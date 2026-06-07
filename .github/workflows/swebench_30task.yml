@@ -436,9 +436,33 @@ jobs:
           # LSP precision pass on the host graph. With pyright+pydantic present this ENRICHES
           # return_types and prunes false-positive name_match edges. Show the GATE-2 delta (live).
           RT0=$(python3 -c "import sqlite3;print(sqlite3.connect('/tmp/gt_prebuilt.db').execute(\"select count(*) from nodes where return_type is not null and trim(return_type)!=''\").fetchone()[0])")
-          timeout 220 python -m groundtruth.resolve --db /tmp/gt_prebuilt.db --root /tmp/testbed_src --resolve --lang python 2>&1 | tail -5 || echo "WARN: offline resolve non-fatal"
+          # Pull THIS task's issue text + derive a demand-driven SCOPE (T4): the issue's
+          # mentioned source files. resolve.py's --source-files restricts the LSP precision
+          # pass to the issue subgraph (Heintze & Tardieu PLDI'01), which also makes the
+          # GATE-2 contract line report scoped_source_files>0 (un-scoped == degraded).
+          python3 -c "
+          import json
+          for l in open('/tmp/ds/dataset.jsonl'):
+              d=json.loads(l)
+              if d.get('instance_id')=='$TASK':
+                  open('/tmp/issue.txt','w').write(d.get('problem_statement','') or ''); break
+          " || true
+          python3 - <<'PY' || true
+          import re, os
+          issue = open("/tmp/issue.txt", encoding="utf-8").read() if os.path.exists("/tmp/issue.txt") else ""
+          base = {os.path.basename(f) for f in re.findall(r'[\w/]+\.py', issue)}
+          scoped = [os.path.join(r, f) for r, _, fs in os.walk("/tmp/testbed_src") for f in fs if f in base]
+          open("/tmp/gt_scope_files.txt", "w").write("\n".join(scoped))
+          print(f"demand scope: {len(scoped)} issue-relevant source files")
+          PY
+          SCOPE_ARG=""; [ -s /tmp/gt_scope_files.txt ] && SCOPE_ARG="--source-files /tmp/gt_scope_files.txt"
+          # Capture resolve's stdout (incl. the `LSP_METRICS resolved=.. residual=..
+          # scoped_source_files=..` contract line) to /tmp/gt_lsp_metrics.txt for GATE 2.
+          timeout 260 python -m groundtruth.resolve --db /tmp/gt_prebuilt.db --root /tmp/testbed_src --resolve --lang python $SCOPE_ARG 2>&1 | tee /tmp/gt_lsp_metrics.txt | tail -8 || echo "WARN: offline resolve non-fatal"
+          echo "GT_LSP_METRICS_FILE=/tmp/gt_lsp_metrics.txt" >> "$GITHUB_ENV"
           RT1=$(python3 -c "import sqlite3;print(sqlite3.connect('/tmp/gt_prebuilt.db').execute(\"select count(*) from nodes where return_type is not null and trim(return_type)!=''\").fetchone()[0])")
           echo "[LSP-GATE2] return_types ${RT0} -> ${RT1} (enrichment delta $((RT1-RT0)))"
+          grep -E 'LSP_METRICS' /tmp/gt_lsp_metrics.txt || echo "WARN: resolve emitted no LSP_METRICS contract line (GATE 2 will fail-closed)"
           # Export the PRE-LSP return_type count so the downstream RESOLUTION-QUALITY gate can
           # assert the LSP precision pass actually ran (RT_after > RT_before == LSP was ON). Without
           # this the gate can only see the absolute RT and could be fooled by a graph that happens
@@ -492,38 +516,45 @@ jobs:
           python3 "${{ github.workspace }}/scripts/metrics/foundational_gates.py" /tmp/gt_prebuilt.db /tmp/testbed_src /tmp/issue.txt > /tmp/l1_debug.txt 2>&1 || true
           cat /tmp/l1_debug.txt
 
-      - name: 3-GATE VERDICT (compact, before agent) — embedder · resolution · graph
-        # Mirrors gate_check.yml's GATES step: SHOW the 3 foundational substrate gates on the
-        # FRESH, in-job graph.db (built by the freshly-compiled gt-index, LSP-resolved at Point-A)
-        # BEFORE we spend a paid agent run. Prints exactly: graph nodes/edges + name_match count &
-        # deterministic% (GATE 1/RESOLUTION), LSP return-type enrichment (GATE 2), and the real
-        # ONNX embedder verdict via foundational_gates.gate_embedder() (GATE 3). Fail-loud: a
-        # missing graph or a zero/absent embedder ABORTS here (no silent baseline on a paid run).
+      - name: 3-GATE VERDICT (fail-closed CONSUMPTION, before agent) — JARVIS · LSP · embedder
+        # Replaces the old PRESENCE-only inline checks with foundational_gates.py's three
+        # CONSUMPTION gates on the FRESH, in-job, LSP-resolved /tmp/gt_prebuilt.db + THIS
+        # task's real issue, BEFORE any paid token:
+        #   GATE-JARVIS  : det% over type='CALLS' via the UNIFIED DETERMINISTIC_RESOLUTION_METHODS
+        #                  (imported from curation_map — never drifts from the consumer) >= a
+        #                  relative SAFETY floor, det >= name_match (non-dominance), AND the
+        #                  receiver-type TYPING TIERS fired (type_flow/impl_method/inherited or
+        #                  the assignment_tracked evidence_type) — catches the 58% method gap.
+        #   GATE 2/LSP   : parses resolve.py's `LSP_METRICS resolved=.. residual=..
+        #                  scoped_source_files=..` contract line -> resolved/residual >= a
+        #                  RELATIVE floor of THIS issue's residual (not resolved>0), flags
+        #                  scoped_source_files==0 (demand-driven scoping degraded).
+        #   GATE 3/EMB   : real ONNX embedder PRESENT (separates) AND CONSUMED by the brief on
+        #                  this graph+issue (effective_w_sem>0, semantic coverage of a relative
+        #                  majority of the considered set, per-task MAD dispersion — Shtok'12).
+        # All thresholds RELATIVE/dynamic (no benchmark-tuned magic, per .claude/CLAUDE.md).
+        # foundational_gates.py exits non-zero if ANY gate is OFF -> the job ABORTS fail-closed
+        # before the paid agent run, and writes the 8-dp deep record to $GT_GATES_DEEP_JSON.
         env:
           GT_FORCE_ONNX_EMBEDDER: "1"
           GT_REQUIRE_EMBEDDER: "1"
           GT_MODELS_ROOT: "${{ github.workspace }}/models"
-          PYTHONPATH: "${{ github.workspace }}/src"
+          PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/metrics"
+          GT_GATES_DEEP_JSON: "/tmp/gt_gates_deep_${{ matrix.task }}.json"
+          GT_LSP_METRICS_FILE: "/tmp/gt_lsp_metrics.txt"
         run: |
           set -euo pipefail
           DB=/tmp/gt_prebuilt.db
           test -s "$DB" || { echo "FATAL [3-GATE]: graph.db absent ($DB) — fresh gt-index never produced a graph"; exit 1; }
-          q(){ python3 -c "import sqlite3;print(sqlite3.connect('file:$DB?mode=ro',uri=True).execute(\"$1\").fetchone()[0])"; }
-          NODES=$(q "select count(*) from nodes")
-          EDGES=$(q "select count(*) from edges")
-          NAME_MATCH=$(q "select count(*) from edges where resolution_method like 'name_match%'")
-          RT=$(q "select count(*) from nodes where return_type is not null and trim(return_type)!=''")
-          DET=$(( EDGES - NAME_MATCH ))
-          DETPCT=$(python3 -c "print(f'{(100.0*$DET/$EDGES) if $EDGES else 0.0:.1f}')")
-          echo "[GATE 1/RESOLUTION] graph nodes=$NODES edges=$EDGES | name_match=$NAME_MATCH | deterministic=$DET (${DETPCT}%)"
-          echo "[GATE 2/LSP]        nodes_with_return_type=$RT (LSP-enriched contracts)"
-          # GATE 3: real ONNX embedder (non-zero, separates related/unrelated). gate_embedder()
-          # returns False on _ZeroEmbeddingModel -> we abort fail-closed under GT_REQUIRE_EMBEDDER.
-          EMB=$(python3 -c "import sys;sys.path.insert(0,'scripts/metrics');from foundational_gates import gate_embedder;print('ON' if gate_embedder() else 'OFF')" 2>&1 | grep -vE "GetPciBusId|device_disc" | tail -1)
-          echo "[GATE 3/EMBEDDER]   verdict piped above"
-          echo "=== 3-GATE VERDICT: embedder=$EMB · resolution(name_match=$NAME_MATCH, det=${DETPCT}%) · graph(nodes=$NODES, edges=$EDGES) ==="
-          [ "$EMB" = "ON" ] || { echo "FATAL [3-GATE]: embedder OFF (zero/absent ONNX) — would silently run baseline; aborting before paid agent run"; exit 1; }
-          [ "$EDGES" -gt 0 ] || { echo "FATAL [3-GATE]: graph has 0 edges — substrate dead"; exit 1; }
+          test -s /tmp/issue.txt || echo "WARN [3-GATE]: /tmp/issue.txt empty — GATE 3 consumption may degrade"
+          # AUTHORITATIVE fail-closed run: non-zero exit on ANY OFF gate aborts the paid run.
+          # 2>stderr carries the compact `GT_GATE_METRICS ...` visibility line (per-run W_SEM /
+          # sem[max,median,MAD] / lsp resolved·residual·scoped / det% + breakdown).
+          python3 scripts/metrics/foundational_gates.py "$DB" /tmp/testbed_src /tmp/issue.txt /tmp/gt_lsp_metrics.txt \
+            2> >(grep -E 'GT_GATE_METRICS' | tee /tmp/gt_gate_metrics_line.txt >&2) \
+            | grep -vE "GetPciBusId|device_disc"
+          echo "=== 3-GATE VERDICT: PASS — all gates ON (substrate CONSUMED) ==="
+          cat /tmp/gt_gate_metrics_line.txt 2>/dev/null || true
 
       - name: RESOLUTION-QUALITY GATE (FAIL-CLOSED — abort before paid agent on an under-resolved graph)
         # WHY: the 3-GATE VERDICT above only PRINTS resolution stats; it aborts solely on a dead
@@ -903,6 +934,32 @@ jobs:
           cp /tmp/gt_debug/gt_run_summary_${{ matrix.task }}.json /tmp/gt_run_summary_${{ matrix.task }}.json 2>/dev/null || true
           python3 scripts/swebench/gt_deep_metrics.py "${{ matrix.task }}" /tmp/results --log /tmp/gt_debug/full_run.log 2>&1 | tail -2 || echo "DEEP_METRICS_WARN"
           cp /tmp/gt_deep_metrics_${{ matrix.task }}.json /tmp/gt_debug/ 2>/dev/null || true
+          # Fold the 3-GATE foundational deep record (8-dp: W_SEM, sem[max/median/MAD],
+          # lsp resolved/residual/scoped, det% + resolution_method breakdown) into the run's
+          # deep metrics + persist beside the run artifacts (constitution: every numeric 8-dp).
+          GATES_JSON="/tmp/gt_gates_deep_${{ matrix.task }}.json"
+          if [ -s "$GATES_JSON" ]; then
+            cp "$GATES_JSON" /tmp/gt_debug/ 2>/dev/null || true
+            python3 - "${{ matrix.task }}" "$GATES_JSON" <<'PY' || true
+          import json, os, sys
+          task, gates_path = sys.argv[1], sys.argv[2]
+          gates = json.load(open(gates_path))
+          deep_path = f"/tmp/gt_deep_metrics_{task}.json"
+          deep = {}
+          if os.path.exists(deep_path):
+              try: deep = json.load(open(deep_path))
+              except Exception: deep = {}
+          deep["foundational_gates"] = gates  # 8-dp gate record nested under the run deep metrics
+          with open(deep_path, "w") as f:
+              json.dump(deep, f, indent=2, default=str)
+          v = gates.get("verdict", {})
+          print(f"GATES_FOLDED task={task} jarvis={v.get('resolution_jarvis')} "
+                f"lsp={v.get('lsp_enrichment')} embedder={v.get('embedder')}")
+          PY
+            cp /tmp/gt_deep_metrics_${{ matrix.task }}.json /tmp/gt_debug/ 2>/dev/null || true
+          else
+            echo "WARN: gate deep JSON $GATES_JSON absent — 3-GATE VERDICT step may not have run"
+          fi
 
       # ── AGENT-DELIVERY GATE (the missing half) ──
       # The 3-GATE + RESOLUTION-QUALITY gates certify graph.db is well RESOLVED. They

@@ -214,8 +214,32 @@ def semantic_top_k(
     graph_db: str,
     model: object,
     k_sem_top: int = 20,
+    *,
+    score_all: bool = False,
 ) -> dict[str, float]:
-    """Return {file_path: cosine_score} for the top-K semantically similar files."""
+    """Return {file_path: cosine_score} for semantically similar files.
+
+    The cosine of EVERY indexed file is computed (one matmul: ``file_embs @
+    issue_emb``); ``k_sem_top`` only controls how many of those scores are
+    RETURNED. Two distinct uses are deliberately decoupled by the caller:
+
+      * ``score_all=False`` (default): return the top-``k_sem_top`` slice — the
+        bounded SEED set that becomes candidate-set membership (no flooding).
+      * ``score_all=True``: return the FULL score map (every file with a finite,
+        strictly-positive cosine). This is the COMPONENT-score source: it lets a
+        candidate already in the set (via graph / BM25 / path) carry its REAL
+        cosine in ``components['sem']`` instead of a spurious 0. Without it the
+        ``sem`` component is structurally zero on every candidate outside the
+        top-``k_sem_top``, which makes a present-but-unconsumed embedder
+        indistinguishable from a genuinely-zero one. Correct-or-quiet: a file
+        whose cosine is <= 0 or non-finite is omitted (never injected as fact),
+        so a truly-zero embedder yields an empty map exactly as before.
+
+    The full map is keyed identically to the bounded slice, so a candidate's
+    component lookup (`sem_all.get(fp, 0.0)`) returns its real cosine whether or
+    not it made the seed cut. The DESIGN INTENT (this function's original
+    docstring: "full {file: score} map for Stage B") is restored without
+    widening the candidate set."""
     file_paths, file_embs = _get_file_embeddings(graph_db, repo_root, model)
     if not file_paths:
         return {}
@@ -224,6 +248,14 @@ def semantic_top_k(
     scores = file_embs @ issue_emb  # cosine (normalized embeddings)
 
     ranked = sorted(zip(file_paths, scores.tolist()), key=lambda x: x[1], reverse=True)
+    if score_all:
+        # Full component-score map: keep only finite, strictly-positive cosines
+        # (correct-or-quiet — never surface 0/NaN as a semantic signal).
+        return {
+            fp: float(score)
+            for fp, score in ranked
+            if math.isfinite(score) and score > 0.0
+        }
     return {fp: float(score) for fp, score in ranked[:k_sem_top]}
 
 
@@ -237,7 +269,7 @@ def select_anchors(
     k_sem_top: int = 20,
     k_lex_top: int = 10,
     tau_anchor: float = 0.30,
-) -> tuple[list[AnchorRecord], dict[str, float]]:
+) -> tuple[list[AnchorRecord], dict[str, float], dict[str, float]]:
     """Run Stage A anchor selection.
 
     Three signals merged:
@@ -246,11 +278,27 @@ def select_anchors(
       3. Lexical top-K: BM25-style term overlap between issue text and file content.
 
     Returns:
-        (anchors, semantic_top_k_scores)
-        anchors: all anchor records sorted by semantic score
-        semantic_top_k_scores: full {file: score} map for Stage B semantic term
+        (anchors, sem_seed_scores, sem_all_scores)
+        anchors: all anchor records sorted by semantic score.
+        sem_seed_scores: the bounded top-``k_sem_top`` map — drives candidate-set
+          SEED membership (kept small so semantics cannot flood the candidate set).
+        sem_all_scores: the FULL {file: cosine} map (every file with a finite,
+          strictly-positive cosine) — the COMPONENT-score source so a candidate
+          already in the set carries its REAL ``components['sem']`` instead of a
+          spurious 0. The two are decoupled on purpose: widening the component
+          coverage must NOT widen what the agent sees. Both come from one cached
+          embedding matmul (``_get_file_embeddings`` memoises the encode).
     """
-    sem_scores = semantic_top_k(issue_text, repo_root, graph_db, model, k_sem_top=k_sem_top)
+    sem_seed_scores = semantic_top_k(
+        issue_text, repo_root, graph_db, model, k_sem_top=k_sem_top
+    )
+    # Full cosine map for the component term (no seed effect). Cheap: reuses the
+    # cached file embeddings, only re-runs the matmul + sort.
+    sem_all_scores = semantic_top_k(
+        issue_text, repo_root, graph_db, model, score_all=True
+    )
+    # Anchor/seed logic operates on the bounded seed map (unchanged behaviour).
+    sem_scores = sem_seed_scores
     sym_files = _symbol_anchors(issue_text, graph_db, k_anchor=k_anchor)
 
     # Lexical top-K via BM25 (reuses validated v7.3 signal)
@@ -297,7 +345,7 @@ def select_anchors(
 
     anchors = [AnchorRecord(**v) for v in anchor_map.values()]
     anchors.sort(key=lambda a: a.semantic_score, reverse=True)
-    return anchors, sem_scores
+    return anchors, sem_seed_scores, sem_all_scores
 
 
 # v7.5 H1 constants — not tunable parameters, structural thresholds

@@ -26,7 +26,7 @@ import json
 import os
 import time
 import threading
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Any, Literal
 
@@ -246,6 +246,16 @@ class V74BriefResult:
     first_gold_rank_full: int | None
     ablation_variant: str
     elapsed_ms: int = 0
+    # --- Embedder-consumption observability (instr 2026-06-07) ---
+    # These let a fail-closed precheck PROVE the semantic embedder is not merely
+    # PRESENT but actually CONSUMED (a non-zero W_SEM that touches non-zero sem
+    # components on the rendered candidates). Defaults keep every caller
+    # byte-compatible. effective_w_sem is the W_SEM ACTUALLY applied after ALL
+    # three zeroing branches (`_SEMANTIC_AVAILABLE` zero, sparse-graph weights
+    # override, RRF det/nosem signal-drop) — see run_v74 for the derivation.
+    effective_w_sem: float = 0.0
+    k_sem_top_effective: int = 0      # the relative cap actually used for the sem-component map
+    sem_components_full: list[float] = field(default_factory=list)  # components['sem'] over ranked_full
 
 
 _CACHED_MODEL: Any = None
@@ -734,8 +744,18 @@ def run_v74(
     if not _SEMANTIC_AVAILABLE:
         effective_weights["W_SEM"] = 0.0
 
-    # Stage A: anchor selection
-    anchors, sem_scores = select_anchors(
+    # Stage A: anchor selection.
+    # `sem_scores` = the BOUNDED top-k_sem_top map → drives candidate-set SEED
+    #   membership (kept small so semantics never floods the candidate set — the
+    #   correct-or-quiet / non-flooding property BRIEFING.md §3-4 require).
+    # `sem_all` = the FULL cosine map (every file with a finite, strictly-positive
+    #   cosine) → the COMPONENT-score source so a candidate ALREADY in the set
+    #   (via graph / BM25 / path) carries its REAL components['sem'] instead of a
+    #   spurious 0. Decoupled on purpose: the OLD k_sem_top=10 cap zeroed sem on
+    #   every candidate outside the top-10, which made a present-but-unconsumed
+    #   embedder indistinguishable from a genuinely-zero one. We widen COMPONENT
+    #   coverage WITHOUT widening what the agent sees (seed set unchanged).
+    anchors, sem_scores, sem_all = select_anchors(
         issue_text, repo_root, graph_db, model,
         k_anchor=k_anchor,
         k_sem_top=k_sem_top,
@@ -901,7 +921,17 @@ def run_v74(
                 for fp, r in reach_scores.items()
             }
 
-    # Stage B: compute score components
+    # Stage B: compute score components.
+    # The `sem` COMPONENT reads the FULL cosine map (`sem_all`) so every candidate
+    # already in the set gets its REAL cosine — not a spurious 0 just because it
+    # fell outside the bounded seed slice. `sem_all` ⊇ `sem_scores` (the seed map
+    # is the top-k_sem_top slice of the same matmul) and, by correct-or-quiet
+    # construction, only holds finite strictly-positive cosines — so a genuinely
+    # zero embedder yields an empty map and the component is 0 everywhere, exactly
+    # as before (no behavior change when the embedder is off). Ablations A/B keep
+    # the bounded seed map to preserve their documented seed-driven semantics; the
+    # LIVE path is C.
+    sem_component_scores = sem_all if sem_all else sem_scores
     if ablation == "A":
         components_map = _score_variant_A(sem_scores, lex_scores, all_files)
     elif ablation in ("B0", "B1"):
@@ -911,7 +941,7 @@ def run_v74(
         )
     else:  # C or D — hub_penalties already computed above for path-specificity BFS
         components_map = _score_variant_C(
-            sem_scores, lex_scores, reach_scores, prox_scores, hub_penalties, all_files,
+            sem_component_scores, lex_scores, reach_scores, prox_scores, hub_penalties, all_files,
             commit_scores,
         )
 
@@ -1075,6 +1105,35 @@ def run_v74(
         **effective_weights,
     }
 
+    # --- Embedder-consumption observability (instr 2026-06-07) ---
+    # effective_w_sem = the W_SEM ACTUALLY APPLIED to the score, after ALL THREE
+    # zeroing branches converge here:
+    #   ① _SEMANTIC_AVAILABLE False  -> effective_weights["W_SEM"] set to 0.0 above.
+    #   ② sparse-graph weights override (caller passes weights={...,"W_SEM":0.0,...})
+    #      -> merged into effective_weights via {**DEFAULT_WEIGHTS, **(weights or {})}.
+    #   ③ RRF det/nosem mode -> sem is DROPPED from the fusion signal set
+    #      (_RRF_SIGNALS_DET), so the embedder contributes 0 to the ranking
+    #      regardless of the nominal weight -> effective weight is 0.0.
+    # In RRF "full" mode and legacy-linear mode sem DOES influence the score, so we
+    # report the post-zeroing nominal weight. This is the WEIGHT applied; whether
+    # the embedder was CONSUMED (touched non-zero components) is a separate fact
+    # carried by semantic_signal_count / sem_components_full below.
+    _sem_dropped_by_rrf = _rrf_mode in ("det", "deterministic", "nosem")
+    effective_w_sem = 0.0 if _sem_dropped_by_rrf else float(effective_weights.get("W_SEM", 0.0))
+
+    # components['sem'] over the FULL ranked candidate list (the rendered universe;
+    # the brief layer slices its delivered subset from ranked_full). Read from the
+    # ACTUAL components computed during scoring — not re-derived.
+    sem_components_full = [
+        float(r.components.get("sem", 0.0) or 0.0) for r in ranked_records
+    ]
+    # The cap ACTUALLY in force for the sem-component map. After the decoupling the
+    # component map is uncapped relative to the rendered set (every candidate with a
+    # finite, strictly-positive cosine carries it), so the effective cap is RELATIVE
+    # to the rendered candidate count — not the old fixed 10. Reported so a precheck
+    # can assert the cap scaled with the candidates shown.
+    k_sem_top_effective = max(int(k_sem_top), len(ranked_records))
+
     return V74BriefResult(
         bug_id=bug_id,
         repo=repo,
@@ -1094,4 +1153,7 @@ def run_v74(
         first_gold_rank_full=first_gold_rank_full,
         ablation_variant=ablation,
         elapsed_ms=elapsed_ms,
+        effective_w_sem=effective_w_sem,
+        k_sem_top_effective=k_sem_top_effective,
+        sem_components_full=sem_components_full,
     )

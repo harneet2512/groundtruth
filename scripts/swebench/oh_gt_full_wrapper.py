@@ -3940,20 +3940,37 @@ def _repromote_after_reindex(
     if "GT_LSP_PRESENT" not in _have:
         return f"skip:lsp_absent({_server_cmd})"
 
-    # Re-promote, scoped to the edited file's source_file. resolve.py filters
-    # ambiguous edges by language; --root anchors LSP at the repo root. We bound
-    # with timeout + non-fatal so a slow/failed LSP can never break the turn.
+    # Re-promote, DEMAND-DRIVEN: scope the LSP precision pass to the edited file's
+    # source_file (the issue-relevant residual), not the whole graph. Previously this
+    # passed NEITHER --source-files NOR --max-edges, so resolve.py fell back to its
+    # default 500-edge whole-graph cap — a blind machine-gun pass that, on a big repo,
+    # cleans ~7% of name_match method edges and leaves the agent's method map mostly
+    # false (CLAUDE.md, conan-17123). --source-files=<edited file> makes the pass run
+    # ONLY on the edges the agent's own edit just touched (Heintze & Tardieu, PLDI'01,
+    # demand-driven analysis: "just enough computation for the query variables"). Cost
+    # = O(issue-relevant residual), bounded + independent of repo size. resolve.py
+    # accepts a comma-separated list OR a path; we pass the single edited file directly.
+    # The LSP_METRICS contract line resolve.py now prints lets us VERIFY the pass was
+    # demand-scoped (scoped_source_files>0) and measure resolved/residual.
     promote_cmd = (
         _env_prefix(config)
         + f"timeout 120 python3 -m groundtruth.resolve resolve "
         + f"--db={_sh_single_quote(config.graph_db)} "
         + f"--root={_sh_single_quote(config.workspace_root)} "
-        + f"--lang={lang} --resolve 2>&1 || echo GT_REPROMOTE_WARN"
+        + f"--lang={lang} --source-files={_sh_single_quote(edited_rel_path)} "
+        + f"--resolve 2>&1 || echo GT_REPROMOTE_WARN"
     )
     out = _run_internal(orig_ra, promote_cmd, 130)
+    # Surface the demand-driven resolution fraction (resolved/residual) + whether the
+    # pass was actually scoped, straight from resolve.py's machine-parseable contract
+    # line — so a capped/un-scoped pass is detectable from the run telemetry.
+    _lsp_metrics = ""
+    for _ln in out.splitlines():
+        if _ln.startswith("LSP_METRICS "):
+            _lsp_metrics = _ln.strip()
     if "GT_REPROMOTE_WARN" in out:
-        return f"warn:repromote_nonzero({lang})"
-    return f"ok:repromoted({lang})"
+        return f"warn:repromote_nonzero({lang})" + (f" [{_lsp_metrics}]" if _lsp_metrics else "")
+    return f"ok:repromoted({lang})" + (f" [{_lsp_metrics}]" if _lsp_metrics else "")
 
 
 def install_graph_and_hook(runtime: Any, config: GTRuntimeConfig) -> list[str]:
@@ -4511,167 +4528,6 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                             _register_pending_next_action(config, _goku_l5b_eid or "", _goku_d.next_action_type or "", _goku_d.next_action_file or "")
                 except Exception as gk_exc:
                     print(f"[GT_META] L5 goku error on CmdRunAction: {gk_exc}", flush=True)
-
-            # Grep Intercept: agent searched for a symbol — append its callers.
-            # This is CONTEXTUAL augmentation (agent's own search focus), not unsolicited.
-            # Decay detail level instead of hard stop: full callers+code -> file-only -> count-only
-            if (
-                not _GT_BASELINE
-                and re.search(r"\b(grep|rg)\b", act_text)
-            ):
-                _gi_count = config._grep_intercept_count
-                if _gi_count < 5:
-                    # Full callers with code snippets
-                    _gi_limit = 5
-                    _gi_detail = "full"
-                elif _gi_count < 10:
-                    # File names only, no code
-                    _gi_limit = 3
-                    _gi_detail = "files_only"
-                else:
-                    # Count only
-                    _gi_limit = 1
-                    _gi_detail = "count_only"
-                _grep_sym = _extract_grep_symbol(act_text)
-                # Honor the agent's OWN search scope: when it grepped a symbol inside
-                # a specific file, resolving the bare name repo-wide (and surfacing a
-                # most-called homonym from an unrelated file) is harmful. Path-scope
-                # the lookup; if the symbol isn't defined in the grepped file, stay
-                # silent rather than emit a wrong-file homonym (correct-or-quiet).
-                _grep_scope = _extract_grep_file_scope(act_text)
-                _grep_db = getattr(config, "_host_graph_db", "") or ""
-                if _grep_sym and (_grep_db and os.path.exists(_grep_db)):
-                    # Host-side graph.db — ego-graph for full detail, flat for lighter modes
-                    # RepoGraph ICLR 2025: agent searches → gets ego-graph as response
-                    if _gi_detail == "full":
-                        try:
-                            from groundtruth.graph.ego import ego_graph as _ego_grep
-                            # Pass the grepped file so the ego center binds to the
-                            # symbol IN that file, not a repo-wide homonym.
-                            _eg = _ego_grep(
-                                _grep_db, _grep_sym,
-                                file_path=_grep_scope or "",
-                                k=1, min_confidence=0.9,
-                            )
-                            # If the agent scoped to a file but the center landed in a
-                            # different file, the grepped file has no such symbol —
-                            # stay silent instead of surfacing the homonym.
-                            _ego_offscope = bool(
-                                _grep_scope and _eg.center
-                                and not _same_grep_scope(_eg.center.file_path, _grep_scope)
-                            )
-                            if _eg.center and len(_eg.callers) > 0 and not _ego_offscope:
-                                _ego_text = _eg.render(max_tokens=150)
-                                _grep_evidence = f"\n[GT] {_grep_sym}:\n{_ego_text}"
-                                obs = append_observation(obs, _grep_evidence)
-                                config._grep_intercept_count += 1
-                                print(f"[GT_DELIVERY] grep_intercept_ego: symbol={_grep_sym} scope={_grep_scope or '-'} callers={len(_eg.callers)} fire={config._grep_intercept_count}", flush=True)
-                                # Skip flat caller path below
-                                _grep_sym = None
-                            elif _ego_offscope:
-                                # Scoped grep, no in-file definition -> silence.
-                                print(f"[GT_META] grep_intercept_ego: symbol={_grep_sym} off-scope (scope={_grep_scope}) — silent", flush=True)
-                                _grep_sym = None
-                        except Exception as _ego_grep_exc:
-                            print(f"[GT_META] grep_ego_fallback: {_ego_grep_exc}", flush=True)
-                    if _grep_sym:
-                        try:
-                            # Path-scoped flat fallback. When the agent grepped a
-                            # specific file, _grep_intercept_callers constrains the
-                            # callee definition to that file and returns [] (silence)
-                            # if the symbol isn't defined there — never a homonym.
-                            _grep_callers = _grep_intercept_callers(
-                                _grep_db, _grep_sym,
-                                file_scope=_grep_scope,
-                                limit=_gi_limit, min_conf=0.6,
-                            )
-                            if _grep_scope and not _grep_callers:
-                                # Scoped grep with no in-file match -> stay silent.
-                                print(f"[GT_META] grep_intercept: symbol={_grep_sym} scope={_grep_scope} — no in-file def, silent", flush=True)
-                                raise _GrepSilent()
-                            _grep_total = len(_grep_callers)
-                            if _grep_callers:
-                                _caller_line_parts: list[str] = []
-                                if _gi_detail == "count_only":
-                                    _caller_line_parts.append(f"  {_grep_total} caller(s) across codebase")
-                                else:
-                                    for _cfile, _cline in _grep_callers:
-                                        if _gi_detail == "full":
-                                            _code = ""
-                                            try:
-                                                _src_path = os.path.join(config.workspace_root or "/workspace", _cfile)
-                                                with open(_src_path, encoding="utf-8", errors="ignore") as _sf:
-                                                    for _li, _ln in enumerate(_sf, 1):
-                                                        if _li == _cline:
-                                                            _code = _ln.strip()[:80]
-                                                            break
-                                            except OSError:
-                                                pass
-                                            _caller_line_parts.append(
-                                                f"  {_cfile}:{_cline}" + (f" `{_code}`" if _code else "")
-                                            )
-                                        else:
-                                            _caller_line_parts.append(f"  {_cfile}:{_cline}")
-                                _caller_lines = "\n".join(_caller_line_parts)
-                                _scope_tag = f" in {_grep_scope}" if _grep_scope else ""
-                                _grep_evidence = f"\n[GT] Callers of '{_grep_sym}'{_scope_tag}:\n{_caller_lines}"
-                                obs = append_observation(obs, _grep_evidence)
-                                config._grep_intercept_count += 1
-                                print(
-                                    f"[GT_DELIVERY] grep_intercept: symbol={_grep_sym} "
-                                    f"scope={_grep_scope or '-'} callers={len(_grep_callers)} "
-                                    f"detail={_gi_detail} fire={config._grep_intercept_count}",
-                                    flush=True,
-                                )
-                            else:
-                                print(f"[GT_META] grep_intercept: symbol={_grep_sym} callers=0 (no high-confidence edges)", flush=True)
-                        except _GrepSilent:
-                            pass
-                        except Exception as _grep_exc:
-                            print(f"[GT_META] grep_intercept_error: {_grep_exc}", flush=True)
-                elif _grep_sym and config.graph_db:
-                    # Fallback: query inside container via _container_query
-                    try:
-                        import json as _j_grep
-                        # Parameterized (CLAUDE.md: no f-string SQL). Path-scope the
-                        # callee definition to the grepped file so a repo-wide homonym
-                        # is never surfaced for a file-scoped grep; the scope/symbol
-                        # values flow as BOUND params (a path with a single quote like
-                        # a'b/c.py is injection-safe, not hand-escaped).
-                        _grep_sql, _grep_params = _build_grep_intercept_query(
-                            _grep_sym,
-                            file_scope=_grep_scope or None,
-                            min_conf=0.6,
-                            limit=_gi_limit,
-                        )
-                        _grep_raw = _container_query(
-                            orig_run_action, config.graph_db, _grep_sql,
-                            params_json=_j_grep.dumps(_grep_params),
-                        )
-                        _grep_rows = _j_grep.loads(_grep_raw)
-                        if _grep_rows:
-                            _caller_line_parts_cq: list[str] = []
-                            if _gi_detail == "count_only":
-                                _caller_line_parts_cq.append(f"  {len(_grep_rows)}+ caller(s) across codebase")
-                            else:
-                                for _row in _grep_rows:
-                                    _fp = _row[0] if isinstance(_row, (list, tuple)) else ""
-                                    _sl = _row[1] if isinstance(_row, (list, tuple)) and len(_row) > 1 else 0
-                                    _caller_line_parts_cq.append(f"  {_fp}:{_sl}")
-                            _caller_lines_cq = "\n".join(_caller_line_parts_cq)
-                            _scope_tag_cq = f" in {_grep_scope}" if _grep_scope else ""
-                            _grep_evidence = f"\n[GT] Callers of '{_grep_sym}'{_scope_tag_cq}:\n{_caller_lines_cq}"
-                            obs = append_observation(obs, _grep_evidence)
-                            config._grep_intercept_count += 1
-                            print(
-                                f"[GT_DELIVERY] grep_intercept(container): symbol={_grep_sym} "
-                                f"callers={len(_grep_rows)} detail={_gi_detail} fire={config._grep_intercept_count}",
-                                flush=True,
-                            )
-                        else:
-                            print(f"[GT_META] grep_intercept(container): symbol={_grep_sym} callers=0", flush=True)
-                    except Exception as _grep_cq_exc:
-                        print(f"[GT_META] grep_intercept_container_error: {_grep_cq_exc}", flush=True)
 
         # Decision 34: Emit GTAgentEvent at action boundary
         _emit_agent_event(config, action, event, _action_file)

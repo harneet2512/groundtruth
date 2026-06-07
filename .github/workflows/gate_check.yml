@@ -39,32 +39,101 @@ jobs:
           cd gt-index && CGO_ENABLED=1 go build -tags sqlite_fts5 -o /tmp/gt-index ./cmd/gt-index/
           test -x /tmp/gt-index && echo "gt-index BUILT"
 
-      - name: GATES (graph -> LSP -> embedder), no agent
+      - name: GATES (JARVIS/resolution -> LSP -> embedder), fail-closed CONSUMPTION checks
+        # CONSUMPTION (not presence): foundational_gates.py asserts the substrate is
+        # actually used — GATE-JARVIS (det% via the unified DETERMINISTIC_RESOLUTION_METHODS
+        # + typing tiers fired), GATE2 (resolve.py's LSP_METRICS contract line: resolved/
+        # residual over THIS issue's residual + scoped flag), GATE3 (embedder present AND
+        # consumed by the brief: effective_w_sem>0, semantic coverage, per-task dispersion).
+        # All thresholds are RELATIVE/dynamic (no benchmark-tuned magic). This step is
+        # observe-and-debug (the workflow's purpose) — it tees the full gate output + the
+        # 8-dp deep JSON to artifacts and exits non-zero only via the explicit verdict step.
+        env:
+          GT_FORCE_ONNX_EMBEDDER: "1"
+          GT_REQUIRE_EMBEDDER: "1"
+          GT_MODELS_ROOT: "${{ github.workspace }}/models"
+          PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/metrics"
+          GT_GATES_DEEP_JSON: "/tmp/gt_gates_deep.json"
         run: |
           set +e
           TASK="$(echo "${{ inputs.task_id }}" | tr -d '\r')"; REPO=$(echo "$TASK"|cut -d_ -f1); REST=$(echo "$TASK"|sed "s/^${REPO}__//")
           IMG="docker.io/starryzhang/sweb.eval.x86_64.${REPO}_1776_${REST}:latest"
           CID=$(docker create "$IMG"); rm -rf /tmp/testbed_src; mkdir -p /tmp/testbed_src
           docker cp "$CID:/testbed/." /tmp/testbed_src/; docker rm "$CID" >/dev/null 2>&1
-          q(){ python3 -c "import sqlite3;print(sqlite3.connect('/tmp/g.db').execute(\"$1\").fetchone()[0])"; }
+          # Pull the issue text (drives GATE 3 brief consumption) from the materialized split.
+          python3 - "$TASK" <<'PY' || true
+          import json, sys
+          from datasets import load_dataset
+          task = sys.argv[1]
+          try:
+              ds = load_dataset("SWE-bench-Live/SWE-bench-Live", split="lite")
+              for d in ds:
+                  if d.get("instance_id") == task:
+                      open("/tmp/issue.txt","w").write(d.get("problem_statement","") or ""); break
+          except Exception as e:
+              print("issue fetch warn:", e)
+          PY
           {
             echo "===== GATE CHECK: $TASK $(date -u +%H:%M:%S) ====="
             /tmp/gt-index -root /tmp/testbed_src -output /tmp/g.db 2>&1 | tail -1
-            echo "[GATE1 GRAPH] nodes=$(q 'select count(*) from nodes') edges=$(q 'select count(*) from edges') name_match=$(q "select count(*) from edges where resolution_method like 'name_match%'")"
-            RT0=$(q "select count(*) from nodes where return_type is not null and trim(return_type)!=''")
-            E0=$(q 'select count(*) from edges')
-            echo "[GATE2 LSP] resolving (return_types before=$RT0, edges before=$E0)..."
-            timeout 220 python3 -m groundtruth.resolve --db /tmp/g.db --root /tmp/testbed_src --resolve --lang python --max-edges 60 2>&1 | tail -10
-            RT1=$(q "select count(*) from nodes where return_type is not null and trim(return_type)!=''"); E1=$(q 'select count(*) from edges')
-            echo "[GATE2 LSP] return_types ${RT0}->${RT1} | edges ${E0}->${E1} | VERDICT: $([ "$RT1" -gt "$RT0" ] || [ "$E1" -lt "$E0" ] && echo 'LSP ON (enriched/pruned)' || echo 'LSP OFF (no change)')"
-            echo "[GATE3 EMBEDDER]"
-            python3 -c "import sys;sys.path.insert(0,'scripts/metrics');from foundational_gates import gate_embedder;gate_embedder()" 2>&1 | grep -vE "GetPciBusId|device_disc"
+            # Demand-driven scoping (T4): resolve only the issue-relevant source files. Derive
+            # a scope list from the issue text's file mentions; fall back to unscoped (the gate
+            # FLAGS scoped=0 as degraded, it does not hard-fail on it).
+            python3 - <<'PY' || true
+            import re, os
+            issue = open("/tmp/issue.txt", encoding="utf-8").read() if os.path.exists("/tmp/issue.txt") else ""
+            files = sorted(set(re.findall(r'[\w/]+\.py', issue)))
+            # keep only basenames that actually exist under the testbed (demand subgraph)
+            base = set(os.path.basename(f) for f in files)
+            scoped = []
+            for root,_,fs in os.walk("/tmp/testbed_src"):
+                for f in fs:
+                    if f in base:
+                        scoped.append(os.path.join(root, f))
+            open("/tmp/gt_scope_files.txt","w").write("\n".join(scoped))
+            print(f"demand scope: {len(scoped)} source files from {len(files)} issue mentions")
+            PY
+            SCOPE_ARG=""
+            if [ -s /tmp/gt_scope_files.txt ]; then SCOPE_ARG="--source-files /tmp/gt_scope_files.txt"; fi
+            echo "[GATE2 LSP] resolving (scope: ${SCOPE_ARG:-UNSCOPED})..."
+            # resolve.py prints the machine-parseable `LSP_METRICS resolved=.. residual=..
+            # scoped_source_files=..` line GATE 2 parses. Capture full stdout for the parser.
+            timeout 260 python3 -m groundtruth.resolve --db /tmp/g.db --root /tmp/testbed_src --resolve --lang python $SCOPE_ARG 2>&1 | tee /tmp/gt_lsp_metrics.txt | tail -8
+            echo "----- FOUNDATIONAL GATES (fail-closed consumption) -----"
+            GT_LSP_METRICS_FILE=/tmp/gt_lsp_metrics.txt \
+              python3 scripts/metrics/foundational_gates.py /tmp/g.db /tmp/testbed_src /tmp/issue.txt /tmp/gt_lsp_metrics.txt 2>&1 | grep -vE "GetPciBusId|device_disc"
           } | tee /tmp/gates.txt
+          # Surface the compact visibility line + deep JSON path for the artifact reader.
+          grep -E 'GT_GATE_METRICS|3-GATE VERDICT' /tmp/gates.txt || true
+
+      - name: 3-GATE VERDICT (fail-closed) — JARVIS · LSP · embedder
+        # Re-run the gates as the AUTHORITATIVE pass/fail (exit non-zero on any OFF gate).
+        # Identical predicates to the debug step above, but its exit code GATES the job:
+        # a degraded substrate (under-resolved graph / LSP no-op / dead-or-unconsumed
+        # embedder) FAILS here. Relative/dynamic thresholds only (no magic numbers).
+        env:
+          GT_FORCE_ONNX_EMBEDDER: "1"
+          GT_REQUIRE_EMBEDDER: "1"
+          GT_MODELS_ROOT: "${{ github.workspace }}/models"
+          PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/metrics"
+          GT_GATES_DEEP_JSON: "/tmp/gt_gates_deep.json"
+          GT_LSP_METRICS_FILE: "/tmp/gt_lsp_metrics.txt"
+        run: |
+          set -euo pipefail
+          test -s /tmp/g.db || { echo "FATAL [VERDICT]: /tmp/g.db absent — gt-index produced no graph"; exit 1; }
+          python3 scripts/metrics/foundational_gates.py /tmp/g.db /tmp/testbed_src /tmp/issue.txt /tmp/gt_lsp_metrics.txt
+          echo "=== 3-GATE VERDICT: PASS (all gates ON — substrate consumed) ==="
 
       - name: Upload gate report (immediate)
         if: always()
         uses: actions/upload-artifact@v4
-        with: { name: gates, path: /tmp/gates.txt, retention-days: 1 }
+        with:
+          name: gates
+          path: |
+            /tmp/gates.txt
+            /tmp/gt_gates_deep.json
+            /tmp/gt_lsp_metrics.txt
+          retention-days: 1
 
       - name: Bore tunnel for live LSP debug
         if: always()

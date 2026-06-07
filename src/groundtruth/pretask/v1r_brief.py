@@ -219,6 +219,15 @@ class V1RBriefResult:
     structural_signal_count: int = 0 # candidates with a nonzero structural/graph-reach score
     fts5_signal_count: int = 0       # candidates scored by / entering via FTS5/BM25 (lexical)
     confidence_tier: str = "low"     # HIGH/MEDIUM/LOW from _localization_header
+    # --- Embedder-CONSUMPTION metrics (instr 2026-06-07, FIELD-NAME CONTRACT) ---
+    # Let a fail-closed precheck distinguish "embedder PRESENT" from "embedder
+    # CONSUMED": a present-but-unconsumed embedder has effective_w_sem > 0 yet
+    # semantic_signal_count == 0 / all-zero sem_components. Measured over the
+    # RENDERED candidates (.files), so it reflects exactly what the agent saw.
+    effective_w_sem: float = 0.0          # W_SEM actually applied after all zeroing branches (from run_v74)
+    rendered_candidate_count: int = 0     # number of rendered/delivered candidates (== len(files))
+    k_sem_top: int = 0                    # the relative sem-component cap actually used (from run_v74)
+    sem_components: list[float] = field(default_factory=list)  # components['sem'] over rendered candidates
 
 
 def _top_functions(graph_db: str, file_path: str, limit: int = MAX_FUNCTIONS_PER_FILE) -> list[str]:
@@ -2202,11 +2211,17 @@ def generate_v1r_brief(
     )
 
     if not v74.ranked_full:
+        # No candidates ranked — but the embedder WEIGHT is still known. Surface it
+        # so the precheck can tell "embedder on, no candidates" from "embedder off".
         return V1RBriefResult(
             files=[],
             brief_text="<gt-task-brief>\n</gt-task-brief>",
             token_estimate=4,
             v74_result=v74,
+            effective_w_sem=float(getattr(v74, "effective_w_sem", 0.0) or 0.0),
+            rendered_candidate_count=0,
+            k_sem_top=int(getattr(v74, "k_sem_top_effective", 0) or 0),
+            sem_components=[],
         )
 
     # Adaptive K: include candidates while score gap is small.
@@ -2973,6 +2988,19 @@ def generate_v1r_brief(
         _ge = _sem_c = _struct_c = _fts5_c = 0
     _conf_tier = _tier_from_loc_header(_loc_header)
 
+    # --- Embedder-CONSUMPTION metrics over the RENDERED candidates ---
+    # sem_components reads components['sem'] from the SAME per-entry top_records
+    # alignment that _l1_signal_counts uses, so semantic_signal_count ==
+    # sum(1 for s in sem_components if s > 0) by construction (auditable). The
+    # effective W_SEM and the relative sem cap come from run_v74 (the single point
+    # where every zeroing branch converges). rendered_candidate_count == len(files).
+    _sem_components = [
+        float((_r.get("components", {}) if isinstance(_r, dict) else {}).get("sem", 0.0) or 0.0)
+        for _r in _aligned_records
+    ]
+    _eff_w_sem = float(getattr(v74, "effective_w_sem", 0.0) or 0.0)
+    _k_sem_top = int(getattr(v74, "k_sem_top_effective", 0) or 0)
+
     result = V1RBriefResult(
         files=_delivered,
         brief_text=brief_text,
@@ -2983,6 +3011,10 @@ def generate_v1r_brief(
         structural_signal_count=_struct_c,
         fts5_signal_count=_fts5_c,
         confidence_tier=_conf_tier,
+        effective_w_sem=_eff_w_sem,
+        rendered_candidate_count=len(_delivered),
+        k_sem_top=_k_sem_top,
+        sem_components=_sem_components,
     )
 
     # Structured telemetry: emit L1 candidates as JSON for wrapper to parse
@@ -3093,6 +3125,14 @@ def generate_v1r_brief(
                 "structural_signal_count": _struct_c,
                 "fts5_signal_count": _fts5_c,
                 "confidence_tier": _conf_tier,
+                # Embedder-CONSUMPTION metrics (same definitions as the
+                # V1RBriefResult fields): effective_w_sem>0 with
+                # semantic_signal_count==0 / all-zero sem_components ==
+                # present-but-unconsumed embedder.
+                "effective_w_sem": _eff_w_sem,
+                "rendered_candidate_count": len(_delivered),
+                "k_sem_top": _k_sem_top,
+                "sem_components": _sem_components,
                 # legacy proxy (callees present) kept for back-compat readers
                 "neighbor_present_count": sum(1 for e in entries if e.callees),
                 "test_edge_count": sum(1 for e in entries if e.test_mappings),

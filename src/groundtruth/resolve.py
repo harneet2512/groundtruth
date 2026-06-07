@@ -110,6 +110,54 @@ def _detect_servers() -> dict[str, bool]:
     return {lang: shutil.which(cmd) is not None for lang, cmd in _KNOWN_SERVERS.items()}
 
 
+def _count_residual_method_edges(
+    conn: sqlite3.Connection,
+    language: str | None = None,
+    source_files: list[str] | None = None,
+) -> int:
+    """Count name_match METHOD-CALL edges present BEFORE the resolve pass.
+
+    This is the *denominator* of the resolution-fraction reported on the
+    ``LSP_METRICS`` contract line. It is deliberately NOT the same set as
+    ``_get_ambiguous_edges`` (which returns *all* sub-threshold CALLS edges and
+    is capped by ``--max-edges``): the metric needs the true, uncapped count of
+    the population the LSP precision pass is meant to convert.
+
+    "Method-call edge" is encoded structurally and language-agnostically as a
+    ``name_match`` CALLS edge whose TARGET node is a ``Method`` — i.e. ``obj.m()``
+    whose receiver type was never resolved, so the call was matched by name across
+    classes. Per CLAUDE.md (conan-17123 trace) ~98% of name_match edges are method
+    calls; this is the population graph.db cannot trust until LSP/propagation
+    resolves the receiver type. The count is scoped to ``source_files`` (the issue
+    subgraph) when given, else the whole graph — this is what makes a capped or
+    un-scoped pass *detectable*: ``resolved/residual`` drops when only a slice of a
+    large residual was touched.
+    """
+    try:
+        conn.execute("SELECT resolution_method FROM edges LIMIT 0")
+    except sqlite3.OperationalError:
+        return 0
+
+    query = (
+        "SELECT COUNT(*) FROM edges e "
+        "JOIN nodes src ON e.source_id = src.id "
+        "JOIN nodes tgt ON e.target_id = tgt.id "
+        "WHERE e.type = 'CALLS' AND e.resolution_method = 'name_match' "
+        "AND tgt.label = 'Method'"
+    )
+    params: list = []
+    if language:
+        query += " AND src.language = ?"
+        params.append(language)
+    if source_files:
+        placeholders = ",".join("?" for _ in source_files)
+        query += f" AND e.source_file IN ({placeholders})"
+        params.extend(source_files)
+
+    row = conn.execute(query, params).fetchone()
+    return int(row[0]) if row else 0
+
+
 def _get_ambiguous_edges(
     conn: sqlite3.Connection,
     min_confidence: float = 0.9,
@@ -805,6 +853,14 @@ def resolve_main() -> None:
     edges = _get_ambiguous_edges(
         conn, args.min_confidence, args.lang, source_files=source_files, limit=args.max_edges
     )
+    # Residual = the resolution-fraction DENOMINATOR: uncapped count of name_match
+    # method-call edges in scope (issue subgraph if --source-files, else whole graph),
+    # captured BEFORE _resolve_edges mutates anything. Distinct from len(edges) (which
+    # is capped + not method-specific) so a capped/un-scoped pass is detectable via
+    # resolved/residual.
+    residual_method_edges = _count_residual_method_edges(
+        conn, args.lang, source_files=source_files
+    )
     conn.close()
 
     if args.resolve:
@@ -817,9 +873,21 @@ def resolve_main() -> None:
             print(f"ERROR: No LSP server installed for {args.lang}", file=sys.stderr)
             sys.exit(1)
 
+        # scoped_source_files: how many files demand-scoped this pass (0 = whole-graph,
+        # un-scoped — the blind-500-cap regime that the metric is meant to expose).
+        _scoped_n = len(source_files) if source_files else 0
+
         lang_edges = [e for e in edges if e.get("language") == args.lang][: args.max_edges]
         if not lang_edges:
             print(f"No ambiguous {args.lang} edges to resolve.")
+            # Always emit the contract line in --resolve mode so a parser can tell
+            # "nothing to resolve" (residual may still be >0 if no name_match METHOD
+            # edges were under the confidence threshold) from a crash.
+            print(
+                f"LSP_METRICS resolved=0 residual={residual_method_edges} "
+                f"scoped_source_files={_scoped_n}",
+                flush=True,
+            )
             return
 
         print(f"\nResolving {len(lang_edges)} {args.lang} edges via LSP...")
@@ -846,6 +914,20 @@ def resolve_main() -> None:
         )
         if _changed:
             _rebuild_closure(args.db)
+
+        # FINAL machine-parseable contract line (stdout). resolved = edges PROMOTED to
+        # resolution_method='lsp' this pass (verified tree-sitter-correct + corrected
+        # to the right target). Deletes are removals, NOT promotions, so they are
+        # excluded. residual = the name_match method-call denominator captured pre-pass.
+        # scoped_source_files exposes whether this was demand-driven (>0) or a blind
+        # whole-graph cap (0). The fraction resolved/residual is now measurable, so a
+        # capped or un-scoped pass is detectable (resolved << residual).
+        resolved_promoted = int(stats.get("verified", 0)) + int(stats.get("corrected", 0))
+        print(
+            f"LSP_METRICS resolved={resolved_promoted} residual={residual_method_edges} "
+            f"scoped_source_files={_scoped_n}",
+            flush=True,
+        )
     else:
         # Diagnostic mode (default)
         _print_summary(edges, servers, args.min_confidence)
