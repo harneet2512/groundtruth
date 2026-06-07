@@ -49,6 +49,10 @@ false → the agent flies blind, can't reach gold (measured conan-17123: 7308 na
 **Research:** PyCG ICSE'21 (99.2%/69.9%); JARVIS'23 (+84%/+20%/+67%); XTA OOPSLA'00 (+88% vs RTA); CHA
 ECOOP'95; demand-driven Heintze-Tardieu PLDI'01.
 **Proof:** gate-check `name_match X→Y`, det% up, top targets show `join/get` gone, gates intact.
+**PROVEN 20260607 — T2 COMPLETE:** name_match 7351→4890 (−33.5%), `join`/`split`→0, det 63.7%, gates
+intact (LSP 47→85, embedder ON). 3 increments (var Strat-2 −1070 / literal parser −219 / strong-builtin
+1.9 −1172). Remaining residual = INTERNAL methods (`with_requires`/`with_settings`/`assert_listed_binary`)
+→ need T1+T3 receiver-typing, NOT exclusion. **NEXT: T1 declared-types + T3 assignment-flow.**
 
 ### P2 — graph.db DEPTH
 **Fix/verify:** the closure/reachability is rebuilt over the *resolved* edges (garbage edges poison
