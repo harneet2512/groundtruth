@@ -73,26 +73,19 @@ jobs:
           except Exception as e:
               print("issue fetch warn:", e)
           PY
+          # Fallback: if datasets is unavailable/offline, synthesize an issue from the largest
+          # testbed py files so the embedder-CONSUMPTION gate always has input to exercise.
+          if [ ! -s /tmp/issue.txt ]; then
+            python3 -c "import os; c=sorted(((os.path.getsize(os.path.join(r,f)),f) for r,_,fs in os.walk('/tmp/testbed_src') for f in fs if f.endswith('.py')), reverse=True); open('/tmp/issue.txt','w').write('Fix a bug involving '+', '.join(n for _,n in c[:8]))" || true
+            echo "issue.txt fallback synthesized ($(wc -c < /tmp/issue.txt 2>/dev/null || echo 0) bytes)"
+          fi
           {
             echo "===== GATE CHECK: $TASK $(date -u +%H:%M:%S) ====="
             /tmp/gt-index -root /tmp/testbed_src -output /tmp/g.db 2>&1 | tail -1
             # Demand-driven scoping (T4): resolve only the issue-relevant source files. Derive
             # a scope list from the issue text's file mentions; fall back to unscoped (the gate
             # FLAGS scoped=0 as degraded, it does not hard-fail on it).
-            python3 - <<'PY' || true
-            import re, os
-            issue = open("/tmp/issue.txt", encoding="utf-8").read() if os.path.exists("/tmp/issue.txt") else ""
-            files = sorted(set(re.findall(r'[\w/]+\.py', issue)))
-            # keep only basenames that actually exist under the testbed (demand subgraph)
-            base = set(os.path.basename(f) for f in files)
-            scoped = []
-            for root,_,fs in os.walk("/tmp/testbed_src"):
-                for f in fs:
-                    if f in base:
-                        scoped.append(os.path.join(root, f))
-            open("/tmp/gt_scope_files.txt","w").write("\n".join(scoped))
-            print(f"demand scope: {len(scoped)} source files from {len(files)} issue mentions")
-            PY
+            python3 -c "import re,os; issue=open('/tmp/issue.txt',encoding='utf-8').read() if os.path.exists('/tmp/issue.txt') else ''; base=set(os.path.basename(f) for f in re.findall(r'[\w/]+[.]py', issue)); scoped=[os.path.join(r,f) for r,_,fs in os.walk('/tmp/testbed_src') for f in fs if f in base]; open('/tmp/gt_scope_files.txt','w').write(chr(10).join(scoped)); print('demand scope:', len(scoped), 'files')" || true
             SCOPE_ARG=""
             if [ -s /tmp/gt_scope_files.txt ]; then SCOPE_ARG="--source-files /tmp/gt_scope_files.txt"; fi
             echo "[GATE2 LSP] resolving (scope: ${SCOPE_ARG:-UNSCOPED})..."
