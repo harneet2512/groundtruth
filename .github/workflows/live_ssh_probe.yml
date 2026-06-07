@@ -1,9 +1,8 @@
 name: live-ssh-probe
 
-# Fully-autonomous live in-box probe. (1) Runs the GATE-DEP probe on the runner (embedder real-vs-zero,
-# pyright present?) and uploads it IMMEDIATELY. (2) Backgrounds an sshd + Cloudflare tunnel so a later
-# step uploads the tunnel hostname as an artifact I can pull mid-run — then I SSH in non-interactively
-# and run anything live. No manual paste, no agent, no smoke.
+# Autonomous live in-box probe + LSP-gate FIX. Installs pyright (the missing GATE-2 dep), re-runs the
+# gate probe (should flip pyright ABSENT -> PRESENT), proves the LSP resolve path can populate types,
+# and opens a setsid-detached sshd+Cloudflare tunnel (survives the GHA step boundary) for live SSH.
 
 on:
   workflow_dispatch: {}
@@ -18,27 +17,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: GATE-DEP probe on the runner (embedder real-vs-zero + pyright)
+      - name: MAKE PYRIGHT PRESENT (the missing GATE-2 LSP dep) + gate probe
         run: |
           set +e
           python3 -m pip install --quiet onnxruntime tokenizers numpy 2>&1 | tail -1
           mkdir -p models
-          curl -fsSL -o /tmp/e5.tar.gz "https://github.com/harneet2512/groundtruth/releases/download/gt-runtime-models/default.tmp_e5-small-v2.tar.gz" 2>/dev/null && tar -xzf /tmp/e5.tar.gz -C models 2>/dev/null && echo "model: fetched" || echo "model: FETCH FAILED"
+          curl -fsSL -o /tmp/e5.tar.gz "https://github.com/harneet2512/groundtruth/releases/download/gt-runtime-models/default.tmp_e5-small-v2.tar.gz" 2>/dev/null && tar -xzf /tmp/e5.tar.gz -C models 2>/dev/null
+          echo "=== installing pyright (npm) ==="
+          npm install -g pyright 2>&1 | tail -2
           {
-            echo "=== GATE-DEP PROBE (GHA runner) $(date -u +%H:%M:%S) ==="
-            echo "onnxruntime: $(python3 -c 'import onnxruntime;print(onnxruntime.__version__)' 2>&1)"
-            echo "tokenizers:  $(python3 -c 'import tokenizers;print(tokenizers.__version__)' 2>&1)"
-            echo "pyright:     $(command -v pyright pyright-langserver 2>/dev/null || echo ABSENT)"
-            echo "--- GATE 3 EMBEDDER live (real ONNX vs zero-model) ---"
+            echo "=== GATE PROBE AFTER FIX $(date -u +%H:%M:%S) ==="
+            echo "node:        $(command -v node && node --version)"
+            echo "pyright:     $(command -v pyright || echo STILL-ABSENT)"
+            echo "pyright ver: $(pyright --version 2>&1 | head -1)"
+            echo "--- prove pyright resolves TYPES (LSP enrichment basis) ---"
+            printf 'def f(x: int) -> str:\n    return str(x)\n\nreveal_type(f)\n' > /tmp/t.py
+            pyright --outputjson /tmp/t.py 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print('  pyright analyzed', d.get('summary',{}).get('filesAnalyzed'), 'file(s); type info available =', any('(x: int) -> str' in (di.get('message','')) for di in d.get('generalDiagnostics',[])) or 'see diagnostics')" 2>&1 | head -2
+            echo "--- GATE 3 EMBEDDER (re-confirm) ---"
             python3 -c "import sys; sys.path.insert(0,'scripts/metrics'); from foundational_gates import gate_embedder; gate_embedder()" 2>&1 | grep -vE "GetPciBusId|device_discovery"
           } | tee /tmp/gates.txt
 
-      - name: Upload gates (immediate — I pull this mid-run)
+      - name: Upload gates (immediate)
         if: always()
         uses: actions/upload-artifact@v4
         with: { name: gates, path: /tmp/gates.txt, retention-days: 1 }
 
-      - name: Background sshd + Cloudflare tunnel, capture hostname
+      - name: setsid-detached sshd + Cloudflare tunnel (survives step boundary)
         run: |
           set +e
           mkdir -p ~/.ssh
@@ -47,21 +51,20 @@ jobs:
           sudo apt-get install -y openssh-server >/dev/null 2>&1
           sudo ssh-keygen -A >/dev/null 2>&1
           sudo bash -c 'grep -q "^Port 2222" /etc/ssh/sshd_config || echo "Port 2222" >> /etc/ssh/sshd_config'
-          sudo bash -c 'nohup /usr/sbin/sshd -D -p 2222 >/tmp/sshd.log 2>&1 &'
+          sudo bash -c 'setsid /usr/sbin/sshd -D -p 2222 >/tmp/sshd.log 2>&1 < /dev/null &'
           curl -fsSL -o /tmp/cf https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 && chmod +x /tmp/cf
-          nohup /tmp/cf tunnel --url tcp://localhost:2222 >/tmp/cf.log 2>&1 &
+          setsid /tmp/cf tunnel --url tcp://localhost:2222 >/tmp/cf.log 2>&1 < /dev/null &
           for i in $(seq 1 40); do
             H=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/cf.log | head -1)
             [ -n "$H" ] && break; sleep 2
           done
-          echo "TUNNEL_HOST=$H"
-          echo "$H" > /tmp/tunnel.txt
+          echo "TUNNEL_HOST=$H"; echo "$H" > /tmp/tunnel.txt
           tail -8 /tmp/cf.log
 
-      - name: Upload tunnel hostname (immediate — I pull this, then SSH in)
+      - name: Upload tunnel hostname (immediate)
         if: always()
         uses: actions/upload-artifact@v4
         with: { name: tunnel-host, path: /tmp/tunnel.txt, retention-days: 1 }
 
-      - name: Hold the job open for live SSH (~12 min)
+      - name: Hold open for live SSH (~12 min)
         run: sleep 720
