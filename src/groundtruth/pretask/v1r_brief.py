@@ -2775,6 +2775,15 @@ def generate_v1r_brief(
         if _rp and _rp not in _rec_by_path:
             _rec_by_path[_rp] = _r
     _aligned_records = [_rec_by_path.get(e.path, {}) for e in _delivered]
+    if os.environ.get("GT_DEBUG_L1") == "1":
+        import sys as _sys_dbg
+        _comp = [(str(_r.get("path", ""))[-44:], {k: round(float(v), 3) for k, v in (_r.get("components") or {}).items()})
+                 for _r in top_records[:5]]
+        _join = [(getattr(e, "path", "")[-44:], "MATCH" if getattr(e, "path", "") in _rec_by_path else "MISS")
+                 for e in _delivered[:8]]
+        print(f"[GT_DEBUG_L1] ranked_full_components={_comp}", file=_sys_dbg.stderr, flush=True)
+        print(f"[GT_DEBUG_L1] delivered_vs_record_join={_join}", file=_sys_dbg.stderr, flush=True)
+        print(f"[GT_DEBUG_L1] n_top_records={len(top_records)} n_delivered={len(_delivered)} embedder={os.environ.get('GT_FORCE_ONNX_EMBEDDER','?')}", file=_sys_dbg.stderr, flush=True)
     try:
         _ge, _sem_c, _struct_c, _fts5_c = _l1_signal_counts(
             graph_db, _delivered, _aligned_records

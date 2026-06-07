@@ -418,6 +418,14 @@ jobs:
           GT_MAX_LLM_CALLS: "300"
           GT_RPM_LIMIT: "0"
           GT_REBUILD_L1: "1"
+          # ENV-SCOPE FIX: the brief's run_v74 + localize run in THIS step's process and need the
+          # embedder forced to the container ONNX path. Without these, run_v74 tries (absent)
+          # sentence_transformers / can't find the model -> _ZeroEmbeddingModel -> sem=0 (the
+          # "works in codespace, breaks on GHA" env-var bug). They were armed only in the gate steps.
+          GT_FORCE_ONNX_EMBEDDER: "1"
+          GT_REQUIRE_EMBEDDER: "1"
+          GT_MODELS_ROOT: "${{ github.workspace }}/models"
+          GT_DEBUG_L1: "1"
           GT_REBUILD_L3: "1"
           GT_REBUILD_L3B: "1"
           GT_REBUILD_L5: "1"
