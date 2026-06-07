@@ -346,12 +346,30 @@ per-language hacks:**
    go-to-definition. Generalized by the dispatch map + by running it where the task's environment lives
    (the eval CONTAINER is the native env for ANY language — no per-language env logic).
 
-**Open — cause NOT yet traced; DO NOT claim a fix without a trace.** Giving pyright the task deps did
-NOT reduce Failed (disproved live), so the residual is NOT a deps/env miss. Remaining suspects, all
-language-agnostic to fix: (a) LSP analysis not finished before the query (wait for server-ready, not a
-fixed 120s), (b) `typeCheckingMode:"off"` starving the type inference (per-server analysis-depth knob),
-(c) the call-site column (`line_text.find` landing off the call token). Trace a failing method-call
-edge — the raw LSP response at the exact position — BEFORE asserting which.
+**TRACED (2026-06-07, live pyright on conan-17123): the LSP resolves method calls CORRECTLY — the
+failure is SCALE, not correctness.** 98% of name_match edges (**7147/7326**) are method calls; targets
+are ultra-common names (`join` 1106, `get` 354, `exists` 316, `items` 254, `append` 228, `loads` 189,
+`split` 122...) that name_match points at an arbitrary same-named method = garbage. The trace proved
+pyright `definition` returns the RIGHT target (`super().__init__` → argparse/builtins/the real local
+class; `StringIO.__init__` → stdlib), so the resolve already CLEANS them (stdlib→delete, internal→
+correct — the gate-check's "Deleted 18 / Corrected 7"). **But it queries the LSP per-edge (~5/sec) and
+caps at `--max-edges 500`** → on a 7147-edge repo it cleans ~7% and 93% stay garbage → the agent's
+method map stays mostly false. That is the "flying blind."
+
+**Efficiency design for big/huge repos (research-backed — do NOT per-edge-query the LSP at scale):**
+- **SCIP batch indexing (Sourcegraph) — the scalable, language-agnostic precision pass.** A SCIP indexer
+  (`scip-python` built directly on pyright; `scip-typescript`, `scip-go`, `scip-clang`, ...) runs the
+  compiler's type analysis **ONCE over the whole project** and emits ALL defs/refs in one language-
+  agnostic protobuf index — ~10–20% of LSIF size, ~10× faster in CI, **incremental on changed files**.
+  GT resolves ALL name_match edges from that single index instead of N per-edge LSP round-trips. One
+  indexer per language, same SCIP format → generalized by construction.
+  (sourcegraph.com/blog/announcing-scip · github.com/sourcegraph/scip-python)
+- **Indexer-level CHA/RTA (no env, every language, fastest).** Resolve `self.m()` / `super().__init__()`
+  structurally via the class hierarchy GT already stores (`inheritance`/`inherited`/`impl_method` edges)
+  — classic Class Hierarchy Analysis / Rapid Type Analysis — so the call never falls to name_match.
+- **Never name_match builtin methods** (`join/get/append/items/split/loads`): a high-candidate-count
+  name_match is not a fact — drop it or floor confidence at index time so it never pollutes graph.db or
+  the closure. (Consumers already filter `<0.5`, but the *connectivity* must be real, not just filtered.)
 
 ---
 
