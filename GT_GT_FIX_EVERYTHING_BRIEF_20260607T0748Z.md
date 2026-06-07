@@ -54,11 +54,36 @@ intact (LSP 47→85, embedder ON). 3 increments (var Strat-2 −1070 / literal p
 1.9 −1172). Remaining residual = INTERNAL methods (`with_requires`/`with_settings`/`assert_listed_binary`)
 → need T1+T3 receiver-typing, NOT exclusion. **NEXT: T1 declared-types + T3 assignment-flow.**
 
-### P2 — graph.db DEPTH
-**Fix/verify:** the closure/reachability is rebuilt over the *resolved* edges (garbage edges poison
-traversal — `GT_INDEX_BIN`); `properties` (`param`/`data_flow`/`signature`/`caller_usage`/`assertions`)
-populated + correct; edge `confidence`+`trust_tier` honest; FTS5 `nodes_fts` complete.
-**Proof:** gate-check shows the population numbers + det-edge fraction up after P1.
+### P2 — graph.db DEPTH (the traversal/reach that decides whether the map reaches gold)
+**Current state (measured 2026-06-07):** the localizer (`v1r_brief.py:2017-2018` → `graph_reach.compute_reach`)
+traverses BFS from trusted anchors with **TWO HARDCODED MAGIC NUMBERS — both violate the dynamic pillar:**
+- `max_depth = 3` (`graph_reach.py:77`) — fixed hop cap.
+- `min_confidence = EDGE_CONFIDENCE_FLOOR = 0.7` (`v1r_brief.py:49`) — fixed float gate on frontier edges.
+Plus path-decay `1/(1+depth)` + hub-penalty (Lao & Cohen PRA 2010). The `3` and `0.7` were tuned on the
+OLD substrate where ≥0.7 edges still included LAUNDERED `name_match` (verified_unique stdlib-shadow) →
+"deeper-hop recovers 0" (ICEMAN) / "29× BFS explosion, gold flat" (G3) are **stale/garbage-confounded**;
+after T2 the ≥fact edges are genuinely real, so depth/gate must be re-derived, not trusted.
+
+**Fix (dynamic + hybrid + confidence-gated — NO `0.7`, NO `3`):**
+- **Gate (per-edge frontier admission):** HYBRID composite (≥3 signals) = ① resolution truth (categorical
+  fact-method vs `name_match`) · ② confidence · ③ edge-type weight · ④ semantic relevance to the issue ·
+  ⑤ hub-penalty. DYNAMIC cutoff = the natural break in *this task's* admission-score distribution, not 0.7.
+  Tiered (facts always; mid-tier iff semantically relevant; guesses dropped — correct-or-quiet).
+- **Depth (per-path continuation):** EMERGENT — expand until a path's decayed contribution drops below a
+  *per-task-relative* floor (fraction of this task's top reach) or the fact-frontier is exhausted; hard cap
+  (~5) only as a backstop, never the policy. Deep on long real chains (Java), shallow on flat (Python) —
+  one uniform mechanism, language-adaptive depth. (Demand-driven termination, Heintze-Tardieu PLDI'01.)
+- Also: closure rebuilt over *resolved* edges; `properties` populated; `confidence`/`trust_tier` honest; FTS5.
+**Proof = GOLD-REACH, not the substrate gate-check:** on clean graphs, does the dynamic gate+depth reach
+gold more / rank it higher (`gold_file_reached`, `first_gold_rank`) WITHOUT exploding the candidate set?
+Reach-gold up + candidate-set flat = serves the goal. Reach-gold flat = revert (motion, not progress).
+
+**Source-residual investigation (conan-17123, 2026-06-07):** top `name_match` after T2 = `with_requires`/
+`with_settings`/`with_requirement`/`assert_listed_binary` (685) are all `GenConanfile().with_…()` builder
+chains + `client.assert_…` fixtures **in `test/` files** (GT filters tests; gold is in source → low value);
+`loads`×188 = all `json.loads` (→ added to strong-builtin set); `run`×127 = MIXED internal (`command.run`/
+`self._conanfile.run`, needs T1/T3 typing) + external (`docker…containers.run`). So the *source* map is
+materially clean; the genuine remaining typing case is `run`.
 
 ### P3 — EMBEDDER
 **Fix/verify:** real ONNX e5 loads, non-zero *separating* vectors, AND the brief/localizer actually
