@@ -1307,6 +1307,8 @@ def classify_tool_event(
             return HookEvent("skip", reason="no_path")
         if not _is_source_path(path, source_exts):
             return HookEvent("skip", path=path, reason="non_source_ext")
+        if _is_test_path(path):  # LEGITIMACY: GT stays silent on test files the agent views
+            return HookEvent("skip", path=path, reason="test_path")
         return HookEvent("post_view", path=path)
 
     if cls in {"FileEditAction", "FileWriteAction"}:
@@ -1324,6 +1326,8 @@ def classify_tool_event(
             if verb in VIEW_EDITOR_VERBS:
                 if not _is_source_path(path, source_exts):
                     return HookEvent("skip", path=path, reason="non_source_ext")
+                if _is_test_path(path):  # LEGITIMACY: silent on test files
+                    return HookEvent("skip", path=path, reason="test_path")
                 return HookEvent("post_view", path=path)
             if verb not in MUTATING_EDITOR_VERBS:
                 return HookEvent("skip", path=path, reason=f"non_mutating_verb:{verb}")
@@ -1348,6 +1352,8 @@ def classify_tool_event(
         if read_path:
             if not _is_source_path(read_path, source_exts):
                 return HookEvent("skip", path=read_path, reason="non_source_ext")
+            if _is_test_path(read_path):  # LEGITIMACY: silent on test files
+                return HookEvent("skip", path=read_path, reason="test_path")
             return HookEvent("post_view", path=read_path)
 
     return HookEvent("skip", reason="non_hook_action")
