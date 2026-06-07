@@ -176,17 +176,45 @@ def _classify(cmd: str) -> tuple[str | None, str | None]:
 _GT_HOOK = os.environ.get("GT_HOOK_PATH", "/opt/gt/gt_hook.py")
 
 
-def _run_hook(kind: str, rel: str) -> str:
-    """Run gt_hook.py for post-edit or post-view evidence.
+# Where gt_agent extracts the per-action import-closure (post_edit/post_view/curation_map/
+# contract_delta + deps). Used as PYTHONPATH so `python3 -m groundtruth.hooks.*` resolves.
+_GT_CLOSURE = os.environ.get("GT_DRIFT_CLOSURE", "/opt/gt/_drift")
 
-    Uses -S to skip site processing so our own .pth does not re-import
-    minisweagent (which prints a banner to stdout).  gt_hook.py is
-    stdlib-only so -S is safe.
-    """
-    root = _root()
-    db_path = os.environ.get("GT_GRAPH_DB", "/tmp/graph.db")
+
+def _run_graph_engine(kind: str, rel: str, root: str, db_path: str) -> str:
+    """Per-action evidence from the GRAPH engines — PARITY with the OH push path (gt_gt §6):
+      post_edit (L3): [SIGNATURE]/[CALLERS]/[TWIN]/[COMPLETENESS]/PRESERVE + [CONTRACT-DELTA],
+                      facts-only (curation_map DETERMINISTIC gate), contract-DELTA self-derived
+                      from git HEAD vs current.
+      post_view (L3b): [CONTRACT]/[RAISES]/Called by/Calls into, graph-based, facts-only.
+    These are the SAME modules OH runs (not the AST gt_hook.py), shipped in the closure. -S
+    skips the minisweagent .pth banner; the closure is stdlib-only so -S is safe."""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = _GT_CLOSURE + os.pathsep + env.get("PYTHONPATH", "")
+    # post_edit's contract-DELTA sub-indexes via gt-index (compute_delta -> _index_one). Pin
+    # the LOCAL binary so it never tries to DOWNLOAD gt-index at runtime (egress-blocked in
+    # the task container — same failure the `gt drift` shim hit). Explicit env wins if set.
+    env.setdefault("GT_INDEX_BINARY", "/tmp/gt-index")
+    if kind == "post_edit":
+        args = [sys.executable, "-S", "-m", "groundtruth.hooks.post_edit",
+                f"--root={root}", f"--db={db_path}", f"--file={rel}",
+                "--quiet", "--max-items=3"]
+    else:
+        args = [sys.executable, "-S", "-m", "groundtruth.hooks.post_view",
+                f"--root={root}", f"--db={db_path}", f"--file={rel}"]
+    try:
+        r = subprocess.run(args, capture_output=True, text=True,
+                           timeout=_HOOK_TIMEOUT, env=env)
+        return (r.stdout or "").strip()
+    except Exception:  # noqa: BLE001 -- correct-or-quiet
+        return ""
+
+
+def _run_gt_hook_ast(kind: str, rel: str, root: str, db_path: str) -> str:
+    """Legacy AST single-file engine (gt_hook.py). Fallback ONLY when the graph engines
+    yield nothing (e.g. graph.db absent or the file is not in the graph) so we never
+    regress to zero per-action evidence. -S avoids the .pth banner."""
     db_flag = f"--db={db_path}" if os.path.isfile(db_path) else ""
-
     if kind == "post_edit":
         args = [sys.executable, "-S", _GT_HOOK, "verify",
                 f"--root={root}", "--quiet", "--max-items=3"]
@@ -200,6 +228,19 @@ def _run_hook(kind: str, rel: str) -> str:
         return (r.stdout or "").strip()
     except Exception:  # noqa: BLE001 -- correct-or-quiet
         return ""
+
+
+def _run_hook(kind: str, rel: str) -> str:
+    """Per-action evidence: GRAPH engines first (OH parity), AST gt_hook only as a no-graph
+    fallback so we never deliver less than before. Correct-or-quiet."""
+    root = _root()
+    db_path = os.environ.get("GT_GRAPH_DB", "/tmp/graph.db")
+    out = ""
+    if os.path.isfile(db_path):
+        out = _run_graph_engine(kind, rel, root, db_path)
+    if not out:
+        out = _run_gt_hook_ast(kind, rel, root, db_path)
+    return out
 
 
 def _norm_rel(p: str) -> str:
@@ -570,6 +611,140 @@ def _l5_failure_nudge(out_text: str) -> str:
     return ""
 
 
+# =====================================================================================
+# Gap #2 — grep-intercept (OH parity): on `grep <symbol>`, inject cross-file VERIFIED
+# callers of that symbol from the graph, scoped to the grepped file. Turns the agent's own
+# search into a graph-augmented one. Facts-only (name_match excluded, conf>=0.6); silent if
+# the symbol isn't defined in the grepped scope (a homonym from elsewhere is worse than none).
+# =====================================================================================
+_GREP_SYM_RE = re.compile(
+    r"\b(?:grep|rg|egrep|ggrep|ripgrep)\b[^|;&]*?(?:-{1,2}\w[\w-]*\s+)*['\"]?([A-Za-z_][A-Za-z0-9_]{1,})['\"]?")
+_GREP_PATH_RE = re.compile(r"[A-Za-z0-9_./\-]+")
+_GREP_STOP = {"def", "class", "import", "from", "return", "if", "else", "for", "while",
+              "try", "except", "with", "async", "await", "function", "const", "let", "var"}
+_grep_seen: set[str] = set()
+
+
+def _grep_symbol(cmd: str) -> str | None:
+    if not re.search(r"\b(?:grep|rg|egrep|ggrep|ripgrep)\b", cmd):
+        return None
+    m = _GREP_SYM_RE.search(cmd)
+    if not m:
+        return None
+    s = m.group(1)
+    return None if (len(s) < 2 or s in _GREP_STOP) else s
+
+
+def _grep_file_scope(cmd: str, sym: str | None) -> str | None:
+    head = re.split(r"[|;&]|\d?>>?|2>", cmd, maxsplit=1)[0]
+    cands: list[str] = []
+    for tok in head.split():
+        t = tok.strip("'\"")
+        if not t or t.startswith("-") or t in ("grep", "rg", "egrep", "fgrep", "ripgrep", "ggrep"):
+            continue
+        if sym and t == sym:
+            continue
+        if not _GREP_PATH_RE.fullmatch(t):
+            continue
+        if "/" in t or t.endswith(_SRC_EXT):
+            cands.append(t)
+    return cands[-1] if cands else None  # grep convention: paths after the pattern
+
+
+def _grep_intercept(cmd: str) -> str:
+    if _GT_BASELINE:
+        return ""
+    sym = _grep_symbol(cmd)
+    if not sym or sym in _grep_seen:
+        return ""
+    db = os.environ.get("GT_GRAPH_DB", "/tmp/graph.db")
+    if not os.path.isfile(db):
+        return ""
+    scope = _grep_file_scope(cmd, sym)
+    import sqlite3
+    rows: list = []
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            con.execute("PRAGMA busy_timeout=3000")
+            base_q = (
+                "SELECT DISTINCT nsrc.file_path, e.source_line FROM edges e "
+                "JOIN nodes nt ON e.target_id=nt.id JOIN nodes nsrc ON e.source_id=nsrc.id "
+                "WHERE nt.name=? AND e.type='CALLS' "
+                "AND LOWER(COALESCE(e.resolution_method,''))!='name_match' "
+                "AND COALESCE(e.confidence,0.5)>=0.6 AND nsrc.file_path!=nt.file_path "
+                "AND COALESCE(nsrc.is_test,0)=0 ")
+            if scope:
+                suffix = "%" + scope.replace("\\", "/").lstrip("/")
+                if not con.execute(
+                    "SELECT 1 FROM nodes WHERE name=? AND file_path LIKE ? AND COALESCE(is_test,0)=0 LIMIT 1",
+                    (sym, suffix),
+                ).fetchone():
+                    return ""  # not defined in the grepped scope → silent (no homonym)
+                rows = con.execute(base_q + "AND nt.file_path LIKE ? LIMIT 5", (sym, suffix)).fetchall()
+            else:
+                rows = con.execute(base_q + "LIMIT 5", (sym,)).fetchall()
+        finally:
+            con.close()
+    except Exception:  # noqa: BLE001 -- correct-or-quiet
+        return ""
+    if not rows:
+        return ""
+    _grep_seen.add(sym)
+    body = "\n".join(f"  {fp}:{ln or '?'}" for fp, ln in rows)
+    return (f"\n<gt-callers symbol=\"{sym}\">\n"
+            f"{sym} is called (verified) from {len(rows)} cross-file site(s) — do not break them:\n"
+            f"{body}\n</gt-callers>")
+
+
+# =====================================================================================
+# Gap #3 — presubmit-verify (OH L6 parity): when the agent is about to submit, remind it to
+# run the project's tests for the edited modules + confirm the behavioral CONTRACT. SANITIZED
+# (per 0e70222d): sourced from the `properties` table (is_test=0), NEVER assertions/tests —
+# no grader test-name leak. Fires once.
+# =====================================================================================
+_presubmit_fired = False
+_edited_for_verify: set[str] = set()
+
+
+def _presubmit_verify(cmd: str) -> str:
+    global _presubmit_fired
+    if _GT_BASELINE or _presubmit_fired:
+        return ""
+    if "COMPLETE_TASK_AND_SUBMIT" not in cmd and "/tmp/patch.txt" not in cmd:
+        return ""
+    if not _edited_for_verify:
+        return ""
+    db = os.environ.get("GT_GRAPH_DB", "/tmp/graph.db")
+    contracts: list[str] = []
+    if os.path.isfile(db):
+        import sqlite3
+        try:
+            con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            try:
+                for ef in list(_edited_for_verify)[:10]:
+                    norm = ef.replace("\\", "/").lstrip("/")
+                    for k, v in con.execute(
+                        "SELECT DISTINCT p.kind,p.value FROM properties p "
+                        "JOIN nodes n ON p.node_id=n.id WHERE n.file_path LIKE ? "
+                        "AND COALESCE(n.is_test,0)=0 "
+                        "AND p.kind IN ('return_shape','exception_type','guard_clause') LIMIT 4",
+                        ("%" + norm,),
+                    ).fetchall():
+                        line = f"  {os.path.basename(norm)}: {k} = {str(v)[:80]}"
+                        if line not in contracts:
+                            contracts.append(line)
+            finally:
+                con.close()
+        except Exception:  # noqa: BLE001
+            pass
+    _presubmit_fired = True
+    tail = (":\n" + "\n".join(contracts[:8])) if contracts else " (return shape, error handling)."
+    return (f"\n<gt-verify>\n[GT_VERIFY] You edited {len(_edited_for_verify)} file(s). Before "
+            f"finishing, run the project's own tests for the affected modules and confirm your "
+            f"change preserves the behavioral contract{tail}\n</gt-verify>")
+
+
 def _augment_output(action, out) -> None:
     """Append GT evidence to a command's output dict."""
     global _marker_sent, _action_count, _source_edit_count
@@ -589,11 +764,14 @@ def _augment_output(action, out) -> None:
                 _source_edit_count += 1
                 _kroot = _root()
                 _krel = os.path.relpath(_kf, _kroot) if os.path.isabs(_kf) else _kf
+                _edited_for_verify.add(_krel)  # Gap #3: presubmit-verify tracks edited files
                 _invalidate_on_edit(_krel, _kroot)  # L6
-                _gc = _graph_contract_block(_krel)  # cross-language [SIGNATURE]/[CALLERS]
-                if _gc:
-                    out["output"] = (out.get("output") or "") + _gc
-                _cc = _cochange_block(_krel)  # COMPLETENESS / co-change
+                # OH PARITY: the per-edit contract ([SIGNATURE]/[CALLERS]/[TWIN]/PRESERVE +
+                # [CONTRACT-DELTA], facts-only, cross-language) is delivered by post_edit via
+                # _evidence(cmd) below — the SAME graph engine OH runs. The old local
+                # _graph_contract_block was a Python-AST-era stopgap and is now superseded
+                # (post_edit is graph-based + cross-lang), so it is no longer fired (no dup).
+                _cc = _cochange_block(_krel)  # co-change (git history — distinct from post_edit)
                 if _cc:
                     out["output"] = (out.get("output") or "") + _cc
         # CONSENSUS (Layer-A first-view + Layer-B progressive/override): same role as
@@ -616,6 +794,16 @@ def _augment_output(action, out) -> None:
             _fn = _l5_failure_nudge(_orig_out)
             if _fn:
                 out["output"] = (out.get("output") or "") + _fn
+        # Gap #2: grep-intercept — verified cross-file callers of a grepped symbol (OH parity).
+        if not _GT_BASELINE:
+            _gi = _grep_intercept(cmd)
+            if _gi:
+                out["output"] = (out.get("output") or "") + _gi
+        # Gap #3: presubmit-verify — contract-sourced verify reminder at submit, no test leak.
+        if not _GT_BASELINE:
+            _pv = _presubmit_verify(cmd)
+            if _pv:
+                out["output"] = (out.get("output") or "") + _pv
         ev = _evidence(cmd)
         if ev:
             out["output"] = (out.get("output") or "") + ev

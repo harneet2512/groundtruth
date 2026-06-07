@@ -84,20 +84,22 @@ def _load(path_candidates: list[Path]) -> str | None:
 _GT_HOOK_CONTENT = _load(_GT_HOOK_CANDIDATES)
 _PATCH_CONTENT = _load([_PATCH_PATH])
 
-# --- groundtruth drift import-closure (for the `gt drift` lever) — mirrors the OH path's
-# _bundle_dir_payload provisioning. The real chain drift_cli -> drift_hook ->
-# contract_map/curation_map/_binary/runtime.* is the canonical engine from 11f14916; its
-# import-closure is STDLIB-ONLY (verified: no pydantic / 3rd-party), so we ship those modules
-# as a tar.gz and extract them into the agent container's python path — no pip, no deps.
-# (Pier's _setup_gt_drift freezes <db>.orig + installs the `gt` shim; this supplies the engine.)
+# --- groundtruth per-action import-closure — mirrors the OH path's _bundle_dir_payload
+# provisioning. Ships the graph-based per-action engines the mini-swe push path now calls for
+# PARITY with OH (gt_gt §6): post_edit (L3 contract evidence + contract-DELTA), post_view (L3b
+# contracts/graph-nav), curation_map/contract_map (facts-only), drift_cli/drift_hook, + the
+# state/runtime deps. import-closure is STDLIB-ONLY (verified: no pydantic / 3rd-party), so we
+# ship those modules as a tar.gz and extract them into the container's python path — no pip.
+# Covers hooks/ pretask/ runtime/ state/ + _binary.py + __init__.py (post_view/post_edit pull
+# groundtruth.state, which the old drift-only closure missed).
 _SRC_GT = _THIS_DIR.parent / "src" / "groundtruth"
 
 
 def _build_drift_tarball_b64() -> str | None:
-    """tar.gz the drift import-closure (hooks/ pretask/ runtime/ + _binary.py + __init__.py)
-    under arcname ``groundtruth/...`` and return base64. None if the source is absent."""
+    """tar.gz the per-action import-closure (hooks/ pretask/ runtime/ state/ + _binary.py +
+    __init__.py) under arcname ``groundtruth/...`` and return base64. None if source absent."""
     if not _SRC_GT.is_dir():
-        logger.warning("GT: drift source not found at %s", _SRC_GT)
+        logger.warning("GT: per-action closure source not found at %s", _SRC_GT)
         return None
     import io
     import tarfile
@@ -108,7 +110,7 @@ def _build_drift_tarball_b64() -> str | None:
             p = _SRC_GT / top
             if p.is_file():
                 tar.add(str(p), arcname=f"groundtruth/{top}")
-        for sub in ("hooks", "pretask", "runtime"):
+        for sub in ("hooks", "pretask", "runtime", "state"):
             d = _SRC_GT / sub
             if not d.is_dir():
                 continue

@@ -575,18 +575,32 @@ jobs:
           # per-action graph). Set BEFORE pier imports gt_agent so it bakes into the image
           # build. Without this the agent's per-action hooks had no graph and delivered nothing.
           GT_INDEX_URL: "https://github.com/${{ inputs.assets_repo }}/releases/download/pipeline-assets-v1/gt-index-linux-amd64"
+          # In-container gt-index path for pier's _setup_gt_drift sub-index (the `gt` shim
+          # bakes GT_INDEX_BINARY so compute_delta uses the LOCAL binary, never a runtime
+          # download — the egress-blocked failure mode we hit on the live run).
+          GT_INDEX_BINARY: "/tmp/gt-index"
+          # Arm the mini-swe contract-DELTA pull lever (`gt drift` -> compute_delta).
+          GT_DRIFT_ENABLED: "1"
+          # Live log stream (parity with the OH workflow): the runner pushes pier's stdout to
+          # the user's ngrok SSE tunnel for live watching — no polling. No-op if var unset.
+          GT_LOG_RELAY_URL: ${{ vars.GT_LOG_RELAY_URL }}
         run: |
           echo "=== DeepSWE GT Trial: ${{ matrix.task }} (model ${{ inputs.model }}) ==="
           echo "GT_GRAPH_DB: ${GT_GRAPH_DB:-<unset -> brief off>}"
-          pier run \
+          # Line-buffered (stdbuf) so the live relay streams line-by-line, not in 8KB blocks
+          # (the OH live-stream fix). tee keeps the full local log regardless of the relay.
+          set +e
+          stdbuf -oL -eL pier run \
             -p deepswe-bench/tasks/${{ matrix.task }} \
             --agent-import-path artifact_deepswe.gt_agent:GTMiniSweAgent \
             --model ${{ inputs.model }} \
             --env docker \
             -y \
             --ak config_file=artifact_deepswe/gt_integration/deepswe_gt_pier.yaml \
-            2>&1 | tee trial_output.log
-          echo "=== Trial complete ==="
+            2>&1 | stdbuf -oL tee trial_output.log | python -u scripts/log_relay.py
+          TRIAL_RC=${PIPESTATUS[0]}
+          set -e
+          echo "=== Trial complete (rc=$TRIAL_RC) ==="
 
       - name: Collect results
         if: always()
