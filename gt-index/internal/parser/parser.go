@@ -897,11 +897,35 @@ func extractCalleeInfo(callNode *sitter.Node, src []byte) (string, string) {
 		if simpleName == "" {
 			simpleName = qualified
 		}
+		// T2 (parser-level): a method call on a LITERAL receiver — ",".join(), [..].append(),
+		// {..}.get() — is a builtin (str/list/dict/...) call, NOT an internal graph edge. Skip it
+		// so it never becomes a name_match guess to an arbitrary same-named internal method.
+		// (The dominant garbage: conan-17123 join×1106, split×122 are string-literal receivers.)
+		if recv := funcNode.Child(0); recv != nil && isLiteralReceiver(recv.Type()) {
+			return "", ""
+		}
 		return simpleName, qualified
 	}
 
 	content := funcNode.Content(src)
 	return content, content
+}
+
+// isLiteralReceiver reports whether a tree-sitter node type is a literal value
+// (string / list / dict / set / number / bool / etc.) across Python, JS/TS, Go, Rust.
+// A method call whose receiver is a literal is a stdlib/builtin call, never an
+// internal call-graph edge — so it must not be resolved to a same-named internal method.
+func isLiteralReceiver(t string) bool {
+	switch t {
+	case "string", "concatenated_string", "raw_string_literal", "interpreted_string_literal",
+		"template_string", "char_literal", "byte_string", "string_literal", "rune_literal",
+		"list", "dictionary", "set", "tuple", "list_literal", "dictionary_literal",
+		"array", "object", "composite_literal", "array_literal",
+		"integer", "float", "integer_literal", "float_literal", "number",
+		"true", "false", "none", "null", "nil", "boolean", "boolean_literal":
+		return true
+	}
+	return false
 }
 
 func extractFieldText(node *sitter.Node, fieldName string, src []byte) string {
