@@ -1839,6 +1839,44 @@ This run only ~1.5 were live, which is the mechanical cause of the 23/25 MEDIUM 
 **Net:** GHA did not provision GT's runtime (no onnxruntime, no pyright), silently degrading GT to a
 **grep+graph lexical localizer**. Same class as the HF-429 dataset failure: wrong (un-provisioned) env.
 
+### 2026-06-07 RESOLVED — the 2-dead-gates cause was a SILENTLY-FAILING deps step (fixed + proven)
+The "no onnxruntime, no pyright" above was NOT an unfixable env limit — it was a workflow bug.
+Diagnosed + fixed live in-box (bore TCP tunnel + ssh into the running GHA runner) on real conan-17123.
+
+**Root cause:** the agent job's "Install GT runtime" step ran `python -m pip install -q onnxruntime
+tokenizers pydantic 2>&1 | tail` — the `| tail` swallowed the pip failure and there was no `set -e`,
+so the step exited 0 with NOTHING installed on every real run. Consequence: onnxruntime/tokenizers/
+numpy absent → embedder zero (sem=0); pydantic absent → GT's `lsp.protocol` import fails → resolve
+catches `"LSP client not available"` → 0 edges resolved. The `npm install pyright` line in the same
+step DID succeed, masking the failure. All three gates silently off.
+
+**Fix (commit `e75fd02b`):** deps step is now `set -euo pipefail`, un-piped, installs
+onnxruntime+tokenizers+numpy+pydantic+pyright, and FAIL-CLOSED verifies each import (the run aborts
+loudly if any is missing — a dep gap can never again silently degrade GT to baseline). `GT_INDEX_BIN`
+added to Point-A env so the closure rebuilds after LSP correction.
+
+**Proof — all 3 gates ON, real conan-17123, ~5-min zero-LLM `gate-check.yml` (NO agent):**
+- **GATE 1 GRAPH ON.** graph.db population: nodes **7075** (Method 4087 / Function 2207 / Class 781),
+  signatures 6304, FTS5 `nodes_fts` 7075; edges **27528** by resolution_method = name_match 7308,
+  import 6853, type_flow 4229, structural 4087, same_file 2181, impl_method 1264, verified_unique 841,
+  inherited 620, inheritance 130, **lsp 15**; properties **52202** (caller_usage 6420, field_read 6329,
+  fingerprint 6294, param 5481, data_flow 5284, call_order 4657); assertions 10264.
+- **GATE 2 LSP ON.** resolve enriched return_types **47→87** (+40 via pyright hover), **DELETED 18**
+  false-positive name_match edges, **CORRECTED 7** mis-pointed, closure rebuilt — actively CLEANING edges.
+- **GATE 3 EMBEDDER ON.** real ONNX EmbeddingModel, cos(related)=0.8605 > cos(unrelated)=0.7608.
+
+**Open optimization (NOT a dead gate): the `Failed` count.** ~33–44/60 sampled name_match edges still
+Failed = pyright go-to-definition returned empty. Structural cause: conan is OOP-heavy — **4087/7075
+nodes (58%) are Methods** — so most name_match edges are method calls (`obj.m(...)`), which pyright
+resolves only after inferring the receiver type, i.e. a FULL project analysis (the task's deps +
+analysis time). Point-A runs on the host without the task venv, so method-call resolution is partial.
+Knob to push Failed→0: give pyright the task environment (venv/`extraPaths`) + longer
+`wait_for_progress_complete`. The edges that DO resolve are already being cleaned (18 deleted, 7 fixed).
+
+**Methodology:** the 3 gates are set by the Point-A SETUP (~5 min), NOT the 20-min agent.
+`gate-check.yml` verifies/iterates graph→LSP→embedder on a real task with NO agent/LLM — fix the gates
+cheaply; never burn a benchmark run to discover they were off.
+
 ### Live-path infra note (separate from GT logic)
 This run executed on **GitHub Actions** (`/home/runner/work/...`), violating the standing
 "live testing = Codespaces ONLY" rule. 3 tasks (cfn-3779/3798, loguru-1306) never ran — HF dataset
