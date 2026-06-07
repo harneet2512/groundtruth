@@ -70,10 +70,25 @@ jobs:
                       # separate, unmetered resource — NOT LFS). lfs:true here now fails the
                       # whole job ("failed to fetch some objects from .../info/lfs").
 
+      # OPTIMIZATION: persistent cross-run cache of the pipeline assets so they download ONCE
+      # ever, not 133MB model + 83MB dataset on EVERY run. Keyed on the release tag; on a hit
+      # the fetch step below is skipped entirely.
+      - name: Cache pipeline assets (model + dataset) across runs
+        id: cache_assets
+        uses: actions/cache@v4
+        with:
+          path: |
+            benchmarks/data/swebench_live_lite.jsonl
+            models/e5-small-v2/model.onnx
+            models/e5-small-v2/tokenizer.json
+          key: pipeline-assets-v1-model-dataset-tokenizer
+
       # Fetch the dataset + e5 model from the pipeline-assets release (LFS-quota bypass).
       # lfs:false left only ~130-byte pointer files; overwrite them with the real content.
       # Release assets do not consume LFS bandwidth, so this works on the exhausted quota.
+      # SKIPPED on a cache hit — the optimization (no re-pull every run).
       - name: Fetch large assets from release (LFS bypass)
+        if: steps.cache_assets.outputs.cache-hit != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
