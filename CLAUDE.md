@@ -40,6 +40,38 @@ did anything. The thing that counts is the **trajectory being right**:
 
 ---
 
+## THE TWO-STAGE METHODOLOGY — STABILIZE (1) BEFORE FLIPS (2). NEVER SKIP STAGE 1.
+
+Building GT toward the goal happens in TWO stages, in order. Do not chase Stage 2 before
+Stage 1 is solid. Confusing the two is the error that wastes runs.
+
+**STAGE 1 — STABILIZE (do this FIRST).** GT must be a **deterministic, stable** product: it
+acts the **same way every time**, delivers the **RIGHT context at the moment it is needed**, and
+**adheres to CLAUDE.md + the architecture** (gt_gt / DOC_OF_HONOR). Stage 1 is proven by
+**CONTROLLED, DETERMINISTIC verification** — same input → same correct output, on the real
+graph/binary, asserted exactly. It is NOT proven by flips. **A given task MAY NEVER FLIP, and
+that is irrelevant to Stage 1.** Stage 1 asks one question: *is the context GT delivers correct,
+stable, and architecture-adherent?* Prove that, deterministically, before anything else.
+
+**STAGE 2 — FLIPS (only once Stage 1 holds).** A flip = GT provides correct context **when it is
+needed**, and that context **CONVERTS the agent — it changes the decision the agent was about to
+make**, producing a correct fix the agent would not otherwise have written. Flips are the Stage-2
+proof (paired GT-on vs the frozen baseline). They are pursued ONLY after GT is stabilized. Never
+fixate on whether a specific task flipped while Stage 1 is unproven.
+
+**NEVER OVERFIT.** Stage-1 determinism/correctness MUST be a GENERAL property — works on any
+repo / task / language / agent. A "fix" that makes one specific task's context right (keyed to
+that task's files/symbols/shape) is benchmaxxing, not Stage 1. Verify generality (held-out
+inputs, multiple shapes), never tune to the task in front of you.
+
+**Practical consequence:** when a lever is built/fixed, prove Stage 1 first — deterministic
+unit/real-binary tests that assert the EXACT correct context on controlled inputs, plus an
+architecture-adherence (LIPI) pass — and report it as "Stage 1: stabilized/correct" or not.
+Only then run the live paired flip experiment (Stage 2). Do not grade a lever by whether one
+live task flipped; grade Stage 1 by determinism + correctness + architecture-adherence.
+
+---
+
 ## What It Is
 
 GroundTruth is an MCP server that gives AI coding agents codebase intelligence -- for any language. It indexes source code into a SQLite call graph, then provides evidence-based briefings, validation, and symbol tracing to prevent hallucinations.
@@ -283,6 +315,111 @@ gt_intel.py --db=graph.db --enhanced-briefing --issue-text="fix auth bug"
 - Go 1.22+. `go-sqlite3` (CGO). `go-tree-sitter`.
 - All SQLite queries use parameterized statements.
 - Update PROGRESS.md after every milestone.
+
+---
+
+## graph.db IS THE CONTEXT GRAPH — METHOD-CALL EDGES ARE THE MAJORITY (2026-06-07)
+
+graph.db is the **context graph of the codebase** — the agent's MAP of the code: who calls whom, what
+reaches what. Its value is the **EDGES** (call relationships), not the nodes. If the edges are wrong or
+missing, the agent navigates a false map → **cannot reach gold files → flies blind.** An edge that
+stays `name_match` is a NAME GUESS, not a fact: it matched a callee by name across files and is
+ambiguous (N functions/methods share that name). Only a *resolved* edge (`import` / `same_file` /
+`type_flow` / `lsp` / `verified_unique`) is a fact.
+
+**The 58% method gap (measured live, conan-17123, 7075 nodes):** 4087/7075 nodes (**58%**) are Methods,
+so **method calls (`obj.method()`) are the MAJORITY of call edges.** Resolving a method call requires
+the RECEIVER'S TYPE — name alone is ambiguous across classes. When that type isn't resolved, the edge
+stays `name_match` = speculative. **If the method calls don't convert, ~58% of the context graph is
+guesswork → the agent's map is mostly false → it cannot reliably reach gold.** This is not an
+optimization; it is whether graph.db functions at all. If it fails on one task, assume it is flying
+blind on most.
+
+**The fix MUST be language-agnostic + generalized (per `.claude/CLAUDE.md`). Two generalized levers, no
+per-language hacks:**
+1. **Indexer-level receiver-type resolution (Go indexer, tree-sitter — all languages, no env):** the
+   indexer already emits `type_flow` / `impl_method` / `inherited` / `inheritance` edges; extend it to
+   track receiver types so more method calls resolve STRUCTURALLY at index time, before any fallback to
+   `name_match`. Most generalized lever — tree-sitter, every language, no per-task environment.
+2. **LSP precision pass (dispatched per language via `_KNOWN_SERVERS`):** for the residual, the
+   language's own type-aware server (pyright/gopls/rust-analyzer/tsserver/jdtls) resolves the call via
+   go-to-definition. Generalized by the dispatch map + by running it where the task's environment lives
+   (the eval CONTAINER is the native env for ANY language — no per-language env logic).
+
+**TRACED (2026-06-07, live pyright on conan-17123): the LSP resolves method calls CORRECTLY — the
+failure is SCALE, not correctness.** 98% of name_match edges (**7147/7326**) are method calls; targets
+are ultra-common names (`join` 1106, `get` 354, `exists` 316, `items` 254, `append` 228, `loads` 189,
+`split` 122...) that name_match points at an arbitrary same-named method = garbage. The trace proved
+pyright `definition` returns the RIGHT target (`super().__init__` → argparse/builtins/the real local
+class; `StringIO.__init__` → stdlib), so the resolve already CLEANS them (stdlib→delete, internal→
+correct — the gate-check's "Deleted 18 / Corrected 7"). **But it queries the LSP per-edge (~5/sec) and
+caps at `--max-edges 500`** → on a 7147-edge repo it cleans ~7% and 93% stay garbage → the agent's
+method map stays mostly false. That is the "flying blind."
+
+**Efficiency design for big/huge repos (research-backed — do NOT per-edge-query the LSP at scale):**
+- **SCIP batch indexing (Sourcegraph) — the scalable, language-agnostic precision pass.** A SCIP indexer
+  (`scip-python` built directly on pyright; `scip-typescript`, `scip-go`, `scip-clang`, ...) runs the
+  compiler's type analysis **ONCE over the whole project** and emits ALL defs/refs in one language-
+  agnostic protobuf index — ~10–20% of LSIF size, ~10× faster in CI, **incremental on changed files**.
+  GT resolves ALL name_match edges from that single index instead of N per-edge LSP round-trips. One
+  indexer per language, same SCIP format → generalized by construction.
+  (sourcegraph.com/blog/announcing-scip · github.com/sourcegraph/scip-python)
+- **Indexer-level CHA/RTA (no env, every language, fastest).** Resolve `self.m()` / `super().__init__()`
+  structurally via the class hierarchy GT already stores (`inheritance`/`inherited`/`impl_method` edges)
+  — classic Class Hierarchy Analysis / Rapid Type Analysis — so the call never falls to name_match.
+- **Never name_match builtin methods** (`join/get/append/items/split/loads`): a high-candidate-count
+  name_match is not a fact — drop it or floor confidence at index time so it never pollutes graph.db or
+  the closure. (Consumers already filter `<0.5`, but the *connectivity* must be real, not just filtered.)
+
+**OPTIMIZED MECHANISM — propagate over graph.db's EXISTING facts; do NOT re-analyze or per-edge-LSP the
+bulk.** graph.db already stores the resolver's inputs, paid for at index time (measured conan-17123):
+hierarchy (`inheritance`/`inherited`/`impl_method` edges), declared types (`signature` on 6304/7075
+nodes + `param` 5481 properties), assignments (`data_flow` 5284 properties), partial type resolution
+(`type_flow` 4229). The indexer extracts all this, then **discards it and string-matches method calls
+into `name_match`.** The fix is a propagation PASS over those existing facts — **XTA set-propagation**
+(Tip & Palsberg, OOPSLA 2000; XTA +88% precision over RTA) for static langs over `signature`+hierarchy;
+**PyCG assignment-graph** (Salis et al., ICSE 2021; 99.2% prec, *ignores external libs*) for dynamic
+langs over `data_flow`. No re-parse, no LSP, no SCIP for the bulk. SCIP/LSP are demoted to the residual.
+
+## SCALE — fast on big/huge repos (research-backed: DEMAND-DRIVEN, not exhaustive)
+Exhaustively resolving every method-call edge per-edge is hours at scale (~5/sec × 500k edges). The
+proven answer is to NOT resolve the whole repo — two tiers:
+1. **Index-time (whole repo, ONCE, amortized, cached, parallel):** the cheap propagation above — CHA for
+   `self`/`super` (free over the hierarchy) + XTA/assignment-graph over the existing facts. Near-linear
+   (PyCG ~0.38 s / 1k LoC → ~6 min / 1M LoC), inside the existing parallel parse pass, written to
+   graph.db. **INCREMENTAL:** `-file` reindex (SHA-256 short-circuit, `incremental.go`) re-propagates only
+   the changed subgraph — the Bazel/Nx monorepo pattern (file-hash change detection → rebuild only what's
+   necessary; 60–80% CI-time reduction). Whole-repo cost paid once, never repeated unchanged.
+2. **Query-time (DEMAND-DRIVEN, scoped to the issue):** the expensive precision (LSP/type-inference for
+   the residual propagation can't statically resolve) runs ONLY on the issue-relevant unresolved edges —
+   the candidate subgraph the brief touches, not the repo. **Demand-driven analysis** (Heintze & Tardieu,
+   *Demand-Driven Pointer Analysis*, PLDI 2001 — "just enough computation for the query variables," proven
+   optimal, no wasted work; Sridharan & Bodík, PLDI 2006 — client-driven refinement, "response times
+   suitable for IDEs"). Cost = O(issue-relevant residual) — a handful of edges — **bounded, independent of
+   repo size.**
+
+**Net time:** index-time bulk = minutes, amortized + incremental; per-query residual = seconds, constant
+in repo size. No whole-repo per-edge LSP, no per-language SCIP toolchain. This is the only design that is
+**generalized** (2 algorithm classes over the uniform tree-sitter graph), **precision-first** (XTA/PyCG,
+correct-or-quiet), AND **scalable** (amortized propagation + demand-driven residual + incremental).
+
+**Research basis:** XTA/RTA — [Tip & Palsberg, OOPSLA 2000](http://web.cs.ucla.edu/~palsberg/paper/oopsla00.pdf);
+CHA (static-typed only) — Dean/Grove/Chambers, ECOOP 1995; PyCG (dynamic, ignores external libs) —
+[Salis et al., ICSE 2021](https://arxiv.org/abs/2103.00587); JS approx CG — Feldthaus et al., ICSE 2013;
+demand-driven — Heintze & Tardieu, PLDI 2001 + Sridharan & Bodík, PLDI 2006; incremental — Bazel/Nx
+file-hash scoping; uniform multilingual tree-sitter + TypeRegistry + stdlib stubs (Graphify/ACER 2023).
+
+---
+
+## Live GHA log streaming (ngrok SSE) — 2026-06-07
+
+`scripts/log_relay.py` tees a run to an ngrok-tunnelled SSE stream so a live GHA run is watchable with
+one `curl.exe -N '<url>'` — **no `gh api` polling**. Wired into `swebench_30task.yml`'s agent step
+(`… | tee full_run.log | python -u scripts/log_relay.py`); `${PIPESTATUS[0]}` (the wrapper exit) is
+unchanged. Enable by setting the `NGROK_AUTHTOKEN` repo secret (no-op passthrough without it — never
+breaks a run). **Full watch-protocol in `gt_trial.md` §3.1.** Harness note: read in **foreground bounded
+chunks** (`curl.exe -N --max-time 55 "<url>"`, Windows `curl.exe` not the PS `curl` alias), never one
+unbounded blocking call — the Bash/PS tool returns output only on command completion.
 
 ---
 

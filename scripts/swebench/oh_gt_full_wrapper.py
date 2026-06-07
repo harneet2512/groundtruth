@@ -696,6 +696,7 @@ class GTRuntimeConfig:
     action_count: int = 0  # PRF Iterative Checkpoints
     max_iter: int = 100
     scaffold_stripped: bool = False
+    base_commit: str = ""  # immutable task base SHA, captured pre-agent (contract_delta old-anchor)
     interaction_log: list[dict[str, Any]] = field(default_factory=list)
     instance_ref: Any = None
     _meta_instance_id: str = "global"
@@ -913,6 +914,10 @@ def _env_prefix(config: GTRuntimeConfig) -> str:
         # same single-file path → find_binary() needs the uploaded container binary,
         # which is NOT on PATH. Export it so the post-edit delta can index.
         f"export GT_INDEX_BINARY={_sh_single_quote(config.gt_index_bin)}; "
+        # contract_delta anchors "old" to the IMMUTABLE task base commit (not live HEAD,
+        # which the agent's own git checkout/commit can move). Forward the base SHA so the
+        # post-edit delta recovers the true pre-edit file even after the agent's git activity.
+        f"export GT_BASE_COMMIT={_sh_single_quote(getattr(config, 'base_commit', '') or '')}; "
         f"export GT_REPO_ROOT={_sh_single_quote(config.workspace_root)}; "
         "export GT_PYTHON=python3; "
         "export PYTHONPATH=/tmp:${PYTHONPATH:-}; "
@@ -1185,50 +1190,47 @@ def _maybe_fire_presubmit_verify(config: GTRuntimeConfig, obs: Any, orig_run_act
     if not db:
         return obs
 
-    tests: list[str] = []
+    # SANITIZED — LEGITIMACY (gt_gt: "GT touches ZERO tests; the assertions table is OFF-LIMITS").
+    # This function PREVIOUSLY read the `assertions` table (test-derived) to surface
+    # `pytest <test_file>::<test>` — which LEAKED the grader test names to the agent on 7/9 tasks
+    # (the leaked test files are the repo's own tests that test_patch later modifies, so naming them
+    # hands the agent the grader). The verify-reminder VALUE is kept, but it is now sourced from the
+    # edited function's behavioral CONTRACT (`properties` table, is_test=0) — never tests/assertions.
+    contracts: list[str] = []
     try:
         conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=3)
-        try:
-            conn.execute("SELECT 1 FROM assertions LIMIT 1")  # table exists?
-        except Exception:
-            conn.close()
-            config._presubmit_fired = True  # nothing to offer; don't retry
-            return obs
         seen: set[str] = set()
         for _ef in list(config._presubmit_edited_files)[:10]:
             _norm = _ef.replace("\\", "/").lstrip("/")
             rows = conn.execute(
-                "SELECT DISTINCT n.file_path, n.name FROM assertions a "
-                "JOIN nodes n ON a.test_node_id = n.id "
-                "JOIN nodes nt ON a.target_node_id = nt.id "
-                "WHERE nt.file_path LIKE ? ESCAPE '\\' AND a.target_node_id > 0 "
-                "LIMIT 5",
+                "SELECT DISTINCT p.kind, p.value FROM properties p "
+                "JOIN nodes n ON p.node_id = n.id "
+                "WHERE n.file_path LIKE ? ESCAPE '\\' AND n.is_test = 0 "
+                "AND p.kind IN ('return_shape', 'exception_type', 'guard_clause') "
+                "LIMIT 4",
                 (f"%{_escape_like(_norm)}",),
             ).fetchall()
-            for _fp, _nm in rows:
-                key = f"{_fp}::{_nm}"
-                if key not in seen:
-                    seen.add(key)
-                    tests.append(f"  pytest {_fp}::{_nm}")
+            for _k, _v in rows:
+                line = f"  {os.path.basename(_norm)}: {_k} = {str(_v)[:80]}"
+                if line not in seen:
+                    seen.add(line)
+                    contracts.append(line)
         conn.close()
     except Exception as _ps_exc:
         print(f"[GT_META] presubmit_verify_error: {_ps_exc}", flush=True)
         return obs
 
     config._presubmit_fired = True
-    if not tests:
-        # Under-confident: no verified test linkage. Stay silent (no guess).
-        print("[GT_META] presubmit_verify: no verified tests for edited files — silent", flush=True)
-        return obs
-
     text = (
-        "[GT_VERIFY] Tests covering your changed files "
-        f"({len(config._presubmit_edited_files)} edited) — run before finishing:\n"
-        + "\n".join(tests[:8])
+        "[GT_VERIFY] You edited "
+        f"{len(config._presubmit_edited_files)} file(s). Before finishing, run the project's own "
+        "test suite for the affected modules and confirm your change preserves the behavioral "
+        "contract"
+        + ((":\n" + "\n".join(contracts[:8])) if contracts else " (return shape, error handling).")
     )
     obs = append_observation(obs, "\n" + text)
     _emit_structured_event(config, "L6", "presubmit_verify", rendered_text=text)
-    print(f"[GT_DELIVERY] presubmit_verify: tests={len(tests)} edited={len(config._presubmit_edited_files)}", flush=True)
+    print(f"[GT_DELIVERY] presubmit_verify: contracts={len(contracts)} edited={len(config._presubmit_edited_files)} (NO test names — sanitized)", flush=True)
     return obs
 
 
@@ -1288,6 +1290,11 @@ def classify_tool_event(
 
     cls = _action_class(action)
     text = _action_text(action)
+    # Wrapper-issued internal actions (post_view/post_edit hooks, reindex, container
+    # queries) carry the _gt_internal marker (KINK #1). They must never be re-classified
+    # as agent post_view/post_edit events nor leak their command echo downstream.
+    if getattr(action, "_gt_internal", False):
+        return HookEvent("skip", reason="internal_gt_command")
     if _is_internal_gt_command(text):
         return HookEvent("skip", reason="internal_gt_command")
 
@@ -1300,6 +1307,8 @@ def classify_tool_event(
             return HookEvent("skip", reason="no_path")
         if not _is_source_path(path, source_exts):
             return HookEvent("skip", path=path, reason="non_source_ext")
+        if _is_test_path(path):  # LEGITIMACY: GT stays silent on test files the agent views
+            return HookEvent("skip", path=path, reason="test_path")
         return HookEvent("post_view", path=path)
 
     if cls in {"FileEditAction", "FileWriteAction"}:
@@ -1317,6 +1326,8 @@ def classify_tool_event(
             if verb in VIEW_EDITOR_VERBS:
                 if not _is_source_path(path, source_exts):
                     return HookEvent("skip", path=path, reason="non_source_ext")
+                if _is_test_path(path):  # LEGITIMACY: silent on test files
+                    return HookEvent("skip", path=path, reason="test_path")
                 return HookEvent("post_view", path=path)
             if verb not in MUTATING_EDITOR_VERBS:
                 return HookEvent("skip", path=path, reason=f"non_mutating_verb:{verb}")
@@ -1341,6 +1352,8 @@ def classify_tool_event(
         if read_path:
             if not _is_source_path(read_path, source_exts):
                 return HookEvent("skip", path=read_path, reason="non_source_ext")
+            if _is_test_path(read_path):  # LEGITIMACY: silent on test files
+                return HookEvent("skip", path=read_path, reason="test_path")
             return HookEvent("post_view", path=read_path)
 
     return HookEvent("skip", reason="non_hook_action")
@@ -1402,6 +1415,10 @@ def make_edit_hook_command_with_artifacts(
         cmd += f" --iteration-ratio={iteration_ratio:.2f}"
     # Always emit structured output — needed for LSP verification + telemetry
     cmd += " --structured-output"
+    # Capture the hook's STDERR ([GT_META] contract_delta_empty/skip reasons etc.) to a log
+    # so the in-container delta is DIAGNOSABLE: the evidence is on stdout (parsed/injected),
+    # the reasons are on stderr (otherwise lost). Stdout is unaffected — structured parsing OK.
+    cmd += " 2>>/tmp/gt_debug/hook_stderr.log"
     return cmd
 
 
@@ -1577,8 +1594,13 @@ def _detect_scope(
         if config.graph_db and orig_run_action:
             try:
                 _scope_escaped = _escape_like(primary_norm).replace("'", "''")
+                # Select resolution_method so the container fallback can relabel a
+                # name_match edge symmetrically with the host path (:1655-1662) via
+                # _SCOPE_REASON_LABELS. A hardcoded "calls functions here" launders a
+                # 1-candidate name_match as a verified call (correct-or-quiet: relabel
+                # the guess "(unverified)", never present it as a fact).
                 _scope_sql = (
-                    f"SELECT DISTINCT nsrc.file_path FROM edges e "
+                    f"SELECT DISTINCT nsrc.file_path, e.resolution_method FROM edges e "
                     f"JOIN nodes nt ON e.target_id = nt.id "
                     f"JOIN nodes nsrc ON e.source_id = nsrc.id "
                     f"WHERE nt.file_path LIKE '%{_scope_escaped}' ESCAPE '\\' "
@@ -1593,11 +1615,17 @@ def _detect_scope(
                     except (ValueError, TypeError):
                         _scope_parsed = []
                     for _row in _scope_parsed:
-                        _sf = _row[0] if isinstance(_row, (list, tuple)) else str(_row)
+                        if isinstance(_row, (list, tuple)):
+                            _sf = _row[0]
+                            _rmeth = _row[1] if len(_row) > 1 else None
+                        else:
+                            _sf = str(_row)
+                            _rmeth = None
                         _sf_norm = _sf.replace("\\", "/").lstrip("./").lstrip("/")
                         if _sf_norm not in seen:
                             seen.add(_sf_norm)
-                            scope.append({"file": _sf_norm, "reason": "calls functions here", "callers": "1+"})
+                            _reason = _SCOPE_REASON_LABELS.get(_rmeth, "graph-connected") if _rmeth else "graph-connected"
+                            scope.append({"file": _sf_norm, "reason": _reason, "callers": "1+"})
                     print(f"[GT_META] detect_scope: container_query fallback found {len(scope)} neighbors", flush=True)
             except Exception as _sq_exc:
                 print(f"[GT_META] detect_scope: container_query failed ({_sq_exc})", flush=True)
@@ -3144,16 +3172,44 @@ def _safe_truncate_evidence(text: str, max_chars: int) -> str:
     return f"{body}\n[+{omitted} chars omitted]"
 
 
-def _cmd_action(command: str, timeout: int = 30) -> Any:
+def _cmd_action(command: str, timeout: int = 30, *, internal: bool = False) -> Any:
     try:
         from openhands.events.action import CmdRunAction  # type: ignore[import]
 
         action = CmdRunAction(command=command)
         if hasattr(action, "set_hard_timeout"):
             action.set_hard_timeout(timeout)
-        return action
     except Exception:
-        return _FallbackCmdRunAction(command=command, timeout=timeout)
+        action = _FallbackCmdRunAction(command=command, timeout=timeout)
+    if internal:
+        _mark_internal_action(action)
+    return action
+
+
+def _mark_internal_action(action: Any) -> Any:
+    """Tag a wrapper-issued action as INTERNAL GT plumbing.
+
+    The wrapper runs its own hooks (post_view/post_edit), reindexes, container
+    queries, and file uploads through OH's ``runtime.run_action``. Those commands
+    must NEVER surface in the agent-visible event stream / ``output.jsonl`` history
+    (the [GT_STATUS]/command-echo leak — KINK #1, run13 ev61): they are GT internals,
+    not agent reasoning, and the actual evidence the agent should see is injected
+    separately via ``append_observation``/``prepend_observation`` on the agent's OWN
+    observation — so suppressing the internal command echo never drops evidence.
+
+    OH's ``runtime.run_action`` does not add to the EventStream by itself (the
+    controller owns stream writes for the agent's own actions), which is why the
+    current live path already shows zero leaks. This marker is the robust,
+    OH-version-agnostic belt-and-suspenders: any consumer (a stream filter,
+    ``classify_tool_event``, or a condenser) can detect ``_gt_internal`` and skip
+    recording, independent of OH's recording behavior. Best-effort: never raises if
+    the action object rejects attribute assignment.
+    """
+    try:
+        setattr(action, "_gt_internal", True)
+    except Exception:
+        pass
+    return action
 
 
 class _FallbackCmdRunAction:
@@ -3166,7 +3222,10 @@ class _FallbackCmdRunAction:
 
 
 def _run_internal(orig_run_action: Callable[[Any], Any], command: str, timeout: int = 30) -> str:
-    obs = orig_run_action(_cmd_action(command, timeout))
+    # internal=True tags the action as GT plumbing so the COMMAND/[GT_STATUS] echo
+    # never leaks into the agent-visible stream (KINK #1). Evidence reaches the agent
+    # only through append_observation on its own observation, so this is leak-only.
+    obs = orig_run_action(_cmd_action(command, timeout, internal=True))
     return getattr(obs, "content", "") or getattr(obs, "stdout", "") or ""
 
 
@@ -3892,20 +3951,37 @@ def _repromote_after_reindex(
     if "GT_LSP_PRESENT" not in _have:
         return f"skip:lsp_absent({_server_cmd})"
 
-    # Re-promote, scoped to the edited file's source_file. resolve.py filters
-    # ambiguous edges by language; --root anchors LSP at the repo root. We bound
-    # with timeout + non-fatal so a slow/failed LSP can never break the turn.
+    # Re-promote, DEMAND-DRIVEN: scope the LSP precision pass to the edited file's
+    # source_file (the issue-relevant residual), not the whole graph. Previously this
+    # passed NEITHER --source-files NOR --max-edges, so resolve.py fell back to its
+    # default 500-edge whole-graph cap — a blind machine-gun pass that, on a big repo,
+    # cleans ~7% of name_match method edges and leaves the agent's method map mostly
+    # false (CLAUDE.md, conan-17123). --source-files=<edited file> makes the pass run
+    # ONLY on the edges the agent's own edit just touched (Heintze & Tardieu, PLDI'01,
+    # demand-driven analysis: "just enough computation for the query variables"). Cost
+    # = O(issue-relevant residual), bounded + independent of repo size. resolve.py
+    # accepts a comma-separated list OR a path; we pass the single edited file directly.
+    # The LSP_METRICS contract line resolve.py now prints lets us VERIFY the pass was
+    # demand-scoped (scoped_source_files>0) and measure resolved/residual.
     promote_cmd = (
         _env_prefix(config)
         + f"timeout 120 python3 -m groundtruth.resolve resolve "
         + f"--db={_sh_single_quote(config.graph_db)} "
         + f"--root={_sh_single_quote(config.workspace_root)} "
-        + f"--lang={lang} --resolve 2>&1 || echo GT_REPROMOTE_WARN"
+        + f"--lang={lang} --source-files={_sh_single_quote(edited_rel_path)} "
+        + f"--resolve 2>&1 || echo GT_REPROMOTE_WARN"
     )
     out = _run_internal(orig_ra, promote_cmd, 130)
+    # Surface the demand-driven resolution fraction (resolved/residual) + whether the
+    # pass was actually scoped, straight from resolve.py's machine-parseable contract
+    # line — so a capped/un-scoped pass is detectable from the run telemetry.
+    _lsp_metrics = ""
+    for _ln in out.splitlines():
+        if _ln.startswith("LSP_METRICS "):
+            _lsp_metrics = _ln.strip()
     if "GT_REPROMOTE_WARN" in out:
-        return f"warn:repromote_nonzero({lang})"
-    return f"ok:repromoted({lang})"
+        return f"warn:repromote_nonzero({lang})" + (f" [{_lsp_metrics}]" if _lsp_metrics else "")
+    return f"ok:repromoted({lang})" + (f" [{_lsp_metrics}]" if _lsp_metrics else "")
 
 
 def install_graph_and_hook(runtime: Any, config: GTRuntimeConfig) -> list[str]:
@@ -3918,6 +3994,29 @@ def install_graph_and_hook(runtime: Any, config: GTRuntimeConfig) -> list[str]:
             host_index = str(cand)
 
     orig_ra = runtime.run_action
+
+    # Capture the IMMUTABLE base commit NOW (pre-agent, testbed still at base) so the
+    # post-edit contract_delta anchors "old" to it, not live HEAD (which the agent's own
+    # git checkout/commit can move — the run7 in-container silence). Prefer instance
+    # metadata; fall back to git rev-parse HEAD in the workspace.
+    if not config.base_commit:
+        bc = ""
+        _inst = getattr(config, "instance_ref", None)
+        if isinstance(_inst, dict):
+            bc = (_inst.get("base_commit") or "").strip()
+        elif _inst is not None:
+            bc = (getattr(_inst, "base_commit", "") or "").strip()
+        if not bc:
+            try:
+                _rp = _run_internal(orig_ra, f"git -C {config.workspace_root} rev-parse HEAD", 15)
+                bc = _rp.strip().splitlines()[-1].strip() if _rp.strip() else ""
+            except Exception:
+                bc = ""
+        if len(bc) >= 7 and all(c in "0123456789abcdefABCDEF" for c in bc[:40]):
+            config.base_commit = bc
+            print(f"[GT_META] base_commit captured (contract_delta old-anchor): {bc[:12]}", flush=True)
+        else:
+            print(f"[GT_META] base_commit capture FAILED (delta falls back to HEAD): {bc[:40]!r}", flush=True)
 
     copy_to_ok = False
     b64_ok = False
@@ -4440,167 +4539,6 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                             _register_pending_next_action(config, _goku_l5b_eid or "", _goku_d.next_action_type or "", _goku_d.next_action_file or "")
                 except Exception as gk_exc:
                     print(f"[GT_META] L5 goku error on CmdRunAction: {gk_exc}", flush=True)
-
-            # Grep Intercept: agent searched for a symbol — append its callers.
-            # This is CONTEXTUAL augmentation (agent's own search focus), not unsolicited.
-            # Decay detail level instead of hard stop: full callers+code -> file-only -> count-only
-            if (
-                not _GT_BASELINE
-                and re.search(r"\b(grep|rg)\b", act_text)
-            ):
-                _gi_count = config._grep_intercept_count
-                if _gi_count < 5:
-                    # Full callers with code snippets
-                    _gi_limit = 5
-                    _gi_detail = "full"
-                elif _gi_count < 10:
-                    # File names only, no code
-                    _gi_limit = 3
-                    _gi_detail = "files_only"
-                else:
-                    # Count only
-                    _gi_limit = 1
-                    _gi_detail = "count_only"
-                _grep_sym = _extract_grep_symbol(act_text)
-                # Honor the agent's OWN search scope: when it grepped a symbol inside
-                # a specific file, resolving the bare name repo-wide (and surfacing a
-                # most-called homonym from an unrelated file) is harmful. Path-scope
-                # the lookup; if the symbol isn't defined in the grepped file, stay
-                # silent rather than emit a wrong-file homonym (correct-or-quiet).
-                _grep_scope = _extract_grep_file_scope(act_text)
-                _grep_db = getattr(config, "_host_graph_db", "") or ""
-                if _grep_sym and (_grep_db and os.path.exists(_grep_db)):
-                    # Host-side graph.db — ego-graph for full detail, flat for lighter modes
-                    # RepoGraph ICLR 2025: agent searches → gets ego-graph as response
-                    if _gi_detail == "full":
-                        try:
-                            from groundtruth.graph.ego import ego_graph as _ego_grep
-                            # Pass the grepped file so the ego center binds to the
-                            # symbol IN that file, not a repo-wide homonym.
-                            _eg = _ego_grep(
-                                _grep_db, _grep_sym,
-                                file_path=_grep_scope or "",
-                                k=1, min_confidence=0.9,
-                            )
-                            # If the agent scoped to a file but the center landed in a
-                            # different file, the grepped file has no such symbol —
-                            # stay silent instead of surfacing the homonym.
-                            _ego_offscope = bool(
-                                _grep_scope and _eg.center
-                                and not _same_grep_scope(_eg.center.file_path, _grep_scope)
-                            )
-                            if _eg.center and len(_eg.callers) > 0 and not _ego_offscope:
-                                _ego_text = _eg.render(max_tokens=150)
-                                _grep_evidence = f"\n[GT] {_grep_sym}:\n{_ego_text}"
-                                obs = append_observation(obs, _grep_evidence)
-                                config._grep_intercept_count += 1
-                                print(f"[GT_DELIVERY] grep_intercept_ego: symbol={_grep_sym} scope={_grep_scope or '-'} callers={len(_eg.callers)} fire={config._grep_intercept_count}", flush=True)
-                                # Skip flat caller path below
-                                _grep_sym = None
-                            elif _ego_offscope:
-                                # Scoped grep, no in-file definition -> silence.
-                                print(f"[GT_META] grep_intercept_ego: symbol={_grep_sym} off-scope (scope={_grep_scope}) — silent", flush=True)
-                                _grep_sym = None
-                        except Exception as _ego_grep_exc:
-                            print(f"[GT_META] grep_ego_fallback: {_ego_grep_exc}", flush=True)
-                    if _grep_sym:
-                        try:
-                            # Path-scoped flat fallback. When the agent grepped a
-                            # specific file, _grep_intercept_callers constrains the
-                            # callee definition to that file and returns [] (silence)
-                            # if the symbol isn't defined there — never a homonym.
-                            _grep_callers = _grep_intercept_callers(
-                                _grep_db, _grep_sym,
-                                file_scope=_grep_scope,
-                                limit=_gi_limit, min_conf=0.6,
-                            )
-                            if _grep_scope and not _grep_callers:
-                                # Scoped grep with no in-file match -> stay silent.
-                                print(f"[GT_META] grep_intercept: symbol={_grep_sym} scope={_grep_scope} — no in-file def, silent", flush=True)
-                                raise _GrepSilent()
-                            _grep_total = len(_grep_callers)
-                            if _grep_callers:
-                                _caller_line_parts: list[str] = []
-                                if _gi_detail == "count_only":
-                                    _caller_line_parts.append(f"  {_grep_total} caller(s) across codebase")
-                                else:
-                                    for _cfile, _cline in _grep_callers:
-                                        if _gi_detail == "full":
-                                            _code = ""
-                                            try:
-                                                _src_path = os.path.join(config.workspace_root or "/workspace", _cfile)
-                                                with open(_src_path, encoding="utf-8", errors="ignore") as _sf:
-                                                    for _li, _ln in enumerate(_sf, 1):
-                                                        if _li == _cline:
-                                                            _code = _ln.strip()[:80]
-                                                            break
-                                            except OSError:
-                                                pass
-                                            _caller_line_parts.append(
-                                                f"  {_cfile}:{_cline}" + (f" `{_code}`" if _code else "")
-                                            )
-                                        else:
-                                            _caller_line_parts.append(f"  {_cfile}:{_cline}")
-                                _caller_lines = "\n".join(_caller_line_parts)
-                                _scope_tag = f" in {_grep_scope}" if _grep_scope else ""
-                                _grep_evidence = f"\n[GT] Callers of '{_grep_sym}'{_scope_tag}:\n{_caller_lines}"
-                                obs = append_observation(obs, _grep_evidence)
-                                config._grep_intercept_count += 1
-                                print(
-                                    f"[GT_DELIVERY] grep_intercept: symbol={_grep_sym} "
-                                    f"scope={_grep_scope or '-'} callers={len(_grep_callers)} "
-                                    f"detail={_gi_detail} fire={config._grep_intercept_count}",
-                                    flush=True,
-                                )
-                            else:
-                                print(f"[GT_META] grep_intercept: symbol={_grep_sym} callers=0 (no high-confidence edges)", flush=True)
-                        except _GrepSilent:
-                            pass
-                        except Exception as _grep_exc:
-                            print(f"[GT_META] grep_intercept_error: {_grep_exc}", flush=True)
-                elif _grep_sym and config.graph_db:
-                    # Fallback: query inside container via _container_query
-                    try:
-                        import json as _j_grep
-                        # Parameterized (CLAUDE.md: no f-string SQL). Path-scope the
-                        # callee definition to the grepped file so a repo-wide homonym
-                        # is never surfaced for a file-scoped grep; the scope/symbol
-                        # values flow as BOUND params (a path with a single quote like
-                        # a'b/c.py is injection-safe, not hand-escaped).
-                        _grep_sql, _grep_params = _build_grep_intercept_query(
-                            _grep_sym,
-                            file_scope=_grep_scope or None,
-                            min_conf=0.6,
-                            limit=_gi_limit,
-                        )
-                        _grep_raw = _container_query(
-                            orig_run_action, config.graph_db, _grep_sql,
-                            params_json=_j_grep.dumps(_grep_params),
-                        )
-                        _grep_rows = _j_grep.loads(_grep_raw)
-                        if _grep_rows:
-                            _caller_line_parts_cq: list[str] = []
-                            if _gi_detail == "count_only":
-                                _caller_line_parts_cq.append(f"  {len(_grep_rows)}+ caller(s) across codebase")
-                            else:
-                                for _row in _grep_rows:
-                                    _fp = _row[0] if isinstance(_row, (list, tuple)) else ""
-                                    _sl = _row[1] if isinstance(_row, (list, tuple)) and len(_row) > 1 else 0
-                                    _caller_line_parts_cq.append(f"  {_fp}:{_sl}")
-                            _caller_lines_cq = "\n".join(_caller_line_parts_cq)
-                            _scope_tag_cq = f" in {_grep_scope}" if _grep_scope else ""
-                            _grep_evidence = f"\n[GT] Callers of '{_grep_sym}'{_scope_tag_cq}:\n{_caller_lines_cq}"
-                            obs = append_observation(obs, _grep_evidence)
-                            config._grep_intercept_count += 1
-                            print(
-                                f"[GT_DELIVERY] grep_intercept(container): symbol={_grep_sym} "
-                                f"callers={len(_grep_rows)} detail={_gi_detail} fire={config._grep_intercept_count}",
-                                flush=True,
-                            )
-                        else:
-                            print(f"[GT_META] grep_intercept(container): symbol={_grep_sym} callers=0", flush=True)
-                    except Exception as _grep_cq_exc:
-                        print(f"[GT_META] grep_intercept_container_error: {_grep_cq_exc}", flush=True)
 
         # Decision 34: Emit GTAgentEvent at action boundary
         _emit_agent_event(config, action, event, _action_file)
@@ -5524,6 +5462,14 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                             "--file", _pe_file,
                             "--mode", "post_edit",
                             "--iteration-ratio", str(_l3_ratio_live),
+                            # --structured-output is what makes post_edit emit the
+                            # __GT_STRUCTURED__ accumulator (incl. CONTRACT_DELTA_DIAG).
+                            # The in-container command builders add it (lines ~1377/1409);
+                            # the host fallback MUST too, or _accum=None in main() (post_edit
+                            # ~4296), the diag is never appended (post_edit ~3585), nothing is
+                            # printed (post_edit ~4337), and the diag-extraction below (~5760)
+                            # finds no __GT_STRUCTURED__ — exactly the run12 symptom.
+                            "--structured-output",
                         ]
                         _pe_old_argv = sys.argv
                         _pe_old_stdout = sys.stdout
@@ -5721,6 +5667,23 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 if has_evidence:
                     # Track last GT action for rescue governor stuck detection
                     config._last_gt_action = config.action_count
+                    # DIAG: surface the contract_delta reason (carried in the
+                    # __GT_STRUCTURED__ accumulator) to the HOST log before stripping it —
+                    # the hook's stderr is in-container and lost, so this is the only way to
+                    # see WHY the delta was quiet in a live run.
+                    if "__GT_STRUCTURED__" in hook_body:
+                        try:
+                            _struct_raw = hook_body.split("__GT_STRUCTURED__", 1)[1].strip().splitlines()[0]
+                            for _it in json.loads(_struct_raw):
+                                if isinstance(_it, dict) and _it.get("family") == "CONTRACT_DELTA_DIAG":
+                                    print(
+                                        f"[GT_DELIVERY] contract_delta_diag: reason={_it.get('reason')} "
+                                        f"delivered={_it.get('delivered')} n_lines={_it.get('n_lines')} "
+                                        f"repo_root={_it.get('repo_root')} file={_it.get('file')}",
+                                        flush=True,
+                                    )
+                        except Exception as _cdd_exc:
+                            print(f"[GT_META] contract_delta_diag_parse_error: {_cdd_exc}", flush=True)
                     # Strip __GT_STRUCTURED__ JSON from agent-visible text (telemetry only)
                     if "__GT_STRUCTURED__" in hook_body:
                         hook_body = hook_body.split("__GT_STRUCTURED__")[0].strip()
@@ -6268,6 +6231,21 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         try:
                             _enorm = _edit_norm_leg or (rel_p or "").replace("\\", "/").lstrip("./").lstrip("/")
                             _host_db = getattr(config, "_host_graph_db", "")
+                            # DETERMINISTIC gate (shared callee-path clause): a phantom
+                            # name_match caller is NOT a fact. Replace the >=0.5 numeric
+                            # floor — which admits name_match — with the shared
+                            # _edge_filter_for_db categorical clause (resolution_method in
+                            # the deterministic set / CERTIFIED|CANDIDATE trust, name_match
+                            # excluded). Resolved against whichever db is reachable; legacy
+                            # numeric fallback only when the categorical schema is absent.
+                            _scope_db_for_ef = _host_db if (_host_db and os.path.exists(_host_db)) else (
+                                config.graph_db if os.path.exists(config.graph_db) else ""
+                            )
+                            try:
+                                from groundtruth.hooks.post_edit import _edge_filter_for_db as _scope_efd
+                                _scope_ef = _scope_efd(_scope_db_for_ef, alias="e") if _scope_db_for_ef else "COALESCE(e.confidence, 0.5) >= 0.7"
+                            except Exception:
+                                _scope_ef = "COALESCE(e.confidence, 0.5) >= 0.7"
                             if _host_db and os.path.exists(_host_db):
                                 import sqlite3 as _sq_scope
                                 _sc = _sq_scope.connect(_host_db)
@@ -6276,7 +6254,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                     "JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS' "
                                     "JOIN nodes nsrc ON e.source_id = nsrc.id "
                                     "WHERE nt.file_path LIKE ? ESCAPE '\\' AND nsrc.file_path NOT LIKE ? ESCAPE '\\' "
-                                    "AND COALESCE(e.confidence, 0.5) >= 0.5 LIMIT 5",
+                                    f"AND {_scope_ef} LIMIT 5",
                                     (f"%{_escape_like(_enorm)}", f"%{_escape_like(_enorm)}"),
                                 ).fetchall()
                                 _sc.close()
@@ -6289,7 +6267,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                     f"JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS' "
                                     f"JOIN nodes nsrc ON e.source_id = nsrc.id "
                                     f"WHERE nt.file_path LIKE '%{_enorm_esc}' ESCAPE '\\' AND nsrc.file_path NOT LIKE '%{_enorm_esc}' ESCAPE '\\' "
-                                    f"AND COALESCE(e.confidence, 0.5) >= 0.5 LIMIT 5",
+                                    f"AND {_scope_ef} LIMIT 5",
                                 )
                                 _caller_files = _j_scope.loads(_raw)
                             if len(_caller_files) >= 2:
@@ -7500,8 +7478,14 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                                 ).fetchall()
                                 for _dr in _dn_rows:
                                     _is_cls = _dr["label"] in ("Class", "Interface", "Struct")
+                                    # Symmetric caller count: gate this rescue COUNT with
+                                    # the SAME 0.7 floor the per-file path uses (:7384-7386)
+                                    # so both sources count callers identically — an
+                                    # ungated COUNT admits name_match phantoms and feeds an
+                                    # inflated caller number into _comp_score.
                                     _dr_callers = _l1_conn.execute(
-                                        "SELECT COUNT(*) FROM edges WHERE target_id = ? AND type = 'CALLS'",
+                                        "SELECT COUNT(*) FROM edges WHERE target_id = ? AND type = 'CALLS' "
+                                        "AND COALESCE(confidence, 0.5) >= 0.7",
                                         (_dr["id"],),
                                     ).fetchone()[0]
                                     _dr_sloc = max(0, (_dr["end_line"] or 0) - (_dr["start_line"] or 0))

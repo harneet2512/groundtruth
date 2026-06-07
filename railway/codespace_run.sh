@@ -63,6 +63,11 @@ IMG_NS="${GT_IMG_NS:-starryzhang}"
 LOGFILE="${CSOUT_LOG:-/tmp/gt_debug/full_run.log}"
 CSOUT_DIR="${REPO}/.csout"
 
+# Clear per-run state FIRST: /tmp/gt_debug holds the belief ledger + layer events,
+# and the router recalls prior deliveries from there — without clearing, a stale
+# delta from an EARLIER run of the same task gets re-shown ("[RECALL]") in this run
+# (observed run4 flood recalled into run5). Each run must start clean.
+rm -rf /tmp/gt_debug /tmp/results 2>/dev/null
 mkdir -p /tmp/gt_debug /tmp/results "${CSOUT_DIR}"
 
 echo "==============================================================="
@@ -129,6 +134,15 @@ else
   fi
 fi
 
+# Semantic embedder (gt_trial §1): bake the e5-small-v2 ONNX model so semantic localization is
+# ON (no torch). Idempotent — setup_models.py skips if present. Required for GT_REQUIRE_EMBEDDER.
+if [ ! -f "${REPO}/models/e5-small-v2/model.onnx" ]; then
+  pip install -q onnxruntime tokenizers huggingface_hub 2>/dev/null || echo "WARN: onnxruntime install failed (semantic will fail-closed)"
+  python "${REPO}/scripts/setup_models.py" 2>&1 | tail -3 || echo "WARN: embedder bake failed"
+else
+  echo "embedder model present at ${REPO}/models/e5-small-v2"
+fi
+
 # pyright (deterministic, warn-don't-fail) — setup-eval lines 61-68.
 # Needed for the C6 offline LSP promotion pass in preindex-promote.
 if python -c "import pyright" 2>/dev/null || command -v pyright >/dev/null 2>&1; then
@@ -145,7 +159,7 @@ echo "=== [3] Build gt-index ==="
   cd "${REPO}/gt-index"
   # -ldflags version stamp mirrors GHA; harmless if git rev-parse fails.
   GTVER="$(git -C "${REPO}" rev-parse --short HEAD 2>/dev/null || echo dev)"
-  CGO_ENABLED=1 go build -ldflags "-X main.version=${GTVER}" -o "${GT_INDEX_BIN}" ./cmd/gt-index/
+  CGO_ENABLED=1 go build -tags sqlite_fts5 -ldflags "-X main.version=${GTVER}" -o "${GT_INDEX_BIN}" ./cmd/gt-index/
   chmod +x "${GT_INDEX_BIN}"
 )
 "${GT_INDEX_BIN}" --version 2>/dev/null || echo "gt-index built (no --version flag)"
@@ -223,8 +237,13 @@ if [ -n "${CONTAINER_ID}" ]; then
   rm -rf /tmp/testbed_src; mkdir -p /tmp/testbed_src
   docker cp "${CONTAINER_ID}:/testbed/." /tmp/testbed_src/ 2>/dev/null || echo "WARN: could not copy /testbed"
   docker rm "${CONTAINER_ID}" >/dev/null 2>&1 || true
+  # SANDBOX (legitimacy: "GT touches ZERO tests"): strip the testbed's TEST files/dirs from GT's
+  # source view BEFORE indexing -> zero test nodes + empty assertions table -> no layer can surface
+  # a test name. Proven: assertions 6709->0, is_test 4553->0. Agent's container keeps the full repo.
+  find /tmp/testbed_src -type d \( -name tests -o -name test -o -name __tests__ -o -name testing -o -name spec \) -prune -exec rm -rf {} + 2>/dev/null || true
+  find /tmp/testbed_src -type f \( -name 'test_*.py' -o -name '*_test.py' -o -name 'conftest.py' -o -name '*_test.go' -o -name '*.test.js' -o -name '*.test.ts' -o -name '*.spec.js' -o -name '*.spec.ts' -o -name '*_spec.rb' -o -name '*Test.java' \) -delete 2>/dev/null || true
   if [ -d /tmp/testbed_src ] && [ -n "$(find /tmp/testbed_src -name '*.py' -o -name '*.go' -o -name '*.js' -o -name '*.ts' -o -name '*.java' -o -name '*.rs' 2>/dev/null | head -1)" ]; then
-    echo "Indexing /tmp/testbed_src -> ${GT_PREINDEX_DB} ..."
+    echo "Indexing /tmp/testbed_src (tests stripped — source-only sandbox) -> ${GT_PREINDEX_DB} ..."
     "${GT_INDEX_BIN}" -root /tmp/testbed_src -output "${GT_PREINDEX_DB}" 2>&1 | tail -5 || echo "WARN: gt-index pre-index failed (non-fatal)"
     if [ -f "${GT_PREINDEX_DB}" ]; then
       PREINDEX_OK=1
@@ -346,9 +365,32 @@ export DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY}"
 if [ "${PREINDEX_OK}" = "1" ] && [ -f "${GT_PREINDEX_DB}" ]; then
   export GT_PREBUILT_GRAPH_DB="${GT_PREINDEX_DB}"
   echo "GT_PREBUILT_GRAPH_DB=${GT_PREINDEX_DB}"
+  # HOST-PRIMARY brief (oh_gt_full_wrapper.py:7125): the IN-CONTAINER brief runner has NO
+  # onnxruntime/e5 model -> semantic SILENTLY 0 (run14: "No semantic embedder ... scores will be 0"),
+  # which kills run_v74 anchoring and the localization fixes. Point the wrapper at the HOST source +
+  # HOST graph.db so the brief is generated on the HOST (where GT_MODELS_ROOT + onnxruntime exist),
+  # making semantic REAL and GT_REQUIRE_EMBEDDER actually fail-closed.
+  export GT_HOST_SRC_ROOT="/tmp/testbed_src"
+  export GT_HOST_GRAPH_DB="${GT_PREINDEX_DB}"
+  echo "GT_HOST_SRC_ROOT=/tmp/testbed_src GT_HOST_GRAPH_DB=${GT_PREINDEX_DB} (host-primary brief -> semantic ON)"
 else
   echo "GT_PREBUILT_GRAPH_DB not set — wrapper rebuilds graph.db at runtime (GT_REBUILD_L1=1)"
 fi
+
+# --- gt_trial §1: FULL-STACK environment (semantic ON + FTS5) or ABORT on degrade ---
+# Semantic is the BRIEFING-critical invariant: a half-on pipeline (W_SEM=0) gives worthless
+# localization numbers. The e5-small-v2 ONNX model is baked at ${REPO}/models (no torch).
+export GT_MODELS_ROOT="${GT_MODELS_ROOT:-${REPO}/models}"
+export GT_FORCE_ONNX_EMBEDDER="${GT_FORCE_ONNX_EMBEDDER:-1}"   # both halves on the identical ONNX surface
+export GT_REQUIRE_EMBEDDER="${GT_REQUIRE_EMBEDDER:-1}"         # RAISE if semantic would zero (no silent W_SEM=0)
+export GT_REQUIRE_FTS5="${GT_REQUIRE_FTS5:-1}"                 # nodes_fts built+populated+MATCH or gt-index aborts
+# Strictest gates (LSP launch/resolve + per-dimension full-stack incl lsp_edges/assertions) are
+# opt-in via GT_STRICT=1 — arm once the in-container LSP surface + those dimensions are confirmed.
+if [ "${GT_STRICT:-0}" = "1" ]; then
+  export GT_REQUIRE_LSP=1
+  export GT_REQUIRE_FULL_STACK=1
+fi
+echo "ENV gates: EMBEDDER=on(ONNX) FTS5=on STRICT=${GT_STRICT:-0} MODELS_ROOT=${GT_MODELS_ROOT}"
 
 # arm gating (canary "Run agent" lines 233-238): v2_live => GT arm, no GT_BASELINE.
 if [ "${BASELINE_FLAG}" = "true" ]; then
@@ -404,5 +446,60 @@ cp /tmp/gt_debug/gt_hooks.log "${CSOUT_DIR}/" 2>/dev/null || true
 [ -f "${GT_PREINDEX_DB}" ] && cp "${GT_PREINDEX_DB}" "${CSOUT_DIR}/gt_prebuilt.db" 2>/dev/null || true
 
 echo "interaction_files=$(ls /tmp/gt_interactions_*.jsonl 2>/dev/null | wc -l)"
+
+# ---------------------------------------------------------------------------
+# (9) OFFICIAL EVAL — Microsoft SWE-bench-Live harness -> RESOLVED verdict.
+#     gt_trial §2: a run with no verdict instrument is unfalsifiable -> not allowed.
+#     CARDINAL: never a custom eval. Set GT_EVAL=0 to skip (e.g. patchless smoke).
+#     Set GT_EVAL_GOLD=1 to grade the GOLD patch instead (instrument self-test).
+# ---------------------------------------------------------------------------
+if [ "${GT_EVAL:-1}" = "1" ]; then
+  echo "=== [9] Official eval (SWE-bench-Live harness) ==="
+  EVAL_RUN_ID="gt_$(echo "${TASK}" | tr -cd 'a-zA-Z0-9')_$(date +%s)"
+  PREDS="/tmp/gt_predictions.jsonl"
+  if [ "${GT_EVAL_GOLD:-0}" = "1" ]; then
+    PREDS_ARG="gold"; echo "[9] grading GOLD patch (instrument self-test)"
+  else
+    PREDS_ARG="${PREDS}"
+    python - "${TASK}" "${PREDS}" <<'PYEOF'
+import json, sys, glob
+task, preds = sys.argv[1], sys.argv[2]
+patch = ""
+for f in glob.glob("/tmp/results/**/output.jsonl", recursive=True):
+    for line in open(f, encoding="utf-8"):
+        try: d = json.loads(line)
+        except Exception: continue
+        if d.get("instance_id") == task or ("test_result" in d):
+            patch = (d.get("test_result") or {}).get("git_patch", "") or d.get("git_patch", "") or patch
+with open(preds, "w", encoding="utf-8") as w:
+    w.write(json.dumps({"instance_id": task, "model_name_or_path": "gt", "model_patch": patch}) + "\n")
+print(f"[9] predictions: instance={task} patch_len={len(patch)}")
+PYEOF
+  fi
+  ( cd "${REPO}" && python -m swebench.harness.run_evaluation \
+      --dataset_name "${DATASET}" \
+      --split "${SPLIT}" \
+      --instance_ids "${TASK}" \
+      --namespace "${IMG_NS}" \
+      --predictions_path "${PREDS_ARG}" \
+      --max_workers 1 \
+      --run_id "${EVAL_RUN_ID}" 2>&1 | tee -a "${LOGFILE}" ) || echo "WARN: eval harness returned nonzero"
+  REPORT="$(find "${REPO}" /tmp -maxdepth 3 -name "*${EVAL_RUN_ID}*.json" 2>/dev/null | head -1)"
+  if [ -n "${REPORT}" ] && [ -f "${REPORT}" ]; then
+    cp "${REPORT}" "${CSOUT_DIR}/report.json" 2>/dev/null || true
+    python - "${REPORT}" "${TASK}" <<'PYEOF'
+import json, sys
+r = json.load(open(sys.argv[1])); task = sys.argv[2]
+resolved = (task in (r.get("resolved_ids") or [])) or (r.get("resolved_instances", 0) >= 1)
+print(f"=== EVAL VERDICT === task={task} RESOLVED={bool(resolved)}")
+keys = ('resolved_instances','unresolved_instances','error_instances','completed_instances',
+        'total_instances','resolved_ids','unresolved_ids','error_ids')
+print("report:", json.dumps({k: r[k] for k in keys if k in r}))
+PYEOF
+  else
+    echo "=== EVAL VERDICT === report NOT FOUND for run_id=${EVAL_RUN_ID} (eval failed — check log above) ==="
+  fi
+fi
+
 echo "=== DONE. Artifacts in ${CSOUT_DIR} ==="
 ls -la "${CSOUT_DIR}" 2>/dev/null || true

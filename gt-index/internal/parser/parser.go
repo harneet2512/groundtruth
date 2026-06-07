@@ -82,11 +82,15 @@ type CallRef struct {
 // Used by resolver Strategy 1.96 for x.method() resolution.
 type AssignmentRef struct {
 	VarName       string // LHS variable name ("x", "self.client")
-	TypeName      string // RHS class/function name being called ("HttpClient", "Session")
+	TypeName      string // RHS class name (constructor) OR callee name (when ViaReturn)
 	TypeQualified string // full qualified RHS if available ("requests.Session")
 	Scope         string // enclosing function name (empty = module level)
 	File          string
 	Line          int
+	// ViaReturn marks x = factory() (non-constructor call): TypeName holds the CALLEE
+	// name, and the resolver bridges through that callee's declared return type
+	// (PyCG Rule 4 / JARVIS return-type chaining) rather than treating it as a class.
+	ViaReturn bool
 }
 
 // ImportRef is a parsed import statement — maps an imported name to its source module.
@@ -767,6 +771,25 @@ func extractAssignments(node *sitter.Node, sf walker.SourceFile, src []byte, res
 							File:          sf.Path,
 							Line:          int(node.StartPoint().Row) + 1,
 						})
+					} else {
+						// PyCG Rule 4 / JARVIS return-type chaining: x = factory() where the
+						// callee is a (non-constructor) function — record the CALLEE name with
+						// ViaReturn so the resolver bridges through factory's declared return
+						// type (e.g. `x = get_client(); x.run()` → return type of get_client).
+						// Lowercase simple name only (capitalized was handled above); skip
+						// qualified receiver-method calls (obj.method()) — their type is
+						// unknown here, left for the demand-driven residual.
+						if simple[0] >= 'a' && simple[0] <= 'z' && (qualified == "" || qualified == simple) {
+							result.Assignments = append(result.Assignments, AssignmentRef{
+								VarName:       lhsName,
+								TypeName:      simple,
+								TypeQualified: qualified,
+								Scope:         scopeName,
+								File:          sf.Path,
+								Line:          int(node.StartPoint().Row) + 1,
+								ViaReturn:     true,
+							})
+						}
 					}
 				}
 			}
@@ -897,11 +920,35 @@ func extractCalleeInfo(callNode *sitter.Node, src []byte) (string, string) {
 		if simpleName == "" {
 			simpleName = qualified
 		}
+		// T2 (parser-level): a method call on a LITERAL receiver — ",".join(), [..].append(),
+		// {..}.get() — is a builtin (str/list/dict/...) call, NOT an internal graph edge. Skip it
+		// so it never becomes a name_match guess to an arbitrary same-named internal method.
+		// (The dominant garbage: conan-17123 join×1106, split×122 are string-literal receivers.)
+		if recv := funcNode.Child(0); recv != nil && isLiteralReceiver(recv.Type()) {
+			return "", ""
+		}
 		return simpleName, qualified
 	}
 
 	content := funcNode.Content(src)
 	return content, content
+}
+
+// isLiteralReceiver reports whether a tree-sitter node type is a literal value
+// (string / list / dict / set / number / bool / etc.) across Python, JS/TS, Go, Rust.
+// A method call whose receiver is a literal is a stdlib/builtin call, never an
+// internal call-graph edge — so it must not be resolved to a same-named internal method.
+func isLiteralReceiver(t string) bool {
+	switch t {
+	case "string", "concatenated_string", "raw_string_literal", "interpreted_string_literal",
+		"template_string", "char_literal", "byte_string", "string_literal", "rune_literal",
+		"list", "dictionary", "set", "tuple", "list_literal", "dictionary_literal",
+		"array", "object", "composite_literal", "array_literal",
+		"integer", "float", "integer_literal", "float_literal", "number",
+		"true", "false", "none", "null", "nil", "boolean", "boolean_literal":
+		return true
+	}
+	return false
 }
 
 func extractFieldText(node *sitter.Node, fieldName string, src []byte) string {
@@ -1757,6 +1804,23 @@ func extractProperties(node *sitter.Node, sf walker.SourceFile, src []byte, resu
 					Confidence: 1.0,
 				})
 			}
+		}		// Implicit return: idiomatic Rust returns the body block's TAIL EXPRESSION with no
+		// `return` keyword, which countReturns (keyed to return_statement) cannot see. Capture it
+		// so an edit that changes the returned value produces real return_shape drift.
+		if tail := rustTailExpr(bodyNode, src); tail != "" {
+			shape := "value|" + tail
+			if strings.HasPrefix(tail, "vec!") || strings.HasPrefix(tail, "[") {
+				shape = "collection|" + tail
+			} else if tail == "None" {
+				shape = "none"
+			}
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "return_shape",
+				Value:      shape,
+				Line:       int(bodyNode.StartPoint().Row) + 1,
+				Confidence: 0.9,
+			})
 		}
 	}
 
@@ -1952,6 +2016,14 @@ func _cleanComment(raw string) string {
 
 // extractGuardFromStmt checks if a statement is a guard clause (if-raise, if-return, if-throw).
 func extractGuardFromStmt(stmt *sitter.Node, stmtType string, sf walker.SourceFile, src []byte, result *ParseResult, nodeIdx int) {
+	// Rust (and some grammars) wrap a top-level `if {...}` guard in an expression_statement;
+	// unwrap it so the guard clause is seen by the scanner below.
+	if stmtType == "expression_statement" && stmt.NamedChildCount() > 0 {
+		if inner := stmt.NamedChild(0); inner.Type() == "if_expression" {
+			stmt = inner
+			stmtType = "if_expression"
+		}
+	}
 	if stmtType != "if_statement" && stmtType != "if_expression" {
 		return
 	}
@@ -1962,13 +2034,13 @@ func extractGuardFromStmt(stmt *sitter.Node, stmtType string, sf walker.SourceFi
 	guardType := ""
 
 	// Look for raise/throw/return/? operator in the if body
-	for _, kw := range []string{"raise ", "throw ", "return", "panic(", "error(", "Error(", "abort(", "Err("} {
+	for _, kw := range []string{"raise ", "throw ", "return", "panic(", "panic!(", "error(", "Error(", "abort(", "Err("} {
 		if strings.Contains(text, kw) {
 			isGuard = true
 			switch {
 			case strings.Contains(text, "raise ") || strings.Contains(text, "throw "):
 				guardType = "raise"
-			case strings.Contains(text, "panic(") || strings.Contains(text, "abort("):
+			case strings.Contains(text, "panic(") || strings.Contains(text, "panic!(") || strings.Contains(text, "abort("):
 				guardType = "panic"
 			default:
 				guardType = "return"
@@ -2251,6 +2323,28 @@ func countReturns(node *sitter.Node, src []byte, shapes map[string]bool) {
 	for i := 0; i < int(node.ChildCount()); i++ {
 		countReturns(node.Child(i), src, shapes)
 	}
+}
+
+// rustTailExpr returns a Rust function body block's implicit-return tail expression (the final
+// expression with no trailing `;`), or "" when the block ends in a statement/declaration. Rust
+// returns its block's last expression without a `return` keyword, so countReturns cannot see it.
+func rustTailExpr(bodyNode *sitter.Node, src []byte) string {
+	for i := int(bodyNode.NamedChildCount()) - 1; i >= 0; i-- {
+		c := bodyNode.NamedChild(i)
+		t := c.Type()
+		if t == "line_comment" || t == "block_comment" {
+			continue // skip trailing comments
+		}
+		if strings.HasSuffix(t, "_statement") || strings.HasSuffix(t, "_declaration") {
+			return "" // block ends in a statement -> no implicit return
+		}
+		txt := strings.TrimSpace(c.Content(src))
+		if len(txt) > 80 {
+			txt = txt[:80]
+		}
+		return txt
+	}
+	return ""
 }
 
 // ── New property extractors ─────────────────────────────────────────────────

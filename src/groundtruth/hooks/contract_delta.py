@@ -24,11 +24,14 @@ the Middle NeurIPS/TACL 2024 (delta first / primacy).
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 
 from groundtruth._binary import find_binary
@@ -36,17 +39,20 @@ from groundtruth.pretask.curation_map import _open_ro, build_function_map
 
 # Contract-bearing property kinds we diff (the depth, not 4 fields). Ordered by how
 # decisively a change breaks a dependent.
+# We diff ONLY the STABLE, high-signal contract dimensions:
+#   - exception_type: raised exception TYPES (identifiers like ValueError/TypeError).
+#     Re-indentation / wrapping in `if smooth:` cannot churn an identifier; a dropped
+#     raise = an exception callers catch is gone (high signal), a new raise = an
+#     exception callers don't expect.
+#   - return_shape: the return contract callers consume.
+# Guard/boundary/conditional/side-effect VALUES are deliberately EXCLUDED: they are
+# full-expression STRINGS that churn under benign restructuring (the arviz run5 LIPI:
+# the agent wrapped code in `if smooth:`, the indexer re-extracted the SAME guards as
+# different strings -> false "dropped/new guard"). Their real high-signal content (a
+# removed precondition that RAISES) already surfaces as a dropped raise.
 _DELTA_KINDS = (
     "return_shape",
     "exception_type",
-    "guard_clause",
-    "boundary_condition",
-    "conditional_return",
-    "exception_handler",
-    "side_effect",
-    "resource_pattern",
-    "field_read",
-    "call_order",
 )
 
 # Human label per kind for the removed/added/changed rendering.
@@ -66,42 +72,82 @@ _KIND_LABEL = {
 _MARKER = "[CONTRACT-DELTA]"
 
 
+# Last compute_delta outcome — read by post_edit and surfaced into the HOST-visible
+# gt_layer_events (the hook's stderr is in-container and lost). Lets us see WHY the delta
+# was quiet in-container ("no_old_content" / "old_equals_current" / "index_failed" / ...).
+LAST_REASON: str = ""
+
+
+def _quiet(reason: str) -> list[str]:
+    """Return [] but LOG why — so "correctly quiet" vs "silently broken" are
+    distinguishable. The arviz live run returned [] silently (old-content recovery
+    failed) with zero signal; every early-return now states its reason."""
+    global LAST_REASON
+    LAST_REASON = reason
+    print(f"[GT_META] contract_delta_empty: reason={reason}", file=sys.stderr, flush=True)
+    return []
+
+
 def _git_env() -> dict:
+    """Git env for in-container use. MUST set safe.directory=* — the SWE-bench testbed
+    repo is owned by a different uid than the hook process, so without it git refuses
+    with 'detected dubious ownership', returncode!=0, and old-content recovery silently
+    returns empty (the run3 silent-fail). Mirrors post_edit._git_env."""
     e = dict(os.environ)
     e.setdefault("GIT_CONFIG_NOSYSTEM", "1")
+    e["GIT_CONFIG_COUNT"] = "1"
+    e["GIT_CONFIG_KEY_0"] = "safe.directory"
+    e["GIT_CONFIG_VALUE_0"] = "*"
     return e
 
 
-def _old_content(repo_root: str, file_rel: str, diff_text: str) -> str:
-    """Pre-edit file content: git HEAD first, then reconstruct from the unified diff."""
-    try:
-        r = subprocess.run(
-            ["git", "show", f"HEAD:{file_rel}"],
-            capture_output=True, text=True, cwd=repo_root, timeout=10, env=_git_env(),
-        )
-        if r.returncode == 0 and r.stdout:
-            return r.stdout
-    except (subprocess.SubprocessError, OSError):
-        pass
-    # fallback: rebuild old side from the diff (deleted + context lines)
-    if not diff_text:
-        return ""
-    target = file_rel.replace("\\", "/").lstrip("/")
-    out: list[str] = []
-    in_file = False
-    for ln in diff_text.splitlines():
-        if ln.startswith("+++ b/"):
-            in_file = ln[6:].strip().replace("\\", "/").lstrip("/") == target
+def _path_candidates(file_rel: str) -> list[str]:
+    """git-relative path candidates. SWE-bench prefixes file paths with the instance
+    dir (`arviz-devs__arviz-2413/arviz/plots/x.py`) while the git root is that dir, so
+    also try the path with the leading segment(s) stripped."""
+    rel = file_rel.replace("\\", "/").lstrip("/")
+    cands = [rel]
+    parts = rel.split("/")
+    for i in range(1, len(parts)):
+        cands.append("/".join(parts[i:]))
+    return cands
+
+
+def _old_content(repo_root: str, file_rel: str) -> str:
+    """The FULL pre-edit file from the IMMUTABLE task base commit — never a fragment.
+
+    Anchors "old" to GT_BASE_COMMIT (the task's base SHA, captured BEFORE the agent ran),
+    not live HEAD: the agent runs its own git commands (checkout/commit), which can move
+    HEAD so that old==current or the diff is wrong — the in-container silence observed in
+    run7. We try the base ref first, then HEAD as a fallback. Full file only (a fragment
+    makes the whole pre-existing contract read as "new" — the run4 bug). "" if unavailable."""
+    base_ref = os.environ.get("GT_BASE_COMMIT", "").strip()
+    refs = [base_ref, "HEAD"] if base_ref else ["HEAD"]
+    for ref in refs:
+        for rel in _path_candidates(file_rel):
+            try:
+                r = subprocess.run(
+                    ["git", "-C", repo_root, "show", f"{ref}:{rel}"],
+                    capture_output=True, text=True, timeout=10, env=_git_env(),
+                )
+                if r.returncode == 0 and r.stdout.strip():
+                    return r.stdout
+            except (subprocess.SubprocessError, OSError):
+                continue
+    return ""
+
+
+def _read_current(repo_root: str, file_rel: str) -> str | None:
+    """Current (post-edit) file content from disk, trying the task-dir-prefixed path
+    AND stripped variants (the same prefix ambiguity as git). None if not found."""
+    for rel in _path_candidates(file_rel):
+        path = os.path.join(repo_root, rel) if repo_root else rel
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                return fh.read()
+        except OSError:
             continue
-        if ln.startswith("diff ") or ln.startswith("--- "):
-            continue
-        if not in_file:
-            continue
-        if ln.startswith("-") and not ln.startswith("---"):
-            out.append(ln[1:])
-        elif ln.startswith(" "):
-            out.append(ln[1:])
-    return "\n".join(out)
+    return None
 
 
 def _index_one(content: str, file_rel: str) -> str | None:
@@ -130,6 +176,36 @@ def _index_one(content: str, file_rel: str) -> str | None:
     except (subprocess.SubprocessError, OSError):
         return None
     return db  # caller is responsible for cleanup of the parent dir
+
+
+# Disk cache for the OLD side. The old content is git HEAD — IMMUTABLE for the whole run —
+# so the agent's repeated edits to the same file re-index identical old content every time.
+# Cache the extracted props keyed by (base, sha256(old)). The cache holds props produced by
+# the SAME _index_one path, so same-path correctness (no phantom drift) is preserved; the
+# binary is deterministic (determinism_rate=1.0), so a hit is byte-identical to a fresh index.
+# Each post_edit invocation is a fresh process, so the cache must live on disk (not in-memory).
+_DELTA_CACHE_DIR = os.path.join(tempfile.gettempdir(), "gt_delta_oldcache")
+
+
+def _old_props_cached(old: str, base: str) -> dict[str, dict[str, set]] | None:
+    key = hashlib.sha256(f"{base}\0{old}".encode("utf-8", "replace")).hexdigest()
+    try:
+        with open(os.path.join(_DELTA_CACHE_DIR, key + ".json"), encoding="utf-8") as fh:
+            raw = json.load(fh)
+        return {fn: {k: set(v) for k, v in kinds.items()} for fn, kinds in raw.items()}
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _old_props_store(old: str, base: str, pre: dict[str, dict[str, set]]) -> None:
+    key = hashlib.sha256(f"{base}\0{old}".encode("utf-8", "replace")).hexdigest()
+    try:
+        os.makedirs(_DELTA_CACHE_DIR, exist_ok=True)
+        raw = {fn: {k: sorted(v) for k, v in kinds.items()} for fn, kinds in pre.items()}
+        with open(os.path.join(_DELTA_CACHE_DIR, key + ".json"), "w", encoding="utf-8") as fh:
+            json.dump(raw, fh)
+    except OSError:
+        pass
 
 
 def _props_by_func(db: str, base_name: str) -> dict[str, dict[str, set]]:
@@ -188,23 +264,31 @@ def _twin_not_updated(graph_db: str, file_rel: str, name: str, changed: set[str]
 
 
 def _diff_func(pre: dict[str, set], post: dict[str, set]) -> list[str]:
-    """Material contract changes for one function, rendered as compact lines."""
+    """High-signal, restructuring-stable contract changes for one function.
+
+    Diffs ONLY return shape + raised exception TYPES (see _DELTA_KINDS rationale).
+    A removed/changed return or a dropped/added raise is a real change callers depend
+    on; both are identifier/shape-level so benign re-indentation cannot produce them.
+    """
     lines: list[str] = []
-    kinds = [k for k in _DELTA_KINDS if k in pre or k in post]
-    for kind in kinds:
-        a = pre.get(kind, set())
-        b = post.get(kind, set())
-        if a == b:
-            continue
-        label = _KIND_LABEL.get(kind, kind)
-        if kind == "return_shape":
-            # scalar-ish: show old -> new compactly
-            lines.append(f"  return shape: {', '.join(sorted(a)) or 'none'} -> {', '.join(sorted(b)) or 'none'}")
-            continue
-        for removed in sorted(a - b):
-            lines.append(f"  dropped {label}: {removed[:80]}")
-        for added in sorted(b - a):
-            lines.append(f"  new {label}: {added[:80]}")
+    # Return shape — diffed at the CATEGORY level (value / collection / none / ...),
+    # not the raw expression. The indexer stores "<category>|<expr>"; comparing the
+    # full string flags a benign rename (value|val -> value|result) as a change. Only
+    # a category shift (value -> none, collection -> value) is a real return-contract change.
+    a = {s.split("|", 1)[0] for s in pre.get("return_shape", set())}
+    b = {s.split("|", 1)[0] for s in post.get("return_shape", set())}
+    if a != b and (a or b):
+        lines.append(
+            f"  return shape: {', '.join(sorted(a)) or 'none'} -> "
+            f"{', '.join(sorted(b)) or 'none'}"
+        )
+    # Raised exception TYPES — dropped (removed a check callers catch) / new.
+    a = pre.get("exception_type", set())
+    b = post.get("exception_type", set())
+    for removed in sorted(a - b):
+        lines.append(f"  dropped raise: {removed[:60]}")
+    for added in sorted(b - a):
+        lines.append(f"  new raise: {added[:60]}")
     return lines
 
 
@@ -215,6 +299,7 @@ def compute_delta(
     repo_root: str,
     diff_text: str = "",
     current_content: str | None = None,
+    old_content: str | None = None,
 ) -> list[str]:
     """Return the [CONTRACT-DELTA] lines for what the edit changed, or [] (correct-or-quiet).
 
@@ -224,37 +309,62 @@ def compute_delta(
     """
     file_rel = file_rel.replace("\\", "/").lstrip("/")
     try:
-        old = _old_content(repo_root, file_rel, diff_text)
+        # OLD must be the FULL pre-edit file. A caller-supplied full file (tests /
+        # explicit callers) is honored; otherwise recover from git HEAD. We do NOT
+        # use diff-fragment reconstruction or OH's str_replace window — a fragment
+        # makes the whole pre-existing contract read as "new" (arviz run4 bug).
+        old = old_content if old_content else _old_content(repo_root, file_rel)
         if current_content is None:
-            cur_path = os.path.join(repo_root, file_rel) if repo_root else file_rel
-            try:
-                with open(cur_path, encoding="utf-8", errors="replace") as fh:
-                    current_content = fh.read()
-            except OSError:
-                return []
-        if not old or not current_content or old == current_content:
-            return []
+            current_content = _read_current(repo_root, file_rel)
+            if current_content is None:
+                return _quiet("no_current_content")
+        if not old:
+            return _quiet("no_old_content")
+        if not current_content:
+            return _quiet("no_current_content")
+        if old == current_content:
+            return _quiet("old_equals_current")
 
         base = os.path.basename(file_rel)
-        old_db = _index_one(old, file_rel)
+        # OLD side is git HEAD — immutable for the run — so cache its props across the
+        # agent's repeated edits to this file. Only the CURRENT side is indexed every
+        # edit (it changed). Same-path correctness holds: cached props came from the same
+        # _index_one path, and the binary is deterministic.
+        pre = _old_props_cached(old, base)
+        if pre is None:
+            old_db = _index_one(old, file_rel)
+            if not old_db:
+                return _quiet("index_failed:old")
+            try:
+                pre = _props_by_func(old_db, base)
+            finally:
+                shutil.rmtree(os.path.dirname(old_db), ignore_errors=True)
+            _old_props_store(old, base, pre)
         new_db = _index_one(current_content, file_rel)
+        if not new_db:
+            return _quiet("index_failed:new")
         try:
-            if not old_db or not new_db:
-                return []
-            pre = _props_by_func(old_db, base)
             post = _props_by_func(new_db, base)
         finally:
-            for db in (old_db, new_db):
-                if db:
-                    shutil.rmtree(os.path.dirname(db), ignore_errors=True)
+            shutil.rmtree(os.path.dirname(new_db), ignore_errors=True)
 
         changed_names = sorted(n for n in (set(pre) | set(post)) if pre.get(n) != post.get(n))
         if not changed_names:
-            return []
+            return _quiet("no_changed_funcs")
 
         blocks: list[str] = []
         for name in changed_names:
-            dlines = _diff_func(pre.get(name, {}), post.get(name, {}))
+            pre_props = pre.get(name, {})
+            post_props = post.get(name, {})
+            # Degenerate-old guard: old has ZERO properties for a function the post
+            # shows as fully-formed => old-content recovery degraded to a fragment
+            # (or the func is brand-new). Either way, reporting the entire post
+            # contract as "new" is the run4 false-positive flood. Stay quiet.
+            if not pre_props and post_props:
+                print(f"[GT_META] contract_delta_skip: degenerate_old func={name}",
+                      file=sys.stderr, flush=True)
+                continue
+            dlines = _diff_func(pre_props, post_props)
             if not dlines:
                 continue
             cnt = _verified_caller_count(graph_db, file_rel, name)
@@ -267,6 +377,8 @@ def compute_delta(
             if twin:
                 block.append(f"  twin not updated: {twin}")
             blocks.extend(block)
+        global LAST_REASON
+        LAST_REASON = f"delivered:{len(changed_names)}func" if blocks else "no_material_diff"
         return blocks
-    except Exception:
-        return []
+    except Exception as e:
+        return _quiet(f"exception:{type(e).__name__}:{str(e)[:80]}")

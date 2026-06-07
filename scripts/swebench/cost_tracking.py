@@ -55,6 +55,51 @@ litellm.model_cost["vertex_ai/qwen/qwen3-coder-480b-a35b-instruct-maas"] = _PRIC
 litellm.model_cost["openai/qwen3-coder-480b-a35b-instruct-maas"] = _PRICING_VERTEX_QWEN3
 litellm.model_cost["openai/qwen/qwen3-coder-480b-a35b-instruct-maas"] = _PRICING_VERTEX_QWEN3
 
+
+def _manual_token_cost(model: Any, prompt_tokens: Any, completion_tokens: Any) -> float | None:
+    """Deterministic per-token cost from the registered ``litellm.model_cost`` map.
+
+    ``litellm.completion_cost`` / ``cost_per_token`` raise
+    ``This model isn't mapped yet`` for ``deepseek/deepseek-v4-flash`` (and other
+    custom-provider models): litellm resolves ``custom_llm_provider=deepseek`` and
+    consults its built-in price table, which IGNORES our ``model_cost[...] =`` /
+    ``register_model`` entries — verified: even ``register_model`` fails. The result
+    was ``cost=None`` → ``$0.0000`` telemetry across the whole run (KINK #6).
+
+    This fallback reads the SAME pricing we already registered and multiplies it by
+    the token usage litellm hands us. Model/provider-agnostic: it tries the full
+    name, the provider-stripped basename, then any registered key whose basename
+    matches — so any model present in ``litellm.model_cost`` is priced, with no
+    hardcoded per-task value. Returns ``None`` only when the model is genuinely
+    unregistered (honest: better $0-and-known-absent than a fabricated number).
+    """
+    if not isinstance(model, str) or not model:
+        return None
+    try:
+        in_t = int(prompt_tokens or 0)
+        out_t = int(completion_tokens or 0)
+    except Exception:
+        return None
+    mc = getattr(litellm, "model_cost", {}) or {}
+    base = model.split("/")[-1]
+    candidates = [model, base]
+    # Fall back to any registered key that shares the same basename (e.g. the
+    # response says "deepseek-v4-flash" but we registered "deepseek/deepseek-v4-flash").
+    for _k in mc:
+        if isinstance(_k, str) and _k.split("/")[-1] == base and _k not in candidates:
+            candidates.append(_k)
+    for key in candidates:
+        entry = mc.get(key)
+        if isinstance(entry, dict) and (
+            "input_cost_per_token" in entry or "output_cost_per_token" in entry
+        ):
+            return (
+                in_t * float(entry.get("input_cost_per_token", 0.0) or 0.0)
+                + out_t * float(entry.get("output_cost_per_token", 0.0) or 0.0)
+            )
+    return None
+
+
 # Rate limiter: matches the old LiteLLM proxy's rpm:12 setting.
 # Without this, 6 concurrent workers overwhelm Vertex MaaS quota.
 import threading
@@ -385,6 +430,25 @@ def _cost_callback(kwargs, completion_response, start_time, end_time):
             print(f"[GT_COST] completion_cost failed: {e}", flush=True)
 
         usage = getattr(completion_response, "usage", None)
+        # KINK #6: litellm.completion_cost raises "model isn't mapped" for
+        # deepseek-v4-flash (and other custom-provider models) even though we
+        # registered pricing — so cost stayed None and telemetry read $0. Recover
+        # deterministically from the registered per-token pricing using the token
+        # usage litellm gives us. Only when completion_cost gave nothing.
+        if cost is None and usage is not None:
+            _fb_model = kwargs.get("model") or getattr(completion_response, "model", None)
+            _fb_cost = _manual_token_cost(
+                _fb_model,
+                getattr(usage, "prompt_tokens", None),
+                getattr(usage, "completion_tokens", None),
+            )
+            if _fb_cost is not None:
+                cost = _fb_cost
+                print(
+                    f"[GT_COST] completion_cost fallback: priced {_fb_model} "
+                    f"from registry cost=${_fb_cost:.6f}",
+                    flush=True,
+                )
         has_reasoning = _detect_reasoning(completion_response)
 
         gen_id = getattr(completion_response, "id", None)

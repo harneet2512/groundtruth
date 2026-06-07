@@ -1,0 +1,235 @@
+name: "SWE-bench Pro — mirror images to GHCR (cache)"
+
+# ONE-TIME (resumable) cache builder. Mirrors the 731 public SWE-bench Pro images
+#   docker.io/jefzda/sweap-images:<dockerhub_tag>   (the upstream)
+# into your own registry
+#   ghcr.io/<owner>/sweap-images:<dockerhub_tag>     (the cache)
+# so every Pro eval run pulls from GHCR (authenticated, fast, NOT subject to the
+# Docker Hub 200-pull/6hr anon/PAT limit) instead of re-pulling upstream each run.
+#
+# WHY GHCR (not actions/cache): the 731 images total ~1,071 GB; a GHA cache entry
+# caps at 10 GB and the repo cache budget is 10 GB — physically impossible. Public
+# GHCR packages have FREE storage + bandwidth, so the cache is free and unlimited.
+# (Same GHCR-primary pattern the SWE-bench-Live workflow already uses.)
+#
+# RESUMABLE: each task first does `docker manifest inspect` on the GHCR target —
+# if the tag is already mirrored it SKIPS (no pull, no push). So if a run is cut
+# short by the Docker Hub rate limit (731 > 400/6hr even with two PATs), just
+# re-run: it picks up exactly where it left off. A full mirror takes ~2 passes
+# spaced ~6h apart, or several smaller language-scoped runs.
+#
+# SECRETS REQUIRED (set on the repo that RUNS this — run-infra repo per project rule):
+#   DOCKERHUB_USER_1 / DOCKERHUB_PAT_1   (e.g. laststan01)
+#   DOCKERHUB_USER_2 / DOCKERHUB_PAT_2   (e.g. lastman01)   <- rotation, doubles 200->400/6hr
+#   GITHUB_TOKEN is automatic and pushes to GHCR.
+# Set them WITHOUT echoing the value, e.g.:
+#   gh secret set DOCKERHUB_PAT_1 --body "<paste>"
+# NEVER commit a PAT to the repo.
+
+on:
+  workflow_dispatch:
+    inputs:
+      languages:
+        description: 'Comma-separated repo_language filter (e.g. python,go) — empty = all'
+        required: false
+        default: ''
+      num_tasks:
+        description: 'Cap number of tasks to consider (0 = all 731). Applied AFTER language filter.'
+        required: false
+        default: '0'
+      chunk_size:
+        description: 'Tags mirrored per matrix job (loop inside the job)'
+        required: false
+        default: '20'
+      max_parallel:
+        description: 'Concurrent mirror jobs (governs Docker Hub pull rate — keep modest)'
+        required: false
+        default: '8'
+
+permissions:
+  contents: read
+  packages: write   # push to GHCR
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.split.outputs.matrix }}
+      total: ${{ steps.split.outputs.total }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+
+      - id: split
+        shell: bash
+        env:
+          LANGS: ${{ inputs.languages }}
+          NUM: ${{ inputs.num_tasks }}
+          CHUNK: ${{ inputs.chunk_size }}
+        run: |
+          set -euo pipefail
+          DS=benchmarks/data/swebench_pro_public_tags.jsonl
+          test -s "$DS" || { echo "FATAL: $DS missing (committed tag list)"; exit 1; }
+          # Emit "tag<TAB>lang" lines, filter by language, cap by num_tasks, chunk for the matrix.
+          python3 - "$DS" "${LANGS}" "${NUM}" "${CHUNK}" > /tmp/matrix.json <<'PY'
+          import json, sys
+          ds, langs_s, num_s, chunk_s = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+          langs = {x.strip().lower() for x in langs_s.split(",") if x.strip()}
+          num = int(num_s or 0); chunk = max(1, int(chunk_s or 20))
+          tags = []
+          for line in open(ds, encoding="utf-8"):
+              if not line.strip():
+                  continue
+              r = json.loads(line)
+              if langs and (r.get("repo_language","").lower() not in langs):
+                  continue
+              t = r.get("dockerhub_tag")
+              if t:
+                  tags.append(t)
+          if num > 0:
+              tags = tags[:num]
+          chunks = [tags[i:i+chunk] for i in range(0, len(tags), chunk)]
+          # GHA matrix hard cap is 256 jobs — fail loud if the chunking exceeds it.
+          if len(chunks) > 256:
+              sys.stderr.write(f"FATAL: {len(chunks)} chunks > 256 matrix cap; raise chunk_size or filter languages\n")
+              sys.exit(1)
+          include = [{"idx": i, "tags": ",".join(c)} for i, c in enumerate(chunks)]
+          print(json.dumps({"include": include}))
+          sys.stderr.write(f"{len(tags)} tags -> {len(chunks)} chunks (chunk_size={chunk})\n")
+          PY
+          echo "matrix=$(cat /tmp/matrix.json)" >> "$GITHUB_OUTPUT"
+          TOTAL=$(python3 -c "import json;print(sum(len(x['tags'].split(',')) for x in json.load(open('/tmp/matrix.json'))['include']))")
+          echo "total=$TOTAL" >> "$GITHUB_OUTPUT"
+          echo "queued $TOTAL tags"
+
+  mirror:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+      fail-fast: false
+      max-parallel: ${{ fromJson(inputs.max_parallel) }}
+    steps:
+      - name: Log in to GHCR (cache target)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: "Mirror chunk (idempotent: skip if already on GHCR)"
+        shell: bash
+        env:
+          DH_USER_1: ${{ secrets.DOCKERHUB_USER_1 }}
+          DH_PAT_1: ${{ secrets.DOCKERHUB_PAT_1 }}
+          DH_USER_2: ${{ secrets.DOCKERHUB_USER_2 }}
+          DH_PAT_2: ${{ secrets.DOCKERHUB_PAT_2 }}
+          OWNER: ${{ github.repository_owner }}
+          TAGS: ${{ matrix.tags }}
+        run: |
+          set -uo pipefail
+          UP="docker.io/jefzda/sweap-images"
+          # GHCR repo names must be lowercase; owner may contain uppercase.
+          GH="ghcr.io/$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')/sweap-images"
+
+          dh_login() {  # rotate between the two Docker Hub accounts to double the 200/6hr cap
+            local which="$1"
+            if [ "$which" = "2" ] && [ -n "${DH_USER_2:-}" ] && [ -n "${DH_PAT_2:-}" ]; then
+              echo "$DH_PAT_2" | docker login -u "$DH_USER_2" --password-stdin >/dev/null 2>&1
+            elif [ -n "${DH_USER_1:-}" ] && [ -n "${DH_PAT_1:-}" ]; then
+              echo "$DH_PAT_1" | docker login -u "$DH_USER_1" --password-stdin >/dev/null 2>&1
+            else
+              echo "::warning::no Docker Hub PAT set — pulling anonymously (low rate limit)"
+            fi
+          }
+
+          IFS=',' read -ra ARR <<< "$TAGS"
+          i=0; done=0; skipped=0; failed=0
+          for TAG in "${ARR[@]}"; do
+            TAG="$(echo "$TAG" | tr -d '\r' | xargs)"
+            [ -n "$TAG" ] || continue
+            i=$((i+1))
+            # (1) Idempotent skip: already mirrored?
+            if docker manifest inspect "$GH:$TAG" >/dev/null 2>&1; then
+              echo "  [skip] $TAG already on GHCR"; skipped=$((skipped+1)); continue
+            fi
+            # (2) Pull upstream with PAT rotation (alternate accounts per image) + retry.
+            dh_login $(( (i % 2) + 1 ))
+            OK=0
+            for a in 1 2 3 4; do
+              if docker pull "$UP:$TAG" >/dev/null 2>&1; then OK=1; break; fi
+              echo "::warning::pull $TAG attempt $a failed (rate limit?) — backing off"; sleep $((a*15))
+              # swap account on retry in case THIS account hit its 6hr cap
+              dh_login $(( ((i+a) % 2) + 1 ))
+            done
+            if [ "$OK" -ne 1 ]; then
+              echo "::error::pull FAILED $UP:$TAG (likely Docker Hub rate limit — re-run later to resume)"; failed=$((failed+1)); continue
+            fi
+            # (3) Retag -> GHCR and push.
+            docker tag "$UP:$TAG" "$GH:$TAG"
+            if docker push "$GH:$TAG" >/dev/null 2>&1; then
+              echo "  [done] $TAG -> $GH:$TAG"; done=$((done+1))
+            else
+              echo "::error::push FAILED $GH:$TAG"; failed=$((failed+1))
+            fi
+            # (4) Reclaim runner disk immediately (images are ~1-2 GB each; runner has ~14 GB).
+            docker rmi "$UP:$TAG" "$GH:$TAG" >/dev/null 2>&1 || true
+          done
+          echo "=== chunk ${{ matrix.idx }}: done=$done skipped=$skipped failed=$failed of $i ==="
+          # Fail the job ONLY on a non-rate-limit hard failure pattern would need richer
+          # detection; rate-limit failures are expected mid-run and resolved by re-running,
+          # so a chunk with failures still exits 0 (the manifest re-verify is the real gate).
+
+  verify:
+    needs: mirror
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { lfs: false }
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Count GHCR cache coverage (manifest-only, no pulls)
+        shell: bash
+        env:
+          OWNER: ${{ github.repository_owner }}
+          LANGS: ${{ inputs.languages }}
+        run: |
+          set -uo pipefail
+          DS=benchmarks/data/swebench_pro_public_tags.jsonl
+          GH="ghcr.io/$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')/sweap-images"
+          # tags in scope (respect the language filter used for the run)
+          python3 - "$DS" "${LANGS}" > /tmp/scope_tags.txt <<'PY'
+          import json, sys
+          ds, langs_s = sys.argv[1], sys.argv[2]
+          langs = {x.strip().lower() for x in langs_s.split(",") if x.strip()}
+          for line in open(ds, encoding="utf-8"):
+              if not line.strip(): continue
+              r = json.loads(line)
+              if langs and r.get("repo_language","").lower() not in langs: continue
+              if r.get("dockerhub_tag"): print(r["dockerhub_tag"])
+          PY
+          TOTAL=0; HAVE=0; MISS=""
+          while IFS= read -r TAG; do
+            [ -n "$TAG" ] || continue
+            TOTAL=$((TOTAL+1))
+            if docker manifest inspect "$GH:$TAG" >/dev/null 2>&1; then
+              HAVE=$((HAVE+1))
+            else
+              MISS="${MISS}\n  $TAG"
+            fi
+          done < /tmp/scope_tags.txt
+          echo "### Pro GHCR cache: $HAVE / $TOTAL mirrored" >> "$GITHUB_STEP_SUMMARY"
+          echo "Pro GHCR cache coverage: $HAVE / $TOTAL"
+          if [ "$HAVE" -lt "$TOTAL" ]; then
+            echo "INCOMPLETE — re-run this workflow to resume (Docker Hub rate limit resets ~6h):"
+            printf '%b\n' "$MISS" | head -30
+            exit 1
+          fi
+          echo "COMPLETE — all $TOTAL Pro images cached on $GH"

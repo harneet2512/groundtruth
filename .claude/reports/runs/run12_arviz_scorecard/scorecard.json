@@ -1,0 +1,70 @@
+{
+  "task": "arviz-devs__arviz-2413",
+  "run": "run12",
+  "ts": "2026-06-05",
+  "tier1_outcome": {
+    "resolved": "UNKNOWN(no eval harness wired)",
+    "baseline_pass": false,
+    "flip": "UNKNOWN",
+    "regression": "N/A",
+    "per_task_delta": "UNKNOWN"
+  },
+  "tier2_causality": {
+    "delivered": 1.0,
+    "correct": 0.0,
+    "consumed": 1.0,
+    "fair_probe": 1.0,
+    "right_trajectory": "UNVERIFIED",
+    "gt_caused": 0.0,
+    "_note": "correct=0 -> test name leaked (gt_gt \u00a7349); consumed=1 but of a LEAK; gt_caused FAILS"
+  },
+  "tier3_localization": {
+    "gold_file_reached": 0.0,
+    "first_gold_rank": "abstain/low (top cand doc/sphinxext = WRONG)",
+    "gold_edited": 1.0,
+    "first_edit_action": 25,
+    "edit_to_gold_action": 25
+  },
+  "tier4_nonharm": {
+    "action_count": "~50 (wedged)",
+    "looped_stuck": "partial (stalled ac=50)",
+    "first_edit_latency": "~25",
+    "unique_files_viewed": "unmeasured",
+    "gt_injected_tokens": "~1190/edit",
+    "_delta_vs_baseline": "UNMEASURED (no paired baseline run this session)"
+  },
+  "tier5_per_layer": {
+    "L1_brief": {
+      "emitted": 1,
+      "localization": "LOW conf, wrong file"
+    },
+    "L3_post_edit": {
+      "emitted": 1,
+      "rendered_tokens": 2045,
+      "pillars": "Impact/Signature/CONTRACT/PRESERVE",
+      "contract_delta": {
+        "emitted": 0,
+        "reason": "in-container silence, root cause OPEN"
+      }
+    },
+    "L3b_post_view": {
+      "emitted": 1
+    }
+  },
+  "tier6_legitimacy": {
+    "env_full_stack": "NO/UNVERIFIED (gates not armed in run12)",
+    "test_names_leaked": 1,
+    "_leaked": "test_plot_hdi (bokeh) x5-6  -> MUST be 0 = FAIL",
+    "fail_to_pass_leaked": false,
+    "_grader": "test_plot_hdi_string_error (matplotlib) NOT surfaced -> not result-invalidating",
+    "no_gold_labels": true
+  },
+  "tier7_cost": {
+    "llm_cost": "$0 (deepseek telemetry unmapped)",
+    "wall_clock_s": 334
+  },
+  "VERDICT": {
+    "gt_caused_flip": "NO/VOID",
+    "why": "VOID by legitimacy gate (env not full-stack + test name leaked) AND no eval verdict obtainable AND correct=0. Even ignoring those, contract-delta NOT delivered. Core delivery=delivered but fails correctness."
+  }
+}

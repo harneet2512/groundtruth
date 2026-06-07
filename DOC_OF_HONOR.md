@@ -1839,8 +1839,137 @@ This run only ~1.5 were live, which is the mechanical cause of the 23/25 MEDIUM 
 **Net:** GHA did not provision GT's runtime (no onnxruntime, no pyright), silently degrading GT to a
 **grep+graph lexical localizer**. Same class as the HF-429 dataset failure: wrong (un-provisioned) env.
 
+### 2026-06-07 RESOLVED — the 2-dead-gates cause was a SILENTLY-FAILING deps step (fixed + proven)
+The "no onnxruntime, no pyright" above was NOT an unfixable env limit — it was a workflow bug.
+Diagnosed + fixed live in-box (bore TCP tunnel + ssh into the running GHA runner) on real conan-17123.
+
+**Root cause:** the agent job's "Install GT runtime" step ran `python -m pip install -q onnxruntime
+tokenizers pydantic 2>&1 | tail` — the `| tail` swallowed the pip failure and there was no `set -e`,
+so the step exited 0 with NOTHING installed on every real run. Consequence: onnxruntime/tokenizers/
+numpy absent → embedder zero (sem=0); pydantic absent → GT's `lsp.protocol` import fails → resolve
+catches `"LSP client not available"` → 0 edges resolved. The `npm install pyright` line in the same
+step DID succeed, masking the failure. All three gates silently off.
+
+**Fix (commit `e75fd02b`):** deps step is now `set -euo pipefail`, un-piped, installs
+onnxruntime+tokenizers+numpy+pydantic+pyright, and FAIL-CLOSED verifies each import (the run aborts
+loudly if any is missing — a dep gap can never again silently degrade GT to baseline). `GT_INDEX_BIN`
+added to Point-A env so the closure rebuilds after LSP correction.
+
+**Proof — all 3 gates ON, real conan-17123, ~5-min zero-LLM `gate-check.yml` (NO agent):**
+- **GATE 1 GRAPH ON.** graph.db population: nodes **7075** (Method 4087 / Function 2207 / Class 781),
+  signatures 6304, FTS5 `nodes_fts` 7075; edges **27528** by resolution_method = name_match 7308,
+  import 6853, type_flow 4229, structural 4087, same_file 2181, impl_method 1264, verified_unique 841,
+  inherited 620, inheritance 130, **lsp 15**; properties **52202** (caller_usage 6420, field_read 6329,
+  fingerprint 6294, param 5481, data_flow 5284, call_order 4657); assertions 10264.
+- **GATE 2 LSP ON.** resolve enriched return_types **47→87** (+40 via pyright hover), **DELETED 18**
+  false-positive name_match edges, **CORRECTED 7** mis-pointed, closure rebuilt — actively CLEANING edges.
+- **GATE 3 EMBEDDER ON.** real ONNX EmbeddingModel, cos(related)=0.8605 > cos(unrelated)=0.7608.
+
+**Open optimization (NOT a dead gate): the `Failed` count.** ~33–44/60 sampled name_match edges still
+Failed = pyright go-to-definition returned empty. Structural cause: conan is OOP-heavy — **4087/7075
+nodes (58%) are Methods** — so most name_match edges are method calls (`obj.m(...)`), which pyright
+resolves only after inferring the receiver type, i.e. a FULL project analysis (the task's deps +
+analysis time). Point-A runs on the host without the task venv, so method-call resolution is partial.
+Knob to push Failed→0: give pyright the task environment (venv/`extraPaths`) + longer
+`wait_for_progress_complete`. The edges that DO resolve are already being cleaned (18 deleted, 7 fixed).
+
+**Methodology:** the 3 gates are set by the Point-A SETUP (~5 min), NOT the 20-min agent.
+`gate-check.yml` verifies/iterates graph→LSP→embedder on a real task with NO agent/LLM — fix the gates
+cheaply; never burn a benchmark run to discover they were off.
+
+### 2026-06-07 Method-call edge resolution — VERIFIED PLAN (agent-checked against gt-index code)
+graph.db is the context graph; its value is the EDGES. On conan-17123, 7308/27528 edges are `name_match`
+and **98% are method calls** — name-guesses (`join`×1106, `get`×354, `exists`×316 → arbitrary same-named
+method) = a mostly-false map → the agent flies blind, can't reach gold. Fix = **ONE receiver-type-
+inference surface** inside `resolver.go:Resolve` (already a cost-ordered stop-at-first-hit chain feeding
+`lookupMethodWithInheritance` CHA), dispatched by typing discipline (declared-type for static langs,
+assignment-flow for dynamic) — the LSP-by-extension model, NOT N tools.
+
+**4 cost-ordered tiers (each call stops at first hit → cheap tiers catch the bulk):**
+- **T1 declared-type** O(1) reuse: `self`→class (Strat 1.75 LIVE); typed param/field/return → type already
+  in `properties.kind=param` (`parser.go:extractStructuredParams:2525`). **PARTIAL** — param types parsed+
+  stored but not in `NodeMeta` (`resolver.go:316`); needs a `properties→NodeMeta` join.
+- **T2 builtin/external exclude** O(1): `str.join`/`dict.get` → drop (application-centered, JARVIS'23/PyCG).
+  **MISSING** (no builtin set; Strat 1.9 only *demotes*). New per-lang builtin name-set + a guard.
+- **T3 assignment-flow → JARVIS flow-sensitive:** Strat 1.96 + `assignments.go` exist (PyCG 5/13, wired
+  full-index `main.go:380-384`). **PARTIAL** — per-file last-write-wins, not flow-sensitive (the only R&D).
+- **T4 demand-driven LSP, issue-scoped:** `resolve.py:_get_ambiguous_edges:113` ALREADY takes
+  `source_files` (scopes the SQL) — unexposed. Add `--source-files` CLI arg (trivial). Heintze-Tardieu PLDI01.
+
+**BUG (agent-found, independent):** `runIncremental` (`main.go:748-1079`) never calls `SetAssignmentIndex`/
+`SetInheritanceMap` → on `gt-index -file`, Strat 1.96 + inherited-method resolution silently no-op (globals
+nil); mutable process-globals = staleness/concurrency hazard. T3's incremental amortization is unrealized
+until fixed.
+
+**Build sequence (cheap→R&D):** (1) wire assignment+inheritance into `runIncremental` (plumbing, fixes the
+bug); (2) expose `--source-files` (T4, trivial); (3) join `param` types into `NodeMeta` (T1); (4) per-lang
+builtin sets (T2, drop-vs-demote vs downstream consumers); (5) flow-sensitive lattice for JARVIS T3 (the
+one genuine R&D — `AssignmentRef` carries `Scope`+`Line`).
+
+**Research:** XTA Tip&Palsberg OOPSLA00 (+88% vs RTA, static); PyCG Salis ICSE21 (99.2%/69.9%, dynamic);
+JARVIS 2023 (+84%/+20%/+67% vs PyCG; flow-sensitive, application-centered, demand-driven); CHA
+Dean/Grove/Chambers ECOOP95 (static only); demand-driven Heintze&Tardieu PLDI01 + Sridharan&Bodík PLDI06.
+Stays ONE surface (receiver-type step), generalized (all langs via uniform tree-sitter), correct-or-quiet.
+
 ### Live-path infra note (separate from GT logic)
 This run executed on **GitHub Actions** (`/home/runner/work/...`), violating the standing
 "live testing = Codespaces ONLY" rule. 3 tasks (cfn-3779/3798, loguru-1306) never ran — HF dataset
 `load_dataset` 429-rate-limited (12 retries) → FileNotFoundError. Per-task anonymous HF re-download
 is the avoidable cause; onnxruntime-absent is the same class (GHA env not provisioned for GT's deps).
+
+### 2026-06-07 T1 (declared-type) + T3 (JARVIS flow toward) — IMPLEMENTATION DESIGN (appended)
+T2 builtin-exclude already cut name_match −36% by DROPPING `json.loads`/`str.join`/`os.path.join` garbage
+(Strat 1.95 builtin guard + Strat 1.9 strong-builtin guard). The RESIDUAL name_match are REAL internal
+method calls whose receiver type was never inferred — `command.run()` → conan's `Command.run`,
+`self._conanfile.run()`. These must be RESOLVED (name_match → type_flow/param_type), not excluded. T1+T3
+do exactly that, as ONE receiver-type surface inside `resolver.go:Resolve` (the existing cost-ordered
+stop-at-first-hit chain feeding `lookupMethodWithInheritance` CHA), dispatched by typing discipline.
+
+**T1 — declared-type receiver resolution (new Strategy 1.94a, between 1.93 and 1.94).**
+Rule: for a qualified call `qualifier.method()` (or `qualifier::method()` for Rust) where the caller
+function declared `qualifier` as a typed parameter/field, resolve the declared type → the class node of
+that type → the method via CHA.
+- Input (zero re-parse): the `param` properties the parser ALREADY extracts
+  (`extractStructuredParams`, value form `name:type [required]` / `name:type opt` / `name:type opt=def`).
+  `BuildParamTypeIndex(props, nodeDBIDs)` (already present, uncommitted) parses `name:type`, keyed by
+  caller DB id → `map[int64]map[string]string`. Wired full-index via `SetParamTypeIndex(BuildParamTypeIndex(allProps, nodeDBIDs))`.
+- Lookup: `typeName = paramTypeIndex[callerID][qualifier]`; `cls = stripTypeWrapper(typeName)` (handles
+  `*Command`/`Optional[Command]`/`List[X]`); find the node named `cls` whose `Label ∈ {Class,Struct,Interface}`
+  via `nodeIDs[cls]` filtered through `nodeMeta`; `targetID = lookupMethodWithInheritance(classID, method)`.
+- Emit `type_flow` (EvidenceType `param_type`, conf 0.9, CERTIFIED) ONLY when the class node exists AND
+  the method resolves via CHA. Otherwise fall through silently (correct-or-quiet). This is XTA-style:
+  the declared type set is the propagated fact (Tip&Palsberg OOPSLA00, +88% precision vs RTA), and it is
+  GENERALIZED — fires on every statically-typed language (Go/Rust/Java/TS) + annotated Python, because the
+  param property is language-uniform (tree-sitter `ParamsField`). No per-language code, no benchmark shape.
+
+**T3 — assignment tracker strengthened toward JARVIS flow-sensitivity.**
+JARVIS (arXiv 2305.05949): flow-sensitive type graph, copy-on-branch / merge-on-join / strong-updates,
+application-centered, demand-driven → +84% precision / +20% recall / +67% speed vs PyCG. PyCG (Salis
+ICSE21): 13 assignment rules, 99.2%/69.9%. We add the two highest-leverage steps without a full lattice:
+- (a) **`self.field = Class()` tracked across the class's other methods.** Already extracted
+  (`extractAssignments` records LHS `self._conanfile` with `Scope`=method); the gap was resolution picking
+  the WRONG same-named field across methods. Fix in `assignments.go`: `Lookup`/`ResolveQualifiedCall`
+  prefer a `self.`-prefixed (class-scoped field) assignment and the latest CONFIDENT one — so
+  `self._conanfile.run()` resolves to the `ConanFile` assigned in `__init__` regardless of which method
+  calls it (class-field scope is intentionally cross-method, JARVIS treats fields as object-scoped).
+- (b) **return-type chaining `x = factory()` / `x = obj.method()`** when the callee's `return_type` is
+  known — `extractAssignments` now records an assignment with the callee's NAME so the resolver can bridge
+  via `nodeMeta[funcID].ReturnType` (reuses the Strat 1.97 return-type machinery on the assigned var).
+- (c) **scope-aware resolution** (reduces last-write-wins imprecision): `ResolveQualifiedCall` takes the
+  caller's enclosing function name (`Scope`) and prefers an assignment whose `Scope` matches (a var typed in
+  function F binds calls in F) before falling back to file-global last-write. `self.`-field assignments are
+  exempt (object-scoped, valid in any method). This is the flow-sensitivity approximation: per-function
+  scope = JARVIS's per-procedure type graph without the full copy/merge lattice; the residual it can't
+  statically resolve is left for the demand-driven LSP (T4), never guessed.
+
+**Correct-or-quiet + generalized:** every new edge fires ONLY when the type is determined and the method
+resolves via CHA; on any miss the call falls through to the next strategy (ultimately the name_match
+fallback or T2 drop). No task IDs / gold / benchmark-shape logic; the inputs (param props, assignments,
+inheritance) are language-uniform tree-sitter facts already paid for at index time (no re-parse, no LSP for
+the bulk). Net effect: name_match DROPS via RESOLUTION (type_flow/param_type rise), det% rises — the goal.
+
+**Research:** XTA Tip&Palsberg OOPSLA00 (+88% vs RTA, static, set-propagation over declared types — the T1
+basis); PyCG Salis ICSE21 (13 rules, 99.2%/69.9%, assignment graph — the T3 basis); JARVIS arXiv 2305.05949
+(flow-sensitive type-graph copy-on-branch/merge-on-join/strong-updates, application-centered, demand-driven;
++84% precision/+20% recall/+67% speed vs PyCG — the T3 target); CHA Dean/Grove/Chambers ECOOP95 (static-only,
+the `lookupMethodWithInheritance` walk); demand-driven Heintze&Tardieu PLDI01 + Sridharan&Bodík PLDI06 (T4).

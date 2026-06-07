@@ -37,6 +37,50 @@ _PATH_RE = re.compile(
     rf"|(?<![\w/])([\w./\\-]+\.(?:{_PATH_EXTS}))\b)"
 )
 
+# Forge blob/raw URLs. Issue bodies routinely link the file via a web URL
+# (``https://github.com/<owner>/<repo>/blob/<ref>/<repo-relative-path>``). The
+# bare-path branch of ``_PATH_RE`` captures the host-prefixed tail
+# (``//github.com/owner/repo/blob/main/arviz/plots/hdiplot.py``), which never
+# equals a graph ``nodes.file_path`` (stored repo-relative, e.g.
+# ``arviz/plots/hdiplot.py``) — so the path anchor silently dies. We strip the
+# host + ``<owner>/<repo>/<view>/<ref>/`` prefix and keep the repo-relative tail.
+#
+# General across forges (GitHub / GitLab / Bitbucket), not repo-specific:
+#   - GitHub/Bitbucket: ``…/blob|raw|blame|tree|src|HEAD/<ref>/<path>``
+#   - GitLab:           ``…/-/blob|raw|blame|tree|...//<ref>/<path>`` (``-/`` infix)
+# The leading ``^(?:https?:)?//[^/]+/`` anchor means this fires ONLY on real
+# URLs — a repo-relative path never starts with ``//host/`` — so legitimate
+# paths that merely contain a ``src/`` segment are untouched.
+_FORGE_BLOB_URL_RE = re.compile(
+    r"^(?:https?:)?//[^/]+/"                       # optional scheme + // + host
+    r".+?/"                                         # <owner>/<repo> (+ group nesting)
+    r"(?:-/)?(?:blob|raw|blame|tree|src|HEAD)/"     # vcs view segment (GitLab ``-/``)
+    r"[^/]+/"                                        # <ref> (branch / tag / sha)
+    r"(.+)$"                                         # repo-relative tail (captured)
+)
+# ``raw.githubusercontent.com`` has no view segment: ``/<owner>/<repo>/<ref>/<path>``.
+_RAW_GHUC_URL_RE = re.compile(
+    r"^(?:https?:)?//raw\.githubusercontent\.com/"
+    r"[^/]+/[^/]+/[^/]+/"                            # <owner>/<repo>/<ref>
+    r"(.+)$"                                         # repo-relative tail (captured)
+)
+
+
+def _normalize_forge_url(path: str) -> str:
+    """Reduce a forge blob/raw URL to its repo-relative tail; pass others through.
+
+    ``https://github.com/o/r/blob/main/pkg/mod.py#L42`` -> ``pkg/mod.py``. The
+    URL fragment (``#Lnn``) and query (``?ref=…``) are stripped from the tail so
+    it matches the graph ``file_path`` exactly. Non-URL strings are returned
+    unchanged (the anchor at the start of both patterns only matches ``//host/``).
+    """
+    for _rx in (_FORGE_BLOB_URL_RE, _RAW_GHUC_URL_RE):
+        m = _rx.match(path)
+        if m:
+            tail = m.group(1).split("#", 1)[0].split("?", 1)[0]
+            return tail or path
+    return path
+
 # Pytest-style test names (test_*, *_test).
 _TEST_NAME_RE = re.compile(r"\b(test_[A-Za-z0-9_]+|[A-Za-z0-9_]+_test)\b")
 
@@ -289,7 +333,9 @@ def _extract_paths(text: str) -> set[str]:
     for match in _PATH_RE.finditer(text):
         path = match.group(1) or match.group(2)
         if path:
-            out.add(path.strip())
+            # Normalize forge blob/raw URLs to the repo-relative tail so the
+            # path anchor matches a graph ``file_path`` (which is repo-relative).
+            out.add(_normalize_forge_url(path.strip()))
     return out
 
 

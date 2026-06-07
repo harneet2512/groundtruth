@@ -104,22 +104,22 @@ class EgoGraph:
         for g in self.guards[:3]:
             parts.append(f"  PRESERVE: {g[:80]}")
 
-        # Pillar 3: Callers (needs verified edges)
-        callers = self.callers
+        # Pillar 3: Callers (needs verified edges). SWAP-INVARIANT: test callers are NEVER
+        # surfaced — a test function's name is a grader reference (run15 leak class). Filter
+        # is_test out at the source so no consumer of render() can leak it.
+        callers = [c for c in self.callers if not c.is_test]
         if callers:
             parts.append("Called by:")
-            for c in sorted(callers, key=lambda x: (not x.is_test, x.file_path))[:5]:
-                tag = " [test]" if c.is_test else ""
-                parts.append(f"  {c.name}() {_basename(c.file_path)}:{c.start_line}{tag}")
+            for c in sorted(callers, key=lambda x: x.file_path)[:5]:
+                parts.append(f"  {c.name}() {_basename(c.file_path)}:{c.start_line}")
                 if self.k >= 2:
                     c_callers = [e for e in self.edges
                                  if e.target_id == c.id and e.edge_type == "CALLS"
                                  and e.source_id != self.center.id]
                     for cc_edge in c_callers[:2]:
                         cc = self.nodes.get(cc_edge.source_id)
-                        if cc:
-                            cc_tag = " [test]" if cc.is_test else ""
-                            parts.append(f"    {cc.name}() {_basename(cc.file_path)}:{cc.start_line}{cc_tag}")
+                        if cc and not cc.is_test:
+                            parts.append(f"    {cc.name}() {_basename(cc.file_path)}:{cc.start_line}")
 
         # Pillar 2: Consistency (shared state = change-may-impact)
         if self.obligations:
@@ -127,11 +127,12 @@ class EgoGraph:
             for o in self.obligations[:3]:
                 parts.append(f"  {o}")
 
-        # Pillar 4: Tests (bonus, not primary)
-        if self.test_assertions:
-            parts.append("Tests:")
-            for t in self.test_assertions[:2]:
-                parts.append(f"  {t[:100]}")
+        # Pillar 4: Tests — DISABLED (swap-invariant — run15 leak): the Tests: block surfaced
+        # test names + assertion bodies. GT surfaces ZERO test references.
+        # if self.test_assertions:
+        #     parts.append("Tests:")
+        #     for t in self.test_assertions[:2]:
+        #         parts.append(f"  {t[:100]}")
 
         # Callees (navigation aid, lower priority)
         callees = self.callees
@@ -429,6 +430,10 @@ def change_impact(
                 "FROM edges e JOIN nodes n ON e.source_id = n.id "
                 "WHERE e.target_id = ? AND e.type = 'CALLS' "
                 "AND COALESCE(e.confidence, 0.5) >= ? "
+                # Test-blind by construction (legitimacy / swap-invariant): GT must NEVER
+                # surface a test name or count — so even if the grading test is swapped, GT's
+                # output is identical. is_test is a graph property -> language/repo-agnostic.
+                "AND n.is_test = 0 "
                 "AND n.file_path != (SELECT file_path FROM nodes WHERE id = ?) "
                 "LIMIT 10",
                 (node_id, min_confidence, center_id),

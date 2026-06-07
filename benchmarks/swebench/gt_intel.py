@@ -57,6 +57,34 @@ def check_staleness(db_path: str, source_file: str, root: str) -> str | None:
 # Immutable default — never mutated.
 VERIFIED_RESOLUTIONS = frozenset({"same_file", "import", "name_match"})
 
+# Deterministic-only fact set — the unified curation_map.DETERMINISTIC_RESOLUTION_METHODS
+# (same_file / import / import_type / type_flow / verified_unique / impl_method /
+# inherited / unique_method / return_type / lsp / lsp_verified). A name_match edge is
+# NEVER a fact (it is a same-name guess across files/classes); rendering one as a
+# copy-pasteable import or as a phantom caller is maximally-harmful plausible-but-wrong
+# context. This set EXCLUDES name_match by construction and is used wherever GT emits an
+# edge as a deterministic fact (IMPORT family, FIX-HERE/top-caller/entry-point). Prefer
+# the shared package constant when importable; otherwise mirror it verbatim so the
+# standalone eval-container script stays self-contained and identical.
+try:  # pragma: no cover - import availability depends on runtime (eval container vs dev)
+    from groundtruth.pretask.curation_map import (  # type: ignore
+        DETERMINISTIC_RESOLUTION_METHODS as _DETERMINISTIC_RESOLUTIONS,
+    )
+except Exception:  # pragma: no cover - eval container has no groundtruth package
+    _DETERMINISTIC_RESOLUTIONS: frozenset[str] = frozenset({
+        "same_file",
+        "import",
+        "import_type",
+        "type_flow",
+        "verified_unique",
+        "impl_method",
+        "inherited",
+        "unique_method",
+        "return_type",
+        "lsp",
+        "lsp_verified",
+    })
+
 # Per-invocation active set. Reset by verify_admissibility_gate() at the
 # start of each database session so previous narrowing never leaks across
 # databases in long-running processes.
@@ -67,6 +95,30 @@ def _resolution_sql_in() -> tuple[str, tuple[str, ...]]:
     """SQL IN clause placeholders and bound values for current active resolutions."""
     methods = tuple(sorted(_active_resolutions))
     return ",".join("?" * len(methods)), methods
+
+
+def _deterministic_sql_in() -> tuple[str, tuple[str, ...]]:
+    """SQL IN clause placeholders/values for DETERMINISTIC-ONLY resolution methods.
+
+    Intersect the active set with the deterministic fact-set so any admissibility-gate
+    narrowing still applies, but name_match is ALWAYS excluded — a name_match edge is a
+    same-name guess, never a fact, and must never be emitted as a copy-pasteable import
+    or a phantom caller. Returns an empty placeholder/value pair only if the active set
+    has no deterministic members (callers must treat that as "no admissible facts").
+    """
+    methods = tuple(sorted(_active_resolutions & _DETERMINISTIC_RESOLUTIONS))
+    return ",".join("?" * len(methods)), methods
+
+
+def _deterministic_sql_literal() -> str:
+    """Comma-joined quoted literal list of deterministic-only resolution methods,
+    intersected with the active set (mirrors the f-string ``res_methods`` style used
+    by the directive-briefing queries). Returns an unsatisfiable ``''`` when empty so
+    an ``IN (...)`` clause selects nothing rather than syntax-erroring."""
+    methods = sorted(_active_resolutions & _DETERMINISTIC_RESOLUTIONS)
+    if not methods:
+        return "''"
+    return ",".join("'" + m + "'" for m in methods)
 
 
 # Minimum confidence threshold for evidence inclusion.
@@ -1043,8 +1095,15 @@ def generate_pretask_briefing(
     found_symbols: list[str] = []
     symbols_shown = 0
 
-    # Build list of admissible resolution methods for queries
+    # Build list of admissible resolution methods for queries.
+    # res_methods = full active set (kept for any non-fact query).
+    # det_methods = DETERMINISTIC-ONLY (name_match excluded) — used wherever an edge is
+    # rendered as a fact (top-caller, entry-point). A name_match caller is a phantom: a
+    # same-name guess across files/classes, never a real dependent. conf_clause adds the
+    # confidence floor on v14+ graphs so low-confidence edges are dropped too.
     res_methods = ",".join(f"'{r}'" for r in _active_resolutions)
+    det_methods = _deterministic_sql_literal()
+    conf_clause = _confidence_clause(_has_confidence_column(conn))
 
     for ident in identifiers:
         if symbols_shown >= 2:
@@ -1056,17 +1115,27 @@ def generate_pretask_briefing(
 
         search_name = ident.split(".")[-1] if "." in ident else ident
 
-        rows = cur.execute("""
-            SELECT id, label, name, qualified_name, file_path, start_line
-            FROM nodes
-            WHERE LOWER(name) = LOWER(?) AND is_test = 0
+        # FIX-HERE disambiguation: a bare LOWER(name) LIKE ... LIMIT 2 picks an arbitrary
+        # same-named node (the stdlib-shadow / phantom-FIX-HERE bug \u2014 N functions share a
+        # name). Rank candidates so the node that is an ACTUAL resolved CALLS target
+        # (has >=1 deterministic incoming edge) sorts first, disambiguating by the
+        # resolved target node id rather than by name alone. Pure SQL, language-agnostic.
+        rows = cur.execute(f"""
+            SELECT n.id, n.label, n.name, n.qualified_name, n.file_path, n.start_line,
+                   COUNT(e.id) AS det_in
+            FROM nodes n
+            LEFT JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS'
+                 AND e.resolution_method IN ({det_methods}){conf_clause}
+            WHERE LOWER(n.name) = LOWER(?) AND n.is_test = 0
+            GROUP BY n.id
+            ORDER BY det_in DESC, n.id ASC
             LIMIT 2
         """, (search_name,)).fetchall()
 
         for row in rows:
             if symbols_shown >= 2:
                 break
-            node_id, label, name, qname, fpath, sline = row
+            node_id, label, name, qname, fpath, sline, _det_in = row
             found_symbols.append(name)
             symbols_shown += 1
 
@@ -1074,12 +1143,14 @@ def generate_pretask_briefing(
             loc = f"{fpath}:{sline}" if sline else fpath
             bullets.append(f"FIX HERE: {qname or name}() \u2192 {loc}")
 
-            # Top caller
+            # Top caller \u2014 DETERMINISTIC-ONLY: a name_match caller is a phantom
+            # (same-name guess), never a real dependent. + confidence floor.
             caller = cur.execute(f"""
                 SELECT n.name, n.file_path
                 FROM edges e JOIN nodes n ON e.source_id = n.id
                 WHERE e.target_id = ? AND e.type = 'CALLS'
-                  AND e.resolution_method IN ({res_methods}) AND n.is_test = 0
+                  AND e.resolution_method IN ({det_methods}){conf_clause}
+                  AND n.is_test = 0
                 LIMIT 1
             """, (node_id,)).fetchone()
             if caller:
@@ -1139,14 +1210,17 @@ def generate_pretask_briefing(
             if found_symbols:
                 break
 
-    # v14 fallback 2: top entry points by caller count
+    # v14 fallback 2: top entry points by caller count.
+    # DETERMINISTIC-ONLY + confidence floor: the rendered "(N callers)" is a fact, so
+    # name_match (phantom, same-name guess) edges must not inflate the count or fabricate
+    # an entry point that has no real dependents.
     if not found_symbols:
         top_nodes = cur.execute(f"""
             SELECT n.name, n.qualified_name, n.file_path, n.start_line,
                    COUNT(e.source_id) as caller_count
             FROM nodes n
             JOIN edges e ON e.target_id = n.id
-            WHERE e.type = 'CALLS' AND e.resolution_method IN ({res_methods})
+            WHERE e.type = 'CALLS' AND e.resolution_method IN ({det_methods}){conf_clause}
               AND n.label IN ('Function','Method') AND n.is_test = 0
               AND n.file_path NOT LIKE '%test%'
             GROUP BY n.id
@@ -1232,19 +1306,29 @@ def get_git_precedent(root: str, file_path: str, start_line: int, end_line: int)
 
 # ── Evidence computation ────────────────────────────────────────────────────
 
-def get_callees(conn: sqlite3.Connection, target_id: int) -> list[GraphNode]:
-    """Get functions that the target calls (outgoing CALLS edges)."""
+def get_callees(conn: sqlite3.Connection, target_id: int) -> list[tuple[GraphNode, str]]:
+    """Get functions that the target calls (outgoing CALLS edges).
+
+    L1 (IMPORT family): gated to DETERMINISTIC-ONLY resolution methods — a name_match
+    callee is a same-name guess, and an import path derived from a guess is maximally
+    harmful (a fabricated, copy-pasteable import). Returns (callee_node, resolution_method)
+    so the IMPORT EvidenceNode can carry the calibration tag. If the active set has no
+    deterministic members, the IN clause is unsatisfiable and no callees are returned
+    (correct-or-quiet — emit nothing rather than a guessed import).
+    """
     cur = conn.cursor()
-    ph, methods = _resolution_sql_in()
+    ph, methods = _deterministic_sql_in()
+    if not methods:
+        return []
     conf_clause = _confidence_clause(_has_confidence_column(conn))
     cur.execute(f"""
-        SELECT n.* FROM edges e
+        SELECT n.*, e.resolution_method FROM edges e
         JOIN nodes n ON n.id = e.target_id
         WHERE e.source_id = ? AND e.type = 'CALLS'
           AND e.resolution_method IN ({ph}){conf_clause}
         LIMIT 10
     """, (target_id, *methods))
-    return [_row_to_node(r) for r in cur.fetchall()]
+    return [(_row_to_node(r[:-1]), r[-1] or "") for r in cur.fetchall()]
 
 
 def compute_evidence(conn: sqlite3.Connection, root: str, target: GraphNode) -> list[EvidenceNode]:
@@ -1311,7 +1395,7 @@ def compute_evidence(conn: sqlite3.Connection, root: str, target: GraphNode) -> 
     if _allowed_families is None or "IMPORT" in _allowed_families:
         callees = get_callees(conn, target.id)
         seen_imports = set()
-        for callee in callees:
+        for callee, callee_rm in callees:
             if callee.file_path == target.file_path:
                 continue  # same file, no import needed
             import_stmt = _format_import_for_language(callee, target.language)
@@ -1325,6 +1409,7 @@ def compute_evidence(conn: sqlite3.Connection, root: str, target: GraphNode) -> 
                 name=callee.name, file=callee.file_path, line=callee.start_line,
                 source_code=import_stmt,
                 summary=f"signature: {sig[:80]}",
+                resolution_method=callee_rm,  # L1: thread calibration (deterministic-only set)
             ))
 
     # Family 1: CALLER — cross-file callers with usage classification

@@ -28,6 +28,7 @@ import time
 from datetime import datetime, timezone
 
 from groundtruth.hooks.logger import log_hook
+from groundtruth.pretask.curation_map import DETERMINISTIC_RESOLUTION_METHODS
 from groundtruth.runtime.sanitizer import clip_balanced
 
 _GT_LOG = os.environ.get("GT_HOOK_LOG", "/tmp/gt_hooks.log")
@@ -136,18 +137,13 @@ _SIBLING_EVIDENCE_ENABLED = True
 #
 # Returns a SQL fragment (no leading AND) used in WHERE clauses on the
 # `edges` table aliased as ``e``.
-_STRONG_RESOLUTION_METHODS = (
-    "same_file",
-    "import",
-    "verified_unique",
-    "type_flow",
-    "import_type",
-    "lsp_verified",
-    "impl_method",
-    "inherited",
-    "unique_method",
-    "return_type",
-)
+# Unified with the brief / curation map / localizer via the single shared
+# constant DETERMINISTIC_RESOLUTION_METHODS (curation_map.py). Previously this
+# hook-local tuple OMITTED ``lsp`` while the brief's set OMITTED
+# impl_method/inherited/unique_method/return_type — three divergent fact-sets that
+# disagreed on 15% of genuinely-resolved CALLS edges. One constant => every
+# consumer treats the same structurally-resolved edges as FACTS, edge-for-edge.
+_STRONG_RESOLUTION_METHODS = DETERMINISTIC_RESOLUTION_METHODS
 _STRONG_TRUST_TIERS = ("CERTIFIED", "CANDIDATE")
 _SUPPRESSED_TRUST_TIER = "SUPPRESSED"
 
@@ -166,7 +162,9 @@ def _categorical_edge_filter_clause(*, alias: str = "e") -> str:
 
     AND trust_tier is not SUPPRESSED (hard exclude).
     """
-    strong_methods = ", ".join(f"'{m}'" for m in _STRONG_RESOLUTION_METHODS)
+    # sorted(): _STRONG_RESOLUTION_METHODS is now a frozenset (unified shared
+    # constant); sort so the emitted SQL IN(...) list is byte-stable across runs.
+    strong_methods = ", ".join(f"'{m}'" for m in sorted(_STRONG_RESOLUTION_METHODS))
     strong_tiers = ", ".join(f"'{t}'" for t in _STRONG_TRUST_TIERS)
     return (
         f"(("
@@ -1623,7 +1621,12 @@ def _get_test_assertions_from_graph(
     db_path: str, file_path: str, function_name: str
 ) -> list[dict[str, str]]:
     """Get test assertions targeting this function from graph.db."""
-    import sqlite3 as _sqlite3
+    # LEGITIMACY / swap-invariant (gt_gt §349: "assertions table untouched ... no test names"):
+    # the [TEST] family named the test and read the assertions table (test-derived) — both are
+    # leakage. Disabled so GT is fully test-blind and its output is unchanged if the grading
+    # test is swapped. (run12 leaked test_plot_hdi via this + the Impact/Verify pillars.)
+    return []
+    import sqlite3 as _sqlite3  # noqa: F401  (dead — kept for ref)
 
     results: list[dict[str, str]] = []
     try:
@@ -2063,7 +2066,12 @@ def _get_targeted_verification_suggestion(
     Language-aware: emits the correct test runner per file extension.
     No suppression — all confidence levels emitted with labels.
     """
-    from groundtruth.config.signal_thresholds import (
+    # LEGITIMACY / swap-invariant (gt_gt §349: "no test names ... assertions table untouched"):
+    # GT must surface NO test name or test command — naming the test that grades a task is
+    # leakage/benchmaxxing, and the output must be identical if the grading test is swapped.
+    # Disabled: the agent runs its own tests; GT stays test-blind. (run12 leaked test_plot_hdi.)
+    return ""
+    from groundtruth.config.signal_thresholds import (  # noqa: F401  (dead — kept for ref)
         VERIFY_LABEL_HIGH_METHODS,
         VERIFY_LABEL_MEDIUM_METHODS,
         log_threshold_use,
@@ -2582,6 +2590,7 @@ def generate_improved_evidence(
     mode: str = "post_edit",
     iteration_ratio: float = 0.0,
     diff_text: str = "",
+    old_content: str = "",
     _evidence_accumulator: list[dict] | None = None,
 ) -> str:
     """Generate priority-ordered evidence from graph.db.
@@ -3177,84 +3186,26 @@ def generate_improved_evidence(
         func_parts.extend(_get_route_reexport_flags(db_path, file_path, func_name))
 
         # --- Priority 3: Test assertions ---
-        assertions = _get_test_assertions_from_graph(db_path, file_path, func_name)
-        if assertions:
-            _KIND_OP = {
-                "assertEqual": "==", "assertEquals": "==", "assertNotEqual": "!=",
-                "assertTrue": "is true", "assertFalse": "is false",
-                "assertIn": "in", "assertNotIn": "not in",
-                "assertIs": "is", "assertIsNone": "is None",
-                "assertRaises": "raises", "assert_raises": "raises",
-                "assert_equal": "==", "assert_true": "is true",
-            }
-            for a in assertions[:2]:
-                expr = clip_balanced(a["expression"], 100) if a["expression"] else ""
-                expected = clip_balanced(a["expected"], 50) if a["expected"] else ""
-                test_ref = f"{a['test_name']}" if a["test_name"] else "test"
-                test_file_base = os.path.basename(a.get("test_file", "")) if a.get("test_file") else ""
-                file_tag = f" ({test_file_base})" if test_file_base else ""
-                kind = a.get("kind", "")
-                op = _KIND_OP.get(kind, "==")
-                if expr:
-                    if kind in ("assertRaises", "assert_raises"):
-                        func_parts.append(f"[TEST] {test_ref}{file_tag} expects {expr} to raise {expected}")
-                    else:
-                        func_parts.append(f"[TEST] {test_ref}{file_tag} expects: {expr} {op} {expected}")
-        if not assertions:
-            file_assertions = _get_test_assertions_from_file(
-                db_path, file_path, func_name, repo_root
-            )
-            if file_assertions:
-                for fa in file_assertions[:3]:
-                    func_parts.append(f"[TEST] {fa}")
-                assertions = [{"test_file": "", "test_name": "", "expression": fa} for fa in file_assertions]
-        elif assertions:
-            # Supplement: if graph assertions have 0 issue-keyword relevance, add file-grep
-            _it = _load_issue_terms()
-            if _it:
-                _any_relevant = any(
-                    sum(1 for t in _it if t in ((a.get("expression", "") + " " + a.get("test_name", "")).lower()))
-                    for a in assertions
-                )
-                if not _any_relevant:
-                    _supp = _get_test_assertions_from_file(db_path, file_path, func_name, repo_root)
-                    for fa in _supp[:2]:
-                        func_parts.append(f"[TEST] {fa}")
-
-        if _evidence_accumulator is not None and assertions:
-            for a in assertions[:2]:
-                _evidence_accumulator.append({
-                    "kind": "l3_test_assertion", "file_path": a.get("test_file", ""),
-                    "symbol": a.get("test_name", ""), "text": a.get("expression", ""),
-                    "source": "graph_db",
-                })
+        # DISABLED (swap-invariant — run15 leak): this block rendered "[TEST] <test_name>
+        # (<test_file>) expects: <expr> <op> <expected>" into func_parts (agent observation).
+        # That surfaces the test FUNCTION NAME, the test FILE NAME, and the assertion BODY —
+        # all test-derived references GT must never show. _get_test_assertions_from_graph
+        # already early-returns [], so this rendering is dead; kept disabled explicitly.
+        assertions: list[dict[str, str]] = []
+        # DISABLED (swap-invariant — run15 leak): the file-fallback ([TEST] {fa}) and the
+        # issue-keyword supplement surfaced "<test_file>: <assertion body>" strings (test file
+        # name + assertion text) directly into func_parts → the agent's observation. The
+        # l3_test_assertion accumulator entry also carried the test name (symbol) + assertion
+        # expression into the __GT_STRUCTURED__ stdout channel the wrapper reads. GT must surface
+        # ZERO test references; the agent runs its own tests. Both paths removed.
+        # (_get_test_assertions_from_graph already early-returns [], so `assertions` is empty here.)
 
         # --- Priority 3b: Test completeness signal ---
-        if db_path and resolved_target_id and os.path.exists(db_path):
-            try:
-                _tc_conn = _open_graph_db(db_path)
-                _tc_fp = _resolve_file_path(_tc_conn, file_path)
-                _tc_tables = {r[0] for r in _tc_conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'"
-                ).fetchall()}
-                if "assertions" in _tc_tables:
-                    _tc_groups = _tc_conn.execute(
-                        """SELECT DISTINCT n.name FROM assertions a
-                           JOIN nodes n ON a.test_node_id = n.id
-                           JOIN nodes tgt ON a.target_node_id = tgt.id
-                           WHERE tgt.file_path = ?
-                           ORDER BY n.name LIMIT 20""",
-                        (_tc_fp,),
-                    ).fetchall()
-                    if len(_tc_groups) > 1:
-                        _tc_names = [r[0] for r in _tc_groups]
-                        func_parts.append(
-                            f"[COMPLETENESS] {len(_tc_names)} test groups target this file: "
-                            f"{', '.join(_tc_names[:5])} — verify ALL pass"
-                        )
-                _tc_conn.close()
-            except Exception:
-                pass
+        # DISABLED (swap-invariant — run15 leak): this read the assertions table for test
+        # node names (n.name) and emitted "[COMPLETENESS] N test groups target this file:
+        # <test_name>, <test_name>, ... — verify ALL pass" into func_parts. That surfaces
+        # the exact test function names that grade the task (leakage/benchmaxxing — output
+        # would change if the grading tests are swapped). Removed; the agent runs its own tests.
 
         # --- Priority 4: Sibling pattern (same class, different method) ---
         # B1: Sibling output suppressed — useless in 13/15 Phase 6 tasks.
@@ -3544,17 +3495,20 @@ def generate_improved_evidence(
             for _fn in function_names[:1]:
                 _impact = change_impact(db_path, _fn, file_path, max_depth=2, min_confidence=0.9)
                 if _impact:
-                    _imp_lines = ["Impact:"]
-                    for _imp in _impact[:3]:
-                        _tag = " [test]" if _imp["is_test"] else ""
-                        _hop = "direct" if _imp["hop"] == 1 else f"{_imp['hop']}-hop"
-                        _imp_lines.append(f"  {_hop}: {_imp['name']}() in {os.path.basename(_imp['file'])}:{_imp['line']}{_tag}")
-                    # Test suggestion from impact
-                    _test_impacts = [i for i in _impact if i["is_test"]]
-                    if _test_impacts:
-                        _test_cmd = _test_impacts[0]
-                        _imp_lines.append(f"Verify: pytest {_test_cmd['file']}::{_test_cmd['name']}")
-                    output_parts.insert(0, "\n".join(_imp_lines))
+                    # DISABLED (swap-invariant — run15 leak): impacted nodes that are tests
+                    # surfaced the test function name (+ a " [test]" tag), and the "Verify:
+                    # pytest <file>::<name>" suggestion surfaced the test file + test name +
+                    # command. GT must surface zero test references. Filter test nodes OUT of
+                    # the Impact list and drop the Verify suggestion entirely; KEEP the
+                    # non-test structural impact (callers/dependents) — that is legitimate
+                    # blast-radius context the agent needs and is not test-derived.
+                    _non_test_impact = [i for i in _impact if not i["is_test"]]
+                    if _non_test_impact:
+                        _imp_lines = ["Impact:"]
+                        for _imp in _non_test_impact[:3]:
+                            _hop = "direct" if _imp["hop"] == 1 else f"{_imp['hop']}-hop"
+                            _imp_lines.append(f"  {_hop}: {_imp['name']}() in {os.path.basename(_imp['file'])}:{_imp['line']}")
+                        output_parts.insert(0, "\n".join(_imp_lines))
         except Exception:
             pass
 
@@ -3567,9 +3521,29 @@ def generate_improved_evidence(
     if db_path and repo_root:
         try:
             from groundtruth.hooks.contract_delta import compute_delta
+            # Do NOT pass old_content here: main()'s recovery is fragment-prone
+            # (str_replace window / partial diff). compute_delta recovers the FULL
+            # pre-edit file from git HEAD itself (with task-dir prefix handling).
             _delta_lines = compute_delta(
-                db_path, file_path, repo_root=repo_root, diff_text=diff_text or ""
+                db_path, file_path, repo_root=repo_root, diff_text=diff_text or "",
             )
+            # Surface the delta outcome into the HOST-visible structured telemetry
+            # (gt_layer_events.evidence_items). The hook's stderr is in-container and lost,
+            # so this is the ONLY way to see WHY the delta was quiet in a live run.
+            try:
+                import groundtruth.hooks.contract_delta as _cdmod
+                _cd_reason = getattr(_cdmod, "LAST_REASON", "")
+            except Exception:
+                _cd_reason = ""
+            if _evidence_accumulator is not None:
+                _evidence_accumulator.append({
+                    "family": "CONTRACT_DELTA_DIAG",
+                    "reason": _cd_reason,
+                    "delivered": bool(_delta_lines),
+                    "n_lines": len(_delta_lines),
+                    "repo_root": repo_root,
+                    "file": file_path,
+                })
             if _delta_lines:
                 output_parts.insert(0, "\n".join(_delta_lines))
                 print(
@@ -4106,13 +4080,11 @@ def _format_evidence(item) -> str:
 
     # TestExpectation: "test_serialize:42 asserts format X"
     if hasattr(item, "assertion_type"):
-        test_func = getattr(item, "test_func", "test")
-        line = getattr(item, "line", "?")
-        assertion = getattr(item, "assertion_type", "")
-        # test-assertion expected is a source-text VALUE — balance-aware clip so a
-        # truncated literal/expr never reaches the agent.
-        expected = clip_balanced(getattr(item, "expected", "") or "", 60)
-        return f"GT: {test_func}:{line} {assertion} {expected} [{family_tag}]"
+        # DISABLED (swap-invariant — run15 leak): this rendered the test FUNCTION NAME
+        # (test_func) + assertion body into agent-visible output. GT must surface zero
+        # test references (no test names, no assertion bodies). Drop the item entirely
+        # so a TestExpectation never reaches the agent; the agent runs its own tests.
+        return ""
 
     # PatternEvidence, ChangeEvidence, StructuralEvidence: have "message"
     msg = getattr(item, "message", str(item))
@@ -4295,6 +4267,7 @@ def main() -> None:
                         mode=args.mode,
                         iteration_ratio=args.iteration_ratio,
                         diff_text=diff_text,
+                        old_content=old_content_text,
                         _evidence_accumulator=_accum,
                     )
                 else:
@@ -4524,7 +4497,9 @@ def main() -> None:
         # Sort by confidence descending, take top N
         passed.sort(key=lambda f: -getattr(f, "confidence", 0))
         for item in passed[: args.max_items]:
-            output_lines.append(_format_evidence(item))
+            _fmt = _format_evidence(item)
+            if _fmt:  # skip empties (e.g. swap-invariant-disabled TestExpectation)
+                output_lines.append(_fmt)
 
     output = "\n".join(output_lines)
     # Prepend the advisory prefix (contract drift + test-edit guard); it must reach the
@@ -4537,6 +4512,14 @@ def main() -> None:
     log_entry["wall_time_ms"] = int((time.time() - start) * 1000)
     log_hook(log_entry)
 
+    # Emit the structured accumulator on the LEGACY path too — generate_improved_evidence may
+    # have run and appended CONTRACT_DELTA_DIAG to _accum yet returned empty evidence (improved
+    # branch not taken). Without this, the diag/reason is silently dropped (run12 observability
+    # gap). The wrapper strips __GT_STRUCTURED__ from agent-visible text but reads the reason.
+    _legacy_accum = locals().get("_accum")
+    if args.structured_output and _legacy_accum:
+        print("__GT_STRUCTURED__")
+        print(json.dumps(_legacy_accum))
     if output:
         print(output)
         status = _status_line("success", f"{len(output_lines)}_items" if output_lines else "test_edit_advisory")

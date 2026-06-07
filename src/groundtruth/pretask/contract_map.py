@@ -605,13 +605,31 @@ def snapshot_contract(
     return snap
 
 
+def _norm_shape(shape: str) -> str:
+    """Normalize a return_shape for comparison: keep the category + the structural skeleton (call /
+    constructor / method heads, brackets), but BLANK bare variable identifiers. NON-HARM: a local-
+    variable rename (`return list(data)` -> `return list(result)`) changes the captured expression
+    TEXT but not the contract, and must NOT read as drift — else drift fires noise on every refactor.
+    A real structural change (list->dict, .foo()->.bar(), value->None) still differs."""
+    if "|" not in shape:
+        return shape
+    cat, expr = shape.split("|", 1)
+
+    def _repl(m: "re.Match[str]") -> str:
+        rest = expr[m.end():].lstrip()
+        return m.group(0) if rest.startswith("(") else "_"  # keep call/constructor/method heads
+
+    return cat + "|" + re.sub(r"[A-Za-z_]\w*", _repl, expr)
+
+
 def _diff_contract(pre: dict, post: dict) -> list[str]:
     """The material changes pre->post. Order-insensitive for set-valued kinds
     (a reorder is not drift). Correct-or-quiet: only well-formed deltas."""
     changes: list[str] = []
     pre_shape = (pre.get("return_shape") or "").strip()
     post_shape = (post.get("return_shape") or "").strip()
-    if pre_shape != post_shape and (pre_shape or post_shape):
+    # Compare STRUCTURE (variable-rename-invariant), not literal text -> no false drift on a rename.
+    if _norm_shape(pre_shape) != _norm_shape(post_shape) and (pre_shape or post_shape):
         changes.append(f"return shape: {pre_shape or 'none'} -> {post_shape or 'none'}")
     # LSP-sharpened type-level drift (List[X] -> Optional[X]) when types are known.
     pre_rt = (pre.get("return_type") or "").strip()
@@ -627,6 +645,14 @@ def _diff_contract(pre: dict, post: dict) -> list[str]:
     pre_guards = set(pre.get("guards") or [])
     post_guards = set(post.get("guards") or [])
     for dropped in sorted(pre_guards - post_guards):
+        # CORRECT-OR-QUIET (offline-proof finding, arviz add-guard FP): the indexer captures only a
+        # LIMITED set of guard_clauses per function, so ADDING a guard can displace the captured one
+        # and look like a "drop". A guard is only really dropped if its exception ALSO disappeared
+        # from raises. If the guard's exception is still raised post-edit, this is a capture artifact
+        # (not a real drop) -> suppress, so drift never falsely tells the agent it broke a guard.
+        _excs = re.findall(r"raise\s+([A-Za-z_][A-Za-z0-9_]*)", dropped)
+        if _excs and any(e in post_raises for e in _excs):
+            continue
         changes.append(f"dropped guard: {dropped}")
     return changes
 

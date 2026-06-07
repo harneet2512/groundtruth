@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 # a fact, no matter its confidence. Reuse those constants so v1r's caller
 # evidence and the <gt-graph-map> obey one identical rule.
 from groundtruth.pretask.curation_map import (
+    DETERMINISTIC_RESOLUTION_METHODS,
     _DETERMINISTIC_METHODS,
     _NAME_MATCH_FLOOR,
     _has_columns,
@@ -218,6 +219,15 @@ class V1RBriefResult:
     structural_signal_count: int = 0 # candidates with a nonzero structural/graph-reach score
     fts5_signal_count: int = 0       # candidates scored by / entering via FTS5/BM25 (lexical)
     confidence_tier: str = "low"     # HIGH/MEDIUM/LOW from _localization_header
+    # --- Embedder-CONSUMPTION metrics (instr 2026-06-07, FIELD-NAME CONTRACT) ---
+    # Let a fail-closed precheck distinguish "embedder PRESENT" from "embedder
+    # CONSUMED": a present-but-unconsumed embedder has effective_w_sem > 0 yet
+    # semantic_signal_count == 0 / all-zero sem_components. Measured over the
+    # RENDERED candidates (.files), so it reflects exactly what the agent saw.
+    effective_w_sem: float = 0.0          # W_SEM actually applied after all zeroing branches (from run_v74)
+    rendered_candidate_count: int = 0     # number of rendered/delivered candidates (== len(files))
+    k_sem_top: int = 0                    # the relative sem-component cap actually used (from run_v74)
+    sem_components: list[float] = field(default_factory=list)  # components['sem'] over rendered candidates
 
 
 def _top_functions(graph_db: str, file_path: str, limit: int = MAX_FUNCTIONS_PER_FILE) -> list[str]:
@@ -320,6 +330,18 @@ def _top_function_names(
         return (issue_matched + others)[:limit]
 
     return [row[0] for row in rows[:limit]]
+
+
+def _is_test_path(path: str) -> bool:
+    """True if a path is a test file (swap-invariant: such paths are never surfaced to the agent)."""
+    p = (path or "").replace("\\", "/").lower()
+    bn = p.rsplit("/", 1)[-1]
+    return (
+        "/test/" in p or "/tests/" in p or "/__tests__/" in p
+        or bn.startswith("test_") or bn.startswith("test")
+        or bn.endswith("_test.py") or bn.endswith("_test.go") or bn.endswith("_test.rs")
+        or ".test." in bn or ".spec." in bn or bn.endswith("test.java")
+    )
 
 
 def _test_files_for(graph_db: str, file_path: str, limit: int = 3) -> list[str]:
@@ -587,6 +609,144 @@ def _caller_contract_for_file(
     if unverified_parts:
         return " | ".join(unverified_parts[:2])
     return ""
+
+
+def _resolved_witnesses_for_file(
+    graph_db: str,
+    file_path: str,
+    repo_root: str,
+    max_each: int = 2,
+) -> list[dict]:
+    """Deterministic-provenance caller AND callee witnesses for ``file_path``.
+
+    This is the STRUCTURED twin of ``_caller_contract_for_file``: it surfaces the
+    RESOLVED call-edge FACTS already in graph.db so a candidate carries a concrete
+    call-edge witness at iter-0 (fixes the audited ``l1_candidates_with_call_edge_count
+    = 0`` / ``l1_primary_witness_file = 'N/A — no confirming edge'`` — the resolution
+    was on disk but never surfaced as a confirming edge in the L1 brief).
+
+    A witness is emitted ONLY when its edge ``resolution_method`` is in
+    ``DETERMINISTIC_RESOLUTION_METHODS`` (the unified categorical fact-set, shared
+    with curation_map / post_edit). ``name_match`` is NEVER a witness here — even a
+    single-candidate name_match scores 0.9 and is still a name GUESS. The same
+    ``_is_stdlib_shadow`` guard the brief's caller line applies is applied here, so a
+    DETERMINISTIC-tagged edge that is really a stdlib attribute call name-matched to a
+    same-named project symbol (``os.walk`` -> project ``walk``) is dropped despite its
+    recorded provenance (wire.md RUN VERDICT: the provenance gate alone trusts that
+    false fact; the stdlib guard is the secondary defense).
+
+    Returns a list of dicts ``{relation: 'CALLS', direction: 'caller'|'callee',
+    file_path, line, symbol, target, code}`` — caller witnesses first (a caller is
+    the stronger localization confirmation: it proves the candidate's symbol is a
+    REAL, USED target). Correct-or-quiet: empty list on any error / no DB / no
+    deterministic edge. Pure read; no ranking effect (BRIEFING.md §3 row 4 / §4 —
+    surface facts that already rank, never change reach/weights).
+    """
+    if not graph_db or not file_path:
+        return []
+    conn = None
+    try:
+        conn = sqlite3.connect(graph_db)
+        _, has_method = _has_columns(conn)
+        if not has_method:
+            return []  # cannot judge provenance -> emit nothing (never launder)
+        _det_sql = "','".join(sorted(DETERMINISTIC_RESOLUTION_METHODS))
+        _norm_fp = file_path.replace("\\", "/").lstrip("./").lstrip("/")
+        out: list[dict] = []
+
+        def _code_at(rel_file: str, line: int) -> str:
+            if not rel_file or not line or line <= 0:
+                return ""
+            try:
+                with open(
+                    os.path.join(repo_root, rel_file), encoding="utf-8", errors="ignore"
+                ) as fh:
+                    _lines = fh.readlines()
+                if 0 < line <= len(_lines):
+                    return _lines[line - 1].strip()
+            except OSError:
+                pass
+            return ""
+
+        # CALLERS: cross-file functions that CALL a symbol defined in this file
+        # (DETERMINISTIC edges only). The target symbol (nt.name) is required so the
+        # stdlib-shadow guard can be applied per (code, target_name).
+        caller_rows = conn.execute(
+            f"""
+            SELECT nsrc.file_path, e.source_line, nsrc.name, nt.name
+            FROM nodes nt
+            JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
+            JOIN nodes nsrc ON e.source_id = nsrc.id
+            WHERE nt.file_path LIKE ?
+              AND nsrc.file_path != nt.file_path
+              AND nsrc.is_test = 0
+              AND e.source_line > 0
+              AND LOWER(TRIM(e.resolution_method)) IN ('{_det_sql}')
+            ORDER BY e.source_line
+            LIMIT ?
+            """,
+            (f"%{_norm_fp}", max_each * 4),
+        ).fetchall()
+        for caller_file, line, caller_name, target_name in caller_rows:
+            code = _code_at(caller_file, line)
+            if _is_stdlib_shadow(code, target_name or ""):
+                continue  # false caller: stdlib attr call name-matched to project symbol
+            out.append({
+                "relation": "CALLS",
+                "direction": "caller",
+                "file_path": caller_file,
+                "line": int(line) if line else 0,
+                "symbol": caller_name or "",
+                "target": target_name or "",
+                "code": code,
+            })
+            if sum(1 for w in out if w["direction"] == "caller") >= max_each:
+                break
+
+        # CALLEES: cross-file symbols this file CALLS into (DETERMINISTIC edges only).
+        callee_rows = conn.execute(
+            f"""
+            SELECT nt.file_path, e.source_line, nt.name, nsrc.name, nt.start_line
+            FROM nodes nsrc
+            JOIN edges e ON e.source_id = nsrc.id AND e.type = 'CALLS'
+            JOIN nodes nt ON e.target_id = nt.id
+            WHERE nsrc.file_path LIKE ?
+              AND nt.file_path != nsrc.file_path
+              AND nt.is_test = 0
+              AND LOWER(TRIM(e.resolution_method)) IN ('{_det_sql}')
+            ORDER BY e.source_line
+            LIMIT ?
+            """,
+            (f"%{_norm_fp}", max_each * 4),
+        ).fetchall()
+        for callee_file, source_line, callee_name, src_name, def_line in callee_rows:
+            # `source_line` is the CALL SITE in THIS candidate file — use it only for the
+            # stdlib-shadow check on the call. The RENDERED location must be the callee's
+            # DEFINITION line in callee_file (nt.start_line); pairing callee_file with the
+            # caller's source_line printed "X in <calleefile>:<callerline>" (wrong file:line).
+            code = _code_at(file_path, source_line)
+            if _is_stdlib_shadow(code, callee_name or ""):
+                continue
+            out.append({
+                "relation": "CALLS",
+                "direction": "callee",
+                "file_path": callee_file,
+                "line": int(def_line) if def_line else 0,
+                "symbol": callee_name or "",
+                "target": src_name or "",
+                "code": code,
+            })
+            if sum(1 for w in out if w["direction"] == "callee") >= max_each:
+                break
+        return out
+    except Exception:
+        return []
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def _sibling_context(graph_db: str, file_path: str, func_names: list[str]) -> str:
@@ -1316,11 +1476,16 @@ def render_brief(
         if f.pattern:
             lines.append(f"   Context: {f.pattern}")
         if f.co_changes:
-            lines.append(f"   Also changes: {', '.join(f.co_changes)}")
+            # SWAP-INVARIANT (run16 leak): drop test files from the co-change list — "Also changes:
+            # …/test_plots_matplotlib.py" surfaces a test reference. Non-test co-changes are kept.
+            _cc = [c for c in f.co_changes if not _is_test_path(c)]
+            if _cc:
+                lines.append(f"   Also changes: {', '.join(_cc)}")
         if f.callees:
             lines.append(f"   Calls: {', '.join(f.callees)}")
-        if f.test_mappings:
-            lines.append(f"   Tests: {', '.join(f.test_mappings)}")
+        # DISABLED (swap-invariant — run15 leak): never surface test FILE names to the agent.
+        # if f.test_mappings:
+        #     lines.append(f"   Tests: {', '.join(f.test_mappings)}")
 
     # EXPECTED BEHAVIOR from issue text — the reporter's own spec for what the code
     # SHOULD do. Extracted from markdown sections like "### Expected Behavior",
@@ -1355,7 +1520,12 @@ def render_brief(
     # When the brief mislocates (84% of the time), the agent sees test assertions
     # for the WRONG file. Now queries ALL rendered files so the correct file's
     # assertions are always present. Language-agnostic; generalized.
-    if graph_db and files:
+    # DISABLED (swap-invariant / gt_trial §6 leakage — caught live in run15): this block queried the
+    # OFF-LIMITS `assertions` table and surfaced grader TEST NAMES + assertion bodies into the brief
+    # ("VERIFY (tests targeting hdiplot.py): test_plot_hdi: assert ax"). "repo-visible tests are
+    # leakage-safe" is FALSE — it lets the agent benchmaxx off the grader's test names (the run12
+    # finding). GT must surface ZERO test references so its output is identical if the grader swaps.
+    if False and graph_db and files:
         try:
             import sqlite3 as _asq
             _aconn = _asq.connect(graph_db)
@@ -1504,8 +1674,9 @@ def render_brief(
         note = f"\nHighest-confidence candidate (graph + issue signals): {top.path}"
         if getattr(top, "witness", ""):
             note += f" — graph witness: {top.witness}"
-        if top.test_mappings:
-            note += f" — covering test: {top.test_mappings[0]}"
+        # DISABLED (swap-invariant — run15 leak): never name a covering test to the agent.
+        # if top.test_mappings:
+        #     note += f" — covering test: {top.test_mappings[0]}"
         lines.append(note)
     elif emit_confident_line and not any(getattr(f, "witness_verified", False) for f in files):
         # No candidate carries a verified witness: honest fallback (correct-or-
@@ -1550,11 +1721,24 @@ def _edit_target_guard(graph_db: str, file_path: str, func: str) -> tuple[str, i
     try:
         conn = sqlite3.connect(graph_db)
         try:
-            base = os.path.basename(file_path)
+            # BIND TO THE CANDIDATE'S OWN FILE — not just its basename. A "%basename"
+            # LIKE matches a SAME-NAMED function in a DIFFERENT file (utils.py/models.py/
+            # db.py collisions; "%db.py" even matches "gtdb.py"), so the HIGH-tier
+            # "Edit target: <tgt.file_path> :: <func>" header could be followed by a
+            # guard/return line that belongs to another file entirely — a confident-WRONG
+            # fact (correct-or-quiet violation). Match the full normalized path: exact on
+            # the stored form, plus a "%/" || rel suffix LIKE so a stored path that differs
+            # only by a leading prefix still resolves, while the leading "/" boundary blocks
+            # the gtdb.py/db.py basename-substring collision. is_test = 0 filters OUT only.
+            # ORDER BY start_line LIMIT 1 makes the single returned node deterministic.
+            rel = _gl_normalize(file_path)
             row = conn.execute(
-                "SELECT id FROM nodes WHERE file_path LIKE ? AND name = ? "
-                "AND label IN ('Function','Method') LIMIT 1",
-                (f"%{base}", func),
+                "SELECT id FROM nodes "
+                "WHERE (file_path = ? OR file_path = ? OR file_path LIKE ?) "
+                "AND name = ? AND is_test = 0 "
+                "AND label IN ('Function','Method') "
+                "ORDER BY start_line LIMIT 1",
+                (file_path, rel, "%/" + rel, func),
             ).fetchone()
             if not row:
                 return "", None
@@ -1649,6 +1833,41 @@ def _high_func_support(witnesses, func: str) -> int:
         if (getattr(w, "anchor", "") or "").lower() == fl
         and getattr(w, "direction", "") != "defines_anchor"
     })
+
+
+def _resolved_witness_tail(graph_db: str, file_path: str) -> str:
+    """Compact one-line RESOLVED call-edge witness for a localization-header
+    candidate, or '' (correct-or-quiet).
+
+    The ``<gt-localization>`` header is the FIRST block the agent reads (primacy),
+    yet on the audited conan run its candidates carried NO call-edge witness at all —
+    the resolution reached the agent only reactively via post_view at iters 8/10/49,
+    too late to redirect the first move. This attaches the deterministic caller/callee
+    FACT (already on disk) right next to the candidate so a resolved edge reaches the
+    iter-0 brief that previously did not.
+
+    Renders ``caller() in file:line`` (a caller proves the candidate's symbol is a
+    REAL, USED target — the strongest confirmation) and falls back to ``-> callee()
+    in file:line``. No source snippet (header stays compact; repo_root not needed).
+    Deterministic-provenance + stdlib-shadow-guarded via ``_resolved_witnesses_for_file``;
+    never surfaces a name_match. Pure read; no ranking effect.
+    """
+    if not graph_db or not file_path:
+        return ""
+    wits = _resolved_witnesses_for_file(graph_db, file_path, repo_root="", max_each=1)
+    if not wits:
+        return ""
+    callers = [w for w in wits if w.get("direction") == "caller"]
+    callees = [w for w in wits if w.get("direction") == "callee"]
+    if callers:
+        w = callers[0]
+        sym = w.get("symbol") or "?"
+        return f"resolved caller: {sym}() in {w.get('file_path')}:{w.get('line')}"
+    if callees:
+        w = callees[0]
+        sym = w.get("symbol") or "?"
+        return f"resolved call: -> {sym}() in {w.get('file_path')}:{w.get('line')}"
+    return ""
 
 
 def _localization_header(loc, graph_db: str, issue_text: str) -> str:
@@ -1817,6 +2036,9 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> str:
                f"Region: {region}/ — candidate edit targets (reason over these, confirm with grep):"]
         for i, c in enumerate(shown, 1):
             out.append(f"  {i}. {c.file_path}")
+            _wt = _resolved_witness_tail(graph_db, c.file_path)
+            if _wt:
+                out.append(f"     {_wt}")
         out.append("</gt-localization>")
         return "\n".join(out)
 
@@ -1832,8 +2054,123 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> str:
         fs = _defines_funcs(c)
         tail = f" — {', '.join(fs[:3])}" if fs else ""
         out.append(f"  {i}. {c.file_path}{tail}")
+        # Surface the RESOLVED call-edge fact (already on disk) next to the
+        # candidate so a confirming edge reaches the iter-0 header — the audited
+        # gap where the header's candidates carried no call-edge witness and the
+        # resolution only reached the agent reactively (post_view, iters 8/10/49).
+        # Deterministic + stdlib-shadow-guarded; correct-or-quiet (no fact -> no line).
+        _wt = _resolved_witness_tail(graph_db, c.file_path)
+        if _wt:
+            out.append(f"     {_wt}")
     out.append("</gt-localization>")
     return "\n".join(out)
+
+
+# Language-invariant generic identifiers — code builtins + ubiquitous collection methods that are
+# NEVER localization anchors even when an issue mentions them (the code equivalent of anchors.py's
+# _NL_FUNCTION_WORDS English-function-word filter — a LANGUAGE invariant, NOT a per-task blocklist;
+# no domain words). loguru-1297: 'print' (a builtin with a caller edge) corroborated _error_interceptor
+# and flanked the gold — this drops it at the source so only specific names seed.
+_GENERIC_CODE_NAMES: frozenset[str] = frozenset({
+    "print", "format", "sorted", "range", "input", "repr", "round", "bytes", "bytearray",
+    "frozenset", "isinstance", "hasattr", "getattr", "setattr", "delattr", "super", "object",
+    "property", "staticmethod", "classmethod", "append", "extend", "insert", "remove",
+    "items", "keys", "values", "update", "split", "strip", "join", "replace", "encode", "decode",
+})
+
+
+def _exact_issue_named_files(issue_text: str, graph_db: str) -> dict[str, list[str]]:
+    """{file: [funcs]} for Function/Method names appearing VERBATIM in the issue (gt_gt §4
+    exact-name seeder). A function the issue literally names is the strongest localization signal
+    that exists — its file MUST be a guaranteed candidate, never composite-scored-and-cut.
+    Language/repo-agnostic (graph name match), test-blind (is_test=0). LIPI: arviz issue names
+    plot_hdi 4x + links hdiplot.py, yet run_v74 never anchored it so the gold was absent from
+    ranked_full. SPECIFICITY (proven needed by held-out loguru-1297): an issue-named function is a
+    localization signal ONLY if it is SPECIFIC — generic names (`__init__`, `print`) appear in the
+    issue AND in many files, flooding the guarantee and burying the real gold. So: skip dunders,
+    skip short generic names, and skip any name that resolves to MORE than a few files."""
+    import re as _re
+    import sqlite3 as _sq
+    toks = set(_re.findall(r"[A-Za-z_][A-Za-z0-9_]{3,}", issue_text or ""))
+    toks |= {t.lower() for t in toks}
+    out: dict[str, list[str]] = {}
+    if not toks:
+        return out
+    _MAX_FILES_PER_NAME = 3  # a name spread across >3 files is generic, not a specific anchor
+    try:
+        c = _sq.connect(graph_db)
+        _name_files: dict[str, set[str]] = {}
+        for name, fp in c.execute(
+            "SELECT DISTINCT name, file_path FROM nodes "
+            "WHERE is_test=0 AND label IN ('Function','Method') AND name IS NOT NULL"
+        ):
+            if not name or not fp:
+                continue
+            if name.startswith("__") and name.endswith("__"):   # dunders are never anchors
+                continue
+            if name.lower() in _GENERIC_CODE_NAMES:             # language builtins are never anchors
+                continue
+            if len(name) < 5 and "_" not in name:               # skip short generic names
+                continue
+            if name in toks or name.lower() in toks:
+                _name_files.setdefault(name, set()).add(fp)
+        for name, files in _name_files.items():
+            if len(files) > _MAX_FILES_PER_NAME:                # generic name -> not a specific anchor
+                continue
+            for fp in files:
+                out.setdefault(fp, [])
+                if name not in out[fp]:
+                    out[fp].append(name)
+        c.close()
+    except Exception:
+        pass
+    return out
+
+
+def _exact_name_has_verified_caller(graph_db: str, file_path: str, func_names: list[str]) -> bool:
+    """True iff at least one of ``func_names`` defined in ``file_path`` has a
+    cross-file caller reaching it through a DETERMINISTIC edge (same_file / import /
+    verified_unique / type_flow / lsp ...). This is independent corroboration that an
+    issue-named function is a REAL, USED symbol — not a coincidental same-name match
+    in a file the issue never meant. Reuses the categorical provenance set
+    (_DETERMINISTIC_METHODS) — a name_match edge is NEVER corroboration. Repo- and
+    language-agnostic; correct-or-quiet (any error / no method column -> False)."""
+    if not graph_db or not file_path or not func_names:
+        return False
+    conn = None
+    try:
+        conn = sqlite3.connect(graph_db)
+        _, has_method = _has_columns(conn)
+        if not has_method:
+            return False  # cannot judge provenance -> not corroborated
+        _det_sql = "','".join(sorted(_DETERMINISTIC_METHODS))
+        _norm_fp = file_path.replace("\\", "/").lstrip("./").lstrip("/")
+        for fname in func_names[:5]:
+            row = conn.execute(
+                f"""
+                SELECT 1
+                FROM nodes nt
+                JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
+                JOIN nodes nsrc ON e.source_id = nsrc.id
+                WHERE nt.name = ? AND nt.file_path LIKE ?
+                  AND nsrc.file_path != nt.file_path
+                  AND nsrc.is_test = 0
+                  AND LOWER(TRIM(e.resolution_method)) IN ('{_det_sql}')
+                LIMIT 1
+                """,
+                (fname, f"%{_norm_fp}"),
+            ).fetchone()
+            if row is not None:
+                return True
+        return False
+    except Exception:
+        return False
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def generate_v1r_brief(
@@ -1891,11 +2228,17 @@ def generate_v1r_brief(
     )
 
     if not v74.ranked_full:
+        # No candidates ranked — but the embedder WEIGHT is still known. Surface it
+        # so the precheck can tell "embedder on, no candidates" from "embedder off".
         return V1RBriefResult(
             files=[],
             brief_text="<gt-task-brief>\n</gt-task-brief>",
             token_estimate=4,
             v74_result=v74,
+            effective_w_sem=float(getattr(v74, "effective_w_sem", 0.0) or 0.0),
+            rendered_candidate_count=0,
+            k_sem_top=int(getattr(v74, "k_sem_top_effective", 0) or 0),
+            sem_components=[],
         )
 
     # Adaptive K: include candidates while score gap is small.
@@ -1917,6 +2260,34 @@ def generate_v1r_brief(
         top_records = v74.ranked_full[: max(min(k, max_files), min_k)]
     else:
         top_records = v74.ranked_full[:max_files]
+
+    # gt_gt §4 exact-name GUARANTEE (RANKING fix, not recall): a function named VERBATIM in the
+    # issue and present in the graph is the strongest content signal — its file is promoted to the
+    # FRONT of the candidates, never composite-scored-and-cut. Pulled from the FULL ranking (so it
+    # already passed retrieval); capped to avoid flooding. (LIPI arviz: plot_hdi named 4x, verified
+    # caller, was ranked below lexical stats.py and dropped from the top-5.)
+    _issue_named = _exact_issue_named_files(issue_text, graph_db)
+    if _issue_named:
+        def _rf(r):
+            return (r.get("path") or r.get("file") or r.get("file_path") or "").replace("\\", "/").lstrip("/")
+        _named = {f.replace("\\", "/").lstrip("/"): fns for f, fns in _issue_named.items()}
+        _have = {_rf(r) for r in top_records}
+        _by_path = {_rf(r): r for r in v74.ranked_full}
+        _top_score = float(top_records[0].get("score", 1.0)) if top_records else 1.0
+        _promote: list[dict] = []
+        for fp in sorted(_named):
+            if fp in _have:
+                continue
+            if fp in _by_path:                       # retrieved-but-cut -> pull to front
+                _promote.append(_by_path[fp])
+            else:                                    # recall miss -> synthesize a top record
+                _promote.append({
+                    "path": fp, "score": _top_score + 0.01,
+                    "functions": _named[fp][:3], "witnesses": [],
+                    "_exact_issue_named": True,
+                })
+        if _promote:
+            top_records = _promote[:3] + top_records
 
     # Filter non-source files from candidates — changelogs, READMEs, configs, docs
     # rank high on BM25 keywords but are never edit targets
@@ -2093,6 +2464,10 @@ def generate_v1r_brief(
         # Also reorder EXISTING records: a lexical record that the localizer
         # verified-witnessed should sort ahead of a witness-less one.
         def _is_verified_witnessed(rec: dict) -> bool:
+            # gt_gt §4.1: an issue-EXACTLY-named symbol (its function appears verbatim in the
+            # issue) ranks with the verified group — it is the strongest anchor that exists.
+            if rec.get("_exact_issue_named"):
+                return True
             p = str(rec.get("path", ""))
             pn = p.replace("\\", "/").lstrip("./").lstrip("/")
             return bool(
@@ -2107,6 +2482,8 @@ def generate_v1r_brief(
         # importer.py (localize #1) lands behind query.py/db.py (localize #2/#4)
         # purely because those were absent from the base lexical set and it wasn't.
         def _loc_rank(rec: dict) -> int:
+            if rec.get("_exact_issue_named"):
+                return -1  # the issue literally names this function -> sort FIRST
             p = str(rec.get("path", ""))
             pn = p.replace("\\", "/").lstrip("./").lstrip("/")
             r = _loc_rank_by_file.get(p)
@@ -2335,7 +2712,82 @@ def generate_v1r_brief(
         finally:
             if _ik_conn is not None:
                 _ik_conn.close()
+    # FINAL exact-name GUARANTEE (after ALL reordering): the verified-witness rebuild can drop a
+    # synthesized issue-named record, so re-assert it here, right before entries are built. gt_gt
+    # §4: a function named verbatim in the issue is the strongest anchor — its file MUST render.
+    #
+    # KINK #5 (residual brief noise): the guarantee used to FRONT-INJECT *every* issue-named file
+    # not already in the top (`top_records = _inj + top_records`), sorted only by retrieval score.
+    # A function name that is SPECIFIC ENOUGH to pass _exact_issue_named_files (not a dunder, len>=5,
+    # in <=3 files) can still appear COINCIDENTALLY in a non-gold file (arviz: inference_data.py /
+    # utils.py; loguru: _error_interceptor.py). Force-prepending those flanked the gold with
+    # non-gold issue-named files. Fix (correct-or-quiet, content+confidence-gated, NOT reach):
+    # split the injections into CORROBORATED vs COINCIDENCE.
+    #   CORROBORATED (>=1 independent signal) -> keep the front-promotion (the rescue purpose):
+    #     - verified graph-traversal witness (_witness_verified_by_file), OR
+    #     - the issue-named function has a DETERMINISTIC cross-file caller edge (real, used symbol), OR
+    #     - retrieval itself already ranked the file in its native top-`max_files`
+    #       (the guarantee is only protecting it from a downstream reorder drop).
+    #   COINCIDENCE (specific-but-unbacked same-name, ranked low/absent natively) -> still injected
+    #     (recall guarantee preserved) but APPENDED AFTER the native top candidates, capped, NEVER
+    #     forced to the front. The gold (already in the native top: arviz hdiplot.py #0, loguru
+    #     _datetime.py top-3) keeps its slot; pure-coincidence matches drop below it.
+    # Research: BLUiR ASE 2013 / FINAL_REPORT lever #4 (deterministic method, name_match != fact),
+    # SWERank ICLR 2025 (verified witness hard-negative), §4 (content + gate, not reach).
+    _ein = _exact_issue_named_files(issue_text, graph_db)
+    if _ein:
+        def _rfp(r):
+            return (r.get("path") or r.get("file") or "").replace("\\", "/").lstrip("/")
+        _ein_n = {f.replace("\\", "/").lstrip("/"): fns for f, fns in _ein.items()}
+        _bp = {_rfp(r): r for r in v74.ranked_full}
+        # Native retrieval rank by normalized path (0 = retrieval's #1). Used to detect
+        # "retrieval already ranked it high" corroboration without re-scoring.
+        _native_rank = {_rfp(r): i for i, r in enumerate(v74.ranked_full)}
+        _topsc = float(top_records[0].get("score", 1.0)) if top_records else 1.0
+        _in_top = {_rfp(r) for r in top_records[:max_files]}
 
+        def _is_corroborated(_fp: str, _funcs: list[str]) -> bool:
+            # (a) verified graph-traversal witness (structural fact)
+            if _witness_verified_by_file.get(_fp) or _witness_verified_by_file.get(
+                _fp.replace("\\", "/").lstrip("./").lstrip("/")
+            ):
+                return True
+            # (b) retrieval natively ranked this file in its own top-`max_files`
+            _nr = _native_rank.get(_fp)
+            if _nr is not None and _nr < max_files:
+                return True
+            # (c) the issue-named function is a REAL, USED symbol (deterministic caller edge)
+            if _exact_name_has_verified_caller(graph_db, _fp, _funcs):
+                return True
+            return False
+
+        _front: list[dict] = []   # corroborated -> keep front-promotion
+        _back: list[dict] = []    # coincidence -> append below native top, capped
+        for _fp in _ein_n:
+            if _fp in _in_top:
+                continue
+            _r = _bp.get(_fp) or {"path": _fp, "score": _topsc + 0.01,
+                                  "functions": _ein_n[_fp][:3], "witnesses": [], "_exact_issue_named": True}
+            if _is_corroborated(_fp, _ein_n[_fp]):
+                _front.append(_r)
+            else:
+                _back.append(_r)
+        _front.sort(key=lambda r: -float(r.get("score", 0.0)))   # highest-scored issue-named first
+        _back.sort(key=lambda r: -float(r.get("score", 0.0)))
+        # Front-promote ONLY corroborated injections. Coincidence injections go AFTER the native
+        # top candidates (preserve the gold's slot), capped to 2 so they don't flood the brief.
+        _MAX_COINCIDENCE_INJ = 2
+        if _back:
+            top_records = _front + top_records + _back[:_MAX_COINCIDENCE_INJ]
+        else:
+            top_records = _front + top_records
+        _seen = set(); _dedup = []
+        for _r in top_records:
+            _k = _rfp(_r)
+            if _k in _seen:
+                continue
+            _seen.add(_k); _dedup.append(_r)
+        top_records = _dedup
     entries: list[FileEntry] = []
     for rec in top_records:
         path = str(rec.get("path", ""))
@@ -2536,6 +2988,15 @@ def generate_v1r_brief(
         if _rp and _rp not in _rec_by_path:
             _rec_by_path[_rp] = _r
     _aligned_records = [_rec_by_path.get(e.path, {}) for e in _delivered]
+    if os.environ.get("GT_DEBUG_L1") == "1":
+        import sys as _sys_dbg
+        _comp = [(str(_r.get("path", ""))[-44:], {k: round(float(v), 3) for k, v in (_r.get("components") or {}).items()})
+                 for _r in top_records[:5]]
+        _join = [(getattr(e, "path", "")[-44:], "MATCH" if getattr(e, "path", "") in _rec_by_path else "MISS")
+                 for e in _delivered[:8]]
+        print(f"[GT_DEBUG_L1] ranked_full_components={_comp}", file=_sys_dbg.stderr, flush=True)
+        print(f"[GT_DEBUG_L1] delivered_vs_record_join={_join}", file=_sys_dbg.stderr, flush=True)
+        print(f"[GT_DEBUG_L1] n_top_records={len(top_records)} n_delivered={len(_delivered)} embedder={os.environ.get('GT_FORCE_ONNX_EMBEDDER','?')}", file=_sys_dbg.stderr, flush=True)
     try:
         _ge, _sem_c, _struct_c, _fts5_c = _l1_signal_counts(
             graph_db, _delivered, _aligned_records
@@ -2543,6 +3004,19 @@ def generate_v1r_brief(
     except Exception:
         _ge = _sem_c = _struct_c = _fts5_c = 0
     _conf_tier = _tier_from_loc_header(_loc_header)
+
+    # --- Embedder-CONSUMPTION metrics over the RENDERED candidates ---
+    # sem_components reads components['sem'] from the SAME per-entry top_records
+    # alignment that _l1_signal_counts uses, so semantic_signal_count ==
+    # sum(1 for s in sem_components if s > 0) by construction (auditable). The
+    # effective W_SEM and the relative sem cap come from run_v74 (the single point
+    # where every zeroing branch converges). rendered_candidate_count == len(files).
+    _sem_components = [
+        float((_r.get("components", {}) if isinstance(_r, dict) else {}).get("sem", 0.0) or 0.0)
+        for _r in _aligned_records
+    ]
+    _eff_w_sem = float(getattr(v74, "effective_w_sem", 0.0) or 0.0)
+    _k_sem_top = int(getattr(v74, "k_sem_top_effective", 0) or 0)
 
     result = V1RBriefResult(
         files=_delivered,
@@ -2554,6 +3028,10 @@ def generate_v1r_brief(
         structural_signal_count=_struct_c,
         fts5_signal_count=_fts5_c,
         confidence_tier=_conf_tier,
+        effective_w_sem=_eff_w_sem,
+        rendered_candidate_count=len(_delivered),
+        k_sem_top=_k_sem_top,
+        sem_components=_sem_components,
     )
 
     # Structured telemetry: emit L1 candidates as JSON for wrapper to parse
@@ -2593,6 +3071,65 @@ def generate_v1r_brief(
                         "text": ", ".join(entry.functions[:3]) if entry.functions else "",
                     }
                 )
+
+            # RESOLVED call-edge witnesses -> structured evidence items in the kinds
+            # the telemetry reader consumes (telemetry/metrics._compute_l1_metrics):
+            #   - kind="l1_graph_edge", source="CALLS"  -> l1_candidates_with_call_edge_count
+            #   - kind="l1_confirming_edge"             -> l1_primary_witness_file/symbol/type
+            # The audited run reported l1_candidates_with_call_edge_count=0 +
+            # l1_primary_witness_file='N/A — no confirming edge' even though the
+            # resolution was on disk: the L1 structured payload never surfaced the
+            # deterministic caller/callee edges as confirming evidence. These items
+            # close that gap. Deterministic-provenance + stdlib-shadow-guarded
+            # (_resolved_witnesses_for_file); a name_match is NEVER emitted here.
+            _primary_emitted = False
+            for entry in entries:
+                try:
+                    _wits = _resolved_witnesses_for_file(graph_db, entry.path, repo_root)
+                except Exception:
+                    _wits = []
+                for _w in _wits:
+                    l1_items.append({
+                        "kind": "l1_graph_edge",
+                        "file_path": entry.path,            # the CANDIDATE this edge confirms
+                        "source": "CALLS",
+                        "direction": _w.get("direction"),   # caller | callee
+                        "symbol": _w.get("symbol", ""),
+                        "edge_file": _w.get("file_path", ""),
+                        "line": _w.get("line", 0),
+                        "confidence": 1.0,                  # deterministic edge = fact
+                        "reason": "resolved CALLS edge (deterministic provenance)",
+                    })
+                # The PRIMARY confirming witness for this candidate is its first
+                # resolved CALLER (a caller proves the candidate's symbol is a real,
+                # used target — the strongest confirmation). Emit ONE per task: the
+                # first candidate that carries a resolved caller.
+                if not _primary_emitted:
+                    _caller = next(
+                        (w for w in _wits if w.get("direction") == "caller"), None
+                    )
+                    if _caller is not None:
+                        l1_items.append({
+                            "kind": "l1_confirming_edge",
+                            "file_path": entry.path,
+                            "symbol": _caller.get("symbol", ""),
+                            "source": "CALLS",
+                            "edge_file": _caller.get("file_path", ""),
+                            "line": _caller.get("line", 0),
+                            "confidence": 1.0,
+                            "reason": "resolved cross-file caller (deterministic)",
+                        })
+                        _primary_emitted = True
+
+            _call_edge_count = sum(
+                1 for it in l1_items
+                if it.get("kind") == "l1_graph_edge" and it.get("source") == "CALLS"
+            )
+            _confirming = next(
+                (it.get("file_path") for it in l1_items
+                 if it.get("kind") == "l1_confirming_edge"),
+                None,
+            )
             structured = {
                 "candidates": l1_items,
                 "candidate_count": len(entries),
@@ -2605,12 +3142,24 @@ def generate_v1r_brief(
                 "structural_signal_count": _struct_c,
                 "fts5_signal_count": _fts5_c,
                 "confidence_tier": _conf_tier,
+                # Embedder-CONSUMPTION metrics (same definitions as the
+                # V1RBriefResult fields): effective_w_sem>0 with
+                # semantic_signal_count==0 / all-zero sem_components ==
+                # present-but-unconsumed embedder.
+                "effective_w_sem": _eff_w_sem,
+                "rendered_candidate_count": len(_delivered),
+                "k_sem_top": _k_sem_top,
+                "sem_components": _sem_components,
                 # legacy proxy (callees present) kept for back-compat readers
                 "neighbor_present_count": sum(1 for e in entries if e.callees),
                 "test_edge_count": sum(1 for e in entries if e.test_mappings),
                 "signature_count": sum(1 for e in entries if e.functions),
                 "witnessed_count": sum(1 for e in entries if e.witness),
                 "verified_witness_count": sum(1 for e in entries if e.witness_verified),
+                # Resolved deterministic call-edge witnesses surfaced at iter-0 — the
+                # signal the audited run reported as 0 / 'N/A'.
+                "l1_candidates_with_call_edge_count": _call_edge_count,
+                "l1_primary_witness_file": _confirming or "N/A — no confirming edge",
                 "warnings": [],
                 "abstain_reason": None,
             }
