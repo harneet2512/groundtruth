@@ -640,11 +640,44 @@ jobs:
           rm -rf /tmp/gt/src && mkdir -p /tmp/gt/src
           docker cp "gtsrc:$ROOT/." /tmp/gt/src || { echo "FATAL: source extract failed"; exit 1; }
           docker rm -f gtsrc 2>/dev/null || true
+          # PRE-LSP return_type baseline so the RESOLUTION-QUALITY gate can prove the LSP
+          # precision pass actually ran (RT_after > RT_before == LSP was ON, not a silent no-op).
+          RT0=$(python3 -c "import sqlite3;print(sqlite3.connect('/tmp/gt/graph.db').execute(\"select count(*) from nodes where return_type is not null and trim(return_type)!=''\").fetchone()[0])" 2>/dev/null || echo 0)
+          # Pull THIS task's issue text -> /tmp/issue.txt (GATE 3 consumption + demand scope).
+          # Mirrors swebench_30task.yml exactly (issue from the materialized /tmp/ds/dataset.jsonl).
+          TASK_ID="$(echo "$TASK" | tr -d '\r')"
+          python3 -c "
+          import json
+          for l in open('/tmp/ds/dataset.jsonl'):
+              d=json.loads(l)
+              if d.get('instance_id')=='$TASK_ID':
+                  open('/tmp/issue.txt','w').write(d.get('problem_statement','') or ''); break
+          " || true
+          # Demand-driven SCOPE (T4 / Heintze & Tardieu PLDI'01): restrict the LSP precision
+          # pass to the issue's mentioned source files so the GATE-2 contract line reports
+          # scoped_source_files>0 (un-scoped == demand-driven scoping degraded).
+          python3 - <<'PY' || true
+          import re, os
+          issue = open("/tmp/issue.txt", encoding="utf-8").read() if os.path.exists("/tmp/issue.txt") else ""
+          base = {os.path.basename(f) for f in re.findall(r'[\w/]+\.py', issue)}
+          scoped = [os.path.join(r, f) for r, _, fs in os.walk("/tmp/gt/src") for f in fs if f in base]
+          open("/tmp/gt_scope_files.txt", "w").write("\n".join(scoped))
+          print(f"demand scope: {len(scoped)} issue-relevant source files")
+          PY
+          SCOPE_ARG=""; [ -s /tmp/gt_scope_files.txt ] && SCOPE_ARG="--source-files /tmp/gt_scope_files.txt"
           # HOST LSP resolve: real pyright on the host source copy (python-only split).
           # Fail-closed under GT_REQUIRE_LSP/FULL_STACK — a degraded LSP pass must abort.
-          python -m groundtruth.resolve --db /tmp/gt/graph.db --root /tmp/gt/src --resolve --lang python 2>&1 | tail -3
+          # Capture resolve's stdout (incl. the `LSP_METRICS resolved=.. residual=..
+          # scoped_source_files=..` contract line) to /tmp/gt_lsp_metrics.txt for GATE 2.
+          python -m groundtruth.resolve --db /tmp/gt/graph.db --root /tmp/gt/src --resolve --lang python $SCOPE_ARG 2>&1 | tee /tmp/gt_lsp_metrics.txt | tail -3
           LSP_RC=${PIPESTATUS[0]}
           [ "$LSP_RC" -eq 0 ] || { echo "FATAL: host LSP resolve pass failed (rc=$LSP_RC)"; exit 1; }
+          echo "GT_LSP_METRICS_FILE=/tmp/gt_lsp_metrics.txt" >> "$GITHUB_ENV"
+          grep -E 'LSP_METRICS' /tmp/gt_lsp_metrics.txt || echo "WARN: resolve emitted no LSP_METRICS contract line (GATE 2 will fail-closed)"
+          RT1=$(python3 -c "import sqlite3;print(sqlite3.connect('/tmp/gt/graph.db').execute(\"select count(*) from nodes where return_type is not null and trim(return_type)!=''\").fetchone()[0])" 2>/dev/null || echo 0)
+          # Export PRE-LSP return_type count so the RESOLUTION-QUALITY gate (C) can assert RT grew.
+          echo "GT_RT_BEFORE_LSP=${RT0}" >> "$GITHUB_ENV"
+          echo "[LSP-GATE2] return_types ${RT0} -> ${RT1} (enrichment delta $((RT1-RT0)))"
           LSP_EDGES=$(sqlite3 /tmp/gt/graph.db "SELECT COUNT(*) FROM edges WHERE resolution_method='lsp'" 2>/dev/null | grep -oE '^[0-9]+' || echo 0)
           echo "host LSP-promoted edges: $LSP_EDGES"
           # Rebuild the transitive-closure sidecar AFTER LSP (it goes stale otherwise) — the
@@ -667,6 +700,117 @@ jobs:
           GT_FORCE_ONNX_EMBEDDER=1 GT_REQUIRE_EMBEDDER=1 GT_REQUIRE_LSP=1 GT_REQUIRE_FTS5=1 \
           GT_REQUIRE_FULL_STACK=1 GT_MODELS_ROOT="$GITHUB_WORKSPACE/models" \
             python scripts/verify/preflight_pipeline.py --db /tmp/gt/graph.db --root /tmp/gt/src --census
+
+      - name: FOUNDATIONAL GATES (graph/LSP/embedder FIRST) — mid-run visibility
+        # Non-fatal visibility pass: prints every gate's exact numbers BEFORE the
+        # authoritative fail-closed verdict below, so the run log shows det%/LSP/sem even
+        # when a gate is OFF (and the verdict step aborts). Mirrors swebench_30task.yml.
+        env:
+          GT_FORCE_ONNX_EMBEDDER: "1"
+          GT_REQUIRE_EMBEDDER: "1"
+          GT_MODELS_ROOT: "${{ github.workspace }}/models"
+          PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/metrics"
+          GT_LSP_METRICS_FILE: "/tmp/gt_lsp_metrics.txt"
+        run: |
+          python3 "${{ github.workspace }}/scripts/metrics/foundational_gates.py" /tmp/gt/graph.db /tmp/gt/src /tmp/issue.txt /tmp/gt_lsp_metrics.txt > /tmp/l1_debug.txt 2>&1 || true
+          cat /tmp/l1_debug.txt
+
+      - name: 3-GATE VERDICT (fail-closed CONSUMPTION, before agent) — JARVIS · LSP · embedder
+        # AUTHORITATIVE fail-closed substrate gate, mirrored EXACTLY from swebench_30task.yml,
+        # on the FRESH, in-job, LSP-resolved /tmp/gt/graph.db + THIS task's real issue, BEFORE
+        # any paid token. foundational_gates.py runs three CONSUMPTION gates:
+        #   GATE-JARVIS  : det% over type='CALLS' via the UNIFIED DETERMINISTIC_RESOLUTION_METHODS
+        #                  (imported from curation_map) >= a relative SAFETY floor, det >= name_match
+        #                  (non-dominance), AND the receiver-type TYPING TIERS fired
+        #                  (type_flow/impl_method/inherited or assignment_tracked) — catches the
+        #                  58% method gap (graph mostly a name GUESS = flying blind).
+        #   GATE 2/LSP   : parses resolve.py's `LSP_METRICS resolved=.. residual=..
+        #                  scoped_source_files=..` line -> resolved/residual >= a RELATIVE floor of
+        #                  THIS issue's residual (not resolved>0), flags scoped_source_files==0.
+        #   GATE 3/EMB   : real ONNX embedder PRESENT (separates) AND CONSUMED by the brief on this
+        #                  graph+issue (effective_w_sem>0, per-task MAD dispersion — Shtok'12).
+        # All thresholds RELATIVE/dynamic (no benchmark-tuned magic, per .claude/CLAUDE.md).
+        # foundational_gates.py exits non-zero if ANY gate is OFF -> the job ABORTS fail-closed
+        # before the paid agent run, and writes the 8-dp deep record to $GT_GATES_DEEP_JSON.
+        env:
+          GT_FORCE_ONNX_EMBEDDER: "1"
+          GT_REQUIRE_EMBEDDER: "1"
+          GT_MODELS_ROOT: "${{ github.workspace }}/models"
+          PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/metrics"
+          GT_GATES_DEEP_JSON: "/tmp/gt_gates_deep_${{ matrix.task }}.json"
+          GT_LSP_METRICS_FILE: "/tmp/gt_lsp_metrics.txt"
+        run: |
+          set -euo pipefail
+          DB=/tmp/gt/graph.db
+          test -s "$DB" || { echo "FATAL [3-GATE]: graph.db absent ($DB) — fresh gt-index never produced a graph"; exit 1; }
+          test -s /tmp/issue.txt || echo "WARN [3-GATE]: /tmp/issue.txt empty — GATE 3 consumption may degrade"
+          # AUTHORITATIVE fail-closed run: non-zero exit on ANY OFF gate aborts the paid run.
+          # 2>stderr carries the compact `GT_GATE_METRICS ...` visibility line (per-run W_SEM /
+          # sem[max,median,MAD] / lsp resolved·residual·scoped / det% + breakdown).
+          python3 scripts/metrics/foundational_gates.py "$DB" /tmp/gt/src /tmp/issue.txt /tmp/gt_lsp_metrics.txt \
+            2> >(grep -E 'GT_GATE_METRICS' | tee /tmp/gt_gate_metrics_line.txt >&2) \
+            | grep -vE "GetPciBusId|device_disc"
+          echo "=== 3-GATE VERDICT: PASS — all gates ON (substrate CONSUMED) ==="
+          cat /tmp/gt_gate_metrics_line.txt 2>/dev/null || true
+
+      - name: RESOLUTION-QUALITY GATE (FAIL-CLOSED — abort before paid agent on an under-resolved graph)
+        # WHY: the 3-GATE VERDICT above only PRINTS resolution stats; it aborts solely on a dead
+        # embedder / 0 edges. A graph that built fine but is UNDER-RESOLVED (method calls never
+        # converted past name_match -> the agent navigates a mostly-false map; CLAUDE.md "flying
+        # blind" / 58% method gap) would still slip through to the PAID agent run. This step makes
+        # RESOLUTION QUALITY itself fail-closed: it ABORTS (exit 1) BEFORE any token spend when the
+        # freshly-built, LSP-resolved task graph is under-resolved on ANY of three independent axes.
+        # Mirrors swebench_30task.yml's RESOLUTION-QUALITY gate, scoped to /tmp/gt/graph.db.
+        #   (A) DETERMINISTIC-FRACTION floor over type='CALLS' (CONSERVATIVE backstop, not tuned).
+        #   (B) NAME-MATCH NON-DOMINANCE (det >= name_match; relative to this graph's own pop.).
+        #   (C) LSP ENRICHMENT OCCURRED (return_type AFTER LSP > GT_RT_BEFORE_LSP; pass was not a no-op).
+        env:
+          PYTHONPATH: "${{ github.workspace }}/src"
+        run: |
+          set -euo pipefail
+          DB=/tmp/gt/graph.db
+          test -s "$DB" || { echo "FATAL [RESOLUTION-QUALITY]: $DB absent — cannot certify resolution; aborting before paid run"; exit 1; }
+          q(){ python3 -c "import sqlite3;print(sqlite3.connect('file:$DB?mode=ro',uri=True).execute(\"$1\").fetchone()[0])"; }
+          EDGES=$(q "select count(*) from edges where type='CALLS'")
+          DET=$(q "select count(*) from edges where type='CALLS' and resolution_method in ('same_file','import','import_type','type_flow','verified_unique','impl_method','inherited','unique_method','return_type','lsp','lsp_verified')")
+          NAME_MATCH=$(q "select count(*) from edges where type='CALLS' and resolution_method like 'name_match%'")
+          RT_NOW=$(q "select count(*) from nodes where return_type is not null and trim(return_type)!=''")
+          RT_BEFORE="${GT_RT_BEFORE_LSP:-0}"
+          DETPCT=$(python3 -c "print(f'{(100.0*$DET/$EDGES) if $EDGES else 0.0:.8f}')")
+          echo "[RESOLUTION-QUALITY] CALLS_edges=$EDGES deterministic=$DET (${DETPCT}%) name_match=$NAME_MATCH return_types ${RT_BEFORE}->${RT_NOW}"
+          [ "$EDGES" -gt 0 ] || { echo "FATAL [RESOLUTION-QUALITY]: 0 CALLS edges — call graph dead; aborting before paid run"; exit 1; }
+          # CONSERVATIVE SAFETY BACKSTOP (commented as such — NOT a tuned threshold). Mirrors
+          # foundational_gates.SAFETY_DET_FLOOR_PCT so the precheck and in-run gate agree.
+          SAFETY_DET_FLOOR_PCT="15.0"
+          FAIL=0
+          if python3 -c "import sys;sys.exit(0 if float('$DETPCT') < float('$SAFETY_DET_FLOOR_PCT') else 1)"; then
+            echo "FATAL [RESOLUTION-QUALITY/A]: deterministic fraction ${DETPCT}% < SAFETY floor ${SAFETY_DET_FLOOR_PCT}% — graph catastrophically under-resolved (method calls never converted past name_match)"
+            FAIL=1
+          fi
+          if [ "$NAME_MATCH" -gt "$DET" ]; then
+            echo "FATAL [RESOLUTION-QUALITY/B]: name_match ($NAME_MATCH) > deterministic ($DET) — name_match is the single dominant method; the agent's map would be mostly a name GUESS"
+            FAIL=1
+          fi
+          if [ "$RT_NOW" -le "$RT_BEFORE" ]; then
+            echo "FATAL [RESOLUTION-QUALITY/C]: return_types did not grow over the LSP pass (${RT_BEFORE} -> ${RT_NOW}) — LSP precision pass silently no-op'd (GATE-2 dead); contracts are bare tree-sitter and method-call pruning never ran"
+            FAIL=1
+          fi
+          if [ "$FAIL" -ne 0 ]; then
+            echo "=== RESOLUTION-QUALITY VERDICT: FAIL — aborting BEFORE paid agent run (under-resolved graph) ==="
+            exit 1
+          fi
+          echo "=== RESOLUTION-QUALITY VERDICT: PASS — CALLS det=${DETPCT}% (>= ${SAFETY_DET_FLOOR_PCT}% floor), det($DET) >= name_match($NAME_MATCH), LSP enriched RT ${RT_BEFORE}->${RT_NOW} ==="
+
+      - name: Upload gate deep metrics (8-dp — immediate, readable mid-run)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gt-gate-deep-${{ matrix.task }}
+          path: |
+            /tmp/gt_gates_deep_${{ matrix.task }}.json
+            /tmp/l1_debug.txt
+          retention-days: 3
+          if-no-files-found: ignore
 
       - name: Pre-flight GT health check
         env:
@@ -722,6 +866,7 @@ jobs:
           PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
           GT_INDEX_BINARY: "/tmp/gt-index"
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          GT_LOG_RELAY_URL: ${{ vars.GT_LOG_RELAY_URL }}
           GT_DEBUG_DIR: "/tmp/gt_debug"
           GT_MAX_LLM_CALLS: "300"
           GT_RPM_LIMIT: "0"
@@ -775,7 +920,7 @@ jobs:
             echo "=== GT MODE ==="
           fi
           set +e
-          python scripts/swebench/oh_gt_full_wrapper.py \
+          stdbuf -oL -eL python -u scripts/swebench/oh_gt_full_wrapper.py \
               --instance-ids '${{ matrix.task }}' \
               -l eval \
               -i ${{ inputs.max_iterations }} \
@@ -783,7 +928,7 @@ jobs:
               --eval-output-dir /tmp/results \
               --dataset 'SWE-bench-Live/SWE-bench-Live' \
               --split lite \
-              2>&1 | tee /tmp/gt_debug/full_run.log
+              2>&1 | stdbuf -oL tee /tmp/gt_debug/full_run.log | python -u scripts/log_relay.py
           AGENT_RC=${PIPESTATUS[0]}
           set -e
 
