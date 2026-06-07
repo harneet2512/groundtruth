@@ -41,6 +41,45 @@ the run **ABORTS** (no silent fallback → no confounded results). Arm ALL of gt
 
 ---
 
+## 1.5 FOUNDATIONAL GATE CHECK — the 3 substrate gates (check + SHOW first, in order; cheap, NO agent)
+
+The §1 env gates can **silently fail and still exit 0** (the 2026-06-07 root cause: the deps step
+`pip install … | tail` swallowed a failure → onnxruntime/tokenizers/numpy/pydantic ALL absent →
+embedder zero **and** LSP-client dead **and** name_match-garbage edges → GT degraded to a grep+graph
+baseline on **every** real run, undetected). So before any 20-min agent run, run the cheap
+**`gate_check.yml`** (~5 min, **NO agent, NO LLM**) on the real task and **SHOW all three numbers, in
+order. A run is NOT trusted until these are GREEN and printed** — these three predict whether the run
+can clear the ~10% baseline at all. Check them **in this order, because each depends on the last:**
+
+**① EMBEDDER (semantic ranker).** Real ONNX e5 producing finite, *separating* vectors —
+`foundational_gates.gate_embedder()` PASS: `class==EmbeddingModel` (NOT `_ZeroEmbeddingModel`),
+`cos(related) > cos(unrelated)`. FAIL = `sem=0` → GT ranks lexically only. Provision
+onnxruntime+tokenizers+numpy **fail-LOUD** (`set -euo pipefail`, verify each import — never `| tail`).
+
+**② RECEIVER-TYPE RESOLUTION (the EDGES — how method calls *actually* resolve: LSP / JARVIS / CHA).**
+graph.db's value IS the call edges; ~58% of nodes are Methods, so **method calls are the MAJORITY of
+edges**, and an unresolved `name_match` method edge is a NAME GUESS (ambiguous), not a fact. **SHOW:**
+total `name_match` count + its top method targets + the deterministic-vs-name_match split, and verify
+the ONE receiver-type surface converts them — T1 declared-type, **T2 builtin-exclude** (no
+`join/get/append` garbage emitted as name_match), T3 assignment-flow, T4 demand-driven LSP. pydantic
+missing → the LSP client can't import → **0 resolved**; a name_match-dominated graph = the agent flies
+blind, can't reach gold. (Research, ONE surface: PyCG ICSE'21 99.2%/69.9%; JARVIS'23 +84%/+20%/+67%;
+XTA OOPSLA'00 +88% vs RTA; demand-driven Heintze-Tardieu PLDI'01.)
+
+**③ graph.db POPULATION (the substrate — *show this is what GT is*).** The context graph, correctly
+built. **SHOW the numbers** (this IS the product): nodes by label (Function/Method/Class), edges by
+`resolution_method` (import/same_file/type_flow/verified_unique/lsp **vs** name_match — the
+*deterministic fraction*), properties (`param`/`data_flow`/`signature` — the receiver-type inputs),
+`return_type` populated (LSP-enriched), FTS5 `nodes_fts` rows. A sparse or name_match-dominated graph =
+no map → no flips are even possible.
+
+**Print this verdict line BEFORE launching the agent:**
+`embedder=ON/OFF · resolution=ON/OFF (name_match X→Y, det N%) · graph=nodes/edges`. If ANY is OFF,
+**FIX IT FIRST — never run the agent on a dead substrate** (it measures the baseline wearing a GT
+label). `gate_check.yml` produces this in ~5 min with no LLM cost; the 20-min agent run is gated on it.
+
+---
+
 ## 2. PRECONDITIONS — before launching (ALL must hold)
 
 - [ ] **Logic proven offline & deterministic** — same-input→same-output on the real binary, FP/TP/determinism asserted (Stage-1 harness). No live run substitutes for this.
@@ -136,10 +175,12 @@ outcome gain = **regression until proven otherwise** (CLAUDE.md).
 per layer: `eligible` / `emitted` / `suppressed (+reason)` / `rendered_tokens` / `consumed (0/1)`.
 
 ### Tier 6 — LEGITIMACY GATES (any failure VOIDS the run — do not report it as a result)
-`env_full_stack` (LSP + embedder ONNX with W_SEM>0 + FTS5 + full-stack gates all GREEN) ·
-`test_names_leaked` (count GT surfaced to the agent — **MUST be 0**) · `fail_to_pass_leaked`
-(GT surfaced the grader test — **MUST be false**) · `no_gold_labels` (no task IDs / gold /
-FAIL_TO_PASS in product logic).
+`foundational_gates` (**§1.5, shown + GREEN**: ① embedder ON — non-zero, separating · ② receiver-type
+resolution ON — `name_match` converted/excluded, NOT dominated (show X→Y) · ③ graph.db populated —
+deterministic edges + `param`/`data_flow` properties + `return_type` + FTS5. **Any OFF ⇒ the run
+measured the baseline wearing a GT label ⇒ VOID, do not report.**) · `test_names_leaked` (count GT
+surfaced to the agent — **MUST be 0**) · `fail_to_pass_leaked` (GT surfaced the grader test — **MUST be
+false**) · `no_gold_labels` (no task IDs / gold / FAIL_TO_PASS in product logic).
 
 ### Tier 7 — COST
 `llm_in` / `llm_out` / `llm_cost` / `gt_injected_tokens` / `wall_clock_s` / `time_to_first_edit` /
