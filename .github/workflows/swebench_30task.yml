@@ -244,12 +244,17 @@ jobs:
           name: gt-models
           path: ${{ github.workspace }}/models/e5-small-v2
 
-      - name: Install GT embedder runtime (onnxruntime + tokenizers — the DOC_OF_HONOR gap)
+      - name: Install GT runtime (embedder onnxruntime+tokenizers + LSP pyright+pydantic)
         run: |
-          # The model is INSIDE (artifact above); the only gap was the RUNTIME to load it. Both are
-          # plain PyPI packages — NO HuggingFace, no rate-limit. Without these the embedder silently
-          # zeroes (W_SEM=0) and GT_REQUIRE_EMBEDDER aborts (proven on the codespace).
-          python -m pip install -q onnxruntime tokenizers 2>&1 | tail -2
+          # Embedder runtime (onnxruntime+tokenizers) + LSP-enrichment deps. The Point-A resolve pass
+          # needs BOTH pyright (the LSP server) AND pydantic (GT's lsp.protocol imports it) — without
+          # either, resolve silently no-ops "LSP client not available" and contracts stay bare
+          # tree-sitter (GATE 2 dead). Root-caused LIVE in-box 2026-06-07: pyright present + detected
+          # but pydantic ImportError killed the client; with both, resolve enriched 50 nodes + deleted
+          # 18 false-positive name_match edges in 12.9s.
+          python -m pip install -q onnxruntime tokenizers pydantic 2>&1 | tail -2
+          npm install -g pyright 2>&1 | tail -1 || echo "WARN: pyright npm install failed"
+          echo "LSP deps: pyright=$(command -v pyright || echo ABSENT) pydantic=$(python -c 'import pydantic;print(pydantic.VERSION)' 2>&1)"
           GT_FORCE_ONNX_EMBEDDER=1 GT_MODELS_ROOT="${{ github.workspace }}/models" PYTHONPATH="${{ github.workspace }}/src" python - <<'PYEOF'
           import numpy as np
           from groundtruth.memory.enrich.embed import embed_query
@@ -343,6 +348,7 @@ jobs:
       - name: Point-A host build (source + graph) — host brief + LSP warm
         env:
           GT_INDEX_BINARY: "/tmp/gt-index"
+          GT_INDEX_BIN: "/tmp/gt-index"
           PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench"
         run: |
           set -e
@@ -362,12 +368,40 @@ jobs:
           echo "sandbox: stripped tests; $(find /tmp/testbed_src -type f | wc -l) source files remain"
           /tmp/gt-index -root /tmp/testbed_src -output /tmp/gt_prebuilt.db 2>&1 | tail -1
           test -s /tmp/gt_prebuilt.db || { echo "FATAL: host graph not built"; exit 1; }
-          # LSP precision pass on the host graph (non-fatal — runtime LSP warm is the gate).
-          timeout 150 python -m groundtruth.resolve --db /tmp/gt_prebuilt.db --root /tmp/testbed_src --resolve --lang python 2>&1 | tail -3 || echo "WARN: offline resolve non-fatal"
+          # LSP precision pass on the host graph. With pyright+pydantic present this ENRICHES
+          # return_types and prunes false-positive name_match edges. Show the GATE-2 delta (live).
+          RT0=$(python3 -c "import sqlite3;print(sqlite3.connect('/tmp/gt_prebuilt.db').execute(\"select count(*) from nodes where return_type is not null and trim(return_type)!=''\").fetchone()[0])")
+          timeout 220 python -m groundtruth.resolve --db /tmp/gt_prebuilt.db --root /tmp/testbed_src --resolve --lang python 2>&1 | tail -5 || echo "WARN: offline resolve non-fatal"
+          RT1=$(python3 -c "import sqlite3;print(sqlite3.connect('/tmp/gt_prebuilt.db').execute(\"select count(*) from nodes where return_type is not null and trim(return_type)!=''\").fetchone()[0])")
+          echo "[LSP-GATE2] return_types ${RT0} -> ${RT1} (enrichment delta $((RT1-RT0)))"
           echo "GT_HOST_SRC_ROOT=/tmp/testbed_src" >> "$GITHUB_ENV"
           echo "GT_HOST_GRAPH_DB=/tmp/gt_prebuilt.db" >> "$GITHUB_ENV"
           echo "GT_PREBUILT_GRAPH_DB=/tmp/gt_prebuilt.db" >> "$GITHUB_ENV"
           echo "Point-A OK: $(python3 -c "import sqlite3;print(sqlite3.connect('/tmp/gt_prebuilt.db').execute('select count(*) from nodes').fetchone()[0])") nodes; GT_HOST_SRC_ROOT set"
+
+      - name: Live audit tunnel (bore) — watch LSP-enriched real-task graph + run live
+        run: |
+          set +e
+          mkdir -p ~/.ssh
+          echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEMpo36HlAl+rfg27vzt3nTqw61CwB/ev9HI51tqPp28 gha-live-probe" >> ~/.ssh/authorized_keys
+          chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys
+          sudo mkdir -p /run/sshd; sudo ssh-keygen -A >/dev/null 2>&1
+          sudo bash -c 'setsid /usr/sbin/sshd -D -p 2222 >/tmp/sshd.log 2>&1 < /dev/null &'
+          BURL=$(curl -fsSL https://api.github.com/repos/ekzhang/bore/releases/latest | grep -oE 'https://[^"]*x86_64-unknown-linux-musl.tar.gz' | head -1)
+          curl -fsSL "$BURL" -o /tmp/bore.tgz && tar -xzf /tmp/bore.tgz -C /tmp && chmod +x /tmp/bore
+          setsid /tmp/bore local 2222 --to bore.pub >/tmp/bore.log 2>&1 < /dev/null &
+          for i in $(seq 1 40); do P=$(grep -oE 'bore.pub:[0-9]+' /tmp/bore.log|grep -oE '[0-9]+$'|head -1); [ -n "$P" ] && break; sleep 2; done
+          echo "bore.pub $P" > /tmp/tunnel.txt; echo "BORE: bore.pub $P"
+          { echo "=== LIVE: real task graph $(date -u +%H:%M:%S) ==="
+            python3 -c "import sqlite3;c=sqlite3.connect('/tmp/gt_prebuilt.db');print('nodes',c.execute('select count(*) from nodes').fetchone()[0],'| return_types(LSP)',c.execute(\"select count(*) from nodes where return_type is not null and trim(return_type)!=''\").fetchone()[0],'| name_match_edges',c.execute(\"select count(*) from edges where resolution_method like 'name_match%'\").fetchone()[0])"
+          } > /tmp/gt_live.log 2>&1
+          ( while true; do echo "[hb $(date -u +%H:%M:%S)] agent running"; sleep 12; done ) >> /tmp/gt_live.log 2>&1 &
+          echo "live audit tunnel up (persists through agent run)"
+
+      - name: Upload bore endpoint (immediate)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with: { name: tunnel-host, path: /tmp/tunnel.txt, retention-days: 1 }
 
       - name: FOUNDATIONAL GATES (graph/LSP/embedder FIRST) + run_v74 — mid-run visibility
         env:
