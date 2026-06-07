@@ -684,6 +684,10 @@ jobs:
           GT_INDEX_BINARY: "/tmp/gt-index"
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
+          # Live log stream to a user-run ngrok tunnel: log_relay POSTs each line to this URL
+          # (the tunnel forwards to the user's local scripts/log_sink.py). Ephemeral per ngrok
+          # session — set via `gh variable set GT_LOG_RELAY_URL`. Empty = no push (safe no-op).
+          GT_LOG_RELAY_URL: ${{ vars.GT_LOG_RELAY_URL }}
           GT_DEBUG_DIR: "/tmp/gt_debug"
           GT_MAX_LLM_CALLS: "300"
           GT_RPM_LIMIT: "0"
