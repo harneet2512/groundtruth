@@ -1,9 +1,9 @@
 name: live-ssh-probe
 
-# Autonomous live in-box probe + LSP-gate FIX. Installs pyright (the missing GATE-2 dep), re-runs the
-# gate probe (pyright ABSENT -> PRESENT), proves pyright resolves types, and opens an sshd over a
-# BORE TCP tunnel (public bore.pub, no account, no cloudflare) so I connect with STANDARD ssh
-# (`ssh -p PORT runner@bore.pub`) — non-interactive commands work. setsid-detached to survive steps.
+# Live audit box. Installs pyright (GATE-2 fix), then a background audit script builds a graph, runs
+# the pyright LSP resolve pass, and shows return_types populate (GATE 2 ON) — all appended to
+# /tmp/gt_live.log. sshd (with the /run/sshd fix) over a bore TCP tunnel. I connect with standard ssh
+# and `tail -f /tmp/gt_live.log` — which STREAMS the live audit into Claude Code as it happens.
 
 on:
   workflow_dispatch: {}
@@ -11,66 +11,71 @@ on:
 jobs:
   probe:
     runs-on: ubuntu-latest
-    env:
-      GT_FORCE_ONNX_EMBEDDER: "1"
-      GT_MODELS_ROOT: "${{ github.workspace }}/models"
-      PYTHONPATH: "${{ github.workspace }}/src"
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.22' }
 
-      - name: MAKE PYRIGHT PRESENT (the missing GATE-2 LSP dep) + gate probe
+      - name: Install deps + pyright + model
         run: |
           set +e
           python3 -m pip install --quiet onnxruntime tokenizers numpy 2>&1 | tail -1
+          npm install -g pyright 2>&1 | tail -1
           mkdir -p models
           curl -fsSL -o /tmp/e5.tar.gz "https://github.com/harneet2512/groundtruth/releases/download/gt-runtime-models/default.tmp_e5-small-v2.tar.gz" 2>/dev/null && tar -xzf /tmp/e5.tar.gz -C models 2>/dev/null
-          echo "=== installing pyright (npm) ==="
-          npm install -g pyright 2>&1 | tail -2
-          {
-            echo "=== GATE PROBE AFTER FIX $(date -u +%H:%M:%S) ==="
-            echo "node:        $(command -v node && node --version)"
-            echo "pyright:     $(command -v pyright || echo STILL-ABSENT)"
-            echo "pyright ver: $(pyright --version 2>&1 | head -1)"
-            echo "--- prove pyright resolves TYPES (LSP enrichment basis) ---"
-            printf 'def f(x: int) -> str:\n    return str(x)\n\nreveal_type(f)\n' > /tmp/t.py
-            pyright --outputjson /tmp/t.py 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); diags=d.get('generalDiagnostics',[]); print('  pyright type-resolution:', next((x['message'] for x in diags if 'int' in x.get('message','') and 'str' in x.get('message','')), 'analyzed '+str(d.get('summary',{}).get('filesAnalyzed'))+' file(s)'))" 2>&1 | head -2
-            echo "--- GATE 3 EMBEDDER (re-confirm) ---"
-            python3 -c "import sys; sys.path.insert(0,'scripts/metrics'); from foundational_gates import gate_embedder; gate_embedder()" 2>&1 | grep -vE "GetPciBusId|device_discovery"
-          } | tee /tmp/gates.txt
+          echo "pyright: $(command -v pyright) $(pyright --version 2>/dev/null)"
 
-      - name: Upload gates (immediate)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with: { name: gates, path: /tmp/gates.txt, retention-days: 1 }
-
-      - name: setsid sshd + BORE tunnel (no cloudflare)
+      - name: Build gt-index
         run: |
           set +e
+          cd gt-index && CGO_ENABLED=1 go build -tags sqlite_fts5 -o /tmp/gt-index ./cmd/gt-index/ 2>&1 | tail -3
+          echo "gt-index: $([ -x /tmp/gt-index ] && echo BUILT || echo FAILED)"
+
+      - name: sshd (/run/sshd fix) + bore tunnel + START live audit
+        env:
+          GHWS: ${{ github.workspace }}
+        run: |
+          set +e
+          # --- ssh access ---
           mkdir -p ~/.ssh
           echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEMpo36HlAl+rfg27vzt3nTqw61CwB/ev9HI51tqPp28 gha-live-probe" >> ~/.ssh/authorized_keys
           chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys
-          sudo apt-get install -y openssh-server >/dev/null 2>&1
+          sudo mkdir -p /run/sshd        # <-- THE FIX: sshd silently fails to start without this
           sudo ssh-keygen -A >/dev/null 2>&1
-          sudo bash -c 'grep -q "^Port 2222" /etc/ssh/sshd_config || echo "Port 2222" >> /etc/ssh/sshd_config'
           sudo bash -c 'setsid /usr/sbin/sshd -D -p 2222 >/tmp/sshd.log 2>&1 < /dev/null &'
-          echo "=== fetch bore (TCP tunnel, public bore.pub, no account) ==="
+          sleep 2
+          echo "sshd listening: $(sudo ss -tlnp 2>/dev/null | grep -c :2222) (want >=1)"
+          # --- bore tunnel ---
           BURL=$(curl -fsSL https://api.github.com/repos/ekzhang/bore/releases/latest | grep -oE 'https://[^"]*x86_64-unknown-linux-musl.tar.gz' | head -1)
-          echo "bore asset: $BURL"
           curl -fsSL "$BURL" -o /tmp/bore.tgz && tar -xzf /tmp/bore.tgz -C /tmp && chmod +x /tmp/bore
           setsid /tmp/bore local 2222 --to bore.pub >/tmp/bore.log 2>&1 < /dev/null &
-          for i in $(seq 1 40); do
-            P=$(grep -oE 'bore.pub:[0-9]+' /tmp/bore.log | grep -oE '[0-9]+$' | head -1)
-            [ -z "$P" ] && P=$(grep -oE 'remote_port[^0-9]*[0-9]+' /tmp/bore.log | grep -oE '[0-9]+' | tail -1)
-            [ -n "$P" ] && break; sleep 2
-          done
-          echo "BORE_PORT=$P"
-          echo "bore.pub $P" > /tmp/tunnel.txt
-          cat /tmp/bore.log
+          for i in $(seq 1 40); do P=$(grep -oE 'bore.pub:[0-9]+' /tmp/bore.log|grep -oE '[0-9]+$'|head -1); [ -n "$P" ] && break; sleep 2; done
+          echo "bore.pub $P" > /tmp/tunnel.txt; echo "BORE: bore.pub $P"
+          # --- the live audit script (writes to /tmp/gt_live.log, which I tail -f live) ---
+          cat > /tmp/audit.sh <<AUD
+          #!/bin/bash
+          cd "$GHWS"
+          export GT_FORCE_ONNX_EMBEDDER=1 GT_MODELS_ROOT="$GHWS/models" PYTHONPATH="$GHWS/src"
+          q(){ python3 -c "import sqlite3;print(sqlite3.connect('/tmp/probe.db').execute(\"\$1\").fetchone()[0])" 2>&1; }
+          echo "===== LIVE AUDIT \$(date -u +%H:%M:%S) ====="
+          echo "[GATE2] pyright: \$(command -v pyright) \$(pyright --version 2>/dev/null)"
+          echo "[GATE3] embedder:"; python3 -c "import sys;sys.path.insert(0,'scripts/metrics');from foundational_gates import gate_embedder;gate_embedder()" 2>&1 | grep -vE "GetPciBusId|device_disc"
+          echo "[GATE1] building graph from src/ ..."; /tmp/gt-index -root src -output /tmp/probe.db 2>&1 | tail -2
+          echo "[GATE1] nodes=\$(q 'select count(*) from nodes') edges=\$(q 'select count(*) from edges')"
+          echo "[GATE2] return_types BEFORE resolve = \$(q "select count(*) from nodes where return_type is not null and trim(return_type)!=''")"
+          echo "[GATE2] running pyright LSP resolve pass (this is the enrichment)..."
+          python3 -m groundtruth.resolve --db /tmp/probe.db --resolve --lang python 2>&1 | tail -6
+          echo "[GATE2] return_types AFTER resolve = \$(q "select count(*) from nodes where return_type is not null and trim(return_type)!=''")  <-- GATE 2 ON if this jumped"
+          echo "===== AUDIT DONE — heartbeat (shell live) ====="
+          while true; do echo "[hb \$(date -u +%H:%M:%S)] live"; sleep 10; done
+          AUD
+          setsid bash /tmp/audit.sh >> /tmp/gt_live.log 2>&1 < /dev/null &
+          sleep 3; echo "audit started; live log seeded:"; head -5 /tmp/gt_live.log
 
-      - name: Upload tunnel endpoint (immediate)
+      - name: Upload tunnel endpoint
         if: always()
         uses: actions/upload-artifact@v4
         with: { name: tunnel-host, path: /tmp/tunnel.txt, retention-days: 1 }
 
-      - name: Hold open for live SSH (~12 min)
-        run: sleep 720
+      - name: Hold open for live SSH (~15 min)
+        run: sleep 900
