@@ -361,6 +361,21 @@ var builtinMethodNames = map[string]bool{
 	"discard": true, "clear": true, "copy": true,
 }
 
+// strongBuiltinMethodNames: method names that are essentially ALWAYS builtin/stdlib
+// (str / os.path / bytes) and almost never an internal method name. Unlike the broader
+// builtinMethodNames set (applied only to multi-candidate name_match), these are safe to
+// drop even on a SINGLE-candidate qualified-unresolved call (Strategy 1.9 demote), because
+// a real internal method by these names is vanishingly rare. Catches os.path.join /
+// str.split — the conan-17123 `join`×933 / `split`×122 single-candidate residual the
+// multi-candidate Strategy-2 guard cannot see. Excludes ambiguous names (get/update/items)
+// that legitimately occur as internal methods — those stay multi-candidate-only.
+var strongBuiltinMethodNames = map[string]bool{
+	"join": true, "split": true, "rsplit": true, "splitlines": true,
+	"strip": true, "lstrip": true, "rstrip": true,
+	"encode": true, "decode": true, "startswith": true, "endswith": true,
+	"zfill": true, "casefold": true,
+}
+
 // SetAssignmentIndex sets the global assignment index for Strategy 1.96.
 func SetAssignmentIndex(idx map[string]*AssignmentMap) {
 	assignmentIndex = idx
@@ -654,6 +669,14 @@ func Resolve(
 		// stdlib call never launders as a confident fact downstream while the agent
 		// still gets the hint. [beancount-931 os.walk -> account.walk]
 		qualifiedUnresolved := call.CalleeQualified != "" && call.CalleeQualified != calleeName
+		// T2 (strong builtins): a qualified call to an always-builtin method name (join/split/
+		// encode/strip/...) whose receiver never resolved internally above is a builtin call
+		// (os.path.join, str.split) — drop it even single-candidate, rather than DEMOTE to a
+		// speculative name_match. Catches the single-candidate residual the multi-candidate
+		// Strategy-2 guard cannot. Narrow set: excludes get/update/items (legit internal names).
+		if qualifiedUnresolved && strongBuiltinMethodNames[calleeName] {
+			continue
+		}
 		if targets, ok := nodeIDs[calleeName]; ok {
 			var candidates []int64
 			for _, tid := range targets {
