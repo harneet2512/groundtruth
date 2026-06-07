@@ -1,9 +1,9 @@
 name: live-ssh-probe
 
-# Live in-box visibility (NOT a smoke, NOT an agent run). Opens a real sshd over a Cloudflare
-# tunnel and HOLDS the job open. I (or you) SSH in through the tunnel and run the 3 foundational
-# gates against the REAL runner/container state, live — then exit, which ends the job. This is the
-# only agent-usable live path (tmate non-interactive is broken; there is no log-streaming API).
+# Fully-autonomous live in-box probe. (1) Runs the GATE-DEP probe on the runner (embedder real-vs-zero,
+# pyright present?) and uploads it IMMEDIATELY. (2) Backgrounds an sshd + Cloudflare tunnel so a later
+# step uploads the tunnel hostname as an artifact I can pull mid-run — then I SSH in non-interactively
+# and run anything live. No manual paste, no agent, no smoke.
 
 on:
   workflow_dispatch: {}
@@ -11,19 +11,57 @@ on:
 jobs:
   probe:
     runs-on: ubuntu-latest
+    env:
+      GT_FORCE_ONNX_EMBEDDER: "1"
+      GT_MODELS_ROOT: "${{ github.workspace }}/models"
+      PYTHONPATH: "${{ github.workspace }}/src"
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install GT embedder deps (so live gate runs work)
+      - name: GATE-DEP probe on the runner (embedder real-vs-zero + pyright)
         run: |
-          python3 -m pip install --quiet onnxruntime tokenizers 2>&1 | tail -1 || true
-          echo "onnxruntime: $(python3 -c 'import onnxruntime,sys;print(onnxruntime.__version__)' 2>&1)"
-          echo "pyright on runner: $(command -v pyright || echo ABSENT)"
+          set +e
+          python3 -m pip install --quiet onnxruntime tokenizers numpy 2>&1 | tail -1
+          mkdir -p models
+          curl -fsSL -o /tmp/e5.tar.gz "https://github.com/harneet2512/groundtruth/releases/download/gt-runtime-models/default.tmp_e5-small-v2.tar.gz" 2>/dev/null && tar -xzf /tmp/e5.tar.gz -C models 2>/dev/null && echo "model: fetched" || echo "model: FETCH FAILED"
+          {
+            echo "=== GATE-DEP PROBE (GHA runner) $(date -u +%H:%M:%S) ==="
+            echo "onnxruntime: $(python3 -c 'import onnxruntime;print(onnxruntime.__version__)' 2>&1)"
+            echo "tokenizers:  $(python3 -c 'import tokenizers;print(tokenizers.__version__)' 2>&1)"
+            echo "pyright:     $(command -v pyright pyright-langserver 2>/dev/null || echo ABSENT)"
+            echo "--- GATE 3 EMBEDDER live (real ONNX vs zero-model) ---"
+            python3 -c "import sys; sys.path.insert(0,'scripts/metrics'); from foundational_gates import gate_embedder; gate_embedder()" 2>&1 | grep -vE "GetPciBusId|device_discovery"
+          } | tee /tmp/gates.txt
 
-      - name: Live SSH over Cloudflare tunnel (holds the job open until I exit)
-        uses: valeriangalliat/action-sshd-cloudflared@v4
-        env:
-          # Public half of the dedicated probe keypair (.tmp_probe_key/id_ed25519). I connect with:
-          #   ssh -o ProxyCommand='cloudflared access tcp --hostname <TUNNEL_URL_from_log>' \
-          #       -i .tmp_probe_key/id_ed25519 runner@action-sshd-cloudflared
-          AUTHORIZED_KEYS: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEMpo36HlAl+rfg27vzt3nTqw61CwB/ev9HI51tqPp28 gha-live-probe"
+      - name: Upload gates (immediate — I pull this mid-run)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with: { name: gates, path: /tmp/gates.txt, retention-days: 1 }
+
+      - name: Background sshd + Cloudflare tunnel, capture hostname
+        run: |
+          set +e
+          mkdir -p ~/.ssh
+          echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEMpo36HlAl+rfg27vzt3nTqw61CwB/ev9HI51tqPp28 gha-live-probe" >> ~/.ssh/authorized_keys
+          chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys
+          sudo apt-get install -y openssh-server >/dev/null 2>&1
+          sudo ssh-keygen -A >/dev/null 2>&1
+          sudo bash -c 'grep -q "^Port 2222" /etc/ssh/sshd_config || echo "Port 2222" >> /etc/ssh/sshd_config'
+          sudo bash -c 'nohup /usr/sbin/sshd -D -p 2222 >/tmp/sshd.log 2>&1 &'
+          curl -fsSL -o /tmp/cf https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 && chmod +x /tmp/cf
+          nohup /tmp/cf tunnel --url tcp://localhost:2222 >/tmp/cf.log 2>&1 &
+          for i in $(seq 1 40); do
+            H=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/cf.log | head -1)
+            [ -n "$H" ] && break; sleep 2
+          done
+          echo "TUNNEL_HOST=$H"
+          echo "$H" > /tmp/tunnel.txt
+          tail -8 /tmp/cf.log
+
+      - name: Upload tunnel hostname (immediate — I pull this, then SSH in)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with: { name: tunnel-host, path: /tmp/tunnel.txt, retention-days: 1 }
+
+      - name: Hold the job open for live SSH (~12 min)
+        run: sleep 720
