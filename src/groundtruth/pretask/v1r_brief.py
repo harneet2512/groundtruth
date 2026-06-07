@@ -706,7 +706,7 @@ def _resolved_witnesses_for_file(
         # CALLEES: cross-file symbols this file CALLS into (DETERMINISTIC edges only).
         callee_rows = conn.execute(
             f"""
-            SELECT nt.file_path, e.source_line, nt.name, nsrc.name
+            SELECT nt.file_path, e.source_line, nt.name, nsrc.name, nt.start_line
             FROM nodes nsrc
             JOIN edges e ON e.source_id = nsrc.id AND e.type = 'CALLS'
             JOIN nodes nt ON e.target_id = nt.id
@@ -719,15 +719,19 @@ def _resolved_witnesses_for_file(
             """,
             (f"%{_norm_fp}", max_each * 4),
         ).fetchall()
-        for callee_file, line, callee_name, src_name in callee_rows:
-            code = _code_at(file_path, line)
+        for callee_file, source_line, callee_name, src_name, def_line in callee_rows:
+            # `source_line` is the CALL SITE in THIS candidate file — use it only for the
+            # stdlib-shadow check on the call. The RENDERED location must be the callee's
+            # DEFINITION line in callee_file (nt.start_line); pairing callee_file with the
+            # caller's source_line printed "X in <calleefile>:<callerline>" (wrong file:line).
+            code = _code_at(file_path, source_line)
             if _is_stdlib_shadow(code, callee_name or ""):
                 continue
             out.append({
                 "relation": "CALLS",
                 "direction": "callee",
                 "file_path": callee_file,
-                "line": int(line) if line else 0,
+                "line": int(def_line) if def_line else 0,
                 "symbol": callee_name or "",
                 "target": src_name or "",
                 "code": code,

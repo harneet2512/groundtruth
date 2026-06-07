@@ -268,6 +268,14 @@ def _neighbors(
         # <gt-graph-map> "called by:" leaked 6 test_plot_hdi* functions. is_test nodes are excluded.
         f"WHERE {match_col} IN ({placeholders}) AND e.type = 'CALLS' AND n.is_test = 0"
     )
+    # FACTS-ONLY parity with the witness path: the symmetric resolved caller/callee queries in
+    # v1r_brief already gate resolution_method ∈ DETERMINISTIC. Without the same gate here the
+    # <gt-graph-map> "called by:"/"calls:" admitted name_match phantom edges (e.g. dynamic-dispatch
+    # names that are not real defs) and _fmt_edge rendered them indistinguishably from facts. Gate
+    # only when the method column exists; without it the conf=0.0 sentinel already suppresses them.
+    if has_method:
+        _det_in = ",".join("'" + str(m).lower() + "'" for m in sorted(DETERMINISTIC_RESOLUTION_METHODS))
+        sql += f" AND LOWER(TRIM(e.resolution_method)) IN ({_det_in})"
     try:
         rows = conn.execute(sql, node_ids).fetchall()
     except sqlite3.Error:
