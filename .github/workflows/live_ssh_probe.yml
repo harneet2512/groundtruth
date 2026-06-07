@@ -1,0 +1,29 @@
+name: live-ssh-probe
+
+# Live in-box visibility (NOT a smoke, NOT an agent run). Opens a real sshd over a Cloudflare
+# tunnel and HOLDS the job open. I (or you) SSH in through the tunnel and run the 3 foundational
+# gates against the REAL runner/container state, live — then exit, which ends the job. This is the
+# only agent-usable live path (tmate non-interactive is broken; there is no log-streaming API).
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install GT embedder deps (so live gate runs work)
+        run: |
+          python3 -m pip install --quiet onnxruntime tokenizers 2>&1 | tail -1 || true
+          echo "onnxruntime: $(python3 -c 'import onnxruntime,sys;print(onnxruntime.__version__)' 2>&1)"
+          echo "pyright on runner: $(command -v pyright || echo ABSENT)"
+
+      - name: Live SSH over Cloudflare tunnel (holds the job open until I exit)
+        uses: valeriangalliat/action-sshd-cloudflared@v4
+        env:
+          # Public half of the dedicated probe keypair (.tmp_probe_key/id_ed25519). I connect with:
+          #   ssh -o ProxyCommand='cloudflared access tcp --hostname <TUNNEL_URL_from_log>' \
+          #       -i .tmp_probe_key/id_ed25519 runner@action-sshd-cloudflared
+          AUTHORIZED_KEYS: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEMpo36HlAl+rfg27vzt3nTqw61CwB/ev9HI51tqPp28 gha-live-probe"
