@@ -376,6 +376,18 @@ func main() {
 
 	nodeMeta := resolver.BuildNodeMeta(allNodes, nodeDBIDs)
 
+	// T1 Step 1: build the declared-type (param/field) receiver index for Strategy
+	// 1.94a. Reuses the `param` properties already extracted (no re-parse): caller
+	// node DB id -> {paramName -> declared type}. allProps' NodeIdx is already global
+	// (converted in Pass 2) and parallel to nodeDBIDs. Resolves REAL internal method
+	// calls whose receiver is a typed parameter/field (e.g. `command.run()` where the
+	// param is `command: Command`) — name_match -> type_flow, not exclusion.
+	if len(allProps) > 0 {
+		ptIdx := resolver.BuildParamTypeIndex(allProps, nodeDBIDs)
+		resolver.SetParamTypeIndex(ptIdx)
+		fmt.Fprintf(os.Stderr, "  Declared-type receivers: %d callers with typed params\n", len(ptIdx))
+	}
+
 	// PyCG Step 1: build assignment index for Strategy 1.96
 	if len(allAssignments) > 0 {
 		asgnIdx := resolver.BuildAssignmentIndex(allAssignments)
@@ -919,6 +931,13 @@ func runIncremental(root, relpath, dbPath string) error {
 	// (Inheritance-map half deferred: buildInheritanceMap needs the cross-file SourceFile list.)
 	if len(pr.Assignments) > 0 {
 		resolver.SetAssignmentIndex(resolver.BuildAssignmentIndex(pr.Assignments))
+	}
+
+	// T1 on the incremental path: build the declared-type receiver index from the
+	// reparsed file's `param` properties (NodeIdx -> pr.Nodes, parallel to newDBIDs),
+	// so Strategy 1.94a resolves typed-receiver method calls on `gt-index -file` too.
+	if len(pr.Properties) > 0 {
+		resolver.SetParamTypeIndex(resolver.BuildParamTypeIndex(pr.Properties, newDBIDs))
 	}
 
 	resolved := resolver.Resolve(pr.Calls, nameIndex, fileIndex, callerDBIDs, pr.Imports, fileMap, nodeMeta)

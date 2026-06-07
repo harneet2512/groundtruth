@@ -82,11 +82,15 @@ type CallRef struct {
 // Used by resolver Strategy 1.96 for x.method() resolution.
 type AssignmentRef struct {
 	VarName       string // LHS variable name ("x", "self.client")
-	TypeName      string // RHS class/function name being called ("HttpClient", "Session")
+	TypeName      string // RHS class name (constructor) OR callee name (when ViaReturn)
 	TypeQualified string // full qualified RHS if available ("requests.Session")
 	Scope         string // enclosing function name (empty = module level)
 	File          string
 	Line          int
+	// ViaReturn marks x = factory() (non-constructor call): TypeName holds the CALLEE
+	// name, and the resolver bridges through that callee's declared return type
+	// (PyCG Rule 4 / JARVIS return-type chaining) rather than treating it as a class.
+	ViaReturn bool
 }
 
 // ImportRef is a parsed import statement — maps an imported name to its source module.
@@ -767,6 +771,25 @@ func extractAssignments(node *sitter.Node, sf walker.SourceFile, src []byte, res
 							File:          sf.Path,
 							Line:          int(node.StartPoint().Row) + 1,
 						})
+					} else {
+						// PyCG Rule 4 / JARVIS return-type chaining: x = factory() where the
+						// callee is a (non-constructor) function — record the CALLEE name with
+						// ViaReturn so the resolver bridges through factory's declared return
+						// type (e.g. `x = get_client(); x.run()` → return type of get_client).
+						// Lowercase simple name only (capitalized was handled above); skip
+						// qualified receiver-method calls (obj.method()) — their type is
+						// unknown here, left for the demand-driven residual.
+						if simple[0] >= 'a' && simple[0] <= 'z' && (qualified == "" || qualified == simple) {
+							result.Assignments = append(result.Assignments, AssignmentRef{
+								VarName:       lhsName,
+								TypeName:      simple,
+								TypeQualified: qualified,
+								Scope:         scopeName,
+								File:          sf.Path,
+								Line:          int(node.StartPoint().Row) + 1,
+								ViaReturn:     true,
+							})
+						}
 					}
 				}
 			}

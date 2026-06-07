@@ -1916,3 +1916,60 @@ This run executed on **GitHub Actions** (`/home/runner/work/...`), violating the
 "live testing = Codespaces ONLY" rule. 3 tasks (cfn-3779/3798, loguru-1306) never ran — HF dataset
 `load_dataset` 429-rate-limited (12 retries) → FileNotFoundError. Per-task anonymous HF re-download
 is the avoidable cause; onnxruntime-absent is the same class (GHA env not provisioned for GT's deps).
+
+### 2026-06-07 T1 (declared-type) + T3 (JARVIS flow toward) — IMPLEMENTATION DESIGN (appended)
+T2 builtin-exclude already cut name_match −36% by DROPPING `json.loads`/`str.join`/`os.path.join` garbage
+(Strat 1.95 builtin guard + Strat 1.9 strong-builtin guard). The RESIDUAL name_match are REAL internal
+method calls whose receiver type was never inferred — `command.run()` → conan's `Command.run`,
+`self._conanfile.run()`. These must be RESOLVED (name_match → type_flow/param_type), not excluded. T1+T3
+do exactly that, as ONE receiver-type surface inside `resolver.go:Resolve` (the existing cost-ordered
+stop-at-first-hit chain feeding `lookupMethodWithInheritance` CHA), dispatched by typing discipline.
+
+**T1 — declared-type receiver resolution (new Strategy 1.94a, between 1.93 and 1.94).**
+Rule: for a qualified call `qualifier.method()` (or `qualifier::method()` for Rust) where the caller
+function declared `qualifier` as a typed parameter/field, resolve the declared type → the class node of
+that type → the method via CHA.
+- Input (zero re-parse): the `param` properties the parser ALREADY extracts
+  (`extractStructuredParams`, value form `name:type [required]` / `name:type opt` / `name:type opt=def`).
+  `BuildParamTypeIndex(props, nodeDBIDs)` (already present, uncommitted) parses `name:type`, keyed by
+  caller DB id → `map[int64]map[string]string`. Wired full-index via `SetParamTypeIndex(BuildParamTypeIndex(allProps, nodeDBIDs))`.
+- Lookup: `typeName = paramTypeIndex[callerID][qualifier]`; `cls = stripTypeWrapper(typeName)` (handles
+  `*Command`/`Optional[Command]`/`List[X]`); find the node named `cls` whose `Label ∈ {Class,Struct,Interface}`
+  via `nodeIDs[cls]` filtered through `nodeMeta`; `targetID = lookupMethodWithInheritance(classID, method)`.
+- Emit `type_flow` (EvidenceType `param_type`, conf 0.9, CERTIFIED) ONLY when the class node exists AND
+  the method resolves via CHA. Otherwise fall through silently (correct-or-quiet). This is XTA-style:
+  the declared type set is the propagated fact (Tip&Palsberg OOPSLA00, +88% precision vs RTA), and it is
+  GENERALIZED — fires on every statically-typed language (Go/Rust/Java/TS) + annotated Python, because the
+  param property is language-uniform (tree-sitter `ParamsField`). No per-language code, no benchmark shape.
+
+**T3 — assignment tracker strengthened toward JARVIS flow-sensitivity.**
+JARVIS (arXiv 2305.05949): flow-sensitive type graph, copy-on-branch / merge-on-join / strong-updates,
+application-centered, demand-driven → +84% precision / +20% recall / +67% speed vs PyCG. PyCG (Salis
+ICSE21): 13 assignment rules, 99.2%/69.9%. We add the two highest-leverage steps without a full lattice:
+- (a) **`self.field = Class()` tracked across the class's other methods.** Already extracted
+  (`extractAssignments` records LHS `self._conanfile` with `Scope`=method); the gap was resolution picking
+  the WRONG same-named field across methods. Fix in `assignments.go`: `Lookup`/`ResolveQualifiedCall`
+  prefer a `self.`-prefixed (class-scoped field) assignment and the latest CONFIDENT one — so
+  `self._conanfile.run()` resolves to the `ConanFile` assigned in `__init__` regardless of which method
+  calls it (class-field scope is intentionally cross-method, JARVIS treats fields as object-scoped).
+- (b) **return-type chaining `x = factory()` / `x = obj.method()`** when the callee's `return_type` is
+  known — `extractAssignments` now records an assignment with the callee's NAME so the resolver can bridge
+  via `nodeMeta[funcID].ReturnType` (reuses the Strat 1.97 return-type machinery on the assigned var).
+- (c) **scope-aware resolution** (reduces last-write-wins imprecision): `ResolveQualifiedCall` takes the
+  caller's enclosing function name (`Scope`) and prefers an assignment whose `Scope` matches (a var typed in
+  function F binds calls in F) before falling back to file-global last-write. `self.`-field assignments are
+  exempt (object-scoped, valid in any method). This is the flow-sensitivity approximation: per-function
+  scope = JARVIS's per-procedure type graph without the full copy/merge lattice; the residual it can't
+  statically resolve is left for the demand-driven LSP (T4), never guessed.
+
+**Correct-or-quiet + generalized:** every new edge fires ONLY when the type is determined and the method
+resolves via CHA; on any miss the call falls through to the next strategy (ultimately the name_match
+fallback or T2 drop). No task IDs / gold / benchmark-shape logic; the inputs (param props, assignments,
+inheritance) are language-uniform tree-sitter facts already paid for at index time (no re-parse, no LSP for
+the bulk). Net effect: name_match DROPS via RESOLUTION (type_flow/param_type rise), det% rises — the goal.
+
+**Research:** XTA Tip&Palsberg OOPSLA00 (+88% vs RTA, static, set-propagation over declared types — the T1
+basis); PyCG Salis ICSE21 (13 rules, 99.2%/69.9%, assignment graph — the T3 basis); JARVIS arXiv 2305.05949
+(flow-sensitive type-graph copy-on-branch/merge-on-join/strong-updates, application-centered, demand-driven;
++84% precision/+20% recall/+67% speed vs PyCG — the T3 target); CHA Dean/Grove/Chambers ECOOP95 (static-only,
+the `lookupMethodWithInheritance` walk); demand-driven Heintze&Tardieu PLDI01 + Sridharan&Bodík PLDI06 (T4).

@@ -342,6 +342,13 @@ var assignmentIndex map[string]*AssignmentMap
 // inheritanceMap: child class DB ID → parent class DB IDs. Set before Resolve().
 var inheritanceMap map[int64][]int64
 
+// paramTypeIndex: caller node DB ID → {param/field name → declared type name}. Set
+// before Resolve() for Strategy 1.94b (T1 declared-type receiver resolution). Populated
+// from the `param` properties the parser already extracts (declared annotations), so a
+// typed receiver `command.run()` resolves to the param's class without re-parsing.
+// Generalized across statically-typed languages (Go/Rust/Java/TS + annotated Python).
+var paramTypeIndex map[int64]map[string]string
+
 // builtinMethodNames: methods of language builtin/stdlib types (str/dict/list/set
 // and equivalents). A QUALIFIED call obj.method() that reaches Strategy 2 did NOT
 // resolve its receiver to an internal class above — so a builtin method name here
@@ -389,6 +396,45 @@ func SetInheritanceMap(m map[int64][]int64) {
 	inheritanceMap = m
 }
 
+// SetParamTypeIndex sets the caller→param→type map for Strategy 1.94b (T1).
+func SetParamTypeIndex(idx map[int64]map[string]string) {
+	paramTypeIndex = idx
+}
+
+// BuildParamTypeIndex builds caller-node-DB-ID → {paramName → typeName} from the
+// `param` properties (value form "name:type [flags]") the parser extracts. nodeDBIDs
+// is parallel to the global node slice the properties' NodeIdx indexes into.
+func BuildParamTypeIndex(props []parser.PropertyRef, nodeDBIDs []int64) map[int64]map[string]string {
+	idx := make(map[int64]map[string]string)
+	for _, p := range props {
+		if p.Kind != "param" || p.NodeIdx < 0 || p.NodeIdx >= len(nodeDBIDs) {
+			continue
+		}
+		dbid := nodeDBIDs[p.NodeIdx]
+		if dbid <= 0 {
+			continue
+		}
+		val := p.Value
+		colon := strings.Index(val, ":")
+		if colon <= 0 {
+			continue
+		}
+		name := strings.TrimSpace(val[:colon])
+		typ := strings.TrimSpace(val[colon+1:])
+		if sp := strings.IndexAny(typ, " ["); sp > 0 { // strip " [required]" / "[..]" suffix flags
+			typ = strings.TrimSpace(typ[:sp])
+		}
+		if name == "" || typ == "" {
+			continue
+		}
+		if idx[dbid] == nil {
+			idx[dbid] = make(map[string]string)
+		}
+		idx[dbid][name] = typ
+	}
+	return idx
+}
+
 // BuildAssignmentIndex builds a per-file variable→type map from parsed assignments.
 // PyCG ICSE 2021: assignment tracking for x = ClassName() resolution.
 func BuildAssignmentIndex(assignments []parser.AssignmentRef) map[string]*AssignmentMap {
@@ -408,7 +454,8 @@ func BuildAssignmentIndex(assignments []parser.AssignmentRef) map[string]*Assign
 			TypeFile:  "", // resolved later
 			Scope:     a.Scope,
 			Line:      a.Line,
-			Confident: true,
+			Confident: !a.ViaReturn, // direct constructor = confident; factory-return = tentative
+			ViaReturn: a.ViaReturn,
 		})
 	}
 	return index
@@ -774,6 +821,66 @@ func Resolve(
 			}
 		}
 
+		// Strategy 1.94a (T1): Declared-type receiver resolution.
+		// For a qualified call qualifier.method() (or qualifier::method()) where the
+		// caller function DECLARED `qualifier` as a typed parameter/field, resolve the
+		// declared type -> the class node of that type -> the method via CHA. The type
+		// is a FACT (the source annotated it), so this resolves REAL internal method
+		// calls whose receiver T2 could not infer (e.g. `command.run()` where the param
+		// is `command: Command`). XTA (Tip&Palsberg OOPSLA00, +88% vs RTA): the declared
+		// type set is the propagated fact. Generalized across statically-typed langs
+		// (Go/Rust/Java/TS) + annotated Python — the `param` property is language-uniform.
+		// Correct-or-quiet: emit ONLY when the class node exists AND CHA resolves the
+		// method; otherwise fall through to the next strategy.
+		if paramTypeIndex != nil && len(nodeMeta) > 0 && nodeMeta[0] != nil && methodsByClass != nil &&
+			call.CalleeQualified != "" && call.CalleeQualified != calleeName {
+			if paramTypes, ok := paramTypeIndex[callerID]; ok && len(paramTypes) > 0 {
+				dotIdx194a := strings.LastIndex(call.CalleeQualified, ".")
+				sep194a := 1
+				if dotIdx194a <= 0 {
+					dotIdx194a = strings.LastIndex(call.CalleeQualified, "::")
+					sep194a = 2
+				}
+				if dotIdx194a > 0 {
+					qualifier194a := call.CalleeQualified[:dotIdx194a]
+					methodName194a := call.CalleeQualified[dotIdx194a+sep194a:]
+					if qualifier194a != "self" && qualifier194a != "this" && qualifier194a != "Self" {
+						if declaredType, ok := paramTypes[qualifier194a]; ok && declaredType != "" {
+							className194a := stripTypeWrapper(declaredType)
+							if className194a != "" {
+								if classIDs, ok := nodeIDs[className194a]; ok {
+									for _, classID := range classIDs {
+										cm, hasMeta := nodeMeta[0][classID]
+										if !hasMeta || (cm.Label != "Class" && cm.Label != "Struct" && cm.Label != "Interface") {
+											continue
+										}
+										if targetID, found := lookupMethodWithInheritance(classID, methodName194a); found && targetID != callerID {
+											key := edgeKey{callerID, targetID, "CALLS"}
+											if !seen[key] {
+												seen[key] = true
+												resolved = append(resolved, ResolvedCall{
+													SourceNodeID:   callerID,
+													TargetNodeID:   targetID,
+													SourceLine:     call.Line,
+													SourceFile:     call.File,
+													Method:         "type_flow",
+													Confidence:     0.9,
+													CandidateCount: 1,
+													TrustTier:      "CERTIFIED",
+													EvidenceType:   "param_type",
+												})
+											}
+											goto nextCall
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
 		// Strategy 1.94: Single/few-implementor method resolution
 		// For a qualified call obj.method() or Type::method(), if method is defined
 		// as a method in exactly 1-3 classes across the codebase (regardless of what
@@ -911,9 +1018,11 @@ func Resolve(
 			}
 		}
 
-		// Strategy 1.96: Assignment-flow resolution (PyCG ICSE 2021)
-		// x = ClassName(); x.method() → resolve method via assignment tracking
-		if assignmentIndex != nil && call.CalleeQualified != "" {
+		// Strategy 1.96 (T3): Assignment-flow resolution (PyCG ICSE 2021 + JARVIS 2023)
+		// x = ClassName(); x.method() → resolve method via assignment tracking.
+		// Scope-aware (caller function name) + self-field-preferring + return-type
+		// chaining (x = factory(); x.method() bridges through factory's return type).
+		if assignmentIndex != nil && len(nodeMeta) > 0 && nodeMeta[0] != nil && methodsByClass != nil && call.CalleeQualified != "" {
 			if dotIdx := strings.LastIndex(call.CalleeQualified, "."); dotIdx > 0 {
 				qualifier := call.CalleeQualified[:dotIdx]
 				methodName := call.CalleeQualified[dotIdx+1:]
@@ -924,35 +1033,62 @@ func Resolve(
 					qualifier = qualifier[5:]
 				}
 				if qualifier != "self" && qualifier != "this" && qualifier != "super" && qualifier != "" {
-						if fileAssignments, ok := assignmentIndex[call.File]; ok {
-						if className, _, found := fileAssignments.ResolveQualifiedCall(qualifier, methodName); found {
-								// Look up the class in nodeIDs, then find the method
-							if classIDs, ok := nodeIDs[className]; ok {
-								for _, classID := range classIDs {
-									if len(nodeMeta) > 0 && nodeMeta[0] != nil {
-										cm, hasMeta := nodeMeta[0][classID]
-										if !hasMeta || (cm.Label != "Class" && cm.Label != "Struct") {
+					if fileAssignments, ok := assignmentIndex[call.File]; ok {
+						// Caller's enclosing function name = the Scope recorded for its
+						// assignments (extractAssignments keys Scope on the function name).
+						callerScope := ""
+						if cm, ok := nodeMeta[0][callerID]; ok {
+							callerScope = cm.Name
+						}
+						if typeName, _, viaReturn, found := fileAssignments.ResolveQualifiedCall(qualifier, methodName, callerScope); found {
+							// Determine the receiver CLASS name. Direct constructor: typeName
+							// is the class. Return-type chain (x = factory()): typeName is the
+							// callee — bridge through its declared return type.
+							className := ""
+							if viaReturn {
+								if funcIDs, ok := nodeIDs[typeName]; ok {
+									for _, funcID := range funcIDs {
+										fm, hasMeta := nodeMeta[0][funcID]
+										if !hasMeta || fm.ReturnType == "" {
 											continue
 										}
-										if methods, ok := methodsByClass[classID]; ok {
-											if targetID, ok := methods[methodName]; ok && targetID != callerID {
-												key := edgeKey{callerID, targetID, "CALLS"}
-												if !seen[key] {
-													seen[key] = true
-													resolved = append(resolved, ResolvedCall{
-														SourceNodeID:   callerID,
-														TargetNodeID:   targetID,
-														SourceLine:     call.Line,
-														SourceFile:     call.File,
-														Method:         "type_flow",
-														Confidence:     0.9,
-														CandidateCount: 1,
-														TrustTier:      "CERTIFIED",
-														EvidenceType:   "assignment_tracked",
-													})
-												}
-												goto nextCall
+										if fm.Label == "Class" || fm.Label == "Struct" || fm.Label == "Interface" {
+											continue
+										}
+										if rt := stripTypeWrapper(fm.ReturnType); rt != "" {
+											className = rt
+											break
+										}
+									}
+								}
+							} else {
+								className = stripTypeWrapper(typeName)
+							}
+							if className != "" {
+								// Look up the class in nodeIDs, then find the method via CHA.
+								if classIDs, ok := nodeIDs[className]; ok {
+									for _, classID := range classIDs {
+										cm, hasMeta := nodeMeta[0][classID]
+										if !hasMeta || (cm.Label != "Class" && cm.Label != "Struct" && cm.Label != "Interface") {
+											continue
+										}
+										if targetID, found := lookupMethodWithInheritance(classID, methodName); found && targetID != callerID {
+											key := edgeKey{callerID, targetID, "CALLS"}
+											if !seen[key] {
+												seen[key] = true
+												resolved = append(resolved, ResolvedCall{
+													SourceNodeID:   callerID,
+													TargetNodeID:   targetID,
+													SourceLine:     call.Line,
+													SourceFile:     call.File,
+													Method:         "type_flow",
+													Confidence:     0.9,
+													CandidateCount: 1,
+													TrustTier:      "CERTIFIED",
+													EvidenceType:   "assignment_tracked",
+												})
 											}
+											goto nextCall
 										}
 									}
 								}

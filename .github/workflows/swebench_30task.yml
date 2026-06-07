@@ -408,6 +408,11 @@ jobs:
           timeout 220 python -m groundtruth.resolve --db /tmp/gt_prebuilt.db --root /tmp/testbed_src --resolve --lang python 2>&1 | tail -5 || echo "WARN: offline resolve non-fatal"
           RT1=$(python3 -c "import sqlite3;print(sqlite3.connect('/tmp/gt_prebuilt.db').execute(\"select count(*) from nodes where return_type is not null and trim(return_type)!=''\").fetchone()[0])")
           echo "[LSP-GATE2] return_types ${RT0} -> ${RT1} (enrichment delta $((RT1-RT0)))"
+          # Export the PRE-LSP return_type count so the downstream RESOLUTION-QUALITY gate can
+          # assert the LSP precision pass actually ran (RT_after > RT_before == LSP was ON). Without
+          # this the gate can only see the absolute RT and could be fooled by a graph that happens
+          # to have many tree-sitter return types but where LSP silently no-op'd.
+          echo "GT_RT_BEFORE_LSP=${RT0}" >> "$GITHUB_ENV"
           echo "GT_HOST_SRC_ROOT=/tmp/testbed_src" >> "$GITHUB_ENV"
           echo "GT_HOST_GRAPH_DB=/tmp/gt_prebuilt.db" >> "$GITHUB_ENV"
           echo "GT_PREBUILT_GRAPH_DB=/tmp/gt_prebuilt.db" >> "$GITHUB_ENV"
@@ -488,6 +493,92 @@ jobs:
           echo "=== 3-GATE VERDICT: embedder=$EMB · resolution(name_match=$NAME_MATCH, det=${DETPCT}%) · graph(nodes=$NODES, edges=$EDGES) ==="
           [ "$EMB" = "ON" ] || { echo "FATAL [3-GATE]: embedder OFF (zero/absent ONNX) — would silently run baseline; aborting before paid agent run"; exit 1; }
           [ "$EDGES" -gt 0 ] || { echo "FATAL [3-GATE]: graph has 0 edges — substrate dead"; exit 1; }
+
+      - name: RESOLUTION-QUALITY GATE (FAIL-CLOSED — abort before paid agent on an under-resolved graph)
+        # WHY: the 3-GATE VERDICT above only PRINTS resolution stats; it aborts solely on a dead
+        # embedder / 0 edges. A graph that built fine but is UNDER-RESOLVED (method calls never
+        # converted past name_match -> the agent navigates a mostly-false map; CLAUDE.md "flying
+        # blind" / 58% method gap) would still slip through to the PAID agent run. This step makes
+        # RESOLUTION QUALITY itself fail-closed: it ABORTS (exit 1) BEFORE any token spend when the
+        # freshly-built, LSP-resolved task graph is under-resolved on ANY of three independent axes.
+        #
+        # Mirrors gate_check.yml's GATES style; queries the SAME fresh /tmp/gt_prebuilt.db the agent
+        # will consume (NOT a probe), opened READ-ONLY. Prints the exact numbers it gates on.
+        #
+        # The three fail-closed predicates (ALL must hold to proceed):
+        #   (A) DETERMINISTIC-FRACTION floor — det edges / total edges must clear a conservative,
+        #       DYNAMIC (relative) safety backstop. "Deterministic" == resolution_method in the
+        #       structural/verified set (same_file, import, type_flow, import_type, impl_method,
+        #       inherited, inheritance, verified_unique, lsp, lsp_verified, param_type) — the exact
+        #       methods gt-index's resolver + the LSP pass emit (closure.go verifiedMethods +
+        #       resolver.go strategies 1.x). name_match* is EXCLUDED (it is a name GUESS, not a fact).
+        #   (B) NAME-MATCH NON-DOMINANCE — name_match must NOT be the single dominant method, i.e.
+        #       deterministic edges must at least equal name_match edges (det >= name_match). If
+        #       name_match alone outnumbers every resolved method, the map is mostly guesswork.
+        #   (C) LSP ENRICHMENT OCCURRED — return_type count AFTER the Point-A LSP pass must exceed the
+        #       count BEFORE it (GT_RT_BEFORE_LSP). If RT did not grow, the LSP precision pass was a
+        #       silent no-op (GATE-2 dead) -> contracts are bare tree-sitter and method-call pruning
+        #       never happened -> treat as under-resolved.
+        #
+        # THRESHOLD POLICY (per .claude/CLAUDE.md "no benchmark-tuned constants"): predicates A & B
+        # are DYNAMIC/relative (fractions of THIS graph's own edge population), not magic numbers.
+        # SAFETY_DET_FLOOR is an explicit CONSERVATIVE BACKSTOP (a floor far below any healthy
+        # resolved graph), NOT a tuned target — it only catches catastrophically under-resolved
+        # graphs that predicate B alone might miss (e.g. det == name_match but both tiny vs a huge
+        # speculative tail). It is intentionally loose; raising it to "optimize" a benchmark is a
+        # CLAUDE.md violation.
+        env:
+          PYTHONPATH: "${{ github.workspace }}/src"
+        run: |
+          set -euo pipefail
+          DB=/tmp/gt_prebuilt.db
+          # Fail-closed: the gate MUST run against the real, freshly-built task graph. If it is
+          # absent we cannot certify resolution quality -> abort (never silently skip the gate).
+          test -s "$DB" || { echo "FATAL [RESOLUTION-QUALITY]: $DB absent — cannot certify resolution; aborting before paid run"; exit 1; }
+          q(){ python3 -c "import sqlite3;print(sqlite3.connect('file:$DB?mode=ro',uri=True).execute(\"$1\").fetchone()[0])"; }
+          EDGES=$(q "select count(*) from edges")
+          # Deterministic == structural/verified resolution methods (the exact strings gt-index's
+          # resolver + resolve.py LSP pass write to edges.resolution_method). Anything matching
+          # name_match% is a guess and is EXCLUDED.
+          DET=$(q "select count(*) from edges where resolution_method in ('same_file','import','type_flow','import_type','impl_method','inherited','inheritance','verified_unique','lsp','lsp_verified','param_type')")
+          NAME_MATCH=$(q "select count(*) from edges where resolution_method like 'name_match%'")
+          RT_NOW=$(q "select count(*) from nodes where return_type is not null and trim(return_type)!=''")
+          RT_BEFORE="${GT_RT_BEFORE_LSP:-0}"
+          # DYNAMIC fraction (relative to THIS graph's edge population), 8-dp per constitution.
+          DETPCT=$(python3 -c "print(f'{(100.0*$DET/$EDGES) if $EDGES else 0.0:.8f}')")
+          echo "[RESOLUTION-QUALITY] edges=$EDGES deterministic=$DET (${DETPCT}%) name_match=$NAME_MATCH return_types ${RT_BEFORE}->${RT_NOW}"
+
+          # Hard precondition: a graph with 0 edges cannot be resolved (3-GATE already guards this,
+          # but this step is independently fail-closed).
+          [ "$EDGES" -gt 0 ] || { echo "FATAL [RESOLUTION-QUALITY]: 0 edges — substrate dead; aborting before paid run"; exit 1; }
+
+          # CONSERVATIVE SAFETY BACKSTOP (commented as such — NOT a tuned threshold). A healthy
+          # LSP-resolved Python graph runs well above this; the floor only trips on catastrophic
+          # under-resolution. Expressed as a fraction so it stays repo-size agnostic.
+          SAFETY_DET_FLOOR_PCT="15.0"
+
+          FAIL=0
+          # (A) deterministic-fraction safety backstop
+          if python3 -c "import sys;sys.exit(0 if float('$DETPCT') < float('$SAFETY_DET_FLOOR_PCT') else 1)"; then
+            echo "FATAL [RESOLUTION-QUALITY/A]: deterministic fraction ${DETPCT}% < SAFETY floor ${SAFETY_DET_FLOOR_PCT}% — graph is catastrophically under-resolved (method calls never converted past name_match)"
+            FAIL=1
+          fi
+          # (B) name_match non-dominance (dynamic: relative to this graph's own resolved population)
+          if [ "$NAME_MATCH" -gt "$DET" ]; then
+            echo "FATAL [RESOLUTION-QUALITY/B]: name_match ($NAME_MATCH) > deterministic ($DET) — name_match is the single dominant method; the agent's map would be mostly a name GUESS"
+            FAIL=1
+          fi
+          # (C) LSP return_type enrichment actually occurred (LSP precision pass was ON, not a no-op)
+          if [ "$RT_NOW" -le "$RT_BEFORE" ]; then
+            echo "FATAL [RESOLUTION-QUALITY/C]: return_types did not grow over the LSP pass (${RT_BEFORE} -> ${RT_NOW}) — LSP precision pass silently no-op'd (GATE-2 dead); contracts are bare tree-sitter and method-call pruning never ran"
+            FAIL=1
+          fi
+
+          if [ "$FAIL" -ne 0 ]; then
+            echo "=== RESOLUTION-QUALITY VERDICT: FAIL — aborting BEFORE paid agent run (under-resolved graph) ==="
+            exit 1
+          fi
+          echo "=== RESOLUTION-QUALITY VERDICT: PASS — det=${DETPCT}% (>= ${SAFETY_DET_FLOOR_PCT}% floor), det($DET) >= name_match($NAME_MATCH), LSP enriched RT ${RT_BEFORE}->${RT_NOW} ==="
 
       - name: Upload L1 debug (immediate — readable mid-run)
         if: always()
