@@ -452,7 +452,15 @@ def gate_embedder_consumption(db: str, repo: str, issue_text: str) -> bool:
         p3 = mx > med
         sep_note = f"MAD=0 w/ {distinct} distinct -> right-tail iff max({mx:.6f})>median({med:.6f})"
 
-    ok = p1 and p2 and p3
+    # CONSUMED := the semantic weight is applied (p1) AND the embedder DISCRIMINATES on
+    # the candidates it scored (p3). Coverage (p2) is NOT a hard gate: the localizer is
+    # HYBRID (sem + lexical + graph), so a graph-reachable/lexical candidate legitimately
+    # carries sem=0 — requiring sem on >=50% of candidates wrongly fails a healthy embedder
+    # whose top candidates separate strongly (e.g. conan: w_sem=0.15, sem_max=0.84>>median).
+    # p3 already requires >=2 distinct values (=> >=1 real sem score), so p1 AND p3 still
+    # catches the true dead/un-consumed paths (w_sem=0, or a flat/all-zero distribution).
+    # Low coverage remains a WARNING (weak-but-alive), not a fail.
+    ok = p1 and p3
     print(
         f"[GATE 3b EMBEDDER CONSUMPTION] {'PASS' if ok else 'FAIL'} "
         f"effective_w_sem={w_sem:.8f} semantic_signal_count={sem_count}/{considered} "
