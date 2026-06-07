@@ -1594,8 +1594,13 @@ def _detect_scope(
         if config.graph_db and orig_run_action:
             try:
                 _scope_escaped = _escape_like(primary_norm).replace("'", "''")
+                # Select resolution_method so the container fallback can relabel a
+                # name_match edge symmetrically with the host path (:1655-1662) via
+                # _SCOPE_REASON_LABELS. A hardcoded "calls functions here" launders a
+                # 1-candidate name_match as a verified call (correct-or-quiet: relabel
+                # the guess "(unverified)", never present it as a fact).
                 _scope_sql = (
-                    f"SELECT DISTINCT nsrc.file_path FROM edges e "
+                    f"SELECT DISTINCT nsrc.file_path, e.resolution_method FROM edges e "
                     f"JOIN nodes nt ON e.target_id = nt.id "
                     f"JOIN nodes nsrc ON e.source_id = nsrc.id "
                     f"WHERE nt.file_path LIKE '%{_scope_escaped}' ESCAPE '\\' "
@@ -1610,11 +1615,17 @@ def _detect_scope(
                     except (ValueError, TypeError):
                         _scope_parsed = []
                     for _row in _scope_parsed:
-                        _sf = _row[0] if isinstance(_row, (list, tuple)) else str(_row)
+                        if isinstance(_row, (list, tuple)):
+                            _sf = _row[0]
+                            _rmeth = _row[1] if len(_row) > 1 else None
+                        else:
+                            _sf = str(_row)
+                            _rmeth = None
                         _sf_norm = _sf.replace("\\", "/").lstrip("./").lstrip("/")
                         if _sf_norm not in seen:
                             seen.add(_sf_norm)
-                            scope.append({"file": _sf_norm, "reason": "calls functions here", "callers": "1+"})
+                            _reason = _SCOPE_REASON_LABELS.get(_rmeth, "graph-connected") if _rmeth else "graph-connected"
+                            scope.append({"file": _sf_norm, "reason": _reason, "callers": "1+"})
                     print(f"[GT_META] detect_scope: container_query fallback found {len(scope)} neighbors", flush=True)
             except Exception as _sq_exc:
                 print(f"[GT_META] detect_scope: container_query failed ({_sq_exc})", flush=True)
@@ -6220,6 +6231,21 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         try:
                             _enorm = _edit_norm_leg or (rel_p or "").replace("\\", "/").lstrip("./").lstrip("/")
                             _host_db = getattr(config, "_host_graph_db", "")
+                            # DETERMINISTIC gate (shared callee-path clause): a phantom
+                            # name_match caller is NOT a fact. Replace the >=0.5 numeric
+                            # floor — which admits name_match — with the shared
+                            # _edge_filter_for_db categorical clause (resolution_method in
+                            # the deterministic set / CERTIFIED|CANDIDATE trust, name_match
+                            # excluded). Resolved against whichever db is reachable; legacy
+                            # numeric fallback only when the categorical schema is absent.
+                            _scope_db_for_ef = _host_db if (_host_db and os.path.exists(_host_db)) else (
+                                config.graph_db if os.path.exists(config.graph_db) else ""
+                            )
+                            try:
+                                from groundtruth.hooks.post_edit import _edge_filter_for_db as _scope_efd
+                                _scope_ef = _scope_efd(_scope_db_for_ef, alias="e") if _scope_db_for_ef else "COALESCE(e.confidence, 0.5) >= 0.7"
+                            except Exception:
+                                _scope_ef = "COALESCE(e.confidence, 0.5) >= 0.7"
                             if _host_db and os.path.exists(_host_db):
                                 import sqlite3 as _sq_scope
                                 _sc = _sq_scope.connect(_host_db)
@@ -6228,7 +6254,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                     "JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS' "
                                     "JOIN nodes nsrc ON e.source_id = nsrc.id "
                                     "WHERE nt.file_path LIKE ? ESCAPE '\\' AND nsrc.file_path NOT LIKE ? ESCAPE '\\' "
-                                    "AND COALESCE(e.confidence, 0.5) >= 0.5 LIMIT 5",
+                                    f"AND {_scope_ef} LIMIT 5",
                                     (f"%{_escape_like(_enorm)}", f"%{_escape_like(_enorm)}"),
                                 ).fetchall()
                                 _sc.close()
@@ -6241,7 +6267,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                     f"JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS' "
                                     f"JOIN nodes nsrc ON e.source_id = nsrc.id "
                                     f"WHERE nt.file_path LIKE '%{_enorm_esc}' ESCAPE '\\' AND nsrc.file_path NOT LIKE '%{_enorm_esc}' ESCAPE '\\' "
-                                    f"AND COALESCE(e.confidence, 0.5) >= 0.5 LIMIT 5",
+                                    f"AND {_scope_ef} LIMIT 5",
                                 )
                                 _caller_files = _j_scope.loads(_raw)
                             if len(_caller_files) >= 2:
@@ -7452,8 +7478,14 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                                 ).fetchall()
                                 for _dr in _dn_rows:
                                     _is_cls = _dr["label"] in ("Class", "Interface", "Struct")
+                                    # Symmetric caller count: gate this rescue COUNT with
+                                    # the SAME 0.7 floor the per-file path uses (:7384-7386)
+                                    # so both sources count callers identically — an
+                                    # ungated COUNT admits name_match phantoms and feeds an
+                                    # inflated caller number into _comp_score.
                                     _dr_callers = _l1_conn.execute(
-                                        "SELECT COUNT(*) FROM edges WHERE target_id = ? AND type = 'CALLS'",
+                                        "SELECT COUNT(*) FROM edges WHERE target_id = ? AND type = 'CALLS' "
+                                        "AND COALESCE(confidence, 0.5) >= 0.7",
                                         (_dr["id"],),
                                     ).fetchone()[0]
                                     _dr_sloc = max(0, (_dr["end_line"] or 0) - (_dr["start_line"] or 0))

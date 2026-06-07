@@ -1721,11 +1721,24 @@ def _edit_target_guard(graph_db: str, file_path: str, func: str) -> tuple[str, i
     try:
         conn = sqlite3.connect(graph_db)
         try:
-            base = os.path.basename(file_path)
+            # BIND TO THE CANDIDATE'S OWN FILE — not just its basename. A "%basename"
+            # LIKE matches a SAME-NAMED function in a DIFFERENT file (utils.py/models.py/
+            # db.py collisions; "%db.py" even matches "gtdb.py"), so the HIGH-tier
+            # "Edit target: <tgt.file_path> :: <func>" header could be followed by a
+            # guard/return line that belongs to another file entirely — a confident-WRONG
+            # fact (correct-or-quiet violation). Match the full normalized path: exact on
+            # the stored form, plus a "%/" || rel suffix LIKE so a stored path that differs
+            # only by a leading prefix still resolves, while the leading "/" boundary blocks
+            # the gtdb.py/db.py basename-substring collision. is_test = 0 filters OUT only.
+            # ORDER BY start_line LIMIT 1 makes the single returned node deterministic.
+            rel = _gl_normalize(file_path)
             row = conn.execute(
-                "SELECT id FROM nodes WHERE file_path LIKE ? AND name = ? "
-                "AND label IN ('Function','Method') LIMIT 1",
-                (f"%{base}", func),
+                "SELECT id FROM nodes "
+                "WHERE (file_path = ? OR file_path = ? OR file_path LIKE ?) "
+                "AND name = ? AND is_test = 0 "
+                "AND label IN ('Function','Method') "
+                "ORDER BY start_line LIMIT 1",
+                (file_path, rel, "%/" + rel, func),
             ).fetchone()
             if not row:
                 return "", None

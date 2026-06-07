@@ -555,13 +555,21 @@ def build_function_map(
 def _fmt_edge(e: Edge) -> str:
     """Render one edge as agent-friendly text. No internal jargon.
 
-    Edges that passed the categorical admission filter are shown without
-    distrust markers — if they survived the filter, they're good enough.
-    A 2-hop edge is tagged so the agent knows it's transitive.
+    Correct-or-quiet honesty marker (the module docstring's promise, in code):
+    a FACT edge (deterministically resolved — ``Edge.is_fact``) renders bare; a
+    VISIBLE-but-unverified edge (a name_match / unknown-provenance edge that only
+    cleared the confidence floor, or any edge on a legacy DB with no
+    ``resolution_method`` column so provenance is unknown) is tagged
+    ``(unverified)`` so the agent's grep stays the filter and a guess is never
+    shown indistinguishably from a structurally-resolved fact (The Distracting
+    Effect, arXiv:2505.06914, 2025). A 2-hop edge is additionally tagged so the
+    agent knows it's transitive (2-hop edges are verified-only, hence always facts).
     """
     base = f"{e.name} ({e.file})" if e.file else e.name
     if e.hops >= 2:
-        return f"{base} (2-hop)"
+        base = f"{base} (2-hop)"
+    if not e.is_fact:
+        base = f"{base} (unverified)"
     return base
 
 
