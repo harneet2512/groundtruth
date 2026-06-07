@@ -24,6 +24,30 @@ irrelevant to whether GT is correct.
 
 ---
 
+## 0.7 FIXING gt_gt — build → MAKE IT WORK → VERIFY, per bucket, substrate-first
+
+The whole goal: fix every bucket of gt_gt so it **genuinely works, PROVEN by the gate-check** — never
+asserted ("compiles" / "tests pass" / "audit clean" = nothing). Canonical plan:
+`GT_GT_FIX_EVERYTHING_BRIEF_<ts>.md`.
+
+**Order — SUBSTRATE prerequisites FIRST** (every layer reads them; a layer over a dead substrate measures
+nothing — the 14-run lesson):
+- **P1 — EDGES / receiver-type resolution** (LSP / JARVIS / CHA — **ONE surface**): the name_match
+  method-call garbage → resolved. T1 typed-param · T2 builtin-exclude · T3 JARVIS flow-sensitive · T4
+  demand-driven LSP · literal-receiver typing · the `-file` incremental degradation bug.
+  Research: PyCG ICSE'21 (99.2%/69.9%) · JARVIS'23 (+84%/+20%/+67%) · XTA OOPSLA'00 (+88% vs RTA).
+- **P2 — graph.db DEPTH** — closure rebuilt over *resolved* edges, `properties`, confidence/trust, FTS5.
+- **P3 — EMBEDDER** — real ONNX, non-zero, *consumed* (not provisioned-but-unconsumed).
+- **THEN LAYERS** — L1 brief/localizer · L3 post-edit · L3b post-view · consensus · GT_VERIFY · drift.
+
+**Per-bucket loop (no exceptions):** (1) **LIPI** the bug (all 4 avenues) → (2) **fix** generalized +
+research-backed + optimized + ONE-surface → (3) **build** it → (4) **VERIFY** — prereqs via the §1.5
+3-gate check (print the `name_match X→Y · det% · embedder ON/OFF` delta); layers via the §4 verifier-agent
+(DELIVERED+CORRECT+CONSUMED from `output.jsonl`, never telemetry). **A fix without its gate-check delta is
+NOT done.** One variable per change, each with its own observable.
+
+---
+
 ## 1. ENVIRONMENT — identical and FULL-STACK every time (arm the gates; abort on degrade)
 
 Same correct environment on every run — **LSP enabled, embedder ON, FTS5 on, full stack** — or
