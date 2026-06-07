@@ -371,6 +371,44 @@ method map stays mostly false. That is the "flying blind."
   name_match is not a fact — drop it or floor confidence at index time so it never pollutes graph.db or
   the closure. (Consumers already filter `<0.5`, but the *connectivity* must be real, not just filtered.)
 
+**OPTIMIZED MECHANISM — propagate over graph.db's EXISTING facts; do NOT re-analyze or per-edge-LSP the
+bulk.** graph.db already stores the resolver's inputs, paid for at index time (measured conan-17123):
+hierarchy (`inheritance`/`inherited`/`impl_method` edges), declared types (`signature` on 6304/7075
+nodes + `param` 5481 properties), assignments (`data_flow` 5284 properties), partial type resolution
+(`type_flow` 4229). The indexer extracts all this, then **discards it and string-matches method calls
+into `name_match`.** The fix is a propagation PASS over those existing facts — **XTA set-propagation**
+(Tip & Palsberg, OOPSLA 2000; XTA +88% precision over RTA) for static langs over `signature`+hierarchy;
+**PyCG assignment-graph** (Salis et al., ICSE 2021; 99.2% prec, *ignores external libs*) for dynamic
+langs over `data_flow`. No re-parse, no LSP, no SCIP for the bulk. SCIP/LSP are demoted to the residual.
+
+## SCALE — fast on big/huge repos (research-backed: DEMAND-DRIVEN, not exhaustive)
+Exhaustively resolving every method-call edge per-edge is hours at scale (~5/sec × 500k edges). The
+proven answer is to NOT resolve the whole repo — two tiers:
+1. **Index-time (whole repo, ONCE, amortized, cached, parallel):** the cheap propagation above — CHA for
+   `self`/`super` (free over the hierarchy) + XTA/assignment-graph over the existing facts. Near-linear
+   (PyCG ~0.38 s / 1k LoC → ~6 min / 1M LoC), inside the existing parallel parse pass, written to
+   graph.db. **INCREMENTAL:** `-file` reindex (SHA-256 short-circuit, `incremental.go`) re-propagates only
+   the changed subgraph — the Bazel/Nx monorepo pattern (file-hash change detection → rebuild only what's
+   necessary; 60–80% CI-time reduction). Whole-repo cost paid once, never repeated unchanged.
+2. **Query-time (DEMAND-DRIVEN, scoped to the issue):** the expensive precision (LSP/type-inference for
+   the residual propagation can't statically resolve) runs ONLY on the issue-relevant unresolved edges —
+   the candidate subgraph the brief touches, not the repo. **Demand-driven analysis** (Heintze & Tardieu,
+   *Demand-Driven Pointer Analysis*, PLDI 2001 — "just enough computation for the query variables," proven
+   optimal, no wasted work; Sridharan & Bodík, PLDI 2006 — client-driven refinement, "response times
+   suitable for IDEs"). Cost = O(issue-relevant residual) — a handful of edges — **bounded, independent of
+   repo size.**
+
+**Net time:** index-time bulk = minutes, amortized + incremental; per-query residual = seconds, constant
+in repo size. No whole-repo per-edge LSP, no per-language SCIP toolchain. This is the only design that is
+**generalized** (2 algorithm classes over the uniform tree-sitter graph), **precision-first** (XTA/PyCG,
+correct-or-quiet), AND **scalable** (amortized propagation + demand-driven residual + incremental).
+
+**Research basis:** XTA/RTA — [Tip & Palsberg, OOPSLA 2000](http://web.cs.ucla.edu/~palsberg/paper/oopsla00.pdf);
+CHA (static-typed only) — Dean/Grove/Chambers, ECOOP 1995; PyCG (dynamic, ignores external libs) —
+[Salis et al., ICSE 2021](https://arxiv.org/abs/2103.00587); JS approx CG — Feldthaus et al., ICSE 2013;
+demand-driven — Heintze & Tardieu, PLDI 2001 + Sridharan & Bodík, PLDI 2006; incremental — Bazel/Nx
+file-hash scoping; uniform multilingual tree-sitter + TypeRegistry + stdlib stubs (Graphify/ACER 2023).
+
 ---
 
 ## Known Limitations
