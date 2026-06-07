@@ -1877,6 +1877,40 @@ Knob to push Failed→0: give pyright the task environment (venv/`extraPaths`) +
 `gate-check.yml` verifies/iterates graph→LSP→embedder on a real task with NO agent/LLM — fix the gates
 cheaply; never burn a benchmark run to discover they were off.
 
+### 2026-06-07 Method-call edge resolution — VERIFIED PLAN (agent-checked against gt-index code)
+graph.db is the context graph; its value is the EDGES. On conan-17123, 7308/27528 edges are `name_match`
+and **98% are method calls** — name-guesses (`join`×1106, `get`×354, `exists`×316 → arbitrary same-named
+method) = a mostly-false map → the agent flies blind, can't reach gold. Fix = **ONE receiver-type-
+inference surface** inside `resolver.go:Resolve` (already a cost-ordered stop-at-first-hit chain feeding
+`lookupMethodWithInheritance` CHA), dispatched by typing discipline (declared-type for static langs,
+assignment-flow for dynamic) — the LSP-by-extension model, NOT N tools.
+
+**4 cost-ordered tiers (each call stops at first hit → cheap tiers catch the bulk):**
+- **T1 declared-type** O(1) reuse: `self`→class (Strat 1.75 LIVE); typed param/field/return → type already
+  in `properties.kind=param` (`parser.go:extractStructuredParams:2525`). **PARTIAL** — param types parsed+
+  stored but not in `NodeMeta` (`resolver.go:316`); needs a `properties→NodeMeta` join.
+- **T2 builtin/external exclude** O(1): `str.join`/`dict.get` → drop (application-centered, JARVIS'23/PyCG).
+  **MISSING** (no builtin set; Strat 1.9 only *demotes*). New per-lang builtin name-set + a guard.
+- **T3 assignment-flow → JARVIS flow-sensitive:** Strat 1.96 + `assignments.go` exist (PyCG 5/13, wired
+  full-index `main.go:380-384`). **PARTIAL** — per-file last-write-wins, not flow-sensitive (the only R&D).
+- **T4 demand-driven LSP, issue-scoped:** `resolve.py:_get_ambiguous_edges:113` ALREADY takes
+  `source_files` (scopes the SQL) — unexposed. Add `--source-files` CLI arg (trivial). Heintze-Tardieu PLDI01.
+
+**BUG (agent-found, independent):** `runIncremental` (`main.go:748-1079`) never calls `SetAssignmentIndex`/
+`SetInheritanceMap` → on `gt-index -file`, Strat 1.96 + inherited-method resolution silently no-op (globals
+nil); mutable process-globals = staleness/concurrency hazard. T3's incremental amortization is unrealized
+until fixed.
+
+**Build sequence (cheap→R&D):** (1) wire assignment+inheritance into `runIncremental` (plumbing, fixes the
+bug); (2) expose `--source-files` (T4, trivial); (3) join `param` types into `NodeMeta` (T1); (4) per-lang
+builtin sets (T2, drop-vs-demote vs downstream consumers); (5) flow-sensitive lattice for JARVIS T3 (the
+one genuine R&D — `AssignmentRef` carries `Scope`+`Line`).
+
+**Research:** XTA Tip&Palsberg OOPSLA00 (+88% vs RTA, static); PyCG Salis ICSE21 (99.2%/69.9%, dynamic);
+JARVIS 2023 (+84%/+20%/+67% vs PyCG; flow-sensitive, application-centered, demand-driven); CHA
+Dean/Grove/Chambers ECOOP95 (static only); demand-driven Heintze&Tardieu PLDI01 + Sridharan&Bodík PLDI06.
+Stays ONE surface (receiver-type step), generalized (all langs via uniform tree-sitter), correct-or-quiet.
+
 ### Live-path infra note (separate from GT logic)
 This run executed on **GitHub Actions** (`/home/runner/work/...`), violating the standing
 "live testing = Codespaces ONLY" rule. 3 tasks (cfn-3779/3798, loguru-1306) never ran — HF dataset

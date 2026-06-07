@@ -342,6 +342,25 @@ var assignmentIndex map[string]*AssignmentMap
 // inheritanceMap: child class DB ID → parent class DB IDs. Set before Resolve().
 var inheritanceMap map[int64][]int64
 
+// builtinMethodNames: methods of language builtin/stdlib types (str/dict/list/set
+// and equivalents). A QUALIFIED call obj.method() that reaches Strategy 2 did NOT
+// resolve its receiver to an internal class above — so a builtin method name here
+// means a builtin call (str.join, dict.get), NOT an internal graph edge. T2
+// (application-centered — JARVIS 2023 / PyCG ICSE 2021): DROP it rather than emit a
+// name_match guess to an arbitrary same-named internal method. Removes the dominant
+// name_match garbage (conan-17123: join×1106, get×354, items×254, append×228, ...).
+var builtinMethodNames = map[string]bool{
+	"join": true, "split": true, "splitlines": true, "strip": true, "lstrip": true,
+	"rstrip": true, "lower": true, "upper": true, "title": true, "startswith": true,
+	"endswith": true, "encode": true, "decode": true, "format": true, "replace": true,
+	"find": true, "rfind": true,
+	"get": true, "keys": true, "values": true, "items": true, "setdefault": true,
+	"update": true, "popitem": true,
+	"append": true, "extend": true, "pop": true, "insert": true, "remove": true,
+	"index": true, "count": true, "sort": true, "reverse": true, "add": true,
+	"discard": true, "clear": true, "copy": true,
+}
+
 // SetAssignmentIndex sets the global assignment index for Strategy 1.96.
 func SetAssignmentIndex(idx map[string]*AssignmentMap) {
 	assignmentIndex = idx
@@ -1005,6 +1024,13 @@ func Resolve(
 		}
 
 		// Strategy 2: Cross-file name match (fallback, 2+ candidates only)
+		// T2 builtin-exclude: a qualified call obj.method() whose receiver never resolved
+		// to an internal class above + method is a builtin name = a builtin call
+		// (str.join, dict.get), not an internal edge. Drop it instead of emitting a
+		// name_match guess (application-centered — JARVIS 2023 / PyCG ICSE 2021).
+		if call.CalleeQualified != "" && call.CalleeQualified != calleeName && builtinMethodNames[calleeName] {
+			continue
+		}
 		if targets, ok := nodeIDs[calleeName]; ok {
 			candidateCount := 0
 			var bestTarget int64
