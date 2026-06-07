@@ -252,9 +252,25 @@ jobs:
           # tree-sitter (GATE 2 dead). Root-caused LIVE in-box 2026-06-07: pyright present + detected
           # but pydantic ImportError killed the client; with both, resolve enriched 50 nodes + deleted
           # 18 false-positive name_match edges in 12.9s.
-          python -m pip install -q onnxruntime tokenizers pydantic 2>&1 | tail -2
-          npm install -g pyright 2>&1 | tail -1 || echo "WARN: pyright npm install failed"
-          echo "LSP deps: pyright=$(command -v pyright || echo ABSENT) pydantic=$(python -c 'import pydantic;print(pydantic.VERSION)' 2>&1)"
+          set -euo pipefail
+          python3 -m pip install --upgrade pip >/dev/null 2>&1 || true
+          # NOT -q and NOT piped to tail — a failure here MUST be visible (it was being swallowed,
+          # leaving onnxruntime/tokenizers/numpy/pydantic absent -> embedder AND LSP both OFF).
+          python3 -m pip install onnxruntime tokenizers numpy pydantic
+          npm install -g pyright 2>&1 | tail -1
+          # FAIL-CLOSED verify: the step dies if any runtime dep is missing, so a dep failure can
+          # never again silently degrade GT to baseline.
+          python3 - <<'PYV'
+          import importlib.util, sys
+          miss = [m for m in ("onnxruntime","tokenizers","numpy","pydantic") if importlib.util.find_spec(m) is None]
+          if miss:
+              print("FATAL runtime deps missing:", miss); sys.exit(1)
+          print("runtime deps OK: onnxruntime tokenizers numpy pydantic")
+          PYV
+          command -v pyright >/dev/null || { echo "FATAL pyright missing"; exit 1; }
+          # cross-check the OTHER interpreter Point-A/brief might use
+          echo "python  pydantic: $(python  -c 'import pydantic;print(pydantic.VERSION)' 2>&1 | tail -1)"
+          echo "python3 pydantic: $(python3 -c 'import pydantic;print(pydantic.VERSION)' 2>&1 | tail -1)"
           GT_FORCE_ONNX_EMBEDDER=1 GT_MODELS_ROOT="${{ github.workspace }}/models" PYTHONPATH="${{ github.workspace }}/src" python - <<'PYEOF'
           import numpy as np
           from groundtruth.memory.enrich.embed import embed_query
