@@ -369,6 +369,47 @@ jobs:
           echo "GT_PREBUILT_GRAPH_DB=/tmp/gt_prebuilt.db" >> "$GITHUB_ENV"
           echo "Point-A OK: $(python3 -c "import sqlite3;print(sqlite3.connect('/tmp/gt_prebuilt.db').execute('select count(*) from nodes').fetchone()[0])") nodes; GT_HOST_SRC_ROOT set"
 
+      - name: L1 LIVE debug — run_v74 on the real graph, dump components (mid-run visibility)
+        env:
+          GT_FORCE_ONNX_EMBEDDER: "1"
+          GT_REQUIRE_EMBEDDER: "1"
+          GT_MODELS_ROOT: "${{ github.workspace }}/models"
+          PYTHONPATH: "${{ github.workspace }}/src"
+          GT_DEBUG_L1: "1"
+        run: |
+          TASK="$(echo "${{ matrix.task }}" | tr -d '\r')"
+          python3 -c "
+          import json
+          for l in open('/tmp/ds/dataset.jsonl'):
+              d=json.loads(l)
+              if d.get('instance_id')=='$TASK':
+                  open('/tmp/issue.txt','w').write(d.get('problem_statement','') or ''); break
+          "
+          python3 - > /tmp/l1_debug.txt 2>&1 <<'PYEOF'
+          import os
+          from groundtruth.pretask.v1r_brief import generate_v1r_brief
+          issue = (open('/tmp/issue.txt').read()[:2500] if os.path.exists('/tmp/issue.txt') else 'fix the bug')
+          print("ENV GT_MODELS_ROOT=%r GT_FORCE_ONNX_EMBEDDER=%r" % (os.environ.get('GT_MODELS_ROOT'), os.environ.get('GT_FORCE_ONNX_EMBEDDER')))
+          try:
+              r = generate_v1r_brief(issue_text=issue, repo_root='/tmp/testbed_src', graph_db='/tmp/gt_prebuilt.db')
+              v = r.v74_result
+              print('ranked_full top-8 components (the REAL run_v74 output):')
+              for rec in (v.ranked_full[:8] if v and v.ranked_full else []):
+                  print('  ', rec.get('path'), {k: round(float(x),3) for k,x in (rec.get('components') or {}).items()})
+              print('L1 signal counts: sem=%s struct=%s fts5=%s graph_edge=%s' % (r.semantic_signal_count, r.structural_signal_count, r.fts5_signal_count, r.graph_edge_count))
+          except Exception:
+              import traceback; traceback.print_exc()
+          PYEOF
+          cat /tmp/l1_debug.txt
+
+      - name: Upload L1 debug (immediate — readable mid-run)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gt-l1-debug
+          path: /tmp/l1_debug.txt
+          retention-days: 3
+
       - name: Pre-flight GT health check
         env:
           PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
