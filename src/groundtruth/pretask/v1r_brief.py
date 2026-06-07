@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 # a fact, no matter its confidence. Reuse those constants so v1r's caller
 # evidence and the <gt-graph-map> obey one identical rule.
 from groundtruth.pretask.curation_map import (
+    DETERMINISTIC_RESOLUTION_METHODS,
     _DETERMINISTIC_METHODS,
     _NAME_MATCH_FLOOR,
     _has_columns,
@@ -599,6 +600,140 @@ def _caller_contract_for_file(
     if unverified_parts:
         return " | ".join(unverified_parts[:2])
     return ""
+
+
+def _resolved_witnesses_for_file(
+    graph_db: str,
+    file_path: str,
+    repo_root: str,
+    max_each: int = 2,
+) -> list[dict]:
+    """Deterministic-provenance caller AND callee witnesses for ``file_path``.
+
+    This is the STRUCTURED twin of ``_caller_contract_for_file``: it surfaces the
+    RESOLVED call-edge FACTS already in graph.db so a candidate carries a concrete
+    call-edge witness at iter-0 (fixes the audited ``l1_candidates_with_call_edge_count
+    = 0`` / ``l1_primary_witness_file = 'N/A — no confirming edge'`` — the resolution
+    was on disk but never surfaced as a confirming edge in the L1 brief).
+
+    A witness is emitted ONLY when its edge ``resolution_method`` is in
+    ``DETERMINISTIC_RESOLUTION_METHODS`` (the unified categorical fact-set, shared
+    with curation_map / post_edit). ``name_match`` is NEVER a witness here — even a
+    single-candidate name_match scores 0.9 and is still a name GUESS. The same
+    ``_is_stdlib_shadow`` guard the brief's caller line applies is applied here, so a
+    DETERMINISTIC-tagged edge that is really a stdlib attribute call name-matched to a
+    same-named project symbol (``os.walk`` -> project ``walk``) is dropped despite its
+    recorded provenance (wire.md RUN VERDICT: the provenance gate alone trusts that
+    false fact; the stdlib guard is the secondary defense).
+
+    Returns a list of dicts ``{relation: 'CALLS', direction: 'caller'|'callee',
+    file_path, line, symbol, target, code}`` — caller witnesses first (a caller is
+    the stronger localization confirmation: it proves the candidate's symbol is a
+    REAL, USED target). Correct-or-quiet: empty list on any error / no DB / no
+    deterministic edge. Pure read; no ranking effect (BRIEFING.md §3 row 4 / §4 —
+    surface facts that already rank, never change reach/weights).
+    """
+    if not graph_db or not file_path:
+        return []
+    conn = None
+    try:
+        conn = sqlite3.connect(graph_db)
+        _, has_method = _has_columns(conn)
+        if not has_method:
+            return []  # cannot judge provenance -> emit nothing (never launder)
+        _det_sql = "','".join(sorted(DETERMINISTIC_RESOLUTION_METHODS))
+        _norm_fp = file_path.replace("\\", "/").lstrip("./").lstrip("/")
+        out: list[dict] = []
+
+        def _code_at(rel_file: str, line: int) -> str:
+            if not rel_file or not line or line <= 0:
+                return ""
+            try:
+                with open(
+                    os.path.join(repo_root, rel_file), encoding="utf-8", errors="ignore"
+                ) as fh:
+                    _lines = fh.readlines()
+                if 0 < line <= len(_lines):
+                    return _lines[line - 1].strip()
+            except OSError:
+                pass
+            return ""
+
+        # CALLERS: cross-file functions that CALL a symbol defined in this file
+        # (DETERMINISTIC edges only). The target symbol (nt.name) is required so the
+        # stdlib-shadow guard can be applied per (code, target_name).
+        caller_rows = conn.execute(
+            f"""
+            SELECT nsrc.file_path, e.source_line, nsrc.name, nt.name
+            FROM nodes nt
+            JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
+            JOIN nodes nsrc ON e.source_id = nsrc.id
+            WHERE nt.file_path LIKE ?
+              AND nsrc.file_path != nt.file_path
+              AND nsrc.is_test = 0
+              AND e.source_line > 0
+              AND LOWER(TRIM(e.resolution_method)) IN ('{_det_sql}')
+            ORDER BY e.source_line
+            LIMIT ?
+            """,
+            (f"%{_norm_fp}", max_each * 4),
+        ).fetchall()
+        for caller_file, line, caller_name, target_name in caller_rows:
+            code = _code_at(caller_file, line)
+            if _is_stdlib_shadow(code, target_name or ""):
+                continue  # false caller: stdlib attr call name-matched to project symbol
+            out.append({
+                "relation": "CALLS",
+                "direction": "caller",
+                "file_path": caller_file,
+                "line": int(line) if line else 0,
+                "symbol": caller_name or "",
+                "target": target_name or "",
+                "code": code,
+            })
+            if sum(1 for w in out if w["direction"] == "caller") >= max_each:
+                break
+
+        # CALLEES: cross-file symbols this file CALLS into (DETERMINISTIC edges only).
+        callee_rows = conn.execute(
+            f"""
+            SELECT nt.file_path, e.source_line, nt.name, nsrc.name
+            FROM nodes nsrc
+            JOIN edges e ON e.source_id = nsrc.id AND e.type = 'CALLS'
+            JOIN nodes nt ON e.target_id = nt.id
+            WHERE nsrc.file_path LIKE ?
+              AND nt.file_path != nsrc.file_path
+              AND nt.is_test = 0
+              AND LOWER(TRIM(e.resolution_method)) IN ('{_det_sql}')
+            ORDER BY e.source_line
+            LIMIT ?
+            """,
+            (f"%{_norm_fp}", max_each * 4),
+        ).fetchall()
+        for callee_file, line, callee_name, src_name in callee_rows:
+            code = _code_at(file_path, line)
+            if _is_stdlib_shadow(code, callee_name or ""):
+                continue
+            out.append({
+                "relation": "CALLS",
+                "direction": "callee",
+                "file_path": callee_file,
+                "line": int(line) if line else 0,
+                "symbol": callee_name or "",
+                "target": src_name or "",
+                "code": code,
+            })
+            if sum(1 for w in out if w["direction"] == "callee") >= max_each:
+                break
+        return out
+    except Exception:
+        return []
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def _sibling_context(graph_db: str, file_path: str, func_names: list[str]) -> str:
@@ -1674,6 +1809,41 @@ def _high_func_support(witnesses, func: str) -> int:
     })
 
 
+def _resolved_witness_tail(graph_db: str, file_path: str) -> str:
+    """Compact one-line RESOLVED call-edge witness for a localization-header
+    candidate, or '' (correct-or-quiet).
+
+    The ``<gt-localization>`` header is the FIRST block the agent reads (primacy),
+    yet on the audited conan run its candidates carried NO call-edge witness at all —
+    the resolution reached the agent only reactively via post_view at iters 8/10/49,
+    too late to redirect the first move. This attaches the deterministic caller/callee
+    FACT (already on disk) right next to the candidate so a resolved edge reaches the
+    iter-0 brief that previously did not.
+
+    Renders ``caller() in file:line`` (a caller proves the candidate's symbol is a
+    REAL, USED target — the strongest confirmation) and falls back to ``-> callee()
+    in file:line``. No source snippet (header stays compact; repo_root not needed).
+    Deterministic-provenance + stdlib-shadow-guarded via ``_resolved_witnesses_for_file``;
+    never surfaces a name_match. Pure read; no ranking effect.
+    """
+    if not graph_db or not file_path:
+        return ""
+    wits = _resolved_witnesses_for_file(graph_db, file_path, repo_root="", max_each=1)
+    if not wits:
+        return ""
+    callers = [w for w in wits if w.get("direction") == "caller"]
+    callees = [w for w in wits if w.get("direction") == "callee"]
+    if callers:
+        w = callers[0]
+        sym = w.get("symbol") or "?"
+        return f"resolved caller: {sym}() in {w.get('file_path')}:{w.get('line')}"
+    if callees:
+        w = callees[0]
+        sym = w.get("symbol") or "?"
+        return f"resolved call: -> {sym}() in {w.get('file_path')}:{w.get('line')}"
+    return ""
+
+
 def _localization_header(loc, graph_db: str, issue_text: str) -> str:
     """Confidence-graded localization block, PREPENDED to the brief.
 
@@ -1840,6 +2010,9 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> str:
                f"Region: {region}/ — candidate edit targets (reason over these, confirm with grep):"]
         for i, c in enumerate(shown, 1):
             out.append(f"  {i}. {c.file_path}")
+            _wt = _resolved_witness_tail(graph_db, c.file_path)
+            if _wt:
+                out.append(f"     {_wt}")
         out.append("</gt-localization>")
         return "\n".join(out)
 
@@ -1855,6 +2028,14 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> str:
         fs = _defines_funcs(c)
         tail = f" — {', '.join(fs[:3])}" if fs else ""
         out.append(f"  {i}. {c.file_path}{tail}")
+        # Surface the RESOLVED call-edge fact (already on disk) next to the
+        # candidate so a confirming edge reaches the iter-0 header — the audited
+        # gap where the header's candidates carried no call-edge witness and the
+        # resolution only reached the agent reactively (post_view, iters 8/10/49).
+        # Deterministic + stdlib-shadow-guarded; correct-or-quiet (no fact -> no line).
+        _wt = _resolved_witness_tail(graph_db, c.file_path)
+        if _wt:
+            out.append(f"     {_wt}")
     out.append("</gt-localization>")
     return "\n".join(out)
 
@@ -2841,6 +3022,65 @@ def generate_v1r_brief(
                         "text": ", ".join(entry.functions[:3]) if entry.functions else "",
                     }
                 )
+
+            # RESOLVED call-edge witnesses -> structured evidence items in the kinds
+            # the telemetry reader consumes (telemetry/metrics._compute_l1_metrics):
+            #   - kind="l1_graph_edge", source="CALLS"  -> l1_candidates_with_call_edge_count
+            #   - kind="l1_confirming_edge"             -> l1_primary_witness_file/symbol/type
+            # The audited run reported l1_candidates_with_call_edge_count=0 +
+            # l1_primary_witness_file='N/A — no confirming edge' even though the
+            # resolution was on disk: the L1 structured payload never surfaced the
+            # deterministic caller/callee edges as confirming evidence. These items
+            # close that gap. Deterministic-provenance + stdlib-shadow-guarded
+            # (_resolved_witnesses_for_file); a name_match is NEVER emitted here.
+            _primary_emitted = False
+            for entry in entries:
+                try:
+                    _wits = _resolved_witnesses_for_file(graph_db, entry.path, repo_root)
+                except Exception:
+                    _wits = []
+                for _w in _wits:
+                    l1_items.append({
+                        "kind": "l1_graph_edge",
+                        "file_path": entry.path,            # the CANDIDATE this edge confirms
+                        "source": "CALLS",
+                        "direction": _w.get("direction"),   # caller | callee
+                        "symbol": _w.get("symbol", ""),
+                        "edge_file": _w.get("file_path", ""),
+                        "line": _w.get("line", 0),
+                        "confidence": 1.0,                  # deterministic edge = fact
+                        "reason": "resolved CALLS edge (deterministic provenance)",
+                    })
+                # The PRIMARY confirming witness for this candidate is its first
+                # resolved CALLER (a caller proves the candidate's symbol is a real,
+                # used target — the strongest confirmation). Emit ONE per task: the
+                # first candidate that carries a resolved caller.
+                if not _primary_emitted:
+                    _caller = next(
+                        (w for w in _wits if w.get("direction") == "caller"), None
+                    )
+                    if _caller is not None:
+                        l1_items.append({
+                            "kind": "l1_confirming_edge",
+                            "file_path": entry.path,
+                            "symbol": _caller.get("symbol", ""),
+                            "source": "CALLS",
+                            "edge_file": _caller.get("file_path", ""),
+                            "line": _caller.get("line", 0),
+                            "confidence": 1.0,
+                            "reason": "resolved cross-file caller (deterministic)",
+                        })
+                        _primary_emitted = True
+
+            _call_edge_count = sum(
+                1 for it in l1_items
+                if it.get("kind") == "l1_graph_edge" and it.get("source") == "CALLS"
+            )
+            _confirming = next(
+                (it.get("file_path") for it in l1_items
+                 if it.get("kind") == "l1_confirming_edge"),
+                None,
+            )
             structured = {
                 "candidates": l1_items,
                 "candidate_count": len(entries),
@@ -2859,6 +3099,10 @@ def generate_v1r_brief(
                 "signature_count": sum(1 for e in entries if e.functions),
                 "witnessed_count": sum(1 for e in entries if e.witness),
                 "verified_witness_count": sum(1 for e in entries if e.witness_verified),
+                # Resolved deterministic call-edge witnesses surfaced at iter-0 — the
+                # signal the audited run reported as 0 / 'N/A'.
+                "l1_candidates_with_call_edge_count": _call_edge_count,
+                "l1_primary_witness_file": _confirming or "N/A — no confirming edge",
                 "warnings": [],
                 "abstain_reason": None,
             }

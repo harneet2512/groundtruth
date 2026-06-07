@@ -6,8 +6,10 @@ for each focus function, the verified callers (who depends on it) and callees
 writing the fix. The value is the graph MAP, not a ranked file list.
 
 Correct-or-quiet (the agreement-guard in mechanism form): an edge is rendered
-as a FACT only when its ``resolution_method`` is deterministic
-(same_file / import / verified_unique / type_flow / import_type / lsp_verified).
+as a FACT only when its ``resolution_method`` is one the Go resolver assigns by
+STRUCTURAL resolution — the unified ``DETERMINISTIC_RESOLUTION_METHODS`` set
+(same_file / import / import_type / type_flow / verified_unique / impl_method /
+inherited / unique_method / return_type / lsp / lsp_verified).
 A ``name_match`` edge is NEVER a fact — no matter how many lexical/structural
 signals agree with it — because plausible-but-wrong context is the maximally
 harmful output. name_match edges below a confidence floor are SUPPRESSED;
@@ -35,19 +37,68 @@ import os
 import sqlite3
 from dataclasses import dataclass, field
 
-# resolution_method values that make an edge a FACT (compiler/LSP/structurally
-# verified). Mirrors the categorical edge filter used by the L3/L3b hooks.
-_DETERMINISTIC_METHODS: frozenset[str] = frozenset(
+# SINGLE SOURCE OF TRUTH for the FACT (deterministically-resolved) CALLS-edge
+# resolution_method set. Every consumer (this module's Edge.is_fact, the live
+# brief's caller-gate + [VERIFIED] tag in v1r_brief.py, contract_map's callee
+# gate, the localizer's verified-witness in graph_localizer.py, and the post_edit
+# hooks' categorical filter) imports THIS constant so they agree edge-for-edge.
+#
+# An edge belongs here ONLY when the Go resolver resolved its target
+# STRUCTURALLY (compiler-grade / LSP-grade), never by bare name. Each entry is a
+# real ``resolution_method`` string the resolver writes for a CALLS edge:
+#   same_file       Strategy 1.0   (resolver.go)  — callee defined in same file
+#   import          Strategy 1.25  (resolver.go)  — import-verified target
+#   import_type     Strategy 1.93  (resolver.go:~866 region) — import-scoped type
+#   type_flow       Strategy 1.95/1.96 (resolver.go:866/1005/1084) — assignment-/type-flow
+#   verified_unique Strategy 1.9   (resolver.go)  — globally unique by name
+#   impl_method     Strategy 1.94  (resolver.go:959) — single/few-implementor class
+#   inherited       Strategy 1.75  (resolver.go:684) — CHA self/super lookup
+#   unique_method   Strategy 1.98  (resolver.go:1175) — method name unique to one class
+#   return_type     Strategy 1.97  (resolver.go:1141) — return-type bridging
+#   lsp / lsp_verified  offline LSP promotion pass (closure.go verifiedMethods)
+#
+# These are exactly the structurally-resolved CALLS methods. The Go closure's own
+# verified set (gt-index/internal/closure/closure.go:59) admits the first five +
+# lsp/lsp_verified by NAME, and admits impl_method/inherited/return_type/unique_method
+# by the confidence>=0.5 floor (resolver assigns them 0.85-1.0). The Python
+# consumers gate on the METHOD NAME alone (no confidence-floor fallback), so those
+# four MUST be listed explicitly here or genuinely-resolved edges get demoted to
+# (unverified) — the audited 15% (738/4874 on a real graph) FACT loss.
+#
+# EXCLUDED ON PURPOSE:
+#   param_type  — it is an EvidenceType, NOT a resolution_method (resolver.go:870
+#                 sets EvidenceType="param_type" while the SAME edge's Method is
+#                 "type_flow", which is already in the set). Listing it would be a
+#                 category error; those edges are already covered via type_flow.
+#   inheritance — it is an EXTENDS-relationship method (relationships.go:148/190/
+#                 266/317 emit Type="EXTENDS", resolution_method="inheritance"),
+#                 NOT a CALLS edge. The curation map / caller gate trace CALLS
+#                 edges; an EXTENDS method must never enter the CALLS fact-set.
+#
+# name_match is NEVER here: it is a name GUESS (N same-named candidates), the
+# maximally-harmful plausible-but-wrong context (The Distracting Effect,
+# arXiv:2505.06914, 2025). Widening this set only widens facts; it can never let
+# a name_match edge classify as a fact.
+DETERMINISTIC_RESOLUTION_METHODS: frozenset[str] = frozenset(
     {
         "same_file",
         "import",
-        "verified_unique",
-        "type_flow",
         "import_type",
-        "lsp_verified",
+        "type_flow",
+        "verified_unique",
+        "impl_method",
+        "inherited",
+        "unique_method",
+        "return_type",
         "lsp",
+        "lsp_verified",
     }
 )
+
+# Back-compat alias: existing imports (v1r_brief, contract_map, graph_localizer,
+# Edge.is_fact below) reference ``_DETERMINISTIC_METHODS``. Point it at the shared
+# constant so every consumer uses the unified fact-set with no import churn.
+_DETERMINISTIC_METHODS: frozenset[str] = DETERMINISTIC_RESOLUTION_METHODS
 
 # name_match (or unknown-provenance) edges below this confidence are suppressed
 # entirely; at/above it they render marked (unverified). Matches gt_intel

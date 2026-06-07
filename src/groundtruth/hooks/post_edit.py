@@ -28,6 +28,7 @@ import time
 from datetime import datetime, timezone
 
 from groundtruth.hooks.logger import log_hook
+from groundtruth.pretask.curation_map import DETERMINISTIC_RESOLUTION_METHODS
 from groundtruth.runtime.sanitizer import clip_balanced
 
 _GT_LOG = os.environ.get("GT_HOOK_LOG", "/tmp/gt_hooks.log")
@@ -136,18 +137,13 @@ _SIBLING_EVIDENCE_ENABLED = True
 #
 # Returns a SQL fragment (no leading AND) used in WHERE clauses on the
 # `edges` table aliased as ``e``.
-_STRONG_RESOLUTION_METHODS = (
-    "same_file",
-    "import",
-    "verified_unique",
-    "type_flow",
-    "import_type",
-    "lsp_verified",
-    "impl_method",
-    "inherited",
-    "unique_method",
-    "return_type",
-)
+# Unified with the brief / curation map / localizer via the single shared
+# constant DETERMINISTIC_RESOLUTION_METHODS (curation_map.py). Previously this
+# hook-local tuple OMITTED ``lsp`` while the brief's set OMITTED
+# impl_method/inherited/unique_method/return_type — three divergent fact-sets that
+# disagreed on 15% of genuinely-resolved CALLS edges. One constant => every
+# consumer treats the same structurally-resolved edges as FACTS, edge-for-edge.
+_STRONG_RESOLUTION_METHODS = DETERMINISTIC_RESOLUTION_METHODS
 _STRONG_TRUST_TIERS = ("CERTIFIED", "CANDIDATE")
 _SUPPRESSED_TRUST_TIER = "SUPPRESSED"
 
@@ -166,7 +162,9 @@ def _categorical_edge_filter_clause(*, alias: str = "e") -> str:
 
     AND trust_tier is not SUPPRESSED (hard exclude).
     """
-    strong_methods = ", ".join(f"'{m}'" for m in _STRONG_RESOLUTION_METHODS)
+    # sorted(): _STRONG_RESOLUTION_METHODS is now a frozenset (unified shared
+    # constant); sort so the emitted SQL IN(...) list is byte-stable across runs.
+    strong_methods = ", ".join(f"'{m}'" for m in sorted(_STRONG_RESOLUTION_METHODS))
     strong_tiers = ", ".join(f"'{t}'" for t in _STRONG_TRUST_TIERS)
     return (
         f"(("

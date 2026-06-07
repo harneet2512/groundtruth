@@ -350,16 +350,47 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Pull Docker image
+      # Per-task image acquisition: aggressive-retry, dual-registry (GHCR mirror ->
+      # dockerhub starryzhang), FAIL-CLOSED. Same caching rationale as swebench_300task:
+      # 300/30 multi-GB images cannot fit a 10GB GHA cache, so this is a registry pull
+      # with retry + failover, hardened from the old `|| echo WARN` (which let a missing
+      # image slide into the paid Point-A build that then fail-closed mid-job) into an
+      # early $0 abort. The dockerhub-name tag is set on a GHCR win so Point-A's
+      # IMG="docker.io/starryzhang/..." reference resolves regardless of source.
+      - name: Pull Docker image (retry + GHCR/dockerhub failover, fail-closed)
+        shell: bash
         run: |
-          TASK="${{ matrix.task }}"
+          set -uo pipefail
+          TASK="$(echo "${{ matrix.task }}" | tr -d '\r')"
           REPO=$(echo "$TASK" | cut -d'_' -f1)
           REST=$(echo "$TASK" | sed "s/^${REPO}__//")
           BASENAME="sweb.eval.x86_64.${REPO}_1776_${REST}"
           GHCR_IMAGE="ghcr.io/${{ github.repository_owner }}/${BASENAME}:latest"
           DOCKERHUB_IMAGE="docker.io/starryzhang/${BASENAME}:latest"
-          docker pull "$GHCR_IMAGE" 2>/dev/null && docker tag "$GHCR_IMAGE" "$DOCKERHUB_IMAGE" \
-            || docker pull "$DOCKERHUB_IMAGE" || echo "WARN: pull failed for $TASK"
+          pull_retry() {  # pull_retry <image> <attempts>
+            local img="$1" attempts="$2" a
+            for a in $(seq 1 "$attempts"); do
+              if docker pull "$img" >/dev/null 2>&1; then
+                echo "  pulled $img (attempt $a)"; return 0
+              fi
+              echo "::warning::pull $img attempt $a/$attempts failed — retrying"; sleep $((a*8))
+            done
+            return 1
+          }
+          OK=0
+          if pull_retry "$GHCR_IMAGE" 5; then
+            docker tag "$GHCR_IMAGE" "$DOCKERHUB_IMAGE" && OK=1
+          fi
+          if [ "$OK" -ne 1 ] && pull_retry "$DOCKERHUB_IMAGE" 5; then
+            OK=1
+          fi
+          if [ "$OK" -ne 1 ]; then
+            echo "FATAL: task image unavailable from BOTH GHCR ($GHCR_IMAGE) and dockerhub ($DOCKERHUB_IMAGE) after retries — aborting BEFORE paid agent work (zero-infra-failures)"
+            exit 1
+          fi
+          docker image inspect "$DOCKERHUB_IMAGE" >/dev/null 2>&1 \
+            || { echo "FATAL: $DOCKERHUB_IMAGE not present after pull — aborting"; exit 1; }
+          echo "task image ready: $DOCKERHUB_IMAGE"
 
       - name: Point-A host build (source + graph) — host brief + LSP warm
         env:
@@ -506,12 +537,26 @@ jobs:
         # will consume (NOT a probe), opened READ-ONLY. Prints the exact numbers it gates on.
         #
         # The three fail-closed predicates (ALL must hold to proceed):
-        #   (A) DETERMINISTIC-FRACTION floor — det edges / total edges must clear a conservative,
-        #       DYNAMIC (relative) safety backstop. "Deterministic" == resolution_method in the
-        #       structural/verified set (same_file, import, type_flow, import_type, impl_method,
-        #       inherited, inheritance, verified_unique, lsp, lsp_verified, param_type) — the exact
-        #       methods gt-index's resolver + the LSP pass emit (closure.go verifiedMethods +
-        #       resolver.go strategies 1.x). name_match* is EXCLUDED (it is a name GUESS, not a fact).
+        #   (A) DETERMINISTIC-FRACTION floor — deterministic CALLS edges / total CALLS edges must
+        #       clear a conservative, DYNAMIC (relative) safety backstop. The fraction is taken over
+        #       type='CALLS' edges ONLY: CALLS is the call graph (who-calls-whom) — the substrate
+        #       this gate certifies; IMPORTS/DEFINES/INHERITS/IMPLEMENTS edges are structurally
+        #       different relations whose presence must not dilute or inflate call-resolution %.
+        #       "Deterministic" == resolution_method in the structural/verified set the CALLS
+        #       resolver + the LSP pass actually WRITE (resolver.go strategies 1.0-1.98 ->
+        #       same_file, import, import_type, type_flow, verified_unique, impl_method, inherited,
+        #       unique_method, return_type ; resolve.py LSP pass -> lsp / lsp_verified). name_match*
+        #       is EXCLUDED (a name GUESS, not a fact).
+        #       BUGFIX (this commit): the prior list counted 'param_type' and 'inheritance' as CALLS
+        #       resolution_methods — NEITHER is one, so both matched ~ZERO CALLS rows and inflated
+        #       DET% with non-CALLS rows when the query was unscoped:
+        #         * 'param_type' is an EvidenceType, not a resolution_method — the resolver emits a
+        #           type_flow edge whose evidence_type='param_type' (DOC_OF_HONOR.md:1939); the
+        #           resolution_method column is 'type_flow', already counted.
+        #         * 'inheritance' is an EDGE TYPE (INHERITS/IMPLEMENTS class-hierarchy edges,
+        #           DOC_OF_HONOR.md:1862), not a CALLS method — the CALLS resolver emits 'inherited'
+        #           (strategy 1.75, resolver.go:684), which IS counted. Scoping to type='CALLS' also
+        #           structurally excludes those hierarchy edges.
         #   (B) NAME-MATCH NON-DOMINANCE — name_match must NOT be the single dominant method, i.e.
         #       deterministic edges must at least equal name_match edges (det >= name_match). If
         #       name_match alone outnumbers every resolved method, the map is mostly guesswork.
@@ -536,21 +581,26 @@ jobs:
           # absent we cannot certify resolution quality -> abort (never silently skip the gate).
           test -s "$DB" || { echo "FATAL [RESOLUTION-QUALITY]: $DB absent — cannot certify resolution; aborting before paid run"; exit 1; }
           q(){ python3 -c "import sqlite3;print(sqlite3.connect('file:$DB?mode=ro',uri=True).execute(\"$1\").fetchone()[0])"; }
-          EDGES=$(q "select count(*) from edges")
-          # Deterministic == structural/verified resolution methods (the exact strings gt-index's
-          # resolver + resolve.py LSP pass write to edges.resolution_method). Anything matching
-          # name_match% is a guess and is EXCLUDED.
-          DET=$(q "select count(*) from edges where resolution_method in ('same_file','import','type_flow','import_type','impl_method','inherited','inheritance','verified_unique','lsp','lsp_verified','param_type')")
-          NAME_MATCH=$(q "select count(*) from edges where resolution_method like 'name_match%'")
+          # Resolution quality is a property of the CALL graph: every count below is scoped to
+          # type='CALLS' so DET% is the deterministic FRACTION OF CALLS EDGES (per task spec),
+          # not diluted/inflated by IMPORTS/DEFINES/INHERITS rows.
+          EDGES=$(q "select count(*) from edges where type='CALLS'")
+          # Deterministic == structural/verified resolution methods the CALLS resolver + resolve.py
+          # LSP pass actually write to edges.resolution_method (resolver.go strategies 1.0-1.98 +
+          # the LSP promotion). 'param_type'/'inheritance' removed — see comment block above (they
+          # are an evidence_type and an edge TYPE respectively, not CALLS resolution_methods).
+          # Anything matching name_match% is a guess and is EXCLUDED.
+          DET=$(q "select count(*) from edges where type='CALLS' and resolution_method in ('same_file','import','import_type','type_flow','verified_unique','impl_method','inherited','unique_method','return_type','lsp','lsp_verified')")
+          NAME_MATCH=$(q "select count(*) from edges where type='CALLS' and resolution_method like 'name_match%'")
           RT_NOW=$(q "select count(*) from nodes where return_type is not null and trim(return_type)!=''")
           RT_BEFORE="${GT_RT_BEFORE_LSP:-0}"
           # DYNAMIC fraction (relative to THIS graph's edge population), 8-dp per constitution.
           DETPCT=$(python3 -c "print(f'{(100.0*$DET/$EDGES) if $EDGES else 0.0:.8f}')")
-          echo "[RESOLUTION-QUALITY] edges=$EDGES deterministic=$DET (${DETPCT}%) name_match=$NAME_MATCH return_types ${RT_BEFORE}->${RT_NOW}"
+          echo "[RESOLUTION-QUALITY] CALLS_edges=$EDGES deterministic=$DET (${DETPCT}%) name_match=$NAME_MATCH return_types ${RT_BEFORE}->${RT_NOW}"
 
-          # Hard precondition: a graph with 0 edges cannot be resolved (3-GATE already guards this,
-          # but this step is independently fail-closed).
-          [ "$EDGES" -gt 0 ] || { echo "FATAL [RESOLUTION-QUALITY]: 0 edges — substrate dead; aborting before paid run"; exit 1; }
+          # Hard precondition: a graph with 0 CALLS edges has no call graph to resolve (3-GATE
+          # guards total-edges>0, but this step is independently fail-closed on CALLS edges).
+          [ "$EDGES" -gt 0 ] || { echo "FATAL [RESOLUTION-QUALITY]: 0 CALLS edges — call graph dead; aborting before paid run"; exit 1; }
 
           # CONSERVATIVE SAFETY BACKSTOP (commented as such — NOT a tuned threshold). A healthy
           # LSP-resolved Python graph runs well above this; the floor only trips on catastrophic
@@ -578,7 +628,7 @@ jobs:
             echo "=== RESOLUTION-QUALITY VERDICT: FAIL — aborting BEFORE paid agent run (under-resolved graph) ==="
             exit 1
           fi
-          echo "=== RESOLUTION-QUALITY VERDICT: PASS — det=${DETPCT}% (>= ${SAFETY_DET_FLOOR_PCT}% floor), det($DET) >= name_match($NAME_MATCH), LSP enriched RT ${RT_BEFORE}->${RT_NOW} ==="
+          echo "=== RESOLUTION-QUALITY VERDICT: PASS — CALLS det=${DETPCT}% (>= ${SAFETY_DET_FLOOR_PCT}% floor), det($DET) >= name_match($NAME_MATCH), LSP enriched RT ${RT_BEFORE}->${RT_NOW} ==="
 
       - name: Upload L1 debug (immediate — readable mid-run)
         if: always()
@@ -849,6 +899,30 @@ jobs:
           cp /tmp/gt_debug/gt_run_summary_${{ matrix.task }}.json /tmp/gt_run_summary_${{ matrix.task }}.json 2>/dev/null || true
           python3 scripts/swebench/gt_deep_metrics.py "${{ matrix.task }}" /tmp/results --log /tmp/gt_debug/full_run.log 2>&1 | tail -2 || echo "DEEP_METRICS_WARN"
           cp /tmp/gt_deep_metrics_${{ matrix.task }}.json /tmp/gt_debug/ 2>/dev/null || true
+
+      # ── AGENT-DELIVERY GATE (the missing half) ──
+      # The 3-GATE + RESOLUTION-QUALITY gates certify graph.db is well RESOLVED. They
+      # do NOT certify that resolution was DELIVERED into the agent's context — a
+      # perfectly-resolved graph can still reach the agent as zero resolved callers.
+      # Per the AGENT-OBSERVATION rule this parses the run's gt_layer_events /
+      # gt_run_summary / output.jsonl and asserts a RESOLVED call edge actually reached
+      # the agent (an agent-visible "Callers: <sym>() in <file>:<line>" witness in
+      # delivered text, OR a positive l1_candidates_with_call_edge_count /
+      # l3b_caller_edge_count). --warn (observe-only) for first rollout; flip to
+      # --require once green on real runs. Truth = agent-facing TEXT, not emitted flags.
+      - name: AGENT-DELIVERY GATE — resolution reached the agent (warn-first)
+        if: always()
+        env:
+          PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench"
+        run: |
+          OUT_ARGS=""
+          for f in $(find /tmp/results -name 'output.jsonl' 2>/dev/null); do
+            OUT_ARGS="$OUT_ARGS --output-jsonl $f"
+          done
+          python scripts/verify/check_resolution_delivery.py \
+            --glob-dir /tmp/gt_debug \
+            $OUT_ARGS \
+            --warn || echo "::warning::resolution-delivery check errored (non-fatal in warn mode)"
 
       - name: Task summary
         if: always()

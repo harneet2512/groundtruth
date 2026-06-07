@@ -111,13 +111,63 @@ def _start_tunnel():
     threading.Thread(target=_drain, daemon=True).start()
 
 
+def _make_pusher():
+    """If GT_LOG_RELAY_URL is set, return a queue whose lines a daemon thread
+    batches and POSTs to that URL — e.g. a user-run `ngrok http 8765` tunnel whose
+    public URL forwards to their local `scripts/log_sink.py`. Returns None when
+    unset (no-op). Best-effort: a failed POST never breaks the piped run."""
+    url = os.environ.get("GT_LOG_RELAY_URL")
+    if not url:
+        return None
+    import urllib.request  # local import: only when actually pushing
+
+    pq: "queue.Queue[str | None]" = queue.Queue()
+
+    def _send():
+        buf: list[str] = []
+        while True:
+            try:
+                item = pq.get(timeout=0.5)
+            except queue.Empty:
+                item = "__FLUSH__"
+            if item is None:
+                break
+            if item != "__FLUSH__":
+                buf.append(item)
+            if buf and (item == "__FLUSH__" or len(buf) >= 25):
+                data = ("\n".join(buf) + "\n").encode("utf-8", "replace")
+                buf = []
+                try:
+                    req = urllib.request.Request(
+                        url,
+                        data=data,
+                        method="POST",
+                        headers={
+                            "ngrok-skip-browser-warning": "1",  # bypass ngrok-free interstitial
+                            "Content-Type": "text/plain",
+                        },
+                    )
+                    urllib.request.urlopen(req, timeout=3).read()
+                except Exception:
+                    pass  # never break the run on a relay hiccup
+
+    threading.Thread(target=_send, daemon=True).start()
+    print(f"[log_relay] pushing lines to GT_LOG_RELAY_URL ({url})", flush=True)
+    return pq
+
+
 def main():
     _start_tunnel()
+    pusher = _make_pusher()
     for line in sys.stdin:
         line = line.rstrip("\n")
         print(line, flush=True)  # keep the normal GHA log
         _q.put(line)
+        if pusher is not None:
+            pusher.put(line)
     _q.put(None)
+    if pusher is not None:
+        pusher.put(None)
 
 
 if __name__ == "__main__":

@@ -773,20 +773,76 @@ def graph_navigation(
             (needle, needle, limit * 4),  # fetch more for filtering; SWAP-INVARIANT: no test callers
         )
         callers = [(row[0], row[1]) for row in cur.fetchall()]
-        # Get one representative source_line per caller file for code snippet
+        # Get one representative source_line + TARGET symbol per caller file. The
+        # target name (nt.name) is fetched so the stdlib-shadow guard can run
+        # per (caller_code, target_name): the SQL `_ef` gate filters by PROVENANCE
+        # (resolution_method / trust_tier), but a DETERMINISTIC-tagged edge can
+        # still be a stdlib attribute call name-matched to a same-named project
+        # symbol (os.walk -> project walk; any(...) -> project any). That false
+        # "caller" passes the provenance gate (wire.md RUN VERDICT) — exactly the
+        # audited L3b laundering ("Called by: ... any(...)"). The brief already
+        # applies this guard via v1r_brief._is_stdlib_shadow; L3b did not. Mirror it.
+        _shadow_root = os.environ.get("GT_REPO_ROOT", "/testbed")
+        try:
+            from groundtruth.pretask.v1r_brief import _is_stdlib_shadow
+        except Exception:
+            _is_stdlib_shadow = None  # type: ignore[assignment]
+
+        def _caller_is_stdlib_shadow(caller_fp: str, line: int, target: str) -> bool:
+            """True iff caller_fp's representative call line is a stdlib attribute
+            call name-matched to the project symbol ``target`` — a false caller.
+            Correct-or-quiet: no guard available / unreadable line -> not a shadow."""
+            if _is_stdlib_shadow is None or not target or not line or line <= 0:
+                return False
+            try:
+                with open(
+                    os.path.join(_shadow_root, caller_fp), encoding="utf-8", errors="ignore"
+                ) as _sf:
+                    _slines = _sf.readlines()
+                if 0 < line <= len(_slines):
+                    return _is_stdlib_shadow(_slines[line - 1].strip(), target)
+            except OSError:
+                pass
+            return False
+
         _caller_source_lines: dict[str, int] = {}
+        _shadow_only_callers: set[str] = set()
         for caller_fp, _ in callers[:10]:
-            row = cur.execute(
-                f"""SELECT e.source_line FROM nodes nt
+            # Fetch several candidate edges (not just the top one) and pick the first
+            # representative whose call line is NOT a stdlib shadow. A caller is only
+            # dropped when EVERY edge to this file is a stdlib shadow — correct-or-
+            # quiet: never over-suppress a file that has a real deterministic caller
+            # just because it also makes a same-named stdlib call.
+            rows = cur.execute(
+                f"""SELECT e.source_line, nt.name FROM nodes nt
                 JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
                   AND {_ef}
                 JOIN nodes nsrc ON e.source_id = nsrc.id
                 WHERE nt.file_path = ? AND nsrc.file_path = ? AND e.source_line > 0
-                ORDER BY e.confidence DESC LIMIT 1""",
+                ORDER BY e.confidence DESC LIMIT 5""",
                 (needle, caller_fp),
-            ).fetchone()
-            if row:
-                _caller_source_lines[caller_fp] = row[0]
+            ).fetchall()
+            if not rows:
+                continue
+            _picked = None
+            _any_clean = False
+            for _src_line, _tgt_name in rows:
+                if _caller_is_stdlib_shadow(caller_fp, _src_line, _tgt_name or ""):
+                    continue
+                _any_clean = True
+                if _picked is None:
+                    _picked = _src_line
+            if not _any_clean:
+                # Every representative edge to this file is a stdlib shadow -> not a
+                # real caller. Drop it rather than render `Called by: ... <name>(...)`.
+                _shadow_only_callers.add(caller_fp)
+                continue
+            if _picked is not None:
+                _caller_source_lines[caller_fp] = _picked
+        # Remove the false (stdlib-shadow-only) callers from the delivered set so
+        # they are never rendered as `Called by:` facts (audit B fix).
+        if _shadow_only_callers:
+            callers = [(fp, cnt) for fp, cnt in callers if fp not in _shadow_only_callers]
         total_callers = len(callers)
 
         # Callees: files this file calls into
