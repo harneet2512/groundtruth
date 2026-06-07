@@ -542,6 +542,7 @@ jobs:
           PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
           GT_INDEX_BINARY: "/tmp/gt-index"
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
           GT_DEBUG_DIR: "/tmp/gt_debug"
           GT_MAX_LLM_CALLS: "300"
           GT_RPM_LIMIT: "0"
@@ -588,6 +589,15 @@ jobs:
           GT_LOCAL_DATASET: "/tmp/ds/dataset.jsonl"
         run: |
           mkdir -p /tmp/gt_debug /tmp/results
+          # Live log stream (optional): if the NGROK_AUTHTOKEN secret is set, install ngrok so
+          # scripts/log_relay.py can tunnel an SSE stream public — one `curl -N <url>` watches
+          # the run live, NO polling (url printed to stdout + the job summary). No-op when the
+          # secret is unset: log_relay degrades to a pure stdin->stdout passthrough.
+          if [ -n "${NGROK_AUTHTOKEN:-}" ] && ! command -v ngrok >/dev/null 2>&1; then
+            curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.tar.gz | tar xz -C /tmp 2>/dev/null || true
+            sudo mv /tmp/ngrok /usr/local/bin/ 2>/dev/null || cp /tmp/ngrok /usr/local/bin/ 2>/dev/null || true
+            ngrok config add-authtoken "$NGROK_AUTHTOKEN" 2>/dev/null || true
+          fi
           if [ "${{ inputs.baseline }}" = "true" ]; then
             echo "=== BASELINE MODE (no GT, same wrapper for config guards) ==="
             export GT_BASELINE=1
@@ -603,7 +613,7 @@ jobs:
               --eval-output-dir /tmp/results \
               --dataset 'SWE-bench-Live/SWE-bench-Live' \
               --split lite \
-              2>&1 | tee /tmp/gt_debug/full_run.log
+              2>&1 | tee /tmp/gt_debug/full_run.log | python -u scripts/log_relay.py
           AGENT_RC=${PIPESTATUS[0]}
           set -e
 
