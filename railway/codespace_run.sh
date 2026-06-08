@@ -462,8 +462,39 @@ if [ "${GT_EVAL:-1}" = "1" ]; then
   else
     PREDS_ARG="${PREDS}"
     python - "${TASK}" "${PREDS}" <<'PYEOF'
-import json, sys, glob
+import json, sys, glob, re
 task, preds = sys.argv[1], sys.argv[2]
+
+# PATCH HYGIENE — strip GENERATED/scaffold artifacts the OH whole-workdir `git diff`
+# sweeps into the model_patch (the agent runs pytest -> .coverage/coverage.xml/pytest.xml;
+# OpenHands writes .openhands/). These pollute the diff, and a binary `.coverage` or a
+# tail-truncated coverage.xml hunk makes `git apply` fail -> the eval ERRORS on a
+# possibly-correct SOURCE fix (observed: mesa-2394 errored, xarray-9586 diff buried).
+# Keep ONLY real source-file sections: drop everything before the first `diff --git`
+# (orphaned/truncated hunks), drop junk paths, drop binary sections. Generalized
+# (pattern-based, any repo/lang); touches no gold/test/FAIL_TO_PASS — pure hygiene.
+_JUNK = re.compile(r'(^|/)(\.coverage[^/]*|coverage\.xml|pytest\.xml|\.pytest_cache/|'
+                   r'__pycache__/|node_modules/|\.openhands/)|\.pyc$')
+def clean_patch(p):
+    if not p:
+        return p
+    idxs = [m.start() for m in re.finditer(r'(?m)^diff --git a/\S+ b/\S+', p)]
+    if not idxs:
+        return ""  # no recoverable source section
+    out = []
+    for i, s in enumerate(idxs):
+        e = idxs[i + 1] if i + 1 < len(idxs) else len(p)
+        sec = p[s:e]
+        path = re.match(r'diff --git a/(\S+) b/(\S+)', sec).group(2)
+        is_bin = ('GIT binary patch' in sec) or bool(re.search(r'(?m)^Binary files ', sec))
+        if _JUNK.search(path) or is_bin:
+            continue
+        out.append(sec)
+    cleaned = "".join(out)
+    if cleaned and not cleaned.endswith("\n"):
+        cleaned += "\n"
+    return cleaned
+
 patch = ""
 for f in glob.glob("/tmp/results/**/output.jsonl", recursive=True):
     for line in open(f, encoding="utf-8"):
@@ -471,9 +502,11 @@ for f in glob.glob("/tmp/results/**/output.jsonl", recursive=True):
         except Exception: continue
         if d.get("instance_id") == task or ("test_result" in d):
             patch = (d.get("test_result") or {}).get("git_patch", "") or d.get("git_patch", "") or patch
+raw_len = len(patch)
+patch = clean_patch(patch)
 with open(preds, "w", encoding="utf-8") as w:
     w.write(json.dumps({"instance_id": task, "model_name_or_path": "gt", "model_patch": patch}) + "\n")
-print(f"[9] predictions: instance={task} patch_len={len(patch)}")
+print(f"[9] predictions: instance={task} raw_patch_len={raw_len} cleaned_patch_len={len(patch)} (source-only)")
 PYEOF
   fi
   ( cd "${REPO}" && python -m swebench.harness.run_evaluation \
