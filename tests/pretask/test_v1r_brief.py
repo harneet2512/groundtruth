@@ -536,3 +536,254 @@ def test_path_match_preservation(_mock_tests, _mock_funcs, mock_v74, tmp_path: P
     result = generate_v1r_brief("fix colorama color rendering issue", "/repo", db_path, max_files=5)
     paths = [f.path for f in result.files]
     assert "src/colorama.py" in paths, f"Path-matched file should survive into brief, got: {paths}"
+
+
+# ===========================================================================
+# SQUASH BATCH (GRANULAR_LIPI_REVIEW_20260607T2330Z) — v1r_brief items
+# ===========================================================================
+
+from groundtruth.pretask.v1r_brief import (  # noqa: E402
+    _localization_header,
+    _entry_confidence_tier,
+    _top_function_names,
+    _resolved_witnesses_for_file,
+    _gl_normalize,
+)
+from groundtruth.pretask.graph_localizer import (  # noqa: E402
+    Candidate,
+    Witness,
+    LocalizerResult,
+)
+
+
+def _cand(file_path: str, *, score: float, verified: bool = False,
+          anchor: str = "anchor_fn", dst: str = "callee_fn") -> Candidate:
+    """A localizer Candidate carrying one issue-anchored witness (verified or not)."""
+    w = Witness(
+        file_path=file_path, anchor=anchor, edge_type="CALLS",
+        direction="calls_anchor", verified=verified, confidence=1.0 if verified else 0.5,
+        hop=1, src_symbol="src_fn", dst_symbol=dst,
+    )
+    return Candidate(
+        file_path=file_path, score=score, witnesses=[w],
+        lex_hits=1, degree=1, confidence=(1.0 if verified else 0.5),
+    )
+
+
+def _loc_result(cands: list[Candidate], *, anchors: list[str], agree: dict[str, int]) -> LocalizerResult:
+    return LocalizerResult(
+        candidates=cands, anchor_symbols=anchors, confidence=cands[0].confidence if cands else 0.0,
+        confident=True, gate_reason="test", agreement_by_file=agree,
+    )
+
+
+# ---- L1 CROSS-WIRE: _localization_header now returns (header, primary) and the
+#      primary is the file the header NAMES as #1 (single source of truth). ------
+
+def test_localization_header_returns_tuple_empty_when_no_loc():
+    """No candidates -> ('', '') — nothing to align to (correct-or-quiet)."""
+    out = _localization_header(None, "", "issue")
+    assert out == ("", "")
+    out2 = _localization_header(_loc_result([], anchors=[], agree={}), "", "issue")
+    assert out2 == ("", "")
+
+
+def test_localization_header_primary_is_named_first_file(tmp_path: Path):
+    """The returned primary_path == the file the header lists as candidate #1.
+
+    Flat MEDIUM/LOW path: shown[0].file_path is named '1.' in the block AND is the
+    returned primary. RED before the tuple change (function returned a bare str so
+    the caller had no primary to align entries[0] to).
+    """
+    db = str(tmp_path / "g.db")
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """CREATE TABLE nodes (id INTEGER PRIMARY KEY, label TEXT, name TEXT,
+              file_path TEXT, start_line INTEGER, is_test INTEGER DEFAULT 0);
+           CREATE TABLE edges (id INTEGER PRIMARY KEY, source_id INTEGER,
+              target_id INTEGER, type TEXT, source_line INTEGER,
+              resolution_method TEXT, confidence REAL DEFAULT 0.5);"""
+    )
+    conn.commit(); conn.close()
+    cands = [_cand("src/gold.py", score=0.9), _cand("src/other.py", score=0.5)]
+    # >=1 ranker agrees on gold -> MEDIUM flat list naming gold #1.
+    loc = _loc_result(cands, anchors=["anchor_fn"], agree={_gl_normalize("src/gold.py"): 1})
+    header, primary = _localization_header(loc, db, "fix the gold bug")
+    assert isinstance(header, str) and isinstance(primary, str)
+    assert primary == "src/gold.py"
+    # the header text NAMES the same file as #1
+    assert "1. src/gold.py" in header
+
+
+def test_l1_alignment_moves_loc_primary_to_entries_front():
+    """The cross-wire fix: when the localizer named a primary that is NOT entries[0]
+    (a downstream reorder put another file first), the alignment moves it to
+    entries[0] so <gt-localization> and <gt-task-brief>/EDIT-TARGET/L1-SCOPE all
+    name the SAME #1 file. This exercises the exact insert(0, pop(i)) invariant.
+
+    RED before the fix: entries[0] stayed 'src/other.py' (Pipe B) while the header
+    named 'src/gold.py' (Pipe A) — two different #1 files reach the agent.
+    """
+    # entries with a DELIBERATE reorder: gold is at index 2, not 0 (a keyword/hub
+    # re-rank put other/hub ahead — the divergence the cross-wire produces).
+    entries = [
+        FileEntry(path="src/hub.py", score=0.95),
+        FileEntry(path="src/other.py", score=0.80),
+        FileEntry(path="src/gold.py", score=0.50),
+    ]
+    _loc_primary = "src/gold.py"
+    _loc_header = "<gt-localization confidence=\"medium\">\n  1. src/gold.py\n</gt-localization>"
+
+    # The exact alignment the consumer runs (generate_v1r_brief, pre-L1-SCOPE).
+    if _loc_header and _loc_primary and entries:
+        _lp_norm = _gl_normalize(_loc_primary)
+        for _i, _e in enumerate(entries):
+            if _gl_normalize(_e.path) == _lp_norm:
+                if _i != 0:
+                    entries.insert(0, entries.pop(_i))
+                break
+
+    assert entries[0].path == "src/gold.py"          # == _loc.candidates[0] (Pipe A)
+    # the other entries keep their relative order behind the pinned primary
+    assert [e.path for e in entries] == ["src/gold.py", "src/hub.py", "src/other.py"]
+
+
+# ---- #37: _entry_confidence_tier path_match — generic 4-char stems must NOT
+#      promote to [WARNING]; specific compound/long stems still do. -------------
+
+def test_entry_tier_generic_stem_not_promoted():
+    """A generic file stem ('core'/'base'/'data') substring-present in the issue
+    must NOT promote the file to [WARNING] (the 'confident on weak signals'
+    inversion). RED before #37: 'core' (len 4 > 3) matched 'core' anywhere in the
+    issue via the bare `_stem in _it` substring test -> [WARNING].
+    """
+    e = FileEntry(path="src/core.py", score=0.1)  # no contract/witness/test/anchor
+    issue = "the application core logic mishandles the request"
+    assert _entry_confidence_tier(e, issue) == "[INFO]"
+
+
+def test_entry_tier_specific_stem_still_promoted():
+    """A SPECIFIC stem (len>=5 OR contains '_') that appears as a whole word in the
+    issue still earns [WARNING] — the real localization signal is preserved
+    (leafonly-plugin / import_files style)."""
+    e1 = FileEntry(path="src/leafonly.py", score=0.1)   # len 8 -> specific
+    assert _entry_confidence_tier(e1, "the leafonly plugin drops postings") == "[WARNING]"
+    e2 = FileEntry(path="src/import_files.py", score=0.1)  # contains '_'
+    assert _entry_confidence_tier(e2, "import_files mis-orders the tasks") == "[WARNING]"
+
+
+def test_entry_tier_specific_stem_substring_only_not_promoted():
+    """Specificity floor passes but NO whole-word boundary match -> not promoted.
+    'render' as a substring of 'prerendered' must not count (word-boundary gate)."""
+    e = FileEntry(path="src/render.py", score=0.1)
+    assert _entry_confidence_tier(e, "the prerendered output is stale") == "[INFO]"
+
+
+# ---- #60: _top_function_names — SQL and Python use ONE filtered term set; the
+#      SQL front-sort is honored, no contradictory Python re-partition. ----------
+
+def _funcname_db(tmp_path: Path) -> str:
+    db = str(tmp_path / "fn.db")
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """CREATE TABLE nodes (id INTEGER PRIMARY KEY, label TEXT, name TEXT,
+              qualified_name TEXT, file_path TEXT, start_line INTEGER, end_line INTEGER,
+              signature TEXT, return_type TEXT, is_exported INTEGER DEFAULT 0,
+              is_test INTEGER DEFAULT 0, language TEXT DEFAULT 'python', parent_id INTEGER);
+           CREATE TABLE edges (id INTEGER PRIMARY KEY, source_id INTEGER, target_id INTEGER,
+              type TEXT, source_line INTEGER, source_file TEXT, resolution_method TEXT,
+              confidence REAL DEFAULT 1.0, metadata TEXT);"""
+    )
+    # set_fields: issue function, LOW ref-count. hub: NOT issue-named, HIGH ref-count.
+    # fi: a 2-char-named function — exists so the short-term test can prove the OLD
+    # unfiltered Python re-partition would vault it to [0], while the fix does not.
+    conn.executemany(
+        "INSERT INTO nodes (id,label,name,file_path,is_test) VALUES (?,?,?,'src/m.py',0)",
+        [(1, "Function", "set_fields"), (2, "Function", "hub"),
+         (3, "Function", "helper"), (4, "Function", "fi")],
+    )
+    # hub has 3 incoming edges (high ref_count); set_fields/fi have 0.
+    conn.executemany(
+        "INSERT INTO edges (source_id,target_id,type,resolution_method,confidence) "
+        "VALUES (?,2,'CALLS','import',1.0)",
+        [(1,), (3,), (4,)],
+    )
+    conn.commit(); conn.close()
+    return db
+
+
+def test_top_function_names_issue_match_sorts_front(tmp_path: Path):
+    """The issue-named low-ref function sorts to the FRONT (SQL CASE), surviving the
+    LIMIT — and the result honors that order (no Python re-partition that could
+    disagree). 'set_fields' must precede the high-ref 'hub'."""
+    db = _funcname_db(tmp_path)
+    out = _top_function_names(db, "src/m.py", issue_terms={"set_fields"})
+    assert out[0] == "set_fields", f"issue fn must rank first, got {out}"
+
+
+def test_top_function_names_short_term_filtered_consistently(tmp_path: Path):
+    """A <=2-char issue term is filtered (len>2) and does NOT re-promote in Python —
+    SQL and Python agree on one filtered term set (#60). 'hub' (the high-ref fn)
+    leads on ref_count; the 2-char term 'fi' does not vault 'set_fields' via a
+    Python-only unfiltered re-partition.
+    """
+    db = _funcname_db(tmp_path)
+    # 'fi' is <=2 chars AND is a real function name here. Filtered out of the SQL CASE
+    # AND must not re-rank in Python. RED before #60: the OLD unfiltered Python
+    # re-partition (terms_lower = {'fi'}) vaulted the 'fi' function to out[0];
+    # GREEN after: SQL ref_count order is honored -> hub (3 refs) leads, 'fi' does not.
+    out = _top_function_names(db, "src/m.py", issue_terms={"fi"})
+    assert out[0] == "hub", f"short term must not re-promote; got {out}"
+    assert out[0] != "fi", f"<=2-char term re-promoted in Python (the #60 bug); got {out}"
+
+
+# ---- #36: callee witness `code` snippet must describe the callee DEFINITION
+#      (file_path:line it travels with), not the call-site line in another file. --
+
+def test_callee_witness_code_matches_definition_line(tmp_path: Path):
+    """The callee record's `code` must be the snippet at (callee_file, def_line) —
+    NOT the call-site line in the candidate file. RED before #36: code was
+    _code_at(candidate_file, call_site_line) while file_path/line pointed at the
+    callee def in another file -> snippet described a different (file,line).
+    """
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    # candidate file: the call site is on line 2.
+    (repo / "src" / "caller.py").write_text(
+        "def use():\n    return helper(1)\n", encoding="utf-8"
+    )
+    # callee file: helper is DEFINED on line 1.
+    (repo / "src" / "lib.py").write_text(
+        "def helper(x):\n    return x + 1\n", encoding="utf-8"
+    )
+    db = str(tmp_path / "g.db")
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """CREATE TABLE nodes (id INTEGER PRIMARY KEY, label TEXT, name TEXT,
+              qualified_name TEXT, file_path TEXT, start_line INTEGER, end_line INTEGER,
+              signature TEXT, return_type TEXT, is_exported INTEGER DEFAULT 0,
+              is_test INTEGER DEFAULT 0, language TEXT DEFAULT 'python', parent_id INTEGER);
+           CREATE TABLE edges (id INTEGER PRIMARY KEY, source_id INTEGER, target_id INTEGER,
+              type TEXT, source_line INTEGER, source_file TEXT, resolution_method TEXT,
+              confidence REAL DEFAULT 1.0, metadata TEXT);"""
+    )
+    conn.executemany(
+        "INSERT INTO nodes (id,label,name,file_path,start_line,is_test) VALUES (?,?,?,?,?,0)",
+        [(1, "Function", "use", "src/caller.py", 1),
+         (2, "Function", "helper", "src/lib.py", 1)],
+    )
+    # use (src/caller.py) CALLS helper (src/lib.py) at call-site line 2 (deterministic).
+    conn.execute(
+        "INSERT INTO edges (source_id,target_id,type,source_line,resolution_method,confidence) "
+        "VALUES (1,2,'CALLS',2,'import',1.0)"
+    )
+    conn.commit(); conn.close()
+
+    wits = _resolved_witnesses_for_file(db, "src/caller.py", str(repo), max_each=2)
+    callees = [w for w in wits if w["direction"] == "callee"]
+    assert callees, f"expected a callee witness, got {wits}"
+    w = callees[0]
+    assert w["file_path"] == "src/lib.py" and w["line"] == 1
+    # the snippet MUST be the callee DEFINITION line, not the call-site 'return helper(1)'
+    assert "def helper" in w["code"], f"code should be the def line, got {w['code']!r}"
+    assert "return helper(1)" not in w["code"]

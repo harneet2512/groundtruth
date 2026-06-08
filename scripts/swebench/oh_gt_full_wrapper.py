@@ -530,6 +530,26 @@ def _record_diff_snapshot(orig_run_action: Any, config: Any, event_path: str, ac
     with open(_diff_path, "a") as f:
         f.write(json.dumps(record) + "\n")
 
+    # #52 LIPI fix (Plumbing — bridge the computed diff size into the governor).
+    # goku_check's patch-collapse detector (governor.py) is blind unless the
+    # governor's AgentState sees each diff snapshot. The wrapper computed collapse
+    # entirely on its OWN side (config._diff_* below) and never told the governor,
+    # so goku_check(... diff_size=None ...) could never flag patch_collapsed.
+    # Feed the same magnitude here: line churn when available, else a nonzero
+    # proxy that is nonzero IFF diff_nonzero (covers shortstat-empty-but-files-
+    # changed). record_diff_snapshot only flags collapse on nonzero→0, so a
+    # quiet read/run iter (diff_size 0 before any edit) is a no-op. Best-effort:
+    # never let a governor hiccup break diff timeline accounting.
+    _l5_gov = getattr(config, "_l5_governor", None)
+    if _l5_gov is not None and not _GT_BASELINE:
+        try:
+            _diff_size = insertions + deletions
+            if _diff_size == 0 and diff_nonzero:
+                _diff_size = files_changed or name_only_count
+            _l5_gov.state.record_diff_snapshot(_diff_size)
+        except Exception as _gov_diff_exc:
+            print(f"[GT_META] L5 governor record_diff_snapshot error: {_gov_diff_exc}", flush=True)
+
     if diff_nonzero:
         if not config._diff_ever_nonzero:
             config._diff_first_nonzero_iter = action_count
@@ -1128,35 +1148,15 @@ def _render_scaffold_advisory(scaffold_path: str, config: GTRuntimeConfig) -> st
     return "\n".join(lines)
 
 
-def _maybe_fire_l5(
-    config: GTRuntimeConfig,
-    path: str,
-    obs: Any,
-    act_text: str,
-    tel_obj: Any,
-    instance_ref: Any,
-) -> Any:
-    """Fire L5 on a non-source edit when there is no prior source progress."""
-    if path == config._l5_last_scaffold_file:
-        return obs
-    config._l5_scaffold_fired = True
-    config._l5_last_scaffold_file = path
-    config._l5_metrics["l5_scaffold_fired"] = True
-    config._l5_metrics["l5_fire_count"] = config._l5_metrics.get("l5_fire_count", 0) + 1
-    advisory = _render_scaffold_advisory(path, config)
-    if advisory:
-        print(f"[GT_META] L5 non_source_edit fired for {path}", flush=True)
-        _l5_ns_eid = _emit_structured_event(
-            config, "L5", "non_source_edit",
-            rendered_text=advisory, file_path=path,
-        )
-        _log_gt_interaction(config, "L5", f"non_source:{path}", "redirect", advisory,
-            agent_action_before=act_text[:300], event_id=_l5_ns_eid or "")
-        obs = append_observation(obs, "\n\n" + advisory + "\n")
-        if tel_obj is not None:
-            tel_obj.record_gate(True)
-            _write_gt_telemetry(instance_ref, tel_obj)
-    return obs
+# #49 LIPI fix: `_maybe_fire_l5` DELETED — it had ZERO call sites (dead code).
+# Scaffold redirection is owned by the governor's scaffolding_trap_early path
+# (governor.py); this orphaned duplicate only misled audits into believing an
+# L5 scaffold path existed. Its sole writer of `_l5_scaffold_fired` /
+# `_l5_last_scaffold_file` was here, so those config fields are already always
+# their `False`/`""` defaults at runtime — their readers (617, 5276, 5915) stay
+# valid (default-False) and unchanged. `_render_scaffold_advisory` (the only
+# thing this function called) is now orphaned but left in place — removing it is
+# outside this item's scope.
 
 
 def _maybe_fire_presubmit_verify(config: GTRuntimeConfig, obs: Any, orig_run_action: Any) -> Any:
@@ -1861,11 +1861,15 @@ def _build_rescue_payload(config: GTRuntimeConfig, rescue_level: int = 0) -> str
     if not top_base:
         return ""
 
-    # Get cached evidence
+    # Get cached evidence FOR THE CHOSEN FILE.
+    # #50 LIPI fix (wrong-fact): previously pulled next(iter(evidence_cache)) —
+    # an arbitrary first cache key, generally a DIFFERENT file than top_cand —
+    # so the rescue asserted "{top_base} … Key evidence: {<other file's evidence>}".
+    # Key the evidence to top_cand; if this file has no cached evidence, omit the
+    # evidence line entirely (correct-or-quiet) rather than pair a mismatched fact.
     top_evidence = ""
     if config.evidence_cache:
-        top_key = next(iter(config.evidence_cache))
-        top_evidence = config.evidence_cache[top_key]
+        top_evidence = config.evidence_cache.get(top_cand, "")
 
     # Scope files not yet edited
     unedited = []
@@ -4457,9 +4461,20 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             if "gt_validate" in act_text:
                 register_gt_validate_paths(act_text, config)
 
-            # L5 governor: detect test commands (edits handled below after event classification)
+            # L5 governor: feed it EVERY classified event on this live (non-finish)
+            # CmdRunAction path, not only "skip". #51 LIPI fix (Integration — gate
+            # asymmetry): the governor's after_interaction dispatch routes source
+            # edits → _handle_source_edit (premature_commitment) and non-source edits
+            # → _handle_non_source_edit. A bash-issued edit classifies as "post_edit"
+            # (or a bash view as "post_view"), NOT "skip", so the prior skip-only gate
+            # made half the governor's intervention surface structurally unreachable.
+            # finish is dispatched separately (AgentFinishAction never enters this
+            # CmdRunAction block), so no double-fire. The post_edit branch at ~5175
+            # only pokes record_source_edit() and never calls after_interaction —
+            # this is the single call site that drives the decision logic on the
+            # live path.
             _l5_gov = getattr(config, "_l5_governor", None)
-            if _l5_gov is not None and not _GT_BASELINE and event.kind == "skip":
+            if _l5_gov is not None and not _GT_BASELINE and event.kind in ("skip", "post_view", "post_edit"):
                 try:
                     _l5d = _l5_gov.after_interaction(
                         action, obs, config.action_count, config.max_iter,
@@ -6310,7 +6325,11 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                 emitted=False, suppressed=True,
                                 suppression_reason="finish_handler_dead_write",
                             )
-                            obs = append_observation(obs, f"\n\n{_l5d.message}\n")
+                            # #48 LIPI fix: DEAD WRITE removed. OH sets state=FINISHED
+                            # before this handler runs, so any obs append here is never
+                            # read by the agent (telemetry above already marks it
+                            # emitted=False/suppressed). Governance must fire mid-trajectory
+                            # (see _maybe_fire_presubmit_verify at the edit→review transition).
                             _log_gt_interaction(
                                 config, "L5", "governor_finish", "advisory", _l5d.message,
                                 agent_action_before=act_text[:300],
@@ -6352,7 +6371,9 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                             emitted=False, suppressed=True,
                             suppression_reason="finish_handler_dead_write",
                         )
-                        obs = append_observation(obs, f"\n\n{_goku_d.message}\n")
+                        # #48 LIPI fix: DEAD WRITE removed (same reason as the L5
+                        # governor finish path above — post-FINISHED obs append is
+                        # never observed by the agent).
                         _log_gt_interaction(
                             config, "L5", "goku_finish", "advisory", _goku_d.message,
                             agent_action_before=act_text[:300],

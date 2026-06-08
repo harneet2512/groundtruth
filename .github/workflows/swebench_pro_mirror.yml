@@ -132,7 +132,12 @@ jobs:
           set -uo pipefail
           UP="docker.io/jefzda/sweap-images"
           # GHCR repo names must be lowercase; owner may contain uppercase.
-          GH="ghcr.io/$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')/sweap-images"
+          OWNER_LC="$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')"
+          GH="ghcr.io/${OWNER_LC}/sweap-images"
+          # OCI source label -> links the GHCR package to the (public) repo, so the
+          # package inherits the repo's access/visibility and storage is free. This is
+          # the org.opencontainers.image.source mechanism.
+          SRC_REPO="https://github.com/${OWNER_LC}/groundtruth"
 
           dh_login() {  # rotate between the two Docker Hub accounts to double the 200/6hr cap
             local which="$1"
@@ -167,8 +172,11 @@ jobs:
             if [ "$OK" -ne 1 ]; then
               echo "::error::pull FAILED $UP:$TAG (likely Docker Hub rate limit — re-run later to resume)"; failed=$((failed+1)); continue
             fi
-            # (3) Retag -> GHCR and push.
-            docker tag "$UP:$TAG" "$GH:$TAG"
+            # (3) Re-tag with the OCI source label (one tiny layer over the pulled image)
+            #     so the GHCR package links to the public repo, then push.
+            printf 'FROM %s\nLABEL org.opencontainers.image.source=%s\n' "$UP:$TAG" "$SRC_REPO" \
+              | docker build -q -t "$GH:$TAG" - >/dev/null 2>&1 \
+              || docker tag "$UP:$TAG" "$GH:$TAG"   # fallback: plain retag if build hiccups
             if docker push "$GH:$TAG" >/dev/null 2>&1; then
               echo "  [done] $TAG -> $GH:$TAG"; done=$((done+1))
             else

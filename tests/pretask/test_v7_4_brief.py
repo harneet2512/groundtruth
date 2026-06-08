@@ -370,3 +370,210 @@ def test_entered_via_graph_rescue(tiny_db_v74: str, tiny_repo: str):
     # With B1, files reachable from semantic anchors via graph are graph_rescue
     # (this is a structural check, not a specific file check)
     assert isinstance(entries, list)
+
+
+# =====================================================================
+# SQUASH-BATCH red→green tests — items #19, #20, #21, #46
+# (D:\Groundtruth\.claude\reports\GRANULAR_LIPI_REVIEW_20260607T2330Z.md)
+# Each test FAILS against the pre-fix code and PASSES after the fix.
+# =====================================================================
+
+
+@pytest.fixture()
+def _clear_embed_cache():
+    """Clear the in-memory + disk embedding cache so a per-test FakeModel's
+    embeddings are not shadowed by a prior test's run on the same db path."""
+    from groundtruth.pretask import anchor_select as _as
+    _as._EMBED_CACHE.clear()
+    yield
+    _as._EMBED_CACHE.clear()
+
+
+class _ConstFileAntiIssueModel:
+    """Embedder whose FILE passages all point to +e0 and whose single-text ISSUE
+    query points to -e0 → every cosine is -1.0.
+
+    Consequence (anchor_select.semantic_top_k): `score_all=True` keeps only
+    strictly-positive cosines → `sem_all` is EMPTY; the bounded seed map
+    (`score_all=False`, top-k, NOT positivity-filtered) keeps files at -1.0 →
+    NON-EMPTY and NON-ZERO. This is exactly the degenerate state item #46 targets:
+    the old `sem_all if sem_all else sem_scores` fallback would leak the seed map's
+    negative cosines into components['sem']; the fix uses `sem_all` unconditionally
+    → component 0 everywhere.
+    """
+
+    def encode(self, texts, **kw):
+        texts = list(texts)
+        v = np.zeros((len(texts), 384), dtype=np.float32)
+        # single-text call == the ISSUE query (run_v74/anchor_select embed the issue
+        # as a singleton); multi-text == FILE passages.
+        sign = -1.0 if len(texts) == 1 else 1.0
+        v[:, 0] = sign
+        return v
+
+
+def test_item46_sem_fallback_never_uses_bounded_seed_map(
+    tiny_db_v74: str, tiny_repo: str, _clear_embed_cache, monkeypatch
+):
+    """item #46: with sem_all empty but the bounded seed map non-empty/non-zero,
+    the `sem` component must be 0 everywhere — the fix drops the seed-map fallback.
+
+    RED (pre-fix `sem_all if sem_all else sem_scores`): components['sem'] carries the
+    seed map's -1.0 cosines on the seeded files (a spurious wrong signal).
+    GREEN (`sem_component_scores = sem_all`): every components['sem'] == 0.0.
+    """
+    from groundtruth.pretask import v7_4_brief as _b
+
+    monkeypatch.setattr(_b, "_get_model", lambda: _ConstFileAntiIssueModel())
+    # _SEMANTIC_AVAILABLE gates the W_SEM zeroing at L744; force it True so the
+    # component (not the weight) is what's under test — we assert the COMPONENT is 0,
+    # independent of the weight.
+    monkeypatch.setattr(_b, "_SEMANTIC_AVAILABLE", True)
+
+    result = _b.run_v74(
+        issue_text="parse_expr tokenize Token crash",
+        repo_root=tiny_repo,
+        graph_db=tiny_db_v74,
+        gold_files=["src/parser.py"],
+        ablation="C",
+    )
+    sem_vals = [r["components"].get("sem", 0.0) for r in result.ranked_full]
+    assert sem_vals, "expected ranked candidates"
+    assert all(v == 0.0 for v in sem_vals), (
+        "sem component must be 0 when sem_all is empty (no fallback to the bounded "
+        f"seed map); got {sem_vals}"
+    )
+    # And the observability field must agree (no positive sem consumed).
+    assert all(v == 0.0 for v in result.sem_components_full)
+
+
+def test_item21_bm25_called_exactly_once(
+    tiny_db_v74: str, tiny_repo: str, monkeypatch
+):
+    """item #21: lexical_file_search must run ONCE per run_v74 (ablation C), reused
+    for both candidate seeding and `lex` component scoring.
+
+    RED (pre-fix): two calls (max(20,…) for seeding, max(50,…) for scoring) → 2.
+    GREEN: one call sized max(50,…) reused for both → 1.
+    """
+    from groundtruth.pretask import v7_4_brief as _b
+
+    real = _b.lexical_file_search
+    calls = {"n": 0, "max_files": []}
+
+    def _counting(*args, **kwargs):
+        calls["n"] += 1
+        calls["max_files"].append(kwargs.get("max_files"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(_b, "lexical_file_search", _counting)
+
+    _b.run_v74(
+        issue_text="parse_expr crashes on empty tokens",
+        repo_root=tiny_repo,
+        graph_db=tiny_db_v74,
+        gold_files=["src/parser.py"],
+        ablation="C",
+    )
+    assert calls["n"] == 1, (
+        f"lexical_file_search must be called once, was called {calls['n']}x "
+        f"(max_files={calls['max_files']})"
+    )
+
+
+def test_item19_path_component_max_normalized_to_one(
+    tiny_db_v74: str, tiny_repo: str
+):
+    """item #19: the `path` component map must be max-normalized to [0,1] like
+    lex/reach, so its top value is 1.0 even when no file is an EXACT basename match
+    (raw construction tops out at 0.7 for a substring match).
+
+    Issue word 'parsers' is a SUPERSTRING of basename 'parser' (substring tier →
+    raw 0.7) and never equals any basename (no raw 1.0). Issue word 'tokenizer' is a
+    superstring of 'tokens'? no — use words that only hit the substring/dir tiers.
+
+    RED (pre-fix, unnormalized): max(path component) == 0.7.
+    GREEN (normalized): max(path component) == 1.0.
+    """
+    from groundtruth.pretask.v7_4_brief import run_v74
+
+    # 'parsers' contains 'parser' (basename of src/parser.py) → substring tier 0.7.
+    # No issue word equals a basename exactly → no raw 1.0 anywhere.
+    result = run_v74(
+        issue_text="the parsers subsystem mishandles input",
+        repo_root=tiny_repo,
+        graph_db=tiny_db_v74,
+        gold_files=["src/parser.py"],
+        ablation="C",
+    )
+    path_vals = [r["components"].get("path", 0.0) for r in result.ranked_full]
+    nonzero = [v for v in path_vals if v > 0.0]
+    assert nonzero, "expected at least one path-matched candidate"
+    assert max(path_vals) == pytest.approx(1.0), (
+        "path component must be max-normalized to 1.0 at the top; "
+        f"got max={max(path_vals)} (raw substring tier 0.7 would indicate no "
+        "normalization)"
+    )
+    # All normalized values stay within [0,1].
+    assert all(0.0 <= v <= 1.0 for v in path_vals)
+
+
+def _rrf_run_tokens_score(monkeypatch, tiny_db_v74, tiny_repo, hub_pen_for_tokens):
+    """Run run_v74 in RRF=full mode with a controlled hub penalty on tokens.py and
+    return its stored final score (post-fusion, post-any-boost). Hub penalties are
+    held identical across calls EXCEPT tokens.py, so the docs/source boost cancels
+    in a ratio comparison."""
+    from groundtruth.pretask import v7_4_brief as _b
+
+    monkeypatch.setenv("GT_RRF_FUSION", "full")
+    monkeypatch.setattr(
+        _b, "compute_hub_penalties",
+        lambda *_a, **_k: {"src/tokens.py": hub_pen_for_tokens},
+    )
+    result = _b.run_v74(
+        issue_text="Token tokenize parse_expr handling",
+        repo_root=tiny_repo,
+        graph_db=tiny_db_v74,
+        gold_files=[],
+        ablation="C",
+    )
+    by_path = {r["path"]: r for r in result.ranked_full}
+    assert "src/tokens.py" in by_path, "tokens.py must be a candidate"
+    return by_path["src/tokens.py"]
+
+
+def test_item20_rrf_mode_applies_hub_demotion(
+    tiny_db_v74: str, tiny_repo: str, monkeypatch
+):
+    """item #20: in RRF fusion mode the hub defense must still apply — a file with a
+    positive hub_pen has its fused score multiplicatively demoted by
+    max(0, 1 - w_hub*hub_pen). Two runs that differ ONLY in tokens.py's hub_pen:
+    the heavy-hub run's score must be strictly lower, by the demotion ratio
+    (1 - w_hub*0.9) / 1.0. The docs/source boost (item #13, separate) is identical
+    in both runs so it cancels in the ratio.
+
+    RED (pre-fix RRF branch, no hub term): the two runs produce the SAME score
+    (demotion never applied) → ratio == 1.0 → assert fails.
+    GREEN: heavy-hub score == base score * (1 - w_hub*0.9) < base score.
+    """
+    from groundtruth.pretask.v7_4_brief import DEFAULT_WEIGHTS, W_HUB_MAX
+
+    # Baseline: no hub penalty on tokens.py.
+    base = _rrf_run_tokens_score(monkeypatch, tiny_db_v74, tiny_repo, 0.0)
+    # Heavy hub penalty on tokens.py — its component must carry it.
+    heavy = _rrf_run_tokens_score(monkeypatch, tiny_db_v74, tiny_repo, 0.9)
+    assert heavy["components"].get("hub_pen", 0.0) == pytest.approx(0.9)
+    assert base["components"].get("hub_pen", 0.0) == pytest.approx(0.0)
+
+    assert base["score"] > 0.0, "baseline RRF score must be positive to test demotion"
+    w_hub = min(W_HUB_MAX, DEFAULT_WEIGHTS.get("W_HUB", 0))
+    expected_ratio = max(0.0, 1.0 - w_hub * 0.9)
+    # Strictly demoted, and by the expected multiplicative factor (boost cancels).
+    assert heavy["score"] < base["score"], (
+        "RRF mode must demote a hub file (item #20); heavy-hub score "
+        f"{heavy['score']} not below baseline {base['score']}"
+    )
+    assert heavy["score"] == pytest.approx(base["score"] * expected_ratio, rel=1e-4), (
+        f"hub demotion factor wrong: heavy={heavy['score']} base={base['score']} "
+        f"ratio={heavy['score']/base['score']} expected={expected_ratio}"
+    )
