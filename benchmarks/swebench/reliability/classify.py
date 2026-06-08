@@ -92,6 +92,8 @@ def classify_task(c: dict, gate_passed: bool, run_ok: bool = True) -> dict:
     if gate_passed:
         # thin if semantic or LSP fired only marginally
         sem_count = (c.get("gate_metrics", {}) or {}).get("semantic_signal_count")
+        if sem_count is None:
+            sem_count = absorp.get("gate_sem_count")  # carried in the absorption contract
         thin = (isinstance(sem_count, int) and sem_count <= 1) or \
                (isinstance(lsp.get("resolved"), int) and 0 < lsp["resolved"] <= 2)
         # hook (only meaningful when an agent ran)

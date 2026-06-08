@@ -1,0 +1,52 @@
+{
+  "aiogram__aiogram-1594": {
+    "final_class": "GREEN_THIN",
+    "top_level_class": "GREEN_THIN",
+    "reason": "all gates ON; det=68.83360086 lsp_resolved=63 lsp_no_op_valid=False"
+  },
+  "aws-cloudformation__cfn-lint-3749": {
+    "final_class": "GREEN_ROBUST",
+    "top_level_class": "GREEN_ROBUST",
+    "reason": "all gates ON; det=73.9117733 lsp_resolved=76 lsp_no_op_valid=False"
+  },
+  "beetbox__beets-5457": {
+    "final_class": "GREEN_ROBUST",
+    "top_level_class": "GREEN_ROBUST",
+    "reason": "all gates ON; det=70.58677891 lsp_resolved=257 lsp_no_op_valid=False"
+  },
+  "beeware__briefcase-2085": {
+    "final_class": "GREEN_ROBUST",
+    "top_level_class": "GREEN_ROBUST",
+    "reason": "all gates ON; det=53.48474727 lsp_resolved=89 lsp_no_op_valid=False"
+  },
+  "bridgecrewio__checkov-6893": {
+    "final_class": "GATE_FALSE_FAIL",
+    "top_level_class": "GT_ARCHITECTURE_FAIL",
+    "reason": "gate RED on a healthy substrate; LSP_NO_OP_VALID (residual=1<= 8 on an already-deterministic graph (det=69.37%)); graph det=69.37332497"
+  },
+  "conan-io__conan-17092": {
+    "final_class": "ABSORPTION_FAIL",
+    "top_level_class": "GT_ARCHITECTURE_FAIL",
+    "reason": "embedder discriminates (3a PASS) but sem_count=0/5 on the rendered set -> semantic ranking not consumed into the rendered candidates"
+  },
+  "cyclotruc__gitingest-115": {
+    "final_class": "GATE_FALSE_FAIL",
+    "top_level_class": "GT_ARCHITECTURE_FAIL",
+    "reason": "gate RED on a healthy substrate; LSP_NO_OP_VALID (residual=4<= 8 on an already-deterministic graph (det=96.33%)); graph det=96.33027523"
+  },
+  "deepset-ai__haystack-8525": {
+    "final_class": "GREEN_THIN",
+    "top_level_class": "GREEN_THIN",
+    "reason": "all gates ON; det=78.09367596 lsp_resolved=2 lsp_no_op_valid=True"
+  },
+  "delgan__loguru-1297": {
+    "final_class": "PRODUCT_QUALITY_FAIL",
+    "top_level_class": "VALID_SETUP_BUT_PRODUCT_QUALITY_GAP",
+    "reason": "name_match dominates the call graph (det=36.65135273, name_match=1241 > det=718)"
+  },
+  "dynaconf__dynaconf-1225": {
+    "final_class": "GREEN_ROBUST",
+    "top_level_class": "GREEN_ROBUST",
+    "reason": "all gates ON; det=70.03412969 lsp_resolved=23 lsp_no_op_valid=False"
+  }
+}
