@@ -566,7 +566,9 @@ jobs:
           esac
           # Run the resolve IN-container against the BUILT repo; the enriched graph.db stays
           # at /tmp/graph.db in the container. Fail-closed on a non-zero resolve exit.
-          docker exec -e PYTHONPATH=/opt/gtsrc gtsrc bash -lc "cd '$ROOT' && python3 -m groundtruth.resolve --db /tmp/graph.db --root '$ROOT' --resolve --lang '$TASK_LANG'" 2>&1 | tail -6
+          # tee the resolve output to a host file so the foundational-gates LSP gate (GATE 2)
+          # can parse resolve.py's `LSP_METRICS resolved=.. residual=.. scoped_source_files=..`.
+          docker exec -e PYTHONPATH=/opt/gtsrc gtsrc bash -lc "cd '$ROOT' && python3 -m groundtruth.resolve --db /tmp/graph.db --root '$ROOT' --resolve --lang '$TASK_LANG'" 2>&1 | tee /tmp/gt_lsp_metrics.txt | tail -6
           RES_RC=${PIPESTATUS[0]}
           [ "$RES_RC" -eq 0 ] || { echo "FATAL: in-container LSP resolve failed (rc=$RES_RC)"; exit 1; }
           mkdir -p /tmp/gt
@@ -598,6 +600,27 @@ jobs:
           # coordinated with gt_gt.md. Aborts if any base or the pipeline is degraded.
           python scripts/verify/preflight_pipeline.py \
             --db /tmp/gt/graph.db --root /tmp/gt/src --census
+
+      - name: Foundational gates — 3 substrate prereqs CONSUMED (fail-closed, $0 abort)
+        if: ${{ env.GT_GRAPH_DB != '' }}
+        env:
+          GT_GATES_DEEP_JSON: /tmp/gt/gates_deep.json
+        run: |
+          # preflight_pipeline (above) proves the substrate is PRESENT. These 3 gates prove it
+          # is actually CONSUMED on THIS task's graph + issue (gt_gt §7 / gt_trial §1.5) — the
+          # difference between "GT is built" and "GT runs as the baseline wearing a GT label":
+          #   ① EMBEDDER consumed  — real ONNX, separating vectors, effective_w_sem>0 + per-task
+          #      MAD score discrimination (not a _ZeroEmbeddingModel / zero W_SEM).
+          #   ② RESOLUTION det%    — CALLS graph mostly deterministic (name_match converted/
+          #      excluded, NOT dominant) + typing tiers fired.
+          #   ③ graph.db populated — nodes/edges/fts5/properties present.
+          # foundational_gates.py prints each gate's numbers + exits non-zero if ANY is OFF, so
+          # a hollow/degraded substrate aborts here ($0, no agent) — parity with the OH pipeline.
+          # Issue = the task's instruction.md ONLY (never solution/ or tests/ — legitimacy).
+          ISSUE="deepswe-bench/tasks/${{ matrix.task }}/instruction.md"
+          [ -s "$ISSUE" ] || { echo "::warning::instruction.md missing — GATE 3 per-issue discrimination degraded"; ISSUE=/dev/null; }
+          PYTHONPATH="$GITHUB_WORKSPACE/src" python3 scripts/metrics/foundational_gates.py \
+            /tmp/gt/graph.db /tmp/gt/src "$ISSUE" /tmp/gt_lsp_metrics.txt
 
       - name: Legitimacy manifest + guard (fail-closed before the agent runs)
         if: ${{ env.GT_GRAPH_DB != '' }}
