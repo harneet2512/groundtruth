@@ -1392,12 +1392,18 @@ def _semantic_score_by_file(issue_text: str, graph_db: str, files: set[str]) -> 
                 k = _normalize(fp)
                 if k in want and len(docs.get(k, [])) < 80:
                     docs.setdefault(k, []).append(f"{nm} {sig}")
-            for fp, val in conn.execute(
-                "SELECT n.file_path, p.value FROM properties p JOIN nodes n ON n.id=p.node_id "
-                "WHERE n.is_test=0 AND p.kind IN ('docstring','call_order','guard_clause','conditional_return')"):
-                k = _normalize(fp)
-                if k in want and len(docs.get(k, [])) < 120:
-                    docs.setdefault(k, []).append(str(val))
+            # Properties are an ADDITIVE enrichment — isolate so a missing `properties`
+            # table (older graphs) degrades to name+signature docs, NOT a proof-mode
+            # fail-close (verifier finding; mirrors anchor_select's isolated try).
+            try:
+                for fp, val in conn.execute(
+                    "SELECT n.file_path, p.value FROM properties p JOIN nodes n ON n.id=p.node_id "
+                    "WHERE n.is_test=0 AND p.kind IN ('docstring','call_order','guard_clause','conditional_return')"):
+                    k = _normalize(fp)
+                    if k in want and len(docs.get(k, [])) < 120:
+                        docs.setdefault(k, []).append(str(val))
+            except sqlite3.Error:
+                pass  # properties table absent on older graphs -> name+signature docs only
         finally:
             conn.close()
     except sqlite3.Error as _e:

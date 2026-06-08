@@ -996,8 +996,21 @@ def resolve_main() -> None:
             sys.exit(1)
 
         if not servers.get(args.lang):
-            print(f"ERROR: No LSP server installed for {args.lang}", file=sys.stderr)
-            sys.exit(1)
+            # No LSP server for this language: emit the 0-resolution CONTRACT (not a hard
+            # abort) so the gate classifies it (resolved=0/residual -> GATE-2 fails-closed =
+            # explicit "unsupported language" proof classification), and the substrate's
+            # proof-mode resolve-fatal sees rc=0 instead of aborting before the gates run.
+            # Generalized: ANY language with no server gets the same honest contract, never
+            # a silent pass and never a hard crash (verifier finding; matches the substrate's
+            # documented "unsupported language -> GATE-2 fails-closed" promise).
+            _scoped_n0 = len(source_files) if source_files else 0
+            print(f"WARN: No LSP server installed for {args.lang} — emitting 0-resolution contract",
+                  file=sys.stderr)
+            print(
+                f"LSP_METRICS resolved=0 residual={residual_method_edges} scoped_source_files={_scoped_n0}",
+                flush=True,
+            )
+            return
 
         # scoped_source_files: how many files demand-scoped this pass (0 = whole-graph,
         # un-scoped — the blind-500-cap regime that the metric is meant to expose).

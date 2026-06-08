@@ -2547,6 +2547,34 @@ def generate_v1r_brief(
                 },
             )
 
+        # MIN-SEM GUARANTEE: semantics must REACH the rendered brief, not just be
+        # computed. When the composite ranks witness/lexical files into the top set and
+        # the sem-scored files fall below it (haystack-8489: rendered top-5 were all
+        # witness-only sem=0 while pipeline/component/tracer carried distinct cosines),
+        # the embedder is consumed in SCORING but ABSENT from DELIVERY -> the agent never
+        # sees the semantic signal and GATE-3 correctly reports it un-consumed. Mirror the
+        # verified-witness guarantee above: if NO rendered candidate carries a positive
+        # sem component, inject the highest-sem candidate from ranked_full. Generalized
+        # (any repo/language); correct-or-quiet (no-op when a sem candidate is already
+        # rendered, or when the embedder produced nothing).
+        _rendered_now = top_records[: max(max_files, 5)]
+        if _rendered_now and not any(
+            float(r.get("components", {}).get("sem", 0.0) or 0.0) > 0.0 for r in _rendered_now
+        ):
+            _sem_pool = [
+                r for r in v74.ranked_full
+                if str(r.get("path", "")) not in {str(x.get("path", "")) for x in top_records}
+                and float(r.get("components", {}).get("sem", 0.0) or 0.0) > 0.0
+            ]
+            if _sem_pool:
+                _best_sem = max(
+                    _sem_pool, key=lambda r: float(r.get("components", {}).get("sem", 0.0) or 0.0)
+                )
+                _bn = os.path.basename(str(_best_sem.get("path", "")))
+                _ext = os.path.splitext(_bn)[1].lower()
+                if _bn not in _NON_SOURCE and _ext not in _NON_SOURCE_EXTS:
+                    top_records.insert(min(len(_all_verified) + 1, len(top_records)), _best_sem)
+
     # Graph neighbor expansion: callers/callees of top-ranked files become
     # candidates themselves. This is the core GT-agent collaboration: L1 gives
     # the NEIGHBORHOOD, not just the ranked list. The agent navigates from there.
