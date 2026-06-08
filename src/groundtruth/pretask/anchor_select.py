@@ -161,10 +161,15 @@ def _embed(texts: list[str], model: object, *, is_query: bool = False) -> np.nda
     raise AttributeError(f"embedder {type(model).__name__} exposes no encode/embed_batch/embed")
 
 
+# Bump when the file-summary CONTENT changes so stale embeddings (keyed by graph
+# mtime) are invalidated. sym1 = symbol-content summary (was raw text[:600]).
+_SUMMARY_VERSION = "sym1"
+
+
 def _cache_key(graph_db: str) -> str:
     db_path = Path(graph_db)
     stat = db_path.stat() if db_path.exists() else None
-    sig = f"{graph_db}:{stat.st_mtime if stat else 0}:{stat.st_size if stat else 0}"
+    sig = f"{graph_db}:{stat.st_mtime if stat else 0}:{stat.st_size if stat else 0}:{_SUMMARY_VERSION}"
     return hashlib.md5(sig.encode()).hexdigest()
 
 
@@ -195,9 +200,38 @@ def _get_file_embeddings(
     # pipes (#18). dict.fromkeys preserves order and de-dups paths that differ only
     # by separator/prefix.
     file_paths = list(dict.fromkeys(_norm_path(row[0]) for row in c.fetchall() if row[0]))
+
+    # BLUiR (Saha et al., ASE 2013): summarize each file by its DISTINCTIVE SYMBOLS
+    # (names + signatures + docstrings), NOT raw text[:600]. The first 600 chars are
+    # the license/import PREAMBLE, which is byte-identical across files in any licensed
+    # repo (beets=GPL) -> identical embeddings -> flat sem (the measured 0.83886 x9
+    # collapse, mad=0, GATE-3 off). PROVEN local (real e5): text[:600] -> 1/10 distinct,
+    # mad=0; symbol summary -> 10/10 distinct, mad=0.0145. This is the SAME symbol
+    # surface localize._semantic_score_by_file already uses (BRIEFING: both halves
+    # identical). text[:600] is kept ONLY as a fallback for files with no indexed symbols.
+    _sym: dict[str, list[str]] = {}
+    for _fp, _nm, _sig in c.execute(
+        "SELECT file_path, name, COALESCE(signature,'') FROM nodes WHERE is_test = 0"
+    ):
+        _k = _norm_path(_fp)
+        if _k and len(_sym.get(_k, [])) < 60:
+            _sym.setdefault(_k, []).append(f"{_nm} {_sig}".strip())
+    try:
+        for _fp, _val in c.execute(
+            "SELECT n.file_path, p.value FROM properties p JOIN nodes n ON n.id=p.node_id "
+            "WHERE n.is_test=0 AND p.kind IN ('docstring','call_order','guard_clause','conditional_return')"
+        ):
+            _k = _norm_path(_fp)
+            if _k and len(_sym.get(_k, [])) < 90:
+                _sym.setdefault(_k, []).append(str(_val))
+    except sqlite3.Error:
+        pass  # properties table absent on older graphs -> name+signature summary only
     conn.close()
 
-    summaries = [_file_summary(fp, repo_root) for fp in file_paths]
+    summaries = [
+        (" ".join(_sym[fp])[:600] if _sym.get(fp) else _file_summary(fp, repo_root))
+        for fp in file_paths
+    ]
     nonempty_idx = [i for i, s in enumerate(summaries) if s.strip()]
 
     if not nonempty_idx:
