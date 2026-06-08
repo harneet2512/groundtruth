@@ -26,16 +26,38 @@ export GT_REQUIRE_FTS5=1
 # Reliability audit: the brief/gate write per-stage candidate snapshots here
 # (read-only; no ranking effect). The contract emitter reads them after the gates.
 export GT_AUDIT_DIR="$OUT/audit"
+# Canonical runtime paths the GTRuntimeContext + every component resolves from.
+export GT_SOURCE_ROOT="$REPO"
+export GT_GRAPH_DB="$OUT/graph.db"
 mkdir -p "$OUT/audit" "$OUT/contracts"
 export PYTHONPATH="/opt/gt/src:/opt/gt/scripts:/opt/gt/scripts/swebench:/opt/gt/benchmarks/swebench:${PYTHONPATH:-}"
 export PATH="/opt/gt/bin:/opt/gt/node/bin:/opt/gt/python/bin:${PATH}"
 PY=/opt/gt/python/bin/python3
+
+# Always emit the reliability contracts on exit — success OR fail-fast — so the probe
+# can classify EVERY task (even one that aborts at preflight/index) from its contracts.
+_emit_contracts() {
+  echo "=== reliability contracts (emitted on exit) ==="
+  "$PY" -m reliability.emit_incontainer --task-id "${GT_TASK_ID:-unknown}" \
+    --repo-root "$REPO" --graph-db "$OUT/graph.db" --lsp-metrics "$OUT/lsp_metrics.txt" \
+    --snapshot-dir "$OUT/audit" --out "$OUT/contracts" 2>&1 | tail -4 || true
+}
+trap _emit_contracts EXIT
 
 echo "=== gt-substrate closure self-check ==="
 gt-index -h >/dev/null 2>&1 && echo "  gt-index: ok (static)"
 "$PY" -c "import onnxruntime, numpy, pydantic, tokenizers" && echo "  py-deps: ok"
 pyright --version >/dev/null 2>&1 && echo "  pyright: $(pyright --version 2>/dev/null)"
 test -s "$GT_MODELS_ROOT/e5-small-v2/model.onnx" && echo "  e5: ok"
+
+echo "=== (0) RUNTIME PREFLIGHT — fail-fast (proof mode) BEFORE any benchmark work ==="
+# Single GTRuntimeContext contract: inside container, import under /opt/gt, baked
+# model, real (non-zero, discriminative) ONNX embedder, LSP server present, all 8
+# proof flags set. In GT_PROOF_MODE=1 a failure aborts before indexing.
+"$PY" -m groundtruth.runtime.preflight --mode runtime --source "$REPO" \
+    --audit "$OUT/audit" --out "$OUT/contracts/runtime_preflight.json"
+PRE_RC=$?
+[ "$PRE_RC" -eq 0 ] || { echo "FATAL: runtime preflight failed (proof mode) rc=$PRE_RC"; exit "$PRE_RC"; }
 
 echo "=== (1) index -> graph.db (FTS5 enforced) ==="
 gt-index -root "$REPO" -output "$OUT/graph.db" 2>&1 | tail -3
@@ -112,6 +134,13 @@ echo "=== (3) LSP resolve (bundled pyright, repo deps present in-container) ==="
 LSP_RC=${PIPESTATUS[0]}
 [ "$LSP_RC" -eq 0 ] || echo "WARN: resolve rc=$LSP_RC (GATE 2 will judge from the contract line)"
 
+echo "=== (3.5) GRAPH PREFLIGHT census (reuse preflight_pipeline; recorded, non-fatal) ==="
+# Records the full-stack dimension census (graph/fts5/edge_quality/data_flow/lsp/embedder/
+# prebuilt) into a contract; the authoritative fail-closed verdict is the 3-GATE step below.
+GT_LSP_METRICS_FILE="$OUT/lsp_metrics.txt" "$PY" -m groundtruth.runtime.preflight \
+    --mode graph --source "$REPO" --graph-db "$OUT/graph.db" --census \
+    --out "$OUT/contracts/runtime_preflight_graph.json" 2>&1 | tail -3 || true
+
 echo "=== (4) 3-GATE VERDICT (fail-closed) — resolution / LSP / embedder ==="
 GT_LSP_METRICS_FILE="$OUT/lsp_metrics.txt" \
 GT_GATES_DEEP_JSON="$OUT/gt_gates_deep.json" \
@@ -119,13 +148,5 @@ GT_GATES_DEEP_JSON="$OUT/gt_gates_deep.json" \
     "$OUT/graph.db" "$REPO" "$ISSUE" "$OUT/lsp_metrics.txt"
 RC=$?
 
-echo "=== (5) reliability contracts (read-only; never changes the gate rc) ==="
-# Emits graph/lsp/embedder/absorption/container contracts from graph.db + lsp_metrics
-# + the GT_AUDIT_DIR snapshots written by the brief during the gate. Best-effort.
-"$PY" -m reliability.emit_incontainer \
-    --task-id "${GT_TASK_ID:-unknown}" --repo-root "$REPO" \
-    --graph-db "$OUT/graph.db" --lsp-metrics "$OUT/lsp_metrics.txt" \
-    --snapshot-dir "$OUT/audit" --out "$OUT/contracts" 2>&1 | tail -4 || true
-
-echo "=== gt-substrate done (gate rc=$RC); artifacts in $OUT ==="
+echo "=== gt-substrate done (gate rc=$RC); reliability contracts emitted on exit (trap) ==="
 exit $RC

@@ -60,7 +60,8 @@ def build_run_contract_from_env() -> dict:
     """Best-effort build from GitHub Actions env (when the workflow doesn't pass a
     structured dict). Fields the workflow exports take precedence."""
     env = os.environ
-    parsed = [x for x in (env.get("GT_TASK_IDS_PARSED", "").replace(",", "\n").split("\n")) if x.strip()]
+    raw = env.get("GT_TASK_IDS_INPUT", "")
+    parsed = [x.strip() for x in raw.replace(",", "\n").split("\n") if x.strip()]
     fields = {
         "run_id": env.get("GITHUB_RUN_ID", ""),
         "workflow_ref_requested": env.get("GITHUB_REF", ""),
@@ -68,8 +69,12 @@ def build_run_contract_from_env() -> dict:
         "gt_commit_input": env.get("GT_COMMIT_INPUT", ""),
         "resolved_gt_sha": env.get("GT_RESOLVED_SHA", ""),
         "gt_use_substrate_image": env.get("GT_USE_SUBSTRATE_IMAGE", ""),
-        "task_ids_input": env.get("GT_TASK_IDS_INPUT", ""),
+        "task_ids_input": raw,
         "task_ids_parsed": parsed,
+        "substrate_image_digest": env.get("GT_SUBSTRATE_DIGEST", ""),
+        "task_image_digest": env.get("GT_TASK_IMAGE_DIGEST", ""),
+        "dataset_sha256": env.get("GT_DATASET_SHA256", ""),
+        "code_sha": env.get("GT_CODE_SHA", ""),
     }
     return build_run_contract(fields)
 

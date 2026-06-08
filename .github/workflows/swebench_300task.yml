@@ -713,6 +713,10 @@ jobs:
           # provision /opt/gt (the GUARANTEED closure) from the prebuilt GT substrate image
           SUB_IMG="ghcr.io/hbali-stack/gt-substrate:latest"
           docker pull "$SUB_IMG" || { echo "FATAL: cannot pull $SUB_IMG"; exit 1; }
+          # record IMMUTABLE digests (not just mutable :latest tags) for reproducibility
+          SUB_DIGEST="$(docker inspect --format '{{join .RepoDigests ","}}' "$SUB_IMG" 2>/dev/null || echo '')"
+          IMG_DIGEST="$(docker inspect --format '{{join .RepoDigests ","}}' "$IMG" 2>/dev/null || echo '')"
+          echo "substrate_image_digest=$SUB_DIGEST"; echo "task_image_digest=$IMG_DIGEST"
           cid=$(docker create "$SUB_IMG")
           rm -rf /tmp/opt-gt && docker cp "$cid:/opt/gt" /tmp/opt-gt && docker rm "$cid" >/dev/null
           docker cp /tmp/opt-gt gtsrc:/opt/gt
@@ -737,7 +741,13 @@ jobs:
           docker cp /tmp/issue.txt gtsrc:/tmp/issue.txt 2>/dev/null || docker exec gtsrc bash -c ': > /tmp/issue.txt'
           # run the WHOLE substrate IN-CONTAINER (the gates run here, where the source is)
           set +e
-          docker exec -e GT_TASK_ID="$TASK" gtsrc bash /tmp/gt-substrate-run.sh "$ROOT" /tmp/issue.txt /tmp/gt 2>&1 | tee /tmp/gt_substrate.log
+          # PROOF MODE: pass the full 8-flag contract on the exec (the container's
+          # GTRuntimeContext preflight fail-fasts on any of these before indexing).
+          docker exec \
+            -e GT_TASK_ID="$TASK" -e GT_PROOF_MODE=1 -e GT_CONTAINERIZED=1 \
+            -e GT_REQUIRE_FTS5=1 -e GT_REQUIRE_EMBEDDER=1 -e GT_FORCE_ONNX_EMBEDDER=1 \
+            -e GT_REQUIRE_LSP=1 -e GT_REQUIRE_FULL_STACK=1 -e GT_FORBID_PREBUILT_GRAPH=1 \
+            gtsrc bash /tmp/gt-substrate-run.sh "$ROOT" /tmp/issue.txt /tmp/gt 2>&1 | tee /tmp/gt_substrate.log
           GATE_RC=${PIPESTATUS[0]}
           set -e
           # copy artifacts OUT (agent wrapper + 8-dp deep metrics + downstream visibility)
@@ -755,9 +765,12 @@ jobs:
           # record the RESOLVED gt SHA + a run_contract (orchestration determinism)
           RESOLVED_SHA="$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD 2>/dev/null || echo '')"
           echo "resolved_gt_sha=$RESOLVED_SHA"
+          DATASET_SHA="$(sha256sum /tmp/ds/dataset.jsonl 2>/dev/null | cut -d' ' -f1 || echo '')"
           GT_COMMIT_INPUT="${{ inputs.gt_commit }}" GT_RESOLVED_SHA="$RESOLVED_SHA" \
           GT_USE_SUBSTRATE_IMAGE="${{ inputs.gt_use_substrate_image }}" \
           GT_TASK_IDS_INPUT="${{ inputs.task_ids }}" GITHUB_RUN_ID="${{ github.run_id }}" \
+          GT_SUBSTRATE_DIGEST="$SUB_DIGEST" GT_TASK_IMAGE_DIGEST="$IMG_DIGEST" \
+          GT_DATASET_SHA256="$DATASET_SHA" \
           PYTHONPATH="$GITHUB_WORKSPACE/benchmarks/swebench" \
             python3 -m reliability.run_contract > /tmp/gt_contracts/run_contract.json 2>/dev/null || true
           docker rm -f gtsrc 2>/dev/null || true

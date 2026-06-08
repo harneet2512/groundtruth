@@ -18,6 +18,25 @@ FINAL_CLASSES = (
     "VALID_INFRA_READY", "GREEN_ROBUST", "GREEN_THIN",
 )
 
+# Map the fine final_class to the 6 TOP-LEVEL surfaces the probe report uses.
+# GATE_FALSE_FAIL maps to GT_ARCHITECTURE (a gate is a GT component) but is flagged as a
+# gate-INVARIANT issue: surfaced + proposed, NEVER auto-tuned to turn a task green.
+TOP_LEVEL = {
+    "GHA_PIPELINE_FAIL": "GHA_PIPELINE_FAIL",
+    "CONTAINER_RUNTIME_FAIL": "CONTAINERIZATION_FAIL",
+    "GRAPH_BASE_FAIL": "GT_ARCHITECTURE_FAIL",
+    "LSP_FAIL": "GT_ARCHITECTURE_FAIL",
+    "LSP_NO_OP_VALID": "GT_ARCHITECTURE_FAIL",
+    "EMBEDDER_FAIL": "GT_ARCHITECTURE_FAIL",
+    "ABSORPTION_FAIL": "GT_ARCHITECTURE_FAIL",
+    "HOOK_DELIVERY_FAIL": "GT_ARCHITECTURE_FAIL",
+    "GATE_FALSE_FAIL": "GT_ARCHITECTURE_FAIL",
+    "PRODUCT_QUALITY_FAIL": "VALID_SETUP_BUT_PRODUCT_QUALITY_GAP",
+    "VALID_INFRA_READY": "VALID_SETUP_BUT_PRODUCT_QUALITY_GAP",
+    "GREEN_ROBUST": "GREEN_ROBUST",
+    "GREEN_THIN": "GREEN_THIN",
+}
+
 # graph hard_fails that mean the base is structurally broken (vs merely under-resolved)
 _GRAPH_STRUCTURAL = {"graph_missing", "fts5_missing", "fts5_match_probe_failed",
                      "calls_edges_missing", "schema_version_unexpected"}
@@ -49,7 +68,8 @@ def classify_task(c: dict, gate_passed: bool, run_ok: bool = True) -> dict:
     }
 
     def out(fc, reason):
-        return {"final_class": fc, "reason": reason, "surfaces": surfaces}
+        return {"final_class": fc, "top_level_class": TOP_LEVEL.get(fc, fc),
+                "reason": reason, "surfaces": surfaces}
 
     # ---- surface order: first failing infra surface wins ----
     if not surfaces["gha_ok"]:
