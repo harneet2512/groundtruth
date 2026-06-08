@@ -744,6 +744,16 @@ def run_v74(
     if not _SEMANTIC_AVAILABLE:
         effective_weights["W_SEM"] = 0.0
 
+    # PROOF MODE (Stage 3): forbid a config that drops the semantic signal on the
+    # final benchmark path — no-sem ablation (A/B0/B1), GT_RRF_FUSION=det/nosem, or a
+    # zeroed W_SEM. Availability is already enforced in _get_model (raises under
+    # GT_REQUIRE_EMBEDDER); this enforces USAGE INTENT up front. Does NOT change any
+    # weight — only refuses in proof mode. No-op otherwise (BRIEFING §3/§4 safe).
+    from groundtruth.runtime import proof as _proof
+    _proof.forbid_no_sem_config(
+        ablation, os.environ.get("GT_RRF_FUSION", ""), float(effective_weights.get("W_SEM", 0.0))
+    )
+
     # Stage A: anchor selection.
     # `sem_scores` = the BOUNDED top-k_sem_top map → drives candidate-set SEED
     #   membership (kept small so semantics never floods the candidate set — the
@@ -1193,6 +1203,14 @@ def run_v74(
     # to the rendered candidate count — not the old fixed 10. Reported so a precheck
     # can assert the cap scaled with the candidates shown.
     k_sem_top_effective = max(int(k_sem_top), len(ranked_records))
+
+    # PROOF MODE (Stage 3): a PRESENT embedder must be CONSUMED — when there are
+    # candidates and effective_w_sem>0, the sem components over the scored universe
+    # cannot be all-zero/flat (the provisioned-but-unconsumed trap: sem_all->sem_scores
+    # fallback or an all-flat distribution masquerading as coverage). This is the
+    # consumption proof the effective_w_sem / sem_components_full fields exist for.
+    # No-op outside proof mode / without GT_REQUIRE_EMBEDDER.
+    _proof.assert_semantic_consumed(effective_w_sem, sem_components_full, len(ranked_records))
 
     return V74BriefResult(
         bug_id=bug_id,

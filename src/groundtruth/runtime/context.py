@@ -19,6 +19,11 @@ import shutil
 import sys
 from dataclasses import dataclass
 
+# Single proof-mode exception type for the whole runtime (defined in the leaf
+# module so resolve.py / pretask / gates all raise+catch the SAME class).
+from groundtruth.runtime import proof as _proof
+from groundtruth.runtime.proof import GTProofModeError
+
 # The proof-mode flag set. Present-and-"1" is asserted in proof mode.
 REQUIRED_FLAGS = (
     "GT_PROOF_MODE", "GT_CONTAINERIZED", "GT_REQUIRE_FTS5", "GT_REQUIRE_EMBEDDER",
@@ -26,15 +31,6 @@ REQUIRED_FLAGS = (
     "GT_FORBID_PREBUILT_GRAPH",
 )
 _DEFAULT_RUNTIME_ROOT = "/opt/gt"
-
-
-class GTProofModeError(RuntimeError):
-    """Raised when GT_PROOF_MODE=1 and the runtime contract is not satisfied."""
-
-    def __init__(self, failures: list[tuple[str, bool, str]]):
-        self.failures = failures
-        lines = "\n".join(f"  - {n}: {d}" for n, ok, d in failures if not ok)
-        super().__init__("GT_PROOF_MODE runtime contract FAILED:\n" + lines)
 
 
 def _in_container() -> bool:
@@ -65,8 +61,16 @@ class GTRuntimeContext:
     def from_env(cls, source_root: str | None = None, graph_db: str | None = None,
                  audit_dir: str | None = None) -> "GTRuntimeContext":
         runtime_root = os.environ.get("GT_HOME") or _DEFAULT_RUNTIME_ROOT
-        src = source_root or os.environ.get("GT_SOURCE_ROOT") or os.environ.get("GT_HOST_SRC_ROOT") or ""
-        gdb = graph_db or os.environ.get("GT_GRAPH_DB") or os.environ.get("GT_HOST_GRAPH_DB") or ""
+        # In proof mode the canonical in-container paths are mandatory — the
+        # GT_HOST_* aliases (a split host/container root) are rejected, never used
+        # as a silent fallback (plan finding A1).
+        if os.environ.get("GT_PROOF_MODE") == "1":
+            _proof.reject_host_aliases()
+            src = source_root or os.environ.get("GT_SOURCE_ROOT") or ""
+            gdb = graph_db or os.environ.get("GT_GRAPH_DB") or ""
+        else:
+            src = source_root or os.environ.get("GT_SOURCE_ROOT") or os.environ.get("GT_HOST_SRC_ROOT") or ""
+            gdb = graph_db or os.environ.get("GT_GRAPH_DB") or os.environ.get("GT_HOST_GRAPH_DB") or ""
         models = os.environ.get("GT_MODELS_ROOT") or os.path.join(runtime_root, "models")
         return cls(
             runtime_root=runtime_root,
@@ -88,6 +92,9 @@ class GTRuntimeContext:
             "GT_GRAPH_DB": self.graph_db,
             "GT_MODELS_ROOT": self.models_root,
             "GT_AUDIT_DIR": self.audit_dir,
+            # Stable id of THIS runtime — stamped into graph meta, brief/gate
+            # results and the run contract so gates-only and live prove identical.
+            "GT_CONTEXT_ID": _proof.context_id(),
         }
         # in proof mode, assert all flags ON so no component silently degrades
         if self.proof_mode:
@@ -195,7 +202,7 @@ class GTRuntimeContext:
             "graph_db": self.graph_db, "models_root": self.models_root,
             "lsp_root": self.lsp_root, "audit_dir": self.audit_dir,
             "inside_container": self.inside_container, "proof_mode": self.proof_mode,
-            "containerized": self.containerized,
+            "containerized": self.containerized, "context_id": _proof.context_id(),
         }
 
 

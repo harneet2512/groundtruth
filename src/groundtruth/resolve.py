@@ -848,13 +848,16 @@ def _rebuild_closure(db_path: str) -> None:
     import shutil
     import subprocess
 
+    from groundtruth.runtime import proof as _proof
+
     bin_path = os.environ.get("GT_INDEX_BIN") or shutil.which("gt-index")
     if not bin_path or not os.path.exists(bin_path):
-        print(
-            "[closure] gt-index binary not found (set GT_INDEX_BIN) — closure "
-            "NOT rebuilt; it remains pre-LSP stale.",
-            file=sys.stderr,
-        )
+        # PROOF MODE (Stage 2): a stale closure is a partial-operation signal — the
+        # closure must rebuild over the LSP-corrected edges or the run fails closed.
+        # Outside proof mode: warn + continue (no regression vs prior behaviour).
+        _proof.require(False, "closure_binary_present",
+                       "gt-index binary not found (set GT_INDEX_BIN) — closure NOT rebuilt; "
+                       "it remains pre-LSP stale")
         return
     try:
         r = subprocess.run(
@@ -868,15 +871,16 @@ def _rebuild_closure(db_path: str) -> None:
             "",
         )
         if r.returncode == 0:
+            # Stamp closure_rebuild_ts so the freshness gate (closure_ts >= lsp_ts)
+            # can prove the closure reflects the resolved edges. Substrate-integrity
+            # proof (impact/trace), NOT a brief ranking signal (BRIEFING §4).
+            _proof.stamp_closure(db_path)
             print(f"[closure] {line.strip() or 'rebuilt over LSP-corrected edges'}")
         else:
-            print(
-                f"[closure] rebuild failed (rc={r.returncode}): "
-                f"{(r.stderr or '')[:200]}",
-                file=sys.stderr,
-            )
-    except Exception as exc:  # non-fatal — resolve already succeeded
-        print(f"[closure] rebuild error: {type(exc).__name__}: {exc}", file=sys.stderr)
+            _proof.require(False, "closure_rebuild_ok",
+                           f"rc={r.returncode}: {(r.stderr or '')[:200]}")
+    except Exception as exc:  # non-fatal outside proof; fail-closed inside
+        _proof.require(False, "closure_rebuild_ok", f"{type(exc).__name__}: {exc}")
 
 
 def resolve_main() -> None:
@@ -1024,6 +1028,16 @@ def resolve_main() -> None:
         print(f"  Failed (LSP couldn't resolve): {stats.get('failed', 0)}")
         print(f"  Skipped: {stats.get('skipped', 0)}")
 
+        # Stamp LSP-enrichment completion (the one-pipeline order: index -> LSP ->
+        # closure). generate_v1r_brief asserts this stamp exists in proof mode, so a
+        # graph scored BEFORE LSP ran fails closed.
+        from groundtruth.runtime import proof as _proof
+        _proof.stamp_lsp(
+            args.db,
+            metrics=f"verified={stats.get('verified',0)} corrected={stats.get('corrected',0)} "
+                    f"deleted={stats.get('deleted',0)} failed={stats.get('failed',0)}",
+        )
+
         # The LSP pass just promoted/re-pointed/deleted edges. The transitive
         # closure sidecar was built at index time (before this pass), so it is
         # now stale: missing reach via the LSP-verified edges AND retaining reach
@@ -1036,6 +1050,13 @@ def resolve_main() -> None:
         )
         if _changed:
             _rebuild_closure(args.db)
+        else:
+            # No edges changed -> the existing closure still matches the edges and is
+            # fresh-by-construction. Stamp it so the freshness gate passes (nothing to
+            # rebuild is not a stale closure).
+            _proof.stamp_closure(args.db)
+        # Proof mode: closure must exist and be >= the LSP stamp (rebuilt AFTER LSP).
+        _proof.assert_closure_after_lsp(args.db)
 
         # FINAL machine-parseable contract line (stdout). resolved = edges PROMOTED to
         # resolution_method='lsp' this pass (verified tree-sitter-correct + corrected

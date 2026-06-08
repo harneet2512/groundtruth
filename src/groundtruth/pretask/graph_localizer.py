@@ -278,6 +278,15 @@ def _fts5_candidates(
     if not issue_tokens:
         return []
 
+    # PROOF MODE (Stage 2): FTS5 is a MANDATORY Go-built capability, not a helper.
+    # nodes_fts must already exist (Go indexer with -tags sqlite_fts5), be populated,
+    # and answer a real MATCH — else this is the silent degrade to a python-side
+    # rebuild the plan forbids. Raises in proof mode; no-op (returns) otherwise so
+    # the dev/CI fallback below is byte-identical.
+    from groundtruth.runtime import proof as _proof
+    if _proof.is_proof_mode():
+        _proof.assert_fts5_native(conn, where="L1 retrieval")
+
     # Check if nodes_fts exists. If not (Go-SQLite lacked FTS5), create it
     # with a writable conn AND use that same conn for queries (the read-only
     # conn has a stale WAL snapshot and won't see the new table).
@@ -1365,6 +1374,12 @@ def _semantic_score_by_file(issue_text: str, graph_db: str, files: set[str]) -> 
     the graph depth). The dense semantic signal: high where the file's behavior
     matches the issue even with zero shared tokens. Empty dict when no embedder."""
     model = _get_embedder()
+    # PROOF MODE (Stage 3): a required embedder with a non-empty candidate set must
+    # produce a real semantic ranking — the silent {} returns below (DB error, no
+    # docs, encode exception, all-zero) hide a dark semantic ranker, which collapses
+    # localize's 3-ranker agreement. Guard each, raise in proof mode only.
+    from groundtruth.runtime import proof as _proof
+    _proof_on = _proof.is_proof_mode() and _proof.require_embedder() and bool(files)
     if model is None or not files:
         return {}
     want = {_normalize(f) for f in files}
@@ -1385,19 +1400,31 @@ def _semantic_score_by_file(issue_text: str, graph_db: str, files: set[str]) -> 
                     docs.setdefault(k, []).append(str(val))
         finally:
             conn.close()
-    except sqlite3.Error:
+    except sqlite3.Error as _e:
+        if _proof_on:
+            _proof.require(False, "semantic_db_read", str(_e))
         return {}
     if not docs:
+        if _proof_on:
+            _proof.require(False, "semantic_docs_present",
+                           f"{len(want)} candidates but 0 docs assembled from graph.db")
         return {}
     import numpy as np
     fps = list(docs)
     texts = [issue_text[:2000]] + [" ".join(docs[f])[:2000] for f in fps]
     try:
         embs = model.encode(texts, normalize_embeddings=True, show_progress_bar=False)
-    except Exception:
+    except Exception as _e:
+        if _proof_on:
+            _proof.require(False, "semantic_encode", str(_e))
         return {}
     q = embs[0]
-    return {fps[i]: float(np.dot(q, embs[i + 1])) for i in range(len(fps))}
+    _res = {fps[i]: float(np.dot(q, embs[i + 1])) for i in range(len(fps))}
+    if _proof_on and _res:
+        _nz = sum(1 for v in _res.values() if v and v > 0)
+        _proof.require(_nz > 0, "semantic_ranks_nonzero",
+                       f"all {len(_res)} semantic ranks zero/flat for {len(want)} candidates")
+    return _res
 
 
 def localize(
