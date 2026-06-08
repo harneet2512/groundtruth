@@ -39,6 +39,10 @@ on:
         description: 'Substrate gates ONLY — skip the paid agent + eval (free §1.5 pre-flight)'
         required: false
         default: 'false'
+      gt_use_substrate_image:
+        description: 'Run the WHOLE substrate (index/scope/resolve/gates) IN the eval container via the prebuilt GT substrate image — kills the host/image split. false = host path (unchanged).'
+        required: false
+        default: 'false'
 
 permissions:
   contents: read
@@ -685,6 +689,65 @@ jobs:
             || { echo "FATAL: $DOCKERHUB_IMAGE not present after pull — aborting"; exit 1; }
           echo "task image ready: $DOCKERHUB_IMAGE"
 
+      # ── Point A (CONTAINERIZED): whole substrate IN the eval container via GT image ──
+      # When gt_use_substrate_image=true, the prebuilt GT substrate image supplies the
+      # entire closure (/opt/gt: static gt-index + portable python + onnxruntime/pydantic +
+      # node/pyright + e5 + pipeline). We copy it INTO this task's eval container and run
+      # index->scope->resolve->GATES there, where the repo's source + installed deps live —
+      # no host/image split (fixes conan sem_count=0), no per-job pip-install (fixes §1.5).
+      # The in-container 3-gate rc is the fail-closed point; the host gate steps below skip.
+      - name: Point A (containerized) — in-container substrate via GT image
+        if: inputs.gt_use_substrate_image == 'true'
+        run: |
+          set -e
+          TASK="${{ matrix.task }}"
+          REPO=$(echo "$TASK" | cut -d'_' -f1)
+          REST=$(echo "$TASK" | sed "s/^${REPO}__//")
+          IMG="docker.io/starryzhang/sweb.eval.x86_64.${REPO}_1776_${REST}:latest"
+          docker image inspect "$IMG" >/dev/null 2>&1 || { echo "FATAL: task image $IMG absent"; exit 1; }
+          docker rm -f gtsrc 2>/dev/null || true
+          docker run -d --name gtsrc "$IMG" sleep 1800 >/dev/null
+          ROOT=$(docker exec gtsrc bash -c 'for d in /testbed /home/user /workspace /app /repo; do [ -d "$d/.git" ] && echo "$d" && break; done')
+          ROOT=${ROOT:-/testbed}
+          echo "repo root in image: $ROOT"
+          # provision /opt/gt (the GUARANTEED closure) from the prebuilt GT substrate image
+          SUB_IMG="ghcr.io/hbali-stack/gt-substrate:latest"
+          docker pull "$SUB_IMG" || { echo "FATAL: cannot pull $SUB_IMG"; exit 1; }
+          cid=$(docker create "$SUB_IMG")
+          rm -rf /tmp/opt-gt && docker cp "$cid:/opt/gt" /tmp/opt-gt && docker rm "$cid" >/dev/null
+          docker cp /tmp/opt-gt gtsrc:/opt/gt
+          # fresh launcher from the checkout (iterate without rebuilding the image)
+          docker cp "${{ github.workspace }}/docker/gt-substrate-run.sh" gtsrc:/tmp/gt-substrate-run.sh
+          docker exec gtsrc sed -i 's/\r$//' /tmp/gt-substrate-run.sh 2>/dev/null || true
+          # this task's issue text — sanitized problem_statement ONLY (no gold/test_patch)
+          TASK_ID="$(echo "$TASK" | tr -d '\r')"
+          python3 -c "
+          import json
+          for l in open('/tmp/ds/dataset.jsonl'):
+              d=json.loads(l)
+              if d.get('instance_id')=='$TASK_ID':
+                  open('/tmp/issue.txt','w').write(d.get('problem_statement','') or ''); break
+          " || true
+          docker cp /tmp/issue.txt gtsrc:/tmp/issue.txt 2>/dev/null || docker exec gtsrc bash -c ': > /tmp/issue.txt'
+          # run the WHOLE substrate IN-CONTAINER (the gates run here, where the source is)
+          set +e
+          docker exec gtsrc bash /tmp/gt-substrate-run.sh "$ROOT" /tmp/issue.txt /tmp/gt 2>&1 | tee /tmp/gt_substrate.log
+          GATE_RC=${PIPESTATUS[0]}
+          set -e
+          # copy artifacts OUT (agent wrapper + 8-dp deep metrics + downstream visibility)
+          mkdir -p /tmp/gt
+          docker cp gtsrc:/tmp/gt/graph.db /tmp/gt/graph.db 2>/dev/null || true
+          docker cp gtsrc:/tmp/gt/gt_gates_deep.json /tmp/gt_gates_deep_${{ matrix.task }}.json 2>/dev/null || true
+          docker cp gtsrc:/tmp/gt/lsp_metrics.txt /tmp/gt_lsp_metrics.txt 2>/dev/null || true
+          rm -rf /tmp/gt/src && mkdir -p /tmp/gt/src
+          docker cp "gtsrc:$ROOT/." /tmp/gt/src 2>/dev/null || true
+          echo "GT_LSP_METRICS_FILE=/tmp/gt_lsp_metrics.txt" >> "$GITHUB_ENV"
+          docker rm -f gtsrc 2>/dev/null || true
+          # fail-closed on the IN-CONTAINER gate verdict (no host embedder, no split)
+          echo "=== in-container substrate gate rc=$GATE_RC ==="
+          [ "$GATE_RC" -eq 0 ] || { echo "SUBSTRATE GATES FAILED in-container (rc=$GATE_RC)"; exit 1; }
+          echo "=== in-container substrate: 3 GATES GREEN ==="
+
       # ── Point A (DeepSWE parity): host-side fresh build + HOST LSP resolve ──
       # WHY: the OH agent runs IN-CONTAINER, so the task's base-commit source lives only
       # inside the runtime container; the host edge-verifier (a host pyright/LSP client)
@@ -695,6 +758,7 @@ jobs:
       # then warm the verifier against the host source. Legitimate: fresh-per-task from the
       # base-commit repo (mtime > GT_JOB_STARTED), no prebuilt / cross-run / gold artifact.
       - name: Build graph.db + extract source + HOST LSP resolve (Point A)
+        if: inputs.gt_use_substrate_image != 'true'
         run: |
           set -e
           TASK="${{ matrix.task }}"
@@ -903,12 +967,14 @@ jobs:
       # bypassed, the dimensions were asserted by nobody. This workflow step fail-closes
       # the run on any degraded GT dimension, so a silent degrade can't reach the agent.
       - name: Preflight — full-stack census on host graph (fail-closed before paid agent)
+        if: inputs.gt_use_substrate_image != 'true'
         run: |
           GT_FORCE_ONNX_EMBEDDER=1 GT_REQUIRE_EMBEDDER=1 GT_REQUIRE_LSP=1 GT_REQUIRE_FTS5=1 \
           GT_REQUIRE_FULL_STACK=1 GT_MODELS_ROOT="$GITHUB_WORKSPACE/models" \
             python scripts/verify/preflight_pipeline.py --db /tmp/gt/graph.db --root /tmp/gt/src --census
 
       - name: FOUNDATIONAL GATES (graph/LSP/embedder FIRST) — mid-run visibility
+        if: inputs.gt_use_substrate_image != 'true'
         # Non-fatal visibility pass: prints every gate's exact numbers BEFORE the
         # authoritative fail-closed verdict below, so the run log shows det%/LSP/sem even
         # when a gate is OFF (and the verdict step aborts). Mirrors swebench_30task.yml.
@@ -923,6 +989,7 @@ jobs:
           cat /tmp/l1_debug.txt
 
       - name: 3-GATE VERDICT (fail-closed CONSUMPTION, before agent) — JARVIS · LSP · embedder
+        if: inputs.gt_use_substrate_image != 'true'
         # AUTHORITATIVE fail-closed substrate gate, mirrored EXACTLY from swebench_30task.yml,
         # on the FRESH, in-job, LSP-resolved /tmp/gt/graph.db + THIS task's real issue, BEFORE
         # any paid token. foundational_gates.py runs three CONSUMPTION gates:
@@ -961,6 +1028,7 @@ jobs:
           cat /tmp/gt_gate_metrics_line.txt 2>/dev/null || true
 
       - name: RESOLUTION-QUALITY GATE (FAIL-CLOSED — abort before paid agent on an under-resolved graph)
+        if: inputs.gt_use_substrate_image != 'true'
         # WHY: the 3-GATE VERDICT above only PRINTS resolution stats; it aborts solely on a dead
         # embedder / 0 edges. A graph that built fine but is UNDER-RESOLVED (method calls never
         # converted past name_match -> the agent navigates a mostly-false map; CLAUDE.md "flying
