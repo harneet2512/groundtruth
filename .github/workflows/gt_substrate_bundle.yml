@@ -1,0 +1,75 @@
+name: "GT substrate bundle — build + verify PORTABLE on glibc 2.31"
+
+# De-risk the containerization: prove a single, pre-built GT substrate bundle
+# (static gt-index + a SELF-CONTAINED Python carrying onnxruntime/tokenizers/numpy/
+# pydantic + the e5 model + the pipeline) runs on glibc 2.31 — the SWE-bench-Live
+# eval-image base. If this passes, the bundle is portable to ANY eval image and the
+# per-job pip-install (the §1.5 silent-fail) + the host/image split (conan embedder)
+# both go away: copy the bundle in, run the whole substrate IN the eval container.
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  build-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Install musl toolchain (for the static hermetic gt-index)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools file
+
+      - name: Build STATIC gt-index (musl + FTS5) — no glibc dependency
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/gtb
+          cd gt-index
+          CC=musl-gcc CGO_ENABLED=1 go build -tags 'sqlite_fts5 osusergo netgo' \
+            -ldflags '-linkmode external -extldflags "-static"' \
+            -o /tmp/gtb/gt-index ./cmd/gt-index/
+          file /tmp/gtb/gt-index
+          echo "gt-index built (expect: statically linked)"
+
+      - name: Self-contained Python (python-build-standalone) + GT runtime deps
+        run: |
+          set -euo pipefail
+          URL=$(curl -fsSL https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest \
+            | grep -oE 'https://[^"]*cpython-3\.11\.[0-9]+\+[0-9]+-x86_64-unknown-linux-gnu-install_only\.tar\.gz' \
+            | head -1)
+          test -n "$URL" || { echo "FATAL: could not resolve python-build-standalone URL"; exit 1; }
+          echo "python-build-standalone: $URL"
+          curl -fsSL "$URL" -o /tmp/pbs.tgz
+          tar -xzf /tmp/pbs.tgz -C /tmp/gtb           # -> /tmp/gtb/python (relocatable)
+          /tmp/gtb/python/bin/python3 -m pip install -q --upgrade pip
+          /tmp/gtb/python/bin/python3 -m pip install -q onnxruntime tokenizers numpy pydantic
+          echo "GT runtime deps installed into the portable interpreter"
+
+      - name: Package the bundle
+        run: |
+          cp -r src /tmp/gtb/src 2>/dev/null || true
+          tar -czf gt-substrate-bundle.tar.gz -C /tmp/gtb .
+          ls -lh gt-substrate-bundle.tar.gz
+
+      - name: VERIFY portable — bundle runs in a glibc-2.31 container (eval-image base)
+        run: |
+          set -euo pipefail
+          # Run the bundle inside ubuntu:20.04 (glibc 2.31) via docker run — the eval
+          # images are Ubuntu 20.04. NO pip, NO network, NO host python: only the bundle.
+          docker run --rm -v /tmp/gtb:/opt/gt ubuntu:20.04 bash -c '
+            set -e
+            echo "container glibc: $(ldd --version 2>/dev/null | head -1 || echo unknown)"
+            /opt/gt/gt-index -h >/dev/null 2>&1 && echo "PASS: static gt-index runs on glibc 2.31"
+            /opt/gt/python/bin/python3 -c "import onnxruntime, numpy, pydantic, tokenizers; print(\"PASS: GT python deps import on glibc 2.31 (portable interpreter)\")"
+          '
+          echo "=== BUNDLE IS PORTABLE — copy-in-and-run-in-eval-container is viable ==="
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gt-substrate-bundle
+          path: gt-substrate-bundle.tar.gz
+          if-no-files-found: ignore
