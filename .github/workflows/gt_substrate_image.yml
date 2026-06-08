@@ -41,6 +41,8 @@ jobs:
             ghcr.io/hbali-stack/gt-substrate:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          secrets: |
+            github_token=${{ secrets.GITHUB_TOKEN }}
 
       - name: Confirm the published image's closure runs on glibc 2.31
         run: |

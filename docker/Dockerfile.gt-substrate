@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # =============================================================================
 # GT SUBSTRATE IMAGE — the agent-with-GT's library closure, containerized.
 # -----------------------------------------------------------------------------
@@ -39,10 +40,8 @@ RUN cd /src/gt-index \
 
 # (2) Self-contained Python (python-build-standalone, relocatable) + GT runtime deps.
 #     Its own interpreter + wheels => independent of the eval image's python version.
-RUN PBS=$(curl -fsSL https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest \
-      | grep -oE 'https://[^"]*cpython-3\.11\.[0-9]+\+[0-9]+-x86_64-unknown-linux-gnu-install_only\.tar\.gz' | head -1) \
-    && test -n "$PBS" \
-    && curl -fsSL "$PBS" | tar -xz -C /opt/gt           # -> /opt/gt/python
+COPY docker/fetch-python.sh /tmp/fetch-python.sh
+RUN --mount=type=secret,id=github_token bash /tmp/fetch-python.sh   # -> /opt/gt/python
 RUN /opt/gt/python/bin/python3 -m pip install --no-cache-dir --upgrade pip \
     && /opt/gt/python/bin/python3 -m pip install --no-cache-dir \
        onnxruntime tokenizers numpy pydantic
