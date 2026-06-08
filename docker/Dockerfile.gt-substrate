@@ -1,0 +1,87 @@
+# =============================================================================
+# GT SUBSTRATE IMAGE — the agent-with-GT's library closure, containerized.
+# -----------------------------------------------------------------------------
+# WHY: the baseline (GT off) is reliable because the SWE-bench-Live eval image
+# guarantees the TASK's libraries (python + repo deps + test runner). GT-on adds a
+# second closure — gt-index(FTS5), pyright+pydantic, onnxruntime+tokenizers+e5,
+# numpy+pipeline — and today those are pip-installed per job, so they silently go
+# missing (gt_trial §1.5) and the gates run split across host/image (conan's
+# sem_count=0). This image makes GT's closure a guaranteed dependency the SAME way
+# the eval image guarantees the task's: it is BUILT ONCE here, on the SAME base as
+# the eval images (Ubuntu 20.04 / glibc 2.31), so everything in /opt/gt runs,
+# unchanged, INSIDE any eval container. The pipeline copies /opt/gt into the eval
+# container and runs the whole substrate (index -> resolve -> embed -> gates) there,
+# against the repo's own source + deps. No per-job install, no host/image split.
+# /opt/gt is fully self-contained and relocatable: a static gt-index, a portable
+# Python, a bundled Node — none depend on the eval image's interpreter or libs, and
+# none pollute them (so the baseline comparison stays fair).
+# =============================================================================
+
+# ---- stage 1: build everything against the eval-image glibc ----
+FROM ubuntu:20.04 AS build
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl git xz-utils file musl-tools build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Go toolchain (only to build the static, hermetic gt-index)
+ARG GO_VERSION=1.22.5
+RUN curl -fsSL https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz | tar -xz -C /usr/local
+ENV PATH="/usr/local/go/bin:${PATH}"
+
+# (1) STATIC gt-index — musl + FTS5, zero glibc dependency -> runs on ANY base
+COPY gt-index /src/gt-index
+RUN cd /src/gt-index \
+    && CC=musl-gcc CGO_ENABLED=1 go build -tags 'sqlite_fts5 osusergo netgo' \
+       -ldflags '-linkmode external -extldflags "-static"' \
+       -o /opt/gt/bin/gt-index ./cmd/gt-index/ \
+    && file /opt/gt/bin/gt-index | tee /opt/gt/.gt-index.fileinfo
+
+# (2) Self-contained Python (python-build-standalone, relocatable) + GT runtime deps.
+#     Its own interpreter + wheels => independent of the eval image's python version.
+RUN PBS=$(curl -fsSL https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest \
+      | grep -oE 'https://[^"]*cpython-3\.11\.[0-9]+\+[0-9]+-x86_64-unknown-linux-gnu-install_only\.tar\.gz' | head -1) \
+    && test -n "$PBS" \
+    && curl -fsSL "$PBS" | tar -xz -C /opt/gt           # -> /opt/gt/python
+RUN /opt/gt/python/bin/python3 -m pip install --no-cache-dir --upgrade pip \
+    && /opt/gt/python/bin/python3 -m pip install --no-cache-dir \
+       onnxruntime tokenizers numpy pydantic
+
+# (3) LSP: bundled Node + pyright, so the resolve pass never needs network in-image
+ARG NODE_VERSION=20.16.0
+RUN curl -fsSL https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz \
+      | tar -xJ -C /opt/gt \
+    && mv /opt/gt/node-v${NODE_VERSION}-linux-x64 /opt/gt/node \
+    && /opt/gt/node/bin/npm install -g --prefix /opt/gt/node pyright
+
+# (4) e5 model (semantic ranker) — pulled from the GT runtime-assets release
+ARG E5_BASE=https://github.com/harneet2512/groundtruth/releases/download/pipeline-assets-v1
+RUN mkdir -p /opt/gt/models/e5-small-v2 \
+    && curl -fsSL "${E5_BASE}/model.onnx"     -o /opt/gt/models/e5-small-v2/model.onnx \
+    && curl -fsSL "${E5_BASE}/tokenizer.json" -o /opt/gt/models/e5-small-v2/tokenizer.json
+
+# (5) the GT pipeline code + the substrate launcher
+COPY src                 /opt/gt/src
+COPY scripts             /opt/gt/scripts
+COPY benchmarks/swebench /opt/gt/benchmarks/swebench
+COPY docker/gt-substrate-run.sh /opt/gt/bin/gt-substrate
+RUN chmod +x /opt/gt/bin/gt-substrate
+
+# ---- stage 2: thin final image whose entire payload is the portable /opt/gt ----
+FROM ubuntu:20.04
+COPY --from=build /opt/gt /opt/gt
+ENV GT_HOME=/opt/gt \
+    GT_INDEX_BINARY=/opt/gt/bin/gt-index \
+    GT_PYTHON=/opt/gt/python/bin/python3 \
+    GT_MODELS_ROOT=/opt/gt/models \
+    GT_FORCE_ONNX_EMBEDDER=1 \
+    PATH="/opt/gt/bin:/opt/gt/node/bin:/opt/gt/python/bin:${PATH}" \
+    PYTHONPATH="/opt/gt/src:/opt/gt/scripts/swebench:/opt/gt/benchmarks/swebench"
+
+# Build-time SELF-TEST: the whole closure must be present + runnable on glibc 2.31,
+# or the image fails to build (you can never ship a missing-library substrate).
+RUN /opt/gt/bin/gt-index -h >/dev/null 2>&1 \
+    && /opt/gt/python/bin/python3 -c "import onnxruntime, numpy, pydantic, tokenizers; print('py-deps ok')" \
+    && /opt/gt/node/bin/pyright --version \
+    && test -s /opt/gt/models/e5-small-v2/model.onnx \
+    && echo '=== GT substrate closure present + runnable on glibc 2.31 ==='
