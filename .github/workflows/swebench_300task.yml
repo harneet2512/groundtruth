@@ -503,6 +503,16 @@ jobs:
             # Best-effort: a failed static build must NOT abort this step (set -e) —
             # Point A falls back to the image-native baked binary. Guard every chain so
             # the host build path (used by the other tasks) is never broken by this.
+            # RELIABILITY (conan-class): the hermetic static binary must NEVER be "absent".
+            # The failure was musl-gcc missing -> musl path skipped -> pure-Go CGO_ENABLED=0
+            # can't link go-sqlite3 -> no binary -> in-image exec dies on glibc. INSTALL the
+            # musl toolchain (retry once) so the musl-static CGO build (keeps the exact driver
+            # + FTS5) reliably produces a binary that runs on ANY eval-image base.
+            if ! command -v musl-gcc >/dev/null 2>&1; then
+              sudo apt-get install -y -qq musl-tools >/dev/null 2>&1 \
+                || { sudo apt-get update -qq >/dev/null 2>&1 && sudo apt-get install -y -qq musl-tools >/dev/null 2>&1; } \
+                || echo "WARN: musl-tools install failed — pure-Go static fallback will be attempted"
+            fi
             GT_INDEX_INIMAGE=""
             if command -v musl-gcc >/dev/null 2>&1; then
               (cd gt-index && CC=musl-gcc CGO_ENABLED=1 \

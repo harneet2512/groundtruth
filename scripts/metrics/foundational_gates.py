@@ -461,13 +461,17 @@ def gate_embedder_consumption(db: str, repo: str, issue_text: str) -> bool:
         # unscored background", K_MAD comment). The zeros are the lexical/graph-only
         # candidates (legitimately sem=0 in a HYBRID localizer) — the BACKGROUND, not
         # part of the judged distribution. Judge the scored cluster against that
-        # background: a real cluster exists iff >=2 scored components stand strictly
-        # above the highest zero/background value. (distinct<=1, incl. all-zero, was
-        # already FAILed above as flat — this branch never sees an all-equal set.)
+        # background: a real signal exists iff >=1 scored component stands strictly
+        # above the highest zero/background value. A SINGLE strong semantic hit (e.g.
+        # 0.84 vs a 0 background) is legitimate discrimination — exactly what the old
+        # max>median test passed (median=0 when one value sits above zeros). Requiring
+        # >=2 false-failed the single-hit case (the aiogram regression). The flat case
+        # (distinct<=1, incl. all-zero) was already FAILed above, so a constant/dead
+        # embedder still cannot reach here.
         zeros = [c for c in comps if c <= 0.0]
         bg = max(zeros) if zeros else 0.0
         mx_scored = max(scored) if scored else 0.0
-        p3 = len(scored) >= 2 and mx_scored > bg
+        p3 = len(scored) >= 1 and mx_scored > bg
         sep_note = (f"MAD=0 w/ {distinct} distinct -> scored-cluster-vs-background: "
                     f"{len(scored)} scored, max_scored({mx_scored:.6f})>background({bg:.6f})")
 
