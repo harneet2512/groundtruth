@@ -46,15 +46,27 @@ echo "======================================================================="
 echo "=== [1] deps (fail-loud) + e5 embedder model ==="
 python3 -m pip install -q onnxruntime tokenizers numpy pydantic structlog 2>&1 | tail -2 || true
 python3 -c "import onnxruntime,tokenizers,numpy,pydantic; print('deps OK: onnxruntime+tokenizers+numpy+pydantic importable')"
-if [ ! -f "$GT_MODELS_ROOT/e5-small-v2/model.onnx" ]; then
+# Embedder model: a real e5 model.onnx is ~133MB. A git-lfs-tracked checkout often
+# leaves a ~130-byte POINTER in its place (INVALID_PROTOBUF at load), and the release
+# tarball can carry the pointer too — so we (1) prefer a known-good >1MB model already
+# on the box, (2) else fetch, (3) then VALIDATE the size so a pointer never poses as
+# the model (the gt_trial §1.5 GATE 3a check would otherwise FAIL-closed misleadingly).
+_have_real_model() { [ -f "$1/e5-small-v2/model.onnx" ] && [ "$(stat -c%s "$1/e5-small-v2/model.onnx" 2>/dev/null || echo 0)" -gt 1000000 ]; }
+if _have_real_model "$GT_MODELS_ROOT"; then
+  echo "e5 model present (real, >1MB) at $GT_MODELS_ROOT/e5-small-v2"
+elif _have_real_model "$REPO/models"; then
+  export GT_MODELS_ROOT="$REPO/models"
+  echo "using real e5 model from repo checkout -> $GT_MODELS_ROOT/e5-small-v2"
+else
   mkdir -p "$GT_MODELS_ROOT"
   curl -fsSL -o /tmp/e5.tar.gz \
     "https://github.com/harneet2512/groundtruth/releases/download/gt-runtime-models/default.tmp_e5-small-v2.tar.gz" \
-    && tar -xzf /tmp/e5.tar.gz -C "$GT_MODELS_ROOT" \
-    && echo "e5 model fetched -> $GT_MODELS_ROOT/e5-small-v2" \
-    || echo "WARN: e5 fetch failed — GATE 3a embedder will FAIL-closed (still informative)"
-else
-  echo "e5 model present at $GT_MODELS_ROOT/e5-small-v2"
+    && tar -xzf /tmp/e5.tar.gz -C "$GT_MODELS_ROOT" || echo "WARN: e5 fetch failed"
+  if _have_real_model "$GT_MODELS_ROOT"; then
+    echo "e5 model fetched (validated >1MB) -> $GT_MODELS_ROOT/e5-small-v2"
+  else
+    echo "WARN: e5 model is a pointer/corrupt ($(stat -c%s "$GT_MODELS_ROOT/e5-small-v2/model.onnx" 2>/dev/null || echo 0)B) — GATE 3a will FAIL-closed (git lfs pull, or point GT_MODELS_ROOT at a real model)"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
