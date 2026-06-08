@@ -14,8 +14,45 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
+
+
+# --- LSP_METRICS contract reader (shared with foundational_gates.gate_lsp) ---
+# ONE-PRODUCT: the census lsp_edges gate and the GATE-2 gate_lsp must judge the
+# SAME fact from the SAME source. resolve.py emits exactly ONE authoritative
+# contract line — `LSP_METRICS resolved=R residual=N scoped_source_files=S` —
+# captured to $GT_LSP_METRICS_FILE (default /tmp/gt_lsp_metrics.txt). This mirrors
+# foundational_gates.py::parse_lsp_metrics byte-for-byte (same regex, same env,
+# last-match-wins) so the two gates can NEVER again disagree on the same run.
+# LSP_RESOLVE_FLOOR mirrors foundational_gates.py:87 (0.10) — the non-triviality
+# floor (the pass did real work on the in-scope residual), relative to THIS issue.
+_LSP_METRICS_LINE = re.compile(
+    r"LSP_METRICS\s+resolved=(\d+)\s+residual=(\d+)\s+scoped_source_files=(\d+)"
+)
+LSP_RESOLVE_FLOOR = 0.10
+
+
+def _read_lsp_metrics() -> "tuple[int, int, int] | None":
+    """Return (resolved, residual, scoped_source_files) from the LAST LSP_METRICS
+    contract line resolve.py wrote, or None if the contract is ABSENT (no file, or
+    no matching line). Reads $GT_LSP_METRICS_FILE (default /tmp/gt_lsp_metrics.txt),
+    identical to foundational_gates.py:607. Language-agnostic: the contract is the
+    same for every language because resolve.py's demand-driven residual is language-
+    agnostic. ABSENT (None) is the genuine dead-LSP / URI-handshake signal."""
+    path = os.environ.get("GT_LSP_METRICS_FILE", "/tmp/gt_lsp_metrics.txt")
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError:
+        return None
+    last = None
+    for m in _LSP_METRICS_LINE.finditer(text or ""):
+        last = m
+    if not last:
+        return None
+    return int(last.group(1)), int(last.group(2)), int(last.group(3))
 
 
 # --- Strictness master gate -------------------------------------------------
@@ -272,27 +309,59 @@ def check_lsp_edges(db: str) -> tuple[bool, str]:
             f"0 lsp edges; LSP server '{server}' NOT installed for lang={lang} "
             f"-> enrichment skipped (install for full potential)")
     # Server installed but 0 promoted edges. CRITICAL: return_type is NOT proof the LSP
-    # ran — tree-sitter populates return_type from the AST signature (esp. Go/Rust), so
-    # return_types>0 + 0 lsp edges can MASK a non-running LSP. Split by language:
-    #  - python/ts/js: pyright/tsserver RELIABLY promote name_match -> verified edges, so
-    #    0 lsp edges here means the resolve pass did NOT run (URI/handshake bug) -> FAIL.
-    #  - go/rust: CALLS-dominant graphs; gopls/rust-analyzer legitimately promote ~0 (no
-    #    ambiguous edges to correct); accept 0 but log LOUD (never silent). The real
-    #    LSP-ran proof for these is the warm-probe gate (GT_REQUIRE_LSP), not edge counts.
+    # ran — tree-sitter populates return_type from the AST signature, so return_types>0 +
+    # 0 lsp edges can MASK a non-running LSP. BUT 0 promoted edges is ALSO the correct,
+    # healthy output when the demand-driven resolve had NOTHING in-scope to promote
+    # (residual==0). Edge-COUNT alone cannot distinguish "LSP dead" from "nothing to do".
+    #
+    # ONE-PRODUCT: consult resolve.py's authoritative LSP_METRICS contract — the SAME
+    # source foundational_gates.py::gate_lsp consumes — and MIRROR gate_lsp for ALL
+    # languages (no python/ts/js-vs-go/rust split). The contract is language-agnostic
+    # because the demand-driven residual is language-agnostic.
+    metrics = _read_lsp_metrics()
+    if metrics is not None:
+        resolved, residual, scoped = metrics
+        if residual == 0:
+            # Nothing in-scope to convert on an already-verified graph — vacuous PASS,
+            # exactly as gate_lsp (foundational_gates.py:294). The warm-probe gate
+            # (GT_REQUIRE_LSP) is the real "LSP-ran" proof; edge count was never valid
+            # liveness when residual is 0. Holds for ANY language.
+            return True, (
+                f"0 lsp edges on lang={lang} but LSP_METRICS residual=0 "
+                f"(scoped_source_files={scoped}) -> no in-scope ambiguous method edges to "
+                f"promote on an already-verified graph (vacuous PASS, mirrors GATE-2 gate_lsp)")
+        frac = resolved / residual
+        if frac >= LSP_RESOLVE_FLOOR:
+            return True, (
+                f"lsp_edges via LSP_METRICS resolved={resolved}/{residual} "
+                f"(frac={frac:.8f} >= floor={LSP_RESOLVE_FLOOR:.8f}, scoped={scoped}, "
+                f"lang={lang}) -> precision pass did real in-scope work")
+        # residual>0 AND below the floor: a genuinely shallow/capped pass. gate_lsp
+        # already FAILs this; the census mirrors but only ENFORCES under require_lsp.
+        return (not require), (
+            f"0 lsp edges on lang={lang}: LSP_METRICS resolved={resolved}/{residual} "
+            f"frac={frac:.8f} < floor={LSP_RESOLVE_FLOOR:.8f} (scoped={scoped}) -> shallow/"
+            f"capped resolve pass (require_lsp={require})")
+    # Contract ABSENT (resolve.py never wrote LSP_METRICS) -> the genuine dead-LSP /
+    # URI-handshake signal. Fall back to the per-language heuristic (the original gate's
+    # intent) since there is no residual to judge against.
     _PROMOTE_RELIABLE = {"python", "py", "typescript", "ts", "javascript", "js"}
     if lang in _PROMOTE_RELIABLE:
         return (not require), (
-            f"0 lsp edges on lang={lang} where '{server}' RELIABLY promotes edges -> the LSP "
-            f"resolve pass did NOT run (URI/handshake bug). return_type={return_types} is "
-            f"tree-sitter-derived, NOT proof the LSP ran. (require_lsp={require})")
+            f"0 lsp edges on lang={lang} where '{server}' RELIABLY promotes edges AND no "
+            f"LSP_METRICS contract line was emitted -> the LSP resolve pass did NOT run "
+            f"(URI/handshake bug). return_type={return_types} is tree-sitter-derived, NOT "
+            f"proof the LSP ran. (require_lsp={require})")
     if return_types > 0:
         return True, (
-            f"LSP NOTE (loud): 0 lsp edges on CALLS-dominant lang={lang} (server={server}); "
-            f"return_type={return_types} populated. Accepted — gopls/rust-analyzer promote ~0 "
-            f"call-edge corrections; warm-probe gate (GT_REQUIRE_LSP) is the LSP-ran proof.")
+            f"LSP NOTE (loud): 0 lsp edges + no LSP_METRICS contract on CALLS-dominant "
+            f"lang={lang} (server={server}); return_type={return_types} populated. Accepted — "
+            f"gopls/rust-analyzer promote ~0 call-edge corrections; warm-probe gate "
+            f"(GT_REQUIRE_LSP) is the LSP-ran proof.")
     return False, (
-        f"0 lsp edges AND 0 return_type enrichment but '{server}' IS installed for "
-        f"lang={lang} -> enrichment RAN BUT WROTE NOTHING (URI/handshake bug — real GT bug)")
+        f"0 lsp edges AND 0 return_type enrichment AND no LSP_METRICS contract but '{server}' "
+        f"IS installed for lang={lang} -> enrichment RAN BUT WROTE NOTHING (URI/handshake "
+        f"bug — real GT bug)")
 
 
 def check_semantic_embedder(root: str) -> tuple[bool, str]:

@@ -489,6 +489,45 @@ jobs:
             test -x /tmp/gt-index || { echo "FATAL: gt-index binary missing after build"; exit 1; }
             echo "GT_INDEX_BINARY=/tmp/gt-index" >> "$GITHUB_ENV"
             echo "gt-index rebuilt from current source"
+            # ── glibc-INDEPENDENT companion binary for the IN-IMAGE exec (Point A) ──
+            # The host binary above is a CGO build dynamically linked against the RUNNER's
+            # glibc (ubuntu-24.04 = glibc 2.39). Point A docker-cp's a gt-index INTO the
+            # eval image and runs it there; SWE-bench-Live images are Ubuntu 20.04 (glibc
+            # 2.31), and glibc is FORWARD-INCOMPATIBLE -> the host binary aborts with
+            # `GLIBC_2.33 not found` BEFORE main() (rc=1). Build a STATIC binary that has
+            # NO runtime glibc dependency so it runs on ANY eval-image base, ANY language's
+            # repo (this is a pipeline property, not a Python/C++ thing). FTS5 is PRESERVED
+            # (-tags sqlite_fts5) and GT_REQUIRE_FTS5 still asserts it at runtime. Try
+            # musl-static CGO go-sqlite3 first (keeps the exact same driver as host); fall
+            # back to a pure-Go static build (CGO_ENABLED=0) if a musl toolchain is absent.
+            # Best-effort: a failed static build must NOT abort this step (set -e) —
+            # Point A falls back to the image-native baked binary. Guard every chain so
+            # the host build path (used by the other tasks) is never broken by this.
+            GT_INDEX_INIMAGE=""
+            if command -v musl-gcc >/dev/null 2>&1; then
+              (cd gt-index && CC=musl-gcc CGO_ENABLED=1 \
+                 go build -tags 'sqlite_fts5 osusergo netgo' \
+                 -ldflags '-linkmode external -extldflags "-static"' \
+                 -o /tmp/gt-index-static ./cmd/gt-index/) \
+                && test -x /tmp/gt-index-static && GT_INDEX_INIMAGE=/tmp/gt-index-static \
+                && echo "in-image gt-index: musl-static CGO (FTS5) built" \
+                || echo "in-image gt-index: musl-static build unavailable — trying pure-Go static"
+            fi
+            if [ -z "$GT_INDEX_INIMAGE" ]; then
+              # Pure-Go static fallback: no CGO, no glibc, no musl toolchain needed.
+              # Requires the modernc.org/sqlite (pure-Go, FTS5-capable) build path in the
+              # gt-index module; if that path is unavailable this build fails and we fall
+              # back to the image-native baked binary at exec time (handled in Point A).
+              (cd gt-index && CGO_ENABLED=0 \
+                 go build -tags 'sqlite_fts5 osusergo netgo' \
+                 -ldflags '-extldflags "-static"' \
+                 -o /tmp/gt-index-static ./cmd/gt-index/) \
+                && test -x /tmp/gt-index-static && GT_INDEX_INIMAGE=/tmp/gt-index-static \
+                && echo "in-image gt-index: pure-Go static (CGO_ENABLED=0, FTS5) built" \
+                || echo "WARN: static in-image gt-index build failed — Point A will prefer the image-native baked /usr/local/bin/gt-index"
+            fi
+            [ -n "$GT_INDEX_INIMAGE" ] && chmod +x "$GT_INDEX_INIMAGE" || true
+            echo "GT_INDEX_INIMAGE=${GT_INDEX_INIMAGE}" >> "$GITHUB_ENV"
           else
             test -x /usr/local/bin/gt-index || { echo "FATAL: no g++ to compile AND no baked gt-index in image"; exit 1; }
             echo "GT_INDEX_BINARY=/usr/local/bin/gt-index" >> "$GITHUB_ENV"
@@ -661,9 +700,44 @@ jobs:
           ROOT=${ROOT:-/testbed}
           echo "repo root in image: $ROOT"
           test -x /tmp/gt-index || { echo "FATAL: /tmp/gt-index missing (build step did not run)"; exit 1; }
-          docker cp /tmp/gt-index gtsrc:/tmp/gt-index && docker exec gtsrc chmod +x /tmp/gt-index
+          # ── glibc-INDEPENDENT in-image gt-index selection (fixes `GLIBC_2.33 not found`) ──
+          # The host /tmp/gt-index is CGO-linked against the RUNNER's glibc 2.39; the eval
+          # image is older (Ubuntu 20.04 / glibc 2.31) and glibc is forward-incompatible, so
+          # the host binary aborts before main() (rc=1) when docker-exec'd in-image. This is a
+          # universal glibc property (any older-base eval image, ANY language), not conan/C++.
+          # Pick, in priority order, a binary that ACTUALLY LOADS in this image, then verify it
+          # runs (-h) so we never index with a broken loader. GT_REQUIRE_FTS5 stays enforced:
+          # every candidate is built -tags sqlite_fts5 and self-aborts if FTS5 is missing.
+          #   1) image-native baked /usr/local/bin/gt-index (compiled on the image's OWN glibc
+          #      at image-build time) — zero cross-glibc risk;
+          #   2) the STATIC companion built this job ($GT_INDEX_INIMAGE) — no glibc dependency;
+          #   3) the host /tmp/gt-index (works only if the image glibc >= runner — last resort).
+          IMG_GT=""
+          if docker exec gtsrc test -x /usr/local/bin/gt-index 2>/dev/null \
+             && docker exec gtsrc /usr/local/bin/gt-index -h >/dev/null 2>&1; then
+            IMG_GT=/usr/local/bin/gt-index
+            echo "in-image gt-index: using image-native baked /usr/local/bin/gt-index (glibc-matched)"
+          fi
+          # Each candidate's copy is guarded (|| true) so a failed cp FALLS THROUGH to the
+          # next candidate instead of aborting under `set -e`; the single fail-closed point
+          # is the [ -n "$IMG_GT" ] || FATAL below.
+          if [ -z "$IMG_GT" ] && [ -n "${GT_INDEX_INIMAGE:-}" ] && [ -x "${GT_INDEX_INIMAGE:-/nonexistent}" ]; then
+            if docker cp "$GT_INDEX_INIMAGE" gtsrc:/tmp/gt-index-static && docker exec gtsrc chmod +x /tmp/gt-index-static \
+               && docker exec gtsrc /tmp/gt-index-static -h >/dev/null 2>&1; then
+              IMG_GT=/tmp/gt-index-static
+              echo "in-image gt-index: using STATIC companion (no glibc dependency)"
+            fi
+          fi
+          if [ -z "$IMG_GT" ]; then
+            if docker cp /tmp/gt-index gtsrc:/tmp/gt-index && docker exec gtsrc chmod +x /tmp/gt-index \
+               && docker exec gtsrc /tmp/gt-index -h >/dev/null 2>&1; then
+              IMG_GT=/tmp/gt-index
+              echo "in-image gt-index: using host-built /tmp/gt-index (image glibc compatible)"
+            fi
+          fi
+          [ -n "$IMG_GT" ] || { echo "FATAL: no in-image gt-index loads (cross-glibc; no baked binary; static build absent) — cannot build fresh graph"; exit 1; }
           # Fresh in-image index (the legitimacy backbone) — fail-closed, never run degraded.
-          docker exec gtsrc /tmp/gt-index -root="$ROOT" -output=/tmp/graph.db 2>&1 | tail -3
+          docker exec gtsrc "$IMG_GT" -root="$ROOT" -output=/tmp/graph.db 2>&1 | tail -3
           IDX_RC=${PIPESTATUS[0]}
           [ "$IDX_RC" -eq 0 ] || { echo "FATAL: in-image gt-index failed (rc=$IDX_RC)"; exit 1; }
           mkdir -p /tmp/gt
@@ -685,15 +759,107 @@ jobs:
                   open('/tmp/issue.txt','w').write(d.get('problem_statement','') or ''); break
           " || true
           # Demand-driven SCOPE (T4 / Heintze & Tardieu PLDI'01): restrict the LSP precision
-          # pass to the issue's mentioned source files so the GATE-2 contract line reports
+          # pass to the issue's relevant source files so the GATE-2 contract line reports
           # scoped_source_files>0 (un-scoped == demand-driven scoping degraded).
+          # LANGUAGE-AGNOSTIC, MULTI-SIGNAL, NEVER-EMPTY seed (replaces the old Python-only
+          # `\w+\.py`-in-prose regex, which yielded EMPTY scope for any non-.py issue —
+          # terraform/YAML/go/rust/ts — forcing the whole-graph denominator vs the 500-cap =
+          # a mathematically unpassable gate keyed to the task's PROSE). The seed is the UNION
+          # of three independent signals, so scope holds for ANY language/issue:
+          #   (a) ANY-extension file paths/basenames named in the issue, mapped to on-disk source
+          #       (the source extension set is discovered from the graph, not hardcoded);
+          #   (b) the brief's already-computed issue-anchor files /tmp/gt_issue_anchors.json
+          #       (paths + symbol files) — reuse, never recompute — when present;
+          #   (c) a bounded BFS neighborhood over graph.db (FTS5 name-hit seeds + 1-hop CALLS),
+          #       so localization survives even when the issue names no path at all.
+          # Every emitted path is REPO-RELATIVE to /tmp/gt/src so it matches edges.source_file
+          # (which is stored repo-relative); the old code wrote ABSOLUTE os.path.join paths that
+          # could never satisfy the `e.source_file IN (...)` filter -> false residual=0.
           python3 - <<'PY' || true
-          import re, os
+          import re, os, json, sqlite3
+          SRC = "/tmp/gt/src"
+          DB = "/tmp/gt/graph.db"
           issue = open("/tmp/issue.txt", encoding="utf-8").read() if os.path.exists("/tmp/issue.txt") else ""
-          base = {os.path.basename(f) for f in re.findall(r'[\w/]+\.py', issue)}
-          scoped = [os.path.join(r, f) for r, _, fs in os.walk("/tmp/gt/src") for f in fs if f in base]
+
+          def rel(p):
+              # Normalize ANY path to repo-relative-to-SRC, forward-slashed (edges.source_file shape).
+              try:
+                  r = os.path.relpath(p, SRC) if os.path.isabs(p) or p.startswith(SRC) else p
+              except ValueError:
+                  r = p
+              return r.replace("\\", "/").lstrip("./")
+
+          # On-disk index: basename -> set(repo-relative paths). Language-agnostic (every file on disk).
+          basemap = {}
+          rel_set = set()
+          for root, _, fs in os.walk(SRC):
+              for f in fs:
+                  rp = rel(os.path.join(root, f))
+                  rel_set.add(rp)
+                  basemap.setdefault(f, set()).add(rp)
+
+          scoped = set()
+          syms = []
+          # (a) ANY-extension file references in the issue (path-like tokens AND bare basenames),
+          #     not just `.py`. Match against real on-disk files so we never invent paths.
+          for tok in re.findall(r'[\w./\\-]+\.[A-Za-z0-9_]+', issue):
+              tok = tok.replace("\\", "/").strip("`'\"()[],")
+              rtok = rel(tok)
+              if rtok in rel_set:
+                  scoped.add(rtok)
+              b = os.path.basename(tok)
+              if b in basemap:
+                  scoped.update(basemap[b])
+
+          # (b) Reuse the brief's issue-anchor files if the wrapper already wrote them
+          #     (paths + per-symbol files). Reuse, do not recompute.
+          try:
+              if os.path.exists("/tmp/gt_issue_anchors.json"):
+                  anch = json.loads(open("/tmp/gt_issue_anchors.json", encoding="utf-8").read() or "{}")
+                  for p in (anch.get("paths") or []):
+                      rp = rel(p)
+                      if rp in rel_set:
+                          scoped.add(rp)
+                      elif os.path.basename(p) in basemap:
+                          scoped.update(basemap[os.path.basename(p)])
+                  # symbols -> files declaring them, via graph.db (bounded)
+                  syms = [s for s in (anch.get("symbols") or []) if s][:40]
+          except Exception:
+              syms = []
+
+          # (c) Bounded BFS neighborhood over graph.db: FTS5/name-hit seed nodes from issue
+          #     terms + anchor symbols, then 1-hop CALLS neighbors. Guarantees a non-empty,
+          #     issue-relevant scope whenever GT can localize at all (any language).
+          try:
+              conn = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+              terms = set(syms)
+              # issue identifier tokens (length>=4) as fallback name seeds
+              for t in re.findall(r'[A-Za-z_][A-Za-z0-9_]{3,}', issue)[:60]:
+                  terms.add(t)
+              seed_files, seed_ids = set(), []
+              for t in list(terms)[:80]:
+                  for (fp, nid) in conn.execute(
+                      "SELECT file_path, id FROM nodes WHERE name = ? LIMIT 8", (t,)
+                  ).fetchall():
+                      if fp:
+                          seed_files.add(rel(fp))
+                      seed_ids.append(nid)
+              # 1-hop CALLS neighbors of seed nodes -> their files (bounded)
+              for nid in seed_ids[:200]:
+                  for (fp,) in conn.execute(
+                      "SELECT n.file_path FROM edges e JOIN nodes n ON e.target_id=n.id "
+                      "WHERE e.source_id = ? AND e.type='CALLS' LIMIT 8", (nid,)
+                  ).fetchall():
+                      if fp:
+                          seed_files.add(rel(fp))
+              conn.close()
+              scoped.update(f for f in seed_files if f in rel_set or basemap.get(os.path.basename(f)))
+          except Exception:
+              pass
+
+          scoped = sorted(p for p in scoped if p)
           open("/tmp/gt_scope_files.txt", "w").write("\n".join(scoped))
-          print(f"demand scope: {len(scoped)} issue-relevant source files")
+          print(f"demand scope: {len(scoped)} issue-relevant source files (multi-signal, repo-relative)")
           PY
           SCOPE_ARG=""; [ -s /tmp/gt_scope_files.txt ] && SCOPE_ARG="--source-files /tmp/gt_scope_files.txt"
           # HOST LSP resolve: real pyright on the host source copy (python-only split).
@@ -1094,7 +1260,7 @@ jobs:
           cp /tmp/gt_l5_state.json /tmp/gt_debug/l5_state.json 2>/dev/null || true
 
       - name: Post-run reaction joiner
-        if: always()
+        if: ${{ always() && inputs.gates_only != 'true' }}
         env:
           PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:${{ github.workspace }}"
         run: |

@@ -397,13 +397,19 @@ def gate_embedder_consumption(db: str, repo: str, issue_text: str) -> bool:
             * MAD(C) > 0:  PASS iff max(C) - median(C) >= K_MAD * MAD(C) — the top
               score clears K_MAD robust deviations above the per-task center (Shtok &
               Carmel SIGIR'12, per-task MAD; K_MAD documented at its definition).
-            * MAD(C) == 0 with >=2 distinct values (a few strong scores above an
-              all-zero/low background pins the median to the background, MAD->0): a
-              right tail EXISTS iff max(C) > median(C) -> PASS. This is the legitimate
-              "one/few strong semantic hits above unscored candidates" signal.
-          The CONSIDERED set (not the scored-only subset) is the right population: a 0
-          is the BACKGROUND the standout must beat, and including it is what makes a
-          single strong hit register as discrimination.
+            * MAD(C) == 0 with >=2 distinct values (a tight high cluster above an
+              all-zero/low background pins MAD->0, and the all-component median lands
+              ON the cluster when the scored cluster is the rendered majority): judge
+              the SCORED cluster against the zero BACKGROUND, not against a median the
+              cluster itself dominates. A real cluster EXISTS iff >=2 scored
+              components stand strictly above the highest zero/background value ->
+              PASS. This is the legitimate "few strong semantic hits above unscored
+              candidates" signal and accepts the scored-majority case the plain
+              max>median test wrongly rejected.
+          The zeros are the lexical/graph-only candidates (legitimately sem=0 in a
+          HYBRID localizer) — the BACKGROUND the scored cluster must clear, never part
+          of the distribution whose center is computed. The degeneracy guard
+          (distinct<=1, incl. all-zero/flat) still FAILs regardless.
     """
     metrics = _load_brief_metrics(db, repo, issue_text)
     if metrics is None:
@@ -447,10 +453,23 @@ def gate_embedder_consumption(db: str, repo: str, issue_text: str) -> bool:
         p3 = gap >= thresh
         sep_note = f"gap={gap:.8f} >= {K_MAD}*MAD={thresh:.8f}"
     else:
-        # MAD==0 but >=2 distinct values: strong score(s) above a zero-dominated median.
-        # A right tail exists iff the max exceeds the per-task median.
-        p3 = mx > med
-        sep_note = f"MAD=0 w/ {distinct} distinct -> right-tail iff max({mx:.6f})>median({med:.6f})"
+        # MAD==0 but >=2 distinct values: a tight high cluster sits above a zero
+        # BACKGROUND. The robust center cannot be the all-component median here: when
+        # the scored cluster is the rendered MAJORITY (e.g. 3 scored, 2 zero), the
+        # median lands ON the cluster, so max>median is False and the gate rejects its
+        # OWN stated good case ("three relevant chunks tightly clustered above the
+        # unscored background", K_MAD comment). The zeros are the lexical/graph-only
+        # candidates (legitimately sem=0 in a HYBRID localizer) — the BACKGROUND, not
+        # part of the judged distribution. Judge the scored cluster against that
+        # background: a real cluster exists iff >=2 scored components stand strictly
+        # above the highest zero/background value. (distinct<=1, incl. all-zero, was
+        # already FAILed above as flat — this branch never sees an all-equal set.)
+        zeros = [c for c in comps if c <= 0.0]
+        bg = max(zeros) if zeros else 0.0
+        mx_scored = max(scored) if scored else 0.0
+        p3 = len(scored) >= 2 and mx_scored > bg
+        sep_note = (f"MAD=0 w/ {distinct} distinct -> scored-cluster-vs-background: "
+                    f"{len(scored)} scored, max_scored({mx_scored:.6f})>background({bg:.6f})")
 
     # CONSUMED := the semantic weight is applied (p1) AND the embedder DISCRIMINATES on
     # the candidates it scored (p3). Coverage (p2) is NOT a hard gate: the localizer is

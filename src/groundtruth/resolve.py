@@ -123,14 +123,15 @@ def _count_residual_method_edges(
     conn: sqlite3.Connection,
     language: str | None = None,
     source_files: list[str] | None = None,
+    cap: int | None = None,
 ) -> int:
     """Count name_match METHOD-CALL edges present BEFORE the resolve pass.
 
     This is the *denominator* of the resolution-fraction reported on the
     ``LSP_METRICS`` contract line. It is deliberately NOT the same set as
     ``_get_ambiguous_edges`` (which returns *all* sub-threshold CALLS edges and
-    is capped by ``--max-edges``): the metric needs the true, uncapped count of
-    the population the LSP precision pass is meant to convert.
+    is capped by ``--max-edges``): the metric needs the true count of the
+    population the LSP precision pass is meant to convert.
 
     "Method-call edge" is encoded structurally and language-agnostically as a
     ``name_match`` CALLS edge whose TARGET node is a ``Method`` — i.e. ``obj.m()``
@@ -141,6 +142,17 @@ def _count_residual_method_edges(
     subgraph) when given, else the whole graph — this is what makes a capped or
     un-scoped pass *detectable*: ``resolved/residual`` drops when only a slice of a
     large residual was touched.
+
+    ``cap`` makes the denominator CAP-CONSISTENT with the attempt budget
+    (``--max-edges``). The resolve pass can only attempt at most ``cap`` edges, so
+    measuring ``resolved`` against a residual LARGER than ``cap`` yields a ceiling of
+    ``cap/residual`` that can fall below the gate floor even at 100% LSP success —
+    a mathematically unpassable gate on any large un-scoped repo (the checkov class).
+    Capping the residual at the attempt budget makes the fraction "of what we could
+    attempt, how many resolved," so the floor is real work, not a coin-flip against
+    the cap. Language-agnostic: it is a property of the attempt budget vs population,
+    not of any repo/language. When demand-scoping makes the residual naturally small
+    (< cap), the cap is a no-op and the fraction is the true in-scope resolution rate.
     """
     try:
         conn.execute("SELECT resolution_method FROM edges LIMIT 0")
@@ -164,7 +176,10 @@ def _count_residual_method_edges(
         params.extend(source_files)
 
     row = conn.execute(query, params).fetchone()
-    return int(row[0]) if row else 0
+    count = int(row[0]) if row else 0
+    if cap is not None and cap > 0:
+        count = min(count, cap)
+    return count
 
 
 def _get_ambiguous_edges(
@@ -925,6 +940,28 @@ def resolve_main() -> None:
                 source_files = [line.strip() for line in _sf if line.strip()]
         else:
             source_files = [p.strip() for p in args.source_files.split(",") if p.strip()]
+        # Normalize the scope to repo-RELATIVE paths so the `e.source_file IN (...)`
+        # filters match. ``edges.source_file`` is stored repo-relative (the resolve
+        # path itself relpaths LSP targets against the root, line ~598); an ABSOLUTE
+        # scope path (e.g. /tmp/gt/src/pkg/m.py) can never satisfy IN(relative), which
+        # silently forces residual=0 / empty-scope on EVERY task regardless of language.
+        # Self-correcting: relpath each entry against --root, forward-slash, strip any
+        # leading "./" — a no-op for already-relative inputs, a fix for absolute ones.
+        if source_files:
+            _root = os.path.abspath(args.root)
+
+            def _rel_to_root(p: str) -> str:
+                # Only rewrite genuinely ABSOLUTE inputs (the bug class: absolute scope
+                # vs repo-relative edges.source_file). Already-relative inputs are left
+                # as-is — they are assumed repo-relative, matching edges.source_file.
+                if os.path.isabs(p):
+                    try:
+                        p = os.path.relpath(p, _root)
+                    except ValueError:
+                        pass
+                return p.replace("\\", "/").lstrip("./")
+
+            source_files = [_rel_to_root(p) for p in source_files]
 
     conn = sqlite3.connect(args.db)
     # Pass --max-edges as the query limit (was hardcoded LIMIT 500). A full resolve
@@ -933,13 +970,18 @@ def resolve_main() -> None:
     edges = _get_ambiguous_edges(
         conn, args.min_confidence, args.lang, source_files=source_files, limit=args.max_edges
     )
-    # Residual = the resolution-fraction DENOMINATOR: uncapped count of name_match
-    # method-call edges in scope (issue subgraph if --source-files, else whole graph),
-    # captured BEFORE _resolve_edges mutates anything. Distinct from len(edges) (which
-    # is capped + not method-specific) so a capped/un-scoped pass is detectable via
-    # resolved/residual.
+    # Residual = the resolution-fraction DENOMINATOR: count of name_match method-call
+    # edges in scope (issue subgraph if --source-files, else whole graph), captured
+    # BEFORE _resolve_edges mutates anything. Distinct from len(edges) (which is also
+    # capped but not method-specific) so a capped/un-scoped pass is detectable via
+    # resolved/residual. CAP-CONSISTENT with --max-edges: the pass can attempt at most
+    # max_edges, so a residual larger than that would make the gate ceiling = cap/residual
+    # < floor even at 100% success (the un-scoped large-repo "unpassable gate" class).
+    # Capping the denominator at the attempt budget makes the floor real work, not a
+    # coin-flip against the cap. When demand-scope shrinks residual below the cap, this
+    # is a no-op and the fraction is the true in-scope resolution rate.
     residual_method_edges = _count_residual_method_edges(
-        conn, args.lang, source_files=source_files
+        conn, args.lang, source_files=source_files, cap=args.max_edges
     )
     conn.close()
 
