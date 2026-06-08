@@ -36,6 +36,7 @@ from groundtruth.pretask.curation_map import (
     _node_ids,
     _open_ro,
     build_function_map,
+    verified_caller_count,
 )
 from groundtruth.runtime.sanitizer import (
     clip_balanced,
@@ -325,7 +326,18 @@ def build_contract(
                     continue
                 if (edge.file, edge.name) in seen_funcs:
                     continue
-                cev = _evidence_for(conn, edge.file, edge.name, is_callee=True)
+                # Read the callee contract from the EXACT node the verified edge
+                # resolved to (its edges.target_id), so sig AND props come from the
+                # SAME node — not sig-over-lowest-line + props-over-the-same-name
+                # union (item #17). Abstain if the resolved id can't be recovered.
+                callee_id = _resolved_callee_node_id(
+                    conn, ids, edge.name, edge.file, has_method=has_method
+                )
+                if callee_id is None:
+                    continue
+                cev = _evidence_for(
+                    conn, edge.file, edge.name, is_callee=True, ids=[callee_id]
+                )
                 # Worth showing a callee if it raises/guards OR exposes a
                 # signature — the signature is the deciding "call it correctly"
                 # interface fact the agent otherwise greps for (Task #48).
@@ -422,20 +434,78 @@ class CalleeContract:
     line: int  # callee definition start_line (1-based; 0 if unknown)
 
 
-def _node_sig_line(conn: sqlite3.Connection, file_path: str, name: str) -> tuple[str, int]:
-    """(signature, start_line) for the lowest-line Function/Method node match."""
+# NOTE: the legacy ``_node_sig_line(conn, file, name)`` (lowest-line over the
+# same-name union) is intentionally GONE — it sourced sig+line from an arbitrary
+# overload, not the node the verified edge resolved to (item #17). Callee sig/line
+# are now read ONLY by the resolver's actual target id via the two helpers below.
+def _node_sig_line_by_id(conn: sqlite3.Connection, node_id: int) -> tuple[str, int]:
+    """(signature, start_line) for the EXACT node ``node_id`` the edge resolved to.
+
+    The verified edge already picked a specific target node structurally (type_flow /
+    impl_method / import / same_file). Read sig+line from THAT node so an overloaded /
+    same-name-across-classes callee never gets the wrong overload's signature/line
+    (item #17). Generalized — pure id lookup, any language.
+    """
     try:
         row = conn.execute(
-            "SELECT signature, start_line FROM nodes "
-            "WHERE file_path = ? AND name = ? AND label IN ('Function','Method') "
-            "ORDER BY start_line LIMIT 1",
-            (file_path, name),
+            "SELECT signature, start_line FROM nodes WHERE id = ?",
+            (node_id,),
         ).fetchone()
     except sqlite3.Error:
         return ("", 0)
     if not row:
         return ("", 0)
     return (_sanitize_signature(str(row[0] or "")), int(row[1]) if row[1] is not None else 0)
+
+
+def _resolved_callee_node_id(
+    conn: sqlite3.Connection,
+    source_ids: list[int],
+    callee_name: str,
+    callee_file: str,
+    *,
+    has_method: bool,
+) -> int | None:
+    """The EXACT target node id the verified CALLS edge resolved to.
+
+    ``_neighbors`` returns only (name, file, confidence, resolution_method) — it
+    discards the resolved ``edges.target_id``, so the callee's sig/line/props get
+    re-derived by lowest ``start_line`` over the same-name union (an arbitrary
+    overload). Recover the resolver's actual target id from the SAME edges join
+    ``_neighbors`` used, gated on the SAME verified-method predicate, so sig/line/
+    props are read from the node the edge truly points at (item #17).
+
+    Correct-or-quiet: if the verified edge resolved to MULTIPLE distinct target ids
+    with this (name, file) — genuinely two overloads both called over verified edges
+    — prefer the lowest-line one AMONG ONLY those resolved ids (still pinned to the
+    resolver's targets, never the whole file-wide union). Returns None when no
+    verified edge to (name, file) exists (then the caller abstains). Generalized:
+    pure SQL over edges/nodes, no language- or benchmark-specific logic.
+    """
+    if not source_ids:
+        return None
+    placeholders = ",".join("?" for _ in source_ids)
+    sql = (
+        "SELECT n.id, n.start_line FROM edges e JOIN nodes n ON e.target_id = n.id "
+        f"WHERE e.source_id IN ({placeholders}) AND e.type = 'CALLS' "
+        "AND n.is_test = 0 AND n.name = ? AND n.file_path = ?"
+    )
+    params: list[object] = [*source_ids, callee_name, callee_file]
+    # Same verified-provenance gate _neighbors applies (only when the column exists);
+    # without it the conf=0.0 sentinel path can't prove provenance, so don't filter.
+    if has_method:
+        _det_in = ",".join("'" + str(m).lower() + "'" for m in sorted(_DETERMINISTIC_METHODS))
+        sql += f" AND LOWER(TRIM(e.resolution_method)) IN ({_det_in})"
+    try:
+        rows = conn.execute(sql, params).fetchall()
+    except sqlite3.Error:
+        return None
+    if not rows:
+        return None
+    # Pin to the resolver's target id(s); among those, lowest known line wins
+    # (NULL line last) for a deterministic, edge-faithful pick.
+    rows.sort(key=lambda r: (r[1] is None, r[1] if r[1] is not None else 0))
+    return int(rows[0][0])
 
 
 def edit_target_callee_contracts(
@@ -492,7 +562,17 @@ def edit_target_callee_contracts(
                 # the same file as a "callee contract" — it adds no interface fact.
                 if edge.name == fname and edge.file == file_path:
                     continue
-                sig, line = _node_sig_line(conn, edge.file, edge.name)
+                # Read sig+line from the EXACT node the verified edge resolved to
+                # (its edges.target_id), NOT the lowest-line node over the same-name
+                # union — else an overload/same-name-method gets the wrong overload's
+                # signature+line (item #17). Abstain if the resolved id can't be
+                # recovered (correct-or-quiet) rather than emit an arbitrary overload.
+                callee_id = _resolved_callee_node_id(
+                    conn, ids, edge.name, edge.file, has_method=has_method
+                )
+                if callee_id is None:
+                    continue
+                sig, line = _node_sig_line_by_id(conn, callee_id)
                 if not sig:
                     continue  # correct-or-quiet: no signature, no fact to send
                 key = (fname, edge.name, edge.file)
@@ -659,11 +739,15 @@ def _diff_contract(pre: dict, post: dict) -> list[str]:
 
 def _verified_caller_count(graph_db_path: str, file_path: str, name: str) -> int:
     """Number of VERIFIED (fact) callers of (file, name). name_match callers are
-    never counted — a guessed caller must not inflate the consequence."""
-    maps = build_function_map(graph_db_path, [(file_path, name)], dynamic=False)
-    if not maps:
-        return 0
-    return sum(1 for e in maps[0].callers if e.is_fact)
+    never counted — a guessed caller must not inflate the consequence.
+
+    Item #14: use the dedicated UNCAPPED ``COUNT(DISTINCT)`` (curation_map.
+    verified_caller_count) instead of counting the callers of a
+    ``build_function_map(dynamic=False)`` result — that path truncated at
+    ``max_neighbors=5``, so a hub with 30 verified callers reported 5 and the
+    drift block understated blast radius 6x. A COUNT must never be subject to a
+    presentation cap."""
+    return verified_caller_count(graph_db_path, file_path, name)
 
 
 def render_drift(drifts: list[ContractDrift]) -> str:

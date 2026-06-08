@@ -612,9 +612,12 @@ func (d *DB) InsertProperty(p *Property) error {
 
 // InsertAssertion inserts an assertion from a test function.
 func (d *DB) InsertAssertion(a *Assertion) error {
+	// Column set MUST match BatchInsertAssertions (incl. resolution_score, the
+	// multi-signal link score); omitting it silently defaulted every single-row
+	// assertion to resolution_score = 0.0.
 	_, err := d.db.Exec(
-		`INSERT INTO assertions (test_node_id, target_node_id, kind, expression, expected, line) VALUES (?, ?, ?, ?, ?, ?)`,
-		a.TestNodeID, a.TargetNodeID, a.Kind, a.Expression, a.Expected, a.Line,
+		`INSERT INTO assertions (test_node_id, target_node_id, resolution_score, kind, expression, expected, line) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		a.TestNodeID, a.TargetNodeID, a.ResolutionScore, a.Kind, a.Expression, a.Expected, a.Line,
 	)
 	return err
 }

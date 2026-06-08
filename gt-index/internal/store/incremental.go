@@ -35,6 +35,17 @@ type IncomingEdgeRef struct {
 	TargetName       string  // name of the target symbol that lived in the file being reparsed
 	ResolutionMethod string  // original resolution method (same_file, import, name_match)
 	Confidence       float64 // original confidence
+	// EvidenceType carries the ORIGINAL edge's evidence marker (ast_call,
+	// name_match, name_match_qualified_unresolved, …). It is the only stored
+	// signal that the original call was a qualified stdlib-shadow the full-index
+	// resolver already demoted (resolver.go:743-747). The restore MUST preserve
+	// it so the incremental (`-file`) path does not re-launder a demoted edge
+	// back to CERTIFIED — parity with the full path's qualifiedUnresolved gate.
+	EvidenceType string
+	// TargetQualifiedName is the freshly-deletable target node's qualified_name,
+	// carried for parity with the full resolver index (it reads qualified_name)
+	// so the incremental path resolves against a non-lobotomized node view.
+	TargetQualifiedName string
 }
 
 // SnapshotIncomingEdgesTx captures cross-file edges whose target is a node
@@ -49,7 +60,8 @@ func SnapshotIncomingEdgesTx(tx *sql.Tx, filePath string, cap int) ([]IncomingEd
 	}
 	rows, err := tx.Query(
 		`SELECT e.source_id, e.source_line, e.type, COALESCE(e.source_file, ''), n.name,
-		        COALESCE(e.resolution_method, ''), COALESCE(e.confidence, 0.0)
+		        COALESCE(e.resolution_method, ''), COALESCE(e.confidence, 0.0),
+		        COALESCE(e.evidence_type, ''), COALESCE(n.qualified_name, '')
 		   FROM edges e
 		   JOIN nodes n ON e.target_id = n.id
 		  WHERE n.file_path = ?
@@ -66,7 +78,7 @@ func SnapshotIncomingEdgesTx(tx *sql.Tx, filePath string, cap int) ([]IncomingEd
 	for rows.Next() {
 		var r IncomingEdgeRef
 		if err := rows.Scan(&r.SourceID, &r.SourceLine, &r.EdgeType, &r.SourceFile, &r.TargetName,
-			&r.ResolutionMethod, &r.Confidence); err != nil {
+			&r.ResolutionMethod, &r.Confidence, &r.EvidenceType, &r.TargetQualifiedName); err != nil {
 			return nil, fmt.Errorf("scan incoming edge: %w", err)
 		}
 		out = append(out, r)
@@ -120,14 +132,28 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string)
 			continue
 		}
 
+		// PARITY with the full-index resolver's qualifiedUnresolved gate
+		// (resolver.go:721,743-747): if the ORIGINAL edge was a qualified
+		// stdlib-shadow the resolver already demoted, the incremental restore
+		// must NOT re-launder it back to CERTIFIED. The only stored signal of
+		// that demotion is the edge's evidence_type marker; an `import`/
+		// `same_file` row that still carries it is a laundered legacy edge and
+		// is treated as demoted too (correct-or-quiet — never re-promote a guess).
+		qualifiedUnresolved := r.EvidenceType == "name_match_qualified_unresolved"
+
 		// If unambiguous (1 candidate) and original was high-confidence, preserve it
 		var conf float64
 		var method string
 		var tier string
-		if len(ids) == 1 && (r.ResolutionMethod == "same_file" || r.ResolutionMethod == "import") {
+		if !qualifiedUnresolved && len(ids) == 1 && (r.ResolutionMethod == "same_file" || r.ResolutionMethod == "import") {
 			conf = r.Confidence
-			if conf < 0.5 {
-				conf = 1.0 // pre-v14 databases have 0.0 default; restore to verified
+			// Item #4: floor ONLY the literal pre-v14 0.0/NULL sentinel to the
+			// method-appropriate verified value (same_file/import → 1.0, the
+			// computeConfidence table). Any conf>0 the pipeline previously stored
+			// — including an intentionally-lowered one — is PRESERVED verbatim:
+			// never re-certify a confidence the pipeline deliberately lowered.
+			if conf <= 0.0 {
+				conf = 1.0
 			}
 			method = r.ResolutionMethod
 			tier = "CERTIFIED"
@@ -159,6 +185,12 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string)
 		evType := method
 		if method == "same_file" || method == "import" {
 			evType = "ast_call"
+		}
+		// Preserve the qualified-unresolved demotion marker so downstream
+		// consumers keep treating this restored edge as the stdlib-shadow guess
+		// it is (parity with resolver.go:747 evidence = name_match_qualified_unresolved).
+		if qualifiedUnresolved {
+			evType = "name_match_qualified_unresolved"
 		}
 		if _, err := ins.Exec(r.SourceID, ids[0], r.EdgeType, r.SourceLine, srcFile,
 			method, conf, tier, len(ids), evType); err != nil {
@@ -252,8 +284,15 @@ func DeleteFileEdgesAndNodesTx(tx *sql.Tx, filePath string) (int64, int64, error
 // We return (nodes, ids) parallel so callers can reuse BuildNameIndex
 // unchanged.
 func (d *DB) GetAllNodes() ([]Node, []int64, error) {
+	// Parity with the full-index resolver's node view (resolver.go strategies
+	// 1.75/1.94/1.95 read qualified_name, signature, parent_id). The incremental
+	// reindex must rebuild the SAME columns, else qualified/self/super (CHA) calls
+	// re-resolve against a lobotomized index — the root enabler of the
+	// qualified-unresolved re-launder on the `-file` path.
 	rows, err := d.db.Query(
-		`SELECT id, label, name, file_path, language, is_test FROM nodes`,
+		`SELECT id, label, name, COALESCE(qualified_name, ''), file_path,
+		        COALESCE(signature, ''), COALESCE(return_type, ''), language, is_test, COALESCE(parent_id, 0)
+		   FROM nodes`,
 	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("query all nodes: %w", err)
@@ -264,7 +303,8 @@ func (d *DB) GetAllNodes() ([]Node, []int64, error) {
 	var ids []int64
 	for rows.Next() {
 		var n Node
-		if err := rows.Scan(&n.ID, &n.Label, &n.Name, &n.FilePath, &n.Language, &n.IsTest); err != nil {
+		if err := rows.Scan(&n.ID, &n.Label, &n.Name, &n.QualifiedName, &n.FilePath,
+			&n.Signature, &n.ReturnType, &n.Language, &n.IsTest, &n.ParentID); err != nil {
 			return nil, nil, fmt.Errorf("scan node: %w", err)
 		}
 		nodes = append(nodes, n)

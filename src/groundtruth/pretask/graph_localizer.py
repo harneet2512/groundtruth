@@ -148,6 +148,22 @@ _WITNESS_VERIFIED = 1.0     # verified EDGE witness (CALLS/IMPORTS)
 _WITNESS_DEFINES = 0.55     # DEFINES witness — above name_match but below edges
 _WITNESS_NAMEMATCH = 0.45   # unverified name_match edge
 # Hop decay is applied inline in Witness.strength() as 1/(1+hop).
+#
+# DEFINES vs verified-EDGE strength inversion guard (#57). A DEFINES witness is
+# ALWAYS hop-0, so its raw decay factor is 1/(1+0)=1.0 and `0.55*conf` could BEAT
+# a verified 1-hop CALLS edge (1.0*conf*0.5=0.50) on the raw scalar that feeds
+# Candidate.confidence (the [VERIFIED] render gate) and the W_WITNESS score term.
+# That is a lexical signal out-ranking a structural one — the exact inversion this
+# module exists to kill. The sort already tiers correctly (_witness_tier), but the
+# SCALAR did not. Fix: the DEFINES scalar is CAPPED strictly below the minimum
+# possible verified-EDGE strength. The deepest BFS hop is bounded by
+# _dynamic_max_hop (ceiling 3) and localize(max_hop=3), so a verified edge's
+# weakest decay factor is 1/(1+_MAX_DECAY_HOP). _WITNESS_DEFINES_CEIL sits just
+# under _WITNESS_VERIFIED*that-decay, so any verified edge (hop 1..max) outranks
+# any DEFINES regardless of confidence. Generalized (no repo/task logic); the cap
+# is derived from the module's own hop bound, not tuned.
+_MAX_DECAY_HOP = 3
+_WITNESS_DEFINES_CEIL = _WITNESS_VERIFIED * (1.0 / (1.0 + _MAX_DECAY_HOP)) * 0.95
 
 # Hub guard for the degree prior — tanh saturates so a 500-caller hub doesn't
 # linearly dominate a 5-caller specific module. Matches hub_penalty.HUB_SCALE.
@@ -368,6 +384,8 @@ def _path_decay_scores(
     max_hop: int = 3,
     beta: float = 0.85,
     min_edge_conf: float = 0.5,
+    has_method: bool = False,
+    has_trust_tier: bool = False,
 ) -> dict[str, float]:
     """KGCompass-style path decay scoring over the call graph.
 
@@ -379,6 +397,13 @@ def _path_decay_scores(
     Score S(f) = beta^L(f). Verified import edges yield short paths with
     minimal decay; speculative name_match edges yield long paths with heavy
     decay — exactly the correct-or-quiet property.
+
+    Edge ADMISSION uses _edge_admitted — the SAME predicate as the witness BFS
+    (#54): SUPPRESSED tier and stdlib-shadow name_match edges are HARD-EXCLUDED,
+    and an unverified edge below ``min_edge_conf`` is dropped, so a file can never
+    earn decay mass through an edge the witness layer rejected. ``has_method`` /
+    ``has_trust_tier`` let the SELECT pull ``resolution_method`` / ``trust_tier``
+    so the predicate sees the same provenance the witness BFS does.
 
     Research: KGCompass (2025) — confidence-weighted path traversal for
     entity retrieval in knowledge graphs. RepoGraph (ICLR 2025) — k-hop
@@ -415,7 +440,8 @@ def _path_decay_scores(
                 node_file[int(r[0])] = _normalize(str(r[1]))
 
     conf_sel = "e.confidence" if has_conf else "1.0"
-    conf_where = f"AND e.confidence >= {min_edge_conf}" if has_conf else ""
+    method_sel = "e.resolution_method" if has_method else "''"
+    tier_sel = "e.trust_tier" if has_trust_tier else "''"
 
     while pq:
         cost, nid, hops = heapq.heappop(pq)
@@ -427,29 +453,44 @@ def _path_decay_scores(
         if hops >= max_hop:
             continue
 
-        # Expand neighbors in both directions (out-edges and in-edges).
+        # Expand neighbors in both directions (out-edges and in-edges). SELECT the
+        # same provenance columns the witness BFS reads (name / method / tier) so
+        # the shared _edge_admitted predicate (#54) sees identical inputs — no
+        # SQL-level conf_where; admission happens once, in Python, for both walks.
         for match_col, join_col in [("e.source_id", "e.target_id"),
                                      ("e.target_id", "e.source_id")]:
             try:
                 rows = conn.execute(
-                    f"""SELECT {join_col} AS nbr_id, n.file_path, {conf_sel}
+                    f"""SELECT {join_col} AS nbr_id, n.file_path, {conf_sel},
+                               n.name, {method_sel}, {tier_sel}
                         FROM edges e
                         JOIN nodes n ON {join_col} = n.id
                         WHERE {match_col} = ?
                           AND e.type IN ('CALLS', 'IMPORTS')
                           AND n.is_test = 0
-                          {conf_where}
                         LIMIT 100""",
                     (nid,),
                 ).fetchall()
             except sqlite3.Error:
                 continue
 
-            for nbr_id, nbr_file, conf in rows:
+            for nbr_id, nbr_file, conf, nbr_name, method, tier in rows:
                 if nbr_id is None or nbr_file is None:
                     continue
                 nbr_id = int(nbr_id)
                 nbr_file = _normalize(str(nbr_file))
+                verified = _is_verified(method)
+                # ADMISSION (shared predicate). Use the witness-BFS conf convention
+                # (0.0 when missing) so the SAME edge is admitted/rejected in both
+                # traversals; the cost weight below keeps its own 1.0 default.
+                try:
+                    admit_conf = float(conf) if conf is not None else 0.0
+                except (TypeError, ValueError):
+                    admit_conf = 0.0
+                if not _edge_admitted(
+                    verified, admit_conf, tier, str(nbr_name or ""), min_edge_conf
+                ):
+                    continue
                 try:
                     conf_f = float(conf) if conf is not None else 1.0
                 except (TypeError, ValueError):
@@ -504,14 +545,21 @@ class Witness:
     dst_symbol: str
 
     def strength(self) -> float:
+        conf = self.confidence if self.confidence > 0 else (1.0 if self.verified else 0.5)
+        decay = 1.0 / (1.0 + self.hop)
         if self.direction == "defines_anchor":
-            base = _WITNESS_DEFINES
-        elif self.verified:
+            # DEFINES is lexical (the file merely defines a same-named symbol) and is
+            # ALWAYS hop-0, so its decay is 1.0. Cap the scalar strictly below the
+            # weakest possible verified-EDGE strength (#57) so a hop-0 DEFINES can
+            # never out-rank a real structural edge on the scalar that feeds
+            # Candidate.confidence / the [VERIFIED] gate / the W_WITNESS term. The
+            # _witness_tier sort already orders tiers; this keeps the SCALAR honest.
+            return min(_WITNESS_DEFINES * conf * decay, _WITNESS_DEFINES_CEIL)
+        if self.verified:
             base = _WITNESS_VERIFIED
         else:
             base = _WITNESS_NAMEMATCH
-        conf = self.confidence if self.confidence > 0 else (1.0 if self.verified else 0.5)
-        return base * conf * (1.0 / (1.0 + self.hop))
+        return base * conf * decay
 
 
 @dataclass(frozen=True)
@@ -596,6 +644,45 @@ def _issue_terms(issue_text: str) -> set[str]:
         for w in _re.findall(r"[A-Za-z_]\w{2,}", issue_text or "")
         if len(w) >= _MIN_ANCHOR_LEN
     }
+
+
+# camelCase / snake_case / digit boundaries — split an identifier into its
+# semantic components so lexical matching is BOUNDARY-aware, not substring.
+_IDENT_SPLIT_RE = _re.compile(r"[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Za-z])(?=[0-9])")
+
+
+def _ident_components(sym: str) -> set[str]:
+    """Lowercased components of an identifier (set_fields -> {set, fields};
+    setUpClass -> {set, up, class}; offset -> {offset}). The component set is
+    what boundary-aware lexical matching tests membership against, so a 3-char
+    issue term like ``set`` matches ``set_fields`` (a real component) but NOT
+    ``settings`` / ``reset`` / ``offset`` (single, indivisible tokens). Mirrors
+    the path-seed component discipline (#56)."""
+    if not sym:
+        return set()
+    parts = {p.lower() for p in _IDENT_SPLIT_RE.split(sym) if p}
+    parts.add(sym.lower())  # the whole identifier is itself a component
+    return parts
+
+
+def _lex_hit(term: str, symset: set[str]) -> bool:
+    """Boundary-aware BLUiR field-level lexical hit (#56). A term scores iff it
+    equals a whole identifier COMPONENT of some symbol (the precise signal), or
+    — only for distinctive terms (len >= 4, mirroring the path-seed >= 4 floor)
+    — it equals the full symbol stem. Replaces the old ``t in s or s in t``
+    unbounded substring, which made ``set`` match settings/reset/offset/dataset
+    and re-introduced the exact lexical-overconnect this module exists to kill."""
+    t = term.lower()
+    if len(t) < _MIN_ANCHOR_LEN:
+        return False
+    for s in symset:
+        if not s or len(s) <= 2:
+            continue
+        if t == s:
+            return True
+        if t in _ident_components(s):
+            return True
+    return False
 
 
 def _seed_node_rows(
@@ -938,6 +1025,31 @@ def _file_degrees(conn: sqlite3.Connection, files: set[str]) -> dict[str, int]:
 
 def _is_verified(method: str) -> bool:
     return (method or "").strip().lower() in _DETERMINISTIC_METHODS
+
+
+def _edge_admitted(
+    verified: bool,
+    conf_f: float,
+    tier: str | None,
+    nbr_name: str | None,
+    min_edge_conf: float,
+) -> bool:
+    """ONE edge-admission predicate, shared by the witness BFS and the path-decay
+    traversal (#54). Both walks must reject the SAME edges so a file can never earn
+    path-decay mass through an edge the witness layer dropped (a phantom decay path
+    with zero admitted witnesses). The categorical rule (curation_map.py): admit IFF
+      * trust_tier is NOT 'SUPPRESSED' (hard exclude), AND
+      * the edge is a deterministic FACT (verified) OR confidence >= min_edge_conf, AND
+      * it is NOT a stdlib-shadow name_match (nbr_name in _STDLIB_ATTRS, unverified).
+    Verified edges are never confidence- or shadow-filtered. Generalized, no
+    repo/task logic — purely a function of the edge's own provenance fields."""
+    if str(tier or "").strip().upper() == "SUPPRESSED":
+        return False
+    if not verified and conf_f < min_edge_conf:
+        return False
+    if not verified and nbr_name and nbr_name in _STDLIB_ATTRS:
+        return False
+    return True
 
 
 def _graph_stats(conn: sqlite3.Connection, has_conf: bool) -> dict:
@@ -1611,30 +1723,19 @@ def localize(
                         verified = _is_verified(method)
 
                         # ---- CATEGORICAL ADMISSION FILTER (single source of truth)
-                        # Reuse curation_map's rule (curation_map.py:113): admit IFF
-                        # the edge is a FACT (deterministic resolution_method) OR
-                        # confidence >= _NAME_MATCH_FLOOR (0.5). A trust_tier =
-                        # 'SUPPRESSED' edge is HARD-EXCLUDED. This drops 5+-candidate
-                        # / conf<0.5 name_match noise AT ADMISSION so it can never
-                        # surface a junk candidate file as an (unverified) witness.
-                        # CLAUDE.md edge-filter rule + Pillar 4 (.claude/CLAUDE.md:24
-                        # "confidence-gated AT THE FILTER LEVEL"). Without this the BFS
-                        # rolled its own verified/name_match split and laundered
-                        # suppressed edges into the candidate list.
-                        if str(tier or "").strip().upper() == "SUPPRESSED":
-                            continue
-                        if not verified and conf_f < _dyn_conf:
+                        # _edge_admitted is the ONE predicate shared with the
+                        # path-decay traversal (#54): admit IFF the edge is a FACT
+                        # (deterministic resolution_method) OR confidence >=
+                        # _dyn_conf, with trust_tier='SUPPRESSED' and stdlib-shadow
+                        # name_match edges HARD-EXCLUDED. Sharing it guarantees a file
+                        # can never earn path-decay mass through an edge this BFS
+                        # rejects. CLAUDE.md edge-filter rule + Pillar 4
+                        # (.claude/CLAUDE.md:24 "confidence-gated AT THE FILTER LEVEL").
+                        if not _edge_admitted(verified, conf_f, tier, nbr_name, _dyn_conf):
                             continue
 
-                        # Stdlib-shadow guard (RepoGraph stdlib filter): drop an
-                        # edge whose neighbor name is a stdlib attribute call of an
-                        # anchor (os.walk -> project walk). We approximate by
-                        # dropping a neighbor whose bare name collides with a
-                        # stdlib head's typical attribute AND is name_match.
                         frontier_anchor = anchor_of_id.get(int(fr_id), "")
                         src_name = name_of_id.get(int(fr_id), frontier_anchor)
-                        if not verified and nbr_name and nbr_name in _STDLIB_ATTRS:
-                            continue
 
                         if edge_dir == "calls_anchor":
                             src_sym, dst_sym = nbr_name, src_name
@@ -1679,6 +1780,7 @@ def localize(
             _path_decay_by_file = _path_decay_scores(
                 conn, seed_ids, has_conf,
                 max_hop=_dyn_hop, beta=0.85, min_edge_conf=_dyn_conf,
+                has_method=has_method, has_trust_tier=has_trust_tier,
             )
         except Exception:
             pass
@@ -1767,7 +1869,7 @@ def localize(
         for w in wits:
             symset.add(w.src_symbol.lower())
             symset.add(w.dst_symbol.lower())
-        lex_hits = sum(1 for t in terms if any(t == s or t in s or s in t for s in symset if len(s) > 2))
+        lex_hits = sum(1 for t in terms if _lex_hit(t, symset))
         lex_norm = min(1.0, lex_hits / 5.0)
         deg = degrees.get(fp, 0)
         deg_norm = math.tanh(deg / _HUB_SCALE)

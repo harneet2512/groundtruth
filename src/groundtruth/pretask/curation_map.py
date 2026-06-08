@@ -34,6 +34,7 @@ LLM-free, $0, pure SQL over a read-only graph.db.
 from __future__ import annotations
 
 import os
+import re as _re
 import sqlite3
 from dataclasses import dataclass, field
 
@@ -134,6 +135,58 @@ _SECOND_HOP_SPARSE_THRESHOLD = 1  # hop-1 visible count at/below this is "sparse
 _SECOND_HOP_MAX = 3  # hard cap on rescued 2-hop facts per direction
 
 
+def normalize_file_path(file_path: str) -> str:
+    """Canonical repo-relative form of a graph/focus file path.
+
+    SHARED normalizer — the witness twin (v1r_brief._resolved_witnesses_for_file)
+    and the curation map MUST agree on path shape or the two symmetric surfaces
+    disagree (one delivers a map, the other silently abstains) on the SAME file
+    when the graph stored a `./`-prefixed or backslash (Windows-indexed) variant.
+    Identical to the witness path's inline normalization
+    (``file_path.replace("\\\\", "/").lstrip("./").lstrip("/")``). Structural; no
+    task/file-specific logic.
+    """
+    if not file_path:
+        return ""
+    return file_path.replace("\\", "/").lstrip("./").lstrip("/")
+
+
+# Stdlib modules whose attribute calls (``os.walk(``) the indexer can name-match
+# to a same-named PROJECT symbol and stamp with a DETERMINISTIC resolution_method,
+# laundering a false fact. The shared secondary defense below drops those. Kept in
+# sync with v1r_brief._STDLIB_MODULES (the witness twin imports THIS set).
+_STDLIB_MODULES: frozenset[str] = frozenset(
+    {
+        "os", "sys", "re", "io", "json", "math", "time", "copy", "glob", "uuid",
+        "shutil", "random", "typing", "logging", "pathlib", "datetime", "string",
+        "decimal", "inspect", "warnings", "argparse", "textwrap", "itertools",
+        "functools", "operator", "collections", "subprocess", "contextlib",
+    }
+)
+
+_STDLIB_SHADOW_RE = _re.compile(r"([A-Za-z_][\w.]*)\.([A-Za-z_]\w*)\s*\(")
+
+
+def is_stdlib_shadow(code: str, target_name: str) -> bool:
+    """True when ``code`` calls ``<stdlib_module>.<target_name>(`` — a stdlib
+    attribute call the indexer name-matched to a project function of the same name
+    (the proven ``os.walk`` -> project ``walk`` false caller).
+
+    SHARED secondary defense against an indexer that records such an edge with a
+    DETERMINISTIC ``resolution_method`` (so the provenance gate alone would trust
+    it). The witness twin (v1r_brief) and the <gt-graph-map> (_neighbors) MUST
+    apply the SAME guard or they render the same laundered edge differently — one
+    drops it, the other shows it bare as a fact. Repo- and language-agnostic.
+    """
+    if not code or not target_name:
+        return False
+    for m in _STDLIB_SHADOW_RE.finditer(code):
+        head = m.group(1).split(".")[0]
+        if m.group(2) == target_name and head in _STDLIB_MODULES:
+            return True
+    return False
+
+
 @dataclass(frozen=True)
 class Edge:
     """One 1-hop connection of a focus function."""
@@ -220,16 +273,50 @@ def _node_ids(conn: sqlite3.Connection, file_path: str, name: str) -> list[int]:
 
     A name can occur more than once in a file (overloads, methods on different
     classes); we union over all of them so the map is complete.
+
+    PATH NORMALIZATION (parity with the witness twin): the focus path and the
+    stored ``nodes.file_path`` can differ in separator (Windows-indexed `\\`) or a
+    `./` / leading-`/` prefix. An exact `file_path = ?` match then returns [] and
+    the WHOLE map silently abstains on a file that DOES have edges. We normalize
+    both sides identically (``normalize_file_path``) and match by SUFFIX LIKE —
+    exactly what ``v1r_brief._resolved_witnesses_for_file`` does
+    (``nt.file_path LIKE '%' || norm_fp``) — so the two symmetric surfaces deliver
+    on the same file. Structural; no task/file-specific logic.
     """
+    norm_fp = normalize_file_path(file_path)
+    if not norm_fp:
+        return []
     try:
         rows = conn.execute(
-            "SELECT id FROM nodes WHERE file_path = ? AND name = ? "
+            "SELECT id FROM nodes "
+            "WHERE REPLACE(file_path, '\\', '/') LIKE ? AND name = ? "
             "AND label IN ('Function','Method')",
-            (file_path, name),
+            (f"%{norm_fp}", name),
         ).fetchall()
     except sqlite3.Error:
         return []
     return [int(r[0]) for r in rows if r and r[0] is not None]
+
+
+def _read_code_line(repo_root: str, rel_file: str, line: int) -> str:
+    """The stripped source text at ``rel_file:line`` under ``repo_root``.
+
+    Mirrors v1r_brief._resolved_witnesses_for_file._code_at — the shadow guard
+    needs the literal call site (``os.walk(``) which is NOT stored on the edge.
+    Empty string on any miss (no root / bad line / unreadable) -> guard no-ops.
+    """
+    if not repo_root or not rel_file or not line or line <= 0:
+        return ""
+    try:
+        with open(
+            os.path.join(repo_root, rel_file), encoding="utf-8", errors="ignore"
+        ) as fh:
+            lines = fh.readlines()
+        if 0 < line <= len(lines):
+            return lines[line - 1].strip()
+    except OSError:
+        pass
+    return ""
 
 
 def _neighbors(
@@ -240,6 +327,7 @@ def _neighbors(
     has_conf: bool,
     has_method: bool,
     max_neighbors: int,
+    repo_root: str = "",
 ) -> list[Edge]:
     """1-hop CALLS neighbors of ``node_ids``.
 
@@ -247,6 +335,15 @@ def _neighbors(
     direction='callees' -> outgoing edges (source_id IN ids), neighbor = target node.
 
     Facts first, then by confidence desc; deduped by (name, file); capped.
+
+    ``repo_root`` (optional): when set, the stdlib-shadow secondary defense
+    (``is_stdlib_shadow``) is applied — the SAME guard the witness twin
+    (v1r_brief._resolved_witnesses_for_file) uses — so a stdlib attribute call
+    (``os.walk(``) the indexer name-matched to a same-named PROJECT symbol and
+    stamped with a DETERMINISTIC ``resolution_method`` is DROPPED instead of
+    rendered bare as a fact in <gt-graph-map>. Without ``repo_root`` (call sites
+    unreadable) the guard no-ops — the provenance gate already filtered the row,
+    and we never read a half-truth as proof. Repo-/language-agnostic.
     """
     if not node_ids:
         return []
@@ -261,9 +358,15 @@ def _neighbors(
         match_col, join_col = "e.target_id", "e.source_id"
     else:
         match_col, join_col = "e.source_id", "e.target_id"
+    # The TARGET node (always e.target_id) carries the called-symbol name the
+    # stdlib-shadow guard checks (``stdlibmod.<target_name>(``); the SOURCE file +
+    # line locate the call site. Both are pulled so the guard can run; harmless
+    # when repo_root is unset.
     sql = (
-        f"SELECT DISTINCT n.name, n.file_path, {conf_sel}, {method_sel} "
+        f"SELECT DISTINCT n.name, n.file_path, {conf_sel}, {method_sel}, "
+        f"ntgt.name, e.source_file, e.source_line "
         f"FROM edges e JOIN nodes n ON {join_col} = n.id "
+        f"JOIN nodes ntgt ON e.target_id = ntgt.id "
         # SWAP-INVARIANT (run16 leak): never surface a test node as a caller/callee — the
         # <gt-graph-map> "called by:" leaked 6 test_plot_hdi* functions. is_test nodes are excluded.
         f"WHERE {match_col} IN ({placeholders}) AND e.type = 'CALLS' AND n.is_test = 0"
@@ -283,16 +386,24 @@ def _neighbors(
 
     # Finding 1: a focus name can resolve to multiple node ids (_node_ids unions
     # overloads / same-name methods), and DISTINCT keeps one row per distinct
-    # 4-tuple. The SAME neighbor can therefore appear twice — once via a
+    # tuple. The SAME neighbor can therefore appear twice — once via a
     # deterministic edge (a FACT) and once via name_match — differing only in
     # resolution_method/confidence. Build candidate Edges first, then sort them
     # fact-first / confidence-desc / name BEFORE the (name,file) dedup, so the
     # best-provenance row wins deterministically. A name_match row can no longer
     # win the dedup and silently downgrade a real fact.
     candidates: list[Edge] = []
-    for name, fpath, conf, method in rows:
+    for name, fpath, conf, method, target_name, src_file, src_line in rows:
         if not name:
             continue
+        # STDLIB-SHADOW secondary defense (parity with the witness twin): when the
+        # call site reads ``<stdlib>.<target>(``, the edge is a name-match to a
+        # same-named project symbol stamped as a fact — drop it regardless of
+        # recorded provenance. No-ops when repo_root/code is unavailable.
+        if repo_root:
+            code = _read_code_line(repo_root, src_file or "", int(src_line) if src_line else 0)
+            if code and is_stdlib_shadow(code, target_name or ""):
+                continue
         try:
             conf_f = float(conf) if conf is not None else 0.0
         except (TypeError, ValueError):
@@ -323,11 +434,59 @@ def _neighbors(
     return edges[:max_neighbors]
 
 
+def _verified_neighbor_count(
+    conn: sqlite3.Connection,
+    node_ids: list[int],
+    *,
+    direction: str,
+    has_method: bool,
+) -> int:
+    """TRUE count of DISTINCT verified (fact) 1-hop neighbors — never truncated.
+
+    A COUNT must never be subject to a presentation cap (the ``max_neighbors`` /
+    over-fetch window): a hub with 30 verified callers reported as 5 understates
+    blast radius 6x in the drift block. This runs a dedicated
+    ``COUNT(DISTINCT name, file)`` with the SAME deterministic-method + is_test=0
+    gate as ``_neighbors`` but NO row cap, so the count is the real fact count.
+
+    Used by (a) the dynamic budget, to shrink the unverified-guess allowance
+    against the real fact count rather than the capped over-fetch window
+    (otherwise a >19-neighbor hub under-counts facts and leaks guesses), and by
+    (b) ``contract_map._verified_caller_count`` for the drift "{n} verified
+    callers depend on this" framing. ``name_match`` is never counted. Returns 0
+    on any error / legacy DB without resolution_method (cannot judge provenance ->
+    no fact). Pure read; never raises.
+    """
+    if not node_ids or not has_method:
+        return 0
+    placeholders = ",".join("?" for _ in node_ids)
+    if direction == "callers":
+        match_col, join_col = "e.target_id", "e.source_id"
+    else:
+        match_col, join_col = "e.source_id", "e.target_id"
+    _det_in = ",".join(
+        "'" + str(m).lower() + "'" for m in sorted(DETERMINISTIC_RESOLUTION_METHODS)
+    )
+    sql = (
+        f"SELECT COUNT(DISTINCT n.name || '\\x00' || n.file_path) "
+        f"FROM edges e JOIN nodes n ON {join_col} = n.id "
+        f"WHERE {match_col} IN ({placeholders}) AND e.type = 'CALLS' "
+        f"AND n.is_test = 0 AND n.name IS NOT NULL "
+        f"AND LOWER(TRIM(e.resolution_method)) IN ({_det_in})"
+    )
+    try:
+        row = conn.execute(sql, node_ids).fetchone()
+    except sqlite3.Error:
+        return 0
+    return int(row[0]) if row and row[0] is not None else 0
+
+
 def _apply_dynamic_budget(
     edges: list[Edge],
     *,
     fact_ceiling: int,
     unverified_k: int,
+    true_fact_count: int | None = None,
 ) -> list[Edge]:
     """Provenance-aware breadth: ALL facts up to ``fact_ceiling``, then a
     fact-scaled number of unverified hints.
@@ -339,12 +498,26 @@ def _apply_dynamic_budget(
     so a fact-rich function shows zero guesses (The Distracting Effect,
     arXiv:2505.06914, 2025) while an isolated one still gets a couple of honest
     hints. Returns facts (capped) followed by the allowed unverified edges.
+
+    ``true_fact_count`` (when supplied) is the UNCAPPED fact count from a
+    dedicated ``COUNT`` — used instead of counting ``edges`` (which the caller may
+    have over-fetched under a row cap). On a mega-hub with more verified neighbors
+    than the over-fetch window, counting ``edges`` under-counts facts and would
+    re-open the guess budget on a fact-rich hub; the uncapped count closes that.
     """
     # Shrink the unverified budget from the RAW pre-cap fact count, not the
     # post-cap len(facts): the "fact-rich -> zero guesses" intent must hold even
     # if a future config sets unverified_k > fact_ceiling (otherwise capping
     # facts at the ceiling would re-open the guess budget on a fact-rich hub).
-    raw_fact_count = sum(1 for e in edges if e.is_fact)
+    # Prefer the uncapped COUNT when given (closes the >over-fetch-window hub gap).
+    windowed_fact_count = sum(1 for e in edges if e.is_fact)
+    raw_fact_count = (
+        true_fact_count if true_fact_count is not None
+        else windowed_fact_count
+    )
+    # Defensive: the true count can only be >= what we see in the window; never
+    # let a bad/smaller override re-open the guess budget.
+    raw_fact_count = max(raw_fact_count, windowed_fact_count)
     facts = [e for e in edges if e.is_fact][:fact_ceiling]
     unverified_allowed = max(0, unverified_k - raw_fact_count)
     if unverified_allowed <= 0:
@@ -362,6 +535,7 @@ def _second_hop_facts(
     has_method: bool,
     exclude: set[tuple[str, str]],
     limit: int,
+    repo_root: str = "",
 ) -> list[Edge]:
     """Verified-only 2-hop rescue for sparse 1-hop targets.
 
@@ -381,13 +555,21 @@ def _second_hop_facts(
     # Re-query 1-hop neighbors of the seeds, then keep facts only. We reuse the
     # frozen _neighbors path (its contract is unchanged) for the SQL + dedup, then
     # filter to facts here so a name_match can never become a 2-hop edge.
+    #
+    # TRUNCATE-AFTER-EXCLUDE: _neighbors caps rows BEFORE we can apply ``exclude``.
+    # On a well-connected seed whose top neighbors heavily overlap the focus's own
+    # 1-hop set, the capped window can be entirely excluded -> 0 rescued edges even
+    # though valid 2-hop facts exist beyond the window. Over-fetch by the exclude
+    # size so the cap never bites before exclusion runs.
+    over_fetch = limit * 4 + len(exclude)
     raw = _neighbors(
         conn,
         seed_ids,
         direction=direction,
         has_conf=has_conf,
         has_method=has_method,
-        max_neighbors=limit * 4,  # over-fetch; exclusion + fact filter trims it
+        max_neighbors=over_fetch,
+        repo_root=repo_root,
     )
     out: list[Edge] = []
     for e in raw:
@@ -420,6 +602,7 @@ def _dynamic_neighbors(
     fact_ceiling: int,
     unverified_k: int,
     second_hop: bool,
+    repo_root: str = "",
 ) -> list[Edge]:
     """1-hop neighbors under the dynamic provenance budget, plus an optional
     verified-only 2-hop rescue when the 1-hop set is empty/sparse.
@@ -438,19 +621,32 @@ def _dynamic_neighbors(
         has_conf=has_conf,
         has_method=has_method,
         max_neighbors=fact_ceiling + unverified_k + 8,
+        repo_root=repo_root,
+    )
+    # TRUE (uncapped) fact count so the guess budget shrinks against the REAL
+    # number of verified neighbors, not the over-fetch window. On a mega-hub with
+    # more facts than the window, counting only ``raw`` would under-count and leak
+    # guesses onto a fact-rich hub.
+    true_facts = _verified_neighbor_count(
+        conn, node_ids, direction=direction, has_method=has_method
     )
     edges = _apply_dynamic_budget(
-        raw, fact_ceiling=fact_ceiling, unverified_k=unverified_k
+        raw, fact_ceiling=fact_ceiling, unverified_k=unverified_k,
+        true_fact_count=true_facts,
     )
 
     if not second_hop:
         return edges
-    # Only rescue when the 1-hop set is empty/sparse (RepoGraph: stay 1-hop by
-    # default; expand only the isolated/low-reach targets).
-    if len(edges) > _SECOND_HOP_SPARSE_THRESHOLD:
+    # Only rescue when the VERIFIED reach is empty/sparse (RepoGraph: stay 1-hop by
+    # default; expand only the isolated/low-reach targets). Gate on the FACT count,
+    # NOT total visible: a target with 0 facts but a couple of name_match guesses
+    # is exactly the isolated case the rescue exists for — counting the guesses
+    # toward "not sparse" would suppress the verified rescue on precisely those
+    # targets (self-defeating). reach is measured by VERIFIED edges, not guesses.
+    fact_neighbors = [e for e in edges if e.is_fact]
+    if len(fact_neighbors) > _SECOND_HOP_SPARSE_THRESHOLD:
         return edges
     # Seeds for the 2-hop = node ids of the FACT 1-hop neighbors (verified path).
-    fact_neighbors = [e for e in edges if e.is_fact]
     seed_ids: list[int] = []
     for e in fact_neighbors:
         seed_ids.extend(_node_ids(conn, e.file, e.name))
@@ -482,6 +678,7 @@ def _dynamic_neighbors(
         has_method=has_method,
         exclude=exclude,
         limit=limit,
+        repo_root=repo_root,
     )
     return edges + hop2
 
@@ -495,6 +692,7 @@ def build_function_map(
     fact_ceiling: int = _FACT_CEILING,
     unverified_k: int = _UNVERIFIED_BUDGET_K,
     second_hop: bool = True,
+    repo_root: str = "",
 ) -> list[FunctionMap]:
     """Build the curation map for each (file_path, function) in ``focus``.
 
@@ -506,6 +704,11 @@ def build_function_map(
     (The Distracting Effect, arXiv:2505.06914, 2025). When ``second_hop`` and a
     focus's 1-hop set is empty/sparse, a VERIFIED-only second hop rescues the
     isolated target (RepoGraph ICLR 2025: stay 1-hop except where reach≈0).
+
+    ``repo_root`` (optional): when set, the stdlib-shadow secondary defense is
+    applied to every neighbor (parity with the witness twin) so a stdlib attribute
+    call name-matched to a same-named project symbol is dropped instead of rendered
+    bare in <gt-graph-map>. Unset -> guard no-ops (the provenance gate already ran).
 
     ``max_neighbors`` is honored only on the legacy path (``dynamic=False``),
     where behavior is byte-for-byte v1.0 — kept so existing callers stay
@@ -528,26 +731,62 @@ def build_function_map(
                     conn, ids, direction="callers", has_conf=has_conf,
                     has_method=has_method, fact_ceiling=fact_ceiling,
                     unverified_k=unverified_k, second_hop=second_hop,
+                    repo_root=repo_root,
                 )
                 callees = _dynamic_neighbors(
                     conn, ids, direction="callees", has_conf=has_conf,
                     has_method=has_method, fact_ceiling=fact_ceiling,
                     unverified_k=unverified_k, second_hop=second_hop,
+                    repo_root=repo_root,
                 )
             else:
                 # Legacy flat-cap path — unchanged v1.0 behavior.
                 callers = _neighbors(
                     conn, ids, direction="callers", has_conf=has_conf,
                     has_method=has_method, max_neighbors=max_neighbors,
+                    repo_root=repo_root,
                 )
                 callees = _neighbors(
                     conn, ids, direction="callees", has_conf=has_conf,
                     has_method=has_method, max_neighbors=max_neighbors,
+                    repo_root=repo_root,
                 )
             out.append(
                 FunctionMap(file=fpath, function=fname, callers=callers, callees=callees)
             )
         return out
+    finally:
+        conn.close()
+
+
+def verified_caller_count(graph_db_path: str, file_path: str, name: str) -> int:
+    """TRUE count of VERIFIED (fact) callers of ``(file_path, name)`` — uncapped.
+
+    Item #14: ``contract_map._verified_caller_count`` previously derived this from
+    ``build_function_map(..., dynamic=False)`` and counted ``e.is_fact`` over the
+    returned callers — which ``_neighbors`` had ALREADY truncated at
+    ``max_neighbors`` (default 5). A function with 30 verified callers reported 5,
+    understating the drift block's "{n} verified callers depend on this" 6x. A
+    COUNT must never be subject to a presentation cap. This runs the dedicated
+    uncapped ``COUNT(DISTINCT)`` with the deterministic-method gate instead.
+
+    name_match callers are NEVER counted (a guessed caller must not inflate the
+    consequence). Returns 0 on bad/missing db or legacy DB without provenance.
+    Pure read; never raises.
+    """
+    if not file_path or not name or not os.path.exists(graph_db_path):
+        return 0
+    conn = _open_ro(graph_db_path)
+    if conn is None:
+        return 0
+    try:
+        _, has_method = _has_columns(conn)
+        ids = _node_ids(conn, file_path, name)
+        if not ids:
+            return 0
+        return _verified_neighbor_count(
+            conn, ids, direction="callers", has_method=has_method
+        )
     finally:
         conn.close()
 
