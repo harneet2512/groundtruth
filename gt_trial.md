@@ -170,6 +170,29 @@ live GHA run is watchable with ONE connection — no `gh api` polling. **Do this
    probe. Otherwise state exactly which of {delivered, correct, consumed} passed. "Delivered" alone
    is reported as **"delivered; correctness unverified"** — NEVER "works".
 
+   **MANDATORY OUTPUT FORMAT (the 2026-06-07 directive) — INDIVIDUAL per-component tables with REAL
+   VALUES, by READING (never grep). A single gate-verdict summary table is NOT the audit; it hides
+   what was actually sent and what the agent actually did.** The verifier's deliverable, PER TASK, is:
+   - **(a) a PREREQS table** (substrate P1 resolution · P2 graph.db · P3 embedder) — the 8-dp REAL
+     numbers, VERBATIM from the gate-deep JSON: P1 `det_pct · name_match count · typing tiers
+     (type_flow/impl_method/inherited)`; P2 `calls_edges · resolution_method breakdown`; P3 `class ·
+     cos_related · cos_unrelated · effective_w_sem · is_zero`. One column = GREEN?; one column = HOW
+     it reached the agent (the substrate numbers are telemetry-only → they reach the agent ONLY as
+     the brief's resolved-edge lines — quote those exact lines).
+   - **(b) ONE TABLE PER gt_gt COMPONENT** (L1 · L3b · consensus · L3/GT_VERIFY · L4 · L5 · L5b · L6),
+     columns EXACTLY: `turn | GT SENT (the verbatim bytes the agent saw) | AGENT DID (the verbatim
+     agent action at/after that turn) | DELIVERED/CORRECT/CONSUMED`. The two middle columns hold REAL
+     VALUES — the exact payload GT injected and the exact agent action, side by side — so the reader
+     SEES delivery and (non-)consumption, never a trusted label. A component that never delivered =
+     one row: `DELIVERED=NO — <reason read from output.jsonl>`. A row's CONSUMED cell must quote the
+     agent action that did (or did NOT) act on THAT turn's payload (e.g. "edit at T42 cites own
+     `cat -n`, not this block → INERT").
+   - **(c) under each table, ONE verdict line** (that component's D/C/C + its leakage count), and a
+     final cross-component line (total test-name/FAIL_TO_PASS leakage — MUST be 0; consumed-count;
+     fair-probe-count).
+   **Read `output.jsonl` chronologically, never grep. Quote verbatim, never paraphrase. No verdict
+   cell without its quote.** The §5 scorecard is computed FROM these tables, not in place of them.
+
 3. **Lead the report with the TRAJECTORY finding, not pass/fail.** "Resolved" is a footnote to
    "the trajectory was right."
 

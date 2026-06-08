@@ -324,6 +324,18 @@ Rounding to 2 dp hides small-but-real effects and corrupts paired statistics.
 `gt_deep_metrics_<task>.json` (the 8-dp deep record; + `gt_metrics_delta_<task>.json` when
 paired). Aggregate with `compute_run_metrics.py`. (Ties to DEFINITION OF DONE: metrics changed.)
 
+## MANDATORY: Per-task ledger (`task_ledgers/`) — every run, every task, ALWAYS updated
+
+Every task in every run gets a per-component **gt_trial.md §4 audit**, stored as one file per task
+at the project root: **`task_ledgers/<task>.md`**. The ledger is the INDIVIDUAL per-component tables
+(PREREQS/substrate + L1 · L3b · consensus · L3/GT_VERIFY · L4 · L5 · L5b · L6), columns
+`turn | GT SENT (verbatim) | AGENT DID (verbatim) | DELIVERED/CORRECT/CONSUMED`, **read (never grep)**
+from `output.jsonl`, with a per-table verdict + a cross-component line (leakage MUST be 0;
+consumed-count; fair-probe-count). **A run is NOT done until every task it ran has its ledger in
+`task_ledgers/`** (index it in `task_ledgers/README.md`). **APPEND-ONLY** across runs — never
+overwrite a prior run's task ledger; add the new run's audit under a dated heading. Format spec lives
+in `gt_trial.md §4`; this is the canonical store of "what GT sent vs what the agent did," per task.
+
 ## Product-v1 Commit (2026-05-22)
 
 **Commit:** `e0a50f72` on `jedi__branch`
