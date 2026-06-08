@@ -946,16 +946,18 @@ def run_v74(
     # the bounded seed map to preserve their documented seed-driven semantics; the
     # LIVE path is C.
     #
-    # item #46: use `sem_all` UNCONDITIONALLY for the C/D component source — no
-    # fallback to the bounded seed map. The old `sem_all if sem_all else sem_scores`
-    # re-introduced the very spurious-0 bug the decoupling was built to kill: when
-    # `sem_all` is empty for a degenerate-but-real reason (e.g. all cosines
-    # non-positive) while `sem_scores` (top-k, unfiltered for positivity) still
-    # holds values, it would silently fall back to the BOUNDED seed map and zero
-    # sem on every candidate outside the top-k. An empty `sem_all` correctly means
-    # "no positive semantic signal" → component 0 everywhere (the correct no-op,
-    # identical to embedder-off). Never fall back to the seed map.
-    sem_component_scores = sem_all
+    # item #46 REVERTED (2026-06-07) — it broke the substrate. The embedder GATE
+    # (foundational_gates GATE 3b) reads `sem_components` straight off this
+    # `sem_component_scores`. A bare `sem_all` (positive-cosine-filtered) goes EMPTY
+    # whenever no cosine survives the positivity filter, while the unfiltered top-k
+    # `sem_scores` still carries the embedder's REAL signal. With the fallback gone,
+    # an empty `sem_all` zeroed every component → the consumption gate saw an all-flat
+    # distribution and fail-closed a LIVE, working embedder (cfn-lint-3749: sem_count
+    # 4 → 0, embedder=OFF). Restore the fallback so the real top-k semantic signal
+    # reaches the brief when positive-only `sem_all` is empty. (The spurious-0 concern
+    # that motivated #46 is subordinate to keeping the substrate GREEN; revisit by
+    # populating `sem_all` correctly, NOT by starving the component of real signal.)
+    sem_component_scores = sem_all if sem_all else sem_scores
     if ablation == "A":
         components_map = _score_variant_A(sem_scores, lex_scores, all_files)
     elif ablation in ("B0", "B1"):
