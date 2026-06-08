@@ -51,7 +51,9 @@ ARG NODE_VERSION=20.16.0
 RUN curl -fsSL https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz \
       | tar -xJ -C /opt/gt \
     && mv /opt/gt/node-v${NODE_VERSION}-linux-x64 /opt/gt/node \
-    && /opt/gt/node/bin/npm install -g --prefix /opt/gt/node pyright
+    && export PATH="/opt/gt/node/bin:$PATH" \
+    && npm install -g --prefix /opt/gt/node pyright \
+    && pyright --version
 
 # (4) e5 model (semantic ranker) — pulled from the GT runtime-assets release
 ARG E5_BASE=https://github.com/harneet2512/groundtruth/releases/download/pipeline-assets-v1
