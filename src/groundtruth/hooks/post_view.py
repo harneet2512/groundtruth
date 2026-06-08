@@ -425,8 +425,17 @@ def _resolve_file_path(conn, query_path: str):
     ambiguous (correct-or-quiet — never echoes a path-shaped string back). All
     call sites bind the result into a SQL ``WHERE file_path = ?`` clause where a
     ``None`` bind yields 0 rows, so the consuming evidence block stays silent.
+
+    The universal resolver lives in ``groundtruth.index`` — a package outside the
+    per-action stdlib-only closure's hot core. The import is guarded so that if a
+    restricted runtime (e.g. ``python3 -S`` with an incomplete closure) cannot load
+    it, this degrades to ``None`` (silent) rather than crashing the whole evidence
+    pass — correct-or-quiet, identical behavior across all languages.
     """
-    from groundtruth.index.path_resolver import resolve_to_stored_path
+    try:
+        from groundtruth.index.path_resolver import resolve_to_stored_path
+    except Exception:
+        return None
 
     db_path = _db_path_from_conn(conn)
     if not db_path:

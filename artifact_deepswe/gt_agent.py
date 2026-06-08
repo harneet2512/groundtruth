@@ -95,28 +95,185 @@ _PATCH_CONTENT = _load([_PATCH_PATH])
 _SRC_GT = _THIS_DIR.parent / "src" / "groundtruth"
 
 
+def _drift_closure_modules() -> list:
+    """Compute the per-action import-closure as the set of ``groundtruth.*`` modules
+    transitively reachable from the two ``-m`` entry points (post_edit, post_view)
+    whose TOP-LEVEL imports are stdlib-only — i.e. importable under ``python3 -S``
+    with NO site-packages (the exact in-container runtime ``_run_graph_engine`` uses).
+
+    Why computed, not a hardcoded dir list: post_edit/post_view fan out (lazily, at
+    runtime) into index/ evidence/ graph/ telemetry/ config/ utils/ validators/
+    confidence/ analysis/ — eleven subpackages beyond hooks/pretask/runtime/state.
+    A static list silently rots when an import is added; this walk is complete by
+    construction and re-derives itself every build.
+
+    Heavy-dep modules (top-level numpy / onnxruntime / sentence_transformers /
+    structlog — the embedder + brief-side ranking) are AUTO-EXCLUDED: they cannot
+    import under ``-S`` and are reached only via runtime-guarded lazy imports that
+    degrade correct-or-quiet. The closure stays stdlib-only and the core
+    deterministic evidence path runs identically across all 5 languages (it reads
+    graph.db, which is language-agnostic). Package ``__init__.py`` ancestors of every
+    kept module are included so the packages import.
+
+    Returns a sorted list of ``(abs_path, arcname)`` tuples. Falls back to the legacy
+    4-dir shipment if AST introspection fails, so a build is never left empty.
+    """
+    import ast
+    import sys as _sys
+
+    stdlib = set(getattr(_sys, "stdlib_module_names", set())) | {"__future__"}
+
+    def _mod_path(mod: str):
+        rel = mod[len("groundtruth.") :].replace(".", "/")
+        p = _SRC_GT / (rel + ".py")
+        if p.is_file():
+            return p
+        pk = _SRC_GT / rel / "__init__.py"
+        return pk if pk.is_file() else None
+
+    _scan_cache: dict = {}
+
+    def _scan(mod: str):
+        """(deep_gt, top_gt, direct_heavy) for one module.
+
+        deep_gt  — every ``groundtruth.*`` imported ANYWHERE (lazy included): the
+                   DISCOVERY edges, since a lazy ``import groundtruth.index...`` fires
+                   at runtime under ``-S``.
+        top_gt   — ``groundtruth.*`` imported at TOP LEVEL: the edges that decide
+                   whether THIS module can import under ``-S`` (transitive shippability).
+        direct_heavy — a TOP-LEVEL non-stdlib, non-groundtruth import (numpy / structlog
+                   / onnxruntime / sentence_transformers): makes the module itself
+                   un-importable under ``-S``."""
+        if mod in _scan_cache:
+            return _scan_cache[mod]
+        p = _mod_path(mod)
+        deep: set = set()
+        top: set = set()
+        heavy = False
+        if p is None:
+            _scan_cache[mod] = (deep, top, True)
+            return _scan_cache[mod]
+        try:
+            tree = ast.parse(p.read_text(encoding="utf-8"))
+        except Exception:
+            _scan_cache[mod] = (deep, top, True)  # unparseable -> skip, never crash build
+            return _scan_cache[mod]
+        toplevel_ids = {id(n) for n in tree.body}
+        for n in ast.walk(tree):
+            names = []
+            if isinstance(n, ast.ImportFrom) and n.module:
+                names = [n.module]
+            elif isinstance(n, ast.Import):
+                names = [a.name for a in n.names]
+            for nm in names:
+                first = nm.split(".")[0]
+                is_top = id(n) in toplevel_ids
+                if nm.startswith("groundtruth."):
+                    deep.add(nm)
+                    if is_top:
+                        top.add(nm)
+                elif first not in stdlib and is_top:
+                    heavy = True
+        _scan_cache[mod] = (deep, top, heavy)
+        return _scan_cache[mod]
+
+    _ship_cache: dict = {}
+
+    def _shippable(mod: str, stack: tuple = ()):
+        """True iff ``mod`` imports under ``-S`` — no direct heavy top-level dep AND
+        every top-level groundtruth dep is itself shippable (TRANSITIVE). Cyclic
+        edges are treated as satisfiable so a legit import cycle doesn't exclude the
+        whole group."""
+        if mod in _ship_cache:
+            return _ship_cache[mod]
+        if mod in stack:
+            return True  # cycle: assume OK (resolved by the other members)
+        if _mod_path(mod) is None:
+            _ship_cache[mod] = False
+            return False
+        _deep, top, heavy = _scan(mod)
+        if heavy:
+            _ship_cache[mod] = False
+            return False
+        ok = all(_shippable(d, stack + (mod,)) for d in top)
+        _ship_cache[mod] = ok
+        return ok
+
+    # DISCOVERY: deep-walk the reachable universe from the two -m entry points,
+    # following lazy imports so nothing runtime-reachable is missed.
+    entry = ("groundtruth.hooks.post_edit", "groundtruth.hooks.post_view")
+    universe: set = set()
+    queue: list = list(entry)
+    while queue:
+        m = queue.pop()
+        if m in universe:
+            continue
+        universe.add(m)
+        deep, _top, _heavy = _scan(m)
+        for g in deep:
+            if g not in universe:
+                queue.append(g)
+        # ancestor package __init__ chain is part of the universe (needed to import)
+        parts = m.split(".")
+        for i in range(2, len(parts)):
+            anc = ".".join(parts[:i])
+            if anc not in universe:
+                queue.append(anc)
+
+    # SHIP = reachable AND transitively -S-importable. The rest are reached only via
+    # runtime-guarded lazy imports and degrade correct-or-quiet.
+    keep: dict = {}
+    for m in universe:
+        p = _mod_path(m)
+        if p is not None and _shippable(m):
+            keep[m] = p
+
+    out: dict = {}
+    for top in ("__init__.py", "_binary.py"):
+        p = _SRC_GT / top
+        if p.is_file():
+            out[f"groundtruth/{top}"] = str(p)
+    for m, p in keep.items():
+        arc = "groundtruth/" + str(p.relative_to(_SRC_GT)).replace("\\", "/")
+        out[arc] = str(p)
+    return sorted(out.items())
+
+
 def _build_drift_tarball_b64() -> str | None:
-    """tar.gz the per-action import-closure (hooks/ pretask/ runtime/ state/ + _binary.py +
-    __init__.py) under arcname ``groundtruth/...`` and return base64. None if source absent."""
+    """tar.gz the per-action import-closure under arcname ``groundtruth/...`` and
+    return base64. The module set is computed transitively (see
+    ``_drift_closure_modules``) so the fixed post_edit/post_view run their FULL
+    deterministic evidence path in-container under ``python3 -S`` on every language.
+    None if source absent."""
     if not _SRC_GT.is_dir():
         logger.warning("GT: per-action closure source not found at %s", _SRC_GT)
         return None
     import io
     import tarfile
 
+    try:
+        members = _drift_closure_modules()
+    except Exception as exc:  # never let introspection break a build
+        logger.warning("GT: closure introspection failed (%s); using legacy 4-dir shipment", exc)
+        members = None
+
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        for top in ("__init__.py", "_binary.py"):
-            p = _SRC_GT / top
-            if p.is_file():
-                tar.add(str(p), arcname=f"groundtruth/{top}")
-        for sub in ("hooks", "pretask", "runtime", "state"):
-            d = _SRC_GT / sub
-            if not d.is_dir():
-                continue
-            for f in sorted(d.rglob("*.py")):
-                arc = "groundtruth/" + str(f.relative_to(_SRC_GT)).replace("\\", "/")
-                tar.add(str(f), arcname=arc)
+        if members:
+            for arc, src in members:
+                tar.add(src, arcname=arc)
+        else:
+            for top in ("__init__.py", "_binary.py"):
+                p = _SRC_GT / top
+                if p.is_file():
+                    tar.add(str(p), arcname=f"groundtruth/{top}")
+            for sub in ("hooks", "pretask", "runtime", "state"):
+                d = _SRC_GT / sub
+                if not d.is_dir():
+                    continue
+                for f in sorted(d.rglob("*.py")):
+                    arc = "groundtruth/" + str(f.relative_to(_SRC_GT)).replace("\\", "/")
+                    tar.add(str(f), arcname=arc)
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
