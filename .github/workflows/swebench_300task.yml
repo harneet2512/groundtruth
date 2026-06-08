@@ -31,6 +31,14 @@ on:
         description: 'Top P'
         required: false
         default: '1.0'
+      task_ids:
+        description: 'Run EXACTLY these instance_ids (newline/space/comma-separated); overrides num_tasks'
+        required: false
+        default: ''
+      gates_only:
+        description: 'Substrate gates ONLY — skip the paid agent + eval (free §1.5 pre-flight)'
+        required: false
+        default: 'false'
 
 permissions:
   contents: read
@@ -131,9 +139,17 @@ jobs:
           test -s "$DS" || { echo "FATAL: committed dataset $DS missing (git lfs?)"; exit 1; }
           python3 -c "import json,sys; [sys.stdout.write(json.loads(l)['instance_id']+'\n') for l in open('$DS')]" | sort > /tmp/task_ids.txt
           readarray -t TASKS < /tmp/task_ids.txt
-          NUM="${{ inputs.num_tasks }}"
-          if [ "${NUM:-0}" -gt 0 ] 2>/dev/null && [ "${NUM}" -lt "${#TASKS[@]}" ]; then
-            TASKS=("${TASKS[@]:0:$NUM}")
+          # task_ids override: run EXACTLY these (curated flip-candidate set) instead of the
+          # sorted first-N. Strip CR (Windows CRLF lists) + commas, drop blanks.
+          TI="$(printf '%s' '${{ inputs.task_ids }}' | tr ',\r' '\n\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' || true)"
+          if [ -n "$TI" ]; then
+            readarray -t TASKS <<< "$TI"
+            echo "task_ids override: running ${#TASKS[@]} custom tasks (num_tasks ignored)"
+          else
+            NUM="${{ inputs.num_tasks }}"
+            if [ "${NUM:-0}" -gt 0 ] 2>/dev/null && [ "${NUM}" -lt "${#TASKS[@]}" ]; then
+              TASKS=("${TASKS[@]:0:$NUM}")
+            fi
           fi
           [ "${#TASKS[@]}" -gt 0 ] || { echo "FATAL: 0 tasks queued — dataset fetch failed"; exit 1; }
           # Persist the SLICED (num_tasks-respecting) list the matrix will actually run, so
@@ -877,6 +893,7 @@ jobs:
           echo "=== PRE-FLIGHT PASSED ==="
 
       - name: Run agent
+        if: inputs.gates_only != 'true'
         env:
           PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
           GT_INDEX_BINARY: "/tmp/gt-index"
