@@ -98,22 +98,32 @@ def build_graph_contract(db_path: str, closure_before_lsp: int | None = None) ->
         if fts_exists:
             c["fts5_row_count"] = _scalar(con, "SELECT COUNT(*) FROM nodes_fts")
             # probe with a real token taken from an actual node name (repo-agnostic).
-            probe = _scalar(con, "SELECT name FROM nodes WHERE name IS NOT NULL AND length(name)>=3 LIMIT 1")
-            if isinstance(probe, str) and probe:
-                # FTS5 tokenizes on separators, so probe the FIRST alphanumeric
-                # subtoken (e.g. "parse_config" -> "parse"), not the joined string.
+            # Probe with SEVERAL real node names; a hit on ANY proves the index queries.
+            # Use the first alnum subtoken with a PREFIX match (token*) so CamelCase,
+            # length/truncation, and tokenization quirks can't false-fail a populated index.
+            try:
+                names = [r[0] for r in con.execute(
+                    "SELECT name FROM nodes WHERE name IS NOT NULL AND length(name)>=4 LIMIT 8"
+                ).fetchall()]
+            except Exception:
+                names = []
+            probe_ok, probe_tok = False, ""
+            for nm in names:
                 tok = ""
-                for _ch in probe:
+                for _ch in str(nm):
                     if _ch.isalnum():
                         tok += _ch
                     elif tok:
                         break
-                tok = tok[:24] or probe
-                hits = _scalar(con, "SELECT COUNT(*) FROM nodes_fts WHERE nodes_fts MATCH ?", (tok,))
-                c["fts5_match_probe_token"] = tok
-                c["fts5_match_probe_ok"] = isinstance(hits, int) and hits > 0
-            else:
-                c["fts5_match_probe_ok"] = False
+                if len(tok) < 3:
+                    continue
+                probe_tok = probe_tok or tok
+                hits = _scalar(con, "SELECT COUNT(*) FROM nodes_fts WHERE nodes_fts MATCH ?", (tok + "*",))
+                if isinstance(hits, int) and hits > 0:
+                    probe_ok, probe_tok = True, tok
+                    break
+            c["fts5_match_probe_token"] = probe_tok
+            c["fts5_match_probe_ok"] = probe_ok
         else:
             c["fts5_row_count"] = 0
             c["fts5_match_probe_ok"] = False

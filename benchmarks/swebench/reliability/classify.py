@@ -101,6 +101,20 @@ def classify_task(c: dict, gate_passed: bool, run_ok: bool = True) -> dict:
                    f"all gates ON; det={graph.get('det_pct')} lsp_resolved={lsp.get('resolved')} "
                    f"lsp_no_op_valid={lsp.get('lsp_no_op_valid')}")
 
+    # gate RED, structural surfaces healthy. But if the embedder is ALIVE (3a) yet
+    # contributed ZERO score to a non-empty rendered set, the semantic ranking never
+    # reached the rendered candidates -> a real consumption/absorption gap
+    # (GT_ARCHITECTURE), NOT a false gate. (conan: sem_count=0/5 with cos 0.86.)
+    _sc = absorp.get("gate_sem_count")
+    if _sc is None:
+        _sc = (c.get("gate_metrics", {}) or {}).get("semantic_signal_count")
+    _rn = absorp.get("rendered_count")
+    if (emb.get("discriminates") and isinstance(_sc, int) and _sc == 0
+            and isinstance(_rn, int) and _rn > 0):
+        return out("ABSORPTION_FAIL",
+                   f"embedder discriminates (3a PASS) but sem_count=0/{_rn} on the rendered "
+                   "set -> semantic ranking not consumed into the rendered candidates")
+
     # gate is RED but every infra surface is healthy -> the gate is failing a sound
     # substrate (false fail) UNLESS the graph is genuinely name_match-dominated.
     if surfaces["name_match_dominates"]:
