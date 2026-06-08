@@ -425,6 +425,24 @@ def gate_embedder_consumption(db: str, repo: str, issue_text: str) -> bool:
     k_sem_top = int(metrics.get("k_sem_top", 0) or 0)
     comps = [float(x) for x in (metrics.get("sem_components") or [])]
 
+    # AUDIT snapshot (READ-ONLY; gated by GT_AUDIT_DIR) — the gate's view of the
+    # rendered semantic set, so absorption_contract can assert gate == rendered.
+    _adir = os.environ.get("GT_AUDIT_DIR")
+    if _adir:
+        try:
+            import json as _ja
+            os.makedirs(_adir, exist_ok=True)
+            with open(os.path.join(_adir, "11_gate_metrics.json"), "w", encoding="utf-8") as _gf:
+                _ja.dump({
+                    "effective_w_sem": w_sem,
+                    "semantic_signal_count": sem_count,
+                    "rendered_candidate_count": rendered,
+                    "k_sem_top": k_sem_top,
+                    "sem_components": comps,
+                }, _gf, indent=2, default=str)
+        except Exception:
+            pass
+
     considered = min(rendered, k_sem_top) if (rendered > 0 and k_sem_top > 0) else max(rendered, k_sem_top)
     need = math.ceil(SEM_FRAC * considered) if considered > 0 else 0
 

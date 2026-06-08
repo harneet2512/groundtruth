@@ -23,6 +23,10 @@ export GT_HOME=/opt/gt
 export GT_MODELS_ROOT=/opt/gt/models
 export GT_FORCE_ONNX_EMBEDDER=1
 export GT_REQUIRE_FTS5=1
+# Reliability audit: the brief/gate write per-stage candidate snapshots here
+# (read-only; no ranking effect). The contract emitter reads them after the gates.
+export GT_AUDIT_DIR="$OUT/audit"
+mkdir -p "$OUT/audit" "$OUT/contracts"
 export PYTHONPATH="/opt/gt/src:/opt/gt/scripts:/opt/gt/scripts/swebench:/opt/gt/benchmarks/swebench:${PYTHONPATH:-}"
 export PATH="/opt/gt/bin:/opt/gt/node/bin:/opt/gt/python/bin:${PATH}"
 PY=/opt/gt/python/bin/python3
@@ -114,6 +118,14 @@ GT_GATES_DEEP_JSON="$OUT/gt_gates_deep.json" \
 "$PY" /opt/gt/scripts/metrics/foundational_gates.py \
     "$OUT/graph.db" "$REPO" "$ISSUE" "$OUT/lsp_metrics.txt"
 RC=$?
+
+echo "=== (5) reliability contracts (read-only; never changes the gate rc) ==="
+# Emits graph/lsp/embedder/absorption/container contracts from graph.db + lsp_metrics
+# + the GT_AUDIT_DIR snapshots written by the brief during the gate. Best-effort.
+"$PY" -m reliability.emit_incontainer \
+    --task-id "${GT_TASK_ID:-unknown}" --repo-root "$REPO" \
+    --graph-db "$OUT/graph.db" --lsp-metrics "$OUT/lsp_metrics.txt" \
+    --snapshot-dir "$OUT/audit" --out "$OUT/contracts" 2>&1 | tail -4 || true
 
 echo "=== gt-substrate done (gate rc=$RC); artifacts in $OUT ==="
 exit $RC

@@ -3072,6 +3072,58 @@ def generate_v1r_brief(
     _eff_w_sem = float(getattr(v74, "effective_w_sem", 0.0) or 0.0)
     _k_sem_top = int(getattr(v74, "k_sem_top_effective", 0) or 0)
 
+    # --- AUDIT snapshots (READ-ONLY; gated by GT_AUDIT_DIR; no ranking effect) ---
+    # Persists the absorption lineage: for each rendered entry, the LIVE (exact-path)
+    # semantic alignment that the product uses AND a CONSISTENT-id alignment over a
+    # normalized path index of the SAME top_records. Where live_sem==0 but
+    # consistent_sem>0, the score existed upstream and the exact-path join dropped it
+    # (the conan seam). When GT_AUDIT_DIR is unset this whole block is skipped.
+    _audit_dir = os.environ.get("GT_AUDIT_DIR")
+    if _audit_dir:
+        try:
+            import json as _json_a
+
+            def _norm_p(p):
+                return str(p or "").replace("\\", "/").lstrip("./").lstrip("/")
+
+            _norm_rec: dict[str, dict] = {}
+            for _r in top_records:
+                _np = _norm_p(_r.get("path", ""))
+                if _np and _np not in _norm_rec:
+                    _norm_rec[_np] = _r
+            _rendered_snap = []
+            for _i, _e in enumerate(_delivered):
+                _np = _norm_p(getattr(_e, "path", ""))
+                _live_sem = float(_sem_components[_i]) if _i < len(_sem_components) else 0.0
+                _cons_sem = float((_norm_rec.get(_np, {}).get("components", {}) or {}).get("sem", 0.0) or 0.0)
+                _routes = list(getattr(_e, "routes", []) or [])
+                _ev = getattr(_e, "entered_via", "") or ""
+                if _ev and _ev not in _routes:
+                    _routes.append(_ev)
+                _rendered_snap.append({
+                    "candidate_id": f"{_np}:{getattr(_e, 'start_line', 0) or 0}:"
+                                    f"{getattr(_e, 'symbol', '') or os.path.basename(_np)}",
+                    "path": getattr(_e, "path", ""),
+                    "live_join": "MATCH" if getattr(_e, "path", "") in _rec_by_path else "MISS",
+                    "live_sem": _live_sem,
+                    "consistent_sem": _cons_sem,
+                    "routes": _routes,
+                })
+            _sem_snap = [{
+                "candidate_id": f"{_norm_p(_r.get('path', ''))}:0:"
+                                f"{os.path.basename(_norm_p(_r.get('path', '')))}",
+                "path": _r.get("path", ""),
+                "sem": float((_r.get("components", {}) or {}).get("sem", 0.0) or 0.0),
+                "components": _r.get("components", {}),
+            } for _r in top_records]
+            os.makedirs(_audit_dir, exist_ok=True)
+            with open(os.path.join(_audit_dir, "10_candidates_rendered.json"), "w", encoding="utf-8") as _f:
+                _json_a.dump(_rendered_snap, _f, indent=2, default=str)
+            with open(os.path.join(_audit_dir, "08_candidates_semantic_scored.json"), "w", encoding="utf-8") as _f:
+                _json_a.dump(_sem_snap, _f, indent=2, default=str)
+        except Exception:
+            pass  # audit snapshot must never affect the brief
+
     result = V1RBriefResult(
         files=_delivered,
         brief_text=brief_text,

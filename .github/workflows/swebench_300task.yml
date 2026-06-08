@@ -716,6 +716,12 @@ jobs:
           cid=$(docker create "$SUB_IMG")
           rm -rf /tmp/opt-gt && docker cp "$cid:/opt/gt" /tmp/opt-gt && docker rm "$cid" >/dev/null
           docker cp /tmp/opt-gt gtsrc:/opt/gt
+          # overlay FRESH GT code from the checkout (instrumentation + reliability module)
+          # so we iterate without rebuilding the substrate image; the binaries (gt-index,
+          # python, node/pyright, e5) stay from /opt/gt, only the .py code is refreshed.
+          docker cp "${{ github.workspace }}/src/." gtsrc:/opt/gt/src/ 2>/dev/null || true
+          docker cp "${{ github.workspace }}/scripts/." gtsrc:/opt/gt/scripts/ 2>/dev/null || true
+          docker cp "${{ github.workspace }}/benchmarks/swebench/." gtsrc:/opt/gt/benchmarks/swebench/ 2>/dev/null || true
           # fresh launcher from the checkout (iterate without rebuilding the image)
           docker cp "${{ github.workspace }}/docker/gt-substrate-run.sh" gtsrc:/tmp/gt-substrate-run.sh
           docker exec gtsrc sed -i 's/\r$//' /tmp/gt-substrate-run.sh 2>/dev/null || true
@@ -731,7 +737,7 @@ jobs:
           docker cp /tmp/issue.txt gtsrc:/tmp/issue.txt 2>/dev/null || docker exec gtsrc bash -c ': > /tmp/issue.txt'
           # run the WHOLE substrate IN-CONTAINER (the gates run here, where the source is)
           set +e
-          docker exec gtsrc bash /tmp/gt-substrate-run.sh "$ROOT" /tmp/issue.txt /tmp/gt 2>&1 | tee /tmp/gt_substrate.log
+          docker exec -e GT_TASK_ID="$TASK" gtsrc bash /tmp/gt-substrate-run.sh "$ROOT" /tmp/issue.txt /tmp/gt 2>&1 | tee /tmp/gt_substrate.log
           GATE_RC=${PIPESTATUS[0]}
           set -e
           # copy artifacts OUT (agent wrapper + 8-dp deep metrics + downstream visibility)
@@ -742,11 +748,33 @@ jobs:
           rm -rf /tmp/gt/src && mkdir -p /tmp/gt/src
           docker cp "gtsrc:$ROOT/." /tmp/gt/src 2>/dev/null || true
           echo "GT_LSP_METRICS_FILE=/tmp/gt_lsp_metrics.txt" >> "$GITHUB_ENV"
+          # reliability contracts + audit snapshots OUT (before the container is removed)
+          mkdir -p /tmp/gt_contracts /tmp/gt_audit
+          docker cp gtsrc:/tmp/gt/contracts/. /tmp/gt_contracts/ 2>/dev/null || true
+          docker cp gtsrc:/tmp/gt/audit/. /tmp/gt_audit/ 2>/dev/null || true
+          # record the RESOLVED gt SHA + a run_contract (orchestration determinism)
+          RESOLVED_SHA="$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD 2>/dev/null || echo '')"
+          echo "resolved_gt_sha=$RESOLVED_SHA"
+          GT_COMMIT_INPUT="${{ inputs.gt_commit }}" GT_RESOLVED_SHA="$RESOLVED_SHA" \
+          GT_USE_SUBSTRATE_IMAGE="${{ inputs.gt_use_substrate_image }}" \
+          GT_TASK_IDS_INPUT="${{ inputs.task_ids }}" GITHUB_RUN_ID="${{ github.run_id }}" \
+          PYTHONPATH="$GITHUB_WORKSPACE/benchmarks/swebench" \
+            python3 -m reliability.run_contract > /tmp/gt_contracts/run_contract.json 2>/dev/null || true
           docker rm -f gtsrc 2>/dev/null || true
           # fail-closed on the IN-CONTAINER gate verdict (no host embedder, no split)
           echo "=== in-container substrate gate rc=$GATE_RC ==="
           [ "$GATE_RC" -eq 0 ] || { echo "SUBSTRATE GATES FAILED in-container (rc=$GATE_RC)"; exit 1; }
           echo "=== in-container substrate: 3 GATES GREEN ==="
+
+      - name: Upload reliability contracts + audit snapshots
+        if: ${{ always() && inputs.gt_use_substrate_image == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: gt-contracts-${{ matrix.task }}
+          path: |
+            /tmp/gt_contracts/
+            /tmp/gt_audit/
+          if-no-files-found: ignore
 
       # ── Point A (DeepSWE parity): host-side fresh build + HOST LSP resolve ──
       # WHY: the OH agent runs IN-CONTAINER, so the task's base-commit source lives only
