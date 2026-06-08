@@ -23,6 +23,18 @@ export GT_HOME=/opt/gt
 export GT_MODELS_ROOT=/opt/gt/models
 export GT_FORCE_ONNX_EMBEDDER=1
 export GT_REQUIRE_FTS5=1
+# PROOF/BENCHMARK MODE is the DEFAULT for the substrate: this script IS the single
+# full-runtime boundary (index->scope->resolve(LSP)->closure->gates, all in-container),
+# so it ARMS all 8 fail-closed flags itself instead of trusting a caller to (finding B4).
+# Each defaults ON but a caller may override to 0 for local debugging. With GT_PROOF_MODE=1
+# the runtime preflight (step 0) and every wired guard (FTS5-native, closure-after-LSP,
+# semantic-consumed) fail-close on any degraded dimension instead of silently warning.
+export GT_PROOF_MODE="${GT_PROOF_MODE:-1}"
+export GT_CONTAINERIZED="${GT_CONTAINERIZED:-1}"
+export GT_REQUIRE_EMBEDDER="${GT_REQUIRE_EMBEDDER:-1}"
+export GT_REQUIRE_LSP="${GT_REQUIRE_LSP:-1}"
+export GT_REQUIRE_FULL_STACK="${GT_REQUIRE_FULL_STACK:-1}"
+export GT_FORBID_PREBUILT_GRAPH="${GT_FORBID_PREBUILT_GRAPH:-1}"
 # Reliability audit: the brief/gate write per-stage candidate snapshots here
 # (read-only; no ranking effect). The contract emitter reads them after the gates.
 export GT_AUDIT_DIR="$OUT/audit"
