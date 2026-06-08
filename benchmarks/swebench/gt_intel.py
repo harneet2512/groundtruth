@@ -191,6 +191,11 @@ class EvidenceNode:
     # "import" / "same_file" are deterministic; "name_match" is speculative.
     # Surfaced as a suffix on every evidence line so the agent can calibrate trust.
     resolution_method: str | None = None
+    # #25: structured caller-usage kind (CALLER family only) — e.g. "destructure",
+    # "isinstance", "attribute", "conditional", "comparison", "assert", "invoke".
+    # Consumers branch on this enum instead of substring-grepping the display summary
+    # (the producer never wrote the word "destruct", so the old grep was dead code).
+    usage: str | None = None
 
 @dataclass
 class GraphNode:
@@ -223,6 +228,37 @@ def read_lines(root: str, rel_path: str, start: int, end: int) -> str:
         return "".join(l[min_indent:] if len(l) > min_indent else l for l in chunk).rstrip()
     except (OSError, IndexError):
         return ""
+
+
+# #23: package / namespace declarations are declared IN-FILE for Go, Java/Kotlin, C#
+# and PHP — they are NOT the on-disk directory. ``internal/foo/bar.go`` is imported as
+# its declared ``package`` under the module path, never as ``"internal/foo"``. Reading
+# the declaration from the file header gives the real symbol; absence ⇒ neutral form.
+_PKG_DECL_PATTERNS: dict[str, re.Pattern[str]] = {
+    "go": re.compile(r'^\s*package\s+([A-Za-z_]\w*)'),
+    "java": re.compile(r'^\s*package\s+([\w.]+)\s*;'),
+    "kotlin": re.compile(r'^\s*package\s+([\w.]+)'),
+    "csharp": re.compile(r'^\s*namespace\s+([\w.]+)'),
+    "php": re.compile(r'^\s*namespace\s+([\w\\]+)\s*;'),
+}
+
+
+def _read_package_decl(root: str, rel_path: str, language: str) -> str | None:
+    """Return the in-file package/namespace declaration for declaration-bearing
+    languages (Go/Java/Kotlin/C#/PHP), or None. Scans only the file header (the decl
+    is always near the top) so this is cheap. Never fabricates a path from a dirname."""
+    pat = _PKG_DECL_PATTERNS.get(language)
+    if pat is None:
+        return None
+    header = read_lines(root, rel_path, 1, 40)
+    if not header:
+        return None
+    for line in header.splitlines():
+        m = pat.match(line)
+        if m:
+            return m.group(1)
+    return None
+
 
 # ── Graph queries ───────────────────────────────────────────────────────────
 
@@ -265,9 +301,21 @@ def get_target_node(conn: sqlite3.Connection, file_path: str, function_name: str
 
 
 def get_callers(conn: sqlite3.Connection, target_id: int, target_file: str) -> list[tuple[GraphNode, int, str, str]]:
-    """Get cross-file callers of target. Returns (caller_node, call_line, source_file, resolution_method)."""
+    """Get cross-file callers of target. Returns (caller_node, call_line, source_file, resolution_method).
+
+    #7: gated DETERMINISTIC-ONLY (``_deterministic_sql_in``), matching the symmetric
+    twin ``get_callees`` and the deterministic top-caller in ``generate_pretask_briefing``.
+    A name_match caller is a same-name guess across files/classes — a phantom dependent,
+    never a fact — and CLAUDE.md names "rendering one as ... a phantom caller" maximally
+    harmful. One policy for "caller as fact" across both paths (resolves the D1 fork by
+    defaulting to the gate ``get_callees`` already uses). If the active set has no
+    deterministic members the IN clause is unsatisfiable and no callers are returned
+    (correct-or-quiet).
+    """
     cur = conn.cursor()
-    ph, methods = _resolution_sql_in()
+    ph, methods = _deterministic_sql_in()
+    if not methods:
+        return []
     conf_clause = _confidence_clause(_has_confidence_column(conn))
     cur.execute(f"""
         SELECT n.*, e.source_line, e.source_file, e.resolution_method
@@ -289,18 +337,27 @@ def get_callers(conn: sqlite3.Connection, target_id: int, target_file: str) -> l
 
 
 def get_siblings(conn: sqlite3.Connection, target_id: int) -> list[GraphNode]:
-    """Get sibling methods (same parent class)."""
+    """Get sibling methods (same parent class).
+
+    #8: same-file containment. A class's methods live in the same file in every supported
+    language, but ``parent_id`` is an integer FK that can collide across files (Go receiver
+    reparenting, C# partial classes, Ruby reopened classes, parent_id=0/NULL-ish). Without
+    a ``file_path`` guard the SIBLING family would surface cross-file "siblings" and the
+    return-type-norm vote would be computed over a class that spans files — a fabricated
+    contract. Constrain siblings to the target's own file. Structural, language-agnostic.
+    """
     cur = conn.cursor()
-    # First find the parent
-    cur.execute("SELECT parent_id FROM nodes WHERE id=?", (target_id,))
+    # First find the parent AND the target's file (siblings must share both).
+    cur.execute("SELECT parent_id, file_path FROM nodes WHERE id=?", (target_id,))
     row = cur.fetchone()
     if not row or not row[0]:
         return []
-    parent_id = row[0]
+    parent_id, target_file = row[0], row[1]
 
     cur.execute(
-        "SELECT * FROM nodes WHERE parent_id=? AND label IN ('Function','Method') AND id!=?",
-        (parent_id, target_id),
+        "SELECT * FROM nodes WHERE parent_id=? AND label IN ('Function','Method') "
+        "AND id!=? AND file_path=?",
+        (parent_id, target_id, target_file),
     )
     return [_row_to_node(r) for r in cur.fetchall()]
 
@@ -350,39 +407,46 @@ CRITICAL_PATHS = {"auth", "security", "session", "password", "token",
                   "middleware", "core"}
 
 
-def classify_caller_usage(root: str, file_path: str, call_line: int) -> tuple[int, str, str]:
-    """v20: Read lines around a call site and classify usage.
+def classify_caller_usage(root: str, file_path: str, call_line: int) -> tuple[int, str, str, str]:
+    """v20: Read the call site and classify how the return value is used.
 
-    Returns (score, summary, call_line_text) — the actual source line is the spec.
+    Returns (score, summary, call_line_text, usage) where ``usage`` is a structured
+    enum (destructure / isinstance / attribute / conditional / comparison / assert /
+    invoke) the consumer can branch on, rather than substring-grepping the display text.
+
+    #22: the spec text is read from the ACTUAL call line (``read_lines(root, file,
+    call_line, call_line)``), not from a fixed offset into a clamped/dedented window — the
+    old ``lines[min(1, len(lines)-1)]`` took the 2nd window line and was off-by-one for any
+    call at the file head. The classification regexes run against that SAME single call
+    line, so the score and the displayed spec describe the same statement (no neighbor-line
+    leakage promoting an unrelated line to score 3).
     """
-    text = read_lines(root, file_path, max(1, call_line - 1), call_line + 2)
-    if not text:
-        return 1, "invokes", ""
-
-    # Extract the actual call line for the spec
-    lines = text.splitlines()
-    call_text = lines[min(1, len(lines) - 1)].strip() if lines else ""
+    call_text = read_lines(root, file_path, call_line, call_line).strip()
+    if not call_text:
+        return 1, "invokes", "", "invoke"
     if len(call_text) > 120:
         call_text = call_text[:117] + "..."
 
-    # Score 3: destructure or type assertion
-    if re.search(r'(\w+)\s*,\s*(\w+)\s*=\s*', text):
-        return 3, f"called as: {call_text}", call_text
-    if re.search(r'isinstance\(', text):
-        return 3, f"called as: {call_text}", call_text
-    if re.search(r'\.\w+\b', text) and not re.search(r'\.\w+\s*\(', text):
-        return 3, f"called as: {call_text}", call_text
+    line = call_text
+
+    # Score 3: destructure or type assertion (classified on the call line only)
+    if re.search(r'(\w+)\s*,\s*(\w+)\s*=\s*', line):
+        return 3, f"called as: {call_text}", call_text, "destructure"
+    if re.search(r'isinstance\(', line):
+        return 3, f"called as: {call_text}", call_text, "isinstance"
+    if re.search(r'\.\w+\b', line) and not re.search(r'\.\w+\s*\(', line):
+        return 3, f"called as: {call_text}", call_text, "attribute"
 
     # Score 2: conditional usage
-    if re.search(r'if\s+.*\w+\(', text):
-        return 2, f"called as: {call_text}", call_text
-    if re.search(r'(==|!=|is |is not |>=|<=|>|<)\s*', text):
-        return 2, f"called as: {call_text}", call_text
-    if re.search(r'assert', text):
-        return 2, f"called as: {call_text}", call_text
+    if re.search(r'if\s+.*\w+\(', line):
+        return 2, f"called as: {call_text}", call_text, "conditional"
+    if re.search(r'(==|!=|is |is not |>=|<=|>|<)\s*', line):
+        return 2, f"called as: {call_text}", call_text, "comparison"
+    if re.search(r'assert', line):
+        return 2, f"called as: {call_text}", call_text, "assert"
 
     # Score 1: just invokes
-    return 1, f"called as: {call_text}" if call_text else "invokes", call_text
+    return 1, f"called as: {call_text}" if call_text else "invokes", call_text, "invoke"
 
 
 def is_critical_path(file_path: str) -> bool:
@@ -1096,12 +1160,11 @@ def generate_pretask_briefing(
     symbols_shown = 0
 
     # Build list of admissible resolution methods for queries.
-    # res_methods = full active set (kept for any non-fact query).
     # det_methods = DETERMINISTIC-ONLY (name_match excluded) — used wherever an edge is
-    # rendered as a fact (top-caller, entry-point). A name_match caller is a phantom: a
-    # same-name guess across files/classes, never a real dependent. conf_clause adds the
-    # confidence floor on v14+ graphs so low-confidence edges are dropped too.
-    res_methods = ",".join(f"'{r}'" for r in _active_resolutions)
+    # rendered as a fact (top-caller, TEST link, entry-point). A name_match caller/test is
+    # a phantom: a same-name guess across files/classes, never a real dependent. Every
+    # fact-rendering sub-query in this function shares this one gate (#27 — no asymmetry).
+    # conf_clause adds the confidence floor on v14+ graphs so low-confidence edges drop too.
     det_methods = _deterministic_sql_literal()
     conf_clause = _confidence_clause(_has_confidence_column(conn))
 
@@ -1156,12 +1219,16 @@ def generate_pretask_briefing(
             if caller:
                 bullets.append(f"CALLERS: {caller[0]}() expects return value")
 
-            # Test
+            # Test — DETERMINISTIC-ONLY (#27): the adjacent top-caller query above is
+            # gated on det_methods; "test X references the target" is rendered as a fact
+            # (TEST: file::name), so it uses the SAME gate. A name_match test edge is a
+            # same-name guess (a phantom test link), never a real reference. One gate for
+            # both sub-queries; no name_match-IN asymmetry.
             test = cur.execute(f"""
                 SELECT n.name, n.file_path
                 FROM edges e JOIN nodes n ON e.source_id = n.id
                 WHERE e.target_id = ? AND e.type = 'CALLS' AND n.is_test = 1
-                  AND e.resolution_method IN ({res_methods})
+                  AND e.resolution_method IN ({det_methods})
                 LIMIT 1
             """, (node_id,)).fetchone()
             if test:
@@ -1331,6 +1398,61 @@ def get_callees(conn: sqlite3.Connection, target_id: int) -> list[tuple[GraphNod
     return [(_row_to_node(r[:-1]), r[-1] or "") for r in cur.fetchall()]
 
 
+def _format_import_for_language(root: str, callee: GraphNode, language: str) -> str:
+    """Generate a language-appropriate import statement for a cross-file callee.
+
+    #23: for languages whose import/module path is DECLARED IN-FILE and need NOT track the
+    on-disk directory (Go ``package``, Java/Kotlin ``package``, C# ``namespace``, PHP
+    ``namespace``), read the real declaration from the file header; if absent, fall back to
+    the neutral ``{name} (from {path})`` form — never fabricate a structural import path
+    from a dirname (the old ``import "internal/foo"`` / ``import src.main.Foo`` was a
+    hallucinated, copy-pasteable WRONG import). Python (module path == file path) and JS/TS
+    (relative-file import) are legitimately path-based and unchanged. Rust ``use`` is
+    crate-relative and unknowable from the file alone → neutral.
+    """
+    path = callee.file_path
+    name = callee.name
+    if not name:
+        return ""
+    if language == "python":
+        mod = path.replace("/", ".").replace("\\", ".")
+        if mod.endswith(".py"):
+            mod = mod[:-3]
+        if mod.endswith(".__init__"):
+            mod = mod[:-9]
+        return f"from {mod} import {name}"
+    elif language == "go":
+        pkg = _read_package_decl(root, path, "go")
+        if pkg:
+            return f"{name} (from package {pkg}, {path})"
+        return f"{name} (from {path})"
+    elif language in ("javascript", "typescript"):
+        mod = os.path.splitext(path)[0]
+        return f"import {{ {name} }} from './{mod}'"
+    elif language in ("java", "kotlin"):
+        pkg = _read_package_decl(root, path, language)
+        if pkg:
+            return f"import {pkg}.{name};"
+        return f"{name} (from {path})"
+    elif language == "rust":
+        return f"{name} (from {path})"
+    elif language == "csharp":
+        ns = _read_package_decl(root, path, "csharp")
+        if ns:
+            return f"using {ns};  // {name}"
+        return f"{name} (from {path})"
+    elif language == "ruby":
+        mod = os.path.splitext(path)[0]
+        return f"require '{mod}'  # {name}"
+    elif language == "php":
+        ns = _read_package_decl(root, path, "php")
+        if ns:
+            return f"use {ns}\\{name};"
+        return f"{name} (from {path})"
+    else:
+        return f"{name} (from {path})"
+
+
 def compute_evidence(conn: sqlite3.Connection, root: str, target: GraphNode) -> list[EvidenceNode]:
     """Compute ranked evidence for a target function.
 
@@ -1343,43 +1465,6 @@ def compute_evidence(conn: sqlite3.Connection, root: str, target: GraphNode) -> 
       TYPE: return type contract
       PRECEDENT: last git commit
     """
-
-    def _format_import_for_language(callee: GraphNode, language: str) -> str:
-        """Generate language-appropriate import statement."""
-        path = callee.file_path
-        name = callee.name
-        if not name:
-            return ""
-        if language == "python":
-            mod = path.replace("/", ".").replace("\\", ".")
-            if mod.endswith(".py"):
-                mod = mod[:-3]
-            if mod.endswith(".__init__"):
-                mod = mod[:-9]
-            return f"from {mod} import {name}"
-        elif language == "go":
-            pkg = os.path.dirname(path)
-            return f'import "{pkg}"  // {name}'
-        elif language in ("javascript", "typescript"):
-            mod = os.path.splitext(path)[0]
-            return f"import {{ {name} }} from './{mod}'"
-        elif language in ("java", "kotlin"):
-            mod = os.path.splitext(path)[0].replace("/", ".")
-            return f"import {mod}.{name};"
-        elif language == "rust":
-            mod = os.path.splitext(path)[0].replace("/", "::")
-            return f"use {mod}::{name};"
-        elif language == "csharp":
-            ns = os.path.dirname(path).replace("/", ".")
-            return f"using {ns};  // {name}"
-        elif language == "ruby":
-            mod = os.path.splitext(path)[0]
-            return f"require '{mod}'  # {name}"
-        elif language == "php":
-            ns = os.path.splitext(path)[0].replace("/", "\\")
-            return f"use {ns}\\{name};"
-        else:
-            return f"{name} (from {path})"
 
     # Ablation family filter — GT_EVIDENCE_FAMILIES=SIBLING,IMPORT etc.
     _fam_env = os.environ.get("GT_EVIDENCE_FAMILIES", "").strip()
@@ -1398,7 +1483,7 @@ def compute_evidence(conn: sqlite3.Connection, root: str, target: GraphNode) -> 
         for callee, callee_rm in callees:
             if callee.file_path == target.file_path:
                 continue  # same file, no import needed
-            import_stmt = _format_import_for_language(callee, target.language)
+            import_stmt = _format_import_for_language(root, callee, target.language)
             key = (callee.name, callee.file_path)
             if key in seen_imports:
                 continue
@@ -1417,7 +1502,7 @@ def compute_evidence(conn: sqlite3.Connection, root: str, target: GraphNode) -> 
     if _allowed_families is None or "CALLER" in _allowed_families:
         callers = get_callers(conn, target.id, target.file_path)
         for caller_node, call_line, source_file, resolution_method in callers:
-            score, summary, call_text = classify_caller_usage(root, source_file, call_line)
+            score, summary, call_text, usage = classify_caller_usage(root, source_file, call_line)
             if score >= 1:
                 # v20: use actual call line as source_code instead of 3-line window
                 code = call_text if call_text else read_lines(root, source_file, max(1, call_line - 1), call_line + 2)
@@ -1426,6 +1511,7 @@ def compute_evidence(conn: sqlite3.Connection, root: str, target: GraphNode) -> 
                     name=caller_node.name, file=source_file, line=call_line,
                     source_code=code, summary=summary,
                     resolution_method=resolution_method,  # Wave 5: thread calibration through
+                    usage=usage,  # #25: structured usage-kind for the TYPE upgrade
                 ))
 
     # Family 2: SIBLING — behavioral norms from same class
@@ -1444,13 +1530,20 @@ def compute_evidence(conn: sqlite3.Connection, root: str, target: GraphNode) -> 
                     summary=f"sibling method in same class ({len(siblings)} total)",
                 ))
 
-            # Upgrade to score 3 if return type norm exists
+            # Upgrade to score 3 if a return-type NORM exists among TYPED siblings.
+            # #24: the agreement ratio's denominator must be the SAME universe as its
+            # numerator — typed siblings only (``len(ret_types)``), not all siblings.
+            # Untyped methods in a partially-annotated class otherwise dilute a genuine,
+            # unanimous-among-typed contract below 0.7 and suppress it. A min-support floor
+            # (>= 2 typed siblings) stops a single typed sibling from trivially hitting 100%.
             ret_types = [s.return_type for s in siblings if s.return_type]
-            if ret_types:
+            if len(ret_types) >= 2:
                 common = Counter(ret_types).most_common(1)[0]
-                if common[1] / max(len(siblings), 1) >= 0.7:
+                if common[1] / len(ret_types) >= 0.7:
                     candidates[-1].score = 3
-                    candidates[-1].summary = f"returns {common[0]} ({common[1]}/{len(siblings)} siblings agree)"
+                    candidates[-1].summary = (
+                        f"returns {common[0]} ({common[1]}/{len(ret_types)} typed siblings agree)"
+                    )
 
     # Family 3: TEST — test functions with assertions
     if _allowed_families is None or "TEST" in _allowed_families:
@@ -1489,7 +1582,12 @@ def compute_evidence(conn: sqlite3.Connection, root: str, target: GraphNode) -> 
     if _allowed_families is None or "TYPE" in _allowed_families:
         if target.return_type:
             score = 1
-            if any(c.score >= 2 and "destruct" in c.summary for c in candidates if c.family == "CALLER"):
+            # #25: upgrade TYPE to score 2 when a CALLER destructures the return value (a
+            # strong return-type-contract signal). Branch on the structured usage enum the
+            # producer now sets — the old ``"destruct" in c.summary`` was permanently False
+            # because classify_caller_usage writes "called as: ...", never "destruct".
+            if any(c.score >= 2 and c.usage == "destructure"
+                   for c in candidates if c.family == "CALLER"):
                 score = 2
             candidates.append(EvidenceNode(
                 family="TYPE", score=score,
@@ -1675,6 +1773,11 @@ def compute_repo_map(
     return "\n".join(lines)
 
 
+# #26: word-boundary matcher for negative-spec (constraint-violation) TEST summaries.
+# Anchored so "not"/"false" do not match inside note/notify/cannot/notification/another.
+_NEGATIVE_SPEC_RE = re.compile(r'\b(raises|error|exception|false|not)\b')
+
+
 def rank_and_select(
     candidates: list[EvidenceNode],
     max_high: int = 4,
@@ -1688,8 +1791,14 @@ def rank_and_select(
     Per-family minimums: TEST≥2, CALLER≥2, others≥1.
     """
     # v20: boost negative specs (constraint violations are highest value)
+    # #26: match the constraint keywords on WORD BOUNDARIES, not as bare substrings.
+    # The old substring test boosted any TEST whose summary merely CONTAINED the letters —
+    # "not" is inside note/notify/cannot/notification/another and "false" inside any
+    # boolean mention — over-ranking unrelated TEST nodes above genuine deterministic
+    # evidence. ``\b`` anchors keep the intent (raises/error/exception/false/not as words)
+    # while dropping the false positives. Generalized; no benchmark/task logic.
     for c in candidates:
-        if c.family == "TEST" and any(kw in c.summary.lower() for kw in ("raises", "error", "exception", "false", "not")):
+        if c.family == "TEST" and _NEGATIVE_SPEC_RE.search(c.summary.lower()):
             c.score = max(c.score, 3)  # boost negative specs
 
     # Sort all candidates by score descending, then family priority

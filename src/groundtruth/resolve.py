@@ -46,59 +46,68 @@ def _uri_to_path(uri: str) -> str:
     return url2pathname(unquote(parsed.path))
 
 
-# Language server commands for auto-detection (used for reporting)
-_KNOWN_SERVERS: dict[str, str] = {
-    "python": "pyright-langserver",
-    "py": "pyright-langserver",
-    "javascript": "typescript-language-server",
-    "js": "typescript-language-server",
-    "typescript": "typescript-language-server",
-    "ts": "typescript-language-server",
-    "go": "gopls",
-    "rust": "rust-analyzer",
-    "rs": "rust-analyzer",
-    "java": "jdtls",
-    "c": "clangd",
-    "cpp": "clangd",
-    "ruby": "solargraph",
-    "kotlin": "kotlin-language-server",
-    "kt": "kotlin-language-server",
-}
+# ─────────────────────────────────────────────────────────────────────────────
+# SINGLE SOURCE OF TRUTH for "which languages this precision pass can serve".
+#
+# item #30: the dispatch tables (_KNOWN_SERVERS for the install/detect report,
+# _LANG_TO_EXT for the name→ext lookup _resolve_edges uses) MUST advertise only
+# languages that config.LSP_SERVERS can actually start. Previously they hard-coded
+# c/cpp/ruby/kotlin (clangd/solargraph/kotlin-language-server) that LSP_SERVERS has
+# NO config for, so resolve_main's `servers.get(args.lang)` gate (~line 872) passed
+# whenever that binary was on PATH, the run proceeded, then get_server_config(ext)
+# returned Err → stats["skipped"]=len(edges) and the WHOLE pass silently no-op'd —
+# while the diagnostic printer told users to "install clangd/solargraph" for a pass
+# that could never run. Deriving both tables from LSP_SERVERS makes
+# `_KNOWN_SERVERS keys ⊆ LSP_SERVERS keys` a structural invariant, not a hope.
+#
+# _LANG_TO_EXT maps every language NAME (and the ext spelled as a name, e.g. "py")
+# to the canonical LSP_SERVERS extension key. config.LANGUAGE_IDS gives ext→lang-id
+# (e.g. ".tsx"→"typescriptreact"); we invert it and add the short ext aliases.
+def _build_lang_to_ext() -> dict[str, str]:
+    from groundtruth.lsp.config import LANGUAGE_IDS, LSP_SERVERS
+
+    out: dict[str, str] = {}
+    for ext in LSP_SERVERS:  # ONLY extensions we can actually serve
+        # ext spelled as a name without the dot ("py", "ts", "go", ...)
+        out[ext.lstrip(".")] = ext
+        # the human language id for that ext ("python", "typescript", ...)
+        lang_id = LANGUAGE_IDS.get(ext)
+        if lang_id:
+            out[lang_id] = ext
+    return out
 
 
-# Language NAME -> canonical file extension, so the LSP precision layer is ONE
-# generalized product across every language. The historical bug: _resolve_edges
-# built ext = f".{language}" -> ".python"/".rust"/".typescript", which are NOT the
-# keys of LSP_SERVERS (".py"/".rs"/".ts"), so get_server_config returned Err and
-# EVERY edge was skipped for 4 of 5 languages (Python included). One map fixes all.
-_LANG_TO_EXT: dict[str, str] = {
-    "python": ".py",
-    "py": ".py",
-    "typescript": ".ts",
-    "ts": ".ts",
-    "typescriptreact": ".tsx",
-    "tsx": ".tsx",
-    "javascript": ".js",
-    "js": ".js",
-    "javascriptreact": ".jsx",
-    "jsx": ".jsx",
-    "go": ".go",
-    "rust": ".rs",
-    "rs": ".rs",
-    "java": ".java",
-    "c": ".c",
-    "cpp": ".cpp",
-    "ruby": ".rb",
-    "kotlin": ".kt",
-    "kt": ".kt",
-}
+_LANG_TO_EXT: dict[str, str] = _build_lang_to_ext()
 
 
-_EXT_TO_LANG_ID: dict[str, str] = {
-    ".py": "python", ".go": "go", ".rs": "rust", ".ts": "typescript",
-    ".tsx": "typescriptreact", ".js": "javascript", ".jsx": "javascriptreact",
-    ".java": "java", ".c": "c", ".cpp": "cpp", ".rb": "ruby", ".kt": "kotlin",
-}
+# Language NAME -> language-server command, for the install/detect report only.
+# Keys are LANGUAGE NAMES + short ext aliases; values are the binary to probe on
+# PATH. Built from LSP_SERVERS so a name appears here iff its ext is serveable.
+def _build_known_servers() -> dict[str, str]:
+    from groundtruth.lsp.config import LANGUAGE_IDS, LSP_SERVERS
+
+    out: dict[str, str] = {}
+    for ext, cfg in LSP_SERVERS.items():
+        cmd = cfg.command[0] if cfg.command else ""
+        out[ext.lstrip(".")] = cmd
+        lang_id = LANGUAGE_IDS.get(ext)
+        if lang_id:
+            out[lang_id] = cmd
+    return out
+
+
+_KNOWN_SERVERS: dict[str, str] = _build_known_servers()
+
+
+# ext -> LSP languageId, derived from config.LANGUAGE_IDS (the same source of
+# truth). Falls back to the bare ext name for any ext config doesn't enumerate.
+def _build_ext_to_lang_id() -> dict[str, str]:
+    from groundtruth.lsp.config import LANGUAGE_IDS
+
+    return dict(LANGUAGE_IDS)
+
+
+_EXT_TO_LANG_ID: dict[str, str] = _build_ext_to_lang_id()
 
 
 def _lang_id_for_ext(ext: str) -> str:
@@ -280,6 +289,98 @@ def _print_summary(
             cmd = _KNOWN_SERVERS.get(lang, "?")
             print(f"  {lang}: install '{cmd}'")
     print(f"{'=' * 60}")
+
+
+def _apply_lsp_resolution(
+    conn: sqlite3.Connection,
+    *,
+    edge: dict,
+    target_rel: str,
+    target_line: int,
+    target_name: str,
+    stats: dict[str, int],
+    has_trust_tier: bool,
+) -> str:
+    """Apply one LSP definition outcome to graph.db and bump ``stats``.
+
+    Pure, synchronous, and free of LSP/IO so the production resolve path and the
+    unit tests run the IDENTICAL match + delete-guard logic. Returns the outcome
+    label ("verified" / "corrected" / "deleted" / "skipped") it recorded.
+
+    item #29 — match PRIMARILY by ``(file_path, line-window)``. The LSP's LOCATION
+    is the authority, not the pre-resolution callee NAME. The old query hard-filtered
+    ``name = target_name``, so a CORRECTED call to a differently-named symbol (alias,
+    re-export, ``super().__init__`` → the parent class name) never matched the real
+    node and fell to the destructive DELETE arm — the exact ambiguous-method case
+    this pass exists to FIX. ``name`` is now only a TIEBREAKER inside the window
+    (``ORDER BY (name = ?) DESC``), never a gate. The window itself
+    (``start_line <= target_line <= end_line``, or NULL ``end_line``) is unchanged.
+    Exact ``file_path`` match — NOT ``LIKE '%basename'`` which collides on common
+    basenames (mod.rs, index.ts, utils.py, __init__.py) and can pick the WRONG node.
+
+    item #28 — a missing node is NOT automatically a false positive. DELETE is the
+    highest-harm action in this file (a read-pass that destroys edges), so it fires
+    ONLY when we can PROVE the edge is spurious: the LSP definition lands in a file
+    the indexer DID ingest, yet no node there spans the call site. Two cases must
+    NEVER delete:
+      (1) EXTERNAL/stdlib target — ``target_rel`` is empty, escaped with ``..``, or
+          absolute (the LSP correctly resolved OUTSIDE the repo — the common
+          join/get/append/loads case). That is a real resolution; leave the edge
+          intact (correct-or-quiet). Deleting it would erase a true call edge.
+      (2) FILE NOT INDEXED — ``target_rel`` has zero nodes in graph.db (generated/
+          vendored/excluded). No ground truth there, so a line-window miss (incl.
+          NULL ``end_line`` / tree-sitter↔LSP line drift on decorators/comments)
+          must NOT trigger a destructive delete.
+    Only when the file IS indexed AND still no window match → genuine FP → delete.
+    """
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        """SELECT id FROM nodes
+           WHERE file_path = ?
+           AND start_line <= ? AND (end_line >= ? OR end_line IS NULL)
+           ORDER BY (name = ?) DESC, start_line DESC LIMIT 1""",
+        (target_rel, target_line, target_line, target_name),
+    ).fetchone()
+
+    if row:
+        lsp_target_id = row["id"]
+        current_target_id = edge["target_id"]
+        _tier_clause = ", trust_tier = 'CERTIFIED'" if has_trust_tier else ""
+        if lsp_target_id == current_target_id:
+            conn.execute(
+                f"UPDATE edges SET confidence = 1.0, resolution_method = 'lsp'{_tier_clause} WHERE id = ?",
+                (edge["id"],),
+            )
+            stats["verified"] += 1
+            return "verified"
+        conn.execute(
+            f"UPDATE edges SET target_id = ?, confidence = 1.0, resolution_method = 'lsp'{_tier_clause} WHERE id = ?",
+            (lsp_target_id, edge["id"]),
+        )
+        stats["corrected"] += 1
+        return "corrected"
+
+    _is_external = (
+        not target_rel
+        or target_rel.startswith("..")
+        or os.path.isabs(target_rel)
+    )
+    if _is_external:
+        stats["skipped"] += 1
+        return "skipped"
+
+    _file_indexed = conn.execute(
+        "SELECT 1 FROM nodes WHERE file_path = ? LIMIT 1",
+        (target_rel,),
+    ).fetchone()
+    if _file_indexed:
+        # Indexed file, no node spans the call site → genuine FP.
+        conn.execute("DELETE FROM edges WHERE id = ?", (edge["id"],))
+        stats["deleted"] += 1
+        return "deleted"
+    # File not in the graph → no ground truth → never delete.
+    stats["skipped"] += 1
+    return "skipped"
 
 
 async def _resolve_edges(
@@ -507,40 +608,19 @@ async def _resolve_edges(
             except ValueError:
                 target_rel = target_path
 
-            # Find matching node in graph.db
-            # Use exact file_path match — NOT LIKE '%basename' which collides
-            # on common basenames (mod.rs, index.ts, utils.py, __init__.py)
-            # and can match the WRONG node, leading to false verification,
-            # false correction, or false deletion of legitimate edges.
-            row = conn.execute(
-                """SELECT id FROM nodes
-                   WHERE file_path = ? AND name = ?
-                   AND start_line <= ? AND (end_line >= ? OR end_line IS NULL)
-                   ORDER BY start_line DESC LIMIT 1""",
-                (target_rel, target_name, target_line, target_line),
-            ).fetchone()
-
-            if row:
-                lsp_target_id = row["id"]
-                current_target_id = edge["target_id"]
-
-                _tier_clause = ", trust_tier = 'CERTIFIED'" if _has_trust_tier else ""
-                if lsp_target_id == current_target_id:
-                    conn.execute(
-                        f"UPDATE edges SET confidence = 1.0, resolution_method = 'lsp'{_tier_clause} WHERE id = ?",
-                        (edge["id"],),
-                    )
-                    stats["verified"] += 1
-                else:
-                    conn.execute(
-                        f"UPDATE edges SET target_id = ?, confidence = 1.0, resolution_method = 'lsp'{_tier_clause} WHERE id = ?",
-                        (lsp_target_id, edge["id"]),
-                    )
-                    stats["corrected"] += 1
-            else:
-                # LSP found a definition not in our graph — edge is false positive
-                conn.execute("DELETE FROM edges WHERE id = ?", (edge["id"],))
-                stats["deleted"] += 1
+            # Apply the verify/correct/delete decision for this LSP definition.
+            # The match + destructive-delete guard live in _apply_lsp_resolution so
+            # the production path and the unit test exercise the SAME logic (items
+            # #28 destructive-delete guard, #29 location-primary match).
+            _apply_lsp_resolution(
+                conn,
+                edge=edge,
+                target_rel=target_rel,
+                target_line=target_line,
+                target_name=target_name,
+                stats=stats,
+                has_trust_tier=_has_trust_tier,
+            )
 
         except Exception:
             stats["failed"] += 1

@@ -194,7 +194,32 @@ func goReceiverType(sig string) string {
 	if !strings.HasPrefix(s, pfx) {
 		return ""
 	}
-	end := strings.IndexByte(s, ')')
+	// Find the receiver's CLOSING paren by balanced matching from just inside the
+	// opening "func (" — NOT the first ')' in the string. A generic or func-typed
+	// receiver such as `func (s *Service[K, func() error]) Do()` has an inner ')'
+	// (closing the embedded func()) that is not the receiver's; taking the first
+	// ')' mis-slices the receiver span and the method never parents to its struct.
+	// We track () and [] depth and stop at the ')' that returns paren-depth to 0.
+	end := -1
+	depth := 1 // we are already inside the receiver's '('
+	for i := len(pfx); i < len(s); i++ {
+		switch s[i] {
+		case '(':
+			depth++
+		case '[':
+			depth++
+		case ']':
+			depth--
+		case ')':
+			depth--
+			if depth == 0 {
+				end = i
+			}
+		}
+		if end >= 0 {
+			break
+		}
+	}
 	if end < 0 || end <= len(pfx) {
 		return ""
 	}
@@ -202,7 +227,16 @@ func goReceiverType(sig string) string {
 	if len(fields) == 0 {
 		return ""
 	}
-	t := strings.TrimPrefix(fields[len(fields)-1], "*")
+	// Go receiver grammar is "<name> <type>": the TYPE is the token right after the
+	// receiver var name (fields[1]). Taking the LAST field breaks a generic receiver
+	// whose type-args span spaces, e.g. `s *Service[K, func() error]` → Fields last =
+	// "error]". The base type name always starts at fields[1] and is cut at the first
+	// '[' (generic params). Fall back to the sole field when the name is omitted.
+	typeTok := fields[len(fields)-1]
+	if len(fields) >= 2 {
+		typeTok = fields[1]
+	}
+	t := strings.TrimPrefix(typeTok, "*")
 	if b := strings.IndexByte(t, '['); b >= 0 {
 		t = t[:b] // generic receiver Stack[T] -> Stack
 	}
@@ -745,9 +779,15 @@ func extractAssignments(node *sitter.Node, sf walker.SourceFile, src []byte, res
 				simple, qualified := extractCalleeInfo(callNode, src)
 				if simple != "" {
 					typeName := ""
-					// Heuristic 1: capitalized bare name = likely constructor (PyCG ICSE 2021)
-					// Covers: Python `x = MyClass()`, Go `x := NewFoo()`, TS/JS `x = new Foo()`
-					if len(simple) > 0 && simple[0] >= 'A' && simple[0] <= 'Z' {
+					// Heuristic 1: capitalized bare name = likely constructor (PyCG ICSE 2021).
+					// Covers: Python `x = MyClass()`, TS/JS `x = new Foo()`.
+					// EXCLUDE Go: an exported Go func is Capitalized but is NOT a constructor
+					// (`x := Marshal()` returns []byte, not a `Marshal` instance). Stamping
+					// TypeName="Marshal" pollutes the resolver with a non-existent type, so for
+					// Go a capitalized bare call falls through to the ViaReturn path below
+					// (bridge through the callee's declared return type). PyCG's capital=ctor
+					// rule is Python/JS/TS-shaped, not Go-shaped.
+					if sf.Language != "go" && len(simple) > 0 && simple[0] >= 'A' && simple[0] <= 'Z' {
 						typeName = simple
 					}
 					// Heuristic 2: Rust/Go qualified constructor — Type::new() / Type::default() / Type::from()
@@ -776,10 +816,14 @@ func extractAssignments(node *sitter.Node, sf walker.SourceFile, src []byte, res
 						// callee is a (non-constructor) function — record the CALLEE name with
 						// ViaReturn so the resolver bridges through factory's declared return
 						// type (e.g. `x = get_client(); x.run()` → return type of get_client).
-						// Lowercase simple name only (capitalized was handled above); skip
-						// qualified receiver-method calls (obj.method()) — their type is
-						// unknown here, left for the demand-driven residual.
-						if simple[0] >= 'a' && simple[0] <= 'z' && (qualified == "" || qualified == simple) {
+						// Lowercase simple name (capitalized = ctor, handled above) OR, in Go,
+						// a capitalized bare call (`x := Marshal()`) which is an exported func,
+						// not a constructor — it too must bridge through its return type. Skip
+						// qualified receiver-method calls (obj.method()) — their type is unknown
+						// here, left for the demand-driven residual.
+						isLowerBare := simple[0] >= 'a' && simple[0] <= 'z'
+						isGoCapBare := sf.Language == "go" && simple[0] >= 'A' && simple[0] <= 'Z'
+						if (isLowerBare || isGoCapBare) && (qualified == "" || qualified == simple) {
 							result.Assignments = append(result.Assignments, AssignmentRef{
 								VarName:       lhsName,
 								TypeName:      simple,
@@ -924,7 +968,7 @@ func extractCalleeInfo(callNode *sitter.Node, src []byte) (string, string) {
 		// {..}.get() — is a builtin (str/list/dict/...) call, NOT an internal graph edge. Skip it
 		// so it never becomes a name_match guess to an arbitrary same-named internal method.
 		// (The dominant garbage: conan-17123 join×1106, split×122 are string-literal receivers.)
-		if recv := funcNode.Child(0); recv != nil && isLiteralReceiver(recv.Type()) {
+		if recv := funcNode.Child(0); recv != nil && receiverRootIsLiteral(recv, 0) {
 			return "", ""
 		}
 		return simpleName, qualified
@@ -947,6 +991,58 @@ func isLiteralReceiver(t string) bool {
 		"integer", "float", "integer_literal", "float_literal", "number",
 		"true", "false", "none", "null", "nil", "boolean", "boolean_literal":
 		return true
+	}
+	return false
+}
+
+// receiverRootIsLiteral reports whether the ROOT of a (possibly chained / wrapped)
+// method-call receiver is a literal value. The depth-1 type check misses two shapes:
+//   - chained: `"x".strip().split()` — the receiver of the outer `.split` is the
+//     `call` node `"x".strip()`, not the string literal; we descend through the
+//     chain head (the call's function's receiver) to the ultimate base.
+//   - parenthesized: `("a").join()` — the receiver is a `parenthesized_expression`
+//     wrapping the literal; we unwrap it.
+// When the chain's ultimate base is a literal, the whole call is a stdlib/builtin
+// call (str/list/dict/…), never an internal call-graph edge. Conservative: any
+// unrecognized shape returns false (keeps the edge — correct-or-quiet, never drops
+// a real internal call). Language-agnostic: driven by the literal type-set + the
+// shared call/attribute node-type sets.
+func receiverRootIsLiteral(node *sitter.Node, depth int) bool {
+	if node == nil || depth > 16 {
+		return false
+	}
+	t := node.Type()
+	if isLiteralReceiver(t) {
+		return true
+	}
+	// Unwrap a parenthesized expression: descend to its inner expression.
+	if t == "parenthesized_expression" {
+		for i := 0; i < int(node.ChildCount()); i++ {
+			c := node.Child(i)
+			if c == nil {
+				continue
+			}
+			ct := c.Type()
+			if ct == "(" || ct == ")" {
+				continue
+			}
+			return receiverRootIsLiteral(c, depth+1)
+		}
+		return false
+	}
+	// Chained call: the receiver is itself a call (`"x".strip()`); descend into the
+	// call's function child, then into THAT function's receiver (Child(0)).
+	if t == "call" || t == "call_expression" || t == "method_invocation" {
+		fn := node.Child(0)
+		if fn == nil {
+			return false
+		}
+		ft := fn.Type()
+		if ft == "attribute" || ft == "member_expression" ||
+			ft == "selector_expression" || ft == "field_expression" {
+			return receiverRootIsLiteral(fn.Child(0), depth+1)
+		}
+		return false
 	}
 	return false
 }
@@ -1675,7 +1771,7 @@ func classifyFlow(idNode *sitter.Node, name string, src []byte) string {
 
 // collectFlowUses walks a body and records the distinct forward-slice contexts of
 // a parameter name (language-agnostic identifier match).
-func collectFlowUses(node *sitter.Node, name string, src []byte, uses *[]string, seen map[string]bool) {
+func collectFlowUses(node *sitter.Node, name string, src []byte, uses *[]string, seen map[string]bool, firstLine *int) {
 	if node == nil || len(*uses) >= 4 {
 		return
 	}
@@ -1683,10 +1779,15 @@ func collectFlowUses(node *sitter.Node, name string, src []byte, uses *[]string,
 		if ctx := classifyFlow(node, name, src); ctx != "" && !seen[ctx] {
 			seen[ctx] = true
 			*uses = append(*uses, ctx)
+			// Anchor the per-parameter data_flow fact at the FIRST use of the param,
+			// not at the function-body start (the wrong-fact line class).
+			if firstLine != nil && *firstLine == 0 {
+				*firstLine = int(node.StartPoint().Row) + 1
+			}
 		}
 	}
 	for i := 0; i < int(node.ChildCount()); i++ {
-		collectFlowUses(node.Child(i), name, src, uses, seen)
+		collectFlowUses(node.Child(i), name, src, uses, seen, firstLine)
 	}
 }
 
@@ -1712,15 +1813,20 @@ func extractDataFlow(node *sitter.Node, bodyNode *sitter.Node, spec *specs.Spec,
 	for _, p := range params {
 		var uses []string
 		seen := map[string]bool{}
-		collectFlowUses(bodyNode, p, src, &uses, seen)
+		firstLine := 0
+		collectFlowUses(bodyNode, p, src, &uses, seen, &firstLine)
 		if len(uses) == 0 {
 			continue
+		}
+		line := int(bodyNode.StartPoint().Row) + 1
+		if firstLine > 0 {
+			line = firstLine
 		}
 		result.Properties = append(result.Properties, PropertyRef{
 			NodeIdx:    nodeIdx,
 			Kind:       "data_flow",
 			Value:      p + " -> " + strings.Join(uses, " | "),
-			Line:       int(bodyNode.StartPoint().Row) + 1,
+			Line:       line,
 			Confidence: 0.8,
 		})
 	}
@@ -1753,7 +1859,7 @@ func extractProperties(node *sitter.Node, sf walker.SourceFile, src []byte, resu
 	}
 
 	// Return shape: examine return statements
-	extractReturnShape(bodyNode, sf, src, result, nodeIdx)
+	extractReturnShape(node, bodyNode, sf, src, result, nodeIdx)
 
 	// Rust-specific: detect ? operator usage (early return on error)
 	// and Result<T,E>/Option<T> return types as properties
@@ -2275,12 +2381,19 @@ func extractExceptionFromNode(node *sitter.Node, sf walker.SourceFile, src []byt
 }
 
 // extractReturnShape classifies the return pattern of a function.
-func extractReturnShape(bodyNode *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, nodeIdx int) {
+func extractReturnShape(funcNode *sitter.Node, bodyNode *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, nodeIdx int) {
 	shapes := make(map[string]bool)
 	countReturns(bodyNode, src, shapes)
 
 	if len(shapes) == 0 {
 		return
+	}
+
+	// Aggregate fact summarizing the function's return behavior → anchor at the
+	// FUNCTION node's start (the declaration), not the body's first statement.
+	shapeLine := int(bodyNode.StartPoint().Row) + 1
+	if funcNode != nil {
+		shapeLine = int(funcNode.StartPoint().Row) + 1
 	}
 
 	// Summarize
@@ -2289,7 +2402,7 @@ func extractReturnShape(bodyNode *sitter.Node, sf walker.SourceFile, src []byte,
 			NodeIdx:    nodeIdx,
 			Kind:       "return_shape",
 			Value:      shape,
-			Line:       int(bodyNode.StartPoint().Row) + 1,
+			Line:       shapeLine,
 			Confidence: 0.9,
 		})
 	}
@@ -3099,7 +3212,9 @@ func extractFunctionFingerprint(funcNode *sitter.Node, bodyNode *sitter.Node, sr
 		NodeIdx:    nodeIdx,
 		Kind:       "fingerprint",
 		Value:      value,
-		Line:       int(bodyNode.StartPoint().Row) + 1,
+		// Aggregate fact summarizing the whole function → anchor at the FUNCTION
+		// node's start (the declaration), not the body's first statement.
+		Line:       int(funcNode.StartPoint().Row) + 1,
 		Confidence: 0.9,
 	})
 }
@@ -4154,6 +4269,20 @@ func extractLuaImports(node *sitter.Node, file string, src []byte, line int, res
 
 // ── Extractors: concurrency, config, call ordering, resources, visibility ──
 
+// bodyOffsetLine converts a byte offset INTO a function-body's text into the
+// absolute 1-based source line of that hit. The text-scan extractors below
+// (config_read, concurrency, …) locate a fact at an arbitrary interior offset
+// `idx`; attributing it to the body's first line (`bodyNode.StartPoint().Row+1`)
+// is the WRONG-FACT class — a value from row A paired with the line of row B.
+// We count newlines in body[:idx] and add the body's start row. Language-agnostic.
+func bodyOffsetLine(bodyNode *sitter.Node, bodyText string, idx int) int {
+	base := int(bodyNode.StartPoint().Row) + 1
+	if idx < 0 || idx > len(bodyText) {
+		return base
+	}
+	return base + strings.Count(bodyText[:idx], "\n")
+}
+
 // extractConcurrencyPatterns detects concurrency-related keywords in function body text.
 // Kind: concurrency_pattern. Value: "lock: keyword_found" or "shared_state: keyword_found".
 func extractConcurrencyPatterns(bodyNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int) {
@@ -4207,14 +4336,15 @@ func extractConcurrencyPatterns(bodyNode *sitter.Node, src []byte, result *Parse
 				NodeIdx:    nodeIdx,
 				Kind:       "concurrency_pattern",
 				Value:      value,
-				Line:       int(bodyNode.StartPoint().Row) + 1,
+				Line:       bodyOffsetLine(bodyNode, bodyText, idx),
 				Confidence: 0.7,
 			})
 		}
 	}
 
 	for _, kw := range sharedKW {
-		if containsKeywordAtBoundary(bodyText, kw) && !seen["shared_state:"+kw] {
+		sIdx := strings.Index(bodyText, kw)
+		if sIdx >= 0 && containsKeywordAtBoundary(bodyText, kw) && !seen["shared_state:"+kw] {
 			seen["shared_state:"+kw] = true
 			value := "shared_state: " + kw
 			if len(value) > 200 {
@@ -4224,7 +4354,7 @@ func extractConcurrencyPatterns(bodyNode *sitter.Node, src []byte, result *Parse
 				NodeIdx:    nodeIdx,
 				Kind:       "concurrency_pattern",
 				Value:      value,
-				Line:       int(bodyNode.StartPoint().Row) + 1,
+				Line:       bodyOffsetLine(bodyNode, bodyText, sIdx),
 				Confidence: 0.7,
 			})
 		}
@@ -4346,7 +4476,7 @@ func extractConfigReads(bodyNode *sitter.Node, src []byte, result *ParseResult, 
 					NodeIdx:    nodeIdx,
 					Kind:       "config_read",
 					Value:      value,
-					Line:       int(bodyNode.StartPoint().Row) + 1,
+					Line:       bodyOffsetLine(bodyNode, bodyText, idx),
 					Confidence: 0.8,
 				})
 			}
@@ -4378,7 +4508,7 @@ func extractConfigReads(bodyNode *sitter.Node, src []byte, result *ParseResult, 
 				NodeIdx:    nodeIdx,
 				Kind:       "config_read",
 				Value:      value,
-				Line:       int(bodyNode.StartPoint().Row) + 1,
+				Line:       bodyOffsetLine(bodyNode, bodyText, idx),
 				Confidence: 0.8,
 			})
 		}
@@ -4408,7 +4538,7 @@ func extractConfigReads(bodyNode *sitter.Node, src []byte, result *ParseResult, 
 				NodeIdx:    nodeIdx,
 				Kind:       "config_read",
 				Value:      value,
-				Line:       int(bodyNode.StartPoint().Row) + 1,
+				Line:       bodyOffsetLine(bodyNode, bodyText, sIdx),
 				Confidence: 0.8,
 			})
 		}
@@ -4433,7 +4563,10 @@ func extractCallOrdering(bodyNode *sitter.Node, src []byte, result *ParseResult,
 	// receiverCalls maps receiver name → ordered list of method names
 	receiverCalls := make(map[string][]string)
 	receiverCtx := make(map[string]string)
-	_walkCallOrdering(bodyNode, src, receiverCalls, receiverCtx, 0)
+	// receiverLine maps receiver name → source line of its FIRST call in the sequence,
+	// so the call_order fact is anchored at the hit, not at the function-body start.
+	receiverLine := make(map[string]int)
+	_walkCallOrdering(bodyNode, src, receiverCalls, receiverCtx, receiverLine, 0)
 
 	// Emit properties for receivers with 2+ calls. Cap at first 5 receivers.
 	emitted := 0
@@ -4455,18 +4588,22 @@ func extractCallOrdering(bodyNode *sitter.Node, src []byte, result *ParseResult,
 		if len(value) > 200 {
 			value = value[:197] + "..."
 		}
+		line := int(bodyNode.StartPoint().Row) + 1
+		if l, ok := receiverLine[receiver]; ok && l > 0 {
+			line = l
+		}
 		result.Properties = append(result.Properties, PropertyRef{
 			NodeIdx:    nodeIdx,
 			Kind:       "call_order",
 			Value:      value,
-			Line:       int(bodyNode.StartPoint().Row) + 1,
+			Line:       line,
 			Confidence: 0.6,
 		})
 		emitted++
 	}
 }
 
-func _walkCallOrdering(node *sitter.Node, src []byte, receiverCalls map[string][]string, receiverCtx map[string]string, depth int) {
+func _walkCallOrdering(node *sitter.Node, src []byte, receiverCalls map[string][]string, receiverCtx map[string]string, receiverLine map[string]int, depth int) {
 	if depth > 10 {
 		return
 	}
@@ -4512,6 +4649,10 @@ func _walkCallOrdering(node *sitter.Node, src []byte, receiverCalls map[string][
 						if len(receiverCalls[receiver]) < 5 {
 							receiverCalls[receiver] = append(receiverCalls[receiver], method)
 						}
+						// Record the source line of the FIRST call seen for this receiver.
+						if _, ok := receiverLine[receiver]; !ok {
+							receiverLine[receiver] = int(node.StartPoint().Row) + 1
+						}
 						// Check parent for resource context
 						if receiverCtx[receiver] == "" {
 							p := node.Parent()
@@ -4536,7 +4677,7 @@ func _walkCallOrdering(node *sitter.Node, src []byte, receiverCalls map[string][
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
 		if child != nil {
-			_walkCallOrdering(child, src, receiverCalls, receiverCtx, depth+1)
+			_walkCallOrdering(child, src, receiverCalls, receiverCtx, receiverLine, depth+1)
 		}
 	}
 }

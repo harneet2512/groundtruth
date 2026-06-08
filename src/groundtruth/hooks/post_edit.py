@@ -204,6 +204,67 @@ def _edge_filter_for_db(db_path: str, *, alias: str = "e", min_conf: float = 0.6
     return _legacy_confidence_filter_clause(alias=alias, min_conf=min_conf)
 
 
+# Verified-hierarchy resolution methods (LIPI #10 — consistency-edge gate).
+#
+# The shared CALLS fact-set ``DETERMINISTIC_RESOLUTION_METHODS`` deliberately
+# EXCLUDES the EXTENDS/IMPLEMENTS relationship methods (`inheritance`,
+# `implements`) because an EXTENDS method must never enter the *CALLS* fact-set
+# (curation_map.py:74). But the consistency family (interface-peers, override
+# chain) relates nodes via the EXTENDS/IMPLEMENTS *edge itself* — so its gate
+# must trust exactly those verified hierarchy provenances, plus any structural
+# method shared with the CALLS set, and NEVER `name_match`. The Go indexer emits
+# EXTENDS with method `inheritance` (conf 1.0) and IMPLEMENTS with `implements`
+# (conf 0.8-1.0); both are deterministic structural relationships, not name
+# guesses. Generalized across languages (tree-sitter relationships.go).
+_HIERARCHY_VERIFIED_METHODS = frozenset(
+    {"inheritance", "implements"}
+) | DETERMINISTIC_RESOLUTION_METHODS
+
+
+def _hierarchy_edge_filter_clause(*, alias: str = "e") -> str:
+    """SQL fragment gating a hierarchy (EXTENDS/IMPLEMENTS) edge as a FACT.
+
+    Mirrors ``_categorical_edge_filter_clause`` (caller gate) but for the
+    consistency family's relating edge: admit when the edge's
+    ``resolution_method`` is a verified-hierarchy provenance OR its trust_tier is
+    CERTIFIED/CANDIDATE — and never when ``resolution_method`` is ``name_match``,
+    and never SUPPRESSED. This is the SAME categorical trust gate the caller
+    query uses, specialized to the hierarchy provenance set, so a ``[PEER]`` /
+    ``[OVERRIDE]`` block can no longer launder a name_match-grade structural guess
+    as a fact on the same edit where the caller block correctly suppressed it.
+    """
+    methods = ", ".join(f"'{m}'" for m in sorted(_HIERARCHY_VERIFIED_METHODS))
+    tiers = ", ".join(f"'{t}'" for t in _STRONG_TRUST_TIERS)
+    return (
+        f"(("
+        f"COALESCE({alias}.resolution_method, '') IN ({methods}) "
+        f"OR (COALESCE({alias}.trust_tier, 'SPECULATIVE') IN ({tiers}) "
+        f"AND LOWER(COALESCE({alias}.resolution_method, '')) != 'name_match')"
+        f") AND COALESCE({alias}.trust_tier, 'SPECULATIVE') != '{_SUPPRESSED_TRUST_TIER}')"
+    )
+
+
+def _hierarchy_edge_filter_for_db(db_path: str, *, alias: str = "e") -> str:
+    """Pick the hierarchy-edge gate, degrading on older schemas.
+
+    Uses the categorical hierarchy clause when ``resolution_method`` is present;
+    otherwise falls back to a numeric ``confidence >= 0.5`` floor (the legacy
+    EXTENDS/IMPLEMENTS threshold these queries used before the gate existed) so
+    behavior never regresses to *looser* than the prior bare filter on indexes
+    that predate the categorical columns.
+    """
+    try:
+        import sqlite3 as _sq
+        conn = _sq.connect(f"file:{db_path}?mode=ro", uri=True, timeout=3)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(edges)").fetchall()}
+        conn.close()
+        if "resolution_method" in cols:
+            return _hierarchy_edge_filter_clause(alias=alias)
+    except Exception:
+        pass
+    return f"COALESCE({alias}.confidence, 0.5) >= 0.5"
+
+
 # G7 isolation-gate marker classification (Layer 2.2 / CLAUDE.md:59).
 # Caller-derived markers legitimately can't exist when a function has 0
 # callers. Pillar markers (Contract/Consistency/Completeness) must survive
@@ -1225,9 +1286,16 @@ def _get_interface_peers_from_graph(
         conn.row_factory = _sq.Row
         norm_path = file_path.replace("\\", "/").lstrip("/")
 
+        # LIPI #10: gate the relating EXTENDS/IMPLEMENTS edge through the SAME
+        # categorical trust gate the caller query uses (verified hierarchy
+        # provenance or CERTIFIED/CANDIDATE tier, never name_match/SUPPRESSED) so
+        # a [PEER] block cannot launder a name_match-grade structural guess as a
+        # fact on the same edit the caller block correctly suppressed.
+        _hier_gate = _hierarchy_edge_filter_for_db(db_path)
+
         # Diagnostic: count EXTENDS/IMPLEMENTS edges in this graph.db
         _ext_count = conn.execute(
-            "SELECT COUNT(*) FROM edges WHERE type IN ('EXTENDS', 'IMPLEMENTS') AND COALESCE(confidence, 0.5) >= 0.5"
+            f"SELECT COUNT(*) FROM edges e WHERE e.type IN ('EXTENDS', 'IMPLEMENTS') AND {_hier_gate}"
         ).fetchone()[0]
         print(
             f"[GT_META] peer_detection: func={function_name} file={norm_path} "
@@ -1262,10 +1330,11 @@ def _get_interface_peers_from_graph(
             file=sys.stderr, flush=True,
         )
 
-        # Strategy 1: Find parent via EXTENDS/IMPLEMENTS edges
+        # Strategy 1: Find parent via EXTENDS/IMPLEMENTS edges (gated — LIPI #10)
         parent_edges = conn.execute(
-            "SELECT target_id, type FROM edges "
-            "WHERE source_id = ? AND type IN ('EXTENDS', 'IMPLEMENTS') LIMIT 3",
+            f"SELECT target_id, type FROM edges e "
+            f"WHERE source_id = ? AND e.type IN ('EXTENDS', 'IMPLEMENTS') "
+            f"AND {_hier_gate} LIMIT 3",
             (class_id,),
         ).fetchall()
         print(
@@ -1278,11 +1347,12 @@ def _get_interface_peers_from_graph(
         for pe in parent_edges:
             parent_id = pe["target_id"]
             # Find all other classes that extend/implement the same parent
+            # (gated through the shared hierarchy trust gate — LIPI #10)
             siblings = conn.execute(
-                "SELECT DISTINCT source_id FROM edges "
-                "WHERE target_id = ? AND type IN ('EXTENDS', 'IMPLEMENTS') "
-                "AND COALESCE(confidence, 0.5) >= 0.5 "
-                "AND source_id != ?",
+                f"SELECT DISTINCT source_id FROM edges e "
+                f"WHERE target_id = ? AND e.type IN ('EXTENDS', 'IMPLEMENTS') "
+                f"AND {_hier_gate} "
+                f"AND source_id != ?",
                 (parent_id, class_id),
             ).fetchall()
             peer_class_ids.extend(s["source_id"] for s in siblings)
@@ -1325,6 +1395,9 @@ def _get_interface_peers_from_graph(
                 "signature": pm["signature"] or "",
                 "snippet": snippet.strip(),
                 "edited": is_edited,
+                # LIPI #10: this peer was related through a gated, verified
+                # EXTENDS/IMPLEMENTS hierarchy edge — it is a structural FACT.
+                "verified": "1",
             })
 
         conn.close()
@@ -1393,6 +1466,11 @@ def _get_name_match_peers(
                 "signature": pm["signature"] or "",
                 "snippet": snippet.strip(),
                 "edited": is_edited,
+                # LIPI #10: this is the name+directory fallback — NO verified
+                # relating edge. It is a name_match-grade guess; the renderer must
+                # mark it unverified so it is never laundered as a structural fact
+                # (correct-or-quiet: relabel the guess, don't present it as a peer).
+                "verified": "0",
             })
 
         results.sort(key=lambda r: (not r["edited"], r["file"]))
@@ -1420,14 +1498,20 @@ def _get_override_chain(
             conn.close()
             return []
         class_id, class_name = parent_node["id"], parent_node["name"]
+        # LIPI #10: gate each EXTENDS/IMPLEMENTS hop through the SAME categorical
+        # trust gate the caller query uses (verified hierarchy provenance or
+        # CERTIFIED/CANDIDATE tier, never name_match/SUPPRESSED) so the [OVERRIDE]
+        # chain cannot walk an unverified hierarchy edge as if it were a fact.
+        _hier_gate = _hierarchy_edge_filter_for_db(db_path)
         rows = conn.execute(
-            """WITH RECURSIVE ancestors AS (
+            f"""WITH RECURSIVE ancestors AS (
                 SELECT n.id, n.name, n.file_path, 0 as depth
                 FROM nodes n WHERE n.id = ?
                 UNION ALL
                 SELECT n2.id, n2.name, n2.file_path, a.depth + 1
                 FROM ancestors a
                 JOIN edges e ON e.source_id = a.id AND e.type IN ('EXTENDS','IMPLEMENTS')
+                  AND {_hier_gate}
                 JOIN nodes n2 ON n2.id = e.target_id
                 WHERE a.depth < 5
             )
@@ -1880,10 +1964,29 @@ def _signature_param_count(signature: str) -> int | None:
 
 
 def _signature_has_varargs(signature: str) -> bool:
-    """Check if signature contains *args or **kwargs."""
+    """Check if signature contains *args or **kwargs.
+
+    LIPI #13 (logic): a bare ``"*" in signature`` substring test is WRONG —
+    a modern signature routinely carries ``*`` as a keyword-only marker
+    (``def f(a, *, b)``) or inside a type hint/default, none of which are
+    varargs. Treating those as variadic silently disables the entire
+    arity-mismatch contract (the dominant ``[GT_CONTRACT]`` signal) on a large
+    fraction of real functions — quiet-when-it-should-speak.
+
+    A true vararg is a ``*`` or ``**`` token immediately followed by an
+    identifier (``*args`` / ``**kwargs``); the keyword-only marker ``*`` is
+    followed by ``,`` or ``)`` (or whitespace then those) and must NOT match.
+    Scan only the param list (inner parens) so a ``*`` in a return annotation
+    or default expression cannot trip the check. Generalized — pure structural
+    parse of the param string, no repo/task logic.
+    """
     if not signature:
         return False
-    return "*" in signature
+    m = re.search(r"\(([^)]*)\)", signature)
+    inner = m.group(1) if m else signature
+    # `*` or `**` directly followed by a word char = a real *args/**kwargs.
+    # The bare keyword-only `*,` / `*)` has no word char after the star(s).
+    return re.search(r"\*\*?\w", inner) is not None
 
 
 def _signature_default_count(signature: str) -> int:
@@ -2699,30 +2802,30 @@ def generate_improved_evidence(
                     if not os.path.exists(db_path):
                         print(f"[GT_META] behavioral_contract: db_missing:{db_path}", file=sys.stderr, flush=True)
                     else:
-                        _conn_bc = _sq_bc.connect(db_path)
-                        # P0-1: generalized path suffix resolver
-                        # Query by name only, then match by path component suffix in Python
-                        _runtime_parts = file_path.replace("\\", "/").lstrip("./").lstrip("/").split("/")
-                        _candidates_bc = _conn_bc.execute(
-                            "SELECT id, start_line, end_line, file_path FROM nodes WHERE name = ?",
-                            (func_name,),
-                        ).fetchall()
-                        _conn_bc.close()
-                        _row_bc = None
-                        _best_match_len = -1
-                        for _nid, _start, _end, _graph_path in _candidates_bc:
-                            _graph_parts = _graph_path.replace("\\", "/").split("/")
-                            # Check if graph path components are a suffix of runtime path components
-                            if len(_graph_parts) <= len(_runtime_parts):
-                                if _runtime_parts[-len(_graph_parts):] == _graph_parts:
-                                    if len(_graph_parts) > _best_match_len:
-                                        _best_match_len = len(_graph_parts)
-                                        _row_bc = (_start, _end)
-                                        _bc_node_id = _nid
-                        if _row_bc:
-                            func_start, func_end = _row_bc
-                        else:
-                            print(f"[GT_META] behavioral_contract: no_node:{func_name}@{file_path} candidates={len(_candidates_bc)}", file=sys.stderr, flush=True)
+                        # LIPI #11 (plumbing): use the ONE canonical resolver
+                        # (`_resolve_node_id`) instead of an inline re-implementation.
+                        # The old inline query (`WHERE name = ?`, no
+                        # `label IN ('Function','Method')` filter, ties broken by
+                        # iteration order via `>` not `>=`) could pick a DIFFERENT
+                        # node than `resolved_target_id` used by the caller/callee/
+                        # signature blocks — pairing this function's PARAMS/RAISES/
+                        # RETURNS contract with another same-name node's body
+                        # (self-contradicting evidence). `_resolve_node_id` filters
+                        # to Function/Method and disambiguates by is_exported then
+                        # lowest id, so the contract and callers describe the SAME
+                        # node by construction.
+                        _bc_node_id = _resolve_node_id(db_path, file_path, func_name)
+                        if _bc_node_id is not None:
+                            _conn_bc = _sq_bc.connect(db_path)
+                            _row_bc = _conn_bc.execute(
+                                "SELECT start_line, end_line FROM nodes WHERE id = ?",
+                                (_bc_node_id,),
+                            ).fetchone()
+                            _conn_bc.close()
+                            if _row_bc:
+                                func_start, func_end = _row_bc[0], _row_bc[1]
+                        if func_start is None:
+                            print(f"[GT_META] behavioral_contract: no_node:{func_name}@{file_path}", file=sys.stderr, flush=True)
                 except Exception as _bc_db_exc:
                     print(f"[GT_META] behavioral_contract_db_error: {_bc_db_exc}", file=sys.stderr, flush=True)
                 print(f"[GT_META] behavioral_contract: func={func_name} file={file_path} start={func_start} end={func_end}", file=sys.stderr, flush=True)
@@ -3056,20 +3159,31 @@ def generate_improved_evidence(
             try:
                 _callees_conn = _open_graph_db(db_path)
                 _resolved_callees_fp = _resolve_file_path(_callees_conn, file_path)
-                # Layer 2.2: callee direction uses same categorical filter as
-                # callers (twin query, was missed in first pass — verifier-found).
-                _callee_filter = _edge_filter_for_db(db_path)
-                _callees = _callees_conn.execute(
-                    f"SELECT DISTINCT nt.file_path, nt.name, nt.signature "
-                    f"FROM edges e "
-                    f"JOIN nodes nt ON e.target_id = nt.id "
-                    f"WHERE e.source_id = ? AND e.type = 'CALLS' "
-                    f"AND {_callee_filter} "
-                    f"AND nt.file_path != ? "
-                    f"LIMIT 5",
-                    (resolved_target_id, _resolved_callees_fp),
-                ).fetchall()
-                _callees_conn.close()
+                # LIPI #12 (plumbing): `_resolve_file_path` returns None when the
+                # path is unknown/ambiguous. Binding `nt.file_path != ?` with None
+                # makes SQL evaluate `!= NULL` = NULL (never true) for EVERY row,
+                # silently disabling the self-exclusion so the edited file's own
+                # functions get listed as "Calls into:" entries. Correct-or-quiet:
+                # skip the callee block entirely when the path didn't resolve
+                # rather than widen the result with self-calls.
+                _callees = []
+                if _resolved_callees_fp is None:
+                    _callees_conn.close()
+                else:
+                    # Layer 2.2: callee direction uses same categorical filter as
+                    # callers (twin query, was missed in first pass — verifier-found).
+                    _callee_filter = _edge_filter_for_db(db_path)
+                    _callees = _callees_conn.execute(
+                        f"SELECT DISTINCT nt.file_path, nt.name, nt.signature "
+                        f"FROM edges e "
+                        f"JOIN nodes nt ON e.target_id = nt.id "
+                        f"WHERE e.source_id = ? AND e.type = 'CALLS' "
+                        f"AND {_callee_filter} "
+                        f"AND nt.file_path != ? "
+                        f"LIMIT 5",
+                        (resolved_target_id, _resolved_callees_fp),
+                    ).fetchall()
+                    _callees_conn.close()
                 if _callees:
                     # TASK #49: render each callee WITH its signature so the
                     # agent sees the contract it must satisfy at the call site
@@ -3157,13 +3271,21 @@ def generate_improved_evidence(
                 for peer in peers[:2]:
                     peer_base = os.path.basename(peer["file"])
                     edited_tag = " (your earlier edit)" if peer["edited"] else ""
+                    # LIPI #10: verified-inheritance peers (related through a gated
+                    # EXTENDS/IMPLEMENTS edge) render as the [PEER] structural fact;
+                    # the name+directory fallback ("verified"=="0") is a name_match-
+                    # grade guess — relabel it [PEER?] with a verify note so it is
+                    # never laundered as a fact (correct-or-quiet).
+                    _verified = peer.get("verified", "1") != "0"
+                    _marker = "[PEER]" if _verified else "[PEER?]"
+                    _vnote = "" if _verified else " (name-only match — verify it shares an interface)"
                     if peer["snippet"]:
                         func_parts.append(
-                            f"[PEER] {peer_base}::{func_name}(){edited_tag}:\n{clip_balanced(peer['snippet'], 300)}"
+                            f"{_marker} {peer_base}::{func_name}(){edited_tag}{_vnote}:\n{clip_balanced(peer['snippet'], 300)}"
                         )
                     elif peer["signature"]:
                         func_parts.append(
-                            f"[PEER] {peer_base}::{func_name}(){edited_tag}: {clip_balanced(peer['signature'], 120)}"
+                            f"{_marker} {peer_base}::{func_name}(){edited_tag}{_vnote}: {clip_balanced(peer['signature'], 120)}"
                         )
                 if _evidence_accumulator is not None:
                     for peer in peers[:2]:

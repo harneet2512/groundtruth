@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import ast
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -39,6 +40,14 @@ _GT_LAYER_EVENTS_PV = os.environ.get(
     "GT_LAYER_EVENTS_PATH", "/tmp/gt_layer_events.jsonl"
 )
 
+# Item #31: real first-line shape of the RepoGraph ego block (ego.py render():
+# `<name>() in <basename>:<line>`). The trimmer keys priority off line prefixes;
+# this shape matches none of them, so the ego block (the most-confident pillar,
+# min_confidence=0.9) was misclassified to band 5 and trimmed FIRST. Matching it
+# here lifts the ego block to band 2 alongside [FOCUS:/[Progress:.
+_EGO_FIRST_LINE_RE = re.compile(r"^[\w.]+\(\) in .+:\d+$")
+
+
 # Priority of an L3b line: LOWER number = MORE important (kept longest). The
 # trimmer drops from the highest-priority-number (lowest value) lines first —
 # i.e. generic navigation goes before contracts/tests.
@@ -52,7 +61,20 @@ def _l3b_line_priority(line: str) -> int:
     if s.startswith("[TEST]"):
         return 1
     # 2 — ego-graph / focus / progress markers (oriented, confident).
-    if s.startswith(("[FOCUS:", "[Progress:")) or "ego" in s.lower()[:6]:
+    # Item #31: the RepoGraph ego block (gated at min_confidence=0.9 — the most-
+    # confident pillar) renders its first line as `<name>() in <file>:<line>`
+    # (ego.py), which matches NONE of the magic prefixes — it fell to band 5 and
+    # was trimmed FIRST, inverting the stated "preserve highest-confidence" order.
+    # Recognize the ego block's real first-line shape so it is preserved with FOCUS.
+    if (
+        s.startswith(("[FOCUS:", "[Progress:"))
+        or "ego" in s.lower()[:6]
+        # `s` may be the whole multi-line ego block; the ego shape is its FIRST line,
+        # and _EGO_FIRST_LINE_RE is `...$` (no re.MULTILINE), so match the first line
+        # only — `$` would never anchor before the block's interior `\n`. Idempotent
+        # on single-line input (split[0] == s), so no regression on other L3b lines.
+        or _EGO_FIRST_LINE_RE.match(s.split("\n", 1)[0])
+    ):
         return 2
     # 3 — direct caller edges (who depends on this).
     if s.startswith("Called by:"):
@@ -201,11 +223,15 @@ def _contract_pillar(conn: sqlite3.Connection, needle: str, issue_terms: set[str
     # by definition order. _relevance below then ranks the anchor to the top. When
     # there are no anchors the fetch is byte-identical to the old definition-order
     # query (suppression gate unchanged on no-signal tasks).
+    # Item #34: SELECT the node `id` as the LAST column so each delivered signature
+    # carries its EXACT node identity. The flows block below joins on that id instead
+    # of re-resolving by `n.name` — a homonym method's def-use flow can no longer be
+    # stapled to a different overload's contract. (r[0]=name keeps _relevance correct.)
     try:
         if _anchor_syms:
             _ph = ",".join("?" * len(_anchor_syms))
             rows = conn.execute(
-                "SELECT name, signature, return_type FROM nodes "
+                "SELECT name, signature, return_type, id FROM nodes "
                 "WHERE file_path = ? AND label IN ('Function','Method') AND is_test = 0 "
                 "AND signature IS NOT NULL AND signature != '' "
                 f"ORDER BY CASE WHEN LOWER(name) IN ({_ph}) THEN 0 ELSE 1 END, start_line "
@@ -214,7 +240,7 @@ def _contract_pillar(conn: sqlite3.Connection, needle: str, issue_terms: set[str
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT name, signature, return_type FROM nodes "
+                "SELECT name, signature, return_type, id FROM nodes "
                 "WHERE file_path = ? AND label IN ('Function','Method') AND is_test = 0 "
                 "AND signature IS NOT NULL AND signature != '' "
                 "ORDER BY start_line LIMIT 30",
@@ -267,8 +293,10 @@ def _contract_pillar(conn: sqlite3.Connection, needle: str, issue_terms: set[str
     # text (audit: duplicate-contract-lines).
     lines: list[str] = []
     _seen: set[str] = set()
-    _delivered_fns: list[str] = []
-    for name, sig, ret in ranked:
+    # Item #34: carry the EXACT node id of each delivered signature (not just its
+    # name) so the flows lookup below binds the same node the contract describes.
+    _delivered_ids: list[int] = []
+    for name, sig, ret, _nid in ranked:
         sig_text = sig if sig else f"{name}(...)"
         if ret and ret not in ("None", "") and "->" not in sig_text:
             line = f"[CONTRACT] {sig_text} -> {ret}"
@@ -278,7 +306,7 @@ def _contract_pillar(conn: sqlite3.Connection, needle: str, issue_terms: set[str
             continue
         _seen.add(line)
         lines.append(line)
-        _delivered_fns.append(name)
+        _delivered_ids.append(_nid)
         if len(lines) >= 3:
             break
 
@@ -294,16 +322,20 @@ def _contract_pillar(conn: sqlite3.Connection, needle: str, issue_terms: set[str
     # separately on _relevance(ranked[0]) dropped it live whenever the hook passed
     # different issue_terms than the standalone path (beets-5495, flows=0 despite the
     # fix loaded). If a signature is shown, its param-flows ship with it.
-    if _delivered_fns:
+    if _delivered_ids:
         _seen_flow: set[str] = set()
-        for _fn in _delivered_fns:
+        for _nid in _delivered_ids:
             try:
+                # Item #34: bind the EXACT delivered node id (p.node_id = ?), not
+                # n.name. A homonym method (two `format(self, value)` in one file)
+                # can no longer have a different overload's def-use flow stapled to
+                # the rendered signature — the flow rides with the node it describes.
                 _fr = conn.execute(
-                    "SELECT p.value FROM properties p JOIN nodes n ON p.node_id = n.id "
-                    "WHERE n.file_path = ? AND n.name = ? AND p.kind = 'data_flow' "
+                    "SELECT p.value FROM properties p "
+                    "WHERE p.node_id = ? AND p.kind = 'data_flow' "
                     "AND COALESCE(p.confidence, 1.0) >= 0.5 AND p.value LIKE '% -> %' "
                     "ORDER BY p.line LIMIT 1",
-                    (needle, _fn),
+                    (_nid,),
                 ).fetchone()
             except sqlite3.Error:
                 continue
@@ -607,15 +639,27 @@ def _classify_layer_inline(file_path: str) -> str:
     return ""
 
 
-def _in_degree_for_file(cur: "sqlite3.Cursor", file_path: str) -> int:
-    """Get total incoming edge count for a file (used for hub penalty)."""
+def _in_degree_for_file(
+    cur: "sqlite3.Cursor", file_path: str,
+    edge_filter: str = "COALESCE(e.confidence, 0.5) >= 0.7",
+) -> int:
+    """Get total incoming edge count for a file (used for hub penalty).
+
+    Item #32: applies the SAME categorical/numeric ``edge_filter`` clause the
+    caller/callee numerators and the hub-scale denominator use, so the hub
+    penalty is computed over ONE edge population. Previously this query applied
+    no confidence/categorical filter at all (a third, unfiltered population),
+    counting speculative name_match edges the numerator already excluded and
+    over-penalizing files whose incoming edges are mostly low-confidence noise.
+    """
     try:
         row = cur.execute(
-            """
+            f"""
             SELECT COUNT(*) FROM edges e
             JOIN nodes nt ON e.target_id = nt.id
             WHERE nt.file_path = ?
               AND e.type = 'CALLS'
+              AND {edge_filter}
             """,
             (file_path,),
         ).fetchone()
@@ -887,13 +931,19 @@ def graph_navigation(
         # Improvement 4: Hub-penalized ranking (repo-relative hub scale)
         # Compute p90 in-degree once for this graph instead of hardcoded 50
         # Only count CALLS edges — EXTENDS/IMPLEMENTS are architectural, not hub indicators
+        # Item #32: the hub-scale denominator MUST be drawn from the SAME edge
+        # population as the caller/callee numerators (the shared categorical `_ef`),
+        # not a hardcoded `confidence >= 0.7` literal. Three different edge sets feeding
+        # one ranking formula (numerator `_ef`, in_deg unfiltered, scale conf>=0.7)
+        # miscalibrated the penalty; thread `_ef` through all three.
         all_degrees = [r[0] for r in cur.execute(
-            "SELECT COUNT(e.id) FROM nodes n JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' AND COALESCE(e.confidence, 0.5) >= 0.7 GROUP BY n.file_path ORDER BY 1"
+            f"SELECT COUNT(e.id) FROM nodes n JOIN edges e ON e.target_id = n.id "
+            f"AND e.type = 'CALLS' AND {_ef} GROUP BY n.file_path ORDER BY 1"
         ).fetchall()]
         hub_scale = all_degrees[int(len(all_degrees) * 0.9)] if all_degrees else 50
 
         def _hub_penalized_score(fp: str, cnt: int) -> float:
-            in_deg = _in_degree_for_file(cur, fp)
+            in_deg = _in_degree_for_file(cur, fp, edge_filter=_ef)
             return cnt * (1.0 - min(1.0, in_deg / float(hub_scale)))
 
         top_callers = sorted(top_callers, key=lambda x: _hub_penalized_score(x[0], x[1]), reverse=True)[:limit]
@@ -1234,21 +1284,73 @@ def _file_function_spec(db_path: str, file_path: str, repo_root: str) -> str:
 
     Delivered at VIEW time = before the agent edits. This is the pre-edit
     specification surface that prevents incomplete fixes.
+
+    Item #9 (correct-or-quiet, mirrors _contract_pillar): the OLD body fetched the
+    first 5 functions by ``start_line`` with NO issue-relevance and emitted
+    ``specs[0]`` — the file-TOP function — unconditionally, re-introducing the exact
+    "generic top-of-file function as salient evidence" noise (progress_write /
+    _setup_logging) that the contract pillar was explicitly hardened against (the
+    "39th of 102 functions" / set_fields bug). The fix applies the SAME anchor
+    front-load + relevance rank + ``_relevance==0 -> ""`` suppression: when a
+    relevance signal exists (issue anchors OR issue terms) and the top function
+    matches none of it, stay silent rather than emit position-ranked noise. A truly
+    blind task (no anchors, no terms) keeps the always-fire definition-order spec.
     """
+    # Issue ANCHORS (the symbols the issue NAMES) — same hygiene as _contract_pillar:
+    # drop generic dunders so they don't match a file's generic methods.
+    def _generic_anchor(_n: str) -> bool:
+        _s = (_n or "").strip()
+        return _s.startswith("__") and _s.endswith("__")
+
+    _anch_data = _load_issue_anchors()
+    _anchor_syms = {
+        s.lower() for s in _anch_data.get("symbols", []) if not _generic_anchor(s)
+    }
+    _issue_terms = _load_issue_terms()
+
     try:
         conn = sqlite3.connect(db_path)
         _resolved_spec = _resolve_file_path(conn, file_path)
-        rows = conn.execute(
-            "SELECT name, start_line, end_line FROM nodes "
-            "WHERE file_path = ? AND label IN ('Function','Method') AND is_test = 0 "
-            "ORDER BY start_line LIMIT 5",
-            (_resolved_spec,),
-        ).fetchall()
+        # Anchor-matched functions sort to the FRONT of the fetch (CASE ... THEN 0)
+        # so an anchored function defined deep in a large file survives the LIMIT;
+        # the rest fill by definition order. No anchors -> byte-identical to the old
+        # definition-order query.
+        if _anchor_syms:
+            _ph = ",".join("?" * len(_anchor_syms))
+            rows = conn.execute(
+                "SELECT name, start_line, end_line FROM nodes "
+                "WHERE file_path = ? AND label IN ('Function','Method') AND is_test = 0 "
+                f"ORDER BY CASE WHEN LOWER(name) IN ({_ph}) THEN 0 ELSE 1 END, start_line "
+                "LIMIT 5",
+                (_resolved_spec, *sorted(_anchor_syms)),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT name, start_line, end_line FROM nodes "
+                "WHERE file_path = ? AND label IN ('Function','Method') AND is_test = 0 "
+                "ORDER BY start_line LIMIT 5",
+                (_resolved_spec,),
+            ).fetchall()
         conn.close()
     except Exception:
         return ""
 
     if not rows:
+        return ""
+
+    def _spec_relevance(r) -> int:
+        name = (r[0] or "").lower()
+        score = 100 if name in _anchor_syms else 0
+        if _issue_terms:
+            parts = set(name.replace("__", "_").split("_"))
+            score += len(parts & _issue_terms)
+        return score
+
+    ranked = sorted(rows, key=_spec_relevance, reverse=True)
+
+    # Correct-or-quiet: a relevance signal exists but the top function matches none
+    # of it -> the file-top spec is misranked noise at salience position 0. Suppress.
+    if (_anchor_syms or _issue_terms) and _spec_relevance(ranked[0]) == 0:
         return ""
 
     from groundtruth.hooks.post_edit import _make_template
@@ -1261,7 +1363,7 @@ def _file_function_spec(db_path: str, file_path: str, repo_root: str) -> str:
         return ""
 
     specs = []
-    for name, start, end in rows:
+    for name, start, end in ranked:
         if not start or not end:
             continue
         func_lines = all_lines[max(0, start - 1):min(len(all_lines), end)]
@@ -1291,8 +1393,14 @@ def _test_file_targets(db_path: str, test_file_path: str, repo_root: str = "") -
     try:
         conn = sqlite3.connect(db_path)
         _resolved_test = _resolve_file_path(conn, test_file_path)
+        # Item #33: also fetch the call-site line (e.source_line) so the
+        # stdlib-shadow guard can run per target — the `Calls into:` render
+        # otherwise launders name_match edges to builtin/stdlib methods
+        # (`result.items()` -> project `items()`, `os.path.join(...)` -> project
+        # `join()`) as confident localization targets, exactly the laundering the
+        # caller block already guards against (lines ~829-839). Mirror it here.
         rows = conn.execute(
-            f"""SELECT DISTINCT nt.name, nt.file_path FROM nodes nsrc
+            f"""SELECT DISTINCT nt.name, nt.file_path, e.source_line FROM nodes nsrc
             JOIN edges e ON e.source_id = nsrc.id AND e.type = 'CALLS'
             JOIN nodes nt ON e.target_id = nt.id
             WHERE nsrc.file_path = ? AND nsrc.is_test = 1 AND nt.is_test = 0
@@ -1303,7 +1411,44 @@ def _test_file_targets(db_path: str, test_file_path: str, repo_root: str = "") -
         conn.close()
     except Exception:
         return []
-    lines = [f"Calls into: {fpath}::{name}()" for name, fpath in rows]
+
+    # Stdlib-shadow guard on the `Calls into:` targets (same gate the caller block
+    # applies). A categorical/numeric-passing edge can still be a stdlib/builtin
+    # attribute call name-matched to a same-named project function — a false target.
+    # Correct-or-quiet: the guard only DROPS a target proven to be a shadow at its
+    # call site; when the guard is unavailable or the line is unreadable, the target
+    # is KEPT (never over-suppress a real source target).
+    try:
+        from groundtruth.pretask.v1r_brief import _is_stdlib_shadow
+    except Exception:
+        _is_stdlib_shadow = None  # type: ignore[assignment]
+    _shadow_root = repo_root or os.environ.get("GT_REPO_ROOT", "/testbed")
+    _test_src_lines: list[str] | None = None
+    if _is_stdlib_shadow is not None and _shadow_root:
+        try:
+            with open(
+                os.path.join(_shadow_root, test_file_path), encoding="utf-8", errors="ignore"
+            ) as _tf:
+                _test_src_lines = _tf.readlines()
+        except OSError:
+            _test_src_lines = None
+
+    def _target_is_stdlib_shadow(name: str, line) -> bool:
+        if _is_stdlib_shadow is None or _test_src_lines is None or not name:
+            return False
+        try:
+            _ln = int(line) if line else 0
+        except (TypeError, ValueError):
+            return False
+        if 0 < _ln <= len(_test_src_lines):
+            return _is_stdlib_shadow(_test_src_lines[_ln - 1].strip(), name)
+        return False
+
+    lines = [
+        f"Calls into: {fpath}::{name}()"
+        for name, fpath, src_line in rows
+        if not _target_is_stdlib_shadow(name, src_line)
+    ]
     # DISABLED (swap-invariant — run15 leak): assertion-body surfacing from the
     # viewed test file. This block regex-scraped `assert .../expect(...).to...`
     # lines out of the test source and appended them as `[TEST] {assertion}`,

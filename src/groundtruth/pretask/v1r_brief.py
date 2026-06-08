@@ -323,12 +323,13 @@ def _top_function_names(
     if not rows:
         return []
 
-    if issue_terms:
-        terms_lower = {t.lower() for t in issue_terms}
-        issue_matched = [r[0] for r in rows if r[0].lower() in terms_lower]
-        others = [r[0] for r in rows if r[0].lower() not in terms_lower]
-        return (issue_matched + others)[:limit]
-
+    # #60: the SQL CASE above already sorts issue-matched names to the FRONT (THEN 0)
+    # using the SINGLE filtered term set `_terms` (len > 2). A second Python partition
+    # here used `terms_lower = {t.lower() for t in issue_terms}` — the UNFILTERED set —
+    # so a 1-2 char term re-promoted a function the SQL had (correctly) not matched,
+    # producing a rank that contradicts the SQL order. The rows are already in the
+    # authoritative order; return them directly so ONE filtered ranker decides the
+    # order. Generalized (no per-repo logic), correct-or-quiet.
     return [row[0] for row in rows[:limit]]
 
 
@@ -720,12 +721,17 @@ def _resolved_witnesses_for_file(
             (f"%{_norm_fp}", max_each * 4),
         ).fetchall()
         for callee_file, source_line, callee_name, src_name, def_line in callee_rows:
-            # `source_line` is the CALL SITE in THIS candidate file — use it only for the
-            # stdlib-shadow check on the call. The RENDERED location must be the callee's
-            # DEFINITION line in callee_file (nt.start_line); pairing callee_file with the
-            # caller's source_line printed "X in <calleefile>:<callerline>" (wrong file:line).
-            code = _code_at(file_path, source_line)
-            if _is_stdlib_shadow(code, callee_name or ""):
+            # `source_line` is the CALL SITE in THIS candidate file — use it ONLY for the
+            # stdlib-shadow check on the call (`os.walk(` must be read at the call site).
+            # The RENDERED location is the callee's DEFINITION line in callee_file
+            # (nt.start_line); pairing callee_file with the caller's source_line printed
+            # "X in <calleefile>:<callerline>" (wrong file:line). #36: the emitted `code`
+            # field travels with (callee_file, def_line), so it must be read THERE too —
+            # the call-site line belongs to a DIFFERENT file than file_path:line, a latent
+            # wrong-fact. Read code at the callee's definition so every field of the record
+            # references the same callee location (symmetric with the caller branch).
+            _call_code = _code_at(file_path, source_line)
+            if _is_stdlib_shadow(_call_code, callee_name or ""):
                 continue
             out.append({
                 "relation": "CALLS",
@@ -734,7 +740,7 @@ def _resolved_witnesses_for_file(
                 "line": int(def_line) if def_line else 0,
                 "symbol": callee_name or "",
                 "target": src_name or "",
-                "code": code,
+                "code": _code_at(callee_file, def_line) if def_line else "",
             })
             if sum(1 for w in out if w["direction"] == "callee") >= max_each:
                 break
@@ -1250,8 +1256,20 @@ def _entry_confidence_tier(entry: FileEntry, issue_text: str = "") -> str:
         # naming the "leafonly plugin". Per .claude/CLAUDE.md, context that does
         # not need edges must fire even on isolated files; an isolated-but-named
         # gold must NOT lose the brief slot to a connected-but-wrong hub.
+        # #37: anchor the stem match on a WORD BOUNDARY and raise the specificity
+        # floor, so a generic stem (`core`/`base`/`data`) does not promote a file to
+        # [WARNING] merely because the substring appears anywhere in the issue text
+        # (e.g. "base" inside "database", "core" inside "scoreboard"). Reuse the
+        # codebase's own anti-generic rule from _exact_issue_named_files
+        # (len >= 5 OR contains "_"): a short, single-token stem is too generic to be
+        # localization evidence on its own. Correct-or-quiet; generalized (no per-repo
+        # names), language-invariant (filename specificity, not Python-specific).
         _stem = os.path.splitext(os.path.basename(entry.path or ""))[0].lower()
-        path_match = len(_stem) > 3 and _stem in _it
+        _stem_specific = len(_stem) >= 5 or "_" in _stem
+        path_match = (
+            _stem_specific
+            and bool(_re.search(rf"\b{_re.escape(_stem)}\b", _it))
+        )
 
     # A verified GRAPH-TRAVERSAL witness (graph_localizer): the file is connected
     # to an issue-anchored symbol by a DETERMINISTIC CALLS/IMPORTS edge. This is
@@ -1870,8 +1888,16 @@ def _resolved_witness_tail(graph_db: str, file_path: str) -> str:
     return ""
 
 
-def _localization_header(loc, graph_db: str, issue_text: str) -> str:
+def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]:
     """Confidence-graded localization block, PREPENDED to the brief.
+
+    Returns ``(header_str, primary_path)``. ``primary_path`` is the file the header
+    NAMED as #1 (the HIGH edit target, or the first shown candidate) — empty when no
+    header fires. The caller (``generate_v1r_brief``) uses it to make the SAME file
+    that ``<gt-localization>`` names #1 the ``entries[0]`` that the L1-SCOPE block,
+    ``render_brief`` file list, graph-map, and EDIT-TARGET CONTRACTS all key off — so
+    the two independently-ordered pipes can no longer name different #1 files (the L1
+    cross-wire, confirmed live cfn-lint-3749). Single ordering source, consumed verbatim.
 
     Granularity scales with RESEARCH-BACKED structural confidence — a verified graph
     edge anchored on an ISSUE-named entity (KGCompass: multi-hop from issue entities),
@@ -1886,7 +1912,7 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> str:
                 (BugLocator/Agentless ranked candidates; agent confirms with grep).
     """
     if loc is None or not getattr(loc, "candidates", None):
-        return ""
+        return "", ""
     anchors = {(a or "").lower() for a in (getattr(loc, "anchor_symbols", None) or [])}
     cands = loc.candidates
 
@@ -2014,7 +2040,7 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> str:
             if wr:
                 out.append(f"  reason: {wr}")
             out.append("</gt-localization>")
-            return "\n".join(out)
+            return "\n".join(out), tgt.file_path
         # weak function anchor (<2 converging structural witnesses) -> fall through to
         # the MEDIUM candidate list below (agent reasons over the file's functions).
 
@@ -2040,7 +2066,7 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> str:
             if _wt:
                 out.append(f"     {_wt}")
         out.append("</gt-localization>")
-        return "\n".join(out)
+        return "\n".join(out), shown[0].file_path
 
     # ---- MEDIUM / LOW flat option set: a cluster with no HIGH winner -> flat option
     # set (dynamic K), each with its issue-relevant functions; the agent reasons +
@@ -2063,7 +2089,7 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> str:
         if _wt:
             out.append(f"     {_wt}")
     out.append("</gt-localization>")
-    return "\n".join(out)
+    return "\n".join(out), shown[0].file_path
 
 
 # Language-invariant generic identifiers — code builtins + ubiquitous collection methods that are
@@ -2850,6 +2876,28 @@ def generate_v1r_brief(
             )
         )
 
+    # ---- L1 CROSS-WIRE FIX (single ordering source) ----
+    # Build the localization header HERE, BEFORE the L1-SCOPE block reads
+    # `entries[0]`, and make the file `<gt-localization>` names #1 the SAME
+    # `entries[0]` that L1-SCOPE, `render_brief`'s file list, the graph-map, and the
+    # EDIT-TARGET CONTRACTS block all key off. Previously the header was built far
+    # below (after L1-SCOPE/render) on `_loc.candidates`, while `entries` carried a
+    # SEPARATELY-ordered list — so `<gt-localization>` and the `files[0]`-keyed
+    # sub-blocks could name DIFFERENT #1 files (the confirmed cfn-lint-3749 self-
+    # contradiction). Reordering `entries` so its head equals the header's primary
+    # makes every brief sub-block consume one ordering verbatim. Pure reorder (no
+    # entry added/dropped); correct-or-quiet (no header / no match -> entries
+    # untouched); generalized (path-normalized match, no per-repo logic).
+    _loc_header, _loc_primary = _localization_header(_loc, graph_db, issue_text)
+    if _loc_header and _loc_primary and entries:
+        _lp_norm = _gl_normalize(_loc_primary)
+        _pi = next(
+            (i for i, e in enumerate(entries) if _gl_normalize(e.path) == _lp_norm),
+            None,
+        )
+        if _pi not in (None, 0):
+            entries.insert(0, entries.pop(_pi))
+
     # BUG-3 instrumentation: prove whether anchor_prox actually reaches the FileEntry on
     # the LIVE brief path (the l1_ranking_diagnosis showed 1.0, but the rendered brief
     # dropped those files — telemetry-vs-delivery gap). Logs the per-entry tier + anchor_prox
@@ -2933,13 +2981,19 @@ def generate_v1r_brief(
             if _sc is not None:
                 _sc.close()
 
-    _scores = [r.get("score", 0.0) for r in top_records[: len(entries)]]
+    # Derive scores from `entries` (each FileEntry.score is the same value its
+    # top_records row produced) so the render_brief #1-vs-#2 gap calc tracks the
+    # SAME order render_brief renders — required after the L1 cross-wire reorder of
+    # `entries` above (a positional top_records slice would pair the gap with the
+    # pre-reorder order).
+    _scores = [float(getattr(e, "score", 0.0)) for e in entries]
     _scope_chains = getattr(_loc, "scope_chains", []) if _loc else []
     # PREPEND the confidence-graded localization header (Agentless hierarchical
     # localize: granularity scales with research-backed structural confidence). When
     # it fires it OWNS the localization steer, so the brief's legacy singular
     # "highest-confidence candidate" line is suppressed (no contradictory steers).
-    _loc_header = _localization_header(_loc, graph_db, issue_text)
+    # `_loc_header`/`_loc_primary` were computed ABOVE (the L1 cross-wire fix), before
+    # L1-SCOPE, so entries[0] is already the header's primary — do NOT recompute here.
     _emit_old = _loc_header == ""
 
     def _render():

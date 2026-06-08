@@ -289,6 +289,25 @@ func stripTypeWrapper(t string) string {
 	return t
 }
 
+// tierFor maps a confidence score to a TrustTier via the single CLAUDE.md threshold
+// table (CLAUDE.md:222) — the ONE source of truth so tier always follows confidence
+// and a 0.85 edge can NEVER be stamped CERTIFIED. Used at every emit site instead of a
+// hardcoded TrustTier literal, eliminating the conf↔tier mismatches where the same
+// structural fact (e.g. 0.85 impl_method vs unique_method) carried different tiers.
+//
+//	conf >= 0.9  -> "CERTIFIED"
+//	0.5 <= conf < 0.9 -> "CANDIDATE"
+//	conf < 0.5   -> "SPECULATIVE"
+func tierFor(conf float64) string {
+	if conf >= 0.9 {
+		return "CERTIFIED"
+	}
+	if conf >= 0.5 {
+		return "CANDIDATE"
+	}
+	return "SPECULATIVE"
+}
+
 // computeConfidence returns a confidence score based on resolution method and ambiguity.
 func computeConfidence(method string, candidateCount int) float64 {
 	switch method {
@@ -311,6 +330,80 @@ func computeConfidence(method string, candidateCount int) float64 {
 		return 0.2
 	}
 	return 0.3
+}
+
+// pickBestImportCandidate implements the same-dir tie-break the Strategy-1.5 comment
+// promises (finding #40). Among ≥1 candidate target node IDs it prefers a target whose
+// file is in the caller's directory; otherwise it returns the candidate with the
+// lexicographically-smallest (file, id) so the pick is DETERMINISTIC across runs (Go map
+// order is randomized — `importCandidates[0]` was run-dependent). Returns the chosen
+// target and whether a same-directory winner existed (the caller demotes below CERTIFIED
+// when there are multiple candidates and NO same-dir winner — an ambiguous import is not a
+// deterministic fact). When meta is absent it falls back to the smallest node ID (stable).
+func pickBestImportCandidate(callerFile string, candidates []int64, meta map[int64]NodeMeta) (int64, bool) {
+	if len(candidates) == 0 {
+		return 0, false
+	}
+	callerDir := filepath.ToSlash(filepath.Dir(callerFile))
+	best := int64(0)
+	bestFile := ""
+	sameDir := false
+	for _, tid := range candidates {
+		tf := ""
+		if meta != nil {
+			if m, ok := meta[tid]; ok {
+				tf = filepath.ToSlash(m.File)
+			}
+		}
+		inSameDir := tf != "" && filepath.ToSlash(filepath.Dir(tf)) == callerDir
+		switch {
+		case inSameDir && !sameDir:
+			// First same-dir candidate always wins over any cross-dir pick.
+			best, bestFile, sameDir = tid, tf, true
+		case inSameDir == sameDir:
+			// Same locality class: deterministic tie-break by (file, id).
+			if best == 0 || tf < bestFile || (tf == bestFile && tid < best) {
+				best, bestFile = tid, tf
+			}
+		}
+	}
+	if best == 0 {
+		best = candidates[0]
+	}
+	return best, sameDir
+}
+
+// pickBestLocalTarget chooses the best same-file target among ≥1 candidate node IDs
+// sharing a name (finding #39). It is DETERMINISTIC and language-agnostic: it prefers a
+// callable-labelled node (Function/Method) over a same-named Class/other, then breaks ties
+// by smallest node ID so the result is stable across runs (Go slice order is stable but the
+// label preference + min-ID rule guarantees one answer). The caller itself is excluded.
+// Returns 0 when no eligible candidate exists.
+func pickBestLocalTarget(candidates []int64, callerID int64, meta map[int64]NodeMeta) int64 {
+	best := int64(0)
+	bestIsCallable := false
+	for _, tid := range candidates {
+		if tid == callerID {
+			continue
+		}
+		callable := false
+		if meta != nil {
+			if m, ok := meta[tid]; ok {
+				callable = m.Label == "Function" || m.Label == "Method"
+			}
+		}
+		switch {
+		case best == 0:
+			best, bestIsCallable = tid, callable
+		case callable && !bestIsCallable:
+			// A callable target always beats a non-callable same-named node.
+			best, bestIsCallable = tid, true
+		case callable == bestIsCallable && tid < best:
+			// Same callability class: deterministic min-ID tie-break.
+			best = tid
+		}
+	}
+	return best
 }
 
 // NodeMeta carries class/interface membership data for self.method resolution.
@@ -473,6 +566,13 @@ func Resolve(
 	// Build import index: file → imported name → list of candidate target files
 	importIndex := buildImportIndex(allImports, fileMap)
 
+	// metaMap: nodeID → NodeMeta, the single accessor for the optional variadic
+	// nodeMeta[0] (nil when absent). Used by the Strategy-1.5 same-dir tie-break (#40).
+	var metaMap map[int64]NodeMeta
+	if len(nodeMeta) > 0 && nodeMeta[0] != nil {
+		metaMap = nodeMeta[0]
+	}
+
 	// Build class-method index for self.method() resolution (Strategy 1.75)
 	var methodsByClass map[int64]map[string]int64
 	if len(nodeMeta) > 0 && nodeMeta[0] != nil {
@@ -567,13 +667,43 @@ func Resolve(
 						Method:         "same_file",
 						Confidence:     1.0,
 						CandidateCount: 1,
-						TrustTier:      "CERTIFIED",
+						TrustTier:      tierFor(1.0),
 						EvidenceType:   "ast_call",
 					})
 				}
 				continue
 			}
-			// Multiple same-name definitions in this file: fall through to name_match
+			// #39: Multiple same-name definitions in this file. Previously this
+			// abandoned same-file resolution entirely and fell through to a
+			// cross-file name_match — discarding the strongest locality signal for a
+			// speculative remote guess. Same-file locality dominates: for an
+			// UNQUALIFIED call (no receiver type to infer; the type-flow strategies
+			// below cannot apply) prefer the best LOCAL candidate at CANDIDATE tier
+			// over any cross-file name_match. Qualified calls still fall through so
+			// the receiver-typing strategies (1.75/1.94a/1.95/1.96) resolve precisely.
+			isUnqualified := call.CalleeQualified == "" || call.CalleeQualified == calleeName
+			if targetIDs, ok := fileNodes[calleeName]; ok && len(targetIDs) > 1 && isUnqualified {
+				if best := pickBestLocalTarget(targetIDs, callerID, metaMap); best != 0 {
+					key := edgeKey{callerID, best, "CALLS"}
+					if !seen[key] {
+						seen[key] = true
+						// 0.6 = CANDIDATE: locality is strong, but WHICH same-named
+						// local definition is the target is not certain → not CERTIFIED.
+						resolved = append(resolved, ResolvedCall{
+							SourceNodeID:   callerID,
+							TargetNodeID:   best,
+							SourceLine:     call.Line,
+							SourceFile:     call.File,
+							Method:         "same_file",
+							Confidence:     0.6,
+							CandidateCount: len(targetIDs),
+							TrustTier:      tierFor(0.6),
+							EvidenceType:   "same_file_ambiguous",
+						})
+					}
+					continue
+				}
+			}
 		}
 
 		// Strategy 1.5: Import-verified cross-file resolution
@@ -636,8 +766,18 @@ func Resolve(
 			}
 
 			if len(importCandidates) > 0 {
-				// Pick best: first candidate (import order is meaningful)
-				bestTarget := importCandidates[0]
+				// #40: implement the promised same-dir tie-break (prefer a target in the
+				// caller's directory; else lexicographically-smallest path) so the pick is
+				// DETERMINISTIC instead of map-order `importCandidates[0]`. When >1 candidate
+				// files export the same name and NONE is same-dir, the pick is an ambiguous
+				// guess — demote below CERTIFIED rather than stamping conf 1.0 on a coin-flip.
+				bestTarget, sameDirWinner := pickBestImportCandidate(call.File, importCandidates, metaMap)
+				conf := 1.0
+				evidence := "ast_import"
+				if len(importCandidates) > 1 && !sameDirWinner {
+					conf = 0.6 // CANDIDATE: import is real, the among-files pick is not certain
+					evidence = "ast_import_ambiguous"
+				}
 				key := edgeKey{callerID, bestTarget, "CALLS"}
 				if !seen[key] {
 					seen[key] = true
@@ -647,10 +787,10 @@ func Resolve(
 						SourceLine:     call.Line,
 						SourceFile:     call.File,
 						Method:         "import",
-						Confidence:     1.0,
+						Confidence:     conf,
 						CandidateCount: len(importCandidates),
-						TrustTier:      "CERTIFIED",
-						EvidenceType:   "ast_import",
+						TrustTier:      tierFor(conf),
+						EvidenceType:   evidence,
 					})
 				}
 				continue
@@ -696,7 +836,7 @@ func Resolve(
 									Method:         method,
 									Confidence:     conf,
 									CandidateCount: 1,
-									TrustTier:      "CERTIFIED",
+									TrustTier:      tierFor(conf),
 									EvidenceType:   evidence,
 								})
 							}
@@ -719,12 +859,17 @@ func Resolve(
 		// stdlib call never launders as a confident fact downstream while the agent
 		// still gets the hint. [beancount-931 os.walk -> account.walk]
 		qualifiedUnresolved := call.CalleeQualified != "" && call.CalleeQualified != calleeName
-		// T2 (strong builtins): a qualified call to an always-builtin method name (join/split/
-		// encode/strip/...) whose receiver never resolved internally above is a builtin call
-		// (os.path.join, str.split) — drop it even single-candidate, rather than DEMOTE to a
-		// speculative name_match. Catches the single-candidate residual the multi-candidate
-		// Strategy-2 guard cannot. Narrow set: excludes get/update/items (legit internal names).
-		if qualifiedUnresolved && strongBuiltinMethodNames[calleeName] {
+		// T2 (builtins): a qualified call obj.method() whose receiver never resolved to an
+		// internal class above + method is a builtin/stdlib name = a builtin call
+		// (os.path.join, str.split, dict.get) — DROP it rather than emit a name_match guess
+		// to an arbitrary same-named internal method (application-centered — JARVIS 2023 /
+		// PyCG ICSE 2021). #6: apply the SAME builtin sets here on the SINGLE-candidate path
+		// that Strategy 2 applies on the multi-candidate path, so a qualified `get`/`items`/
+		// `append` with exactly one global definition can no longer skip the broad guard and
+		// launder into a name_match_qualified_unresolved edge. strongBuiltinMethodNames is a
+		// superset-by-intent for single-candidate (os.path.join), builtinMethodNames is the
+		// broad set (get/items/append/...). One predicate, both candidate-count paths.
+		if qualifiedUnresolved && (strongBuiltinMethodNames[calleeName] || builtinMethodNames[calleeName]) {
 			continue
 		}
 		if targets, ok := nodeIDs[calleeName]; ok {
@@ -739,11 +884,15 @@ func Resolve(
 				key := edgeKey{callerID, targetID, "CALLS"}
 				if !seen[key] {
 					seen[key] = true
-					method, conf, tier, evidence := "verified_unique", 0.95, "CERTIFIED", "name_unique"
+					method, conf, evidence := "verified_unique", 0.95, "name_unique"
 					if qualifiedUnresolved {
+						// Qualified receiver never resolved internally => stdlib/external/
+						// unknown. DEMOTE to a speculative name_match so it never launders as
+						// a confident fact. Confidence must sit below the SPECULATIVE threshold
+						// so tierFor agrees with the demote (a sub-0.5 conf, not the 0.9
+						// single-candidate name_match score that tierFor would re-CERTIFY).
 						method = "name_match"
-						conf = computeConfidence("name_match", 1)
-						tier = "SPECULATIVE"
+						conf = 0.2
 						evidence = "name_match_qualified_unresolved"
 					}
 					resolved = append(resolved, ResolvedCall{
@@ -754,7 +903,7 @@ func Resolve(
 						Method:         method,
 						Confidence:     conf,
 						CandidateCount: 1,
-						TrustTier:      tier,
+						TrustTier:      tierFor(conf),
 						EvidenceType:   evidence,
 					})
 				}
@@ -773,14 +922,15 @@ func Resolve(
 				dotIdx = strings.LastIndex(call.CalleeQualified, "::")
 				sep = "::"
 			}
-			_ = sep
 			if dotIdx > 0 {
+				// #41: qualifier is everything before the separator for BOTH "." and "::"
+				// (the prior `if sep == "::"` re-assign was a no-op — identical slice).
 				qualifier := call.CalleeQualified[:dotIdx]
-				if sep == "::" {
-					qualifier = call.CalleeQualified[:dotIdx]
-				}
 				methodName := call.CalleeQualified[dotIdx+len(sep):]
-				if qualifier != "self" && qualifier != "this" {
+				// #41: exclude "Self" too, matching the four sibling strategies (1.75/1.94/
+				// 1.94a/1.95) — a Rust Self::method() that slipped past 1.75 (no caller
+				// ParentID) must not mis-scope to an imported class literally named "Self".
+				if qualifier != "self" && qualifier != "this" && qualifier != "Self" {
 						if fileImports, ok := importIndex[call.File]; ok {
 						if candidateFiles, ok := fileImports[qualifier]; ok {
 							for _, targetFile := range candidateFiles {
@@ -804,7 +954,7 @@ func Resolve(
 															Method:         "import_type",
 															Confidence:     0.95,
 															CandidateCount: 1,
-															TrustTier:      "CERTIFIED",
+															TrustTier:      tierFor(0.95),
 															EvidenceType:   "import_scoped_type",
 														})
 													}
@@ -866,7 +1016,7 @@ func Resolve(
 													Method:         "type_flow",
 													Confidence:     0.9,
 													CandidateCount: 1,
-													TrustTier:      "CERTIFIED",
+													TrustTier:      tierFor(0.9),
 													EvidenceType:   "param_type",
 												})
 											}
@@ -918,18 +1068,19 @@ func Resolve(
 				if !isSelfLike && !qualifierIsClass {
 					if classes194, ok := methodClassCount[methodName194]; ok && len(classes194) >= 1 && len(classes194) <= 3 {
 						numClasses := len(classes194)
-						// Graduated confidence: 1 class=0.85, 2=0.5, 3=0.4
+						// #5: impl_method resolves purely on GLOBAL METHOD-NAME UNIQUENESS
+						// with ZERO check that the receiver `obj` is actually that class
+						// (the qualifier was explicitly excluded from being a known class
+						// above). Name-uniqueness != receiver-proof (RTA-without-the-receiver),
+						// so the 1-class case must NEVER be CERTIFIED — cap it at CANDIDATE
+						// (conf 0.6). CERTIFIED stays reserved for stages that PROVE the
+						// receiver type (1.75 self, 1.93/1.94a import/declared-type, 1.95/1.96
+						// type_flow). Graduated: 1 class=0.6, 2=0.5, 3=0.4; tier via tierFor.
 						conf194 := 0.4
 						if numClasses == 1 {
-							conf194 = 0.85
+							conf194 = 0.6
 						} else if numClasses == 2 {
 							conf194 = 0.5
-						}
-						tier194 := "CANDIDATE"
-						if numClasses == 1 {
-							tier194 = "CERTIFIED"
-						} else if numClasses >= 3 {
-							tier194 = "SPECULATIVE"
 						}
 						// Pick the best target: prefer same-file class, then first
 						var bestTarget194 int64
@@ -959,7 +1110,7 @@ func Resolve(
 									Method:         "impl_method",
 									Confidence:     conf194,
 									CandidateCount: numClasses,
-									TrustTier:      tier194,
+									TrustTier:      tierFor(conf194),
 									EvidenceType:   "single_implementor",
 								})
 							}
@@ -1005,7 +1156,7 @@ func Resolve(
 											Method:         "type_flow",
 											Confidence:     0.9,
 											CandidateCount: 1,
-											TrustTier:      "CERTIFIED",
+											TrustTier:      tierFor(0.9),
 											EvidenceType:   "type_qualified",
 										})
 									}
@@ -1084,7 +1235,7 @@ func Resolve(
 													Method:         "type_flow",
 													Confidence:     0.9,
 													CandidateCount: 1,
-													TrustTier:      "CERTIFIED",
+													TrustTier:      tierFor(0.9),
 													EvidenceType:   "assignment_tracked",
 												})
 											}
@@ -1141,7 +1292,7 @@ func Resolve(
 													Method:         "return_type",
 													Confidence:     0.85,
 													CandidateCount: 1,
-													TrustTier:      "CERTIFIED",
+													TrustTier:      tierFor(0.85),
 													EvidenceType:   "return_type_flow",
 												})
 											}
@@ -1175,7 +1326,7 @@ func Resolve(
 								Method:         "unique_method",
 								Confidence:     0.85,
 								CandidateCount: 1,
-								TrustTier:      "CANDIDATE",
+								TrustTier:      tierFor(0.85),
 								EvidenceType:   "unique_method_class",
 							})
 						}
@@ -1209,10 +1360,6 @@ func Resolve(
 
 			if bestTarget != 0 && candidateCount > 1 {
 				conf := computeConfidence("name_match", candidateCount)
-				tier := "SPECULATIVE"
-				if candidateCount == 2 {
-					tier = "CANDIDATE"
-				}
 				key := edgeKey{callerID, bestTarget, "CALLS"}
 				if !seen[key] {
 					seen[key] = true
@@ -1224,7 +1371,7 @@ func Resolve(
 						Method:         "name_match",
 						Confidence:     conf,
 						CandidateCount: candidateCount,
-						TrustTier:      tier,
+						TrustTier:      tierFor(conf),
 						EvidenceType:   "name_match",
 					})
 				}

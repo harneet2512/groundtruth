@@ -816,9 +816,21 @@ def run_v74(
     # Stage B: full-source BM25 recall — add top BM25 results to candidate set.
     # This ensures files findable by keyword content are always candidates,
     # not just files found by semantic similarity or graph expansion.
+    #
+    # ONE BM25 pass (item #21). Previously this call (max_files=max(20,…)) seeded
+    # candidate membership + the diagnostic, and a SECOND call below
+    # (max_files=max(50,…)) scored the `lex` component — two passes whose
+    # `_max_lex` normalizers diverged, so a file admitted by call #1 could carry a
+    # different normalized lex than the score it was ranked by, and the
+    # `bm25_raw` diagnostic paired call #1's number with call #2's score. We call
+    # `lexical_file_search` ONCE at the larger cap (`max(50, …)`); `max_files` only
+    # truncates the returned top-N (the whole-corpus df/idf is unchanged), so the
+    # single larger pass is a strict superset of the old seed slice. Reused below
+    # for both candidate seeding (top-10) and component scoring → one normalizer,
+    # diagnostic matches the score.
     _lex_candidates = lexical_file_search(
         issue_text, repo_root, graph_db, issue_anchors,
-        max_files=max(20, len(candidate_set)),
+        max_files=max(50, len(candidate_set)),
     )
     _lex_top_paths = {h.file for h in (_lex_candidates or [])[:10]}
     candidate_set |= _lex_top_paths
@@ -891,11 +903,13 @@ def run_v74(
     # BM25-only files are bounded by W_LEX * 1.0 instead of W_SEM * 1.0, and since
     # calibration drives W_LEX < W_SEM, high-cosine gold files retain their ranking.
     # This is the standard hybrid retrieval formulation (Ma et al. 2022, BEIR papers).
+    #
+    # item #21: REUSE the single BM25 pass (`_lex_candidates`, computed above at
+    # max_files=max(50, …)) — do NOT issue a second `lexical_file_search`. One pass
+    # = one `_max_lex` normalizer shared by candidate seeding AND component scoring,
+    # so the `bm25_raw` diagnostic and the `lex` component can never disagree.
     lex_scores: dict[str, float] = {}
-    _lex_hits = lexical_file_search(
-        issue_text, repo_root, graph_db, issue_anchors,
-        max_files=max(50, len(all_files)),
-    )
+    _lex_hits = _lex_candidates
     if _lex_hits:
         _max_lex = max(h.score for h in _lex_hits)
         if _max_lex > 0:
@@ -931,7 +945,17 @@ def run_v74(
     # as before (no behavior change when the embedder is off). Ablations A/B keep
     # the bounded seed map to preserve their documented seed-driven semantics; the
     # LIVE path is C.
-    sem_component_scores = sem_all if sem_all else sem_scores
+    #
+    # item #46: use `sem_all` UNCONDITIONALLY for the C/D component source — no
+    # fallback to the bounded seed map. The old `sem_all if sem_all else sem_scores`
+    # re-introduced the very spurious-0 bug the decoupling was built to kill: when
+    # `sem_all` is empty for a degenerate-but-real reason (e.g. all cosines
+    # non-positive) while `sem_scores` (top-k, unfiltered for positivity) still
+    # holds values, it would silently fall back to the BOUNDED seed map and zero
+    # sem on every candidate outside the top-k. An empty `sem_all` correctly means
+    # "no positive semantic signal" → component 0 everywhere (the correct no-op,
+    # identical to embedder-off). Never fall back to the seed map.
+    sem_component_scores = sem_all
     if ablation == "A":
         components_map = _score_variant_A(sem_scores, lex_scores, all_files)
     elif ablation in ("B0", "B1"):
@@ -983,16 +1007,50 @@ def run_v74(
         else:
             components_map[fp] = {"path": path_scores.get(fp, 0.0), "frame": _frame_val, "code_def": _cdef_val}
 
+    # item #19: max-normalize path/frame/code_def to [0,1], the SAME treatment lex
+    # (L900-915) and reach (L925-936) already receive. Before this, lex/reach were
+    # normalized but path/frame/code_def carried raw construction magnitudes
+    # (path ∈ {0.4,0.5,0.7,1.0}; frame = 1/(idx+1); code_def = 1/n) — near 1.0 and,
+    # multiplied by their large weights (W_PATH=0.45, W_FRAME=0.60, W_CODE_DEF=0.70),
+    # they systematically out-weighed the normalized sem/lex/reach terms (the
+    # documented hub/keyword over-weighting). Dividing each map by its own observed
+    # max makes ALL SIX linear terms scale-commensurate so the weights mean what they
+    # say. No-op when a component is empty/all-zero (max==0 ⇒ skip) — preserves the
+    # correct-or-quiet behavior of an absent signal. Same per-component max-norm the
+    # RRF path is scale-invariant to, so this only affects the linear sum's scale.
+    for _comp in ("path", "frame", "code_def"):
+        _cmax = max((cm.get(_comp, 0.0) for cm in components_map.values()), default=0.0)
+        if _cmax > 0:
+            for cm in components_map.values():
+                _v = cm.get(_comp, 0.0)
+                if _v:
+                    cm[_comp] = _v / _cmax
+
     # Rank all candidates. GT_RRF_FUSION replaces the hand-weighted linear sum
     # with rank-based reciprocal rank fusion (research #1 fusion lever). Default
     # unset -> legacy linear sum (exact no-regression). "det" drops embeddings.
+    #
+    # item #20: BOTH fusion paths must carry the hub defense. The RRF signal set
+    # (_RRF_SIGNALS_FULL/_DET) has NO hub term, so without this a switch to
+    # GT_RRF_FUSION=on silently disabled the entire B4 hub-mislocalization defense
+    # the linear path applies via `hub_sub` (_total_score). We post-multiply each
+    # RRF score by `max(0, 1 - w_hub*hub_pen)` — the rank-space-compatible mirror of
+    # the linear `max(0, evidence - w_hub*hub_pen)`: a monotone demotion of high
+    # in-degree hubs that leaves non-hubs (hub_pen==0) untouched (exact no-op). Uses
+    # the SAME W_HUB_MAX clamp as _total_score so the two paths defend identically.
+    _w_hub_rrf = min(W_HUB_MAX, effective_weights.get("W_HUB", 0))
+
+    def _hub_demote(fp: str, raw: float) -> float:
+        hub_pen = components_map.get(fp, {}).get("hub_pen", 0.0)
+        return raw * max(0.0, 1.0 - _w_hub_rrf * hub_pen)
+
     _rrf_mode = os.environ.get("GT_RRF_FUSION", "").strip().lower()
     if _rrf_mode in ("1", "on", "full", "rrf"):
         _rrf = _rrf_fuse(components_map, all_files, _RRF_SIGNALS_FULL)
-        scored = [(fp, _rrf.get(fp, 0.0), components_map[fp]) for fp in all_files]
+        scored = [(fp, _hub_demote(fp, _rrf.get(fp, 0.0)), components_map[fp]) for fp in all_files]
     elif _rrf_mode in ("det", "deterministic", "nosem"):
         _rrf = _rrf_fuse(components_map, all_files, _RRF_SIGNALS_DET)
-        scored = [(fp, _rrf.get(fp, 0.0), components_map[fp]) for fp in all_files]
+        scored = [(fp, _hub_demote(fp, _rrf.get(fp, 0.0)), components_map[fp]) for fp in all_files]
     else:
         scored = [
             (fp, _total_score(components_map[fp], effective_weights), components_map[fp])
