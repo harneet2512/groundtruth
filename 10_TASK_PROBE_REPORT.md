@@ -41,16 +41,18 @@ correct, but the GT-architecture absorption gap (conan) must be fixed and the LS
 ### conan-17092 — `ABSORPTION_FAIL` (the one real GT-architecture wiring bug)
 - Graph healthy (det 77.79%, name_match not dominant, FTS5 ok), LSP did real work (27/79), embedder
   discriminates (cos 0.86 vs 0.76). Substrate is sound.
-- **`gate_sem_count=0`, `rendered_count=5`, `rendered_with_consistent_sem=0`** → NONE of the 5
-  rendered candidates carry any semantic score, live OR consistent. `dropped_by_join=0` — so it is
-  NOT the exact-path join drop; the localizer's rendered files are simply **never semantically scored
-  by run_v74** (the candidate sets diverge). GATE 3b (embedder consumption) correctly fails: `sem=0/5`.
-- **This is the Phase-6 GT-architecture fix:** candidate-identity / semantic-absorption lineage in
-  `v1r_brief.py` — the rendered (localizer) set must be scored by / joined to run_v74's semantic
-  scores. General, not task-specific.
-- *Note:* the earlier non-proof-mode audit labeled conan an exact-path-join "absorption" bug. With the
-  8 proof flags enforced, `dropped_by_join=0` — the real gap is coverage (rendered ∉ run_v74-scored),
-  a different (and still GT-architecture) defect.
+- **`gate_sem_count=0`, `rendered_count=5`, `dropped_by_join=0`.** Snapshot 08-vs-10 inspection proves
+  the 5 rendered candidates ARE matched in run_v74's scored set (`live_join=MATCH` for all 5) — so it is
+  **NOT a join miss and NOT candidate-set divergence**. But run_v74's **semantic component is `0.0` for
+  all 5** (`live_sem=0.0`, `consistent_sem=0.0`) even though the embedder passes GATE 3a (cos 0.86).
+  → **run_v74's semantic SCORING produces 0 for conan's candidates**: the embedder loads but its score
+  never reaches `_sem_components` for this repo. GATE 3b correctly fails `sem=0/5`.
+- **This is the Phase-6 GT-architecture fix — target `v7_4_brief.py` (run_v74) semantic path**, NOT the
+  brief join. Investigate why `_sem_components=0` for conan when the embedder works and the other 9
+  tasks get sem 1–4/5 — conan is the largest repo here, so the prime suspect is a big-repo size/time
+  cap (or a candidate-count threshold) that silently skips embedding. General, not task-specific.
+- *Note:* the earlier non-proof-mode audit guessed an exact-path-join "absorption" bug; this proof-mode
+  evidence (live_join=MATCH, sem=0) refutes that and localizes the defect to run_v74's scoring.
 
 ### gitingest-115 + checkov-6893 — `GATE_FALSE_FAIL` (gate-invariant; surfaced, NOT auto-tuned)
 - gitingest det **96.33%**, checkov det 69.37% — both healthy, deterministic graphs, FTS5 ok,
@@ -89,8 +91,10 @@ correct, but the GT-architecture absorption gap (conan) must be fixed and the LS
    aiogram (sem=1/5 ⇒ thin).
 
 ## WHAT TO FIX FIRST (Phase 6 — GENERAL, not task-specific)
-1. **conan absorption (GT-architecture):** make the localizer's rendered candidates carry run_v74's
-   semantic scores (candidate-identity / absorption lineage in `v1r_brief.py`). One real wiring bug.
+1. **conan semantic scoring (GT-architecture):** run_v74 (`v7_4_brief.py`) emits `sem=0` for conan's
+   rendered candidates even though they match (`live_join=MATCH`) and the embedder works (3a, cos 0.86).
+   Investigate + fix the run_v74 semantic path — prime suspect is a big-repo size/time cap silently
+   skipping embedding (conan is the largest repo; the other 9 score sem 1–4/5). General, not the join.
 2. **LSP gate-invariant (gitingest/checkov):** surface + propose the no-op-valid correction to GATE 2;
    do not auto-tune. Decision required.
 3. **loguru product-quality:** separate report; do not fix in this pass.
