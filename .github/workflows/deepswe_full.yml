@@ -148,8 +148,53 @@ jobs:
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
               f.write(f"matrix={json.dumps(matrix)}\n")
               f.write(f"total={len(tasks)}\n")
+          # Persist the task id list for the Stage-0 image pre-verify (fail-closed before
+          # the paid matrix), mirroring the OH pipeline's run_task_ids.txt.
+          with open("/tmp/deepswe_task_ids.txt", "w") as f:
+              f.write("\n".join(tasks) + "\n")
           print(f"{len(tasks)} tasks queued (lang={lang}, max={maxt})", file=sys.stderr)
           PYEOF
+
+      - name: Pre-verify ALL task images exist (manifest-only, fail-closed — $0 abort)
+        env:
+          GHCR_TOKEN: ${{ secrets.GHCR_PULL_TOKEN || secrets.GITHUB_TOKEN }}
+          DOCKER_CLI_EXPERIMENTAL: enabled
+        shell: bash
+        run: |
+          # Mirror of the OH pipeline's image pre-verify: resolve EVERY task image's manifest
+          # (GHCR mirror first, then the ECR-Public source) BEFORE the paid matrix. A missing
+          # image #50 of 113 would otherwise waste 49 tasks of spend before surfacing — so any
+          # unresolvable tag aborts the whole run here, in Stage-0, at $0. Metadata-only
+          # (`docker manifest inspect`), no layer pulls; one retry each for transient blips.
+          set -uo pipefail
+          test -s /tmp/deepswe_task_ids.txt || { echo "FATAL: task id list missing (gen step did not persist it)"; exit 1; }
+          OWNER=$(echo "${{ inputs.assets_repo }}" | cut -d/ -f1 | tr '[:upper:]' '[:lower:]')
+          echo "${GHCR_TOKEN}" | docker login ghcr.io -u "$OWNER" --password-stdin >/dev/null 2>&1 \
+            || echo "::warning::GHCR login failed — relying on the ECR-Public source for pre-verify"
+          MISSING=""; TOTAL=0; OK=0; GHCR_HIT=0
+          while IFS= read -r TASK; do
+            TASK="$(echo "$TASK" | tr -d '\r')"; [ -n "$TASK" ] || continue
+            TOTAL=$((TOTAL+1))
+            TOML="deepswe-bench/tasks/$TASK/task.toml"
+            IMG=$(python3 -c "import tomllib;print(tomllib.load(open('$TOML','rb')).get('environment',{}).get('docker_image',''))" 2>/dev/null || true)
+            if [ -z "$IMG" ]; then MISSING="${MISSING}\n  $TASK (no docker_image in task.toml)"; continue; fi
+            BASE="${IMG##*/}"; BASE="${BASE%%:*}"; TAG="${IMG##*:}"
+            GHCR="ghcr.io/${OWNER}/${BASE}:${TAG}"
+            if docker manifest inspect "$GHCR" >/dev/null 2>&1 || docker manifest inspect "$GHCR" >/dev/null 2>&1; then
+              OK=$((OK+1)); GHCR_HIT=$((GHCR_HIT+1))
+            elif docker manifest inspect "$IMG" >/dev/null 2>&1 || docker manifest inspect "$IMG" >/dev/null 2>&1; then
+              OK=$((OK+1))
+            else
+              MISSING="${MISSING}\n  $TASK ($IMG | $GHCR)"
+            fi
+          done < /tmp/deepswe_task_ids.txt
+          echo "image pre-verify: $OK/$TOTAL resolvable ($GHCR_HIT via GHCR mirror, rest via ECR source)"
+          if [ -n "$MISSING" ]; then
+            echo "FATAL: task images MISSING from BOTH the GHCR mirror and the ECR source — aborting the whole run in Stage-0 (\$0 spent):"
+            printf '%b\n' "$MISSING"
+            exit 1
+          fi
+          echo "image pre-verify PASSED: all $TOTAL task images resolvable before the paid matrix"
 
       - name: Legitimacy guard — Stage-0 built NO task graph.db (env-only)
         run: |
