@@ -40,6 +40,168 @@ REQUIRED_ARTIFACTS = [
 # Where GT is baked in the substrate image (NOT a checkout, NOT host paths).
 GT_HOME = os.environ.get("GT_HOME", "/opt/gt")
 
+# ── Run provenance (Stage-5 audit: a run must prove WHICH code produced it) ──────────────
+# The 8 proof-env flags the substrate runs under — same set as required_env in the contract.
+PROOF_FLAG_KEYS = ("GT_PROOF_MODE", "GT_CONTAINERIZED", "GT_RUNTIME_STRATEGY",
+                   "GT_REQUIRE_FTS5", "GT_REQUIRE_EMBEDDER", "GT_FORCE_ONNX_EMBEDDER",
+                   "GT_REQUIRE_LSP", "GT_REQUIRE_FULL_STACK")
+
+# The 4 substrate certificates whose schema/version stamps the manifest records.
+_CERT_FILES = {"lsp_certificate": "lsp_certificate.json",
+               "graph_certificate": "graph_certificate.json",
+               "embedder_certificate": "embedder_certificate.json",
+               "foundational_gate_report": "foundational_gate_report.json"}
+
+_LEGIT_MOD = None
+_LEGIT_TRIED = False
+
+
+def _legitimacy_mod():
+    """Borrow scripts/verify/legitimacy.py (the OH-path manifest builder) when reachable.
+    The substrate bakes the whole scripts tree (Dockerfile: COPY scripts /opt/gt/scripts)
+    but only scripts/swebench is on PYTHONPATH, so load it by PATH — in-container under
+    $GT_HOME, or repo-relative on a host/dev checkout. None => callers use the inline
+    minimal equivalents below; provenance must never crash the proof run."""
+    global _LEGIT_MOD, _LEGIT_TRIED
+    if _LEGIT_TRIED:
+        return _LEGIT_MOD
+    _LEGIT_TRIED = True
+    import importlib.util
+    here = os.path.dirname(os.path.abspath(__file__))
+    for cand in (os.path.join(GT_HOME, "scripts", "verify", "legitimacy.py"),
+                 os.path.normpath(os.path.join(here, "..", "verify", "legitimacy.py"))):
+        if not os.path.exists(cand):
+            continue
+        try:
+            spec = importlib.util.spec_from_file_location("gt_legitimacy_helpers", cand)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            _LEGIT_MOD = mod
+        except Exception:
+            _LEGIT_MOD = None
+        break
+    return _LEGIT_MOD
+
+
+def _env_or_none(key: str):
+    """Provenance env value, recorded-or-null. Absent/empty -> None — never a guess."""
+    v = os.environ.get(key, "").strip()
+    return v or None
+
+
+def _gt_git_commit():
+    """Which GT code produced this run. Env GT_GIT_COMMIT first (the substrate container
+    has no .git — the workflow exports github.sha into the docker run); fall back to
+    `git rev-parse HEAD` ONLY when a .git actually exists (host/dev checkout); else None.
+    Never fabricated."""
+    v = _env_or_none("GT_GIT_COMMIT")
+    if v:
+        return v
+    here = os.path.dirname(os.path.abspath(__file__))
+    for root in (GT_HOME, os.path.normpath(os.path.join(here, "..", ".."))):
+        if not os.path.isdir(os.path.join(root, ".git")):
+            continue
+        m = _legitimacy_mod()
+        if m is not None and hasattr(m, "_git_head"):
+            return m._git_head(root) or None
+        try:
+            out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root,
+                                 capture_output=True, text=True, timeout=15)
+            if out.returncode == 0 and out.stdout.strip():
+                return out.stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            pass
+        return None
+    return None
+
+
+def _sha256_file(path: str):
+    """sha256 of a file (graph.db provenance). Borrows legitimacy._sha256_file when
+    available (byte-identical inline fallback otherwise). None when unreadable."""
+    m = _legitimacy_mod()
+    if m is not None and hasattr(m, "_sha256_file"):
+        try:
+            return m._sha256_file(path) or None
+        except Exception:
+            return None
+    try:
+        import hashlib
+        h = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return None
+
+
+def _language_distribution(graph_db: str):
+    """REAL per-language node counts from the built graph.db. EVERY language present is
+    counted — including ones with no LSP server (_detect_langs filters to _LSP_LANGS for
+    resolve scheduling; provenance must not drop them). None when the graph cannot be
+    read — never a fabricated {}."""
+    try:
+        import sqlite3
+        c = sqlite3.connect(f"file:{graph_db}?mode=ro", uri=True)
+        rows = c.execute("select coalesce(nullif(trim(language),''),'unknown') as lang, "
+                         "count(*) from nodes group by lang order by count(*) desc").fetchall()
+        c.close()
+        return {str(r[0]): int(r[1]) for r in rows}
+    except Exception:
+        return None
+
+
+def _cert_versions(out_dir: str) -> dict:
+    """The schema/version stamp from each of the 4 substrate certs when present
+    (gt.lsp_certificate.v1 / gt.graph_certificate.v1 / gt.embedder_certificate.v1; the
+    foundational gate report carries no schema field today). Absent file or absent
+    field -> None — never fabricated."""
+    out: dict = {}
+    for name, fname in _CERT_FILES.items():
+        ver = None
+        p = os.path.join(out_dir, fname)
+        try:
+            if os.path.exists(p):
+                with open(p, encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    for k in ("schema", "schema_version", "version", "cert_version"):
+                        if data.get(k):
+                            ver = data[k]
+                            break
+        except Exception:
+            ver = None
+        out[name] = ver
+    return out
+
+
+def build_run_manifest(*, graph_db: str, out_dir: str, languages: list, lsp_scope_files: int,
+                       lsp_max_edges: str, gate_rc: int, artifacts_present: dict,
+                       source_root: str) -> dict:
+    """run_manifest.json — v2 = the v1 run-shape + RUN PROVENANCE (Stage-5 audit gap:
+    a DeepSWE run could not prove which code produced it). Additive only: no task IDs,
+    no gold, no behavior change to the proof/gates. Every provenance field is
+    recorded-or-null, never guessed."""
+    return {
+        "schema": "gt.run_manifest.v2",
+        # ── run shape (v1 fields, unchanged) ──
+        "languages": languages,
+        "lsp_scope_files": lsp_scope_files,
+        "lsp_max_edges": lsp_max_edges,
+        "gate_rc": gate_rc,
+        "artifacts_present": artifacts_present,
+        "source_root": source_root,
+        "out": out_dir,
+        # ── provenance: which code / substrate / task repo produced this run ──
+        "gt_git_commit": _gt_git_commit(),
+        "substrate_digest": _env_or_none("GT_SUBSTRATE_DIGEST"),
+        "task_repo_commit": _env_or_none("GT_TASK_REPO_COMMIT"),
+        "runtime_flags": {k: os.environ.get(k) for k in PROOF_FLAG_KEYS},
+        "language_distribution": _language_distribution(graph_db),
+        "graph_db_sha256": _sha256_file(graph_db),
+        "cert_versions": _cert_versions(out_dir),
+    }
+
 
 def expected_outputs(out_dir: str) -> list[str]:
     """The absolute artifact paths this entrypoint guarantees under --out."""
@@ -471,12 +633,12 @@ def main(argv=None) -> int:
     except Exception as e:
         print(f"WARN: runtime_context.json: {e}", file=sys.stderr)
 
-    # 6. run manifest + artifact presence
+    # 6. run manifest + artifact presence (+ run provenance — see build_run_manifest)
     present = {a_: os.path.exists(os.path.join(a.out, a_)) for a_ in REQUIRED_ARTIFACTS
                if a_ != "run_manifest.json"}
-    manifest = {"schema": "gt.run_manifest.v1", "languages": langs, "lsp_scope_files": len(scope_files),
-                "lsp_max_edges": max_edges, "gate_rc": rc,
-                "artifacts_present": present, "source_root": work, "out": a.out}
+    manifest = build_run_manifest(graph_db=graph, out_dir=a.out, languages=langs,
+                                  lsp_scope_files=len(scope_files), lsp_max_edges=max_edges,
+                                  gate_rc=rc, artifacts_present=present, source_root=work)
     with open(os.path.join(a.out, "run_manifest.json"), "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
     missing = [k for k, v in present.items() if not v]
