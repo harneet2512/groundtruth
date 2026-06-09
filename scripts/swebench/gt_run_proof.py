@@ -128,6 +128,7 @@ def main(argv=None) -> int:
               file=sys.stderr)
         return 2
     try:
+        sys.path.insert(0, os.path.join(GT_HOME, "src"))  # package lives at $GT_HOME/src
         sys.path.insert(0, GT_HOME)
         from groundtruth.runtime.context import assert_container_boundary
         assert_container_boundary("gt-run-proof")
@@ -147,9 +148,26 @@ def main(argv=None) -> int:
     cert_emb = os.path.join(a.out, "embedder_certificate.json")
     gate_report = os.path.join(a.out, "foundational_gate_report.json")
     issue_file = a.issue or "/tmp/issue.txt"
+    # foundational_gates reads the issue file; in the portable run it may not be mounted. Ensure it
+    # exists (empty or GT_ISSUE_TEXT) so the gates run + emit certs instead of crashing on open().
+    if not os.path.exists(issue_file):
+        try:
+            with open(issue_file, "w", encoding="utf-8") as _f:
+                _f.write(os.environ.get("GT_ISSUE_TEXT", ""))
+        except Exception:
+            issue_file = os.path.join(a.out, "issue.txt")
+            with open(issue_file, "w", encoding="utf-8") as _f:
+                _f.write(os.environ.get("GT_ISSUE_TEXT", ""))
 
+    # The groundtruth package is baked at $GT_HOME/src (Dockerfile: COPY src /opt/gt/src), the scripts
+    # at $GT_HOME/scripts. The subprocesses (resolve, foundational_gates) import groundtruth, so
+    # PYTHONPATH MUST include $GT_HOME/src — PREPEND it to (never overwrite) the image's PYTHONPATH.
+    _pp = os.environ.get("PYTHONPATH", "")
+    _gt_paths = os.pathsep.join([os.path.join(GT_HOME, "src"),
+                                 os.path.join(GT_HOME, "scripts", "swebench"),
+                                 os.path.join(GT_HOME, "benchmarks", "swebench"), GT_HOME])
     base_env = os.environ.copy()
-    base_env.update({"PYTHONPATH": GT_HOME, "GT_HOME": GT_HOME,
+    base_env.update({"PYTHONPATH": _gt_paths + (os.pathsep + _pp if _pp else ""), "GT_HOME": GT_HOME,
                      "GT_MODELS_ROOT": os.environ.get("GT_MODELS_ROOT", os.path.join(GT_HOME, "models")),
                      "GT_SOURCE_ROOT": work, "GT_GRAPH_DB": graph,
                      "GT_LSP_CERT": cert_lsp, "GT_GRAPH_CERT": cert_graph, "GT_EMBEDDER_CERT": cert_emb})
