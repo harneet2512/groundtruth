@@ -122,6 +122,67 @@ def eval_leakage(source_root: str) -> list:
     return leaks
 
 
+_LSP_LANGS = {"python", "go", "javascript", "typescript", "rust", "java", "c", "cpp", "ruby", "php"}
+_STOP = {"the", "and", "for", "with", "this", "that", "when", "from", "into", "have", "will", "your",
+         "are", "was", "not", "but", "you", "can", "all", "any", "has", "had", "get", "set", "def",
+         "self", "test", "error", "issue", "should", "would", "could", "because", "return", "none"}
+
+
+def _detect_langs(graph_db: str) -> list:
+    """ALL languages present in the graph that have a known LSP server, ordered by node count desc
+    (dominant first). Polyglot repos resolve every language, not just the dominant one."""
+    try:
+        import sqlite3
+        c = sqlite3.connect(f"file:{graph_db}?mode=ro", uri=True)
+        rows = c.execute("select language, count(*) c from nodes where is_test=0 and language is not "
+                         "null and trim(language)!='' group by language order by c desc").fetchall()
+        c.close()
+        return [r[0] for r in rows if r[0] and str(r[0]).lower() in _LSP_LANGS]
+    except Exception:
+        return []
+
+
+def _read_issue(path: str) -> str:
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        return ""
+
+
+def _issue_terms(issue_text: str, k: int = 30) -> list:
+    import re
+    out = []
+    for w in re.findall(r"[A-Za-z_][A-Za-z0-9_]{3,}", issue_text or ""):
+        if w.lower() in _STOP:
+            continue
+        if w not in out:
+            out.append(w)
+        if len(out) >= k:
+            break
+    return out
+
+
+def _demand_scope_files(graph_db: str, issue_text: str, cap: int = 80) -> list:
+    """Demand-driven scope (Heintze & Tardieu, PLDI 2001): the issue-relevant files via an FTS5
+    MATCH on the issue terms. Returns [] (=> whole-repo) when there's no issue. Bounds LSP work to
+    the subgraph that matters so it can be resolved FULLY instead of whole-repo-capped-at-500."""
+    terms = _issue_terms(issue_text)
+    if not terms:
+        return []
+    match = " OR ".join(f'"{t}"' for t in terms)
+    try:
+        import sqlite3
+        c = sqlite3.connect(f"file:{graph_db}?mode=ro", uri=True)
+        rows = c.execute("select n.file_path from nodes_fts f join nodes n on n.id=f.rowid where "
+                         "nodes_fts match ? group by n.file_path order by count(*) desc limit ?",
+                         (match, cap)).fetchall()
+        c.close()
+        return [r[0] for r in rows if r[0]]
+    except Exception:
+        return []
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="gt-run-proof")
     ap.add_argument("--source-root", required=False, default="/work")
@@ -212,11 +273,32 @@ def main(argv=None) -> int:
     if _run([_gt_index_bin(), "-root", work, "-output", graph], base_env) != 0:
         print("FATAL: gt-index failed", file=sys.stderr)
         return 2
-    lang = a.lang or _detect_lang(graph)
-
-    # 2. LSP enrichment (emits lsp_certificate.json + resolved graph + closure rebuild)
-    _run([sys.executable, "-m", "groundtruth.resolve", "--db", graph, "--root", work,
-          "--resolve", "--lang", lang], base_env)
+    # 2. LSP enrichment — demand-driven + polyglot + un-throttled within the issue scope.
+    # gt_gt §3/§7 + CLAUDE.md "demand-driven, not exhaustive": resolve the issue-relevant subgraph
+    # for EVERY language present (not just the dominant one), un-capped within that bounded scope —
+    # closing the "whole-repo capped at 500 -> majority name_match" gap. With a real issue the
+    # demand scope resolves FULLY; with no issue (free liveness proof) it keeps the 500 default.
+    # Dominant language is resolved LAST so its LSP certificate is the one that persists.
+    langs = _detect_langs(graph) or ([a.lang] if a.lang else [_detect_lang(graph)])
+    scope_files = _demand_scope_files(graph, _read_issue(issue_file))
+    scope_path = ""
+    if scope_files:
+        scope_path = os.path.join(a.out, "gt_scope_files.txt")
+        with open(scope_path, "w", encoding="utf-8") as _sf:
+            _sf.write("\n".join(scope_files))
+    max_edges = "20000" if scope_files else "500"
+    lsp_ok = False
+    for lg in reversed(langs):  # least-common first, dominant last (its cert persists)
+        cmd = [sys.executable, "-m", "groundtruth.resolve", "--db", graph, "--root", work,
+               "--resolve", "--lang", lg, "--max-edges", max_edges]
+        if scope_path:
+            cmd += ["--source-files", scope_path]
+        if _run(cmd, base_env) == 0:
+            lsp_ok = True
+    if os.environ.get("GT_REQUIRE_LSP") == "1" and not lsp_ok:
+        print("LSP_LIVENESS_FAIL: GT_REQUIRE_LSP=1 but LSP resolved no language successfully",
+              file=sys.stderr)
+        return 2
 
     # 3. graph certificate
     _run([sys.executable, os.path.join(GT_HOME, "scripts/metrics/graph_certificate.py"), graph,
@@ -237,27 +319,43 @@ def main(argv=None) -> int:
         try:
             os.environ["GT_EMBEDDER_CERT"] = cert_emb
             from groundtruth.runtime import proof as _proof
+            import numpy as _np
+            from groundtruth.pretask.v7_4_brief import _get_model
             _proof.embedder_identity()  # loads the embedder (raises if not the forced-ONNX one)
-            disc = None
-            try:
-                import numpy as _np
-                from groundtruth.pretask.v7_4_brief import _get_model
-                vs = _get_model().encode(["database connection pool",
-                                          "database connection pool timeout", "the quick brown fox"])
+            # Encode errors are NOT swallowed — a degenerate/unloadable embedder is fatal in proof.
+            vs = _get_model().encode(["database connection pool",
+                                      "database connection pool timeout", "the quick brown fox"])
 
-                def _cos(a, b):
-                    a = _np.asarray(a, float); b = _np.asarray(b, float)
-                    return float(a @ b / ((a @ a) ** 0.5 * (b @ b) ** 0.5 + 1e-9))
-                disc = _cos(vs[0], vs[1]) - _cos(vs[0], vs[2])
-            except Exception as _e:
-                print(f"WARN: embedder probe encode: {_e}", file=sys.stderr)
+            def _cos(a, b):
+                a = _np.asarray(a, float); b = _np.asarray(b, float)
+                return float(a @ b / ((a @ a) ** 0.5 * (b @ b) ** 0.5 + 1e-9))
+            disc = _cos(vs[0], vs[1]) - _cos(vs[0], vs[2])
             cert = _proof.build_embedder_certificate(db=graph, bug_id="portable_probe")
             cert["discrimination_margin"] = disc
             cert["emitted_by"] = "gt-run-proof direct identity+cosine probe (issue-independent)"
             _proof.write_embedder_certificate(cert)
             print(f"[gt-run-proof] embedder cert emitted via direct probe (disc={disc})", flush=True)
         except Exception as e:
-            print(f"WARN: embedder cert probe failed: {e}", file=sys.stderr)
+            print(f"EMBEDDER_USAGE_FAIL: embedder probe failed (no swallow in proof): {e}", file=sys.stderr)
+            return 2
+
+    # 4c. CLASSIFY the embedder certificate (probe OR gate-written) and FAIL-CLOSED on a bad verdict
+    # — degenerate/no-discrimination, zero model, ST-under-forced-ONNX, model-root divergence,
+    # dropped semantic. Presence alone is not proof on a real-money run.
+    try:
+        _md = os.path.join(GT_HOME, "scripts", "metrics")
+        if _md not in sys.path:
+            sys.path.insert(0, _md)
+        import importlib
+        _ec = importlib.import_module("embedder_certificate")
+        _verdict, _ok = _ec.classify_embedder(_ec.load_embedder_cert(cert_emb),
+                                              proof_mode=True, require_embedder=True)
+        print(f"[gt-run-proof] embedder verdict: {_verdict}", flush=True)
+        if not _ok:
+            print(f"EMBEDDER_USAGE_FAIL: {_verdict}", file=sys.stderr)
+            return 2
+    except Exception as e:
+        print(f"WARN: embedder cert classification skipped: {e}", file=sys.stderr)
 
     # 5. runtime_context.json
     try:
@@ -275,7 +373,8 @@ def main(argv=None) -> int:
     # 6. run manifest + artifact presence
     present = {a_: os.path.exists(os.path.join(a.out, a_)) for a_ in REQUIRED_ARTIFACTS
                if a_ != "run_manifest.json"}
-    manifest = {"schema": "gt.run_manifest.v1", "language": lang, "gate_rc": rc,
+    manifest = {"schema": "gt.run_manifest.v1", "languages": langs, "lsp_scope_files": len(scope_files),
+                "lsp_max_edges": max_edges, "gate_rc": rc,
                 "artifacts_present": present, "source_root": work, "out": a.out}
     with open(os.path.join(a.out, "run_manifest.json"), "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)

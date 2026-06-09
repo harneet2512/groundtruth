@@ -143,3 +143,22 @@ def test_contract_lists_separation_guarantee(capsys):
     grp.main(["--print-contract"])
     j = json.loads(capsys.readouterr().out)
     assert any("leakage" in g for g in j["guarantees"])
+
+
+# ── LSP coverage: polyglot + demand scope (un-throttle the 500-cap) ──────────
+
+def test_issue_terms_filters_stopwords():
+    terms = grp._issue_terms("The connection pool should not timeout because of the error")
+    assert "connection" in terms and "timeout" in terms
+    assert "should" not in terms and "the" not in [t.lower() for t in terms]
+
+
+def test_demand_scope_empty_issue_is_whole_repo():
+    # no terms or no graph -> [] (=> whole-repo, default cap); never raises
+    assert grp._demand_scope_files("/tmp/nonexistent.db", "") == []
+    assert grp._demand_scope_files("/tmp/nonexistent.db", "fix the connection bug") == []
+
+
+def test_detect_langs_graceful_and_lsp_only():
+    assert grp._detect_langs("/tmp/nonexistent.db") == []  # graceful on missing db
+    assert "python" in grp._LSP_LANGS and "typescript" in grp._LSP_LANGS

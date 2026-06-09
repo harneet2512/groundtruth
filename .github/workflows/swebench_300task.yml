@@ -893,10 +893,14 @@ jobs:
           GT_SUBSTRATE_DIGEST="${GT_SUBSTRATE_DIGEST:-${{ vars.GT_SUBSTRATE_DIGEST }}}"
           if [ -n "$GT_SUBSTRATE_DIGEST" ]; then
             echo "Stage 4.2 PORTABLE substrate run (pinned $GT_SUBSTRATE_DIGEST) -> /tmp/gt"
+            # Write THIS task's issue (the problem statement — NOT gold/tests) so the portable LSP
+            # demand-scope + embedder cert operate on the issue-relevant subgraph. Mounted read-only.
+            python3 -c "import json; tid='${{ matrix.task }}'.strip(); rows=[json.loads(l) for l in open('/tmp/ds/dataset.jsonl')]; m=[d.get('problem_statement','') or '' for d in rows if d.get('instance_id')==tid]; open('/tmp/issue.txt','w',encoding='utf-8').write(m[0] if m else '')" 2>/dev/null || : > /tmp/issue.txt
             docker run --rm -v "/tmp/gt/src:/work:ro" -v "/tmp/gt:/gt_artifacts" \
+              -v "/tmp/issue.txt:/work_issue.txt:ro" \
               -e GT_PROOF_MODE=1 -e GT_CONTAINERIZED=1 -e GT_RUNTIME_STRATEGY=unified_substrate \
               -e GT_REQUIRE_FTS5=1 -e GT_REQUIRE_EMBEDDER=1 -e GT_FORCE_ONNX_EMBEDDER=1 \
-              -e GT_REQUIRE_LSP=1 -e GT_REQUIRE_FULL_STACK=1 \
+              -e GT_REQUIRE_LSP=1 -e GT_REQUIRE_FULL_STACK=1 -e GT_ISSUE_FILE=/work_issue.txt \
               "$GT_SUBSTRATE_DIGEST" gt-run-proof --source-root /work --out /gt_artifacts
             # Step 5: the portable path is PRIMARY in proof — consume /gt_artifacts and SKIP the
             # in-task LSP/gates (a second, divergent runtime). Fail-closed if any cert is missing.

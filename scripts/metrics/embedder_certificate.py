@@ -31,6 +31,11 @@ def _root_of(identity):
     return ""
 
 
+# Minimum related-vs-unrelated cosine separation for a healthy e5 embedder. e5-small-v2 yields a
+# margin well above this on the probe strings; a degenerate/constant embedder yields ~0.
+_DISC_FLOOR = 0.02
+
+
 def classify_embedder(cert, *, proof_mode: bool = False, require_embedder: bool = False):
     """Hard gates over the embedder certificate -> (verdict, ok).
 
@@ -63,6 +68,23 @@ def classify_embedder(cert, *, proof_mode: bool = False, require_embedder: bool 
     cand = int(cert.get("semantic_candidate_count", 0) or 0)
     rendered_nz = int(cert.get("rendered_semantic_nonzero_count", 0) or 0)
     upstream_nz = int(cert.get("upstream_semantic_nonzero_count", 0) or 0)
+
+    # Discrimination floor: the gt-run-proof direct probe (empty-issue path) records
+    # discrimination_margin = cos(related) - cos(unrelated). A non-positive / below-floor margin is a
+    # degenerate (constant-vector) embedder -> FAIL even with no candidates. None (probe encode
+    # failed) under proof+require is also a FAIL. Closes the "load-only" gap on the portable path.
+    if "discrimination_margin" in cert:
+        dm = cert.get("discrimination_margin", None)
+        if dm is None:
+            if proof_mode and require_embedder:
+                return ("EMBEDDER_FAIL_NO_DISCRIMINATION", False)
+        else:
+            try:
+                if float(dm) <= _DISC_FLOOR:
+                    return ("EMBEDDER_FAIL_NO_DISCRIMINATION", False)
+            except (TypeError, ValueError):
+                if proof_mode and require_embedder:
+                    return ("EMBEDDER_FAIL_NO_DISCRIMINATION", False)
 
     # Non-empty candidates that render all-zero semantic, under a required embedder in proof
     # mode, are a FAIL — no escape hatch. If upstream scores existed, they were DROPPED.
