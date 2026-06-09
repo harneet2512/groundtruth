@@ -487,5 +487,48 @@ working" — and **"delivered" is the WRONG axis for a reindexer or an event hoo
 
 ---
 
+## 13. Session 2026-06-09 — work done + the DeepSWE/mini-swe-agent pivot (FULL-depth, multilingual)
+
+### 13.1 What shipped today (pushed to origin/harneet2512 + hbali-stack gt-trial)
+- **Proof/infra:** LSP stamping fix (`9e7edeca` — gate counts lsp_resolved from the FINAL graph + cross-checks the cert; measurement-only, graph==cert proven on 6 tasks); image-pull retry hardening (`dff3144b`, `TASK_IMAGE_PULL_FAIL`); **brief-consume fix (`8d48360a`)** — the agent consumes the in-container `/gt_artifacts/brief.txt`; no host `run_v74` in proof (closed the host-split + dead-finish issue).
+- **30-task PAID agent run (`27214152241`):** 30/30 ran, 0 fail, **2/30 resolved** (sh-744, beancount-931), **0 GT-caused flips** (both baseline-coincident self-localizations), **leakage 0**, substrate GREEN 30/30.
+- **§4 trajectory audit — 30 ledgers in `task_ledgers/`:** dominant non-resolution = **post-localization implementation correctness + multi-file scope**; L1 mislocalizes the majority (granularity + JSON/data blind spot); leakage 0 everywhere.
+- **CHANGE 1 — per-symbol MaxSim granularity (`33970b9f`):** fixes the whole-file-bag flat-cosine collapse; validated **gold #1 3/7→7/7 at e5/384** (granularity is the lever WITHOUT a model swap). See §11.2.
+- **Fusion + dense floor (validated in worktree, integrating):** `W_SEM_FLOOR=0.25`, base `W_SEM 0.15→0.40`; query-adaptive Dimension-0 (error-code regex → identifier-heavy lexical-lead; nl_gap dense-lead); dense led/floored, never throttled, lexical-fused. 15/15 tests. See §11.5/§11.6.
+- **Docs/cleanup:** dead-shim removal (`specificity.py`, `db267869`); gt_gt §11 (findings+plan), §12 (per-layer role table — anti-mislabel safeguard), §11.8 (dense-floor LOCKED).
+- **Diagnostic corrections (from code+artifacts, not labels):** L6 = REINDEXER, fires+works but STRIPS LSP (`gt-index -file` is structural-only; pyright absent from the TASK image → post-edit contracts degrade LSP→AST); L3b = relevance bug (`start_line` fallback) + the L6 LSP-strip; L5/L5b scaffold nudge IS delivered (§4 "DELIVERED=NO" was a mislabel) — genuine non-delivery = goku band/cap deadlock + L5b defer-to-goku + the orphaned `multi_file_scope_warning` (dead finish handler); `GRAPH_FAIL_MISSING_HANDOFF` = FALSE FAIL (cert pre-agent; runtime witness proves handoff); **L4 = EVENT hook** (fires on its event; absence ≠ no-op).
+
+### 13.2 The PIVOT: OH+GT (SWE-Live-Lite) → mini-swe-agent+GT (DeepSWE / Datacurve), multilingual
+- **Benchmark:** drop SWE-Live-Lite (low mindshare) + skip **saturated** SWE-bench Verified → **Datacurve DeepSWE** (`github.com/datacurve-ai/deep-swe`): **113 tasks / 91 repos / 5 languages (TS/Go/Rust/JS/Python)**, contamination-free (newly-written, not from commits), **unsaturated** (leaderboard 5–70%; gpt-5.5 70%, claude-opus-4.8 58%), long-horizon (~5.5× more code), **Harbor/Pier harness**, frontier attention. Right fit for GT: contamination-free → flips are real; unsaturated → headroom; polyglot → exercises the language-agnostic mandate.
+- **Harness CONFIRMED from project code** (`scripts/swebench/gt_deep_metrics.py:117,120`): **DeepSWE = `pier` + `mini-swe-agent`.** GT integrates with mini-swe-agent (GTMiniSweAgent), NOT OpenHands.
+
+### 13.3 The TWO-ENGINE problem (a latent ONE-PRODUCT-RULE violation) — UNIFY mandate
+Read from code (not CLAUDE.md):
+- **OH path:** `oh_gt_full_wrapper.py` → `v1r_brief.generate_v1r_brief` → `run_v74` + `anchor_select`/`graph_localizer` — the **DEEP, multilingual** (tree-sitter graph + ONNX embedder) engine where **CHANGE 1 + fusion+floor + the embedder live.**
+- **mini-swe/DeepSWE path TODAY:** `run_mini_gt_hooked.py` → `graph.db` → **`gt_intel.py`** (sqlite + `ast`, the 7 evidence families, **NO embedder / NO semantic ranker / NO v1r**) + `gt_hook.py` (173KB, `ast` + graph.db-backed analyze via gt_intel). **The levers are NOT here.** And `ast` = **Python-only** → wrong for 5-language DeepSWE.
+- **MANDATE:** do NOT fork the product or port fixes between two engines. **UNIFY the DeepSWE/mini-swe path onto `v1r_brief`/`run_v74`** (the deep, multilingual engine). This satisfies the ONE PRODUCT RULE and makes CHANGE 1 + fusion+floor + the embedder apply to DeepSWE by construction.
+
+### 13.4 Integration requirement: FULL OH depth (and more), language-agnostic, on mini-swe-agent
+User directive: **full OH depth, and more.** Bring the WHOLE of GT (§1–10), not just localization, to mini-swe-agent:
+- Layer-0 graph base (gt-index tree-sitter, 30 langs) → LSP enrichment (§3) → localization+brief (§4 + CHANGE 1/fusion/embedder) → semantic/ONNX (§5, → gte-modernbert) → the hooked tool surface (§6) → the no-silent-fallback gates (§7) → the proof runtime.
+- **OH deep hooks to replicate on the mini-swe-agent loop:** L1 brief delivery, L3b contracts (post-view), **L6 post-edit reindex preserving LSP** (bake pyright in the task image), consensus (`<gt-scope>`), L5 governors, completeness forcing. Map onto mini-swe-agent's (simpler than OH's controller) injection points — **port CAPABILITIES, not OH-specific plumbing** (the dead-finish-handler workaround, the OH stuck-detector are OH artifacts, do not carry them over).
+- **Language-agnostic (CLAUDE.md mandate):** tree-sitter graph + multilingual embedder everywhere; **retire the Python-`ast` paths** (`gt_intel`/`gt_hook` ast) for the DeepSWE engine.
+
+### 13.5 Docker imaging of GT — REQUIRED for DeepSWE too
+GT already has a portable substrate image from the proof work: `ghcr.io/hbali-stack/gt-substrate@sha256:…` (bakes the GT package + static gt-index tree-sitter+FTS5 + ONNX embedder + node/pyright + model + the `gt-run-proof` entrypoint). For DeepSWE the image must:
+1. **Swap e5 → gte-modernbert** (CHANGE 2; multilingual, 768-dim, int8 ONNX).
+2. **Bake pyright + the per-language LSP servers (gopls, rust-analyzer, tsserver/typescript-language-server) into the image** — so the post-edit reindex (L6) **preserves LSP across all 5 languages** (the LSP-strip fix; critical for polyglot — §11.4 / 13.1).
+3. Be runnable inside the **Pier/Harbor task environment** (DeepSWE's `task.toml` + `environment/Dockerfile`), emitting the same proof certs.
+This Docker imaging is in scope for the DeepSWE integration, not only the OH proof path.
+
+### 13.6 Build order (each Stage-1 deterministic before any flip claim)
+1. **Integrate the validated fusion+floor into `v1r`** (done-pending).
+2. **CHANGE 2** — gte-modernbert multilingual ONNX swap + bake into the substrate image + the per-language LSP servers.
+3. **UNIFY the DeepSWE/mini-swe path onto `v1r_brief`/`run_v74`** — full OH depth (brief, contracts, reindex, consensus, completeness) on mini-swe-agent in the Pier harness, language-agnostic; retire the `gt_intel`/`gt_hook` ast paths.
+4. **DeepSWE substrate Docker image** (gte-modernbert + multilingual LSP) wired into Pier.
+5. **Validate** — GT-off baseline on DeepSWE + paired GT-on (Wilcoxon), Stage-1 deterministic per lever, across all 5 languages (anti-overfit / language-agnostic proof).
+
+---
+
 *End — gt_gt.md. Localization deep internals: `BRIEFING.md`. Benchmark operation/gates:
 `BENCHMARK_RUNBOOK.md`. Fix history: `we_did.md` (legacy).*
