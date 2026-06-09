@@ -825,8 +825,20 @@ def main() -> int:
             print("  -> deliver-always: graph-quality gate(s) OFF but embedder ON — substrate "
                   "is DELIVERABLE; verdict recorded (measurement), agent runs.")
             return 0
-        print("  -> deliver-always: embedder OFF — a dead semantic axis; the brief's "
-              "GT_REQUIRE_EMBEDDER guard fails closed, so surfacing now.")
+        # g3 = 3a(present/alive) AND 3b(consumption). Distinguish the two: only a DEAD embedder
+        # (3a present-FAIL: ZeroEmbedding / no discrimination) makes the brief's GT_REQUIRE_EMBEDDER
+        # raise -> genuinely fatal. WEAK CONSUMPTION (3a ON but 3b OFF: embedder alive + discriminating,
+        # just 0 rendered sem for THIS issue) is NOT a dead axis — the brief still delivers (contracts/
+        # callers/siblings/completeness + a live embedder), so under deliver-always it is MEASUREMENT,
+        # exactly like g1/g2 graph-quality. Refusing a deliverable substrate over one issue's weak sem
+        # is the "confident-on-weak / silent-on-strong" inversion CLAUDE.md forbids.
+        embedder_alive = bool(_DEEP.get("gate_embedder", {}).get("present", {}).get("pass"))
+        if embedder_alive:
+            print("  -> deliver-always: embedder PRESENT + discriminating (3a ON) but consumption "
+                  "(3b) weak on this issue — substrate DELIVERABLE; verdict recorded (measurement).")
+            return 0
+        print("  -> deliver-always: embedder DEAD (3a present-FAIL) — the brief's GT_REQUIRE_EMBEDDER "
+              "guard fails closed, so surfacing now.")
         return 1
     print("  -> a GATE is OFF (fail-closed): success ceiling is LOW; fix BEFORE any paid run.")
     return 1
