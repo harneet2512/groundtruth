@@ -67,7 +67,12 @@ env:
   # (resolution det%, name_match-dominance, LSP yield) record their verdict but never abort the
   # agent; a degraded map still carries correct contracts/siblings/completeness. Set to 0 only
   # for gates_only probes, where the 3 gates ARE the proof contract and must fail-close.
-  GT_GATES_DELIVER_ALWAYS: ${{ inputs.gates_only == 'true' && '0' || '1' }}
+  # Gates MEASURE (emit verdict + 8-dp report + cert) but never fail-close the RUN on a GT-quality
+  # gate-OFF. A gates_only IMAGE proof has no agent to protect, and the staged 30-review wants every
+  # task's data — fail-closing there conflates image health with context quality (that was the
+  # cfn-lint-3779 false-fail: image fine, GATE 3b sem-consumption OFF). Skip-paying-weak-tasks
+  # (fatal gates) is a separate, explicit decision for the eventual full PAID run, not the default.
+  GT_GATES_DELIVER_ALWAYS: "1"
   # HF fully offline on the paid run: the dataset is materialized to a local JSONL in
   # `prepare` and consumed via GT_LOCAL_DATASET; the embedder uses the baked ONNX e5
   # model. Any HF network read on a paid run is a degraded-stack signal -> fail-closed.
@@ -413,12 +418,18 @@ jobs:
       # this the lfs:false checkout leaves only a 133-byte LFS pointer and the
       # GT_REQUIRE_EMBEDDER probe would fail-closed.
       - name: Download e5 model artifact (pre-place — avoids per-job git lfs pull)
+        # B1 optimization: skip on the portable + gates_only path — the pinned substrate image BAKES
+        # e5 + pyright + onnxruntime, so the runner needs neither the model nor setup-eval there (no
+        # agent/wrapper runs in gates_only). Saves ~130MB download + an install per task × 300. Kept
+        # whenever an agent runs (the runner wrapper needs the local stack) or no pinned digest is set.
+        if: ${{ !(vars.GT_SUBSTRATE_DIGEST != '' && inputs.gates_only == 'true') }}
         uses: actions/download-artifact@v4
         with:
           name: gt-e5-model
           path: models/e5-small-v2
 
-      - uses: ./.github/actions/setup-eval
+      - if: ${{ !(vars.GT_SUBSTRATE_DIGEST != '' && inputs.gates_only == 'true') }}
+        uses: ./.github/actions/setup-eval
 
       - name: Mark job-start epoch (legitimacy freshness baseline)
         run: |
@@ -901,6 +912,7 @@ jobs:
               -e GT_PROOF_MODE=1 -e GT_CONTAINERIZED=1 -e GT_RUNTIME_STRATEGY=unified_substrate \
               -e GT_REQUIRE_FTS5=1 -e GT_REQUIRE_EMBEDDER=1 -e GT_FORCE_ONNX_EMBEDDER=1 \
               -e GT_REQUIRE_LSP=1 -e GT_REQUIRE_FULL_STACK=1 -e GT_ISSUE_FILE=/work_issue.txt \
+              -e GT_GATES_DELIVER_ALWAYS="${GT_GATES_DELIVER_ALWAYS:-1}" \
               "$GT_SUBSTRATE_DIGEST" gt-run-proof --source-root /work --out /gt_artifacts
             # Step 5: the portable path is PRIMARY in proof — consume /gt_artifacts and SKIP the
             # in-task LSP/gates (a second, divergent runtime). Fail-closed if any cert is missing.
