@@ -18,8 +18,14 @@ container at three points:
     file in site-packages.  It monkey-patches the environment's execute() to
     classify commands as edit/view and append <gt-evidence> from gt_hook.py.
 
-All phases are best-effort / correct-or-quiet: failures fall back silently to
-the unaugmented mini-swe-agent behavior.
+SUBSTRATE-CONSUME / PROOF mode (GT_PROOF_MODE=1, the leaderboard `deepswe_full.yml`
+run) is FAIL-CLOSED, NO-FALLBACK on every path: the pinned substrate's
+/gt_artifacts/graph.db is THE ONLY graph (no second in-container build), the §H
+consumption witness RAISES (does not warn) on a hook != post-LSP hash mismatch, and
+the brief is CONSUMED read-only from $GT_CERT_DIR/brief.txt — never regenerated host-
+side. A missing/divergent substrate artifact HARD-STOPS the run (DeepSweAdapterError /
+DEEPSWE_ADAPTER_FAIL), it never silently degrades. Outside proof mode the legacy
+preindex/trial path stays best-effort / correct-or-quiet.
 
 Control arm: set GT_BASELINE=1 to disable all GT injection.
 
@@ -59,6 +65,35 @@ logger = logging.getLogger(__name__)
 
 _GT_BASELINE = bool(os.environ.get("GT_BASELINE"))
 _THIS_DIR = Path(__file__).resolve().parent
+
+
+def _proof_mode() -> bool:
+    """True when the run is the substrate-consume PROOF (GHA `deepswe_full.yml`):
+    GT_PROOF_MODE=1. In proof mode every GT path is consume-or-fail-closed — no
+    in-container rebuild, no host-side brief, no warn-and-continue."""
+    return os.environ.get("GT_PROOF_MODE") == "1"
+
+
+def _substrate_active() -> bool:
+    """True when the pinned portable substrate already produced the authoritative
+    graph + certs and the harness handed them to the adapter READ-ONLY via the
+    canonical handoff (GT_HOST_GRAPH_DB / GT_CERT_DIR; proof.py HOST_HANDOFF). In
+    this mode the substrate graph is THE ONLY graph — the adapter never builds a
+    second one and never falls back to one. Detected purely from the handoff env so
+    it is harness-agnostic and mirrors gt_mini_patch._substrate_active exactly."""
+    return bool(
+        os.environ.get("GT_PORTABLE_SUBSTRATE") == "1"
+        or os.environ.get("GT_HOST_GRAPH_DB")
+        or os.environ.get("GT_CERT_DIR")
+    )
+
+
+class DeepSweAdapterError(RuntimeError):
+    """Fail-closed adapter error (§E DEEPSWE_ADAPTER_FAIL). Raised — never warned —
+    when a substrate-consume invariant is violated under proof/substrate mode (a
+    second graph would be built, the consumed graph diverges from the substrate's
+    LSP-resolved graph, or the substrate brief is absent). A divergent or missing
+    substrate artifact must HARD-STOP the run, not silently degrade."""
 
 # ---------------------------------------------------------------------------
 # Locate the two payloads we inject into the container
@@ -342,8 +377,30 @@ def _inject_steps() -> list[InstallStep]:
     # --- Repo root detection ---
     steps.append(InstallStep(user="root", run=_ROOT_DETECT))
 
-    # --- Phase 1: graph.db indexing (best-effort) ---
-    steps.append(InstallStep(user="root", run=_BUILD_GRAPH_DB))
+    # --- Phase 1: graph.db ---
+    # SUBSTRATE-CONSUME (hole #1, FAIL-CLOSED, NO DUAL GRAPH): when the pinned
+    # substrate already produced the authoritative graph (GT_PORTABLE_SUBSTRATE /
+    # GT_HOST_GRAPH_DB / GT_CERT_DIR set), the substrate's /gt_artifacts/graph.db is
+    # THE ONLY graph. Building a SECOND in-container /tmp/graph.db would (a) diverge
+    # from the substrate's LSP-resolved + gate-certified graph and (b) break the
+    # hook==post-LSP-hash witness. So the build step is REMOVED ENTIRELY in substrate
+    # mode — never "fall back" to it. The consume path is verified by the witness
+    # (which fails closed if the consumed graph is absent or diverges). Outside
+    # substrate mode (the legacy preindex/trial path) the in-container build remains.
+    if _substrate_active():
+        steps.append(
+            InstallStep(
+                user="root",
+                run=(
+                    'echo "GT: substrate-consume mode (GT_HOST_GRAPH_DB/GT_CERT_DIR '
+                    'set) — the substrate graph is authoritative; NOT building a '
+                    'second in-container graph.db (no dual graph, no fallback)" >&2 '
+                    "|| true"
+                ),
+            )
+        )
+    else:
+        steps.append(InstallStep(user="root", run=_BUILD_GRAPH_DB))
 
     # --- Self-test: verify patch loaded (fails build with diagnostic if not) ---
     if patch_chunks:
@@ -352,17 +409,108 @@ def _inject_steps() -> list[InstallStep]:
     return steps
 
 
-def _generate_brief(instruction: str) -> str:
-    """Phase 2: host-side brief from a preindexed graph.db.
+def _cert_dir() -> str:
+    """The substrate artifact dir the adapter consumes. GT_CERT_DIR is canonical;
+    GT_HOST_GRAPH_DB=/gt_artifacts/graph.db implies the dir even if GT_CERT_DIR was
+    not exported separately."""
+    cert_dir = os.environ.get("GT_CERT_DIR", "")
+    if not cert_dir:
+        hg = os.environ.get("GT_HOST_GRAPH_DB", "")
+        if hg:
+            cert_dir = os.path.dirname(hg)
+    return cert_dir
 
-    Requires GT_GRAPH_DB and GT_REPO_ROOT env vars on the HOST pointing to
-    a pre-built graph.db and the repo root.  When running the deepswe_preindex
-    workflow, these are set from the pre-indexed artifacts.
+
+def _substrate_brief() -> str:
+    """SUBSTRATE-CONSUME (handoff §A/§D/§G, hole #3): the pinned substrate emitted the
+    CURATED brief IN-CONTAINER to ``$GT_CERT_DIR/brief.txt`` (gt_run_proof.py:380-385)
+    over the SAME LSP-enriched graph the gates measured. Consume it READ-ONLY — the
+    host NEVER re-runs the brief pipeline in this mode.
+
+    FAIL-CLOSED in proof/substrate mode (NO host fallback): if the substrate brief is
+    absent/empty while the substrate is active, that is a SUBSTRATE_MISSING_CERTS / GT_
+    ARTIFACT_MISSING violation — host-side GT scoring is forbidden (assert_container_
+    boundary). We raise DeepSweAdapterError rather than silently falling back to host
+    ``generate_v1r_brief``. Outside proof/substrate mode, '' (caller may host-gen)."""
+    cert_dir = _cert_dir()
+    proof = _proof_mode()
+    substrate = _substrate_active()
+    if not cert_dir:
+        if proof or substrate:
+            raise DeepSweAdapterError(
+                "GT_ARTIFACT_MISSING / DEEPSWE_ADAPTER_FAIL: substrate-consume mode is "
+                "active (proof_mode=%s substrate=%s) but neither GT_CERT_DIR nor "
+                "GT_HOST_GRAPH_DB is set — cannot locate the substrate brief, and host "
+                "GT scoring is forbidden in proof mode (no fallback)."
+                % (proof, substrate)
+            )
+        return ""
+    brief_path = os.path.join(cert_dir, "brief.txt")
+    if not os.path.isfile(brief_path):
+        if proof or substrate:
+            raise DeepSweAdapterError(
+                "GT_ARTIFACT_MISSING / DEEPSWE_ADAPTER_FAIL: substrate brief absent at "
+                f"{brief_path!r} in substrate-consume mode (proof_mode={proof} "
+                f"substrate={substrate}). Failing closed — host-side generate_v1r_brief "
+                "is forbidden in proof mode (no divergent host GT scoring)."
+            )
+        return ""
+    try:
+        with open(brief_path, encoding="utf-8", errors="replace") as fh:
+            txt = (fh.read() or "").strip()
+    except OSError as e:
+        if proof or substrate:
+            raise DeepSweAdapterError(
+                f"DEEPSWE_ADAPTER_FAIL: substrate brief unreadable at {brief_path!r} "
+                f"in substrate-consume mode: {e} (no fallback)."
+            ) from e
+        logger.warning("GT: substrate brief unreadable (%s) -- skipping", e)
+        return ""
+    if not txt and (proof or substrate):
+        raise DeepSweAdapterError(
+            f"DEEPSWE_ADAPTER_FAIL: substrate brief at {brief_path!r} is EMPTY in "
+            f"substrate-consume mode (proof_mode={proof} substrate={substrate}). "
+            "Failing closed — a paid proof run must not ship a brief-less trajectory "
+            "(no host fallback)."
+        )
+    if txt:
+        logger.info("GT: consumed substrate brief %s (%d chars, READ-ONLY)",
+                    brief_path, len(txt))
+    return txt
+
+
+def _generate_brief(instruction: str) -> str:
+    """Phase 2: the L1 brief.
+
+    SUBSTRATE-CONSUME / PROOF (hole #3): if the pinned substrate is active, the brief
+    is consumed READ-ONLY from ``$GT_CERT_DIR/brief.txt`` (``_substrate_brief``) — which
+    FAILS CLOSED (raises) if the substrate brief is absent/empty. Host-side generation
+    over a divergent graph is FORBIDDEN in proof mode (no fallback).
+
+    LEGACY (non-proof, non-substrate ONLY): host-side generation from a preindexed
+    graph.db via GT_GRAPH_DB + GT_REPO_ROOT (the pre-substrate deepswe_preindex/trial
+    path). This branch is unreachable in the leaderboard `deepswe_full.yml` run.
     """
-    db = os.environ.get("GT_GRAPH_DB", "")
-    root = os.environ.get("GT_REPO_ROOT", "")
+    substrate = _substrate_brief()  # raises DeepSweAdapterError on a missing proof brief
+    if substrate:
+        return substrate
+
+    # Past this point the substrate is NOT active and we are NOT in proof mode
+    # (_substrate_brief would have raised otherwise). Host generation is allowed only
+    # on the legacy non-proof preindex path — and we still refuse it under proof mode
+    # as a defence in depth.
+    if _proof_mode() or _substrate_active():
+        raise DeepSweAdapterError(
+            "DEEPSWE_ADAPTER_FAIL: reached host brief generation while proof/substrate "
+            "mode is active — host GT scoring is forbidden (no fallback). The substrate "
+            "brief consume must have produced a brief or failed closed before this point."
+        )
+
+    db = os.environ.get("GT_GRAPH_DB", "") or os.environ.get("GT_HOST_GRAPH_DB", "")
+    root = os.environ.get("GT_REPO_ROOT", "") or os.environ.get("GT_HOST_SRC_ROOT", "")
     if not db or not root or not os.path.isfile(db):
-        logger.info("GT: no GT_GRAPH_DB/GT_REPO_ROOT -- skipping brief (Phase 2)")
+        logger.info("GT: no substrate brief and no GT_GRAPH_DB/GT_REPO_ROOT -- "
+                    "skipping brief (Phase 2, legacy non-proof path)")
         return ""
     try:
         from groundtruth.pretask.v1r_brief import generate_v1r_brief
@@ -370,13 +518,9 @@ def _generate_brief(instruction: str) -> str:
         res = generate_v1r_brief(instruction, root, db)
         return (getattr(res, "brief_text", "") or "").strip()
     except Exception as e:  # noqa: BLE001
-        # §7 PARITY (matches the OH wrapper host-primary fix): under the strict
-        # full-stack flags a brief failure is most often a DEGRADED dimension
-        # (e.g. GT_REQUIRE_EMBEDDER=1 raising because the ONNX embedder did not
-        # load -> W_SEM would be 0). "No silent fallback — the stack is live or
-        # the run aborts": re-raise so the paid run fails closed instead of
-        # silently shipping a brief-less (or semantic-less) trajectory. Only the
-        # non-strict path keeps the correct-or-quiet skip.
+        # Legacy non-proof path: a brief failure under the strict full-stack flags is a
+        # degraded dimension — re-raise so the run fails closed instead of shipping a
+        # degraded trajectory. Otherwise correct-or-quiet skip.
         if (
             os.environ.get("GT_REQUIRE_EMBEDDER") == "1"
             or os.environ.get("GT_REQUIRE_FULL_STACK") == "1"
@@ -388,6 +532,192 @@ def _generate_brief(instruction: str) -> str:
             raise
         logger.warning("GT: brief generation failed (%s) -- skipping", e)
         return ""
+
+
+def _emit_gt_meta_witness() -> None:
+    """Handoff §H — the DeepSWE adapter CONSUMPTION WITNESS.
+
+    Prove (from the agent's own host, NOT telemetry) that this adapter read the
+    SAME resolved graph + certs the pinned substrate produced — never a rebuild.
+
+    The witness is meaningful only if the graph the adapter consumed fingerprints
+    IDENTICALLY to the LSP certificate's post-LSP hash (graph_certificate.py:192-198
+    enforces hook==post-LSP as GRAPH_FAIL_HASH_MISMATCH). So:
+      * resolve the consumed graph via GTRuntimeContext.from_env (the NON-PROOF
+        host-handoff branch, context.py:111-112 -> GT_HOST_GRAPH_DB / GT_CERT_DIR),
+        READ-ONLY — we never index, never write, never rebuild;
+      * fingerprint it with proof.graph_edges_hash (proof.py:225-245), the SAME
+        canonical edge hash resolve/graph_certificate use;
+      * read the LSP cert's graph_hash_after_lsp from $GT_CERT_DIR and compare;
+      * format the canonical [GT_META] graph_witness line via
+        graph_certificate.format_graph_witness (layer-1 GT code — we MAY call it),
+        then append cert paths + substrate_digest (§H format).
+
+    FAIL-CLOSED (hole #2, §E DEEPSWE_ADAPTER_FAIL / GRAPH_FAIL_HASH_MISMATCH): under
+    PROOF mode (GT_PROOF_MODE=1) any failure to wire, fingerprint, or MATCH the
+    substrate's post-LSP hash emits `[GT_META] ... error=DEEPSWE_ADAPTER_FAIL ...`
+    AND RAISES ``DeepSweAdapterError`` — a divergent or unconsumable graph HARD-STOPS
+    the run, it does NOT warn-and-continue. Outside proof mode the same conditions
+    print the classified line and return (warn), so dev/CI is non-fatal.
+    """
+    import json as _json
+
+    proof = _proof_mode()
+
+    def _fail(detail: str, *, prebuilt: str = "unknown") -> None:
+        """Print the classified [GT_META] DEEPSWE_ADAPTER_FAIL line, then RAISE in
+        proof mode (fail-closed) or return (warn) outside it."""
+        print(f"[GT_META] gt_artifacts={os.environ.get('GT_CERT_DIR', '')}; "
+              f"gt_prebuilt_active={prebuilt}; error=DEEPSWE_ADAPTER_FAIL "
+              f"detail={detail}", flush=True)
+        if proof:
+            raise DeepSweAdapterError(f"DEEPSWE_ADAPTER_FAIL: {detail}")
+
+    try:
+        from groundtruth.runtime import proof as _proof
+        from groundtruth.runtime.context import GTRuntimeContext
+    except Exception as _ie:  # noqa: BLE001 -- layer-1 GT must be importable host-side
+        _fail(f"import_failed:{_ie}", prebuilt="false")
+        return
+
+    # The canonical [GT_META] formatter is layer-1 GT code (graph_certificate.py) —
+    # the handoff (§H) says the adapter MAY call it directly. scripts/metrics has no
+    # __init__.py, so import the module by adding its dir to sys.path (the same shape
+    # gt_run_proof.py:357-361 uses). Optional: an inline fallback formats the line if
+    # the import is unavailable, so the witness is never blocked on it.
+    format_graph_witness = None  # type: ignore[assignment]
+    try:
+        import importlib as _il
+        import sys as _sys
+        # _THIS_DIR is artifact_deepswe/; the repo root is its parent.
+        _md = str((_THIS_DIR.parent / "scripts" / "metrics"))
+        if os.path.isdir(_md) and _md not in _sys.path:
+            _sys.path.insert(0, _md)
+        format_graph_witness = getattr(
+            _il.import_module("graph_certificate"), "format_graph_witness", None)
+    except Exception:  # noqa: BLE001 -- inline fallback below
+        format_graph_witness = None  # type: ignore[assignment]
+
+    cert_dir = os.environ.get("GT_CERT_DIR", "")
+    host_graph = os.environ.get("GT_HOST_GRAPH_DB", "")
+    if not cert_dir and host_graph:
+        cert_dir = os.path.dirname(host_graph)
+
+    try:
+        # Non-proof host-handoff resolution (context.py:111-112): resolves
+        # GT_GRAPH_DB or GT_HOST_GRAPH_DB without entering proof-mode reject paths.
+        ctx = GTRuntimeContext.from_env()
+        resolved_db = ctx.graph_db or host_graph
+        prebuilt_active = bool(resolved_db and os.path.exists(resolved_db))
+
+        if not prebuilt_active:
+            # No substrate graph resolved/present. In proof/substrate mode this is a
+            # GT_ARTIFACT_MISSING fail-closed (the substrate graph MUST be consumable —
+            # never rebuild, never fall back). Outside proof mode it is the legacy
+            # host-fallback path (warn + return).
+            if proof or _substrate_active():
+                _fail(
+                    f"no_resolved_substrate_graph graph_db={resolved_db or '(unset)'} "
+                    f"cert_dir={cert_dir or '(unset)'} (GT_ARTIFACT_MISSING — the "
+                    f"substrate graph is absent and rebuild/fallback is forbidden)",
+                    prebuilt="false",
+                )
+                return
+            print(f"[GT_META] gt_artifacts={cert_dir or '(unset)'}; "
+                  f"graph_db={resolved_db or '(unset)'}; gt_prebuilt_active=false; "
+                  f"runtime_strategy={os.environ.get('GT_RUNTIME_STRATEGY', '')}; "
+                  f"note=no_host_resolved_graph (host-fallback path, not substrate-consume)",
+                  flush=True)
+            return
+
+        # READ-ONLY canonical fingerprint of the consumed graph (never writes).
+        hook_hash = _proof.graph_edges_hash(resolved_db)
+        if not hook_hash:
+            _fail(f"graph_edges_hash_empty for {resolved_db!r}", prebuilt="true")
+            return
+
+        # Compare against the LSP cert's post-LSP hash (the substrate's authority).
+        lsp_cert_path = (os.environ.get("GT_LSP_CERT", "")
+                         or (os.path.join(cert_dir, "lsp_certificate.json") if cert_dir else ""))
+        post_lsp_hash = ""
+        if lsp_cert_path and os.path.isfile(lsp_cert_path):
+            try:
+                with open(lsp_cert_path, encoding="utf-8") as fh:
+                    _lc = _json.load(fh)
+                post_lsp_hash = (_lc.get("graph_hash_after_lsp")
+                                 or _lc.get("graph_hash") or "")
+            except (OSError, ValueError):
+                post_lsp_hash = ""
+        # Also accept the graph_certificate's post-LSP hash if the LSP cert lacked it.
+        if not post_lsp_hash and cert_dir:
+            _gc_path = os.path.join(cert_dir, "graph_certificate.json")
+            if os.path.isfile(_gc_path):
+                try:
+                    with open(_gc_path, encoding="utf-8") as fh:
+                        _gc = _json.load(fh)
+                    post_lsp_hash = (_gc.get("graph_hash_after_lsp")
+                                     or _gc.get("graph_hash") or "")
+                except (OSError, ValueError):
+                    post_lsp_hash = ""
+
+        hash_match = bool(post_lsp_hash) and (hook_hash == post_lsp_hash)
+
+        # Canonical witness line (layer-1 formatter) + the §H cert/digest suffix.
+        if format_graph_witness is not None:
+            base = format_graph_witness(host_resolved_graph_db=resolved_db,
+                                        hook_graph_db=resolved_db,
+                                        hook_graph_hash=hook_hash,
+                                        prebuilt_active=prebuilt_active)
+        else:
+            base = (f"[GT_META] graph_witness host_resolved_graph_db={resolved_db} "
+                    f"hook_graph_db={resolved_db} hook_graph_hash={hook_hash} "
+                    f"_gt_prebuilt_active={prebuilt_active}")
+
+        def _cert(name: str) -> str:
+            return os.path.join(cert_dir, name) if cert_dir else ""
+
+        digest = os.environ.get("GT_SUBSTRATE_DIGEST", "")
+        print(
+            f"{base} | gt_artifacts={cert_dir}; graph_db={resolved_db}; "
+            f"graph_hash={hook_hash}; graph_hash_after_lsp={post_lsp_hash or '(absent)'}; "
+            f"hook_graph_hash_matches_post_lsp={hash_match}; "
+            f"lsp_certificate={_cert('lsp_certificate.json')}; "
+            f"graph_certificate={_cert('graph_certificate.json')}; "
+            f"embedder_certificate={_cert('embedder_certificate.json')}; "
+            f"foundational_gate_report={_cert('foundational_gate_report.json')}; "
+            f"gt_prebuilt_active=true; "
+            f"runtime_strategy={os.environ.get('GT_RUNTIME_STRATEGY', 'unified_substrate')}; "
+            f"substrate_digest={digest or '(unset)'}",
+            flush=True,
+        )
+        # FAIL-CLOSED (hole #2): a divergent consumed graph must HARD-STOP under proof
+        # mode, NOT warn. graph_certificate.classify_graph treats hook!=post-LSP as
+        # GRAPH_FAIL_HASH_MISMATCH; the adapter is the in-agent enforcement of that.
+        if post_lsp_hash and not hash_match:
+            # The graph the adapter consumed is NOT the one the substrate certified.
+            _fail(
+                f"GRAPH_FAIL_HASH_MISMATCH hook_graph_hash={hook_hash} != "
+                f"graph_hash_after_lsp={post_lsp_hash} — the consumed graph diverges "
+                f"from the substrate's LSP-resolved graph",
+                prebuilt="true",
+            )
+            return
+        # In proof mode the substrate's authority hash MUST be present + matched —
+        # an absent post-LSP hash means we cannot PROVE the consume is correct, which
+        # is itself a fail-closed condition (no unprovable consume).
+        if proof and not post_lsp_hash:
+            _fail(
+                f"post_lsp_hash_absent cert_dir={cert_dir or '(unset)'} — cannot prove "
+                f"the consumed graph == the substrate's LSP-resolved graph "
+                f"(GRAPH_FAIL_MISSING_HANDOFF analogue)",
+                prebuilt="true",
+            )
+            return
+    except DeepSweAdapterError:
+        # _fail already printed + raised under proof; propagate the hard stop.
+        raise
+    except Exception as e:  # noqa: BLE001 -- surface, never swallow (§E)
+        _fail(f"witness_exception:{e}", prebuilt="unknown")
 
 
 class GTMiniSweAgent(MiniSweAgent):
@@ -422,7 +752,16 @@ class GTMiniSweAgent(MiniSweAgent):
 
         augmented = instruction
 
-        # Phase 2: host-side brief
+        # Handoff §H — emit the consumption WITNESS before the agent runs: prove this
+        # adapter read the SAME resolved graph the substrate produced (hook hash ==
+        # post-LSP hash), READ-ONLY, never rebuilt. FAIL-CLOSED (hole #2): under proof
+        # mode this RAISES DeepSweAdapterError on a hash mismatch / unconsumable graph,
+        # hard-stopping the run before any model spend (no warn-and-continue).
+        _emit_gt_meta_witness()
+
+        # Phase 2: L1 brief — substrate brief consumed READ-ONLY (hole #3). FAIL-CLOSED
+        # under proof mode: raises DeepSweAdapterError if the substrate brief is
+        # absent/empty (NO host-side generate_v1r_brief fallback in proof mode).
         brief = _generate_brief(instruction)
         if brief:
             augmented = (

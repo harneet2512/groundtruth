@@ -38,6 +38,14 @@ on:
         description: "owner/repo that hosts the shared GHCR image cache + pipeline-assets-v1 release (a mirror on another account points here so both share ONE public cache)"
         required: true
         default: "harneet2512/groundtruth"
+      gt_substrate_digest:
+        description: "Pinned GT substrate image by IMMUTABLE digest (ghcr.io/<org>/gt-substrate@sha256:<digest>). Overrides vars.GT_SUBSTRATE_DIGEST. Proof input — never a mutable tag."
+        required: false
+        default: ""
+      require_pinned_substrate:
+        description: "Fail-closed if no pinned digest is set (1 = enforce the substrate-consume proof path; 0 = transitional warn-and-skip). Default 1 per the handoff hard rule."
+        required: true
+        default: "1"
 
 permissions:
   contents: read
@@ -53,13 +61,35 @@ env:
   GT_FORCE_ONNX_EMBEDDER: "1"
   GT_REQUIRE_EMBEDDER: "1"
   GT_REQUIRE_LSP: "1"
-  # Legitimacy: fresh per-task in-container index, never a prebuilt / cross-run graph.db.
+  # Legitimacy: the per-task graph must be built FRESH from THIS task's repo — never a
+  # cross-run / stale / out-of-repo prebuilt graph.db. In substrate-consume mode the graph
+  # the substrate emits to /gt_artifacts FROM the mounted /work:ro IS that fresh per-task
+  # graph (built inside the pinned image, this task, this commit); the adapter consumes it
+  # read-only. This flag forbids a STALE/cross-run injection, not the legitimate substrate
+  # handoff (proof.py HOST_HANDOFF; same reconciliation as the OH wrapper freshness check).
   GT_FORBID_PREBUILT_GRAPH: "1"
   # HF must be fully offline: the embedder + dataset come from the baked model / local
   # files only. Any HF network read on a paid run is a degraded-stack signal -> fail.
   HF_DATASETS_OFFLINE: "1"
   TRANSFORMERS_OFFLINE: "1"
   HF_HUB_OFFLINE: "1"
+  # ── SUBSTRATE-CONSUME (handoff §A/§B-AFTER/§D/§G) ───────────────────────────
+  # The GT proof runtime is a PINNED, portable substrate image (Option B). It is
+  # referenced by IMMUTABLE DIGEST, never a mutable tag (§F.1). gt-run-proof runs
+  # INSIDE that image with the task repo mounted /work:ro and emits the 7 artifacts
+  # to /gt_artifacts; the DeepSWE adapter CONSUMES them read-only and NEVER rebuilds.
+  GT_SUBSTRATE_DIGEST: ${{ inputs.gt_substrate_digest || vars.GT_SUBSTRATE_DIGEST }}
+  # Fail-closed digest pin (§E GT_SUBSTRATE_DIGEST_MISSING / PROOF_RUNTIME_FALLBACK_FORBIDDEN):
+  # with this =1 a run with no pinned digest ABORTS (no host fallback, no per-task provisioning).
+  GT_REQUIRE_PINNED_SUBSTRATE: ${{ inputs.require_pinned_substrate }}
+  # gates-only / proof policy: MEASURE, never fail-close on graph-quality (§B gate-policy);
+  # the only fatal cases are dead embedder / 0 edges (enforced inside gt-run-proof).
+  GT_GATES_DELIVER_ALWAYS: "1"
+  # Proof env for the AGENT path (hook validation in-container): the adapter consumes the
+  # substrate certs and validates the in-container graph reads against the resolved graph.
+  GT_PROOF_MODE: "1"
+  GT_CONTAINERIZED: "1"
+  GT_RUNTIME_STRATEGY: "unified_substrate"
 
 jobs:
   # ── Stage-0 / prepare: ENV-ONLY. Leaderboard legitimacy. ────────────────────
@@ -181,16 +211,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.23"
 
       # ── TOOLCHAIN CACHE (scalability) ──────────────────────────────────────────
-      # The 113-task matrix otherwise reinstalls pier + 4 LSP servers and rebuilds the
-      # CGO gt-index binary on EVERY job. Cache the pip wheels, the e5 model, the built
-      # gt-index binary, and the LSP server binaries so warm runners skip the heavy
-      # reinstall. setup-go@v5 already caches Go modules. All keys are content-hashed
-      # (or static-versioned) — never task-specific, so this is benchmark-shape-neutral.
+      # SUBSTRATE-CONSUME: the e5 model, gt-index binary, and LSP servers are all BAKED in
+      # the pinned substrate image (handoff §A) — the runner no longer builds/fetches them.
+      # The only host-side install is pier + the current GT (for the adapter's imports), so
+      # we keep just the pip-wheel cache. Key is content-hashed (pyproject.toml), never
+      # task-specific -> benchmark-shape-neutral.
       - name: Cache pip wheels
         uses: actions/cache@v4
         with:
@@ -198,92 +225,19 @@ jobs:
           key: gt-pip-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}
           restore-keys: gt-pip-${{ runner.os }}-
 
-      - name: Cache e5 embedder model (shared key with deepswe_trial; survives waves)
-        uses: actions/cache@v4
-        with:
-          path: models/e5-small-v2
-          key: gt-embed-e5-small-v2-onnx-v1
-
-      - name: Cache gt-index linux binary (skip CGO rebuild when source unchanged)
-        uses: actions/cache@v4
-        with:
-          path: gt-index/gt-index-linux
-          key: gt-index-bin-${{ runner.os }}-${{ hashFiles('gt-index/**/*.go', 'gt-index/go.mod', 'gt-index/go.sum') }}
-
-      - name: Cache LSP server binaries (gopls, rust-analyzer, ts-language-server)
-        uses: actions/cache@v4
-        with:
-          path: ~/.gttools
-          key: gt-lsp-tools-${{ runner.os }}-v1
-
-      - name: Fetch e5 model from release (LFS-quota bypass)
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install host harness deps (pier + GT python deps for the adapter ONLY — NO host LSP)
         run: |
           set -e
-          echo "GT_MODELS_ROOT=$PWD/models" >> "$GITHUB_ENV"
-          # If the cache restored a real model, skip the download (release bandwidth saved).
-          if [ -s models/e5-small-v2/model.onnx ] && [ "$(stat -c%s models/e5-small-v2/model.onnx)" -gt 1000000 ]; then
-            echo "e5 model present from cache ($(stat -c%s models/e5-small-v2/model.onnx)B) — skip release fetch"; exit 0
-          fi
-          REL=pipeline-assets-v1
-          mkdir -p models/e5-small-v2
-          # The ONE critical model download — retry each asset so a CDN blip never aborts.
-          dl() {  # dl <asset> <dest> <min_bytes>
-            for ATTEMPT in 1 2 3 4 5; do
-              gh release download "$REL" -R "${{ inputs.assets_repo }}" -p "$1" -O "$2" --clobber \
-                && [ "$(stat -c%s "$2" 2>/dev/null || echo 0)" -gt "$3" ] && { echo "  $1 ok (attempt $ATTEMPT)"; return 0; }
-              echo "::warning::release download $1 attempt $ATTEMPT failed — retrying"; sleep 10
-            done
-            echo "FATAL: could not fetch release asset $1 after 5 attempts"; return 1
-          }
-          dl model.onnx models/e5-small-v2/model.onnx 1000000
-          dl tokenizer.json models/e5-small-v2/tokenizer.json 1000
-          echo "e5 model from release: model=$(stat -c%s models/e5-small-v2/model.onnx)B tokenizer=$(stat -c%s models/e5-small-v2/tokenizer.json)B"
-
-      - name: Install bare-runner eval stack (pier + LSP + onnxruntime; image used to bake these)
-        run: |
-          set -e
-          # Cached toolchain dir (actions/cache restores ~/.gttools above). Put it on PATH
-          # for THIS step (the gates below) AND for later steps (resolve/preflight/pier).
-          GTBIN="$HOME/.gttools/bin"; mkdir -p "$GTBIN"
-          export PATH="$GTBIN:$PATH"; echo "$GTBIN" >> "$GITHUB_PATH"
+          # SUBSTRATE-CONSUME (handoff §B-AFTER + §F.2 "no host GT execution"): LSP/gates/graph
+          # build all run INSIDE the pinned substrate. The runner therefore installs ONLY what
+          # the HARNESS needs: pier (to run the agent) and the GT python deps the ADAPTER imports
+          # host-side (GTRuntimeContext / proof.graph_edges_hash for the §H witness, and the brief
+          # fallback). NO gopls/rust-analyzer/tsserver/pyright on the runner — host LSP is exactly
+          # the §B BEFORE/invalid host-split this change removes.
           python -m pip install --upgrade pip
-          python -m pip install datacurve-pier onnxruntime tokenizers huggingface_hub pyright || \
-            { echo "FATAL: pier/onnxruntime install failed"; exit 1; }
-          # PER-LANGUAGE LSP servers for the Point A host-side `groundtruth.resolve` pass,
-          # installed INTO the cached $GTBIN (warm runners skip these via the command -v
-          # guard). language=all can pull go/rust/ts/js tasks; without their server the host
-          # LSP resolve fails-closed (correct, but wastes the slot). Best-effort per server
-          # so a transient flake on an UNUSED language never fails the whole job — the
-          # per-language hard-fail below still aborts if THIS run's server didn't land.
-          # Go (gopls):
-          command -v gopls >/dev/null || GOBIN="$GTBIN" go install golang.org/x/tools/gopls@latest || echo "WARN: gopls install failed (go tasks will fail-closed)"
-          # Rust (rust-analyzer):
-          command -v rust-analyzer >/dev/null || (curl -fsSL https://github.com/rust-lang/rust-analyzer/releases/latest/download/rust-analyzer-x86_64-unknown-linux-gnu.gz \
-            | gunzip -c > "$GTBIN/rust-analyzer" && chmod +x "$GTBIN/rust-analyzer") || echo "WARN: rust-analyzer install failed (rust tasks will fail-closed)"
-          # TS/JS (typescript-language-server): npm prefix -> $HOME/.gttools so the binary
-          # lands in the cached $GTBIN (no sudo, no global system dir).
-          if ! command -v typescript-language-server >/dev/null; then
-            (command -v npm >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq nodejs npm)) \
-              && npm config set prefix "$HOME/.gttools" \
-              && npm install -g typescript typescript-language-server >/dev/null 2>&1 \
-              || echo "WARN: typescript-language-server install failed (ts/js tasks will fail-closed)"
-          fi
+          python -m pip install datacurve-pier || { echo "FATAL: pier install failed"; exit 1; }
           command -v pier >/dev/null || { echo "FATAL: pier not on PATH after install"; exit 1; }
-          echo "bare-runner eval stack ready: pier=$(command -v pier) gopls=$(command -v gopls) rust-analyzer=$(command -v rust-analyzer) tsserver=$(command -v typescript-language-server) g++=$(command -v g++)"
-          # #7 NO SILENT FAILURE on the run's REQUIRED language server. The best-effort installs
-          # above tolerate a transient flake on an UNUSED language; but if the server for the
-          # language THIS run targets is absent, ABORT (don't silently fail-closed every task).
-          # 'all' loudly lists any absent server so a systematically-missing one is visible.
-          LANG="${{ inputs.language }}"
-          case "$LANG" in
-            go) command -v gopls >/dev/null || { echo "FATAL: language=go but gopls absent"; exit 1; } ;;
-            rust) command -v rust-analyzer >/dev/null || { echo "FATAL: language=rust but rust-analyzer absent"; exit 1; } ;;
-            typescript|javascript) command -v typescript-language-server >/dev/null || { echo "FATAL: language=$LANG but typescript-language-server absent"; exit 1; } ;;
-            python) (command -v pyright >/dev/null || python -m pyright --version >/dev/null 2>&1) || { echo "FATAL: language=python but pyright absent"; exit 1; } ;;
-          esac
-          for s in gopls rust-analyzer typescript-language-server; do command -v "$s" >/dev/null || echo "::warning::LSP server $s ABSENT — $s-language tasks will fail-closed"; done
+          echo "host harness ready: pier=$(command -v pier) (LSP/gates/graph run inside the substrate)"
 
       - name: Trust the workspace for git (CI checkout uid mismatch)
         run: |
@@ -347,38 +301,20 @@ jobs:
           fi
           docker compose version 2>&1 | head -1 || { echo "FATAL: docker compose still missing"; exit 1; }
 
-      - name: Current GT over baked deps + rebuild gt-index (no re-install of the toolchain)
+      - name: Install current GT host-side (adapter imports ONLY — no gt-index build, no host LSP)
         run: |
-          # Everything heavy is baked into the image. Install ONLY the current checkout's
-          # GT (deps already present -> fast) and rebuild gt-index from this source (FTS5).
-          python -m pip install -e .   # wheels served from the cached ~/.cache/pip above
-          # e5 embedder model is fetched from the pipeline-assets-v1 release earlier in the
-          # job (LFS-quota bypass); GT_MODELS_ROOT is exported there. Verify it landed —
-          # fail fast HERE (cheap) instead of at the semantic preflight gate downstream.
-          if [ -s models/e5-small-v2/model.onnx ] && [ "$(stat -c%s models/e5-small-v2/model.onnx)" -gt 1000000 ]; then
-            echo "  e5 model present: $(stat -c%s models/e5-small-v2/model.onnx)b"
-          else
-            echo "FATAL: e5 model missing/pointer after release fetch — refusing degraded run"; exit 1
-          fi
-          # go-tree-sitter ocaml/yaml grammars compile C++ via CGO -> need g++ (the baked
-          # image ships gcc but not g++): "exec: g++: executable file not found".
-          # g++ is REQUIRED for the gt-index CGO build — a true absence must fail the job.
-          command -v g++ >/dev/null \
-            || (sudo apt-get update -qq && sudo apt-get install -y -qq g++) \
-            || (apt-get update -qq && apt-get install -y -qq g++) \
-            || { echo "FATAL: g++ missing and install failed (required for gt-index CGO build)"; exit 1; }
-          if [ -x gt-index/gt-index-linux ]; then
-            echo "gt-index-linux restored from cache — skip CGO rebuild"
-          else
-            (cd gt-index && CGO_ENABLED=1 go build -buildvcs=false -tags sqlite_fts5 -o gt-index-linux ./cmd/gt-index/ && chmod +x gt-index-linux)
-          fi
-          # CRITICAL: the image bakes a STALE GT at /opt/groundtruth and sets PYTHONPATH
-          # there. Override PYTHONPATH to THIS checkout so the run uses CURRENT code (the
-          # legitimacy + gate fixes), not the baked snapshot. GT_MODELS_ROOT (image ENV)
-          # still points the embedder at the baked e5 model — no per-run HF download.
-          echo "PYTHONPATH=$GITHUB_WORKSPACE/src:$GITHUB_WORKSPACE/scripts/swebench" >> "$GITHUB_ENV"
-          echo "=== baked toolchain present? (preflight hard-fails any real gap) ==="
-          for s in pyright-langserver gopls rust-analyzer typescript-language-server rg pier sqlite3 docker; do command -v "$s" >/dev/null && echo "  $s OK" || echo "  $s MISSING"; done
+          set -e
+          # The graph build / FTS5 / LSP / closure / embedder / gates all run INSIDE the pinned
+          # substrate (handoff §F.2/§F.3/§F.4 — no host GT execution, no per-task pip into the
+          # task image, no host gt-index build). Host-side we install ONLY the current checkout's
+          # GT so the DeepSWE adapter can import groundtruth.runtime (GTRuntimeContext +
+          # proof.graph_edges_hash) for the §H witness and the brief fallback.
+          python -m pip install -e .
+          # PYTHONPATH: THIS checkout's src (current adapter/runtime code, not any baked snapshot)
+          # + scripts/swebench + scripts/metrics (so the canonical graph_certificate.format_graph_witness
+          # the adapter MAY call is importable host-side; the adapter also self-adds it to sys.path).
+          echo "PYTHONPATH=$GITHUB_WORKSPACE/src:$GITHUB_WORKSPACE/scripts/swebench:$GITHUB_WORKSPACE/scripts/metrics" >> "$GITHUB_ENV"
+          python -c "import groundtruth.runtime.proof as p, groundtruth.runtime.context as c; print('GT runtime importable host-side:', bool(p.graph_edges_hash and c.GTRuntimeContext))"
 
       - name: Log in to GHCR for the shared image cache (token-aware, cross-account)
         env:
@@ -407,116 +343,217 @@ jobs:
           fi
           echo "Task directory: $TASK_DIR"
 
-      - name: Build graph.db + extract source, wire the brief (Point A)
+      - name: GT substrate proof (handoff §B-AFTER/§D/§G) — pre-agent, pinned, read-only repo
         run: |
           set -e
+          # ── SUBSTRATE-CONSUME pattern (mirrors swebench_300task.yml:919-944) ──────────
+          # Replaces the OLD host/image split (§B BEFORE/invalid): NO host gt-index build,
+          # NO host `groundtruth.resolve` LSP pass, NO host gates. The pinned substrate
+          # image runs gt-run-proof INSIDE the container with the task repo mounted /work:ro
+          # and emits the 7 artifacts to /gt_artifacts; the agent CONSUMES them read-only.
           TASK_DIR="deepswe-bench/tasks/${{ matrix.task }}"
+
+          # §E GT_SUBSTRATE_DIGEST_MISSING / PROOF_RUNTIME_FALLBACK_FORBIDDEN (fail-closed).
+          if [ -z "$GT_SUBSTRATE_DIGEST" ]; then
+            if [ "${GT_REQUIRE_PINNED_SUBSTRATE:-1}" = "1" ]; then
+              echo "GT_SUBSTRATE_DIGEST_MISSING / PROOF_RUNTIME_FALLBACK_FORBIDDEN: proof/substrate-consume"
+              echo "mode requires GT_SUBSTRATE_DIGEST (the pinned portable substrate, by @sha256 digest)."
+              echo "Host GT execution + per-task provisioning are forbidden. Set the gt_substrate_digest"
+              echo "input or the GT_SUBSTRATE_DIGEST repo variable to the published image digest."
+              exit 1
+            fi
+            echo "::warning::GT_SUBSTRATE_DIGEST unset and GT_REQUIRE_PINNED_SUBSTRATE=0 (transitional)"
+            echo "::warning::— skipping the substrate proof; the agent runs with the brief OFF (no host GT)."
+            exit 0
+          fi
+          # §F.1 immutable-digest assertion: a mutable tag is NOT a valid proof input.
+          case "$GT_SUBSTRATE_DIGEST" in
+            *@sha256:*) : ;;
+            *) echo "FATAL: GT_SUBSTRATE_DIGEST='$GT_SUBSTRATE_DIGEST' is not a pinned @sha256 digest"; exit 1 ;;
+          esac
+          echo "pinned substrate: $GT_SUBSTRATE_DIGEST"
+
           IMG=$(python3 -c "import tomllib;t=tomllib.load(open('$TASK_DIR/task.toml','rb'));print(t.get('environment',{}).get('docker_image',''))")
-          [ -z "$IMG" ] && { echo "::warning::no docker_image in task.toml — brief stays off"; exit 0; }
+          [ -z "$IMG" ] && { echo "FATAL: no docker_image in task.toml — cannot materialize the task repo"; exit 1; }
           echo "task image: $IMG"
-          # GHCR-FIRST pull (cache_deepswe_images.yml mirrors the ECR Public images to
-          # GHCR to kill cold-pull latency + ECR rate limits). Retag to $IMG so the rest
-          # of the script is unchanged. Fall back to ECR Public with retries.
+          # GHCR-FIRST pull (cache_deepswe_images.yml mirrors the source images to GHCR to
+          # kill cold-pull latency + rate limits). Retag to $IMG. Fall back with retries.
           OWNER=$(echo "${{ inputs.assets_repo }}" | cut -d/ -f1 | tr '[:upper:]' '[:lower:]')
           BASE="${IMG##*/}"; BASE="${BASE%%:*}"; GHCR="ghcr.io/${OWNER}/${BASE}:${IMG##*:}"
           if docker pull "$GHCR" 2>/dev/null; then
             docker tag "$GHCR" "$IMG"; echo "pulled from GHCR cache: $GHCR"
           else
             echo "GHCR miss ($GHCR) — pulling source"
-            for i in 1 2 3 4; do docker pull "$IMG" && break || { echo "pull attempt $i failed, retrying..."; sleep 15; }; done
+            PULLED=0
+            for i in 1 2 3 4; do docker pull "$IMG" && { PULLED=1; break; } || { echo "pull attempt $i failed, retrying..."; sleep 15; }; done
+            [ "$PULLED" -eq 1 ] || { echo "FATAL: task image pull failed"; exit 1; }
           fi
-          docker image inspect "$IMG" >/dev/null 2>&1 || { echo "::warning::image pull failed — brief stays off"; exit 0; }
+          docker image inspect "$IMG" >/dev/null 2>&1 || { echo "FATAL: task image not present after pull"; exit 1; }
+
+          # Pull the PINNED substrate by digest (§E GT_SUBSTRATE_PULL_FAIL).
+          if ! docker pull "$GT_SUBSTRATE_DIGEST"; then
+            echo "GT_SUBSTRATE_PULL_FAIL: docker pull of the pinned substrate failed"; exit 1
+          fi
+
+          # Materialize the task repo at its base commit and copy it OUT to a host dir we
+          # then mount READ-ONLY into the substrate (the substrate copies to its own writable
+          # scratch internally; the task image is never mutated).
           docker rm -f gtsrc 2>/dev/null || true
           docker run -d --name gtsrc "$IMG" sleep 1800 >/dev/null
           ROOT=$(docker exec gtsrc bash -c 'for d in /home/user /testbed /workspace /app /repo; do [ -d "$d/.git" ] && echo "$d" && break; done')
           ROOT=${ROOT:-/testbed}
           echo "repo root: $ROOT"
-          if [ ! -x gt-index/gt-index-linux ]; then
-            # Fail-closed: a gt-index build failure must abort the task, not run degraded.
-            (cd gt-index && CGO_ENABLED=1 go build -buildvcs=false -tags sqlite_fts5 -o gt-index-linux ./cmd/gt-index/) \
-              || { echo "FATAL: gt-index build failed"; exit 1; }
-          fi
-          mkdir -p /tmp/gt
-          docker cp gt-index/gt-index-linux gtsrc:/tmp/gt-index && docker exec gtsrc chmod +x /tmp/gt-index
-          # Fail-closed: the FRESH in-container index is the legitimacy backbone. If it
-          # fails, abort — never fall back to a stale / partial graph.
-          docker exec gtsrc /tmp/gt-index -root="$ROOT" -output=/tmp/graph.db 2>&1 | tail -3
-          IDX_RC=${PIPESTATUS[0]}
-          [ "$IDX_RC" -eq 0 ] || { echo "FATAL: gt-index run failed (rc=$IDX_RC)"; exit 1; }
-          docker cp gtsrc:/tmp/graph.db /tmp/gt/graph.db || { echo "FATAL: graph.db not produced by in-container index"; exit 1; }
-          mkdir -p /tmp/gt/src && docker cp "gtsrc:$ROOT/." /tmp/gt/src 2>/dev/null || echo "WARN: no source"
-          docker rm -f gtsrc 2>/dev/null || true
-          if [ -f /tmp/gt/graph.db ]; then
-            TASK_LANG=$(python3 -c "import tomllib;t=tomllib.load(open('$TASK_DIR/task.toml','rb'));print(t.get('metadata',{}).get('language','python'))")
-            echo "task language: $TASK_LANG -> LSP pass"
-            # Fail-closed: LSP enrichment is part of the full stack. Under GT_REQUIRE_LSP/
-            # GT_REQUIRE_FULL_STACK a degraded LSP pass must abort, not run silently.
-            python -m groundtruth.resolve --db /tmp/gt/graph.db --root /tmp/gt/src --resolve --lang "$TASK_LANG" 2>&1 | tail -3
-            LSP_RC=${PIPESTATUS[0]}
-            [ "$LSP_RC" -eq 0 ] || { echo "FATAL: LSP resolve pass failed (rc=$LSP_RC)"; exit 1; }
-            echo "lsp edges written: $(sqlite3 /tmp/gt/graph.db "SELECT COUNT(*) FROM edges WHERE resolution_method='lsp'" 2>/dev/null || echo '?')"
-            # Gate ORDER (D): rebuild the transitive-closure sidecar AFTER LSP so it
-            # reflects LSP-promoted / re-pointed / deleted edges (it goes stale otherwise).
-            # This is the closure-rebuild step the preflight HARD gate depends on.
-            gt-index/gt-index-linux -rebuild-closure -output=/tmp/gt/graph.db 2>&1 | tail -2
-            CLO_RC=${PIPESTATUS[0]}
-            [ "$CLO_RC" -eq 0 ] || { echo "FATAL: closure rebuild after LSP failed (rc=$CLO_RC)"; exit 1; }
-            echo "GT_GRAPH_DB=/tmp/gt/graph.db" >> "$GITHUB_ENV"
-            echo "GT_REPO_ROOT=/tmp/gt/src" >> "$GITHUB_ENV"
-            echo "GT brief WIRED: graph.db $(stat -c%s /tmp/gt/graph.db) bytes, src $(ls /tmp/gt/src | wc -l) entries"
-          else
-            # Fail-closed: under GT_REQUIRE_FULL_STACK a missing graph.db is a degraded
-            # run, not a "brief off" downgrade. The agent must NOT start without the stack.
-            echo "FATAL: graph.db missing after fresh in-container index — refusing degraded run"
+          rm -rf /tmp/gt && mkdir -p /tmp/gt /tmp/gt/src
+          docker cp "gtsrc:$ROOT/." /tmp/gt/src || { echo "FATAL: source extract failed"; exit 1; }
+
+          # THIS task's issue (problem statement only — NEVER gold/tests) so the substrate's
+          # demand-driven LSP scope + embedder cert operate on the issue-relevant subgraph.
+          python3 -c "import tomllib;t=tomllib.load(open('$TASK_DIR/task.toml','rb'));import io;open('/tmp/issue.txt','w',encoding='utf-8').write((t.get('metadata',{}) or {}).get('issue','') or (t.get('task',{}) or {}).get('prompt','') or '')" 2>/dev/null || : > /tmp/issue.txt
+
+          # ── gt-run-proof INSIDE the pinned substrate (the ONE portable command, §A) ──
+          # Repo mounted /work:ro; artifacts -> /gt_artifacts. All 8 proof flags set so the
+          # substrate fails-closed on any boundary/baked-dep violation. The host only orchestrates.
+          if ! docker run --rm \
+              -v "/tmp/gt/src:/work:ro" -v "/tmp/gt:/gt_artifacts" \
+              -v "/tmp/issue.txt:/work_issue.txt:ro" \
+              -e GT_PROOF_MODE=1 -e GT_CONTAINERIZED=1 -e GT_RUNTIME_STRATEGY=unified_substrate \
+              -e GT_REQUIRE_FTS5=1 -e GT_REQUIRE_EMBEDDER=1 -e GT_FORCE_ONNX_EMBEDDER=1 \
+              -e GT_REQUIRE_LSP=1 -e GT_REQUIRE_FULL_STACK=1 -e GT_ISSUE_FILE=/work_issue.txt \
+              -e GT_GATES_DELIVER_ALWAYS="${GT_GATES_DELIVER_ALWAYS:-1}" \
+              "$GT_SUBSTRATE_DIGEST" gt-run-proof --source-root /work --out /gt_artifacts; then
+            echo "GT_RUN_PROOF_FAIL: gt-run-proof returned non-zero (boundary/leak/missing-baked-dep)"
+            docker rm -f gtsrc 2>/dev/null || true
             exit 1
           fi
+          docker rm -f gtsrc 2>/dev/null || true
 
-      - name: Preflight — HARD gate full stack before the paid run (abort on degradation)
-        if: ${{ env.GT_GRAPH_DB != '' }}
-        run: |
-          # No silent fallback. preflight_pipeline.py exits non-zero under
-          # GT_REQUIRE_FULL_POTENTIAL when FTS5 / semantic / lsp-edges / data_flow degrade.
-          # --census: the authoritative "GT runs as built" gate — full build census
-          # (9 tables, edge trust model, cross-language property kinds, closure) + an
-          # end-to-end pipeline run (graph-backed brief + real per-view hook content),
-          # coordinated with gt_gt.md. Aborts if any base or the pipeline is degraded.
-          python scripts/verify/preflight_pipeline.py \
-            --db /tmp/gt/graph.db --root /tmp/gt/src --census
+          # §E GT_ARTIFACT_MISSING / SUBSTRATE_MISSING_CERTS — verify the 7-artifact contract.
+          for c in graph.db runtime_context.json lsp_certificate.json graph_certificate.json \
+                   embedder_certificate.json foundational_gate_report.json run_manifest.json; do
+            test -s "/tmp/gt/$c" || { echo "GT_ARTIFACT_MISSING / SUBSTRATE_MISSING_CERTS: /gt_artifacts/$c absent after gt-run-proof"; exit 1; }
+          done
+          echo "all 7 GT artifacts present under /tmp/gt (= /gt_artifacts)"
 
-      - name: Legitimacy manifest + guard (fail-closed before the agent runs)
-        if: ${{ env.GT_GRAPH_DB != '' }}
-        run: |
-          # Emit a provenance manifest AND fail-closed on any illegitimate prebuilt
-          # artifact (graph.db / brief / closure older than GT_JOB_STARTED). Exit
-          # non-zero -> this step fails -> the agent never starts.
-          python scripts/verify/legitimacy.py \
-            --task "${{ matrix.task }}" \
-            --db /tmp/gt/graph.db \
-            --root /tmp/gt/src \
-            --out /tmp/gt \
-            --job-started "$GT_JOB_STARTED" \
-            --dataset-source "task.toml(local)"
+          # ── Cert-env handoff into the agent (§D) — the adapter reads these READ-ONLY ──
+          # GT_HOST_GRAPH_DB + GT_CERT_DIR are the canonical host->agent handoff (proof.py
+          # HOST_HANDOFF); the adapter resolves them via GTRuntimeContext.from_env (non-proof
+          # host-handoff branch, context.py:111-112). GT_REPO_ROOT kept for adapter brief compat.
+          {
+            echo "GT_PORTABLE_SUBSTRATE=1"
+            echo "GT_CERT_DIR=/tmp/gt"
+            echo "GT_HOST_GRAPH_DB=/tmp/gt/graph.db"
+            echo "GT_HOST_SRC_ROOT=/tmp/gt/src"
+            echo "GT_REPO_ROOT=/tmp/gt/src"
+            echo "GT_LSP_CERT=/tmp/gt/lsp_certificate.json"
+            echo "GT_GRAPH_CERT=/tmp/gt/graph_certificate.json"
+            echo "GT_EMBEDDER_CERT=/tmp/gt/embedder_certificate.json"
+          } >> "$GITHUB_ENV"
+          # Deep gate record alongside the per-task metrics (mandate: persist the 8-dp gate report).
+          cp -f /tmp/gt/foundational_gate_report.json "/tmp/gt_gates_deep_${{ matrix.task }}.json" 2>/dev/null || true
+          echo "substrate proof done: consumed /gt_artifacts; host LSP+gates SKIPPED (no divergent graph)"
 
       - name: Run GT trial
+        # Cert-env handoff (§D): GT_CERT_DIR / GT_HOST_GRAPH_DB / GT_HOST_SRC_ROOT + the cert
+        # paths were written to $GITHUB_ENV by the substrate-proof step and are inherited here;
+        # GT_PROOF_MODE / GT_CONTAINERIZED / GT_RUNTIME_STRATEGY come from the top-level env.
+        # The HOST-SIDE adapter (gt_agent.py witness/brief) consumes the HOST paths READ-ONLY
+        # and emits the §H [GT_META] witness to stdout (captured in trial_output.log).
+        #
+        # ── hole #5: UNCONDITIONAL env passthrough INTO THE TASK CONTAINER ──────────────
+        # The in-container patch (gt_mini_patch.py) runs as part of the mini-swe-agent
+        # PROCESS, which pier launches via `docker compose exec -e KEY=VALUE main ...`. The
+        # GHA top-level env: / $GITHUB_ENV reach ONLY the host runner (pier) — pier does NOT
+        # blanket-forward os.environ into the task container. The VERIFIED forwarding path is
+        # `pier run --ae KEY=VALUE` -> AgentConfig.env (cli/jobs.py:620,629) -> factory
+        # extra_env (agents/factory.py:120) -> agent._extra_env -> build_process_env
+        # (agents/installed/base.py:251-255) -> exec_as_agent(env=) -> environment.exec(env=)
+        # -> DockerEnvironment.exec appends `-e KEY=VALUE` (environments/docker/docker.py:
+        # 679-681). So the consume path is NOT conditional on a launcher that may not set it —
+        # every GT var is forwarded EXPLICITLY here.
+        #
+        # CONTAINER paths, not host paths: gt_mini_patch is INSIDE the container, so the env it
+        # reads must point at /gt_artifacts — the in-container mount target. `--mounts-json`
+        # bind-mounts the host substrate dir (/tmp/gt) -> /gt_artifacts READ-ONLY so the path
+        # the env names actually exists in the container (the substrate graph is the ONE graph;
+        # ro => the in-container patch can never mutate/rebuild it — no divergent reindex).
         run: |
           echo "=== DeepSWE GT Trial: ${{ matrix.task }} (model ${{ inputs.model }}) ==="
-          echo "GT_GRAPH_DB: ${GT_GRAPH_DB:-<unset -> brief off>}"
+          echo "HOST  GT_CERT_DIR=${GT_CERT_DIR:-<unset>}  GT_HOST_GRAPH_DB=${GT_HOST_GRAPH_DB:-<unset>}"
+          echo "GT_PROOF_MODE=${GT_PROOF_MODE:-<unset>}  GT_CONTAINERIZED=${GT_CONTAINERIZED:-<unset>}  GT_SUBSTRATE_DIGEST=${GT_SUBSTRATE_DIGEST:-<unset>}"
+
+          # In-container substrate dir (mount target). The host substrate dir is /tmp/gt
+          # (written by the substrate-proof step); the container sees it as /gt_artifacts:ro.
+          GT_C_ARTIFACTS=/gt_artifacts
+          HOST_ARTIFACTS="${GT_CERT_DIR:-/tmp/gt}"
+
+          # Bind-mount the host substrate dir into the task container READ-ONLY. JSON is the
+          # pier --mounts-json contract (ServiceVolumeConfig: type/source/target/read_only).
+          MOUNTS_JSON="[{\"type\":\"bind\",\"source\":\"${HOST_ARTIFACTS}\",\"target\":\"${GT_C_ARTIFACTS}\",\"read_only\":true}]"
+          echo "CONTAINER mount: ${HOST_ARTIFACTS} -> ${GT_C_ARTIFACTS} (ro)"
+          echo "mounts-json: ${MOUNTS_JSON}"
+
+          # Forward the SUBSTRATE-CONSUME env into the container, pointing at /gt_artifacts.
+          # GT_FORBID_PREBUILT_GRAPH + GT_PORTABLE_SUBSTRATE + GT_PROOF_MODE/GT_CONTAINERIZED
+          # make the in-container pillars consume-or-fail-closed and keep L6 reindex OFF.
           pier run \
             -p deepswe-bench/tasks/${{ matrix.task }} \
             --agent-import-path artifact_deepswe.gt_agent:GTMiniSweAgent \
             --model ${{ inputs.model }} \
             --env docker \
             -y \
+            --mounts-json "${MOUNTS_JSON}" \
+            --ae GT_HOST_GRAPH_DB="${GT_C_ARTIFACTS}/graph.db" \
+            --ae GT_CERT_DIR="${GT_C_ARTIFACTS}" \
+            --ae GT_HOST_SRC_ROOT="${GT_C_ARTIFACTS}/src" \
+            --ae GT_PORTABLE_SUBSTRATE="1" \
+            --ae GT_FORBID_PREBUILT_GRAPH="1" \
+            --ae GT_PROOF_MODE="${GT_PROOF_MODE:-1}" \
+            --ae GT_CONTAINERIZED="1" \
+            --ae GT_RUNTIME_STRATEGY="${GT_RUNTIME_STRATEGY:-unified_substrate}" \
             --ak config_file=artifact_deepswe/gt_integration/deepswe_gt_pier.yaml \
             2>&1 | tee trial_output.log
           echo "=== Trial complete ==="
 
+      - name: Verify DeepSWE adapter witness (§E DEEPSWE_ADAPTER_FAIL / §H consumption proof)
+        if: ${{ env.GT_PORTABLE_SUBSTRATE == '1' }}
+        run: |
+          # AGENT-OBSERVATION truth: the adapter emitted a [GT_META] witness to stdout. Prove
+          # (1) it consumed the substrate graph (gt_prebuilt_active=true) and (2) the consumed
+          # graph fingerprints to the substrate's post-LSP hash (hook_graph_hash_matches_post_lsp=True).
+          # Any error=DEEPSWE_ADAPTER_FAIL or a hash mismatch fails the task (no silent degrade).
+          if grep -q "error=DEEPSWE_ADAPTER_FAIL" trial_output.log; then
+            echo "DEEPSWE_ADAPTER_FAIL: the adapter failed to wire/consume the substrate artifacts:"
+            grep "DEEPSWE_ADAPTER_FAIL" trial_output.log | head -5
+            exit 1
+          fi
+          if ! grep -q "gt_prebuilt_active=true" trial_output.log; then
+            echo "GT_ARTIFACT_NOT_CONSUMED: no [GT_META] witness with gt_prebuilt_active=true — the"
+            echo "adapter did not consume the substrate graph (delivery, not telemetry)."
+            grep "\[GT_META\]" trial_output.log | head -5 || echo "(no [GT_META] line at all)"
+            exit 1
+          fi
+          if grep -q "hook_graph_hash_matches_post_lsp=False" trial_output.log; then
+            echo "GRAPH_FAIL_HASH_MISMATCH: hook_graph_hash != graph_hash_after_lsp — the consumed"
+            echo "graph diverges from the substrate's LSP-resolved graph."
+            grep "hook_graph_hash_matches_post_lsp" trial_output.log | head -3
+            exit 1
+          fi
+          echo "adapter witness OK: substrate graph consumed read-only; hook hash == post-LSP hash"
+          grep "\[GT_META\] graph_witness" trial_output.log | head -2 || true
+
       - name: Collect results
         if: always()
         run: |
-          mkdir -p trial_results
+          mkdir -p trial_results trial_results/gt_artifacts
           cp trial_output.log trial_results/ 2>/dev/null || true
           cp /tmp/gt/graph.db trial_results/graph.db 2>/dev/null || true
+          # §F.10 — upload the 7 GT artifacts the substrate emitted (the proof set), even on
+          # task failure. graph.db is already copied above; mirror the certs + manifests + brief.
+          for a in runtime_context.json lsp_certificate.json graph_certificate.json \
+                   embedder_certificate.json foundational_gate_report.json run_manifest.json \
+                   brief.txt gt_issue_anchors.json gt_scope_files.txt gt_lsp_metrics.txt; do
+            cp "/tmp/gt/$a" "trial_results/gt_artifacts/$a" 2>/dev/null || true
+          done
           cp /tmp/gt/delivered_instruction.txt trial_results/ 2>/dev/null || true
           cp -r jobs trial_results/jobs 2>/dev/null || true
           cp /tmp/gt/*.log              trial_results/ 2>/dev/null || true

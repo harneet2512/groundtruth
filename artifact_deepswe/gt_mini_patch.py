@@ -209,8 +209,39 @@ def _classify(cmd: str) -> tuple[str | None, str | None]:
     return None, None
 
 
+def _substrate_active() -> bool:
+    """True when GT runs in SUBSTRATE-CONSUME mode (handoff §B AFTER / §G): the pinned
+    portable substrate already produced the resolved graph + certs into /gt_artifacts and
+    the harness handed them to us READ-ONLY via GT_HOST_GRAPH_DB / GT_CERT_DIR. In this
+    mode the substrate graph is AUTHORITATIVE and immutable — the adapter must NEVER rebuild
+    or mutate it (the "never rebuilds a divergent graph" rule). Detected purely from the
+    handoff env so it is harness-agnostic. Mirrors gt_agent._substrate_active exactly."""
+    return bool(
+        os.environ.get("GT_PORTABLE_SUBSTRATE") == "1"
+        or os.environ.get("GT_HOST_GRAPH_DB")
+        or os.environ.get("GT_CERT_DIR")
+    )
+
+
 def _db_path() -> str:
-    return os.environ.get("GT_GRAPH_DB", "/tmp/graph.db")
+    """The graph the per-turn pillars read (hole #6).
+
+    SUBSTRATE-CONSUME (authoritative, no fallback): GT_HOST_GRAPH_DB is read
+    UNCONDITIONALLY as THE graph — the SAME LSP-enriched graph the gates measured and
+    the host witness fingerprinted. In substrate/proof mode we NEVER fall back to the
+    legacy in-container /tmp/graph.db: there IS no second graph (gt_agent removed the
+    dual-graph build), so a missing GT_HOST_GRAPH_DB must surface as 'no graph' (the
+    pillars are correct-or-quiet on a missing db), never silently read a divergent
+    rebuild. The /tmp/graph.db legacy fallback applies ONLY on the non-substrate,
+    non-proof (preindex/trial) path."""
+    host = os.environ.get("GT_HOST_GRAPH_DB")
+    if host:
+        return host
+    if _substrate_active() or os.environ.get("GT_PROOF_MODE") == "1":
+        # Substrate/proof mode but GT_HOST_GRAPH_DB unset -> GT_GRAPH_DB if the harness
+        # used the canonical name; NEVER the legacy /tmp/graph.db (no divergent rebuild).
+        return os.environ.get("GT_GRAPH_DB") or ""
+    return os.environ.get("GT_GRAPH_DB") or "/tmp/graph.db"
 
 
 def _has_columns(con) -> tuple[bool, bool]:
@@ -486,7 +517,7 @@ def _norm_rel(p: str) -> str:
 def _query_scope(rel: str) -> list[str]:
     """Graph 1-hop neighbours of `rel`, confidence-gated (>= 0.5). Shared by the
     first-view consensus and the override re-anchor."""
-    db = os.environ.get("GT_GRAPH_DB", "/tmp/graph.db")
+    db = _db_path()
     if not os.path.isfile(db):
         return []
     out: list[str] = []
@@ -569,7 +600,7 @@ def _consensus_block(rel: str, root: str) -> str:
         return ""
     _consensus_fired = True
     try:
-        db = os.environ.get("GT_GRAPH_DB", "/tmp/graph.db")
+        db = _db_path()
         scope: list[str] = []
         if os.path.isfile(db):
             import sqlite3
@@ -717,7 +748,7 @@ def _graph_contract_block(rel: str) -> str:
         return ""
     _contract_seen.add(rel)
     try:
-        db = os.environ.get("GT_GRAPH_DB", "/tmp/graph.db")
+        db = _db_path()
         if not os.path.isfile(db):
             return ""
         import sqlite3
@@ -783,7 +814,7 @@ def _cochange_block(rel: str) -> str:
     if _cochange_fired or _GT_BASELINE:
         return ""
     try:
-        db = os.environ.get("GT_GRAPH_DB", "/tmp/graph.db")
+        db = _db_path()
         if not os.path.isfile(db):
             return ""
         import sqlite3
@@ -829,7 +860,21 @@ def _invalidate_on_edit(rel: str, root: str) -> None:
     gt_hook AST cache and best-effort single-file reindex graph.db, so the next
     understand / consensus / verify reads the agent's NEW code rather than base-commit.
     On OH the wrapper reindexes after every edit; DeepSWE had nothing, leaving the
-    cross-file intelligence frozen for the whole trajectory."""
+    cross-file intelligence frozen for the whole trajectory.
+
+    SUBSTRATE-CONSUME RECONCILIATION (handoff: "NEVER rebuilds a divergent graph",
+    §B AFTER / §G; chosen OPTION (a)): when the pinned substrate produced the
+    authoritative graph (_substrate_active -> GT_HOST_GRAPH_DB / GT_CERT_DIR set),
+    the substrate's /gt_artifacts/graph.db is READ-ONLY and is the SAME graph the
+    gates certified and the host witness fingerprinted. A single-file `gt-index -file`
+    reindex would MUTATE it (or fork a divergent copy), breaking hook==post-LSP-hash
+    parity and the no-divergent-graph rule. So in substrate mode L6 is GATED OFF:
+    the per-turn pillars keep reading the substrate graph unchanged. (Option (b) — a
+    per-task graph COPY — was rejected: it reintroduces a divergent graph the witness
+    would fail to match, strictly worse for the proof.) L6 stays ENABLED only on the
+    non-substrate (preindex/trial) path where the in-container /tmp/graph.db is ours."""
+    if _substrate_active():
+        return  # substrate graph is authoritative + read-only; never mutate/rebuild it.
     try:
         if os.path.isfile(_GT_INDEX_CACHE):
             os.remove(_GT_INDEX_CACHE)
@@ -837,7 +882,7 @@ def _invalidate_on_edit(rel: str, root: str) -> None:
         pass
     try:
         gt_index = os.environ.get("GT_INDEX_BIN", "/tmp/gt-index")
-        db = os.environ.get("GT_GRAPH_DB", "/tmp/graph.db")
+        db = _db_path()
         if os.path.isfile(gt_index) and os.path.isfile(db):
             subprocess.run(
                 [gt_index, f"-root={root}", f"-file={rel}", f"-output={db}"],
