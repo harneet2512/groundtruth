@@ -496,6 +496,14 @@ Key routing rules:
 
 ---
 
+> **SUPERSEDED (2026-06-09) — historical only.** Current state of record: `gt_gt.md` §11–§13 +
+> `LATEST_TASK.md` + `SESSION_SUMMARY.md`. What changed since this block: DeepSWE is the LIVE surface
+> NOW (Datacurve DeepSWE, 113 tasks / 5 langs / pier + mini-swe-agent) — not "after OH is bug-free."
+> `gt_hook.py`'s Python-`ast` path is being RETIRED (70% of DeepSWE is non-Python) in favor of the
+> tree-sitter graph + the deep `v1r` engine (now carrying per-symbol MaxSim granularity + dense-floor
+> fusion + the open-source code embedder). Decisions here are grounded on research+code+performance,
+> not on this (or any) doc. Read the block below only for history.
+
 ## ICEMAN session (2026-05-31) — v15.2 census + pivot to the DeepSWE goal
 
 Branch `gt-consensus-curation`. Commit `c8f59cc6` (`fix(lsp+localizer)`). Live testing

@@ -1,167 +1,46 @@
-> **SUPERSEDED BY RESPEC.md — historical only.**
+# LATEST TASK — Unleash full-power GT on DeepSWE (mini-swe-agent), multilingual
 
-# LATEST TASK — Graph Quality Verification Smoke
-
-**Status:** READY TO SMOKE (locally verified — all layers proven working)
-**Branch:** `jedi__branch` (commit `157c8e3`)
-**Last updated:** 2026-05-16
-**Coordinator plan:** `we-will-run-a-twinkly-elephant.md`
-**Work log:** `jedi_WORK.md`
+**Status:** IN PROGRESS — localization levers landing; DeepSWE/mini-swe unify mid-build.
+**Branch:** `gt-trial` @ `8a65b4ce` (pushed to origin/harneet2512 + hbali-stack).
+**Last updated:** 2026-06-09
+**Canonical detail:** `gt_gt.md` §11 (findings), §12 (per-layer roles), §13 (this pivot + build order);
+`SESSION_SUMMARY.md`. (Older `RESPEC.md` / `jedi_WORK.md` / the CLAUDE.md ICEMAN block are historical.)
 
 ---
 
-## What Was Done
+## The current goal
+Validation surface = **Datacurve DeepSWE** (`github.com/datacurve-ai/deep-swe`): 113 tasks, 91 repos,
+**5 languages (TS 35 / Go 34 / Py 34 / Rust 5 / JS 5 — 70% non-Python)**, contamination-free,
+unsaturated, harness = **pier + mini-swe-agent**. (NOT SWE-Live-Lite — low mindshare; NOT saturated
+Verified.) 113 images cached to GHCR.
 
-Commit `e72690c` implements graph quality infrastructure:
-1. Schema: `trust_tier`, `candidate_count`, `evidence_type`, `verification_status` columns added to edges table
-2. Resolver: persists candidate count + trust tier at resolution time (CERTIFIED/CANDIDATE/SPECULATIVE)
-3. V1R confidence floor: 4 unfiltered queries now filter `AND e.confidence >= 0.7`
-4. V1R graph_reach: min_confidence raised from 0.5 to 0.7
-5. New: `scripts/graph_quality_metrics.py` — quality metrics from any graph.db
+Bring the **FULL OH-depth GT** to mini-swe-agent, **language-agnostic**, by **unifying onto the deep
+`v1r/run_v74` engine** (where the levers live) — NOT the shallow `gt_intel`/`gt_hook` (`ast`, Python-only)
+engine. The brief already reaches the mini-swe agent via `gt_agent._generate_brief` → `generate_v1r_brief`.
 
-## Local Verification (2026-05-16, Phase 0-4 complete)
+## Decision-grounding rule (this session)
+Decisions are grounded on **research + code + performance** (measured, RED→GREEN), NOT on docs.
+Docs (CLAUDE.md/gt_gt) are authoritative only when CURRENT — keep them updated; never let a stale doc
+drive a decision. Example: drop `ast` because **70% of DeepSWE is non-Python → `ast.parse` emits empty
+evidence on 70% of tasks** (performance), the tree-sitter graph already exists for all langs (code), and
+multilingual graph/retrieval is SOTA (research) — proven by a per-language RED→GREEN test, not by the doc.
 
-All layers proven working locally:
-- **Graph metrics:** 5 repos × 4 languages tested. Confidence floor eliminates 45% noise connections.
-- **V1R brief:** G3a removed, W_SEM=0 fallback works. 41 ranked files produced locally.
-- **L3 evidence:** 4/5 smoke tasks have rich evidence (635, 136, 1678 callers at conf=1.0).
-- **L3b navigation:** Iteration-aware decay implemented (1000/640/320/0 char caps by band).
-- **L5 governor:** 49 tests pass, infrastructure correct.
-- **D29 fixes:** All 4 applied (Fix A via graph connectivity gate, B/C/D confirmed).
-- **Tests:** 376/377 pass (1 pre-existing failure unrelated).
+## Build order (each Stage-1 deterministic before any flip claim)
+1. ✅ **CHANGE 1** — per-symbol MaxSim granularity (`33970b9f`; gold #1 3/7→7/7 @ e5/384).
+2. ✅ **Fusion + dense floor** (`8a65b4ce`; W_SEM_FLOOR=0.25, base 0.40, query-adaptive; 15/15).
+3. 🔄 **CHANGE 2** — open-source code embedder `gte-modernbert-base` (Apache-2.0), configurable, e5 fallback.
+4. 🔄 **Unify ast-residue → cross-language evidence** (`gt_mini_patch` `gt_hook`/`ast` → v1r/graph SQL pillars).
+5. ⏭ **DeepSWE substrate Docker image** — bake GT wheel + embedder + pyright/gopls/rust-analyzer/tsserver
+   (so in-container v1r evidence + L6 reindex preserve LSP across all 5 langs).
+6. ⏭ **Validate** — GT-off baseline + paired GT-on on DeepSWE across all 5 languages (Wilcoxon).
 
-See `jedi_WORK.md` for full evidence chain and `reports/PHASE1_GRAPH_VERIFICATION.md` for metrics.
+## Open / verify
+- Step-0: confirm a real DeepSWE trajectory fires the `<gt-task-brief>` on a Go task (trial dispatched).
+- CHANGE 2 live model-load pending `setup_models` fetch / image bake.
+- Unify per-turn evidence needs the GT package in-container (substrate bake) or host-side.
 
-## What Needs Verification (VM/GHA only)
-
-Run a 5-task smoke test with DeepSeek V4 Flash on GHA to prove:
-- The code runs (no crashes from schema changes)
-- V1R brief produces non-empty output with the confidence floor
-- Resolved count >= 3/5 (no regression from baseline)
-- beancount-931, beets-5495, xarray-9760 still resolve
-
-## How To Run The Smoke
-
-### Option 1: GitHub Actions (preferred)
-
-1. Go to: `Actions` tab → `SWE-bench-Live 30-task (VM baseline)` workflow
-2. Click "Run workflow"
-3. Parameters:
-   - `gt_commit`: `jedi__branch`
-   - `max_iterations`: `100`
-   - `baseline`: `false`
-   - `temperature`: `0.7`
-   - `top_p`: `0.8`
-4. Wait for 5 tasks to complete (~60-90 min)
-5. Check: resolved count in eval results
-
-### Option 2: Manual single-task test
-
-```bash
-# On a machine with Docker + DeepSeek API key
-export DEEPSEEK_API_KEY="..."
-python scripts/swebench/oh_gt_full_wrapper.py \
-    --instance-ids 'beancount__beancount-931' \
-    -l eval \
-    -i 100 \
-    --eval-num-workers 1 \
-    --eval-output-dir /tmp/results \
-    --dataset 'SWE-bench-Live/SWE-bench-Live' \
-    --split lite
-```
-
-## DeepSeek V4 Flash Config
-
-```toml
-[llm.eval]
-model = "deepseek/deepseek-v4-flash"
-api_key = "${DEEPSEEK_API_KEY}"
-base_url = "https://api.deepseek.com"
-temperature = 0.7
-top_p = 0.8
-max_output_tokens = 65536
-drop_params = true
-num_retries = 10
-timeout = 300
-```
-
-**Cost estimate:** ~$0.02-0.05 per task (DeepSeek V4 Flash is cheap). 5 tasks = ~$0.10-0.25 total.
-
-## GHA Workflow Details
-
-- **File:** `.github/workflows/swebench_30task.yml`
-- **Runner:** `ubuntu-latest` (not VM — DeepSeek direct API doesn't need WIF/GCP)
-- **Docker:** `ghcr.io/all-hands-ai/runtime:0.54-nikolaik`
-- **Task images:** `ghcr.io/harneet2512/sweb.eval.x86_64.<repo>_1776_<task>:latest`
-- **Parallel:** up to 20 (but only 5 tasks in current config)
-- **Timeout:** 90 min per task
-
-## Feature Flags (all enabled in workflow)
-
-```
-GT_REBUILD_L1=1
-GT_REBUILD_L3=1
-GT_REBUILD_L3B=1
-GT_REBUILD_L5=1
-GT_LAYER_EVENTS=1
-GT_STRUCTURED_EVENTS=1
-GT_STRUCTURAL_NEXT_ACTION=1
-GT_L3B_PRIMARY_EDGE=1
-GT_L5_STRUCTURAL_UNVERIFIED=1
-GT_L5_GOKU_EVENTS=1
-GT_DEEP_LAYER_GROUNDED_METRICS=1
-GT_L5B_SAFETY_REQUIRED=1
-GT_LSP_VERIFY=1
-EVAL_CONDENSER=recent_events:5
-```
-
-## 5 Smoke Tasks
-
-| Task | Repo | Previous Result | Expected |
-|------|------|----------------|----------|
-| beancount__beancount-931 | beancount/beancount | RESOLVED | RESOLVED |
-| beetbox__beets-5495 | beetbox/beets | RESOLVED | RESOLVED |
-| pydata__xarray-9760 | pydata/xarray | RESOLVED | RESOLVED |
-| aws-cloudformation__cfn-lint-3821 | aws-cloudformation/cfn-lint | FAILED | FAILED (acceptable) |
-| delgan__loguru-1306 | delgan/loguru | FAILED | FAILED (acceptable) |
-
-## Acceptance Gates
-
-| Gate | Criterion | Action if FAIL |
-|------|-----------|----------------|
-| G1 | No crash / infra error | Fix code, don't rerun |
-| G2 | V1R brief non-empty on >= 4/5 tasks | Lower confidence floor or investigate |
-| G3 | Resolved >= 3/5 | Revert confidence floor changes |
-| G4 | beancount + beets + xarray all resolve | Revert — regression detected |
-| G5 | No new GT-caused timeouts | Investigate LSP/query latency |
-
-## After Smoke Passes
-
-1. Run `scripts/graph_quality_metrics.py` on the per-task graph.db files
-2. Compare metrics before/after (are certified edges actually surfacing in brief?)
-3. Check GT logs for `[GT_META]` lines — does V1R brief content differ from pre-fix?
-4. Document results in `reports/` directory
-
-## After Smoke Fails
-
-1. Check which gate failed
-2. If G3/G4 (regression): `git revert e72690c`, push, re-smoke to confirm revert fixes it
-3. If G1 (crash): read error logs, fix the code, push fix, re-smoke
-4. If G2 (empty brief): confidence floor may be too high for small repos — investigate per-repo metrics
-
----
-
-## Context Documents (for deep understanding)
-
-- `reports/GRAPH_CREATION_METRIC_DIAGNOSIS.md` — measured graph quality on 4 repos
-- `reports/GENERAL_GRAPH_CREATION_DESIGN.md` — generalized architecture design (19 sections)
-- `reports/HYPOTHESIS_ISOLATION_PLAN.md` — causal research design (5 hypotheses)
-
-## Key Proven Facts (from this session's analysis)
-
-- dagster graph: 27% of edges are noise (conf < 0.5)
-- 5,726 cross-language false positives (Python → TypeScript)
-- `docs_snippets/ops.py` ranked #2 in entire codebase (93% noise edges)
-- `execute_in_process` had 1,318 edges — ALL noise (0 certified)
-- After confidence floor: docs/TS/utilities all drop off top-10
-- Confidence floor is the MINIMAL safe infrastructure change
+## Key facts (from code, not docs)
+- Two engines existed (ONE-PRODUCT violation): `v1r/run_v74` (deep, multilingual, tree-sitter+embedder)
+  vs `gt_intel`/`gt_hook` (`ast`, Python-only). Unify onto v1r; retire `run_mini_gt_hooked.py` + the `ast` routes.
+- L6 = REINDEXER (works, but strips LSP because pyright is absent from the task image → bake it).
+- L4 = EVENT hook. `GRAPH_FAIL_MISSING_HANDOFF` = a cert false-fail. (See gt_gt §12.)
