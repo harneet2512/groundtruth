@@ -394,3 +394,75 @@ def assert_same_embedder_identity(db, who: str) -> bool:
         return True
     return require(prior == sig, "same_embedder_identity",
                    f"{who} embedder {sig!r} != prior {prior!r}")
+
+
+def embedder_model_path() -> str:
+    """Path to the baked ONNX model (GT_MODELS_ROOT/e5-small-v2/model.onnx)."""
+    root = os.environ.get("GT_MODELS_ROOT", "") or os.path.join(runtime_root(), "models")
+    return os.path.join(root, "e5-small-v2", "model.onnx")
+
+
+def embedder_model_sha() -> str:
+    """Best-effort model SHA — a sidecar `.sha256` or $GT_MODEL_SHA (never hash a ~130MB
+    model file per task). '' if unavailable."""
+    env = os.environ.get("GT_MODEL_SHA", "")
+    if env:
+        return env.strip()
+    p = embedder_model_path()
+    for cand in (p + ".sha256", os.path.join(os.path.dirname(p), "model.onnx.sha256")):
+        try:
+            with open(cand, encoding="utf-8") as f:
+                return f.read().split()[0].strip()
+        except Exception:
+            continue
+    return ""
+
+
+def build_embedder_certificate(**kw) -> dict:
+    """Assemble the Stage-3 embedder-usage certificate (identity + consumption fields).
+    Pure data assembly; classification lives in scripts/metrics/embedder_certificate.py."""
+    try:
+        ident = embedder_identity()
+    except Exception:
+        ident = {}
+    db = kw.get("db")
+    stamped = read_meta(db, K_EMBEDDER_ID) if db else None
+    return {
+        "schema": "gt.embedder_certificate.v1",
+        "bug_id": kw.get("bug_id", ""),
+        "GT_FORCE_ONNX_EMBEDDER": os.environ.get("GT_FORCE_ONNX_EMBEDDER", ""),
+        "GT_REQUIRE_EMBEDDER": os.environ.get("GT_REQUIRE_EMBEDDER", ""),
+        "GT_MODELS_ROOT": ident.get("models_root", os.environ.get("GT_MODELS_ROOT", "")),
+        "model_path": embedder_model_path(),
+        "model_sha": embedder_model_sha(),
+        "embedder_class": ident.get("class", ""),
+        "embedder_dim": ident.get("dim", ""),
+        "runtime_context_id": context_id(),
+        "stamped_embedder_identity": stamped,
+        "run_v74_embedder_identity": kw.get("run_v74_identity") or ident,
+        "localize_embedder_identity": kw.get("localize_identity"),
+        "v1r_render_semantic_identity": kw.get("v1r_identity"),
+        "semantic_candidate_count": int(kw.get("semantic_candidate_count", 0) or 0),
+        "rendered_candidate_count": int(kw.get("rendered_candidate_count", 0) or 0),
+        "rendered_semantic_nonzero_count": int(kw.get("rendered_semantic_nonzero_count", 0) or 0),
+        "upstream_semantic_nonzero_count": int(kw.get("upstream_semantic_nonzero_count", 0) or 0),
+        "effective_w_sem": float(kw.get("effective_w_sem", 0.0) or 0.0),
+        "all_zero_semantic_reason": kw.get("all_zero_semantic_reason", "") or "",
+        "model_download_attempted": bool(kw.get("model_download_attempted", False)),
+    }
+
+
+def write_embedder_certificate(cert: dict) -> str:
+    """Write the embedder certificate to $GT_EMBEDDER_CERT (default
+    /tmp/gt/embedder_certificate.json). Best-effort; never raises."""
+    import json as _json
+    path = os.environ.get("GT_EMBEDDER_CERT", "/tmp/gt/embedder_certificate.json")
+    try:
+        d = os.path.dirname(path)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            _json.dump(cert, f, indent=2)
+    except Exception:
+        pass
+    return path

@@ -19,8 +19,8 @@
 | Handoff doc + discipline | ✅ committed | `9f0a7d83` |
 | Stage 0 — map final runtime path | ✅ committed | `e593f72e` |
 | Stage 1 — LSP liveness cert | ✅ local gate proven (15 tests) | `1c3ec178` |
-| Stage 2 — graph handoff cert | ✅ local gate proven (18 tests) — awaiting review | this commit |
-| Stage 3 — embedder usage cert | ⛔ not started | — |
+| Stage 2 — graph handoff cert | ✅ local gate proven (18 tests) | `dbc41e43` |
+| Stage 3 — embedder usage cert | ✅ local gate proven (15 tests) — awaiting review | this commit |
 | Stage 4 — LSP+gates in-container | ⛔ not started | — |
 | Stage 5 — image cache + manifest | ⛔ not started | — |
 
@@ -31,12 +31,14 @@
 - **U2** ✅ CLOSED in code (Stage 2): graph certificate (depth + FTS5 MATCH + handoff), canonical
   cross-stage edge hash + drift test, and the `[GT_META] graph_witness` hook emitter. Live
   cross-stage hash equality (`hook_graph_hash == graph_hash_after_lsp`) asserted in Stage C.
-- **U3** embedder model-root identity across `run_v74`/`localize` unproven; `assert_same_embedder_identity` never called (Stage 3).
+- **U3** ✅ CLOSED in code (Stage 3): `assert_same_embedder_identity` now wired into `run_v74` +
+  `localize` (was never called); embedder certificate (identity + consumption + all-zero/dropped)
+  + `classify_embedder` hard gates. Live cross-path identity equality asserted in Stage B/C.
 - **U4** agent step sets no `GT_PROOF_MODE`/`GT_CONTAINERIZED`; LSP+gates run on host (Stage 4).
 - **U5** GHCR-only pull + image-cache manifest + `gt_commit` pinning unproven; cache≠run set (Stage 5).
 - **U6** whether the host path invokes `GTRuntimeContext`/`runtime.preflight` consistently (Stage 0 UNKNOWN — revisit).
 
 ## Next allowed action
 
-**Stage 3 — embedder usage certificate** (after user review of Stage 2). No GHA runs until the
-local staged gates (Phase 6 Stage A) pass for all of Stages 1–5.
+**Stage 4 — run LSP + gates inside the eval container** (after user review of Stage 3). No GHA
+runs until the local staged gates (Phase 6 Stage A) pass for all of Stages 1–5.

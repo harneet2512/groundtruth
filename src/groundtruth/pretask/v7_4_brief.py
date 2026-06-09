@@ -750,6 +750,9 @@ def run_v74(
     # GT_REQUIRE_EMBEDDER); this enforces USAGE INTENT up front. Does NOT change any
     # weight — only refuses in proof mode. No-op otherwise (BRIEFING §3/§4 safe).
     from groundtruth.runtime import proof as _proof
+    # Stage 3: prove run_v74 uses the SAME embedder identity as localize/v1r (model-root
+    # divergence -> raise in proof mode). Wires the never-called assert_same_embedder_identity.
+    _proof.assert_same_embedder_identity(graph_db, "run_v74")
     _proof.forbid_no_sem_config(
         ablation, os.environ.get("GT_RRF_FUSION", ""), float(effective_weights.get("W_SEM", 0.0))
     )
@@ -1211,6 +1214,31 @@ def run_v74(
     # consumption proof the effective_w_sem / sem_components_full fields exist for.
     # No-op outside proof mode / without GT_REQUIRE_EMBEDDER.
     _proof.assert_semantic_consumed(effective_w_sem, sem_components_full, len(ranked_records))
+
+    # Stage 3: emit the embedder-usage certificate (identity + consumption proof) so the gate
+    # can prove the embedder was CONSUMED on every semantic path, not merely loaded. upstream
+    # = nonzero over the component source (sem_all/sem_scores); rendered = nonzero over the
+    # delivered components -> upstream>0 with rendered==0 is a DROPPED-semantic fail. Wrapped
+    # so it never alters ranking/brief behavior (proof-mode reporting only).
+    try:
+        _rendered_nz = sum(1 for s in sem_components_full
+                           if isinstance(s, (int, float)) and s and s > 0.0)
+        _upstream_nz = sum(1 for v in (sem_component_scores or {}).values()
+                           if isinstance(v, (int, float)) and v and v > 0.0)
+        _all_zero_reason = ("no_candidates" if len(ranked_records) == 0
+                            else ("" if _rendered_nz > 0 else "rendered_semantic_all_zero"))
+        _proof.write_embedder_certificate(_proof.build_embedder_certificate(
+            db=graph_db, bug_id=bug_id,
+            semantic_candidate_count=len(ranked_records),
+            rendered_candidate_count=len(ranked_records),
+            rendered_semantic_nonzero_count=_rendered_nz,
+            upstream_semantic_nonzero_count=_upstream_nz,
+            effective_w_sem=effective_w_sem,
+            all_zero_semantic_reason=_all_zero_reason,
+            run_v74_identity=_proof.embedder_identity(),
+        ))
+    except Exception:
+        pass
 
     return V74BriefResult(
         bug_id=bug_id,

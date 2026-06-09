@@ -1379,6 +1379,9 @@ def _semantic_score_by_file(issue_text: str, graph_db: str, files: set[str]) -> 
     # docs, encode exception, all-zero) hide a dark semantic ranker, which collapses
     # localize's 3-ranker agreement. Guard each, raise in proof mode only.
     from groundtruth.runtime import proof as _proof
+    # Stage 3: prove localize uses the SAME embedder identity as run_v74/v1r (model-root
+    # divergence -> raise in proof mode). Wires the never-called assert_same_embedder_identity.
+    _proof.assert_same_embedder_identity(graph_db, "localize")
     _proof_on = _proof.is_proof_mode() and _proof.require_embedder() and bool(files)
     if model is None or not files:
         return {}
