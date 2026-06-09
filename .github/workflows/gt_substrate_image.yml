@@ -10,6 +10,12 @@ name: "GT substrate image — build + push (one image, runs in any eval containe
 
 on:
   workflow_dispatch: {}
+  push:
+    branches: [gt-trial]
+    paths:
+      - "docker/Dockerfile.gt-substrate"
+      - "docker/gt-substrate-run.sh"
+      - ".github/workflows/gt_substrate_image.yml"
 
 permissions:
   contents: read
