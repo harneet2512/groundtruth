@@ -455,5 +455,29 @@ tests (for C), classifier + candidate-inclusion tests (for D); ≥3 repos/langua
 
 ---
 
+## 12. PER-LAYER ROLE + SUCCESS CRITERION — judge each layer by ITS job, never a generic template
+
+A recurring audit error (2026-06-09): judging every layer by a generic DELIVERED/CONSUMED template and
+trusting audit layer-labels, instead of grounding WHAT EACH LAYER IS and judging it by its own
+criterion. That produced wrong verdicts (L4 "no-op", L6 "DELIVERED=NO", cert "FAIL"). **Before judging
+any layer, look it up here and apply ITS criterion.**
+
+| Layer | What it IS | Correct success criterion | Do NOT mislabel as |
+|---|---|---|---|
+| **L1** | file RANKER (run_v74 linear sum → `.files`) | gold ranked high AND reached by the agent (fairly, not via issue pre-localization) | "broken localizer" when flat cosines are a **granularity** symptom (§11.2) |
+| **L3b** | contract pillar (post-view signatures) | DELIVERED + CORRECT + **relevant to the bug locus** + CONSUMED | "CONSUMED≈0 = agent ignores it" — it's relevance (`start_line` fallback) + post-edit LSP-strip (§11.4 reindex) |
+| **L4** | **EVENT hook** (fires on a specific agent event) | its EVENT occurred AND it fired with correct content | "no-op / conditional / dead" when its **event simply didn't occur** in the trajectory |
+| **L5 / L5b** | trajectory governor / intervention | the nudge DELIVERED at a LIVE hook AND strong enough to change behavior | "DELIVERED=NO" — the scaffold nudge IS delivered (`emitted=True`); only the over-gated goku family + the L5b goku-deferral are truly undelivered |
+| **L6** | **post-edit REINDEXER** (+ presubmit-verify) | reindex fired + updated graph.db + **preserved LSP enrichment** + fresh graph reaches later queries | "DELIVERED=NO / dead" — it's a reindexer, not a deliver-text layer; it fires + works; its real bug is LSP-strip on `-file` reindex |
+| **gates / certs** | proof artifacts | reconcile against the **runtime witness** before reporting a FAIL | `GRAPH_FAIL_MISSING_HANDOFF` is a FALSE FAIL — cert is pre-agent; the `graph_witness` proves the handoff |
+
+**Mandatory audit protocol (mine + any spawned agent):** (1) ground each layer's ROLE from this table
+FIRST; (2) judge by ITS criterion, never a generic delivered/consumed frame; (3) reconcile any
+cert/telemetry FAIL against the runtime witness (`graph_witness`, `output.jsonl`) before calling it
+broken; (4) no claim from n < a real sample (the n=2 latency error). "Fired ≠ delivered ≠ consumed ≠
+working" — and **"delivered" is the WRONG axis for a reindexer or an event hook.**
+
+---
+
 *End — gt_gt.md. Localization deep internals: `BRIEFING.md`. Benchmark operation/gates:
 `BENCHMARK_RUNBOOK.md`. Fix history: `we_did.md` (legacy).*
