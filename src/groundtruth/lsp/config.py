@@ -24,7 +24,13 @@ LSP_SERVERS: dict[str, LSPServerConfig] = {
     ".tsx": LSPServerConfig(command=["typescript-language-server", "--stdio"]),
     ".js": LSPServerConfig(command=["typescript-language-server", "--stdio"]),
     ".jsx": LSPServerConfig(command=["typescript-language-server", "--stdio"]),
-    ".go": LSPServerConfig(command=["gopls", "serve", "-stdio"]),
+    # gopls serves over stdio BY DEFAULT (no -listen/-port => fakenet stdio conn,
+    # gopls/internal/cmd/serve.go). It has NO `-stdio` flag, and its CLI uses
+    # flag.ExitOnError (x/tools internal/tool), so an undefined flag prints usage to
+    # stderr and exits(2) BEFORE the LSP handshake — `gopls serve -stdio` died
+    # instantly and `initialize` read EOF (5-lang smoke run 27240730335:
+    # server_launched=True warm_probe_ok=False -> LSP_FAIL_NO_WARM).
+    ".go": LSPServerConfig(command=["gopls", "serve"]),
     ".rs": LSPServerConfig(command=["rust-analyzer"]),
     ".java": LSPServerConfig(command=["jdtls"]),
 }

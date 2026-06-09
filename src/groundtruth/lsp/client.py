@@ -29,6 +29,13 @@ DEFAULT_TIMEOUT = 30.0
 _TRACE_TRUNCATE_BYTES = 10 * 1024  # 10KB
 _TRACE_MAX_FILES = 3
 
+# Server-stderr forensics (language-agnostic, every server this client spawns):
+# retain the FIRST lines of the server's stderr — that is where a dying server
+# prints its die-reason (e.g. gopls's "flag provided but not defined" + usage).
+_STDERR_KEEP_LINES = 40  # lines retained for diagnostics
+_STDERR_EXCERPT_LINES = 10  # lines surfaced in error messages / certificates
+_STDERR_LINE_MAX_CHARS = 400  # per-line cap so one giant line can't bloat errors
+
 
 class LSPClient:
     """Async JSON-RPC client for communicating with an LSP server over stdio."""
@@ -52,6 +59,10 @@ class LSPClient:
         # Responses read during drain() so _request() can consume them (avoid dropping e.g. late documentSymbol)
         self._pending_responses: dict[int | str, dict[str, Any]] = {}
         self._progress_tokens: dict[str | int, bool] = {}  # token → completed
+        # First N server-stderr lines (die-reason forensics) + the drain task that
+        # keeps the stderr pipe from filling up (see _drain_stderr).
+        self._stderr_lines: list[str] = []
+        self._stderr_task: asyncio.Task[None] | None = None
 
     @property
     def is_running(self) -> bool:
@@ -72,6 +83,13 @@ class LSPClient:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
+            # Drain stderr from the start: stderr=PIPE that nobody reads both hides
+            # the server's die-reason AND can deadlock a chatty server once the OS
+            # pipe buffer fills. See _drain_stderr.
+            if self._process.stderr is not None:
+                self._stderr_task = asyncio.create_task(
+                    self._drain_stderr(self._process.stderr)
+                )
             self._started = True
             return Ok(None)
         except (OSError, FileNotFoundError) as exc:
@@ -123,6 +141,72 @@ class LSPClient:
         except (asyncio.IncompleteReadError, json.JSONDecodeError) as e:
             logger.warning("LSP read error: %s", e)
             return None
+
+    async def _drain_stderr(self, reader: asyncio.StreamReader) -> None:
+        """Continuously drain the server's stderr pipe.
+
+        Two jobs, language-agnostic for every server this client spawns:
+        1. FORENSICS — retain the FIRST ``_STDERR_KEEP_LINES`` lines (the die-reason:
+           e.g. gopls's "flag provided but not defined" + usage, a crash backtrace)
+           so launch/handshake failures are never blind again.
+        2. LIVENESS — keep consuming past the retained window so a chatty server can
+           never fill the OS pipe buffer and block writing to stderr (a stderr=PIPE
+           that nobody reads is a latent deadlock).
+        """
+        try:
+            while True:
+                line = await reader.readline()
+                if not line or not isinstance(line, (bytes, bytearray)):
+                    break
+                if len(self._stderr_lines) < _STDERR_KEEP_LINES:
+                    text = line.decode("utf-8", errors="replace").strip()
+                    if text:
+                        self._stderr_lines.append(text[:_STDERR_LINE_MAX_CHARS])
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return
+
+    def stderr_excerpt(self, max_lines: int = _STDERR_EXCERPT_LINES) -> str:
+        """The first captured server-stderr lines, newline-joined ('' when none)."""
+        return "\n".join(self._stderr_lines[:max_lines])
+
+    async def _collect_failure_detail(self) -> tuple[str, dict[str, Any]]:
+        """Liveness + stderr forensics for a failed request.
+
+        Disambiguates the two faces of a missing response: a server that is ALIVE but
+        slow (genuine timeout — no exit code) vs a server that DIED (exit code + its
+        own die-reason from stderr). Bounded: waits at most ~0.5s each for the process
+        reap and the stderr drain to finish; never blocks an error path indefinitely.
+        """
+        rc: int | None = None
+        proc = self._process
+        if proc is not None:
+            if proc.returncode is None:
+                # If the server just died, reap it so returncode is real; if it is
+                # alive (true timeout) this returns after the bounded wait.
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=0.5)
+                except Exception:
+                    pass
+            rc = proc.returncode if isinstance(proc.returncode, int) else None
+        task = self._stderr_task
+        if task is not None and not task.done():
+            # Give the drain a bounded window to consume the die-reason (stderr EOF
+            # arrives with process death). shield: a timeout here must NOT cancel
+            # the drain task itself.
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=0.5)
+            except Exception:
+                pass
+        lines = self._stderr_lines[:_STDERR_EXCERPT_LINES]
+        excerpt = "\n".join(lines)
+        suffix = ""
+        if rc is not None:
+            suffix += f"; server exited with code {rc}"
+        if lines:
+            suffix += f"; server stderr (first {len(lines)} lines): " + " | ".join(lines)
+        return suffix, {"server_returncode": rc, "server_stderr": excerpt}
 
     def _trace_log(self, direction: str, message: dict[str, Any]) -> None:
         """Write a trace entry to the JSONL trace file."""
@@ -363,7 +447,9 @@ class LSPClient:
         try:
             self._process.stdin.write(data)
             await self._process.stdin.drain()
-        except BrokenPipeError:
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            # Windows raises ConnectionResetError (not BrokenPipeError) on a dead
+            # pipe; either way the read path surfaces the failure with stderr detail.
             logger.warning("lsp_broken_pipe", msg="stdin write failed — server likely crashed")
 
     async def drain(self, timeout: float = 2.0) -> None:
@@ -409,18 +495,29 @@ class LSPClient:
     ) -> Result[Any, GroundTruthError]:
         """Send a JSON-RPC request and wait for the response."""
         if not self.is_running:
+            # The server may have died right after launch (e.g. an invalid CLI flag
+            # → usage on stderr + instant exit). Surface its exit code + stderr.
+            suffix, details = await self._collect_failure_detail()
             return Err(
-                GroundTruthError(code="lsp_not_running", message="LSP server is not running")
+                GroundTruthError(
+                    code="lsp_not_running",
+                    message=f"LSP server is not running{suffix}",
+                    details=details,
+                )
             )
 
         async with self._request_lock:
             response = await self._request(method, params, timeout=timeout)
 
         if response is None:
+            # None = timeout OR stdout EOF (server death). Attach exit code + the
+            # first stderr lines so the two cases are distinguishable downstream.
+            suffix, details = await self._collect_failure_detail()
             return Err(
                 GroundTruthError(
                     code="lsp_timeout",
-                    message=f"Request timed out or connection closed: {method}",
+                    message=f"Request timed out or connection closed: {method}{suffix}",
+                    details=details,
                 )
             )
         if "error" in response:
@@ -645,6 +742,17 @@ class LSPClient:
         proc = self._process
         self._process = None
         self._started = False
+
+        # Stop the stderr drain (it normally finishes on its own at pipe EOF when
+        # the server exits; cancel covers the still-alive-server case).
+        stderr_task = self._stderr_task
+        self._stderr_task = None
+        if stderr_task is not None and not stderr_task.done():
+            stderr_task.cancel()
+            try:
+                await stderr_task
+            except (asyncio.CancelledError, Exception):
+                pass
 
         if proc is None or proc.returncode is not None:
             return

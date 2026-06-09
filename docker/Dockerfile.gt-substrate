@@ -30,11 +30,18 @@ ARG GO_VERSION=1.22.5
 RUN curl -fsSL https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz | tar -xz -C /usr/local
 ENV PATH="/usr/local/go/bin:${PATH}"
 
-# (1) STATIC gt-index — musl + FTS5, zero glibc dependency -> runs on ANY base
+# (1) STATIC gt-index — musl + FTS5, zero glibc dependency -> runs on ANY base.
+#     Build-stamped via -X main.{commitSHA,buildTimeUTC,goToolchain} (RC-17/F-003,
+#     cmd/gt-index/main.go) so the binary never prints "Toolchain:  unknown" — the
+#     smoke-runner preflight refuses unstamped binaries on paid runs. GT_COMMIT_SHA
+#     is passed by gt_substrate_image.yml (--build-arg GT_COMMIT_SHA=${{ github.sha }}).
+ARG GT_COMMIT_SHA=unknown
 COPY gt-index /src/gt-index
 RUN cd /src/gt-index \
+    && GO_TC="$(go version | cut -d' ' -f3)" \
+    && BUILD_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     && CC=musl-gcc CGO_ENABLED=1 go build -tags 'sqlite_fts5 osusergo netgo' \
-       -ldflags '-linkmode external -extldflags "-static"' \
+       -ldflags "-linkmode external -extldflags '-static' -X main.commitSHA=${GT_COMMIT_SHA} -X main.buildTimeUTC=${BUILD_TS} -X main.goToolchain=${GO_TC}" \
        -o /opt/gt/bin/gt-index ./cmd/gt-index/ \
     && file /opt/gt/bin/gt-index | tee /opt/gt/.gt-index.fileinfo
 
@@ -188,10 +195,14 @@ RUN printf '#!/bin/sh\nexec "${GT_PYTHON:-python3}" /opt/gt/scripts/swebench/gt_
 # ---- stage 2: thin final image whose entire payload is the portable /opt/gt ----
 FROM ubuntu:20.04
 COPY --from=build /opt/gt /opt/gt
-# gopls REQUIRES the `go` toolchain at runtime (`go env`/`go list`) to load a workspace —
-# without it the LSP `initialize` handshake times out (proven by the 5-language smoke:
-# server_launched=True warm_probe_ok=False, LSP_FAIL_NO_WARM on go). Bake the build-stage
-# toolchain into the final image and pin it OFFLINE so initialization never needs network.
+# Go toolchain for gopls WORKSPACE LOADING: gopls shells out to the `go` command
+# (`go env`/`go list`) to load packages, so the toolchain stays baked + pinned OFFLINE
+# (GOTOOLCHAIN=local, GOPROXY=off) so workspace loading never needs network.
+# NOTE (root-caused 2026-06-09): the go smoke's `initialize` failure (run 27240730335,
+# UNCHANGED by baking this toolchain) was NOT the toolchain — it was the invalid launch
+# flag `gopls serve -stdio` (gopls has no -stdio flag; flag.ExitOnError prints usage to
+# stderr and exits(2) BEFORE the handshake, so `initialize` read EOF). Fixed in
+# src/groundtruth/lsp/config.py; stderr is now captured + surfaced by lsp/client.py.
 COPY --from=build /usr/local/go /opt/gt/go
 ENV GT_HOME=/opt/gt \
     GT_INDEX_BINARY=/opt/gt/bin/gt-index \

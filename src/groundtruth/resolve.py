@@ -488,7 +488,11 @@ async def _resolve_edges(
 
     stats: dict = {"verified": 0, "corrected": 0, "deleted": 0, "failed": 0, "skipped": 0,
                    "server_launched": False, "warm_probe_ok": False,
-                   "probe_method": "workspace/symbol", "probe_latency_ms": 0.0}
+                   "probe_method": "workspace/symbol", "probe_latency_ms": 0.0,
+                   # WHY the launch/handshake/probe failed (server exit code + first
+                   # stderr lines from the client) — lands in the LSP certificate so
+                   # an LSP_FAIL_NO_WARM verdict is never blind again.
+                   "failure_detail": ""}
 
     # Map the language NAME to its real file extension (LSP_SERVERS is keyed by
     # extension, e.g. ".py", not ".python"). This is the fix for the universal LSP
@@ -541,10 +545,12 @@ async def _resolve_edges(
         start_result = await client.start()
         if isinstance(start_result, LspErr):
             print(f"  LSP start failed: {start_result.error.message}", file=sys.stderr)
+            stats["failure_detail"] = f"start: {start_result.error.message}"
             stats["failed"] = len(edges)
             return stats
     except Exception as e:
         print(f"  Failed to start LSP: {e}", file=sys.stderr)
+        stats["failure_detail"] = f"start: {e}"
         stats["failed"] = len(edges)
         return stats
     stats["server_launched"] = True
@@ -572,8 +578,15 @@ async def _resolve_edges(
     try:
         init_result = await client.send_request("initialize", init_params)
         if isinstance(init_result, LspErr):
+            # The message now carries the server's exit code + first stderr lines
+            # (LSPClient._collect_failure_detail) — e.g. gopls's own die-reason.
             print(f"  LSP initialize failed: {init_result.error.message}", file=sys.stderr)
+            stats["failure_detail"] = f"initialize: {init_result.error.message}"
             stats["failed"] = len(edges)
+            try:
+                await client.shutdown()
+            except Exception:
+                pass
             return stats
         await client.send_notification("initialized", {})
         await client.drain(timeout=2.0)
@@ -587,10 +600,17 @@ async def _resolve_edges(
             _warm_ok = False
         stats["warm_probe_ok"] = bool(_warm_ok)
         stats["probe_latency_ms"] = (time.time() - _probe_t0) * 1000.0
+        if not _warm_ok:
+            _stderr = client.stderr_excerpt()
+            stats["failure_detail"] = (
+                "warm_probe: server initialized but never answered workspace/symbol"
+                + (f"; server stderr: {_stderr}" if _stderr else "")
+            )
         print(f"  LSP initialized (warm_probe_ok={_warm_ok}, "
               f"{stats['probe_latency_ms']:.1f}ms), resolving {len(edges)} edges...")
     except Exception as e:
         print(f"  LSP initialize failed: {e}", file=sys.stderr)
+        stats["failure_detail"] = f"initialize: {e}"
         try:
             await client.shutdown()
         except Exception:
@@ -1100,6 +1120,9 @@ def resolve_main() -> None:
             "closure_rebuilt_after_lsp": False, "closure_rebuilt_at": None,
             "closure_hash_after_rebuild": "",
             "verdict_hint": "",
+            # WHY a failing verdict failed: server exit code + first stderr lines
+            # (the server's own die-reason), populated from _resolve_edges.
+            "failure_detail": "",
         }
 
         if not servers.get(args.lang):
@@ -1180,6 +1203,7 @@ def resolve_main() -> None:
         cert["probe_latency_ms"] = float(stats.get("probe_latency_ms", 0.0))
         cert["lsp_warm"] = bool(cert["server_launched"] and cert["warm_probe_ok"]
                                 and cert["probe_latency_ms"] > 0.0)
+        cert["failure_detail"] = str(stats.get("failure_detail", "") or "")
         cert["attempted_edges"] = len(lang_edges)
         cert["verified_edges"] = int(stats.get("verified", 0))
         cert["corrected_edges"] = int(stats.get("corrected", 0))
@@ -1189,6 +1213,8 @@ def resolve_main() -> None:
 
         print(f"\nResults ({_elapsed:.1f}s): server_launched={cert['server_launched']} "
               f"warm_probe_ok={cert['warm_probe_ok']} probe_latency_ms={cert['probe_latency_ms']:.1f}")
+        if cert["failure_detail"]:
+            print(f"  failure_detail: {cert['failure_detail']}", file=sys.stderr)
         print(f"  Verified: {stats.get('verified',0)}  Corrected: {stats.get('corrected',0)}  "
               f"Deleted: {stats.get('deleted',0)}  Failed: {stats.get('failed',0)}  "
               f"Skipped: {stats.get('skipped',0)}")

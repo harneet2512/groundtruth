@@ -360,6 +360,87 @@ class TestLSPClientServerRequests:
         await client.shutdown()
 
 
+class TestLSPClientStderrSurfacing:
+    """A server that dies at launch must surface its exit code + stderr in the client
+    error — never a blind 'Request timed out or connection closed'.
+
+    This is the gopls regression (5-lang smoke run 27240730335): `gopls serve -stdio`
+    hit an undefined flag, gopls printed usage to stderr and exited(2) BEFORE the LSP
+    handshake; the client read EOF on stdout and reported a bare timeout with the
+    die-reason sitting unread in the stderr pipe. These tests use a real subprocess
+    that reproduces that exact shape (stderr + instant exit). Red before the
+    stderr-capture fix, green after.
+    """
+
+    @pytest.mark.asyncio
+    async def test_dead_server_surfaces_stderr_and_exit_code(self) -> None:
+        import sys
+
+        script = (
+            "import sys; "
+            "sys.stderr.write('flag provided but not defined: -stdio\\n'); "
+            "sys.stderr.write('Usage: fake-gopls serve [flags]\\n'); "
+            "sys.exit(2)"
+        )
+        client = LSPClient(
+            server_command=[sys.executable, "-c", script],
+            root_uri="file:///project",
+        )
+        start = await client.start()
+        assert isinstance(start, Ok)
+        result = await client.send_request("initialize", {"processId": 1}, timeout=10.0)
+        assert isinstance(result, Err)
+        # Either branch (lsp_timeout via stdout-EOF, or lsp_not_running if the death
+        # was reaped first) must carry the server's die-reason + exit code.
+        assert "flag provided but not defined: -stdio" in result.error.message
+        assert "server exited with code 2" in result.error.message
+        assert result.error.details is not None
+        assert result.error.details["server_returncode"] == 2
+        assert "Usage: fake-gopls serve" in str(result.error.details["server_stderr"])
+        await client.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_stderr_excerpt_keeps_first_lines_bounded(self) -> None:
+        import sys
+
+        script = (
+            "import sys\n"
+            "for i in range(200):\n"
+            "    sys.stderr.write(f'line-{i}\\n')\n"
+            "sys.exit(3)\n"
+        )
+        client = LSPClient(
+            server_command=[sys.executable, "-c", script],
+            root_uri="file:///project",
+        )
+        await client.start()
+        result = await client.send_request("initialize", {}, timeout=10.0)
+        assert isinstance(result, Err)
+        excerpt = client.stderr_excerpt()
+        lines = excerpt.splitlines()
+        assert lines[0] == "line-0"  # FIRST lines retained (the die-reason), not last
+        assert len(lines) <= 10  # excerpt bounded
+        await client.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_alive_silent_server_reports_plain_timeout(self) -> None:
+        """A server that is alive but slow must NOT gain a bogus exit-code suffix —
+        the timeout/death disambiguation must not misclassify genuine timeouts."""
+        import sys
+
+        script = "import time; time.sleep(30)"
+        client = LSPClient(
+            server_command=[sys.executable, "-c", script],
+            root_uri="file:///project",
+        )
+        await client.start()
+        result = await client.send_request("initialize", {}, timeout=0.5)
+        assert isinstance(result, Err)
+        assert "Request timed out or connection closed: initialize" in result.error.message
+        assert "server exited with code" not in result.error.message
+        await client.shutdown()
+
+
 class TestLSPClientShutdown:
     @pytest.mark.asyncio
     async def test_shutdown_double_safe(self, client: LSPClient) -> None:
