@@ -142,7 +142,66 @@ func ParseFile(sf walker.SourceFile, isTest bool) (*ParseResult, error) {
 		linkRustImplMethods(result)
 	}
 
+	// Synthetic file-anchor node for module-linking files that define NO symbols.
+	// A barrel/re-export file (e.g. TS `index.ts` containing only `export … from
+	// "./x"`) parses to zero symbol nodes, so file→file relationship edges
+	// (RE_EXPORTS, IMPORTS) have nothing to anchor on the source side and are
+	// silently dropped. Emit one File node so such files can anchor those edges.
+	// Generalized: fires for ANY language whose file has zero symbol nodes but
+	// contains a module-linking construct (export/import/from/require/use/mod) —
+	// not TS-specific, no per-repo logic. Skips genuinely empty/comment-only files
+	// so the graph isn't polluted with content-free anchors.
+	maybeAddFileAnchorNode(sf, src, result)
+
 	return result, nil
+}
+
+// maybeAddFileAnchorNode appends a synthetic File node when a file yields zero
+// symbol nodes yet carries module-linking structure. See ParseFile caller for why.
+func maybeAddFileAnchorNode(sf walker.SourceFile, src []byte, result *ParseResult) {
+	if len(result.Nodes) > 0 {
+		return
+	}
+	text := string(src)
+	if strings.TrimSpace(text) == "" {
+		return
+	}
+	// Module-linking tokens common across languages. A barrel/re-export or pure
+	// import/use file matches one of these even though it defines no symbols.
+	linkTokens := []string{"export ", "export*", "export{", "import ", " from ",
+		"require(", "use ", "mod ", "pub use", "from \"", "from '"}
+	hasLink := false
+	for _, tok := range linkTokens {
+		if strings.Contains(text, tok) {
+			hasLink = true
+			break
+		}
+	}
+	if !hasLink {
+		return
+	}
+	// Derive a stable module name from the file's base name (sans extension).
+	base := sf.Path
+	if idx := strings.LastIndexAny(base, "/\\"); idx >= 0 {
+		base = base[idx+1:]
+	}
+	if dot := strings.LastIndexByte(base, '.'); dot > 0 {
+		base = base[:dot]
+	}
+	if base == "" {
+		base = sf.Path
+	}
+	endLine := strings.Count(text, "\n") + 1
+	result.Nodes = append(result.Nodes, store.Node{
+		Label:         "File",
+		Name:          base,
+		QualifiedName: sf.Path,
+		FilePath:      sf.Path,
+		StartLine:     1,
+		EndLine:       endLine,
+		Language:      sf.Language,
+		IsExported:    true,
+	})
 }
 
 // linkGoReceiverMethods sets Label="Method" and ParentID for Go receiver methods
@@ -241,6 +300,56 @@ func goReceiverType(sig string) string {
 		t = t[:b] // generic receiver Stack[T] -> Stack
 	}
 	return t
+}
+
+// goReceiverName extracts the receiver VARIABLE NAME from a Go method signature:
+//
+//	"func (c *Circle) Area() float64"          -> "c"
+//	"func (s *Service[K]) Do()"                -> "s"
+//	"func (Account) Name() string"            -> ""   (receiver type only, unnamed)
+//	"func Plain() {}"                          -> ""   (no receiver)
+//
+// Returns "" when the signature has no receiver or the receiver is anonymous. Mirrors
+// goReceiverType's balanced-paren slicing so generic/func-typed receivers are handled.
+func goReceiverName(sig string) string {
+	s := strings.TrimSpace(sig)
+	const pfx = "func ("
+	if !strings.HasPrefix(s, pfx) {
+		return ""
+	}
+	end := -1
+	depth := 1 // already inside the receiver's '('
+	for i := len(pfx); i < len(s); i++ {
+		switch s[i] {
+		case '(', '[':
+			depth++
+		case ']':
+			depth--
+		case ')':
+			depth--
+			if depth == 0 {
+				end = i
+			}
+		}
+		if end >= 0 {
+			break
+		}
+	}
+	if end < 0 || end <= len(pfx) {
+		return ""
+	}
+	fields := strings.Fields(s[len(pfx):end]) // "c *Circle" or "Account"
+	// Named receiver is "<name> <type>" (>=2 fields). A single field is the type only
+	// (anonymous receiver) — no variable name to match field access against.
+	if len(fields) < 2 {
+		return ""
+	}
+	name := fields[0]
+	// Guard against odd tokens (must be a plain identifier).
+	if name == "" || name == "_" {
+		return ""
+	}
+	return name
 }
 
 // linkRustImplMethods consolidates Rust impl block methods under the struct's
@@ -1840,6 +1949,16 @@ func extractProperties(node *sitter.Node, sf walker.SourceFile, src []byte, resu
 		return
 	}
 
+	// Receiver variable for named-receiver methods (Go: `func (c *Circle) ...` → "c").
+	// Empty for self/this languages and plain functions. Passed to the side-effect and
+	// field-read extractors so receiver methods get the same instance-field facts that
+	// self/this methods already get. Generalized: derived structurally from the Go method
+	// signature, no per-task logic.
+	recvName := ""
+	if sf.Language == "go" {
+		recvName = goReceiverName(node.Content(src))
+	}
+
 	// Extract docstring (first string child of function, common in Python/JS/Go)
 	extractDocstring(node, bodyNode, sf, src, result, nodeIdx)
 
@@ -1935,8 +2054,8 @@ func extractProperties(node *sitter.Node, sf walker.SourceFile, src []byte, resu
 	// Conditional returns: if/elif with return statements
 	extractConditionalReturns(bodyNode, src, result, nodeIdx)
 
-	// Side effects: self./this. attribute mutations
-	extractSideEffects(bodyNode, src, result, nodeIdx)
+	// Side effects: self./this./<recv>. attribute mutations
+	extractSideEffects(bodyNode, src, result, nodeIdx, recvName)
 
 	// Structured parameters: name, type, default
 	extractStructuredParams(node, sf.Spec, src, result, nodeIdx)
@@ -1953,8 +2072,8 @@ func extractProperties(node *sitter.Node, sf walker.SourceFile, src []byte, resu
 	// Function fingerprint: complexity proxy + unique call names
 	extractFunctionFingerprint(node, bodyNode, src, result, nodeIdx)
 
-	// Field reads: self.x/this.x attribute reads (not assignments)
-	extractFieldReads(bodyNode, src, result, nodeIdx)
+	// Field reads: self.x/this.x/<recv>.x attribute reads (not assignments)
+	extractFieldReads(bodyNode, src, result, nodeIdx, recvName)
 
 	// Data flow: per-parameter forward slice (where each input value flows) — the
 	// def-use / value-provenance dimension the call graph lacks.
@@ -2566,21 +2685,32 @@ func _findReturnsInBlock(block *sitter.Node, ifNode *sitter.Node, src []byte, re
 	}
 }
 
-// extractSideEffects finds assignment expressions where the left side starts with self. or this.
-// Kind: side_effect. Value: "mutates: self.field_name".
-func extractSideEffects(bodyNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int) {
-	_walkSideEffects(bodyNode, src, result, nodeIdx, 0)
+// extractSideEffects finds assignment expressions where the left side starts with
+// the instance prefix (self./this./this-> or, for Go/other named-receiver methods,
+// the receiver variable like `c.`). Kind: side_effect. Value: "mutates: <recv>.field".
+//
+// recvName is the receiver variable for languages whose methods bind the instance to
+// a NAMED receiver instead of the self/this keyword (Go: `func (c *Circle) ...` → "c").
+// Empty for self/this languages. Generalized: any non-empty receiver is matched as an
+// instance-field write, so Go/other receiver methods get the same field-mutation facts
+// Python/JS already get from self/this.
+func extractSideEffects(bodyNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int, recvName string) {
+	_walkSideEffects(bodyNode, src, result, nodeIdx, 0, recvName)
 }
 
-func _walkSideEffects(node *sitter.Node, src []byte, result *ParseResult, nodeIdx int, depth int) {
+func _walkSideEffects(node *sitter.Node, src []byte, result *ParseResult, nodeIdx int, depth int, recvName string) {
 	if depth > 15 {
 		return
 	}
 	nodeType := node.Type()
 
+	// Go uses "assignment_statement" (and "short_var_declaration" for :=); the
+	// self/this languages use "assignment"/"assignment_expression". Include all so
+	// named-receiver mutations (c.field = ...) are seen, not just self/this ones.
 	if nodeType == "assignment" || nodeType == "augmented_assignment" ||
-		nodeType == "assignment_expression" || nodeType == "expression_statement" {
-		if _tryExtractSideEffect(node, src, result, nodeIdx) {
+		nodeType == "assignment_expression" || nodeType == "expression_statement" ||
+		nodeType == "assignment_statement" {
+		if _tryExtractSideEffect(node, src, result, nodeIdx, recvName) {
 			return
 		}
 	}
@@ -2588,14 +2718,15 @@ func _walkSideEffects(node *sitter.Node, src []byte, result *ParseResult, nodeId
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
 		if child != nil {
-			_walkSideEffects(child, src, result, nodeIdx, depth+1)
+			_walkSideEffects(child, src, result, nodeIdx, depth+1, recvName)
 		}
 	}
 }
 
-// _tryExtractSideEffect checks if an assignment node mutates self./this. fields.
-// Returns true if a side effect was found and emitted (caller should not recurse).
-func _tryExtractSideEffect(node *sitter.Node, src []byte, result *ParseResult, nodeIdx int) bool {
+// _tryExtractSideEffect checks if an assignment node mutates instance fields via
+// self./this. or a named receiver (recvName). Returns true if a side effect was found
+// and emitted (caller should not recurse).
+func _tryExtractSideEffect(node *sitter.Node, src []byte, result *ParseResult, nodeIdx int, recvName string) bool {
 	text := strings.TrimSpace(node.Content(src))
 	// Check for self. or this. on the left side of =
 	eqIdx := strings.Index(text, "=")
@@ -2616,6 +2747,42 @@ func _tryExtractSideEffect(node *sitter.Node, src []byte, result *ParseResult, n
 		lhsEnd--
 	}
 	lhs := strings.TrimSpace(text[:lhsEnd])
+
+	// Named-receiver instance write (Go etc.): `<recv>.field = ...`. Treated exactly
+	// like self./this. so receiver methods produce the same field-mutation fact.
+	if recvName != "" && strings.HasPrefix(lhs, recvName+".") {
+		field := strings.TrimPrefix(lhs, recvName+".")
+		if dotIdx := strings.Index(field, "."); dotIdx > 0 {
+			field = field[:dotIdx]
+		}
+		if bIdx := strings.Index(field, "["); bIdx > 0 {
+			field = field[:bIdx]
+		}
+		if field != "" {
+			rhs := ""
+			if eqIdx >= 0 && eqIdx+1 < len(text) {
+				rhs = strings.TrimSpace(text[eqIdx+1:])
+				if len(rhs) > 60 {
+					rhs = rhs[:60]
+				}
+			}
+			value := "mutates: " + recvName + "." + field
+			if rhs != "" {
+				value += " = " + rhs
+			}
+			if len(value) > 200 {
+				value = value[:197] + "..."
+			}
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "side_effect",
+				Value:      value,
+				Line:       int(node.StartPoint().Row) + 1,
+				Confidence: 1.0,
+			})
+		}
+		return true
+	}
 
 	if strings.HasPrefix(lhs, "self.") {
 		field := strings.TrimPrefix(lhs, "self.")
@@ -3261,44 +3428,53 @@ func _collectCallNames(node *sitter.Node, src []byte, calls map[string]bool, dep
 	}
 }
 
-// extractFieldReads finds self.x / this.x attribute access NOT on the left side of assignment.
-// Kind: field_read. Value: "reads: self.field_name".
-func extractFieldReads(bodyNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int) {
+// extractFieldReads finds self.x / this.x / <recv>.x attribute access NOT on the left
+// side of assignment. Kind: field_read. Value: "reads: self.field_name".
+//
+// recvName is the named receiver variable (Go: `func (c *Circle) ...` → "c"); empty for
+// self/this languages. Generalized so receiver methods get the same field-read facts.
+func extractFieldReads(bodyNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int, recvName string) {
 	seen := make(map[string]bool)
-	_walkFieldReads(bodyNode, src, result, nodeIdx, seen, 0)
+	_walkFieldReads(bodyNode, src, result, nodeIdx, seen, 0, recvName)
 }
 
-func _walkFieldReads(node *sitter.Node, src []byte, result *ParseResult, nodeIdx int, seen map[string]bool, depth int) {
+func _walkFieldReads(node *sitter.Node, src []byte, result *ParseResult, nodeIdx int, seen map[string]bool, depth int, recvName string) {
 	if depth > 15 {
 		return
 	}
 	nodeType := node.Type()
 
-	// Skip assignment left-hand sides: those are side_effects, not reads
-	if nodeType == "assignment" || nodeType == "augmented_assignment" || nodeType == "assignment_expression" {
+	// Skip assignment left-hand sides: those are side_effects, not reads. Go uses
+	// "assignment_statement"; self/this languages use "assignment"/"assignment_expression".
+	if nodeType == "assignment" || nodeType == "augmented_assignment" ||
+		nodeType == "assignment_expression" || nodeType == "assignment_statement" {
 		// The left child is the LHS — skip it, only walk the RHS
 		lhsNode := node.ChildByFieldName("left")
 		rhsNode := node.ChildByFieldName("right")
 		if rhsNode != nil {
-			_walkFieldReads(rhsNode, src, result, nodeIdx, seen, depth+1)
+			_walkFieldReads(rhsNode, src, result, nodeIdx, seen, depth+1, recvName)
 		}
 		// Also walk value field (Python augmented_assignment uses 'right')
 		valNode := node.ChildByFieldName("value")
 		if valNode != nil {
-			_walkFieldReads(valNode, src, result, nodeIdx, seen, depth+1)
+			_walkFieldReads(valNode, src, result, nodeIdx, seen, depth+1, recvName)
 		}
 		// Walk any non-LHS, non-RHS children (shouldn't matter much, but be safe)
 		for i := 0; i < int(node.ChildCount()); i++ {
 			child := node.Child(i)
 			if child != nil && child != lhsNode && child != rhsNode && child != valNode {
-				_walkFieldReads(child, src, result, nodeIdx, seen, depth+1)
+				_walkFieldReads(child, src, result, nodeIdx, seen, depth+1, recvName)
 			}
 		}
 		return
 	}
 
-	// attribute / member_expression nodes: check for self.x / this.x
-	if nodeType == "attribute" || nodeType == "member_expression" {
+	// attribute / member_expression / selector_expression / field_expression nodes:
+	// check for self.x / this.x / <recv>.x. Go field access is `selector_expression`
+	// (receiver.field); Rust field access is `field_expression` (self.field) — both
+	// of which the attribute/member_expression check alone would miss.
+	if nodeType == "attribute" || nodeType == "member_expression" ||
+		nodeType == "selector_expression" || nodeType == "field_expression" {
 		text := node.Content(src)
 		prefix := ""
 		if strings.HasPrefix(text, "self.") {
@@ -3307,6 +3483,8 @@ func _walkFieldReads(node *sitter.Node, src []byte, result *ParseResult, nodeIdx
 			prefix = "this."
 		} else if strings.HasPrefix(text, "this->") {
 			prefix = "this->"
+		} else if recvName != "" && strings.HasPrefix(text, recvName+".") {
+			prefix = recvName + "."
 		}
 		if prefix != "" {
 			field := text[len(prefix):]
@@ -3370,7 +3548,7 @@ func _walkFieldReads(node *sitter.Node, src []byte, result *ParseResult, nodeIdx
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
 		if child != nil {
-			_walkFieldReads(child, src, result, nodeIdx, seen, depth+1)
+			_walkFieldReads(child, src, result, nodeIdx, seen, depth+1, recvName)
 		}
 	}
 }

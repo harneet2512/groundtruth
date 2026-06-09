@@ -37,6 +37,13 @@ var (
 	implementsRe = regexp.MustCompile(`class\s+(\w+)(?:\s*<[^>]*>)?\s+(?:extends\s+\w+\s+)?implements\s+([^{]+)`)
 	// Go: func NewFoo() MyInterface { return &myStruct{} }
 	goReturnInterfaceRe = regexp.MustCompile(`func\s+\w+\([^)]*\)\s+(\w+)\s*\{`)
+	// Go interface declaration opener: `type Reader interface {`
+	goIfaceOpenRe = regexp.MustCompile(`^\s*type\s+(\w+)\s+interface\s*\{`)
+	// Go interface method line: `Read(p []byte) (int, error)` — captures the method name.
+	goIfaceMethodRe = regexp.MustCompile(`^\s*([A-Za-z_]\w*)\s*\(`)
+	// Go embedded interface line: a bare type name on its own (e.g. `io.Reader` or
+	// `Stringer`). Captures the trailing identifier (last path segment).
+	goIfaceEmbedRe = regexp.MustCompile(`^\s*(?:[\w.]+\.)?([A-Z]\w*)\s*$`)
 )
 
 // ---------------------------------------------------------------------------
@@ -103,6 +110,12 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 		})
 	}
 
+	// Go interfaces collected during the source scan, for CHA-style structural
+	// method-set satisfaction (a struct whose method set covers an interface's
+	// method set IMPLEMENTS it). Populated in the "go" case below; consumed after
+	// the file loop by resolveGoImplements.
+	var goInterfaces []goInterfaceDecl
+
 	for _, sf := range files {
 		absPath := sf.AbsPath
 		if absPath == "" {
@@ -122,6 +135,10 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 		inStruct := false       // Go: tracking struct body for embedded types
 		var currentStructName string
 		var currentStructLine int
+
+		// Go: tracking an interface body for CHA method-set collection.
+		inInterface := false
+		var currentIface goInterfaceDecl
 
 		for scanner.Scan() {
 			lineNum++
@@ -290,9 +307,44 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 				// HANDLES_ROUTE edges for Java are skipped here to avoid duplication.
 
 			case "go":
+				// CHA: collect interface method sets. `type Name interface {` opens a
+				// body whose member lines are required method signatures. We record the
+				// method NAME of each (the matchable unit for structural satisfaction);
+				// a bare type name inside the body is an embedded interface (recorded as
+				// an embed to expand transitively after the scan).
+				if m := goIfaceOpenRe.FindStringSubmatch(line); m != nil {
+					inInterface = true
+					currentIface = goInterfaceDecl{
+						Name:     m[1],
+						FilePath: sf.Path,
+						Line:     lineNum,
+					}
+					// Single-line empty interface `type X interface {}` closes immediately.
+					if strings.Contains(line[strings.Index(line, "interface"):], "}") {
+						inInterface = false
+						goInterfaces = append(goInterfaces, currentIface)
+						currentIface = goInterfaceDecl{}
+					}
+				} else if inInterface {
+					trimmed := strings.TrimSpace(line)
+					if trimmed == "}" || strings.HasPrefix(trimmed, "}") {
+						inInterface = false
+						goInterfaces = append(goInterfaces, currentIface)
+						currentIface = goInterfaceDecl{}
+					} else if trimmed != "" && !strings.HasPrefix(trimmed, "//") {
+						if mm := goIfaceMethodRe.FindStringSubmatch(trimmed); mm != nil {
+							// `Method(args) ret` — a required method.
+							currentIface.Methods = append(currentIface.Methods, mm[1])
+						} else if me := goIfaceEmbedRe.FindStringSubmatch(trimmed); me != nil {
+							// A bare type name on its own line = embedded interface.
+							currentIface.Embeds = append(currentIface.Embeds, me[1])
+						}
+					}
+				}
+
 				// P0: Go embedded structs (inheritance-like)
 				// Detect struct opening: type Foo struct {
-				if strings.Contains(line, "struct") && strings.Contains(line, "{") {
+				if !inInterface && strings.Contains(line, "struct") && strings.Contains(line, "{") {
 					// Extract struct name
 					parts := strings.Fields(line)
 					for i, p := range parts {
@@ -365,8 +417,17 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 				}
 			}
 		}
+		// Flush an interface whose body was still open at EOF (no closing brace seen).
+		if inInterface && currentIface.Name != "" {
+			goInterfaces = append(goInterfaces, currentIface)
+		}
 		f.Close()
 	}
+
+	// CHA: Go structural method-set satisfaction. Emit IMPLEMENTS edges from each
+	// struct whose method set covers an interface's required method set. Runs once
+	// over the collected interfaces + the struct method sets read from the DB.
+	resolveGoImplements(db, goInterfaces, classIndex, interfaceIndex, addEdge)
 
 	if len(edges) == 0 {
 		return 0, nil
@@ -388,6 +449,152 @@ type classNodeEntry struct {
 	Name     string
 	FilePath string
 	ID       int64
+}
+
+// goInterfaceDecl is a Go interface collected during the source scan, holding the
+// NAMES of its required methods (the unit matched for CHA structural satisfaction)
+// and any embedded interface names (expanded transitively before matching).
+type goInterfaceDecl struct {
+	Name     string
+	FilePath string
+	Line     int
+	Methods  []string
+	Embeds   []string
+}
+
+// resolveGoImplements emits IMPLEMENTS edges via CHA-style structural method-set
+// satisfaction: for every (struct, interface) pair where the struct's method set is
+// a superset of the interface's required method set, the struct IMPLEMENTS the
+// interface (Go has structural — not nominal — interface satisfaction, so there is
+// no `implements` keyword to key on; the structural match IS the fact). Generalized:
+// no per-repo logic, language-structural only.
+//
+// Struct method sets are read from the DB (methods are already parented to their
+// Class/Struct node by the parser). Interface method sets come from the source scan.
+// Non-empty interfaces only (the empty interface is satisfied by everything and is
+// not a useful edge). Embedded interfaces are expanded transitively.
+func resolveGoImplements(
+	db *store.DB,
+	interfaces []goInterfaceDecl,
+	classIndex map[string][]classNodeEntry,
+	interfaceIndex map[string][]classNodeEntry,
+	addEdge func(sourceID, targetID int64, edgeType, sourceFile string, sourceLine int, method string, confidence float64),
+) {
+	if len(interfaces) == 0 {
+		return
+	}
+
+	// structMethods: structNodeID -> set of method names it defines.
+	// structEntries: per (name) -> []entry to map a struct name to its node(s).
+	structMethods := buildGoStructMethodSets(db)
+	if len(structMethods) == 0 {
+		return
+	}
+
+	// Index interfaces by name for embedded-interface expansion.
+	ifaceByName := make(map[string]*goInterfaceDecl, len(interfaces))
+	for i := range interfaces {
+		// Prefer the first declaration of a given name (interfaces are rarely
+		// redeclared); embeds resolve by name regardless of file.
+		if _, ok := ifaceByName[interfaces[i].Name]; !ok {
+			ifaceByName[interfaces[i].Name] = &interfaces[i]
+		}
+	}
+
+	// Expand each interface's required method set transitively over its embeds.
+	required := make(map[string]map[string]bool, len(interfaces))
+	for i := range interfaces {
+		name := interfaces[i].Name
+		if _, done := required[name]; done {
+			continue
+		}
+		required[name] = expandGoInterfaceMethods(name, ifaceByName, make(map[string]bool))
+	}
+
+	// A struct satisfies an interface iff every required method is in its method set.
+	for i := range interfaces {
+		iface := &interfaces[i]
+		req := required[iface.Name]
+		if len(req) == 0 {
+			continue // empty interface — satisfied by everything; not a useful edge
+		}
+		ifaceID := resolveInterfaceOrClassNode(iface.Name, iface.FilePath, interfaceIndex, classIndex)
+		if ifaceID == 0 {
+			continue
+		}
+		for structID, methods := range structMethods {
+			if structID == ifaceID {
+				continue
+			}
+			covers := true
+			for m := range req {
+				if !methods[m] {
+					covers = false
+					break
+				}
+			}
+			if covers {
+				addEdge(structID, ifaceID, "IMPLEMENTS", iface.FilePath, iface.Line, "structural_method_set", 0.95)
+			}
+		}
+	}
+}
+
+// buildGoStructMethodSets reads the DB and returns structNodeID -> set of method
+// names, for Go Class/Struct nodes only. Methods are linked to their struct via
+// parent_id (the parser parents Go receiver methods to their struct node).
+func buildGoStructMethodSets(db *store.DB) map[int64]map[string]bool {
+	out := make(map[int64]map[string]bool)
+
+	tx, err := db.BeginTx()
+	if err != nil {
+		return out
+	}
+	defer tx.Rollback()
+
+	// All Go method nodes with a non-zero parent (the parent is the struct).
+	rows, err := tx.Query(`SELECT parent_id, name FROM nodes
+		WHERE language = 'go' AND label = 'Method' AND parent_id IS NOT NULL AND parent_id != 0`)
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var parentID int64
+		var name string
+		if err := rows.Scan(&parentID, &name); err != nil {
+			continue
+		}
+		if out[parentID] == nil {
+			out[parentID] = make(map[string]bool)
+		}
+		out[parentID][name] = true
+	}
+	return out
+}
+
+// expandGoInterfaceMethods returns the full required method-name set of an interface,
+// transitively pulling in the methods of any embedded interfaces. `visited` guards
+// against cyclic embeds.
+func expandGoInterfaceMethods(name string, byName map[string]*goInterfaceDecl, visited map[string]bool) map[string]bool {
+	set := make(map[string]bool)
+	if visited[name] {
+		return set
+	}
+	visited[name] = true
+	iface, ok := byName[name]
+	if !ok {
+		return set
+	}
+	for _, m := range iface.Methods {
+		set[m] = true
+	}
+	for _, emb := range iface.Embeds {
+		for m := range expandGoInterfaceMethods(emb, byName, visited) {
+			set[m] = true
+		}
+	}
+	return set
 }
 
 // buildRelationshipIndexes queries graph.db for Class/Interface/Function nodes
