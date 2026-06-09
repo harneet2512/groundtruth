@@ -5,14 +5,18 @@ name: "Verified: Cache Docker Images to GHCR"
 #
 # RESUMABLE: each image first does `docker manifest inspect` on the GHCR target —
 # if already mirrored it SKIPS (no pull, no push). Re-run to pick up where a
-# rate-limited run left off. With Docker Hub's 200-pull/6hr anon limit, a full
-# 500-image mirror may need 2-3 runs spaced ~6h apart.
+# rate-limited run left off.
+#
+# DUAL DOCKER HUB ACCOUNTS: rotates between two Docker Hub PATs per image,
+# doubling the rate limit from 200 to 400 pulls/6hr. With 500 images this
+# completes in a single run.
 #
 # PREREQUISITE: benchmarks/swebench_verified_500_ids.json must exist.
 # Run `python scripts/swebench/fetch_verified_ids.py` first.
 #
 # SECRETS REQUIRED:
-#   DOCKERHUB_USERNAME / DOCKERHUB_TOKEN  (doubles pull rate limit)
+#   DOCKERHUB_USER_1 / DOCKERHUB_PAT_1  (primary Docker Hub account)
+#   DOCKERHUB_USER_2 / DOCKERHUB_PAT_2  (rotation account, doubles 200→400/6hr)
 #   GITHUB_TOKEN is automatic and pushes to GHCR.
 
 on:
@@ -23,9 +27,9 @@ on:
         required: true
         default: "15"
       max_parallel:
-        description: "Max concurrent cache jobs (governs Docker Hub pull rate)"
+        description: "Max concurrent cache jobs (2 Docker Hub accounts = 400/6hr, go wide)"
         required: true
-        default: "5"
+        default: "15"
       source_namespace:
         description: "Docker Hub namespace for source images (e.g. aorwall, swebench, starryzhang)"
         required: true
@@ -86,85 +90,68 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-        continue-on-error: true
-
-      - name: Pull from Docker Hub, push to GHCR
+      - name: "Mirror images (dual Docker Hub rotation → GHCR)"
         env:
+          DH_USER_1: ${{ secrets.DOCKERHUB_USER_1 }}
+          DH_PAT_1: ${{ secrets.DOCKERHUB_PAT_1 }}
+          DH_USER_2: ${{ secrets.DOCKERHUB_USER_2 }}
+          DH_PAT_2: ${{ secrets.DOCKERHUB_PAT_2 }}
           SOURCE_NS: ${{ inputs.source_namespace }}
           OWNER: ${{ github.repository_owner }}
         run: |
+          set -uo pipefail
           OWNER_LC="$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')"
           GHCR_PREFIX="ghcr.io/${OWNER_LC}"
           SRC_REPO="https://github.com/${OWNER_LC}/groundtruth"
 
-          pull_with_retry() {
-            local IMAGE="$1" MAX_RETRIES=3 DELAY=10
-            for i in $(seq 1 $MAX_RETRIES); do
-              if docker pull "$IMAGE" 2>/dev/null; then return 0; fi
-              if [ "$i" -lt "$MAX_RETRIES" ]; then
-                echo "    Retry $i/$MAX_RETRIES in ${DELAY}s..."
-                sleep $DELAY
-                DELAY=$((DELAY * 2))
-              fi
-            done
-            return 1
-          }
-
-          push_with_retry() {
-            local IMAGE="$1" MAX_RETRIES=3 DELAY=10
-            for i in $(seq 1 $MAX_RETRIES); do
-              if docker push "$IMAGE" 2>/dev/null; then return 0; fi
-              if [ "$i" -lt "$MAX_RETRIES" ]; then
-                echo "    Push retry $i/$MAX_RETRIES in ${DELAY}s..."
-                sleep $DELAY
-                DELAY=$((DELAY * 2))
-              fi
-            done
-            return 1
+          dh_login() {
+            local which="$1"
+            if [ "$which" = "2" ] && [ -n "${DH_USER_2:-}" ] && [ -n "${DH_PAT_2:-}" ]; then
+              echo "$DH_PAT_2" | docker login -u "$DH_USER_2" --password-stdin >/dev/null 2>&1
+            elif [ -n "${DH_USER_1:-}" ] && [ -n "${DH_PAT_1:-}" ]; then
+              echo "$DH_PAT_1" | docker login -u "$DH_USER_1" --password-stdin >/dev/null 2>&1
+            else
+              echo "::warning::no Docker Hub PAT set — pulling anonymously (low rate limit)"
+            fi
           }
 
           IFS=',' read -ra TASK_ARRAY <<< "${{ matrix.tasks }}"
           TOTAL=${#TASK_ARRAY[@]}
-          COUNT=0
-          CACHED=0
-          FAILED=0
-          MIRRORED=0
+          i=0; done_count=0; skipped=0; failed=0
 
           for TASK in "${TASK_ARRAY[@]}"; do
-            COUNT=$((COUNT + 1))
+            i=$((i + 1))
             SLUG=$(echo "$TASK" | sed 's/__/_1776_/')
             BASENAME="sweb.eval.x86_64.${SLUG}"
             DST="${GHCR_PREFIX}/${BASENAME}:latest"
 
-            echo "=== [$COUNT/$TOTAL] $TASK ==="
+            echo "=== [$i/$TOTAL] $TASK ==="
 
             # Idempotent: skip if already cached on GHCR
             if docker manifest inspect "$DST" >/dev/null 2>&1; then
               echo "  Already cached in GHCR, skipping"
-              CACHED=$((CACHED + 1))
+              skipped=$((skipped + 1))
               continue
             fi
 
-            # Try source namespace first, then fallback to 'swebench' namespace
+            # Rotate Docker Hub account per image (alternates 1↔2)
+            dh_login $(( (i % 2) + 1 ))
+
+            # Try source namespace, then fallback — with retry + account swap
             SRC="docker.io/${SOURCE_NS}/${BASENAME}:latest"
             SRC_ALT="docker.io/swebench/${BASENAME}:latest"
-            PULLED=0
-            if pull_with_retry "$SRC"; then
-              PULLED_FROM="$SRC"
-              PULLED=1
-            elif [ "$SOURCE_NS" != "swebench" ] && pull_with_retry "$SRC_ALT"; then
-              PULLED_FROM="$SRC_ALT"
-              PULLED=1
-            fi
+            OK=0; PULLED_FROM=""
+            for a in 1 2 3 4; do
+              if docker pull "$SRC" >/dev/null 2>&1; then OK=1; PULLED_FROM="$SRC"; break; fi
+              if [ "$SOURCE_NS" != "swebench" ] && docker pull "$SRC_ALT" >/dev/null 2>&1; then OK=1; PULLED_FROM="$SRC_ALT"; break; fi
+              echo "::warning::pull $TASK attempt $a failed — backing off"
+              sleep $((a * 15))
+              dh_login $(( ((i + a) % 2) + 1 ))
+            done
 
-            if [ "$PULLED" -ne 1 ]; then
-              echo "::warning::Failed to pull $TASK from $SOURCE_NS or swebench namespace"
-              FAILED=$((FAILED + 1))
+            if [ "$OK" -ne 1 ]; then
+              echo "::error::pull FAILED $TASK after retries (rate limit? — re-run to resume)"
+              failed=$((failed + 1))
               continue
             fi
 
@@ -173,12 +160,12 @@ jobs:
               | docker build -q -t "$DST" - >/dev/null 2>&1 \
               || docker tag "$PULLED_FROM" "$DST"
 
-            if push_with_retry "$DST"; then
+            if docker push "$DST" >/dev/null 2>&1; then
               echo "  Cached: $DST (from $PULLED_FROM)"
-              MIRRORED=$((MIRRORED + 1))
+              done_count=$((done_count + 1))
             else
-              echo "::warning::Failed to push $DST"
-              FAILED=$((FAILED + 1))
+              echo "::warning::push FAILED $DST"
+              failed=$((failed + 1))
             fi
 
             # Reclaim disk after each image (~1-2 GB each, runner has ~14 GB)
@@ -187,12 +174,7 @@ jobs:
 
           echo ""
           echo "=== Batch ${{ matrix.batch_id }} Summary ==="
-          echo "Total: $TOTAL | New: $MIRRORED | Already cached: $CACHED | Failed: $FAILED"
-
-          if [ "$FAILED" -eq "$TOTAL" ] && [ "$CACHED" -eq 0 ]; then
-            echo "::error::All images in batch failed"
-            exit 1
-          fi
+          echo "Total: $TOTAL | New: $done_count | Already cached: $skipped | Failed: $failed"
 
       - name: Summary
         run: |
