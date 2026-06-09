@@ -7085,9 +7085,29 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
         # writes the canonical /tmp/gt_issue_anchors.json + reads /tmp/gt_issue_terms.txt on the
         # HOST; we mirror the terms file host-side and upload the produced anchors INTO the
         # container so the in-container post_view/post_edit consumers read the SAME anchors.
+        # PORTABLE-SUBSTRATE BRIEF CONSUMPTION (proof-safe): when GT ran as the pinned substrate
+        # (gt-run-proof), it emitted the curated brief IN-CONTAINER to GT_CERT_DIR/brief.txt. In proof
+        # mode the HOST run_v74 below is fail-closed (container boundary), so CONSUME that
+        # pre-generated brief — the agent consumes GT artifacts, never recomputes GT scoring on host.
+        _cert_dir = os.environ.get("GT_CERT_DIR", "").strip()
+        _portable_brief = os.path.join(_cert_dir, "brief.txt") if _cert_dir else ""
+        if _portable_brief and os.path.exists(_portable_brief) and os.path.getsize(_portable_brief) > 0:
+            try:
+                with open(_portable_brief, encoding="utf-8") as _bf:
+                    raw_br = _bf.read()
+                _pa = os.path.join(_cert_dir, "gt_issue_anchors.json")
+                if os.path.exists(_pa):
+                    with open(_pa, "rb") as _af:
+                        _upload_bytes_b64(runtime, _af.read(), "/tmp/gt_issue_anchors.json")
+                    print("[GT_META] portable-substrate anchors uploaded to container", flush=True)
+                print(f"[GT_META] L1 brief CONSUMED from portable substrate ({len(raw_br)} chars) "
+                      f"@ {_portable_brief} — no host run_v74 (proof-safe)", flush=True)
+            except Exception as _pe:
+                print(f"[GT_META] portable brief read failed ({_pe}); falling through", flush=True)
+                raw_br = ""
         _host_src = os.environ.get("GT_HOST_SRC_ROOT", "").strip()
         _host_gdb = os.environ.get("GT_HOST_GRAPH_DB", "").strip()
-        if _host_src and os.path.isdir(_host_src) and _host_gdb and os.path.exists(_host_gdb):
+        if not raw_br and _host_src and os.path.isdir(_host_src) and _host_gdb and os.path.exists(_host_gdb):
             try:
                 with open("/tmp/gt_issue_terms.txt", "w", encoding="utf-8") as _tf:
                     _tf.write("\n".join(issue_terms))

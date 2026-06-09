@@ -368,6 +368,26 @@ def main(argv=None) -> int:
     except Exception as e:
         print(f"WARN: embedder cert classification skipped: {e}", file=sys.stderr)
 
+    # 4d. Emit the curated brief IN-CONTAINER (run_v74 is legal here — containerized + proof) so the
+    # agent CONSUMES it from /gt_artifacts/brief.txt instead of regenerating on the host (where
+    # run_v74 is fail-closed by the boundary assert). generate_v1r_brief writes the issue anchors;
+    # mirror them out for the agent's in-container post_view/post_edit consumers.
+    try:
+        from groundtruth.pretask.v1r_brief import generate_v1r_brief
+        _b = generate_v1r_brief(issue_text=_read_issue(issue_file), repo_root=work,
+                                graph_db=graph, bug_id="portable")
+        _bt = (getattr(_b, "brief_text", "") or "").strip()
+        if _bt:
+            with open(os.path.join(a.out, "brief.txt"), "w", encoding="utf-8") as _bf:
+                _bf.write(_bt)
+            if os.path.exists("/tmp/gt_issue_anchors.json"):
+                shutil.copy("/tmp/gt_issue_anchors.json", os.path.join(a.out, "gt_issue_anchors.json"))
+            print(f"[gt-run-proof] brief emitted -> /gt_artifacts/brief.txt ({len(_bt)} chars)", flush=True)
+        else:
+            print("WARN: portable brief empty — not written (agent will host-fallback)", file=sys.stderr)
+    except Exception as e:
+        print(f"WARN: brief emission failed: {e}", file=sys.stderr)
+
     # 5. runtime_context.json
     try:
         from groundtruth.runtime.context import GTRuntimeContext
