@@ -398,12 +398,50 @@ def _apply_lsp_resolution(
     return "skipped"
 
 
+def _graph_edges_hash(db_path: str) -> str:
+    """SHA-256 over the edge rows (source,target,type,resolution_method,confidence) — a
+    content fingerprint proving the SAME graph flows build -> LSP -> gates -> hooks (Stage 1/2)."""
+    import hashlib
+    import sqlite3 as _sql
+    h = hashlib.sha256()
+    try:
+        c = _sql.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            for row in c.execute(
+                "SELECT source_id, target_id, type, resolution_method, confidence "
+                "FROM edges ORDER BY id"
+            ):
+                h.update(repr(tuple(row)).encode("utf-8"))
+        finally:
+            c.close()
+    except Exception:
+        return ""
+    return h.hexdigest()
+
+
+def _write_lsp_certificate(cert: dict) -> str:
+    """Write the LSP-liveness certificate (Stage 1) to $GT_LSP_CERT (default
+    /tmp/gt/lsp_certificate.json). The foundational LSP gate reads this to classify the
+    verdict; a residual==0 pass is INVALID without lsp_warm=true here."""
+    import json as _json
+    path = os.environ.get("GT_LSP_CERT", "/tmp/gt/lsp_certificate.json")
+    try:
+        _d = os.path.dirname(path)
+        if _d:
+            os.makedirs(_d, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            _json.dump(cert, f, indent=2)
+    except Exception as e:
+        print(f"  WARN: could not write LSP certificate to {path}: {e}", file=sys.stderr)
+    return path
+
+
 async def _resolve_edges(
     db_path: str,
     root: str,
     edges: list[dict],
     language: str,
-) -> dict[str, int]:
+) -> dict:
     """Resolve ambiguous edges using LSP textDocument/definition.
 
     For each ambiguous edge:
@@ -425,7 +463,9 @@ async def _resolve_edges(
         )
         return {"error": 1}
 
-    stats = {"verified": 0, "corrected": 0, "deleted": 0, "failed": 0, "skipped": 0}
+    stats: dict = {"verified": 0, "corrected": 0, "deleted": 0, "failed": 0, "skipped": 0,
+                   "server_launched": False, "warm_probe_ok": False,
+                   "probe_method": "workspace/symbol", "probe_latency_ms": 0.0}
 
     # Map the language NAME to its real file extension (LSP_SERVERS is keyed by
     # extension, e.g. ".py", not ".python"). This is the fix for the universal LSP
@@ -484,6 +524,7 @@ async def _resolve_edges(
         print(f"  Failed to start LSP: {e}", file=sys.stderr)
         stats["failed"] = len(edges)
         return stats
+    stats["server_launched"] = True
 
     # LSP spec requires initialize/initialized handshake before any requests.
     # Without this, servers like Pyright reject all textDocument/* calls.
@@ -514,7 +555,17 @@ async def _resolve_edges(
         await client.send_notification("initialized", {})
         await client.drain(timeout=2.0)
         await client.wait_for_progress_complete(timeout=120.0)
-        print(f"  LSP initialized, resolving {len(edges)} edges...")
+        # WARM PROBE (Stage 1 LSP-liveness): prove the server actually ANSWERS, not just
+        # that the binary launched. workspace/symbol round-trip; any response == alive.
+        _probe_t0 = time.time()
+        try:
+            _warm_ok = await client.probe_ready(timeout=5.0)
+        except Exception:
+            _warm_ok = False
+        stats["warm_probe_ok"] = bool(_warm_ok)
+        stats["probe_latency_ms"] = (time.time() - _probe_t0) * 1000.0
+        print(f"  LSP initialized (warm_probe_ok={_warm_ok}, "
+              f"{stats['probe_latency_ms']:.1f}ms), resolving {len(edges)} edges...")
     except Exception as e:
         print(f"  LSP initialize failed: {e}", file=sys.stderr)
         try:
@@ -995,93 +1046,130 @@ def resolve_main() -> None:
             print("ERROR: --resolve requires --lang (e.g., --lang python)", file=sys.stderr)
             sys.exit(1)
 
-        if not servers.get(args.lang):
-            # No LSP server for this language: emit the 0-resolution CONTRACT (not a hard
-            # abort) so the gate classifies it (resolved=0/residual -> GATE-2 fails-closed =
-            # explicit "unsupported language" proof classification), and the substrate's
-            # proof-mode resolve-fatal sees rc=0 instead of aborting before the gates run.
-            # Generalized: ANY language with no server gets the same honest contract, never
-            # a silent pass and never a hard crash (verifier finding; matches the substrate's
-            # documented "unsupported language -> GATE-2 fails-closed" promise).
-            _scoped_n0 = len(source_files) if source_files else 0
-            print(f"WARN: No LSP server installed for {args.lang} — emitting 0-resolution contract",
-                  file=sys.stderr)
-            print(
-                f"LSP_METRICS resolved=0 residual={residual_method_edges} scoped_source_files={_scoped_n0}",
-                flush=True,
-            )
-            return
-
-        # scoped_source_files: how many files demand-scoped this pass (0 = whole-graph,
-        # un-scoped — the blind-500-cap regime that the metric is meant to expose).
+        from groundtruth.runtime import proof as _proof
         _scoped_n = len(source_files) if source_files else 0
+        try:
+            _ctx_id = _proof.context_id()
+        except Exception:
+            _ctx_id = os.environ.get("GT_CONTEXT_ID", "")
+        _hash_before = _graph_edges_hash(args.db)
 
-        lang_edges = [e for e in edges if e.get("language") == args.lang][: args.max_edges]
-        if not lang_edges:
-            print(f"No ambiguous {args.lang} edges to resolve.")
-            # Always emit the contract line in --resolve mode so a parser can tell
-            # "nothing to resolve" (residual may still be >0 if no name_match METHOD
-            # edges were under the confidence threshold) from a crash.
+        # LSP-LIVENESS CERTIFICATE (Stage 1). Filled per path below; the foundational LSP
+        # gate reads it, and a residual==0 pass is INVALID without lsp_warm=true here.
+        cert: dict = {
+            "schema": "gt.lsp_certificate.v1",
+            "language": args.lang,
+            "server_command": str(_KNOWN_SERVERS.get(args.lang, "") or ""),
+            "graph_db": args.db,
+            "runtime_context_id": _ctx_id,
+            "scoped_source_files": _scoped_n,
+            "demand_edges": int(residual_method_edges),
+            "residual": int(residual_method_edges),
+            "attempted_edges": 0,
+            "verified_edges": 0, "corrected_edges": 0, "deleted_edges": 0,
+            "failed_edges": 0, "skipped_edges": 0,
+            "server_launched": False, "warm_probe_ok": False, "lsp_warm": False,
+            "probe_method": "workspace/symbol", "probe_latency_ms": 0.0,
+            "no_op_valid": False, "no_op_reason": "", "unsupported_reason": "",
+            "lsp_started_at": None, "lsp_finished_at": None,
+            "graph_hash_before_lsp": _hash_before, "graph_hash_after_lsp": _hash_before,
+            "closure_rebuilt_after_lsp": False, "closure_rebuilt_at": None,
+            "closure_hash_after_rebuild": "",
+            "verdict_hint": "",
+        }
+
+        if not servers.get(args.lang):
+            # No LSP server for this language: EXPLICIT unsupported classification (never a
+            # silent pass, never a crash). The server cannot launch -> lsp_warm stays False.
+            cert["unsupported_reason"] = f"no LSP server installed for language '{args.lang}'"
+            cert["verdict_hint"] = "LSP_UNSUPPORTED_EXPLICIT"
+            print(f"WARN: No LSP server installed for {args.lang} — emitting unsupported certificate",
+                  file=sys.stderr)
+            _proof.stamp_meta(args.db, "lsp_warm", "0")
+            _proof.stamp_meta(args.db, "lsp_language", args.lang)
+            _write_lsp_certificate(cert)
             print(
                 f"LSP_METRICS resolved=0 residual={residual_method_edges} "
-                f"scoped_source_files={_scoped_n}",
+                f"scoped_source_files={_scoped_n} lsp_warm=0 verdict=LSP_UNSUPPORTED_EXPLICIT",
                 flush=True,
             )
             return
 
-        print(f"\nResolving {len(lang_edges)} {args.lang} edges via LSP...")
-        start = time.time()
+        lang_edges = [e for e in edges if e.get("language") == args.lang][: args.max_edges]
+
+        # ALWAYS launch + warm-probe the server (EVEN with zero demand edges) so a
+        # residual==0 no-op is PROVABLE — a no-op pass is only valid with a warmed server.
+        print(f"\nResolving {len(lang_edges)} {args.lang} edges via LSP "
+              f"(launch + warm-probe even on no-op)...")
+        _t0 = time.time()
         stats = asyncio.run(_resolve_edges(args.db, args.root, lang_edges, args.lang))
-        elapsed = time.time() - start
+        _elapsed = time.time() - _t0
+        cert["lsp_started_at"] = _t0
+        cert["lsp_finished_at"] = _t0 + _elapsed
+        cert["server_launched"] = bool(stats.get("server_launched", False))
+        cert["warm_probe_ok"] = bool(stats.get("warm_probe_ok", False))
+        cert["probe_method"] = str(stats.get("probe_method", "workspace/symbol"))
+        cert["probe_latency_ms"] = float(stats.get("probe_latency_ms", 0.0))
+        cert["lsp_warm"] = bool(cert["server_launched"] and cert["warm_probe_ok"]
+                                and cert["probe_latency_ms"] > 0.0)
+        cert["attempted_edges"] = len(lang_edges)
+        cert["verified_edges"] = int(stats.get("verified", 0))
+        cert["corrected_edges"] = int(stats.get("corrected", 0))
+        cert["deleted_edges"] = int(stats.get("deleted", 0))
+        cert["failed_edges"] = int(stats.get("failed", 0))
+        cert["skipped_edges"] = int(stats.get("skipped", 0))
 
-        print(f"\nResults ({elapsed:.1f}s):")
-        print(f"  Verified (tree-sitter was correct): {stats.get('verified', 0)}")
-        print(f"  Corrected (pointed to wrong target): {stats.get('corrected', 0)}")
-        print(f"  Deleted (false positive): {stats.get('deleted', 0)}")
-        print(f"  Failed (LSP couldn't resolve): {stats.get('failed', 0)}")
-        print(f"  Skipped: {stats.get('skipped', 0)}")
+        print(f"\nResults ({_elapsed:.1f}s): server_launched={cert['server_launched']} "
+              f"warm_probe_ok={cert['warm_probe_ok']} probe_latency_ms={cert['probe_latency_ms']:.1f}")
+        print(f"  Verified: {stats.get('verified',0)}  Corrected: {stats.get('corrected',0)}  "
+              f"Deleted: {stats.get('deleted',0)}  Failed: {stats.get('failed',0)}  "
+              f"Skipped: {stats.get('skipped',0)}")
 
-        # Stamp LSP-enrichment completion (the one-pipeline order: index -> LSP ->
-        # closure). generate_v1r_brief asserts this stamp exists in proof mode, so a
-        # graph scored BEFORE LSP ran fails closed.
-        from groundtruth.runtime import proof as _proof
+        # Stamp LSP-enrichment completion + warm flag (one-pipeline order: index -> LSP ->
+        # closure). generate_v1r_brief asserts the lsp stamp in proof mode.
         _proof.stamp_lsp(
             args.db,
             metrics=f"verified={stats.get('verified',0)} corrected={stats.get('corrected',0)} "
                     f"deleted={stats.get('deleted',0)} failed={stats.get('failed',0)}",
         )
+        _proof.stamp_meta(args.db, "lsp_warm", "1" if cert["lsp_warm"] else "0")
+        _proof.stamp_meta(args.db, "lsp_language", args.lang)
 
-        # The LSP pass just promoted/re-pointed/deleted edges. The transitive
-        # closure sidecar was built at index time (before this pass), so it is
-        # now stale: missing reach via the LSP-verified edges AND retaining reach
-        # via edges this pass deleted/re-pointed. Refresh it over the corrected
-        # edges so impact/trace/localization see LSP-accurate deep reach.
-        _changed = (
-            stats.get("corrected", 0)
-            + stats.get("deleted", 0)
-            + stats.get("verified", 0)
-        )
+        # Closure rebuild AFTER LSP (stale otherwise). Fatal in proof mode if it fails/stale.
+        _changed = (stats.get("corrected", 0) + stats.get("deleted", 0) + stats.get("verified", 0))
         if _changed:
             _rebuild_closure(args.db)
         else:
-            # No edges changed -> the existing closure still matches the edges and is
-            # fresh-by-construction. Stamp it so the freshness gate passes (nothing to
-            # rebuild is not a stale closure).
             _proof.stamp_closure(args.db)
-        # Proof mode: closure must exist and be >= the LSP stamp (rebuilt AFTER LSP).
         _proof.assert_closure_after_lsp(args.db)
+        cert["closure_rebuilt_after_lsp"] = True
+        try:
+            cert["closure_rebuilt_at"] = _proof.read_ts(args.db, _proof.K_CLOSURE_TS)
+        except Exception:
+            cert["closure_rebuilt_at"] = None
+        cert["graph_hash_after_lsp"] = _graph_edges_hash(args.db)
+        cert["closure_hash_after_rebuild"] = cert["graph_hash_after_lsp"]
 
-        # FINAL machine-parseable contract line (stdout). resolved = edges PROMOTED to
-        # resolution_method='lsp' this pass (verified tree-sitter-correct + corrected
-        # to the right target). Deletes are removals, NOT promotions, so they are
-        # excluded. residual = the name_match method-call denominator captured pre-pass.
-        # scoped_source_files exposes whether this was demand-driven (>0) or a blind
-        # whole-graph cap (0). The fraction resolved/residual is now measurable, so a
-        # capped or un-scoped pass is detectable (resolved << residual).
+        # No-op validity: residual==0 (or no in-scope demand edges) with a WARMED server is a
+        # valid no-op. Without a warm server it is NOT (that would be a fake LSP pass).
+        if cert["residual"] == 0 or not lang_edges:
+            cert["no_op_valid"] = bool(cert["lsp_warm"])
+            cert["no_op_reason"] = ("zero in-scope name_match method-call edges to resolve"
+                                    if cert["lsp_warm"] else "")
+
+        if not cert["lsp_warm"]:
+            cert["verdict_hint"] = "LSP_FAIL_NO_WARM"
+        elif cert["residual"] == 0 or not lang_edges:
+            cert["verdict_hint"] = "LSP_NO_OP_VALID_WITH_WARM_SERVER"
+        else:
+            cert["verdict_hint"] = "LSP_ACTIVE_VALID"
+
         resolved_promoted = int(stats.get("verified", 0)) + int(stats.get("corrected", 0))
+        _write_lsp_certificate(cert)
         print(
             f"LSP_METRICS resolved={resolved_promoted} residual={residual_method_edges} "
-            f"scoped_source_files={_scoped_n}",
+            f"scoped_source_files={_scoped_n} lsp_warm={1 if cert['lsp_warm'] else 0} "
+            f"verdict={cert['verdict_hint']}",
             flush=True,
         )
     else:

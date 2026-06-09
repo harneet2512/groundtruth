@@ -267,12 +267,18 @@ def gate_resolution(db: str) -> bool:
 # ===========================================================================
 _LSP_LINE = re.compile(
     r"LSP_METRICS\s+resolved=(\d+)\s+residual=(\d+)\s+scoped_source_files=(\d+)"
+    r"(?:\s+lsp_warm=(\d+))?(?:\s+verdict=(\S+))?"
 )
+
+# Verdicts the LSP-liveness gate treats as a PASS (every other verdict is fail-closed).
+_LSP_VERDICTS_PASS = {
+    "LSP_ACTIVE_VALID", "LSP_NO_OP_VALID_WITH_WARM_SERVER", "LSP_UNSUPPORTED_EXPLICIT",
+}
 
 
 def parse_lsp_metrics(text: str):
     """Return (resolved, residual, scoped_source_files) from the LAST contract line,
-    or None if absent. Last match wins (a run may print intermediate lines)."""
+    or None if absent. Backward-compatible 3-tuple; richer fields via parse_lsp_line()."""
     last = None
     for m in _LSP_LINE.finditer(text or ""):
         last = m
@@ -281,58 +287,144 @@ def parse_lsp_metrics(text: str):
     return int(last.group(1)), int(last.group(2)), int(last.group(3))
 
 
-def gate_lsp(lsp_metrics_text: str) -> bool:
-    """Fail-closed: parse resolve.py's LSP_METRICS contract line and assert the LSP
-    precision pass did real work on THIS issue's residual.
-
-    Predicates:
-      - contract line MUST be present (absent == LSP pass never emitted it == degraded).
-      - residual > 0 precondition: if there were ZERO issue-relevant name_match method
-        edges to convert, the pass is vacuously satisfied (PASS, nothing to resolve) —
-        but flagged so visibility shows it.
-      - resolved/residual >= LSP_RESOLVE_FLOOR (relative to THIS issue's residual).
-      - scoped_source_files==0 is FLAGGED (un-scoped == demand-driven scoping degraded);
-        it does not fail by itself (whole-graph resolve is correct, just costlier).
-    """
-    parsed = parse_lsp_metrics(lsp_metrics_text)
-    if parsed is None:
-        print("[GATE 2 LSP ENRICHMENT] FAIL — no LSP_METRICS contract line found "
-              "(resolve.py did not emit `LSP_METRICS resolved=.. residual=.. scoped_source_files=..`) "
-              "-> LSP precision pass silently absent/no-op")
-        _DEEP["gate_lsp"] = {"contract_line_present": False, "pass": False}
-        return False
-
-    resolved, residual, scoped = parsed
-    if residual == 0:
-        # Nothing in-scope to convert. Not a failure of the pass; report + pass.
-        frac = 0.0
-        ok = True
-        print(f"[GATE 2 LSP ENRICHMENT] PASS (vacuous) resolved={resolved} residual=0 "
-              f"scoped_source_files={scoped} -> no issue-relevant name_match method edges to resolve")
-    else:
-        frac = resolved / residual
-        ok = frac >= LSP_RESOLVE_FLOOR
-        print(f"[GATE 2 LSP ENRICHMENT] {'PASS' if ok else 'FAIL'} "
-              f"resolved={resolved} residual={residual} resolve_frac={frac:.8f} "
-              f"(floor={LSP_RESOLVE_FLOOR:.8f}) scoped_source_files={scoped}")
-        if not ok:
-            print(f"  WARNING: only {frac:.4%} of this issue's {residual} name_match method-call "
-                  f"edges were converted (< {LSP_RESOLVE_FLOOR:.0%} floor) -> contracts stay "
-                  "name_match-shallow on the issue subgraph")
-    if scoped == 0:
-        print("  FLAG: scoped_source_files=0 -> LSP ran UN-SCOPED (whole graph), demand-driven "
-              "scoping (--source-files) was not applied; correct but not demand-driven")
-
-    _DEEP["gate_lsp"] = {
-        "contract_line_present": True,
-        "resolved": _f8(resolved),
-        "residual": _f8(residual),
-        "resolve_frac": _f8(frac),
-        "resolve_floor": _f8(LSP_RESOLVE_FLOOR),
-        "scoped_source_files": int(scoped),
-        "scoped_degraded": bool(scoped == 0),
-        "pass": bool(ok),
+def parse_lsp_line(text: str):
+    """Parse the LAST LSP_METRICS line into a dict incl. optional lsp_warm/verdict (the
+    warm-proof fields resolve.py now appends), or None if absent."""
+    last = None
+    for m in _LSP_LINE.finditer(text or ""):
+        last = m
+    if not last:
+        return None
+    g = last.groups()
+    return {
+        "resolved": int(g[0]), "residual": int(g[1]), "scoped_source_files": int(g[2]),
+        "lsp_warm": (int(g[3]) if g[3] is not None else None),
+        "verdict": (g[4] if len(g) > 4 and g[4] is not None else None),
     }
+
+
+def _load_lsp_cert(path=None):
+    """Load the LSP-liveness certificate written by resolve.py ($GT_LSP_CERT or
+    /tmp/gt/lsp_certificate.json), or None if absent/unreadable."""
+    p = path or os.environ.get("GT_LSP_CERT", "/tmp/gt/lsp_certificate.json")
+    try:
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _classify_lsp(cert):
+    """Return (verdict, ok) for an LSP-liveness certificate. ok=True only for the three
+    valid verdicts; a residual==0 pass is INVALID without a warmed server; no cert => fail.
+
+    PASS: LSP_ACTIVE_VALID, LSP_NO_OP_VALID_WITH_WARM_SERVER, LSP_UNSUPPORTED_EXPLICIT.
+    FAIL: LSP_FAIL_NO_WARM, LSP_FAIL_STALE_CLOSURE, LSP_FAIL_NOT_RUN_BEFORE_SCORING,
+          LSP_FAIL_MISSING_CERTIFICATE."""
+    if not cert:
+        return ("LSP_FAIL_MISSING_CERTIFICATE", False)
+    if cert.get("unsupported_reason"):
+        # Honest "no server for this language" — explicit, never a fake LSP success.
+        return ("LSP_UNSUPPORTED_EXPLICIT", True)
+    if not cert.get("server_launched"):
+        return ("LSP_FAIL_NO_WARM", False)
+    warm = (bool(cert.get("lsp_warm")) and bool(cert.get("warm_probe_ok"))
+            and float(cert.get("probe_latency_ms", 0.0) or 0.0) > 0.0)
+    if not warm:
+        return ("LSP_FAIL_NO_WARM", False)
+    if cert.get("lsp_finished_at") is None:
+        return ("LSP_FAIL_NOT_RUN_BEFORE_SCORING", False)
+    if not cert.get("closure_rebuilt_after_lsp"):
+        return ("LSP_FAIL_STALE_CLOSURE", False)
+    _fin = cert.get("lsp_finished_at")
+    _clo = cert.get("closure_rebuilt_at")
+    if _fin is not None and _clo is not None and float(_clo) < float(_fin):
+        return ("LSP_FAIL_STALE_CLOSURE", False)
+    residual = int(cert.get("residual", 0))
+    demand = int(cert.get("demand_edges", residual))
+    attempted = int(cert.get("attempted_edges", 0))
+    if demand > 0 and attempted == 0:
+        return ("LSP_FAIL_NOT_RUN_BEFORE_SCORING", False)
+    if residual == 0 or demand == 0:
+        if cert.get("no_op_valid"):
+            return ("LSP_NO_OP_VALID_WITH_WARM_SERVER", True)
+        return ("LSP_FAIL_NO_WARM", False)
+    return ("LSP_ACTIVE_VALID", True)
+
+
+def gate_lsp(lsp_metrics_text: str, cert=None) -> bool:
+    """Fail-closed LSP-LIVENESS gate (Stage 1). Reads resolve.py's LSP certificate (the
+    warm-probe + closure-timing proof) and emits ONE verdict. A residual==0 pass is
+    INVALID without a warmed server: "the binary exists" is not "the server answered".
+
+    Primary source: the certificate JSON ($GT_LSP_CERT). Fallback: the LSP_METRICS line's
+    lsp_warm field. No certificate AND no lsp_warm proof => LSP_FAIL_MISSING_CERTIFICATE.
+    Yield (resolved/residual) is NOT a liveness predicate here — it is a graph-QUALITY axis
+    handled deliver-always; liveness asks only "did a real server warm and run when there
+    was demand, or validly no-op with a warm server."
+    """
+    if cert is None:
+        cert = _load_lsp_cert()
+
+    if cert is not None:
+        verdict, ok = _classify_lsp(cert)
+        _resolved = int(cert.get("verified_edges", 0)) + int(cert.get("corrected_edges", 0))
+        print(f"[GATE 2 LSP ENRICHMENT] {verdict} {'PASS' if ok else 'FAIL'} "
+              f"lsp_warm={cert.get('lsp_warm')} server_launched={cert.get('server_launched')} "
+              f"warm_probe_ok={cert.get('warm_probe_ok')} probe_latency_ms={cert.get('probe_latency_ms')} "
+              f"language={cert.get('language')} residual={cert.get('residual')} "
+              f"demand={cert.get('demand_edges')} attempted={cert.get('attempted_edges')} "
+              f"resolved(v+c)={_resolved} closure_after_lsp={cert.get('closure_rebuilt_after_lsp')}")
+        _DEEP["gate_lsp"] = {
+            "certificate_present": True,
+            "verdict": verdict,
+            "lsp_warm": bool(cert.get("lsp_warm")),
+            "server_launched": bool(cert.get("server_launched")),
+            "warm_probe_ok": bool(cert.get("warm_probe_ok")),
+            "probe_latency_ms": _f8(float(cert.get("probe_latency_ms", 0.0) or 0.0)),
+            "language": cert.get("language"),
+            "residual": _f8(int(cert.get("residual", 0))),
+            "demand_edges": _f8(int(cert.get("demand_edges", 0))),
+            "attempted_edges": _f8(int(cert.get("attempted_edges", 0))),
+            "resolved_promoted": _f8(_resolved),
+            "closure_rebuilt_after_lsp": bool(cert.get("closure_rebuilt_after_lsp")),
+            "graph_hash_before_lsp": cert.get("graph_hash_before_lsp"),
+            "graph_hash_after_lsp": cert.get("graph_hash_after_lsp"),
+            "unsupported_reason": cert.get("unsupported_reason", ""),
+            "no_op_reason": cert.get("no_op_reason", ""),
+            "pass": bool(ok),
+        }
+        return ok
+
+    # No certificate file: fall back to the contract line, but residual==0 NO LONGER passes
+    # vacuously — without lsp_warm proof there is no evidence the server ran.
+    parsed = parse_lsp_line(lsp_metrics_text)
+    if parsed is None:
+        print("[GATE 2 LSP ENRICHMENT] LSP_FAIL_MISSING_CERTIFICATE — no certificate and no "
+              "LSP_METRICS contract line (LSP precision pass silently absent/no-op)")
+        _DEEP["gate_lsp"] = {"certificate_present": False, "verdict": "LSP_FAIL_MISSING_CERTIFICATE",
+                             "pass": False}
+        return False
+    warm = parsed.get("lsp_warm")
+    residual = parsed["residual"]
+    resolved = parsed["resolved"]
+    if warm != 1:
+        print(f"[GATE 2 LSP ENRICHMENT] LSP_FAIL_MISSING_CERTIFICATE — LSP_METRICS line without "
+              f"lsp_warm=1 proof (lsp_warm={warm}); a warmed server was not certified")
+        _DEEP["gate_lsp"] = {"certificate_present": False, "verdict": "LSP_FAIL_MISSING_CERTIFICATE",
+                             "lsp_warm": warm, "pass": False}
+        return False
+    if parsed.get("verdict"):
+        verdict = parsed["verdict"]
+        ok = verdict in _LSP_VERDICTS_PASS
+    elif residual == 0:
+        verdict, ok = "LSP_NO_OP_VALID_WITH_WARM_SERVER", True
+    else:
+        verdict, ok = "LSP_ACTIVE_VALID", True
+    print(f"[GATE 2 LSP ENRICHMENT] {verdict} {'PASS' if ok else 'FAIL'} "
+          f"(from contract line; lsp_warm={warm} residual={residual} resolved={resolved})")
+    _DEEP["gate_lsp"] = {"certificate_present": False, "verdict": verdict, "lsp_warm": warm,
+                         "resolved": _f8(resolved), "residual": _f8(residual), "pass": bool(ok)}
     return ok
 
 
