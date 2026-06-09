@@ -244,10 +244,10 @@ jobs:
           # Retry the single HF fetch — a transient blip shouldn't lose the cache.
           for ATTEMPT in 1 2 3; do
             python - <<'PY'
-          from datasets import load_dataset
-          ds = load_dataset("SWE-bench-Live/SWE-bench-Live", split="lite")
-          print("pre-cached SWE-bench-Live[lite]:", len(ds), "rows")
-          PY
+from datasets import load_dataset
+ds = load_dataset("SWE-bench-Live/SWE-bench-Live", split="lite")
+print("pre-cached SWE-bench-Live[lite]:", len(ds), "rows")
+PY
             if [ -n "$(ls -A /tmp/hf_cache 2>/dev/null)" ]; then echo "grader cache built (attempt $ATTEMPT)"; break; fi
             echo "::warning::pre-cache attempt $ATTEMPT failed — retrying"; sleep 15
           done
@@ -1648,7 +1648,7 @@ jobs:
           echo "============================================"
           echo ""
 
-          TOTAL=0; PATCHED=0; RESOLVED=0
+          TOTAL=0; PATCHED=0; RESOLVED=0; INFRA_FAIL=0
 
           for dir in /tmp/all/task-*/; do
             TASK=$(basename "$dir" | sed 's/^task-//')
@@ -1662,7 +1662,14 @@ jobs:
             fi
 
             REPORT=$(find "$dir" -name 'eval_result.json' 2>/dev/null | head -1)
-            if [ -n "$REPORT" ]; then
+            # INFRA failure (e.g. HF 429 -> eval_no_report) is NOT a model NO — the grader
+            # never produced a verdict. Count separately and EXCLUDE from the resolved
+            # denominator so infra noise never masquerades as an unresolved task.
+            STATUS=""
+            [ -n "$REPORT" ] && STATUS=$(python3 -c "import json;print(json.load(open('$REPORT')).get('status',''))" 2>/dev/null || echo "")
+            if [ "$STATUS" = "eval_no_report" ]; then
+              IS_RESOLVED="INFRA"; INFRA_FAIL=$((INFRA_FAIL + 1))
+            elif [ -n "$REPORT" ]; then
               RES=$(python3 -c "
           import json, sys
           r = json.load(open('$REPORT'))
@@ -1687,6 +1694,8 @@ jobs:
 
           echo ""
           echo "============================================"
-          echo "  PATCHED:  $PATCHED / $TOTAL"
-          echo "  RESOLVED: $RESOLVED / $TOTAL"
+          GRADED=$((TOTAL - INFRA_FAIL))
+          echo "  PATCHED:    $PATCHED / $TOTAL"
+          echo "  RESOLVED:   $RESOLVED / $GRADED graded  (INFRA_FAIL=$INFRA_FAIL excluded; $RESOLVED / $TOTAL incl-infra)"
+          echo "  INFRA_FAIL: $INFRA_FAIL (grader produced no verdict — NOT a model failure)"
           echo "============================================"
