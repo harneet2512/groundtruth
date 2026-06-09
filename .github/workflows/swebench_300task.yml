@@ -758,6 +758,12 @@ jobs:
           rm -rf /tmp/gt/src && mkdir -p /tmp/gt/src
           docker cp "gtsrc:$ROOT/." /tmp/gt/src 2>/dev/null || true
           echo "GT_LSP_METRICS_FILE=/tmp/gt_lsp_metrics.txt" >> "$GITHUB_ENV"
+          # ONE PIPELINE (gt_gt §1): hand the agent the SAME LSP-resolved graph the substrate
+          # gates just measured, so the in-loop hooks read it instead of rebuilding an
+          # unresolved one. The host-path step exports these too (:1001-1002); the substrate
+          # branch must export them as well or the two modes feed the agent differently.
+          echo "GT_HOST_SRC_ROOT=/tmp/gt/src" >> "$GITHUB_ENV"
+          echo "GT_HOST_GRAPH_DB=/tmp/gt/graph.db" >> "$GITHUB_ENV"
           # reliability contracts + audit snapshots OUT (before the container is removed)
           mkdir -p /tmp/gt_contracts /tmp/gt_audit
           docker cp gtsrc:/tmp/gt/contracts/. /tmp/gt_contracts/ 2>/dev/null || true

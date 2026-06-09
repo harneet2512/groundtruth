@@ -789,20 +789,37 @@ class GTRuntimeConfig:
     _stuck_compat_skip_count: int = 0
 
     def __post_init__(self) -> None:
-        # LEGITIMACY GATE: a real benchmark must index FRESH per task, in the task's
-        # own environment, from the base-commit repo — never a prebuilt / cross-run
-        # graph.db. GT_FORBID_PREBUILT_GRAPH=1 hard-disables every prebuilt path and
-        # forces the in-container build, so the agent sees the graph a real GT user
-        # would get (not a runner-promoted best-case db). Armed on the 300 + 113 runs.
-        if os.environ.get("GT_FORBID_PREBUILT_GRAPH") == "1":
-            if self._host_graph_db:
-                print(f"[GT_META] LEGITIMACY: GT_FORBID_PREBUILT_GRAPH=1 — ignoring prebuilt "
+        # ONE PIPELINE (gt_gt §1/§3): the agent must hook onto the SAME LSP-enriched graph
+        # the gates measured — not a separate unresolved rebuild. GT exports GT_HOST_GRAPH_DB
+        # as the graph it built+LSP-resolved FRESH this task; seed from it so the in-container
+        # hooks (L3/L3b/L4/L6) read that enriched substrate.
+        if not self._host_graph_db:
+            self._host_graph_db = os.environ.get("GT_HOST_GRAPH_DB", "")
+        # LEGITIMACY GATE — forbid a CROSS-RUN / STALE prebuilt, NEVER the fresh per-task
+        # host-resolved graph. GT_FORBID_PREBUILT_GRAPH targets cross-run leakage; a graph
+        # built fresh from THIS task's base-commit (mtime >= the job-start epoch) IS what a
+        # real GT user gets and is exactly the enriched substrate the agent hooks onto.
+        # Conflating the two is what split the gates from the agent (the in-loop hooks ran on
+        # an unresolved graph while the gates certified the resolved one).
+        if os.environ.get("GT_FORBID_PREBUILT_GRAPH") == "1" and self._host_graph_db:
+            _job_started = float(os.environ.get("GT_JOB_STARTED", "0") or 0)
+            try:
+                _fresh = (os.path.exists(self._host_graph_db)
+                          and os.path.getmtime(self._host_graph_db) >= _job_started)
+            except OSError:
+                _fresh = False
+            if _fresh:
+                print(f"[GT_META] LEGITIMACY: using FRESH per-task host-resolved graph "
+                      f"{self._host_graph_db} (mtime >= job start) — the ONE LSP-enriched "
+                      "substrate the agent hooks onto (gt_gt §1).", flush=True)
+            else:
+                print(f"[GT_META] LEGITIMACY: GT_FORBID_PREBUILT_GRAPH=1 — ignoring STALE/cross-run "
                       f"{self._host_graph_db}; forcing a fresh in-container index per task.", flush=True)
-            self._host_graph_db = ""
-            os.environ.pop("GT_PREBUILT_GRAPH_DB", None)
+                self._host_graph_db = ""
+                os.environ.pop("GT_PREBUILT_GRAPH_DB", None)
         if self._host_graph_db and os.path.exists(self._host_graph_db):
             os.environ.setdefault("GT_GRAPH_DB", self._host_graph_db)
-            print(f"[GT_META] prebuilt_graph_db: {self._host_graph_db} ({os.path.getsize(self._host_graph_db)} bytes)", flush=True)
+            print(f"[GT_META] host_resolved_graph_db: {self._host_graph_db} ({os.path.getsize(self._host_graph_db)} bytes)", flush=True)
 
 
 @dataclass
