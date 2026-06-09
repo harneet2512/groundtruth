@@ -95,6 +95,33 @@ def _run(cmd: list[str], env: dict | None = None) -> int:
     return subprocess.run(cmd, env=env or os.environ.copy()).returncode
 
 
+_EVAL_LEAK_ENV = ("FAIL_TO_PASS", "PASS_TO_PASS", "GOLD_PATCH", "GOLD_FILES", "TEST_PATCH",
+                  "GT_GOLD", "SWE_GOLD", "SWE_TEST_PATCH")
+_EVAL_LEAK_FILES = {"test_patch.diff", "gold_patch.diff", "test_patch", "gold_patch",
+                    "fail_to_pass.json", "pass_to_pass.json", "eval.sh", "run_tests.sh",
+                    "eval_spec.json", "run_instance.sh", "fail_to_pass", "pass_to_pass"}
+
+
+def eval_leakage(source_root: str) -> list:
+    """Separation of concerns / anti-cheat: GT (the HELPER) must NEVER see the evaluator's hidden
+    tests or gold. The substrate's ONLY input is the read-only repo at the agent's commit. Returns a
+    list of leaks (empty == clean) if any eval artifact (gold / test_patch / FAIL_TO_PASS) reaches GT
+    via an env key or a harness-injected TOP-LEVEL file. The repo's OWN tests are legitimate and are
+    never flagged — we inspect only env keys + top-level injected names, not the repo's test tree."""
+    leaks = []
+    for k in os.environ:
+        ku = k.upper()
+        if any(tok in ku for tok in _EVAL_LEAK_ENV):
+            leaks.append(f"env:{k}")
+    try:
+        for name in os.listdir(source_root):
+            if name.lower() in _EVAL_LEAK_FILES:
+                leaks.append(f"file:{name}")
+    except Exception:
+        pass
+    return leaks
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="gt-run-proof")
     ap.add_argument("--source-root", required=False, default="/work")
@@ -115,7 +142,8 @@ def main(argv=None) -> int:
             "inputs": {"source_root": "read-only mount of the task repo", "out": "writable artifact dir"},
             "outputs": REQUIRED_ARTIFACTS,
             "guarantees": ["no per-task pip install", "no model download", "no host GT execution",
-                           "no mutation of the task image", "baked pinned image"],
+                           "no mutation of the task image", "baked pinned image",
+                           "no eval-test/gold leakage (helper/evaluator separation)"],
         }, indent=2))
         return 0
 
@@ -134,6 +162,14 @@ def main(argv=None) -> int:
         assert_container_boundary("gt-run-proof")
     except Exception as e:
         print(f"FINAL_PIPELINE_HOST_SPLIT_FAIL: {e}", file=sys.stderr)
+        return 2
+
+    # Separation of concerns (anti-cheat): GT is the HELPER, never the evaluator. It must never see
+    # the evaluator's hidden tests or gold. Fail-closed if any eval artifact leaked in via env/file.
+    leaks = eval_leakage(a.source_root)
+    if leaks:
+        print("EVAL_LEAKAGE_FORBIDDEN: GT (substrate) must never receive the evaluator's hidden "
+              "tests/gold/FAIL_TO_PASS; separation breached by: " + ", ".join(leaks), file=sys.stderr)
         return 2
 
     # The task repo is mounted READ-ONLY at --source-root; copy to a writable workdir so gt-index

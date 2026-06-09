@@ -110,3 +110,36 @@ def test_fallback_failure_classes_present():
     assert "GT_SUBSTRATE_DIGEST_MISSING" in t
     assert "PROOF_RUNTIME_FALLBACK_FORBIDDEN" in t
     assert "SUBSTRATE_MISSING_CERTS" in t
+
+
+# ── separation of concerns / anti-cheat (helper never sees the evaluator) ────
+
+def test_eval_leakage_env_forbidden(monkeypatch, tmp_path):
+    for v in ("FAIL_TO_PASS", "PASS_TO_PASS", "GOLD_PATCH", "TEST_PATCH"):
+        monkeypatch.delenv(v, raising=False)
+    assert grp.eval_leakage(str(tmp_path)) == []  # clean
+    monkeypatch.setenv("FAIL_TO_PASS", '["t::x"]')
+    assert any("FAIL_TO_PASS" in x for x in grp.eval_leakage(str(tmp_path)))
+
+
+def test_eval_leakage_file_forbidden(monkeypatch, tmp_path):
+    for v in ("FAIL_TO_PASS", "PASS_TO_PASS", "GOLD_PATCH", "TEST_PATCH", "GOLD_FILES"):
+        monkeypatch.delenv(v, raising=False)
+    (tmp_path / "test_patch.diff").write_text("--- a\n+++ b\n")
+    leaks = grp.eval_leakage(str(tmp_path))
+    assert any("test_patch" in x for x in leaks)
+
+
+def test_eval_leakage_allows_real_repo_tests(monkeypatch, tmp_path):
+    # the repo's OWN tests are legitimate — a tests/ dir or test_foo.py must NOT trip the guard.
+    for v in ("FAIL_TO_PASS", "PASS_TO_PASS", "GOLD_PATCH", "TEST_PATCH", "GOLD_FILES"):
+        monkeypatch.delenv(v, raising=False)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "test_widget.py").write_text("def test_x(): assert True\n")
+    assert grp.eval_leakage(str(tmp_path)) == []
+
+
+def test_contract_lists_separation_guarantee(capsys):
+    grp.main(["--print-contract"])
+    j = json.loads(capsys.readouterr().out)
+    assert any("leakage" in g for g in j["guarantees"])
