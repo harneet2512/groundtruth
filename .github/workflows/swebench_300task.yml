@@ -685,29 +685,35 @@ jobs:
           DOCKERHUB_IMAGE="docker.io/starryzhang/${BASENAME}:latest"
           # Pull <image> with N retries + backoff; a transient 429/CDN blip must not lose
           # the task. Returns 0 on first success.
-          pull_retry() {  # pull_retry <image> <attempts>
-            local img="$1" attempts="$2" a
+          pull_retry() {  # pull_retry <image> <attempts>  — exponential backoff, capped at 60s
+            local img="$1" attempts="$2" a s
             for a in $(seq 1 "$attempts"); do
               if docker pull "$img" >/dev/null 2>&1; then
                 echo "  pulled $img (attempt $a)"; return 0
               fi
-              echo "::warning::pull $img attempt $a/$attempts failed — retrying"; sleep $((a*8))
+              s=$((a*a*4)); [ "$s" -gt 60 ] && s=60
+              echo "::warning::pull $img attempt $a/$attempts failed (transient) — retrying in ${s}s"; sleep "$s"
             done
             return 1
           }
           OK=0
           # GHCR mirror first (authenticated, no dockerhub anon rate-limit). On success,
           # tag to the dockerhub name so the downstream Point-A IMG reference resolves
-          # regardless of which source won (preserves the existing contract).
-          if pull_retry "$GHCR_IMAGE" 5; then
+          # regardless of which source won (preserves the existing contract). 8 attempts each
+          # (~5 min/registry worst case) — hardened after 3/300 transient pull exhaustions
+          # (haystack x2, instructlab x1) on the prior run.
+          if pull_retry "$GHCR_IMAGE" 8; then
             docker tag "$GHCR_IMAGE" "$DOCKERHUB_IMAGE" && OK=1
           fi
           # Fallback: dockerhub starryzhang (the canonical upstream).
-          if [ "$OK" -ne 1 ] && pull_retry "$DOCKERHUB_IMAGE" 5; then
+          if [ "$OK" -ne 1 ] && pull_retry "$DOCKERHUB_IMAGE" 8; then
             OK=1
           fi
           if [ "$OK" -ne 1 ]; then
-            echo "FATAL: task image unavailable from BOTH GHCR ($GHCR_IMAGE) and dockerhub ($DOCKERHUB_IMAGE) after retries — aborting BEFORE paid agent work (zero-infra-failures)"
+            # TASK_IMAGE_PULL_FAIL is an INFRA class (registry/network), NOT a GT/gate failure — the
+            # image never reached the runner, so GT never ran. Fail-closed BEFORE any paid agent work.
+            # Artifacts/logs still upload (the upload steps are if: always()). Never hidden.
+            echo "TASK_IMAGE_PULL_FAIL: task image unavailable from BOTH GHCR ($GHCR_IMAGE) and dockerhub ($DOCKERHUB_IMAGE) after 8 retries each — INFRA failure (not GT), aborting before paid work."
             exit 1
           fi
           # Confirm the image is present locally under the dockerhub name Point-A uses.
