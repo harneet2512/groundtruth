@@ -24,6 +24,12 @@ import numpy as np
 
 from groundtruth.pretask.anchors import IssueAnchors
 from groundtruth.pretask.hybrid import lexical_file_search
+from groundtruth.memory.enrich.embed import (
+    aggregate_symbol_cosines,
+    passage_hash,
+    read_agg_params,
+    symbol_passage,
+)
 
 # Minimum identifier length to consider as a potential symbol match.
 _MIN_TOKEN_LEN = 3
@@ -128,7 +134,28 @@ def _symbol_anchors(
     return {fp: "symbol_match" for fp, _ in ranked[:k_anchor]}
 
 
-_EMBED_CACHE: dict[str, tuple[list[str], np.ndarray]] = {}
+# Per-graph in-memory cache: (file_paths, {file_path -> symbol-vector matrix}).
+# Each value is an (n_symbols, dim) float32 array of the file's per-symbol vectors;
+# semantic_top_k aggregates them by MaxSim against the issue vector.
+_EMBED_CACHE: dict[str, tuple[list[str], dict[str, np.ndarray]]] = {}
+
+# Content-addressed per-symbol vector cache (survives across graphs/runs): keyed by
+# sha256(version:model:dim:passage). One ONNX encode per UNIQUE passage, ever.
+_SYMVEC_CACHE: dict[str, np.ndarray] = {}
+
+
+def _model_identity(model: object) -> tuple[str, int]:
+    """Best-effort (model_name, dim) for the passage cache key. Defaults to the
+    e5-small-v2 / 384 contract when the adapter does not expose them."""
+    name = getattr(model, "model_name", None)
+    if not name:
+        inner = getattr(model, "_m", None)
+        name = getattr(inner, "model_name", None)
+    dim = getattr(model, "dim", None)
+    if dim is None:
+        inner = getattr(model, "_m", None)
+        dim = getattr(inner, "dim", None)
+    return (str(name or "intfloat/e5-small-v2"), int(dim or 384))
 
 
 def _file_summary(file_path: str, repo_root: str, max_chars: int = 600) -> str:
@@ -162,8 +189,12 @@ def _embed(texts: list[str], model: object, *, is_query: bool = False) -> np.nda
 
 
 # Bump when the file-summary CONTENT changes so stale embeddings (keyed by graph
-# mtime) are invalidated. sym1 = symbol-content summary (was raw text[:600]).
-_SUMMARY_VERSION = "sym1"
+# mtime) are invalidated.
+#   sym1     = per-FILE symbol-bag summary (one vector/file; was raw text[:600]).
+#   sym2-fn  = per-SYMBOL passages aggregated by MaxSim (CHANGE 1) — one vector per
+#              indexed symbol, file score = MaxSim over its symbols. Bumping past
+#              sym1 abandons every stale file-bag .pkl so the two shapes never mix.
+_SUMMARY_VERSION = "sym2-fn"
 
 
 def _cache_key(graph_db: str) -> str:
@@ -177,8 +208,21 @@ def _get_file_embeddings(
     graph_db: str,
     repo_root: str,
     model: object,
-) -> tuple[list[str], np.ndarray]:
-    """Return (file_paths, embeddings) for all non-test files. Cached in memory."""
+) -> tuple[list[str], dict[str, np.ndarray]]:
+    """Return (file_paths, {file_path -> (n_symbols, dim) symbol-vector matrix}).
+
+    CHANGE 1 — symbol-level granularity. Instead of ONE vector per file from a
+    concatenated symbol-bag (which averages the issue function into its siblings
+    and clusters sibling files at cosine 0.80-0.84), embed each non-test SYMBOL as
+    its own short ``"{name} {signature}\\n{behavioral props}"`` passage and keep the
+    per-symbol vectors. ``semantic_top_k`` then scores a file by the MAX cosine over
+    its symbols (ColBERT MaxSim, Khattab & Zaharia SIGIR 2020 + MaxP, Dai & Callan
+    SIGIR 2019) so the file holding the gold function is no longer diluted.
+
+    A file with ZERO indexed symbols falls back to its ``_file_summary`` text as ONE
+    passage (a strict superset of today's behaviour). Empty/blank passages are never
+    embedded (correct-or-quiet). Cached in memory AND, per UNIQUE passage, in
+    ``_SYMVEC_CACHE`` so only cache-misses are encoded (one batched ONNX pass)."""
     key = _cache_key(graph_db)
     if key in _EMBED_CACHE:
         return _EMBED_CACHE[key]
@@ -187,10 +231,22 @@ def _get_file_embeddings(
     cache_dir = Path(graph_db).parent / ".embed_cache"
     cache_file = cache_dir / f"{key}.pkl"
     if cache_file.exists():
-        with open(cache_file, "rb") as f:
-            result = pickle.load(f)
-            _EMBED_CACHE[key] = result
-            return result
+        try:
+            with open(cache_file, "rb") as f:
+                result = pickle.load(f)
+            # Validate the on-disk shape matches the sym2-fn contract (a dict of
+            # per-file matrices); a stale sym1 .pkl (np.ndarray value) is ignored.
+            if (
+                isinstance(result, tuple)
+                and len(result) == 2
+                and isinstance(result[1], dict)
+            ):
+                _EMBED_CACHE[key] = result
+                return result
+        except Exception:
+            pass  # corrupt/legacy cache -> recompute below (correct-or-quiet)
+
+    model_name, dim = _model_identity(model)
 
     conn = sqlite3.connect(graph_db)
     c = conn.cursor()
@@ -201,59 +257,85 @@ def _get_file_embeddings(
     # by separator/prefix.
     file_paths = list(dict.fromkeys(_norm_path(row[0]) for row in c.fetchall() if row[0]))
 
-    # BLUiR (Saha et al., ASE 2013): summarize each file by its DISTINCTIVE SYMBOLS
-    # (names + signatures + docstrings), NOT raw text[:600]. The first 600 chars are
-    # the license/import PREAMBLE, which is byte-identical across files in any licensed
-    # repo (beets=GPL) -> identical embeddings -> flat sem (the measured 0.83886 x9
-    # collapse, mad=0, GATE-3 off). PROVEN local (real e5): text[:600] -> 1/10 distinct,
-    # mad=0; symbol summary -> 10/10 distinct, mad=0.0145. This is the SAME symbol
-    # surface localize._semantic_score_by_file already uses (BRIEFING: both halves
-    # identical). text[:600] is kept ONLY as a fallback for files with no indexed symbols.
-    _sym: dict[str, list[str]] = {}
-    for _fp, _nm, _sig in c.execute(
-        "SELECT file_path, name, COALESCE(signature,'') FROM nodes WHERE is_test = 0"
-    ):
-        _k = _norm_path(_fp)
-        if _k and len(_sym.get(_k, [])) < 60:
-            _sym.setdefault(_k, []).append(f"{_nm} {_sig}".strip())
+    # Collect this node's behavioral properties (docstring / call_order / guards /
+    # conditional_return) per node_id so each symbol's passage carries its own body
+    # snippet — NOT the whole file's. Source = the SAME properties the file-bag used,
+    # regrouped per-symbol. (No file reads: stays inside the demand-scope cost bound.)
+    node_body: dict[int, list[str]] = {}
     try:
-        for _fp, _val in c.execute(
-            "SELECT n.file_path, p.value FROM properties p JOIN nodes n ON n.id=p.node_id "
+        for _nid, _val in c.execute(
+            "SELECT p.node_id, p.value FROM properties p JOIN nodes n ON n.id=p.node_id "
             "WHERE n.is_test=0 AND p.kind IN ('docstring','call_order','guard_clause','conditional_return')"
         ):
-            _k = _norm_path(_fp)
-            if _k and len(_sym.get(_k, [])) < 90:
-                _sym.setdefault(_k, []).append(str(_val))
+            if _nid is None:
+                continue
+            lst = node_body.setdefault(int(_nid), [])
+            if len(lst) < 4:  # a few snippets keep the passage inside the token cap
+                lst.append(str(_val))
     except sqlite3.Error:
-        pass  # properties table absent on older graphs -> name+signature summary only
+        pass  # properties table absent on older graphs -> name+signature passage only
+
+    # Per-file ordered list of symbol passages (carry the existing 60/symbol cap).
+    file_passages: dict[str, list[str]] = {fp: [] for fp in file_paths}
+    for _id, _fp, _nm, _sig in c.execute(
+        "SELECT id, file_path, name, COALESCE(signature,'') FROM nodes WHERE is_test = 0"
+    ):
+        _k = _norm_path(_fp)
+        if not _k or _k not in file_passages or len(file_passages[_k]) >= 60:
+            continue
+        body = " ".join(node_body.get(int(_id), [])) if _id is not None else ""
+        passage = symbol_passage(_nm or "", _sig or "", body)
+        if passage:  # correct-or-quiet: never embed a blank symbol
+            file_passages[_k].append(passage)
     conn.close()
 
-    summaries = [
-        (" ".join(_sym[fp])[:600] if _sym.get(fp) else _file_summary(fp, repo_root))
-        for fp in file_paths
-    ]
-    nonempty_idx = [i for i, s in enumerate(summaries) if s.strip()]
+    # Files with NO indexed symbols fall back to the file_summary text as ONE passage
+    # (superset of current behaviour). Empty stays empty (zero-vector file).
+    for fp in file_paths:
+        if not file_passages[fp]:
+            fb = symbol_passage(_file_summary(fp, repo_root), "")
+            if fb:
+                file_passages[fp] = [fb]
 
-    if not nonempty_idx:
-        result = (file_paths, np.zeros((len(file_paths), 384), dtype=np.float32))
-        _EMBED_CACHE[key] = result
-        return result
+    # Gather the UNIQUE passages that miss the content-addressed vector cache, embed
+    # them ONCE in a single batched ONNX pass, store by passage-hash.
+    miss_hashes: list[str] = []
+    miss_passages: list[str] = []
+    seen_miss: set[str] = set()
+    for fp in file_paths:
+        for passage in file_passages[fp]:
+            h = passage_hash(passage, model_name, dim, _SUMMARY_VERSION)
+            if h not in _SYMVEC_CACHE and h not in seen_miss:
+                seen_miss.add(h)
+                miss_hashes.append(h)
+                miss_passages.append(passage)
+    if miss_passages:
+        new_embs = _embed(miss_passages, model)  # PASSAGE prefix (is_query=False)
+        for h, vec in zip(miss_hashes, new_embs):
+            _SYMVEC_CACHE[h] = np.asarray(vec, dtype=np.float32)
 
-    sums_nonempty = [summaries[i] for i in nonempty_idx]
-    embs = _embed(sums_nonempty, model)
+    # Assemble the per-file symbol-vector matrices from the cache.
+    file_matrix: dict[str, np.ndarray] = {}
+    for fp in file_paths:
+        vecs = [
+            _SYMVEC_CACHE[passage_hash(p, model_name, dim, _SUMMARY_VERSION)]
+            for p in file_passages[fp]
+        ]
+        if vecs:
+            file_matrix[fp] = np.vstack(vecs).astype(np.float32)
+        else:
+            file_matrix[fp] = np.zeros((0, dim), dtype=np.float32)
 
-    # Build full embedding matrix (zero for empty files)
-    full_embs = np.zeros((len(file_paths), embs.shape[1]), dtype=np.float32)
-    for i, orig_i in enumerate(nonempty_idx):
-        full_embs[orig_i] = embs[i]
-
-    result = (file_paths, full_embs)
+    result = (file_paths, file_matrix)
     _EMBED_CACHE[key] = result
 
-    # Save disk cache
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    with open(cache_file, "wb") as f:
-        pickle.dump(result, f)
+    # Save disk cache (best-effort; a read-only dir must not break the brief).
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        with open(cache_file, "wb") as f:
+            pickle.dump(result, f)
+    except Exception:
+        pass
 
     return result
 
@@ -289,17 +371,35 @@ def semantic_top_k(
     component lookup (`sem_all.get(fp, 0.0)`) returns its real cosine whether or
     not it made the seed cut. The DESIGN INTENT (this function's original
     docstring: "full {file: score} map for Stage B") is restored without
-    widening the candidate set."""
-    file_paths, file_embs = _get_file_embeddings(graph_db, repo_root, model)
+    widening the candidate set.
+
+    CHANGE 1: each file now scores by ColBERT MaxSim over its per-symbol vectors —
+    ``alpha*max_i(cos_i) + (1-alpha)*mean(top_k cos_i)`` (``aggregate_symbol_cosines``)
+    — so the gold function is not averaged into 60 siblings. The return CONTRACT is
+    byte-identical: ``dict[file_path -> float]`` in [0, 1]."""
+    file_paths, file_matrix = _get_file_embeddings(graph_db, repo_root, model)
     if not file_paths:
         return {}
 
     issue_emb = _embed([issue_text], model, is_query=True)[0]  # e5: the issue is the QUERY
-    scores = file_embs @ issue_emb  # cosine (normalized embeddings)
+    issue_emb = np.asarray(issue_emb, dtype=np.float32)
+    alpha, top_k = read_agg_params()
 
-    ranked = sorted(zip(file_paths, scores.tolist()), key=lambda x: x[1], reverse=True)
+    file_scores: list[tuple[str, float]] = []
+    for fp in file_paths:
+        mat = file_matrix.get(fp)
+        if mat is None or mat.shape[0] == 0:
+            file_scores.append((fp, 0.0))
+            continue
+        # Per-symbol cosines (vectors are unit-normalized: dot == cosine), then MaxSim.
+        cosines = (mat @ issue_emb).tolist()
+        cosines = [c for c in cosines if math.isfinite(c)]
+        score = aggregate_symbol_cosines(cosines, alpha=alpha, top_k=top_k)
+        file_scores.append((fp, float(score)))
+
+    ranked = sorted(file_scores, key=lambda x: x[1], reverse=True)
     if score_all:
-        # Full component-score map: keep only finite, strictly-positive cosines
+        # Full component-score map: keep only finite, strictly-positive scores
         # (correct-or-quiet — never surface 0/NaN as a semantic signal).
         return {
             fp: float(score)

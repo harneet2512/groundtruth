@@ -1369,16 +1369,26 @@ def _get_embedder():
 
 
 def _semantic_score_by_file(issue_text: str, graph_db: str, files: set[str]) -> dict[str, float]:
-    """Cosine similarity between the issue and each candidate file's CODE CONTENT
-    (names + signatures + docstrings + call_order/guards from the properties table —
-    the graph depth). The dense semantic signal: high where the file's behavior
-    matches the issue even with zero shared tokens. Empty dict when no embedder."""
+    """Semantic similarity between the issue and each candidate file's CODE CONTENT.
+
+    CHANGE 1 — symbol-level granularity. Each non-test SYMBOL in a candidate file is
+    embedded as its own short ``"{name} {signature}\\n{behavioral props}"`` passage
+    (~80-token cap) and the file scores by ColBERT MaxSim over its symbols —
+    ``alpha*max_i(cos_i) + (1-alpha)*mean(top_k cos_i)`` — so a file's gold function
+    is not averaged into its 60 siblings (which collapsed sibling cosines to a flat
+    0.80-0.84 band). Demand-scoped to the candidate ``files`` set only. Return CONTRACT
+    is byte-identical: ``dict[file_path -> float]``; empty dict when no embedder."""
     model = _get_embedder()
     # PROOF MODE (Stage 3): a required embedder with a non-empty candidate set must
     # produce a real semantic ranking — the silent {} returns below (DB error, no
     # docs, encode exception, all-zero) hide a dark semantic ranker, which collapses
     # localize's 3-ranker agreement. Guard each, raise in proof mode only.
     from groundtruth.runtime import proof as _proof
+    from groundtruth.memory.enrich.embed import (
+        aggregate_symbol_cosines,
+        read_agg_params,
+        symbol_passage,
+    )
     # Stage 3: prove localize uses the SAME embedder identity as run_v74/v1r (model-root
     # divergence -> raise in proof mode). Wires the never-called assert_same_embedder_identity.
     _proof.assert_same_embedder_identity(graph_db, "localize")
@@ -1386,49 +1396,77 @@ def _semantic_score_by_file(issue_text: str, graph_db: str, files: set[str]) -> 
     if model is None or not files:
         return {}
     want = {_normalize(f) for f in files}
-    docs: dict[str, list[str]] = {}
+    # Per-node behavioral body snippet (docstring/call_order/guards/conditional_return)
+    # so each symbol carries ITS OWN body, not the whole file's. Same source as before,
+    # regrouped per-symbol.
+    node_body: dict[int, list[str]] = {}
+    # Per-file ordered list of symbol passages (carry the existing 80/symbol cap).
+    file_passages: dict[str, list[str]] = {}
     try:
         conn = sqlite3.connect(graph_db)
         try:
-            for fp, nm, sig in conn.execute(
-                "SELECT file_path, name, COALESCE(signature,'') FROM nodes WHERE is_test=0"):
-                k = _normalize(fp)
-                if k in want and len(docs.get(k, [])) < 80:
-                    docs.setdefault(k, []).append(f"{nm} {sig}")
-            # Properties are an ADDITIVE enrichment — isolate so a missing `properties`
-            # table (older graphs) degrades to name+signature docs, NOT a proof-mode
-            # fail-close (verifier finding; mirrors anchor_select's isolated try).
+            # Properties are ADDITIVE — isolate so a missing `properties` table (older
+            # graphs) degrades to name+signature passages, NOT a proof-mode fail-close.
             try:
-                for fp, val in conn.execute(
-                    "SELECT n.file_path, p.value FROM properties p JOIN nodes n ON n.id=p.node_id "
+                for nid, val in conn.execute(
+                    "SELECT p.node_id, p.value FROM properties p JOIN nodes n ON n.id=p.node_id "
                     "WHERE n.is_test=0 AND p.kind IN ('docstring','call_order','guard_clause','conditional_return')"):
-                    k = _normalize(fp)
-                    if k in want and len(docs.get(k, [])) < 120:
-                        docs.setdefault(k, []).append(str(val))
+                    if nid is None:
+                        continue
+                    lst = node_body.setdefault(int(nid), [])
+                    if len(lst) < 4:
+                        lst.append(str(val))
             except sqlite3.Error:
-                pass  # properties table absent on older graphs -> name+signature docs only
+                pass  # properties table absent -> name+signature passages only
+            for nid, fp, nm, sig in conn.execute(
+                "SELECT id, file_path, name, COALESCE(signature,'') FROM nodes WHERE is_test=0"):
+                k = _normalize(fp)
+                if k not in want or len(file_passages.get(k, [])) >= 80:
+                    continue
+                body = " ".join(node_body.get(int(nid), [])) if nid is not None else ""
+                passage = symbol_passage(nm or "", sig or "", body)
+                if passage:  # correct-or-quiet: never embed a blank symbol
+                    file_passages.setdefault(k, []).append(passage)
         finally:
             conn.close()
     except sqlite3.Error as _e:
         if _proof_on:
             _proof.require(False, "semantic_db_read", str(_e))
         return {}
-    if not docs:
+    # Drop files that yielded no embeddable symbol.
+    file_passages = {k: v for k, v in file_passages.items() if v}
+    if not file_passages:
         if _proof_on:
             _proof.require(False, "semantic_docs_present",
-                           f"{len(want)} candidates but 0 docs assembled from graph.db")
+                           f"{len(want)} candidates but 0 symbol passages assembled from graph.db")
         return {}
     import numpy as np
-    fps = list(docs)
-    texts = [issue_text[:2000]] + [" ".join(docs[f])[:2000] for f in fps]
+    # ONE encode over the issue (texts[0] -> QUERY) + every unique symbol passage
+    # (texts[1:] -> PASSAGES); the _OnnxEmbedderAdapter preserves the e5 asymmetry.
+    fps = list(file_passages)
+    uniq: dict[str, int] = {}
+    flat: list[str] = []
+    for f in fps:
+        for p in file_passages[f]:
+            if p not in uniq:
+                uniq[p] = len(flat)
+                flat.append(p)
+    texts = [issue_text[:2000]] + flat
     try:
         embs = model.encode(texts, normalize_embeddings=True, show_progress_bar=False)
     except Exception as _e:
         if _proof_on:
             _proof.require(False, "semantic_encode", str(_e))
         return {}
+    embs = np.asarray(embs, dtype=np.float32)
     q = embs[0]
-    _res = {fps[i]: float(np.dot(q, embs[i + 1])) for i in range(len(fps))}
+    sym_vecs = embs[1:]
+    alpha, top_k = read_agg_params()
+    _res: dict[str, float] = {}
+    for f in fps:
+        cosines = [float(np.dot(q, sym_vecs[uniq[p]])) for p in file_passages[f]]
+        cosines = [c for c in cosines if np.isfinite(c)]
+        _res[f] = aggregate_symbol_cosines(cosines, alpha=alpha, top_k=top_k)
     if _proof_on and _res:
         _nz = sum(1 for v in _res.values() if v and v > 0)
         _proof.require(_nz > 0, "semantic_ranks_nonzero",
