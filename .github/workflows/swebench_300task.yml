@@ -898,12 +898,31 @@ jobs:
               -e GT_REQUIRE_FTS5=1 -e GT_REQUIRE_EMBEDDER=1 -e GT_FORCE_ONNX_EMBEDDER=1 \
               -e GT_REQUIRE_LSP=1 -e GT_REQUIRE_FULL_STACK=1 \
               "$GT_SUBSTRATE_DIGEST" gt-run-proof --source-root /work --out /gt_artifacts
-            echo "GT_PORTABLE_SUBSTRATE=1" >> "$GITHUB_ENV"
+            # Step 5: the portable path is PRIMARY in proof — consume /gt_artifacts and SKIP the
+            # in-task LSP/gates (a second, divergent runtime). Fail-closed if any cert is missing.
+            for c in graph.db lsp_certificate.json graph_certificate.json embedder_certificate.json foundational_gate_report.json; do
+              test -s "/tmp/gt/$c" || { echo "SUBSTRATE_MISSING_CERTS: /gt_artifacts/$c absent after gt-run-proof"; exit 1; }
+            done
+            cp -f /tmp/gt/foundational_gate_report.json "/tmp/gt_gates_deep_${{ matrix.task }}.json" 2>/dev/null || true
+            { echo "GT_PORTABLE_SUBSTRATE=1"; echo "GT_HOST_SRC_ROOT=/tmp/gt/src"; \
+              echo "GT_HOST_GRAPH_DB=/tmp/gt/graph.db"; echo "GT_CERT_DIR=/tmp/gt"; \
+              echo "GT_LSP_CERT=/tmp/gt/lsp_certificate.json"; echo "GT_GRAPH_CERT=/tmp/gt/graph_certificate.json"; \
+              echo "GT_EMBEDDER_CERT=/tmp/gt/embedder_certificate.json"; echo "GT_ROOT=$ROOT"; \
+              echo "GT_EVAL_CONTAINER=gtsrc"; } >> "$GITHUB_ENV"
+            echo "Point A done (PORTABLE substrate): consumed /gt_artifacts; in-task LSP+gates SKIPPED"
+            exit 0
           else
-            # TRANSITIONAL (no pinned digest yet): provision the GT package into gtsrc WITHOUT
-            # per-task pip — the deps must already be in the image, else the proof flags + the
-            # runtime boundary assertions fail-closed (never a silent host-split). The pinned
-            # portable image is the final path; this branch exists only until it is published.
+            # TRANSITIONAL (no pinned digest yet). Step 5 rule: proof/final MUST prefer the pinned
+            # substrate. In-task provisioning is a fallback, NEVER silent — when GT_REQUIRE_PINNED_SUBSTRATE=1
+            # it is forbidden (fail-closed); otherwise it warns loudly. No per-task pip; deps must be baked.
+            if [ "${GT_REQUIRE_PINNED_SUBSTRATE:-0}" = "1" ]; then
+              echo "GT_SUBSTRATE_DIGEST_MISSING / PROOF_RUNTIME_FALLBACK_FORBIDDEN: proof/final mode requires"
+              echo "GT_SUBSTRATE_DIGEST (the pinned portable substrate). In-task provisioning fallback is"
+              echo "forbidden. Set the GT_SUBSTRATE_DIGEST repo variable to the published image digest."
+              exit 1
+            fi
+            echo "::warning::PROOF_RUNTIME_FALLBACK_FORBIDDEN (transitional): no GT_SUBSTRATE_DIGEST set — using"
+            echo "::warning::in-task provisioning. Set GT_SUBSTRATE_DIGEST + GT_REQUIRE_PINNED_SUBSTRATE=1 to enforce the pinned path."
             docker exec gtsrc mkdir -p /opt/gt /tmp/gt 2>/dev/null || true
             docker cp "${{ github.workspace }}/src/groundtruth" gtsrc:/opt/gt/groundtruth 2>/dev/null || true
             docker cp "${{ github.workspace }}/scripts" gtsrc:/opt/gt/scripts 2>/dev/null || true
@@ -1078,6 +1097,7 @@ jobs:
       - name: Preflight — full-stack census on host graph (fail-closed before paid agent)
         if: inputs.gt_use_substrate_image != 'true'
         run: |
+          [ "${GT_PORTABLE_SUBSTRATE:-0}" = "1" ] && { echo "census: portable substrate (gt-run-proof) already emitted certs in-container; skip host census"; exit 0; }
           GT_FORCE_ONNX_EMBEDDER=1 GT_REQUIRE_EMBEDDER=1 GT_REQUIRE_LSP=1 GT_REQUIRE_FTS5=1 \
           GT_REQUIRE_FULL_STACK=1 GT_MODELS_ROOT="$GITHUB_WORKSPACE/models" \
             python scripts/verify/preflight_pipeline.py --db /tmp/gt/graph.db --root /tmp/gt/src --census
@@ -1094,6 +1114,11 @@ jobs:
           PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/metrics"
           GT_LSP_METRICS_FILE: "/tmp/gt_lsp_metrics.txt"
         run: |
+          if [ "${GT_PORTABLE_SUBSTRATE:-0}" = "1" ]; then
+            echo "mid-run visibility: portable substrate (gt-run-proof) already emitted foundational_gate_report.json"
+            cp -f /tmp/gt/foundational_gate_report.json /tmp/l1_debug.txt 2>/dev/null || echo "{}" > /tmp/l1_debug.txt
+            head -40 /tmp/l1_debug.txt; exit 0
+          fi
           python3 "${{ github.workspace }}/scripts/metrics/foundational_gates.py" /tmp/gt/graph.db /tmp/gt/src /tmp/issue.txt /tmp/gt_lsp_metrics.txt > /tmp/l1_debug.txt 2>&1 || true
           cat /tmp/l1_debug.txt
 
@@ -1124,6 +1149,10 @@ jobs:
           GT_LSP_METRICS_FILE: "/tmp/gt_lsp_metrics.txt"
         run: |
           set -uo pipefail
+          if [ "${GT_PORTABLE_SUBSTRATE:-0}" = "1" ]; then
+            echo "=== 3-GATE: ran INSIDE the portable substrate (gt-run-proof -> foundational_gate_report.json); skipping redundant in-task gates ==="
+            exit 0
+          fi
           DB=/tmp/gt/graph.db
           test -s "$DB" || { echo "FATAL [3-GATE]: graph.db absent ($DB) — fresh gt-index never produced a graph"; exit 1; }
           # Stage 4: the 3 gates run INSIDE the eval container (docker exec gtsrc), NOT host
@@ -1167,6 +1196,7 @@ jobs:
           PYTHONPATH: "${{ github.workspace }}/src"
         run: |
           set -euo pipefail
+          [ "${GT_PORTABLE_SUBSTRATE:-0}" = "1" ] && { echo "RESOLUTION-QUALITY: portable substrate (gt-run-proof) already gated in-container; skip"; exit 0; }
           DB=/tmp/gt/graph.db
           test -s "$DB" || { echo "FATAL [RESOLUTION-QUALITY]: $DB absent — cannot certify resolution; aborting before paid run"; exit 1; }
           q(){ python3 -c "import sqlite3;print(sqlite3.connect('file:$DB?mode=ro',uri=True).execute(\"$1\").fetchone()[0])"; }

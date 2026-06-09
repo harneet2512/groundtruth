@@ -94,3 +94,19 @@ def test_workflow_no_per_task_pip_install():
 def test_wrapper_consumes_artifact_dir():
     w = _read(_WRAP)
     assert "GT_CERT_DIR" in w or "/gt_artifacts" in w
+
+
+# ── Step 5: portable path primary + fallback forbidden ───────────────────────
+
+def test_portable_path_primary_skips_in_task():
+    t = _read(_WF)
+    assert "GT_PORTABLE_SUBSTRATE=1" in t
+    assert "in-task LSP+gates SKIPPED" in t
+    assert "GT_PORTABLE_SUBSTRATE:-0" in t  # the redundant in-task gate steps guard on it
+
+
+def test_fallback_failure_classes_present():
+    t = _read(_WF)
+    assert "GT_SUBSTRATE_DIGEST_MISSING" in t
+    assert "PROOF_RUNTIME_FALLBACK_FORBIDDEN" in t
+    assert "SUBSTRATE_MISSING_CERTS" in t
