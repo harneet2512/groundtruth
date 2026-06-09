@@ -46,19 +46,131 @@ RUN /opt/gt/python/bin/python3 -m pip install --no-cache-dir --upgrade pip \
     && /opt/gt/python/bin/python3 -m pip install --no-cache-dir \
        onnxruntime tokenizers numpy pydantic
 
-# (3) LSP: bundled Node + pyright, so the resolve pass never needs network in-image
+# (3) LSP: bundled Node + the GT-SUPPORTED language-server set, baked OFFLINE so the
+#     resolve pass never needs network in-image. The set is the canonical one in
+#     src/groundtruth/lsp/config.py::LSP_SERVERS (NOT "DeepSWE's 5" — that would be
+#     benchmark-shaped). resolve.py spawns EXACTLY these binaries by name:
+#       .py            -> pyright-langserver   (npm, bundled Node)
+#       .ts/.js/.tsx   -> typescript-language-server (npm, bundled Node)
+#       .go            -> gopls               (go install, build-stage toolchain)
+#       .rs            -> rust-analyzer        (prebuilt release binary, gunzip)
+#       .java          -> jdtls               (Eclipse release tarball + bundled JRE)
+#     All land on /opt/gt/... and are reachable via the final image PATH. None need a
+#     runtime toolchain merely to LAUNCH (see HONESTY note: full type-aware go-to-def
+#     for go/rust/ts may still need the TASK build env — a per-language D1 probe item).
 ARG NODE_VERSION=20.16.0
 RUN curl -fsSL https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz \
       | tar -xJ -C /opt/gt \
     && mv /opt/gt/node-v${NODE_VERSION}-linux-x64 /opt/gt/node \
     && export PATH="/opt/gt/node/bin:$PATH" \
-    && npm install -g --prefix /opt/gt/node pyright \
-    && pyright --version
+    && npm install -g --prefix /opt/gt/node pyright typescript-language-server typescript \
+    && pyright --version \
+    && typescript-language-server --version
 
-# (4) e5 model (semantic ranker) — pulled from the GT runtime-assets release
+# (3b) gopls — built with the build-stage Go toolchain, installed into /opt/gt/bin.
+#      A static-ish Go binary; launches with no runtime Go toolchain. (Type-aware
+#      go-to-def across packages may still need the task's resolved module cache —
+#      flagged as the Go D1-probe item.)
+ARG GOPLS_VERSION=v0.16.2
+RUN GOBIN=/opt/gt/bin GOFLAGS=-trimpath GOPATH=/tmp/gopath GOTOOLCHAIN=local \
+      go install golang.org/x/tools/gopls@${GOPLS_VERSION} \
+    && rm -rf /tmp/gopath \
+    && /opt/gt/bin/gopls version
+
+# (3c) rust-analyzer — official prebuilt release binary (no rustup/cargo to LAUNCH).
+#      (Crate-level type resolution may still need `cargo metadata`/target dir from the
+#      task env — flagged as the Rust D1-probe item.)
+ARG RUST_ANALYZER_VERSION=2024-08-12
+RUN curl -fsSL "https://github.com/rust-lang/rust-analyzer/releases/download/${RUST_ANALYZER_VERSION}/rust-analyzer-x86_64-unknown-linux-gnu.gz" \
+      | gunzip > /opt/gt/bin/rust-analyzer \
+    && chmod +x /opt/gt/bin/rust-analyzer \
+    && /opt/gt/bin/rust-analyzer --version
+
+# (3d) jdtls (Eclipse JDT language server) — the Eclipse JDT.LS product tarball + a
+#      bundled headless JRE, so it LAUNCHES with NO system Java and NO runtime download.
+#      resolve.py spawns the bare `jdtls` name, so /opt/gt/bin/jdtls is a launcher that
+#      invokes the Eclipse Equinox launcher jar directly with the bundled JRE (the
+#      offline-deterministic path — NOT the pip `jdtls` wrapper, which downloads JDT.LS
+#      at runtime and would fail under allow_internet=false). The launcher resolves the
+#      versioned equinox launcher jar + the platform config dir at run, writes its
+#      workspace under a writable tmp dir.
+#      (Full Java type resolution needs the task's compiled classpath / Maven-Gradle deps
+#      — flagged as the Java D1-probe item; bare launch + workspace/symbol still work.)
+ARG JDTLS_VERSION=1.40.0
+ARG JDTLS_TIMESTAMP=202409261450
+# Temurin JRE 21 — the URL path-segment (%2B == '+') and the filename token ('_') are kept
+# as SEPARATE pre-encoded ARGs so the RUN needs NO bash `${var//+/_}` substitution (the
+# Docker default shell is dash, which does not support that expansion).
+ARG JRE_TAG=jdk-21.0.4%2B7
+ARG JRE_FILE_TOKEN=21.0.4_7
+RUN mkdir -p /opt/gt/jdtls /opt/gt/jre \
+    && curl -fsSL "https://download.eclipse.org/jdtls/milestones/${JDTLS_VERSION}/jdt-language-server-${JDTLS_VERSION}-${JDTLS_TIMESTAMP}.tar.gz" \
+       | tar -xz -C /opt/gt/jdtls \
+    && curl -fsSL "https://github.com/adoptium/temurin21-binaries/releases/download/${JRE_TAG}/OpenJDK21U-jre_x64_linux_hotspot_${JRE_FILE_TOKEN}.tar.gz" \
+       | tar -xz -C /opt/gt/jre --strip-components=1 \
+    && printf '%s\n' \
+       '#!/bin/sh' \
+       'JDTLS_HOME=/opt/gt/jdtls' \
+       'JAVA=/opt/gt/jre/bin/java' \
+       'LAUNCHER=$(ls "$JDTLS_HOME"/plugins/org.eclipse.equinox.launcher_*.jar 2>/dev/null | head -1)' \
+       'CONFIG="$JDTLS_HOME/config_linux"' \
+       'WORKSPACE="${JDTLS_WORKSPACE:-/tmp/jdtls-workspace}"' \
+       'mkdir -p "$WORKSPACE"' \
+       'exec "$JAVA" -Declipse.application=org.eclipse.jdt.ls.core.id1 -Dosgi.bundles.defaultStartLevel=4' \
+       '  -Declipse.product=org.eclipse.jdt.ls.core.product -Dosgi.checkConfiguration=true' \
+       '  -Dosgi.sharedConfiguration.area="$CONFIG" -Dosgi.sharedConfiguration.area.readOnly=true' \
+       '  -Dosgi.configuration.cascaded=true -Xms256m --add-modules=ALL-SYSTEM' \
+       '  --add-opens java.base/java.util=ALL-UNNAMED --add-opens java.base/java.lang=ALL-UNNAMED' \
+       '  -jar "$LAUNCHER" -configuration "$CONFIG" -data "$WORKSPACE" "$@"' \
+       > /opt/gt/bin/jdtls \
+    && chmod +x /opt/gt/bin/jdtls \
+    && test -n "$(ls /opt/gt/jdtls/plugins/org.eclipse.equinox.launcher_*.jar 2>/dev/null | head -1)" \
+    && /opt/gt/jre/bin/java -version
+
+# (4) Embedder models, baked OFFLINE at BUILD time (the build stage has network; the
+#     eval/DeepSWE container has allow_internet=false, so NOTHING is downloaded at run).
+#     PRIMARY = code-tuned multilingual gte-modernbert-base, INT8 ONNX (~150MB) so the
+#     loader DEFAULT (embed.DEFAULT_EMBED_MODEL = "Alibaba-NLP/gte-modernbert-base") loads
+#     with no download. e5-small-v2 (384-dim) stays baked as the runtime fallback. The
+#     dest dirnames are the HF basenames ("gte-modernbert-base", "e5-small-v2"), exactly
+#     how EmbeddingModel.model_dir + proof.embedder_model_path resolve the baked files
+#     (model_name.split('/')[-1]); the ONNX is saved as the canonical "model.onnx" so the
+#     loader finds it by primary name. The gte fetch uses huggingface_hub at build time
+#     (the SAME candidate list as scripts/setup_models.py::_GTE_MODERNBERT — int8 first,
+#     then quantized/uint8/fp32) so we never depend on an unverified release mirror.
+#     e5 keeps the proven curl-from-release pattern (its assets already exist there).
 ARG E5_BASE=https://github.com/harneet2512/groundtruth/releases/download/pipeline-assets-v1
-RUN mkdir -p /opt/gt/models/e5-small-v2 \
-    && curl -fsSL "${E5_BASE}/model.onnx"     -o /opt/gt/models/e5-small-v2/model.onnx \
+RUN /opt/gt/python/bin/python3 -m pip install --no-cache-dir huggingface_hub \
+    && mkdir -p /opt/gt/models/gte-modernbert-base /opt/gt/models/e5-small-v2 \
+    && /opt/gt/python/bin/python3 - <<'PY'
+import shutil
+from pathlib import Path
+from huggingface_hub import hf_hub_download
+
+DEST = Path("/opt/gt/models/gte-modernbert-base")
+# Same candidate order as scripts/setup_models.py::_GTE_MODERNBERT — int8 (~150MB) first.
+ONNX = [("Alibaba-NLP/gte-modernbert-base", "onnx/model_int8.onnx"),
+        ("Alibaba-NLP/gte-modernbert-base", "onnx/model_quantized.onnx"),
+        ("Alibaba-NLP/gte-modernbert-base", "onnx/model_uint8.onnx"),
+        ("Alibaba-NLP/gte-modernbert-base", "onnx/model.onnx")]
+TOK  = [("Alibaba-NLP/gte-modernbert-base", "tokenizer.json")]
+
+def fetch(cands, out):
+    for repo, path in cands:
+        try:
+            src = hf_hub_download(repo_id=repo, filename=path)
+            shutil.copyfile(src, out)
+            print(f"OK {out} <- {repo}/{path} ({out.stat().st_size // (1024*1024)}MB)")
+            return True
+        except Exception as e:
+            print(f"miss {repo}/{path}: {str(e)[:100]}")
+    return False
+
+# Save the ONNX under the canonical name the loader resolves first (model.onnx).
+assert fetch(ONNX, DEST / "model.onnx"), "FATAL: could not bake gte-modernbert-base ONNX"
+assert fetch(TOK,  DEST / "tokenizer.json"), "FATAL: could not bake gte-modernbert-base tokenizer"
+PY
+RUN curl -fsSL "${E5_BASE}/model.onnx"     -o /opt/gt/models/e5-small-v2/model.onnx \
     && curl -fsSL "${E5_BASE}/tokenizer.json" -o /opt/gt/models/e5-small-v2/tokenizer.json
 
 # (5) the GT pipeline code + the substrate launcher
@@ -81,13 +193,26 @@ ENV GT_HOME=/opt/gt \
     GT_PYTHON=/opt/gt/python/bin/python3 \
     GT_MODELS_ROOT=/opt/gt/models \
     GT_FORCE_ONNX_EMBEDDER=1 \
-    PATH="/opt/gt/bin:/opt/gt/node/bin:/opt/gt/python/bin:${PATH}" \
+    JDTLS_HOME=/opt/gt/jdtls \
+    JAVA_HOME=/opt/gt/jre \
+    PATH="/opt/gt/bin:/opt/gt/node/bin:/opt/gt/python/bin:/opt/gt/jre/bin:${PATH}" \
     PYTHONPATH="/opt/gt/src:/opt/gt/scripts/swebench:/opt/gt/benchmarks/swebench"
 
 # Build-time SELF-TEST: the whole closure must be present + runnable on glibc 2.31,
-# or the image fails to build (you can never ship a missing-library substrate).
+# or the image fails to build (you can never ship a missing-library substrate). This
+# asserts EVERY LSP server resolve.py spawns (config.py::LSP_SERVERS) launches, AND that
+# the loader-default embedder (gte-modernbert-base) + the e5 fallback are both baked.
 RUN /opt/gt/bin/gt-index -h >/dev/null 2>&1 \
     && /opt/gt/python/bin/python3 -c "import onnxruntime, numpy, pydantic, tokenizers; print('py-deps ok')" \
-    && /opt/gt/node/bin/pyright --version \
+    && pyright --version \
+    && typescript-language-server --version \
+    && gopls version \
+    && rust-analyzer --version \
+    && test -x /opt/gt/bin/jdtls \
+    && test -n "$(ls /opt/gt/jdtls/plugins/org.eclipse.equinox.launcher_*.jar 2>/dev/null | head -1)" \
+    && /opt/gt/jre/bin/java -version \
+    && test -s /opt/gt/models/gte-modernbert-base/model.onnx \
+    && test -s /opt/gt/models/gte-modernbert-base/tokenizer.json \
     && test -s /opt/gt/models/e5-small-v2/model.onnx \
-    && echo '=== GT substrate closure present + runnable on glibc 2.31 ==='
+    && /opt/gt/python/bin/python3 -c "import sys; sys.path.insert(0,'/opt/gt/src'); from groundtruth.memory.enrich.embed import _default_embed_model, get_embedding_model; m=_default_embed_model(); print('default embedder:', m); mod=get_embedding_model(); v=mod.embed('database connection pool', is_query=True); assert len(v)==mod.dim and any(v), 'embedder produced empty/zero vector'; print('embedder loaded + non-zero, dim=', mod.dim)" \
+    && echo '=== GT substrate closure present + runnable on glibc 2.31 (LSP: py/ts/go/rust/java; embedder: gte+e5) ==='

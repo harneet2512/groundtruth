@@ -59,8 +59,17 @@ trap _emit_contracts EXIT
 echo "=== gt-substrate closure self-check ==="
 gt-index -h >/dev/null 2>&1 && echo "  gt-index: ok (static)"
 "$PY" -c "import onnxruntime, numpy, pydantic, tokenizers" && echo "  py-deps: ok"
-pyright --version >/dev/null 2>&1 && echo "  pyright: $(pyright --version 2>/dev/null)"
-test -s "$GT_MODELS_ROOT/e5-small-v2/model.onnx" && echo "  e5: ok"
+# LSP servers resolve.py can spawn (config.py::LSP_SERVERS): py/ts/go/rust/java. Each is
+# a soft check (echo present/MISSING) — the authoritative fail-closed verdict for the
+# dominant-language LSP is GATE 2 below; a non-dominant server merely being absent must
+# not abort the whole substrate (correct-or-quiet). Probed by the exact spawned binary.
+for _srv in pyright typescript-language-server gopls rust-analyzer jdtls; do
+  if command -v "$_srv" >/dev/null 2>&1; then echo "  lsp[$_srv]: ok"; else echo "  lsp[$_srv]: MISSING"; fi
+done
+# Embedder: the loader DEFAULT is gte-modernbert-base; e5 is the runtime fallback. Report
+# both; the configured default is what proof.embedder_model_path / the gates assert.
+test -s "$GT_MODELS_ROOT/gte-modernbert-base/model.onnx" && echo "  embedder[gte-modernbert-base]: ok" || echo "  embedder[gte-modernbert-base]: MISSING"
+test -s "$GT_MODELS_ROOT/e5-small-v2/model.onnx" && echo "  embedder[e5-small-v2 fallback]: ok" || echo "  embedder[e5-small-v2 fallback]: MISSING"
 
 echo "=== (0) RUNTIME PREFLIGHT — fail-fast (proof mode) BEFORE any benchmark work ==="
 # Single GTRuntimeContext contract: inside container, import under /opt/gt, baked

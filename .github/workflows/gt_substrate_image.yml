@@ -52,8 +52,14 @@ jobs:
             gt-index -h >/dev/null 2>&1 && echo "gt-index ok"
             /opt/gt/python/bin/python3 -c "import onnxruntime,numpy,pydantic,tokenizers; print(\"py ok\")"
             pyright --version
+            typescript-language-server --version
+            gopls version
+            rust-analyzer --version
+            test -x /opt/gt/bin/jdtls && /opt/gt/jre/bin/java -version
+            test -s /opt/gt/models/gte-modernbert-base/model.onnx && echo "gte ok"
             test -s /opt/gt/models/e5-small-v2/model.onnx && echo "e5 ok"
-            echo "=== GT substrate image verified portable ==="'
+            /opt/gt/python/bin/python3 -c "import sys; sys.path.insert(0,\"/opt/gt/src\"); from groundtruth.memory.enrich.embed import get_embedding_model, _default_embed_model; print(\"default embedder:\", _default_embed_model()); m=get_embedding_model(); v=m.embed(\"x\", is_query=True); assert any(v) and len(v)==m.dim; print(\"embedder ok dim=\", m.dim)"
+            echo "=== GT substrate image verified portable (LSP py/ts/go/rust/java; embedder gte+e5) ==="'
 
       - name: Verify gt-run-proof portable entrypoint is baked (Stage 4.2)
         run: |

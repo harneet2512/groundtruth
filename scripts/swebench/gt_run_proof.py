@@ -63,15 +63,67 @@ def validate_proof_env() -> list[str]:
         problems.append(f"GT_RUNTIME_STRATEGY={strat!r} (expected unified_substrate)")
     # BAKED deps — never install at runtime. A missing dep is a build error in the substrate
     # image, NEVER a per-task pip/download.
-    if not (shutil.which("pyright-langserver") or shutil.which("pyright")):
-        problems.append("pyright-langserver not baked (do NOT pip-install per task)")
-    model = os.path.join(os.environ.get("GT_MODELS_ROOT", os.path.join(GT_HOME, "models")),
-                         "e5-small-v2", "model.onnx")
-    if not os.path.exists(model):
-        problems.append(f"e5 model not baked at {model} (do NOT download per task)")
+    problems.extend(_baked_lsp_problems())
+    problems.extend(_baked_embedder_problems())
     if not shutil.which("gt-index") and not os.path.exists("/usr/local/bin/gt-index"):
         problems.append("gt-index not baked")
     return problems
+
+
+def _models_root() -> str:
+    return os.environ.get("GT_MODELS_ROOT", os.path.join(GT_HOME, "models"))
+
+
+def _baked_lsp_problems() -> list[str]:
+    """Assert EVERY LSP server resolve.py can spawn is baked on PATH. The canonical set is
+    src/groundtruth/lsp/config.py::LSP_SERVERS (the ONLY language-aware source) — NOT a
+    benchmark-shaped list. We probe the binary resolve.py actually spawns (command[0]),
+    deriving it from config so the check tracks config automatically. pyright-langserver
+    accepts the `pyright` CLI alias (npm ships both). Generalized, correct-or-quiet."""
+    problems: list[str] = []
+    # Each baked server command[0] -> acceptable PATH aliases. Derived from config below.
+    aliases = {
+        "pyright-langserver": ("pyright-langserver", "pyright"),
+    }
+    try:
+        sys.path.insert(0, os.path.join(GT_HOME, "src"))
+        from groundtruth.lsp.config import LSP_SERVERS  # canonical, language-aware
+        commands = sorted({cfg.command[0] for cfg in LSP_SERVERS.values() if cfg.command})
+    except Exception:
+        # Fail-closed to the known set if config can't be imported (still NOT benchmark-shaped).
+        commands = ["pyright-langserver", "typescript-language-server", "gopls",
+                    "rust-analyzer", "jdtls"]
+    for cmd in commands:
+        cands = aliases.get(cmd, (cmd,))
+        if not any(shutil.which(c) for c in cands):
+            problems.append(f"LSP server {cmd!r} not baked on PATH "
+                            f"(do NOT install per task; tried: {', '.join(cands)})")
+    return problems
+
+
+def _baked_embedder_problems() -> list[str]:
+    """Assert the CONFIGURED localization embedder is baked, consistent with
+    proof.embedder_model_path / context.model_files_baked (which derive the dirname from
+    embed._default_embed_model()). The loader DEFAULT is gte-modernbert-base; e5 is the
+    runtime fallback. Clean iff EITHER the configured-default ONNX OR the e5 fallback ONNX
+    is present (matching the loader, which falls back to e5 when gte is absent)."""
+    root = _models_root()
+    candidates: list[tuple[str, str]] = []
+    try:
+        sys.path.insert(0, os.path.join(GT_HOME, "src"))
+        from groundtruth.memory.enrich.embed import _default_embed_model
+        configured = _default_embed_model().split("/")[-1]  # e.g. gte-modernbert-base
+        candidates.append((configured, os.path.join(root, configured, "model.onnx")))
+    except Exception:
+        candidates.append(("gte-modernbert-base",
+                           os.path.join(root, "gte-modernbert-base", "model.onnx")))
+    # e5 fallback — the loader uses it when the configured default is absent.
+    candidates.append(("e5-small-v2", os.path.join(root, "e5-small-v2", "model.onnx")))
+    if any(os.path.exists(p) for _, p in candidates):
+        return []
+    tried = "; ".join(f"{name}@{p}" for name, p in candidates)
+    return [f"embedder model not baked (configured default OR e5 fallback); do NOT download "
+            f"per task. tried: {tried}"]
 
 
 def _gt_index_bin() -> str:
