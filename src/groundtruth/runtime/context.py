@@ -150,9 +150,13 @@ class GTRuntimeContext:
         # embedder is real (not Zero) and discriminates related>unrelated
         r.append(self._embedder_check())
 
-        # an LSP server is launchable (pyright/node for python; others by ext at resolve time)
-        r.append(("lsp_server_available", bool(shutil.which("pyright") and shutil.which("node")),
-                  f"pyright={shutil.which('pyright')} node={shutil.which('node')}"))
+        # an LSP server is launchable. Probe the binary resolve.py actually SPAWNS
+        # (`pyright-langserver`), not the `pyright` CLI — the two can drift and a green
+        # presence-check on the wrong binary would mask a langserver that can't start. npm
+        # ships both, so accept either, but require node.
+        _ls = shutil.which("pyright-langserver") or shutil.which("pyright")
+        r.append(("lsp_server_available", bool(_ls and shutil.which("node")),
+                  f"langserver={_ls} node={shutil.which('node')}"))
 
         if require_graph:
             present = bool(self.graph_db and os.path.exists(self.graph_db))
