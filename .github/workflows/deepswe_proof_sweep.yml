@@ -1,0 +1,616 @@
+name: "DeepSWE: substrate proof SWEEP (113 tasks, NO LLM, $0)"
+
+# NON-PAID substrate-proof sweep across ALL 113 DeepSWE tasks. NO agent, NO LLM,
+# NO gold/task-specific logic — per task it runs ONLY the pinned-substrate
+# gt-run-proof (pure GHA compute) and audits, per task:
+#   - LSP enabled + WARM   (lsp_certificate.json: lsp_warm/server_launched/probe_latency_ms)
+#   - embedder enabled+USED (embedder_certificate.json: verdict/identity/dim/discrimination)
+#   - foundational gates    (foundational_gate_report.json: gate1/2/3, det_pct, w_sem)
+#   - setup OPTIMIZED       (timings: task-image pull, substrate pull, proof wall-time;
+#                            zero per-task model downloads — model_download_attempted MUST be false)
+#
+# Legitimacy: the IDENTICAL proof command runs for every task; only the mounted repo
+# differs. The substrate is referenced by IMMUTABLE @sha256 digest (fail-closed
+# GT_SUBSTRATE_DIGEST_MISSING). Failures are CLASSIFIED per task, never silent;
+# every upload is if: always(). gt-run-proof itself enforces the helper/evaluator
+# separation (eval_leakage) and the no-per-task-install/no-download boundary.
+#
+# Pull/extract logic mirrors deepswe_full.yml (GHCR-first task-image pull with
+# ECR-public fallback + retry backoff; docker create/run + docker cp extraction).
+
+on:
+  workflow_dispatch:
+    inputs:
+      gt_substrate_digest:
+        description: "Pinned GT substrate image by IMMUTABLE digest (ghcr.io/<org>/gt-substrate@sha256:<digest>). Empty = vars.GT_SUBSTRATE_DIGEST. Never a mutable tag."
+        required: false
+        default: ""
+      max_tasks:
+        description: "Max tasks to sweep ('' = all 113)"
+        required: false
+        default: ""
+  push:
+    branches: [gt-trial]
+    paths: [".github/workflows/deepswe_proof_sweep.yml"]
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: deepswe-proof-sweep-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # On push events inputs.* is empty -> falls back to the repo variable.
+  GT_SUBSTRATE_DIGEST: ${{ inputs.gt_substrate_digest || vars.GT_SUBSTRATE_DIGEST }}
+
+jobs:
+  # ── prepare: env-only. Lint the workflow, fail-closed on the digest, emit the matrix. ──
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+      total: ${{ steps.gen.outputs.total }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+
+      - name: Workflow lint — catch CI bug classes before the matrix
+        run: |
+          python3 scripts/verify/workflow_lint.py .github/workflows/deepswe_proof_sweep.yml
+
+      - name: Digest precheck (fail-closed — GT_SUBSTRATE_DIGEST_MISSING)
+        run: |
+          if [ -z "${GT_SUBSTRATE_DIGEST:-}" ]; then
+            echo "GT_SUBSTRATE_DIGEST_MISSING: no pinned substrate digest (gt_substrate_digest input"
+            echo "or vars.GT_SUBSTRATE_DIGEST). The proof sweep has NO fallback runtime — aborting"
+            echo "before the 113-job matrix."
+            exit 1
+          fi
+          case "$GT_SUBSTRATE_DIGEST" in
+            *@sha256:*) echo "pinned substrate OK: $GT_SUBSTRATE_DIGEST" ;;
+            *) echo "GT_SUBSTRATE_DIGEST_MISSING: '$GT_SUBSTRATE_DIGEST' is not an immutable @sha256 digest (mutable tags are not a valid proof input)"; exit 1 ;;
+          esac
+
+      - id: gen
+        name: Build the task matrix from artifact_deepswe/repo_manifest.json (113 tasks)
+        env:
+          INPUT_MAX_TASKS: ${{ inputs.max_tasks }}
+        run: |
+          python3 << 'PYEOF'
+          import json, os, sys
+          mt = (os.environ.get("INPUT_MAX_TASKS") or "").strip()
+          with open("artifact_deepswe/repo_manifest.json", encoding="utf-8") as f:
+              man = json.load(f)
+          tasks = man.get("tasks") or []
+          if not tasks:
+              print("FATAL: repo_manifest.json has no tasks", file=sys.stderr)
+              sys.exit(1)
+          # Fail-closed: every entry must carry the fields the proof job consumes.
+          for t in tasks:
+              for k in ("instance_id", "language", "docker_image"):
+                  if not t.get(k):
+                      print(f"FATAL: manifest entry missing {k!r}: {t}", file=sys.stderr)
+                      sys.exit(1)
+          if mt:
+              tasks = tasks[: int(mt)]
+          # GHA matrix cap is 256; DeepSWE is 113, but guard anyway.
+          if len(tasks) > 256:
+              print(f"WARN: {len(tasks)} tasks > 256 matrix cap; truncating", file=sys.stderr)
+              tasks = tasks[:256]
+          include = [{"task": t["instance_id"], "language": t["language"],
+                      "image": t["docker_image"]} for t in tasks]
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write("matrix=" + json.dumps({"include": include}) + "\n")
+              f.write(f"total={len(include)}\n")
+          langs = {}
+          for t in tasks:
+              langs[t["language"]] = langs.get(t["language"], 0) + 1
+          print(f"{len(include)} tasks queued (max_tasks={mt or 'all'}) langs={langs}",
+                file=sys.stderr)
+          PYEOF
+
+  # ── proof: per task — pull task image, extract repo, run the PINNED gt-run-proof, record. ──
+  proof:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    name: "${{ matrix.task }} (${{ matrix.language }})"
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+      fail-fast: false
+      max-parallel: 20
+    env:
+      TASK_ID: ${{ matrix.task }}
+      TASK_LANG: ${{ matrix.language }}
+      IMG: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false   # only scripts/ is consumed host-side (row classification); no LFS objects
+
+      - name: Init per-task state
+        run: |
+          mkdir -p /tmp/gt/src /tmp/gt/out
+          {
+            echo "FAIL_CLASS="
+            echo "PROOF_RC=-1"
+            echo "T_TASK_PULL_S=-1"
+            echo "T_EXTRACT_S=-1"
+            echo "T_SUBSTRATE_PULL_S=-1"
+            echo "T_PROOF_S=-1"
+            echo "PULL_SOURCE="
+          } >> "$GITHUB_ENV"
+          echo "task=$TASK_ID lang=$TASK_LANG image=$IMG"
+
+      - name: Digest precheck (per-job defense; prepare already hard-failed the run)
+        run: |
+          if [ -z "${GT_SUBSTRATE_DIGEST:-}" ]; then
+            echo "FAIL_CLASS=GT_SUBSTRATE_DIGEST_MISSING" >> "$GITHUB_ENV"
+            echo "GT_SUBSTRATE_DIGEST_MISSING (classified; row still recorded)"
+            exit 0
+          fi
+          case "$GT_SUBSTRATE_DIGEST" in
+            *@sha256:*) echo "pinned substrate: $GT_SUBSTRATE_DIGEST" ;;
+            *) echo "FAIL_CLASS=GT_SUBSTRATE_DIGEST_MISSING" >> "$GITHUB_ENV"
+               echo "not an immutable @sha256 digest: $GT_SUBSTRATE_DIGEST" ;;
+          esac
+
+      - name: Log in to GHCR (best-effort — the cache + ECR-public fallback need no auth when public)
+        env:
+          GHCR_TOKEN: ${{ secrets.GHCR_PULL_TOKEN || secrets.GITHUB_TOKEN }}
+          HAS_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN != '' }}
+          GH_OWNER: ${{ github.repository_owner }}
+        run: |
+          # Mirrors deepswe_full.yml token-aware login: GHCR_PULL_TOKEN (cross-account cache
+          # owner's read:packages token) when present, else the job's own GITHUB_TOKEN.
+          # (The secret is never interpolated into the script body — env-only.)
+          if [ "$HAS_PULL_TOKEN" = "true" ]; then
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u hbali-stack --password-stdin || true
+          else
+            OWNER_LC=$(echo "$GH_OWNER" | tr '[:upper:]' '[:lower:]')
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$OWNER_LC" --password-stdin || true
+          fi
+
+      - name: Pull task image (GHCR-first, ECR-public fallback, 3-retry backoff)
+        env:
+          GH_OWNER: ${{ github.repository_owner }}
+        run: |
+          if [ -n "${FAIL_CLASS:-}" ]; then echo "skip: $FAIL_CLASS"; exit 0; fi
+          T0=$(date +%s)
+          # GHCR tag derivation — same as deepswe_full.yml / cache_deepswe_images.yml:
+          #   IMG = public.ecr.aws/d3j8x8q7/swe-bench-202605:<tag>
+          #   GHCR = ghcr.io/<owner>/swe-bench-202605:<tag>
+          TAG="${IMG##*:}"
+          BASE="${IMG##*/}"; BASE="${BASE%%:*}"
+          OWNER_LC=$(echo "$GH_OWNER" | tr '[:upper:]' '[:lower:]')
+          PULLED=""
+          for CAND in "ghcr.io/hbali-stack/${BASE}:${TAG}" "ghcr.io/${OWNER_LC}/${BASE}:${TAG}"; do
+            if docker pull "$CAND" 2>/dev/null; then
+              docker tag "$CAND" "$IMG"
+              PULLED="$CAND"
+              echo "pulled from GHCR cache: $CAND"
+              break
+            fi
+            echo "GHCR miss: $CAND"
+          done
+          if [ -z "$PULLED" ]; then
+            echo "GHCR miss — pulling ECR-public source with 3-retry backoff: $IMG"
+            for i in 1 2 3; do
+              if docker pull "$IMG"; then PULLED="$IMG"; break; fi
+              echo "pull attempt $i failed; backoff $((i*20))s"
+              sleep $((i*20))
+            done
+          fi
+          T_PULL=$(( $(date +%s) - T0 ))
+          echo "T_TASK_PULL_S=$T_PULL" >> "$GITHUB_ENV"
+          if [ -z "$PULLED" ] || ! docker image inspect "$IMG" >/dev/null 2>&1; then
+            echo "TASK_IMAGE_PULL_FAIL: $IMG (GHCR candidates + ECR source all failed)"
+            echo "FAIL_CLASS=TASK_IMAGE_PULL_FAIL" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo "PULL_SOURCE=$PULLED" >> "$GITHUB_ENV"
+          echo "task image ready from $PULLED in ${T_PULL}s"
+
+      - name: Extract repo source from the task image (docker run + docker cp, as deepswe_full)
+        run: |
+          if [ -n "${FAIL_CLASS:-}" ]; then echo "skip: $FAIL_CLASS"; exit 0; fi
+          T0=$(date +%s)
+          docker rm -f gtsrc 2>/dev/null || true
+          if ! docker run -d --name gtsrc "$IMG" sleep 1800 >/dev/null; then
+            echo "SRC_EXTRACT_FAIL: could not start the task container"
+            echo "FAIL_CLASS=SRC_EXTRACT_FAIL" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          # Same repo-root probe as deepswe_full.yml: first dir with a .git, default /testbed.
+          ROOT=$(docker exec gtsrc bash -c 'for d in /home/user /testbed /workspace /app /repo; do [ -d "$d/.git" ] && echo "$d" && break; done' || true)
+          ROOT=${ROOT:-/testbed}
+          echo "repo root in task image: $ROOT"
+          rm -rf /tmp/gt/src && mkdir -p /tmp/gt/src
+          if ! docker cp "gtsrc:$ROOT/." /tmp/gt/src; then
+            echo "SRC_EXTRACT_FAIL: docker cp from $ROOT failed"
+            echo "FAIL_CLASS=SRC_EXTRACT_FAIL" >> "$GITHUB_ENV"
+            docker rm -f gtsrc 2>/dev/null || true
+            exit 0
+          fi
+          docker rm -f gtsrc 2>/dev/null || true
+          # Free disk before the substrate pull (the task image is no longer needed).
+          docker rmi "$IMG" "${PULL_SOURCE:-$IMG}" 2>/dev/null || true
+          T_EXTRACT=$(( $(date +%s) - T0 ))
+          echo "T_EXTRACT_S=$T_EXTRACT" >> "$GITHUB_ENV"
+          N_FILES=$(find /tmp/gt/src -type f 2>/dev/null | wc -l)
+          echo "extracted $N_FILES files in ${T_EXTRACT}s"
+          if [ "$N_FILES" -eq 0 ]; then
+            echo "SRC_EXTRACT_FAIL: extracted tree is empty"
+            echo "FAIL_CLASS=SRC_EXTRACT_FAIL" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+      - name: Pull the pinned substrate (by immutable digest, 3-retry backoff)
+        run: |
+          if [ -n "${FAIL_CLASS:-}" ]; then echo "skip: $FAIL_CLASS"; exit 0; fi
+          T0=$(date +%s)
+          PULLED=0
+          for i in 1 2 3; do
+            if docker pull "$GT_SUBSTRATE_DIGEST"; then PULLED=1; break; fi
+            echo "substrate pull attempt $i failed; backoff $((i*20))s"
+            sleep $((i*20))
+          done
+          T_SP=$(( $(date +%s) - T0 ))
+          echo "T_SUBSTRATE_PULL_S=$T_SP" >> "$GITHUB_ENV"
+          if [ "$PULLED" -ne 1 ]; then
+            echo "GT_SUBSTRATE_PULL_FAIL: docker pull of the pinned substrate failed"
+            echo "FAIL_CLASS=GT_SUBSTRATE_PULL_FAIL" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo "substrate pulled in ${T_SP}s"
+
+      - name: gt-run-proof inside the pinned substrate (the ONE identical command per task)
+        run: |
+          if [ -n "${FAIL_CLASS:-}" ]; then echo "skip: $FAIL_CLASS"; exit 0; fi
+          T0=$(date +%s)
+          # The byte-identical proof command: 8 proof flags + GT_GIT_COMMIT provenance.
+          # Repo mounted /work:ro (never mutated); artifacts -> /gt_artifacts. No LLM,
+          # no agent, no issue/gold input — the free liveness-proof path (substrate
+          # warmth + embedder identity probe are issue-independent).
+          set +e
+          docker run --rm \
+            -v "/tmp/gt/src:/work:ro" \
+            -v "/tmp/gt/out:/gt_artifacts" \
+            -e GT_PROOF_MODE=1 \
+            -e GT_CONTAINERIZED=1 \
+            -e GT_RUNTIME_STRATEGY=unified_substrate \
+            -e GT_REQUIRE_FTS5=1 \
+            -e GT_REQUIRE_EMBEDDER=1 \
+            -e GT_FORCE_ONNX_EMBEDDER=1 \
+            -e GT_REQUIRE_LSP=1 \
+            -e GT_REQUIRE_FULL_STACK=1 \
+            -e GT_GIT_COMMIT="${{ github.sha }}" \
+            -e GT_SUBSTRATE_DIGEST="$GT_SUBSTRATE_DIGEST" \
+            "$GT_SUBSTRATE_DIGEST" gt-run-proof --source-root /work --out /gt_artifacts \
+            > /tmp/gt/out/proof_run.log 2>&1
+          RC=$?
+          set -e
+          T_PROOF=$(( $(date +%s) - T0 ))
+          echo "PROOF_RC=$RC" >> "$GITHUB_ENV"
+          echo "T_PROOF_S=$T_PROOF" >> "$GITHUB_ENV"
+          echo "--- proof_run.log (tail) ---"
+          tail -n 120 /tmp/gt/out/proof_run.log || true
+          echo "gt-run-proof: exit=$RC wall=${T_PROOF}s"
+          if [ "$RC" -ne 0 ]; then
+            echo "GT_RUN_PROOF_FAIL: exit=$RC (classified; row + artifacts still uploaded)"
+            echo "FAIL_CLASS=GT_RUN_PROOF_FAIL" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build the per-task JSON row (always — failures are classified, never silent)
+        if: always()
+        run: |
+          python3 << 'PYEOF'
+          import json, os, sys, time
+          out = "/tmp/gt/out"
+          os.makedirs(out, exist_ok=True)
+
+          def jload(p):
+              try:
+                  with open(p, encoding="utf-8") as f:
+                      return json.load(f)
+              except Exception:
+                  return None
+
+          REQ = ["graph.db", "runtime_context.json", "lsp_certificate.json",
+                 "graph_certificate.json", "embedder_certificate.json",
+                 "foundational_gate_report.json", "run_manifest.json"]
+          present = {a: os.path.exists(os.path.join(out, a)) for a in REQ}
+          lsp = jload(os.path.join(out, "lsp_certificate.json")) or {}
+          emb = jload(os.path.join(out, "embedder_certificate.json")) or {}
+          gates = jload(os.path.join(out, "foundational_gate_report.json")) or {}
+          man = jload(os.path.join(out, "run_manifest.json")) or {}
+
+          # Embedder verdict via the canonical classifier (scripts/metrics, stdlib-only).
+          verdict, ok = "EMBEDDER_CERT_ABSENT", False
+          if emb:
+              try:
+                  sys.path.insert(0, os.path.join(
+                      os.environ.get("GITHUB_WORKSPACE", "."), "scripts", "metrics"))
+                  from embedder_certificate import classify_embedder
+                  verdict, ok = classify_embedder(emb, proof_mode=True, require_embedder=True)
+              except Exception as e:
+                  verdict, ok = f"CLASSIFY_ERROR:{type(e).__name__}", False
+
+          def fnum(v, d=0.0):
+              try:
+                  return float(v)
+              except (TypeError, ValueError):
+                  return d
+
+          def inum(v, d=0):
+              try:
+                  return int(v)
+              except (TypeError, ValueError):
+                  return d
+
+          gv = gates.get("verdict") or {}
+          gr = gates.get("gate_resolution") or {}
+          ge = (gates.get("gate_embedder") or {}).get("consumption") or {}
+          resolved = (inum(lsp.get("verified_edges")) + inum(lsp.get("corrected_edges"))
+                      + inum(lsp.get("deleted_edges")))
+          row = {
+              "instance_id": os.environ.get("TASK_ID", ""),
+              "language": os.environ.get("TASK_LANG", ""),
+              "image": os.environ.get("IMG", ""),
+              "pull_source": os.environ.get("PULL_SOURCE", ""),
+              "failure_class": os.environ.get("FAIL_CLASS", ""),
+              "proof_exit_code": inum(os.environ.get("PROOF_RC", "-1"), -1),
+              "artifacts_present": present,
+              "artifacts_present_count": sum(1 for v in present.values() if v),
+              "lsp": {
+                  "verdict_hint": lsp.get("verdict_hint", ""),
+                  "lsp_warm": bool(lsp.get("lsp_warm", False)),
+                  "server_launched": bool(lsp.get("server_launched", False)),
+                  "warm_probe_ok": bool(lsp.get("warm_probe_ok", False)),
+                  "probe_latency_ms": fnum(lsp.get("probe_latency_ms")),
+                  "resolved": resolved,
+                  "verified_edges": inum(lsp.get("verified_edges")),
+                  "corrected_edges": inum(lsp.get("corrected_edges")),
+                  "deleted_edges": inum(lsp.get("deleted_edges")),
+                  "residual": inum(lsp.get("residual")),
+                  "attempted_edges": inum(lsp.get("attempted_edges")),
+                  "language": lsp.get("language", ""),
+                  "scoped_source_files": inum(lsp.get("scoped_source_files")),
+              },
+              "embedder": {
+                  "verdict": verdict,
+                  "ok": bool(ok),
+                  "class": emb.get("embedder_class", ""),
+                  "dim": emb.get("embedder_dim"),
+                  "models_root": emb.get("GT_MODELS_ROOT", ""),
+                  "discrimination_margin": emb.get("discrimination_margin"),
+                  "model_download_attempted": bool(emb.get("model_download_attempted", False)),
+                  "semantic_candidate_count": inum(emb.get("semantic_candidate_count")),
+                  "rendered_semantic_nonzero_count": inum(emb.get("rendered_semantic_nonzero_count")),
+                  "effective_w_sem": emb.get("effective_w_sem"),
+              },
+              "gates": {
+                  "gate1_resolution": gv.get("resolution_jarvis"),
+                  "gate2_lsp": gv.get("lsp_enrichment"),
+                  "gate3_embedder": gv.get("embedder"),
+                  "all_on": gv.get("all_on"),
+                  "det_pct": gr.get("det_pct"),
+                  "w_sem": ge.get("effective_w_sem"),
+              },
+              "timings_s": {
+                  "task_pull": inum(os.environ.get("T_TASK_PULL_S", "-1"), -1),
+                  "extract": inum(os.environ.get("T_EXTRACT_S", "-1"), -1),
+                  "substrate_pull": inum(os.environ.get("T_SUBSTRATE_PULL_S", "-1"), -1),
+                  "proof": inum(os.environ.get("T_PROOF_S", "-1"), -1),
+              },
+              "languages_in_graph": man.get("languages"),
+              "gt_git_commit": os.environ.get("GITHUB_SHA", ""),
+              "substrate_digest": os.environ.get("GT_SUBSTRATE_DIGEST", ""),
+              "run_id": os.environ.get("GITHUB_RUN_ID", ""),
+              "ts_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+          }
+          with open(os.path.join(out, "row.json"), "w", encoding="utf-8") as fo:
+              json.dump(row, fo, separators=(",", ":"))
+          print(json.dumps(row, separators=(",", ":")))
+          PYEOF
+
+      - name: Upload per-task artifacts (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: proof-sweep-${{ matrix.task }}
+          path: /tmp/gt/out
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Enforce per-task verdict (red job on any classified failure)
+        run: |
+          if [ -n "${FAIL_CLASS:-}" ]; then
+            echo "::error title=${TASK_ID}::${FAIL_CLASS}"
+            exit 1
+          fi
+          if [ "${PROOF_RC:-1}" != "0" ]; then
+            echo "::error title=${TASK_ID}::gt-run-proof exit=${PROOF_RC} (unclassified)"
+            exit 1
+          fi
+          echo "OK: ${TASK_ID} — proof exit 0, row recorded"
+
+  # ── summarize: aggregate the 113 rows into the audit report. ──
+  summarize:
+    needs: [prepare, proof]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/rows
+          pattern: proof-sweep-*
+
+      - name: Aggregate sweep rows -> SWEEP_REPORT.md + step summary
+        env:
+          MATRIX_JSON: ${{ needs.prepare.outputs.matrix }}
+          EXPECTED_TOTAL: ${{ needs.prepare.outputs.total }}
+        run: |
+          python3 << 'PYEOF'
+          import glob, json, os, time
+
+          rows = []
+          for p in sorted(glob.glob("/tmp/rows/proof-sweep-*/row.json")):
+              try:
+                  with open(p, encoding="utf-8") as f:
+                      rows.append(json.load(f))
+              except Exception as e:
+                  print(f"WARN: unreadable {p}: {e}")
+          try:
+              expected = json.loads(os.environ.get("MATRIX_JSON") or '{"include":[]}')["include"]
+          except Exception:
+              expected = []
+          exp = {e["task"]: e.get("language", "?") for e in expected}
+          got = {r.get("instance_id") for r in rows}
+          missing = sorted(t for t in exp if t not in got)
+
+          def mean(xs):
+              return (sum(xs) / len(xs)) if xs else 0.0
+
+          def pct(xs, q):
+              if not xs:
+                  return 0.0
+              s = sorted(xs)
+              i = min(len(s) - 1, max(0, int(round(q * (len(s) - 1)))))
+              return s[i]
+
+          L = []
+          ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+          digest = (rows[0].get("substrate_digest", "") if rows else "")
+          sha = (rows[0].get("gt_git_commit", "") if rows else "")
+          L.append(f"# DeepSWE substrate-proof SWEEP — {len(rows)}/{len(exp)} task rows ({ts})")
+          L.append("")
+          L.append(f"- substrate: `{digest or '<unknown>'}`")
+          L.append(f"- gt commit: `{sha or '<unknown>'}`  run: {os.environ.get('GITHUB_RUN_ID','')}")
+          L.append("- NO LLM / NO agent: gt-run-proof only, identical command per task ($0 LLM)")
+          L.append("")
+
+          # ── per-language table ──
+          langs = {}
+          for r in rows:
+              langs.setdefault(r.get("language", "?"), []).append(r)
+          L.append("## Per-language substrate audit")
+          L.append("")
+          L.append("| language | tasks | lsp_warm | LSP verdicts | embedder ok | "
+                   "proof s mean/med | pull s mean | probe ms med |")
+          L.append("|---|---:|---:|---|---:|---|---:|---:|")
+          for lang in sorted(langs):
+              rs = langs[lang]
+              warm = sum(1 for r in rs if r.get("lsp", {}).get("lsp_warm"))
+              embok = sum(1 for r in rs if r.get("embedder", {}).get("ok"))
+              hist = {}
+              for r in rs:
+                  v = r.get("lsp", {}).get("verdict_hint") or "<none>"
+                  hist[v] = hist.get(v, 0) + 1
+              hist_s = ", ".join(f"{k}:{v}" for k, v in sorted(hist.items(), key=lambda kv: -kv[1]))
+              pr = [r["timings_s"]["proof"] for r in rs if r.get("timings_s", {}).get("proof", -1) >= 0]
+              pl = [r["timings_s"]["task_pull"] for r in rs if r.get("timings_s", {}).get("task_pull", -1) >= 0]
+              probe = [r["lsp"]["probe_latency_ms"] for r in rs if r.get("lsp", {}).get("probe_latency_ms", 0) > 0]
+              L.append(f"| {lang} | {len(rs)} | {warm} | {hist_s} | {embok} | "
+                       f"{mean(pr):.1f}/{pct(pr, 0.5):.0f} | {mean(pl):.1f} | {pct(probe, 0.5):.0f} |")
+          L.append("")
+
+          # ── gate verdicts ──
+          g_all = sum(1 for r in rows if r.get("gates", {}).get("all_on"))
+          g1 = sum(1 for r in rows if r.get("gates", {}).get("gate1_resolution"))
+          g2 = sum(1 for r in rows if r.get("gates", {}).get("gate2_lsp"))
+          g3 = sum(1 for r in rows if r.get("gates", {}).get("gate3_embedder"))
+          L.append("## Foundational gates")
+          L.append("")
+          L.append(f"- gate1 resolution ON: {g1}/{len(rows)}  |  gate2 LSP ON: {g2}/{len(rows)}  |  "
+                   f"gate3 embedder ON: {g3}/{len(rows)}  |  ALL ON: {g_all}/{len(rows)}")
+          L.append("")
+
+          # ── failures (exact list, classified) ──
+          fails = [r for r in rows
+                   if r.get("failure_class") or r.get("proof_exit_code", -1) != 0]
+          L.append(f"## Failing tasks ({len(fails)} classified + {len(missing)} missing rows)")
+          L.append("")
+          if fails:
+              L.append("| instance_id | language | class | proof exit | LSP verdict | embedder verdict |")
+              L.append("|---|---|---|---:|---|---|")
+              for r in sorted(fails, key=lambda r: (r.get("failure_class", ""), r.get("instance_id", ""))):
+                  L.append(f"| {r.get('instance_id')} | {r.get('language')} | "
+                           f"{r.get('failure_class') or '<none>'} | {r.get('proof_exit_code')} | "
+                           f"{r.get('lsp', {}).get('verdict_hint') or '<none>'} | "
+                           f"{r.get('embedder', {}).get('verdict')} |")
+          else:
+              L.append("(none)")
+          if missing:
+              L.append("")
+              L.append("Rows MISSING (job died before row upload — class JOB_DIED_BEFORE_ROW):")
+              for t in missing:
+                  L.append(f"- {t} ({exp[t]})")
+          L.append("")
+
+          # ── optimization verdict ──
+          dl = [r for r in rows if r.get("embedder", {}).get("model_download_attempted")]
+          slow = sorted((r for r in rows if r.get("timings_s", {}).get("task_pull", -1) > 120),
+                        key=lambda r: -r["timings_s"]["task_pull"])
+          ghcr_hits = sum(1 for r in rows if str(r.get("pull_source", "")).startswith("ghcr.io/"))
+          pr_all = [r["timings_s"]["proof"] for r in rows if r.get("timings_s", {}).get("proof", -1) >= 0]
+          sp_all = [r["timings_s"]["substrate_pull"] for r in rows
+                    if r.get("timings_s", {}).get("substrate_pull", -1) >= 0]
+          L.append("## Optimization verdict (setup efficiency)")
+          L.append("")
+          L.append(f"- per-task model downloads: "
+                   f"{'NONE (baked model — OPTIMIZED)' if not dl else 'VIOLATION: ' + ', '.join(r['instance_id'] for r in dl)}")
+          L.append(f"- GHCR cache hit rate: {ghcr_hits}/{len(rows)}")
+          L.append(f"- task pulls >120s: {len(slow)}"
+                   + ("" if not slow else " — worst: "
+                      + ", ".join(f"{r['instance_id']}={r['timings_s']['task_pull']}s" for r in slow[:5])))
+          if pr_all:
+              L.append(f"- proof wall-time s: min={min(pr_all)} p50={pct(pr_all, 0.5):.0f} "
+                       f"p90={pct(pr_all, 0.9):.0f} max={max(pr_all)} mean={mean(pr_all):.1f}")
+          if sp_all:
+              L.append(f"- substrate pull s: mean={mean(sp_all):.1f} max={max(sp_all)}")
+          optimized = (not dl) and (not slow) and not missing and not fails
+          L.append(f"- **VERDICT: {'OPTIMIZED + CLEAN' if optimized else 'ATTENTION NEEDED (see flags above)'}**")
+          L.append("")
+
+          report = "\n".join(L) + "\n"
+          with open("SWEEP_REPORT.md", "w", encoding="utf-8") as f:
+              f.write(report)
+          print(report)
+          if fails or missing or not rows:
+              with open("/tmp/sweep_fail", "w", encoding="utf-8") as f:
+                  f.write(f"fails={len(fails)} missing={len(missing)} rows={len(rows)}\n")
+          PYEOF
+          cat SWEEP_REPORT.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload SWEEP_REPORT.md
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sweep-report-${{ github.run_id }}
+          path: SWEEP_REPORT.md
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Enforce sweep verdict (red on any failing/missing task — never silent)
+        run: |
+          if [ -f /tmp/sweep_fail ]; then
+            echo "::error::sweep has failing or missing tasks:"
+            cat /tmp/sweep_fail
+            exit 1
+          fi
+          echo "sweep CLEAN: all task rows present, proof exit 0 everywhere"
