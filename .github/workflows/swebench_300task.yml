@@ -418,18 +418,16 @@ jobs:
       # this the lfs:false checkout leaves only a 133-byte LFS pointer and the
       # GT_REQUIRE_EMBEDDER probe would fail-closed.
       - name: Download e5 model artifact (pre-place — avoids per-job git lfs pull)
-        # B1 optimization: skip on the portable + gates_only path — the pinned substrate image BAKES
-        # e5 + pyright + onnxruntime, so the runner needs neither the model nor setup-eval there (no
-        # agent/wrapper runs in gates_only). Saves ~130MB download + an install per task × 300. Kept
-        # whenever an agent runs (the runner wrapper needs the local stack) or no pinned digest is set.
-        if: ${{ !(vars.GT_SUBSTRATE_DIGEST != '' && inputs.gates_only == 'true') }}
+        # NOTE: NOT skipped on the portable path. setup-eval also clones+installs OpenHands and
+        # SWE-bench-Live (the grader), which downstream steps (Patch OH, Eval harness) need even in
+        # gates_only. The e5/pyright redundancy on portable is wasteful but SAFE; the real optimization
+        # must gate the WHOLE agent-prep+grader chain together (deferred), not just setup-eval.
         uses: actions/download-artifact@v4
         with:
           name: gt-e5-model
           path: models/e5-small-v2
 
-      - if: ${{ !(vars.GT_SUBSTRATE_DIGEST != '' && inputs.gates_only == 'true') }}
-        uses: ./.github/actions/setup-eval
+      - uses: ./.github/actions/setup-eval
 
       - name: Mark job-start epoch (legitimacy freshness baseline)
         run: |
