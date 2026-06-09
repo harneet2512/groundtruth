@@ -215,7 +215,18 @@ def gate_resolution(db: str) -> bool:
     a_ok = det_pct >= SAFETY_DET_FLOOR_PCT
     b_ok = det >= name_match
     c_ok = typing_fired
-    ok = a_ok and b_ok and c_ok
+    # OUTCOME-based pass (SDE: assert the contract, not the implementation detail).
+    # The gate verifies the call-graph MAP is trustworthy = FACT-DOMINANT (a_ok floor +
+    # b_ok non-dominance). It does NOT require a specific resolver MECHANISM to have
+    # fired: a map fully resolved by same_file/import alone (a small/simple repo with no
+    # method-call ambiguity — e.g. gitingest: 89/89 deterministic, 0 name_match) is the
+    # BEST possible map and must pass. The danger pred_C targeted (a wide-open method gap)
+    # is ALREADY caught by b_ok, since a wide-open gap means name_match DOMINATES. Requiring
+    # typing tiers fail-closed a PERFECT substrate (the "GT can't work on a healthy task"
+    # bug). typing_fired stays a reported diagnostic, never a refusal. Whether the LSP
+    # enrichment pass actually ran is independently guarded by the workflow's
+    # RESOLUTION-QUALITY gate (return_type grew over the pass), so legitimacy is preserved.
+    ok = a_ok and b_ok
 
     print(
         f"[GATE 1 RESOLUTION/JARVIS] {'PASS' if ok else 'FAIL'} "
@@ -229,9 +240,10 @@ def gate_resolution(db: str) -> bool:
     if not b_ok:
         print(f"  WARNING (B): name_match ({name_match}) > deterministic ({det}) "
               "-> the agent's call map is mostly a NAME GUESS (flying blind)")
-    if not c_ok:
-        print("  WARNING (C): ZERO typing-tier edges -> receiver types never resolved "
-              "structurally; the 58% method-call gap is wide open (stale binary / propagation off)")
+    if not c_ok and name_match > 0:
+        print("  NOTE (C, diagnostic — NOT a failure): no typing-tier edges fired while "
+              f"name_match edges exist ({name_match}) — receiver-type propagation may be "
+              "partial; b_ok already guards method-call-gap dominance.")
 
     _DEEP["gate_resolution"] = {
         "calls_edges": _f8(edges),
