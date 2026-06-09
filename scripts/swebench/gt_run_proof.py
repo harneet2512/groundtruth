@@ -104,26 +104,31 @@ def _baked_lsp_problems() -> list[str]:
 def _baked_embedder_problems() -> list[str]:
     """Assert the CONFIGURED localization embedder is baked, consistent with
     proof.embedder_model_path / context.model_files_baked (which derive the dirname from
-    embed._default_embed_model()). The loader DEFAULT is gte-modernbert-base; e5 is the
-    runtime fallback. Clean iff EITHER the configured-default ONNX OR the e5 fallback ONNX
-    is present (matching the loader, which falls back to e5 when gte is absent)."""
+    embed._default_embed_model()). The loader DEFAULT is gte-modernbert-base.
+
+    NO-FALLBACK on the proof path (audit Stage-3 reconcile): under GT_REQUIRE_EMBEDDER the
+    embedder loaders (_get_model / _get_embedder) now require the CONFIGURED model (gte) and
+    RAISE rather than silently substitute e5. So validate_proof_env must likewise require the
+    CONFIGURED model to be baked — the prior "configured-default OR e5" acceptance would clear
+    the boundary while the loader then raises, a contradiction. We accept ONLY the configured
+    model's ONNX (model.onnx or a baked int8/quantized variant). e5 remains baked for the
+    sqlite-vec MEMORY store, but it is NOT an acceptable substitute for the proof-path embedder.
+    Variants accepted (matches EmbeddingModel._resolve_onnx_path): model.onnx, model_int8.onnx,
+    model_quantized.onnx, model_uint8.onnx."""
     root = _models_root()
-    candidates: list[tuple[str, str]] = []
     try:
         sys.path.insert(0, os.path.join(GT_HOME, "src"))
         from groundtruth.memory.enrich.embed import _default_embed_model
         configured = _default_embed_model().split("/")[-1]  # e.g. gte-modernbert-base
-        candidates.append((configured, os.path.join(root, configured, "model.onnx")))
     except Exception:
-        candidates.append(("gte-modernbert-base",
-                           os.path.join(root, "gte-modernbert-base", "model.onnx")))
-    # e5 fallback — the loader uses it when the configured default is absent.
-    candidates.append(("e5-small-v2", os.path.join(root, "e5-small-v2", "model.onnx")))
-    if any(os.path.exists(p) for _, p in candidates):
+        configured = "gte-modernbert-base"
+    variants = ("model.onnx", "model_int8.onnx", "model_quantized.onnx", "model_uint8.onnx")
+    paths = [os.path.join(root, configured, v) for v in variants]
+    if any(os.path.exists(p) for p in paths):
         return []
-    tried = "; ".join(f"{name}@{p}" for name, p in candidates)
-    return [f"embedder model not baked (configured default OR e5 fallback); do NOT download "
-            f"per task. tried: {tried}"]
+    tried = "; ".join(paths)
+    return [f"configured embedder model {configured!r} not baked (no silent e5 substitution on the "
+            f"proof path); do NOT download per task. tried: {tried}"]
 
 
 def _gt_index_bin() -> str:
@@ -346,6 +351,7 @@ def main(argv=None) -> int:
     base_env["GT_LSP_METRICS_FILE"] = lsp_metrics_file
     open(lsp_metrics_file, "w").close()
     lsp_ok = False
+    install_missing_langs: list[str] = []  # baked-server langs whose server is missing on PATH
     for lg in reversed(langs):  # least-common first, dominant last (its cert persists)
         cmd = [sys.executable, "-m", "groundtruth.resolve", "--db", graph, "--root", work,
                "--resolve", "--lang", lg, "--max-edges", max_edges]
@@ -356,12 +362,24 @@ def main(argv=None) -> int:
         sys.stdout.write(rr.stdout or ""); sys.stderr.write(rr.stderr or "")
         with open(lsp_metrics_file, "a", encoding="utf-8") as _mf:
             _mf.write(rr.stdout or "")
+        # A baked-server language whose server is missing emits the LSP_INSTALL_MISSING verdict
+        # (and, under GT_REQUIRE_LSP=1, exits nonzero). Record it: in a polyglot repo a DIFFERENT
+        # language succeeding must NOT mask a known-language install gap (audit defect #1 — a
+        # no-server-on-PATH baked language must fail closed, not be hidden by a sibling success).
+        if "verdict=LSP_INSTALL_MISSING" in (rr.stdout or ""):
+            install_missing_langs.append(lg)
         if rr.returncode == 0:
             lsp_ok = True
-    if os.environ.get("GT_REQUIRE_LSP") == "1" and not lsp_ok:
-        print("LSP_LIVENESS_FAIL: GT_REQUIRE_LSP=1 but LSP resolved no language successfully",
-              file=sys.stderr)
-        return 2
+    if os.environ.get("GT_REQUIRE_LSP") == "1":
+        if install_missing_langs:
+            print("LSP_LIVENESS_FAIL: GT_REQUIRE_LSP=1 but the baked LSP server is missing on PATH "
+                  f"for known language(s): {', '.join(install_missing_langs)} — a baked-server "
+                  "language that cannot launch/warm fails closed (no silent pass)", file=sys.stderr)
+            return 2
+        if not lsp_ok:
+            print("LSP_LIVENESS_FAIL: GT_REQUIRE_LSP=1 but LSP resolved no language successfully",
+                  file=sys.stderr)
+            return 2
 
     # 3. graph certificate
     _run([sys.executable, os.path.join(GT_HOME, "scripts/metrics/graph_certificate.py"), graph,

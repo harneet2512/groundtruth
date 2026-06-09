@@ -1350,10 +1350,16 @@ def _get_embedder():
             return _EMBEDDER
         except Exception as e:
             _st_err = e
-    # Container-viable ONNX path (no torch). CHANGE 2 fallback chain: the code-tuned
-    # default (gte-modernbert) ONNX → e5/384 → None. Each step loads only if onnxruntime +
-    # that model's files are baked; both halves walk the SAME chain so they stay matched.
-    from groundtruth.memory.enrich.embed import get_embedding_model, E5_MODEL, E5_DIM
+    # Container-viable ONNX path (no torch). CHANGE 2 chain: the code-tuned default
+    # (gte-modernbert) ONNX → e5/384 → None. Each step loads only if onnxruntime + that
+    # model's files are baked; both halves (run_v74 + localize) walk the SAME chain so they
+    # stay matched (BRIEFING.md §2 — a half-on / mismatched pipeline gives worthless numbers).
+    from groundtruth.memory.enrich.embed import (
+        E5_DIM,
+        E5_MODEL,
+        _default_embed_model,
+        get_embedding_model,
+    )
     try:
         _m = get_embedding_model()  # code-tuned default (GT_EMBED_MODEL_NAME/DIM)
         _m._ensure_loaded()         # raises if onnxruntime / model files absent
@@ -1361,23 +1367,34 @@ def _get_embedder():
         return _EMBEDDER
     except Exception as e:
         _onnx_err = e
-    try:
-        # Transition fallback: e5/384 if the code-tuned ONNX is absent/unloadable.
-        _m5 = get_embedding_model(E5_MODEL, E5_DIM)
-        _m5._ensure_loaded()
-        _EMBEDDER = _OnnxEmbedderAdapter(_m5)
-        return _EMBEDDER
-    except Exception as e:
-        _onnx_err = RuntimeError(f"code-tuned: {_onnx_err!r}; e5: {e!r}")
+    # NO-FALLBACK under GT_REQUIRE_EMBEDDER (audit Stage-3 fix): when the run REQUIRES the
+    # embedder, the CONFIGURED model (gte-modernbert) must LOAD or the run RAISES. We MUST NOT
+    # silently substitute e5 here — that is the silent-substitution the audit flagged, and it
+    # would also DESYNC the two halves if one loaded gte and the other e5. e5 stays available
+    # ONLY for the sqlite-vec MEMORY store (which calls get_embedding_model(E5_MODEL, E5_DIM)
+    # directly) and for the GRACEFUL non-proof path — NEVER as a proof-path embedder fallback.
+    _require_embedder = os.environ.get("GT_REQUIRE_EMBEDDER") == "1"
+    if not _require_embedder:
+        try:
+            # Transition fallback: e5/384 if the code-tuned ONNX is absent/unloadable.
+            _m5 = get_embedding_model(E5_MODEL, E5_DIM)
+            _m5._ensure_loaded()
+            _EMBEDDER = _OnnxEmbedderAdapter(_m5)
+            return _EMBEDDER
+        except Exception as e:
+            _onnx_err = RuntimeError(f"code-tuned: {_onnx_err!r}; e5: {e!r}")
     _EMBEDDER = None
-    # Fail-loud on a paid run: a silently-off semantic ranker collapses the HIGH
-    # tier's 3-ranker agreement to 2 and poisons every localization-quality result.
-    if os.environ.get("GT_REQUIRE_EMBEDDER") == "1":
+    # Fail-loud on a paid run: a silently-off OR silently-substituted semantic ranker collapses
+    # the HIGH tier's 3-ranker agreement to 2 and poisons every localization-quality result.
+    if _require_embedder:
+        _configured = _default_embed_model()
         raise RuntimeError(
-            "GT_REQUIRE_EMBEDDER=1 but NO embedder is available — semantic ranking would be 0. "
-            f"sentence-transformers: {_st_err!r}; onnx (onnxruntime + baked model files): {_onnx_err!r}. "
-            "Install onnxruntime and ship the model files (or sentence-transformers), "
-            "or unset GT_REQUIRE_EMBEDDER. Refusing to run a degraded paid localization."
+            f"GT_REQUIRE_EMBEDDER=1 but the CONFIGURED embedder '{_configured}' did not load "
+            "(no silent e5 substitution on the proof path) — semantic ranking would be 0 or run "
+            f"on the wrong model. sentence-transformers: {_st_err!r}; configured ONNX "
+            f"(onnxruntime + baked model files): {_onnx_err!r}. "
+            "Install onnxruntime and ship the configured model files (or sentence-transformers), "
+            "or unset GT_REQUIRE_EMBEDDER. Refusing to run a degraded/substituted paid localization."
         )
     return _EMBEDDER
 

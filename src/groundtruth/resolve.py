@@ -119,6 +119,29 @@ def _detect_servers() -> dict[str, bool]:
     return {lang: shutil.which(cmd) is not None for lang, cmd in _KNOWN_SERVERS.items()}
 
 
+def _is_known_lsp_language(lang: str) -> bool:
+    """True iff ``lang`` is a language GT KNOWS HOW TO SERVE — i.e. its extension is in
+    ``config.LSP_SERVERS`` (py/ts/js/go/rust/java) — regardless of whether that server's
+    BINARY is currently on PATH.
+
+    This is the discriminator for the no-fallback split (audit defect #1):
+      * ``lang`` is a KNOWN LSP language but the binary is missing -> the server SHOULD
+        exist for this run; a missing binary is an INSTALL gap that must fail-closed under
+        ``GT_REQUIRE_LSP=1`` (``LSP_INSTALL_MISSING``), NOT a legitimate no-op.
+      * ``lang`` is NOT a known LSP language (no entry in LSP_SERVERS at all, e.g. ruby/c)
+        -> there genuinely is no server to install; the pass legitimately no-ops
+        (``LSP_UNSUPPORTED_EXPLICIT``, may exit 0).
+
+    ``_LANG_TO_EXT`` is derived purely from ``LSP_SERVERS`` (+ short ext aliases), so
+    membership here == "config can serve this language." Generalized, language-agnostic:
+    one config drives the discriminator; no per-language or per-task branching."""
+    if not lang:
+        return False
+    key = lang if lang.startswith(".") else lang
+    # Accept the language NAME ("python"), the short ext ("py"), or the dotted ext (".py").
+    return (key in _LANG_TO_EXT) or (key.lstrip(".") in _LANG_TO_EXT) or (key in _KNOWN_SERVERS)
+
+
 def _count_residual_method_edges(
     conn: sqlite3.Connection,
     language: str | None = None,
@@ -1071,6 +1094,7 @@ def resolve_main() -> None:
             "server_launched": False, "warm_probe_ok": False, "lsp_warm": False,
             "probe_method": "workspace/symbol", "probe_latency_ms": 0.0,
             "no_op_valid": False, "no_op_reason": "", "unsupported_reason": "",
+            "install_missing_reason": "",
             "lsp_started_at": None, "lsp_finished_at": None,
             "graph_hash_before_lsp": _hash_before, "graph_hash_after_lsp": _hash_before,
             "closure_rebuilt_after_lsp": False, "closure_rebuilt_at": None,
@@ -1079,14 +1103,58 @@ def resolve_main() -> None:
         }
 
         if not servers.get(args.lang):
-            # No LSP server for this language: EXPLICIT unsupported classification (never a
-            # silent pass, never a crash). The server cannot launch -> lsp_warm stays False.
-            cert["unsupported_reason"] = f"no LSP server installed for language '{args.lang}'"
-            cert["verdict_hint"] = "LSP_UNSUPPORTED_EXPLICIT"
-            print(f"WARN: No LSP server installed for {args.lang} — emitting unsupported certificate",
-                  file=sys.stderr)
+            # The server binary is NOT on PATH for this language. TWO cases, and they MUST
+            # NOT both false-green the LSP gate (audit defect #1):
+            #
+            #   (a) GENUINELY-UNSUPPORTED — the language has NO entry in config.LSP_SERVERS at
+            #       all (e.g. ruby/c): there is no server to install, so a no-op is honest.
+            #       -> LSP_UNSUPPORTED_EXPLICIT, exit 0 (satisfies GT_REQUIRE_LSP=1).
+            #
+            #   (b) INSTALL-MISSING — the language IS in LSP_SERVERS (py/ts/js/go/rust/java) but
+            #       its baked server binary is missing from PATH this run: the server SHOULD be
+            #       present. That is an INSTALL/substrate gap, NOT "no server exists." Under
+            #       GT_REQUIRE_LSP=1 it MUST fail-closed (nonzero exit) — a baked-server language
+            #       that cannot launch can NEVER count as a satisfied LSP requirement.
+            _known = _is_known_lsp_language(args.lang)
+            _require_lsp = os.environ.get("GT_REQUIRE_LSP") == "1"
             _proof.stamp_meta(args.db, "lsp_warm", "0")
             _proof.stamp_meta(args.db, "lsp_language", args.lang)
+            if _known:
+                # (b) baked-server language, binary missing -> install gap.
+                _cmd = _KNOWN_SERVERS.get(args.lang, "") or ""
+                cert["unsupported_reason"] = ""  # NOT a genuine "no server" case
+                cert["no_op_valid"] = False
+                cert["verdict_hint"] = "LSP_INSTALL_MISSING"
+                cert["install_missing_reason"] = (
+                    f"LSP server for known language '{args.lang}' (command '{_cmd}') is not on PATH; "
+                    "this is an install/substrate gap, not an unsupported language"
+                )
+                print(
+                    f"LSP_INSTALL_MISSING: known LSP language '{args.lang}' but server "
+                    f"'{_cmd}' is not installed on PATH — NOT a valid no-op",
+                    file=sys.stderr,
+                )
+                _write_lsp_certificate(cert)
+                print(
+                    f"LSP_METRICS resolved=0 residual={residual_method_edges} "
+                    f"scoped_source_files={_scoped_n} lsp_warm=0 verdict=LSP_INSTALL_MISSING",
+                    flush=True,
+                )
+                if _require_lsp:
+                    # Fail-closed: the run requires LSP and a baked server is missing.
+                    print(
+                        "LSP_LIVENESS_FAIL: GT_REQUIRE_LSP=1 but the baked LSP server for known "
+                        f"language '{args.lang}' is missing from PATH (install '{_cmd}')",
+                        file=sys.stderr,
+                    )
+                    sys.exit(2)
+                # Outside the proof requirement, surface the gap but do not hard-fail.
+                return
+            # (a) genuinely-unsupported language: no server exists to install -> honest no-op.
+            cert["unsupported_reason"] = f"no LSP server configured for language '{args.lang}'"
+            cert["verdict_hint"] = "LSP_UNSUPPORTED_EXPLICIT"
+            print(f"WARN: No LSP server configured for {args.lang} — emitting unsupported certificate",
+                  file=sys.stderr)
             _write_lsp_certificate(cert)
             print(
                 f"LSP_METRICS resolved=0 residual={residual_method_edges} "

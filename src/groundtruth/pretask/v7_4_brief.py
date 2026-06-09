@@ -532,7 +532,12 @@ def _get_model() -> Any:
                     return _CACHED_MODEL
                 except Exception as e:
                     _st_err = e
-            from groundtruth.memory.enrich.embed import get_embedding_model, E5_MODEL, E5_DIM
+            from groundtruth.memory.enrich.embed import (
+                E5_DIM,
+                E5_MODEL,
+                _default_embed_model,
+                get_embedding_model,
+            )
             # 2. ONNX code-tuned default (container-viable, no torch) — the benchmark path
             try:
                 _m = get_embedding_model()  # code-tuned default (GT_EMBED_MODEL_NAME/DIM)
@@ -542,22 +547,36 @@ def _get_model() -> Any:
                 return _CACHED_MODEL
             except Exception as e:
                 _onnx_err = e
-            # 3. ONNX e5/384 transition fallback
-            try:
-                _m5 = get_embedding_model(E5_MODEL, E5_DIM)
-                _m5._ensure_loaded()
-                _CACHED_MODEL = _OnnxEmbedderAdapter(_m5)
-                _SEMANTIC_AVAILABLE = True
-                return _CACHED_MODEL
-            except Exception as e:
-                _onnx_err = RuntimeError(f"code-tuned: {_onnx_err!r}; e5: {e!r}")
-            # 4. fail-loud on a paid run: a silently-zeroed W_SEM = the 30-task-run failure.
-            if os.environ.get("GT_REQUIRE_EMBEDDER") == "1":
+            # NO-FALLBACK under GT_REQUIRE_EMBEDDER (audit Stage-3 fix): when the run REQUIRES
+            # the embedder, the CONFIGURED model (gte-modernbert) must LOAD or the run RAISES.
+            # We MUST NOT silently substitute e5 — a proof/paid run that reports "embedder loaded"
+            # while actually running e5 is the silent-substitution the audit flagged. e5 stays a
+            # first-class citizen ONLY for the sqlite-vec MEMORY store (which calls
+            # get_embedding_model(E5_MODEL, E5_DIM) directly) and for the GRACEFUL non-proof path
+            # below — NEVER as a proof-path embedder fallback.
+            _require_embedder = os.environ.get("GT_REQUIRE_EMBEDDER") == "1"
+            if not _require_embedder:
+                # 3. ONNX e5/384 transition fallback (graceful, non-proof only).
+                try:
+                    _m5 = get_embedding_model(E5_MODEL, E5_DIM)
+                    _m5._ensure_loaded()
+                    _CACHED_MODEL = _OnnxEmbedderAdapter(_m5)
+                    _SEMANTIC_AVAILABLE = True
+                    return _CACHED_MODEL
+                except Exception as e:
+                    _onnx_err = RuntimeError(f"code-tuned: {_onnx_err!r}; e5: {e!r}")
+            # 4. fail-loud on a paid run: a silently-zeroed (or silently-substituted) W_SEM = the
+            # 30-task-run failure. Under GT_REQUIRE_EMBEDDER the configured model is gte->RAISE
+            # (the e5 step above was skipped), so this fires the moment gte fails to load.
+            if _require_embedder:
+                _configured = _default_embed_model()
                 raise RuntimeError(
-                    "GT_REQUIRE_EMBEDDER=1 but run_v74 has NO embedder — W_SEM would be 0. "
-                    f"sentence-transformers: {_st_err!r}; onnx (onnxruntime + baked model files): {_onnx_err!r}. "
-                    "Install onnxruntime + bake the model, or unset GT_REQUIRE_EMBEDDER. "
-                    "Refusing to run a half-on semantic pipeline."
+                    f"GT_REQUIRE_EMBEDDER=1 but the CONFIGURED embedder '{_configured}' did not load "
+                    "(no silent e5 substitution on the proof path) — W_SEM would be 0 or run on the "
+                    f"wrong model. sentence-transformers: {_st_err!r}; configured ONNX "
+                    f"(onnxruntime + baked model files): {_onnx_err!r}. "
+                    "Install onnxruntime + bake the configured model, or unset GT_REQUIRE_EMBEDDER. "
+                    "Refusing to run a half-on / silently-substituted semantic pipeline."
                 )
             # graceful (non-required) fallback: zero embeddings (semantic OFF)
             import logging

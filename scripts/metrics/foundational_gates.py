@@ -323,8 +323,15 @@ def _classify_lsp(cert):
           LSP_FAIL_MISSING_CERTIFICATE."""
     if not cert:
         return ("LSP_FAIL_MISSING_CERTIFICATE", False)
+    if cert.get("install_missing_reason") or cert.get("verdict_hint") == "LSP_INSTALL_MISSING":
+        # A KNOWN LSP language whose baked server binary is missing on PATH. This is an
+        # install/substrate gap, NOT a legitimately-unsupported language — it must FAIL CLOSED
+        # (audit defect #1). Never treat a no-server-on-PATH baked language as a valid no-op.
+        return ("LSP_INSTALL_MISSING", False)
     if cert.get("unsupported_reason"):
         # Honest "no server for this language" — explicit, never a fake LSP success.
+        # (Only a language with NO entry in LSP_SERVERS reaches here; resolve.py sets
+        # unsupported_reason ONLY for genuinely-no-server-exists languages.)
         return ("LSP_UNSUPPORTED_EXPLICIT", True)
     if not cert.get("server_launched"):
         return ("LSP_FAIL_NO_WARM", False)
