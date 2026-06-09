@@ -138,3 +138,13 @@ gcp_fuckery.md
 # generated submission packages (re-create with package_submission.py)
 submissions/**/trajs/
 submissions/**/logs/
+
+# full-runtime proof reports/docs — kept LOCAL-ONLY (copied to Downloads), NOT pushed to GitHub
+/GO_NO_GO.md
+/PIPELINE_PROOF_REPORT.md
+/STAGE4_RUNTIME_STRATEGY_DECISION.md
+/LSP_LIVENESS_REPORT.md
+/GRAPH_HANDOFF_REPORT.md
+/EMBEDDER_USAGE_REPORT.md
+/PHASE0_RUNTIME_MAP.md
+/docs/SWE_LIVE_LITE_OH_GT_INTEGRATION_HANDOFF.md
