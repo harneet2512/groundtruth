@@ -287,13 +287,24 @@ def main(argv=None) -> int:
         with open(scope_path, "w", encoding="utf-8") as _sf:
             _sf.write("\n".join(scope_files))
     max_edges = "20000" if scope_files else "500"
+    # Capture resolve's stdout (the LSP_METRICS contract line) into GT_LSP_METRICS_FILE so the
+    # foundational LSP gate can read residual/scoped — previously uncaptured -> gate read resolved=0
+    # while the graph + cert held the real count (the measurement half of the stamp discrepancy).
+    lsp_metrics_file = os.path.join(a.out, "gt_lsp_metrics.txt")
+    base_env["GT_LSP_METRICS_FILE"] = lsp_metrics_file
+    open(lsp_metrics_file, "w").close()
     lsp_ok = False
     for lg in reversed(langs):  # least-common first, dominant last (its cert persists)
         cmd = [sys.executable, "-m", "groundtruth.resolve", "--db", graph, "--root", work,
                "--resolve", "--lang", lg, "--max-edges", max_edges]
         if scope_path:
             cmd += ["--source-files", scope_path]
-        if _run(cmd, base_env) == 0:
+        print(f"[gt-run-proof] $ {' '.join(cmd)}", flush=True)
+        rr = subprocess.run(cmd, env=base_env, capture_output=True, text=True)
+        sys.stdout.write(rr.stdout or ""); sys.stderr.write(rr.stderr or "")
+        with open(lsp_metrics_file, "a", encoding="utf-8") as _mf:
+            _mf.write(rr.stdout or "")
+        if rr.returncode == 0:
             lsp_ok = True
     if os.environ.get("GT_REQUIRE_LSP") == "1" and not lsp_ok:
         print("LSP_LIVENESS_FAIL: GT_REQUIRE_LSP=1 but LSP resolved no language successfully",

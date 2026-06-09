@@ -741,6 +741,43 @@ def _read_text(path: str) -> str:
         return ""
 
 
+def _lsp_graph_count(db: str) -> int:
+    """CANONICAL count of LSP-resolved edges PERSISTED in the final graph (not a stdout line, not a
+    cert event). This is what the agent actually navigates. resolve.py stamps resolution_method='lsp'
+    (verified) / 'lsp' on a re-pointed target (corrected); both are counted here."""
+    try:
+        c = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        n = c.execute(
+            "SELECT count(*) FROM edges WHERE resolution_method IN ('lsp','lsp_verified')"
+        ).fetchone()[0]
+        c.close()
+        return int(n or 0)
+    except Exception:
+        return 0
+
+
+def _lsp_cert_resolved() -> int:
+    """verified+corrected from the LSP certificate (what the LSP pass REPORTS it resolved)."""
+    p = os.environ.get("GT_LSP_CERT", "/tmp/gt/lsp_certificate.json")
+    try:
+        with open(p, encoding="utf-8") as f:
+            c = json.load(f)
+        return int(c.get("verified_edges", 0) or 0) + int(c.get("corrected_edges", 0) or 0)
+    except Exception:
+        return 0
+
+
+def lsp_stamp_check(graph_lsp: int, cert_resolved: int) -> str:
+    """Cross-check LSP cert vs final-graph stamps. Returns '' when consistent:
+      - cert_resolved>0 AND graph_lsp>0  -> stamps persisted (OK)
+      - cert_resolved==0 (unsupported / no-op) -> graph_lsp==0 is consistent (NOT faked, NOT flagged)
+    Returns the fail class when cert_resolved>0 but graph_lsp==0 -> the LSP resolved edges that never
+    landed (or were dropped after resolve) in the final graph the agent reads = real graph-loss."""
+    if cert_resolved > 0 and graph_lsp == 0:
+        return "LSP_STAMP_DROPPED_AFTER_RESOLVE"
+    return ""
+
+
 def main() -> int:
     # Stage 4 container-boundary lockdown: in proof mode the foundational gates MUST run inside
     # the eval container (docker exec), never on the host runner. Fail-closed
@@ -782,11 +819,21 @@ def main() -> int:
     rj = _DEEP.get("gate_resolution", {})
     lp = _DEEP.get("gate_lsp", {})
     ec = _DEEP.get("gate_embedder", {}).get("consumption", {})
+    # CANONICAL lsp_resolved = count PERSISTED in the FINAL graph (resolution_method='lsp'), NOT the
+    # LSP_METRICS stdout line (which the orchestrator may not capture into GT_LSP_METRICS_FILE). The
+    # gate must measure the graph the agent reads. Cross-check vs the cert's verified+corrected:
+    # cert>0 while final graph lsp_edges==0 => stamps DROPPED after resolve (real graph-loss).
+    graph_lsp = _lsp_graph_count(db)
+    cert_resolved = _lsp_cert_resolved()
+    lsp_stamp_mismatch = lsp_stamp_check(graph_lsp, cert_resolved)
+    lp["graph_lsp_edges"] = graph_lsp
+    lp["cert_resolved"] = cert_resolved
+    lp["stamp_mismatch"] = lsp_stamp_mismatch
     print(
         "GT_GATE_METRICS "
         f"det_pct={rj.get('det_pct', 0.0)} name_match={int(rj.get('name_match_edges', 0))} "
         f"typing_fired={rj.get('typing_fired', False)} "
-        f"lsp_resolved={int(lp.get('resolved', 0))} lsp_residual={int(lp.get('residual', 0))} "
+        f"lsp_resolved={graph_lsp} lsp_cert_resolved={cert_resolved} lsp_residual={int(lp.get('residual', 0))} "
         f"lsp_frac={lp.get('resolve_frac', 0.0)} lsp_scoped={lp.get('scoped_source_files', 0)} "
         f"w_sem={ec.get('effective_w_sem', 0.0)} sem_count={ec.get('semantic_signal_count', 0)} "
         f"sem_max={ec.get('sem_max', 0.0)} sem_median={ec.get('sem_median', 0.0)} "
@@ -808,6 +855,15 @@ def main() -> int:
         print(f"  deep metrics (8-dp) -> {deep_path}")
     except Exception as e:
         print(f"  WARN: could not persist deep metrics: {e}", file=sys.stderr)
+
+    # LSP stamp integrity (runs BEFORE the deliver-always tolerance): a cert that resolved edges
+    # while the FINAL graph has 0 lsp-stamped edges means the LSP's work never reached the agent's
+    # graph — real graph-loss, not a weak-quality axis. Fail-closed in proof mode regardless of
+    # deliver-always. (If cert==0/unsupported, graph_lsp==0 is consistent and NOT flagged.)
+    if lsp_stamp_mismatch and os.environ.get("GT_PROOF_MODE") == "1":
+        print(f"  -> {lsp_stamp_mismatch}: LSP cert resolved={cert_resolved} but final-graph "
+              f"lsp_edges={graph_lsp} (stamps dropped after resolve) — fail-closed.")
+        return 1
 
     if g1 and g2 and g3:
         print("  -> all 3 ON: substrate is consumed; downstream audit is meaningful.")
