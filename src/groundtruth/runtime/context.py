@@ -44,6 +44,24 @@ def _in_container() -> bool:
         return False
 
 
+def assert_container_boundary(where: str = "gt") -> None:
+    """Stage 4 container-boundary lockdown: in proof mode, GT EXECUTION must happen inside the
+    eval container — the host runner may only orchestrate (docker exec). Fail-closed if this
+    process runs on the HOST (GT_CONTAINERIZED unset, or cgroup/.dockerenv say host), so the
+    pipeline can NEVER silently host-split even if in-container provisioning is imperfect.
+    Inert outside proof mode (byte-identical)."""
+    if os.environ.get("GT_PROOF_MODE") != "1":
+        return
+    containerized = os.environ.get("GT_CONTAINERIZED") == "1"
+    in_ctr = _in_container()
+    if not (containerized and in_ctr):
+        raise _proof.GTProofModeError(
+            f"FINAL_PIPELINE_HOST_SPLIT_FAIL: {where} ran on the HOST in proof mode "
+            f"(GT_CONTAINERIZED={os.environ.get('GT_CONTAINERIZED')!r}, inside_container={in_ctr}). "
+            "In proof/final mode GT must execute inside the eval container (docker exec), never "
+            "the host runner.")
+
+
 @dataclass
 class GTRuntimeContext:
     runtime_root: str

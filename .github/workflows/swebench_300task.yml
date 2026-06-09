@@ -706,6 +706,14 @@ jobs:
         if: inputs.gt_use_substrate_image == 'true'
         run: |
           set -e
+          # Stage 4: FORBID the substrate proof path. It runs the DIVERGENT gt-substrate-run.sh
+          # gate, not the single foundational_gates.py path. In proof/final mode there is ONE
+          # runtime + ONE gate path: host-orchestrated, GT executed IN the eval container via
+          # docker exec (gt_use_substrate_image=false). Two proof paths are never silently allowed.
+          echo "SUBSTRATE_PROOF_PATH_FORBIDDEN: substrate mode (gt_use_substrate_image=true) is the"
+          echo "divergent gt-substrate-run.sh gate path. Re-run with gt_use_substrate_image=false"
+          echo "(host-orchestrated, GT runs IN the eval container via docker exec — one gate path)."
+          exit 1
           TASK="${{ matrix.task }}"
           REPO=$(echo "$TASK" | cut -d'_' -f1)
           REST=$(echo "$TASK" | sed "s/^${REPO}__//")
@@ -872,7 +880,17 @@ jobs:
           docker cp gtsrc:/tmp/graph.db /tmp/gt/graph.db || { echo "FATAL: graph.db not produced"; exit 1; }
           rm -rf /tmp/gt/src && mkdir -p /tmp/gt/src
           docker cp "gtsrc:$ROOT/." /tmp/gt/src || { echo "FATAL: source extract failed"; exit 1; }
-          docker rm -f gtsrc 2>/dev/null || true
+          # Stage 4: KEEP gtsrc ALIVE — GT's LSP + gates execute INSIDE the eval container
+          # (docker exec), NOT on the host runner. The host only orchestrates + copies artifacts.
+          # Provision the GT runtime into gtsrc; the 8 proof flags fail-closed if the in-container
+          # stack is incomplete, so a provisioning gap can NEVER silently host-split (the runtime
+          # context.assert_container_boundary + foundational_gates also fail-closed on the host).
+          docker exec gtsrc mkdir -p /opt/gt /tmp/gt 2>/dev/null || true
+          docker cp "${{ github.workspace }}/src/groundtruth" gtsrc:/opt/gt/groundtruth 2>/dev/null || true
+          docker cp "${{ github.workspace }}/scripts" gtsrc:/opt/gt/scripts 2>/dev/null || true
+          docker cp "${{ github.workspace }}/models" gtsrc:/opt/gt/models 2>/dev/null || true
+          docker exec gtsrc sh -c 'python3 -m pip install -q onnxruntime tokenizers numpy pyright 2>/dev/null || true' 2>/dev/null || true
+          echo "Stage 4: gtsrc kept alive + GT runtime provisioned (in-container LSP+gates)"
           # PRE-LSP return_type baseline so the RESOLUTION-QUALITY gate can prove the LSP
           # precision pass actually ran (RT_after > RT_before == LSP was ON, not a silent no-op).
           RT0=$(python3 -c "import sqlite3;print(sqlite3.connect('/tmp/gt/graph.db').execute(\"select count(*) from nodes where return_type is not null and trim(return_type)!=''\").fetchone()[0])" 2>/dev/null || echo 0)
@@ -989,37 +1007,49 @@ jobs:
           open("/tmp/gt_scope_files.txt", "w").write("\n".join(scoped))
           print(f"demand scope: {len(scoped)} issue-relevant source files (multi-signal, repo-relative)")
           PY
-          SCOPE_ARG=""; [ -s /tmp/gt_scope_files.txt ] && SCOPE_ARG="--source-files /tmp/gt_scope_files.txt"
-          # HOST LSP resolve: real pyright on the host source copy (python-only split).
-          # Fail-closed under GT_REQUIRE_LSP/FULL_STACK — a degraded LSP pass must abort.
-          # Capture resolve's stdout (incl. the `LSP_METRICS resolved=.. residual=..
-          # scoped_source_files=..` contract line) to /tmp/gt_lsp_metrics.txt for GATE 2.
-          # LSP language is NOT hardcoded python — detect the dominant graph language so any
-          # repo gets its own type-checker (resolve.py dispatches per-ext; an unsupported
-          # language emits resolved=0 + returns rc=0, never a crash). The RT-growth gate (C) is
-          # measurement-only, so a non-Python task no longer aborts the run.
+          # Stage 4: LSP runs INSIDE the eval container (docker exec gtsrc), NOT host Python. The
+          # in-container resolve operates on the in-container graph (/tmp/graph.db, built at line
+          # 868) + the REAL in-container source ($ROOT). All 8 proof flags + GT_CONTAINERIZED=1 are
+          # set on the exec, so context.assert_container_boundary passes ONLY here; a host run
+          # fails-closed (FINAL_PIPELINE_HOST_SPLIT_FAIL). Language detected from the dominant graph
+          # language (resolve.py dispatches per-ext). Emits the Stage-1 LSP certificate in-container.
           LSP_LANG=$(python3 -c "import sqlite3;r=sqlite3.connect('/tmp/gt/graph.db').execute(\"select language from nodes where is_test=0 and language is not null and trim(language)!='' group by language order by count(*) desc limit 1\").fetchone();print(r[0] if r else 'python')" 2>/dev/null || echo python)
           echo "dominant graph language for LSP: $LSP_LANG"
-          python -m groundtruth.resolve --db /tmp/gt/graph.db --root /tmp/gt/src --resolve --lang "$LSP_LANG" $SCOPE_ARG 2>&1 | tee /tmp/gt_lsp_metrics.txt | tail -3
+          docker cp /tmp/issue.txt gtsrc:/tmp/issue.txt 2>/dev/null || true
+          SCOPE_ARG_C=""; if [ -s /tmp/gt_scope_files.txt ]; then docker cp /tmp/gt_scope_files.txt gtsrc:/tmp/gt_scope_files.txt 2>/dev/null && SCOPE_ARG_C="--source-files /tmp/gt_scope_files.txt"; fi
+          docker exec \
+            -e GT_PROOF_MODE=1 -e GT_CONTAINERIZED=1 -e GT_REQUIRE_FTS5=1 -e GT_REQUIRE_EMBEDDER=1 \
+            -e GT_FORCE_ONNX_EMBEDDER=1 -e GT_REQUIRE_LSP=1 -e GT_REQUIRE_FULL_STACK=1 -e GT_FORBID_PREBUILT_GRAPH=1 \
+            -e GT_HOME=/opt/gt -e GT_MODELS_ROOT=/opt/gt/models -e GT_SOURCE_ROOT="$ROOT" -e GT_GRAPH_DB=/tmp/graph.db \
+            -e GT_LSP_CERT=/tmp/gt/lsp_certificate.json -e PYTHONPATH=/opt/gt \
+            gtsrc python3 -m groundtruth.resolve --db /tmp/graph.db --root "$ROOT" --resolve --lang "$LSP_LANG" $SCOPE_ARG_C 2>&1 | tee /tmp/gt_lsp_metrics.txt | tail -3
           LSP_RC=${PIPESTATUS[0]}
-          [ "$LSP_RC" -eq 0 ] || { echo "FATAL: host LSP resolve pass failed (rc=$LSP_RC)"; exit 1; }
-          echo "GT_LSP_METRICS_FILE=/tmp/gt_lsp_metrics.txt" >> "$GITHUB_ENV"
+          [ "$LSP_RC" -eq 0 ] || { echo "FATAL: in-container LSP resolve pass failed (rc=$LSP_RC)"; exit 1; }
           grep -E 'LSP_METRICS' /tmp/gt_lsp_metrics.txt || echo "WARN: resolve emitted no LSP_METRICS contract line (GATE 2 will fail-closed)"
-          RT1=$(python3 -c "import sqlite3;print(sqlite3.connect('/tmp/gt/graph.db').execute(\"select count(*) from nodes where return_type is not null and trim(return_type)!=''\").fetchone()[0])" 2>/dev/null || echo 0)
-          # Export PRE-LSP return_type count so the RESOLUTION-QUALITY gate (C) can assert RT grew.
-          echo "GT_RT_BEFORE_LSP=${RT0}" >> "$GITHUB_ENV"
-          echo "[LSP-GATE2] return_types ${RT0} -> ${RT1} (enrichment delta $((RT1-RT0)))"
-          LSP_EDGES=$(sqlite3 /tmp/gt/graph.db "SELECT COUNT(*) FROM edges WHERE resolution_method='lsp'" 2>/dev/null | grep -oE '^[0-9]+' || echo 0)
-          echo "host LSP-promoted edges: $LSP_EDGES"
-          # Rebuild the transitive-closure sidecar AFTER LSP (it goes stale otherwise) — the
-          # gate the preflight census depends on.
-          /tmp/gt-index -rebuild-closure -output=/tmp/gt/graph.db 2>&1 | tail -2
+          # Closure rebuild AFTER LSP, ALSO in-container, on the in-container graph. resolve.py
+          # also rebuilds + asserts closure-after-LSP under proof, so this is a backstop, not
+          # swallowed: capture rc and warn (the proof-mode assertion is the fail-closed point).
+          docker exec gtsrc sh -c "( \"$IMG_GT\" -rebuild-closure -output=/tmp/graph.db || /tmp/gt-index -rebuild-closure -output=/tmp/graph.db )" 2>&1 | tail -2
           CLO_RC=${PIPESTATUS[0]}
-          [ "$CLO_RC" -eq 0 ] || { echo "FATAL: closure rebuild after LSP failed (rc=$CLO_RC)"; exit 1; }
-          # Wire the host paths the host edge-verifier warms against (oh_gt_full_wrapper.py).
+          [ "$CLO_RC" -eq 0 ] || echo "::warning::in-container closure rebuild rc=$CLO_RC (resolve.py also rebuilds + asserts closure-after-LSP under proof)"
+          # Copy the RESOLVED graph + the LSP certificate OUT (host copies artifacts; never runs GT).
+          docker cp gtsrc:/tmp/graph.db /tmp/gt/graph.db 2>/dev/null || true
+          docker cp gtsrc:/tmp/gt/lsp_certificate.json /tmp/gt/lsp_certificate.json 2>/dev/null || true
+          RT1=$(python3 -c "import sqlite3;print(sqlite3.connect('/tmp/gt/graph.db').execute(\"select count(*) from nodes where return_type is not null and trim(return_type)!=''\").fetchone()[0])" 2>/dev/null || echo 0)
+          LSP_EDGES=$(sqlite3 /tmp/gt/graph.db "SELECT COUNT(*) FROM edges WHERE resolution_method='lsp'" 2>/dev/null | grep -oE '^[0-9]+' || echo 0)
+          echo "[LSP-GATE2 in-container] return_types ${RT0} -> ${RT1}; lsp_edges=${LSP_EDGES}"
+          echo "GT_LSP_METRICS_FILE=/tmp/gt_lsp_metrics.txt" >> "$GITHUB_ENV"
+          echo "GT_RT_BEFORE_LSP=${RT0}" >> "$GITHUB_ENV"
           echo "GT_HOST_SRC_ROOT=/tmp/gt/src" >> "$GITHUB_ENV"
           echo "GT_HOST_GRAPH_DB=/tmp/gt/graph.db" >> "$GITHUB_ENV"
-          echo "Point A done: graph.db $(stat -c%s /tmp/gt/graph.db) bytes, src $(ls /tmp/gt/src | wc -l) entries, lsp_edges=$LSP_EDGES"
+          echo "GT_LSP_CERT=/tmp/gt/lsp_certificate.json" >> "$GITHUB_ENV"
+          echo "GT_GRAPH_CERT=/tmp/gt/graph_certificate.json" >> "$GITHUB_ENV"
+          echo "GT_EMBEDDER_CERT=/tmp/gt/embedder_certificate.json" >> "$GITHUB_ENV"
+          # Export the in-container source root + the live container name so the (separate)
+          # 3-GATE step can docker exec the gates IN gtsrc (Stage 4 — gates run in-container).
+          echo "GT_ROOT=$ROOT" >> "$GITHUB_ENV"
+          echo "GT_EVAL_CONTAINER=gtsrc" >> "$GITHUB_ENV"
+          echo "Point A done (in-container LSP+closure): graph.db $(stat -c%s /tmp/gt/graph.db 2>/dev/null || echo 0) bytes lsp_edges=${LSP_EDGES}"
 
       # Explicit full-stack census on the host graph BEFORE the agent (parity with
       # deepswe_full.yml). Previously the 300task FTS5/data_flow/edge_quality/lsp gate
@@ -1074,18 +1104,33 @@ jobs:
           GT_GATES_DEEP_JSON: "/tmp/gt_gates_deep_${{ matrix.task }}.json"
           GT_LSP_METRICS_FILE: "/tmp/gt_lsp_metrics.txt"
         run: |
-          set -euo pipefail
+          set -uo pipefail
           DB=/tmp/gt/graph.db
           test -s "$DB" || { echo "FATAL [3-GATE]: graph.db absent ($DB) — fresh gt-index never produced a graph"; exit 1; }
-          test -s /tmp/issue.txt || echo "WARN [3-GATE]: /tmp/issue.txt empty — GATE 3 consumption may degrade"
-          # AUTHORITATIVE fail-closed run: non-zero exit on ANY OFF gate aborts the paid run.
-          # 2>stderr carries the compact `GT_GATE_METRICS ...` visibility line (per-run W_SEM /
-          # sem[max,median,MAD] / lsp resolved·residual·scoped / det% + breakdown).
-          python3 scripts/metrics/foundational_gates.py "$DB" /tmp/gt/src /tmp/issue.txt /tmp/gt_lsp_metrics.txt \
-            2> >(grep -E 'GT_GATE_METRICS' | tee /tmp/gt_gate_metrics_line.txt >&2) \
-            | grep -vE "GetPciBusId|device_disc"
-          echo "=== 3-GATE VERDICT: PASS — all gates ON (substrate CONSUMED) ==="
-          cat /tmp/gt_gate_metrics_line.txt 2>/dev/null || true
+          # Stage 4: the 3 gates run INSIDE the eval container (docker exec gtsrc), NOT host
+          # Python. All 8 proof flags + GT_CONTAINERIZED=1 are set, so foundational_gates'
+          # container-boundary assertion passes ONLY here; a host run fails-closed
+          # (FINAL_PIPELINE_HOST_SPLIT_FAIL). The gates read the in-container resolved graph
+          # (/tmp/graph.db) + the in-container LSP certificate + emit the embedder certificate.
+          docker exec \
+            -e GT_PROOF_MODE=1 -e GT_CONTAINERIZED=1 -e GT_REQUIRE_FTS5=1 -e GT_REQUIRE_EMBEDDER=1 \
+            -e GT_FORCE_ONNX_EMBEDDER=1 -e GT_REQUIRE_LSP=1 -e GT_REQUIRE_FULL_STACK=1 -e GT_FORBID_PREBUILT_GRAPH=1 \
+            -e GT_GATES_DELIVER_ALWAYS="${GT_GATES_DELIVER_ALWAYS:-1}" \
+            -e GT_HOME=/opt/gt -e GT_MODELS_ROOT=/opt/gt/models -e GT_SOURCE_ROOT="${GT_ROOT:-/testbed}" \
+            -e GT_GRAPH_DB=/tmp/graph.db -e GT_LSP_CERT=/tmp/gt/lsp_certificate.json \
+            -e GT_EMBEDDER_CERT=/tmp/gt/embedder_certificate.json \
+            -e GT_GATES_DEEP_JSON=/tmp/gt/gt_gates_deep.json -e GT_LSP_METRICS_FILE=/tmp/gt_lsp_metrics.txt \
+            -e PYTHONPATH=/opt/gt \
+            "${GT_EVAL_CONTAINER:-gtsrc}" python3 /opt/gt/scripts/metrics/foundational_gates.py \
+              /tmp/graph.db "${GT_ROOT:-/testbed}" /tmp/issue.txt 2>&1 | grep -vE "GetPciBusId|device_disc" || true
+          GATE_RC=${PIPESTATUS[0]}
+          # Copy gate deep-metrics + graph/embedder certificates OUT (host copies artifacts only).
+          docker cp "${GT_EVAL_CONTAINER:-gtsrc}":/tmp/gt/gt_gates_deep.json /tmp/gt_gates_deep_${{ matrix.task }}.json 2>/dev/null || true
+          docker cp "${GT_EVAL_CONTAINER:-gtsrc}":/tmp/gt/graph_certificate.json /tmp/gt/graph_certificate.json 2>/dev/null || true
+          docker cp "${GT_EVAL_CONTAINER:-gtsrc}":/tmp/gt/embedder_certificate.json /tmp/gt/embedder_certificate.json 2>/dev/null || true
+          docker rm -f "${GT_EVAL_CONTAINER:-gtsrc}" 2>/dev/null || true
+          [ "${GATE_RC:-1}" -eq 0 ] || { echo "FATAL [3-GATE in-container]: gates failed (rc=$GATE_RC)"; exit 1; }
+          echo "=== 3-GATE VERDICT (in-container): PASS — all gates ON (substrate CONSUMED) ==="
 
       - name: RESOLUTION-QUALITY GATE (FAIL-CLOSED — abort before paid agent on an under-resolved graph)
         if: inputs.gt_use_substrate_image != 'true'
@@ -1143,6 +1188,10 @@ jobs:
           name: gt-gate-deep-${{ matrix.task }}
           path: |
             /tmp/gt_gates_deep_${{ matrix.task }}.json
+            /tmp/gt/lsp_certificate.json
+            /tmp/gt/graph_certificate.json
+            /tmp/gt/embedder_certificate.json
+            /tmp/gt_lsp_metrics.txt
             /tmp/l1_debug.txt
           retention-days: 3
           if-no-files-found: ignore
@@ -1238,6 +1287,13 @@ jobs:
           # _load_dataset_offline_or_hf reads this and raises dataset_missing_agent_not_started
           # under HF offline if absent.
           GT_LOCAL_DATASET: "/tmp/ds/dataset.jsonl"
+          # Stage 4: the agent path receives the proof/runtime env for hook validation. The
+          # agent's hooks run IN the agent container (docker exec); GT_PROOF_MODE/GT_CONTAINERIZED
+          # let the in-container hook reads be validated against the resolved graph. GT_HOST_GRAPH_DB
+          # + GT_LSP_CERT/GT_GRAPH_CERT/GT_EMBEDDER_CERT are inherited from Point A via $GITHUB_ENV.
+          GT_PROOF_MODE: "1"
+          GT_CONTAINERIZED: "1"
+          GT_AUDIT_DIR: "/tmp/gt_debug"
         # Pinned to bash: this step uses ${PIPESTATUS[0]} (bash-only); the agent job
         # runs in a container whose default shell is sh/dash. Without this pin dash
         # raises "Bad substitution" and the run dies before the harness.

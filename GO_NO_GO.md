@@ -20,8 +20,8 @@
 | Stage 0 — map final runtime path | ✅ committed | `e593f72e` |
 | Stage 1 — LSP liveness cert | ✅ local gate proven (15 tests) | `1c3ec178` |
 | Stage 2 — graph handoff cert | ✅ local gate proven (18 tests) | `dbc41e43` |
-| Stage 3 — embedder usage cert | ✅ local gate proven (15 tests) — awaiting review | this commit |
-| Stage 4 — LSP+gates in-container | ⛔ not started | — |
+| Stage 3 — embedder usage cert | ✅ local gate proven (15 tests) | `061e50bb` |
+| Stage 4 — LSP+gates in-container | ✅ runtime boundary proven (12 tests); workflow GHA-proven Stage B | this commit |
 | Stage 5 — image cache + manifest | ⛔ not started | — |
 
 ## Blockers (from Stage 0 UNKNOWNs)
@@ -34,11 +34,14 @@
 - **U3** ✅ CLOSED in code (Stage 3): `assert_same_embedder_identity` now wired into `run_v74` +
   `localize` (was never called); embedder certificate (identity + consumption + all-zero/dropped)
   + `classify_embedder` hard gates. Live cross-path identity equality asserted in Stage B/C.
-- **U4** agent step sets no `GT_PROOF_MODE`/`GT_CONTAINERIZED`; LSP+gates run on host (Stage 4).
+- **U4** ✅ CLOSED in code (Stage 4): runtime `assert_container_boundary` fails-closed
+  `FINAL_PIPELINE_HOST_SPLIT_FAIL` on host+proof; workflow moves LSP + gates into `gtsrc` via
+  `docker exec` (8 flags), forbids substrate under proof, agent gets proof env. In-container
+  provisioning is GHA-proven Stage B (see PIPELINE_PROOF_REPORT escalation).
 - **U5** GHCR-only pull + image-cache manifest + `gt_commit` pinning unproven; cache≠run set (Stage 5).
 - **U6** whether the host path invokes `GTRuntimeContext`/`runtime.preflight` consistently (Stage 0 UNKNOWN — revisit).
 
 ## Next allowed action
 
-**Stage 4 — run LSP + gates inside the eval container** (after user review of Stage 3). No GHA
-runs until the local staged gates (Phase 6 Stage A) pass for all of Stages 1–5.
+**Stage 5 — image cache + final-pipeline manifest contract** (after user review of Stage 4). No
+GHA runs until the local staged gates (Phase 6 Stage A) pass for all of Stages 1–5.

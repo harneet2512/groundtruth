@@ -742,6 +742,17 @@ def _read_text(path: str) -> str:
 
 
 def main() -> int:
+    # Stage 4 container-boundary lockdown: in proof mode the foundational gates MUST run inside
+    # the eval container (docker exec), never on the host runner. Fail-closed
+    # FINAL_PIPELINE_HOST_SPLIT_FAIL if executed on the host — the host orchestrates, GT executes
+    # in-container. Inert outside proof mode.
+    if os.environ.get("GT_PROOF_MODE") == "1":
+        try:
+            from groundtruth.runtime.context import assert_container_boundary
+            assert_container_boundary("foundational_gates")
+        except Exception as _ce:
+            print(f"{_ce}", file=sys.stderr)
+            return 1
     db = sys.argv[1] if len(sys.argv) > 1 else "/tmp/gt_prebuilt.db"
     repo = sys.argv[2] if len(sys.argv) > 2 else "/tmp/testbed_src"
     issue_file = sys.argv[3] if len(sys.argv) > 3 else "/tmp/issue.txt"
