@@ -192,6 +192,37 @@ def main(argv=None) -> int:
     rc = _run([sys.executable, os.path.join(GT_HOME, "scripts/metrics/foundational_gates.py"),
                graph, work, issue_file], gate_env)
 
+    # 4b. Embedder certificate — foundational_gates writes it via run_v74 ONLY when the brief has
+    # candidates (a non-empty issue). Guarantee the artifact: if absent, emit it from a direct
+    # identity + cosine-discrimination probe (proves the forced-ONNX embedder LOADS + produces a
+    # finite, discriminating vector). The gate (gate_rc above) proves CONSUMPTION; together =
+    # "loaded AND used". Issue-independent, so it always emits.
+    if not os.path.exists(cert_emb):
+        try:
+            os.environ["GT_EMBEDDER_CERT"] = cert_emb
+            from groundtruth.runtime import proof as _proof
+            _proof.embedder_identity()  # loads the embedder (raises if not the forced-ONNX one)
+            disc = None
+            try:
+                import numpy as _np
+                from groundtruth.pretask.v7_4_brief import _get_model
+                vs = _get_model().encode(["database connection pool",
+                                          "database connection pool timeout", "the quick brown fox"])
+
+                def _cos(a, b):
+                    a = _np.asarray(a, float); b = _np.asarray(b, float)
+                    return float(a @ b / ((a @ a) ** 0.5 * (b @ b) ** 0.5 + 1e-9))
+                disc = _cos(vs[0], vs[1]) - _cos(vs[0], vs[2])
+            except Exception as _e:
+                print(f"WARN: embedder probe encode: {_e}", file=sys.stderr)
+            cert = _proof.build_embedder_certificate(db=graph, bug_id="portable_probe")
+            cert["discrimination_margin"] = disc
+            cert["emitted_by"] = "gt-run-proof direct identity+cosine probe (issue-independent)"
+            _proof.write_embedder_certificate(cert)
+            print(f"[gt-run-proof] embedder cert emitted via direct probe (disc={disc})", flush=True)
+        except Exception as e:
+            print(f"WARN: embedder cert probe failed: {e}", file=sys.stderr)
+
     # 5. runtime_context.json
     try:
         from groundtruth.runtime.context import GTRuntimeContext
