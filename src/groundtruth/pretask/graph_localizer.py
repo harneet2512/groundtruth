@@ -1299,8 +1299,11 @@ class _OnnxEmbedderAdapter:
     (~90MB onnx), fast, deps = onnxruntime + tokenizers (vs torch's ~2GB)."""
 
     def __init__(self, model):
+        from groundtruth.memory.enrich.embed import DEFAULT_EMBED_DIM
         self._m = model
-        self.dim = getattr(model, "dim", 384)
+        # Width of the zero-fallback vectors when encode() is called with no texts.
+        # Read the model's true dim (CHANGE 2: 768 for gte-modernbert, 384 for e5).
+        self.dim = getattr(model, "dim", DEFAULT_EMBED_DIM)
 
     def encode(self, texts, normalize_embeddings=True, show_progress_bar=False):
         import numpy as np
@@ -1332,9 +1335,10 @@ def _get_embedder():
     _st_err: Exception | None = None
     _onnx_err: Exception | None = None
     # GT_FORCE_ONNX_EMBEDDER=1 skips sentence-transformers so this half uses the
-    # IDENTICAL container ONNX _OnnxEmbedderAdapter (e5-small-v2) that run_v74 uses —
-    # BRIEFING.md §5: block sentence_transformers, both halves on the same surface,
-    # or the numbers are worthless.
+    # IDENTICAL container ONNX _OnnxEmbedderAdapter (code-tuned default, e5 fallback) that
+    # run_v74 uses — BRIEFING.md §5: block sentence_transformers, BOTH halves on the SAME
+    # surface, or the numbers are worthless. Both halves call get_embedding_model() no-arg
+    # so they resolve to the identical (model, dim) — the invariant holds across CHANGE 2.
     _force_onnx = os.environ.get("GT_FORCE_ONNX_EMBEDDER") == "1"
     if not _force_onnx:
         try:
@@ -1346,22 +1350,32 @@ def _get_embedder():
             return _EMBEDDER
         except Exception as e:
             _st_err = e
+    # Container-viable ONNX path (no torch). CHANGE 2 fallback chain: the code-tuned
+    # default (gte-modernbert) ONNX → e5/384 → None. Each step loads only if onnxruntime +
+    # that model's files are baked; both halves walk the SAME chain so they stay matched.
+    from groundtruth.memory.enrich.embed import get_embedding_model, E5_MODEL, E5_DIM
     try:
-        # Container-viable fallback: ONNX, no torch. Needs onnxruntime + models/ files.
-        from groundtruth.memory.enrich.embed import get_embedding_model
-        _m = get_embedding_model()  # intfloat/e5-small-v2 by default
+        _m = get_embedding_model()  # code-tuned default (GT_EMBED_MODEL_NAME/DIM)
         _m._ensure_loaded()         # raises if onnxruntime / model files absent
         _EMBEDDER = _OnnxEmbedderAdapter(_m)
         return _EMBEDDER
     except Exception as e:
         _onnx_err = e
+    try:
+        # Transition fallback: e5/384 if the code-tuned ONNX is absent/unloadable.
+        _m5 = get_embedding_model(E5_MODEL, E5_DIM)
+        _m5._ensure_loaded()
+        _EMBEDDER = _OnnxEmbedderAdapter(_m5)
+        return _EMBEDDER
+    except Exception as e:
+        _onnx_err = RuntimeError(f"code-tuned: {_onnx_err!r}; e5: {e!r}")
     _EMBEDDER = None
     # Fail-loud on a paid run: a silently-off semantic ranker collapses the HIGH
     # tier's 3-ranker agreement to 2 and poisons every localization-quality result.
     if os.environ.get("GT_REQUIRE_EMBEDDER") == "1":
         raise RuntimeError(
             "GT_REQUIRE_EMBEDDER=1 but NO embedder is available — semantic ranking would be 0. "
-            f"sentence-transformers: {_st_err!r}; onnx (onnxruntime + models/e5-small-v2): {_onnx_err!r}. "
+            f"sentence-transformers: {_st_err!r}; onnx (onnxruntime + baked model files): {_onnx_err!r}. "
             "Install onnxruntime and ship the model files (or sentence-transformers), "
             "or unset GT_REQUIRE_EMBEDDER. Refusing to run a degraded paid localization."
         )

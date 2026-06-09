@@ -170,9 +170,12 @@ class GTRuntimeContext:
         r.append(("source_root_exists", bool(self.source_root and os.path.isdir(self.source_root)),
                   self.source_root or "(unset)"))
 
-        # baked model files present -> no runtime download
-        onnx = os.path.join(self.models_root, "e5-small-v2", "model.onnx")
-        tok = os.path.join(self.models_root, "e5-small-v2", "tokenizer.json")
+        # baked model files present -> no runtime download. Dirname derived from the
+        # CONFIGURED localization model name (CHANGE 2: gte-modernbert-base by default).
+        from groundtruth.memory.enrich.embed import _default_embed_model
+        _model_dirname = _default_embed_model().split("/")[-1]
+        onnx = os.path.join(self.models_root, _model_dirname, "model.onnx")
+        tok = os.path.join(self.models_root, _model_dirname, "tokenizer.json")
         r.append(("model_files_baked", os.path.exists(onnx) and os.path.exists(tok), onnx))
 
         # onnxruntime importable

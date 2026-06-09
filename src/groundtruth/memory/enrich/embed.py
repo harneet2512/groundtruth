@@ -1,4 +1,12 @@
-"""Configurable ONNX E5 embedding pipeline."""
+"""Configurable ONNX embedding pipeline (code-tuned default, e5 fallback).
+
+The PRETASK-LOCALIZATION embedder identity is single-sourced here: ``get_embedding_model``
+defaults to ``GT_EMBED_MODEL_NAME`` / ``GT_EMBED_DIM`` (and, when both are unset, to the
+code-tuned ``DEFAULT_EMBED_MODEL`` / ``DEFAULT_EMBED_DIM`` below). The sqlite-vec MEMORY
+store is a SEPARATE subsystem pinned to e5/384 via ``MemoryConfig`` — it always passes its
+own explicit ``model_name``/``dim`` to ``embed_query``/``embed_passage``/``insert_embedding``,
+so flipping the localization default here never migrates the memory vectors.
+"""
 
 from __future__ import annotations
 
@@ -17,7 +25,7 @@ if TYPE_CHECKING:
 
 # GT_MODELS_ROOT lets a baked image point the embedder at its pre-fetched models
 # (e.g. /opt/groundtruth/models) even when GT itself is pip-installed from a different
-# checkout — so a `container:` job doesn't re-download the e5 model. Falls back to the
+# checkout — so a `container:` job doesn't re-download the model. Falls back to the
 # repo-relative models/ dir when unset.
 _MODELS_ROOT = (
     Path(os.environ["GT_MODELS_ROOT"])
@@ -25,23 +33,93 @@ _MODELS_ROOT = (
     else Path(__file__).parent.parent.parent.parent.parent / "models"
 )
 
+# ---------------------------------------------------------------------------
+# Single-sourced PRETASK-LOCALIZATION embedder identity (CHANGE 2)
+# ---------------------------------------------------------------------------
+# The DeepSWE benchmark is polyglot (TS/Go/Rust/JS/Python; ~70% non-Python), so the
+# localization embedder is code-tuned + multilingual, NOT general-text e5. Default to
+# Alibaba-NLP/gte-modernbert-base (Apache-2.0, 149M, 768-dim, ONNX published incl int8;
+# ModernBERT => NO token_type_ids input, CLS pooling, symmetric / no query-passage prefix).
+# Both env vars override the default so an image can pin a different OPEN model with $0 / no
+# API. The sqlite-vec memory store does NOT read these — it stays on e5/384 (MemoryConfig).
+DEFAULT_EMBED_MODEL = "Alibaba-NLP/gte-modernbert-base"
+DEFAULT_EMBED_DIM = 768
+
+# e5 stays a first-class citizen as the runtime fallback (both baked during transition).
+E5_MODEL = "intfloat/e5-small-v2"
+E5_DIM = 384
+
+# Models whose tokenizer/ONNX use e5-style query:/passage: prefixes AND mean pooling.
+# Everything else (gte-modernbert, jina-code, ...) is symmetric: no prefix, CLS pooling.
+_E5_FAMILY = {"intfloat/e5-small-v2", "intfloat/e5-base-v2", "intfloat/e5-large-v2"}
+
+
+def _default_embed_model() -> str:
+    return os.environ.get("GT_EMBED_MODEL_NAME") or DEFAULT_EMBED_MODEL
+
+
+def _default_embed_dim() -> int:
+    raw = os.environ.get("GT_EMBED_DIM")
+    if raw:
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            pass
+    # When only the name is overridden, keep dim consistent with the known model.
+    name = os.environ.get("GT_EMBED_MODEL_NAME")
+    if name == E5_MODEL:
+        return E5_DIM
+    return DEFAULT_EMBED_DIM
+
 
 class EmbeddingModel:
-    """Lazy-loading ONNX embedding model."""
+    """Lazy-loading ONNX embedding model (model-aware prefix + pooling + ONNX inputs).
 
-    def __init__(self, model_name: str, dim: int, prefix_query: str = "query: ", prefix_passage: str = "passage: ") -> None:
+    Two model families are supported by the SAME code path:
+      * e5 family (mean pooling, ``query:``/``passage:`` prefixes, token_type_ids declared)
+      * code-tuned / ModernBERT family (CLS pooling, NO prefix, NO token_type_ids input)
+    The pooling and prefix behaviour are selected from ``model_name``; the ONNX input names
+    are INTROSPECTED at load time so a model whose graph does not declare ``token_type_ids``
+    (ModernBERT) is never fed one (the load-bearing fix for CHANGE 2)."""
+
+    def __init__(
+        self,
+        model_name: str,
+        dim: int,
+        prefix_query: str | None = None,
+        prefix_passage: str | None = None,
+        pooling: str | None = None,
+    ) -> None:
         self.model_name = model_name
         self.dim = dim
-        self.prefix_query = prefix_query
-        self.prefix_passage = prefix_passage
+        _is_e5 = model_name in _E5_FAMILY
+        # Prefix: e5 needs query:/passage:; everything else is symmetric (no prefix).
+        self.prefix_query = prefix_query if prefix_query is not None else ("query: " if _is_e5 else "")
+        self.prefix_passage = prefix_passage if prefix_passage is not None else ("passage: " if _is_e5 else "")
+        # Pooling: e5 = mean (over attention mask); ModernBERT/gte/jina-code = CLS ([:,0]).
+        self.pooling = pooling if pooling is not None else ("mean" if _is_e5 else "cls")
         self._session: "ort.InferenceSession | None" = None
         self._tokenizer: "Tokenizer | None" = None
+        # The exact input names the loaded ONNX graph declares (introspected once).
+        self._input_names: list[str] = []
         self._last_used = 0.0
         self._lock = threading.Lock()
 
     @property
     def model_dir(self) -> Path:
         return _MODELS_ROOT / self.model_name.split("/")[-1]
+
+    def _resolve_onnx_path(self) -> Path:
+        """Pick the ONNX file: model.onnx, else a quantized/int8 variant if that is all
+        that was baked (setup_models writes model.onnx, but an int8-only image is valid)."""
+        d = self.model_dir
+        primary = d / "model.onnx"
+        if primary.exists():
+            return primary
+        for alt in ("model_int8.onnx", "model_quantized.onnx", "model_uint8.onnx"):
+            if (d / alt).exists():
+                return d / alt
+        return primary  # report the canonical name in the FileNotFoundError below
 
     def _ensure_loaded(self) -> tuple["ort.InferenceSession", "Tokenizer"]:
         with self._lock:
@@ -52,7 +130,7 @@ class EmbeddingModel:
             import onnxruntime as ort_mod
             from tokenizers import Tokenizer as Tok
 
-            onnx_path = self.model_dir / "model.onnx"
+            onnx_path = self._resolve_onnx_path()
             tok_path = self.model_dir / "tokenizer.json"
             if not onnx_path.exists():
                 raise FileNotFoundError(f"ONNX model not found at {onnx_path}. Run: python scripts/setup_models.py")
@@ -63,6 +141,11 @@ class EmbeddingModel:
 
             self._tokenizer = tokenizer
             self._session = ort_mod.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+            # Introspect the declared inputs ONCE. ModernBERT's ONNX declares only
+            # input_ids + attention_mask (no token_type_ids); e5's declares all three.
+            # Feeding an input the graph does not declare raises in onnxruntime, so we
+            # build the feed dict from THIS set, never unconditionally.
+            self._input_names = [i.name for i in self._session.get_inputs()]
             self._last_used = time.monotonic()
             return self._session, self._tokenizer
 
@@ -80,19 +163,29 @@ class EmbeddingModel:
         encoded = tokenizer.encode_batch(texts)
         input_ids = np.array([e.ids for e in encoded], dtype=np.int64)
         attention_mask = np.array([e.attention_mask for e in encoded], dtype=np.int64)
-        token_type_ids = np.zeros_like(input_ids, dtype=np.int64)
 
-        outputs = session.run(
-            None,
-            {
-                "input_ids": input_ids,
-                "attention_mask": attention_mask,
-                "token_type_ids": token_type_ids,
-            },
-        )
-        token_embeddings = outputs[0]
-        mask_expanded = np.expand_dims(attention_mask, axis=-1).astype(np.float32)
-        pooled = np.sum(token_embeddings * mask_expanded, axis=1) / np.clip(mask_expanded.sum(axis=1), 1e-9, None)
+        # Feed ONLY the inputs the ONNX graph declares. ModernBERT (gte/jina-code) has no
+        # token_type_ids tensor — feeding one raises "Unexpected input"; e5 has all three.
+        feed: dict[str, np.ndarray] = {}
+        if "input_ids" in self._input_names:
+            feed["input_ids"] = input_ids
+        if "attention_mask" in self._input_names:
+            feed["attention_mask"] = attention_mask
+        if "token_type_ids" in self._input_names:
+            feed["token_type_ids"] = np.zeros_like(input_ids, dtype=np.int64)
+        # Some exports name it position_ids etc.; only token_type_ids is the known variant.
+
+        outputs = session.run(None, feed)
+        token_embeddings = outputs[0]  # (batch, seq, hidden)
+        if self.pooling == "cls":
+            # CLS pooling ([:, 0]) — the gte-modernbert / jina-code recipe.
+            pooled = token_embeddings[:, 0]
+        else:
+            # Mean pooling over the attention mask — the e5 recipe.
+            mask_expanded = np.expand_dims(attention_mask, axis=-1).astype(np.float32)
+            pooled = np.sum(token_embeddings * mask_expanded, axis=1) / np.clip(
+                mask_expanded.sum(axis=1), 1e-9, None
+            )
         normalized = pooled / np.clip(np.linalg.norm(pooled, axis=1, keepdims=True), 1e-12, None)
         return [vec.tolist() for vec in normalized]
 
@@ -108,7 +201,18 @@ class EmbeddingModel:
 _models: dict[tuple[str, int], EmbeddingModel] = {}
 
 
-def get_embedding_model(model_name: str = "intfloat/e5-small-v2", dim: int = 384) -> EmbeddingModel:
+def get_embedding_model(model_name: str | None = None, dim: int | None = None) -> EmbeddingModel:
+    """Return the cached EmbeddingModel for (model_name, dim).
+
+    With NO args (the PRETASK-LOCALIZATION call sites: anchor_select, graph_localizer,
+    v7_4_brief, proof/context self-checks) this resolves to the CHANGE-2 code-tuned default
+    (``GT_EMBED_MODEL_NAME``/``GT_EMBED_DIM`` -> gte-modernbert-base / 768). The sqlite-vec
+    MEMORY store NEVER calls this no-arg — it passes its own e5/384 via embed_query/passage —
+    so the memory subsystem is unaffected by the localization default flip."""
+    if model_name is None:
+        model_name = _default_embed_model()
+    if dim is None:
+        dim = _default_embed_dim()
     key = (model_name, dim)
     if key not in _models:
         _models[key] = EmbeddingModel(model_name=model_name, dim=dim)

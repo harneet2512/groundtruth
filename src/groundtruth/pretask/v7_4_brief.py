@@ -458,8 +458,10 @@ class _OnnxEmbedderAdapter:
     ~90MB onnx, deps = onnxruntime + tokenizers (vs torch ~2GB)."""
 
     def __init__(self, model):
+        from groundtruth.memory.enrich.embed import DEFAULT_EMBED_DIM
         self._m = model
-        self.dim = getattr(model, "dim", 384)
+        # CHANGE 2: read the model's true dim (768 gte-modernbert / 384 e5), not a literal.
+        self.dim = getattr(model, "dim", DEFAULT_EMBED_DIM)
 
     def encode(self, texts, normalize_embeddings=True, show_progress_bar=False, batch_size=128):
         import numpy as np
@@ -476,7 +478,13 @@ class _ZeroEmbeddingModel:
     NOR the ONNX embedder is available.
 
     All semantic scores become 0.0, so BM25 (W_LEX) and graph signals drive ranking alone.
+    The vector WIDTH follows the configured localization model dim (CHANGE 2) so downstream
+    matmuls/RRF see a consistent dim whether semantic is on or off.
     """
+
+    def __init__(self) -> None:
+        from groundtruth.memory.enrich.embed import _default_embed_dim
+        self.dim = _default_embed_dim()
 
     def encode(
         self,
@@ -488,9 +496,9 @@ class _ZeroEmbeddingModel:
     ) -> Any:
         try:
             import numpy as _np
-            return _np.zeros((len(texts), 384), dtype=_np.float32)
+            return _np.zeros((len(texts), self.dim), dtype=_np.float32)
         except ImportError:
-            return [[0.0] * 384 for _ in texts]
+            return [[0.0] * self.dim for _ in texts]
 
 
 def _get_model() -> Any:
@@ -499,17 +507,17 @@ def _get_model() -> Any:
     Tries, in order — the SAME order the localizer uses, so run_v74 and localize share
     ONE semantic surface:
       1. sentence-transformers (if installed)
-      2. ONNX e5-small-v2 (container-viable, NO torch — works when onnxruntime + the
-         models/ files are present; this is what makes W_SEM non-zero in the agent's
-         container where torch is absent)
-      3. _ZeroEmbeddingModel (semantic OFF — W_SEM zeroed, BM25 + graph drive ranking)
+      2. ONNX code-tuned default (gte-modernbert-base, GT_EMBED_MODEL_NAME/DIM) — container-
+         viable, NO torch; this is what makes W_SEM non-zero in the agent's container.
+      3. ONNX e5-small-v2 (transition fallback if the code-tuned ONNX is absent/unloadable)
+      4. _ZeroEmbeddingModel (semantic OFF — W_SEM zeroed, BM25 + graph drive ranking)
     """
     global _CACHED_MODEL, _SEMANTIC_AVAILABLE
     # GT_FORCE_ONNX_EMBEDDER=1 skips sentence-transformers so BOTH semantic halves
-    # (run_v74 + localize) use the IDENTICAL container ONNX _OnnxEmbedderAdapter
-    # (e5-small-v2). Without this the two halves load DIFFERENT ST models (MiniLM here
-    # vs codesearch in localize) and diverge from the container — the half-on / "worthless
-    # numbers" trap BRIEFING.md §5 forbids. The agent container has no torch anyway.
+    # (run_v74 + localize) use the IDENTICAL container ONNX _OnnxEmbedderAdapter. Both
+    # halves call get_embedding_model() no-arg and walk the SAME code-tuned->e5 chain, so
+    # they resolve to the identical (model, dim) — the half-on / "worthless numbers" trap
+    # BRIEFING.md §5 forbids stays closed across CHANGE 2. The agent container has no torch.
     _force_onnx = os.environ.get("GT_FORCE_ONNX_EMBEDDER") == "1"
     _st_err: Any = None
     _onnx_err: Any = None
@@ -524,21 +532,30 @@ def _get_model() -> Any:
                     return _CACHED_MODEL
                 except Exception as e:
                     _st_err = e
-            # 2. ONNX e5-small-v2 (container-viable, no torch) — the benchmark path
+            from groundtruth.memory.enrich.embed import get_embedding_model, E5_MODEL, E5_DIM
+            # 2. ONNX code-tuned default (container-viable, no torch) — the benchmark path
             try:
-                from groundtruth.memory.enrich.embed import get_embedding_model
-                _m = get_embedding_model()  # intfloat/e5-small-v2 by default (dim=384)
+                _m = get_embedding_model()  # code-tuned default (GT_EMBED_MODEL_NAME/DIM)
                 _m._ensure_loaded()         # raises if onnxruntime / model files absent
                 _CACHED_MODEL = _OnnxEmbedderAdapter(_m)
                 _SEMANTIC_AVAILABLE = True
                 return _CACHED_MODEL
             except Exception as e:
                 _onnx_err = e
-            # 3. fail-loud on a paid run: a silently-zeroed W_SEM = the 30-task-run failure.
+            # 3. ONNX e5/384 transition fallback
+            try:
+                _m5 = get_embedding_model(E5_MODEL, E5_DIM)
+                _m5._ensure_loaded()
+                _CACHED_MODEL = _OnnxEmbedderAdapter(_m5)
+                _SEMANTIC_AVAILABLE = True
+                return _CACHED_MODEL
+            except Exception as e:
+                _onnx_err = RuntimeError(f"code-tuned: {_onnx_err!r}; e5: {e!r}")
+            # 4. fail-loud on a paid run: a silently-zeroed W_SEM = the 30-task-run failure.
             if os.environ.get("GT_REQUIRE_EMBEDDER") == "1":
                 raise RuntimeError(
                     "GT_REQUIRE_EMBEDDER=1 but run_v74 has NO embedder — W_SEM would be 0. "
-                    f"sentence-transformers: {_st_err!r}; onnx (onnxruntime + models/e5-small-v2): {_onnx_err!r}. "
+                    f"sentence-transformers: {_st_err!r}; onnx (onnxruntime + baked model files): {_onnx_err!r}. "
                     "Install onnxruntime + bake the model, or unset GT_REQUIRE_EMBEDDER. "
                     "Refusing to run a half-on semantic pipeline."
                 )

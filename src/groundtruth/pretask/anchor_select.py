@@ -146,7 +146,12 @@ _SYMVEC_CACHE: dict[str, np.ndarray] = {}
 
 def _model_identity(model: object) -> tuple[str, int]:
     """Best-effort (model_name, dim) for the passage cache key. Defaults to the
-    e5-small-v2 / 384 contract when the adapter does not expose them."""
+    CONFIGURED localization embedder identity (CHANGE 2: gte-modernbert/768 by default,
+    or GT_EMBED_MODEL_NAME/GT_EMBED_DIM) when the adapter does not expose them — so the
+    content-addressed symbol-vector cache key flips with the model and stale e5 vectors
+    are never reused under a new model."""
+    from groundtruth.memory.enrich.embed import _default_embed_model, _default_embed_dim
+
     name = getattr(model, "model_name", None)
     if not name:
         inner = getattr(model, "_m", None)
@@ -155,7 +160,7 @@ def _model_identity(model: object) -> tuple[str, int]:
     if dim is None:
         inner = getattr(model, "_m", None)
         dim = getattr(inner, "dim", None)
-    return (str(name or "intfloat/e5-small-v2"), int(dim or 384))
+    return (str(name or _default_embed_model()), int(dim or _default_embed_dim()))
 
 
 def _file_summary(file_path: str, repo_root: str, max_chars: int = 600) -> str:

@@ -397,9 +397,16 @@ def assert_same_embedder_identity(db, who: str) -> bool:
 
 
 def embedder_model_path() -> str:
-    """Path to the baked ONNX model (GT_MODELS_ROOT/e5-small-v2/model.onnx)."""
+    """Path to the baked ONNX model (GT_MODELS_ROOT/<model-dirname>/model.onnx).
+
+    CHANGE 2: the dirname is derived from the CONFIGURED localization model name
+    (``model_name.split('/')[-1]`` — gte-modernbert-base by default, or whatever
+    GT_EMBED_MODEL_NAME pins) so the proof cert points at the model actually loaded."""
+    from groundtruth.memory.enrich.embed import _default_embed_model
+
     root = os.environ.get("GT_MODELS_ROOT", "") or os.path.join(runtime_root(), "models")
-    return os.path.join(root, "e5-small-v2", "model.onnx")
+    model_dirname = _default_embed_model().split("/")[-1]
+    return os.path.join(root, model_dirname, "model.onnx")
 
 
 def embedder_model_sha() -> str:
