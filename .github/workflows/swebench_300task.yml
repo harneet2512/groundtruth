@@ -62,6 +62,12 @@ env:
   # the base-commit repo — never a prebuilt / cross-run graph.db. This hard-disables
   # the wrapper's prebuilt path so the agent gets the graph a real GT user would.
   GT_FORBID_PREBUILT_GRAPH: "1"
+  # DELIVER-ALWAYS (CLAUDE.md correct-or-quiet / never refuse a deliverable substrate): on the
+  # LIVE paid agent path the foundational gates are MEASUREMENT — the graph-QUALITY axes
+  # (resolution det%, name_match-dominance, LSP yield) record their verdict but never abort the
+  # agent; a degraded map still carries correct contracts/siblings/completeness. Set to 0 only
+  # for gates_only probes, where the 3 gates ARE the proof contract and must fail-close.
+  GT_GATES_DELIVER_ALWAYS: ${{ inputs.gates_only == 'true' && '0' || '1' }}
   # HF fully offline on the paid run: the dataset is materialized to a local JSONL in
   # `prepare` and consumed via GT_LOCAL_DATASET; the embedder uses the baked ONNX e5
   # model. Any HF network read on a paid run is a degraded-stack signal -> fail-closed.
@@ -747,6 +753,7 @@ jobs:
             -e GT_TASK_ID="$TASK" -e GT_PROOF_MODE=1 -e GT_CONTAINERIZED=1 \
             -e GT_REQUIRE_FTS5=1 -e GT_REQUIRE_EMBEDDER=1 -e GT_FORCE_ONNX_EMBEDDER=1 \
             -e GT_REQUIRE_LSP=1 -e GT_REQUIRE_FULL_STACK=1 -e GT_FORBID_PREBUILT_GRAPH=1 \
+            -e GT_GATES_DELIVER_ALWAYS="${GT_GATES_DELIVER_ALWAYS:-1}" \
             gtsrc bash /tmp/gt-substrate-run.sh "$ROOT" /tmp/issue.txt /tmp/gt 2>&1 | tee /tmp/gt_substrate.log
           GATE_RC=${PIPESTATUS[0]}
           set -e

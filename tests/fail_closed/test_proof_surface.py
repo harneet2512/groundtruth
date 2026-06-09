@@ -95,22 +95,33 @@ def test_require_noop_outside_proof():
 # ───────────────────────────── host aliases (A1) ─────────────────────────────
 
 
-def test_reject_host_aliases_proof(monkeypatch):
+def test_canonical_host_handoff_allowed_in_proof(monkeypatch):
+    # GT_HOST_GRAPH_DB / GT_HOST_SRC_ROOT are the LEGITIMATE host->agent graph handoff
+    # (gt_gt §1) — the agent hooks onto the same LSP-enriched graph the gates measured.
+    # They must NOT raise in proof mode.
     monkeypatch.setenv("GT_PROOF_MODE", "1")
     monkeypatch.setenv("GT_HOST_GRAPH_DB", "/host/graph.db")
+    monkeypatch.setenv("GT_HOST_SRC_ROOT", "/host/src")
+    proof.reject_host_aliases()  # canonical handoff allowed
+
+
+def test_reject_noncanonical_host_alias_proof(monkeypatch):
+    # A NON-canonical alias the pipeline never sets == a misconfiguration -> fail-closed.
+    monkeypatch.setenv("GT_PROOF_MODE", "1")
+    monkeypatch.setenv("GT_HOST_GRAPH", "/host/typo.db")
     with pytest.raises(GTProofModeError):
         proof.reject_host_aliases()
 
 
-def test_host_aliases_allowed_outside_proof(monkeypatch):
-    monkeypatch.setenv("GT_HOST_GRAPH_DB", "/host/graph.db")
-    proof.reject_host_aliases()  # no-op, no raise
+def test_noncanonical_host_alias_allowed_outside_proof(monkeypatch):
+    monkeypatch.setenv("GT_HOST_GRAPH", "/host/typo.db")
+    proof.reject_host_aliases()  # no-op outside proof mode
 
 
-def test_context_from_env_rejects_host_alias_in_proof(monkeypatch):
+def test_context_from_env_rejects_noncanonical_host_alias_in_proof(monkeypatch):
     from groundtruth.runtime.context import GTRuntimeContext
     monkeypatch.setenv("GT_PROOF_MODE", "1")
-    monkeypatch.setenv("GT_HOST_GRAPH_DB", "/host/graph.db")
+    monkeypatch.setenv("GT_HOST_GRAPH", "/host/typo.db")
     with pytest.raises(GTProofModeError):
         GTRuntimeContext.from_env()
 

@@ -709,6 +709,22 @@ def main() -> int:
     if g1 and g2 and g3:
         print("  -> all 3 ON: substrate is consumed; downstream audit is meaningful.")
         return 0
+    # DELIVER-ALWAYS (live agent path, GT_GATES_DELIVER_ALWAYS=1): the gates are
+    # MEASUREMENT, never a refusal switch (CLAUDE.md correct-or-quiet / never refuse a
+    # deliverable substrate). g1 (resolution quality) and g2 (LSP yield) are graph-QUALITY
+    # axes — a degraded map still carries correct contracts/siblings/completeness (items
+    # 1,2,4 always fire), so they must NOT abort the agent. The embedder (g3) is the one
+    # capability the brief HARD-REQUIRES under GT_REQUIRE_EMBEDDER (it raises if dead), so a
+    # dead embedder still fails the run (at the brief); we surface it here too. In gates-only
+    # MEASUREMENT mode (flag unset) any OFF gate fails the process (the proof contract).
+    if os.environ.get("GT_GATES_DELIVER_ALWAYS") == "1":
+        if g3:
+            print("  -> deliver-always: graph-quality gate(s) OFF but embedder ON — substrate "
+                  "is DELIVERABLE; verdict recorded (measurement), agent runs.")
+            return 0
+        print("  -> deliver-always: embedder OFF — a dead semantic axis; the brief's "
+              "GT_REQUIRE_EMBEDDER guard fails closed, so surfacing now.")
+        return 1
     print("  -> a GATE is OFF (fail-closed): success ceiling is LOW; fix BEFORE any paid run.")
     return 1
 

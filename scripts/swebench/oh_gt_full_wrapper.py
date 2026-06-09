@@ -3628,6 +3628,23 @@ def _promoted_graph_db_path() -> str:
     p = os.environ.get("GT_PREBUILT_GRAPH_DB", "")
     if p and os.path.exists(p):
         return p
+    # ONE PIPELINE (gt_gt §1): the fresh per-task host-resolved graph (GT_HOST_GRAPH_DB,
+    # exported by Point A AFTER the LSP pass) is the SAME enriched substrate the gates
+    # measured. Upload it into the container so the in-loop hooks (--db=config.graph_db)
+    # read THAT, not a separate unresolved rebuild. 300-task sets only GT_HOST_GRAPH_DB
+    # (never GT_PREBUILT_GRAPH_DB); without this the upload never fired and the leaderboard
+    # run's hooks ran on an unresolved graph while the gates certified the resolved one.
+    # Legitimacy-safe: only a FRESH graph (mtime >= the job-start epoch) is uploaded — a
+    # stale/cross-run db is rejected, mirroring __post_init__; _upload_promoted_db then
+    # schema-verifies before trusting it.
+    h = os.environ.get("GT_HOST_GRAPH_DB", "")
+    if h and os.path.exists(h):
+        _job_started = float(os.environ.get("GT_JOB_STARTED", "0") or 0)
+        try:
+            if os.path.getmtime(h) >= _job_started:
+                return h
+        except OSError:
+            pass
     return ""
 
 

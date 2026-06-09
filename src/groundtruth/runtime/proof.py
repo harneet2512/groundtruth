@@ -34,7 +34,14 @@ _LOG = logging.getLogger("groundtruth.runtime.proof")
 # Host-path aliases. Accepting these in proof mode is the split host/container
 # root the plan flags (context.from_env falls back to them). In proof mode the
 # canonical GT_SOURCE_ROOT / GT_GRAPH_DB (the in-container paths) MUST be used.
-HOST_ALIASES = ("GT_HOST_SRC_ROOT", "GT_HOST_GRAPH_DB", "GT_HOST_GRAPH", "GT_HOST_SOURCE_ROOT")
+# The canonical host->agent handoff: Point A resolves the graph on the host and hands the
+# SAME LSP-enriched graph to the agent via these (gt_gt §1). They are LEGITIMATE (freshness
+# + schema validated downstream), NOT a forbidden host split — the agent must hook onto the
+# same enriched graph the gates measured. They are intentionally NOT in the reject list.
+HOST_HANDOFF = ("GT_HOST_SRC_ROOT", "GT_HOST_GRAPH_DB")
+# Non-canonical aliases the pipeline never sets — their presence means a MISCONFIGURATION
+# (typo / dead var), which proof mode should surface.
+HOST_ALIASES = ("GT_HOST_GRAPH", "GT_HOST_SOURCE_ROOT")
 
 _DEFAULT_RUNTIME_ROOT = "/opt/gt"
 
@@ -101,14 +108,16 @@ def require(ok: bool, name: str, detail: str = "") -> bool:
 
 
 def reject_host_aliases() -> None:
-    """In proof mode, refuse if any GT_HOST_* alias is set — the canonical
-    in-container GT_SOURCE_ROOT / GT_GRAPH_DB must be used, never a host split."""
+    """In proof mode, refuse only NON-CANONICAL host aliases (a misconfiguration). The
+    canonical GT_HOST_SRC_ROOT / GT_HOST_GRAPH_DB are the LEGITIMATE host->agent graph
+    handoff (gt_gt §1) — the agent hooks onto the same LSP-enriched graph the gates
+    measured — and are NOT forbidden."""
     if not is_proof_mode():
         return
     present = [k for k in HOST_ALIASES if os.environ.get(k)]
-    require(not present, "no_host_aliases",
-            f"host-path aliases set in proof mode: {present} — use canonical "
-            f"GT_SOURCE_ROOT/GT_GRAPH_DB inside the container")
+    require(not present, "no_noncanonical_host_aliases",
+            f"non-canonical host aliases set in proof mode: {present} — use the canonical "
+            f"handoff GT_HOST_SRC_ROOT/GT_HOST_GRAPH_DB, or in-container GT_SOURCE_ROOT/GT_GRAPH_DB")
 
 
 def runtime_root() -> str:
