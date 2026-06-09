@@ -6896,6 +6896,24 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
 
     l4_ok = install_graph_and_hook(runtime, config)
 
+    # GRAPH-HANDOFF WITNESS (Stage 2): emit a [GT_META] line so a run/test can PROVE the
+    # agent's in-loop hooks read the SAME resolved graph the gates measured. When the
+    # host-resolved graph was uploaded into the container as config.graph_db
+    # (_gt_prebuilt_active), its CONTENT equals GT_HOST_GRAPH_DB (host-readable) -> hash that
+    # as the hook-graph fingerprint; it must equal the LSP cert's graph_hash_after_lsp.
+    try:
+        _gw_host = os.environ.get("GT_HOST_GRAPH_DB", "")
+        _gw_prebuilt = bool(getattr(config, "_gt_prebuilt_active", False))
+        _gw_hook_hash = ""
+        if _gw_prebuilt and _gw_host and os.path.exists(_gw_host):
+            from groundtruth.runtime import proof as _gw_proof
+            _gw_hook_hash = _gw_proof.graph_edges_hash(_gw_host)
+        print(f"[GT_META] graph_witness host_resolved_graph_db={_gw_host} "
+              f"hook_graph_db={getattr(config, 'graph_db', '')} hook_graph_hash={_gw_hook_hash} "
+              f"_gt_prebuilt_active={_gw_prebuilt}", flush=True)
+    except Exception as _gw_e:
+        print(f"[GT_META] graph_witness error={_gw_e}", flush=True)
+
     # B-7: graph.db access mode.
     # "proxy" (default): one query to get node count for L5 threshold (~1 sec)
     # "always": full 11MB chunked transfer (~7.5 min) for host-side graph.db

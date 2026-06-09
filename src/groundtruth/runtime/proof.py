@@ -222,6 +222,29 @@ def read_ts(db, key: str) -> float | None:
         return None
 
 
+def graph_edges_hash(db) -> str:
+    """Canonical content fingerprint of the graph's edges (source,target,type,
+    resolution_method,confidence) — proves the SAME graph flows build -> LSP -> gates ->
+    hooks (Stage 2). MUST match resolve._graph_edges_hash exactly so cross-stage hashes
+    compare; a drift test guards that. Returns '' if the db is unreadable."""
+    import hashlib
+    import sqlite3 as _sql
+    h = hashlib.sha256()
+    try:
+        c = _sql.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            for row in c.execute(
+                "SELECT source_id, target_id, type, resolution_method, confidence "
+                "FROM edges ORDER BY id"
+            ):
+                h.update(repr(tuple(row)).encode("utf-8"))
+        finally:
+            c.close()
+    except Exception:
+        return ""
+    return h.hexdigest()
+
+
 # ───────────────────────────── FTS5 (Stage 2) ────────────────────────────────
 
 
