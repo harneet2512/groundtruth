@@ -43,8 +43,10 @@
 | DeepSWE pipeline | draft: GT commit + substrate digest recorded; `if:always` upload; no hidden filtering | record DeepSWE commit + task-image digests; classification + paired-Wilcoxon | `GHA_PIPELINE_FAIL` | yes |
 | multi-language | none | run manifest records lang distribution + unsupported/no-op counts; no language-specific silent exclusion | — | no |
 
-## Stage-readiness summary
-- **Stage 1 (LSP): BLOCKED** — bake gopls/rust-analyzer/tsserver (70% of tasks).
-- **Stage 3 (embedder): BLOCKED** — bake gte (or pin e5) to match the CHANGE-2 default.
-- **Stages 2/4/5: ready in GT code; blocked on the substrate digest publish + D2 validation + the 113-cache verify.**
-- No stage is safe to *implement-and-run* until the substrate image is rebuilt (LSP servers + gte) and pinned, and the adapter draft passes D0-D2.
+## Stage-readiness summary (VERIFIED by the 5 per-stage grounded audits)
+- **Stage 1 (LSP): BLOCKED** — GT code CORRECT (warm probe real, stamps preserved); blocker = substrate bakes pyright ONLY → 70% non-Python `LSP_INSTALL_MISSING`, and the unsupported path exits 0 so `GT_REQUIRE_LSP` is **falsely green** on non-Python.
+- **Stage 2 (graph handoff): BLOCKED** — hash machinery CORRECT + closure PRESERVES `'lsp'` stamps (no stamp-drop); blocker = witness is **FAIL-OPEN** (warns, never raises) + the consume path is **conditional on launcher env** (`GT_HOST_GRAPH_DB`/`GT_CERT_DIR`) the pier config doesn't set.
+- **Stage 3 (embedder): BLOCKED** — consumption logic CORRECT; blocker = **e5 baked / gte default mismatch**, 3 proof surfaces disagree → silent e5 substitution or fail-close.
+- **Stage 4 (container boundary): BLOCKED** — boundary asserts + docker-run shape CORRECT; blocker = the adapter draft **still injects a divergent in-container `/tmp/graph.db`** (`_BUILD_GRAPH_DB`) + the **pinned digest is unpublished**.
+- **Stage 5 (cache/manifest): BLOCKED on provenance** — 113-GHCR cache **VERIFIED present**; blocker = **no GT/DeepSWE commit SHA recorded** (`legitimacy.write_manifest` wired only to OH) + `deepswe_outcome.py` **can't classify** infra/GT/agent.
+- **Net:** the GT *contract* is clean; the work is (a) rebuild+publish the substrate (servers+gte+digest), (b) fix the adapter draft (dual-graph, fail-open witness, launcher-env), (c) wire provenance + failure-classification. No stage is safe to implement-and-run until those land and D0–D2 pass. See `GO_NO_GO_DEEPSWE.md` for the consolidated blocker list.
