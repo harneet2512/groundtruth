@@ -13,23 +13,64 @@ Attachment mapping (GT integration guide -> mini-swe-agent):
                            text reaches the agent verbatim)
   GT_BASELINE switch    -> _GT_BASELINE early no-op
 
-Evidence comes from gt_hook.py (the stdlib-only single-file evidence engine):
-  gt_hook.py understand <file> --root=... --quiet --max-lines=10
-  gt_hook.py verify --root=... --quiet --max-items=3
-The container must have gt_hook.py at /opt/gt/gt_hook.py (injected by
-GTMiniSweAgent.install_spec). If a graph.db is present at /tmp/graph.db,
-gt_hook.py uses it for richer evidence; otherwise it self-indexes via AST.
+Per-turn <gt-evidence> is built DIRECTLY from graph.db (tree-sitter, ALL
+languages) via the same deterministic, categorical-fact-gated pillars the
+host-side brief uses (resolved-witness / caller-contract / sibling +
+edit-target callee contracts). This is pure SQL and cross-language by
+construction — it replaces the old `gt_hook.py understand/verify` route, which
+was Python-`ast`-only (`.py`-filtered) and therefore emitted EMPTY evidence on
+the ~70% of DeepSWE tasks that are Go/Rust/TS/JS.
+
+The pillar logic is PORTED INLINE here (stdlib-only) rather than imported from
+`groundtruth.pretask.*`, because only the two single files gt_hook.py +
+gt_mini_patch.py (plus /tmp/graph.db) are injected into the task container —
+the full `groundtruth` package is NOT importable in-container. The categorical
+FACT gate (`_DETERMINISTIC_METHODS`) + stdlib-shadow guard are reproduced
+verbatim from curation_map / v1r_brief so no name_match edge is ever laundered
+as a fact (parity with the brief).
+
+gt_hook.py is still injected at /opt/gt/gt_hook.py for the agent's optional
+manual use, but the AUTOMATIC per-view/per-edit evidence no longer routes
+through it.
 """
 from __future__ import annotations
 
 import os
 import re
 import subprocess
-import sys
 
 _GT_BASELINE = bool(os.environ.get("GT_BASELINE"))
 _ROOT_FILE = os.environ.get("GT_ROOT_FILE", "/opt/gt/gt_root.txt")
 _HOOK_TIMEOUT = int(os.environ.get("GT_HOOK_TIMEOUT", "30"))
+
+# ---------------------------------------------------------------------------
+# Categorical FACT gate (ported verbatim from groundtruth.pretask.curation_map
+# DETERMINISTIC_RESOLUTION_METHODS). A cross-file call edge is a FACT only when
+# its resolution_method is one of these STRUCTURAL methods; a `name_match` edge
+# (even a single-candidate one, scored 0.9) is a NAME GUESS, never a fact.
+# Reproduced inline because the groundtruth package is NOT importable in the
+# task container (only gt_hook.py + gt_mini_patch.py + /tmp/graph.db injected).
+# ---------------------------------------------------------------------------
+_DETERMINISTIC_METHODS: frozenset[str] = frozenset(
+    {
+        "same_file", "import", "import_type", "type_flow", "verified_unique",
+        "impl_method", "inherited", "unique_method", "return_type",
+        "lsp", "lsp_verified",
+    }
+)
+
+# Stdlib/builtin module names whose attribute calls (os.walk, json.loads, ...)
+# get name-matched to a same-named PROJECT function by the indexer. Ported from
+# v1r_brief._STDLIB_MODULES; defends against a DETERMINISTIC-tagged false fact.
+_STDLIB_MODULES: frozenset[str] = frozenset(
+    {
+        "os", "sys", "re", "io", "json", "math", "time", "copy", "glob", "uuid",
+        "shutil", "random", "typing", "logging", "pathlib", "datetime", "string",
+        "decimal", "inspect", "warnings", "argparse", "textwrap", "itertools",
+        "functools", "operator", "collections", "subprocess", "contextlib",
+    }
+)
+_STDLIB_SHADOW_RE = re.compile(r"([A-Za-z_][\w.]*)\.([A-Za-z_]\w*)\s*\(")
 
 # per-file-once dedup, keyed (kind, relpath)
 _seen: set[tuple[str, str]] = set()
@@ -168,33 +209,273 @@ def _classify(cmd: str) -> tuple[str | None, str | None]:
     return None, None
 
 
-_GT_HOOK = os.environ.get("GT_HOOK_PATH", "/opt/gt/gt_hook.py")
+def _db_path() -> str:
+    return os.environ.get("GT_GRAPH_DB", "/tmp/graph.db")
 
 
-def _run_hook(kind: str, rel: str) -> str:
-    """Run gt_hook.py for post-edit or post-view evidence.
-
-    Uses -S to skip site processing so our own .pth does not re-import
-    minisweagent (which prints a banner to stdout).  gt_hook.py is
-    stdlib-only so -S is safe.
-    """
-    root = _root()
-    db_path = os.environ.get("GT_GRAPH_DB", "/tmp/graph.db")
-    db_flag = f"--db={db_path}" if os.path.isfile(db_path) else ""
-
-    if kind == "post_edit":
-        args = [sys.executable, "-S", _GT_HOOK, "verify",
-                f"--root={root}", "--quiet", "--max-items=3"]
-        if db_flag:
-            args.append(db_flag)
-    else:
-        args = [sys.executable, "-S", _GT_HOOK, "understand", rel,
-                f"--root={root}", "--quiet", "--max-lines=10"]
+def _has_columns(con) -> tuple[bool, bool]:
+    """(has_confidence, has_resolution_method) for the edges table.
+    Ported from curation_map._has_columns."""
     try:
-        r = subprocess.run(args, capture_output=True, text=True, timeout=_HOOK_TIMEOUT)
-        return (r.stdout or "").strip()
-    except Exception:  # noqa: BLE001 -- correct-or-quiet
+        cols = {r[1] for r in con.execute("PRAGMA table_info(edges)").fetchall()}
+    except Exception:  # noqa: BLE001
+        return (False, False)
+    return ("confidence" in cols, "resolution_method" in cols)
+
+
+def _is_stdlib_shadow(code: str, target_name: str) -> bool:
+    """True when ``code`` calls ``<stdlib_module>.<target_name>(`` — a stdlib
+    attribute call the indexer name-matched to a project function of the same
+    name. Ported from v1r_brief._is_stdlib_shadow. Language-agnostic."""
+    if not code or not target_name:
+        return False
+    for m in _STDLIB_SHADOW_RE.finditer(code):
+        head = m.group(1).split(".")[0]
+        if m.group(2) == target_name and head in _STDLIB_MODULES:
+            return True
+    return False
+
+
+def _code_at(repo_root: str, rel_file: str, line: int) -> str:
+    """The source line at (rel_file, line), 1-based, or '' on any error."""
+    if not rel_file or not line or line <= 0:
         return ""
+    try:
+        with open(os.path.join(repo_root, rel_file), encoding="utf-8", errors="ignore") as fh:
+            lines = fh.readlines()
+        if 0 < line <= len(lines):
+            return lines[line - 1].strip()
+    except OSError:
+        pass
+    return ""
+
+
+def _norm_fp(file_path: str) -> str:
+    return (file_path or "").replace("\\", "/").lstrip("./").lstrip("/")
+
+
+def _top_func_names(con, file_path: str, limit: int = 3) -> list[str]:
+    """Most-referenced non-test Function/Method names in the file (suffix-LIKE
+    match, so a stored `pkg/foo.go` matches a relative `foo.go`). Cross-language:
+    pure node-label query, no per-language branch. Mirrors v1r_brief._top_function_names
+    (issueless variant — per-view has no issue-anchor context; the host brief owns
+    issue-anchored selection)."""
+    out: list[str] = []
+    try:
+        rows = con.execute(
+            "SELECT n.name, COUNT(e.id) AS rc FROM nodes n "
+            "LEFT JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' "
+            "WHERE (n.file_path = ? OR n.file_path LIKE ?) "
+            "AND n.label IN ('Function','Method') AND COALESCE(n.is_test,0)=0 "
+            "GROUP BY n.id ORDER BY rc DESC, n.name LIMIT ?",
+            (file_path, "%" + os.path.basename(file_path), limit),
+        ).fetchall()
+        for (name, _rc) in rows:
+            if name and name not in out:
+                out.append(name)
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def _resolved_witnesses_for_file(con, file_path: str, repo_root: str, max_each: int = 2) -> list[dict]:
+    """Deterministic-provenance caller AND callee witnesses for ``file_path``.
+
+    Ported from v1r_brief._resolved_witnesses_for_file (pure SQL, cross-language).
+    A witness is emitted ONLY when its edge resolution_method is in
+    ``_DETERMINISTIC_METHODS``; name_match is NEVER a witness. The same
+    stdlib-shadow guard the brief applies is applied here. Correct-or-quiet."""
+    _, has_method = _has_columns(con)
+    if not has_method:
+        return []  # cannot judge provenance -> emit nothing (never launder)
+    det_sql = "','".join(sorted(_DETERMINISTIC_METHODS))
+    nfp = _norm_fp(file_path)
+    out: list[dict] = []
+    try:
+        caller_rows = con.execute(
+            f"""
+            SELECT nsrc.file_path, e.source_line, nsrc.name, nt.name
+            FROM nodes nt
+            JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
+            JOIN nodes nsrc ON e.source_id = nsrc.id
+            WHERE nt.file_path LIKE ? AND nsrc.file_path != nt.file_path
+              AND COALESCE(nsrc.is_test,0) = 0 AND e.source_line > 0
+              AND LOWER(TRIM(e.resolution_method)) IN ('{det_sql}')
+            ORDER BY e.source_line LIMIT ?
+            """,
+            ("%" + nfp, max_each * 4),
+        ).fetchall()
+        for caller_file, line, caller_name, target_name in caller_rows:
+            code = _code_at(repo_root, caller_file, line)
+            if _is_stdlib_shadow(code, target_name or ""):
+                continue
+            out.append({"direction": "caller", "file_path": caller_file,
+                        "line": int(line) if line else 0, "symbol": caller_name or "",
+                        "target": target_name or "", "code": code})
+            if sum(1 for w in out if w["direction"] == "caller") >= max_each:
+                break
+
+        callee_rows = con.execute(
+            f"""
+            SELECT nt.file_path, e.source_line, nt.name, nsrc.name, nt.start_line
+            FROM nodes nsrc
+            JOIN edges e ON e.source_id = nsrc.id AND e.type = 'CALLS'
+            JOIN nodes nt ON e.target_id = nt.id
+            WHERE nsrc.file_path LIKE ? AND nt.file_path != nsrc.file_path
+              AND COALESCE(nt.is_test,0) = 0
+              AND LOWER(TRIM(e.resolution_method)) IN ('{det_sql}')
+            ORDER BY e.source_line LIMIT ?
+            """,
+            ("%" + nfp, max_each * 4),
+        ).fetchall()
+        for callee_file, source_line, callee_name, src_name, def_line in callee_rows:
+            call_code = _code_at(repo_root, file_path, source_line)
+            if _is_stdlib_shadow(call_code, callee_name or ""):
+                continue
+            out.append({"direction": "callee", "file_path": callee_file,
+                        "line": int(def_line) if def_line else 0, "symbol": callee_name or "",
+                        "target": src_name or "",
+                        "code": _code_at(repo_root, callee_file, def_line) if def_line else ""})
+            if sum(1 for w in out if w["direction"] == "callee") >= max_each:
+                break
+    except Exception:  # noqa: BLE001
+        return []
+    return out
+
+
+def _caller_contract_for_file(con, file_path: str, repo_root: str, func_names: list[str]) -> str:
+    """Categorical, correct-or-quiet caller evidence.
+    Ported from v1r_brief._caller_contract_for_file. A cross-file caller renders as a
+    confident FACT (``name() in file:line``) ONLY over a DETERMINISTIC edge; name_match
+    is never laundered — at/above the floor it renders as a bare `file:line (unverified)`
+    location hint with no caller-name claim, facts-first. Cross-language: pure SQL."""
+    if not func_names:
+        return ""
+    has_conf, has_method = _has_columns(con)
+    conf_sel = "e.confidence" if has_conf else "0.0"
+    method_sel = "e.resolution_method" if has_method else "''"
+    det_sql = "','".join(sorted(_DETERMINISTIC_METHODS))
+    nfp = _norm_fp(file_path)
+    fact_parts: list[str] = []
+    unverified_parts: list[str] = []
+    try:
+        for fname in func_names[:2]:
+            rows = con.execute(
+                f"""
+                SELECT nsrc.file_path, e.source_line, nsrc.name, {conf_sel}, {method_sel}
+                FROM nodes nt
+                JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
+                JOIN nodes nsrc ON e.source_id = nsrc.id
+                WHERE nt.name = ? AND nt.file_path LIKE ?
+                  AND nsrc.file_path != nt.file_path AND COALESCE(nsrc.is_test,0) = 0
+                  AND e.source_line > 0
+                ORDER BY CASE WHEN LOWER(TRIM({method_sel})) IN ('{det_sql}') THEN 0 ELSE 1 END,
+                         {conf_sel} DESC, e.source_line
+                LIMIT ?
+                """,
+                (fname, "%" + nfp, 8),
+            ).fetchall()
+            for caller_file, source_line, caller_name, conf, method in rows:
+                try:
+                    conf_f = float(conf) if conf is not None else 0.0
+                except (TypeError, ValueError):
+                    conf_f = 0.0
+                code = _code_at(repo_root, caller_file, source_line)
+                if _is_stdlib_shadow(code, fname):
+                    continue
+                is_fact = (method or "").strip().lower() in _DETERMINISTIC_METHODS
+                if is_fact:
+                    snippet = code if len(code) <= 80 else code[:77] + "..."
+                    rendered = (f"{caller_name}() in {caller_file}:{source_line} `{snippet}`"
+                                if snippet else f"{caller_name}() in {caller_file}:{source_line}")
+                    if rendered not in fact_parts:
+                        fact_parts.append(rendered)
+                elif conf_f >= 0.5 or not has_conf:
+                    hint = f"{caller_file}:{source_line}"
+                    if hint not in unverified_parts:
+                        unverified_parts.append(hint)
+                if len(fact_parts) >= 3:
+                    break
+            if len(fact_parts) >= 3:
+                break
+    except Exception:  # noqa: BLE001
+        return ""
+    if fact_parts:
+        return " | ".join(fact_parts[:3])
+    if unverified_parts:
+        return " | ".join(unverified_parts[:2])
+    return ""
+
+
+def _sibling_context(con, file_path: str, func_names: list[str]) -> str:
+    """Sibling functions at the same scope — parallel patterns to follow.
+    Ported from v1r_brief._sibling_context. Cross-language: pure node query."""
+    if not func_names:
+        return ""
+    try:
+        rows = con.execute(
+            "SELECT DISTINCT n.name FROM nodes n "
+            "WHERE (n.file_path = ? OR n.file_path LIKE ?) "
+            "AND n.label IN ('Function','Method') AND COALESCE(n.is_test,0)=0 "
+            "AND n.name NOT IN ({}) ORDER BY n.start_line LIMIT 8".format(
+                ",".join("?" * len(func_names))),
+            (file_path, "%" + os.path.basename(file_path), *func_names),
+        ).fetchall()
+        names = [r[0] for r in rows if r[0] and len(r[0]) > 2 and not r[0].startswith("_")]
+        return ", ".join(names[:5]) if names else ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _edit_target_callee_contracts(con, file_path: str, func_names: list[str],
+                                  max_funcs: int = 3, max_callees: int = 3) -> list[str]:
+    """Verified callees (signature + location) of the edit-target functions.
+    Ported from contract_map.edit_target_callee_contracts (the deciding
+    "what does the method I'm editing CALL, and how" fact). name_match callees
+    are NEVER included. Cross-language: pure SQL over edges/nodes + signatures."""
+    if not func_names:
+        return []
+    _, has_method = _has_columns(con)
+    nfp = _norm_fp(file_path)
+    det_sql = "','".join(sorted(_DETERMINISTIC_METHODS))
+    method_clause = (f"AND LOWER(TRIM(e.resolution_method)) IN ('{det_sql}')"
+                     if has_method else "")
+    out: list[str] = []
+    seen: set[tuple[str, str, str]] = set()
+    try:
+        for fname in func_names[:max_funcs]:
+            if not fname:
+                continue
+            rows = con.execute(
+                f"""
+                SELECT nt.name, nt.signature, nt.file_path, nt.start_line
+                FROM nodes nsrc
+                JOIN edges e ON e.source_id = nsrc.id AND e.type = 'CALLS' {method_clause}
+                JOIN nodes nt ON e.target_id = nt.id
+                WHERE nsrc.name = ? AND nsrc.file_path LIKE ?
+                  AND COALESCE(nt.is_test,0) = 0
+                  AND nt.signature IS NOT NULL AND TRIM(nt.signature) != ''
+                ORDER BY nt.start_line LIMIT ?
+                """,
+                (fname, "%" + nfp, max_callees * 3),
+            ).fetchall()
+            added = 0
+            for callee_name, sig, callee_file, line in rows:
+                if added >= max_callees:
+                    break
+                if callee_name == fname and _norm_fp(callee_file) == nfp:
+                    continue
+                key = (fname, callee_name or "", callee_file or "")
+                if key in seen:
+                    continue
+                seen.add(key)
+                sig = (sig or "").strip()
+                loc = f" ({callee_file}:{int(line)})" if line else ""
+                out.append(f"[CALLEE] {fname} -> {sig}{loc}")
+                added += 1
+    except Exception:  # noqa: BLE001
+        return []
+    return out
 
 
 def _norm_rel(p: str) -> str:
@@ -344,6 +625,66 @@ def _consensus_block(rel: str, root: str) -> str:
         return ""
 
 
+def _evidence_body(kind: str, rel: str, root: str) -> str:
+    """Build the <gt-evidence> body from graph.db (pure SQL, cross-language).
+
+    post_view : resolved-witness facts + caller-contract for the viewed file.
+    post_edit : edit-target callee contracts + resolved witnesses.
+    Both obey the categorical FACT gate (_DETERMINISTIC_METHODS) + stdlib-shadow
+    guard, so no name_match edge is ever laundered as a fact (parity with the
+    brief). Correct-or-quiet: empty body -> the caller emits nothing.
+
+    This replaces the old gt_hook.py understand/verify shell-out, which was
+    Python-ast-only (.py-filtered at gt_hook.py:4110) and therefore EMPTY on
+    every Go/Rust/TS/JS file. graph.db is tree-sitter over ALL languages."""
+    db = _db_path()
+    if not os.path.isfile(db):
+        return ""
+    import sqlite3
+    try:
+        con = sqlite3.connect(db)
+    except Exception:  # noqa: BLE001
+        return ""
+    lines: list[str] = []
+    try:
+        func_names = _top_func_names(con, rel, limit=3)
+        if kind == "post_edit":
+            # What the edited functions CALL, and how to call it correctly.
+            for cl in _edit_target_callee_contracts(con, rel, func_names):
+                if cl not in lines:
+                    lines.append(cl)
+        # Resolved cross-file witnesses (caller + callee FACTS) for both kinds.
+        for w in _resolved_witnesses_for_file(con, rel, root, max_each=2):
+            arrow = "called by" if w["direction"] == "caller" else "calls"
+            loc = f"{w['file_path']}:{w['line']}" if w["line"] else w["file_path"]
+            sym = w["symbol"] or "?"
+            snippet = f" `{w['code']}`" if w.get("code") else ""
+            ln = f"[WITNESS] {sym} {arrow} -> {loc}{snippet}".rstrip()
+            if ln not in lines:
+                lines.append(ln)
+        # Caller-contract line for the viewed file (facts-first, unverified hint
+        # only when no fact exists). Mainly meaningful on a view.
+        if kind == "post_view":
+            cc = _caller_contract_for_file(con, rel, root, func_names)
+            if cc:
+                ln = f"[CALLERS] {cc}"
+                if ln not in lines:
+                    lines.append(ln)
+            sib = _sibling_context(con, rel, func_names)
+            if sib:
+                ln = f"[SIBLINGS] {sib}"
+                if ln not in lines:
+                    lines.append(ln)
+    except Exception:  # noqa: BLE001 -- correct-or-quiet
+        return ""
+    finally:
+        try:
+            con.close()
+        except Exception:  # noqa: BLE001
+            pass
+    return "\n".join(lines[:6]).strip()
+
+
 def _evidence(cmd: str) -> str:
     if _GT_BASELINE:
         return ""
@@ -356,7 +697,7 @@ def _evidence(cmd: str) -> str:
     if key in _seen:
         return ""
     _seen.add(key)
-    ev = _run_hook(kind, rel)
+    ev = _evidence_body(kind, rel, root)
     if not ev:
         return ""
     return f"\n<gt-evidence kind=\"{kind}\" file=\"{rel}\">\n{ev}\n</gt-evidence>"

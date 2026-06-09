@@ -38,26 +38,18 @@ agent:
     ## Codebase Intelligence Tool
 
     GroundTruth automatically appends evidence to command output inside
-    <gt-evidence> tags when you read or edit source files. This evidence
-    includes cross-file callers, test coverage, behavioral contracts, and
-    sibling patterns. Read those tags -- they are facts you cannot get from
-    the file alone.
+    <gt-evidence> tags when you read or edit source files. This evidence is
+    built from the codebase call graph (any language -- Go, Rust, TS, JS,
+    Python, ...) and includes:
+    - Cross-file callers of the functions in the file you opened, and how they
+      use the result (so you do not break them).
+    - Behavioral contracts: the typed signatures of the functions your edit
+      target CALLS (so you call them correctly).
+    - Sibling functions at the same scope (the patterns you must match).
 
-    You can also manually query the codebase intelligence tool:
-
-    **Before editing a file**, run:
-      python3 /opt/gt/gt_hook.py understand <filepath> --root=$(cat /opt/gt/gt_root.txt) --quiet --max-lines=10
-    This shows you information you CANNOT get by reading the file alone:
-    - Which OTHER files call functions in this file and how they use the results
-    - Which TEST files cover this module (so you know where to verify)
-    - Rules that hold across ALL sibling methods (patterns you must follow)
-    - Behavioral contracts (what functions read/write/return)
-
-    **After editing**, you may optionally run:
-      python3 /opt/gt/gt_hook.py verify --root=$(cat /opt/gt/gt_root.txt) --quiet --max-items=3
-    If the command outputs any GT: lines, read them carefully -- they are structural warnings about your edit.
-
-    Use the understand command for 1-2 key files during exploration. Don't over-use it.
+    Read those <gt-evidence> tags -- they are verified cross-file facts you
+    cannot get from the file alone. They appear automatically; you do not call
+    anything.
 
     ## Important Boundaries
 
@@ -69,11 +61,13 @@ agent:
     1. Read the task carefully. Identify the key symbols/files involved.
     2. Explore the codebase structure: `find . -name "*.go" -o -name "*.ts" -o -name "*.py" | head -30`
     3. Use grep/find to locate relevant files.
-    4. Run `python3 /opt/gt/gt_hook.py understand <filepath> --root=$(cat /opt/gt/gt_root.txt) --quiet --max-lines=10` on files you plan to edit.
-    5. Read the relevant source files to understand current behavior.
-    6. Implement the changes. Cross-check against callers and patterns from step 4.
-    7. Run existing tests to verify: check for test scripts, Makefiles, or standard test commands.
-    8. Submit your patch.
+    4. Read the relevant source files to understand current behavior. As you
+       read and edit, GroundTruth appends <gt-evidence> tags with the cross-file
+       callers, callee contracts, and sibling patterns -- read them.
+    5. Implement the changes. Cross-check against the callers and contracts in
+       the <gt-evidence> tags.
+    6. Run existing tests to verify: check for test scripts, Makefiles, or standard test commands.
+    7. Submit your patch.
 
     ## Command Execution Rules
 
