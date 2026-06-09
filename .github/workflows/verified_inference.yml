@@ -1,0 +1,751 @@
+name: "Verified: Inference"
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Run mode (smoke=5, pilot20=20, pilot50=50, pilot100=100, full500=all)"
+        required: true
+        type: choice
+        options: ["smoke", "pilot20", "pilot50", "pilot100", "full500"]
+        default: "smoke"
+      max_parallel:
+        description: "Max concurrent inference jobs"
+        required: true
+        default: "20"
+      tasks_per_job:
+        description: "Tasks per job. 3 for GT arm (GT adds per-task graph build; smaller shards stay under 340-min ceiling). 5 for baseline-only."
+        required: true
+        type: choice
+        options: ["1", "2", "3", "5", "7", "10"]
+        default: "3"
+      model:
+        description: "LLM model identifier"
+        required: true
+        default: "deepseek/deepseek-v4-flash"
+      max_iterations:
+        description: "Max agent iterations per task"
+        required: true
+        default: "100"
+      run_id:
+        description: "Run identifier (links inference → eval → bundle)"
+        required: true
+        default: "verified-run"
+      gt_commit:
+        description: "GT commit/branch to evaluate"
+        required: true
+        default: "general_start"
+      dry_run:
+        description: "Dry run (validate setup without running inference)"
+        required: false
+        type: boolean
+        default: false
+      baseline:
+        description: "Baseline mode — pure OpenHands, GT fully disabled (GT_BASELINE=1)"
+        required: false
+        type: boolean
+        default: false
+      docker_namespace:
+        description: "Docker Hub namespace for task images (fallback if GHCR miss)"
+        required: false
+        default: "aorwall"
+      task_ids:
+        description: "Explicit comma-separated instance IDs (overrides mode; for targeted re-runs)"
+        required: false
+        default: ""
+  workflow_call:
+    inputs:
+      mode:
+        type: string
+        required: true
+      max_parallel:
+        type: string
+        required: false
+        default: "20"
+      tasks_per_job:
+        type: string
+        required: false
+        default: "3"
+      model:
+        type: string
+        required: false
+        default: "deepseek/deepseek-v4-flash"
+      max_iterations:
+        type: string
+        required: false
+        default: "100"
+      run_id:
+        type: string
+        required: true
+      gt_commit:
+        type: string
+        required: false
+        default: "general_start"
+      dry_run:
+        type: boolean
+        required: false
+        default: false
+      baseline:
+        type: boolean
+        required: false
+        default: false
+      docker_namespace:
+        type: string
+        required: false
+        default: "aorwall"
+      task_ids:
+        type: string
+        required: false
+        default: ""
+
+jobs:
+  # ── Phase 1: Build task matrix ──────────────────────────────────────
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build.outputs.matrix }}
+      task_count: ${{ steps.build.outputs.task_count }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - id: build
+        name: Build task matrix
+        run: |
+          MATRIX=$(python scripts/swebench/verified_tasks.py \
+            --mode "${{ inputs.mode }}" \
+            --tasks-per-job "${{ inputs.tasks_per_job }}" \
+            --task-ids "${{ inputs.task_ids }}" \
+            --output matrix)
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
+          TASK_COUNT=$(python scripts/swebench/verified_tasks.py \
+            --mode "${{ inputs.mode }}" \
+            --task-ids "${{ inputs.task_ids }}" \
+            --output count)
+          echo "task_count=$TASK_COUNT" >> "$GITHUB_OUTPUT"
+
+          BATCH_COUNT=$(echo "$MATRIX" | python3 -c "import json,sys; print(len(json.load(sys.stdin)['include']))")
+          ROUNDS=$(python3 -c "import math; print(math.ceil($BATCH_COUNT / ${{ inputs.max_parallel }}))")
+          echo "### Inference Plan" >> $GITHUB_STEP_SUMMARY
+          echo "- **Benchmark:** SWE-bench Verified (500 tasks)" >> $GITHUB_STEP_SUMMARY
+          echo "- Mode: **${{ inputs.mode }}**" >> $GITHUB_STEP_SUMMARY
+          echo "- Tasks: **$TASK_COUNT**" >> $GITHUB_STEP_SUMMARY
+          echo "- Jobs: **$BATCH_COUNT** (${{ inputs.tasks_per_job }} tasks/job)" >> $GITHUB_STEP_SUMMARY
+          echo "- Rounds: **$ROUNDS** (at max_parallel=${{ inputs.max_parallel }})" >> $GITHUB_STEP_SUMMARY
+          echo "- Model: \`${{ inputs.model }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Run ID: \`${{ inputs.run_id }}\`" >> $GITHUB_STEP_SUMMARY
+
+  # ── Phase 2: Parallel inference ─────────────────────────────────────
+  inference:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    strategy:
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+      fail-fast: false
+      max-parallel: ${{ fromJson(inputs.max_parallel) }}
+    env:
+      DOCKER_CLIENT_TIMEOUT: "300"
+      COMPOSE_HTTP_TIMEOUT: "300"
+      GT_ROUTER_V2: ${{ inputs.baseline == true && 'off' || 'live' }}
+      GT_DEBUG_DIR: "/tmp/gt_debug"
+      GT_MAX_LLM_CALLS: "300"
+      EVAL_CONDENSER: ""
+      GT_REBUILD_L1: "1"
+      GT_REBUILD_L3: "1"
+      GT_REBUILD_L3B: "1"
+      GT_REBUILD_L5: "1"
+      GT_LAYER_EVENTS: "1"
+      GT_STRUCTURED_EVENTS: "1"
+      GT_STRUCTURAL_NEXT_ACTION: "1"
+      GT_L3B_PRIMARY_EDGE: "1"
+      GT_L5_STRUCTURAL_UNVERIFIED: "1"
+      GT_L5_GOKU_EVENTS: "0"
+      GT_DEEP_LAYER_GROUNDED_METRICS: "1"
+      GT_L5B_SAFETY_REQUIRED: "1"
+      GT_LSP_VERIFY: "1"
+    steps:
+      # ─── Disk cleanup ──────────────────────────────────────────────
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android \
+            /opt/ghc /usr/share/swift /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/powershell /usr/local/share/chromium \
+            /opt/hostedtoolcache/go &
+          CLEANUP_PID=$!
+          docker system prune -af --volumes &
+          DOCKER_PRUNE_PID=$!
+          wait $CLEANUP_PID $DOCKER_PRUNE_PID 2>/dev/null || true
+          df -h /
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.gt_commit }}
+
+      # ─── Cached setup: OH + GT + gt-index + datasets ───────────────
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - uses: ./.github/actions/setup-eval
+
+      # ─── Pre-flight GT health check (GT arm only) ──────────────────
+      - name: Pre-flight GT health check
+        if: ${{ inputs.baseline != true && inputs.dry_run != true }}
+        env:
+          GT_INDEX_BINARY: "/tmp/gt-index"
+        run: |
+          echo "=== GT PRE-FLIGHT ==="
+          test -x /tmp/gt-index && echo "gt-index binary OK" || { echo "FAIL: gt-index missing"; exit 1; }
+          mkdir -p /tmp/preflight && echo 'def hello(): pass' > /tmp/preflight/test.py
+          /tmp/gt-index -root /tmp/preflight -output /tmp/preflight/test.db 2>&1 || { echo "FAIL: gt-index crashed"; exit 1; }
+          python3 "$GITHUB_WORKSPACE/scripts/verify/preflight_doc_of_honor.py" /tmp/preflight/test.db
+          python3 "$GITHUB_WORKSPACE/scripts/verify/preflight_delivery_layer.py" /tmp/preflight/test.db --schema --closure \
+            || echo "WARN: closure table absent — C7 not in this gt-index build?"
+          echo "=== GT PRE-FLIGHT PASSED ==="
+
+      # ─── Registry logins ───────────────────────────────────────────
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ─── Parallel Docker image pulls ───────────────────────────────
+      # SWE-bench Verified: GHCR cache first (from verified_cache_images.yml),
+      # then Docker Hub with configurable namespace fallback.
+      - name: Pull Docker images (parallel)
+        run: |
+          echo "=== Disk before pulls ==="
+          df -h /
+          df -h / > /tmp/disk_report.txt
+
+          GHCR_PREFIX="ghcr.io/${{ github.repository_owner }}"
+          DHUB_NS="${{ inputs.docker_namespace }}"
+
+          pull_with_retry() {
+            local IMG="$1" RETRIES=3 DELAY=5
+            for i in $(seq 1 $RETRIES); do
+              docker pull "$IMG" 2>/dev/null && return 0
+              [ "$i" -lt "$RETRIES" ] && sleep $DELAY && DELAY=$((DELAY * 2))
+            done
+            return 1
+          }
+
+          PULL_LOG=$(mktemp)
+          MAX_PULL=2
+          IFS=',' read -ra TASK_ARRAY <<< "${{ matrix.tasks }}"
+          for TASK in "${TASK_ARRAY[@]}"; do
+            SLUG=$(echo "$TASK" | sed 's/__/_1776_/')
+            GHCR_IMAGE="${GHCR_PREFIX}/sweb.eval.x86_64.${SLUG}:latest"
+            DHUB_IMAGE="docker.io/${DHUB_NS}/sweb.eval.x86_64.${SLUG}:latest"
+            (
+              if pull_with_retry "$GHCR_IMAGE"; then
+                docker tag "$GHCR_IMAGE" "$DHUB_IMAGE"
+                echo "GHCR $TASK" >> "$PULL_LOG"
+              elif pull_with_retry "$DHUB_IMAGE"; then
+                echo "DHUB $TASK" >> "$PULL_LOG"
+              else
+                echo "MISS $TASK" >> "$PULL_LOG"
+              fi
+            ) &
+            while [ "$(jobs -r | wc -l)" -ge "$MAX_PULL" ]; do wait -n; done
+          done
+          wait
+
+          GHCR_COUNT=$(grep -c "^GHCR " "$PULL_LOG" 2>/dev/null || echo 0)
+          DHUB_COUNT=$(grep -c "^DHUB " "$PULL_LOG" 2>/dev/null || echo 0)
+          MISS_COUNT=$(grep -c "^MISS " "$PULL_LOG" 2>/dev/null || echo 0)
+          TOTAL_TASKS=${#TASK_ARRAY[@]}
+          echo "=== Pull summary: $GHCR_COUNT GHCR, $DHUB_COUNT DockerHub, $MISS_COUNT missed / $TOTAL_TASKS total ==="
+          cat "$PULL_LOG"
+          if [ "$MISS_COUNT" -gt 0 ]; then
+            echo "::warning::$MISS_COUNT image(s) not found — harness will attempt to build them"
+            grep "^MISS " "$PULL_LOG" | awk '{print "  missing: "$2}'
+          fi
+          rm -f "$PULL_LOG"
+
+          echo "=== Disk after pulls ===" | tee -a /tmp/disk_report.txt
+          df -h / | tee -a /tmp/disk_report.txt
+          FREE_GB=$(df --output=avail / | tail -1 | awk '{printf "%.0f", $1/1048576}')
+          if [ "$FREE_GB" -lt 3 ]; then
+            echo "::error::Critically low disk (${FREE_GB}GB). Attempting aggressive prune."
+            docker image prune -af
+            FREE_GB=$(df --output=avail / | tail -1 | awk '{printf "%.0f", $1/1048576}')
+            echo "Disk after aggressive prune: ${FREE_GB}GB" | tee -a /tmp/disk_report.txt
+            if [ "$FREE_GB" -lt 3 ]; then
+              echo "::error::Disk still critically low (${FREE_GB}GB). Failing shard."
+              exit 1
+            fi
+          elif [ "$FREE_GB" -lt 5 ]; then
+            echo "::warning::Low disk (${FREE_GB}GB). Pruning unused images."
+            docker image prune -f
+          fi
+
+          echo "=== Disk before inference ===" | tee -a /tmp/disk_report.txt
+          df -h / | tee -a /tmp/disk_report.txt
+
+      - name: Validate API key
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          if [ -z "$DEEPSEEK_API_KEY" ]; then
+            echo "::error::DEEPSEEK_API_KEY secret is not set"
+            exit 1
+          fi
+          echo "DeepSeek key present (${#DEEPSEEK_API_KEY} chars)"
+
+      - name: Patch OH to disable DeepSeek V4 thinking
+        run: |
+          python3 << 'PATCH'
+          import sys
+          target = "/tmp/OpenHands/openhands/llm/llm.py"
+          with open(target) as f:
+              content = f.read()
+          if "_eb['thinking']" in content:
+              print("Already patched"); sys.exit(0)
+          marker = "            # Record start time for latency measurement"
+          lines = [
+              "            # DeepSeek V4: disable thinking at runtime (merged into extra_body)",
+              "            if 'deepseek-v4' in self.config.model.lower():",
+              "                _eb = kwargs.get('extra_body', {}) or {}",
+              "                _eb['thinking'] = {'type': 'disabled'}",
+              "                kwargs['extra_body'] = _eb",
+              "",
+          ]
+          inject = "\n".join(lines) + "\n"
+          if marker not in content:
+              print("WARN: marker not found, skipping patch"); sys.exit(0)
+          content = content.replace(marker, inject + marker, 1)
+          old_strip = "            if 'litellm_proxy' not in self.config.model:\n                kwargs.pop('extra_body', None)"
+          new_strip = "            if 'litellm_proxy' not in self.config.model and 'deepseek-v4' not in self.config.model.lower():\n                kwargs.pop('extra_body', None)"
+          if old_strip in content:
+              content = content.replace(old_strip, new_strip, 1)
+          with open(target, 'w') as f:
+              f.write(content)
+          print("PATCH_OK: thinking disabled for deepseek-v4")
+          PATCH
+
+      - name: Write OpenHands config
+        run: |
+          cat > config.toml << 'TOML'
+          [core]
+          max_iterations = ${{ inputs.max_iterations }}
+          default_agent = "CodeActAgent"
+
+          [llm.eval]
+          model = "${{ inputs.model }}"
+          api_key = "${{ secrets.DEEPSEEK_API_KEY }}"
+          base_url = "https://api.deepseek.com"
+          temperature = 1.0
+          top_p = 1.0
+          max_output_tokens = 65536
+          drop_params = true
+          caching_prompt = false
+          num_retries = 10
+          timeout = 300
+
+          [sandbox]
+          runtime_container_image = "ghcr.io/all-hands-ai/runtime:0.54-nikolaik"
+          timeout = 600
+          TOML
+
+      # ─── Run inference ──────────────────────────────────────────────
+      # SWE-bench Verified = princeton-nlp/SWE-bench_Verified, split=test
+      - name: Run inference
+        if: inputs.dry_run != true
+        env:
+          PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
+          GT_INDEX_BINARY: "/tmp/gt-index"
+        run: |
+          mkdir -p /tmp/results /tmp/gt_debug
+          if [ "${{ inputs.baseline }}" = "true" ]; then
+            export GT_BASELINE=1
+            echo "=== BASELINE MODE: pure OpenHands + DeepSeek, GT disabled (GT_BASELINE=1) ==="
+          else
+            echo "=== GT ARM: router_v2=$GT_ROUTER_V2, layers rebuilt, LSP verify on; graph.db built per-task in-container ==="
+          fi
+          python scripts/swebench/oh_gt_full_wrapper.py \
+            --instance-ids '${{ matrix.tasks }}' \
+            -l eval \
+            -i ${{ inputs.max_iterations }} \
+            --eval-num-workers 1 \
+            --eval-output-dir /tmp/results \
+            --dataset 'princeton-nlp/SWE-bench_Verified' \
+            --split test \
+            2>&1 | tee /tmp/results/run.log
+
+      # ─── Recover infra deaths (single clean retry) ─────────────────
+      - name: Retry zero-completion infra deaths (once)
+        if: inputs.dry_run != true
+        env:
+          PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
+          GT_INDEX_BINARY: "/tmp/gt-index"
+        run: |
+          RETRY_IDS=$(python scripts/swebench/detect_retry_tasks.py \
+            --output-jsonl /tmp/results/output.jsonl \
+            --completions-root /tmp/results \
+            --task-ids '${{ matrix.tasks }}' \
+            --audit-log /tmp/results/retry_audit.json | tail -1)
+          if [ -z "$RETRY_IDS" ]; then
+            echo "No zero-completion infra deaths to retry."
+            exit 0
+          fi
+          echo "=== Single clean retry of infra deaths that never started: $RETRY_IDS ==="
+          if [ "${{ inputs.baseline }}" = "true" ]; then
+            export GT_BASELINE=1
+          fi
+          python scripts/swebench/oh_gt_full_wrapper.py \
+            --instance-ids "$RETRY_IDS" \
+            -l eval \
+            -i ${{ inputs.max_iterations }} \
+            --eval-num-workers 1 \
+            --eval-output-dir /tmp/results \
+            --dataset 'princeton-nlp/SWE-bench_Verified' \
+            --split test \
+            2>&1 | tee -a /tmp/results/run.log
+
+      - name: Dry run summary
+        if: inputs.dry_run == true
+        run: |
+          echo "DRY RUN — skipped inference for tasks: ${{ matrix.tasks }}"
+          df -h /
+          docker images --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}" | head -20
+
+      # ─── Upload inference results FIRST (safe checkpoint) ──────────
+      - name: Capture token + cost (per shard)
+        if: always() && inputs.dry_run != true
+        run: |
+          python3 scripts/swebench/cost_token_report.py \
+            --root /tmp \
+            --emit /tmp/results/token_summary_${{ matrix.batch_id }}.json \
+            || echo "WARN: token capture failed"
+
+      - name: Upload inference results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: inference-${{ inputs.run_id }}-batch-${{ matrix.batch_id }}
+          path: |
+            /tmp/results/**/output.jsonl
+            /tmp/results/run.log
+            /tmp/results/token_summary_*.json
+            /tmp/gt_interactions.jsonl
+            /tmp/disk_report.txt
+          retention-days: 30
+          compression-level: 9
+          if-no-files-found: warn
+
+      # ─── Per-shard eval ────────────────────────────────────────────
+      - name: Convert predictions for eval
+        if: inputs.dry_run != true
+        run: |
+          mkdir -p /tmp/shard_eval
+          OUTPUT_JSONL=$(find /tmp/results -type f -name output.jsonl 2>/dev/null | head -1)
+          if [ -z "$OUTPUT_JSONL" ] || [ ! -s "$OUTPUT_JSONL" ]; then
+            echo "::warning::No inference output — skipping per-shard eval"
+            echo '{}' > /tmp/shard_eval/eval_results.json
+            exit 0
+          fi
+          echo "Found inference output: $OUTPUT_JSONL"
+
+          OUTPUT_JSONL="$OUTPUT_JSONL" python3 << 'PYEOF'
+          import json, os
+          MODEL = "${{ inputs.baseline == true && 'OpenHands-CodeActAgent + DeepSeek-V4-Flash (baseline)' || 'GroundTruth + OpenHands-CodeActAgent + DeepSeek-V4-Flash' }}"
+          preds = []
+          with open(os.environ["OUTPUT_JSONL"]) as f:
+              for line in f:
+                  if not line.strip():
+                      continue
+                  obj = json.loads(line)
+                  patch = obj.get("test_result", {}).get("git_patch", "") or ""
+                  preds.append({
+                      "instance_id": obj["instance_id"],
+                      "model_patch": patch.strip(),
+                      "model_name_or_path": MODEL,
+                  })
+          with open("/tmp/shard_eval/predictions.jsonl", "w") as f:
+              for p in preds:
+                  f.write(json.dumps(p) + "\n")
+          print(f"Converted {len(preds)} predictions for per-shard eval")
+          PYEOF
+
+      - name: Free disk for eval
+        if: inputs.dry_run != true
+        run: |
+          docker container prune -f 2>/dev/null || true
+          docker image prune -f 2>/dev/null || true
+          echo "=== Disk before per-shard eval ===" | tee -a /tmp/disk_report.txt
+          df -h / | tee -a /tmp/disk_report.txt
+
+      # SWE-bench Verified eval uses the standard swebench harness with
+      # princeton-nlp/SWE-bench_Verified dataset. The harness was installed
+      # via setup-eval from the Microsoft SWE-bench-Live repo (which also
+      # supports evaluating the original SWE-bench splits).
+      - name: Run per-shard eval (images already warm)
+        if: inputs.dry_run != true
+        run: |
+          if [ ! -f /tmp/shard_eval/predictions.jsonl ] || [ ! -s /tmp/shard_eval/predictions.jsonl ]; then
+            echo "No predictions to evaluate"
+            exit 0
+          fi
+          python -m swebench.harness.run_evaluation \
+            --dataset_name princeton-nlp/SWE-bench_Verified \
+            --split test \
+            --predictions_path /tmp/shard_eval/predictions.jsonl \
+            --max_workers 2 \
+            --run_id shard_${{ matrix.batch_id }} \
+            2>&1 | tee /tmp/shard_eval/eval.log || true
+
+      - name: Collect shard eval results
+        if: always() && inputs.dry_run != true
+        env:
+          BID: ${{ matrix.batch_id }}
+        run: |
+          python3 << 'PYEOF'
+          import json, glob, os
+          bid = os.environ["BID"]
+          resolved, all_ids = set(), set()
+          for rf in glob.glob(f"*shard_{bid}.json") + glob.glob(f"/tmp/shard_eval/*shard_{bid}.json"):
+              try:
+                  d = json.load(open(rf))
+              except Exception:
+                  continue
+              if isinstance(d, dict) and "resolved_ids" in d:
+                  resolved |= set(d.get("resolved_ids", []))
+                  for k in ("resolved_ids", "unresolved_ids", "error_ids", "empty_patch_ids"):
+                      all_ids |= set(d.get(k, []))
+          for rep in glob.glob(f"logs/run_evaluation/shard_{bid}/**/report.json", recursive=True):
+              try:
+                  d = json.load(open(rep))
+              except Exception:
+                  continue
+              for iid, res in (d.items() if isinstance(d, dict) else []):
+                  all_ids.add(iid)
+                  if isinstance(res, dict) and res.get("resolved"):
+                      resolved.add(iid)
+          out = {iid: {"resolved": iid in resolved} for iid in all_ids}
+          with open(f"/tmp/shard_eval/shard_{bid}.json", "w") as f:
+              json.dump(out, f)
+          print(f"Normalized shard {bid}: {len(out)} instances, {len(resolved)} resolved -> /tmp/shard_eval/shard_{bid}.json")
+          PYEOF
+          ls -la /tmp/shard_eval/ 2>/dev/null || true
+
+      - name: Upload shard eval results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-${{ inputs.run_id }}-batch-${{ matrix.batch_id }}
+          path: /tmp/shard_eval/
+          retention-days: 90
+          if-no-files-found: warn
+
+  # ── Phase 3: Merge results ──────────────────────────────────────────
+  merge:
+    needs: [prepare, inference]
+    runs-on: ubuntu-latest
+    if: always() && inputs.dry_run != true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-eval
+
+      - name: Download all inference artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/all_results
+          pattern: inference-${{ inputs.run_id }}-batch-*
+
+      - name: Merge and convert predictions
+        env:
+          RUN_MODE: ${{ inputs.mode }}
+          TASKS_PER_JOB: ${{ inputs.tasks_per_job }}
+        run: |
+          mkdir -p /tmp/merged
+
+          find /tmp/all_results -name 'output.jsonl' -exec cat {} + > /tmp/merged/output.jsonl
+
+          export TOTAL=$(wc -l < /tmp/merged/output.jsonl)
+          export EXPECTED=${{ needs.prepare.outputs.task_count }}
+          echo "Merged: $TOTAL tasks (expected: $EXPECTED)"
+
+          python3 << 'PYEOF'
+          import json, os, glob, math, sys
+
+          expected = int(os.environ.get("EXPECTED", "0") or "0")
+          total_lines = int(os.environ.get("TOTAL", "0") or "0")
+          mode = os.environ.get("RUN_MODE", "smoke")
+          tpj = int(os.environ.get("TASKS_PER_JOB", "3"))
+          n_batches = math.ceil(expected / tpj) if expected > 0 else 0
+          expected_ids = set(range(n_batches))
+
+          received_dirs = glob.glob("/tmp/all_results/inference-*-batch-*")
+          received_ids = set()
+          for d in received_dirs:
+              parts = d.rsplit("-batch-", 1)
+              if len(parts) == 2 and parts[1].isdigit():
+                  received_ids.add(int(parts[1]))
+
+          missing = sorted(expected_ids - received_ids)
+          with open("/tmp/merged/failed_batches.json", "w") as f:
+              json.dump(missing, f)
+
+          if total_lines == 0:
+              print("::error::No results to merge (0 tasks)")
+              sys.exit(1)
+
+          if missing:
+              print(f"::warning::Missing {len(missing)} batch(es): {missing}")
+              if mode == "full500":
+                  summary = os.environ.get("GITHUB_STEP_SUMMARY", "")
+                  if summary:
+                      with open(summary, "a") as f:
+                          f.write("### Incomplete full500 run\n\n")
+                          f.write(f"**Missing batches:** {missing}\n\n")
+                          f.write(f"**Received:** {total_lines}/{expected} tasks\n\n")
+                          f.write("**Eval blocked.** Rerun missing batches, then re-trigger merge.\n")
+                  print(f"::error::full500 incomplete: {total_lines}/{expected} tasks. Eval blocked.")
+                  sys.exit(1)
+              else:
+                  print(f"Non-full500 mode ({mode}): proceeding with {total_lines}/{expected} tasks")
+          else:
+              print(f"All {n_batches} batches received. {total_lines} tasks merged.")
+          PYEOF
+
+          python scripts/swebench/dedup_predictions.py /tmp/merged/output.jsonl || true
+
+          export GT_SUBMISSION_MODEL_NAME="${{ inputs.baseline == true && 'OpenHands-CodeActAgent + DeepSeek-V4-Flash (baseline)' || '' }}"
+          python scripts/swebench/convert_to_submission.py \
+            /tmp/merged/output.jsonl \
+            --output-dir /tmp/merged
+
+          echo "=== CONTAMINATION REPORT ==="
+          cat /tmp/merged/contamination_report.txt
+
+          echo "=== TOKEN + COST (full run) ==="
+          python3 scripts/swebench/cost_token_report.py --merge /tmp/all_results | tee -a "$GITHUB_STEP_SUMMARY" || echo "WARN: token/cost merge failed"
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### Inference Results (SWE-bench Verified)" >> $GITHUB_STEP_SUMMARY
+
+          if [ -f /tmp/merged/predictions.jsonl ]; then
+            python3 << 'PYEOF'
+          import json
+          with open("/tmp/merged/predictions.jsonl") as f:
+              preds = [json.loads(l) for l in f if l.strip()]
+          has_patch = sum(1 for p in preds if p.get("model_patch", "").strip())
+          empty = len(preds) - has_patch
+          print(f"| Metric | Value |")
+          print(f"|--------|-------|")
+          print(f"| Total predictions | {len(preds)} |")
+          print(f"| With patches | {has_patch} |")
+          print(f"| Empty patches | {empty} |")
+          print(f"| Patch rate | {has_patch/len(preds)*100:.1f}% |")
+          PYEOF
+          fi >> $GITHUB_STEP_SUMMARY
+
+      - name: GT utilization report
+        if: always()
+        run: |
+          python scripts/swebench/gt_utilization_report.py \
+            /tmp/merged/output.jsonl 2>&1 || echo "WARN: utilization report failed"
+
+      - name: Download shard eval artifacts
+        if: always()
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/all_eval
+          pattern: eval-${{ inputs.run_id }}-batch-*
+
+      - name: Aggregate per-shard eval results
+        if: always()
+        run: |
+          mkdir -p /tmp/final_eval
+
+          python3 << 'PYEOF'
+          import json, glob, os
+
+          result_files = []
+          for search_dir in ["/tmp/all_eval", "/tmp/all_results"]:
+              for pattern in ["**/shard_*.json", "**/*.eval.json"]:
+                  result_files.extend(glob.glob(f"{search_dir}/{pattern}", recursive=True))
+
+          if not result_files:
+              print("::warning::No per-shard eval results found")
+              with open("/tmp/final_eval/eval_summary.json", "w") as f:
+                  json.dump({"status": "no_shard_eval_results", "total": 0, "resolved": 0}, f)
+          else:
+              all_results = {}
+              for rf in result_files:
+                  try:
+                      with open(rf) as f:
+                          data = json.load(f)
+                      if isinstance(data, dict):
+                          for iid, result in data.items():
+                              all_results[iid] = result
+                      elif isinstance(data, list):
+                          for item in data:
+                              if "instance_id" in item:
+                                  all_results[item["instance_id"]] = item
+                  except Exception as e:
+                      print(f"WARN: Failed to parse {rf}: {e}")
+
+              total = len(all_results)
+              resolved = sum(1 for r in all_results.values()
+                             if (isinstance(r, dict) and r.get("resolved", False))
+                             or r == "RESOLVED"
+                             or (isinstance(r, str) and "resolved" in r.lower()))
+              rate = (resolved / total * 100) if total > 0 else 0
+
+              summary = {
+                  "total": total,
+                  "resolved": resolved,
+                  "not_resolved": total - resolved,
+                  "resolved_rate": round(rate, 2),
+                  "result_files": len(result_files),
+              }
+
+              print(f"{'='*50}")
+              print(f"PER-SHARD EVAL RESULTS (SWE-bench Verified)")
+              print(f"{'='*50}")
+              print(f"Total evaluated:  {total}")
+              print(f"Resolved:         {resolved}")
+              print(f"Resolved rate:    {rate:.1f}%")
+
+              with open("/tmp/final_eval/eval_results.json", "w") as f:
+                  json.dump(all_results, f, indent=2)
+              with open("/tmp/final_eval/eval_summary.json", "w") as f:
+                  json.dump(summary, f, indent=2)
+
+              sm = os.environ.get("GITHUB_STEP_SUMMARY", "")
+              if sm:
+                  with open(sm, "a") as f:
+                      f.write("\n### Evaluation Results (SWE-bench Verified)\n\n")
+                      f.write(f"| Metric | Value |\n|--------|-------|\n")
+                      f.write(f"| Total evaluated | {total} |\n")
+                      f.write(f"| Resolved | {resolved} |\n")
+                      f.write(f"| **Resolved rate** | **{rate:.1f}%** |\n")
+          PYEOF
+
+      - name: Upload merged predictions
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: predictions-${{ inputs.run_id }}
+          path: /tmp/merged/
+          retention-days: 90
+
+      - name: Upload eval results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-results-${{ inputs.run_id }}
+          path: /tmp/final_eval/
+          retention-days: 90

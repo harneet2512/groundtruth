@@ -1,0 +1,256 @@
+name: "Verified: Cache Docker Images to GHCR"
+
+# One-time (resumable) cache builder. Mirrors all 500 SWE-bench Verified Docker
+# images from Docker Hub to GHCR for same-network fast pulls during inference.
+#
+# RESUMABLE: each image first does `docker manifest inspect` on the GHCR target —
+# if already mirrored it SKIPS (no pull, no push). Re-run to pick up where a
+# rate-limited run left off. With Docker Hub's 200-pull/6hr anon limit, a full
+# 500-image mirror may need 2-3 runs spaced ~6h apart.
+#
+# PREREQUISITE: benchmarks/swebench_verified_500_ids.json must exist.
+# Run `python scripts/swebench/fetch_verified_ids.py` first.
+#
+# SECRETS REQUIRED:
+#   DOCKERHUB_USERNAME / DOCKERHUB_TOKEN  (doubles pull rate limit)
+#   GITHUB_TOKEN is automatic and pushes to GHCR.
+
+on:
+  workflow_dispatch:
+    inputs:
+      batch_size:
+        description: "Images per job (loop inside each job)"
+        required: true
+        default: "15"
+      max_parallel:
+        description: "Max concurrent cache jobs (governs Docker Hub pull rate)"
+        required: true
+        default: "5"
+      source_namespace:
+        description: "Docker Hub namespace for source images (e.g. aorwall, swebench, starryzhang)"
+        required: true
+        default: "aorwall"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build.outputs.matrix }}
+      task_count: ${{ steps.build.outputs.task_count }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - id: build
+        name: Build image batch matrix
+        run: |
+          MATRIX=$(python scripts/swebench/verified_tasks.py \
+            --mode full500 \
+            --tasks-per-job "${{ inputs.batch_size }}" \
+            --output matrix)
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
+          TASK_COUNT=$(python scripts/swebench/verified_tasks.py \
+            --mode full500 \
+            --output count)
+          echo "task_count=$TASK_COUNT" >> "$GITHUB_OUTPUT"
+
+          BATCH_COUNT=$(echo "$MATRIX" | python3 -c "import json,sys; print(len(json.load(sys.stdin)['include']))")
+          echo "### Cache Plan" >> $GITHUB_STEP_SUMMARY
+          echo "- **Benchmark:** SWE-bench Verified (500 images)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Source:** docker.io/${{ inputs.source_namespace }}/sweb.eval.x86_64.*" >> $GITHUB_STEP_SUMMARY
+          echo "- **Target:** ghcr.io/${{ github.repository_owner }}/sweb.eval.x86_64.*" >> $GITHUB_STEP_SUMMARY
+          echo "- Jobs: **$BATCH_COUNT** (${{ inputs.batch_size }} images/job)" >> $GITHUB_STEP_SUMMARY
+          echo "- Tasks: **$TASK_COUNT**" >> $GITHUB_STEP_SUMMARY
+
+  cache:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+      fail-fast: false
+      max-parallel: ${{ fromJson(inputs.max_parallel) }}
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+        continue-on-error: true
+
+      - name: Pull from Docker Hub, push to GHCR
+        env:
+          SOURCE_NS: ${{ inputs.source_namespace }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          OWNER_LC="$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')"
+          GHCR_PREFIX="ghcr.io/${OWNER_LC}"
+          SRC_REPO="https://github.com/${OWNER_LC}/groundtruth"
+
+          pull_with_retry() {
+            local IMAGE="$1" MAX_RETRIES=3 DELAY=10
+            for i in $(seq 1 $MAX_RETRIES); do
+              if docker pull "$IMAGE" 2>/dev/null; then return 0; fi
+              if [ "$i" -lt "$MAX_RETRIES" ]; then
+                echo "    Retry $i/$MAX_RETRIES in ${DELAY}s..."
+                sleep $DELAY
+                DELAY=$((DELAY * 2))
+              fi
+            done
+            return 1
+          }
+
+          push_with_retry() {
+            local IMAGE="$1" MAX_RETRIES=3 DELAY=10
+            for i in $(seq 1 $MAX_RETRIES); do
+              if docker push "$IMAGE" 2>/dev/null; then return 0; fi
+              if [ "$i" -lt "$MAX_RETRIES" ]; then
+                echo "    Push retry $i/$MAX_RETRIES in ${DELAY}s..."
+                sleep $DELAY
+                DELAY=$((DELAY * 2))
+              fi
+            done
+            return 1
+          }
+
+          IFS=',' read -ra TASK_ARRAY <<< "${{ matrix.tasks }}"
+          TOTAL=${#TASK_ARRAY[@]}
+          COUNT=0
+          CACHED=0
+          FAILED=0
+          MIRRORED=0
+
+          for TASK in "${TASK_ARRAY[@]}"; do
+            COUNT=$((COUNT + 1))
+            SLUG=$(echo "$TASK" | sed 's/__/_1776_/')
+            BASENAME="sweb.eval.x86_64.${SLUG}"
+            DST="${GHCR_PREFIX}/${BASENAME}:latest"
+
+            echo "=== [$COUNT/$TOTAL] $TASK ==="
+
+            # Idempotent: skip if already cached on GHCR
+            if docker manifest inspect "$DST" >/dev/null 2>&1; then
+              echo "  Already cached in GHCR, skipping"
+              CACHED=$((CACHED + 1))
+              continue
+            fi
+
+            # Try source namespace first, then fallback to 'swebench' namespace
+            SRC="docker.io/${SOURCE_NS}/${BASENAME}:latest"
+            SRC_ALT="docker.io/swebench/${BASENAME}:latest"
+            PULLED=0
+            if pull_with_retry "$SRC"; then
+              PULLED_FROM="$SRC"
+              PULLED=1
+            elif [ "$SOURCE_NS" != "swebench" ] && pull_with_retry "$SRC_ALT"; then
+              PULLED_FROM="$SRC_ALT"
+              PULLED=1
+            fi
+
+            if [ "$PULLED" -ne 1 ]; then
+              echo "::warning::Failed to pull $TASK from $SOURCE_NS or swebench namespace"
+              FAILED=$((FAILED + 1))
+              continue
+            fi
+
+            # Retag with OCI source label (links GHCR package to public repo = free storage)
+            printf 'FROM %s\nLABEL org.opencontainers.image.source=%s\n' "$PULLED_FROM" "$SRC_REPO" \
+              | docker build -q -t "$DST" - >/dev/null 2>&1 \
+              || docker tag "$PULLED_FROM" "$DST"
+
+            if push_with_retry "$DST"; then
+              echo "  Cached: $DST (from $PULLED_FROM)"
+              MIRRORED=$((MIRRORED + 1))
+            else
+              echo "::warning::Failed to push $DST"
+              FAILED=$((FAILED + 1))
+            fi
+
+            # Reclaim disk after each image (~1-2 GB each, runner has ~14 GB)
+            docker rmi "$PULLED_FROM" "$DST" 2>/dev/null || true
+          done
+
+          echo ""
+          echo "=== Batch ${{ matrix.batch_id }} Summary ==="
+          echo "Total: $TOTAL | New: $MIRRORED | Already cached: $CACHED | Failed: $FAILED"
+
+          if [ "$FAILED" -eq "$TOTAL" ] && [ "$CACHED" -eq 0 ]; then
+            echo "::error::All images in batch failed"
+            exit 1
+          fi
+
+      - name: Summary
+        run: |
+          echo "## Batch ${{ matrix.batch_id }}" >> $GITHUB_STEP_SUMMARY
+          echo "Tasks: \`${{ matrix.tasks }}\`" >> $GITHUB_STEP_SUMMARY
+
+  # ── Verify cache coverage ──────────────────────────────────────────
+  verify:
+    needs: [prepare, cache]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Count GHCR cache coverage (manifest-only, no pulls)
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          OWNER_LC="$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')"
+          GHCR_PREFIX="ghcr.io/${OWNER_LC}"
+
+          TOTAL=0
+          HAVE=0
+          MISS_LIST=""
+
+          while IFS= read -r TASK; do
+            [ -n "$TASK" ] || continue
+            TOTAL=$((TOTAL + 1))
+            SLUG=$(echo "$TASK" | sed 's/__/_1776_/')
+            DST="${GHCR_PREFIX}/sweb.eval.x86_64.${SLUG}:latest"
+            if docker manifest inspect "$DST" >/dev/null 2>&1; then
+              HAVE=$((HAVE + 1))
+            else
+              MISS_LIST="${MISS_LIST}\n  ${TASK}"
+            fi
+          done < <(python scripts/swebench/verified_tasks.py --mode full500 --output list)
+
+          echo "### Verified GHCR cache: $HAVE / $TOTAL mirrored" >> "$GITHUB_STEP_SUMMARY"
+          echo "Verified GHCR cache coverage: $HAVE / $TOTAL"
+
+          if [ "$HAVE" -lt "$TOTAL" ]; then
+            MISSING=$((TOTAL - HAVE))
+            echo "::warning::INCOMPLETE — $MISSING images missing. Re-run to resume (Docker Hub rate limit resets ~6h)."
+            printf '%b\n' "$MISS_LIST" | head -30
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "**Missing:** $MISSING images — re-run to resume" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "COMPLETE — all $TOTAL Verified images cached on GHCR"
+          echo "**Status:** All $TOTAL images cached" >> "$GITHUB_STEP_SUMMARY"
