@@ -370,5 +370,90 @@ exactly which of {delivered, correct, consumed} passed. "Delivered" alone is rep
 
 ---
 
+## 11. Localization redesign — findings + build plan (2026-06-09, run 27214152241)
+
+A 30-task paid agent run (2/30 resolved, **0 GT-caused flips**, leakage 0, substrate GREEN 30/30) +
+a full §4 trajectory audit + 4 design probes pinned WHY GT delivers correct-or-quiet context yet
+produces no flips. The substrate (embedder/LSP/graph) is ON and consumed — the failures are in the
+**ranking composition** and in **dead delivery hooks**, not the substrate.
+
+### 11.1 The verified live localization path (the ONE path)
+`oh_gt_full_wrapper → generate_v1r_brief` (`v1r_brief.py:2202`) → **`run_v74`** (`:2239`,
+hand-weighted LINEAR SUM `_total_score` `v7_4_brief.py:438-470`) → `ranked_full` (`:1261`) →
+`top_records` (`v1r_brief.py:2286`) → `entries` → **`.files`** (`:3051`, what the agent sees).
+`graph_localizer.localize()` (`:2451`) is **enrichment only** — it reorders/injects verified-witness
+files; it does NOT replace the ranking. `v22_brief`, `graph_map`, the `v2_ranker`/`v8_governor`
+chains are **dead on this path** (referenced only by old scripts). `run_v74`'s `focus_set` is computed
+but never feeds `.files`.
+
+### 11.2 Root finding A — semantic signal is throttled by GRANULARITY, not weight
+The embedder DOES reach `.files` (via `W_SEM=0.15`·sem in the linear sum + a tertiary `_rrf3` tie-break
+in localize), but it's near-flat: GT embeds **ONE vector per FILE** from a ≤600/2000-char bag of ≤60–80
+symbol `name+signature` (`anchor_select.py:212-258`, `graph_localizer.py:1393-1431`). Sibling files in
+a module share that vocabulary → cosines cluster at **0.80–0.84** (code-documented `mad=0.0145`,
+`_SUMMARY_VERSION="sym1"`; a prior version hit "0.83886 ×9 collapse"). **Maxing `W_SEM` cannot fix flat
+cosines** — the discriminating function is 1 of 60, averaged into noise.
+**Fix (CHANGE 1):** embed **per-symbol** (`name+signature+body-snippet`, ≤80 tok); file score =
+`0.7·max_i(cos_i) + 0.3·mean(top-k cos_i)`. ColBERT MaxSim (Khattab & Zaharia, SIGIR 2020) + MaxP/Birch
+(Dai & Callan, SIGIR 2019). Keep dict[file→float] contract; demand-scope to candidate files; cache by
+node-content hash; bump `_SUMMARY_VERSION`. **Validatable at 384-dim alone** (proves granularity is the
+lever before any model change).
+
+### 11.3 Root finding B — the embedder is general-text, not code-tuned
+`intfloat/e5-small-v2` (33M, 384-dim, general-text) under-discriminates code. **Fix (CHANGE 2):**
+`Alibaba-NLP/gte-modernbert-base` (149M, **768-dim**, **Apache-2.0**, ONNX published, CoIR ~71.5 vs
+e5-base ~51). Code-IR evidence: CoIR (arXiv 2407.02883, 2024), CodeXEmbed (arXiv 2411.12644, 2024),
+CodeSage (ICLR 2024). Risks: `embed.py:82-91` feeds `token_type_ids` unconditionally (ModernBERT's ONNX
+doesn't declare it → must introspect `session.get_inputs()`); drop e5's `query:`/`passage:` prefixes;
+int8-quantize (~150MB); **pin the sqlite-vec memory store to e5/384** (separate subsystem — don't
+migrate). Fallback e5→ZeroEmbedding (correct-or-quiet).
+
+### 11.4 Root finding C — the completeness signal fires into a DEAD hook
+The wrapper runs the **OH 0.54 controller** path: `AgentFinishAction` sets `state=FINISHED` **before**
+the patched `run_action` → the **finish handler is a dead write** (`emitted=False,
+suppressed=finish_handler_dead_write`; `safety/governor.py:80-87`). The leak-free multi-file scope check
+(`_check_multi_file_scope`, conf≥0.7 call-graph) is wired into that dead handler — **so aiogram-1594's
+correct scope warning never reached the agent. Not missing logic, a dead hook.** `_consensus_scope` /
+`_consensus_scope_edited` are already tracked + leak-free (call-graph neighbors ≥0.7, test files
+excluded, zero gold/FAIL_TO_PASS).
+**Fix (#4, highest FLIP leverage):** re-route the K-of-N completeness warning to the LIVE
+`_maybe_fire_presubmit_verify` hook (`oh_gt_full_wrapper.py:1186`, the edit→review transition that DOES
+reach the agent); make the one-shot "no source edits" nudge ESCALATE (the cfn-lint-3875 empty-patch
+loop), capped at 3 and yielding to OH's stuck detector (preserve the 2026-05-25 stuck-compat skip).
+
+### 11.5 Root finding D — fusion is not query-adaptive + non-code gold is invisible
+`_adapt_weights_for_issue` (`v7_4_brief.py:46-157`) adapts W_FRAME/LEX/PATH/REACH/PROX but **never
+W_SEM**. SWE-bench-Live cfn-lint issues quote machine-checkable strings (rule codes `E1010`, paths) →
+lexical is decisive there; NL-gap issues favor dense. Evidence: BEIR (NeurIPS 2021), DPR (EMNLP 2020),
+Sciavolino entity-centric (EMNLP 2021). And the Go indexer has **no `.json` spec** (`walker.go`) →
+schema/data gold (`policy.json`) has zero nodes → invisible to `localize`/FTS5 (though `run_v74`'s
+lexical walk already reads `.json`).
+**Fix (#3):** deterministic query-type detector (error-code regex `\b[A-Z]\d{3,5}\b` + quoted
+paths/code-symbols vs NL-prose ratio) as "Dimension 0" → identifier_heavy = lexical-lead, nl_gap =
+dense-lead, mixed = no change; gated non-code candidate rescue (issue-term ∩ path-component) + a
+durable `.json` indexer spec.
+
+### 11.6 Cross-cutting constraint (all levers)
+`forbid_no_sem_config` (`proof.py:328-340`) RAISES if `effective_w_sem ≤ 0` under proof+require_embedder.
+Fusion/granularity changes must down-weight dense to a **floor > 0**, never zero it.
+
+### 11.7 LLM-free boundary
+GT borrows only DETERMINISTIC primitives from the SOTA (repo code-graph — RepoGraph ICLR 2025; MaxSim;
+RRF). The LLM-agent localizers (Agentless 2024, LocAgent/OrcaLoca 2025) are NOT adopted — they add a
+generative LLM, which the ONE-PRODUCT / $0-AI rule forbids.
+
+### 11.8 Prioritized build plan (each Stage-1 deterministic before any flip claim)
+1. **CHANGE 1 — symbol-level granularity** (§11.2). Root fix for flat cosines; low risk; e5/384.
+2. **#4 — re-route completeness to live hook + escalating loop-breaker** (§11.4). Highest flip
+   leverage; logic mostly exists (dead-hooked).
+3. **#3 — query-adaptive fusion + non-code inclusion** (§11.5). Stage-1 correctness; cfn-lint + JSON.
+4. **CHANGE 2 — e5→gte-modernbert swap** (§11.3). Headroom; higher risk (ONNX `token_type_ids`, 768d).
+
+Validation for each: sibling-pair cosine-MAD harness (for A/B), red→green leak-free K-of-N + loop-break
+tests (for C), classifier + candidate-inclusion tests (for D); ≥3 repos/languages (anti-overfit);
+8-dp deep logs; then paired Wilcoxon vs the frozen `FINAL_resolved_300_20260531.json`.
+
+---
+
 *End — gt_gt.md. Localization deep internals: `BRIEFING.md`. Benchmark operation/gates:
 `BENCHMARK_RUNBOOK.md`. Fix history: `we_did.md` (legacy).*
