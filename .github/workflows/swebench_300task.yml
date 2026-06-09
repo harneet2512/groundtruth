@@ -706,13 +706,16 @@ jobs:
         if: inputs.gt_use_substrate_image == 'true'
         run: |
           set -e
-          # Stage 4: FORBID the substrate proof path. It runs the DIVERGENT gt-substrate-run.sh
-          # gate, not the single foundational_gates.py path. In proof/final mode there is ONE
-          # runtime + ONE gate path: host-orchestrated, GT executed IN the eval container via
-          # docker exec (gt_use_substrate_image=false). Two proof paths are never silently allowed.
-          echo "SUBSTRATE_PROOF_PATH_FORBIDDEN: substrate mode (gt_use_substrate_image=true) is the"
-          echo "divergent gt-substrate-run.sh gate path. Re-run with gt_use_substrate_image=false"
-          echo "(host-orchestrated, GT runs IN the eval container via docker exec — one gate path)."
+          # Stage 4.1: FORBID only the LEGACY DIVERGENT substrate path (gt-substrate-run.sh — a
+          # shell gate distinct from foundational_gates.py). A UNIFIED GT substrate runtime (the
+          # substrate IMAGE running the SAME foundational_gates.py + resolve.py + certificates in
+          # a container) is the preferred final design (Option B — STAGE4_RUNTIME_STRATEGY_DECISION.md)
+          # and is NOT forbidden; but until it is wired, this opt-in flag runs gt-substrate-run.sh,
+          # so it fails-closed here. There is ONE proof path: GT executes in-container via one gate.
+          echo "LEGACY_DIVERGENT_SUBSTRATE_FORBIDDEN: gt_use_substrate_image=true currently runs the"
+          echo "divergent gt-substrate-run.sh gate, not the unified foundational_gates.py path. Use"
+          echo "the host-orchestrated in-container path (gt_use_substrate_image=false), or wire the"
+          echo "UNIFIED GT substrate (substrate image + foundational_gates.py) per Stage 4.1."
           exit 1
           TASK="${{ matrix.task }}"
           REPO=$(echo "$TASK" | cut -d'_' -f1)

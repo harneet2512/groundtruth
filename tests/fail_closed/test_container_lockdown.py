@@ -90,8 +90,41 @@ def test_all_proof_flags_on_in_container_execs():
         assert flag in t, f"missing in-container exec flag: {flag}"
 
 
-def test_substrate_proof_path_forbidden():
-    assert "SUBSTRATE_PROOF_PATH_FORBIDDEN" in _wf_text()
+def test_legacy_divergent_substrate_forbidden():
+    # Stage 4.1: forbid the LEGACY DIVERGENT shell gate, NOT unified substrate.
+    t = _wf_text()
+    assert "LEGACY_DIVERGENT_SUBSTRATE_FORBIDDEN" in t
+    assert "SUBSTRATE_PROOF_PATH_FORBIDDEN" not in t  # the old blanket-forbid wording is gone
+
+
+def test_classify_runtime_strategy():
+    from groundtruth.runtime.context import classify_runtime_strategy
+    assert classify_runtime_strategy(gate_module="foundational_gates.py", in_container=False, proof=True) == ("HOST_GT_EXEC_FORBIDDEN", False)
+    assert classify_runtime_strategy(gate_module="gt-substrate-run.sh", in_container=True, proof=True) == ("LEGACY_DIVERGENT_SUBSTRATE_FORBIDDEN", False)
+    assert classify_runtime_strategy(gate_module="foundational_gates.py", in_container=True, proof=True) == ("UNIFIED_GT_SUBSTRATE_OK", True)
+
+
+def test_run_v74_forbids_host_in_proof(monkeypatch):
+    # Stage 4.1: the host-primary brief proof leak is closed — run_v74 on the host in proof fails.
+    from groundtruth.pretask.v7_4_brief import run_v74
+    from groundtruth.runtime.proof import GTProofModeError
+    monkeypatch.setenv("GT_PROOF_MODE", "1")
+    monkeypatch.delenv("GT_CONTAINERIZED", raising=False)
+    with pytest.raises(GTProofModeError) as e:
+        run_v74("some issue", "/tmp/repo", "/tmp/does_not_exist.db")
+    assert "FINAL_PIPELINE_HOST_SPLIT_FAIL" in str(e.value)
+
+
+def test_run_v74_guard_inert_outside_proof(monkeypatch):
+    monkeypatch.delenv("GT_PROOF_MODE", raising=False)
+    from groundtruth.pretask.v7_4_brief import run_v74
+    from groundtruth.runtime.proof import GTProofModeError
+    try:
+        run_v74("x", "/tmp/repo", "/tmp/does_not_exist.db")
+    except GTProofModeError:
+        pytest.fail("boundary guard must be inert outside proof mode")
+    except Exception:
+        pass  # other failures (missing db etc.) are fine; we only assert the proof guard is inert
 
 
 def test_certificates_collected_and_uploaded():

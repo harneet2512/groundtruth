@@ -735,6 +735,14 @@ def run_v74(
     # IssueAnchors() so symbol/path signal was dropped — and (b) seeding the
     # explicit-path component of the frame signal below. Degrades to no-op when
     # the issue has no resolvable symbols/paths (extract returns empty sets).
+    # Stage 4.1: close the proof-boundary leak — run_v74 (brief + semantic scoring) MUST NOT
+    # execute on the HOST in proof/final mode. The agent's host-primary brief on the GHA runner
+    # would be host GT execution in proof; fail-closed FINAL_PIPELINE_HOST_SPLIT_FAIL. In
+    # proof/final mode the brief is generated INSIDE the eval container (where the gates already
+    # invoke run_v74). Inert outside proof mode (byte-identical).
+    from groundtruth.runtime.context import assert_container_boundary as _assert_cb
+    _assert_cb("run_v74/brief/scoring")
+
     issue_anchors = extract_issue_anchors(issue_text, graph_db)
 
     model = _get_model()

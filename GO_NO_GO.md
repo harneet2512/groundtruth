@@ -21,7 +21,8 @@
 | Stage 1 — LSP liveness cert | ✅ local gate proven (15 tests) | `1c3ec178` |
 | Stage 2 — graph handoff cert | ✅ local gate proven (18 tests) | `dbc41e43` |
 | Stage 3 — embedder usage cert | ✅ local gate proven (15 tests) | `061e50bb` |
-| Stage 4 — LSP+gates in-container | ✅ runtime boundary proven (12 tests); workflow GHA-proven Stage B | this commit |
+| Stage 4 — LSP+gates in-container | ⚠️ escalation checkpoint (NOT final) — runtime boundary proven, workflow surfaced the provisioning tension | `b88beeec` |
+| Stage 4.1 — runtime strategy decision + proof-leak fix | ✅ Option B chosen; host run_v74 leak CLOSED; rule reframed (15 tests) — awaiting review | this commit |
 | Stage 5 — image cache + manifest | ⛔ not started | — |
 
 ## Blockers (from Stage 0 UNKNOWNs)
@@ -43,5 +44,9 @@
 
 ## Next allowed action
 
-**Stage 5 — image cache + final-pipeline manifest contract** (after user review of Stage 4). No
-GHA runs until the local staged gates (Phase 6 Stage A) pass for all of Stages 1–5.
+**NOT Stage 5.** Option B (unified GT substrate runtime) is chosen but **not yet wired** — image-
+cache work (Stage 5) presupposes the final runtime path. Next is either: wire the unified-substrate
+runtime (same `foundational_gates.py`/`resolve.py`/certs, baked GT image + shared source/volume,
+host orchestrates only), OR a Stage-B 1-task run to test whether Option A provisioning is
+deterministic + cheap. Stage 5 begins only after the runtime path is final. No GHA runs until the
+local staged gates (Phase 6 Stage A) pass for the final runtime path.

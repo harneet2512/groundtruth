@@ -6,6 +6,35 @@
 > INSIDE the eval container. No image-cache / GHCR-manifest / task-manifest / run_v74-semantic /
 > ranking-weight / task-specific changes.
 
+## Stage 4.1 — runtime-strategy decision + proof-leak fix (UPDATE)
+
+Stage 4 was accepted as an **escalation-revealing checkpoint, not final.** Stage 4.1 resolves it
+(full rationale in `STAGE4_RUNTIME_STRATEGY_DECISION.md`):
+
+- **Decision: Option B (unified GT substrate runtime)** is the chosen final design; Option A
+  (per-task provisioning) is a fallback valid only if Stage B proves it deterministic + cheap.
+
+  | Decision | Option A: provision task image | **Option B: unified substrate (CHOSEN)** |
+  |---|---|---|
+  | GT deps baked? | no | **yes** |
+  | per-task network? | yes | **no** |
+  | same task container? | yes | no — **shared source/artifacts** |
+  | host GT execution possible? | **must fail** | **must fail** |
+  | proof-path divergence risk | medium/high | **low if unified** |
+  | 300-run risk | high unless proven | **lower** |
+  | recommendation | only if Stage B proves stable | **preferred** |
+
+- **Proof-leak CLOSED:** `run_v74` now calls `assert_container_boundary` at entry, so the agent's
+  host-primary brief in proof mode fails-closed `FINAL_PIPELINE_HOST_SPLIT_FAIL` (no host semantic
+  scoring in proof). The brief must be generated in-container.
+- **Rule reframed:** "substrate forbidden globally" → `LEGACY_DIVERGENT_SUBSTRATE_FORBIDDEN`
+  (the `gt-substrate-run.sh` shell gate) + `UNIFIED_GT_SUBSTRATE_OK` (same `foundational_gates.py`
+  in-container) + `HOST_GT_EXEC_FORBIDDEN`. Implemented as `context.classify_runtime_strategy`.
+- **Stage 4 rework:** the W1 per-task provisioning is Option A → deprecated; the unified-substrate
+  runtime is the follow-up. Stage 5 is NOT safe until Option B is wired (or Stage B proves A).
+
+---
+
 ## The load-bearing guarantee (runtime, locally proven)
 
 `context.assert_container_boundary` (new) + `foundational_gates.main` (wired) **fail-closed

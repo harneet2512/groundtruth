@@ -62,6 +62,27 @@ def assert_container_boundary(where: str = "gt") -> None:
             "the host runner.")
 
 
+def classify_runtime_strategy(*, gate_module: str, in_container: bool, proof: bool):
+    """Stage 4.1 GT container-runtime strategy verdict. The goal is NOT 'host mode' for its own
+    sake — it is: host runner only orchestrates; GT NEVER executes on the host in proof/final
+    mode; ONE proof path; the SAME foundational_gates.py + resolve.py + certificates + artifacts.
+
+    Returns (verdict, ok):
+      HOST_GT_EXEC_FORBIDDEN              — GT (gates/resolve/run_v74/embedder) ran on the host in proof.
+      LEGACY_DIVERGENT_SUBSTRATE_FORBIDDEN— the old gt-substrate-run.sh shell gate (divergent code).
+      UNIFIED_GT_SUBSTRATE_OK            — the SAME foundational_gates.py running IN a container.
+      UNIFIED_CONTAINER_RUNTIME_REQUIRED — outside proof, or an unclassified path (advisory).
+    """
+    if proof and not in_container:
+        return ("HOST_GT_EXEC_FORBIDDEN", False)
+    g = (gate_module or "").lower()
+    if "gt-substrate-run.sh" in g or "gt_substrate_run" in g:
+        return ("LEGACY_DIVERGENT_SUBSTRATE_FORBIDDEN", False)
+    if "foundational_gates" in g and in_container:
+        return ("UNIFIED_GT_SUBSTRATE_OK", True)
+    return ("UNIFIED_CONTAINER_RUNTIME_REQUIRED", not proof)
+
+
 @dataclass
 class GTRuntimeContext:
     runtime_root: str
