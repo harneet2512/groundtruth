@@ -363,7 +363,11 @@ def test_lsp_installed_zero_enrichment_fails_or_reason(pp, clean_env, tmp_path, 
 
     ok_b, detail_b = pp.check_lsp_edges(db_b)
     assert ok_b is True, f"return_type enrichment should document the no-edge reason: {detail_b}"
-    assert "enrichment" in detail_b and "no edge corrections needed" in detail_b, detail_b
+    # Align with the current check_lsp_edges wording (preflight_pipeline.py:358-360): a
+    # 0-call-edge result on a CALLS-dominant lang is accepted when return_type is populated
+    # AND the warm-probe gate is the LSP-ran proof. Intent unchanged: enrichment present +
+    # documented no-edge reason.
+    assert "return_type" in detail_b and "call-edge corrections" in detail_b, detail_b
 
 
 # =========================================================================== #
