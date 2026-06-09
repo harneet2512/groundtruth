@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import threading
 from dataclasses import dataclass, asdict, field
@@ -50,6 +51,8 @@ def _adapt_weights_for_issue(
     *,
     graph_db: str = "",
     issue_anchors: "IssueAnchors | None" = None,
+    issue_text: str = "",
+    enforce_floor: bool = True,
 ) -> dict[str, float]:
     """Dynamic localization — adapt weights based on WHICH signals exist AND
     the scope/structure of the task. Three dimensions of adaptation, each a
@@ -81,11 +84,48 @@ def _adapt_weights_for_issue(
 
     All dimensions compose additively. Each is a gate that either fires or
     falls back. Worst case = no gate fires = base weights unchanged.
+
+    Dimension 0: QUERY LEXICALITY (FUSION REDESIGN — runs FIRST so later dims
+      compose over it via max/min). Classifies the issue (identifier_heavy /
+      nl_gap / mixed) from issue_text + IssueAnchors, then leads the fusion toward
+      the signal that query type favors WITHOUT throttling the other:
+        identifier_heavy -> lexical LEADS (W_LEX/W_PATH floored up), dense LED-DOWN
+          to the floor (BEIR NeurIPS 2021 + Sciavolino EMNLP 2021: exact-identifier
+          queries favor lexical) — dense floored, never zeroed.
+        nl_gap -> dense LEADS (W_SEM floored up to 0.45); lexical left at base.
+        mixed -> no change (byte-identical to the pre-change ranker).
+      THE INVARIANT: after ALL adaptation, W_SEM >= W_SEM_FLOOR (> 0) always.
     """
     w = dict(base)
 
     has_frames = bool(frame_scores)
     has_code_defs = bool(code_def_scores)
+
+    # ── Dimension 0: Query lexicality (FUSION REDESIGN — runs FIRST) ──
+    # Lead the fusion toward the signal the query type favors; never throttle the
+    # other below its floor. Composes with later dims (which use max/min), so a
+    # later dim can only RAISE a led-up weight, never undo the floor (re-asserted
+    # at the END of this function as a single hard invariant).
+    w_sem_floor = _w_sem_floor()
+    lexicality = _classify_issue_lexicality(issue_text, issue_anchors, graph_db=graph_db)
+    if lexicality == "identifier_heavy":
+        # Exact-identifier query -> lexical LEADS. Float lexical/path UP regardless.
+        # max() so a later dim cannot drop lexical below this lead.
+        w["W_LEX"] = max(w.get("W_LEX", 0.50), 0.65)
+        w["W_PATH"] = max(w.get("W_PATH", 0.45), 0.55)
+        if enforce_floor:
+            # LEAD dense DOWN to the floor (floored, NOT zeroed). Skipped when the
+            # embedder is off (enforce_floor=False) so a dead/ablated W_SEM=0 stays 0.
+            w["W_SEM"] = w_sem_floor
+    elif lexicality == "nl_gap":
+        # Lexical-gap prose query -> dense LEADS (bridges vocabulary mismatch BM25
+        # cannot). Float dense UP so it AT LEAST matches lexical — dense must lead,
+        # so the target is max(0.45, W_LEX): we add the dense lead WITHOUT demoting
+        # lexical (correct-or-quiet — we never subtract the lexical signal). Skipped
+        # when the embedder is off (a dense lead over a zero signal is noise).
+        if enforce_floor:
+            w["W_SEM"] = max(w.get("W_SEM", 0.40), 0.45, w.get("W_LEX", 0.50))
+    # mixed -> no change (byte-identical to the pre-change ranker for this dim).
 
     # ── Dimension 1: Signal presence ──
     if has_frames and has_code_defs:
@@ -154,11 +194,156 @@ def _adapt_weights_for_issue(
         except Exception:
             pass  # safe fallback
 
+    # ── THE DENSE FLOOR — single hard invariant, enforced AFTER all dimensions ──
+    # No matter which dims fired or how they composed, the dense weight is never
+    # throttled below the floor. Dimension 0 may LEAD dense down to the floor on
+    # identifier_heavy queries, but this guarantees it stops AT the floor (> 0):
+    # dense is never marginalized (the e5-era W_SEM=0.15 bug), and the proof gate
+    # (forbid_no_sem_config: effective_w_sem > 0.0) is satisfied by construction.
+    # This does NOT force dominance — on identifier_heavy, W_LEX (0.65) still
+    # out-weights W_SEM (the floor), exactly as BEIR/Sciavolino prescribe.
+    # enforce_floor=False (embedder absent / sem-zeroing ablation) leaves W_SEM=0
+    # untouched so the floor never resurrects a dead/ablated dense signal.
+    if enforce_floor:
+        w["W_SEM"] = max(w.get("W_SEM", 0.0), w_sem_floor)
+
     return w
 
 
+def _w_sem_floor() -> float:
+    """The DENSE (W_SEM) FLOOR — a *substantive* co-signal floor (default 0.25),
+    NOT the 0.05 proof-floor. After ALL weight adaptation, ``W_SEM >= W_SEM_FLOOR``
+    is enforced as a single invariant: dense can be LED-down toward the floor on
+    identifier-heavy queries (BEIR NeurIPS 2021 + Sciavolino EMNLP 2021 — exact-
+    identifier queries favor lexical), but is NEVER throttled below it (the e5-era
+    bug where W_SEM=0.15 marginalized the dense signal). The floor GUARANTEES dense
+    is never marginalized; it does NOT force dominance — lexical may still out-weight
+    it on identifier-heavy issues. Kept strictly > 0 so forbid_no_sem_config
+    (runtime/proof.py: effective_w_sem > 0.0 under proof + require_embedder) holds.
+    Overridable via GT_W_SEM_FLOOR for per-deployment tuning; clamped to (0, 1].
+    """
+    raw = os.environ.get("GT_W_SEM_FLOOR", "")
+    if raw:
+        try:
+            v = float(raw)
+            if 0.0 < v <= 1.0:
+                return v
+        except (TypeError, ValueError):
+            pass
+    return 0.25
+
+
+# ── Deterministic issue-type classifier (FUSION REDESIGN, query-adaptive) ──
+# Error/rule-code surface form — language-agnostic: cfn-lint E1010, pylint C0114,
+# mypy/tsc/rustc diagnostic codes (e.g. E0599), flake8 W503, etc. A leading capital
+# letter (the tool's code class) followed by 3-5 digits. Anchored on word boundaries
+# so it does not fire on hex/version tokens embedded in longer alnum runs.
+_RULE_CODE_RE = re.compile(r"\b[A-Z]\d{3,5}\b")
+# Identifier-shaped tokens for the prose function-word ratio (cheap, language-invariant).
+_WORD_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _classify_issue_lexicality(
+    issue_text: str,
+    issue_anchors: "IssueAnchors | None",
+    *,
+    graph_db: str = "",
+) -> Literal["identifier_heavy", "nl_gap", "mixed"]:
+    """Deterministic, generalized issue-lexicality classifier (no task IDs / gold).
+
+    Decides WHICH retrieval signal a query favors, from the issue text + the
+    already-extracted IssueAnchors only. Three categorical buckets (a DECISION
+    GATE in the Dimension-1 style, not continuous tuning):
+
+      identifier_heavy — the issue is dominated by EXACT lexical surface forms a
+        BM25/FTS index matches verbatim: a tool error/rule code (``E1010``),
+        backtick-wrapped code symbols, and/or a path that RESOLVES to an indexed
+        graph file. Research: BEIR (Thakur et al., NeurIPS 2021 Datasets) and
+        Sciavolino et al. (EMNLP 2021, "Simple Entity-Centric Questions Challenge
+        Dense Retrievers") — exact-identifier / entity queries favor sparse lexical
+        retrieval over dense. Lexical LEADS here; dense is floored, not throttled.
+
+      nl_gap — natural-language prose describing a behavior with little or no exact
+        identifier surface (a "lexical gap" query). Dense LEADS here: the semantic
+        embedder bridges the vocabulary mismatch BM25 cannot. Research: the dense-
+        retrieval motivation in BEIR / Karpukhin et al. (DPR, EMNLP 2020).
+
+      mixed — ambiguous / both present in balance -> NO change (byte-identical to
+        the pre-change ranker; the no-regression bucket).
+
+    Path resolution: a raw path COUNTS as an identifier signal ONLY if it resolves
+    against the indexed graph (reuse ``_resolve_against_graph_files``) — so one
+    stray, unindexed path in prose does not misclassify a natural-language issue.
+    Falls back to NOT counting the path when no graph is available (correct-or-quiet).
+    """
+    text = issue_text or ""
+
+    # ── Lexical (identifier) signals ──
+    rule_codes = _RULE_CODE_RE.findall(text)
+    n_rule_codes = len(rule_codes)
+
+    code_symbols: set[str] = set()
+    raw_paths: set[str] = set()
+    if issue_anchors is not None:
+        code_symbols = set(getattr(issue_anchors, "code_symbols", set()) or set())
+        raw_paths = set(getattr(issue_anchors, "paths", set()) or set())
+    n_code_symbols = len(code_symbols)
+
+    # A path counts ONLY if it resolves against the indexed graph (no stray-path
+    # misclassification). Reuses the same suffix/unique-basename matcher the frame
+    # signal uses, so "resolves" means the SAME thing everywhere.
+    n_resolved_paths = 0
+    if raw_paths and graph_db:
+        try:
+            # graph_file_paths_for_frame is defined in THIS module (below) — the
+            # same distinct-non-test file_path query the frame signal uses, so
+            # "resolves" means the same thing across the pipeline.
+            graph_files = graph_file_paths_for_frame(graph_db)
+        except Exception:
+            graph_files = []
+        if graph_files:
+            graph_basenames: dict[str, list[str]] = {}
+            for gf in graph_files:
+                graph_basenames.setdefault(os.path.basename(gf), []).append(gf)
+            for raw in raw_paths:
+                if _resolve_against_graph_files(raw, graph_files, graph_basenames):
+                    n_resolved_paths += 1
+
+    identifier_signal = n_rule_codes + n_code_symbols + n_resolved_paths
+
+    # ── Natural-language (prose) signal ──
+    # A cheap, language-invariant proxy for prose: closed-class English FUNCTION
+    # words (articles/conjunctions/prepositions/auxiliaries — _NL_FUNCTION_WORDS).
+    # These never appear in code identifiers, so a high count = prose-heavy report.
+    from groundtruth.pretask.anchors import _NL_FUNCTION_WORDS
+    tokens = _WORD_TOKEN_RE.findall(text)
+    n_tokens = len(tokens)
+    n_nl_words = sum(1 for t in tokens if t.lower() in _NL_FUNCTION_WORDS)
+    nl_ratio = (n_nl_words / n_tokens) if n_tokens else 0.0
+
+    # ── Categorical decision (DECISION GATE, not tuning) ──
+    # identifier_heavy: any exact-identifier surface form present (rule code,
+    # backtick code symbol, or graph-resolved path). These are the queries BEIR /
+    # Sciavolino show favor lexical — and they are unambiguous when present.
+    if identifier_signal >= 1:
+        return "identifier_heavy"
+    # nl_gap: NO identifier surface AND prose-shaped (function-word ratio above the
+    # closed-class baseline of English, ~0.20 of running text). Dense bridges the gap.
+    if n_tokens >= 8 and nl_ratio >= 0.20:
+        return "nl_gap"
+    # Everything else (sparse text, no clear signal) -> mixed (no change, no regression).
+    return "mixed"
+
+
 DEFAULT_WEIGHTS: dict[str, float] = {
-    "W_SEM": 0.15,
+    # W_SEM — dense cosine weight. DENSE-LED default (raised 0.15 -> 0.40 in the
+    # FUSION REDESIGN): the old 0.15 was calibrated for a WEAK general-text e5 and
+    # marginalized the dense signal. With per-symbol MaxSim granularity (CHANGE 1)
+    # and a future code embedder, dense is a strong signal that must LEAD on mixed/
+    # semantic queries — without monopolizing (lexical stays in the fusion for
+    # identifier queries). Enforced never to fall below _w_sem_floor() (default 0.25)
+    # after all weight adaptation. Research: BEIR (NeurIPS 2021) hybrid dense+sparse.
+    "W_SEM": 0.40,
     "W_LEX": 0.50,
     "W_REACH": 0.05,
     "W_PROX": 0.05,
@@ -896,9 +1081,15 @@ def run_v74(
     # Not continuous tuning — a decision gate. Falls back to base weights when
     # no strong signal (correct-or-quiet: never worse than current).
     # If the brief still misranks, Consensus corrects at runtime.
+    # The dense floor applies ONLY when dense is a real, live signal: the embedder
+    # is available AND the ablation does not deliberately zero W_SEM (A=dense-only
+    # keeps it; B0/B1 zero it). Otherwise the floor must NOT resurrect a dead/ablated
+    # W_SEM=0 — keeping effective_w_sem honest for the consumption proof.
+    _enforce_sem_floor = bool(_SEMANTIC_AVAILABLE) and ablation not in ("B0", "B1")
     effective_weights = _adapt_weights_for_issue(
         frame_scores, code_def_scores, effective_weights,
-        graph_db=graph_db, issue_anchors=issue_anchors,
+        graph_db=graph_db, issue_anchors=issue_anchors, issue_text=issue_text,
+        enforce_floor=_enforce_sem_floor,
     )
 
     if code_def_scores:
