@@ -70,3 +70,42 @@ Outcome: resolved=**no** (`eval_result.json` → `resolved_instances: 0`, `unres
 ## Cross-component line
 
 leakage=**0** · delivered components=**4** (L1, L3b post-view, consensus `<gt-scope>`, L3/GT_VERIFY) · consumed=**4** (all four reached and were acted on by the agent; the gold file was opened turn 1, contracts read, scope respected, verify-suite run) · fair-probe=**FAIR** (GT pre-named the gold file as candidate #1 via the localizer, but the agent independently opened, reasoned over, and edited it — and the non-resolution is a post-localization implementation-logic error inside the correctly-named file, NOT a probe that pre-fed the answer; the gold's actual fix — the `_ACCOUNT_ID` global — was NOT surfaced by any GT component, so GT did not leak the solution).
+
+---
+
+# §4 DEEP AUDIT — aws-cloudformation__cfn-lint-3749 (run 27214152241, branch gt-trial, 2026-06-09)
+
+Outcome: **UNRESOLVED** (submitted, completed, non-empty patch) · baseline_pass=NO · flip=NO · regression=NO (flip-candidate)
+Gold: `src/cfnlint/template/transforms/_language_extensions.py` — module-global `_ACCOUNT_ID`; capture the FindInMap key that matched `AWS::AccountId` in `_ForEachCollection.value()`; make `_ForEachValueRef.value()` raise unless `_ACCOUNT_ID` is set. FAIL_TO_PASS: `test_ref`, `test_account_id`, `test_transform`.
+Source: output.jsonl (136 events) read chronologically. actions=60, edits=1.
+
+## (a) PREREQS / substrate (gate-deep, 8-dp)
+| dim | REAL value | GREEN? | reached agent as |
+|---|---|---|---|
+| P1 resolution | det_pct=76.29499561 · name_match=810 · calls_edges=3417 · type_flow=223/impl_method=248/inherited=149 | YES | `Witness … [CALLS]` / `Calls:` lines |
+| P2 graph.db | calls_edges=3417 · name_match=810/same_file=604/import=591/verified_unique=540/impl_method=248/type_flow=223/lsp=176/inherited=149/return_type=75 | YES | `<gt-graph-map>`, `EDIT-TARGET CONTRACTS` |
+| P3 embedder | class=EmbeddingModel · cos_related=0.86053280 · cos_unrelated=0.76078654 · is_zero=false · effective_w_sem=0.15 · sem_max=0.83408400 | YES | ranking only |
+
+## (b) per-component tables
+
+### L1 brief (event id=1)
+| turn | GT SENT (verbatim) | AGENT DID | D/C/C |
+|---|---|---|---|
+| id=1 | `<gt-localization confidence="medium"> Candidate edit targets: 1. src/cfnlint/template/transforms/_language_extensions.py — values, _ResolveError, __init__ …` | agent opens `_language_extensions.py`, greps `def value`/`AWS::AccountId` | **DELIVERED=YES · CORRECT=YES** — gold file ranked **#1** · CONSUMED=YES |
+| id=1 | `<gt-task-brief> 1. src/cfnlint/template/transforms/_language_extensions.py (def create…, def value(, def language_extension…) … EDIT-TARGET CONTRACTS: values -> calls def value( [...:252]` | agent navigates to `value`/`values`/AccountId region | DELIVERED=YES · CORRECT=YES (names the gold functions) · CONSUMED=YES |
+
+### L3b post-view contract + L3/GT_VERIFY
+| turn | GT SENT (verbatim) | AGENT DID | D/C/C |
+|---|---|---|---|
+| post-view on `_language_extensions.py` | `[GT] … [CONTRACT] def values( -> Iterator[str | dict…]  … [RAISES] WHEN … : raise _ResolveError("Can't resolve Fn::FindInMap"…)` + `[GT KEY CONTRACTS] Preserve: conditional_return: if len(self._map) == 4 and default_on_resolver_failure:` | agent's edit at id≈81 changes `_ForEachValueFnFindInMap.value()`: `result = mapping.get(...).get(...); if result is not None: return result` | DELIVERED=YES · CORRECT=YES (real contracts) · CONSUMED=YES (preserved the `len==4` clause) — but did NOT lead to the gold mechanism |
+| GT_VERIFY | `[GT_VERIFY] … run the project's own test suite … exception_handler: except Exception …` | agent runs full suite: `1648 tests passed` (grader tests ABSENT at HEAD) | DELIVERED=YES · CORRECT=YES · CONSUMED=YES (ran tests) — but suite can't catch it (gold test_patch not applied) |
+
+### consensus / L4 / L5 / L5b / L6
+DELIVERED=NO for L4/L5/L5b/L6 (no distinct agent-visible bytes; lone `gt_validate unknown` = no-op). consensus: MEDIUM-tier, file ranked #1 but no single-primary forcing.
+
+## (c) verdicts
+- L1: **delivered + correct + consumed** (gold file #1, agent reached it). L3b/GT_VERIFY: delivered+correct+consumed (no harm, no leak).
+- **Cross-component:** test-name/FAIL_TO_PASS leakage=**0** · consumed-count=3 (L1, L3b contract, GT_VERIFY) · fair-probe: issue names `Fn::ForEach`/`AWS::LanguageExtensions` → file is partly self-localizable, but GT independently ranked it #1; the GOLD MECHANISM (`_ACCOUNT_ID` global) was NOT surfaced by any GT component → no leakage.
+
+## right_trajectory = **FALSE** (localization correct; fix wrong)
+GT localized perfectly (gold file ranked #1, gold functions named, contracts correct, leakage 0) and the agent reached and edited the gold file. But the agent's fix — a `result is not None` guard in `_ForEachValueFnFindInMap.value()` — addresses a different mechanism than the gold, which captures the FindInMap-over-`AWS::AccountId` map key into a module global `_ACCOUNT_ID` and rewires `_ForEachValueRef.value()` to use it. The three FAIL_TO_PASS tests assert the AccountId path resolves to the actual map key, which the agent's patch does not implement. **Failure locus: post-localization implementation miss (wrong fix logic inside the correctly-localized file).** GT delivered correct localization context but cannot supply the implementation insight (the `_ACCOUNT_ID` design), which a no-leakage context layer is not positioned to determine.

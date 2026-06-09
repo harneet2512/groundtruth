@@ -89,3 +89,71 @@ Outcome: resolved=**yes** (`eval_result.json` `"resolved_ids":["amoffat__sh-744"
 ## Cross-component line
 
 leakage=**0** · delivered components=**5** (L1 brief, L3b post-view, consensus `<gt-scope>`, L3/GT_VERIFY; substrate delivered only mediated via the brief) · consumed=**4** (L1 → opened gold file `sh.py` first + `wait()`/`_waited_until_completion` reasoning at the edit; L3b → contracts on the @2380/@889 reads that drove the fix; consensus `<gt-scope>` → grep-to-confirm at turn 8; L3/GT_VERIFY → ran real suite + exception-preservation reasoning that produced the turn-76 `self.wait()` correction) · not-delivered=**3** (L4 skipped, L5/L5b generated-but-not-injected, L6 no GT-attributable agent payload) · fair-probe=**PRE-NAMED** (issue text names `RunningCommand`, `__await__`, `_return_cmd`, `await`, `bake`, `RunningCommand` and the gold file is single-symbol `sh.py`; L1 rank-#1=`sh.py` is pre-named by the issue, and this task is a **baseline pass** — GT delivered correct, non-leaking, consumed context but did not cause a flip).
+
+
+---
+---
+
+# Ledger (re-audit) — amoffat__sh-744  (run 27214152241, branch gt-trial, 2026-06-09)
+
+> APPEND-ONLY second audit, independent chronological read of THIS run's `output.jsonl`
+> (`task-amoffat__sh-744/results/.../deepseek-v4-flash_maxiter_100/output.jsonl`, 115 history events).
+> Read turn-by-turn with the Read tool (never grep); quotes verbatim. This verdict DIVERGES
+> from the 2026-06-07 ledger above (which credited 4 components "consumed"): the chronological
+> read shows GT payloads only ECHOED facts the agent had already found on its own — GT did not
+> change a single agent decision.
+
+Outcome: resolved=**yes** (`task-amoffat__sh-744/eval_result.json` `"resolved_ids":["amoffat__sh-744"]`) · baseline_pass=**yes** (in frozen `full300_baseline_ohdeepseek_20260531/FINAL_resolved_300_20260531.json`) · flip=**NO** (resolved AND baseline already passed). GOLD = `sh.py::RunningCommand.__await__` (gold: `if self.call_args["return_cmd"]: return self else: return str(self)`). FAIL_TO_PASS = `tests/sh_test.py::FunctionalTests::test_async_return_cmd`.
+
+## (a) PREREQS / substrate  (`gt-gate-deep-amoffat__sh-744/gt_gates_deep_*.json`, 8-dp)
+| dim | REAL value | GREEN? | how it reached the agent |
+|---|---|---|---|
+| P1 resolution | calls_edges=438 · deterministic=399 · det_pct=**91.09589041** · name_match=39 · tiers type_flow=0 / impl_method=39 / inherited=0 | YES | telemetry-only; reaches agent only as brief edge lines (`__await__ -> calls wait( ... ) [sh.py:736]`) |
+| P2 graph.db | breakdown: same_file=285, lsp=62, name_match=39, impl_method=39, verified_unique=7, import=6 | YES | mediated via brief edge lines |
+| P3 embedder | class=EmbeddingModel · is_zero=**false** · cos_related=**0.86053280** · cos_unrelated=**0.76078654** · effective_w_sem=0.15 | YES | affects candidate ordering only |
+
+Foundational gates ALL GREEN (`verdict.all_on=true`) → run NOT void on substrate. (Substrate correct != GT caused it.)
+
+## (b) per-component tables — `turn | GT SENT (verbatim) | AGENT DID (verbatim) | D/C/C`
+
+### L1 brief (prepended block, EVENT 1)
+| turn | GT SENT (verbatim) | AGENT DID (verbatim) | D/C/C |
+|---|---|---|---|
+| EVENT 1 | `<gt-localization confidence="medium"> Candidate edit targets: 1. sh.py - RunningCommand, ssh, stdout ...`; `__await__ -> calls wait( ... ) [sh.py:736]`; `<gt-orientation> bake() in sh.py (10 callers) / wait() in sh.py (24 callers) / RunningCommand() in sh.py [class]`; `[GT KEY CONTRACTS] Preserve: guard_clause ... _waited_until_completion` | EVENT 4: `read /workspace/amoffat__sh-744`. EVENT 8: agent's OWN `grep -n "_return_cmd\|__await__\|def wait\|class RunningCommand" sh.py` — search terms taken VERBATIM from the ISSUE text, not the brief. | **D=YES / C=partial / C=NO (inert)** |
+
+Verdict L1: DELIVERED; CORRECT only on file `sh.py` — the gold SYMBOL `__await__`/`return_cmd` is NOT the brief's headline (task-brief headlines `wait`/`debug`/`bake`; `__await__` is one buried "calls wait" edge). CONSUMED=NO — agent's localization comes from issue text ("the definition of `RunningCommand.__await__` is hard-coded to return `str(self)`" + names `_return_cmd`). Leak=0.
+
+### L3b post-view (`[GT] sh:` / `<gt-context file="sh.py">`, EVENTS 11, 13, 65)
+| turn | GT SENT (verbatim) | AGENT DID (verbatim) | D/C/C |
+|---|---|---|---|
+| EVENT 11 | `[GT] sh:` + `[CONTRACT] def stdout(self):` `[CONTRACT] def ssh(orig):` `[CONTRACT] def bake( ... ) -> Self@Command` + `<gt-scope files="1"> sh.py is the file you're viewing; GT could not expand scope from the graph - confirm the edit target with grep.` | continues reading sh.py around `class RunningCommand`/`wait` (region it already grepped at EVENT 8). | D=YES / C=NO (`stdout`/`ssh`/`bake`, NOT `__await__`) / C=NO |
+| EVENT 65 | `[GT] Highest-confidence target: sh.py. [CONTRACT] def stdout(self): Also in scope: sh.py` | fixes its own repro script off its own `TypeError` traceback (EVENT 66). | D=YES / C=NO (off-target) / C=NO |
+
+Verdict L3b: DELIVERED, CORRECT=NO — every surfaced contract is the WRONG function; `__await__` was never contract-surfaced. Not consumed. Leak=0.
+
+### consensus `<gt-scope>` (EVENT 11)
+| turn | GT SENT | AGENT DID | D/C/C |
+|---|---|---|---|
+| EVENT 11 | `<gt-scope files="1"> ... GT could not expand scope from the graph - confirm the edit target with grep.` | had ALREADY located `__await__` at sh.py:889 via its own EVENT 8/9 grep, BEFORE this fired. | D=YES / C=honest-abstain / C=NO |
+
+Verdict consensus: correct-or-quiet abstain; told agent to grep, which it was already doing. Not causal. Leak=0.
+
+### L3 / GT_VERIFY + governor L5 nudge (EVENTS 39, 79)
+| turn | GT SENT (verbatim) | AGENT DID (verbatim) | D/C/C |
+|---|---|---|---|
+| EVENT 39 | `[GT L5: No Source Edits] Iteration: 21/100 You have run 21 actions with 0 source file edits.` | continues exploring; edits at EVENT 73 per its own EVENT-36 plan, not this nudge. | D=YES / C=n/a / C=NO |
+| EVENT 79 | `[GT_VERIFY] You edited 1 file(s). ... preserve the behavioral contract: sh.py: exception_type = RuntimeError / TimeoutException / exc / StopIteration` | runs `ExecutionContextTests` (pass) then broader suites; never references those exception types. | D=YES / C=partial-but-irrelevant / C=NO |
+
+Verdict L3/GT_VERIFY: delivered; not consumed; restated exception contracts the `__await__` edit does not touch.
+
+### L4 / L5 / L5b / L6
+DELIVERED=NO — no agent-visible bytes attributable to these in `output.jsonl` (L5 fired only as the governor nudge above).
+
+## THE EDIT (EVENT 72-73, self-driven)
+GT SENT: nothing new at the edit. AGENT DID (EVENT 36 `think`, verbatim): "The fix should make `__await__` check if `_return_cmd` is set in `self.call_args`, and if so, return `self` instead of `str(self)`." — derived from the ISSUE text + the agent's OWN read of `Command.__call__` line 1506 (`if rc._spawned_and_waited and not call_args["return_cmd"]: return str(rc)`, found via its own grep). EVENT 73 edit = the GOLD fix. CONSUMED of GT = NO.
+
+## Cross-component line
+leakage=**0** (no test name / FAIL_TO_PASS surfaced; brief named `test_command_with_baked_call_args` etc. but NOT the grader `test_async_return_cmd`) · consumed=**0** (no GT payload changed an agent decision) · fair-probe=**BAD PROBE / PRE-LOCALIZED** (issue names `__await__`, `_return_cmd`, `str(self)`, `RunningCommand`; single-file repo target) · GT reaction telemetry (cross-ref) agrees: 2 "reactions" both `FOLLOWED_RELATED_FILE` -> `test_repro.py` (agent's OWN scaffold), `edited_suggested_file=false`, `changed_diff_after_gt=false`.
+
+## VERDICT: gt_caused = **FALSE**
+Agent self-localized to `sh.py::__await__` from the issue text + its own greps; wrote the gold fix from its own EVENT-36 reasoning. GT delivered the correct FILE with no leak (Stage-1 hygiene OK), but its detailed contracts were off-target, it explicitly abstained on scope, and ZERO GT payload changed an agent decision. Resolved != GT win. flip=no.

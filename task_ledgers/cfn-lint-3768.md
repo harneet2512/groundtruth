@@ -69,3 +69,58 @@ Outcome: resolved=**no** (`eval_result.json` → `resolved_instances: 0`, `unres
 ## Cross-component line
 
 leakage=**0** · delivered components=**4** (L1 brief, L3b post-view, consensus `<gt-scope>`, L5 nudge/advisory) · consumed=**1** (only L3b's gold-file body was actually read-into the agent's reasoning at IDX 32; L1 was ignored (agent self-grepped), consensus was abstained-on/ignored, the L5 advisory was not acted upon) · fair-probe=**FAIR** (GT did NOT pre-name the gold file — `StateMachineDefinition.py` is absent from every L1 candidate, the task-brief, the graph-map, and the consensus scope; the agent found it via its own `grep "E3601"`; and the gold's actual fix — restructuring `validate()` to loop `Definition`/`DefinitionString` and skip `DefinitionSubstitutions` placeholders — was surfaced by NO GT component, so GT leaked nothing. The non-resolution is an L1 localization miss compounded by the agent choosing the wrong fix-target (schema regex over rule logic), not a probe that fed the answer).
+
+---
+
+# §4 DEEP AUDIT — run /tmp/gt_30_artifacts (deepseek-v4-flash, 2026-06-09, 129 events)
+
+Outcome: resolved=**no** (`eval_result.json` `resolved_ids=[]`, `unresolved_ids=["aws-cloudformation__cfn-lint-3768"]`), baseline_pass=**no**, flip=**no**. GOLD = `src/cfnlint/rules/resources/stepfunctions/StateMachineDefinition.py` — gold restructures `validate()` to loop `definition_keys=["Definition"(+"DefinitionString")]` and changes the `keywords` from `…/Properties/Definition` to `…/Properties`.
+
+**Causal headline (this run, DIFFERENT from the 2026-06-07 run above):** GT mislocalized again (gold `StateMachineDefinition.py` ABSENT from the brief; GT ranked `SubNeeded.py` #1). The agent self-localized to gold (read it T12 via dir nav) and THIS time **did edit the gold `.py`** at T72/T74 — but with the WRONG implementation: a regex `_has_substitution_variable()` helper that `continue`s on `pattern` errors. Gold instead restructures the whole `validate()` loop. right_trajectory=**FALSE** for GT; failure locus = **mislocalization (GT) + post-localization implementation miss (agent)**.
+
+## PREREQS (substrate, 8-dp from gt_gates_deep_aws-cloudformation__cfn-lint-3768.json)
+
+| gate | real value | GREEN? |
+|---|---|---|
+| **P1 resolution** | `det_pct=77.01249637`; name_match=791/3441; det=2650; typing `{type_flow:224, impl_method:249, inherited:149, ev:assignment_tracked:199}`; pass=true | YES |
+| **P2 graph.db** | breakdown `{name_match:791, same_file:605, import:597, verified_unique:546, impl_method:249, type_flow:224, lsp:201, inherited:149, return_type:78, unique_method:1}`; LSP `LSP_ACTIVE_VALID` promoted=201 | YES |
+| **P3 embedder** | `EmbeddingModel`, is_zero=false, cos_related=0.86053280 > cos_unrelated=0.76078654, effective_w_sem=0.15, pass=true | YES |
+
+**Prereqs verdict:** `all_on=true`. Substrate GREEN. LEAK=0.
+
+## L1 localizer
+
+| turn | GT SENT (verbatim) | AGENT DID | D/C/C |
+|---|---|---|---|
+| T1 | `<gt-task-brief>` `1. src/cfnlint/rules/functions/SubNeeded.py (def _match_values…, def match…, def _variable_custom_excluded…)` … `EDIT-TARGET CONTRACTS (SubNeeded.py): match -> calls _variable_custom_excluded …`. **Gold `StateMachineDefinition.py` ABSENT** (`'StateMachineDefinition.py' in content == False`). | T8 read `SubNeeded.py` (GT #1); **T12 read GOLD `StateMachineDefinition.py`** via its own dir navigation; T72/T74 EDIT gold | **D=YES · C=WRONG** (gold absent; GT pinned `SubNeeded.py`) · **C=NO** toward gold (self-localized) |
+
+**L1 verdict:** D=YES, C=WRONG, CONSUMED-toward-gold=NO, leak=0. Clean localization MISS.
+
+## L3b post-view
+
+| turn | GT SENT | AGENT DID | D/C/C |
+|---|---|---|---|
+| T9 (SubNeeded.py view) | `[GT] SubNeeded:` `[CONTRACT]` block (non-gold) | agent moved on to read gold T12 | D=YES · C=PARTIAL (non-gold) · C=NO |
+| T25 (_keywords.py view) | `[GT] … [CONTRACT]` block | T26 think: pivoted to `pattern`/`_keywords.py` reasoning | D=YES · C=PARTIAL · C=weak |
+| T69 (exceptions.py view) | `[GT]` contract block | T70 think: `err.instance`/`err.validator` reasoning → fed the regex-skip approach | D=YES · C=Y (real bytes) · C=partial (informed the WRONG fix) |
+
+**L3b verdict:** D=YES (6 emitted), CORRECT=real bytes but non-gold-centric, CONSUMED=partial (`follow_type_distribution` on L3_router_v2 shows 1 `FOLLOWED_RELATED_FILE`, util=1.0; L3b reactions_total=0). leak=0.
+
+## consensus / L3_router_v2 / L4 / L5 / L5b / L6
+
+| layer | status |
+|---|---|
+| **consensus `<gt-scope>`** | fired on non-gold views with honest "GT has not confirmed a single primary target — confirm with grep"; CONSUMED=NO |
+| **L3_router_v2 (post-edit)** | eligible=13 emitted=13 `next_action_count=1` `FOLLOWED_RELATED_FILE=1` util=1.0 — DELIVERED=YES, one related-file follow (not gold-driving) |
+| **L4** | 0 tool invocations — DELIVERED=NO |
+| **L5 (governor)** | eligible=26 emitted=1 suppressed=25 (`structured_only:confidence=MEDIUM`×14, `max_emissions_reached`, `finish_handler_dead_write`) — heavily suppressed; CONSUMED=NO |
+| **L5b** | eligible=1 emitted=1 — no distinct consumed payload |
+| **L6** | not in per_layer — DELIVERED=NO |
+
+## Cross-component line
+
+leakage=**0** · delivered=**4** (L1, L3b, consensus, L3_router_v2) · consumed=**0** toward the correct fix · fair-probe=**FAIR** · **right_trajectory=FALSE**. **Failure locus: MISLOCALIZATION (GT, gold absent from brief) + POST-LOCALIZATION IMPLEMENTATION MISS (agent edited gold `.py` but with a regex-skip approach, not the gold's `validate()` restructure).**
+
+
+---
+

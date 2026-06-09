@@ -453,6 +453,14 @@ Validation for each: sibling-pair cosine-MAD harness (for A/B), red→green leak
 tests (for C), classifier + candidate-inclusion tests (for D); ≥3 repos/languages (anti-overfit);
 8-dp deep logs; then paired Wilcoxon vs the frozen `FINAL_resolved_300_20260531.json`.
 
+**Status (2026-06-09):** CHANGE 1 (per-symbol MaxSim granularity) **DONE + committed**, Stage-1
+validated at e5/384 (gold #1 3/7→7/7; synthetic separation 0.67 vs 0.02; 8/8 + regression green) —
+proves granularity is the lever WITHOUT a model swap. **Dense-weight policy LOCKED:** dense is
+dense-LED with a **substantive `W_SEM_FLOOR` (>0)** — query-adaptive may flex W_SEM toward the floor on
+identifier-heavy issues (lexical leads, per BEIR/Sciavolino) but NEVER throttles it below the floor
+(the e5-era 0.15 bug); RRF protects dense by rank. NOT a monopoly. The #3 fusion redesign implements
+this floor; CHANGE 2 (gte-modernbert swap) then layers model headroom on the proven granularity.
+
 ---
 
 ## 12. PER-LAYER ROLE + SUCCESS CRITERION — judge each layer by ITS job, never a generic template

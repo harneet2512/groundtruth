@@ -73,3 +73,42 @@ Outcome: resolved=**no** (`eval_result.json` → `resolved_instances: 0`, `unres
 ## Cross-component line
 
 leakage=**0** · delivered components=**4** (L1, L3b post-view, consensus `<gt-scope>`, L3/GT_VERIFY; L4/L5/L5b/L6 = not delivered to the agent) · consumed=**4** (all four delivered components reached and were acted on — gold file opened turn 11, `def values(` contract used to navigate to the method, scope respected, verify-suite run) · fair-probe=**FAIR** (GT pre-named the gold file as candidate #1 via the localizer, but the agent independently opened, grepped, read the exact gold region, and at turn 18 derived gold hunk #2 from its OWN trace of `values()` line 532 — not from a GT-fed answer; and GT never surfaced gold hunk #1 — the `max_length` dedup in `_ForEachValueFnFindInMap.value()` — so the solution was NOT leaked. The non-resolution is a post-localization **partial-fix / completeness** miss inside the correctly-named file, which a no-leakage context layer cannot fix).
+
+---
+
+# §4 DEEP AUDIT — aws-cloudformation__cfn-lint-3764 (run 27214152241, branch gt-trial, 2026-06-09)
+
+Outcome: **UNRESOLVED** (submitted, completed, non-empty patch) · baseline_pass=NO · flip=NO · regression=NO (flip-candidate)
+Gold: `src/cfnlint/template/transforms/_language_extensions.py` — TWO hunks: (1) `_ForEachCollection.value()` adds `max_length` filtering to pick the LONGEST matching map entry (handles map with one-empty + one-nonempty); (2) `_ForEachCollection.values()` `if values:` → `if values is not None:`. FAIL_TO_PASS: `TestTransformValueEmptyList::test_transform`, `TestTransformValueOneEmpty::test_transform`.
+Source: output.jsonl (77 events) read chronologically. actions=37, edits=2.
+
+## (a) PREREQS / substrate (gate-deep, 8-dp)
+| dim | REAL value | GREEN? | reached agent as |
+|---|---|---|---|
+| P1 resolution | det_pct=76.75707203 · name_match=797 · calls_edges=3429 · type_flow=223/impl_method=251/inherited=149 | YES | `Witness … [CALLS]` lines |
+| P2 graph.db | calls_edges=3429 · name_match=797/same_file=605/import=596/verified_unique=542/impl_method=251/type_flow=223/lsp=188/inherited=149/return_type=77 | YES | `<gt-graph-map>`, `EDIT-TARGET CONTRACTS` |
+| P3 embedder | class=EmbeddingModel · cos_related=0.86053280 · cos_unrelated=0.76078654 · is_zero=false · effective_w_sem=0.15 · sem_max=0.84273700 | YES | ranking only |
+
+## (b) per-component tables
+
+### L1 brief (event id=1)
+| turn | GT SENT (verbatim) | AGENT DID | D/C/C |
+|---|---|---|---|
+| id=1 | `<gt-localization confidence="medium"> Candidate edit targets: 1. src/cfnlint/template/transforms/_language_extensions.py — values, _ResolveError, __init__ …` | agent opens `_language_extensions.py`, locates `_ForEachCollection.values()` | **DELIVERED=YES · CORRECT=YES** — gold file ranked **#1** · CONSUMED=YES |
+| id=1 | `<gt-task-brief> 1. src/cfnlint/template/transforms/_language_extensions.py (def create…, def language_extension…, def value()) … EDIT-TARGET CONTRACTS: values -> calls def value( [...:254]` | agent reads/edits `values()` | DELIVERED=YES · CORRECT=YES · CONSUMED=YES |
+
+### L3b post-view contract + GT_VERIFY
+| turn | GT SENT (verbatim) | AGENT DID | D/C/C |
+|---|---|---|---|
+| post-view | `[GT] _language_extensions: [CONTRACT] def values( -> Iterator[str | dict…] … [RAISES] WHEN not isinstance(obj, list): raise _TypeError("Fn::FindInMap should be a list"…)` + `[GT KEY CONTRACTS] Preserve: conditional_return: if len(self._map)==4 …` | id=33 edit: `if self._collection is not None:` ; id=37 edit: `if values:`→`if isinstance(values, list):` in `values()` | DELIVERED=YES · CORRECT=YES · CONSUMED=YES — agent fixed the `values()` half (matches gold hunk #2 functionally) |
+| GT_VERIFY (id=38) | `[GT_VERIFY] You edited 1 file(s). … run the project's own test suite …` | runs repro + `cfn-lint` (Exit 0); 25 existing tests pass (grader tests ABSENT at HEAD) | DELIVERED=YES · CORRECT=YES · CONSUMED=YES — but suite can't catch missing hunk #1 |
+
+### consensus / L4 / L5 / L5b / L6
+DELIVERED=NO (L4/L5/L5b/L6 no agent-visible bytes; two `gt_validate unknown` no-ops; `gt_validate _language_extensions.py` returned 8 informational CALLER-BLIND-EDIT flags only). consensus MEDIUM, file #1, no single-primary forcing.
+
+## (c) verdicts
+- L1: delivered+correct+consumed (gold file #1). L3b/GT_VERIFY: delivered+correct+consumed; agent fixed ONE of two gold hunks.
+- **Cross-component:** test-name/FAIL_TO_PASS leakage=**0** · consumed-count=3 · fair-probe: issue names `Fn::ForEach`/empty array; GT ranked the gold file #1 independently; the gold `max_length` mechanism (hunk #1) was NOT surfaced → no leakage.
+
+## right_trajectory = **FALSE** (localization correct; fix incomplete)
+GT localized perfectly (gold file #1, `value`/`values` named, contracts correct, leakage 0). The agent reached the gold file and correctly fixed the `values()` empty-list path (`if values:`→`isinstance(values, list)`, plus `if self._collection is not None:`) — matching the gold's hunk #2 functionally for the simple empty-list case. But it MISSED gold hunk #1: the `max_length` filtering in `_ForEachCollection.value()` that selects the longest matching map entry, which is what `TestTransformValueOneEmpty::test_transform` (one-empty + one-nonempty map) requires. Final diff (test_result.git_patch) = `values()` method only. **Failure locus: post-localization partial fix / completeness miss (one of two required hunks).** GT delivered correct localization but cannot supply the second-bug insight without leaking; the agent stopped at the first reproduced symptom.
