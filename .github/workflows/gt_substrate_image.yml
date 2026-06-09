@@ -31,6 +31,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build + push GT substrate image (build-time self-test gates it)
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -53,3 +54,24 @@ jobs:
             pyright --version
             test -s /opt/gt/models/e5-small-v2/model.onnx && echo "e5 ok"
             echo "=== GT substrate image verified portable ==="'
+
+      - name: Verify gt-run-proof portable entrypoint is baked (Stage 4.2)
+        run: |
+          docker run --rm "ghcr.io/hbali-stack/gt-substrate@${{ steps.build.outputs.digest }}" \
+            gt-run-proof --print-contract | head -8
+
+      - name: Capture immutable digest (the pinned proof input — NOT a mutable tag)
+        run: |
+          DIGEST="${{ steps.build.outputs.digest }}"
+          PINNED="ghcr.io/hbali-stack/gt-substrate@${DIGEST}"
+          echo "GT_SUBSTRATE_DIGEST=$PINNED"
+          { echo "## GT substrate pinned digest"; echo '```'; \
+            echo "GT_SUBSTRATE_DIGEST=$PINNED"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          mkdir -p /tmp/gt_digest && echo "$PINNED" > /tmp/gt_digest/GT_SUBSTRATE_DIGEST.txt
+
+      - name: Upload pinned digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: gt-substrate-digest
+          path: /tmp/gt_digest/GT_SUBSTRATE_DIGEST.txt
+          if-no-files-found: warn
