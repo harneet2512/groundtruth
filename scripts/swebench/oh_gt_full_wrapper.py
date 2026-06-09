@@ -795,6 +795,13 @@ class GTRuntimeConfig:
         # hooks (L3/L3b/L4/L6) read that enriched substrate.
         if not self._host_graph_db:
             self._host_graph_db = os.environ.get("GT_HOST_GRAPH_DB", "")
+        # Stage 4.2: portable substrate artifacts. When the GT proof runtime ran as the PINNED
+        # portable substrate (gt-run-proof -> GT_CERT_DIR=/gt_artifacts), consume the resolved
+        # graph + certs from there READ-ONLY; never rebuild a divergent graph.
+        if not self._host_graph_db:
+            _cert_dir = os.environ.get("GT_CERT_DIR", "")
+            if _cert_dir and os.path.exists(os.path.join(_cert_dir, "graph.db")):
+                self._host_graph_db = os.path.join(_cert_dir, "graph.db")
         # LEGITIMACY GATE — forbid a CROSS-RUN / STALE prebuilt, NEVER the fresh per-task
         # host-resolved graph. GT_FORBID_PREBUILT_GRAPH targets cross-run leakage; a graph
         # built fresh from THIS task's base-commit (mtime >= the job-start epoch) IS what a

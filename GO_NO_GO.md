@@ -22,7 +22,8 @@
 | Stage 2 — graph handoff cert | ✅ local gate proven (18 tests) | `dbc41e43` |
 | Stage 3 — embedder usage cert | ✅ local gate proven (15 tests) | `061e50bb` |
 | Stage 4 — LSP+gates in-container | ⚠️ escalation checkpoint (NOT final) — runtime boundary proven, workflow surfaced the provisioning tension | `b88beeec` |
-| Stage 4.1 — runtime strategy decision + proof-leak fix | ✅ Option B chosen; host run_v74 leak CLOSED; rule reframed (15 tests) — awaiting review | this commit |
+| Stage 4.1 — runtime strategy decision + proof-leak fix | ✅ Option B chosen; host run_v74 leak CLOSED; rule reframed (15 tests) | `36f51321` |
+| Stage 4.2 — portable benchmark-team substrate | ✅ gt-run-proof entrypoint + contract + external run-contract docs (9 tests) — awaiting review | this commit |
 | Stage 5 — image cache + manifest | ⛔ not started | — |
 
 ## Blockers (from Stage 0 UNKNOWNs)
@@ -44,9 +45,11 @@
 
 ## Next allowed action
 
-**NOT Stage 5.** Option B (unified GT substrate runtime) is chosen but **not yet wired** — image-
-cache work (Stage 5) presupposes the final runtime path. Next is either: wire the unified-substrate
-runtime (same `foundational_gates.py`/`resolve.py`/certs, baked GT image + shared source/volume,
-host orchestrates only), OR a Stage-B 1-task run to test whether Option A provisioning is
-deterministic + cheap. Stage 5 begins only after the runtime path is final. No GHA runs until the
-local staged gates (Phase 6 Stage A) pass for the final runtime path.
+**NOT Stage 5.** The portable runtime path (Option B) is now defined + locally proven: the pinned
+`gt-run-proof` substrate + the external run contract. What remains before Stage 5: **publish the
+pinned substrate image digest** (`GT_SUBSTRATE_DIGEST`) + a **Stage-B 1-task official run** proving
+the portable `docker run gt-run-proof` produces all certs and the OH wrapper consumes
+`/gt_artifacts` (hook hash == post-LSP hash, `_gt_prebuilt_active=True`), then remove the
+transitional in-task-image branch. Stage 5 (image-cache/manifest) begins only after the portable
+runtime is published + Stage-B-proven. No GHA runs until the local staged gates pass + the image is
+pinned.

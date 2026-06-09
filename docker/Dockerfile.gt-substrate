@@ -67,6 +67,11 @@ COPY scripts             /opt/gt/scripts
 COPY benchmarks/swebench /opt/gt/benchmarks/swebench
 COPY docker/gt-substrate-run.sh /opt/gt/bin/gt-substrate
 RUN chmod +x /opt/gt/bin/gt-substrate
+# Stage 4.2: the PORTABLE proof entrypoint (Option B). ONE command an external benchmark team runs
+# to produce all GT artifacts from a mounted read-only repo — no per-task pip / model download.
+RUN printf '#!/bin/sh\nexec "${GT_PYTHON:-python3}" /opt/gt/scripts/swebench/gt_run_proof.py "$@"\n' \
+        > /opt/gt/bin/gt-run-proof \
+ && chmod +x /opt/gt/bin/gt-run-proof
 
 # ---- stage 2: thin final image whose entire payload is the portable /opt/gt ----
 FROM ubuntu:20.04

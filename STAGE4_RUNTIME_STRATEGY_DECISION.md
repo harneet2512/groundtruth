@@ -72,6 +72,57 @@ the **unified substrate runtime** (baked GT image + shared source/volume + the s
 `foundational_gates.py`), and the per-task `pip install`/model-copy block is removed once B runs.
 The Stage 4 commit (`b88beeec`) is preserved as escalation evidence; it is **not the final path**.
 
+## External benchmark-team run contract (Stage 4.2 — portable)
+
+The GT proof runtime is a **published, pinned image** with ONE entrypoint (`gt-run-proof`). An
+external benchmark team needs Docker and nothing else — no checkout, no pip, no model download, no
+private state.
+
+**Required image digest:** `ghcr.io/<org>/groundtruth-substrate@sha256:<DIGEST>` (pin by digest in
+proof/final mode — a tag is NOT acceptable). The digest is published with the cache build.
+
+**Required inputs:**
+- `-v "$TASK_REPO:/work:ro"` — the task repo, **read-only** (never mutated).
+- `-v "$GT_ARTIFACTS:/gt_artifacts"` — a writable output directory.
+- env: `GT_PROOF_MODE=1 GT_CONTAINERIZED=1 GT_RUNTIME_STRATEGY=unified_substrate GT_REQUIRE_FTS5=1
+  GT_REQUIRE_EMBEDDER=1 GT_FORCE_ONNX_EMBEDDER=1 GT_REQUIRE_LSP=1 GT_REQUIRE_FULL_STACK=1`.
+
+**Exact command:**
+```bash
+docker pull ghcr.io/<org>/groundtruth-substrate@sha256:<DIGEST>
+docker run --rm \
+  -v "$TASK_REPO:/work:ro" -v "$GT_ARTIFACTS:/gt_artifacts" \
+  -e GT_PROOF_MODE=1 -e GT_CONTAINERIZED=1 -e GT_RUNTIME_STRATEGY=unified_substrate \
+  -e GT_REQUIRE_FTS5=1 -e GT_REQUIRE_EMBEDDER=1 -e GT_FORCE_ONNX_EMBEDDER=1 \
+  -e GT_REQUIRE_LSP=1 -e GT_REQUIRE_FULL_STACK=1 \
+  ghcr.io/<org>/groundtruth-substrate@sha256:<DIGEST> \
+  gt-run-proof --source-root /work --out /gt_artifacts
+# discover the contract without running: `gt-run-proof --print-contract`
+```
+
+**Expected outputs** (under `$GT_ARTIFACTS`): `graph.db`, `runtime_context.json`,
+`lsp_certificate.json`, `graph_certificate.json`, `embedder_certificate.json`,
+`foundational_gate_report.json`, `run_manifest.json` (+ `brief/` render artifacts if applicable).
+
+**Agent integration** (the OH/task container consumes artifacts only — it does NOT recreate GT):
+```bash
+-v "$GT_ARTIFACTS:/gt_artifacts:ro"
+-e GT_HOST_GRAPH_DB=/gt_artifacts/graph.db -e GT_CERT_DIR=/gt_artifacts
+-e GT_PROOF_MODE=1 -e GT_CONTAINERIZED=1
+# wrapper logs: [GT_META] host_resolved_graph_db=/gt_artifacts/graph.db
+#               hook_graph_hash=<same post-LSP hash>  _gt_prebuilt_active=True
+```
+
+**Failure classifications:** `FINAL_PIPELINE_HOST_SPLIT_FAIL` (GT on host / not containerized) ·
+`SUBSTRATE_NOT_PORTABLE` (a baked dep missing — never pip/download per task) ·
+`SUBSTRATE_MISSING_CERTS` (a required artifact absent) ·
+`LEGACY_DIVERGENT_SUBSTRATE_FORBIDDEN` (the old shell gate) · gate verdicts (LSP/graph/embedder).
+
+**What the benchmark team must trust / need NOT trust:** they trust the pinned digest (the baked GT
+runtime) and the artifact contract. They do **not** need: our GHA plumbing, a checkout, network at
+run time, a model server, or any gold/FAIL_TO_PASS/test-name data (none is used — the substrate sees
+only the repo source + the issue text).
+
 ## Go/No-Go
 
 - Stage 4 = **escalation-revealing checkpoint** (accepted as such, not as final).

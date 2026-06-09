@@ -883,17 +883,33 @@ jobs:
           docker cp gtsrc:/tmp/graph.db /tmp/gt/graph.db || { echo "FATAL: graph.db not produced"; exit 1; }
           rm -rf /tmp/gt/src && mkdir -p /tmp/gt/src
           docker cp "gtsrc:$ROOT/." /tmp/gt/src || { echo "FATAL: source extract failed"; exit 1; }
-          # Stage 4: KEEP gtsrc ALIVE — GT's LSP + gates execute INSIDE the eval container
-          # (docker exec), NOT on the host runner. The host only orchestrates + copies artifacts.
-          # Provision the GT runtime into gtsrc; the 8 proof flags fail-closed if the in-container
-          # stack is incomplete, so a provisioning gap can NEVER silently host-split (the runtime
-          # context.assert_container_boundary + foundational_gates also fail-closed on the host).
-          docker exec gtsrc mkdir -p /opt/gt /tmp/gt 2>/dev/null || true
-          docker cp "${{ github.workspace }}/src/groundtruth" gtsrc:/opt/gt/groundtruth 2>/dev/null || true
-          docker cp "${{ github.workspace }}/scripts" gtsrc:/opt/gt/scripts 2>/dev/null || true
-          docker cp "${{ github.workspace }}/models" gtsrc:/opt/gt/models 2>/dev/null || true
-          docker exec gtsrc sh -c 'python3 -m pip install -q onnxruntime tokenizers numpy pyright 2>/dev/null || true' 2>/dev/null || true
-          echo "Stage 4: gtsrc kept alive + GT runtime provisioned (in-container LSP+gates)"
+          # Stage 4.2: the GT proof runtime is a PORTABLE, pinned substrate image (Option B —
+          # STAGE4_RUNTIME_STRATEGY_DECISION.md). The image BAKES GT + pyright/node + onnxruntime
+          # + e5 — NO per-task pip install, NO per-task model download. An external benchmark team
+          # runs ONE command (see docs/EXTERNAL run contract):
+          #   docker run --rm -v "$REPO:/work:ro" -v "$ARTIFACTS:/gt_artifacts" \
+          #     -e GT_PROOF_MODE=1 -e GT_CONTAINERIZED=1 -e GT_RUNTIME_STRATEGY=unified_substrate \
+          #     <pinned-digest> gt-run-proof --source-root /work --out /gt_artifacts
+          GT_SUBSTRATE_DIGEST="${GT_SUBSTRATE_DIGEST:-${{ vars.GT_SUBSTRATE_DIGEST }}}"
+          if [ -n "$GT_SUBSTRATE_DIGEST" ]; then
+            echo "Stage 4.2 PORTABLE substrate run (pinned $GT_SUBSTRATE_DIGEST) -> /tmp/gt"
+            docker run --rm -v "/tmp/gt/src:/work:ro" -v "/tmp/gt:/gt_artifacts" \
+              -e GT_PROOF_MODE=1 -e GT_CONTAINERIZED=1 -e GT_RUNTIME_STRATEGY=unified_substrate \
+              -e GT_REQUIRE_FTS5=1 -e GT_REQUIRE_EMBEDDER=1 -e GT_FORCE_ONNX_EMBEDDER=1 \
+              -e GT_REQUIRE_LSP=1 -e GT_REQUIRE_FULL_STACK=1 \
+              "$GT_SUBSTRATE_DIGEST" gt-run-proof --source-root /work --out /gt_artifacts
+            echo "GT_PORTABLE_SUBSTRATE=1" >> "$GITHUB_ENV"
+          else
+            # TRANSITIONAL (no pinned digest yet): provision the GT package into gtsrc WITHOUT
+            # per-task pip — the deps must already be in the image, else the proof flags + the
+            # runtime boundary assertions fail-closed (never a silent host-split). The pinned
+            # portable image is the final path; this branch exists only until it is published.
+            docker exec gtsrc mkdir -p /opt/gt /tmp/gt 2>/dev/null || true
+            docker cp "${{ github.workspace }}/src/groundtruth" gtsrc:/opt/gt/groundtruth 2>/dev/null || true
+            docker cp "${{ github.workspace }}/scripts" gtsrc:/opt/gt/scripts 2>/dev/null || true
+            docker cp "${{ github.workspace }}/models" gtsrc:/opt/gt/models 2>/dev/null || true
+            echo "Stage 4.2 TRANSITIONAL: gtsrc provisioned (NO per-task pip; deps must be baked)"
+          fi
           # PRE-LSP return_type baseline so the RESOLUTION-QUALITY gate can prove the LSP
           # precision pass actually ran (RT_after > RT_before == LSP was ON, not a silent no-op).
           RT0=$(python3 -c "import sqlite3;print(sqlite3.connect('/tmp/gt/graph.db').execute(\"select count(*) from nodes where return_type is not null and trim(return_type)!=''\").fetchone()[0])" 2>/dev/null || echo 0)

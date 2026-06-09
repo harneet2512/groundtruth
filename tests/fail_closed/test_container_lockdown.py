@@ -141,6 +141,8 @@ def test_agent_path_receives_proof_env():
 
 
 def test_gtsrc_kept_alive_and_provisioned():
+    # Stage 4.2: provisioning moved to the TRANSITIONAL branch (no per-task pip); the portable
+    # pinned gt-run-proof substrate is the primary path.
     t = _wf_text()
-    assert "GT runtime provisioned" in t
+    assert "gtsrc provisioned" in t
     assert "docker cp \"${{ github.workspace }}/src/groundtruth\" gtsrc:/opt/gt/groundtruth" in t

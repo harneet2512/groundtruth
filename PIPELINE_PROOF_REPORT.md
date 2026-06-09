@@ -33,6 +33,23 @@ Stage 4 was accepted as an **escalation-revealing checkpoint, not final.** Stage
 - **Stage 4 rework:** the W1 per-task provisioning is Option A → deprecated; the unified-substrate
   runtime is the follow-up. Stage 5 is NOT safe until Option B is wired (or Stage B proves A).
 
+## Stage 4.2 — PORTABLE benchmark-team-runnable substrate (UPDATE)
+
+The GT proof runtime is now a **portable, pinned substrate image + a single `gt-run-proof`
+entrypoint** (Option B made externally runnable). An external benchmark team runs ONE `docker run …
+gt-run-proof --source-root /work --out /gt_artifacts` against a read-only repo mount and gets all
+artifacts (`graph.db` + `runtime_context.json` + lsp/graph/embedder certs + `foundational_gate_report.json`
++ `run_manifest.json`) — **no per-task pip, no model download, no host GT execution, no task-image
+mutation, no checkout**. `gt-run-proof` (`scripts/swebench/gt_run_proof.py`) `validate_proof_env`
+fails-closed if a dep is not BAKED (never installs per task) or if run on the host. The workflow
+reduces to the pinned `docker run` (`GT_SUBSTRATE_DIGEST`); the OH wrapper consumes
+`GT_CERT_DIR=/gt_artifacts/graph.db` read-only (never rebuilds). The full external run contract
+(digest, command, outputs, failure classes, trust boundary) is in
+`STAGE4_RUNTIME_STRATEGY_DECISION.md` → "External benchmark-team run contract". Tests:
+`test_portable_substrate.py` (9). The Dockerfile bakes the `gt-run-proof` entrypoint. The pinned
+digest + removing the transitional in-task-image branch is completed once the image is published
+(Stage-B-proven).
+
 ---
 
 ## The load-bearing guarantee (runtime, locally proven)
