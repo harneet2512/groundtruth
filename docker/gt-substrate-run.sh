@@ -86,6 +86,23 @@ SRC = os.environ["GT_SRC"]; DB = os.environ["GT_DB"]
 ISSUE = os.environ.get("GT_ISSUE", ""); OUTF = os.environ["GT_SCOPE_OUT"]
 issue = open(ISSUE, encoding="utf-8", errors="ignore").read() if ISSUE and os.path.exists(ISSUE) else ""
 
+# SCOPE = the bug's GRAPH-REACHABLE NEIGHBORHOOD, derived from code STRUCTURE — not from
+# how many words the issue happens to share with file/symbol names. The old heuristic
+# matched every 4+-char issue word to node NAMES, which swung the scope from 1 file
+# (flexget: specific words matched little -> type-checker STARVED) to 1158 (checkov:
+# common words like "check" matched thousands -> type-checker DROWNED). Same gate failed
+# for OPPOSITE reasons, so no threshold fixes both. Fix: seed on the PRECISE anchors the
+# issue actually names (verbatim file paths + backtick code symbols), then expand over the
+# CALL GRAPH in BOTH directions (callers AND callees) for a small fixed ego-radius
+# (RepoGraph ICLR 2025: a k=1-2 ego-graph IS the bug's neighborhood), bounded by a uniform
+# COST budget. A tiny repo -> tiny neighborhood; a huge repo -> the closest neighborhood,
+# bounded; an empty anchor set -> empty scope -> whole-graph resolve (never starves). Same
+# mechanism on any repo; the two numbers below are a structural ego-radius and a uniform
+# cost ceiling, NOT a per-task threshold.
+EGO_HOPS = 2                 # ego-graph radius (structural; RepoGraph ICLR 2025)
+NEIGHBORHOOD_BUDGET = 400    # uniform COST ceiling on files the type-checker processes
+_FRONTIER_CAP = 300          # per-hop BFS fan-out bound (query-cost, uniform)
+
 def rel(p):
     try:
         r = os.path.relpath(p, SRC) if os.path.isabs(p) or p.startswith(SRC) else p
@@ -93,58 +110,98 @@ def rel(p):
         r = p
     return r.replace("\\", "/").lstrip("./")
 
-basemap, rel_set = {}, set()
+rel_set = set()
 for root, _, fs in os.walk(SRC):
     if "/.git" in root:
         continue
     for f in fs:
-        rp = rel(os.path.join(root, f)); rel_set.add(rp); basemap.setdefault(f, set()).add(rp)
+        rel_set.add(rel(os.path.join(root, f)))
 
-scoped, syms = set(), []
+# ---- precise seeds: verbatim file paths + anchor symbols (NOT broad word matching) ----
+seed_files = set()
 for tok in re.findall(r'[\w./\\-]+\.[A-Za-z0-9_]+', issue):
-    tok = tok.replace("\\", "/").strip("`'\"()[],"); rtok = rel(tok)
-    if rtok in rel_set: scoped.add(rtok)
-    b = os.path.basename(tok)
-    if b in basemap: scoped.update(basemap[b])
+    rtok = rel(tok.replace("\\", "/").strip("`'\"()[],"))
+    if rtok in rel_set:
+        seed_files.add(rtok)
+syms = []
 try:
     if os.path.exists("/tmp/gt_issue_anchors.json"):
         anch = json.loads(open("/tmp/gt_issue_anchors.json", encoding="utf-8").read() or "{}")
         for p in (anch.get("paths") or []):
             rp = rel(p)
-            if rp in rel_set: scoped.add(rp)
-            elif os.path.basename(p) in basemap: scoped.update(basemap[os.path.basename(p)])
-        syms = [s for s in (anch.get("symbols") or []) if s][:40]
+            if rp in rel_set:
+                seed_files.add(rp)
+        syms = [s for s in (anch.get("symbols") or []) if s and len(s) >= 4][:60]
+        syms += [str(s).split(".")[-1] for s in (anch.get("code_symbols") or []) if s][:60]
 except Exception:
     syms = []
+
+scoped = set(seed_files)
 try:
     conn = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
-    terms = set(syms)
-    for t in re.findall(r'[A-Za-z_][A-Za-z0-9_]{3,}', issue)[:60]: terms.add(t)
-    seed_files, seed_ids = set(), []
-    for t in list(terms)[:80]:
-        for (fp, nid) in conn.execute("SELECT file_path, id FROM nodes WHERE name = ? LIMIT 8", (t,)).fetchall():
-            if fp: seed_files.add(rel(fp))
-            seed_ids.append(nid)
-    for nid in seed_ids[:200]:
-        for (fp,) in conn.execute(
-            "SELECT n.file_path FROM edges e JOIN nodes n ON e.target_id=n.id "
-            "WHERE e.source_id = ? AND e.type='CALLS' LIMIT 8", (nid,)).fetchall():
-            if fp: seed_files.add(rel(fp))
+    # anchor node ids: nodes IN the seeded files + nodes NAMED by the precise symbols
+    seed_ids = set()
+    for f in list(seed_files)[:80]:
+        for (nid,) in conn.execute(
+            "SELECT id FROM nodes WHERE (file_path = ? OR file_path LIKE ?) AND is_test=0 LIMIT 40",
+            (f, "%/" + f)).fetchall():
+            seed_ids.add(nid)
+    for s in set(syms):
+        for (fp, nid) in conn.execute(
+            "SELECT file_path, id FROM nodes WHERE name = ? AND is_test=0 LIMIT 12", (s,)).fetchall():
+            seed_ids.add(nid)
+            if fp:
+                scoped.add(rel(fp))
+    # bidirectional ego-graph BFS over CALLS edges, cost-bounded
+    frontier = list(seed_ids); seen = set(seed_ids)
+    for _hop in range(EGO_HOPS):
+        if not frontier or len(scoped) >= NEIGHBORHOOD_BUDGET:
+            break
+        nxt = []
+        for nid in frontier[:_FRONTIER_CAP]:
+            if len(scoped) >= NEIGHBORHOOD_BUDGET:
+                break
+            for q in (
+                "SELECT n.file_path, n.id FROM edges e JOIN nodes n ON n.id=e.target_id WHERE e.source_id=? AND e.type='CALLS' LIMIT 24",
+                "SELECT n.file_path, n.id FROM edges e JOIN nodes n ON n.id=e.source_id WHERE e.target_id=? AND e.type='CALLS' LIMIT 24",
+            ):
+                for (fp, oid) in conn.execute(q, (nid,)).fetchall():
+                    if fp:
+                        scoped.add(rel(fp))
+                    if oid not in seen:
+                        seen.add(oid); nxt.append(oid)
+        frontier = nxt
     conn.close()
-    scoped.update(f for f in seed_files if f in rel_set or basemap.get(os.path.basename(f)))
 except Exception:
     pass
-scoped = sorted(p for p in scoped if p)
+
+scoped = sorted(p for p in scoped if p and p in rel_set)[:NEIGHBORHOOD_BUDGET]
 open(OUTF, "w").write("\n".join(scoped))
-print(f"  demand scope: {len(scoped)} issue-relevant source files")
+print(f"  graph-neighborhood scope: {len(scoped)} files (bidirectional {EGO_HOPS}-hop ego-graph from {len(seed_files)} seed files, budget {NEIGHBORHOOD_BUDGET})")
 PY
 SCOPE_ARG=""; [ -s "$OUT/scope.txt" ] && SCOPE_ARG="--source-files $OUT/scope.txt"
 
 echo "=== (3) LSP resolve (bundled pyright, repo deps present in-container) ==="
-"$PY" -m groundtruth.resolve --db "$OUT/graph.db" --root "$REPO" --resolve --lang python $SCOPE_ARG \
+# LSP language is NOT hardcoded to python: detect the DOMINANT language in the graph
+# so the precision pass serves whatever language the task repo is (resolve.py dispatches
+# per-ext via _LANG_TO_EXT; an unsupported language resolves 0 -> GATE 2 fails-closed
+# = explicit proof classification, never a silent pass).
+LSP_LANG=$("$PY" -c "import sqlite3; r=sqlite3.connect('$OUT/graph.db').execute(\"select language from nodes where is_test=0 and language is not null and trim(language)!='' group by language order by count(*) desc limit 1\").fetchone(); print(r[0] if r else 'python')" 2>/dev/null || echo python)
+echo "  dominant graph language: $LSP_LANG"
+"$PY" -m groundtruth.resolve --db "$OUT/graph.db" --root "$REPO" --resolve --lang "$LSP_LANG" $SCOPE_ARG \
     2>&1 | tee "$OUT/lsp_metrics.txt" | grep -aE 'LSP_METRICS' || true
 LSP_RC=${PIPESTATUS[0]}
-[ "$LSP_RC" -eq 0 ] || echo "WARN: resolve rc=$LSP_RC (GATE 2 will judge from the contract line)"
+# PROOF MODE: a non-zero resolve exit is FATAL — it means a fail-closed guard fired
+# (LSP-before-scoring / closure-after-LSP / semantic-consumed) or resolve crashed. The
+# old WARN-and-continue masked exactly the partial-operation the guards exist to catch
+# (the substrate swallowed resolve failures into the gates). Outside proof mode: WARN
+# (GATE 2 still judges from the contract line) — byte-identical to before.
+if [ "$LSP_RC" -ne 0 ]; then
+  if [ "${GT_PROOF_MODE:-0}" = "1" ]; then
+    echo "FATAL: resolve rc=$LSP_RC in PROOF MODE — fail-closed (a proof guard fired or resolve crashed; not masking it)"; exit "$LSP_RC"
+  fi
+  echo "WARN: resolve rc=$LSP_RC (not proof mode; GATE 2 will judge from the contract line)"
+fi
 
 echo "=== (3.5) GRAPH PREFLIGHT census (reuse preflight_pipeline; recorded, non-fatal) ==="
 # Records the full-stack dimension census (graph/fts5/edge_quality/data_flow/lsp/embedder/
