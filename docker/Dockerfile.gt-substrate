@@ -188,6 +188,11 @@ RUN printf '#!/bin/sh\nexec "${GT_PYTHON:-python3}" /opt/gt/scripts/swebench/gt_
 # ---- stage 2: thin final image whose entire payload is the portable /opt/gt ----
 FROM ubuntu:20.04
 COPY --from=build /opt/gt /opt/gt
+# gopls REQUIRES the `go` toolchain at runtime (`go env`/`go list`) to load a workspace —
+# without it the LSP `initialize` handshake times out (proven by the 5-language smoke:
+# server_launched=True warm_probe_ok=False, LSP_FAIL_NO_WARM on go). Bake the build-stage
+# toolchain into the final image and pin it OFFLINE so initialization never needs network.
+COPY --from=build /usr/local/go /opt/gt/go
 ENV GT_HOME=/opt/gt \
     GT_INDEX_BINARY=/opt/gt/bin/gt-index \
     GT_PYTHON=/opt/gt/python/bin/python3 \
@@ -195,7 +200,16 @@ ENV GT_HOME=/opt/gt \
     GT_FORCE_ONNX_EMBEDDER=1 \
     JDTLS_HOME=/opt/gt/jdtls \
     JAVA_HOME=/opt/gt/jre \
-    PATH="/opt/gt/bin:/opt/gt/node/bin:/opt/gt/python/bin:/opt/gt/jre/bin:${PATH}" \
+    GOROOT=/opt/gt/go \
+    GOTOOLCHAIN=local \
+    GOFLAGS=-mod=mod \
+    GOPROXY=off \
+    GOSUMDB=off \
+    GOPATH=/tmp/gopath \
+    GOMODCACHE=/tmp/gomodcache \
+    GOCACHE=/tmp/gocache \
+    GO111MODULE=on \
+    PATH="/opt/gt/bin:/opt/gt/node/bin:/opt/gt/python/bin:/opt/gt/jre/bin:/opt/gt/go/bin:${PATH}" \
     PYTHONPATH="/opt/gt/src:/opt/gt/scripts/swebench:/opt/gt/benchmarks/swebench"
 
 # Build-time SELF-TEST: the whole closure must be present + runnable on glibc 2.31,
@@ -207,6 +221,7 @@ RUN /opt/gt/bin/gt-index -h >/dev/null 2>&1 \
     && pyright --version \
     && typescript-language-server --version \
     && gopls version \
+    && /opt/gt/go/bin/go version \
     && rust-analyzer --version \
     && test -x /opt/gt/bin/jdtls \
     && test -n "$(ls /opt/gt/jdtls/plugins/org.eclipse.equinox.launcher_*.jar 2>/dev/null | head -1)" \
