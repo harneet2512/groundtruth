@@ -244,10 +244,10 @@ jobs:
           # Retry the single HF fetch — a transient blip shouldn't lose the cache.
           for ATTEMPT in 1 2 3; do
             python - <<'PY'
-from datasets import load_dataset
-ds = load_dataset("SWE-bench-Live/SWE-bench-Live", split="lite")
-print("pre-cached SWE-bench-Live[lite]:", len(ds), "rows")
-PY
+          from datasets import load_dataset
+          ds = load_dataset("SWE-bench-Live/SWE-bench-Live", split="lite")
+          print("pre-cached SWE-bench-Live[lite]:", len(ds), "rows")
+          PY
             if [ -n "$(ls -A /tmp/hf_cache 2>/dev/null)" ]; then echo "grader cache built (attempt $ATTEMPT)"; break; fi
             echo "::warning::pre-cache attempt $ATTEMPT failed — retrying"; sleep 15
           done
