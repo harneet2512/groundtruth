@@ -1,0 +1,185 @@
+name: "GT language smoke — identical gt-run-proof per language (5 fixtures)"
+
+# The MINIMAL language-agnostic execution proof for the GT substrate. It runs the SAME
+# portable gt-run-proof command (the §A proof-runtime contract) once per language, changing
+# ONLY the mounted fixture path — never the command, never per-language special-casing. Each
+# job asserts the 7-artifact contract, reads lsp_certificate.json's verdict, records the
+# gt-run-proof exit code, and uploads /gt_artifacts. The final summarize step prints the
+# per-language table the architecture-parity audit expects:
+#   Language | exit | 7-artifact ✓/✗ | LSP status (verdict_hint)
+#
+# LEGITIMACY: the docker-run is byte-identical across languages; the image digest is the ONLY
+# thing pinning the runtime (@sha256 only, never a mutable tag). An unsupported / mis-baked
+# language surfaces its CLASSIFIED LSP verdict (e.g. LSP_INSTALL_MISSING), never a forced pass.
+#
+# READY-TO-FIRE: the instant gt_substrate_image.yml publishes a digest, set the
+# GT_SUBSTRATE_DIGEST repo variable (or pass gt_substrate_digest on dispatch) and run.
+
+on:
+  # Manual fire once the substrate digest exists.
+  workflow_dispatch:
+    inputs:
+      gt_substrate_digest:
+        description: "Pinned GT substrate image by IMMUTABLE digest (ghcr.io/<org>/gt-substrate@sha256:<digest>). Overrides vars.GT_SUBSTRATE_DIGEST. Proof input — NEVER a mutable tag."
+        required: false
+        default: ""
+  # This workflow has never been on the default branch, so GitHub never registered it for
+  # workflow_dispatch (HTTP 404 on dispatch off a non-default branch). A push trigger scoped to
+  # THIS file + the fixtures self-registers it on the first push to gt-trial (and runs the smoke
+  # once if the digest variable is already set), after which manual workflow_dispatch works.
+  # Path-scoped so unrelated pushes never trigger it. Push carries no dispatch inputs, so the
+  # digest resolves from vars.GT_SUBSTRATE_DIGEST (the `||` fallback below).
+  push:
+    branches: [gt-trial]
+    paths:
+      - ".github/workflows/gt_language_smoke.yml"
+      - "tests/fixtures/lang_smoke/**"
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  # Input overrides the repo variable; on a push event the input is empty so the variable wins.
+  GT_SUBSTRATE_DIGEST: ${{ inputs.gt_substrate_digest || vars.GT_SUBSTRATE_DIGEST }}
+
+jobs:
+  smoke:
+    name: "smoke (${{ matrix.lang }})"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # The 5 GT-supported languages, each backed by a tiny self-contained fixture under
+        # tests/fixtures/lang_smoke/<lang>/. ONLY the mount path changes between jobs.
+        lang: [python, javascript, typescript, go, rust]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve + validate the pinned substrate digest (@sha256 only)
+        run: |
+          set -euo pipefail
+          if [ -z "${GT_SUBSTRATE_DIGEST:-}" ]; then
+            echo "GT_SUBSTRATE_DIGEST_MISSING: set the gt_substrate_digest dispatch input or the"
+            echo "GT_SUBSTRATE_DIGEST repo variable to the digest published by gt_substrate_image.yml."
+            echo "The pinned substrate (by @sha256) is the ONLY thing that pins the runtime."
+            exit 1
+          fi
+          case "$GT_SUBSTRATE_DIGEST" in
+            *@sha256:*) : ;;
+            *) echo "FATAL: GT_SUBSTRATE_DIGEST='$GT_SUBSTRATE_DIGEST' is not a pinned @sha256 digest (mutable tags forbidden)"; exit 1 ;;
+          esac
+          echo "pinned substrate: $GT_SUBSTRATE_DIGEST"
+
+      - name: Pull the pinned substrate by digest
+        run: |
+          set -euo pipefail
+          docker pull "$GT_SUBSTRATE_DIGEST" || { echo "GT_SUBSTRATE_PULL_FAIL: docker pull of the pinned substrate failed"; exit 1; }
+
+      - name: "gt-run-proof inside the pinned substrate (IDENTICAL command; only fixture path changes)"
+        id: proof
+        run: |
+          set -uo pipefail
+          mkdir -p "$RUNNER_TEMP/gt_artifacts"
+          # Clean the artifact dir so a stale prior run can never mask a missing artifact.
+          rm -rf "$RUNNER_TEMP/gt_artifacts" && mkdir -p "$RUNNER_TEMP/gt_artifacts"
+          # ── THE byte-identical portable proof command (§A). ONLY <lang> in the mount changes. ──
+          docker run --rm \
+            -v "$PWD/tests/fixtures/lang_smoke/${{ matrix.lang }}:/work:ro" \
+            -v "$RUNNER_TEMP/gt_artifacts:/gt_artifacts" \
+            -e GT_PROOF_MODE=1 -e GT_CONTAINERIZED=1 -e GT_RUNTIME_STRATEGY=unified_substrate \
+            -e GT_REQUIRE_FTS5=1 -e GT_REQUIRE_EMBEDDER=1 -e GT_FORCE_ONNX_EMBEDDER=1 \
+            -e GT_REQUIRE_LSP=1 -e GT_REQUIRE_FULL_STACK=1 \
+            "$GT_SUBSTRATE_DIGEST" gt-run-proof --source-root /work --out /gt_artifacts
+          RC=$?
+          echo "gt_run_proof_exit=$RC"
+          echo "exit_code=$RC" >> "$GITHUB_OUTPUT"
+          # Do NOT fail the step on a non-zero gt-run-proof rc: a classified verdict (e.g. an
+          # unsupported language) is a VALID outcome we must record + table, not crash on.
+          exit 0
+
+      - name: "Assert the 7-artifact contract + read LSP status"
+        id: verify
+        run: |
+          set -uo pipefail
+          A="$RUNNER_TEMP/gt_artifacts"
+          MISSING=""
+          for c in graph.db runtime_context.json lsp_certificate.json graph_certificate.json \
+                   embedder_certificate.json foundational_gate_report.json run_manifest.json; do
+            if [ ! -s "$A/$c" ]; then MISSING="$MISSING $c"; fi
+          done
+          if [ -z "$MISSING" ]; then
+            echo "all 7 GT artifacts present"
+            echo "artifacts_ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "SUBSTRATE_MISSING_CERTS:$MISSING"
+            echo "artifacts_ok=false" >> "$GITHUB_OUTPUT"
+          fi
+          # Read the per-language LSP verdict from the certificate (the allowed enum:
+          # LSP_ACTIVE_VALID / LSP_NO_OP_VALID_WITH_WARM_SERVER / LSP_UNSUPPORTED_EXPLICIT /
+          # LSP_INSTALL_MISSING / LSP_FAIL_NO_WARM / ...). Never forced — whatever the cert says.
+          LSP_STATUS="NO_LSP_CERTIFICATE"
+          if [ -s "$A/lsp_certificate.json" ]; then
+            LSP_STATUS=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('verdict_hint') or 'UNKNOWN')" "$A/lsp_certificate.json" 2>/dev/null || echo "UNREADABLE_CERT")
+          fi
+          echo "LSP status (${{ matrix.lang }}): $LSP_STATUS"
+          echo "lsp_status=$LSP_STATUS" >> "$GITHUB_OUTPUT"
+
+      - name: "Record per-language row for the summary table"
+        if: always()
+        run: |
+          set -uo pipefail
+          mkdir -p "$RUNNER_TEMP/rows"
+          EXIT="${{ steps.proof.outputs.exit_code }}"
+          OK="${{ steps.verify.outputs.artifacts_ok }}"
+          LSP="${{ steps.verify.outputs.lsp_status }}"
+          MARK="✗"; [ "$OK" = "true" ] && MARK="✓"
+          printf '%s|%s|%s|%s\n' "${{ matrix.lang }}" "${EXIT:-?}" "$MARK" "${LSP:-?}" \
+            > "$RUNNER_TEMP/rows/${{ matrix.lang }}.row"
+
+      - name: "Upload /gt_artifacts (+ the row)"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: "gt-lang-smoke-${{ matrix.lang }}"
+          path: |
+            ${{ runner.temp }}/gt_artifacts
+            ${{ runner.temp }}/rows
+          if-no-files-found: warn
+
+  summarize:
+    name: "summarize (per-language table)"
+    needs: smoke
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all per-language rows
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/dl
+          pattern: gt-lang-smoke-*
+          merge-multiple: true
+      - name: Print the audit table (Language | exit | 7-artifact ✓/✗ | LSP status)
+        run: |
+          set -uo pipefail
+          {
+            echo "## GT language smoke — identical gt-run-proof per language"
+            echo ""
+            echo "Image digest pin: \`${GT_SUBSTRATE_DIGEST:-<unset>}\` (byte-identical command, only fixture path changed)"
+            echo ""
+            echo "| Language | exit | 7-artifact | LSP status |"
+            echo "|---|---|---|---|"
+            for f in /tmp/dl/rows/*.row; do
+              [ -e "$f" ] || continue
+              IFS='|' read -r LANG EXIT MARK LSP < "$f"
+              echo "| $LANG | $EXIT | $MARK | $LSP |"
+            done
+          } | tee -a "$GITHUB_STEP_SUMMARY"
