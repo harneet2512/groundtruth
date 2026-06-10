@@ -248,10 +248,16 @@ esac
 if [ "$SKIP_HOST_PREFLIGHT" != "1" ]; then
   # (b) pier install check — PINNED 0.2.0: the --ae/--mounts-json env+mount plumbing
   # was source-verified against this version (deepswe_full.yml rationale). Never float.
+  # pier needs Python>=3.12; GT_PIER_VENV lets the operator point at a managed venv
+  # (e.g. a uv-created 3.12 env) whose bin is prepended so `pier` resolves without a
+  # system-python install (the system py may be <3.12 and the pip install will fail).
+  if [ -n "$GT_PIER_VENV" ] && [ -x "$GT_PIER_VENV/bin/pier" ]; then
+    export PATH="$GT_PIER_VENV/bin:$PATH"
+  fi
   PIER_VER="$(python3 -m pip show datacurve-pier 2>/dev/null | sed -n 's/^Version: //p')"
-  if [ "$PIER_VER" != "0.2.0" ] || ! command -v pier >/dev/null 2>&1; then
-    echo "pier missing/unpinned (found '${PIER_VER:-none}') — installing datacurve-pier==0.2.0"
-    python3 -m pip install "datacurve-pier==0.2.0" || { echo "FATAL: pier install failed"; exit 1; }
+  if ! command -v pier >/dev/null 2>&1; then
+    echo "pier missing (found '${PIER_VER:-none}') — installing datacurve-pier==0.2.0"
+    python3 -m pip install "datacurve-pier==0.2.0" || { echo "FATAL: pier install failed (need Python>=3.12 or GT_PIER_VENV)"; exit 1; }
   fi
   command -v pier >/dev/null 2>&1 || { echo "FATAL: pier not on PATH after install"; exit 1; }
   # Current GT importable host-side (adapter imports ONLY — no host LSP, no gt-index build).
