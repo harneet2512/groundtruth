@@ -459,6 +459,83 @@ def _write_lsp_certificate(cert: dict) -> str:
     return path
 
 
+# Total wall-clock budget for the ONE-TIME project-readiness barrier (below). Bounded so
+# a permanently-broken project can never stall the pass; env-overridable for slow CI.
+_READY_BUDGET_S_DEFAULT = 20.0
+
+
+async def _await_project_ready(
+    client, uri: str, line: int, col: int, *, budget_s: float | None = None
+):
+    """Readiness barrier for LAZILY-LOADING language servers — run ONCE per pass, on
+    the FIRST textDocument/definition (i.e. right after the first didOpen).
+
+    Fix 27249519544-b: tsserver starts its configured-project load on the first
+    didOpen, so the initialize-time ``wait_for_progress_complete()`` (line ~593)
+    returned before ANY load existed and every definition fast-failed (the
+    dynamodb-toolbox shape: ``Verified:0 Corrected:2 Deleted:11 Failed:478`` in
+    11.9s — LspErr/empty, never the 30s timeout; the same client on loose JS
+    resolved 41.6%). Mechanism, language-agnostic (NO per-server branching):
+
+      1. drain + re-run ``wait_for_progress_complete``: servers that report the
+         project load via window/workDoneProgress (begun by the didOpen) are
+         awaited properly, bounded by the remaining budget;
+      2. retry the FIRST definition with short exponential backoff while it
+         errors or returns empty — fast-failing servers converge to a real
+         answer once the load completes.
+
+    EARLY EXIT on the first non-error, non-empty answer: an already-warm server
+    (pyright/gopls) pays ~one bounded drain + one request, so working languages
+    are not slowed. Total budget ``budget_s`` (default 20s, env
+    ``GT_LSP_READY_BUDGET_S``); never raises.
+
+    Returns ``(last_def_result, waited_ms, ready_ok, attempts)``; the final
+    definition result is REUSED by the caller as the first edge's answer (no
+    double query). ``ready_ok=False`` after the budget means the pass proceeds
+    edge-by-edge anyway (per-edge failures stay counted/classified) — the
+    barrier is a wait, never a gate.
+    """
+    from groundtruth.utils.result import Err as LspErr
+    from groundtruth.utils.result import GroundTruthError
+
+    if budget_s is None:
+        try:
+            budget_s = float(os.environ.get("GT_LSP_READY_BUDGET_S", "") or _READY_BUDGET_S_DEFAULT)
+        except ValueError:
+            budget_s = _READY_BUDGET_S_DEFAULT
+    t0 = time.time()
+    deadline = t0 + max(0.0, float(budget_s))
+
+    # (1) progress-aware wait: pick up any workDoneProgress tokens the first didOpen
+    # just created, then wait them out. A warm server with no fresh tokens passes
+    # through in ~the drain window (all-complete tokens return immediately).
+    try:
+        await client.drain(timeout=min(1.0, max(0.05, deadline - time.time())))
+        if getattr(client, "_progress_tokens", None):
+            await client.wait_for_progress_complete(timeout=max(0.1, deadline - time.time()))
+    except Exception:
+        pass  # the definition-retry below is the authoritative readiness signal
+
+    # (2) bounded retry of the FIRST definition until the server actually answers.
+    attempts = 0
+    backoff = 0.5
+    last = None
+    while True:
+        attempts += 1
+        try:
+            last = await client.definition(uri, line, col)
+        except Exception as exc:  # client-side raise == not ready; stay bounded
+            last = LspErr(GroundTruthError(code="lsp_error", message=str(exc)))
+        ready = (not isinstance(last, LspErr)) and bool(last.value)
+        if ready:
+            return last, (time.time() - t0) * 1000.0, True, attempts
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            return last, (time.time() - t0) * 1000.0, False, attempts
+        await asyncio.sleep(min(backoff, remaining))
+        backoff = min(backoff * 2.0, 4.0)
+
+
 async def _resolve_edges(
     db_path: str,
     root: str,
@@ -492,7 +569,17 @@ async def _resolve_edges(
                    # WHY the launch/handshake/probe failed (server exit code + first
                    # stderr lines from the client) — lands in the LSP certificate so
                    # an LSP_FAIL_NO_WARM verdict is never blind again.
-                   "failure_detail": ""}
+                   "failure_detail": "",
+                   # Project-readiness barrier (run once, on the FIRST definition):
+                   # None == never exercised (zero in-scope edges). Lands in the cert
+                   # as project_ready / project_ready_wait_ms / project_ready_attempts.
+                   "project_ready": None, "project_ready_wait_ms": 0.0,
+                   "project_ready_attempts": 0,
+                   # Definition-stage failure classification (subset of "failed"):
+                   # lsp_error = the server ANSWERED with an error (the gopls offline
+                   # `no package metadata` class, the tsserver lazy-load fast-fail);
+                   # empty = answered with no location; exception = client-side raise.
+                   "failed_lsp_error": 0, "failed_empty": 0, "failed_exception": 0}
 
     # Map the language NAME to its real file extension (LSP_SERVERS is keyed by
     # extension, e.g. ".py", not ".python"). This is the fix for the universal LSP
@@ -642,6 +729,9 @@ async def _resolve_edges(
         pass
 
     opened_files: set[str] = set()
+    # Readiness barrier: pending until the FIRST definition of the pass (after the
+    # first didOpen — the moment a lazily-loading server starts its project load).
+    _barrier_pending = True
 
     for i, edge in enumerate(edges):
         source_file = edge.get("source_file", "")
@@ -686,15 +776,34 @@ async def _resolve_edges(
 
         # Ask LSP for definition
         try:
-            def_result = await client.definition(uri, source_line - 1, col)
+            if _barrier_pending:
+                # ONE-TIME project-readiness barrier (fix 27249519544-b): absorb a
+                # lazily-loading server's fast-fail burst; the converged result is
+                # reused as THIS edge's answer (no double query).
+                _barrier_pending = False
+                def_result, _ready_ms, _ready_ok, _ready_attempts = await _await_project_ready(
+                    client, uri, source_line - 1, col
+                )
+                stats["project_ready"] = bool(_ready_ok)
+                stats["project_ready_wait_ms"] = float(_ready_ms)
+                stats["project_ready_attempts"] = int(_ready_attempts)
+                print(
+                    f"  project readiness barrier: ready={_ready_ok} "
+                    f"wait_ms={_ready_ms:.1f} attempts={_ready_attempts}",
+                    file=sys.stderr,
+                )
+            else:
+                def_result = await client.definition(uri, source_line - 1, col)
             if isinstance(def_result, LspErr):
                 stats["failed"] += 1
+                stats["failed_lsp_error"] += 1
                 continue
 
             locations = def_result.value
             if not locations:
                 # LSP couldn't resolve — mark as checked
                 stats["failed"] += 1
+                stats["failed_empty"] += 1
                 continue
 
             # Got a definition location
@@ -724,6 +833,7 @@ async def _resolve_edges(
 
         except Exception:
             stats["failed"] += 1
+            stats["failed_exception"] += 1
             continue
 
         # Progress every 100 edges
@@ -1117,6 +1227,14 @@ def resolve_main() -> None:
             "failed_edges": 0, "skipped_edges": 0,
             "server_launched": False, "warm_probe_ok": False, "lsp_warm": False,
             "probe_method": "workspace/symbol", "probe_latency_ms": 0.0,
+            # Project-readiness barrier (lazily-loading servers, fix 27249519544-b):
+            # null == barrier never exercised (no in-scope edges / pass never ran).
+            "project_ready": None, "project_ready_wait_ms": 0.0,
+            "project_ready_attempts": 0,
+            # Definition-stage failure classification (subset of failed_edges):
+            # {"lsp_error": N, "empty": N, "exception": N} — e.g. gopls offline
+            # `no package metadata` per-edge fast-fails land under lsp_error.
+            "failed_breakdown": {},
             "no_op_valid": False, "no_op_reason": "", "unsupported_reason": "",
             "install_missing_reason": "",
             "lsp_started_at": None, "lsp_finished_at": None,
@@ -1214,6 +1332,14 @@ def resolve_main() -> None:
         cert["deleted_edges"] = int(stats.get("deleted", 0))
         cert["failed_edges"] = int(stats.get("failed", 0))
         cert["skipped_edges"] = int(stats.get("skipped", 0))
+        cert["project_ready"] = stats.get("project_ready", None)
+        cert["project_ready_wait_ms"] = float(stats.get("project_ready_wait_ms", 0.0) or 0.0)
+        cert["project_ready_attempts"] = int(stats.get("project_ready_attempts", 0) or 0)
+        cert["failed_breakdown"] = {
+            "lsp_error": int(stats.get("failed_lsp_error", 0)),
+            "empty": int(stats.get("failed_empty", 0)),
+            "exception": int(stats.get("failed_exception", 0)),
+        }
 
         print(f"\nResults ({_elapsed:.1f}s): server_launched={cert['server_launched']} "
               f"warm_probe_ok={cert['warm_probe_ok']} probe_latency_ms={cert['probe_latency_ms']:.1f}")
@@ -1222,6 +1348,13 @@ def resolve_main() -> None:
         print(f"  Verified: {stats.get('verified',0)}  Corrected: {stats.get('corrected',0)}  "
               f"Deleted: {stats.get('deleted',0)}  Failed: {stats.get('failed',0)}  "
               f"Skipped: {stats.get('skipped',0)}")
+        if stats.get("project_ready") is not None:
+            print(f"  project_ready={stats['project_ready']} "
+                  f"project_ready_wait_ms={float(stats.get('project_ready_wait_ms', 0.0)):.1f} "
+                  f"project_ready_attempts={int(stats.get('project_ready_attempts', 0))} "
+                  f"failed_breakdown(lsp_error={stats.get('failed_lsp_error',0)} "
+                  f"empty={stats.get('failed_empty',0)} "
+                  f"exception={stats.get('failed_exception',0)})")
 
         # Stamp LSP-enrichment completion + warm flag (one-pipeline order: index -> LSP ->
         # closure). generate_v1r_brief asserts the lsp stamp in proof mode.

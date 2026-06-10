@@ -409,6 +409,89 @@ def _demand_scope_files(graph_db: str, issue_text: str, cap: int = 80) -> list:
         return []
 
 
+# ── GATE-1-aware dynamic LSP attempt budget (fix: 113-task sweep run 27249519544) ────────
+# GATE 1 pred_B requires det >= name_match over CALLS edges. Each LSP promotion
+# (verify/correct: name_match -> 'lsp', a deterministic method) closes the dominance gap
+# (name_match - det) by 2; each delete closes it by 1. Flipping pred_B therefore needs
+# 2*Promoted + Deleted > gap. The old FIXED un-scoped cap of 500 was structurally below
+# that requirement on the failing TS repos (dynamodb-toolbox: gap = 3154 - 2485 = 669 —
+# 500 attempts can clear it only at a >67% pure-promotion rate, far above any realistic
+# mixed promote/delete/fail outcome). The budget must SCALE with the measured gap.
+#
+# Worst-case wall clock is BOUNDED by the ceiling: 20000 edges at the measured ~24
+# edges/s ≈ 14 min per language; the dynamodb-class gap (669 -> budget 870) is ~36s, and
+# the full 3154-edge TS residual would be ≈ 2.2 min. Repo-size-agnostic, no benchmark
+# shapes: the gap is read from THIS graph, the floors/ceiling are fixed bounds.
+LSP_MAX_EDGES_FLOOR = 500            # historical un-scoped default — kept as the floor
+LSP_MAX_EDGES_SCOPED_FLOOR = 20000   # historical issue-scoped budget — kept as a floor
+LSP_MAX_EDGES_CEILING = 20000        # bounded worst case (~14 min/lang at ~24 edges/s)
+LSP_GAP_HEADROOM = 0.30              # sub-perfect promote/delete success margin
+
+
+def _gate1_det_set() -> frozenset:
+    """The gates' DETERMINISTIC resolution-method set — the SAME unified fact-set
+    foundational_gates.gate_resolution counts (curation_map), same fallback literal,
+    so this budget's gap math can never drift from pred_B's."""
+    try:
+        sys.path.insert(0, os.path.join(GT_HOME, "src"))
+        from groundtruth.pretask.curation_map import DETERMINISTIC_RESOLUTION_METHODS
+        return frozenset(DETERMINISTIC_RESOLUTION_METHODS)
+    except Exception:
+        return frozenset({
+            "same_file", "import", "import_type", "type_flow", "verified_unique",
+            "impl_method", "inherited", "unique_method", "return_type", "lsp", "lsp_verified",
+        })
+
+
+def gate1_dominance_gap(graph_db: str) -> int:
+    """GATE 1 pred_B's dominance gap on this graph: name_match% CALLS edges minus
+    deterministic CALLS edges (exactly gate_resolution's math: det via the unified
+    set, name_match via LIKE 'name_match%'). >=0; 0 on a det-dominant or unreadable
+    graph (fail-safe — the floor budget still runs the pass)."""
+    try:
+        import sqlite3
+        det_set = sorted(_gate1_det_set())
+        ph = ",".join("?" for _ in det_set)
+        c = sqlite3.connect(f"file:{graph_db}?mode=ro", uri=True)
+        det = c.execute(
+            f"SELECT count(*) FROM edges WHERE type='CALLS' AND resolution_method IN ({ph})",
+            det_set,
+        ).fetchone()[0]
+        nm = c.execute(
+            "SELECT count(*) FROM edges WHERE type='CALLS' "
+            "AND resolution_method LIKE 'name_match%'"
+        ).fetchone()[0]
+        c.close()
+        return max(0, int(nm) - int(det))
+    except Exception:
+        return 0
+
+
+def compute_lsp_max_edges(graph_db: str, *, scoped: bool, env=None) -> int:
+    """Dynamic --max-edges for the LSP residual pass.
+
+    ``min(CEILING, max(floor, ceil(gap * (1 + HEADROOM))))`` where ``gap`` is GATE 1's
+    dominance gap on this graph and ``floor`` preserves the historical budgets (500
+    un-scoped / 20000 issue-scoped) — the dynamic computation may only RAISE budgets,
+    never shrink a pass that worked before. ``GT_LSP_MAX_EDGES`` (positive int) is an
+    explicit operator override and wins outright; invalid values are ignored. Pure +
+    deterministic for the tests; never raises."""
+    env = os.environ if env is None else env
+    override = str(env.get("GT_LSP_MAX_EDGES", "") or "").strip()
+    if override:
+        try:
+            v = int(override)
+            if v > 0:
+                return v
+        except ValueError:
+            pass
+    import math
+    gap = gate1_dominance_gap(graph_db)
+    floor = LSP_MAX_EDGES_SCOPED_FLOOR if scoped else LSP_MAX_EDGES_FLOOR
+    dynamic = int(math.ceil(gap * (1.0 + LSP_GAP_HEADROOM)))
+    return min(LSP_MAX_EDGES_CEILING, max(floor, dynamic))
+
+
 def aggregate_lsp_verdicts(lang_verdicts: dict, *, require_lsp: bool, any_success: bool):
     """P1-e polyglot aggregation rule over per-language LSP verdicts -> (ok, failures).
 
@@ -579,7 +662,19 @@ def main(argv=None) -> int:
         scope_path = os.path.join(a.out, "gt_scope_files.txt")
         with open(scope_path, "w", encoding="utf-8") as _sf:
             _sf.write("\n".join(scope_files))
-    max_edges = "20000" if scope_files else "500"
+    # Dynamic --max-edges (fix 27249519544-a): the old fixed un-scoped 500 was structurally
+    # below GATE 1's dominance gap (pred_B needs 2*Promoted + Deleted > gap; dynamodb-toolbox
+    # gap=669). Budget = gap + 30% headroom, floor-preserving (500 un-scoped / 20000 scoped),
+    # ceiling-capped at 20000 (worst case ≈ 14 min/lang at the measured ~24 edges/s),
+    # GT_LSP_MAX_EDGES env-overridable. See compute_lsp_max_edges.
+    _gate1_gap = gate1_dominance_gap(graph)
+    max_edges = str(compute_lsp_max_edges(graph, scoped=bool(scope_files)))
+    print(f"[gt-run-proof] LSP attempt budget: gate1_dominance_gap={_gate1_gap} "
+          f"(name_match - deterministic, CALLS), scoped={bool(scope_files)}, "
+          f"headroom={LSP_GAP_HEADROOM:.2f} -> --max-edges {max_edges}"
+          + (" (GT_LSP_MAX_EDGES override)"
+             if (os.environ.get("GT_LSP_MAX_EDGES") or "").strip() else ""),
+          flush=True)
     # Capture resolve's stdout (the LSP_METRICS contract line) into GT_LSP_METRICS_FILE so the
     # foundational LSP gate can read residual/scoped — previously uncaptured -> gate read resolved=0
     # while the graph + cert held the real count (the measurement half of the stamp discrepancy).
