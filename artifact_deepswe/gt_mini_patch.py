@@ -1564,7 +1564,14 @@ _TEST_RUNNER_RE = re.compile(
     # A `timeout N` / `time` / `env VAR=…` wrapper does not stop a command being
     # a real test-runner invocation (2026-06-10: boa ran `timeout 60 cargo test`
     # six times — the governor's common case is exactly the wrapped form).
-    r"(?:^|[|&;]\s*)(?:timeout\s+(?:-\S+\s+)*\d+\S*\s+|time\s+|env\s+(?:\S+=\S+\s+)+)*(?:"
+    # The timeout wrapper accepts any run of flag/duration tokens so the
+    # kill-after form (`timeout -k 5 60 cargo test`) cannot escape it (LIPI).
+    # A `python[\d.]* <script>.py` prefix is a wrapper ONLY when the next token
+    # is a .py script (G6 Finding 2: `python manage.py test` — Django's
+    # prefixed form — escaped the governor); the runner-shape alternatives
+    # below still decide, so an arbitrary `python script.py` is NOT a runner.
+    r"(?:^|[|&;]\s*)(?:timeout\s+(?:-\S+\s+|\d+\S*\s+)+|time\s+|env\s+(?:\S+=\S+\s+)+"
+    r"|python[\d.]*\s+(?=\S*\.py\b))*(?:"
     r"python[\d.]*\s+-m\s+(?:pytest|unittest|nose2?|tox)\b"
     r"|pytest\b|py\.test\b|tox\b|nose2?\b"
     r"|(?:\S*/)?(?:runtests?|run_tests?)\.py\b"
