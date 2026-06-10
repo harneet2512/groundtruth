@@ -34,8 +34,11 @@
 #                        the task container: pier/agents/utils.py PROVIDER_KEYS).
 #   vertex_ai/* models : export VERTEXAI_PROJECT=<gcp-project>  (REQUIRED — pier
 #                        raises without it; auto-forwarded into the container).
-#                        export VERTEXAI_LOCATION=<loc>  (default: global; NOT
-#                        auto-forwarded by pier -> this script adds an --ae).
+#                        export VERTEXAI_LOCATION=<loc>  (default: us-east1, the
+#                        LOCKED region — NOT global, whose shared serving pool
+#                        carries a 429 risk; NOT auto-forwarded by pier -> this
+#                        script adds an --ae. Fallback us-east4/us-central1 if the
+#                        model isn't served in us-east1: one env override, no code change).
 #                        export GOOGLE_APPLICATION_CREDENTIALS=<sa.json on the VM>
 #                        (STRONGLY recommended: DeepSWE tasks set
 #                        allow_internet=false, so pier isolates the task container
@@ -102,6 +105,12 @@ DISK_MIN_GB="${DISK_MIN_GB:-25}"
 DISK_WAIT_MAX_S="${DISK_WAIT_MAX_S:-1800}"
 PARALLEL="${PARALLEL:-8}"
 SKIP_HOST_PREFLIGHT="${SKIP_HOST_PREFLIGHT:-0}"
+# Canonical embedder classifier dir (scripts/metrics) — the row builder imports
+# embedder_certificate.classify_embedder for the embedder verdict (mirrors gt_proof_sweep.sh).
+GT_METRICS_DIR="${GT_METRICS_DIR:-$REPO_ROOT/scripts/metrics}"
+# Per-run cost-budget halt (constitution / LATEST_TASK.md). Default 200 (full); the
+# trial passes STOP_AT_COST=25. '' or 0 disables the halt.
+STOP_AT_COST="${STOP_AT_COST:-200}"
 
 # ── flag overrides ───────────────────────────────────────────────────────────
 while [ $# -gt 0 ]; do
@@ -185,7 +194,9 @@ case "$MODEL" in
       echo "NEVER hardcode it — export VERTEXAI_PROJECT=<your-gcp-project> and relaunch."
       exit 2
     fi
-    export VERTEXAI_LOCATION="${VERTEXAI_LOCATION:-global}"
+    # LOCKED default us-east1 (LATEST_TASK.md) — fail-safe to the locked region,
+    # never the shared-pool 'global' endpoint (429 risk). Operator overrides via env.
+    export VERTEXAI_LOCATION="${VERTEXAI_LOCATION:-us-east1}"
     echo "vertex auth: VERTEXAI_PROJECT=<set> VERTEXAI_LOCATION=$VERTEXAI_LOCATION"
     if [ -n "${GOOGLE_APPLICATION_CREDENTIALS:-}" ]; then
       [ -f "$GOOGLE_APPLICATION_CREDENTIALS" ] || { echo "FATAL: GOOGLE_APPLICATION_CREDENTIALS not a file: $GOOGLE_APPLICATION_CREDENTIALS"; exit 2; }
@@ -292,6 +303,10 @@ echo "agent sweep: $TOTAL_TASKS tasks | model=$MODEL | parallel=$PARALLEL | out=
 echo "pier config: $PIER_CONFIG"
 echo "substrate:   $GT_SUBSTRATE_DIGEST"
 echo "gt commit:   ${GT_GIT_COMMIT:-<unknown>}"
+case "${STOP_AT_COST:-0}" in
+  ''|0|0.0|0.00) echo "budget:      STOP_AT_COST disabled (no cost halt)" ;;
+  *)             echo "budget:      STOP_AT_COST=\$${STOP_AT_COST} (per-run halt; tasks past the cap -> BUDGET_HALTED)" ;;
+esac
 [ -n "$REUSE_PROOF_DIR" ] && echo "reuse proof: $REUSE_PROOF_DIR (8-artifact dirs consumed; misses re-prove)"
 
 # ── optional GHCR login (best-effort; env-only, never stored) ────────────────
@@ -330,6 +345,74 @@ disk_guard() {
   done
 }
 
+# ── per-run cost budget (STOP_AT_COST) — race-safe under xargs -P ─────────────
+# Sum the per-task recorded cost (gt_deep_metrics_<id>.json efficiency.llm_cost_usd,
+# copied into each task dir) across ALL completed tasks, under an flock on a sentinel,
+# so concurrent workers can't double-count or race. Returns 0 (halt) when the running
+# total >= STOP_AT_COST. STOP_AT_COST='' or '0' disables the halt (always returns 1).
+budget_exceeded() {
+  local cap="${STOP_AT_COST:-0}"
+  case "$cap" in ''|0|0.0|0.00) return 1 ;; esac      # disabled
+  local sentinel="$OUT_DIR/.budget.lock"
+  : > "$sentinel" 2>/dev/null || true
+  # flock the sentinel; recount inside the lock so the read is atomic vs other workers.
+  # If flock is unavailable (non-Linux), fall back to an unlocked recount (the recount
+  # itself is idempotent — worst case is a one-task overshoot, never a crash).
+  local _lock="flock 9"; command -v flock >/dev/null 2>&1 || _lock=":"
+  local total
+  total="$( exec 9>>"$sentinel"; $_lock
+    OUT_DIR="$OUT_DIR" python3 - <<'PYB'
+import glob, json, os
+out = os.environ["OUT_DIR"]
+tot = 0.0
+# Prefer the deep-metrics record (model-recorded cost); fall back to the row's lsp/cost.
+for p in glob.glob(os.path.join(out, "*", "gt_deep_metrics_*.json")):
+    try:
+        d = json.load(open(p, encoding="utf-8"))
+        c = (d.get("efficiency") or {}).get("llm_cost_usd")
+        if isinstance(c, (int, float)):
+            tot += float(c)
+    except Exception:
+        pass
+print(f"{tot:.8f}")
+PYB
+  )"
+  total="${total:-0}"
+  # numeric compare via awk (floats); >= cap => halt.
+  awk -v t="$total" -v c="$cap" 'BEGIN{ exit (t+0 >= c+0) ? 0 : 1 }'
+}
+
+# ── timeout teardown: rm the leaked task+squid containers a TERMed pier left behind ──
+# `docker container prune` only removes STOPPED containers; pier's detached task/squid
+# containers keep RUNNING after timeout(1) SIGTERMs the pier process. Find them by the
+# pier compose-project label and by the task-id name pattern, then force-rm (which also
+# drops the per-task internal network once its endpoints are gone). Best-effort; the id
+# is sanitized to a docker-safe token (the same transform used for $ctr).
+pier_timeout_teardown() {
+  local tid="$1"
+  local safe; safe="$(printf '%s' "$tid" | tr -c 'a-zA-Z0-9_.-' '_')"
+  local cids
+  # (1) by compose-project label (pier names the project after the task/job).
+  cids="$(docker ps -aq --filter "label=com.docker.compose.project" \
+            --filter "name=${safe}" 2>/dev/null || true)"
+  # (2) by name substring (task id or 'squid'/'pier' in the container name) — covers
+  #     containers pier did not label with the project.
+  cids="$cids $(docker ps -aq --filter "name=${safe}" 2>/dev/null || true)"
+  cids="$cids $(docker ps -aq --filter "name=squid" --filter "name=${safe}" 2>/dev/null || true)"
+  # de-dup + force-rm
+  local uniq
+  uniq="$(printf '%s\n' $cids | sort -u | tr '\n' ' ')"
+  if [ -n "${uniq// /}" ]; then
+    echo "[timeout-teardown] $tid: force-removing leaked containers: $uniq" >&2
+    # shellcheck disable=SC2086
+    docker rm -f $uniq >/dev/null 2>&1 || true
+  fi
+  # Drop any now-dangling internal network pier created for this task.
+  docker network ls --filter "name=${safe}" -q 2>/dev/null | while read -r net; do
+    [ -n "$net" ] && docker network rm "$net" >/dev/null 2>&1 || true
+  done
+}
+
 # ── per-task runner (mirrors deepswe_full.yml's trial job, step for step) ─────
 run_task() {
   local line="$1" id lang img
@@ -354,6 +437,35 @@ sys.exit(0 if (r.get("failure_class") or r.get("pier_rc", -1) != 0) else 1)
       echo "[skip] $id — row.json exists (resumable re-run)"
       return 0
     fi
+  fi
+
+  # ── STOP_AT_COST budget halt: before any spend, if the running total of recorded
+  #    per-task cost has reached the cap, do NOT launch this task. Record it as a
+  #    classified BUDGET_HALTED row (not silent) so the aggregate counts it. ──
+  if budget_exceeded; then
+    mkdir -p "$task_dir"
+    echo "[budget] $id — STOP_AT_COST=${STOP_AT_COST} reached; not launching (BUDGET_HALTED)" >&2
+    TASK_ID="$id" TASK_LANG="$lang" IMG="$img" MODEL="$MODEL" \
+    PIER_CONFIG="$PIER_CONFIG" OUT_TASK="$task_dir" SWEEP_RUN_ID="$SWEEP_RUN_ID" \
+    STOP_AT_COST="$STOP_AT_COST" python3 - <<'PYH'
+import json, os, time
+out = os.environ["OUT_TASK"]; os.makedirs(out, exist_ok=True)
+row = {
+    "instance_id": os.environ.get("TASK_ID", ""),
+    "language": os.environ.get("TASK_LANG", ""),
+    "image": os.environ.get("IMG", ""),
+    "model": os.environ.get("MODEL", ""),
+    "pier_config": os.path.basename(os.environ.get("PIER_CONFIG", "")),
+    "failure_class": "BUDGET_HALTED",
+    "pier_rc": -1,
+    "budget_cap_usd": os.environ.get("STOP_AT_COST", ""),
+    "run_id": os.environ.get("SWEEP_RUN_ID", ""),
+    "ts_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+}
+with open(os.path.join(out, "row.json"), "w", encoding="utf-8") as fo:
+    json.dump(row, fo, separators=(",", ":"))
+PYH
+    return 0
   fi
 
   mkdir -p "$task_dir" "$art_dir"
@@ -410,11 +522,66 @@ sys.exit(0 if (r.get("failure_class") or r.get("pier_rc", -1) != 0) else 1)
              brief.txt; do
       [ -s "$REUSE_PROOF_DIR/$id/$c" ] || { missing=1; echo "[reuse] $id: $c absent in $REUSE_PROOF_DIR/$id — re-proving" >&2; break; }
     done
+    # Presence is NOT enough: a reused proof must also be CLEAN and on THIS substrate.
+    # Reject (fall through to a fresh proof, never error) when — (1) a source row.json
+    # exists with a non-empty failure_class; (2) any cert verdict is FAIL (lsp/graph/
+    # embedder + per-language lsp certs); (3) run_manifest.substrate_digest != the pinned
+    # GT_SUBSTRATE_DIGEST. A pre-fix-substrate or FAILED-cert proof must never be admitted.
+    if [ "$missing" -eq 0 ]; then
+      if ! RP="$REUSE_PROOF_DIR/$id" WANT_DIGEST="$GT_SUBSTRATE_DIGEST" python3 - <<'PYV'
+import json, glob, os, sys
+rp = os.environ["RP"]; want = os.environ.get("WANT_DIGEST", "")
+def jload(p):
+    try:
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+# (1) source row failure_class must be empty (if a row exists at all)
+row = jload(os.path.join(rp, "row.json"))
+if isinstance(row, dict) and (row.get("failure_class") or "").strip():
+    print(f"REUSE_REJECT: source row failure_class={row.get('failure_class')!r}", file=sys.stderr); sys.exit(1)
+# (2) no cert verdict may be FAIL (scan lsp/graph/embedder + per-language lsp certs)
+def has_fail(d):
+    if not isinstance(d, dict):
+        return False
+    for k in ("verdict", "verdict_hint", "status", "result"):
+        if "FAIL" in str(d.get(k, "")).upper():
+            return True
+    v = d.get("verdict")
+    if isinstance(v, dict):
+        for vv in v.values():
+            if "FAIL" in str(vv).upper():
+                return True
+    return False
+certs = ["lsp_certificate.json", "graph_certificate.json", "embedder_certificate.json"]
+certs += [os.path.basename(p) for p in glob.glob(os.path.join(rp, "lsp_certificate_*.json"))]
+for c in certs:
+    if has_fail(jload(os.path.join(rp, c))):
+        print(f"REUSE_REJECT: cert {c} carries a FAIL verdict", file=sys.stderr); sys.exit(1)
+# (3) substrate digest must match the pinned one
+man = jload(os.path.join(rp, "run_manifest.json")) or {}
+got = str(man.get("substrate_digest") or "")
+if want and got and got != want:
+    print(f"REUSE_REJECT: substrate_digest mismatch (proof={got} != pinned={want})", file=sys.stderr); sys.exit(1)
+sys.exit(0)
+PYV
+      then
+        missing=1
+        echo "[reuse] $id — proof present but failed admit gate (failed cert / dirty row / substrate mismatch) — re-proving" >&2
+      fi
+    fi
     if [ "$missing" -eq 0 ]; then
       for c in graph.db runtime_context.json lsp_certificate.json graph_certificate.json \
                embedder_certificate.json foundational_gate_report.json run_manifest.json \
                brief.txt gt_issue_anchors.json gt_scope_files.txt gt_lsp_metrics.txt issue.txt; do
         cp -f "$REUSE_PROOF_DIR/$id/$c" "$art_dir/$c" 2>/dev/null || true
+      done
+      # Per-language LSP certs (lsp_certificate_<lang>.json) — glob; absent on
+      # single-language proofs, so best-effort. These carry the per-lang verdicts
+      # the row builder/metrics surface reads.
+      for pc in "$REUSE_PROOF_DIR/$id"/lsp_certificate_*.json; do
+        [ -e "$pc" ] && cp -f "$pc" "$art_dir/" 2>/dev/null || true
       done
       [ -d "$REUSE_PROOF_DIR/$id/src" ] && cp -a "$REUSE_PROOF_DIR/$id/src" "$art_dir/src" 2>/dev/null
       NEED_PROOF=0; PROOF_REUSED=1
@@ -554,7 +721,7 @@ PYEOF
     local -a AE_EXTRA=()
     case "$MODEL" in
       vertex_ai/*)
-        AE_EXTRA+=( --ae VERTEXAI_LOCATION="${VERTEXAI_LOCATION:-global}" )
+        AE_EXTRA+=( --ae VERTEXAI_LOCATION="${VERTEXAI_LOCATION:-us-east1}" )
         if [ -n "${GOOGLE_APPLICATION_CREDENTIALS:-}" ]; then
           MOUNTS_JSON+=",{\"type\":\"bind\",\"source\":\"${GOOGLE_APPLICATION_CREDENTIALS}\",\"target\":\"/gt_auth/adc.json\",\"read_only\":true}"
           AE_EXTRA+=( --ae GOOGLE_APPLICATION_CREDENTIALS="/gt_auth/adc.json" )
@@ -590,6 +757,7 @@ PYEOF
         --ae GT_CONTAINERIZED="1" \
         --ae GT_RUNTIME_STRATEGY="${GT_RUNTIME_STRATEGY:-unified_substrate}" \
         ${AE_EXTRA[@]+"${AE_EXTRA[@]}"} \
+        --ak version=2.2.8 \
         --ak config_file="$PIER_CONFIG" \
         2>&1 | tee -a "$trial_log"
       exit "${PIPESTATUS[0]}"
@@ -606,10 +774,24 @@ PYEOF
     if [ "$PIER_RC" -eq 124 ]; then
       FAIL_CLASS="PIER_TIMEOUT"
       echo "PIER_TIMEOUT: pier run exceeded ${TASK_TIMEOUT_S}s (timeout(1) rc=124)" | tee -a "$trial_log"
+      # timeout(1) TERMs pier, but the detached task + squid containers pier launched
+      # SURVIVE (docker container prune only removes STOPPED ones) — they leak and
+      # starve the next task of CPU/RAM/ports. Tear down THIS task's compose project /
+      # leftover containers before moving on. Match by the pier compose-project label
+      # (com.docker.compose.project) and by the task-id name pattern; force-rm both.
+      pier_timeout_teardown "$id"
     elif grep -RIq "DeepSweAdapterError" "$task_dir/pier/jobs" "$trial_log" 2>/dev/null; then
       FAIL_CLASS="DEEPSWE_ADAPTER_FAIL"
       echo "DEEPSWE_ADAPTER_FAIL: DeepSweAdapterError found in pier jobs/exception_message (swallowed adapter raise)" | tee -a "$trial_log"
       grep -RIn "DeepSweAdapterError" "$task_dir/pier/jobs" "$trial_log" 2>/dev/null | head -5 || true
+    elif [ "$PIER_RC" -ne 0 ] && grep -Eiq "429|too many requests|rate.?limit|resource[_ ]exhausted|quota exceeded" "$trial_log" 2>/dev/null; then
+      # A non-zero pier run dominated by provider rate-limiting (429 / RESOURCE_EXHAUSTED /
+      # quota). Distinct class so the run can be re-driven (different region / lower
+      # PARALLEL) rather than charged as a generic harness fault. Line-anchored RATE_LIMIT
+      # token so the classifier/aggregate can see it cheaply.
+      FAIL_CLASS="RATE_LIMIT"
+      echo "RATE_LIMIT: pier run exited rc=$PIER_RC with provider 429/quota signal (re-drive: us-east4/us-central1 or lower PARALLEL)" | tee -a "$trial_log"
+      grep -Ein "429|too many requests|rate.?limit|resource[_ ]exhausted|quota exceeded" "$trial_log" 2>/dev/null | head -3 || true
     elif [ "$PIER_RC" -ne 0 ]; then
       FAIL_CLASS="PIER_RUN_FAIL"
       echo "PIER_RUN_FAIL: pier run exited rc=$PIER_RC (pipefail surfaced — not tee's 0)" | tee -a "$trial_log"
@@ -637,8 +819,11 @@ PYEOF
     > "$task_dir/outcome.txt" 2>&1 || echo "WARN: outcome extract failed for $id" >&2
 
   # Deep 8-dp metrics (constitution mandate) — best-effort, mirrors the workflow.
-  python3 "$REPO_ROOT/scripts/swebench/gt_deep_metrics.py" "$id" "$art_dir" \
-    --log "$trial_log" >/dev/null 2>&1 || echo "DEEP_METRICS_WARN: $id" >&2
+  # results_dir = the TASK dir (holds BOTH gt/<certs,graph.db> AND pier/jobs/**/agent/
+  # *.trajectory.json) so the trajectory glob resolves THIS task and can't grab a
+  # sibling (gt_deep_metrics also id-filters its hits). graph.db pinned via --db.
+  python3 "$REPO_ROOT/scripts/swebench/gt_deep_metrics.py" "$id" "$task_dir" \
+    --db "$art_dir/graph.db" --log "$trial_log" >/dev/null 2>&1 || echo "DEEP_METRICS_WARN: $id" >&2
   cp -f "/tmp/gt_deep_metrics_${id}.json" "/tmp/gt_deep_metrics_${id}.md" "$task_dir/" 2>/dev/null || true
 
   # ── (g) per-task JSON row (always — failures are classified, never silent) ──
@@ -646,11 +831,13 @@ PYEOF
   PIER_CONFIG="$PIER_CONFIG" FAIL_CLASS="$FAIL_CLASS" PIER_RC="$PIER_RC" \
   PROOF_REUSED="$PROOF_REUSED" TASK_REPO_COMMIT="$TASK_REPO_COMMIT" \
   T_TASK_PULL_S="$T_TASK_PULL_S" T_PROOF_S="$T_PROOF_S" T_AGENT_S="$T_AGENT_S" \
-  T_SUBSTRATE_PULL_S="$T_SUBSTRATE_PULL_S" OUT_TASK="$task_dir" \
+  T_SUBSTRATE_PULL_S="$T_SUBSTRATE_PULL_S" OUT_TASK="$task_dir" ART_DIR="$art_dir" \
+  GT_METRICS_DIR="$GT_METRICS_DIR" \
   SWEEP_RUN_ID="$SWEEP_RUN_ID" BENCH_SHA="$GT_DEEPSWE_BENCH_SHA" \
   python3 << 'PYEOF'
-import json, os, time
+import glob, json, os, sys, time
 out = os.environ["OUT_TASK"]
+art = os.environ.get("ART_DIR", out)
 os.makedirs(out, exist_ok=True)
 
 def jload(p):
@@ -665,6 +852,36 @@ def inum(v, d=0):
         return int(v)
     except (TypeError, ValueError):
         return d
+
+# ── embedder / lsp / gate verdicts from the proof certs (mirror gt_proof_sweep.sh:405-423)
+#    so the agent row carries the metrics surface (effective_w_sem, lsp verdict, gates). ──
+emb = jload(os.path.join(art, "embedder_certificate.json")) or {}
+lsp_cert = jload(os.path.join(art, "lsp_certificate.json")) or {}
+gates = jload(os.path.join(art, "foundational_gate_report.json")) or {}
+emb_verdict, emb_ok = ("EMBEDDER_CERT_ABSENT", False)
+if emb:
+    try:
+        sys.path.insert(0, os.environ.get("GT_METRICS_DIR", "scripts/metrics"))
+        from embedder_certificate import classify_embedder
+        emb_verdict, emb_ok = classify_embedder(emb, proof_mode=True, require_embedder=True)
+    except Exception as e:
+        emb_verdict, emb_ok = (f"CLASSIFY_ERROR:{type(e).__name__}", False)
+gv = gates.get("verdict") or {}
+gr = gates.get("gate_resolution") or {}
+ge = (gates.get("gate_embedder") or {}).get("consumption") or {}
+# per-language LSP certs (lsp_certificate_<lang>.json) — per-lang verdict surface.
+per_lang_lsp = {}
+for pc in sorted(glob.glob(os.path.join(art, "lsp_certificate_*.json"))):
+    name = os.path.basename(pc)[len("lsp_certificate_"):-len(".json")]
+    c = jload(pc) or {}
+    per_lang_lsp[name] = {
+        "verdict_hint": c.get("verdict_hint", ""),
+        "server_launched": bool(c.get("server_launched", False)),
+        "warm_probe_ok": bool(c.get("warm_probe_ok", False)),
+        "verified_edges": inum(c.get("verified_edges")),
+        "corrected_edges": inum(c.get("corrected_edges")),
+        "deleted_edges": inum(c.get("deleted_edges")),
+    }
 
 outcome = jload(os.path.join(out, "outcome.json")) or {}
 rec = (outcome.get("tasks") or [{}])[0]
@@ -686,6 +903,35 @@ row = {
     "exit_status": rec.get("exit_status"),
     "gt_prebuilt_active": rec.get("gt_prebuilt_active"),
     "hook_hash_match": rec.get("hook_hash_match"),
+    # ── embedder / LSP / gate verdicts (the metrics surface — effective_w_sem etc.) ──
+    "embedder": {
+        "verdict": emb_verdict,
+        "ok": bool(emb_ok),
+        "class": emb.get("embedder_class", ""),
+        "dim": emb.get("embedder_dim"),
+        "discrimination_margin": emb.get("discrimination_margin"),
+        "semantic_candidate_count": inum(emb.get("semantic_candidate_count")),
+        "rendered_semantic_nonzero_count": inum(emb.get("rendered_semantic_nonzero_count")),
+        "effective_w_sem": emb.get("effective_w_sem"),
+    },
+    "lsp": {
+        "verdict_hint": lsp_cert.get("verdict_hint", ""),
+        "server_launched": bool(lsp_cert.get("server_launched", False)),
+        "warm_probe_ok": bool(lsp_cert.get("warm_probe_ok", False)),
+        "verified_edges": inum(lsp_cert.get("verified_edges")),
+        "corrected_edges": inum(lsp_cert.get("corrected_edges")),
+        "deleted_edges": inum(lsp_cert.get("deleted_edges")),
+        "language": lsp_cert.get("language", ""),
+        "per_language": per_lang_lsp,
+    },
+    "gates": {
+        "gate1_resolution": gv.get("resolution_jarvis"),
+        "gate2_lsp": gv.get("lsp_enrichment"),
+        "gate3_embedder": gv.get("embedder"),
+        "all_on": gv.get("all_on"),
+        "det_pct": gr.get("det_pct"),
+        "effective_w_sem": ge.get("effective_w_sem"),
+    },
     "timings_s": {
         "task_pull": inum(os.environ.get("T_TASK_PULL_S", "-1"), -1),
         "proof": inum(os.environ.get("T_PROOF_S", "-1"), -1),
@@ -716,11 +962,11 @@ PYEOF
   return 0
 }
 
-export -f run_task disk_guard
+export -f run_task disk_guard pier_timeout_teardown budget_exceeded
 export OUT_DIR BENCH_DIR REPO_ROOT GHCR_OWNER GT_SUBSTRATE_DIGEST GT_GIT_COMMIT \
        SWEEP_RUN_ID MODEL PIER_CONFIG RETRY_FAILED REUSE_PROOF_DIR TASK_TIMEOUT_S \
        T_SUBSTRATE_PULL_S TOTAL_TASKS DISK_MIN_GB DISK_WAIT_MAX_S DOCKER_DF_PATH \
-       GT_DEEPSWE_BENCH_SHA
+       GT_DEEPSWE_BENCH_SHA GT_METRICS_DIR STOP_AT_COST
 
 # ── N-parallel sweep (xargs -P; one line per task, classification never aborts) ──
 xargs -a "$TASKS_TSV" -d '\n' -n 1 -P "$PARALLEL" bash -c 'run_task "$0"'

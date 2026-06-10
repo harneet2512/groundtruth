@@ -384,13 +384,37 @@ def _deepseek_price_for(model: str) -> dict:
 
 
 def _find_miniswe_trajectory(task: str, results_dir: str) -> str | None:
-    for base in (results_dir, f"/tmp/results_{task}", f"/tmp/gt/{task}", "."):
-        if not base:
+    """Locate this task's pier/mini-swe-agent trajectory. The VM runner lays it out
+    under <results_dir>/pier/jobs/**/agent/mini-swe-agent.trajectory.json (results_dir
+    is the per-task gt artifact dir); OH/legacy layouts also matched. When the cwd or a
+    shared dir is searched, the recursive glob can hit a SIBLING task's trajectory, so
+    when a task id is provided we filter candidate hits to those whose path contains the
+    id and only fall back to hits[0] if none match (preserves existing callers — the
+    filter only NARROWS, never widens)."""
+    bases = (
+        results_dir,
+        os.path.join(results_dir, "pier") if results_dir else "",
+        f"/tmp/results_{task}",
+        f"/tmp/gt/{task}",
+        ".",
+    )
+    seen: set[str] = set()
+    for base in bases:
+        if not base or base in seen:
             continue
-        hits = glob.glob(
-            os.path.join(base, "**", "mini-swe-agent.trajectory.json"), recursive=True)
-        if hits:
-            return hits[0]
+        seen.add(base)
+        # Both the bare name and the pier jobs/**/agent layout the VM runner produces.
+        hits: list[str] = []
+        for pat in ("mini-swe-agent.trajectory.json",
+                    os.path.join("jobs", "**", "agent", "*.trajectory.json")):
+            hits.extend(glob.glob(os.path.join(base, "**", pat), recursive=True))
+        if not hits:
+            continue
+        if task:
+            scoped = [h for h in hits if task in h]
+            if scoped:
+                return scoped[0]
+        return hits[0]
     return None
 
 
@@ -404,6 +428,9 @@ def _from_miniswe_trajectory(task: str, results_dir: str) -> dict:
         "has_patch": False, "resolved": None,
         "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
         "cache_hit_tokens": 0, "cache_miss_tokens": 0, "cost_usd": 0.0,
+        # cost the model/litellm ITSELF recorded per call (model-agnostic, summed);
+        # preferred over keyed recompute when present (gemini etc. are not DeepSeek-priced).
+        "recorded_cost_usd": 0.0, "cost_source": "",
         "gt_brief_delivered": 0, "gt_evidence_delivered": 0, "gt_graph_map_delivered": 0,
         "gt_nudge_delivered": 0, "gt_understand_calls": 0, "gt_verify_calls": 0,
         "gt_observation_chars_total": 0,
@@ -426,7 +453,16 @@ def _from_miniswe_trajectory(task: str, results_dir: str) -> dict:
     out["exit_status"] = str(info.get("exit_status", ""))
     sub = str(info.get("submission") or "")
     out["has_patch"] = bool("diff --git" in sub)
-    out["action_count"] = int((info.get("model_stats", {}) or {}).get("api_calls", 0) or 0)
+    model_stats = info.get("model_stats", {}) or {}
+    out["action_count"] = int(model_stats.get("api_calls", 0) or 0)
+    # mini-swe-agent rolls up the litellm-recorded spend here (instance_cost / cost) —
+    # this is the model's OWN cost, model-agnostic. Use it as the run-level recorded cost.
+    for ck in ("instance_cost", "cost", "total_cost"):
+        cv = model_stats.get(ck)
+        if isinstance(cv, (int, float)) and cv > 0:
+            out["recorded_cost_usd"] = float(cv)
+            out["cost_source"] = f"trajectory_model_stats.{ck}"
+            break
 
     step = 0
     n_assist = 0
@@ -436,7 +472,18 @@ def _from_miniswe_trajectory(task: str, results_dir: str) -> dict:
         usage = None
         extra = m.get("extra")
         if isinstance(extra, dict):
-            usage = (extra.get("response") or {}).get("usage")
+            resp = extra.get("response") or {}
+            usage = resp.get("usage")
+            # litellm stashes the per-call dollar cost it computed in _hidden_params
+            # (response_cost) — model-agnostic; sum it as the recorded cost when no
+            # run-level rollup was present.
+            if not out["cost_source"]:
+                hp = resp.get("_hidden_params") or {}
+                rc = hp.get("response_cost")
+                if not isinstance(rc, (int, float)):
+                    rc = extra.get("cost") or extra.get("response_cost")
+                if isinstance(rc, (int, float)) and rc > 0:
+                    out["recorded_cost_usd"] += float(rc)
         if isinstance(usage, dict):
             out["prompt_tokens"] += int(usage.get("prompt_tokens", 0) or 0)
             out["completion_tokens"] += int(usage.get("completion_tokens", 0) or 0)
@@ -477,13 +524,22 @@ def _from_miniswe_trajectory(task: str, results_dir: str) -> dict:
         except (OSError, ValueError):
             pass
 
-    # DeepSeek-priced cost: cache hit + cache miss + output, separately
-    p = _deepseek_price_for(out["model"] or "deepseek-v4-flash")
-    out["cost_usd"] = d8(
-        out["cache_hit_tokens"] / 1e6 * p["hit"]
-        + out["cache_miss_tokens"] / 1e6 * p["miss"]
-        + out["completion_tokens"] / 1e6 * p["out"]
-    )
+    # Cost: prefer the trajectory's OWN recorded litellm cost (model-agnostic — correct
+    # for gemini/vertex and any other provider). Only when the trajectory carries no
+    # cost at all do we fall back to the DeepSeek-keyed recompute (which is only valid
+    # for deepseek models). recorded_cost_usd>0 => recorded; else keyed.
+    if out["recorded_cost_usd"] > 0:
+        out["cost_usd"] = d8(out["recorded_cost_usd"])
+        if not out["cost_source"]:
+            out["cost_source"] = "trajectory_recorded"
+    else:
+        p = _deepseek_price_for(out["model"] or "deepseek-v4-flash")
+        out["cost_usd"] = d8(
+            out["cache_hit_tokens"] / 1e6 * p["hit"]
+            + out["cache_miss_tokens"] / 1e6 * p["miss"]
+            + out["completion_tokens"] / 1e6 * p["out"]
+        )
+        out["cost_source"] = "deepseek_keyed_recompute"
     return out
 
 
@@ -897,7 +953,8 @@ def build(task: str, results_dir: str, log_path: str = "",
     # token/cost EFFICIENCY (the constitution's honest token story: GT injection vs LLM usage)
     efficiency = {
         "model": mini.get("model") or "",
-        "cost_source": "deepseek_priced_trajectory" if (mini.get("found") and mini.get("total_tokens")) else "gt_cost_log",
+        "cost_source": (mini.get("cost_source") or "deepseek_priced_trajectory")
+        if (mini.get("found") and mini.get("total_tokens")) else "gt_cost_log",
         "llm_calls": d8(cost["llm_calls"]),
         "llm_tokens_in": d8(cost["llm_tokens_in"]),
         "llm_tokens_out": d8(cost["llm_tokens_out"]),

@@ -240,6 +240,13 @@ model:
     # MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT) — inner retries absorb transient
     # provider errors fast; the outer loop stays the safety net.
     num_retries: 3
+    # The inner litellm retry above has NO backoff between attempts by default, so a
+    # 429 burst gets 3 rapid-fire retries that all re-hit the rate limit. Force litellm's
+    # exponential backoff between retries (litellm honors retry_strategy=
+    # "exponential_backoff_retry" in completion_with_retries -> tenacity wait_exponential).
+    # Gemini-3 preview on the shared serving pool is 429-prone — this is the cheap,
+    # provider-correct mitigation; us-east1 (not global) is the primary one.
+    retry_strategy: exponential_backoff_retry
     # NOTE (deliberate omissions): no extra_body.thinking (DeepSeek-only payload);
     # Gemini-3 thinking is controlled via reasoning_effort -> thinking_level if
     # ever needed (litellm maps it for gemini-3*) — left at model default here.
