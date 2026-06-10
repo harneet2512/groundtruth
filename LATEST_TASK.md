@@ -52,26 +52,18 @@ Bring the **FULL OH-depth GT** to mini-swe-agent, **language-agnostic**, unified
   `GT_REQUIRE_EMBEDDER` (ST + e5 fallbacks skipped); OH pins e5.
 
 ---
-## TWO PATHWAYS (corrected 2026-06-10): SAME pipeline, MODEL is the only variable
-Same benchmark (DeepSWE-113), same substrate digest (6428af2a), same pier+mini-swe harness,
-same gates/artifacts/metrics. Each model on its natural platform:
-
-### PATH A — GCP (VM gt-sweep-1): GT-on with **gemini-3-flash** (Vertex)
-- Bills to the $271 credits; auth = the VM's own service identity (ADC) — ZERO keys on the box.
-- Direct leaderboard reference: gemini-3-flash = 5% on the DeepSWE board → clean lift measurement.
-- Pre-launch checklist: Vertex API enabled + VM SA has Vertex-AI-User; pier+mini-swe installed on VM;
-  litellm model id (vertex_ai/gemini-3-flash); the proof sweep's 4 answers green.
-- NOW: the DeepSWE-113 proof sweep is running here first (the 4 answers).
-
-### PATH B — GHA: GT-on with **deepseek-v4-flash**
-- Existing DEEPSEEK_API_KEY secret; deepswe_full dispatch-registered (no 404).
-- ARMED: the 5-task probe (5x language dispatches, max_tasks=1) — awaits explicit "launch".
-
-### Cross-path payoff
-GT lifting BOTH models on identical tasks = cross-model generalization (the CLAUDE.md pillar),
-plus the Gemini side gives a direct board-baseline delta.
-
-### Cross-path rules
-- Per-launch permission ALWAYS, both paths. No secrets/IDs in files; VM uses ADC only.
-- Sequence: VM sweep 4-answers -> user reviews -> "launch" probes (suggest 5-task probe PER PATH:
-  ~$5-10 DeepSeek cash + ~$8 Gemini credits) -> verdicts -> full-run decisions.
+## TWO PATHWAYS (FINAL, 2026-06-10): different benchmark x model x platform
+### PATH A — GCP VM gt-sweep-1: **DeepSWE-113 with gemini-3-flash** (Vertex)
+- Baseline: gemini-3-flash IS on the DeepSWE leaderboard (5%) -> direct GT lift measurement.
+- Auth: VM identity/ADC (zero keys on the box). Bills to the $271 credits.
+- NOW: the 113 proof sweep running (the 4 answers). THEN (each gated on user OK):
+  enable Vertex API + widen VM scopes + pier install -> 5-task gemini trial -> full 113.
+- Needs built: VM agent-runner (pier agent step port) + gemini model config (vertex_ai/gemini-3-flash).
+### PATH B — GHA: **SWE-bench Verified-500 with deepseek-v4-flash**
+- Baseline: the ~79% vendor-scaffold line (user decision). DEEPSEEK_API_KEY already a GHA secret.
+- Needs built: the Verified GT adapter (mini-swe swebench path; the pier wrapper is DeepSWE-only)
+  + a verified workflow (pull official task image -> substrate proof -> GT-injected mini-swe agent
+  -> official Princeton harness eval) + the Verified manifest (builder in flight).
+- Trial: 5 Verified tasks with v4-flash (cheap; cache-discounted) before any 500 run.
+### Rules: per-launch permission ALWAYS, both paths. No secrets on the VM (deepseek key never
+touches GCP; gemini uses ADC). gt_gt is the audit surface for both.
