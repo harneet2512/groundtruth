@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/harneet2512/groundtruth/gt-index/internal/parser"
@@ -112,28 +113,36 @@ func RegisterGoModulePaths(fm map[string][]string, goModulePath string) {
 	if goModulePath == "" {
 		return
 	}
-	additions := make(map[string][]string)
-	for key, files := range fm {
+	// #B8b: collect ALL additions first and apply them to fm exactly ONCE at the
+	// end. The previous code applied `additions` after the base loop AND re-applied
+	// the SAME map again inside the versioned-module branch — every module-prefixed
+	// key got its files appended TWICE, and the versioned loop (iterating the
+	// already-mutated fm) minted garbage keys like
+	// "github.com/org/repo/github.com/org/repo/v2/pkg".
+	skip := func(key string) bool {
 		// Only process slash-separated directory paths (Go package dirs).
 		// Skip: Rust (::), PHP (\), Python dotted (no slash), source files (.go etc)
 		if strings.Contains(key, "::") || strings.Contains(key, `\`) {
-			continue
+			return true
 		}
 		if ext := filepath.Ext(key); ext != "" {
-			continue
+			return true
 		}
 		if strings.HasPrefix(key, goModulePath) {
-			continue
+			return true
 		}
 		// Skip Python dotted imports (e.g. "os.path") but NOT Go dirs with slashes
 		if strings.Contains(key, ".") && !strings.Contains(key, "/") {
+			return true
+		}
+		return false
+	}
+	additions := make(map[string][]string)
+	for key, files := range fm {
+		if skip(key) {
 			continue
 		}
-		moduleKey := goModulePath + "/" + key
-		additions[moduleKey] = files
-	}
-	for k, v := range additions {
-		fm[k] = append(fm[k], v...)
+		additions[goModulePath+"/"+key] = files
 	}
 	// Also handle versioned modules: github.com/org/repo/v2/pkg → strip v2/ and try
 	// Import "github.com/org/repo/v2/pkg" should match dir "pkg/"
@@ -143,21 +152,21 @@ func RegisterGoModulePaths(fm map[string][]string, goModulePath string) {
 			// Versioned module: github.com/org/repo/v2
 			// Import "github.com/org/repo/v2/ast" → strip module prefix → "ast" → lookup
 			// Already handled by suffix stripping in resolveModulePath.
-			// But also register the full versioned path.
+			// But also register the unversioned-prefixed path.
 			unversioned := strings.Join(parts[:len(parts)-1], "/")
 			for key, files := range fm {
-				if strings.Contains(key, "::") || filepath.Ext(key) != "" {
+				if skip(key) || strings.HasPrefix(key, unversioned) {
 					continue
 				}
-				if strings.Contains(key, ".") && !strings.Contains(key, "/") {
-					continue
+				vKey := unversioned + "/" + key
+				if _, exists := additions[vKey]; !exists {
+					additions[vKey] = files
 				}
-				additions[unversioned+"/"+key] = files
-			}
-			for k, v := range additions {
-				fm[k] = append(fm[k], v...)
 			}
 		}
+	}
+	for k, v := range additions {
+		fm[k] = append(fm[k], v...)
 	}
 }
 
@@ -849,65 +858,55 @@ func Resolve(
 
 		// Strategy 1.9 (T1): Verified-unique cross-file resolution
 		// ACG (ECOOP 2022): globally unique function names are 99%+ correct — but
-		// that holds only for UNQUALIFIED calls. A qualified call X.attr(...) that
-		// reached here did NOT resolve its qualifier via the import/type stages
-		// above, so X is a stdlib/external/unknown receiver (e.g. `os.walk`). The
-		// single-candidate cross-file match is the ONLY resolver stage that fires
-		// for one candidate (Strategy 2 below needs 2+), so we must NOT drop it —
-		// that would lose a real fallback edge. Instead DEMOTE it: emit name_match
-		// (low trust) rather than verified_unique (deterministic), so a qualified
-		// stdlib call never launders as a confident fact downstream while the agent
-		// still gets the hint. [beancount-931 os.walk -> account.walk]
+		// that holds only for UNQUALIFIED calls. A qualified call X.attr(...) whose
+		// receiver X never resolves to an internal class is stdlib/external/unknown
+		// (e.g. `os.walk`) and must never launder as verified_unique; its demote
+		// (name_match conf=0.2, evidence name_match_qualified_unresolved) now lives
+		// in the last-chance block after 1.98. [beancount-931 os.walk -> account.walk]
 		qualifiedUnresolved := call.CalleeQualified != "" && call.CalleeQualified != calleeName
-		// T2 (builtins): a qualified call obj.method() whose receiver never resolved to an
-		// internal class above + method is a builtin/stdlib name = a builtin call
-		// (os.path.join, str.split, dict.get) — DROP it rather than emit a name_match guess
-		// to an arbitrary same-named internal method (application-centered — JARVIS 2023 /
-		// PyCG ICSE 2021). #6: apply the SAME builtin sets here on the SINGLE-candidate path
-		// that Strategy 2 applies on the multi-candidate path, so a qualified `get`/`items`/
-		// `append` with exactly one global definition can no longer skip the broad guard and
-		// launder into a name_match_qualified_unresolved edge. strongBuiltinMethodNames is a
-		// superset-by-intent for single-candidate (os.path.join), builtinMethodNames is the
-		// broad set (get/items/append/...). One predicate, both candidate-count paths.
-		if qualifiedUnresolved && (strongBuiltinMethodNames[calleeName] || builtinMethodNames[calleeName]) {
-			continue
-		}
-		if targets, ok := nodeIDs[calleeName]; ok {
-			var candidates []int64
-			for _, tid := range targets {
-				if tid != callerID {
-					candidates = append(candidates, tid)
-				}
-			}
-			if len(candidates) == 1 {
-				targetID := candidates[0]
-				key := edgeKey{callerID, targetID, "CALLS"}
-				if !seen[key] {
-					seen[key] = true
-					method, conf, evidence := "verified_unique", 0.95, "name_unique"
-					if qualifiedUnresolved {
-						// Qualified receiver never resolved internally => stdlib/external/
-						// unknown. DEMOTE to a speculative name_match so it never launders as
-						// a confident fact. Confidence must sit below the SPECULATIVE threshold
-						// so tierFor agrees with the demote (a sub-0.5 conf, not the 0.9
-						// single-candidate name_match score that tierFor would re-CERTIFY).
-						method = "name_match"
-						conf = 0.2
-						evidence = "name_match_qualified_unresolved"
+		// T2 (builtins): a qualified call obj.method() whose receiver never resolves to an
+		// internal class + builtin/stdlib method name = a builtin call (os.path.join,
+		// str.split, dict.get) — DROP rather than guess (application-centered — JARVIS
+		// 2023 / PyCG ICSE 2021). #B5 reorder: this predicate no longer short-circuits
+		// HERE — the receiver-PROVING rungs (1.93/1.94a/1.95/1.96/1.97) get first
+		// attempt; if one of them resolves the receiver to an internal class, the call
+		// IS internal and must not be dropped. The drop/demote moved to the last-chance
+		// block after 1.98 and still guards the receiver-UNPROVEN rungs (1.94/1.98).
+		builtinQualified := qualifiedUnresolved && (strongBuiltinMethodNames[calleeName] || builtinMethodNames[calleeName])
+
+		// Strategy 1.9 fires here ONLY for UNQUALIFIED calls (the ACG/ECOOP 2022
+		// globally-unique-name property holds for bare names). #B5: a QUALIFIED call
+		// previously got demoted to name_match conf=0.2 here, BEFORE the type-aware
+		// rungs 1.93-1.98 ever ran — starving e.g. a declared-type receiver
+		// (`command.run()` with `command: Command`) of its type_flow resolution. The
+		// qualified-unresolved demote now runs as the true last chance after 1.98.
+		if !qualifiedUnresolved {
+			if targets, ok := nodeIDs[calleeName]; ok {
+				var candidates []int64
+				for _, tid := range targets {
+					if tid != callerID {
+						candidates = append(candidates, tid)
 					}
-					resolved = append(resolved, ResolvedCall{
-						SourceNodeID:   callerID,
-						TargetNodeID:   targetID,
-						SourceLine:     call.Line,
-						SourceFile:     call.File,
-						Method:         method,
-						Confidence:     conf,
-						CandidateCount: 1,
-						TrustTier:      tierFor(conf),
-						EvidenceType:   evidence,
-					})
 				}
-				continue
+				if len(candidates) == 1 {
+					targetID := candidates[0]
+					key := edgeKey{callerID, targetID, "CALLS"}
+					if !seen[key] {
+						seen[key] = true
+						resolved = append(resolved, ResolvedCall{
+							SourceNodeID:   callerID,
+							TargetNodeID:   targetID,
+							SourceLine:     call.Line,
+							SourceFile:     call.File,
+							Method:         "verified_unique",
+							Confidence:     0.95,
+							CandidateCount: 1,
+							TrustTier:      tierFor(0.95),
+							EvidenceType:   "name_unique",
+						})
+					}
+					continue
+				}
 			}
 		}
 
@@ -1040,7 +1039,10 @@ func Resolve(
 		// (1.95) because it uses global method uniqueness as a disambiguation signal.
 		// Skips self/this/Self (handled by 1.75) and common method names (>3 classes).
 		// Skips calls where the qualifier is a known class name (1.95 handles those).
-		if len(nodeMeta) > 0 && nodeMeta[0] != nil && methodsByClass != nil &&
+		// #B5: skips builtin-named qualified calls — 1.94 does NOT prove the receiver
+		// (global name-uniqueness only), so letting it claim `obj.get()`/`x.update()`
+		// would re-launder dict/str calls the builtin drop exists to remove.
+		if len(nodeMeta) > 0 && nodeMeta[0] != nil && methodsByClass != nil && !builtinQualified &&
 			call.CalleeQualified != "" && call.CalleeQualified != calleeName {
 			resolved194 := false
 			methodName194 := calleeName
@@ -1082,9 +1084,17 @@ func Resolve(
 						} else if numClasses == 2 {
 							conf194 = 0.5
 						}
-						// Pick the best target: prefer same-file class, then first
-						var bestTarget194 int64
+						// Pick the best target: prefer same-file class, then the smallest
+						// class node ID. #B8a: the previous `range classes194` map
+						// iteration made the cross-file pick RUN-DEPENDENT (Go map order
+						// is randomized) — sort the class IDs so the pick is deterministic.
+						classIDs194 := make([]int64, 0, len(classes194))
 						for classID := range classes194 {
+							classIDs194 = append(classIDs194, classID)
+						}
+						sort.Slice(classIDs194, func(a, b int) bool { return classIDs194[a] < classIDs194[b] })
+						var bestTarget194 int64
+						for _, classID := range classIDs194 {
 							if methods, ok := methodsByClass[classID]; ok {
 								if targetID, ok := methods[methodName194]; ok && targetID != callerID {
 									cm := nodeMeta[0][classID]
@@ -1311,7 +1321,9 @@ func Resolve(
 		// If a method name belongs to exactly one class in the codebase, and this is a
 		// qualified call (obj.method()), resolve to that class's method.
 		// e.g., "filter" exists only in QuerySet → any x.filter() resolves to QuerySet.filter.
-		if call.CalleeQualified != "" && call.CalleeQualified != calleeName {
+		// #B5: builtin-named calls are excluded — 1.98 does not prove the receiver, and an
+		// internal class happening to define `update`/`get` must not claim every dict call.
+		if !builtinQualified && call.CalleeQualified != "" && call.CalleeQualified != calleeName {
 			if classID, ok := uniqueMethodClass[calleeName]; ok {
 				if methods, ok := methodsByClass[classID]; ok {
 					if targetID, ok := methods[calleeName]; ok && targetID != callerID {
@@ -1336,14 +1348,54 @@ func Resolve(
 			}
 		}
 
-		// Strategy 2: Cross-file name match (fallback, 2+ candidates only)
-		// T2 builtin-exclude: a qualified call obj.method() whose receiver never resolved
-		// to an internal class above + method is a builtin name = a builtin call
-		// (str.join, dict.get), not an internal edge. Drop it instead of emitting a
-		// name_match guess (application-centered — JARVIS 2023 / PyCG ICSE 2021).
-		if call.CalleeQualified != "" && call.CalleeQualified != calleeName && builtinMethodNames[calleeName] {
-			continue
+		// LAST CHANCE for qualified-unresolved calls (#B5 — the reordered tail of
+		// Strategy 1.9): every receiver-typing rung above failed, so the receiver is
+		// stdlib/external/unknown.
+		//   - builtin method name → a builtin call (os.path.join, dict.get): DROP it
+		//     rather than emit a name_match guess to an arbitrary same-named internal
+		//     method (covers BOTH the single- and multi-candidate paths — #6).
+		//   - single global candidate → DEMOTE to a speculative name_match
+		//     (evidence name_match_qualified_unresolved) so a qualified stdlib call
+		//     never launders as a confident fact while the agent still gets the hint.
+		//     [beancount-931 os.walk -> account.walk]
+		if qualifiedUnresolved {
+			if builtinQualified {
+				continue
+			}
+			if targets, ok := nodeIDs[calleeName]; ok {
+				var candidates []int64
+				for _, tid := range targets {
+					if tid != callerID {
+						candidates = append(candidates, tid)
+					}
+				}
+				if len(candidates) == 1 {
+					targetID := candidates[0]
+					key := edgeKey{callerID, targetID, "CALLS"}
+					if !seen[key] {
+						seen[key] = true
+						// Confidence must sit below the SPECULATIVE threshold so tierFor
+						// agrees with the demote (a sub-0.5 conf, not the 0.9 single-
+						// candidate name_match score that tierFor would re-CERTIFY).
+						resolved = append(resolved, ResolvedCall{
+							SourceNodeID:   callerID,
+							TargetNodeID:   targetID,
+							SourceLine:     call.Line,
+							SourceFile:     call.File,
+							Method:         "name_match",
+							Confidence:     0.2,
+							CandidateCount: 1,
+							TrustTier:      tierFor(0.2),
+							EvidenceType:   "name_match_qualified_unresolved",
+						})
+					}
+					continue
+				}
+			}
 		}
+
+		// Strategy 2: Cross-file name match (fallback, 2+ candidates only).
+		// Qualified builtin calls were already dropped by the last-chance block above.
 		if targets, ok := nodeIDs[calleeName]; ok {
 			candidateCount := 0
 			var bestTarget int64
@@ -2068,11 +2120,20 @@ func ChainReExports(
 // BuildNameIndex creates a map from symbol name to list of node IDs.
 // fileIndex maps file → name → []nodeIDs to handle duplicate names
 // (e.g., Java method overloading, Python nested classes with same-named methods).
+//
+// #B3: synthetic File-anchor nodes (label "File", minted by the parser for
+// barrel/re-export files with zero symbols) are EXCLUDED — they exist only to
+// anchor file→file relationship edges (RE_EXPORTS/IMPORTS, looked up straight
+// from the DB) and must never be call-resolution targets. Registering them let
+// Strategy 1.9 stamp a phantom module-named node as a verified_unique callee.
 func BuildNameIndex(db *store.DB, nodes []store.Node, nodeDBIDs []int64) (map[string][]int64, map[string]map[string][]int64) {
 	nameIndex := make(map[string][]int64)
 	fileIndex := make(map[string]map[string][]int64)
 
 	for i, n := range nodes {
+		if n.Label == "File" {
+			continue // File anchors are never call targets (#B3)
+		}
 		dbID := nodeDBIDs[i]
 		nameIndex[n.Name] = append(nameIndex[n.Name], dbID)
 

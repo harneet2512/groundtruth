@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode"
 
@@ -39,8 +40,6 @@ var (
 	goReturnInterfaceRe = regexp.MustCompile(`func\s+\w+\([^)]*\)\s+(\w+)\s*\{`)
 	// Go interface declaration opener: `type Reader interface {`
 	goIfaceOpenRe = regexp.MustCompile(`^\s*type\s+(\w+)\s+interface\s*\{`)
-	// Go interface method line: `Read(p []byte) (int, error)` — captures the method name.
-	goIfaceMethodRe = regexp.MustCompile(`^\s*([A-Za-z_]\w*)\s*\(`)
 	// Go embedded interface line: a bare type name on its own (e.g. `io.Reader` or
 	// `Stringer`). Captures the trailing identifier (last path segment).
 	goIfaceEmbedRe = regexp.MustCompile(`^\s*(?:[\w.]+\.)?([A-Z]\w*)\s*$`)
@@ -99,14 +98,24 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 			return
 		}
 		seen[key] = true
+		// #2: relationship edges previously left TrustTier/EvidenceType/
+		// VerificationStatus as Go zero values, and the explicit empty bind in
+		// BatchInsertEdges defeats the SQL column DEFAULTs — every EXTENDS/
+		// IMPLEMENTS/COMPOSES/RE_EXPORTS row landed with trust_tier='' and
+		// verification_status=''. Stamp them here from the SAME thresholds
+		// tierFor uses, so tier always follows confidence.
 		edges = append(edges, &store.Edge{
-			SourceID:         sourceID,
-			TargetID:         targetID,
-			Type:             edgeType,
-			SourceLine:       sourceLine,
-			SourceFile:       sourceFile,
-			ResolutionMethod: method,
-			Confidence:       confidence,
+			SourceID:           sourceID,
+			TargetID:           targetID,
+			Type:               edgeType,
+			SourceLine:         sourceLine,
+			SourceFile:         sourceFile,
+			ResolutionMethod:   method,
+			Confidence:         confidence,
+			TrustTier:          tierFor(confidence),
+			CandidateCount:     1,
+			EvidenceType:       method,
+			VerificationStatus: "unverified",
 		})
 	}
 
@@ -332,12 +341,28 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 						goInterfaces = append(goInterfaces, currentIface)
 						currentIface = goInterfaceDecl{}
 					} else if trimmed != "" && !strings.HasPrefix(trimmed, "//") {
-						if mm := goIfaceMethodRe.FindStringSubmatch(trimmed); mm != nil {
-							// `Method(args) ret` — a required method.
-							currentIface.Methods = append(currentIface.Methods, mm[1])
+						if sig, ok := parseGoMethodSig(trimmed); ok {
+							// `Method(args) ret` — a required method with its
+							// structural fingerprint (name + arity + result-presence).
+							currentIface.Methods = append(currentIface.Methods, sig)
 						} else if me := goIfaceEmbedRe.FindStringSubmatch(trimmed); me != nil {
 							// A bare type name on its own line = embedded interface.
-							currentIface.Embeds = append(currentIface.Embeds, me[1])
+							// A QUALIFIED embed (`io.Reader`) names an interface in
+							// another package — this regex layer cannot resolve which
+							// one, and matching the bare tail name against a same-named
+							// project interface would be a false expansion. #1c:
+							// under-approximation must abstain, so mark INCOMPLETE.
+							if strings.Contains(trimmed, ".") {
+								currentIface.Incomplete = true
+							} else {
+								currentIface.Embeds = append(currentIface.Embeds, me[1])
+							}
+						} else {
+							// #1c: a body line that parses as neither a method nor an
+							// embed (multi-line declaration, type union, …) means the
+							// required method set is UNKNOWN — mark the interface
+							// incomplete so resolveGoImplements abstains.
+							currentIface.Incomplete = true
 						}
 					}
 				}
@@ -451,15 +476,143 @@ type classNodeEntry struct {
 	ID       int64
 }
 
+// goMethodSig is the structural fingerprint of one Go method usable at the
+// regex extraction layer: name + parameter ARITY + result-presence. Full type
+// equality is out of scope for a line regex; arity + result-presence kill the
+// bulk of name-only false positives (#1a: `Close()` vs `Close() error` must
+// not match). Parsed=false means the signature could not be extracted — the
+// matcher must then abstain, never assume.
+type goMethodSig struct {
+	Name       string
+	Arity      int
+	HasResults bool
+	Parsed     bool
+}
+
 // goInterfaceDecl is a Go interface collected during the source scan, holding the
-// NAMES of its required methods (the unit matched for CHA structural satisfaction)
-// and any embedded interface names (expanded transitively before matching).
+// structural fingerprints of its required methods (the unit matched for CHA
+// structural satisfaction) and any embedded interface names (expanded
+// transitively before matching). Incomplete=true means at least one body line
+// could not be classified (multi-line method, type union, qualified embed) —
+// the required set is then an under-approximation and matching must abstain (#1c).
 type goInterfaceDecl struct {
-	Name     string
-	FilePath string
-	Line     int
-	Methods  []string
-	Embeds   []string
+	Name       string
+	FilePath   string
+	Line       int
+	Methods    []goMethodSig
+	Embeds     []string
+	Incomplete bool
+}
+
+// parseGoParamList scans a balanced parenthesized parameter list starting at
+// s[0]=='(' and returns (arity, remainder-after-closing-paren, ok). Arity is
+// the count of TOP-LEVEL commas + 1 for a non-empty list — grouped params
+// (`a, b int`) intentionally count as their declared positions. Commas nested
+// in parens/brackets/braces (func types, generics, struct literals) are not
+// counted. ok=false on an unbalanced list (e.g. a declaration that spans
+// lines) so the caller can abstain.
+func parseGoParamList(s string) (int, string, bool) {
+	if s == "" || s[0] != '(' {
+		return 0, "", false
+	}
+	depthParen, depthBracket, depthBrace := 0, 0, 0
+	commas := 0
+	content := false
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '(':
+			depthParen++
+		case ')':
+			depthParen--
+			if depthParen == 0 {
+				arity := 0
+				if content {
+					arity = commas + 1
+				}
+				return arity, s[i+1:], true
+			}
+		case '[':
+			depthBracket++
+		case ']':
+			depthBracket--
+		case '{':
+			depthBrace++
+		case '}':
+			depthBrace--
+		case ',':
+			if depthParen == 1 && depthBracket == 0 && depthBrace == 0 {
+				commas++
+			}
+		default:
+			if depthParen >= 1 && s[i] != ' ' && s[i] != '\t' {
+				content = true
+			}
+		}
+	}
+	return 0, "", false // unbalanced — multi-line declaration; abstain
+}
+
+// parseGoMethodSig parses a Go method signature fragment that STARTS at the
+// method name — the form an interface body line takes (`Read(p []byte) (int,
+// error)`). Returns ok=false when the fragment cannot be parsed confidently.
+func parseGoMethodSig(s string) (goMethodSig, bool) {
+	s = strings.TrimSpace(s)
+	i := 0
+	for i < len(s) {
+		c := s[i]
+		if c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (i > 0 && c >= '0' && c <= '9') {
+			i++
+			continue
+		}
+		break
+	}
+	if i == 0 {
+		return goMethodSig{}, false
+	}
+	name := s[:i]
+	rest := strings.TrimSpace(s[i:])
+	if rest == "" || rest[0] != '(' {
+		return goMethodSig{}, false
+	}
+	arity, after, ok := parseGoParamList(rest)
+	if !ok {
+		return goMethodSig{}, false
+	}
+	// Strip a trailing line comment and the function BODY before checking for
+	// declared results. Stored signatures are first-line slices, so a one-line
+	// method carries its body (`Close() {}` / `Close() error { return nil }`) —
+	// truncate at the first '{' (a Go result list never STARTS with '{').
+	if ci := strings.Index(after, "//"); ci >= 0 {
+		after = after[:ci]
+	}
+	if bi := strings.Index(after, "{"); bi >= 0 {
+		after = after[:bi]
+	}
+	after = strings.TrimSpace(after)
+	return goMethodSig{Name: name, Arity: arity, HasResults: after != "", Parsed: true}, true
+}
+
+// parseGoStructMethodSig parses the stored first-line signature of a Go method
+// node (`func (f *FileX) Close() error {`) into the same structural fingerprint
+// the interface side uses. ok=false when the signature is absent/unparseable.
+func parseGoStructMethodSig(sig string) (goMethodSig, bool) {
+	s := strings.TrimSpace(sig)
+	if !strings.HasPrefix(s, "func") {
+		return goMethodSig{}, false
+	}
+	s = strings.TrimSpace(strings.TrimPrefix(s, "func"))
+	if s == "" {
+		return goMethodSig{}, false
+	}
+	if s[0] == '(' {
+		// Receiver — skip the balanced group.
+		_, rest, ok := parseGoParamList(s)
+		if !ok {
+			return goMethodSig{}, false
+		}
+		s = strings.TrimSpace(rest)
+	}
+	return parseGoMethodSig(s)
 }
 
 // resolveGoImplements emits IMPLEMENTS edges via CHA-style structural method-set
@@ -484,67 +637,110 @@ func resolveGoImplements(
 		return
 	}
 
-	// structMethods: structNodeID -> set of method names it defines.
-	// structEntries: per (name) -> []entry to map a struct name to its node(s).
+	// structMethods: structNodeID -> its method fingerprints + the struct's file.
 	structMethods := buildGoStructMethodSets(db)
 	if len(structMethods) == 0 {
 		return
 	}
 
-	// Index interfaces by name for embedded-interface expansion.
-	ifaceByName := make(map[string]*goInterfaceDecl, len(interfaces))
+	// Index interfaces by bare name for embedded-interface expansion (a same-file
+	// declaration is preferred at expansion time).
+	ifaceByName := make(map[string][]*goInterfaceDecl, len(interfaces))
 	for i := range interfaces {
-		// Prefer the first declaration of a given name (interfaces are rarely
-		// redeclared); embeds resolve by name regardless of file.
-		if _, ok := ifaceByName[interfaces[i].Name]; !ok {
-			ifaceByName[interfaces[i].Name] = &interfaces[i]
-		}
+		ifaceByName[interfaces[i].Name] = append(ifaceByName[interfaces[i].Name], &interfaces[i])
 	}
 
-	// Expand each interface's required method set transitively over its embeds.
-	required := make(map[string]map[string]bool, len(interfaces))
+	// #1d: key the expanded required sets by FILE+NAME, not name alone — two
+	// same-named interfaces in different files must not collide onto one set.
+	type requiredSet struct {
+		methods  map[string]goMethodSig
+		complete bool
+	}
+	keyOf := func(d *goInterfaceDecl) string { return d.FilePath + "\x00" + d.Name }
+	required := make(map[string]requiredSet, len(interfaces))
 	for i := range interfaces {
-		name := interfaces[i].Name
-		if _, done := required[name]; done {
+		d := &interfaces[i]
+		k := keyOf(d)
+		if _, done := required[k]; done {
 			continue
 		}
-		required[name] = expandGoInterfaceMethods(name, ifaceByName, make(map[string]bool))
+		methods, complete := expandGoInterfaceMethods(d, ifaceByName, make(map[string]bool))
+		required[k] = requiredSet{methods: methods, complete: complete}
 	}
 
-	// A struct satisfies an interface iff every required method is in its method set.
+	// Deterministic struct order so edge emission is stable across runs
+	// (Go map iteration is randomized).
+	structIDs := make([]int64, 0, len(structMethods))
+	for id := range structMethods {
+		structIDs = append(structIDs, id)
+	}
+	sort.Slice(structIDs, func(i, j int) bool { return structIDs[i] < structIDs[j] })
+
+	// A struct satisfies an interface iff every required method matches by
+	// NAME + ARITY + RESULT-PRESENCE (#1a). Name-only matching stamped every
+	// struct with any `Close()` as a 0.95-CERTIFIED implementor of `Closer`.
 	for i := range interfaces {
 		iface := &interfaces[i]
-		req := required[iface.Name]
-		if len(req) == 0 {
+		req := required[keyOf(iface)]
+		if !req.complete {
+			continue // #1c: under-approximated required set — abstain, never match
+		}
+		if len(req.methods) == 0 {
 			continue // empty interface — satisfied by everything; not a useful edge
 		}
 		ifaceID := resolveInterfaceOrClassNode(iface.Name, iface.FilePath, interfaceIndex, classIndex)
 		if ifaceID == 0 {
 			continue
 		}
-		for structID, methods := range structMethods {
+		// #1b: name+arity+result-presence is still not full signature equality →
+		// never 0.95/CERTIFIED. A ≥2-method match is strong structural evidence
+		// (0.85, CANDIDATE); a 1-method interface is ambiguous by construction
+		// (any struct with one matching method "implements" it) → 0.6, CANDIDATE.
+		conf := 0.85
+		if len(req.methods) == 1 {
+			conf = 0.6
+		}
+		for _, structID := range structIDs {
 			if structID == ifaceID {
 				continue
 			}
+			sm := structMethods[structID]
 			covers := true
-			for m := range req {
-				if !methods[m] {
+			for name, want := range req.methods {
+				have, ok := sm.Methods[name]
+				if !ok || !have.Parsed || !want.Parsed ||
+					have.Arity != want.Arity || have.HasResults != want.HasResults {
 					covers = false
 					break
 				}
 			}
 			if covers {
-				addEdge(structID, ifaceID, "IMPLEMENTS", iface.FilePath, iface.Line, "structural_method_set", 0.95)
+				// #1e: source_file/line = the STRUCT's, so a `-file` reindex of the
+				// struct's file deletes this edge along with the struct's nodes
+				// (orphan-edge invariant); previously the edge carried the
+				// interface's file and survived the struct's delete as an orphan.
+				addEdge(structID, ifaceID, "IMPLEMENTS", sm.File, sm.Line, "structural_method_set_arity", conf)
 			}
 		}
 	}
 }
 
-// buildGoStructMethodSets reads the DB and returns structNodeID -> set of method
-// names, for Go Class/Struct nodes only. Methods are linked to their struct via
-// parent_id (the parser parents Go receiver methods to their struct node).
-func buildGoStructMethodSets(db *store.DB) map[int64]map[string]bool {
-	out := make(map[int64]map[string]bool)
+// goStructMethodSet is one struct's method fingerprints plus the struct node's
+// own file/line (the source anchor CHA IMPLEMENTS edges must carry — #1e).
+type goStructMethodSet struct {
+	File    string
+	Line    int
+	Methods map[string]goMethodSig
+}
+
+// buildGoStructMethodSets reads the DB and returns structNodeID -> its method
+// fingerprints, for Go Class/Struct nodes only. Methods are linked to their
+// struct via parent_id (the parser parents Go receiver methods to their struct
+// node). The join pulls the STRUCT's file/start_line so emitted edges anchor on
+// the struct's file (#1e), and the method's stored signature so arity +
+// result-presence can be verified (#1a).
+func buildGoStructMethodSets(db *store.DB) map[int64]goStructMethodSet {
+	out := make(map[int64]goStructMethodSet)
 
 	tx, err := db.BeginTx()
 	if err != nil {
@@ -553,48 +749,83 @@ func buildGoStructMethodSets(db *store.DB) map[int64]map[string]bool {
 	defer tx.Rollback()
 
 	// All Go method nodes with a non-zero parent (the parent is the struct).
-	rows, err := tx.Query(`SELECT parent_id, name FROM nodes
-		WHERE language = 'go' AND label = 'Method' AND parent_id IS NOT NULL AND parent_id != 0`)
+	rows, err := tx.Query(`SELECT m.parent_id, m.name, COALESCE(m.signature, ''),
+	        p.file_path, COALESCE(p.start_line, 0)
+	   FROM nodes m JOIN nodes p ON m.parent_id = p.id
+	  WHERE m.language = 'go' AND m.label = 'Method'
+	    AND m.parent_id IS NOT NULL AND m.parent_id != 0`)
 	if err != nil {
 		return out
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var parentID int64
-		var name string
-		if err := rows.Scan(&parentID, &name); err != nil {
+		var name, sig, structFile string
+		var structLine int
+		if err := rows.Scan(&parentID, &name, &sig, &structFile, &structLine); err != nil {
 			continue
 		}
-		if out[parentID] == nil {
-			out[parentID] = make(map[string]bool)
+		entry, ok := out[parentID]
+		if !ok {
+			entry = goStructMethodSet{File: structFile, Line: structLine, Methods: make(map[string]goMethodSig)}
 		}
-		out[parentID][name] = true
+		ms, parsed := parseGoStructMethodSig(sig)
+		if !parsed || ms.Name != name {
+			// Signature absent/unparseable: keep the name so the method is known
+			// to exist, but Parsed=false makes the matcher abstain on it
+			// (correct-or-quiet — never assume an arity we did not see).
+			ms = goMethodSig{Name: name}
+		}
+		if _, dup := entry.Methods[name]; !dup {
+			entry.Methods[name] = ms
+		}
+		out[parentID] = entry
 	}
 	return out
 }
 
-// expandGoInterfaceMethods returns the full required method-name set of an interface,
-// transitively pulling in the methods of any embedded interfaces. `visited` guards
-// against cyclic embeds.
-func expandGoInterfaceMethods(name string, byName map[string]*goInterfaceDecl, visited map[string]bool) map[string]bool {
-	set := make(map[string]bool)
-	if visited[name] {
-		return set
+// expandGoInterfaceMethods returns the full required method set of an interface,
+// transitively pulling in the methods of any embedded interfaces, plus a
+// COMPLETE flag. complete=false when the declaration was marked Incomplete or
+// any embed does not resolve to a project-local interface (#1c) — the caller
+// must then abstain from emitting IMPLEMENTS for it (an under-approximated
+// required set would match structs that do NOT implement the real interface).
+// `visited` guards against cyclic embeds.
+func expandGoInterfaceMethods(decl *goInterfaceDecl, byName map[string][]*goInterfaceDecl, visited map[string]bool) (map[string]goMethodSig, bool) {
+	set := make(map[string]goMethodSig)
+	key := decl.FilePath + "\x00" + decl.Name
+	if visited[key] {
+		return set, true // cycle — already being expanded higher in the stack
 	}
-	visited[name] = true
-	iface, ok := byName[name]
-	if !ok {
-		return set
+	visited[key] = true
+	if decl.Incomplete {
+		return set, false
 	}
-	for _, m := range iface.Methods {
-		set[m] = true
+	for _, m := range decl.Methods {
+		set[m.Name] = m
 	}
-	for _, emb := range iface.Embeds {
-		for m := range expandGoInterfaceMethods(emb, byName, visited) {
-			set[m] = true
+	for _, emb := range decl.Embeds {
+		cands := byName[emb]
+		if len(cands) == 0 {
+			return set, false // #1c: embed is not project-local — required set unknown
+		}
+		// Prefer a same-file declaration; else the first collected (scan order).
+		target := cands[0]
+		for _, c := range cands {
+			if c.FilePath == decl.FilePath {
+				target = c
+				break
+			}
+		}
+		sub, complete := expandGoInterfaceMethods(target, byName, visited)
+		if !complete {
+			return set, false
+		}
+		for n, m := range sub {
+			set[n] = m
 		}
 	}
-	return set
+	return set, true
 }
 
 // buildRelationshipIndexes queries graph.db for Class/Interface/Function nodes

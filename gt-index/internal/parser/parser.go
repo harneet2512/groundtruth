@@ -167,13 +167,31 @@ func maybeAddFileAnchorNode(sf walker.SourceFile, src []byte, result *ParseResul
 		return
 	}
 	// Module-linking tokens common across languages. A barrel/re-export or pure
-	// import/use file matches one of these even though it defines no symbols.
-	linkTokens := []string{"export ", "export*", "export{", "import ", " from ",
-		"require(", "use ", "mod ", "pub use", "from \"", "from '"}
+	// import/use file STARTS a line with one of these even though it defines no
+	// symbols. #B3: the previous whole-text substring scan matched module-link
+	// tokens inside COMMENTS and string prose (any sentence containing " from ")
+	// and minted phantom File nodes for content-free files. Require the token at
+	// LINE START (after optional whitespace) on a non-comment line.
+	linkTokens := []string{"export ", "export*", "export{", "import ", "import{",
+		"from ", "require(", "use ", "pub use", "mod ", "pub mod "}
 	hasLink := false
-	for _, tok := range linkTokens {
-		if strings.Contains(text, tok) {
-			hasLink = true
+	for _, line := range strings.Split(text, "\n") {
+		t := strings.TrimSpace(line)
+		if t == "" {
+			continue
+		}
+		// Skip comment lines (//, #, /* and block-comment continuations '*').
+		if strings.HasPrefix(t, "//") || strings.HasPrefix(t, "#") ||
+			strings.HasPrefix(t, "/*") || strings.HasPrefix(t, "*") {
+			continue
+		}
+		for _, tok := range linkTokens {
+			if strings.HasPrefix(t, tok) {
+				hasLink = true
+				break
+			}
+		}
+		if hasLink {
 			break
 		}
 	}
@@ -3473,8 +3491,25 @@ func _walkFieldReads(node *sitter.Node, src []byte, result *ParseResult, nodeIdx
 	// check for self.x / this.x / <recv>.x. Go field access is `selector_expression`
 	// (receiver.field); Rust field access is `field_expression` (self.field) — both
 	// of which the attribute/member_expression check alone would miss.
-	if nodeType == "attribute" || nodeType == "member_expression" ||
-		nodeType == "selector_expression" || nodeType == "field_expression" {
+	//
+	// #B4: a METHOD CALL parses as call(function=selector/attribute) — the selector
+	// node `c.Area` of `c.Area()` is NOT a field read. When this node is the callee
+	// of a call parent, skip the emit and fall through to the child recursion so a
+	// genuine receiver read inside a chained call (`self.x` in `self.x.area()`)
+	// is still captured.
+	isCalleeOfCall := false
+	if parent := node.Parent(); parent != nil {
+		pt := parent.Type()
+		if pt == "call" || pt == "call_expression" || pt == "method_invocation" {
+			fn := parent.ChildByFieldName("function")
+			if fn == nil ||
+				(fn.StartByte() == node.StartByte() && fn.EndByte() == node.EndByte()) {
+				isCalleeOfCall = true
+			}
+		}
+	}
+	if !isCalleeOfCall && (nodeType == "attribute" || nodeType == "member_expression" ||
+		nodeType == "selector_expression" || nodeType == "field_expression") {
 		text := node.Content(src)
 		prefix := ""
 		if strings.HasPrefix(text, "self.") {

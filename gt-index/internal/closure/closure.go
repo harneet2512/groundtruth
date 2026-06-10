@@ -10,13 +10,20 @@
 // RF-4 MANDATE: the closure is built over VERIFIED edges ONLY. An edge is
 // included iff
 //
-//	confidence >= MinEdgeConfidence (0.5)
-//	  OR resolution_method ∈ {same_file, import, verified_unique,
-//	                          type_flow, import_type, lsp_verified, lsp}
+//	resolution_method ∈ deterministic set (same_file, import, verified_unique,
+//	                    type_flow, import_type, inherited, unique_method,
+//	                    return_type, lsp_verified, lsp)
+//	  AND confidence >= MinEdgeConfidence (0.7)
 //
-// If we let name_match (conf 0.2–0.4) edges in, a single bad 1-hop edge
-// would propagate transitively — a bad 1-hop becomes a bad 2-hop and 3-hop
-// reach, amplifying graph noise instead of delivering trustworthy deep reach.
+// (#B7) The previous OR-rule (conf >= 0.5 OR deterministic method) admitted
+// 0.6 GUESSES — 2-candidate name_match, ambiguous same_file/import variants,
+// receiver-unproven impl_method — into a sidecar documented as "over VERIFIED
+// CALLS" (gt_gt §2.1). If we let name_match (or any sub-verified guess) in, a
+// single bad 1-hop edge propagates transitively — a bad 1-hop becomes a bad
+// 2-hop and 3-hop reach, amplifying graph noise instead of delivering
+// trustworthy deep reach. name_match is categorically excluded regardless of
+// confidence (name_match is never a deterministic fact); the 0.7 floor also
+// keeps out the 0.6 ambiguous variants of the deterministic methods.
 //
 // Properties:
 //   - In-memory BFS over an adjacency list built from the filtered edges.
@@ -44,35 +51,41 @@ import (
 // closure would cause on hub functions.
 const MaxDepth = 3
 
-// MinEdgeConfidence is the VERIFIED-edge floor (RF-4). Matches the Python
-// reader gate (graph.py / gt_intel MIN_CONFIDENCE = 0.5). Edges below this
-// confidence are admitted to the closure only when their resolution_method
-// is one of the deterministic methods below.
-const MinEdgeConfidence = 0.5
+// MinEdgeConfidence is the VERIFIED-edge floor (RF-4, #B7: raised 0.5 → 0.7).
+// 0.5 admitted the 0.6 ambiguity tier (2-candidate name_match, ambiguous
+// same_file/import picks, 1-class impl_method) — guesses, not verified facts.
+// 0.7 sits above every ambiguity score the resolver emits (max 0.6) and below
+// the weakest deterministic type-derived score (return_type/unique_method 0.85).
+const MinEdgeConfidence = 0.7
 
-// verifiedMethods is the set of resolution methods that are trustworthy
-// regardless of the numeric confidence score. These are produced by the
-// deterministic resolver strategies (same_file/import/...) and the offline
-// LSP promotion pass (C6: lsp / lsp_verified). resolver.computeConfidence
-// already assigns these >= 0.9, so the method check is belt-and-suspenders —
-// it future-proofs the filter if a method's score is ever lowered.
+// verifiedMethods is the set of resolution methods produced by the
+// deterministic resolver strategies (same_file/import/type-derived rungs) and
+// the offline LSP promotion pass (C6: lsp / lsp_verified). #B7: extended with
+// the deterministic type-derived methods (inherited / unique_method /
+// return_type) the original set predated. impl_method and name_match stay OUT:
+// impl_method never proves the receiver (conf <= 0.6, global name-uniqueness
+// only) and name_match is never a deterministic fact.
 var verifiedMethods = map[string]bool{
 	"same_file":       true,
 	"import":          true,
 	"verified_unique": true,
 	"type_flow":       true,
 	"import_type":     true,
+	"inherited":       true,
+	"unique_method":   true,
+	"return_type":     true,
 	"lsp_verified":    true,
 	"lsp":             true,
 }
 
-// isVerifiedEdge implements the RF-4 admission rule: confidence >= floor OR a
-// deterministic/LSP resolution method.
+// isVerifiedEdge implements the RF-4 admission rule. #B7: BOTH conditions are
+// now required (deterministic method AND confidence >= floor) — the previous
+// OR-rule let any conf>=0.5 edge in regardless of method, so 0.6 name_match
+// guesses propagated transitively through a "verified-only" closure. The AND
+// keeps ambiguity-demoted variants of deterministic methods (0.6 ambiguous
+// import/same_file picks) out as well.
 func isVerifiedEdge(e *store.Edge) bool {
-	if e.Confidence >= MinEdgeConfidence {
-		return true
-	}
-	return verifiedMethods[e.ResolutionMethod]
+	return verifiedMethods[e.ResolutionMethod] && e.Confidence >= MinEdgeConfidence
 }
 
 // reachKey is a (source, target) pair used to dedup discovered closure rows.
@@ -87,8 +100,9 @@ type reachKey struct {
 //
 // edgeType selects which edge relation to close over ("CALLS" for the call
 // graph). minConf is the per-repo confidence floor for the *initial* edge
-// read; the RF-4 verified-method override is still applied on top of it, so
-// passing MinEdgeConfidence here is the conservative default.
+// read; the RF-4 admission rule (deterministic method AND conf >= the
+// MinEdgeConfidence floor) is still applied on top of it, so passing
+// MinEdgeConfidence here is the conservative default.
 func ComputeTransitiveClosure(db *store.DB, edgeType string, maxDepth int, minConf float64) (int, error) {
 	if maxDepth <= 0 {
 		maxDepth = MaxDepth

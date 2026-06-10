@@ -270,15 +270,24 @@ func ResolveAPIEdges(db *store.DB, files []walker.SourceFile, root string) (int,
 				"method": c.Method,
 			})
 
+			// #2: API_CALL edges previously left trust_tier/evidence_type/
+			// verification_status as empty strings (the explicit empty bind in
+			// BatchInsertEdges defeats the SQL column DEFAULTs). Stamp the tier
+			// from confidence via the ONE threshold table (tierFor) and record
+			// route ambiguity honestly in candidate_count.
 			edges = append(edges, &store.Edge{
-				SourceID:         c.NodeID,
-				TargetID:         r.NodeID,
-				Type:             "API_CALL",
-				SourceLine:       c.Line,
-				SourceFile:       c.File,
-				ResolutionMethod: "route_match",
-				Confidence:       0.7,
-				Metadata:         string(metadata),
+				SourceID:           c.NodeID,
+				TargetID:           r.NodeID,
+				Type:               "API_CALL",
+				SourceLine:         c.Line,
+				SourceFile:         c.File,
+				ResolutionMethod:   "route_match",
+				Confidence:         0.7,
+				TrustTier:          tierFor(0.7),
+				CandidateCount:     len(matchedRoutes),
+				EvidenceType:       "route_match",
+				VerificationStatus: "unverified",
+				Metadata:           string(metadata),
 			})
 		}
 	}

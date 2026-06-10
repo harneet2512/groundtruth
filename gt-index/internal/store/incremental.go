@@ -86,16 +86,56 @@ func SnapshotIncomingEdgesTx(tx *sql.Tx, filePath string, cap int) ([]IncomingEd
 	return out, rows.Err()
 }
 
+// deterministicRestoreMethods is the set of resolution methods the deterministic
+// resolver strategies + the offline LSP pass produce (the curation_map set). #B6:
+// an incremental restore must PRESERVE these with their original confidence/tier
+// — the previous {same_file, import}-only preserve condition stripped every lsp/
+// type_flow/inherited/verified_unique/… edge targeting a reindexed file down to a
+// name_match guess, so a single `-file` reindex lobotomized the resolved tiers.
+var deterministicRestoreMethods = map[string]bool{
+	"lsp":             true,
+	"lsp_verified":    true,
+	"verified_unique": true,
+	"type_flow":       true,
+	"import_type":     true,
+	"inherited":       true,
+	"unique_method":   true,
+	"return_type":     true,
+	"impl_method":     true,
+	"same_file":       true,
+	"import":          true,
+}
+
+// tierForConfidence mirrors resolver.tierFor (CLAUDE.md:222 — the ONE threshold
+// table) for the store package, which cannot import resolver (import cycle).
+// Keep the thresholds in lockstep with resolver.tierFor.
+//
+//	conf >= 0.9       -> CERTIFIED
+//	0.5 <= conf < 0.9 -> CANDIDATE
+//	conf < 0.5        -> SPECULATIVE
+func tierForConfidence(conf float64) string {
+	if conf >= 0.9 {
+		return "CERTIFIED"
+	}
+	if conf >= 0.5 {
+		return "CANDIDATE"
+	}
+	return "SPECULATIVE"
+}
+
 // ResolveIncomingEdgesTx re-resolves the snapshot against freshly-inserted
-// nodes in `filePath`. Confidence follows the CLAUDE.md name_match table:
-// 1 candidate → 0.9, 2 → 0.6, 3-5 → 0.4, 6+ → 0.2. Zero candidates means
-// the symbol was renamed/removed; the edge is dropped silently and counted
-// in `unresolved`. Returns (restored, unresolved).
+// nodes in `filePath`. Deterministic-method edges with one candidate are
+// preserved verbatim (method + confidence, tier re-derived via the tierFor
+// table); only genuinely-unresolvable edges fall to a name_match guess.
+// Zero candidates means the symbol was renamed/removed; the edge is dropped
+// silently and counted in `unresolved`. Returns (restored, unresolved).
 func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string) (int, int, error) {
 	if len(snap) == 0 {
 		return 0, 0, nil
 	}
-	lookup, err := tx.Prepare(`SELECT id FROM nodes WHERE name = ? AND file_path = ?`)
+	// #B8c: ORDER BY id so the candidate list (and the ids[0] pick below) is
+	// explicitly deterministic, not an accident of SQLite scan order.
+	lookup, err := tx.Prepare(`SELECT id FROM nodes WHERE name = ? AND file_path = ? ORDER BY id`)
 	if err != nil {
 		return 0, 0, fmt.Errorf("prepare incoming lookup: %w", err)
 	}
@@ -141,38 +181,65 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string)
 		// is treated as demoted too (correct-or-quiet — never re-promote a guess).
 		qualifiedUnresolved := r.EvidenceType == "name_match_qualified_unresolved"
 
-		// If unambiguous (1 candidate) and original was high-confidence, preserve it
+		// #B6: if unambiguous (1 candidate) and the original edge was resolved by
+		// ANY deterministic method, preserve method + confidence verbatim and
+		// re-derive the tier from the ONE threshold table. Only genuinely-
+		// unresolvable edges (ambiguous re-match, original name_match, or the
+		// qualified-unresolved stdlib-shadow demote) fall to a name_match guess.
 		var conf float64
 		var method string
 		var tier string
-		if !qualifiedUnresolved && len(ids) == 1 && (r.ResolutionMethod == "same_file" || r.ResolutionMethod == "import") {
+		var evType string
+		if !qualifiedUnresolved && len(ids) == 1 && deterministicRestoreMethods[r.ResolutionMethod] {
 			conf = r.Confidence
 			// Item #4: floor ONLY the literal pre-v14 0.0/NULL sentinel to the
 			// method-appropriate verified value (same_file/import → 1.0, the
-			// computeConfidence table). Any conf>0 the pipeline previously stored
-			// — including an intentionally-lowered one — is PRESERVED verbatim:
-			// never re-certify a confidence the pipeline deliberately lowered.
-			if conf <= 0.0 {
+			// computeConfidence table; the other deterministic methods post-date
+			// v14 and can never carry the sentinel). Any conf>0 the pipeline
+			// previously stored — including an intentionally-lowered one — is
+			// PRESERVED verbatim: never re-certify a deliberately-lowered edge.
+			if conf <= 0.0 && (r.ResolutionMethod == "same_file" || r.ResolutionMethod == "import") {
 				conf = 1.0
 			}
 			method = r.ResolutionMethod
-			tier = "CERTIFIED"
+			tier = tierForConfidence(conf)
+			// Preserve the original evidence marker; fall back to the method-
+			// appropriate default for legacy rows that stored none.
+			evType = r.EvidenceType
+			if evType == "" {
+				if method == "same_file" || method == "import" {
+					evType = "ast_call"
+				} else {
+					evType = method
+				}
+			}
 		} else {
 			method = "name_match"
+			evType = "name_match"
 			switch {
+			case qualifiedUnresolved:
+				// Parity with the resolver demote (resolver.go: conf 0.2,
+				// evidence name_match_qualified_unresolved): a demoted stdlib-
+				// shadow must restore at demoted confidence, not climb back to
+				// 0.9 via the single-candidate row below.
+				conf = 0.2
+				evType = "name_match_qualified_unresolved"
 			case len(ids) == 1:
-				conf = 0.9
-				tier = "SPECULATIVE"
+				// #B6 split-brain fix: this row used to store conf 0.9 with tier
+				// SPECULATIVE — tierFor(0.9) is CERTIFIED, and a name_match must
+				// NEVER restore as CERTIFIED (name_match is not a fact). Cap the
+				// confidence at the 2-candidate ambiguity score so conf and tier
+				// agree (0.6 → CANDIDATE): a single-candidate re-match without
+				// the original qualifier context is not a verified edge.
+				conf = 0.6
 			case len(ids) == 2:
 				conf = 0.6
-				tier = "CANDIDATE"
 			case len(ids) <= 5:
 				conf = 0.4
-				tier = "SPECULATIVE"
 			default:
 				conf = 0.2
-				tier = "SPECULATIVE"
 			}
+			tier = tierForConfidence(conf)
 		}
 		// Pick the first candidate deterministically (id ASC from SELECT).
 		// Edge confidence reflects ambiguity across all candidates.
@@ -181,16 +248,6 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string)
 			srcFile = nil
 		} else {
 			srcFile = r.SourceFile
-		}
-		evType := method
-		if method == "same_file" || method == "import" {
-			evType = "ast_call"
-		}
-		// Preserve the qualified-unresolved demotion marker so downstream
-		// consumers keep treating this restored edge as the stdlib-shadow guess
-		// it is (parity with resolver.go:747 evidence = name_match_qualified_unresolved).
-		if qualifiedUnresolved {
-			evType = "name_match_qualified_unresolved"
 		}
 		if _, err := ins.Exec(r.SourceID, ids[0], r.EdgeType, r.SourceLine, srcFile,
 			method, conf, tier, len(ids), evType); err != nil {

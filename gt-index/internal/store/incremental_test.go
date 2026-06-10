@@ -67,8 +67,15 @@ func TestResolveIncomingEdgesDoesNotCertifyNameMatch(t *testing.T) {
 	if evidenceType != "name_match" || verificationStatus != "unverified" {
 		t.Fatalf("evidence_type=%q verification_status=%q", evidenceType, verificationStatus)
 	}
-	if confidence != 0.9 {
-		t.Fatalf("confidence=%v", confidence)
+	// #B6 split-brain fix: the restore used to store conf 0.9 with tier
+	// SPECULATIVE — tierFor(0.9) is CERTIFIED, so conf and tier disagreed. A
+	// single-candidate name_match re-match now restores at 0.6 (the ambiguity
+	// score) so tier == tierFor(conf) AND name_match stays below CERTIFIED.
+	if confidence >= 0.9 {
+		t.Fatalf("confidence=%v; cc==1 name_match restore must stay below the CERTIFIED threshold", confidence)
+	}
+	if tier != tierForConfidence(confidence) {
+		t.Fatalf("tier %q does not follow confidence %v (tierFor says %q)", tier, confidence, tierForConfidence(confidence))
 	}
 }
 
@@ -144,8 +151,85 @@ func TestResolveIncomingEdgesDoesNotRelaunderQualifiedUnresolved(t *testing.T) {
 	if evidenceType != "name_match_qualified_unresolved" {
 		t.Fatalf("evidence_type=%q; demotion marker must be preserved across reindex", evidenceType)
 	}
-	if confidence >= 0.95 {
-		t.Fatalf("confidence=%v; demoted edge must not regain CERTIFIED-level confidence", confidence)
+	// #B6: parity with the resolver demote — a demoted stdlib-shadow restores at
+	// the demoted confidence (0.2/SPECULATIVE), it must not climb back to 0.9
+	// via the single-candidate name_match row.
+	if confidence > 0.2 {
+		t.Fatalf("confidence=%v; demoted edge must restore at the demoted confidence (0.2)", confidence)
+	}
+	if tier != "SPECULATIVE" {
+		t.Fatalf("tier=%q; demoted edge must restore SPECULATIVE", tier)
+	}
+}
+
+// #B6: an edge resolved by a deterministic method (here: the offline LSP pass)
+// must be PRESERVED across an incremental `-file` reindex — method, confidence,
+// evidence marker — with the tier re-derived from the one threshold table.
+// Before the fix the preserve condition was {same_file, import} only, so every
+// lsp/type_flow/inherited/verified_unique edge targeting a reindexed file was
+// stripped down to a 0.9 name_match guess.
+func TestResolveIncomingEdgesPreservesLSPEdge(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "graph.db")
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := createSchema(db); err != nil {
+		t.Fatal(err)
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(
+		`INSERT INTO nodes (id, label, name, file_path, language) VALUES
+		 (1, 'Function', 'caller', 'src/caller.py', 'python'),
+		 (2, 'Method',   'save',   'src/models.py', 'python')`,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	snap := []IncomingEdgeRef{{
+		SourceID:         1,
+		SourceLine:       12,
+		EdgeType:         "CALLS",
+		SourceFile:       "src/caller.py",
+		TargetName:       "save",
+		ResolutionMethod: "lsp",
+		Confidence:       0.95,
+		EvidenceType:     "lsp_definition",
+	}}
+	restored, unresolved, err := ResolveIncomingEdgesTx(tx, snap, "src/models.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored != 1 || unresolved != 0 {
+		t.Fatalf("restored=%d unresolved=%d", restored, unresolved)
+	}
+
+	var method, tier, evidenceType string
+	var confidence float64
+	if err := tx.QueryRow(
+		`SELECT resolution_method, trust_tier, evidence_type, confidence
+		   FROM edges WHERE source_id = 1 AND target_id = 2`,
+	).Scan(&method, &tier, &evidenceType, &confidence); err != nil {
+		t.Fatal(err)
+	}
+	if method != "lsp" {
+		t.Fatalf("method=%q; lsp edge must restore as lsp, not be stripped to a guess", method)
+	}
+	if confidence != 0.95 {
+		t.Fatalf("confidence=%v; original lsp confidence must be preserved", confidence)
+	}
+	if tier != "CERTIFIED" {
+		t.Fatalf("tier=%q; tierFor(0.95) is CERTIFIED", tier)
+	}
+	if evidenceType != "lsp_definition" {
+		t.Fatalf("evidence_type=%q; original evidence marker must be preserved", evidenceType)
 	}
 }
 
