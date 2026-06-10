@@ -63,7 +63,9 @@ from pier.models.agent.install import AgentInstallSpec, InstallStep
 
 logger = logging.getLogger(__name__)
 
-_GT_BASELINE = bool(os.environ.get("GT_BASELINE"))
+# Strict flag parse (bug #6): bool(env) made GT_BASELINE=0 enable the baseline
+# arm. Strict == "1" like every other GT flag (GT_PROOF_MODE, GT_PORTABLE_SUBSTRATE).
+_GT_BASELINE = os.environ.get("GT_BASELINE") == "1"
 _THIS_DIR = Path(__file__).resolve().parent
 
 
@@ -94,6 +96,22 @@ class DeepSweAdapterError(RuntimeError):
     second graph would be built, the consumed graph diverges from the substrate's
     LSP-resolved graph, or the substrate brief is absent). A divergent or missing
     substrate artifact must HARD-STOP the run, not silently degrade."""
+
+
+def _adapter_fail(detail: str, message: str, cause: BaseException | None = None):
+    """Print the classified ``[GT_META] ... error=DEEPSWE_ADAPTER_FAIL`` line and
+    THEN raise DeepSweAdapterError (bug #7, P0-support). pier can swallow the
+    exception, so the printed line is what the workflow's grep and the outcome
+    classifier actually see — a bare raise was invisible. Every adapter raise
+    site routes through here (the witness's ``_fail`` prints its own richer line)."""
+    print(
+        f"[GT_META] gt_artifacts={os.environ.get('GT_CERT_DIR', '')}; "
+        f"error=DEEPSWE_ADAPTER_FAIL detail={detail}",
+        flush=True,
+    )
+    if cause is not None:
+        raise DeepSweAdapterError(message) from cause
+    raise DeepSweAdapterError(message)
 
 # ---------------------------------------------------------------------------
 # Locate the two payloads we inject into the container
@@ -437,22 +455,24 @@ def _substrate_brief() -> str:
     substrate = _substrate_active()
     if not cert_dir:
         if proof or substrate:
-            raise DeepSweAdapterError(
+            _adapter_fail(
+                "GT_ARTIFACT_MISSING_CERT_DIR",
                 "GT_ARTIFACT_MISSING / DEEPSWE_ADAPTER_FAIL: substrate-consume mode is "
                 "active (proof_mode=%s substrate=%s) but neither GT_CERT_DIR nor "
                 "GT_HOST_GRAPH_DB is set — cannot locate the substrate brief, and host "
                 "GT scoring is forbidden in proof mode (no fallback)."
-                % (proof, substrate)
+                % (proof, substrate),
             )
         return ""
     brief_path = os.path.join(cert_dir, "brief.txt")
     if not os.path.isfile(brief_path):
         if proof or substrate:
-            raise DeepSweAdapterError(
+            _adapter_fail(
+                "GT_ARTIFACT_MISSING_BRIEF",
                 "GT_ARTIFACT_MISSING / DEEPSWE_ADAPTER_FAIL: substrate brief absent at "
                 f"{brief_path!r} in substrate-consume mode (proof_mode={proof} "
                 f"substrate={substrate}). Failing closed — host-side generate_v1r_brief "
-                "is forbidden in proof mode (no divergent host GT scoring)."
+                "is forbidden in proof mode (no divergent host GT scoring).",
             )
         return ""
     try:
@@ -460,18 +480,21 @@ def _substrate_brief() -> str:
             txt = (fh.read() or "").strip()
     except OSError as e:
         if proof or substrate:
-            raise DeepSweAdapterError(
+            _adapter_fail(
+                "BRIEF_UNREADABLE",
                 f"DEEPSWE_ADAPTER_FAIL: substrate brief unreadable at {brief_path!r} "
-                f"in substrate-consume mode: {e} (no fallback)."
-            ) from e
+                f"in substrate-consume mode: {e} (no fallback).",
+                cause=e,
+            )
         logger.warning("GT: substrate brief unreadable (%s) -- skipping", e)
         return ""
     if not txt and (proof or substrate):
-        raise DeepSweAdapterError(
+        _adapter_fail(
+            "BRIEF_EMPTY",
             f"DEEPSWE_ADAPTER_FAIL: substrate brief at {brief_path!r} is EMPTY in "
             f"substrate-consume mode (proof_mode={proof} substrate={substrate}). "
             "Failing closed — a paid proof run must not ship a brief-less trajectory "
-            "(no host fallback)."
+            "(no host fallback).",
         )
     if txt:
         logger.info("GT: consumed substrate brief %s (%d chars, READ-ONLY)",
@@ -500,10 +523,11 @@ def _generate_brief(instruction: str) -> str:
     # on the legacy non-proof preindex path — and we still refuse it under proof mode
     # as a defence in depth.
     if _proof_mode() or _substrate_active():
-        raise DeepSweAdapterError(
+        _adapter_fail(
+            "HOST_BRIEF_FORBIDDEN",
             "DEEPSWE_ADAPTER_FAIL: reached host brief generation while proof/substrate "
             "mode is active — host GT scoring is forbidden (no fallback). The substrate "
-            "brief consume must have produced a brief or failed closed before this point."
+            "brief consume must have produced a brief or failed closed before this point.",
         )
 
     db = os.environ.get("GT_GRAPH_DB", "") or os.environ.get("GT_HOST_GRAPH_DB", "")
@@ -554,23 +578,29 @@ def _emit_gt_meta_witness() -> None:
         then append cert paths + substrate_digest (§H format).
 
     FAIL-CLOSED (hole #2, §E DEEPSWE_ADAPTER_FAIL / GRAPH_FAIL_HASH_MISMATCH): under
-    PROOF mode (GT_PROOF_MODE=1) any failure to wire, fingerprint, or MATCH the
-    substrate's post-LSP hash emits `[GT_META] ... error=DEEPSWE_ADAPTER_FAIL ...`
-    AND RAISES ``DeepSweAdapterError`` — a divergent or unconsumable graph HARD-STOPS
-    the run, it does NOT warn-and-continue. Outside proof mode the same conditions
-    print the classified line and return (warn), so dev/CI is non-fatal.
+    PROOF mode (GT_PROOF_MODE=1) OR substrate-consume mode (_substrate_active) any
+    failure to wire, fingerprint, or MATCH the substrate's post-LSP hash emits
+    `[GT_META] ... error=DEEPSWE_ADAPTER_FAIL ...` AND RAISES ``DeepSweAdapterError``
+    — a divergent or unconsumable graph HARD-STOPS the run, it does NOT
+    warn-and-continue. The raise scope is CONSISTENT with the brief consume
+    (``_substrate_brief`` raises under proof OR substrate) and with the
+    DeepSweAdapterError contract ("under proof/substrate mode") — the witness was
+    proof-only, leaving a substrate-active non-proof run to warn on a divergent
+    graph (bug #7). Outside BOTH proof and substrate the same conditions print the
+    classified line and return (warn), so legacy dev/CI is non-fatal.
     """
     import json as _json
 
     proof = _proof_mode()
+    substrate = _substrate_active()
 
     def _fail(detail: str, *, prebuilt: str = "unknown") -> None:
         """Print the classified [GT_META] DEEPSWE_ADAPTER_FAIL line, then RAISE in
-        proof mode (fail-closed) or return (warn) outside it."""
+        proof/substrate mode (fail-closed) or return (warn) outside both."""
         print(f"[GT_META] gt_artifacts={os.environ.get('GT_CERT_DIR', '')}; "
               f"gt_prebuilt_active={prebuilt}; error=DEEPSWE_ADAPTER_FAIL "
               f"detail={detail}", flush=True)
-        if proof:
+        if proof or substrate:
             raise DeepSweAdapterError(f"DEEPSWE_ADAPTER_FAIL: {detail}")
 
     try:

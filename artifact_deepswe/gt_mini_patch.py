@@ -39,7 +39,9 @@ import os
 import re
 import subprocess
 
-_GT_BASELINE = bool(os.environ.get("GT_BASELINE"))
+# Strict flag parse (bug #6 parity with gt_agent / every other GT flag):
+# bool(env) made GT_BASELINE=0 enable the baseline arm.
+_GT_BASELINE = os.environ.get("GT_BASELINE") == "1"
 _ROOT_FILE = os.environ.get("GT_ROOT_FILE", "/opt/gt/gt_root.txt")
 _HOOK_TIMEOUT = int(os.environ.get("GT_HOOK_TIMEOUT", "30"))
 
@@ -282,24 +284,175 @@ def _code_at(repo_root: str, rel_file: str, line: int) -> str:
 
 
 def _norm_fp(file_path: str) -> str:
+    """Normalize a path to the form gt-index stores in nodes.file_path:
+    repo-relative, forward slashes, no leading `./` or `/` (walker.go does
+    filepath.Rel + ToSlash). Used for EXACT `file_path = ?` matches — never
+    suffix-LIKE (bug #1: `%__init__.py` matched EVERY package's __init__)."""
     return (file_path or "").replace("\\", "/").lstrip("./").lstrip("/")
 
 
+# ---------------------------------------------------------------------------
+# Sanitizers (bug #4) — ported verbatim from groundtruth (stdlib-only, the
+# package is NOT importable in the task container):
+#   _sanitize_signature  <- contract_map._sanitize_signature (pyright hover-
+#                           markdown D-2 defect: ```python\n(method) def ...```)
+#   _clip_balanced       <- runtime.sanitizer.clip_balanced (mid-string /
+#                           dangling-operator truncation repair)
+# ---------------------------------------------------------------------------
+_HOVER_KIND_RE = re.compile(
+    r"^\((?:method|function|property|variable|class|parameter|field|constant|module|overload)\)\s*"
+)
+
+
+def _sanitize_signature(sig: str) -> str:
+    """Strip leaked LSP/Pyright hover markdown from a stored signature.
+    Ported from contract_map._sanitize_signature. No-op on already-clean
+    signatures (fast path). Language-agnostic (fences/markers, not AST)."""
+    if not sig:
+        return sig
+    s = sig.strip()
+    if "```" not in s and not s.startswith("("):
+        return s  # already clean — no hover markdown
+    s = s.replace("```python", " ").replace("```", " ")
+    cleaned: list[str] = []
+    for ln in s.splitlines():
+        ln = _HOVER_KIND_RE.sub("", ln.strip()).strip()
+        if ln:
+            cleaned.append(ln)
+    if not cleaned:
+        return ""
+    for ln in cleaned:
+        if "(" in ln:
+            return ln
+    return cleaned[0]
+
+
+# A trailing binary/word operator means the clause was cut mid-expression.
+_TRAILING_OP_RE = re.compile(
+    r"(?:\s+(?:and|or|not|in|is)\b"
+    r"|\s*(?:->|\+|-|\*|/|%|<=|>=|==|!=|<|>|&&|\|\||&|\||\^|~|=|,))\s*$"
+)
+
+
+def _clip_balanced(text: str, max_len: int | None = None) -> str:
+    """Longest well-formed prefix of ``text`` (quotes balanced, bracket depth
+    zero, no dangling operator, never mid-identifier), or "" when none exists.
+    Ported from groundtruth.runtime.sanitizer.clip_balanced."""
+    if not text:
+        return ""
+    text = text.rstrip()
+    budget = len(text) if max_len is None else min(len(text), max_len)
+
+    in_str = ""
+    esc = False
+    depth = 0
+    safe = 0  # furthest prefix length that is balanced and outside any string
+    for i, ch in enumerate(text):
+        if i <= budget and not in_str and depth == 0:
+            safe = i
+        if esc:
+            esc = False
+            continue
+        if in_str:
+            if ch == "\\":
+                esc = True
+            elif ch == in_str:
+                in_str = ""
+            continue
+        if ch in "\"'":
+            in_str = ch
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth = max(0, depth - 1)
+    if not in_str and depth == 0 and len(text) <= budget:
+        safe = len(text)
+
+    if 0 < safe < len(text):
+        before = text[safe - 1]
+        after = text[safe]
+        if (before.isalnum() or before == "_") and (after.isalnum() or after == "_"):
+            m = re.search(r"\w+$", text[:safe])
+            if m:
+                safe = m.start()
+
+    prefix = text[:safe].rstrip()
+    prev = None
+    while prefix and prev != prefix:
+        prev = prefix
+        prefix = _TRAILING_OP_RE.sub("", prefix).rstrip()
+    return prefix
+
+
+# One-time state for the in-container readability probe's classified line (bug #5):
+# the print fires at most ONCE per process; the probe itself runs on every open
+# (sqlite3.connect is lazy — a doomed handle on an unreadable graph only surfaces
+# at first query, so the trivial SELECT is what actually proves readability).
+_graph_probe_printed = False
+
+
+def _connect_ro(db: str):
+    """Open graph.db READ-ONLY via sqlite URI (bug #5).
+
+    The substrate graph is bind-mounted READ-ONLY into the container; a plain
+    ``sqlite3.connect(db)`` against it can fail on a WAL graph (an old
+    in-container sqlite, or a leftover ``-wal``, needs write access for WAL
+    recovery/locking) — and every pillar then silently returned "" per turn.
+    ``mode=ro`` never writes; ``immutable=1`` additionally skips locking + WAL
+    entirely and is correct ONLY when nothing can modify the file, i.e. the
+    truly-ro substrate/proof mount. On the legacy (non-substrate) path
+    /tmp/graph.db is OURS and L6 rewrites it between turns, so plain ``mode=ro``
+    is used there instead (immutable on a mutating file risks stale/torn reads).
+
+    READABILITY PROBE: every open runs a trivial schema SELECT (one cached page;
+    sqlite3.connect alone is lazy and proves nothing). On the FIRST failure it
+    prints a single classified ``[gt-patch] GRAPH_UNREADABLE_IN_CONTAINER:``
+    line — so a silently-dead per-turn surface becomes visible in the
+    trajectory — then stays quiet on later failures (correct-or-quiet, no spam).
+    Returns a connection or None.
+    """
+    global _graph_probe_printed
+    import sqlite3
+    dbu = (db or "").replace("\\", "/")
+    immutable = _substrate_active() or os.environ.get("GT_PROOF_MODE") == "1"
+    uri = f"file:{dbu}?mode=ro" + ("&immutable=1" if immutable else "")
+    con = None
+    try:
+        con = sqlite3.connect(uri, uri=True, timeout=10)
+        con.execute("SELECT name FROM sqlite_master LIMIT 1").fetchone()
+        return con
+    except Exception as e:  # noqa: BLE001
+        if con is not None:
+            try:
+                con.close()
+            except Exception:  # noqa: BLE001
+                pass
+        if not _graph_probe_printed:
+            _graph_probe_printed = True
+            try:
+                print(f"[gt-patch] GRAPH_UNREADABLE_IN_CONTAINER: {e}", flush=True)
+            except Exception:  # noqa: BLE001
+                pass
+        return None
+
+
 def _top_func_names(con, file_path: str, limit: int = 3) -> list[str]:
-    """Most-referenced non-test Function/Method names in the file (suffix-LIKE
-    match, so a stored `pkg/foo.go` matches a relative `foo.go`). Cross-language:
-    pure node-label query, no per-language branch. Mirrors v1r_brief._top_function_names
-    (issueless variant — per-view has no issue-anchor context; the host brief owns
-    issue-anchored selection)."""
+    """Most-referenced non-test Function/Method names in the file. EXACT
+    normalized-relpath match (bug #1 — canonical v1r_brief._top_function_names
+    uses `n.file_path = ?`; a basename suffix-LIKE matched EVERY package's
+    `__init__.py` and cross-attributed other files' evidence as facts).
+    Cross-language: pure node-label query, no per-language branch. Issueless
+    variant — per-view has no issue-anchor context; the host brief owns
+    issue-anchored selection."""
     out: list[str] = []
     try:
         rows = con.execute(
             "SELECT n.name, COUNT(e.id) AS rc FROM nodes n "
             "LEFT JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' "
-            "WHERE (n.file_path = ? OR n.file_path LIKE ?) "
+            "WHERE n.file_path = ? "
             "AND n.label IN ('Function','Method') AND COALESCE(n.is_test,0)=0 "
             "GROUP BY n.id ORDER BY rc DESC, n.name LIMIT ?",
-            (file_path, "%" + os.path.basename(file_path), limit),
+            (_norm_fp(file_path), limit),
         ).fetchall()
         for (name, _rc) in rows:
             if name and name not in out:
@@ -422,7 +575,10 @@ def _caller_contract_for_file(con, file_path: str, repo_root: str, func_names: l
                     if rendered not in fact_parts:
                         fact_parts.append(rendered)
                 elif conf_f >= 0.5 or not has_conf:
-                    hint = f"{caller_file}:{source_line}"
+                    # Honesty marker (curation_map._fmt_edge discipline, bug #9):
+                    # a floor-clearing-but-unverified hint is labeled, never shown
+                    # indistinguishably from a structurally-resolved fact.
+                    hint = f"{caller_file}:{source_line} (unverified)"
                     if hint not in unverified_parts:
                         unverified_parts.append(hint)
                 if len(fact_parts) >= 3:
@@ -440,17 +596,19 @@ def _caller_contract_for_file(con, file_path: str, repo_root: str, func_names: l
 
 def _sibling_context(con, file_path: str, func_names: list[str]) -> str:
     """Sibling functions at the same scope — parallel patterns to follow.
-    Ported from v1r_brief._sibling_context. Cross-language: pure node query."""
+    Ported from v1r_brief._sibling_context. EXACT normalized-relpath match
+    (bug #1: a basename suffix-LIKE pulled "siblings" from OTHER files with the
+    same basename — e.g. every other package's __init__.py). Cross-language."""
     if not func_names:
         return ""
     try:
         rows = con.execute(
             "SELECT DISTINCT n.name FROM nodes n "
-            "WHERE (n.file_path = ? OR n.file_path LIKE ?) "
+            "WHERE n.file_path = ? "
             "AND n.label IN ('Function','Method') AND COALESCE(n.is_test,0)=0 "
             "AND n.name NOT IN ({}) ORDER BY n.start_line LIMIT 8".format(
                 ",".join("?" * len(func_names))),
-            (file_path, "%" + os.path.basename(file_path), *func_names),
+            (_norm_fp(file_path), *func_names),
         ).fetchall()
         names = [r[0] for r in rows if r[0] and len(r[0]) > 2 and not r[0].startswith("_")]
         return ", ".join(names[:5]) if names else ""
@@ -463,14 +621,19 @@ def _edit_target_callee_contracts(con, file_path: str, func_names: list[str],
     """Verified callees (signature + location) of the edit-target functions.
     Ported from contract_map.edit_target_callee_contracts (the deciding
     "what does the method I'm editing CALL, and how" fact). name_match callees
-    are NEVER included. Cross-language: pure SQL over edges/nodes + signatures."""
+    are NEVER included; the deterministic gate is re-checked PER ROW in Python
+    (contract_map:558-559 parity, bug #3) and a legacy schema without
+    resolution_method ABSTAINS — provenance unknowable means no fact, never
+    "include everything". Cross-language: pure SQL over edges/nodes + signatures."""
     if not func_names:
         return []
     _, has_method = _has_columns(con)
+    if not has_method:
+        # Legacy schema: cannot judge provenance -> emit nothing (never launder).
+        return []
     nfp = _norm_fp(file_path)
     det_sql = "','".join(sorted(_DETERMINISTIC_METHODS))
-    method_clause = (f"AND LOWER(TRIM(e.resolution_method)) IN ('{det_sql}')"
-                     if has_method else "")
+    method_clause = f"AND LOWER(TRIM(e.resolution_method)) IN ('{det_sql}')"
     out: list[str] = []
     seen: set[tuple[str, str, str]] = set()
     try:
@@ -479,7 +642,8 @@ def _edit_target_callee_contracts(con, file_path: str, func_names: list[str],
                 continue
             rows = con.execute(
                 f"""
-                SELECT nt.name, nt.signature, nt.file_path, nt.start_line
+                SELECT nt.name, nt.signature, nt.file_path, nt.start_line,
+                       e.resolution_method
                 FROM nodes nsrc
                 JOIN edges e ON e.source_id = nsrc.id AND e.type = 'CALLS' {method_clause}
                 JOIN nodes nt ON e.target_id = nt.id
@@ -491,16 +655,22 @@ def _edit_target_callee_contracts(con, file_path: str, func_names: list[str],
                 (fname, "%" + nfp, max_callees * 3),
             ).fetchall()
             added = 0
-            for callee_name, sig, callee_file, line in rows:
+            for callee_name, sig, callee_file, line, method in rows:
                 if added >= max_callees:
                     break
+                # Verified-edge gate, re-checked per row (contract_map parity):
+                # never surface a non-deterministic callee as a fact.
+                if (method or "").strip().lower() not in _DETERMINISTIC_METHODS:
+                    continue
                 if callee_name == fname and _norm_fp(callee_file) == nfp:
                     continue
                 key = (fname, callee_name or "", callee_file or "")
                 if key in seen:
                     continue
                 seen.add(key)
-                sig = (sig or "").strip()
+                sig = _sanitize_signature((sig or "").strip())
+                if not sig:
+                    continue  # correct-or-quiet: no clean signature, no fact
                 loc = f" ({callee_file}:{int(line)})" if line else ""
                 out.append(f"[CALLEE] {fname} -> {sig}{loc}")
                 added += 1
@@ -516,26 +686,27 @@ def _norm_rel(p: str) -> str:
 
 def _query_scope(rel: str) -> list[str]:
     """Graph 1-hop neighbours of `rel`, confidence-gated (>= 0.5). Shared by the
-    first-view consensus and the override re-anchor."""
+    first-view consensus and the override re-anchor. EXACT normalized-relpath
+    match (bug #1) over a read-only URI connection (bug #5)."""
     db = _db_path()
     if not os.path.isfile(db):
         return []
     out: list[str] = []
     try:
-        import sqlite3
-        con = sqlite3.connect(db)
-        base = os.path.basename(rel)
+        con = _connect_ro(db)
+        if con is None:
+            return []
         q = (
             "SELECT DISTINCT n2.file_path FROM nodes n1 "
             "JOIN edges e ON (e.source_id = n1.id OR e.target_id = n1.id) "
             "JOIN nodes n2 ON n2.id = (CASE WHEN e.source_id = n1.id "
             "                          THEN e.target_id ELSE e.source_id END) "
-            "WHERE (n1.file_path = ? OR n1.file_path LIKE ?) "
+            "WHERE n1.file_path = ? "
             "AND n2.file_path != n1.file_path AND n2.file_path IS NOT NULL "
             "AND COALESCE(e.confidence, 0) >= 0.5 ORDER BY e.confidence DESC LIMIT 6"
         )
         try:
-            for (fp,) in con.execute(q, (rel, "%" + base)):
+            for (fp,) in con.execute(q, (_norm_fp(rel),)):
                 if fp and fp not in out:
                     out.append(fp)
         finally:
@@ -602,10 +773,8 @@ def _consensus_block(rel: str, root: str) -> str:
     try:
         db = _db_path()
         scope: list[str] = []
-        if os.path.isfile(db):
-            import sqlite3
-            con = sqlite3.connect(db)
-            base = os.path.basename(rel)
+        con = _connect_ro(db) if os.path.isfile(db) else None
+        if con is not None:
             q = (
                 "SELECT DISTINCT n2.file_path FROM nodes n1 "
                 "JOIN edges e ON (e.source_id = n1.id OR e.target_id = n1.id) "
@@ -615,14 +784,16 @@ def _consensus_block(rel: str, root: str) -> str:
                 # the graph is 70-80% name_match; without this, 0.2-confidence SPECULATIVE
                 # neighbours were shown identically to verified edges as "graph-connected".
                 # >= 0.5 keeps CERTIFIED + CANDIDATE, drops SPECULATIVE (correct-or-quiet).
-                "WHERE (n1.file_path = ? OR n1.file_path LIKE ?) "
+                # EXACT normalized-relpath match (bug #1: basename-LIKE pulled
+                # neighbours of OTHER same-named files into this file's scope).
+                "WHERE n1.file_path = ? "
                 "AND n2.file_path != n1.file_path AND n2.file_path IS NOT NULL "
                 "AND COALESCE(e.confidence, 0) >= 0.5 "
                 "ORDER BY e.confidence DESC "
                 "LIMIT 6"
             )
             try:
-                for (fp,) in con.execute(q, (rel, "%" + base)):
+                for (fp,) in con.execute(q, (_norm_fp(rel),)):
                     if fp and fp not in scope:
                         scope.append(fp)
             finally:
@@ -671,10 +842,8 @@ def _evidence_body(kind: str, rel: str, root: str) -> str:
     db = _db_path()
     if not os.path.isfile(db):
         return ""
-    import sqlite3
-    try:
-        con = sqlite3.connect(db)
-    except Exception:  # noqa: BLE001
+    con = _connect_ro(db)
+    if con is None:
         return ""
     lines: list[str] = []
     try:
@@ -751,51 +920,85 @@ def _graph_contract_block(rel: str) -> str:
         db = _db_path()
         if not os.path.isfile(db):
             return ""
-        import sqlite3
-        con = sqlite3.connect(db)
-        base = os.path.basename(rel)
+        con = _connect_ro(db)
+        if con is None:
+            return ""
+        nfp = _norm_fp(rel)
         rows: list = []
+        preserve: list[str] = []
         try:
+            # Caller COUNT discipline (bug #2 — curation_map._verified_neighbor_count
+            # parity): count ONLY deterministic-method edges, confidence >= 0.7,
+            # non-test callers. An ungated COUNT laundered name_match guesses into a
+            # confident "N caller(s)" number. Legacy schema without resolution_method
+            # -> ABSTAIN from the count entirely (no number rather than a fake one).
+            has_conf, has_method = _has_columns(con)
+            if has_method:
+                det_sql = "','".join(sorted(_DETERMINISTIC_METHODS))
+                conf_gate = ("AND COALESCE(e.confidence, 0) >= 0.7 " if has_conf else "")
+                ncallers_sel = (
+                    "(SELECT COUNT(DISTINCT e.source_id) FROM edges e "
+                    "   JOIN nodes ns ON ns.id = e.source_id "
+                    "   WHERE e.target_id = n.id AND e.type='CALLS' "
+                    "   AND COALESCE(ns.is_test,0)=0 "
+                    f"  AND LOWER(TRIM(e.resolution_method)) IN ('{det_sql}') "
+                    f"  {conf_gate})"
+                )
+                nfiles_sel = (
+                    "(SELECT COUNT(DISTINCT ns.file_path) FROM edges e "
+                    "   JOIN nodes ns ON ns.id = e.source_id "
+                    "   WHERE e.target_id = n.id AND e.type='CALLS' "
+                    "   AND COALESCE(ns.is_test,0)=0 "
+                    f"  AND LOWER(TRIM(e.resolution_method)) IN ('{det_sql}') "
+                    f"  {conf_gate})"
+                )
+            else:
+                ncallers_sel = "0"
+                nfiles_sel = "0"
             q = (
                 "SELECT n.id, n.name, n.signature, "
-                " (SELECT COUNT(DISTINCT e.source_id) FROM edges e "
-                "    WHERE e.target_id = n.id AND e.type='CALLS') AS ncallers, "
-                " (SELECT COUNT(DISTINCT n2.file_path) FROM edges e JOIN nodes n2 ON n2.id = e.source_id "
-                "    WHERE e.target_id = n.id AND e.type='CALLS') AS nfiles "
-                "FROM nodes n WHERE (n.file_path = ? OR n.file_path LIKE ?) "
+                f" {ncallers_sel} AS ncallers, "
+                f" {nfiles_sel} AS nfiles "
+                # EXACT normalized-relpath match (bug #1): basename-LIKE attributed
+                # other files' functions (every __init__.py) to this contract.
+                "FROM nodes n WHERE n.file_path = ? "
                 "AND n.label IN ('Function','Method') AND COALESCE(n.is_test,0)=0 "
-                "ORDER BY ncallers DESC LIMIT 3"
+                "ORDER BY ncallers DESC, n.name LIMIT 3"
             )
-            rows = con.execute(q, (rel, "%" + base)).fetchall()
+            rows = [
+                (rid, name, _sanitize_signature((sig or "").strip()), nc, nf)
+                for rid, name, sig, nc, nf in con.execute(q, (nfp,)).fetchall()
+            ]
+            # bug #4: a signature that sanitizes to nothing is no fact — drop the row.
+            rows = [r for r in rows if r[2]]
             # PRESERVE: behavioural properties of the top (most-called) function — the
             # cross-language equivalent of OH's guard_removed/return_shape safety family
             # (gt_hook's is Python-AST-only). Properties are tree-sitter-mined per language
             # (thin on Go, richer on Python/TS) — correct-or-quiet where absent.
-            preserve: list[str] = []
-            top_rows = [r for r in rows if (r[2] or "").strip()]
-            if top_rows:
+            if rows:
                 pq = ("SELECT kind, value FROM properties WHERE node_id = ? "
                       "AND kind IN ('guard_clause','conditional_return','exception_flow','return_shape') "
                       "LIMIT 5")
-                for kind, val in con.execute(pq, (top_rows[0][0],)):
-                    val = (val or "").strip()
+                for kind, val in con.execute(pq, (rows[0][0],)):
+                    # bug #4: balanced clip (never a raw byte slice) so a value the
+                    # indexer stored mid-expression never renders an unterminated
+                    # literal or a dangling operator; empty after repair -> drop.
+                    val = _clip_balanced((val or "").strip(), 120)
                     if not val:
                         continue
                     tag = {"guard_clause": "PRESERVE", "conditional_return": "PRESERVE",
                            "exception_flow": "[RAISES]", "return_shape": "[RETURNS]"}.get(kind, "PRESERVE")
-                    preserve.append(f"{tag} {val[:120]}")
+                    preserve.append(f"{tag} {val}")
         finally:
             con.close()
-        rows = [r for r in rows if (r[2] or "").strip()]
         if not rows:
             return ""
         out = [f'<gt-contract file="{os.path.basename(rel)}">']
         for _id, name, sig, ncallers, nfiles in rows:
-            sig = (sig or "").strip()
             out.append(f"[SIGNATURE] {sig}")
             if ncallers and int(ncallers) > 0:
-                out.append(f"[CALLERS] {name}: {int(ncallers)} caller(s) in {int(nfiles)} "
-                           "file(s) — preserve this interface")
+                out.append(f"[CALLERS] {name}: {int(ncallers)} verified caller(s) in "
+                           f"{int(nfiles)} file(s) — preserve this interface")
         for p in preserve:
             out.append(p)
         out.append("</gt-contract>")
@@ -817,20 +1020,22 @@ def _cochange_block(rel: str) -> str:
         db = _db_path()
         if not os.path.isfile(db):
             return ""
-        import sqlite3
-        con = sqlite3.connect(db)
-        base = os.path.basename(rel)
-        like = "%" + base
+        con = _connect_ro(db)
+        if con is None:
+            return ""
+        nfp = _norm_fp(rel)
         rows: list[tuple[str, int]] = []
         try:
+            # EXACT normalized-relpath match (bug #1): basename-LIKE attributed
+            # ANOTHER file's co-change history (every __init__.py) to this edit.
             q = (
                 "SELECT file_a, file_b, count FROM cochanges "
-                "WHERE (file_a = ? OR file_a LIKE ? OR file_b = ? OR file_b LIKE ?) "
+                "WHERE (file_a = ? OR file_b = ?) "
                 "AND count >= 2 ORDER BY count DESC LIMIT 8"
             )
-            for fa, fb, cnt in con.execute(q, (rel, like, rel, like)):
-                other = fb if (fa == rel or (fa or "").endswith(base)) else fa
-                if other and os.path.basename(other) != base and other not in [r[0] for r in rows]:
+            for fa, fb, cnt in con.execute(q, (nfp, nfp)):
+                other = fb if _norm_fp(fa) == nfp else fa
+                if other and _norm_fp(other) != nfp and other not in [r[0] for r in rows]:
                     rows.append((other, cnt))
         except Exception:  # noqa: BLE001 -- cochanges table may be absent on old graphs
             return ""

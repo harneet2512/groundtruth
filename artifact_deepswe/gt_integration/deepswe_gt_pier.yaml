@@ -47,9 +47,17 @@ agent:
       target CALLS (so you call them correctly).
     - Sibling functions at the same scope (the patterns you must match).
 
-    Read those <gt-evidence> tags -- they are verified cross-file facts you
-    cannot get from the file alone. They appear automatically; you do not call
-    anything.
+    Read those <gt-evidence> tags. Lines such as [WITNESS] and [CALLEE] are
+    deterministically resolved cross-file facts you cannot get from the file
+    alone; [CALLERS] location hints and scope neighbors may be unverified --
+    those are labeled "(unverified)", so treat them as leads to confirm with
+    grep, not facts. The tags appear automatically; you do not call anything.
+
+    GroundTruth may also append these blocks when relevant:
+    - <gt-contract>: signatures and verified caller counts for functions in a file you edited -- preserve those interfaces.
+    - <gt-scope>: graph-connected files around the file you are viewing -- candidate scope; confirm the edit target with grep.
+    - <gt-cochange>: files that historically changed together with the file you edited -- check whether your fix needs them too.
+    - <gt-nudge>: a one-time course-correction when your trajectory looks stuck.
 
     ## Important Boundaries
 

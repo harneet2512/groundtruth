@@ -150,9 +150,14 @@ def test_hole2_witness_does_not_raise_on_match_in_proof(agent_mod, monkeypatch, 
     agent_mod._emit_gt_meta_witness()  # must not raise
 
 
-def test_hole2_witness_warns_not_raises_off_proof(agent_mod, monkeypatch, tmp_path, capsys):
-    """Outside proof mode the same mismatch must WARN (classified [GT_META] line) and
-    NOT raise — dev/CI stays non-fatal."""
+def test_hole2_witness_raises_on_mismatch_substrate_off_proof(
+        agent_mod, monkeypatch, tmp_path, capsys):
+    """CONSISTENT raise scope (delivery-surface fix #7): the witness raises under
+    (proof OR substrate) — matching ``_substrate_brief`` and the DeepSweAdapterError
+    contract ("under proof/substrate mode"). With the substrate handoff present
+    (GT_HOST_GRAPH_DB set) but NO GT_PROOF_MODE, a hash mismatch must STILL raise,
+    after printing the classified [GT_META] line (grep-visible even if pier
+    swallows the exception)."""
     _gt_env_clear(monkeypatch)
     db = tmp_path / "graph.db"
     _make_graph(db)
@@ -163,7 +168,8 @@ def test_hole2_witness_warns_not_raises_off_proof(agent_mod, monkeypatch, tmp_pa
     monkeypatch.setenv("GT_HOST_GRAPH_DB", str(db))
     monkeypatch.setenv("GT_CERT_DIR", str(cert_dir))
     monkeypatch.setenv("GT_LSP_CERT", str(cert_dir / "lsp_certificate.json"))
-    agent_mod._emit_gt_meta_witness()  # must NOT raise
+    with pytest.raises(agent_mod.DeepSweAdapterError, match="GRAPH_FAIL_HASH_MISMATCH"):
+        agent_mod._emit_gt_meta_witness()
     out = capsys.readouterr().out
     assert "DEEPSWE_ADAPTER_FAIL" in out and "GRAPH_FAIL_HASH_MISMATCH" in out
 
