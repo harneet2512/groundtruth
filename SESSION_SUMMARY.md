@@ -1,71 +1,99 @@
 # Session Summary
 
 ## Date / Time
-2026-06-09
+2026-06-09 (full-day arc; supersedes the morning entry)
 
 ## Branch / Commit
-`gt-trial` @ `8a65b4ce` — pushed to **BOTH origin/harneet2512 AND hbali-stack** (user override of the
-prior "code→origin only" rule, to enable the DeepSWE runs on hbali).
+`gt-trial` @ `4253da65` (go/no-go: 5/5 language-agnostic smoke EXECUTED on the fixed-stack
+substrate, run 27249519490). Pushed to **BOTH origin/harneet2512 AND hbali-stack** (user
+override of the prior "code→origin only" rule, to enable the DeepSWE runs on hbali).
 
 ## Objective
-Close LSP-stamping + image-pull + brief-consume gaps; run + §4-audit the 30-task paired agent run;
-diagnose 0-flips; build the localization levers; **pivot the validation surface to the Datacurve
-DeepSWE benchmark (mini-swe-agent via Pier)** and bring FULL OH-depth GT to it, language-agnostic.
+The day's arc: **levers → audits → 62 findings → 4 fixes → rebuild.**
+1. Land the localization levers (CHANGE 1 granularity, fusion+floor, CHANGE 2 embedder swap).
+2. Run 4 parallel LIPI reviewers over the whole DeepSWE-proof stack (pipeline+gates /
+   localization / delivery / indexer) → **62 findings**.
+3. Ship the four fixer surfaces (each red→green proven), rebuild the substrate on the fixed
+   stack, re-fire the proof waves.
+4. Bring `gt_gt.md` (the architecture source of truth) back to CURRENT (this session's doc pass).
 
 ## Files read (key)
-`scripts/metrics/foundational_gates.py`, `scripts/swebench/gt_run_proof.py`,
-`src/groundtruth/pretask/{v1r_brief,v7_4_brief,anchor_select,graph_localizer,specificity}.py`,
-`src/groundtruth/memory/enrich/embed.py`, `gt-index/cmd/gt-index/main.go`,
-`scripts/swebench/oh_gt_full_wrapper.py`, `benchmarks/swebench/{gt_hook,gt_intel,run_mini_gt_hooked}.py`,
-`artifact_deepswe/{gt_agent,gt_mini_patch}.py`, `.github/workflows/{cache_deepswe_images,deepswe_*}.yml`,
-`artifact_deepswe/repo_manifest.json` (113 tasks: TS 35 / Go 34 / Py 34 / Rust 5 / JS 5).
+`gt-index/internal/resolver/{resolver,relationships,api_edges}.go`,
+`gt-index/internal/{store/incremental,closure/closure,parser/parser}.go`,
+`src/groundtruth/pretask/{v1r_brief,v7_4_brief,graph_localizer,anchor_select}.py`,
+`src/groundtruth/memory/enrich/embed.py`, `scripts/swebench/gt_run_proof.py`,
+`scripts/metrics/foundational_gates.py`, `scripts/verify/deepswe_outcome.py`,
+`artifact_deepswe/{gt_agent,gt_mini_patch}.py`, `.github/workflows/deepswe_full.yml`.
 
 ## Exact decisions used
-- DeepSWE harness = **pier + mini-swe-agent** (confirmed `gt_deep_metrics.py:117,120`).
-- TWO GT engines (ONE-PRODUCT violation): `v1r/run_v74` (deep, multilingual — levers) vs `gt_intel`/`gt_hook`
-  (ast, Python-only). **UNIFY onto v1r.** The brief already reaches DeepSWE via `gt_agent._generate_brief`.
-- Dense-weight LOCKED: dense-led + `W_SEM_FLOOR=0.25`>0, never throttled, lexical-fused (not monopoly).
-- Validation surface: **Datacurve DeepSWE** (113 tasks / 5 langs / contamination-free / unsaturated),
-  not SWE-Live-Lite (low mindshare) nor saturated Verified. 113 images cached to GHCR.
-- Embedder: swap e5 → **gte-modernbert-base (Apache-2.0, open-source)**, configurable, e5 fallback.
+- Levers merged: CHANGE 1 per-symbol MaxSim (`33970b9f`); **fusion + dense floor `5a6e99b4`**
+  (the morning entry mis-cited `8a65b4ce`, which is the gt_gt §13 docs commit); Dim-1
+  max-compose + sparse-floor (`dc5844f8`); **CHANGE 2 gte-modernbert swap `5f460f23`**.
+- Dense-weight LOCKED: dense-led, `W_SEM=0.40` default + `W_SEM_FLOOR=0.25` enforced LAST,
+  never throttled below the floor, lexical-fused (not monopoly).
+- DeepSWE proof path is STRICT: `GT_GATES_DELIVER_ALWAYS=0` (any OFF gate fails); OH live
+  path stays deliver-always (=1). OH workflows pin `GT_EMBED_MODEL_NAME=e5`; gte on substrate.
+- Substrate graph is AUTHORITATIVE in proof mode → L6 single-file reindex deliberately OFF
+  there; the restore-level LSP-strip itself fixed in the indexer (`10368a2f`).
 
 ## Research checked
-ColBERT MaxSim (SIGIR 2020), MaxP (SIGIR 2019); CoIR (2407.02883), CodeXEmbed (2411.12644),
-CodeSage (ICLR 2024); BEIR (NeurIPS 2021), DPR (EMNLP 2020), Sciavolino (EMNLP 2021);
-RepoGraph (ICLR 2025). LLM-agent localizers (Agentless/LocAgent/OrcaLoca) NOT adopted (GT is LLM-free).
+ColBERT MaxSim (SIGIR 2020), MaxP (SIGIR 2019); CoIR/CodeXEmbed/CodeSage (code-IR); BEIR
+(NeurIPS 2021), DPR (EMNLP 2020), Sciavolino (EMNLP 2021); XTA (Tip&Palsberg OOPSLA 2000),
+PyCG (ICSE 2021), JARVIS 2023, ACG (ECOOP 2022) — the resolver-rung + builtin-drop basis.
 
 ## Implementation changes (committed + pushed)
-`9e7edeca` LSP-stamp fix · `dff3144b` image-pull retry · `8d48360a` brief-consume · `db267869` dead-shim
-· `33970b9f` **CHANGE 1 per-symbol MaxSim** · `8a65b4ce` **fusion + dense floor** · gt_gt §11/§12/§13 ·
-30 §4 ledgers. **In flight (worktrees):** CHANGE 2 (gte-modernbert), unify ast-residue → cross-lang evidence.
+- **Levers:** `33970b9f` CHANGE 1 · `5a6e99b4` fusion+floor · `5f460f23` CHANGE 2 (gte) ·
+  `72e688b4` no-fallback hardening · `f807e... / f6294add` substrate bakes (LSP servers, Go
+  toolchain) · `d6066ba3` run_manifest v2 provenance.
+- **The 4 LIPI fixer surfaces (62 findings):** `9bf106ca` pipeline+gates (P0 green-zero-run
+  chain fail-closed end-to-end; FAIL_NO_WARM/INSTALL_MISSING exit 2; per-lang certs +
+  aggregation; cert schema v2 + version-skew FAIL; brief.txt = 8th required artifact) ·
+  `dc5844f8` localization (model-keyed cache, sparse W_SEM floor, witness provenance honesty,
+  Dim-1 compose, ST hole) · `ffc6c7dc` delivery (exact-match pillars, verified-caller counts,
+  sanitizers, ro/immutable connect + one-time probe, adapter raise visibility) · `10368a2f`
+  indexer (Go CHA arity, 1.9 rung reorder, deterministic `-file` restore, AND-rule closure,
+  phantom/field_read guards, relationship/API trust stamping). Plus `8ae5584d` gopls launch.
+- **Rebuild + waves:** `02b02425` substrate rebuild on the fixed stack · `0e2489cc` wave-2
+  re-fire · `4253da65` smoke 5/5 executed.
+- **Docs (this pass, uncommitted by instruction):** `gt_gt.md` reconciled to HEAD with dated
+  UPDATED notes (§2.1/§2.3/§2.5/§4.1/§4.2/§4.3/§5/§6/§7/§11.8/§12/§13.1/§13.4 + new §13.7);
+  `LATEST_TASK.md`; this file.
 
 ## Metrics before → after
-- 30-task PAID run `27214152241`: 30/30 ran, 0 fail, **2/30 resolved, 0 GT-caused flips**, leakage 0.
-- CHANGE 1 (Stage-1, real graph e5/384): gold #1 **3/7 → 7/7**; synthetic separation 0.02 → 0.67 (~30×).
+- CHANGE 1 (Stage-1, real graph e5/384): gold #1 **3/7 → 7/7**; synthetic separation 0.02→0.67.
 - Fusion+floor: 15/15; `effective_w_sem ≥ 0.25 > 0` on every classification.
+- Fixers: 9bf106ca 22 red → 226 fail_closed pass · dc5844f8 15/17 red→green, 292 regression
+  pass · ffc6c7dc 26 fail → 52 pass · 10368a2f red→green vs pristine-HEAD worktree, closure
+  −19.7% rows on dagster with zero deterministic edges lost.
+- Smoke (fixed stack): **5/5 languages**, identical gt-run-proof command, exit 0, warm LSP
+  (all NO_OP_VALID_WITH_WARM_SERVER — fixtures resolve structurally; ACTIVE LSP is the
+  113-sweep's question).
 
 ## Tests / runs executed
-30-task GHA agent run (complete); CHANGE 1 23/23; fusion 15/15; full fail_closed 149; no new regressions.
-Step-0 DeepSWE Go-task trial: dispatched (verify the `<gt-task-brief>` lands cross-language).
+Per-fixer red→green suites (above); go build exit 0 + `go test` (1 known pre-existing
+failure); 5-language smoke run 27249519490; 113-task non-paid substrate sweep dispatched
+(running at session close).
 
 ## Result
-`v1r` upgraded (granularity + dense-floor fusion), committed/pushed/documented. DeepSWE pivot grounded
-in code; the brief engine already reaches the mini-swe agent. CHANGE 2 + unify in flight.
+Stack hardened on all four surfaces and PROVEN live on the rebuilt substrate (smoke 5/5).
+gt_gt.md is CURRENT again (dated supersede notes, no silent rewrites).
 
 ## Regressions
-None new (CHANGE 1 flipped 1 prior failure to pass; the pre-existing fail_closed/render failures unchanged).
+None new. Known pre-existing: 1 resolver go-test failure (TestRoutePatternMatching, fails on
+base too); render/fail_closed pre-existing failures unchanged.
 
 ## Rollback
-Each lever is a revertable commit; CHANGE 2 + unify are uncommitted worktrees.
+Each fixer surface is a single revertable commit (`9bf106ca`/`dc5844f8`/`ffc6c7dc`/`10368a2f`);
+substrate rollback = re-pin the previous image digest.
 
 ## Open blockers
-CHANGE 2 live model-load pending `setup_models` fetch / image bake; unify per-turn evidence needs the GT
-package in-container (substrate bake) or host-side; verify a real DeepSWE trajectory fires the brief (Step-0).
+113 sweep completion → integration audit; real-repo ACTIVE LSP resolution unproven (smoke was
+no-op-valid on tiny fixtures); 1-task dry gated on sweep + integration audit; benchmark on D2.
 
 ## Next allowed action
-Integrate CHANGE 2 + unify when validated; bake the DeepSWE substrate image (gte-modernbert + pyright/
-gopls/rust-analyzer/tsserver) for in-container v1r + L6 LSP-preservation; paired baseline + GT-on on
-DeepSWE across all 5 languages.
+Read the 113-sweep verdicts → integration audit (gt_trial §4 style, agent-observation) →
+1-task dry → paired GT-on vs GT-off decision (Wilcoxon) across all 5 languages.
 
 ---
-*Architecture of record: `gt_gt.md` §11–§13. This session's docs live in gt_gt §13 + here.*
+*Architecture of record: `gt_gt.md` §11–§13 (incl. the new §13.7 hardening). This session's
+docs live there + here.*

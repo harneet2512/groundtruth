@@ -1,8 +1,9 @@
 # GO / NO-GO — GT language-agnostic Docker proof
 
-> Branch `gt-trial`. Gates DeepSWE on the language-agnostic Docker audit. **EXECUTED 2026-06-09 on the fixed-stack image** (superseding the earlier not-run state)
-> (no local Docker daemon; the multilingual substrate image is not built/published — rebuild is a pending
-> CI dispatch). So every proof is **NO (UNVERIFIED — not run)**, not a failure of the architecture.
+> Branch `gt-trial`. Gates DeepSWE on the language-agnostic Docker audit. **EXECUTED 2026-06-09 on the
+> fixed-stack image `3c9e4a79` (smoke run 27249519490) — 5/5 languages pass**, superseding the earlier
+> not-run state. The identical `docker run … gt-run-proof` produced all artifacts + a warm LSP server on
+> every language; fail-closed gates green.
 
 | Decision | Status | Reason |
 |---|---|---|

@@ -7,7 +7,8 @@
 > **Scope rule:** this documents GT *only*. The agent harness (OpenHands /
 > mini-swe-agent) appears only as "the surface GT hooks evidence/tools onto," at
 > the overall level — never harness-specific plumbing. Branch
-> `gt-consensus-curation`. Last verified 2026-06-03 (direct code reads).
+> `gt-trial`. Last verified 2026-06-09 (direct code reads, post the 4-surface
+> LIPI hardening — §13.7; dated "UPDATED (2026-06-09, …)" notes mark what moved).
 >
 > Supersedes the architecture content scattered across `DOC_OF_HONOR.md`,
 > `we_did.md`, and `BRIEFING.md` (now legacy/feeders; BRIEFING stays the deeper
@@ -46,9 +47,9 @@ GT's edge is the **graph**. This is everything we extract from a repo.
 |---|---|
 | 1 STRUCTURE | discover source files by language |
 | 2 DEFINITIONS+IMPORTS | parse (NumCPU workers) → nodes; collect calls/imports/properties/assertions; then **PopulateFTS5()** |
-| 3 CALLS | 11-rung resolver → `CALLS` edges; emit `CONTAINS` from parent_id |
+| 3 CALLS | the §2.3 resolver ladder (~13 rungs + drop/demote gates) → `CALLS` edges; emit `CONTAINS` from parent_id |
 | 4 PROPERTIES+ASSERTIONS | insert properties; resolve assertion→tested-function (TCTracer) |
-| 4b API EDGES | cross-service route matching (`HANDLES_ROUTE`/api) |
+| 4b API EDGES | cross-service route matching → `API_CALL` @0.7 (route JSON in `metadata`) |
 | 4c RELATIONSHIPS | `EXTENDS/IMPLEMENTS/COMPOSES/RE_EXPORTS/HANDLES_ROUTE` (regex, per-language) |
 | 4d SERDE+TWINS | `serialization_pair`, `structural_twin` (as *properties*) |
 | 4e CLOSURE | transitive-closure sidecar over VERIFIED CALLS, depth ≤3 |
@@ -69,22 +70,60 @@ resolution_method, confidence, **trust_tier**, **candidate_count**, **evidence_t
 `file_hashes` · `project_meta` · `nodes_fts` (FTS5 virtual table over name/qname/signature/path).
 
 ### 2.3 Edge types we collect (+ trust model)
+
+> **UPDATED (2026-06-09, commits `dd460fe7` + `10368a2f`).** The previous "11-rung ladder"
+> description was stale; the live ladder is **~13 rungs + 2 drop/demote gates**, and the
+> 4b/CHA/relationship edges changed. What follows is the corrected state (verified by direct
+> `resolver.go` / `relationships.go` / `api_edges.go` reads at HEAD).
+
 | Edge | Languages | Confidence model |
 |---|---|---|
-| **CALLS** | all | 0.2–1.0 (per the 11-rung resolver) |
+| **CALLS** | all | 0.2–1.0 (per the ladder below) |
 | **CONTAINS** | all (structural) | 1.0, CERTIFIED |
 | **EXTENDS** | py/js/ts/java/kotlin/go/rust | 1.0 |
-| **IMPLEMENTS** | js/ts/java/kotlin/go/rust | 0.8–1.0 |
+| **IMPLEMENTS** | js/ts/java/kotlin 1.0; **Go CHA 0.6–0.85** (below) | 0.6–1.0 |
 | **COMPOSES** | JS/TS only (JSX) | 0.9 |
 | **RE_EXPORTS** | JS/TS only (barrels) | 1.0 |
-| **HANDLES_ROUTE** | Python (4c) + cross-service (4b) | 0.95 |
+| **HANDLES_ROUTE** | **Python (4c `decorator_route`) only** | 0.95 |
+| **API_CALL** | cross-service (4b), any lang | **0.7**, route JSON in `metadata` |
 
-CALLS resolution is an **11-rung ladder** (`resolver.go`): Strategy 1 same-file (1.0) →
-1.5 import-verified (1.0) → 1.75 self/this/Self+inheritance → 1.9 verified-unique (0.95) →
-1.93 import-scoped type_flow (0.95) → 1.94 single/few-implementor (0.4–0.85) → 1.95 type-flow
-qualified (0.9) → 1.96 assignment-flow (PyCG ICSE 2021) → 1.97 return-type bridging → 1.98
-unique-method-class (0.85) → **2 name_match fallback** (cc≤1→0.9, ==2→0.6, ≤5→0.4, else 0.2).
-Each edge carries `trust_tier` (CERTIFIED/CANDIDATE/SPECULATIVE) + `evidence_type`.
+**The CALLS ladder** (`resolver.go`, in fire order) — ~13 rungs:
+Strategy **1** same-file unambiguous (1.0; **multi-def same-file → 0.6 CANDIDATE
+`same_file_ambiguous`**, unqualified calls only) → **1.5** import-verified (1.0; multi-file
+no-same-dir pick → **0.6 `ast_import_ambiguous`**) → **1.75** self/this/Self + inheritance
+(1.0/0.95) → **1.9** verified-unique (0.95 — **UNQUALIFIED calls only**, see the reorder note)
+→ **1.93** import-scoped type_flow (0.95) → **1.94a declared-type receiver** (`qualifier.m()`
+where the caller declared `qualifier`'s type → CHA lookup → `type_flow` **0.9**, evidence
+`param_type` — XTA over the language-uniform `param` property) → **1.94** single/few-implementor
+(`impl_method`, **CANDIDATE-capped: 1 class=0.6, 2=0.5, 3=0.4** — name-uniqueness never proves
+the receiver, so it can never be CERTIFIED) → **1.95** type-flow qualified (0.9) → **1.96**
+assignment-flow (PyCG ICSE 2021) → **1.97** return-type bridging → **1.98** unique-method-class
+(0.85) → **last-chance gate** (below) → **2** name_match fallback (**2+ candidates ONLY**:
+==2→0.6, ≤5→0.4, else 0.2 — **the cc≤1→0.9 row of the old table never occurs on the full
+path**: a single unqualified candidate is 1.9 `verified_unique` 0.95; a single qualified-
+unresolved candidate is the last-chance demote).
+
+**The 2 drop/demote gates (NEW order, `10368a2f` #B5):** a QUALIFIED call now reaches the
+type-aware rungs (1.93/1.94a/1.95/1.96/1.97) **FIRST**; only after every receiver-typing rung
+fails does the last-chance gate run: **(a) T2 builtin drop** — receiver never resolved internal
++ builtin/stdlib method name (`join`/`get`/`items`/`loads`…) → the edge is **DROPPED** (single-
+AND multi-candidate paths), never a name_match guess; **(b) single-candidate demote** — a
+qualified-unresolved call with one global candidate → `name_match` **0.2 SPECULATIVE**
+(`name_match_qualified_unresolved`), the stdlib-shadow guard (os.walk → account.walk) preserved.
+Previously this demote fired BEFORE 1.93–1.98 and starved e.g. `command.run()` (declared
+`command: Command`) of its type_flow resolution.
+
+**Go CHA IMPLEMENTS (`relationships.go`, `10368a2f`):** structural method-set satisfaction with
+**name+arity+result-presence fingerprints** (`structural_method_set_arity`): **≥2-method
+interface → 0.85**, **1-method interface → 0.6/CANDIDATE** (ambiguous by construction),
+**incomplete embedded-interface expansion → abstain** (never match an under-approximated set);
+required sets keyed file+name; the edge anchors on the STRUCT's file (survives `-file` reindex
+orphan-correctly).
+
+Each edge carries `trust_tier` (CERTIFIED/CANDIDATE/SPECULATIVE) + `evidence_type`; **relationship
+(EXTENDS/IMPLEMENTS/COMPOSES/RE_EXPORTS) and API_CALL edges now carry REAL `trust_tier` /
+`verification_status`** (previously empty strings — the explicit empty bind defeated the SQL
+defaults; `10368a2f` #2 stamps them via the same `tierFor` thresholds).
 
 ### 2.4 Property kinds — the "dimensions of understanding" (~23, per function)
 | kind | captures |
@@ -110,17 +149,49 @@ Each edge carries `trust_tier` (CERTIFIED/CANDIDATE/SPECULATIVE) + `evidence_typ
 Plus **co-change** (git), **closure** (transitive reach), **FTS5** (BM25 retrieval).
 
 ### 2.5 What is missing / schema-present-but-dead (honest)
+
+> **UPDATED (2026-06-09, commits `dd460fe7` + `ffc6c7dc` + `10368a2f`).** Three of the old
+> bullets are no longer true; struck below with what replaced them, plus new deterministic
+> facts the section predated.
+
 - **`IMPORTS` edges**: declared in a schema comment, **never emitted** — imports only feed
-  the resolver to *produce* CALLS edges.
+  the resolver to *produce* CALLS edges. *(still true)*
 - **`DEFINES` / `REFERENCES` / `INHERITS`**: **not implemented at all** (stale comment only;
-  the real inheritance edge is `EXTENDS`).
-- **`edges.metadata`**: effectively always empty.
+  the real inheritance edge is `EXTENDS`). *(still true)*
+- ~~**`edges.metadata`**: effectively always empty.~~ **STRUCK** — `API_CALL` edges (4b) carry
+  a route JSON in `metadata` (`api_edges.go`); CALLS edges still leave it NULL.
 - **`verification_status`**: written `'unverified'` at index time and **never flipped** —
-  even the LSP pass sets `resolution_method='lsp'` + trust_tier, not this column. Stale by design.
-- **Relationship edges are language-uneven**: COMPOSES/RE_EXPORTS are **JS/TS-only**; the 23
-  Tier-2 languages get **zero** EXTENDS/IMPLEMENTS/COMPOSES/RE_EXPORTS. `side_effect`/`field_read`
-  only match `self.`/`this.` (miss Go/Rust receiver mutations). The cross-language-solid kinds
-  are data_flow, param, docstring, return_shape, caller_usage.
+  even the LSP pass sets `resolution_method='lsp'` + trust_tier, not this column. Stale by
+  design. *(still true — but it is now at least POPULATED on relationship/API_CALL rows, §2.3)*
+- ~~`side_effect`/`field_read` only match `self.`/`this.` (miss Go/Rust receiver mutations).~~
+  **STRUCK** — both are **receiver-aware** (`recvName`: Go `func (c *Circle)` → `c.field`
+  writes/reads count, `parser.go`), and `field_read` **skips call selectors** (`c.Area` of
+  `c.Area()` is not a field read; chained-call receivers like `self.x` in `self.x.area()` are
+  kept — `10368a2f` #4).
+- **Relationship-edge language coverage** (corrected): extraction passes exist for python,
+  js/ts, java/kotlin, **go (incl. CHA IMPLEMENTS)**, and **rust** (`relationships.go`);
+  COMPOSES/RE_EXPORTS remain JS/TS-only and the remaining Tier-2 languages still get no
+  relationship edges. `data_flow`/`param`/IMPLEMENTS **do fire on TS/Rust on the current
+  binary** — earlier "0 on TS/Rust" readings were **stale graphs**, not the code.
+
+**Deterministic facts this section predated (now load-bearing):**
+- **`-file` incremental restore preserves ALL 11 deterministic methods** (`incremental.go`
+  `deterministicRestoreMethods`: lsp, lsp_verified, verified_unique, type_flow, import_type,
+  inherited, unique_method, return_type, impl_method, same_file, import) **verbatim with their
+  confidence** — the previous `{same_file, import}`-only preserve stripped every lsp/type_flow
+  edge to a name_match guess on a single-file reindex (the L6 "LSP-strip", §12). Candidate
+  lookups are `ORDER BY id` (deterministic restore, `10368a2f` #6).
+- **Closure admission is now AND, not OR** (`closure.go` #B7): an edge enters the transitive
+  closure iff `resolution_method ∈ deterministic set` **AND** `confidence ≥ 0.7` — the old
+  OR-rule let 0.6 guesses (2-candidate name_match, ambiguous same_file/import, impl_method)
+  propagate transitively through a "verified-only" sidecar. `impl_method` and `name_match`
+  are categorically excluded.
+- **Synthetic File-anchor nodes** (`label='File'`, minted for zero-symbol barrel/re-export
+  files): the link-token check requires **line-start on a non-comment line** (no phantom
+  nodes from prose containing " from "), and File nodes are **excluded from the call-name
+  index** — they can never become `verified_unique` call targets (`10368a2f` #3).
+- The cross-language-solid property kinds remain data_flow, param, docstring, return_shape,
+  caller_usage (+ now receiver-aware side_effect/field_read).
 
 ---
 
@@ -176,10 +247,50 @@ issue → ① run_v74 (candidate gen + scoring)
 - **MEDIUM** (`Candidate edit targets (reason over these):` list): agreement ≥ 1.
 - **LOW** (region summary or flat list): agreement < 1.
 
+> **UPDATED (2026-06-09 — live `v1r_brief.py`): HIGH has TWO MORE gates** on top of (a)–(c),
+> both shipped against confident-wrong steers (the single worst failure mode):
+> - **(d) ≥2 DISTINCT issue anchors** must structurally witness the target file
+>   (`_distinct_issue_anchors ≥ 2` — KGCompass multi-hop-from-issue-ENTITIES, *plural*; a lone
+>   tangential CALLS edge + a weak lexical match no longer earns the imperative steer —
+>   the abs-module-cache-flags fix).
+> - **(e) ≥2 structural witnesses must converge on the NAMED function**
+>   (`_high_func_support ≥ 2` — D-3 calibration; sh-744's lone-edge `stdout` pick, gold
+>   `__await__`, demotes to the MEDIUM candidate list instead).
+> Failing (d)/(e) falls through to MEDIUM — same files, same order, only the tier label drops.
+>
+> **Witness-render honesty (commit `dc5844f8`):** a **non-deterministic** witness edge renders
+> with an explicit **`(unverified)`** tag (name_match is never displayed as bare fact);
+> **grep/path/FTS5 SEEDS render as `grep match: <tok>` / `path match: …` / `fts5 match: …`**
+> at conf 0.35 — never minted as `defines X (issue symbol)` (the old rendering fabricated a
+> DEFINES fact for a lexical seed). Deterministic sets are single-sourced from `curation_map`.
+
 ### 4.2 Scoring weights (current, as shipped)
-**run_v74 DEFAULT_WEIGHTS:** `W_SEM=0.15, W_LEX=0.50, W_REACH=0.05, W_PROX=0.05, W_HUB=0.10,
-W_COMMIT=0.0, W_PATH=0.45`, plus **`W_FRAME=0.60`** (stack-trace/typed-path) and
-**`W_CODE_DEF=0.70`** (backtick code-symbol definition site) — both no-op when nothing resolves.
+
+> **UPDATED (2026-06-09, fusion redesign `5a6e99b4` MERGED + Dim-1 compose `dc5844f8`).**
+> `W_SEM=0.15` below is SUPERSEDED — the dense weight is now **dense-LED with a hard floor**:
+> - **`W_SEM` default 0.40** (`DEFAULT_WEIGHTS`, `v7_4_brief.py` — the 0.15 was the e5-era
+>   throttle bug, §11.8) and **`W_SEM_FLOOR=0.25`** (`GT_W_SEM_FLOOR`, clamped (0,1]) is
+>   enforced **LAST**, after ALL weight adaptation: every classification ends with
+>   `W_SEM ≥ 0.25 > 0` (the `forbid_no_sem_config` invariant, §11.6). The sparse-graph
+>   branch also floors W_SEM instead of zeroing it (`dc5844f8`). One honest carve-out:
+>   `enforce_floor=False` (embedder absent / a deliberate sem-zeroing ablation) leaves a
+>   dead `W_SEM=0` at 0 — the floor asserts dense participation when the embedder is ON,
+>   it never fabricates a dense signal that does not exist.
+> - **Dimension 0 (query lexicality) runs FIRST** in `_adapt_weights_for_issue`: a
+>   deterministic classifier → `identifier_heavy` (exact surface forms: rule codes, quoted
+>   paths/symbols) = **lexical leads** (W_LEX/W_PATH floored up, W_SEM led DOWN to the floor);
+>   `nl_gap` (prose) = **dense leads** (`W_SEM = max(0.40, 0.45, W_LEX)`); `mixed` = no change.
+> - **Dimension 1 max-COMPOSES over Dim-0** (`dc5844f8`): under `identifier_heavy`, the
+>   signal-presence dimension may only RAISE W_LEX/W_PATH (`max()`), never overwrite the
+>   Dim-0 lexical lead back down; off `identifier_heavy` the original direct assignment
+>   stands byte-identical.
+> §11.8's "the #3 fusion redesign implements this floor" is **merged, live in
+> `DEFAULT_WEIGHTS`** — no longer integrating/pending.
+
+**run_v74 DEFAULT_WEIGHTS:** `W_SEM=0.40 (floor 0.25 — see the update note), W_LEX=0.50,
+W_REACH=0.05, W_PROX=0.05, W_HUB=0.10, W_COMMIT=0.0, W_PATH=0.45`, plus **`W_FRAME=0.60`**
+(stack-trace/typed-path) and **`W_CODE_DEF=0.70`** (backtick code-symbol definition site) —
+both no-op when nothing resolves.
 
 **localizer composite:** `W_WITNESS=0.60, W_BM25=0.35, W_PATH_DECAY=0.30, W_LEX=0.30,
 W_SUBJECT=0.15, W_DEGREE=0.10`, with **gen −0.5** and **test −0.4** penalties applied post-composite.
@@ -191,10 +302,30 @@ The ranking change-list (W_LEX 0.50→0.60, W_REACH 0.05→0.02, W_BM25/W_PATH_D
 0.35/0.30/0.30→0.40/0.15/0.40, min-3 BM25 guarantee, caller-render conf gate, reach min_conf
 0.0→0.5) are **research items, not in the binary** — current weights are the values above. They
 ship only after measuring `first@5` improves, one variable at a time. Do **not** assume they're live.
+*(2026-06-09: the W_SEM lever is the exception — it shipped via the §4.2 fusion redesign. The
+levers listed in THIS subsection remain unapplied: W_LEX is still 0.50, W_REACH still 0.05.)*
 
 ---
 
 ## 5. Layer — Semantic / ONNX (the corrected state)
+
+> **SUPERSEDED IN PART (2026-06-09, CHANGE 2 — commit `5f460f23`).** The model identity below is
+> historical. What changed, specifically:
+> - **"ONNX e5-small-v2" as the default embedder (both call sites below) is SUPERSEDED** → the default
+>   is now **`Alibaba-NLP/gte-modernbert-base`** (Apache-2.0, **768-dim**, code-tuned, multilingual),
+>   configurable via `GT_EMBED_MODEL_NAME`/`GT_EMBED_DIM` (`embed.py:45-46,57-58`). **e5-small-v2 (384)
+>   is now the runtime FALLBACK** and remains the **pin for the sqlite-vec memory store** (not migrated).
+> - **"The model (e5-small-v2 ONNX, ~90MB) is baked once" is SUPERSEDED** → the SUBSTRATE must bake
+>   **gte int8 (~143MB)** to match the loader default; baking e5 alone is the audit-found mismatch
+>   (3 proof surfaces disagree — `validate_proof_env` wants e5; `proof.embedder_model_path` +
+>   `context.model_files_baked` want gte). Reconciled in the substrate stage.
+> - **ONNX-input handling changed:** ModernBERT declares only `input_ids`+`attention_mask` (no
+>   `token_type_ids`); `embed.py` now introspects `session.get_inputs()` and feeds `token_type_ids`
+>   ONLY when declared. Pooling/prefix are per-model (e5 `query:`/`passage:`+mean; gte none+CLS).
+> - **Proven lever (why):** per-symbol-MaxSim sibling-MAD gte-768 vs e5-384 on real graphs — Python
+>   3.3×, TypeScript 6.3× better separation (biggest on non-Python = the multilingual win).
+> Everything else in §5 (`_OnnxEmbedderAdapter`, `GT_FORCE_ONNX`/`GT_REQUIRE_EMBEDDER`/`GT_MODELS_ROOT`
+> enforcement, the two-call-site identity) still holds — only the model identity + the bake target moved e5→gte.
 
 > This supersedes the old "semantic is OFF in both halves / `embed.py` gitignored" note.
 > Semantic is now **ON via the container ONNX path in BOTH halves.**
@@ -209,6 +340,10 @@ Enforcement:
 - **`GT_FORCE_ONNX_EMBEDDER=1`** skips sentence-transformers so both halves use the *identical*
   container ONNX `_OnnxEmbedderAdapter` (e5-small-v2, no torch) — one surface, consistent numbers.
 - **`GT_REQUIRE_EMBEDDER=1`** makes both halves **raise** instead of silently zeroing W_SEM.
+  **UPDATED (2026-06-09, `dc5844f8` ST-hole fix):** under the flag, "required" means the
+  **CONFIGURED model, full stop** — the sentence-transformers attempt is SKIPPED in both halves
+  and the e5 runtime fallback is skipped too: configured-ONNX-loads-or-RAISE (no silent e5,
+  no ST hole around the ONNX surface).
 - **`GT_MODELS_ROOT`** points the loader at a baked/pre-fetched model dir (`embed.py`), so a
   from-checkout GT finds the model with no per-run HuggingFace download.
 
@@ -228,7 +363,22 @@ GT delivers evidence by **hooking onto the agent's actions**, at the overall lev
 | per source-view | contracts + graph-navigation (`Called by:` / `Calls into:` / `[CONTRACT]` / `[RAISES]`) |
 | per edit | post-edit contract evidence (`[SIGNATURE]`, `[BEHAVIORAL CONTRACT]`, `[CALLERS]`, `[TWIN]`, `[COMPLETENESS]`, `PRESERVE:`) |
 | per turn | trajectory governor (test-failure nudges, scaffold/loop redirects) |
-| per edit | incremental reindex so the next view/edit sees the new graph |
+| per edit | incremental reindex so the next view/edit sees the new graph — **see the substrate-mode note below** |
+
+> **UPDATED (2026-06-09 — substrate/proof mode reconciliation, `ffc6c7dc` + `gt_mini_patch.py`).**
+> On the DeepSWE **substrate/proof path** the "per edit: incremental reindex" row is
+> **deliberately OFF**: the substrate's `/gt_artifacts/graph.db` is the AUTHORITATIVE graph the
+> gates certified and the host witness fingerprinted — a `-file` reindex would mutate it (or
+> fork a divergent copy) and break hook==post-LSP-hash parity, so in substrate mode L6 is gated
+> off and the per-turn pillars read the ONE mounted graph unchanged (a per-task graph COPY was
+> considered and rejected — it reintroduces the divergent graph the witness would fail).
+> L6 reindex stays ENABLED on the non-substrate (OH / preindex/trial) paths.
+> Per-turn evidence opens that graph **read-only via sqlite URI `mode=ro`** (+`immutable=1` on
+> the truly-ro substrate/proof mount only — never on a mutating legacy graph), with a
+> **one-time readability probe** (`GRAPH_UNREADABLE_IN_CONTAINER` printed once on first
+> failure, then quiet). Per-view/per-edit evidence dedups **once per (kind, file)** —
+> a documented trade vs OH's per-edit re-delivery (quieter, but a second edit to the same
+> file gets no refreshed contracts).
 
 ### The hooked tool surface
 GT registers an MCP tool surface (FastMCP, stdio): the **16 core** —
@@ -256,6 +406,33 @@ delivery is the *passive* brief + per-view/per-edit hooks above, not agent-invok
 
 These exist because a prior run silently degraded (FTS5 rebuilt, semantic=0, LSP 0ms) and
 produced confounded results. The gates are opt-in; the benchmark workflows arm them.
+
+> **UPDATED (2026-06-09, commit `9bf106ca` + `dc5844f8` — post-LIPI gate reality).** The table
+> above is the gate *inventory*; enforcement hardened as follows (verified in
+> `gt_run_proof.py` / `foundational_gates.py` / `deepswe_full.yml` at HEAD):
+> - **`GT_REQUIRE_LSP=1` → exit 2 on BOTH `LSP_INSTALL_MISSING` AND `LSP_FAIL_NO_WARM`** (a
+>   launched-but-never-warm server is a FAILURE; a baked-language server missing on PATH is an
+>   install gap, never a "valid no-op"). **Per-language certs are persisted AND aggregated**
+>   (`aggregate_lsp_verdicts`): on a polyglot repo, EVERY known language must pass — **a
+>   sibling language succeeding never masks another language's gap**; no language resolving at
+>   all also fails.
+> - **LSP cert schema v2 + version-skew=FAIL:** `gt.lsp_certificate.v2` adds
+>   `install_missing_reason` + `verdict_hint`; a cert carrying NEITHER field is a v1 cert from
+>   a stale binary → classified `LSP_FAIL_CERT_VERSION_SKEW`, never PASS.
+> - **`GT_GATES_DELIVER_ALWAYS` is STRICT-by-default on the DeepSWE proof path**
+>   (`deepswe_full.yml` pins it `"0"`: any OFF gate fails the process — the proof contract).
+>   The OH live-agent path keeps `"1"` (gates as measurement: graph-quality axes never abort
+>   the agent; only a DEAD embedder is fatal).
+> - **`GT_REQUIRE_EMBEDDER=1` = the CONFIGURED model loads or RAISES** — sentence-transformers
+>   and the e5 runtime fallback are SKIPPED under the flag (§5; no silent e5 behind a gte
+>   config).
+> - **`brief.txt` is the 8th REQUIRED proof artifact** (`REQUIRED_ARTIFACTS`): generation
+>   raise or an empty brief = `GT_ARTIFACT_MISSING`, exit 2 — the agent consumes
+>   `/gt_artifacts/brief.txt` read-only, there is NO host fallback.
+> - **`run_manifest.json` is schema v2 = run shape + PROVENANCE** (`gt.run_manifest.v2`):
+>   `gt_git_commit`, `substrate_digest`, `task_repo_commit`, `runtime_flags` (incl.
+>   `GT_FORBID_PREBUILT_GRAPH`), `language_distribution` (real per-language node counts from
+>   graph.db), `graph_db_sha256`, `cert_versions` — every field recorded-or-null, never guessed.
 
 ---
 
@@ -460,6 +637,10 @@ dense-LED with a **substantive `W_SEM_FLOOR` (>0)** — query-adaptive may flex 
 identifier-heavy issues (lexical leads, per BEIR/Sciavolino) but NEVER throttles it below the floor
 (the e5-era 0.15 bug); RRF protects dense by rank. NOT a monopoly. The #3 fusion redesign implements
 this floor; CHANGE 2 (gte-modernbert swap) then layers model headroom on the proven granularity.
+**UPDATE (2026-06-09): #3 is MERGED** (`5a6e99b4` fusion+floor; `dc5844f8` Dim-1 max-compose +
+sparse-graph floor) — `W_SEM=0.40` default + `W_SEM_FLOOR=0.25` enforced last are live in
+`DEFAULT_WEIGHTS` (§4.2), and CHANGE 2 is committed (`5f460f23`, §5 banner). Not
+"integrating/pending" anymore.
 
 ---
 
@@ -485,6 +666,14 @@ cert/telemetry FAIL against the runtime witness (`graph_witness`, `output.jsonl`
 broken; (4) no claim from n < a real sample (the n=2 latency error). "Fired ≠ delivered ≠ consumed ≠
 working" — and **"delivered" is the WRONG axis for a reindexer or an event hook.**
 
+> **UPDATED (2026-06-09, commit `10368a2f`): the L6 row's "real bug is LSP-strip on `-file`
+> reindex" is FIXED at the store level** — the incremental restore now preserves all 11
+> deterministic methods (incl. `lsp`) verbatim on a single-file reindex (§2.5), so LSP
+> enrichment survives L6. Two residuals stay true: (a) NEW edges created by the edit still
+> resolve structurally only until an LSP server runs (the bake-pyright item, §13.5);
+> (b) on the DeepSWE substrate/proof path L6 is **gated OFF by design** (authoritative
+> read-only graph, hash parity — §6 note), so "L6 fired" is the wrong expectation there.
+
 ---
 
 ## 13. Session 2026-06-09 — work done + the DeepSWE/mini-swe-agent pivot (FULL-depth, multilingual)
@@ -494,7 +683,7 @@ working" — and **"delivered" is the WRONG axis for a reindexer or an event hoo
 - **30-task PAID agent run (`27214152241`):** 30/30 ran, 0 fail, **2/30 resolved** (sh-744, beancount-931), **0 GT-caused flips** (both baseline-coincident self-localizations), **leakage 0**, substrate GREEN 30/30.
 - **§4 trajectory audit — 30 ledgers in `task_ledgers/`:** dominant non-resolution = **post-localization implementation correctness + multi-file scope**; L1 mislocalizes the majority (granularity + JSON/data blind spot); leakage 0 everywhere.
 - **CHANGE 1 — per-symbol MaxSim granularity (`33970b9f`):** fixes the whole-file-bag flat-cosine collapse; validated **gold #1 3/7→7/7 at e5/384** (granularity is the lever WITHOUT a model swap). See §11.2.
-- **Fusion + dense floor (validated in worktree, integrating):** `W_SEM_FLOOR=0.25`, base `W_SEM 0.15→0.40`; query-adaptive Dimension-0 (error-code regex → identifier-heavy lexical-lead; nl_gap dense-lead); dense led/floored, never throttled, lexical-fused. 15/15 tests. See §11.5/§11.6.
+- **Fusion + dense floor (MERGED `5a6e99b4`; Dim-1 compose + sparse-floor `dc5844f8`):** `W_SEM_FLOOR=0.25`, base `W_SEM 0.15→0.40`; query-adaptive Dimension-0 (error-code regex → identifier-heavy lexical-lead; nl_gap dense-lead); dense led/floored, never throttled, lexical-fused. 15/15 tests. See §4.2/§11.5/§11.6.
 - **Docs/cleanup:** dead-shim removal (`specificity.py`, `db267869`); gt_gt §11 (findings+plan), §12 (per-layer role table — anti-mislabel safeguard), §11.8 (dense-floor LOCKED).
 - **Diagnostic corrections (from code+artifacts, not labels):** L6 = REINDEXER, fires+works but STRIPS LSP (`gt-index -file` is structural-only; pyright absent from the TASK image → post-edit contracts degrade LSP→AST); L3b = relevance bug (`start_line` fallback) + the L6 LSP-strip; L5/L5b scaffold nudge IS delivered (§4 "DELIVERED=NO" was a mislabel) — genuine non-delivery = goku band/cap deadlock + L5b defer-to-goku + the orphaned `multi_file_scope_warning` (dead finish handler); `GRAPH_FAIL_MISSING_HANDOFF` = FALSE FAIL (cert pre-agent; runtime witness proves handoff); **L4 = EVENT hook** (fires on its event; absence ≠ no-op).
 
@@ -512,6 +701,13 @@ Read from code (not CLAUDE.md):
 User directive: **full OH depth, and more.** Bring the WHOLE of GT (§1–10), not just localization, to mini-swe-agent:
 - Layer-0 graph base (gt-index tree-sitter, 30 langs) → LSP enrichment (§3) → localization+brief (§4 + CHANGE 1/fusion/embedder) → semantic/ONNX (§5, → gte-modernbert) → the hooked tool surface (§6) → the no-silent-fallback gates (§7) → the proof runtime.
 - **OH deep hooks to replicate on the mini-swe-agent loop:** L1 brief delivery, L3b contracts (post-view), **L6 post-edit reindex preserving LSP** (bake pyright in the task image), consensus (`<gt-scope>`), L5 governors, completeness forcing. Map onto mini-swe-agent's (simpler than OH's controller) injection points — **port CAPABILITIES, not OH-specific plumbing** (the dead-finish-handler workaround, the OH stuck-detector are OH artifacts, do not carry them over).
+  **UPDATED (2026-06-09): the L6 item is reconciled, not ported as-is** — in substrate/proof
+  mode L6 single-file reindex is **deliberately OFF** (the mounted graph is authoritative +
+  read-only; mutating it breaks witness-hash parity — §6 note), and the restore-level
+  LSP-strip is fixed in the indexer itself (`10368a2f`, §2.5/§12), so "preserving LSP" no
+  longer requires a live per-edit reindex on the proof path. Per-turn evidence reads the ONE
+  mounted graph via `mode=ro(+immutable)` with a one-time readability probe, deduped
+  per-(kind,file)-once.
 - **Language-agnostic (CLAUDE.md mandate):** tree-sitter graph + multilingual embedder everywhere; **retire the Python-`ast` paths** (`gt_intel`/`gt_hook` ast) for the DeepSWE engine.
 
 ### 13.5 Docker imaging of GT — REQUIRED for DeepSWE too
@@ -527,6 +723,37 @@ This Docker imaging is in scope for the DeepSWE integration, not only the OH pro
 3. **UNIFY the DeepSWE/mini-swe path onto `v1r_brief`/`run_v74`** — full OH depth (brief, contracts, reindex, consensus, completeness) on mini-swe-agent in the Pier harness, language-agnostic; retire the `gt_intel`/`gt_hook` ast paths.
 4. **DeepSWE substrate Docker image** (gte-modernbert + multilingual LSP) wired into Pier.
 5. **Validate** — GT-off baseline on DeepSWE + paired GT-on (Wilcoxon), Stage-1 deterministic per lever, across all 5 languages (anti-overfit / language-agnostic proof).
+
+### 13.7 2026-06-09 hardening — the 4-reviewer LIPI audit → 4 fix surfaces (+ substrate rebuild)
+
+Four parallel LIPI reviewers (pipeline+gates / localization / delivery / indexer) audited the
+whole DeepSWE-proof stack and isolated **62 findings**; everything actionable shipped as **four
+fixer commits** (each red→green proven), plus the gopls launch fix that preceded them:
+
+| Surface | Commit | What it closed (verified at HEAD) |
+|---|---|---|
+| LSP launch | `8ae5584d` | gopls launched with a nonexistent `-stdio` flag → exit-2 before handshake; server stderr now surfaced |
+| Pipeline + gates | `9bf106ca` | the P0 green-zero-run chain (below); OH workflows pin `GT_EMBED_MODEL_NAME=e5` (gte stays on substrate); `LSP_FAIL_NO_WARM`/`LSP_INSTALL_MISSING` exit 2; per-language certs + aggregation (no sibling masking); cert schema v2 + version-skew FAIL; `GT_GATES_DELIVER_ALWAYS` strict-by-default on DeepSWE (§7 note); 22 red tests → 226 fail_closed pass |
+| Localization | `dc5844f8` | model-keyed embed cache (gte↔e5 switch = miss); sparse-graph W_SEM floor (never 0); witness provenance honesty (`(unverified)` tags + `grep/path/fts5 match:` seeds, §4.1); Dim-1 max-compose (§4.2); ST hole (configured-ONNX-or-raise, §5); 15/17 red→green, 292 regression pass |
+| Delivery (per-turn) | `ffc6c7dc` | 5 basename-LIKE pillar queries → exact normalized-relpath (zero cross-attribution); caller counts deterministic+conf≥0.7+non-test ("N verified caller(s)", legacy abstains); signature sanitizers at render sites; `_connect_ro` (mode=ro, immutable on substrate only) + one-time `GRAPH_UNREADABLE_IN_CONTAINER` probe; `DEEPSWE_ADAPTER_FAIL` printed before every raise; 26 fail → 52 pass |
+| Indexer | `10368a2f` | 8-bug batch: Go CHA arity matching, 1.9 rung reorder (typed rungs first for qualified calls), deterministic `-file` restore (11 methods, lsp survives), verified-only AND-rule closure (dagster −19.7% closure rows, zero deterministic lost), File-anchor phantom guard, field_read call-selector guard, relationship/API trust stamping, sorted 1.94 pick (§2.3/§2.5) |
+
+**The P0 green-zero-run chain is fail-closed END-TO-END** (each link verified in
+`deepswe_full.yml`/`gt_run_proof.py`/`deepswe_outcome.py`): (1) **empty-issue extraction** —
+issue read from `instruction.md`, empty → `GT_ISSUE_MISSING`, fail-closed (no silent no-issue
+run); (2) **pier swallow** — a `DeepSweAdapterError` pier ends rc=0 on is surfaced by the
+jobs-dir grep → `DEEPSWE_ADAPTER_FAIL`; (3) **tee swallow** — `set -o pipefail` +
+`${PIPESTATUS[0]}` so `pier | tee` reports pier's rc, not tee's 0; (4) **presence-grep** — the
+summary parses the `n_agent_steps` VALUE and requires >0 (the old check counted mere token
+presence, so a 0-step run summarized as "agent-ran").
+
+**Aftermath:** the substrate image was rebuilt on the fixed stack (`02b02425` — the image bakes
+gt_run_proof/resolve/gates/pretask/gt-index, so the runtime ran PRE-fix code until the rebuild
+published a new digest); wave-2 re-fired (`0e2489cc`); the **5-language smoke EXECUTED 5/5**
+(`4253da65`, run 27249519490 — identical gt-run-proof command, exit 0 each, warm LSP; all
+NO_OP_VALID_WITH_WARM_SERVER because the fixed indexer resolves the tiny fixtures structurally;
+real-repo ACTIVE LSP resolution is the 113-sweep's question). Remaining: 113 sweep →
+integration audit → 1-task dry → benchmark decision (D2).
 
 ---
 
