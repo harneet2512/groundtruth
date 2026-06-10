@@ -220,7 +220,11 @@ case "$MODEL" in
     GT_VERTEX_SHIM="${GT_VERTEX_SHIM:-$REPO_ROOT/artifact_deepswe/gt_integration/gt_vertex_token_shim.py}"
     [ -f "$GT_VERTEX_SHIM" ] || { echo "FATAL: vertex token shim not found: $GT_VERTEX_SHIM"; exit 2; }
     # Start the host-side token refresher (mints now + every ~40 min; first mint must succeed).
-    GT_AUTH_DIR="$GT_AUTH_DIR" SHIM_SRC="$GT_VERTEX_SHIM"       "$REPO_ROOT/scripts/vm/gt_vertex_token_refresher.sh" >>"$OUT_DIR/token_refresher.log" 2>&1 &
+    # Invoke via `bash` (NOT direct exec): the +x bit is lost through git-bundle/scp/Windows
+    # checkout, and a non-executable refresher silently never runs -> the launch token expires
+    # at ~60min -> every later gemini call dies AuthenticationError (the 2026-06-10 PATH A 10/10
+    # auth wipeout). `bash <script>` is exec-bit-independent.
+    GT_AUTH_DIR="$GT_AUTH_DIR" SHIM_SRC="$GT_VERTEX_SHIM"       bash "$REPO_ROOT/scripts/vm/gt_vertex_token_refresher.sh" >>"$OUT_DIR/token_refresher.log" 2>&1 &
     GT_TOKEN_REFRESHER_PID=$!
     export GT_TOKEN_REFRESHER_PID
     # Wait (<=30s) for the first token file to appear.
