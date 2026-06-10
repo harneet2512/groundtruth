@@ -1,0 +1,562 @@
+name: "Verified: GT-on mini-swe-agent run (per-task matrix)"
+
+# PATH B — SWE-bench Verified (500) with deepseek-v4-flash, GT-on via
+# mini-swe-agent's OWN swebench path (NOT pier). Mirrors the proven DeepSWE
+# substrate-consume pattern (deepswe_full.yml): per task -> pull the prebuilt
+# task image -> extract /testbed source -> run gt-run-proof INSIDE the pinned
+# substrate (8 artifacts incl. brief.txt, fail-closed) -> run the GT-injected
+# mini-swe agent (artifact_verified/gt_verified_agent.py: brief prepend +
+# host-side observation interception + §H [GT_META] witness) -> eval with the
+# OFFICIAL Princeton harness (python -m swebench.harness.run_evaluation) ->
+# witness-verify + upload if:always.
+#
+# DISPATCH ONLY — no push/PR trigger; committing this file never fires a run.
+#
+# NOTE vs deepswe_full: HF_*_OFFLINE are NOT set here — the Verified dataset
+# (problem_statement) and the official eval harness both require HF access.
+# The substrate container remains offline internally (its deps are baked).
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance_ids:
+        description: "Explicit comma-separated instance IDs (overrides max_tasks/shard)"
+        required: false
+        default: ""
+      max_tasks:
+        description: "Max tasks (applied after shard slice; 0 = all in shard)"
+        required: true
+        default: "5"
+      shard:
+        description: "Shard spec i/n (strided slice of the 500-id list, e.g. 0/4)"
+        required: true
+        default: "0/1"
+      model:
+        description: "LLM model"
+        required: true
+        default: "deepseek/deepseek-v4-flash"
+      max_parallel:
+        description: "Concurrent matrix jobs"
+        required: true
+        default: "12"
+      gt_substrate_digest:
+        description: "Pinned GT substrate image by IMMUTABLE digest (ghcr.io/<org>/gt-substrate@sha256:<digest>). Overrides vars.GT_SUBSTRATE_DIGEST. Never a mutable tag."
+        required: false
+        default: ""
+      require_pinned_substrate:
+        description: "Fail-closed if no pinned digest (1 = enforce substrate-consume; 0 = transitional — task runs GT-OFF with a loud warning)"
+        required: true
+        default: "1"
+      baseline:
+        description: "Baseline control arm — GT fully disabled (GT_BASELINE=1, no substrate, no brief, no patch)"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  # Full-stack enforcement inside the substrate proof (same as deepswe_full).
+  GT_REQUIRE_FULL_STACK: "1"
+  GT_REQUIRE_FULL_POTENTIAL: "1"
+  GT_REQUIRE_FTS5: "1"
+  GT_FORCE_ONNX_EMBEDDER: "1"
+  GT_REQUIRE_EMBEDDER: "1"
+  GT_REQUIRE_LSP: "1"
+  # The per-task graph is built FRESH by the pinned substrate from THIS task's
+  # extracted repo — never a stale/cross-run prebuilt injection.
+  GT_FORBID_PREBUILT_GRAPH: "1"
+  GT_GATES_DELIVER_ALWAYS: "0"
+  # Substrate-consume proof env for the agent path (gt_verified_agent consumes
+  # the substrate artifacts read-only, fail-closed).
+  GT_PROOF_MODE: "1"
+  GT_CONTAINERIZED: "1"
+  GT_RUNTIME_STRATEGY: "unified_substrate"
+  GT_SUBSTRATE_DIGEST: ${{ inputs.gt_substrate_digest || vars.GT_SUBSTRATE_DIGEST }}
+  GT_REQUIRE_PINNED_SUBSTRATE: ${{ inputs.require_pinned_substrate }}
+
+jobs:
+  # ── Stage-0 / prepare: ENV-ONLY (matrix from the version-controlled id list) ─
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+      total: ${{ steps.gen.outputs.total }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Workflow lint — catch CI bug classes before the paid matrix
+        run: |
+          python scripts/verify/workflow_lint.py .github/workflows/verified_run.yml
+      - id: gen
+        name: Build per-task matrix (canonical 500-id list; no HF at matrix time)
+        env:
+          INPUT_INSTANCE_IDS: ${{ inputs.instance_ids }}
+          INPUT_MAX_TASKS: ${{ inputs.max_tasks }}
+          INPUT_SHARD: ${{ inputs.shard }}
+        run: |
+          python3 << 'PYEOF'
+          import json, os, sys
+          ids_file = "benchmarks/swebench_verified_500_ids.json"
+          ids = json.load(open(ids_file, encoding="utf-8"))["instance_ids"]
+          explicit = [t.strip() for t in os.environ.get("INPUT_INSTANCE_IDS", "").split(",") if t.strip()]
+          if explicit:
+              unknown = [t for t in explicit if t not in set(ids)]
+              if unknown:
+                  print(f"FATAL: unknown instance ids (not in Verified-500): {unknown}", file=sys.stderr)
+                  sys.exit(1)
+              tasks = explicit
+          else:
+              shard = os.environ.get("INPUT_SHARD", "0/1").strip() or "0/1"
+              try:
+                  i, n = (int(x) for x in shard.split("/", 1))
+                  assert n >= 1 and 0 <= i < n
+              except Exception:
+                  print(f"FATAL: bad shard spec {shard!r} (want i/n, 0<=i<n)", file=sys.stderr)
+                  sys.exit(1)
+              tasks = ids[i::n]  # strided slice keeps the repo mix balanced per shard
+              maxt = int(os.environ.get("INPUT_MAX_TASKS", "5") or "0")
+              if maxt > 0:
+                  tasks = tasks[:maxt]
+          if len(tasks) > 256:
+              print(f"WARN: {len(tasks)} tasks > 256 GHA matrix cap; truncating", file=sys.stderr)
+              tasks = tasks[:256]
+          matrix = {"include": [{"task": t} for t in tasks]}
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"matrix={json.dumps(matrix)}\n")
+              f.write(f"total={len(tasks)}\n")
+          print(f"{len(tasks)} tasks queued", file=sys.stderr)
+          PYEOF
+      - name: Legitimacy guard — Stage-0 built NO task graph.db (env-only)
+        run: |
+          FOUND=$(find "$GITHUB_WORKSPACE" -name 'graph.db' 2>/dev/null | head -5)
+          if [ -n "$FOUND" ]; then
+            echo "FATAL: prepare/Stage-0 produced graph.db — must be env/metadata only:"
+            echo "$FOUND"
+            exit 1
+          fi
+          echo "legitimacy OK: no graph.db built in Stage-0 (per-task graphs are fresh in the substrate)"
+
+  trial:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+      fail-fast: false
+      max-parallel: ${{ fromJson(inputs.max_parallel) }}
+    env:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+    steps:
+      - name: Checkout GroundTruth
+        uses: actions/checkout@v4
+        with:
+          lfs: false  # LFS quota exhausted (2026-06-05); nothing here needs LFS objects.
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache pip wheels
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: gt-verified-pip-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}
+          restore-keys: gt-verified-pip-${{ runner.os }}-
+
+      - name: Verify env armed (fail-closed — abort before any paid work)
+        run: |
+          set -e
+          BAD=0
+          for k in GT_REQUIRE_FTS5 GT_REQUIRE_EMBEDDER GT_FORCE_ONNX_EMBEDDER \
+                   GT_REQUIRE_LSP GT_REQUIRE_FULL_STACK GT_FORBID_PREBUILT_GRAPH; do
+            v=$(printenv "$k" || true)
+            if [ "$v" = "1" ]; then echo "  $k=1 OK"; else echo "FATAL: env $k='$v' expected '1' — fail-closed gate"; BAD=1; fi
+          done
+          [ "$BAD" -eq 0 ] || { echo "FATAL: fail-closed env not armed"; exit 1; }
+          # NOTE: HF_*_OFFLINE deliberately NOT enforced on this path — the Verified
+          # dataset fetch (problem_statement) + the official Princeton eval need HF.
+          echo "=== fail-closed env ARMED (Verified variant: HF online allowed) ==="
+
+      - name: Install host harness deps (GT for the witness imports + mini-swe-agent + official eval harness)
+        run: |
+          set -e
+          python -m pip install --upgrade pip
+          # Current checkout's GT: the adapter imports groundtruth.runtime
+          # (GTRuntimeContext + proof.graph_edges_hash) for the §H witness.
+          python -m pip install -e .
+          # PINNED harness + eval: never float a paid matrix's contracts.
+          # mini-swe-agent 2.2.8 = the source-verified injection surface
+          # (swebench.py process_instance / environments/docker.py execute).
+          # swebench 4.1.0 = the official Princeton eval harness (Verified-aware,
+          # -n swebench default namespace). datasets for problem_statement loads.
+          python -m pip install "mini-swe-agent==2.2.8" "swebench==4.1.0" datasets
+          echo "PYTHONPATH=$GITHUB_WORKSPACE/src:$GITHUB_WORKSPACE/scripts/swebench:$GITHUB_WORKSPACE/scripts/metrics" >> "$GITHUB_ENV"
+          python -c "import groundtruth.runtime.proof as p, groundtruth.runtime.context as c; print('GT runtime importable host-side:', bool(p.graph_edges_hash and c.GTRuntimeContext))"
+          python -c "import minisweagent, swebench; print('harness ready: mini-swe-agent + swebench')"
+
+      - name: Log in to GHCR (substrate pull; task images are anonymous on epoch mirror)
+        env:
+          GHCR_TOKEN: ${{ secrets.GHCR_PULL_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$OWNER" --password-stdin
+          echo "GHCR login OK as $OWNER"
+
+      - name: Mark job-start epoch (legitimacy freshness baseline)
+        run: |
+          echo "GT_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
+
+      - name: Pull task image (GHCR-epoch primary, Docker Hub _1776_ fallback)
+        run: |
+          set -e
+          IID="${{ matrix.task }}"
+          # ONE source of image-name truth: the adapter (parity-tested against
+          # scripts/vm/build_verified_manifest.py conventions).
+          PRIMARY=$(python artifact_verified/gt_verified_agent.py --instance-id "$IID" --print-image | head -1)
+          FALLBACK=$(python artifact_verified/gt_verified_agent.py --instance-id "$IID" --print-image | tail -1)
+          echo "primary:  $PRIMARY"
+          echo "fallback: $FALLBACK"
+          RESOLVED=""
+          for i in 1 2 3; do
+            if docker pull "$PRIMARY"; then RESOLVED="$PRIMARY"; break; fi
+            echo "primary pull attempt $i failed, retrying..."; sleep 10
+          done
+          if [ -z "$RESOLVED" ]; then
+            echo "primary miss — trying Docker Hub fallback"
+            for i in 1 2 3 4; do
+              if docker pull "$FALLBACK"; then RESOLVED="$FALLBACK"; break; fi
+              echo "fallback pull attempt $i failed, retrying..."; sleep 15
+            done
+          fi
+          if [ -z "$RESOLVED" ]; then
+            echo "TASK_IMAGE_PULL_FAIL: task image pull failed on both registries ($PRIMARY | $FALLBACK)" | tee -a trial_output.log
+            exit 1
+          fi
+          echo "RESOLVED_IMG=$RESOLVED" >> "$GITHUB_ENV"
+          # Pre-tag for the OFFICIAL eval harness (-n swebench, tag latest):
+          # docker.io/swebench/sweb.eval.x86_64.<iid __ -> _1776_>:latest — so the
+          # eval step finds the image locally instead of re-pulling.
+          SLUG=$(echo "$IID" | tr '[:upper:]' '[:lower:]' | sed 's/__/_1776_/g')
+          docker tag "$RESOLVED" "swebench/sweb.eval.x86_64.${SLUG}:latest"
+          echo "task image ready: $RESOLVED (also tagged swebench/sweb.eval.x86_64.${SLUG}:latest)"
+
+      - name: GT substrate proof (pinned, read-only repo) — pre-agent, fail-closed
+        if: ${{ inputs.baseline != true }}
+        run: |
+          set -e
+          # §E GT_SUBSTRATE_DIGEST_MISSING (fail-closed; markers tee'd into
+          # trial_output.log so the INFRA classifier sees them).
+          if [ -z "$GT_SUBSTRATE_DIGEST" ]; then
+            if [ "${GT_REQUIRE_PINNED_SUBSTRATE:-1}" = "1" ]; then
+              echo "GT_SUBSTRATE_DIGEST_MISSING / PROOF_RUNTIME_FALLBACK_FORBIDDEN: substrate-consume" | tee -a trial_output.log
+              echo "mode requires GT_SUBSTRATE_DIGEST (pinned @sha256). Set the gt_substrate_digest"
+              echo "input or the GT_SUBSTRATE_DIGEST repo variable."
+              exit 1
+            fi
+            echo "::warning::GT_SUBSTRATE_DIGEST unset and GT_REQUIRE_PINNED_SUBSTRATE=0 (transitional)"
+            echo "::warning::— skipping the substrate proof; THIS TASK RUNS GT-OFF (GT_BASELINE=1)."
+            echo "GT_TRANSITIONAL_NO_SUBSTRATE=1" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          case "$GT_SUBSTRATE_DIGEST" in
+            *@sha256:*) : ;;
+            *) echo "FATAL: GT_SUBSTRATE_DIGEST='$GT_SUBSTRATE_DIGEST' is not a pinned @sha256 digest"; exit 1 ;;
+          esac
+          echo "pinned substrate: $GT_SUBSTRATE_DIGEST"
+
+          if ! docker pull "$GT_SUBSTRATE_DIGEST"; then
+            echo "GT_SUBSTRATE_PULL_FAIL: docker pull of the pinned substrate failed" | tee -a trial_output.log; exit 1
+          fi
+
+          # Materialize the task repo at its base commit (Verified images keep the
+          # repo at /testbed) and copy it out for the read-only substrate mount.
+          docker rm -f gtsrc 2>/dev/null || true
+          docker run -d --name gtsrc "$RESOLVED_IMG" sleep 1800 >/dev/null
+          ROOT=$(docker exec gtsrc bash -c 'for d in /testbed /home/user /workspace /app /repo; do [ -d "$d/.git" ] && echo "$d" && break; done')
+          ROOT=${ROOT:-/testbed}
+          echo "repo root: $ROOT"
+          rm -rf /tmp/gt && mkdir -p /tmp/gt /tmp/gt/src
+          docker cp "gtsrc:$ROOT/." /tmp/gt/src || { echo "FATAL: source extract failed"; exit 1; }
+          TASK_REPO_COMMIT=$(git -C /tmp/gt/src rev-parse HEAD 2>/dev/null || true)
+          echo "task repo commit: ${TASK_REPO_COMMIT:-<unknown>}"
+
+          # THIS task's issue (problem statement only — NEVER gold/tests) so the
+          # substrate's demand-driven LSP scope + embedder cert operate on the
+          # issue-relevant subgraph. Fail-closed on empty (GT_ISSUE_MISSING).
+          if ! python artifact_verified/gt_verified_agent.py --instance-id "${{ matrix.task }}" --dump-issue-to /tmp/issue.txt; then
+            echo "GT_ISSUE_MISSING: no issue text for this task — refusing to run the substrate with an EMPTY issue (fail-closed)" | tee -a trial_output.log
+            docker rm -f gtsrc 2>/dev/null || true
+            exit 1
+          fi
+
+          # gt-run-proof INSIDE the pinned substrate (the ONE portable command).
+          if ! docker run --rm \
+              -v "/tmp/gt/src:/work:ro" -v "/tmp/gt:/gt_artifacts" \
+              -v "/tmp/issue.txt:/work_issue.txt:ro" \
+              -e GT_PROOF_MODE=1 -e GT_CONTAINERIZED=1 -e GT_RUNTIME_STRATEGY=unified_substrate \
+              -e GT_REQUIRE_FTS5=1 -e GT_REQUIRE_EMBEDDER=1 -e GT_FORCE_ONNX_EMBEDDER=1 \
+              -e GT_REQUIRE_LSP=1 -e GT_REQUIRE_FULL_STACK=1 -e GT_ISSUE_FILE=/work_issue.txt \
+              -e GT_GATES_DELIVER_ALWAYS="${GT_GATES_DELIVER_ALWAYS:-0}" \
+              -e GT_GIT_COMMIT="${{ github.sha }}" \
+              -e GT_SUBSTRATE_DIGEST="$GT_SUBSTRATE_DIGEST" \
+              -e GT_TASK_REPO_COMMIT="$TASK_REPO_COMMIT" \
+              "$GT_SUBSTRATE_DIGEST" gt-run-proof --source-root /work --out /gt_artifacts; then
+            echo "GT_RUN_PROOF_FAIL: gt-run-proof returned non-zero (boundary/leak/missing-baked-dep)" | tee -a trial_output.log
+            docker rm -f gtsrc 2>/dev/null || true
+            exit 1
+          fi
+          docker rm -f gtsrc 2>/dev/null || true
+
+          # §E GT_ARTIFACT_MISSING — verify the 8-artifact contract (brief.txt incl).
+          for c in graph.db runtime_context.json lsp_certificate.json graph_certificate.json \
+                   embedder_certificate.json foundational_gate_report.json run_manifest.json \
+                   brief.txt; do
+            test -s "/tmp/gt/$c" || { echo "GT_ARTIFACT_MISSING / SUBSTRATE_MISSING_CERTS: /gt_artifacts/$c absent after gt-run-proof" | tee -a trial_output.log; exit 1; }
+          done
+          echo "all 8 GT artifacts present under /tmp/gt"
+
+          # Repo-root file for gt_mini_patch._root() (snippet resolution against
+          # the extracted source copy; GT_ROOT_FILE default /opt/gt is container-only).
+          echo "/tmp/gt/src" > /tmp/gt/gt_root.txt
+
+          # Cert-env handoff — HOST paths (the agent + pillars run on this runner,
+          # unlike the pier path where the patch lived inside the task container).
+          {
+            echo "GT_PORTABLE_SUBSTRATE=1"
+            echo "GT_CERT_DIR=/tmp/gt"
+            echo "GT_HOST_GRAPH_DB=/tmp/gt/graph.db"
+            echo "GT_HOST_SRC_ROOT=/tmp/gt/src"
+            echo "GT_REPO_ROOT=/tmp/gt/src"
+            echo "GT_LSP_CERT=/tmp/gt/lsp_certificate.json"
+            echo "GT_GRAPH_CERT=/tmp/gt/graph_certificate.json"
+            echo "GT_EMBEDDER_CERT=/tmp/gt/embedder_certificate.json"
+            echo "GT_ROOT_FILE=/tmp/gt/gt_root.txt"
+            echo "GT_DELIVERY_DIR=/tmp/gt"
+          } >> "$GITHUB_ENV"
+          echo "substrate proof done: artifacts consumed read-only by the host-side agent"
+
+      - name: Run GT mini-swe agent (official Verified task, fail-closed adapter)
+        run: |
+          echo "=== Verified GT trial: ${{ matrix.task }} (model ${{ inputs.model }}) ==="
+          echo "GT_CERT_DIR=${GT_CERT_DIR:-<unset>}  GT_HOST_GRAPH_DB=${GT_HOST_GRAPH_DB:-<unset>}  digest=${GT_SUBSTRATE_DIGEST:-<unset>}"
+          if [ "${{ inputs.baseline }}" = "true" ] || [ "${GT_TRANSITIONAL_NO_SUBSTRATE:-0}" = "1" ]; then
+            export GT_BASELINE=1
+            export GT_PROOF_MODE=0
+            echo "=== CONTROL/TRANSITIONAL ARM: GT fully disabled (GT_BASELINE=1) ==="
+          fi
+          # pipefail + PIPESTATUS discipline: tee must never mask the agent rc.
+          set +e
+          set -o pipefail
+          python artifact_verified/gt_verified_agent.py \
+            --instance-id "${{ matrix.task }}" \
+            --model "${{ inputs.model }}" \
+            --config artifact_verified/verified_gt.yaml \
+            --output /tmp/results \
+            --image "${RESOLVED_IMG}" \
+            2>&1 | tee -a trial_output.log
+          AGENT_RC=${PIPESTATUS[0]}
+          set -e
+          echo "=== agent run complete (rc=$AGENT_RC) ==="
+          # Belt-and-braces (the adapter already exits nonzero on its own raise —
+          # there is no pier here to swallow it): any adapter-fail marker fails the step.
+          if grep -q "DeepSweAdapterError\|error=DEEPSWE_ADAPTER_FAIL" trial_output.log; then
+            echo "DEEPSWE_ADAPTER_FAIL: adapter fail-closed marker found in the trial log" | tee -a trial_output.log
+            grep -n "DeepSweAdapterError\|DEEPSWE_ADAPTER_FAIL" trial_output.log | head -5 || true
+            exit 1
+          fi
+          if [ "$AGENT_RC" -ne 0 ]; then
+            echo "AGENT_RUN_FAIL: gt_verified_agent exited rc=$AGENT_RC (pipefail surfaced — not tee's 0)" | tee -a trial_output.log
+            exit 1
+          fi
+
+      - name: Verify adapter witness (§H consumption proof — delivery, not telemetry)
+        if: ${{ inputs.baseline != true }}
+        run: |
+          if [ "${GT_TRANSITIONAL_NO_SUBSTRATE:-0}" = "1" ]; then
+            echo "transitional GT-off task — witness check skipped"; exit 0
+          fi
+          if grep -q "error=DEEPSWE_ADAPTER_FAIL" trial_output.log; then
+            echo "DEEPSWE_ADAPTER_FAIL: the adapter failed to wire/consume the substrate artifacts:"
+            grep "DEEPSWE_ADAPTER_FAIL" trial_output.log | head -5
+            exit 1
+          fi
+          if ! grep -q "gt_prebuilt_active=true" trial_output.log; then
+            echo "GT_ARTIFACT_NOT_CONSUMED: no [GT_META] witness with gt_prebuilt_active=true"
+            grep "\[GT_META\]" trial_output.log | head -5 || echo "(no [GT_META] line at all)"
+            exit 1
+          fi
+          if grep -q "hook_graph_hash_matches_post_lsp=False" trial_output.log; then
+            echo "GRAPH_FAIL_HASH_MISMATCH: consumed graph diverges from the substrate's LSP-resolved graph"
+            grep "hook_graph_hash_matches_post_lsp" trial_output.log | head -3
+            exit 1
+          fi
+          echo "adapter witness OK: substrate graph consumed read-only; hook hash == post-LSP hash"
+          grep "\[GT_META\] graph_witness" trial_output.log | head -2 || true
+
+      - name: Convert predictions for the official eval
+        run: |
+          set -e
+          python3 << 'PYEOF'
+          import json, os, sys
+          preds_path = "/tmp/results/preds.json"
+          if not os.path.isfile(preds_path):
+              print("EVAL_SKIPPED_NO_PREDICTIONS: preds.json absent")
+              sys.exit(0)
+          preds = json.load(open(preds_path, encoding="utf-8"))
+          n = 0
+          with open("/tmp/results/predictions.jsonl", "w", encoding="utf-8") as f:
+              for iid, rec in preds.items():
+                  f.write(json.dumps({
+                      "instance_id": iid,
+                      "model_patch": (rec.get("model_patch") or "").strip(),
+                      "model_name_or_path": rec.get("model_name_or_path") or "gt-verified",
+                  }) + "\n")
+                  n += 1
+          print(f"converted {n} prediction(s) -> /tmp/results/predictions.jsonl")
+          PYEOF
+
+      - name: Official eval — Princeton swebench harness (the CARDINAL no-custom-eval rule)
+        run: |
+          if [ ! -s /tmp/results/predictions.jsonl ]; then
+            echo "EVAL_SKIPPED_NO_PREDICTIONS: nothing to evaluate" | tee -a trial_output.log
+            exit 0
+          fi
+          mkdir -p /tmp/eval
+          set +e
+          set -o pipefail
+          python -m swebench.harness.run_evaluation \
+            --dataset_name princeton-nlp/SWE-bench_Verified \
+            --split test \
+            --predictions_path /tmp/results/predictions.jsonl \
+            --instance_ids "${{ matrix.task }}" \
+            --max_workers 1 \
+            --namespace swebench \
+            --instance_image_tag latest \
+            --run_id "vrun${{ github.run_id }}" \
+            --report_dir /tmp/eval \
+            2>&1 | tee eval_output.log
+          EVAL_RC=${PIPESTATUS[0]}
+          set -e
+          if [ "$EVAL_RC" -ne 0 ]; then
+            echo "EVAL_HARNESS_FAIL: official harness exited rc=$EVAL_RC" | tee -a trial_output.log
+            exit 1
+          fi
+          echo "=== official eval complete ==="
+
+      - name: Extract outcome (resolved verdict from the official report)
+        if: always()
+        env:
+          TASK_ID: ${{ matrix.task }}
+        run: |
+          python3 << 'PYEOF'
+          import glob, json, os
+          iid = os.environ["TASK_ID"]
+          resolved = False
+          report_files = sorted(glob.glob("/tmp/eval/*.json") + glob.glob("*.vrun*.json"))
+          for rf in report_files:
+              try:
+                  d = json.load(open(rf, encoding="utf-8"))
+              except Exception:
+                  continue
+              if isinstance(d, dict) and "resolved_ids" in d:
+                  if iid in set(d.get("resolved_ids") or []):
+                      resolved = True
+          out = {
+              "schema": "gt.verified_outcome.v1",
+              "instance_id": iid,
+              "resolved": resolved,
+              "report_files": report_files,
+              "workflow_run_id": os.environ.get("GITHUB_RUN_ID"),
+          }
+          os.makedirs("/tmp/results", exist_ok=True)
+          json.dump(out, open("/tmp/results/outcome.json", "w", encoding="utf-8"), indent=2)
+          print(f"TASK_RESOLVED={resolved} ({iid}); reports={report_files or '(none)'}")
+          PYEOF
+
+      - name: Collect results
+        if: always()
+        run: |
+          mkdir -p trial_results trial_results/gt_artifacts trial_results/eval
+          cp trial_output.log trial_results/ 2>/dev/null || true
+          cp eval_output.log trial_results/ 2>/dev/null || true
+          # The 8 substrate artifacts (proof set incl. brief.txt) + per-language certs.
+          for a in graph.db runtime_context.json lsp_certificate.json graph_certificate.json \
+                   embedder_certificate.json foundational_gate_report.json run_manifest.json \
+                   brief.txt gt_issue_anchors.json gt_scope_files.txt gt_lsp_metrics.txt \
+                   delivered_instruction.txt gt_root.txt; do
+            cp "/tmp/gt/$a" "trial_results/gt_artifacts/$a" 2>/dev/null || true
+          done
+          cp /tmp/gt/lsp_certificate_*.json trial_results/gt_artifacts/ 2>/dev/null || true
+          cp /tmp/issue.txt trial_results/gt_artifacts/issue.txt 2>/dev/null || true
+          # Agent outputs: preds, predictions, trajectory, outcome.
+          cp -r /tmp/results trial_results/results 2>/dev/null || true
+          cp /tmp/eval/*.json trial_results/eval/ 2>/dev/null || true
+          cp ./*.vrun*.json trial_results/eval/ 2>/dev/null || true
+          # Per-job provenance (gt commit + digest + model + run ids).
+          python3 -c "import json,os;json.dump({'schema':'gt.verified_run_provenance.v1','task':'${{ matrix.task }}','gt_git_commit':os.environ.get('GITHUB_SHA') or None,'substrate_digest':os.environ.get('GT_SUBSTRATE_DIGEST') or None,'model':'${{ inputs.model }}','baseline':'${{ inputs.baseline }}','workflow_run_id':os.environ.get('GITHUB_RUN_ID') or None,'workflow_run_attempt':os.environ.get('GITHUB_RUN_ATTEMPT') or None},open('trial_results/run_provenance.json','w'),indent=2)" \
+            || echo "WARN: run_provenance.json write failed"
+          find trial_results -type f | head -40
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-run-${{ matrix.task }}
+          path: trial_results/
+          retention-days: 30
+          if-no-files-found: warn
+
+  summarize:
+    needs: [prepare, trial]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/all
+          pattern: verified-run-*
+      - name: Aggregate Verified run results
+        run: |
+          {
+            echo "## SWE-bench Verified GT run — ${{ needs.prepare.outputs.total }} task(s)"
+            echo ""
+            echo "**Provenance** — GT commit: \`${{ github.sha }}\` | model: \`${{ inputs.model }}\` | baseline: \`${{ inputs.baseline }}\` | substrate digest: \`${GT_SUBSTRATE_DIGEST:-<unset>}\`"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+          TOTAL=0; RAN=0; LAUNCH_FAIL=0; RESOLVED=0; ADAPTER_FAIL=0
+          for d in /tmp/all/verified-run-*; do
+            [ -d "$d" ] || continue
+            TOTAL=$((TOTAL+1))
+            # n_agent_steps VALUE must parse >0 (deepswe_full P0.1-d pattern —
+            # token presence alone never counts as agent-ran).
+            STEPS=$(grep -rhoE "AGENT_RAN_STEPS=[0-9]+" "$d" 2>/dev/null | head -1 | grep -oE "[0-9]+$" || true)
+            if [ -n "$STEPS" ] && [ "$STEPS" -gt 0 ]; then
+              RAN=$((RAN+1))
+            else
+              LAUNCH_FAIL=$((LAUNCH_FAIL+1))
+              echo "launch-fail (AGENT_RAN_STEPS=${STEPS:-absent}): $(basename "$d")"
+            fi
+            if grep -rq '"resolved": true' "$d"/results/outcome.json 2>/dev/null; then
+              RESOLVED=$((RESOLVED+1))
+              echo "RESOLVED: $(basename "$d")"
+            fi
+            if grep -rq "error=DEEPSWE_ADAPTER_FAIL" "$d" 2>/dev/null; then
+              ADAPTER_FAIL=$((ADAPTER_FAIL+1))
+              echo "adapter-fail: $(basename "$d")"
+            fi
+          done
+          {
+            echo "Artifacts: $TOTAL  |  agent-ran (steps>0 PARSED): $RAN  |  launch-fail: $LAUNCH_FAIL  |  **resolved (official eval): $RESOLVED**  |  adapter-fail: $ADAPTER_FAIL"
+            echo ""
+            echo "Per-task: \`results/outcome.json\` (official verdict) + \`gt_artifacts/\` (8-artifact proof set incl. brief.txt) + \`trial_output.log\` ([GT_META] witness + delivery)."
+          } >> "$GITHUB_STEP_SUMMARY"
