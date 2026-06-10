@@ -191,7 +191,9 @@ def test_wrap_execute_appends_evidence_on_fake_env(monkeypatch, tmp_path):
     out = FakeEnv().execute({"command": "cat a.py"})
 
     assert out["returncode"] == 0
-    assert "[gt-patch:loaded]" in out["output"]
+    # 2026-06-10 (PATH B audit): the loader banner is telemetry — stderr only,
+    # never agent-visible output (it leaked at MSG 3 on 10/10 tasks).
+    assert "[gt-patch:loaded]" not in out["output"]
     assert "<gt-evidence" in out["output"]
     assert "[WITNESS]" in out["output"]  # the deterministic 'import' edge, never name_match
     # read-only consume: the substrate graph was not rewritten

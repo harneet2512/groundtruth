@@ -36,8 +36,14 @@ def test_anchors_resolve_against_graph(tiny_graph_db: str) -> None:
     assert "SafeWatchdog" in out.symbols
     assert "_fd" in out.symbols
     assert "NotARealSymbol" not in out.symbols
-    # Sanity: the dotted form resolved its tail too.
-    assert "SafeWatchdog._fd" not in out.symbols  # not a node name
+    # CONTRACT UPDATED (fix 2026-06-10, §4 anchor-extraction defect): the dotted
+    # form is now KEPT when the graph CONFIRMS the qualified pair (SafeWatchdog
+    # defines _fd in this fixture). The old assertion (`not in symbols — not a
+    # node name`) encoded the bug where the issue's most specific anchor was
+    # dropped and W_CODE_DEF never engaged. Unconfirmable dotted tokens are
+    # still dropped — see test_rerank_localization_fixes.py::
+    # test_unconfirmed_dotted_anchor_stays_dropped.
+    assert "SafeWatchdog._fd" in out.symbols
 
 
 def test_anchors_extract_paths() -> None:

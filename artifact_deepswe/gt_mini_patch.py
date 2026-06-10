@@ -38,6 +38,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 
 # Strict flag parse (bug #6 parity with gt_agent / every other GT flag):
 # bool(env) made GT_BASELINE=0 enable the baseline arm.
@@ -74,6 +75,130 @@ _STDLIB_MODULES: frozenset[str] = frozenset(
 )
 _STDLIB_SHADOW_RE = re.compile(r"([A-Za-z_][\w.]*)\.([A-Za-z_]\w*)\s*\(")
 
+# ---------------------------------------------------------------------------
+# DELIVERY FACT-FILTER (2026-06-10, PATH B per-layer health audit, run
+# 27260307167). Two pollution classes were DELIVERED as deterministic facts
+# through L1/L3/L3b ([WITNESS]/[CALLERS]/[CALLEE]/contract/scope):
+#   (a) vendored/minified/generated paths (astropy/extern/jquery/*.min.js
+#       cited as a "resolved caller"; raw minified jQuery as a [WITNESS]);
+#   (b) builtin/dunder-shadow laundering (`isinstance` -> a project method
+#       named isinstance, rendered "1048 verified caller(s) — preserve this
+#       interface"). A bare builtin call resolves verified_unique (0.95,
+#       deterministic) when ONE project symbol shadows the builtin name — the
+#       resolver's T2 builtin drop (gt_gt §2.3) covers QUALIFIED calls only,
+#       and PATH A/B substrate graphs are FROZEN, so the consumer fact surface
+#       is the operative guard.
+# This extends the localizer's `_is_generated` W_GEN demote (ranking) to the
+# DELIVERY surface, and the §2.5 stdlib-shadow guard (commit 55ab30eb) to the
+# bare-call residual. Three composited signals (path-class, content-class,
+# name-class); correct-or-quiet: exclusion suppresses, never invents.
+# ---------------------------------------------------------------------------
+_VENDOR_DIR_MARKERS: tuple[str, ...] = (
+    "/extern/", "/externals/", "/vendor/", "/vendored/", "/third_party/",
+    "/thirdparty/", "/node_modules/", "/bower_components/", "/dist/",
+    "/_generated/", "/generated/", "/site-packages/",
+)
+_MINIFIED_SUFFIXES: tuple[str, ...] = (".min.js", ".min.css", ".min.mjs", ".min.map")
+# Codegen file markers — mirrors graph_localizer._GENERATED_MARKERS (W_GEN).
+_GENERATED_FILE_MARKERS: tuple[str, ...] = (
+    "zz_generated", ".pb.go", ".pb.gw.go", "_pb2.py", "_pb2_grpc.py",
+    ".generated.", "_generated.go", ".g.dart", ".freezed.dart",
+)
+
+
+def _is_vendored_path(fp: str) -> bool:
+    """Path-class filter: vendored / minified / generated code is never a
+    DELIVERED fact (witness, caller, callee contract, scope, co-change).
+    Language-agnostic path conventions; segment-anchored (leading '/' added so
+    a top-level `vendor/x.go` matches, while `src/distribute.py` does not)."""
+    f = "/" + (fp or "").replace("\\", "/").lstrip("./").lstrip("/").lower()
+    if any(m in f for m in _VENDOR_DIR_MARKERS):
+        return True
+    base = f.rsplit("/", 1)[-1]
+    if base.endswith(_MINIFIED_SUFFIXES):
+        return True
+    return any(m in base for m in _GENERATED_FILE_MARKERS)
+
+
+# Content-class filter: minified/bundled files outside any vendor dir. Mean
+# non-blank line length > 200 chars is unreachable for hand-written source in
+# any indexed language (minifiers strip newlines). Cached per relpath.
+_MINIFIED_MEAN_LINE_LEN = 200
+_minified_cache: dict[str, bool] = {}
+
+
+def _is_minified_file(repo_root: str, rel: str) -> bool:
+    if rel in _minified_cache:
+        return _minified_cache[rel]
+    verdict = False
+    try:
+        with open(os.path.join(repo_root or "", rel), encoding="utf-8",
+                  errors="ignore") as fh:
+            head = fh.read(16384)
+        lines = [ln for ln in head.splitlines() if ln.strip()]
+        if lines:
+            verdict = (sum(len(ln) for ln in lines) / len(lines)) > _MINIFIED_MEAN_LINE_LEN
+    except OSError:
+        verdict = False
+    _minified_cache[rel] = verdict
+    return verdict
+
+
+def _is_delivery_excluded(fp: str, repo_root: str = "") -> bool:
+    """True when ``fp`` must never appear in a DELIVERED fact. Path-class
+    always; content-class (minified heuristic) when the file is readable."""
+    if _is_vendored_path(fp):
+        return True
+    if repo_root:
+        return _is_minified_file(repo_root, _norm_fp(fp))
+    return False
+
+
+# Name-class filter: builtin/dunder callable names. Mirrors resolver.go
+# builtinMethodNames + strongBuiltinMethodNames (the T2 builtin drop, gt_gt
+# §2.3) and adds the shadowable language builtins the T2 drop cannot see
+# (it only fires on QUALIFIED calls; a bare `isinstance(...)` resolves
+# verified_unique when one project symbol shadows the name). An edge whose
+# TARGET carries one of these names is never delivered as a caller/contract
+# fact — callers overwhelmingly invoke the language builtin, not the project
+# symbol. Static set by design (consistent with the resolver's T2 list; no
+# invented distribution threshold).
+_BUILTIN_CALLABLE_NAMES: frozenset[str] = frozenset({
+    # resolver.go builtinMethodNames (str/dict/list/set methods)
+    "join", "split", "splitlines", "strip", "lstrip", "rstrip", "lower",
+    "upper", "title", "startswith", "endswith", "encode", "decode", "format",
+    "replace", "find", "rfind",
+    "get", "keys", "values", "items", "setdefault", "update", "popitem",
+    "append", "extend", "pop", "insert", "remove", "index", "count", "sort",
+    "reverse", "add", "discard", "clear", "copy",
+    # resolver.go strongBuiltinMethodNames extras
+    "rsplit", "zfill", "casefold", "loads", "dumps",
+    # shadowable Python builtins (the isinstance/len launder class) + os.path
+    "isinstance", "issubclass", "len", "print", "open", "type", "super",
+    "getattr", "setattr", "hasattr", "delattr", "repr", "str", "int", "float",
+    "bool", "list", "dict", "set", "tuple", "iter", "next", "range", "zip",
+    "map", "filter", "sorted", "reversed", "enumerate", "sum", "min", "max",
+    "abs", "round", "all", "any", "id", "hash", "vars", "dir", "callable",
+    "exists",
+    # JS/TS/Go/Rust ultra-common builtin method names
+    "push", "shift", "unshift", "slice", "splice", "concat", "indexof",
+    "foreach", "tostring", "write", "read", "close", "new", "make", "clone",
+    "unwrap", "expect",
+})
+
+
+def _is_builtin_shadow_name(name: str) -> bool:
+    """True when ``name`` is a builtin/dunder callable name whose call edges
+    cannot be trusted as facts regardless of recorded provenance (the bare
+    builtin-shadow launder; dunders are invoked via the language protocol,
+    not by callers naming the project's definition)."""
+    n = (name or "").strip()
+    if not n:
+        return False
+    if n.startswith("__") and n.endswith("__") and len(n) > 4:
+        return True
+    return n.lower() in _BUILTIN_CALLABLE_NAMES
+
 # per-file-once dedup, keyed (kind, relpath)
 _seen: set[tuple[str, str]] = set()
 # Layer-A consensus fires once per run (first source-view), like the OH wrapper.
@@ -106,7 +231,9 @@ _GT_INDEX_CACHE = os.environ.get("GT_INDEX_CACHE", "/tmp/gt_index.json")
 # signal DeepSWE entirely lacked — OH ships it from the cochanges table).
 _cochange_fired = False
 # diagnostic: one-time marker so trajectory analysis can tell
-# "patch never loaded" from "loaded but no evidence"
+# "patch never loaded" from "loaded but no evidence". Printed to STDERR
+# (harness log) — never appended to agent-visible output (2026-06-10 fix:
+# it leaked into the agent's context at MSG 3 on 10/10 PATH B tasks).
 _marker_sent = False
 
 # Source-file extensions GT indexes (matches gt-index language set).
@@ -494,17 +621,23 @@ def _top_func_names(con, file_path: str, limit: int = 3) -> list[str]:
     issue-anchored selection."""
     out: list[str] = []
     try:
+        # Over-fetch then drop builtin/dunder-shadow names in Python (2026-06-10
+        # fact-filter): a project method shadowing a builtin (`isinstance`)
+        # carries a poisoned reference count (callers call the BUILTIN), so it
+        # must neither rank here nor seed the caller/contract pillars.
         rows = con.execute(
             "SELECT n.name, COUNT(e.id) AS rc FROM nodes n "
             "LEFT JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' "
             "WHERE n.file_path = ? "
             "AND n.label IN ('Function','Method') AND COALESCE(n.is_test,0)=0 "
             "GROUP BY n.id ORDER BY rc DESC, n.name LIMIT ?",
-            (_norm_fp(file_path), limit),
+            (_norm_fp(file_path), limit * 3 + 5),
         ).fetchall()
         for (name, _rc) in rows:
-            if name and name not in out:
+            if name and name not in out and not _is_builtin_shadow_name(name):
                 out.append(name)
+            if len(out) >= limit:
+                break
     except Exception:  # noqa: BLE001
         pass
     return out
@@ -538,6 +671,12 @@ def _resolved_witnesses_for_file(con, file_path: str, repo_root: str, max_each: 
             (nfp, max_each * 4),
         ).fetchall()
         for caller_file, line, caller_name, target_name in caller_rows:
+            # 2026-06-10 fact-filter: a vendored/minified caller or a
+            # builtin/dunder-shadow target is never a delivered [WITNESS] fact.
+            if _is_delivery_excluded(caller_file or "", repo_root):
+                continue
+            if _is_builtin_shadow_name(target_name or ""):
+                continue
             code = _code_at(repo_root, caller_file, line)
             if _is_stdlib_shadow(code, target_name or ""):
                 continue
@@ -561,6 +700,12 @@ def _resolved_witnesses_for_file(con, file_path: str, repo_root: str, max_each: 
             (nfp, max_each * 4),
         ).fetchall()
         for callee_file, source_line, callee_name, src_name, def_line in callee_rows:
+            # 2026-06-10 fact-filter: vendored/minified callee files and
+            # builtin/dunder-shadow callee names are never [WITNESS] facts.
+            if _is_delivery_excluded(callee_file or "", repo_root):
+                continue
+            if _is_builtin_shadow_name(callee_name or ""):
+                continue
             call_code = _code_at(repo_root, file_path, source_line)
             if _is_stdlib_shadow(call_code, callee_name or ""):
                 continue
@@ -592,6 +737,11 @@ def _caller_contract_for_file(con, file_path: str, repo_root: str, func_names: l
     unverified_parts: list[str] = []
     try:
         for fname in func_names[:2]:
+            # 2026-06-10 fact-filter: never claim callers for a builtin/dunder-
+            # shadow name (the `isinstance` launder) — defense in depth behind
+            # the _top_func_names exclusion.
+            if _is_builtin_shadow_name(fname):
+                continue
             rows = con.execute(
                 f"""
                 SELECT nsrc.file_path, e.source_line, nsrc.name, {conf_sel}, {method_sel}
@@ -608,6 +758,10 @@ def _caller_contract_for_file(con, file_path: str, repo_root: str, func_names: l
                 (fname, nfp, 8),
             ).fetchall()
             for caller_file, source_line, caller_name, conf, method in rows:
+                # 2026-06-10 fact-filter: a vendored/minified caller is never a
+                # fact NOR an unverified location hint.
+                if _is_delivery_excluded(caller_file or "", repo_root):
+                    continue
                 try:
                     conf_f = float(conf) if conf is not None else 0.0
                 except (TypeError, ValueError):
@@ -658,7 +812,9 @@ def _sibling_context(con, file_path: str, func_names: list[str]) -> str:
                 ",".join("?" * len(func_names))),
             (_norm_fp(file_path), *func_names),
         ).fetchall()
-        names = [r[0] for r in rows if r[0] and len(r[0]) > 2 and not r[0].startswith("_")]
+        # 2026-06-10 fact-filter: builtin-shadow names are not sibling patterns.
+        names = [r[0] for r in rows if r[0] and len(r[0]) > 2 and not r[0].startswith("_")
+                 and not _is_builtin_shadow_name(r[0])]
         return ", ".join(names[:5]) if names else ""
     except Exception:  # noqa: BLE001
         return ""
@@ -710,6 +866,12 @@ def _edit_target_callee_contracts(con, file_path: str, func_names: list[str],
                 # never surface a non-deterministic callee as a fact.
                 if (method or "").strip().lower() not in _DETERMINISTIC_METHODS:
                     continue
+                # 2026-06-10 fact-filter: vendored callee files / builtin-shadow
+                # callee names are never [CALLEE] facts.
+                if _is_delivery_excluded(callee_file or ""):
+                    continue
+                if _is_builtin_shadow_name(callee_name or ""):
+                    continue
                 if callee_name == fname and _norm_fp(callee_file) == nfp:
                     continue
                 key = (fname, callee_name or "", callee_file or "")
@@ -755,7 +917,9 @@ def _query_scope(rel: str) -> list[str]:
         )
         try:
             for (fp,) in con.execute(q, (_norm_fp(rel),)):
-                if fp and fp not in out:
+                # 2026-06-10 fact-filter: vendored/minified/generated neighbours
+                # are never delivered scope.
+                if fp and fp not in out and not _is_vendored_path(fp):
                     out.append(fp)
         finally:
             con.close()
@@ -842,7 +1006,9 @@ def _consensus_block(rel: str, root: str) -> str:
             )
             try:
                 for (fp,) in con.execute(q, (_norm_fp(rel),)):
-                    if fp and fp not in scope:
+                    # 2026-06-10 fact-filter: vendored/minified/generated
+                    # neighbours are never delivered scope.
+                    if fp and fp not in scope and not _is_vendored_path(fp):
                         scope.append(fp)
             finally:
                 con.close()
@@ -887,6 +1053,10 @@ def _evidence_body(kind: str, rel: str, root: str) -> str:
     This replaces the old gt_hook.py understand/verify shell-out, which was
     Python-ast-only (.py-filtered at gt_hook.py:4110) and therefore EMPTY on
     every Go/Rust/TS/JS file. graph.db is tree-sitter over ALL languages."""
+    # 2026-06-10 fact-filter: a vendored/minified/generated file gets NO
+    # evidence at all (correct-or-quiet — its edges are not facts).
+    if _is_delivery_excluded(rel, root):
+        return ""
     db = _db_path()
     if not os.path.isfile(db):
         return ""
@@ -964,6 +1134,9 @@ def _graph_contract_block(rel: str) -> str:
     if _GT_BASELINE or rel in _contract_seen:
         return ""
     _contract_seen.add(rel)
+    # 2026-06-10 fact-filter: no contract for a vendored/minified/generated file.
+    if _is_delivery_excluded(rel):
+        return ""
     try:
         db = _db_path()
         if not os.path.isfile(db):
@@ -1011,7 +1184,7 @@ def _graph_contract_block(rel: str) -> str:
                 # other files' functions (every __init__.py) to this contract.
                 "FROM nodes n WHERE n.file_path = ? "
                 "AND n.label IN ('Function','Method') AND COALESCE(n.is_test,0)=0 "
-                "ORDER BY ncallers DESC, n.name LIMIT 3"
+                "ORDER BY ncallers DESC, n.name LIMIT 8"
             )
             rows = [
                 (rid, name, _sanitize_signature((sig or "").strip()), nc, nf)
@@ -1019,6 +1192,33 @@ def _graph_contract_block(rel: str) -> str:
             ]
             # bug #4: a signature that sanitizes to nothing is no fact — drop the row.
             rows = [r for r in rows if r[2]]
+            # 2026-06-10 fact-filter: a builtin/dunder-shadow name carries a
+            # POISONED caller count (callers call the language builtin, not the
+            # project symbol — the `isinstance: 1048 verified caller(s)` launder)
+            # and must never render as a [SIGNATURE]/[CALLERS] contract fact.
+            # Over-fetched (LIMIT 8) so real functions still fill the top-3.
+            rows = [r for r in rows if not _is_builtin_shadow_name(r[1])][:3]
+            # 2026-06-10 fact-filter: recompute the DELIVERED caller count
+            # excluding vendored/minified/generated caller FILES — a jquery
+            # bundle calling into this file is not a "verified caller" the
+            # agent must preserve an interface for. (≤3 rows, cheap.)
+            if rows and has_method:
+                _fixed = []
+                for _rid, _name, _sig, _nc, _nf in rows:
+                    _crows = con.execute(
+                        "SELECT DISTINCT e.source_id, ns.file_path FROM edges e "
+                        "JOIN nodes ns ON ns.id = e.source_id "
+                        "WHERE e.target_id = ? AND e.type='CALLS' "
+                        "AND COALESCE(ns.is_test,0)=0 "
+                        f"AND LOWER(TRIM(e.resolution_method)) IN ('{det_sql}') "
+                        f"{conf_gate}",
+                        (_rid,)).fetchall()
+                    _keep = [(s, fp) for s, fp in _crows
+                             if not _is_vendored_path(fp or "")]
+                    _fixed.append((_rid, _name, _sig,
+                                   len({s for s, _ in _keep}),
+                                   len({fp for _, fp in _keep})))
+                rows = _fixed
             # PRESERVE: behavioural properties of the top (most-called) function — the
             # cross-language equivalent of OH's guard_removed/return_shape safety family
             # (gt_hook's is Python-AST-only). Properties are tree-sitter-mined per language
@@ -1083,6 +1283,10 @@ def _cochange_block(rel: str) -> str:
             )
             for fa, fb, cnt in con.execute(q, (nfp, nfp)):
                 other = fb if _norm_fp(fa) == nfp else fa
+                # 2026-06-10 fact-filter: vendored/minified/generated co-change
+                # partners are never delivered (jquery churn is not completeness).
+                if other and _is_vendored_path(other):
+                    continue
                 if other and _norm_fp(other) != nfp and other not in [r[0] for r in rows]:
                     rows.append((other, cnt))
         except Exception:  # noqa: BLE001 -- cochanges table may be absent on old graphs
@@ -1145,21 +1349,27 @@ def _invalidate_on_edit(rel: str, root: str) -> None:
         pass
 
 
-def _l5_nudge(cmd: str) -> str:
+def _l5_nudge(cmd: str, out_text: str = "") -> str:
     """L5 (minimal trajectory-governor port): fire AT MOST ONCE on the two highest-value
     stuck patterns the OH governor catches. The full L5Governor cannot run here (execute()
     has no max_iter / per-turn callback), but these two prevent the unguarded burn:
       (a) scaffold trap  -- many actions, zero source edits (the dominant failure mode);
-      (b) repeated-command loop -- the same command 4+ times (the maxiter-burn pattern)."""
+      (b) repeated-command loop -- the same command producing the SAME observation 4+
+          times. 2026-06-10 (PATH B audit, 13453 false fire): "loop" requires NO NEW
+          STATE — the same command with a DIFFERENT observation each run is iteration,
+          not a loop, so the signature is (command, normalized observation), not the
+          command alone. Correct-or-quiet."""
     global _l5_fired
     if _l5_fired or _GT_BASELINE:
         return ""
     norm = (cmd or "").strip()
     if norm:
-        _cmd_history.append(norm)
+        # Loop signature = command + collapsed observation (no-new-state proof).
+        sig = norm + "\x00" + " ".join((out_text or "").split())[:400]
+        _cmd_history.append(sig)
         if len(_cmd_history) > 12:
             del _cmd_history[0]
-        if _cmd_history.count(norm) >= 4:
+        if _cmd_history.count(sig) >= 4:
             _l5_fired = True
             return ('\n<gt-nudge reason="loop">\nGT: you have repeated the same command 4+ '
                     "times with no progress. Stop, re-read the last error, and change approach "
@@ -1172,19 +1382,70 @@ def _l5_nudge(cmd: str) -> str:
     return ""
 
 
-_FAIL_RE = re.compile(r"(FAILED|AssertionError|Traceback|[0-9]+ failed|FAIL:|Error:)", re.I)
+# ---------------------------------------------------------------------------
+# failure_persisted classification (2026-06-10, PATH B audit run 27260307167:
+# 5/7 firings were ENVIRONMENT errors — pip/C-ext/import/py-version shims —
+# and 1 firing reinforced reverting a gold-equivalent edit that had only been
+# checked against a scratch script + stale visible fixture, django-10097).
+# gt_gt §12 L5 role: a nudge must never harm a correct course (Cursor
+# mentality). Three gates, all required, uncertain -> SILENT:
+#   1. the failing command is a REAL test-runner invocation (a scratch
+#      script's failure cannot falsify a hypothesis);
+#   2. NO environment/tooling failure marker in the output (an env failure
+#      says nothing about the hypothesis — parity with the OH governor's
+#      classify_observation.is_env_failure suppression, governor.py:307);
+#   3. an explicit test/assertion FAILURE marker is present (a bare
+#      Traceback / "Error:" is not proof a TEST failed).
+# ---------------------------------------------------------------------------
+_TEST_RUNNER_RE = re.compile(
+    r"(?:^|[|&;]\s*)(?:"
+    r"python[\d.]*\s+-m\s+(?:pytest|unittest|nose2?|tox)\b"
+    r"|pytest\b|py\.test\b|tox\b|nose2?\b"
+    r"|(?:\S*/)?(?:runtests?|run_tests?)\.py\b"
+    r"|(?:\S*/)?manage\.py\s+test\b"
+    r"|go\s+test\b|cargo\s+test\b"
+    r"|npm\s+(?:run\s+)?test\b|yarn\s+(?:run\s+)?test\b|pnpm\s+(?:run\s+)?test\b"
+    r"|jest\b|mocha\b|vitest\b|rspec\b|rake\s+test\b|phpunit\b|ctest\b"
+    r"|mvn\s+\S*\s*test\b|gradlew?\s+\S*\s*test\b|make\s+(?:check|test)\b"
+    r")", re.I)
+
+_ENV_FAIL_RE = re.compile(
+    r"(ModuleNotFoundError|No module named|ImportError"
+    r"|ERROR: Could not find a version|No matching distribution found"
+    r"|Could not build wheels|subprocess-exited-with-error|metadata-generation-failed"
+    r"|error: command .* failed|fatal error: |compilation terminated"
+    r"|undefined reference to|ld returned \d+ exit status|collect2: error"
+    r"|command not found|is not recognized as an internal or external command"
+    r"|Connection refused|Network is unreachable|Temporary failure in name resolution"
+    r"|CERTIFICATE_VERIFY_FAILED|ReadTimeoutError|ProxyError"
+    r"|error while loading shared libraries|cannot open shared object"
+    r"|ImproperlyConfigured"
+    r"|AttributeError: module '[\w.]+' has no attribute"  # py-version shims (collections.Mapping)
+    r"|errors? during collection|ERROR collecting|Interrupted: \d+ error)", re.I)
+
+_TEST_FAIL_RE = re.compile(
+    r"(\bFAILED\b|\bAssertionError\b|\b\d+ failed\b|\bFAIL: "
+    r"|FAILED \(failures=|--- FAIL:|test result: FAILED"
+    r"|\b\d+ failing\b|Tests:\s+\d+ failed)")
 
 
-def _l5_failure_nudge(out_text: str) -> str:
-    """L5 hypothesis-falsified (OH hook_same_failure_persisted): the SAME test failure
-    recurs across the agent's edit(s) -> the current hypothesis is likely wrong. Fires
-    once, only after a source edit has happened (so it means 'your fix didn't take')."""
+def _l5_failure_nudge(cmd: str, out_text: str) -> str:
+    """L5 hypothesis-falsified (OH hook_same_failure_persisted): the SAME genuine
+    TEST failure recurs across the agent's edit(s) -> the hypothesis may be wrong.
+    Fires once, only after a source edit, and ONLY when the three classification
+    gates above all pass — an environment/tooling failure or a scratch-script
+    failure stays SILENT (correct-or-quiet; wrong steering is worse than none)."""
     global _l5_failure_fired
     if _l5_failure_fired or _GT_BASELINE or not out_text:
         return ""
-    if not _FAIL_RE.search(out_text):
+    # Gate 1: only a real test-runner invocation can falsify a hypothesis.
+    if not _TEST_RUNNER_RE.search(cmd or ""):
         return ""
-    fails = [ln.strip() for ln in out_text.splitlines() if _FAIL_RE.search(ln)]
+    # Gate 2: env/tooling failure -> not hypothesis evidence -> silent.
+    if _ENV_FAIL_RE.search(out_text):
+        return ""
+    # Gate 3: an explicit test/assertion failure marker is required.
+    fails = [ln.strip() for ln in out_text.splitlines() if _TEST_FAIL_RE.search(ln)]
     sig = "|".join(sorted(set(fails))[:3])[:200]
     if not sig:
         return ""
@@ -1204,7 +1465,9 @@ def _augment_output(action, out) -> None:
         return
     try:
         if not _marker_sent:
-            out["output"] = (out.get("output") or "") + "\n[gt-patch:loaded]"
+            # 2026-06-10 (PATH B audit): loader telemetry, NOT agent content —
+            # stderr only. It leaked into agent-visible stdout on 10/10 tasks.
+            print("[gt-patch:loaded]", file=sys.stderr, flush=True)
             _marker_sent = True
         cmd = action.get("command", "") if isinstance(action, dict) else str(action)
         _orig_out = out.get("output") or ""  # the command's own output (for failure detect)
@@ -1237,10 +1500,10 @@ def _augment_output(action, out) -> None:
                     out["output"] = (out.get("output") or "") + _cons
         # L5 stuck-detection: scaffold/loop (once) + hypothesis-falsified (once).
         if not _GT_BASELINE:
-            _nudge = _l5_nudge(cmd)
+            _nudge = _l5_nudge(cmd, _orig_out)
             if _nudge:
                 out["output"] = (out.get("output") or "") + _nudge
-            _fn = _l5_failure_nudge(_orig_out)
+            _fn = _l5_failure_nudge(cmd, _orig_out)
             if _fn:
                 out["output"] = (out.get("output") or "") + _fn
         ev = _evidence(cmd)

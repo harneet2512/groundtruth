@@ -371,6 +371,78 @@ def _cross_check_against_graph(
         return set()
 
 
+def _resolve_qualified_dotted(
+    dotted_candidates: set[str],
+    db_path: str | None,
+) -> set[str]:
+    """Resolve DOTTED symbol candidates (``Class.method``, ``module.func``) that the
+    bare-name cross-check can never match — graph nodes store BARE names, so a dotted
+    token like ``Widget._refresh`` always died at ``_cross_check_against_graph`` even
+    when the issue named the defect site verbatim. Its components were then often
+    dropped independently (``_refresh`` as a homonym by ``_drop_generic_hubs``,
+    ``Widget`` likewise), so the MOST SPECIFIC anchor in the issue vanished entirely
+    (the §4 anchor-extraction defect: W_CODE_DEF never engaged).
+
+    A dotted token is KEPT iff the graph can confirm the QUALIFIED pair — i.e. the
+    qualification structurally disambiguates it (this is the opposite of a homonym:
+    ``A.b`` names exactly which ``b``). Three deterministic probes, first hit wins:
+
+      1. parent-child: a node named ``tail`` whose ``parent_id`` is a node named
+         ``qualifier`` (methods inside a class — any language the indexer parents).
+      2. qualified_name: a node whose ``qualified_name`` equals the dotted token or
+         ends with ``.qualifier.tail`` (module-qualified forms).
+      3. containment: ``qualifier`` is a Class/Interface definition and a node named
+         ``tail`` is defined in the SAME file (parsers that don't populate parent_id).
+
+    Correct-or-quiet: no DB / no hit -> the token stays dropped (never minted from
+    string shape alone). Language-agnostic: pure graph lookups, no per-language logic.
+    Research: SweRank (ICLR 2025) code-entity resolution; ORACLE-SWE 2026
+    definition-site as the strongest edit-location signal.
+    """
+    if not dotted_candidates or not db_path:
+        return set()
+    out: set[str] = set()
+    try:
+        conn = sqlite3.connect(db_path)
+    except sqlite3.Error:
+        return set()
+    try:
+        for tok in dotted_candidates:
+            parts = [p for p in tok.split(".") if p]
+            if len(parts) < 2:
+                continue
+            qualifier, tail = parts[-2], parts[-1]
+            try:
+                # 1. parent-child (method defined inside the named class/scope)
+                hit = conn.execute(
+                    "SELECT 1 FROM nodes c JOIN nodes p ON c.parent_id = p.id "
+                    "WHERE c.name = ? AND p.name = ? LIMIT 1",
+                    (tail, qualifier),
+                ).fetchone()
+                # 2. qualified_name exact / suffix match
+                if not hit:
+                    hit = conn.execute(
+                        "SELECT 1 FROM nodes WHERE qualified_name = ? "
+                        "OR qualified_name LIKE ? LIMIT 1",
+                        (tok, f"%.{qualifier}.{tail}"),
+                    ).fetchone()
+                # 3. same-file containment (qualifier class defined + tail in its file)
+                if not hit:
+                    hit = conn.execute(
+                        "SELECT 1 FROM nodes p JOIN nodes c ON c.file_path = p.file_path "
+                        "WHERE p.name = ? AND p.label IN ('Class','Interface') "
+                        "AND c.name = ? AND c.id != p.id LIMIT 1",
+                        (qualifier, tail),
+                    ).fetchone()
+                if hit:
+                    out.add(tok)
+            except sqlite3.Error:
+                continue
+    finally:
+        conn.close()
+    return out
+
+
 def _drop_generic_hubs(symbols: set[str], db_path: str | None) -> set[str]:
     """Suppress graph-resolved anchors that would POLLUTE seeding — the dynamic +
     confidence-gated replacement for the static symbol blocklist.
@@ -439,6 +511,21 @@ def extract_issue_anchors(
     resolved = _cross_check_against_graph(after_filter, graph_db_path)
     resolved = _drop_generic_hubs(resolved, graph_db_path)
 
+    # QUALIFIED dotted anchors (fix 2026-06-10 — §4 anchor-extraction defect):
+    # a dotted token (``Class.method`` / ``module.func``) can never survive the
+    # bare-name cross-check (nodes store bare names) and its components are often
+    # independently dropped as homonyms — so the issue's MOST SPECIFIC anchor
+    # vanished and W_CODE_DEF (the strongest localization weight) never engaged.
+    # Resolve the QUALIFIED pair against the graph (parent-child / qualified_name /
+    # same-file containment); a confirmed pair is kept and is EXEMPT from the
+    # generic-hub gate — qualification structurally disambiguates (it is the
+    # opposite of a homonym). Correct-or-quiet: unconfirmed dotted tokens stay out.
+    _qualified_dotted = _resolve_qualified_dotted(
+        {t for t in after_filter if "." in t and t not in resolved},
+        graph_db_path,
+    )
+    resolved |= _qualified_dotted
+
     # PROVENANCE tier (BugLocator ICSE 2012; Schröter MSR 2010): the resolved
     # symbols that also occur in the TITLE / heading region are the high-signal
     # localization anchors; everything else (body + pasted traceback) is the
@@ -485,8 +572,10 @@ def extract_issue_anchors(
             pass
     _prose_demoted: set[str] = set()
     for s in list(resolved):
-        if s in _graph_confirmed_unique:
-            continue  # graph says it's uniquely defined — trust the graph
+        if s in _graph_confirmed_unique or s in _qualified_dotted:
+            # graph says it's uniquely defined / a confirmed qualified pair —
+            # trust the graph (qualification disambiguates; never shape-demote it)
+            continue
         if _is_prose_only_common_word(s, _code_idents):
             _prose_demoted.add(s)
             resolved.discard(s)

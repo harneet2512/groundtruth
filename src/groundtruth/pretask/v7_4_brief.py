@@ -233,6 +233,87 @@ def _adapt_weights_for_issue(
     return w
 
 
+def _sem_flat_rel_eps() -> float:
+    """Relative (scale-free) dispersion floor below which the dense signal is
+    declared FLAT for fusion purposes (default 0.05 of the per-task max cosine).
+    The threshold is RELATIVE to the per-task score scale (NQC-style score-
+    dispersion normalization — Shtok et al., TOIS 2012; Cummins et al., SIGIR
+    2011: the std-dev of retrieval scores predicts query effectiveness), so it
+    adapts to each task's distribution rather than being an absolute cutoff.
+    Overridable via GT_SEM_FLAT_REL_EPS; clamped to [0, 1).
+    """
+    raw = os.environ.get("GT_SEM_FLAT_REL_EPS", "")
+    if raw:
+        try:
+            v = float(raw)
+            if 0.0 <= v < 1.0:
+                return v
+        except (TypeError, ValueError):
+            pass
+    return 0.05
+
+
+def _apply_dense_dispersion_gate(
+    weights: dict[str, float],
+    sem_component_scores: dict[str, float],
+    candidate_files: list[str],
+) -> tuple[dict[str, float], bool, float]:
+    """Dimension 4 — DENSE-DISPERSION gate (fix 2026-06-10, §4.2 flat-dense defect).
+
+    The dense signal that reaches the linear fusion can arrive FLAT: every candidate
+    carries (near-)identical cosine, or only 1–2 candidates carry any cosine at all
+    (the §11.2 granularity/coverage symptom AT the fusion input). A flat dense vector
+    cannot ORDER the candidates — but with W_SEM at its dense-led default it still
+    arbitrarily boosts whichever 1–2 files happen to carry coverage, washing out the
+    structural/anchor ordering (gold defined-by-anchor files sink).
+
+    Detection (query-performance prediction, deterministic): the MAD of the sem
+    component over the candidate set, normalized by the per-task max (scale-free —
+    Shtok et al. TOIS 2012 NQC; Cummins et al. SIGIR 2011 score-dispersion). MAD is
+    0 both for the all-equal case and the 1-of-N-covered case — exactly the two flat
+    shapes observed live (sem_mad=0.00000000 with pred_2_coverage=False).
+
+    Action when flat (DECISION GATE, max-compose — never lowers a non-dense weight):
+      * W_SEM is LED DOWN to the dense floor (floored, NEVER zeroed — §11.6
+        forbid_no_sem_config invariant; the embedder stays a co-signal).
+      * The CONTENT/anchor-structural signals take the lead: W_CODE_DEF (anchor-
+        defines-file), W_FRAME (runtime-named file), W_LEX/W_PATH (exact lexical
+        surface), W_PROX (anchor proximity). W_REACH is deliberately NOT raised —
+        reach over-promotes hubs and the architecture subordinates it (BRIEFING §3,
+        gt_gt §4.2 "W_CLOSURE intentionally absent").
+    Healthy dispersion -> byte-identical weights (exact no-regression). Hybrid ≥3
+    signals remain in the fusion either way.
+
+    Returns (weights, fired, sem_mad).
+    """
+    vals = [
+        float(sem_component_scores.get(fp, 0.0) or 0.0) for fp in candidate_files
+    ]
+    if len(vals) < 2:
+        return weights, False, 0.0
+    svals = sorted(vals)
+    n = len(svals)
+    med = svals[n // 2] if n % 2 else 0.5 * (svals[n // 2 - 1] + svals[n // 2])
+    devs = sorted(abs(v - med) for v in vals)
+    mad = devs[n // 2] if n % 2 else 0.5 * (devs[n // 2 - 1] + devs[n // 2])
+    scale = max(vals)
+    flat = (scale <= 0.0) or (mad <= _sem_flat_rel_eps() * scale)
+    if not flat:
+        return weights, False, mad
+    w = dict(weights)
+    floor = _w_sem_floor()
+    if w.get("W_SEM", 0.0) > floor:
+        w["W_SEM"] = floor
+    # Content/anchor-structural lean — max-compose only (a led-up weight is never
+    # revoked; identifier_heavy leads from Dim-0 survive untouched). No W_REACH.
+    w["W_CODE_DEF"] = max(w.get("W_CODE_DEF", 0.0), 0.70)
+    w["W_FRAME"] = max(w.get("W_FRAME", 0.0), 0.60)
+    w["W_LEX"] = max(w.get("W_LEX", 0.0), 0.55)
+    w["W_PATH"] = max(w.get("W_PATH", 0.0), 0.50)
+    w["W_PROX"] = max(w.get("W_PROX", 0.0), 0.12)
+    return w, True, mad
+
+
 def _w_sem_floor() -> float:
     """The DENSE (W_SEM) FLOOR — a *substantive* co-signal floor (default 0.25),
     NOT the 0.05 proof-floor. After ALL weight adaptation, ``W_SEM >= W_SEM_FLOOR``
@@ -464,6 +545,14 @@ class V74BriefResult:
     effective_w_sem: float = 0.0
     k_sem_top_effective: int = 0      # the relative cap actually used for the sem-component map
     sem_components_full: list[float] = field(default_factory=list)  # components['sem'] over ranked_full
+    # --- Dense-dispersion gate observability (fix 2026-06-10, §4.2 flat-dense) ---
+    # fired=True means the sem component arrived FLAT at the fusion (MAD ~ 0 over
+    # the candidate set) and the fusion leaned on content/anchor-structural signals
+    # with W_SEM led down to the floor. sem_dispersion_mad is the measured MAD
+    # (8-dp float, per the deep-logging precision rule). Defaults keep callers
+    # byte-compatible.
+    sem_flat_gate_fired: bool = False
+    sem_dispersion_mad: float = 0.0
 
 
 _CACHED_MODEL: Any = None
@@ -915,10 +1004,59 @@ def _compute_code_symbol_scores(
         import sqlite3 as _sql
         conn = _sql.connect(graph_db)
         for sym in code_syms:
-            # Look up the last component (e.g., "trusted_hosts" from "request.trusted_hosts")
-            parts = sym.split(".")
+            parts = [p for p in sym.split(".") if p]
             lookup_name = parts[-1] if parts else sym
             if len(lookup_name) < 3:
+                continue
+            # QUALIFIED resolution FIRST (fix 2026-06-10 — §4 anchor-extraction
+            # defect): a dotted symbol (``Class.method``) names exactly WHICH
+            # definition the reporter meant, so resolving the bare tail by name
+            # (1/n across every same-named method) threw the qualification away
+            # and diluted the strongest signal in the issue. Resolve the PAIR:
+            #   1. parent-child join (method defined inside the named class),
+            #   2. qualified_name exact/suffix match,
+            #   3. the CONTAINING symbol's definition file (the class/scope the
+            #      reporter qualified with — per §4: ``Foo.bar`` -> the file
+            #      defining ``Foo``) for tails not defined as own nodes.
+            # A qualified hit scores by ITS OWN ambiguity (usually 1 file -> 1.0).
+            # Language-agnostic graph lookups; falls through to the bare-tail
+            # 1/n lookup when nothing qualifies (exact pre-change behavior).
+            qrows: list[tuple] = []
+            if len(parts) >= 2:
+                qualifier, tail = parts[-2], parts[-1]
+                try:
+                    qrows = conn.execute(
+                        "SELECT DISTINCT c.file_path FROM nodes c "
+                        "JOIN nodes p ON c.parent_id = p.id "
+                        "WHERE c.name = ? AND p.name = ? AND c.is_test = 0 "
+                        "AND c.file_path IS NOT NULL",
+                        (tail, qualifier),
+                    ).fetchall()
+                    if not qrows:
+                        qrows = conn.execute(
+                            "SELECT DISTINCT file_path FROM nodes "
+                            "WHERE (qualified_name = ? OR qualified_name LIKE ?) "
+                            "AND is_test = 0 AND file_path IS NOT NULL",
+                            (sym, f"%.{qualifier}.{tail}"),
+                        ).fetchall()
+                    if not qrows:
+                        # Containing-symbol fallback: the file defining the
+                        # qualifier as a Class/Interface (inherited/dynamic
+                        # tails have no own node, but the scope file is the
+                        # reporter-named defect region).
+                        qrows = conn.execute(
+                            "SELECT DISTINCT file_path FROM nodes "
+                            "WHERE name = ? AND label IN ('Class','Interface') "
+                            "AND is_test = 0 AND file_path IS NOT NULL",
+                            (qualifier,),
+                        ).fetchall()
+                except Exception:
+                    qrows = []
+            if qrows:
+                weight = 1.0 / len(qrows)
+                for (fp,) in qrows:
+                    norm = fp.replace("\\", "/").lstrip("./").lstrip("/")
+                    scores[norm] = max(scores.get(norm, 0.0), weight)
                 continue
             rows = conn.execute(
                 "SELECT DISTINCT file_path FROM nodes "
@@ -1248,6 +1386,25 @@ def run_v74(
     # that motivated #46 is subordinate to keeping the substrate GREEN; revisit by
     # populating `sem_all` correctly, NOT by starving the component of real signal.)
     sem_component_scores = sem_all if sem_all else sem_scores
+
+    # ── Dimension 4: DENSE-DISPERSION gate (fix 2026-06-10, §4.2 flat-dense) ──
+    # Runs on the sem component AS IT REACHES the fusion (post-granularity, over
+    # the final candidate set) — the exact point the flat signal was observed
+    # (sem_mad=0.00000000 live while the embedder cert was green). When the dense
+    # signal cannot discriminate (MAD ≈ 0 relative to the per-task scale: all-
+    # equal cosines OR 1-of-N coverage), lead the fusion with the content/anchor-
+    # structural signals and floor W_SEM (never zero — §11.6). Applied only on the
+    # live hybrid path with a real embedder; ablations keep their semantics, and
+    # a healthy dispersion leaves the weights byte-identical (no-regression).
+    sem_flat_gate_fired = False
+    sem_dispersion_mad = 0.0
+    if _enforce_sem_floor and ablation in ("C", "D") and all_files:
+        effective_weights, sem_flat_gate_fired, sem_dispersion_mad = (
+            _apply_dense_dispersion_gate(
+                effective_weights, sem_component_scores, all_files
+            )
+        )
+
     if ablation == "A":
         components_map = _score_variant_A(sem_scores, lex_scores, all_files)
     elif ablation in ("B0", "B1"):
@@ -1539,4 +1696,6 @@ def run_v74(
         effective_w_sem=effective_w_sem,
         k_sem_top_effective=k_sem_top_effective,
         sem_components_full=sem_components_full,
+        sem_flat_gate_fired=sem_flat_gate_fired,
+        sem_dispersion_mad=float(sem_dispersion_mad),
     )

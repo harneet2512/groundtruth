@@ -739,6 +739,42 @@ def _seed_node_rows(
         for r in rows:
             if r and r[0] is not None and r[2]:
                 out.append((int(r[0]), str(r[1]), _normalize(str(r[2]))))
+
+    # QUALIFIED dotted anchors (fix 2026-06-10 — §4 anchor-extraction defect):
+    # anchors like ``Class.method`` can never match the bare-name IN(...) query
+    # (nodes store bare names), so the issue's most specific anchor seeded
+    # NOTHING here. Resolve the qualified pair: the node named ``tail`` whose
+    # parent is named ``qualifier`` (or whose qualified_name matches). Pure
+    # recall addition — a dotted anchor that resolves seeds its REAL definition
+    # node; unresolvable dotted anchors stay non-seeding (correct-or-quiet).
+    _seen_ids = {nid for nid, _, _ in out}
+    for anc in anchors:
+        if "." not in anc:
+            continue
+        parts = [p for p in anc.split(".") if p]
+        if len(parts) < 2:
+            continue
+        qualifier, tail = parts[-2], parts[-1]
+        try:
+            qrows = conn.execute(
+                "SELECT c.id, c.name, c.file_path FROM nodes c "
+                "JOIN nodes p ON c.parent_id = p.id "
+                "WHERE c.name = ? AND p.name = ? AND c.is_test = 0",
+                (tail, qualifier),
+            ).fetchall()
+            if not qrows:
+                qrows = conn.execute(
+                    "SELECT id, name, file_path FROM nodes "
+                    "WHERE (qualified_name = ? OR qualified_name LIKE ?) "
+                    "AND is_test = 0",
+                    (anc, f"%.{qualifier}.{tail}"),
+                ).fetchall()
+        except sqlite3.Error:
+            continue
+        for r in qrows:
+            if r and r[0] is not None and r[2] and int(r[0]) not in _seen_ids:
+                _seen_ids.add(int(r[0]))
+                out.append((int(r[0]), str(r[1]), _normalize(str(r[2]))))
     return out
 
 

@@ -483,6 +483,79 @@ def _is_stdlib_shadow(code: str, target_name: str) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# DELIVERY FACT-FILTER (2026-06-10, PATH B per-layer health audit, run
+# 27260307167) — FACT-FILTERING ONLY, no ranking/anchor/fusion effect.
+# Same two classifiers as gt_mini_patch.py (kept inline there by design):
+#   (a) vendored/minified/generated paths (astropy/extern/jquery/*.min.js was
+#       delivered as a resolved [WITNESS]/caller fact) — extends the
+#       localizer's `_is_generated` W_GEN demote (ranking) to the brief's
+#       DELIVERY surface;
+#   (b) builtin/dunder-shadow names (`isinstance` -> project method named
+#       isinstance rendered as a verified-caller fact): a bare builtin call
+#       resolves verified_unique when ONE project symbol shadows the name —
+#       the resolver's T2 builtin drop (gt_gt §2.3) covers QUALIFIED calls
+#       only, and substrate graphs are frozen, so the consumer fact surface
+#       is the operative guard. Same family as the stdlib-shadow guard above.
+# ---------------------------------------------------------------------------
+_VENDOR_DIR_MARKERS: tuple[str, ...] = (
+    "/extern/", "/externals/", "/vendor/", "/vendored/", "/third_party/",
+    "/thirdparty/", "/node_modules/", "/bower_components/", "/dist/",
+    "/_generated/", "/generated/", "/site-packages/",
+)
+_MINIFIED_SUFFIXES: tuple[str, ...] = (".min.js", ".min.css", ".min.mjs", ".min.map")
+_GENERATED_FILE_MARKERS: tuple[str, ...] = (
+    "zz_generated", ".pb.go", ".pb.gw.go", "_pb2.py", "_pb2_grpc.py",
+    ".generated.", "_generated.go", ".g.dart", ".freezed.dart",
+)
+
+
+def _is_vendored_path(fp: str) -> bool:
+    """Path-class filter: vendored/minified/generated code is never a DELIVERED
+    fact. Segment-anchored, language-agnostic path conventions."""
+    f = "/" + (fp or "").replace("\\", "/").lstrip("./").lstrip("/").lower()
+    if any(m in f for m in _VENDOR_DIR_MARKERS):
+        return True
+    base = f.rsplit("/", 1)[-1]
+    if base.endswith(_MINIFIED_SUFFIXES):
+        return True
+    return any(m in base for m in _GENERATED_FILE_MARKERS)
+
+
+# Mirrors resolver.go builtinMethodNames + strongBuiltinMethodNames (the T2
+# builtin drop) + the shadowable language builtins the T2 drop cannot see
+# (it only fires on QUALIFIED calls). Kept identical to gt_mini_patch.py.
+_BUILTIN_CALLABLE_NAMES: frozenset[str] = frozenset({
+    "join", "split", "splitlines", "strip", "lstrip", "rstrip", "lower",
+    "upper", "title", "startswith", "endswith", "encode", "decode", "format",
+    "replace", "find", "rfind",
+    "get", "keys", "values", "items", "setdefault", "update", "popitem",
+    "append", "extend", "pop", "insert", "remove", "index", "count", "sort",
+    "reverse", "add", "discard", "clear", "copy",
+    "rsplit", "zfill", "casefold", "loads", "dumps",
+    "isinstance", "issubclass", "len", "print", "open", "type", "super",
+    "getattr", "setattr", "hasattr", "delattr", "repr", "str", "int", "float",
+    "bool", "list", "dict", "set", "tuple", "iter", "next", "range", "zip",
+    "map", "filter", "sorted", "reversed", "enumerate", "sum", "min", "max",
+    "abs", "round", "all", "any", "id", "hash", "vars", "dir", "callable",
+    "exists",
+    "push", "shift", "unshift", "slice", "splice", "concat", "indexof",
+    "foreach", "tostring", "write", "read", "close", "new", "make", "clone",
+    "unwrap", "expect",
+})
+
+
+def _is_builtin_shadow_name(name: str) -> bool:
+    """True when ``name`` is a builtin/dunder callable name whose call edges
+    cannot be trusted as facts regardless of recorded provenance."""
+    n = (name or "").strip()
+    if not n:
+        return False
+    if n.startswith("__") and n.endswith("__") and len(n) > 4:
+        return True
+    return n.lower() in _BUILTIN_CALLABLE_NAMES
+
+
 def _caller_contract_for_file(
     graph_db: str,
     file_path: str,
@@ -527,6 +600,10 @@ def _caller_contract_for_file(
         _det_sql = "','".join(sorted(_DETERMINISTIC_METHODS))
         _norm_fp = file_path.replace("\\", "/").lstrip("./").lstrip("/")
         for fname in func_names[:2]:
+            # 2026-06-10 fact-filter: never claim callers for a builtin/dunder-
+            # shadow name (the `isinstance` launder — callers call the BUILTIN).
+            if _is_builtin_shadow_name(fname):
+                continue
             # No confidence gate in SQL — fetch cross-file callers and classify by
             # provenance in Python. Over-fetch so non-fact rows don't crowd out
             # the deterministic ones before the per-func cap.
@@ -548,6 +625,10 @@ def _caller_contract_for_file(
             ).fetchall()
 
             for caller_file, source_line, caller_name, conf, method in rows:
+                # 2026-06-10 fact-filter: a vendored/minified/generated caller
+                # is never a fact NOR an unverified location hint.
+                if _is_vendored_path(caller_file or ""):
+                    continue
                 try:
                     conf_f = float(conf) if conf is not None else 0.0
                 except (TypeError, ValueError):
@@ -689,6 +770,12 @@ def _resolved_witnesses_for_file(
             (f"%{_norm_fp}", max_each * 4),
         ).fetchall()
         for caller_file, line, caller_name, target_name in caller_rows:
+            # 2026-06-10 fact-filter: vendored/minified caller files and
+            # builtin/dunder-shadow targets are never [WITNESS] facts.
+            if _is_vendored_path(caller_file or ""):
+                continue
+            if _is_builtin_shadow_name(target_name or ""):
+                continue
             code = _code_at(caller_file, line)
             if _is_stdlib_shadow(code, target_name or ""):
                 continue  # false caller: stdlib attr call name-matched to project symbol
@@ -730,6 +817,12 @@ def _resolved_witnesses_for_file(
             # the call-site line belongs to a DIFFERENT file than file_path:line, a latent
             # wrong-fact. Read code at the callee's definition so every field of the record
             # references the same callee location (symmetric with the caller branch).
+            # 2026-06-10 fact-filter: vendored/minified callee files and
+            # builtin/dunder-shadow callee names are never [WITNESS] facts.
+            if _is_vendored_path(callee_file or ""):
+                continue
+            if _is_builtin_shadow_name(callee_name or ""):
+                continue
             _call_code = _code_at(file_path, source_line)
             if _is_stdlib_shadow(_call_code, callee_name or ""):
                 continue
@@ -1615,11 +1708,15 @@ def render_brief(
             lines.extend(_etc_lines)
 
     # Cross-file scope hint (Signal 1)
+    # 2026-06-10 fact-filter (DELIVERY only — scope computation untouched):
+    # vendored/minified/generated files (extern/jquery.dataTables.js, PATH B
+    # audit) are never rendered as "Related files to inspect".
     if scope_files and scope_confidence in ("high", "medium"):
-        scope_names = [os.path.basename(f) for f in scope_files[:3]]
-        if scope_confidence == "high":
+        _deliverable_scope = [f for f in scope_files if not _is_vendored_path(f)]
+        scope_names = [os.path.basename(f) for f in _deliverable_scope[:3]]
+        if scope_names and scope_confidence == "high":
             lines.append(f"\nLikely multi-file scope: {', '.join(scope_names)}")
-        else:
+        elif scope_names:
             lines.append(f"\nRelated files to inspect: {', '.join(scope_names)}")
 
     # Graph-derived scope chains (Signal 2): connected file subgraphs from the
@@ -2105,16 +2202,36 @@ _GENERIC_CODE_NAMES: frozenset[str] = frozenset({
 })
 
 
-def _exact_issue_named_files(issue_text: str, graph_db: str) -> dict[str, list[str]]:
-    """{file: [funcs]} for Function/Method names appearing VERBATIM in the issue (gt_gt §4
-    exact-name seeder). A function the issue literally names is the strongest localization signal
-    that exists — its file MUST be a guaranteed candidate, never composite-scored-and-cut.
+def _exact_issue_named_files(
+    issue_text: str,
+    graph_db: str,
+    issue_anchors=None,
+) -> dict[str, list[str]]:
+    """{file: [symbols]} for Function/Method/Class/Interface names appearing VERBATIM in the
+    issue (gt_gt §4 exact-name seeder). A symbol the issue literally names is the strongest
+    localization signal that exists — its DEFINING file MUST be a guaranteed candidate, never
+    composite-scored-and-cut.
     Language/repo-agnostic (graph name match), test-blind (is_test=0). LIPI: arviz issue names
     plot_hdi 4x + links hdiplot.py, yet run_v74 never anchored it so the gold was absent from
-    ranked_full. SPECIFICITY (proven needed by held-out loguru-1297): an issue-named function is a
+    ranked_full. SPECIFICITY (proven needed by held-out loguru-1297): an issue-named symbol is a
     localization signal ONLY if it is SPECIFIC — generic names (`__init__`, `print`) appear in the
     issue AND in many files, flooding the guarantee and burying the real gold. So: skip dunders,
-    skip short generic names, and skip any name that resolves to MORE than a few files."""
+    skip short generic names, and skip any name that resolves to MORE than a few files.
+
+    UPDATED (fix 2026-06-10 — §4 candidate-union recall defect). Two generalized gaps closed:
+      * CLASS-like definitions count. The label filter was Function/Method only, so an issue
+        whose title names the defective CLASS verbatim (defined in <= _MAX_FILES_PER_NAME
+        files — a one-line grep for any agent) never earned the guarantee and the gold could
+        be absent from every rendered slot. Class/Interface is the same class-like set
+        graph_localizer._seed_node_rows already seeds on — ONE definition of "definition"
+        across the pipeline.
+      * PROVENANCE beats string shape for short names. The `len<5 and no _` skip is a SHAPE
+        heuristic against prose collisions; a short name the reporter put in the TITLE or in
+        BACKTICKS (IssueAnchors.title_symbols / code_symbols — BugLocator ICSE 2012 summary
+        weighting; arXiv:2512.07022 code-mention provenance) is reporter-confirmed, not a
+        collision — it bypasses the shape skip ONLY (still subject to the dunder / generic /
+        ambiguity gates: confidence-gated, never a free pass).
+    """
     import re as _re
     import sqlite3 as _sq
     toks = set(_re.findall(r"[A-Za-z_][A-Za-z0-9_]{3,}", issue_text or ""))
@@ -2122,13 +2239,21 @@ def _exact_issue_named_files(issue_text: str, graph_db: str) -> dict[str, list[s
     out: dict[str, list[str]] = {}
     if not toks:
         return out
+    # Reporter-confirmed provenance (title / backtick code) — exempts ONLY the
+    # short-name shape skip below, never the dunder/generic/ambiguity gates.
+    _prov: set[str] = set()
+    if issue_anchors is not None:
+        _prov = set(getattr(issue_anchors, "title_symbols", set()) or set()) | set(
+            getattr(issue_anchors, "code_symbols", set()) or set()
+        )
     _MAX_FILES_PER_NAME = 3  # a name spread across >3 files is generic, not a specific anchor
     try:
         c = _sq.connect(graph_db)
         _name_files: dict[str, set[str]] = {}
         for name, fp in c.execute(
             "SELECT DISTINCT name, file_path FROM nodes "
-            "WHERE is_test=0 AND label IN ('Function','Method') AND name IS NOT NULL"
+            "WHERE is_test=0 AND label IN ('Function','Method','Class','Interface') "
+            "AND name IS NOT NULL"
         ):
             if not name or not fp:
                 continue
@@ -2136,8 +2261,8 @@ def _exact_issue_named_files(issue_text: str, graph_db: str) -> dict[str, list[s
                 continue
             if name.lower() in _GENERIC_CODE_NAMES:             # language builtins are never anchors
                 continue
-            if len(name) < 5 and "_" not in name:               # skip short generic names
-                continue
+            if len(name) < 5 and "_" not in name and name not in _prov:
+                continue  # short generic names: only reporter-confirmed provenance admits them
             if name in toks or name.lower() in toks:
                 _name_files.setdefault(name, set()).add(fp)
         for name, files in _name_files.items():
@@ -2294,12 +2419,25 @@ def generate_v1r_brief(
     else:
         top_records = v74.ranked_full[:max_files]
 
+    # SINGLE-SOURCE ANCHORS, hoisted (fix 2026-06-10): extracted ONCE here against the
+    # SAME graph_db every consumer uses — the exact-name guarantee (both call sites,
+    # for title/backtick provenance), the /tmp/gt_issue_anchors.json write, and
+    # localize() all reuse THIS object. extract_issue_anchors is deterministic on
+    # (issue_text, graph_db), so hoisting is behavior-identical for the later users.
+    _anchors_obj = None
+    if graph_db:
+        try:
+            from groundtruth.pretask.anchors import extract_issue_anchors as _eia_h
+            _anchors_obj = _eia_h(issue_text, graph_db)
+        except Exception:
+            _anchors_obj = None
+
     # gt_gt §4 exact-name GUARANTEE (RANKING fix, not recall): a function named VERBATIM in the
     # issue and present in the graph is the strongest content signal — its file is promoted to the
     # FRONT of the candidates, never composite-scored-and-cut. Pulled from the FULL ranking (so it
     # already passed retrieval); capped to avoid flooding. (LIPI arviz: plot_hdi named 4x, verified
     # caller, was ranked below lexical stats.py and dropped from the top-5.)
-    _issue_named = _exact_issue_named_files(issue_text, graph_db)
+    _issue_named = _exact_issue_named_files(issue_text, graph_db, issue_anchors=_anchors_obj)
     if _issue_named:
         def _rf(r):
             return (r.get("path") or r.get("file") or r.get("file_path") or "").replace("\\", "/").lstrip("/")
@@ -2441,9 +2579,10 @@ def generate_v1r_brief(
             # functions ([CONTRACT] __init__/__call__/validate_backend instead of
             # cycler/validate_marker). This runs in-container AFTER the wrapper's
             # upload, so its write is authoritative for every downstream consumer.
-            from groundtruth.pretask.anchors import extract_issue_anchors as _eia
             import json as _json_anch
-            _anchors_obj = _eia(issue_text, graph_db)
+            if _anchors_obj is None:  # hoisted single-source extraction (2026-06-10)
+                from groundtruth.pretask.anchors import extract_issue_anchors as _eia
+                _anchors_obj = _eia(issue_text, graph_db)
             try:
                 with open("/tmp/gt_issue_anchors.json", "w", encoding="utf-8") as _af:
                     _json_anch.dump({
@@ -2795,7 +2934,7 @@ def generate_v1r_brief(
     #     _datetime.py top-3) keeps its slot; pure-coincidence matches drop below it.
     # Research: BLUiR ASE 2013 / FINAL_REPORT lever #4 (deterministic method, name_match != fact),
     # SWERank ICLR 2025 (verified witness hard-negative), §4 (content + gate, not reach).
-    _ein = _exact_issue_named_files(issue_text, graph_db)
+    _ein = _exact_issue_named_files(issue_text, graph_db, issue_anchors=_anchors_obj)
     if _ein:
         def _rfp(r):
             return (r.get("path") or r.get("file") or "").replace("\\", "/").lstrip("/")

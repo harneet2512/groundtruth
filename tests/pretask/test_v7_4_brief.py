@@ -382,11 +382,25 @@ def test_entered_via_graph_rescue(tiny_db_v74: str, tiny_repo: str):
 @pytest.fixture()
 def _clear_embed_cache():
     """Clear the in-memory + disk embedding cache so a per-test FakeModel's
-    embeddings are not shadowed by a prior test's run on the same db path."""
+    embeddings are not shadowed by a prior test's run on the same db path.
+
+    Also clears the CONTENT-ADDRESSED per-symbol vector cache (_SYMVEC_CACHE =
+    embed._PASSAGE_VEC_CACHE): it survives across graphs/runs, so a prior test
+    that embedded the same fixture content with the REAL model would shadow
+    this test's FakeModel vectors (the pre-existing combined-order flake on
+    test_item46, 2026-06-10)."""
     from groundtruth.pretask import anchor_select as _as
     _as._EMBED_CACHE.clear()
+    try:
+        _as._SYMVEC_CACHE.clear()
+    except Exception:
+        pass
     yield
     _as._EMBED_CACHE.clear()
+    try:
+        _as._SYMVEC_CACHE.clear()
+    except Exception:
+        pass
 
 
 class _ConstFileAntiIssueModel:

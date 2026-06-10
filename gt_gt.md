@@ -193,6 +193,30 @@ Plus **co-change** (git), **closure** (transitive reach), **FTS5** (BM25 retriev
 - The cross-language-solid property kinds remain data_flow, param, docstring, return_shape,
   caller_usage (+ now receiver-aware side_effect/field_read).
 
+> **ADDED (2026-06-10, PATH B per-layer health audit run 27260307167) — DELIVERY FACT-FILTER at
+> the consumer surfaces.** Two pollution classes were being DELIVERED as deterministic facts
+> through L1/L3/L3b despite the §2.3 trust model: (a) **vendored/minified/generated paths**
+> (`astropy/extern/jquery/*.min.js` cited as a resolved caller / raw minified jQuery as a
+> `[WITNESS]`; `jquery.dataTables.js` in "Related files to inspect"); (b) **bare builtin-shadow
+> laundering** — a bare `isinstance(...)` call resolves **`verified_unique` 0.95** when exactly ONE
+> project symbol shadows the builtin name (`TableColumns.isinstance`), rendering
+> `[CALLERS] isinstance: 1048 verified caller(s) … preserve this interface`. The §2.3 **T2 builtin
+> drop fires on QUALIFIED calls only**, and the §2.5 stdlib-shadow guard (55ab30eb) catches the
+> qualified `os.walk` shape only — the bare-call shape was the residual. Because PATH A/B substrate
+> graphs are FROZEN (read-only, hash-paritied), a resolver fix cannot reach live runs; the
+> **consumer fact surface is the operative guard**. Fix (gt_mini_patch.py + v1r_brief.py, fact-filter
+> lines only): three composited signals — path-class (`/extern/`,`/vendor/`,`/third_party/`,
+> `/node_modules/`,`/dist/`,`/_generated/`,`*.min.js`, protobuf/codegen markers — extends the
+> localizer's `_is_generated` W_GEN demote from ranking to DELIVERY), content-class (mean non-blank
+> line length > 200 = minified), and name-class (builtin/dunder set mirroring resolver.go
+> `builtinMethodNames`/`strongBuiltinMethodNames` + shadowable Python/JS/Go/Rust builtins) — applied
+> to every delivered fact: `[WITNESS]`, `[CALLERS]` (incl. the recomputed verified-caller COUNT),
+> `[CALLEE]`, contract rows, siblings, consensus scope, co-change, and the brief's
+> "Related files to inspect" render. Correct-or-quiet: exclusion suppresses, never invents.
+> Tests: `tests/test_factfilter_l5_classifier_fixes.py` (red→green). **Open resolver residual
+> (substrate rebuilds only):** extend the T2 builtin drop to bare calls so future graphs stop
+> minting `verified_unique` edges onto builtin-shadow definitions.
+
 ---
 
 ## 3. Layer — LSP enrichment
@@ -286,6 +310,48 @@ issue → ① run_v74 (candidate gen + scoring)
 >   stands byte-identical.
 > §11.8's "the #3 fusion redesign implements this floor" is **merged, live in
 > `DEFAULT_WEIGHTS`** — no longer integrating/pending.
+
+> **UPDATED (2026-06-10 — PATH B Tier-3b conformance audit, run 27260307167: the 3 RERANK_LOGIC
+> defects fixed, all keyed to issue STRUCTURE, no task/gold logic):**
+> - **① Qualified dotted/backtick anchors (§4 anchor extraction).** A dotted symbol the issue
+>   names verbatim (``` `Class.method` ```) could never survive the bare-name graph cross-check
+>   (nodes store bare names) and its components often died independently as homonyms — so the
+>   issue's MOST SPECIFIC anchor vanished and `W_CODE_DEF` (0.70, the strongest weight) never
+>   engaged; that produced the run's one confident-WRONG HIGH steer. Now `anchors.py
+>   _resolve_qualified_dotted` confirms the QUALIFIED pair against the graph (parent-child join
+>   → `qualified_name` exact/suffix → same-file containment); a confirmed pair is kept in
+>   `symbols`/`code_symbols` (exempt from the generic-hub gate — qualification disambiguates,
+>   the opposite of a homonym; unconfirmed dotted tokens stay dropped, correct-or-quiet).
+>   `v7_4_brief._compute_code_symbol_scores` resolves the pair to the defining file at full
+>   confidence (containing-class file as fallback) instead of 1/n-diluting the bare tail, and
+>   `graph_localizer._seed_node_rows` seeds the real definition node for dotted anchors.
+> - **② Exact-anchor recall guarantee covers class-likes + reporter-confirmed short names
+>   (`v1r_brief._exact_issue_named_files`).** The guarantee was Function/Method-only, so an
+>   issue whose TITLE names the defective CLASS verbatim (unique definition — a 1-line grep for
+>   any agent) never earned it and the gold could miss every rendered slot. Labels now match
+>   `_seed_node_rows`' class-like set (`Function/Method/Class/Interface` — ONE definition of
+>   "definition"); the `len<5` short-name shape skip is bypassed ONLY by reporter-confirmed
+>   provenance (`title_symbols`/`code_symbols` — BugLocator ICSE 2012 summary weighting), never
+>   unconditionally; the dunder/generic/≤3-defining-files gates are unchanged. Both call sites
+>   receive the hoisted single-source `IssueAnchors`.
+> - **③ Dimension 4 — DENSE-DISPERSION gate (`_apply_dense_dispersion_gate`, run_v74 C/D
+>   path).** The dense signal can reach the fusion FLAT (per-task `sem_mad=0.00000000` on 5/10
+>   live tasks: all-equal cosines or 1-of-N coverage). A flat dense vector cannot ORDER the
+>   candidates, but at the dense-led `W_SEM=0.40` it still arbitrarily boosts whichever 1–2
+>   files carry coverage — sinking anchor-defined gold. Detection: MAD of the sem component
+>   over the candidate set, normalized by the per-task max (scale-free, QPP score-dispersion —
+>   Shtok et al. TOIS 2012 NQC; Cummins et al. SIGIR 2011); flat iff MAD ≤ 0.05·max
+>   (`GT_SEM_FLAT_REL_EPS`). Action: W_SEM led DOWN to the floor (floored, NEVER zeroed —
+>   §11.6) and the CONTENT/anchor-structural signals led up by max-compose only
+>   (`W_CODE_DEF≥0.70, W_FRAME≥0.60, W_LEX≥0.55, W_PATH≥0.50, W_PROX≥0.12`; **W_REACH
+>   deliberately untouched** — reach over-promotes hubs and stays subordinated). Healthy
+>   dispersion → byte-identical weights. Telemetry: `V74BriefResult.sem_flat_gate_fired` +
+>   `sem_dispersion_mad` (8-dp).
+> Stage-1 proof: `tests/pretask/test_rerank_localization_fixes.py` (14 deterministic tests,
+> 11 red→green on pre-fix code + 3 negative controls); existing fusion/anchors/v74/frame
+> suites 75/75 green; the 5 failures in v1r/localizer suites are PRE-EXISTING (identical on
+> pre-fix code). One legacy assertion updated to the new contract
+> (`test_anchors_resolve_against_graph`: a graph-CONFIRMED dotted anchor is now kept).
 
 **run_v74 DEFAULT_WEIGHTS:** `W_SEM=0.40 (floor 0.25 — see the update note), W_LEX=0.50,
 W_REACH=0.05, W_PROX=0.05, W_HUB=0.10, W_COMMIT=0.0, W_PATH=0.45`, plus **`W_FRAME=0.60`**
@@ -398,6 +464,11 @@ GT delivers evidence by **hooking onto the agent's actions**, at the overall lev
 > failure, then quiet). Per-view/per-edit evidence dedups **once per (kind, file)** —
 > a documented trade vs OH's per-edit re-delivery (quieter, but a second edit to the same
 > file gets no refreshed contracts).
+> **UPDATED (2026-06-10, PATH B audit):** (a) every per-turn fact surface now passes the §2.5
+> DELIVERY FACT-FILTER (vendored/minified/generated paths + builtin/dunder-shadow names are never
+> delivered facts); (b) the one-time `[gt-patch:loaded]` loader marker now prints to **stderr**
+> (harness log) — it had leaked into agent-visible stdout at MSG 3 on 10/10 tasks (telemetry,
+> not agent content).
 
 ### The hooked tool surface
 GT registers an MCP tool surface (FastMCP, stdio): the **16 core** —
@@ -661,6 +732,19 @@ sparse-graph floor) — `W_SEM=0.40` default + `W_SEM_FLOOR=0.25` enforced last 
 `DEFAULT_WEIGHTS` (§4.2), and CHANGE 2 is committed (`5f460f23`, §5 banner). Not
 "integrating/pending" anymore.
 
+**UPDATE (2026-06-10 — Tier-3b audit closure, see the §4.2 2026-06-10 note for full detail):**
+the flat-cosine symptom of §11.2 RE-APPEARS at the FUSION INPUT (live: `sem_mad=0.00000000` on
+5/10 PATH-B tasks with the embedder cert green — granularity fixed the embedding level, not the
+per-task arrival). Closed by **Dimension 4, the dense-dispersion gate** in `run_v74`
+(`_apply_dense_dispersion_gate`): scale-free MAD flatness detection (QPP — Shtok TOIS 2012 NQC /
+Cummins SIGIR 2011) → W_SEM led to the floor (§11.6 held, never zeroed) + content/anchor-
+structural max-compose lean (no W_REACH raise — reach stays subordinated). Plus two §4
+extraction/recall fixes: qualified dotted/backtick anchors (`_resolve_qualified_dotted`,
+qualified `_compute_code_symbol_scores`, qualified localizer seeds) and the class-like +
+provenance-aware exact-name guarantee (`_exact_issue_named_files`). All three keyed to issue
+STRUCTURE (backtick/dotted form, exact-anchor-defines-file, flat dispersion) — zero task/gold
+logic; Stage-1 red→green in `tests/pretask/test_rerank_localization_fixes.py`.
+
 ---
 
 ## 12. PER-LAYER ROLE + SUCCESS CRITERION — judge each layer by ITS job, never a generic template
@@ -692,6 +776,26 @@ working" — and **"delivered" is the WRONG axis for a reindexer or an event hoo
 > resolve structurally only until an LSP server runs (the bake-pyright item, §13.5);
 > (b) on the DeepSWE substrate/proof path L6 is **gated OFF by design** (authoritative
 > read-only graph, hash parity — §6 note), so "L6 fired" is the wrong expectation there.
+
+> **UPDATED (2026-06-10, PATH B audit run 27260307167): the L5 row's mini-swe port
+> (`gt_mini_patch.py`) was BROKEN on two of its three arms and is now classification-gated.**
+> The audit measured: `failure_persisted` 1/7 substantively correct — **5 false positives on
+> ENVIRONMENT errors** (pip/C-ext/import/py-version shims) told agents with CORRECT fixes "your
+> hypothesis is likely wrong", and one firing (django-10097) reinforced reverting a
+> **gold-equivalent edit** that had only been checked against a scratch script + STALE visible
+> fixture; the `loop` nudge false-fired 1/1 (same command, NEW state each run). Fix
+> (Cursor-mentality, correct-or-quiet — parity with the OH governor's
+> `classify_observation.is_env_failure` suppression, `governor.py:307`):
+> `failure_persisted` now requires ALL of — (1) a real **test-runner invocation**
+> (pytest/unittest/runtests.py/manage.py test/go test/cargo test/npm test/jest/… — a scratch
+> script's failure can NEVER falsify a hypothesis), (2) **no env/tooling failure marker**
+> (ModuleNotFoundError/pip/build/link/network/ImproperlyConfigured/module-attr shims), and
+> (3) an explicit **test/assertion FAILURE marker** (bare `Traceback`/`Error:` no longer
+> qualifies); uncertain → SILENT. The `loop` nudge signature is now
+> **(command, normalized observation)** — it fires only on proven NO-NEW-STATE repetition.
+> `scaffold_trap` (4/5 true-positive in the audit) is unchanged. Tests:
+> `tests/test_factfilter_l5_classifier_fixes.py` (red→green, incl. the 10554 runtests.py
+> true-positive shape still firing).
 
 ---
 
