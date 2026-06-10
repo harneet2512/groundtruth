@@ -52,22 +52,26 @@ Bring the **FULL OH-depth GT** to mini-swe-agent, **language-agnostic**, unified
   `GT_REQUIRE_EMBEDDER` (ST + e5 fallbacks skipped); OH pins e5.
 
 ---
-## TWO PATHWAYS (2026-06-10, written to avoid confusion — per-launch permission ALWAYS)
+## TWO PATHWAYS (corrected 2026-06-10): SAME pipeline, MODEL is the only variable
+Same benchmark (DeepSWE-113), same substrate digest (6428af2a), same pier+mini-swe harness,
+same gates/artifacts/metrics. Each model on its natural platform:
 
-### PATH A — GCP (VM gt-sweep-1, 8vCPU, us-central1-a) = SUBSTRATE/PROOF work, $0 LLM
-- NOW: DeepSWE-113 proof sweep RUNNING (all-fixes digest 6428af2a) → the 4 answers
-  (29 SIGKILLs survive? · scc/jdtls? · dynamodb gate-1 flip? · per-language table).
-- NEXT (prep only): Verified-500 manifest builder → Verified proof sweep on the VM (awaits launch OK).
-- Pro-731: DEFERRED.
-- Rules: no secrets/tokens/project-IDs on the VM or in artifacts; images pull anonymously.
+### PATH A — GCP (VM gt-sweep-1): GT-on with **gemini-3-flash** (Vertex)
+- Bills to the $271 credits; auth = the VM's own service identity (ADC) — ZERO keys on the box.
+- Direct leaderboard reference: gemini-3-flash = 5% on the DeepSWE board → clean lift measurement.
+- Pre-launch checklist: Vertex API enabled + VM SA has Vertex-AI-User; pier+mini-swe installed on VM;
+  litellm model id (vertex_ai/gemini-3-flash); the proof sweep's 4 answers green.
+- NOW: the DeepSWE-113 proof sweep is running here first (the 4 answers).
 
-### PATH B — GHA (hbali-stack) = AGENT/LLM surface + CI
-- ARMED, awaiting explicit "launch": the 5-task probe — deepswe_full × 5 dispatches
-  (language ∈ {go,python,typescript,rust,javascript}, max_tasks=1, deepseek-v4-flash, ~$5-10, ~1hr).
-  Success = the integration audit's 12 runtime criteria + real $/task from the 8-dp logs.
-- CI substrate rebuilds + image pins live here (digest pinned: 6428af2a).
-- THEN (gated on probe green): the full DeepSWE-113 GT-on run (~$160 anchored est., ~3.5-4h).
+### PATH B — GHA: GT-on with **deepseek-v4-flash**
+- Existing DEEPSEEK_API_KEY secret; deepswe_full dispatch-registered (no 404).
+- ARMED: the 5-task probe (5x language dispatches, max_tasks=1) — awaits explicit "launch".
+
+### Cross-path payoff
+GT lifting BOTH models on identical tasks = cross-model generalization (the CLAUDE.md pillar),
+plus the Gemini side gives a direct board-baseline delta.
 
 ### Cross-path rules
-- Sequence: VM sweep 4-answers → user reviews → "launch" the 5-task probe → probe verdict → full-run decision.
-- NOTHING launches on either path without explicit per-launch permission.
+- Per-launch permission ALWAYS, both paths. No secrets/IDs in files; VM uses ADC only.
+- Sequence: VM sweep 4-answers -> user reviews -> "launch" probes (suggest 5-task probe PER PATH:
+  ~$5-10 DeepSeek cash + ~$8 Gemini credits) -> verdicts -> full-run decisions.
