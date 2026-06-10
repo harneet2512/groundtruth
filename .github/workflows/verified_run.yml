@@ -36,9 +36,9 @@ on:
         required: true
         default: "deepseek/deepseek-v4-flash"
       max_parallel:
-        description: "Concurrent matrix jobs"
+        description: "Concurrent matrix jobs (locked default = 20; one of the real run bounds alongside step_limit + the 60-min job timeout)"
         required: true
-        default: "12"
+        default: "20"
       gt_substrate_digest:
         description: "Pinned GT substrate image by IMMUTABLE digest (ghcr.io/<org>/gt-substrate@sha256:<digest>). Overrides vars.GT_SUBSTRATE_DIGEST. Never a mutable tag."
         required: false
@@ -122,9 +122,21 @@ jobs:
               maxt = int(os.environ.get("INPUT_MAX_TASKS", "5") or "0")
               if maxt > 0:
                   tasks = tasks[:maxt]
+          # GHA hard-caps a matrix at 256 jobs. Silently truncating to 256 made a
+          # naive full-500 dispatch (shard 0/1, max_tasks 0) RUN 256 and LOOK
+          # complete — corrupting the resolved denominator. FAIL-CLOSED: the
+          # selected count must be <= 256. The 500 set must be run as >= 2
+          # DELIBERATE shards (e.g. 0/4 .. 3/4), each <= 256, never one truncated
+          # dispatch. An explicit instance_ids list of <= 256 is allowed as-is.
           if len(tasks) > 256:
-              print(f"WARN: {len(tasks)} tasks > 256 GHA matrix cap; truncating", file=sys.stderr)
-              tasks = tasks[:256]
+              print(
+                  f"FATAL: {len(tasks)} selected tasks exceed the 256 GHA matrix cap. "
+                  f"Truncation is forbidden (it makes a partial run look complete). "
+                  f"Split the 500-id set into deliberate shards that each yield <= 256 "
+                  f"(e.g. shard 0/4..3/4), or pass an instance_ids list of <= 256.",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
           matrix = {"include": [{"task": t} for t in tasks]}
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
               f.write(f"matrix={json.dumps(matrix)}\n")
@@ -305,6 +317,7 @@ jobs:
               -e GT_PROOF_MODE=1 -e GT_CONTAINERIZED=1 -e GT_RUNTIME_STRATEGY=unified_substrate \
               -e GT_REQUIRE_FTS5=1 -e GT_REQUIRE_EMBEDDER=1 -e GT_FORCE_ONNX_EMBEDDER=1 \
               -e GT_REQUIRE_LSP=1 -e GT_REQUIRE_FULL_STACK=1 -e GT_ISSUE_FILE=/work_issue.txt \
+              -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 -e HF_DATASETS_OFFLINE=1 \
               -e GT_GATES_DELIVER_ALWAYS="${GT_GATES_DELIVER_ALWAYS:-0}" \
               -e GT_GIT_COMMIT="${{ github.sha }}" \
               -e GT_SUBSTRATE_DIGEST="$GT_SUBSTRATE_DIGEST" \
@@ -460,27 +473,74 @@ jobs:
           python3 << 'PYEOF'
           import glob, json, os
           iid = os.environ["TASK_ID"]
-          resolved = False
           report_files = sorted(glob.glob("/tmp/eval/*.json") + glob.glob("*.vrun*.json"))
+          have_preds = os.path.isfile("/tmp/results/predictions.jsonl") \
+              and os.path.getsize("/tmp/results/predictions.jsonl") > 0
+
+          resolved = None         # None = NOT a graded resolve (INFRA / no-prediction)
+          classification = None    # INFRA | RESOLVED | AGENT (set below)
+          report_seen = False
           for rf in report_files:
               try:
                   d = json.load(open(rf, encoding="utf-8"))
               except Exception:
                   continue
               if isinstance(d, dict) and "resolved_ids" in d:
-                  if iid in set(d.get("resolved_ids") or []):
-                      resolved = True
+                  report_seen = True
+                  resolved = iid in set(d.get("resolved_ids") or [])
+
+          if report_seen:
+              # A real graded verdict (true or false) — counts in the denominator.
+              classification = "RESOLVED" if resolved else "AGENT"
+          elif have_preds:
+              # Predictions WERE produced but the official harness emitted NO report.
+              # This is INFRA, NOT a failed solve — recording resolved:false here
+              # would corrupt the paired/resolved denominator. Exclude it, exactly
+              # like the deepswe_outcome INFRA>GT>RESOLVED>AGENT ladder. Leave
+              # `resolved` as None so the summarizer never counts it as resolved
+              # AND the marker excludes it from the resolved denominator.
+              classification = "INFRA"
+              resolved = None
+              print("EVAL_NO_REPORT: predictions present but no official report file"
+                    f" matched the globs for {iid} — classifying INFRA (excluded from"
+                    " the resolved denominator), NOT resolved:false.")
+          else:
+              # No predictions at all (agent produced no patch / eval skipped).
+              classification = "AGENT"
+              resolved = False
+
           out = {
-              "schema": "gt.verified_outcome.v1",
+              "schema": "gt.verified_outcome.v2",
               "instance_id": iid,
-              "resolved": resolved,
+              "resolved": resolved,             # None when INFRA / not graded
+              "classification": classification, # INFRA | RESOLVED | AGENT
+              "eval_no_report": (have_preds and not report_seen),
+              "had_predictions": have_preds,
               "report_files": report_files,
               "workflow_run_id": os.environ.get("GITHUB_RUN_ID"),
           }
           os.makedirs("/tmp/results", exist_ok=True)
           json.dump(out, open("/tmp/results/outcome.json", "w", encoding="utf-8"), indent=2)
-          print(f"TASK_RESOLVED={resolved} ({iid}); reports={report_files or '(none)'}")
+          print(f"TASK_RESOLVED={resolved} CLASS={classification} ({iid}); "
+                f"reports={report_files or '(none)'}")
           PYEOF
+
+      - name: Deep metrics (8-dp deep log — a run without it is NOT done)
+        if: always()
+        env:
+          TASK_ID: ${{ matrix.task }}
+        run: |
+          # PATH B emits its trajectory as <iid>.traj.json — the shared
+          # scripts/swebench/gt_deep_metrics.py finder does NOT match that shape
+          # (it looks for OH output.jsonl / pier mini-swe-agent.trajectory.json),
+          # so the Verified-specific emitter parses <iid>.traj.json + outcome.json
+          # + the substrate certs and writes the constitution-mandated 8-dp record.
+          # stdlib-only, ALWAYS writes (even on total input loss) — never fail the job.
+          python artifact_verified/verified_deep_metrics.py "$TASK_ID" /tmp/results \
+            --out "/tmp/results/gt_deep_metrics_${TASK_ID}.json" \
+            || echo "WARN: verified_deep_metrics emitter returned nonzero (record may be partial)"
+          ls -l "/tmp/results/gt_deep_metrics_${TASK_ID}.json" 2>/dev/null || \
+            echo "WARN: deep-metrics file not found after emitter"
 
       - name: Collect results
         if: always()
@@ -497,8 +557,11 @@ jobs:
           done
           cp /tmp/gt/lsp_certificate_*.json trial_results/gt_artifacts/ 2>/dev/null || true
           cp /tmp/issue.txt trial_results/gt_artifacts/issue.txt 2>/dev/null || true
-          # Agent outputs: preds, predictions, trajectory, outcome.
+          # Agent outputs: preds, predictions, trajectory, outcome, deep metrics.
           cp -r /tmp/results trial_results/results 2>/dev/null || true
+          # Surface the 8-dp deep record (+ .md companion) at the artifact root too.
+          cp /tmp/results/gt_deep_metrics_*.json trial_results/ 2>/dev/null || true
+          cp /tmp/results/gt_deep_metrics_*.md trial_results/ 2>/dev/null || true
           cp /tmp/eval/*.json trial_results/eval/ 2>/dev/null || true
           cp ./*.vrun*.json trial_results/eval/ 2>/dev/null || true
           # Per-job provenance (gt commit + digest + model + run ids).
@@ -533,7 +596,7 @@ jobs:
             echo "**Provenance** — GT commit: \`${{ github.sha }}\` | model: \`${{ inputs.model }}\` | baseline: \`${{ inputs.baseline }}\` | substrate digest: \`${GT_SUBSTRATE_DIGEST:-<unset>}\`"
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
-          TOTAL=0; RAN=0; LAUNCH_FAIL=0; RESOLVED=0; ADAPTER_FAIL=0
+          TOTAL=0; RAN=0; LAUNCH_FAIL=0; RESOLVED=0; ADAPTER_FAIL=0; INFRA=0; GRADED=0
           for d in /tmp/all/verified-run-*; do
             [ -d "$d" ] || continue
             TOTAL=$((TOTAL+1))
@@ -546,9 +609,22 @@ jobs:
               LAUNCH_FAIL=$((LAUNCH_FAIL+1))
               echo "launch-fail (AGENT_RAN_STEPS=${STEPS:-absent}): $(basename "$d")"
             fi
-            if grep -rq '"resolved": true' "$d"/results/outcome.json 2>/dev/null; then
-              RESOLVED=$((RESOLVED+1))
-              echo "RESOLVED: $(basename "$d")"
+            # INFRA (eval_no_report / classification INFRA): predictions present but
+            # the official harness emitted no report. EXCLUDED from the resolved
+            # denominator (never counted as resolved:false). Mirrors the
+            # deepswe_outcome INFRA>GT>RESOLVED>AGENT ladder.
+            if grep -rq '"classification": "INFRA"' "$d"/results/outcome.json 2>/dev/null \
+               || grep -rq '"eval_no_report": true' "$d"/results/outcome.json 2>/dev/null \
+               || grep -rq "EVAL_NO_REPORT" "$d" 2>/dev/null; then
+              INFRA=$((INFRA+1))
+              echo "infra (eval_no_report — excluded from denominator): $(basename "$d")"
+            else
+              # A graded task (true resolve verdict available, true or false).
+              GRADED=$((GRADED+1))
+              if grep -rq '"resolved": true' "$d"/results/outcome.json 2>/dev/null; then
+                RESOLVED=$((RESOLVED+1))
+                echo "RESOLVED: $(basename "$d")"
+              fi
             fi
             if grep -rq "error=DEEPSWE_ADAPTER_FAIL" "$d" 2>/dev/null; then
               ADAPTER_FAIL=$((ADAPTER_FAIL+1))
@@ -556,7 +632,9 @@ jobs:
             fi
           done
           {
-            echo "Artifacts: $TOTAL  |  agent-ran (steps>0 PARSED): $RAN  |  launch-fail: $LAUNCH_FAIL  |  **resolved (official eval): $RESOLVED**  |  adapter-fail: $ADAPTER_FAIL"
+            echo "Artifacts: $TOTAL  |  agent-ran (steps>0 PARSED): $RAN  |  launch-fail: $LAUNCH_FAIL  |  graded: $GRADED  |  **resolved (official eval): $RESOLVED / $GRADED**  |  infra/eval-no-report (excluded): $INFRA  |  adapter-fail: $ADAPTER_FAIL"
             echo ""
-            echo "Per-task: \`results/outcome.json\` (official verdict) + \`gt_artifacts/\` (8-artifact proof set incl. brief.txt) + \`trial_output.log\` ([GT_META] witness + delivery)."
+            echo "Resolved rate denominator is GRADED tasks only — INFRA / EVAL_NO_REPORT tasks are EXCLUDED (predictions present but no official report ≠ a failed solve)."
+            echo ""
+            echo "Per-task: \`results/outcome.json\` (official verdict + classification) + \`gt_artifacts/\` (8-artifact proof set incl. brief.txt) + \`trial_output.log\` ([GT_META] witness + delivery)."
           } >> "$GITHUB_STEP_SUMMARY"

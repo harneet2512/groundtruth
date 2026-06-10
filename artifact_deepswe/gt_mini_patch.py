@@ -291,6 +291,54 @@ def _norm_fp(file_path: str) -> str:
     return (file_path or "").replace("\\", "/").lstrip("./").lstrip("/")
 
 
+# Container repo-root prefixes the AGENT'S observations carry. The task runs in
+# the eval CONTAINER (verified_gt.yaml cwd=/testbed); its `docker exec` output
+# names files as /testbed/<repo-rel> (or the other roots the workflow probes:
+# verified_run.yml:284 `for d in /testbed /home/user /workspace /app /repo`).
+# But graph.db stores nodes.file_path REPO-RELATIVE (walker.go filepath.Rel over
+# the HOST extract /tmp/gt/src). So an absolute container path must have its
+# container-root prefix stripped to recover the graph's key — NOT os.path.relpath
+# against the host root (that yields `../../testbed/x` and matches nothing ->
+# every pillar goes correct-or-quiet EMPTY, the bug). Longest-first so a nested
+# root never half-strips. Trailing slash REQUIRED in the match so only a true
+# path-segment prefix is removed (never a sibling like `/testbedX/...`).
+_CONTAINER_ROOTS = ("/testbed/", "/home/user/", "/workspace/", "/app/", "/repo/")
+
+
+def _to_repo_rel(f: str, root: str) -> str:
+    """Map an observation path ``f`` to a repo-relative key matching graph.db.
+
+    Order (correct-or-quiet — never invent a match):
+      1. Absolute container path under a known container root (/testbed/ ...):
+         strip that prefix ONCE -> repo-relative. This is the dominant agent
+         shape (the task container cwd is /testbed). Both an absolute and the
+         equivalent relative path then map to the SAME graph key.
+      2. Absolute path that IS under the host extract root: os.path.relpath
+         (legitimate when the agent somehow surfaced a host path).
+      3. Any other absolute path: fall back to relpath (prior behaviour) — it
+         won't match the graph, but that's a quiet miss, not a false hit.
+      4. Already-relative path: pass through unchanged.
+
+    The container-root strip touches ONLY absolute paths, so a legitimate
+    top-level repo dir named `testbed/` (relative) is never over-stripped."""
+    if not f:
+        return f
+    nf = f.replace("\\", "/")
+    if nf.startswith("/"):
+        for cr in _CONTAINER_ROOTS:
+            if nf.startswith(cr):
+                return nf[len(cr):]
+        if root:
+            nroot = root.replace("\\", "/").rstrip("/") + "/"
+            if nf.startswith(nroot):
+                return nf[len(nroot):]
+        try:
+            return os.path.relpath(f, root) if root else f
+        except (ValueError, TypeError):
+            return f
+    return f
+
+
 # ---------------------------------------------------------------------------
 # Sanitizers (bug #4) — ported verbatim from groundtruth (stdlib-only, the
 # package is NOT importable in the task container):
@@ -482,12 +530,12 @@ def _resolved_witnesses_for_file(con, file_path: str, repo_root: str, max_each: 
             FROM nodes nt
             JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
             JOIN nodes nsrc ON e.source_id = nsrc.id
-            WHERE nt.file_path LIKE ? AND nsrc.file_path != nt.file_path
+            WHERE nt.file_path = ? AND nsrc.file_path != nt.file_path
               AND COALESCE(nsrc.is_test,0) = 0 AND e.source_line > 0
               AND LOWER(TRIM(e.resolution_method)) IN ('{det_sql}')
             ORDER BY e.source_line LIMIT ?
             """,
-            ("%" + nfp, max_each * 4),
+            (nfp, max_each * 4),
         ).fetchall()
         for caller_file, line, caller_name, target_name in caller_rows:
             code = _code_at(repo_root, caller_file, line)
@@ -505,12 +553,12 @@ def _resolved_witnesses_for_file(con, file_path: str, repo_root: str, max_each: 
             FROM nodes nsrc
             JOIN edges e ON e.source_id = nsrc.id AND e.type = 'CALLS'
             JOIN nodes nt ON e.target_id = nt.id
-            WHERE nsrc.file_path LIKE ? AND nt.file_path != nsrc.file_path
+            WHERE nsrc.file_path = ? AND nt.file_path != nsrc.file_path
               AND COALESCE(nt.is_test,0) = 0
               AND LOWER(TRIM(e.resolution_method)) IN ('{det_sql}')
             ORDER BY e.source_line LIMIT ?
             """,
-            ("%" + nfp, max_each * 4),
+            (nfp, max_each * 4),
         ).fetchall()
         for callee_file, source_line, callee_name, src_name, def_line in callee_rows:
             call_code = _code_at(repo_root, file_path, source_line)
@@ -550,14 +598,14 @@ def _caller_contract_for_file(con, file_path: str, repo_root: str, func_names: l
                 FROM nodes nt
                 JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
                 JOIN nodes nsrc ON e.source_id = nsrc.id
-                WHERE nt.name = ? AND nt.file_path LIKE ?
+                WHERE nt.name = ? AND nt.file_path = ?
                   AND nsrc.file_path != nt.file_path AND COALESCE(nsrc.is_test,0) = 0
                   AND e.source_line > 0
                 ORDER BY CASE WHEN LOWER(TRIM({method_sel})) IN ('{det_sql}') THEN 0 ELSE 1 END,
                          {conf_sel} DESC, e.source_line
                 LIMIT ?
                 """,
-                (fname, "%" + nfp, 8),
+                (fname, nfp, 8),
             ).fetchall()
             for caller_file, source_line, caller_name, conf, method in rows:
                 try:
@@ -647,12 +695,12 @@ def _edit_target_callee_contracts(con, file_path: str, func_names: list[str],
                 FROM nodes nsrc
                 JOIN edges e ON e.source_id = nsrc.id AND e.type = 'CALLS' {method_clause}
                 JOIN nodes nt ON e.target_id = nt.id
-                WHERE nsrc.name = ? AND nsrc.file_path LIKE ?
+                WHERE nsrc.name = ? AND nsrc.file_path = ?
                   AND COALESCE(nt.is_test,0) = 0
                   AND nt.signature IS NOT NULL AND TRIM(nt.signature) != ''
                 ORDER BY nt.start_line LIMIT ?
                 """,
-                (fname, "%" + nfp, max_callees * 3),
+                (fname, nfp, max_callees * 3),
             ).fetchall()
             added = 0
             for callee_name, sig, callee_file, line, method in rows:
@@ -892,7 +940,7 @@ def _evidence(cmd: str) -> str:
     if not kind or not f:
         return ""
     root = _root()
-    rel = os.path.relpath(f, root) if os.path.isabs(f) else f
+    rel = _to_repo_rel(f, root)
     key = (kind, rel)
     if key in _seen:
         return ""
@@ -1167,7 +1215,7 @@ def _augment_output(action, out) -> None:
             if _kkind == "post_edit" and _kf:
                 _source_edit_count += 1
                 _kroot = _root()
-                _krel = os.path.relpath(_kf, _kroot) if os.path.isabs(_kf) else _kf
+                _krel = _to_repo_rel(_kf, _kroot)
                 _invalidate_on_edit(_krel, _kroot)  # L6
                 _gc = _graph_contract_block(_krel)  # cross-language [SIGNATURE]/[CALLERS]
                 if _gc:
@@ -1182,7 +1230,7 @@ def _augment_output(action, out) -> None:
             _ckind, _cf = _classify(cmd)
             if _ckind == "post_view" and _cf:
                 _croot = _root()
-                _crel = os.path.relpath(_cf, _croot) if os.path.isabs(_cf) else _cf
+                _crel = _to_repo_rel(_cf, _croot)
                 _cons = _consensus_block(_crel, _croot) if not _consensus_fired \
                     else _consensus_progressive(_crel)
                 if _cons:

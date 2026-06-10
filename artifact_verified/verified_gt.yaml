@@ -152,7 +152,13 @@ agent:
     - You CANNOT continue working (reading, editing, testing) in any way on this task after submitting.
     </CRITICAL>
     </instructions>
-  step_limit: 250
+  step_limit: 250          # the REAL upper bound on agent work for this run.
+  # cost_limit is INERT for deepseek-v4-flash: litellm has no price-map entry for
+  # this model, so cost_tracking is "ignore_errors" and the per-call cost pins to
+  # 0.0 -> this 3.0 ceiling is NEVER reached and NEVER triggers. It is kept only
+  # as a defensive cap for any future priced model. Do NOT cite cost_limit as an
+  # active control on this run — the real bounds are: step_limit (250) + the
+  # 60-minute GHA job timeout + max_parallel (20) at dispatch.
   cost_limit: 3.0
 
 # The agent process runs ON THE HOST; DockerEnvironment drives the task image

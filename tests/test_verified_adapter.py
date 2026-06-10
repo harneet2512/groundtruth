@@ -39,6 +39,7 @@ _CONFIG_PATH = _ROOT / "artifact_verified" / "verified_gt.yaml"
 _PATCH_PATH = _ROOT / "artifact_deepswe" / "gt_mini_patch.py"
 _MANIFEST_PATH = _ROOT / "scripts" / "vm" / "build_verified_manifest.py"
 _WORKFLOW = _ROOT / ".github" / "workflows" / "verified_run.yml"
+_DEEP_METRICS_PATH = _ROOT / "artifact_verified" / "verified_deep_metrics.py"
 
 
 def _load(name: str, path: Path):
@@ -316,6 +317,201 @@ def test_verified_config_parses_with_deepseek_locked_sampling():
     # actual prompt templates (comments may mention it; templates must not)
     assert "<gt-task-brief" not in cfg["agent"]["instance_template"]
     assert "<gt-task-brief" not in cfg["agent"]["system_template"]
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Fix #4: container absolute-path observations resolve to the SAME pillar hit as
+# the repo-relative form (/testbed/<repo-rel> strip, not os.path.relpath).
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+def _evidence_for_view(gmp, file_token: str) -> str:
+    """Run the wrapped execute() on a `cat <file_token>` view and return the GT
+    text appended to the observation."""
+    class FakeEnv:
+        def execute(self, action, *a, **k):
+            return {"output": f"1\tdef funcA(x):", "returncode": 0, "exception_info": ""}
+
+    FakeEnv.execute = gmp._wrap_execute(FakeEnv.execute)
+    out = FakeEnv().execute({"command": f"cat {file_token}"})
+    return out["output"]
+
+
+def test_to_repo_rel_strips_container_root(monkeypatch, tmp_path):
+    """The unit contract: an absolute /testbed/<x> path maps to the graph's
+    repo-relative key <x>; a relative path passes through; a legitimate top-level
+    `testbed/` RELATIVE dir is never stripped (only absolute paths are)."""
+    _gt_env_clear(monkeypatch)
+    gmp = _load("gt_mini_patch_reporel_uut", _PATCH_PATH)
+    assert gmp._to_repo_rel("/testbed/django/core/x.py", "/tmp/gt/src") == "django/core/x.py"
+    assert gmp._to_repo_rel("/home/user/pkg/y.py", "/tmp/gt/src") == "pkg/y.py"
+    assert gmp._to_repo_rel("django/core/x.py", "/tmp/gt/src") == "django/core/x.py"
+    # over-strip guard: a RELATIVE path that happens to live under a dir literally
+    # named testbed must NOT be touched (only absolute container paths are stripped).
+    assert gmp._to_repo_rel("testbed/conf.py", "/tmp/gt/src") == "testbed/conf.py"
+    # an absolute host path under the extract root falls to relpath
+    assert gmp._to_repo_rel("/tmp/gt/src/pkg/z.py", "/tmp/gt/src") == "pkg/z.py"
+
+
+def test_abs_testbed_view_resolves_same_pillar_as_relative(monkeypatch, tmp_path):
+    """An absolute `/testbed/a.py` observation must produce the SAME deterministic
+    [WITNESS] pillar hit as the relative `a.py` form. Before the fix, relpath
+    turned /testbed/a.py into ../../testbed/a.py -> matched nothing -> EMPTY."""
+    _gt_env_clear(monkeypatch)
+    repo_root = tmp_path / "src"
+    db = tmp_path / "graph.db"
+    _make_graph(db, repo_root)
+    root_file = tmp_path / "gt_root.txt"
+    root_file.write_text(str(repo_root), encoding="utf-8")
+    monkeypatch.setenv("GT_HOST_GRAPH_DB", str(db))
+    monkeypatch.setenv("GT_CERT_DIR", str(tmp_path))
+    monkeypatch.setenv("GT_ROOT_FILE", str(root_file))
+
+    gmp = _load("gt_mini_patch_absview_uut", _PATCH_PATH)
+    # The relative form (baseline correct behaviour).
+    rel_out = _evidence_for_view(gmp, "a.py")
+    assert "<gt-evidence" in rel_out and "[WITNESS]" in rel_out
+    # _seen dedups (kind, rel) across calls; the abs path strips to the SAME rel
+    # "a.py" key, so the consensus/evidence would dedup. Reset module state so the
+    # abs-path call is judged on its own resolution, not the dedup cache.
+    gmp._seen.clear()
+    gmp._consensus_fired = False
+    abs_out = _evidence_for_view(gmp, "/testbed/a.py")
+    assert "<gt-evidence" in abs_out, "abs /testbed path produced NO evidence (relpath bug not fixed)"
+    assert "[WITNESS]" in abs_out
+    # same repo-relative key on the tag
+    assert 'file="a.py"' in abs_out
+
+
+def test_verified_deep_metrics_emits_8dp_record(tmp_path):
+    """Fix #1: the Verified <iid>.traj.json + outcome.json must yield an 8-dp deep
+    record (gt_deep_metrics.v2) — the constitution's NOT-done gate. Synthesizes a
+    minimal trajectory in the exact DefaultAgent.save shape + a v2 outcome."""
+    dm = _load("verified_deep_metrics_uut", _DEEP_METRICS_PATH)
+    iid = "astropy__astropy-12907"
+    task_dir = tmp_path
+    # 1) the trajectory the Verified adapter writes (<iid>.traj.json)
+    traj = {
+        "instance_id": iid,
+        "info": {
+            "model_stats": {"instance_cost": 0.0, "api_calls": 3},
+            "config": {
+                "model": {"model_name": "deepseek/deepseek-v4-flash"},
+                "agent": {"step_limit": 250, "cost_limit": 3.0},
+            },
+            "exit_status": "Submitted",
+            "submission": "diff --git a/astropy/x.py b/astropy/x.py\n+fix",
+            "gt_baseline": False,
+            "gt_wall_seconds": 42.12345678,
+        },
+        "messages": [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "<gt-task-brief>look at astropy/x.py</gt-task-brief>\ntask"},
+            {"role": "assistant", "content": "thought",
+             "extra": {"actions": [{"command": "cat astropy/x.py"}],
+                       "response": {"usage": {"prompt_tokens": 1000, "completion_tokens": 200,
+                                              "total_tokens": 1200},
+                                    "_hidden_params": {"response_cost": 0.0}}}},
+            {"role": "tool", "content": "1\tcode\n<gt-evidence kind=\"post_view\" file=\"astropy/x.py\">\n[WITNESS] f called by -> y.py:3\n</gt-evidence>"},
+            {"role": "assistant", "content": "edit now",
+             "extra": {"actions": [{"command": "sed -i 's/a/b/' astropy/x.py"}]}},
+            {"role": "exit", "content": "done", "extra": {"exit_status": "Submitted", "submission": "diff --git a/astropy/x.py b/x"}},
+        ],
+        "trajectory_format": "mini-swe-agent-1.1",
+    }
+    (task_dir / iid).mkdir()
+    (task_dir / iid / f"{iid}.traj.json").write_text(json.dumps(traj), encoding="utf-8")
+    # 2) the official-eval outcome (v2, graded RESOLVED)
+    (task_dir / "results").mkdir()
+    (task_dir / "results" / "outcome.json").write_text(json.dumps({
+        "schema": "gt.verified_outcome.v2", "instance_id": iid,
+        "resolved": True, "classification": "RESOLVED",
+        "eval_no_report": False, "had_predictions": True,
+    }), encoding="utf-8")
+    # 3) substrate brief (gt_sent_tokens source)
+    (task_dir / "gt_artifacts").mkdir()
+    (task_dir / "gt_artifacts" / "brief.txt").write_text("<gt-task-brief>x</gt-task-brief>" * 10, encoding="utf-8")
+
+    out_path = task_dir / f"gt_deep_metrics_{iid}.json"
+    rc = dm.main([iid, str(task_dir), "--out", str(out_path)])
+    assert rc == 0
+    rec = json.loads(out_path.read_text(encoding="utf-8"))
+
+    assert rec["schema"] == "gt_deep_metrics.v2"
+    assert rec["precision_decimals"] == 8
+    assert rec["task_id"] == iid
+    assert rec["resolved"] is True
+    assert rec["outcome"] == "resolved"
+    assert rec["official_eval"]["in_resolved_denominator"] is True
+    # agent behavior recovered from the traj
+    assert rec["agent"]["action_count"] == 3.0
+    assert rec["agent"]["edits"] >= 1.0
+    assert "astropy/x.py" in rec["agent"]["edited_files"]
+    # tokens from per-call usage; gt_sent_tokens from the brief
+    assert rec["efficiency"]["llm_tokens_in"] == 1000.0
+    assert rec["efficiency"]["gt_sent_tokens"] > 0
+    # GT delivery counted from the agent's OBSERVATION content
+    assert rec["gt_delivery"]["evidence_delivered"] >= 1.0
+    # 8-dp wall-clock + trajectory sha + model params pinned
+    assert rec["wall_clock_s"] == 42.12345678
+    assert rec["trajectory_sha256"]
+    assert rec["model"]["params"] and rec["model"]["params"].get("temperature") == 1.0
+    # the .md companion is written too
+    assert (task_dir / f"gt_deep_metrics_{iid}.md").exists()
+
+
+def test_verified_deep_metrics_infra_excluded_from_denominator(tmp_path):
+    """An EVAL_NO_REPORT (INFRA) outcome must NOT be counted resolved and must be
+    excluded from the resolved denominator (workflow fix #2 mirrored in the record)."""
+    dm = _load("verified_deep_metrics_infra_uut", _DEEP_METRICS_PATH)
+    iid = "django__django-11099"
+    (tmp_path / iid).mkdir()
+    (tmp_path / iid / f"{iid}.traj.json").write_text(json.dumps({
+        "instance_id": iid,
+        "info": {"model_stats": {"api_calls": 5, "instance_cost": 0.0},
+                 "config": {"model": {"model_name": "deepseek/deepseek-v4-flash"},
+                            "agent": {"step_limit": 250}},
+                 "exit_status": "Submitted",
+                 "submission": "diff --git a/x b/x", "gt_baseline": False,
+                 "gt_wall_seconds": 1.0},
+        "messages": [{"role": "assistant", "content": "x", "extra": {"actions": []}}],
+    }), encoding="utf-8")
+    (tmp_path / "results").mkdir()
+    (tmp_path / "results" / "outcome.json").write_text(json.dumps({
+        "schema": "gt.verified_outcome.v2", "instance_id": iid,
+        "resolved": None, "classification": "INFRA",
+        "eval_no_report": True, "had_predictions": True,
+    }), encoding="utf-8")
+    out_path = tmp_path / f"gt_deep_metrics_{iid}.json"
+    assert dm.main([iid, str(tmp_path), "--out", str(out_path)]) == 0
+    rec = json.loads(out_path.read_text(encoding="utf-8"))
+    assert rec["resolved"] is None
+    assert rec["outcome"] == "infra_failed_agent_not_started"
+    assert rec["official_eval"]["in_resolved_denominator"] is False
+
+
+def test_verified_deep_metrics_always_writes_on_missing_inputs(tmp_path):
+    """Constitution: ALWAYS WRITE. A bare task dir (no traj, no outcome, no certs)
+    still yields a record carrying outcome/failure attribution + inputs_present."""
+    dm = _load("verified_deep_metrics_empty_uut", _DEEP_METRICS_PATH)
+    iid = "nonexistent__task-1"
+    out_path = tmp_path / f"gt_deep_metrics_{iid}.json"
+    assert dm.main([iid, str(tmp_path), "--out", str(out_path)]) == 0
+    rec = json.loads(out_path.read_text(encoding="utf-8"))
+    assert rec["task_id"] == iid
+    assert rec["schema"] == "gt_deep_metrics.v2"
+    assert rec["inputs_present"]["trajectory"] is False
+    assert rec["outcome"] == "infra_failed_agent_not_started"
+
+
+def test_workflow_runs_deep_metrics_and_caps_matrix_fatal():
+    """The workflow must (a) run verified_deep_metrics.py if:always, and (b) FAIL
+    (not truncate) when the selected task count exceeds the 256 GHA matrix cap."""
+    text = _WORKFLOW.read_text(encoding="utf-8")
+    assert "verified_deep_metrics.py" in text
+    # 256 truncation removed -> FATAL sys.exit(1), never silent tasks[:256]
+    assert "tasks[:256]" not in text
+    assert "exceed the 256 GHA matrix cap" in text
 
 
 def test_adapter_witness_and_preds_reuse_are_imports_not_ports():
