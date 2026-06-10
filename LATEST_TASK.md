@@ -101,3 +101,16 @@ OPEN: in-container litellm auth (pier runs agent IN container behind squid; meta
 delegated to a focused on-VM agent to prove token-forward vs host-proxy.
 
 ### PATH B (deepseek/GHA): OOM fixed; image rebuilding (new digest pending) -> redispatch 5 tasks.
+
+## LOCKED TRIAL TASK LISTS (2026-06-10, user-corrected: 10 each)
+PATH_A (DeepSWE, 2/lang, PARALLEL=4):
+  abs-module-cache-flags,abs-stepped-slices,csstree-shorthand-expansion-compression,
+  katex-multicolumn-array-spans,adaptix-name-mapping-aliases,aiomonitor-task-snapshots-diff,
+  boa-hierarchical-evaluation-cancellation,fd-deterministic-multi-key-sorting,
+  arktype-json-schema-refs-dependencies,awilix-async-container-initialization
+PATH_B (Verified Python, max_parallel=10):
+  django__django-10097,django__django-10554,sympy__sympy-11618,sympy__sympy-12096,
+  astropy__astropy-12907,astropy__astropy-13033,astropy__astropy-13236,astropy__astropy-13398,
+  astropy__astropy-13453,astropy__astropy-13579
+EVAL: wired in BOTH (PATH B = Princeton swebench harness step; PATH A = pier verifier/reward).
+  NOT yet executed — no clean agent run has reached eval (B died at proof, A blocked on auth).
