@@ -34,21 +34,25 @@
 #                        the task container: pier/agents/utils.py PROVIDER_KEYS).
 #   vertex_ai/* models : export VERTEXAI_PROJECT=<gcp-project>  (REQUIRED — pier
 #                        raises without it; auto-forwarded into the container).
-#                        export VERTEXAI_LOCATION=<loc>  (default: us-east1, the
-#                        LOCKED region — NOT global, whose shared serving pool
-#                        carries a 429 risk; NOT auto-forwarded by pier -> this
-#                        script adds an --ae. Fallback us-east4/us-central1 if the
-#                        model isn't served in us-east1: one env override, no code change).
-#                        export GOOGLE_APPLICATION_CREDENTIALS=<sa.json on the VM>
-#                        (STRONGLY recommended: DeepSWE tasks set
-#                        allow_internet=false, so pier isolates the task container
-#                        on an internal-only docker network behind a squid egress
-#                        proxy allowlisting only .googleapis.com — the GCE metadata
-#                        server (169.254.169.254) is NOT reachable in-container, so
-#                        metadata-ADC fails there. The script bind-mounts the SA
-#                        JSON read-only at /gt_auth/adc.json and forwards the env;
-#                        its token endpoint oauth2.googleapis.com:443 passes the
-#                        proxy. Without it the run proceeds with a LOUD warning.)
+#                        export VERTEXAI_LOCATION=<loc>  (default: global —
+#                        gemini-3-flash-preview is served ONLY at location=global;
+#                        regions 404. Auto --ae'd into the container.)
+#                        AUTH = forwarded metadata token (NO SA key, NO ADC):
+#                        DeepSWE tasks set allow_internet=false, so pier isolates the
+#                        agent on an internal-only network behind a squid proxy
+#                        (allowlist .googleapis.com). metadata (169.254.169.254) is
+#                        UNREACHABLE in-container, and org policy
+#                        iam.disableServiceAccountKeyCreation forbids SA-key JSON.
+#                        BUT aiplatform/oauth2.googleapis.com ARE reachable. So this
+#                        script starts gt_vertex_token_refresher.sh on the HOST, which
+#                        mints an OAuth token from metadata (cloud-platform scope) and
+#                        keeps it fresh at $GT_AUTH_DIR/vertex_token (default /gt_auth,
+#                        VM-only — NEVER in the repo). The dir is bind-mounted ro into
+#                        the container; gt_vertex_token_shim.py (auto-loaded via
+#                        PYTHONPATH=/gt_auth + sitecustomize) makes litellm use that
+#                        token. Refresh every ~40 min (TTL ~60); live via dir-mount.
+#                        No GOOGLE_APPLICATION_CREDENTIALS / SA JSON is needed or used.
+#                        Override the auth dir with GT_AUTH_DIR=<vm-path outside repo>.
 #
 # Inputs (env, overridable by flags):
 #   MANIFEST             manifest json: {"tasks":[{"instance_id","language","docker_image"},...]}
@@ -194,22 +198,41 @@ case "$MODEL" in
       echo "NEVER hardcode it — export VERTEXAI_PROJECT=<your-gcp-project> and relaunch."
       exit 2
     fi
-    # FORCED to 'global' (2026-06-10): gemini-3-flash-preview is Pre-GA and served ONLY
-    # at the global endpoint — live-probed 404 on BOTH us-east1 and us-central1, 200 on
-    # global. The us-east1 429-avoidance plan is moot when the model isn't served there.
-    # 429 risk on global is mitigated by PARALLEL=4 + num_retries=3 + exp backoff.
+    # gemini-3-flash-preview is served ONLY at location=global (404 on regions),
+    # so default to global. (us-east1 etc. 404 for this model.) Operator overrides.
     export VERTEXAI_LOCATION="${VERTEXAI_LOCATION:-global}"
     echo "vertex auth: VERTEXAI_PROJECT=<set> VERTEXAI_LOCATION=$VERTEXAI_LOCATION"
-    if [ -n "${GOOGLE_APPLICATION_CREDENTIALS:-}" ]; then
-      [ -f "$GOOGLE_APPLICATION_CREDENTIALS" ] || { echo "FATAL: GOOGLE_APPLICATION_CREDENTIALS not a file: $GOOGLE_APPLICATION_CREDENTIALS"; exit 2; }
-      echo "vertex auth: SA JSON will be bind-mounted ro at /gt_auth/adc.json (token endpoint oauth2.googleapis.com passes the egress proxy)"
-    else
-      echo "WARNING: GOOGLE_APPLICATION_CREDENTIALS unset. DeepSWE tasks run with"
-      echo "WARNING: allow_internet=false -> pier's internal-only network + squid proxy"
-      echo "WARNING: (allowlist .googleapis.com) BLOCK the GCE metadata server in-container,"
-      echo "WARNING: so metadata-ADC is expected to FAIL inside the task container."
-      echo "WARNING: Export a service-account JSON path to be safe."
+    # ── IN-CONTAINER VERTEX AUTH = forwarded metadata token (NO ADC / metadata / SA-key).
+    # DeepSWE tasks set allow_internet=false -> pier isolates the agent on an internal-only
+    # network behind a squid proxy (allowlist .googleapis.com). The GCE metadata server is
+    # UNREACHABLE in-container and org policy iam.disableServiceAccountKeyCreation forbids
+    # SA-key JSON. BUT aiplatform.googleapis.com + oauth2.googleapis.com ARE reachable.
+    # So the HOST mints an OAuth token from metadata (cloud-platform scope) and keeps it
+    # fresh at $GT_AUTH_DIR/vertex_token; the agent's litellm consumes it via
+    # gt_vertex_token_shim.py (auto-loaded from PYTHONPATH=$GT_AUTH_DIR via sitecustomize).
+    # $GT_AUTH_DIR is a VM-only dir (default /gt_auth) — NEVER inside the repo, no secret
+    # is ever written to /data/groundtruth. Proven end-to-end (in-container mini-swe-agent
+    # gemini-3-flash-preview call succeeded through the live squid proxy, 2026-06-10).
+    export GT_AUTH_DIR="${GT_AUTH_DIR:-/gt_auth}"
+    case "$GT_AUTH_DIR" in
+      "$REPO_ROOT"*|/data/groundtruth*) echo "FATAL: GT_AUTH_DIR ($GT_AUTH_DIR) must not be inside the repo (token would risk being committed)"; exit 2 ;;
+    esac
+    GT_VERTEX_SHIM="${GT_VERTEX_SHIM:-$REPO_ROOT/artifact_deepswe/gt_integration/gt_vertex_token_shim.py}"
+    [ -f "$GT_VERTEX_SHIM" ] || { echo "FATAL: vertex token shim not found: $GT_VERTEX_SHIM"; exit 2; }
+    # Start the host-side token refresher (mints now + every ~40 min; first mint must succeed).
+    GT_AUTH_DIR="$GT_AUTH_DIR" SHIM_SRC="$GT_VERTEX_SHIM"       "$REPO_ROOT/scripts/vm/gt_vertex_token_refresher.sh" >>"$OUT_DIR/token_refresher.log" 2>&1 &
+    GT_TOKEN_REFRESHER_PID=$!
+    export GT_TOKEN_REFRESHER_PID
+    # Wait (<=30s) for the first token file to appear.
+    for _i in $(seq 1 30); do [ -s "$GT_AUTH_DIR/vertex_token" ] && break; sleep 1; done
+    if [ ! -s "$GT_AUTH_DIR/vertex_token" ]; then
+      echo "FATAL: token refresher did not produce $GT_AUTH_DIR/vertex_token (see $OUT_DIR/token_refresher.log)"
+      kill "$GT_TOKEN_REFRESHER_PID" 2>/dev/null || true
+      exit 2
     fi
+    # Kill the refresher on exit (best-effort).
+    trap '[ -n "${GT_TOKEN_REFRESHER_PID:-}" ] && kill "$GT_TOKEN_REFRESHER_PID" 2>/dev/null || true' EXIT
+    echo "vertex auth: forwarded-token mode armed (refresher pid=$GT_TOKEN_REFRESHER_PID, dir=$GT_AUTH_DIR)"
     ;;
   deepseek/*)
     if [ -z "${DEEPSEEK_API_KEY:-}" ]; then
@@ -721,16 +744,22 @@ PYEOF
     # graph; ro => no divergent reindex). JSON is the pier --mounts-json contract.
     local GT_C_ARTIFACTS=/gt_artifacts
     local MOUNTS_JSON="[{\"type\":\"bind\",\"source\":\"${art_dir}\",\"target\":\"${GT_C_ARTIFACTS}\",\"read_only\":true}"
-    # Vertex SA JSON: bind-mount ro + forward the env (metadata-ADC is blocked by the
-    # egress proxy — see header). NO secret content touches this script or any file.
+    # Vertex auth = forwarded metadata token (NO ADC / metadata / SA-key). Bind-mount
+    # the host token DIRECTORY $GT_AUTH_DIR -> /gt_auth READ-ONLY (directory, not file,
+    # so the host refresher's atomic token rewrites are visible live in-container), and
+    # forward the shim env: PYTHONPATH=/gt_auth (sitecustomize auto-loads
+    # gt_vertex_token_shim.py), GT_VERTEX_TOKEN_FILE, VERTEXAI_PROJECT/LOCATION. The
+    # shim patches litellm VertexBase to use the file token, skipping google-auth.
+    # No secret touches this script or the repo.
     local -a AE_EXTRA=()
     case "$MODEL" in
       vertex_ai/*)
-        AE_EXTRA+=( --ae VERTEXAI_LOCATION="${VERTEXAI_LOCATION:-us-east1}" )
-        if [ -n "${GOOGLE_APPLICATION_CREDENTIALS:-}" ]; then
-          MOUNTS_JSON+=",{\"type\":\"bind\",\"source\":\"${GOOGLE_APPLICATION_CREDENTIALS}\",\"target\":\"/gt_auth/adc.json\",\"read_only\":true}"
-          AE_EXTRA+=( --ae GOOGLE_APPLICATION_CREDENTIALS="/gt_auth/adc.json" )
-        fi
+        local GTA="${GT_AUTH_DIR:-/gt_auth}"
+        MOUNTS_JSON+=",{\"type\":\"bind\",\"source\":\"${GTA}\",\"target\":\"/gt_auth\",\"read_only\":true}"
+        AE_EXTRA+=( --ae VERTEXAI_LOCATION="${VERTEXAI_LOCATION:-global}" )
+        AE_EXTRA+=( --ae VERTEXAI_PROJECT="${VERTEXAI_PROJECT}" )
+        AE_EXTRA+=( --ae GT_VERTEX_TOKEN_FILE="/gt_auth/vertex_token" )
+        AE_EXTRA+=( --ae PYTHONPATH="/gt_auth" )
         ;;
     esac
     MOUNTS_JSON+="]"
