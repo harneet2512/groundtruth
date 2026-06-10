@@ -25,7 +25,10 @@ import numpy as np
 from groundtruth.pretask.anchors import IssueAnchors
 from groundtruth.pretask.hybrid import lexical_file_search
 from groundtruth.memory.enrich.embed import (
+    PASSAGE_CACHE_VERSION,
+    _PASSAGE_VEC_CACHE,
     aggregate_symbol_cosines,
+    model_identity,
     passage_hash,
     read_agg_params,
     symbol_passage,
@@ -141,26 +144,20 @@ _EMBED_CACHE: dict[str, tuple[list[str], dict[str, np.ndarray]]] = {}
 
 # Content-addressed per-symbol vector cache (survives across graphs/runs): keyed by
 # sha256(version:model:dim:passage). One ONNX encode per UNIQUE passage, ever.
-_SYMVEC_CACHE: dict[str, np.ndarray] = {}
+# SHARED STORE (encode-blowup fix 2026-06-09): this is the SAME bounded-LRU object
+# as embed._PASSAGE_VEC_CACHE, so the other semantic half
+# (graph_localizer._semantic_score_by_file) hits vectors this half already paid
+# for within the task — and vice versa. The local name is kept for back-compat
+# (tests clear it via anchor_select._SYMVEC_CACHE).
+_SYMVEC_CACHE = _PASSAGE_VEC_CACHE
 
 
 def _model_identity(model: object) -> tuple[str, int]:
-    """Best-effort (model_name, dim) for the passage cache key. Defaults to the
-    CONFIGURED localization embedder identity (CHANGE 2: gte-modernbert/768 by default,
-    or GT_EMBED_MODEL_NAME/GT_EMBED_DIM) when the adapter does not expose them — so the
-    content-addressed symbol-vector cache key flips with the model and stale e5 vectors
-    are never reused under a new model."""
-    from groundtruth.memory.enrich.embed import _default_embed_model, _default_embed_dim
-
-    name = getattr(model, "model_name", None)
-    if not name:
-        inner = getattr(model, "_m", None)
-        name = getattr(inner, "model_name", None)
-    dim = getattr(model, "dim", None)
-    if dim is None:
-        inner = getattr(model, "_m", None)
-        dim = getattr(inner, "dim", None)
-    return (str(name or _default_embed_model()), int(dim or _default_embed_dim()))
+    """Best-effort (model_name, dim) for the passage cache key. Delegates to the
+    single shared implementation (embed.model_identity) so both semantic halves
+    key the content-addressed vector cache IDENTICALLY — a fork here would split
+    the cache and silently double the encode work."""
+    return model_identity(model)
 
 
 def _file_summary(file_path: str, repo_root: str, max_chars: int = 600) -> str:
@@ -199,7 +196,9 @@ def _embed(texts: list[str], model: object, *, is_query: bool = False) -> np.nda
 #   sym2-fn  = per-SYMBOL passages aggregated by MaxSim (CHANGE 1) — one vector per
 #              indexed symbol, file score = MaxSim over its symbols. Bumping past
 #              sym1 abandons every stale file-bag .pkl so the two shapes never mix.
-_SUMMARY_VERSION = "sym2-fn"
+# Single-sourced from embed.PASSAGE_CACHE_VERSION (2026-06-09) so the shared
+# passage-vector cache key can never drift between the two semantic halves.
+_SUMMARY_VERSION = PASSAGE_CACHE_VERSION
 
 
 def _cache_key(graph_db: str, model_name: str = "", dim: int = 0) -> str:
@@ -337,27 +336,38 @@ def _get_file_embeddings(
                 file_passages[fp] = [fb]
 
     # Gather the UNIQUE passages that miss the content-addressed vector cache, embed
-    # them ONCE in a single batched ONNX pass, store by passage-hash.
+    # them ONCE in a single batched ONNX pass, store by passage-hash. `vec_by_hash`
+    # pins THIS call's vectors locally (hits AND fresh encodes) so the shared
+    # bounded-LRU cache's eviction can never drop a vector between lookup and
+    # matrix assembly below.
+    vec_by_hash: dict[str, np.ndarray] = {}
     miss_hashes: list[str] = []
     miss_passages: list[str] = []
     seen_miss: set[str] = set()
     for fp in file_paths:
         for passage in file_passages[fp]:
             h = passage_hash(passage, model_name, dim, _SUMMARY_VERSION)
-            if h not in _SYMVEC_CACHE and h not in seen_miss:
+            if h in vec_by_hash or h in seen_miss:
+                continue
+            cached = _SYMVEC_CACHE.get(h)
+            if cached is not None:
+                vec_by_hash[h] = np.asarray(cached, dtype=np.float32)
+            else:
                 seen_miss.add(h)
                 miss_hashes.append(h)
                 miss_passages.append(passage)
     if miss_passages:
         new_embs = _embed(miss_passages, model)  # PASSAGE prefix (is_query=False)
         for h, vec in zip(miss_hashes, new_embs):
-            _SYMVEC_CACHE[h] = np.asarray(vec, dtype=np.float32)
+            v = np.asarray(vec, dtype=np.float32)
+            vec_by_hash[h] = v
+            _SYMVEC_CACHE[h] = v
 
-    # Assemble the per-file symbol-vector matrices from the cache.
+    # Assemble the per-file symbol-vector matrices from this call's pinned vectors.
     file_matrix: dict[str, np.ndarray] = {}
     for fp in file_paths:
         vecs = [
-            _SYMVEC_CACHE[passage_hash(p, model_name, dim, _SUMMARY_VERSION)]
+            vec_by_hash[passage_hash(p, model_name, dim, _SUMMARY_VERSION)]
             for p in file_passages[fp]
         ]
         if vecs:

@@ -1443,7 +1443,42 @@ def _get_embedder():
     return _EMBEDDER
 
 
-def _semantic_score_by_file(issue_text: str, graph_db: str, files: set[str]) -> dict[str, float]:
+def _sem_passage_budget() -> int:
+    """``GT_SEM_PASSAGE_BUDGET``: hard per-call ENCODE budget for
+    _semantic_score_by_file (encode-blowup fix 2026-06-09; run 27249519544:
+    29/113 tasks SIGKILL exit-137 during BRIEF generation on big repos). Counts
+    passages actually SENT to the embedder — cache hits are free. Generous but
+    FINITE default; clamped to >=1 so there is never silent infinite work.
+    Malformed values fall back to the default (correct-or-quiet)."""
+    default = 4096
+    raw = os.environ.get("GT_SEM_PASSAGE_BUDGET")
+    if raw:
+        try:
+            return max(1, int(raw))
+        except (TypeError, ValueError):
+            pass
+    return default
+
+
+def _sem_pool_files(top_k: int) -> int:
+    """``GT_SEM_POOL_FILES``: how many top pre-semantic candidates the semantic
+    ranker scores (the localize call-site pool). Default ``max(6*top_k, 48)`` —
+    generous headroom above the final window so the semantic signal can still
+    PROMOTE a mid-pack candidate. Clamped to >= top_k so the final window is
+    always fully inside the scored pool (the final-top_k ⊆ pool invariant)."""
+    default = max(6 * max(top_k, 1), 48)
+    raw = os.environ.get("GT_SEM_POOL_FILES")
+    if raw:
+        try:
+            return max(int(raw), max(top_k, 1))
+        except (TypeError, ValueError):
+            pass
+    return default
+
+
+def _semantic_score_by_file(
+    issue_text: str, graph_db: str, files: "Iterable[str]"
+) -> dict[str, float]:
     """Semantic similarity between the issue and each candidate file's CODE CONTENT.
 
     CHANGE 1 — symbol-level granularity. Each non-test SYMBOL in a candidate file is
@@ -1452,7 +1487,19 @@ def _semantic_score_by_file(issue_text: str, graph_db: str, files: set[str]) -> 
     ``alpha*max_i(cos_i) + (1-alpha)*mean(top_k cos_i)`` — so a file's gold function
     is not averaged into its 60 siblings (which collapsed sibling cosines to a flat
     0.80-0.84 band). Demand-scoped to the candidate ``files`` set only. Return CONTRACT
-    is byte-identical: ``dict[file_path -> float]``; empty dict when no embedder."""
+    is byte-identical: ``dict[file_path -> float]``; empty dict when no embedder.
+
+    ENCODE DISCIPLINE (fix 2026-06-09, gt_gt §11.2 "cache by node-content hash"):
+    ``files`` iteration order is the PRIORITY order (the call site passes the
+    pre-semantic candidate ranking). Vectors are content-addressed in the shared
+    bounded-LRU ``embed._PASSAGE_VEC_CACHE`` (model+dim+version-keyed
+    ``passage_hash``) so the SAME passage — scored again this task by the other
+    semantic half, or on a later call — is never re-encoded. Fresh encodes are
+    hard-capped by ``GT_SEM_PASSAGE_BUDGET``; past the budget, the lowest-priority
+    files simply stay unscored (absent from the result, never a fake 0.0) and ONE
+    ``[GT_SEM] passage budget hit (X/Y encoded)`` line goes to stderr — bounded
+    beats killed."""
+    files = list(files)
     model = _get_embedder()
     # PROOF MODE (Stage 3): a required embedder with a non-empty candidate set must
     # produce a real semantic ranking — the silent {} returns below (DB error, no
@@ -1460,7 +1507,11 @@ def _semantic_score_by_file(issue_text: str, graph_db: str, files: set[str]) -> 
     # localize's 3-ranker agreement. Guard each, raise in proof mode only.
     from groundtruth.runtime import proof as _proof
     from groundtruth.memory.enrich.embed import (
+        _PASSAGE_VEC_CACHE,
+        PASSAGE_CACHE_VERSION,
         aggregate_symbol_cosines,
+        model_identity,
+        passage_hash,
         read_agg_params,
         symbol_passage,
     )
@@ -1516,17 +1567,49 @@ def _semantic_score_by_file(issue_text: str, graph_db: str, files: set[str]) -> 
                            f"{len(want)} candidates but 0 symbol passages assembled from graph.db")
         return {}
     import numpy as np
-    # ONE encode over the issue (texts[0] -> QUERY) + every unique symbol passage
-    # (texts[1:] -> PASSAGES); the _OnnxEmbedderAdapter preserves the e5 asymmetry.
-    fps = list(file_passages)
-    uniq: dict[str, int] = {}
-    flat: list[str] = []
-    for f in fps:
+    # PRIORITY ORDER = the caller's iteration order (the call site passes the
+    # pre-semantic candidate ranking). The encode budget truncates from the BACK,
+    # so the lowest-priority candidates lose their semantic scores first.
+    order: list[str] = []
+    _seen_f: set[str] = set()
+    for f in files:
+        k = _normalize(f)
+        if k in file_passages and k not in _seen_f:
+            _seen_f.add(k)
+            order.append(k)
+    # CONTENT-ADDRESSED CACHE + HARD ENCODE BUDGET (fix 2026-06-09). Every unique
+    # passage is looked up in the shared bounded-LRU (embed._PASSAGE_VEC_CACHE,
+    # model+dim+version-keyed passage_hash — gt_gt §11.2 "cache by node-content
+    # hash"); only MISSES are encoded, capped at GT_SEM_PASSAGE_BUDGET. vec_by_hash
+    # pins this call's vectors locally so LRU eviction can never drop one between
+    # lookup and scoring.
+    model_name, dim = model_identity(model)
+    budget = _sem_passage_budget()
+    hash_of: dict[str, str] = {}
+    vec_by_hash: dict[str, "np.ndarray"] = {}
+    seen_hashes: set[str] = set()
+    to_encode: list[str] = []
+    to_encode_hashes: list[str] = []
+    for f in order:
         for p in file_passages[f]:
-            if p not in uniq:
-                uniq[p] = len(flat)
-                flat.append(p)
-    texts = [issue_text[:2000]] + flat
+            h = hash_of.get(p)
+            if h is None:
+                h = passage_hash(p, model_name, dim, PASSAGE_CACHE_VERSION)
+                hash_of[p] = h
+            if h in seen_hashes:
+                continue
+            seen_hashes.add(h)
+            cached = _PASSAGE_VEC_CACHE.get(h)
+            if cached is not None:
+                vec_by_hash[h] = np.asarray(cached, dtype=np.float32)
+            elif len(to_encode) < budget:
+                to_encode.append(p)
+                to_encode_hashes.append(h)
+            # else: over budget — this passage stays unscored (bounded beats killed).
+    n_hits = len(vec_by_hash)
+    # ONE encode over the issue (texts[0] -> QUERY) + the cache-missed passages
+    # (texts[1:] -> PASSAGES); the _OnnxEmbedderAdapter preserves the e5 asymmetry.
+    texts = [issue_text[:2000]] + to_encode
     try:
         embs = model.encode(texts, normalize_embeddings=True, show_progress_bar=False)
     except Exception as _e:
@@ -1535,12 +1618,32 @@ def _semantic_score_by_file(issue_text: str, graph_db: str, files: set[str]) -> 
         return {}
     embs = np.asarray(embs, dtype=np.float32)
     q = embs[0]
-    sym_vecs = embs[1:]
+    for h, vec in zip(to_encode_hashes, embs[1:]):
+        v = np.asarray(vec, dtype=np.float32)
+        vec_by_hash[h] = v
+        _PASSAGE_VEC_CACHE[h] = v
+    n_skipped = len(seen_hashes) - n_hits - len(to_encode)
+    if n_skipped > 0:
+        # Correct-or-quiet: ONE line, stderr only (never agent-visible stdout).
+        import sys as _sys
+        print(
+            f"[GT_SEM] passage budget hit ({len(to_encode)}/{len(seen_hashes)} encoded; "
+            f"{n_hits} cached; {n_skipped} unique passages skipped)",
+            file=_sys.stderr,
+        )
     alpha, top_k = read_agg_params()
     _res: dict[str, float] = {}
-    for f in fps:
-        cosines = [float(np.dot(q, sym_vecs[uniq[p]])) for p in file_passages[f]]
-        cosines = [c for c in cosines if np.isfinite(c)]
+    for f in order:
+        cosines = []
+        for p in file_passages[f]:
+            v = vec_by_hash.get(hash_of[p])
+            if v is None:
+                continue  # over-budget passage — score the file on what IS available
+            c = float(np.dot(q, v))
+            if np.isfinite(c):
+                cosines.append(c)
+        if not cosines:
+            continue  # fully unscored (budget) — absent from the result, never a fake 0.0
         _res[f] = aggregate_symbol_cosines(cosines, alpha=alpha, top_k=top_k)
     if _proof_on and _res:
         _nz = sum(1 for v in _res.values() if v and v > 0)
@@ -2202,8 +2305,40 @@ def localize(
     # (weasyprint overflow->block_box_layout; sqllineage MetaDataProvider->create_insert).
     # Fused with grep (lexical) and struct (graph) by 3-way Reciprocal Rank Fusion —
     # ONE pipeline, three signals. No-op (deterministic) when no embedder is available.
-    _sem = _semantic_score_by_file(issue_text, graph_db, {c.file_path for c in candidates})
-    _sem_order = sorted(candidates, key=lambda c: -_sem.get(_normalize(c.file_path), 0.0)) if _sem else []
+    #
+    # ENCODE ONLY WHAT GETS RANKED (fix 2026-06-09; run 27249519544: 29/113 tasks
+    # SIGKILL exit-137 during BRIEF generation on big repos): this used to score the
+    # FULL pre-truncation candidate set — hundreds of witnessed files × ≤80
+    # ONNX-encoded passages per task, before the top_k cut below. The semantic pool
+    # is now the top _sem_pool_files(top_k) candidates under the DETERMINISTIC
+    # pre-semantic ordering (grep floor, depth authority, 2-way grep+struct RRF —
+    # the SAME primary keys as the final sort). Soundness of the cap: the semantic
+    # term can only ADD RRF mass, pool members are exactly the candidates with the
+    # most 2-way mass within each (floor, authority) stratum, and every non-pool /
+    # unscored candidate falls to rank _BIG in _sem_rank — so at least pool-size
+    # candidates always outrank any non-pool candidate and the final top_k window
+    # is ALWAYS a subset of the pool. The agreement vote's semantic top-3 is
+    # therefore computed over every candidate that can actually render. What is
+    # given up: a candidate BELOW the pool cutoff can no longer be promoted into
+    # the window by semantic rank alone (bounded beats killed).
+    def _rrf2(c: Candidate) -> float:
+        return (1.0 / (60 + _grep_rank.get(id(c), _BIG))
+                + 1.0 / (60 + _struct_rank.get(id(c), _BIG)))
+
+    _sem_pool = sorted(
+        candidates,
+        key=lambda c: (_grep_floor(c), _depth_authority(c), -_rrf2(c), c.file_path),
+    )[:_sem_pool_files(top_k)]
+    _sem = _semantic_score_by_file(
+        issue_text, graph_db, [c.file_path for c in _sem_pool]
+    )
+    # Rank ONLY scored candidates: a file with no semantic score (outside the pool,
+    # over the encode budget, or no embeddable symbols) must fall to rank _BIG
+    # (≈0 RRF mass) — never inherit a small list-position rank from a 0.0 default.
+    _sem_order = sorted(
+        (c for c in candidates if _normalize(c.file_path) in _sem),
+        key=lambda c: -_sem.get(_normalize(c.file_path), 0.0),
+    ) if _sem else []
     _sem_rank = {id(c): i for i, c in enumerate(_sem_order)}
 
     # ---- MULTI-SIGNAL AGREEMENT COUNT (the grep-floor build) ----

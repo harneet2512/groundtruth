@@ -14,6 +14,7 @@ import hashlib
 import os
 import time
 import threading
+from collections import OrderedDict
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -316,6 +317,88 @@ def passage_hash(passage: str, model_name: str, dim: int, version: str) -> str:
     automatically invalidated when any of those change."""
     sig = f"{version}:{model_name}:{dim}:{passage}"
     return hashlib.sha256(sig.encode("utf-8")).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Shared content-addressed passage-vector cache (encode-blowup fix 2026-06-09)
+# ---------------------------------------------------------------------------
+# Run 27249519544: 29/113 tasks SIGKILL (exit 137) during BRIEF generation because
+# graph_localizer._semantic_score_by_file re-encoded EVERY witnessed candidate
+# file's per-symbol passages — hundreds of files × ≤80 passages per task — with NO
+# cache. gt_gt §11.2 prescribes "cache by node-content hash"; this is that cache,
+# single-sourced HERE (per the module contract above: both semantic halves share
+# ONE implementation and ONE cache key) so a file scored by BOTH halves
+# (anchor_select.semantic_top_k and graph_localizer._semantic_score_by_file)
+# within one task is encoded exactly once.
+
+# The single version tag folded into every passage_hash. Bump when the passage
+# CONTENT shape changes (it started life as anchor_select._SUMMARY_VERSION, which
+# now aliases this constant so the two halves can never drift apart).
+PASSAGE_CACHE_VERSION = "sym2-fn"
+
+
+class _PassageVecCache(OrderedDict):
+    """Bounded LRU dict mapping ``passage_hash`` -> float32 vector.
+
+    Plain dict API (``in`` / ``[k]`` / ``.get`` / ``.clear``) so the existing
+    anchor_select call sites work unchanged; inserts and reads refresh recency,
+    and inserts evict the least-recently-used entries past ``maxsize`` — the
+    unbounded growth of the old per-module dict is what compounded the OOM kills
+    on big repos. ``maxsize <= 0`` disables eviction (explicit opt-out only)."""
+
+    def __init__(self, maxsize: int) -> None:
+        super().__init__()
+        self.maxsize = int(maxsize)
+
+    def __getitem__(self, key):
+        value = super().__getitem__(key)
+        self.move_to_end(key)
+        return value
+
+    def get(self, key, default=None):
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def __setitem__(self, key, value) -> None:
+        super().__setitem__(key, value)
+        self.move_to_end(key)
+        while self.maxsize > 0 and len(self) > self.maxsize:
+            self.popitem(last=False)
+
+
+def _passage_cache_max() -> int:
+    """``GT_SYMVEC_CACHE_MAX``: max cached passage vectors (default 100_000 ≈
+    300MB worst-case at 768-dim float32). Malformed values fall back to the
+    default (correct-or-quiet: never crash a brief on a typo'd env var)."""
+    raw = os.environ.get("GT_SYMVEC_CACHE_MAX")
+    if raw:
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            pass
+    return 100_000
+
+
+_PASSAGE_VEC_CACHE = _PassageVecCache(_passage_cache_max())
+
+
+def model_identity(model: object) -> tuple[str, int]:
+    """Best-effort (model_name, dim) for the passage cache key — shared by BOTH
+    semantic halves so identical passages hash identically everywhere. Defaults
+    to the CONFIGURED localization embedder identity when the adapter does not
+    expose them, so the content-addressed key flips with the model and stale
+    foreign-model vectors are never reused."""
+    name = getattr(model, "model_name", None)
+    if not name:
+        inner = getattr(model, "_m", None)
+        name = getattr(inner, "model_name", None)
+    dim = getattr(model, "dim", None)
+    if dim is None:
+        inner = getattr(model, "_m", None)
+        dim = getattr(inner, "dim", None)
+    return (str(name or _default_embed_model()), int(dim or _default_embed_dim()))
 
 
 def aggregate_symbol_cosines(cosines: list[float], *, alpha: float, top_k: int) -> float:
