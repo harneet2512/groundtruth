@@ -32,8 +32,10 @@ from dataclasses import dataclass
 from groundtruth.pretask.curation_map import (
     _DETERMINISTIC_METHODS,
     _has_columns,
+    _is_cross_language_pair,
     _neighbors,
     _node_ids,
+    _nodes_have_language,
     _open_ro,
     build_function_map,
     verified_caller_count,
@@ -458,6 +460,21 @@ def _node_sig_line_by_id(conn: sqlite3.Connection, node_id: int) -> tuple[str, i
     return (_sanitize_signature(str(row[0] or "")), int(row[1]) if row[1] is not None else 0)
 
 
+def _node_language(conn: sqlite3.Connection, node_id: int | None) -> str:
+    """``nodes.language`` for ``node_id``, or '' when unknown/absent/legacy
+    schema — '' downstream means 'cannot judge', never 'different' (the
+    cross-language disqualifier stays PERMISSIVE on it)."""
+    if node_id is None:
+        return ""
+    try:
+        row = conn.execute(
+            "SELECT language FROM nodes WHERE id = ?", (node_id,)
+        ).fetchone()
+    except sqlite3.Error:
+        return ""
+    return str(row[0]) if row and row[0] else ""
+
+
 def _resolved_callee_node_id(
     conn: sqlite3.Connection,
     source_ids: list[int],
@@ -535,6 +552,9 @@ def edit_target_callee_contracts(
         return []
     try:
         has_conf, has_method = _has_columns(conn)
+        # Cross-language disqualifier (mini-delivery port, boa [57]): legacy
+        # graphs without nodes.language stay PERMISSIVE (no judgement).
+        has_lang = _nodes_have_language(conn)
         out: list[CalleeContract] = []
         seen: set[tuple[str, str, str]] = set()  # (caller, callee, file) dedup
         for fname in func_names[:max_funcs]:
@@ -543,6 +563,7 @@ def edit_target_callee_contracts(
             ids = _node_ids(conn, file_path, fname)
             if not ids:
                 continue
+            src_lang = _node_language(conn, ids[0]) if has_lang else ""
             callees = _neighbors(
                 conn,
                 ids,
@@ -571,6 +592,14 @@ def edit_target_callee_contracts(
                     conn, ids, edge.name, edge.file, has_method=has_method
                 )
                 if callee_id is None:
+                    continue
+                # Cross-language disqualifier: a CALLS edge across language
+                # families cannot be a real source-level call — never a
+                # callee CONTRACT fact, whatever its deterministic stamp.
+                # Permissive when either language is unknown/legacy.
+                if has_lang and _is_cross_language_pair(
+                    src_lang, _node_language(conn, callee_id)
+                ):
                     continue
                 sig, line = _node_sig_line_by_id(conn, callee_id)
                 if not sig:

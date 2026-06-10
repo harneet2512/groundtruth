@@ -106,6 +106,66 @@ _DETERMINISTIC_METHODS: frozenset[str] = DETERMINISTIC_RESOLUTION_METHODS
 # MIN_CONFIDENCE.
 _NAME_MATCH_FLOOR = 0.5
 
+# ---------------------------------------------------------------------------
+# CROSS-LANGUAGE CALLS-edge disqualifier (2026-06-10, ported VERBATIM from the
+# per-turn mini delivery, artifact_deepswe/gt_mini_patch.py — DeepSWE
+# non-Python audit, run 27290157847, boa ledger [57]: `chainTest() in
+# benches/scripts/v8-benches/deltablue.js` rendered as a deterministic
+# [CALLERS] fact for Rust core/engine/src/module/source.rs). The indexer's
+# typed tiers (verified_unique / impl_method / type_flow / unique_method)
+# match candidates ACROSS languages, so the DETERMINISTIC_RESOLUTION_METHODS
+# fact gate admits them and the vendored-path filter misses them (benches/ is
+# first-party). A source-level call edge between files of DIFFERENT language
+# families is impossible (tree-sitter call resolution is intra-language; FFI
+# never surfaces as a name-matched source call). Families group real
+# same-toolchain interop so legitimate mixed projects are untouched: js/ts
+# (one compilation unit), java/kotlin/scala/groovy (mixed JVM builds),
+# c/c++/objc/swift (headers / bridging). Unknown or absent languages are
+# PERMISSIVE — never suppress an edge whose languages we cannot judge (the
+# suppression itself must be a fact). Keys match gt-index spec names exactly
+# (``nodes.language``, NOT NULL per schema; legacy graphs may lack the
+# column -> consumers probe with ``_nodes_have_language`` and stay permissive).
+# ---------------------------------------------------------------------------
+_LANG_FAMILIES: dict[str, str] = {
+    "javascript": "jslike", "typescript": "jslike", "jsx": "jslike",
+    "tsx": "jslike", "vue": "jslike", "svelte": "jslike",
+    "java": "jvm", "kotlin": "jvm", "scala": "jvm", "groovy": "jvm",
+    "c": "cfamily", "cpp": "cfamily", "c++": "cfamily", "objc": "cfamily",
+    "objcpp": "cfamily", "objective-c": "cfamily", "swift": "cfamily",
+    "python": "python", "go": "go", "rust": "rust", "ruby": "ruby",
+    "php": "php", "csharp": "csharp", "c#": "csharp", "lua": "lua",
+    "elixir": "elixir", "erlang": "erlang", "haskell": "haskell",
+    "dart": "dart", "r": "r", "julia": "julia", "perl": "perl",
+    "bash": "shell", "shell": "shell", "sh": "shell", "zig": "zig",
+    "ocaml": "ocaml", "clojure": "jvm",
+}
+
+
+def _lang_family(language) -> str | None:
+    """Language-family key for ``language`` (graph ``nodes.language``), or
+    None when unknown/absent — None means 'cannot judge', never 'different'."""
+    if not language:
+        return None
+    return _LANG_FAMILIES.get(str(language).strip().lower())
+
+
+def _is_cross_language_pair(lang_a, lang_b) -> bool:
+    """True ONLY when both languages are known and their families differ —
+    such a CALLS edge cannot be a real source-level call, whatever its
+    recorded resolution_method says. Unknown on either side -> False."""
+    fa, fb = _lang_family(lang_a), _lang_family(lang_b)
+    return fa is not None and fb is not None and fa != fb
+
+
+def _nodes_have_language(conn: sqlite3.Connection) -> bool:
+    """True when the nodes table carries the ``language`` column (legacy
+    graphs may not; they stay PERMISSIVE — no cross-language judgement)."""
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(nodes)").fetchall()}
+    except sqlite3.Error:
+        return False
+    return "language" in cols
+
 # 1-hop neighbor cap per direction. RepoGraph: tight 1-hop beats wide dumps.
 # Kept as the legacy flat cap so _neighbors() and explicit max_neighbors callers
 # reproduce v1.0 behavior byte-for-byte.

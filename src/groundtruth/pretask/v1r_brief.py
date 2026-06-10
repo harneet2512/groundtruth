@@ -25,6 +25,8 @@ from groundtruth.pretask.curation_map import (
     _DETERMINISTIC_METHODS,
     _NAME_MATCH_FLOOR,
     _has_columns,
+    _is_cross_language_pair,
+    _nodes_have_language,
 )
 from groundtruth.pretask.v7_4_brief import V74BriefResult, _w_sem_floor, run_v74
 from groundtruth.pretask.contract_map import (
@@ -594,6 +596,12 @@ def _caller_contract_for_file(
         has_conf, has_method = _has_columns(conn)
         conf_sel = "e.confidence" if has_conf else "0.0"
         method_sel = "e.resolution_method" if has_method else "''"
+        # Cross-language disqualifier (ported from the mini delivery): pull
+        # both endpoint languages when the column exists; legacy graphs
+        # (no nodes.language) stay PERMISSIVE — '' -> family None -> no judgement.
+        has_lang = _nodes_have_language(conn)
+        src_lang_sel = "nsrc.language" if has_lang else "''"
+        tgt_lang_sel = "nt.language" if has_lang else "''"
         # Facts-first ordering: deterministic-provenance edges sort before
         # name_match, so the over-fetch LIMIT can never cut a real fact off behind
         # a run of higher-confidence name_match rows.
@@ -609,7 +617,8 @@ def _caller_contract_for_file(
             # the deterministic ones before the per-func cap.
             rows = conn.execute(
                 f"""
-                SELECT nsrc.file_path, e.source_line, nsrc.name, {conf_sel}, {method_sel}
+                SELECT nsrc.file_path, e.source_line, nsrc.name, {conf_sel}, {method_sel},
+                       {src_lang_sel}, {tgt_lang_sel}
                 FROM nodes nt
                 JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
                 JOIN nodes nsrc ON e.source_id = nsrc.id
@@ -624,10 +633,17 @@ def _caller_contract_for_file(
                 (fname, f"%{_norm_fp}", MAX_CALLERS_PER_FUNC * 4),
             ).fetchall()
 
-            for caller_file, source_line, caller_name, conf, method in rows:
+            for caller_file, source_line, caller_name, conf, method, src_lang, tgt_lang in rows:
                 # 2026-06-10 fact-filter: a vendored/minified/generated caller
                 # is never a fact NOR an unverified location hint.
                 if _is_vendored_path(caller_file or ""):
+                    continue
+                # Cross-language disqualifier (mini-delivery port, boa [57]): a
+                # CALLS edge whose endpoint files are in DIFFERENT language
+                # families cannot be a real source-level call, whatever its
+                # recorded resolution_method/confidence — drop it before fact
+                # OR unverified-hint classification. Unknown language -> keep.
+                if _is_cross_language_pair(src_lang, tgt_lang):
                     continue
                 try:
                     conf_f = float(conf) if conf is not None else 0.0
@@ -737,6 +753,11 @@ def _resolved_witnesses_for_file(
             return []  # cannot judge provenance -> emit nothing (never launder)
         _det_sql = "','".join(sorted(DETERMINISTIC_RESOLUTION_METHODS))
         _norm_fp = file_path.replace("\\", "/").lstrip("./").lstrip("/")
+        # Cross-language disqualifier (mini-delivery port): endpoint languages,
+        # permissive on legacy graphs without nodes.language ('' -> no judgement).
+        has_lang = _nodes_have_language(conn)
+        _src_lang_sel = "nsrc.language" if has_lang else "''"
+        _tgt_lang_sel = "nt.language" if has_lang else "''"
         out: list[dict] = []
 
         def _code_at(rel_file: str, line: int) -> str:
@@ -758,7 +779,8 @@ def _resolved_witnesses_for_file(
         # stdlib-shadow guard can be applied per (code, target_name).
         caller_rows = conn.execute(
             f"""
-            SELECT nsrc.file_path, e.source_line, nsrc.name, nt.name
+            SELECT nsrc.file_path, e.source_line, nsrc.name, nt.name,
+                   {_src_lang_sel}, {_tgt_lang_sel}
             FROM nodes nt
             JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
             JOIN nodes nsrc ON e.source_id = nsrc.id
@@ -772,12 +794,16 @@ def _resolved_witnesses_for_file(
             """,
             (f"%{_norm_fp}", max_each * 4),
         ).fetchall()
-        for caller_file, line, caller_name, target_name in caller_rows:
+        for caller_file, line, caller_name, target_name, _slang, _tlang in caller_rows:
             # 2026-06-10 fact-filter: vendored/minified caller files and
             # builtin/dunder-shadow targets are never [WITNESS] facts.
             if _is_vendored_path(caller_file or ""):
                 continue
             if _is_builtin_shadow_name(target_name or ""):
+                continue
+            # Cross-language disqualifier (mini-delivery port, boa [57]): an
+            # edge across language families is never a [WITNESS] fact.
+            if _is_cross_language_pair(_slang, _tlang):
                 continue
             code = _code_at(caller_file, line)
             if _is_stdlib_shadow(code, target_name or ""):
@@ -797,7 +823,8 @@ def _resolved_witnesses_for_file(
         # CALLEES: cross-file symbols this file CALLS into (DETERMINISTIC edges only).
         callee_rows = conn.execute(
             f"""
-            SELECT nt.file_path, e.source_line, nt.name, nsrc.name, nt.start_line
+            SELECT nt.file_path, e.source_line, nt.name, nsrc.name, nt.start_line,
+                   {_src_lang_sel}, {_tgt_lang_sel}
             FROM nodes nsrc
             JOIN edges e ON e.source_id = nsrc.id AND e.type = 'CALLS'
             JOIN nodes nt ON e.target_id = nt.id
@@ -810,7 +837,7 @@ def _resolved_witnesses_for_file(
             """,
             (f"%{_norm_fp}", max_each * 4),
         ).fetchall()
-        for callee_file, source_line, callee_name, src_name, def_line in callee_rows:
+        for callee_file, source_line, callee_name, src_name, def_line, _slang, _tlang in callee_rows:
             # `source_line` is the CALL SITE in THIS candidate file — use it ONLY for the
             # stdlib-shadow check on the call (`os.walk(` must be read at the call site).
             # The RENDERED location is the callee's DEFINITION line in callee_file
@@ -825,6 +852,10 @@ def _resolved_witnesses_for_file(
             if _is_vendored_path(callee_file or ""):
                 continue
             if _is_builtin_shadow_name(callee_name or ""):
+                continue
+            # Cross-language disqualifier (mini-delivery port): an edge across
+            # language families is never a [CALLEE] witness fact.
+            if _is_cross_language_pair(_slang, _tlang):
                 continue
             _call_code = _code_at(file_path, source_line)
             if _is_stdlib_shadow(_call_code, callee_name or ""):
