@@ -194,9 +194,11 @@ case "$MODEL" in
       echo "NEVER hardcode it — export VERTEXAI_PROJECT=<your-gcp-project> and relaunch."
       exit 2
     fi
-    # LOCKED default us-east1 (LATEST_TASK.md) — fail-safe to the locked region,
-    # never the shared-pool 'global' endpoint (429 risk). Operator overrides via env.
-    export VERTEXAI_LOCATION="${VERTEXAI_LOCATION:-us-east1}"
+    # FORCED to 'global' (2026-06-10): gemini-3-flash-preview is Pre-GA and served ONLY
+    # at the global endpoint — live-probed 404 on BOTH us-east1 and us-central1, 200 on
+    # global. The us-east1 429-avoidance plan is moot when the model isn't served there.
+    # 429 risk on global is mitigated by PARALLEL=4 + num_retries=3 + exp backoff.
+    export VERTEXAI_LOCATION="${VERTEXAI_LOCATION:-global}"
     echo "vertex auth: VERTEXAI_PROJECT=<set> VERTEXAI_LOCATION=$VERTEXAI_LOCATION"
     if [ -n "${GOOGLE_APPLICATION_CREDENTIALS:-}" ]; then
       [ -f "$GOOGLE_APPLICATION_CREDENTIALS" ] || { echo "FATAL: GOOGLE_APPLICATION_CREDENTIALS not a file: $GOOGLE_APPLICATION_CREDENTIALS"; exit 2; }
