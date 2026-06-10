@@ -27,13 +27,17 @@ on:
         required: true
         default: "all"
       max_tasks:
-        description: "Max tasks to run (0 = all 113)"
+        description: "Max tasks to run (0 = all 113). max_tasks=1 + max_parallel=1 = the 1-task demo."
         required: true
         default: "0"
+      instance_ids:
+        description: "Explicit comma-separated instance IDs (overrides language/max_tasks; validated against the 113-task manifest — e.g. one id for a precise 1-task demo)"
+        required: false
+        default: ""
       max_parallel:
-        description: "Concurrent jobs (GitHub-hosted runner ceiling ~20 on this plan)"
+        description: "Concurrent jobs. Default 10 — the PATH B trial showed DeepSeek 429s at 20 concurrent (litellm num_retries=3 absorbs some, but 10 is the safe full-run start). Use 1 for the demo."
         required: true
-        default: "20"
+        default: "10"
       assets_repo:
         description: "owner/repo that hosts the shared GHCR image cache + pipeline-assets-v1 release (a mirror on another account points here so both share ONE public cache)"
         required: true
@@ -123,6 +127,49 @@ jobs:
           python scripts/verify/workflow_lint.py \
             .github/workflows/deepswe_full.yml \
             .github/actions/setup-eval/action.yml
+
+      - name: Digest precheck (fail-closed at run level — abort BEFORE the paid matrix)
+        shell: bash
+        run: |
+          # Mirrors deepswe_proof_sweep.yml/verified_run.yml: a missing/mutable digest
+          # must kill the run HERE (one cheap job), not 113 times inside the matrix.
+          # Respects the require_pinned_substrate transitional escape hatch (=0).
+          if [ -z "${GT_SUBSTRATE_DIGEST:-}" ]; then
+            if [ "${GT_REQUIRE_PINNED_SUBSTRATE:-1}" = "1" ]; then
+              echo "GT_SUBSTRATE_DIGEST_MISSING: no pinned substrate digest (gt_substrate_digest"
+              echo "input or vars.GT_SUBSTRATE_DIGEST). NOTE: harneet2512/groundtruth has NO repo"
+              echo "vars — dispatches there MUST pass the gt_substrate_digest input explicitly."
+              exit 1
+            fi
+            echo "::warning::GT_SUBSTRATE_DIGEST unset + GT_REQUIRE_PINNED_SUBSTRATE=0 (transitional) — per-task steps will skip the substrate proof"
+            exit 0
+          fi
+          case "$GT_SUBSTRATE_DIGEST" in
+            *@sha256:*) echo "pinned substrate OK: $GT_SUBSTRATE_DIGEST" ;;
+            *) echo "GT_SUBSTRATE_DIGEST_MISSING: '$GT_SUBSTRATE_DIGEST' is not an immutable @sha256 digest (mutable tags are not a valid proof input)"; exit 1 ;;
+          esac
+
+      - name: Cost guard — per-task step_limit + cost_limit MUST be set (no unlimited spend)
+        shell: bash
+        run: |
+          # The per-task spend bounds live in the pier agent config (consumed via
+          # --ak config_file=...): agent.step_limit (DeepSWE official = 300) and
+          # agent.cost_limit (USD). A config without BOTH finite positive bounds
+          # means an unbounded paid matrix — abort in Stage-0. Stdlib regex (no
+          # pyyaml dependency in the cheap job); the keys are flat scalars.
+          GT_PIER_CFG=artifact_deepswe/gt_integration/deepswe_gt_pier.yaml python3 << 'PYEOF'
+          import os, re, sys
+          cfg = os.environ["GT_PIER_CFG"]
+          txt = open(cfg, encoding="utf-8").read()
+          sl = re.search(r"^\s*step_limit:\s*([0-9]+)\s*$", txt, re.M)
+          cl = re.search(r"^\s*cost_limit:\s*([0-9.]+)\s*$", txt, re.M)
+          if not sl or int(sl.group(1)) <= 0:
+              sys.exit(f"FATAL: agent.step_limit missing/zero in {cfg} — unbounded steps forbidden")
+          if not cl or float(cl.group(1)) <= 0:
+              sys.exit(f"FATAL: agent.cost_limit missing/zero in {cfg} — unbounded cost forbidden")
+          print(f"cost guard OK: step_limit={sl.group(1)} (DeepSWE official 300) "
+                f"cost_limit=${cl.group(1)} USD per task")
+          PYEOF
       - name: Clone deepswe-bench
         id: bench_clone
         run: |
@@ -136,46 +183,84 @@ jobs:
           echo "bench_sha=${BENCH_SHA}" >> "$GITHUB_OUTPUT"
           echo "deepswe-bench clone SHA: ${BENCH_SHA:-<unknown>}"
       - id: gen
-        name: Build task matrix (clone is the source of truth for valid task dirs)
+        name: Build task matrix (manifest-driven; clone cross-checked — run-set == cache-set)
         env:
           INPUT_LANGUAGE: ${{ inputs.language }}
           INPUT_MAX_TASKS: ${{ inputs.max_tasks }}
+          INPUT_INSTANCE_IDS: ${{ inputs.instance_ids }}
         run: |
+          # SOURCE OF TRUTH: artifact_deepswe/repo_manifest.json (the version-controlled
+          # 113-task set — the SAME file cache_deepswe_images.yml mirrors from, so the
+          # run-set and the GHCR cache-set can never drift apart). The deep-swe clone is
+          # CROSS-CHECKED per selected task (dir + task.toml exist, docker_image matches
+          # the manifest) so a bench-repo drift fails HERE, deterministically, instead of
+          # surfacing as a mid-matrix pull/validate failure. Selection order is the
+          # manifest order (stable across runs) — never the clone's glob order.
           python3 << 'PYEOF'
-          import json, os, sys, glob
+          import json, os, sys
           try:
               import tomllib
           except ModuleNotFoundError:
               import tomli as tomllib
           lang = os.environ.get("INPUT_LANGUAGE", "all")
-          maxt = int(os.environ.get("INPUT_MAX_TASKS", "0"))
-          tasks = []
-          for d in sorted(glob.glob("deepswe-bench/tasks/*")):
-              if not os.path.isdir(d):
+          maxt = int(os.environ.get("INPUT_MAX_TASKS", "0") or "0")
+          explicit = [t.strip() for t in os.environ.get("INPUT_INSTANCE_IDS", "").split(",") if t.strip()]
+          with open("artifact_deepswe/repo_manifest.json", encoding="utf-8") as f:
+              man = json.load(f)
+          tasks = man.get("tasks") or []
+          if not tasks:
+              sys.exit("FATAL: repo_manifest.json has no tasks")
+          for t in tasks:
+              for k in ("instance_id", "language", "docker_image"):
+                  if not t.get(k):
+                      sys.exit(f"FATAL: manifest entry missing {k!r}: {t}")
+          by_id = {t["instance_id"]: t for t in tasks}
+          if explicit:
+              unknown = [t for t in explicit if t not in by_id]
+              if unknown:
+                  sys.exit(f"FATAL: unknown instance ids (not in the 113-task manifest): {unknown}")
+              sel = [by_id[t] for t in explicit]
+          else:
+              sel = [t for t in tasks if lang == "all" or t["language"] == lang]
+              if maxt > 0:
+                  sel = sel[:maxt]
+          # GHA matrix cap is 256; DeepSWE is 113, but guard anyway (fail-closed, never
+          # truncate — a truncated run looks complete and corrupts the denominator).
+          if len(sel) > 256:
+              sys.exit(f"FATAL: {len(sel)} selected tasks exceed the 256 GHA matrix cap")
+          # Cross-check every SELECTED task against the bench clone (the dir pier runs).
+          drift = []
+          for t in sel:
+              tid = t["instance_id"]
+              toml_path = os.path.join("deepswe-bench", "tasks", tid, "task.toml")
+              if not os.path.isfile(toml_path):
+                  drift.append(f"{tid}: task dir/task.toml missing in the deep-swe clone")
                   continue
-              tid = os.path.basename(d)
-              toml = os.path.join(d, "task.toml")
-              if not os.path.exists(toml):
+              try:
+                  with open(toml_path, "rb") as fh:
+                      tt = tomllib.load(fh)
+              except Exception as e:
+                  drift.append(f"{tid}: task.toml unparseable ({e})")
                   continue
-              if lang != "all":
-                  try:
-                      t = tomllib.load(open(toml, "rb"))
-                      if t.get("metadata", {}).get("language", "") != lang:
-                          continue
-                  except Exception:
-                      continue
-              tasks.append(tid)
-          if maxt > 0:
-              tasks = tasks[:maxt]
-          # GHA matrix cap is 256; DeepSWE is 113, but guard anyway.
-          if len(tasks) > 256:
-              print(f"WARN: {len(tasks)} tasks > 256 matrix cap; truncating", file=sys.stderr)
-              tasks = tasks[:256]
-          matrix = {"include": [{"task": t} for t in tasks]}
+              clone_img = (tt.get("environment", {}) or {}).get("docker_image", "")
+              if clone_img != t["docker_image"]:
+                  drift.append(f"{tid}: image drift manifest={t['docker_image']} clone={clone_img}")
+          if drift:
+              print("FATAL: RUN_SET_DRIFT — manifest vs deep-swe clone mismatch "
+                    "(refresh repo_manifest.json + re-run cache_deepswe_images.yml):", file=sys.stderr)
+              for d in drift:
+                  print(f"  {d}", file=sys.stderr)
+              sys.exit(1)
+          include = [{"task": t["instance_id"], "language": t["language"],
+                      "image": t["docker_image"]} for t in sel]
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-              f.write(f"matrix={json.dumps(matrix)}\n")
-              f.write(f"total={len(tasks)}\n")
-          print(f"{len(tasks)} tasks queued (lang={lang}, max={maxt})", file=sys.stderr)
+              f.write("matrix=" + json.dumps({"include": include}) + "\n")
+              f.write(f"total={len(include)}\n")
+          langs = {}
+          for t in sel:
+              langs[t["language"]] = langs.get(t["language"], 0) + 1
+          print(f"{len(include)} tasks queued (lang={lang}, max={maxt}, "
+                f"explicit={len(explicit)}) langs={langs}", file=sys.stderr)
           PYEOF
 
       - name: Legitimacy guard — Stage-0 built NO task graph.db (env-only)
@@ -193,7 +278,12 @@ jobs:
   trial:
     needs: prepare
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    name: "${{ matrix.task }} (${{ matrix.language }})"
+    # 120 not 90: the manifest's largest agent_timeout_sec is 5400 (=90 min) and the
+    # pull+proof prologue adds 5-15 min — a 90-min job cap could kill a legitimately
+    # long task as a timeout-INFRA. step_limit=300 + cost_limit bound the spend; the
+    # job timeout is only the backstop.
+    timeout-minutes: 120
     # The container's default shell is sh/dash; our steps use bash-isms (PIPESTATUS,
     # ${!...}). Pin the whole job to bash so fail-closed guards evaluate correctly
     # (the "Bad substitution" / "declare -A" crashes were sh running bash syntax).
@@ -400,22 +490,36 @@ jobs:
           esac
           echo "pinned substrate: $GT_SUBSTRATE_DIGEST"
 
-          IMG=$(python3 -c "import tomllib;t=tomllib.load(open('$TASK_DIR/task.toml','rb'));print(t.get('environment',{}).get('docker_image',''))")
-          [ -z "$IMG" ] && { echo "FATAL: no docker_image in task.toml — cannot materialize the task repo"; exit 1; }
+          # Task image comes from the MATRIX (manifest-driven; prepare already
+          # cross-checked it byte-equal against the clone's task.toml docker_image).
+          IMG="${{ matrix.image }}"
+          [ -z "$IMG" ] && { echo "FATAL: matrix carried no task image — manifest/matrix bug"; exit 1; }
           echo "task image: $IMG"
-          # GHCR-FIRST pull (cache_deepswe_images.yml mirrors the source images to GHCR to
-          # kill cold-pull latency + rate limits). Retag to $IMG. Fall back with retries.
-          OWNER=$(echo "${{ inputs.assets_repo }}" | cut -d/ -f1 | tr '[:upper:]' '[:lower:]')
-          BASE="${IMG##*/}"; BASE="${BASE%%:*}"; GHCR="ghcr.io/${OWNER}/${BASE}:${IMG##*:}"
-          if docker pull "$GHCR" 2>/dev/null; then
-            docker tag "$GHCR" "$IMG"; echo "pulled from GHCR cache: $GHCR"
-          else
-            echo "GHCR miss ($GHCR) — pulling source"
-            PULLED=0
-            for i in 1 2 3 4; do docker pull "$IMG" && { PULLED=1; break; } || { echo "pull attempt $i failed, retrying..."; sleep 15; }; done
+          # GHCR-FIRST pull (cache_deepswe_images.yml mirrors the source images to GHCR
+          # from the SAME manifest, so the cache-set == this run-set). MULTI-CANDIDATE
+          # (proof-sweep pattern): assets_repo owner, then hbali-stack (the run-infra
+          # account that ran the mirror), then this repo's owner — kills the
+          # owner-mismatch cache miss. ECR-public source is the retried fallback.
+          A_OWNER=$(echo "${{ inputs.assets_repo }}" | cut -d/ -f1 | tr '[:upper:]' '[:lower:]')
+          R_OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          TAG="${IMG##*:}"
+          BASE="${IMG##*/}"; BASE="${BASE%%:*}"
+          PULLED=""
+          for CAND_OWNER in "$A_OWNER" "hbali-stack" "$R_OWNER"; do
+            GHCR="ghcr.io/${CAND_OWNER}/${BASE}:${TAG}"
+            case " $TRIED " in *" $GHCR "*) continue ;; esac
+            TRIED="${TRIED:-} $GHCR"
+            if docker pull "$GHCR" 2>/dev/null; then
+              docker tag "$GHCR" "$IMG"; PULLED="$GHCR"; echo "pulled from GHCR cache: $GHCR"; break
+            fi
+            echo "GHCR miss: $GHCR"
+          done
+          if [ -z "$PULLED" ]; then
+            echo "all GHCR candidates missed — pulling ECR-public source with retries"
+            for i in 1 2 3 4; do docker pull "$IMG" && { PULLED="$IMG"; break; } || { echo "pull attempt $i failed, retrying..."; sleep 15; }; done
             # G1: canonical token (deepswe_outcome.INFRA_LOG_MARKERS) — the old
             # "FATAL: task image pull failed" echo could never classify INFRA.
-            [ "$PULLED" -eq 1 ] || { echo "TASK_IMAGE_PULL_FAIL: task image pull failed after 4 attempts ($IMG)" | tee -a trial_output.log; exit 1; }
+            [ -n "$PULLED" ] || { echo "TASK_IMAGE_PULL_FAIL: task image pull failed after 4 attempts ($IMG)" | tee -a trial_output.log; exit 1; }
           fi
           docker image inspect "$IMG" >/dev/null 2>&1 || { echo "TASK_IMAGE_PULL_FAIL: task image not present after pull ($IMG)" | tee -a trial_output.log; exit 1; }
 
@@ -577,6 +681,9 @@ jobs:
           # (written by the substrate-proof step); the container sees it as /gt_artifacts:ro.
           GT_C_ARTIFACTS=/gt_artifacts
           HOST_ARTIFACTS="${GT_CERT_DIR:-/tmp/gt}"
+          # Transitional no-substrate path (require_pinned_substrate=0): the proof step
+          # exited 0 without creating /tmp/gt — an absent bind source would fail compose.
+          mkdir -p "${HOST_ARTIFACTS}"
 
           # Bind-mount the host substrate dir into the task container READ-ONLY. JSON is the
           # pier --mounts-json contract (ServiceVolumeConfig: type/source/target/read_only).
@@ -669,6 +776,9 @@ jobs:
           done
           # P1-e: per-language LSP certificates (polyglot aggregation — no FAIL cert overwritten)
           cp /tmp/gt/lsp_certificate_*.json trial_results/gt_artifacts/ 2>/dev/null || true
+          # The EXACT issue text the substrate ran with (§4 audit: what GT was given —
+          # mirrors verified_run.yml's issue.txt upload).
+          cp /tmp/issue.txt trial_results/gt_artifacts/issue.txt 2>/dev/null || true
           cp /tmp/gt/delivered_instruction.txt trial_results/ 2>/dev/null || true
           cp -r jobs trial_results/jobs 2>/dev/null || true
           cp /tmp/gt/*.log              trial_results/ 2>/dev/null || true
@@ -676,6 +786,7 @@ jobs:
           cp /tmp/gt/gt_hooks*.log      trial_results/ 2>/dev/null || true
           # Deep 8-dp metrics (constitution mandate: token/cost efficiency + per-layer)
           cp /tmp/gt/gt_run_summary*.json /tmp/gt_run_summary_${{ matrix.task }}.json 2>/dev/null || true
+          cp /tmp/gt/gt_run_summary*.json trial_results/ 2>/dev/null || true
           PYTHONPATH=${{ github.workspace }}/src python3 scripts/swebench/gt_deep_metrics.py "${{ matrix.task }}" /tmp/gt --log trial_output.log 2>&1 | tail -2 || echo DEEP_METRICS_WARN
           cp /tmp/gt_deep_metrics_${{ matrix.task }}.json trial_results/ 2>/dev/null || true
           cp /tmp/gt_deep_metrics_${{ matrix.task }}.md   trial_results/ 2>/dev/null || true   # human-readable: steps/tokens/money/GT-delivery
@@ -688,7 +799,12 @@ jobs:
           # Plus a small per-job provenance file: bench clone SHA + GT commit + digest.
           python3 -c "import json,os;json.dump({'schema':'gt.deepswe_run_provenance.v1','task':'${{ matrix.task }}','deepswe_bench_sha':os.environ.get('GT_DEEPSWE_BENCH_SHA') or None,'gt_git_commit':os.environ.get('GITHUB_SHA') or None,'substrate_digest':os.environ.get('GT_SUBSTRATE_DIGEST') or None,'workflow_run_id':os.environ.get('GITHUB_RUN_ID') or None,'workflow_run_attempt':os.environ.get('GITHUB_RUN_ATTEMPT') or None},open('trial_results/gt_artifacts/run_provenance.json','w'),indent=2)" \
             || echo "WARN: run_provenance.json write failed"
-          python3 scripts/verify/deepswe_outcome.py jobs || echo "WARN: outcome extract failed"
+          # Outcome classification (INFRA > GT > RESOLVED > AGENT) — PERSISTED as
+          # outcome.json in the artifact (GT_DEEPSWE_OUTCOME_JSON), not just printed:
+          # the summarize job + the §4/§5 audit consume the machine-readable record.
+          GT_TRIAL_LOG=trial_output.log GT_CERT_DIR=/tmp/gt \
+            GT_DEEPSWE_OUTCOME_JSON=trial_results/outcome.json \
+            python3 scripts/verify/deepswe_outcome.py jobs || echo "WARN: outcome extract failed"
           find trial_results -type f | head -40
 
       - name: Upload results
@@ -741,4 +857,41 @@ jobs:
             fi
           done
           echo "Artifacts collected: $TOTAL  |  agent-ran (n_agent_steps>0 PARSED): $RAN  |  launch-fail (steps 0/absent): $LAUNCH_FAIL" >> $GITHUB_STEP_SUMMARY
-          echo "Per-task outcome detail is in scripts/verify/deepswe_outcome.py output inside each artifact." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+      - name: Classification tally (INFRA > GT > RESOLVED > AGENT, infra-excluded denominator)
+        run: |
+          # Aggregate the per-task outcome.json records the Collect step persisted.
+          # Same denominator rule as scripts/verify/deepswe_outcome.py (imported, not
+          # re-implemented): INFRA/UNKNOWN excluded; resolved_rate at 8-dp.
+          python3 << 'PYEOF' >> "$GITHUB_STEP_SUMMARY"
+          import glob, json, sys
+          sys.path.insert(0, "scripts/verify")
+          from deepswe_outcome import tally_classes
+          recs, missing = [], []
+          for d in sorted(glob.glob("/tmp/all/deepswe-full-*")):
+              task = d.split("deepswe-full-", 1)[-1]
+              try:
+                  with open(f"{d}/outcome.json", encoding="utf-8") as f:
+                      recs.extend(json.load(f).get("tasks") or [])
+              except (OSError, ValueError):
+                  missing.append(task)
+          t = tally_classes(recs)
+          print("### Outcome classification (per-task `outcome.json`)")
+          print()
+          print("| class | count |")
+          print("|---|---:|")
+          for k in ("RESOLVED", "AGENT", "GT", "INFRA", "UNKNOWN"):
+              print(f"| {k} | {t['counts'].get(k, 0)} |")
+          print()
+          print(f"**resolved_rate = {t['resolved_rate']}** over denominator "
+                f"{t['denominator_excluding_infra']} (INFRA/UNKNOWN excluded: "
+                f"{t['excluded_from_denominator']})")
+          if missing:
+              print()
+              print(f"outcome.json MISSING for {len(missing)} task(s) (job died before "
+                    f"Collect — triage in the per-task artifact): {', '.join(missing[:10])}"
+                    + (" ..." if len(missing) > 10 else ""))
+          PYEOF
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Per-task detail: \`outcome.json\` (classification) + \`gt_deep_metrics_<task>.json\` (8-dp) + \`gt_artifacts/\` (8-artifact proof set incl. brief.txt + issue.txt) + \`jobs/\` (trajectory + verifier) inside each \`deepswe-full-<task>\` artifact." >> "$GITHUB_STEP_SUMMARY"
+          echo "Pull any task MID-RUN once its job finishes: \`gh run download <run_id> -n deepswe-full-<task> -R <owner>/groundtruth\`." >> "$GITHUB_STEP_SUMMARY"
