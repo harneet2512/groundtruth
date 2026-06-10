@@ -486,18 +486,30 @@ jobs:
           # ── gt-run-proof INSIDE the pinned substrate (the ONE portable command, §A) ──
           # Repo mounted /work:ro; artifacts -> /gt_artifacts. All 8 proof flags set so the
           # substrate fails-closed on any boundary/baked-dep violation. The host only orchestrates.
-          if ! docker run --rm \
+          # --memory: a runaway in-container encode must OOM the CONTAINER (rc=137,
+          # classified GT_PROOF_OOM) — uncapped, the GHA HOST OOM-killer killed the
+          # process BEFORE its fail-closed stderr print, surfacing as a silent generic
+          # failure (the 2026-06-10 5-task brief-OOM). rc is THE diagnostic bit.
+          PROOF_RC=0
+          docker run --rm \
+              --memory=10g --memory-swap=10g \
               -v "/tmp/gt/src:/work:ro" -v "/tmp/gt:/gt_artifacts" \
               -v "/tmp/issue.txt:/work_issue.txt:ro" \
               -e GT_PROOF_MODE=1 -e GT_CONTAINERIZED=1 -e GT_RUNTIME_STRATEGY=unified_substrate \
               -e GT_REQUIRE_FTS5=1 -e GT_REQUIRE_EMBEDDER=1 -e GT_FORCE_ONNX_EMBEDDER=1 \
               -e GT_REQUIRE_LSP=1 -e GT_REQUIRE_FULL_STACK=1 -e GT_ISSUE_FILE=/work_issue.txt \
+              -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 -e HF_DATASETS_OFFLINE=1 \
               -e GT_GATES_DELIVER_ALWAYS="${GT_GATES_DELIVER_ALWAYS:-0}" \
               -e GT_GIT_COMMIT="${{ github.sha }}" \
               -e GT_SUBSTRATE_DIGEST="$GT_SUBSTRATE_DIGEST" \
               -e GT_TASK_REPO_COMMIT="$TASK_REPO_COMMIT" \
-              "$GT_SUBSTRATE_DIGEST" gt-run-proof --source-root /work --out /gt_artifacts; then
-            echo "GT_RUN_PROOF_FAIL: gt-run-proof returned non-zero (boundary/leak/missing-baked-dep)" | tee -a trial_output.log
+              "$GT_SUBSTRATE_DIGEST" gt-run-proof --source-root /work --out /gt_artifacts || PROOF_RC=$?
+          if [ "$PROOF_RC" -ne 0 ]; then
+            if [ "$PROOF_RC" -eq 137 ]; then
+              echo "GT_PROOF_OOM: gt-run-proof rc=137 — killed by the container memory cap (capacity kill, not logic; the fail-closed print never ran)" | tee -a trial_output.log
+            else
+              echo "GT_RUN_PROOF_FAIL: gt-run-proof rc=$PROOF_RC (boundary/leak/missing-baked-dep)" | tee -a trial_output.log
+            fi
             docker rm -f gtsrc 2>/dev/null || true
             exit 1
           fi

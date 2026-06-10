@@ -72,6 +72,7 @@ INFRA_LOG_MARKERS: tuple[str, ...] = (
     "GT_SUBSTRATE_DIGEST_MISSING",
     "GT_SUBSTRATE_PULL_FAIL",
     "GT_RUN_PROOF_FAIL",
+    "GT_PROOF_OOM",
     "GT_ARTIFACT_MISSING",
     "TASK_IMAGE_PULL_FAIL",
     # The task issue could not be materialized (no instruction.md, no task.toml
