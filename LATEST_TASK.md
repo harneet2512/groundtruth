@@ -50,3 +50,24 @@ Bring the **FULL OH-depth GT** to mini-swe-agent, **language-agnostic**, unified
 - Weights live: `W_SEM=0.40` + `W_SEM_FLOOR=0.25` enforced last; Dimension-0 query-adaptive,
   Dim-1 max-compose (gt_gt §4.2). Embedder: gte-modernbert default, configured-or-raise under
   `GT_REQUIRE_EMBEDDER` (ST + e5 fallbacks skipped); OH pins e5.
+
+---
+## TWO PATHWAYS (2026-06-10, written to avoid confusion — per-launch permission ALWAYS)
+
+### PATH A — GCP (VM gt-sweep-1, 8vCPU, us-central1-a) = SUBSTRATE/PROOF work, $0 LLM
+- NOW: DeepSWE-113 proof sweep RUNNING (all-fixes digest 6428af2a) → the 4 answers
+  (29 SIGKILLs survive? · scc/jdtls? · dynamodb gate-1 flip? · per-language table).
+- NEXT (prep only): Verified-500 manifest builder → Verified proof sweep on the VM (awaits launch OK).
+- Pro-731: DEFERRED.
+- Rules: no secrets/tokens/project-IDs on the VM or in artifacts; images pull anonymously.
+
+### PATH B — GHA (hbali-stack) = AGENT/LLM surface + CI
+- ARMED, awaiting explicit "launch": the 5-task probe — deepswe_full × 5 dispatches
+  (language ∈ {go,python,typescript,rust,javascript}, max_tasks=1, deepseek-v4-flash, ~$5-10, ~1hr).
+  Success = the integration audit's 12 runtime criteria + real $/task from the 8-dp logs.
+- CI substrate rebuilds + image pins live here (digest pinned: 6428af2a).
+- THEN (gated on probe green): the full DeepSWE-113 GT-on run (~$160 anchored est., ~3.5-4h).
+
+### Cross-path rules
+- Sequence: VM sweep 4-answers → user reviews → "launch" the 5-task probe → probe verdict → full-run decision.
+- NOTHING launches on either path without explicit per-launch permission.
