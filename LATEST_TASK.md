@@ -67,3 +67,10 @@ Bring the **FULL OH-depth GT** to mini-swe-agent, **language-agnostic**, unified
 - Trial: 5 Verified tasks with v4-flash (cheap; cache-discounted) before any 500 run.
 ### Rules: per-launch permission ALWAYS, both paths. No secrets on the VM (deepseek key never
 touches GCP; gemini uses ADC). gt_gt is the audit surface for both.
+
+## LAUNCH PARAMETERS (locked 2026-06-10)
+- PATH A (VM, DeepSWE x gemini-3-flash-preview): PARALLEL=4 (8 vCPU + compile/test bursts), step_limit=300 (official), cost_limit=3.0/task, STOP_AT_COST=25 trial / 200 full, temp=1.0, VERTEXAI_LOCATION=global, SA-key bind-mount (ADC blocked in-container).
+- PATH B (GHA, Verified x deepseek-v4-flash): max_parallel=20, step_limit=250 + cost_limit=3.0 (the EXACT official leaderboard config), temp=1.0/top_p=0.95/max=8192, num_retries=3.
+- POST-RUN RULE: download EVERYTHING to local disk D (.claude/reports/runs/<run>/) — full trajectories,
+  patches, gt_artifacts, deep metrics, rows, reports — from BOTH platforms, before the run is "done".
+  VM: tarball OUT_DIR -> pull back. GHA: download all artifacts. Then ledgers + the submission bundle.
