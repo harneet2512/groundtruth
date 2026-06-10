@@ -155,3 +155,17 @@ gt-index/*.exe
 gt-index/runs/
 *.db-shm
 *.db-wal
+
+# SECRET-LEAK GUARD (2026-06-10): run artifacts embed pier PROXY_TOKEN + verbatim agent
+# trajectories — NEVER commit. Reports/ledgers are LOCAL-ONLY ("only code goes").
+.claude/reports/runs/
+task_ledgers/
+**/docker-compose-egress-proxy.json
+**/mini-swe-agent.trajectory.json
+**/*.trajectory.json
+**/gt_artifacts/
+
+# one-shot scratch + pulled GHA artifacts (may embed secrets) — never commit
+gha_latest_artifacts/
+.tmp_test_*
+.tmp_*

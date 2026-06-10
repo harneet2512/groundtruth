@@ -219,10 +219,52 @@ class IssueAnchors:
     # Query Reduction for Bug Localization (Mejia-Bernal et al., JSS 2025) shows
     # raw keywords are noisy queries — reducing/reweighting improves precision.
     code_symbols: set[str] = field(default_factory=set)
+    # GREENFIELD tier (2026-06-10, DeepSWE non-Python audit run 27290157847) —
+    # reporter-marked CODE tokens (backtick/fence provenance) that did NOT
+    # resolve against the graph. For feature/greenfield issues these are the
+    # MOST SPECIFIC anchors in the text (the API to BE BUILT, env vars), and
+    # the graph cross-check structurally deletes them: measured on
+    # abs-module-cache-flags, `require` / `ABS_MODULE_PATH` /
+    # `require_cache_info` / `reset_require_cache` were all raw-extracted with
+    # 0 graph nodes, so the anchor set collapsed to ["BeginRepl","clear"] and
+    # lexical rank latched onto install.go (wrong brief #1). These tokens are
+    # NEVER graph seeds (no node exists); they are the honest GREP/BM25
+    # lexical tier — `require` literally appears in evaluator/functions.go as
+    # the builtin-registration string, the exact grep the agent used to
+    # self-localize. Empty when no graph is provided (without a graph we
+    # cannot KNOW a token is unresolved — abstain).
+    unresolved_code_symbols: set[str] = field(default_factory=set)
 
 
 # Backtick-wrapped inline code: `symbol` or `module.symbol`
 _BACKTICK_CODE_RE = re.compile(r"`([^`\n]+)`")
+
+# `Type::method` qualified pairs (Rust / C++ path syntax). _IDENT_RE only spans
+# `.`-qualified forms, so a `::` pair decomposes into two bare tokens that die
+# independently (DeepSWE non-Python audit: boa's issue-named `Script::evaluate`
+# never reached _resolve_qualified_dotted; `Context` died as a homonym). The
+# pair is harvested here and confirmed through the SAME graph probes as dotted
+# pairs — correct-or-quiet, never minted from string shape alone.
+_QUALIFIED_COLON_RE = re.compile(
+    r"\b([A-Za-z_][A-Za-z0-9_]{2,})::([A-Za-z_][A-Za-z0-9_]{2,})\b"
+)
+
+# Cross-language type/keyword tokens that are never localization anchors even
+# with explicit code provenance (they appear inside backticked SIGNATURES —
+# `BeginRepl(args []string, version string)` — as parameter/type syntax, not
+# as symbols). Static by design: language syntax invariants, not domain words.
+_LANG_KEYWORD_TOKENS: frozenset[str] = frozenset({
+    "string", "str", "int", "int8", "int16", "int32", "int64", "uint",
+    "float", "float32", "float64", "double", "bool", "boolean", "void",
+    "char", "byte", "rune", "number", "object", "array", "vec", "map",
+    "list", "dict", "tuple", "option", "result", "nil", "null", "none",
+    "true", "false", "self", "cls", "this", "args", "kwargs", "argv",
+    "func", "function", "def", "let", "mut", "pub", "const", "var",
+    "class", "struct", "enum", "impl", "trait", "interface", "type",
+    "import", "from", "use", "mod", "package", "return", "yield",
+    "async", "await", "static", "public", "private", "protected",
+    "new", "make", "err", "error", "ctx", "context", "val", "key",
+})
 
 
 def _extract_code_region_identifiers(text: str) -> set[str]:
@@ -526,6 +568,23 @@ def extract_issue_anchors(
     )
     resolved |= _qualified_dotted
 
+    # `Type::method` qualified pairs (2026-06-10, DeepSWE non-Python audit):
+    # Rust/C++ path syntax decomposes under _IDENT_RE into two bare tokens that
+    # die independently (boa: `Script::evaluate` never reached the qualified
+    # probes; `Context` died as a homonym). Harvest `A::b`, normalize to the
+    # dotted form, and confirm through the SAME graph probes — a confirmed pair
+    # is exempt from the generic-hub/prose gates exactly like a confirmed
+    # dotted pair (qualification disambiguates). Unconfirmed pairs stay out.
+    _colon_pairs = {
+        f"{m.group(1)}.{m.group(2)}"
+        for m in _QUALIFIED_COLON_RE.finditer(issue_text)
+    }
+    _colon_confirmed = _resolve_qualified_dotted(
+        {t for t in _colon_pairs if t not in resolved}, graph_db_path,
+    )
+    _qualified_dotted |= _colon_confirmed
+    resolved |= _colon_confirmed
+
     # PROVENANCE tier (BugLocator ICSE 2012; Schröter MSR 2010): the resolved
     # symbols that also occur in the TITLE / heading region are the high-signal
     # localization anchors; everything else (body + pasted traceback) is the
@@ -580,6 +639,22 @@ def extract_issue_anchors(
             _prose_demoted.add(s)
             resolved.discard(s)
 
+    # GREENFIELD tier (2026-06-10): reporter-marked code tokens that resolved
+    # to NOTHING in the graph. Only meaningful WITH a graph (without one we
+    # cannot know a token is unresolved — abstain, keep empty). Language
+    # type/keyword tokens (from backticked signatures) and closed-class words
+    # are excluded; dotted composites are skipped (their components are
+    # handled individually; confirmed pairs already live in `symbols`).
+    unresolved_code_symbols: set[str] = set()
+    if graph_db_path:
+        for tok in _code_idents:
+            if "." in tok or tok in resolved:
+                continue
+            low = tok.lower()
+            if low in _NL_FUNCTION_WORDS or low in _LANG_KEYWORD_TOKENS:
+                continue
+            unresolved_code_symbols.add(tok)
+
     return IssueAnchors(
         symbols=resolved,
         paths=_extract_paths(issue_text),
@@ -588,4 +663,5 @@ def extract_issue_anchors(
         symbols_pre_stopword=raw_idents,
         title_symbols=title_symbols,
         code_symbols=code_symbols,
+        unresolved_code_symbols=unresolved_code_symbols,
     )

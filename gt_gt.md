@@ -920,3 +920,57 @@ NOT superseded / re-confirmed by the trial: the substrate (LSP warm + edge-conve
 separating, graph det% 68–74, FTS5), the legitimacy gates, zero benchmark-leakage, the §12 `GRAPH_FAIL_MISSING_HANDOFF`
 false-fail reconciliation. Unexercised (substrate path): L4, L6, GT_VERIFY — health UNPROVEN, to be tested on the
 DeepSWE/multi-language path.
+
+## 14. DESIGN NOTE (2026-06-10, design-track — NOT BUILT): Consistency-pillar extension for feature/greenfield issues
+
+**Source verdict:** `.claude/reports/DEEPSWE_NONPYTHON_DEBUG_CONSUMPTION_VERDICT_20260610T2240Z.md` —
+consumption≈0 on the sub-L1 layers is ~60% "(d) wrong-KIND-of-context for feature work": the L3
+post-edit contract narrates the EXISTING graph ("`parse`: 8 callers — preserve this interface", boa
+[69]/[85]) while the agent is ADDING code; in ADD-mode there is nothing for a preserve-interface
+contract to bind to. The killing boa defect was new-API SHAPE (`&mut self` constructors on a
+non-mut `Context`) — sibling accessors are `&self`-shaped, a graph-derivable fact GT never delivered.
+
+**Why this is design-track, not a surgical fix (assessed against the existing code, 2026-06-10):**
+1. The in-container delivery layer (`artifact_deepswe/gt_mini_patch.py`) is ISSUELESS BY DESIGN
+   (":710 — per-view has no issue-anchor context; the host brief owns issue-anchored selection") and
+   nothing under `artifact_deepswe/` reads `gt_issue_anchors.json`. "When the issue is
+   feature-shaped, lead with siblings instead of the contract" therefore needs a NEW host→container
+   channel (serialize issue-shape + `unresolved_code_symbols`; ship + read it) — new plumbing, not a
+   connect of two existing things.
+2. The existing sibling evidence is NAMES-ONLY (`_sibling_context` → "cancel, is_cancelled, reason";
+   post_view-only). The consumable form per the verdict is sibling SHAPE — signatures + receiver
+   mutability + return shape. That is a NEW renderer over `nodes.signature` + `properties`, not a
+   reuse of the computed string. A names line would not have prevented the boa `&mut self` defect.
+3. Dimension-0 (`_classify_issue_lexicality`, v7_4_brief.py) classifies LEXICALITY for fusion
+   weights; feature-vs-bugfix is a NEW classification output with its own gate. (A prior one-shot
+   attempt built an NL feature-verb regex and was REVERTED for undefined-variable bugs; any NL-verb
+   signal must be tertiary, never the gate.)
+
+**The proposal (Consistency-pillar extension — CLAUDE.md "structural twins, parallel patterns"):**
+- **Detector (dynamic, hybrid, graph-grounded):** issue-shape from ≥3 deterministic signals —
+  (1) greenfield ratio `|unresolved_code_symbols| / |code-provenance tokens|` (the committed anchors
+  tier: high ratio = the named API does not exist yet), (2) anchor file-scope = 0 resolved defining
+  files, (3) absence of traceback frames (Dim-1 already computes `frame_scores`). Threshold from
+  per-task distributions, not hardcoded.
+- **Delivery, feature-shaped issues only (correct-or-quiet elsewhere):**
+  (a) **closest-analog re-surfacing** — the §11.2 per-symbol MaxSim vectors already exist; rank
+  existing functions/files by MaxSim against the unresolved symbols + requirement clauses and
+  re-surface the top analog AT FIRST-EDIT TIME ("the cancel/reason pattern you are adding exists at
+  abort/mod.rs — mirror it"; boa had this at brief rank 6, turn 1, never re-surfaced);
+  (b) **sibling-shape block at post-edit** — for the edited file, render sibling SIGNATURES +
+  receiver/mutability/return-shape properties framed as "shape what you add like its siblings",
+  REPLACING (not adding to) the preserve-interface caller framing for that edit;
+  (c) the preserve-interface contract keeps firing unchanged on non-feature issues (its guard-rail
+  role per §12 is not consumption-scored).
+- **Research:** example/analog retrieval grounds new-code correctness — Strathcona (Holmes & Murphy,
+  ICSE 2005: structural context → example recommendation), MAPO (Zhong et al., ECOOP 2009: mined API
+  usage patterns), Aroma (Luan et al., OOPSLA 2019: structural code-recommendation), RepoCoder
+  (Zhang et al., EMNLP 2023: repo-level similar-snippet retrieval improves generation). The verdict's
+  own ledger data: the one consumed payload class matched the agent's CURRENT decision (go [70]) —
+  delivery must intersect the decision moment, hence post-edit/first-edit, not turn-1 narration.
+- **Stage-1 proof before any flip claim:** deterministic fixtures where a feature-shaped issue +
+  sibling set yields the exact sibling-shape block (and bug-shaped issues yield the unchanged
+  contract), ≥3 languages; then the §4 ledger consumption check on a paired run.
+
+**Explicitly NOT done now:** no new channel, no detector, no renderer were built — minimal-diff rule;
+this section is the build spec for a dedicated session.

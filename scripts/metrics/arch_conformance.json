@@ -1,0 +1,1112 @@
+[
+  {
+    "conforming": [
+      "Consensus Layer A <gt-scope> (entry 9): fired on first brief-candidate view before edits, honored correct-or-quiet ('GT has not confirmed a single primary target \u2014 confirm the edit target with grep')",
+      "Consensus Layer B 'also in scope' progressive confirmation (entries 11, 21) for subsequent candidate views",
+      "GT_VERIFY pre-submit (entry 87): fired at edit->review transition after 1 source edit, verifiable-only, NO test name / assertion / pytest surfaced",
+      "L5 scaffold/no-progress governor (entry 47): fired diagnostically with no prescriptive file list",
+      "L1 brief delivered at task start (instruction field) with localization+task-brief+graph-map+orientation present",
+      "Legitimacy: zero test names/assertions surfaced by any GT layer"
+    ],
+    "deviating": [
+      "L1 localization/brief headline target is WRONG: ranks runner.py #1 and buries the gold file config.py::_glob_filenames at candidate #6 / 'Also changes' footnote / scope-chain tail \u2014 gold function name never appears in any L1 block",
+      "L3b post-view on the GOLD file config.py (entries 21, 25): delivered contracts for _has_file/get_template_args/set_template_args (NOT _glob_filenames) and irrelevant scripts/*.json.load callers \u2014 wrong-function curation on the one file that mattered",
+      "Consensus progressive (entry 77): emitted stale/wrong claim '[GT] cfn_yaml.py was confirmed earlier' though cfn_yaml.py was never an edit target and scope was runner/api/config",
+      "L3 post-edit (entry 83): silent after the gold edit \u2014 no [BEHAVIORAL CONTRACT]/[CALLERS]/[SIGNATURE] block delivered on the edited _glob_filenames",
+      "L5 format deviation: emitted legacy '[GT L5: No Source Edits] Iteration: 25/100' rather than the spec's diagnostic <gt-advisory layer=\"L5\"> XML form",
+      "L1 multi-file scope incomplete: gold patch also edits data/.../schema.json + rules/errors/config.py; L1 'Also changes' only named config.py"
+    ],
+    "l1_consistent": true,
+    "l1_detail": "The three L1 sub-blocks AGREE with each other on runner.py as the headline target \u2014 but they jointly agree on the WRONG target (gold is config.py::_glob_filenames). <gt-localization confidence=\\\"medium\\\">: '1. src/cfnlint/runner.py \u2014 get_formatter, TemplateRunner, _dedup ... 6. src/cfnlint/config.py \u2014 ConfigFileArgs, _find_config, _has_file' (config.py last, _glob_filenames never named). <gt-task-brief>: leads '1. src/cfnlint/runner.py (def run...)', config.py only as 'Also changes: src/cfnlint/config.py' and 'Scope chain ... runner.py -> config.py -> helpers.py'. <gt-graph-map>: 'src/cfnlint/runner.py :: run'. <gt-orientation>: 'run() in runner.py (10 callers)' / 'lint() in api.py' / 'format() in config.py'. No internal contradiction (all point at runner.py), so l1_consistent=true; the failure is shared mis-localization, not inconsistency.",
+    "legitimacy_clean": true,
+    "layers": [
+      {
+        "layer": "L0 index/graph.db",
+        "spec": "Pre-index target repo into graph.db before agent; assertions/nodes/edges populated. Not directly agent-visible.",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "evidence": "Graph-derived evidence is present throughout (entry 9 '[GT] runner:' with CONTRACT/Called by from graph.db; entry 21 config.py callers from scripts/*). Graph.db was clearly pre-built and queried; no agent-visible L0 error.",
+        "deviation": ""
+      },
+      {
+        "layer": "L1 brief",
+        "spec": "v1r_brief at task start: localization + task-brief + graph-map + orientation. Should put the correct edit target in front of the agent; correct-or-quiet on ranking.",
+        "fired": true,
+        "verdict": "DEVIATED",
+        "evidence": "instruction field: '<gt-localization confidence=\"medium\"> 1. src/cfnlint/runner.py ... 6. src/cfnlint/config.py \u2014 ConfigFileArgs, _find_config, _has_file'. Gold = config.py::_glob_filenames, ranked #6, _glob_filenames never named in any L1 block. <gt-task-brief> leads with runner.py def run; config.py only 'Also changes'.",
+        "deviation": "Mis-localized: headline target runner.py is wrong; gold file buried at candidate #6 and gold function _glob_filenames absent. Confidence labeled 'medium' (honest-ish) but the agent had to self-localize via grep (entries 26-27)."
+      },
+      {
+        "layer": "L1 detail (sub-block agreement)",
+        "spec": "<gt-localization>, <gt-task-brief>, <gt-graph-map> must agree on the target, not contradict.",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "evidence": "All three name runner.py as primary: localization #1 'src/cfnlint/runner.py', task-brief '1. src/cfnlint/runner.py (def run...)', graph-map 'src/cfnlint/runner.py :: run'. Internally consistent (agree with each other).",
+        "deviation": "Internally consistent but jointly wrong \u2014 they agree on runner.py while gold is config.py::_glob_filenames."
+      },
+      {
+        "layer": "L3 post_edit",
+        "spec": "On agent file edit: behavioral contract + callers + signature for the edited function, budget 2000 chars. Should fire on the gold edit.",
+        "fired": false,
+        "verdict": "SILENT_MISS",
+        "evidence": "Entry 83 (edit obs of config.py::_glob_filenames) shows only 'The file ... has been edited. Here's the result of running cat -n ...' \u2014 NO [BEHAVIORAL CONTRACT]/[CALLERS]/[SIGNATURE] block on the edited function. (GT_VERIFY at 87 is the only post-edit-ish injection, and it lists unrelated guard-clauses.)",
+        "deviation": "No L3 contract/caller evidence delivered on the gold function at the moment of edit; the one moment L3 is designed for produced no visible curated evidence for _glob_filenames."
+      },
+      {
+        "layer": "L3b post_view",
+        "spec": "On agent file view: Contract pillar (always-fire) + verified categorical callers + ego, issue-ranked. Should surface the issue-relevant function's contract.",
+        "fired": true,
+        "verdict": "DEVIATED",
+        "evidence": "Entry 21 viewing GOLD config.py: '[GT] config: [CONTRACT] def _has_file ... def get_template_args ... def set_template_args ... Called by: scripts/update_serverless_aws_policies.py:21 ... scripts/boto/update_schemas_from_boto.py:74 ...'. Never surfaced _glob_filenames; callers are unrelated build scripts (json.load).",
+        "deviation": "Contract pillar fired but on the WRONG functions (_has_file/get_template_args), not the issue-relevant _glob_filenames; callers are name_match-grade script noise, not issue-relevant. On non-gold files (runner.py entry 9, decode.py entry 15) the contracts were reasonable, so the deviation is the issue-ranking failing exactly on the gold file."
+      },
+      {
+        "layer": "L3b post_view (non-gold files)",
+        "spec": "Same as above on supporting files.",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "evidence": "Entry 11 api.py: 'lint() in api.py:19 sig: def lint( returns: list[Match] PRESERVE: conditional_return: if errors: return errors ... Called by: lint_all() api.py:66 Calls: TemplateRunner() in runner.py'. Entry 15 decode.py CATCHES/RAISES correct.",
+        "deviation": ""
+      },
+      {
+        "layer": "consensus (Layer A/B <gt-scope>)",
+        "spec": "Fires once on first brief-candidate view before edits (Layer A scope list), then progressive confirmation (Layer B 'also in scope'); correct-or-quiet.",
+        "fired": true,
+        "verdict": "DEVIATED",
+        "evidence": "Layer A entry 9: '<gt-scope files=\"6\"> 1. cfnlint/runner.py \u2014 in scope ... These files are related in scope; GT has not confirmed a single primary target \u2014 confirm the edit target with grep.' Layer B entry 11/21: '[GT] api.py: also in scope.' / '[GT] config.py: also in scope.' BUT entry 77: '[GT] cfn_yaml.py was confirmed earlier ... Scope: runner.py, api.py, config.py'.",
+        "deviation": "Layer A correct-or-quiet honored (no false single target). But entry 77 progressive claim 'cfn_yaml.py was confirmed earlier' is a stale/false confirmation \u2014 cfn_yaml.py was never an edit target and is not even in the entry-77 Scope list; injects a misleading 'confirmed' claim."
+      },
+      {
+        "layer": "L5 governor",
+        "spec": "Non-source-edit-without-progress trigger; diagnostic-only <gt-advisory layer=\"L5\">, no prescriptive file list.",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "evidence": "Entry 47: '[GT L5: No Source Edits] Iteration: 25/100 You have run 25 actions with 0 source file edits.' No file prescription, no 'edit X first'.",
+        "deviation": "Diagnostic intent honored, but format is the legacy '[GT L5: No Source Edits]' line, not the spec's '<gt-advisory layer=\"L5\" trigger=\"non_source_without_progress\">' XML \u2014 minor format drift, not a content/correct-or-quiet violation."
+      },
+      {
+        "layer": "L5b late reminder",
+        "spec": "High-confidence structural signal unexamined for N actions; diagnostic-only; suppressed by goku_active default.",
+        "fired": false,
+        "verdict": "NA",
+        "evidence": "No '[GT L5: Unexamined structural signal]' line anywhere in the 121-entry history. Consistent with goku_active=1 default suppression.",
+        "deviation": ""
+      },
+      {
+        "layer": "L6 reindex",
+        "spec": "After every edit, gt-index -file reindex BEFORE L3 post_edit; logs telemetry, not agent-visible.",
+        "fired": false,
+        "verdict": "NA",
+        "evidence": "No agent-visible L6 reindex marker (correctly \u2014 it is telemetry-only). The single source edit (entry 82) was followed by editor output (83) with no reindex error surfaced. Cannot confirm firing from agent observation; not agent-visible by design.",
+        "deviation": ""
+      },
+      {
+        "layer": "GT_VERIFY pre-submit",
+        "spec": "At edit->review transition (>=1 edit, then review), once, verifiable-only: list tests covering changed files (assertions table). Under-confident -> silent. MUST NOT fabricate.",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "evidence": "Entry 87: '[GT_VERIFY] You edited 1 file(s). Before finishing, run the project's own test suite for the affected modules and confirm your change preserves the behavioral contract: config.py: guard_clause = return: not results -> ...'. No test name, no assertion, no pytest command surfaced.",
+        "deviation": "Fired at the correct moment, legitimacy-clean. Content note: it listed guard-clause contracts of OTHER config.py functions (default_region_env, ALL_REGIONS) rather than tests covering _glob_filenames (no verified test linkage existed -> degraded to generic contracts), so it is honest-but-low-value, not a violation."
+      },
+      {
+        "layer": "grep_intercept",
+        "spec": "On agent grep/rg: inject callers of searched symbol from graph (max 5).",
+        "fired": false,
+        "verdict": "SILENT_MISS",
+        "evidence": "Entry 26: agent ran 'grep -n \"_glob_filenames\" src/cfnlint/config.py'; entry 27 observation shows only the raw grep output ('770: ... 789: ...') with NO '[GT] Callers of _glob_filenames:' injection.",
+        "deviation": "A grep on the gold symbol _glob_filenames fired no grep-intercept caller injection \u2014 the exact symbol where caller context could have anchored the agent. (Possibly suppressed because the grep was same-file scoped, but spec trigger is symbol-based; no GT response delivered.)"
+      },
+      {
+        "layer": "drift (contract drift)",
+        "spec": "Detect/flag contract drift between edited code and stored contract.",
+        "fired": false,
+        "verdict": "NA",
+        "evidence": "No drift marker in any observation. The edit preserved the function signature (only added a branch), so no drift trigger.",
+        "deviation": ""
+      }
+    ],
+    "overall_verdict": "GT fired across most layers but mis-served the agent on the ONE file that mattered, and the agent self-localized despite GT, not because of it. The task RESOLVED (agent edited gold config.py::_glob_filenames, all 627 tests pass per its TASKS.md) \u2014 but per CLAUDE.md this is a self-localization resolve, not a GT-caused win. L1 (DEVIATED): localization/brief/graph-map/orientation are internally consistent (l1_consistent=true) but jointly point at runner.py while gold is config.py::_glob_filenames (candidate #6, function never named). L3b (DEVIATED on gold): on config.py it surfaced _has_file/get_template_args contracts and unrelated scripts/*.json.load callers, never _glob_filenames \u2014 the issue-ranking failed exactly where needed (it was CONFORMANT on api.py/decode.py). Consensus (DEVIATED): Layer A honored correct-or-quiet ('GT has not confirmed a single primary target \u2014 confirm with grep'), but entry 77 emitted a false 'cfn_yaml.py was confirmed earlier' progressive claim. L3 post-edit was a SILENT_MISS (no contract/caller block on the gold edit, entry 83). Grep-intercept was a SILENT_MISS on the gold symbol (entry 26/27, no caller injection). L5 fired diagnostically (CONFORMANT content, legacy-format). GT_VERIFY (CONFORMANT + legitimacy_clean=true): no test name/assertion/pytest surfaced by ANY GT layer (entry 87 lists only guard-clauses); every pytest/assert/::test_ string in the trajectory comes from the agent's own file reads and test runs, not GT. CONFORMANT: consensus Layer A scope, L3b on non-gold files, L5 diagnostic, GT_VERIFY legitimacy, L1 internal agreement. DEVIATED: L1 target ranking, L3b on gold file, consensus progressive claim (entry 77), L5 format. SILENT_MISS: L3 post-edit on gold, grep-intercept on gold symbol.",
+    "task": "Audit GroundTruth architecture (DOC_OF_HONOR.md) behavior against real agent trajectory aws-cloudformation__cfn-lint-3862 (gold = src/cfnlint/config.py::_glob_filenames + schema.json + rules/errors/config.py)."
+  },
+  {
+    "task": "Audit the GroundTruth architecture (DOC_OF_HONOR.md spec) against the real OpenHands trajectory aws-cloudformation__cfn-lint-3875.jsonl (199-entry history). Gold file = src/cfnlint/template/transforms/_language_extensions.py, function value() ~line 403 (guard the FindInMap fallback loop when a DefaultValue is present). Determine per-layer conformance vs spec, grounded in raw observation quotes.",
+    "layers": [
+      {
+        "layer": "L0 index->graph.db (pre-index)",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "spec": "Layer 0 / 0.11: GHA pre-indexes /testbed into graph.db before the agent starts; assertions/properties/edges populated so downstream L1/L3/L3b/grep/consensus have data. Fires once, before agent.",
+        "evidence": "Pre-index is implicit but PROVEN by downstream graph-derived content: entry 1 instruction carries a populated <gt-localization>/<gt-task-brief>/<gt-graph-map>; entry 13 emits real [CONTRACT] sigs + Called-by lines from _mappings.py; entry 68 emits stored [RAISES] WHEN len(obj)!=1: raise _ValueError... from _language_extensions.py. None of this exists without a pre-built graph.db. No trigger entry is in history (pre-index runs in the workflow, outside the agent loop), so firing is inferred from data presence.",
+        "deviation": ""
+      },
+      {
+        "layer": "L1 brief / localization",
+        "fired": true,
+        "verdict": "DEVIATED",
+        "spec": "2.1: v1r_brief emits <gt-localization> + <gt-task-brief> + <gt-graph-map> (+ <gt-orientation>, [GT KEY CONTRACTS]) at task start, dynamic+hybrid+confidence-gated; ranked candidates, correct-or-quiet. Sub-blocks should be internally consistent about the target.",
+        "evidence": "Entry 1 (action.args, the instruction injected at task start): '<gt-localization confidence=\"medium\"> ... 1. src/cfnlint/rules/functions/FindInMap.py ... 2. src/cfnlint/template/transforms/_language_extensions.py \u2014 values, _ResolveError, _ValueError ...' THEN '<gt-task-brief> 1. src/cfnlint/context/_mappings.py (def create_from_dict...)' THEN '<gt-graph-map> src/cfnlint/context/_mappings.py :: value'. The three blocks name THREE different #1 targets; gold (_language_extensions.py) is only #2 in localization and absent from brief#1/graph-map.",
+        "deviation": "Internal inconsistency: <gt-localization> ranks FindInMap.py #1 and gold _language_extensions.py #2; <gt-task-brief> #1 and <gt-graph-map> both point at a THIRD file _mappings.py (create_from_dict/value), which is NOT the gold and not localization's top pick. The blocks contradict on the primary target; gold is never surfaced as the primary anywhere. Honest 'confidence=\"medium\"' label mitigates harm, but the brief mis-ranked the gold to #2 and the brief/graph-map pointed elsewhere \u2014 not correct-or-quiet on ranking."
+      },
+      {
+        "layer": "L1 [GT KEY CONTRACTS] enhancement",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "spec": "2.1+: when pre-built graph.db exists, append [GT EDIT PLAN]/[GT KEY CONTRACTS] (guard/return/side-effect properties) to L1. Orientation, not prescription.",
+        "evidence": "Entry 1: '[GT KEY CONTRACTS]\\n  Preserve: conditional_return: if self._collection: return return\\n  Preserve: exception_handler: except _ResolveError -> handles' and '<gt-orientation> Issue references: values() in _language_extensions.py (25 callers); get_resources() in template.py (20 callers); fn_findinmap() in FindInMap.py (1 callers)'. Surfaces real properties; the _ResolveError exception handler it names is exactly the block the agent later edits.",
+        "deviation": ""
+      },
+      {
+        "layer": "L3 post_edit contract",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "spec": "2.2: on a file_editor edit, emit [BEHAVIORAL CONTRACT]/[CALLERS]/[SIGNATURE]/[TEST] etc, budget 2000 chars, categorical caller filter, no test-file masking. Fires on edit.",
+        "evidence": "Entry 103 (observation after the gold edit at entry 102): '[GT] Post-edit: _language_extensions.py\\n[GT] You edited test/fixture file(s): test/__init__.py, test/fixtures/__init__.py... A failing test is fixed by changing the SOURCE under test, not the test itself \u2014 editing the test only masks the bug...'. Fired on the correct edited file, delivered the anti-test-masking advisory (a legitimate behavioral guardrail, no test names leaked).",
+        "deviation": ""
+      },
+      {
+        "layer": "L3b post_view navigation / Contract pillar",
+        "fired": true,
+        "verdict": "DEVIATED",
+        "spec": "2.3: on a file view emit [CONTRACT] signature/return (always-fire) + categorical-filtered Called-by/Calls-into. Caller provenance must be a FACT only for deterministic resolution_method; name_match never a fact.",
+        "evidence": "Fired many times correctly: entry 19/68/153 deliver real [CONTRACT] sigs for _language_extensions.py; entry 21 context.py; entry 45 Properties.py with PRESERVE guards; entry 49 _BaseFn.py with real cross-file callers (If.py:49, Ref.py:62). BUT entry 68/153 'Called by: ...CodepipelineStageActions.py:169 `[f\\'condition \"{k}\" is {v}\\' for (k, v) in scenario.items()]`... PrimaryIdentifiers.py:37 `for k2, v2 in conditions2.items():`' \u2014 these are generic .items() name_match collisions laundered as Called-by for transform(), not real CALLS edges.",
+        "deviation": "Caller-provenance laundering: L3b 'Called by' for _language_extensions.py transform() lists unrelated .items()/dict-iteration sites (Codepipeline*, PrimaryIdentifiers) as if they call transform \u2014 classic name_match collision the categorical/FACT gate was supposed to suppress. Did not misdirect the agent (it read the real code), but violates the correct-or-quiet provenance rule. [CONTRACT] always-fire portion is CONFORMANT."
+      },
+      {
+        "layer": "consensus / <gt-scope>",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "spec": "3.1 Layer A: first time agent views a brief-candidate file before any source edit, emit <gt-scope> listing connected files; correct-or-quiet (no false single-primary claim). Layer B progressive '...also in scope.'",
+        "evidence": "Entry 11 (first view of FindInMap.py): '<gt-scope files=\"6\"> 1. functions/FindInMap.py \u2014 in scope (you are viewing this) 2. functions/_BaseFn.py \u2014 graph-connected ... These files are related in scope; GT has not confirmed a single primary target \u2014 confirm the edit target with grep.' Layer B fired at entry 49: '[GT] _BaseFn.py: also in scope.'",
+        "deviation": ""
+      },
+      {
+        "layer": "L5 scaffold governor",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "spec": "2.5: when agent edits/creates scaffold (debug_, test_, reproduce_) with no prior source edit, emit diagnostic-only <gt-advisory>/[GT L5: No Source Edits] \u2014 NO prescriptive file list.",
+        "evidence": "Entry 85 (after 47 actions, agent running reproduction scripts, before the gold source edit at 102): '[GT L5: No Source Edits]\\nIteration: 47/100\\nYou have run 47 actions with 0 source file edits.' Pure diagnostic statement of the verifiable fact, no 'edit X' directive.",
+        "deviation": ""
+      },
+      {
+        "layer": "L5b late reminder",
+        "fired": false,
+        "verdict": "NA",
+        "spec": "2.6: diagnostic late reminder for an unexamined high-confidence structural signal; suppressed by default (goku_active=1) \u2014 telemetry only, rarely agent-visible.",
+        "evidence": "No '[GT L5: Unexamined structural signal]' string appears in any agent observation across all 199 entries (scan found only the L5 No-Source-Edits line at entry 85). Suppressed-by-default behavior, consistent with spec.",
+        "deviation": ""
+      },
+      {
+        "layer": "L6 reindex (post-edit, before L3)",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "spec": "2.7: after each edit run gt-index -file to refresh graph.db before L3 post_edit; if binary missing, skip. Hidden telemetry (no agent-visible payload expected).",
+        "evidence": "Cannot be directly quoted (its [GT_META]/[GT_DELIVERY] lines are filtered from agent observations per 5.3). Indirect evidence it ran: L3 post_edit at entry 103 fired immediately after the entry-102 edit with file-specific content, and GT_VERIFY at entry 107 read fresh _language_extensions.py properties \u2014 both depend on the post-edit graph state. No 'L6 reindex SKIPPED' surfaced. Firing inferred from downstream freshness, not a raw quote (correctly hidden).",
+        "deviation": ""
+      },
+      {
+        "layer": "GT_VERIFY pre-submit",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "spec": "2.8: at edit->review transition (>=1 source edit then >=3 non-edit actions), fire ONCE, verifiable-only. Spec form lists pytest node IDs from the assertions table (target_node_id>0). Must not fabricate; under-confident -> silent.",
+        "evidence": "Entry 107: '[GT_VERIFY] You edited 1 file(s). Before finishing, run the project\\'s own test suite for the affected modules and confirm your change preserves the behavioral contract:\\n  _language_extensions.py: exception_type = _ValueError\\n  _language_extensions.py: exception_type = _TypeError\\n  _language_extensions.py: exception_type = _ResolveError\\n  _language_extensions.py: guard_clause = raise: isinstance(obj, dict) -> if params:'. Fired once, after the source edit, while agent could still act.",
+        "deviation": ""
+      },
+      {
+        "layer": "grep intercept",
+        "fired": false,
+        "verdict": "NA",
+        "spec": "2.9: when agent runs grep/rg, emit '[GT] Callers of X:' from CALLS edges, rate-limited to 5. Trigger is a grep/rg command.",
+        "evidence": "No '[GT] Callers of' string appears in any observation. The agent's run actions were python reproduction scripts and pytest invocations, not grep/rg over symbols that triggered the intercept (scan of all 199 entries found zero 'Callers of' firings). No trigger met -> correctly silent.",
+        "deviation": ""
+      },
+      {
+        "layer": "contract drift",
+        "fired": false,
+        "verdict": "NA",
+        "spec": "Contract-drift / pre-submit drift block (newer drift engine): block/flag an edit that breaks a stored contract. Not part of the DOC_OF_HONOR 2026-05-27 layer set delivered in this run.",
+        "evidence": "No drift-block marker surfaced in any observation; the only post-edit guardrail that fired was the L3 anti-test-masking advisory (entry 103) and GT_VERIFY (entry 107). No drift layer trigger in this trajectory.",
+        "deviation": ""
+      },
+      {
+        "layer": "L4a auto-query / L4b tool-as-hooks",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "spec": "2.4 L4a RETIRED (subsumed by L3b); 4.2 L4b delivers tool logic passively via hooks (gt_contract->L3, investigate->L3b). No standalone [GT_AUTO] expected since L4a retired.",
+        "evidence": "No '[GT_AUTO]' marker appears (consistent with L4a RETIRED). L4b tool capability is delivered through the L3b [GT]/<gt-context> [CONTRACT] blocks (entries 13,15,19,21,23) and L3 post-edit \u2014 exactly the passive-hook design. No autonomous MCP tool call (gt_query/gt_search/gt_navigate/gt_validate listed in instance.gt_l4_tools) appears in any agent action.",
+        "deviation": ""
+      },
+      {
+        "layer": "drift / dedup / hidden-prefix hygiene",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "spec": "5.1 dedup per-file per-layer; 5.3 hidden prefixes ([GT_META]/[GT_STATUS]/[GT_DELIVERY]/[GT_COST] etc) filtered from agent observations.",
+        "evidence": "Across all 199 agent-visible observations, the marker scan found ZERO leaked [GT_META]/[GT_STATUS]/[GT_DELIVERY]/[GT_TRACE]/[GT_COST] lines \u2014 only intended agent-facing markers ([GT], [CONTRACT], <gt-context>, <gt-scope>, [GT_VERIFY], [GT L5...]). Repeated _language_extensions.py views (entry 68 then 153) re-delivered context without spammy exact-duplicate stacking.",
+        "deviation": ""
+      }
+    ],
+    "l1_consistent": false,
+    "l1_detail": "The three L1 sub-blocks CONTRADICT on the primary target. (a) <gt-localization confidence=\"medium\">: '1. src/cfnlint/rules/functions/FindInMap.py \u2014 ... 2. src/cfnlint/template/transforms/_language_extensions.py \u2014 values, _ResolveError, _ValueError' (gold is #2). (b) <gt-task-brief>: '1. src/cfnlint/context/_mappings.py (def create_from_dict... -> Mappings ... -> Map)' \u2014 a different file, not gold, with create_from_dict callers. (c) <gt-graph-map>: 'src/cfnlint/context/_mappings.py :: value / called by: find_in_map (src/cfnlint/context/_mappings.py)'. So: localization's #1 = FindInMap.py; brief's #1 = _mappings.py; graph-map = _mappings.py. Brief and graph-map agree with EACH OTHER (_mappings.py) but disagree with localization's top pick (FindInMap.py), and the GOLD file _language_extensions.py is never the #1 in any block (only localization #2). The blocks do not agree on the target -> internally inconsistent. Mitigant: confidence=\"medium\" is an honest hedge and the localization list does include gold at #2; the scope block (entry 11) explicitly states 'GT has not confirmed a single primary target \u2014 confirm the edit target with grep,' which is correct-or-quiet. But strictly, L1's three sub-blocks contradict.",
+    "legitimacy_clean": true,
+    "overall_verdict": "The GT architecture behaved largely as DOC_OF_HONOR specifies on this real run, and the run ended with the agent editing the GOLD file with a semantically-correct fix. Layers that CONFORMED: pre-index/L0 (graph.db populated, proven by downstream real [CONTRACT]/[RAISES] content), L1 [GT KEY CONTRACTS]/orientation (surfaced the exact _ResolveError handler the agent later edited), L3 post-edit (fired on the correct edited file with the anti-test-masking guardrail at entry 103), consensus/<gt-scope> (entry 11 honest 'GT has not confirmed a single primary target \u2014 confirm with grep,' plus Layer-B 'also in scope' at 49), L5 scaffold governor (entry 85 diagnostic-only '[GT L5: No Source Edits] Iteration 47/100'), L6 reindex (inferred from downstream freshness; correctly hidden), GT_VERIFY pre-submit (entry 107, once, verifiable property list, no test names), and hidden-prefix/dedup hygiene (zero [GT_META]/[GT_DELIVERY] leaks). L5b, grep-intercept, and contract-drift were NA (no trigger). TWO layers DEVIATED: (1) L1 brief/localization is internally inconsistent \u2014 <gt-localization> ranks gold _language_extensions.py only #2 while <gt-task-brief> and <gt-graph-map> both point at a third file _mappings.py as #1; gold is never surfaced as the primary target by any block, though the honest 'medium' confidence and the grep-confirm scope note limited the harm and the agent self-localized to gold anyway. (2) L3b post-view caller provenance launders generic .items()/dict-iteration name_match collisions (entry 68/153: CodepipelineStageActions.py, PrimaryIdentifiers.py listed as 'Called by' transform()) as if they were real CALLS edges \u2014 a correct-or-quiet provenance violation, though it did not misdirect the agent. Legitimacy is CLEAN: no layer (GT_VERIFY included) surfaced any test name, assertion, or pytest node id \u2014 GT_VERIFY at entry 107 listed only exception_type/guard_clause properties. Net: the architecture fired the right layers at the right moments with honest hedging; the two deviations are localization ranking imprecision and residual caller name_match laundering, neither of which caused a wrong edit.",
+    "conforming": [
+      "L0 pre-index (graph.db populated; real [CONTRACT]/[RAISES] downstream)",
+      "L1 [GT KEY CONTRACTS]/orientation (named the _ResolveError handler later edited)",
+      "L3 post_edit (fired on gold file, anti-test-masking guardrail, entry 103)",
+      "consensus/<gt-scope> (entry 11 honest no-single-primary + grep-confirm; Layer B entry 49)",
+      "L5 scaffold governor (entry 85 diagnostic-only, no prescription)",
+      "L6 reindex (hidden telemetry; freshness inferred)",
+      "GT_VERIFY pre-submit (entry 107, once, verifiable-only, no test names)",
+      "L4b tool-as-hooks (passive [CONTRACT] delivery; L4a retired, no [GT_AUTO])",
+      "hidden-prefix/dedup hygiene (zero [GT_META]/[GT_DELIVERY] leaks)"
+    ],
+    "deviating": [
+      "L1 brief/localization: internally inconsistent \u2014 localization ranks gold #2 while task-brief and graph-map point at a different file (_mappings.py) as #1; gold never surfaced as primary (mitigated by confidence=medium + grep-confirm scope note)",
+      "L3b post-view caller provenance: laundered generic .items()/dict-iteration name_match collisions (Codepipeline*, PrimaryIdentifiers) as 'Called by' transform() at entries 68/153 \u2014 correct-or-quiet provenance violation; did not misdirect the agent"
+    ]
+  },
+  {
+    "task": "Audit GroundTruth architecture (DOC_OF_HONOR.md) behavior against the REAL agent trajectory .tmp_trajd/conan-io__conan-17123.jsonl (109-entry OH/CodeActAgent history, deepseek-v4-flash). Gold target = conan/internal/api/config/config_installer.py::_ConanIgnoreMatcher (inverse-match .conanignore). Determine per-layer conformance vs spec, grounded in raw quotes.",
+    "layers": [
+      {
+        "layer": "L0 index/graph.db",
+        "spec": "L0 (DOC_OF_HONOR 0.x): gt-index builds graph.db with nodes/edges/properties/assertions BEFORE the agent starts; pre-index orchestration (0.11) populates assertions + contracts. Not directly agent-visible; inferred from downstream layers having content.",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "evidence": "Downstream layers carry real graph.db-derived content: entry 11 emits [CONTRACT] flows + Called by: lines + Spec: from properties/edges; entry 77 GT_VERIFY lists exception_type=ConanException and guard_clause properties for config_installer.py. A populated graph existed. No raw L0 line is agent-visible (by design), so conformance is inferred, not directly quoted.",
+        "deviation": "None observable; L0 itself emits nothing agent-visible. Quality issue surfaces at L3b (name_match laundering, see that layer)."
+      },
+      {
+        "layer": "L1 brief",
+        "spec": "L1 (2.1): first-turn v1r brief delivers <gt-task-brief> ranked files + <gt-graph-map>/orientation; correct-or-quiet; the sub-blocks should agree on the edit target. Localization candidates should rank the gold file.",
+        "fired": true,
+        "verdict": "DEVIATED",
+        "evidence": "Entry 1 (user message) + entry 2 (recall) carry the brief. <gt-localization confidence=\"medium\"> ranks gold '1. conan/internal/api/config/config_installer.py \u2014 _ConanIgnoreMatcher, matches, _hide_password' #1 (CORRECT). But <gt-task-brief> leads with a DIFFERENT file: '1. conan/cli/commands/config.py (def config..., def config_home..., def config_install...)' and two unrelated scope chains 'create.py -> lockfile.py' and 'graph_binaries.py -> build_mode.py'. <gt-orientation> 'Issue references: config_install() in config.py / config_home() in config.py' + 'Related: update() in remotes.py, remove() in remotes.py'. config_installer.py appears ONLY in <gt-localization>; the brief + orientation point at config.py. Internally contradictory.",
+        "deviation": "The three L1 sub-blocks disagree: localization=config_installer.py (gold), but task-brief + orientation=config.py (wrong, the CLI command, not the matcher). No <gt-graph-map> block present at all. The agent succeeded by ignoring the brief/orientation and trusting the localization candidate."
+      },
+      {
+        "layer": "L3 post_edit",
+        "spec": "L3 (2.2): on a file edit, emit contract/caller/signature evidence within 2000-char budget; correct-or-quiet; never inject a FALSE claim. Includes contract-drift (SEMANTIC WARNING guard added/removed) and scope-completeness markers.",
+        "fired": true,
+        "verdict": "MISFIRED",
+        "evidence": "Entry 73 (post-edit of config_installer.py) emits: '[GT] Post-edit: config_installer.py / SEMANTIC WARNING: New guard: fnmatch.fnmatch(path, pattern) / SEMANTIC WARNING: Guard removed: fnmatch.fnmatch(path, ignore_entry)' (legitimate drift detection of the matches() rewrite). BUT then: '[GT] You edited test/fixture file(s): conan/test/__init__.py, conan/test/assets/__init__.py, conan/test/assets/autotools.py. A failing test is fixed by changing the SOURCE under test... edits to test files are discarded'. The agent edited config_installer.py (SOURCE), NOT any conan/test/* file \u2014 this is a FALSE claim. Also '[GT] 1/4 scope files edited. 3 verified co-change file(s) remain: api/output.py, downloaders/file_downloader.py, conans/errors.py' \u2014 these three are config_installer.py's IMPORTS, not co-change files.",
+        "deviation": "Injected a false 'you edited test/fixture files' claim about files the agent never touched (anti-test-edit warning misfired on a pure source edit), and mislabeled import targets as 'verified co-change files'. Both violate correct-or-quiet (false context). The drift SEMANTIC WARNING portion was correct."
+      },
+      {
+        "layer": "L3b post_view",
+        "spec": "L3b (2.3): on a file view, ALWAYS-fire Contract pillar (signature/return from nodes, no edges needed) + categorical-filtered verified callers; correct-or-quiet \u2014 name_match is NEVER a fact (suppress <0.5 / 'unverified' >=0.5, no relationship claim).",
+        "fired": true,
+        "verdict": "MISFIRED",
+        "evidence": "Entry 11 (first view of config_installer.py) fires [CONTRACT] lines for tmp_config_install_folder/_process_git_repo/__init__ + flows (Contract pillar = CONFORMANT). But the same block asserts 'Called by: conan/internal/deploy.py:60 `if any(conanfile.ref.matches(p, consumer) for p in excluded):`, conans/client/graph/range_resolver.py:71 `if remote.allowed_packages and not any`, conans/client/graph/proxy.py:100 `if remote.allowed_packages and not any`'. Those call ref.matches()/package-matching \u2014 NOT _ConanIgnoreMatcher.matches() in config_installer.py. The common name 'matches' was name_match-laundered into a false relationship claim, presented as fact with no 'unverified' tag. Repeated truncated at entry 99 and entry 105 (<gt-context> wrapper) Contract-only (clean).",
+        "deviation": "Contract pillar conformant, but 'Called by:' laundered name_match callers (ref.matches / allowed_packages) as verified callers of config_installer.py \u2014 exactly the categorical-filter violation the spec forbids (name_match presented as fact, no unverified tag)."
+      },
+      {
+        "layer": "consensus",
+        "spec": "Consensus/<gt-scope> (3.1): on viewing a brief candidate before source edits, emit scope ('N files connected; primary target=X') Layer A once, then progressive Layer B confirmations; correct-or-quiet on the primary-target claim.",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "evidence": "Entry 11 emits Layer A: '<gt-scope files=\"4\"> 1. config/config_installer.py \u2014 in scope (you are viewing this) 2. api/output.py \u2014 imported 3. downloaders/file_downloader.py \u2014 imported 4. conans/errors.py \u2014 imported. These files are related in scope; GT has not confirmed a single primary target \u2014 confirm the edit target with grep.' Entry 57 emits Layer B progressive: '[GT] config_installer.py was confirmed earlier. Key evidence: [CONTRACT] def tmp_config_install_folder... Scope: config_installer.py, output.py, file_downloader.py'.",
+        "deviation": "Correct-or-quiet honored: consensus explicitly DECLINED to name a primary target ('GT has not confirmed a single primary target \u2014 confirm with grep'). The scope members beyond config_installer.py are just imports (low value) but the layer fired honestly without a false primary-target claim."
+      },
+      {
+        "layer": "L5 governor",
+        "spec": "L5 (2.5): on a scaffold edit / non-source-without-progress, emit DIAGNOSTIC-ONLY advisory; per the 2026-05-28 update the de-prescribed form is '<gt-advisory layer=\"L5\" trigger=\"non_source_without_progress\">No tracked source file modified yet...'. No prescriptive file list.",
+        "fired": true,
+        "verdict": "DEVIATED",
+        "evidence": "Entry 69 emits '[GT L5: No Source Edits] / Iteration: 36/100 / You have run 36 actions with 0 source file edits.' This is the OLDER plain-text '[GT L5: No Source Edits]' counter form, NOT the spec's de-prescribed '<gt-advisory layer=\"L5\" trigger=\"non_source_without_progress\">...Source-level resolution requires editing tracked source.' wrapper.",
+        "deviation": "Diagnostic in spirit (no prescriptive file list \u2014 that part conforms), but the rendered form is the legacy '[GT L5: No Source Edits] / Iteration N/100' counter, not the spec's <gt-advisory> de-prescribed text. Content/format drift from DOC_OF_HONOR 2.5."
+      },
+      {
+        "layer": "L5b",
+        "spec": "L5b (2.6): late reminder for an unexamined high-confidence structural signal; suppressed by default (goku_active=1) \u2014 no agent-visible injection by default, telemetry only.",
+        "fired": false,
+        "verdict": "NA",
+        "evidence": "No '[GT L5: Unexamined structural signal]' line appears in any of the 109 entries. Consistent with the spec default (goku_active=1 suppresses agent-visible L5b). No trigger this run.",
+        "deviation": "None \u2014 silent by design."
+      },
+      {
+        "layer": "L6 reindex",
+        "spec": "L6 (2.7): after every edit, fire 'gt-index -file' incremental reindex BEFORE the L3 post_edit hook; logs to hidden [GT_META]/[GT_DELIVERY] prefixes (not agent-visible).",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "evidence": "Not directly agent-visible (hidden prefixes per 5.3). Indirect proof: entry 73 L3 post-edit DID fire with fresh drift analysis ('SEMANTIC WARNING: New guard... Guard removed...') on the just-edited content, which requires L6 to have run before L3 per the load-bearing ordering (line 3825). No reindex error surfaced to the agent.",
+        "deviation": "None observable; hidden-by-design. Conformance inferred from L3 firing with up-to-date post-edit content."
+      },
+      {
+        "layer": "GT_VERIFY pre-submit",
+        "spec": "L6 pre-submit / GT_VERIFY (2.8): at the edit->review transition (>=1 edit then >=3 non-edit actions), emit VERIFIABLE-ONLY [GT_VERIFY] listing tests covering changed files OR contract to preserve; under-confident -> silent; NO semantic judgment.",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "evidence": "Entry 77 emits '[GT_VERIFY] You edited 1 file(s). Before finishing, run the project's own test suite for the affected modules and confirm your change preserves the behavioral contract: config_installer.py: exception_type = ConanException / guard_clause = raise: not os.path.isdir(folder) -> raise ConanException / guard_clause = return: zipfile.is_zipfile(filename) -> return True'. It surfaced the contract/guards to preserve and a generic 'run the project's own test suite' \u2014 NO specific pytest test name, NO assertion, NO gold test.",
+        "deviation": "None. Verifiable-only; legitimacy clean (no test name/assertion leaked). When no verified test linkage existed it correctly fell back to listing contract properties rather than guessing a test."
+      },
+      {
+        "layer": "grep_intercept",
+        "spec": "Grep intercept (2.9): on agent grep/rg, emit '[GT] Callers of X:' with verified callers, rate-limited to 5 firings.",
+        "fired": false,
+        "verdict": "NA",
+        "evidence": "No '[GT] Callers of' grep-intercept block appears in any entry. The agent's run commands (entries 8-68) are pip/python -c probes and file ops; no grep/rg command triggered the intercept in the inspected GT-firing entries.",
+        "deviation": "None \u2014 no qualifying grep trigger this run."
+      },
+      {
+        "layer": "drift (contract drift)",
+        "spec": "Contract drift: L3 post-edit SEMANTIC WARNING when a guard/return/exception changes between pre- and post-edit (drift detection on the edited function).",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "evidence": "Entry 73: 'SEMANTIC WARNING: New guard: fnmatch.fnmatch(path, pattern)' and 'SEMANTIC WARNING: Guard removed: fnmatch.fnmatch(path, ignore_entry)'. The agent's edit rewrote matches() from 'for ignore_entry... if fnmatch(path, ignore_entry): return True' to 'for pattern,is_negation... if fnmatch(path,pattern): result=not is_negation' \u2014 the drift warning correctly identifies the removed and added guard expressions.",
+        "deviation": "None \u2014 drift detection accurately captured the guard rewrite. (This is the one fully-correct, high-value firing in the L3 block; the false test-file/co-change claims around it are the misfires, scored under L3 post_edit.)"
+      }
+    ],
+    "l1_consistent": false,
+    "l1_detail": "The three L1 sub-blocks CONTRADICT on the target. <gt-localization confidence=\"medium\"> ranks the GOLD file first: '1. conan/internal/api/config/config_installer.py \u2014 _ConanIgnoreMatcher, matches, _hide_password'. But <gt-task-brief> leads with a different file entirely: '1. conan/cli/commands/config.py (def config..., def config_home..., def config_install...)' plus two unrelated scope chains ('create.py \u2192 lockfile.py', 'graph_binaries.py \u2192 build_mode.py') \u2014 none mention config_installer.py. <gt-orientation> also points at config.py: 'Issue references: config_install() in config.py / config_home() in config.py' and 'Related: update() in remotes.py, remove() in remotes.py'. So localization=config_installer.py (correct gold), while task-brief+orientation=config.py (wrong). No <gt-graph-map> block was emitted at all. The agent reached gold via the localization candidate, not via the brief/orientation, which actively pointed elsewhere.",
+    "legitimacy_clean": true,
+    "overall_verdict": "Mixed. The GT architecture fired on this run and the agent DID resolve the issue by editing the gold file config_installer.py (candidate #1 in <gt-localization>), but several layers deviated from DOC_OF_HONOR. CONFORMANT: consensus/<gt-scope> (Layer A honestly declined a primary target \u2014 'GT has not confirmed a single primary target \u2014 confirm with grep' \u2014 and Layer B progressive confirmed at entry 57); GT_VERIFY pre-submit (entry 77, verifiable contract-only, zero test-name/assertion leakage); contract drift (entry 73 SEMANTIC WARNING correctly flagged the matches() guard rewrite); L6 reindex (hidden, inferred from fresh L3 content). DEVIATED: L1 brief is internally inconsistent \u2014 <gt-localization> says config_installer.py (gold) while <gt-task-brief> and <gt-orientation> both point at config.py; no <gt-graph-map>. L5 fired the legacy '[GT L5: No Source Edits] / Iteration 36/100' counter form, not the spec's de-prescribed <gt-advisory> wrapper. MISFIRED: L3 post-edit injected a FALSE claim ('You edited test/fixture file(s): conan/test/__init__.py...' \u2014 the agent edited only the SOURCE file) and mislabeled config_installer.py's imports as 'verified co-change files'; L3b post-view 'Called by:' laundered name_match callers (ref.matches / remote.allowed_packages in deploy.py/range_resolver.py/proxy.py) as verified callers of config_installer.py, the exact name_match-as-fact violation the spec forbids. Legitimacy is CLEAN: no GT layer surfaced any pytest test name or assertion. Net: the win came from <gt-localization> ranking gold #1, despite the brief/orientation contradicting it and L3/L3b injecting false caller/test-file context.",
+    "conforming": [
+      "consensus/<gt-scope> \u2014 Layer A declined a primary target (correct-or-quiet) at entry 11, Layer B progressive confirm at entry 57",
+      "GT_VERIFY pre-submit (entry 77) \u2014 verifiable contract-only, no test name/assertion leaked",
+      "contract drift (entry 73) \u2014 SEMANTIC WARNING correctly flagged the matches() guard add/remove",
+      "L6 reindex \u2014 inferred conformant (fresh post-edit drift content present, hidden-by-design)",
+      "L0 index \u2014 populated graph evidenced downstream (contracts/properties present)"
+    ],
+    "deviating": [
+      "L1 brief \u2014 <gt-localization>(config_installer.py) contradicts <gt-task-brief>+<gt-orientation>(config.py); no <gt-graph-map> emitted",
+      "L5 governor \u2014 emitted legacy '[GT L5: No Source Edits] / Iteration 36/100' instead of the spec's de-prescribed <gt-advisory layer=L5> wrapper (entry 69)",
+      "L3 post-edit (MISFIRE) \u2014 false 'you edited test/fixture file(s): conan/test/__init__.py...' on a pure source edit + imports mislabeled as 'verified co-change files' (entry 73)",
+      "L3b post-view (MISFIRE) \u2014 'Called by:' laundered name_match callers (ref.matches/allowed_packages) as verified callers of config_installer.py (entry 11)"
+    ]
+  },
+  {
+    "task": "Audit GroundTruth architecture (DOC_OF_HONOR.md) behavior against the real OpenHands trajectory .tmp_trajd/conan-io__conan-17183.jsonl (45-entry history). Gold/edited file = conan/tools/google/bazel.py (Bazel.build clean-command startup-options bug, issue points at bazel.py L71). Agent resolved it by editing ONLY the gold file.",
+    "layers": [
+      {
+        "layer": "L0 index",
+        "spec": "Layer 0: gt-index builds graph.db pre-agent (GHA pre-index). Trigger = before agent start; populates nodes/edges/properties/assertions. Not agent-visible; observed only via downstream layer content quality.",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "evidence": "Indirect: downstream layers carry real graph content. Entry 5 L3b emits real signatures `[CONTRACT] def build(self, args=None, target=\"//...\", clean=True):` and `_safe_run_command() in bazel.py:15 ... Called by: build() bazel.py:27, test() bazel.py:74` \u2014 graph.db was pre-built with bazel.py nodes/edges/properties. No raw L0 line is agent-visible (correct).",
+        "deviation": ""
+      },
+      {
+        "layer": "L1 brief",
+        "spec": "Section 2.1: v1r_brief generates first-turn <gt-task-brief> ranked files + <gt-graph-map>; <gt-localization> candidate edit targets; <gt-orientation>; [GT KEY CONTRACTS]. Correct-or-quiet; must put correct files in front of agent. Three sub-blocks should agree on the target.",
+        "fired": true,
+        "verdict": "DEVIATED",
+        "evidence": "Entry 1 (instruction/first user msg): <gt-localization confidence=\"medium\"> ranks gold #1: '1. conan/tools/google/bazel.py \u2014 Bazel, _safe_run_command, __init__'. But <gt-task-brief> lists '1. conan/cli/commands/config.py ... 2. conan/cli/commands/cache.py ... 3. conan/internal/cache/conan_reference_layout.py' (NONE is gold). <gt-graph-map> shows only 'conan/internal/cache/conan_reference_layout.py :: metadata'. [GT KEY CONTRACTS] surfaces 'Preserve: guard_clause: raise: self.configuration is None -> raise ConanException' (a msbuilddeps.py/MSBuildDeps contract, NOT bazel.py). The three sub-blocks point at four different non-overlapping targets \u2014 internally contradictory. The agent never references any brief file; entry 4 thought localizes straight from the issue text ('the problem is clear: in conan/tools/google/bazel.py ... line 71').",
+        "deviation": "<gt-task-brief>, <gt-graph-map>, and [GT KEY CONTRACTS] delivered wrong/irrelevant files while <gt-localization> alone had the gold #1 \u2014 the dominant brief surface contradicted the localizer. confidence=\"medium\" was the only honesty signal; the brief was not correct-or-quiet, it was confidently-wrong on 3 of 4 sub-blocks."
+      },
+      {
+        "layer": "L1 detail (sub-block agreement)",
+        "spec": "Step 4: <gt-localization>, <gt-task-brief>, <gt-graph-map> must AGREE on the target or are flagged internally inconsistent.",
+        "fired": true,
+        "verdict": "DEVIATED",
+        "evidence": "localization target = conan/tools/google/bazel.py (#1, gold). task-brief targets = config.py / cache.py / conan_reference_layout.py. graph-map target = conan_reference_layout.py. orientation = generate() in msbuilddeps.py / bazeldeps.py + install() in config.py. Four sub-blocks, four different files; only <gt-orientation>'s 'generate() in bazeldeps.py' is even repo-adjacent. CONTRADICTORY.",
+        "deviation": "No agreement: localization had gold, the rest pointed elsewhere. Classic 'L1 brief inconsistent with the localizer' failure shape."
+      },
+      {
+        "layer": "L3b post_view",
+        "spec": "Section 2.3: on file view, graph_navigation() prepends [CONTRACT] pillar (sig+return, always-fire, no edges needed) + verified callers/callees, categorical filter, no name_match noise, no 'Next: read X' directive.",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "evidence": "Entry 5 (view bazel.py): '[GT] bazel:\\n[CONTRACT] def _safe_run_command(self, command):\\n[CONTRACT] def build(self, args=None, target=\"//...\", clean=True):\\n[CONTRACT] def test(self, target=None):\\n[CONTRACT] flows: command -> self._conanfile.run(command)...' then '_safe_run_command() in bazel.py:15 ... Called by: build() bazel.py:27 test() bazel.py:74' \u2014 verified same-file callers only, no speculative cross-file name_match. Re-fires correctly post-edit at entry 17 ('Spec: build handles: check_type=list))') and entry 43 as '<gt-context file=\"bazel.py\">'. No exploration directive. Contract pillar fired on the right file the agent actually edited.",
+        "deviation": ""
+      },
+      {
+        "layer": "consensus / <gt-scope>",
+        "spec": "Layer 3.1: when agent views a brief candidate before edits, Layer A consensus fires once with connected scope; correct-or-quiet \u2014 must not assert a false single primary target.",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "evidence": "Entry 5: '<gt-scope files=\"3\">\\n1. google/bazel.py \u2014 in scope (you are viewing this)\\n2. rest/file_uploader.py \u2014 possible match (unverified)\\n3. util/thread.py \u2014 possible match (unverified)\\nThese files are related in scope; GT has not confirmed a single primary target \u2014 confirm the edit target with grep.</gt-scope>'. It hedges the two graph-noise files explicitly as 'possible match (unverified)' and declines to assert a primary \u2014 correct-or-quiet honored. The agent was already on bazel.py (gold) and ignored the two noise files.",
+        "deviation": ""
+      },
+      {
+        "layer": "L3 post_edit",
+        "spec": "Section 2.2: after edit, priority-ordered evidence (behavioral contract, callers, signature, completeness). Must not inject FALSE claims. Categorical/verified filter. G7 fires only on isolated functions.",
+        "fired": true,
+        "verdict": "MISFIRED",
+        "evidence": "Entry 15 (after editing conan/tools/google/bazel.py \u2014 a SOURCE file): '[GT] Post-edit: bazel.py\\n[GT] You edited test/fixture file(s): conan/test/__init__.py, conan/test/assets/__init__.py, conan/test/assets/autotools.py. A failing test is fixed by changing the SOURCE under test, not the test itself...'. This is a FALSE claim \u2014 the agent edited NO test/fixture files, only bazel.py. Also '[GT] 1/3 scope files edited. 2 verified co-change file(s) remain: rest/file_uploader.py, util/thread.py' re-asserts the two graph-noise files as 'verified co-change' (they are not gold and not co-changed with bazel.py in reality).",
+        "deviation": "Injected a false test-edit-masking warning on a pure source edit (the conan/test/* file list is unrelated to the edit), and laundered two noise files as 'verified co-change' \u2014 both violate correct-or-quiet / never-inject-false-as-fact. Agent ignored it (no harm realized), but it is a MISFIRE."
+      },
+      {
+        "layer": "L3b post_view (re-fire post-edit)",
+        "spec": "Section 2.3 re-fire on subsequent views: contract pillar, dedup, no noise.",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "evidence": "Entry 17 (re-read after edit): '[GT] bazel:\\n[CONTRACT] def build(self, args=None, target=\"//...\", clean=True): ... [CONTRACT] flows: args -> if args: build_command += ...' \u2014 reflects the POST-EDIT body (build_command rename), proving L6 reindex updated the graph and L3b re-queried correctly. Entry 43: '<gt-context file=\"bazel.py\"> ... Spec: build handles: check_type=list))'. Contract-only, no fabricated callers.",
+        "deviation": ""
+      },
+      {
+        "layer": "L6 reindex",
+        "spec": "Section 2.7: after every edit, gt-index -file reindexes the edited file BEFORE L3 post_edit; not agent-visible.",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "evidence": "No agent-visible line (correct \u2014 hidden). Inferred fired: entry 17/43 post-edit contract reads the renamed 'build_command' variable ('flows: args -> if args: build_command += ...'), which only appears after the edit at entry 14; the graph reflected the new source, so an incremental reindex occurred between entry 15 (edit) and entry 17 (re-read).",
+        "deviation": ""
+      },
+      {
+        "layer": "GT_VERIFY pre-submit",
+        "spec": "Section 2.8: at edit->review transition, _maybe_fire_presubmit_verify lists tests covering changed files (assertions table, verified links) and suggests running them. Verifiable-only; under-confident -> silent. MUST NOT surface FAIL_TO_PASS/hidden test names as a leak.",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "evidence": "Entry 19 (after first test attempt): '[GT_VERIFY] You edited 1 file(s). Before finishing, run the project's own test suite for the affected modules and confirm your change preserves the behavioral contract:\\n  bazel.py: guard_clause = return: self._conanfile.conf.get(\"tools.build:skip_test\", check_type=bool) or ta\\n  bazel.py: return_shape = none'. It names NO specific pytest test, NO assertion, NO gold/hidden test \u2014 only a generic 'run your suite' + a behavioral-contract property reminder. Legitimacy clean.",
+        "deviation": ""
+      },
+      {
+        "layer": "grep_intercept",
+        "spec": "Section 2.9: on grep/rg, inject callers of searched symbol (max 5).",
+        "fired": false,
+        "verdict": "NA",
+        "evidence": "Agent ran `find` (entry 6) but never `grep`/`rg`. re.search(r'\\b(grep|rg)\\b') trigger never matched. Correctly silent.",
+        "deviation": ""
+      },
+      {
+        "layer": "L5 governor",
+        "spec": "Section 2.5: fires on scaffold edit (test_/reproduce_/scratch_) without prior source edit; diagnostic-only.",
+        "fired": false,
+        "verdict": "NA",
+        "evidence": "Agent created no scaffold/reproduce file; first edit (entry 14) was the gold source file conan/tools/google/bazel.py. No scaffold trigger. Correctly silent.",
+        "deviation": ""
+      },
+      {
+        "layer": "L5b late reminder",
+        "spec": "Section 2.6: fires when a high-confidence structural signal goes unexamined for N actions; diagnostic-only; suppressed by default (goku_active=1).",
+        "fired": false,
+        "verdict": "NA",
+        "evidence": "No '[GT L5: Unexamined structural signal]' line anywhere in the 45-entry history. Suppressed-by-default behavior held; short trajectory with prompt edit gave no late-band trigger.",
+        "deviation": ""
+      },
+      {
+        "layer": "drift / contract-drift",
+        "spec": "Contract-drift: flag when an edit changes a signature/base-class with callers. Should fire only on a real contract break.",
+        "fired": false,
+        "verdict": "NA",
+        "evidence": "The edit (entry 14) renamed local var 'command'->'build_command' and split startup_options; it did NOT change Bazel.build's signature ('def build(self, args=None, target=\"//...\", clean=True):' unchanged in entry 17). No caller-blind signature break existed, so no drift firing is the correct (quiet) behavior.",
+        "deviation": ""
+      },
+      {
+        "layer": "L4b / gt_validate (agent-invoked tool)",
+        "spec": "Section 4: MCP tools 0% autonomous adoption by design; gt_validate is human/agent-invoked structural check.",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "evidence": "Entry 40 agent ran `gt_validate unknown` (passed a placeholder, not the file path). Entry 41 returned '# gt_validate: unknown\\n# (file not in worktree at .../unknown; nothing to validate)' \u2014 tool degraded honestly on a bad arg rather than fabricating a verdict. No false pass. (Agent misused the tool; GT itself behaved correctly-or-quiet.)",
+        "deviation": ""
+      }
+    ],
+    "l1_consistent": false,
+    "legitimacy_clean": true,
+    "l1_detail": "<gt-localization confidence=\\\"medium\\\"> = '1. conan/tools/google/bazel.py \u2014 Bazel, _safe_run_command, __init__' (GOLD #1). <gt-task-brief> = '1. conan/cli/commands/config.py ... 2. conan/cli/commands/cache.py ... 3. conan/internal/cache/conan_reference_layout.py' (NONE gold). <gt-graph-map> = 'conan/internal/cache/conan_reference_layout.py :: metadata calls: download_export...'. [GT KEY CONTRACTS] = 'Preserve: guard_clause: raise: self.configuration is None -> raise ConanException' (an MSBuildDeps contract, wrong file). VERDICT: CONTRADICT. The localizer alone hit gold; the brief + graph-map + key-contracts all named different, non-gold files. Three of four L1 surfaces disagree with the localizer and with each other.",
+    "overall_verdict": "The GT architecture mostly behaved to spec on this run, with one clear MISFIRE and one clear L1 DEVIATION. Localization was effectively self-served: <gt-localization> correctly ranked gold conan/tools/google/bazel.py #1, but the dominant L1 surfaces (<gt-task-brief>, <gt-graph-map>, [GT KEY CONTRACTS]) pointed at unrelated files (config.py/cache.py/conan_reference_layout.py/MSBuildDeps), internally contradicting the localizer \u2014 the brief was confidently-wrong on 3 of 4 sub-blocks (only the 'medium' confidence tag and the issue text \u2014 which literally cites bazel.py L71 \u2014 saved the run). The agent ignored the brief and localized from the issue, then viewed bazel.py. There, L3b post-view + consensus behaved well: contract pillar was correct on the gold file (entry 5/17/43), and <gt-scope> honored correct-or-quiet ('GT has not confirmed a single primary target \u2014 confirm with grep', hedging the two graph-noise files rest/file_uploader.py + util/thread.py as 'possible match (unverified)'). The L3 post-edit hook MISFIRED at entry 15: on a pure SOURCE edit it injected a FALSE 'you edited test/fixture file(s): conan/test/__init__.py...' masking warning (no test file was touched) and re-laundered the two noise files as 'verified co-change' \u2014 a false-claim violation, though the agent ignored it so no harm was realized. GT_VERIFY (entry 19) was conformant and legitimacy-clean: it surfaced ZERO test names/assertions, only a generic 'run your suite' + a guard_clause/return_shape contract reminder. L6 reindex fired correctly (post-edit contract reflected the renamed build_command). L5/L5b/grep-intercept/drift were correctly NA (no trigger). gt_validate was misused by the agent (`gt_validate unknown`) but GT degraded honestly. Net: localization-as-product DEVIATED (brief inconsistent), post-edit MISFIRED with a false claim, but the navigation/contract/verify spine was conformant and legitimacy is clean \u2014 the resolve was driven by issue-text self-localization + correct contract context on the gold file, NOT by the L1 brief.",
+    "conforming": [
+      "L3b post_view (entry 5/17/43): contract pillar correct on the gold file bazel.py, verified same-file callers only, no name_match noise, no exploration directive",
+      "consensus <gt-scope> (entry 5): correct-or-quiet honored \u2014 declined to assert a single primary target, hedged noise files as 'possible match (unverified)', told agent to confirm with grep",
+      "GT_VERIFY pre-submit (entry 19): legitimacy-clean \u2014 no pytest test names, no assertions, no hidden/gold tests; only generic 'run the suite' + contract reminder",
+      "L6 reindex: fired (hidden), post-edit contract reflects the renamed 'build_command' proving incremental reindex between entries 15 and 17",
+      "<gt-localization> sub-block: correctly ranked gold conan/tools/google/bazel.py #1 with honest confidence=medium",
+      "L5 / L5b / grep_intercept / contract-drift: correctly silent (no trigger) \u2014 no scaffold, no grep, no signature break",
+      "gt_validate tool: degraded honestly on a bad arg instead of fabricating a pass"
+    ],
+    "deviating": [
+      "L1 brief INTERNAL CONTRADICTION: <gt-task-brief> (config.py/cache.py/conan_reference_layout.py), <gt-graph-map> (conan_reference_layout.py), and [GT KEY CONTRACTS] (MSBuildDeps ConanException guards) all named non-gold files, contradicting <gt-localization>'s correct #1 (bazel.py) and each other",
+      "L3 post_edit MISFIRE (entry 15): injected a FALSE 'you edited test/fixture file(s): conan/test/__init__.py, conan/test/assets/__init__.py, conan/test/assets/autotools.py' masking warning on a pure SOURCE edit (no test file was edited)",
+      "L3 post_edit (entry 15): laundered two graph-noise files (rest/file_uploader.py, util/thread.py) as '2 verified co-change file(s) remain' \u2014 false 'verified' provenance on files unrelated to bazel.py",
+      "[GT KEY CONTRACTS] in L1 delivered the wrong file's contracts (MSBuildDeps 'self.configuration is None'/'self.platform is None') for a bazel.py task"
+    ]
+  },
+  {
+    "task": "Audit GroundTruth architecture (DOC_OF_HONOR.md) behavior against the REAL agent trajectory .tmp_trajd/conan-io__conan-17292.jsonl (113 history entries). Gold target = conan/tools/cmake/cmake.py (official patch + FAIL_TO_PASS test/unittests/tools/cmake/test_cmake_cmd_line_args.py::test_visual_studio). Agent edited the gold cmake.py AND msbuild.py; task appears resolved.",
+    "layers": [
+      {
+        "layer": "L0 index / pre-index",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "spec": "gt-index builds graph.db before agent start; downstream layers query it. Evidence of a populated graph = real Called by/Calls/Spec lines with file:line.",
+        "evidence": "L1 brief and L3b deliver concrete graph-derived lines, e.g. OBS9: 'Called by: conan/tools/microsoft/layout.py:29 `arch = msbuild_arch(arch)`, conan/tools/cmake/cmake.py:27 `verbosity = msbuild_verbosity_cmd_line_arg(conanfile)`'. Real edges present -> pre-index/graph.db worked.",
+        "deviation": ""
+      },
+      {
+        "layer": "L1 brief",
+        "fired": true,
+        "verdict": "DEVIATED",
+        "spec": "Task-start passive brief: gt-localization region + gt-task-brief (ranked files w/ contracts+callers) + gt-graph-map (ego-graph) + gt-orientation. Correct-or-quiet; low confidence honestly labeled. Should agree on the target.",
+        "evidence": "Entry 1 / instruction. gt-localization confidence=low lists 6 candidates ranked #1 visual.py ... #5 cmake.py (the GOLD). gt-task-brief leads '1. conan/tools/microsoft/visual.py' with deepest detail on visual.py. gt-graph-map maps ONLY 'conan/tools/microsoft/visual.py :: is_msvc' (no cmake.py, no msbuild.py). gt-orientation 'Issue references: build() in msbuild.py, generate()/MSBuildDeps() in msbuilddeps.py'. Gold cmake.py is rank #5, absent from graph-map. Confidence honestly 'low' (correct-or-quiet partially honored) but the ranking misdirects toward visual.py.",
+        "deviation": "Top-ranked target (visual.py) and the entire graph-map are a NON-GOLD file; the gold cmake.py is buried at rank 5 with no graph-map coverage. Wrong ranking/primary target -> DEVIATED (not a clean miss because it fired with confident-looking structured content centered on the wrong file, mitigated only by the low-confidence tag)."
+      },
+      {
+        "layer": "L1 detail (internal consistency of the 3 sub-blocks)",
+        "fired": true,
+        "verdict": "DEVIATED",
+        "spec": "gt-localization, gt-task-brief, gt-graph-map should agree on the edit target.",
+        "evidence": "localization #1 + task-brief #1 + graph-map ALL = conan/tools/microsoft/visual.py; but gt-orientation 'Issue references: build() in msbuild.py ... MSBuildDeps() in msbuilddeps.py' points at msbuild/msbuilddeps; gold cmake.py is only rank #5 in localization, has NO line in the graph-map, and is not the orientation focus. The blocks contradict each other on the target.",
+        "deviation": "Three-way internal contradiction: brief/graph-map say visual.py, orientation says msbuild.py/msbuilddeps.py, gold is cmake.py (rank 5). No single agreed target."
+      },
+      {
+        "layer": "L3 post_edit",
+        "fired": true,
+        "verdict": "MISFIRED",
+        "spec": "On a file_editor edit, deliver behavioral contract / callers / signature / completeness. Correct-or-quiet; must NOT inject FALSE claims (CLAUDE.md: wrong info that misdirects is worse than none).",
+        "evidence": "OBS 61 (after editing conan/tools/microsoft/msbuild.py, a SOURCE file): '[GT] Post-edit: msbuild.py  SEMANTIC WARNING: Guard removed: maxcpucount' AND '[GT] You edited test/fixture file(s): conan/test/__init__.py, conan/test/assets/__init__.py, conan/test/assets/autotools.py. A failing test is fixed by changing the SOURCE under test...'. Both are FALSE: (a) the guard was NOT removed -- the agent changed `if maxcpucount:` to `if maxcpucount is not None:` (still guarded, OBS61 shows lines 66-70); (b) the agent edited msbuild.py (source), NOT any conan/test/* file -- the test-file warning fired against a file the agent never touched. Also '[GT] 1/4 scope files edited. 3 verified co-change file(s) remain: conan/errors.py, cmake/cmake.py, microsoft/layout.py'.",
+        "deviation": "Two false injections on a clean source edit: a fabricated 'Guard removed' semantic warning and a 'you edited test/fixture file(s)' accusation naming conan/test/* files the agent never edited. Both misdirect; MISFIRE."
+      },
+      {
+        "layer": "L3b post_view",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "spec": "On file view, always-fire Contract pillar ([CONTRACT] sig/return/flows from nodes table, no edges needed) + verified callers (Called by) + Spec. Correct-or-quiet.",
+        "evidence": "Fired on every source view: OBS9 msbuild.py '[GT] msbuild: [CONTRACT] def build(self, sln, targets=None): ... Called by: conan/tools/microsoft/layout.py:29 ...'; OBS15 conf.py; OBS21 cmake.py '[CONTRACT] def _cmake_cmd_line_args(conanfile, generator): ... Spec: _cmake_cmd_line_args handles: args.append(\"/m:{}\".format(njobs))' (correctly surfaced the buggy njobs branch on the gold function); OBS25 conf.py re-view via <gt-context>; OBS55 cpu.py; re-fired OBS89/91 post-edit. Contract-always-fire honored, real file:line callers, no false claims.",
+        "deviation": ""
+      },
+      {
+        "layer": "consensus",
+        "fired": true,
+        "verdict": "DEVIATED",
+        "spec": "Layer A first-consensus fires once on a brief-candidate view before edits, lists connected scope w/ a primary target; Layer B progressive confirms subsequent candidate views.",
+        "evidence": "Layer A OBS9: '<gt-scope files=\"4\"> 1. microsoft/msbuild.py -- in scope (you are viewing this) 2. conan/errors.py -- imported 3. cmake/cmake.py -- imported 4. microsoft/layout.py -- imported  These files are related in scope; GT has not confirmed a single primary target -- confirm the edit target with grep.' Layer B OBS21: '[GT] cmake.py: also in scope.' Fired correctly (once + progressive) and HONESTLY declined to name a single primary target (correct-or-quiet). But the scope is anchored on msbuild.py ('you are viewing this'), and lists cmake.py only as a generic 'imported' file -- it does not elevate the gold cmake.py as the target.",
+        "deviation": "Fired at the right moments and was honest about uncertainty, but the scope is centered on the viewed msbuild.py and treats the gold cmake.py as merely 'imported', not surfacing it as the likely target. Plumbing-correct, ranking-weak -> DEVIATED rather than CONFORMANT."
+      },
+      {
+        "layer": "L5 governor",
+        "fired": false,
+        "verdict": "NA",
+        "spec": "Fires when agent creates/edits a scaffold (test_/reproduce_/tmp_/.openhands etc.) WITHOUT any prior source edit; diagnostic-only advisory.",
+        "evidence": "Agent created scaffold .openhands/TASKS.md (seen in git_patch: 'diff --git a/.openhands/TASKS.md') but only AFTER editing source (msbuild.py edit at A60/OBS61, cmake.py at A64/OBS65 precede the scaffold writes). No <gt-advisory layer=\"L5\"> appears in any observation. Trigger condition (no prior source edit) not met.",
+        "deviation": ""
+      },
+      {
+        "layer": "L5b",
+        "fired": false,
+        "verdict": "NA",
+        "spec": "Late reminder of an unexamined high-confidence structural signal; suppressed by default (goku_active=1) -> telemetry-only, agent-invisible.",
+        "evidence": "No '[GT L5: Unexamined structural signal]' line in any observation 0-112. Per spec L5b is suppressed by default; no agent-visible firing expected and none seen.",
+        "deviation": ""
+      },
+      {
+        "layer": "L6 reindex",
+        "fired": false,
+        "verdict": "NA",
+        "spec": "Incremental gt-index -file after each edit, fires before L3 post_edit; not agent-visible (telemetry).",
+        "evidence": "No agent-visible L6 line (by design hidden). Cannot confirm or deny from agent observations; L3b post-edit re-views (OBS89/91) show current file content, consistent with but not proof of reindex. No GT_META visible (filtered).",
+        "deviation": ""
+      },
+      {
+        "layer": "GT_VERIFY",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "spec": "Pre-submit / edit->review verifiable test consolidation: list tests covering changed files from assertions table, suggest running them; verifiable-only, no semantic judgment, under-confident -> silent. Legitimacy: must NOT surface FAIL_TO_PASS test names/assertions.",
+        "evidence": "OBS65 (after cmake.py edit): '[GT_VERIFY] You edited 1 file(s). Before finishing, run the project's own test suite for the affected modules and confirm your change preserves the behavioral contract:  msbuild.py: exception_type = ConanException  msbuild.py: guard_clause = return: verbosity is not None -> verbosity = {  msbuild.py: return_shape = value|f'/verbosity:{verbosity}' ...'. It lists CONTRACT markers only and tells the agent to run its own suite -- it does NOT name test_visual_studio or any pytest test/assertion. No assertions-table test linkage was available so it stayed verifiable-only. Legitimacy clean.",
+        "deviation": ""
+      },
+      {
+        "layer": "grep_intercept",
+        "fired": false,
+        "verdict": "SILENT_MISS",
+        "spec": "On agent grep/rg, intercept and inject '[GT] Callers of <symbol>' from graph.db, rate-limited to 5 firings.",
+        "evidence": "Agent ran multiple greps: A10 'grep -r \"max_cpu_count\"', A18 'grep -n \"max_cpu_count\" conan/tools/cmake/cmake.py', A22 'grep -n \"def get\"', A28 'grep -n \"def loads\"', A34, A40, A42, A52. Their result observations (OBS11,19,23,29,35,41,43,45,47,53) contain ZERO '[GT] Callers of' line -- grep intercept never fired despite < 5 prior firings (budget available).",
+        "deviation": "Architecture says grep/rg triggers caller-trace injection (max 5); 6+ greps including direct symbol greps (max_cpu_count) produced no interception. Layer silently did not fire when its trigger was met."
+      },
+      {
+        "layer": "drift",
+        "fired": false,
+        "verdict": "NA",
+        "spec": "Contract-drift / pre-submit drift block on edits that violate a stored contract.",
+        "evidence": "No drift-specific marker in any observation. The L3 'Guard removed' warning (OBS61) is the only contract-claim and it was false (see L3 MISFIRED). No separate drift layer fired.",
+        "deviation": ""
+      },
+      {
+        "layer": "L4 tools (gt_validate)",
+        "fired": true,
+        "verdict": "DEVIATED",
+        "spec": "L4b tool-as-hooks; gt_l4_tools includes gt_validate/gt_query/gt_search/gt_navigate for agent/passive use; should validate a real file.",
+        "evidence": "Agent invoked the GT CLI directly: A108/A110 'gt_validate unknown' -> OBS109/111: '# gt_validate: unknown  # (file not in worktree at /workspace/conan-io__conan-17292/unknown; nothing to validate)'. Tool ran but the agent passed literal 'unknown' (no target resolved); it produced an empty no-op result.",
+        "deviation": "gt_validate fired but on a placeholder 'unknown' path -> nothing validated; degenerate no-op invocation (agent misuse / missing target resolution), not a useful validation."
+      }
+    ],
+    "l1_consistent": false,
+    "l1_detail": "The three core L1 sub-blocks CONTRADICT on the target. (1) gt-localization confidence=low: '1. conan/tools/microsoft/visual.py ... 5. conan/tools/cmake/cmake.py ...' -- gold cmake.py ranked #5, visual.py ranked #1. (2) gt-task-brief: '1. conan/tools/microsoft/visual.py (def is_msvc..., def msvc_runtime_flag..., def _vcvars_versions...)' -- deepest contracts/callers all about visual.py. (3) gt-graph-map: 'conan/tools/microsoft/visual.py :: is_msvc  calls: get_safe... called by: is_msvc_static_runtime...' -- maps ONLY visual.py; cmake.py and msbuild.py absent entirely. Plus gt-orientation: 'Issue references: build() in msbuild.py ... generate() in msbuilddeps.py ... MSBuildDeps() in msbuilddeps.py' -- points at msbuild/msbuilddeps. So localization+task-brief+graph-map agree on visual.py (NON-gold), orientation points at msbuild.py/msbuilddeps.py, and the actual gold cmake.py is rank #5 with no graph-map line. They do not agree; the brief is internally inconsistent and centers on the wrong (non-gold) file.",
+    "legitimacy_clean": true,
+    "overall_verdict": "The GT architecture mostly fired where gt_gt says it should, with one strong layer (L3b post-view Contract-pillar always-fire) behaving exactly to spec on real graph data, and a CLEAN legitimacy record: NO layer -- including GT_VERIFY -- surfaced any FAIL_TO_PASS test name or assertion. The FAIL_TO_PASS test 'test_visual_studio' never appears in any GT output; GT_VERIFY (OBS65) listed only contract markers and told the agent to run its own suite. However three layers deviated/misfired: (1) L1 brief misdirected -- localization/task-brief/graph-map all center on the NON-gold visual.py while the true gold cmake.py is rank #5 with no graph-map coverage, and the sub-blocks contradict each other (orientation points at msbuild.py). The honest 'confidence=low' tag is the only thing keeping this from being a hard MISFIRE. (2) L3 post-edit MISFIRED with TWO false claims on a clean source edit of msbuild.py: a fabricated 'SEMANTIC WARNING: Guard removed: maxcpucount' (the guard was changed, not removed) and a 'You edited test/fixture file(s): conan/test/__init__.py, conan/test/assets/...' accusation naming files the agent never touched -- exactly the 'wrong info worse than no info' failure CLAUDE.md warns against. (3) grep_intercept was a SILENT_MISS -- the agent ran 6+ greps (including a direct 'max_cpu_count' grep) with budget available, and zero caller-trace injections fired. Consensus fired correctly (Layer A once + Layer B progressive) and honestly declined a single primary target, but anchored scope on the viewed msbuild.py and treated gold cmake.py as merely 'imported'. gt_validate ran as a degenerate no-op on a literal 'unknown' path. Net: the agent reached and edited the gold file (cmake.py) largely via its own grep-driven exploration of the issue's max_cpu_count symbol and L3b contract context on cmake.py -- NOT because of L1 ranking (which pointed at visual.py). GT's correct contributions here were L3b's accurate contract/Spec on cmake.py (OBS21 surfaced the buggy njobs branch) and the honest low-confidence consensus scope; its harms were the L1 misranking, the two false L3 post-edit injections, and the grep silent-miss.",
+    "conforming": [
+      "L3b post-view: Contract-pillar always-fire on every view (OBS9/15/21/25/55/89/91), real file:line callers and Spec branches from graph.db, no false claims -- e.g. OBS21 correctly surfaced the gold cmake.py buggy branch 'args.append(\"/m:{}\".format(njobs))'.",
+      "GT_VERIFY (OBS65): verifiable-only, listed contract markers and 'run the project's own test suite', surfaced NO pytest test name or assertion -- legitimacy clean.",
+      "Consensus plumbing: Layer A '<gt-scope files=\"4\">' fired once before edits (OBS9), Layer B '[GT] cmake.py: also in scope.' progressive (OBS21); honestly stated 'GT has not confirmed a single primary target'.",
+      "L0/graph.db: populated with real edges (concrete Called by file:line lines throughout).",
+      "Legitimacy: zero test-name/assertion leakage from any layer; FAIL_TO_PASS 'test_visual_studio' absent from all GT output."
+    ],
+    "deviating": [
+      "L1 brief: localization/task-brief/graph-map all center on NON-gold conan/tools/microsoft/visual.py; gold conan/tools/cmake/cmake.py is rank #5 and absent from the graph-map. Misranked target.",
+      "L1 internal inconsistency: brief/graph-map say visual.py, gt-orientation says msbuild.py/msbuilddeps.py, gold is cmake.py -- three-way contradiction, no agreed target.",
+      "L3 post-edit (OBS61): MISFIRE -- false 'SEMANTIC WARNING: Guard removed: maxcpucount' (guard was changed to `is not None`, not removed) AND false 'You edited test/fixture file(s): conan/test/__init__.py, conan/test/assets/...' on an edit to source msbuild.py the agent never touching those test files.",
+      "grep_intercept: SILENT_MISS -- 6+ greps (incl. direct 'max_cpu_count' symbol grep at A10/A18) with firing budget available, zero '[GT] Callers of' injections.",
+      "Consensus ranking: scope anchored on viewed msbuild.py, lists gold cmake.py only as generic 'imported', does not elevate it as the target.",
+      "L4 gt_validate (OBS109/111): degenerate no-op invoked on literal 'unknown' path -- 'nothing to validate'."
+    ]
+  },
+  {
+    "task": "Audit GroundTruth architecture (DOC_OF_HONOR layers) against the real agent trajectory for instructlab__instructlab-2585; verify per-layer conformance, L1 internal consistency, and legitimacy (no test-name leakage).",
+    "layers": [
+      {
+        "layer": "L0 index",
+        "spec": "gt-index parses repo into graph.db (nodes/edges/properties/assertions) BEFORE the agent starts; all downstream layers depend on it. Fires once pre-task.",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "evidence": "Indirect but unambiguous: every later layer emits real graph-derived data \u2014 E25 '[CONTRACT] def get_model_template( -> Tuple[str, str, str]' + 'Called by: ...vllm.py:115 ... [model]', E166 'CALLER-BLIND-EDIT symbol=get_default_config callers=12'. A populated graph.db with nodes, edges, callers and signatures clearly existed.",
+        "deviation": ""
+      },
+      {
+        "layer": "L1 brief",
+        "spec": "Task-start passive brief: <gt-localization>/<gt-task-brief>/<gt-graph-map>/<gt-orientation>/[GT KEY CONTRACTS]; should converge on the issue target, correct-or-quiet, never assert wrong provenance as fact.",
+        "fired": true,
+        "verdict": "DEVIATED",
+        "evidence": "Entry 1: localization #1='src/instructlab/defaults.py \u2014 STORAGE_DIR_NAMES, _InstructlabDefaults, _reset'; task-brief+graph-map='src/instructlab/config/config.py :: config'; orientation 'Issue references: config() in config.py'. The brief's primary narrative (config.py::config) is the WRONG file for a merlinite-template / MODEL_FAMILY_MAPPINGS issue, and the sub-blocks contradict each other. confidence=medium is an honest hedge, so DEVIATED (wrong content/ranking) not a hard MISFIRE.",
+        "deviation": "Brief/graph-map fixate on config/config.py::config (unrelated click group); localization lists the right file (defaults.py) but wrong symbols; the three sub-blocks disagree. Agent ignored the brief and localized off the issue's own GitHub links (E8 server.py, E10 config.py)."
+      },
+      {
+        "layer": "L3 post_edit",
+        "spec": "After a file edit: behavioral contract / callers / signature / verify suggestion within 2000-char budget; correct-or-quiet, never inject a false claim.",
+        "fired": true,
+        "verdict": "MISFIRED",
+        "evidence": "Entry 110 after editing the SOURCE file defaults.py: '[GT] Post-edit: defaults.py' then '[GT] You edited test/fixture file(s): src/instructlab/model/linux_test.py, tests/__init__.py, tests/common.py. ... edits to test files are discarded ... Fix the source.' The agent edited NONE of those test files \u2014 it edited defaults.py (source). Entry 116 after common.py edit: '[GT_VERIFY] You edited 1 file(s)...' lists defaults.py return_shape contracts (wrong file).",
+        "deviation": "Injected a FALSE 'you edited test/fixture files' warning on a pure source edit (E110); wrong-file contract attribution on E116. Violates correct-or-quiet."
+      },
+      {
+        "layer": "L3b post_view",
+        "spec": "On a file read: Contract pillar always-fire ([CONTRACT] sig+return from nodes table, no edges needed) + verified categorical callers + layer tags; correct-or-quiet.",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "evidence": "Fired on every read: E11 '[GT] config: [CONTRACT] def config(ctx): [CONTRACT] flows: ctx -> ...'; E19 '[GT] defaults: [CONTRACT] def DEFAULT_CHAT_MODEL(self) -> str: ...'; E25 '[GT] common: [CONTRACT] def get_model_template( -> Tuple[str, str, str] ... Called by: ...vllm.py:115 ... [model]'; E58/E104 same content in <gt-context> wrapper. Signatures match the cat-n'd source; callers carry file:line + [model] tags.",
+        "deviation": ""
+      },
+      {
+        "layer": "L3b post_view (relevance ranking)",
+        "spec": "Contract pillar should surface the contract for the issue-relevant function the agent is about to edit, ranked first.",
+        "fired": true,
+        "verdict": "DEVIATED",
+        "evidence": "On reads of defaults.py (E19) and configuration.py (E29) the [CONTRACT] block listed DEFAULT_CHAT_MODEL/get_default_config/read_config/write_config \u2014 never MODEL_FAMILIES/MODEL_FAMILY_MAPPINGS/get_model_family (the issue-relevant symbols). get_model_family appeared only in the raw cat-n output, not in GT's contract ranking.",
+        "deviation": "Contract pillar fired (good) but ranked generic top-of-file functions over the issue-relevant ones \u2014 same relevance-ordering miss as L1."
+      },
+      {
+        "layer": "consensus",
+        "spec": "Scope-Aware Consensus / <gt-scope>: on viewing a brief candidate before edits, deliver connected-file scope; must stay honest when no single primary is confirmed.",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "evidence": "E17: '<gt-scope files=\"2\"> 1. config/config.py \u2014 in scope (you are viewing this) 2. instructlab/configuration.py \u2014 imported. These files are related in scope; GT has not confirmed a single primary target \u2014 confirm the edit target with grep.' E29 progressive: '[GT] configuration.py: also in scope.'",
+        "deviation": ""
+      },
+      {
+        "layer": "L5 governor",
+        "spec": "Scaffold/no-progress governor: diagnostic-only advisory (no prescriptive file list) when the agent has made no source edits.",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "evidence": "E46: '[GT L5: No Source Edits] Iteration: 26/100 You have run 26 actions with 0 source file edits.' Pure diagnostic fact, no prescribed file list \u2014 matches the de-prescribed L5 spec.",
+        "deviation": ""
+      },
+      {
+        "layer": "L5b",
+        "spec": "Late reminder for an unexamined high-confidence structural signal; suppressed by default (goku_active=1) \u2014 telemetry-only, agent rarely sees it.",
+        "fired": false,
+        "verdict": "NA",
+        "evidence": "No '[GT L5: Unexamined structural signal]' line appears in any of the 170 entries. Consistent with the default-suppressed design.",
+        "deviation": ""
+      },
+      {
+        "layer": "L6 reindex",
+        "spec": "After every edit, gt-index -file reindexes the changed file (before L3) so graph.db stays fresh; telemetry-level, not agent-visible.",
+        "fired": false,
+        "verdict": "NA",
+        "evidence": "No agent-visible reindex line; L6 reindex output is a hidden prefix and would not appear in the agent observation stream. Cannot confirm firing from the trajectory, and per spec it is not agent-visible \u2014 NA for observation-based audit.",
+        "deviation": ""
+      },
+      {
+        "layer": "GT_VERIFY",
+        "spec": "Pre-submit verifiable test consolidation at edit->review transition: list assertion-linked tests covering edited files; under-confident -> silent; must NOT surface gold test internals beyond a runnable pytest path.",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "evidence": "E116 '[GT_VERIFY] You edited 1 file(s). Before finishing, run the project's own test suite ...' followed by 'defaults.py: return_shape = ...' contracts \u2014 NO pytest test name, NO assertion. Agent-invoked gt_validate (E160-166) returned only 'CALLER-BLIND-EDIT symbol=... callers=N' and '(no structural flags raised)'. No test name / assertion leaked.",
+        "deviation": ""
+      },
+      {
+        "layer": "grep_intercept",
+        "spec": "On agent grep/rg: inject verified callers of the searched symbol (max 5), correct-or-quiet.",
+        "fired": false,
+        "verdict": "SILENT_MISS",
+        "evidence": "Agent ran many greps (E20 'grep -rn \"merlinite\"', E22 template grep, E53/E55 'grep -n MODEL_FAMILY', E105/E123 grep) but NO '[GT] Callers of ...' block was injected on any of them. Per the grep-intercept spec it should have fired on at least the symbol greps (MODEL_FAMILY).",
+        "deviation": "No grep-intercept caller injection on grep of MODEL_FAMILY / merlinite; either disabled on this (DeepSWE/gt-CLI) transport or the symbols had no qualifying CALLS edges. The documented layer did not deliver."
+      },
+      {
+        "layer": "drift",
+        "spec": "Contract-drift detection: warn when an edit changes a signature/contract its callers depend on.",
+        "fired": false,
+        "verdict": "NA",
+        "evidence": "The edits were value/string changes (merlinite->instructlab, dict remap) with no signature change; get_model_family signature was preserved (E158 diff shows only body change). No drift trigger; no drift line emitted.",
+        "deviation": ""
+      }
+    ],
+    "l1_consistent": false,
+    "l1_detail": "Three L1 sub-blocks, quoted from entry 1 (instruction prefix): (1) <gt-localization confidence=medium> candidate #1 = 'src/instructlab/defaults.py \u2014 STORAGE_DIR_NAMES, _InstructlabDefaults, _reset' (correct FILE, wrong symbols \u2014 gold edits MODEL_FAMILIES/MODEL_FAMILY_MAPPINGS). (2) <gt-task-brief> = '1. src/instructlab/config/config.py (def config(ctx):) ... EDIT-TARGET CONTRACTS (config.py): config -> calls storage_dirs_exist()'. (3) <gt-graph-map> = 'src/instructlab/config/config.py :: config / calls: storage_dirs_exist ..., ensure_config ...'. The task-brief and graph-map AGREE with each other (both = config/config.py::config) but CONTRADICT the localization (#1 = defaults.py). They do not converge on a single target, and none names the gold symbol. <gt-orientation> adds a third framing ('config() in config.py', 'is_model_safetensors()', 'start_prompt()'). NOT consistent.",
+    "legitimacy_clean": true,
+    "overall_verdict": "DeepSWE/gt-CLI transport run (gt_validate, [GT] Post-edit, [GT_VERIFY], <gt-scope>, [GT L5: No Source Edits]) rather than the OpenHands canary DOC_OF_HONOR documents, but the layers map cleanly. The task RESOLVED: the agent edited exactly the gold files (defaults.py, configuration.py, common.py \u2014 git_patch matches gold shape incl. the case-insensitive get_model_family fix). Per CLAUDE.md this resolve is a FOOTNOTE: the trajectory shows GT did NOT cause it. The agent localized off the issue's own GitHub links (E8 server.py, E10 config.py) and its own greps (E20, E53), ignoring the brief. LAYER VERDICTS: L3b post-view Contract pillar, consensus <gt-scope> (honestly hedged 'GT has not confirmed a single primary target \u2014 confirm with grep'), L5 diagnostic-only, and GT_VERIFY are CONFORMANT and legitimacy-clean. L1 is the dominant failure: <gt-localization> (defaults.py, wrong symbols) CONTRADICTS <gt-task-brief>+<gt-graph-map> (config/config.py::config, wrong file), and <gt-orientation> adds a third wrong framing \u2014 internally inconsistent and off-target for a model-family/template-rename issue. L3 post-edit MISFIRED with a FALSE claim at E110 ('You edited test/fixture file(s): ... linux_test.py, tests/__init__.py, tests/common.py') on a pure SOURCE edit of defaults.py \u2014 a correct-or-quiet violation injecting a wrong premise. grep_intercept was a SILENT_MISS (no caller injection on MODEL_FAMILY greps). LEGITIMACY: CLEAN \u2014 exhaustively scanned every GT-injected line; zero pytest test names, zero assertions, zero ::test_ surfaced by any layer (the 'merlinite-7b-lab' and test_config.py lines at E126 are the agent's own grep of tests/, not GT output).",
+    "conforming": [
+      "L3b post-view Contract pillar (always-fire): [GT] <file>: [CONTRACT] ... blocks fired on every read (E11,E17,E19,E25,E29,E58,E104) with real signatures from the nodes table and verified-looking callers \u2014 content correct-or-quiet, no false provenance",
+      "Consensus / <gt-scope> (Layer 3.1): fired honestly at E17 ('<gt-scope files=2> ... GT has not confirmed a single primary target \u2014 confirm the edit target with grep.') \u2014 explicitly did NOT assert a false primary, matching correct-or-quiet; progressive '[GT] configuration.py: also in scope.' at E29",
+      "GT_VERIFY / pre-submit (Layer 2.8): legitimacy-clean \u2014 [GT_VERIFY] at E116 surfaced only return_shape contracts, NOT pytest test names; agent-invoked gt_validate (E160-166) surfaced only CALLER-BLIND-EDIT caller counts. Zero test names / assertions anywhere.",
+      "L5 governor (Layer 2.5): E46 '[GT L5: No Source Edits] ... 26 actions with 0 source file edits' \u2014 diagnostic-only, no prescriptive file list, conformant to de-prescribed spec",
+      "L1 <gt-localization> honesty hedge: confidence=medium and 'reason over these' framing \u2014 does not over-assert despite wrong content"
+    ],
+    "deviating": [
+      "L1 internal inconsistency: <gt-localization> #1=defaults.py vs <gt-task-brief>+<gt-graph-map>=config/config.py::config \u2014 the sub-blocks contradict on the target and none surface the gold symbols (MODEL_FAMILIES / MODEL_FAMILY_MAPPINGS)",
+      "L1 <gt-task-brief> + <gt-graph-map> DEVIATED: both point entirely at config/config.py::config (the click command group), unrelated to the merlinite/model-family issue; gold files are defaults.py/configuration.py/common.py",
+      "L3 post-edit MISFIRED with a FALSE claim (E110): after editing the SOURCE file defaults.py, GT injected '[GT] You edited test/fixture file(s): src/instructlab/model/linux_test.py, tests/__init__.py, tests/common.py ... Fix the source.' \u2014 the agent edited none of those test files; false test-edit warning on a pure source edit",
+      "L3 post-edit/GT_VERIFY wrong-file attribution (E116): fired after editing common.py but the [GT_VERIFY] contract lines describe defaults.py return_shape (STORAGE_DIR_NAMES path joins), generic and not about the edited template",
+      "L3b post-view relevance ranking: contract blocks (E19 defaults, E29 configuration) ranked generic top-of-file funcs (DEFAULT_CHAT_MODEL, get_default_config) over the issue-relevant get_model_family / MODEL_FAMILY_MAPPINGS",
+      "grep_intercept SILENT_MISS: no caller injection on the agent's MODEL_FAMILY / merlinite greps (E20, E53)",
+      "L1 <gt-orientation> DEVIATED: 'Issue references: config() / is_model_safetensors() / start_prompt()' \u2014 none are the issue's actual targets"
+    ]
+  },
+  {
+    "task": "Audit GroundTruth architecture (DOC_OF_HONOR.md) conformance against the REAL agent trajectory .tmp_trajd/kedro-org__kedro-4580.jsonl (OpenHands path, 131 history entries). Task: kedro _load_obj suppresses missing-dependency traceback. Agent edited gold file kedro/io/core.py::_load_obj (4 edits) and self-verified with pytest; final patch re-raises ModuleNotFoundError for missing deps. Verdict per GT layer, grounded in raw observation quotes.",
+    "layers": [
+      {
+        "layer": "L0 index->graph.db",
+        "spec": "Layer 0 (DOH:35-303): gt-index builds graph.db (nodes/edges/properties/assertions/cochanges) pre-agent via GHA pre-index. Downstream L1/L3b contracts, callers, RAISES, flows all depend on it. Fires once before agent start; silent to agent.",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "evidence": "Delivered graph content proves a populated graph.db: entry 7 L3b emits real signatures + Called-by edges (`Called by: kedro/runner/runner.py:144 ...`, `kedro/runner/task.py:153 inputs[name] = catalog.load(name)`) and RAISES/flow properties for core.py \u2014 these come from nodes/edges/properties tables. telemetry gt_hook_log (instance metadata) shows post_view hooks firing with root=/workspace/kedro-org__kedro-4580. No index errors.",
+        "deviation": ""
+      },
+      {
+        "layer": "L1 brief",
+        "spec": "Section 2.1 (DOH:332-414): v1r_brief at task start emits <gt-localization>+<gt-task-brief>+<gt-graph-map> in the instruction. Correct-or-quiet; the three sub-blocks should agree on the target. Callers = FACT only when deterministic resolution.",
+        "fired": true,
+        "verdict": "DEVIATED",
+        "evidence": "Instruction (len 7839) carries all three. <gt-localization confidence=\"medium\"> ranks `1. kedro/io/core.py - parse_dataset_definition, _load_obj, exists` FIRST = the GOLD file+function (right). BUT <gt-task-brief> leads with `1. kedro/framework/session/session.py (def run(...), _get_config_loader, _init_store)` and EDIT-TARGET CONTRACTS are all session.py (`create -> calls _describe_git ... session.py:38`). <gt-graph-map> maps `kedro/framework/session/session.py :: create`. So task-brief+graph-map point at session.py while localization points at core.py \u2014 internal contradiction; the brief's edit-target half is wrong.",
+        "deviation": "L1 internally inconsistent: localization correctly names core.py/_load_obj, but task-brief + EDIT-TARGET CONTRACTS + graph-map all center on session.py::run/create, which is NOT the gold file. The richer 'where to edit' guidance misdirects; only the localization candidate list is correct."
+      },
+      {
+        "layer": "L1 detail (consistency)",
+        "spec": "Step 4: do <gt-localization>, <gt-task-brief>, <gt-graph-map> agree on the target?",
+        "fired": true,
+        "verdict": "DEVIATED",
+        "evidence": "localization #1=core.py(_load_obj); task-brief #1=session.py(run); graph-map=session.py::create. Two of three contradict the first.",
+        "deviation": "They disagree on the target file."
+      },
+      {
+        "layer": "L3 post_edit contract",
+        "spec": "Section 2.2 (DOH:416-544): on every file_editor edit, inject priority-ordered evidence [BEHAVIORAL CONTRACT]/PRESERVE/[CALLERS]/[SIGNATURE]/[TEST] (budget 2000 chars). Fires on the edited function.",
+        "fired": false,
+        "verdict": "SILENT_MISS",
+        "evidence": "Agent made 4 edits to the GOLD function core.py::_load_obj (entries 48,60,70,106). Each resulting edit observation (49,61,71,107) begins `The file .../kedro/io/core.py has been edited. Here's the res...` with ZERO L3 markers \u2014 no [BEHAVIORAL CONTRACT], no [CALLERS], no [SIGNATURE], no PRESERVE. telemetry gt_hook_log logged only `post_view` fires, never a post_edit fire. L3 never delivered on the exact function being patched \u2014 the moment it should help.",
+        "deviation": "L3 post-edit produced no agent-visible evidence on any of the 4 edits to the gold function."
+      },
+      {
+        "layer": "L3b post_view navigation",
+        "spec": "Section 2.3 (DOH:546-615): on file_editor view, prepend Contract pillar ([CONTRACT] sig+return, always-fire) + categorical callers (Called by) + RAISES/flows; correct-or-quiet; first-view-per-file (dedup).",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "evidence": "entry 7 (first read core.py): `[GT] core:` then `[CONTRACT] def parse_dataset_definition( -> tuple[...]`, `[CONTRACT] def _load_obj(class_path: str) -> Any | None:`, `Called by: kedro/runner/runner.py:144 ...`, `[RAISES] WHEN TYPE_KEY not in config: raise DatasetError`. entry 13 (utils.py): `[GT] utils:` `[CONTRACT] def load_obj(...)` `[CATCHES] except ImportError -> returns: return False`. entry 11/103 wrap as <gt-context file=\"core.py\">. Re-reads (83,125) re-emit. Correctly quiet on test-file reads (entries 18,22,24,66,96 carry NO GT block). Contracts are accurate to the real code (matches cat -n output for _load_obj).",
+        "deviation": ""
+      },
+      {
+        "layer": "consensus / <gt-scope>",
+        "spec": "Layer 3.1 (DOH:850-886): when agent views a brief candidate before source edits, fire once with connected-file scope; correct-or-quiet (does NOT fabricate a single primary target when unsure).",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "evidence": "entry 7 prepends `<gt-scope files=\"11\"> 1. io/core.py - in scope (you are viewing this) 2. cli/micropkg.py - calls functions here ... These files are related in scope; GT has not confirmed a single primary target - confirm the edit target with grep.` The only occurrence of 'primary target' in the whole run is this honest negation. No false 'X -- primary target' claim was injected.",
+        "deviation": ""
+      },
+      {
+        "layer": "L5 governor",
+        "spec": "Section 2.5 (DOH:676-713, 2026-05-28): scaffold/no-progress governor must be DIAGNOSTIC-ONLY in the form <gt-advisory layer=\"L5\" trigger=\"non_source_without_progress\">...source-level resolution requires editing tracked source.</gt-advisory> \u2014 NO prescriptive list, no iteration counter directive.",
+        "fired": true,
+        "verdict": "DEVIATED",
+        "evidence": "entry 47 observation (after 25 actions, 0 source edits) injects `[GT L5: No Source Edits]\\nIteration: 25/100\\nYou have run 25 actions with 0 source file edits.` This is the OLD bracketed/iteration-counter form, NOT the documented diagnostic `<gt-advisory layer=\"L5\" trigger=...>` XML form. No <gt-advisory ... trigger=\"non_source_without_progress\"> appears anywhere in agent history.",
+        "deviation": "L5 fired in a deprecated prescriptive-style format ([GT L5: No Source Edits] / Iteration 25/100) instead of the spec's diagnostic <gt-advisory> form. (No wrong file list injected, so harm is limited, but it does not match the documented contract.)"
+      },
+      {
+        "layer": "L5b late reminder",
+        "spec": "Section 2.6 (DOH:715-750): diagnostic 'unexamined structural signal'; suppressed by default (goku_active=1, Invariant 25).",
+        "fired": false,
+        "verdict": "NA",
+        "evidence": "No `[GT L5: Unexamined structural signal]` line anywhere in history. Suppressed by default as documented.",
+        "deviation": ""
+      },
+      {
+        "layer": "L6 reindex",
+        "spec": "Section 2.7 (DOH:752-762): gt-index -file incremental reindex after each edit, BEFORE L3; silent to agent.",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "evidence": "Silent-to-agent by design; no agent-visible artifact expected and none present. telemetry gt_hook_log records hook activity rooted at the workspace. No reindex error surfaced. (Cannot positively confirm per-edit -file invocation from the agent stream, but no SKIPPED/error line leaked, consistent with WORKING+silent.)",
+        "deviation": ""
+      },
+      {
+        "layer": "L5b/L6 GT_VERIFY pre-submit",
+        "spec": "Section 2.8 (DOH:764-815): verifiable-only [GT_VERIFY] test list at edit->review transition, while agent can still act; finish-handler dead write was REMOVED. Telemetry-only writes never reach agent.",
+        "fired": true,
+        "verdict": "MISFIRED",
+        "evidence": "A pre-submit block exists ONLY in instance metadata (instance/gt_advisory): `<gt-advisory layer=\"L5\" pending_count=\"0\" unresolved_count=\"0\"> [GT_GATE] Pre-submit review: Files edited: 1 ... Files explored but not edited: kedro/utils.py </gt-advisory>`. Verified absent from history: 'gt-advisory in history: False', 'GT_GATE in history: False'. The finish entry (130) has empty content. So the pre-submit/GT_VERIFY was a DEAD WRITE \u2014 generated but never delivered to the agent (the exact 0/6-delivery failure the spec says was 'removed'). It also surfaced NO [GT_VERIFY] pytest line at the edit->review transition where the agent was self-running pytest.",
+        "deviation": "Pre-submit review still emitted as a telemetry-only dead write (instance/gt_advisory) that the agent never saw; the documented actionable [GT_VERIFY] test-consolidation at the edit->review transition did not fire in the agent stream. It did, however, carry no test names/assertions (legitimacy-safe)."
+      },
+      {
+        "layer": "grep_intercept",
+        "spec": "Section 2.9 (DOH:817-846): on agent grep/rg, inject `[GT] Callers of '<sym>': file:line ...`, rate-limited to 5.",
+        "fired": false,
+        "verdict": "SILENT_MISS",
+        "evidence": "Agent ran grep/rg at entries 8,16,20,42,100 (e.g. entry 8 `grep -n \"def parse_dataset_definition|def _load_obj|def load_obj\"`, entry 16 `grep -rn \"_load_obj|parse_dataset_definition\" tests/`). The result observation after each (entries 9,17,21,43,101) contains NO `[GT] Callers of` block (verified: GT marker present = False for all 5). The intercept never fired despite repeated greps on resolvable symbols (_load_obj/parse_dataset_definition both have edges in graph.db, as L3b proved).",
+        "deviation": "Grep intercept did not fire on any of 5 greps, including greps for symbols GT had caller edges for."
+      },
+      {
+        "layer": "contract drift",
+        "spec": "Drift detection on edited contract (referenced in tasks/owner-B transport).",
+        "fired": false,
+        "verdict": "NA",
+        "evidence": "No drift/[GT] contract-changed block in any agent observation; not triggered on this OH-path run.",
+        "deviation": ""
+      },
+      {
+        "layer": "L4a auto-query",
+        "spec": "Section 2.4 (DOH:617-674): RETIRED via _L4A_AUTO_QUERY_ENABLED=False; subsumed by L3b.",
+        "fired": false,
+        "verdict": "CONFORMANT",
+        "evidence": "`[GT_AUTO` count in whole doc = 0. Retired as documented; L3b owns first read. Correctly absent.",
+        "deviation": ""
+      },
+      {
+        "layer": "legitimacy (test-name/assertion leakage)",
+        "spec": "No GT layer may surface a test name / pytest <test> / assertion as injected evidence. Must be zero.",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "evidence": "Scanned the GT-injected portion (before the cat -n body) of every GT observation (entries 7,11,13,83,103,125): test_ names = empty set, assert tokens = empty set for ALL. The metadata pre-submit gt_advisory lists only file paths (Files edited/explored), no test names. The 132 'pytest tests' occurrences are all the AGENT's own self-run grep/pytest commands and their stdout \u2014 not GT-injected. Zero test leakage from any GT layer.",
+        "deviation": ""
+      }
+    ],
+    "l1_consistent": false,
+    "l1_detail": "Three L1 sub-blocks (all in the instruction). <gt-localization confidence=\"medium\"> #1 = 'kedro/io/core.py - parse_dataset_definition, _load_obj, exists' (CORRECT gold). <gt-task-brief> #1 = 'kedro/framework/session/session.py (def run(...), _get_config_loader, _init_store)' plus 'EDIT-TARGET CONTRACTS (session.py): create -> calls _describe_git ... session.py:38'. <gt-graph-map> = 'kedro/framework/session/session.py :: create calls: _describe_git ...'. AGREEMENT: NO \u2014 localization points at core.py/_load_obj (right), but task-brief and graph-map both center on session.py::run/create (wrong). The blocks contradict each other on the edit target.",
+    "legitimacy_clean": true,
+    "overall_verdict": "On this real OH-path run, GT's READ-SIDE architecture behaved as gt_gt specifies, but its EDIT-SIDE and SEARCH-SIDE layers were largely absent, and L1 was internally inconsistent. CONFORMANT: L0 (populated graph delivered accurate contracts), L3b post_view (fired on every source read with correct [CONTRACT]/[RAISES]/Called-by, correctly quiet on test files), consensus/<gt-scope> (honest 'GT has not confirmed a single primary target - confirm with grep' \u2014 the only 'primary target' string in the run is that negation), L4a (correctly retired, 0 [GT_AUTO]), and legitimacy (ZERO test names/assertions in any GT-injected block \u2014 all 132 'pytest' hits are the agent's own commands). DEVIATED: L1 \u2014 <gt-localization> correctly named core.py/_load_obj first, but <gt-task-brief> + EDIT-TARGET CONTRACTS + <gt-graph-map> all pointed at kedro/framework/session/session.py::run/create, contradicting localization and misdirecting toward a non-gold file. L5 governor fired but in the deprecated '[GT L5: No Source Edits] / Iteration: 25/100' form (entry 47), not the spec's diagnostic <gt-advisory layer=L5 trigger=non_source_without_progress> XML. SILENT_MISS: L3 post_edit injected NOTHING on any of the 4 edits to the gold function core.py::_load_obj (telemetry logged only post_view fires) \u2014 exactly the moment evidence should land; grep_intercept never fired on any of 5 greps despite GT holding caller edges for the grepped symbols. MISFIRED-as-dead-write: the pre-submit/GT_VERIFY review existed only in instance/gt_advisory telemetry ([GT_GATE] Pre-submit review, files-only) and never reached the agent's history \u2014 the same 0-delivery dead write the spec claims was removed. Net: the agent still resolved-shaped the gold patch (re-raise ModuleNotFoundError in _load_obj), but that was driven by L3b contracts + its own grep/pytest, NOT by L1 edit-target, L3, grep-intercept, or pre-submit, which were wrong, silent, or undelivered. Trajectory was right on the read side; the write/verify side of GT was effectively inert.",
+    "conforming": [
+      "L0 index->graph.db (accurate contracts/edges delivered downstream)",
+      "L3b post_view (correct [CONTRACT]/[RAISES]/Called-by on every source read, quiet on tests)",
+      "consensus/<gt-scope> (correct-or-quiet: explicitly declined to name a single primary target)",
+      "L6 reindex (silent, no leak/skip)",
+      "L4a auto-query (correctly retired, 0 [GT_AUTO])",
+      "legitimacy: zero test names/assertions surfaced by any GT layer"
+    ],
+    "deviating": [
+      "L1: <gt-task-brief>+EDIT-TARGET CONTRACTS+<gt-graph-map> point at session.py::run/create, contradicting <gt-localization>'s correct core.py/_load_obj target (internal inconsistency, misdirection)",
+      "L5 governor: fired in deprecated '[GT L5: No Source Edits]/Iteration 25/100' form, not the documented diagnostic <gt-advisory trigger=non_source_without_progress>",
+      "L3 post_edit: SILENT_MISS \u2014 no [BEHAVIORAL CONTRACT]/[CALLERS]/[SIGNATURE] on any of 4 edits to the gold function",
+      "grep_intercept: SILENT_MISS \u2014 never fired on 5 greps of symbols GT had caller edges for",
+      "GT_VERIFY/pre-submit: MISFIRED dead write \u2014 only in instance/gt_advisory telemetry, never delivered to agent history"
+    ]
+  },
+  {
+    "conforming": [
+      "L3b post-view (<gt-scope>/<gt-context> fired on first view of each file with honest correct-or-quiet: 'GT has not confirmed a single primary target \u2014 confirm the edit target with grep')",
+      "Consensus Layer B progressive ([17] '[GT] dash.py: also in scope.')",
+      "GT_VERIFY pre-submit (fired at edit->review transition, listed only contract markers, zero test names/assertions \u2014 legitimacy clean)",
+      "L1 <gt-graph-map> internal format (well-formed)"
+    ],
+    "deviating": [
+      "L1 brief: <gt-localization>, <gt-task-brief>, <gt-graph-map>, <gt-orientation> CONTRADICT each other and ALL point away from the gold file dash/manifest.py (localization #1 = session.py; brief+map = ffmpegmux.py::command; orientation = twitch.py/ffmpegmux.py)",
+      "L5 governor MISFIRED at [44] in PRESCRIPTIVE form ('[GT] manifest.py was confirmed earlier... Scope: manifest.py, dash.py, segment.py') \u2014 DOC_OF_HONOR mandates diagnostic-only, no file list/prescription",
+      "L3 post-edit MISFIRED at [93]: injected a FALSE cross-repo claim ('You edited test/fixture file(s): build_backend/test_build_backend.py...') when the agent had edited the SOURCE file dash/manifest.py; build_backend does not exist in streamlink",
+      "Grep intercept SILENT_MISS: agent grepped at [10],[14],[45] (rg/grep) and intercept never fired"
+    ],
+    "l1_consistent": false,
+    "l1_detail": "The three L1 sub-blocks CONTRADICT each other and none name the gold file (dash/manifest.py). <gt-localization confidence=\\\"medium\\\"> ranks '1. src/streamlink/session/session.py', '2. exceptions.py', '3. twitch.py' ... (no manifest.py). <gt-task-brief> targets '1. src/streamlink/stream/ffmpegmux.py (def is_usable..., def command..., def _resolve_command...)' with 'EDIT-TARGET CONTRACTS (ffmpegmux.py)'. <gt-graph-map> describes 'src/streamlink/stream/ffmpegmux.py :: command / calls: _resolve_command ...'. <gt-orientation> lists 'video() in twitch.py', 'command() in ffmpegmux.py', 'close() in ffmpegmux.py'. So localization says session.py, brief+map say ffmpegmux.py, orientation says twitch.py/ffmpegmux.py \u2014 three different targets, all wrong. The gold fix is BaseURL.join in dash/manifest.py, never mentioned in any L1 block. The agent ignored the brief and self-localized via its own grep for 'BaseURL|urljoin|urlsplit' at entry [10].",
+    "legitimacy_clean": true,
+    "layers": [
+      {
+        "layer": "L0 index/graph.db",
+        "spec": "Pre-index target repo into graph.db before agent starts; powers all downstream layers. Fires before the agent (GHA pre-index, GT_PREBUILT_GRAPH_DB).",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "evidence": "Downstream layers query real graph data: [9] '[CONTRACT] def text(self)...', 'Called by: src/streamlink/plugins/ustreamtv.py:283...', and [97] GT_VERIFY 'manifest.py: exception_type = MPDParsingError' prove a populated graph.db with nodes/properties/assertions. No agent-visible L0 firing (correct \u2014 it is build-time).",
+        "deviation": ""
+      },
+      {
+        "layer": "L1 brief",
+        "spec": "At task start emit <gt-localization>+<gt-task-brief>+<gt-graph-map> (+ <gt-orientation>, [GT KEY CONTRACTS]). Ranked candidate files + callers + graph map; correct-or-quiet; sub-blocks must agree on the target.",
+        "fired": true,
+        "verdict": "DEVIATED",
+        "evidence": "Entry [1] (instruction): <gt-localization confidence=\"medium\"> '1. src/streamlink/session/session.py' ... ; <gt-task-brief> '1. src/streamlink/stream/ffmpegmux.py (def is_usable..., def command...)'; <gt-graph-map> 'src/streamlink/stream/ffmpegmux.py :: command'; <gt-orientation> 'command() in ffmpegmux.py (6 callers)'. The gold file dash/manifest.py is absent from EVERY block, and the blocks disagree (session.py vs ffmpegmux.py vs twitch.py).",
+        "deviation": "Wrong target in every sub-block AND internal contradiction. Gold = dash/manifest.py::BaseURL.join never surfaced. Brief fired with 'medium' confidence on a wrong, self-inconsistent localization rather than abstaining \u2014 a correct-or-quiet violation at the brief level."
+      },
+      {
+        "layer": "L3 post_edit",
+        "spec": "After a source edit, emit contract/callers/callees/scope. Correct-or-quiet; must not inject false claims; must reflect the file actually edited.",
+        "fired": true,
+        "verdict": "MISFIRED",
+        "evidence": "Entry [93], after the agent edited the SOURCE file dash/manifest.py at [92]: '[GT] You edited test/fixture file(s): build_backend/test_build_backend.py, build_backend/test_onbuild.py, build_backend/test_plugins_json.py. A failing test is fixed by changing the SOURCE...'. build_backend/* are setuptools files that do not exist in streamlink (confirmed: 'build_backend in repo patch?: False'). Also emitted noise: 'SCOPE: callers in unedited files: src/streamlink/validate/_validate.py (10x)' and '3 verified co-change file(s) remain: dash/dash.py, dash/segment.py, utils/times.py'.",
+        "deviation": "Injected a FALSE cross-repo/stale claim that the agent edited test fixtures (it edited a source file), plus a wrong 'test file' admonition. This is the plausible-wrong-context failure GT is supposed to avoid."
+      },
+      {
+        "layer": "L3b post_view",
+        "spec": "On first view of a file, emit Contract pillar (always-fire) + categorical callers + <gt-scope>/<gt-context>; honest fallback when no single primary target; visited-file suppression.",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "evidence": "[9] on viewing manifest.py: '<gt-scope files=\"4\"> 1. dash/manifest.py \u2014 in scope (you are viewing this) 2. dash/dash.py \u2014 imported ... These files are related in scope; GT has not confirmed a single primary target \u2014 confirm the edit target with grep.' plus [CONTRACT]/[RAISES]. [21] '<gt-context file=\"manifest.py\"> [CONTRACT] def text...'. [125] re-view fired contract again. Correct-or-quiet honored verbatim.",
+        "deviation": ""
+      },
+      {
+        "layer": "L3b post_view (contract pillar quality)",
+        "spec": "Contract pillar should surface the issue-relevant function's signature.",
+        "fired": true,
+        "verdict": "DEVIATED",
+        "evidence": "[9]/[21]/[125] always lead with '[CONTRACT] def text(self) -> str | None:' and segment_template/freeze_timeline \u2014 never BaseURL.join, the function actually under repair. The contract pillar fired but ranked generic/top-of-file functions over the gold function.",
+        "deviation": "Contract pillar surfaced non-issue functions (text/freeze_timeline) instead of BaseURL.join; issue-relevant ranking missed the gold symbol (same class of LIMIT-before-ranking bug noted in CLAUDE.md for set_fields)."
+      },
+      {
+        "layer": "consensus / <gt-scope>",
+        "spec": "Layer A first-consensus '[GT] Scope: N files connected to this issue' on first candidate view before edits; Layer B progressive '[GT] X: also in scope.'",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "evidence": "Layer B progressive: [17] '[GT] dash.py: also in scope.' Layer A delivered as the <gt-scope files=\"4\"> block at [9]. Both fired before source edits (first edit was [92]).",
+        "deviation": ""
+      },
+      {
+        "layer": "L5 governor",
+        "spec": "On non-source edits without progress, emit DIAGNOSTIC-ONLY advisory (<gt-advisory layer=\"L5\">): state the fact, NO file list, NO 'edit X', NO prescription (DOC_OF_HONOR 2.5).",
+        "fired": true,
+        "verdict": "MISFIRED",
+        "evidence": "[44]: '[GT L5: No Source Edits] Iteration: 25/100 You have run 25 actions with 0 source file edits. [GT] manifest.py was confirmed earlier. Key evidence: [CONTRACT] def text(self) -> str | None: Scope: manifest.py, dash.py, segment.py'.",
+        "deviation": "Fired in the OLD PRESCRIPTIVE form the spec says was removed: it names a file ('manifest.py was confirmed'), lists a scope, and asserts confirmation \u2014 exactly the prescriptive anchoring DOC_OF_HONOR 2.5 says was rewritten to diagnostic-only. The deployed binary predates that change."
+      },
+      {
+        "layer": "L5b late reminder",
+        "spec": "Diagnostic 'unexamined structural signal' reminder; suppressed by default (goku_active=1).",
+        "fired": false,
+        "verdict": "NA",
+        "evidence": "No '[GT L5: Unexamined structural signal]' line appears anywhere in the 135-entry history. Suppressed-by-default as documented.",
+        "deviation": ""
+      },
+      {
+        "layer": "L6 reindex",
+        "spec": "After each edit, run gt-index -file before L3; hidden/telemetry, not agent-visible.",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "evidence": "No agent-visible L6 line (correct \u2014 [GT_DELIVERY]/[GT_META] are filtered). Post-edit [93] L3 contract reflects manifest.py state, implying the reindex/query path ran. Not independently observable from agent observations, consistent with hidden-by-design.",
+        "deviation": ""
+      },
+      {
+        "layer": "GT_VERIFY pre-submit",
+        "spec": "At edit->review transition, list ONLY verified tests covering changed files (assertions table) as 'pytest file::name'; under-confident -> silent. Must NOT leak gold test assertions if not graph-verified.",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "evidence": "[97]: '[GT_VERIFY] You edited 1 file(s). Before finishing, run the project's own test suite for the affected modules and confirm your change preserves the behavioral contract: manifest.py: exception_type = MPDParsingError ; manifest.py: guard_clause = raise: mpdtype not in (\"static\",\"dynamic\")...'. It surfaced contract/guard markers, NOT a single pytest test name or the gold assertion test_baseurl_urljoin.",
+        "deviation": ""
+      },
+      {
+        "layer": "grep intercept",
+        "spec": "On agent grep/rg, emit '[GT] Callers of <symbol>' (rate-limited to 5).",
+        "fired": false,
+        "verdict": "SILENT_MISS",
+        "evidence": "Agent ran grep/rg at [10] 'grep -rn \"base_url|BaseURL|urljoin|urlsplit...\"', [14] 'grep -rn \"MPD|manifest_url...\"', [45] 'grep -rn \"urljoin|baseurl_urljoin|test_baseurl\"'. Checked observations [11],[12],[15],[16],[46],[47]: GT_present=False on all. No '[GT] Callers of' ever injected.",
+        "deviation": "Per DOC_OF_HONOR 2.9 grep intercept should fire on grep/rg with a caller trace; it never fired despite 3+ grep commands \u2014 a silent miss of a documented trigger."
+      },
+      {
+        "layer": "contract drift",
+        "spec": "Flag when an edit changes a contract that callers depend on.",
+        "fired": false,
+        "verdict": "NA",
+        "evidence": "No drift/contract-violation marker appears post-edit; the edit (adding a guard) did not change the public signature of BaseURL.join, so no drift trigger. No agent-visible drift firing.",
+        "deviation": ""
+      }
+    ],
+    "task": "Audit GroundTruth architecture (DOC_OF_HONOR) behavior against real agent trajectory streamlink__streamlink-6328 (gold fix: BaseURL.join in src/streamlink/stream/dash/manifest.py).",
+    "overall_verdict": "Mixed conformance with two genuine misfires, one silent miss, and a broken L1. The L1 brief is the worst failure: <gt-localization> (session.py #1), <gt-task-brief>+<gt-graph-map> (ffmpegmux.py::command), and <gt-orientation> (twitch.py/ffmpegmux.py) all DISAGREE and ALL point away from the gold file dash/manifest.py \u2014 fired at 'medium' confidence instead of abstaining (correct-or-quiet violation). The resolve was NOT GT-caused: the agent self-localized via its own grep ('BaseURL|urljoin|urlsplit') at entry [10] and reached manifest.py independently, then wrote the exact gold fix at [92] (the trajectory is right, but the cause was self-localization, not GT). Once the agent reached the gold file, the passive layers behaved correctly: L3b <gt-scope>/<gt-context> fired with honest correct-or-quiet ('GT has not confirmed a single primary target \u2014 confirm with grep') and consensus Layer B progressive fired ('dash.py: also in scope'). Two layers MISFIRED against spec: (1) L5 governor at [44] fired in the OLD PRESCRIPTIVE form ('manifest.py was confirmed earlier ... Scope: manifest.py, dash.py, segment.py') that DOC_OF_HONOR 2.5 says was rewritten to diagnostic-only \u2014 the deployed binary predates that change; (2) L3 post-edit at [93] injected a FALSE cross-repo claim that the agent edited 'build_backend/test_*.py' setuptools fixtures when it had edited the streamlink SOURCE file dash/manifest.py \u2014 a plausible-wrong-context injection of exactly the kind GT is meant to prevent. Grep intercept is a SILENT_MISS: it never fired despite three agent grep/rg commands. GT_VERIFY is clean and legitimate \u2014 it surfaced only contract/guard markers, no test names or assertions; the gold test test_baseurl_urljoin was seen by the agent only from its own pytest run, never from any GT layer. Legitimacy: CLEAN. Net: the conformant layers (L3b scope, consensus-B, GT_VERIFY, hidden L6/L0) did their job; the L1 brief, L5 governor, and L3 post-edit deviated/misfired and were not the cause of the correct edit."
+  },
+  {
+    "task": "Audit GT architecture vs trajectory urllib3-3527",
+    "layers": [
+      {
+        "layer": "L0",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "evidence": "hook_log 19 post_view db populated"
+      },
+      {
+        "layer": "L1",
+        "fired": true,
+        "verdict": "DEVIATED",
+        "evidence": "localization 4 non-gold files anchored read not close pyopenssl absent"
+      },
+      {
+        "layer": "L3",
+        "fired": false,
+        "verdict": "SILENT_MISS",
+        "evidence": "5 source edits no marker L3 ok 0 fail 1 hooklog 0 post_edit"
+      },
+      {
+        "layer": "L3scaffold",
+        "fired": true,
+        "verdict": "MISFIRED",
+        "evidence": "entry 47 false claim edited 3 test files only made reproduce.py leaked stderr"
+      },
+      {
+        "layer": "L3b",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "evidence": "entry 9 CONTRACT data Called by connectionpool 903 L3b ok 11"
+      },
+      {
+        "layer": "consensus",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "evidence": "entry 9 gt-scope files 6 no single primary plus also in scope"
+      },
+      {
+        "layer": "L5",
+        "fired": true,
+        "verdict": "CONFORMANT",
+        "evidence": "entry 47 diagnostic only L5 skipped 1"
+      },
+      {
+        "layer": "L5b",
+        "fired": false,
+        "verdict": "NA",
+        "evidence": "no line suppressed default"
+      },
+      {
+        "layer": "L6",
+        "fired": true,
+        "verdict": "DEVIATED",
+        "evidence": "L6 ok 6 fail 2 L3 consumer never ran"
+      },
+      {
+        "layer": "GT_VERIFY",
+        "fired": false,
+        "verdict": "SILENT_MISS",
+        "evidence": "no GT_VERIFY in obs only GT_GATE telemetry no tests"
+      },
+      {
+        "layer": "grep",
+        "fired": false,
+        "verdict": "SILENT_MISS",
+        "evidence": "greps 10 18 22 no GT Callers in results"
+      },
+      {
+        "layer": "drift",
+        "fired": false,
+        "verdict": "NA",
+        "evidence": "no marker L3 never ran"
+      }
+    ],
+    "l1_consistent": false,
+    "l1_detail": "Files agree response and connection but functions contradict localization HTTPConnection get data brief and graphmap read orientation request read close none name edited close",
+    "legitimacy_clean": true,
+    "overall_verdict": "L0 L3b consensus L5 CONFORMANT. L1 brief DEVIATED 4 non-gold files anchored read not close pyopenssl absent sub-blocks contradict at function level. L6 DEVIATED fail 2. Worst L3 post_edit SILENT_MISS 0 fires on 5 source edits ok 0 fail 1 hooklog 0 post_edit vs 19 post_view and L3 MISFIRED scaffold false claim agent edited 3 untouched test files plus leaked bash stderr. GT_VERIFY not agent visible only telemetry. Legitimacy CLEAN no test name surfaced. Agent solved close via own reproduction contract-guard layer silent where it mattered.",
+    "conforming": [
+      "L0",
+      "L3b post_view",
+      "consensus",
+      "L5 governor",
+      "legitimacy clean"
+    ],
+    "deviating": [
+      "L3 SILENT_MISS 5 source edits",
+      "L3 MISFIRED scaffold false claim plus stderr",
+      "L1 diluted mis-anchored read vs close",
+      "L1 internal inconsistency",
+      "L6 fail 2",
+      "GT_VERIFY not agent visible",
+      "grep 0 fires"
+    ]
+  }
+]

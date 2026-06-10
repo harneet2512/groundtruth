@@ -1,0 +1,65 @@
+# GT_PATCH_V6_GT_SRC: ship groundtruth src tree into container at /tmp/groundtruth/src/
+#
+# Why: the canonical-hook shim (gt_canonical_hook_shim.py) defaults
+# GT_CANONICAL_PYTHONPATH=/tmp/groundtruth/src so that `python3 -m
+# groundtruth.hooks.post_edit` / `groundtruth.hooks.post_view` resolve.
+# V3_INDEXER only ships gt-index-linux + sentence_transformers; it does NOT
+# ship the groundtruth python package. Without this block, the first hook
+# fire ImportErrors on `groundtruth.hooks.logger`.
+#
+# Strategy: host packs src/groundtruth/ into a tarball, sets
+# GT_SRC_PACKAGE_PATH; this block chunks+base64s that tarball into the
+# container, extracts at /tmp/groundtruth/src/. Idempotent:
+# /tmp/groundtruth/src/groundtruth/__init__.py existence skips re-injection.
+#
+# Insert AFTER the GT_PATCH_V3_INDEXER closing marker (so the indexer +
+# sentence_transformers + groundtruth-src all settle before V3 brief).
+#
+# Idempotent installer: scripts/swebench/install_run_infer_gt_src_patch.py
+# (mirrors the V3_INDEXER and V5_VIEW installer pattern).
+#
+# Date drafted: 2026-05-04 — for GT-Full v2 wrapper integration.
+
+--- run_infer.py.orig
++++ run_infer.py
+@@
+     # <<< GT_PATCH_V3_INDEXER
++    # >>> GT_PATCH_V6_GT_SRC: ship groundtruth/ python package into container
++    _gt_src_pkg = os.environ.get("GT_SRC_PACKAGE_PATH", "")
++    if _gt_src_pkg and os.path.isfile(_gt_src_pkg):
++        try:
++            _gs_check = CmdRunAction(command="test -f /tmp/groundtruth/src/groundtruth/__init__.py && echo GT_SRC_EXISTS || echo GT_SRC_MISSING")
++            _gs_check.set_hard_timeout(10)
++            _gs_obs = runtime.run_action(_gs_check)
++            if "GT_SRC_MISSING" in getattr(_gs_obs, "content", ""):
++                import base64 as _b64v6
++                with open(_gt_src_pkg, "rb") as _fh:
++                    _gs_b64 = _b64v6.b64encode(_fh.read()).decode("ascii")
++                _CHUNK_V6 = 8000
++                _gschunks = [_gs_b64[i:i+_CHUNK_V6] for i in range(0, len(_gs_b64), _CHUNK_V6)]
++                _gsok = True
++                for _i, _chunk in enumerate(_gschunks):
++                    _op = ">" if _i == 0 else ">>"
++                    _act = CmdRunAction(command="echo -n '" + _chunk + "' " + _op + " /tmp/gt_src.tgz.b64")
++                    _act.set_hard_timeout(30)
++                    _obs = runtime.run_action(_act)
++                    if not isinstance(_obs, CmdOutputObservation) or _obs.exit_code != 0:
++                        _gsok = False
++                        break
++                if _gsok:
++                    _act = CmdRunAction(command="mkdir -p /tmp/groundtruth/src && base64 -d /tmp/gt_src.tgz.b64 > /tmp/gt_src.tgz && tar -xzf /tmp/gt_src.tgz -C /tmp/groundtruth/src && rm -f /tmp/gt_src.tgz /tmp/gt_src.tgz.b64 && test -f /tmp/groundtruth/src/groundtruth/__init__.py && echo GT_SRC_READY")
++                    _act.set_hard_timeout(60)
++                    _obs = runtime.run_action(_act)
++                    if "GT_SRC_READY" in getattr(_obs, "content", ""):
++                        logger.info("GT src package injected: %s", instance.instance_id)
++                    else:
++                        logger.warning("GT V6_GT_SRC extract failed: %s", getattr(_obs, "content", "")[:300])
++                else:
++                    logger.warning("GT V6_GT_SRC chunk upload failed")
++            else:
++                logger.info("GT V6_GT_SRC: /tmp/groundtruth/src/groundtruth/__init__.py already present, skipping")
++        except Exception as _v6e:
++            logger.warning("GT V6_GT_SRC error: %s", _v6e)
++    # <<< GT_PATCH_V6_GT_SRC
+
+     # >>> GT_PATCH_V3: pre-task restrictive brief

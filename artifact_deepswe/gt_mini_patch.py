@@ -222,6 +222,11 @@ _l5_fired = False
 _l5_finish_fired = False
 _l5_failure_fired = False
 _test_fail_history: list[str] = []
+# no_test_evidence governor state (2026-06-10, boa [243]-[333]): blind test
+# runs counted; any observed pass/fail result latches _test_evidence_seen.
+_l5_notest_fired = False
+_blind_test_runs = 0
+_test_evidence_seen = False
 # L6 (incremental freshness, minimal port): the gt_hook understand AST cache
 # (/tmp/gt_index.json) has no mtime invalidation, and graph.db is frozen at base commit.
 # After a source EDIT we invalidate the cache + best-effort single-file reindex so the
@@ -381,6 +386,92 @@ def _has_columns(con) -> tuple[bool, bool]:
     except Exception:  # noqa: BLE001
         return (False, False)
     return ("confidence" in cols, "resolution_method" in cols)
+
+
+# ---------------------------------------------------------------------------
+# CROSS-LANGUAGE edge disqualifier (2026-06-10, DeepSWE non-Python audit, run
+# 27290157847). boa ledger [57]: a first-party JS benchmark
+# (`benches/scripts/v8-benches/deltablue.js`) rendered as a [CALLERS] FACT for
+# Rust `core/engine/src/module/source.rs` — cross-language name collision on
+# `execute`. Measured on the run's own graph.db: 214 cross-language CALLS
+# edges, 99 carrying DETERMINISTIC stamps (verified_unique=42, impl_method=26,
+# type_flow=24, unique_method=7) — the indexer's typed tiers match candidates
+# ACROSS languages, so the _DETERMINISTIC_METHODS fact gate admits them and
+# the vendored-path filter misses them (benches/ is first-party). A source-
+# level call edge between files of DIFFERENT language families is impossible
+# (tree-sitter call resolution is intra-language; FFI never surfaces as a
+# name-matched source call). Families group real same-toolchain interop so
+# legitimate mixed projects are untouched: js/ts (one compilation unit),
+# java/kotlin/scala/groovy (mixed JVM builds), c/c++/objc/swift (headers /
+# bridging). Unknown or absent languages are PERMISSIVE — never suppress an
+# edge whose languages we cannot judge (the suppression itself must be a
+# fact). The index-time residual (resolver.go candidate pools should be
+# language-scoped) is flagged for the next substrate rebuild; substrate
+# graphs are FROZEN, so this consumer filter is the operative guard.
+# ---------------------------------------------------------------------------
+_LANG_FAMILIES: dict[str, str] = {
+    "javascript": "jslike", "typescript": "jslike", "jsx": "jslike",
+    "tsx": "jslike", "vue": "jslike", "svelte": "jslike",
+    "java": "jvm", "kotlin": "jvm", "scala": "jvm", "groovy": "jvm",
+    "c": "cfamily", "cpp": "cfamily", "c++": "cfamily", "objc": "cfamily",
+    "objcpp": "cfamily", "objective-c": "cfamily", "swift": "cfamily",
+    "python": "python", "go": "go", "rust": "rust", "ruby": "ruby",
+    "php": "php", "csharp": "csharp", "c#": "csharp", "lua": "lua",
+    "elixir": "elixir", "erlang": "erlang", "haskell": "haskell",
+    "dart": "dart", "r": "r", "julia": "julia", "perl": "perl",
+    "bash": "shell", "shell": "shell", "sh": "shell", "zig": "zig",
+    "ocaml": "ocaml", "clojure": "jvm",
+}
+
+
+def _lang_family(language) -> str | None:
+    """Language-family key for ``language`` (graph ``nodes.language``), or
+    None when unknown/absent — None means 'cannot judge', never 'different'."""
+    if not language:
+        return None
+    return _LANG_FAMILIES.get(str(language).strip().lower())
+
+
+def _is_cross_language_pair(lang_a, lang_b) -> bool:
+    """True ONLY when both languages are known and their families differ —
+    such a CALLS edge cannot be a real source-level call, whatever its
+    recorded resolution_method says. Unknown on either side -> False."""
+    fa, fb = _lang_family(lang_a), _lang_family(lang_b)
+    return fa is not None and fb is not None and fa != fb
+
+
+def _nodes_have_language(con) -> bool:
+    """True when the nodes table carries the ``language`` column (legacy
+    graphs may not; they stay PERMISSIVE — no cross-language judgement)."""
+    try:
+        cols = {r[1] for r in con.execute("PRAGMA table_info(nodes)").fetchall()}
+    except Exception:  # noqa: BLE001
+        return False
+    return "language" in cols
+
+
+# ---------------------------------------------------------------------------
+# SNIPPET ATTESTATION (2026-06-10, DeepSWE non-Python audit). L6 reindex is
+# OFF by design on the substrate (authoritative read-only graph), so after the
+# agent edits a file the graph's line numbers DRIFT against the live file —
+# boa [109] quoted the agent's OWN just-inserted doc comment as
+# `root_shape calls -> context/mod.rs:545 '/// Returns an error...'`; [257]
+# quoted a bare `}`; arktype's json.ts:92 snippet went stale after a rewrite.
+# A line-keyed claim whose live line no longer mentions the attributed symbol
+# is GT asserting a falsehood ("wrong info is worse than no info"). The gate:
+# a witness/caller-fact row renders ONLY when its snippet still mentions the
+# symbol the graph attributes to it; a drifted row is dropped entirely (the
+# line number is no longer a fact either). An unreadable file (empty snippet)
+# is NOT drift evidence — the row keeps rendering without a snippet, as
+# before. Content-based, so it also catches indexer line-skew on unedited
+# files; subsumes "track edited files" without needing edit bookkeeping.
+# ---------------------------------------------------------------------------
+def _snippet_attests(code: str, symbol: str) -> bool:
+    """True when the live source line plausibly mentions ``symbol`` (the
+    graph's line-keyed claim still holds). Empty code/symbol -> True."""
+    if not code or not symbol:
+        return True
+    return symbol in code
 
 
 def _is_stdlib_shadow(code: str, target_name: str) -> bool:
@@ -653,13 +744,16 @@ def _resolved_witnesses_for_file(con, file_path: str, repo_root: str, max_each: 
     _, has_method = _has_columns(con)
     if not has_method:
         return []  # cannot judge provenance -> emit nothing (never launder)
+    has_lang = _nodes_have_language(con)
+    lang_caller_sel = ", nsrc.language, nt.language" if has_lang else ", '', ''"
+    lang_callee_sel = ", nt.language, nsrc.language" if has_lang else ", '', ''"
     det_sql = "','".join(sorted(_DETERMINISTIC_METHODS))
     nfp = _norm_fp(file_path)
     out: list[dict] = []
     try:
         caller_rows = con.execute(
             f"""
-            SELECT nsrc.file_path, e.source_line, nsrc.name, nt.name
+            SELECT nsrc.file_path, e.source_line, nsrc.name, nt.name{lang_caller_sel}
             FROM nodes nt
             JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
             JOIN nodes nsrc ON e.source_id = nsrc.id
@@ -670,15 +764,24 @@ def _resolved_witnesses_for_file(con, file_path: str, repo_root: str, max_each: 
             """,
             (nfp, max_each * 4),
         ).fetchall()
-        for caller_file, line, caller_name, target_name in caller_rows:
+        for caller_file, line, caller_name, target_name, src_lang, tgt_lang in caller_rows:
             # 2026-06-10 fact-filter: a vendored/minified caller or a
             # builtin/dunder-shadow target is never a delivered [WITNESS] fact.
             if _is_delivery_excluded(caller_file or "", repo_root):
                 continue
             if _is_builtin_shadow_name(target_name or ""):
                 continue
+            # 2026-06-10 cross-language disqualifier (boa [57]): a caller in a
+            # different language family cannot be a real call edge.
+            if _is_cross_language_pair(src_lang, tgt_lang):
+                continue
             code = _code_at(repo_root, caller_file, line)
             if _is_stdlib_shadow(code, target_name or ""):
+                continue
+            # 2026-06-10 snippet attestation (boa [109]/[257]): the live call-
+            # site line must still mention the CALLED symbol, else the graph's
+            # line has drifted (post-edit, L6 OFF) and the row is no fact.
+            if not _snippet_attests(code, target_name or ""):
                 continue
             out.append({"direction": "caller", "file_path": caller_file,
                         "line": int(line) if line else 0, "symbol": caller_name or "",
@@ -688,7 +791,7 @@ def _resolved_witnesses_for_file(con, file_path: str, repo_root: str, max_each: 
 
         callee_rows = con.execute(
             f"""
-            SELECT nt.file_path, e.source_line, nt.name, nsrc.name, nt.start_line
+            SELECT nt.file_path, e.source_line, nt.name, nsrc.name, nt.start_line{lang_callee_sel}
             FROM nodes nsrc
             JOIN edges e ON e.source_id = nsrc.id AND e.type = 'CALLS'
             JOIN nodes nt ON e.target_id = nt.id
@@ -699,20 +802,30 @@ def _resolved_witnesses_for_file(con, file_path: str, repo_root: str, max_each: 
             """,
             (nfp, max_each * 4),
         ).fetchall()
-        for callee_file, source_line, callee_name, src_name, def_line in callee_rows:
+        for (callee_file, source_line, callee_name, src_name, def_line,
+             tgt_lang, src_lang) in callee_rows:
             # 2026-06-10 fact-filter: vendored/minified callee files and
             # builtin/dunder-shadow callee names are never [WITNESS] facts.
             if _is_delivery_excluded(callee_file or "", repo_root):
                 continue
             if _is_builtin_shadow_name(callee_name or ""):
                 continue
+            # 2026-06-10 cross-language disqualifier: a callee in a different
+            # language family cannot be a real call edge.
+            if _is_cross_language_pair(src_lang, tgt_lang):
+                continue
             call_code = _code_at(repo_root, file_path, source_line)
             if _is_stdlib_shadow(call_code, callee_name or ""):
+                continue
+            def_code = _code_at(repo_root, callee_file, def_line) if def_line else ""
+            # 2026-06-10 snippet attestation: the live DEFINITION line must
+            # still mention the callee's name, else the line drifted.
+            if not _snippet_attests(def_code, callee_name or ""):
                 continue
             out.append({"direction": "callee", "file_path": callee_file,
                         "line": int(def_line) if def_line else 0, "symbol": callee_name or "",
                         "target": src_name or "",
-                        "code": _code_at(repo_root, callee_file, def_line) if def_line else ""})
+                        "code": def_code})
             if sum(1 for w in out if w["direction"] == "callee") >= max_each:
                 break
     except Exception:  # noqa: BLE001
@@ -731,6 +844,8 @@ def _caller_contract_for_file(con, file_path: str, repo_root: str, func_names: l
     has_conf, has_method = _has_columns(con)
     conf_sel = "e.confidence" if has_conf else "0.0"
     method_sel = "e.resolution_method" if has_method else "''"
+    has_lang = _nodes_have_language(con)
+    lang_sel = ", nsrc.language, nt.language" if has_lang else ", '', ''"
     det_sql = "','".join(sorted(_DETERMINISTIC_METHODS))
     nfp = _norm_fp(file_path)
     fact_parts: list[str] = []
@@ -744,7 +859,7 @@ def _caller_contract_for_file(con, file_path: str, repo_root: str, func_names: l
                 continue
             rows = con.execute(
                 f"""
-                SELECT nsrc.file_path, e.source_line, nsrc.name, {conf_sel}, {method_sel}
+                SELECT nsrc.file_path, e.source_line, nsrc.name, {conf_sel}, {method_sel}{lang_sel}
                 FROM nodes nt
                 JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
                 JOIN nodes nsrc ON e.source_id = nsrc.id
@@ -757,10 +872,15 @@ def _caller_contract_for_file(con, file_path: str, repo_root: str, func_names: l
                 """,
                 (fname, nfp, 8),
             ).fetchall()
-            for caller_file, source_line, caller_name, conf, method in rows:
+            for caller_file, source_line, caller_name, conf, method, src_lang, tgt_lang in rows:
                 # 2026-06-10 fact-filter: a vendored/minified caller is never a
                 # fact NOR an unverified location hint.
                 if _is_delivery_excluded(caller_file or "", repo_root):
+                    continue
+                # 2026-06-10 cross-language disqualifier (boa [57]): a caller in
+                # a different language family is never a fact nor a hint —
+                # whatever its recorded resolution_method claims.
+                if _is_cross_language_pair(src_lang, tgt_lang):
                     continue
                 try:
                     conf_f = float(conf) if conf is not None else 0.0
@@ -768,6 +888,11 @@ def _caller_contract_for_file(con, file_path: str, repo_root: str, func_names: l
                     conf_f = 0.0
                 code = _code_at(repo_root, caller_file, source_line)
                 if _is_stdlib_shadow(code, fname):
+                    continue
+                # 2026-06-10 snippet attestation (boa [257]): a FACT render
+                # requires the live call-site line to still mention the called
+                # function — a drifted line (post-edit, L6 OFF) is no fact.
+                if not _snippet_attests(code, fname):
                     continue
                 is_fact = (method or "").strip().lower() in _DETERMINISTIC_METHODS
                 if is_fact:
@@ -835,6 +960,8 @@ def _edit_target_callee_contracts(con, file_path: str, func_names: list[str],
     if not has_method:
         # Legacy schema: cannot judge provenance -> emit nothing (never launder).
         return []
+    has_lang = _nodes_have_language(con)
+    lang_sel = ", nt.language, nsrc.language" if has_lang else ", '', ''"
     nfp = _norm_fp(file_path)
     det_sql = "','".join(sorted(_DETERMINISTIC_METHODS))
     method_clause = f"AND LOWER(TRIM(e.resolution_method)) IN ('{det_sql}')"
@@ -847,7 +974,7 @@ def _edit_target_callee_contracts(con, file_path: str, func_names: list[str],
             rows = con.execute(
                 f"""
                 SELECT nt.name, nt.signature, nt.file_path, nt.start_line,
-                       e.resolution_method
+                       e.resolution_method{lang_sel}
                 FROM nodes nsrc
                 JOIN edges e ON e.source_id = nsrc.id AND e.type = 'CALLS' {method_clause}
                 JOIN nodes nt ON e.target_id = nt.id
@@ -859,12 +986,16 @@ def _edit_target_callee_contracts(con, file_path: str, func_names: list[str],
                 (fname, nfp, max_callees * 3),
             ).fetchall()
             added = 0
-            for callee_name, sig, callee_file, line, method in rows:
+            for callee_name, sig, callee_file, line, method, tgt_lang, src_lang in rows:
                 if added >= max_callees:
                     break
                 # Verified-edge gate, re-checked per row (contract_map parity):
                 # never surface a non-deterministic callee as a fact.
                 if (method or "").strip().lower() not in _DETERMINISTIC_METHODS:
+                    continue
+                # 2026-06-10 cross-language disqualifier: a callee in a
+                # different language family is never a [CALLEE] fact.
+                if _is_cross_language_pair(src_lang, tgt_lang):
                     continue
                 # 2026-06-10 fact-filter: vendored callee files / builtin-shadow
                 # callee names are never [CALLEE] facts.
@@ -1203,18 +1334,27 @@ def _graph_contract_block(rel: str) -> str:
             # bundle calling into this file is not a "verified caller" the
             # agent must preserve an interface for. (≤3 rows, cheap.)
             if rows and has_method:
+                _has_lang = _nodes_have_language(con)
+                _lang_sel = (", ns.language, nt.language" if _has_lang
+                             else ", '', ''")
                 _fixed = []
                 for _rid, _name, _sig, _nc, _nf in rows:
                     _crows = con.execute(
-                        "SELECT DISTINCT e.source_id, ns.file_path FROM edges e "
+                        f"SELECT DISTINCT e.source_id, ns.file_path{_lang_sel} "
+                        "FROM edges e "
                         "JOIN nodes ns ON ns.id = e.source_id "
+                        "JOIN nodes nt ON nt.id = e.target_id "
                         "WHERE e.target_id = ? AND e.type='CALLS' "
                         "AND COALESCE(ns.is_test,0)=0 "
                         f"AND LOWER(TRIM(e.resolution_method)) IN ('{det_sql}') "
                         f"{conf_gate}",
                         (_rid,)).fetchall()
-                    _keep = [(s, fp) for s, fp in _crows
-                             if not _is_vendored_path(fp or "")]
+                    # 2026-06-10 fact-filter: vendored caller files AND cross-
+                    # language callers (boa [57]) are excluded from the
+                    # DELIVERED "N verified caller(s)" count.
+                    _keep = [(s, fp) for s, fp, _sl, _tl in _crows
+                             if not _is_vendored_path(fp or "")
+                             and not _is_cross_language_pair(_sl, _tl)]
                     _fixed.append((_rid, _name, _sig,
                                    len({s for s, _ in _keep}),
                                    len({fp for _, fp in _keep})))
@@ -1398,7 +1538,10 @@ def _l5_nudge(cmd: str, out_text: str = "") -> str:
 #      Traceback / "Error:" is not proof a TEST failed).
 # ---------------------------------------------------------------------------
 _TEST_RUNNER_RE = re.compile(
-    r"(?:^|[|&;]\s*)(?:"
+    # A `timeout N` / `time` / `env VAR=…` wrapper does not stop a command being
+    # a real test-runner invocation (2026-06-10: boa ran `timeout 60 cargo test`
+    # six times — the governor's common case is exactly the wrapped form).
+    r"(?:^|[|&;]\s*)(?:timeout\s+(?:-\S+\s+)*\d+\S*\s+|time\s+|env\s+(?:\S+=\S+\s+)+)*(?:"
     r"python[\d.]*\s+-m\s+(?:pytest|unittest|nose2?|tox)\b"
     r"|pytest\b|py\.test\b|tox\b|nose2?\b"
     r"|(?:\S*/)?(?:runtests?|run_tests?)\.py\b"
@@ -1427,6 +1570,70 @@ _TEST_FAIL_RE = re.compile(
     r"(\bFAILED\b|\bAssertionError\b|\b\d+ failed\b|\bFAIL: "
     r"|FAILED \(failures=|--- FAIL:|test result: FAILED"
     r"|\b\d+ failing\b|Tests:\s+\d+ failed)")
+
+
+# ---------------------------------------------------------------------------
+# no_test_evidence governor (2026-06-10, DeepSWE non-Python audit, run
+# 27290157847 — the single highest-value missing layer the audit found).
+# boa [243]-[333]: six `timeout N cargo test` runs were SIGKILLed mid-build;
+# the agent saw only compile lines, concluded ([332]) "The tests seem to pass
+# but it's not printing results", and SUBMITTED a 398-line feature it had
+# never seen one test execute against (reward 0; the kills had also corrupted
+# the incremental build the grader then failed on). The submit action itself
+# NEVER reaches env.execute() (mini-swe intercepts it before execution:
+# `<exception>action was not executed</exception>`), so a submit-time hook is
+# structurally impossible — the governor fires on the PATTERN instead, at the
+# moment it is actionable. Event definition (all required, else SILENT):
+#   1. the command is a REAL test-runner invocation (_TEST_RUNNER_RE — the
+#      same gate as failure_persisted);
+#   2. the output carries NO test result: no pass marker (_TEST_PASS_RE), no
+#      fail marker (_TEST_FAIL_RE) — a result either way is evidence and
+#      latches _test_evidence_seen for the session;
+#   3. no env-failure marker (_ENV_FAIL_RE) and no compile error
+#      (_COMPILE_FAIL_RE) — those are actionable feedback, not blindness;
+#   4. the 2nd such BLIND run, with >=1 source edit and ZERO test evidence
+#      observed all session -> fire ONCE.
+# Generalized: language-agnostic runner + result regexes, no benchmark/task
+# logic; correct-or-quiet: any observed result, env error, or compile error
+# keeps it silent.
+# ---------------------------------------------------------------------------
+_TEST_PASS_RE = re.compile(
+    r"(test result: ok\b|\b\d+ passed\b|\b\d+ passing\b"
+    r"|^OK\b|^ok\s+\S+\s+[\d.]+s|^PASS$|^PASS\b"
+    r"|OK \(\d+ tests?\)|Tests:\s+\d+ passed|\bpassed\b.*\b0 failed\b)",
+    re.M)
+
+_COMPILE_FAIL_RE = re.compile(
+    r"(error\[E\d+\]|error: could not compile|\bSyntaxError\b"
+    r"|cannot find (?:value|function|type|module|symbol)"
+    r"|undefined:\s|\bTS\d{4,}:|compilation error)")
+
+
+def _l5_no_test_evidence_nudge(cmd: str, out_text: str) -> str:
+    """Fire ONCE when the agent's real test-runner invocations repeatedly
+    produce NO observable test result (timeout/SIGKILL mid-build) — before it
+    concludes 'tests seem to pass' and submits blind. Correct-or-quiet."""
+    global _l5_notest_fired, _blind_test_runs, _test_evidence_seen
+    if _l5_notest_fired or _GT_BASELINE:
+        return ""
+    if not _TEST_RUNNER_RE.search(cmd or ""):
+        return ""
+    text = out_text or ""
+    if _TEST_FAIL_RE.search(text) or _TEST_PASS_RE.search(text):
+        _test_evidence_seen = True  # a result was observed — pattern moot
+        return ""
+    if _ENV_FAIL_RE.search(text) or _COMPILE_FAIL_RE.search(text):
+        return ""  # actionable feedback, not blindness
+    _blind_test_runs += 1
+    if (_blind_test_runs >= 2 and not _test_evidence_seen
+            and _source_edit_count >= 1):
+        _l5_notest_fired = True
+        return ('\n<gt-nudge reason="no_test_evidence">\nGT: your test commands have produced '
+                "no visible test results (likely killed/timed out before any test ran). You have "
+                "NOT observed a single test execute — do not conclude tests pass, and do not "
+                "submit yet. Run a narrower target (one test name / one module) or raise the "
+                "timeout until you see real pass/fail output.\n</gt-nudge>")
+    return ""
 
 
 def _l5_failure_nudge(cmd: str, out_text: str) -> str:
@@ -1506,6 +1713,9 @@ def _augment_output(action, out) -> None:
             _fn = _l5_failure_nudge(cmd, _orig_out)
             if _fn:
                 out["output"] = (out.get("output") or "") + _fn
+            _nt = _l5_no_test_evidence_nudge(cmd, _orig_out)
+            if _nt:
+                out["output"] = (out.get("output") or "") + _nt
         ev = _evidence(cmd)
         if ev:
             out["output"] = (out.get("output") or "") + ev

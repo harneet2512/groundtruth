@@ -92,6 +92,28 @@ jobs:
       - name: Workflow lint — catch CI bug classes before the paid matrix
         run: |
           python scripts/verify/workflow_lint.py .github/workflows/verified_run.yml
+      - name: Cost guard — per-task step_limit + cost_limit MUST be set (no unlimited spend)
+        run: |
+          # Mirror of deepswe_full's Stage-0 cost guard: a Verified-500 dispatch is
+          # worst-case 500 × per-task work, so the per-task bounds in the agent config
+          # MUST be finite+positive before the paid matrix. step_limit is the REAL bound
+          # on this path (cost_limit is inert for the unpriced deepseek-v4-flash but is a
+          # defensive cap for any priced model). Abort HERE (one cheap job), not 500 times.
+          GT_VERIFIED_CFG=artifact_verified/verified_gt.yaml python3 << 'PYEOF'
+          import os, re, sys
+          cfg = os.environ["GT_VERIFIED_CFG"]
+          txt = open(cfg, encoding="utf-8").read()
+          # Tolerate an inline `# comment` after the value (verified_gt.yaml annotates
+          # step_limit/cost_limit inline) — match the number, then allow trailing ws/comment.
+          sl = re.search(r"^\s*step_limit:\s*([0-9]+)\s*(?:#.*)?$", txt, re.M)
+          cl = re.search(r"^\s*cost_limit:\s*([0-9.]+)\s*(?:#.*)?$", txt, re.M)
+          if not sl or int(sl.group(1)) <= 0:
+              sys.exit(f"FATAL: agent.step_limit missing/zero in {cfg} — unbounded steps forbidden")
+          if not cl or float(cl.group(1)) <= 0:
+              sys.exit(f"FATAL: agent.cost_limit missing/zero in {cfg} — unbounded cost forbidden")
+          print(f"cost guard OK: step_limit={sl.group(1)} cost_limit=${cl.group(1)} USD per task "
+                f"(+ 60-min job timeout + max_parallel are the run-level bounds)")
+          PYEOF
       - id: gen
         name: Build per-task matrix (canonical 500-id list; no HF at matrix time)
         env:
@@ -235,15 +257,29 @@ jobs:
           # scripts/vm/build_verified_manifest.py conventions).
           PRIMARY=$(python artifact_verified/gt_verified_agent.py --instance-id "$IID" --print-image | head -1)
           FALLBACK=$(python artifact_verified/gt_verified_agent.py --instance-id "$IID" --print-image | tail -1)
-          echo "primary:  $PRIMARY"
-          echo "fallback: $FALLBACK"
+          # OWNER GHCR cache: this is the namespace verified_cache_images.yml ACTUALLY
+          # mirrors into (ghcr.io/<owner>/sweb.eval.x86_64.<_1776_ slug>:latest), so the
+          # run-set hits the warm cache instead of falling through to a cold/rate-limited
+          # Docker Hub pull on all 500. Same `_1776_` slug the eval pre-tag uses below;
+          # run-set == cache-set. Tried BEFORE the Docker Hub fallback, AFTER the adapter
+          # primary (epoch-research external mirror, kept as-is — src owns that derivation).
+          OWNER_LC=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          SLUG_LC=$(echo "$IID" | tr '[:upper:]' '[:lower:]' | sed 's/__/_1776_/g')
+          OWNER_GHCR="ghcr.io/${OWNER_LC}/sweb.eval.x86_64.${SLUG_LC}:latest"
+          echo "primary:     $PRIMARY"
+          echo "owner-cache: $OWNER_GHCR"
+          echo "fallback:    $FALLBACK"
           RESOLVED=""
           for i in 1 2 3; do
             if docker pull "$PRIMARY"; then RESOLVED="$PRIMARY"; break; fi
             echo "primary pull attempt $i failed, retrying..."; sleep 10
           done
           if [ -z "$RESOLVED" ]; then
-            echo "primary miss — trying Docker Hub fallback"
+            echo "primary miss — trying owner GHCR cache (verified_cache_images.yml target)"
+            if docker pull "$OWNER_GHCR"; then RESOLVED="$OWNER_GHCR"; fi
+          fi
+          if [ -z "$RESOLVED" ]; then
+            echo "owner-cache miss — trying Docker Hub fallback"
             for i in 1 2 3 4; do
               if docker pull "$FALLBACK"; then RESOLVED="$FALLBACK"; break; fi
               echo "fallback pull attempt $i failed, retrying..."; sleep 15

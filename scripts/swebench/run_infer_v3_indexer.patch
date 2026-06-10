@@ -1,0 +1,62 @@
+# VM-only patch to run_infer.py — applied on robbymd-umls-t0 at /home/Lenovo/oh-benchmarks/evaluation/benchmarks/swe_bench/run_infer.py
+# Backup: /home/Lenovo/oh-benchmarks/evaluation/benchmarks/swe_bench/run_infer.py.bak_pre_v3a_1777793057
+# Date applied: 2026-05-03 07:24-07:48 UTC (two-step: V3_INDEXER block first, then ST install hook)
+#
+# Why: V1R-map (and V1R-map+hook) brief generators use v7.4 hybrid retrieval, which
+# requires (a) /tmp/graph.db built by gt-index, and (b) sentence_transformers in
+# container python. The original V2 patch only built graph.db when GT_HOOK_PATH was
+# set, so V1R-map (no hook by design) never got an index. ST also missing in OH
+# runtime container.
+#
+# Effect: when GT_PRETASK_PATH and GT_INDEXER_PATH are both set, this block:
+#   1) builds /tmp/graph.db via gt-index-linux if absent (V3IDX_INDEX_BUILT marker)
+#   2) pip-installs sentence_transformers in container python if missing (ST_INSTALLED marker)
+# Runs once per task, immediately before V3 brief block. No effect when
+# GT_INDEXER_PATH is unset (BL, V1 keep prior behavior).
+
+--- run_infer.py.bak_pre_v3a_1777793057	2026-05-03 07:24:17 UTC
++++ run_infer.py	2026-05-03 07:48:01 UTC
+@@ -563,6 +563,44 @@
+         except Exception as _ke2:
+             logger.warning("GT kernel injection error: %s", _ke2)
+     # <<< GT_PATCH_V4: kernel hook
++    # >>> GT_PATCH_V3_INDEXER: ensure graph.db exists for brief (independent of GT_HOOK_PATH)
++    _gt_brief_path_v3i = os.environ.get("GT_PRETASK_PATH", "")
++    _gt_indexer_v3i = os.environ.get("GT_INDEXER_PATH", "")
++    if _gt_brief_path_v3i and _gt_indexer_v3i and os.path.isfile(_gt_indexer_v3i):
++        try:
++            _gd_check = CmdRunAction(command="test -f /tmp/graph.db && echo GRAPHDB_EXISTS || echo GRAPHDB_MISSING")
++            _gd_check.set_hard_timeout(10)
++            _gd_obs = runtime.run_action(_gd_check)
++            if "GRAPHDB_MISSING" in getattr(_gd_obs, "content", ""):
++                runtime.copy_to(_gt_indexer_v3i, "/tmp/")
++                _gd_idx = CmdRunAction(command="chmod +x /tmp/gt-index-linux && /tmp/gt-index-linux -root $(ls -d /workspace/*/ 2>/dev/null | head -1) -output /tmp/graph.db 2>&1 | tail -3 && echo V3IDX_INDEX_BUILT")
++                _gd_idx.set_hard_timeout(180)
++                _gd_idx_obs = runtime.run_action(_gd_idx)
++                if "V3IDX_INDEX_BUILT" in getattr(_gd_idx_obs, "content", ""):
++                    logger.info("GT graph.db built (V3_INDEXER, no hook arm)")
++                else:
++                    logger.warning("GT V3_INDEXER build failed: %s", getattr(_gd_idx_obs, "content", "")[:200])
++            else:
++                logger.info("GT V3_INDEXER: /tmp/graph.db already exists, skipping rebuild")
++            # Ensure sentence-transformers is available in container python for v7.4 hybrid retrieval
++            _st_check = CmdRunAction(command="python3 -c 'import sentence_transformers' 2>&1 && echo ST_OK || echo ST_MISSING")
++            _st_check.set_hard_timeout(15)
++            _st_obs = runtime.run_action(_st_check)
++            if "ST_MISSING" in getattr(_st_obs, "content", ""):
++                logger.info("GT V3_INDEXER: installing sentence_transformers in container")
++                _st_inst = CmdRunAction(command="pip install --quiet sentence_transformers 2>&1 | tail -5 && python3 -c 'import sentence_transformers' && echo ST_INSTALLED")
++                _st_inst.set_hard_timeout(300)
++                _st_inst_obs = runtime.run_action(_st_inst)
++                if "ST_INSTALLED" in getattr(_st_inst_obs, "content", ""):
++                    logger.info("GT V3_INDEXER: sentence_transformers installed")
++                else:
++                    logger.warning("GT V3_INDEXER: sentence_transformers install failed: %s", getattr(_st_inst_obs, "content", "")[:300])
++            else:
++                logger.info("GT V3_INDEXER: sentence_transformers already present")
++        except Exception as _v3i_e:
++            logger.warning("GT V3_INDEXER error: %s", _v3i_e)
++    # <<< GT_PATCH_V3_INDEXER
+
+     # >>> GT_PATCH_V3: pre-task restrictive brief
+     _gt_brief_path = os.environ.get("GT_PRETASK_PATH", "")

@@ -35,9 +35,9 @@ on:
         required: false
         default: ""
       max_parallel:
-        description: "Concurrent jobs. Default 10 — the PATH B trial showed DeepSeek 429s at 20 concurrent (litellm num_retries=3 absorbs some, but 10 is the safe full-run start). Use 1 for the demo."
+        description: "Concurrent jobs. Default 20 — DeepSeek API is NOT the bound (confirmed not rate-limited at 20; litellm num_retries=3 absorbs any transient 429s). Use 1 for the demo, lower if your GHA account runner ceiling is below 20."
         required: true
-        default: "10"
+        default: "20"
       assets_repo:
         description: "owner/repo that hosts the shared GHCR image cache + pipeline-assets-v1 release (a mirror on another account points here so both share ONE public cache)"
         required: true
@@ -99,6 +99,10 @@ env:
   GT_PROOF_MODE: "1"
   GT_CONTAINERIZED: "1"
   GT_RUNTIME_STRATEGY: "unified_substrate"
+  # Optional GLOBAL override of the per-language LSP readiness budget (seconds). Empty =
+  # use the per-language default chosen in the proof step (go/rust=5s no-op floor,
+  # ts/js/python=20s). vars.* indirection only — never a secret, never a hardcoded value.
+  GT_LSP_READY_BUDGET_S_OVERRIDE: ${{ vars.GT_LSP_READY_BUDGET_S_OVERRIDE }}
 
 jobs:
   # ── Stage-0 / prepare: ENV-ONLY. Leaderboard legitimacy. ────────────────────
@@ -182,6 +186,136 @@ jobs:
           BENCH_SHA=$(git -C deepswe-bench rev-parse HEAD 2>/dev/null || true)
           echo "bench_sha=${BENCH_SHA}" >> "$GITHUB_OUTPUT"
           echo "deepswe-bench clone SHA: ${BENCH_SHA:-<unknown>}"
+
+      # ── SPEED-OPT A: cache deepswe-bench across runs (keyed on commit SHA) ──
+      # The bench repo is cloned in every matrix job (113×) for task validation and
+      # pier's task dir. After the clone above, archive it ONCE here in prepare so each
+      # trial job restores the tarball from cache (fast local decompress) instead of
+      # git-cloning over the network.
+      - name: Cache deepswe-bench clone (bench_sha-keyed, archive for matrix jobs)
+        shell: bash
+        run: |
+          BENCH_SHA="${{ steps.bench_clone.outputs.bench_sha }}"
+          BENCH_CACHE_KEY="deepswe-bench-clone-${BENCH_SHA:-unknown}"
+          echo "BENCH_CACHE_KEY=${BENCH_CACHE_KEY}" >> "$GITHUB_ENV"
+          # Write the key out so the actions/cache step below can reference it.
+          echo "bench_cache_key=${BENCH_CACHE_KEY}" >> "$GITHUB_OUTPUT"
+          # Archive the clone so actions/cache can store it.
+          tar -czf /tmp/deepswe-bench.tar.gz deepswe-bench/
+          echo "deepswe-bench archived: $(du -sh /tmp/deepswe-bench.tar.gz | cut -f1)"
+        id: bench_archive
+
+      - name: Save deepswe-bench tarball to GHA cache
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/deepswe-bench.tar.gz
+          key: ${{ steps.bench_archive.outputs.bench_cache_key }}
+
+      # ── SPEED-OPT B: pre-build harness venv ONCE in prepare → restore per job ──
+      # pier + GT python package install runs per job even with the wheel cache
+      # (pip resolver + egg-link scan costs 20-60s each). Build a fully-installed
+      # venv here, tar it to a fixed path, cache with pyproject-hash key, and
+      # restore + activate in each trial job — pip never runs in the hot path.
+      - name: Build and cache harness venv (pier==0.2.0 + GT editable install)
+        shell: bash
+        run: |
+          set -e
+          VENV_DIR=/tmp/gt-harness-venv
+          python -m venv "$VENV_DIR"
+          source "$VENV_DIR/bin/activate"
+          python -m pip install --upgrade pip --quiet
+          python -m pip install "datacurve-pier==0.2.0" --quiet
+          python -m pip install -e . --quiet
+          deactivate
+          tar -czf /tmp/gt-harness-venv.tar.gz -C /tmp gt-harness-venv/
+          echo "harness venv archived: $(du -sh /tmp/gt-harness-venv.tar.gz | cut -f1)"
+
+      - name: Save harness venv to GHA cache
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/gt-harness-venv.tar.gz
+          key: gt-harness-venv-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}-pier020
+
+      # ── SPEED-OPT C: pull + save substrate image ONCE → restore per job ──────
+      # The ~8GB substrate is pulled from GHCR in every matrix job (113×). Save it
+      # ONCE here (docker save | gzip → cache) so each trial job loads from cache
+      # instead of pulling from the network. The GHA cache cap is 10GB total; a
+      # docker save of the substrate (compressed) is typically 2-5GB. If the save
+      # would exceed the cap (10GB limit), the cache/save step will silently fail-
+      # to-save and each job falls back to the direct GHCR pull — graceful degradation.
+      # Key is the immutable @sha256 digest so a substrate update automatically busts.
+      - name: Pull + save substrate image for matrix job cache
+        shell: bash
+        if: ${{ env.GT_SUBSTRATE_DIGEST != '' }}
+        run: |
+          set -e
+          # Install docker CLI so prepare can pull + save the substrate.
+          if ! command -v docker >/dev/null 2>&1; then
+            DVER=27.3.1
+            curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DVER}.tgz" -o /tmp/docker.tgz \
+              && tar -xzf /tmp/docker.tgz -C /tmp \
+              && cp /tmp/docker/docker /usr/local/bin/docker \
+              && chmod +x /usr/local/bin/docker
+          fi
+          # GHCR login so prepare can pull from the authenticated registry.
+          OWNER=$(echo "${{ inputs.assets_repo }}" | cut -d/ -f1 | tr '[:upper:]' '[:lower:]')
+          echo "${{ secrets.GHCR_PULL_TOKEN || secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "$OWNER" --password-stdin
+          echo "pulling substrate: $GT_SUBSTRATE_DIGEST"
+          if docker pull "$GT_SUBSTRATE_DIGEST"; then
+            echo "saving substrate image to /tmp/gt-substrate.tar.gz ..."
+            docker save "$GT_SUBSTRATE_DIGEST" | gzip -1 > /tmp/gt-substrate.tar.gz
+            SAVED_SIZE=$(du -sh /tmp/gt-substrate.tar.gz | cut -f1)
+            echo "substrate image saved: $SAVED_SIZE"
+            # Extract the digest fingerprint (sha256 hex, no colon prefix) for the cache key.
+            DIGEST_HEX=$(echo "$GT_SUBSTRATE_DIGEST" | sed 's/.*@sha256://')
+            echo "SUBSTRATE_CACHE_KEY=gt-substrate-img-${DIGEST_HEX:0:16}" >> "$GITHUB_ENV"
+            echo "substrate_cache_key=gt-substrate-img-${DIGEST_HEX:0:16}" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::substrate pull in prepare failed — each trial job will pull directly from GHCR"
+            echo "SUBSTRATE_CACHE_KEY=" >> "$GITHUB_ENV"
+            echo "substrate_cache_key=" >> "$GITHUB_OUTPUT"
+          fi
+        id: substrate_save
+        env:
+          GHCR_TOKEN: ${{ secrets.GHCR_PULL_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Save substrate image tarball to GHA cache
+        if: ${{ steps.substrate_save.outputs.substrate_cache_key != '' }}
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/gt-substrate.tar.gz
+          key: ${{ steps.substrate_save.outputs.substrate_cache_key }}
+
+      # ── SPEED-OPT D: pull + save static docker CLI + compose binaries once ───
+      # Each trial job downloads docker CLI (~50MB) + compose plugin (~30MB) when
+      # absent. Cache the two binaries keyed on version so the per-job install is
+      # a cache restore + cp instead of a curl download.
+      - name: Fetch + cache static docker CLI and compose plugin
+        shell: bash
+        run: |
+          DVER=27.3.1
+          CVER=2.29.7
+          DOCKER_BIN=/tmp/docker-cli-cache/docker
+          COMPOSE_BIN=/tmp/docker-cli-cache/docker-compose
+          mkdir -p /tmp/docker-cli-cache
+          if [ ! -x "$DOCKER_BIN" ]; then
+            curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DVER}.tgz" -o /tmp/docker.tgz \
+              && tar -xzf /tmp/docker.tgz -C /tmp/docker-cli-cache --strip-components=1 docker/docker \
+              && chmod +x "$DOCKER_BIN"
+          fi
+          if [ ! -x "$COMPOSE_BIN" ]; then
+            curl -fsSL "https://github.com/docker/compose/releases/download/v${CVER}/docker-compose-linux-x86_64" \
+              -o "$COMPOSE_BIN" && chmod +x "$COMPOSE_BIN"
+          fi
+          echo "docker CLI: $(${DOCKER_BIN} --version 2>&1 | head -1)"
+          echo "compose: $($COMPOSE_BIN version 2>&1 | head -1)"
+
+      - name: Save docker CLI + compose binaries to GHA cache
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/docker-cli-cache
+          key: docker-cli-27.3.1-compose-2.29.7-linux-x86_64
+
       - id: gen
         name: Build task matrix (manifest-driven; clone cross-checked — run-set == cache-set)
         env:
@@ -316,17 +450,15 @@ jobs:
           python-version: "3.12"
 
       # ── TOOLCHAIN CACHE (scalability) ──────────────────────────────────────────
-      # SUBSTRATE-CONSUME: the e5 model, gt-index binary, and LSP servers are all BAKED in
-      # the pinned substrate image (handoff §A) — the runner no longer builds/fetches them.
-      # The only host-side install is pier + the current GT (for the adapter's imports), so
-      # we keep just the pip-wheel cache. Key is content-hashed (pyproject.toml), never
-      # task-specific -> benchmark-shape-neutral.
-      - name: Cache pip wheels
-        uses: actions/cache@v4
+      # SPEED-OPT B restore: harness venv built ONCE in prepare (pier==0.2.0 + GT
+      # editable install). Restore the tarball here → unpack → activate. Falls back
+      # to a direct pip install if the cache miss (e.g. first run or pyproject change).
+      - name: Restore harness venv from cache
+        id: venv_cache
+        uses: actions/cache/restore@v4
         with:
-          path: ~/.cache/pip
-          key: gt-pip-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}
-          restore-keys: gt-pip-${{ runner.os }}-
+          path: /tmp/gt-harness-venv.tar.gz
+          key: gt-harness-venv-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}-pier020
 
       - name: Install host harness deps (pier + GT python deps for the adapter ONLY — NO host LSP)
         run: |
@@ -337,14 +469,38 @@ jobs:
           # host-side (GTRuntimeContext / proof.graph_edges_hash for the §H witness, and the brief
           # fallback). NO gopls/rust-analyzer/tsserver/pyright on the runner — host LSP is exactly
           # the §B BEFORE/invalid host-split this change removes.
-          python -m pip install --upgrade pip
-          # PINNED: the whole --ae/--mounts-json env+mount integration was source-verified
-          # against pier 0.2.0 (cli/jobs.py:620,629 -> factory extra_env -> DockerEnvironment
-          # exec -e). An unpinned install lets an upstream release silently change that
-          # plumbing mid-run — never float the harness contract on a paid matrix.
-          python -m pip install "datacurve-pier==0.2.0" || { echo "FATAL: pier install failed"; exit 1; }
-          command -v pier >/dev/null || { echo "FATAL: pier not on PATH after install"; exit 1; }
-          echo "host harness ready: pier=$(command -v pier) (LSP/gates/graph run inside the substrate)"
+          #
+          # SPEED-OPT B: if the venv tarball was restored from cache, unpack + activate it
+          # instead of running pip (saves 20-60s per job on the hot path).
+          if [ -f /tmp/gt-harness-venv.tar.gz ]; then
+            echo "venv cache HIT — unpacking harness venv"
+            tar -xzf /tmp/gt-harness-venv.tar.gz -C /tmp/
+            # Relink the editable install to THIS checkout (the venv was built in prepare
+            # against a different GITHUB_WORKSPACE path; update the .pth / egg-link so
+            # the adapter imports from the current checkout, not the prepare workspace).
+            VENV_SITE=$(/tmp/gt-harness-venv/bin/python -c "import site; print(site.getsitepackages()[0])")
+            # Remove stale groundtruth egg-link/direct_url pointing to prepare workspace.
+            find "$VENV_SITE" -name "groundtruth*.egg-link" -delete 2>/dev/null || true
+            find "$VENV_SITE" -name "__editable__.groundtruth*.pth" -delete 2>/dev/null || true
+            # Re-install just the GT package editable (no-deps, wheel already present → fast).
+            /tmp/gt-harness-venv/bin/python -m pip install -e . --no-deps --quiet 2>&1 | tail -3 || true
+            # Activate: prepend venv bin so pier + python resolve here.
+            echo "PATH=/tmp/gt-harness-venv/bin:$PATH" >> "$GITHUB_ENV"
+            echo "VIRTUAL_ENV=/tmp/gt-harness-venv" >> "$GITHUB_ENV"
+            export PATH="/tmp/gt-harness-venv/bin:$PATH"
+            command -v pier >/dev/null || { echo "FATAL: pier not on PATH after venv restore"; exit 1; }
+            echo "host harness ready (venv cache): pier=$(command -v pier)"
+          else
+            echo "venv cache MISS — installing harness from scratch (first run / pyproject changed)"
+            python -m pip install --upgrade pip
+            # PINNED: the whole --ae/--mounts-json env+mount integration was source-verified
+            # against pier 0.2.0 (cli/jobs.py:620,629 -> factory extra_env -> DockerEnvironment
+            # exec -e). An unpinned install lets an upstream release silently change that
+            # plumbing mid-run — never float the harness contract on a paid matrix.
+            python -m pip install "datacurve-pier==0.2.0" || { echo "FATAL: pier install failed"; exit 1; }
+            command -v pier >/dev/null || { echo "FATAL: pier not on PATH after install"; exit 1; }
+            echo "host harness ready: pier=$(command -v pier) (LSP/gates/graph run inside the substrate)"
+          fi
 
       - name: Trust the workspace for git (CI checkout uid mismatch)
         run: |
@@ -375,6 +531,14 @@ jobs:
           [ "$BAD" -eq 0 ] || { echo "FATAL: fail-closed env not armed"; exit 1; }
           echo "=== fail-closed env ARMED ==="
 
+      # ── SPEED-OPT D restore: docker CLI + compose from cache ────────────────────
+      - name: Restore docker CLI + compose binaries from cache
+        id: docker_cli_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/docker-cli-cache
+          key: docker-cli-27.3.1-compose-2.29.7-linux-x86_64
+
       - name: Install docker CLI (socket is mounted, CLI binary not baked)
         run: |
           # The container mounts /var/run/docker.sock but the baked image lacks the
@@ -382,29 +546,40 @@ jobs:
           # pier --env docker. Install the client best-effort.
           # docker CLI is REQUIRED (GHCR login + pier --env docker + task image pulls).
           # A true absence must fail the job — never run degraded.
-          # apt-get install of docker.io kept failing in this container; use the STATIC
-          # docker CLI binary (no apt, just curl which is baked) — reliable everywhere.
+          # SPEED-OPT D: use cached binaries from prepare when available (avoids curl download).
           if ! command -v docker >/dev/null; then
-            echo "docker CLI absent — fetching static client binary"
-            DVER=27.3.1
-            curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DVER}.tgz" -o /tmp/docker.tgz \
-              && tar -xzf /tmp/docker.tgz -C /tmp \
-              && cp /tmp/docker/docker /usr/local/bin/docker \
-              && chmod +x /usr/local/bin/docker \
-              || (apt-get update -qq && apt-get install -y -qq docker.io) \
-              || { echo "FATAL: docker CLI missing and static+apt install failed"; exit 1; }
+            if [ -x /tmp/docker-cli-cache/docker ]; then
+              echo "docker CLI from cache"
+              cp /tmp/docker-cli-cache/docker /usr/local/bin/docker
+              chmod +x /usr/local/bin/docker
+            else
+              echo "docker CLI absent and no cache — fetching static client binary"
+              DVER=27.3.1
+              curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DVER}.tgz" -o /tmp/docker.tgz \
+                && tar -xzf /tmp/docker.tgz -C /tmp \
+                && cp /tmp/docker/docker /usr/local/bin/docker \
+                && chmod +x /usr/local/bin/docker \
+                || (apt-get update -qq && apt-get install -y -qq docker.io) \
+                || { echo "FATAL: docker CLI missing and static+apt install failed"; exit 1; }
+            fi
           fi
           docker --version 2>&1 | head -1 || { echo "FATAL: docker CLI still missing"; exit 1; }
           # pier uses `docker compose` (v2 plugin) — the static client + docker.io DON'T
           # include it ("unknown flag: --project-name" => compose subcommand absent).
           # Install the compose v2 plugin binary into the CLI-plugins dir.
           if ! docker compose version >/dev/null 2>&1; then
-            echo "docker compose plugin absent — installing v2 plugin"
             mkdir -p /usr/local/lib/docker/cli-plugins
-            curl -fsSL "https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-x86_64" \
-              -o /usr/local/lib/docker/cli-plugins/docker-compose \
-              && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose \
-              || { echo "FATAL: docker compose plugin install failed"; exit 1; }
+            if [ -x /tmp/docker-cli-cache/docker-compose ]; then
+              echo "compose plugin from cache"
+              cp /tmp/docker-cli-cache/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
+              chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+            else
+              echo "compose plugin absent and no cache — fetching"
+              curl -fsSL "https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-x86_64" \
+                -o /usr/local/lib/docker/cli-plugins/docker-compose \
+                && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose \
+                || { echo "FATAL: docker compose plugin install failed"; exit 1; }
+            fi
           fi
           docker compose version 2>&1 | head -1 || { echo "FATAL: docker compose still missing"; exit 1; }
 
@@ -416,7 +591,13 @@ jobs:
           # task image, no host gt-index build). Host-side we install ONLY the current checkout's
           # GT so the DeepSWE adapter can import groundtruth.runtime (GTRuntimeContext +
           # proof.graph_edges_hash) for the §H witness and the brief fallback.
-          python -m pip install -e .
+          # SPEED-OPT B: if the venv was restored, the -e install already ran in harness setup
+          # above (re-linked to this workspace). Skip if already importable.
+          if python -c "import groundtruth.runtime.proof, groundtruth.runtime.context" 2>/dev/null; then
+            echo "GT runtime already importable (venv cache active) — no install needed"
+          else
+            python -m pip install -e .
+          fi
           # PYTHONPATH: THIS checkout's src (current adapter/runtime code, not any baked snapshot)
           # + scripts/swebench + scripts/metrics (so the canonical graph_certificate.format_graph_witness
           # the adapter MAY call is importable host-side; the adapter also self-adds it to sys.path).
@@ -436,17 +617,30 @@ jobs:
           echo "$GHCR_TOKEN" | docker login ghcr.io -u "$OWNER" --password-stdin
           echo "GHCR login OK as $OWNER (cache: ghcr.io/$OWNER/swe-bench-202605)"
 
-      - name: Clone deepswe-bench
+      # ── SPEED-OPT A restore: deepswe-bench from cache ────────────────────────────
+      - name: Restore deepswe-bench from cache
+        id: bench_cache_restore
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/deepswe-bench.tar.gz
+          key: deepswe-bench-clone-${{ needs.prepare.outputs.bench_sha }}
+
+      - name: Clone deepswe-bench (or restore from cache)
         run: |
+          if [ -f /tmp/deepswe-bench.tar.gz ] && [ ! -d "deepswe-bench" ]; then
+            echo "bench cache HIT — unpacking deepswe-bench from cache"
+            tar -xzf /tmp/deepswe-bench.tar.gz
+          fi
           if [ ! -d "deepswe-bench" ]; then
+            echo "bench cache MISS — cloning deepswe-bench from GitHub"
             git clone --depth 1 https://github.com/datacurve-ai/deep-swe.git deepswe-bench
           fi
-          # Run provenance: THIS job's own bench clone SHA (each matrix job clones fresh;
-          # a mid-run push to the bench default branch could drift between jobs — record
-          # what THIS task actually ran from). Written to run_provenance.json in Collect.
+          # Run provenance: record what SHA this task actually ran from. On a cache hit
+          # this equals prepare's bench_sha (same tarball); on a cache miss it is the
+          # live clone SHA (document any drift).
           BENCH_SHA=$(git -C deepswe-bench rev-parse HEAD 2>/dev/null || true)
           echo "GT_DEEPSWE_BENCH_SHA=${BENCH_SHA}" >> "$GITHUB_ENV"
-          echo "deepswe-bench clone SHA: ${BENCH_SHA:-<unknown>}"
+          echo "deepswe-bench clone/cache SHA: ${BENCH_SHA:-<unknown>}"
 
       - name: Validate task exists
         run: |
@@ -455,6 +649,36 @@ jobs:
             echo "::error::Task directory not found: $TASK_DIR"; exit 1
           fi
           echo "Task directory: $TASK_DIR"
+
+      # ── SPEED-OPT C restore: substrate image from GHA cache ──────────────────
+      # Restore the tarball saved in prepare (docker save | gzip). If the cache hit,
+      # docker load below is ~10-30s vs a cold GHCR pull (~3-8 min). The cache key is
+      # the first 16 hex chars of the @sha256 digest so a new substrate automatically
+      # busts the cache. GHA cache max is 10GB total — substrate compressed is ~2-5GB;
+      # if the save failed in prepare (exceeded cap) the restore will miss and the job
+      # falls back to the regular GHCR pull without failing.
+      # NOTE: the cache key must be computed at step-time since GT_SUBSTRATE_DIGEST is
+      # set as a top-level env var (not an input expression); we derive it in a small
+      # bash step first and then pass it to cache/restore via an output + env write.
+      - name: Compute substrate cache key
+        id: substrate_cache_key
+        shell: bash
+        run: |
+          DIGEST_HEX=$(echo "${GT_SUBSTRATE_DIGEST:-}" | sed 's/.*@sha256://')
+          if [ -n "$DIGEST_HEX" ]; then
+            KEY="gt-substrate-img-${DIGEST_HEX:0:16}"
+          else
+            KEY="gt-substrate-img-none"
+          fi
+          echo "key=${KEY}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore substrate image tarball from cache
+        id: substrate_cache_restore
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/gt-substrate.tar.gz
+          key: ${{ steps.substrate_cache_key.outputs.key }}
+        continue-on-error: true
 
       - name: GT substrate proof (handoff §B-AFTER/§D/§G) — pre-agent, pinned, read-only repo
         run: |
@@ -523,9 +747,32 @@ jobs:
           fi
           docker image inspect "$IMG" >/dev/null 2>&1 || { echo "TASK_IMAGE_PULL_FAIL: task image not present after pull ($IMG)" | tee -a trial_output.log; exit 1; }
 
-          # Pull the PINNED substrate by digest (§E GT_SUBSTRATE_PULL_FAIL).
-          if ! docker pull "$GT_SUBSTRATE_DIGEST"; then
-            echo "GT_SUBSTRATE_PULL_FAIL: docker pull of the pinned substrate failed" | tee -a trial_output.log; exit 1
+          # ── SPEED-OPT C: load substrate from GHA cache or pull from GHCR ────
+          # If prepare saved the substrate tarball and the cache restored it above,
+          # load from the local file (fast, no network). Fall back to GHCR pull if
+          # the cache file is absent (first run, cache eviction, or oversized).
+          SUBSTRATE_LOADED=0
+          if [ -f /tmp/gt-substrate.tar.gz ]; then
+            echo "SPEED-OPT C: loading substrate from GHA cache (docker load)"
+            if docker load < /tmp/gt-substrate.tar.gz; then
+              # docker load with a digest-tagged image may produce a <none> name; tag it.
+              docker tag "$GT_SUBSTRATE_DIGEST" "$GT_SUBSTRATE_DIGEST" 2>/dev/null || true
+              # Verify the digest is now present in the local daemon.
+              if docker image inspect "$GT_SUBSTRATE_DIGEST" >/dev/null 2>&1; then
+                echo "substrate loaded from cache OK"
+                SUBSTRATE_LOADED=1
+              else
+                echo "::warning::docker load succeeded but digest not found locally — falling back to GHCR pull"
+              fi
+            else
+              echo "::warning::docker load failed (corrupt tarball?) — falling back to GHCR pull"
+            fi
+          fi
+          if [ "$SUBSTRATE_LOADED" -eq 0 ]; then
+            echo "substrate cache miss — pulling from GHCR (pinned digest)"
+            if ! docker pull "$GT_SUBSTRATE_DIGEST"; then
+              echo "GT_SUBSTRATE_PULL_FAIL: docker pull of the pinned substrate failed" | tee -a trial_output.log; exit 1
+            fi
           fi
 
           # Materialize the task repo at its base commit and copy it OUT to a host dir we
@@ -587,6 +834,26 @@ jobs:
           print(f"issue text: {len(issue)} chars from {source} -> {out_path}")
           PYEOF
 
+          # ── Per-language LSP readiness budget (efficiency, src-free knob) ────────────
+          # resolve.py runs a ONE-TIME project-readiness barrier per pass bounded by
+          # GT_LSP_READY_BUDGET_S (default 20s, read via os.environ — resolve.py:523). The
+          # barrier EARLY-EXITS on the first non-error/non-empty definition (resolve.py:507),
+          # so a WARM server (pyright/tsserver) pays ~one drain + one request, NOT the full
+          # budget. The full budget is only ever consumed by a server that NEVER converges —
+          # the measured go/rust shape (project_ready=false, 0 LSP conversion: the audit's
+          # gopls/rust-analyzer no-op). On those languages the 20s wait is pure dead time
+          # (tree-sitter structural depth is index-time, unaffected by this wait), so we
+          # SHORTEN it; on ts/js (tsserver converts) we KEEP the full budget where it pays.
+          # Pure process-env (no src change, no per-server branching) — overridable via the
+          # repo var GT_LSP_READY_BUDGET_S (global override) if a future task profile shifts.
+          case "${{ matrix.language }}" in
+            go|rust)               DEF_BUDGET=5 ;;  # proven no-op at scale — stop the dead wait
+            typescript|javascript) DEF_BUDGET=20 ;; # tsserver converts — keep full budget
+            *)                     DEF_BUDGET=20 ;; # python (pyright warm, early-exits) + unknown
+          esac
+          # Optional global override from a repo var; vars.* indirection only, never a secret.
+          LSP_BUDGET="${GT_LSP_READY_BUDGET_S_OVERRIDE:-$DEF_BUDGET}"
+          echo "LSP readiness budget for ${{ matrix.language }}: ${LSP_BUDGET}s (early-exits on first real answer)"
           # ── gt-run-proof INSIDE the pinned substrate (the ONE portable command, §A) ──
           # Repo mounted /work:ro; artifacts -> /gt_artifacts. All 8 proof flags set so the
           # substrate fails-closed on any boundary/baked-dep violation. The host only orchestrates.
@@ -602,6 +869,7 @@ jobs:
               -e GT_PROOF_MODE=1 -e GT_CONTAINERIZED=1 -e GT_RUNTIME_STRATEGY=unified_substrate \
               -e GT_REQUIRE_FTS5=1 -e GT_REQUIRE_EMBEDDER=1 -e GT_FORCE_ONNX_EMBEDDER=1 \
               -e GT_REQUIRE_LSP=1 -e GT_REQUIRE_FULL_STACK=1 -e GT_ISSUE_FILE=/work_issue.txt \
+              -e GT_LSP_READY_BUDGET_S="$LSP_BUDGET" \
               -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 -e HF_DATASETS_OFFLINE=1 \
               -e GT_GATES_DELIVER_ALWAYS="${GT_GATES_DELIVER_ALWAYS:-0}" \
               -e GT_GIT_COMMIT="${{ github.sha }}" \

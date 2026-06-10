@@ -1,0 +1,350 @@
+[
+  {
+    "task": "aws-cloudformation__cfn-lint-3862",
+    "resolved": false,
+    "localization_source": "self",
+    "gt_caused": false,
+    "leakage": false,
+    "what_agent_did": "The agent self-localized to config.py _glob_filenames via its own grep at turn 27 and reasoning at turn 58, then edited that function to append the original filename when glob returns empty and the path has no wildcards. This divergent fix misses the gold raise ValueError, the ignore_bad_template precedence branch, and the runner.py ConfigError-catch plus new E0003 rule and schema.json changes; it ignored GT co-change hints and finished with a single-file patch.",
+    "what_gt_led": "GT L1 brief foregrounded the WRONG primary: it ranked runner.py first and buried config.py at sixth, listing config functions ConfigFileArgs, _find_config, _has_file and never the gold function _glob_filenames. Its only correct config pointer was a footnote Also changes: src/cfnlint/config.py plus a Scope chain runner.py to config.py line; L3 post-edit later flagged 4 verified co-change file(s) remain: cfnlint/runner.py, cfnlint/api.py, cfnlint/core.py but GT never named ignore_bad_template or the raise-ValueError contract.",
+    "gt_layers": [
+      {
+        "layer": "L1 brief",
+        "delivered": true,
+        "consumed": false,
+        "note": "Delivered gt-localization/gt-task-brief/gt-graph-map at turn 1. Partially correct but misranked: Candidate edit targets: 1. src/cfnlint/runner.py ... 6. src/cfnlint/config.py - ConfigFileArgs, _find_config, _has_file. config.py is gold but ranked last and its named functions are wrong (gold fn is _glob_filenames, never listed). Footnote Also changes: src/cfnlint/config.py and Scope chain runner.py to config.py to helpers.py were correct. Agent did not reference the brief; it grepped config.py independently at turn 23/27."
+      },
+      {
+        "layer": "L3b post_view",
+        "delivered": true,
+        "consumed": false,
+        "note": "On the config.py view (turn 25) GT injected gt-context file=config.py [CONTRACT] def _has_file ... def set_template_args - contract pillar fired but on the WRONG functions (not _glob_filenames, which the agent was actually reading at line 791). On runner.py view (turn 17) it gave correct [CONTRACT]/[RAISES] for validate_template/get_formatter. Agent cited no [CONTRACT] line in its fix reasoning."
+      },
+      {
+        "layer": "L3 post_edit",
+        "delivered": true,
+        "consumed": false,
+        "note": "After the config.py edit (turn 83): [GT] Post-edit: config.py ... SCOPE: callers in unedited files: src/cfnlint/schema/manager.py (8x); src/cfnlint/runner.py (6x) and [GT] 1/6 scope files edited. 4 verified co-change file(s) remain: cfnlint/runner.py, cfnlint/api.py, cfnlint/core.py. Directionally correct (gold also edits runner.py) but the agent ignored it and shipped a single-file patch. Did NOT name ignore_bad_template or the ConfigError rule, the actual missing pieces."
+      },
+      {
+        "layer": "consensus",
+        "delivered": true,
+        "consumed": false,
+        "note": "gt-scope files=6 at turn 9: GT has not confirmed a single primary target - confirm the edit target with grep. Honest correct-or-quiet abstention; no single-primary claim. Agent did exactly this (grepped). Not a causal driver."
+      },
+      {
+        "layer": "GT_VERIFY",
+        "delivered": true,
+        "consumed": false,
+        "note": "Turn 87: [GT_VERIFY] You edited 1 file(s). Before finishing, run the project own test suite ... config.py: guard_clause = ... NO test names, NO assertions, NO FAIL_TO_PASS - clean, no leakage. Agent ran its own pytest afterward but the verify text named no tests, so it did not drive which tests."
+      }
+    ],
+    "misdirected": {
+      "happened": true,
+      "detail": "L1 mis-ranked the primary target: Candidate edit targets (reason over these): 1. src/cfnlint/runner.py ... 6. src/cfnlint/config.py - ConfigFileArgs, _find_config, _has_file. The gold core change is config.py _glob_filenames (raise ValueError), yet GT put config.py last, named the wrong functions, and never surfaced _glob_filenames or ignore_bad_template. The agent overrode this by self-grepping, so no turns were wasted chasing runner.py, but the brief gave zero positive lift toward the actual fix; the L3b contract pillar on config.py also fired on _has_file/set_template_args rather than the function under edit."
+    },
+    "one_line": "GT delivered every layer cleanly with no leakage, but mis-prioritized localization (config.py ranked sixth, gold fn _glob_filenames never named) and never surfaced ignore_bad_template; the agent self-localized via grep and shipped a divergent, scope-incomplete fix - not GT-caused and not resolved.",
+    "_resolved": false,
+    "_baseline": false
+  },
+  {
+    "task": "aws-cloudformation__cfn-lint-3875",
+    "resolved": false,
+    "localization_source": "both",
+    "gt_caused": false,
+    "leakage": false,
+    "what_gt_led": "GT named the gold file in L1 (localization #2 \"src/cfnlint/template/transforms/_language_extensions.py \u2014 values, _ResolveError, _ValueError\", plus \"Related files to inspect: ... _language_extensions.py\" and scope chain \"FindInMap.py -> context.py -> _language_extensions.py\"), and L3b post-view on turn 19 delivered the gold function's contract: \"[GT] _language_extensions: [CONTRACT] def value(\" with \"[RAISES] ... raise _ValueError ... raise _ResolveError\". GT correctly pointed at the gold file+function but did NOT top-rank it (L1 localization #1 = FindInMap.py, task-brief #1 = _mappings.py, both non-gold).",
+    "what_agent_did": "The agent self-reasoned through the FindInMap flow (read FindInMap.py t10, _mappings.py t12, _resolvers_cfn.py t14, then gold _language_extensions.py t18 \u2014 order tracking the brief's named files), then edited the GOLD function value() at the exact gold site (the `except _ResolveError` block ~line 403). But it wrote the WRONG condition: `if len(self._map) != 4:` (t102) whereas gold gates on `isinstance(t_map[2], (_ForEachValueRef, _ForEachValueFnFindInMap))`. Right file, right function, wrong fix logic -> not resolved.",
+    "gt_layers": [
+      {
+        "layer": "L1 brief",
+        "delivered": true,
+        "consumed": true,
+        "note": "Delivered gt-localization+gt-task-brief+gt-graph-map+gt-orientation at t1-2. CORRECT that it named the gold file (localization #2: 'src/cfnlint/template/transforms/_language_extensions.py \u2014 values, _ResolveError, _ValueError'; orientation 'values() in _language_extensions.py (25 callers)'; scope chain ends at _language_extensions.py), but NOT top-1 (localization #1 = FindInMap.py, task-brief #1 = _mappings.py \u2014 both non-gold). Consumed: agent's read order (t10 FindInMap.py, t12 _mappings.py, t14 _resolvers_cfn.py, t18 gold) mirrors the brief's named files."
+      },
+      {
+        "layer": "L3b post_view",
+        "delivered": true,
+        "consumed": true,
+        "note": "Fired on every view incl. the gold file at t19: '[GT] _language_extensions: [CONTRACT] def value(' plus '[RAISES] WHEN ... raise _ValueError ... raise _ResolveError' \u2014 CORRECT contract for the gold function. gt-scope was honest: 'GT has not confirmed a single primary target \u2014 confirm the edit target with grep.' Agent did edit value() in that file, but the contract did not steer it to gold's isinstance(t_map[2],...) branch condition."
+      },
+      {
+        "layer": "GT_VERIFY",
+        "delivered": true,
+        "consumed": false,
+        "note": "t107 post-edit: '[GT_VERIFY] You edited 1 file(s)... run the project\\'s own test suite... _language_extensions.py: exception_type = _ValueError / _TypeError / _ResolveError'. CORRECT and leak-free (no test names, no FAIL_TO_PASS). Agent ran its own repro/cfn-lint instead; the generic 'run the test suite' nudge did not surface the failing assertion."
+      },
+      {
+        "layer": "consensus",
+        "delivered": false,
+        "consumed": false,
+        "note": "No single-primary-target consensus fired \u2014 gt-scope explicitly stated 'GT has not confirmed a single primary target'; localization confidence='medium'. The pre-submit gt_advisory ([GT_GATE], pending_count=0) carried no target claim and no test names."
+      }
+    ],
+    "misdirected": {
+      "happened": false,
+      "detail": "Mild rank noise, not material misdirection. L1 top-1 ranks were non-gold (localization #1 'src/cfnlint/rules/functions/FindInMap.py', task-brief #1 '_mappings.py'), costing a few exploratory reads (t10-t16) before the agent reached gold at t18 \u2014 but the gold file WAS named in the same brief (localization #2 + related-files + scope chain) and the agent reached and edited it fast. GT did not derail the agent onto a wrong file; the non-resolution is post-localization fix-logic, not GT pointing at the wrong place."
+    },
+    "one_line": "GT delivered the correct gold file+function contract (leak-free) and the agent consumed it to edit the exact gold site, but ranked gold #2 not #1 and \u2014 decisively \u2014 the failure was wrong post-localization fix logic GT's no-leakage context cannot dictate; right trajectory, not a flip.",
+    "_resolved": false,
+    "_baseline": false
+  },
+  {
+    "task": "conan-io__conan-17123",
+    "resolved": true,
+    "localization_source": "gt",
+    "gt_caused": true,
+    "leakage": false,
+    "what_gt_led": "GT's L1 brief delivered (embedded in the turn-1 instruction) a `<gt-localization confidence=\"medium\">` whose candidate #1 was the EXACT gold: \"conan/internal/api/config/config_installer.py \u2014 _ConanIgnoreMatcher, matches, _hide_password\" (gold file + gold class + gold method `matches`). The problem statement never mentions `ConanIgnoreMatcher`/`config_installer` (verified: 'problem mentions ConanIgnoreMatcher: False'), so the class name could only have come from GT.",
+    "what_agent_did": "At turn 8 the agent grepped for the GT-supplied symbols (`find ... | xargs grep -l \"ConanIgnoreMatcher\\|conanignore\\|_ConanIgnoreMatcher\"`), read the gold file `config_installer.py` at turn 10, and at turn 72 edited the gold class `_ConanIgnoreMatcher` (`__init__` + `matches`) to support `!`-negation with last-match-wins semantics \u2014 logically equivalent to the gold patch; task resolved.",
+    "gt_layers": [
+      {
+        "layer": "L1 brief",
+        "delivered": true,
+        "consumed": true,
+        "note": "Delivered <gt-localization> cand #1 = gold: 'config_installer.py \u2014 _ConanIgnoreMatcher, matches, _hide_password'. CORRECT (gold file+class+method). Consumed: agent's turn-8 grep used the exact GT symbol 'ConanIgnoreMatcher' which appears nowhere in the issue text, then read gold at turn 10. The <gt-task-brief> section instead led with config.py (non-gold) + create.py/graph_binaries.py scope chains, but the agent ignored those and followed the localization."
+      },
+      {
+        "layer": "L3b post_view",
+        "delivered": true,
+        "consumed": false,
+        "note": "On the turn-11 read of config_installer.py GT injected '[CONTRACT]', 'Called by: conan/internal/deploy.py:60 ...', and 'Spec: tmp_config_install_folder handles: rmdir(tmp_folder)'. The contract/callers were for the wrong/generic function (tmp_config_install_folder, not _ConanIgnoreMatcher), so correctness is partial; agent did not visibly reference it \u2014 it had already localized."
+      },
+      {
+        "layer": "consensus",
+        "delivered": true,
+        "consumed": false,
+        "note": "Turn 11 injected '<gt-scope files=\"4\"> 1. config/config_installer.py \u2014 in scope (you are viewing this) ... These files are related in scope; GT has not confirmed a single primary target \u2014 confirm the edit target with grep.' Honest correct-or-quiet: it did not falsely assert a primary, and the file the agent was on IS the gold. Not separately consumed (agent already on gold)."
+      },
+      {
+        "layer": "GT_VERIFY",
+        "delivered": true,
+        "consumed": false,
+        "note": "After the gold edit, turn 77 injected '[GT_VERIFY] You edited 1 file(s). Before finishing, run the project's own test suite for the affected modules and confirm your change preserves the behavioral contract: config_installer.py: exception_type = ConanException; guard_clause = raise: not os.path.isdir(folder) -> raise ConanException'. NO leak of F2P test names \u2014 generic 'run the project's own test suite'. Agent had already validated via its own fnmatch experiments."
+      }
+    ],
+    "misdirected": {
+      "happened": false,
+      "detail": "The <gt-task-brief> led with a non-gold file ('1. conan/cli/commands/config.py ...') and two non-gold scope chains (create.py\u2192lockfile.py, graph_binaries.py\u2192build_mode.py), which had misdirection potential. But the agent never read or edited config.py (reads before the gold edit were only turns 6,10,18; no '/config.py' path touched) \u2014 it followed the correct <gt-localization> cand #1 instead. Zero wasted turns; net no misdirection."
+    },
+    "one_line": "GT's localization brief named the exact gold class (absent from the issue), the agent grepped that exact symbol and went straight to the gold file and gold methods \u2014 clean GT-caused right trajectory, no leakage; resolved (but baseline also passed, so not a flip).",
+    "_resolved": true,
+    "_baseline": true
+  },
+  {
+    "task": "conan-io__conan-17183",
+    "resolved": true,
+    "localization_source": "both",
+    "gt_caused": false,
+    "leakage": false,
+    "what_gt_led": "GT's L1 localization put the gold file/functions at rank #1: `<gt-localization confidence=\"medium\"> ... 1. conan/tools/google/bazel.py - Bazel, _safe_run_command, __init__`, and L3b post-view delivered the correct contract on the gold functions: `[GT] bazel:\\n[CONTRACT] def build(self, args=None, target=\"//...\", clean=True):` plus an honest `<gt-scope>`: \"GT has not confirmed a single primary target - confirm the edit target with grep\" (extra files tagged \"possible match (unverified)\").",
+    "what_agent_did": "The agent's very first action (turn 4) was to read the GT-pointed gold file `conan/tools/google/bazel.py`, then self-found the test via its own `find ... *bazel*` (turn 6), reasoned directly from the issue (turn 12: \"The problem is in conan/tools/google/bazel.py in the build method. On line 71...\"), and applied the exact fix the issue itself proposed (extract `startup_options`, reuse for both `clean` and `build` commands) - matching the gold patch.",
+    "gt_layers": [
+      {
+        "layer": "L1 brief",
+        "delivered": true,
+        "consumed": true,
+        "note": "gt-localization #1 + gt-task-brief + gt-orientation delivered at turn 1; #1 candidate is the gold file/functions: '1. conan/tools/google/bazel.py - Bazel, _safe_run_command, __init__'. CORRECT (gold patch edits bazel.py build()). Consumed: agent read this exact file as its FIRST action (turn 4) with no prior grep. But over-determined - the issue text itself links 'conan/tools/google/bazel.py#L71' and contains the proposed fix."
+      },
+      {
+        "layer": "L3b post_view",
+        "delivered": true,
+        "consumed": true,
+        "note": "Turn 5 observation content: '[GT] bazel:\\n[CONTRACT] def build(self, args=None, target=\"//...\", clean=True):\\n[CONTRACT] def test... Called by: build() bazel.py:27 ... <gt-scope files=\"3\"> ... GT has not confirmed a single primary target - confirm the edit target with grep'. CORRECT contracts on the gold functions; honest scope (2 extra files marked 'unverified'). Consumed implicitly - reinforces the file the agent was already editing; no misdirection."
+      },
+      {
+        "layer": "GT_VERIFY",
+        "delivered": true,
+        "consumed": false,
+        "note": "Turn 19: '[GT_VERIFY] You edited 1 file(s). Before finishing, run the project's own test suite for the affected modules ... bazel.py: guard_clause = ...'. Diagnostic and GENERIC (no specific test name / FAIL_TO_PASS) - no leak. Agent had already independently run test/unittests/tools/google/test_bazel.py (turn 18, found via its own turn-6 find), so GT_VERIFY did not change behavior."
+      }
+    ],
+    "misdirected": {
+      "happened": false,
+      "detail": "GT pointed at the correct gold file first. The L3b <gt-scope> listed two extra files (rest/file_uploader.py, util/thread.py) but explicitly tagged them 'possible match (unverified)' and told the agent to confirm with grep - correct-or-quiet, no wasted turns. The agent never read those files; it went straight to bazel.py."
+    },
+    "one_line": "GT delivered correct localization + contracts on the gold file (no leak), but the fix is over-determined - the issue text itself names bazel.py#L71 and supplies the patch, baseline already PASSED, so GT was correct and consumed but not causal.",
+    "_resolved": true,
+    "_baseline": true
+  },
+  {
+    "task": "conan-io__conan-17292",
+    "resolved": true,
+    "localization_source": "self",
+    "gt_caused": false,
+    "leakage": false,
+    "what_gt_led": "GT L1 brief mis-ranked the target: candidate #1 and the entire gt-task-brief/graph-map were about conan/tools/microsoft/visual.py (NOT the gold file), with gold cmake.py buried as candidate #5. The correct GT delivery was L3b post-view on the gold file at turn 21, surfacing the exact buggy line: Spec: _cmake_cmd_line_args handles: args.append(\"-j{}\".format(njobs)) | args.append(\"/m:{}\".format(njobs)), plus consensus [GT] cmake.py: also in scope.",
+    "what_agent_did": "The agent ignored the L1 brief (never opened visual.py) and self-localized to the gold file by its own grep (turn 18: grep -n max_cpu_count conan/tools/cmake/cmake.py), read it at turn 20, reasoned over the RAW cat output, spotted the njobs-vs-maxcpucount bug at turn 50 (Wait, there's a bug here too!), and at turn 64 edited cmake.py changing /m:{}.format(njobs) to int(maxcpucount) \u2014 exactly the gold fix \u2014 making FAIL_TO_PASS test_visual_studio PASS (turns 87/105).",
+    "gt_layers": [
+      {
+        "layer": "L1 brief",
+        "delivered": true,
+        "consumed": false,
+        "note": "Delivered but MISDIRECTED at the top: gt-localization candidate 1 = conan/tools/microsoft/visual.py and the whole gt-task-brief plus EDIT-TARGET CONTRACTS (visual.py) targeted the wrong file. Gold cmake.py was only candidate #5. Agent never opened visual.py; navigated by its own grep \u2014 not consumed."
+      },
+      {
+        "layer": "L3b post_view",
+        "delivered": true,
+        "consumed": false,
+        "note": "CORRECT and on-gold. At turn 21 (after agent self-read cmake.py) it surfaced the buggy line via Spec: _cmake_cmd_line_args handles: args.append(/m:{}.format(njobs)). Agent flagged the njobs bug at turn 50 but cited RAW source in its reasoning and never referenced the GT Spec \u2014 consumption not provable."
+      },
+      {
+        "layer": "consensus",
+        "delivered": true,
+        "consumed": false,
+        "note": "Layer-B progressive confirmation fired on the gold file: [GT] cmake.py: also in scope. (turn 21). Correct scope confirmation, but agent had already grepped to cmake.py; no evidence it acted on the line."
+      },
+      {
+        "layer": "GT_VERIFY",
+        "delivered": true,
+        "consumed": false,
+        "note": "After the cmake.py edit (turn 65): [GT_VERIFY] You edited 1 file(s). Before finishing, run the project's own test suite... plus behavioral-contract reminders. No test name leaked. Agent ran pytest but had already planned to verify; no causal attribution."
+      }
+    ],
+    "misdirected": {
+      "happened": true,
+      "detail": "L1 brief top-ranked the WRONG file: gt-task-brief 1. conan/tools/microsoft/visual.py (def is_msvc...) with EDIT-TARGET CONTRACTS (visual.py) and a graph-map entirely about is_msvc \u2014 none of which is gold. Gold cmake.py appeared only as localization candidate #5. The misdirection wasted no turns ONLY because the agent ignored the brief and self-localized by grep; had it trusted the brief it would have gone to visual.py."
+    },
+    "one_line": "Officially resolved but self-localized and self-reasoned: the agent ignored a misdirected L1 brief (visual.py #1, gold cmake.py #5), grepped to the gold file, and fixed the njobs bug from raw source \u2014 GT's correct L3b Spec line was present but not provably consumed, so not a GT-caused flip.",
+    "_resolved": true,
+    "_baseline": false
+  },
+  {
+    "task": "instructlab__instructlab-2585",
+    "resolved": false,
+    "localization_source": "self",
+    "gt_caused": false,
+    "leakage": false,
+    "what_gt_led": "GT's L1 brief did list the correct gold file first in localization (\"1. src/instructlab/defaults.py \u2014 STORAGE_DIR_NAMES, _InstructlabDefaults, _reset\"), but its primary <gt-task-brief>/<gt-graph-map> fixated on the irrelevant \"src/instructlab/config/config.py (def config(ctx):) ... config -> calls storage_dirs_exist()\" which has nothing to do with the merlinite-rename; L3b post_view then delivered correct contracts on the files the agent read itself (\"[GT] defaults: [CONTRACT] def DEFAULT_CHAT_MODEL(self) -> str:\", \"[GT] configuration: [CONTRACT] def get_default_config() -> Config:\").",
+    "what_agent_did": "The agent self-localized entirely via its own grep/find (turn 20 'grep -rn \"merlinite\" ... src/', turn 55 'grep -rn \"MODEL_FAMILY_MAPPINGS|MODEL_FAMILIES\"'), reaching defaults.py/configuration.py/common.py/tests/test_config.py, then edited defaults.py, common.py and configuration.py to implement the FIRST issue proposal (rename template to \"instructlab\", MODEL_FAMILY_MAPPINGS mapping merlinite/granite -> \"instructlab\") instead of the gold direction (merlinite -> \"granite\"); at turn 65 it explicitly recognized its change \"would break the test\" yet proceeded, producing the wrong-semantics patch.",
+    "gt_layers": [
+      {
+        "layer": "L1 brief",
+        "delivered": true,
+        "consumed": false,
+        "note": "Delivered <gt-localization>+<gt-task-brief>+<gt-graph-map>+<gt-orientation> at turn 1. PARTIALLY correct: localization #1 'src/instructlab/defaults.py' is a real gold file (CORRECT), but the symbols named (STORAGE_DIR_NAMES, _InstructlabDefaults, _reset) are not the issue-relevant ones (MODEL_FAMILY_MAPPINGS/MODEL_FAMILIES), and the main brief body misdirected to a non-gold target: 'src/instructlab/config/config.py (def config(ctx):) ... config -> calls storage_dirs_exist() [src/instructlab/configuration.py:1376]'. Not consumed: agent never referenced config.py::config or storage_dirs_exist; it grep'd merlinite/MODEL_FAMILY on its own (turns 20,55)."
+      },
+      {
+        "layer": "L3b post_view",
+        "delivered": true,
+        "consumed": false,
+        "note": "Fired on every relevant read with correct contract+caller evidence: turn 19 '[GT] defaults: [CONTRACT] def DEFAULT_CHAT_MODEL(self) -> str:'; turn 25 '[GT] common: [CONTRACT] def get_model_template( -> Tuple[str, str, str] ... Called by: src/instructlab/model/chat.py:249'; turn 29 '[GT] configuration: [CONTRACT] def get_default_config() -> Config:'. Signatures/callers match repo ground truth (CORRECT). Not consumed for the decision \u2014 agent's think turns (30/36/65/167) reasoned from the issue text and the test file it read itself, not these contracts."
+      },
+      {
+        "layer": "L3 post_edit",
+        "delivered": true,
+        "consumed": false,
+        "note": "After the defaults.py edit, turn 116 emitted '[GT_VERIFY] You edited 1 file(s). Before finishing, run the project's own test suite ... defaults.py: return_shape = value|path.join(self._data_dir, STORAGE_DIR_NAMES.CHECKPOINTS)'. Generic and non-leaky (CORRECT, no test names). Agent acknowledged but the verify could not run tests (env broken, turns 67-99) and surfaced nothing about the granite-vs-instructlab expectation."
+      },
+      {
+        "layer": "consensus",
+        "delivered": false,
+        "consumed": false,
+        "note": "No Layer-A/B <gt-scope> consensus line appeared in the agent's observations; the gt_advisory L5 pre-submit block ('[GT_GATE] Pre-submit review: Files edited: 3 ... Files explored but not edited: config.py, config/config.py, server.py') is the only late advisory and was not acted on."
+      }
+    ],
+    "misdirected": {
+      "happened": true,
+      "detail": "GT's primary brief body pointed at the wrong target: '<gt-task-brief> 1. src/instructlab/config/config.py (def config(ctx):) ... EDIT-TARGET CONTRACTS (config.py): config -> calls storage_dirs_exist()' and '<gt-graph-map> src/instructlab/config/config.py :: config calls: storage_dirs_exist, ensure_config' \u2014 config.py::config and storage_dirs_exist are entirely unrelated to the merlinite->granite model-family rename. The damage was contained: the agent ignored this and self-localized via grep, so no turns were demonstrably wasted on GT's wrong target. The localization list itself was salvaged by having defaults.py at #1."
+    },
+    "one_line": "GT delivered correct contracts and even ranked the gold file (defaults.py) first, but the agent self-localized via grep and failed on a pure semantic decision \u2014 implementing the issue's 'instructlab' rename instead of the gold 'granite' switch \u2014 which a no-leakage context layer cannot determine; not a GT win and not GT-caused.",
+    "_resolved": false,
+    "_baseline": false
+  },
+  {
+    "task": "kedro-org__kedro-4580",
+    "resolved": false,
+    "localization_source": "self",
+    "gt_caused": false,
+    "leakage": false,
+    "what_gt_led": "GT delivered a split, partly-misdirected signal. The L1 `<gt-localization confidence=\"medium\">` correctly listed candidate #1 as \"kedro/io/core.py \u2014 parse_dataset_definition, _load_obj, exists\" (the gold file+function), but the same brief's `<gt-task-brief>` and `<gt-graph-map>` were entirely about an unrelated file: \"1. kedro/framework/session/session.py (def run(...)\" with \"EDIT-TARGET CONTRACTS (session.py): create -> calls _describe_git...\". Once the agent was on core.py, L3b post-view correctly delivered \"[CONTRACT] def _load_obj(class_path: str) -> Any | None:\" with honest scope: \"GT has not confirmed a single primary target \u2014 confirm the edit target with grep.\"",
+    "what_agent_did": "The agent self-localized from the issue text alone \u2014 at its first action (turn 4) it already stated \"The issue is about `parse_dataset_definition` -> `_load_obj` in `kedro/io/core.py`\" and opened that exact file (turn 6) before any GT post-view fired, then grep-confirmed the functions (turn 8). It edited the gold function `_load_obj` in core.py to re-raise ModuleNotFoundError, but the patch was crude (special-casing module-name matching to keep the typo path returning None), did not resolve officially, and the agent never referenced any GT block.",
+    "gt_layers": [
+      {
+        "layer": "L1 brief",
+        "delivered": true,
+        "consumed": false,
+        "note": "Split signal \u2014 partly correct, partly misdirected. CORRECT part: `<gt-localization confidence=\"medium\"> Candidate edit targets ... 1. kedro/io/core.py \u2014 parse_dataset_definition, _load_obj, exists` (gold file+function ranked #1). MISDIRECTED part: `<gt-task-brief> 1. kedro/framework/session/session.py (def run(...` and `<gt-graph-map> kedro/framework/session/session.py :: create` \u2014 wholly unrelated to a _load_obj import-error issue. Agent never referenced either; it localized from the issue text, which itself names both functions."
+      },
+      {
+        "layer": "L3b post_view",
+        "delivered": true,
+        "consumed": false,
+        "note": "Correct and high-signal on the gold file. Turn 7/11/83/103/125 delivered `[CONTRACT] def _load_obj(class_path: str) -> Any | None:` plus `[RAISES] WHEN not issubclass(class_obj, AbstractDataset): raise DatasetError` and real callers. Matches repo ground truth (the gold function). But the GT obs arrived only after the agent had already issued the read for core.py on its own; agent's thoughts cite the issue and its own grep, never the GT contract block."
+      },
+      {
+        "layer": "consensus",
+        "delivered": true,
+        "consumed": false,
+        "note": "`<gt-scope files=\"11\"> 1. io/core.py \u2014 in scope (you are viewing this) ... These files are related in scope; GT has not confirmed a single primary target \u2014 confirm the edit target with grep.` Correct-or-quiet: honestly declined to assert a primary target rather than misdirecting. Agent did exactly what it said (grep-confirmed) but drove that itself, not because of consensus."
+      }
+    ],
+    "misdirected": {
+      "happened": true,
+      "detail": "The `<gt-task-brief>` and `<gt-graph-map>` in the L1 brief pointed entirely at the wrong file: `1. kedro/framework/session/session.py (def run(...)` and `EDIT-TARGET CONTRACTS (session.py): create -> calls _describe_git(project_path: Path)`. This has nothing to do with the `_load_obj`/`parse_dataset_definition` import-traceback issue. It wasted no turns only because the agent ignored the brief entirely and self-localized from the issue text; a brief-trusting agent would have been anchored on session.py."
+    },
+    "one_line": "GT's post-view/consensus correctly contracted the gold function `_load_obj` (and its localization listed it #1), but the agent self-localized straight from the issue text that names the function, never consumed GT, the L1 task-brief was misdirected to session.py, and the task did not resolve \u2014 no GT causation.",
+    "_resolved": false,
+    "_baseline": false
+  },
+  {
+    "task": "streamlink__streamlink-6328",
+    "resolved": false,
+    "localization_source": "self",
+    "gt_caused": false,
+    "leakage": false,
+    "what_gt_led": "GT delivered ONLY an L1 brief (turn 1): a `<gt-localization confidence=\"medium\">` candidate list + `<gt-task-brief>` + `<gt-graph-map>` whose top edit target was `src/streamlink/stream/ffmpegmux.py` and whose 6 candidates were session.py, exceptions.py, twitch.py, ustreamtv.py, cdp/client.py, ffmpegmux.py \u2014 NONE of which is the gold file. Raw: \"Candidate edit targets (reason over these): 1. src/streamlink/session/session.py ... 6. src/streamlink/stream/ffmpegmux.py\" and \"EDIT-TARGET CONTRACTS (ffmpegmux.py): command -> calls _resolve_command\". The gold file `src/streamlink/stream/dash/manifest.py`/`BaseURL.join` appears NOWHERE in the brief (verified: \"manifest.py in brief? False\", \"BaseURL in brief? False\").",
+    "what_agent_did": "The agent ignored GT entirely and self-localized from the issue text \u2014 its first thought (turn 4) reasoned \"The issue is about incorrect BaseURL joining in DASH streams... includes the manifest filename\", then it ran `find .../src/streamlink/stream -type f -name \"*.py\"` (turn 6) and read the gold `dash/manifest.py` at turn 8, never referencing any GT candidate. It then patched `BaseURL.join` with a dot-based-filename heuristic (turn 92) and edited the FAIL_TO_PASS test's expected values (turn 98); officially NOT resolved (gold deletes BaseURL.join and switches all call sites to urljoin; editing the gold test voids the fix).",
+    "gt_layers": [
+      {
+        "layer": "L1 brief",
+        "delivered": true,
+        "consumed": false,
+        "note": "Delivered at turn 1 but INCORRECT: top edit target and all 6 localization candidates are wrong (ffmpegmux.py/session.py/twitch.py/ustreamtv.py); gold manifest.py/BaseURL absent. Agent never referenced it \u2014 self-localized from issue text. Raw quote: '1. src/streamlink/session/session.py \u2014 Streamlink, streams, version ... 6. src/streamlink/stream/ffmpegmux.py' and graph-map 'src/streamlink/stream/ffmpegmux.py :: command'. CONSUMED=false, CORRECT=false."
+      }
+    ],
+    "misdirected": {
+      "happened": true,
+      "detail": "GT pointed at entirely wrong files. The brief's primary edit target was ffmpegmux.py ('EDIT-TARGET CONTRACTS (ffmpegmux.py): command -> calls _resolve_command') and its scope chains were 'ustreamtv.py \u2192 ffmpegmux.py' and 'session.py \u2192 http.py' \u2014 none touch DASH BaseURL handling. The actual gold (manifest.py BaseURL.join \u2192 urljoin) was never named. The agent did not waste turns on these because it ignored GT and went straight to manifest.py via its own `find`/issue reasoning at turns 6-8; misdirection was present but harmlessly bypassed by self-localization."
+    },
+    "one_line": "GT delivered a wrong-file L1 brief (gold manifest.py/BaseURL never mentioned); the agent ignored it, self-localized to the gold file from issue text, edited the gold file plus the FAIL_TO_PASS test, and did not resolve \u2014 zero GT causal contribution, no leakage.",
+    "_resolved": false,
+    "_baseline": false
+  },
+  {
+    "task": "urllib3__urllib3-3527",
+    "resolved": false,
+    "localization_source": "both",
+    "gt_caused": false,
+    "leakage": false,
+    "what_gt_led": "GT's L1 brief named BOTH gold files in <gt-localization confidence=\"medium\"> (\"1. src/urllib3/connection.py ... 6. src/urllib3/response.py\") and <gt-orientation> directly surfaced the gold function (\"close() in response.py (3 callers)\"); but the brief's function-level focus headlined the WRONG function \u2014 \"<gt-task-brief> 1. src/urllib3/response.py (def get..., def read...)\" and \"EDIT-TARGET CONTRACTS (response.py): read -> calls _decode...\", never close() and never socket.shutdown.",
+    "what_agent_did": "The agent opened response.py and connection.py first (both gold) saying at turn 8 \"Let me explore the key files mentioned in the task brief,\" then self-localized to close() via its own grep (\"def close\") and a custom threaded reproduction script (turn 57) that reproduced the hang; it independently reasoned to add socket.shutdown(SHUT_RDWR) to HTTPConnection.close and HTTPResponse.close (turns 70/96) \u2014 a plausible gold-shaped fix that nonetheless did NOT officially resolve.",
+    "gt_layers": [
+      {
+        "layer": "L1 brief",
+        "delivered": true,
+        "consumed": true,
+        "note": "DELIVERED file-level localization correctly \u2014 both gold files present: '<gt-localization confidence=\"medium\"> ... 1. src/urllib3/connection.py \u2014 BaseSSLError, HTTPConnection, host ... 6. src/urllib3/response.py \u2014 HTTPResponse, get, data', and '<gt-orientation> Issue references: ... close() in response.py (3 callers)'. CONSUMED: turn 8 agent says 'Let me explore the key files mentioned in the task brief' and reads response.py then connection.py first. BUT the function-level focus is WRONG/misdirecting: '<gt-task-brief> 1. src/urllib3/response.py (def get..., def read...)' and 'EDIT-TARGET CONTRACTS (response.py): read -> calls _decode...' point at read(), not the gold close(); '[GT KEY CONTRACTS] Preserve: side_effect: mutates: self._response_options' is irrelevant to the fix. CORRECT at file granularity, incorrect at function granularity."
+      },
+      {
+        "layer": "L3b post_view",
+        "delivered": true,
+        "consumed": false,
+        "note": "DELIVERED on every gold-file read but with contracts for the WRONG functions. Turn 17 (reading connection.py): '[GT] connection: [CONTRACT] def request_chunked( [CONTRACT] def _url_from_connection( -> str [CONTRACT] def is_closed(self) -> bool ... [GT] connection.py: also in scope.' \u2014 never delivers the contract for close(), the gold function. INCORRECT relative to the issue (close()/socket.shutdown). NOT consumed: the agent's fix reasoning (turns 59-93) derived shutdown from its own reproduction and source reading, never citing these [CONTRACT] lines."
+      },
+      {
+        "layer": "GT_VERIFY",
+        "delivered": true,
+        "consumed": false,
+        "note": "After the agent edited 2 files, GT fired the diagnostic verify-before-finish: '[GT_VERIFY] You edited 2 file(s). Before finishing, run the project's own test suite for the affected modules and confir...' (turn 57 observation). CORRECT and leak-free (no test names, no FAIL_TO_PASS, no pytest::name). The agent did run pytest near the end (turn 185) but not demonstrably because of this line."
+      }
+    ],
+    "misdirected": {
+      "happened": true,
+      "detail": "GT misdirected at the FUNCTION level (file level was correct). The brief's primary edit-target was read(), not the gold close(): '<gt-task-brief> 1. src/urllib3/response.py (def get..., def read...)' and 'EDIT-TARGET CONTRACTS (response.py): read -> calls _decode(...), _init_decoder(...), _raw_read(...)'. L3b repeatedly delivered contracts for request_chunked / _url_from_connection / is_closed, not close(). However the agent did not chase this \u2014 it self-localized to close() via grep + its own reproduction (turns 10-93), so the misdirection wasted no material turns."
+    },
+    "one_line": "GT correctly localized both gold FILES (and named close() in orientation) and the agent cited the brief to open them, but the fix reasoning (socket.shutdown to interrupt a blocking cross-thread read) came entirely from the agent's own reproduction; GT's function-level contracts targeted read()/request_chunked() not close(), and the task did not resolve \u2014 not a GT-caused win.",
+    "_resolved": false,
+    "_baseline": false
+  }
+]

@@ -203,6 +203,38 @@ def _any_cert_fail(certs: dict[str, dict]) -> bool:
     return any(c.get("is_fail") for c in certs.values())
 
 
+#: §12 witness reconciliation (gt_gt.md:764): cert verdicts that are KNOWN FALSE FAILS
+#: when the runtime witness holds. graph_certificate.json is written PRE-AGENT, so it
+#: records hook_graph_hash=null / prebuilt_active=null and stamps
+#: GRAPH_FAIL_MISSING_HANDOFF even when the handoff later succeeds; the [GT_META]
+#: graph_witness (gt_prebuilt_active=true AND hook_graph_hash_matches_post_lsp=true)
+#: PROVES the handoff. ONLY this verdict is reconcilable — every other failing verdict
+#: (embedder/LSP/graph integrity fails) classifies GT regardless of the witness.
+RECONCILABLE_CERT_VERDICTS: frozenset[str] = frozenset({"GRAPH_FAIL_MISSING_HANDOFF"})
+
+
+def _witness_holds(rec: dict) -> bool:
+    """The §12 runtime consumption witness: prebuilt graph consumed AND hash parity."""
+    return (rec.get("gt_prebuilt_active") is True
+            and rec.get("hook_hash_match") is True)
+
+
+def _unreconciled_cert_fail(rec: dict) -> bool:
+    """True when at least one failing cert is NOT explained away by the §12 witness.
+
+    Fail-closed: if cert_fail is set but no per-cert verdict detail is available, the
+    fail cannot be verified as the reconcilable pre-agent verdict -> it stands. If the
+    witness does not hold, every cert fail stands. Otherwise only failing certs whose
+    verdict is outside RECONCILABLE_CERT_VERDICTS keep the fail.
+    """
+    fails = [c for c in (rec.get("cert_verdicts") or {}).values() if c.get("is_fail")]
+    if not fails:
+        return bool(rec.get("cert_fail"))
+    if not _witness_holds(rec):
+        return True
+    return any((c.get("verdict") or "") not in RECONCILABLE_CERT_VERDICTS for c in fails)
+
+
 def _to_bool(v) -> bool | None:
     """Coerce a [GT_META] string field ('true'/'false') or a real bool to bool|None."""
     if isinstance(v, bool):
@@ -224,7 +256,10 @@ def classify_outcome(rec: dict) -> str:
          (eval_no_report). Excluded downstream from the resolved denominator.
       2. GT    — the adapter failed to wire (DEEPSWE_ADAPTER_FAIL), the substrate graph
          was not consumed (gt_prebuilt_active=false), the consumed graph != the
-         post-LSP graph (hook_graph_hash_matches_post_lsp=false), or any cert FAILed.
+         post-LSP graph (hook_graph_hash_matches_post_lsp=false), or any cert FAILed —
+         EXCEPT the §12-reconcilable GRAPH_FAIL_MISSING_HANDOFF when the runtime
+         witness holds (gt_prebuilt_active ∧ hook_hash_match): that cert is written
+         pre-agent and is a KNOWN FALSE FAIL (gt_gt.md:764) — fall through.
       3. RESOLVED — reward == 1.0.
       3b. GT — the agent RAN (n_agent_steps>0) and did NOT resolve (reward<1) but the
          consumption witness is MISSING (gt_prebuilt_active unknown): witness-absent =
@@ -253,7 +288,11 @@ def classify_outcome(rec: dict) -> str:
         return "GT"
     if rec.get("hook_hash_match") is False:
         return "GT"
-    if rec.get("cert_fail"):
+    # §12 reconciliation (gt_gt.md:764): GRAPH_FAIL_MISSING_HANDOFF with the runtime
+    # witness true (gt_prebuilt_active ∧ hook_hash_match) is a KNOWN FALSE FAIL — the
+    # cert is pre-agent. Skip the GT stamp ONLY for that reconciled verdict and fall
+    # through to the real outcome ladder; any unreconciled cert fail still returns GT.
+    if rec.get("cert_fail") and _unreconciled_cert_fail(rec):
         return "GT"
 
     # 3. RESOLVED — the win.
@@ -270,9 +309,10 @@ def classify_outcome(rec: dict) -> str:
             and reward is not None and float(reward) < 1.0):
         return "GT"
 
-    # 4. AGENT — sound GT context, agent ran, did not resolve.
+    # 4. AGENT — sound GT context, agent ran, did not resolve. A §12-reconciled cert
+    # false-fail counts as sound context (the witness proved the handoff).
     if (rec.get("gt_prebuilt_active") is True
-            and not rec.get("cert_fail")
+            and not _unreconciled_cert_fail(rec)
             and isinstance(steps, int) and steps > 0
             and reward is not None and float(reward) < 1.0):
         return "AGENT"
@@ -377,6 +417,47 @@ def build_paired_delta(gt_on: dict, baseline: dict | None = None) -> dict:
 # Signal extraction — build the per-task record the classifier consumes.
 # ===========================================================================
 
+def extract_instance_id(d: dict, info: dict, trial_dir: str | None = None) -> str | None:
+    """Resolve the pairing key (instance_id) from whatever the result shape carries.
+
+    Why: the pier/DeepSWE per-trial result.json has NO `instance_id` and NO `info`
+    block — the old extractor looked only there and returned null for every task,
+    making the paired Wilcoxon (keyed by instance_id) impossible. The identity the
+    trial DOES carry: `task_name` ("org/<slug>"), `task_id.path` (".../tasks/<slug>"),
+    and the trial dir / `trial_name` ("<slug>__<hash>", slug TRUNCATED by pier — last
+    resort only). Priority (first hit wins, deterministic, identical for every task):
+      1. explicit `instance_id` (result top-level / info / info.instance) — VERBATIM
+         (SWE-bench ids like `astropy__astropy-12907` legitimately contain `__`).
+      2. `task_name` -> last path segment (the task slug, the run-set key).
+      3. `task_id.path` -> last path segment.
+      4. `trial_name` / trial dir name -> trailing `__<attempt-hash>` stripped (the
+         hash varies per trial and would break GT-on-vs-baseline pairing).
+    """
+    for src in (d, info):
+        v = src.get("instance_id")
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    inst = info.get("instance")
+    if isinstance(inst, dict):
+        v = inst.get("instance_id")
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    v = d.get("task_name")
+    if isinstance(v, str) and v.strip():
+        return v.strip().rstrip("/").rsplit("/", 1)[-1]
+    tid = d.get("task_id")
+    if isinstance(tid, dict):
+        p = tid.get("path")
+        if isinstance(p, str) and p.strip():
+            return p.strip().rstrip("/").rsplit("/", 1)[-1]
+    base = os.path.basename(trial_dir.rstrip("/\\")) if trial_dir else None
+    for v in (d.get("trial_name"), base):
+        if isinstance(v, str) and v.strip():
+            v = v.strip()
+            return v.rsplit("__", 1)[0] if "__" in v else v
+    return None
+
+
 def build_signal_record(
     *,
     instance_id: str | None,
@@ -412,6 +493,8 @@ def build_signal_record(
         "cert_fail": _any_cert_fail(certs),
         "gt_meta_present": bool(meta),
     }
+    # Transparency: was a raw cert_fail reconciled away by the §12 runtime witness?
+    rec["cert_fail_reconciled"] = bool(rec["cert_fail"]) and not _unreconciled_cert_fail(rec)
     rec["failure_class"] = classify_outcome(rec)
     rec["in_resolved_denominator"] = is_in_resolved_denominator(rec["failure_class"])
     return rec
@@ -473,10 +556,8 @@ def main(argv: list[str]) -> int:
         n_agent_steps = d.get("n_agent_steps")
         exit_status = traj_info.get("exit_status") or info.get("exit_status")
         reward = (vr.get("rewards") or {}).get("reward")
-        instance_id = (d.get("instance_id") or info.get("instance_id")
-                       or info.get("instance", {}).get("instance_id")
-                       if isinstance(info.get("instance"), dict) else
-                       (d.get("instance_id") or info.get("instance_id")))
+        instance_id = extract_instance_id(d, info,
+                                          trial_dir=os.path.dirname(trials[-1]))
         print(f"AGENT_RAN_STEPS={n_agent_steps}   (>0 = harness healthy; 0/None = broke before agent)")
         print(f"EXIT_STATUS={exit_status}   (Submitted = agent finished + submitted a patch)")
         print(f"API_CALLS={(traj_info.get('model_stats') or info.get('model_stats') or {}).get('api_calls')}")

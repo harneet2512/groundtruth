@@ -1,0 +1,24 @@
+# Vertex MaaS qwen3-coder LLM config block for OpenHands SWE-bench-Live runs.
+#
+# Merge this block into oh-benchmarks/config.toml on the launch VM:
+#   1. Open ~/oh-benchmarks/config.toml
+#   2. Append the [llm.qwen3_vertex_south] section verbatim if not already present.
+#   3. The launcher (run_all_v1r_arms_vertex.sh) sets VERTEXAI_LOCATION per arm
+#      to override the region (us-central1 for BL+V1, us-south1 for V1R-map ± hook),
+#      so a single config block suffices for all arms.
+#
+# Auth: GCE service account on the launch VM (singhharneet2512 project) picks
+# up Vertex MaaS automatically. No API key required.
+#
+# Why caching_prompt=false: the OH default broke OR completions and tool selection
+# for non-Anthropic / non-Vertex providers. Set explicitly for safety on Vertex.
+# Why max_output_tokens=8192: Qwen3-Coder is verbose on tool selection;
+# truncated outputs cause iteration loops.
+
+[llm.qwen3_vertex_south]
+model = "vertex_ai/qwen/qwen3-coder-480b-a35b-instruct-maas"
+temperature = 0.2
+top_p = 0.95
+max_message_chars = 30000
+max_output_tokens = 8192
+caching_prompt = false

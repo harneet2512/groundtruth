@@ -889,6 +889,7 @@ def _grep_to_seeds(
     repo_root: str,
     conn: sqlite3.Connection,
     max_seeds: int = 20,
+    priority_tokens: set[str] | None = None,
 ) -> list[tuple[int, str, str]]:
     """Grep-recall seeding: subsume grep so GT can never have worse recall.
 
@@ -909,11 +910,24 @@ def _grep_to_seeds(
     import subprocess
     import sys as _sys_grep
 
-    if not repo_root or not issue_tokens:
+    if not repo_root or not (issue_tokens or priority_tokens):
         return []
 
+    # GREENFIELD priority (gt_gt §4 grep-fallback wiring, 2026-06-10):
+    # reporter-marked code tokens with ZERO graph nodes
+    # (IssueAnchors.unresolved_code_symbols — go `require`, env vars, rust
+    # `::`-pair tails) are the MOST specific grep anchors for feature issues,
+    # but the length-sorted top-10 cut below crowds them out behind longer
+    # prose words. They go FIRST, capped at 5 (longest first) so a fenced
+    # example block can never flood the grep query. No-op when empty.
+    _prio = sorted(
+        {t for t in (priority_tokens or set()) if len(t) >= _MIN_ANCHOR_LEN},
+        key=lambda t: (-len(t), t),
+    )[:5]
+    _prio_low = {t.lower() for t in _prio}
+
     # Pick distinctive tokens (skip very short or very common words)
-    tokens = sorted(
+    tokens = _prio + [t for t in sorted(
         (t for t in issue_tokens if len(t) >= 4 and t not in {
             "that", "this", "with", "from", "have", "been", "will",
             "when", "what", "which", "were", "they", "their", "does",
@@ -921,7 +935,7 @@ def _grep_to_seeds(
             "into", "more", "than", "each", "also", "after", "before",
         }),
         key=lambda t: (-len(t), t),
-    )[:10]
+    )[:10] if t.lower() not in _prio_low]
 
     if not tokens:
         return []
@@ -1863,7 +1877,15 @@ def localize(
         _grep_limit = _base_limit if _seed_quality >= 0.5 else int(_base_limit * 1.6)
         if repo_root:
             try:
-                grep_seeds = _grep_to_seeds(terms, repo_root, conn, max_seeds=_grep_limit)
+                # GREENFIELD wiring (gt_gt §4, 2026-06-10): unresolved code
+                # symbols (0 graph nodes — the feature TO BE BUILT) have no
+                # name-match/FTS5 node to seed; the literal-token grep over
+                # source is their ONLY entry into the candidate set.
+                grep_seeds = _grep_to_seeds(
+                    terms, repo_root, conn, max_seeds=_grep_limit,
+                    priority_tokens=set(getattr(
+                        issue_anchors, "unresolved_code_symbols", None) or set()),
+                )
                 if grep_seeds:
                     existing_ids = {s[0] for s in seeds}
                     for gs in grep_seeds:

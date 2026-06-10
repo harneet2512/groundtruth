@@ -1,0 +1,92 @@
+# GT_PATCH_V5_VIEW: post-view hook injection for OH run_infer.py
+#
+# Adds a third runtime.run_action wrapper that fires the canonical
+# groundtruth.hooks.post_view shim on view/read actions.
+#
+# Mirrors the GT_PATCH_V4 pattern:
+#   - reads GT_VIEW_HOOK_PATH env var (default off; if unset block is no-op)
+#   - chunk-injects that file as /tmp/gt_view_hook.py inside the container
+#   - wraps runtime.run_action so that on view/read tool calls the hook
+#     fires post-action and its <gt-structural> output is appended to
+#     the agent-visible observation
+#
+# Insert AFTER the GT_PATCH_V4 closing marker (so V4 chains under V5 — the
+# kernel hook still runs first on edits; view actions are handled here).
+#
+# Idempotent installer: scripts/swebench/install_run_infer_view_patch.py
+# (same shape as install_run_infer_patch.py for V3_INDEXER).
+#
+# Date drafted: 2026-05-04 — for GT-Full v2 wrapper integration.
+
+--- run_infer.py.orig
++++ run_infer.py
+@@
+     # <<< GT_PATCH_V4: kernel hook
++    # >>> GT_PATCH_V5_VIEW: post-view enrichment hook
++    _gt_view_path = os.environ.get("GT_VIEW_HOOK_PATH", "")
++    if _gt_view_path and os.path.isfile(_gt_view_path):
++        try:
++            import base64 as _b64v5
++            with open(_gt_view_path, "rb") as _fh:
++                _view_b64 = _b64v5.b64encode(_fh.read()).decode("ascii")
++            _CHUNK_V5 = 8000
++            _vchunks = [_view_b64[i:i+_CHUNK_V5] for i in range(0, len(_view_b64), _CHUNK_V5)]
++            _vok = True
++            for _i, _chunk in enumerate(_vchunks):
++                _op = ">" if _i == 0 else ">>"
++                _act = CmdRunAction(command="echo -n '" + _chunk + "' " + _op + " /tmp/gt_view_hook.b64")
++                _act.set_hard_timeout(30)
++                _obs = runtime.run_action(_act)
++                if not isinstance(_obs, CmdOutputObservation) or _obs.exit_code != 0:
++                    _vok = False
++                    break
++            if _vok:
++                _act = CmdRunAction(command="base64 -d /tmp/gt_view_hook.b64 > /tmp/gt_view_hook.py && chmod +x /tmp/gt_view_hook.py && rm -f /tmp/gt_view_hook.b64 && echo GT_VIEW_READY")
++                _act.set_hard_timeout(30)
++                _obs = runtime.run_action(_act)
++                if "GT_VIEW_READY" in getattr(_obs, "content", ""):
++                    logger.info("GT view hook injected: %s", instance.instance_id)
++
++                    _orig_run_v5 = runtime.run_action
++                    def _gt_view_wrap(action, _orig=_orig_run_v5):
++                        obs = _orig(action)
++                        try:
++                            _raw = getattr(action, "action", "")
++                            atype = getattr(_raw, "value", str(_raw)) if _raw else ""
++                            cmd_attr = getattr(action, "command", "")
++                            fpath = getattr(action, "path", "") or getattr(action, "file_path", "")
++                            is_view = (
++                                atype in ("read", "view")
++                                or cmd_attr == "view"
++                            )
++                            if is_view and fpath:
++                                if "/workspace/" in fpath:
++                                    parts = fpath.split("/workspace/", 1)[1]
++                                    rel = parts.split("/", 1)[1] if "/" in parts else parts
++                                else:
++                                    rel = fpath
++                                ws_root = "$(ls -d /workspace/*/ 2>/dev/null | head -1)"
++                                vcmd = (
++                                    "python3 /tmp/gt_view_hook.py view "
++                                    "--root=" + ws_root + " "
++                                    "--db=/tmp/graph.db "
++                                    "--file='" + rel + "' "
++                                    "2>/dev/null || true"
++                                )
++                                va = CmdRunAction(command=vcmd)
++                                va.set_hard_timeout(15)
++                                vo = _orig(va)
++                                vout = getattr(vo, "content", "") or ""
++                                if vout.strip():
++                                    existing = getattr(obs, "content", "") or ""
++                                    obs.content = existing + "\n\n" + vout.strip()
++                                    logger.info("GT_VIEW: enrichment appended for %s", rel)
++                        except Exception as _ve:
++                            logger.warning("GT_VIEW: wrap error %s", _ve)
++                        return obs
++                    runtime.run_action = _gt_view_wrap
++                    logger.info("GT view runtime wrapper installed")
++        except Exception as _ve2:
++            logger.warning("GT view injection error: %s", _ve2)
++    # <<< GT_PATCH_V5_VIEW: post-view enrichment hook
+     # >>> GT_PATCH_V3_INDEXER: ensure graph.db exists for brief (independent of GT_HOOK_PATH)

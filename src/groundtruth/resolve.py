@@ -464,6 +464,26 @@ def _write_lsp_certificate(cert: dict) -> str:
 _READY_BUDGET_S_DEFAULT = 20.0
 
 
+def _note_failure_detail(stats: dict, detail: str) -> None:
+    """Record the FIRST failure detail verbatim into ``stats`` (cert surface).
+
+    2026-06-10 (DeepSWE non-Python audit, run 27290157847): the go cert showed
+    ``failed_breakdown.lsp_error=7/7`` and the rust cert ``empty=6620/6620``,
+    both with an EMPTY ``failure_detail`` — the certs proved the pass converted
+    ZERO edges but carried no evidence of WHY (gopls workspace-load error text
+    / rust-analyzer still-indexing), making the failure undiagnosable from the
+    artifact. First-detail-wins; never overwrites; bounded length; never raises.
+    """
+    try:
+        if stats.get("failure_detail"):
+            return
+        d = (detail or "").strip()
+        if d:
+            stats["failure_detail"] = d[:300]
+    except Exception:  # noqa: BLE001 -- telemetry must never break the pass
+        pass
+
+
 async def _await_project_ready(
     client, uri: str, line: int, col: int, *, budget_s: float | None = None
 ):
@@ -797,6 +817,15 @@ async def _resolve_edges(
             if isinstance(def_result, LspErr):
                 stats["failed"] += 1
                 stats["failed_lsp_error"] += 1
+                # 2026-06-10: surface the first server error verbatim in the
+                # cert (go: 7/7 lsp_error with empty failure_detail was
+                # undiagnosable — likely a gopls workspace-load failure, but
+                # the artifact carried no proof).
+                try:
+                    _note_failure_detail(
+                        stats, f"definition: {def_result.error.message}")
+                except Exception:  # noqa: BLE001
+                    pass
                 continue
 
             locations = def_result.value
@@ -841,6 +870,22 @@ async def _resolve_edges(
             print(f"  ... {i + 1}/{len(edges)} edges processed", file=sys.stderr)
 
     conn.commit()
+
+    # 2026-06-10 (DeepSWE non-Python audit): an all-empty pass behind a failed
+    # readiness barrier is the rust-analyzer-still-indexing shape (rust cert:
+    # project_ready=false after 20s, 6620/6620 definition queries empty, 0
+    # edges changed). Stamp WHY into the cert so the artifact is diagnosable.
+    if (stats.get("project_ready") is False
+            and stats.get("failed_empty", 0) > 0
+            and (stats.get("verified", 0) + stats.get("corrected", 0)
+                 + stats.get("deleted", 0)) == 0):
+        _note_failure_detail(
+            stats,
+            f"project_ready=false after "
+            f"{float(stats.get('project_ready_wait_ms', 0.0)):.0f}ms; "
+            f"{int(stats.get('failed_empty', 0))} definition queries returned "
+            "empty — server likely still indexing the workspace "
+            "(readiness budget too short for this project size)")
 
     # ---- LSP TYPE ENRICHMENT (same session, server already warm) ----
     # Query textDocument/hover on the top-N most-referenced nodes to extract
