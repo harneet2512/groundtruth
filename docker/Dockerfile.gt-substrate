@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1
 # =============================================================================
 # GT SUBSTRATE IMAGE — the agent-with-GT's library closure, containerized.
+# rebuild 2026-06-09T2245: bake the 4 fixer surfaces (9bf106ca pipeline+gates / dc5844f8 localization / ffc6c7dc delivery / 10368a2f indexer)
 # -----------------------------------------------------------------------------
 # WHY: the baseline (GT off) is reliable because the SWE-bench-Live eval image
 # guarantees the TASK's libraries (python + repo deps + test runner). GT-on adds a

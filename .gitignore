@@ -150,3 +150,8 @@ submissions/**/logs/
 /docs/SWE_LIVE_LITE_OH_GT_INTEGRATION_HANDOFF.md
 /docs/DEEPSWE_GT_INTEGRATION_HANDOFF.md
 /LSP_STAMPING_DISCREPANCY_REPORT.md
+# gt-index local build/test strays
+gt-index/*.exe
+gt-index/runs/
+*.db-shm
+*.db-wal
