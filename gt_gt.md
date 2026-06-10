@@ -327,6 +327,25 @@ levers listed in THIS subsection remain unapplied: W_LEX is still 0.50, W_REACH 
 > Everything else in §5 (`_OnnxEmbedderAdapter`, `GT_FORCE_ONNX`/`GT_REQUIRE_EMBEDDER`/`GT_MODELS_ROOT`
 > enforcement, the two-call-site identity) still holds — only the model identity + the bake target moved e5→gte.
 
+> **UPDATED (2026-06-10, commit `466a0c85` — the CAPACITY INVARIANT).** The encode surface now
+> carries an architectural invariant, found by LIPI on a live failure (all 5 PATH B Verified
+> tasks + the VM sweep box death traced to ONE bug):
+> - **Invariant: peak encode memory is O(GT_EMBED_ENCODE_BATCH), CONSTANT in repo size — never
+>   O(N passages).** `_embed_prefixed` previously fed the ENTIRE passage list to one
+>   `session.run`: ~1.8MB activations/passage × the 4096-passage budget ≈ 7.3GB anon-rss
+>   (memcg-kill reproduced live on astropy-13236). The budget bounded COUNT; nothing bounded
+>   BYTES. Now chunked at `GT_EMBED_ENCODE_BATCH=32` (~60MB peak). Padding is FIXED at 128
+>   tokens, so chunking is **numerically identical** to the single call — determinism holds
+>   bit-for-bit; only the resource envelope changed.
+> - **Proof-surface rule (integration): a proof run MUST exercise the production surface,
+>   including inputs.** The 113-task sweep ran without `GT_ISSUE_FILE` → `emit_brief` (the OOM
+>   path) had ZERO coverage in 113 green rows. Sweeps run WITH issue files from now on; a green
+>   proof that skipped a production code path proves nothing about it.
+> - **Capacity kills are classified, never silent (plumbing):** proof containers run under an
+>   explicit `--memory` cap; rc=137 → `GT_PROOF_OOM` (distinct from fail-closed exit 2) in all
+>   runners. An uncapped host-OOM kill executes no fail-closed stderr print — the cap converts
+>   a silent host kill into a classified container kill.
+
 > This supersedes the old "semantic is OFF in both halves / `embed.py` gitignored" note.
 > Semantic is now **ON via the container ONNX path in BOTH halves.**
 
