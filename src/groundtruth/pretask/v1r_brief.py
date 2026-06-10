@@ -674,7 +674,10 @@ def _caller_contract_for_file(
                     # cannot gate by the floor, so render the bare location hint
                     # (matches the documented unverified path) rather than dropping
                     # every caller — the pre-rewrite behavior, kept correct-or-quiet.
-                    hint = f"{caller_file}:{source_line}"
+                    # Honesty marker (curation_map._fmt_edge discipline, bug #9;
+                    # docstring contract above): an unverified hint must never
+                    # render indistinguishably from a structurally-resolved fact.
+                    hint = f"{caller_file}:{source_line} (unverified)"
                     if hint not in unverified_parts:
                         unverified_parts.append(hint)
                 # below floor and not a fact -> suppressed (correct-or-quiet)
