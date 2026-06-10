@@ -321,7 +321,11 @@ sys.exit(0 if (r.get("failure_class") or r.get("proof_exit_code", -1) != 0) else
     T_PROOF_S=$(( $(date +%s) - T0 ))
     PROOF_RC=$RC
     if [ "$RC" -ne 0 ]; then
-      FAIL_CLASS="GT_RUN_PROOF_FAIL"
+      # rc is THE diagnostic bit: 137 = kill (memcg OOM under --memory / SIGKILL) — the
+      # process died before any fail-closed stderr print could run; never conflate with
+      # a fail-closed exit 2. (The 2026-06-10 brief-OOM hid behind the generic class.)
+      if [ "$RC" -eq 137 ]; then FAIL_CLASS="GT_PROOF_OOM"; else FAIL_CLASS="GT_RUN_PROOF_FAIL"; fi
+      echo "[proof] rc=$RC class=$FAIL_CLASS" >> "$out_task/proof_run.log"
     fi
   fi
 

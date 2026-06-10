@@ -160,6 +160,19 @@ class EmbeddingModel:
             self.unload()
 
     def _embed_prefixed(self, texts: list[str]) -> list[list[float]]:
+        # Chunked encode: ONE session.run over N=thousands of passages allocates
+        # N x seq x hidden x layers of activations (~1.8MB/passage measured) — a 4096-passage
+        # budget = ~7.3GB anon-rss, OOM-killed in capped containers (proven live,
+        # astropy-13236 repro 2026-06-10) and the killer of the 8-par VM sweep box.
+        # Padding is FIXED at 128 (enable_padding(length=128)), so chunking is numerically
+        # IDENTICAL to the single call — only peak memory changes (~60MB at B=32).
+        out: list[list[float]] = []
+        B = max(1, int(os.environ.get("GT_EMBED_ENCODE_BATCH", "32")))
+        for i in range(0, len(texts), B):
+            out.extend(self._embed_chunk(texts[i:i + B]))
+        return out
+
+    def _embed_chunk(self, texts: list[str]) -> list[list[float]]:
         session, tokenizer = self._ensure_loaded()
         encoded = tokenizer.encode_batch(texts)
         input_ids = np.array([e.ids for e in encoded], dtype=np.int64)

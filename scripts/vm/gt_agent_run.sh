@@ -681,8 +681,10 @@ PYEOF
     RC=$?
     T_PROOF_S=$(( $(date +%s) - T0 ))
     if [ "$RC" -ne 0 ]; then
-      FAIL_CLASS="GT_RUN_PROOF_FAIL"
-      echo "GT_RUN_PROOF_FAIL: gt-run-proof returned non-zero (boundary/leak/missing-baked-dep)" | tee -a "$trial_log"
+      # 137 = killed (memcg OOM / SIGKILL): the in-container fail-closed print never ran —
+      # distinct class so a capacity kill can't masquerade as a logic failure.
+      if [ "$RC" -eq 137 ]; then FAIL_CLASS="GT_PROOF_OOM"; else FAIL_CLASS="GT_RUN_PROOF_FAIL"; fi
+      echo "$FAIL_CLASS: gt-run-proof rc=$RC" | tee -a "$trial_log"
     fi
   fi
 
