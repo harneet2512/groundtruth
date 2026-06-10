@@ -62,7 +62,8 @@ jobs:
 
       - name: Install pier, groundtruth, embedder + ALL LSP servers, build gt-index
         run: |
-          pip install datacurve-pier
+          # PINNED to the source-verified pier contract version (matches deepswe_full.yml).
+          pip install "datacurve-pier==0.2.0"
           pip install -e .
           # Full-potential GT on the runner (host-side brief runs here): ONNX embedder
           # (no torch) + ALL 4 LSP servers so non-Python tasks (go/ts/js/rust) get the

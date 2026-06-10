@@ -558,6 +558,23 @@ def _generate_brief(instruction: str) -> str:
         return ""
 
 
+def _prepend_brief(brief: str, instruction: str) -> str:
+    """Assemble the agent instruction with EXACTLY ONE ``<gt-task-brief>`` block (G2).
+
+    brief.txt from the substrate (gt_run_proof.emit_brief -> generate_v1r_brief
+    .brief_text, v1r_brief.py:1417) already STARTS with the ``<gt-task-brief>`` tag;
+    the old unconditional wrap nested duplicate tags in the agent's prompt. Consume a
+    pre-tagged brief as-is; wrap only when the tag is absent (legacy host-generated
+    text). Empty brief -> instruction untouched (correct-or-quiet). Same single-tag
+    invariant the OH wrapper pins (tests/preflight/test_brief_delivery_invariants.py).
+    """
+    if not brief:
+        return instruction
+    if brief.lstrip().startswith("<gt-task-brief"):
+        return f"{brief}\n\n{instruction}"
+    return f"<gt-task-brief>\n{brief}\n</gt-task-brief>\n\n{instruction}"
+
+
 def _emit_gt_meta_witness() -> None:
     """Handoff §H — the DeepSWE adapter CONSUMPTION WITNESS.
 
@@ -792,11 +809,10 @@ class GTMiniSweAgent(MiniSweAgent):
         # Phase 2: L1 brief — substrate brief consumed READ-ONLY (hole #3). FAIL-CLOSED
         # under proof mode: raises DeepSweAdapterError if the substrate brief is
         # absent/empty (NO host-side generate_v1r_brief fallback in proof mode).
+        # G2: _prepend_brief guarantees exactly ONE <gt-task-brief> block — the
+        # substrate brief is already tagged (v1r_brief.py:1417); never wrap it twice.
         brief = _generate_brief(instruction)
-        if brief:
-            augmented = (
-                f"<gt-task-brief>\n{brief}\n</gt-task-brief>\n\n{augmented}"
-            )
+        augmented = _prepend_brief(brief, augmented)
 
         # Phase 3 preamble: tell the agent about automatic evidence injection.
         # If the patch is available, use the automatic preamble; otherwise

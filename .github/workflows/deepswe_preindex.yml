@@ -282,7 +282,8 @@ jobs:
           python-version: "3.12"
 
       - name: Install pier
-        run: pip install datacurve-pier
+        # PINNED to the source-verified pier contract version (matches deepswe_full.yml).
+        run: pip install "datacurve-pier==0.2.0"
 
       - name: Download indexes
         uses: actions/download-artifact@v4

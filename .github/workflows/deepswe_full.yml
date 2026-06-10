@@ -248,7 +248,11 @@ jobs:
           # fallback). NO gopls/rust-analyzer/tsserver/pyright on the runner — host LSP is exactly
           # the §B BEFORE/invalid host-split this change removes.
           python -m pip install --upgrade pip
-          python -m pip install datacurve-pier || { echo "FATAL: pier install failed"; exit 1; }
+          # PINNED: the whole --ae/--mounts-json env+mount integration was source-verified
+          # against pier 0.2.0 (cli/jobs.py:620,629 -> factory extra_env -> DockerEnvironment
+          # exec -e). An unpinned install lets an upstream release silently change that
+          # plumbing mid-run — never float the harness contract on a paid matrix.
+          python -m pip install "datacurve-pier==0.2.0" || { echo "FATAL: pier install failed"; exit 1; }
           command -v pier >/dev/null || { echo "FATAL: pier not on PATH after install"; exit 1; }
           echo "host harness ready: pier=$(command -v pier) (LSP/gates/graph run inside the substrate)"
 
@@ -373,9 +377,13 @@ jobs:
           TASK_DIR="deepswe-bench/tasks/${{ matrix.task }}"
 
           # §E GT_SUBSTRATE_DIGEST_MISSING / PROOF_RUNTIME_FALLBACK_FORBIDDEN (fail-closed).
+          # G1: every §E marker echo ALSO appends to trial_output.log (tee -a creates it) —
+          # this step exits BEFORE the agent step creates the log, and deepswe_outcome.py's
+          # INFRA classification scans trial_output.log line-anchored. Without the tee the
+          # failure classified UNKNOWN instead of INFRA.
           if [ -z "$GT_SUBSTRATE_DIGEST" ]; then
             if [ "${GT_REQUIRE_PINNED_SUBSTRATE:-1}" = "1" ]; then
-              echo "GT_SUBSTRATE_DIGEST_MISSING / PROOF_RUNTIME_FALLBACK_FORBIDDEN: proof/substrate-consume"
+              echo "GT_SUBSTRATE_DIGEST_MISSING / PROOF_RUNTIME_FALLBACK_FORBIDDEN: proof/substrate-consume" | tee -a trial_output.log
               echo "mode requires GT_SUBSTRATE_DIGEST (the pinned portable substrate, by @sha256 digest)."
               echo "Host GT execution + per-task provisioning are forbidden. Set the gt_substrate_digest"
               echo "input or the GT_SUBSTRATE_DIGEST repo variable to the published image digest."
@@ -405,13 +413,15 @@ jobs:
             echo "GHCR miss ($GHCR) — pulling source"
             PULLED=0
             for i in 1 2 3 4; do docker pull "$IMG" && { PULLED=1; break; } || { echo "pull attempt $i failed, retrying..."; sleep 15; }; done
-            [ "$PULLED" -eq 1 ] || { echo "FATAL: task image pull failed"; exit 1; }
+            # G1: canonical token (deepswe_outcome.INFRA_LOG_MARKERS) — the old
+            # "FATAL: task image pull failed" echo could never classify INFRA.
+            [ "$PULLED" -eq 1 ] || { echo "TASK_IMAGE_PULL_FAIL: task image pull failed after 4 attempts ($IMG)" | tee -a trial_output.log; exit 1; }
           fi
-          docker image inspect "$IMG" >/dev/null 2>&1 || { echo "FATAL: task image not present after pull"; exit 1; }
+          docker image inspect "$IMG" >/dev/null 2>&1 || { echo "TASK_IMAGE_PULL_FAIL: task image not present after pull ($IMG)" | tee -a trial_output.log; exit 1; }
 
           # Pull the PINNED substrate by digest (§E GT_SUBSTRATE_PULL_FAIL).
           if ! docker pull "$GT_SUBSTRATE_DIGEST"; then
-            echo "GT_SUBSTRATE_PULL_FAIL: docker pull of the pinned substrate failed"; exit 1
+            echo "GT_SUBSTRATE_PULL_FAIL: docker pull of the pinned substrate failed" | tee -a trial_output.log; exit 1
           fi
 
           # Materialize the task repo at its base commit and copy it OUT to a host dir we
@@ -487,7 +497,7 @@ jobs:
               -e GT_SUBSTRATE_DIGEST="$GT_SUBSTRATE_DIGEST" \
               -e GT_TASK_REPO_COMMIT="$TASK_REPO_COMMIT" \
               "$GT_SUBSTRATE_DIGEST" gt-run-proof --source-root /work --out /gt_artifacts; then
-            echo "GT_RUN_PROOF_FAIL: gt-run-proof returned non-zero (boundary/leak/missing-baked-dep)"
+            echo "GT_RUN_PROOF_FAIL: gt-run-proof returned non-zero (boundary/leak/missing-baked-dep)" | tee -a trial_output.log
             docker rm -f gtsrc 2>/dev/null || true
             exit 1
           fi
@@ -500,7 +510,7 @@ jobs:
           for c in graph.db runtime_context.json lsp_certificate.json graph_certificate.json \
                    embedder_certificate.json foundational_gate_report.json run_manifest.json \
                    brief.txt; do
-            test -s "/tmp/gt/$c" || { echo "GT_ARTIFACT_MISSING / SUBSTRATE_MISSING_CERTS: /gt_artifacts/$c absent after gt-run-proof"; exit 1; }
+            test -s "/tmp/gt/$c" || { echo "GT_ARTIFACT_MISSING / SUBSTRATE_MISSING_CERTS: /gt_artifacts/$c absent after gt-run-proof" | tee -a trial_output.log; exit 1; }
           done
           echo "all 8 GT artifacts present under /tmp/gt (= /gt_artifacts)"
 
