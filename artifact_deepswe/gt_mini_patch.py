@@ -946,7 +946,8 @@ def _sibling_context(con, file_path: str, func_names: list[str]) -> str:
 
 
 def _edit_target_callee_contracts(con, file_path: str, func_names: list[str],
-                                  max_funcs: int = 3, max_callees: int = 3) -> list[str]:
+                                  max_funcs: int = 3, max_callees: int = 3,
+                                  repo_root: str = "") -> list[str]:
     """Verified callees (signature + location) of the edit-target functions.
     Ported from contract_map.edit_target_callee_contracts (the deciding
     "what does the method I'm editing CALL, and how" fact). name_match callees
@@ -999,9 +1000,17 @@ def _edit_target_callee_contracts(con, file_path: str, func_names: list[str],
                     continue
                 # 2026-06-10 fact-filter: vendored callee files / builtin-shadow
                 # callee names are never [CALLEE] facts.
-                if _is_delivery_excluded(callee_file or ""):
+                if _is_delivery_excluded(callee_file or "", repo_root):
                     continue
                 if _is_builtin_shadow_name(callee_name or ""):
+                    continue
+                # 2026-06-10 snippet attestation (parity with the witness-callee
+                # gate): the [CALLEE] render is line-keyed (file:line) — the live
+                # DEFINITION line must still mention the callee's name, else the
+                # graph's line drifted (post-edit, L6 OFF) and the row is no
+                # fact. Unreadable file (empty snippet) is NOT drift evidence.
+                if repo_root and line and not _snippet_attests(
+                        _code_at(repo_root, callee_file, line), callee_name or ""):
                     continue
                 if callee_name == fname and _norm_fp(callee_file) == nfp:
                     continue
@@ -1037,8 +1046,13 @@ def _query_scope(rel: str) -> list[str]:
         con = _connect_ro(db)
         if con is None:
             return []
+        # 2026-06-10 cross-language disqualifier (boa [57] parity): scope is a
+        # DELIVERED claim ("graph-connected") and must obey the same gate as the
+        # witness/caller facts. Legacy graphs without nodes.language stay
+        # PERMISSIVE ('' selects -> cannot judge -> never suppress).
+        _lang_sel = ", n1.language, n2.language" if _nodes_have_language(con) else ", '', ''"
         q = (
-            "SELECT DISTINCT n2.file_path FROM nodes n1 "
+            f"SELECT DISTINCT n2.file_path{_lang_sel} FROM nodes n1 "
             "JOIN edges e ON (e.source_id = n1.id OR e.target_id = n1.id) "
             "JOIN nodes n2 ON n2.id = (CASE WHEN e.source_id = n1.id "
             "                          THEN e.target_id ELSE e.source_id END) "
@@ -1047,10 +1061,12 @@ def _query_scope(rel: str) -> list[str]:
             "AND COALESCE(e.confidence, 0) >= 0.5 ORDER BY e.confidence DESC LIMIT 6"
         )
         try:
-            for (fp,) in con.execute(q, (_norm_fp(rel),)):
+            for fp, _l1, _l2 in con.execute(q, (_norm_fp(rel),)):
                 # 2026-06-10 fact-filter: vendored/minified/generated neighbours
-                # are never delivered scope.
-                if fp and fp not in out and not _is_vendored_path(fp):
+                # are never delivered scope; nor are cross-language "neighbours"
+                # (a call edge between language families is not a real edge).
+                if (fp and fp not in out and not _is_vendored_path(fp)
+                        and not _is_cross_language_pair(_l1, _l2)):
                     out.append(fp)
         finally:
             con.close()
@@ -1118,8 +1134,12 @@ def _consensus_block(rel: str, root: str) -> str:
         scope: list[str] = []
         con = _connect_ro(db) if os.path.isfile(db) else None
         if con is not None:
+            # 2026-06-10 cross-language disqualifier (boa [57] parity) — same
+            # gate as _query_scope; legacy no-language graphs stay PERMISSIVE.
+            _lang_sel = (", n1.language, n2.language" if _nodes_have_language(con)
+                         else ", '', ''")
             q = (
-                "SELECT DISTINCT n2.file_path FROM nodes n1 "
+                f"SELECT DISTINCT n2.file_path{_lang_sel} FROM nodes n1 "
                 "JOIN edges e ON (e.source_id = n1.id OR e.target_id = n1.id) "
                 "JOIN nodes n2 ON n2.id = (CASE WHEN e.source_id = n1.id "
                 "                          THEN e.target_id ELSE e.source_id END) "
@@ -1136,10 +1156,12 @@ def _consensus_block(rel: str, root: str) -> str:
                 "LIMIT 6"
             )
             try:
-                for (fp,) in con.execute(q, (_norm_fp(rel),)):
+                for fp, _l1, _l2 in con.execute(q, (_norm_fp(rel),)):
                     # 2026-06-10 fact-filter: vendored/minified/generated
-                    # neighbours are never delivered scope.
-                    if fp and fp not in scope and not _is_vendored_path(fp):
+                    # neighbours are never delivered scope; nor cross-language
+                    # "neighbours" (not a real call edge — boa [57]).
+                    if (fp and fp not in scope and not _is_vendored_path(fp)
+                            and not _is_cross_language_pair(_l1, _l2)):
                         scope.append(fp)
             finally:
                 con.close()
@@ -1199,7 +1221,8 @@ def _evidence_body(kind: str, rel: str, root: str) -> str:
         func_names = _top_func_names(con, rel, limit=3)
         if kind == "post_edit":
             # What the edited functions CALL, and how to call it correctly.
-            for cl in _edit_target_callee_contracts(con, rel, func_names):
+            for cl in _edit_target_callee_contracts(con, rel, func_names,
+                                                    repo_root=root):
                 if cl not in lines:
                     lines.append(cl)
         # Resolved cross-file witnesses (caller + callee FACTS) for both kinds.
