@@ -234,6 +234,32 @@ luck/self-solve = NOT a GT win — do not count it.**
 `gold_file_reached` (GT brief named the gold file) · `first_gold_rank` (rank in GT's list, or
 "abstain") · `gold_edited` · `first_edit_action` · `edit_to_gold_action`.
 
+### Tier 3b — ARCHITECTURAL CONFORMANCE (THE MAIN THING — is GT behaving as gt_gt.md intends?) — EVERY task, PASS AND FAIL
+**This is the heart of the audit, not an add-on.** Recording "localization was wrong" is useless
+without the ARCHITECTURAL ROOT CAUSE. For EVERY task (resolved AND not — a pass with wrong GT
+behavior is still a defect, and a fail with correct GT behavior is still a GT win), walk GT's actual
+pipeline execution through the trajectory + the gt_artifacts CERTS and MATCH it against the gt_gt.md
+pipeline (§2 graph → §3 LSP → §4 localization/rerank → §4.2 fusion/weights → brief). Then answer, per
+task: **did each architecture stage FIRE AS gt_gt SPECIFIES, and if the brief was wrong, WHICH stage
+caused it?** A wrong localization is ALWAYS one of a bounded set of architectural causes — name which:
+- **LSP** — `lsp_certificate.json`: server_launched + warm_probe_ok? verified/corrected/deleted edge
+  counts > 0, or residual==0 with a real warm server? If LSP was NOT warm / not applied before
+  scoring → method-call edges stayed `name_match` → the graph the ranker saw was a false map. (gt_gt §3, §12 L6 LSP-strip.)
+- **Embedder** — `embedder_certificate.json`: class (gte/ZeroEmbedding?), cos_related vs cos_unrelated
+  (separating?), `effective_w_sem` (>0, or zeroed?), `is_zero`. A zeroed/absent embedder → semantic
+  signal dead → ranker is lexical-only → wrong gold rank. (gt_gt §5.)
+- **Graph base** — `graph_certificate.json`: det_pct, calls_edges, resolution_method breakdown, FTS5
+  rows/probe. Sparse/wrong deterministic edges → wrong reachability → wrong rank. (gt_gt §2.)
+- **Rerank logic** — given LSP+embedder+graph were healthy, was it the §4.2 fusion (W_SEM floor,
+  Dimension-0 query-adaptive lead, per-symbol MaxSim granularity §11.2) that mis-ordered gold? This is
+  the "reranking logic" bucket — the one that survives even when the substrate gates are all GREEN.
+**The verdict per task:** `gt_conformant` (GT executed as gt_gt specifies) + `localization_root_cause`
+(one of: LSP_NOT_WARM / EMBEDDER_OFF / GRAPH_SPARSE / RERANK_LOGIC / CORRECT / N-A-self-localized).
+This is what tells the WHOLE STORY: if the substrate gates are GREEN (LSP warm, embedder separating,
+graph dense) yet gold still ranked low, the bug is RERANK LOGIC (the fixable lever) — not the
+substrate. If a gate was OFF, the bug is that stage. NEVER report "GT mislocalized" without this
+root-cause attribution, grounded in the certs + gt_gt.
+
 ### Tier 4 — NON-HARM / EFFICIENCY (Cursor mentality, paired vs baseline)
 `action_count` (+Δ) · `first_edit_latency` (+Δ) · `unique_files_viewed` (+Δ — did GT reduce
 wandering or open a new exploration tree) · `looped_stuck` (did GT make every obs unique →
