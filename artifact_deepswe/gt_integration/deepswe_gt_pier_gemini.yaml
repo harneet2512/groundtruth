@@ -1,15 +1,47 @@
-# mini-swe-agent config for DeepSWE with GroundTruth — Pier native.
+# mini-swe-agent config for DeepSWE with GroundTruth — Pier native, GEMINI variant.
 #
-# Streamlined for Pier's agent runner. GT injection happens via
-# GTMiniSweAgent.install_spec() (base64 heredoc of gt_hook.py).
-# This config provides the instance_template with GT tool instructions.
+# IDENTICAL GT integration to deepswe_gt_pier.yaml (same agent templates, same
+# environment, same observation contract). ONLY the model: section differs —
+# tuned for Vertex AI gemini-3-flash instead of DeepSeek.
+#
+# MODEL STRING (verified against installed litellm 1.86.1 model cost map +
+# Vertex Model Garden): `vertex_ai/gemini-3-flash-preview`. There is NO
+# `vertex_ai/gemini-3-flash` (non-preview) entry — Gemini 3 Flash is Pre-GA.
+# The model name is passed via `pier run --model ...`, NOT in this file
+# (pier injects it as mini-swe-agent's --model flag; this config carries only
+# model_kwargs/templates).
+#
+# AUTH / ENV (NO project ID, NO credentials in this file — runtime env ONLY):
+#   - pier REQUIRES `VERTEXAI_PROJECT` exported on the host for any vertex_ai/*
+#     model (pier/agents/utils.py PROVIDER_KEYS["vertex_ai"]="VERTEXAI_PROJECT");
+#     pier forwards it into the task container automatically (mini_swe_agent.py
+#     run() -> env[api_key_var] -> docker exec -e). litellm consumes it via
+#     get_secret("VERTEXAI_PROJECT") (litellm/main.py vertex_ai branch).
+#   - `VERTEXAI_LOCATION` is NOT auto-forwarded by pier (not in PROVIDER_KEYS);
+#     litellm defaults to us-central1 when unset (vertex_llm_base.py:252).
+#     Gemini 3 preview models are served via the global endpoint — the runner
+#     (scripts/vm/gt_agent_run.sh) forwards VERTEXAI_LOCATION (default: global)
+#     via --ae.
+#   - Credentials: litellm falls back to google.auth.default() (ADC) when
+#     VERTEXAI_CREDENTIALS is unset. NOTE: DeepSWE tasks set allow_internet=false,
+#     so pier puts the task container on an internal-only docker network behind a
+#     squid egress proxy allowlisting only .googleapis.com — the GCE metadata
+#     server (169.254.169.254) is NOT reachable from inside, so metadata-ADC does
+#     not work in-container. Use a service-account JSON: the runner bind-mounts
+#     $GOOGLE_APPLICATION_CREDENTIALS read-only into the container and forwards
+#     the env; its token endpoint (oauth2.googleapis.com:443) passes the proxy.
+#   - Neither pier's config heredoc (single-quoted marker, no shell expansion)
+#     nor mini-swe-agent's yaml load performs ${ENV_VAR} interpolation — which is
+#     why NO project/location value appears here at all; litellm reads them from
+#     the process env at runtime.
 #
 # Usage:
+#   VERTEXAI_PROJECT=<your-gcp-project> VERTEXAI_LOCATION=global \
 #   pier run -p deepswe-bench/tasks/<task> \
 #     --agent-import-path artifact_deepswe.gt_agent:GTMiniSweAgent \
-#     --model deepseek/deepseek-v4-flash \
+#     --model vertex_ai/gemini-3-flash-preview \
 #     --env docker -y \
-#     --ak config_file=artifact_deepswe/gt_integration/deepswe_gt_pier.yaml
+#     --ak config_file=artifact_deepswe/gt_integration/deepswe_gt_pier_gemini.yaml
 
 agent:
   system_template: |
@@ -139,23 +171,11 @@ agent:
 # mini-swe-agent runs INSIDE the pier-managed task container (pier's `--env docker`
 # provisions the container and execs the agent there). So mini-swe-agent's OWN
 # environment must be `local` — it runs commands in the container it is already in.
-# `docker` made it attempt docker-in-docker: mini-swe-agent v2's DockerEnvironmentConfig
-# REQUIRES an `image` field that pier does not inject, so it died in pydantic validation
-# BEFORE the model/agent/task — 0 agent steps, every run. `local` is also the env that
-# GTMiniSweAgent patches (minisweagent.environments.local.LocalEnvironment) to append
-# <gt-evidence>, so `docker` would have bypassed GT even if it hadn't crashed.
-# LocalEnvironmentConfig accepts only {cwd, env, timeout}; the docker-only `interpreter`
-# and `pull_timeout` are dropped (verified ignored, but removed for clarity).
+# (Same rationale as deepswe_gt_pier.yaml: `docker` here would mean docker-in-docker,
+# crash in DockerEnvironmentConfig validation, and bypass the GT LocalEnvironment patch.)
 environment:
-  # NO hardcoded cwd. mini-swe-agent's LocalEnvironment does
-  # `cwd = cwd or self.config.cwd or os.getcwd()`, so an empty cwd falls back to
-  # os.getcwd() = the container's WORKDIR = the repo root (e.g. /app for arktype,
-  # /testbed for others). Hardcoding `/home/user` pointed at a dir that does not
-  # exist in most task images -> every command failed to spawn with
-  # `[Errno 2] No such file or directory: '/home/user'`. WORKDIR always exists and
-  # is the repo root on SWE/DeepSWE images; the agent also prefixes
-  # `cd $(cat /opt/gt/gt_root.txt)` (the detected root) for navigation. Generalized:
-  # no per-task path baked in.
+  # NO hardcoded cwd (LocalEnvironment falls back to os.getcwd() = the container
+  # WORKDIR = the repo root). See deepswe_gt_pier.yaml for the full rationale.
   timeout: 120
   env:
     PAGER: cat
@@ -202,24 +222,24 @@ model:
     You made an invalid tool call. Please retry with the correct tool call format.
   cost_tracking: "ignore_errors"
   model_kwargs:
-    # DeepSeek official-spec sampling (paper-locked, matches .llm_config/*deepseek_v32.json):
-    # temp 1.0 / top_p 0.95 / max 8192 / penalties 0. Same for flash AND pro.
+    # Gemini-3 official sampling guidance (ai.google.dev/gemini-api/docs/gemini-3 +
+    # the Gemini 3 prompting guide): keep temperature at its DEFAULT 1.0 for all
+    # Gemini 3 models — the reasoning stack is optimized for it, and lowering it
+    # "may lead to unexpected behavior, such as looping or degraded performance,
+    # particularly in complex mathematical or reasoning tasks". No top_p / penalty
+    # overrides — leave Gemini's server-side defaults (the DeepSeek-spec knobs in
+    # the sibling yaml are provider-locked, NOT portable).
     temperature: 1.0
-    top_p: 0.95
     max_tokens: 8192
-    presence_penalty: 0
-    frequency_penalty: 0
     # litellm-level retry on transient API errors (rate limits / 5xx). VERIFIED
     # passthrough: LitellmModelConfig.model_kwargs -> LitellmModel._query ->
     # litellm.completion(**(model_kwargs | kwargs)) -> litellm utils.py client
     # wrapper (_get_wrapper_num_retries; sync path utils.py:1712-1720) ->
     # litellm.completion_with_retries (tenacity, stop_after_attempt(num_retries)).
-    # Sits UNDER mini-swe-agent's own outer tenacity retry (10 attempts).
+    # This sits UNDER mini-swe-agent's own outer tenacity retry (10 attempts,
+    # MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT) — inner retries absorb transient
+    # provider errors fast; the outer loop stays the safety net.
     num_retries: 3
-    # Disable DeepSeek-V4 thinking (default is THINKING-ON, which bloats output
-    # tokens + cost + latency, and the V3.2 paper notes thinking is incompatible with
-    # multi-turn harnesses). Same payload the OH path injects via extra_body.
-    # litellm forwards extra_body to the DeepSeek API. Applies to flash AND pro.
-    extra_body:
-      thinking:
-        type: disabled
+    # NOTE (deliberate omissions): no extra_body.thinking (DeepSeek-only payload);
+    # Gemini-3 thinking is controlled via reasoning_effort -> thinking_level if
+    # ever needed (litellm maps it for gemini-3*) — left at model default here.
