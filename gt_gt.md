@@ -882,3 +882,41 @@ integration audit → 1-task dry → benchmark decision (D2).
 
 *End — gt_gt.md. Localization deep internals: `BRIEFING.md`. Benchmark operation/gates:
 `BENCHMARK_RUNBOOK.md`. Fix history: `we_did.md` (legacy).*
+
+---
+
+## 2026-06-10 — TRIAL-FIXES CHANGELOG + WHAT IS SUPERSEDED (PATH B Verified trial, run 27260307167)
+
+The PATH B 10-task Verified trial (deepseek-v4-flash) + its gt_trial.md §4/§5 + Tier-3b audits surfaced
+5 defects (substrate GREEN 10/10; all defects in the rerank/delivery/governor consumer stack). Fixed in
+commit `7d48304f` (Stage-1 stabilized: 111 tests green, RED→GREEN proofs; Stage-2 paired validation still
+owed). **SUPERSEDED, explicitly:**
+
+1. **§4.2 fusion / §4.1 anchors — SUPERSEDED for 3 behaviors:**
+   - OLD: dotted/backtick issue symbols (`` `Class.method` ``) were dropped (bare-name graph cross-check +
+     homonym hub-gate killed them) → W_CODE_DEF never engaged. **NOW:** `_resolve_qualified_dotted`
+     confirms the qualified pair against the graph → engages W_CODE_DEF on the defining file.
+   - OLD: the exact-issue-named-file recall guarantee was `Function/Method`-only and skipped short names →
+     a title-named gold CLASS never entered the candidate slots. **NOW:** covers `Class/Interface` +
+     provenance-confirmed short names (ambiguity gates + promote caps unchanged).
+   - OLD: a FLAT dense signal (`sem_mad≈0`) at dense-led `W_SEM=0.40` still arbitrarily boosted
+     coverage-carrying files, sinking anchor-defined gold. **NOW:** Dimension-4 `_apply_dense_dispersion_gate`
+     leads W_SEM to its floor (never zeroed) + max-composes structural signals when dense is flat.
+   - NOT changed: `W_REACH` (hub over-promotion risk — stays subordinated per the original §4.2).
+2. **§2.5 / §6 delivery — SUPERSEDED:** OLD: vendored/minified files + builtin/dunder-shadow names could
+   render as `[WITNESS]`/`[CALLERS]`/contract FACTS ("isinstance: 1048 verified callers — preserve this
+   interface"; minified-jquery callers). **NOW:** consumer fact-filter excludes them at every delivered-fact
+   point + recomputes caller counts excluding vendored caller files. (Residual: `resolver.go` builtin-drop is
+   qualified-call-only; the consumer filter is the operative guard on FROZEN substrate graphs — flagged for
+   the next substrate rebuild.)
+3. **§12 L5 row — SUPERSEDED:** OLD: `failure_persisted` fired on bare `Traceback`/`Error:` (5/7 false
+   positives on ENV errors; 1 HARM — pushed the agent off a gold-equivalent edit, django-10097); the `loop`
+   nudge fired without proven no-new-state. **NOW:** failure_persisted requires real-test-runner + no-env-marker
+   + explicit-test-fail (else silent); loop arm gated on no-new-state; `scaffold_trap` unchanged (was working 4/5).
+4. **Delivery hygiene:** the `[gt-patch:loaded]` loader banner (leaked into agent-visible stdout 10/10) →
+   moved to stderr.
+
+NOT superseded / re-confirmed by the trial: the substrate (LSP warm + edge-conversion 10/10, embedder gte-768
+separating, graph det% 68–74, FTS5), the legitimacy gates, zero benchmark-leakage, the §12 `GRAPH_FAIL_MISSING_HANDOFF`
+false-fail reconciliation. Unexercised (substrate path): L4, L6, GT_VERIFY — health UNPROVEN, to be tested on the
+DeepSWE/multi-language path.
