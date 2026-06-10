@@ -166,7 +166,7 @@ agent:
     </CRITICAL>
     </instructions>
   step_limit: 300
-  cost_limit: 5.0
+  cost_limit: 3.0
 
 # mini-swe-agent runs INSIDE the pier-managed task container (pier's `--env docker`
 # provisions the container and execs the agent there). So mini-swe-agent's OWN
