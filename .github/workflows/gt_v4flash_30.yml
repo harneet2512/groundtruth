@@ -111,9 +111,7 @@ jobs:
             if 'deepseek-v4' in self.config.model.lower() or 'deepseek/deepseek-v4' in self.config.model.lower():
                 _eb = kwargs.get('extra_body', {}) or {}
                 _eb['thinking'] = {'type': 'disabled'}
-                kwargs['extra_body'] = _eb
-
-'''
+                kwargs['extra_body'] = _eb\n\n'''
           if marker not in content:
               print("WARN: marker not found, skipping patch"); sys.exit(0)
           content = content.replace(marker, inject + marker, 1)
