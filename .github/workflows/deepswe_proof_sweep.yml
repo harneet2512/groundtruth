@@ -1,3 +1,4 @@
+# full sweep on substrate  (gopls fixed)
 name: "DeepSWE: substrate proof SWEEP (113 tasks, NO LLM, $0)"
 
 # NON-PAID substrate-proof sweep across ALL 113 DeepSWE tasks. NO agent, NO LLM,

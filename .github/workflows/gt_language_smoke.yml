@@ -1,3 +1,4 @@
+# re-audit on substrate  (gopls -stdio fix + stderr surfacing + stamped gt-index)
 # re-audit on substrate 3a3168a4f9dd (go toolchain + parity gt-index baked)
 name: "GT language smoke — identical gt-run-proof per language (5 fixtures)"
 
