@@ -74,3 +74,30 @@ touches GCP; gemini uses ADC). gt_gt is the audit surface for both.
 - POST-RUN RULE: download EVERYTHING to local disk D (.claude/reports/runs/<run>/) — full trajectories,
   patches, gt_artifacts, deep metrics, rows, reports — from BOTH platforms, before the run is "done".
   VM: tarball OUT_DIR -> pull back. GHA: download all artifacts. Then ledgers + the submission bundle.
+
+## 2026-06-10 — TRIALS IN PROGRESS (autonomous; STOP for permission before fulls)
+USER GRANT: work autonomously until BOTH trials produce trajectories (5 PATH A + 5 PATH B = 10),
+run gt_trial §4 analysis on all 10, THEN explicitly ask permission before either full run.
+
+### Infra hardened today
+- VM gt-sweep-1: e2-custom-12-49152 (12 vCPU/48G), +1TB pd-standard at /data (docker root + outputs there),
+  cloud-platform scope. IP 34.61.186.143.
+- ROOT-CAUSE FIXED (LIPI): brief-step OOM = unchunked ONNX encode O(N) ~7.3G. Fix: chunked encode
+  O(batch=32) ~few-hundred-MB, numerically identical (fixed-128 pad). Committed 466a0c85; gt_gt §5
+  capacity invariant recorded (4f155ffb); image self-test gauges peak RSS<3000MB (081b9b38).
+- rc=137 now classified GT_PROOF_OOM in all 3 runners (no more silent host-OOM masquerade).
+- Per-proof-container --memory cap (7g VM / 10g GHA).
+
+### Sweep (113/113) — the 4 answers
+- Q1 OOM survival: 0 rc=137 kills. Memory fix proven at scale, box never died.
+- 57 OK / 56 GT_RUN_PROOF_FAIL = the no-issue-file artifact (sweep ran w/o GT_ISSUE_FILE -> empty brief);
+  the WITH-issue repro passed fully (brief 2820 chars, 8/8 artifacts). Trials run WITH issues.
+- Per-lang gate-OK: go 14/34, py 18/34, ts 19/35, js 5/5, rust 1/5.
+
+### PATH A auth (gemini): SA keys DEAD (org policy), AI-Studio key = wrong billing, express = unsupported.
+WORKING: VM metadata identity + cloud-platform scope -> Vertex GLOBAL -> bills credits (proven via REST).
+gemini-3-flash-preview served ONLY at location=global (404 on regions) -> VERTEXAI_LOCATION=global forced.
+OPEN: in-container litellm auth (pier runs agent IN container behind squid; metadata unreachable there) —
+delegated to a focused on-VM agent to prove token-forward vs host-proxy.
+
+### PATH B (deepseek/GHA): OOM fixed; image rebuilding (new digest pending) -> redispatch 5 tasks.
