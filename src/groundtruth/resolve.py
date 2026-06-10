@@ -1099,8 +1099,12 @@ def resolve_main() -> None:
 
         # LSP-LIVENESS CERTIFICATE (Stage 1). Filled per path below; the foundational LSP
         # gate reads it, and a residual==0 pass is INVALID without lsp_warm=true here.
+        # SCHEMA v2 (P1-g): v2 added install_missing_reason + verdict_hint, whose ABSENCE
+        # changed meaning (a v1 cert cannot distinguish install-missing from unsupported,
+        # and carries no FAIL_NO_WARM hint). foundational_gates._classify_lsp treats a cert
+        # WITHOUT those fields as version-skew -> FAIL, never PASS (no false-green).
         cert: dict = {
-            "schema": "gt.lsp_certificate.v1",
+            "schema": "gt.lsp_certificate.v2",
             "language": args.lang,
             "server_command": str(_KNOWN_SERVERS.get(args.lang, "") or ""),
             "graph_db": args.db,
@@ -1266,6 +1270,20 @@ def resolve_main() -> None:
             f"verdict={cert['verdict_hint']}",
             flush=True,
         )
+        if (cert["verdict_hint"] == "LSP_FAIL_NO_WARM"
+                and os.environ.get("GT_REQUIRE_LSP") == "1"):
+            # P1-e fail-closed: a launched-but-never-warm (or never-launched) server is a
+            # FAILURE, not a pass — mirror the install-missing exit-2 so gt-run-proof / CI
+            # can never count a dead server as a satisfied LSP requirement. The certificate
+            # + LSP_METRICS line above are already written (the FAIL is auditable, not blind).
+            print(
+                "LSP_LIVENESS_FAIL: GT_REQUIRE_LSP=1 but the LSP server for language "
+                f"'{args.lang}' did not warm (verdict=LSP_FAIL_NO_WARM"
+                + (f"; {cert['failure_detail']}" if cert.get("failure_detail") else "")
+                + ") — fail-closed, no silent pass",
+                file=sys.stderr,
+            )
+            sys.exit(2)
     else:
         # Diagnostic mode (default)
         _print_summary(edges, servers, args.min_confidence)

@@ -103,6 +103,91 @@ def test_classify_unknown_no_signal():
     assert do.classify_outcome(rec) == "UNKNOWN"
 
 
+# ── P1-h: missing witness on a ran-but-unresolved task classifies GT ─────────
+
+def test_classify_gt_missing_witness_ran_unresolved():
+    # Agent RAN (steps>0), did NOT resolve (reward<1), and the consumption witness is
+    # MISSING (gt_prebuilt_active unknown): witness-absent = unproven consumption =
+    # GT's problem — class GT, IN the resolved denominator (never UNKNOWN-excluded).
+    rec = {
+        "infra_markers": [], "adapter_fail": False, "gt_prebuilt_active": None,
+        "hook_hash_match": None, "cert_fail": False, "reward": 0.0, "n_agent_steps": 17,
+    }
+    assert do.classify_outcome(rec) == "GT"
+    assert do.is_in_resolved_denominator("GT") is True
+
+
+def test_classify_missing_witness_resolved_stays_resolved():
+    # reward 1.0 wins before the witness-absent rule (precedence 3 > 3b).
+    rec = {
+        "infra_markers": [], "adapter_fail": False, "gt_prebuilt_active": None,
+        "cert_fail": False, "reward": 1.0, "n_agent_steps": 9,
+    }
+    assert do.classify_outcome(rec) == "RESOLVED"
+
+
+def test_classify_missing_witness_no_reward_stays_unknown():
+    # UNKNOWN is kept ONLY for no-result-at-all: steps>0 but NO reward at all.
+    rec = {"infra_markers": [], "gt_prebuilt_active": None, "reward": None, "n_agent_steps": 9}
+    assert do.classify_outcome(rec) == "UNKNOWN"
+
+
+# ── P1-h: infra-marker token collision (line-anchored matching) ──────────────
+
+def test_find_infra_markers_line_anchored():
+    # The workflow's own fail-closed echo (marker starts the line) -> detected.
+    log = "some output\nGT_ARTIFACT_MISSING / SUBSTRATE_MISSING_CERTS: /gt_artifacts/brief.txt absent\n"
+    assert do.find_infra_markers(log) == ["GT_ARTIFACT_MISSING"]
+    # GHA ::error:: prefix and leading whitespace are tolerated.
+    assert do.find_infra_markers("  ::error::GT_RUN_PROOF_FAIL: boom\n") == ["GT_RUN_PROOF_FAIL"]
+
+
+def test_find_infra_markers_embedded_token_not_matched():
+    # An infra token EMBEDDED mid-line (not line-anchored) must NOT count as INFRA.
+    log = "[GT_META] witness error=DEEPSWE_ADAPTER_FAIL(GT_ARTIFACT_MISSING: brief absent)\n"
+    assert do.find_infra_markers(log) == []
+    # Even without the adapter marker, a mid-line token is not the workflow's echo.
+    assert do.find_infra_markers("note: saw GT_ARTIFACT_MISSING earlier\n") == []
+
+
+def test_adapter_fail_line_with_embedded_infra_token_classifies_gt():
+    # The collision case: the ONLY 'GT_ARTIFACT_MISSING' occurrence lives INSIDE a
+    # DEEPSWE_ADAPTER_FAIL message. INFRA must NOT eat the adapter-consume failure.
+    log = ("[GT_META] graph_witness ... | error=DEEPSWE_ADAPTER_FAIL: "
+           "GT_ARTIFACT_MISSING brief.txt not consumed\n")
+    rec = do.build_signal_record(
+        instance_id="repo__e-5", reward=0.0, n_agent_steps=11, exit_status="Submitted",
+        trial_log=log, cert_dir=None,
+    )
+    assert rec["infra_markers"] == []
+    assert rec["adapter_fail"] is True
+    assert rec["failure_class"] == "GT"
+
+
+def test_line_anchored_infra_marker_still_classifies_infra():
+    # A genuine workflow fail-closed line still wins as INFRA (precedence 1).
+    log = "GT_SUBSTRATE_PULL_FAIL: docker pull of the pinned substrate failed\n"
+    rec = do.build_signal_record(
+        instance_id="repo__f-6", reward=0.0, n_agent_steps=0, exit_status=None,
+        trial_log=log, cert_dir=None,
+    )
+    assert rec["infra_markers"] == ["GT_SUBSTRATE_PULL_FAIL"]
+    assert rec["failure_class"] == "INFRA"
+
+
+def test_issue_missing_marker_is_infra():
+    # P0.1-a: the GT_ISSUE_MISSING fail-closed echo classifies INFRA (harness input),
+    # excluded from the resolved denominator.
+    assert "GT_ISSUE_MISSING" in do.INFRA_LOG_MARKERS
+    log = "GT_ISSUE_MISSING: no issue text for this task — refusing to run the substrate\n"
+    rec = do.build_signal_record(
+        instance_id="repo__g-7", reward=None, n_agent_steps=None, exit_status=None,
+        trial_log=log, cert_dir=None,
+    )
+    assert rec["failure_class"] == "INFRA"
+    assert rec["in_resolved_denominator"] is False
+
+
 def test_precedence_infra_beats_gt_beats_outcome():
     # INFRA wins over a GT signal; GT wins over a resolved reward.
     infra_over_gt = {"infra_markers": ["GT_RUN_PROOF_FAIL"], "adapter_fail": True, "reward": 1.0}

@@ -162,6 +162,72 @@ def test_genuinely_unknown_language_no_ops_exit_0(tmp_path):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# P1-e — FAIL_NO_WARM fails closed under GT_REQUIRE_LSP=1 (launched != warm)
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _fake_resolve_edges_no_warm(db_path, root, edges, language):
+    """A server that LAUNCHED but never answered the warm probe (the FAIL_NO_WARM shape)."""
+    return {"verified": 0, "corrected": 0, "deleted": 0, "failed": len(edges), "skipped": 0,
+            "server_launched": True, "warm_probe_ok": False,
+            "probe_method": "workspace/symbol", "probe_latency_ms": 0.0,
+            "failure_detail": "warm_probe: server initialized but never answered workspace/symbol"}
+
+
+def _run_resolve_main_inprocess(tmp_path, monkeypatch, *, require_lsp: bool):
+    """Drive resolve_main in-process with a present-but-never-warm server: server binary
+    'installed' (_detect_servers patched) and _resolve_edges returning the no-warm stats."""
+    import json as _json
+
+    from groundtruth import resolve
+
+    db = str(tmp_path / "graph.db")
+    _tiny_graph_db(db)
+    cert_path = tmp_path / "lsp_certificate.json"
+    monkeypatch.setenv("GT_LSP_CERT", str(cert_path))
+    monkeypatch.delenv("GT_PROOF_MODE", raising=False)
+    if require_lsp:
+        monkeypatch.setenv("GT_REQUIRE_LSP", "1")
+    else:
+        monkeypatch.delenv("GT_REQUIRE_LSP", raising=False)
+    monkeypatch.setattr(resolve, "_detect_servers", lambda: {"python": True})
+    monkeypatch.setattr(resolve, "_resolve_edges", _fake_resolve_edges_no_warm)
+    monkeypatch.setattr(sys, "argv",
+                        ["resolve", "--db", db, "--root", str(tmp_path),
+                         "--resolve", "--lang", "python"])
+    rc = None
+    try:
+        resolve.resolve_main()
+    except SystemExit as e:
+        rc = e.code
+    cert = _json.loads(cert_path.read_text(encoding="utf-8")) if cert_path.exists() else None
+    return rc, cert
+
+
+def test_fail_no_warm_exits_nonzero_under_require_lsp(tmp_path, monkeypatch, capsys):
+    """RED->GREEN (P1-e): GT_REQUIRE_LSP=1 + a launched-but-never-warm server must EXIT
+    NONZERO (mirroring the install-missing exit-2). Before the fix resolve_main returned
+    0 with verdict=LSP_FAIL_NO_WARM — a dead server counted as a satisfied requirement."""
+    rc, cert = _run_resolve_main_inprocess(tmp_path, monkeypatch, require_lsp=True)
+    out = capsys.readouterr()
+    assert rc == 2, f"expected exit 2; got {rc!r}; out={out.out!r} err={out.err!r}"
+    assert "verdict=LSP_FAIL_NO_WARM" in out.out          # the contract line is still emitted
+    assert "LSP_LIVENESS_FAIL" in out.err                  # the fail-closed reason is named
+    assert cert is not None and cert["verdict_hint"] == "LSP_FAIL_NO_WARM"
+    assert cert["schema"] == "gt.lsp_certificate.v2"       # P1-g schema bump
+    assert "install_missing_reason" in cert and "verdict_hint" in cert  # v2 fields present
+
+
+def test_fail_no_warm_without_require_lsp_does_not_exit(tmp_path, monkeypatch, capsys):
+    """Off the flag the same no-warm pass completes (exit 0 / no SystemExit) but the FAIL
+    verdict is still surfaced in the cert + contract line (never silently green)."""
+    rc, cert = _run_resolve_main_inprocess(tmp_path, monkeypatch, require_lsp=False)
+    out = capsys.readouterr()
+    assert rc is None, f"expected no SystemExit off the flag; got {rc!r} err={out.err!r}"
+    assert "verdict=LSP_FAIL_NO_WARM" in out.out
+    assert cert is not None and cert["verdict_hint"] == "LSP_FAIL_NO_WARM"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # DEFECT #2 — embedder: no silent e5 substitution under GT_REQUIRE_EMBEDDER
 # ─────────────────────────────────────────────────────────────────────────────
 

@@ -27,9 +27,11 @@ across all 113 tasks):
             (GT_SUBSTRATE_DIGEST_MISSING, GT_SUBSTRATE_PULL_FAIL, GT_RUN_PROOF_FAIL,
             GT_ARTIFACT_MISSING, TASK_IMAGE_PULL_FAIL, eval_no_report / harness crash).
             EXCLUDED from the resolved-rate denominator (never an agent/GT failure).
-- GT      — GT delivered wrong/no context (DEEPSWE_ADAPTER_FAIL,
-            gt_prebuilt_active=false, hook != post-LSP graph-hash mismatch, or any
-            embedder/LSP/graph cert with a FAIL verdict).
+- GT      — GT delivered wrong/no/UNPROVEN context (DEEPSWE_ADAPTER_FAIL,
+            gt_prebuilt_active=false, hook != post-LSP graph-hash mismatch, any
+            embedder/LSP/graph cert with a FAIL verdict, OR the agent ran without
+            resolving while the consumption witness is MISSING — witness-absent =
+            unproven consumption = GT's problem, never UNKNOWN-excluded).
 - AGENT   — GT context was sound (prebuilt active + valid certs) but the model missed:
             n_agent_steps>0 + reward 0.
 - RESOLVED — reward 1.0.
@@ -61,20 +63,49 @@ from collections import Counter
 # ===========================================================================
 
 #: Markers the workflow prints to stdout/stderr (captured in trial_output.log) on an
-#: infra/substrate/harness failure. Substring match against the trial log. Generalized:
-#: these are the run-level fail-closed tokens emitted in deepswe_full.yml §E, identical
-#: for every task. (eval_no_report is also detected structurally from the eval report.)
+#: infra/substrate/harness failure. Matched LINE-ANCHORED (see find_infra_markers) so an
+#: infra token EMBEDDED in an adapter-fail message can never be mistaken for the
+#: workflow's own fail-closed line. Generalized: these are the run-level fail-closed
+#: tokens emitted in deepswe_full.yml §E, identical for every task. (eval_no_report is
+#: also detected structurally from the eval report.)
 INFRA_LOG_MARKERS: tuple[str, ...] = (
     "GT_SUBSTRATE_DIGEST_MISSING",
     "GT_SUBSTRATE_PULL_FAIL",
     "GT_RUN_PROOF_FAIL",
     "GT_ARTIFACT_MISSING",
     "TASK_IMAGE_PULL_FAIL",
+    # The task issue could not be materialized (no instruction.md, no task.toml
+    # issue/prompt) — the substrate is never run with an EMPTY issue (fail-closed in
+    # deepswe_full.yml). A harness-input failure, not an agent or GT failure.
+    "GT_ISSUE_MISSING",
 )
 
 #: The adapter-wire failure marker (§E DEEPSWE_ADAPTER_FAIL). This is a GT-side failure
 #: (the adapter could not consume / fingerprint the substrate), classified GT — NOT INFRA.
 GT_ADAPTER_FAIL_MARKER = "DEEPSWE_ADAPTER_FAIL"
+
+
+def find_infra_markers(trial_log: str) -> list[str]:
+    """§E infra markers found in the trial log, matched PRECISELY (token-collision fix).
+
+    Two rules, both required so INFRA can never eat a GT adapter-consume failure:
+      1. LINE-ANCHORED — a marker counts only when it STARTS a log line (modulo leading
+         whitespace / a `::error::` GHA prefix). The workflow's own fail-closed echoes
+         start the line with the marker; an adapter message that merely EMBEDS the token
+         (e.g. `error=DEEPSWE_ADAPTER_FAIL(GT_ARTIFACT_MISSING: brief absent)`) does not.
+      2. ADAPTER-LINE EXCLUSION — any line carrying DEEPSWE_ADAPTER_FAIL is the
+         adapter's (class GT); it is never scanned for infra markers.
+    Returns markers in INFRA_LOG_MARKERS order (deterministic).
+    """
+    starts: list[str] = []
+    for ln in (trial_log or "").splitlines():
+        if GT_ADAPTER_FAIL_MARKER in ln:
+            continue  # adapter-fail lines belong to class GT, never INFRA
+        s = ln.lstrip()
+        if s.startswith("::error::"):
+            s = s[len("::error::"):].lstrip()
+        starts.append(s)
+    return [m for m in INFRA_LOG_MARKERS if any(s.startswith(m) for s in starts)]
 
 #: The certs whose verdict gates GT correctness. A FAIL verdict (or pass=False) on any of
 #: these means GT delivered an unsound substrate -> class GT.
@@ -187,16 +218,21 @@ def _to_bool(v) -> bool | None:
 def classify_outcome(rec: dict) -> str:
     """Deterministic failure classifier over a per-task signal record -> class string.
 
-    Precedence (INFRA > GT > RESOLVED > AGENT > UNKNOWN):
+    Precedence (INFRA > GT > RESOLVED > GT-witness-absent > AGENT > UNKNOWN):
       1. INFRA — any §E infra/harness marker fired, OR the eval produced no report
          (eval_no_report). Excluded downstream from the resolved denominator.
       2. GT    — the adapter failed to wire (DEEPSWE_ADAPTER_FAIL), the substrate graph
          was not consumed (gt_prebuilt_active=false), the consumed graph != the
          post-LSP graph (hook_graph_hash_matches_post_lsp=false), or any cert FAILed.
       3. RESOLVED — reward == 1.0.
+      3b. GT — the agent RAN (n_agent_steps>0) and did NOT resolve (reward<1) but the
+         consumption witness is MISSING (gt_prebuilt_active unknown): witness-absent =
+         UNPROVEN consumption = GT's problem. It stays IN the resolved denominator —
+         never UNKNOWN-excluded (the old asymmetry let unproven GT delivery vanish
+         from the rate).
       4. AGENT — GT context was sound (prebuilt active + no cert FAIL) and the agent
          ran (n_agent_steps>0) but did not resolve (reward 0).
-      5. UNKNOWN — insufficient signal (e.g. no trial result.json AND no infra marker)
+      5. UNKNOWN — no result at all (no reward, no infra marker, nothing attributable)
          — surfaced explicitly, never silently bucketed.
 
     `rec` fields (all optional; produced by build_signal_record):
@@ -224,8 +260,16 @@ def classify_outcome(rec: dict) -> str:
     if reward is not None and float(reward) >= 1.0:
         return "RESOLVED"
 
-    # 4. AGENT — sound GT context, agent ran, did not resolve.
+    # 3b. GT — agent ran, did not resolve, and the consumption WITNESS IS MISSING
+    # (gt_prebuilt_active unknown). Witness-absent = unproven consumption = GT's
+    # problem; it counts in the resolved denominator (never UNKNOWN-excluded).
     steps = rec.get("n_agent_steps")
+    if (rec.get("gt_prebuilt_active") is None
+            and isinstance(steps, int) and steps > 0
+            and reward is not None and float(reward) < 1.0):
+        return "GT"
+
+    # 4. AGENT — sound GT context, agent ran, did not resolve.
     if (rec.get("gt_prebuilt_active") is True
             and not rec.get("cert_fail")
             and isinstance(steps, int) and steps > 0
@@ -348,7 +392,7 @@ def build_signal_record(
     exit_status, the [GT_META] witness fields (from trial_log), the cert verdicts
     (from cert_dir), and the §E infra/adapter markers (from trial_log).
     """
-    infra_markers = [m for m in INFRA_LOG_MARKERS if m in trial_log]
+    infra_markers = find_infra_markers(trial_log)
     adapter_fail = GT_ADAPTER_FAIL_MARKER in trial_log
     meta = _gt_meta_witness(trial_log)
     certs = collect_cert_verdicts(cert_dir)

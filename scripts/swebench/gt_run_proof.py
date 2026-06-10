@@ -27,6 +27,9 @@ import subprocess
 import sys
 
 # The artifact contract the external benchmark team relies on (all written under --out).
+# brief.txt IS part of the contract (P0.1-c): the agent CONSUMES /gt_artifacts/brief.txt
+# read-only — in proof mode an empty/missing brief is GT_ARTIFACT_MISSING (fail-closed),
+# never a "host-fallback" WARN (host run_v74 is fail-closed by the container boundary).
 REQUIRED_ARTIFACTS = [
     "graph.db",
     "runtime_context.json",
@@ -35,16 +38,20 @@ REQUIRED_ARTIFACTS = [
     "embedder_certificate.json",
     "foundational_gate_report.json",
     "run_manifest.json",
+    "brief.txt",
 ]
 
 # Where GT is baked in the substrate image (NOT a checkout, NOT host paths).
 GT_HOME = os.environ.get("GT_HOME", "/opt/gt")
 
 # ── Run provenance (Stage-5 audit: a run must prove WHICH code produced it) ──────────────
-# The 8 proof-env flags the substrate runs under — same set as required_env in the contract.
+# The runtime flags recorded in run_manifest.runtime_flags: the 8 proof-env flags the
+# substrate runs under (same set as required_env in the contract) PLUS
+# GT_FORBID_PREBUILT_GRAPH (P1-i — the freshness legitimacy flag the workflow arms;
+# recorded-or-null provenance, not a required_env gate).
 PROOF_FLAG_KEYS = ("GT_PROOF_MODE", "GT_CONTAINERIZED", "GT_RUNTIME_STRATEGY",
                    "GT_REQUIRE_FTS5", "GT_REQUIRE_EMBEDDER", "GT_FORCE_ONNX_EMBEDDER",
-                   "GT_REQUIRE_LSP", "GT_REQUIRE_FULL_STACK")
+                   "GT_REQUIRE_LSP", "GT_REQUIRE_FULL_STACK", "GT_FORBID_PREBUILT_GRAPH")
 
 # The 4 substrate certificates whose schema/version stamps the manifest records.
 _CERT_FILES = {"lsp_certificate": "lsp_certificate.json",
@@ -153,7 +160,7 @@ def _language_distribution(graph_db: str):
 
 def _cert_versions(out_dir: str) -> dict:
     """The schema/version stamp from each of the 4 substrate certs when present
-    (gt.lsp_certificate.v1 / gt.graph_certificate.v1 / gt.embedder_certificate.v1; the
+    (gt.lsp_certificate.v2 / gt.graph_certificate.v1 / gt.embedder_certificate.v1; the
     foundational gate report carries no schema field today). Absent file or absent
     field -> None — never fabricated."""
     out: dict = {}
@@ -402,6 +409,66 @@ def _demand_scope_files(graph_db: str, issue_text: str, cap: int = 80) -> list:
         return []
 
 
+def aggregate_lsp_verdicts(lang_verdicts: dict, *, require_lsp: bool, any_success: bool):
+    """P1-e polyglot aggregation rule over per-language LSP verdicts -> (ok, failures).
+
+    ``failures`` lists 'lang=verdict' for every language whose pass FAILED:
+      * LSP_INSTALL_MISSING  — baked-server language, binary missing on PATH;
+      * LSP_FAIL_NO_WARM     — server launched (or tried) but never warmed: a
+        launched-but-never-warm server is a FAILURE, not a pass;
+      * LSP_RESOLVE_ERROR(..)— the resolve pass exited nonzero without a verdict.
+    Genuinely-unknown languages (LSP_UNSUPPORTED_EXPLICIT) and the two valid verdicts
+    (LSP_ACTIVE_VALID / LSP_NO_OP_VALID_WITH_WARM_SERVER) are never failures.
+
+    Under ``require_lsp`` (GT_REQUIRE_LSP=1): ok=False if ANY known language failed —
+    a sibling language succeeding must NOT mask another language's gap — or if no
+    language resolved successfully at all. Without the flag, ok=True (verdicts are
+    still recorded for the certs/manifest). Pure + deterministic for the tests."""
+    failures = [
+        f"{lg}={v}" for lg, v in lang_verdicts.items()
+        if v in ("LSP_INSTALL_MISSING", "LSP_FAIL_NO_WARM") or str(v).startswith("LSP_RESOLVE_ERROR")
+    ]
+    if not require_lsp:
+        return True, failures
+    if failures:
+        return False, failures
+    if not any_success:
+        return False, ["<none>=NO_LANGUAGE_RESOLVED"]
+    return True, failures
+
+
+def emit_brief(out_dir: str, issue_text: str, work: str, graph: str, *, generator=None):
+    """Emit the curated brief to <out>/brief.txt — proof artifact #8 (P0.1-c).
+
+    gt-run-proof is PROOF-ONLY (validate_proof_env requires GT_PROOF_MODE=1), and the agent
+    consumes /gt_artifacts/brief.txt READ-ONLY: there is NO host fallback (host run_v74 is
+    fail-closed by the container boundary), so an empty or failed brief is a missing proof
+    artifact — never a WARN. Returns (ok, detail); the caller fails closed on ok=False with
+    GT_ARTIFACT_MISSING. ``generator`` is injectable for tests; default = the real
+    generate_v1r_brief (which also writes the issue anchors mirrored below)."""
+    try:
+        if generator is None:
+            from groundtruth.pretask.v1r_brief import generate_v1r_brief as generator
+        b = generator(issue_text=issue_text, repo_root=work, graph_db=graph, bug_id="portable")
+        bt = (getattr(b, "brief_text", "") or "").strip()
+    except Exception as e:
+        return False, f"brief generation raised (no swallow in proof): {type(e).__name__}: {e}"
+    if not bt:
+        return False, ("portable brief EMPTY — proof mode requires a non-empty brief.txt "
+                       "(the agent consumes /gt_artifacts/brief.txt; there is no host fallback)")
+    try:
+        with open(os.path.join(out_dir, "brief.txt"), "w", encoding="utf-8") as bf:
+            bf.write(bt)
+    except OSError as e:
+        return False, f"brief.txt write failed: {e}"
+    if os.path.exists("/tmp/gt_issue_anchors.json"):
+        try:
+            shutil.copy("/tmp/gt_issue_anchors.json", os.path.join(out_dir, "gt_issue_anchors.json"))
+        except OSError:
+            pass
+    return True, f"{len(bt)} chars"
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="gt-run-proof")
     ap.add_argument("--source-root", required=False, default="/work")
@@ -497,7 +564,14 @@ def main(argv=None) -> int:
     # for EVERY language present (not just the dominant one), un-capped within that bounded scope —
     # closing the "whole-repo capped at 500 -> majority name_match" gap. With a real issue the
     # demand scope resolves FULLY; with no issue (free liveness proof) it keeps the 500 default.
-    # Dominant language is resolved LAST so its LSP certificate is the one that persists.
+    #
+    # P1-e (cert-overwrite fix): per-language verdicts AGGREGATE. Each language's resolve pass
+    # writes its OWN certificate (lsp_certificate_<lang>.json) so no FAIL cert is ever overwritten
+    # by a later language; the DOMINANT language's cert is then copied to the canonical
+    # lsp_certificate.json path. Under GT_REQUIRE_LSP=1 the run fails closed if ANY known
+    # language is INSTALL_MISSING **or FAIL_NO_WARM** (a launched-but-never-warm server is a
+    # failure, not a pass — resolve.py exits 2 on both); genuinely-unknown languages
+    # (LSP_UNSUPPORTED_EXPLICIT) remain an honest no-op.
     langs = _detect_langs(graph) or ([a.lang] if a.lang else [_detect_lang(graph)])
     scope_files = _demand_scope_files(graph, _read_issue(issue_file))
     scope_path = ""
@@ -512,36 +586,54 @@ def main(argv=None) -> int:
     lsp_metrics_file = os.path.join(a.out, "gt_lsp_metrics.txt")
     base_env["GT_LSP_METRICS_FILE"] = lsp_metrics_file
     open(lsp_metrics_file, "w").close()
+    import re as _re
     lsp_ok = False
-    install_missing_langs: list[str] = []  # baked-server langs whose server is missing on PATH
-    for lg in reversed(langs):  # least-common first, dominant last (its cert persists)
+    lang_verdicts: dict = {}  # per-language verdict (aggregated, none overwritten)
+    for lg in reversed(langs):  # least-common first, dominant last
+        # Per-language certificate path: NO overwrite — every language's cert persists.
+        cert_lsp_lang = os.path.join(a.out, f"lsp_certificate_{lg}.json")
+        lang_env = dict(base_env, GT_LSP_CERT=cert_lsp_lang)
         cmd = [sys.executable, "-m", "groundtruth.resolve", "--db", graph, "--root", work,
                "--resolve", "--lang", lg, "--max-edges", max_edges]
         if scope_path:
             cmd += ["--source-files", scope_path]
         print(f"[gt-run-proof] $ {' '.join(cmd)}", flush=True)
-        rr = subprocess.run(cmd, env=base_env, capture_output=True, text=True)
+        rr = subprocess.run(cmd, env=lang_env, capture_output=True, text=True)
         sys.stdout.write(rr.stdout or ""); sys.stderr.write(rr.stderr or "")
         with open(lsp_metrics_file, "a", encoding="utf-8") as _mf:
             _mf.write(rr.stdout or "")
-        # A baked-server language whose server is missing emits the LSP_INSTALL_MISSING verdict
-        # (and, under GT_REQUIRE_LSP=1, exits nonzero). Record it: in a polyglot repo a DIFFERENT
-        # language succeeding must NOT mask a known-language install gap (audit defect #1 — a
-        # no-server-on-PATH baked language must fail closed, not be hidden by a sibling success).
-        if "verdict=LSP_INSTALL_MISSING" in (rr.stdout or ""):
-            install_missing_langs.append(lg)
+        # Verdict for THIS language from its LSP_METRICS contract line (last wins). A
+        # nonzero exit without a verdict line is recorded as LSP_RESOLVE_ERROR(rc=N).
+        _vs = _re.findall(r"verdict=(\S+)", rr.stdout or "")
+        verdict = _vs[-1] if _vs else ""
+        if not verdict and rr.returncode != 0:
+            verdict = f"LSP_RESOLVE_ERROR(rc={rr.returncode})"
+        lang_verdicts[lg] = verdict or "LSP_RESOLVE_ERROR(no_verdict)"
         if rr.returncode == 0:
             lsp_ok = True
-    if os.environ.get("GT_REQUIRE_LSP") == "1":
-        if install_missing_langs:
-            print("LSP_LIVENESS_FAIL: GT_REQUIRE_LSP=1 but the baked LSP server is missing on PATH "
-                  f"for known language(s): {', '.join(install_missing_langs)} — a baked-server "
-                  "language that cannot launch/warm fails closed (no silent pass)", file=sys.stderr)
-            return 2
-        if not lsp_ok:
-            print("LSP_LIVENESS_FAIL: GT_REQUIRE_LSP=1 but LSP resolved no language successfully",
-                  file=sys.stderr)
-            return 2
+    # Canonical cert = the DOMINANT language's (langs[0], node-count desc); per-language
+    # certs persist alongside so a FAIL verdict is never lost to an overwrite.
+    _dom_cert = os.path.join(a.out, f"lsp_certificate_{langs[0]}.json")
+    if os.path.exists(_dom_cert):
+        try:
+            shutil.copyfile(_dom_cert, cert_lsp)
+        except OSError as _ce:
+            print(f"WARN: could not copy dominant LSP cert to canonical path: {_ce}", file=sys.stderr)
+    print(f"[gt-run-proof] per-language LSP verdicts: {lang_verdicts}", flush=True)
+    # P1-e fail-closed aggregation: ANY known language INSTALL_MISSING / FAIL_NO_WARM /
+    # resolve-error fails the proof under GT_REQUIRE_LSP=1 — a sibling language's success
+    # must never mask another language's gap (audit defect #1), and a launched-but-
+    # never-warm server is a failure, not a pass.
+    _agg_ok, _agg_failures = aggregate_lsp_verdicts(
+        lang_verdicts,
+        require_lsp=os.environ.get("GT_REQUIRE_LSP") == "1",
+        any_success=lsp_ok,
+    )
+    if not _agg_ok:
+        print("LSP_LIVENESS_FAIL: GT_REQUIRE_LSP=1 but known language(s) failed the LSP pass: "
+              f"{', '.join(_agg_failures)} — a baked-server language that cannot launch/warm "
+              "fails closed (no silent pass, no sibling-language masking)", file=sys.stderr)
+        return 2
 
     # 3. graph certificate
     _run([sys.executable, os.path.join(GT_HOME, "scripts/metrics/graph_certificate.py"), graph,
@@ -604,21 +696,15 @@ def main(argv=None) -> int:
     # agent CONSUMES it from /gt_artifacts/brief.txt instead of regenerating on the host (where
     # run_v74 is fail-closed by the boundary assert). generate_v1r_brief writes the issue anchors;
     # mirror them out for the agent's in-container post_view/post_edit consumers.
-    try:
-        from groundtruth.pretask.v1r_brief import generate_v1r_brief
-        _b = generate_v1r_brief(issue_text=_read_issue(issue_file), repo_root=work,
-                                graph_db=graph, bug_id="portable")
-        _bt = (getattr(_b, "brief_text", "") or "").strip()
-        if _bt:
-            with open(os.path.join(a.out, "brief.txt"), "w", encoding="utf-8") as _bf:
-                _bf.write(_bt)
-            if os.path.exists("/tmp/gt_issue_anchors.json"):
-                shutil.copy("/tmp/gt_issue_anchors.json", os.path.join(a.out, "gt_issue_anchors.json"))
-            print(f"[gt-run-proof] brief emitted -> /gt_artifacts/brief.txt ({len(_bt)} chars)", flush=True)
-        else:
-            print("WARN: portable brief empty — not written (agent will host-fallback)", file=sys.stderr)
-    except Exception as e:
-        print(f"WARN: brief emission failed: {e}", file=sys.stderr)
+    # P0.1-c: brief.txt is REQUIRED (artifact #8). In proof mode an empty/missing brief is
+    # GT_ARTIFACT_MISSING (fail-closed) — the old "agent will host-fallback" WARN was stale:
+    # the host brief path is fail-closed by the container boundary, so a missing brief here
+    # means the agent runs with NO brief at all (the green-zero-run chain).
+    _brief_ok, _brief_detail = emit_brief(a.out, _read_issue(issue_file), work, graph)
+    if not _brief_ok:
+        print(f"GT_ARTIFACT_MISSING: brief.txt — {_brief_detail}", file=sys.stderr)
+        return 2
+    print(f"[gt-run-proof] brief emitted -> /gt_artifacts/brief.txt ({_brief_detail})", flush=True)
 
     # 5. runtime_context.json
     try:

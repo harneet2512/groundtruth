@@ -15,9 +15,12 @@ _spec.loader.exec_module(fg)
 
 
 def _base_cert(**kw):
-    """A valid, warm, active-resolution certificate; override fields per test."""
+    """A valid, warm, active-resolution v2 certificate; override fields per test.
+
+    v2 (P1-g): carries install_missing_reason + verdict_hint — the fields whose ABSENCE
+    marks a version-skewed (v1) cert that _classify_lsp must FAIL, never PASS."""
     c = {
-        "schema": "gt.lsp_certificate.v1",
+        "schema": "gt.lsp_certificate.v2",
         "language": "python",
         "server_command": "pyright-langserver",
         "server_launched": True,
@@ -35,6 +38,8 @@ def _base_cert(**kw):
         "no_op_valid": False,
         "no_op_reason": "",
         "unsupported_reason": "",
+        "install_missing_reason": "",
+        "verdict_hint": "",
         "lsp_started_at": 1000.0,
         "lsp_finished_at": 1002.0,
         "closure_rebuilt_after_lsp": True,
@@ -104,6 +109,33 @@ def test_scoring_before_lsp_finished_fails():
 def test_missing_certificate_fails():
     v, ok = fg._classify_lsp(None)
     assert v == "LSP_FAIL_MISSING_CERTIFICATE" and not ok
+
+
+def test_v1_cert_without_new_fields_is_not_pass():
+    """P1-g version skew: a v1-shaped cert (NO install_missing_reason, NO verdict_hint —
+    e.g. emitted by a stale binary) must classify UNKNOWN -> FAIL, never PASS, even when
+    every other field looks like a healthy warm active pass."""
+    cert = _base_cert()
+    del cert["install_missing_reason"]
+    del cert["verdict_hint"]
+    cert["schema"] = "gt.lsp_certificate.v1"
+    v, ok = fg._classify_lsp(cert)
+    assert v == "LSP_FAIL_CERT_VERSION_SKEW" and not ok
+
+
+def test_v2_cert_with_empty_new_fields_still_judged_normally():
+    """The skew check keys on FIELD PRESENCE, not truthiness: a v2 cert with the fields
+    present-but-empty is judged on its real liveness fields (here: a healthy PASS)."""
+    v, ok = fg._classify_lsp(_base_cert())
+    assert v == "LSP_ACTIVE_VALID" and ok
+
+
+def test_v1_cert_only_one_field_present_is_judged_normally():
+    """A cert carrying EITHER new field has the v2 semantics — only both-absent is skew."""
+    cert = _base_cert()
+    del cert["install_missing_reason"]  # verdict_hint still present
+    v, ok = fg._classify_lsp(cert)
+    assert v == "LSP_ACTIVE_VALID" and ok
 
 
 def test_active_valid_passes():

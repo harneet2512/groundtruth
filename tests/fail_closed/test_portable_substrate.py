@@ -31,8 +31,104 @@ def _read(p):
 def test_contract_lists_all_required_artifacts():
     out = grp.expected_outputs("/gt_artifacts")
     for a in ("graph.db", "runtime_context.json", "lsp_certificate.json", "graph_certificate.json",
-              "embedder_certificate.json", "foundational_gate_report.json"):
+              "embedder_certificate.json", "foundational_gate_report.json", "brief.txt"):
         assert os.path.join("/gt_artifacts", a) in out, a
+
+
+def test_brief_is_a_required_artifact():
+    # P0.1-c: brief.txt is proof artifact #8 — the agent consumes it read-only; a missing
+    # brief is GT_ARTIFACT_MISSING, never a host-fallback WARN.
+    assert "brief.txt" in grp.REQUIRED_ARTIFACTS
+
+
+def test_runtime_flags_record_forbid_prebuilt_graph():
+    # P1-i: run_manifest.runtime_flags must record GT_FORBID_PREBUILT_GRAPH (provenance).
+    assert "GT_FORBID_PREBUILT_GRAPH" in grp.PROOF_FLAG_KEYS
+
+
+# ── P0.1-c: emit_brief fail-closed (empty/raising brief is a missing artifact) ──
+
+def _brief_obj(text):
+    class _B:
+        brief_text = text
+    return _B()
+
+
+def test_emit_brief_empty_is_fail_closed(tmp_path):
+    ok, detail = grp.emit_brief(str(tmp_path), "fix the bug", "/work", "/g.db",
+                                generator=lambda **kw: _brief_obj(""))
+    assert ok is False
+    assert "EMPTY" in detail
+    assert not os.path.exists(os.path.join(str(tmp_path), "brief.txt"))
+
+
+def test_emit_brief_exception_is_fail_closed_not_swallowed(tmp_path):
+    def _boom(**kw):
+        raise RuntimeError("embedder dead")
+    ok, detail = grp.emit_brief(str(tmp_path), "fix the bug", "/work", "/g.db", generator=_boom)
+    assert ok is False
+    assert "RuntimeError" in detail and "embedder dead" in detail
+
+
+def test_emit_brief_writes_nonempty_brief(tmp_path):
+    ok, detail = grp.emit_brief(str(tmp_path), "fix the bug", "/work", "/g.db",
+                                generator=lambda **kw: _brief_obj("EDIT-TARGET: src/x.py"))
+    assert ok is True
+    with open(os.path.join(str(tmp_path), "brief.txt"), encoding="utf-8") as f:
+        assert f.read() == "EDIT-TARGET: src/x.py"
+
+
+# ── P1-e: polyglot per-language verdict AGGREGATION (no sibling masking) ──────
+
+def test_aggregate_fail_no_warm_fails_under_require():
+    # RED->GREEN: a launched-but-never-warm language is a FAILURE even when a sibling
+    # language passed — the old loop's `lsp_ok = any rc==0` masked it.
+    ok, failures = grp.aggregate_lsp_verdicts(
+        {"python": "LSP_ACTIVE_VALID", "go": "LSP_FAIL_NO_WARM"},
+        require_lsp=True, any_success=True)
+    assert ok is False
+    assert failures == ["go=LSP_FAIL_NO_WARM"]
+
+
+def test_aggregate_install_missing_fails_under_require():
+    ok, failures = grp.aggregate_lsp_verdicts(
+        {"python": "LSP_ACTIVE_VALID", "rust": "LSP_INSTALL_MISSING"},
+        require_lsp=True, any_success=True)
+    assert ok is False and failures == ["rust=LSP_INSTALL_MISSING"]
+
+
+def test_aggregate_resolve_error_fails_under_require():
+    ok, failures = grp.aggregate_lsp_verdicts(
+        {"typescript": "LSP_RESOLVE_ERROR(rc=1)"}, require_lsp=True, any_success=False)
+    assert ok is False and failures == ["typescript=LSP_RESOLVE_ERROR(rc=1)"]
+
+
+def test_aggregate_unsupported_and_valid_pass():
+    # Genuinely-unknown languages stay an honest no-op; valid verdicts pass.
+    ok, failures = grp.aggregate_lsp_verdicts(
+        {"python": "LSP_ACTIVE_VALID", "ruby": "LSP_UNSUPPORTED_EXPLICIT",
+         "go": "LSP_NO_OP_VALID_WITH_WARM_SERVER"},
+        require_lsp=True, any_success=True)
+    assert ok is True and failures == []
+
+
+def test_aggregate_no_language_resolved_fails_under_require():
+    ok, failures = grp.aggregate_lsp_verdicts({}, require_lsp=True, any_success=False)
+    assert ok is False and failures == ["<none>=NO_LANGUAGE_RESOLVED"]
+
+
+def test_aggregate_without_require_records_but_passes():
+    ok, failures = grp.aggregate_lsp_verdicts(
+        {"go": "LSP_FAIL_NO_WARM"}, require_lsp=False, any_success=False)
+    assert ok is True and failures == ["go=LSP_FAIL_NO_WARM"]
+
+
+def test_per_language_certs_persisted_no_overwrite():
+    # Source contract: each language's resolve pass writes lsp_certificate_<lang>.json
+    # (no FAIL cert overwritten) and the dominant cert is copied to the canonical path.
+    src = _read(os.path.join(ROOT, "scripts", "swebench", "gt_run_proof.py"))
+    assert 'lsp_certificate_{lg}.json' in src
+    assert "shutil.copyfile(_dom_cert, cert_lsp)" in src
 
 
 def test_print_contract(capsys):

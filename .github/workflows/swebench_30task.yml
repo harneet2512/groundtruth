@@ -42,6 +42,13 @@ permissions:
 
 env:
   DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+  # OH-surface embedder PIN (P0.2): this pipeline bakes ONLY e5-small-v2 (the
+  # gt-runtime-models release asset -> gt-models artifact). The loader DEFAULT is
+  # gte-modernbert-base and, under GT_REQUIRE_EMBEDDER=1, the gte-or-raise hardening
+  # would fail-closed EVERY task here (no gte baked anywhere on this surface). Pin OH
+  # to its baked model explicitly. The substrate/DeepSWE pipelines stay gte (baked there).
+  GT_EMBED_MODEL_NAME: "intfloat/e5-small-v2"
+  GT_EMBED_DIM: "384"
 
 jobs:
   prepare:
@@ -218,6 +225,10 @@ jobs:
             [HF_DATASETS_OFFLINE]=1
             [TRANSFORMERS_OFFLINE]=1
             [HF_HUB_OFFLINE]=1
+            # P0.2: the OH-surface pin must be ARMED (workflow-level env) — without it the
+            # gte default + GT_REQUIRE_EMBEDDER=1 gte-or-raise fail-closes every task.
+            [GT_EMBED_MODEL_NAME]=intfloat/e5-small-v2
+            [GT_EMBED_DIM]=384
           )
           BAD=0
           for k in "${!EXPECT[@]}"; do
@@ -501,6 +512,9 @@ jobs:
         env:
           GT_FORCE_ONNX_EMBEDDER: "1"
           GT_REQUIRE_EMBEDDER: "1"
+          # P0.2: pin the OH-baked e5 explicitly wherever the embedder flags are armed.
+          GT_EMBED_MODEL_NAME: "intfloat/e5-small-v2"
+          GT_EMBED_DIM: "384"
           GT_MODELS_ROOT: "${{ github.workspace }}/models"
           PYTHONPATH: "${{ github.workspace }}/src"
           GT_DEBUG_L1: "1"
@@ -538,6 +552,9 @@ jobs:
         env:
           GT_FORCE_ONNX_EMBEDDER: "1"
           GT_REQUIRE_EMBEDDER: "1"
+          # P0.2: pin the OH-baked e5 explicitly wherever the embedder flags are armed.
+          GT_EMBED_MODEL_NAME: "intfloat/e5-small-v2"
+          GT_EMBED_DIM: "384"
           GT_MODELS_ROOT: "${{ github.workspace }}/models"
           PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/metrics"
           GT_GATES_DEEP_JSON: "/tmp/gt_gates_deep_${{ matrix.task }}.json"
@@ -754,6 +771,10 @@ jobs:
           GT_REQUIRE_FTS5: "1"
           GT_REQUIRE_EMBEDDER: "1"
           GT_FORCE_ONNX_EMBEDDER: "1"
+          # P0.2: pin the OH-baked e5 explicitly wherever the embedder flags are armed
+          # (gte default + gte-or-raise would fail-close the whole OH surface).
+          GT_EMBED_MODEL_NAME: "intfloat/e5-small-v2"
+          GT_EMBED_DIM: "384"
           GT_REQUIRE_LSP: "1"
           GT_FORBID_PREBUILT_GRAPH: "1"
           # HF fully offline: the dataset is materialized to a local JSONL in `prepare`

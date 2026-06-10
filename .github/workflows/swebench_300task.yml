@@ -57,6 +57,14 @@ env:
   GT_FORCE_ONNX_EMBEDDER: "1"
   GT_REQUIRE_FTS5: "1"
   GT_REQUIRE_EMBEDDER: "1"
+  # OH-surface embedder PIN (P0.2): this pipeline bakes ONLY e5-small-v2 (the gt-e5-model
+  # artifact / pipeline assets). The loader DEFAULT is gte-modernbert-base and, under
+  # GT_REQUIRE_EMBEDDER=1, the gte-or-raise hardening would fail-closed EVERY task on this
+  # surface (no gte baked). Pin OH to its baked model. NOTE: the pinned-substrate paths
+  # (gt-substrate-run.sh / gt-run-proof inside the substrate image) deliberately do NOT
+  # forward this pin — the substrate bakes gte and stays gte.
+  GT_EMBED_MODEL_NAME: "intfloat/e5-small-v2"
+  GT_EMBED_DIM: "384"
   GT_REQUIRE_LSP: "1"
   # LEGITIMACY: the 300-task benchmark must index FRESH per task, in-container, from
   # the base-commit repo — never a prebuilt / cross-run graph.db. This hard-disables
@@ -464,6 +472,12 @@ jobs:
             v=$(printenv "$k" || true)
             if [ "$v" = "1" ]; then echo "  $k=1 OK"; else echo "FATAL: env $k='$v' expected '1' — fail-closed gate"; BAD=1; fi
           done
+          # P0.2: the OH-surface embedder pin must be ARMED (workflow-level env). Without it
+          # the gte default + GT_REQUIRE_EMBEDDER=1 gte-or-raise fail-closes every OH task.
+          v=$(printenv GT_EMBED_MODEL_NAME || true)
+          if [ "$v" = "intfloat/e5-small-v2" ]; then echo "  GT_EMBED_MODEL_NAME=$v OK"; else echo "FATAL: env GT_EMBED_MODEL_NAME='$v' expected 'intfloat/e5-small-v2' (OH bakes only e5)"; BAD=1; fi
+          v=$(printenv GT_EMBED_DIM || true)
+          if [ "$v" = "384" ]; then echo "  GT_EMBED_DIM=$v OK"; else echo "FATAL: env GT_EMBED_DIM='$v' expected '384'"; BAD=1; fi
           [ "$BAD" -eq 0 ] || { echo "FATAL: fail-closed env not armed"; exit 1; }
           echo "=== fail-closed env ARMED ==="
 
@@ -1089,6 +1103,7 @@ jobs:
           docker exec \
             -e GT_PROOF_MODE=1 -e GT_CONTAINERIZED=1 -e GT_REQUIRE_FTS5=1 -e GT_REQUIRE_EMBEDDER=1 \
             -e GT_FORCE_ONNX_EMBEDDER=1 -e GT_REQUIRE_LSP=1 -e GT_REQUIRE_FULL_STACK=1 -e GT_FORBID_PREBUILT_GRAPH=1 \
+            -e GT_EMBED_MODEL_NAME=intfloat/e5-small-v2 -e GT_EMBED_DIM=384 \
             -e GT_HOME=/opt/gt -e GT_MODELS_ROOT=/opt/gt/models -e GT_SOURCE_ROOT="$ROOT" -e GT_GRAPH_DB=/tmp/graph.db \
             -e GT_LSP_CERT=/tmp/gt/lsp_certificate.json -e PYTHONPATH=/opt/gt \
             gtsrc python3 -m groundtruth.resolve --db /tmp/graph.db --root "$ROOT" --resolve --lang "$LSP_LANG" $SCOPE_ARG_C 2>&1 | tee /tmp/gt_lsp_metrics.txt | tail -3
@@ -1194,6 +1209,7 @@ jobs:
           docker exec \
             -e GT_PROOF_MODE=1 -e GT_CONTAINERIZED=1 -e GT_REQUIRE_FTS5=1 -e GT_REQUIRE_EMBEDDER=1 \
             -e GT_FORCE_ONNX_EMBEDDER=1 -e GT_REQUIRE_LSP=1 -e GT_REQUIRE_FULL_STACK=1 -e GT_FORBID_PREBUILT_GRAPH=1 \
+            -e GT_EMBED_MODEL_NAME=intfloat/e5-small-v2 -e GT_EMBED_DIM=384 \
             -e GT_GATES_DELIVER_ALWAYS="${GT_GATES_DELIVER_ALWAYS:-1}" \
             -e GT_HOME=/opt/gt -e GT_MODELS_ROOT=/opt/gt/models -e GT_SOURCE_ROOT="${GT_ROOT:-/testbed}" \
             -e GT_GRAPH_DB=/tmp/graph.db -e GT_LSP_CERT=/tmp/gt/lsp_certificate.json \

@@ -320,9 +320,18 @@ def _classify_lsp(cert):
 
     PASS: LSP_ACTIVE_VALID, LSP_NO_OP_VALID_WITH_WARM_SERVER, LSP_UNSUPPORTED_EXPLICIT.
     FAIL: LSP_FAIL_NO_WARM, LSP_FAIL_STALE_CLOSURE, LSP_FAIL_NOT_RUN_BEFORE_SCORING,
-          LSP_FAIL_MISSING_CERTIFICATE."""
+          LSP_FAIL_MISSING_CERTIFICATE, LSP_FAIL_CERT_VERSION_SKEW.
+
+    VERSION SKEW (P1-g): the gt.lsp_certificate.v2 schema added install_missing_reason +
+    verdict_hint, whose semantics this classifier depends on (install-missing vs
+    unsupported; FAIL_NO_WARM hint). A cert carrying NEITHER field predates those
+    semantics (a v1 cert from a stale binary) and is classified UNKNOWN -> FAIL, never
+    PASS — a version skew must not false-green the LSP gate."""
     if not cert:
         return ("LSP_FAIL_MISSING_CERTIFICATE", False)
+    if "install_missing_reason" not in cert and "verdict_hint" not in cert:
+        # v1-shaped cert (pre-v2 fields absent entirely): UNKNOWN semantics -> fail-closed.
+        return ("LSP_FAIL_CERT_VERSION_SKEW", False)
     if cert.get("install_missing_reason") or cert.get("verdict_hint") == "LSP_INSTALL_MISSING":
         # A KNOWN LSP language whose baked server binary is missing on PATH. This is an
         # install/substrate gap, NOT a legitimately-unsupported language — it must FAIL CLOSED

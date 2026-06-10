@@ -76,15 +76,20 @@ env:
   # ── SUBSTRATE-CONSUME (handoff §A/§B-AFTER/§D/§G) ───────────────────────────
   # The GT proof runtime is a PINNED, portable substrate image (Option B). It is
   # referenced by IMMUTABLE DIGEST, never a mutable tag (§F.1). gt-run-proof runs
-  # INSIDE that image with the task repo mounted /work:ro and emits the 7 artifacts
-  # to /gt_artifacts; the DeepSWE adapter CONSUMES them read-only and NEVER rebuilds.
+  # INSIDE that image with the task repo mounted /work:ro and emits the 8 artifacts
+  # (incl. brief.txt) to /gt_artifacts; the DeepSWE adapter CONSUMES them read-only
+  # and NEVER rebuilds.
   GT_SUBSTRATE_DIGEST: ${{ inputs.gt_substrate_digest || vars.GT_SUBSTRATE_DIGEST }}
   # Fail-closed digest pin (§E GT_SUBSTRATE_DIGEST_MISSING / PROOF_RUNTIME_FALLBACK_FORBIDDEN):
   # with this =1 a run with no pinned digest ABORTS (no host fallback, no per-task provisioning).
   GT_REQUIRE_PINNED_SUBSTRATE: ${{ inputs.require_pinned_substrate }}
-  # gates-only / proof policy: MEASURE, never fail-close on graph-quality (§B gate-policy);
-  # the only fatal cases are dead embedder / 0 edges (enforced inside gt-run-proof).
-  GT_GATES_DELIVER_ALWAYS: "1"
+  # Gates policy (P1-f decision: STRICT proof default). gt-run-proof's foundational gates
+  # ARE the proof contract on this pipeline — deliver-always there converts a gate failure
+  # into a green zero-run (the P0.1 chain), and unlike the OH live-agent workflows there is
+  # no separate agent-path consumer of this flag here (it is not forwarded via --ae). So the
+  # proof container is strict by DEFAULT ("0"); deliver-always is an EXPLICIT opt-in (set
+  # this to "1" deliberately). The OH workflows keep their own explicit "1" (agent path).
+  GT_GATES_DELIVER_ALWAYS: "0"
   # Proof env for the AGENT path (hook validation in-container): the adapter consumes the
   # substrate certs and validates the in-container graph reads against the resolved graph.
   GT_PROOF_MODE: "1"
@@ -364,7 +369,7 @@ jobs:
           # Replaces the OLD host/image split (§B BEFORE/invalid): NO host gt-index build,
           # NO host `groundtruth.resolve` LSP pass, NO host gates. The pinned substrate
           # image runs gt-run-proof INSIDE the container with the task repo mounted /work:ro
-          # and emits the 7 artifacts to /gt_artifacts; the agent CONSUMES them read-only.
+          # and emits the 8 artifacts to /gt_artifacts; the agent CONSUMES them read-only.
           TASK_DIR="deepswe-bench/tasks/${{ matrix.task }}"
 
           # §E GT_SUBSTRATE_DIGEST_MISSING / PROOF_RUNTIME_FALLBACK_FORBIDDEN (fail-closed).
@@ -428,7 +433,45 @@ jobs:
 
           # THIS task's issue (problem statement only — NEVER gold/tests) so the substrate's
           # demand-driven LSP scope + embedder cert operate on the issue-relevant subgraph.
-          python3 -c "import tomllib;t=tomllib.load(open('$TASK_DIR/task.toml','rb'));import io;open('/tmp/issue.txt','w',encoding='utf-8').write((t.get('metadata',{}) or {}).get('issue','') or (t.get('task',{}) or {}).get('prompt','') or '')" 2>/dev/null || : > /tmp/issue.txt
+          # P0.1-a: the real DeepSWE task instruction lives in the sibling instruction.md
+          # (pier reads it as Task.instruction) — task.toml has NO metadata.issue/task.prompt,
+          # so the old extraction yielded an EMPTY issue on every task (and `|| :` swallowed
+          # it), silently degrading the substrate to a no-issue run (the green-zero-run
+          # chain). Read instruction.md first, task.toml fields as fallback, and FAIL-CLOSED
+          # (GT_ISSUE_MISSING, classified INFRA) if the issue text ends up empty — never run
+          # the substrate with an empty issue.
+          python3 - "$TASK_DIR" << 'PYEOF' || { echo "GT_ISSUE_MISSING: no issue text for this task — refusing to run the substrate with an EMPTY issue (fail-closed)" | tee -a trial_output.log; exit 1; }
+          import os, sys
+          try:
+              import tomllib
+          except ModuleNotFoundError:
+              import tomli as tomllib
+          task_dir = sys.argv[1]
+          out_path = os.environ.get("GT_ISSUE_OUT", "/tmp/issue.txt")
+          issue, source = "", ""
+          inst = os.path.join(task_dir, "instruction.md")
+          if os.path.exists(inst):
+              with open(inst, encoding="utf-8", errors="replace") as f:
+                  issue = f.read().strip()
+              source = "instruction.md"
+          if not issue:
+              try:
+                  with open(os.path.join(task_dir, "task.toml"), "rb") as f:
+                      t = tomllib.load(f)
+                  issue = ((t.get("metadata", {}) or {}).get("issue", "")
+                           or (t.get("task", {}) or {}).get("prompt", "")
+                           or (t.get("task", {}) or {}).get("instruction", "") or "").strip()
+                  source = "task.toml"
+              except Exception:
+                  issue = ""
+          if not issue:
+              print("GT_ISSUE_MISSING: no instruction.md and no task.toml issue/prompt/instruction "
+                    "— the substrate must never run with an EMPTY issue (fail-closed)", file=sys.stderr)
+              sys.exit(1)
+          with open(out_path, "w", encoding="utf-8") as f:
+              f.write(issue)
+          print(f"issue text: {len(issue)} chars from {source} -> {out_path}")
+          PYEOF
 
           # ── gt-run-proof INSIDE the pinned substrate (the ONE portable command, §A) ──
           # Repo mounted /work:ro; artifacts -> /gt_artifacts. All 8 proof flags set so the
@@ -439,7 +482,7 @@ jobs:
               -e GT_PROOF_MODE=1 -e GT_CONTAINERIZED=1 -e GT_RUNTIME_STRATEGY=unified_substrate \
               -e GT_REQUIRE_FTS5=1 -e GT_REQUIRE_EMBEDDER=1 -e GT_FORCE_ONNX_EMBEDDER=1 \
               -e GT_REQUIRE_LSP=1 -e GT_REQUIRE_FULL_STACK=1 -e GT_ISSUE_FILE=/work_issue.txt \
-              -e GT_GATES_DELIVER_ALWAYS="${GT_GATES_DELIVER_ALWAYS:-1}" \
+              -e GT_GATES_DELIVER_ALWAYS="${GT_GATES_DELIVER_ALWAYS:-0}" \
               -e GT_GIT_COMMIT="${{ github.sha }}" \
               -e GT_SUBSTRATE_DIGEST="$GT_SUBSTRATE_DIGEST" \
               -e GT_TASK_REPO_COMMIT="$TASK_REPO_COMMIT" \
@@ -450,12 +493,16 @@ jobs:
           fi
           docker rm -f gtsrc 2>/dev/null || true
 
-          # §E GT_ARTIFACT_MISSING / SUBSTRATE_MISSING_CERTS — verify the 7-artifact contract.
+          # §E GT_ARTIFACT_MISSING / SUBSTRATE_MISSING_CERTS — verify the 8-artifact contract.
+          # brief.txt INCLUDED (P0.1-c): the agent consumes /gt_artifacts/brief.txt read-only;
+          # in proof mode an empty/missing brief is GT_ARTIFACT_MISSING, never a WARN (there
+          # is no host fallback — host run_v74 is fail-closed by the container boundary).
           for c in graph.db runtime_context.json lsp_certificate.json graph_certificate.json \
-                   embedder_certificate.json foundational_gate_report.json run_manifest.json; do
+                   embedder_certificate.json foundational_gate_report.json run_manifest.json \
+                   brief.txt; do
             test -s "/tmp/gt/$c" || { echo "GT_ARTIFACT_MISSING / SUBSTRATE_MISSING_CERTS: /gt_artifacts/$c absent after gt-run-proof"; exit 1; }
           done
-          echo "all 7 GT artifacts present under /tmp/gt (= /gt_artifacts)"
+          echo "all 8 GT artifacts present under /tmp/gt (= /gt_artifacts)"
 
           # ── Cert-env handoff into the agent (§D) — the adapter reads these READ-ONLY ──
           # GT_HOST_GRAPH_DB + GT_CERT_DIR are the canonical host->agent handoff (proof.py
@@ -518,6 +565,10 @@ jobs:
           # Forward the SUBSTRATE-CONSUME env into the container, pointing at /gt_artifacts.
           # GT_FORBID_PREBUILT_GRAPH + GT_PORTABLE_SUBSTRATE + GT_PROOF_MODE/GT_CONTAINERIZED
           # make the in-container pillars consume-or-fail-closed and keep L6 reindex OFF.
+          # P0.1-b: pipefail + ${PIPESTATUS[0]} (the swebench_30task pattern) — without it
+          # `pier ... | tee` returned tee's 0 and a swallowed adapter raise stayed GREEN.
+          set +e
+          set -o pipefail
           pier run \
             -p deepswe-bench/tasks/${{ matrix.task }} \
             --agent-import-path artifact_deepswe.gt_agent:GTMiniSweAgent \
@@ -535,7 +586,23 @@ jobs:
             --ae GT_RUNTIME_STRATEGY="${GT_RUNTIME_STRATEGY:-unified_substrate}" \
             --ak config_file=artifact_deepswe/gt_integration/deepswe_gt_pier.yaml \
             2>&1 | tee trial_output.log
-          echo "=== Trial complete ==="
+          PIER_RC=${PIPESTATUS[0]}
+          set -e
+          echo "=== Trial complete (pier rc=$PIER_RC) ==="
+          # P0.1-b: pier SWALLOWS adapter exceptions into result files (exception_message in
+          # jobs/<ts>/<task>__*/result.json) — a DeepSweAdapterError can end the run with
+          # pier rc=0. Surface it: any DeepSweAdapterError in the jobs dir or the trial log
+          # fails the step with the DEEPSWE_ADAPTER_FAIL class (the witness step + the
+          # outcome classifier both key on that marker -> class GT, never silent green).
+          if grep -RIq "DeepSweAdapterError" jobs trial_output.log 2>/dev/null; then
+            echo "DEEPSWE_ADAPTER_FAIL: DeepSweAdapterError found in pier jobs/exception_message (swallowed adapter raise)" | tee -a trial_output.log
+            grep -RIn "DeepSweAdapterError" jobs trial_output.log 2>/dev/null | head -5 || true
+            exit 1
+          fi
+          if [ "$PIER_RC" -ne 0 ]; then
+            echo "PIER_RUN_FAIL: pier run exited rc=$PIER_RC (pipefail surfaced — not tee's 0)" | tee -a trial_output.log
+            exit 1
+          fi
 
       - name: Verify DeepSWE adapter witness (§E DEEPSWE_ADAPTER_FAIL / §H consumption proof)
         if: ${{ env.GT_PORTABLE_SUBSTRATE == '1' }}
@@ -570,13 +637,16 @@ jobs:
           mkdir -p trial_results trial_results/gt_artifacts
           cp trial_output.log trial_results/ 2>/dev/null || true
           cp /tmp/gt/graph.db trial_results/graph.db 2>/dev/null || true
-          # §F.10 — upload the 7 GT artifacts the substrate emitted (the proof set), even on
-          # task failure. graph.db is already copied above; mirror the certs + manifests + brief.
+          # §F.10 — upload the 8 GT artifacts the substrate emitted (the proof set, incl.
+          # brief.txt + per-language LSP certs), even on task failure. graph.db is already
+          # copied above; mirror the certs + manifests + brief.
           for a in runtime_context.json lsp_certificate.json graph_certificate.json \
                    embedder_certificate.json foundational_gate_report.json run_manifest.json \
                    brief.txt gt_issue_anchors.json gt_scope_files.txt gt_lsp_metrics.txt; do
             cp "/tmp/gt/$a" "trial_results/gt_artifacts/$a" 2>/dev/null || true
           done
+          # P1-e: per-language LSP certificates (polyglot aggregation — no FAIL cert overwritten)
+          cp /tmp/gt/lsp_certificate_*.json trial_results/gt_artifacts/ 2>/dev/null || true
           cp /tmp/gt/delivered_instruction.txt trial_results/ 2>/dev/null || true
           cp -r jobs trial_results/jobs 2>/dev/null || true
           cp /tmp/gt/*.log              trial_results/ 2>/dev/null || true
@@ -628,11 +698,25 @@ jobs:
           echo "**Provenance** — GT commit: \`${{ github.sha }}\` | deepswe-bench clone SHA: \`${{ needs.prepare.outputs.bench_sha }}\` | substrate digest: \`${GT_SUBSTRATE_DIGEST:-<unset>}\`" >> $GITHUB_STEP_SUMMARY
           echo "Per-task: \`gt_artifacts/run_manifest.json\` (gt_git_commit / substrate_digest / task_repo_commit / runtime_flags / language_distribution / graph_db_sha256 / cert_versions) + \`gt_artifacts/run_provenance.json\` (per-job bench SHA)." >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          RAN=0; TOTAL=0
+          # P0.1-d: parse the n_agent_steps VALUE and require >0. The old check counted the
+          # mere PRESENCE of the token "AGENT_RAN_STEPS|n_agent_steps" — a 0-step / None /
+          # UNKNOWN launch failure carries the token too, so a whole-run launch outage still
+          # summarized as "agent-ran" (the green-zero-run chain). Numeric-only match:
+          # AGENT_RAN_STEPS=None / =UNKNOWN do NOT parse; absent or ==0 counts as launch-fail.
+          RAN=0; TOTAL=0; LAUNCH_FAIL=0
           for d in /tmp/all/deepswe-full-*; do
             [ -d "$d" ] || continue
             TOTAL=$((TOTAL+1))
-            if grep -rqsE "AGENT_RAN_STEPS|n_agent_steps" "$d" 2>/dev/null; then RAN=$((RAN+1)); fi
+            STEPS=$(grep -rhoE "AGENT_RAN_STEPS=[0-9]+" "$d" 2>/dev/null | head -1 | grep -oE "[0-9]+$" || true)
+            if [ -z "$STEPS" ]; then
+              STEPS=$(grep -rhoE '"n_agent_steps"[[:space:]]*:[[:space:]]*[0-9]+' "$d" 2>/dev/null | head -1 | grep -oE "[0-9]+$" || true)
+            fi
+            if [ -n "$STEPS" ] && [ "$STEPS" -gt 0 ]; then
+              RAN=$((RAN+1))
+            else
+              LAUNCH_FAIL=$((LAUNCH_FAIL+1))
+              echo "launch-fail (n_agent_steps=${STEPS:-absent}): $(basename "$d")"
+            fi
           done
-          echo "Artifacts collected: $TOTAL  |  agent-ran (steps>0 detected): $RAN" >> $GITHUB_STEP_SUMMARY
+          echo "Artifacts collected: $TOTAL  |  agent-ran (n_agent_steps>0 PARSED): $RAN  |  launch-fail (steps 0/absent): $LAUNCH_FAIL" >> $GITHUB_STEP_SUMMARY
           echo "Per-task outcome detail is in scripts/verify/deepswe_outcome.py output inside each artifact." >> $GITHUB_STEP_SUMMARY
