@@ -26,7 +26,7 @@ from groundtruth.pretask.curation_map import (
     _NAME_MATCH_FLOOR,
     _has_columns,
 )
-from groundtruth.pretask.v7_4_brief import V74BriefResult, run_v74
+from groundtruth.pretask.v7_4_brief import V74BriefResult, _w_sem_floor, run_v74
 from groundtruth.pretask.contract_map import (
     _callee_sig_args,
     contract_line,
@@ -2211,7 +2211,14 @@ def generate_v1r_brief(
     max_brief_tokens: int = MAX_BRIEF_TOKENS,
     weights: dict[str, float] | None = None,
 ) -> V1RBriefResult:
-    # Density check: if graph is too sparse, graph signals are noise — use BM25 only
+    # Density check: if the graph is too sparse, GRAPH signals (reach/prox/hub)
+    # are noise — zero those and let lexical LEAD. Dense (W_SEM) is FLOORED, not
+    # zeroed (§11.6 locked dense-floor policy: floor, never zero, never
+    # abort-on-sparse — fix 2026-06-09). The prior hard W_SEM=0.0 here was
+    # dead-or-fatal: in proof+require mode forbid_no_sem_config RAISED on every
+    # sparse repo, and off-proof the floor in _adapt_weights_for_issue silently
+    # resurrected 0 -> 0.25 anyway. Graph sparsity says nothing about the
+    # EMBEDDER's health — dense stays alive at the floor while lexical leads.
     _sparse_graph = False
     if weights is None and graph_db:
         try:
@@ -2225,7 +2232,7 @@ def generate_v1r_brief(
             if _edges_per_file < 2.0:
                 _sparse_graph = True
                 weights = {
-                    "W_SEM": 0.0,
+                    "W_SEM": _w_sem_floor(),  # dense floored, never zeroed (§11.6)
                     "W_LEX": 0.70,
                     "W_REACH": 0.0,
                     "W_PROX": 0.0,

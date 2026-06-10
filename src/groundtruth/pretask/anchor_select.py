@@ -202,11 +202,38 @@ def _embed(texts: list[str], model: object, *, is_query: bool = False) -> np.nda
 _SUMMARY_VERSION = "sym2-fn"
 
 
-def _cache_key(graph_db: str) -> str:
+def _cache_key(graph_db: str, model_name: str = "", dim: int = 0) -> str:
+    """Cache key for the per-graph file-embedding matrices.
+
+    MODEL-KEYED (bug fix 2026-06-09): the key folds in the embedder IDENTITY
+    (model name + dim) alongside the graph signature. Before this, the key was
+    md5(db:mtime:size:version) ONLY — a gte<->e5 model switch on the same graph
+    short-circuited into the OTHER model's matrices (memory dict + .embed_cache
+    pkl), which either dim-crashes the matmul (384 vs 768) or, worse, silently
+    scores with stale foreign-model vectors. The identity is computed BEFORE any
+    cache lookup (see _get_file_embeddings)."""
     db_path = Path(graph_db)
     stat = db_path.stat() if db_path.exists() else None
-    sig = f"{graph_db}:{stat.st_mtime if stat else 0}:{stat.st_size if stat else 0}:{_SUMMARY_VERSION}"
+    sig = (
+        f"{graph_db}:{stat.st_mtime if stat else 0}:{stat.st_size if stat else 0}:"
+        f"{_SUMMARY_VERSION}:{model_name}:{dim}"
+    )
     return hashlib.md5(sig.encode()).hexdigest()
+
+
+def _matrices_match_dim(file_matrix: dict, dim: int) -> bool:
+    """True iff EVERY cached per-file matrix is a 2-D array whose vector width
+    equals the CURRENT model's dim. A pkl written under a different-dim model (or
+    a corrupted one) is treated as a cache MISS and recomputed — never consumed
+    (correct-or-quiet: stale vectors must not silently rank files)."""
+    try:
+        for m in file_matrix.values():
+            arr = np.asarray(m)
+            if arr.ndim != 2 or int(arr.shape[1]) != int(dim):
+                return False
+        return True
+    except Exception:
+        return False
 
 
 def _get_file_embeddings(
@@ -228,7 +255,13 @@ def _get_file_embeddings(
     passage (a strict superset of today's behaviour). Empty/blank passages are never
     embedded (correct-or-quiet). Cached in memory AND, per UNIQUE passage, in
     ``_SYMVEC_CACHE`` so only cache-misses are encoded (one batched ONNX pass)."""
-    key = _cache_key(graph_db)
+    # Model identity FIRST — before any cache lookup — so the cache key is
+    # model-keyed and a gte<->e5 switch can never reuse the other model's
+    # matrices (bug fix 2026-06-09: the key previously had NO model identity and
+    # both the memory dict and the .embed_cache pkl short-circuited before
+    # _model_identity ran).
+    model_name, dim = _model_identity(model)
+    key = _cache_key(graph_db, model_name, dim)
     if key in _EMBED_CACHE:
         return _EMBED_CACHE[key]
 
@@ -241,17 +274,18 @@ def _get_file_embeddings(
                 result = pickle.load(f)
             # Validate the on-disk shape matches the sym2-fn contract (a dict of
             # per-file matrices); a stale sym1 .pkl (np.ndarray value) is ignored.
+            # ALSO validate every matrix's vector WIDTH against the CURRENT model
+            # dim — a stale different-dim pkl is a MISS, never silently consumed.
             if (
                 isinstance(result, tuple)
                 and len(result) == 2
                 and isinstance(result[1], dict)
+                and _matrices_match_dim(result[1], dim)
             ):
                 _EMBED_CACHE[key] = result
                 return result
         except Exception:
             pass  # corrupt/legacy cache -> recompute below (correct-or-quiet)
-
-    model_name, dim = _model_identity(model)
 
     conn = sqlite3.connect(graph_db)
     c = conn.cursor()
@@ -411,7 +445,17 @@ def semantic_top_k(
             for fp, score in ranked
             if math.isfinite(score) and score > 0.0
         }
-    return {fp: float(score) for fp, score in ranked[:k_sem_top]}
+    # SEED map: same strictly-positive discipline as the component map (fix
+    # 2026-06-09). A zero/negative-cosine file carries NO semantic evidence —
+    # admitting it as a "semantic_top_k" SEED (anchor + candidate membership)
+    # injected up to k_sem_top no-signal files whenever the embedder was dead or
+    # the corpus mismatched (a zero embedder now yields an EMPTY seed map, not
+    # 20 fake semantic anchors). Correct-or-quiet at the filter level.
+    return {
+        fp: float(score)
+        for fp, score in ranked[:k_sem_top]
+        if math.isfinite(score) and score > 0.0
+    }
 
 
 def select_anchors(

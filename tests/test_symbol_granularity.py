@@ -305,5 +305,36 @@ def test_semantic_top_k_end_to_end_separates_gold(tmp_path):
     print(f"\n[E2E] gold={gold:.6f} sibling={sib:.6f} sep={gold - sib:.6f}")
 
 
+def test_zero_cosine_files_never_become_semantic_seeds(tmp_path):
+    """Fix 2026-06-09: the bounded SEED map (score_all=False) now applies the same
+    strictly-positive discipline as the component map. A zero embedder must yield
+    an EMPTY seed map — not k_sem_top files admitted as fake 'semantic_top_k'
+    anchors at score 0.0 (correct-or-quiet at the filter level).
+
+    RED before the fix: the seed slice was returned unfiltered, so every file
+    came back at 0.0 and entered candidate/anchor membership as semantic seeds."""
+    from groundtruth.pretask import anchor_select
+
+    anchor_select._EMBED_CACHE.clear()
+    anchor_select._SYMVEC_CACHE.clear()
+
+    db = str(tmp_path / "graph.db")
+    _make_graph_db(db, "UNUSEDGOLDTOKEN")
+
+    class _ZeroEmbedder:
+        model_name = "fake/zero"
+        dim = _DIM
+
+        def encode(self, texts, normalize_embeddings=True, show_progress_bar=False, batch_size=128):
+            return np.zeros((len(list(texts)), _DIM), dtype=np.float32)
+
+    seeds = anchor_select.semantic_top_k(
+        "fix the request handler crash", str(tmp_path), db, _ZeroEmbedder()
+    )
+    assert seeds == {}, (
+        f"zero-cosine files admitted as semantic seeds: {list(seeds.items())[:3]}"
+    )
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q", "-s"]))

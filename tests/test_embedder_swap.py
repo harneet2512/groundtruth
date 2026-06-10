@@ -275,6 +275,215 @@ def test_memory_embed_helpers_default_to_e5():
 
 
 # ---------------------------------------------------------------------------
+# (5) Model-keyed embedding cache (P0 fix 2026-06-09) — a gte<->e5 swap must MISS
+# ---------------------------------------------------------------------------
+
+import pickle
+import sqlite3
+from pathlib import Path
+
+
+class _DimEmbedder:
+    """Deterministic fake embedder exposing the container interface
+    (.embed_batch/.embed, model_name + dim) at an arbitrary dim."""
+
+    def __init__(self, name: str, dim: int) -> None:
+        self.model_name = name
+        self.dim = dim
+
+    def _vec(self, text: str) -> list[float]:
+        v = np.zeros(self.dim, dtype=np.float32)
+        v[abs(hash(text)) % self.dim] = 1.0
+        return v.tolist()
+
+    def embed(self, text, is_query=False):
+        return self._vec(text)
+
+    def embed_batch(self, texts, is_query=False):
+        return [self._vec(t) for t in texts]
+
+
+def _mini_graph(path: str) -> None:
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        "CREATE TABLE nodes (id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT,"
+        " name TEXT, qualified_name TEXT, file_path TEXT NOT NULL,"
+        " start_line INTEGER, end_line INTEGER, signature TEXT, return_type TEXT,"
+        " is_exported BOOLEAN DEFAULT 0, is_test BOOLEAN DEFAULT 0,"
+        " language TEXT, parent_id INTEGER);"
+    )
+    conn.execute(
+        "INSERT INTO nodes (label, name, file_path, signature, is_test, language) "
+        "VALUES ('Function', 'load_config', 'src/app.py', '(path)', 0, 'python')"
+    )
+    conn.commit()
+    conn.close()
+
+
+def _fresh_anchor_select():
+    from groundtruth.pretask import anchor_select as a
+
+    a._EMBED_CACHE.clear()
+    a._SYMVEC_CACHE.clear()
+    return a
+
+
+def test_embed_memory_cache_is_model_keyed(tmp_path):
+    """RED before the fix: _cache_key had NO model identity, so the gte call
+    short-circuited into the e5 matrices (384-wide) from the in-memory cache."""
+    a = _fresh_anchor_select()
+    db = str(tmp_path / "graph.db")
+    _mini_graph(db)
+
+    e5 = _DimEmbedder(E5_MODEL, E5_DIM)
+    gte = _DimEmbedder(DEFAULT_EMBED_MODEL, DEFAULT_EMBED_DIM)
+
+    _, m_e5 = a._get_file_embeddings(db, str(tmp_path), e5)
+    assert m_e5["src/app.py"].shape[1] == E5_DIM
+
+    _, m_gte = a._get_file_embeddings(db, str(tmp_path), gte)
+    assert m_gte["src/app.py"].shape[1] == DEFAULT_EMBED_DIM, (
+        "model swap reused the OTHER model's cached matrices (model-blind cache key)"
+    )
+
+
+def test_embed_disk_cache_is_model_keyed(tmp_path):
+    """A .embed_cache pkl written under the e5 identity must MISS under gte
+    (the disk short-circuit was also keyed without model identity)."""
+    a = _fresh_anchor_select()
+    db = str(tmp_path / "graph.db")
+    _mini_graph(db)
+
+    _, m_e5 = a._get_file_embeddings(db, str(tmp_path), _DimEmbedder(E5_MODEL, E5_DIM))
+    assert m_e5["src/app.py"].shape[1] == E5_DIM
+    # Drop the memory cache so only the on-disk pkl could satisfy the next call.
+    a._EMBED_CACHE.clear()
+
+    _, m_gte = a._get_file_embeddings(
+        db, str(tmp_path), _DimEmbedder(DEFAULT_EMBED_MODEL, DEFAULT_EMBED_DIM)
+    )
+    assert m_gte["src/app.py"].shape[1] == DEFAULT_EMBED_DIM, (
+        "disk pkl written under e5 was consumed under gte (model-blind disk key)"
+    )
+
+
+def test_embed_disk_cache_width_mismatch_is_miss(tmp_path):
+    """Defense-in-depth: a pkl under the CORRECT key whose matrices have the WRONG
+    vector width (stale/corrupt) is treated as a MISS and recomputed."""
+    a = _fresh_anchor_select()
+    db = str(tmp_path / "graph.db")
+    _mini_graph(db)
+
+    key = a._cache_key(db, DEFAULT_EMBED_MODEL, DEFAULT_EMBED_DIM)
+    cache_dir = Path(db).parent / ".embed_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    forged = (["src/app.py"], {"src/app.py": np.zeros((1, E5_DIM), dtype=np.float32)})
+    with open(cache_dir / f"{key}.pkl", "wb") as f:
+        pickle.dump(forged, f)
+
+    _, m = a._get_file_embeddings(
+        db, str(tmp_path), _DimEmbedder(DEFAULT_EMBED_MODEL, DEFAULT_EMBED_DIM)
+    )
+    assert m["src/app.py"].shape[1] == DEFAULT_EMBED_DIM, (
+        "wrong-width pkl matrices were consumed instead of being treated as a miss"
+    )
+
+
+# ---------------------------------------------------------------------------
+# (6) The ST hole (P0 fix 2026-06-09): GT_REQUIRE_EMBEDDER=1 means the CONFIGURED
+# model, full stop — sentence-transformers must NOT satisfy "required".
+# ---------------------------------------------------------------------------
+
+
+def _fake_st_module():
+    import types
+
+    fake = types.ModuleType("sentence_transformers")
+
+    class _FakeST:
+        def __init__(self, name):
+            self.name = name
+
+        def encode(self, texts, **kw):
+            return np.zeros((len(list(texts)), 3), dtype=np.float32)
+
+    fake.SentenceTransformer = _FakeST
+    return fake, _FakeST
+
+
+def test_require_embedder_skips_st_in_run_v74(monkeypatch):
+    """RED before the fix: with GT_REQUIRE_EMBEDDER=1 (no GT_FORCE_ONNX),
+    sentence-transformers loaded FIRST and satisfied "required" with an arbitrary
+    host model. Now the ST step is skipped: configured-ONNX-or-raise."""
+    import sys
+
+    from groundtruth.pretask import v7_4_brief as b
+
+    fake, _FakeST = _fake_st_module()
+    monkeypatch.setitem(sys.modules, "sentence_transformers", fake)
+    monkeypatch.setenv("GT_REQUIRE_EMBEDDER", "1")
+    monkeypatch.delenv("GT_FORCE_ONNX_EMBEDDER", raising=False)
+    monkeypatch.setattr(b, "_CACHED_MODEL", None)
+    monkeypatch.setattr(b, "_SEMANTIC_AVAILABLE", None)
+
+    got = None
+    try:
+        got = b._get_model()
+    except RuntimeError as e:
+        # Configured ONNX not baked in this checkout -> fail-loud is the contract.
+        assert "GT_REQUIRE_EMBEDDER" in str(e)
+    assert not isinstance(got, _FakeST), (
+        "required run satisfied by an arbitrary host sentence-transformers model"
+    )
+    if got is not None:  # configured ONNX baked here -> must be the ONNX adapter
+        assert type(got).__name__ == "_OnnxEmbedderAdapter"
+
+
+def test_require_embedder_skips_st_in_localizer(monkeypatch):
+    """Same hole, second half (graph_localizer._get_embedder) — both semantic
+    halves must refuse the ST substitution under require (one surface)."""
+    import sys
+
+    from groundtruth.pretask import graph_localizer as gl
+
+    fake, _FakeST = _fake_st_module()
+    monkeypatch.setitem(sys.modules, "sentence_transformers", fake)
+    monkeypatch.setenv("GT_REQUIRE_EMBEDDER", "1")
+    monkeypatch.delenv("GT_FORCE_ONNX_EMBEDDER", raising=False)
+    monkeypatch.setattr(gl, "_EMBEDDER", None)
+    monkeypatch.setattr(gl, "_EMBEDDER_TRIED", False)
+
+    got = None
+    try:
+        got = gl._get_embedder()
+    except RuntimeError as e:
+        assert "GT_REQUIRE_EMBEDDER" in str(e)
+    assert not isinstance(got, _FakeST), (
+        "required localize satisfied by an arbitrary host sentence-transformers model"
+    )
+    if got is not None:
+        assert type(got).__name__ == "_OnnxEmbedderAdapter"
+
+
+def test_st_still_available_when_require_off(monkeypatch):
+    """No-regression: with the flag OFF, the ST step still loads first (graceful
+    dev-path behavior unchanged)."""
+    import sys
+
+    from groundtruth.pretask import v7_4_brief as b
+
+    fake, _FakeST = _fake_st_module()
+    monkeypatch.setitem(sys.modules, "sentence_transformers", fake)
+    monkeypatch.delenv("GT_REQUIRE_EMBEDDER", raising=False)
+    monkeypatch.delenv("GT_FORCE_ONNX_EMBEDDER", raising=False)
+    monkeypatch.setattr(b, "_CACHED_MODEL", None)
+    monkeypatch.setattr(b, "_SEMANTIC_AVAILABLE", None)
+
+    got = b._get_model()
+    assert isinstance(got, _FakeST)
+
+
+# ---------------------------------------------------------------------------
 # LIVE model-load validation — RUN-WHEN-PRESENT (skips if model not baked)
 # ---------------------------------------------------------------------------
 

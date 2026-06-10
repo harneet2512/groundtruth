@@ -33,6 +33,11 @@ from typing import Any, Literal
 
 from groundtruth.pretask.anchor_select import AnchorRecord, select_anchors
 from groundtruth.pretask.anchors import IssueAnchors, extract_issue_anchors
+# Single source of truth for "deterministic resolution method" (curation_map).
+# Dimension 3 (graph confidence) previously hand-rolled its own 7-method subset,
+# silently dropping impl_method/inherited/unique_method/return_type — genuinely
+# resolved edges counted as non-deterministic, skewing the det-% gate (#fix 2026-06-09).
+from groundtruth.pretask.curation_map import DETERMINISTIC_RESOLUTION_METHODS
 from groundtruth.pretask.graph_reach import compute_reach, graph_expand_candidates
 from groundtruth.pretask.anchor_proximity import compute_anchor_proximity
 from groundtruth.pretask.hub_penalty import compute_hub_penalties, W_HUB_MAX
@@ -128,19 +133,32 @@ def _adapt_weights_for_issue(
     # mixed -> no change (byte-identical to the pre-change ranker for this dim).
 
     # ── Dimension 1: Signal presence ──
+    # COMPOSE-VIA-MAX under identifier_heavy (fix 2026-06-09): when Dimension 0
+    # classified the issue identifier_heavy it floored W_LEX/W_PATH UP (lexical
+    # LEADS — BEIR/Sciavolino). The documented composition contract ("later dims
+    # compose over it via max/min; a later dim can only RAISE a led-up weight")
+    # was violated here by direct assignment, which silently revoked the lexical
+    # lead (W_LEX 0.65 -> 0.25/0.30/0.35) on every backtick-symbol/traceback
+    # issue. Under identifier_heavy, Dim-1 may only RAISE W_LEX/W_PATH; off
+    # identifier_heavy the original direct assignment stands (byte-identical).
+    def _dim1_lexpath(lex: float, path: float) -> None:
+        if lexicality == "identifier_heavy":
+            w["W_LEX"] = max(w.get("W_LEX", 0.0), lex)
+            w["W_PATH"] = max(w.get("W_PATH", 0.0), path)
+        else:
+            w["W_LEX"] = lex
+            w["W_PATH"] = path
+
     if has_frames and has_code_defs:
         w["W_FRAME"] = 0.80
         w["W_CODE_DEF"] = 0.50
-        w["W_LEX"] = 0.25
-        w["W_PATH"] = 0.20
+        _dim1_lexpath(0.25, 0.20)
     elif has_frames:
         w["W_FRAME"] = 0.80
-        w["W_LEX"] = 0.30
-        w["W_PATH"] = 0.25
+        _dim1_lexpath(0.30, 0.25)
     elif has_code_defs:
         w["W_CODE_DEF"] = 0.70
-        w["W_LEX"] = 0.35
-        w["W_PATH"] = 0.30
+        _dim1_lexpath(0.35, 0.30)
 
     # ── Dimension 2: Scope detection (single-file vs multi-file) ──
     if graph_db and issue_anchors and issue_anchors.symbols:
@@ -177,10 +195,15 @@ def _adapt_weights_for_issue(
             _total = _cc.execute(
                 "SELECT COUNT(*) FROM edges WHERE type = 'CALLS'"
             ).fetchone()[0]
+            # Deterministic fact-set from curation_map (single source — fix
+            # 2026-06-09): the prior hand-rolled 7-method literal dropped
+            # impl_method/inherited/unique_method/return_type from the det-%.
+            _det_in = ",".join(
+                "'" + m + "'" for m in sorted(DETERMINISTIC_RESOLUTION_METHODS)
+            )
             _det = _cc.execute(
                 "SELECT COUNT(*) FROM edges WHERE type = 'CALLS' "
-                "AND resolution_method IN ('same_file','import','verified_unique',"
-                "'type_flow','import_type','lsp_verified','lsp')"
+                f"AND resolution_method IN ({_det_in})"
             ).fetchone()[0]
             _cc.close()
             if _total > 0:
@@ -506,7 +529,9 @@ def _get_model() -> Any:
 
     Tries, in order — the SAME order the localizer uses, so run_v74 and localize share
     ONE semantic surface:
-      1. sentence-transformers (if installed)
+      1. sentence-transformers (if installed; SKIPPED under GT_FORCE_ONNX_EMBEDDER=1
+         AND under GT_REQUIRE_EMBEDDER=1 — "required" means the CONFIGURED model,
+         never an arbitrary host ST model)
       2. ONNX code-tuned default (gte-modernbert-base, GT_EMBED_MODEL_NAME/DIM) — container-
          viable, NO torch; this is what makes W_SEM non-zero in the agent's container.
       3. ONNX e5-small-v2 (transition fallback if the code-tuned ONNX is absent/unloadable)
@@ -519,12 +544,19 @@ def _get_model() -> Any:
     # they resolve to the identical (model, dim) — the half-on / "worthless numbers" trap
     # BRIEFING.md §5 forbids stays closed across CHANGE 2. The agent container has no torch.
     _force_onnx = os.environ.get("GT_FORCE_ONNX_EMBEDDER") == "1"
+    # GT_REQUIRE_EMBEDDER=1 means the CONFIGURED model, full stop (ST-hole fix
+    # 2026-06-09): without this, sentence-transformers loaded FIRST and satisfied
+    # "required" with an ARBITRARY host model (all-MiniLM) — a silent substitution
+    # that desyncs the two semantic halves and vacuously stamps the identity cert.
+    # Under require, the ST step is skipped exactly like under force-ONNX:
+    # configured-ONNX-or-raise. ST stays available when the flag is off.
+    _require_embedder = os.environ.get("GT_REQUIRE_EMBEDDER") == "1"
     _st_err: Any = None
     _onnx_err: Any = None
     with _MODEL_LOCK:
         if _CACHED_MODEL is None:
-            # 1. sentence-transformers (skipped under force-ONNX)
-            if not _force_onnx:
+            # 1. sentence-transformers (skipped under force-ONNX AND under require)
+            if not _force_onnx and not _require_embedder:
                 try:
                     from sentence_transformers import SentenceTransformer
                     _CACHED_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
@@ -553,8 +585,9 @@ def _get_model() -> Any:
             # while actually running e5 is the silent-substitution the audit flagged. e5 stays a
             # first-class citizen ONLY for the sqlite-vec MEMORY store (which calls
             # get_embedding_model(E5_MODEL, E5_DIM) directly) and for the GRACEFUL non-proof path
-            # below — NEVER as a proof-path embedder fallback.
-            _require_embedder = os.environ.get("GT_REQUIRE_EMBEDDER") == "1"
+            # below — NEVER as a proof-path embedder fallback. (_require_embedder
+            # is read ONCE at the top of this function: it now also gates the ST
+            # step, so "required" can never be satisfied by an arbitrary host model.)
             if not _require_embedder:
                 # 3. ONNX e5/384 transition fallback (graceful, non-proof only).
                 try:
@@ -973,18 +1006,15 @@ def run_v74(
     if not _SEMANTIC_AVAILABLE:
         effective_weights["W_SEM"] = 0.0
 
-    # PROOF MODE (Stage 3): forbid a config that drops the semantic signal on the
-    # final benchmark path — no-sem ablation (A/B0/B1), GT_RRF_FUSION=det/nosem, or a
-    # zeroed W_SEM. Availability is already enforced in _get_model (raises under
-    # GT_REQUIRE_EMBEDDER); this enforces USAGE INTENT up front. Does NOT change any
-    # weight — only refuses in proof mode. No-op otherwise (BRIEFING §3/§4 safe).
     from groundtruth.runtime import proof as _proof
     # Stage 3: prove run_v74 uses the SAME embedder identity as localize/v1r (model-root
     # divergence -> raise in proof mode). Wires the never-called assert_same_embedder_identity.
     _proof.assert_same_embedder_identity(graph_db, "run_v74")
-    _proof.forbid_no_sem_config(
-        ablation, os.environ.get("GT_RRF_FUSION", ""), float(effective_weights.get("W_SEM", 0.0))
-    )
+    # NOTE (fix 2026-06-09): forbid_no_sem_config moved BELOW _adapt_weights_for_issue
+    # so it judges the POST-adaptation effective W_SEM — the weight ACTUALLY applied to
+    # scoring. The locked §11.6 dense-floor policy floors W_SEM on sparse graphs (never
+    # zero, never abort-on-sparse); judging the caller's PRE-adaptation override here
+    # aborted every sparse-repo brief in proof+require mode even though the floor held.
 
     # Stage A: anchor selection.
     # `sem_scores` = the BOUNDED top-k_sem_top map → drives candidate-set SEED
@@ -1126,6 +1156,18 @@ def run_v74(
         frame_scores, code_def_scores, effective_weights,
         graph_db=graph_db, issue_anchors=issue_anchors, issue_text=issue_text,
         enforce_floor=_enforce_sem_floor,
+    )
+
+    # PROOF MODE (Stage 3): forbid a config that drops the semantic signal on the
+    # final benchmark path — no-sem ablation (A/B0/B1), GT_RRF_FUSION=det/nosem, or a
+    # zeroed W_SEM. Availability is already enforced in _get_model (raises under
+    # GT_REQUIRE_EMBEDDER); this enforces USAGE INTENT. Evaluated on the
+    # POST-adaptation effective W_SEM (fix 2026-06-09): the §11.6 dense floor is
+    # applied by _adapt_weights_for_issue, so a sparse-graph caller override that
+    # the floor lifted back to >0 must NOT abort — no abort when the floor holds.
+    # Does NOT change any weight — only refuses in proof mode. No-op otherwise.
+    _proof.forbid_no_sem_config(
+        ablation, os.environ.get("GT_RRF_FUSION", ""), float(effective_weights.get("W_SEM", 0.0))
     )
 
     if code_def_scores:

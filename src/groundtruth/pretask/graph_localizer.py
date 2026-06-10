@@ -612,15 +612,35 @@ class Candidate:
 
             w = min(edge_wits, key=_display_key)
             rel = "calls" if w.direction == "calls_anchor" else "called by"
+            # PROVENANCE TAG (fix 2026-06-09, correct-or-quiet): an edge whose
+            # resolution_method is NOT in curation_map.DETERMINISTIC_RESOLUTION_METHODS
+            # renders with an explicit "(unverified)" marker. Witness.verified IS
+            # that single-source predicate (_is_verified(method) == method in
+            # _DETERMINISTIC_METHODS). v1r_brief's renderer documented this tag
+            # ("a name_match witness carries its own '(unverified)' tag from the
+            # localizer") but it was never emitted — a name guess rendered exactly
+            # like a structural fact (witness-pipe laundering).
+            tag = "" if w.verified else " (unverified)"
             if w.hop >= 2:
                 far = w.src_symbol if w.direction == "calls_anchor" else w.dst_symbol
                 return (
                     f"{w.anchor} -> ... -> {far} "
-                    f"[{w.edge_type}, {w.hop}-hop]"
+                    f"[{w.edge_type}, {w.hop}-hop]{tag}"
                 )
-            return f"{w.src_symbol} {rel} {w.dst_symbol} [{w.edge_type}]"
+            return f"{w.src_symbol} {rel} {w.dst_symbol} [{w.edge_type}]{tag}"
         w = max(self.witnesses, key=lambda x: x.strength())
-        return f"defines {w.anchor} (issue symbol)"
+        # SEED-TYPED witnesses (fix 2026-06-09): only the exact-name seeder mints
+        # the "defines {name} (issue symbol)" DEFINES fact. A grep/path/FTS5 seed
+        # is a retrieval ENTRY POINT — render it as what it is, never as a
+        # fabricated issue-symbol definition.
+        if w.edge_type == "DEFINES":
+            return f"defines {w.anchor} (issue symbol)"
+        _seed_label = {
+            "GREP_SEED": "grep match",
+            "PATH_SEED": "path match",
+            "FTS5_SEED": "fts5 match",
+        }.get(w.edge_type, "seed match")
+        return f"{_seed_label}: {w.src_symbol or w.anchor}"
 
 
 @dataclass(frozen=True)
@@ -815,6 +835,19 @@ def _path_to_seeds(
     return out
 
 
+def _path_match_token(fp: str, issue_tokens: set[str]) -> str:
+    """The issue token that PATH-matched this file — re-derived with the same
+    component patterns ``_path_to_seeds`` matched on (``/{token}.``, ``/{token}/``,
+    leading ``{token}.``). Longest hit wins; ``""`` when nothing re-derives.
+    Display-only (the seed-typed witness line); never affects ranking."""
+    fpl = "/" + (fp or "").lower()
+    hits = [
+        t for t in issue_tokens
+        if len(t) >= 4 and (f"/{t}." in fpl or f"/{t}/" in fpl)
+    ]
+    return max(hits, key=len) if hits else ""
+
+
 def _grep_to_seeds(
     issue_tokens: set[str],
     repo_root: str,
@@ -890,9 +923,12 @@ def _grep_to_seeds(
             except subprocess.TimeoutExpired:
                 continue
             except FileNotFoundError:
-                # rg binary vanished after shutil.which check — fall through
-                # to Python walk below for remaining tokens
-                break
+                # rg invocation failed for THIS token (binary vanished after the
+                # shutil.which check / transient spawn failure). Fix 2026-06-09:
+                # CONTINUE to the next token — the prior `break` silently aborted
+                # the remaining tokens' recall (and no Python-walk fallback runs
+                # on this branch, so those tokens were simply LOST).
+                continue
         print(
             f"[GT L1] grep-to-seed: rg found {len(hit_files)} files",
             file=_sys_grep.stderr,
@@ -1340,7 +1376,14 @@ def _get_embedder():
     # surface, or the numbers are worthless. Both halves call get_embedding_model() no-arg
     # so they resolve to the identical (model, dim) — the invariant holds across CHANGE 2.
     _force_onnx = os.environ.get("GT_FORCE_ONNX_EMBEDDER") == "1"
-    if not _force_onnx:
+    # GT_REQUIRE_EMBEDDER=1 means the CONFIGURED model, full stop (ST-hole fix
+    # 2026-06-09, mirrors v7_4_brief._get_model): without this, sentence-transformers
+    # loaded FIRST and satisfied "required" with an ARBITRARY host model — silent
+    # substitution that desyncs the two semantic halves (BRIEFING.md §2: block
+    # sentence_transformers; both halves on the SAME ONNX surface). Under require,
+    # the ST step is skipped: configured-ONNX-or-raise. ST stays available when off.
+    _require_embedder = os.environ.get("GT_REQUIRE_EMBEDDER") == "1"
+    if not _force_onnx and not _require_embedder:
         try:
             from sentence_transformers import SentenceTransformer
             # CODE-AWARE embedder (CodeSearchNet query->code; LIPI on sqllineage-557:
@@ -1372,8 +1415,9 @@ def _get_embedder():
     # silently substitute e5 here — that is the silent-substitution the audit flagged, and it
     # would also DESYNC the two halves if one loaded gte and the other e5. e5 stays available
     # ONLY for the sqlite-vec MEMORY store (which calls get_embedding_model(E5_MODEL, E5_DIM)
-    # directly) and for the GRACEFUL non-proof path — NEVER as a proof-path embedder fallback.
-    _require_embedder = os.environ.get("GT_REQUIRE_EMBEDDER") == "1"
+    # directly) and for the GRACEFUL non-proof path — NEVER as a proof-path embedder
+    # fallback. (_require_embedder is read ONCE above: it now also gates the ST step,
+    # so "required" can never be satisfied by an arbitrary host model.)
     if not _require_embedder:
         try:
             # Transition fallback: e5/384 if the code-tuned ONNX is absent/unloadable.
@@ -1581,6 +1625,16 @@ def localize(
 
         seeds = _seed_node_rows(conn, anchors)
 
+        # SEED PROVENANCE (fix 2026-06-09): ONLY these exact-name seeds — the
+        # issue literally names a symbol defined in the file — may mint the
+        # "defines {name} (issue symbol)" DEFINES witness below. Grep/path/FTS5
+        # seeds are retrieval ENTRY POINTS (string/path/BM25 matches), recorded
+        # here so the witness loop can mint an honest seed-typed witness instead
+        # of a fabricated DEFINES at confidence 1.0.
+        _exact_seed_ids: set[int] = {s[0] for s in seeds}
+        _seed_provenance: dict[int, tuple[str, str]] = {}
+        _grep_token_by_file: dict[str, str] = {}
+
         # PATH-TO-SEED: match issue tokens against file PATHS, not just
         # function NAMES. Closes the gap where "flex" matches layout/flex.py
         # but no function is named "flex" (function is flex_layout). Only
@@ -1598,6 +1652,9 @@ def localize(
                     if ps[0] not in existing_ids:
                         seeds.append(ps)
                         existing_ids.add(ps[0])
+                        _seed_provenance[ps[0]] = (
+                            "PATH_SEED", _path_match_token(ps[2], terms)
+                        )
         except Exception as _path_err:
             print(
                 f"[GT L1] path-to-seed: FAILED: {_path_err}",
@@ -1627,15 +1684,20 @@ def localize(
         # Confidence score: fraction of seeds with a verified edge backing
         _verified_seed_files = set()
         if has_method:
+            # Deterministic fact-set from curation_map (single source — fix
+            # 2026-06-09): the prior hand-rolled ('import','same_file','lsp')
+            # subset missed type_flow/verified_unique/impl_method/… so genuinely
+            # verified seeds counted as unverified in the quality gate.
+            _det_in_sq = ",".join("'" + m + "'" for m in sorted(_DETERMINISTIC_METHODS))
             for _, sname, sfp in seeds:
                 try:
                     _v = conn.execute(
                         "SELECT "
                         "(SELECT COUNT(*) FROM edges e JOIN nodes n ON n.id = e.source_id "
-                        " WHERE n.file_path = ? AND e.resolution_method IN ('import','same_file','lsp')) "
+                        f" WHERE n.file_path = ? AND e.resolution_method IN ({_det_in_sq})) "
                         "+ "
                         "(SELECT COUNT(*) FROM edges e JOIN nodes n ON n.id = e.target_id "
-                        " WHERE n.file_path = ? AND e.resolution_method IN ('import','same_file','lsp'))",
+                        f" WHERE n.file_path = ? AND e.resolution_method IN ({_det_in_sq}))",
                         (sfp, sfp),
                     ).fetchone()
                     if _v and _v[0] > 0:
@@ -1670,6 +1732,7 @@ def localize(
                         if gs[0] not in existing_ids:
                             seeds.append(gs)
                             existing_ids.add(gs[0])
+                            _seed_provenance[gs[0]] = ("GREP_SEED", "")
                     _grep_seed_used = True
                 # Grep STRENGTH per recalled file = distinct issue-token coverage
                 # (the same signal grep-only ranks by). Used for within-floor rank
@@ -1679,7 +1742,12 @@ def localize(
                     try:
                         _txt = open(os.path.join(repo_root, _fp), encoding="utf-8",
                                     errors="ignore").read(500_000).lower()
-                        grep_score_by_file[_fp] = sum(1 for t in _gtoks if t in _txt)
+                        _hit_toks = [t for t in _gtoks if t in _txt]
+                        grep_score_by_file[_fp] = len(_hit_toks)
+                        if _hit_toks:
+                            # Longest matched token = the displayed grep-witness
+                            # token ("grep match: {token}"). Display-only.
+                            _grep_token_by_file[_fp] = max(_hit_toks, key=len)
                     except OSError:
                         grep_score_by_file[_fp] = 0
             except Exception as _grep_err:
@@ -1710,6 +1778,7 @@ def localize(
                     if nid not in existing_ids:
                         seeds.append((nid, name, fp))
                         existing_ids.add(nid)
+                        _seed_provenance[nid] = ("FTS5_SEED", str(name or ""))
                 _fts5_seed_used = True
         except Exception as _fts_err:
             print(
@@ -1745,7 +1814,30 @@ def localize(
         seed_ids = [s[0] for s in seeds]
         seed_name_by_id = {s[0]: s[1] for s in seeds}
 
-        for _, name, fp in seeds:
+        for sid, name, fp in seeds:
+            if sid not in _exact_seed_ids:
+                # Fix 2026-06-09 (witness provenance): a grep/path/FTS5 seed is a
+                # retrieval ENTRY POINT — the issue did NOT name this symbol.
+                # Minting "defines {name} (issue symbol)" for it fabricated a
+                # verified-grade DEFINES fact (conf 1.0) out of a string/path/BM25
+                # match, which the [VERIFIED] gate, verified-first sort and HIGH
+                # header then consumed as structural truth. These seeds now carry
+                # a seed-typed, UNVERIFIED witness (rendered "grep match: …" /
+                # "path match: …" / "fts5 match: …") at confidence 0.35 — below
+                # the demoted-DEFINES grade (0.45) so an exact-name DEFINES always
+                # outranks them. BFS traversal from these seeds is unchanged.
+                _kind, _tok = _seed_provenance.get(sid, ("SEED", ""))
+                if _kind == "GREP_SEED" and not _tok:
+                    _tok = _grep_token_by_file.get(fp, "")
+                witnesses_by_file.setdefault(fp, []).append(
+                    Witness(
+                        file_path=fp, anchor=name, edge_type=_kind,
+                        direction="defines_anchor", verified=False,
+                        confidence=0.35, hop=0,
+                        src_symbol=_tok or name, dst_symbol=name,
+                    )
+                )
+                continue
             # A DEFINES seed is a NAME MATCH: "the issue token equals a symbol
             # defined in this file". For a DISTINCTIVE symbol (set_fields,
             # aware_now, _to_geo) that is strong localization evidence -> verified
