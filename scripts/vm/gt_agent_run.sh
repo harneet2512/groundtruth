@@ -666,6 +666,7 @@ PYEOF
     # byte-mirrored (8 proof flags + issue file + provenance), per-task paths.
     T0=$(date +%s)
     docker run --rm \
+        --memory="${GT_PROOF_MEM:-7g}" --memory-swap="${GT_PROOF_MEM:-7g}" \
         -v "$art_dir/src:/work:ro" -v "$art_dir:/gt_artifacts" \
         -v "$art_dir/issue.txt:/work_issue.txt:ro" \
         -e GT_PROOF_MODE=1 -e GT_CONTAINERIZED=1 -e GT_RUNTIME_STRATEGY=unified_substrate \

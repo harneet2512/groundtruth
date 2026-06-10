@@ -298,7 +298,11 @@ sys.exit(0 if (r.get("failure_class") or r.get("proof_exit_code", -1) != 0) else
     # The byte-identical proof command: 8 proof flags + GT_GIT_COMMIT provenance.
     # Repo mounted /work:ro (never mutated); artifacts -> /gt_artifacts. No LLM,
     # no agent, no issue/gold input.
+    # Memory cap per proof container: a runaway encode OOMs the CONTAINER (exit 137,
+    # classified row) instead of the HOST (global OOM killed the box 2026-06-10: one
+    # python3 hit 15.8G RSS at PARALLEL=8 -> sshd/DHCP paralysis). 4 x 7g fits 32G.
     docker run --rm \
+      --memory="${GT_PROOF_MEM:-7g}" --memory-swap="${GT_PROOF_MEM:-7g}" \
       -v "$src_dir:/work:ro" \
       -v "$out_task:/gt_artifacts" \
       -e GT_PROOF_MODE=1 \
