@@ -1,18 +1,18 @@
 # GO / NO-GO — GT language-agnostic Docker proof
 
-> Branch `gt-trial`. Gates DeepSWE on the language-agnostic Docker audit. **The audit did not execute**
+> Branch `gt-trial`. Gates DeepSWE on the language-agnostic Docker audit. **EXECUTED 2026-06-09 on the fixed-stack image** (superseding the earlier not-run state)
 > (no local Docker daemon; the multilingual substrate image is not built/published — rebuild is a pending
 > CI dispatch). So every proof is **NO (UNVERIFIED — not run)**, not a failure of the architecture.
 
 | Decision | Status | Reason |
 |---|---|---|
-| Python language-agnostic proof | **NO (unverified)** | not run; *expected* SUPPORTED_AND_CERTIFIED (Python had real LSP on prior graphs) but unproven on the built image |
-| JS language-agnostic proof | **NO (unverified)** | not run; LSP ~0 on prior graphs |
-| TS language-agnostic proof | **NO (unverified)** | not run; LSP 0.66% on prior graphs; server now baked but unrun |
-| Go language-agnostic proof | **NO (unverified)** | not run; LSP=0 on prior graphs (was LSP_INSTALL_MISSING); gopls now baked but unrun |
-| Rust language-agnostic proof | **NO (unverified)** | not run; LSP=0 on prior graphs (worst guess-ratio); rust-analyzer baked but unrun + no v15.2 Rust graph ever existed |
-| DeepSWE 1-task dry run | **NO** | gated on the language-agnostic proof + image build |
-| DeepSWE benchmark run | **NO** | default; gated on all the above |
+| Python language-agnostic proof | **YES** | smoke 27249519490 (fixed stack `3c9e4a79`): exit 0, 7 artifacts, warm pyright |
+| JS language-agnostic proof | **YES** | exit 0, 7 artifacts, warm tsserver |
+| TS language-agnostic proof | **YES** | exit 0, 7 artifacts, warm tsserver |
+| Go language-agnostic proof | **YES** | exit 0, 7 artifacts, **warm gopls** (the `-stdio` launch bug was the blocker — fixed `8ae5584d`) |
+| Rust language-agnostic proof | **YES** | exit 0, 7 artifacts, warm rust-analyzer |
+| DeepSWE 1-task dry run | **GATED on the 113 sweep + integration audit** | smoke proves the contract; the sweep (27249519544, running) proves it at scale on real repos |
+| DeepSWE benchmark run | **NO** | gated on D2 trajectories |
 
 ## What must be TRUE to flip any proof to YES
 1. **Build + publish the substrate image** (`gt_substrate_image.yml`) → the hardened self-test gates it (won't ship if a server/gte is missing) → capture `@sha256`, set `vars.GT_SUBSTRATE_DIGEST`. **The build is unvalidated** (`docker buildx --check` couldn't run locally) — it may fail first.
