@@ -132,3 +132,11 @@ Tier 3: gold_in_brief=True - first_gold_rank=1.0 - gold_edited=True - first_edit
 Tier 4: action_count=33.00000000 - gt_injected_tokens=601.00000000 - looped_stuck=False - self_localized=False
 Tier 6: foundational_gates=GREEN (all_on=true) - test_names_leaked=0 - fail_to_pass_leaked=false - no_gold_labels=true - telemetry stdout leak=1 (`[gt-patch:loaded]`) - VOID=false
 Tier 7: llm_in=665917.00000000 - llm_out=14913.00000000 - llm_cost_usd=0.00000000 (none_litellm_unmapped) - wall_clock_s=243.26526403 - time_to_gold_view_s=0.00000000
+
+
+### Tier 3b architectural conformance - 2026-06-10 (PATH B run 27260307167)
+
+- **Substrate (verbatim certs):** graph det_pct=71.35262847 (calls=35553, name_match=10185), FTS5 17790 rows probe ok; LSP `LSP_ACTIVE_VALID`, warm probe 1.54972076 ms, verified/corrected/deleted=1656/2281/1, promoted 3937; embedder gte-768 separating (0.71040983 / 0.29940427), effective_w_sem=0.25, sem_mad=0.210425. Graph-cert FAIL verdict = documented FALSE FAIL (par.12).
+- **Brief vs gold:** HIGH single steer `Edit target: astropy/wcs/wcsapi/wrappers/sliced_wcs.py` = gold. Trajectory-verified: agent's literal FIRST command `cd /testbed && cat astropy/wcs/wcsapi/wrappers/sliced_wcs.py`, zero search actions; fix flowed through brief-named `_pixel_to_world_values_all`.
+- **localization_root_cause = CORRECT. gt_conformant = YES - the exemplar of the par.4 pipeline working as specified end-to-end.**
+- Cross-run reference: full table + split in `.claude/reports/runs/pathB_verified_trial_27260307167/TIER3B_ARCHITECTURAL_CONFORMANCE.md`. Run-level split: wrong-localization = 4/4 RERANK_LOGIC, 0 LSP_NOT_WARM, 0 EMBEDDER_OFF, 0 GRAPH_SPARSE - substrate solved, rerank logic is the live lever.

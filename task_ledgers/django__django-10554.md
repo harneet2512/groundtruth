@@ -136,3 +136,11 @@ Tier 3: gold_in_brief=True - first_gold_rank=2.0 - gold_edited=False - first_edi
 Tier 4: action_count=112.00000000 - gt_injected_tokens=798.00000000 - looped_stuck=False - self_localized=True
 Tier 6: foundational_gates=GREEN (all_on=true) - test_names_leaked=0 - fail_to_pass_leaked=false - no_gold_labels=true - telemetry stdout leak=1 (`[gt-patch:loaded]`) - VOID=false
 Tier 7: llm_in=5069498.00000000 - llm_out=43641.00000000 - llm_cost_usd=0.00000000 (none_litellm_unmapped) - wall_clock_s=603.96364403 - time_to_gold_view_s=10.68186069
+
+
+### Tier 3b architectural conformance - 2026-06-10 (PATH B run 27260307167)
+
+- **Substrate (verbatim certs):** graph det_pct=70.39690184 (calls=49836, name_match=14753), FTS5 29543 rows probe ok; LSP `LSP_ACTIVE_VALID`, warm probe 1.32012367 ms, verified/corrected/deleted=733/820/1, promoted 1553; embedder gte-768 separating (0.71040983 / 0.29940427), effective_w_sem=0.25, sem_mad=0.00000000, pred_2_coverage=False. Graph-cert FAIL verdict = documented FALSE FAIL (par.12).
+- **Brief vs gold:** gold `django/db/models/sql/compiler.py` at **rank 2** (MEDIUM); agent went straight to `query.py` from its own analysis (trajectory-verified first commands), read compiler.py twice and walked away - ~9 lost turns. Delivery/consumption loss, not a ranking failure.
+- **localization_root_cause = CORRECT (delivered, unconsumed). gt_conformant = YES.**
+- Cross-run reference: full table + split in `.claude/reports/runs/pathB_verified_trial_27260307167/TIER3B_ARCHITECTURAL_CONFORMANCE.md`. Run-level split: wrong-localization = 4/4 RERANK_LOGIC, 0 LSP_NOT_WARM, 0 EMBEDDER_OFF, 0 GRAPH_SPARSE - substrate solved, rerank logic is the live lever.

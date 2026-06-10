@@ -140,3 +140,11 @@ Tier 3: gold_in_brief=True - first_gold_rank=1.0 - gold_edited=True - first_edit
 Tier 4: action_count=96.00000000 - gt_injected_tokens=708.00000000 - looped_stuck=False - self_localized=True
 Tier 6: foundational_gates=GREEN (all_on=true) - test_names_leaked=0 - fail_to_pass_leaked=false - no_gold_labels=true - telemetry stdout leak=1 (`[gt-patch:loaded]`) - VOID=false
 Tier 7: llm_in=2291437.00000000 - llm_out=13736.00000000 - llm_cost_usd=0.00000000 (none_litellm_unmapped) - wall_clock_s=313.41393256 - time_to_gold_view_s=0.00000000
+
+
+### Tier 3b architectural conformance - 2026-06-10 (PATH B run 27260307167)
+
+- **Substrate (verbatim certs):** graph det_pct=71.30456910 (calls=35368, name_match=10149), FTS5 17705 rows probe ok; LSP `LSP_ACTIVE_VALID`, warm probe 1.39570236 ms, verified/corrected/deleted=1650/2265/1, promoted 3915; embedder gte-768 separating (0.71040983 / 0.29940427), effective_w_sem=0.25, sem_mad=0.054196. Graph-cert FAIL verdict = documented FALSE FAIL (par.12).
+- **Brief vs gold:** gold `astropy/table/table.py` at **rank 1** (MEDIUM). Fair probe bad (issue quotes the code) - rank-1 was redundant; the miss is post-localization content (FutureWarning wording vs hidden `match=` assert).
+- **localization_root_cause = CORRECT. gt_conformant = YES.**
+- Cross-run reference: full table + split in `.claude/reports/runs/pathB_verified_trial_27260307167/TIER3B_ARCHITECTURAL_CONFORMANCE.md`. Run-level split: wrong-localization = 4/4 RERANK_LOGIC, 0 LSP_NOT_WARM, 0 EMBEDDER_OFF, 0 GRAPH_SPARSE - substrate solved, rerank logic is the live lever.

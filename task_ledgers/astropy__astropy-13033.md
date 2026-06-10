@@ -141,3 +141,11 @@ Tier 3: gold_in_brief=False - first_gold_rank=absent (no abstain taken) - gold_e
 Tier 4: action_count=62.00000000 - gt_injected_tokens=686.00000000 - looped_stuck=False - self_localized=True
 Tier 6: foundational_gates=GREEN (all_on=true) - test_names_leaked=0 - fail_to_pass_leaked=false - no_gold_labels=true - telemetry stdout leak=1 (`[gt-patch:loaded]`) - VOID=false
 Tier 7: llm_in=1142314.00000000 - llm_out=9574.00000000 - llm_cost_usd=0.00000000 (none_litellm_unmapped) - wall_clock_s=215.06733394 - time_to_gold_view_s=5.25348043
+
+
+### Tier 3b architectural conformance - 2026-06-10 (PATH B run 27260307167)
+
+- **Substrate (verbatim certs):** graph det_pct=71.82873149 (calls=34986, name_match=9856), FTS5 17582 rows probe ok; LSP `LSP_ACTIVE_VALID`, warm probe 1.46603584 ms, verified/corrected/deleted=1665/2211/1, promoted 3876, closure rebuilt post-LSP; embedder gte-768 separating (0.71040983 / 0.29940427), effective_w_sem=0.25, **sem_mad=0.00000000, pred_2_coverage=False** (dense scored 2 of 5 rendered). Graph-cert FAIL verdict = the documented FALSE FAIL (par.12).
+- **Brief vs gold:** gold `astropy/timeseries/core.py` **ABSENT** from all 6 MEDIUM slots (votable/tree.py, time/core.py, table.py, column.py, iers.py, sky_coordinate.py) despite anchors `TimeSeries` + `remove_column` and a green FTS5 - candidate-union/fusion miss with a flat dense signal.
+- **localization_root_cause = RERANK_LOGIC** (substrate gates all GREEN, gold absent - the par.4.2/par.11.2 lever). **gt_conformant = YES on substrate stages; localization output non-conformant to its job.**
+- Cross-run reference: full table + split in `.claude/reports/runs/pathB_verified_trial_27260307167/TIER3B_ARCHITECTURAL_CONFORMANCE.md`. Run-level split: wrong-localization = 4/4 RERANK_LOGIC, 0 LSP_NOT_WARM, 0 EMBEDDER_OFF, 0 GRAPH_SPARSE - substrate solved, rerank logic is the live lever.

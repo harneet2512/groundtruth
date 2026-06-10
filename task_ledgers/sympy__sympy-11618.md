@@ -137,3 +137,11 @@ Tier 3: gold_in_brief=True - first_gold_rank=6.0 - gold_edited=True - first_edit
 Tier 4: action_count=68.00000000 - gt_injected_tokens=672.00000000 - looped_stuck=False - self_localized=True
 Tier 6: foundational_gates=GREEN (all_on=true) - test_names_leaked=0 - fail_to_pass_leaked=false - no_gold_labels=true - telemetry stdout leak=1 (`[gt-patch:loaded]`) - VOID=false
 Tier 7: llm_in=991948.00000000 - llm_out=9886.00000000 - llm_cost_usd=0.00000000 (none_litellm_unmapped) - wall_clock_s=225.21403694 - time_to_gold_view_s=14.30868769
+
+
+### Tier 3b architectural conformance - 2026-06-10 (PATH B run 27260307167)
+
+- **Substrate (verbatim certs):** graph det_pct=68.36441261 (calls=56683, name_match=17932), FTS5 21484 rows probe ok; LSP `LSP_ACTIVE_VALID`, warm probe 1.23929977 ms, verified/corrected/deleted=823/1662/85, promoted 2485; embedder gte-768 separating (0.71040983 / 0.29940427), effective_w_sem=0.25, **sem_mad=0.00000000, pred_2_coverage=False**. Graph-cert FAIL verdict = documented FALSE FAIL (par.12).
+- **Brief vs gold:** gold `sympy/geometry/point.py` at **rank 6 of 6** (LOW). Title anchor `distance` is DEFINED in gold (the brief itself renders `point.py - distance, Point, __new__`), yet fusion ordered ellipse/line/polygon/expr/plane above it with a flat dense signal. Honest LOW label = conformant correct-or-quiet; the ORDER is the defect.
+- **localization_root_cause = RERANK_LOGIC** (substrate GREEN, gold last). **gt_conformant = YES on substrate + tiering; fusion order non-conformant to its job.**
+- Cross-run reference: full table + split in `.claude/reports/runs/pathB_verified_trial_27260307167/TIER3B_ARCHITECTURAL_CONFORMANCE.md`. Run-level split: wrong-localization = 4/4 RERANK_LOGIC, 0 LSP_NOT_WARM, 0 EMBEDDER_OFF, 0 GRAPH_SPARSE - substrate solved, rerank logic is the live lever.
