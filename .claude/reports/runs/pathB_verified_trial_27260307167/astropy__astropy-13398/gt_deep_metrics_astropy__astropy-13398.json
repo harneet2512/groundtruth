@@ -1,0 +1,118 @@
+{
+  "task_id": "astropy__astropy-13398",
+  "schema": "gt_deep_metrics.v2",
+  "producer": "verified_deep_metrics",
+  "pipeline": "verified-miniswe",
+  "precision_decimals": 8,
+  "branch": "gt-trial",
+  "git_commit": "301e367d7c038f26786791904718243e423a38ee",
+  "outcome": "unresolved_with_patch",
+  "failure_stage": "none",
+  "agent_started": true,
+  "resolved": false,
+  "has_patch": true,
+  "exit_status": "Submitted",
+  "gt_baseline": false,
+  "official_eval": {
+    "classification": "AGENT",
+    "eval_no_report": false,
+    "had_predictions": true,
+    "in_resolved_denominator": true
+  },
+  "model": {
+    "name": "deepseek/deepseek-v4-flash",
+    "params": {
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "max_tokens": 8192,
+      "presence_penalty": 0,
+      "frequency_penalty": 0,
+      "thinking": "disabled"
+    }
+  },
+  "language": null,
+  "substrate_digest": "ghcr.io/hbali-stack/gt-substrate@sha256:db7bd22de2299ce677f78048d47a4796280556d9ef64a22853fe48eb0cfdc1b9",
+  "task_repo_commit": "6500928dc0e57be8f06d1162eacc3ba5e2eff692",
+  "graph_hash": null,
+  "graph_db_sha256": "d5e457596272254e46e386be381bf7aec1533bd3946a9e28455bbc8e9cc26bcd",
+  "trajectory_path": "/tmp/results/astropy__astropy-13398/astropy__astropy-13398.traj.json",
+  "trajectory_sha256": "fda2f2fc1442ce74e69372ce7e6a740af840fafa64141d78c9a06ed179dde663",
+  "max_iter": 250,
+  "wall_clock_s": 227.31242561,
+  "substrate": {
+    "graph_nodes": null,
+    "graph_edges": null,
+    "det_pct": null,
+    "resolution_method_dist": null,
+    "lsp_resolved": null,
+    "lsp_residual": 3102,
+    "lsp_verified": null,
+    "lsp_corrected": null,
+    "lsp_deleted": null,
+    "lsp_no_op_valid": null,
+    "gt_artifacts_dir": "/tmp/gt",
+    "brief_chars": 2965.0
+  },
+  "gt_injected_tokens_total": 741.0,
+  "efficiency": {
+    "model": "deepseek/deepseek-v4-flash",
+    "cost_source": "none_litellm_unmapped",
+    "llm_calls": 48.0,
+    "llm_tokens_in": 1254914.0,
+    "llm_tokens_out": 9862.0,
+    "llm_cache_hit_tokens": 1221888.0,
+    "llm_cache_miss_tokens": 33026.0,
+    "llm_tokens_total": 1264776.0,
+    "llm_cost_usd": 0.0,
+    "gt_injected_tokens_total": 741.0,
+    "gt_sent_tokens": 741.0,
+    "tokens_per_action": 26349.5,
+    "cost_per_action_usd": 0.0,
+    "gt_injection_overhead_pct": 0.05904787
+  },
+  "gt_delivery": {
+    "brief_delivered": 2.0,
+    "evidence_delivered": 13.0,
+    "scope_delivered": 10.0,
+    "contract_delivered": 2.0,
+    "cochange_delivered": 1.0,
+    "nudge_delivered": 2.0,
+    "gt_observation_chars_total": 55539.0,
+    "raw_delivered_gt_samples": [
+      "<gt-task-brief>\n<gt-localization confidence=\"medium\">\nCandidate edit targets (reason over these):\n  1. astropy/coordinates/transformations.py \u2014 FunctionTransformWithFiniteDifference, frame_attrs_from_set, frame_comps_from_set\n     resolved caller: _get_frame_class() in astropy/coordinates/sky_coordinate_parsers.py:39\n  2. astropy/coordinates/earth.py \u2014 to_geodetic, lon, lat\n     resolved caller: earth_location() in astropy/coordinates/builtin_frames/itrs.py:35\n  3. astropy/coordinates/baseframe.py \u2014 realize_frame, cartesian, _get_repr_cls\n     resolved caller: from_tree_transform() in astropy/",
+      "<gt-scope files=\"5\">\n1. builtin_frames/intermediate_rotation_transforms.py \u2014 in scope (you are viewing this)\n2. tests/test_intermediate_transformations.py \u2014 graph-connected\n3. coordinates/matrix_utilities.py \u2014 graph-connected\n4. builtin_frames/utils.py \u2014 graph-connected\n5. coordinates/earth.py \u2014 graph-connected\nThese files are related in scope; GT has not confirmed a single primary target \u2014 confirm the edit target with grep.\n</gt-scope>\n<gt-evidence kind=\"post_view\" file=\"astropy/coordinates/builtin_frames/intermediate_rotation_transforms.py\">\n[WITNESS] get_gcrs_posvel called by -> astropy/coo",
+      "<gt-scope note=\"in-scope\">\n[GT] builtin_frames/intermediate_rotation_transforms.py: also in GT scope.\n</gt-scope></output>",
+      "<gt-evidence kind=\"post_view\" file=\"astropy/coordinates/builtin_frames/itrs.py\">\n[WITNESS] _wcs_to_celestial_frame_builtin called by -> astropy/wcs/utils.py:102 `frame = ITRS(representation_type=SphericalRepresentation,`\n[WITNESS] teme_to_itrs called by -> astropy/coordinates/builtin_frames/intermediate_rotation_transforms.py:258 `itrs = ITRS(crepr, obstime=teme_coo.obstime)`\n[WITNESS] represent_as calls -> astropy/coordinates/baseframe.py:964 `def represent_as(self, base, s='base', in_frame_units=False):`\n[WITNESS] EarthLocation calls -> astropy/coordinates/earth.py:164 `class EarthLocation(u",
+      "<gt-evidence kind=\"post_view\" file=\"astropy/coordinates/builtin_frames/cirs_observed_transforms.py\">\n[WITNESS] any calls -> astropy/units/quantity.py:1879 `def any(self, axis=None, out=None):`\n[WITNESS] transform_to calls -> astropy/coordinates/baseframe.py:1144 `def transform_to(self, new_frame):`\n</gt-evidence></output>",
+      "<gt-scope reason=\"re-anchored\">\n1. builtin_frames/icrs_observed_transforms.py \u2014 you have moved here; re-grounding scope\n2. coordinates/representation.py \u2014 graph-connected\n3. builtin_frames/utils.py \u2014 graph-connected\n4. table/table.py \u2014 graph-connected\n5. coordinates/baseframe.py \u2014 graph-connected\nGT re-anchored scope on your current file \u2014 confirm the edit target with grep.\n</gt-scope>\n<gt-evidence kind=\"post_view\" file=\"astropy/coordinates/builtin_frames/icrs_observed_transforms.py\">\n[WITNESS] isinstance calls -> astropy/table/table.py:308 `def isinstance(self, cls):`\n[WITNESS] apco calls -> ",
+      "<gt-scope note=\"in-scope\">\n[GT] tests/test_intermediate_transformations.py: also in GT scope.\n</gt-scope>\n<gt-evidence kind=\"post_view\" file=\"astropy/coordinates/tests/test_intermediate_transformations.py\">\n[WITNESS] golden_spiral_grid calls -> astropy/coordinates/angle_utilities.py:156 `def golden_spiral_grid(size):`\n[WITNESS] ICRS calls -> astropy/coordinates/builtin_frames/icrs.py:11 `class ICRS(BaseRADecFrame):`\n</gt-evidence></output>",
+      "<gt-scope note=\"in-scope\">\n[GT] builtin_frames/utils.py: also in GT scope.\n</gt-scope>\n<gt-evidence kind=\"post_view\" file=\"astropy/coordinates/builtin_frames/utils.py\">\n[WITNESS] teme_to_itrs_mat called by -> astropy/coordinates/builtin_frames/intermediate_rotation_transforms.py:29 `gst = erfa.gmst82(*get_jd12(time, 'ut1'))`\n[WITNESS] _mean_ecliptic_rotation_matrix called by -> astropy/coordinates/builtin_frames/ecliptic_transforms.py:30 `return erfa.ecm06(*get_jd12(equinox, 'tt'))`\n[WITNESS] pm_xy calls -> astropy/utils/iers/iers.py:336 `def pm_xy(self, jd1, jd2=0., return_status=False):`\n[WI"
+    ]
+  },
+  "agent": {
+    "action_count": 48.0,
+    "n_calls": 48.0,
+    "edits": 16.0,
+    "first_edit_action": 13.0,
+    "edit_to_gold_action": 0.0,
+    "gold_edited": null,
+    "edited_files": [
+      "astropy/coordinates/builtin_frames/altaz.py",
+      "astropy/coordinates/builtin_frames/hadec.py",
+      "astropy/coordinates/builtin_frames/utils.py",
+      "astropy/coordinates/builtin_frames/itrs_observed_transforms.py",
+      "itrs_observed_transforms.py",
+      "astropy/coordinates/builtin_frames/__init__.py",
+      "astropy/coordinates/tests/test_intermediate_transformations.py",
+      "a/astropy/coordinates/builtin_frames/itrs_observed_transforms.py",
+      "b/astropy/coordinates/builtin_frames/itrs_observed_transforms.py"
+    ]
+  },
+  "inputs_present": {
+    "trajectory": true,
+    "outcome_json": true,
+    "substrate_certs": true,
+    "brief": true,
+    "graph_db": true
+  }
+}

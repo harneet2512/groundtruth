@@ -1,0 +1,115 @@
+{
+  "task_id": "sympy__sympy-12096",
+  "schema": "gt_deep_metrics.v2",
+  "producer": "verified_deep_metrics",
+  "pipeline": "verified-miniswe",
+  "precision_decimals": 8,
+  "branch": "gt-trial",
+  "git_commit": "301e367d7c038f26786791904718243e423a38ee",
+  "outcome": "resolved",
+  "failure_stage": "none",
+  "agent_started": true,
+  "resolved": true,
+  "has_patch": true,
+  "exit_status": "Submitted",
+  "gt_baseline": false,
+  "official_eval": {
+    "classification": "RESOLVED",
+    "eval_no_report": false,
+    "had_predictions": true,
+    "in_resolved_denominator": true
+  },
+  "model": {
+    "name": "deepseek/deepseek-v4-flash",
+    "params": {
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "max_tokens": 8192,
+      "presence_penalty": 0,
+      "frequency_penalty": 0,
+      "thinking": "disabled"
+    }
+  },
+  "language": null,
+  "substrate_digest": "ghcr.io/hbali-stack/gt-substrate@sha256:db7bd22de2299ce677f78048d47a4796280556d9ef64a22853fe48eb0cfdc1b9",
+  "task_repo_commit": "d7c3045115693e887bcd03599b7ca4650ac5f2cb",
+  "graph_hash": null,
+  "graph_db_sha256": "6e5aa2c45e1c1c4f81cb8cd8afa76fecf44279efaf18969309244cee76c4e6ae",
+  "trajectory_path": "/tmp/results/sympy__sympy-12096/sympy__sympy-12096.traj.json",
+  "trajectory_sha256": "0491d607b74b55b11bf8d77e61db618cd5d6a0384ba936d313e6ccc3bfe65fce",
+  "max_iter": 250,
+  "wall_clock_s": 150.46497965,
+  "substrate": {
+    "graph_nodes": null,
+    "graph_edges": null,
+    "det_pct": null,
+    "resolution_method_dist": null,
+    "lsp_resolved": null,
+    "lsp_residual": 5735,
+    "lsp_verified": null,
+    "lsp_corrected": null,
+    "lsp_deleted": null,
+    "lsp_no_op_valid": null,
+    "gt_artifacts_dir": "/tmp/gt",
+    "brief_chars": 2310.0
+  },
+  "gt_injected_tokens_total": 578.0,
+  "efficiency": {
+    "model": "deepseek/deepseek-v4-flash",
+    "cost_source": "none_litellm_unmapped",
+    "llm_calls": 51.0,
+    "llm_tokens_in": 609334.0,
+    "llm_tokens_out": 7725.0,
+    "llm_cache_hit_tokens": 593280.0,
+    "llm_cache_miss_tokens": 16054.0,
+    "llm_tokens_total": 617059.0,
+    "llm_cost_usd": 0.0,
+    "gt_injected_tokens_total": 578.0,
+    "gt_sent_tokens": 578.0,
+    "tokens_per_action": 12099.19607843,
+    "cost_per_action_usd": 0.0,
+    "gt_injection_overhead_pct": 0.09485766
+  },
+  "gt_delivery": {
+    "brief_delivered": 2.0,
+    "evidence_delivered": 12.0,
+    "scope_delivered": 6.0,
+    "contract_delivered": 4.0,
+    "cochange_delivered": 1.0,
+    "nudge_delivered": 1.0,
+    "gt_observation_chars_total": 23772.0,
+    "raw_delivered_gt_samples": [
+      "<gt-task-brief>\n<gt-localization confidence=\"high\">\nEdit target: sympy/utilities/lambdify.py :: lambdify\n  guard/return to update: null_check|modules is None => module_provided = False  [L350]\n  reason: lambdify called by _import [CALLS]\n</gt-localization>\n<gt-task-brief>\n1. sympy/utilities/lambdify.py (def implemented_function(symfunc, implementation):, def lambdify(args, expr, modules=None, printer=None, use_imps=True,, def _import(module, reload=\"False\"):)\n   Witness: main called by implemented_function [CALLS]\n   Contract: raises ValueError | preserve raise: isinstance(symfunc, string_type",
+      "<gt-scope files=\"5\">\n1. utilities/lambdify.py \u2014 in scope (you are viewing this)\n2. core/compatibility.py \u2014 graph-connected\n3. plotting/textplot.py \u2014 graph-connected\n4. solvers/solvers.py \u2014 graph-connected\n5. tests/test_numeric.py \u2014 graph-connected\nThese files are related in scope; GT has not confirmed a single primary target \u2014 confirm the edit target with grep.\n</gt-scope>\n<gt-evidence kind=\"post_view\" file=\"sympy/utilities/lambdify.py\">\n[WITNESS] textplot called by -> sympy/plotting/textplot.py:24 `f = lambdify([x], expr)`\n[WITNESS] main called by -> examples/advanced/autowrap_integrators.py:",
+      "<gt-evidence kind=\"post_view\" file=\"sympy/core/function.py\">\n[WITNESS] _eval_conjugate called by -> sympy/functions/special/mathieu_functions.py:23 `return self.func(a.conjugate(), q.conjugate(), z.conjugate())`\n[WITNESS] _eval_is_rational called by -> sympy/functions/elementary/trigonometric.py:31 `s = self.func(*self.args)`\n[WITNESS] __init__ calls -> sympy/core/assumptions.py:315 `def __init__(cls, *args, **kws):`\n[WITNESS] is_sequence calls -> sympy/core/compatibility.py:254 `def is_sequence(i, include=None):`\n[CALLERS] _eval_rewrite_as_exp() in sympy/functions/elementary/trigonometric.py:",
+      "<gt-scope reason=\"re-anchored\">\n1. core/function.py \u2014 you have moved here; re-grounding scope\n2. elementary/exponential.py \u2014 graph-connected\n3. elementary/hyperbolic.py \u2014 graph-connected\n4. printing/latex.py \u2014 graph-connected\n5. printing/mathml.py \u2014 graph-connected\nGT re-anchored scope on your current file \u2014 confirm the edit target with grep.\n</gt-scope></output>",
+      "<gt-scope note=\"in-scope\">\n[GT] core/function.py: also in GT scope.\n</gt-scope></output>",
+      "<gt-evidence kind=\"post_view\" file=\"sympy/core/basic.py\">\n[WITNESS] _rewrite_hyperbolics_as_exp called by -> sympy/functions/elementary/hyperbolic.py:14 `return expr.xreplace(dict([(h, h.rewrite(exp))`\n[WITNESS] Wild calls -> sympy/core/symbol.py:225 `class Wild(Symbol):`\n[WITNESS] _sympify calls -> sympy/core/sympify.py:336 `def _sympify(a):`\n[CALLERS] _eval_nseries() in sympy/core/function.py:648 `s = s.subs(v, zi).expand() + Order(o.expr.subs(v, zi), x)` | _eval_rewrite_as_sqrt() in sympy/functions/elementary/trigonometric.py:809 `pcls = cos(sum([x[0] for x in X]))._eval_expand_trig().subs(",
+      "<gt-contract file=\"basic.py\">\n[SIGNATURE] def __new__(cls, *args):\n[CALLERS] __new__: 122 verified caller(s) in 52 file(s) \u2014 preserve this interface\n[SIGNATURE] def func(self):\n[CALLERS] func: 104 verified caller(s) in 27 file(s) \u2014 preserve this interface\n[SIGNATURE] def subs( self: Self@Basic, ... ) -> (Any | Self@Basic | Basic)\n[CALLERS] subs: 58 verified caller(s) in 31 file(s) \u2014 preserve this interface\n[RETURNS] value|obj\n</gt-contract>\n<gt-evidence kind=\"post_edit\" file=\"sympy/core/basic.py\">\n[CALLEE] subs -> def filldedent(s, w=70): (sympy/utilities/misc.py:19)\n[CALLEE] subs -> Symbol (s",
+      "<gt-contract file=\"plot.py\">\n[SIGNATURE] def show(self):\n[CALLERS] show: 6 verified caller(s) in 2 file(s) \u2014 preserve this interface\n[SIGNATURE] def check_arguments(args, expr_len, nb_of_free_symbols):\n[CALLERS] check_arguments: 5 verified caller(s) in 1 file(s) \u2014 preserve this interface\n[SIGNATURE] def __init__(self):\n[CALLERS] __init__: 4 verified caller(s) in 1 file(s) \u2014 preserve this interface\n</gt-contract>\n<gt-evidence kind=\"post_edit\" file=\"sympy/plotting/plot.py\">\n[CALLEE] show -> def textplot(expr, a, b, W=55, H=18): (sympy/plotting/textplot.py:8)\n[CALLEE] show -> def process_series(s"
+    ]
+  },
+  "agent": {
+    "action_count": 51.0,
+    "n_calls": 51.0,
+    "edits": 13.0,
+    "first_edit_action": 11.0,
+    "edit_to_gold_action": 0.0,
+    "gold_edited": null,
+    "edited_files": [
+      "setup.py",
+      "sympy/core/basic.py",
+      "sympy/plotting/plot.py",
+      "sympy/core/function.py",
+      "sympy/core/tests/test_function.py",
+      "sympy/utilities/tests/test_lambdify.py"
+    ]
+  },
+  "inputs_present": {
+    "trajectory": true,
+    "outcome_json": true,
+    "substrate_certs": true,
+    "brief": true,
+    "graph_db": true
+  }
+}

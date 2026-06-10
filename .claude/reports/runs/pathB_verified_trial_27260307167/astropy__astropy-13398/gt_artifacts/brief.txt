@@ -1,0 +1,38 @@
+<gt-localization confidence="medium">
+Candidate edit targets (reason over these):
+  1. astropy/coordinates/transformations.py — FunctionTransformWithFiniteDifference, frame_attrs_from_set, frame_comps_from_set
+     resolved caller: _get_frame_class() in astropy/coordinates/sky_coordinate_parsers.py:39
+  2. astropy/coordinates/earth.py — to_geodetic, lon, lat
+     resolved caller: earth_location() in astropy/coordinates/builtin_frames/itrs.py:35
+  3. astropy/coordinates/baseframe.py — realize_frame, cartesian, _get_repr_cls
+     resolved caller: from_tree_transform() in astropy/io/misc/asdf/tags/transform/polynomial.py:23
+  4. astropy/coordinates/sky_coordinate.py — frame, SkyCoordInfo, default_format
+     resolved caller: to_skycoord() in astropy/coordinates/jparser.py:47
+  5. astropy/coordinates/builtin_frames/ecliptic_transforms.py — _mean_ecliptic_rotation_matrix, _true_ecliptic_rotation_matrix, _obliquity_only_rotation_matrix
+     resolved call: -> get_jd12() in astropy/coordinates/builtin_frames/utils.py:97
+  6. astropy/coordinates/representation.py — lon, lat, _fqn_class
+     resolved caller: compute_chi2_ref() in astropy/timeseries/periodograms/lombscargle/utils.py:33
+</gt-localization>
+<gt-task-brief>
+1. astropy/coordinates/transformations.py (def get_transform(self, fromsys, tosys):, def lookup_name(self, name):, def get_names(self):)
+   Witness: frame_attributes calls frame_attrs_from_set [CALLS]
+   Contract: returns value|func | flows transcls -> transcls
+   Callers: transform_to() in astropy/coordinates/baseframe.py:1194 `trans = frame_transform_graph.get_transform(self.__class__,` | is_transformable_to() in astropy/coordinates/baseframe.py:1237 `trans = frame_transform_graph.get_transform(self.__class__, new_frame_cls)` | transform_to() in astropy/coordinates/sky_coordinate.py:663 `trans = frame_transform_graph.get_transform(self.frame.__class__, new_frame_cls)`
+   Context: frame_attrs_from_set, frame_comps_from_set, frame_set, frame_attributes, frame_component_names
+   Calls: astropy/coordinates/sky_coordinate.py, astropy/table/table.py, astropy/coordinates/baseframe.py
+
+EDIT-TARGET CONTRACTS (transformations.py):
+  get_transform -> calls find_shortest_path(self, fromsys, tosys)  [astropy/coordinates/transformations.py:264]
+
+Related files to inspect: baseframe.py, __init__.py, sky_coordinate.py
+
+Scope chain (graph-connected, check ALL): transformations.py → baseframe.py → representation.py
+   Chain: transformations.py → baseframe.py (__call__ → realize_frame); transformations.py → representation.py (__call__ → without_differentials)
+
+Scope chain (graph-connected, check ALL): sky_coordinate.py → core.py
+   Chain: sky_coordinate.py → core.py (apply_space_motion → Time)
+</gt-task-brief>
+<gt-graph-map>
+astropy/coordinates/transformations.py :: transform
+  called by: _apply_transform (astropy/coordinates/transformations.py), _combine_affine_params (astropy/coordinates/transformations.py)
+</gt-graph-map>

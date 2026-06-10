@@ -1,0 +1,7 @@
+{
+  "sympy__sympy-12096": {
+    "model_name_or_path": "deepseek/deepseek-v4-flash",
+    "instance_id": "sympy__sympy-12096",
+    "model_patch": "diff --git a/sympy/core/function.py b/sympy/core/function.py\nindex 1b8005e1d2..d5d773cb49 100644\n--- a/sympy/core/function.py\n+++ b/sympy/core/function.py\n@@ -507,7 +507,11 @@ def _eval_evalf(self, prec):\n             func = getattr(mpmath, fname)\n         except (AttributeError, KeyError):\n             try:\n-                return Float(self._imp_(*self.args), prec)\n+                # Evaluate args numerically to handle composition of\n+                # implemented functions (e.g., f(g(x)) where both have _imp_)\n+                args = [arg.evalf() if hasattr(arg, 'evalf') else arg\n+                        for arg in self.args]\n+                return Float(self._imp_(*args), prec)\n             except (AttributeError, TypeError, ValueError):\n                 return\n \n"
+  }
+}

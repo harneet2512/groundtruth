@@ -1,0 +1,34 @@
+<gt-localization confidence="medium">
+Candidate edit targets (reason over these):
+  1. astropy/modeling/core.py — inputs, outputs, separable
+     resolved caller: __init__() in astropy/io/ascii/fastbasic.py:40
+  2. astropy/modeling/separable.py — separability_matrix, is_separable, _compute_n_outputs
+     resolved call: -> where() in astropy/table/index.py:511
+  3. astropy/units/quantity.py — Conf, QuantityIterator, __init__
+     resolved caller: _process_block_inputs() in astropy/nddata/blocks.py:17
+  4. astropy/table/table.py — TableReplaceWarning, descr, has_info_class
+     resolved caller: gb() in astropy/extern/jquery/data/js/jquery.dataTables.min.js:9
+  5. astropy/coordinates/representation.py — _fqn_class, get_reprdiff_cls_hash, _invalidate_reprdiff_cls_hash
+     resolved caller: xa() in astropy/extern/jquery/data/js/jquery-3.1.1.min.js:3
+  6. astropy/convolution/convolve.py — _next_fast_lengths, _copy_input_if_needed, convolve
+     resolved call: -> isinstance() in astropy/table/table.py:308
+</gt-localization>
+<gt-task-brief>
+1. astropy/modeling/core.py (def deepcopy(self: Self@Model) -> Self@Model, def copy(self):, def __init__(self, *args, meta=None, name=None, **kwargs):)
+   Witness: _model_oper called by CompoundModel [CALLS]
+   Contract: raises ValueError | preserve raise: len(val) != self.n_inputs -> raise ValueError | returns value|self._inputs | flows val -> len(val) | self._inputs = val
+   Context: name
+   Calls: astropy/convolution/convolve.py, astropy/wcs/wcs.py, astropy/modeling/fitting.py
+
+EDIT-TARGET CONTRACTS (core.py):
+  inputs -> calls _initialize_unit_support(self)  [astropy/modeling/core.py:817]
+
+Likely multi-file scope: convolve.py, utils.py, compound.py
+
+Scope chain (graph-connected, check ALL): core.py → table.py → quantity.py → core.py → column.py
+   Chain: core.py → table.py (__new__ → isinstance); core.py → quantity.py (_handle_special_methods → all); core.py → core.py (__setattr__ → UnitsError); table.py → column.py (__getstate__ → col_copy)
+</gt-task-brief>
+<gt-graph-map>
+astropy/modeling/core.py :: inputs
+  calls: _initialize_unit_support (astropy/modeling/core.py), isinstance (astropy/table/table.py) (2-hop)
+</gt-graph-map>

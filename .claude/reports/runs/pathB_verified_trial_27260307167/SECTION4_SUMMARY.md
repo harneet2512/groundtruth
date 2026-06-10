@@ -79,3 +79,19 @@ GT's correct-context rate at the moment of decision was: L1 1/10 consumed-and-co
 assists, nudges 1 clean conversion (13236 scaffold_trap) vs 3+ false positives. The honest summary:
 **1 GT-caused resolve, 10 leakage hits, and the brief was ignored whenever it hedged.** The 13579/12096
 pair is the experiment to run at scale: single-committed-target briefs convert; 6-item hedges never did.
+
+## Paired-baseline note (appended 2026-06-10, second-verifier cross-check)
+
+These 10 ids are SWE-bench **Verified**; the frozen 87/300 baseline (`FINAL_resolved_300_20260531.json`)
+is SWE-bench-**Live** (OH+deepseek) — **no per-task pairing exists for this arm**. 13579 is therefore a
+**gt_caused-resolve CANDIDATE flip**, not a claimable flip, until the Verified baseline arm (vendor ~79%
+line per LATEST_TASK.md) is settled. Flip/regression accounting and the paired Wilcoxon are deferred.
+
+Second-verifier cross-check (independent chronological re-read of all 10 traj.json): the 10-row table,
+the 1-GT-caused / 4-self-localized split, the dominant hidden-contract failure mode, and the
+leakage=10 (`[gt-patch:loaded]` at MSG 3 in 10/10, GT_META=0, empty-dedup=0, F2P/P2P=0) all CONFIRMED.
+Substrate (part a) GREEN on all 10 — foundational gate pass (det% 68.36441261–74.02780928, typing
+fired, non-dominance held), LSP warm `LSP_ACTIVE_VALID` (pyright), embedder live (cos_related
+0.71040983 / cos_unrelated 0.29940427, dim 768), FTS5 probe ok, brief non-empty (2233–3202 B),
+gate_rc=0; known cert false-fail `graph_certificate.verdict=GRAPH_FAIL_MISSING_HANDOFF` on all 10
+(hook_graph_hash=null; gt_gt §12 — does not void the run).

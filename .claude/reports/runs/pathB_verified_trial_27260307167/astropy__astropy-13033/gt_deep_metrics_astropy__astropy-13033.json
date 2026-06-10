@@ -1,0 +1,116 @@
+{
+  "task_id": "astropy__astropy-13033",
+  "schema": "gt_deep_metrics.v2",
+  "producer": "verified_deep_metrics",
+  "pipeline": "verified-miniswe",
+  "precision_decimals": 8,
+  "branch": "gt-trial",
+  "git_commit": "301e367d7c038f26786791904718243e423a38ee",
+  "outcome": "unresolved_with_patch",
+  "failure_stage": "none",
+  "agent_started": true,
+  "resolved": false,
+  "has_patch": true,
+  "exit_status": "Submitted",
+  "gt_baseline": false,
+  "official_eval": {
+    "classification": "AGENT",
+    "eval_no_report": false,
+    "had_predictions": true,
+    "in_resolved_denominator": true
+  },
+  "model": {
+    "name": "deepseek/deepseek-v4-flash",
+    "params": {
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "max_tokens": 8192,
+      "presence_penalty": 0,
+      "frequency_penalty": 0,
+      "thinking": "disabled"
+    }
+  },
+  "language": null,
+  "substrate_digest": "ghcr.io/hbali-stack/gt-substrate@sha256:db7bd22de2299ce677f78048d47a4796280556d9ef64a22853fe48eb0cfdc1b9",
+  "task_repo_commit": "298ccb478e6bf092953bca67a3d29dc6c35f6752",
+  "graph_hash": null,
+  "graph_db_sha256": "90ceffdc4e4a14c7230e3690b27b61b1fb388b04dc9115b423b44d8c7e46b52d",
+  "trajectory_path": "/tmp/results/astropy__astropy-13033/astropy__astropy-13033.traj.json",
+  "trajectory_sha256": "c19cb0b1efb5a8007fb19273f9aa9f69a079b53d3818c5a3dc888aa61d11579b",
+  "max_iter": 250,
+  "wall_clock_s": 215.06733394,
+  "substrate": {
+    "graph_nodes": null,
+    "graph_edges": null,
+    "det_pct": null,
+    "resolution_method_dist": null,
+    "lsp_resolved": null,
+    "lsp_residual": 3063,
+    "lsp_verified": null,
+    "lsp_corrected": null,
+    "lsp_deleted": null,
+    "lsp_no_op_valid": null,
+    "gt_artifacts_dir": "/tmp/gt",
+    "brief_chars": 2744.0
+  },
+  "gt_injected_tokens_total": 686.0,
+  "efficiency": {
+    "model": "deepseek/deepseek-v4-flash",
+    "cost_source": "none_litellm_unmapped",
+    "llm_calls": 62.0,
+    "llm_tokens_in": 1142314.0,
+    "llm_tokens_out": 9574.0,
+    "llm_cache_hit_tokens": 1110912.0,
+    "llm_cache_miss_tokens": 31402.0,
+    "llm_tokens_total": 1151888.0,
+    "llm_cost_usd": 0.0,
+    "gt_injected_tokens_total": 686.0,
+    "gt_sent_tokens": 686.0,
+    "tokens_per_action": 18578.83870968,
+    "cost_per_action_usd": 0.0,
+    "gt_injection_overhead_pct": 0.06005354
+  },
+  "gt_delivery": {
+    "brief_delivered": 2.0,
+    "evidence_delivered": 10.0,
+    "scope_delivered": 7.0,
+    "contract_delivered": 2.0,
+    "cochange_delivered": 1.0,
+    "nudge_delivered": 3.0,
+    "gt_observation_chars_total": 38344.0,
+    "raw_delivered_gt_samples": [
+      "<gt-task-brief>\n<gt-localization confidence=\"medium\">\nCandidate edit targets (reason over these):\n  1. astropy/io/votable/tree.py \u2014 description, format, version\n     resolved caller: w() in astropy/extern/jquery/data/js/jquery-3.1.1.min.js:2\n  2. astropy/time/core.py \u2014 Time, format, _LeapSecondsCheck\n     resolved caller: cb() in astropy/extern/jquery/data/js/jquery-3.1.1.min.js:3\n  3. astropy/table/table.py \u2014 remove_column, TableReplaceWarning, descr\n     resolved caller: gb() in astropy/extern/jquery/data/js/jquery.dataTables.min.js:9\n  4. astropy/table/column.py \u2014 format, StringTruncateWarn",
+      "<gt-scope files=\"5\">\n1. timeseries/sampled.py \u2014 in scope (you are viewing this)\n2. timeseries/core.py \u2014 graph-connected\n3. io/kepler.py \u2014 graph-connected\n4. tests/test_common.py \u2014 graph-connected\n5. tests/test_downsample.py \u2014 graph-connected\nThese files are related in scope; GT has not confirmed a single primary target \u2014 confirm the edit target with grep.\n</gt-scope>\n<gt-evidence kind=\"post_view\" file=\"astropy/timeseries/sampled.py\">\n[WITNESS] kepler_fits_reader called by -> astropy/timeseries/io/kepler.py:96 `return TimeSeries(time=time, data=tab)`\n[WITNESS] isinstance calls -> astropy/table/",
+      "<gt-scope note=\"in-scope\">\n[GT] timeseries/core.py: also in GT scope.\n</gt-scope>\n<gt-evidence kind=\"post_view\" file=\"astropy/timeseries/core.py\">\n[WITNESS] __init__ called by -> astropy/timeseries/sampled.py:132 `with self._delay_required_column_checks():`\n[WITNESS] __init__ called by -> astropy/timeseries/binned.py:175 `with self._delay_required_column_checks():`\n[WITNESS] isinstance calls -> astropy/table/table.py:308 `def isinstance(self, cls):`\n[CALLERS] __init__() in astropy/timeseries/sampled.py:132 `with self._delay_required_column_checks():` | __init__() in astropy/timeseries/binned.p",
+      "<gt-evidence kind=\"post_view\" file=\"astropy/timeseries/binned.py\">\n[WITNESS] aggregate_downsample called by -> astropy/timeseries/downsample.py:143 `binned = BinnedTimeSeries(time_bin_size=time_bin_size,`\n[WITNESS] isinstance calls -> astropy/table/table.py:308 `def isinstance(self, cls):`\n[WITNESS] Time calls -> astropy/time/core.py:1437 `class Time(TimeBase):`\n[SIBLINGS] time_bin_start, time_bin_center, time_bin_end, time_bin_size\n</gt-evidence></output>",
+      "<gt-scope reason=\"re-anchored\">\n1. setup.py \u2014 you have moved here; re-grounding scope\nGT re-anchored scope on your current file \u2014 confirm the edit target with grep.\n</gt-scope></output>",
+      "<gt-scope note=\"in-scope\">\n[GT] setup.py: also in GT scope.\n</gt-scope></output>",
+      "<gt-nudge reason=\"scaffold_trap\">\nGT: 25+ actions and no source-file edit yet \u2014 you are likely stuck exploring/scaffolding. Use the brief's gt-scope to localize and make a concrete edit to a SOURCE file now.\n</gt-nudge></output>",
+      "<gt-scope note=\"in-scope\">\n[GT] tests/test_sampled.py: also in GT scope.\n</gt-scope>\n<gt-evidence kind=\"post_view\" file=\"astropy/timeseries/tests/test_sampled.py\">\n[WITNESS] TimeSeries calls -> astropy/timeseries/sampled.py:18 `class TimeSeries(BaseTimeSeries):`\n[WITNESS] Time calls -> astropy/time/core.py:1437 `class Time(TimeBase):`\n</gt-evidence></output>"
+    ]
+  },
+  "agent": {
+    "action_count": 62.0,
+    "n_calls": 62.0,
+    "edits": 15.0,
+    "first_edit_action": 5.0,
+    "edit_to_gold_action": 0.0,
+    "gold_edited": null,
+    "edited_files": [
+      "astropy/timeseries/binned.py",
+      "astropy/timeseries/core.py",
+      "binned.py",
+      "setup.py",
+      "longintrepr.h",
+      "tmp/fix_core.py",
+      "astropy/timeseries/tests/test_sampled.py"
+    ]
+  },
+  "inputs_present": {
+    "trajectory": true,
+    "outcome_json": true,
+    "substrate_certs": true,
+    "brief": true,
+    "graph_db": true
+  }
+}

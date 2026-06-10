@@ -1,0 +1,110 @@
+{
+  "task_id": "django__django-10097",
+  "schema": "gt_deep_metrics.v2",
+  "producer": "verified_deep_metrics",
+  "pipeline": "verified-miniswe",
+  "precision_decimals": 8,
+  "branch": "gt-trial",
+  "git_commit": "301e367d7c038f26786791904718243e423a38ee",
+  "outcome": "unresolved_with_patch",
+  "failure_stage": "none",
+  "agent_started": true,
+  "resolved": false,
+  "has_patch": true,
+  "exit_status": "Submitted",
+  "gt_baseline": false,
+  "official_eval": {
+    "classification": "AGENT",
+    "eval_no_report": false,
+    "had_predictions": true,
+    "in_resolved_denominator": true
+  },
+  "model": {
+    "name": "deepseek/deepseek-v4-flash",
+    "params": {
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "max_tokens": 8192,
+      "presence_penalty": 0,
+      "frequency_penalty": 0,
+      "thinking": "disabled"
+    }
+  },
+  "language": null,
+  "substrate_digest": "ghcr.io/hbali-stack/gt-substrate@sha256:db7bd22de2299ce677f78048d47a4796280556d9ef64a22853fe48eb0cfdc1b9",
+  "task_repo_commit": "b9cf764be62e77b4777b3a75ec256f6209a57671",
+  "graph_hash": null,
+  "graph_db_sha256": "eb9f97446064ac5415b09d8e245138d2b130570b6ed04dc3c0f898c559ec3ad7",
+  "trajectory_path": "/tmp/results/django__django-10097/django__django-10097.traj.json",
+  "trajectory_sha256": "2604a98646566ec28045be38774b556c88c2357a1f22eae642d1a974af4f5f16",
+  "max_iter": 250,
+  "wall_clock_s": 352.8816545,
+  "substrate": {
+    "graph_nodes": null,
+    "graph_edges": null,
+    "det_pct": null,
+    "resolution_method_dist": null,
+    "lsp_resolved": null,
+    "lsp_residual": 2015,
+    "lsp_verified": null,
+    "lsp_corrected": null,
+    "lsp_deleted": null,
+    "lsp_no_op_valid": null,
+    "gt_artifacts_dir": "/tmp/gt",
+    "brief_chars": 2744.0
+  },
+  "gt_injected_tokens_total": 686.0,
+  "efficiency": {
+    "model": "deepseek/deepseek-v4-flash",
+    "cost_source": "none_litellm_unmapped",
+    "llm_calls": 79.0,
+    "llm_tokens_in": 2275030.0,
+    "llm_tokens_out": 27015.0,
+    "llm_cache_hit_tokens": 2248320.0,
+    "llm_cache_miss_tokens": 26710.0,
+    "llm_tokens_total": 2302045.0,
+    "llm_cost_usd": 0.0,
+    "gt_injected_tokens_total": 686.0,
+    "gt_sent_tokens": 686.0,
+    "tokens_per_action": 29139.81012658,
+    "cost_per_action_usd": 0.0,
+    "gt_injection_overhead_pct": 0.03015345
+  },
+  "gt_delivery": {
+    "brief_delivered": 2.0,
+    "evidence_delivered": 6.0,
+    "scope_delivered": 4.0,
+    "contract_delivered": 2.0,
+    "cochange_delivered": 1.0,
+    "nudge_delivered": 3.0,
+    "gt_observation_chars_total": 22277.0,
+    "raw_delivered_gt_samples": [
+      "<gt-task-brief>\n<gt-localization confidence=\"medium\">\nCandidate edit targets (reason over these):\n  1. django/core/validators.py \u2014 URLValidator, _lazy_re_compile, RegexValidator\n     resolved caller: _check_query() in django/contrib/gis/geoip2/base.py:160\n  2. django/forms/fields.py \u2014 Field, __init__, prepare_value\n     resolved caller: __init__() in django/forms/formsets.py:35\n  3. django/db/models/fields/__init__.py \u2014 validators, Empty, NOT_PROVIDED\n     resolved caller: _check_default() in django/contrib/postgres/fields/mixins.py:8\n  4. django/urls/resolvers.py \u2014 regex, ResolverMatch, __ini",
+      "<gt-scope files=\"5\">\n1. core/validators.py \u2014 in scope (you are viewing this)\n2. utils/functional.py \u2014 graph-connected\n3. forms/fields.py \u2014 graph-connected\n4. tests/test_forms.py \u2014 graph-connected\n5. migrations/test_autodetector.py \u2014 graph-connected\nThese files are related in scope; GT has not confirmed a single primary target \u2014 confirm the edit target with grep.\n</gt-scope>\n<gt-evidence kind=\"post_view\" file=\"django/core/validators.py\">\n[WITNESS] _check_query called by -> django/contrib/gis/geoip2/base.py:160 `validate_ipv46_address(query)`\n[WITNESS] __init__ called by -> django/forms/fields.p",
+      "<gt-scope note=\"in-scope\">\n[GT] core/validators.py: also in GT scope.\n</gt-scope></output>",
+      "<gt-scope note=\"in-scope\">\n[GT] validators/tests.py: also in GT scope.\n</gt-scope>\n<gt-evidence kind=\"post_view\" file=\"tests/validators/tests.py\">\n[WITNESS] ValidationError calls -> django/core/exceptions.py:94 `class ValidationError(Exception):`\n</gt-evidence></output>",
+      "<gt-nudge reason=\"scaffold_trap\">\nGT: 25+ actions and no source-file edit yet \u2014 you are likely stuck exploring/scaffolding. Use the brief's gt-scope to localize and make a concrete edit to a SOURCE file now.\n</gt-nudge></output>",
+      "<gt-contract file=\"validators.py\">\n[SIGNATURE] def _lazy_re_compile(regex, flags=0):\n[CALLERS] _lazy_re_compile: 2 verified caller(s) in 1 file(s) \u2014 preserve this interface\n[SIGNATURE] def ip_address_validators(protocol, unpack_ipv4):\n[CALLERS] ip_address_validators: 2 verified caller(s) in 2 file(s) \u2014 preserve this interface\n[SIGNATURE] def validate_ipv46_address(value):\n[CALLERS] validate_ipv46_address: 2 verified caller(s) in 2 file(s) \u2014 preserve this interface\n[RETURNS] value|SimpleLazyObject(_compile)\n[RETURNS] value|re.compile(regex, flags)\n[RETURNS] value|regex\n</gt-contract>\n<gt-eviden",
+      "<gt-nudge reason=\"failure_persisted\">\nGT: the same test failure has persisted across your edit(s) \u2014 your current hypothesis is likely wrong. Re-read the failing assertion and reconsider the root cause / target file.\n</gt-nudge></output>"
+    ]
+  },
+  "agent": {
+    "action_count": 79.0,
+    "n_calls": 79.0,
+    "edits": 5.0,
+    "first_edit_action": 43.0,
+    "edit_to_gold_action": 0.0,
+    "gold_edited": null,
+    "edited_files": [
+      "django/core/validators.py",
+      "tests/validators/tests.py"
+    ]
+  },
+  "inputs_present": {
+    "trajectory": true,
+    "outcome_json": true,
+    "substrate_certs": true,
+    "brief": true,
+    "graph_db": true
+  }
+}

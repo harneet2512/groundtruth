@@ -1,0 +1,10 @@
+{
+  "schema": "gt.verified_run_provenance.v1",
+  "task": "astropy__astropy-12907",
+  "gt_git_commit": "301e367d7c038f26786791904718243e423a38ee",
+  "substrate_digest": "ghcr.io/hbali-stack/gt-substrate@sha256:db7bd22de2299ce677f78048d47a4796280556d9ef64a22853fe48eb0cfdc1b9",
+  "model": "deepseek/deepseek-v4-flash",
+  "baseline": "false",
+  "workflow_run_id": "27260307167",
+  "workflow_run_attempt": "1"
+}

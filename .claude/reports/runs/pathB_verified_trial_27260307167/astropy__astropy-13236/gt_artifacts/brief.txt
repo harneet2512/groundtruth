@@ -1,0 +1,39 @@
+<gt-localization confidence="medium">
+Candidate edit targets (reason over these):
+  1. astropy/table/table.py — Table, isinstance, TableReplaceWarning
+     resolved caller: gb() in astropy/extern/jquery/data/js/jquery.dataTables.min.js:9
+  2. astropy/table/column.py — Column, StringTruncateWarning, _auto_names
+     resolved caller: _searchsorted() in astropy/table/sorted_array.py:11
+  3. astropy/wcs/wcs.py — _load_tab_bintable, _parse_keysel, NoConvergence
+     resolved caller: ya() in astropy/extern/jquery/data/js/jquery-3.1.1.min.js:2
+  4. astropy/utils/masked/core.py — view, Masked, __new__
+     resolved caller: __repr__() in astropy/utils/state.py:24
+  5. astropy/io/votable/tree.py — Table, description, _resize
+     resolved caller: w() in astropy/extern/jquery/data/js/jquery-3.1.1.min.js:2
+  6. astropy/table/ndarray_mixin.py — NdarrayMixin, NdarrayMixinInfo, _represent_as_dict
+     resolved call: -> view() in astropy/uncertainty/core.py:277
+</gt-localization>
+<gt-task-brief>
+1. astropy/table/table.py (def isinstance( self: Self@TableColumns, cls: Any ) -> list, def as_array(self, keep_byteorder=False, names=None):, def add_index(self, colnames, engine=None, unique=False):)
+   Witness: has_info_class called by isinstance [CALLS]
+   Contract: returns value|cols
+   Callers: to_tree() in astropy/io/misc/asdf/tags/unit/unit.py:14 `if isinstance(node, str):` | deserialize_class() in astropy/wcs/wcsapi/utils.py:14 `if not isinstance(tpl, tuple) or len(tpl) != 3:` | __init__() in astropy/wcs/wcsapi/high_level_wcs_wrapper.py:15 `if not isinstance(low_level_wcs, BaseLowLevelWCS):`
+   Context: descr, has_info_class
+   Calls: astropy/io/fits/hdu/compressed.py, astropy/wcs/wcs.py, astropy/units/quantity.py
+
+EDIT-TARGET CONTRACTS (table.py):
+  isinstance -> calls values(self)  [astropy/table/table.py:2031]
+  dtype -> calls descr(col)  [astropy/table/table.py:166]
+  dtype -> calls values(self)  [astropy/table/table.py:2031]
+  remove -> calls _remove(self, names, raise_exc=False)  [astropy/table/table.py:483]
+
+Related files to inspect: core.py, core.py, index.py
+
+Scope chain (graph-connected, check ALL): table.py → column.py → wcs.py → quantity.py → core.py
+   Chain: table.py → column.py (__getstate__ → col_copy); table.py → wcs.py (add_index → slice); table.py → quantity.py (_init_from_list_of_dicts → all); table.py → core.py (_convert_col_for_table → Masked)
+</gt-task-brief>
+<gt-graph-map>
+astropy/table/table.py :: isinstance
+  calls: values (astropy/table/table.py)
+  called by: __array__ (astropy/table/table.py), __delitem__ (astropy/table/table.py), __getitem__ (astropy/table/table.py), __getstate__ (astropy/table/table.py), __init__ (astropy/table/table.py), __set__ (astropy/table/table.py), __setitem__ (astropy/table/table.py), _add_remove_setup (astropy/table/table.py)
+</gt-graph-map>

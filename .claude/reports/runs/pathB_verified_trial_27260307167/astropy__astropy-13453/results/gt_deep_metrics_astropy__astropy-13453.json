@@ -1,0 +1,113 @@
+{
+  "task_id": "astropy__astropy-13453",
+  "schema": "gt_deep_metrics.v2",
+  "producer": "verified_deep_metrics",
+  "pipeline": "verified-miniswe",
+  "precision_decimals": 8,
+  "branch": "gt-trial",
+  "git_commit": "301e367d7c038f26786791904718243e423a38ee",
+  "outcome": "resolved",
+  "failure_stage": "none",
+  "agent_started": true,
+  "resolved": true,
+  "has_patch": true,
+  "exit_status": "Submitted",
+  "gt_baseline": false,
+  "official_eval": {
+    "classification": "RESOLVED",
+    "eval_no_report": false,
+    "had_predictions": true,
+    "in_resolved_denominator": true
+  },
+  "model": {
+    "name": "deepseek/deepseek-v4-flash",
+    "params": {
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "max_tokens": 8192,
+      "presence_penalty": 0,
+      "frequency_penalty": 0,
+      "thinking": "disabled"
+    }
+  },
+  "language": null,
+  "substrate_digest": "ghcr.io/hbali-stack/gt-substrate@sha256:db7bd22de2299ce677f78048d47a4796280556d9ef64a22853fe48eb0cfdc1b9",
+  "task_repo_commit": "19cc80471739bcb67b7e8099246b391c355023ee",
+  "graph_hash": null,
+  "graph_db_sha256": "7d8321b9872b9d012a3ac707212d61ba98e23692409d93214f7932047bef94e8",
+  "trajectory_path": "/tmp/results/astropy__astropy-13453/astropy__astropy-13453.traj.json",
+  "trajectory_sha256": "7f5a3090cf976a8339388b3daeb55726cd4e475c36e268389cc55e1e5a424c9a",
+  "max_iter": 250,
+  "wall_clock_s": 190.91150069,
+  "substrate": {
+    "graph_nodes": null,
+    "graph_edges": null,
+    "det_pct": null,
+    "resolution_method_dist": null,
+    "lsp_resolved": null,
+    "lsp_residual": 3101,
+    "lsp_verified": null,
+    "lsp_corrected": null,
+    "lsp_deleted": null,
+    "lsp_no_op_valid": null,
+    "gt_artifacts_dir": "/tmp/gt",
+    "brief_chars": 2989.0
+  },
+  "gt_injected_tokens_total": 747.0,
+  "efficiency": {
+    "model": "deepseek/deepseek-v4-flash",
+    "cost_source": "none_litellm_unmapped",
+    "llm_calls": 50.0,
+    "llm_tokens_in": 1041995.0,
+    "llm_tokens_out": 6619.0,
+    "llm_cache_hit_tokens": 1014400.0,
+    "llm_cache_miss_tokens": 27595.0,
+    "llm_tokens_total": 1048614.0,
+    "llm_cost_usd": 0.0,
+    "gt_injected_tokens_total": 747.0,
+    "gt_sent_tokens": 747.0,
+    "tokens_per_action": 20972.28,
+    "cost_per_action_usd": 0.0,
+    "gt_injection_overhead_pct": 0.0716894
+  },
+  "gt_delivery": {
+    "brief_delivered": 2.0,
+    "evidence_delivered": 10.0,
+    "scope_delivered": 5.0,
+    "contract_delivered": 2.0,
+    "cochange_delivered": 1.0,
+    "nudge_delivered": 2.0,
+    "gt_observation_chars_total": 39215.0,
+    "raw_delivered_gt_samples": [
+      "<gt-task-brief>\n<gt-localization confidence=\"medium\">\nCandidate edit targets (reason over these):\n  1. astropy/table/table.py \u2014 Table, TableReplaceWarning, descr\n     resolved caller: t() in astropy/extern/jquery/data/js/jquery-3.6.0.min.js:2\n  2. astropy/io/fits/column.py \u2014 ascii, names, formats\n     resolved caller: fitsinfo() in astropy/io/fits/scripts/fitsinfo.py:51\n  3. astropy/io/votable/tree.py \u2014 Table, description, content\n     resolved caller: Fa() in astropy/extern/jquery/data/js/jquery.dataTables.min.js:61\n  4. astropy/wcs/wcs.py \u2014 _load_tab_bintable, _parse_keysel, NoConvergence\n  ",
+      "<gt-scope files=\"5\">\n1. ascii/html.py \u2014 in scope (you are viewing this)\n2. table/table.py \u2014 graph-connected\n3. ascii/core.py \u2014 graph-connected\n4. tests/test_html.py \u2014 graph-connected\n5. modeling/core.py \u2014 graph-connected\nThese files are related in scope; GT has not confirmed a single primary target \u2014 confirm the edit target with grep.\n</gt-scope>\n<gt-evidence kind=\"post_view\" file=\"astropy/io/ascii/html.py\">\n[WITNESS] show_in_notebook called by -> astropy/table/table.py:1699 `return HTML(html)`\n[WITNESS] isinstance calls -> astropy/table/table.py:308 `def isinstance(self, cls):`\n[SIBLINGS] wri",
+      "<gt-scope note=\"in-scope\">\n[GT] ascii/html.py: also in GT scope.\n</gt-scope></output>",
+      "<gt-scope note=\"in-scope\">\n[GT] ascii/core.py: also in GT scope.\n</gt-scope>\n<gt-evidence kind=\"post_view\" file=\"astropy/io/ascii/core.py\">\n[WITNESS] __call__ called by -> astropy/io/ascii/fixedwidth.py:41 `yield [self.process_val(x) for x in vals]`\n[WITNESS] get_cols called by -> astropy/io/ascii/cds.py:62 `f = readme_inputter.get_lines(self.readme)`\n[WITNESS] itercols calls -> astropy/table/serialize.py:341 `def itercols(self):`\n[WITNESS] seek calls -> astropy/io/fits/file.py:371 `def seek(self, offset, whence=0):`\n[CALLERS] kepler_fits_reader() in astropy/timeseries/io/kepler.py:62 `tab.ren",
+      "<gt-evidence kind=\"post_view\" file=\"astropy/io/ascii/basic.py\">\n[WITNESS] end calls -> astropy/utils/xml/writer.py:249 `def end(self, tag=None, indent=True, wrap=False):`\n[WITNESS] write_comments calls -> astropy/io/ascii/core.py:643 `def write_comments(self, lines, meta):`\n[SIBLINGS] write, read, write_header, process_line, inconsistent_handler\n</gt-evidence></output>",
+      "<gt-contract file=\"html.py\">\n[SIGNATURE] def fill_values(self, col, col_str_iters):\n[CALLERS] fill_values: 1 verified caller(s) in 1 file(s) \u2014 preserve this interface\n[SIGNATURE] def identify_table(soup, htmldict, numtable):\n[CALLERS] identify_table: 1 verified caller(s) in 1 file(s) \u2014 preserve this interface\n[SIGNATURE] def __call__(self, lines):\n</gt-contract>\n<gt-evidence kind=\"post_edit\" file=\"astropy/io/ascii/html.py\">\n[CALLEE] identify_table -> def isinstance( self: Self@TableColumns, cls: Any ) -> list (astropy/table/table.py:308)\n[CALLEE] start_line -> def isinstance( self: Self@TableC",
+      "<gt-nudge reason=\"loop\">\nGT: you have repeated the same command 4+ times with no progress. Stop, re-read the last error, and change approach (open a different file or test a new hypothesis).\n</gt-nudge></output>",
+      "<gt-scope note=\"in-scope\">\n[GT] tests/test_html.py: also in GT scope.\n</gt-scope>\n<gt-evidence kind=\"post_view\" file=\"astropy/io/ascii/tests/test_html.py\">\n[WITNESS] isinstance calls -> astropy/table/table.py:308 `def isinstance(self, cls):`\n[WITNESS] write calls -> astropy/io/ascii/html.py:40 `def write(self, data):`\n</gt-evidence></output>"
+    ]
+  },
+  "agent": {
+    "action_count": 50.0,
+    "n_calls": 50.0,
+    "edits": 11.0,
+    "first_edit_action": 19.0,
+    "edit_to_gold_action": 0.0,
+    "gold_edited": null,
+    "edited_files": [
+      "astropy/io/ascii/html.py",
+      "astropy/io/ascii/tests/test_html.py",
+      "astropy/io/ascii/tests/test_write.py",
+      "astropy/io/ascii/tests/test_connect.py"
+    ]
+  },
+  "inputs_present": {
+    "trajectory": true,
+    "outcome_json": true,
+    "substrate_certs": true,
+    "brief": true,
+    "graph_db": true
+  }
+}

@@ -1,0 +1,11 @@
+Available LSP servers: py, python, ts, typescript, tsx, typescriptreact, js, javascript, jsx, javascriptreact, go, rs, rust, java
+
+Resolving 3741 python edges via LSP (launch + warm-probe even on no-op)...
+  Starting pyright-langserver for python...
+  LSP initialized (warm_probe_ok=True, 1.2ms), resolving 3741 edges...
+
+Results (62.4s): server_launched=True warm_probe_ok=True probe_latency_ms=1.2
+  Verified: 823  Corrected: 1662  Deleted: 85  Failed: 759  Skipped: 412
+  project_ready=True project_ready_wait_ms=2706.5 project_ready_attempts=1 failed_breakdown(lsp_error=0 empty=759 exception=0)
+[closure] rebuild-closure: 105066 -> 115144 closure rows (recomputed over current/LSP-corrected edges)
+LSP_METRICS resolved=2485 residual=2305 scoped_source_files=80 lsp_warm=1 verdict=LSP_ACTIVE_VALID

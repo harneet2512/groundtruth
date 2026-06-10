@@ -1,0 +1,10 @@
+{
+  "runtime_root": "/opt/gt",
+  "source_root": "/tmp/gt_work_src",
+  "graph_db": "/gt_artifacts/graph.db",
+  "models_root": "/opt/gt/models",
+  "inside_container": true,
+  "proof_mode": true,
+  "containerized": true,
+  "runtime_context_id": ""
+}

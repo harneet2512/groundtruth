@@ -1,0 +1,28 @@
+<gt-localization confidence="high">
+Edit target: astropy/wcs/wcsapi/wrappers/sliced_wcs.py :: slice
+  reason: sanitize_slices calls slice [CALLS]
+</gt-localization>
+<gt-task-brief>
+1. astropy/wcs/wcsapi/wrappers/sliced_wcs.py (def pixel_to_world_values(self, *pixel_arrays):, def world_to_pixel_values(self, *world_arrays):, def _pixel_to_world_values_all(self, *pixel_arrays):)
+   Witness: dropped_world_dimensions called by _pixel_to_world_values_all [CALLS]
+   Contract: preserve return: isinstance(world_arrays, np.ndarray) and not world_arrays.shape -> return world_arrays; return: self._wcs.world_n_dim > 1 -> world_arrays = [world_arrays[iw] for iw in self._world_keep] | returns value|world_arrays | flows pixel_arrays -> *pixel_arrays
+   Context: sanitize_slices, combine_slices, dropped_world_dimensions, pixel_n_dim, world_n_dim
+   Calls: astropy/wcs/wcs.py, astropy/table/table.py, astropy/units/quantity.py
+
+EDIT-TARGET CONTRACTS (sliced_wcs.py):
+  pixel_to_world_values -> calls _pixel_to_world_values_all(self, *pixel_arrays)  [astropy/wcs/wcsapi/wrappers/sliced_wcs.py:212]
+  pixel_to_world_values -> calls isinstance( self: Self@TableColumns, cls: Any )  [astropy/table/table.py:308]
+  world_to_pixel_values -> calls isinstance( self: Self@TableColumns, cls: Any )  [astropy/table/table.py:308]
+  world_to_pixel_values -> calls def map(cls, function, items, multiprocess=False, file=None, step=100,  [astropy/utils/console.py:664]
+  _pixel_to_world_values_all -> calls pixel_to_world_values(self, *pixel_arrays)  [astropy/wcs/wcsapi/wrappers/sliced_wcs.py:229]
+
+Related files to inspect: ndslicing.py, wcsapi.py
+
+Scope chain (graph-connected, check ALL): utils.py → table.py → high_level_api.py → fitswcs.py → core.py
+   Chain: utils.py → table.py (_celestial_frame_to_wcs_builtin → isinstance); utils.py → high_level_api.py (pixel_to_pixel → pixel_to_world); utils.py → fitswcs.py (local_partial_pixel_derivatives → pixel_to_world_values); utils.py → core.py (fit_wcs_from_points → deepcopy)
+</gt-task-brief>
+<gt-graph-map>
+astropy/wcs/wcsapi/wrappers/sliced_wcs.py :: pixel_to_world_values
+  calls: _pixel_to_world_values_all (astropy/wcs/wcsapi/wrappers/sliced_wcs.py), isinstance (astropy/table/table.py)
+  called by: _pixel_to_world_values_all (astropy/wcs/wcsapi/wrappers/sliced_wcs.py), dropped_world_dimensions (astropy/wcs/wcsapi/wrappers/sliced_wcs.py) (2-hop)
+</gt-graph-map>

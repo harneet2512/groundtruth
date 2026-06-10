@@ -1,0 +1,47 @@
+{
+  "schema": "gt.run_manifest.v2",
+  "languages": [
+    "python",
+    "javascript"
+  ],
+  "lsp_scope_files": 80,
+  "lsp_max_edges": "20000",
+  "gate_rc": 0,
+  "artifacts_present": {
+    "graph.db": true,
+    "runtime_context.json": true,
+    "lsp_certificate.json": true,
+    "graph_certificate.json": true,
+    "embedder_certificate.json": true,
+    "foundational_gate_report.json": true,
+    "brief.txt": true
+  },
+  "source_root": "/tmp/gt_work_src",
+  "out": "/gt_artifacts",
+  "gt_git_commit": "301e367d7c038f26786791904718243e423a38ee",
+  "substrate_digest": "ghcr.io/hbali-stack/gt-substrate@sha256:db7bd22de2299ce677f78048d47a4796280556d9ef64a22853fe48eb0cfdc1b9",
+  "task_repo_commit": "b9cf764be62e77b4777b3a75ec256f6209a57671",
+  "runtime_flags": {
+    "GT_PROOF_MODE": "1",
+    "GT_CONTAINERIZED": "1",
+    "GT_RUNTIME_STRATEGY": "unified_substrate",
+    "GT_REQUIRE_FTS5": "1",
+    "GT_REQUIRE_EMBEDDER": "1",
+    "GT_FORCE_ONNX_EMBEDDER": "1",
+    "GT_REQUIRE_LSP": "1",
+    "GT_REQUIRE_FULL_STACK": "1",
+    "GT_FORBID_PREBUILT_GRAPH": null
+  },
+  "language_distribution": {
+    "python": 28110,
+    "javascript": 149,
+    "html": 1
+  },
+  "graph_db_sha256": "eb9f97446064ac5415b09d8e245138d2b130570b6ed04dc3c0f898c559ec3ad7",
+  "cert_versions": {
+    "lsp_certificate": "gt.lsp_certificate.v2",
+    "graph_certificate": "gt.graph_certificate.v1",
+    "embedder_certificate": "gt.embedder_certificate.v1",
+    "foundational_gate_report": null
+  }
+}

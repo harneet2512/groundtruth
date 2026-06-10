@@ -1,0 +1,35 @@
+<gt-localization confidence="medium">
+Candidate edit targets (reason over these):
+  1. astropy/io/votable/tree.py — description, format, version
+     resolved caller: w() in astropy/extern/jquery/data/js/jquery-3.1.1.min.js:2
+  2. astropy/time/core.py — Time, format, _LeapSecondsCheck
+     resolved caller: cb() in astropy/extern/jquery/data/js/jquery-3.1.1.min.js:3
+  3. astropy/table/table.py — remove_column, TableReplaceWarning, descr
+     resolved caller: gb() in astropy/extern/jquery/data/js/jquery.dataTables.min.js:9
+  4. astropy/table/column.py — format, StringTruncateWarning, _auto_names
+     resolved caller: _searchsorted() in astropy/table/sorted_array.py:11
+  5. astropy/utils/iers/iers.py — open, download_file, _none_to_float
+     resolved caller: load_wcs_from_file() in docs/wcs/examples/from_file.py:12
+  6. astropy/coordinates/sky_coordinate.py — SkyCoordInfo, default_format, unit
+     resolved caller: to_skycoord() in astropy/coordinates/jparser.py:47
+</gt-localization>
+<gt-task-brief>
+1. astropy/io/votable/tree.py (def get_first_table(self):, def to_xml(self, fd, compressed=False, tabledata_format=None,, def resolve_id(ID, id, config=None, pos=None):)
+   Witness: test_version called by VOTableFile [CALLS]
+   Contract: raises ValueError | preserve raise: version not in self._version_namespace_map -> allowed_from_map = "', '".join(self._version_namespace_map) | returns value|self._version | flows version -> version = str(version) | str(version) | version not in self._version_namespace_map | self._version = version
+   Callers: minversion() in astropy/utils/introspection.py:157 `module_version = metadata.version(module_name)`
+   Context: check_astroyear, check_string, resolve_id
+   Calls: astropy/table/table.py, astropy/extern/jquery/data/js/jquery-3.1.1.js, astropy/extern/jquery/data/js/jquery.dataTables.js
+
+Expected behavior: <!-- What did you expect to happen. -->
+An exception that informs the users required columns are missing.
+
+Related files to inspect: jquery.dataTables.js, jquery.dataTables.min.js, connect.py
+
+Scope chain (graph-connected, check ALL): tree.py → table.py → column.py → wcs.py → core.py → sky_coordinate.py → iers.py → core.py
+   Chain: tree.py → table.py (check_string → isinstance); table.py → column.py (__getstate__ → col_copy); table.py → wcs.py (add_index → slice); table.py → core.py (from_pandas → Time); wcs.py → sky_coordinate.py (footprint_contains → contained_by); core.py → iers.py (get_delta_ut1_utc → ut1_utc); iers.py → core.py (from_leap_seconds_list → convert_numpy)
+</gt-task-brief>
+<gt-graph-map>
+astropy/io/votable/tree.py :: version
+  called by: minversion (astropy/utils/introspection.py), get_pyarrow (astropy/io/misc/parquet.py) (2-hop)
+</gt-graph-map>

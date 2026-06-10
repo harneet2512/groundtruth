@@ -1,0 +1,38 @@
+<gt-localization confidence="medium">
+Candidate edit targets (reason over these):
+  1. django/db/models/query.py — QuerySet, last, values_list
+     resolved caller: create_default_site() in django/contrib/sites/management.py:20
+  2. django/db/models/sql/compiler.py — execute_sql, SQLCompiler, __init__
+     resolved caller: do_query() in django/db/models/sql/subqueries.py:24
+  3. django/db/backends/utils.py — _execute_with_wrappers, _execute, CursorWrapper
+     resolved caller: _database_exists() in django/db/backends/postgresql/creation.py:33
+  4. django/db/utils.py — ProgrammingError, Error, InterfaceError
+     resolved caller: __enter__() in django/db/backends/sqlite3/schema.py:24
+  5. django/db/transaction.py — TransactionManagementError, get_connection, get_autocommit
+     resolved caller: __enter__() in django/db/backends/base/schema.py:104
+  6. django/db/backends/sqlite3/schema.py — DatabaseSchemaEditor, __enter__, __exit__
+     resolved caller: remove_field() in django/contrib/gis/db/backends/spatialite/schema.py:122
+</gt-localization>
+<gt-task-brief>
+1. django/db/models/query.py (def annotate( self: Self@QuerySet, ... ) -> Self@QuerySet, def order_by( self: Self@QuerySet, *field_names: Any ) -> Self@QuerySet, def first(self: Self@QuerySet) -> (Any | None))
+   Witness: last called by reverse [CALLS]
+   Contract: returns value|obj | flows field_names -> *field_names
+   Spec: handles: raise TypeError("'flat' and 'named' can't be us... | raise TypeError("'flat' is not valid when value...
+   Callers: get_queryset() in django/views/generic/list.py:46 `queryset = queryset.order_by(*ordering)` | _get_permissions() in django/contrib/auth/backends.py:85 `perms = perms.values_list('content_type__app_label', 'codename').order_by()` | serialize_db_to_string() in django/db/backends/base/creation.py:119 `queryset = model._default_manager.using(self.connection.alias).order_by(model...`
+   Context: create_namedtuple_class, as_manager
+   Calls: django/db/models/sql/query.py, django/db/models/sql/compiler.py, django/contrib/admin/options.py
+
+EDIT-TARGET CONTRACTS (query.py):
+  order_by -> calls _chain(self, **kwargs)  [django/db/models/query.py:1212]
+  order_by -> calls add_ordering(self, *ordering)  [django/db/models/sql/query.py:1826]
+  order_by -> calls can_filter(self)  [django/db/models/sql/query.py:1752]
+  values_list -> calls _values(self, *fields, **expressions)  [django/db/models/query.py:786]
+  filter -> calls _filter_or_exclude(self, negate, *args, **kwargs)  [django/db/models/query.py:899]
+
+Related files to inspect: related_descriptors.py, filters.py, options.py
+</gt-task-brief>
+<gt-graph-map>
+django/db/models/query.py :: order_by
+  calls: _chain (django/db/models/query.py), add_ordering (django/db/models/sql/query.py), can_filter (django/db/models/sql/query.py), clear_ordering (django/db/models/sql/query.py)
+  called by: dates (django/db/models/query.py), datetimes (django/db/models/query.py), first (django/db/models/query.py), get (django/db/models/query.py), in_bulk (django/db/models/query.py), last (django/db/models/query.py), __init__ (django/contrib/admin/filters.py), __init__ (django/db/models/expressions.py)
+</gt-graph-map>

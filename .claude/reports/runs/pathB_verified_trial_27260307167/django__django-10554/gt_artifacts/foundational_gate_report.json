@@ -1,0 +1,93 @@
+{
+  "det_set_source": "curation_map.DETERMINISTIC_RESOLUTION_METHODS",
+  "gate_resolution": {
+    "calls_edges": 49836.0,
+    "deterministic_edges": 35083.0,
+    "name_match_edges": 14753.0,
+    "det_pct": 70.39690184,
+    "safety_det_floor_pct": 15.0,
+    "typing_fired": true,
+    "typing_tier_counts": {
+      "type_flow": 2051,
+      "impl_method": 9382,
+      "inherited": 3870,
+      "ev:assignment_tracked": 1772
+    },
+    "resolution_method_breakdown": {
+      "name_match": 14753,
+      "impl_method": 9382,
+      "same_file": 7701,
+      "import": 5212,
+      "verified_unique": 4933,
+      "inherited": 3870,
+      "type_flow": 2051,
+      "lsp": 1553,
+      "unique_method": 381
+    },
+    "pred_A_det_floor": true,
+    "pred_B_nondominance": true,
+    "pred_C_typing": true,
+    "pass": true
+  },
+  "gate_lsp": {
+    "certificate_present": true,
+    "verdict": "LSP_ACTIVE_VALID",
+    "lsp_warm": true,
+    "server_launched": true,
+    "warm_probe_ok": true,
+    "probe_latency_ms": 1.32012367,
+    "language": "python",
+    "residual": 2029.0,
+    "demand_edges": 2029.0,
+    "attempted_edges": 3985.0,
+    "resolved_promoted": 1553.0,
+    "closure_rebuilt_after_lsp": true,
+    "graph_hash_before_lsp": "543a70ec8ad903c2be2b411e7515f9186e5fbf3f289c4e42b5447e642d8f0fda",
+    "graph_hash_after_lsp": "422f5499e44a77a19f5ecc70cbf82c1234cc9537ffeb497b4b8f908ba2dbb794",
+    "unsupported_reason": "",
+    "no_op_reason": "",
+    "pass": true,
+    "graph_lsp_edges": 1553,
+    "cert_resolved": 1553,
+    "stamp_mismatch": ""
+  },
+  "gate_embedder": {
+    "present": {
+      "class": "EmbeddingModel",
+      "is_zero": false,
+      "cos_related": 0.71040983,
+      "cos_unrelated": 0.29940427,
+      "pass": true
+    },
+    "consumption": {
+      "contract_available": true,
+      "effective_w_sem": 0.25,
+      "semantic_signal_count": 2,
+      "rendered_candidate_count": 5,
+      "k_sem_top": 141,
+      "considered": 5,
+      "coverage_need": 3,
+      "sem_scored_count": 2,
+      "sem_distinct_values": 3,
+      "sem_max": 0.662285,
+      "sem_median": 0.0,
+      "sem_mad": 0.0,
+      "sem_separation_gap": 0.662285,
+      "sem_separation_threshold": 0.0,
+      "k_mad": 1.0,
+      "sem_frac": 0.5,
+      "pred_1_weight": true,
+      "pred_2_coverage": false,
+      "pred_3_dispersion": true,
+      "pass": true
+    },
+    "mode": "present_and_consumption",
+    "pass": true
+  },
+  "verdict": {
+    "resolution_jarvis": true,
+    "lsp_enrichment": true,
+    "embedder": true,
+    "all_on": true
+  }
+}

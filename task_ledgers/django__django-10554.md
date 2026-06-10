@@ -42,3 +42,97 @@ right_trajectory = **FALSE** (agent visited the gold region, rejected it, fixed 
 | MSG 151 | `<gt-nudge reason="failure_persisted"> …your current hypothesis is likely wrong. Re-read the failing assertion and reconsider the root cause / target file.` | Fired amid the agent's failed repro attempts. The advice was substantively RIGHT (the hypothesis — clone-the-queries — was indeed wrong) but the agent read the persistence as env-difference (SQLite) and kept course | D=Y · C=**Y in substance** (only nudge this run whose content matched the true failure) · C=N (not consumed) |
 
 **Cross-component:** LEAKAGE = **1** (`[gt-patch:loaded]` at MSG 3). consumed-count = **0** of ~18 firings. fair-probe-count: 2 (L1 candidate choice at MSG 2-9; failure_persisted at MSG 151 — both went against gold). **Context gap (mandatory):** the agent needed (a) "the issue's error is PostgreSQL-only; SQLite raises `ORDER BY not allowed in subqueries` instead — do not require local repro of the exact message" and (b) mechanism-level evidence pinning `compiler.py::get_order_by`'s `self.select` position-matching loop as where combined-query ordering resolution lives. GT's graph has the `get_order_by → setup_query/get_select` edges to say (b); it delivered candidates and trailing scope instead. This is the run's clearest correct-but-unconverted delivery and the strongest argument that candidate LISTS don't flip decisions — committed mechanism-level briefs do.
+
+## 2026-06-10 PATH B trial - gt_trial.md §4+§5 audit (run 27260307167)
+
+**Arm:** SWE-bench Verified x deepseek-v4-flash (temp=1.0), mini-swe-agent, GT-on, substrate `gt-substrate@sha256:db7bd22d...`. Official eval: **NOT RESOLVED**. Audit method: chronological read of the full `django__django-10554.traj.json` messages array incl. `tool_calls` commands (never grep), per gt_trial.md §4 + the AGENT-OBSERVATION rule. Scorecard (8-dp, §5): `.claude/reports/runs/pathB_verified_trial_27260307167/django__django-10554/scorecard.json`.
+
+**TRAJECTORY (lead):** NOT resolved; the agent READ the gold function and walked away. Gold `django/db/models/sql/compiler.py::get_order_by` was rank 2 in the brief (headline rank 1 = query.py, where the wrong fix landed). The agent reached compiler.py at action 10, read get_order_by's combinator position-resolution loop twice (MSG 88-105), could not reproduce the PostgreSQL-only `ORDER BY position` error on the SQLite testbed, and shipped a defensive `query.chain()` clone in query.py::_combinator_query instead. The one substantively-correct nudge of the run (failure_persisted, MSG 151) went unconsumed. gt_caused=FALSE.
+
+### (a) PREREQS - substrate P1/P2/P3 (gt_trial.md §1.5 gates, verbatim 8-dp)
+
+| substrate gate | 8-dp REAL numbers (verbatim, foundational_gate_report.json) | GREEN? | HOW it reached the agent |
+|---|---|---|---|
+| P1 receiver-type resolution | `det_pct=70.39690184` - `name_match=14753` - typing tiers: `type_flow=2051 - impl_method=9382 - inherited=3870` (preds A/B/C all true) | GREEN (pass=true) | `resolved caller: create_default_site() in django/contrib/sites/management.py:20` / `resolved caller: do_query() in django/db/models/sql/subqueries.py:24` |
+| P2 graph.db depth | `calls_edges=49836.0` - resolution_method breakdown: name_match=14753, impl_method=9382, same_file=7701, import=5212, verified_unique=4933, inherited=3870, type_flow=2051, lsp=1553, unique_method=381 - LSP: `LSP_ACTIVE_VALID`, warm probe `1.32012367 ms`, `resolved_promoted=1553.0`, `graph_lsp_edges=1553` (cert==graph, `stamp_mismatch=""`) | GREEN (pass=true) | same resolved-edge lines + post-view `[WITNESS]`/`[CALLERS]` lines (quoted in the L3b table) |
+| P3 embedder | `class=EmbeddingModel` - `is_zero=False` - `cos_related=0.71040983` - `cos_unrelated=0.29940427` - `effective_w_sem=0.25000000` (consumption preds 1/2/3 true) | GREEN (pass=true, mode=present_and_consumption) | indirect only - it ORDERS the L1 candidate list the agent sees (no embedder text reaches the agent) |
+
+Substrate numbers are telemetry-only; they reach the agent ONLY as the brief's resolved-edge lines (quoted in the HOW column). Certs reconciled against the runtime witness per gt_gt S12 (no GRAPH_FAIL_MISSING_HANDOFF false-FAIL present on this run; graph cert + LSP cert + embedder cert all PASS).
+
+### (b) L1 brief / localization (ROLE per gt_gt §12: file RANKER - judge by gold-rank + fair reach)
+
+| turn | GT SENT (verbatim) | AGENT DID (verbatim) | DELIVERED/CORRECT/CONSUMED |
+|---|---|---|---|
+| MSG 1 | `<gt-localization confidence="medium"> 1. django/db/models/query.py - QuerySet, last, values_list / resolved caller: create_default_site() in django/contrib/sites/management.py:20 / 2. django/db/models/sql/compiler.py - execute_sql, SQLCompiler, __init__ / resolved caller: do_query() in django/db/models/sql/subqueries.py:24 ...` | MSG 2 CMDs: `ls -la` + `grep -n "def order_by" django/db/models/query.py` + `grep -rn "union" django/db/models/query.py` (issue-driven: union/order_by) | D=Y - C=PARTIAL (gold compiler.py at rank 2; headline query.py = where the WRONG fix landed - the issue also points there, so misdirection is shared with the issue) - C=NO |
+
+**L1 verdict:** delivered, gold at rank 2, not consumed; headline shared the issue's misdirection; leakage 0
+
+### (b) consensus / scope (`<gt-scope>`)
+
+| turn | GT SENT (verbatim) | AGENT DID (verbatim) | DELIVERED/CORRECT/CONSUMED |
+|---|---|---|---|
+| MSG 17 | `<gt-scope reason="re-anchored"> 1. sql/compiler.py - you have moved here; re-grounding scope...` | agent reading get_order_by/combinator code | D=Y - C=Y - C=N (trailing) |
+
+**SCOPE verdict:** delivered, trailing; leakage 0
+
+### (b) L3b post-view (ROLE: contract pillar - judge by bug-locus relevance, gt_gt §12)
+
+| turn | GT SENT (verbatim) | AGENT DID (verbatim) | DELIVERED/CORRECT/CONSUMED |
+|---|---|---|---|
+| MSG 16 | `<gt-evidence kind="post_view" file="django/db/models/sql/compiler.py"> [WITNESS] do_query called by -> django/db/models/sql/subqueries.py:24 'cursor = self.get_compiler(using).execute_sql(CURSOR)' [SIBLINGS] setup_query, get_group_by, collapse_group_by, get_select, get_order_by` | MSG 18: agent seds 340-370 + 410-490 (the combinator block) - in-neighborhood but uncited | D=Y - C=Y (siblings include the gold function name) - C=N |
+
+**L3b verdict:** delivered, correct (gold function in SIBLINGS), inert; leakage 0
+
+### (b) L3 post-edit contract (`<gt-contract>` + post_edit evidence)
+
+| turn | GT SENT (verbatim) | AGENT DID (verbatim) | DELIVERED/CORRECT/CONSUMED |
+|---|---|---|---|
+| MSG 195 | `<gt-contract file="query.py">` after the _combinator_query chain() edit | agent verifies clone independence + runs queries suite | D=Y - C=Y - C=N |
+
+**L3 verdict:** delivered, correct, inert; leakage 0
+
+### (b) GT_VERIFY
+
+| turn | GT SENT (verbatim) | AGENT DID (verbatim) | D/C/C |
+|---|---|---|---|
+| - | DELIVERED=NO - the agent-invoked GT_VERIFY surface is not wired on PATH B (mini-swe Verified pipeline); the post-edit `<gt-contract>` + `<gt-evidence kind="post_edit">` injections (tabled above) carry the L3 role. Read from the trajectory: no `gt understand`/`gt verify` invocation occurs in any of the agent's commands. | - | N/A |
+
+**GT_VERIFY verdict:** N/A on this path (no agent-invoked verify surface); not a dead layer.
+
+### (b) L4 (EVENT hook - gt_gt §12: absence = event didn't occur, NOT dead)
+
+| turn | GT SENT (verbatim) | AGENT DID (verbatim) | D/C/C |
+|---|---|---|---|
+| - | DELIVERED=N/A - L4 is an EVENT hook (gt_gt S12); on PATH B the wrapper's view/edit/failure/loop events ARE the hook surface and are tabled above (L3b/L3/L5). No separate L4 event exists on this path - absence = the event surface doesn't exist here, NOT a dead layer. | - | N/A |
+
+**L4 verdict:** N/A-by-path; the event surfaces that DO exist here all fired (see L3b/L3/L5 tables).
+
+### (b) L5 / L5b governor (`<gt-nudge>`)
+
+| turn | GT SENT (verbatim) | AGENT DID (verbatim) | DELIVERED/CORRECT/CONSUMED |
+|---|---|---|---|
+| MSG 43 | `<gt-nudge reason="scaffold_trap"> GT: 25+ actions and no source-file edit yet...` | agent continued reading compiler.py/query.py; first real fix attempt much later | D=Y - C=Y (true positive) - C=N |
+| MSG 151 | `<gt-nudge reason="failure_persisted"> GT: the same test failure has persisted across your edit(s) - your current hypothesis is likely wrong. Re-read the failing assertion and reconsider the root cause / target file.` | the agent's hypothesis (queryset-clone corruption in query.py) WAS the wrong mechanism - the gold fix lives in compiler.py get_order_by; agent did not change target; at MSG 202 it says 'I'm going to stop trying to understand the exact corruption mechanism' | D=Y - C=Y (SUBSTANTIVELY CORRECT - the only correct failure_persisted of the run) - C=N (ignored) |
+
+**L5/L5b verdict:** 3 nudges; 1 substantively-correct failure_persisted UNCONSUMED (missed save); leakage 0
+
+### (b) L6 (REINDEXER - gt_gt §12)
+
+| turn | GT SENT (verbatim) | AGENT DID (verbatim) | D/C/C |
+|---|---|---|---|
+| - | DELIVERED=N/A-BY-DESIGN - L6 is the post-edit REINDEXER; on the substrate path the mounted graph.db is authoritative + read-only (witness-hash parity), so single-file reindex is deliberately OFF (gt_gt S12 update / S6 note). 'L6 fired' is the wrong expectation here. | - | N/A |
+
+**L6 verdict:** gated OFF by design on the substrate path - correct behavior, not a failure.
+
+### (c) Cross-component line
+
+LEAKAGE (test-name/F2P) = 0. Telemetry stdout leak = 1 (`[gt-patch:loaded]` MSG 3). consumed-count = 0. fair-probe: YES (issue names no file) - gold-at-rank-2 unconsumed = a missed efficiency/causation win.
+
+### §5 scorecard (stored 8-dp at `django__django-10554/scorecard.json`)
+
+Tier 1: resolved=False - baseline/flip/regression = **N/A** (no frozen SWE-bench Verified baseline exists; the 87/300 frozen file is OH+SWE-bench-Live - stated, not faked).
+Tier 2: delivered=1.00000000 - correct=0.00000000 - consumed=0.00000000 - fair_probe=1.00000000 - right_trajectory=0.00000000 - **gt_caused=0.00000000** (gate broke: correct (gold compiler.py at rank 2; headline rank 1 = query.py where the wrong fix landed) + consumed=0 (agent read get_order_by twice, MSG 88-105, and walked away; failure_persisted nudge MSG 151 - the one substantively-correct nudge - unconsumed))
+Tier 3: gold_in_brief=True - first_gold_rank=2.0 - gold_edited=False - first_edit_action=19.0 - edit_to_gold_action=None - turns_to_gold_view=10.0
+Tier 4: action_count=112.00000000 - gt_injected_tokens=798.00000000 - looped_stuck=False - self_localized=True
+Tier 6: foundational_gates=GREEN (all_on=true) - test_names_leaked=0 - fail_to_pass_leaked=false - no_gold_labels=true - telemetry stdout leak=1 (`[gt-patch:loaded]`) - VOID=false
+Tier 7: llm_in=5069498.00000000 - llm_out=43641.00000000 - llm_cost_usd=0.00000000 (none_litellm_unmapped) - wall_clock_s=603.96364403 - time_to_gold_view_s=10.68186069

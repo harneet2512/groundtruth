@@ -1,0 +1,119 @@
+{
+  "task_id": "astropy__astropy-13236",
+  "schema": "gt_deep_metrics.v2",
+  "producer": "verified_deep_metrics",
+  "pipeline": "verified-miniswe",
+  "precision_decimals": 8,
+  "branch": "gt-trial",
+  "git_commit": "301e367d7c038f26786791904718243e423a38ee",
+  "outcome": "unresolved_with_patch",
+  "failure_stage": "none",
+  "agent_started": true,
+  "resolved": false,
+  "has_patch": true,
+  "exit_status": "Submitted",
+  "gt_baseline": false,
+  "official_eval": {
+    "classification": "AGENT",
+    "eval_no_report": false,
+    "had_predictions": true,
+    "in_resolved_denominator": true
+  },
+  "model": {
+    "name": "deepseek/deepseek-v4-flash",
+    "params": {
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "max_tokens": 8192,
+      "presence_penalty": 0,
+      "frequency_penalty": 0,
+      "thinking": "disabled"
+    }
+  },
+  "language": null,
+  "substrate_digest": "ghcr.io/hbali-stack/gt-substrate@sha256:db7bd22de2299ce677f78048d47a4796280556d9ef64a22853fe48eb0cfdc1b9",
+  "task_repo_commit": "6ed769d58d89380ebaa1ef52b300691eefda8928",
+  "graph_hash": null,
+  "graph_db_sha256": "3e1fce5e572bc5f26ce6805ef2f38bc2681718983605fb478062d55a5ed19834",
+  "trajectory_path": "/tmp/results/astropy__astropy-13236/astropy__astropy-13236.traj.json",
+  "trajectory_sha256": "01ecf0647b4222b814deb101b45fcae13a654ef4b62ffcc6152ad877b68d0a3b",
+  "max_iter": 250,
+  "wall_clock_s": 313.41393256,
+  "substrate": {
+    "graph_nodes": null,
+    "graph_edges": null,
+    "det_pct": null,
+    "resolution_method_dist": null,
+    "lsp_resolved": null,
+    "lsp_residual": 3121,
+    "lsp_verified": null,
+    "lsp_corrected": null,
+    "lsp_deleted": null,
+    "lsp_no_op_valid": null,
+    "gt_artifacts_dir": "/tmp/gt",
+    "brief_chars": 2831.0
+  },
+  "gt_injected_tokens_total": 708.0,
+  "efficiency": {
+    "model": "deepseek/deepseek-v4-flash",
+    "cost_source": "none_litellm_unmapped",
+    "llm_calls": 96.0,
+    "llm_tokens_in": 2291437.0,
+    "llm_tokens_out": 13736.0,
+    "llm_cache_hit_tokens": 2255232.0,
+    "llm_cache_miss_tokens": 36205.0,
+    "llm_tokens_total": 2305173.0,
+    "llm_cost_usd": 0.0,
+    "gt_injected_tokens_total": 708.0,
+    "gt_sent_tokens": 708.0,
+    "tokens_per_action": 24012.21875,
+    "cost_per_action_usd": 0.0,
+    "gt_injection_overhead_pct": 0.03089764
+  },
+  "gt_delivery": {
+    "brief_delivered": 2.0,
+    "evidence_delivered": 9.0,
+    "scope_delivered": 7.0,
+    "contract_delivered": 2.0,
+    "cochange_delivered": 1.0,
+    "nudge_delivered": 3.0,
+    "gt_observation_chars_total": 26435.0,
+    "raw_delivered_gt_samples": [
+      "<gt-task-brief>\n<gt-localization confidence=\"medium\">\nCandidate edit targets (reason over these):\n  1. astropy/table/table.py \u2014 Table, isinstance, TableReplaceWarning\n     resolved caller: gb() in astropy/extern/jquery/data/js/jquery.dataTables.min.js:9\n  2. astropy/table/column.py \u2014 Column, StringTruncateWarning, _auto_names\n     resolved caller: _searchsorted() in astropy/table/sorted_array.py:11\n  3. astropy/wcs/wcs.py \u2014 _load_tab_bintable, _parse_keysel, NoConvergence\n     resolved caller: ya() in astropy/extern/jquery/data/js/jquery-3.1.1.min.js:2\n  4. astropy/utils/masked/core.py \u2014 view,",
+      "<gt-scope files=\"5\">\n1. table/table.py \u2014 in scope (you are viewing this)\n2. tests/test_array.py \u2014 graph-connected\n3. tests/test_jsviewer.py \u2014 graph-connected\n4. utils/shapes.py \u2014 graph-connected\n5. table/serialize.py \u2014 graph-connected\nThese files are related in scope; GT has not confirmed a single primary target \u2014 confirm the edit target with grep.\n</gt-scope>\n<gt-evidence kind=\"post_view\" file=\"astropy/table/table.py\">\n[WITNESS] gb called by -> astropy/extern/jquery/data/js/jquery.dataTables.min.js:9 `width:100,overflow:\"scroll\"}).append(h(\"<div/>\").css({width:\"100%\",height:10}))).appendTo(\"b",
+      "<gt-evidence kind=\"post_view\" file=\"astropy/table/ndarray_mixin.py\">\n[WITNESS] view calls -> astropy/uncertainty/core.py:277 `def view(self, dtype=None, type=None):`\n</gt-evidence></output>",
+      "<gt-scope note=\"in-scope\">\n[GT] table/table.py: also in GT scope.\n</gt-scope></output>",
+      "<gt-nudge reason=\"scaffold_trap\">\nGT: 25+ actions and no source-file edit yet \u2014 you are likely stuck exploring/scaffolding. Use the brief's gt-scope to localize and make a concrete edit to a SOURCE file now.\n</gt-nudge></output>",
+      "<gt-evidence kind=\"post_view\" file=\"astropy/table/column.py\">\n[WITNESS] _searchsorted called by -> astropy/table/sorted_array.py:11 `return array.searchsorted(val, side=side)`\n[WITNESS] select_step_degree called by -> astropy/visualization/wcsaxes/utils.py:39 `n = degree_limits.searchsorted(dv.to(u.degree))`\n[WITNESS] isinstance calls -> astropy/table/table.py:308 `def isinstance(self, cls):`\n[WITNESS] replace_col calls -> astropy/table/index.py:126 `def replace_col(self, prev_col, new_col):`\n[CALLERS] table_info() in astropy/table/info.py:112 `outlines.extend(info.pformat(max_width=-1, max_li",
+      "<gt-scope reason=\"re-anchored\">\n1. table/column.py \u2014 you have moved here; re-grounding scope\n2. fits/fitstime.py \u2014 graph-connected\n3. utils/misc.py \u2014 graph-connected\n4. utils/data_info.py \u2014 graph-connected\n5. utils/console.py \u2014 graph-connected\nGT re-anchored scope on your current file \u2014 confirm the edit target with grep.\n</gt-scope></output>",
+      "<gt-scope note=\"in-scope\">\n[GT] table/column.py: also in GT scope.\n</gt-scope></output>"
+    ]
+  },
+  "agent": {
+    "action_count": 96.0,
+    "n_calls": 96.0,
+    "edits": 18.0,
+    "first_edit_action": 16.0,
+    "edit_to_gold_action": 0.0,
+    "gold_edited": null,
+    "edited_files": [
+      "astropy/table/table.py",
+      "astropy/version.py",
+      "astropy/__init__.py",
+      "astropy/_version.py",
+      "_version.py",
+      "opt/miniconda3/envs/testbed/lib/python3.9/site-packages/erfa/__init__.py",
+      "setup.py",
+      "longintrepr.h",
+      "opt/miniconda3/include/python3.11/cpython/longintrepr.h",
+      "opt/miniconda3/include/python3.11/longintrepr.h"
+    ]
+  },
+  "inputs_present": {
+    "trajectory": true,
+    "outcome_json": true,
+    "substrate_certs": true,
+    "brief": true,
+    "graph_db": true
+  }
+}

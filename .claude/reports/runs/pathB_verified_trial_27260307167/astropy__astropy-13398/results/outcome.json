@@ -1,0 +1,12 @@
+{
+  "schema": "gt.verified_outcome.v2",
+  "instance_id": "astropy__astropy-13398",
+  "resolved": false,
+  "classification": "AGENT",
+  "eval_no_report": false,
+  "had_predictions": true,
+  "report_files": [
+    "deepseek__deepseek-v4-flash.vrun27260307167.json"
+  ],
+  "workflow_run_id": "27260307167"
+}

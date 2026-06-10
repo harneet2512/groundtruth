@@ -1,0 +1,7 @@
+{
+  "django__django-10554": {
+    "model_name_or_path": "deepseek/deepseek-v4-flash",
+    "instance_id": "django__django-10554",
+    "model_patch": "diff --git a/django/db/models/query.py b/django/db/models/query.py\nindex 1544beb613..0add44cc9d 100644\n--- a/django/db/models/query.py\n+++ b/django/db/models/query.py\n@@ -931,7 +931,11 @@ class QuerySet:\n         # Clear limits and ordering so they can be reapplied\n         clone.query.clear_ordering(True)\n         clone.query.clear_limits()\n-        clone.query.combined_queries = (self.query,) + tuple(qs.query for qs in other_qs)\n+        clone.query.combined_queries = (\n+            self.query.chain(),\n+        ) + tuple(\n+            qs.query.chain() for qs in other_qs\n+        )\n         clone.query.combinator = combinator\n         clone.query.combinator_all = all\n         return clone\n"
+  }
+}

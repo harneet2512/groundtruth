@@ -1,0 +1,58 @@
+<gt-task-brief>
+<gt-localization confidence="high">
+Edit target: sympy/utilities/lambdify.py :: lambdify
+  guard/return to update: null_check|modules is None => module_provided = False  [L350]
+  reason: lambdify called by _import [CALLS]
+</gt-localization>
+<gt-task-brief>
+1. sympy/utilities/lambdify.py (def implemented_function(symfunc, implementation):, def lambdify(args, expr, modules=None, printer=None, use_imps=True,, def _import(module, reload="False"):)
+   Witness: main called by implemented_function [CALLS]
+   Contract: raises ValueError | preserve raise: isinstance(symfunc, string_types) -> symfunc = UndefinedFunction(symfunc) | returns value|symfunc | flows symfunc -> isinstance(symfunc, string_types) | symfunc = UndefinedFunction(symfunc) | UndefinedFunction(symfunc) | isinstance(symfunc, UndefinedFunction)
+   Callers: main() in examples/advanced/autowrap_integrators.py:128 `psi_ho = implemented_function('psi_ho',` | binary_function() in sympy/utilities/autowrap.py:558 `return implemented_function(symfunc, binary)` | ufuncify() in sympy/utilities/autowrap.py:958 `f = implemented_function(Dummy().name, Lambda(args, expr))`
+   Context: lambdastr
+   Calls: sympy/core/function.py, sympy/utilities/autowrap.py, sympy/core/basic.py
+
+EDIT-TARGET CONTRACTS (lambdify.py):
+  lambdify -> calls _get_namespace(m)  [sympy/utilities/lambdify.py:462]
+  lambdify -> calls _imp_namespace(expr, namespace=None)  [sympy/utilities/lambdify.py:585]
+  lambdify -> calls _import(module, reload="False")  [sympy/utilities/lambdify.py:119]
+  _import -> calls exec_(_code_, _globs_=None, _locs_=None)  [sympy/core/compatibility.py:125]
+
+Likely multi-file scope: autowrap_integrators.py, textplot.py, solvers.py
+
+Scope chain (graph-connected, check ALL): function.py → numbers.py → power.py → evalf.py → trigonometric.py
+   Chain: function.py → numbers.py (_eval_evalf → Float); function.py → power.py (nfloat → Pow); numbers.py → evalf.py (_eval_evalf → _evalf); numbers.py → trigonometric.py (_eval_rewrite_as_sin → sin)
+</gt-task-brief>
+<gt-graph-map>
+sympy/utilities/lambdify.py :: implemented_function
+  calls: UndefinedFunction (sympy/core/function.py)
+  called by: binary_function (sympy/utilities/autowrap.py), main (examples/advanced/autowrap_integrators.py), ufuncify (sympy/utilities/autowrap.py)
+</gt-graph-map>
+</gt-task-brief>
+
+evalf does not call _imp_ recursively
+Example from https://stackoverflow.com/questions/41818842/why-cant-i-evaluate-a-composition-of-implemented-functions-in-sympy-at-a-point:
+
+```
+>>> from sympy.utilities.lambdify import implemented_function
+>>> f = implemented_function('f', lambda x: x ** 2)
+>>> g = implemented_function('g', lambda x: 2 * x)
+>>> print(f(  2 ).evalf())
+4.00000000000000
+>>> print(  g(2) .evalf())
+4.00000000000000
+>>> print(f(g(2)).evalf())
+f(g(2))
+```
+
+The code for this is in `Function._eval_evalf`. It isn't calling evalf recursively on the return of `_imp_`.
+
+## GroundTruth codebase intelligence (automatic)
+
+As you read and edit files, GroundTruth automatically appends evidence to the
+command output inside <gt-evidence> tags: who calls a function and how, the
+tests that cover it, behavioral contracts (signature/return), and sibling
+patterns you must match. Read those tags -- they are cross-file facts you
+cannot get from the file alone. They appear on their own; you do not call
+anything. When GT shows callers, do not break them; when it shows a contract,
+preserve it; when it names a test, run it to verify.

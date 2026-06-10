@@ -1,0 +1,24 @@
+Available LSP servers: py, python, ts, typescript, tsx, typescriptreact, js, javascript, jsx, javascriptreact, go, rs, rust, java
+
+Resolving 244 javascript edges via LSP (launch + warm-probe even on no-op)...
+  Starting typescript-language-server for javascript...
+  LSP initialized (warm_probe_ok=True, 14.6ms), resolving 244 edges...
+
+Results (14.0s): server_launched=True warm_probe_ok=True probe_latency_ms=14.6
+  Verified: 4  Corrected: 30  Deleted: 36  Failed: 139  Skipped: 35
+  project_ready=True project_ready_wait_ms=1199.6 project_ready_attempts=1 failed_breakdown(lsp_error=0 empty=139 exception=0)
+[closure] rebuild-closure: 38141 -> 38181 closure rows (recomputed over current/LSP-corrected edges)
+LSP_METRICS resolved=34 residual=46 scoped_source_files=80 lsp_warm=1 verdict=LSP_ACTIVE_VALID
+Available LSP servers: py, python, ts, typescript, tsx, typescriptreact, js, javascript, jsx, javascriptreact, go, rs, rust, java
+LSP_METRICS resolved=0 residual=0 scoped_source_files=80 lsp_warm=0 verdict=LSP_UNSUPPORTED_EXPLICIT
+Available LSP servers: py, python, ts, typescript, tsx, typescriptreact, js, javascript, jsx, javascriptreact, go, rs, rust, java
+
+Resolving 9002 python edges via LSP (launch + warm-probe even on no-op)...
+  Starting pyright-langserver for python...
+  LSP initialized (warm_probe_ok=True, 1.4ms), resolving 9002 edges...
+
+Results (181.9s): server_launched=True warm_probe_ok=True probe_latency_ms=1.4
+  Verified: 1650  Corrected: 2265  Deleted: 1  Failed: 2007  Skipped: 3079
+  project_ready=False project_ready_wait_ms=20003.5 project_ready_attempts=8 failed_breakdown(lsp_error=0 empty=2007 exception=0)
+[closure] rebuild-closure: 38181 -> 53621 closure rows (recomputed over current/LSP-corrected edges)
+LSP_METRICS resolved=3915 residual=3121 scoped_source_files=80 lsp_warm=1 verdict=LSP_ACTIVE_VALID

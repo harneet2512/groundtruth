@@ -1,0 +1,44 @@
+<gt-localization confidence="medium">
+Candidate edit targets (reason over these):
+  1. astropy/table/table.py — Table, TableReplaceWarning, descr
+     resolved caller: t() in astropy/extern/jquery/data/js/jquery-3.6.0.min.js:2
+  2. astropy/io/fits/column.py — ascii, names, formats
+     resolved caller: fitsinfo() in astropy/io/fits/scripts/fitsinfo.py:51
+  3. astropy/io/votable/tree.py — Table, description, content
+     resolved caller: Fa() in astropy/extern/jquery/data/js/jquery.dataTables.min.js:61
+  4. astropy/wcs/wcs.py — _load_tab_bintable, _parse_keysel, NoConvergence
+     resolved caller: Ee() in astropy/extern/jquery/data/js/jquery-3.6.0.min.js:2
+  5. astropy/utils/iers/iers.py — open, IERSWarning, IERSDegradedAccuracyWarning
+     resolved caller: load_wcs_from_file() in docs/wcs/examples/from_file.py:12
+  6. astropy/units/core.py — names, _flatten_units_collection, _normalize_equivalencies
+     resolved caller: to_tree() in astropy/io/misc/asdf/tags/unit/unit.py:14
+</gt-localization>
+<gt-task-brief>
+1. astropy/table/table.py (def isinstance( self: Self@TableColumns, cls: Any ) -> list, def as_array(self, keep_byteorder=False, names=None):, def add_index(self, colnames, engine=None, unique=False):)
+   Witness: has_info_class called by isinstance [CALLS]
+   Contract: returns value|out | flows copy_data -> copy=copy_data
+   Callers: write_table_hdf5() in astropy/io/misc/hdf5.py:325 `table = table.copy(copy_data=False)` | _apply_join_funcs() in astropy/table/operations.py:1041 `left = left.copy(copy_data=False)` | _join() in astropy/table/operations.py:1122 `left = left.copy(copy_data=False)`
+   Context: descr, has_info_class
+   Calls: astropy/units/quantity.py, astropy/wcs/wcs.py, astropy/coordinates/sky_coordinate.py
+
+Expected behavior: <!-- What did you expect to happen. -->
+
+I expect the HTML table output to respect the formatting given by the `formats` argument.
+
+EDIT-TARGET CONTRACTS (table.py):
+  remove -> calls _remove(self, names, raise_exc=False)  [astropy/table/table.py:483]
+  isinstance -> calls values(self)  [astropy/table/table.py:2024]
+
+Related files to inspect: core.py, core.py, index.py
+
+Scope chain (graph-connected, check ALL): table.py → column.py → wcs.py → core.py → column.py
+   Chain: table.py → column.py (__getstate__ → col_copy); table.py → wcs.py (add_index → slice); column.py → core.py (unit → Unit); wcs.py → column.py (_read_sip_kw → info)
+
+Scope chain (graph-connected, check ALL): iers.py → core.py
+   Chain: iers.py → core.py (from_leap_seconds_list → convert_numpy)
+</gt-task-brief>
+<gt-graph-map>
+astropy/table/table.py :: copy
+  calls: TableGroups (astropy/table/groups.py)
+  called by: __copy__ (astropy/table/table.py), __deepcopy__ (astropy/table/table.py), __getitem__ (astropy/table/table.py), __init__ (astropy/table/table.py), _new_from_slice (astropy/table/table.py), filled (astropy/table/table.py), to_pandas (astropy/table/table.py), _apply_join_funcs (astropy/table/operations.py)
+</gt-graph-map>

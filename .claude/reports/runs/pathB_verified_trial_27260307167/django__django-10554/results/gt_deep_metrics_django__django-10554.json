@@ -1,0 +1,118 @@
+{
+  "task_id": "django__django-10554",
+  "schema": "gt_deep_metrics.v2",
+  "producer": "verified_deep_metrics",
+  "pipeline": "verified-miniswe",
+  "precision_decimals": 8,
+  "branch": "gt-trial",
+  "git_commit": "301e367d7c038f26786791904718243e423a38ee",
+  "outcome": "unresolved_with_patch",
+  "failure_stage": "none",
+  "agent_started": true,
+  "resolved": false,
+  "has_patch": true,
+  "exit_status": "Submitted",
+  "gt_baseline": false,
+  "official_eval": {
+    "classification": "AGENT",
+    "eval_no_report": false,
+    "had_predictions": true,
+    "in_resolved_denominator": true
+  },
+  "model": {
+    "name": "deepseek/deepseek-v4-flash",
+    "params": {
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "max_tokens": 8192,
+      "presence_penalty": 0,
+      "frequency_penalty": 0,
+      "thinking": "disabled"
+    }
+  },
+  "language": null,
+  "substrate_digest": "ghcr.io/hbali-stack/gt-substrate@sha256:db7bd22de2299ce677f78048d47a4796280556d9ef64a22853fe48eb0cfdc1b9",
+  "task_repo_commit": "14d026cccb144c6877294ba4cd4e03ebf0842498",
+  "graph_hash": null,
+  "graph_db_sha256": "3f9ed53df13e196ce1eaf6c23b41b7dc7399c456c2cfe360ce0adae6ad2894b5",
+  "trajectory_path": "/tmp/results/django__django-10554/django__django-10554.traj.json",
+  "trajectory_sha256": "0caec5d0fd2f15795708af2e891dff13557892f86ed80f75dba0f6983781b8d9",
+  "max_iter": 250,
+  "wall_clock_s": 603.96364403,
+  "substrate": {
+    "graph_nodes": null,
+    "graph_edges": null,
+    "det_pct": null,
+    "resolution_method_dist": null,
+    "lsp_resolved": null,
+    "lsp_residual": 2029,
+    "lsp_verified": null,
+    "lsp_corrected": null,
+    "lsp_deleted": null,
+    "lsp_no_op_valid": null,
+    "gt_artifacts_dir": "/tmp/gt",
+    "brief_chars": 3190.0
+  },
+  "gt_injected_tokens_total": 798.0,
+  "efficiency": {
+    "model": "deepseek/deepseek-v4-flash",
+    "cost_source": "none_litellm_unmapped",
+    "llm_calls": 112.0,
+    "llm_tokens_in": 5069498.0,
+    "llm_tokens_out": 43641.0,
+    "llm_cache_hit_tokens": 5022336.0,
+    "llm_cache_miss_tokens": 47162.0,
+    "llm_tokens_total": 5113139.0,
+    "llm_cost_usd": 0.0,
+    "gt_injected_tokens_total": 798.0,
+    "gt_sent_tokens": 798.0,
+    "tokens_per_action": 45653.02678571,
+    "cost_per_action_usd": 0.0,
+    "gt_injection_overhead_pct": 0.0157412
+  },
+  "gt_delivery": {
+    "brief_delivered": 2.0,
+    "evidence_delivered": 9.0,
+    "scope_delivered": 11.0,
+    "contract_delivered": 2.0,
+    "cochange_delivered": 1.0,
+    "nudge_delivered": 3.0,
+    "gt_observation_chars_total": 42451.0,
+    "raw_delivered_gt_samples": [
+      "<gt-task-brief>\n<gt-localization confidence=\"medium\">\nCandidate edit targets (reason over these):\n  1. django/db/models/query.py \u2014 QuerySet, last, values_list\n     resolved caller: create_default_site() in django/contrib/sites/management.py:20\n  2. django/db/models/sql/compiler.py \u2014 execute_sql, SQLCompiler, __init__\n     resolved caller: do_query() in django/db/models/sql/subqueries.py:24\n  3. django/db/backends/utils.py \u2014 _execute_with_wrappers, _execute, CursorWrapper\n     resolved caller: _database_exists() in django/db/backends/postgresql/creation.py:33\n  4. django/db/utils.py \u2014 Programmi",
+      "<gt-scope files=\"5\">\n1. models/query.py \u2014 in scope (you are viewing this)\n2. prefetch_related/models.py \u2014 graph-connected\n3. custom_managers/models.py \u2014 graph-connected\n4. generic_views/models.py \u2014 graph-connected\n5. custom_managers/tests.py \u2014 graph-connected\nThese files are related in scope; GT has not confirmed a single primary target \u2014 confirm the edit target with grep.\n</gt-scope>\n<gt-evidence kind=\"post_view\" file=\"django/db/models/query.py\">\n[WITNESS] create_default_site called by -> django/contrib/sites/management.py:20 `if not Site.objects.using(using).exists():`\n[WITNESS] __init__ cal",
+      "<gt-scope note=\"in-scope\">\n[GT] models/query.py: also in GT scope.\n</gt-scope></output>",
+      "<gt-evidence kind=\"post_view\" file=\"django/db/models/sql/query.py\">\n[WITNESS] do_query called by -> django/db/models/sql/subqueries.py:24 `cursor = self.get_compiler(using).execute_sql(CURSOR)`\n[WITNESS] _get_check_sql called by -> django/db/models/constraints.py:36 `query = Query(model=model)`\n[WITNESS] get_fields calls -> django/contrib/admin/options.py:312 `def get_fields(self, request, obj=None):`\n[WITNESS] SimpleCol calls -> django/db/models/expressions.py:749 `class SimpleCol(Expression):`\n[CALLERS] _get_check_sql() in django/db/models/constraints.py:38 `compiler = query.get_compiler(con",
+      "<gt-evidence kind=\"post_view\" file=\"django/db/models/sql/compiler.py\">\n[WITNESS] do_query called by -> django/db/models/sql/subqueries.py:24 `cursor = self.get_compiler(using).execute_sql(CURSOR)`\n[WITNESS] __iter__ called by -> django/db/models/query.py:57 `results = compiler.execute_sql(chunked_fetch=self.chunked_fetch, chunk_size=self.chunk_size)`\n[WITNESS] get_initial_alias calls -> django/db/models/sql/query.py:907 `def get_initial_alias(self):`\n[WITNESS] split_having calls -> django/db/models/sql/where.py:32 `def split_having(self, negated=False):`\n[CALLERS] do_query() in django/db/model",
+      "<gt-scope reason=\"re-anchored\">\n1. sql/compiler.py \u2014 you have moved here; re-grounding scope\n2. utils/hashable.py \u2014 graph-connected\n3. db/utils.py \u2014 graph-connected\n4. db/transaction.py \u2014 graph-connected\n5. core/exceptions.py \u2014 graph-connected\nGT re-anchored scope on your current file \u2014 confirm the edit target with grep.\n</gt-scope></output>",
+      "<gt-scope note=\"in-scope\">\n[GT] sql/compiler.py: also in GT scope.\n</gt-scope></output>",
+      "<gt-nudge reason=\"scaffold_trap\">\nGT: 25+ actions and no source-file edit yet \u2014 you are likely stuck exploring/scaffolding. Use the brief's gt-scope to localize and make a concrete edit to a SOURCE file now.\n</gt-nudge></output>"
+    ]
+  },
+  "agent": {
+    "action_count": 112.0,
+    "n_calls": 112.0,
+    "edits": 20.0,
+    "first_edit_action": 19.0,
+    "edit_to_gold_action": 0.0,
+    "gold_edited": null,
+    "edited_files": [
+      "test_sqlite.py",
+      "django/db/models/sql/compiler.py",
+      "django/db/models/query.py",
+      "home/bbt/.virtualenvs/ispnext/lib/python3.6/site-packages/django/db/models/query.py",
+      "tmp/reproduce.py",
+      "tmp/patch.py",
+      "django/db/models/sql/query.py",
+      "tests/queries/test_qs_combinators.py",
+      "tests/runtests.py"
+    ]
+  },
+  "inputs_present": {
+    "trajectory": true,
+    "outcome_json": true,
+    "substrate_certs": true,
+    "brief": true,
+    "graph_db": true
+  }
+}

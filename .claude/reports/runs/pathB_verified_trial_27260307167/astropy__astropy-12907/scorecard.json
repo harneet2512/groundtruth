@@ -1,0 +1,115 @@
+{
+ "task": "astropy__astropy-12907",
+ "run": "pathB_verified_trial_27260307167",
+ "audit": "gt_trial.md S4+S5, 2026-06-10, chronological read of traj.json (never grep)",
+ "tier1_outcome": {
+  "resolved": true,
+  "baseline_pass": "N/A - no frozen SWE-bench Verified baseline exists; the frozen 87/300 file is OH+SWE-bench-Live (different benchmark+harness). Do not pair against it.",
+  "flip": "N/A",
+  "regression": "N/A",
+  "per_task_delta": "N/A"
+ },
+ "tier2_causality": {
+  "delivered": 1.0,
+  "correct": 0.0,
+  "consumed": 0.0,
+  "fair_probe": 0.0,
+  "right_trajectory": 0.0,
+  "gt_caused": 0.0,
+  "gate_broke": "correct (headline=non-gold core.py; jQuery junk callers; isinstance->TableColumns false CALLEEs) + consumed=0 + fair_probe=0 (issue names separability_matrix + repro)",
+  "verdict_note": "resolved & NOT gt_caused = self-solve/luck - NOT a GT win, do not count it"
+ },
+ "tier3_localization": {
+  "gold_file_reached_by_brief": true,
+  "first_gold_rank": 2.0,
+  "gold_edited": true,
+  "first_edit_action": 7.0,
+  "edit_to_gold_action": 21.0,
+  "turns_to_gold_view": 16.0
+ },
+ "tier4_nonharm_efficiency": {
+  "action_count": 39.0,
+  "action_count_delta": "N/A (no paired baseline arm)",
+  "first_edit_latency_actions": 7.0,
+  "unique_files_edited": 3,
+  "looped_stuck": false,
+  "gt_injected_tokens": 549.0,
+  "time_first_action_to_gold_view_s": 56.02960467,
+  "self_localized": true
+ },
+ "tier5_per_layer": {
+  "L1_brief": {
+   "eligible": 1,
+   "emitted": 1,
+   "suppressed": 0,
+   "rendered_chars": 2197.0,
+   "consumed": 0
+  },
+  "consensus_scope": {
+   "eligible": 1,
+   "emitted": 6,
+   "suppressed": 0,
+   "consumed": 0
+  },
+  "L3b_post_view": {
+   "eligible": 1,
+   "emitted": 6,
+   "suppressed": 0,
+   "consumed": 0
+  },
+  "L3_post_edit_contract": {
+   "eligible": 1,
+   "emitted": 2,
+   "suppressed": 0,
+   "consumed": 0
+  },
+  "L4_event_hook": {
+   "note": "no separate L4 surface on PATH B; view/edit/failure events are the wrapper hooks above - absence != dead layer (gt_gt S12)"
+  },
+  "L5_L5b_governor_nudges": {
+   "emitted": 2,
+   "consumed": 0,
+   "false_positive_firings": 1
+  },
+  "L6_reindexer": {
+   "note": "N/A-by-design on the substrate path - authoritative read-only mounted graph, hash parity (gt_gt S12 update)"
+  },
+  "cochange_multifile": {
+   "emitted": 1,
+   "consumed": 0
+  }
+ },
+ "tier6_legitimacy": {
+  "foundational_gates_green": true,
+  "gate_detail": {
+   "P1_det_pct": 71.94909195,
+   "P1_name_match": 9808,
+   "P2_calls_edges": 34965.0,
+   "P3_embedder_class": "EmbeddingModel",
+   "P3_cos_related": 0.71040983,
+   "P3_cos_unrelated": 0.29940427,
+   "P3_is_zero": false,
+   "P3_effective_w_sem": 0.25
+  },
+  "test_names_leaked": 0,
+  "fail_to_pass_leaked": false,
+  "no_gold_labels": true,
+  "telemetry_stdout_leak": "1 ([gt-patch:loaded] verbatim in MSG 3 tool output - loader banner on stdout; product bug, NOT test/F2P leakage; does not void per S6 but must move to stderr)",
+  "void": false
+ },
+ "tier7_cost": {
+  "llm_in": 512416.0,
+  "llm_out": 10508.0,
+  "llm_cost_usd": 0.0,
+  "cost_source": "none_litellm_unmapped",
+  "gt_injected_tokens": 549.0,
+  "wall_clock_s": 169.02382708,
+  "time_to_first_edit_actions": 7.0,
+  "time_to_gold_view_s": 56.02960467
+ },
+ "manager_line": {
+  "gt_caused_flip": "N/A (flip undefined - no Verified baseline)",
+  "gt_caused": false
+ },
+ "trajectory_finding": "Issue-driven self-localization; agent hand-traced _cstack to the =1->=right fix (MSG 34-38); GT peripheral."
+}

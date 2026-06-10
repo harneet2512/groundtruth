@@ -1,0 +1,7 @@
+{
+  "sympy__sympy-11618": {
+    "model_name_or_path": "deepseek/deepseek-v4-flash",
+    "instance_id": "sympy__sympy-11618",
+    "model_patch": "diff --git a/sympy/geometry/point.py b/sympy/geometry/point.py\nindex 593048464b..d207391489 100644\n--- a/sympy/geometry/point.py\n+++ b/sympy/geometry/point.py\n@@ -266,8 +266,15 @@ def distance(self, p):\n         sqrt(x**2 + y**2)\n \n         \"\"\"\n-        return sqrt(sum([(a - b)**2 for a, b in zip(\n-            self.args, p.args if isinstance(p, Point) else p)]))\n+        if isinstance(p, Point):\n+            p_args = p.args\n+        else:\n+            p_args = p\n+        # Pad shorter args with zeros to handle different dimensions\n+        n = max(len(self.args), len(p_args))\n+        s_args = list(self.args) + [S.Zero] * (n - len(self.args))\n+        p_args_list = list(p_args) + [S.Zero] * (n - len(p_args))\n+        return sqrt(sum([(a - b)**2 for a, b in zip(s_args, p_args_list)]))\n \n     def taxicab_distance(self, p):\n         \"\"\"The Taxicab Distance from self to point p.\n"
+  }
+}

@@ -1,0 +1,36 @@
+<gt-localization confidence="medium">
+Candidate edit targets (reason over these):
+  1. django/core/validators.py — URLValidator, _lazy_re_compile, RegexValidator
+     resolved caller: _check_query() in django/contrib/gis/geoip2/base.py:160
+  2. django/forms/fields.py — Field, __init__, prepare_value
+     resolved caller: __init__() in django/forms/formsets.py:35
+  3. django/db/models/fields/__init__.py — validators, Empty, NOT_PROVIDED
+     resolved caller: _check_default() in django/contrib/postgres/fields/mixins.py:8
+  4. django/urls/resolvers.py — regex, ResolverMatch, __init__
+     resolved caller: check_url_config() in django/core/checks/urls.py:12
+  5. django/contrib/auth/hashers.py — is_password_usable, check_password, make_password
+     resolved caller: get_context() in django/contrib/auth/forms.py:32
+  6. django/contrib/admin/utils.py — FieldIsAForeignKeyColumnName, lookup_needs_distinct, prepare_lookup_value
+     resolved caller: admin_urlquote() in django/contrib/admin/templatetags/admin_urls.py:18
+</gt-localization>
+<gt-task-brief>
+1. django/core/validators.py (def __call__(self, value):, def __init__(self, regex=None, message=None, code=None, inverse_match=None, flags=None):, def _lazy_re_compile(regex, flags=0):)
+   Witness: validators called by DecimalValidator [CALLS]
+   Contract: raises ValidationError,e | preserve raise: invalid_input -> raise ValidationError(self.message, code=self.code); raise: scheme not in self.schemes -> raise ValidationError(self.message, code=self.code) | returns none | flows value -> str(value)
+   Context: validate_integer, validate_domain_part, validate_ipv4_address, validate_ipv6_address, validate_ipv46_address
+   Calls: django/db/models/fields/__init__.py, django/db/models/expressions.py, django/forms/fields.py
+
+EDIT-TARGET CONTRACTS (validators.py):
+  __call__ -> calls ValidationError  [django/core/exceptions.py:94]
+  __call__ -> calls clean(self, x)  [django/core/validators.py:335]
+  __call__ -> calls compare(self, a, b)  [django/core/validators.py:332]
+  __init__ -> calls _lazy_re_compile(regex, flags=0)  [django/core/validators.py:16]
+  __init__ -> calls super(self: Self@BlockNode)  [django/template/loader_tags.py:67]
+
+Related files to inspect: base.py, __init__.py, fields.py
+</gt-task-brief>
+<gt-graph-map>
+django/core/validators.py :: __call__
+  calls: ValidationError (django/core/exceptions.py), __call__ (django/core/validators.py), clean (django/core/validators.py), compare (django/core/validators.py), validate_domain_part (django/core/validators.py), validate_ipv6_address (django/core/validators.py), super (django/template/loader_tags.py), groups (django/contrib/auth/models.py)
+  called by: __call__ (django/core/validators.py)
+</gt-graph-map>

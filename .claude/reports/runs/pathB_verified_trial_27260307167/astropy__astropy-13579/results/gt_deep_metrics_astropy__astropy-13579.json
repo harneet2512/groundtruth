@@ -1,0 +1,109 @@
+{
+  "task_id": "astropy__astropy-13579",
+  "schema": "gt_deep_metrics.v2",
+  "producer": "verified_deep_metrics",
+  "pipeline": "verified-miniswe",
+  "precision_decimals": 8,
+  "branch": "gt-trial",
+  "git_commit": "301e367d7c038f26786791904718243e423a38ee",
+  "outcome": "resolved",
+  "failure_stage": "none",
+  "agent_started": true,
+  "resolved": true,
+  "has_patch": true,
+  "exit_status": "Submitted",
+  "gt_baseline": false,
+  "official_eval": {
+    "classification": "RESOLVED",
+    "eval_no_report": false,
+    "had_predictions": true,
+    "in_resolved_denominator": true
+  },
+  "model": {
+    "name": "deepseek/deepseek-v4-flash",
+    "params": {
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "max_tokens": 8192,
+      "presence_penalty": 0,
+      "frequency_penalty": 0,
+      "thinking": "disabled"
+    }
+  },
+  "language": null,
+  "substrate_digest": "ghcr.io/hbali-stack/gt-substrate@sha256:db7bd22de2299ce677f78048d47a4796280556d9ef64a22853fe48eb0cfdc1b9",
+  "task_repo_commit": "0df94ff7097961e92fd7812036a24b145bc13ca8",
+  "graph_hash": null,
+  "graph_db_sha256": "415759a359f212bc6574627101985c358633ce8e282a47c2d2a68784806b9bd0",
+  "trajectory_path": "/tmp/results/astropy__astropy-13579/astropy__astropy-13579.traj.json",
+  "trajectory_sha256": "add3592e97755db60ff021cedfe05e811ebe2ac66898a9a025c2a2b6196b9c0d",
+  "max_iter": 250,
+  "wall_clock_s": 243.26526403,
+  "substrate": {
+    "graph_nodes": null,
+    "graph_edges": null,
+    "det_pct": null,
+    "resolution_method_dist": null,
+    "lsp_resolved": null,
+    "lsp_residual": 3106,
+    "lsp_verified": null,
+    "lsp_corrected": null,
+    "lsp_deleted": null,
+    "lsp_no_op_valid": null,
+    "gt_artifacts_dir": "/tmp/gt",
+    "brief_chars": 2403.0
+  },
+  "gt_injected_tokens_total": 601.0,
+  "efficiency": {
+    "model": "deepseek/deepseek-v4-flash",
+    "cost_source": "none_litellm_unmapped",
+    "llm_calls": 33.0,
+    "llm_tokens_in": 665917.0,
+    "llm_tokens_out": 14913.0,
+    "llm_cache_hit_tokens": 645760.0,
+    "llm_cache_miss_tokens": 20157.0,
+    "llm_tokens_total": 680830.0,
+    "llm_cost_usd": 0.0,
+    "gt_injected_tokens_total": 601.0,
+    "gt_sent_tokens": 601.0,
+    "tokens_per_action": 20631.21212121,
+    "cost_per_action_usd": 0.0,
+    "gt_injection_overhead_pct": 0.09025149
+  },
+  "gt_delivery": {
+    "brief_delivered": 2.0,
+    "evidence_delivered": 6.0,
+    "scope_delivered": 4.0,
+    "contract_delivered": 2.0,
+    "cochange_delivered": 1.0,
+    "nudge_delivered": 2.0,
+    "gt_observation_chars_total": 27777.0,
+    "raw_delivered_gt_samples": [
+      "<gt-task-brief>\n<gt-localization confidence=\"high\">\nEdit target: astropy/wcs/wcsapi/wrappers/sliced_wcs.py :: slice\n  reason: sanitize_slices calls slice [CALLS]\n</gt-localization>\n<gt-task-brief>\n1. astropy/wcs/wcsapi/wrappers/sliced_wcs.py (def pixel_to_world_values(self, *pixel_arrays):, def world_to_pixel_values(self, *world_arrays):, def _pixel_to_world_values_all(self, *pixel_arrays):)\n   Witness: dropped_world_dimensions called by _pixel_to_world_values_all [CALLS]\n   Contract: preserve return: isinstance(world_arrays, np.ndarray) and not world_arrays.shape -> return world_arrays; retur",
+      "<gt-scope files=\"5\">\n1. wrappers/sliced_wcs.py \u2014 in scope (you are viewing this)\n2. tests/test_sliced_wcs.py \u2014 graph-connected\n3. wrappers/base.py \u2014 graph-connected\n4. wcsapi/fitswcs.py \u2014 graph-connected\n5. table/table.py \u2014 graph-connected\nThese files are related in scope; GT has not confirmed a single primary target \u2014 confirm the edit target with grep.\n</gt-scope>\n<gt-evidence kind=\"post_view\" file=\"astropy/wcs/wcsapi/wrappers/sliced_wcs.py\">\n[WITNESS] _slice_wcs called by -> astropy/nddata/mixins/ndslicing.py:123 `llwcs = SlicedLowLevelWCS(self.wcs.low_level_wcs, item)`\n[WITNESS] apply_slice",
+      "<gt-scope note=\"in-scope\">\n[GT] wrappers/sliced_wcs.py: also in GT scope.\n</gt-scope></output>",
+      "<gt-scope note=\"in-scope\">\n[GT] tests/test_sliced_wcs.py: also in GT scope.\n</gt-scope>\n<gt-evidence kind=\"post_view\" file=\"astropy/wcs/wcsapi/wrappers/tests/test_sliced_wcs.py\">\n[WITNESS] SlicedLowLevelWCS calls -> astropy/wcs/wcsapi/wrappers/sliced_wcs.py:105 `class SlicedLowLevelWCS(BaseWCSWrapper):`\n[WITNESS] slice calls -> astropy/wcs/wcs.py:3074 `def slice(self, view, numpy_order=True):`\n</gt-evidence></output>",
+      "<gt-contract file=\"sliced_wcs.py\">\n[SIGNATURE] def _pixel_to_world_values_all(self, *pixel_arrays):\n[CALLERS] _pixel_to_world_values_all: 2 verified caller(s) in 1 file(s) \u2014 preserve this interface\n[SIGNATURE] def combine_slices(slice1, slice2):\n[CALLERS] combine_slices: 1 verified caller(s) in 1 file(s) \u2014 preserve this interface\n[SIGNATURE] def pixel_to_world_values(self, *pixel_arrays):\n[CALLERS] pixel_to_world_values: 1 verified caller(s) in 1 file(s) \u2014 preserve this interface\n[RETURNS] value|self._wcs.pixel_to_world_values(*pixel_arrays_new)\n</gt-contract>\n<gt-evidence kind=\"post_edit\" fil",
+      "<gt-nudge reason=\"failure_persisted\">\nGT: the same test failure has persisted across your edit(s) \u2014 your current hypothesis is likely wrong. Re-read the failing assertion and reconsider the root cause / target file.\n</gt-nudge></output>"
+    ]
+  },
+  "agent": {
+    "action_count": 33.0,
+    "n_calls": 33.0,
+    "edits": 7.0,
+    "first_edit_action": 13.0,
+    "edit_to_gold_action": 0.0,
+    "gold_edited": null,
+    "edited_files": [
+      "astropy/wcs/wcsapi/wrappers/sliced_wcs.py",
+      "astropy/wcs/wcsapi/wrappers/tests/test_sliced_wcs.py"
+    ]
+  },
+  "inputs_present": {
+    "trajectory": true,
+    "outcome_json": true,
+    "substrate_certs": true,
+    "brief": true,
+    "graph_db": true
+  }
+}

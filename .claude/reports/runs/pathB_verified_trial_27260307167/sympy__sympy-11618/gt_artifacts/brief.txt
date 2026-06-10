@@ -1,0 +1,39 @@
+<gt-localization confidence="low">
+Candidate edit targets (reason over these):
+  1. sympy/geometry/ellipse.py — Ellipse, __new__, ambient_dimension
+     resolved caller: control_point() in sympy/physics/quantum/circuitplot.py:244
+  2. sympy/geometry/line.py — distance, Undecidable, LinearEntity
+     resolved caller: __new__() in sympy/geometry/parabola.py:75
+  3. sympy/geometry/polygon.py — distance, Polygon, __new__
+     resolved caller: convex_hull() in sympy/geometry/util.py:330
+  4. sympy/core/expr.py — together, Expr, _diff_wrt
+     resolved caller: series() in sympy/series/series.py:12
+  5. sympy/geometry/plane.py — distance, Plane, __new__
+     resolved caller: are_coplanar() in sympy/geometry/util.py:536
+  6. sympy/geometry/point.py — distance, Point, __new__
+     resolved caller: __new__() in sympy/geometry/line3d.py:45
+</gt-localization>
+<gt-task-brief>
+1. sympy/geometry/ellipse.py (def equation(self, x='x', y='y'):, def encloses_point(self, p):, def intersection(self, o):)
+   Witness: circumference calls sqrt [CALLS]
+   Contract: returns value|t1 + t2 - 1 | flows x -> x = _symbol(x) | _symbol(x) | x - self.center.x | self.center.x
+   Context: ambient_dimension, center, hradius, vradius, minor
+   Calls: sympy/geometry/polygon.py, sympy/combinatorics/perm_groups.py, sympy/core/numbers.py
+
+EDIT-TARGET CONTRACTS (ellipse.py):
+  equation -> calls _symbol(s, matching_symbol=None)  [sympy/geometry/util.py:88]
+  encloses_point -> calls fuzzy_bool(x)  [sympy/core/logic.py:89]
+  encloses_point -> calls distance(self, p)  [sympy/geometry/point.py:237]
+  intersection -> calls _do_ellipse_intersection(self, o)  [sympy/geometry/ellipse.py:1121]
+  intersection -> calls _do_line_intersection(self, o)  [sympy/geometry/ellipse.py:1084]
+
+Related files to inspect: point.py, polygon.py, circuitplot.py
+
+Scope chain (graph-connected, check ALL): ellipse.py → point.py → util.py → line.py → polygon.py → plane.py → function.py → expr.py
+   Chain: ellipse.py → point.py (__new__ → Point); ellipse.py → util.py (reflect → _uniquely_named_symbol); ellipse.py → line.py (tangent_lines → Line); ellipse.py → polygon.py (__new__ → Triangle); point.py → plane.py (are_coplanar → Plane); util.py → function.py (idiff → Function); function.py → expr.py (_eval_evalf → _from_mpmath)
+</gt-task-brief>
+<gt-graph-map>
+sympy/geometry/ellipse.py :: equation
+  calls: _symbol (sympy/geometry/util.py), Symbol (sympy/core/symbol.py) (2-hop)
+  called by: __contains__ (sympy/geometry/ellipse.py), _do_ellipse_intersection (sympy/geometry/ellipse.py), normal_lines (sympy/geometry/ellipse.py), reflect (sympy/geometry/ellipse.py), tangent_lines (sympy/geometry/ellipse.py)
+</gt-graph-map>

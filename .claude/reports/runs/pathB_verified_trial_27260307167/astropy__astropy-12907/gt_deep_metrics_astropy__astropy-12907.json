@@ -1,0 +1,112 @@
+{
+  "task_id": "astropy__astropy-12907",
+  "schema": "gt_deep_metrics.v2",
+  "producer": "verified_deep_metrics",
+  "pipeline": "verified-miniswe",
+  "precision_decimals": 8,
+  "branch": "gt-trial",
+  "git_commit": "301e367d7c038f26786791904718243e423a38ee",
+  "outcome": "resolved",
+  "failure_stage": "none",
+  "agent_started": true,
+  "resolved": true,
+  "has_patch": true,
+  "exit_status": "Submitted",
+  "gt_baseline": false,
+  "official_eval": {
+    "classification": "RESOLVED",
+    "eval_no_report": false,
+    "had_predictions": true,
+    "in_resolved_denominator": true
+  },
+  "model": {
+    "name": "deepseek/deepseek-v4-flash",
+    "params": {
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "max_tokens": 8192,
+      "presence_penalty": 0,
+      "frequency_penalty": 0,
+      "thinking": "disabled"
+    }
+  },
+  "language": null,
+  "substrate_digest": "ghcr.io/hbali-stack/gt-substrate@sha256:db7bd22de2299ce677f78048d47a4796280556d9ef64a22853fe48eb0cfdc1b9",
+  "task_repo_commit": "d16bfe05a744909de4b27f5875fe0d4ed41ce607",
+  "graph_hash": null,
+  "graph_db_sha256": "b142b638ff5c2d61e48e60ad58d53ac496195d9f9c2a424f1e873c00ec4cf584",
+  "trajectory_path": "/tmp/results/astropy__astropy-12907/astropy__astropy-12907.traj.json",
+  "trajectory_sha256": "11e1691371b9cbef5520ff6924da11199fb8e669d949a469589324df9e52c31b",
+  "max_iter": 250,
+  "wall_clock_s": 169.02382708,
+  "substrate": {
+    "graph_nodes": null,
+    "graph_edges": null,
+    "det_pct": null,
+    "resolution_method_dist": null,
+    "lsp_resolved": null,
+    "lsp_residual": 3092,
+    "lsp_verified": null,
+    "lsp_corrected": null,
+    "lsp_deleted": null,
+    "lsp_no_op_valid": null,
+    "gt_artifacts_dir": "/tmp/gt",
+    "brief_chars": 2197.0
+  },
+  "gt_injected_tokens_total": 549.0,
+  "efficiency": {
+    "model": "deepseek/deepseek-v4-flash",
+    "cost_source": "none_litellm_unmapped",
+    "llm_calls": 39.0,
+    "llm_tokens_in": 512416.0,
+    "llm_tokens_out": 10508.0,
+    "llm_cache_hit_tokens": 496000.0,
+    "llm_cache_miss_tokens": 16416.0,
+    "llm_tokens_total": 522924.0,
+    "llm_cost_usd": 0.0,
+    "gt_injected_tokens_total": 549.0,
+    "gt_sent_tokens": 549.0,
+    "tokens_per_action": 13408.30769231,
+    "cost_per_action_usd": 0.0,
+    "gt_injection_overhead_pct": 0.10713951
+  },
+  "gt_delivery": {
+    "brief_delivered": 2.0,
+    "evidence_delivered": 6.0,
+    "scope_delivered": 6.0,
+    "contract_delivered": 2.0,
+    "cochange_delivered": 1.0,
+    "nudge_delivered": 2.0,
+    "gt_observation_chars_total": 27487.0,
+    "raw_delivered_gt_samples": [
+      "<gt-task-brief>\n<gt-localization confidence=\"medium\">\nCandidate edit targets (reason over these):\n  1. astropy/modeling/core.py \u2014 inputs, outputs, separable\n     resolved caller: __init__() in astropy/io/ascii/fastbasic.py:40\n  2. astropy/modeling/separable.py \u2014 separability_matrix, is_separable, _compute_n_outputs\n     resolved call: -> where() in astropy/table/index.py:511\n  3. astropy/units/quantity.py \u2014 Conf, QuantityIterator, __init__\n     resolved caller: _process_block_inputs() in astropy/nddata/blocks.py:17\n  4. astropy/table/table.py \u2014 TableReplaceWarning, descr, has_info_class\n     r",
+      "<gt-scope files=\"1\">\n1. setup.py \u2014 in scope (you are viewing this); GT could not expand scope from the graph \u2014 confirm the edit target with grep.\n</gt-scope></output>",
+      "<gt-scope note=\"in-scope\">\n[GT] setup.py: also in GT scope.\n</gt-scope></output>",
+      "<gt-evidence kind=\"post_view\" file=\"astropy/modeling/separable.py\">\n[WITNESS] where calls -> astropy/table/index.py:511 `def where(self, col_map):`\n[SIBLINGS] is_separable\n</gt-evidence>\n</output_tail>",
+      "<gt-scope reason=\"re-anchored\">\n1. modeling/separable.py \u2014 you have moved here; re-grounding scope\n2. tests/test_separable.py \u2014 graph-connected\n3. tests/test_core.py \u2014 graph-connected\n4. tests/test_models.py \u2014 graph-connected\n5. table/table.py \u2014 graph-connected\nGT re-anchored scope on your current file \u2014 confirm the edit target with grep.\n</gt-scope></output>",
+      "<gt-contract file=\"separable.py\">\n[SIGNATURE] def _coord_matrix(model, pos, noutp):\n[CALLERS] _coord_matrix: 3 verified caller(s) in 1 file(s) \u2014 preserve this interface\n[SIGNATURE] def _separable(transform):\n[CALLERS] _separable: 2 verified caller(s) in 1 file(s) \u2014 preserve this interface\n[SIGNATURE] def _compute_n_outputs(left, right):\n[CALLERS] _compute_n_outputs: 1 verified caller(s) in 1 file(s) \u2014 preserve this interface\nPRESERVE if isinstance(model, Mapping): return mat\nPRESERVE return: isinstance(model, Mapping) -> axes = []\n[RETURNS] value|mat\n</gt-contract>\n<gt-evidence kind=\"post_edit",
+      "<gt-nudge reason=\"failure_persisted\">\nGT: the same test failure has persisted across your edit(s) \u2014 your current hypothesis is likely wrong. Re-read the failing assertion and reconsider the root cause / target file.\n</gt-nudge></output>",
+      "<gt-scope note=\"in-scope\">\n[GT] modeling/separable.py: also in GT scope.\n</gt-scope></output>"
+    ]
+  },
+  "agent": {
+    "action_count": 39.0,
+    "n_calls": 39.0,
+    "edits": 6.0,
+    "first_edit_action": 7.0,
+    "edit_to_gold_action": 0.0,
+    "gold_edited": null,
+    "edited_files": [
+      "setup.py",
+      "astropy/modeling/separable.py",
+      "astropy/utils/src/compiler.c"
+    ]
+  },
+  "inputs_present": {
+    "trajectory": true,
+    "outcome_json": true,
+    "substrate_certs": true,
+    "brief": true,
+    "graph_db": true
+  }
+}
