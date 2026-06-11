@@ -143,6 +143,33 @@ def test_active_valid_passes():
     assert v == "LSP_ACTIVE_VALID" and ok
 
 
+def test_warm_residual_zero_effective_work_fails():
+    cert = _base_cert(
+        residual=5,
+        demand_edges=5,
+        attempted_edges=5,
+        verified_edges=0,
+        corrected_edges=0,
+        deleted_edges=0,
+        verdict_hint="LSP_FAIL_ZERO_CONVERSION",
+    )
+    v, ok = fg._classify_lsp(cert)
+    assert v == "LSP_FAIL_ZERO_CONVERSION" and not ok
+
+
+def test_deleted_edges_count_as_effective_lsp_work():
+    cert = _base_cert(
+        residual=5,
+        demand_edges=5,
+        attempted_edges=5,
+        verified_edges=0,
+        corrected_edges=0,
+        deleted_edges=2,
+    )
+    v, ok = fg._classify_lsp(cert)
+    assert v == "LSP_ACTIVE_VALID" and ok
+
+
 # ── gate_lsp end-to-end (cert path + line fallback) ──────────────────────────
 
 def test_gate_lsp_reads_cert_arg():

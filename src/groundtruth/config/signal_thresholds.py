@@ -72,6 +72,15 @@ COCHANGE_WINDOW_COMMITS = 30
 """Look back 30 commits for co-change patterns. Deeper history adds noise
 from old refactors that no longer apply."""
 
+# ---------------------------------------------------------------------------
+# Signal 5: C1 candidate confidence floor
+# ---------------------------------------------------------------------------
+
+C1_CONFIDENCE_FLOOR_MAD_MULTIPLIER = 1.0
+"""Multiplier in the C1 distribution floor: median + k*MAD over the current
+candidate pool's own confidence scores. This is a robust-statistics contract,
+not an absolute confidence cutoff; k=1.0 is the documented C1 floor."""
+
 
 def log_threshold_use(
     threshold_name: str, value: object, context: str = ""

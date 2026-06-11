@@ -12,6 +12,7 @@ from groundtruth.config.signal_thresholds import (
     COCHANGE_HIGH_THRESHOLD,
     COCHANGE_MEDIUM_THRESHOLD,
     COCHANGE_WINDOW_COMMITS,
+    C1_CONFIDENCE_FLOOR_MAD_MULTIPLIER,
     log_threshold_use,
 )
 
@@ -38,6 +39,10 @@ def test_verify_constants_sane():
 def test_cochange_thresholds_ordered():
     assert COCHANGE_MEDIUM_THRESHOLD < COCHANGE_HIGH_THRESHOLD
     assert COCHANGE_WINDOW_COMMITS >= 10
+
+
+def test_c1_confidence_floor_threshold_sane():
+    assert C1_CONFIDENCE_FLOOR_MAD_MULTIPLIER >= 0.0
 
 
 def test_log_threshold_use(capsys):

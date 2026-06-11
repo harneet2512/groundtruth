@@ -194,7 +194,12 @@ def collect_cert_verdicts(cert_dir: str | None) -> dict[str, dict]:
         verdict, passed = _cert_verdict(cert_dir, name)
         if verdict is None and passed is None:
             continue
-        is_fail = (passed is False) or (verdict is not None and "FAIL" in verdict.upper())
+        v_upper = verdict.upper() if isinstance(verdict, str) else ""
+        is_fail = (
+            (passed is False)
+            or ("FAIL" in v_upper)
+            or v_upper in {"LSP_INSTALL_MISSING", "EMBEDDER_INSTALL_MISSING"}
+        )
         out[name] = {"verdict": verdict, "pass": passed, "is_fail": is_fail}
     return out
 

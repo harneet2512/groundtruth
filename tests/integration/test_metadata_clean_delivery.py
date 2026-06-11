@@ -107,7 +107,7 @@ class TestSanitize:
 
 
 class TestAllHiddenPrefixesCovered:
-    """Verify all 8 documented hidden prefixes are in _HIDDEN_PREFIXES."""
+    """Verify all documented hidden prefixes are in _HIDDEN_PREFIXES."""
 
     EXPECTED_PREFIXES = {
         "[GT_STATUS]",
@@ -118,6 +118,9 @@ class TestAllHiddenPrefixesCovered:
         "[GT_COST]",
         "[GT_PAYLOAD]",
         "[GT_LLM_CONFIG]",
+        "[GT_RANK_DIAG]",
+        "[GT_BRIEF_DIAG]",
+        "[gt-patch:loaded]",
     }
 
     def test_all_prefixes_present(self) -> None:

@@ -607,7 +607,7 @@ def _prepend_brief(brief: str, instruction: str) -> str:
     """
     if not brief:
         return instruction
-    if brief.lstrip().startswith("<gt-task-brief"):
+    if re.search(r"<gt-task-brief\b", brief, re.IGNORECASE):
         return f"{brief}\n\n{instruction}"
     return f"<gt-task-brief>\n{brief}\n</gt-task-brief>\n\n{instruction}"
 

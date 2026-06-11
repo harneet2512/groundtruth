@@ -7807,7 +7807,7 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
         # agent. Structure (<gt-task-brief>/<gt-graph-map>/...) is preserved.
         _wrapped = _core_sanitize_block(brief.strip())
         if _wrapped:
-            if "<gt-task-brief>" in _wrapped:
+            if re.search(r"<gt-task-brief\b", _wrapped, re.IGNORECASE):
                 content = f"{_wrapped}\n\n{tools_hint}\n{_demo}\n" + content
             else:
                 content = f"<gt-task-brief>\n{_wrapped}\n</gt-task-brief>\n\n{tools_hint}\n{_demo}\n" + content

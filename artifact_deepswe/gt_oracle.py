@@ -153,13 +153,30 @@ def _severity_score(sev: str) -> float:
 #     the pool's central mass... i.e. below median+MAD) are suppressed —
 #     the gate scales with the data, no invented absolute threshold anywhere.
 # ---------------------------------------------------------------------------
+def _c1_floor_mad_multiplier() -> float:
+    try:
+        return float(_os.environ.get("GT_C1_CONFIDENCE_FLOOR_MAD_MULTIPLIER", "") or 1.0)
+    except (TypeError, ValueError):
+        return 1.0
+
+
 def distribution_floor(confidences) -> float:
     vals = [float(c) for c in confidences]
     if not vals:
         return 0.0
     med = _stats.median(vals)
     mad = _stats.median(abs(v - med) for v in vals)
-    return med + mad
+    k = _c1_floor_mad_multiplier()
+    try:
+        print(
+            f"[GT_CONFIG] C1_CONFIDENCE_FLOOR_MAD_MULTIPLIER={k} "
+            "context=artifact_deepswe.gt_oracle.distribution_floor",
+            file=_sys.stderr,
+            flush=True,
+        )
+    except Exception:
+        pass
+    return med + (k * mad)
 
 
 def gate_pool(candidates) -> tuple[Candidate | None, list[SuppressionRecord]]:
@@ -618,7 +635,7 @@ def order_unmet(statuses):
 
 
 def render_obligation_status_block(statuses, covering=None,
-                                   max_listed: int = 5) -> str:
+                                   max_listed: int | None = None) -> str:
     """The review-transition checklist: every unmet obligation with its
     sensed status, the covering test named for untested ones (Rothermel &
     Harrold TOSEM 1997 safe-RTS reachability; Ekstazi ISSTA 2015; TestPrune),
@@ -634,7 +651,8 @@ def render_obligation_status_block(statuses, covering=None,
         "GT: requirement status from the issue — sensed from your own edit "
         "commands and observed test output:",
     ]
-    for v, s, _touched, _conf in unmet[:max_listed]:
+    listed = unmet if max_listed is None else unmet[:max_listed]
+    for v, s, _touched, _conf in listed:
         quote = v.verbatim if len(v.verbatim) <= 160 else v.verbatim[:157] + "..."
         mark = ("[✓ edited, ✗ untested]" if s == OBL_EDITED_UNTESTED
                 else "[✗ not addressed]")
@@ -644,7 +662,7 @@ def render_obligation_status_block(statuses, covering=None,
             line += (f"\n    covering test: `{ct.get('name', '')}` in "
                      f"`{ct.get('file', '')}` — run: `{ct.get('run_cmd', '')}`")
         lines.append(line)
-    if len(unmet) > max_listed:
+    if max_listed is not None and len(unmet) > max_listed:
         lines.append(f"(+{len(unmet) - max_listed} more unverified requirement(s))")
     if tested_n:
         lines.append(f"{tested_n} requirement(s) already show test evidence.")

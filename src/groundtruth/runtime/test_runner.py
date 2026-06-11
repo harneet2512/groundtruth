@@ -13,6 +13,123 @@ from groundtruth.runtime.repo_adapters import (
     select_repo_test_command,
 )
 
+_ENV_FAILURE_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "missing_runner",
+        (
+            "command not found",
+            "not recognized as",
+            "no such file or directory",
+            "executable file not found",
+            "failed to spawn",
+        ),
+    ),
+    (
+        "missing_manifest",
+        (
+            "go.mod file not found",
+            "could not find cargo.toml",
+            "no package.json",
+            "cannot find package.json",
+            "could not find a package.json",
+            "no pyproject.toml",
+            "no setup.py",
+        ),
+    ),
+    (
+        "package_manager_mismatch",
+        (
+            "pnpm-lock.yaml",
+            "yarn.lock",
+            "package-lock.json",
+            "use pnpm",
+            "use yarn",
+            "npm ci can only install",
+            "lockfile is out of date",
+            "frozen-lockfile",
+        ),
+    ),
+    (
+        "excluded_build_target",
+        (
+            "build constraints exclude all go files",
+            "no go files",
+            "ignored by build tags",
+            "target .* not found",
+            "package .* is not in std",
+        ),
+    ),
+    (
+        "unresolved_module_or_artifact",
+        (
+            "cannot find module",
+            "module not found",
+            "no module named",
+            "unresolved import",
+            "could not resolve",
+            "failed to resolve",
+            "cannot find crate",
+            "class not found",
+        ),
+    ),
+    (
+        "missing_linker_or_toolchain",
+        (
+            "linker .* not found",
+            "link.exe",
+            "gcc: command not found",
+            "cc: command not found",
+            "rustc: command not found",
+            "go: cannot find",
+            "jdk",
+            "java_home",
+            "no c compiler",
+        ),
+    ),
+    (
+        "offline_install_or_proxy",
+        (
+            "network is unreachable",
+            "temporary failure in name resolution",
+            "proxy",
+            "certificate verify failed",
+            "connection refused",
+            "connection timed out",
+            "read timed out",
+            "could not fetch",
+            "failed to download",
+            "offline",
+        ),
+    ),
+)
+
+
+def classify_environment_failure(
+    text: str,
+    *,
+    command: list[str] | None = None,
+    spawn_error: str | None = None,
+) -> str | None:
+    """Classify generic self-verification environment failures.
+
+    The categories are runner/repo-environment classes, not exact benchmark
+    strings. Returns None when output looks like an ordinary test failure.
+    """
+    hay = "\n".join(
+        part for part in (
+            " ".join(command or []),
+            spawn_error or "",
+            text or "",
+        ) if part
+    ).lower()
+    if not hay:
+        return None
+    for category, patterns in _ENV_FAILURE_PATTERNS:
+        for pattern in patterns:
+            if re.search(pattern, hay, re.IGNORECASE):
+                return category
+    return None
+
 
 def select_test_command(
     repo_root: str,
@@ -161,6 +278,9 @@ def execute_test_command(
                 "mode": mode,
                 "selected_contract_files": selected_contract_files or [],
                 "reason": "spawn_error",
+                "environment_failure_class": classify_environment_failure(
+                    "", command=command, spawn_error=str(exc)
+                ),
                 "spawn_error": str(exc),
                 "exit_code": None,
                 "duration_ms": duration_ms,
@@ -179,6 +299,7 @@ def execute_test_command(
     stdout = proc.stdout or ""
     stderr = proc.stderr or ""
     parsed = _parse_test_output(stdout + "\n" + stderr, command)
+    env_failure = classify_environment_failure(stdout + "\n" + stderr, command=command)
     duration_ms = int((time.perf_counter() - start) * 1000)
     failed = parsed["failed"]
     errored = parsed["errored"]
@@ -189,6 +310,7 @@ def execute_test_command(
         "mode": mode,
         "selected_contract_files": selected_contract_files or [],
         "reason": "ran",
+        "environment_failure_class": env_failure,
         "exit_code": int(proc.returncode),
         "duration_ms": duration_ms,
         "passed": parsed["passed"],

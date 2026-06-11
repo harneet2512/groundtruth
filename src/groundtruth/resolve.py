@@ -1426,21 +1426,33 @@ def resolve_main() -> None:
         cert["graph_hash_after_lsp"] = _graph_edges_hash(args.db)
         cert["closure_hash_after_rebuild"] = cert["graph_hash_after_lsp"]
 
-        # No-op validity: residual==0 (or no in-scope demand edges) with a WARMED server is a
-        # valid no-op. Without a warm server it is NOT (that would be a fake LSP pass).
-        if cert["residual"] == 0 or not lang_edges:
+        # No-op validity: only residual==0 with a WARMED server is a valid no-op.
+        # A warm server plus residual>0 plus no attempted/effective work is a
+        # fail-closed zero-conversion run, not an active LSP success.
+        if cert["residual"] == 0:
             cert["no_op_valid"] = bool(cert["lsp_warm"])
             cert["no_op_reason"] = ("zero in-scope name_match method-call edges to resolve"
                                     if cert["lsp_warm"] else "")
 
+        effective_work = (
+            int(stats.get("verified", 0))
+            + int(stats.get("corrected", 0))
+            + int(stats.get("deleted", 0))
+        )
         if not cert["lsp_warm"]:
             cert["verdict_hint"] = "LSP_FAIL_NO_WARM"
-        elif cert["residual"] == 0 or not lang_edges:
+        elif cert["residual"] == 0:
             cert["verdict_hint"] = "LSP_NO_OP_VALID_WITH_WARM_SERVER"
+        elif effective_work <= 0:
+            cert["verdict_hint"] = "LSP_FAIL_ZERO_CONVERSION"
+            cert["failure_detail"] = (
+                cert["failure_detail"]
+                or "warm LSP server ran with residual work remaining but converted/deleted zero edges"
+            )
         else:
             cert["verdict_hint"] = "LSP_ACTIVE_VALID"
 
-        resolved_promoted = int(stats.get("verified", 0)) + int(stats.get("corrected", 0))
+        resolved_promoted = effective_work
         _write_lsp_certificate(cert)
         print(
             f"LSP_METRICS resolved={resolved_promoted} residual={residual_method_edges} "

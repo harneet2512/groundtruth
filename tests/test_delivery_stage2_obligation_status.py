@@ -147,14 +147,16 @@ class TestStatusMachinery:
         )
         assert oracle_mod.render_obligation_status_block(sts) == ""
 
-    def test_renderer_caps_listing(self, oracle_mod):
+    def test_renderer_lists_all_unmet_rows(self, oracle_mod):
         obls = [{"verbatim_text": f"Requirement number {i} must hold for api_{i}.",
                  "kind": "behavior", "symbols": [f"api_sym_{i}"],
                  "keywords": [], "checkable_forms": []} for i in range(9)]
         views = oracle_mod._obligation_views(obls)
         sts = oracle_mod.obligation_statuses(views, {"api_sym_0"}, set())
         block = oracle_mod.render_obligation_status_block(sts)
-        assert "(+4 more unverified requirement(s))" in block
+        assert "more unverified requirement" not in block
+        for i in range(9):
+            assert f"Requirement number {i} must hold" in block
 
 
 # ---------------------------------------------------------------------------

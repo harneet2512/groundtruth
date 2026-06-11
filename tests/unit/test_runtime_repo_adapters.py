@@ -8,6 +8,7 @@ from groundtruth.runtime.repo_adapters import (
     select_repo_test_command,
 )
 from groundtruth.runtime.test_runner import select_test_command
+from groundtruth.runtime.test_runner import classify_environment_failure
 
 
 def test_repo_profile_detects_python_without_locking_control_plane(tmp_path) -> None:
@@ -65,3 +66,16 @@ def test_select_repo_test_command_prefers_detected_adapter_order(tmp_path) -> No
 
     assert command == ["npm", "test"]
     assert reason == "javascript-typescript"
+
+
+def test_environment_classifier_generic_categories() -> None:
+    cases = {
+        "missing_runner": "pytest: command not found",
+        "missing_manifest": "go: go.mod file not found in current directory",
+        "package_manager_mismatch": "ERR_PNPM_OUTDATED_LOCKFILE frozen-lockfile",
+        "unresolved_module_or_artifact": "Cannot find module '@app/core'",
+        "missing_linker_or_toolchain": "error: linker `cc` not found",
+        "offline_install_or_proxy": "Temporary failure in name resolution while downloading",
+    }
+    for expected, text in cases.items():
+        assert classify_environment_failure(text) == expected

@@ -104,6 +104,14 @@ _GENERATED_FILE_MARKERS: tuple[str, ...] = (
     "zz_generated", ".pb.go", ".pb.gw.go", "_pb2.py", "_pb2_grpc.py",
     ".generated.", "_generated.go", ".g.dart", ".freezed.dart",
 )
+_SOURCE_EXTS: tuple[str, ...] = (
+    ".py", ".pyi", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs", ".java",
+    ".kt", ".c", ".h", ".cc", ".cpp", ".hpp", ".rb", ".php", ".cs",
+    ".swift", ".scala",
+)
+_SCRATCH_DIR_MARKERS: tuple[str, ...] = (
+    "/tmp/", "/temp/", "/scratch/", "/.tmp/", "/.cache/", "/logs/",
+)
 
 
 def _is_vendored_path(fp: str) -> bool:
@@ -118,6 +126,17 @@ def _is_vendored_path(fp: str) -> bool:
     if base.endswith(_MINIFIED_SUFFIXES):
         return True
     return any(m in base for m in _GENERATED_FILE_MARKERS)
+
+
+def _is_repo_source_path(fp: str) -> bool:
+    """Source edit accounting gate: real source file, not scratch/temp/vendor/generated."""
+    f = "/" + (fp or "").replace("\\", "/").lstrip("./").lstrip("/")
+    low = f.lower()
+    if any(m in low for m in _SCRATCH_DIR_MARKERS):
+        return False
+    if _is_vendored_path(fp):
+        return False
+    return low.endswith(_SOURCE_EXTS)
 
 
 # Content-class filter: minified/bundled files outside any vendor dir. Mean
@@ -280,7 +299,7 @@ def _src_tokens(text: str) -> list[str]:
     out: list[str] = []
     for tok in re.split(r"\s+", text or ""):
         t = tok.strip("\"'`()<>;|&")
-        if t.endswith(_SRC_EXT) and "*" not in t and "$" not in t:
+        if _is_repo_source_path(t) and "*" not in t and "$" not in t:
             out.append(t)
     return out
 
@@ -299,7 +318,7 @@ def _edit_target(cmd: str) -> str | None:
     # 1. redirect whose TARGET is a source file
     for mm in re.finditer(r">>?\s*([^\s'\"<>|&;]+)", nohd):
         t = mm.group(1).strip("\"'`()")
-        if t.endswith(_SRC_EXT) and "*" not in t and "$" not in t:
+        if _is_repo_source_path(t) and "*" not in t and "$" not in t:
             return t
     # 2. sed -i / tee / apply_patch -> the source-file argument (last source token)
     first = cmd.split("\n", 1)[0]
@@ -310,7 +329,7 @@ def _edit_target(cmd: str) -> str | None:
     # 3. python/node in-place write (scans the FULL cmd incl. heredoc body)
     for rx in (_PY_WRITE_RE, _JS_WRITE_RE):
         m = rx.search(cmd)
-        if m and m.group(1).endswith(_SRC_EXT) and "*" not in m.group(1):
+        if m and _is_repo_source_path(m.group(1)) and "*" not in m.group(1):
             return m.group(1)
     return None
 
@@ -2330,13 +2349,13 @@ def _obligation_nudge_block() -> tuple[float, str] | None:
         if h in _oblig_status_emitted:
             return None
         # ── COVERING-TEST per untested obligation (Stage B query, FACT-tier
-        # CALLS edges only; capped to the first 3 displayed — perf guard). ──
+        # CALLS edges only). Render all unmet rows; attach commands only when
+        # the real graph query returns a covering test and _test_run_command
+        # formats it. No fabricated fallback command text.
         covering: dict[int, dict] = {}
-        looked = 0
-        for v, s, touched, _conf in unmet[:5]:
-            if s != om.OBL_EDITED_UNTESTED or looked >= 3:
+        for v, s, touched, _conf in unmet:
+            if s != om.OBL_EDITED_UNTESTED:
                 continue
-            looked += 1
             try:
                 hits = _covering_tests_for_symbols(set(touched))
                 if hits:
@@ -2356,6 +2375,44 @@ def _obligation_nudge_block() -> tuple[float, str] | None:
         sev = om.composite_severity(_SEV_OBLIGATION, budget_b, unmet_ratio)
         return (sev, payload)
     except Exception:  # noqa: BLE001 -- never break the agent loop
+        return None
+
+
+_SUBMIT_LIKE_RE = re.compile(r"(^|\s)(submit|finish)(\s|$)", re.I)
+
+
+def _final_obligation_block() -> tuple[float, str, str, bool] | None:
+    """Final pre-submit obligation reserve.
+
+    Same data and renderer as the review-transition producer, but independent
+    of the review-budget/vector latch. It fires only when a submit-shaped action
+    reaches this hook and there is edited-but-untested source obligation debt.
+    """
+    om = _load_gt_oracle()
+    if om is None:
+        return None
+    try:
+        obls = om.load_obligations(_anchors_path())
+        if not obls:
+            return None
+        views = om._obligation_views(obls)
+        statuses = om.obligation_statuses(
+            views, _oracle_edited_tokens, _oracle_tested_tokens)
+        unmet = om.order_unmet(statuses)
+        if not any(s == om.OBL_EDITED_UNTESTED for _v, s, _t, _c in unmet):
+            return None
+        covering: dict[int, dict] = {}
+        for v, s, touched, _conf in unmet:
+            if s != om.OBL_EDITED_UNTESTED:
+                continue
+            hits = _covering_tests_for_symbols(set(touched))
+            if hits:
+                covering[v.idx] = hits[0]
+        payload = om.render_obligation_status_block(statuses, covering)
+        if not payload:
+            return None
+        return (_SEV_GATE, "spec.obligation.final", payload, True)
+    except Exception:  # noqa: BLE001
         return None
 # Kinds the gate suppressed THIS turn as a re-armable loss (outranked /
 # irrelevant — NOT 'delivered'): _augment_output releases their producers'
@@ -3084,6 +3141,14 @@ def _augment_output(action, out) -> None:
             _vh = _verification_horizon_candidate()
             if _vh is not None:
                 cands.append(_vh)
+            # Final pre-submit reserve: if a submit/finish-shaped command is
+            # visible to this environment hook, edited-but-untested obligations
+            # get one last chance even if earlier review-transition budget
+            # arbitration suppressed them.
+            if _SUBMIT_LIKE_RE.search(cmd or ""):
+                _fo = _final_obligation_block()
+                if _fo is not None:
+                    cands.append(_fo)
             _win = _oracle_gate_blocks(cands)
             # Latch re-arm (LIPI 2026-06-10): a produced-but-not-emitted
             # candidate is DEFERRED, not destroyed — gate losers release the
@@ -3110,6 +3175,8 @@ def _augment_output(action, out) -> None:
                     _oracle_obligation_fired = False
                     if _oblig_status_last_hash:
                         _oblig_status_emitted.discard(_oblig_status_last_hash)
+                if "spec.obligation.final" in _lost and _oblig_status_last_hash:
+                    _oblig_status_emitted.discard(_oblig_status_last_hash)
                 if "l5.stuck" in _lost:
                     _l5_fired = False
                 if "l5.failure" in _lost:

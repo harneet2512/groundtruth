@@ -337,6 +337,9 @@ def _classify_lsp(cert):
         # install/substrate gap, NOT a legitimately-unsupported language — it must FAIL CLOSED
         # (audit defect #1). Never treat a no-server-on-PATH baked language as a valid no-op.
         return ("LSP_INSTALL_MISSING", False)
+    hinted = str(cert.get("verdict_hint") or "")
+    if hinted.startswith("LSP_FAIL_") or hinted == "LSP_INSTALL_MISSING":
+        return (hinted, False)
     if cert.get("unsupported_reason"):
         # Honest "no server for this language" — explicit, never a fake LSP success.
         # (Only a language with NO entry in LSP_SERVERS reaches here; resolve.py sets
@@ -365,6 +368,13 @@ def _classify_lsp(cert):
         if cert.get("no_op_valid"):
             return ("LSP_NO_OP_VALID_WITH_WARM_SERVER", True)
         return ("LSP_FAIL_NO_WARM", False)
+    effective = (
+        int(cert.get("verified_edges", 0) or 0)
+        + int(cert.get("corrected_edges", 0) or 0)
+        + int(cert.get("deleted_edges", 0) or 0)
+    )
+    if effective <= 0:
+        return ("LSP_FAIL_ZERO_CONVERSION", False)
     return ("LSP_ACTIVE_VALID", True)
 
 

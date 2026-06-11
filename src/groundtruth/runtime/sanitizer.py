@@ -11,6 +11,7 @@ import re
 _HIDDEN_PREFIXES = (
     "[GT_META]", "[GT_STATUS]", "[GT_CONFIG]", "[GT_TRACE]",
     "[GT_DELIVERY]", "[GT_COST]", "[GT_PAYLOAD]", "[GT_LLM_CONFIG]",
+    "[gt-patch:loaded]",
     # Brief-runner diagnostics — were stripped only by a local filter in the
     # wrapper brief path; centralized here so every strip site shares one
     # authority and they cannot re-leak through a path that doesn't know them.
