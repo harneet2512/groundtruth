@@ -1,116 +1,109 @@
-# LATEST TASK — Unleash full-power GT on DeepSWE (mini-swe-agent), multilingual
+# LATEST_TASK.md — Session Handoff (2026-06-11)
 
-**Status:** IN PROGRESS — stack HARDENED (4 LIPI fixer surfaces) + substrate rebuilt; smoke
-wave EXECUTED 5/5; 113 sweep running.
-**Branch:** `gt-trial` @ `4253da65` (pushed to origin/harneet2512 + hbali-stack).
-**Last updated:** 2026-06-09 (evening)
-**Canonical detail:** `gt_gt.md` §11 (findings), §12 (per-layer roles), §13 (pivot + build
-order, incl. **§13.7 — the 2026-06-09 hardening**); `SESSION_SUMMARY.md`.
+## STATUS: 6 BUGS TO FIX → REBUILD → BENCHMARK
 
----
+The delivery engine is built, tested (547 green), and pushed to hbali (`fe128e0f`).
+Three measurement runs completed (baseline `27307362054`, oracle-only `27321848581`,
+delivery `27342218002`). M20 +10 hidden tests (code quality improving). 0 flips.
+The deep gt_trial audit found 6 specific bugs that explain why. Fix them → benchmark.
 
-## The current goal
-Validation surface = **Datacurve DeepSWE** (`github.com/datacurve-ai/deep-swe`): 113 tasks, 91 repos,
-**5 languages (TS 35 / Go 34 / Py 34 / Rust 5 / JS 5 — 70% non-Python)**, contamination-free,
-unsaturated, harness = **pier + mini-swe-agent**. 113 images cached to GHCR.
+## THE 6 BUGS (exact sites, from the deep audit `task_ledgers/RUN_27342218002_SUMMARY.md`)
 
-Bring the **FULL OH-depth GT** to mini-swe-agent, **language-agnostic**, unified on the deep
-`v1r/run_v74` engine. The brief reaches the mini-swe agent via `gt_agent._generate_brief` →
-`generate_v1r_brief`; the proof path is fail-closed end-to-end (gt_gt §7 + §13.7).
+### BUG 1 — LSP 0/0 ACROSS ALL 5 LANGUAGES (P0, root cause UNKNOWN)
+- **What:** LSP converts ZERO edges on every language (go/py/ts/js/rust) on digest `55f18a1c`.
+  The PRIOR digest (`1d4d8bfd`) converted 415 on ts, 167 on py. Something broke between digests.
+- **Impact:** graph depth regressed to tree-sitter-only. ALL delivery engine results are on a DEGRADED graph.
+- **Certs:** every task shows `converted=0`, `failed=N`, `verdict=LSP_ACTIVE_VALID` (the gate PASSES a 0-conversion LSP — §7 violation).
+- **Action:** investigate what changed between digests `1d4d8bfd` → `1e932985` → `55f18a1c` in the LSP resolve path. Check `src/groundtruth/resolve.py` for regressions. The substrate bakes the resolve code — a src change that broke LSP would be invisible until a rebuild.
 
-## Current state (2026-06-09, from code + runs — not labels)
-- **4-reviewer LIPI audit → 62 findings → 4 fixer surfaces shipped** (each red→green):
-  `9bf106ca` pipeline+gates · `dc5844f8` localization · `ffc6c7dc` delivery · `10368a2f`
-  indexer (+ `8ae5584d` gopls launch). Detail: gt_gt §13.7.
-- **P0 green-zero-run chain fail-closed** (empty-issue / pier swallow / tee swallow /
-  presence-grep — all four links verified).
-- **Substrate REBUILT on the fixed stack** (`02b02425` — the image bakes the GT code, so
-  pre-rebuild runs exercised PRE-fix code; never cite them as the fixed stack).
-- **Wave: smoke EXECUTED 5/5** (`4253da65`, run 27249519490) — identical gt-run-proof command,
-  exit 0 per language, warm LSP. All NO_OP_VALID_WITH_WARM_SERVER (fixtures resolve
-  structurally on the fixed indexer); **real-repo ACTIVE LSP resolution = the 113-sweep's
-  question.**
+### BUG 2 — SELF-VERIFICATION GATE HARMS 4/9 (disable or fix)
+- **What:** `gt_agent.py:871-877` `_ENV_UNVERIFIABLE_RE` is incomplete. Missed `syscall/js` (go), `TS2307` (ts), corepack/yarn (js). The L5 governor's env classifiers exist but were never ported to the gate.
+- **Impact:** 4/9 actively harmful (agent wrote `os.Setenv` hacks, resubmitted byte-identical, burned 60 steps on yarn).
+- **Action:** port `_ENV_FAIL_RE` patterns from `gt_mini_patch.py:1718-1730` to `gt_agent.py:871-877`. Or: disable the gate (`GT_SELF_VERIFY_ATTEMPTS=0`) until the classifier is correct.
 
-## Remaining waves (in order — each gates the next)
-1. 🔄 **113-task sweep** (non-paid substrate proof, dispatched `0e2489cc`) — per-language
-   certs + ACTIVE LSP on real repos.
-2. ⏭ **Integration audit** — gt_trial §4 style, agent-observation rule, on the sweep output.
-3. ⏭ **1-task dry** (D2) — single paid trajectory on the fixed stack.
-4. ⏭ **Decision** — paired GT-on vs GT-off benchmark (Wilcoxon) across all 5 languages;
-   Stage-1 deterministic per lever before any flip claim.
+### BUG 3 — OBLIGATION SILENT AT SUBMIT 8/9
+- **What:** `gt_oracle.py:937-973` the `oblig_class_spent` one-shot budget gets spent mid-run on an early review-transition, then the obligation goes SILENT at the actual pre-submit moment.
+- **Impact:** the #1 lever (review-transition obligation) fires early and is exhausted when it matters.
+- **Action:** guarantee a pre-submit fire: reserve one emission for the FINAL review-transition (within last 2×V steps), regardless of prior spend.
 
-## Key facts (from code, not docs)
-- Two engines existed (ONE-PRODUCT violation): unify onto `v1r/run_v74`; retire the
-  `gt_intel`/`gt_hook` `ast` routes (70% of DeepSWE is non-Python).
-- **L6 in substrate/proof mode is OFF BY DESIGN** (authoritative ro graph, witness-hash
-  parity); the `-file` restore LSP-strip is fixed in the indexer (`10368a2f`) for the paths
-  where L6 runs. L4 = EVENT hook. `GRAPH_FAIL_MISSING_HANDOFF` = cert false-fail. (gt_gt §12.)
-- Per-turn evidence reads the ONE mounted graph `mode=ro(+immutable)`, one-time readability
-  probe, per-(kind,file)-once dedup (gt_gt §6 note).
-- Weights live: `W_SEM=0.40` + `W_SEM_FLOOR=0.25` enforced last; Dimension-0 query-adaptive,
-  Dim-1 max-compose (gt_gt §4.2). Embedder: gte-modernbert default, configured-or-raise under
-  `GT_REQUIRE_EMBEDDER` (ST + e5 fallbacks skipped); OH pins e5.
+### BUG 4 — OBLIGATION RENDER TRUNCATED + WRONG
+- **What:** the run-deciding clause is cut to "(+N more unverified)". False "✓ edited" rows from cross-attempt blindness, scratch file over-crediting, token-overlap≠implemented. Covering-test text is garbage (`the test suite`, `npx jest` in a Rust repo).
+- **Action:** un-truncate the obligation table. Fix edited? to require the symbol in a SOURCE file edit (not scratch). Fix covering-test render to use the actual `_test_run_command` output.
 
----
-## TWO PATHWAYS (FINAL, 2026-06-10): different benchmark x model x platform
-### PATH A — GCP VM gt-sweep-1: **DeepSWE-113 with gemini-3-flash** (Vertex)
-- Baseline: gemini-3-flash IS on the DeepSWE leaderboard (5%) -> direct GT lift measurement.
-- Auth: VM identity/ADC (zero keys on the box). Bills to the $271 credits.
-- NOW: the 113 proof sweep running (the 4 answers). THEN (each gated on user OK):
-  enable Vertex API + widen VM scopes + pier install -> 5-task gemini trial -> full 113.
-- Needs built: VM agent-runner (pier agent step port) + gemini model config (vertex_ai/gemini-3-flash).
-### PATH B — GHA: **SWE-bench Verified-500 with deepseek-v4-flash**
-- Baseline: the ~79% vendor-scaffold line (user decision). DEEPSEEK_API_KEY already a GHA secret.
-- Needs built: the Verified GT adapter (mini-swe swebench path; the pier wrapper is DeepSWE-only)
-  + a verified workflow (pull official task image -> substrate proof -> GT-injected mini-swe agent
-  -> official Princeton harness eval) + the Verified manifest (builder in flight).
-- Trial: 5 Verified tasks with v4-flash (cheap; cache-discounted) before any 500 run.
-### Rules: per-launch permission ALWAYS, both paths. No secrets on the VM (deepseek key never
-touches GCP; gemini uses ADC). gt_gt is the audit surface for both.
+### BUG 5 — CONFIDENCE TIER VIOLATION
+- **What:** every C1 emission at 0.02-0.4 confidence. The `[INFO] never-on-C1` rule from §15.3 is absent — only the relative median+MAD floor exists.
+- **Action:** add an absolute floor: confidence < 0.5 → suppress from C1 (the agent-visible channel). Render to telemetry only.
 
-## LAUNCH PARAMETERS (locked 2026-06-10)
-- PATH A (VM, DeepSWE x gemini-3-flash-preview): PARALLEL=4 (8 vCPU + compile/test bursts), step_limit=300 (official), cost_limit=3.0/task, STOP_AT_COST=25 trial / 200 full, temp=1.0, VERTEXAI_LOCATION=us-east1 (the southeast-US region; NOT global - shared-pool 429 risk; fallback us-east4/us-central1 if the model isn't served there - one env var, no code change), SA-key bind-mount (ADC blocked in-container). PARALLEL stays 4.
-- PATH B (GHA, Verified x deepseek-v4-flash): max_parallel=20, step_limit=250 + cost_limit=3.0 (the EXACT official leaderboard config), temp=1.0/top_p=0.95/max=8192, num_retries=3.
-- POST-RUN RULE: download EVERYTHING to local disk D (.claude/reports/runs/<run>/) — full trajectories,
-  patches, gt_artifacts, deep metrics, rows, reports — from BOTH platforms, before the run is "done".
-  VM: tarball OUT_DIR -> pull back. GHA: download all artifacts. Then ledgers + the submission bundle.
+### BUG 6 — COSMETIC/PLUMBING (4 items)
+- Doubled `<gt-task-brief>` (root: `gt_agent.py:610` `_prepend_brief` startswith guard)
+- `[gt-patch:loaded]` leak (internal marker visible to agent)
+- `GT_REQUIRE_EMBEDDER=1` fail-open (numpy missing → embedder silently OFF → §7)
+- deep-metrics blind (`per_layer={}`)
 
-## 2026-06-10 — TRIALS IN PROGRESS (autonomous; STOP for permission before fulls)
-USER GRANT: work autonomously until BOTH trials produce trajectories (5 PATH A + 5 PATH B = 10),
-run gt_trial §4 analysis on all 10, THEN explicitly ask permission before either full run.
+## WHAT WORKS (confirmed live on delivery run 27342218002)
+- Governor FP closure: 0 false `failure_persisted` (was 3/3 two runs ago)
+- Full-declaration signatures: boa renders `T: Trace + 'static` correctly
+- Coherence detector: consumed true-positives on 5-6 tasks (best new layer)
+- abs-stepped localization FIXED (wrong `New` pin didn't recur)
+- aiomonitor tailwind.js brief ranking FIXED (didn't recur)
+- scaffold_trap RETIRED on oracle route (no more research-invalidated fires)
+- Cross-lang fact-row filter: held across all tasks
+- Oracle telemetry harvest: wired (verify on next run)
 
-### Infra hardened today
-- VM gt-sweep-1: e2-custom-12-49152 (12 vCPU/48G), +1TB pd-standard at /data (docker root + outputs there),
-  cloud-platform scope. IP 34.61.186.143.
-- ROOT-CAUSE FIXED (LIPI): brief-step OOM = unchunked ONNX encode O(N) ~7.3G. Fix: chunked encode
-  O(batch=32) ~few-hundred-MB, numerically identical (fixed-128 pad). Committed 466a0c85; gt_gt §5
-  capacity invariant recorded (4f155ffb); image self-test gauges peak RSS<3000MB (081b9b38).
-- rc=137 now classified GT_PROOF_OOM in all 3 runners (no more silent host-OOM masquerade).
-- Per-proof-container --memory cap (7g VM / 10g GHA).
+## THREE MEASUREMENT RUNS ON DISK (frozen, for comparison)
+1. **Baseline** `27307362054` (pre-oracle GT, deepseek): `.claude/reports/runs/tenpack_27307362054/`
+2. **Oracle-only** `27321848581` (oracle, no self-verify): `.claude/reports/runs/oracle_tenpack_27321848581/`
+3. **Delivery engine** `27342218002` (full engine, deepseek): `.claude/reports/runs/delivery_tenpack_27342218002/`
 
-### Sweep (113/113) — the 4 answers
-- Q1 OOM survival: 0 rc=137 kills. Memory fix proven at scale, box never died.
-- 57 OK / 56 GT_RUN_PROOF_FAIL = the no-issue-file artifact (sweep ran w/o GT_ISSUE_FILE -> empty brief);
-  the WITH-issue repro passed fully (brief 2820 chars, 8/8 artifacts). Trials run WITH issues.
-- Per-lang gate-OK: go 14/34, py 18/34, ts 19/35, js 5/5, rust 1/5.
+Metrics reports: `.claude/reports/metrics/oracle_vs_baseline_20260611/` and `delivery_vs_baseline_20260611/`
 
-### PATH A auth (gemini): SA keys DEAD (org policy), AI-Studio key = wrong billing, express = unsupported.
-WORKING: VM metadata identity + cloud-platform scope -> Vertex GLOBAL -> bills credits (proven via REST).
-gemini-3-flash-preview served ONLY at location=global (404 on regions) -> VERTEXAI_LOCATION=global forced.
-OPEN: in-container litellm auth (pier runs agent IN container behind squid; metadata unreachable there) —
-delegated to a focused on-VM agent to prove token-forward vs host-proxy.
+## THE 10 TASKS (2 per language)
+go: abs-module-cache-flags, abs-stepped-slices
+js: csstree-shorthand-expansion-compression, katex-multicolumn-array-spans
+ts: arktype-json-schema-refs-dependencies (infra-fails consistently), awilix-async-container-initialization
+rust: boa-hierarchical-evaluation-cancellation, fd-deterministic-multi-key-sorting
+py: adaptix-name-mapping-aliases, aiomonitor-task-snapshots-diff
 
-### PATH B (deepseek/GHA): OOM fixed; image rebuilding (new digest pending) -> redispatch 5 tasks.
+## KEY METRICS (delivery engine vs baseline)
+- M20 hidden test pass: 187→197 (+10, directional, p=0.31)
+- M13 steps-to-gold-edit: 33→51 (+15, slower — agent explores more)
+- M03 total steps: 145→134 (-11, agent finishes sooner overall)
+- M04 P@3 brief: 0.63→0.67 (improved)
+- Resolved: 0→0 (no flips)
 
-## LOCKED TRIAL TASK LISTS (2026-06-10, user-corrected: 10 each)
-PATH_A (DeepSWE, 2/lang, PARALLEL=4):
-  abs-module-cache-flags,abs-stepped-slices,csstree-shorthand-expansion-compression,
-  katex-multicolumn-array-spans,adaptix-name-mapping-aliases,aiomonitor-task-snapshots-diff,
-  boa-hierarchical-evaluation-cancellation,fd-deterministic-multi-key-sorting,
-  arktype-json-schema-refs-dependencies,awilix-async-container-initialization
-PATH_B (Verified Python, max_parallel=10):
-  django__django-10097,django__django-10554,sympy__sympy-11618,sympy__sympy-12096,
-  astropy__astropy-12907,astropy__astropy-13033,astropy__astropy-13236,astropy__astropy-13398,
-  astropy__astropy-13453,astropy__astropy-13579
-EVAL: wired in BOTH (PATH B = Princeton swebench harness step; PATH A = pier verifier/reward).
-  NOT yet executed — no clean agent run has reached eval (B died at proof, A blocked on auth).
+## SEQUENCE TO BENCHMARK
+1. Fix BUG 1 (LSP regression — investigate + fix)
+2. Fix BUG 2 (disable self-verify gate OR port env classifiers)
+3. Fix BUG 3 (guarantee pre-submit obligation)
+4. Fix BUG 4 (un-truncate + fix edited? + fix covering-test)
+5. Fix BUG 5 (confidence floor on C1)
+6. Fix BUG 6 (cosmetic/plumbing)
+7. Push + substrate rebuild
+8. 10-task validation run
+9. gt_trial FULL audit (start-to-finish, per-layer TABLES, not summaries)
+10. If clean → full 113-task benchmark
+
+## KEY FILES
+- Delivery engine: `artifact_deepswe/gt_mini_patch.py`, `gt_oracle.py`, `gt_oracle_sense.py`, `gt_agent.py`
+- Substrate: `src/groundtruth/pretask/v1r_brief.py`, `curation_map.py`, `contract_map.py`, `spec.py`
+- LSP: `src/groundtruth/resolve.py`
+- Indexer: `gt-index/internal/parser/parser.go`
+- Pipeline: `.github/workflows/deepswe_full.yml`
+- Architecture: `gt_gt.md` (§1-§16 + REFERENCES)
+- Audit artifacts: `task_ledgers/RUN_27342218002_SUMMARY.md`, `DEEP_TRAJECTORY_ANALYSIS_ORACLE_RUN.md`
+- Gap analysis: `GAP_ANALYSIS.md`, `RESOLVED_ISSUES_CHECKLIST.md`
+
+## REMOTES + SECRETS
+- hbali-stack is THE working repo (not origin/harneet2512)
+- Pre-push guard: `.git/hooks/pre-push` (blocks reports/secrets)
+- Secrets: `DEEPSEEK_API_KEY`, `TOKENROUTER_API_KEY` on hbali-stack
+- Current digest: `55f18a1c` (HAS THE LSP BUG — investigate before using)
+- MiniMax-M3: wired but fails (TokenRouter doesn't support Responses API; needs model_class override)
+
+## CLAUDE.md RULES STILL IN FORCE
+- No LLM in the GT pipeline
+- Dynamic / hybrid / confidence-gated (3 mandatory properties)
+- Generalized (any repo/lang/agent/model) — no benchmaxxing
+- Correct-or-quiet (silence > wrong)
+- DONE = metrics changed (flips or efficiency delta, Wilcoxon p<0.05)
+- gt_trial audit = read trajectories chronologically, compare against gt_gt, produce TABLES not summaries
