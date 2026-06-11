@@ -16,7 +16,12 @@ Submission layout (SWE-bench-Live/submission): submissions/{subset}/{agent}/{mod
 NOTHING is submitted; this only PACKAGES so the benchmark reproduces + is submission-ready.
 """
 from __future__ import annotations
-import argparse, glob, json, os, re, shutil, sys
+import argparse, glob, importlib.util, json, os, re, shutil, sys
+
+_PH_PATH = os.path.join(os.path.dirname(__file__), "patch_hygiene.py")
+_ph_spec = importlib.util.spec_from_file_location("patch_hygiene_pkg", _PH_PATH)
+_ph = importlib.util.module_from_spec(_ph_spec)
+_ph_spec.loader.exec_module(_ph)
 
 SRC_EXTS = (".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs", ".java", ".rb")
 # GT delivery markers searched in the agent's OBSERVATION (not telemetry) — the truth.
@@ -170,12 +175,14 @@ def main():
         res = iid in resolved_ids if resolved_ids else (float(r.get("reward") or 0) > 0)
         flip = bool(res and iid not in base_resolved) if base_resolved else None
         dlv = gt_delivery(r.get("obs_text"))
+        patch_h = _ph.classify_patch(r.get("patch") or "")
         deep.append(dict(
             instance_id=iid, harness=r.get("harness"), model=args.model,
             n_input_tokens=_f(r.get("n_in")), n_output_tokens=_f(r.get("n_out")),
             n_cache_tokens=_f(r.get("n_cache")), cost_usd=cost, steps=_f(r.get("steps")),
             resolved=bool(res), flip_vs_baseline=flip, has_patch=bool((r.get("patch") or "").strip()),
             gt_delivery=dlv,
+            patch_hygiene=patch_h,
         ))
         tot["n_in"] += r.get("n_in") or 0; tot["n_out"] += r.get("n_out") or 0
         tot["n_cache"] += r.get("n_cache") or 0; tot["cost"] += cost

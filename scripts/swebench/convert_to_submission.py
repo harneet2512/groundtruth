@@ -10,11 +10,17 @@ Also generates:
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import subprocess
 import sys
 from pathlib import Path
+
+_PH_PATH = Path(__file__).resolve().parent / "patch_hygiene.py"
+_ph_spec = importlib.util.spec_from_file_location("patch_hygiene_conv", _PH_PATH)
+_ph = importlib.util.module_from_spec(_ph_spec)
+_ph_spec.loader.exec_module(_ph)
 
 GT_TAGS = [
     "gt-evidence", "gt-advisory", "gt-task-brief", "gt-prefetch",
@@ -88,11 +94,13 @@ def convert(input_path: str, output_dir: str) -> None:
             if not patch:
                 empty_patches.append(iid)
 
+            patch_hygiene = _ph.classify_patch(patch)
             run_model = (((obj.get("metadata") or {}).get("llm_config") or {}).get("model") or "").strip() or run_model
             predictions.append({
                 "instance_id": iid,
                 "model_patch": patch,
                 "model_name_or_path": _model_name_for(obj),
+                "patch_hygiene": patch_hygiene,
             })
 
     # Write predictions.jsonl
