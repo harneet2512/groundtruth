@@ -590,6 +590,29 @@ def _resolve_db_path(task: str, results_dir: str, explicit: str = "") -> str:
     return ""
 
 
+def _resolve_embedder_cert_path(task: str, results_dir: str) -> str:
+    """Find the emitted embedder certificate for this task, if present."""
+    env_cert = os.environ.get("GT_EMBEDDER_CERT")
+    if env_cert and os.path.exists(env_cert):
+        return env_cert
+    bases = [results_dir, f"/tmp/results_{task}", f"/tmp/gt_debug_{task}", f"/tmp/gt/{task}"]
+    seen: set[str] = set()
+    for base in bases:
+        if not base or base in seen:
+            continue
+        seen.add(base)
+        direct = os.path.join(base, "gt_artifacts", "embedder_certificate.json")
+        if os.path.exists(direct):
+            return direct
+        hits = glob.glob(os.path.join(base, "**", "gt_artifacts", "embedder_certificate.json"), recursive=True)
+        if hits:
+            return hits[0]
+        hits = glob.glob(os.path.join(base, "**", "embedder_certificate.json"), recursive=True)
+        if hits:
+            return hits[0]
+    return ""
+
+
 def _table_exists(con: "sqlite3.Connection", name: str) -> bool:
     try:
         row = con.execute(
@@ -757,15 +780,51 @@ def _env_snapshot() -> dict:
     return snap
 
 
-def _from_embedder() -> dict:
-    """TASK 2 — load the embedding model and embed a probe to confirm it is real.
-    semantic_enabled = model loaded AND the probe vector is nonzero."""
+def _from_embedder(cert_path: str = "") -> dict:
+    """Embedder status for metrics. Prefer the emitted proof certificate.
+
+    A local probe is only a fallback. In DeepSWE validation, probing from the
+    metrics process can fail because that process lacks runtime deps even when
+    the proof substrate emitted a valid certificate.
+    """
     out = {
         "embedder_path": "",
         "embedder_vector_dim": 0,
         "embedder_nonzero": False,
         "semantic_enabled": False,
+        "embedder_status_source": "local_probe",
     }
+    cert = _load_json(cert_path) if cert_path else None
+    if isinstance(cert, dict):
+        cls = str(cert.get("embedder_class", "") or "")
+        dim = d8(cert.get("embedder_dim", 0) or 0)
+        semantic_candidates = int(cert.get("semantic_candidate_count", 0) or 0)
+        rendered_nonzero = int(cert.get("rendered_semantic_nonzero_count", 0) or 0)
+        upstream_nonzero = int(cert.get("upstream_semantic_nonzero_count", 0) or 0)
+        effective_w_sem = float(cert.get("effective_w_sem", 0.0) or 0.0)
+        zero_or_error = (
+            "Zero" in cls or "_ZeroEmbeddingModel" in cls or "load_error" in cls
+        )
+        nonzero = bool(
+            not zero_or_error
+            and dim > 0
+            and (rendered_nonzero > 0 or upstream_nonzero > 0 or effective_w_sem > 0)
+        )
+        out.update({
+            "embedder_path": str(cert.get("model_path") or cert.get("GT_MODELS_ROOT") or ""),
+            "embedder_vector_dim": dim,
+            "embedder_nonzero": nonzero,
+            "semantic_enabled": bool(nonzero and semantic_candidates > 0),
+            "embedder_status_source": "embedder_certificate",
+            "embedder_certificate_path": cert_path,
+            "embedder_class": cls,
+            "semantic_candidate_count": d8(semantic_candidates),
+            "rendered_semantic_nonzero_count": d8(rendered_nonzero),
+            "upstream_semantic_nonzero_count": d8(upstream_nonzero),
+            "effective_w_sem": d8(effective_w_sem),
+        })
+        return out
+
     try:
         from groundtruth.memory.enrich.embed import get_embedding_model
 
@@ -959,6 +1018,7 @@ def build(task: str, results_dir: str, log_path: str = "",
         log_path = _find_log(task, results_dir) or ""
     pipeline = detect_pipeline(task, results_dir, log_path, oj, pipeline_arg)
     db_resolved = _resolve_db_path(task, results_dir, db_path)
+    embedder_cert_path = _resolve_embedder_cert_path(task, results_dir)
     log_text = _safe_read_text(log_path) if log_path else ""
 
     traj = _from_trajectory(task, results_dir)
@@ -1031,7 +1091,7 @@ def build(task: str, results_dir: str, log_path: str = "",
     # --- TASK 2: required spec-F field set ----------------------------------
     graph = _from_graph_db(db_resolved)
     lsp = _from_lsp(log_text, db_resolved)
-    embedder = _from_embedder()
+    embedder = _from_embedder(embedder_cert_path)
     env_snap = _env_snapshot()
     l1f = _from_l1_block(summ)
     l3f = _from_l3_block(summ)
@@ -1074,6 +1134,13 @@ def build(task: str, results_dir: str, log_path: str = "",
         "embedder_vector_dim": d8(embedder["embedder_vector_dim"]),
         "embedder_nonzero": embedder["embedder_nonzero"],
         "semantic_enabled": embedder["semantic_enabled"],
+        "embedder_status_source": embedder.get("embedder_status_source", ""),
+        "embedder_certificate_path": embedder.get("embedder_certificate_path", ""),
+        "embedder_class": embedder.get("embedder_class", ""),
+        "semantic_candidate_count": d8(embedder.get("semantic_candidate_count", 0)),
+        "rendered_semantic_nonzero_count": d8(embedder.get("rendered_semantic_nonzero_count", 0)),
+        "upstream_semantic_nonzero_count": d8(embedder.get("upstream_semantic_nonzero_count", 0)),
+        "effective_w_sem": d8(embedder.get("effective_w_sem", 0)),
         # --- env hard-gate snapshot (TASK 2) ---
         "gt_require_env": env_snap,
         # --- L1 / L3 / L3b spec-F fields (TASK 2) ---
