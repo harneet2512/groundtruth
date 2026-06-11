@@ -1098,6 +1098,34 @@ def build(task: str, results_dir: str, log_path: str = "",
     l3bf = _from_l3b_block(summ)
 
     summ_present = bool(summ)
+
+    # CP007 — consumption ledger from mini trajectory when present.
+    consumption = {"gt_blocks_delivered": 0, "gt_blocks_consumed": 0, "gt_blocks_enforced": 0}
+    ledger_path = ""
+    mini_traj = _find_miniswe_trajectory(task, results_dir)
+    if mini_traj:
+        try:
+            import importlib.util
+
+            cl_path = os.path.join(
+                os.path.dirname(__file__), "consumption_ledger.py"
+            )
+            spec = importlib.util.spec_from_file_location("consumption_ledger_gdm", cl_path)
+            cl_mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(cl_mod)
+            consumption = cl_mod.ledger_from_trajectory_path(mini_traj)
+            ledger_path = os.path.join(
+                os.path.dirname(mini_traj), "..", "gt_consumption_ledger.json"
+            )
+            ledger_path = os.path.normpath(ledger_path)
+            try:
+                with open(ledger_path, "w", encoding="utf-8") as lf:
+                    json.dump(consumption, lf, indent=2)
+            except OSError:
+                ledger_path = ""
+        except Exception:
+            pass
+
     deep = {
         "task_id": task,
         "schema": "gt_deep_metrics.v2",
@@ -1171,6 +1199,10 @@ def build(task: str, results_dir: str, log_path: str = "",
             "verify_calls": d8(traj.get("gt_verify_calls", 0)),
             "gt_observation_chars_total": d8(traj.get("gt_observation_chars_total", 0)),
         },
+        "gt_blocks_delivered": d8(consumption.get("gt_blocks_delivered", 0)),
+        "gt_blocks_consumed": d8(consumption.get("gt_blocks_consumed", 0)),
+        "gt_blocks_enforced": d8(consumption.get("gt_blocks_enforced", 0)),
+        "gt_consumption_ledger_path": ledger_path or None,
         "per_layer": per_layer,
         "agent": {k: (d8(v) if isinstance(v, (int, float)) else v) for k, v in traj.items()},
         # --- provenance of optional inputs (what was missing, never fatal) ---
