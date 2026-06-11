@@ -263,8 +263,11 @@ class TestRendering:
             "urgent", 245, 300, {"src/x.py"}, covering)
         assert '<gt-verify level="urgent">' in block
         assert "55" in block  # R = 300 - 245
-        assert "test_foo" in block
-        assert "pytest" in block
+        assert "test_foo" not in block
+        assert "tests/test_x.py" not in block
+        assert "pytest tests/test_x.py::test_foo" not in block
+        assert "Run the covering test now" not in block
+        assert "narrowest relevant repo test target" in block
 
     def test_gate_rendering(self, gmp):
         block = gmp._render_verify_emission(

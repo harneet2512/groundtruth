@@ -636,38 +636,39 @@ def order_unmet(statuses):
 
 def render_obligation_status_block(statuses, covering=None,
                                    max_listed: int | None = None) -> str:
-    """The review-transition checklist: every unmet obligation with its
-    sensed status, the covering test named for untested ones (Rothermel &
-    Harrold TOSEM 1997 safe-RTS reachability; Ekstazi ISSTA 2015; TestPrune),
-    issue text quoted VERBATIM (`issue_verbatim` provenance — the
-    un-misdirectable class).  Empty string when nothing is unmet
-    (correct-or-quiet).  `covering`: {obligation_idx: covering-test dict}."""
+    """Render the review-transition checklist without leaking exact tests.
+
+    `covering` may contain exact graph-linked test identifiers for internal
+    targeting. Agent-visible text only states that targeted verification is
+    required; it never names the test, file, or single-test command.
+    """
     unmet = order_unmet(statuses)
     if not unmet:
         return ""
     h = status_vector_hash(statuses)
     tested_n = sum(1 for _v, s, _t, _c in statuses if s == OBL_TESTED)
     lines = [
-        "GT: requirement status from the issue — sensed from your own edit "
+        "GT: requirement status from the issue - sensed from your own edit "
         "commands and observed test output:",
     ]
     listed = unmet if max_listed is None else unmet[:max_listed]
     for v, s, _touched, _conf in listed:
         quote = v.verbatim if len(v.verbatim) <= 160 else v.verbatim[:157] + "..."
-        mark = ("[✓ edited, ✗ untested]" if s == OBL_EDITED_UNTESTED
-                else "[✗ not addressed]")
+        mark = ("[edited, untested]" if s == OBL_EDITED_UNTESTED
+                else "[not addressed]")
         line = f"{mark} \"{quote}\""
-        ct = (covering or {}).get(v.idx)
-        if ct and s == OBL_EDITED_UNTESTED:
-            line += (f"\n    covering test: `{ct.get('name', '')}` in "
-                     f"`{ct.get('file', '')}` — run: `{ct.get('run_cmd', '')}`")
+        if (covering or {}).get(v.idx) and s == OBL_EDITED_UNTESTED:
+            line += (
+                "\n    targeted verification: graph-linked covering test "
+                "available; run the narrowest relevant repo test target."
+            )
         lines.append(line)
     if max_listed is not None and len(unmet) > max_listed:
         lines.append(f"(+{len(unmet) - max_listed} more unverified requirement(s))")
     if tested_n:
         lines.append(f"{tested_n} requirement(s) already show test evidence.")
     lines.append(
-        "Run the covering test for each untested requirement before "
+        "Run targeted verification for each untested requirement before "
         "concluding it is met; an unverified submission cannot be fixed after "
         "submit.")
     body = "\n".join(lines)

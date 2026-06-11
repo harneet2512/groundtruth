@@ -1676,8 +1676,8 @@ def _cochange_block(rel: str) -> str:
 def _covering_tests_for_symbols(symbol_names: set[str]) -> list[dict]:
     """Query graph.db for test nodes that CALL the given symbols.
 
-    Returns a list of dicts: [{"name": "test_foo", "file": "tests/test_x.py",
-    "confidence": 0.95, "run_cmd": "pytest tests/test_x.py::test_foo"}]
+    Returns internal test metadata dicts. These identifiers are for targeting
+    only and must not be rendered verbatim to the agent-visible surface.
     Correct-or-quiet: no graph, no test nodes, no FACT edges -> empty list."""
     if not symbol_names:
         return []
@@ -2126,17 +2126,14 @@ def _degenerate_loop_candidate(cmd: str, raw_obs: str) -> tuple[float, str] | No
 
 
 def _coherence_collapse_candidate(rel: str) -> tuple[float, str] | None:
-    """detect.coherence_collapse producer — called on edit turns AFTER the
-    churn increment.  Returns (severity, payload) or None."""
+    """detect.coherence_collapse producer called after edit churn increments."""
     global _coherence_last_rel
     if rel in _coherence_fired_files:
         return None
     churn = _edit_churn.get(rel, 0)
     if churn < 3:
         return None
-    # anchor signal: issue anchors/obligations (NOT edited-file stems — those
-    # would make the check vacuous), or a failing last test, or unknowable.
-    _oracle_focus()  # ensure the anchors cache is loaded
+    _oracle_focus()
     anch = _oracle_focus_cache or set()
     stem = os.path.splitext(os.path.basename(rel))[0]
     ftoks = _oracle_edited_tokens_by_file.get(rel, set())
@@ -2150,18 +2147,18 @@ def _coherence_collapse_candidate(rel: str) -> tuple[float, str] | None:
     try:
         idents = sorted(_coverage_idents(ftoks) & anch) or \
             sorted(_coverage_idents(ftoks))[:10]
-        covering = _covering_tests_for_symbols(set(idents[:10]))
-        if covering:
-            ct = covering[0]
-            hint = (f" Covering test: `{ct['name']}` in `{ct['file']}` — "
-                    f"run: `{ct['run_cmd']}`.")
+        if _covering_tests_for_symbols(set(idents[:10])):
+            hint = (
+                " A graph-linked covering test exists; run the narrowest "
+                "relevant repo test target before editing again."
+            )
     except Exception:  # noqa: BLE001 -- enrichment is best-effort
         pass
     body = (
         f"GT: you have rewritten {os.path.basename(rel)} {churn} times with "
-        "no passing test between edits — you are overwriting your own work "
-        "blind. Run the test FIRST to see what is actually failing, then "
-        f"make one targeted edit.{hint}"
+        "no passing test between edits - you are overwriting your own work "
+        "blind. Run targeted verification FIRST to see what is actually "
+        f"failing, then make one targeted edit.{hint}"
     )
     return (float(_SEV_DETECT),
             f'\n<gt-nudge reason="coherence_collapse">\n{body}\n</gt-nudge>')
@@ -2603,10 +2600,12 @@ def verify_horizon_band(action_count: int, step_limit: int | None,
 
 def _render_verify_emission(band: str, action_count: int, step_limit: int,
                             edited_rels: set, covering_tests: list) -> str:
-    """Render the agent-visible verification horizon emission.
+    """Render an agent-visible verification horizon emission.
 
-    Template-based, deterministic, no LLM. Tag: <gt-verify level="band">.
-    Product framing: "GT reminds you to test before shipping."\""""
+    Exact test names, file paths, and single-test commands are intentionally
+    not rendered. The graph query may prove that a covering test exists, but
+    benchmark-valid guidance must stay at the targeted-verification level.
+    """
     S = step_limit
     R = S - action_count
     edited_summary = ", ".join(
@@ -2614,42 +2613,40 @@ def _render_verify_emission(band: str, action_count: int, step_limit: int,
     if len(edited_rels) > 3:
         edited_summary += f" (+{len(edited_rels)-3} more)"
 
-    # Covering test command (from Stage B H1 query)
-    if covering_tests:
-        ct = covering_tests[0]
-        test_cmd = ct["run_cmd"]
-        test_info = f"`{ct['name']}` in `{ct['file']}`"
-    else:
-        test_cmd = "the test suite"
-        test_info = "the relevant tests"
+    has_covering = bool(covering_tests)
+    test_info = "a graph-linked covering test" if has_covering else "the relevant tests"
+    test_action = (
+        "the narrowest relevant repo test target" if has_covering
+        else "the relevant test suite or narrowest related target"
+    )
 
     if band == "advisory":
         body = (
             f"GT: you have edited {edited_summary} but no test output observed "
-            f"so far references these changes. {test_info} covers them — "
-            f"consider running: `{test_cmd}`"
+            f"so far references these changes. {test_info} covers them - "
+            f"consider running {test_action}."
         )
     elif band == "urgent":
         body = (
             f"GT: ~{R} of {S} steps remain. Your edits to {edited_summary} "
-            f"are still unverified — nothing you have run exercises them. "
-            f"Run the covering test now: `{test_cmd}`. A failing result with "
+            "are still unverified - nothing you have run exercises them. "
+            f"Run {test_action} now. A failing result with "
             f"~{R} steps left is still fixable; an unverified submission is not."
         )
     elif band == "gate":
         body = (
-            f"GT: {R} steps left — at your observed pace this is your LAST "
+            f"GT: {R} steps left - at your observed pace this is your LAST "
             f"window to verify. You edited {edited_summary}; no test has "
-            f"exercised them. Run `{test_cmd}` NOW. If it passes, finish. "
-            f"If it fails, make the single smallest fix and re-run. "
-            f"Do not submit unverified work."
+            f"exercised them. Run {test_action} NOW. If it passes, finish. "
+            "If it fails, make the single smallest fix and re-run. "
+            "Do not submit unverified work."
         )
     elif band == "pivot":
         body = (
-            f"GT: the covering test has failed and ~{R} steps remain. "
-            f"Re-read the failing assertion once; if the fix is not one edit "
-            f"away, revert to your last passing state and submit the minimal "
-            f"correct change."
+            f"GT: the targeted verification has failed and ~{R} steps remain. "
+            "Re-read the failing assertion once; if the fix is not one edit "
+            "away, revert to your last passing state and submit the minimal "
+            "correct change."
         )
     else:
         return ""

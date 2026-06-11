@@ -126,16 +126,18 @@ class TestStatusMachinery:
                         "run_cmd": "pytest tests/test_m.py::test_capture"}}
         block = oracle_mod.render_obligation_status_block(sts, covering)
         assert 'reason="test_evidence_gap"' in block
-        assert "[✓ edited, ✗ untested]" in block
-        assert "[✗ not addressed]" in block
+        assert "[edited, untested]" in block
+        assert "[not addressed]" in block
         assert "The capture_snapshot method should be async." in block
         assert "Multi-key conflicts raise ExtraFieldsLoadError." in block
-        assert "pytest tests/test_m.py::test_capture" in block
+        assert "pytest tests/test_m.py::test_capture" not in block
+        assert "test_capture" not in block
+        assert "tests/test_m.py" not in block
         # the tested obligation is summarized, never re-listed as unmet
         assert "1 requirement(s) already show test evidence." in block
         # edited-untested rows sort BEFORE unaddressed rows
-        assert (block.index("[✓ edited, ✗ untested]")
-                < block.index("[✗ not addressed]"))
+        assert (block.index("[edited, untested]")
+                < block.index("[not addressed]"))
 
     def test_renderer_quiet_when_all_tested(self, oracle_mod):
         views = oracle_mod._obligation_views(_OBLS)
@@ -213,7 +215,7 @@ def test_refires_when_status_vector_changes(patch_mod, tmp_path, monkeypatch):
         outs.append(_drive(patch_mod, c))
     first = "\n".join(outs)
     assert 'reason="test_evidence_gap"' in first
-    assert "[✓ edited, ✗ untested]" in first
+    assert "[edited, untested]" in first
 
     # the agent now edits a SECOND obligation surface -> vector changes.
     outs2 = [_drive(patch_mod, _EDIT_ERR)]
@@ -253,7 +255,7 @@ def test_unaddressed_listed_alongside_edited(patch_mod, tmp_path, monkeypatch):
     for c in _NONEDITS:
         outs.append(_drive(patch_mod, c))
     joined = "\n".join(outs)
-    assert "[✗ not addressed]" in joined
+    assert "[not addressed]" in joined
     assert "ExtraFieldsLoadError" in joined
 
 
