@@ -81,6 +81,8 @@ def _reset(patch_mod, monkeypatch, route=True):
         ("_lr_history", []), ("_nsr_history", []),
         ("_detect_loop_fired", False), ("_coherence_fired_files", set()),
         ("_coherence_last_rel", None),
+        ("_DELIVERED_FACTS", set()),
+        ("_ledger_consumed_kinds", set()), ("_ledger_ignore_counts", {}),
     ]:
         monkeypatch.setattr(patch_mod, name, val, raising=False)
 
@@ -171,7 +173,7 @@ class TestCoherenceCollapse:
         joined = "\n".join(outs)
         assert 'reason="coherence_collapse"' in joined
         assert "3 times" in joined
-        assert "Run the test FIRST" in joined
+        assert "Run targeted verification FIRST" in joined
 
     def test_pass_between_resets_and_stays_silent(self, patch_mod, monkeypatch, tmp_path):
         _reset(patch_mod, monkeypatch)

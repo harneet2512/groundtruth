@@ -634,6 +634,112 @@ def order_unmet(statuses):
     return unmet
 
 
+# ---------------------------------------------------------------------------
+# CP011 — persistent obligation tracker (lifecycle across turns).
+# ---------------------------------------------------------------------------
+@dataclass
+class Obligation:
+    """One issue obligation with lifecycle status and evidence trail."""
+    id: int
+    verbatim: str
+    symbols: frozenset[str]
+    status: str  # unedited | edited | tested | satisfied
+    evidence: list[str] = field(default_factory=list)
+    last_turn: int = 0
+
+
+def _status_to_obligation_lifecycle(obl_status: str) -> str:
+    if obl_status == OBL_TESTED:
+        return "tested"
+    if obl_status == OBL_EDITED_UNTESTED:
+        return "edited"
+    return "unedited"
+
+
+def _obligation_lifecycle_to_status(lifecycle: str) -> str:
+    if lifecycle in ("tested", "satisfied"):
+        return OBL_TESTED
+    if lifecycle == "edited":
+        return OBL_EDITED_UNTESTED
+    return OBL_UNADDRESSED
+
+
+class ObligationTracker:
+    """Persistent per-run obligation lifecycle — survives across turns."""
+
+    def __init__(self, obligations: list[dict] | None = None):
+        self.obligations: list[Obligation] = []
+        views = _obligation_views(obligations or [])
+        for v in views:
+            self.obligations.append(Obligation(
+                id=v.idx,
+                verbatim=v.verbatim,
+                symbols=v.sym_parts,
+                status="unedited",
+            ))
+        self._views = views
+
+    def update(
+        self,
+        edited_tokens: set[str],
+        tested_tokens: set[str],
+        turn: int,
+    ) -> list[tuple[int, str, str]]:
+        """Apply turn evidence; return [(id, old_status, new_status)] transitions."""
+        statuses = obligation_statuses(self._views, edited_tokens, tested_tokens)
+        transitions: list[tuple[int, str, str]] = []
+        by_id = {o.id: o for o in self.obligations}
+        for v, st, touched, _conf in statuses:
+            ob = by_id.get(v.idx)
+            if ob is None:
+                continue
+            new_lifecycle = _status_to_obligation_lifecycle(st)
+            if st == OBL_EDITED_UNTESTED and touched:
+                new_lifecycle = "edited"
+            if st == OBL_TESTED:
+                new_lifecycle = "tested"
+            old = ob.status
+            if new_lifecycle != old:
+                transitions.append((ob.id, old, new_lifecycle))
+                ob.status = new_lifecycle
+                ob.last_turn = turn
+                if touched:
+                    ob.evidence.append(f"turn{turn}:edited={','.join(sorted(touched)[:3])}")
+                if st == OBL_TESTED:
+                    ob.evidence.append(f"turn{turn}:tested")
+        return transitions
+
+    def statuses_tuple(self, edited_tokens: set[str], tested_tokens: set[str]):
+        """Compatibility shim: same tuple shape as obligation_statuses()."""
+        edited = set(edited_tokens or ())
+        tested = set(tested_tokens or ())
+        out = []
+        by_id = {o.id: o for o in self.obligations}
+        for v in self._views:
+            ob = by_id.get(v.idx)
+            if ob is None:
+                continue
+            st = _obligation_lifecycle_to_status(ob.status)
+            touched, conf = _overlap(v, edited)
+            if ob.status in ("tested", "satisfied") or _obligation_tested(v, tested):
+                st = OBL_TESTED
+            elif ob.status == "edited" or touched:
+                st = OBL_EDITED_UNTESTED
+            else:
+                st = OBL_UNADDRESSED
+            out.append((v, st, touched, conf))
+        return out
+
+    def unmet(self) -> list[Obligation]:
+        return [o for o in self.obligations if o.status not in ("tested", "satisfied")]
+
+    def coverage_ratio(self) -> float:
+        if not self.obligations:
+            return 1.0
+        done = sum(1 for o in self.obligations if o.status in ("tested", "satisfied"))
+        return done / len(self.obligations)
+
+
 def render_obligation_status_block(statuses, covering=None,
                                    max_listed: int | None = None) -> str:
     """Render the review-transition checklist without leaking exact tests.
@@ -1131,4 +1237,5 @@ __all__ = [
     "obligation_statuses", "status_vector_hash", "composite_severity",
     "order_unmet", "render_obligation_status_block",
     "OBL_TESTED", "OBL_EDITED_UNTESTED", "OBL_UNADDRESSED",
+    "Obligation", "ObligationTracker",
 ]

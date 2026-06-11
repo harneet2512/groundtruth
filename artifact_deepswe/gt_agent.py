@@ -916,6 +916,28 @@ def _retry_test_command() -> tuple[str, str]:
     return _RETRY_TEST_AUTODETECT, "repository test suite (auto-detected runner)"
 
 
+_FAILURE_CLASSIFIERS: list[tuple[str, re.Pattern[str]]] = [
+    ("assertion_error", re.compile(
+        r"AssertionError|assert\s+.*failed|FAILED.*assert", re.I)),
+    ("regression", re.compile(
+        r"regression|previously passed|was passing", re.I)),
+    ("missing_feature", re.compile(
+        r"not implemented|NotImplementedError|expected.*got", re.I)),
+    ("env_failure", re.compile(
+        r"ModuleNotFoundError|ImportError|No module named|command not found",
+        re.I)),
+]
+
+
+def _classify_verifier_failure(output: str) -> str:
+    """P6: bucket test/verifier output for targeted retry feedback."""
+    text = output or ""
+    for label, pat in _FAILURE_CLASSIFIERS:
+        if pat.search(text):
+            return label
+    return "test_failure"
+
+
 def _format_test_feedback(attempt: int, display_cmd: str, rc: int,
                           output: str) -> str:
     """The structured failure message prepended to the retry attempt's
@@ -924,16 +946,33 @@ def _format_test_feedback(attempt: int, display_cmd: str, rc: int,
     tail = (output or "").strip()
     if len(tail) > _FEEDBACK_TAIL_CHARS:
         tail = "…(truncated)…\n" + tail[-_FEEDBACK_TAIL_CHARS:]
+    failure_kind = _classify_verifier_failure(tail)
+    repair_hint = {
+        "assertion_error": (
+            "Logic bug: a failing assertion disagrees with your change. "
+            "Re-read the assertion and fix the implementation."),
+        "regression": (
+            "Regression: an existing test broke. Restore prior behavior "
+            "while keeping the new fix."),
+        "missing_feature": (
+            "Incomplete implementation: new behavior is missing or partial. "
+            "Cover the unmet requirement before finishing."),
+        "env_failure": (
+            "Environment/setup issue detected — fix imports or runner setup."),
+        "test_failure": (
+            "Fix the failures: re-read the failing assertions, correct your "
+            "changes in the repository (your previous edits are still present), "
+            "and re-run the tests to confirm they pass before you finish."),
+    }[failure_kind]
     return (
-        f'<test-feedback attempt="{attempt}">\n'
+        f'<test-feedback attempt="{attempt}" failure="{failure_kind}">\n'
         "Tests failed: your previous attempt did not pass the test suite.\n"
         f"Command: {display_cmd}\n"
         f"Exit code: {rc}\n"
+        f"Failure class: {failure_kind}\n"
         "Failing output (tail):\n"
         f"{tail}\n"
-        "Fix the failures: re-read the failing assertions, correct your "
-        "changes in the repository (your previous edits are still present), "
-        "and re-run the tests to confirm they pass before you finish.\n"
+        f"{repair_hint}\n"
         "</test-feedback>"
     )
 
@@ -1034,8 +1073,19 @@ class GTMiniSweAgent(MiniSweAgent):
             await self._archive_attempt_artifacts(environment, attempt)
             # Latest feedback + the ORIGINAL instruction (no accumulation —
             # one bounded feedback block per attempt, dose-disciplined).
+            gate_note = ""
+            if not _GT_BASELINE:
+                # CP012 option 2: patch-intercept path — retry loop blocks
+                # another submit until tests pass; remind about unverified reqs.
+                gate_note = (
+                    "GT pre-submit gate: your patch is still in the repo. "
+                    "Run targeted tests for every edited requirement before "
+                    "you finish — unverified obligations are the top hidden "
+                    "verifier failure mode.\n\n"
+                )
             attempt_instruction = (
-                _format_test_feedback(attempt + 1, display_cmd, rc, output)
+                gate_note
+                + _format_test_feedback(attempt + 1, display_cmd, rc, output)
                 + "\n\n" + instruction
             )
 

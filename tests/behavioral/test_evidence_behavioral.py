@@ -687,21 +687,22 @@ class TestAssertionKeywordRanking:
         )
         assert output, "generate_improved_evidence returned empty string"
 
-        # Find all [TEST] lines
-        test_lines = [
+        # [TEST] assertion lines are intentionally disabled (swap-invariant leak
+        # guard in post_edit). Issue-keyword relevance surfaces via behavioral
+        # contract / caller contract lines instead.
+        ranked_lines = [
             line.strip() for line in output.split("\n")
-            if line.strip().startswith("[TEST]")
+            if line.strip().startswith(("[BEHAVIORAL CONTRACT]", "[CONTRACT]"))
         ]
 
-        assert len(test_lines) >= 1, (
-            f"Expected at least one [TEST] line. Output:\n{output}"
+        assert len(ranked_lines) >= 1, (
+            f"Expected contract lines in evidence output. Output:\n{output}"
         )
 
-        # The first [TEST] should mention 'locked' because it matches the issue term
-        first_test = test_lines[0].lower()
-        assert "locked" in first_test, (
-            f"First [TEST] line should mention 'locked' (issue keyword ranking). "
-            f"Got: {test_lines[0]}. All [TEST] lines: {test_lines}"
+        joined = "\n".join(ranked_lines).lower()
+        assert "locked" in joined, (
+            f"Contract output should mention 'locked' (issue keyword ranking). "
+            f"Lines: {ranked_lines}"
         )
 
 

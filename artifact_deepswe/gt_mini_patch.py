@@ -35,6 +35,7 @@ through it.
 """
 from __future__ import annotations
 
+import enum
 import os
 import re
 import subprocess
@@ -1454,6 +1455,10 @@ def _evidence(cmd: str) -> str:
     ev = _evidence_body(kind, rel, root)
     if not ev:
         return ""
+    ev = _translate_to_action(ev, _detect_phase())
+    ev = _budget_trim(ev)
+    if not ev:
+        return ""
     return f"\n<gt-evidence kind=\"{kind}\" file=\"{rel}\">\n{ev}\n</gt-evidence>"
 
 
@@ -2133,8 +2138,7 @@ def _coherence_collapse_candidate(rel: str) -> tuple[float, str] | None:
     churn = _edit_churn.get(rel, 0)
     if churn < 3:
         return None
-    _oracle_focus()
-    anch = _oracle_focus_cache or set()
+    anch = _oracle_focus()
     stem = os.path.splitext(os.path.basename(rel))[0]
     ftoks = _oracle_edited_tokens_by_file.get(rel, set())
     anchored = (not anch) or (stem in anch) or bool(ftoks & anch) \
@@ -2330,9 +2334,11 @@ def _obligation_nudge_block() -> tuple[float, str] | None:
         obls = om.load_obligations(_anchors_path())
         if not obls:
             return None
-        views = om._obligation_views(obls)
-        statuses = om.obligation_statuses(
-            views, _oracle_edited_tokens, _oracle_tested_tokens)
+        tracker = _get_obligation_tracker(om)
+        tracker.update(
+            _oracle_edited_tokens, _oracle_tested_tokens, _action_count)
+        statuses = tracker.statuses_tuple(
+            _oracle_edited_tokens, _oracle_tested_tokens)
         unmet = om.order_unmet(statuses)
         if not unmet:
             return None
@@ -2376,6 +2382,9 @@ def _obligation_nudge_block() -> tuple[float, str] | None:
         budget_b_sev = (_action_count / _GT_STEP_LIMIT) if _GT_STEP_LIMIT else 0.0
         unmet_ratio = len(unmet) / max(len(statuses), 1)
         sev = om.composite_severity(_SEV_OBLIGATION, budget_b_sev, unmet_ratio)
+        # CP012 option 1: pre-submit severity boost — obligation wins final 10%.
+        if budget_b_sev > 0.90 and unmet:
+            sev = float(_SEV_GATE)
         return (sev, payload)
     except Exception:  # noqa: BLE001 -- never break the agent loop
         return None
@@ -2402,6 +2411,205 @@ _SEV_CONTRACT = 3
 _SEV_STUCK = 2
 _SEV_SCOPE = 2
 _SEV_CODEMAP = 1
+
+
+# ---------------------------------------------------------------------------
+# CP013 — phase detection + policy filter (P5 symbol narrowing).
+# ---------------------------------------------------------------------------
+class Phase(enum.Enum):
+    ORIENT = "orient"
+    SEARCH = "search"
+    EDIT = "edit"
+    VERIFY = "verify"
+    SUBMIT = "submit"
+
+
+_PHASE_POLICY: dict[Phase, frozenset[str]] = {
+    Phase.ORIENT: frozenset({"consensus.scope"}),
+    Phase.SEARCH: frozenset({"l3b.evidence"}),
+    Phase.EDIT: frozenset({
+        "l3b.evidence", "spec.obligation", "l3.contract", "l3.cochange",
+        "detect.coherence",
+    }),
+    Phase.VERIFY: frozenset({
+        "spec.obligation", "l5.stuck", "l5.failure", "l5.no_test",
+        "detect.loop", "verify.horizon.advisory", "verify.horizon.urgent",
+        "verify.horizon.pivot",
+    }),
+    Phase.SUBMIT: frozenset({
+        "spec.obligation", "verify.horizon.gate",
+    }),
+}
+
+
+def _detect_phase() -> Phase:
+    if _action_count <= 5 and not _oracle_edited_rels:
+        return Phase.ORIENT
+    if not _oracle_edited_rels:
+        return Phase.SEARCH
+    budget = (_action_count / _GT_STEP_LIMIT) if _GT_STEP_LIMIT else 0.0
+    if budget > 0.90:
+        return Phase.SUBMIT
+    if _oracle_nonedit_streak >= 3 and _oracle_edited_rels:
+        return Phase.VERIFY
+    return Phase.EDIT
+
+
+def _phase_allows(kind: str, phase: Phase) -> bool:
+    allowed = _PHASE_POLICY.get(phase, frozenset())
+    if kind in allowed:
+        return True
+    if kind.startswith("verify.horizon."):
+        return any(
+            k.startswith("verify.horizon.") or k == "horizon.gate"
+            for k in allowed
+        )
+    return False
+
+
+# ---------------------------------------------------------------------------
+# CP011 — persistent obligation tracker (singleton per anchors file).
+# ---------------------------------------------------------------------------
+_obligation_tracker = None
+_obligation_tracker_anchors: str | None = None
+
+
+def _get_obligation_tracker(om):
+    global _obligation_tracker, _obligation_tracker_anchors
+    path = _anchors_path()
+    if _obligation_tracker is None or _obligation_tracker_anchors != path:
+        obls = om.load_obligations(path)
+        _obligation_tracker = om.ObligationTracker(obls)
+        _obligation_tracker_anchors = path
+    return _obligation_tracker
+
+
+# ---------------------------------------------------------------------------
+# CP014 — graph-to-action templates (deterministic, no LLM).
+# ---------------------------------------------------------------------------
+_ACTION_TEMPLATES = {
+    "caller_risk": (
+        "Changing {callee} risks breaking {caller} ({file}:{line}). "
+        "Inspect before editing."
+    ),
+    "contract_must": (
+        "{symbol} must return {return_type} — {n_callers} callers depend on this."
+    ),
+    "witness_call": "Inspect {sym} at {loc} before changing related code.",
+    "sibling_match": (
+        "Sibling pattern nearby: {line}. Your implementation should match."
+    ),
+}
+
+
+def _translate_to_action(evidence_block: str, phase: Phase) -> str:
+    if phase in (Phase.ORIENT, Phase.SEARCH):
+        return evidence_block
+    lines: list[str] = []
+    for line in evidence_block.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if "[WITNESS]" in stripped and "->" in stripped:
+            m = re.search(
+                r"\[WITNESS\]\s+(\S+)\s+\w+\s+by\s+->\s+([^`]+)",
+                stripped,
+            )
+            if m:
+                lines.append(_ACTION_TEMPLATES["witness_call"].format(
+                    sym=m.group(1), loc=m.group(2).strip()))
+                continue
+        if "[CALLERS]" in stripped:
+            lines.append(
+                "Check all callers listed above before changing this interface."
+            )
+            continue
+        if "[SIBLINGS]" in stripped:
+            lines.append(_ACTION_TEMPLATES["sibling_match"].format(line=stripped))
+            continue
+        lines.append(stripped)
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# CP015 — context budget trim + cross-turn dedup.
+# ---------------------------------------------------------------------------
+_DELIVERED_FACTS: set[str] = set()
+_IMPERATIVE_PREFIXES = (
+    "Changing", "Must", "Check", "Run", "You edited", "Inspect",
+    "GT:", "Before",
+)
+
+
+def _budget_trim(payload: str, max_tokens: int = 500) -> str:
+    if not payload:
+        return ""
+    lines = payload.splitlines()
+    fresh = [ln for ln in lines if ln.strip() and ln.strip() not in _DELIVERED_FACTS]
+    imperative = [
+        ln for ln in fresh
+        if any(ln.strip().startswith(w) for w in _IMPERATIVE_PREFIXES)
+    ]
+    facts = [
+        ln for ln in fresh
+        if ln not in imperative and ("[" in ln or "→" in ln or "->" in ln)
+    ]
+    other = [ln for ln in fresh if ln not in imperative and ln not in facts]
+    ranked = imperative + facts + other
+    result: list[str] = []
+    chars = 0
+    limit = max_tokens * 4
+    for line in ranked:
+        if chars + len(line) > limit:
+            break
+        result.append(line)
+        chars += len(line) + 1
+        _DELIVERED_FACTS.add(line.strip())
+    return "\n".join(result)
+
+
+# ---------------------------------------------------------------------------
+# Piece 3 — consumption-ledger-driven suppression + consumed boost.
+# ---------------------------------------------------------------------------
+_ledger_consumed_kinds: set[str] = set()
+_ledger_ignore_counts: dict[str, int] = {}
+_last_delivered_kind: str = ""
+_last_gate_winner_kind: str = ""
+
+
+def _ledger_cmd_acted(cmd: str) -> bool:
+    """True when the command is an edit or test invocation (consumption signal)."""
+    c = (cmd or "").strip()
+    if not c:
+        return False
+    if _TEST_RUNNER_RE.search(c):
+        return True
+    if _EDIT_KW_RE.search(c):
+        return True
+    return bool(re.search(r">>?\s*[^\s/]", c))
+
+
+def _ledger_note_delivery(kind: str, cmd: str) -> None:
+    global _last_delivered_kind
+    _last_delivered_kind = kind
+    if not kind:
+        return
+    acted = _ledger_cmd_acted(cmd)
+    if acted and kind not in _ledger_consumed_kinds:
+        _ledger_consumed_kinds.add(kind)
+        _ledger_ignore_counts.pop(kind, None)
+    elif not acted:
+        _ledger_ignore_counts[kind] = _ledger_ignore_counts.get(kind, 0) + 1
+
+
+def _ledger_boost_severity(kind: str, sev: float) -> float:
+    if kind in _ledger_consumed_kinds:
+        return sev + 0.5
+    return sev
+
+
+def _ledger_should_skip_kind(kind: str) -> bool:
+    return _ledger_ignore_counts.get(kind, 0) >= 2
 
 
 # ---------------------------------------------------------------------------
@@ -2851,7 +3059,7 @@ def _oracle_gate_blocks(cands) -> str:
     but be suppressed in replay.  Now parity: identical median+MAD floor."""
     import hashlib as _hl
     import statistics as _ostats
-    global _oracle_last_losers
+    global _oracle_last_losers, _last_gate_winner_kind
     _oracle_last_losers = set()
     focus = _oracle_focus()
     passing: list[tuple[float, float, str, str, str]] = []
@@ -2862,8 +3070,9 @@ def _oracle_gate_blocks(cands) -> str:
     # agent may now act on it when it previously ignored it.
     _bstate = f"{len(_oracle_edited_rels)}:{len(_oracle_tested_tokens)}:{_action_count // 30}"
     for sev, kind, text, edit_bound in cands:
-        if not text:
+        if not text or _ledger_should_skip_kind(kind):
             continue
+        sev = _ledger_boost_severity(kind, sev)
         h = _hl.sha256((text + _bstate).encode("utf-8")).hexdigest()[:8]
         if h in _oracle_delivered_hashes:
             suppressed.append((kind, "delivered", 0.0))
@@ -2908,6 +3117,7 @@ def _oracle_gate_blocks(cands) -> str:
             suppressed.append((p[3], "outranked", p[1]))
             _oracle_last_losers.add(p[3])
         _oracle_delivered_hashes.add(winner[2])
+        _last_gate_winner_kind = winner[3]
     _oracle_telemetry_write(suppressed, winner)
     return winner[4] if winner else ""
 
@@ -3126,6 +3336,14 @@ def _augment_output(action, out) -> None:
             _vh = _verification_horizon_candidate()
             if _vh is not None:
                 cands.append(_vh)
+            _phase = _detect_phase()
+            # Event-bound candidates bypass phase filter — the trigger IS the
+            # event (post_view / post_edit / review transition); phase policy
+            # only narrows ambient producers (P5 symbol narrowing).
+            cands = [
+                c for c in cands
+                if c[2] and (c[3] or _phase_allows(c[1], _phase))
+            ]
             _win = _oracle_gate_blocks(cands)
             # Latch re-arm (LIPI 2026-06-10): a produced-but-not-emitted
             # candidate is DEFERRED, not destroyed — gate losers release the
@@ -3176,6 +3394,7 @@ def _augment_output(action, out) -> None:
                         0, _horizon_gate_fire_count - 1)
             if _win:
                 out["output"] = (out.get("output") or "") + _win
+                _ledger_note_delivery(_last_gate_winner_kind, cmd)
             return
 
         # ---- LEGACY PATH (GT_ORACLE_ROUTE=0): unconditional appends ----

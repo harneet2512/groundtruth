@@ -46,6 +46,36 @@ def test_reconcile_fail_without_witness():
     assert rec["contradictions"]
 
 
+def test_witness_overrides_cert_fail_no_contradiction():
+    """B5/B9 held-out: witness-over-cert must not leave contradictions open."""
+    signal = {
+        "gt_prebuilt_active": True,
+        "hook_hash_match": True,
+        "gt_meta_present": True,
+        "cert_verdicts": {
+            "graph_certificate.json": {
+                "verdict": "GRAPH_FAIL_MISSING_HANDOFF",
+                "is_fail": True,
+            },
+        },
+    }
+    rec = tt.reconcile_graph_handoff(signal)
+    assert rec["graph_handoff"] == "witness_overrides"
+    assert rec["contradictions"] == []
+
+
+def test_unproven_without_meta_is_not_pass():
+    """B9: absent witness must not reconcile to pass."""
+    signal = {
+        "gt_prebuilt_active": False,
+        "hook_hash_match": None,
+        "gt_meta_present": False,
+        "cert_verdicts": {},
+    }
+    rec = tt.reconcile_graph_handoff(signal)
+    assert rec["graph_handoff"] in ("fail", "unproven")
+
+
 def test_build_task_truth_writes_json():
     with tempfile.TemporaryDirectory() as jobs:
         trial = os.path.join(jobs, "run", "task__abc")

@@ -128,7 +128,7 @@ def test_retry_fires_and_injects_feedback(agent, record_runs, monkeypatch):
     assert len(record_runs) == 2, "a failing verifier must produce a retry attempt"
     first, second = record_runs
     assert "<test-feedback" not in first
-    assert '<test-feedback attempt="2">' in second
+    assert '<test-feedback attempt="2"' in second
     assert "Tests failed" in second
     assert "FAIL: test_foo" in second
     assert "Exit code: 1" in second
@@ -151,8 +151,8 @@ def test_retry_cap_three_total_attempts(agent, record_runs, monkeypatch):
     assert len(record_runs) == 3, "cost bound: at most 3 total attempts"
     # no verifier exec after the final attempt (nothing left to retry into).
     assert len(env.verifier_execs()) == 2
-    assert '<test-feedback attempt="2">' in record_runs[1]
-    assert '<test-feedback attempt="3">' in record_runs[2]
+    assert '<test-feedback attempt="2"' in record_runs[1]
+    assert '<test-feedback attempt="3"' in record_runs[2]
     # feedback does NOT accumulate (one bounded block per attempt).
     assert record_runs[2].count("<test-feedback") == 1
 

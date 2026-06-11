@@ -188,6 +188,8 @@ def _reset(patch_mod, monkeypatch):
         ("_oracle_tested_tokens", set()), ("_oracle_edited_tokens_by_file", {}),
         ("_edit_churn", {}), ("_gt_oracle_tried", False), ("_gt_oracle_mod", None),
         ("_horizon_advisory_fired", False), ("_horizon_gate_fire_count", 0),
+        ("_DELIVERED_FACTS", set()),
+        ("_ledger_consumed_kinds", set()), ("_ledger_ignore_counts", {}),
     ]:
         monkeypatch.setattr(patch_mod, name, val, raising=False)
 
@@ -277,6 +279,43 @@ def test_severity_is_composite_not_constant(patch_mod, tmp_path, monkeypatch):
     # base 5 + 2*(3/100) + 1*(3/3 unmet) = 6.06
     assert abs(sev - (5 + 2 * (3 / 100) + 1.0)) < 1e-9
     assert 'reason="test_evidence_gap"' in payload
+
+
+def test_pre_submit_severity_boost_at_90pct_budget(patch_mod, tmp_path, monkeypatch):
+    """CP012 option 1: >90% budget + unmet -> severity = _SEV_GATE."""
+    _reset(patch_mod, monkeypatch)
+    monkeypatch.setattr(patch_mod, "_GT_STEP_LIMIT", 300, raising=False)
+    monkeypatch.setattr(patch_mod, "_action_count", 281, raising=False)
+    monkeypatch.setenv("GT_ANCHORS_PATH", _write_anchors(tmp_path, _OBLS))
+    monkeypatch.setattr(patch_mod, "_oracle_edited_tokens", {"capture_snapshot"}, raising=False)
+    monkeypatch.setattr(patch_mod, "_oracle_nonedit_streak", 3, raising=False)
+    got = patch_mod._obligation_nudge_block()
+    assert got is not None
+    sev, _payload = got
+    assert sev == float(patch_mod._SEV_GATE)
+
+
+def test_pre_submit_no_boost_early_budget(patch_mod, tmp_path, monkeypatch):
+    """CP012: below 90% budget uses composite severity, not gate max."""
+    _reset(patch_mod, monkeypatch)
+    monkeypatch.setattr(patch_mod, "_GT_STEP_LIMIT", 300, raising=False)
+    monkeypatch.setattr(patch_mod, "_action_count", 100, raising=False)
+    monkeypatch.setenv("GT_ANCHORS_PATH", _write_anchors(tmp_path, _OBLS))
+    monkeypatch.setattr(patch_mod, "_oracle_edited_tokens", {"capture_snapshot"}, raising=False)
+    monkeypatch.setattr(patch_mod, "_oracle_nonedit_streak", 3, raising=False)
+    got = patch_mod._obligation_nudge_block()
+    assert got is not None
+    sev, _payload = got
+    budget_b = 100 / 300
+    unmet_ratio = len(patch_mod._load_gt_oracle().order_unmet(
+        patch_mod._get_obligation_tracker(patch_mod._load_gt_oracle()).statuses_tuple(
+            patch_mod._oracle_edited_tokens, patch_mod._oracle_tested_tokens
+        )
+    )) / 3
+    expected = patch_mod._load_gt_oracle().composite_severity(
+        patch_mod._SEV_OBLIGATION, budget_b, unmet_ratio)
+    assert abs(sev - expected) < 1e-9
+    assert sev != float(patch_mod._SEV_GATE)
 
 
 def test_no_obligations_dormant(patch_mod, tmp_path, monkeypatch):

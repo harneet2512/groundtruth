@@ -1545,6 +1545,85 @@ def _task_to_dict(tm: TaskMetrics) -> Dict:
 # Main reporting
 # ---------------------------------------------------------------------------
 
+def compute_trajectory_scorecard(
+    baseline_run: Dict[str, TaskMetrics],
+    oracle_run: Dict[str, TaskMetrics],
+    shared_ids: List[str],
+) -> Dict[str, Any]:
+    """P7 — Stage-2 trajectory scorecard (post-hoc, paired runs only).
+
+    Surfaces gt_caused_flip (heuristic: flip + behavioral consumption or test
+    evidence consumed), obligation_coverage_at_submit (M21 proxy), and mean
+    consumption rates. Does not rerun GT-OFF; uses paired TaskMetrics only.
+    """
+    def _baseline_resolved(tid: str) -> bool:
+        bm = baseline_run.get(tid)
+        return bool(bm and bm.resolved)
+
+    def _oracle_resolved(tid: str) -> bool:
+        om = oracle_run.get(tid)
+        return bool(om and om.resolved)
+
+    flips = [
+        tid for tid in shared_ids
+        if _oracle_resolved(tid) and not _baseline_resolved(tid)
+    ]
+    regressions = [
+        tid for tid in shared_ids
+        if _baseline_resolved(tid) and not _oracle_resolved(tid)
+    ]
+    flip_details: List[Dict[str, Any]] = []
+    gt_caused_flips = 0
+    for tid in flips:
+        o = oracle_run[tid]
+        behavioral = (
+            not math.isnan(o.m05_consumption_rate_behavioral)
+            and o.m05_consumption_rate_behavioral > 0
+        )
+        test_consumed = o.m19_test_evidence_consumed > 0
+        obligation_ok = (
+            not math.isnan(o.m21_patch_completeness)
+            and o.m21_patch_completeness >= 0.5
+        )
+        gt_caused = (behavioral or test_consumed) and (
+            obligation_ok or math.isnan(o.m21_patch_completeness)
+        )
+        if gt_caused:
+            gt_caused_flips += 1
+        flip_details.append({
+            "task_id": tid,
+            "gt_caused": gt_caused,
+            "obligation_coverage_at_submit": _fmt(o.m21_patch_completeness),
+            "consumption_behavioral": _fmt(o.m05_consumption_rate_behavioral),
+            "test_evidence_consumed": _fmt(o.m19_test_evidence_consumed),
+        })
+
+    obligation_cov = [
+        oracle_run[tid].m21_patch_completeness
+        for tid in shared_ids
+        if not math.isnan(oracle_run[tid].m21_patch_completeness)
+    ]
+    consumption = [
+        oracle_run[tid].m05_consumption_rate_behavioral
+        for tid in shared_ids
+        if not math.isnan(oracle_run[tid].m05_consumption_rate_behavioral)
+    ]
+    explicit = [
+        oracle_run[tid].m05_consumption_rate_explicit
+        for tid in shared_ids
+        if not math.isnan(oracle_run[tid].m05_consumption_rate_explicit)
+    ]
+    return {
+        "gt_caused_flips": gt_caused_flips,
+        "flip_count": len(flips),
+        "regression_count": len(regressions),
+        "flip_tasks": flip_details,
+        "obligation_coverage_at_submit_mean": _fmt(_safe_mean(obligation_cov)),
+        "consumption_rate_behavioral_mean": _fmt(_safe_mean(consumption)),
+        "consumption_rate_explicit_mean": _fmt(_safe_mean(explicit)),
+    }
+
+
 def compute_paired_report(
     baseline_run: Dict[str, TaskMetrics],
     oracle_run: Dict[str, TaskMetrics],
@@ -2050,6 +2129,9 @@ def compute_paired_report(
     m20_wilcoxon_p = statistical_tests["m20_wilcoxon"].get("p_value")
     m20_sig = statistical_tests["m20_wilcoxon"].get("significant_p05", False)
 
+    trajectory_scorecard = compute_trajectory_scorecard(
+        baseline_run, oracle_run, shared_ids)
+
     report = {
         "schema": "gt_metrics.v2",
         "baseline_run_id": baseline_run_id,
@@ -2064,11 +2146,19 @@ def compute_paired_report(
         "aggregate": aggregate,
         "statistical_tests": statistical_tests,
         "regression_guards": regression_guards,
+        "trajectory_scorecard": trajectory_scorecard,
         "headline": {
             "resolved_baseline": resolved_baseline,
             "resolved_oracle": resolved_oracle,
             "flip_count": flip_count,
             "regression_count": regression_count,
+            "gt_caused_flips": trajectory_scorecard["gt_caused_flips"],
+            "obligation_coverage_at_submit_mean": (
+                trajectory_scorecard["obligation_coverage_at_submit_mean"]
+            ),
+            "consumption_rate_behavioral_mean": (
+                trajectory_scorecard["consumption_rate_behavioral_mean"]
+            ),
             # M20 — PRIMARY code correctness metric
             "m20_hidden_tests_pass_baseline": _fmt(m20_pass_base),
             "m20_hidden_tests_pass_oracle": _fmt(m20_pass_oracle),
