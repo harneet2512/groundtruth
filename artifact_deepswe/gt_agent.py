@@ -870,9 +870,22 @@ _RETRY_TEST_AUTODETECT = (
 # quiet — the same _ENV_FAIL_RE discipline the in-container governors use).
 _ENV_UNVERIFIABLE_RE = re.compile(
     r"(command not found|not recognized as|No module named|ModuleNotFoundError"
+    r"|ImportError|ERROR: Could not find a version|No matching distribution found"
+    r"|Could not build wheels|subprocess-exited-with-error|metadata-generation-failed"
+    r"|error: command .* failed|fatal error: |compilation terminated"
+    r"|undefined reference to|ld returned \d+ exit status|collect2: error"
     r"|error: could not find `Cargo\.toml`"
-    r"|cannot find package|npm ERR! missing script"
-    r"|Unable to locate package|no such file or directory: .*(?:go|cargo|npm|pytest))",
+    r"|cannot find package|npm ERR! missing script|npm ERR! code E"
+    r"|Unable to locate package|no such file or directory: .*(?:go|cargo|npm|pytest)"
+    r"|Connection refused|Network is unreachable|Temporary failure in name resolution"
+    r"|CERTIFICATE_VERIFY_FAILED|ReadTimeoutError|ProxyError"
+    r"|error while loading shared libraries|cannot open shared object"
+    r"|ImproperlyConfigured"
+    r"|syscall/js|GOOS=js|js/wasm"
+    r"|TS2307|Cannot find module|TS1005|TS2345"
+    r"|corepack|ENOENT.*yarn|ENOENT.*pnpm"
+    r"|AttributeError: module '[\w.]+' has no attribute"
+    r"|errors? during collection|ERROR collecting|Interrupted: \d+ error)",
     re.I,
 )
 
