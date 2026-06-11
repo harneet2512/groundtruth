@@ -154,36 +154,22 @@ RUN mkdir -p /opt/gt/jdtls /opt/gt/jre \
 #     then quantized/uint8/fp32) so we never depend on an unverified release mirror.
 #     e5 keeps the proven curl-from-release pattern (its assets already exist there).
 ARG E5_BASE=https://github.com/harneet2512/groundtruth/releases/download/pipeline-assets-v1
-RUN /opt/gt/python/bin/python3 -m pip install --no-cache-dir huggingface_hub \
-    && mkdir -p /opt/gt/models/gte-modernbert-base /opt/gt/models/e5-small-v2 \
-    && /opt/gt/python/bin/python3 - <<'PY'
-import shutil
-from pathlib import Path
-from huggingface_hub import hf_hub_download
-
-DEST = Path("/opt/gt/models/gte-modernbert-base")
-# Same candidate order as scripts/setup_models.py::_GTE_MODERNBERT — int8 (~150MB) first.
-ONNX = [("Alibaba-NLP/gte-modernbert-base", "onnx/model_int8.onnx"),
-        ("Alibaba-NLP/gte-modernbert-base", "onnx/model_quantized.onnx"),
-        ("Alibaba-NLP/gte-modernbert-base", "onnx/model_uint8.onnx"),
-        ("Alibaba-NLP/gte-modernbert-base", "onnx/model.onnx")]
-TOK  = [("Alibaba-NLP/gte-modernbert-base", "tokenizer.json")]
-
-def fetch(cands, out):
-    for repo, path in cands:
-        try:
-            src = hf_hub_download(repo_id=repo, filename=path)
-            shutil.copyfile(src, out)
-            print(f"OK {out} <- {repo}/{path} ({out.stat().st_size // (1024*1024)}MB)")
-            return True
-        except Exception as e:
-            print(f"miss {repo}/{path}: {str(e)[:100]}")
-    return False
-
-# Save the ONNX under the canonical name the loader resolves first (model.onnx).
-assert fetch(ONNX, DEST / "model.onnx"), "FATAL: could not bake gte-modernbert-base ONNX"
-assert fetch(TOK,  DEST / "tokenizer.json"), "FATAL: could not bake gte-modernbert-base tokenizer"
-PY
+ARG HF_CDN=https://huggingface.co/Alibaba-NLP/gte-modernbert-base/resolve/main
+RUN mkdir -p /opt/gt/models/gte-modernbert-base /opt/gt/models/e5-small-v2 \
+    && ( curl -fsSL --retry 3 --retry-delay 5 -o /opt/gt/models/gte-modernbert-base/model.onnx \
+           "${HF_CDN}/onnx/model_int8.onnx" \
+         || curl -fsSL --retry 3 --retry-delay 5 -o /opt/gt/models/gte-modernbert-base/model.onnx \
+              "${HF_CDN}/onnx/model_quantized.onnx" \
+         || curl -fsSL --retry 3 --retry-delay 5 -o /opt/gt/models/gte-modernbert-base/model.onnx \
+              "${HF_CDN}/onnx/model_uint8.onnx" \
+         || curl -fsSL --retry 3 --retry-delay 5 -o /opt/gt/models/gte-modernbert-base/model.onnx \
+              "${HF_CDN}/onnx/model.onnx" ) \
+    && test -s /opt/gt/models/gte-modernbert-base/model.onnx \
+    && echo "OK gte-modernbert-base ONNX ($(du -sh /opt/gt/models/gte-modernbert-base/model.onnx | cut -f1))" \
+    && curl -fsSL --retry 3 --retry-delay 5 -o /opt/gt/models/gte-modernbert-base/tokenizer.json \
+         "${HF_CDN}/tokenizer.json" \
+    && test -s /opt/gt/models/gte-modernbert-base/tokenizer.json \
+    && echo "OK gte-modernbert-base tokenizer"
 RUN curl -fsSL "${E5_BASE}/model.onnx"     -o /opt/gt/models/e5-small-v2/model.onnx \
     && curl -fsSL "${E5_BASE}/tokenizer.json" -o /opt/gt/models/e5-small-v2/tokenizer.json
 
