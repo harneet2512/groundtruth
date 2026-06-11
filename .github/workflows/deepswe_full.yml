@@ -103,6 +103,21 @@ env:
   # use the per-language default chosen in the proof step (go/rust=5s no-op floor,
   # ts/js/python=20s). vars.* indirection only — never a secret, never a hardcoded value.
   GT_LSP_READY_BUDGET_S_OVERRIDE: ${{ vars.GT_LSP_READY_BUDGET_S_OVERRIDE }}
+  # ── VERIFICATION HORIZON (self-verification gate) ────────────────────────────
+  # Budget-aware self-verification: GT proactively reminds the agent to test
+  # before shipping. GT_STEP_LIMIT reads the pier config's step_limit (300 for
+  # DeepSWE). GT_SELF_VERIFY_ATTEMPTS is the post-exit outer safety ring (the
+  # retry loop, product name for GT_RETRY_ON_VERIFIER_FAIL). V is the estimated
+  # cost (in steps) of one edit->test->edit cycle, railed to [8, 40].
+  GT_STEP_LIMIT: "300"
+  GT_SELF_VERIFY_ATTEMPTS: "2"
+  GT_VERIFICATION_CYCLE_COST: "25"
+  # ── MODEL ROUTING (litellm OpenAI-compatible) ──────────────────────────────
+  # When model input contains "MiniMax" or uses TokenRouter, route via the
+  # OpenAI-compatible path. TOKENROUTER_API_KEY is in secrets (never in code).
+  # For deepseek: DEEPSEEK_API_KEY is used directly (litellm native).
+  TOKENROUTER_API_KEY: ${{ secrets.TOKENROUTER_API_KEY }}
+  TOKENROUTER_API_BASE: "https://api.tokenrouter.com/v1"
 
 jobs:
   # ── Stage-0 / prepare: ENV-ONLY. Leaderboard legitimacy. ────────────────────
@@ -955,8 +970,14 @@ jobs:
 
           # Bind-mount the host substrate dir into the task container READ-ONLY. JSON is the
           # pier --mounts-json contract (ServiceVolumeConfig: type/source/target/read_only).
-          MOUNTS_JSON="[{\"type\":\"bind\",\"source\":\"${HOST_ARTIFACTS}\",\"target\":\"${GT_C_ARTIFACTS}\",\"read_only\":true}]"
-          echo "CONTAINER mount: ${HOST_ARTIFACTS} -> ${GT_C_ARTIFACTS} (ro)"
+          # FIX 3 (2026-06-11): a SECOND, WRITABLE mount (/tmp/gt_out -> /gt_out) carries the
+          # oracle's 8-dp suppression telemetry (GT_ORACLE_EVENTS) out of the task container —
+          # it was written to the in-container /tmp and lost on every prior run. chmod 777:
+          # the task-image user is arbitrary and must be able to append.
+          HOST_GT_OUT=/tmp/gt_out
+          mkdir -p "${HOST_GT_OUT}" && chmod 777 "${HOST_GT_OUT}"
+          MOUNTS_JSON="[{\"type\":\"bind\",\"source\":\"${HOST_ARTIFACTS}\",\"target\":\"${GT_C_ARTIFACTS}\",\"read_only\":true},{\"type\":\"bind\",\"source\":\"${HOST_GT_OUT}\",\"target\":\"/gt_out\",\"read_only\":false}]"
+          echo "CONTAINER mount: ${HOST_ARTIFACTS} -> ${GT_C_ARTIFACTS} (ro); ${HOST_GT_OUT} -> /gt_out (rw)"
           echo "mounts-json: ${MOUNTS_JSON}"
 
           # Forward the SUBSTRATE-CONSUME env into the container, pointing at /gt_artifacts.
@@ -966,10 +987,23 @@ jobs:
           # `pier ... | tee` returned tee's 0 and a swallowed adapter raise stayed GREEN.
           set +e
           set -o pipefail
+          # Model routing: if the input model contains "MiniMax" or "tokenrouter",
+          # set litellm's OpenAI-compatible env so it routes through TokenRouter.
+          # Otherwise deepseek/other models use their native litellm provider.
+          INPUT_MODEL="${{ inputs.model }}"
+          if echo "$INPUT_MODEL" | grep -qiE "minimax|tokenrouter"; then
+            export OPENAI_API_KEY="${TOKENROUTER_API_KEY}"
+            export OPENAI_API_BASE="${TOKENROUTER_API_BASE}"
+            # litellm OpenAI-compatible: prefix with openai/ if not already
+            if ! echo "$INPUT_MODEL" | grep -q "^openai/"; then
+              INPUT_MODEL="openai/${INPUT_MODEL}"
+            fi
+            echo "=== Model routed via TokenRouter: $INPUT_MODEL ==="
+          fi
           pier run \
             -p deepswe-bench/tasks/${{ matrix.task }} \
             --agent-import-path artifact_deepswe.gt_agent:GTMiniSweAgent \
-            --model ${{ inputs.model }} \
+            --model "$INPUT_MODEL" \
             --env docker \
             -y \
             --mounts-json "${MOUNTS_JSON}" \
@@ -981,6 +1015,17 @@ jobs:
             --ae GT_PROOF_MODE="${GT_PROOF_MODE:-1}" \
             --ae GT_CONTAINERIZED="1" \
             --ae GT_RUNTIME_STRATEGY="${GT_RUNTIME_STRATEGY:-unified_substrate}" \
+            --ae GT_STEP_LIMIT="${GT_STEP_LIMIT:-}" \
+            --ae GT_VERIFICATION_CYCLE_COST="${GT_VERIFICATION_CYCLE_COST:-}" \
+            --ae GT_SELF_VERIFY_ATTEMPTS="${GT_SELF_VERIFY_ATTEMPTS:-}" \
+            --ae GT_ORACLE_ROUTE="${GT_ORACLE_ROUTE:-1}" \
+            --ae GT_ORACLE_EVENTS="/gt_out/gt_oracle_events.jsonl" \
+            --ae GT_ESC_ADV_TCOV="${GT_ESC_ADV_TCOV:-}" \
+            --ae GT_ESC_ADV_B="${GT_ESC_ADV_B:-}" \
+            --ae GT_ESC_URG_TCOV="${GT_ESC_URG_TCOV:-}" \
+            --ae GT_ESC_URG_B="${GT_ESC_URG_B:-}" \
+            --ae GT_ESC_GATE_TCOV="${GT_ESC_GATE_TCOV:-}" \
+            --ae GT_ESC_GATE_KV="${GT_ESC_GATE_KV:-}" \
             --ak config_file=artifact_deepswe/gt_integration/deepswe_gt_pier.yaml \
             2>&1 | tee trial_output.log
           PIER_RC=${PIPESTATUS[0]}
@@ -1052,6 +1097,9 @@ jobs:
           cp /tmp/gt/*.log              trial_results/ 2>/dev/null || true
           cp /tmp/gt/gt_interactions*.jsonl trial_results/ 2>/dev/null || true
           cp /tmp/gt/gt_hooks*.log      trial_results/ 2>/dev/null || true
+          # FIX 3 (2026-06-11): harvest the oracle gate's 8-dp suppression telemetry
+          # (written in-container to the writable /gt_out mount = host /tmp/gt_out).
+          cp /tmp/gt_out/gt_oracle_events.jsonl trial_results/gt_oracle_events_${{ matrix.task }}.jsonl 2>/dev/null || true
           # Deep 8-dp metrics (constitution mandate: token/cost efficiency + per-layer)
           cp /tmp/gt/gt_run_summary*.json /tmp/gt_run_summary_${{ matrix.task }}.json 2>/dev/null || true
           cp /tmp/gt/gt_run_summary*.json trial_results/ 2>/dev/null || true

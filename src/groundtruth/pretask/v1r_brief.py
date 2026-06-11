@@ -388,14 +388,24 @@ def _issue_relevant_neighbors(
     try:
         conn = sqlite3.connect(graph_db)
         conf_clause = _edge_conf_clause(graph_db)
+        # FIX 2 (2026-06-11, gt_gt §16.5 issue C): same cross-language
+        # disqualifier as _static_callees — this UNION (callees + CALLERS) is
+        # the surface that promoted the vendored-JS caller of a Python file
+        # (aiomonitor tailwind.js, brief entry #2, both runs). Legacy schema
+        # (no nodes.language) stays permissive.
+        has_lang = _nodes_have_language(conn)
+        src_lang_sel = "nsrc.language" if has_lang else "''"
+        tgt_lang_sel = "nt.language" if has_lang else "''"
         rows = conn.execute(
             f"""
-            SELECT DISTINCT nt.file_path FROM nodes nsrc
+            SELECT DISTINCT nt.file_path, {src_lang_sel}, {tgt_lang_sel}
+            FROM nodes nsrc
             JOIN edges e ON e.source_id = nsrc.id {conf_clause}
             JOIN nodes nt ON e.target_id = nt.id
             WHERE nsrc.file_path = ? AND nt.file_path != ? AND nt.is_test = 0
             UNION
-            SELECT DISTINCT nsrc.file_path FROM nodes nt
+            SELECT DISTINCT nsrc.file_path, {src_lang_sel}, {tgt_lang_sel}
+            FROM nodes nt
             JOIN edges e ON e.target_id = nt.id {conf_clause}
             JOIN nodes nsrc ON e.source_id = nsrc.id
             WHERE nt.file_path = ? AND nsrc.file_path != ? AND nsrc.is_test = 0
@@ -407,7 +417,13 @@ def _issue_relevant_neighbors(
         return []
 
     scored: list[tuple[str, int]] = []
-    for (neighbor,) in rows:
+    seen_neighbors: set[str] = set()
+    for neighbor, src_lang, tgt_lang in rows:
+        if _is_cross_language_pair(src_lang, tgt_lang):
+            continue
+        if neighbor in seen_neighbors:
+            continue
+        seen_neighbors.add(neighbor)
         fpath = os.path.join(repo_root, neighbor)
         try:
             text = open(fpath, encoding="utf-8", errors="ignore").read(200_000).lower()
@@ -424,9 +440,17 @@ def _static_callees(graph_db: str, file_path: str, limit: int = 3) -> list[str]:
     try:
         conn = sqlite3.connect(graph_db)
         conf_clause = _edge_conf_clause(graph_db)
+        # FIX 2 (2026-06-11, gt_gt §16.5 issue C): this RANKING surface fed the
+        # brief's file candidates from CALLS edges WITHOUT the cross-language
+        # disqualifier (the fact-filter protects FACT ROWS only) — vendored
+        # tailwind.js reached brief entry #2 on a Python repo. Over-fetch, drop
+        # cross-language pairs, cap. Legacy schema (no language) -> permissive.
+        has_lang = _nodes_have_language(conn)
+        src_lang_sel = "nsrc.language" if has_lang else "''"
+        tgt_lang_sel = "nt.language" if has_lang else "''"
         rows = conn.execute(
             f"""
-            SELECT DISTINCT nt.file_path
+            SELECT DISTINCT nt.file_path, {src_lang_sel}, {tgt_lang_sel}
             FROM nodes nsrc
             JOIN edges e ON e.source_id = nsrc.id AND e.type = 'CALLS' {conf_clause}
             JOIN nodes nt ON e.target_id = nt.id
@@ -435,10 +459,16 @@ def _static_callees(graph_db: str, file_path: str, limit: int = 3) -> list[str]:
               AND nt.is_test = 0
             LIMIT ?
             """,
-            (file_path, file_path, limit),
+            (file_path, file_path, limit * 4),
         ).fetchall()
         conn.close()
-        return [row[0] for row in rows]
+        out: list[str] = []
+        for fpath, src_lang, tgt_lang in rows:
+            if _is_cross_language_pair(src_lang, tgt_lang):
+                continue
+            if fpath not in out:
+                out.append(fpath)
+        return out[:limit]
     except Exception:
         return []
 
@@ -1939,6 +1969,54 @@ def _hub_degree_fn(graph_db: str):
         return math.inf, (lambda p: 0)
 
 
+# FIX 4 (2026-06-11, gt_gt §16.5 issue D — the inverted-confidence pattern):
+# the audited floor for the SYMBOL-level hub gate. Mechanism (recurring verbatim
+# across runs 27307362054/27321848581): a func with very many callers (abs-stepped
+# `functions.go::New`; csstree fixture.js) MANUFACTURES the >=2-distinct-witness
+# convergence the HIGH gate requires — every caller of the hub is a "distinct
+# structural witness" — so centrality, not evidence, stamps HIGH on a non-gold
+# file. The floor (>20 callers, the audited magnitude) rails the per-task p80 on
+# small/sparse graphs where the quantile collapses to 1-2 and would kill every
+# legitimate HIGH; on dense graphs the p80 max-composes ABOVE the floor (dynamic
+# pillar). n=2 calibration receipts — Stage 6 (gt_gt §15.4) owns refinement.
+_HIGH_PIN_HUB_FANIN_FLOOR = 20
+
+
+def _symbol_fanin_fn(graph_db: str):
+    """Return ``(hub_thr, fanin_of)`` for SYMBOL-level hub detection — the
+    symbol twin of ``_hub_degree_fn`` (which gates the candidate FILE; live
+    beets-5495). The FILE gate passes when other files are similarly busy
+    (the abs-stepped shape) — only the symbol fan-in exposes the hub.
+
+    ``fanin_of(name)`` = COUNT of CALLS edges whose target node carries that
+    symbol name (non-test); ``hub_thr`` = max(per-task p80 of that fan-in
+    distribution, ``_HIGH_PIN_HUB_FANIN_FLOOR``). On any failure returns
+    ``(inf, ->0)`` so NO symbol is treated as a hub — the gate's own failure
+    is never a demotion fact (same permissive convention as
+    ``_hub_degree_fn``)."""
+    import math
+
+    try:
+        conn = sqlite3.connect(graph_db)
+        try:
+            rows = conn.execute(
+                "SELECT n.name, COUNT(e.id) FROM nodes n "
+                "JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' "
+                "WHERE n.is_test = 0 GROUP BY n.name"
+            ).fetchall()
+        finally:
+            conn.close()
+        if not rows:
+            return math.inf, (lambda s: 0)
+        degs = sorted(int(d) for _, d in rows)
+        p80 = degs[min(len(degs) - 1, int(len(degs) * 0.8))]
+        thr = max(p80, _HIGH_PIN_HUB_FANIN_FLOOR)
+        by_name = {str(n).lower(): int(d) for n, d in rows}
+        return thr, (lambda s: by_name.get((s or "").lower(), 0))
+    except Exception:
+        return math.inf, (lambda s: 0)
+
+
 def _render_witness_line(w) -> str:
     """One-line render of a SINGLE witness, coherent with the edit target it
     justifies (mirrors ``Candidate.render_witness`` edge formatting). Used so the
@@ -2155,7 +2233,17 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
         # downgrade to the MEDIUM candidate list instead. Correct-or-quiet; this is the
         # confidence-gate lever (BRIEFING.md §3/§4), NOT a reach/ranking change — same
         # files, same order; only the top file's tier label changes.
-        if _high_func_support(tgt.witnesses, func) >= 2:
+        # FIX 4 — SYMBOL-LEVEL HUB GATE (gt_gt §16.5 issue D, inverted-confidence):
+        # the >=2-witness convergence below is MANUFACTURED when `func` itself is a
+        # hub (abs-stepped `New`: every caller is a "distinct" witness). The file-
+        # level hub gate above passes when other files are similarly busy, so the
+        # named FUNC must also clear the per-task symbol fan-in threshold. A
+        # hub-anchored pin demotes to the MEDIUM candidate list (correct-or-quiet:
+        # a confident-wrong steer is the single worst failure mode). Unreadable
+        # graph -> (inf, ->0) -> permissive (prior behavior).
+        _sym_hub_thr, _fanin_of = _symbol_fanin_fn(graph_db)
+        if (_high_func_support(tgt.witnesses, func) >= 2
+                and _fanin_of(func) <= _sym_hub_thr):
             line_txt, line_no = _edit_target_guard(graph_db, tgt.file_path, func)
             out = ['<gt-localization confidence="high">',
                    f"Edit target: {tgt.file_path} :: {func}"]

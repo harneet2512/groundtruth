@@ -168,7 +168,7 @@ def test_outranked_l5_failure_nudge_rearms(patch_mod, monkeypatch, tmp_path):
     monkeypatch.setattr(patch_mod, "_classify", lambda c: (None, None),
                         raising=False)
     monkeypatch.setattr(patch_mod, "_evidence", lambda c: "", raising=False)
-    monkeypatch.setattr(patch_mod, "_l5_nudge", lambda c, o="": "", raising=False)
+    monkeypatch.setattr(patch_mod, "_l5_nudge", lambda c, o="", **k: "", raising=False)
     monkeypatch.setattr(patch_mod, "_l5_no_test_evidence_nudge",
                         lambda c, o: "", raising=False)
     scope_block = ('\n<gt-scope reason="completeness">\nanything pkg/b.py — in '
@@ -217,7 +217,7 @@ def test_empty_scope_block_does_not_consume_review_latch(patch_mod, monkeypatch,
     monkeypatch.setattr(patch_mod, "_classify", lambda c: (None, None),
                         raising=False)
     monkeypatch.setattr(patch_mod, "_evidence", lambda c: "", raising=False)
-    monkeypatch.setattr(patch_mod, "_l5_nudge", lambda c, o="": "", raising=False)
+    monkeypatch.setattr(patch_mod, "_l5_nudge", lambda c, o="", **k: "", raising=False)
     monkeypatch.setattr(patch_mod, "_l5_failure_nudge", lambda c, o: "",
                         raising=False)
     monkeypatch.setattr(patch_mod, "_l5_no_test_evidence_nudge",

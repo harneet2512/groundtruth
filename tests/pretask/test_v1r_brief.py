@@ -350,7 +350,11 @@ def test_render_brief_no_prose() -> None:
     assert text.endswith("</gt-task-brief>")
     assert "login_user" in text
     assert "require_auth" in text
-    assert "Tests: tests/test_auth.py" in text
+    # SWAP-INVARIANT (run15 leak, v1r_brief.py:1661-1663): the "Tests:" line is
+    # DISABLED by design — test FILE names must never surface to the agent. The
+    # entry still survives the tier filter via its test_mappings evidence.
+    assert "Tests: tests/test_auth.py" not in text
+    assert "tests/test_auth.py" not in text
     # No in-band tier labels and no prose directives in agent-facing output.
     for forbidden in [
         "[VERIFIED]",

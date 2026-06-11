@@ -343,6 +343,169 @@ def _classify(cmd: str) -> tuple[str | None, str | None]:
     return None, None
 
 
+# ---------------------------------------------------------------------------
+# BEHAVIORAL SIGNAL PRIMITIVES (delivery-engine Stage 1, 2026-06-11).
+#
+# The validated trajectory-structure signals from RESEARCH_AGENT_BEHAVIORAL_
+# SIGNALS.md (Category 5 feature table), computed deterministically from the
+# agent's own (command, observation) stream — no LLM, no gold, no task IDs:
+#   - loop_ratio / new_state_rate  — TIDE (arXiv 2602.02196): degenerate
+#     repetition forms recursive cycles revisiting identical state sequences
+#     with no new nodes; adaptive cycles EXPAND the graph. Also the "stale
+#     score" complement (arXiv 2604.13151).
+#   - edit churn per target        — TRAJEVAL (arXiv 2603.24631) "Coherence
+#     Collapse": 60-69% of failures reach the right code then thrash it; the
+#     `Pr` re-patch symbol of arXiv 2604.02547.
+#   - edit/test coverage ratios    — SWE-Next (arXiv 2603.20691): 97.6% of
+#     successes ran >=1 test; validation share rho=+0.50 (arXiv 2604.02547).
+#
+# These live HERE (not in the sensor) because gt_oracle_sense.py binds its
+# primitives FROM this module ("the sensor and the live patch can never
+# disagree") — the same one-direction reuse that already covers _classify and
+# the test regexes. One formula, two consumers: the LEGITIMACY deduction-1
+# (live/replay twin drift) cannot reopen on these signals.
+# ---------------------------------------------------------------------------
+_STATE_WINDOW = 12  # the live loop window (gt_gt §12) — the TIDE window K
+
+
+def _obs_collapse(obs: str, n: int = 400) -> str:
+    """Collapsed-observation prefix — the no-new-state proof half of the live
+    loop signature (gt_mini_patch._l5_nudge / gt_oracle._loop_signature)."""
+    return " ".join((obs or "").split())[:n]
+
+
+def _behavior_state_key(cmd: str, raw_obs: str) -> str:
+    """TIDE state-graph node identity for ONE action: (action TYPE, TARGET
+    file) when the command classifies as an edit/view — an action is 'new'
+    iff its target file+type hasn't appeared in the recent window — else the
+    command head token + a collapsed-observation hash (a non-file action is
+    'new' when it produces new output)."""
+    kind, fpath = _classify(cmd)
+    if kind and fpath:
+        return f"{kind}\x00{fpath}"
+    import hashlib as _h
+    head = (cmd or "").strip().split(None, 1)[0] if (cmd or "").strip() else ""
+    oh = _h.sha256(_obs_collapse(raw_obs).encode("utf-8", "replace")).hexdigest()[:8]
+    return f"cmd\x00{head}\x00{oh}"
+
+
+def compute_loop_ratio(signatures) -> float:
+    """TIDE Loop Ratio (deterministic form): the fraction of actions whose
+    full (command, collapsed-observation) signature occurs >=2 times in the
+    trajectory — actions inside recurring identical-state cycles / length.
+    A no-new-state revisit contributes; a same-command-NEW-observation
+    iteration does not (the 2026-06-10 '13453 false fire' discipline: same
+    command + different output is iteration, not a loop)."""
+    sigs = list(signatures or ())
+    if not sigs:
+        return 0.0
+    counts: dict[str, int] = {}
+    for s in sigs:
+        counts[s] = counts.get(s, 0) + 1
+    inside = sum(c for c in counts.values() if c >= 2)
+    return inside / len(sigs)
+
+
+def compute_new_state_rate(state_keys, window: int = _STATE_WINDOW) -> float:
+    """Fraction of the last `window` actions whose state key did NOT appear in
+    the `window` actions preceding it (TIDE new-node production rate; the
+    arXiv 2604.13151 'stale score' complement). Empty -> 1.0 (everything is
+    new); a healthy exploring agent stays near 1.0, a stale-binary loop
+    (fd: 5x identical command+output) collapses toward 0."""
+    keys = list(state_keys or ())
+    if not keys:
+        return 1.0
+    tail = keys[-window:]
+    base = len(keys) - len(tail)
+    new = 0
+    for i, k in enumerate(tail):
+        gi = base + i
+        if k not in keys[max(0, gi - window):gi]:
+            new += 1
+    return new / len(tail)
+
+
+# Language keywords / structural noise tokens: never coverage EVIDENCE (an
+# edit command and a test output sharing `return` proves nothing). Structural
+# set in the _BUILTIN_CALLABLE_NAMES tradition — not a tuned threshold.
+_SIG_STOPWORDS: frozenset[str] = frozenset({
+    "def", "return", "class", "self", "this", "func", "const", "let", "var",
+    "pub", "impl", "import", "from", "for", "while", "else", "elif", "none",
+    "true", "false", "null", "async", "await", "print", "and", "not", "with",
+    "pass", "raise", "new", "mut", "use", "type", "interface", "export",
+    "function", "static", "void", "int", "str", "string", "bool", "float",
+    "public", "private", "protected", "match", "case", "break", "continue",
+    "struct", "enum", "trait", "where", "package", "module", "require",
+})
+
+
+def _coverage_idents(tokens) -> set[str]:
+    """Identifier-shaped tokens usable as coverage evidence (>=4 chars, not a
+    language keyword) — the precision guard on the token-intersection ratios."""
+    return {t for t in (tokens or ()) if len(t) >= 4
+            and t.lower() not in _SIG_STOPWORDS}
+
+
+def symbol_tested(sym: str, tested_tokens) -> bool:
+    """plan §5.2 'tested?' at SYMBOL grain: exact token intersection, plus
+    substring containment for compound names (`test_capture_snapshot` IS
+    observed evidence for `capture_snapshot`). Mirrors the obligation-level
+    gt_oracle._obligation_tested; looser matching is the SAFE direction —
+    'tested' SUPPRESSES an emission (correct-or-quiet)."""
+    if not sym:
+        return False
+    tested = tested_tokens or ()
+    if sym in tested:
+        return True
+    compound = ("_" in sym or "." in sym or any(c.isdigit() for c in sym)
+                or any(c.isupper() for c in sym[1:]))
+    if not compound:
+        return False
+    return any(sym in t for t in tested)
+
+
+def composite_severity(base, budget_fraction, unmet_ratio) -> float:
+    """severity = base + (budget_fraction × 2) + (unmet_ratio × 1) — a
+    COMPUTED score compositing 3 signals (hybrid pillar), in the contract-
+    algorithm urgency form (Zilberstein, AI Magazine 1996; BATS arXiv
+    2511.17006): budget position multiplies URGENCY, it never triggers on
+    its own.  THE one severity formula — gt_oracle binds this (one product,
+    one formula)."""
+    return float(base) + 2.0 * float(budget_fraction) + 1.0 * float(unmet_ratio)
+
+
+def edit_coverage_ratio(obligation_syms, edited_tokens):
+    """Stage-1 (c): obligation symbols edited / total obligation symbols
+    (exact membership in the edit-evidence token set — the same intersection
+    gt_oracle._overlap uses). None = DORMANT: no obligations -> no signal ->
+    every consumer stays correct-or-quiet on this clause."""
+    syms = {s for s in (obligation_syms or ()) if s}
+    if not syms:
+        return None
+    edited = {s for s in syms if s in (edited_tokens or ())}
+    return len(edited) / len(syms)
+
+
+def test_coverage_ratio(edited_tokens_by_file, tested_tokens):
+    """Stage-1 (d): edited source files whose edit-evidence identifiers show
+    test evidence / total edited source files. None = DORMANT (nothing
+    edited). Exact-intersection fast path first; the compound-containment
+    scan is capped (perf guard, not a behavior threshold)."""
+    files = dict(edited_tokens_by_file or {})
+    if not files:
+        return None
+    tested = set(tested_tokens or ())
+    covered = 0
+    for _f, toks in files.items():
+        idents = _coverage_idents(toks)
+        if idents & tested:
+            covered += 1
+            continue
+        if any(symbol_tested(t, tested) for t in sorted(idents)[:50]):
+            covered += 1
+    return covered / len(files)
+
+
 def _substrate_active() -> bool:
     """True when GT runs in SUBSTRATE-CONSUME mode (handoff §B AFTER / §G): the pinned
     portable substrate already produced the resolved graph + certs into /gt_artifacts and
@@ -1475,6 +1638,141 @@ def _cochange_block(rel: str) -> str:
         return ""
 
 
+# ---------------------------------------------------------------------------
+# COVERING-TEST QUERY (Stage B / Verification Horizon §3 V1 rung)
+# Given a set of edited symbols, find is_test=1 nodes with CALLS edges to those
+# symbols (FACT-filtered: deterministic resolution + conf >= 0.7; name_match
+# never admits, per the P0 stdlib-shadow rule). Returns up to 2 covering tests
+# ranked by confidence desc.
+#
+# Product value: "GT tells you which test to run after your edit" — useful in
+# Cursor, Claude Code, any MCP client — not just SWE-bench. The obligation nudge
+# uses this to say "run test_X in tests/test_Y.py" instead of generic "run a
+# test that exercises sym". The Verification Horizon H1/H2 uses this for
+# targeted test selection.
+#
+# Language dispatch for the run command mirrors _RETRY_TEST_AUTODETECT's
+# manifest-based detection, collapsed to a per-test-file suggestion.
+# ---------------------------------------------------------------------------
+def _covering_tests_for_symbols(symbol_names: set[str]) -> list[dict]:
+    """Query graph.db for test nodes that CALL the given symbols.
+
+    Returns a list of dicts: [{"name": "test_foo", "file": "tests/test_x.py",
+    "confidence": 0.95, "run_cmd": "pytest tests/test_x.py::test_foo"}]
+    Correct-or-quiet: no graph, no test nodes, no FACT edges -> empty list."""
+    if not symbol_names:
+        return []
+    try:
+        db = _db_path()
+        if not os.path.isfile(db):
+            return []
+        con = _connect_ro(db)
+        if con is None:
+            return []
+        has_conf, has_method = _has_columns(con)
+        if not has_method:
+            con.close()
+            return []
+        try:
+            # Find node ids for the edited symbols (by name, non-test)
+            placeholders = ",".join("?" * len(symbol_names))
+            target_q = (
+                f"SELECT id, name, file_path FROM nodes "
+                f"WHERE name IN ({placeholders}) "
+                f"AND COALESCE(is_test, 0) = 0 "
+                f"LIMIT 20"
+            )
+            target_rows = con.execute(target_q, list(symbol_names)).fetchall()
+            if not target_rows:
+                return []
+            target_ids = [r[0] for r in target_rows]
+
+            # Find test nodes that call these targets with FACT-tier edges
+            det_sql = "','".join(sorted(_DETERMINISTIC_METHODS))
+            conf_gate = "AND COALESCE(e.confidence, 0) >= 0.7 " if has_conf else ""
+            tid_placeholders = ",".join("?" * len(target_ids))
+            test_q = (
+                "SELECT DISTINCT nt.name, nt.file_path, "
+                "  MAX(COALESCE(e.confidence, 1.0)) as max_conf "
+                "FROM edges e "
+                "JOIN nodes nt ON nt.id = e.source_id "
+                f"WHERE e.target_id IN ({tid_placeholders}) "
+                "AND e.type = 'CALLS' "
+                "AND COALESCE(nt.is_test, 0) = 1 "
+                f"AND LOWER(TRIM(e.resolution_method)) IN ('{det_sql}') "
+                f"{conf_gate}"
+                "GROUP BY nt.name, nt.file_path "
+                "ORDER BY max_conf DESC, nt.name "
+                "LIMIT 8"
+            )
+            test_rows = con.execute(test_q, target_ids).fetchall()
+            if not test_rows:
+                return []
+
+            # HYBRID rank (design §3, >=3 signals, lexicographic priority):
+            # (1) CALLS-edge confidence PRIMARY — safe-RTS reachability
+            #     (Rothermel & Harrold, TOSEM 1997); then
+            # (2) test-name overlap with the edited symbols; then
+            # (3) path convention (test_<stem> / <stem>_test / __tests__ —
+            #     the classical RTS file heuristic, Ekstazi ISSTA 2015).
+            lower_syms = {s.lower() for s in symbol_names}
+
+            def _hrank(row):
+                tname, tfile, tconf = row
+                low_name = (tname or "").lower()
+                overlap = sum(1 for s in lower_syms if s in low_name)
+                base = os.path.basename(tfile or "").lower()
+                conv = 1 if (base.startswith("test") or base.endswith(
+                    ("_test.py", "_test.go", "_test.rs", ".test.ts",
+                     ".test.js", ".spec.ts", ".spec.js"))
+                    or "__tests__" in (tfile or "").lower()) else 0
+                return (-float(tconf or 0.0), -overlap, -conv, tname or "")
+
+            test_rows = sorted(test_rows, key=_hrank)[:2]
+            results = []
+            for tname, tfile, tconf in test_rows:
+                run_cmd = _test_run_command(tname, tfile or "")
+                results.append({
+                    "name": tname,
+                    "file": tfile or "",
+                    "confidence": float(tconf),
+                    "run_cmd": run_cmd,
+                })
+            return results
+        finally:
+            con.close()
+    except Exception:  # noqa: BLE001 -- correct-or-quiet
+        return []
+
+
+def _test_run_command(test_name: str, test_file: str) -> str:
+    """Language-dispatched test run command for a single test function.
+
+    ONE dispatch surface (mirrors _RETRY_TEST_AUTODETECT / _LANG_TO_EXT pattern):
+    detects the language from the test file extension and emits the idiomatic
+    single-test invocation. Generalized: no task/repo/benchmark logic."""
+    ext = os.path.splitext(test_file)[1].lower() if test_file else ""
+    if ext == ".py":
+        return f"pytest {test_file}::{test_name}"
+    elif ext == ".go":
+        # Go test files: `go test -run '^TestName$' ./pkg/...`
+        pkg_dir = os.path.dirname(test_file) or "."
+        return f"go test -run '^{test_name}$' ./{pkg_dir}/..."
+    elif ext == ".rs":
+        return f"cargo test {test_name}"
+    elif ext in (".ts", ".tsx", ".js", ".jsx"):
+        return f'npx jest -t "{test_name}"'
+    elif ext == ".java":
+        # Extract class name from file
+        class_name = os.path.splitext(os.path.basename(test_file))[0]
+        return f"mvn test -pl . -Dtest={class_name}#{test_name}"
+    elif ext == ".rb":
+        return f"ruby -Itest {test_file} -n {test_name}"
+    else:
+        # Fallback: pytest-style (the most common Python test runner)
+        return f"pytest {test_file}::{test_name}" if test_file else f"pytest -k {test_name}"
+
+
 def _invalidate_on_edit(rel: str, root: str) -> None:
     """L6 (minimal incremental-freshness port): after a source edit, drop the stale
     gt_hook AST cache and best-effort single-file reindex graph.db, so the next
@@ -1512,7 +1810,8 @@ def _invalidate_on_edit(rel: str, root: str) -> None:
         pass
 
 
-def _l5_nudge(cmd: str, out_text: str = "") -> str:
+def _l5_nudge(cmd: str, out_text: str = "",
+              loop_arm: bool = True, scaffold_arm: bool = True) -> str:
     """L5 (minimal trajectory-governor port): fire AT MOST ONCE on the two highest-value
     stuck patterns the OH governor catches. The full L5Governor cannot run here (execute()
     has no max_iter / per-turn callback), but these two prevent the unguarded burn:
@@ -1521,7 +1820,22 @@ def _l5_nudge(cmd: str, out_text: str = "") -> str:
           times. 2026-06-10 (PATH B audit, 13453 false fire): "loop" requires NO NEW
           STATE — the same command with a DIFFERENT observation each run is iteration,
           not a loop, so the signature is (command, normalized observation), not the
-          command alone. Correct-or-quiet."""
+          command alone. Correct-or-quiet.
+
+    Delivery-engine STAGE 3 (2026-06-11): on the ORACLE route the windowed
+    loop arm is RETIRED (loop_arm=False) — detect.loop (TIDE k-step cycles
+    over the WHOLE trajectory, dynamic thresholds) supersedes it; the
+    window-12 check measured 0 fires on the run it existed for (fd's 5x loop
+    was spread >12 actions apart — DEEP_TRAJECTORY §3.2). The legacy route
+    (GT_ORACLE_ROUTE=0) keeps the original arm unchanged.
+
+    FIX 1 (2026-06-11 measurement-gate closeout): on the ORACLE route the
+    scaffold arm is RETIRED too (scaffold_arm=False). Research INVALIDATES
+    penalizing exploration volume (early-patch-intensity rho = -0.78 — high
+    pre-edit exploration correlates with SUCCESS, not failure); live receipts:
+    fired uniformly at ~step 25 on 7/9 oracle-run tasks, 0 consumed, 1 wrong
+    steer (csstree -> fixture.js, gt_gt §16.4). The legacy route keeps it
+    (backward compat / byte-parity with the pre-oracle governor)."""
     global _l5_fired
     if _l5_fired or _GT_BASELINE:
         return ""
@@ -1532,12 +1846,12 @@ def _l5_nudge(cmd: str, out_text: str = "") -> str:
         _cmd_history.append(sig)
         if len(_cmd_history) > 12:
             del _cmd_history[0]
-        if _cmd_history.count(sig) >= 4:
+        if loop_arm and _cmd_history.count(sig) >= 4:
             _l5_fired = True
             return ('\n<gt-nudge reason="loop">\nGT: you have repeated the same command 4+ '
                     "times with no progress. Stop, re-read the last error, and change approach "
                     "(open a different file or test a new hypothesis).\n</gt-nudge>")
-    if _action_count >= 25 and _source_edit_count == 0:
+    if scaffold_arm and _action_count >= 25 and _source_edit_count == 0:
         _l5_fired = True
         return ('\n<gt-nudge reason="scaffold_trap">\nGT: 25+ actions and no source-file edit '
                 "yet — you are likely stuck exploring/scaffolding. Use the brief's gt-scope to "
@@ -1600,6 +1914,53 @@ _TEST_FAIL_RE = re.compile(
     r"(\bFAILED\b|\bAssertionError\b|\b\d+ failed\b|\bFAIL: "
     r"|FAILED \(failures=|--- FAIL:|test result: FAILED"
     r"|\b\d+ failing\b|Tests:\s+\d+ failed)")
+
+# ---------------------------------------------------------------------------
+# DELIVERY-ENGINE STAGE 5 (2026-06-11) — failure_persisted FP closure.
+# Run 27321848581 measured failure_persisted 3/3 FALSE POSITIVE.  LIPI root
+# cause, PROVEN on the frozen fd trajectory (turns 122/226/242/250/269/274):
+# the "fail" lines the governor matched were **fully GREEN result lines** —
+# `test result: ok. 106 passed; 0 failed; …` — because `\b\d+ failed\b`
+# matches "0 failed".  Two green runs -> identical "failure" signature ->
+# "persisted" -> fired right after a 106/106 pass (fd step 270).
+# Three deterministic exclusions, all correct-or-quiet (they only ever
+# SUPPRESS a nudge, never invent one):
+#   1. ZERO-COUNT results are pass evidence, never failure lines
+#      (_TEST_FAIL_STRICT_RE: counts must be >= 1);
+#   2. patch/apply bookkeeping lines (`Hunk #N FAILED at L`, `error: patch
+#      failed: …`) are never TEST-failure lines;
+#   3. a failure signature first observed at BASELINE — before any source
+#      edit, or while the agent's changes are stashed (`git stash` …
+#      `git stash pop/apply`) — is the repo's own state, never "persisted
+#      across your edit(s)" (the abs-module/abs-stepped pre-existing class).
+# _TEST_FAIL_RE itself is FROZEN (the gt_oracle Stage-2 byte-parity corpus
+# replays against it); the corrected predicate lives in _failure_lines and
+# is what the live governor and parity_mode=False replay consume.
+# ---------------------------------------------------------------------------
+_TEST_FAIL_STRICT_RE = re.compile(
+    r"(\bFAILED\b|\bAssertionError\b|\b[1-9]\d* failed\b|\bFAIL: "
+    r"|FAILED \(failures=|--- FAIL:|test result: FAILED"
+    r"|\b[1-9]\d* failing\b|Tests:\s+[1-9]\d* failed)")
+_PATCH_NOISE_RE = re.compile(
+    r"(^\s*error: (?:patch failed\b|corrupt patch\b|while searching for\b"
+    r"|.*: (?:patch does not apply|does not exist in index|already exists))"
+    r"|^\s*Hunk #\d+ (?:FAILED|succeeded)"
+    r"|^\s*\d+ out of \d+ hunks? FAILED"
+    r"|^\s*Reversed \(or previously applied\) patch)", re.I)
+# `git stash` push (bare/push/save) opens a BASELINE window; pop/apply closes it.
+_STASH_PUSH_RE = re.compile(r"git\s+stash\b(?!\s+(?:pop|apply|list|show|drop|branch|clear))")
+_STASH_POP_RE = re.compile(r"git\s+stash\s+(?:pop|apply)\b")
+_stash_depth = 0
+_baseline_fail_sigs: set[str] = set()
+
+
+def _failure_lines(text: str) -> list[str]:
+    """TEST-failure lines only: zero-count-safe (_TEST_FAIL_STRICT_RE) AND
+    not patch/apply bookkeeping. Shared by the live governor and the
+    (non-parity) replay so the twins cannot disagree on what counts as a
+    failure line."""
+    return [ln.strip() for ln in (text or "").splitlines()
+            if _TEST_FAIL_STRICT_RE.search(ln) and not _PATCH_NOISE_RE.search(ln)]
 
 
 # ---------------------------------------------------------------------------
@@ -1666,13 +2027,143 @@ def _l5_no_test_evidence_nudge(cmd: str, out_text: str) -> str:
     return ""
 
 
+# ---------------------------------------------------------------------------
+# DELIVERY-ENGINE STAGE 3 (2026-06-11) — two behavioral detector classes over
+# the Stage-1 signals.  Both sev-5 (below the verification gate, above the
+# advisory band), both fire-once with gate-loss re-arm, both candidates in the
+# ONE oracle gate (one product, one gate — never a side channel).
+#
+# (a) detect.loop — TIDE (arXiv 2602.02196) degenerate-cycle detector.
+#     Replaces the window-12 same-signature arm on the oracle route: fd's
+#     stale-binary loop (5x identical command+output at steps 177-234, spread
+#     >12 apart) drew SILENCE from the windowed check — ~75 wasted steps and
+#     a fabricated-observation hallucination (DEEP_TRAJECTORY §1.8/§3.2 "loop
+#     nudge 0 fires; sensor not live").  HYBRID, 4 composited signals:
+#       reps(current sig) >= 3            — a recursive cycle, not a revisit
+#       loop_ratio  > median+MAD(history) — degenerate share above the
+#                                           trajectory's OWN norm
+#       new_state_rate < median(history)  — node production below its OWN norm
+#       steps >= 2*window                 — window-derived minimum, no magic
+#     DYNAMIC: thresholds are median/MAD over the trajectory-so-far's own
+#     signal history (Leys et al., J.Exp.Soc.Psych 2013 — the same robust
+#     pair as the oracle's distribution floor). No constant thresholds.
+#
+# (b) detect.coherence_collapse — TRAJEVAL (arXiv 2603.24631): 60-69% of
+#     failures REACH the right code then thrash it (the `Pr` re-patch symbol,
+#     arXiv 2604.02547).  HYBRID, 3 composited signals: per-file churn >= 3
+#     ∧ no passing test between (churn resets on observed pass, by
+#     construction) ∧ target anchored (issue anchors/obligations) or the last
+#     observed test outcome failed; unknown anchors -> permissive (the
+#     cross-language-disqualifier precedent: never suppress on data we
+#     cannot judge).
+# ---------------------------------------------------------------------------
+_SEV_DETECT = 5  # spec: below gate (6), above advisory (4)
+_traj_state_keys: list[str] = []
+_traj_loop_sigs: list[str] = []
+_lr_history: list[float] = []
+_nsr_history: list[float] = []
+_detect_loop_fired = False
+_coherence_fired_files: set[str] = set()
+_coherence_last_rel: str | None = None
+
+
+def _degenerate_loop_candidate(cmd: str, raw_obs: str) -> tuple[float, str] | None:
+    """detect.loop producer — called EVERY turn on the oracle route (it owns
+    the trajectory-stream bookkeeping).  Returns (severity, payload) or None."""
+    global _detect_loop_fired
+    import statistics as _st
+    norm = (cmd or "").strip()
+    sig = (norm + "\x00" + _obs_collapse(raw_obs)) if norm else None
+    _traj_state_keys.append(_behavior_state_key(cmd, raw_obs))
+    if sig:
+        _traj_loop_sigs.append(sig)
+    lr = compute_loop_ratio(_traj_loop_sigs)
+    nsr = compute_new_state_rate(_traj_state_keys)
+    fire = False
+    reps = 0
+    if (not _detect_loop_fired and sig
+            and len(_lr_history) >= 2 * _STATE_WINDOW):
+        lr_med = _st.median(_lr_history)
+        lr_mad = _st.median(abs(v - lr_med) for v in _lr_history)
+        nsr_med = _st.median(_nsr_history)
+        reps = _traj_loop_sigs.count(sig)
+        fire = (reps >= 3 and lr > lr_med + lr_mad and nsr < nsr_med)
+    # history = the PRIOR turns' distribution; the current value never gates itself.
+    _lr_history.append(lr)
+    _nsr_history.append(nsr)
+    if not fire:
+        return None
+    _detect_loop_fired = True
+    body = (
+        f"GT: you have run this exact command with this exact output {reps} "
+        "times, and your recent actions are producing almost no new state — "
+        "this is a degenerate loop, not progress. If you edited a compiled "
+        "binary's source, REBUILD before re-running; otherwise re-read the "
+        "last real error and try a different approach (different file, "
+        "different hypothesis, or a narrower test)."
+    )
+    return (float(_SEV_DETECT),
+            f'\n<gt-nudge reason="degenerate_loop">\n{body}\n</gt-nudge>')
+
+
+def _coherence_collapse_candidate(rel: str) -> tuple[float, str] | None:
+    """detect.coherence_collapse producer — called on edit turns AFTER the
+    churn increment.  Returns (severity, payload) or None."""
+    global _coherence_last_rel
+    if rel in _coherence_fired_files:
+        return None
+    churn = _edit_churn.get(rel, 0)
+    if churn < 3:
+        return None
+    # anchor signal: issue anchors/obligations (NOT edited-file stems — those
+    # would make the check vacuous), or a failing last test, or unknowable.
+    _oracle_focus()  # ensure the anchors cache is loaded
+    anch = _oracle_focus_cache or set()
+    stem = os.path.splitext(os.path.basename(rel))[0]
+    ftoks = _oracle_edited_tokens_by_file.get(rel, set())
+    anchored = (not anch) or (stem in anch) or bool(ftoks & anch) \
+        or _last_test_outcome_failed
+    if not anchored:
+        return None
+    _coherence_fired_files.add(rel)
+    _coherence_last_rel = rel
+    hint = ""
+    try:
+        idents = sorted(_coverage_idents(ftoks) & anch) or \
+            sorted(_coverage_idents(ftoks))[:10]
+        covering = _covering_tests_for_symbols(set(idents[:10]))
+        if covering:
+            ct = covering[0]
+            hint = (f" Covering test: `{ct['name']}` in `{ct['file']}` — "
+                    f"run: `{ct['run_cmd']}`.")
+    except Exception:  # noqa: BLE001 -- enrichment is best-effort
+        pass
+    body = (
+        f"GT: you have rewritten {os.path.basename(rel)} {churn} times with "
+        "no passing test between edits — you are overwriting your own work "
+        "blind. Run the test FIRST to see what is actually failing, then "
+        f"make one targeted edit.{hint}"
+    )
+    return (float(_SEV_DETECT),
+            f'\n<gt-nudge reason="coherence_collapse">\n{body}\n</gt-nudge>')
+
+
 def _l5_failure_nudge(cmd: str, out_text: str) -> str:
     """L5 hypothesis-falsified (OH hook_same_failure_persisted): the SAME genuine
     TEST failure recurs across the agent's edit(s) -> the hypothesis may be wrong.
     Fires once, only after a source edit, and ONLY when the three classification
     gates above all pass — an environment/tooling failure or a scratch-script
     failure stays SILENT (correct-or-quiet; wrong steering is worse than none)."""
-    global _l5_failure_fired
+    global _l5_failure_fired, _stash_depth
+    # Stash-window tracking runs on EVERY turn (baseline detection must not
+    # depend on the latch state).  The dominant agent shape is the SINGLE-TURN
+    # disproof — `git stash && go test … ; git stash pop` (abs-module turn 69,
+    # abs-stepped turn 55, live receipts) — so a turn that PUSHES a stash is
+    # itself a baseline window, whatever it pops later in the same command.
+    _pushes = len(_STASH_PUSH_RE.findall(cmd or ""))
+    _pops = len(_STASH_POP_RE.findall(cmd or ""))
+    _turn_is_stashed = _stash_depth > 0 or _pushes > 0
+    _stash_depth = max(0, _stash_depth + _pushes - _pops)
     if _l5_failure_fired or _GT_BASELINE or not out_text:
         return ""
     # Gate 1: only a real test-runner invocation can falsify a hypothesis.
@@ -1681,10 +2172,19 @@ def _l5_failure_nudge(cmd: str, out_text: str) -> str:
     # Gate 2: env/tooling failure -> not hypothesis evidence -> silent.
     if _ENV_FAIL_RE.search(out_text):
         return ""
-    # Gate 3: an explicit test/assertion failure marker is required.
-    fails = [ln.strip() for ln in out_text.splitlines() if _TEST_FAIL_RE.search(ln)]
+    # Gate 3: an explicit test/assertion failure marker is required — and
+    # patch/apply bookkeeping lines never qualify (Stage-5 fd FP closure).
+    fails = _failure_lines(out_text)
     sig = "|".join(sorted(set(fails))[:3])[:200]
     if not sig:
+        return ""
+    # Gate 4 (Stage-5 abs FP closure): a failure observed at BASELINE — no
+    # source edit yet, or the agent's changes are stashed — is the repo's own
+    # state; record it and never let it drive "persisted across your edit(s)".
+    if _source_edit_count == 0 or _turn_is_stashed:
+        _baseline_fail_sigs.add(sig)
+        return ""
+    if sig in _baseline_fail_sigs:
         return ""
     _test_fail_history.append(sig)
     if _test_fail_history.count(sig) >= 2 and _source_edit_count >= 1:
@@ -1720,11 +2220,23 @@ _oracle_review_fired = False
 #     command carries the code it writes), the "edited?" intersection set;
 #   tested_tokens — tokens of test-runner command+output WHEN a real pass/fail
 #     result was observed (the "tested?" intersection set).
-# Dose (Stage-3 contract): the obligation CLASS emits at most ONCE per task;
-# the production latch is released only on a gate loss (deferred, not destroyed).
-_oracle_obligation_fired = False
+# Dose (delivery-engine Stage 2, 2026-06-11 — supersedes the once-per-task
+# latch): the obligation-STATUS emission fires at EVERY review transition
+# whose status VECTOR is new (content×phase×status dedup) — the once-per-task
+# dose was THE measured gap (DEEP_TRAJECTORY §3.2: review-transition emissions
+# 0 of 9; the one early nudge "deduped forever").  The vector can only change
+# when the agent's own edits/tests change an obligation's status, so the dose
+# is bounded by the agent's own progress — data-derived, no invented cap.
+_oracle_obligation_fired = False           # last-production marker (telemetry/tests)
+_oblig_status_emitted: set[str] = set()    # delivered status-vector hashes
+_oblig_status_last_hash: str | None = None  # released on a gate loss (deferred)
 _oracle_edited_tokens: set[str] = set()
 _oracle_tested_tokens: set[str] = set()
+# per-file edit-evidence tokens (Stage-1 signal: test_coverage_ratio input).
+_oracle_edited_tokens_by_file: dict[str, set] = {}
+# per-file re-edit churn with no observed PASSING test between (Stage-1
+# signal; TRAJEVAL Coherence Collapse) — reset on every observed pass.
+_edit_churn: dict[str, int] = {}
 _gt_oracle_mod = None
 _gt_oracle_tried = False
 
@@ -1774,42 +2286,77 @@ def _load_gt_oracle():
     return _gt_oracle_mod
 
 
-def _obligation_nudge_block() -> str:
-    """SPEC producer at the live review transition (gt_gt §15.3 WHAT rank-1 /
-    plan §5.2 — the anchor-aware test-evidence gap): an obligation candidate
-    fires when issue-named symbols were EDITED (symbols ∩ edit-command tokens)
-    but NO observed test output mentions them (symbols ∩ tested tokens = ∅).
-    Confidence is provenance-derived (edit-overlap ratio) and gated by
-    gt_oracle.gate_pool's distribution floor (median+1*MAD over the triggered
-    pool — never a hardcoded threshold). The payload is rendered by the SAME
-    gt_oracle renderer the replay path uses (byte parity live vs replay).
-    Correct-or-quiet: no sibling module / no obligations / every touched
-    obligation already tested -> ''."""
-    global _oracle_obligation_fired
+def _obligation_nudge_block() -> tuple[float, str] | None:
+    """SPEC producer at the live review transition — delivery-engine STAGE 2
+    (2026-06-11): the per-obligation STATUS checklist (gt_gt §15.4 Stage 3 /
+    DEEP_TRAJECTORY §3.3 fix #1, the #1 lever).
+
+    WHAT: every unmet obligation with its sensed status — `[✓ edited, ✗
+    untested]` / `[✗ not addressed]` — issue text verbatim, the covering test
+    named per untested obligation (graph.db assertions, FACT-tier only).
+    WHEN: every review-transition turn whose status VECTOR is new (the
+    content×phase×status dedup; same vector -> suppress, changed -> re-fire).
+    TRIGGER (hybrid, 4 composited signals): review transition (>=1 edit +
+    >=3 non-edit) ∧ >=1 obligation edited-but-untested (the proven-aimed
+    intersection — 3/3 named the hidden verifier's target, LEGITIMACY §1.5)
+    ∧ unmet obligations exist ∧ status vector unseen.
+    SEVERITY (computed, never a constant): composite_severity(base=5,
+    budget_fraction, unmet_ratio) — Zilberstein-form urgency.
+    Correct-or-quiet: no sibling module / no obligations / nothing
+    edited-untested / vector already delivered -> None.
+
+    Returns (severity, payload) or None."""
+    global _oracle_obligation_fired, _oblig_status_last_hash
     om = _load_gt_oracle()
     if om is None:
-        return ""
+        return None
     try:
         obls = om.load_obligations(_anchors_path())
         if not obls:
-            return ""
-        cands = []
-        for v in om._obligation_views(obls):
-            touched, conf = om._overlap(v, _oracle_edited_tokens)
-            if not touched:
+            return None
+        views = om._obligation_views(obls)
+        statuses = om.obligation_statuses(
+            views, _oracle_edited_tokens, _oracle_tested_tokens)
+        unmet = om.order_unmet(statuses)
+        if not unmet:
+            return None
+        # Precision gate: fire only when >=1 obligation is EDITED-but-untested
+        # (the intersection that demonstrably aims at the verifier's target);
+        # unaddressed obligations ride along as checklist rows, never trigger
+        # alone (edit tokens are a noisy proxy — correct-or-quiet).
+        if not any(s == om.OBL_EDITED_UNTESTED for _v, s, _t, _c in unmet):
+            return None
+        h = om.status_vector_hash(statuses)
+        if h in _oblig_status_emitted:
+            return None
+        # ── COVERING-TEST per untested obligation (Stage B query, FACT-tier
+        # CALLS edges only; capped to the first 3 displayed — perf guard). ──
+        covering: dict[int, dict] = {}
+        looked = 0
+        for v, s, touched, _conf in unmet[:5]:
+            if s != om.OBL_EDITED_UNTESTED or looked >= 3:
                 continue
-            if om._obligation_tested(v, _oracle_tested_tokens):
-                continue
-            cands.append(om._obligation_candidate(v, touched, conf))
-        if not cands:
-            return ""
-        winner, _tel = om.gate_pool(cands)  # distribution floor + 8dp rank
-        if winner is None:
-            return ""
-        _oracle_obligation_fired = True  # class dose <=1/task; re-armed on loss
-        return winner.content
+            looked += 1
+            try:
+                hits = _covering_tests_for_symbols(set(touched))
+                if hits:
+                    covering[v.idx] = hits[0]
+            except Exception:  # noqa: BLE001 -- enrichment is best-effort
+                pass
+        payload = om.render_obligation_status_block(statuses, covering)
+        if not payload:
+            return None
+        # production-time latch: delivered-vector set; a gate LOSS releases it
+        # (deferred, not destroyed — the established re-arm law).
+        _oblig_status_emitted.add(h)
+        _oblig_status_last_hash = h
+        _oracle_obligation_fired = True
+        budget_b = (_action_count / _GT_STEP_LIMIT) if _GT_STEP_LIMIT else 0.0
+        unmet_ratio = len(unmet) / max(len(statuses), 1)
+        sev = om.composite_severity(_SEV_OBLIGATION, budget_b, unmet_ratio)
+        return (sev, payload)
     except Exception:  # noqa: BLE001 -- never break the agent loop
-        return ""
+        return None
 # Kinds the gate suppressed THIS turn as a re-armable loss (outranked /
 # irrelevant — NOT 'delivered'): _augment_output releases their producers'
 # production-time latches so a one-shot class is DEFERRED to a later turn,
@@ -1820,15 +2367,388 @@ _oracle_last_losers: set[str] = set()
 _BLOCK_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 # severity ranks (the plan §3.4 WHAT ordering, mirrored from gt_oracle):
+#   6 = verification gate (NEW MAX RANK — budget-critical self-verify),
 #   5 = issue-verbatim obligation (the un-misdirectable class),
 #   4 = verification-gap nudge, 3 = edit-bound contract, 2 = stuck nudge /
 #   review-time scope completeness, 1 = code-map narration (evidence/cochange).
+_SEV_GATE = 6           # verification horizon GATE band (displaces everything)
 _SEV_OBLIGATION = 5
 _SEV_NUDGE_VERIFY = 4
 _SEV_CONTRACT = 3
 _SEV_STUCK = 2
 _SEV_SCOPE = 2
 _SEV_CODEMAP = 1
+
+
+# ---------------------------------------------------------------------------
+# VERIFICATION HORIZON (Stage C — H0 budget sensor + H1 covering-test + H2 gate)
+#
+# A budget-aware, escalating self-verification candidate class inside the oracle.
+# Product value: GT proactively reminds you to test before shipping — any
+# developer in Cursor/Claude Code benefits, not just SWE-bench agents.
+#
+# 4 bands (DORMANT/ADVISORY/URGENT/GATE) keyed to budget_remaining and the
+# verification gap (edited > 0 AND tested = 0 for those symbols). Scale-free:
+# thresholds are fractions of step_limit, not hardcoded step numbers.
+# V (verification cycle cost) is estimated from the agent's own pace or railed.
+#
+# Research basis: SWE-Next (87.4% budget exhaustion), BATS (budget tracker
+# Pareto-dominates budget-blind), TestPrune (+8-13% from targeted selection),
+# Zilberstein 1996 (contract-algorithm metareasoning).
+# ---------------------------------------------------------------------------
+
+# H0: Budget sensor — reads GT_STEP_LIMIT from env (set by the harness from the
+# pier config step_limit). Absent -> class disabled (fail-quiet).
+_GT_STEP_LIMIT: int | None = None
+_GT_VERIFICATION_CYCLE_COST: int = 25  # default V, railed [8, 40]
+_V_MIN = 8
+_V_MAX = 40
+
+
+def _henv(name: str, dflt: float) -> float:
+    """Env-overridable horizon threshold (calibration channel, never a secret)."""
+    try:
+        return float(os.environ.get(name, "") or dflt)
+    except (TypeError, ValueError):
+        return dflt
+
+
+# H3-CALIBRATION CHANNEL (delivery-engine Stage 4, 2026-06-11 — replaces the
+# static B>=0.5/0.8 + 1.5xV bands).  The band edges are functions of the
+# BEHAVIORAL signals (test/edit coverage from Stage 1) with the budget as the
+# urgency multiplier (Zilberstein 1996; BATS arXiv 2511.17006; SWE-Next:
+# 87.4% of failures end by budget exhaustion).  Env-overridable channel.
+#
+# FIX 5 (2026-06-11 measurement-gate closeout): the defaults are now
+# DATA-DERIVED from the 9 frozen oracle trajectories of run 27321848581
+# (offline Stage-0 sensor replay, scripts/calibrate_esc_bands.py; receipt
+# .claude/reports/metrics/esc_calibration_20260611T071654Z.json), replacing
+# the invented 0.4/0.5/0.3/0.7/2.0. n=9 and 0/9 resolved, so the design's
+# outcome-stratified quantiles are impossible — per the fallback rule the
+# edges are corpus medians/quartiles: **n=9, calibration-quality
+# placeholder** (Stage 6, gt_gt §15.4, refines on a grown corpus).
+#   ADV_TCOV 0.125       tcov@first-review = 0.0 on 9/9 (universal under-
+#                        verification); median floored at 1/8 — a 0.0 edge
+#                        makes the strict `tcov < edge` clause a DEAD band
+#   ADV_B    0.11166666  p25 budget@first-review — armable by the time most
+#                        agents first reach review (corpus B = 0.09-0.20)
+#   URG_TCOV 0.125       p25 tcov@first-review, same floor (monotone clamp)
+#   URG_B    0.35333333  median budget@LAST-review — the typical final-
+#                        review zone
+#   GATE_TCOV 1.0        median tcov@last-review: 7/9 reach FULL coverage by
+#                        their last review; the gate arms only for below-
+#                        typical (still-uncovered) edits
+#   GATE_KV  7.48        median (remaining-at-SUBMISSION / V): agents submit
+#                        with ~7.5 verification cycles UNUSED — the gate must
+#                        arm before the typical submission point (at the old
+#                        2.0 the band was unreachable: 8/9 trajectories ended
+#                        before R ever dropped to 2V)
+_ESC_ADV_TCOV = _henv("GT_ESC_ADV_TCOV", 0.125)        # advisory: test_coverage below
+_ESC_ADV_B = _henv("GT_ESC_ADV_B", 0.11166666)         # advisory: budget_fraction above
+_ESC_URG_TCOV = _henv("GT_ESC_URG_TCOV", 0.125)        # urgent: test_coverage below
+_ESC_URG_B = _henv("GT_ESC_URG_B", 0.35333333)         # urgent: budget_fraction above
+_ESC_GATE_TCOV = _henv("GT_ESC_GATE_TCOV", 1.0)        # gate: test_coverage below
+_ESC_GATE_KV = _henv("GT_ESC_GATE_KV", 7.48)           # gate: R < KV * V (V observed)
+
+try:
+    _raw_step_limit = os.environ.get("GT_STEP_LIMIT", "").strip()
+    if _raw_step_limit:
+        _GT_STEP_LIMIT = int(_raw_step_limit)
+        if _GT_STEP_LIMIT <= 0:
+            _GT_STEP_LIMIT = None
+except (TypeError, ValueError):
+    _GT_STEP_LIMIT = None
+
+try:
+    _raw_vcc = os.environ.get("GT_VERIFICATION_CYCLE_COST", "").strip()
+    if _raw_vcc:
+        _v = int(_raw_vcc)
+        _GT_VERIFICATION_CYCLE_COST = max(_V_MIN, min(_V_MAX, _v))
+except (TypeError, ValueError):
+    pass
+
+# Horizon state (module-global, reset per interpreter = per attempt)
+_horizon_advisory_fired = False
+# Per-band once-latches (2026-06-11 LIPI replay receipt: fd turns 209-218 got
+# TEN consecutive urgent emissions — the band held while R counted down, the
+# changing step-count gave every render a new content hash, and urgent/pivot
+# had no dose latch. Wink (arXiv 2602.17037): one intervention recovers 90.9%,
+# multi-intervention drops to 79% — the ESCALATION LADDER (advisory->urgent->
+# gate) is the re-fire mechanism, never within-band repetition. Gate-loss
+# re-arm preserved (deferred, not destroyed), same law as advisory.
+_horizon_urgent_fired = False
+_horizon_pivot_fired = False
+_horizon_gate_fire_count = 0
+_HORIZON_GATE_CAP = 3  # max fires in GATE band (persistent_until_met cap)
+# Observed EDIT->TEST cycle spans (for dynamic V estimation — Stage 4: V is
+# the agent's OWN observed pace, "25 is the DEFAULT, not the RULE"). A cycle
+# opens at the first source edit after the last observed test result and
+# closes at the next observed result.
+_cycle_edit_start: int | None = None
+_test_cycle_spans: list[int] = []
+# FIX 6 (2026-06-11): action indices of every observed source edit — the
+# EDIT->EDIT pace proxy for the NEVER-TEST agent (the escalation ladder's
+# target population, 2/9 of the frozen corpus), whose empty _test_cycle_spans
+# previously made V silently fall back to the static 25.
+_edit_action_steps: list[int] = []
+# kept for back-compat with older telemetry readers (no longer drives V):
+_last_test_step: int | None = None
+# RECENCY (design §1.3 pivot: "the MOST RECENT sensed test evidence is a FAIL")
+# — _test_fail_history is append-only/never cleared on a later PASS, so it must
+# never drive the pivot. This flag tracks the LAST observed test outcome only.
+_last_test_outcome_failed: bool = False
+
+
+def _estimate_v() -> int:
+    """Verification cycle cost estimate (in steps).
+
+    1. >= 1 observed EDIT->TEST cycle -> median observed span (the agent's
+       own verification pace — always wins when it exists).
+    2. FIX 6 (2026-06-11): NEVER-TEST agent with >= 2 source edits -> median
+       EDIT->EDIT span (the agent's own working cadence stands in for the
+       cost of a verification cycle it has never run). Without this the
+       exact population the escalation ladder targets (edits, never tests)
+       got the STATIC default — V was inert where it mattered most. Still
+       dynamic (the agent's own data), still railed.
+    3. Otherwise (no pace signal yet) -> V_DEFAULT.
+    Always railed to [V_MIN, V_MAX]."""
+    import statistics as _hstats
+    if _test_cycle_spans:
+        v = int(_hstats.median(_test_cycle_spans))
+    elif len(_edit_action_steps) >= 2:
+        _paces = [b - a for a, b in
+                  zip(_edit_action_steps, _edit_action_steps[1:]) if b > a]
+        v = int(_hstats.median(_paces)) if _paces else _GT_VERIFICATION_CYCLE_COST
+    else:
+        v = _GT_VERIFICATION_CYCLE_COST
+    return max(_V_MIN, min(_V_MAX, v))
+
+
+def verify_horizon_band(action_count: int, step_limit: int | None,
+                        v: int, edit_coverage: float | None,
+                        test_coverage: float | None, has_edits: bool,
+                        last_test_failed: bool = False) -> str | None:
+    """The band decision function — delivery-engine STAGE 4 (2026-06-11):
+    band edges are functions of the BEHAVIORAL signals, not budget constants.
+
+    Inputs (all Stage-1 sensed, stateless per turn):
+      edit_coverage  — obligation symbols edited / total (None = no
+                       obligations -> the clause degrades to edit-presence;
+                       the obligation-status class owns the obligation story)
+      test_coverage  — edited files with test evidence / edited files
+                       (None = nothing edited)
+      has_edits      — >=1 source edit observed
+      last_test_failed — the MOST RECENT observed outcome was a failure
+
+    Bands (each predicate composites >=3 signals — hybrid pillar; thresholds
+    are the env-overridable GT_ESC_* calibration channel — dynamic pillar):
+      pivot    : last_test_failed ∧ critical zone (B >= urg_B or R < KV*V)
+      gate     : R < KV*V ∧ test_coverage < gate_tcov ∧ has_edits
+      urgent   : B > urg_B ∧ test_coverage < urg_tcov ∧ has_edits
+      advisory : B > adv_B ∧ test_coverage < adv_tcov ∧ edit_coverage > 0
+    Returns: "gate" | "urgent" | "advisory" | "pivot" | None (dormant).
+    Pure function — no side effects."""
+    if step_limit is None or step_limit <= 0:
+        return None  # GT_STEP_LIMIT absent -> escalation disabled
+    if not has_edits:
+        return None  # no edits -> no verification debt (correct-or-quiet)
+    a = action_count
+    S = step_limit
+    R = S - a
+    B = a / S
+    tc = 0.0 if test_coverage is None else float(test_coverage)
+    # No obligations -> edit-presence stands in for edit_coverage>0 (the
+    # boa-class advisory must survive obligation-less tasks).
+    ec_pos = True if edit_coverage is None else (float(edit_coverage) > 0.0)
+
+    # Pivot first: the agent HAS evidence and it is failing — "run the test
+    # NOW" would be wrong advice; sizing the remaining-budget response is right.
+    if last_test_failed and (B >= _ESC_URG_B or R <= _ESC_GATE_KV * v):
+        return "pivot"
+    if R <= _ESC_GATE_KV * v and tc < _ESC_GATE_TCOV:
+        return "gate"        # feasibility horizon — keyed to OBSERVED pace V
+    if B >= _ESC_URG_B and tc < _ESC_URG_TCOV:
+        return "urgent"
+    if B >= _ESC_ADV_B and tc < _ESC_ADV_TCOV and ec_pos:
+        return "advisory"
+    return None              # DORMANT: the event-driven family covers the rest
+
+
+def _render_verify_emission(band: str, action_count: int, step_limit: int,
+                            edited_rels: set, covering_tests: list) -> str:
+    """Render the agent-visible verification horizon emission.
+
+    Template-based, deterministic, no LLM. Tag: <gt-verify level="band">.
+    Product framing: "GT reminds you to test before shipping."\""""
+    S = step_limit
+    R = S - action_count
+    edited_summary = ", ".join(
+        os.path.basename(r) for r in sorted(edited_rels)[:3])
+    if len(edited_rels) > 3:
+        edited_summary += f" (+{len(edited_rels)-3} more)"
+
+    # Covering test command (from Stage B H1 query)
+    if covering_tests:
+        ct = covering_tests[0]
+        test_cmd = ct["run_cmd"]
+        test_info = f"`{ct['name']}` in `{ct['file']}`"
+    else:
+        test_cmd = "the test suite"
+        test_info = "the relevant tests"
+
+    if band == "advisory":
+        body = (
+            f"GT: you have edited {edited_summary} but no test output observed "
+            f"so far references these changes. {test_info} covers them — "
+            f"consider running: `{test_cmd}`"
+        )
+    elif band == "urgent":
+        body = (
+            f"GT: ~{R} of {S} steps remain. Your edits to {edited_summary} "
+            f"are still unverified — nothing you have run exercises them. "
+            f"Run the covering test now: `{test_cmd}`. A failing result with "
+            f"~{R} steps left is still fixable; an unverified submission is not."
+        )
+    elif band == "gate":
+        body = (
+            f"GT: {R} steps left — at your observed pace this is your LAST "
+            f"window to verify. You edited {edited_summary}; no test has "
+            f"exercised them. Run `{test_cmd}` NOW. If it passes, finish. "
+            f"If it fails, make the single smallest fix and re-run. "
+            f"Do not submit unverified work."
+        )
+    elif band == "pivot":
+        body = (
+            f"GT: the covering test has failed and ~{R} steps remain. "
+            f"Re-read the failing assertion once; if the fix is not one edit "
+            f"away, revert to your last passing state and submit the minimal "
+            f"correct change."
+        )
+    else:
+        return ""
+
+    return f'\n<gt-verify level="{band}">\n{body}\n</gt-verify>'
+
+
+# Obligation SYMBOLS only (the edit_coverage_ratio numerator domain) — from
+# the per-task anchors artifact's obligations[], never the anchor superset
+# (anchors include file stems/keywords that would dilute the ratio).
+_oblig_syms_cache: set[str] | None = None
+
+
+def _obligation_symbol_set() -> set[str]:
+    global _oblig_syms_cache
+    if _oblig_syms_cache is None:
+        syms: set[str] = set()
+        try:
+            import json as _j
+            with open(_anchors_path(), encoding="utf-8") as f:
+                data = _j.load(f)
+            for o in data.get("obligations") or []:
+                if not isinstance(o, dict):
+                    continue
+                for s in o.get("symbols") or []:
+                    if isinstance(s, str) and len(s) >= 3:
+                        syms.add(s)
+                        syms.update(p for p in s.split(".") if len(p) >= 3)
+        except Exception:  # noqa: BLE001 -- absent artifact -> dormant clause
+            pass
+        _oblig_syms_cache = syms
+    return _oblig_syms_cache
+
+
+def _verification_horizon_candidate() -> tuple[float, str, str, bool] | None:
+    """Produce the Verification Horizon candidate for this turn — delivery-
+    engine STAGE 4: bands from the Stage-1 behavioral signals; V from the
+    agent's OWN observed edit->test pace; severity a COMPUTED composite
+    (base + 2*budget_fraction + 1*unmet_ratio), never a class constant.
+
+    Returns (severity, kind, block_text, edit_bound) or None.
+    Respects: dose caps (advisory/urgent/pivot once each, gate cap-3, all
+    gate-loss re-armed)."""
+    global _horizon_advisory_fired, _horizon_urgent_fired, \
+        _horizon_pivot_fired, _horizon_gate_fire_count
+
+    if _GT_BASELINE:
+        return None
+
+    # Stage-1 signals, live mirrors of DerivedState (sensed, never assumed).
+    tc = test_coverage_ratio(_oracle_edited_tokens_by_file,
+                             _oracle_tested_tokens)
+    ec = edit_coverage_ratio(_obligation_symbol_set(), _oracle_edited_tokens)
+
+    if _GT_STEP_LIMIT is None:
+        # H0 absent (interactive surface — Cursor/Claude Code, no step
+        # budget): the COVERAGE GAP alone earns ONE budget-agnostic advisory
+        # at the review transition. No budget -> no escalation, ever.
+        if (_horizon_advisory_fired or not _oracle_edited_rels
+                or _oracle_nonedit_streak < 3
+                or tc is None or tc >= _ESC_ADV_TCOV):
+            return None
+        _horizon_advisory_fired = True
+        covering = _covering_tests_for_symbols(_oracle_edited_tokens)
+        block = _render_verify_emission(
+            "advisory", _action_count, max(_action_count, 1),
+            _oracle_edited_rels, covering)
+        if not block:
+            return None
+        return (float(_SEV_NUDGE_VERIFY), "verify.horizon.advisory", block, True)
+
+    v = _estimate_v()
+    band = verify_horizon_band(
+        action_count=_action_count,
+        step_limit=_GT_STEP_LIMIT,
+        v=v,
+        edit_coverage=ec,
+        test_coverage=tc,
+        has_edits=bool(_oracle_edited_rels),
+        # RECENCY: the MOST RECENT sensed test outcome (never "any fail
+        # ever" — a recovered-then-passing agent must not get a false pivot).
+        last_test_failed=_last_test_outcome_failed,
+    )
+
+    if band is None:
+        return None
+
+    # Dose caps — once per band; the LADDER escalates, the band never repeats.
+    if band == "advisory":
+        if _horizon_advisory_fired:
+            return None
+        _horizon_advisory_fired = True
+    elif band == "urgent":
+        if _horizon_urgent_fired:
+            return None
+        _horizon_urgent_fired = True
+    elif band == "pivot":
+        if _horizon_pivot_fired:
+            return None
+        _horizon_pivot_fired = True
+    elif band == "gate":
+        if _horizon_gate_fire_count >= _HORIZON_GATE_CAP:
+            return None
+        _horizon_gate_fire_count += 1
+
+    # H1: covering-test query for targeting
+    covering = _covering_tests_for_symbols(_oracle_edited_tokens)
+
+    # Severity: COMPUTED composite over (base, budget position, unmet mass).
+    if band == "gate":
+        base = _SEV_GATE
+    elif band in ("urgent", "pivot"):
+        base = _SEV_OBLIGATION  # 5 — outranks contract
+    else:
+        base = _SEV_NUDGE_VERIFY  # 4
+    budget_b = _action_count / _GT_STEP_LIMIT
+    unmet_ratio = (1.0 - float(ec)) if ec is not None else 0.0
+    sev = composite_severity(base, budget_b, unmet_ratio)
+
+    block = _render_verify_emission(
+        band, _action_count, _GT_STEP_LIMIT, _oracle_edited_rels, covering)
+
+    if not block:
+        return None
+
+    return (sev, f"verify.horizon.{band}", block, True)
 
 
 def _oracle_focus() -> set[str]:
@@ -1895,14 +2815,22 @@ def _oracle_gate_blocks(cands) -> str:
     the SINGLE winning block ('' = silence).  Gates, in order: DEDUP
     (content-hash delivered-set; rearm_on_change falls out naturally — changed
     content has a new hash), RELEVANCE (block tokens ∩ focus, waived for
-    edit-bound candidates whose trigger IS the edit), RANK/BUDGET (severity
-    desc, then confidence = focus-coverage ratio desc, then kind asc; <=1
-    emission per turn, losers dropped — no queue)."""
+    edit-bound candidates whose trigger IS the edit), DISTRIBUTION FLOOR
+    (median+1*MAD over the triggered pool — parity with gt_oracle.gate_pool;
+    a singleton always passes; singletons excluded from suppression),
+    RANK/BUDGET (severity desc, then confidence 8dp desc, then kind asc;
+    <=1 emission per turn, losers dropped — no queue).
+
+    LIVE/REPLAY PARITY FIX (2026-06-11): the replay oracle applies
+    gt_oracle.distribution_floor(); the live gate previously applied NO floor,
+    meaning a low-confidence candidate in a multi-candidate pool could win live
+    but be suppressed in replay.  Now parity: identical median+MAD floor."""
     import hashlib as _hl
+    import statistics as _ostats
     global _oracle_last_losers
     _oracle_last_losers = set()
     focus = _oracle_focus()
-    passing: list[tuple[int, float, str, str, str]] = []
+    passing: list[tuple[float, float, str, str, str]] = []
     suppressed: list[tuple[str, str, float]] = []
     for sev, kind, text, edit_bound in cands:
         if not text:
@@ -1920,6 +2848,23 @@ def _oracle_gate_blocks(cands) -> str:
         conf = (len(matched) / len(focus)) if focus else (
             1.0 if edit_bound else 0.0)
         passing.append((sev, conf, h, kind, text))
+    # ── DISTRIBUTION FLOOR (parity with gt_oracle.distribution_floor) ────
+    # median + 1*MAD over the triggered pool's confidence values.  A lone
+    # candidate always passes (MAD=0, floor=own value, >= passes).  Multi-
+    # candidate pools suppress the low tail — the gate scales with the data.
+    if len(passing) > 1:
+        confs = [p[1] for p in passing]
+        med = _ostats.median(confs)
+        mad = _ostats.median(abs(v - med) for v in confs)
+        floor = med + mad
+        floored = []
+        for p in passing:
+            if p[1] < floor:
+                suppressed.append((p[3], "below_floor", p[1]))
+                _oracle_last_losers.add(p[3])
+            else:
+                floored.append(p)
+        passing = floored
     winner = None
     if passing:
         passing.sort(key=lambda x: (-x[0], -round(x[1], 8), x[3]))
@@ -1991,7 +2936,7 @@ def _scope_completeness_block() -> str:
 
 def _augment_output(action, out) -> None:
     """Append GT evidence to a command's output dict."""
-    global _marker_sent, _action_count, _source_edit_count
+    global _marker_sent, _action_count, _source_edit_count, _cycle_edit_start
     if not isinstance(out, dict):
         return
     try:
@@ -2006,9 +2951,12 @@ def _augment_output(action, out) -> None:
         if not _GT_BASELINE and _ORACLE_ROUTE:
             # ---- STAGE-4 ORACLE ROUTING: producers -> candidates -> ONE gate ----
             global _oracle_nonedit_streak, _oracle_review_fired, \
-                _oracle_obligation_fired
+                _oracle_obligation_fired, _last_test_step
             _action_count += 1
-            cands: list[tuple[int, str, str, bool]] = []
+            # severities are COMPUTED floats (composite_severity) — int-base
+            # constants coexist; the gate sorts numerically either way.
+            cands: list[tuple[float, str, str, bool]] = []
+            _krel = ""  # bound on post_edit; hardening for the guarded uses below
             _kkind, _kf = _classify(cmd)
             if _kkind == "post_edit" and _kf:
                 _source_edit_count += 1
@@ -2019,10 +2967,30 @@ def _augment_output(action, out) -> None:
                 # edit EVIDENCE tokens (plan §5.2 "edited?"): the edit command
                 # carries the code it writes (sed pattern / heredoc body) —
                 # mirrors gt_oracle_sense.DerivedState.edited_tokens exactly.
-                _oracle_edited_tokens.update(
-                    t for t in _BLOCK_TOKEN_RE.findall(cmd or "") if len(t) >= 3)
+                _edit_toks = {t for t in _BLOCK_TOKEN_RE.findall(cmd or "")
+                              if len(t) >= 3}
+                _oracle_edited_tokens.update(_edit_toks)
+                # Stage-1 signal inputs (mirrors DerivedState exactly):
+                # per-file edit evidence (test_coverage_ratio denominator) +
+                # per-file churn (TRAJEVAL coherence; reset on observed PASS).
+                _oracle_edited_tokens_by_file.setdefault(
+                    _krel, set()).update(_edit_toks)
+                _edit_churn[_krel] = _edit_churn.get(_krel, 0) + 1
+                # H0 (Stage 4): open an edit->test cycle at the FIRST source
+                # edit after the last observed test result.
+                if _cycle_edit_start is None:
+                    _cycle_edit_start = _action_count
+                # FIX 6: record the edit's action index — the EDIT->EDIT pace
+                # proxy that keeps V dynamic for the never-test agent.
+                _edit_action_steps.append(_action_count)
                 _invalidate_on_edit(_krel, _kroot)  # L6 (freshness, not delivery)
                 # L3: EDIT-BOUND contract candidates (rearm_on_change via hash).
+                # LIVE/REPLAY PARITY FIX (2026-06-11): rearm_on_change — a
+                # subsequent edit to the SAME file clears the production latch so
+                # a fresh contract can compete. The content-hash dedup in the gate
+                # still suppresses an IDENTICAL contract; a CHANGED contract
+                # (new file state) has a new hash and re-arms naturally.
+                _contract_seen.discard(_krel)
                 cands.append((_SEV_CONTRACT, "l3.contract",
                               _graph_contract_block(_krel), True))
                 cands.append((_SEV_CODEMAP, "l3.cochange",
@@ -2046,6 +3014,28 @@ def _augment_output(action, out) -> None:
                     t for t in _BLOCK_TOKEN_RE.findall(_orig_out) if len(t) >= 3)
                 _oracle_tested_tokens.update(
                     t for t in _BLOCK_TOKEN_RE.findall(cmd or "") if len(t) >= 3)
+                # H0 (Stage 4): V = the agent's OWN observed EDIT->TEST pace.
+                # A cycle opened at the first source edit after the last
+                # result closes here; its span feeds the V median.
+                global _last_test_step, _last_test_outcome_failed
+                if _cycle_edit_start is not None:
+                    span = _action_count - _cycle_edit_start
+                    if span > 0:
+                        _test_cycle_spans.append(span)
+                    _cycle_edit_start = None
+                _last_test_step = _action_count
+                # RECENCY: pivot keys on the MOST RECENT outcome (env-shaped
+                # failures never count — the failure_persisted discipline).
+                # Stage 5: zero-count-safe via _failure_lines — a green
+                # `… 0 failed …` line is a PASS, never a pivot trigger.
+                _last_test_outcome_failed = bool(
+                    _failure_lines(_orig_out)
+                    and not _ENV_FAIL_RE.search(_orig_out))
+                # Stage-1 coherence reset (mirrors the sensor): an observed
+                # PASSING result clears per-file churn — re-edits after this
+                # are a new cycle, not thrash.
+                if _TEST_PASS_RE.search(_orig_out):
+                    _edit_churn.clear()
             # L3b: evidence candidate (view/edit keyed) — RELEVANCE-gated.
             cands.append((_SEV_CODEMAP, "l3b.evidence", _evidence(cmd), False))
             # consensus K-of-N completeness at the LIVE review transition.
@@ -2058,23 +3048,42 @@ def _augment_output(action, out) -> None:
                 if _scb:
                     _oracle_review_fired = True
                     cands.append((_SEV_SCOPE, "consensus.scope", _scb, True))
-            # SPEC obligations at the SAME review-transition edge (the proven
-            # GT_VERIFY predicate). LIPI 2026-06-10: this is the live caller
-            # load_obligations() never had — the Rank-1 test-evidence-gap
-            # nudge now reaches the agent, not just the replay harness.
+            # SPEC obligations at the SAME review-transition predicate (the
+            # proven GT_VERIFY shape).  Delivery-engine STAGE 2: no once-per-
+            # task latch — the producer's status-VECTOR dedup is the dose
+            # governor (same vector suppressed, changed vector re-fires; the
+            # DEEP_TRAJECTORY "review transition silent in 9/9" gap closed).
             # edit_bound=True: the trigger IS the review event and the
-            # candidate's symbols intersect the edit set by construction.
-            if (_oracle_edited_rels and _oracle_nonedit_streak >= 3
-                    and not _oracle_obligation_fired):
+            # candidate requires >=1 edited-untested obligation by construction.
+            if _oracle_edited_rels and _oracle_nonedit_streak >= 3:
                 _ob = _obligation_nudge_block()
-                if _ob:
-                    cands.append((_SEV_OBLIGATION, "spec.obligation", _ob, True))
+                if _ob is not None:
+                    cands.append((_ob[0], "spec.obligation", _ob[1], True))
             # L5 nudges: premise-sensed event candidates (latches unchanged).
-            cands.append((_SEV_STUCK, "l5.stuck", _l5_nudge(cmd, _orig_out), True))
+            # Stage 3: loop_arm=False — detect.loop owns loops on this route.
+            # FIX 1 (2026-06-11): scaffold_arm=False — scaffold_trap RETIRED on
+            # the oracle route (early-patch-intensity rho=-0.78: never penalize
+            # exploration volume; 7/9 fires, 0 consumed, 1 wrong steer).
+            cands.append((_SEV_STUCK, "l5.stuck",
+                          _l5_nudge(cmd, _orig_out, loop_arm=False,
+                                    scaffold_arm=False), True))
             cands.append((_SEV_STUCK, "l5.failure",
                           _l5_failure_nudge(cmd, _orig_out), True))
             cands.append((_SEV_NUDGE_VERIFY, "l5.no_test",
                           _l5_no_test_evidence_nudge(cmd, _orig_out), True))
+            # DELIVERY-ENGINE STAGE 3 — behavioral detectors over the Stage-1
+            # signals (TIDE degenerate loop; TRAJEVAL coherence collapse).
+            _dl = _degenerate_loop_candidate(cmd, _orig_out)
+            if _dl is not None:
+                cands.append((_dl[0], "detect.loop", _dl[1], True))
+            if _kkind == "post_edit" and _kf:
+                _cc = _coherence_collapse_candidate(_krel)
+                if _cc is not None:
+                    cands.append((_cc[0], "detect.coherence", _cc[1], True))
+            # VERIFICATION HORIZON (Stage C H2): budget-aware self-verify candidate
+            _vh = _verification_horizon_candidate()
+            if _vh is not None:
+                cands.append(_vh)
             _win = _oracle_gate_blocks(cands)
             # Latch re-arm (LIPI 2026-06-10): a produced-but-not-emitted
             # candidate is DEFERRED, not destroyed — gate losers release the
@@ -2084,7 +3093,9 @@ def _augment_output(action, out) -> None:
             _lost = _oracle_last_losers
             if _lost:
                 global _cochange_fired, _l5_fired, _l5_failure_fired, \
-                    _l5_notest_fired
+                    _l5_notest_fired, _horizon_advisory_fired, \
+                    _horizon_urgent_fired, _horizon_pivot_fired, \
+                    _horizon_gate_fire_count, _detect_loop_fired
                 if "l3.contract" in _lost and _kkind == "post_edit" and _kf:
                     _contract_seen.discard(_krel)
                 if "l3.cochange" in _lost:
@@ -2094,13 +3105,33 @@ def _augment_output(action, out) -> None:
                 if "consensus.scope" in _lost:
                     _oracle_review_fired = False
                 if "spec.obligation" in _lost:
+                    # release THIS vector so the same status re-competes at a
+                    # later review turn (deferred, not destroyed).
                     _oracle_obligation_fired = False
+                    if _oblig_status_last_hash:
+                        _oblig_status_emitted.discard(_oblig_status_last_hash)
                 if "l5.stuck" in _lost:
                     _l5_fired = False
                 if "l5.failure" in _lost:
                     _l5_failure_fired = False
                 if "l5.no_test" in _lost:
                     _l5_notest_fired = False
+                # Stage-3 detector latches: deferred, never destroyed.
+                if "detect.loop" in _lost:
+                    _detect_loop_fired = False
+                if "detect.coherence" in _lost and _coherence_last_rel:
+                    _coherence_fired_files.discard(_coherence_last_rel)
+                # Horizon latches consumed at PRODUCTION re-arm on a gate loss
+                # (deferred, not destroyed — same law as every class above).
+                if "verify.horizon.advisory" in _lost:
+                    _horizon_advisory_fired = False
+                if "verify.horizon.urgent" in _lost:
+                    _horizon_urgent_fired = False
+                if "verify.horizon.pivot" in _lost:
+                    _horizon_pivot_fired = False
+                if "verify.horizon.gate" in _lost:
+                    _horizon_gate_fire_count = max(
+                        0, _horizon_gate_fire_count - 1)
             if _win:
                 out["output"] = (out.get("output") or "") + _win
             return

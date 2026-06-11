@@ -234,7 +234,26 @@ def _loop_signature(cmd: str, raw_obs: str) -> str:
     return norm + "\x00" + " ".join((raw_obs or "").split())[:400]
 
 
-def _l5_decision_at(turns, k: int) -> tuple[str, str, float] | None:
+def _fail_sig(text: str, parity_mode: bool) -> str:
+    """The failure-signature of one observation.
+
+    parity_mode=True  — the HISTORICAL predicate (every _TEST_FAIL_RE line),
+      byte-parity with the recorded corpus (Stage-2 contract, frozen).
+    parity_mode=False — the CORRECTED predicate (delivery-engine Stage 5):
+      patch/apply bookkeeping lines excluded via gt_mini_patch._failure_lines
+      (the fd `Hunk #N FAILED` green-run FP).  ONE implementation, bound from
+      the live module — the twins cannot disagree."""
+    if _gmp is None:
+        return ""
+    if parity_mode:
+        fails = [ln.strip() for ln in (text or "").splitlines()
+                 if _gmp._TEST_FAIL_RE.search(ln)]
+    else:
+        fails = _gmp._failure_lines(text)
+    return "|".join(sorted(set(fails))[:3])[:200]
+
+
+def _l5_decision_at(turns, k: int, parity_mode: bool = True) -> tuple[str, str, float] | None:
     """Re-derive which L5 nudge (if any) the live patch would emit AT turn k,
     statelessly, evaluating the SAME predicates over turns[:k+1] with the same
     fire-once-per-class semantics.  Returns (reason, payload, confidence) or None.
@@ -246,15 +265,18 @@ def _l5_decision_at(turns, k: int) -> tuple[str, str, float] | None:
       3. _l5_no_test_evidence_nudge: 2nd blind real-test run with >=1 edit and no
          test evidence yet; fires once.
     A class that already fired at an EARLIER turn is latched off (the live _fired
-    flags) — recomputed here by scanning earlier turns for that class's fire."""
+    flags) — recomputed here by scanning earlier turns for that class's fire.
+
+    parity_mode=False applies the delivery-engine Stage-5 failure_persisted
+    corrections (patch-noise + baseline-failure exclusions)."""
     # Which classes already fired before turn k (the stateless latch).  loop and
     # scaffold_trap share the single live latch _l5_fired -> the "l5_stuck" key.
     fired_before: set[str] = set()
     for j in range(k):
-        d = _l5_raw_fire(turns, j, fired_before)
+        d = _l5_raw_fire(turns, j, fired_before, parity_mode)
         if d is not None:
             fired_before.add(_latch_key(d[0]))
-    return _l5_raw_fire(turns, k, fired_before)
+    return _l5_raw_fire(turns, k, fired_before, parity_mode)
 
 
 def _latch_key(reason: str) -> str:
@@ -263,7 +285,8 @@ def _latch_key(reason: str) -> str:
     return "l5_stuck" if reason in ("loop", "scaffold_trap") else reason
 
 
-def _l5_raw_fire(turns, k: int, fired_before: set[str]) -> tuple[str, str, float] | None:
+def _l5_raw_fire(turns, k: int, fired_before: set[str],
+                 parity_mode: bool = True) -> tuple[str, str, float] | None:
     """The single-turn fire decision GIVEN which classes already fired.  This is
     the exact body of _augment_output's nudge block for turn k.
 
@@ -307,27 +330,55 @@ def _l5_raw_fire(turns, k: int, fired_before: set[str]) -> tuple[str, str, float
     if "failure_persisted" not in fired_before and raw:
         if _gmp is not None and _gmp._TEST_RUNNER_RE.search(cmd or ""):
             if not _gmp._ENV_FAIL_RE.search(raw):
-                fails = [ln.strip() for ln in raw.splitlines()
-                         if _gmp._TEST_FAIL_RE.search(ln)]
-                sig = "|".join(sorted(set(fails))[:3])[:200]
+                sig = _fail_sig(raw, parity_mode)
                 if sig:
                     # count this signature's recurrence across all PRIOR + current
                     # real-test-runner turns (the live _test_fail_history.append).
+                    # Non-parity (Stage 5): baseline failures — observed before
+                    # any source edit or inside a `git stash` window — never
+                    # enter the history and never fire (mirrors the live gates).
                     hist_count = 0
                     runner_count = 0
+                    stash = 0
+                    edits = 0
+                    baseline: set[str] = set()
+                    cur_is_baseline = False
                     for j in range(k + 1):
                         tj = turns[j]
-                        if not (_gmp._TEST_RUNNER_RE.search(tj.command or "")):
+                        cj = tj.command or ""
+                        j_stashed = False
+                        if not parity_mode:
+                            # single-turn stash disproofs are baseline windows
+                            pushes = len(_gmp._STASH_PUSH_RE.findall(cj))
+                            pops = len(_gmp._STASH_POP_RE.findall(cj))
+                            j_stashed = stash > 0 or pushes > 0
+                            stash = max(0, stash + pushes - pops)
+                            kj, fj_ = _gmp._classify(cj)
+                            if kj == "post_edit" and fj_:
+                                edits += 1
+                        if not _gmp._TEST_RUNNER_RE.search(cj):
                             continue
                         if _gmp._ENV_FAIL_RE.search(tj.raw_obs or ""):
                             continue
                         runner_count += 1
-                        fj = [ln.strip() for ln in (tj.raw_obs or "").splitlines()
-                              if _gmp._TEST_FAIL_RE.search(ln)]
-                        sj = "|".join(sorted(set(fj))[:3])[:200]
+                        sj = _fail_sig(tj.raw_obs, parity_mode)
+                        if not sj:
+                            continue
+                        if not parity_mode:
+                            if edits == 0 or j_stashed:
+                                baseline.add(sj)
+                                if j == k:
+                                    cur_is_baseline = True
+                                continue
+                            if sj in baseline:
+                                if j == k:
+                                    cur_is_baseline = True
+                                continue
                         if sj == sig:
                             hist_count += 1
-                    if hist_count >= 2 and st.source_edit_count >= 1:
+                    if (hist_count >= 2 and st.source_edit_count >= 1
+                            and not cur_is_baseline
+                            and (parity_mode or sig not in baseline)):
                         return ("failure_persisted", _NUDGE_FAILURE,
                                 hist_count / runner_count)
 
@@ -499,6 +550,112 @@ def _obligation_candidate(view: _ObligationView, touched: set[str],
     )
 
 
+# ---------------------------------------------------------------------------
+# STAGE 2 (delivery engine, 2026-06-11) — per-obligation STATUS at the review
+# transition.  The #1 lever from DEEP_TRAJECTORY_ANALYSIS_ORACLE_RUN §3.3:
+# "review-transition unmet-obligation emission … would have intersected the
+# killing defect in 7-8 of 9 tasks; every trajectory HAD the event; every
+# trajectory got silence."  The status vector (edited?/tested? per obligation,
+# recomputed statelessly from the trajectory) is BOTH the payload and the
+# dedup key: same vector -> suppress, changed vector -> re-fire (the awilix
+# h=0e1a89ba one-shot content-hash defect closed by construction).
+# Research: TRAJEVAL (arXiv 2603.24631) once-per-triggering-CONTEXT dosing;
+# Wink (arXiv 2602.17037) class-keyed sparse corrective text; severity from
+# the Zilberstein (AI Magazine 1996) contract-algorithm urgency form.
+# ---------------------------------------------------------------------------
+OBL_TESTED = "tested"
+OBL_EDITED_UNTESTED = "edited_untested"
+OBL_UNADDRESSED = "unaddressed"
+
+
+def obligation_statuses(views, edited_tokens, tested_tokens):
+    """Per-obligation status, recomputed statelessly from the §5.2 surfaces:
+    (view, status, touched_symbols, edit_overlap_conf) per obligation."""
+    out = []
+    edited = set(edited_tokens or ())
+    tested = set(tested_tokens or ())
+    for v in views:
+        touched, conf = _overlap(v, edited)
+        if _obligation_tested(v, tested):
+            status = OBL_TESTED
+        elif touched:
+            status = OBL_EDITED_UNTESTED
+        else:
+            status = OBL_UNADDRESSED
+        out.append((v, status, touched, conf))
+    return out
+
+
+def status_vector_hash(statuses) -> str:
+    """The content×phase×status dedup key: a hash of the (obligation, status)
+    vector.  Phase is fixed (REVIEW — the only trigger), content is the
+    obligation set — so the vector hash IS the full dedup key."""
+    body = "|".join(f"{v.idx}:{s}" for v, s, _t, _c in statuses)
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()[:8]
+
+
+if _gmp is not None and hasattr(_gmp, "composite_severity"):
+    # ONE formula (delivery-engine Stage 4): bind the live module's
+    # composite-severity primitive — live and replay can never disagree.
+    composite_severity = _gmp.composite_severity
+else:  # pragma: no cover - standalone replay without the sibling
+    def composite_severity(base: float, budget_fraction: float,
+                           unmet_ratio: float) -> float:
+        """severity = base + (budget_fraction × 2) + (unmet_ratio × 1) —
+        Zilberstein 1996 contract-algorithm urgency; hybrid 3-signal
+        composite. Fallback copy of gt_mini_patch.composite_severity."""
+        return (float(base) + 2.0 * float(budget_fraction)
+                + 1.0 * float(unmet_ratio))
+
+
+def order_unmet(statuses):
+    """Deterministic display order: edited-but-untested first (the proven
+    convertible class — the intersection that aimed 3/3 at the hidden
+    verifier's target), then unaddressed; stable by obligation index."""
+    unmet = [x for x in statuses if x[1] != OBL_TESTED]
+    unmet.sort(key=lambda x: (0 if x[1] == OBL_EDITED_UNTESTED else 1, x[0].idx))
+    return unmet
+
+
+def render_obligation_status_block(statuses, covering=None,
+                                   max_listed: int = 5) -> str:
+    """The review-transition checklist: every unmet obligation with its
+    sensed status, the covering test named for untested ones (Rothermel &
+    Harrold TOSEM 1997 safe-RTS reachability; Ekstazi ISSTA 2015; TestPrune),
+    issue text quoted VERBATIM (`issue_verbatim` provenance — the
+    un-misdirectable class).  Empty string when nothing is unmet
+    (correct-or-quiet).  `covering`: {obligation_idx: covering-test dict}."""
+    unmet = order_unmet(statuses)
+    if not unmet:
+        return ""
+    h = status_vector_hash(statuses)
+    tested_n = sum(1 for _v, s, _t, _c in statuses if s == OBL_TESTED)
+    lines = [
+        "GT: requirement status from the issue — sensed from your own edit "
+        "commands and observed test output:",
+    ]
+    for v, s, _touched, _conf in unmet[:max_listed]:
+        quote = v.verbatim if len(v.verbatim) <= 160 else v.verbatim[:157] + "..."
+        mark = ("[✓ edited, ✗ untested]" if s == OBL_EDITED_UNTESTED
+                else "[✗ not addressed]")
+        line = f"{mark} \"{quote}\""
+        ct = (covering or {}).get(v.idx)
+        if ct and s == OBL_EDITED_UNTESTED:
+            line += (f"\n    covering test: `{ct.get('name', '')}` in "
+                     f"`{ct.get('file', '')}` — run: `{ct.get('run_cmd', '')}`")
+        lines.append(line)
+    if len(unmet) > max_listed:
+        lines.append(f"(+{len(unmet) - max_listed} more unverified requirement(s))")
+    if tested_n:
+        lines.append(f"{tested_n} requirement(s) already show test evidence.")
+    lines.append(
+        "Run the covering test for each untested requirement before "
+        "concluding it is met; an unverified submission cannot be fixed after "
+        "submit.")
+    body = "\n".join(lines)
+    return (f'\n<gt-nudge reason="test_evidence_gap" h="{h}">\n{body}\n</gt-nudge>')
+
+
 def _drift_records(views, turn, st, k: int) -> list[SuppressionRecord]:
     """WHITELIST-ONLY drift production (plan §5.2 SAFE set), ALWAYS suppressed
     while DRIFT_CERTIFIED is False.  A drift candidate exists when this turn's
@@ -619,13 +776,14 @@ def oracle_decide(turns, k: int, *, parity_mode: bool = True,
     decision is the combined walk over the prefix — still a pure function of
     (turns[:k+1], obligations): same input, same output, bit-for-bit."""
     if obligations:
-        return _decide_walk(turns[: k + 1], obligations)[k]
+        return _decide_walk(turns[: k + 1], obligations,
+                            parity_mode=parity_mode)[k]
 
     telemetry: list[SuppressionRecord] = []
     # 1+2. SENSE + TRIGGER: the L5 family produces at most one triggered candidate
     # per turn (the live governor emits at most one nudge of each class, and the
     # _l5_decision_at order yields the first one that fires this turn).
-    fired = _l5_decision_at(turns, k)
+    fired = _l5_decision_at(turns, k, parity_mode)
     triggered: list[Candidate] = []
     if fired is not None:
         reason, payload, conf = fired
@@ -646,7 +804,8 @@ def oracle_decide(turns, k: int, *, parity_mode: bool = True,
     return OracleDecision(turn_index=k, emission=emission, telemetry=telemetry)
 
 
-def _l5_fire_streaming(turns, states=None) -> list[tuple[str, str, float] | None]:
+def _l5_fire_streaming(turns, states=None,
+                       parity_mode: bool = True) -> list[tuple[str, str, float] | None]:
     """Efficient forward pass that yields, per turn, the (reason, payload,
     confidence) the L5 family would emit — IDENTICAL to calling
     _l5_decision_at(turns, k) for every k, but O(n) instead of O(n^3).  It
@@ -664,6 +823,9 @@ def _l5_fire_streaming(turns, states=None) -> list[tuple[str, str, float] | None
     # streaming failure-signature history (mirrors _test_fail_history.append).
     fail_hist: list[str] = []
     runner_count = 0  # real-test-runner turns (non-env) — failure-conf denominator
+    # Stage-5 (non-parity) baseline-failure state (mirrors the live gates).
+    stream_stash = 0
+    baseline_sigs: set[str] = set()
     for k, turn in enumerate(turns):
         st = states[k]
         cmd = turn.command
@@ -697,19 +859,31 @@ def _l5_fire_streaming(turns, states=None) -> list[tuple[str, str, float] | None
         #    recount) includes it; dropping it inflated the streamed confidence
         #    (LIPI 2026-06-10).
         if "failure_persisted" not in fired and _gmp is not None:
+            turn_is_stashed = False
+            if not parity_mode:
+                # single-turn `git stash && test … ; git stash pop` disproofs
+                # count as baseline windows (mirrors the live governor).
+                pushes = len(_gmp._STASH_PUSH_RE.findall(cmd or ""))
+                pops = len(_gmp._STASH_POP_RE.findall(cmd or ""))
+                turn_is_stashed = stream_stash > 0 or pushes > 0
+                stream_stash = max(0, stream_stash + pushes - pops)
             if (_gmp._TEST_RUNNER_RE.search(cmd or "")
                     and not _gmp._ENV_FAIL_RE.search(raw or "")):
                 runner_count += 1
-                fails = [ln.strip() for ln in (raw or "").splitlines()
-                         if _gmp._TEST_FAIL_RE.search(ln)]
-                sig = "|".join(sorted(set(fails))[:3])[:200]
+                sig = _fail_sig(raw, parity_mode)
                 if sig:
-                    fail_hist.append(sig)
-                    n_rec = fail_hist.count(sig)
-                    if (decision is None and n_rec >= 2
-                            and st.source_edit_count >= 1):
-                        decision = ("failure_persisted", _NUDGE_FAILURE,
-                                    n_rec / runner_count)
+                    if not parity_mode and (st.source_edit_count == 0
+                                            or turn_is_stashed):
+                        baseline_sigs.add(sig)  # repo's own state, never fires
+                    elif not parity_mode and sig in baseline_sigs:
+                        pass  # pre-existing failure: excluded from history
+                    else:
+                        fail_hist.append(sig)
+                        n_rec = fail_hist.count(sig)
+                        if (decision is None and n_rec >= 2
+                                and st.source_edit_count >= 1):
+                            decision = ("failure_persisted", _NUDGE_FAILURE,
+                                        n_rec / runner_count)
 
         # 3. no_test_evidence
         if decision is None and "no_test_evidence" not in fired and _gmp is not None:
@@ -734,7 +908,8 @@ def _l5_fire_streaming(turns, states=None) -> list[tuple[str, str, float] | None
 
 def _decide_walk(turns, obligations: list[dict] | None,
                  states=None, payload_pool: dict[int, list[Candidate]] | None = None,
-                 anchors: set[str] | None = None) -> list[OracleDecision]:
+                 anchors: set[str] | None = None,
+                 parity_mode: bool = True) -> list[OracleDecision]:
     """The combined per-turn decision walk: L5 candidates (Stage 2, unchanged)
     + obligation candidates at their Stage-3 trigger + whitelist-only drift
     production (always suppressed while uncertified).
@@ -755,7 +930,7 @@ def _decide_walk(turns, obligations: list[dict] | None,
     obligation itself is `delivered`."""
     if states is None:
         states = _sense.stream_states(turns)
-    fires = _l5_fire_streaming(turns, states)
+    fires = _l5_fire_streaming(turns, states, parity_mode)
     views = _obligation_views(obligations) if obligations else []
     emitted_oblig: set[int] = set()
     emitted_hashes: set[str] = set()  # Stage-4 dedup (the oracle's OWN emissions)
@@ -869,8 +1044,13 @@ def replay(turns, *, parity_mode: bool = True,
     decisions.  This is the Stage-2 byte-parity instrument (without obligations)
     and the Stage-3 replay instrument (with them).  Uses the streaming L5 pass
     for performance; the per-turn emission/telemetry shape is identical to
-    oracle_decide."""
-    return _decide_walk(turns, obligations)
+    oracle_decide.
+
+    parity_mode=True (default): byte-parity with the FROZEN corpus — the
+    historical predicates, never to drift (the Stage-2 contract).
+    parity_mode=False: the CORRECTED product semantics (delivery-engine
+    Stage 5 failure_persisted FP closure) — what the live patch now does."""
+    return _decide_walk(turns, obligations, parity_mode=parity_mode)
 
 
 # ---------------------------------------------------------------------------
@@ -919,7 +1099,7 @@ def replay_nudge_reasons(turns, *, parity_mode: bool = True) -> list[str]:
     for d in replay(turns, parity_mode=parity_mode):
         if d.emission is not None:
             out.append(d.emission.reason_string)
-    return out
+    return out  # parity_mode threads through replay (Stage-5 corrections off by default)
 
 
 __all__ = [
@@ -928,4 +1108,8 @@ __all__ = [
     "distribution_floor", "gate_pool", "load_obligations",
     "write_oracle_events", "delivered_payload_candidates", "stage4_replay",
     "DRIFT_CERTIFIED",
+    # Stage-2 obligation-status machinery (delivery engine 2026-06-11)
+    "obligation_statuses", "status_vector_hash", "composite_severity",
+    "order_unmet", "render_obligation_status_block",
+    "OBL_TESTED", "OBL_EDITED_UNTESTED", "OBL_UNADDRESSED",
 ]

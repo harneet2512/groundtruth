@@ -34,9 +34,12 @@ from pathlib import Path
 import pytest
 
 from groundtruth.pretask.contract_map import edit_target_callee_contracts
+from groundtruth.pretask import curation_map
 from groundtruth.pretask.v1r_brief import (
     _caller_contract_for_file,
+    _issue_relevant_neighbors,
     _resolved_witnesses_for_file,
+    _static_callees,
 )
 
 _RS_SOURCE = "core/engine/src/module/source.rs"
@@ -247,6 +250,144 @@ def test_host_cross_language_callee_never_a_callee_contract(crosslang_repo):
     names = [cc.callee for cc in out]
     assert "format_output" not in names, f"cross-language callee contract leaked: {names}"
     assert "parse_module" in names, f"true callee contract lost: {names}"
+
+
+# ===========================================================================
+# FIX 2 (2026-06-11, gt_gt §16.5 issue C) — the brief RANKING surfaces.
+# The fact-filter above protects FACT ROWS; the aiomonitor FIX-A launder came
+# through the file-CANDIDATE surfaces: v1r_brief._static_callees /
+# _issue_relevant_neighbors and curation_map._neighbors returned files from
+# CALLS edges with NO cross-language disqualifier, promoting vendored
+# tailwind.js to brief entry #2 on a Python repo (both runs, recurring).
+# ===========================================================================
+_PY_MAIN = "app/main.py"
+_PY_UTIL = "app/util.py"
+_JS_TAILWIND = "assets/tailwind.js"
+
+_PY_NODES = [
+    {"label": "Function", "name": "format_running", "key": "format_running",
+     "file_path": _PY_MAIN, "signature": "def format_running(tasks)",
+     "start_line": 1, "end_line": 4, "language": "python"},
+    {"label": "Function", "name": "snapshot_helper", "key": "snapshot_helper",
+     "file_path": _PY_UTIL, "signature": "def snapshot_helper(x)",
+     "start_line": 1, "end_line": 2, "language": "python"},
+    {"label": "Function", "name": "twind", "key": "twind",
+     "file_path": _JS_TAILWIND, "signature": "function twind()",
+     "start_line": 1, "end_line": 2, "language": "javascript"},
+]
+
+_PY_EDGES = [
+    # true same-language callee (must survive)
+    ("format_running", "snapshot_helper", "CALLS", 2, "import", 1.0),
+    # cross-language CALLEE, deterministic stamp (must drop)
+    ("format_running", "twind", "CALLS", 3, "verified_unique", 0.95),
+    # cross-language CALLER of the python file, deterministic stamp (must drop)
+    ("twind", "format_running", "CALLS", 1, "verified_unique", 0.95),
+]
+
+
+def _write_py_repo(repo: Path) -> None:
+    for rel in (_PY_MAIN, _PY_UTIL, _JS_TAILWIND):
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+    (repo / _PY_MAIN).write_text(
+        "def format_running(tasks):\n    return snapshot_helper(tasks)\n",
+        encoding="utf-8")
+    (repo / _PY_UTIL).write_text(
+        "def snapshot_helper(x):\n    # snapshot helper\n    return x\n",
+        encoding="utf-8")
+    (repo / _JS_TAILWIND).write_text(
+        "function twind() { /* snapshot styles */ }\n", encoding="utf-8")
+
+
+@pytest.fixture
+def py_xlang_repo(tmp_path: Path):
+    db = tmp_path / "graph.db"
+    repo = tmp_path / "src"
+    _write_py_repo(repo)
+    _create_graph_db(db, _PY_NODES, _PY_EDGES)
+    return repo, db
+
+
+def test_static_callees_drops_cross_language_callee(py_xlang_repo):
+    repo, db = py_xlang_repo
+    out = _static_callees(str(db), _PY_MAIN, limit=3)
+    assert _JS_TAILWIND not in out, f"cross-language callee leaked: {out}"
+    assert _PY_UTIL in out, f"true same-language callee lost: {out}"
+
+
+def test_static_callees_same_family_survives(crosslang_repo):
+    repo, db = crosslang_repo
+    out = _static_callees(str(db), _JS_LIB, limit=3)
+    assert _TS_LIB in out, f"same-family js->ts callee wrongly suppressed: {out}"
+
+
+def test_issue_relevant_neighbors_drop_cross_language(py_xlang_repo):
+    repo, db = py_xlang_repo
+    out = _issue_relevant_neighbors(
+        str(db), _PY_MAIN, str(repo), {"snapshot"}, limit=3)
+    assert _JS_TAILWIND not in out, (
+        f"cross-language neighbor (the tailwind.js launder) leaked: {out}")
+    assert _PY_UTIL in out, f"true same-language neighbor lost: {out}"
+
+
+def test_static_callees_legacy_schema_permissive(tmp_path):
+    db = tmp_path / "graph.db"
+    _create_graph_db(db, _PY_NODES, _PY_EDGES, with_language=False)
+    out = _static_callees(str(db), _PY_MAIN, limit=3)
+    assert _JS_TAILWIND in out, (
+        "legacy schema (no nodes.language) must stay permissive: " + repr(out))
+
+
+def test_curation_map_neighbors_drop_cross_language(py_xlang_repo):
+    repo, db = py_xlang_repo
+    conn = sqlite3.connect(db)
+    try:
+        ids = curation_map._node_ids(conn, _PY_MAIN, "format_running")
+        assert ids, "fixture focus node missing"
+        callers = curation_map._neighbors(
+            conn, ids, direction="callers", has_conf=True, has_method=True,
+            max_neighbors=5, repo_root=str(repo))
+        callees = curation_map._neighbors(
+            conn, ids, direction="callees", has_conf=True, has_method=True,
+            max_neighbors=5, repo_root=str(repo))
+    finally:
+        conn.close()
+    caller_files = [e.file for e in callers]
+    callee_files = [e.file for e in callees]
+    assert _JS_TAILWIND not in caller_files, (
+        f"cross-language caller leaked into <gt-graph-map>: {caller_files}")
+    assert _JS_TAILWIND not in callee_files, (
+        f"cross-language callee leaked into <gt-graph-map>: {callee_files}")
+    assert _PY_UTIL in callee_files, f"true callee lost: {callee_files}"
+
+
+def test_curation_map_neighbors_same_family_survives(crosslang_repo):
+    repo, db = crosslang_repo
+    conn = sqlite3.connect(db)
+    try:
+        ids = curation_map._node_ids(conn, _TS_LIB, "startServer")
+        callers = curation_map._neighbors(
+            conn, ids, direction="callers", has_conf=True, has_method=True,
+            max_neighbors=5, repo_root=str(repo))
+    finally:
+        conn.close()
+    assert any(e.file == _JS_LIB for e in callers), (
+        f"same-family js->ts caller wrongly suppressed: {callers}")
+
+
+def test_curation_map_neighbors_legacy_schema_permissive(tmp_path):
+    db = tmp_path / "graph.db"
+    _create_graph_db(db, _PY_NODES, _PY_EDGES, with_language=False)
+    conn = sqlite3.connect(db)
+    try:
+        ids = curation_map._node_ids(conn, _PY_MAIN, "format_running")
+        callees = curation_map._neighbors(
+            conn, ids, direction="callees", has_conf=True, has_method=True,
+            max_neighbors=5)
+    finally:
+        conn.close()
+    assert _JS_TAILWIND in [e.file for e in callees], (
+        "legacy schema must stay permissive (cannot judge language)")
 
 
 # ===========================================================================

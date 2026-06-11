@@ -123,8 +123,12 @@ def _reset_live_state(patch_mod, monkeypatch, *, route: bool = True) -> None:
     monkeypatch.setattr(patch_mod, "_oracle_review_fired", False, raising=False)
     monkeypatch.setattr(patch_mod, "_oracle_last_losers", set(), raising=False)
     monkeypatch.setattr(patch_mod, "_oracle_obligation_fired", False, raising=False)
+    monkeypatch.setattr(patch_mod, "_oblig_status_emitted", set(), raising=False)
+    monkeypatch.setattr(patch_mod, "_oblig_status_last_hash", None, raising=False)
     monkeypatch.setattr(patch_mod, "_oracle_edited_tokens", set(), raising=False)
     monkeypatch.setattr(patch_mod, "_oracle_tested_tokens", set(), raising=False)
+    monkeypatch.setattr(patch_mod, "_oracle_edited_tokens_by_file", {}, raising=False)
+    monkeypatch.setattr(patch_mod, "_edit_churn", {}, raising=False)
     monkeypatch.setattr(patch_mod, "_gt_oracle_tried", False, raising=False)
     monkeypatch.setattr(patch_mod, "_gt_oracle_mod", None, raising=False)
 
@@ -165,7 +169,11 @@ def test_live_obligation_fires_at_review_transition(patch_mod, tmp_path, monkeyp
     assert patch_mod._oracle_obligation_fired is True
 
 
-def test_live_obligation_dose_cap_one_per_task(patch_mod, tmp_path, monkeypatch):
+def test_live_obligation_status_dedup_same_vector_one_fire(patch_mod, tmp_path, monkeypatch):
+    """Delivery-engine Stage 2 dose law: the dedup key is the status VECTOR.
+    A second review transition with an UNCHANGED vector (same edit tokens, no
+    new test evidence) must NOT re-fire; the once-per-task latch is gone but
+    an identical checklist is never re-sent."""
     _reset_live_state(patch_mod, monkeypatch)
     monkeypatch.setenv("GT_ANCHORS_PATH", _write_anchors(tmp_path, [_OBL_ASYNC]))
     monkeypatch.setenv("GT_ORACLE_EVENTS", str(tmp_path / "ev.jsonl"))
@@ -173,12 +181,12 @@ def test_live_obligation_dose_cap_one_per_task(patch_mod, tmp_path, monkeypatch)
     outputs = [_drive(patch_mod, _EDIT_CMD)]
     for c in _NONEDIT_CMDS:
         outputs.append(_drive(patch_mod, c))
-    # a SECOND edit + review transition must NOT re-fire the class (<=1/task).
+    # a SECOND identical edit + review transition: same status vector -> quiet.
     outputs.append(_drive(patch_mod, _EDIT_CMD))
     for c in _NONEDIT_CMDS:
         outputs.append(_drive(patch_mod, c))
     fires = sum(o.count('reason="test_evidence_gap"') for o in outputs)
-    assert fires == 1, f"obligation class must fire at most once per task, got {fires}"
+    assert fires == 1, f"identical status vector must not re-fire, got {fires}"
 
 
 def test_live_obligation_tested_stays_quiet(patch_mod, tmp_path, monkeypatch):
@@ -296,10 +304,18 @@ def test_corpus_boa_live_obligation_fire(patch_mod, sense_mod, tmp_path, monkeyp
 
     turns = sense_mod.load_trajectory(tj)
     fires = 0
+    hashes: list[str] = []
     for t in turns:
         out_text = _drive(patch_mod, t.command, t.raw_obs)
         appended = out_text[len(t.raw_obs):] if out_text.startswith(t.raw_obs) else out_text
-        fires += appended.count('reason="test_evidence_gap"')
-    assert fires == 1, (
-        f"boa must fire the obligation exactly once through the LIVE path, got {fires}"
+        n = appended.count('reason="test_evidence_gap"')
+        fires += n
+        if n:
+            hashes += re.findall(r'reason="test_evidence_gap" h="([0-9a-f]+)"', appended)
+    # Stage-2 semantics: >=1 fire through the LIVE path (the original
+    # red->green), and EVERY fire carries a DISTINCT status vector (the
+    # content×phase×status dedup — an identical checklist is never re-sent).
+    assert fires >= 1, "boa must fire the obligation status through the LIVE path"
+    assert len(hashes) == fires and len(set(hashes)) == fires, (
+        f"every fire must be a distinct status vector: {hashes}"
     )

@@ -88,6 +88,18 @@ if _gmp is not None:
     _TEST_FAIL_RE = _gmp._TEST_FAIL_RE
     _ENV_FAIL_RE = _gmp._ENV_FAIL_RE
     _COMPILE_FAIL_RE = _gmp._COMPILE_FAIL_RE
+    # Behavioral-signal primitives (delivery-engine Stage 1): ONE formula,
+    # shared with the live patch, so live and replay can never disagree on
+    # loop_ratio / new_state_rate / coverage (the LEGITIMACY deduction-1
+    # twin-drift mitigation). Research: TIDE arXiv 2602.02196, TRAJEVAL
+    # arXiv 2603.24631, arXiv 2604.02547 (see gt_mini_patch for full notes).
+    _behavior_state_key = _gmp._behavior_state_key
+    _obs_collapse = _gmp._obs_collapse
+    compute_loop_ratio = _gmp.compute_loop_ratio
+    compute_new_state_rate = _gmp.compute_new_state_rate
+    symbol_tested = _gmp.symbol_tested
+    edit_coverage_ratio = _gmp.edit_coverage_ratio
+    test_coverage_ratio = _gmp.test_coverage_ratio
 else:  # pragma: no cover - exercised only if gt_mini_patch is truly absent
     _SRC_EXT = (
         ".py", ".go", ".ts", ".tsx", ".js", ".jsx", ".rs", ".java", ".rb",
@@ -109,6 +121,66 @@ else:  # pragma: no cover - exercised only if gt_mini_patch is truly absent
     _TEST_FAIL_RE = re.compile(r"(\bFAILED\b|\b\d+ failed\b)")
     _ENV_FAIL_RE = re.compile(r"(ModuleNotFoundError|No module named)", re.I)
     _COMPILE_FAIL_RE = re.compile(r"(error\[E\d+\]|\bSyntaxError\b)")
+
+    def _obs_collapse(obs, n=400):  # type: ignore
+        return " ".join((obs or "").split())[:n]
+
+    def _behavior_state_key(cmd, raw_obs):  # type: ignore
+        import hashlib as _h
+        head = (cmd or "").strip().split(None, 1)[0] if (cmd or "").strip() else ""
+        oh = _h.sha256(_obs_collapse(raw_obs).encode("utf-8", "replace")).hexdigest()[:8]
+        return f"cmd\x00{head}\x00{oh}"
+
+    def compute_loop_ratio(signatures):  # type: ignore
+        sigs = list(signatures or ())
+        if not sigs:
+            return 0.0
+        counts: dict = {}
+        for s in sigs:
+            counts[s] = counts.get(s, 0) + 1
+        return sum(c for c in counts.values() if c >= 2) / len(sigs)
+
+    def compute_new_state_rate(state_keys, window=12):  # type: ignore
+        keys = list(state_keys or ())
+        if not keys:
+            return 1.0
+        tail = keys[-window:]
+        base = len(keys) - len(tail)
+        new = 0
+        for i, k in enumerate(tail):
+            gi = base + i
+            if k not in keys[max(0, gi - window):gi]:
+                new += 1
+        return new / len(tail)
+
+    def symbol_tested(sym, tested_tokens):  # type: ignore
+        if not sym:
+            return False
+        tested = tested_tokens or ()
+        if sym in tested:
+            return True
+        compound = ("_" in sym or "." in sym or any(c.isdigit() for c in sym)
+                    or any(c.isupper() for c in sym[1:]))
+        return compound and any(sym in t for t in tested)
+
+    def edit_coverage_ratio(obligation_syms, edited_tokens):  # type: ignore
+        syms = {s for s in (obligation_syms or ()) if s}
+        if not syms:
+            return None
+        return len({s for s in syms if s in (edited_tokens or ())}) / len(syms)
+
+    def test_coverage_ratio(edited_tokens_by_file, tested_tokens):  # type: ignore
+        files = dict(edited_tokens_by_file or {})
+        if not files:
+            return None
+        tested = set(tested_tokens or ())
+        covered = 0
+        for _f, toks in files.items():
+            idents = {t for t in (toks or ()) if len(t) >= 4}
+            if idents & tested or any(
+                    symbol_tested(t, tested) for t in sorted(idents)[:50]):
+                covered += 1
+        return covered / len(files)
 
 
 # Template / non-`_SRC_EXT` write shapes the live edit-counter does not treat as
@@ -318,6 +390,19 @@ class DerivedState:
     delivered_markers: list[tuple[int, str, str]] = field(default_factory=list)  # (turn, tag, reason)
     delivered_nudge_reasons: set[str] = field(default_factory=set)
     phase: str = "ORIENT"
+    # ── delivery-engine Stage-1 behavioral signals (2026-06-11) ──────────────
+    # TIDE state graph (arXiv 2602.02196): per-action node identities + full
+    # no-new-state signatures, and the two derived structure metrics.
+    state_keys: list[str] = field(default_factory=list)
+    loop_signatures: list[str] = field(default_factory=list)
+    loop_ratio: float = 0.0
+    new_state_rate: float = 1.0
+    # TRAJEVAL Coherence Collapse (arXiv 2603.24631): per-source-file re-edit
+    # count with NO observed passing test between (reset on every observed
+    # pass) — the `Pr` re-patch symbol of arXiv 2604.02547.
+    edit_churn: dict[str, int] = field(default_factory=dict)
+    # per-file edit-evidence tokens — the test_coverage_ratio denominator.
+    edited_tokens_by_file: dict[str, set[str]] = field(default_factory=dict)
 
     # convenience for replay/telemetry
     def edited_files(self) -> set[str]:
@@ -406,6 +491,14 @@ def sense(turns: list[Turn]) -> DerivedState:
         raw = turn.raw_obs
         st.action_count += 1
 
+        # ── Stage-1 behavioral state graph (TIDE): one node key per action,
+        # one full no-new-state signature per non-empty command (matching the
+        # live loop window's append discipline). ──────────────────────────────
+        st.state_keys.append(_behavior_state_key(cmd, raw))
+        if (cmd or "").strip():
+            st.loop_signatures.append(
+                (cmd or "").strip() + "\x00" + _obs_collapse(raw))
+
         kind, fpath = _classify(cmd)
         is_source_edit = (kind == "post_edit" and bool(fpath))
         if is_source_edit:
@@ -415,11 +508,16 @@ def sense(turns: list[Turn]) -> DerivedState:
             seen_source_edit = True
             nonedit_streak = 0
             phase = "IMPLEMENT"
+            # TRAJEVAL coherence: one more re-edit of this target with no
+            # passing test observed since the last reset.
+            st.edit_churn[fpath] = st.edit_churn.get(fpath, 0) + 1
             # edit EVIDENCE tokens: the command text carries what was written
             # (sed/heredoc/editor payload) — plan §5.2 "edited?" intersection set.
+            ftoks = st.edited_tokens_by_file.setdefault(fpath, set())
             for w in _WORD_RE.findall(cmd or ""):
                 if len(w) >= 3:
                     st.edited_tokens.add(w)
+                    ftoks.add(w)
         else:
             # non-source write (template/config) — recorded but not a source edit
             ns = _nonsource_write_target(cmd)
@@ -445,6 +543,10 @@ def sense(turns: list[Turn]) -> DerivedState:
             if tr.has_result:
                 st.test_evidence_seen = True
                 phase = "VERIFY" if phase != "REVIEW" else "REVIEW"
+                # TRAJEVAL coherence reset: an observed PASSING result clears
+                # the per-target churn (re-edits after this are a new cycle).
+                if tr.has_pass:
+                    st.edit_churn = {}
                 # tokens in the observed test output AND the test command
                 # itself (plan §5.2 "tested?" = obligation symbols ∩ observed
                 # test command/output text) -> tested_tokens
@@ -470,6 +572,9 @@ def sense(turns: list[Turn]) -> DerivedState:
                 st.delivered_nudge_reasons.add(reason)
 
     st.phase = phase if seen_source_edit else "ORIENT"
+    # ── Stage-1 derived structure metrics (pure functions of the streams) ────
+    st.loop_ratio = compute_loop_ratio(st.loop_signatures)
+    st.new_state_rate = compute_new_state_rate(st.state_keys)
     return st
 
 
@@ -482,4 +587,7 @@ def stream_states(turns: list[Turn]) -> list[DerivedState]:
 __all__ = [
     "Turn", "EditEvent", "TestRun", "DerivedState",
     "load_trajectory", "messages_to_turns", "sense", "stream_states", "strip_gt",
+    # Stage-1 behavioral signals (shared formulas — bound from gt_mini_patch)
+    "compute_loop_ratio", "compute_new_state_rate", "symbol_tested",
+    "edit_coverage_ratio", "test_coverage_ratio",
 ]

@@ -878,9 +878,14 @@ _ENV_UNVERIFIABLE_RE = re.compile(
 
 
 def _retry_count() -> int:
-    """Retries from GT_RETRY_ON_VERIFIER_FAIL, capped at _RETRY_MAX.
-    Unset/0/garbage -> 0 (off: exact single-attempt legacy behavior)."""
-    raw = os.environ.get(_RETRY_FLAG, "").strip()
+    """Retries from GT_SELF_VERIFY_ATTEMPTS (product name) or the legacy
+    GT_RETRY_ON_VERIFIER_FAIL, capped at _RETRY_MAX.
+    Unset/0/garbage -> 0 (off: exact single-attempt legacy behavior).
+    GT_SELF_VERIFY_ATTEMPTS takes precedence (the product name for the outer
+    safety ring — verification that fires AFTER the in-run horizon)."""
+    raw = os.environ.get("GT_SELF_VERIFY_ATTEMPTS", "").strip()
+    if not raw:
+        raw = os.environ.get(_RETRY_FLAG, "").strip()
     try:
         n = int(raw)
     except (TypeError, ValueError):

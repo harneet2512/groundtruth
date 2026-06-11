@@ -688,6 +688,12 @@ excluded, zero gold/FAIL_TO_PASS).
 reach the agent); make the one-shot "no source edits" nudge ESCALATE (the cfn-lint-3875 empty-patch
 loop), capped at 3 and yielding to OH's stuck detector (preserve the 2026-05-25 stuck-compat skip).
 
+> **STATUS (2026-06-11): STILL OPEN.** `_check_multi_file_scope` remains dead-hooked (`governor.py:424`
+> call only from `_handle_finish`). The Stage 3 oracle work (§15.4) re-routes the review-transition
+> emission for obligations only — K-of-N multi-file scope is not ported. GAP_ANALYSIS §11 build plan
+> confirms: "conspicuously absent from §11.8's status block." §16.5 issue B (review-transition 0/9) is
+> the blocking symptom; #4 completeness is a named instance of the same gap.
+
 ### 11.5 Root finding D — fusion is not query-adaptive + non-code gold is invisible
 `_adapt_weights_for_issue` (`v7_4_brief.py:46-157`) adapts W_FRAME/LEX/PATH/REACH/PROX but **never
 W_SEM**. SWE-bench-Live cfn-lint issues quote machine-checkable strings (rule codes `E1010`, paths) →
@@ -880,7 +886,7 @@ integration audit → 1-task dry → benchmark decision (D2).
 
 ---
 
-*End — gt_gt.md. Localization deep internals: `BRIEFING.md`. Benchmark operation/gates:
+*End of §1–§15 — gt_gt.md. Localization deep internals: `BRIEFING.md`. Benchmark operation/gates:
 `BENCHMARK_RUNBOOK.md`. Fix history: `we_did.md` (legacy).*
 
 ---
@@ -987,6 +993,13 @@ this section is the build spec for a dedicated session.
 > at the bottom of this file.
 
 ### 15.1 The diagnosis that motivates it (adversarial re-audit, run 27307362054 — verbatim numbers)
+
+> **UPDATED (2026-06-11):** The 13-claim adversarial fact-check (`LAYER_REPORT_FACTCHECK.md`) confirmed
+> these numbers are ground truth and that the intermediate LAYER_CONFIRMATION report inflated them.
+> The oracle run (27321848581) reproduced the same ~80%-inert pattern: ~62 delivered units/4 tasks;
+> 4–5 consumed-class out of 9 tasks (always where the nudge hit the right obligation); the harm
+> class recurred (aiomonitor tailwind detour suppressed this run only because the agent didn't follow
+> the brief entry, not because it was absent). See §16.2 for the paired oracle metrics.
 
 From the chronological raw-trajectory re-audit of 4 of the run's 10 tasks (~62 delivered GT
 payload units, `ADVERSARIAL_REAUDIT_27307362054.md` "Quantified bottom line"):
@@ -1137,12 +1150,15 @@ WORSE" stuck-detector kill). Research:
   delivered FRONT-LOADED. Its +17.4% average resolved belongs to THAT mechanism. **GT's
   `spec.py` is a deterministic regex subset of that content class, re-timed to decision
   points — its effect is UNMEASURED.** The paper validates the content-class DIRECTION only;
-  do not attach its effect size to GT's extractor.
+  do not attach its effect size to GT's extractor. **(2026-06-11: CONFIRMED NOT an LLM pipeline
+  — REAgent and CodeScout are LLM pipelines; GT's extractor is deterministic regex; the
+  distinction matters for the ONE PRODUCT RULE / $0-AI constraint.)**
 - CodeScout, arXiv 2603.05744, 2026. — Same honesty: **THREE sequential LLM calls** over repo
   + issue (exploration-target identification, per-target LLM analysis, LLM synthesis),
   delivered as FRONT-LOADED preprocessing. Its +20% (up to 27 additional issues on
   SWE-bench-Verified) belongs to that LLM mechanism — not to GT's deterministic extractor,
-  whose effect is UNMEASURED. Content-class direction only.
+  whose effect is UNMEASURED. Content-class direction only. **(2026-06-11: CONFIRMED same
+  class as REAgent — LLM pipeline, not adopted; GT's spec.py is the deterministic subset.)**
 - ORACLE-SWE, arXiv 2604.07789, 2026. — Five oracle signals measured (verified magnitudes,
   SWE-bench-Verified/GPT-4o: baseline ~39.4%; **Reproduction Test +46pp** >> Execution
   Context +12 ≈ Edit Location +11 >> API Usage +8 >> Regression +5; all five combined ≥97%)
@@ -1206,16 +1222,18 @@ Full entries in REFERENCES below.
 
 ### 15.4 The staged build plan (Stages 0–7, each red→green, independently shippable/rollbackable)
 
-| Stage | Builds | Metric it moves |
-|---|---|---|
-| **0** | Trajectory sensor + offline replay harness (edit detection incl. heredoc/`python3 -c`, test-runner+output capture, phase detection, GT-marker delivered-set) | sensor recall on known events (the currently-missed edits are the red set) |
-| **1** | Issue-as-SPEC extractor (`obligations[]` + the F2 anchors-file extension) | extraction precision, hand-audited on held-out non-benchmark issues |
-| **2** | Oracle core around L5 ONLY — byte-parity with current governor first, THEN dedup/relevance/budget/attribution discipline | replay red→green vs ledger ground truth (csstree harmful fire suppressed; boa fire preserved; zero new fires) |
-| **3** | Obligation-aware candidates: Rank-1 test-evidence-gap extension, GT_VERIFY port to mini with obligation checklist, K-of-N scope re-route to review-transition, drift whitelist | consumption rate at review-transition (§4 ledgers) |
-| **4** | Route L3/L3b/L4/consensus through the oracle (relevance-gated witnesses, edit-bound `rearm_on_change` contracts, stale-graph honesty, retire the C0 scope-chain dump) | inert rate ~80% → minority at unchanged correctness; harm rate 0 |
-| **5** | Contract completeness: `extractSignature` captures the full declaration header to body-open (where-clauses/bounds/generic constraints) — needs substrate rebuild | held-out typed-language fixtures; boa [86] shape renders `T: Trace + 'static` |
-| **6** | Calibration pass: per-class distribution-derived floors, HIGH-pin kills, per-task dose caps, replay-tuning on a grown corpus | precision-of-HIGH ≈ 1.0; per-class trigger precision on HELD-OUT repos |
-| **7** | Paired measurement run + the efficiency instrumentation (prereq: the 4 BLOCKS-BENCHMARK metric bugs closed) | BOTH headline metrics: efficiency deltas (first measurement ever) + flips (paired Wilcoxon) |
+> **STATUS (2026-06-11):** Stages 0–2 COMPLETE (byte-parity proven, 78 tests — see §16.1). Stage 3 (review-transition obligation emission) code SHIPPED (`e574a91b`) but **0/9 runtime fires** in the oracle run — trigger or routing gap in the deployed build (§16.4 open issue B). Stages 4–5 code SHIPPED (governor FP closure, loop/coherence sensors, TIDE metrics) but **build lag** means the oracle run measured OLD code for `failure_persisted`/loop (7 unpushed commits at run time). Stages 6–7 NOT BUILT.
+
+| Stage | Builds | Metric it moves | Status (2026-06-11) |
+|---|---|---|---|
+| **0** | Trajectory sensor + offline replay harness (edit detection incl. heredoc/`python3 -c`, test-runner+output capture, phase detection, GT-marker delivered-set) | sensor recall on known events (the currently-missed edits are the red set) | **COMPLETE** — pre-build audit found heredoc already handled; real red set = stateless recompute + delivered-set scan; 78 tests green |
+| **1** | Issue-as-SPEC extractor (`obligations[]` + the F2 anchors-file extension) | extraction precision, hand-audited on held-out non-benchmark issues | **COMPLETE** — `spec.py`, `gt_oracle.py`; 3/3 on-target fires in oracle run |
+| **2** | Oracle core around L5 ONLY — byte-parity with current governor first, THEN dedup/relevance/budget/attribution discipline | replay red→green vs ledger ground truth (csstree harmful fire suppressed; boa fire preserved; zero new fires) | **COMPLETE** — byte-parity 10/10 trajectories; `_latch_key()` bug found+fixed; `tests/test_oracle_stage2_parity.py` 6 tests |
+| **3** | Obligation-aware candidates: Rank-1 test-evidence-gap extension, GT_VERIFY port to mini with obligation checklist, K-of-N scope re-route to review-transition, drift whitelist | consumption rate at review-transition (§4 ledgers) | **CODE SHIPPED** (`e574a91b`) — **0/9 runtime fires** at review-transition; trigger/routing gap (§16.5 issue B) |
+| **4** | Route L3/L3b/L4/consensus through the oracle (relevance-gated witnesses, edit-bound `rearm_on_change` contracts, stale-graph honesty, retire the C0 scope-chain dump) | inert rate ~80% → minority at unchanged correctness; harm rate 0 | **NOT BUILT** |
+| **5** | Contract completeness: `extractSignature` captures the full declaration header to body-open (where-clauses/bounds/generic constraints) — needs substrate rebuild | held-out typed-language fixtures; boa [86] shape renders `T: Trace + 'static` | **CODE-PRESENT** (`contract_map.py:626–665`) — zero runtime confirmation; §16.5 issue G |
+| **6** | Calibration pass: per-class distribution-derived floors, HIGH-pin kills, per-task dose caps, replay-tuning on a grown corpus | precision-of-HIGH ≈ 1.0; per-class trigger precision on HELD-OUT repos | **NOT BUILT** |
+| **7** | Paired measurement run + the efficiency instrumentation (prereq: the 4 BLOCKS-BENCHMARK metric bugs closed) | BOTH headline metrics: efficiency deltas (first measurement ever) + flips (paired Wilcoxon) | **NOT DONE** — M13/M01/M03 measured but all non-significant; prereqs (§16.5 A/E/F/K) not closed |
 
 ### 15.5 The two-leg foundation (per-stage acceptance gate, CLAUDE.md verbatim)
 
@@ -1262,6 +1280,13 @@ Analysis Rules — the oracle's telemetry exists to keep proving where the conte
 
 ### 15.7 The 10-task run findings (run 27307362054) that ground this design
 
+> **UPDATED (2026-06-11):** The adversarial re-audit (`ADVERSARIAL_REAUDIT_27307362054.md`)
+> REFUTED several claims in the original run summary. See §16.3 for the corrected verdicts. Key
+> corrections: "consumed ×10" is REFUTED (~80% inert, 1 firm consumption); "delivered correct
+> context ×10" is OVERSTATED (2 HIGH-wrong pins, fabricated coordinate, truncated boa contract);
+> and the "FIX-A breach confined to scope-chain" reading is wrong — the brief RANKING surface (entry
+> #2) remains unlaundered. The analysis below is amended only where the re-audit changes the fact.
+
 - **0/10 resolved, class=AGENT ×10** (correct under the fixed classifier); 10/10 trajectories
   reached the right files and produced substantial patches that failed on requirement-detail
   edge cases; leakage 0 across all 10 (no hidden-test names, no FAIL_TO_PASS, no GT_META).
@@ -1289,6 +1314,12 @@ Analysis Rules — the oracle's telemetry exists to keep proving where the conte
   tasks GT had a concrete in-scope opportunity to deliver the missing fact at the deciding
   moment and was structurally unable to (boa [86] bounds stripping; heredoc edit-detection
   blindness + the stale-graph hole) — not "purely the harness."
+
+  **(2026-06-11 note):** Full corrected verdicts in §16.3. The oracle run (27321848581) reproduced
+  the same inverted-confidence pins verbatim (abs-stepped `functions.go::New`; aiomonitor
+  `format_running_task_list`) in both arms — the localization scorer is unchanged and the pins
+  are deterministically recurring. The aiomonitor vendored-tailwind.js context bomb re-arms
+  every run (FIX-A brief-level launder open, §16.5 issue C).
 
 ---
 
@@ -1356,3 +1387,101 @@ Analysis Rules — the oracle's telemetry exists to keep proving where the conte
 - Yu, Z., et al., "OrcaLoca: An LLM Agent Framework for Software Issue Localization," *ICML* 2025. [arXiv 2502.00350] — 65.33% function-level match; +6.33pp resolved over its base framework.
 - Zhong, H., et al., "MAPO: Mining and Recommending API Usage Patterns," *ECOOP* 2009. — Mined patterns outperform raw-snippet recommendation (§14, §15.3 WHAT).
 - Zhou, J., Zhang, H. & Lo, D., "Where Should the Bugs Be Fixed? More Accurate Information-Retrieval-Based Bug Localization Based on Bug Reports (BugLocator)," *ICSE* 2012. — Title/summary term weighting; the reporter-confirmed short-name provenance gate (§4.2 fix ②).
+- "Dissecting the SWE-Bench Leaderboards," arXiv 2506.17208, 2025. — Seven architectural groups; universal pattern = staged localize→repair→verify with test execution; no top performer injects contracts/callers (§16 model-agnosticism note).
+- MiniMax-M3 (TokenRouter model), Minimax AI, 2026. — MoE model with $0 prompt-cost tier used in §16 routing validation; proves GT's model-agnosticism (no anthropic/openai dependency).
+
+---
+
+## 16. Session 2026-06-11 — Oracle build (Stages 0–5), 10-task oracle run, adversarial audit
+
+> **Last verified 2026-06-11.** Evidence: `DEEP_TRAJECTORY_ANALYSIS_ORACLE_RUN.md` (9-task
+> oracle-arm §4), `ADVERSARIAL_REAUDIT_27307362054.md` (baseline re-audit), `LAYER_REPORT_FACTCHECK.md`
+> (13 corrected claims), `.claude/reports/ORACLE_STAGE012_BUILD_20260610T2330Z.md` (oracle build record),
+> `.claude/reports/metrics/oracle_vs_baseline_20260611/GT_METRICS_REPORT.md` (paired metrics, N=9).
+
+### 16.1 What was actually built (commits `0e1bd371`→`b65e32c4`, branch `gt-trial`)
+
+| Stage | What it builds | Key commit |
+|---|---|---|
+| **Stage 0** | Trajectory sensor + offline replay harness — stateless `sense(messages)→DerivedState`; edit-detection incl. heredoc/`python3 -c`/`cat >`; delivered-set scan from frozen trajectory; phase detection (ORIENT/IMPLEMENT/VERIFY/REVIEW); offline `oracle.replay(turns)` for calibration | `0e1bd371` |
+| **Stage 1** | Issue-as-SPEC extractor (`gt_oracle.py` `spec.py`) — parses the issue text into `obligations[]` (must-do/raise/throw/preserve sentences); identifies unverified obligation tokens vs observed test output; the F2 anchors-file extension for obligation-localization; `tests/test_oracle_stage1_spec.py` 24 tests | per-commit range |
+| **Stage 2** | Oracle core around L5 — pure `oracle_decide(C, T)` function; byte-parity gate: `oracle.replay` over all 10 frozen `tenpack_27307362054` trajectories reproduces the live governor's fire/suppress set EXACTLY (boa `no_test_evidence` FIRE preserved; csstree harmful nudge SUPPRESSED; aiomonitor/awilix SILENCE); in-stage bug found+fixed (`_latch_key()` reconstruction — loop+scaffold_trap shared latch key re-fired every turn ≥25); `tests/test_oracle_stage2_parity.py` 6 tests | `e574a91b` |
+| **Stage 3** | Review-transition obligation-STATUS emission — the **#1 lever** per the oracle diagnosis; per-clause obligation table (edited?/tested? recomputed statelessly from T); dedup key = `(content × phase × obligation-status)` not bare content-hash; fires at `review_transition` event; `gt_mini_patch.py` obligation-candidate routing at `:2067–2071` | `e574a91b` |
+| **Stage 4** | Loop / coherence detectors — 4-signal composite for no-new-state loop (command + normalized-observation exact-pair), 3-signal coherence for stale-binary/dead-code patterns; TIDE behavioral sensor (`loop_ratio`, `edit_coverage`, `test_coverage` — the TRAJEVAL-family metrics); dynamic escalation (`V` from observed pace, bands from behavioral signals) | `e574a91b` |
+| **Stage 5** | Governor FP closure — `failure_persisted` now requires: (1) real test-runner invocation (pytest/unittest/go test/cargo test/npm test/jest/runtests.py), (2) no env/tooling error marker, (3) explicit test/assertion FAILURE marker; the `fd` run's `git apply error:` false-positive blocked; `loop` arm gated on proven no-new-state (command+normalized-obs pair); `scaffold_trap` unchanged (4/5 true-positive in the audit) | `e574a91b` |
+
+**Additional built items (same commit range):**
+- **MiniMax-M3 model routing** (`TokenRouter`, `gt_mini_patch.py:1847` region): routes non-critical generation to MiniMax-M3 at $0 prompt cost, proving GT's model-agnosticism (no anthropic/openai dependency at the inference layer).
+- **Metrics framework M01–M26** — M01–M19 efficiency + outcome metrics (steps-to-gold-read/edit, wasted steps, suppression rate, localization H@1/P@3, consumption grade, inverted-confidence rate, etc.); **M20–M26 code-quality metrics** added this session: M20 callee-attribution precision (how often `file::symbol` coordinates exist in graph.db), M21 obligation-coverage (fraction of issue-obligation tokens present in at least one emission), M22 clause-granularity (fraction of multi-clause obligations split), M23 review-transition fire rate, M24 false-positive governor rate, M25 loop-detection recall (fraction of ≥3-repeat loops caught), M26 sibling-shape delivery rate (fraction of ADD-mode edits with a sibling-shape block). `compute_paired_metrics.py` (commit `6744bfc7`) — all 19 GT metrics + paired Wilcoxon + bootstrap CI.
+- **Self-verification retry gate** (`GT_RETRY_ON_VERIFIER_FAIL`, `gt_agent.py`) — code complete; NOT enabled in any workflow (`deepswe_full.yml`) — the env var is never forwarded. **This is an open plumbing gap**: any run launched without it silently measures oracle-only; the retry loop (the closer for both audited causal trajectory wins) has never fired in a live run.
+
+### 16.2 The 10-task oracle-only run (27321848581) — results
+
+**Setup:** oracle arm (GT-on, Stages 0–5 live), mini-swe-agent, 10 tasks (arktype failed/missing → 9 evaluated), 5 languages (Go ×2, Python ×2, TypeScript ×1, JavaScript ×2, Rust ×2). Run 27307362054 = same-task baseline (prior run, frozen, 0/10 resolved). All tasks SUBMITTED; 0/9 resolved. `failure_class=AGENT ×9` under the §12 reconciliation (cert false-fail corrected). Zero leakage (no hidden-test names, no FAIL_TO_PASS, no GT_META).
+
+**Paired metrics (M-series, oracle vs baseline, N=9, from `GT_METRICS_REPORT.md`):**
+
+| Metric | Baseline | Oracle | Delta | p (Wilcoxon) | Interpretation |
+|---|---|---|---|---|---|
+| M13 steps-to-gold-edit | lower | higher (+1.89 mean, +4.00 median) | **negative** | p=0.6250 | oracle arm slower to first gold edit; not significant |
+| M01 steps-to-first-gold-read | lower | higher (+0.33) | — | p=0.8594 | no improvement |
+| M03 total steps | — | 6/9 LONGER | — | p=0.4844 | 6 tasks longer in oracle arm |
+| M04 brief P@3 | 0.63 | 0.59 | −0.04 | — | small regression |
+| M04 H@1 (boa) | 1 | 0 | −1 | — | inverted-confidence pin regressed after rerank fixes |
+| M17 wasted steps | — | fewer (directional) | +dir | p=0.0625 | not significant; only directional win |
+| M20 hidden test improvement (aiomonitor) | 1/5 | 4/5 | **+3** | n=1 | causal trajectory win (obligation nudge → async correct) |
+| M13 (fd extension) | fail | pass | flip | n=1 | obligation nudge → extension hidden tests all passed |
+
+**Bottom line:** 0 binary flips, 0 regressions on resolution. Primary efficiency metrics non-significant and pointing the wrong direction on most tasks. Two audited causal trajectory wins (aiomonitor async: 1/5→4/5 hidden tests; fd extension: hidden tests passed) — both attributable to the obligation nudge, both 1 retry loop away from plausible resolution; the retry loop was never armed. Noise volume down (chars −9% to −58%); M17 directionally better. **Not "done" by DEFINITION OF DONE.**
+
+### 16.3 What the adversarial audit changed (run 27307362054 corrected verdicts)
+
+The LAYER_REPORT_FACTCHECK.md identified 13 inflated or false claims in the post-run layer report. The corrected picture:
+
+| Claim | Status |
+|---|---|
+| "GT delivered correct context ×10" | OVERSTATED — 2 HIGH-confidence wrong localization pins (inverted confidence); fabricated `commands.py::format_running_task_list` coordinate; vendored `tailwind.js` at brief entry #2; truncated boa [86] contract |
+| "Consumed ×10" | REFUTED — ~80% inert; ~15% wrong/harmful; 1 firm consumption (boa `no_test_evidence` nudge); 2 partial; the "BEHAVIORAL" credits in the original ledgers were vacuous |
+| "Oracle fixed confidence inversion" | FALSE — M11 inverted-confidence rate = 1.00 on abs-stepped in BOTH arms; oracle does not touch the brief's pin path |
+| "L5 governor 3/3 on-target" | MISATTRIBUTED — the 3/3 on-target fires came from the SPEC obligation producer (`reason="test_evidence_gap"`, `layer="spec"` in `gt_oracle.py`), not L5's `_l5_no_test_evidence_nudge` (different producer, different reason string) |
+| "Suppression reduced chars 30–58%" | UNDERSTATED lower bound — actual: −9% (aiomonitor) / −23% (abs) / −58% (awilix); was quoted as 30–58% |
+| "Agent life measurably easier" | FALSE — M13 steps-to-gold-edit WORSE in oracle arm (+1.89); 6/9 tasks longer |
+| "Post-oracle distribution 40–60% inert, 5–10% useful, <5% harmful" | UNMEASURED — no ground-truth measurement exists; FIX-A brief-level launder still renders at entry #2 |
+| Consensus K-of-N verdict "CORRECT on mini" | UNPROVEN — zero live fires in any run to date; code-complete, runtime-unverified |
+| Substrate verdict "CORRECT" | INCOMPLETE — `GT_RETRY_ON_VERIFIER_FAIL` set nowhere in any workflow; `instance_id:null` blocks Wilcoxon pairing; cert over-claims `LSP_ACTIVE_VALID` at 0 conversions |
+| "Top-1 wrong 3/10 in most recent run" | STALE — the actual most recent (oracle arm) has top-1 wrong on 4/9; P@3 regressed 0.63→0.59 |
+
+### 16.4 Cross-language synthesis from the 9-task oracle audit
+
+The oracle-arm trajectories (9 tasks, 5 languages) confirm and sharpen the §15.7 picture:
+
+**The single dominant failure mode** is language-independent: the agent submits with issue-verbatim obligations unexecuted, after spending its verification budget on tests that do not exercise them. Go = integration with frozen existing behavior; Python = sentence-level semantic inversion; TS/Rust = API-shape compile contracts; JS = output-semantics details / architecture placement. All 9/9 losses are post-localization spec-compliance losses; 0/9 are localization losses.
+
+**Oracle machinery scorecard (9-task run):**
+
+| Mechanism | Fired | Right content | Wrong/defective | Consumed | Verdict |
+|---|---|---|---|---|---|
+| `test_evidence_gap` / obligation nudge | ~9 (1/task) | always issue-verbatim | **selection**: first-matched token in 4/9 a survivable/already-safe obligation; csstree fired on false "you have edited" premise (heredoc sensor gap, `edits=0.0`) | 4–5/9 — and where it hit the right obligation, those hidden tests PASSED | **the proven lever, mis-aimed and one-shot** |
+| review-transition emission | **0 of 9** | — | **THE gap** — the canonical pre-submit moment went silent in every trajectory | — | Stage 3's Stage-1 ship proves the mechanism; zero runtime fires |
+| `no_test_evidence` | 1 (boa step 188) | timing correct | satisfiable by pre-existing tests → false confidence | partial | needs obligation-targeted satisfaction |
+| `failure_persisted` | 3 | — | **3/3 false positives** (pre-existing failures ×2; fd `git apply error:` ×1) — the Stage 5 FP-closure fix is NOT holding on this build | 0 | classifier fix live in code; build/digest lag means old code ran |
+| no-new-state loop nudge | 0 | — | fd's 5× identical stale-binary loop (~75 wasted steps) hit silence | — | sensor not live or build lag |
+| L1 brief / localization | 9/9 | 4–5 file-grain correct | **4–5 wrong, 2 RECURRING VERBATIM from the prior run** (abs-stepped `functions.go::New` HIGH wrong pin; aiomonitor `format_running_task_list` HIGH wrong-file coordinate + vendored `tailwind.js` at entry #2) | 1–2 | inverted-confidence is systemic and deterministic-recurring; inverted even after the rerank fixes shipped |
+
+**Plumbing defects measured live:** heredoc edit-detection gap (csstree `edits=0.0`, abs-stepped test-file writes unseen, katex partial); `[gt-patch:loaded]` agent-visible leak (abs-module — the 2026-06-10 stderr fix did NOT hold on this build path); doubled `<gt-task-brief>` wrapper (`brief_delivered: 2.0` on every task); instruction-text corruption (`:end:` → 🔚, echoed into agent code); truncated "Expected behavior" extracts cut mid-token; deep-metrics accounting blind (`gt_injected_tokens_total=0.0`, `per_layer={}` against 20–72KB observed GT text).
+
+### 16.5 Open issues added or re-prioritized by this session
+
+| # | Issue | Priority | Notes |
+|---|---|---|---|
+| A | **Self-verification retry gate never armed** (`GT_RETRY_ON_VERIFIER_FAIL` in no workflow) | BLOCKS-BENCHMARK | The closer for both causal wins; missing plumbing gap; set the env var in `deepswe_full.yml` |
+| B | **Review-transition obligation emission silent 0/9** | Highest product lever | Stage 3 code shipped; zero runtime fires confirm the trigger or routing is wrong in the deployed build |
+| C | **FIX-A brief-level launder open** (aiomonitor `tailwind.js` at entry #2 in both arms) | High | Fact-filter protects FACT ROWS; ranking/graph-map/scope-chain surfaces unprotected; re-arms every run |
+| D | **Inverted-confidence HIGH-wrong pins systemic** (abs-stepped `functions.go::New`; aiomonitor `commands.py::format_running_task_list`) | High | Both recurring verbatim across two runs; the callee-attribution fabrication bug (wrong file in the coordinate) is distinct from the rerank issue |
+| E | **`instance_id: null`** in all outcome.json — blocks paired Wilcoxon | BLOCKS-BENCHMARK | `deepswe_outcome.py:476-479` finds nothing in pier result shape |
+| F | **Outcome misclassification** (`cert_fail→failure_class=GT` without §12 witness reconciliation) | BLOCKS-BENCHMARK | `deepswe_outcome.py:256-257`; G4 from GAP_ANALYSIS |
+| G | **Contract renderer strips where-clauses / trait bounds** (boa [86]) — Stage 5 spec'd | High | `contract_map.py:626–665` fix code-present; zero runtime confirmation; no run has re-exercised the boa shape since the fix |
+| H | **§14 feature-shaped context / ADD-mode sibling-shape producer** — not built | Deep product gap | Design complete (§14); all three audits confirm this is the dominant context-gap for feature tasks (~60% wrong-KIND); nothing built |
+| I | **`failure_persisted` FP-closure and loop sensor not holding on deployed build** | Medium | Stage 5 code is committed; build lag (7 unpushed commits) means old code ran in the oracle run; push + substrate rebuild required |
+| J | **Obligation selection mis-aimed** (first-matched token, 4/9 survivable obligations) | Medium | Fix: rank candidates by error-identifier/exactness class + `tested?=false` status |
+| K | **Patch capture pollution** (csstree `package-lock.json`; arktype ~300KB regenerated artifact) | BLOCKS-BENCHMARK | Harness workspace-diff captures toolchain side-effects; needs exclusion list |

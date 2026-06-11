@@ -422,11 +422,20 @@ def _neighbors(
     # stdlib-shadow guard checks (``stdlibmod.<target_name>(``); the SOURCE file +
     # line locate the call site. Both are pulled so the guard can run; harmless
     # when repo_root is unset.
+    # FIX 2 (2026-06-11, gt_gt §16.5 issue C): pull BOTH endpoint languages so
+    # the cross-language disqualifier can run on this <gt-graph-map> surface —
+    # a deterministic-stamped CALLS edge between different language families is
+    # impossible and previously rendered here unfiltered (the FIX-A brief-level
+    # launder). Legacy schema (no nodes.language) stays permissive ('').
+    has_lang = _nodes_have_language(conn)
+    n_lang_sel = "n.language" if has_lang else "''"
+    foc_lang_sel = "nfoc.language" if has_lang else "''"
     sql = (
         f"SELECT DISTINCT n.name, n.file_path, {conf_sel}, {method_sel}, "
-        f"ntgt.name, e.source_file, e.source_line "
+        f"ntgt.name, e.source_file, e.source_line, {n_lang_sel}, {foc_lang_sel} "
         f"FROM edges e JOIN nodes n ON {join_col} = n.id "
         f"JOIN nodes ntgt ON e.target_id = ntgt.id "
+        f"JOIN nodes nfoc ON {match_col} = nfoc.id "
         # SWAP-INVARIANT (run16 leak): never surface a test node as a caller/callee — the
         # <gt-graph-map> "called by:" leaked 6 test_plot_hdi* functions. is_test nodes are excluded.
         f"WHERE {match_col} IN ({placeholders}) AND e.type = 'CALLS' AND n.is_test = 0"
@@ -453,8 +462,14 @@ def _neighbors(
     # best-provenance row wins deterministically. A name_match row can no longer
     # win the dedup and silently downgrade a real fact.
     candidates: list[Edge] = []
-    for name, fpath, conf, method, target_name, src_file, src_line in rows:
+    for name, fpath, conf, method, target_name, src_file, src_line, n_lang, foc_lang in rows:
         if not name:
+            continue
+        # CROSS-LANGUAGE disqualifier (FIX 2): a CALLS edge whose endpoints are
+        # in DIFFERENT language families cannot be a real source-level call,
+        # whatever its recorded resolution_method — drop it before it renders
+        # as a fact or an (unverified) hint. Unknown language -> keep.
+        if _is_cross_language_pair(n_lang, foc_lang):
             continue
         # STDLIB-SHADOW secondary defense (parity with the witness twin): when the
         # call site reads ``<stdlib>.<target>(``, the edge is a name-match to a
