@@ -530,28 +530,7 @@ def _is_stdlib_shadow(code: str, target_name: str) -> bool:
 #       only, and substrate graphs are frozen, so the consumer fact surface
 #       is the operative guard. Same family as the stdlib-shadow guard above.
 # ---------------------------------------------------------------------------
-_VENDOR_DIR_MARKERS: tuple[str, ...] = (
-    "/extern/", "/externals/", "/vendor/", "/vendored/", "/third_party/",
-    "/thirdparty/", "/node_modules/", "/bower_components/", "/dist/",
-    "/_generated/", "/generated/", "/site-packages/",
-)
-_MINIFIED_SUFFIXES: tuple[str, ...] = (".min.js", ".min.css", ".min.mjs", ".min.map")
-_GENERATED_FILE_MARKERS: tuple[str, ...] = (
-    "zz_generated", ".pb.go", ".pb.gw.go", "_pb2.py", "_pb2_grpc.py",
-    ".generated.", "_generated.go", ".g.dart", ".freezed.dart",
-)
-
-
-def _is_vendored_path(fp: str) -> bool:
-    """Path-class filter: vendored/minified/generated code is never a DELIVERED
-    fact. Segment-anchored, language-agnostic path conventions."""
-    f = "/" + (fp or "").replace("\\", "/").lstrip("./").lstrip("/").lower()
-    if any(m in f for m in _VENDOR_DIR_MARKERS):
-        return True
-    base = f.rsplit("/", 1)[-1]
-    if base.endswith(_MINIFIED_SUFFIXES):
-        return True
-    return any(m in base for m in _GENERATED_FILE_MARKERS)
+from groundtruth.delivery.path_policy import is_vendored_path as _is_vendored_path
 
 
 # Mirrors resolver.go builtinMethodNames + strongBuiltinMethodNames (the T2

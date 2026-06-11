@@ -219,19 +219,7 @@ def _is_generic_symbol(sym: str) -> bool:
     return s.startswith("__") and s.endswith("__")
 
 
-_GENERATED_MARKERS: tuple[str, ...] = (
-    "zz_generated", ".pb.go", ".pb.gw.go", "_pb2.py", "_pb2_grpc.py",
-    ".generated.", "/generated/", "_generated.go", ".g.dart", ".freezed.dart",
-)
-
-
-def _is_generated(fp: str) -> bool:
-    """True for machine-generated files (protobuf, grpc, codegen) that are never
-    hand-edited fix targets. Cross-ecosystem marker list, language-agnostic — it
-    keeps a generated hub (run_function.pb.go, deg 201) from out-ranking the real
-    edit target. Correct-or-quiet: a heavy score penalty, not a hard drop."""
-    f = (fp or "").lower()
-    return any(m in f for m in _GENERATED_MARKERS)
+from groundtruth.delivery.path_policy import is_generated as _is_generated
 
 
 # Test file detection — language-agnostic patterns covering all 5+ Tier-1
