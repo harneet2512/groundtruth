@@ -54,12 +54,14 @@ from __future__ import annotations
 import base64
 import logging
 import os
+import re
 import textwrap
 from pathlib import Path
 from pier.agents.installed.mini_swe_agent import MiniSweAgent
 from pier.environments.base import BaseEnvironment
 from pier.models.agent.context import AgentContext
 from pier.models.agent.install import AgentInstallSpec, InstallStep
+from pier.models.trial.paths import EnvironmentPaths
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +124,13 @@ _GT_HOOK_CANDIDATES = [
     _THIS_DIR / "gt_hook.py",
 ]
 _PATCH_PATH = _THIS_DIR / "gt_mini_patch.py"
+# Oracle siblings (LIPI 2026-06-10): gt_mini_patch._load_gt_oracle() loads
+# gt_oracle.py (which requires gt_oracle_sense.py) from ITS OWN directory to
+# produce the live SPEC/obligation candidates. Without shipping both siblings
+# to /opt/gt the live obligation fire stays dead in-container (the exact gap
+# this wiring closes). Best-effort: absent files -> correct-or-quiet skip.
+_ORACLE_PATH = _THIS_DIR / "gt_oracle.py"
+_SENSE_PATH = _THIS_DIR / "gt_oracle_sense.py"
 
 
 def _load(path_candidates: list[Path]) -> str | None:
@@ -136,6 +145,8 @@ def _load(path_candidates: list[Path]) -> str | None:
 
 _GT_HOOK_CONTENT = _load(_GT_HOOK_CANDIDATES)
 _PATCH_CONTENT = _load([_PATCH_PATH])
+_ORACLE_CONTENT = _load([_ORACLE_PATH])
+_SENSE_CONTENT = _load([_SENSE_PATH])
 
 # ---------------------------------------------------------------------------
 # Base64 encoding for heredoc injection (gt_hook.py is ~115KB+)
@@ -391,6 +402,32 @@ def _inject_steps() -> list[InstallStep]:
         )
         # Wire the patch into mini-swe-agent's import chain
         steps.append(InstallStep(user="root", run=_APPEND_TO_MINI))
+
+    # --- gt_oracle.py + gt_oracle_sense.py: the SPEC/obligation producer ---
+    # gt_mini_patch._load_gt_oracle() resolves these as same-directory siblings
+    # at the review transition; both must land in /opt/gt for the live
+    # obligation fire (load_obligations) to exist in-container.
+    for fname, content in (("gt_oracle.py", _ORACLE_CONTENT),
+                           ("gt_oracle_sense.py", _SENSE_CONTENT)):
+        chunks = _b64_chunks(content)
+        if not chunks:
+            continue
+        b64name = fname.replace(".py", ".b64")
+        for i, chunk in enumerate(chunks):
+            op = ">" if i == 0 else ">>"
+            steps.append(
+                InstallStep(user="root", run=f'echo "{chunk}" {op} {_GT_DIR}/{b64name}')
+            )
+        steps.append(
+            InstallStep(
+                user="root",
+                run=(
+                    f"base64 -d {_GT_DIR}/{b64name} > {_GT_DIR}/{fname} "
+                    f"&& chmod 644 {_GT_DIR}/{fname} "
+                    f"&& rm -f {_GT_DIR}/{b64name}"
+                ),
+            )
+        )
 
     # --- Repo root detection ---
     steps.append(InstallStep(user="root", run=_ROOT_DETECT))
@@ -767,12 +804,129 @@ def _emit_gt_meta_witness() -> None:
         _fail(f"witness_exception:{e}", prebuilt="unknown")
 
 
+# ---------------------------------------------------------------------------
+# Write->test->fix retry loop (PIER_INTEGRATION.md §d Option 2 — the in-agent
+# retry; gt_gt §15.6: "the verification loop" is the dominant measured lever:
+# Reflexion NeurIPS 2023 +11pp; Self-Debug ICLR 2024; ORACLE-SWE Reproduction
+# Test the largest single signal).
+#
+# CONFIRMED from pier 0.2.0 source (the "confirm which" the plan demanded):
+#   * pier's Verifier is TRIAL-level (trial.py:318 `Verifier(task=self._task, …)`);
+#     the agent receives only (instruction, environment, context) — there is NO
+#     `self._task` on the agent, so pier's verifier is NOT callable from run().
+#   * the verifier's test script (tests/test.sh) lives HOST-side in the task dir
+#     and is uploaded to /tests only AT VERIFY TIME (verifier.py:134-143) — it
+#     does not exist in the container while the agent runs.
+#   * test.sh applies the HIDDEN test patch (/tests/test.patch) and captures
+#     model.patch from the worktree — running it mid-run would LEAK the hidden
+#     test suite into the agent's context (leakage MUST be 0; no FAIL_TO_PASS /
+#     hidden tests in product logic) and contaminate the model.patch artifact.
+# => the retry verifier calls the test command DIRECTLY: the repository's OWN
+#    visible test suite, executed in the container via environment.exec().
+#    Command source: GT_RETRY_TEST_CMD (explicit per-run config) or the
+#    language-dispatched auto-detection below (ONE surface, not per-task logic).
+#
+# Flag: GT_RETRY_ON_VERIFIER_FAIL = number of retries (0 = off, the default —
+# without the flag behavior is byte-identical to today). Cap: 2 retries
+# (3 total attempts) to bound cost. Applied to BOTH arms (GT-on and
+# GT_BASELINE) so a paired measurement compares the same harness.
+#
+# Oracle statelessness across retries (verified by construction): every
+# attempt shells a NEW `mini-swe-agent` process in the container
+# (mini_swe_agent.py:891-901 exec_as_agent), so gt_mini_patch's module-global
+# latches (loaded per-interpreter via the .pth bootstrap) start FRESH each
+# attempt, and the oracle recomputes its state from that attempt's own
+# trajectory — exactly the right behavior for a retry.
+# ---------------------------------------------------------------------------
+_RETRY_FLAG = "GT_RETRY_ON_VERIFIER_FAIL"
+_RETRY_MAX = 2                     # hard cap: 3 total attempts
+_RETRY_TIMEOUT_DEFAULT = 600       # seconds per in-container test run
+_FEEDBACK_TAIL_CHARS = 6000        # bounded failure-output dose
+
+_RC_NO_ROOT = 96                   # repo root not found -> unverifiable
+_RC_NO_RUNNER = 97                 # no recognizable test runner -> unverifiable
+
+# Language-dispatched, repo-native test command (ONE surface — mirrors the LSP
+# dispatch-by-extension rule; no per-task or per-benchmark logic). The repo
+# root comes from /opt/gt/gt_root.txt (the GT install step) with a generic
+# fallback scan.
+_RETRY_TEST_AUTODETECT = (
+    'R="$(cat /opt/gt/gt_root.txt 2>/dev/null)"; '
+    'if [ -z "$R" ] || [ ! -d "$R" ]; then '
+    'for d in /app /testbed /workspace /home/user /repo; do '
+    '[ -d "$d/.git" ] && R="$d" && break; done; fi; '
+    f'[ -z "$R" ] && exit {_RC_NO_ROOT}; cd "$R" || exit {_RC_NO_ROOT}; '
+    "if [ -f go.mod ]; then go test ./... 2>&1; "
+    "elif [ -f Cargo.toml ]; then cargo test 2>&1; "
+    "elif [ -f package.json ] && grep -q '\"test\"' package.json; then "
+    "npm test --silent 2>&1; "
+    "elif [ -f pyproject.toml ] || [ -f setup.py ] || [ -f setup.cfg ] "
+    "|| [ -f pytest.ini ] || [ -d tests ]; then python3 -m pytest -x -q 2>&1; "
+    f"else exit {_RC_NO_RUNNER}; fi"
+)
+
+# Environment-shaped failures are NOT test failures: injecting "Tests failed"
+# for a runner that cannot even start would misdirect the agent (correct-or-
+# quiet — the same _ENV_FAIL_RE discipline the in-container governors use).
+_ENV_UNVERIFIABLE_RE = re.compile(
+    r"(command not found|not recognized as|No module named|ModuleNotFoundError"
+    r"|error: could not find `Cargo\.toml`"
+    r"|cannot find package|npm ERR! missing script"
+    r"|Unable to locate package|no such file or directory: .*(?:go|cargo|npm|pytest))",
+    re.I,
+)
+
+
+def _retry_count() -> int:
+    """Retries from GT_RETRY_ON_VERIFIER_FAIL, capped at _RETRY_MAX.
+    Unset/0/garbage -> 0 (off: exact single-attempt legacy behavior)."""
+    raw = os.environ.get(_RETRY_FLAG, "").strip()
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(n, _RETRY_MAX))
+
+
+def _retry_test_command() -> tuple[str, str]:
+    """(command, display_name) for the in-loop verifier check. GT_RETRY_TEST_CMD
+    wins (explicit per-run config); otherwise the auto-detected repo-native
+    runner."""
+    explicit = os.environ.get("GT_RETRY_TEST_CMD", "").strip()
+    if explicit:
+        return explicit, explicit
+    return _RETRY_TEST_AUTODETECT, "repository test suite (auto-detected runner)"
+
+
+def _format_test_feedback(attempt: int, display_cmd: str, rc: int,
+                          output: str) -> str:
+    """The structured failure message prepended to the retry attempt's
+    instruction. Arm-neutral tag (<test-feedback>, not <gt-…>): this is
+    harness execution feedback, identical across GT-on and baseline arms."""
+    tail = (output or "").strip()
+    if len(tail) > _FEEDBACK_TAIL_CHARS:
+        tail = "…(truncated)…\n" + tail[-_FEEDBACK_TAIL_CHARS:]
+    return (
+        f'<test-feedback attempt="{attempt}">\n'
+        "Tests failed: your previous attempt did not pass the test suite.\n"
+        f"Command: {display_cmd}\n"
+        f"Exit code: {rc}\n"
+        "Failing output (tail):\n"
+        f"{tail}\n"
+        "Fix the failures: re-read the failing assertions, correct your "
+        "changes in the repository (your previous edits are still present), "
+        "and re-run the tests to confirm they pass before you finish.\n"
+        "</test-feedback>"
+    )
+
+
 class GTMiniSweAgent(MiniSweAgent):
     """MiniSweAgent with full 3-phase GroundTruth integration.
 
     Phase 1: graph.db indexing in the container (install_spec)
     Phase 2: L1 brief prepended to instruction (run)
     Phase 3: observation interception via gt_mini_patch.py (install_spec)
+    Phase 4: optional write->test->fix retry loop (GT_RETRY_ON_VERIFIER_FAIL)
 
     Set GT_BASELINE=1 to disable all GT injection (control arm).
     """
@@ -788,13 +942,94 @@ class GTMiniSweAgent(MiniSweAgent):
             spec.steps.extend(_inject_steps())
         return spec
 
+    async def _retry_verifier_check(
+        self, environment: BaseEnvironment, cmd: str
+    ) -> tuple[str, int, str]:
+        """Run the in-loop verifier command in the container and classify the
+        result: ('pass'|'fail'|'unverifiable', return_code, output).
+        Correct-or-quiet: any shape that is not a REAL test failure (missing
+        root/runner, environment failure, exec error, timeout) is
+        'unverifiable' — never injected as feedback."""
+        timeout_raw = os.environ.get("GT_RETRY_TEST_TIMEOUT_SEC", "").strip()
+        try:
+            timeout = int(timeout_raw) if timeout_raw else _RETRY_TIMEOUT_DEFAULT
+        except (TypeError, ValueError):
+            timeout = _RETRY_TIMEOUT_DEFAULT
+        try:
+            res = await environment.exec(command=cmd, timeout_sec=timeout)
+        except Exception as e:  # noqa: BLE001 -- exec/timeout failure != test failure
+            return "unverifiable", -1, f"verifier exec failed: {e}"
+        out = (res.stdout or "")
+        if res.stderr:
+            out = f"{out}\n{res.stderr}" if out else res.stderr
+        rc = res.return_code
+        if rc == 0:
+            return "pass", 0, out
+        if rc in (_RC_NO_ROOT, _RC_NO_RUNNER):
+            return "unverifiable", rc, out
+        if _ENV_UNVERIFIABLE_RE.search(out or ""):
+            return "unverifiable", rc, out
+        return "fail", rc, out
+
+    async def _archive_attempt_artifacts(
+        self, environment: BaseEnvironment, attempt: int
+    ) -> None:
+        """Preserve the finished attempt's trajectory/log before the retry
+        overwrites them (best-effort; /logs is the mounted trial dir)."""
+        try:
+            ad = str(EnvironmentPaths.agent_dir)
+            await environment.exec(command=(
+                f"mv {ad}/mini-swe-agent.trajectory.json "
+                f"{ad}/mini-swe-agent.trajectory.attempt{attempt}.json 2>/dev/null; "
+                f"cp {ad}/mini-swe-agent.txt "
+                f"{ad}/mini-swe-agent.attempt{attempt}.txt 2>/dev/null; true"
+            ))
+        except Exception:  # noqa: BLE001 -- archival must never break the loop
+            pass
+
+    async def _run_with_test_retry(
+        self, instruction: str, environment: BaseEnvironment, context: AgentContext
+    ) -> None:
+        """The write->test->fix loop (Option 2): run the agent; run the
+        repo-native test command in the SAME container (edits persist); on a
+        REAL failure, prepend the structured failure output to the original
+        instruction and re-enter the agent loop. Capped at _RETRY_MAX retries.
+        GT_RETRY_ON_VERIFIER_FAIL unset/0 -> exactly one super().run(), no
+        verifier exec — byte-identical to the pre-retry behavior."""
+        retries = _retry_count()
+        if retries <= 0:
+            await super().run(instruction, environment, context)
+            return
+        cmd, display_cmd = _retry_test_command()
+        attempt_instruction = instruction
+        total_attempts = retries + 1
+        for attempt in range(1, total_attempts + 1):
+            await super().run(attempt_instruction, environment, context)
+            if attempt >= total_attempts:
+                break
+            status, rc, output = await self._retry_verifier_check(environment, cmd)
+            print(f"[GT_RETRY] attempt={attempt}/{total_attempts} "
+                  f"status={status} rc={rc}", flush=True)
+            if status != "fail":
+                # pass -> done; unverifiable -> stop (never inject non-test noise).
+                break
+            await self._archive_attempt_artifacts(environment, attempt)
+            # Latest feedback + the ORIGINAL instruction (no accumulation —
+            # one bounded feedback block per attempt, dose-disciplined).
+            attempt_instruction = (
+                _format_test_feedback(attempt + 1, display_cmd, rc, output)
+                + "\n\n" + instruction
+            )
+
     async def run(
         self, instruction: str, environment: BaseEnvironment, context: AgentContext
     ) -> None:
         """Run mini-swe-agent with GT brief and preamble prepended."""
         if _GT_BASELINE:
-            # Control arm: pure mini-swe-agent, no GT content at all
-            await super().run(instruction, environment, context)
+            # Control arm: pure mini-swe-agent, no GT content at all.
+            # The retry loop is HARNESS mechanics, not GT content — it applies
+            # to both arms so paired measurement compares the same harness.
+            await self._run_with_test_retry(instruction, environment, context)
             return
 
         augmented = instruction
@@ -833,4 +1068,4 @@ class GTMiniSweAgent(MiniSweAgent):
         except Exception:
             pass
 
-        await super().run(augmented, environment, context)
+        await self._run_with_test_retry(augmented, environment, context)

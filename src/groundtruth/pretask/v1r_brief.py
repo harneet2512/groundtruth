@@ -2617,6 +2617,17 @@ def generate_v1r_brief(
             if _anchors_obj is None:  # hoisted single-source extraction (2026-06-10)
                 from groundtruth.pretask.anchors import extract_issue_anchors as _eia
                 _anchors_obj = _eia(issue_text, graph_db)
+            # Oracle Stage 1: the issue-as-SPEC obligations + unresolved_code_symbols
+            # (F2) ride the SAME already-shipped artifact. The spec extractor is a
+            # SEPARATE consumer of issue_text from anchors (opposite filtering: it
+            # KEEPS async/await/returns the anchor extractor drops). Deterministic,
+            # no graph dependency, correct-or-quiet (empty list on empty issue).
+            try:
+                from groundtruth.pretask.spec import extract_spec as _extract_spec
+                _spec = _extract_spec(issue_text)
+                _obligations = _spec.to_serializable()
+            except Exception:
+                _obligations = []
             try:
                 with open("/tmp/gt_issue_anchors.json", "w", encoding="utf-8") as _af:
                     _json_anch.dump({
@@ -2625,6 +2636,9 @@ def generate_v1r_brief(
                         "test_names": sorted(_anchors_obj.test_names),
                         "title_symbols": sorted(getattr(_anchors_obj, "title_symbols", set())),
                         "code_symbols": sorted(getattr(_anchors_obj, "code_symbols", set())),
+                        "unresolved_code_symbols": sorted(
+                            getattr(_anchors_obj, "unresolved_code_symbols", set())),
+                        "obligations": _obligations,
                     }, _af)
             except OSError:
                 pass  # non-container / read-only /tmp (e.g. unit tests) — no consumer

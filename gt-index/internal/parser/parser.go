@@ -475,7 +475,7 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 			}
 		}
 		if name != "" {
-			sig := extractSignature(node, src)
+			sig := extractSignature(node, src, spec.BodyField)
 			retType := extractFieldText(node, spec.ReturnTypeField, src)
 
 			// Compute qualified name: Parent.Name for methods, just Name for top-level
@@ -1195,16 +1195,60 @@ func extractFirstIdentifier(node *sitter.Node, src []byte) string {
 	return ""
 }
 
-func extractSignature(node *sitter.Node, src []byte) string {
-	// Get the first line of the node as signature
+// extractSignature returns the FULL declaration header of a function node:
+// everything from the node start up to (not including) its body child — so
+// trait bounds, where-clauses, generic constraints, throws clauses, and
+// multi-line parameter lists are preserved for every language whose spec maps
+// a BodyField (Stage 5, ORACLE_ARCHITECTURE_PLAN.md — the old first-line
+// truncation stripped boa's `T: Trace + 'static` where-clause, so the
+// [CALLEE] renderer, which renders nodes.signature verbatim, could not carry
+// the killing fact). Language-uniform: the cut point is the grammar's own
+// body node, never a language-specific delimiter.
+func extractSignature(node *sitter.Node, src []byte, bodyField string) string {
+	if bodyField != "" {
+		if body := node.ChildByFieldName(bodyField); body != nil {
+			start, end := node.StartByte(), body.StartByte()
+			if end > start && int(end) <= len(src) {
+				return normalizeSignature(string(src[start:end]))
+			}
+		}
+	}
+	// No body child (bodyless signature items — Rust trait fns, Java
+	// interface methods — or a spec without a BodyField): keep the legacy
+	// first-line behavior. Taking the whole node text here could swallow a
+	// body the grammar exposes under a different field name.
 	text := node.Content(src)
 	if idx := strings.Index(text, "\n"); idx >= 0 {
 		text = text[:idx]
 	}
-	if len(text) > 200 {
-		text = text[:200]
+	return normalizeSignature(text)
+}
+
+// normalizeSignature flattens a (possibly multi-line) declaration header onto
+// ONE line: each physical line is trimmed and clipped at 200 chars (the
+// pre-existing per-line clip, kept), non-empty lines are joined with single
+// spaces, and the result is capped at 1000 chars to bound pathological
+// headers. Single-line output keeps every existing consumer working unchanged
+// (goReceiverType, the resolver's signature-fingerprint parsers, the
+// [CALLEE]/_sanitize_signature render path) while carrying the full header.
+func normalizeSignature(text string) string {
+	lines := strings.Split(text, "\n")
+	parts := make([]string, 0, len(lines))
+	for _, ln := range lines {
+		ln = strings.TrimSpace(ln)
+		if ln == "" {
+			continue
+		}
+		if len(ln) > 200 {
+			ln = strings.TrimSpace(ln[:200])
+		}
+		parts = append(parts, ln)
 	}
-	return strings.TrimSpace(text)
+	out := strings.Join(parts, " ")
+	if len(out) > 1000 {
+		out = strings.TrimSpace(out[:1000])
+	}
+	return out
 }
 
 // ── Import extraction ─────────────────────────────────────────────────────

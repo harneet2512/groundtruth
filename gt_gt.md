@@ -974,3 +974,385 @@ non-mut `Context`) — sibling accessors are `&self`-shaped, a graph-derivable f
 
 **Explicitly NOT done now:** no new channel, no detector, no renderer were built — minimal-diff rule;
 this section is the build spec for a dedicated session.
+
+---
+
+## 15. The Stateless Deterministic Delivery Oracle (2026-06-10)
+
+> **Design of record:** `ORACLE_ARCHITECTURE_PLAN.md` (full spec). Evidence base:
+> `RESEARCH_BETTER_CONTEXT.md` (7-claim literature pass), `ADVERSARIAL_REAUDIT_27307362054.md`
+> (the diagnosis), `task_ledgers/RUN_27307362054_SUMMARY.md` (the 10-task run),
+> `FLIP_LEVERS_ON_THE_TABLE.md` (lever inventory). DESIGN — not built; staged plan in §15.4.
+> Every citation in this section is fully documented in the consolidated REFERENCES section
+> at the bottom of this file.
+
+### 15.1 The diagnosis that motivates it (adversarial re-audit, run 27307362054 — verbatim numbers)
+
+From the chronological raw-trajectory re-audit of 4 of the run's 10 tasks (~62 delivered GT
+payload units, `ADVERSARIAL_REAUDIT_27307362054.md` "Quantified bottom line"):
+
+| Class | Share | What it was |
+|---|---|---|
+| **Consumed AND useful** | **~2–5%** | exactly **ONE firm item**: the `no_test_evidence` governor nudge (boa) — short, active, delivered AT THE DECISION POINT (after a 120s zero-output `cargo test`); it changed the agent's verification behavior |
+| **Delivered, correct, inert** | **~80%** | nearly all post_view witnesses, scope blocks, contracts — factually fine, zero demonstrable effect on any decision |
+| **Wrong / harmful** | **~15%** | 2 HIGH-confidence wrong localization pins (inverted confidence), a fabricated cross-language scope chain (consumed → ~350KB context bomb), wrong-file contract blocks, a truncated killing contract (boa [86] — `T: Trace + 'static` stripped), a harmful nudge detour (csstree) |
+
+Three structural facts explain the distribution: (1) **untimed dumps were not acted on** —
+turn-0 evidence had no demonstrable effect by the decisive edit (aiomonitor step 104, boa step
+86+). Citation-honest framing (2026-06-10 adversarial verification): Lost-in-the-Middle (Liu
+et al., TACL 2024) measured STATIC prompts and found a U-shaped curve in which the BEGINNING is
+a FAVORED (primacy) position — it supports recency placement for C1 payloads (and, by primacy,
+the C0 front-loaded brief), NOT an anti-front-loading claim; the inertness evidence here is
+GT's OWN trajectory audit, not LitM; (2) **the one consumed payload was timed, scoped, and short** — fired on a
+trajectory event, at the agent's live decision, as one imperative sentence; (3) **each layer
+dumps independently** (L1 prepends; L3/L3b per-edit/per-view; L5 per-turn; consensus its own
+block) — nothing decides whether *this payload, now, is the one thing worth the agent's
+attention*.
+
+### 15.2 The architecture — GT → oracle → agent
+
+```
+Issue → FTS5 → graph → LSP → scoring → ┌──────────────────────────────┐
+                                        │  CANDIDATE POOL (all layers) │
+   agent trajectory-so-far ──────────►  │  ORACLE: pure decision gate  │ ──► one emission
+                                        │  (trigger·confidence·        │     (or silence)
+                                        │   relevance·dedup·dose)      │
+                                        └──────────────────────────────┘
+```
+
+- **Pure function:** `oracle(C, T) → E` where `C` = the candidate pool (every payload all GT
+  layers computed, one shared schema), `T` = the trajectory-so-far exactly as it appears in
+  `output.jsonl` / `mini-swe-agent.txt`, `E` = `{emit(c, channel, dose)}` with **|E| ≤ 1 per
+  turn, or ∅ (silence)**.
+- **All layers become candidate PRODUCERS** (L1, L3, L3b, L4, L5, L5b, consensus, plus the new
+  SPEC producer); ONE gate decides WHEN / WHERE / HOW-MUCH / WHAT. This is the locked "L5
+  decides WHEN, L3/L3b provide WHAT" mandate **generalized across every layer** — not a ninth
+  layer; ONE PRODUCT RULE preserved (one candidate schema, one gate, one pipeline).
+- **Stateless:** the oracle holds NO memory between turns — delivered-set (content-hash markers
+  scanned from T), self-discovered-set (token-intersection with the agent's OWN observations),
+  edit events (incl. heredoc/`python3 -c` writes — the current detection gap becomes a sensor
+  requirement), test evidence, per-obligation edited?/tested? status, agent phase
+  (ORIENT/IMPLEMENT/VERIFY/REVIEW), and failure/loop state are all **deterministically
+  recomputed from T each turn**. Same `(C, T)` → same output, bit-for-bit → replayable offline
+  against frozen trajectories (what makes calibration and red→green testing possible).
+- **Decision function (per turn):** SENSE → TRIGGER → CONFIDENCE (per-task distribution-derived
+  floors, never hardcoded) → RELEVANCE (∩ current focus / unmet obligation) → DEDUP →
+  BUDGET (≤1 emission, dynamic per-task cap) → RANK (severity × confidence × relevance, 8-dp
+  deterministic tie-break) → EMIT (+ full suppression telemetry even on silence).
+- **NO LLM (hard rule):** trigger predicates + thresholds + set intersections + dedup hashes.
+  Nothing generative, learned, or sampled.
+
+### 15.3 The four per-emission decisions — every citation, fully documented
+
+#### WHEN — decision-point triggers, never ambient narration
+A candidate fires only on a sensed trajectory event (`edit_touches_issue_symbol`,
+`review_transition`, `repeated_failure`, `no_new_state_loop`, `test_zero_output` /
+`test_evidence_gap`, `drift` (whitelist-only), `view` (relevance-gated)). Research:
+
+- Liu, N. F., et al., "Lost in the Middle: How Language Models Use Long Contexts," *TACL* 2024
+  (arXiv 2307.03172, 2023). — RECENCY support ONLY (citation-honest, 2026-06-10): the U-shaped
+  curve over STATIC prompts shows performance is highest with relevant content at the BEGINNING
+  (primacy — which favors the C0 brief) or the END (recency — which favors C1 placement at the
+  end of the current context). The paper does NOT show front-loaded content "decaying" as a
+  trajectory grows; that extrapolation is retracted. The case for decision-point timing rests
+  on GT's own trajectory ground truth, below.
+- ORACLE-SWE (arXiv 2604.07789, 2026) — cited honestly for timing: its oracle signals were
+  appended to the INITIAL user prompt — **front-loaded — and it works** (Reproduction Test
+  dominant; all five signals combined ≥97%). It validates the CONTENT classes (§WHAT), not
+  decision-point delivery; do not borrow its authority for the WHEN thesis.
+- Iqbal, S. T. & Bailey, B. P., "Effects of Intelligent Notification Management on Users and
+  Their Tasks," *CHI* 2008. — Deferring notifications to task breakpoints measurably cuts
+  interruption cost (frustration, resumption time) vs immediate delivery.
+- Iqbal, S. T. & Bailey, B. P., "Oasis: A Framework for Linking Notification Delivery to the
+  Perceptual Structure of Goal-Directed Tasks," *ACM TOCHI* 2010. — A deployed framework
+  scheduling notification delivery at perceptually-defined breakpoints of goal-directed tasks;
+  breakpoint-aligned delivery reduces disruption. Review-transition and post-edit are the
+  agent-loop analogue of those breakpoints.
+- Horvitz, E., "Principles of Mixed-Initiative User Interfaces," *CHI* 1999. — A mixed-
+  initiative agent should act only when the expected utility of acting exceeds the attention
+  cost of the interruption — the oracle's emit-vs-silence calculus.
+- Chen, V., et al., "Need Help? Designing Proactive AI Assistants for Programming," *CHI* 2025
+  (arXiv 2410.04596). — Proactive programming-assistant suggestions timed to a just-occurred
+  problem are preferred and more accepted than mid-task interjections.
+- (Scope note: Iqbal & Bailey 2008/2010, Horvitz 1999, and Chen et al. 2025 are HUMAN-subject
+  attention/interruption studies — applied here as ANALOGY, not agent evidence. No cited work
+  measures breakpoint-timed delivery for LLM agents.)
+- Plus GT's own ground truth: the single consumed payload of run 27307362054 fired at
+  `test_zero_output`; and the SWE-agent test-guardrail precedent (+10.7pp — Yang et al.,
+  *NeurIPS* 2024, already cited at `oh_gt_full_wrapper.py:1195`).
+
+#### WHERE — the consumed channel, as an active check
+Two channels, strictly assigned: **C0** (turn-0 front prepend — the L1 orientation brief ONLY,
+the single legitimate front-load: it serves the agent's FIRST decision) and **C1** (post-action
+observation append — everything correctness-related, rendered as a SHORT ACTIVE CHECK at
+recency position, the favored end of the U-curve). No submit channel exists (the submit action
+never reaches `env.execute()` on mini — F3); review-transition on C1 is the canonical
+pre-submit moment. Research:
+
+- Pu, K., et al., "Assistance or Disruption? Exploring and Evaluating the Design and Trade-offs
+  of Proactive AI Programming Support," *CHI* 2025 (arXiv 2502.18658). — Proactive programming
+  support carries a measured disruption cost; placement/timing trade-offs determine whether
+  support nets positive — the channel-discipline basis (distinct paper from Chen et al.
+  2410.04596 above; both CHI 2025; human-subject — analogy).
+- TRAJEVAL, arXiv 2603.24631, 2026. — Mid-trajectory feedback injection into INTERCEPTED TOOL
+  OBSERVATIONS, dosed at most once per event to avoid flooding — the published agent-side
+  mechanism closest to GT's C1 observation-append channel; the external evidence that the
+  channel itself is viable. Honesty note: the "SHORT ACTIVE CHECK > passive line" FRAMING
+  claim still has no external citation — it rests on exactly ONE consumed payload in GT's own
+  data (the boa `no_test_evidence` nudge, n=1) and is stated as a hypothesis, not a rule.
+
+#### HOW-MUCH — confidence-gated dynamic dose; correct-or-quiet
+≤1 emission/turn, each ≤ its `dose_cost` (nudge ≈1–3 sentences); per-task dynamic cap railed
+(e.g. [4..10]/task, nudges ≤3); tier gating per CLAUDE.md (`[VERIFIED]`≥0.9 free at its
+trigger; `[WARNING]` 0.5–0.9 only with ≥2 relevance keys; `[INFO]`<0.5 NEVER on C1). Over-fire
+is harm with receipts (csstree detour, ~350KB aiomonitor context bomb, 2026-05-25 "MORE GT =
+WORSE" stuck-detector kill). Research:
+
+- Cuconasu, F., et al., "The Power of Noise: Redefining Retrieval for RAG Systems," *SIGIR*
+  2024 (arXiv 2401.14887). — Quoted honestly (2026-06-10): what degrades generation is
+  semantically-RELATED but non-answer-bearing (DISTRACTING) documents; truly RANDOM documents
+  can even IMPROVE accuracy (up to ~30–35%); and relevant content should sit near the query
+  (recency). GT's wrong-but-plausible payloads are exactly the harmful distractor class —
+  the corrected citation is STRONGER for correct-or-quiet than the earlier misquote. No cited
+  paper prescribes ≤1 emission/turn or any numeric dose — those are engineering choices whose
+  real basis is GT's own incident record (2026-05-25 "MORE GT = WORSE", the ~350KB aiomonitor
+  context bomb).
+- Pu, K., et al., "Assistance or Disruption? …," *CHI* 2025 (arXiv 2502.18658). — (same entry
+  as WHERE) the measured disruption cost of proactive support bounds the dose.
+- Horvitz, E., *CHI* 1999 — (same entry as WHEN) attention cost sits inside the utility
+  calculus; silence is a first-class action.
+
+#### WHAT — issue-obligation/constraint over code-map (severity order 1→4)
+1. **Obligation candidates** (`issue_verbatim` provenance — the issue's own requirements
+   re-positioned at the decision point; zero misdirection risk), 2. **verification-gap
+   candidates** (the proven-consumed class), 3. **contract candidates bound to the CURRENT
+   edit** (complete declarations incl. bounds — the boa [86] fix; sibling-SHAPE in ADD-mode per
+   §14), 4. **code-map narration** (the ~80%-inert class, demoted, anchor/obligation-gated).
+   Research:
+
+- REAgent, arXiv 2604.06861, 2026. — Cited honestly (2026-06-10): the mechanism is an
+  **LLM PIPELINE** — a requirement-generation LLM agent that autonomously EXPLORES THE
+  REPOSITORY, fills a 9-attribute template (incl. root-cause analysis, modification locations,
+  impact scope), with assessment/refinement LLM agents sampling at temperature 0.5/0.1,
+  delivered FRONT-LOADED. Its +17.4% average resolved belongs to THAT mechanism. **GT's
+  `spec.py` is a deterministic regex subset of that content class, re-timed to decision
+  points — its effect is UNMEASURED.** The paper validates the content-class DIRECTION only;
+  do not attach its effect size to GT's extractor.
+- CodeScout, arXiv 2603.05744, 2026. — Same honesty: **THREE sequential LLM calls** over repo
+  + issue (exploration-target identification, per-target LLM analysis, LLM synthesis),
+  delivered as FRONT-LOADED preprocessing. Its +20% (up to 27 additional issues on
+  SWE-bench-Verified) belongs to that LLM mechanism — not to GT's deterministic extractor,
+  whose effect is UNMEASURED. Content-class direction only.
+- ORACLE-SWE, arXiv 2604.07789, 2026. — Five oracle signals measured (verified magnitudes,
+  SWE-bench-Verified/GPT-4o: baseline ~39.4%; **Reproduction Test +46pp** >> Execution
+  Context +12 ≈ Edit Location +11 >> API Usage +8 >> Regression +5; all five combined ≥97%)
+  — a reproduction requirement is the dominant signal class. Delivery posture: front-loaded
+  (see the WHEN honesty note above).
+- Shinn, N., et al., "Reflexion: Language Agents with Verbal Reinforcement Learning," *NeurIPS*
+  2023 (arXiv 2303.11366). — Reflect-on-execution-feedback loop: 91.0% vs 80.0% pass@1 on
+  HumanEval (+11pp); ablating test execution collapses the gain.
+- Chen, X., et al., "Teaching Large Language Models to Self-Debug," *ICLR* 2024 (arXiv
+  2304.05128). — Model inspects execution results and explains its own code ("rubber duck");
+  execution feedback is necessary — without it self-correction gains are minimal.
+- "Type-Constrained Code Generation with Language Models," arXiv 2504.09246, 2025. — Enforcing
+  well-typedness at decode time: **+37% pass@1 on repair** (largest effect), >50% fewer
+  compilation errors — type constraints carry real signal, but via an enforcement loop GT does
+  not have; GT's deliverable form is the complete typed declaration as context.
+- "LLM Type Errors" (type-correctness study), arXiv 2510.10216, 2025. — Type errors alone
+  account for **33.6%** of failed LLM-generated programs — the failure mass complete contracts
+  target.
+- Xia, C. S., et al., "Agentless: Demystifying LLM-based Software Engineering Agents," *FSE*
+  2025 (arXiv 2407.01489). — Repair-step recipe = issue + **±10 lines** around the edit
+  location + test feedback; narrow, decision-bound context beats rich structural dumps — the
+  oracle's severity ordering encodes exactly that.
+- Yang, J., et al., "SWE-agent: Agent-Computer Interfaces Enable Automated Software
+  Engineering," *NeurIPS* 2024 (arXiv 2405.15793). — ACI design; the test-guardrail
+  (+10.7pp) is the proven precedent for GT's verification-gap nudges.
+- Chen, Z., et al., "LocAgent: Graph-Guided LLM Agents for Code Localization," *ACL* 2025
+  (arXiv 2503.09089). — File Acc@5 92.7% (fine-tuned Qwen-2.5-32B); removing structured
+  retrieval support causes dramatic drops. / Yu, Z., et al., "OrcaLoca: An LLM Agent Framework
+  for Software Issue Localization," *ICML* 2025 (arXiv 2502.00350). — 65.33% function-level
+  match; +6.33pp resolved. Together: localization is partially solved at file level; the open
+  gap is function/line — WHAT within the file.
+- SWE-Explore, arXiv 2606.07297, 2025. — Leading agents reach ~64–68% file hit but only
+  **15–20% line-level recall** of ground-truth evidence — agents find neighborhoods, miss
+  evidence spans.
+- Luan, S., et al., "Aroma: Code Recommendation via Structural Code Search," *OOPSLA/PACMPL*
+  2019 (doi 10.1145/3360578). — Structural code-to-code search; clusters/intersects sibling
+  method bodies into a distilled common pattern (deliver patterns, not raw snippets).
+- Zhong, H., et al., "MAPO: Mining and Recommending API Usage Patterns," *ECOOP* 2009. — Mined
+  API usage patterns help programmers more effectively than raw snippet recommendation.
+- Zhang, F., et al., "RepoCoder: Repository-Level Code Completion Through Iterative Retrieval
+  and Generation," *EMNLP* 2023 (ACL Anthology 2023.emnlp-main.151). — Repo-level retrieval of
+  similar snippets improves completion >10%; iterative retrieval bridges the context-target gap.
+- Holmes, R. & Murphy, G. C., "Using Structural Context to Recommend Source Code Examples
+  (Strathcona)," *ICSE* 2005. — The developer's structural context drives relevant example
+  recommendation — the ADD-mode sibling-SHAPE basis.
+- "Beyond Localization," arXiv 2603.29067, 2025. — Oracle localization improves all tested
+  repair systems but success stays **below 50%** without the verification loop — localization
+  is necessary, not sufficient (the §15.6 ceiling).
+
+#### Carried-over architecture citations (already load-bearing in §§2–14, normalized here)
+RepoGraph (*ICLR* 2025 — k-hop ego-graph, hub caution) · ColBERT MaxSim (Khattab & Zaharia,
+*SIGIR* 2020 — per-symbol late interaction, §11.2) · RRF (Cormack et al., *SIGIR* 2009 — rank
+fusion, §8) · XTA (Tip & Palsberg, *OOPSLA* 2000 — set-propagation call graphs, §2.3 rung
+1.94a) · CHA (Dean, Grove & Chambers, *ECOOP* 1995 — class-hierarchy dispatch resolution, Go
+IMPLEMENTS §2.3) · PyCG (Salis et al., *ICSE* 2021 — assignment-flow resolution, rung 1.96) ·
+demand-driven analysis (Heintze & Tardieu, *PLDI* 2001; Sridharan & Bodík, *PLDI* 2006 —
+query-scoped residual resolution) · BEIR (Thakur et al., *NeurIPS* 2021) + DPR (Karpukhin et
+al., *EMNLP* 2020) + entity-centric (Sciavolino et al., *EMNLP* 2021) — the lexical-vs-dense
+adaptive-fusion evidence, §11.5 · approximate JS call graphs (Feldthaus et al., *ICSE* 2013).
+Full entries in REFERENCES below.
+
+### 15.4 The staged build plan (Stages 0–7, each red→green, independently shippable/rollbackable)
+
+| Stage | Builds | Metric it moves |
+|---|---|---|
+| **0** | Trajectory sensor + offline replay harness (edit detection incl. heredoc/`python3 -c`, test-runner+output capture, phase detection, GT-marker delivered-set) | sensor recall on known events (the currently-missed edits are the red set) |
+| **1** | Issue-as-SPEC extractor (`obligations[]` + the F2 anchors-file extension) | extraction precision, hand-audited on held-out non-benchmark issues |
+| **2** | Oracle core around L5 ONLY — byte-parity with current governor first, THEN dedup/relevance/budget/attribution discipline | replay red→green vs ledger ground truth (csstree harmful fire suppressed; boa fire preserved; zero new fires) |
+| **3** | Obligation-aware candidates: Rank-1 test-evidence-gap extension, GT_VERIFY port to mini with obligation checklist, K-of-N scope re-route to review-transition, drift whitelist | consumption rate at review-transition (§4 ledgers) |
+| **4** | Route L3/L3b/L4/consensus through the oracle (relevance-gated witnesses, edit-bound `rearm_on_change` contracts, stale-graph honesty, retire the C0 scope-chain dump) | inert rate ~80% → minority at unchanged correctness; harm rate 0 |
+| **5** | Contract completeness: `extractSignature` captures the full declaration header to body-open (where-clauses/bounds/generic constraints) — needs substrate rebuild | held-out typed-language fixtures; boa [86] shape renders `T: Trace + 'static` |
+| **6** | Calibration pass: per-class distribution-derived floors, HIGH-pin kills, per-task dose caps, replay-tuning on a grown corpus | precision-of-HIGH ≈ 1.0; per-class trigger precision on HELD-OUT repos |
+| **7** | Paired measurement run + the efficiency instrumentation (prereq: the 4 BLOCKS-BENCHMARK metric bugs closed) | BOTH headline metrics: efficiency deltas (first measurement ever) + flips (paired Wilcoxon) |
+
+### 15.5 The two-leg foundation (per-stage acceptance gate, CLAUDE.md verbatim)
+
+Every stage ships only if it passes BOTH legs:
+
+- **LEG 1 — GENERALIZATION.** `.claude/CLAUDE.md`: "**Generalized** — works on any repo / agent
+  / language / model. No benchmark-shape logic, task IDs, or gold labels." Project CLAUDE.md:
+  "If your implementation improves a benchmark by overfitting to benchmark structure, task IDs,
+  gold files, FAIL_TO_PASS labels, repeated smoke tasks, specific repos, specific models, or
+  specific agent behavior, you must stop and call it out immediately." Oracle mechanisms are
+  structural (predicates over harness-output text + issue text + graph provenance); confidence
+  floors are per-task distribution-derived; the drift trigger is whitelist-only until a
+  held-out non-benchmark corpus certifies precision; tuning splits are by repo+language, never
+  by task; gold is measurement-only, post-hoc, never in product logic.
+- **LEG 2 — PRODUCT + FLIPS.** `.claude/CLAUDE.md`: "produce **flips** … by delivering
+  **correct context** that lets the agent write **correct code**. … **The arrow: correct
+  context → correct code → flips.** Flips are the OUTPUT that proves it works, not a feature to
+  engineer toward." Core Product Contract verbatim: "reduce turns-to-useful-edit", "reduce
+  turns-to-gold-read/edit", "compact, high-precision evidence", "**stay silent when
+  uncertain**", "agent-assisting, not agent-controlling"; must NOT "flood the agent with graph
+  noise", "delay first useful edit", "increase action count without outcome gain", "inject
+  low-confidence evidence as if it is fact". And: "**DEFINITION OF DONE: metrics changed.**" —
+  DONE here = the Stage-7 paired measurement (efficiency Δ + flips, Wilcoxon), nothing earlier.
+
+### 15.6 The honest ceiling (bounded by the verification loop)
+
+**Can buy:** harm → ~0 (HIGH-pin kills, fabricated-coordinate kill, C0 scope-dump retirement,
+premise-sensed nudges — a wrong confident pin COSTS turns today); inert ~80% → a minority
+(correctness content moved to sensed decision points at recency position — the only delivery
+shape with a proven consumption in our own data); efficiency deltas finally measured; 2–4 of
+the 10 failure shapes become contestable (the obligation/test-evidence class: aiomonitor's
+"async", boa's `Trace`, katex's never-thrown validation).
+
+**Cannot buy:** **the verification loop** — the dominant measured lever is write→test→fix with
+failure-specific feedback (ORACLE-SWE; Reflexion *NeurIPS* 2023; Self-Debug *ICLR* 2024);
+without it, context-only improvement plateaus below ~50% oracle success ("Beyond Localization"
+arXiv 2603.29067). GT can say "you never observed your new API execute"; it cannot make the
+agent write and iterate the test — that is the harness (pier closes exactly this; the 0/10 was
+mini-swe without it). **The unconvertible residue:** awilix's conscious algorithm punt, fd's
+ordering corners, arktype's recursive $defs — no deterministic context plausibly converts
+these; claiming otherwise would violate this codebase's own rules. Model-capability limits
+(~3% even at full oracle signals, ORACLE-SWE) are never filed as a loss cause per the Mandatory
+Analysis Rules — the oracle's telemetry exists to keep proving where the context gap actually was.
+
+### 15.7 The 10-task run findings (run 27307362054) that ground this design
+
+- **0/10 resolved, class=AGENT ×10** (correct under the fixed classifier); 10/10 trajectories
+  reached the right files and produced substantial patches that failed on requirement-detail
+  edge cases; leakage 0 across all 10 (no hidden-test names, no FAIL_TO_PASS, no GT_META).
+- **Bottleneck = the harness:** every loss is spec-compliance/self-verification against
+  requirements VERBATIM in the agent's own context (aiomonitor's "async", boa's `Trace`
+  sentence, csstree's canonical-order, abs-stepped's `[::2]`); mini-swe-agent has no
+  write→test→fix loop against stated requirements — the 0/10 is NOT comparable to the pier
+  0.790 board number; a fair comparison needs GT-on-pier or a paired baseline mini arm.
+- **Efficiency UNMEASURED — the Stage-7 obligation:** no paired efficiency metric
+  (turns-to-gold-read/edit, time-to-first-useful-edit, wasted-detour count) has ever been
+  computed; the Core Product Contract's efficiency half is un-claimed until Stage 7 measures it.
+- **FIX-A held:** the cross-language disqualifier held 9/10; boa (rust + 657 vendored v8-bench
+  JS files, the exact pre-fix launder shape) came back clean on every surface with a direct
+  paired before/after kill of the prior run's `deltablue.js` launder; the aiomonitor
+  py→vendored-JS scope-chain breach is a confirmed 1-off (close in normal course with a
+  vendored/minified-asset filter — and note: it was CONSUMED, not just rendered).
+- **The adversarial correction (what the re-audit changed):** the run summary's "delivered,
+  factually correct, consumed ×10" was **refuted as stated** — across ~62 payload units,
+  demonstrable helpful consumption ≈ 1 (boa's `no_test_evidence` nudge); ~80% inert; ~15%
+  wrong/harmful; the ledgers' "BEHAVIORAL" consumption grades are mostly vacuous (interfaces
+  preserved that were never at risk; transitions that pre-dated the nudge). Inverted confidence
+  is systemic (2 HIGH pins wrong — abs-stepped `New`, aiomonitor
+  `commands.py::format_running_task_list`, a fabricated coordinate). The honest verdict:
+  **harness-dominant losses with named GT deliverable-context gaps** — in 2 of 4 re-audited
+  tasks GT had a concrete in-scope opportunity to deliver the missing fact at the deciding
+  moment and was structurally unable to (boa [86] bounds stripping; heredoc edit-detection
+  blindness + the stale-graph hole) — not "purely the harness."
+
+---
+
+## REFERENCES — consolidated (every citation in §§1–15, one line each, alphabetical)
+
+> Format: `Author(s), "Title," *Venue* Year. [URL/ID]`. This section is the single citation
+> registry for this document: the short forms used in the body (§2.3, §4.1–4.2, §8, §9, §11,
+> §14, §15) and the SCIP/CHA/XTA/PyCG references carried in CLAUDE.md all resolve to an entry
+> here. No citation appears in the body without an entry below. Entries marked *(as cited in
+> code/CLAUDE.md)* preserve the project's existing attribution where the primary source is a
+> blog/tool rather than a paper.
+
+- "Beyond Localization" (oracle-localization ceiling study), arXiv 2603.29067, 2025. — Oracle localization improves all tested repair systems; success stays below 50% without the verification loop.
+- Chen, V., et al., "Need Help? Designing Proactive AI Assistants for Programming," *CHI* 2025. [arXiv 2410.04596] — Proactive suggestions timed to a just-occurred problem are preferred over mid-task interjections.
+- Chen, X., et al., "Teaching Large Language Models to Self-Debug," *ICLR* 2024. [arXiv 2304.05128] — Execution-feedback self-inspection; without execution feedback, self-correction gains are minimal.
+- Chen, Z., et al., "LocAgent: Graph-Guided LLM Agents for Code Localization," *ACL* 2025. [arXiv 2503.09089] — File Acc@5 92.7%; structured retrieval support is load-bearing.
+- CodeScout, arXiv 2603.05744, 2026. — Structured problem-statement enhancement via THREE sequential LLM calls over repo+issue, front-loaded; +20% on SWE-bench-Verified belongs to that LLM mechanism — content-class direction only for GT's deterministic extractor (effect UNMEASURED).
+- CodeSage: Zhang, D., et al., "Code Representation Learning at Scale," *ICLR* 2024. — Code-tuned embedding evidence for the §11.3 embedder swap.
+- CoIR: Li, X., et al., "CoIR: A Comprehensive Benchmark for Code Information Retrieval Models," arXiv 2407.02883, 2024. — Code-IR benchmark grounding gte-modernbert > e5 for code (§11.3).
+- CodeXEmbed: Liu, Y., et al., "CodeXEmbed: A Generalist Embedding Model Family for Multilingual and Multi-task Code Retrieval," arXiv 2411.12644, 2024. — Multilingual code-retrieval embedding evidence (§11.3).
+- Cormack, G. V., Clarke, C. L. A. & Buettcher, S., "Reciprocal Rank Fusion Outperforms Condorcet and Individual Rank Learning Methods," *SIGIR* 2009. — RRF rank fusion; the fixed k=60 convention (§8).
+- CoSIL (LLM-driven code-graph issue localization), arXiv 2025 *(as cited in code, §9)*. — Graph-search issue localization; comparative context for the localizer design.
+- Cuconasu, F., et al., "The Power of Noise: Redefining Retrieval for RAG Systems," *SIGIR* 2024. [arXiv 2401.14887] — Semantically-related DISTRACTOR documents degrade generation (random noise can improve it); relevant content belongs near the query. Bounds brief breadth and the oracle's distractor risk (§15.3 HOW-MUCH, quoted honestly).
+- Cummins, R., Jose, J. & O'Riordan, C., "Improved Query Performance Prediction Using Standard Deviation," *SIGIR* 2011. — Score-dispersion QPP; basis of the Dimension-4 dense-dispersion gate (§4.2).
+- Dai, Z. & Callan, J., "Deeper Text Understanding for IR with Contextual Neural Language Modeling," *SIGIR* 2019. — Passage-level (MaxP) scoring; basis for the per-symbol max+mean file score (§11.2).
+- Dean, J., Grove, D. & Chambers, C., "Optimization of Object-Oriented Programs Using Static Class Hierarchy Analysis," *ECOOP* 1995. — CHA: resolve dispatch via the class hierarchy (Go IMPLEMENTS, §2.3; CLAUDE.md indexer lever).
+- "Dissecting the SWE-Bench Leaderboards," arXiv 2506.17208, 2025. — Seven architectural groups; universal pattern = staged localize→repair→verify with test execution; no top performer injects contracts/callers.
+- Feldthaus, A., et al., "Efficient Construction of Approximate Call Graphs for JavaScript IDE Services," *ICSE* 2013. — Approximate JS call-graph construction; the JS resolution-strategy reference (CLAUDE.md).
+- Fox, E. A. & Shaw, J. A., "Combination of Multiple Searches," *TREC-2* 1994. — CombMIN/CombMNZ evidence-combination baselines used alongside RRF (§9).
+- Heintze, N. & Tardieu, O., "Demand-Driven Pointer Analysis," *PLDI* 2001. — Just-enough computation for the query variables; the query-time residual-resolution design (CLAUDE.md SCALE).
+- Holmes, R. & Murphy, G. C., "Using Structural Context to Recommend Source Code Examples," *ICSE* 2005. — Strathcona: structural context → example recommendation (§14 sibling-SHAPE; §15.3 WHAT).
+- Horvitz, E., "Principles of Mixed-Initiative User Interfaces," *CHI* 1999. — Act only when expected utility exceeds attention cost; the oracle's emit-vs-silence calculus.
+- Iqbal, S. T. & Bailey, B. P., "Effects of Intelligent Notification Management on Users and Their Tasks," *CHI* 2008. — Defer-to-breakpoint notification delivery measurably cuts interruption cost.
+- Iqbal, S. T. & Bailey, B. P., "Oasis: A Framework for Linking Notification Delivery to the Perceptual Structure of Goal-Directed Tasks," *ACM TOCHI* 2010. — Breakpoint-aligned delivery framework; the WHEN trigger model.
+- Karpukhin, V., et al., "Dense Passage Retrieval for Open-Domain Question Answering," *EMNLP* 2020. — DPR; dense-retrieval strengths/limits grounding adaptive fusion (§11.5).
+- KGCompass (repository-aware knowledge-graph repair), arXiv 2025 *(as cited in code)*. — Path-decay graph traversal (beta=0.85, multi-hop-from-issue-entities); §8 decay constant + §4.1 gate (d).
+- Khattab, O. & Zaharia, M., "ColBERT: Efficient and Effective Passage Search via Contextualized Late Interaction over BERT," *SIGIR* 2020. — MaxSim late interaction; the per-symbol granularity fix (§11.2).
+- Lao, N. & Cohen, W. W., "Relational Retrieval Using a Combination of Path-Constrained Random Walks," *Machine Learning* 81(1), 2010. — PRA hub-discounted paths (§9).
+- Liu, N. F., et al., "Lost in the Middle: How Language Models Use Long Contexts," *TACL* 2024. [arXiv 2307.03172] — U-shaped long-context attention over STATIC prompts: beginning (primacy) AND end (recency) are favored. Supports C1 recency placement and the C0 front-loaded brief; does NOT support anti-front-loading (§15.3, quoted honestly). Also brief breadth (§8).
+- "LLM Type Errors" (type-correctness failure study), arXiv 2510.10216, 2025. — Type errors alone account for 33.6% of failed LLM-generated programs.
+- Luan, S., et al., "Aroma: Code Recommendation via Structural Code Search," *OOPSLA/PACMPL* 2019. [doi 10.1145/3360578] — Distilled sibling-pattern recommendation (§14; §15.3 WHAT).
+- ORACLE-SWE, arXiv 2604.07789, 2026. — Five oracle signals (Verified/GPT-4o: baseline ~39.4%, Reproduction Test +46pp, combined ≥97%); Reproduction Test dominates — the verification-loop ceiling (§15.6). Signals delivered FRONT-LOADED (initial prompt) — content evidence, not timing evidence (§15.3 WHEN honesty note).
+- Pu, K., et al., "Assistance or Disruption? Exploring and Evaluating the Design and Trade-offs of Proactive AI Programming Support," *CHI* 2025. [arXiv 2502.18658] — Measured disruption cost of proactive support; WHERE/HOW-MUCH discipline.
+- PyCG: Salis, V., et al., "PyCG: Practical Call Graph Generation in Python," *ICSE* 2021. [arXiv 2103.00587] — Assignment-graph call resolution for dynamic languages (rung 1.96, §2.3; CLAUDE.md).
+- REAgent, arXiv 2604.06861, 2026. — LLM requirement-generation pipeline with autonomous repo exploration (temp 0.5/0.1), front-loaded; +17.4% average resolved belongs to that mechanism — content-class direction only for GT's deterministic extractor (effect UNMEASURED).
+- RepoCoder: Zhang, F., et al., "RepoCoder: Repository-Level Code Completion Through Iterative Retrieval and Generation," *EMNLP* 2023. [ACL Anthology 2023.emnlp-main.151] — Iterative repo-level similar-snippet retrieval, >10% improvement.
+- RepoGraph: Ouyang, S., et al., "RepoGraph: Enhancing AI Software Engineering with Repository-level Code Graph," *ICLR* 2025. — k-hop ego-graph repo representation; hub caution (§9, §11.7).
+- Saha, R. K., et al., "Improving Bug Localization Using Structured Information Retrieval (BLUiR)," *ASE* 2013. — Field-level lexical bug localization (§9).
+- Sciavolino, C., et al., "Simple Entity-Centric Questions Challenge Dense Retrievers," *EMNLP* 2021. — Identifier/entity-heavy queries favor lexical over dense; Dimension-0 fusion basis (§4.2, §11.5).
+- Shinn, N., et al., "Reflexion: Language Agents with Verbal Reinforcement Learning," *NeurIPS* 2023. [arXiv 2303.11366] — +11pp from the reflect-on-execution loop; ablating test execution collapses it.
+- Shtok, A., Kurland, O., Carmel, D., et al., "Predicting Query Performance by Query-Drift Estimation (NQC)," *ACM TOIS* 2012. — Normalized query commitment; score-dispersion flatness detection (§4.2 Dimension 4).
+- Sourcegraph, "Announcing SCIP," 2022. [sourcegraph.com/blog/announcing-scip] *(as cited in CLAUDE.md)* — Batch whole-project semantic indexing; the scalable language-agnostic precision-pass design reference.
+- Sridharan, M. & Bodík, R., "Refinement-Based Context-Sensitive Points-To Analysis for Java," *PLDI* 2006. — Client-driven refinement with IDE-suitable response times; demand-driven residual resolution (CLAUDE.md SCALE).
+- SWE-agent: Yang, J., et al., "SWE-agent: Agent-Computer Interfaces Enable Automated Software Engineering," *NeurIPS* 2024. [arXiv 2405.15793] — ACI design; the +10.7pp test-guardrail precedent (`oh_gt_full_wrapper.py:1195`).
+- SWE-Explore, arXiv 2606.07297, 2025. — ~64–68% file hit vs 15–20% line-level evidence recall; the recall-not-precision gap.
+- SWE-PRM (process-reward intervention form), *NeurIPS* 2025 *(as cited in `trajectory/governor.py`)*. — Diagnostic-not-prescriptive intervention framing for the K-of-N scope check (§11.4).
+- SWERank, *ICLR* 2025 *(as cited in code)*. — Retrieve→rerank localization; witness hard-negative ordering (§8 witness strengths, §9).
+- TRAJEVAL, arXiv 2603.24631, 2026. — Mid-trajectory feedback injected into intercepted tool observations, dosed at most once per event — the published agent-side precedent for the C1 observation-append channel (§15.3 WHERE).
+- TCTracer: White, R., Krinke, J. & Tan, R., "Establishing Multilevel Test-to-Code Traceability Links," *ICSE* 2020. — Assertion→tested-function linking (pass 4, §2.1; the `assertions` table).
+- Thakur, N., et al., "BEIR: A Heterogeneous Benchmark for Zero-shot Evaluation of Information Retrieval Models," *NeurIPS* 2021 (Datasets & Benchmarks). — No single retriever wins across query types; adaptive fusion basis (§11.5).
+- Tip, F. & Palsberg, J., "Scalable Propagation-Based Call Graph Construction Algorithms," *OOPSLA* 2000. [web.cs.ucla.edu/~palsberg/paper/oopsla00.pdf] — XTA set-propagation (+88% precision over RTA); rung 1.94a (§2.3); CLAUDE.md indexer lever.
+- "Type-Constrained Code Generation with Language Models," arXiv 2504.09246, 2025. — Decode-time well-typedness: +37% repair pass@1, >50% fewer compile errors; the enforcement-vs-information caveat (§15.3 WHAT).
+- Weiser, M., "Program Slicing," *ICSE* 1981. — Forward slicing; the `data_flow` property kind (§2.4).
+- Xia, C. S., et al., "Agentless: Demystifying LLM-based Software Engineering Agents," *FSE* 2025. [arXiv 2407.01489] — Three-stage localization (file 69.7% / function 52.0% / line 35.3%); repair context = issue + ±10 lines.
+- Yu, Z., et al., "OrcaLoca: An LLM Agent Framework for Software Issue Localization," *ICML* 2025. [arXiv 2502.00350] — 65.33% function-level match; +6.33pp resolved over its base framework.
+- Zhong, H., et al., "MAPO: Mining and Recommending API Usage Patterns," *ECOOP* 2009. — Mined patterns outperform raw-snippet recommendation (§14, §15.3 WHAT).
+- Zhou, J., Zhang, H. & Lo, D., "Where Should the Bugs Be Fixed? More Accurate Information-Retrieval-Based Bug Localization Based on Bug Reports (BugLocator)," *ICSE* 2012. — Title/summary term weighting; the reporter-confirmed short-name provenance gate (§4.2 fix ②).

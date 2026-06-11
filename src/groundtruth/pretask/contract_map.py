@@ -632,10 +632,20 @@ def _callee_sig_args(signature: str, callee: str) -> str:
     signature when it does not parse as ``def name(...)``.
     """
     sig = signature.strip()
+    is_pydef = False
     for prefix in ("async def ", "def "):
         if sig.startswith(prefix):
+            is_pydef = True
             sig = sig[len(prefix):].strip()
             break
+    if not is_pydef:
+        # Stage 5 / LIPI 2026-06-10: a non-Python declaration header carries
+        # contract AFTER the arg list — return type, throws, generic
+        # constraints, and the Rust where-clause (`T: Trace + 'static`, the
+        # boa [86] killing fact the parser now preserves). Cutting at the
+        # balanced arg list re-introduced exactly the truncation Stage 5
+        # fixed; render the full header verbatim.
+        return sig.rstrip(":").rstrip()
     # Cut a return annotation / trailing colon after the balanced arg list.
     depth = 0
     end = -1

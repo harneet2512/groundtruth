@@ -1695,6 +1695,300 @@ def _l5_failure_nudge(cmd: str, out_text: str) -> str:
     return ""
 
 
+# ---------------------------------------------------------------------------
+# STAGE-4 ORACLE ROUTING (gt_gt §15.4 Stage 4 / ORACLE_ARCHITECTURE_PLAN §2.2).
+# The block producers (L3 contract, L3 cochange, L3b evidence, consensus scope,
+# L5 nudges) stop appending unconditionally; they become CANDIDATES behind one
+# gate enforcing RELEVANCE (anchors ∪ obligations ∪ edit set), DEDUP
+# (content-hash; rearm_on_change = a changed block re-arms), and BUDGET
+# (<=1 GT block per turn, severity-ranked).  Consensus K-of-N completeness is
+# RE-ROUTED from per-view to the live REVIEW-TRANSITION trigger (§11.4).
+# Kill switch: GT_ORACLE_ROUTE=0 restores the legacy unconditional appends.
+# Telemetry: 8-dp suppression records appended to GT_ORACLE_EVENTS
+# (default /tmp/gt_oracle_events.jsonl) — never agent-visible.
+# ---------------------------------------------------------------------------
+_ORACLE_ROUTE = os.environ.get("GT_ORACLE_ROUTE", "1") != "0"
+_oracle_focus_cache: set[str] | None = None
+_oracle_delivered_hashes: set[str] = set()
+_oracle_edited_rels: set[str] = set()
+_oracle_nonedit_streak = 0
+_oracle_review_fired = False
+# SPEC obligation state (LIPI 2026-06-10: gt_oracle.load_obligations had ZERO
+# live callers — the Rank-1 test-evidence-gap nudge fired only in replay).
+# The live producer mirrors the replay sensor's plan §5.2 surfaces:
+#   edited_tokens — tokens of edit-command text (the edit EVIDENCE: an edit
+#     command carries the code it writes), the "edited?" intersection set;
+#   tested_tokens — tokens of test-runner command+output WHEN a real pass/fail
+#     result was observed (the "tested?" intersection set).
+# Dose (Stage-3 contract): the obligation CLASS emits at most ONCE per task;
+# the production latch is released only on a gate loss (deferred, not destroyed).
+_oracle_obligation_fired = False
+_oracle_edited_tokens: set[str] = set()
+_oracle_tested_tokens: set[str] = set()
+_gt_oracle_mod = None
+_gt_oracle_tried = False
+
+
+def _anchors_path() -> str:
+    """Resolve the per-task gt_issue_anchors.json artifact, call-time.
+    Priority: GT_ANCHORS_PATH (explicit) -> $GT_CERT_DIR/gt_issue_anchors.json
+    (the substrate-consume container mount /gt_artifacts, where the artifact
+    actually lives in the live deepswe_full run — the /tmp default never exists
+    in the agent container) -> the /tmp default (host/replay)."""
+    p = os.environ.get("GT_ANCHORS_PATH")
+    if p:
+        return p
+    cert = os.environ.get("GT_CERT_DIR", "")
+    if cert:
+        cand = os.path.join(cert, "gt_issue_anchors.json")
+        if os.path.isfile(cand):
+            return cand
+    return "/tmp/gt_issue_anchors.json"
+
+
+def _load_gt_oracle():
+    """Lazy sibling load of gt_oracle.py (the SPEC/obligation producer + the
+    distribution-derived gate_pool). Pre-registers THIS module under
+    gt_oracle's sibling key so its primitives (_TEST_RUNNER_RE etc.) are
+    SHARED, never re-executed. Correct-or-quiet: a missing sibling (gt_oracle
+    or its gt_oracle_sense dependency) -> None, no obligation candidates."""
+    global _gt_oracle_mod, _gt_oracle_tried
+    if _gt_oracle_tried:
+        return _gt_oracle_mod
+    _gt_oracle_tried = True
+    try:
+        import importlib.util as _ilu
+        sys.modules.setdefault("gt_mini_patch_oracle", sys.modules[__name__])
+        here = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(here, "gt_oracle.py")
+        if not os.path.isfile(path):
+            return None
+        spec = _ilu.spec_from_file_location("gt_oracle_live", path)
+        if spec and spec.loader:
+            mod = _ilu.module_from_spec(spec)
+            sys.modules["gt_oracle_live"] = mod
+            spec.loader.exec_module(mod)
+            _gt_oracle_mod = mod
+    except Exception:  # noqa: BLE001 -- correct-or-quiet, never break the loop
+        _gt_oracle_mod = None
+    return _gt_oracle_mod
+
+
+def _obligation_nudge_block() -> str:
+    """SPEC producer at the live review transition (gt_gt §15.3 WHAT rank-1 /
+    plan §5.2 — the anchor-aware test-evidence gap): an obligation candidate
+    fires when issue-named symbols were EDITED (symbols ∩ edit-command tokens)
+    but NO observed test output mentions them (symbols ∩ tested tokens = ∅).
+    Confidence is provenance-derived (edit-overlap ratio) and gated by
+    gt_oracle.gate_pool's distribution floor (median+1*MAD over the triggered
+    pool — never a hardcoded threshold). The payload is rendered by the SAME
+    gt_oracle renderer the replay path uses (byte parity live vs replay).
+    Correct-or-quiet: no sibling module / no obligations / every touched
+    obligation already tested -> ''."""
+    global _oracle_obligation_fired
+    om = _load_gt_oracle()
+    if om is None:
+        return ""
+    try:
+        obls = om.load_obligations(_anchors_path())
+        if not obls:
+            return ""
+        cands = []
+        for v in om._obligation_views(obls):
+            touched, conf = om._overlap(v, _oracle_edited_tokens)
+            if not touched:
+                continue
+            if om._obligation_tested(v, _oracle_tested_tokens):
+                continue
+            cands.append(om._obligation_candidate(v, touched, conf))
+        if not cands:
+            return ""
+        winner, _tel = om.gate_pool(cands)  # distribution floor + 8dp rank
+        if winner is None:
+            return ""
+        _oracle_obligation_fired = True  # class dose <=1/task; re-armed on loss
+        return winner.content
+    except Exception:  # noqa: BLE001 -- never break the agent loop
+        return ""
+# Kinds the gate suppressed THIS turn as a re-armable loss (outranked /
+# irrelevant — NOT 'delivered'): _augment_output releases their producers'
+# production-time latches so a one-shot class is DEFERRED to a later turn,
+# never destroyed (LIPI 2026-06-10: the first-edit contract permanently ate
+# the cochange completeness signal; a sev-tie scope block could permanently
+# eat the failure_persisted nudge).
+_oracle_last_losers: set[str] = set()
+_BLOCK_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+# severity ranks (the plan §3.4 WHAT ordering, mirrored from gt_oracle):
+#   5 = issue-verbatim obligation (the un-misdirectable class),
+#   4 = verification-gap nudge, 3 = edit-bound contract, 2 = stuck nudge /
+#   review-time scope completeness, 1 = code-map narration (evidence/cochange).
+_SEV_OBLIGATION = 5
+_SEV_NUDGE_VERIFY = 4
+_SEV_CONTRACT = 3
+_SEV_STUCK = 2
+_SEV_SCOPE = 2
+_SEV_CODEMAP = 1
+
+
+def _oracle_focus() -> set[str]:
+    """The agent's current focus: issue anchors + obligation symbols (from the
+    per-task gt_issue_anchors.json artifact, loaded once) + the stems of files
+    the agent has edited.  Empty anchors -> edit-set-only relevance
+    (fail-quiet, never fail-loud)."""
+    global _oracle_focus_cache
+    if _oracle_focus_cache is None:
+        toks: set[str] = set()
+        try:
+            import json as _j
+            with open(_anchors_path(), encoding="utf-8") as f:
+                data = _j.load(f)
+            for key in ("symbols", "title_symbols", "code_symbols",
+                        "unresolved_code_symbols"):
+                for s in data.get(key) or []:
+                    if isinstance(s, str) and len(s) >= 3:
+                        toks.add(s)
+            for o in data.get("obligations") or []:
+                for s in (o.get("symbols") or []) if isinstance(o, dict) else []:
+                    if isinstance(s, str):
+                        toks.add(s)
+                        toks.update(p for p in s.split(".") if len(p) >= 3)
+        except Exception:  # noqa: BLE001 -- absent artifact -> edit-set only
+            pass
+        _oracle_focus_cache = toks
+    stems = set()
+    for r in _oracle_edited_rels:
+        stem = os.path.splitext(os.path.basename(r))[0]
+        if len(stem) >= 3:
+            stems.add(stem)
+    return _oracle_focus_cache | stems
+
+
+def _oracle_telemetry_write(suppressed, winner) -> None:
+    """8-dp suppression telemetry (plan §1.4) — file/stderr side, NEVER the
+    agent channel."""
+    try:
+        import json as _j
+        if not suppressed and winner is None:
+            return
+        rec = {
+            "emitted": None if winner is None else {
+                "kind": winner[3],
+                "confidence": float(f"{float(winner[1]):.8f}"),
+            },
+            "suppressed": [
+                {"kind": k, "reason": r, "confidence": float(f"{float(c):.8f}")}
+                for k, r, c in suppressed
+            ],
+        }
+        path = os.environ.get("GT_ORACLE_EVENTS", "/tmp/gt_oracle_events.jsonl")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(_j.dumps(rec) + "\n")
+    except Exception:  # noqa: BLE001 -- telemetry must never break the loop
+        pass
+
+
+def _oracle_gate_blocks(cands) -> str:
+    """The live decision gate over this turn's candidate blocks.
+
+    `cands`: list of (severity_rank, kind, block_text, edit_bound).  Returns
+    the SINGLE winning block ('' = silence).  Gates, in order: DEDUP
+    (content-hash delivered-set; rearm_on_change falls out naturally — changed
+    content has a new hash), RELEVANCE (block tokens ∩ focus, waived for
+    edit-bound candidates whose trigger IS the edit), RANK/BUDGET (severity
+    desc, then confidence = focus-coverage ratio desc, then kind asc; <=1
+    emission per turn, losers dropped — no queue)."""
+    import hashlib as _hl
+    global _oracle_last_losers
+    _oracle_last_losers = set()
+    focus = _oracle_focus()
+    passing: list[tuple[int, float, str, str, str]] = []
+    suppressed: list[tuple[str, str, float]] = []
+    for sev, kind, text, edit_bound in cands:
+        if not text:
+            continue
+        h = _hl.sha256(text.encode("utf-8")).hexdigest()[:8]
+        if h in _oracle_delivered_hashes:
+            suppressed.append((kind, "delivered", 0.0))
+            continue
+        keys = {t for t in _BLOCK_TOKEN_RE.findall(text) if len(t) >= 3}
+        matched = keys & focus
+        if not edit_bound and not matched:
+            suppressed.append((kind, "irrelevant", 0.0))
+            _oracle_last_losers.add(kind)
+            continue
+        conf = (len(matched) / len(focus)) if focus else (
+            1.0 if edit_bound else 0.0)
+        passing.append((sev, conf, h, kind, text))
+    winner = None
+    if passing:
+        passing.sort(key=lambda x: (-x[0], -round(x[1], 8), x[3]))
+        winner = passing[0]
+        for p in passing[1:]:
+            suppressed.append((p[3], "outranked", p[1]))
+            _oracle_last_losers.add(p[3])
+        _oracle_delivered_hashes.add(winner[2])
+    _oracle_telemetry_write(suppressed, winner)
+    return winner[4] if winner else ""
+
+
+def _consensus_collect(rel: str) -> None:
+    """Stage-4 consensus producer: build the scope MEMBERSHIP on first view
+    (same `_query_scope` facts) WITHOUT emitting — the per-view scope dump is
+    retired; delivery happens at the review transition."""
+    global _consensus_fired
+    if _consensus_fired:
+        return
+    _consensus_fired = True
+    try:
+        _consensus_scope.add(_norm_rel(rel))
+        for s in _query_scope(rel):
+            _consensus_scope.add(_norm_rel(s))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _scope_completeness_block() -> str:
+    """The K-of-N completeness check at the review transition (§11.4 re-route):
+    emit ONLY when the sensed edit set ∩ scope is a STRICT subset of scope AND
+    the un-edited members are focus-anchored (correct-or-quiet otherwise)."""
+    try:
+        if not _consensus_scope:
+            return ""
+        edited = {_norm_rel(r) for r in _oracle_edited_rels}
+        scope = set(_consensus_scope)
+        if not (scope & edited):
+            return ""  # nothing edited in scope -> no completeness claim
+        unedited = sorted(scope - edited)
+        if not unedited:
+            return ""  # not a strict subset -> scope fully covered
+        focus = _oracle_focus()
+        anchored = []
+        for m in unedited:
+            toks = {t for t in _BLOCK_TOKEN_RE.findall(os.path.basename(m))
+                    if len(t) >= 3}
+            if toks & focus:
+                anchored.append(m)
+        if not anchored:
+            return ""
+
+        def _short(p: str) -> str:
+            r = (p or "").replace("\\", "/")
+            return "/".join(r.split("/")[-2:]) if "/" in r else r
+
+        lines = [f"- {_short(m)} — in GT scope, not yet edited" for m in anchored[:4]]
+        return (
+            '\n<gt-scope reason="completeness">\n'
+            f"You edited {len(scope & edited)} of {len(scope)} graph-connected "
+            "in-scope files. Issue-relevant scope members you have NOT touched:\n"
+            + "\n".join(lines)
+            + "\nConfirm whether the fix is complete without them before "
+            "submitting.\n</gt-scope>"
+        )
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _augment_output(action, out) -> None:
     """Append GT evidence to a command's output dict."""
     global _marker_sent, _action_count, _source_edit_count
@@ -1708,6 +2002,110 @@ def _augment_output(action, out) -> None:
             _marker_sent = True
         cmd = action.get("command", "") if isinstance(action, dict) else str(action)
         _orig_out = out.get("output") or ""  # the command's own output (for failure detect)
+
+        if not _GT_BASELINE and _ORACLE_ROUTE:
+            # ---- STAGE-4 ORACLE ROUTING: producers -> candidates -> ONE gate ----
+            global _oracle_nonedit_streak, _oracle_review_fired, \
+                _oracle_obligation_fired
+            _action_count += 1
+            cands: list[tuple[int, str, str, bool]] = []
+            _kkind, _kf = _classify(cmd)
+            if _kkind == "post_edit" and _kf:
+                _source_edit_count += 1
+                _kroot = _root()
+                _krel = _to_repo_rel(_kf, _kroot)
+                _oracle_edited_rels.add(_krel)
+                _oracle_nonedit_streak = 0
+                # edit EVIDENCE tokens (plan §5.2 "edited?"): the edit command
+                # carries the code it writes (sed pattern / heredoc body) —
+                # mirrors gt_oracle_sense.DerivedState.edited_tokens exactly.
+                _oracle_edited_tokens.update(
+                    t for t in _BLOCK_TOKEN_RE.findall(cmd or "") if len(t) >= 3)
+                _invalidate_on_edit(_krel, _kroot)  # L6 (freshness, not delivery)
+                # L3: EDIT-BOUND contract candidates (rearm_on_change via hash).
+                cands.append((_SEV_CONTRACT, "l3.contract",
+                              _graph_contract_block(_krel), True))
+                cands.append((_SEV_CODEMAP, "l3.cochange",
+                              _cochange_block(_krel), True))
+            else:
+                if _oracle_edited_rels:
+                    _oracle_nonedit_streak += 1
+            if _kkind == "post_view" and _kf:
+                _croot = _root()
+                _crel = _to_repo_rel(_kf, _croot)
+                # consensus: collect scope membership QUIETLY (re-routed).
+                _consensus_collect(_crel)
+            # tested EVIDENCE tokens (plan §5.2 "tested?"): a real test-runner
+            # invocation whose output carries an observed pass/fail result —
+            # mirrors gt_oracle_sense.DerivedState.tested_tokens (tokens of the
+            # observed output AND the test command itself).
+            if _TEST_RUNNER_RE.search(cmd or "") and (
+                    _TEST_FAIL_RE.search(_orig_out)
+                    or _TEST_PASS_RE.search(_orig_out)):
+                _oracle_tested_tokens.update(
+                    t for t in _BLOCK_TOKEN_RE.findall(_orig_out) if len(t) >= 3)
+                _oracle_tested_tokens.update(
+                    t for t in _BLOCK_TOKEN_RE.findall(cmd or "") if len(t) >= 3)
+            # L3b: evidence candidate (view/edit keyed) — RELEVANCE-gated.
+            cands.append((_SEV_CODEMAP, "l3b.evidence", _evidence(cmd), False))
+            # consensus K-of-N completeness at the LIVE review transition.
+            # The latch is consumed only on a NON-EMPTY production (LIPI
+            # 2026-06-10: an empty block at the first transition permanently
+            # blocked a later, non-empty completeness check).
+            if (_oracle_edited_rels and _oracle_nonedit_streak >= 3
+                    and not _oracle_review_fired):
+                _scb = _scope_completeness_block()
+                if _scb:
+                    _oracle_review_fired = True
+                    cands.append((_SEV_SCOPE, "consensus.scope", _scb, True))
+            # SPEC obligations at the SAME review-transition edge (the proven
+            # GT_VERIFY predicate). LIPI 2026-06-10: this is the live caller
+            # load_obligations() never had — the Rank-1 test-evidence-gap
+            # nudge now reaches the agent, not just the replay harness.
+            # edit_bound=True: the trigger IS the review event and the
+            # candidate's symbols intersect the edit set by construction.
+            if (_oracle_edited_rels and _oracle_nonedit_streak >= 3
+                    and not _oracle_obligation_fired):
+                _ob = _obligation_nudge_block()
+                if _ob:
+                    cands.append((_SEV_OBLIGATION, "spec.obligation", _ob, True))
+            # L5 nudges: premise-sensed event candidates (latches unchanged).
+            cands.append((_SEV_STUCK, "l5.stuck", _l5_nudge(cmd, _orig_out), True))
+            cands.append((_SEV_STUCK, "l5.failure",
+                          _l5_failure_nudge(cmd, _orig_out), True))
+            cands.append((_SEV_NUDGE_VERIFY, "l5.no_test",
+                          _l5_no_test_evidence_nudge(cmd, _orig_out), True))
+            _win = _oracle_gate_blocks(cands)
+            # Latch re-arm (LIPI 2026-06-10): a produced-but-not-emitted
+            # candidate is DEFERRED, not destroyed — gate losers release the
+            # production-time latches their producers consumed, so the class
+            # re-competes at a later turn ("consume the one-shot only on a
+            # REAL emit" — the cochange producer's own stated contract).
+            _lost = _oracle_last_losers
+            if _lost:
+                global _cochange_fired, _l5_fired, _l5_failure_fired, \
+                    _l5_notest_fired
+                if "l3.contract" in _lost and _kkind == "post_edit" and _kf:
+                    _contract_seen.discard(_krel)
+                if "l3.cochange" in _lost:
+                    _cochange_fired = False
+                if "l3b.evidence" in _lost and _kkind and _kf:
+                    _seen.discard((_kkind, _to_repo_rel(_kf, _root())))
+                if "consensus.scope" in _lost:
+                    _oracle_review_fired = False
+                if "spec.obligation" in _lost:
+                    _oracle_obligation_fired = False
+                if "l5.stuck" in _lost:
+                    _l5_fired = False
+                if "l5.failure" in _lost:
+                    _l5_failure_fired = False
+                if "l5.no_test" in _lost:
+                    _l5_notest_fired = False
+            if _win:
+                out["output"] = (out.get("output") or "") + _win
+            return
+
+        # ---- LEGACY PATH (GT_ORACLE_ROUTE=0): unconditional appends ----
         # L5/L6 bookkeeping: count actions, track source edits, refresh on edit.
         if not _GT_BASELINE:
             _action_count += 1
