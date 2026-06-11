@@ -2346,6 +2346,12 @@ def _obligation_nudge_block() -> tuple[float, str] | None:
         if not any(s == om.OBL_EDITED_UNTESTED for _v, s, _t, _c in unmet):
             return None
         h = om.status_vector_hash(statuses)
+        # Near budget end (>80% steps spent), clear the dedup so the obligation
+        # gets one final shot even if the status vector hasn't changed — the
+        # agent may never have tested, so the hash is the same as the early fire.
+        budget_b_now = (_action_count / _GT_STEP_LIMIT) if _GT_STEP_LIMIT else 0.0
+        if budget_b_now > 0.80 and h in _oblig_status_emitted:
+            _oblig_status_emitted.discard(h)
         if h in _oblig_status_emitted:
             return None
         # ── COVERING-TEST per untested obligation (Stage B query, FACT-tier
@@ -2378,42 +2384,6 @@ def _obligation_nudge_block() -> tuple[float, str] | None:
         return None
 
 
-_SUBMIT_LIKE_RE = re.compile(r"(^|\s)(submit|finish)(\s|$)", re.I)
-
-
-def _final_obligation_block() -> tuple[float, str, str, bool] | None:
-    """Final pre-submit obligation reserve.
-
-    Same data and renderer as the review-transition producer, but independent
-    of the review-budget/vector latch. It fires only when a submit-shaped action
-    reaches this hook and there is edited-but-untested source obligation debt.
-    """
-    om = _load_gt_oracle()
-    if om is None:
-        return None
-    try:
-        obls = om.load_obligations(_anchors_path())
-        if not obls:
-            return None
-        views = om._obligation_views(obls)
-        statuses = om.obligation_statuses(
-            views, _oracle_edited_tokens, _oracle_tested_tokens)
-        unmet = om.order_unmet(statuses)
-        if not any(s == om.OBL_EDITED_UNTESTED for _v, s, _t, _c in unmet):
-            return None
-        covering: dict[int, dict] = {}
-        for v, s, touched, _conf in unmet:
-            if s != om.OBL_EDITED_UNTESTED:
-                continue
-            hits = _covering_tests_for_symbols(set(touched))
-            if hits:
-                covering[v.idx] = hits[0]
-        payload = om.render_obligation_status_block(statuses, covering)
-        if not payload:
-            return None
-        return (_SEV_GATE, "spec.obligation.final", payload, True)
-    except Exception:  # noqa: BLE001
-        return None
 # Kinds the gate suppressed THIS turn as a re-armable loss (outranked /
 # irrelevant — NOT 'delivered'): _augment_output releases their producers'
 # production-time latches so a one-shot class is DEFERRED to a later turn,
@@ -2906,14 +2876,20 @@ def _oracle_gate_blocks(cands) -> str:
             1.0 if edit_bound else 0.0)
         passing.append((sev, conf, h, kind, text))
     # ── DISTRIBUTION FLOOR (parity with gt_oracle.distribution_floor) ────
-    # median + 1*MAD over the triggered pool's confidence values.  A lone
+    # median + k*MAD over the triggered pool's confidence values.  A lone
     # candidate always passes (MAD=0, floor=own value, >= passes).  Multi-
     # candidate pools suppress the low tail — the gate scales with the data.
+    # k is GT_C1_CONFIDENCE_FLOOR_MAD_MULTIPLIER (default 1.0, parity with
+    # gt_oracle.distribution_floor — LIPI 2026-06-11).
     if len(passing) > 1:
         confs = [p[1] for p in passing]
         med = _ostats.median(confs)
         mad = _ostats.median(abs(v - med) for v in confs)
-        floor = med + mad
+        try:
+            _k = float(os.environ.get("GT_C1_CONFIDENCE_FLOOR_MAD_MULTIPLIER", "") or 1.0)
+        except (TypeError, ValueError):
+            _k = 1.0
+        floor = med + (_k * mad)
         floored = []
         for p in passing:
             if p[1] < floor:
@@ -3141,14 +3117,6 @@ def _augment_output(action, out) -> None:
             _vh = _verification_horizon_candidate()
             if _vh is not None:
                 cands.append(_vh)
-            # Final pre-submit reserve: if a submit/finish-shaped command is
-            # visible to this environment hook, edited-but-untested obligations
-            # get one last chance even if earlier review-transition budget
-            # arbitration suppressed them.
-            if _SUBMIT_LIKE_RE.search(cmd or ""):
-                _fo = _final_obligation_block()
-                if _fo is not None:
-                    cands.append(_fo)
             _win = _oracle_gate_blocks(cands)
             # Latch re-arm (LIPI 2026-06-10): a produced-but-not-emitted
             # candidate is DEFERRED, not destroyed — gate losers release the
@@ -3175,8 +3143,6 @@ def _augment_output(action, out) -> None:
                     _oracle_obligation_fired = False
                     if _oblig_status_last_hash:
                         _oblig_status_emitted.discard(_oblig_status_last_hash)
-                if "spec.obligation.final" in _lost and _oblig_status_last_hash:
-                    _oblig_status_emitted.discard(_oblig_status_last_hash)
                 if "l5.stuck" in _lost:
                     _l5_fired = False
                 if "l5.failure" in _lost:
