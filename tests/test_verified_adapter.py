@@ -378,11 +378,38 @@ def test_abs_testbed_view_resolves_same_pillar_as_relative(monkeypatch, tmp_path
     # abs-path call is judged on its own resolution, not the dedup cache.
     gmp._seen.clear()
     gmp._consensus_fired = False
+    gmp._oracle_delivered_hashes.clear()
     abs_out = _evidence_for_view(gmp, "/testbed/a.py")
     assert "<gt-evidence" in abs_out, "abs /testbed path produced NO evidence (relpath bug not fixed)"
     assert "[WITNESS]" in abs_out
     # same repo-relative key on the tag
     assert 'file="a.py"' in abs_out
+
+
+def test_oracle_view_evidence_not_irrelevant_without_anchors(
+    monkeypatch, tmp_path,
+):
+    """Oracle route ON + empty issue anchors: post_view still delivers l3b.evidence
+    (event-bound relevance waiver — B11 / CP004)."""
+    _gt_env_clear(monkeypatch)
+    repo_root = tmp_path / "src"
+    db = tmp_path / "graph.db"
+    _make_graph(db, repo_root)
+    root_file = tmp_path / "gt_root.txt"
+    root_file.write_text(str(repo_root), encoding="utf-8")
+    events = tmp_path / "gt_oracle_events.jsonl"
+    monkeypatch.setenv("GT_HOST_GRAPH_DB", str(db))
+    monkeypatch.setenv("GT_CERT_DIR", str(tmp_path))
+    monkeypatch.setenv("GT_ROOT_FILE", str(root_file))
+    monkeypatch.setenv("GT_ORACLE_EVENTS", str(events))
+    monkeypatch.delenv("GT_ORACLE_ROUTE", raising=False)
+
+    gmp = _load("gt_mini_patch_oracle_view_uut", _PATCH_PATH)
+    out = _evidence_for_view(gmp, "a.py")
+    assert "<gt-evidence" in out and "[WITNESS]" in out
+    if events.is_file():
+        blob = events.read_text(encoding="utf-8")
+        assert "irrelevant" not in blob or "l3b.evidence" not in blob.split("irrelevant")[0]
 
 
 def test_verified_deep_metrics_emits_8dp_record(tmp_path):

@@ -3071,8 +3071,15 @@ def _augment_output(action, out) -> None:
                 # are a new cycle, not thrash.
                 if _TEST_PASS_RE.search(_orig_out):
                     _edit_churn.clear()
-            # L3b: evidence candidate (view/edit keyed) — RELEVANCE-gated.
-            cands.append((_SEV_CODEMAP, "l3b.evidence", _evidence(cmd), False))
+            # L3b: evidence candidate (view/edit keyed) — RELEVANCE-gated, but
+            # the view/edit event bounds relevance (§15.3 VIEW policy): when the
+            # trigger IS a resolved post_view/post_edit, waive the empty-focus
+            # irrelevant suppression — same contract as edit-bound contract/cochange.
+            _ev_text = _evidence(cmd)
+            _ev_event_bound = bool(
+                _kkind in ("post_view", "post_edit") and _kf and _ev_text)
+            cands.append(
+                (_SEV_CODEMAP, "l3b.evidence", _ev_text, _ev_event_bound))
             # consensus K-of-N completeness at the LIVE review transition.
             # The latch is consumed only on a NON-EMPTY production (LIPI
             # 2026-06-10: an empty block at the first transition permanently
