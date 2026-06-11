@@ -801,6 +801,24 @@ jobs:
           rm -rf /tmp/gt && mkdir -p /tmp/gt /tmp/gt/src
           docker cp "gtsrc:$ROOT/." /tmp/gt/src || { echo "FATAL: source extract failed"; exit 1; }
 
+          # ── Extract dep stores so the substrate's LSP servers can resolve ──────
+          # gopls needs the Go module cache; rust-analyzer needs cargo metadata.
+          # The task image has these populated from its install step. Copy them
+          # out so we can mount them into the substrate container alongside /work.
+          mkdir -p /tmp/gt/deps/gomodcache /tmp/gt/deps/cargo
+          # Go: module cache (typically ~/go/pkg/mod or /root/go/pkg/mod)
+          docker cp "gtsrc:/root/go/pkg/mod/." /tmp/gt/deps/gomodcache 2>/dev/null \
+            || docker cp "gtsrc:/home/user/go/pkg/mod/." /tmp/gt/deps/gomodcache 2>/dev/null \
+            || echo "no Go module cache found in task image (ok for non-Go tasks)"
+          # Rust: cargo home (registry + bin/cargo) + rustup toolchain (sysroot for std)
+          docker cp "gtsrc:/root/.cargo/." /tmp/gt/deps/cargo 2>/dev/null \
+            || docker cp "gtsrc:/home/user/.cargo/." /tmp/gt/deps/cargo 2>/dev/null \
+            || echo "no Cargo home found in task image (ok for non-Rust tasks)"
+          mkdir -p /tmp/gt/deps/rustup
+          docker cp "gtsrc:/root/.rustup/." /tmp/gt/deps/rustup 2>/dev/null \
+            || docker cp "gtsrc:/home/user/.rustup/." /tmp/gt/deps/rustup 2>/dev/null \
+            || echo "no rustup found in task image (ok for non-Rust tasks)"
+
           # Run provenance: the task base commit = the materialized repo's HEAD (docker cp
           # carries .git). Recorded-or-empty — gt-run-proof writes null when absent, never
           # a guess. Provenance only; no task IDs in product logic, no gate behavior change.
@@ -862,7 +880,8 @@ jobs:
           # Pure process-env (no src change, no per-server branching) — overridable via the
           # repo var GT_LSP_READY_BUDGET_S (global override) if a future task profile shifts.
           case "${{ matrix.language }}" in
-            go|rust)               DEF_BUDGET=5 ;;  # proven no-op at scale — stop the dead wait
+            go)                    DEF_BUDGET=30 ;; # gopls needs module cache loaded — give it time
+            rust)                  DEF_BUDGET=45 ;; # rust-analyzer crate indexing is slower
             typescript|javascript) DEF_BUDGET=20 ;; # tsserver converts — keep full budget
             *)                     DEF_BUDGET=20 ;; # python (pyright warm, early-exits) + unknown
           esac
@@ -881,10 +900,15 @@ jobs:
               --memory=10g --memory-swap=10g \
               -v "/tmp/gt/src:/work:ro" -v "/tmp/gt:/gt_artifacts" \
               -v "/tmp/issue.txt:/work_issue.txt:ro" \
+              -v "/tmp/gt/deps/gomodcache:/tmp/gomodcache:ro" \
+              -v "/tmp/gt/deps/cargo:/root/.cargo:ro" \
+              -v "/tmp/gt/deps/rustup:/root/.rustup:ro" \
               -e GT_PROOF_MODE=1 -e GT_CONTAINERIZED=1 -e GT_RUNTIME_STRATEGY=unified_substrate \
               -e GT_REQUIRE_FTS5=1 -e GT_REQUIRE_EMBEDDER=1 -e GT_FORCE_ONNX_EMBEDDER=1 \
               -e GT_REQUIRE_LSP=1 -e GT_REQUIRE_FULL_STACK=1 -e GT_ISSUE_FILE=/work_issue.txt \
               -e GT_LSP_READY_BUDGET_S="$LSP_BUDGET" \
+              -e GOPROXY=off -e GONOSUMCHECK=1 -e CARGO_HOME=/root/.cargo \
+              -e PATH="/opt/gt/bin:/opt/gt/go/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
               -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 -e HF_DATASETS_OFFLINE=1 \
               -e GT_GATES_DELIVER_ALWAYS="${GT_GATES_DELIVER_ALWAYS:-0}" \
               -e GT_GIT_COMMIT="${{ github.sha }}" \
