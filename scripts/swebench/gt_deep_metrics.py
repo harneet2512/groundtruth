@@ -885,6 +885,54 @@ def _from_l3b_block(summ: dict) -> dict:
     }
 
 
+def _trajectory_layer_fallback(traj: dict) -> tuple[dict, list[str], float]:
+    """Best-effort layer/token accounting from agent-observed GT text.
+
+    The run summary is the precise source when present. DeepSWE runs can lose
+    that file while still preserving the agent trajectory, so reporting zero
+    injected tokens would be false. This fallback is deliberately marked as a
+    proxy by the caller.
+    """
+    chars = d8(traj.get("gt_observation_chars_total", 0) or 0)
+    if chars <= 0:
+        return {}, [], 0.0
+
+    layer_counts = {
+        "L1": d8((traj.get("gt_brief_delivered", 0) or 0)
+                 + (traj.get("gt_graph_map_delivered", 0) or 0)),
+        "L3": d8(traj.get("gt_evidence_delivered", 0) or 0),
+        "L4": d8((traj.get("gt_understand_calls", 0) or 0)
+                 + (traj.get("gt_verify_calls", 0) or 0)),
+        "L5": d8(traj.get("gt_nudge_delivered", 0) or 0),
+    }
+    active = [layer for layer, count in layer_counts.items() if count > 0]
+    if not active:
+        active = ["trajectory_gt_observation"]
+        layer_counts = {"trajectory_gt_observation": 1.0}
+
+    total_weight = sum(layer_counts[layer] for layer in active) or 1.0
+    total_tokens = d8(chars / 4.0)
+    per_layer = {}
+    remaining = total_tokens
+    for i, layer in enumerate(active):
+        if i == len(active) - 1:
+            tokens = d8(max(0.0, remaining))
+        else:
+            tokens = d8(total_tokens * (layer_counts[layer] / total_weight))
+            remaining = d8(remaining - tokens)
+        per_layer[layer] = {
+            "eligible": layer_counts[layer],
+            "emitted": layer_counts[layer],
+            "suppressed": 0.0,
+            "rendered_tokens_total": tokens,
+            "utilization_score": 0.0,
+            "next_action_count": 0.0,
+            "emit_rate": 1.0,
+            "source": "trajectory_proxy",
+        }
+    return per_layer, active, total_tokens
+
+
 def build(task: str, results_dir: str, log_path: str = "",
           db_path: str = "", pipeline_arg: str = "") -> dict:
     summ = _load_json(f"/tmp/gt_run_summary_{task}.json") or {}
@@ -937,6 +985,13 @@ def build(task: str, results_dir: str, log_path: str = "",
     if (not traj.get("action_count")) and log_text:
         traj["has_patch"] = traj.get("has_patch") or _log_has_patch(log_text)
 
+    token_accounting_source = "gt_run_summary" if per_layer_raw else "none"
+    fallback_per_layer, fallback_layers, fallback_tokens = _trajectory_layer_fallback(traj)
+    if not per_layer_raw and fallback_tokens > 0:
+        per_layer = fallback_per_layer
+        inj_tokens_total = fallback_tokens
+        token_accounting_source = "trajectory_proxy"
+
     cost = _from_cost_log(log_path)
     # DeepSWE: no [GT_COST] log lines (litellm unmapped) — derive tokens + DeepSeek-priced
     # cost from the pier trajectory's per-call usage (incl cache hit/miss) instead.
@@ -964,6 +1019,7 @@ def build(task: str, results_dir: str, log_path: str = "",
         "llm_tokens_total": d8(llm_total),
         "llm_cost_usd": d8(cost["llm_cost_usd"]),
         "gt_injected_tokens_total": d8(inj_tokens_total),
+        "gt_injected_tokens_source": token_accounting_source,
         "tokens_per_action": d8(llm_total / actions) if actions else 0.0,
         "cost_per_action_usd": d8(cost["llm_cost_usd"] / actions) if actions else 0.0,
         # GT's added context as a fraction of total LLM input — the honest overhead figure
@@ -1032,10 +1088,11 @@ def build(task: str, results_dir: str, log_path: str = "",
         "l3b_token_cap": l3bf["l3b_token_cap"],
         "l3b_cap_enforced": l3bf["l3b_cap_enforced"],
         # --- existing v1 fields (preserved) ---
-        "layers_active": summ.get("layers_active", []),
+        "layers_active": summ.get("layers_active", []) or fallback_layers,
         "total_layer_events": d8(summ.get("total_layer_events", 0)),
         "total_agent_events": d8(summ.get("total_agent_events", 0)),
         "gt_injected_tokens_total": d8(inj_tokens_total),
+        "gt_injected_tokens_source": token_accounting_source,
         "efficiency": efficiency,
         # --- GT-reached-agent SHOWCASE (fired AND delivered, from agent observation) ---
         "gt_delivery": {
