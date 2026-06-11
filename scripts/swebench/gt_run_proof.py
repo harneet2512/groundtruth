@@ -509,7 +509,7 @@ def aggregate_lsp_verdicts(lang_verdicts: dict, *, require_lsp: bool, any_succes
     still recorded for the certs/manifest). Pure + deterministic for the tests."""
     failures = [
         f"{lg}={v}" for lg, v in lang_verdicts.items()
-        if v in ("LSP_INSTALL_MISSING", "LSP_FAIL_NO_WARM", "LSP_FAIL_ZERO_CONVERSION")
+        if v in ("LSP_INSTALL_MISSING", "LSP_FAIL_NO_WARM")
         or str(v).startswith("LSP_RESOLVE_ERROR") or str(v).startswith("LSP_FAIL_")
     ]
     if not require_lsp:

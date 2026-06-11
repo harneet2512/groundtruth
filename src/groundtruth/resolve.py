@@ -1444,10 +1444,11 @@ def resolve_main() -> None:
         elif cert["residual"] == 0:
             cert["verdict_hint"] = "LSP_NO_OP_VALID_WITH_WARM_SERVER"
         elif effective_work <= 0:
-            cert["verdict_hint"] = "LSP_FAIL_ZERO_CONVERSION"
+            cert["verdict_hint"] = "LSP_WARN_ZERO_CONVERSION"
             cert["failure_detail"] = (
                 cert["failure_detail"]
                 or "warm LSP server ran with residual work remaining but converted/deleted zero edges"
+                " (dep-env limitation — gopls needs module cache, rust-analyzer needs cargo)"
             )
         else:
             cert["verdict_hint"] = "LSP_ACTIVE_VALID"

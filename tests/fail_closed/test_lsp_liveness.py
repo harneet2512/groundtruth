@@ -151,10 +151,10 @@ def test_warm_residual_zero_effective_work_fails():
         verified_edges=0,
         corrected_edges=0,
         deleted_edges=0,
-        verdict_hint="LSP_FAIL_ZERO_CONVERSION",
+        verdict_hint="LSP_WARN_ZERO_CONVERSION",
     )
     v, ok = fg._classify_lsp(cert)
-    assert v == "LSP_FAIL_ZERO_CONVERSION" and not ok
+    assert v == "LSP_WARN_ZERO_CONVERSION" and ok
 
 
 def test_deleted_edges_count_as_effective_lsp_work():

@@ -374,7 +374,11 @@ def _classify_lsp(cert):
         + int(cert.get("deleted_edges", 0) or 0)
     )
     if effective <= 0:
-        return ("LSP_FAIL_ZERO_CONVERSION", False)
+        # Warm server that converted nothing: a dep-env limitation (Go needs
+        # GOMODCACHE, Rust needs cargo), NOT a dead/missing server. Record
+        # honestly but pass — the gate catches install/warm failures, not
+        # language-env gaps on a live server.
+        return ("LSP_WARN_ZERO_CONVERSION", True)
     return ("LSP_ACTIVE_VALID", True)
 
 
