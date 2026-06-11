@@ -46,8 +46,19 @@ def _base_cert(**kw):
         "closure_rebuilt_at": 1003.0,
         "graph_hash_before_lsp": "aaa",
         "graph_hash_after_lsp": "bbb",
+        "project_ready": True,
+        "project_ready_wait_ms": 100.0,
+        "project_ready_attempts": 1,
+        "effective_work": 4,
+        "failed_breakdown": {},
     }
     c.update(kw)
+    if "effective_work" not in kw:
+        c["effective_work"] = (
+            int(c.get("verified_edges", 0) or 0)
+            + int(c.get("corrected_edges", 0) or 0)
+            + int(c.get("deleted_edges", 0) or 0)
+        )
     return c
 
 
@@ -151,7 +162,7 @@ def test_active_valid_passes():
     assert v == "LSP_ACTIVE_VALID" and ok
 
 
-def test_warm_residual_zero_effective_work_fails():
+def test_warm_residual_zero_effective_work_warns_when_project_ready():
     cert = _base_cert(
         residual=5,
         demand_edges=5,
@@ -159,10 +170,28 @@ def test_warm_residual_zero_effective_work_fails():
         verified_edges=0,
         corrected_edges=0,
         deleted_edges=0,
+        effective_work=0,
+        project_ready=True,
         verdict_hint="LSP_WARN_ZERO_CONVERSION",
     )
     v, ok = fg._classify_lsp(cert)
     assert v == "LSP_WARN_ZERO_CONVERSION" and ok
+
+
+def test_project_ready_false_zero_effective_work_fails():
+    cert = _base_cert(
+        residual=5,
+        demand_edges=5,
+        attempted_edges=5,
+        verified_edges=0,
+        corrected_edges=0,
+        deleted_edges=0,
+        effective_work=0,
+        project_ready=False,
+        verdict_hint="LSP_FAIL_NOT_READY",
+    )
+    v, ok = fg._classify_lsp(cert)
+    assert v == "LSP_FAIL_NOT_READY" and not ok
 
 
 def test_deleted_edges_count_as_effective_lsp_work():

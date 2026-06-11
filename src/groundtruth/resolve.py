@@ -1439,17 +1439,26 @@ def resolve_main() -> None:
             + int(stats.get("corrected", 0))
             + int(stats.get("deleted", 0))
         )
+        cert["effective_work"] = int(effective_work)
         if not cert["lsp_warm"]:
             cert["verdict_hint"] = "LSP_FAIL_NO_WARM"
         elif cert["residual"] == 0:
             cert["verdict_hint"] = "LSP_NO_OP_VALID_WITH_WARM_SERVER"
-        elif effective_work <= 0:
-            cert["verdict_hint"] = "LSP_WARN_ZERO_CONVERSION"
+        elif effective_work <= 0 and cert.get("project_ready") is False:
+            cert["verdict_hint"] = "LSP_FAIL_NOT_READY"
             cert["failure_detail"] = (
                 cert["failure_detail"]
+                or "warm LSP transport but project_ready=false — workspace not indexed"
+            )
+        elif effective_work <= 0:
+            cert["verdict_hint"] = "LSP_WARN_ZERO_CONVERSION"
+            cert["zero_conversion_reason"] = (
+                cert.get("failure_detail")
                 or "warm LSP server ran with residual work remaining but converted/deleted zero edges"
                 " (dep-env limitation — gopls needs module cache, rust-analyzer needs cargo)"
             )
+            if not cert["failure_detail"]:
+                cert["failure_detail"] = cert["zero_conversion_reason"]
         else:
             cert["verdict_hint"] = "LSP_ACTIVE_VALID"
 

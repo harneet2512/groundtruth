@@ -370,16 +370,19 @@ def _classify_lsp(cert):
         if cert.get("no_op_valid"):
             return ("LSP_NO_OP_VALID_WITH_WARM_SERVER", True)
         return ("LSP_FAIL_NO_WARM", False)
-    effective = (
-        int(cert.get("verified_edges", 0) or 0)
-        + int(cert.get("corrected_edges", 0) or 0)
-        + int(cert.get("deleted_edges", 0) or 0)
-    )
+    effective = int(cert.get("effective_work", -1))
+    if effective < 0:
+        effective = (
+            int(cert.get("verified_edges", 0) or 0)
+            + int(cert.get("corrected_edges", 0) or 0)
+            + int(cert.get("deleted_edges", 0) or 0)
+        )
+    if cert.get("project_ready") is False and effective <= 0:
+        # Transport warm but workspace not product-ready (indexing barrier).
+        return ("LSP_FAIL_NOT_READY", False)
     if effective <= 0:
-        # Warm server that converted nothing: a dep-env limitation (Go needs
-        # GOMODCACHE, Rust needs cargo), NOT a dead/missing server. Record
-        # honestly but pass — the gate catches install/warm failures, not
-        # language-env gaps on a live server.
+        # Warm server that converted nothing: dep-env limitation when
+        # project_ready is true/unknown — transport OK, product not ready.
         return ("LSP_WARN_ZERO_CONVERSION", True)
     return ("LSP_ACTIVE_VALID", True)
 
@@ -401,16 +404,30 @@ def gate_lsp(lsp_metrics_text: str, cert=None) -> bool:
     if cert is not None:
         verdict, ok = _classify_lsp(cert)
         _resolved = int(cert.get("verified_edges", 0)) + int(cert.get("corrected_edges", 0))
+        _eff = int(cert.get("effective_work", -1))
+        if _eff < 0:
+            _eff = _resolved + int(cert.get("deleted_edges", 0) or 0)
+        _transport_ok = bool(
+            cert.get("lsp_warm") and cert.get("server_launched")
+            and cert.get("warm_probe_ok"))
+        _product_ok = (
+            verdict in ("LSP_ACTIVE_VALID", "LSP_NO_OP_VALID_WITH_WARM_SERVER",
+                        "LSP_UNSUPPORTED_EXPLICIT")
+            or (verdict == "LSP_WARN_ZERO_CONVERSION" and ok)
+        )
         print(f"[GATE 2 LSP ENRICHMENT] {verdict} {'PASS' if ok else 'FAIL'} "
               f"lsp_warm={cert.get('lsp_warm')} server_launched={cert.get('server_launched')} "
               f"warm_probe_ok={cert.get('warm_probe_ok')} probe_latency_ms={cert.get('probe_latency_ms')} "
               f"language={cert.get('language')} residual={cert.get('residual')} "
               f"demand={cert.get('demand_edges')} attempted={cert.get('attempted_edges')} "
+              f"effective_work={_eff} project_ready={cert.get('project_ready')} "
               f"resolved(v+c)={_resolved} closure_after_lsp={cert.get('closure_rebuilt_after_lsp')}")
         _DEEP["gate_lsp"] = {
             "certificate_present": True,
             "verdict": verdict,
             "lsp_warm": bool(cert.get("lsp_warm")),
+            "lsp_transport_ok": _transport_ok,
+            "lsp_product_ready": _product_ok,
             "server_launched": bool(cert.get("server_launched")),
             "warm_probe_ok": bool(cert.get("warm_probe_ok")),
             "probe_latency_ms": _f8(float(cert.get("probe_latency_ms", 0.0) or 0.0)),
@@ -418,6 +435,11 @@ def gate_lsp(lsp_metrics_text: str, cert=None) -> bool:
             "residual": _f8(int(cert.get("residual", 0))),
             "demand_edges": _f8(int(cert.get("demand_edges", 0))),
             "attempted_edges": _f8(int(cert.get("attempted_edges", 0))),
+            "effective_work": _f8(_eff),
+            "project_ready": cert.get("project_ready"),
+            "project_ready_wait_ms": _f8(float(cert.get("project_ready_wait_ms", 0.0) or 0.0)),
+            "failed_breakdown": cert.get("failed_breakdown") or {},
+            "zero_conversion_reason": cert.get("zero_conversion_reason", ""),
             "resolved_promoted": _f8(_resolved),
             "closure_rebuilt_after_lsp": bool(cert.get("closure_rebuilt_after_lsp")),
             "graph_hash_before_lsp": cert.get("graph_hash_before_lsp"),
