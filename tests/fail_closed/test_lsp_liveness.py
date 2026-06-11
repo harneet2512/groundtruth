@@ -67,10 +67,18 @@ def test_residual_zero_warm_noop_valid_passes():
     assert v == "LSP_NO_OP_VALID_WITH_WARM_SERVER" and ok
 
 
-def test_demand_present_no_attempts_fails():
+def test_demand_present_no_attempts_warm_warns():
     cert = _base_cert(demand_edges=5, residual=5, attempted_edges=0)
     v, ok = fg._classify_lsp(cert)
-    assert v == "LSP_FAIL_NOT_RUN_BEFORE_SCORING" and not ok
+    assert v == "LSP_WARN_NOT_ATTEMPTED" and ok
+
+
+def test_demand_present_no_attempts_no_warm_fails():
+    cert = _base_cert(demand_edges=5, residual=5, attempted_edges=0,
+                      lsp_warm=False, warm_probe_ok=False, probe_latency_ms=0.0)
+    v, ok = fg._classify_lsp(cert)
+    # No warm → fails earlier at the warm check, never reaches the attempted check
+    assert not ok
 
 
 def test_stale_closure_fails():

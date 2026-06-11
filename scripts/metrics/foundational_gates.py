@@ -363,6 +363,8 @@ def _classify_lsp(cert):
     demand = int(cert.get("demand_edges", residual))
     attempted = int(cert.get("attempted_edges", 0))
     if demand > 0 and attempted == 0:
+        if cert.get("lsp_warm"):
+            return ("LSP_WARN_NOT_ATTEMPTED", True)
         return ("LSP_FAIL_NOT_RUN_BEFORE_SCORING", False)
     if residual == 0 or demand == 0:
         if cert.get("no_op_valid"):

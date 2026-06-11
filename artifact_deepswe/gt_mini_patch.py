@@ -2376,9 +2376,9 @@ def _obligation_nudge_block() -> tuple[float, str] | None:
         _oblig_status_emitted.add(h)
         _oblig_status_last_hash = h
         _oracle_obligation_fired = True
-        budget_b = (_action_count / _GT_STEP_LIMIT) if _GT_STEP_LIMIT else 0.0
+        budget_b_sev = (_action_count / _GT_STEP_LIMIT) if _GT_STEP_LIMIT else 0.0
         unmet_ratio = len(unmet) / max(len(statuses), 1)
-        sev = om.composite_severity(_SEV_OBLIGATION, budget_b, unmet_ratio)
+        sev = om.composite_severity(_SEV_OBLIGATION, budget_b_sev, unmet_ratio)
         return (sev, payload)
     except Exception:  # noqa: BLE001 -- never break the agent loop
         return None
@@ -2859,10 +2859,15 @@ def _oracle_gate_blocks(cands) -> str:
     focus = _oracle_focus()
     passing: list[tuple[float, float, str, str, str]] = []
     suppressed: list[tuple[str, str, float]] = []
+    # Behavioral state key: the dedup is STATE-AWARE, not just content-aware.
+    # Same text in a different agent state (more edits, more tests, more files
+    # opened, deeper into the budget) is a DIFFERENT delivery context — the
+    # agent may now act on it when it previously ignored it.
+    _bstate = f"{len(_oracle_edited_rels)}:{len(_oracle_tested_tokens)}:{_action_count // 30}"
     for sev, kind, text, edit_bound in cands:
         if not text:
             continue
-        h = _hl.sha256(text.encode("utf-8")).hexdigest()[:8]
+        h = _hl.sha256((text + _bstate).encode("utf-8")).hexdigest()[:8]
         if h in _oracle_delivered_hashes:
             suppressed.append((kind, "delivered", 0.0))
             continue
