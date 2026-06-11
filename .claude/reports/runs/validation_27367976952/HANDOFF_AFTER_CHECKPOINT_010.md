@@ -13,10 +13,10 @@ Execute bugfree checkpoints CP004–CP010 against validation run `validation_273
 | `d7da2bc2` | 004 | Oracle event-bound evidence waiver (B11) |
 | `7a554ec8` | 005 | LSP product readiness (B4) |
 | `9a7ce8b4` | 006 | task_truth.json reconciler (B5/B9) |
-| *(see git log)* | 007 | Consumption ledger + deep metrics columns (B6) |
-| *(see git log)* | 008 | Infra subtypes ENOSPC/trajectory/artifact (B10) |
-| *(see git log)* | 009 | Centralized path_policy (B7) |
-| *(see git log)* | 010 | Patch hygiene classification (B8) |
+| `6c0b1af6` | 007 | Consumption ledger + deep metrics columns (B6) |
+| `eae6667a` | 008 | Infra subtypes + task_truth write hook (B10) |
+| `f5dee492` | 009 | Centralized path_policy (B7) |
+| `eb5cfe5f` | 010 | Patch hygiene classification (B8) |
 
 ## Verification matrix
 
@@ -43,8 +43,18 @@ python -m pytest tests/test_patch_hygiene.py -q             # 3/3
 | B10 | **FIXED** |
 | B11 | **FIXED** |
 
+## Verification (2026-06-11)
+
+```text
+88 passed, 1 warning in 12.66s
+```
+
+## Trajectory audit
+
+`CONTEXT_GAP_AUDIT_27367976952.md` — adaptix, fd, katex, abs: delivery often worked on this run; CP004 targets empty-anchor fake-env path. Dominant gaps: obligation shape, Go/Rust LSP, verify leakage (katex).
+
 ## Open work
 
-- Smoke re-run 2 Go/Rust tasks to confirm LSP `effective_work` + CP004 evidence in live trajectories
+- Smoke re-run 2 Go/Rust tasks to confirm LSP `effective_work` + consumption ledger on live trajectories
 - Stage-2 paired flips vs frozen baseline (GT-on only)
 - Full B5/B9 cross-run truth audit on held-out validation tasks

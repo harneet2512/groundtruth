@@ -13,6 +13,10 @@
 > Supersedes the architecture content scattered across `DOC_OF_HONOR.md`,
 > `we_did.md`, and `BRIEFING.md` (now legacy/feeders; BRIEFING stays the deeper
 > localization scratchpad).
+>
+> **Bugfree program (2026-06-11):** validation run `27367976952`, checkpoints
+> 001–010, bug ledger B1–B11 — **§17** (architecture of record). Per-checkpoint
+> evidence lives under `.claude/reports/runs/validation_27367976952/`.
 
 ---
 
@@ -1485,3 +1489,178 @@ The oracle-arm trajectories (9 tasks, 5 languages) confirm and sharpen the §15.
 | I | **`failure_persisted` FP-closure and loop sensor not holding on deployed build** | Medium | Stage 5 code is committed; build lag (7 unpushed commits) means old code ran in the oracle run; push + substrate rebuild required |
 | J | **Obligation selection mis-aimed** (first-matched token, 4/9 survivable obligations) | Medium | Fix: rank candidates by error-identifier/exactness class + `tested?=false` status |
 | K | **Patch capture pollution** (csstree `package-lock.json`; arktype ~300KB regenerated artifact) | BLOCKS-BENCHMARK | Harness workspace-diff captures toolchain side-effects; needs exclusion list |
+
+---
+
+## 17. Bugfree program — validation_27367976952, checkpoints 001–010 (2026-06-11)
+
+> **Last verified 2026-06-11.** Branch `gt-trial`. Master handoff:
+> `.claude/reports/runs/validation_27367976952/GT_BUGFREE_HANDOFF_FULL.md`.
+> This section is the **architecture-of-record** for the bugfree layer-by-layer fix
+> program; run-folder checkpoint docs are the per-boundary evidence trail.
+
+### 17.1 Goal and product model
+
+Make GT a **product-quality context provider**, not a benchmark-maxxing patch set.
+
+| State | Meaning |
+|---|---|
+| **Delivered** | Agent saw the GT text |
+| **Used** | Agent's next action followed the GT text |
+| **Enforced** | Agent could not submit without satisfying/checking the GT obligation |
+
+Target control loop:
+
+```text
+graph / LSP / semantic / issue obligations
+  → trusted context store
+  → trajectory sensor
+  → phase detector
+  → context selector
+  → small GT intervention
+  → consumption/enforcement measurement
+```
+
+Product rule: **right context, at the right moment, in the smallest useful form,
+with a clear next action, and proof the agent used it.**
+
+Stage discipline (from `CLAUDE.md`):
+
+1. **Stage 1 — Stabilize:** deterministic, stable delivery; prove with controlled tests on the real binary; a given task may never flip — that is irrelevant to Stage 1.
+2. **Stage 2 — Flips:** paired GT-on vs frozen baseline only after Stage 1 holds. **Never rerun GT-OFF baseline** — pair against `.claude/reports/full300_baseline_ohdeepseek_20260531/FINAL_resolved_300_20260531.json`.
+
+### 17.2 Reference run and current score
+
+| Field | Value |
+|---|---|
+| Run id | `validation_27367976952` |
+| Tasks | 9 evaluated (10-task matrix; arktype infra-missing) |
+| Resolved | **0/9** at run time |
+| Artifacts | `.claude/reports/runs/validation_27367976952/` (~411MB trajectories) |
+
+Checkpoints **001–010 shipped** (2026-06-11). CP001–003: metrics fallback, no-leak verify, embedder cert truth. CP004–010: evidence oracle waiver, LSP product readiness, task truth, consumption ledger, infra subtypes, path_policy, patch hygiene. See `HANDOFF_AFTER_CHECKPOINT_010.md` and `CONTEXT_GAP_AUDIT_27367976952.md`.
+
+### 17.3 Bug ledger B1–B11
+
+| Bug | Description | Status (2026-06-11) | Next checkpoint |
+|---|---|---|---|
+| B1 | Deep metrics false zero for GT injection | **FIXED** (`060eccc9`) | — |
+| B2 | Embedder cert vs metrics contradiction | **FIXED** (`e013c7be`) | — |
+| B3 | Exact test leak in DeepSWE runtime | **FIXED** (`956c32e1`) | — |
+| B4 | LSP warm over-credit (Go/Rust 0 conversions) | **FIXED** (`7a554ec8`) | — |
+| B5 | Contradictory task truth (cert vs witness vs outcome) | **PARTIAL** (`9a7ce8b4`, `eae6667a`) | cross-run audit |
+| B6 | No consumption/agreement ledger (Delivered ≠ Used) | **FIXED** (`6c0b1af6`) | — |
+| B7 | Low-value surfaces (vendor/static/generated in brief) | **FIXED** (`f5dee492`) | — |
+| B8 | Patch hygiene (lockfile/noise vs source fix) | **FIXED** (`eb5cfe5f`) | — |
+| B9 | Outcome schema / `resolved:null` rows | **PARTIAL** (`9a7ce8b4`) | paired metrics unify |
+| B10 | Infra/capture classification (ENOSPC, missing artifact) | **FIXED** (`eae6667a`) | — |
+| B11 | Runtime evidence delivery (`test_verified_adapter` 2 fails) | **FIXED** (`d7da2bc2`) | — |
+
+### 17.4 Checkpoint map 004–010
+
+Each checkpoint = **one boundary, one commit, one regression test, one LIPI pass, full documentation.**
+
+| CP | Layer / topic | Primary files | Done when |
+|---|---|---|---|
+| **004** | L4 evidence delivery (B11) | `artifact_deepswe/gt_mini_patch.py`, `tests/test_verified_adapter.py` | **SHIPPED** `d7da2bc2` — 23/23 |
+| **005** | LSP product readiness (B4) | `src/groundtruth/resolve.py`, `scripts/metrics/foundational_gates.py`, `tests/fail_closed/test_lsp_liveness.py` | **SHIPPED** `7a554ec8` — 22/22 liveness |
+| **006** | Task truth ledger (B5, B9) | `scripts/swebench/task_truth.py`, `scripts/verify/deepswe_outcome.py` | **SHIPPED** `9a7ce8b4` — 3/3; B5/B9 partial |
+| **007** | Consumption ledger (B6) | `scripts/swebench/consumption_ledger.py`, `scripts/swebench/gt_deep_metrics.py` | **SHIPPED** `6c0b1af6` — 2/2 |
+| **008** | Infra classification (B10) | `scripts/verify/deepswe_outcome.py` | **SHIPPED** `eae6667a` |
+| **009** | Surface policy (B7) | `src/groundtruth/delivery/path_policy.py` (+ localizer, brief, post_view) | **SHIPPED** `f5dee492` — 3/3 |
+| **010** | Patch hygiene (B8) | `scripts/swebench/package_submission.py`, `convert_to_submission.py` | **SHIPPED** `eb5cfe5f` — 3/3 |
+
+### 17.5 Checkpoint 004 — root cause (B11, verified 2026-06-11)
+
+**Symptom:** `python -m pytest tests/test_verified_adapter.py -q` → 2 failed, 20 passed.
+Failures: `test_wrap_execute_appends_evidence_on_fake_env`,
+`test_abs_testbed_view_resolves_same_pillar_as_relative`.
+
+**Mechanism:** Oracle route ON by default (`GT_ORACLE_ROUTE≠0`). `_evidence()` builds a
+valid `[WITNESS]` body from graph.db, but `l3b.evidence` enters `_oracle_gate_blocks` with
+`edit_bound=False`. When `_oracle_focus()` is empty (no `gt_issue_anchors.json`, no prior
+edits), the relevance gate suppresses the candidate as `irrelevant` — output stays bare.
+
+**Ruled out:** `_to_repo_rel` (/testbed strip — unit test passes); `_connect_ro` + `immutable=1`
+on substrate path (opens OK on Windows temp DB).
+
+**Fix (LIPI-safe, §15.3):** VIEW is relevance-gated, but the **view/edit event bounds** the
+evidence — set event-bound waiver on `l3b.evidence` when `_classify(cmd)` is `post_view` or
+`post_edit` with a resolved file (same contract as edit-bound contract/cochange candidates).
+Do **not** disable the oracle gate globally.
+
+**Pre-flight:**
+
+```powershell
+Set-Location <repo>
+python -m pytest tests/test_verified_adapter.py -q
+```
+
+### 17.6 Documentation protocol (required every checkpoint)
+
+Documentation is part of the deliverable. **§17 is the index; run-folder docs are the evidence.**
+
+#### A. Per-checkpoint (force-add: `git add -f`)
+
+Path: `.claude/reports/runs/validation_27367976952/`
+
+| Artifact | Purpose |
+|---|---|
+| `CHECKPOINT_00N_<LAYER>_<TOPIC>.md` | Boundary, root cause, code changes, verification output, LIPI checklist, product impact, bug-row delta |
+| `HANDOFF_AFTER_CHECKPOINT_00N.md` | Rolling handoff: cumulative commits, updated B4–B11 table, next start command |
+
+**Checkpoint doc template sections:** Date + commit · Boundary (in + out of scope) · Bug addressed · Code changes · Verification (exact commands) · LIPI (§7 / §12 / §15) · Product impact · Bug ledger delta.
+
+#### B. Trajectory context-gap audit
+
+`CONTEXT_GAP_AUDIT_27367976952.md` — after CP004, for adaptix, fd, katex, abs:
+
+- First GT delivery turn → next 3 agent actions → trajectory finding
+- **Context gap:** what GT sent vs what was needed (never "model stochasticity")
+- Hypothesis whether CP004+ would have changed the decision (evidence-backed)
+
+#### C. Session closeout (after CP010)
+
+| File | Update |
+|---|---|
+| `GT_BUGFREE_HANDOFF_FULL.md` | Final B4–B11 status, commit stack, next session |
+| `LATEST_TASK.md` | Session handoff block |
+| `HANDOFF_AFTER_CHECKPOINT_010.md` | Full session summary |
+| `PROGRESS.md` | One milestone line per shipped checkpoint |
+| **This file (`gt_gt.md` §17.3–17.4)** | Bug ledger + checkpoint status rows |
+
+#### D. Rules
+
+1. Code commit and checkpoint doc in the **same commit** (no doc-less fixes).
+2. Force-add gitignored run-folder docs.
+3. Include terminal output blocks (copy-paste verification).
+4. Cross-link prior checkpoints when a fix depends on an earlier boundary.
+5. Grep adjacent surfaces for the same bug pattern before committing (handoff rule).
+
+### 17.7 Execution rules (all checkpoints)
+
+1. One boundary per commit — never mix surfaces.
+2. Regression test red→green before commit.
+3. LIPI against §7 (gates), §12 (per-layer role), §15 (oracle) for the touched layer.
+4. Document before commit (§17.6).
+5. Do not rerun GT-OFF baseline.
+6. Trajectory wins are judged by **right trajectory**, not resolve alone (`CLAUDE.md`).
+
+### 17.8 Ten missing architectural pieces (handoff reference)
+
+These guide CP006–010 and beyond; not all are closed by 004–010 alone:
+
+1. Trajectory-state controller (phase → speak/silence)
+2. Context selection policy (ORIENT / VIEW / EDIT / VERIFY / SUBMIT)
+3. Consumption feedback loop (CP007)
+4. First-class obligation model (status vector per clause)
+5. Pre-submit gate
+6. Verifier-fail retry plumbing
+7. Trust-gated context surfaces (CP005, CP009)
+8. Context budgeting
+9. Graph-to-action translation
+10. Flip/trajectory scorecard (steps_saved, consumed, gt_caused_flip)
+
+One-sentence diagnosis (unchanged from handoff): GT has substrate and evidence generation,
+but lacks a strong just-in-time controller, obligation tracker, trust gate, and
+enforcement/retry loop that turn context into trajectory changes.

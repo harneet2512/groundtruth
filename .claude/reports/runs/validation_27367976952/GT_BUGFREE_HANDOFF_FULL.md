@@ -411,7 +411,7 @@ Root cause:
 
 Status:
 
-- Not fixed this session.
+- **FIXED** in commit `7a554ec8` (CP005): `effective_work`, `LSP_FAIL_NOT_READY`, foundational gate split transport vs product readiness.
 
 ### B5 - Graph cert and outcome truth contradiction
 
@@ -432,7 +432,7 @@ Root cause:
 
 Status:
 
-- Not fixed this session.
+- **PARTIAL** in commit `9a7ce8b4` + `eae6667a` (CP006/008): `task_truth.json` reconciler + outcome hook; witness-over-cert rules implemented; full cross-run audit still open.
 
 ### B6 - No agreement/consumption metric
 
@@ -453,7 +453,7 @@ Root cause:
 
 Status:
 
-- Not fixed this session.
+- **FIXED** in commit `6c0b1af6` (CP007): `consumption_ledger.py`, `gt_consumption_ledger.json`, deep-metrics `gt_blocks_*` columns.
 
 ### B7 - Low-value/static surface leakage
 
@@ -473,7 +473,7 @@ Root cause:
 
 Status:
 
-- Not fixed this session.
+- **FIXED** in commit `f5dee492` (CP009): `src/groundtruth/delivery/path_policy.py` shared across localizer, v1r_brief, post_view.
 
 ### B8 - Patch capture/hygiene missing
 
@@ -494,7 +494,7 @@ Root cause:
 
 Status:
 
-- Not fixed this session.
+- **FIXED** in commit `eb5cfe5f` (CP010): `patch_hygiene.py` + submission converters.
 
 ### B9 - Outcome schema confusion
 
@@ -513,7 +513,7 @@ Root cause:
 
 Status:
 
-- Not fixed this session.
+- **PARTIAL** in commit `9a7ce8b4` (CP006): reconciled fields in `task_truth.json`; paired metrics `resolved:null` rows not fully unified.
 
 ### B10 - Infra/capture classification weak
 
@@ -534,7 +534,7 @@ Root cause:
 
 Status:
 
-- Not fixed this session.
+- **FIXED** in commit `eae6667a` (CP008): `detect_infra_subtype`, `INFRA_ENOSPC` / `INFRA_TRAJECTORY_FALLBACK` / `INFRA_MISSING_ARTIFACT`.
 
 ### B11 - Runtime evidence delivery failing tests
 
@@ -557,11 +557,11 @@ Code:
 
 Root cause:
 
-- Not debugged yet. Expected `<gt-evidence>` is not appended in these fake-env/view paths.
+- `_oracle_gate_blocks` suppressed `l3b.evidence` as `irrelevant` when `_oracle_focus()` was empty and `edit_bound=False`, even though `_evidence()` produced valid `[WITNESS]` on `post_view`/`post_edit`.
 
 Status:
 
-- This should be the next session start.
+- **FIXED** in commit `d7da2bc2` (CP004): event-bound oracle waiver for `l3b.evidence` on `post_view`/`post_edit`. `tests/test_verified_adapter.py` → **23/23**.
 
 ## What Was Solved This Session
 
@@ -659,75 +659,46 @@ Doc:
 
 ## Current Commit Stack
 
-Latest relevant commits:
+Latest relevant commits (CP004–CP010, 2026-06-11):
 
 ```text
-5b3a0d4e Document GT bugfix handoff
-e013c7be Use embedder cert as deep metrics source
-956c32e1 Sanitize DeepSWE verify guidance
-060eccc9 Fix GT deep metrics trajectory fallback
-7a283c60 fix(lsp): mount task image dep stores for Go/Rust LSP resolution
+eb5cfe5f feat(submission): patch hygiene classification (CP010/B8)
+f5dee492 refactor(delivery): centralized path_policy surface filter (CP009/B7)
+eae6667a fix(outcome): infra subtypes and task_truth write hook (CP008/B10)
+6c0b1af6 feat(metrics): gt_consumption_ledger and used/enforced columns (CP007/B6)
+9a7ce8b4 feat(truth): per-task task_truth.json reconciler (CP006/B5,B9)
+7a554ec8 fix(lsp): product readiness gate splits transport from effective work (CP005/B4)
+d7da2bc2 fix(evidence): event-bound oracle waiver for l3b witnesses (CP004/B11)
 ```
+
+Prior session (CP001–003): `060eccc9`, `956c32e1`, `e013c7be`, `5b3a0d4e`.
 
 ## Next Session Should Start Here
 
-Start with the runtime evidence delivery bug, not metrics.
+Checkpoints **004–010 are shipped**. Stage 1 stabilization for this boundary set is complete; next work is **Stage 2 validation** and architectural gaps (§17.8).
 
-Command:
-
-```text
-python -m pytest tests\test_verified_adapter.py -q
-```
-
-Expected current state from this session:
+Pre-flight:
 
 ```text
-2 failed, 20 passed
+python -m pytest tests/test_verified_adapter.py tests/fail_closed/test_lsp_liveness.py tests/test_task_truth.py tests/test_consumption_ledger.py tests/fail_closed/test_deepswe_outcome_classify.py tests/test_path_policy.py tests/test_patch_hygiene.py -q
 ```
 
-Focus:
+Expected: **88 passed**.
 
-- `artifact_deepswe/gt_mini_patch.py`
-- evidence append path
-- path normalization for relative vs `/testbed/...`
-- read-only substrate graph connection
+Recommended next steps:
 
-Boundary for checkpoint 004:
+1. **Smoke re-run** 2 Go/Rust tasks (`abs-module-cache-flags`, `fd-deterministic-multi-key-sorting`) with current binary — confirm `effective_work > 0` and consumption ledger populates.
+2. **Context-gap audit** — `CONTEXT_GAP_AUDIT_27367976952.md` (adaptix, fd, katex, abs).
+3. **Paired GT-on flip experiment** vs frozen baseline (never rerun GT-OFF).
+4. **Trajectory-state controller** + obligation model (§17.8 items 1–4) — dominant gap for feature tasks.
 
-- Fix only DeepSWE runtime evidence delivery.
-- Do not change metrics, cert generation, no-leak rendering, LSP, or outcome classification.
-- Add/adjust focused tests in `tests/test_verified_adapter.py`.
-- Write `.claude/reports/runs/validation_27367976952/CHECKPOINT_004_LAYER4_EVIDENCE_DELIVERY.md`.
-- Commit as its own checkpoint.
+## Recommended Plan After Checkpoint 010
 
-## Recommended Plan After Checkpoint 004
+1. **Smoke + consumption scoring** on held-out validation tasks using new ledgers.
+2. **Reconcile B5/B9** across full run into `task_truth.json` batch report.
+3. **Stage-2 flips** with trajectory-first grading (not resolve-only).
 
-1. **Checkpoint 004 - Layer 4 evidence delivery**
-   - Fix failing `<gt-evidence>` append tests.
-   - This is directly in the just-in-time context path.
-
-2. **Checkpoint 005 - LSP product readiness**
-   - Split transport liveness from product-useful LSP readiness.
-   - Add fields/tests around `project_ready`, `effective_work`, zero conversions.
-
-3. **Checkpoint 006 - Reconciled task truth ledger**
-   - Build one final `task_truth.json` or equivalent per task.
-   - Inputs: certs, runtime witness, deep metrics, outcome, trajectory integrity, patch hygiene.
-
-4. **Checkpoint 007 - Consumption/agreement ledger**
-   - Track whether agent listened to delivered GT.
-   - Block id -> next agent turns -> reference/follow/conflict/patch alignment.
-
-5. **Checkpoint 008 - Infra/capture classification**
-   - Classify ENOSPC, zero-byte canonical trajectory, mini trajectory fallback, missing artifacts.
-
-6. **Checkpoint 009 - Low-value surface policy**
-   - Centralize vendor/static/generated path filtering.
-   - Apply consistently across localization, brief, graph map, post-view, cochange.
-
-7. **Checkpoint 010 - Patch hygiene**
-   - Classify patch files and artifact integrity.
-   - Separate source fix signal from lockfile/generated/noise and missing patch.
+See also: `CONTEXT_GAP_AUDIT_27367976952.md`, `HANDOFF_AFTER_CHECKPOINT_010.md`.
 
 ## Rules For Continuing
 
