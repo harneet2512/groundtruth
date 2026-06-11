@@ -68,6 +68,13 @@ from collections import Counter
 #: workflow's own fail-closed line. Generalized: these are the run-level fail-closed
 #: tokens emitted in deepswe_full.yml §E, identical for every task. (eval_no_report is
 #: also detected structurally from the eval report.)
+#: Fine-grained infra subtypes (CP008) — precedence before AGENT/GT when classifying.
+INFRA_SUBTYPES: tuple[str, ...] = (
+    "INFRA_ENOSPC",
+    "INFRA_TRAJECTORY_FALLBACK",
+    "INFRA_MISSING_ARTIFACT",
+)
+
 INFRA_LOG_MARKERS: tuple[str, ...] = (
     "GT_SUBSTRATE_DIGEST_MISSING",
     "GT_SUBSTRATE_PULL_FAIL",
@@ -84,6 +91,39 @@ INFRA_LOG_MARKERS: tuple[str, ...] = (
 #: The adapter-wire failure marker (§E DEEPSWE_ADAPTER_FAIL). This is a GT-side failure
 #: (the adapter could not consume / fingerprint the substrate), classified GT — NOT INFRA.
 GT_ADAPTER_FAIL_MARKER = "DEEPSWE_ADAPTER_FAIL"
+
+
+def detect_infra_subtype(jobs: str, trial_log: str = "") -> str | None:
+    """Deterministic infra subtype from disk artifacts + trial log (CP008)."""
+    log_lower = (trial_log or "").lower()
+    if "no space left on device" in log_lower or "enospc" in log_lower:
+        return "INFRA_ENOSPC"
+
+    trials = sorted(glob.glob(os.path.join(jobs, "*", "*__*", "result.json")))
+    mini_trajs = sorted(glob.glob(
+        os.path.join(jobs, "*", "*__*", "agent", "mini-swe-agent.trajectory.json")
+    ))
+    canon_trajs = sorted(glob.glob(
+        os.path.join(jobs, "*", "*__*", "agent", "trajectory.json")
+    ))
+
+    if not trials and not mini_trajs and not canon_trajs:
+        return "INFRA_MISSING_ARTIFACT"
+
+    for p in canon_trajs:
+        try:
+            if os.path.getsize(p) == 0 and mini_trajs:
+                return "INFRA_TRAJECTORY_FALLBACK"
+        except OSError:
+            continue
+
+    if trials and not mini_trajs and not canon_trajs:
+        trial_dir = os.path.dirname(trials[-1])
+        agent_dir = os.path.join(trial_dir, "agent")
+        if not os.path.isdir(agent_dir):
+            return "INFRA_MISSING_ARTIFACT"
+
+    return None
 
 
 def find_infra_markers(trial_log: str) -> list[str]:
@@ -283,7 +323,7 @@ def classify_outcome(rec: dict) -> str:
       reward: float|None            n_agent_steps: int|None
     """
     # 1. INFRA — wins outright; the comparison was never clean.
-    if rec.get("infra_markers") or rec.get("eval_no_report"):
+    if rec.get("infra_markers") or rec.get("eval_no_report") or rec.get("infra_subtype"):
         return "INFRA"
 
     # 2. GT — delivery break. Adapter-wire fail, no consumption, hash divergence, cert FAIL.
@@ -472,6 +512,7 @@ def build_signal_record(
     trial_log: str,
     cert_dir: str | None,
     eval_no_report: bool = False,
+    infra_subtype: str | None = None,
 ) -> dict:
     """Assemble the per-task signal record + classify it.
 
@@ -490,6 +531,7 @@ def build_signal_record(
         "n_agent_steps": n_agent_steps,
         "exit_status": exit_status,
         "infra_markers": infra_markers,
+        "infra_subtype": infra_subtype,
         "eval_no_report": bool(eval_no_report),
         "adapter_fail": adapter_fail,
         "gt_prebuilt_active": _to_bool(meta.get("gt_prebuilt_active")),
@@ -608,6 +650,7 @@ def main(argv: list[str]) -> int:
                 or ("trial_results/gt_artifacts" if os.path.isdir("trial_results/gt_artifacts") else None))
     trial_log = _read_trial_log(log_path)
     eval_no_report = _detect_eval_no_report(jobs)
+    infra_subtype = detect_infra_subtype(jobs, trial_log)
 
     rec = build_signal_record(
         instance_id=instance_id,
@@ -617,10 +660,13 @@ def main(argv: list[str]) -> int:
         trial_log=trial_log,
         cert_dir=cert_dir,
         eval_no_report=eval_no_report,
+        infra_subtype=infra_subtype,
     )
     print("--- FAILURE CLASSIFICATION ---")
     print(f"FAILURE_CLASS={rec['failure_class']}   "
           "(INFRA=pull/build/harness | GT=context wrong/absent | AGENT=model missed | RESOLVED=reward 1.0)")
+    if rec.get("infra_subtype"):
+        print(f"INFRA_SUBTYPE={rec['infra_subtype']}")
     print(f"IN_RESOLVED_DENOMINATOR={rec['in_resolved_denominator']}   "
           "(INFRA/UNKNOWN are EXCLUDED from the resolved-rate denominator)")
     print(f"  signals: reward={rec['reward']} n_agent_steps={rec['n_agent_steps']} "
@@ -649,6 +695,24 @@ def main(argv: list[str]) -> int:
             print(f"  classification record -> {out_path}")
         except OSError as e:
             print(f"  WARN: could not persist classification record: {e}")
+
+    # CP006 — per-task truth ledger beside the trial.
+    try:
+        import importlib.util
+
+        tt_path = os.path.join(os.path.dirname(__file__), "..", "swebench", "task_truth.py")
+        spec = importlib.util.spec_from_file_location("task_truth_do", tt_path)
+        tt_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tt_mod)
+        truth_path = tt_mod.write_task_truth(
+            jobs,
+            trial_log=trial_log,
+            cert_dir=cert_dir,
+        )
+        print(f"  task_truth.json -> {truth_path}")
+    except Exception as exc:  # noqa: BLE001 — best-effort adjunct
+        print(f"  WARN: could not write task_truth.json: {exc}")
+
     return 0
 
 

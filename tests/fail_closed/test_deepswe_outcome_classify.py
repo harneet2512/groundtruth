@@ -36,6 +36,26 @@ def test_classify_infra_eval_no_report():
     assert do.classify_outcome(rec) == "INFRA"
 
 
+def test_classify_infra_enospc_subtype():
+    rec = {
+        "infra_markers": [], "infra_subtype": "INFRA_ENOSPC",
+        "reward": 0.0, "n_agent_steps": 5,
+    }
+    assert do.classify_outcome(rec) == "INFRA"
+
+
+def test_classify_infra_trajectory_fallback_subtype():
+    rec = {
+        "infra_markers": [], "infra_subtype": "INFRA_TRAJECTORY_FALLBACK",
+        "reward": 0.0, "n_agent_steps": 5,
+    }
+    assert do.classify_outcome(rec) == "INFRA"
+
+
+def test_detect_infra_enospc_from_log():
+    assert do.detect_infra_subtype("/nonexistent", "OSError: no space left on device") == "INFRA_ENOSPC"
+
+
 def test_classify_infra_every_marker():
     # Every §E infra marker must classify INFRA (generalized, identical rule).
     for marker in do.INFRA_LOG_MARKERS:
