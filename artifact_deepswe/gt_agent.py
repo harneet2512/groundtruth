@@ -914,29 +914,30 @@ _RETRY_TEST_AUTODETECT = (
     f"else exit {_RC_NO_RUNNER}; fi"
 )
 
-# Environment-shaped failures are NOT test failures: injecting "Tests failed"
-# for a runner that cannot even start would misdirect the agent (correct-or-
-# quiet — the same _ENV_FAIL_RE discipline the in-container governors use).
+# D6 fix: split env detection into HARD (always env, never agent) and SOFT
+# (could be the agent's own broken patch). Only HARD patterns classify as
+# "unverifiable" — SOFT patterns are real test failures that the retry loop
+# should give the agent feedback on.
+#
+# HARD: toolchain missing, network, syscall/wasm, corepack — the agent's
+# patch cannot cause these.
 _ENV_UNVERIFIABLE_RE = re.compile(
-    r"(command not found|not recognized as|No module named|ModuleNotFoundError"
-    r"|ImportError|ERROR: Could not find a version|No matching distribution found"
-    r"|Could not build wheels|subprocess-exited-with-error|metadata-generation-failed"
-    r"|error: command .* failed|fatal error: |compilation terminated"
-    r"|undefined reference to|ld returned \d+ exit status|collect2: error"
+    r"(command not found|not recognized as"
     r"|error: could not find `Cargo\.toml`"
-    r"|cannot find package|npm ERR! missing script|npm ERR! code E"
+    r"|cannot find package|npm ERR! missing script"
     r"|Unable to locate package|no such file or directory: .*(?:go|cargo|npm|pytest)"
     r"|Connection refused|Network is unreachable|Temporary failure in name resolution"
     r"|CERTIFICATE_VERIFY_FAILED|ReadTimeoutError|ProxyError"
     r"|error while loading shared libraries|cannot open shared object"
-    r"|ImproperlyConfigured"
     r"|syscall/js|GOOS=js|js/wasm"
-    r"|TS2307|Cannot find module|TS1005|TS2345"
     r"|corepack|ENOENT.*yarn|ENOENT.*pnpm"
-    r"|AttributeError: module '[\w.]+' has no attribute"
-    r"|errors? during collection|ERROR collecting|Interrupted: \d+ error)",
+    r"|Could not build wheels|subprocess-exited-with-error|metadata-generation-failed"
+    r"|ERROR: Could not find a version|No matching distribution found)",
     re.I,
 )
+# SOFT: patterns that CAN be agent-caused (broken import, compile error,
+# missing symbol). These are now classified as "fail" → retry gets feedback.
+# Previously they were in _ENV_UNVERIFIABLE_RE and ate 5/9 tasks.
 
 
 def _retry_count() -> int:
@@ -966,14 +967,22 @@ def _retry_test_command() -> tuple[str, str]:
 
 
 _FAILURE_CLASSIFIERS: list[tuple[str, re.Pattern[str]]] = [
+    # D6: compile_error catches agent-caused breakage that was previously eaten
+    # by _ENV_UNVERIFIABLE_RE. These patterns now reach the classifier.
+    ("compile_error", re.compile(
+        r"ModuleNotFoundError|ImportError|No module named"
+        r"|fatal error: |compilation terminated|undefined reference to"
+        r"|ld returned \d+ exit status|collect2: error"
+        r"|TS2307|Cannot find module|TS1005|TS2345"
+        r"|AttributeError: module '[\w.]+' has no attribute"
+        r"|errors? during collection|ERROR collecting",
+        re.I)),
     ("assertion_error", re.compile(
-        r"AssertionError|assert\s+.*failed|FAILED.*assert", re.I)),
-    ("regression", re.compile(
-        r"regression|previously passed|was passing", re.I)),
+        r"AssertionError|assert\s+.*failed|FAILED.*assert"
+        r"|expected.*got|test result: FAILED",
+        re.I)),
     ("missing_feature", re.compile(
-        r"not implemented|NotImplementedError|expected.*got", re.I)),
-    ("env_failure", re.compile(
-        r"ModuleNotFoundError|ImportError|No module named|command not found",
+        r"not implemented|NotImplementedError|TODO|FIXME.*not.*implement",
         re.I)),
 ]
 
@@ -997,17 +1006,16 @@ def _format_test_feedback(attempt: int, display_cmd: str, rc: int,
         tail = "…(truncated)…\n" + tail[-_FEEDBACK_TAIL_CHARS:]
     failure_kind = _classify_verifier_failure(tail)
     repair_hint = {
+        "compile_error": (
+            "Your change broke compilation or imports. Check for: missing "
+            "imports, wrong module paths, undefined symbols, type errors. "
+            "Fix the compile/import error before re-running tests."),
         "assertion_error": (
             "Logic bug: a failing assertion disagrees with your change. "
             "Re-read the assertion and fix the implementation."),
-        "regression": (
-            "Regression: an existing test broke. Restore prior behavior "
-            "while keeping the new fix."),
         "missing_feature": (
             "Incomplete implementation: new behavior is missing or partial. "
             "Cover the unmet requirement before finishing."),
-        "env_failure": (
-            "Environment/setup issue detected — fix imports or runner setup."),
         "test_failure": (
             "Fix the failures: re-read the failing assertions, correct your "
             "changes in the repository (your previous edits are still present), "

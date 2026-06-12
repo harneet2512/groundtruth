@@ -30,9 +30,16 @@ def test_classify_assertion_error(ga):
     assert ga._classify_verifier_failure(out) == "assertion_error"
 
 
-def test_classify_env_failure(ga):
+def test_classify_compile_error(ga):
+    """D6: ModuleNotFoundError is now compile_error (agent-caused), not env_failure."""
     out = "ModuleNotFoundError: No module named 'foo'"
-    assert ga._classify_verifier_failure(out) == "env_failure"
+    assert ga._classify_verifier_failure(out) == "compile_error"
+
+
+def test_classify_hard_env_is_unverifiable(ga):
+    """D6: hard env patterns stay in _ENV_UNVERIFIABLE_RE — never reach classifier."""
+    out = "bash: cargo: command not found"
+    assert ga._ENV_UNVERIFIABLE_RE.search(out) is not None
 
 
 def test_feedback_includes_failure_class(ga):
