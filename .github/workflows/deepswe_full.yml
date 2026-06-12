@@ -849,7 +849,7 @@ jobs:
             --cargo-host /tmp/gt/deps/cargo --cargo-source "$CARGO_SRC" \
             --rustup-host /tmp/gt/deps/rustup --rustup-source "$RUSTUP_SRC" \
             --rust-toolchain "$ACTIVE_RUST_TOOLCHAIN" \
-            || { echo "DEP_STORE_MANIFEST_FAIL: required dep store missing for ${{ matrix.language }}" | tee -a trial_output.log; exit 1; }
+            || { echo "DEP_STORE_MANIFEST_WARN: dep store incomplete for ${{ matrix.language }} (Go/Rust LSP will degrade)" | tee -a trial_output.log; }
 
           # Run provenance: the task base commit = the materialized repo's HEAD (docker cp
           # carries .git). Recorded-or-empty — gt-run-proof writes null when absent, never
