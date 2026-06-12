@@ -643,7 +643,7 @@ class Obligation:
     id: int
     verbatim: str
     symbols: frozenset[str]
-    status: str  # unedited | edited | tested | satisfied
+    status: str  # unedited | edited | tested | satisfied | contradicted
     evidence: list[str] = field(default_factory=list)
     last_turn: int = 0
 
@@ -662,6 +662,18 @@ def _obligation_lifecycle_to_status(lifecycle: str) -> str:
     if lifecycle == "edited":
         return OBL_EDITED_UNTESTED
     return OBL_UNADDRESSED
+
+
+def _obligation_status_certainty(status: str) -> str:
+    if status == "satisfied":
+        return "explicit_satisfaction_evidence"
+    if status == "contradicted":
+        return "contradicting_evidence"
+    if status == "tested":
+        return "observed_test_token"
+    if status == "edited":
+        return "observed_edit_token"
+    return "no_runtime_evidence"
 
 
 class ObligationTracker:
@@ -709,6 +721,33 @@ class ObligationTracker:
                     ob.evidence.append(f"turn{turn}:tested")
         return transitions
 
+    def mark_satisfied(self, obligation_id: int, evidence: str, turn: int) -> bool:
+        """Promote an obligation only when an integration has explicit proof."""
+        return self._set_explicit_status(
+            obligation_id, "satisfied", evidence=evidence, turn=turn
+        )
+
+    def mark_contradicted(self, obligation_id: int, evidence: str, turn: int) -> bool:
+        """Mark an obligation contradicted by observed behavior or failure output."""
+        return self._set_explicit_status(
+            obligation_id, "contradicted", evidence=evidence, turn=turn
+        )
+
+    def _set_explicit_status(
+        self, obligation_id: int, status: str, *, evidence: str, turn: int
+    ) -> bool:
+        if status not in {"satisfied", "contradicted"}:
+            return False
+        for ob in self.obligations:
+            if ob.id != obligation_id:
+                continue
+            ob.status = status
+            ob.last_turn = turn
+            if evidence:
+                ob.evidence.append(f"turn{turn}:{status}={evidence[:120]}")
+            return True
+        return False
+
     def statuses_tuple(self, edited_tokens: set[str], tested_tokens: set[str]):
         """Compatibility shim: same tuple shape as obligation_statuses()."""
         edited = set(edited_tokens or ())
@@ -721,7 +760,9 @@ class ObligationTracker:
                 continue
             st = _obligation_lifecycle_to_status(ob.status)
             touched, conf = _overlap(v, edited)
-            if ob.status in ("tested", "satisfied") or _obligation_tested(v, tested):
+            if ob.status == "contradicted":
+                st = OBL_EDITED_UNTESTED if touched else OBL_UNADDRESSED
+            elif ob.status in ("tested", "satisfied") or _obligation_tested(v, tested):
                 st = OBL_TESTED
             elif ob.status == "edited" or touched:
                 st = OBL_EDITED_UNTESTED
@@ -731,7 +772,10 @@ class ObligationTracker:
         return out
 
     def unmet(self) -> list[Obligation]:
-        return [o for o in self.obligations if o.status not in ("tested", "satisfied")]
+        return [
+            o for o in self.obligations
+            if o.status not in ("tested", "satisfied")
+        ]
 
     def coverage_ratio(self) -> float:
         if not self.obligations:
@@ -745,6 +789,7 @@ class ObligationTracker:
             {
                 "id": o.id,
                 "status": o.status,
+                "status_certainty": _obligation_status_certainty(o.status),
                 "last_turn": o.last_turn,
                 "verbatim": (o.verbatim or "")[:160],
                 "evidence": list(o.evidence[-3:]),

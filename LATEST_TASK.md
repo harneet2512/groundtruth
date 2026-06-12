@@ -1,57 +1,91 @@
-# LATEST_TASK.md — Session Handoff (2026-06-11)
+# LATEST_TASK.md — Session Handoff (2026-06-12)
 
-## STATUS: CP004–CP010 SHIPPED — STAGE 1 STABILIZED FOR BUGFREE BOUNDARIES
+## STATUS: ARCHITECTURE-FIRST LIPI REPAIR PASS COMPLETE
 
-Branch: `gt-trial`  
-Validation run: `validation_27367976952` (0/9 resolved at run time; artifacts on disk)
+Current audited HEAD: `51c54d51`
 
-### Commits (CP004–CP010)
+New architecture-first docs:
 
-| Commit | Checkpoint | Summary |
-|--------|------------|---------|
-| `d7da2bc2` | 004 | Oracle event-bound waiver for `l3b.evidence` (B11) — 23/23 adapter tests |
-| `7a554ec8` | 005 | LSP product readiness: `effective_work`, transport vs product gates (B4) |
-| `9a7ce8b4` | 006 | `task_truth.json` reconciler (B5/B9 partial) |
-| `6c0b1af6` | 007 | `gt_consumption_ledger.json` + deep metrics Used/Enforced columns (B6) |
-| `eae6667a` | 008 | Infra subtypes + `write_task_truth` outcome hook (B10) |
-| `f5dee492` | 009 | Centralized `path_policy` surface filter (B7) |
-| `eb5cfe5f` | 010 | Patch hygiene classification (B8) |
+- `.claude/reports/runs/validation_27367976952/LIPI_64_ITEM_CLOSURE_AUDIT_20260612.md`
+- `.claude/reports/runs/validation_27367976952/GT_GT_DESIRED_VS_CURRENT_GAP_AUDIT_20260612.md`
 
-Prior session (CP001–003): `060eccc9`, `956c32e1`, `e013c7be`, `5b3a0d4e`.
+Audit result:
 
-### Pre-flight (88 tests)
+| Class | Count | Notes |
+|---|---:|---|
+| CLOSED | 47 | Code-read closed against desired behavior |
+| PARTIAL | 16 | Code exists but semantics/live proof/docs remain incomplete |
+| LIVE | 1 | `P0-01` substrate rebuild + Go/Rust re-proof |
+| FALSELY CLOSED | 0 | `P1-09` and `P2-03` repaired in code/docs |
 
-```powershell
-Set-Location d:\Groundtruth
-python -m pytest tests/test_verified_adapter.py tests/fail_closed/test_lsp_liveness.py tests/test_task_truth.py tests/test_consumption_ledger.py tests/fail_closed/test_deepswe_outcome_classify.py tests/test_path_policy.py tests/test_patch_hygiene.py -q
-```
+The audit treats tests as receipts only. Closure authority is current code versus
+`gt_gt.md` + `CLAUDE.md`, checked through `LIPI.md` Logic / Implementation / Integration /
+Plumbing.
 
-### Bug ledger (B4–B11)
+Architecture gaps outside the 64:
+
+- `ARCH-01` CLOSED: product truth authority contract added to `task_truth`.
+- `ARCH-02` phase policy exists, but full trajectory-state controller is still partial.
+- `ARCH-03` no single phase-to-payload contract across all surfaces.
+- `ARCH-04` PARTIAL: oracle event payload hash/actionability metadata added; full cross-surface schema remains.
+- `ARCH-05` CLOSED: obligation lifecycle now distinguishes `tested`, `satisfied`, and `contradicted`.
+- `ARCH-06` CLOSED: enforcement metrics are hard-block-only; verification follow-up is separate.
+
+Do not run tenpack until `P0-01` is green on rebuilt substrate. The repaired rows still
+need a new live run to populate regenerated artifacts.
+
+## STATUS: LSP PROOF BOUNDARY FIXES LANDED — STAGE 1 CODE COMPLETE — LIVE RE-PROOF BLOCKED ON SUBSTRATE REBUILD
+
+Branch: `gt-trial` (local uncommitted changes — P0 LSP proof pass)
+Triage run: `27387470440`
+Prior: CP011–015 @ `df4c37c5`; tenpack `27386082651` failed at substrate proof
+
+### This session (LSP proof boundary)
 
 | Bug | Status |
 |-----|--------|
-| B4 LSP warm over-credit | **FIXED** |
-| B5 task truth contradiction | PARTIAL |
-| B6 consumption ledger | **FIXED** |
-| B7 surface pollution | **FIXED** |
-| B8 patch hygiene | **FIXED** |
-| B9 outcome schema | PARTIAL |
-| B10 infra classification | **FIXED** |
-| B11 evidence delivery | **FIXED** |
+| P0-04 Go `GOMODCACHE` / dep manifest | **CLOSED (code)** — await live re-proof |
+| P0-05 Rust RA + rust-src + gcc | **CLOSED (code)** — **substrate rebuild required** |
+| P0-02 `proof_progress.json` / `proof_failure.json` | **CLOSED** |
+| P0-06/07 `task_truth.json` authority | **CLOSED** |
+| P0-11 `phase_policy.py` extraction | **CLOSED** |
+| Stage 2 tenpack GT-on | **NOT RUN** (blocked until re-proof green) |
+
+### Handoff doc (start here)
+
+`.claude/reports/runs/validation_27387470440/GT_LSP_PROOF_HANDOFF.md`
+
+### Bug register + LIPI
+
+`.claude/reports/runs/validation_27387470440/ATOMIC_PRODUCT_BUG_REGISTER_20260612.md`
+
+### Fast verify (17 tests)
+
+```powershell
+Set-Location d:\Groundtruth
+python -m pytest tests/test_proof_progress_json.py tests/test_dep_store_manifest.py tests/test_phase_policy_module.py tests/test_task_truth.py tests/test_gt_deep_metrics_task_truth.py -q
+```
+
+### Broader pre-flight (84 tests, CP011–015)
+
+```powershell
+python -m pytest tests/test_verified_adapter.py tests/fail_closed/test_lsp_liveness.py tests/test_task_truth.py tests/test_consumption_ledger.py tests/fail_closed/test_deepswe_outcome_classify.py tests/test_path_policy.py tests/test_patch_hygiene.py tests/test_obligation_tracker.py tests/test_phase_detection.py tests/test_action_templates.py tests/test_context_budget.py tests/test_ledger_suppression.py tests/test_gt_agent_retry.py tests/test_pier_retry_loop.py tests/test_trajectory_scorecard.py tests/test_delivery_stage2_obligation_status.py tests/test_delivery_stage3_detectors.py -q
+```
+
+### Frozen baseline (never rerun GT-OFF)
+
+`.claude/reports/full300_baseline_ohdeepseek_20260531/FINAL_resolved_300_20260531.json`
+
+### Next work (ordered)
+
+1. Commit/push P0 changes.
+2. Rebuild `gt-substrate` image; pin new `GT_SUBSTRATE_DIGEST`.
+3. Re-proof: `abs-module-cache-flags`, `abs-stepped-slices`, `boa-hierarchical-evaluation-cancellation`.
+4. If green → `./scripts/swebench/dispatch_tenpack_gt_on.sh` (GT-on only).
+5. Pair with `compute_paired_metrics.py` vs frozen baseline.
 
 ### Key docs
 
-- Master handoff: `.claude/reports/runs/validation_27367976952/GT_BUGFREE_HANDOFF_FULL.md`
-- Session closeout: `.claude/reports/runs/validation_27367976952/HANDOFF_AFTER_CHECKPOINT_010.md`
-- Trajectory context gaps: `.claude/reports/runs/validation_27367976952/CONTEXT_GAP_AUDIT_27367976952.md`
-- Architecture of record: `gt_gt.md` §17
-
-### Next work (Stage 2)
-
-1. Smoke re-run Go/Rust tasks (`abs-module-cache-flags`, `fd-deterministic-multi-key-sorting`) — confirm `effective_work > 0` + consumption ledger on live trajectories.
-2. Paired GT-on flip experiment vs frozen baseline (never rerun GT-OFF).
-3. Trajectory-state controller + obligation model (§17.8) — dominant gap for feature tasks per context-gap audit.
-
-### Context-gap finding (four tasks)
-
-Validation run **already delivered** `post_view` witnesses on adaptix/fd/abs; CP004 closes fake-env suppression, not this run's trajectories. Dominant failures: **obligation/spec shape**, **LSP product readiness on Go/Rust**, **verify leakage** (katex — fixed in CP002 for future runs), **patch pollution**.
+- Architecture: `gt_gt.md` §17.8–17.10
+- CP011–015 context: `.claude/reports/runs/validation_27367976952/GT_BUGFREE_HANDOFF_FULL.md`
+- Methodology: `CLAUDE.md` (Stage 1 before Stage 2; trajectory > resolve)

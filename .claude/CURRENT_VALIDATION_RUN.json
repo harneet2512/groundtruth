@@ -1,11 +1,11 @@
 {
   "schema": "gt.current_validation_run.v1",
   "local_branch": "gt-trial",
-  "local_head": "c8009722",
+  "local_head": "51c54d51",
   "last_substrate_proof_run_id": "27387470440",
-  "last_substrate_proof_url": "https://github.com/starryzhang/GroundTruth/actions/runs/27387470440",
+  "last_substrate_proof_url": "https://github.com/hbali-stack/groundtruth/actions/runs/27387470440",
   "status": "awaiting_substrate_rebuild_and_reproof",
   "blocking_p0": ["P0-01"],
   "register": ".claude/reports/runs/validation_27367976952/ATOMIC_PRODUCT_BUG_REGISTER_20260612.md",
-  "notes": "P0-04/05/02/06-14 and P1/P2 code landed locally; 106+ register tests pass. Live re-proof required after substrate image rebuild + GT_SUBSTRATE_DIGEST pin."
+  "notes": "Architecture-first LIPI audit is in progress at 51c54d51. P0-04/05/02/06-14 and most P1/P2 code are present locally; live re-proof is still required after substrate image rebuild + GT_SUBSTRATE_DIGEST pin. Tests are receipts only, not closure authority."
 }

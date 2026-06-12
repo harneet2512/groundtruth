@@ -3109,14 +3109,37 @@ def _oracle_telemetry_write(suppressed, winner) -> None:
     """8-dp suppression telemetry (plan §1.4) — file/stderr side, NEVER the
     agent channel."""
     try:
+        import hashlib as _hl
         import json as _j
         if not suppressed and winner is None:
             return
+        emitted = None
+        if winner is not None:
+            _text = str(winner[4] or "")
+            _next_action = bool(
+                re.search(
+                    r"\b(run|open|inspect|check|confirm|verify|test|edit)\b",
+                    _text,
+                    re.I,
+                )
+            )
+            emitted = {
+                "kind": winner[3],
+                "confidence": float(f"{float(winner[1]):.8f}"),
+                "payload_hash": _hl.sha256(
+                    _text.encode("utf-8", errors="replace")
+                ).hexdigest()[:16],
+                "payload_chars": len(_text),
+                "actionable": _next_action,
+                "surface": "agent_observation",
+            }
         rec = {
+            "schema": "gt.oracle_event.v2",
             "emitted": None if winner is None else {
                 "kind": winner[3],
                 "confidence": float(f"{float(winner[1]):.8f}"),
             },
+            "emission": emitted,
             "suppressed": [
                 {"kind": k, "reason": r, "confidence": float(f"{float(c):.8f}")}
                 for k, r, c in suppressed

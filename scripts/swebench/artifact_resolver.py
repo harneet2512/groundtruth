@@ -47,6 +47,36 @@ def _sha256_file(path: str | None) -> str | None:
     return h.hexdigest()
 
 
+def _read_text(path: str | None) -> str | None:
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
+def _sha256_text(text: str | None) -> str | None:
+    if text is None:
+        return None
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _extract_gt_task_brief(text: str | None) -> str | None:
+    """Return the delivered <gt-task-brief> block, if present."""
+    if not text:
+        return None
+    start = text.find("<gt-task-brief")
+    if start < 0:
+        return None
+    end_tag = "</gt-task-brief>"
+    end = text.find(end_tag, start)
+    if end < 0:
+        return None
+    return text[start:end + len(end_tag)]
+
+
 def resolve_trial_artifacts(
     jobs_dir: str,
     *,
@@ -129,13 +159,28 @@ def resolve_trial_artifacts(
 
 
 def brief_provenance(artifacts: TrialArtifacts) -> dict[str, Any]:
-    """P1-09 / P2-13 — substrate vs delivered brief hashes."""
+    """P1-09 / P2-13 - substrate brief survives inside the agent prompt."""
+    brief_text = _read_text(artifacts.brief_txt)
+    delivered_text = _read_text(artifacts.delivered_instruction)
+    delivered_block = _extract_gt_task_brief(delivered_text)
+    substrate_hash = _sha256_text(brief_text)
+    delivered_block_hash = _sha256_text(delivered_block)
+    delivered_contains = (
+        bool(brief_text and delivered_text and brief_text in delivered_text)
+        if brief_text is not None and delivered_text is not None
+        else None
+    )
+    if substrate_hash and delivered_block_hash:
+        brief_match = substrate_hash == delivered_block_hash
+    elif delivered_contains is not None:
+        brief_match = delivered_contains
+    else:
+        brief_match = None
     return {
-        "substrate_brief_sha256": _sha256_file(artifacts.brief_txt),
+        "substrate_brief_sha256": substrate_hash,
         "delivered_instruction_sha256": _sha256_file(artifacts.delivered_instruction),
-        "brief_match": (
-            _sha256_file(artifacts.brief_txt) == _sha256_file(artifacts.delivered_instruction)
-            if artifacts.brief_txt and artifacts.delivered_instruction
-            else None
-        ),
+        "delivered_brief_block_sha256": delivered_block_hash,
+        "delivered_contains_substrate_brief": delivered_contains,
+        "brief_match": brief_match,
+        "match_semantics": "delivered_brief_block_or_containment",
     }

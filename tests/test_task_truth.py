@@ -95,6 +95,8 @@ def test_build_task_truth_writes_json():
             json.dump(result, fh)
         truth = tt.build_task_truth(jobs, trial_log="")
         assert truth["schema"] == "gt.task_truth.v1"
+        assert truth["authority"]["outcome"] == "task_truth.outcome"
+        assert truth["authority"]["brief_delivery"] == "task_truth.brief_provenance"
         assert truth["instance_id"] == "task"
         assert "reconciled" in truth
         assert truth["patch_hygiene"].get("classification") == "source_fix"
@@ -113,6 +115,7 @@ def test_reconciled_substrate_verdict_shape():
     verdict = tt.build_reconciled_substrate_verdict(truth)
     assert verdict["schema"] == "gt.reconciled_substrate_verdict.v1"
     assert verdict["authority"] == "task_truth.json"
+    assert verdict["authority_map"]["substrate"] == "reconciled_substrate_verdict.json"
     assert verdict["graph_handoff"] == "pass"
 
 

@@ -62,7 +62,7 @@ def build_consumption_ledger(
         steps = []
 
     entries: list[dict[str, Any]] = []
-    delivered = consumed = enforced = 0
+    delivered = consumed = verification_followup = hard_enforced = 0
 
     for i, step in enumerate(steps):
         if not isinstance(step, dict):
@@ -85,19 +85,24 @@ def build_consumption_ledger(
         for blk in blocks:
             delivered += 1
             is_consumed = _token_overlap(obs, future_text) or bool(future_files)
-            is_enforced = any(
+            has_verification_followup = any(
                 "pytest" in a.lower() or "test" in a.lower() for a in future_actions
             )
+            is_hard_enforced = False
             if is_consumed:
                 consumed += 1
-            if is_enforced:
-                enforced += 1
+            if has_verification_followup:
+                verification_followup += 1
+            if is_hard_enforced:
+                hard_enforced += 1
             entries.append({
                 "turn": turn,
                 "kind": blk["kind"],
                 "content_hash": blk["content_hash"],
                 "consumed": is_consumed,
-                "enforced": is_enforced,
+                "verification_followup": has_verification_followup,
+                "hard_enforced": is_hard_enforced,
+                "enforced": is_hard_enforced,
                 "window": window,
             })
 
@@ -105,7 +110,11 @@ def build_consumption_ledger(
         "schema": "gt.consumption_ledger.v1",
         "gt_blocks_delivered": delivered,
         "gt_blocks_consumed": consumed,
-        "gt_blocks_enforced": enforced,
+        "gt_blocks_verification_followup": verification_followup,
+        "gt_blocks_hard_enforced": hard_enforced,
+        "gt_blocks_enforced": hard_enforced,
+        "enforcement_semantics": "hard_block_only",
+        "legacy_note": "pre-CP semantics counted test-looking follow-up as enforced",
         "entries": entries,
     }
 

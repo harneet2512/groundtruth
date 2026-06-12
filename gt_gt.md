@@ -1495,7 +1495,8 @@ The oracle-arm trajectories (9 tasks, 5 languages) confirm and sharpen the §15.
 
 ## 17. Bugfree program — validation_27367976952, checkpoints 001–015 (2026-06-11–12)
 
-> **Last verified 2026-06-12.** Branch `gt-trial` @ `df4c37c5`. Master handoff:
+> **Last verified 2026-06-12.** Branch `gt-trial` @ `51c54d51` plus architecture-first
+> LIPI audit docs. Master handoff:
 > `.claude/reports/runs/validation_27367976952/GT_BUGFREE_HANDOFF_FULL.md`.
 > This section is the **architecture-of-record** for the bugfree layer-by-layer fix
 > program; run-folder checkpoint docs are the per-boundary evidence trail.
@@ -1539,7 +1540,21 @@ Stage discipline (from `CLAUDE.md`):
 | Resolved | **0/9** at run time |
 | Artifacts | `.claude/reports/runs/validation_27367976952/` (~411MB trajectories) |
 
-Checkpoints **001–015 shipped** (2026-06-11–12). CP001–003: metrics fallback, no-leak verify, embedder cert truth. CP004–010: evidence oracle waiver, LSP product readiness, task truth, consumption ledger, infra subtypes, path_policy, patch hygiene. **CP011–015 + P6/P7** (`df4c37c5`): obligation lifecycle, phase policy, action templates, context budget, ledger suppression, verifier retry, trajectory scorecard. See `HANDOFF_AFTER_CHECKPOINT_015.md`, `SESSION_20260612_CP011-015.md`, and `CONTEXT_GAP_AUDIT_27367976952.md`.
+Checkpoints **001–015 shipped** (2026-06-11–12). CP001–003: metrics fallback, no-leak verify, embedder cert truth. CP004–010: evidence oracle waiver, LSP product readiness, task truth, consumption ledger, infra subtypes, path_policy, patch hygiene. **CP011–015 + P6/P7** (`df4c37c5`): obligation lifecycle, phase policy, action templates, context budget, ledger suppression, verifier retry, trajectory scorecard. **Register closure / architecture-first audit** (`51c54d51`): structured proof truth, dep manifests, task_truth authority, phase policy module, and 64-row LIPI audit. See `LIPI_64_ITEM_CLOSURE_AUDIT_20260612.md`, `GT_GT_DESIRED_VS_CURRENT_GAP_AUDIT_20260612.md`, `HANDOFF_AFTER_CHECKPOINT_015.md`, `SESSION_20260612_CP011-015.md`, and `CONTEXT_GAP_AUDIT_27367976952.md`.
+
+Product truth authority is explicit after the 2026-06-12 LIPI repair pass:
+
+| Claim | Canonical surface |
+|---|---|
+| Outcome / denominator | `task_truth.outcome` |
+| Substrate readiness | `reconciled_substrate_verdict.json` |
+| Runtime witness | `task_truth.runtime_witness` |
+| Brief delivery proof | `task_truth.brief_provenance` |
+| Verifier semantics | `task_truth.verifier_semantics` |
+| Obligation lifecycle | `task_truth.obligation_status` |
+| Patch hygiene | `task_truth.patch_hygiene` |
+| Trajectory integrity | `task_truth.trajectory_integrity` |
+| Consumption / enforcement | `gt_consumption_ledger.json` via `task_truth.deep_metrics`; enforcement is hard-block-only |
 
 ### 17.3 Bug ledger B1–B11
 
@@ -1653,12 +1668,12 @@ Status after CP011–015 + LSP proof boundary fixes (2026-06-12, run `2738747044
 
 | # | Piece | Status |
 |---|---|---|
-| 1 | Trajectory-state controller (phase → speak/silence) | **SHIPPED** CP013 |
+| 1 | Trajectory-state controller (phase → speak/silence) | **PARTIAL** — phase policy module shipped; full controller ledger still open (`ARCH-02`) |
 | 2 | Context selection policy (ORIENT / VIEW / EDIT / VERIFY / SUBMIT) | **PARTIAL** — phase gates; live ORIENT/VIEW policy TBD |
 | 3 | Consumption feedback loop | **SHIPPED** CP007 |
 | 4 | First-class obligation model (status vector per clause) | **SHIPPED** CP011 |
-| 5 | Pre-submit intervention (severity boost; not hard submit block) | **SHIPPED** CP012 |
-| 6 | Verifier-fail retry plumbing | **SHIPPED** P6 |
+| 5 | Pre-submit intervention (severity boost; not hard submit block) | **PARTIAL/SHIPPED AS INTERVENTION** CP012 — not a hard submit blocker |
+| 6 | Self-verifier retry plumbing | **SHIPPED** P6 — not official hidden-verifier repair |
 | 7 | Trust-gated context surfaces | **SHIPPED** CP005, CP009 |
 | 8 | Context budgeting | **SHIPPED** CP015 |
 | 9 | Graph-to-action translation | **SHIPPED** CP014 |
@@ -1674,12 +1689,12 @@ Trajectory controller stack + substrate proof boundary fixes (run `27387470440`)
 | CP / P0 | Topic | Primary owner files | Done when |
 |---|---|---|---|
 | **011** | Obligation lifecycle | `gt_oracle.py` (`ObligationTracker`) | **SHIPPED** — `tests/test_obligation_tracker.py` |
-| **012** | Pre-submit gate | `gt_oracle.py`, `gt_agent.py` | **SHIPPED** — delivery stage2/3 tests. **Semantics:** severity boost at >90% budget is an *intervention*, not a hard block — agent may still submit. |
+| **012** | Pre-submit intervention | `gt_oracle.py`, `gt_agent.py` | **SHIPPED AS INTERVENTION** — delivery stage2/3 tests. **Semantics:** severity boost at >90% budget is not a hard block — agent may still submit. |
 | **013** | Phase policy | `artifact_deepswe/phase_policy.py` (canonical); `gt_mini_patch.py` imports; `gt_agent.py` injects | **SHIPPED** — `tests/test_phase_policy_module.py`, `tests/test_phase_detection.py` |
-| **014** | Action templates | `gt_oracle.py` (`_evidence` TEMPLATES) | **SHIPPED** — `tests/test_action_templates.py` |
-| **015** | Context budget | `gt_oracle.py` (`ContextBudget`) | **SHIPPED** — `tests/test_context_budget.py` |
-| **—** | Ledger suppression | `gt_oracle.py` | **SHIPPED** — `tests/test_ledger_suppression.py` |
-| **P6** | Verifier retry | `gt_agent.py`, pier loop | **SHIPPED** — `tests/test_gt_agent_retry.py`, `test_pier_retry_loop.py`. **Semantics:** *self-verifier* retry ring (`GT_SELF_VERIFY_ATTEMPTS`), not the official pier hidden-test verifier. |
+| **014** | Action templates | `gt_oracle.py` + `gt_mini_patch.py` runtime renderers | **SHIPPED REGISTER ROW** — `tests/test_action_templates.py`; broader actionability audit remains `ARCH-04` |
+| **015** | Context budget | `gt_mini_patch.py` budget/dedupe metadata | **SHIPPED REGISTER ROW** — `tests/test_context_budget.py`; single phase-to-payload contract remains `ARCH-03` |
+| **—** | Ledger suppression | `gt_mini_patch.py` runtime suppression heuristic | **SHIPPED** — `tests/test_ledger_suppression.py` |
+| **P6** | Self-verifier retry | `gt_agent.py`, pier loop | **SHIPPED** — `tests/test_gt_agent_retry.py`, `test_pier_retry_loop.py`. **Semantics:** self-verifier retry ring (`GT_RETRY_ON_VERIFIER_FAIL`), not the official pier hidden-test verifier. |
 | **P7** | Trajectory scorecard | `compute_paired_metrics.py`, `gt_deep_metrics.py` | **SHIPPED** — `tests/test_trajectory_scorecard.py`; outcome authority via `task_truth.json` |
 | **P0-04** | Go dep-store boundary | `deepswe_full.yml`, `dep_store_manifest.py` | **CLOSED (code)** — dynamic `GOMODCACHE`; fail-closed manifest; `tests/test_dep_store_manifest.py` |
 | **P0-05** | Rust LSP boundary | `Dockerfile.gt-substrate`, `deepswe_full.yml`, boa task Dockerfile | **CLOSED (code)** — RA `2026-06-08`, `gcc`, `rust-src`; **awaiting substrate image rebuild** |
@@ -1693,7 +1708,7 @@ Pre-flight: `pytest tests/test_dep_store_manifest.py tests/test_proof_progress_j
 | Field | Value |
 |---|---|
 | Branch / commit (frozen tenpack) | `gt-trial` @ `df4c37c5` |
-| Local code HEAD (register closure session) | `gt-trial` @ `c8009722` — see `.claude/CURRENT_VALIDATION_RUN.json` |
+| Local code HEAD (register closure session) | `gt-trial` @ `51c54d51` — see `.claude/CURRENT_VALIDATION_RUN.json` |
 | Substrate | `ghcr.io/hbali-stack/gt-substrate@sha256:dd5692aa11dcc02050d8d25c91b74010eec1dd1164dfd5b0c22018f6a95f0f7d` |
 | Language smoke `27385688504` | **PASS** — `gt-run-proof` OK on 5 fixtures |
 | Tenpack `27386082651` | **FAIL** — all 10 matrix jobs, pre-agent |
@@ -1702,6 +1717,6 @@ Pre-flight: `pytest tests/test_dep_store_manifest.py tests/test_proof_progress_j
 
 **Triage run `27387470440` (2026-06-12):** Go tasks `abs-module-cache-flags`, `abs-stepped-slices` → `LSP_FAIL_NOT_READY` (empty gomodcache — hardcoded `/root/go/pkg/mod` miss). Rust `boa-hierarchical-evaluation-cancellation` → `LSP_FAIL_NO_WARM` (missing rust-src, RA proc-macro API skew, no `cc`). TS `arktype-json-schema-refs-dependencies` → substrate proof **passed** (failure is post-proof trial — separate triage).
 
-**Fix status (code landed, Stage 1):** P0-04 dynamic `GOMODCACHE` + `dep_store_manifest` fail-closed; P0-05 RA `2026-06-08` + `gcc` + rust-src; P0-02 proof substage JSON; P0-06/07 `task_truth.json` authority. Register: `.claude/reports/runs/validation_27387470440/ATOMIC_PRODUCT_BUG_REGISTER_20260612.md`. **Substrate image rebuild required** before re-proof; **tenpack not dispatched** until Go/Rust proof matrix is green.
+**Fix status (code landed, Stage 1):** P0-04 dynamic `GOMODCACHE` + `dep_store_manifest` fail-closed; P0-05 RA `2026-06-08` + `gcc` + rust-src; P0-02 proof substage JSON; P0-06/07 `task_truth.json` authority. Architecture-first audit docs: `.claude/reports/runs/validation_27367976952/LIPI_64_ITEM_CLOSURE_AUDIT_20260612.md` and `.claude/reports/runs/validation_27367976952/GT_GT_DESIRED_VS_CURRENT_GAP_AUDIT_20260612.md`. **Substrate image rebuild required** before re-proof; **tenpack not dispatched** until Go/Rust proof matrix is green.
 
 **Do not** use pre-CP011 paired reports (`tenpack_27307362054`, `delivery_tenpack_27342218002`) as bugfree evidence.

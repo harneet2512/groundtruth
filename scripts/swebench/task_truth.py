@@ -91,6 +91,21 @@ def _patch_hygiene_from_artifacts(artifacts: dict[str, str | None]) -> dict:
     return ph.classify_patch(patch)
 
 
+def _truth_authority_map() -> dict[str, str]:
+    """Product-facing authority contract for the one-surface truth ledger."""
+    return {
+        "outcome": "task_truth.outcome",
+        "substrate": "reconciled_substrate_verdict.json",
+        "runtime_witness": "task_truth.runtime_witness",
+        "brief_delivery": "task_truth.brief_provenance",
+        "verifier_semantics": "task_truth.verifier_semantics",
+        "obligations": "task_truth.obligation_status",
+        "patch_hygiene": "task_truth.patch_hygiene",
+        "trajectory_integrity": "task_truth.trajectory_integrity",
+        "consumption": "gt_consumption_ledger.json via task_truth.deep_metrics",
+    }
+
+
 def build_task_truth(
     jobs_dir: str,
     *,
@@ -172,6 +187,7 @@ def build_task_truth(
 
     return {
         "schema": "gt.task_truth.v1",
+        "authority": _truth_authority_map(),
         "instance_id": iid,
         "certs": signal.get("cert_verdicts") or {},
         "runtime_witness": {
@@ -187,7 +203,12 @@ def build_task_truth(
             "gt_delivery": deep.get("gt_delivery"),
             "gt_blocks_delivered": deep.get("gt_blocks_delivered"),
             "gt_blocks_consumed": deep.get("gt_blocks_consumed"),
+            "gt_blocks_verification_followup": deep.get(
+                "gt_blocks_verification_followup"
+            ),
+            "gt_blocks_hard_enforced": deep.get("gt_blocks_hard_enforced"),
             "gt_blocks_enforced": deep.get("gt_blocks_enforced"),
+            "gt_enforcement_semantics": deep.get("gt_enforcement_semantics"),
         },
         "outcome": {
             "reward": signal.get("reward"),
@@ -240,6 +261,7 @@ def build_reconciled_substrate_verdict(truth: dict[str, Any]) -> dict[str, Any]:
         "outcome_failure_class": (truth.get("outcome") or {}).get("failure_class"),
         "in_resolved_denominator": (truth.get("outcome") or {}).get("in_resolved_denominator"),
         "authority": "task_truth.json",
+        "authority_map": truth.get("authority") or _truth_authority_map(),
     }
 
 

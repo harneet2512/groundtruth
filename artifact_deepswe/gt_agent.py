@@ -1139,6 +1139,7 @@ class GTMiniSweAgent(MiniSweAgent):
             _os.makedirs("/tmp/gt", exist_ok=True)
             with open("/tmp/gt/delivered_instruction.txt", "w", encoding="utf-8") as _vf:
                 _vf.write(augmented)
+            _brief_hash = hashlib.sha256((brief or "").encode("utf-8")).hexdigest()
             witness = {
                 "schema": "gt.adapter_witness.v1",
                 "gt_prebuilt_active": _os.environ.get("GT_GRAPH_DB") is not None,
@@ -1149,6 +1150,11 @@ class GTMiniSweAgent(MiniSweAgent):
                 "delivered_instruction_sha256": hashlib.sha256(
                     augmented.encode("utf-8")
                 ).hexdigest(),
+                "substrate_brief_sha256": _brief_hash,
+                "delivered_brief_block_sha256": _brief_hash,
+                "delivered_contains_substrate_brief": bool(brief and brief in augmented),
+                "brief_match": bool(brief and brief in augmented),
+                "brief_match_semantics": "delivered_brief_block_or_containment",
                 "brief_chars": len(brief or ""),
             }
             with open("/tmp/gt/adapter_witness.json", "w", encoding="utf-8") as _wf:

@@ -39,4 +39,34 @@ def test_brief_provenance_match():
         )
         prov = mod.brief_provenance(arts)
         assert prov["brief_match"] is True
-        assert prov["substrate_brief_sha256"] == prov["delivered_instruction_sha256"]
+        assert prov["delivered_contains_substrate_brief"] is True
+        assert prov["delivered_brief_block_sha256"] is None
+
+
+def test_brief_provenance_matches_wrapped_instruction():
+    mod = _load()
+    with tempfile.TemporaryDirectory() as td:
+        brief = os.path.join(td, "brief.txt")
+        delivered = os.path.join(td, "delivered_instruction.txt")
+        block = "<gt-task-brief>\nGT brief body\n</gt-task-brief>"
+        open(brief, "w", encoding="utf-8").write(block)
+        open(delivered, "w", encoding="utf-8").write(
+            "issue prompt\n" + block + "\nGT runtime preamble"
+        )
+        arts = mod.TrialArtifacts(
+            trial_dir=td,
+            result_json=None,
+            mini_trajectory=None,
+            canonical_trajectory=None,
+            deep_metrics=None,
+            task_truth=None,
+            outcome_json=None,
+            oracle_events=None,
+            delivered_instruction=delivered,
+            brief_txt=brief,
+        )
+        prov = mod.brief_provenance(arts)
+        assert prov["brief_match"] is True
+        assert prov["delivered_contains_substrate_brief"] is True
+        assert prov["substrate_brief_sha256"] == prov["delivered_brief_block_sha256"]
+        assert prov["substrate_brief_sha256"] != prov["delivered_instruction_sha256"]

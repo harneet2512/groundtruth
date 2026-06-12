@@ -1136,7 +1136,14 @@ def build(task: str, results_dir: str, log_path: str = "",
     summ_present = bool(summ)
 
     # CP007 — consumption ledger from mini trajectory when present.
-    consumption = {"gt_blocks_delivered": 0, "gt_blocks_consumed": 0, "gt_blocks_enforced": 0}
+    consumption = {
+        "gt_blocks_delivered": 0,
+        "gt_blocks_consumed": 0,
+        "gt_blocks_verification_followup": 0,
+        "gt_blocks_hard_enforced": 0,
+        "gt_blocks_enforced": 0,
+        "enforcement_semantics": "hard_block_only",
+    }
     ledger_path = ""
     mini_traj = _find_miniswe_trajectory(task, results_dir)
     if mini_traj:
@@ -1239,7 +1246,14 @@ def build(task: str, results_dir: str, log_path: str = "",
         },
         "gt_blocks_delivered": d8(consumption.get("gt_blocks_delivered", 0)),
         "gt_blocks_consumed": d8(consumption.get("gt_blocks_consumed", 0)),
-        "gt_blocks_enforced": d8(consumption.get("gt_blocks_enforced", 0)),
+        "gt_blocks_verification_followup": d8(
+            consumption.get("gt_blocks_verification_followup", 0)
+        ),
+        "gt_blocks_hard_enforced": d8(consumption.get("gt_blocks_hard_enforced", 0)),
+        "gt_blocks_enforced": d8(consumption.get("gt_blocks_hard_enforced", 0)),
+        "gt_enforcement_semantics": consumption.get(
+            "enforcement_semantics", "hard_block_only"
+        ),
         "gt_consumption_ledger_path": ledger_path or None,
         "per_layer": per_layer,
         "agent": {k: (d8(v) if isinstance(v, (int, float)) else v) for k, v in traj.items()},

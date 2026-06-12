@@ -76,3 +76,23 @@ def test_statuses_tuple_matches_obligation_statuses(om):
     assert [s for _v, s, _t, _c in via_tracker] == [
         s for _v, s, _t, _c in via_fn
     ]
+
+
+def test_tracker_supports_explicit_contradiction(om):
+    tracker = om.ObligationTracker(_OBLS)
+    assert tracker.mark_contradicted(0, "observed failing behavior", turn=7)
+    snap = tracker.snapshot()
+    row = next(r for r in snap if r["id"] == 0)
+    assert row["status"] == "contradicted"
+    assert row["status_certainty"] == "contradicting_evidence"
+    assert 0 in {o.id for o in tracker.unmet()}
+
+
+def test_tracker_satisfied_requires_explicit_promotion(om):
+    tracker = om.ObligationTracker(_OBLS)
+    tracker.update({"ExtraFieldsLoadError"}, {"test_other_path"}, turn=3)
+    assert tracker.coverage_ratio() == 0.0
+    assert tracker.mark_satisfied(0, "observed passing behavior", turn=4)
+    assert tracker.coverage_ratio() == 0.5
+    row = next(r for r in tracker.snapshot() if r["id"] == 0)
+    assert row["status_certainty"] == "explicit_satisfaction_evidence"
