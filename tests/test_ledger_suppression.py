@@ -45,17 +45,29 @@ def test_consumed_kind_gets_severity_boost(pm):
     assert pm._ledger_boost_severity("l3b.evidence", 5.0) == 5.0
 
 
-def test_ignored_kind_skipped_after_two_deliveries(pm):
-    pm._ledger_ignore_counts["l5.stuck"] = 2
+def test_ignored_kind_skipped_after_three_ignores(pm):
+    """D7: raised threshold from 2 to 3; decay prevents permanent mute."""
+    pm._ledger_ignore_counts["l5.stuck"] = 3
     assert pm._ledger_should_skip_kind("l5.stuck")
-    assert not pm._ledger_should_skip_kind("l5.failure")
+    pm._ledger_ignore_counts["l5.stuck"] = 2
+    assert not pm._ledger_should_skip_kind("l5.stuck")
 
 
-def test_delivery_marks_consumed_on_action_cmd(pm):
-    pm._ledger_note_delivery("spec.obligation", "pytest tests/test_foo.py")
+def test_delivery_defers_judgment_to_next_turn(pm):
+    """D7: delivery records pending; judgment happens on next _ledger_judge_pending call."""
+    pm._ledger_note_delivery("spec.obligation", "cat file.py")
+    # Consumption not judged yet — deferred
+    assert "spec.obligation" not in pm._ledger_consumed_kinds
+    # Next turn: agent edits (consumption signal)
+    pm._ledger_judge_pending("sed -i 's/old/new/' file.py")
     assert "spec.obligation" in pm._ledger_consumed_kinds
-    pm._ledger_note_delivery("l5.stuck", "git status")
-    assert pm._ledger_ignore_counts.get("l5.stuck", 0) == 1
+
+
+def test_delivery_decays_ignore_count(pm):
+    """D7: each new delivery decays ignore count by 1, preventing permanent mute."""
+    pm._ledger_ignore_counts["l5.stuck"] = 2
+    pm._ledger_note_delivery("l5.stuck", "")
+    assert pm._ledger_ignore_counts["l5.stuck"] == 1
 
 
 def test_wrong_phase_suppression_is_written_to_runtime_ledger(pm, tmp_path, monkeypatch):

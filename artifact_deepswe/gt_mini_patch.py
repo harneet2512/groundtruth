@@ -2704,11 +2704,14 @@ def _filter_candidates_by_phase(cands, phase: Phase, event, *, file_path: str = 
 
 # ---------------------------------------------------------------------------
 # Piece 3 — runtime_suppression_heuristic (ledger-driven ignore/boost; NOT consumption proof).
+# D7 fix: judge consumption from the NEXT action (deferred one turn), not the
+# trigger command. Decay ignore counts instead of permanent mute.
 # ---------------------------------------------------------------------------
 _ledger_consumed_kinds: set[str] = set()
 _ledger_ignore_counts: dict[str, int] = {}
 _last_delivered_kind: str = ""
 _last_gate_winner_kind: str = ""
+_pending_delivery: tuple[str, int] | None = None  # (kind, turn) awaiting next-turn judgment
 
 
 def _ledger_cmd_acted(cmd: str) -> bool:
@@ -2720,25 +2723,37 @@ def _ledger_cmd_acted(cmd: str) -> bool:
         return True
     if _EDIT_KW_RE.search(c):
         return True
-    return bool(re.search(r">>?\s*[^\s/]", c))
+    # D7: exclude bare stderr redirects (2>&1) from the redirect heuristic
+    return bool(re.search(r"(?<!\d)>>?\s*[^\s/&]", c))
 
 
-def _ledger_note_suppression_heuristic(kind: str, cmd: str) -> None:
-    """P0-12: heuristic ignore/boost only — not authoritative consumption proof."""
-    global _last_delivered_kind
-    _last_delivered_kind = kind
+def _ledger_judge_pending(cmd: str) -> None:
+    """D7: judge the PREVIOUS delivery from THIS turn's command (one-turn defer)."""
+    global _pending_delivery
+    if _pending_delivery is None:
+        return
+    kind, _turn = _pending_delivery
+    _pending_delivery = None
     if not kind:
         return
     acted = _ledger_cmd_acted(cmd)
-    if acted and kind not in _ledger_consumed_kinds:
+    if acted:
         _ledger_consumed_kinds.add(kind)
         _ledger_ignore_counts.pop(kind, None)
-    elif not acted:
+    else:
+        # D7: decay instead of permanent mute — halve the count each time
+        # the kind is delivered again, so it never permanently bans.
         _ledger_ignore_counts[kind] = _ledger_ignore_counts.get(kind, 0) + 1
 
 
 def _ledger_note_delivery(kind: str, cmd: str) -> None:
-    _ledger_note_suppression_heuristic(kind, cmd)
+    """Record that kind was delivered; judgment deferred to next turn."""
+    global _last_delivered_kind, _pending_delivery
+    _last_delivered_kind = kind
+    # D7: decay the ignore count by 1 on each new delivery (prevents permanent mute)
+    if kind in _ledger_ignore_counts and _ledger_ignore_counts[kind] > 0:
+        _ledger_ignore_counts[kind] = max(0, _ledger_ignore_counts[kind] - 1)
+    _pending_delivery = (kind, _action_count)
 
 
 def _ledger_boost_severity(kind: str, sev: float) -> float:
@@ -2748,7 +2763,7 @@ def _ledger_boost_severity(kind: str, sev: float) -> float:
 
 
 def _ledger_should_skip_kind(kind: str) -> bool:
-    return _ledger_ignore_counts.get(kind, 0) >= 2
+    return _ledger_ignore_counts.get(kind, 0) >= 3  # D7: raised from 2 to 3
 
 
 # ---------------------------------------------------------------------------
@@ -3333,6 +3348,8 @@ def _augment_output(action, out) -> None:
             global _oracle_nonedit_streak, _oracle_review_fired, \
                 _oracle_obligation_fired, _last_test_step
             _action_count += 1
+            # D7: judge the PREVIOUS delivery from THIS turn's command.
+            _ledger_judge_pending(cmd or "")
             # severities are COMPUTED floats (composite_severity) — int-base
             # constants coexist; the gate sorts numerically either way.
             cands: list[tuple[float, str, str, bool]] = []

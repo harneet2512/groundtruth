@@ -693,14 +693,23 @@ class ObligationTracker:
             ))
         self._views = views
 
+    # D4: monotonic lifecycle ordering — status only moves FORWARD.
+    _LIFECYCLE_ORDER = {"unedited": 0, "edited": 1, "tested": 2, "satisfied": 3}
+
     def update(
         self,
         edited_tokens: set[str],
         tested_tokens: set[str],
         turn: int,
     ) -> list[tuple[int, str, str]]:
-        """Apply turn evidence; return [(id, old_status, new_status)] transitions."""
-        statuses = obligation_statuses(self._views, edited_tokens, tested_tokens)
+        """Apply turn evidence; return [(id, old_status, new_status)] transitions.
+        D4 fix: monotonic ratchet — status only moves forward (unedited→edited→
+        tested→satisfied), never backward. Min symbol length 4 to avoid false
+        positives like 'map' matching every command."""
+        # Filter tokens: min length 4 avoids 3-char false positives (e.g. 'map')
+        filtered_edit = {t for t in edited_tokens if len(t) >= 4}
+        filtered_test = {t for t in tested_tokens if len(t) >= 4}
+        statuses = obligation_statuses(self._views, filtered_edit, filtered_test)
         transitions: list[tuple[int, str, str]] = []
         by_id = {o.id: o for o in self.obligations}
         for v, st, touched, _conf in statuses:
@@ -713,7 +722,9 @@ class ObligationTracker:
             if st == OBL_TESTED:
                 new_lifecycle = "tested"
             old = ob.status
-            if new_lifecycle != old:
+            old_rank = self._LIFECYCLE_ORDER.get(old, 0)
+            new_rank = self._LIFECYCLE_ORDER.get(new_lifecycle, 0)
+            if new_rank > old_rank:
                 transitions.append((ob.id, old, new_lifecycle))
                 ob.status = new_lifecycle
                 ob.last_turn = turn

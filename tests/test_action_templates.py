@@ -43,8 +43,10 @@ def test_orient_passes_through(pm):
 def test_edit_translates_witness_to_imperative(pm):
     raw = "[WITNESS] capture_snapshot called by -> pkg/mod.py:44"
     out = pm._translate_to_action(raw, pm.Phase.EDIT)
-    assert out.startswith("Inspect capture_snapshot at pkg/mod.py:44")
-    assert "called by" not in out
+    # D5: original fact kept + imperative appended (append, not replace)
+    assert "[WITNESS]" in out, "original fact must be preserved"
+    assert "Changing capture_snapshot risks breaking" in out, "caller_risk template must fire"
+    assert "pkg/mod.py:44" in out
 
 
 def test_edit_callers_becomes_check_instruction(pm):
