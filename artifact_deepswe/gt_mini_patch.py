@@ -44,25 +44,62 @@ import re
 import subprocess
 import sys
 
-# Ensure /opt/gt/src is on sys.path so groundtruth.runtime.* imports resolve.
-# The .pth bootstrap loads this module at Python startup BEFORE the substrate's
-# src/ directory is necessarily on the path. Without this, every import from
-# groundtruth.runtime.* fails with ModuleNotFoundError in the agent container.
+# Graceful import of groundtruth.runtime.* — these modules live in the substrate's
+# baked src/ tree. If the import path isn't available (container bootstrap timing,
+# missing substrate, dev environment), fall back to inline stubs so the core
+# delivery engine (pre-CP011 behavior) still works. The CP011-015 features
+# (phase policy, action templates, context budget, ledger) degrade to no-ops.
 _GT_SRC = os.path.join(os.environ.get("GT_HOME", "/opt/gt"), "src")
 if os.path.isdir(_GT_SRC) and _GT_SRC not in sys.path:
     sys.path.insert(0, _GT_SRC)
 
-from groundtruth.runtime.action_translation import translate_to_action as _product_translate_to_action
-from groundtruth.runtime.context_budget import ContextBudgeter as _ProductContextBudgeter
-from groundtruth.runtime.ledger import Ledger as _ProductLedger
-from groundtruth.runtime.ledger import LedgerEntry as _ProductLedgerEntry
-from groundtruth.runtime.ledger import SignalOutcome as _ProductSignalOutcome
-from groundtruth.runtime.trajectory_state import TrajectoryState as _ProductTrajectoryState
-from groundtruth.runtime.trajectory_state import derive_phase as _product_derive_phase
-from groundtruth.runtime.verification_horizon import HorizonThresholds as _ProductHorizonThresholds
-from groundtruth.runtime.verification_horizon import composite_severity as _product_composite_severity
-from groundtruth.runtime.verification_horizon import render_verify_emission as _product_render_verify_emission
-from groundtruth.runtime.verification_horizon import verify_horizon_band as _product_verify_horizon_band
+_RUNTIME_AVAILABLE = False
+try:
+    from groundtruth.runtime.action_translation import translate_to_action as _product_translate_to_action
+    from groundtruth.runtime.context_budget import ContextBudgeter as _ProductContextBudgeter
+    from groundtruth.runtime.ledger import Ledger as _ProductLedger
+    from groundtruth.runtime.ledger import LedgerEntry as _ProductLedgerEntry
+    from groundtruth.runtime.ledger import SignalOutcome as _ProductSignalOutcome
+    from groundtruth.runtime.trajectory_state import TrajectoryState as _ProductTrajectoryState
+    from groundtruth.runtime.trajectory_state import derive_phase as _product_derive_phase
+    from groundtruth.runtime.verification_horizon import HorizonThresholds as _ProductHorizonThresholds
+    from groundtruth.runtime.verification_horizon import composite_severity as _product_composite_severity
+    from groundtruth.runtime.verification_horizon import render_verify_emission as _product_render_verify_emission
+    from groundtruth.runtime.verification_horizon import verify_horizon_band as _product_verify_horizon_band
+    _RUNTIME_AVAILABLE = True
+except ImportError as _import_err:
+    # Fallback stubs — pre-CP011 behavior
+    print(f"[GT_META] runtime_import_fallback=true reason={_import_err}", file=sys.stderr, flush=True)
+    def _product_translate_to_action(block, phase=None):
+        return block
+    class _ProductContextBudgeter:
+        def __init__(self, *a, **kw): pass
+        def trim(self, payload, max_tokens=500):
+            class _R:
+                text = payload
+                meta = {}
+                pending_lines = payload.splitlines() if payload else []
+            return _R()
+        def commit_delivered(self, lines): pass
+        def reset(self): pass
+    class _ProductLedger:
+        def record(self, *a): pass
+    class _ProductLedgerEntry:
+        def __init__(self, **kw): pass
+    class _ProductSignalOutcome:
+        DELIVERED = "delivered"
+        SUPPRESSED_WRONG_PHASE = "suppressed_wrong_phase"
+    class _ProductTrajectoryState:
+        def __init__(self, **kw): pass
+    def _product_derive_phase(state): return None
+    class _ProductHorizonThresholds:
+        pass
+    def _product_composite_severity(base, budget, ratio):
+        return float(base) + 2.0 * float(budget) + float(ratio)
+    def _product_render_verify_emission(*a, **kw):
+        return ""
+    def _product_verify_horizon_band(*a, **kw):
+        return None
 
 # Strict flag parse (bug #6 parity with gt_agent / every other GT flag):
 # bool(env) made GT_BASELINE=0 enable the baseline arm.
@@ -2492,13 +2529,36 @@ _SEV_CODEMAP = 1
 _pp_dir = os.path.dirname(os.path.abspath(__file__))
 if _pp_dir not in _sys.path:
     _sys.path.insert(0, _pp_dir)
-from phase_policy import (
-    PHASE_POLICY as _PHASE_POLICY,
-    Event,
-    Phase,
-    phase_allows as _phase_allows_policy,
-    should_emit as _phase_should_emit,
-)
+try:
+    from phase_policy import (
+        PHASE_POLICY as _PHASE_POLICY,
+        Event,
+        Phase,
+        phase_allows as _phase_allows_policy,
+        should_emit as _phase_should_emit,
+    )
+except ImportError:
+    # Fallback: no phase filtering — all candidates pass (pre-CP013 behavior)
+    import enum as _pp_enum
+    class Phase(_pp_enum.Enum):
+        ORIENT = "orient"
+        VIEW = "view"
+        EDIT = "edit"
+        VERIFY = "verify"
+        SUBMIT = "submit"
+    class Event(_pp_enum.Enum):
+        TASK_START = "task_start"
+        POST_VIEW = "post_view"
+        POST_EDIT = "post_edit"
+        TEST_RESULT = "test_result"
+        REVIEW_TRANSITION = "review_transition"
+        PRE_SUBMIT = "pre_submit"
+    _PHASE_POLICY = {}
+    class _PolicyDecision:
+        allowed = True
+        reason = "fallback"
+    def _phase_allows_policy(kind, phase, policy=None): return True
+    def _phase_should_emit(kind, phase, **kw): return _PolicyDecision()
 
 
 def _detect_phase() -> Phase:
