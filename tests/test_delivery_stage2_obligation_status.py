@@ -292,7 +292,9 @@ def test_pre_submit_severity_boost_at_90pct_budget(patch_mod, tmp_path, monkeypa
     got = patch_mod._obligation_nudge_block()
     assert got is not None
     sev, _payload = got
-    assert sev == float(patch_mod._SEV_GATE)
+    # D3 fix: composite severity with base _SEV_GATE+1 so obligation beats horizon.
+    # At 281/300 budget (0.937), unmet_ratio=1.0: composite(7, 0.937, 1.0) ≈ 9.87
+    assert sev > float(patch_mod._SEV_GATE), f"boost {sev} must beat flat gate {patch_mod._SEV_GATE}"
 
 
 def test_pre_submit_no_boost_early_budget(patch_mod, tmp_path, monkeypatch):

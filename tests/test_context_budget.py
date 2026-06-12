@@ -46,21 +46,27 @@ def test_trim_caps_length(pm):
     assert imperative.strip() in out
 
 
-def test_dedup_second_turn(pm):
+def test_dedup_after_commit(pm):
+    """D1 fix: dedup only takes effect AFTER commit_delivered is called."""
     line = "Check all callers listed above before changing this interface."
     first = pm._budget_trim(line)
-    second = pm._budget_trim(line)
     assert first.strip() == line
-    assert second == ""
+    second = pm._budget_trim(line)
+    assert second.strip() == line, "uncommitted facts must not be suppressed"
+    pm._PRODUCT_BUDGETER.commit_delivered([line])
+    third = pm._budget_trim(line)
+    assert third == "", "committed facts must be suppressed"
 
 
-def test_dedup_semantic_id_survives_wording_change(pm):
+def test_dedup_semantic_id_after_commit(pm):
     pm._DELIVERED_FACTS.clear()
     pm._DELIVERED_FACT_IDS.clear()
     a = "[WITNESS] capture_snapshot called by -> pkg/mod.py:44"
+    first = pm._budget_trim(a)
+    assert first.strip() == a
+    pm._PRODUCT_BUDGETER.commit_delivered([a])
     b = "[WITNESS] capture_snapshot invoked from -> pkg/mod.py:44"
-    assert pm._budget_trim(a).strip() == a
-    assert pm._budget_trim(b) == ""
+    assert pm._budget_trim(b) == "", "same semantic ID should be suppressed"
 
 
 def test_imperative_survives_over_explanation(pm):

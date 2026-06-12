@@ -2280,6 +2280,43 @@ _gt_oracle_mod = None
 _gt_oracle_tried = False
 
 
+def _reset_oracle_state() -> None:
+    """Clear ALL oracle/delivery state — call between retry attempts (D2 fix)."""
+    global _action_count, _oracle_nonedit_streak, _oracle_obligation_fired
+    global _consensus_fired, _cochange_fired, _l5_fired
+    global _obligation_tracker, _obligation_tracker_anchors
+    global _last_budget_pending
+    global _ledger_consumed_kinds, _ledger_ignore_counts
+    global _last_delivered_kind, _last_gate_winner_kind
+    global _horizon_advisory_fired
+    _action_count = 0
+    _oracle_nonedit_streak = 0
+    _oracle_obligation_fired = False
+    _consensus_fired = False
+    _cochange_fired = False
+    _l5_fired = False
+    _oracle_edited_rels.clear()
+    _oracle_tested_tokens.clear()
+    _oracle_edited_tokens.clear()
+    _oracle_edited_tokens_by_file.clear()
+    _edit_churn.clear()
+    _oblig_status_emitted.clear()
+    _oracle_delivered_hashes.clear()
+    _obligation_tracker = None
+    _obligation_tracker_anchors = None
+    _last_budget_pending = []
+    _PRODUCT_BUDGETER.reset()
+    _ledger_consumed_kinds = set()
+    _ledger_ignore_counts = {}
+    _last_delivered_kind = ""
+    _last_gate_winner_kind = ""
+    _horizon_advisory_fired = False
+    try:
+        _oracle_last_losers.clear()
+    except Exception:
+        pass
+
+
 def _anchors_path() -> str:
     """Resolve the per-task gt_issue_anchors.json artifact, call-time.
     Priority: GT_ANCHORS_PATH (explicit) -> $GT_CERT_DIR/gt_issue_anchors.json
@@ -2402,9 +2439,13 @@ def _obligation_nudge_block() -> tuple[float, str] | None:
         budget_b_sev = (_action_count / _GT_STEP_LIMIT) if _GT_STEP_LIMIT else 0.0
         unmet_ratio = len(unmet) / max(len(statuses), 1)
         sev = om.composite_severity(_SEV_OBLIGATION, budget_b_sev, unmet_ratio)
-        # CP012 option 1: pre-submit severity boost — obligation wins final 10%.
+        # D3 fix: pre-submit boost uses composite so it BEATS horizon gate.
+        # Horizon: composite(_SEV_GATE, budget, tcov) ≈ 7.8-8.9.
+        # Obligation: composite(_SEV_GATE+1, budget, unmet) ≈ 9.0+ → always wins.
         if budget_b_sev > 0.90 and unmet:
-            sev = float(_SEV_GATE)
+            sev = om.composite_severity(_SEV_GATE + 1, budget_b_sev, unmet_ratio)
+        # Also drop the nonedit_streak requirement in the final 10% — the agent
+        # may be editing right up to submit and still needs the checklist.
         return (sev, payload)
     except Exception:  # noqa: BLE001 -- never break the agent loop
         return None
@@ -2582,10 +2623,14 @@ def _stable_fact_id(line: str) -> str:
     return hashlib.sha256(stripped.encode("utf-8")).hexdigest()[:16]
 
 
+_last_budget_pending: list[str] = []
+
+
 def _budget_trim(payload: str, max_tokens: int = 500) -> str:
-    global _last_budget_meta
+    global _last_budget_meta, _last_budget_pending
     _budget_result = _PRODUCT_BUDGETER.trim(payload, max_tokens=max_tokens)
     _last_budget_meta = _budget_result.meta
+    _last_budget_pending = _budget_result.pending_lines
     return _budget_result.text
 
 
@@ -3397,7 +3442,12 @@ def _augment_output(action, out) -> None:
             # DEEP_TRAJECTORY "review transition silent in 9/9" gap closed).
             # edit_bound=True: the trigger IS the review event and the
             # candidate requires >=1 edited-untested obligation by construction.
-            if _oracle_edited_rels and _oracle_nonedit_streak >= 3:
+            # D3 fix: at >90% budget, produce obligation on ANY turn with edits
+            # (drop nonedit_streak requirement — agent may edit up to submit).
+            _budget_now = (_action_count / _GT_STEP_LIMIT) if _GT_STEP_LIMIT else 0.0
+            _oblig_gate = (_oracle_edited_rels and (
+                _oracle_nonedit_streak >= 3 or _budget_now > 0.90))
+            if _oblig_gate:
                 _ob = _obligation_nudge_block()
                 if _ob is not None:
                     cands.append((_ob[0], "spec.obligation", _ob[1], True))
@@ -3436,6 +3486,9 @@ def _augment_output(action, out) -> None:
                 cands, _phase, _event, file_path=_krel or _kf or ""
             )
             _win = _oracle_gate_blocks(cands)
+            # D1 fix: commit budget dedup ONLY after the gate confirms delivery.
+            if _win and _last_budget_pending:
+                _PRODUCT_BUDGETER.commit_delivered(_last_budget_pending)
             # Latch re-arm (LIPI 2026-06-10): a produced-but-not-emitted
             # candidate is DEFERRED, not destroyed — gate losers release the
             # production-time latches their producers consumed, so the class

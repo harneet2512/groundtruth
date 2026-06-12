@@ -1110,6 +1110,14 @@ class GTMiniSweAgent(MiniSweAgent):
         attempt_instruction = instruction
         total_attempts = retries + 1
         for attempt in range(1, total_attempts + 1):
+            # D2 fix: reset oracle state per attempt — action_count, phase,
+            # dedup hashes, obligation tracker, budget facts all start fresh.
+            if attempt > 1:
+                try:
+                    from artifact_deepswe.gt_mini_patch import _reset_oracle_state
+                    _reset_oracle_state()
+                except Exception:
+                    pass
             await super().run(attempt_instruction, environment, context)
             if attempt >= total_attempts:
                 break

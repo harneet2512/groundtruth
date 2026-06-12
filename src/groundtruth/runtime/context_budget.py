@@ -17,6 +17,7 @@ IMPERATIVE_PREFIXES = (
 class BudgetResult:
     text: str
     meta: dict
+    pending_lines: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -36,7 +37,7 @@ class ContextBudgeter:
                 "lines_kept": 0,
                 "lines_total": 0,
                 "dedupe_ids": len(self.delivered_fact_ids),
-            })
+            }, [])
         lines = payload.splitlines()
         fresh = [
             ln for ln in lines
@@ -61,10 +62,6 @@ class ContextBudgeter:
                 break
             result.append(line)
             chars += len(line) + 1
-            self.delivered_facts.add(line.strip())
-            fid = self.stable_fact_id(line)
-            if fid:
-                self.delivered_fact_ids.add(fid)
         return BudgetResult("\n".join(result), {
             "max_tokens_est": max_tokens,
             "char_cap": limit,
@@ -72,7 +69,22 @@ class ContextBudgeter:
             "lines_kept": len(result),
             "lines_total": len(lines),
             "dedupe_ids": len(self.delivered_fact_ids),
-        })
+        }, list(result))
+
+    def commit_delivered(self, lines: list[str]) -> None:
+        """Call ONLY after the gate confirms this candidate won."""
+        for line in lines:
+            stripped = line.strip()
+            if stripped:
+                self.delivered_facts.add(stripped)
+                fid = self.stable_fact_id(line)
+                if fid:
+                    self.delivered_fact_ids.add(fid)
+
+    def reset(self) -> None:
+        """Clear all state — call between retry attempts."""
+        self.delivered_facts.clear()
+        self.delivered_fact_ids.clear()
 
 
 def stable_fact_id(line: str) -> str:
