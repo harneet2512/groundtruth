@@ -46,6 +46,9 @@ import sys
 
 from groundtruth.runtime.action_translation import translate_to_action as _product_translate_to_action
 from groundtruth.runtime.context_budget import ContextBudgeter as _ProductContextBudgeter
+from groundtruth.runtime.ledger import Ledger as _ProductLedger
+from groundtruth.runtime.ledger import LedgerEntry as _ProductLedgerEntry
+from groundtruth.runtime.ledger import SignalOutcome as _ProductSignalOutcome
 from groundtruth.runtime.trajectory_state import TrajectoryState as _ProductTrajectoryState
 from groundtruth.runtime.trajectory_state import derive_phase as _product_derive_phase
 from groundtruth.runtime.verification_horizon import HorizonThresholds as _ProductHorizonThresholds
@@ -2584,50 +2587,74 @@ def _budget_trim(payload: str, max_tokens: int = 500) -> str:
     _budget_result = _PRODUCT_BUDGETER.trim(payload, max_tokens=max_tokens)
     _last_budget_meta = _budget_result.meta
     return _budget_result.text
-    if not payload:
-        return ""
-    lines = payload.splitlines()
-    fresh = [
-        ln
-        for ln in lines
-        if ln.strip()
-        and ln.strip() not in _DELIVERED_FACTS
-        and _stable_fact_id(ln) not in _DELIVERED_FACT_IDS
-    ]
-    imperative = [
-        ln for ln in fresh
-        if any(ln.strip().startswith(w) for w in _IMPERATIVE_PREFIXES)
-    ]
-    facts = [
-        ln for ln in fresh
-        if ln not in imperative and ("[" in ln or "→" in ln or "->" in ln)
-    ]
-    other = [ln for ln in fresh if ln not in imperative and ln not in facts]
-    ranked = imperative + facts + other
-    result: list[str] = []
-    chars = 0
-    limit = max_tokens * 4
-    for line in ranked:
-        if chars + len(line) > limit:
-            break
-        result.append(line)
-        chars += len(line) + 1
-        _DELIVERED_FACTS.add(line.strip())
-        fid = _stable_fact_id(line)
-        if fid:
-            _DELIVERED_FACT_IDS.add(fid)
-    _last_budget_meta = {
-        "max_tokens_est": max_tokens,
-        "char_cap": max_tokens * 4,
-        "chars_used": chars,
-        "lines_kept": len(result),
-        "lines_total": len(lines),
-        "dedupe_ids": len(_DELIVERED_FACT_IDS),
-    }
-    return "\n".join(result)
 
 
 _last_budget_meta: dict = {}
+_RUNTIME_LEDGER = _ProductLedger()
+
+
+def _runtime_ledger_path() -> str:
+    return os.environ.get("GT_RUNTIME_LEDGER", "/tmp/gt_runtime_ledger.jsonl")
+
+
+def _runtime_ledger_flush() -> None:
+    try:
+        path = _runtime_ledger_path()
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            payload = _RUNTIME_LEDGER.to_jsonl()
+            if payload:
+                fh.write(payload)
+                fh.write("\n")
+    except Exception:
+        pass
+
+
+def _runtime_ledger_record(
+    *,
+    kind: str,
+    outcome,
+    reason: str = "",
+    chars: int = 0,
+    file_path: str = "",
+    event=None,
+) -> None:
+    ev = event.value if event is not None else ""
+    _RUNTIME_LEDGER.record(
+        _ProductLedgerEntry(
+            layer=kind,
+            event_type=ev,
+            file_path=file_path,
+            outcome=outcome,
+            reason=reason,
+            chars_delivered=chars,
+            iteration=_action_count,
+        )
+    )
+    _runtime_ledger_flush()
+
+
+def _filter_candidates_by_phase(cands, phase: Phase, event, *, file_path: str = ""):
+    kept = []
+    for sev, kind, text, event_bound in cands:
+        if not text:
+            continue
+        decision = _phase_should_emit(
+            kind, phase, event=event, event_bound=bool(event_bound)
+        )
+        if decision.allowed:
+            kept.append((sev, kind, text, event_bound))
+            continue
+        _runtime_ledger_record(
+            kind=kind,
+            outcome=_ProductSignalOutcome.SUPPRESSED_WRONG_PHASE,
+            reason=decision.reason,
+            file_path=file_path,
+            event=event,
+        )
+    return kept
 
 
 # ---------------------------------------------------------------------------
@@ -2853,26 +2880,26 @@ def verify_horizon_band(action_count: int, step_limit: int | None,
                         v: int, edit_coverage: float | None,
                         test_coverage: float | None, has_edits: bool,
                         last_test_failed: bool = False) -> str | None:
-    """The band decision function — delivery-engine STAGE 4 (2026-06-11):
+    """The band decision function - delivery-engine STAGE 4 (2026-06-11):
     band edges are functions of the BEHAVIORAL signals, not budget constants.
 
     Inputs (all Stage-1 sensed, stateless per turn):
-      edit_coverage  — obligation symbols edited / total (None = no
+      edit_coverage  - obligation symbols edited / total (None = no
                        obligations -> the clause degrades to edit-presence;
                        the obligation-status class owns the obligation story)
-      test_coverage  — edited files with test evidence / edited files
+      test_coverage  - edited files with test evidence / edited files
                        (None = nothing edited)
-      has_edits      — >=1 source edit observed
-      last_test_failed — the MOST RECENT observed outcome was a failure
+      has_edits      - >=1 source edit observed
+      last_test_failed - the MOST RECENT observed outcome was a failure
 
-    Bands (each predicate composites >=3 signals — hybrid pillar; thresholds
-    are the env-overridable GT_ESC_* calibration channel — dynamic pillar):
-      pivot    : last_test_failed ∧ critical zone (B >= urg_B or R < KV*V)
-      gate     : R < KV*V ∧ test_coverage < gate_tcov ∧ has_edits
-      urgent   : B > urg_B ∧ test_coverage < urg_tcov ∧ has_edits
-      advisory : B > adv_B ∧ test_coverage < adv_tcov ∧ edit_coverage > 0
+    Bands (each predicate composites >=3 signals - hybrid pillar; thresholds
+    are the env-overridable GT_ESC_* calibration channel - dynamic pillar):
+      pivot    : last_test_failed + critical zone (B >= urg_B or R < KV*V)
+      gate     : R < KV*V + test_coverage < gate_tcov + has_edits
+      urgent   : B > urg_B + test_coverage < urg_tcov + has_edits
+      advisory : B > adv_B + test_coverage < adv_tcov + edit_coverage > 0
     Returns: "gate" | "urgent" | "advisory" | "pivot" | None (dormant).
-    Pure function — no side effects."""
+    Pure function - no side effects."""
     return _product_verify_horizon_band(
         action_count,
         step_limit,
@@ -2890,33 +2917,6 @@ def verify_horizon_band(action_count: int, step_limit: int | None,
             gate_cycles=_ESC_GATE_KV,
         ),
     )
-    if step_limit is None or step_limit <= 0:
-        return None  # GT_STEP_LIMIT absent -> escalation disabled
-    if not has_edits:
-        return None  # no edits -> no verification debt (correct-or-quiet)
-    a = action_count
-    return _product_render_verify_emission(
-        band, action_count, step_limit, edited_rels, covering_tests)
-    S = step_limit
-    R = S - a
-    B = a / S
-    tc = 0.0 if test_coverage is None else float(test_coverage)
-    # No obligations -> edit-presence stands in for edit_coverage>0 (the
-    # boa-class advisory must survive obligation-less tasks).
-    ec_pos = True if edit_coverage is None else (float(edit_coverage) > 0.0)
-
-    # Pivot first: the agent HAS evidence and it is failing — "run the test
-    # NOW" would be wrong advice; sizing the remaining-budget response is right.
-    if last_test_failed and (B >= _ESC_URG_B or R <= _ESC_GATE_KV * v):
-        return "pivot"
-    if R <= _ESC_GATE_KV * v and tc < _ESC_GATE_TCOV:
-        return "gate"        # feasibility horizon — keyed to OBSERVED pace V
-    if B >= _ESC_URG_B and tc < _ESC_URG_TCOV:
-        return "urgent"
-    if B >= _ESC_ADV_B and tc < _ESC_ADV_TCOV and ec_pos:
-        return "advisory"
-    return None              # DORMANT: the event-driven family covers the rest
-
 
 def _render_verify_emission(band: str, action_count: int, step_limit: int,
                             edited_rels: set, covering_tests: list) -> str:
@@ -2928,53 +2928,6 @@ def _render_verify_emission(band: str, action_count: int, step_limit: int,
     """
     return _product_render_verify_emission(
         band, action_count, step_limit, edited_rels, covering_tests)
-    S = step_limit
-    R = S - action_count
-    edited_summary = ", ".join(
-        os.path.basename(r) for r in sorted(edited_rels)[:3])
-    if len(edited_rels) > 3:
-        edited_summary += f" (+{len(edited_rels)-3} more)"
-
-    has_covering = bool(covering_tests)
-    test_info = "a graph-linked covering test" if has_covering else "the relevant tests"
-    test_action = (
-        "the narrowest relevant repo test target" if has_covering
-        else "the relevant test suite or narrowest related target"
-    )
-
-    if band == "advisory":
-        body = (
-            f"GT: you have edited {edited_summary} but no test output observed "
-            f"so far references these changes. {test_info} covers them - "
-            f"consider running {test_action}."
-        )
-    elif band == "urgent":
-        body = (
-            f"GT: ~{R} of {S} steps remain. Your edits to {edited_summary} "
-            "are still unverified - nothing you have run exercises them. "
-            f"Run {test_action} now. A failing result with "
-            f"~{R} steps left is still fixable; an unverified submission is not."
-        )
-    elif band == "gate":
-        body = (
-            f"GT: {R} steps left - at your observed pace this is your LAST "
-            f"window to verify. You edited {edited_summary}; no test has "
-            f"exercised them. Run {test_action} NOW. If it passes, finish. "
-            "If it fails, make the single smallest fix and re-run. "
-            "Do not submit unverified work."
-        )
-    elif band == "pivot":
-        body = (
-            f"GT: the targeted verification has failed and ~{R} steps remain. "
-            "Re-read the failing assertion once; if the fix is not one edit "
-            "away, revert to your last passing state and submit the minimal "
-            "correct change."
-        )
-    else:
-        return ""
-
-    return f'\n<gt-verify level="{band}">\n{body}\n</gt-verify>'
-
 
 # Obligation SYMBOLS only (the edit_coverage_ratio numerator domain) — from
 # the per-task anchors artifact's obligations[], never the anchor superset
@@ -3479,12 +3432,9 @@ def _augment_output(action, out) -> None:
             # event (post_view / post_edit / review transition); phase policy
             # only narrows ambient producers (P5 symbol narrowing).
             _event = _current_event(_kkind)
-            cands = [
-                c for c in cands
-                if c[2] and _phase_should_emit(
-                    c[1], _phase, event=_event, event_bound=bool(c[3])
-                ).allowed
-            ]
+            cands = _filter_candidates_by_phase(
+                cands, _phase, _event, file_path=_krel or _kf or ""
+            )
             _win = _oracle_gate_blocks(cands)
             # Latch re-arm (LIPI 2026-06-10): a produced-but-not-emitted
             # candidate is DEFERRED, not destroyed — gate losers release the
@@ -3536,6 +3486,13 @@ def _augment_output(action, out) -> None:
             if _win:
                 out["output"] = (out.get("output") or "") + _win
                 _ledger_note_delivery(_last_gate_winner_kind, cmd)
+                _runtime_ledger_record(
+                    kind=_last_gate_winner_kind,
+                    outcome=_ProductSignalOutcome.DELIVERED,
+                    chars=len(_win),
+                    file_path=_krel or _kf or "",
+                    event=_event,
+                )
             return
 
         # ---- LEGACY PATH (GT_ORACLE_ROUTE=0): unconditional appends ----

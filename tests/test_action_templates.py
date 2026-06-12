@@ -51,3 +51,10 @@ def test_edit_callers_becomes_check_instruction(pm):
     raw = "[CALLERS] 2 callers in other files"
     out = pm._translate_to_action(raw, pm.Phase.VERIFY)
     assert "Check all callers" in out
+
+
+def test_edit_verified_callers_becomes_contract_risk_instruction(pm):
+    raw = "[CALLERS] capture_snapshot: 3 verified caller(s) in 2 file(s) — preserve this interface"
+    out = pm._translate_to_action(raw, pm.Phase.EDIT)
+    assert "Preserve the capture_snapshot interface" in out
+    assert "callers" in out

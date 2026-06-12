@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import sys
 from pathlib import Path
@@ -55,3 +56,24 @@ def test_delivery_marks_consumed_on_action_cmd(pm):
     assert "spec.obligation" in pm._ledger_consumed_kinds
     pm._ledger_note_delivery("l5.stuck", "git status")
     assert pm._ledger_ignore_counts.get("l5.stuck", 0) == 1
+
+
+def test_wrong_phase_suppression_is_written_to_runtime_ledger(pm, tmp_path, monkeypatch):
+    ledger_path = tmp_path / "gt_runtime_ledger.jsonl"
+    monkeypatch.setenv("GT_RUNTIME_LEDGER", str(ledger_path))
+    pm._RUNTIME_LEDGER = pm._ProductLedger()
+    kept = pm._filter_candidates_by_phase(
+        [(1.0, "spec.obligation", "<gt-verify>body</gt-verify>", False)],
+        pm.Phase.VIEW,
+        pm.Event.POST_VIEW,
+        file_path="src/app.py",
+    )
+    assert kept == []
+    rows = [
+        json.loads(line)
+        for line in ledger_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert rows[0]["outcome"] == "suppressed_wrong_phase"
+    assert rows[0]["reason"] == "wrong_phase"
+    assert rows[0]["file_path"] == "src/app.py"

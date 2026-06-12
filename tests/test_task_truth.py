@@ -107,6 +107,7 @@ def test_task_truth_includes_product_runtime_control_surface():
         trial = os.path.join(jobs, "run", "task__abc")
         agent = os.path.join(trial, "agent")
         os.makedirs(agent, exist_ok=True)
+        runtime_ledger = os.path.join(trial, "gt_runtime_ledger.jsonl")
         with open(os.path.join(trial, "result.json"), "w", encoding="utf-8") as fh:
             json.dump(
                 {
@@ -117,6 +118,17 @@ def test_task_truth_includes_product_runtime_control_surface():
                 },
                 fh,
             )
+        with open(runtime_ledger, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({
+                "layer": "spec.obligation",
+                "event_type": "post_view",
+                "file_path": "src/app.py",
+                "outcome": "suppressed_wrong_phase",
+                "reason": "wrong_phase",
+                "chars_delivered": 0,
+                "timestamp_ms": 1,
+                "iteration": 2,
+            }) + "\n")
         with open(os.path.join(agent, "mini-swe-agent.trajectory.json"), "w", encoding="utf-8") as fh:
             json.dump(
                 {
@@ -135,6 +147,7 @@ def test_task_truth_includes_product_runtime_control_surface():
         assert runtime["trajectory_state_summary"]["test_evidence_seen"] is True
         assert runtime["obligation_lifecycle_summary"]["version"].startswith("gt.runtime.obligations.")
         assert runtime["verification_horizon_summary"]["version"].startswith("gt.runtime.verification_horizon.")
+        assert runtime["runtime_ledger_summary"]["outcome_counts"]["suppressed_wrong_phase"] == 1
         assert runtime["enforcement_semantics"]["official_verifier_repair"] is False
         assert runtime["adapter_witness"]["gt_meta_present"] is True
 

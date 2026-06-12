@@ -19,6 +19,7 @@ class TrialArtifacts:
     task_truth: str | None
     outcome_json: str | None
     oracle_events: str | None
+    runtime_ledger: str | None
     delivered_instruction: str | None
     brief_txt: str | None
 
@@ -32,6 +33,7 @@ class TrialArtifacts:
             "task_truth": self.task_truth,
             "outcome_json": self.outcome_json,
             "oracle_events": self.oracle_events,
+            "runtime_ledger": self.runtime_ledger,
             "delivered_instruction": self.delivered_instruction,
             "brief_txt": self.brief_txt,
         }
@@ -130,6 +132,22 @@ def resolve_trial_artifacts(
                 oracle_events = cand
                 break
 
+    runtime_ledger = os.environ.get("GT_RUNTIME_LEDGER")
+    if runtime_ledger and not os.path.isfile(runtime_ledger):
+        runtime_ledger = None
+    if not runtime_ledger and trial_dir:
+        parent = os.path.dirname(jobs_dir)
+        for base in (trial_dir, parent, "/tmp/gt"):
+            if not base:
+                continue
+            for name in ("gt_runtime_ledger.jsonl", f"gt_runtime_ledger_{instance_id}.jsonl"):
+                cand = os.path.join(base, name)
+                if os.path.isfile(cand):
+                    runtime_ledger = cand
+                    break
+            if runtime_ledger:
+                break
+
     delivered = None
     brief = None
     for base in (trial_dir, os.path.dirname(jobs_dir) if jobs_dir else None, "/tmp/gt"):
@@ -153,6 +171,7 @@ def resolve_trial_artifacts(
         task_truth=task_truth,
         outcome_json=outcome,
         oracle_events=oracle_events,
+        runtime_ledger=runtime_ledger,
         delivered_instruction=delivered,
         brief_txt=brief,
     )

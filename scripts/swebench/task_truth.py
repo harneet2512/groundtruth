@@ -43,6 +43,27 @@ def _load_json(path: str) -> dict | None:
         return None
 
 
+def _load_jsonl(path: str) -> list[dict[str, Any]]:
+    if not path or not os.path.isfile(path):
+        return []
+    rows: list[dict[str, Any]] = []
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(row, dict):
+                    rows.append(row)
+    except OSError:
+        return []
+    return rows
+
+
 def _find_trial_artifacts(jobs_dir: str, *, instance_id: str | None = None) -> dict[str, str | None]:
     """Locate per-trial paths under jobs_dir (P1-29 artifact_resolver)."""
     arts = resolve_trial_artifacts(
@@ -207,6 +228,25 @@ def _verification_horizon_summary(deep: dict, verifier_semantics: dict) -> dict[
     }
 
 
+def _runtime_ledger_summary(path: str | None) -> dict[str, Any]:
+    rows = _load_jsonl(path or "")
+    outcome_counts: dict[str, int] = {}
+    reason_counts: dict[str, int] = {}
+    for row in rows:
+        outcome = str(row.get("outcome") or "unknown")
+        outcome_counts[outcome] = outcome_counts.get(outcome, 0) + 1
+        reason = str(row.get("reason") or "")
+        if reason:
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+    return {
+        "path": path,
+        "present": bool(path and os.path.isfile(path)),
+        "entry_count": len(rows),
+        "outcome_counts": outcome_counts,
+        "reason_counts": reason_counts,
+    }
+
+
 def _truth_authority_map() -> dict[str, str]:
     """Product-facing authority contract for the one-surface truth ledger."""
     return {
@@ -305,6 +345,7 @@ def build_task_truth(
     obligation_summary = _obligation_lifecycle_summary(obligation_status)
     consumption_summary = _consumption_summary(deep)
     horizon_summary = _verification_horizon_summary(deep, verifier_semantics)
+    runtime_ledger_summary = _runtime_ledger_summary(arts.runtime_ledger)
 
     return {
         "schema": "gt.task_truth.v1",
@@ -337,6 +378,7 @@ def build_task_truth(
             "trajectory_state_summary": trajectory_summary,
             "obligation_lifecycle_summary": obligation_summary,
             "verification_horizon_summary": horizon_summary,
+            "runtime_ledger_summary": runtime_ledger_summary,
             "consumption_summary": consumption_summary,
             "enforcement_semantics": {
                 "pre_submit_intervention": horizon_summary["pre_submit_intervention"],
