@@ -1720,3 +1720,100 @@ Pre-flight: `pytest tests/test_dep_store_manifest.py tests/test_proof_progress_j
 **Fix status (code landed, Stage 1):** P0-04 dynamic `GOMODCACHE` + `dep_store_manifest` fail-closed; P0-05 RA `2026-06-08` + `gcc` + rust-src; P0-02 proof substage JSON; P0-06/07 `task_truth.json` authority. Architecture-first audit docs: `.claude/reports/runs/validation_27367976952/LIPI_64_ITEM_CLOSURE_AUDIT_20260612.md` and `.claude/reports/runs/validation_27367976952/GT_GT_DESIRED_VS_CURRENT_GAP_AUDIT_20260612.md`. **Substrate image rebuild required** before re-proof; **tenpack not dispatched** until Go/Rust proof matrix is green.
 
 **Do not** use pre-CP011 paired reports (`tenpack_27307362054`, `delivery_tenpack_27342218002`) as bugfree evidence.
+
+---
+
+## 17. Session 2026-06-12 — D1-D10 LIPI defect closure, pipeline architecture, substrate-reproof revert
+
+> **Last verified 2026-06-12.** Evidence: `GT_BUGFREE_STATUS_AND_BUILD_PLAN.md` (PART 2B defect
+> table), `GT_PIPELINE_ARCHITECTURE.md` (surface boundary rules), Fable LIPI audits (2 rounds),
+> validation run `27367976952` (0/9 resolved, 9/10 jobs passing), failed run `27435048257`
+> (substrate-reproof merge regression — 8/10 fail, reverted).
+
+### 17.1 CP011-015 defects found and closed (Fable LIPI, 2 rounds)
+
+CP011-015 shipped as a single 997-line commit by Cursor. Fable LIPI found 10 defects (D1-D10).
+All 7 P0/P1 defects closed; 3 P2 cosmetics closed.
+
+| ID | Defect | Fix | Commit |
+|---|---|---|---|
+| D1 | Budget dedup committed at production time (gate losses destroyed evidence) | `commit_delivered()` post-gate, scoped to l3b.evidence winner only | `77dc857c` + `7da50622` |
+| D2 | Oracle state reset was dead code (host-side import, different process) | Removed — state fresh by construction (new process per attempt) | `7da50622` |
+| D3 | Pre-submit obligation boost (flat 6.0) lost to horizon gate (7.8+) | `composite_severity(_SEV_GATE+1, budget, unmet)` → always wins; nonedit_streak dropped at >90% | `77dc857c` |
+| D4 | ObligationTracker added zero signal (no monotonic ratchet, 3-char symbols) | Monotonic `_LIFECYCLE_ORDER` ratchet; min symbol length 4 | `8d505603` |
+| D5 | Action templates semantically inverted (caller name in callee position) | `w["target"]` for caller direction; append originals, never replace | `8d505603` + `d7979a4e` |
+| D6 | Retry classifier unreachable (env regex ate agent-caused breakage) | Split `_ENV_UNVERIFIABLE_RE` into HARD env / SOFT agent-caused; `compile_error` class | `e7fd256e` |
+| D7 | Consumption ledger judged trigger cmd, not agent response; permanent mute | Deferred one turn via `_pending_delivery`; decay on consumed only; threshold 3 | `8d505603` + `7da50622` |
+| D8 | Phase thresholds hardcoded (ORIENT=5 actions) | `ORIENT_ACTION_FRACTION=0.03` of step_limit (9 at 300) | `0caa5878` |
+| D9 | SEARCH phase missing from policy module | Not needed — `Phase.VIEW` covers searching state | `0caa5878` |
+| D10 | `gt_caused` labeled causal (is grep heuristic) | Renamed `gt_caused_heuristic` throughout scorecard | `0caa5878` |
+
+### 17.2 Pipeline architecture — three surfaces
+
+Documented in `GT_PIPELINE_ARCHITECTURE.md`. The key rule violated by the substrate-reproof
+merge: `gt_mini_patch.py` imports `groundtruth.runtime.*` modules that must exist in the agent
+container's Python path. These modules are baked into the substrate via `COPY src /opt/gt/src`.
+When the substrate is built from a stale Docker layer cache that predates the modules, the import
+fails at `.pth` bootstrap time → `RuntimeError` → 0 agent steps → `DEEPSWE_ADAPTER_FAIL`.
+
+**Surface 1 — GT Product** (`artifact_deepswe/` + `src/groundtruth/`): all intelligence. Tested
+locally. Base64-injected into agent container from checkout.
+
+**Surface 2 — Substrate** (`docker/Dockerfile.gt-substrate`): baked environment (gt-index, LSP
+servers, ONNX models, src/groundtruth). Runs pre-agent. Exists for performance (no per-task
+builds), not logic.
+
+**Surface 3 — GHA Workflow** (`.github/workflows/`): orchestration only. Extracts repo + deps from
+task image, runs substrate, mounts artifacts, runs pier.
+
+**The contract:** Surface 1 imports from `groundtruth.runtime.*` → those modules must be in
+Surface 2's baked `src/`. Surface 2 must be rebuilt from the SAME commit as Surface 1.
+Surface 3 passes env vars and mounts — no GT logic.
+
+### 17.3 Go/Rust LSP status
+
+Go and Rust LSP converts zero edges because the substrate lacks their dependency environment:
+- **Go:** gopls needs `GOMODCACHE` populated; substrate has `GOPROXY=off` + empty cache
+- **Rust:** rust-analyzer needs `cargo metadata`; substrate has no cargo binary
+
+**Current policy:** `LSP_WARN_ZERO_CONVERSION` and `LSP_WARN_NOT_ATTEMPTED` are soft passes
+(`ok=True`). Go/Rust tasks proceed with tree-sitter-only graph (no LSP enrichment). Py/TS/JS
+get full LSP conversions (347/51/132 edges on the frozen run).
+
+**Substrate-reproof fixes (correct but not yet integrated):**
+- Go 1.24.4, `GOFLAGS=-mod=readonly`, `go list -e ./...` for syscall/js
+- Rust sysroot backfill from `rustc --print sysroot`
+- Dep mount from task image (module cache, cargo home)
+- LSP WARN verdicts fail-closed (`ok=False`) — correct once deps work
+
+**Integration order (after benchmark):**
+1. Verify Go/Rust converts >0 edges on a proof sweep with dep mounts
+2. Gate changes (WARN → fail-closed) only AFTER conversion verified
+3. Substrate rebuild AFTER gate changes
+4. Integration test BEFORE dispatch
+
+### 17.4 Validation run results
+
+| Run | Substrate | Config | Result |
+|---|---|---|---|
+| `27367976952` | `2595578534` (pre-D1-D10) | WARN soft-pass, no D1-D10 | 9/10 jobs pass, 0/9 resolved, arktype infra-fail |
+| `27435048257` | `aa3e8908` (merged substrate-reproof) | fail-closed, D1-D10 | 2/10 pass, **8/10 REGRESSION** — `groundtruth.runtime.ledger` import fail |
+| Next run | Rebuilding from `53ae4106` (reverted merge) | WARN soft-pass + D1-D10 | Pending |
+
+### 17.5 What the 10 architectural pieces look like now
+
+| # | Piece | Status |
+|---|---|---|
+| 1 | Trajectory-State Controller | **BUILT** — `Phase` enum, `derive_phase()`, `_detect_phase()` in `context_policy.py` / `trajectory_state.py` |
+| 2 | Context Selection Policy | **BUILT** — `PHASE_POLICY` dict, `EVENT_BOUND_PAYLOADS`, `should_emit()` in `context_policy.py`; `_filter_candidates_by_phase()` in `gt_mini_patch.py` |
+| 3 | Consumption Feedback Loop | **BUILT** — `gt_consumption_ledger` (CP007) + deferred judgment (D7) + decay |
+| 4 | First-Class Obligation Model | **BUILT** — `ObligationTracker` in `gt_oracle.py` with monotonic ratchet (D4) |
+| 5 | Pre-Submit Gate | **BUILT** — composite boost at >90% budget beats horizon (D3); nonedit_streak dropped |
+| 6 | Verifier-Fail Retry | **BUILT** — `compile_error` class in `_classify_verifier_failure` (D6); targeted repair hints |
+| 7 | Trust-Gated Context Surfaces | **BUILT** — CP002 (no-leak) + CP005 (LSP truth) + CP009 (surface filter) |
+| 8 | Context Budgeting | **BUILT** — `ContextBudgeter` with post-gate commit (D1); 500-token cap; imperative-first |
+| 9 | Graph-To-Action Translation | **BUILT** — `translate_to_action()` with caller_risk/callee_contract/sibling templates (D5) |
+| 10 | Flip/Trajectory Scorecard | **BUILT** — `compute_trajectory_scorecard()` with `gt_caused_heuristic` (D10) |
+
+All 10 pieces built, LIPI'd, defects closed. Quality depends on the agent's response to the
+delivered context — measurable only on a live benchmark run.
