@@ -2,12 +2,13 @@
 
 ## STATUS: ARCHITECTURE-FIRST LIPI REPAIR PASS COMPLETE
 
-Current audited HEAD: `51c54d51`
+Current audited HEAD: `3dab29c6`
 
 New architecture-first docs:
 
 - `.claude/reports/runs/validation_27367976952/LIPI_64_ITEM_CLOSURE_AUDIT_20260612.md`
 - `.claude/reports/runs/validation_27367976952/GT_GT_DESIRED_VS_CURRENT_GAP_AUDIT_20260612.md`
+- `.claude/reports/runs/validation_27367976952/SUBSTRATE_BOUNDARY_LIPI_GO_RUST_20260612.md`
 
 Audit result:
 
@@ -34,7 +35,7 @@ Architecture gaps outside the 64:
 Do not run tenpack until `P0-01` is green on rebuilt substrate. The repaired rows still
 need a new live run to populate regenerated artifacts.
 
-## STATUS: LSP PROOF BOUNDARY FIXES LANDED — STAGE 1 CODE COMPLETE — LIVE RE-PROOF BLOCKED ON SUBSTRATE REBUILD
+## STATUS: SUBSTRATE BOUNDARY CLEANED — LIVE RE-PROOF BLOCKED ON SUBSTRATE REBUILD
 
 Branch: `gt-trial` (local uncommitted changes — P0 LSP proof pass)
 Triage run: `27387470440`
