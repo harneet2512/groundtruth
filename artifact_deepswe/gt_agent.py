@@ -1110,14 +1110,10 @@ class GTMiniSweAgent(MiniSweAgent):
         attempt_instruction = instruction
         total_attempts = retries + 1
         for attempt in range(1, total_attempts + 1):
-            # D2 fix: reset oracle state per attempt — action_count, phase,
-            # dedup hashes, obligation tracker, budget facts all start fresh.
-            if attempt > 1:
-                try:
-                    from artifact_deepswe.gt_mini_patch import _reset_oracle_state
-                    _reset_oracle_state()
-                except Exception:
-                    pass
+            # D2 note: oracle state reset is NOT needed here — each super().run()
+            # spawns a NEW mini-swe-agent process in the container (exec_as_agent),
+            # so gt_mini_patch state is fresh by construction per attempt. A host-side
+            # reset would import a DIFFERENT module instance and have no effect.
             await super().run(attempt_instruction, environment, context)
             if attempt >= total_attempts:
                 break

@@ -63,11 +63,20 @@ def test_delivery_defers_judgment_to_next_turn(pm):
     assert "spec.obligation" in pm._ledger_consumed_kinds
 
 
-def test_delivery_decays_ignore_count(pm):
-    """D7: each new delivery decays ignore count by 1, preventing permanent mute."""
+def test_consumed_judgment_decays_ignore_count(pm):
+    """D7: consumed judgment decays ignore count by 1."""
     pm._ledger_ignore_counts["l5.stuck"] = 2
-    pm._ledger_note_delivery("l5.stuck", "")
+    pm._pending_delivery = ("l5.stuck", 5)
+    pm._ledger_judge_pending("sed -i 's/old/new/' file.py")  # edit = consumed
     assert pm._ledger_ignore_counts["l5.stuck"] == 1
+
+
+def test_ignore_count_reaches_skip_threshold(pm):
+    """D7: 3 consecutive ignored judgments → skip fires."""
+    for i in range(3):
+        pm._pending_delivery = ("l5.stuck", i)
+        pm._ledger_judge_pending("git log")  # not an edit/test = ignored
+    assert pm._ledger_should_skip_kind("l5.stuck")
 
 
 def test_wrong_phase_suppression_is_written_to_runtime_ledger(pm, tmp_path, monkeypatch):

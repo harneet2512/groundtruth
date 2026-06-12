@@ -2739,10 +2739,10 @@ def _ledger_judge_pending(cmd: str) -> None:
     acted = _ledger_cmd_acted(cmd)
     if acted:
         _ledger_consumed_kinds.add(kind)
-        _ledger_ignore_counts.pop(kind, None)
+        # Consumed → decay ignore count by 1 (the ONLY decay path)
+        if kind in _ledger_ignore_counts:
+            _ledger_ignore_counts[kind] = max(0, _ledger_ignore_counts[kind] - 1)
     else:
-        # D7: decay instead of permanent mute — halve the count each time
-        # the kind is delivered again, so it never permanently bans.
         _ledger_ignore_counts[kind] = _ledger_ignore_counts.get(kind, 0) + 1
 
 
@@ -2750,9 +2750,6 @@ def _ledger_note_delivery(kind: str, cmd: str) -> None:
     """Record that kind was delivered; judgment deferred to next turn."""
     global _last_delivered_kind, _pending_delivery
     _last_delivered_kind = kind
-    # D7: decay the ignore count by 1 on each new delivery (prevents permanent mute)
-    if kind in _ledger_ignore_counts and _ledger_ignore_counts[kind] > 0:
-        _ledger_ignore_counts[kind] = max(0, _ledger_ignore_counts[kind] - 1)
     _pending_delivery = (kind, _action_count)
 
 
@@ -3503,9 +3500,11 @@ def _augment_output(action, out) -> None:
                 cands, _phase, _event, file_path=_krel or _kf or ""
             )
             _win = _oracle_gate_blocks(cands)
-            # D1 fix: commit budget dedup ONLY after the gate confirms delivery.
-            if _win and _last_budget_pending:
+            # D1 fix: commit budget dedup ONLY when l3b.evidence wins the gate.
+            global _last_budget_pending
+            if _win and _last_budget_pending and _last_gate_winner_kind == "l3b.evidence":
                 _PRODUCT_BUDGETER.commit_delivered(_last_budget_pending)
+            _last_budget_pending = []
             # Latch re-arm (LIPI 2026-06-10): a produced-but-not-emitted
             # candidate is DEFERRED, not destroyed — gate losers release the
             # production-time latches their producers consumed, so the class
