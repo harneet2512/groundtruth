@@ -809,8 +809,9 @@ jobs:
           # Discover paths inside gtsrc (mars-base images use non-default GOMODCACHE).
           mkdir -p /tmp/gt/deps/gomodcache /tmp/gt/deps/cargo /tmp/gt/deps/rustup
           GOMOD_SRC=""
+          GOMOD_DECLARED="$(docker exec gtsrc sh -lc 'go env GOMODCACHE 2>/dev/null' | tr -d '\r')"
           for CAND in \
-            "$(docker exec gtsrc sh -lc 'go env GOMODCACHE 2>/dev/null' | tr -d '\r')" \
+            "$GOMOD_DECLARED" \
             "/root/go/pkg/mod" "/home/user/go/pkg/mod" "/go/pkg/mod"; do
             [ -n "$CAND" ] || continue
             if docker exec gtsrc test -d "$CAND" 2>/dev/null; then
@@ -844,7 +845,7 @@ jobs:
           python3 scripts/swebench/dep_store_manifest.py \
             --out /tmp/gt/dep_store_manifest.json \
             --language "${{ matrix.language }}" \
-            --gomodcache-host /tmp/gt/deps/gomodcache --gomodcache-source "$GOMOD_SRC" \
+            --gomodcache-host /tmp/gt/deps/gomodcache --gomodcache-source "$GOMOD_SRC" --gomodcache-declared-source "$GOMOD_DECLARED" \
             --cargo-host /tmp/gt/deps/cargo --cargo-source "$CARGO_SRC" \
             --rustup-host /tmp/gt/deps/rustup --rustup-source "$RUSTUP_SRC" \
             --rust-toolchain "$ACTIVE_RUST_TOOLCHAIN" \

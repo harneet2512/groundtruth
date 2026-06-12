@@ -9,6 +9,9 @@ During the Go/Rust substrate LIPI pass, one remaining ambiguity was still visibl
 
 - `dep_store_manifest.json` proved that `cargo` and `rustup` were copied
 - it did **not** prove that usable `rust-src` existed for the active toolchain
+- on the Go side, it did not preserve the distinction between:
+  - the path reported by `go env GOMODCACHE`
+  - the path we actually copied from the task image
 
 That meant a Rust proof failure could still collapse multiple cases:
 
@@ -34,20 +37,25 @@ without source components could still look acceptable.
 Logic:
 `rust-analyzer` product readiness depends on more than "some rustup files exist". The
 proof boundary needs to say whether the source tree for the active toolchain is present.
+On the Go side, the manifest should preserve the declared module-cache location even when
+the copied cache is empty or missing, so the next failure is explainable.
 
 Implementation:
 `scripts/swebench/dep_store_manifest.py` now derives and records `stores.rust_src`,
-including the active toolchain and source-path mapping when found.
+including the active toolchain and source-path mapping when found. It also records
+`stores.gomodcache.declared_in_task_image` separately from the copied source path.
 
 Integration:
 `.github/workflows/deepswe_full.yml` now resolves `ACTIVE_RUST_TOOLCHAIN` once and passes
-it both to the dep-store manifest and the substrate container environment.
+it both to the dep-store manifest and the substrate container environment. It also captures
+the declared `go env GOMODCACHE` path once and passes it into the manifest.
 
 Plumbing:
 `tests/test_dep_store_manifest.py` now proves:
   - rustup missing -> fail
   - rust-src missing for active toolchain -> fail
   - rust-src present for active toolchain -> pass
+  - declared Go module cache path is preserved even when the copied cache is empty
 
 Verdict:
 Closed for the evidence boundary. Live proof still needed for P0-01.

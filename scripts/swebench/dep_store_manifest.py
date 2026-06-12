@@ -87,6 +87,7 @@ def build_manifest(
     language: str,
     gomodcache_host: str,
     gomodcache_source: str,
+    gomodcache_declared_source: str = "",
     cargo_host: str,
     cargo_source: str,
     rustup_host: str,
@@ -108,6 +109,7 @@ def build_manifest(
         "stores": {
             "gomodcache": {
                 "source_in_task_image": gomodcache_source or None,
+                "declared_in_task_image": gomodcache_declared_source or None,
                 **_dir_stats(gomodcache_host),
             },
             "cargo": {
@@ -135,6 +137,7 @@ def validate_manifest(manifest: dict[str, Any]) -> list[str]:
             problems.append(
                 "DEP_STORE_EMPTY: go task requires non-empty gomodcache "
                 f"(source={gm.get('source_in_task_image')!r}, "
+                f"declared={gm.get('declared_in_task_image')!r}, "
                 f"path={gm.get('path')!r})"
             )
 
@@ -163,6 +166,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--language", required=True)
     ap.add_argument("--gomodcache-host", default="/tmp/gt/deps/gomodcache")
     ap.add_argument("--gomodcache-source", default="")
+    ap.add_argument("--gomodcache-declared-source", default="")
     ap.add_argument("--cargo-host", default="/tmp/gt/deps/cargo")
     ap.add_argument("--cargo-source", default="")
     ap.add_argument("--rustup-host", default="/tmp/gt/deps/rustup")
@@ -182,6 +186,7 @@ def main(argv: list[str] | None = None) -> int:
             language=args.language,
             gomodcache_host=args.gomodcache_host,
             gomodcache_source=args.gomodcache_source,
+            gomodcache_declared_source=args.gomodcache_declared_source,
             cargo_host=args.cargo_host,
             cargo_source=args.cargo_source,
             rustup_host=args.rustup_host,

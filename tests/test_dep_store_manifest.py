@@ -30,6 +30,7 @@ def test_go_fail_closed_empty_gomodcache():
             language="go",
             gomodcache_host=gm,
             gomodcache_source="/custom/go/pkg/mod",
+            gomodcache_declared_source="/custom/go/pkg/mod",
             cargo_host=os.path.join(td, "cargo"),
             cargo_source="",
             rustup_host=os.path.join(td, "rustup"),
@@ -48,6 +49,7 @@ def test_go_passes_with_non_default_gomodcache_layout():
             language="go",
             gomodcache_host=gm,
             gomodcache_source="/home/user/go/pkg/mod",
+            gomodcache_declared_source="/home/user/go/pkg/mod",
             cargo_host=os.path.join(td, "cargo"),
             cargo_source="",
             rustup_host=os.path.join(td, "rustup"),
@@ -56,6 +58,25 @@ def test_go_passes_with_non_default_gomodcache_layout():
         assert validate_manifest(manifest) == []
         assert manifest["stores"]["gomodcache"]["file_count"] == 1
         assert manifest["stores"]["gomodcache"]["source_in_task_image"] == "/home/user/go/pkg/mod"
+        assert manifest["stores"]["gomodcache"]["declared_in_task_image"] == "/home/user/go/pkg/mod"
+
+
+def test_go_manifest_keeps_declared_gomodcache_when_copy_is_missing():
+    with tempfile.TemporaryDirectory() as td:
+        gm = os.path.join(td, "gomodcache")
+        os.makedirs(gm)
+        manifest = build_manifest(
+            language="go",
+            gomodcache_host=gm,
+            gomodcache_source="",
+            gomodcache_declared_source="/workspace/.cache/go/pkg/mod",
+            cargo_host=os.path.join(td, "cargo"),
+            cargo_source="",
+            rustup_host=os.path.join(td, "rustup"),
+            rustup_source="",
+        )
+        problems = validate_manifest(manifest)
+        assert any("/workspace/.cache/go/pkg/mod" in p for p in problems)
 
 
 def test_rust_fail_closed_missing_rustup():
@@ -68,6 +89,7 @@ def test_rust_fail_closed_missing_rustup():
             language="rust",
             gomodcache_host=os.path.join(td, "gomodcache"),
             gomodcache_source="",
+            gomodcache_declared_source="",
             cargo_host=cargo,
             cargo_source="/root/.cargo",
             rustup_host=rustup,
@@ -88,6 +110,7 @@ def test_rust_fail_closed_missing_rust_src_for_active_toolchain():
             language="rust",
             gomodcache_host=os.path.join(td, "gomodcache"),
             gomodcache_source="",
+            gomodcache_declared_source="",
             cargo_host=cargo,
             cargo_source="/root/.cargo",
             rustup_host=rustup,
@@ -111,6 +134,7 @@ def test_rust_passes_with_rust_src_for_active_toolchain():
             language="rust",
             gomodcache_host=os.path.join(td, "gomodcache"),
             gomodcache_source="",
+            gomodcache_declared_source="",
             cargo_host=cargo,
             cargo_source="/root/.cargo",
             rustup_host=rustup,
@@ -131,6 +155,7 @@ def test_write_manifest_roundtrip():
             language="python",
             gomodcache_host=os.path.join(td, "gomodcache"),
             gomodcache_source="",
+            gomodcache_declared_source="",
             cargo_host=os.path.join(td, "cargo"),
             cargo_source="",
             rustup_host=os.path.join(td, "rustup"),

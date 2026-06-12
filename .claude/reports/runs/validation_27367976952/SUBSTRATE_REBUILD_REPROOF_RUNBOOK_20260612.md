@@ -132,6 +132,18 @@ If it still fails, separate the cause carefully:
 3. `gopls` workspace-loading / package-metadata problem
 4. manifest policy too strict for a valid empty-cache case
 
+Current code improvement:
+
+- `dep_store_manifest.json` now preserves both:
+  - `source_in_task_image` for the copied cache path
+  - `declared_in_task_image` for the path reported by `go env GOMODCACHE`
+
+So a Go failure can now distinguish:
+
+- no declared module cache path
+- declared path exists but nothing useful copied
+- copied cache exists but `gopls` still cannot load workspace metadata
+
 Important:
 
 The current code still assumes a Go proof needs a non-empty copied `gomodcache`.
