@@ -125,6 +125,7 @@ _GT_HOOK_CANDIDATES = [
 ]
 _PATCH_PATH = _THIS_DIR / "gt_mini_patch.py"
 _PHASE_POLICY_PATH = _THIS_DIR / "phase_policy.py"
+_PRODUCT_RUNTIME_DIR = _THIS_DIR.parent / "src" / "groundtruth" / "runtime"
 # Oracle siblings (LIPI 2026-06-10): gt_mini_patch._load_gt_oracle() loads
 # gt_oracle.py (which requires gt_oracle_sense.py) from ITS OWN directory to
 # produce the live SPEC/obligation candidates. Without shipping both siblings
@@ -149,6 +150,17 @@ _PATCH_CONTENT = _load([_PATCH_PATH])
 _PHASE_POLICY_CONTENT = _load([_PHASE_POLICY_PATH])
 _ORACLE_CONTENT = _load([_ORACLE_PATH])
 _SENSE_CONTENT = _load([_SENSE_PATH])
+_PRODUCT_RUNTIME_FILES = {
+    name: _load([_PRODUCT_RUNTIME_DIR / name])
+    for name in (
+        "context_policy.py",
+        "trajectory_state.py",
+        "context_budget.py",
+        "action_translation.py",
+        "verification_horizon.py",
+        "obligations.py",
+    )
+}
 
 # ---------------------------------------------------------------------------
 # Base64 encoding for heredoc injection (gt_hook.py is ~115KB+)
@@ -427,6 +439,40 @@ def _inject_steps() -> list[InstallStep]:
                 run=(
                     f"base64 -d {_GT_DIR}/{b64name} > {_GT_DIR}/{fname} "
                     f"&& chmod 644 {_GT_DIR}/{fname} "
+                    f"&& rm -f {_GT_DIR}/{b64name}"
+                ),
+            )
+        )
+
+    # --- product runtime modules: GT identity lives under groundtruth.runtime ---
+    # The task container receives only the files injected by this adapter. Ship
+    # the product-owned runtime control plane so mini-swe code delegates to GT
+    # product behavior instead of reimplementing policy/state/lifecycle locally.
+    steps.append(InstallStep(
+        user="root",
+        run=(
+            f"mkdir -p {_GT_DIR}/groundtruth/runtime "
+            f"&& touch {_GT_DIR}/groundtruth/__init__.py "
+            f"&& touch {_GT_DIR}/groundtruth/runtime/__init__.py"
+        ),
+    ))
+    for fname, content in _PRODUCT_RUNTIME_FILES.items():
+        chunks = _b64_chunks(content)
+        if not chunks:
+            continue
+        b64name = fname.replace(".py", ".b64")
+        for i, chunk in enumerate(chunks):
+            op = ">" if i == 0 else ">>"
+            steps.append(
+                InstallStep(user="root", run=f'echo "{chunk}" {op} {_GT_DIR}/{b64name}')
+            )
+        steps.append(
+            InstallStep(
+                user="root",
+                run=(
+                    f"base64 -d {_GT_DIR}/{b64name} > "
+                    f"{_GT_DIR}/groundtruth/runtime/{fname} "
+                    f"&& chmod 644 {_GT_DIR}/groundtruth/runtime/{fname} "
                     f"&& rm -f {_GT_DIR}/{b64name}"
                 ),
             )

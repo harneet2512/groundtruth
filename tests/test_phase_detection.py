@@ -45,16 +45,17 @@ def test_orient_phase_early(pm, monkeypatch):
     _reset(pm, monkeypatch)
     monkeypatch.setattr(pm, "_action_count", 3, raising=False)
     assert pm._detect_phase() == pm.Phase.ORIENT
-    assert pm._phase_allows("consensus.scope", pm.Phase.ORIENT)
+    assert pm._phase_allows("brief", pm.Phase.ORIENT)
+    assert pm._phase_allows("orientation", pm.Phase.ORIENT)
     assert not pm._phase_allows("l3b.evidence", pm.Phase.ORIENT)
 
 
-def test_search_phase_before_edits(pm, monkeypatch):
+def test_view_phase_before_edits(pm, monkeypatch):
     _reset(pm, monkeypatch)
     monkeypatch.setattr(pm, "_action_count", 20, raising=False)
-    assert pm._detect_phase() == pm.Phase.SEARCH
-    assert pm._phase_allows("l3b.evidence", pm.Phase.SEARCH)
-    assert not pm._phase_allows("spec.obligation", pm.Phase.SEARCH)
+    assert pm._detect_phase() == pm.Phase.VIEW
+    assert pm._phase_allows("l3b.evidence", pm.Phase.VIEW)
+    assert not pm._phase_allows("spec.obligation", pm.Phase.VIEW)
 
 
 def test_edit_phase_after_source_edit(pm, monkeypatch):

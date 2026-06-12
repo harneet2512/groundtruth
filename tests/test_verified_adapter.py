@@ -378,6 +378,7 @@ def test_abs_testbed_view_resolves_same_pillar_as_relative(monkeypatch, tmp_path
     # abs-path call is judged on its own resolution, not the dedup cache.
     gmp._seen.clear()
     gmp._DELIVERED_FACTS.clear()
+    gmp._DELIVERED_FACT_IDS.clear()
     gmp._consensus_fired = False
     gmp._oracle_delivered_hashes.clear()
     abs_out = _evidence_for_view(gmp, "/testbed/a.py")

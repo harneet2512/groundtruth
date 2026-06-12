@@ -44,6 +44,15 @@ import re
 import subprocess
 import sys
 
+from groundtruth.runtime.action_translation import translate_to_action as _product_translate_to_action
+from groundtruth.runtime.context_budget import ContextBudgeter as _ProductContextBudgeter
+from groundtruth.runtime.trajectory_state import TrajectoryState as _ProductTrajectoryState
+from groundtruth.runtime.trajectory_state import derive_phase as _product_derive_phase
+from groundtruth.runtime.verification_horizon import HorizonThresholds as _ProductHorizonThresholds
+from groundtruth.runtime.verification_horizon import composite_severity as _product_composite_severity
+from groundtruth.runtime.verification_horizon import render_verify_emission as _product_render_verify_emission
+from groundtruth.runtime.verification_horizon import verify_horizon_band as _product_verify_horizon_band
+
 # Strict flag parse (bug #6 parity with gt_agent / every other GT flag):
 # bool(env) made GT_BASELINE=0 enable the baseline arm.
 _GT_BASELINE = os.environ.get("GT_BASELINE") == "1"
@@ -494,7 +503,7 @@ def composite_severity(base, budget_fraction, unmet_ratio) -> float:
     2511.17006): budget position multiplies URGENCY, it never triggers on
     its own.  THE one severity formula — gt_oracle binds this (one product,
     one formula)."""
-    return float(base) + 2.0 * float(budget_fraction) + 1.0 * float(unmet_ratio)
+    return _product_composite_severity(base, budget_fraction, unmet_ratio)
 
 
 def edit_coverage_ratio(obligation_syms, edited_tokens):
@@ -2427,24 +2436,40 @@ _SEV_CODEMAP = 1
 _pp_dir = os.path.dirname(os.path.abspath(__file__))
 if _pp_dir not in _sys.path:
     _sys.path.insert(0, _pp_dir)
-from phase_policy import PHASE_POLICY as _PHASE_POLICY, Phase, phase_allows as _phase_allows_policy
+from phase_policy import (
+    PHASE_POLICY as _PHASE_POLICY,
+    Event,
+    Phase,
+    phase_allows as _phase_allows_policy,
+    should_emit as _phase_should_emit,
+)
 
 
 def _detect_phase() -> Phase:
-    if _action_count <= 5 and not _oracle_edited_rels:
-        return Phase.ORIENT
-    if not _oracle_edited_rels:
-        return Phase.SEARCH
-    budget = (_action_count / _GT_STEP_LIMIT) if _GT_STEP_LIMIT else 0.0
-    if budget > 0.90:
-        return Phase.SUBMIT
-    if _oracle_nonedit_streak >= 3 and _oracle_edited_rels:
-        return Phase.VERIFY
-    return Phase.EDIT
+    state = _ProductTrajectoryState(
+        action_count=_action_count,
+        step_limit=_GT_STEP_LIMIT,
+        edited_files=set(_oracle_edited_rels),
+        source_edit_count=_source_edit_count,
+        nonedit_streak=_oracle_nonedit_streak,
+    )
+    return _product_derive_phase(state)
 
 
 def _phase_allows(kind: str, phase: Phase) -> bool:
     return _phase_allows_policy(kind, phase, _PHASE_POLICY)
+
+
+def _current_event(kind: str) -> Event | None:
+    if kind == "post_view":
+        return Event.POST_VIEW
+    if kind == "post_edit":
+        return Event.POST_EDIT
+    if _oracle_nonedit_streak >= 3 and _oracle_edited_rels:
+        return Event.REVIEW_TRANSITION
+    if _detect_phase() == Phase.SUBMIT:
+        return Event.PRE_SUBMIT
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -2523,32 +2548,7 @@ _ACTION_TEMPLATES = {
 
 
 def _translate_to_action(evidence_block: str, phase: Phase) -> str:
-    if phase in (Phase.ORIENT, Phase.SEARCH):
-        return evidence_block
-    lines: list[str] = []
-    for line in evidence_block.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if "[WITNESS]" in stripped and "->" in stripped:
-            m = re.search(
-                r"\[WITNESS\]\s+(\S+)\s+\w+\s+by\s+->\s+([^`]+)",
-                stripped,
-            )
-            if m:
-                lines.append(_ACTION_TEMPLATES["witness_call"].format(
-                    sym=m.group(1), loc=m.group(2).strip()))
-                continue
-        if "[CALLERS]" in stripped:
-            lines.append(
-                "Check all callers listed above before changing this interface."
-            )
-            continue
-        if "[SIBLINGS]" in stripped:
-            lines.append(_ACTION_TEMPLATES["sibling_match"].format(line=stripped))
-            continue
-        lines.append(stripped)
-    return "\n".join(lines)
+    return _product_translate_to_action(evidence_block, phase)
 
 
 # ---------------------------------------------------------------------------
@@ -2556,6 +2556,7 @@ def _translate_to_action(evidence_block: str, phase: Phase) -> str:
 # ---------------------------------------------------------------------------
 _DELIVERED_FACTS: set[str] = set()
 _DELIVERED_FACT_IDS: set[str] = set()
+_PRODUCT_BUDGETER = _ProductContextBudgeter(_DELIVERED_FACTS, _DELIVERED_FACT_IDS)
 _FACT_TAG_RE = re.compile(r"\[([A-Z][A-Z0-9_]*)\]")
 _IMPERATIVE_PREFIXES = (
     "Changing", "Must", "Check", "Run", "You edited", "Inspect",
@@ -2579,9 +2580,12 @@ def _stable_fact_id(line: str) -> str:
 
 
 def _budget_trim(payload: str, max_tokens: int = 500) -> str:
+    global _last_budget_meta
+    _budget_result = _PRODUCT_BUDGETER.trim(payload, max_tokens=max_tokens)
+    _last_budget_meta = _budget_result.meta
+    return _budget_result.text
     if not payload:
         return ""
-    global _last_budget_meta
     lines = payload.splitlines()
     fresh = [
         ln
@@ -2869,11 +2873,30 @@ def verify_horizon_band(action_count: int, step_limit: int | None,
       advisory : B > adv_B ∧ test_coverage < adv_tcov ∧ edit_coverage > 0
     Returns: "gate" | "urgent" | "advisory" | "pivot" | None (dormant).
     Pure function — no side effects."""
+    return _product_verify_horizon_band(
+        action_count,
+        step_limit,
+        v,
+        edit_coverage,
+        test_coverage,
+        has_edits,
+        last_test_failed=last_test_failed,
+        thresholds=_ProductHorizonThresholds(
+            advisory_test_coverage=_ESC_ADV_TCOV,
+            advisory_budget=_ESC_ADV_B,
+            urgent_test_coverage=_ESC_URG_TCOV,
+            urgent_budget=_ESC_URG_B,
+            gate_test_coverage=_ESC_GATE_TCOV,
+            gate_cycles=_ESC_GATE_KV,
+        ),
+    )
     if step_limit is None or step_limit <= 0:
         return None  # GT_STEP_LIMIT absent -> escalation disabled
     if not has_edits:
         return None  # no edits -> no verification debt (correct-or-quiet)
     a = action_count
+    return _product_render_verify_emission(
+        band, action_count, step_limit, edited_rels, covering_tests)
     S = step_limit
     R = S - a
     B = a / S
@@ -2903,6 +2926,8 @@ def _render_verify_emission(band: str, action_count: int, step_limit: int,
     not rendered. The graph query may prove that a covering test exists, but
     benchmark-valid guidance must stay at the targeted-verification level.
     """
+    return _product_render_verify_emission(
+        band, action_count, step_limit, edited_rels, covering_tests)
     S = step_limit
     R = S - action_count
     edited_summary = ", ".join(
@@ -3453,9 +3478,12 @@ def _augment_output(action, out) -> None:
             # Event-bound candidates bypass phase filter — the trigger IS the
             # event (post_view / post_edit / review transition); phase policy
             # only narrows ambient producers (P5 symbol narrowing).
+            _event = _current_event(_kkind)
             cands = [
                 c for c in cands
-                if c[2] and (c[3] or _phase_allows(c[1], _phase))
+                if c[2] and _phase_should_emit(
+                    c[1], _phase, event=_event, event_bound=bool(c[3])
+                ).allowed
             ]
             _win = _oracle_gate_blocks(cands)
             # Latch re-arm (LIPI 2026-06-10): a produced-but-not-emitted

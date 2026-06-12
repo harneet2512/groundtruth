@@ -14,9 +14,15 @@ Phase = _pp.Phase
 phase_allows = _pp.phase_allows
 
 
-def test_orient_allows_scope_only():
-    assert phase_allows("consensus.scope", Phase.ORIENT)
+def test_orient_allows_brief_only():
+    assert phase_allows("brief", Phase.ORIENT)
+    assert phase_allows("orientation", Phase.ORIENT)
     assert not phase_allows("l3b.evidence", Phase.ORIENT)
+
+
+def test_view_allows_local_evidence_only():
+    assert phase_allows("l3b.evidence", Phase.VIEW)
+    assert not phase_allows("spec.obligation", Phase.VIEW)
 
 
 def test_edit_allows_contract_pillars():

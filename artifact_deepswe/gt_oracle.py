@@ -33,6 +33,8 @@ import statistics as _stats
 import sys as _sys
 from dataclasses import dataclass, field, replace as _dc_replace
 
+from groundtruth.runtime import obligations as _product_obligations
+
 
 def _load_sibling(modname: str, filename: str):
     """Load a sibling module by path (deployment-agnostic, same pattern as the
@@ -837,6 +839,24 @@ def render_obligation_status_block(statuses, covering=None,
         "submit.")
     body = "\n".join(lines)
     return (f'\n<gt-nudge reason="test_evidence_gap" h="{h}">\n{body}\n</gt-nudge>')
+
+
+# Product-owned obligation lifecycle. Keep the historical gt_oracle names as
+# adapter-facing shims so live and replay paths use the same status vocabulary.
+OBL_TESTED = _product_obligations.OBL_TESTED
+OBL_EDITED_UNTESTED = _product_obligations.OBL_EDITED_UNTESTED
+OBL_UNADDRESSED = _product_obligations.OBL_UNADDRESSED
+obligation_statuses = _product_obligations.obligation_statuses
+status_vector_hash = _product_obligations.status_vector_hash
+order_unmet = _product_obligations.order_unmet
+render_obligation_status_block = _product_obligations.render_obligation_status_block
+
+
+class ObligationTracker(_product_obligations.ObligationTracker):
+    """Compatibility wrapper: old callers pass raw obligation dicts."""
+
+    def __init__(self, obligations: list[dict] | None = None):
+        super().__init__(_obligation_views(obligations or []))
 
 
 def _drift_records(views, turn, st, k: int) -> list[SuppressionRecord]:
