@@ -135,12 +135,23 @@ def derive_state(turns: list[Turn], *, step_limit: int | None = None) -> Traject
     return state
 
 
+ORIENT_ACTION_FRACTION = 0.03
+"""D8: ORIENT ends at 3% of step budget (9 actions at step_limit=300), not a
+fixed constant. Derived from the frozen corpus: first GT witness at turns 9
+(abs), 13 (adaptix), 87 (katex) — ORIENT should cover only the initial
+exploration before GT's first delivery, not a fixed 5-action window."""
+
+SUBMIT_BUDGET_FRACTION = 0.90
+"""Budget fraction above which the phase is SUBMIT (>90% of steps spent)."""
+
+
 def derive_phase(state: TrajectoryState) -> Phase:
-    if state.action_count <= 5 and not state.edited_files:
+    orient_limit = max(3, int((state.step_limit or 300) * ORIENT_ACTION_FRACTION))
+    if state.action_count <= orient_limit and not state.edited_files:
         return Phase.ORIENT
     if not state.edited_files:
         return Phase.VIEW
-    if state.step_limit and state.budget_fraction > 0.90:
+    if state.step_limit and state.budget_fraction > SUBMIT_BUDGET_FRACTION:
         return Phase.SUBMIT
     if state.nonedit_streak >= 3 or state.test_count:
         return Phase.VERIFY

@@ -1613,7 +1613,7 @@ def compute_trajectory_scorecard(
         if _baseline_resolved(tid) and not _oracle_resolved(tid)
     ]
     flip_details: List[Dict[str, Any]] = []
-    gt_caused_flips = 0
+    gt_caused_heuristic_flips = 0
     for tid in flips:
         o = oracle_run[tid]
         behavioral = (
@@ -1629,10 +1629,10 @@ def compute_trajectory_scorecard(
             obligation_ok or math.isnan(o.m21_patch_completeness)
         )
         if gt_caused:
-            gt_caused_flips += 1
+            gt_caused_heuristic_flips += 1
         flip_details.append({
             "task_id": tid,
-            "gt_caused": gt_caused,
+            "gt_caused_heuristic": gt_caused,
             "obligation_coverage_at_submit": _fmt(o.m21_patch_completeness),
             "consumption_behavioral": _fmt(o.m05_consumption_rate_behavioral),
             "test_evidence_consumed": _fmt(o.m19_test_evidence_consumed),
@@ -1654,7 +1654,7 @@ def compute_trajectory_scorecard(
         if not math.isnan(oracle_run[tid].m05_consumption_rate_explicit)
     ]
     return {
-        "gt_caused_flips": gt_caused_flips,
+        "gt_caused_heuristic_flips": gt_caused_heuristic_flips,
         "flip_count": len(flips),
         "regression_count": len(regressions),
         "flip_tasks": flip_details,
@@ -2192,7 +2192,7 @@ def compute_paired_report(
             "resolved_oracle": resolved_oracle,
             "flip_count": flip_count,
             "regression_count": regression_count,
-            "gt_caused_flips": trajectory_scorecard["gt_caused_flips"],
+            "gt_caused_heuristic_flips": trajectory_scorecard["gt_caused_heuristic_flips"],
             "obligation_coverage_at_submit_mean": (
                 trajectory_scorecard["obligation_coverage_at_submit_mean"]
             ),

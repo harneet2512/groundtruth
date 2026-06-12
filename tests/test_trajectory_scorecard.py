@@ -42,8 +42,8 @@ def test_scorecard_counts_gt_caused_flip(cpm):
     }
     card = cpm.compute_trajectory_scorecard(base, ora, ["a", "b"])
     assert card["flip_count"] == 2
-    assert card["gt_caused_flips"] == 1
-    assert card["flip_tasks"][0]["gt_caused"] is True
+    assert card["gt_caused_heuristic_flips"] == 1
+    assert card["flip_tasks"][0]["gt_caused_heuristic"] is True
 
 
 def test_scorecard_regression_count(cpm):
