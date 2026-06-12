@@ -85,14 +85,21 @@ RUN GOBIN=/opt/gt/bin GOFLAGS=-trimpath GOPATH=/tmp/gopath GOTOOLCHAIN=local \
     && rm -rf /tmp/gopath \
     && /opt/gt/bin/gopls version
 
-# (3c) rust-analyzer — official prebuilt release binary (no rustup/cargo to LAUNCH).
-#      (Crate-level type resolution may still need `cargo metadata`/target dir from the
-#      task env — flagged as the Rust D1-probe item.)
+# (3c) rust-analyzer + minimal Rust toolchain (cargo + rustc + rust-src for RA).
+#      rust-analyzer needs `cargo metadata` for workspace discovery and rust-src
+#      for stdlib type resolution. Without both, RA returns empty on every query.
 ARG RUST_ANALYZER_VERSION=2026-06-08
 RUN curl -fsSL "https://github.com/rust-lang/rust-analyzer/releases/download/${RUST_ANALYZER_VERSION}/rust-analyzer-x86_64-unknown-linux-gnu.gz" \
       | gunzip > /opt/gt/bin/rust-analyzer \
     && chmod +x /opt/gt/bin/rust-analyzer \
     && /opt/gt/bin/rust-analyzer --version
+# Minimal rustup + stable toolchain with rust-src (for RA stdlib resolution).
+# Task images have their own toolchains — this is the SUBSTRATE's fallback so
+# RA can at least do cargo metadata + stdlib lookups when task deps are mounted.
+ENV RUSTUP_HOME=/opt/gt/rustup CARGO_HOME=/opt/gt/cargo
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --component rust-src --no-modify-path \
+    && /opt/gt/cargo/bin/rustc --version \
+    && /opt/gt/cargo/bin/cargo --version
 
 # (3d) jdtls (Eclipse JDT language server) — the Eclipse JDT.LS product tarball + a
 #      bundled headless JRE, so it LAUNCHES with NO system Java and NO runtime download.
@@ -222,7 +229,9 @@ ENV GT_HOME=/opt/gt \
     GOMODCACHE=/tmp/gomodcache \
     GOCACHE=/tmp/gocache \
     GO111MODULE=on \
-    PATH="/opt/gt/bin:/opt/gt/node/bin:/opt/gt/python/bin:/opt/gt/jre/bin:/opt/gt/go/bin:${PATH}" \
+    RUSTUP_HOME=/opt/gt/rustup \
+    CARGO_HOME=/opt/gt/cargo \
+    PATH="/opt/gt/bin:/opt/gt/cargo/bin:/opt/gt/node/bin:/opt/gt/python/bin:/opt/gt/jre/bin:/opt/gt/go/bin:${PATH}" \
     PYTHONPATH="/opt/gt/src:/opt/gt/scripts/swebench:/opt/gt/benchmarks/swebench"
 
 # Build-time SELF-TEST: the whole closure must be present + runnable on glibc 2.31,

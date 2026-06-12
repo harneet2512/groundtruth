@@ -842,6 +842,19 @@ jobs:
             fi
           done
           [ -n "$RUSTUP_SRC" ] || echo "no rustup copied from task image"
+          # Backfill rust-src from task image sysroot if not in the copied rustup tree
+          ACTIVE_RUST_TOOLCHAIN="$(docker exec gtsrc sh -lc 'rustup show active-toolchain 2>/dev/null | awk "{print \$1}" | tr -d "\r"' || true)"
+          RUST_SYSROOT="$(docker exec gtsrc sh -lc 'rustc --print sysroot 2>/dev/null' | tr -d '\r' || true)"
+          if [ -n "$ACTIVE_RUST_TOOLCHAIN" ] && [ -n "$RUST_SYSROOT" ] \
+             && [ ! -d "/tmp/gt/deps/rustup/toolchains/$ACTIVE_RUST_TOOLCHAIN/lib/rustlib/src/rust/library" ]; then
+            TASK_RUST_SRC="${RUST_SYSROOT%/}/lib/rustlib/src/rust/library"
+            if docker exec gtsrc test -d "$TASK_RUST_SRC" 2>/dev/null; then
+              mkdir -p "/tmp/gt/deps/rustup/toolchains/$ACTIVE_RUST_TOOLCHAIN/lib/rustlib/src/rust/library"
+              docker cp "gtsrc:${TASK_RUST_SRC}/." "/tmp/gt/deps/rustup/toolchains/$ACTIVE_RUST_TOOLCHAIN/lib/rustlib/src/rust/library" 2>/dev/null \
+                && echo "backfilled rust-src from sysroot: $TASK_RUST_SRC" \
+                || echo "rust-src backfill failed (non-fatal)"
+            fi
+          fi
           python3 scripts/swebench/dep_store_manifest.py \
             --out /tmp/gt/dep_store_manifest.json \
             --language "${{ matrix.language }}" \
