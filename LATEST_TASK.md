@@ -12,6 +12,7 @@ New architecture-first docs:
 - `.claude/reports/runs/validation_27367976952/CHECKPOINT_PRODUCT_RUNTIME_CONTROL_PLANE_20260612.md`
 - `.claude/reports/runs/validation_27367976952/CHECKPOINT_TASK_TRUTH_RUNTIME_CONTROL_20260612.md`
 - `.claude/reports/runs/validation_27367976952/CHECKPOINT_FIVE_LANGUAGE_RUNTIME_RECEIPTS_20260612.md`
+- `.claude/reports/runs/validation_27367976952/LIPI_CODE_AUDIT_RUNTIME_PARITY_20260612.md`
 
 Audit result:
 
@@ -42,6 +43,8 @@ Architecture gaps outside the 64:
 - `ARCH-09` CLOSED for deterministic receipts: five-language runtime fixtures now
   prove shared state/policy/verification/budget/action/obligation behavior without
   benchmark-shaped branches.
+- `BENCHMARK READINESS` NO: `CLAUDE.md` Stage 1 is still blocked by `P0-01`
+  until rebuilt Go/Rust substrate proof is green and regenerated artifacts agree.
 
 Do not run tenpack until `P0-01` is green on rebuilt substrate. The repaired rows still
 need a new live run to populate regenerated artifacts.
