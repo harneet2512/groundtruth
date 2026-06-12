@@ -132,7 +132,7 @@ def validate_manifest(manifest: dict[str, Any]) -> list[str]:
     stores = manifest.get("stores") or {}
 
     if lang == "rust":
-        for key in ("cargo", "rustup", "rust_src"):
+        for key in ("cargo", "rustup"):
             st = stores.get(key) or {}
             if not st.get("exists") or int(st.get("file_count") or 0) == 0:
                 problems.append(

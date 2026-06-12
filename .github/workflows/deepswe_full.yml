@@ -942,7 +942,7 @@ jobs:
               --memory=10g --memory-swap=10g \
               -v "/tmp/gt/src:/work:ro" -v "/tmp/gt:/gt_artifacts" \
               -v "/tmp/issue.txt:/work_issue.txt:ro" \
-              -v "/tmp/gt/deps/gomodcache:/tmp/gomodcache:ro" \
+              -v "/tmp/gt/deps/gomodcache:/tmp/gomodcache" \
               -v "/tmp/gt/deps/cargo:/root/.cargo:ro" \
               -v "/tmp/gt/deps/rustup:/root/.rustup:ro" \
               -e GT_PROOF_MODE=1 -e GT_CONTAINERIZED=1 -e GT_RUNTIME_STRATEGY=unified_substrate \
