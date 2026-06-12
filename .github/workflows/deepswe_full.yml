@@ -796,28 +796,57 @@ jobs:
           docker rm -f gtsrc 2>/dev/null || true
           docker run -d --name gtsrc "$IMG" sleep 1800 >/dev/null
           ROOT=$(docker exec gtsrc bash -c 'for d in /home/user /testbed /workspace /app /repo; do [ -d "$d/.git" ] && echo "$d" && break; done')
-          ROOT=${ROOT:-/testbed}
+          if [ -z "$ROOT" ]; then
+            echo "FATAL: no git repo root found in task image (fail-closed — refuse /testbed guess)"
+            exit 1
+          fi
           echo "repo root: $ROOT"
           rm -rf /tmp/gt && mkdir -p /tmp/gt /tmp/gt/src
           docker cp "gtsrc:$ROOT/." /tmp/gt/src || { echo "FATAL: source extract failed"; exit 1; }
 
           # ── Extract dep stores so the substrate's LSP servers can resolve ──────
-          # gopls needs the Go module cache; rust-analyzer needs cargo metadata.
-          # The task image has these populated from its install step. Copy them
-          # out so we can mount them into the substrate container alongside /work.
-          mkdir -p /tmp/gt/deps/gomodcache /tmp/gt/deps/cargo
-          # Go: module cache (typically ~/go/pkg/mod or /root/go/pkg/mod)
-          docker cp "gtsrc:/root/go/pkg/mod/." /tmp/gt/deps/gomodcache 2>/dev/null \
-            || docker cp "gtsrc:/home/user/go/pkg/mod/." /tmp/gt/deps/gomodcache 2>/dev/null \
-            || echo "no Go module cache found in task image (ok for non-Go tasks)"
-          # Rust: cargo home (registry + bin/cargo) + rustup toolchain (sysroot for std)
-          docker cp "gtsrc:/root/.cargo/." /tmp/gt/deps/cargo 2>/dev/null \
-            || docker cp "gtsrc:/home/user/.cargo/." /tmp/gt/deps/cargo 2>/dev/null \
-            || echo "no Cargo home found in task image (ok for non-Rust tasks)"
-          mkdir -p /tmp/gt/deps/rustup
-          docker cp "gtsrc:/root/.rustup/." /tmp/gt/deps/rustup 2>/dev/null \
-            || docker cp "gtsrc:/home/user/.rustup/." /tmp/gt/deps/rustup 2>/dev/null \
-            || echo "no rustup found in task image (ok for non-Rust tasks)"
+          # gopls needs the Go module cache; rust-analyzer needs cargo + rustup.
+          # Discover paths inside gtsrc (mars-base images use non-default GOMODCACHE).
+          mkdir -p /tmp/gt/deps/gomodcache /tmp/gt/deps/cargo /tmp/gt/deps/rustup
+          GOMOD_SRC=""
+          for CAND in \
+            "$(docker exec gtsrc sh -lc 'go env GOMODCACHE 2>/dev/null' | tr -d '\r')" \
+            "/root/go/pkg/mod" "/home/user/go/pkg/mod" "/go/pkg/mod"; do
+            [ -n "$CAND" ] || continue
+            if docker exec gtsrc test -d "$CAND" 2>/dev/null; then
+              docker cp "gtsrc:${CAND}/." /tmp/gt/deps/gomodcache 2>/dev/null && GOMOD_SRC="$CAND" && break
+            fi
+          done
+          [ -n "$GOMOD_SRC" ] || echo "no Go module cache copied from task image"
+          CARGO_SRC=""
+          for CAND in \
+            "$(docker exec gtsrc sh -lc 'echo ${CARGO_HOME:-$HOME/.cargo}' | tr -d '\r')" \
+            "/root/.cargo" "/home/user/.cargo"; do
+            [ -n "$CAND" ] || continue
+            if docker exec gtsrc test -d "$CAND" 2>/dev/null; then
+              docker cp "gtsrc:${CAND}/." /tmp/gt/deps/cargo 2>/dev/null && CARGO_SRC="$CAND" && break
+            fi
+          done
+          [ -n "$CARGO_SRC" ] || echo "no Cargo home copied from task image"
+          # Ensure rust-src is present for rust-analyzer sysroot (best-effort before copy).
+          docker exec gtsrc sh -lc 'rustup component add rust-src 2>/dev/null || true' || true
+          RUSTUP_SRC=""
+          for CAND in \
+            "$(docker exec gtsrc sh -lc 'echo ${RUSTUP_HOME:-$HOME/.rustup}' | tr -d '\r')" \
+            "/root/.rustup" "/home/user/.rustup"; do
+            [ -n "$CAND" ] || continue
+            if docker exec gtsrc test -d "$CAND" 2>/dev/null; then
+              docker cp "gtsrc:${CAND}/." /tmp/gt/deps/rustup 2>/dev/null && RUSTUP_SRC="$CAND" && break
+            fi
+          done
+          [ -n "$RUSTUP_SRC" ] || echo "no rustup copied from task image"
+          python3 scripts/swebench/dep_store_manifest.py \
+            --out /tmp/gt/dep_store_manifest.json \
+            --language "${{ matrix.language }}" \
+            --gomodcache-host /tmp/gt/deps/gomodcache --gomodcache-source "$GOMOD_SRC" \
+            --cargo-host /tmp/gt/deps/cargo --cargo-source "$CARGO_SRC" \
+            --rustup-host /tmp/gt/deps/rustup --rustup-source "$RUSTUP_SRC" \
+            || { echo "DEP_STORE_MANIFEST_FAIL: required dep store missing for ${{ matrix.language }}" | tee -a trial_output.log; exit 1; }
 
           # Run provenance: the task base commit = the materialized repo's HEAD (docker cp
           # carries .git). Recorded-or-empty — gt-run-proof writes null when absent, never
@@ -866,6 +895,7 @@ jobs:
               f.write(issue)
           print(f"issue text: {len(issue)} chars from {source} -> {out_path}")
           PYEOF
+          python3 scripts/swebench/issue_manifest.py /tmp/issue.txt /tmp/gt/issue_manifest.json --source instruction || exit 1
 
           # ── Per-language LSP readiness budget (efficiency, src-free knob) ────────────
           # resolve.py runs a ONE-TIME project-readiness barrier per pass bounded by
@@ -888,6 +918,7 @@ jobs:
           # Optional global override from a repo var; vars.* indirection only, never a secret.
           LSP_BUDGET="${GT_LSP_READY_BUDGET_S_OVERRIDE:-$DEF_BUDGET}"
           echo "LSP readiness budget for ${{ matrix.language }}: ${LSP_BUDGET}s (early-exits on first real answer)"
+          python3 -c "import json,os,time; p={'schema':'gt.run_provenance.v1','task':'${{ matrix.task }}','language':'${{ matrix.language }}','substrate_digest':os.environ.get('GT_SUBSTRATE_DIGEST',''),'git_sha':os.environ.get('GITHUB_SHA',''),'ts':time.time()}; open('/tmp/gt/run_provenance.json','w').write(json.dumps(p,indent=2)+'\n')" 2>/dev/null || true
           # ── gt-run-proof INSIDE the pinned substrate (the ONE portable command, §A) ──
           # Repo mounted /work:ro; artifacts -> /gt_artifacts. All 8 proof flags set so the
           # substrate fails-closed on any boundary/baked-dep violation. The host only orchestrates.
@@ -910,7 +941,8 @@ jobs:
               -e GT_REQUIRE_LSP=1 -e GT_REQUIRE_FULL_STACK=1 -e GT_ISSUE_FILE=/work_issue.txt \
               -e GT_LSP_READY_BUDGET_S="$LSP_BUDGET" \
               -e GOPROXY=off -e GONOSUMCHECK=1 -e CARGO_HOME=/root/.cargo \
-              -e PATH="/opt/gt/bin:/opt/gt/node/bin:/opt/gt/python/bin:/opt/gt/jre/bin:/opt/gt/go/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+              -e RUSTUP_HOME=/root/.rustup -e RUSTUP_TOOLCHAIN="$(docker exec gtsrc sh -lc 'rustup show active-toolchain 2>/dev/null | awk "{print \$1}" | tr -d "\r"' || true)" \
+              -e PATH="/root/.cargo/bin:/opt/gt/bin:/opt/gt/node/bin:/opt/gt/python/bin:/opt/gt/jre/bin:/opt/gt/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
               -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 -e HF_DATASETS_OFFLINE=1 \
               -e GT_GATES_DELIVER_ALWAYS="${GT_GATES_DELIVER_ALWAYS:-0}" \
               -e GT_GIT_COMMIT="${{ github.sha }}" \
@@ -922,6 +954,18 @@ jobs:
               echo "GT_PROOF_OOM: gt-run-proof rc=137 — killed by the container memory cap (capacity kill, not logic; the fail-closed print never ran)" | tee -a trial_output.log
             else
               echo "GT_RUN_PROOF_FAIL: gt-run-proof rc=$PROOF_RC (boundary/leak/missing-baked-dep)" | tee -a trial_output.log
+              if [ -f /tmp/gt/proof_failure.json ]; then
+                echo "proof_failure.json:" | tee -a trial_output.log
+                cat /tmp/gt/proof_failure.json | tee -a trial_output.log
+              fi
+              if [ -f /tmp/gt/proof_progress.json ]; then
+                echo "proof_progress.json:" | tee -a trial_output.log
+                cat /tmp/gt/proof_progress.json | tee -a trial_output.log
+              fi
+              if [ -f /tmp/gt/dep_store_manifest.json ]; then
+                echo "dep_store_manifest.json:" | tee -a trial_output.log
+                cat /tmp/gt/dep_store_manifest.json | tee -a trial_output.log
+              fi
             fi
             docker rm -f gtsrc 2>/dev/null || true
             exit 1
@@ -1062,9 +1106,8 @@ jobs:
           # pier rc=0. Surface it: any DeepSweAdapterError in the jobs dir or the trial log
           # fails the step with the DEEPSWE_ADAPTER_FAIL class (the witness step + the
           # outcome classifier both key on that marker -> class GT, never silent green).
-          if grep -RIq "DeepSweAdapterError" jobs trial_output.log 2>/dev/null; then
-            echo "DEEPSWE_ADAPTER_FAIL: DeepSweAdapterError found in pier jobs/exception_message (swallowed adapter raise)" | tee -a trial_output.log
-            grep -RIn "DeepSweAdapterError" jobs trial_output.log 2>/dev/null | head -5 || true
+          if ! python3 scripts/swebench/adapter_error_scan.py jobs trial_output.log; then
+            echo "DEEPSWE_ADAPTER_FAIL: adapter error found via structured result.json scan" | tee -a trial_output.log
             exit 1
           fi
           if [ "$PIER_RC" -ne 0 ]; then
@@ -1110,7 +1153,8 @@ jobs:
           # copied above; mirror the certs + manifests + brief.
           for a in runtime_context.json lsp_certificate.json graph_certificate.json \
                    embedder_certificate.json foundational_gate_report.json run_manifest.json \
-                   brief.txt gt_issue_anchors.json gt_scope_files.txt gt_lsp_metrics.txt; do
+                   brief.txt gt_issue_anchors.json gt_scope_files.txt gt_lsp_metrics.txt \
+                   proof_progress.json proof_failure.json dep_store_manifest.json; do
             cp "/tmp/gt/$a" "trial_results/gt_artifacts/$a" 2>/dev/null || true
           done
           # P1-e: per-language LSP certificates (polyglot aggregation — no FAIL cert overwritten)
@@ -1118,7 +1162,12 @@ jobs:
           # The EXACT issue text the substrate ran with (§4 audit: what GT was given —
           # mirrors verified_run.yml's issue.txt upload).
           cp /tmp/issue.txt trial_results/gt_artifacts/issue.txt 2>/dev/null || true
+          cp /tmp/gt/issue_manifest.json trial_results/gt_artifacts/issue_manifest.json 2>/dev/null || true
           cp /tmp/gt/delivered_instruction.txt trial_results/ 2>/dev/null || true
+          cp /tmp/gt/adapter_witness.json trial_results/adapter_witness.json 2>/dev/null || true
+          cp /tmp/gt/obligation_status.json trial_results/obligation_status.json 2>/dev/null || true
+          cp /tmp/gt/run_provenance.json trial_results/gt_artifacts/run_provenance.json 2>/dev/null || true
+          python3 scripts/swebench/task_truth.py jobs trial_results/task_truth.json 2>/dev/null || true
           cp -r jobs trial_results/jobs 2>/dev/null || true
           cp /tmp/gt/*.log              trial_results/ 2>/dev/null || true
           cp /tmp/gt/gt_interactions*.jsonl trial_results/ 2>/dev/null || true

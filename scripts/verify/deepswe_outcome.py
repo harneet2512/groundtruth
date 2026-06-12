@@ -23,7 +23,7 @@ triageable failure class derived DETERMINISTICALLY from per-task signals — nev
 task IDs / gold / per-task exceptions. The four classes (generalized rules, identical
 across all 113 tasks):
 
-- INFRA   — image-pull / substrate-pull / adapter-wire / harness failure
+- INFRA   — image-pull / substrate-pull / harness failure (adapter-wire is GT, not INFRA)
             (GT_SUBSTRATE_DIGEST_MISSING, GT_SUBSTRATE_PULL_FAIL, GT_RUN_PROOF_FAIL,
             GT_ARTIFACT_MISSING, TASK_IMAGE_PULL_FAIL, eval_no_report / harness crash).
             EXCLUDED from the resolved-rate denominator (never an agent/GT failure).
@@ -372,6 +372,22 @@ def classify_outcome(rec: dict) -> str:
 DENOMINATOR_EXCLUDED: frozenset[str] = frozenset({"INFRA", "UNKNOWN"})
 
 
+def unknown_reason(rec: dict) -> str | None:
+    """P2-08 — explicit reason when failure_class is UNKNOWN."""
+    if rec.get("failure_class") != "UNKNOWN":
+        return None
+    if rec.get("reward") is None and not rec.get("n_agent_steps"):
+        return "no_reward_and_no_agent_steps"
+    if rec.get("reward") is None:
+        return "missing_reward"
+    steps = rec.get("n_agent_steps")
+    if not isinstance(steps, int) or steps <= 0:
+        return "agent_never_ran"
+    if rec.get("gt_prebuilt_active") is None and not rec.get("gt_meta_present"):
+        return "witness_absent_but_steps_present"
+    return "unclassified_signal_gap"
+
+
 def is_in_resolved_denominator(failure_class: str) -> bool:
     """True if this task counts toward the resolved-rate denominator.
 
@@ -544,6 +560,7 @@ def build_signal_record(
     rec["cert_fail_reconciled"] = bool(rec["cert_fail"]) and not _unreconciled_cert_fail(rec)
     rec["failure_class"] = classify_outcome(rec)
     rec["in_resolved_denominator"] = is_in_resolved_denominator(rec["failure_class"])
+    rec["unknown_reason"] = unknown_reason(rec)
     return rec
 
 

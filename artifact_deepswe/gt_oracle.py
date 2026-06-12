@@ -739,6 +739,19 @@ class ObligationTracker:
         done = sum(1 for o in self.obligations if o.status in ("tested", "satisfied"))
         return done / len(self.obligations)
 
+    def snapshot(self) -> list[dict]:
+        """Serializable obligation vector for post-run truth (P1-18/19)."""
+        return [
+            {
+                "id": o.id,
+                "status": o.status,
+                "last_turn": o.last_turn,
+                "verbatim": (o.verbatim or "")[:160],
+                "evidence": list(o.evidence[-3:]),
+            }
+            for o in self.obligations
+        ]
+
 
 def render_obligation_status_block(statuses, covering=None,
                                    max_listed: int | None = None) -> str:

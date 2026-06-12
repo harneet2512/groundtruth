@@ -1,0 +1,15 @@
+{
+  "schema": "gt.horizon_calibration.v1",
+  "version": "2026-06-11T071654Z",
+  "corpus": "frozen_oracle_trajectories_n9",
+  "quality": "placeholder_heuristic",
+  "thresholds": {
+    "GT_ESC_ADV_TCOV": 0.125,
+    "GT_ESC_ADV_B": 0.11166666,
+    "GT_ESC_URG_TCOV": 0.125,
+    "GT_ESC_URG_B": 0.35333333,
+    "GT_ESC_GATE_TCOV": 1.0,
+    "GT_ESC_GATE_KV": 7.48
+  },
+  "notes": "Defaults from scripts/calibrate_esc_bands.py on 9 frozen oracle trajectories. Override via env; env wins over file."
+}

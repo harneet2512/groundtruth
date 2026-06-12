@@ -1,7 +1,7 @@
 # wave2 on fixed-stack substrate  (all 4 fixer surfaces baked)
 # re-audit on substrate  (gopls -stdio fix + stderr surfacing + stamped gt-index)
 # re-audit on substrate 3a3168a4f9dd (go toolchain + parity gt-index baked)
-name: "GT language smoke — identical gt-run-proof per language (5 fixtures)"
+name: "GT substrate preflight — gt-run-proof per language (NOT DeepSWE agent proof)"
 
 # The MINIMAL language-agnostic execution proof for the GT substrate. It runs the SAME
 # portable gt-run-proof command (the §A proof-runtime contract) once per language, changing

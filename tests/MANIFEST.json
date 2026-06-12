@@ -1,0 +1,30 @@
+{
+  "schema": "gt.tests.manifest.v1",
+  "description": "Register-closure Stage-1 proof suite (107 tests as of 2026-06-11)",
+  "command": "python -m pytest tests/test_adapter_error_scan.py tests/test_lsp_product_verdict.py tests/test_reconcile.py tests/test_artifact_resolver.py tests/test_issue_manifest.py tests/test_deepswe_outcome_unknown.py tests/test_baseline_guard.py tests/test_task_truth.py tests/test_proof_progress_json.py tests/test_dep_store_manifest.py tests/test_phase_policy_module.py tests/test_gt_deep_metrics_task_truth.py tests/test_action_templates.py tests/test_patch_hygiene.py tests/test_verification_horizon_stage_a.py tests/test_verification_horizon_stage_b.py tests/test_verification_horizon_stage_c.py tests/test_phase_detection.py tests/test_deepswe_infra_markers_and_brief_wrap.py tests/test_context_budget.py tests/test_gt_agent_retry.py tests/test_ledger_suppression.py tests/test_obligation_tracker.py -q",
+  "suites": [
+    "tests/test_adapter_error_scan.py",
+    "tests/test_lsp_product_verdict.py",
+    "tests/test_reconcile.py",
+    "tests/test_artifact_resolver.py",
+    "tests/test_issue_manifest.py",
+    "tests/test_deepswe_outcome_unknown.py",
+    "tests/test_baseline_guard.py",
+    "tests/test_task_truth.py",
+    "tests/test_proof_progress_json.py",
+    "tests/test_dep_store_manifest.py",
+    "tests/test_phase_policy_module.py",
+    "tests/test_gt_deep_metrics_task_truth.py",
+    "tests/test_action_templates.py",
+    "tests/test_patch_hygiene.py",
+    "tests/test_verification_horizon_stage_a.py",
+    "tests/test_verification_horizon_stage_b.py",
+    "tests/test_verification_horizon_stage_c.py",
+    "tests/test_phase_detection.py",
+    "tests/test_deepswe_infra_markers_and_brief_wrap.py",
+    "tests/test_context_budget.py",
+    "tests/test_gt_agent_retry.py",
+    "tests/test_ledger_suppression.py",
+    "tests/test_obligation_tracker.py"
+  ]
+}

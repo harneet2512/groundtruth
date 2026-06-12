@@ -41,6 +41,80 @@ REQUIRED_ARTIFACTS = [
     "brief.txt",
 ]
 
+PROOF_STAGES = (
+    "env_validation",
+    "dep_store",
+    "source_copy",
+    "index",
+    "lsp_pass",
+    "graph_cert",
+    "gates",
+    "brief_emit",
+    "artifact_contract",
+)
+
+
+class _ProofTracker:
+    """Persist proof_progress.json + proof_failure.json (P0-02, P1-04/05)."""
+
+    def __init__(self, out_dir: str) -> None:
+        self.out_dir = out_dir
+        self.stages: list[dict] = []
+        self._flush()
+
+    @staticmethod
+    def _memory_heartbeat() -> dict:
+        """Best-effort RSS snapshot for OOM triage (P1-04)."""
+        rss_kb: int | None = None
+        try:
+            import resource
+
+            raw = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+            # Linux reports KiB; macOS reports bytes.
+            rss_kb = raw if raw < 10_000_000 else raw // 1024
+        except Exception:
+            try:
+                import psutil
+
+                rss_kb = int(psutil.Process().memory_info().rss // 1024)
+            except Exception:
+                pass
+        return {"rss_kb": rss_kb}
+
+    def _flush(self) -> None:
+        path = os.path.join(self.out_dir, "proof_progress.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"schema": "gt.proof_progress.v1", "stages": self.stages}, fh, indent=2)
+            fh.write("\n")
+
+    def complete(self, stage: str, **extra) -> None:
+        row = {"stage": stage, "status": "ok"}
+        row.update(self._memory_heartbeat())
+        row.update(extra)
+        self.stages.append(row)
+        self._flush()
+
+    def fail(self, stage: str, code: str, message: str, **extra) -> int:
+        row = {"stage": stage, "status": "fail", "code": code, "message": message}
+        row.update(self._memory_heartbeat())
+        row.update(extra)
+        self.stages.append(row)
+        self._flush()
+        failure = {
+            "schema": "gt.proof_failure.v1",
+            "stage": stage,
+            "code": code,
+            "message": message,
+            "stages": self.stages,
+        }
+        failure.update(extra)
+        fpath = os.path.join(self.out_dir, "proof_failure.json")
+        with open(fpath, "w", encoding="utf-8") as fh:
+            json.dump(failure, fh, indent=2)
+            fh.write("\n")
+        print(f"{code}: {message}", file=sys.stderr)
+        return 2
+
 # Where GT is baked in the substrate image (NOT a checkout, NOT host paths).
 GT_HOME = os.environ.get("GT_HOME", "/opt/gt")
 
@@ -207,6 +281,8 @@ def build_run_manifest(*, graph_db: str, out_dir: str, languages: list, lsp_scop
         "language_distribution": _language_distribution(graph_db),
         "graph_db_sha256": _sha256_file(graph_db),
         "cert_versions": _cert_versions(out_dir),
+        "brief_sha256": _sha256_file(os.path.join(out_dir, "brief.txt")),
+        "issue_sha256": _sha256_file(os.path.join(out_dir, "issue.txt")),
     }
 
 
@@ -579,35 +655,70 @@ def main(argv=None) -> int:
         return 0
 
     os.makedirs(a.out, exist_ok=True)
+    tracker = _ProofTracker(a.out)
 
     # Boundary + baked-deps + flags. A host run / missing baked dep fails-closed here.
     violations = validate_proof_env()
     if violations:
-        print("FINAL_PIPELINE_HOST_SPLIT_FAIL / SUBSTRATE_NOT_PORTABLE: " + "; ".join(violations),
-              file=sys.stderr)
-        return 2
+        return tracker.fail(
+            "env_validation",
+            "SUBSTRATE_NOT_PORTABLE",
+            "FINAL_PIPELINE_HOST_SPLIT_FAIL / SUBSTRATE_NOT_PORTABLE: " + "; ".join(violations),
+        )
     try:
         sys.path.insert(0, os.path.join(GT_HOME, "src"))  # package lives at $GT_HOME/src
         sys.path.insert(0, GT_HOME)
         from groundtruth.runtime.context import assert_container_boundary
         assert_container_boundary("gt-run-proof")
     except Exception as e:
-        print(f"FINAL_PIPELINE_HOST_SPLIT_FAIL: {e}", file=sys.stderr)
-        return 2
+        return tracker.fail("env_validation", "FINAL_PIPELINE_HOST_SPLIT_FAIL", str(e))
+    tracker.complete("env_validation")
+
+    dep_manifest = os.path.join(a.out, "dep_store_manifest.json")
+    if os.path.exists(dep_manifest):
+        try:
+            with open(dep_manifest, encoding="utf-8") as fh:
+                dm = json.load(fh)
+            try:
+                import dep_store_manifest as _dsm
+            except ImportError:
+                sys.path.insert(0, os.path.join(GT_HOME, "scripts", "swebench"))
+                import dep_store_manifest as _dsm
+            dep_problems = _dsm.validate_manifest(dm)
+            if dep_problems:
+                return tracker.fail(
+                    "dep_store",
+                    "DEP_STORE_EMPTY",
+                    dep_problems[0],
+                    language=dm.get("language"),
+                    manifest=dep_manifest,
+                )
+            tracker.complete("dep_store", manifest=dep_manifest)
+        except Exception as e:
+            return tracker.fail("dep_store", "DEP_STORE_MANIFEST_READ_FAIL", str(e))
+    else:
+        tracker.complete("dep_store", manifest="absent")
 
     # Separation of concerns (anti-cheat): GT is the HELPER, never the evaluator. It must never see
     # the evaluator's hidden tests or gold. Fail-closed if any eval artifact leaked in via env/file.
     leaks = eval_leakage(a.source_root)
     if leaks:
-        print("EVAL_LEAKAGE_FORBIDDEN: GT (substrate) must never receive the evaluator's hidden "
-              "tests/gold/FAIL_TO_PASS; separation breached by: " + ", ".join(leaks), file=sys.stderr)
-        return 2
+        return tracker.fail(
+            "env_validation",
+            "EVAL_LEAKAGE_FORBIDDEN",
+            "GT (substrate) must never receive the evaluator's hidden tests/gold/FAIL_TO_PASS; "
+            "separation breached by: " + ", ".join(leaks),
+        )
 
     # The task repo is mounted READ-ONLY at --source-root; copy to a writable workdir so gt-index
     # never mutates the official task image's source.
     work = "/tmp/gt_work_src"
     shutil.rmtree(work, ignore_errors=True)
-    shutil.copytree(a.source_root, work, symlinks=True, ignore_dangling_symlinks=True)
+    try:
+        shutil.copytree(a.source_root, work, symlinks=True, ignore_dangling_symlinks=True)
+    except Exception as e:
+        return tracker.fail("source_copy", "SOURCE_COPY_FAIL", str(e))
+    tracker.complete("source_copy", workdir=work)
 
     graph = os.path.join(a.out, "graph.db")
     cert_lsp = os.path.join(a.out, "lsp_certificate.json")
@@ -641,8 +752,8 @@ def main(argv=None) -> int:
 
     # 1. graph build (FTS5 enforced at index time under GT_REQUIRE_FTS5)
     if _run([_gt_index_bin(), "-root", work, "-output", graph], base_env) != 0:
-        print("FATAL: gt-index failed", file=sys.stderr)
-        return 2
+        return tracker.fail("index", "GT_INDEX_FAIL", "gt-index failed")
+    tracker.complete("index", graph_db=graph)
     # 2. LSP enrichment — demand-driven + polyglot + un-throttled within the issue scope.
     # gt_gt §3/§7 + CLAUDE.md "demand-driven, not exhaustive": resolve the issue-relevant subgraph
     # for EVERY language present (not just the dominant one), un-capped within that bounded scope —
@@ -726,15 +837,20 @@ def main(argv=None) -> int:
         any_success=lsp_ok,
     )
     if not _agg_ok:
-        print("LSP_LIVENESS_FAIL: GT_REQUIRE_LSP=1 but known language(s) failed the LSP pass: "
-              f"{', '.join(_agg_failures)} — a baked-server language that cannot launch/warm "
-              "fails closed (no silent pass, no sibling-language masking)", file=sys.stderr)
-        return 2
+        return tracker.fail(
+            "lsp_pass",
+            "LSP_LIVENESS_FAIL",
+            "GT_REQUIRE_LSP=1 but known language(s) failed the LSP pass: "
+            f"{', '.join(_agg_failures)}",
+            lang_verdicts=lang_verdicts,
+        )
+    tracker.complete("lsp_pass", lang_verdicts=lang_verdicts)
 
     # 3. graph certificate
     _run([sys.executable, os.path.join(GT_HOME, "scripts/metrics/graph_certificate.py"), graph,
           "--source-root", work, "--lsp-cert", cert_lsp, "--out", cert_graph,
           "--built-inside-container", "1"], base_env)
+    tracker.complete("graph_cert", path=cert_graph)
 
     # 4. foundational gates (emits foundational_gate_report.json + embedder_certificate.json via run_v74)
     gate_env = dict(base_env, GT_GATES_DEEP_JSON=gate_report)
@@ -767,8 +883,7 @@ def main(argv=None) -> int:
             _proof.write_embedder_certificate(cert)
             print(f"[gt-run-proof] embedder cert emitted via direct probe (disc={disc})", flush=True)
         except Exception as e:
-            print(f"EMBEDDER_USAGE_FAIL: embedder probe failed (no swallow in proof): {e}", file=sys.stderr)
-            return 2
+            return tracker.fail("gates", "EMBEDDER_USAGE_FAIL", str(e))
 
     # 4c. CLASSIFY the embedder certificate (probe OR gate-written) and FAIL-CLOSED on a bad verdict
     # — degenerate/no-discrimination, zero model, ST-under-forced-ONNX, model-root divergence,
@@ -783,10 +898,10 @@ def main(argv=None) -> int:
                                               proof_mode=True, require_embedder=True)
         print(f"[gt-run-proof] embedder verdict: {_verdict}", flush=True)
         if not _ok:
-            print(f"EMBEDDER_USAGE_FAIL: {_verdict}", file=sys.stderr)
-            return 2
+            return tracker.fail("gates", "EMBEDDER_USAGE_FAIL", str(_verdict))
     except Exception as e:
         print(f"WARN: embedder cert classification skipped: {e}", file=sys.stderr)
+    tracker.complete("gates", gate_rc=rc)
 
     # 4d. Emit the curated brief IN-CONTAINER (run_v74 is legal here — containerized + proof) so the
     # agent CONSUMES it from /gt_artifacts/brief.txt instead of regenerating on the host (where
@@ -798,8 +913,8 @@ def main(argv=None) -> int:
     # means the agent runs with NO brief at all (the green-zero-run chain).
     _brief_ok, _brief_detail = emit_brief(a.out, _read_issue(issue_file), work, graph)
     if not _brief_ok:
-        print(f"GT_ARTIFACT_MISSING: brief.txt — {_brief_detail}", file=sys.stderr)
-        return 2
+        return tracker.fail("brief_emit", "GT_ARTIFACT_MISSING", f"brief.txt — {_brief_detail}")
+    tracker.complete("brief_emit", detail=_brief_detail)
     print(f"[gt-run-proof] brief emitted -> /gt_artifacts/brief.txt ({_brief_detail})", flush=True)
 
     # 5. runtime_context.json
@@ -825,7 +940,13 @@ def main(argv=None) -> int:
         json.dump(manifest, f, indent=2)
     missing = [k for k, v in present.items() if not v]
     if missing:
-        print(f"SUBSTRATE_MISSING_CERTS: {missing}", file=sys.stderr)
+        return tracker.fail(
+            "artifact_contract",
+            "SUBSTRATE_MISSING_CERTS",
+            f"missing artifacts: {missing}",
+            artifacts_present=present,
+        )
+    tracker.complete("artifact_contract", artifacts_present=present, gate_rc=rc)
     print(f"[gt-run-proof] done: gate_rc={rc} artifacts_present={present}", flush=True)
     return rc
 

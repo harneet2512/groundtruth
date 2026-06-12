@@ -2,7 +2,7 @@
 
 Branch: `gt-trial`
 
-Code HEAD while writing: `0b093e1d`
+Code HEAD while writing: `0b093e1d` (closure session handoff: `ATOMIC_REGISTER_HANDOFF_20260611.md`)
 
 This is the deeper register after the one-surface map. The prior "21 issues"
 answer was too coarse: it counted bug families. Product launch readiness needs
@@ -34,11 +34,11 @@ the number; the point is that every row has an owner boundary.
 
 | ID | Boundary | Atomic bug | Current code / evidence | Why it blocks launch | Fix shape |
 |---|---|---|---|---|---|
-| P0-01 | GHA -> substrate proof | Real DeepSWE tasks still fail before agent at `GT substrate proof` | Run `27387470440`: Go/Boa jobs failing at proof stage | No trajectory exists; product cannot claim runtime readiness | Fetch full failed proof logs; classify exact proof substage; fix generally |
+| P0-01 | GHA -> substrate proof | Real DeepSWE tasks still fail before agent at `GT substrate proof` | Run `27387470440`: Go (`LSP_FAIL_NOT_READY`) + Rust (`LSP_FAIL_NO_WARM`) at L2 LSP pass; ts arktype proof passed | No trajectory exists on Go/Rust until dep boundary fixed | Fix P0-04/P0-05; re-dispatch matrix |
 | P0-02 | Proof failure diagnostics | `GT_RUN_PROOF_FAIL rc=2` collapses many causes | `.github/workflows/deepswe_full.yml` emits one marker for boundary/leak/missing-baked-dep | Launch triage requires substage without reading huge logs | Emit `proof_failure.json` with stage, language, tool, exception, missing artifact |
 | P0-03 | Smoke equivalence overclaim | Language smoke green does not prove DeepSWE task proof | `gt_language_smoke.yml` lacks issue/deps/task-image/PATH handoff | A green preflight can hide real-task proof failures | Rename docs/status to "substrate preflight"; add DeepSWE proof parity test |
-| P0-04 | Go proof dependency boundary unknown | Go jobs fail in real-task proof despite module cache mount | Workflow copies gomodcache and sets `GOPROXY=off`; failure logs not yet read | Could be dep-store path, gopls readiness, module cache, or source root | Read logs; add deterministic Go real-task fixture for the failing sub-boundary |
-| P0-05 | Rust proof dependency boundary unknown | Boa fails at proof; fd succeeded, so Rust boundary is task-shape dependent | Workflow mounts Cargo and rustup read-only | Could be rust-analyzer sysroot, workspace metadata, memory, or graph build | Read logs; isolate Rust proof substage and add fixture |
+| P0-04 | Go proof dep-store extraction | **TRIAGED** run `27387470440`: `abs-module-cache-flags` + `abs-stepped-slices` — gopls warm but `project_ready=False`, 73/73 `no package metadata`, verdict `LSP_FAIL_NOT_READY`. Log: `no Go module cache found in task image` — hardcoded `/root/go/pkg/mod` miss on mars-base; empty gomodcache + `GOPROXY=off` | Go proof cannot resolve modules | Dynamic `go env GOMODCACHE` discovery + `dep_store_manifest.json` fail-closed for Go |
+| P0-05 | Rust proof LSP toolchain boundary | **TRIAGED** run `27387470440`: `boa-hierarchical-evaluation-cancellation` — `lsp_warm=0`, `LSP_FAIL_NO_WARM`. stderr: missing rust-src from sysroot; proc-macro API 6 vs RA 5 (substrate RA `2024-08-12` vs task rustc 1.92.0); `linker cc not found` | Rust proof cannot warm rust-analyzer | Dynamic cargo/rustup discovery; rust-src in task images; bump RA; bake gcc in substrate |
 | P0-06 | Task truth not globally authoritative | `task_truth.json` exists but paired metrics still reads `outcome.json` directly | `compute_paired_metrics.py` `_find_outcome_path()` + `m.resolved = reward > 0` | Reconciled truth can be bypassed by old reports | Make all report readers prefer `task_truth.json` |
 | P0-07 | Raw graph cert can outlive reconciliation | Raw `GRAPH_FAIL_MISSING_HANDOFF` can still be visible after witness override | `task_truth.py` reconciles; raw cert remains in artifacts | Users/debuggers can see two verdicts and choose wrong one | Add post-agent `reconciled_substrate_verdict.json`; dashboards read it |
 | P0-08 | "Pre-submit gate" overclaim | Code injects interventions; no proven finish/submit hard block | `gt_agent.py` retry note; `gt_mini_patch.py` horizon gate | Docs may claim agent cannot submit when code only warns/injects | Either wire finish hook blocker or rename to pre-submit intervention |
@@ -133,11 +133,79 @@ split-truth bugs:
 Those are exactly the kinds of meniscule bugs that make a product fail launch
 even when most code exists.
 
+## Closure matrix (2026-06-11 local session)
+
+Status key: **CLOSED** = code+tests landed; **PARTIAL** = semantics/docs fixed, residual work;
+**LIVE** = needs substrate rebuild + GHA re-proof.
+
+| ID | Status | Evidence |
+|---|---|---|
+| P0-01 | LIVE | Go/Rust dep fixes local; `validate_proof_readiness.py`; re-proof after substrate pin |
+| P0-02 | CLOSED | `proof_progress.json` / `proof_failure.json` in `gt_run_proof.py` |
+| P0-03 | PARTIAL | Workflow renamed substrate preflight; DeepSWE parity still separate job |
+| P0-04 | CLOSED | Dynamic GOMODCACHE + `dep_store_manifest.py` |
+| P0-05 | CLOSED | Rust dep discovery, rust-src, RA bump, gcc in substrate Dockerfile |
+| P0-06 | CLOSED | `compute_paired_metrics.py` prefers `task_truth.json` |
+| P0-07 | CLOSED | `reconciled_substrate_verdict.json` |
+| P0-08 | CLOSED | `pre_submit_intervention` wording in `gt_agent.py` |
+| P0-09 | CLOSED | `verifier_semantics` + `adapter_witness.json` |
+| P0-10 | CLOSED | Owner table in `gt_gt.md` §17.9 |
+| P0-11 | CLOSED | `artifact_deepswe/phase_policy.py` |
+| P0-12 | CLOSED | `_ledger_note_suppression_heuristic` rename |
+| P0-13 | CLOSED | `.claude/calibration/horizon_v1.json` + loader |
+| P0-14 | CLOSED | `CHECKPOINT_PROTOCOL.md` + `scripts/ci/check_checkpoint_protocol.py` |
+| P1-01 | CLOSED | `issue_manifest.py` + GHA step |
+| P1-02 | CLOSED | `dep_store_manifest.json` |
+| P1-03 | CLOSED | ROOT fail-closed in `deepswe_full.yml` |
+| P1-05 | CLOSED | `proof_progress.json` |
+| P1-08 | CLOSED | `scripts/swebench/reconcile.py` |
+| P1-09 | PARTIAL | `brief_provenance` in task_truth; adapter witness hash |
+| P1-10 | CLOSED | `adapter_witness.json` |
+| P1-12 | CLOSED | `GT_ORACLE_ROUTE=0` forbidden in `GT_PROOF_MODE` |
+| P1-14 | CLOSED | suppression heuristic rename |
+| P1-24 | CLOSED | strict trajectory match in `gt_deep_metrics.py` |
+| P1-26 | PARTIAL | `steps_to_first_gold_edit` export alias |
+| P1-27 | PARTIAL | task_truth resolved path; denominator via outcome classifier |
+| P1-29 | CLOSED | `artifact_resolver.py` |
+| P2-09 | CLOSED | `unknown_reason` in `deepswe_outcome.py` |
+| P2-11 | CLOSED | `oracle_events_status` in task_truth |
+| P2-13 | CLOSED | `brief_sha256` in `run_manifest.json` |
+| P2-14 | CLOSED | `.claude/CURRENT_VALIDATION_RUN.json` |
+| P2-15 | CLOSED | `tests/MANIFEST.json` |
+| P2-16 | CLOSED | baseline guard in `compute_paired_metrics.py` |
+| P1-04 | CLOSED | `rss_kb` heartbeat in `proof_progress.json` (Unix + psutil fallback) |
+| P1-06 | CLOSED | `tests/test_lsp_product_verdict.py` |
+| P1-07 | CLOSED | `embedder_product_verdict` / `embedder_diagnostic_only` |
+| P1-11 | CLOSED | `adapter_error_scan.py` + GHA step |
+| P1-13 | CLOSED | `tests/test_phase_detection.py` event-bound policy |
+| P1-15 | CLOSED | `_stable_fact_id` + `_DELIVERED_FACT_IDS` in `gt_mini_patch.py` |
+| P1-16 | CLOSED | `_last_budget_meta` char/token reporting |
+| P1-17 | CLOSED | `tests/test_action_templates.py` |
+| P1-18 | CLOSED | obligation events → `GT_ORACLE_EVENTS` jsonl |
+| P1-19 | CLOSED | `obligation_status` in `task_truth.json` |
+| P1-20 | CLOSED | `tests/test_verification_horizon_stage_*.py` |
+| P1-21 | CLOSED | `tests/test_gt_agent_retry.py` targeted retry |
+| P1-22 | CLOSED | `tests/test_gt_agent_retry.py` feedback sanitizer |
+| P1-23 | CLOSED | `verifier_semantics` in `task_truth.json` documents GT note |
+| P1-25 | CLOSED | `gt_deep_metrics.build` prefers `task_truth.json` |
+| P1-28 | CLOSED | auto `patch_hygiene` in `build_task_truth()` |
+| P2-01 | CLOSED | `gt_gt.md` §17.8 row 5 intervention wording |
+| P2-02 | CLOSED | `gt_gt.md` §17.9 owner table corrected |
+| P2-03 | CLOSED | `.claude/CURRENT_VALIDATION_RUN.json` local HEAD pointer |
+| P2-06 | CLOSED | `run_provenance.json` before proof in GHA |
+| P2-07 | CLOSED | `deepswe_outcome.py` INFRA docstring |
+| P2-08 | CLOSED | `tests/test_deepswe_infra_markers_and_brief_wrap.py` |
+| P2-10 | CLOSED | collect writes `task_truth.json` |
+| P2-12 | CLOSED | collect copies `delivered_instruction` + witness |
+| P2-17 | CLOSED | `cost_estimate` flag on DeepSeek recompute |
+| P2-18 | CLOSED | `assistant_steps` in `gt_deep_metrics.py` |
+
+**Still LIVE (infra, not code):** P0-01 — substrate image rebuild + `GT_SUBSTRATE_DIGEST` pin + Go/Rust re-proof.
+
+**Still PARTIAL / ops-only:** P0-03 (DeepSWE parity is separate job from smoke); P1-09 brief hash parity witness; P1-26 steps-to-edited-file rename; P1-27 denominator via task_truth (wired, needs live run); P2-05 historical log wording; P2-19–21 dirty tree / push guard / remote split (process, not product bugs).
+
 ## Next Work
 
-1. Read run `27387470440` failed proof logs end-to-end once available.
-2. Add proof substage classification before touching benchmark behavior.
-3. Fix the real-task proof boundary generally.
-4. Make `task_truth.json` the only reporting source for outcome/failure class.
-5. Correct architecture docs for owner and enforcement semantics.
-6. Extract phase/context policy into a tested product object.
+1. **P0-01 LIVE:** Rebuild substrate image + pin `GT_SUBSTRATE_DIGEST`; re-dispatch Go/Rust matrix from run `27387470440`.
+2. Confirm substrate proof PASS on all 5 languages before any tenpack GT-on run.
+3. Optional polish: P0-03 DeepSWE proof parity job; P1-09 brief hash witness; P1-26 metric rename in reports.

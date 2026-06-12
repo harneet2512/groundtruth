@@ -414,6 +414,8 @@ def _find_miniswe_trajectory(task: str, results_dir: str) -> str | None:
             scoped = [h for h in hits if task in h]
             if scoped:
                 return scoped[0]
+            # P1-24: never borrow a sibling task's trajectory when task id is known.
+            continue
         return hits[0]
     return None
 
@@ -424,7 +426,7 @@ def _from_miniswe_trajectory(task: str, results_dir: str) -> dict:
     and the GT content that actually reached the agent's OBSERVATIONS (showcase counts)."""
     out = {
         "found": False, "trajectory_path": "", "model": "", "exit_status": "",
-        "action_count": 0, "edits": 0, "first_edit_action": 0,
+        "action_count": 0, "assistant_steps": 0, "edits": 0, "first_edit_action": 0,
         "has_patch": False, "resolved": None,
         "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
         "cache_hit_tokens": 0, "cache_miss_tokens": 0, "cost_usd": 0.0,
@@ -513,6 +515,7 @@ def _from_miniswe_trajectory(task: str, results_dir: str) -> dict:
             out["gt_nudge_delivered"] += content.count("<gt-nudge")
             if "<gt-" in content or content.lstrip().startswith("GT:"):
                 out["gt_observation_chars_total"] += len(content)
+    out["assistant_steps"] = n_assist
     if out["action_count"] == 0:
         out["action_count"] = n_assist
 
@@ -532,6 +535,7 @@ def _from_miniswe_trajectory(task: str, results_dir: str) -> dict:
         out["cost_usd"] = d8(out["recorded_cost_usd"])
         if not out["cost_source"]:
             out["cost_source"] = "trajectory_recorded"
+        out["cost_estimate"] = False
     else:
         p = _deepseek_price_for(out["model"] or "deepseek-v4-flash")
         out["cost_usd"] = d8(
@@ -540,6 +544,7 @@ def _from_miniswe_trajectory(task: str, results_dir: str) -> dict:
             + out["completion_tokens"] / 1e6 * p["out"]
         )
         out["cost_source"] = "deepseek_keyed_recompute"
+        out["cost_estimate"] = True
     return out
 
 
@@ -793,6 +798,8 @@ def _from_embedder(cert_path: str = "") -> dict:
         "embedder_nonzero": False,
         "semantic_enabled": False,
         "embedder_status_source": "local_probe",
+        "embedder_product_verdict": False,
+        "embedder_diagnostic_only": True,
     }
     cert = _load_json(cert_path) if cert_path else None
     if isinstance(cert, dict):
@@ -822,6 +829,8 @@ def _from_embedder(cert_path: str = "") -> dict:
             "rendered_semantic_nonzero_count": d8(rendered_nonzero),
             "upstream_semantic_nonzero_count": d8(upstream_nonzero),
             "effective_w_sem": d8(effective_w_sem),
+            "embedder_product_verdict": True,
+            "embedder_diagnostic_only": False,
         })
         return out
 
@@ -839,6 +848,8 @@ def _from_embedder(cert_path: str = "") -> dict:
         out["semantic_enabled"] = bool(out["embedder_vector_dim"] > 0 and out["embedder_nonzero"])
     except Exception as exc:  # noqa: BLE001 - embedder is optional, never fatal
         out["embedder_path"] = f"unavailable: {type(exc).__name__}: {str(exc)[:120]}"
+    out["embedder_product_verdict"] = False
+    out["embedder_diagnostic_only"] = True
     return out
 
 
@@ -1021,12 +1032,21 @@ def build(task: str, results_dir: str, log_path: str = "",
     embedder_cert_path = _resolve_embedder_cert_path(task, results_dir)
     log_text = _safe_read_text(log_path) if log_path else ""
 
+    # task_truth.json is authoritative for resolved/outcome when present (P0-06).
+    truth_path = os.path.join(results_dir, "task_truth.json")
+    if not os.path.isfile(truth_path):
+        for hit in glob.glob(os.path.join(results_dir, "**", "task_truth.json"), recursive=True):
+            truth_path = hit
+            break
+    truth_data = _load_json(truth_path) if truth_path and os.path.isfile(truth_path) else None
+
     traj = _from_trajectory(task, results_dir)
     # DeepSWE/pier writes mini-swe-agent.trajectory.json, NOT output.jsonl — read it as
     # the agent-side truth (steps, edits, patch, tokens, GT delivery) when OH is absent.
     mini = _from_miniswe_trajectory(task, results_dir)
     if (not traj.get("action_count")) and mini.get("found"):
         traj["action_count"] = mini["action_count"]
+        traj["assistant_steps"] = mini.get("assistant_steps", mini["action_count"])
         traj["edits"] = mini["edits"]
         traj["first_edit_action"] = mini["first_edit_action"]
         traj["has_patch"] = traj.get("has_patch") or mini["has_patch"]
@@ -1070,6 +1090,10 @@ def build(task: str, results_dir: str, log_path: str = "",
         "model": mini.get("model") or "",
         "cost_source": (mini.get("cost_source") or "deepseek_priced_trajectory")
         if (mini.get("found") and mini.get("total_tokens")) else "gt_cost_log",
+        "cost_estimate": bool(
+            (mini.get("cost_source") or "").endswith("recompute")
+            or (mini.get("cost_source") or "") == "deepseek_priced_trajectory"
+        ),
         "llm_calls": d8(cost["llm_calls"]),
         "llm_tokens_in": d8(cost["llm_tokens_in"]),
         "llm_tokens_out": d8(cost["llm_tokens_out"]),
@@ -1085,8 +1109,20 @@ def build(task: str, results_dir: str, log_path: str = "",
         # GT's added context as a fraction of total LLM input — the honest overhead figure
         "gt_injection_overhead_pct": d8(100.0 * inj_tokens_total / cost["llm_tokens_in"]) if cost["llm_tokens_in"] else 0.0,
     }
+    if truth_data:
+        outcome_block = truth_data.get("outcome") or {}
+        if "resolved" in outcome_block:
+            traj["resolved"] = bool(outcome_block["resolved"])
+        elif outcome_block.get("failure_class") == "RESOLVED":
+            traj["resolved"] = True
+        elif outcome_block.get("failure_class"):
+            traj["resolved"] = False
+
     # --- TASK 1: outcome classification (start-blocking failures win) --------
     verdict = classify_outcome(task, log_path, traj, summ, pipeline)
+    if truth_data and (truth_data.get("outcome") or {}).get("failure_class"):
+        verdict["failure_class"] = truth_data["outcome"]["failure_class"]
+        verdict["outcome_authority"] = "task_truth.json"
 
     # --- TASK 2: required spec-F field set ----------------------------------
     graph = _from_graph_db(db_resolved)
@@ -1140,6 +1176,8 @@ def build(task: str, results_dir: str, log_path: str = "",
         "failure_reason": verdict["failure_reason"],
         "resolved": verdict["resolved"],
         "has_patch": verdict["has_patch"],
+        "failure_class": verdict.get("failure_class", ""),
+        "outcome_authority": verdict.get("outcome_authority", ""),
         # --- graph-derived (TASK 2) ---
         "graph_db_path": graph["graph_db_path"],
         "graph_nodes": d8(graph["graph_nodes"]),
@@ -1268,7 +1306,7 @@ def _write_markdown(deep: dict, md_path: str) -> None:
 ## Steps / agent behaviour
 | metric | value |
 |---|---|
-{rows([("agent steps (api_calls)", f(a.get('action_count'))), ("source edits", f(a.get('edits'))), ("first edit at step", f(a.get('first_edit_action')))])}
+{rows([("agent steps (api_calls)", f(a.get('action_count'))), ("assistant messages", f(a.get('assistant_steps'))), ("source edits", f(a.get('edits'))), ("first edit at step", f(a.get('first_edit_action')))])}
 
 ## Tokens & money (DeepSeek-priced, 8-dp)
 | metric | value |

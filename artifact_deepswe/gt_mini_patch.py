@@ -36,7 +36,10 @@ through it.
 from __future__ import annotations
 
 import enum
+import hashlib
+import json
 import os
+import sys as _sys
 import re
 import subprocess
 import sys
@@ -2228,6 +2231,10 @@ def _l5_failure_nudge(cmd: str, out_text: str) -> str:
 # (default /tmp/gt_oracle_events.jsonl) — never agent-visible.
 # ---------------------------------------------------------------------------
 _ORACLE_ROUTE = os.environ.get("GT_ORACLE_ROUTE", "1") != "0"
+if os.environ.get("GT_PROOF_MODE") == "1" and os.environ.get("GT_ORACLE_ROUTE") == "0":
+    raise RuntimeError(
+        "GT_ORACLE_ROUTE=0 forbidden in GT_PROOF_MODE=1 (legacy unconditional appends)"
+    )
 _oracle_focus_cache: set[str] | None = None
 _oracle_delivered_hashes: set[str] = set()
 _oracle_edited_rels: set[str] = set()
@@ -2337,6 +2344,7 @@ def _obligation_nudge_block() -> tuple[float, str] | None:
         tracker = _get_obligation_tracker(om)
         tracker.update(
             _oracle_edited_tokens, _oracle_tested_tokens, _action_count)
+        _persist_obligation_status(tracker)
         statuses = tracker.statuses_tuple(
             _oracle_edited_tokens, _oracle_tested_tokens)
         unmet = om.order_unmet(statuses)
@@ -2416,30 +2424,10 @@ _SEV_CODEMAP = 1
 # ---------------------------------------------------------------------------
 # CP013 — phase detection + policy filter (P5 symbol narrowing).
 # ---------------------------------------------------------------------------
-class Phase(enum.Enum):
-    ORIENT = "orient"
-    SEARCH = "search"
-    EDIT = "edit"
-    VERIFY = "verify"
-    SUBMIT = "submit"
-
-
-_PHASE_POLICY: dict[Phase, frozenset[str]] = {
-    Phase.ORIENT: frozenset({"consensus.scope"}),
-    Phase.SEARCH: frozenset({"l3b.evidence"}),
-    Phase.EDIT: frozenset({
-        "l3b.evidence", "spec.obligation", "l3.contract", "l3.cochange",
-        "detect.coherence",
-    }),
-    Phase.VERIFY: frozenset({
-        "spec.obligation", "l5.stuck", "l5.failure", "l5.no_test",
-        "detect.loop", "verify.horizon.advisory", "verify.horizon.urgent",
-        "verify.horizon.pivot",
-    }),
-    Phase.SUBMIT: frozenset({
-        "spec.obligation", "verify.horizon.gate",
-    }),
-}
+_pp_dir = os.path.dirname(os.path.abspath(__file__))
+if _pp_dir not in _sys.path:
+    _sys.path.insert(0, _pp_dir)
+from phase_policy import PHASE_POLICY as _PHASE_POLICY, Phase, phase_allows as _phase_allows_policy
 
 
 def _detect_phase() -> Phase:
@@ -2456,15 +2444,7 @@ def _detect_phase() -> Phase:
 
 
 def _phase_allows(kind: str, phase: Phase) -> bool:
-    allowed = _PHASE_POLICY.get(phase, frozenset())
-    if kind in allowed:
-        return True
-    if kind.startswith("verify.horizon."):
-        return any(
-            k.startswith("verify.horizon.") or k == "horizon.gate"
-            for k in allowed
-        )
-    return False
+    return _phase_allows_policy(kind, phase, _PHASE_POLICY)
 
 
 # ---------------------------------------------------------------------------
@@ -2482,6 +2462,46 @@ def _get_obligation_tracker(om):
         _obligation_tracker = om.ObligationTracker(obls)
         _obligation_tracker_anchors = path
     return _obligation_tracker
+
+
+def _persist_obligation_status(tracker, *, turn: int | None = None) -> None:
+    """Write obligation vector to disk + oracle jsonl (P1-18/19)."""
+    try:
+        import json as _j
+
+        snap = {
+            "event": "obligation_status",
+            "turn": turn if turn is not None else _action_count,
+            "coverage_ratio": float(f"{tracker.coverage_ratio():.8f}"),
+            "obligations": tracker.snapshot(),
+        }
+        path = os.environ.get("GT_OBLIGATION_STATUS", "/tmp/gt/obligation_status.json")
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            _j.dump(snap, fh, indent=2)
+            fh.write("\n")
+        ev = os.environ.get("GT_ORACLE_EVENTS", "/tmp/gt_oracle_events.jsonl")
+        with open(ev, "a", encoding="utf-8") as fh:
+            fh.write(_j.dumps(snap) + "\n")
+    except Exception:  # noqa: BLE001 -- telemetry must never break the loop
+        pass
+
+
+def _maybe_persist_obligation_status() -> None:
+    om = _load_gt_oracle()
+    if om is None:
+        return
+    try:
+        obls = om.load_obligations(_anchors_path())
+        if not obls:
+            return
+        tracker = _get_obligation_tracker(om)
+        tracker.update(_oracle_edited_tokens, _oracle_tested_tokens, _action_count)
+        _persist_obligation_status(tracker)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -2535,17 +2555,41 @@ def _translate_to_action(evidence_block: str, phase: Phase) -> str:
 # CP015 — context budget trim + cross-turn dedup.
 # ---------------------------------------------------------------------------
 _DELIVERED_FACTS: set[str] = set()
+_DELIVERED_FACT_IDS: set[str] = set()
+_FACT_TAG_RE = re.compile(r"\[([A-Z][A-Z0-9_]*)\]")
 _IMPERATIVE_PREFIXES = (
     "Changing", "Must", "Check", "Run", "You edited", "Inspect",
     "GT:", "Before",
 )
 
 
+def _stable_fact_id(line: str) -> str:
+    """Semantic dedupe key (P1-15) — tag + primary symbol, else content hash."""
+    stripped = line.strip()
+    if not stripped:
+        return ""
+    m = _FACT_TAG_RE.search(stripped)
+    if m:
+        tag = m.group(1)
+        rest = stripped[m.end() :].strip()
+        sym = re.split(r"\s|→|->|,|\(", rest, maxsplit=1)[0].strip()
+        if sym:
+            return f"{tag}:{sym.lower()}"
+    return hashlib.sha256(stripped.encode("utf-8")).hexdigest()[:16]
+
+
 def _budget_trim(payload: str, max_tokens: int = 500) -> str:
     if not payload:
         return ""
+    global _last_budget_meta
     lines = payload.splitlines()
-    fresh = [ln for ln in lines if ln.strip() and ln.strip() not in _DELIVERED_FACTS]
+    fresh = [
+        ln
+        for ln in lines
+        if ln.strip()
+        and ln.strip() not in _DELIVERED_FACTS
+        and _stable_fact_id(ln) not in _DELIVERED_FACT_IDS
+    ]
     imperative = [
         ln for ln in fresh
         if any(ln.strip().startswith(w) for w in _IMPERATIVE_PREFIXES)
@@ -2565,11 +2609,25 @@ def _budget_trim(payload: str, max_tokens: int = 500) -> str:
         result.append(line)
         chars += len(line) + 1
         _DELIVERED_FACTS.add(line.strip())
+        fid = _stable_fact_id(line)
+        if fid:
+            _DELIVERED_FACT_IDS.add(fid)
+    _last_budget_meta = {
+        "max_tokens_est": max_tokens,
+        "char_cap": max_tokens * 4,
+        "chars_used": chars,
+        "lines_kept": len(result),
+        "lines_total": len(lines),
+        "dedupe_ids": len(_DELIVERED_FACT_IDS),
+    }
     return "\n".join(result)
 
 
+_last_budget_meta: dict = {}
+
+
 # ---------------------------------------------------------------------------
-# Piece 3 — consumption-ledger-driven suppression + consumed boost.
+# Piece 3 — runtime_suppression_heuristic (ledger-driven ignore/boost; NOT consumption proof).
 # ---------------------------------------------------------------------------
 _ledger_consumed_kinds: set[str] = set()
 _ledger_ignore_counts: dict[str, int] = {}
@@ -2589,7 +2647,8 @@ def _ledger_cmd_acted(cmd: str) -> bool:
     return bool(re.search(r">>?\s*[^\s/]", c))
 
 
-def _ledger_note_delivery(kind: str, cmd: str) -> None:
+def _ledger_note_suppression_heuristic(kind: str, cmd: str) -> None:
+    """P0-12: heuristic ignore/boost only — not authoritative consumption proof."""
     global _last_delivered_kind
     _last_delivered_kind = kind
     if not kind:
@@ -2600,6 +2659,10 @@ def _ledger_note_delivery(kind: str, cmd: str) -> None:
         _ledger_ignore_counts.pop(kind, None)
     elif not acted:
         _ledger_ignore_counts[kind] = _ledger_ignore_counts.get(kind, 0) + 1
+
+
+def _ledger_note_delivery(kind: str, cmd: str) -> None:
+    _ledger_note_suppression_heuristic(kind, cmd)
 
 
 def _ledger_boost_severity(kind: str, sev: float) -> float:
@@ -2645,6 +2708,26 @@ def _henv(name: str, dflt: float) -> float:
         return dflt
 
 
+def _load_horizon_calibration_defaults() -> dict[str, float]:
+    """P0-13: load shipped corpus thresholds; env still wins via _henv."""
+    path = os.environ.get(
+        "GT_HORIZON_CALIBRATION",
+        os.path.join(
+            os.path.dirname(__file__), "..", ".claude", "calibration", "horizon_v1.json"
+        ),
+    )
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        th = data.get("thresholds") or {}
+        return {str(k): float(v) for k, v in th.items()}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+_HORIZON_DEFAULTS = _load_horizon_calibration_defaults()
+
+
 # H3-CALIBRATION CHANNEL (delivery-engine Stage 4, 2026-06-11 — replaces the
 # static B>=0.5/0.8 + 1.5xV bands).  The band edges are functions of the
 # BEHAVIORAL signals (test/edit coverage from Stage 1) with the budget as the
@@ -2675,12 +2758,18 @@ def _henv(name: str, dflt: float) -> float:
 #                        arm before the typical submission point (at the old
 #                        2.0 the band was unreachable: 8/9 trajectories ended
 #                        before R ever dropped to 2V)
-_ESC_ADV_TCOV = _henv("GT_ESC_ADV_TCOV", 0.125)        # advisory: test_coverage below
-_ESC_ADV_B = _henv("GT_ESC_ADV_B", 0.11166666)         # advisory: budget_fraction above
-_ESC_URG_TCOV = _henv("GT_ESC_URG_TCOV", 0.125)        # urgent: test_coverage below
-_ESC_URG_B = _henv("GT_ESC_URG_B", 0.35333333)         # urgent: budget_fraction above
-_ESC_GATE_TCOV = _henv("GT_ESC_GATE_TCOV", 1.0)        # gate: test_coverage below
-_ESC_GATE_KV = _henv("GT_ESC_GATE_KV", 7.48)           # gate: R < KV * V (V observed)
+_ESC_ADV_TCOV = _henv(
+    "GT_ESC_ADV_TCOV", _HORIZON_DEFAULTS.get("GT_ESC_ADV_TCOV", 0.125)
+)
+_ESC_ADV_B = _henv("GT_ESC_ADV_B", _HORIZON_DEFAULTS.get("GT_ESC_ADV_B", 0.11166666))
+_ESC_URG_TCOV = _henv(
+    "GT_ESC_URG_TCOV", _HORIZON_DEFAULTS.get("GT_ESC_URG_TCOV", 0.125)
+)
+_ESC_URG_B = _henv("GT_ESC_URG_B", _HORIZON_DEFAULTS.get("GT_ESC_URG_B", 0.35333333))
+_ESC_GATE_TCOV = _henv(
+    "GT_ESC_GATE_TCOV", _HORIZON_DEFAULTS.get("GT_ESC_GATE_TCOV", 1.0)
+)
+_ESC_GATE_KV = _henv("GT_ESC_GATE_KV", _HORIZON_DEFAULTS.get("GT_ESC_GATE_KV", 7.48))
 
 try:
     _raw_step_limit = os.environ.get("GT_STEP_LIMIT", "").strip()
@@ -3316,6 +3405,7 @@ def _augment_output(action, out) -> None:
             # FIX 1 (2026-06-11): scaffold_arm=False — scaffold_trap RETIRED on
             # the oracle route (early-patch-intensity rho=-0.78: never penalize
             # exploration volume; 7/9 fires, 0 consumed, 1 wrong steer).
+            _maybe_persist_obligation_status()
             cands.append((_SEV_STUCK, "l5.stuck",
                           _l5_nudge(cmd, _orig_out, loop_arm=False,
                                     scaffold_arm=False), True))

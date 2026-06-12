@@ -46,6 +46,10 @@ import scipy.stats as stats
 # Constants
 # ---------------------------------------------------------------------------
 
+FROZEN_BASELINE_MARKER = Path(
+    ".claude/reports/full300_baseline_ohdeepseek_20260531/FINAL_resolved_300_20260531.json"
+)
+
 GT_BLOCK_RE = re.compile(r"<gt-[^/][^>]*>.*?</gt-\w[\w-]*>", re.DOTALL)
 GT_LOCALIZATION_RE = re.compile(
     r'<gt-localization\s+confidence="([^"]+)">(.*?)</gt-localization>', re.DOTALL
@@ -914,6 +918,23 @@ def _find_outcome_path(task_dir: Path) -> Optional[Path]:
     return p if p.exists() else None
 
 
+def _find_task_truth_path(task_dir: Path) -> Optional[Path]:
+    p = task_dir / "task_truth.json"
+    return p if p.exists() else None
+
+
+def _resolved_from_task_truth(truth: dict) -> tuple[bool | None, dict]:
+    """Prefer reconciled task_truth outcome over raw pier outcome.json (P0-06)."""
+    outcome = truth.get("outcome") or {}
+    if "resolved" in outcome:
+        return bool(outcome["resolved"]), outcome
+    if outcome.get("failure_class") == "RESOLVED":
+        return True, outcome
+    if outcome.get("failure_class"):
+        return False, outcome
+    return None, outcome
+
+
 # ---------------------------------------------------------------------------
 # Core metrics computation per task
 # ---------------------------------------------------------------------------
@@ -952,7 +973,16 @@ def compute_task_metrics(task_id: str, task_dir: Path) -> Optional[TaskMetrics]:
         except Exception:
             pass
 
-    # Load outcome (optional)
+    # Load outcome — task_truth.json is authoritative when present (P0-06).
+    truth_path = _find_task_truth_path(task_dir)
+    truth_data: Dict = {}
+    if truth_path:
+        try:
+            with open(truth_path, encoding="utf-8", errors="replace") as f:
+                truth_data = json.load(f)
+        except Exception:
+            pass
+
     outcome_path = _find_outcome_path(task_dir)
     outcome_data: Dict = {}
     if outcome_path:
@@ -967,9 +997,15 @@ def compute_task_metrics(task_id: str, task_dir: Path) -> Optional[TaskMetrics]:
     # ----- Resolved -----
     tasks_list = outcome_data.get("tasks", [{}])
     task_record = tasks_list[0] if tasks_list else {}
-    m.resolved = bool(task_record.get("reward", 0) > 0)
+    resolved_truth, _outcome_block = _resolved_from_task_truth(truth_data)
+    if resolved_truth is not None:
+        m.resolved = resolved_truth
+    else:
+        m.resolved = bool(task_record.get("reward", 0) > 0)
     m.n_agent_steps = float(
-        task_record.get("n_agent_steps", model_stats.get("api_calls", 0))
+        _outcome_block.get("n_agent_steps")
+        if truth_data and _outcome_block.get("n_agent_steps") is not None
+        else task_record.get("n_agent_steps", model_stats.get("api_calls", 0))
     )
 
     # ----- Efficiency fields from deep metrics -----
@@ -1538,7 +1574,11 @@ def _fmt(v: Any) -> Any:
 
 def _task_to_dict(tm: TaskMetrics) -> Dict:
     d = asdict(tm)
-    return {k: _fmt(v) for k, v in d.items()}
+    out = {k: _fmt(v) for k, v in d.items()}
+    # P1-26 — stable public alias (gold proxy metric, not oracle gold file hits).
+    out["steps_to_first_gold_edit"] = out.get("m13_steps_to_gold_edit")
+    out["steps_to_first_gold_edit_confidence"] = out.get("m13_steps_to_gold_edit_confidence")
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -2682,6 +2722,29 @@ def generate_markdown_report(report: Dict) -> str:
 # CLI entry point
 # ---------------------------------------------------------------------------
 
+def _assert_baseline_arm_is_off(baseline_dir: Path) -> None:
+    """P2-06 — refuse GT-on directories posing as GT-OFF baseline."""
+    if os.environ.get("GT_ALLOW_BASELINE_RERUN") == "1":
+        return
+    marker = baseline_dir / "GT_ON_ARM"
+    if marker.is_file():
+        raise SystemExit(
+            f"[ERROR] baseline-dir {baseline_dir} is marked GT_ON_ARM — "
+            "pair against frozen GT-OFF baseline only"
+        )
+    for outcome in baseline_dir.rglob("outcome.json"):
+        try:
+            data = json.loads(outcome.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        for task in data.get("tasks") or []:
+            if task.get("gt_prebuilt_active") is True:
+                raise SystemExit(
+                    f"[ERROR] baseline-dir appears GT-on (gt_prebuilt_active in {outcome}); "
+                    f"use frozen baseline {FROZEN_BASELINE_MARKER}"
+                )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Compute GT Metrics Framework (M01–M26, including M20–M26 code quality) against a paired run.",
@@ -2713,6 +2776,7 @@ def main() -> int:
     if not baseline_dir.is_dir():
         print(f"[ERROR] baseline-dir does not exist: {baseline_dir}", file=sys.stderr)
         return 1
+    _assert_baseline_arm_is_off(baseline_dir)
     if not oracle_dir.is_dir():
         print(f"[ERROR] oracle-dir does not exist: {oracle_dir}", file=sys.stderr)
         return 1

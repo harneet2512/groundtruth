@@ -33,6 +33,7 @@ def _load_patch():
 def pm():
     mod = _load_patch()
     mod._DELIVERED_FACTS.clear()
+    mod._DELIVERED_FACT_IDS.clear()
     return mod
 
 
@@ -51,6 +52,15 @@ def test_dedup_second_turn(pm):
     second = pm._budget_trim(line)
     assert first.strip() == line
     assert second == ""
+
+
+def test_dedup_semantic_id_survives_wording_change(pm):
+    pm._DELIVERED_FACTS.clear()
+    pm._DELIVERED_FACT_IDS.clear()
+    a = "[WITNESS] capture_snapshot called by -> pkg/mod.py:44"
+    b = "[WITNESS] capture_snapshot invoked from -> pkg/mod.py:44"
+    assert pm._budget_trim(a).strip() == a
+    assert pm._budget_trim(b) == ""
 
 
 def test_imperative_survives_over_explanation(pm):

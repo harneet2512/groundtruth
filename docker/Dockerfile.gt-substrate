@@ -88,7 +88,7 @@ RUN GOBIN=/opt/gt/bin GOFLAGS=-trimpath GOPATH=/tmp/gopath GOTOOLCHAIN=local \
 # (3c) rust-analyzer — official prebuilt release binary (no rustup/cargo to LAUNCH).
 #      (Crate-level type resolution may still need `cargo metadata`/target dir from the
 #      task env — flagged as the Rust D1-probe item.)
-ARG RUST_ANALYZER_VERSION=2024-08-12
+ARG RUST_ANALYZER_VERSION=2026-06-08
 RUN curl -fsSL "https://github.com/rust-lang/rust-analyzer/releases/download/${RUST_ANALYZER_VERSION}/rust-analyzer-x86_64-unknown-linux-gnu.gz" \
       | gunzip > /opt/gt/bin/rust-analyzer \
     && chmod +x /opt/gt/bin/rust-analyzer \
@@ -187,6 +187,9 @@ RUN printf '#!/bin/sh\nexec "${GT_PYTHON:-python3}" /opt/gt/scripts/swebench/gt_
 
 # ---- stage 2: thin final image whose entire payload is the portable /opt/gt ----
 FROM ubuntu:20.04
+# rust-analyzer/cargo metadata probes need a C linker when task rustup is mounted.
+RUN apt-get update && apt-get install -y --no-install-recommends gcc ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=build /opt/gt /opt/gt
 # Go toolchain for gopls WORKSPACE LOADING: gopls shells out to the `go` command
 # (`go env`/`go list`) to load packages, so the toolchain stays baked + pinned OFFLINE
