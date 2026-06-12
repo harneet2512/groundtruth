@@ -13,6 +13,7 @@ New architecture-first docs:
 - `.claude/reports/runs/validation_27367976952/CHECKPOINT_TASK_TRUTH_RUNTIME_CONTROL_20260612.md`
 - `.claude/reports/runs/validation_27367976952/CHECKPOINT_FIVE_LANGUAGE_RUNTIME_RECEIPTS_20260612.md`
 - `.claude/reports/runs/validation_27367976952/LIPI_CODE_AUDIT_RUNTIME_PARITY_20260612.md`
+- `.claude/reports/runs/validation_27367976952/LIPI_LINE_LEVEL_CODE_AUDIT_COMMITS_BF840549_CE0947C2_FB009A1E_20260612.md`
 
 Audit result:
 
@@ -45,6 +46,9 @@ Architecture gaps outside the 64:
   benchmark-shaped branches.
 - `BENCHMARK READINESS` NO: `CLAUDE.md` Stage 1 is still blocked by `P0-01`
   until rebuilt Go/Rust substrate proof is green and regenerated artifacts agree.
+- `LIPI DEPTH` UPDATED: added line-level LIPI audit for the code behavior commits
+  `bf840549`, `ce0947c2`, and `fb009a1e`, using concrete symptoms and all four
+  LIPI avenues per changed code group.
 
 Do not run tenpack until `P0-01` is green on rebuilt substrate. The repaired rows still
 need a new live run to populate regenerated artifacts.
