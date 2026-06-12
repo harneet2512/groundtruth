@@ -6,10 +6,10 @@ name: "GT language smoke — identical gt-run-proof per language (5 fixtures)"
 # The MINIMAL language-agnostic execution proof for the GT substrate. It runs the SAME
 # portable gt-run-proof command (the §A proof-runtime contract) once per language, changing
 # ONLY the mounted fixture path — never the command, never per-language special-casing. Each
-# job asserts the 7-artifact contract, reads lsp_certificate.json's verdict, records the
+# job asserts the 8-artifact contract, reads lsp_certificate.json's verdict, records the
 # gt-run-proof exit code, and uploads /gt_artifacts. The final summarize step prints the
 # per-language table the architecture-parity audit expects:
-#   Language | exit | 7-artifact ✓/✗ | LSP status (verdict_hint)
+#   Language | exit | 8-artifact ✓/✗ | LSP status (verdict_hint)
 #
 # LEGITIMACY: the docker-run is byte-identical across languages; the image digest is the ONLY
 # thing pinning the runtime (@sha256 only, never a mutable tag). An unsupported / mis-baked
@@ -172,7 +172,7 @@ jobs:
           path: /tmp/dl
           pattern: gt-lang-smoke-*
           merge-multiple: true
-      - name: Print the audit table (Language | exit | 7-artifact ✓/✗ | LSP status)
+      - name: Print the audit table (Language | exit | 8-artifact ✓/✗ | LSP status)
         run: |
           set -uo pipefail
           {
@@ -180,7 +180,7 @@ jobs:
             echo ""
             echo "Image digest pin: \`${GT_SUBSTRATE_DIGEST:-<unset>}\` (byte-identical command, only fixture path changed)"
             echo ""
-            echo "| Language | exit | 7-artifact | LSP status |"
+            echo "| Language | exit | 8-artifact | LSP status |"
             echo "|---|---|---|---|"
             for f in /tmp/dl/rows/*.row; do
               [ -e "$f" ] || continue

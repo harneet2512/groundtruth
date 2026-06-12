@@ -51,7 +51,7 @@ def _step(doc, job, name_prefix):
 # ── workflows must stay YAML-parseable ────────────────────────────────────────
 
 def test_workflows_parse_as_yaml():
-    for p in (WF_DEEPSWE, WF_30, WF_300):
+    for p in (WF_DEEPSWE, WF_30, WF_300, WF_LANG_SMOKE):
         doc = _load(p)
         assert isinstance(doc, dict) and "jobs" in doc, p
 
@@ -218,8 +218,8 @@ def test_deepswe_proof_gates_strict_by_default():
 
 
 def test_deepswe_proof_path_exposes_complete_substrate_closure():
-    # Regression for run 27386082651: DeepSWE overrode PATH and hid the baked
-    # Node LSP binaries even though the pinned substrate image contained them.
+    # Regression for split substrate contracts: DeepSWE overrode PATH and hid
+    # baked language-tool directories even though the pinned substrate contained them.
     run = _step(_load(WF_DEEPSWE), "trial", "GT substrate proof")["run"]
     path_lines = [ln for ln in run.splitlines() if '-e PATH="' in ln]
     assert len(path_lines) == 1
@@ -247,6 +247,12 @@ def test_language_smoke_uses_same_eight_artifact_contract():
     assert "all 8 GT artifacts present" in run
     assert "all 7 GT artifacts present" not in run
     assert "exit 1" in run
+
+
+def test_language_smoke_summary_uses_eight_artifact_wording():
+    run = _step(_load(WF_LANG_SMOKE), "summarize", "Print the audit table")["run"]
+    assert "8-artifact" in run
+    assert "7-artifact" not in run
 
 
 def test_oh_live_agent_workflows_keep_explicit_deliver_always():
