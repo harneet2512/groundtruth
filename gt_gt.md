@@ -1676,7 +1676,7 @@ Status after CP011–015 + LSP proof boundary fixes (2026-06-12, run `2738747044
 | 6 | Self-verifier retry plumbing | **SHIPPED** P6 — not official hidden-verifier repair |
 | 7 | Trust-gated context surfaces | **SHIPPED** CP005, CP009 |
 | 8 | Context budgeting | **SHIPPED** CP015 |
-| 9 | Graph-to-action translation | **SHIPPED** CP014 |
+| 9 | Graph-to-action translation | **PARTIAL** — CP014 shipped the product module; `6cae3ab7` strengthened caller-risk wording, but richer graph-risk/action coverage is still open |
 | 10 | Flip/trajectory scorecard | **SHIPPED** P7 (tooling); **awaiting live run** for populated metrics |
 
 Stage-1 deterministic proofs for items 1, 4–6, 8–10 are in plan-scoped pytest (84+ passed).
