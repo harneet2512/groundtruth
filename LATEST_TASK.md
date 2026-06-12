@@ -2,7 +2,7 @@
 
 ## STATUS: ARCHITECTURE-FIRST LIPI REPAIR PASS COMPLETE
 
-Current audited HEAD: `3dab29c6`
+Current audited HEAD: `323af3c7`
 
 New architecture-first docs:
 
@@ -35,9 +35,9 @@ Architecture gaps outside the 64:
 Do not run tenpack until `P0-01` is green on rebuilt substrate. The repaired rows still
 need a new live run to populate regenerated artifacts.
 
-## STATUS: SUBSTRATE BOUNDARY CLEANED — LIVE RE-PROOF BLOCKED ON SUBSTRATE REBUILD
+## STATUS: SUBSTRATE BOUNDARY CLEANED — PROOF SWEEP POLICY DEDUPED — LIVE RE-PROOF BLOCKED ON SUBSTRATE REBUILD
 
-Branch: `gt-trial` (local uncommitted changes — P0 LSP proof pass)
+Branch: `gt-trial` (proof-sweep/runtime boundary synced through `323af3c7`)
 Triage run: `27387470440`
 Prior: CP011–015 @ `df4c37c5`; tenpack `27386082651` failed at substrate proof
 
@@ -47,6 +47,7 @@ Prior: CP011–015 @ `df4c37c5`; tenpack `27386082651` failed at substrate proof
 |-----|--------|
 | P0-04 Go `GOMODCACHE` / dep manifest | **CLOSED (code)** — await live re-proof |
 | P0-05 Rust RA + rust-src + gcc | **CLOSED (code)** — **substrate rebuild required** |
+| Proof sweep LSP budget owner | **CLOSED (code)** — workflow no longer forks per-language policy |
 | P0-02 `proof_progress.json` / `proof_failure.json` | **CLOSED** |
 | P0-06/07 `task_truth.json` authority | **CLOSED** |
 | P0-11 `phase_policy.py` extraction | **CLOSED** |

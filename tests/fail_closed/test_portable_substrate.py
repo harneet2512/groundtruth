@@ -19,6 +19,7 @@ grp = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(grp)
 _WF = os.path.join(ROOT, ".github", "workflows", "swebench_300task.yml")
 _DEEPSWE_WF = os.path.join(ROOT, ".github", "workflows", "deepswe_full.yml")
+_PROOF_SWEEP_WF = os.path.join(ROOT, ".github", "workflows", "deepswe_proof_sweep.yml")
 _WRAP = os.path.join(ROOT, "scripts", "swebench", "oh_gt_full_wrapper.py")
 
 
@@ -198,6 +199,14 @@ def test_deepswe_workflow_does_not_own_per_language_lsp_budget_policy():
     t = _read(_DEEPSWE_WF)
     assert 'GT_LSP_READY_BUDGET_S="$LSP_BUDGET"' not in t
     assert "GT_LSP_READY_BUDGET_S_OVERRIDE" in t
+
+
+def test_proof_sweep_workflow_does_not_reencode_per_language_lsp_budget_policy():
+    """The proof sweep must prove the runtime contract, not fork budget policy."""
+    t = _read(_PROOF_SWEEP_WF)
+    assert 'GT_LSP_READY_BUDGET_S="$LSP_BUDGET"' not in t
+    assert 'case "$TASK_LANG"' not in t
+    assert "LSP readiness budget owner: gt-run-proof" in t
 
 
 # ── OH wrapper consumes the artifacts (does not rebuild a divergent graph) ────

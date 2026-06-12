@@ -46,6 +46,9 @@ concurrency:
 env:
   # On push events inputs.* is empty -> falls back to the repo variable.
   GT_SUBSTRATE_DIGEST: ${{ inputs.gt_substrate_digest || vars.GT_SUBSTRATE_DIGEST }}
+  # Optional global override for debugging. Empty keeps the runtime-owned per-language
+  # defaults in gt-run-proof.
+  GT_LSP_READY_BUDGET_S_OVERRIDE: ${{ vars.GT_LSP_READY_BUDGET_S_OVERRIDE }}
 
 jobs:
   # ── prepare: env-only. Lint the workflow, fail-closed on the digest, emit the matrix. ──
@@ -284,19 +287,11 @@ jobs:
           # Repo mounted /work:ro (never mutated); artifacts -> /gt_artifacts. No LLM,
           # no agent, no issue/gold input — the free liveness-proof path (substrate
           # warmth + embedder identity probe are issue-independent).
-          # Per-language LSP readiness budget (efficiency, src-free env knob). The
-          # readiness barrier (resolve.py:507/523) EARLY-EXITS on the first real answer,
-          # so a warm server pays ~one request; the full budget is only burned by a
-          # never-converging server — the measured go/rust no-op shape. Shorten it there
-          # (tree-sitter depth is index-time, unaffected); keep the full 20s on ts/js where
-          # tsserver converts. This sweep is the $0 instrument that MEASURES the payoff
-          # (the per-language `proof s mean/med` + `probe ms med` columns in SWEEP_REPORT).
-          case "$TASK_LANG" in
-            go|rust)               LSP_BUDGET=5 ;;
-            typescript|javascript) LSP_BUDGET=20 ;;
-            *)                     LSP_BUDGET=20 ;;
-          esac
-          echo "LSP readiness budget for $TASK_LANG: ${LSP_BUDGET}s"
+          # LSP readiness policy belongs to gt-run-proof. The sweep proves the same
+          # portable runtime contract as the paid pipeline, so it must not re-encode
+          # per-language budgets here. Operators may still set a single global
+          # GT_LSP_READY_BUDGET_S_OVERRIDE on the workflow environment when debugging.
+          echo "LSP readiness budget owner: gt-run-proof (language=$TASK_LANG)"
           set +e
           docker run --rm \
             -v "/tmp/gt/src:/work:ro" \
@@ -309,7 +304,6 @@ jobs:
             -e GT_FORCE_ONNX_EMBEDDER=1 \
             -e GT_REQUIRE_LSP=1 \
             -e GT_REQUIRE_FULL_STACK=1 \
-            -e GT_LSP_READY_BUDGET_S="$LSP_BUDGET" \
             -e GT_GIT_COMMIT="${{ github.sha }}" \
             -e GT_SUBSTRATE_DIGEST="$GT_SUBSTRATE_DIGEST" \
             "$GT_SUBSTRATE_DIGEST" gt-run-proof --source-root /work --out /gt_artifacts \

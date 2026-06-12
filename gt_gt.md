@@ -1495,7 +1495,7 @@ The oracle-arm trajectories (9 tasks, 5 languages) confirm and sharpen the §15.
 
 ## 17. Bugfree program — validation_27367976952, checkpoints 001–015 (2026-06-11–12)
 
-> **Last verified 2026-06-12.** Branch `gt-trial` @ `3dab29c6` with architecture-first
+> **Last verified 2026-06-12.** Branch `gt-trial` @ `323af3c7` with architecture-first
 > LIPI audit docs. Master handoff:
 > `.claude/reports/runs/validation_27367976952/GT_BUGFREE_HANDOFF_FULL.md`.
 > This section is the **architecture-of-record** for the bugfree layer-by-layer fix
@@ -1540,7 +1540,7 @@ Stage discipline (from `CLAUDE.md`):
 | Resolved | **0/9** at run time |
 | Artifacts | `.claude/reports/runs/validation_27367976952/` (~411MB trajectories) |
 
-Checkpoints **001–015 shipped** (2026-06-11–12). CP001–003: metrics fallback, no-leak verify, embedder cert truth. CP004–010: evidence oracle waiver, LSP product readiness, task truth, consumption ledger, infra subtypes, path_policy, patch hygiene. **CP011–015 + P6/P7** (`df4c37c5`): obligation lifecycle, phase policy, action templates, context budget, ledger suppression, verifier retry, trajectory scorecard. **Register closure / architecture-first audit** (`51c54d51`), **LIPI repair pass** (`b7d26fba`), and **substrate-boundary cleanup** (`3dab29c6`): structured proof truth, task-truth authority, brief proof repair, hard-block-only enforcement semantics, and substrate-owned Go/Rust LSP policy. See `LIPI_64_ITEM_CLOSURE_AUDIT_20260612.md`, `GT_GT_DESIRED_VS_CURRENT_GAP_AUDIT_20260612.md`, `SUBSTRATE_BOUNDARY_LIPI_GO_RUST_20260612.md`, `HANDOFF_AFTER_CHECKPOINT_015.md`, `SESSION_20260612_CP011-015.md`, and `CONTEXT_GAP_AUDIT_27367976952.md`.
+Checkpoints **001–015 shipped** (2026-06-11–12). CP001–003: metrics fallback, no-leak verify, embedder cert truth. CP004–010: evidence oracle waiver, LSP product readiness, task truth, consumption ledger, infra subtypes, path_policy, patch hygiene. **CP011–015 + P6/P7** (`df4c37c5`): obligation lifecycle, phase policy, action templates, context budget, ledger suppression, verifier retry, trajectory scorecard. **Register closure / architecture-first audit** (`51c54d51`), **LIPI repair pass** (`b7d26fba`), **substrate-boundary cleanup** (`3dab29c6`), and **proof-sweep/runtime policy dedupe** (`323af3c7`): structured proof truth, task-truth authority, brief proof repair, hard-block-only enforcement semantics, substrate-owned Go/Rust LSP policy, and removal of duplicate per-language LSP budgets from the proof sweep workflow. See `LIPI_64_ITEM_CLOSURE_AUDIT_20260612.md`, `GT_GT_DESIRED_VS_CURRENT_GAP_AUDIT_20260612.md`, `SUBSTRATE_BOUNDARY_LIPI_GO_RUST_20260612.md`, `HANDOFF_AFTER_CHECKPOINT_015.md`, `SESSION_20260612_CP011-015.md`, and `CONTEXT_GAP_AUDIT_27367976952.md`.
 
 Product truth authority is explicit after the 2026-06-12 LIPI repair pass:
 
@@ -1708,7 +1708,7 @@ Pre-flight: `pytest tests/test_dep_store_manifest.py tests/test_proof_progress_j
 | Field | Value |
 |---|---|
 | Branch / commit (frozen tenpack) | `gt-trial` @ `df4c37c5` |
-| Local code HEAD (register closure session) | `gt-trial` @ `3dab29c6` — see `.claude/CURRENT_VALIDATION_RUN.json` |
+| Local code HEAD (register closure session) | `gt-trial` @ `323af3c7` — see `.claude/CURRENT_VALIDATION_RUN.json` |
 | Substrate | `ghcr.io/hbali-stack/gt-substrate@sha256:dd5692aa11dcc02050d8d25c91b74010eec1dd1164dfd5b0c22018f6a95f0f7d` |
 | Language smoke `27385688504` | **PASS** — `gt-run-proof` OK on 5 fixtures |
 | Tenpack `27386082651` | **FAIL** — all 10 matrix jobs, pre-agent |

@@ -1,6 +1,6 @@
 # Substrate boundary LIPI - Go/Rust LSP - 2026-06-12
 
-Audited HEAD: `b7d26fba`
+Audited HEAD: `323af3c7`
 
 Purpose: before rebuilding `gt-substrate`, verify the Go/Rust LSP path against the
 desired architecture. The rule is simple: if a concern belongs to the portable proof
@@ -19,7 +19,7 @@ Desired state:
 - Task image owns task dependency state: Go module cache, Cargo home, Rustup/sysroot
   contents. Workflow must not "fix" them at runtime.
 
-Current state before this patch:
+Current state before this patch series:
 
 - Good: `gt_run_proof.py` already owned graph/index/resolve/gates and per-language LSP
   aggregation.
@@ -27,6 +27,9 @@ Current state before this patch:
   inside the task container.
 - Bad: per-language LSP ready-budget policy lived in workflow shell logic and was passed
   into the substrate as a precomputed value.
+- Bad: `.github/workflows/deepswe_proof_sweep.yml` still had its own per-language
+  `case "$TASK_LANG"` budget table, so the proof sweep could silently drift from the
+  paid runtime contract.
 
 ## LIPI findings
 
@@ -65,6 +68,8 @@ Fix boundary: `scripts/swebench/gt_run_proof.py` + `.github/workflows/deepswe_fu
 - Removed workflow-side `rustup component add rust-src`.
 - Added `gt_run_proof.lsp_ready_budget_seconds()` and moved default per-language
   readiness budget policy into the proof runtime.
+- Removed proof-sweep-side per-language LSP budget selection; the sweep now proves the
+  same runtime-owned policy instead of restating it.
 - `run_manifest.json` now records `lsp_ready_budgets`.
 - Workflow now passes only `GT_LSP_READY_BUDGET_S_OVERRIDE`, not a precomputed
   per-language budget.
