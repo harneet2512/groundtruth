@@ -2,7 +2,7 @@
 
 ## STATUS: ARCHITECTURE-FIRST LIPI REPAIR PASS COMPLETE
 
-Current audited HEAD: `b40ee15b`
+Current audited HEAD: `fb009a1e`
 
 New architecture-first docs:
 
@@ -11,6 +11,7 @@ New architecture-first docs:
 - `.claude/reports/runs/validation_27367976952/SUBSTRATE_BOUNDARY_LIPI_GO_RUST_20260612.md`
 - `.claude/reports/runs/validation_27367976952/CHECKPOINT_PRODUCT_RUNTIME_CONTROL_PLANE_20260612.md`
 - `.claude/reports/runs/validation_27367976952/CHECKPOINT_TASK_TRUTH_RUNTIME_CONTROL_20260612.md`
+- `.claude/reports/runs/validation_27367976952/CHECKPOINT_FIVE_LANGUAGE_RUNTIME_RECEIPTS_20260612.md`
 
 Audit result:
 
@@ -38,13 +39,16 @@ Architecture gaps outside the 64:
   DeepSWE delegates to them as adapter glue.
 - `ARCH-08` IMPROVED: `task_truth.json` now carries runtime-control summaries and
   deep metrics forwards that surface instead of hiding it.
+- `ARCH-09` CLOSED for deterministic receipts: five-language runtime fixtures now
+  prove shared state/policy/verification/budget/action/obligation behavior without
+  benchmark-shaped branches.
 
 Do not run tenpack until `P0-01` is green on rebuilt substrate. The repaired rows still
 need a new live run to populate regenerated artifacts.
 
 ## STATUS: SUBSTRATE BOUNDARY CLEANED — PROOF SWEEP POLICY DEDUPED — LIVE RE-PROOF BLOCKED ON SUBSTRATE REBUILD
 
-Branch: `gt-trial` (proof-sweep/runtime boundary synced through `b40ee15b`)
+Branch: `gt-trial` (proof-sweep/runtime boundary synced through `fb009a1e`)
 Triage run: `27387470440`
 Prior: CP011–015 @ `df4c37c5`; tenpack `27386082651` failed at substrate proof
 
