@@ -1495,7 +1495,7 @@ The oracle-arm trajectories (9 tasks, 5 languages) confirm and sharpen the §15.
 
 ## 17. Bugfree program — validation_27367976952, checkpoints 001–015 (2026-06-11–12)
 
-> **Last verified 2026-06-12.** Branch `gt-trial` @ `323af3c7` with architecture-first
+> **Last verified 2026-06-12.** Branch `gt-trial` @ `6cae3ab7` with architecture-first
 > LIPI audit docs. Master handoff:
 > `.claude/reports/runs/validation_27367976952/GT_BUGFREE_HANDOFF_FULL.md`.
 > This section is the **architecture-of-record** for the bugfree layer-by-layer fix
@@ -1540,7 +1540,7 @@ Stage discipline (from `CLAUDE.md`):
 | Resolved | **0/9** at run time |
 | Artifacts | `.claude/reports/runs/validation_27367976952/` (~411MB trajectories) |
 
-Checkpoints **001–015 shipped** (2026-06-11–12). CP001–003: metrics fallback, no-leak verify, embedder cert truth. CP004–010: evidence oracle waiver, LSP product readiness, task truth, consumption ledger, infra subtypes, path_policy, patch hygiene. **CP011–015 + P6/P7** (`df4c37c5`): obligation lifecycle, phase policy, action templates, context budget, ledger suppression, verifier retry, trajectory scorecard. **Register closure / architecture-first audit** (`51c54d51`), **LIPI repair pass** (`b7d26fba`), **substrate-boundary cleanup** (`3dab29c6`), and **proof-sweep/runtime policy dedupe** (`323af3c7`): structured proof truth, task-truth authority, brief proof repair, hard-block-only enforcement semantics, substrate-owned Go/Rust LSP policy, and removal of duplicate per-language LSP budgets from the proof sweep workflow. See `LIPI_64_ITEM_CLOSURE_AUDIT_20260612.md`, `GT_GT_DESIRED_VS_CURRENT_GAP_AUDIT_20260612.md`, `SUBSTRATE_BOUNDARY_LIPI_GO_RUST_20260612.md`, `HANDOFF_AFTER_CHECKPOINT_015.md`, `SESSION_20260612_CP011-015.md`, and `CONTEXT_GAP_AUDIT_27367976952.md`.
+Checkpoints **001–015 shipped** (2026-06-11–12). CP001–003: metrics fallback, no-leak verify, embedder cert truth. CP004–010: evidence oracle waiver, LSP product readiness, task truth, consumption ledger, infra subtypes, path_policy, patch hygiene. **CP011–015 + P6/P7** (`df4c37c5`): obligation lifecycle, phase policy, action templates, context budget, ledger suppression, verifier retry, trajectory scorecard. **Register closure / architecture-first audit** (`51c54d51`), **LIPI repair pass** (`b7d26fba`), **substrate-boundary cleanup** (`3dab29c6`), **proof-sweep/runtime policy dedupe** (`323af3c7`), and **runtime-ledger truth repair** (`6cae3ab7`): structured proof truth, task-truth authority, brief proof repair, hard-block-only enforcement semantics, substrate-owned Go/Rust LSP policy, removal of duplicate per-language LSP budgets from the proof sweep workflow, durable wrong-phase suppression truth, and cleaner delegated mini-swe runtime surfaces. See `LIPI_64_ITEM_CLOSURE_AUDIT_20260612.md`, `GT_GT_DESIRED_VS_CURRENT_GAP_AUDIT_20260612.md`, `SUBSTRATE_BOUNDARY_LIPI_GO_RUST_20260612.md`, `CHECKPOINT_RUNTIME_LEDGER_ACTION_TRANSLATION_20260612.md`, `STAGE1_STATE_AND_SUBSTRATE_BOUNDARY_20260612_AFTER_6CAE3AB7.md`, `HANDOFF_AFTER_CHECKPOINT_015.md`, `SESSION_20260612_CP011-015.md`, and `CONTEXT_GAP_AUDIT_27367976952.md`.
 
 Product truth authority is explicit after the 2026-06-12 LIPI repair pass:
 

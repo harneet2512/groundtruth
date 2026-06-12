@@ -1,19 +1,21 @@
 # LATEST_TASK.md — Session Handoff (2026-06-12)
 
-## STATUS: ARCHITECTURE-FIRST LIPI REPAIR PASS COMPLETE
+## STATUS: STAGE 1 DOC/TRUTH SURFACES SYNCED; SUBSTRATE RE-PROOF STILL BLOCKING
 
-Current audited HEAD: `2ef22fcf`
+Current audited HEAD: `6cae3ab7`
 
 New architecture-first docs:
 
 - `.claude/reports/runs/validation_27367976952/LIPI_64_ITEM_CLOSURE_AUDIT_20260612.md`
 - `.claude/reports/runs/validation_27367976952/GT_GT_DESIRED_VS_CURRENT_GAP_AUDIT_20260612.md`
 - `.claude/reports/runs/validation_27367976952/SUBSTRATE_BOUNDARY_LIPI_GO_RUST_20260612.md`
+- `.claude/reports/runs/validation_27367976952/STAGE1_STATE_AND_SUBSTRATE_BOUNDARY_20260612_AFTER_6CAE3AB7.md`
 - `.claude/reports/runs/validation_27367976952/CHECKPOINT_PRODUCT_RUNTIME_CONTROL_PLANE_20260612.md`
 - `.claude/reports/runs/validation_27367976952/CHECKPOINT_TASK_TRUTH_RUNTIME_CONTROL_20260612.md`
 - `.claude/reports/runs/validation_27367976952/CHECKPOINT_FIVE_LANGUAGE_RUNTIME_RECEIPTS_20260612.md`
 - `.claude/reports/runs/validation_27367976952/LIPI_CODE_AUDIT_RUNTIME_PARITY_20260612.md`
 - `.claude/reports/runs/validation_27367976952/LIPI_LINE_LEVEL_CODE_AUDIT_COMMITS_BF840549_CE0947C2_FB009A1E_20260612.md`
+- `.claude/reports/runs/validation_27367976952/CHECKPOINT_RUNTIME_LEDGER_ACTION_TRANSLATION_20260612.md`
 
 Audit result:
 
@@ -44,11 +46,20 @@ Architecture gaps outside the 64:
 - `ARCH-09` CLOSED for deterministic receipts: five-language runtime fixtures now
   prove shared state/policy/verification/budget/action/obligation behavior without
   benchmark-shaped branches.
+- `ARCH-10` IMPROVED: wrong-phase suppressions on the mini-swe path now persist to
+  a runtime ledger and can surface through `task_truth.runtime_control`.
 - `BENCHMARK READINESS` NO: `CLAUDE.md` Stage 1 is still blocked by `P0-01`
   until rebuilt Go/Rust substrate proof is green and regenerated artifacts agree.
 - `LIPI DEPTH` UPDATED: added line-level LIPI audit for the code behavior commits
   `bf840549`, `ce0947c2`, and `fb009a1e`, using concrete symptoms and all four
   LIPI avenues per changed code group.
+
+Current delta after `6cae3ab7`:
+
+- runtime phase-policy suppressions no longer disappear silently on the mini-swe path
+- `gt_mini_patch.py` delegated helpers no longer carry dead fallback logic below live returns
+- action translation is stronger for verified-caller contract facts
+- top-level truth pointers must now follow `6cae3ab7`, not `2ef22fcf`
 
 Do not run tenpack until `P0-01` is green on rebuilt substrate. The repaired rows still
 need a new live run to populate regenerated artifacts.
