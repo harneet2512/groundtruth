@@ -895,6 +895,8 @@ jobs:
           # classified GT_PROOF_OOM) — uncapped, the GHA HOST OOM-killer killed the
           # process BEFORE its fail-closed stderr print, surfacing as a silent generic
           # failure (the 2026-06-10 5-task brief-OOM). rc is THE diagnostic bit.
+          # Preserve the whole substrate closure on PATH. Omitting /opt/gt/node/bin hides
+          # pyright-langserver/typescript-language-server even when the pinned image baked them.
           PROOF_RC=0
           docker run --rm \
               --memory=10g --memory-swap=10g \
@@ -908,7 +910,7 @@ jobs:
               -e GT_REQUIRE_LSP=1 -e GT_REQUIRE_FULL_STACK=1 -e GT_ISSUE_FILE=/work_issue.txt \
               -e GT_LSP_READY_BUDGET_S="$LSP_BUDGET" \
               -e GOPROXY=off -e GONOSUMCHECK=1 -e CARGO_HOME=/root/.cargo \
-              -e PATH="/opt/gt/bin:/opt/gt/go/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+              -e PATH="/opt/gt/bin:/opt/gt/node/bin:/opt/gt/python/bin:/opt/gt/jre/bin:/opt/gt/go/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
               -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 -e HF_DATASETS_OFFLINE=1 \
               -e GT_GATES_DELIVER_ALWAYS="${GT_GATES_DELIVER_ALWAYS:-0}" \
               -e GT_GIT_COMMIT="${{ github.sha }}" \

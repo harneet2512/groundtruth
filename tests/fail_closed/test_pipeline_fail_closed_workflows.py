@@ -29,6 +29,7 @@ ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
 WF_DEEPSWE = os.path.join(ROOT, ".github", "workflows", "deepswe_full.yml")
 WF_30 = os.path.join(ROOT, ".github", "workflows", "swebench_30task.yml")
 WF_300 = os.path.join(ROOT, ".github", "workflows", "swebench_300task.yml")
+WF_LANG_SMOKE = os.path.join(ROOT, ".github", "workflows", "gt_language_smoke.yml")
 
 
 def _read(p):
@@ -214,6 +215,38 @@ def test_deepswe_proof_gates_strict_by_default():
     run = _step(doc, "trial", "GT substrate proof")["run"]
     assert "${GT_GATES_DELIVER_ALWAYS:-0}" in run
     assert "${GT_GATES_DELIVER_ALWAYS:-1}" not in run
+
+
+def test_deepswe_proof_path_exposes_complete_substrate_closure():
+    # Regression for run 27386082651: DeepSWE overrode PATH and hid the baked
+    # Node LSP binaries even though the pinned substrate image contained them.
+    run = _step(_load(WF_DEEPSWE), "trial", "GT substrate proof")["run"]
+    path_lines = [ln for ln in run.splitlines() if '-e PATH="' in ln]
+    assert len(path_lines) == 1
+    path_line = path_lines[0]
+    for required in (
+        "/opt/gt/bin",
+        "/opt/gt/node/bin",
+        "/opt/gt/python/bin",
+        "/opt/gt/jre/bin",
+        "/opt/gt/go/bin",
+    ):
+        assert required in path_line
+
+
+def test_language_smoke_fails_on_nonzero_proof_exit():
+    run = _step(_load(WF_LANG_SMOKE), "smoke", "gt-run-proof inside the pinned substrate")["run"]
+    assert 'echo "exit_code=$RC" >> "$GITHUB_OUTPUT"' in run
+    assert 'exit "$RC"' in run
+    assert "exit 0" not in run
+
+
+def test_language_smoke_uses_same_eight_artifact_contract():
+    run = _step(_load(WF_LANG_SMOKE), "smoke", "Assert the 8-artifact contract")["run"]
+    assert "brief.txt" in run
+    assert "all 8 GT artifacts present" in run
+    assert "all 7 GT artifacts present" not in run
+    assert "exit 1" in run
 
 
 def test_oh_live_agent_workflows_keep_explicit_deliver_always():

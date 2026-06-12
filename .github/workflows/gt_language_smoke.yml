@@ -105,26 +105,28 @@ jobs:
           RC=$?
           echo "gt_run_proof_exit=$RC"
           echo "exit_code=$RC" >> "$GITHUB_OUTPUT"
-          # Do NOT fail the step on a non-zero gt-run-proof rc: a classified verdict (e.g. an
-          # unsupported language) is a VALID outcome we must record + table, not crash on.
-          exit 0
+          # This workflow is a pre-flight gate for the same proof runtime used by DeepSWE.
+          # A non-zero proof exit means the pinned substrate is not runnable for that language.
+          exit "$RC"
 
-      - name: "Assert the 7-artifact contract + read LSP status"
+      - name: "Assert the 8-artifact contract + read LSP status"
         id: verify
         run: |
           set -uo pipefail
           A="$RUNNER_TEMP/gt_artifacts"
           MISSING=""
           for c in graph.db runtime_context.json lsp_certificate.json graph_certificate.json \
-                   embedder_certificate.json foundational_gate_report.json run_manifest.json; do
+                   embedder_certificate.json foundational_gate_report.json run_manifest.json \
+                   brief.txt; do
             if [ ! -s "$A/$c" ]; then MISSING="$MISSING $c"; fi
           done
           if [ -z "$MISSING" ]; then
-            echo "all 7 GT artifacts present"
+            echo "all 8 GT artifacts present"
             echo "artifacts_ok=true" >> "$GITHUB_OUTPUT"
           else
             echo "SUBSTRATE_MISSING_CERTS:$MISSING"
             echo "artifacts_ok=false" >> "$GITHUB_OUTPUT"
+            exit 1
           fi
           # Read the per-language LSP verdict from the certificate (the allowed enum:
           # LSP_ACTIVE_VALID / LSP_NO_OP_VALID_WITH_WARM_SERVER / LSP_UNSUPPORTED_EXPLICIT /
