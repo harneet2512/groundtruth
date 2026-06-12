@@ -2,7 +2,7 @@
 
 ## STATUS: STAGE 1 DOC/TRUTH SURFACES SYNCED; SUBSTRATE RE-PROOF STILL BLOCKING
 
-Current audited HEAD: `0329d87b`
+Current audited HEAD: `da2e37c0`
 
 New architecture-first docs:
 
@@ -60,14 +60,14 @@ Architecture gaps outside the 64:
   `bf840549`, `ce0947c2`, and `fb009a1e`, using concrete symptoms and all four
   LIPI avenues per changed code group.
 
-Current delta after `0329d87b`:
+Current delta after `da2e37c0`:
 
 - runtime phase-policy suppressions no longer disappear silently on the mini-swe path
 - `gt_mini_patch.py` delegated helpers no longer carry dead fallback logic below live returns
 - action translation is stronger for verified-caller contract facts
 - Go dep-store evidence now preserves declared versus copied module-cache paths
 - Go/Rust substrate readiness now probes offline workspace metadata before the LSP pass
-- top-level truth pointers must now follow `0329d87b`, not `2ef22fcf`
+- top-level truth pointers must now follow `da2e37c0`, not `2ef22fcf`
 
 Do not run tenpack until `P0-01` is green on rebuilt substrate. The repaired rows still
 need a new live run to populate regenerated artifacts.
