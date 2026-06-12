@@ -672,7 +672,12 @@ def probe_workspace_metadata(language: str, source_root: str, env: dict[str, str
         }
 
     if lang == "go":
-        cmd = ["go", "list", "./..."]
+        # -e: don't fail on build-constraint errors (syscall/js, platform-specific)
+        # Override GOFLAGS + GOPROXY for probe only: the mounted module cache may
+        # be incomplete (missing transitive deps). The probe downloads what's needed
+        # to prove workspace readiness. The actual LSP pass runs offline.
+        cmd = ["go", "list", "-e", "./..."]
+        env = dict(env, GOFLAGS="-mod=mod", GOPROXY="https://proxy.golang.org,direct")
         code = "GO_WORKSPACE_METADATA_FAIL"
     else:
         cmd = ["cargo", "metadata", "--format-version=1", "--no-deps"]
