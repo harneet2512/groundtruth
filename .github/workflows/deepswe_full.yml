@@ -832,7 +832,9 @@ jobs:
           # Missing rust-src must fail closed via the manifest/proof path; do not
           # mutate the task image here to provision toolchain components.
           ACTIVE_RUST_TOOLCHAIN="$(docker exec gtsrc sh -lc 'rustup show active-toolchain 2>/dev/null | awk "{print \$1}" | tr -d "\r"' || true)"
+          RUST_SYSROOT="$(docker exec gtsrc sh -lc 'rustc --print sysroot 2>/dev/null' | tr -d '\r')"
           RUSTUP_SRC=""
+          RUST_SRC_SRC=""
           for CAND in \
             "$(docker exec gtsrc sh -lc 'echo ${RUSTUP_HOME:-$HOME/.rustup}' | tr -d '\r')" \
             "/root/.rustup" "/home/user/.rustup"; do
@@ -842,12 +844,24 @@ jobs:
             fi
           done
           [ -n "$RUSTUP_SRC" ] || echo "no rustup copied from task image"
+          if [ -n "$ACTIVE_RUST_TOOLCHAIN" ] && [ -n "$RUST_SYSROOT" ] \
+             && [ ! -d "/tmp/gt/deps/rustup/toolchains/$ACTIVE_RUST_TOOLCHAIN/lib/rustlib/src/rust/library" ]; then
+            TASK_RUST_SRC="${RUST_SYSROOT%/}/lib/rustlib/src/rust/library"
+            if docker exec gtsrc test -d "$TASK_RUST_SRC" 2>/dev/null; then
+              mkdir -p "/tmp/gt/deps/rustup/toolchains/$ACTIVE_RUST_TOOLCHAIN/lib/rustlib/src/rust/library"
+              if docker cp "gtsrc:${TASK_RUST_SRC}/." "/tmp/gt/deps/rustup/toolchains/$ACTIVE_RUST_TOOLCHAIN/lib/rustlib/src/rust/library" 2>/dev/null; then
+                RUST_SRC_SRC="$TASK_RUST_SRC"
+                echo "backfilled rust-src from sysroot: $TASK_RUST_SRC"
+              fi
+            fi
+          fi
           python3 scripts/swebench/dep_store_manifest.py \
             --out /tmp/gt/dep_store_manifest.json \
             --language "${{ matrix.language }}" \
             --gomodcache-host /tmp/gt/deps/gomodcache --gomodcache-source "$GOMOD_SRC" --gomodcache-declared-source "$GOMOD_DECLARED" \
             --cargo-host /tmp/gt/deps/cargo --cargo-source "$CARGO_SRC" \
             --rustup-host /tmp/gt/deps/rustup --rustup-source "$RUSTUP_SRC" \
+            --rust-src-host "/tmp/gt/deps/rustup/toolchains/${ACTIVE_RUST_TOOLCHAIN}/lib/rustlib/src/rust/library" --rust-src-source "$RUST_SRC_SRC" \
             --rust-toolchain "$ACTIVE_RUST_TOOLCHAIN" \
             || { echo "DEP_STORE_MANIFEST_FAIL: required dep store missing for ${{ matrix.language }}" | tee -a trial_output.log; exit 1; }
 

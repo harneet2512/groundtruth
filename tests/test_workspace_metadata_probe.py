@@ -19,7 +19,7 @@ _SPEC.loader.exec_module(_MOD)
 
 def test_go_workspace_metadata_probe_success(monkeypatch, tmp_path):
     def _run(cmd, cwd=None, env=None, capture_output=None, text=None, timeout=None):
-        assert cmd == ["go", "list", "./..."]
+        assert cmd == ["go", "list", "-e", "./..."]
         assert cwd == str(tmp_path)
         return subprocess.CompletedProcess(cmd, 0, stdout="repo/pkg\nrepo/pkg/sub\n", stderr="")
 
@@ -38,6 +38,22 @@ def test_go_workspace_metadata_probe_failure(monkeypatch, tmp_path):
     assert result["status"] == "fail"
     assert result["code"] == "GO_WORKSPACE_METADATA_FAIL"
     assert "no required module provides package" in result["message"]
+
+
+def test_go_workspace_metadata_probe_tolerates_platform_specific_packages(monkeypatch, tmp_path):
+    def _run(cmd, cwd=None, env=None, capture_output=None, text=None, timeout=None):
+        assert cmd == ["go", "list", "-e", "./..."]
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout="repo\nrepo/js\n",
+            stderr="package repo/js\n\timports syscall/js: build constraints exclude all Go files",
+        )
+
+    monkeypatch.setattr(_MOD.subprocess, "run", _run)
+    result = _MOD.probe_workspace_metadata("go", str(tmp_path), os.environ.copy())
+    assert result["status"] == "ok"
+    assert result["package_count"] == 2
 
 
 def test_rust_workspace_metadata_probe_success(monkeypatch, tmp_path):

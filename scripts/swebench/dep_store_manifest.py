@@ -92,17 +92,26 @@ def build_manifest(
     cargo_source: str,
     rustup_host: str,
     rustup_source: str,
+    rust_src_host: str = "",
+    rust_src_source: str = "",
     rust_toolchain: str = "",
 ) -> dict[str, Any]:
-    rust_src = _find_rust_src(rustup_host, rust_toolchain)
-    if rustup_source and rust_src.get("exists"):
-        active_toolchain = rust_src.get("active_toolchain")
-        if active_toolchain:
-            rust_src["source_in_task_image"] = (
-                f"{rustup_source}/toolchains/{active_toolchain}/lib/rustlib/src/rust/library"
-            )
-        else:
-            rust_src["source_in_task_image"] = f"{rustup_source}/toolchains/*/lib/rustlib/src/rust/library"
+    rust_src_host = (rust_src_host or "").strip()
+    rust_src_source = (rust_src_source or "").strip()
+    if rust_src_host:
+        rust_src = _dir_stats(rust_src_host)
+        rust_src["active_toolchain"] = rust_toolchain or None
+        rust_src["source_in_task_image"] = rust_src_source or None
+    else:
+        rust_src = _find_rust_src(rustup_host, rust_toolchain)
+        if rustup_source and rust_src.get("exists"):
+            active_toolchain = rust_src.get("active_toolchain")
+            if active_toolchain:
+                rust_src["source_in_task_image"] = (
+                    f"{rustup_source}/toolchains/{active_toolchain}/lib/rustlib/src/rust/library"
+                )
+            else:
+                rust_src["source_in_task_image"] = f"{rustup_source}/toolchains/*/lib/rustlib/src/rust/library"
     return {
         "schema": SCHEMA,
         "language": language,
@@ -161,6 +170,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--cargo-source", default="")
     ap.add_argument("--rustup-host", default="/tmp/gt/deps/rustup")
     ap.add_argument("--rustup-source", default="")
+    ap.add_argument("--rust-src-host", default="")
+    ap.add_argument("--rust-src-source", default="")
     ap.add_argument("--rust-toolchain", default="")
     ap.add_argument("--validate-only", action="store_true")
     args = ap.parse_args(argv)
@@ -181,6 +192,8 @@ def main(argv: list[str] | None = None) -> int:
             cargo_source=args.cargo_source,
             rustup_host=args.rustup_host,
             rustup_source=args.rustup_source,
+            rust_src_host=args.rust_src_host,
+            rust_src_source=args.rust_src_source,
             rust_toolchain=args.rust_toolchain,
         )
         write_manifest(args.out, manifest)

@@ -78,10 +78,10 @@ def test_residual_zero_warm_noop_valid_passes():
     assert v == "LSP_NO_OP_VALID_WITH_WARM_SERVER" and ok
 
 
-def test_demand_present_no_attempts_warm_warns():
+def test_demand_present_no_attempts_warm_fails():
     cert = _base_cert(demand_edges=5, residual=5, attempted_edges=0)
     v, ok = fg._classify_lsp(cert)
-    assert v == "LSP_WARN_NOT_ATTEMPTED" and ok
+    assert v == "LSP_WARN_NOT_ATTEMPTED" and not ok
 
 
 def test_demand_present_no_attempts_no_warm_fails():
@@ -162,7 +162,7 @@ def test_active_valid_passes():
     assert v == "LSP_ACTIVE_VALID" and ok
 
 
-def test_warm_residual_zero_effective_work_warns_when_project_ready():
+def test_warm_residual_zero_effective_work_fails_when_project_ready():
     cert = _base_cert(
         residual=5,
         demand_edges=5,
@@ -175,7 +175,7 @@ def test_warm_residual_zero_effective_work_warns_when_project_ready():
         verdict_hint="LSP_WARN_ZERO_CONVERSION",
     )
     v, ok = fg._classify_lsp(cert)
-    assert v == "LSP_WARN_ZERO_CONVERSION" and ok
+    assert v == "LSP_WARN_ZERO_CONVERSION" and not ok
 
 
 def test_project_ready_false_zero_effective_work_fails():

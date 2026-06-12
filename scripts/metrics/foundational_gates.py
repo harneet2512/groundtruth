@@ -320,7 +320,8 @@ def _classify_lsp(cert):
 
     PASS: LSP_ACTIVE_VALID, LSP_NO_OP_VALID_WITH_WARM_SERVER, LSP_UNSUPPORTED_EXPLICIT.
     FAIL: LSP_FAIL_NO_WARM, LSP_FAIL_STALE_CLOSURE, LSP_FAIL_NOT_RUN_BEFORE_SCORING,
-          LSP_FAIL_MISSING_CERTIFICATE, LSP_FAIL_CERT_VERSION_SKEW.
+          LSP_FAIL_MISSING_CERTIFICATE, LSP_FAIL_CERT_VERSION_SKEW,
+          LSP_WARN_NOT_ATTEMPTED, LSP_WARN_ZERO_CONVERSION.
 
     VERSION SKEW (P1-g): the gt.lsp_certificate.v2 schema added install_missing_reason +
     verdict_hint, whose semantics this classifier depends on (install-missing vs
@@ -364,7 +365,7 @@ def _classify_lsp(cert):
     attempted = int(cert.get("attempted_edges", 0))
     if demand > 0 and attempted == 0:
         if cert.get("lsp_warm"):
-            return ("LSP_WARN_NOT_ATTEMPTED", True)
+            return ("LSP_WARN_NOT_ATTEMPTED", False)
         return ("LSP_FAIL_NOT_RUN_BEFORE_SCORING", False)
     if residual == 0 or demand == 0:
         if cert.get("no_op_valid"):
@@ -381,9 +382,11 @@ def _classify_lsp(cert):
         # Transport warm but workspace not product-ready (indexing barrier).
         return ("LSP_FAIL_NOT_READY", False)
     if effective <= 0:
-        # Warm server that converted nothing: dep-env limitation when
-        # project_ready is true/unknown — transport OK, product not ready.
-        return ("LSP_WARN_ZERO_CONVERSION", True)
+        # Warm transport with residual work but zero useful conversions is not a
+        # product-ready LSP surface. It usually means dependency/workspace
+        # context is still incomplete. Keep the WARN name for diagnosis, but
+        # fail the gate so dashboards cannot treat it as green readiness.
+        return ("LSP_WARN_ZERO_CONVERSION", False)
     return ("LSP_ACTIVE_VALID", True)
 
 
@@ -410,10 +413,10 @@ def gate_lsp(lsp_metrics_text: str, cert=None) -> bool:
         _transport_ok = bool(
             cert.get("lsp_warm") and cert.get("server_launched")
             and cert.get("warm_probe_ok"))
-        _product_ok = (
-            verdict in ("LSP_ACTIVE_VALID", "LSP_NO_OP_VALID_WITH_WARM_SERVER",
-                        "LSP_UNSUPPORTED_EXPLICIT")
-            or (verdict == "LSP_WARN_ZERO_CONVERSION" and ok)
+        _product_ok = verdict in (
+            "LSP_ACTIVE_VALID",
+            "LSP_NO_OP_VALID_WITH_WARM_SERVER",
+            "LSP_UNSUPPORTED_EXPLICIT",
         )
         print(f"[GATE 2 LSP ENRICHMENT] {verdict} {'PASS' if ok else 'FAIL'} "
               f"lsp_warm={cert.get('lsp_warm')} server_launched={cert.get('server_launched')} "
