@@ -2,7 +2,7 @@
 
 ## STATUS: STAGE 1 DOC/TRUTH SURFACES SYNCED; SUBSTRATE RE-PROOF STILL BLOCKING
 
-Current audited HEAD: `6cae3ab7`
+Current audited HEAD: `0329d87b`
 
 New architecture-first docs:
 
@@ -12,6 +12,7 @@ New architecture-first docs:
 - `.claude/reports/runs/validation_27367976952/STAGE1_STATE_AND_SUBSTRATE_BOUNDARY_20260612_AFTER_6CAE3AB7.md`
 - `.claude/reports/runs/validation_27367976952/SUBSTRATE_REBUILD_REPROOF_RUNBOOK_20260612.md`
 - `.claude/reports/runs/validation_27367976952/CHECKPOINT_DEP_STORE_RUSTSRC_TRUTH_20260612.md`
+- `.claude/reports/runs/validation_27367976952/CHECKPOINT_WORKSPACE_METADATA_PROBE_20260612.md`
 - `.claude/reports/runs/validation_27367976952/CHECKPOINT_PRODUCT_RUNTIME_CONTROL_PLANE_20260612.md`
 - `.claude/reports/runs/validation_27367976952/CHECKPOINT_TASK_TRUTH_RUNTIME_CONTROL_20260612.md`
 - `.claude/reports/runs/validation_27367976952/CHECKPOINT_FIVE_LANGUAGE_RUNTIME_RECEIPTS_20260612.md`
@@ -52,16 +53,21 @@ Architecture gaps outside the 64:
   a runtime ledger and can surface through `task_truth.runtime_control`.
 - `BENCHMARK READINESS` NO: `CLAUDE.md` Stage 1 is still blocked by `P0-01`
   until rebuilt Go/Rust substrate proof is green and regenerated artifacts agree.
+- `SUBSTRATE READINESS LOGIC` UPDATED: Go/Rust product readiness is now owned by
+  offline workspace metadata probes in `gt_run_proof.py`; dep-store manifests remain
+  evidence, not the final verdict.
 - `LIPI DEPTH` UPDATED: added line-level LIPI audit for the code behavior commits
   `bf840549`, `ce0947c2`, and `fb009a1e`, using concrete symptoms and all four
   LIPI avenues per changed code group.
 
-Current delta after `6cae3ab7`:
+Current delta after `0329d87b`:
 
 - runtime phase-policy suppressions no longer disappear silently on the mini-swe path
 - `gt_mini_patch.py` delegated helpers no longer carry dead fallback logic below live returns
 - action translation is stronger for verified-caller contract facts
-- top-level truth pointers must now follow `6cae3ab7`, not `2ef22fcf`
+- Go dep-store evidence now preserves declared versus copied module-cache paths
+- Go/Rust substrate readiness now probes offline workspace metadata before the LSP pass
+- top-level truth pointers must now follow `0329d87b`, not `2ef22fcf`
 
 Do not run tenpack until `P0-01` is green on rebuilt substrate. The repaired rows still
 need a new live run to populate regenerated artifacts.

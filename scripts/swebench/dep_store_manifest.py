@@ -131,16 +131,6 @@ def validate_manifest(manifest: dict[str, Any]) -> list[str]:
     lang = (manifest.get("language") or "").strip().lower()
     stores = manifest.get("stores") or {}
 
-    if lang == "go":
-        gm = stores.get("gomodcache") or {}
-        if not gm.get("exists") or int(gm.get("file_count") or 0) == 0:
-            problems.append(
-                "DEP_STORE_EMPTY: go task requires non-empty gomodcache "
-                f"(source={gm.get('source_in_task_image')!r}, "
-                f"declared={gm.get('declared_in_task_image')!r}, "
-                f"path={gm.get('path')!r})"
-            )
-
     if lang == "rust":
         for key in ("cargo", "rustup", "rust_src"):
             st = stores.get(key) or {}

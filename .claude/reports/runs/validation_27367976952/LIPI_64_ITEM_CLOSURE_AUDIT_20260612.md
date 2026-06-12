@@ -68,14 +68,14 @@ Fix boundary: Add proof-only DeepSWE parity job or keep all docs explicitly non-
 ```text
 ID: P0-04
 Desired state: Go proof discovers task module/dependency state dynamically and fails with structured evidence when unavailable.
-Current state: deepswe_full.yml probes go env GOMODCACHE and candidate caches, writes dep_store_manifest.json, and mounts cache into substrate.
-Logic: Mostly clean - dynamic discovery fixes the original hardcoded /root/go/pkg/mod bug.
-Implementation: Partial risk - dep_store_manifest.py currently treats every Go task as requiring a non-empty gomodcache.
-Integration: Pending live proof - code is wired into GHA but not re-proved with rebuilt image.
-Plumbing: Clean for evidence - source path, file_count, total_bytes, and failure marker are structured.
+Current state: deepswe_full.yml probes go env GOMODCACHE and candidate caches, writes dep_store_manifest.json, and mounts cache into substrate; gt_run_proof.py now probes offline `go list ./...` workspace metadata before the LSP pass.
+Logic: Clean - dynamic discovery fixes the original hardcoded /root/go/pkg/mod bug, and product readiness is now owned by workspace metadata load rather than cache presence alone.
+Implementation: Clean in code - Go dep-store data is evidence-only, while substrate runtime owns the real offline metadata readiness check.
+Integration: Pending live proof - code is wired into GHA and substrate runtime but not re-proved with rebuilt image.
+Plumbing: Clean for evidence - declared/copied cache paths are structured, and metadata-probe failures now have a dedicated proof stage and structured failure surface.
 Verdict: PARTIAL
-Remaining bug, if any: Generality risk for Go repos with no external module cache requirement; live proof still required.
-Fix boundary: Re-proof first; if empty-cache false positives appear, validate package metadata readiness rather than cache non-emptiness alone.
+Remaining bug, if any: Live re-proof still required to prove this on the real Go tasks.
+Fix boundary: Rebuild substrate, pin digest, and re-proof the ABS Go tasks.
 ```
 
 ### P0-05

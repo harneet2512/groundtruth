@@ -144,27 +144,26 @@ We still do not have the final evidence required by the Stage 1 goal:
 
 Without that, we still cannot say the product path is benchmark-ready.
 
-#### Generality risk still worth watching
+#### Workspace metadata now owns Go/Rust readiness truth
 
-There is one code-level generality risk still visible at the substrate boundary:
+The remaining substrate semantics are now cleaner than this document originally captured.
 
-- `dep_store_manifest.py` currently treats Go proof as requiring a non-empty `gomodcache`
+Go no longer uses "non-empty copied `gomodcache`" as product truth.
+Instead:
 
-That may be correct for the failing DeepSWE tasks that motivated the fix, but Stage 1 product
-truth requires a more general claim:
+- workflow still extracts/cache-mount evidence
+- `dep_store_manifest.json` still records declared and copied paths
+- `gt_run_proof.py` now owns an offline workspace metadata probe:
+  - Go: `go list ./...`
+  - Rust: `cargo metadata --format-version=1 --no-deps`
+
+That matches the more general Stage 1 product claim:
 
 ```text
 package metadata and workspace loading must be ready
 ```
 
-not necessarily:
-
-```text
-there must always be a non-empty copied gomodcache
-```
-
-This is not a confirmed code bug yet. It is the main remaining design-risk note to watch
-when the Go re-proof runs.
+The remaining open item is live proof, not local boundary semantics.
 
 ## LIPI
 

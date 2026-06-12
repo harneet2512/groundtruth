@@ -22,7 +22,7 @@ def _touch_tree(root: str, rel_paths: list[str]) -> None:
             fh.write(b"x")
 
 
-def test_go_fail_closed_empty_gomodcache():
+def test_go_empty_gomodcache_is_evidence_not_gate():
     with tempfile.TemporaryDirectory() as td:
         gm = os.path.join(td, "gomodcache")
         os.makedirs(gm)
@@ -36,8 +36,8 @@ def test_go_fail_closed_empty_gomodcache():
             rustup_host=os.path.join(td, "rustup"),
             rustup_source="",
         )
-        problems = validate_manifest(manifest)
-        assert any("DEP_STORE_EMPTY" in p and "gomodcache" in p for p in problems)
+        assert validate_manifest(manifest) == []
+        assert manifest["stores"]["gomodcache"]["declared_in_task_image"] == "/custom/go/pkg/mod"
 
 
 def test_go_passes_with_non_default_gomodcache_layout():
@@ -75,8 +75,8 @@ def test_go_manifest_keeps_declared_gomodcache_when_copy_is_missing():
             rustup_host=os.path.join(td, "rustup"),
             rustup_source="",
         )
-        problems = validate_manifest(manifest)
-        assert any("/workspace/.cache/go/pkg/mod" in p for p in problems)
+        assert validate_manifest(manifest) == []
+        assert manifest["stores"]["gomodcache"]["declared_in_task_image"] == "/workspace/.cache/go/pkg/mod"
 
 
 def test_rust_fail_closed_missing_rustup():

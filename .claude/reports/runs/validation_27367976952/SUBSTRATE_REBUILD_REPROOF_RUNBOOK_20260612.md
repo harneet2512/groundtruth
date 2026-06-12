@@ -130,13 +130,16 @@ If it still fails, separate the cause carefully:
 1. dep-store extract problem
 2. substrate Go toolchain handoff problem
 3. `gopls` workspace-loading / package-metadata problem
-4. manifest policy too strict for a valid empty-cache case
+4. offline workspace metadata probe failing even though cache evidence is present
 
-Current code improvement:
+Current code improvements:
 
 - `dep_store_manifest.json` now preserves both:
   - `source_in_task_image` for the copied cache path
   - `declared_in_task_image` for the path reported by `go env GOMODCACHE`
+- `gt_run_proof.py` now runs an offline Go workspace metadata probe (`go list ./...`)
+  inside the substrate before the LSP pass, so product truth is package/workspace
+  readiness rather than cache non-emptiness alone.
 
 So a Go failure can now distinguish:
 
@@ -146,19 +149,13 @@ So a Go failure can now distinguish:
 
 Important:
 
-The current code still assumes a Go proof needs a non-empty copied `gomodcache`.
-That may be right for the failing tasks, but if re-proof shows a valid Go task can
-load packages without that copied cache, the product boundary should move from:
-
-```text
-non-empty gomodcache
-```
-
-to:
+The product boundary has now moved to:
 
 ```text
 package metadata/workspace readiness
 ```
+
+The copied cache remains evidence, not the final verdict.
 
 ### Rust
 
@@ -173,6 +170,9 @@ Current code improvement:
 
 - `dep_store_manifest.json` now records `stores.rust_src` keyed to the active toolchain,
   so "rustup copied" and "usable rust-src exists" are no longer conflated.
+- `gt_run_proof.py` now runs an offline Rust workspace metadata probe
+  (`cargo metadata --format-version=1 --no-deps`) before the LSP pass, so a Rust
+  failure can separate metadata-load failure from later rust-analyzer behavior.
 
 ## Minimal success evidence
 

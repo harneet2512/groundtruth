@@ -45,6 +45,7 @@ PROOF_STAGES = (
     "env_validation",
     "dep_store",
     "source_copy",
+    "workspace_metadata",
     "index",
     "lsp_pass",
     "graph_cert",
@@ -655,6 +656,83 @@ def emit_brief(out_dir: str, issue_text: str, work: str, graph: str, *, generato
     return True, f"{len(bt)} chars"
 
 
+def probe_workspace_metadata(language: str, source_root: str, env: dict[str, str]) -> dict[str, object]:
+    """Probe offline workspace/package metadata for languages whose LSPs depend on it.
+
+    This is product truth for Go/Rust readiness: dep-store presence is only evidence.
+    The actual question is whether the substrate can load workspace metadata offline.
+    """
+    lang = (language or "").strip().lower()
+    if lang not in {"go", "rust"}:
+        return {
+            "applicable": False,
+            "language": lang,
+            "status": "skip",
+            "reason": "language_not_metadata_bound",
+        }
+
+    if lang == "go":
+        cmd = ["go", "list", "./..."]
+        code = "GO_WORKSPACE_METADATA_FAIL"
+    else:
+        cmd = ["cargo", "metadata", "--format-version=1", "--no-deps"]
+        code = "RUST_WORKSPACE_METADATA_FAIL"
+
+    try:
+        cp = subprocess.run(
+            cmd,
+            cwd=source_root,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+    except Exception as e:
+        return {
+            "applicable": True,
+            "language": lang,
+            "status": "fail",
+            "code": code,
+            "message": f"{lang} workspace metadata probe raised: {type(e).__name__}: {e}",
+            "command": cmd,
+        }
+
+    stdout = (cp.stdout or "").strip()
+    stderr = (cp.stderr or "").strip()
+    if cp.returncode != 0:
+        msg_bits = [f"{lang} workspace metadata probe failed (rc={cp.returncode})"]
+        if stderr:
+            msg_bits.append(f"stderr={stderr[:300]}")
+        elif stdout:
+            msg_bits.append(f"stdout={stdout[:300]}")
+        return {
+            "applicable": True,
+            "language": lang,
+            "status": "fail",
+            "code": code,
+            "message": "; ".join(msg_bits),
+            "command": cmd,
+            "returncode": cp.returncode,
+            "stdout_excerpt": stdout[:300],
+            "stderr_excerpt": stderr[:300],
+        }
+
+    package_count = 0
+    if lang == "go":
+        package_count = len([ln for ln in stdout.splitlines() if ln.strip()])
+
+    return {
+        "applicable": True,
+        "language": lang,
+        "status": "ok",
+        "command": cmd,
+        "returncode": cp.returncode,
+        "package_count": package_count,
+        "stdout_excerpt": stdout[:300],
+        "stderr_excerpt": stderr[:300],
+    }
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="gt-run-proof")
     ap.add_argument("--source-root", required=False, default="/work")
@@ -701,10 +779,12 @@ def main(argv=None) -> int:
     tracker.complete("env_validation")
 
     dep_manifest = os.path.join(a.out, "dep_store_manifest.json")
+    proof_language = (a.lang or "").strip().lower()
     if os.path.exists(dep_manifest):
         try:
             with open(dep_manifest, encoding="utf-8") as fh:
                 dm = json.load(fh)
+            proof_language = ((dm.get("language") or proof_language or "")).strip().lower()
             try:
                 import dep_store_manifest as _dsm
             except ImportError:
@@ -775,6 +855,32 @@ def main(argv=None) -> int:
                      "GT_MODELS_ROOT": os.environ.get("GT_MODELS_ROOT", os.path.join(GT_HOME, "models")),
                      "GT_SOURCE_ROOT": work, "GT_GRAPH_DB": graph,
                      "GT_LSP_CERT": cert_lsp, "GT_GRAPH_CERT": cert_graph, "GT_EMBEDDER_CERT": cert_emb})
+
+    metadata_probe = probe_workspace_metadata(proof_language, work, base_env)
+    if metadata_probe.get("applicable"):
+        if metadata_probe.get("status") != "ok":
+            return tracker.fail(
+                "workspace_metadata",
+                str(metadata_probe.get("code") or "WORKSPACE_METADATA_FAIL"),
+                str(metadata_probe.get("message") or "workspace metadata probe failed"),
+                language=proof_language,
+                command=metadata_probe.get("command"),
+                returncode=metadata_probe.get("returncode"),
+                stdout_excerpt=metadata_probe.get("stdout_excerpt"),
+                stderr_excerpt=metadata_probe.get("stderr_excerpt"),
+            )
+        tracker.complete(
+            "workspace_metadata",
+            language=proof_language,
+            command=metadata_probe.get("command"),
+            package_count=metadata_probe.get("package_count"),
+        )
+    else:
+        tracker.complete(
+            "workspace_metadata",
+            language=proof_language or None,
+            skipped_reason=metadata_probe.get("reason"),
+        )
 
     # 1. graph build (FTS5 enforced at index time under GT_REQUIRE_FTS5)
     if _run([_gt_index_bin(), "-root", work, "-output", graph], base_env) != 0:
