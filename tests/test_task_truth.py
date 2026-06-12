@@ -102,6 +102,43 @@ def test_build_task_truth_writes_json():
         assert truth["patch_hygiene"].get("classification") == "source_fix"
 
 
+def test_task_truth_includes_product_runtime_control_surface():
+    with tempfile.TemporaryDirectory() as jobs:
+        trial = os.path.join(jobs, "run", "task__abc")
+        agent = os.path.join(trial, "agent")
+        os.makedirs(agent, exist_ok=True)
+        with open(os.path.join(trial, "result.json"), "w", encoding="utf-8") as fh:
+            json.dump(
+                {
+                    "n_agent_steps": 4,
+                    "verifier_result": {"rewards": {"reward": 0.0}},
+                    "task_name": "org/task",
+                    "info": {"submission": ""},
+                },
+                fh,
+            )
+        with open(os.path.join(agent, "mini-swe-agent.trajectory.json"), "w", encoding="utf-8") as fh:
+            json.dump(
+                {
+                    "messages": [
+                        {"action": {"command": "sed -n '1,40p' src/app.py"}},
+                        {"action": {"command": "python -c \"open('src/app.py','w').write('def capture_snapshot(): pass')\""}},
+                        {"action": {"command": "pytest tests/test_app.py"}, "observation": "1 passed"},
+                    ]
+                },
+                fh,
+            )
+        truth = tt.build_task_truth(jobs, trial_log="[GT_META] gt_prebuilt_active=True hook_hash_match=True")
+        runtime = truth["runtime_control"]
+        assert runtime["phase_policy_version"].startswith("gt.runtime.context_policy.")
+        assert runtime["trajectory_state_summary"]["edited_files"] == ["src/app.py"]
+        assert runtime["trajectory_state_summary"]["test_evidence_seen"] is True
+        assert runtime["obligation_lifecycle_summary"]["version"].startswith("gt.runtime.obligations.")
+        assert runtime["verification_horizon_summary"]["version"].startswith("gt.runtime.verification_horizon.")
+        assert runtime["enforcement_semantics"]["official_verifier_repair"] is False
+        assert runtime["adapter_witness"]["gt_meta_present"] is True
+
+
 def test_reconciled_substrate_verdict_shape():
     truth = {
         "instance_id": "abs-module-cache-flags",

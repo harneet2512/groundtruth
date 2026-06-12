@@ -926,7 +926,7 @@ def _find_task_truth_path(task_dir: Path) -> Optional[Path]:
 def _resolved_from_task_truth(truth: dict) -> tuple[bool | None, dict]:
     """Prefer reconciled task_truth outcome over raw pier outcome.json (P0-06)."""
     outcome = truth.get("outcome") or {}
-    if "resolved" in outcome:
+    if outcome.get("resolved") is not None:
         return bool(outcome["resolved"]), outcome
     if outcome.get("failure_class") == "RESOLVED":
         return True, outcome

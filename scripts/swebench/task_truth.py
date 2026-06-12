@@ -18,9 +18,16 @@ from typing import Any
 _SCRIPTS = os.path.dirname(__file__)
 if _SCRIPTS not in sys.path:
     sys.path.insert(0, _SCRIPTS)
+_SRC = os.path.abspath(os.path.join(_SCRIPTS, "..", "..", "src"))
+if _SRC not in sys.path:
+    sys.path.insert(0, _SRC)
 
 from artifact_resolver import brief_provenance, resolve_trial_artifacts  # noqa: E402
 from reconcile import reconcile_graph_handoff as reconcile_graph_handoff  # noqa: E402
+from groundtruth.runtime.context_policy import POLICY_VERSION as PHASE_POLICY_VERSION  # noqa: E402
+from groundtruth.runtime.obligations import OBLIGATION_VERSION  # noqa: E402
+from groundtruth.runtime.trajectory_state import Turn, derive_phase, derive_state  # noqa: E402
+from groundtruth.runtime.verification_horizon import HORIZON_VERSION  # noqa: E402
 
 __all__ = ["build_task_truth", "write_task_truth", "reconcile_graph_handoff"]
 
@@ -89,6 +96,115 @@ def _patch_hygiene_from_artifacts(artifacts: dict[str, str | None]) -> dict:
         patch = str((d.get("info") or {}).get("submission") or "")
     ph = _load_patch_hygiene()
     return ph.classify_patch(patch)
+
+
+def _first_str(*values: Any) -> str:
+    for value in values:
+        if isinstance(value, str) and value:
+            return value
+        if isinstance(value, dict):
+            for key in ("command", "cmd", "content", "text", "output", "observation"):
+                v = value.get(key)
+                if isinstance(v, str) and v:
+                    return v
+    return ""
+
+
+def _turns_from_mini_trajectory(path: str | None) -> list[Turn]:
+    data = _load_json(path or "") or {}
+    raw = data.get("messages") or data.get("trajectory") or data.get("steps") or []
+    if not isinstance(raw, list):
+        return []
+    turns: list[Turn] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        action = item.get("action") or item.get("tool_call") or {}
+        result = item.get("result") or item.get("observation") or item.get("response") or {}
+        command = _first_str(
+            item.get("command"),
+            item.get("cmd"),
+            action,
+            item.get("content") if item.get("role") == "assistant" else "",
+        )
+        observation = _first_str(
+            item.get("observation"),
+            item.get("output"),
+            result,
+            item.get("content") if item.get("role") != "assistant" else "",
+        )
+        full = _first_str(item.get("full_observation"), item.get("content"), observation)
+        if command or observation or full:
+            turns.append(Turn(command=command, observation=observation, full_observation=full))
+    return turns
+
+
+def _trajectory_state_summary(artifacts: dict[str, str | None]) -> dict[str, Any]:
+    step_limit_raw = os.environ.get("GT_STEP_LIMIT")
+    try:
+        step_limit = int(step_limit_raw) if step_limit_raw else None
+    except ValueError:
+        step_limit = None
+    turns = _turns_from_mini_trajectory(artifacts.get("mini_trajectory"))
+    state = derive_state(turns, step_limit=step_limit)
+    return {
+        "phase_policy_version": PHASE_POLICY_VERSION,
+        "turns_observed": len(turns),
+        "phase": derive_phase(state).value,
+        "action_count": state.action_count,
+        "step_limit": state.step_limit,
+        "budget_fraction": round(state.budget_fraction, 8),
+        "viewed_files": sorted(state.viewed_files)[:20],
+        "edited_files": sorted(state.edited_files)[:20],
+        "source_edit_count": state.source_edit_count,
+        "test_count": state.test_count,
+        "test_evidence_seen": state.test_evidence_seen,
+        "last_test_failed": state.last_test_failed,
+        "delivered_markers": [
+            {"turn": turn, "marker": marker, "reason": reason}
+            for turn, marker, reason in state.delivered_markers[-20:]
+        ],
+    }
+
+
+def _obligation_lifecycle_summary(obligation_status: dict | None) -> dict[str, Any]:
+    data = obligation_status or {}
+    records = data.get("obligations") or data.get("records") or data.get("snapshot") or []
+    counts: dict[str, int] = {}
+    if isinstance(records, list):
+        for rec in records:
+            if isinstance(rec, dict):
+                status = str(rec.get("status") or "unknown")
+                counts[status] = counts.get(status, 0) + 1
+    return {
+        "version": OBLIGATION_VERSION,
+        "source_present": bool(data),
+        "count": sum(counts.values()),
+        "status_counts": counts,
+    }
+
+
+def _consumption_summary(deep: dict) -> dict[str, Any]:
+    return {
+        "delivered": deep.get("gt_blocks_delivered"),
+        "consumed": deep.get("gt_blocks_consumed"),
+        "verification_followup": deep.get("gt_blocks_verification_followup"),
+        "hard_enforced": deep.get("gt_blocks_hard_enforced"),
+        "enforced": deep.get("gt_blocks_enforced"),
+        "semantics": deep.get("gt_enforcement_semantics"),
+    }
+
+
+def _verification_horizon_summary(deep: dict, verifier_semantics: dict) -> dict[str, Any]:
+    semantics = deep.get("gt_enforcement_semantics") or {}
+    return {
+        "version": HORIZON_VERSION,
+        "summary": deep.get("verification_horizon") or {},
+        "pre_submit_intervention": True,
+        "hard_enforced": bool(semantics.get("hard_enforced")) if isinstance(semantics, dict) else False,
+        "official_verifier_repair": bool(verifier_semantics.get("official_verifier_repair")),
+        "self_verifier_retry": bool(verifier_semantics.get("self_verifier_retry")),
+    }
 
 
 def _truth_authority_map() -> dict[str, str]:
@@ -185,6 +301,11 @@ def build_task_truth(
     if patch_hygiene is None:
         patch_hygiene = _patch_hygiene_from_artifacts(artifacts)
 
+    trajectory_summary = _trajectory_state_summary(artifacts)
+    obligation_summary = _obligation_lifecycle_summary(obligation_status)
+    consumption_summary = _consumption_summary(deep)
+    horizon_summary = _verification_horizon_summary(deep, verifier_semantics)
+
     return {
         "schema": "gt.task_truth.v1",
         "authority": _truth_authority_map(),
@@ -209,6 +330,25 @@ def build_task_truth(
             "gt_blocks_hard_enforced": deep.get("gt_blocks_hard_enforced"),
             "gt_blocks_enforced": deep.get("gt_blocks_enforced"),
             "gt_enforcement_semantics": deep.get("gt_enforcement_semantics"),
+        },
+        "trajectory_state": trajectory_summary,
+        "runtime_control": {
+            "phase_policy_version": PHASE_POLICY_VERSION,
+            "trajectory_state_summary": trajectory_summary,
+            "obligation_lifecycle_summary": obligation_summary,
+            "verification_horizon_summary": horizon_summary,
+            "consumption_summary": consumption_summary,
+            "enforcement_semantics": {
+                "pre_submit_intervention": horizon_summary["pre_submit_intervention"],
+                "hard_enforced": horizon_summary["hard_enforced"],
+                "official_verifier_repair": horizon_summary["official_verifier_repair"],
+                "self_verifier_retry": horizon_summary["self_verifier_retry"],
+            },
+            "adapter_witness": {
+                "gt_prebuilt_active": signal.get("gt_prebuilt_active"),
+                "hook_hash_match": signal.get("hook_hash_match"),
+                "gt_meta_present": signal.get("gt_meta_present"),
+            },
         },
         "outcome": {
             "reward": signal.get("reward"),

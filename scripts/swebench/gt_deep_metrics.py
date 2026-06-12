@@ -1111,7 +1111,7 @@ def build(task: str, results_dir: str, log_path: str = "",
     }
     if truth_data:
         outcome_block = truth_data.get("outcome") or {}
-        if "resolved" in outcome_block:
+        if outcome_block.get("resolved") is not None:
             traj["resolved"] = bool(outcome_block["resolved"])
         elif outcome_block.get("failure_class") == "RESOLVED":
             traj["resolved"] = True
@@ -1185,6 +1185,8 @@ def build(task: str, results_dir: str, log_path: str = "",
         "has_patch": verdict["has_patch"],
         "failure_class": verdict.get("failure_class", ""),
         "outcome_authority": verdict.get("outcome_authority", ""),
+        "task_truth_path": truth_path if truth_data else None,
+        "runtime_control": (truth_data.get("runtime_control") if truth_data else None),
         # --- graph-derived (TASK 2) ---
         "graph_db_path": graph["graph_db_path"],
         "graph_nodes": d8(graph["graph_nodes"]),

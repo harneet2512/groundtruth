@@ -20,7 +20,11 @@ def test_build_prefers_task_truth_failure_class():
                 "failure_class": "INFRA",
                 "resolved": False,
                 "in_resolved_denominator": False,
-            }
+            },
+            "runtime_control": {
+                "phase_policy_version": "gt.runtime.context_policy.v1",
+                "enforcement_semantics": {"hard_enforced": False},
+            },
         }
         with open(os.path.join(td, "task_truth.json"), "w", encoding="utf-8") as fh:
             json.dump(truth, fh)
@@ -33,3 +37,4 @@ def test_build_prefers_task_truth_failure_class():
         assert payload["failure_class"] == "INFRA"
         assert payload["outcome_authority"] == "task_truth.json"
         assert payload["resolved"] is False
+        assert payload["runtime_control"]["phase_policy_version"] == "gt.runtime.context_policy.v1"
