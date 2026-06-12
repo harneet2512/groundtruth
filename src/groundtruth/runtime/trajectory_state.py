@@ -54,7 +54,10 @@ _TEST_RUNNER_RE = re.compile(
     r"|jest\b|mocha\b|vitest\b|rspec\b|mvn\b.*\btest\b|gradlew?\b.*\btest\b)",
     re.I,
 )
-_TEST_PASS_RE = re.compile(r"(test result: ok\b|\b\d+ passed\b|\b\d+ passing\b|^OK\b|^PASS\b)", re.I | re.M)
+_TEST_PASS_RE = re.compile(
+    r"(test result: ok\b|\b\d+ passed\b|\b\d+ passing\b|^OK\b|^PASS\b|BUILD SUCCESS)",
+    re.I | re.M,
+)
 _TEST_FAIL_RE = re.compile(r"(\bFAILED\b|\bAssertionError\b|\b[1-9]\d* failed\b|--- FAIL:|test result: FAILED)", re.I)
 _ENV_FAIL_RE = re.compile(r"(ModuleNotFoundError|No module named|ImportError|command not found|No matching distribution)", re.I)
 
@@ -72,9 +75,11 @@ def command_event(command: str, observation: str = "") -> Event | None:
     if _TEST_RUNNER_RE.search(command or ""):
         return Event.TEST_RESULT
     if files:
-        if re.search(r"(cat|sed|grep|rg|less|head|tail|Get-Content|Select-String)", command or "", re.I):
+        if re.search(r"\b(apply_patch|python[\d.]*\s+-c|writeFile|open\()", command or "", re.I):
+            return Event.POST_EDIT
+        if re.search(r"(?:^|[;&|]\s*)(cat|sed|grep|rg|less|head|tail|Get-Content|Select-String)\b", command or "", re.I):
             return Event.POST_VIEW
-        if re.search(r"(apply_patch|python[\d.]*\s+-c|cat\s*>|>>?|writeFile|open\()", command or "", re.I):
+        if re.search(r"(?:^|[;&|]\s*)(?:cat\b.*>|.*>>)", command or "", re.I):
             return Event.POST_EDIT
     return None
 
@@ -157,4 +162,3 @@ def detect_events(prev: TrajectoryState, cur: TrajectoryState) -> set[Event]:
     if derive_phase(cur) == Phase.SUBMIT:
         events.add(Event.PRE_SUBMIT)
     return events
-
