@@ -2,7 +2,7 @@
 
 ## STATUS: ARCHITECTURE-FIRST LIPI REPAIR PASS COMPLETE
 
-Current audited HEAD: `ce0947c2`
+Current audited HEAD: `b40ee15b`
 
 New architecture-first docs:
 
@@ -44,7 +44,7 @@ need a new live run to populate regenerated artifacts.
 
 ## STATUS: SUBSTRATE BOUNDARY CLEANED — PROOF SWEEP POLICY DEDUPED — LIVE RE-PROOF BLOCKED ON SUBSTRATE REBUILD
 
-Branch: `gt-trial` (proof-sweep/runtime boundary synced through `ce0947c2`)
+Branch: `gt-trial` (proof-sweep/runtime boundary synced through `b40ee15b`)
 Triage run: `27387470440`
 Prior: CP011–015 @ `df4c37c5`; tenpack `27386082651` failed at substrate proof
 
