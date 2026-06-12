@@ -2,13 +2,15 @@
 
 ## STATUS: ARCHITECTURE-FIRST LIPI REPAIR PASS COMPLETE
 
-Current audited HEAD: `323af3c7`
+Current audited HEAD: `ce0947c2`
 
 New architecture-first docs:
 
 - `.claude/reports/runs/validation_27367976952/LIPI_64_ITEM_CLOSURE_AUDIT_20260612.md`
 - `.claude/reports/runs/validation_27367976952/GT_GT_DESIRED_VS_CURRENT_GAP_AUDIT_20260612.md`
 - `.claude/reports/runs/validation_27367976952/SUBSTRATE_BOUNDARY_LIPI_GO_RUST_20260612.md`
+- `.claude/reports/runs/validation_27367976952/CHECKPOINT_PRODUCT_RUNTIME_CONTROL_PLANE_20260612.md`
+- `.claude/reports/runs/validation_27367976952/CHECKPOINT_TASK_TRUTH_RUNTIME_CONTROL_20260612.md`
 
 Audit result:
 
@@ -31,13 +33,18 @@ Architecture gaps outside the 64:
 - `ARCH-04` PARTIAL: oracle event payload hash/actionability metadata added; full cross-surface schema remains.
 - `ARCH-05` CLOSED: obligation lifecycle now distinguishes `tested`, `satisfied`, and `contradicted`.
 - `ARCH-06` CLOSED: enforcement metrics are hard-block-only; verification follow-up is separate.
+- `ARCH-07` IMPROVED: product runtime control-plane modules now own phase/context,
+  budget, graph-to-action, verification horizon, and obligation lifecycle behavior;
+  DeepSWE delegates to them as adapter glue.
+- `ARCH-08` IMPROVED: `task_truth.json` now carries runtime-control summaries and
+  deep metrics forwards that surface instead of hiding it.
 
 Do not run tenpack until `P0-01` is green on rebuilt substrate. The repaired rows still
 need a new live run to populate regenerated artifacts.
 
 ## STATUS: SUBSTRATE BOUNDARY CLEANED — PROOF SWEEP POLICY DEDUPED — LIVE RE-PROOF BLOCKED ON SUBSTRATE REBUILD
 
-Branch: `gt-trial` (proof-sweep/runtime boundary synced through `323af3c7`)
+Branch: `gt-trial` (proof-sweep/runtime boundary synced through `ce0947c2`)
 Triage run: `27387470440`
 Prior: CP011–015 @ `df4c37c5`; tenpack `27386082651` failed at substrate proof
 
