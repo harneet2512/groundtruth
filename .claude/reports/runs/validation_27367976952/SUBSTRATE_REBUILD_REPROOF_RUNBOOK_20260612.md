@@ -157,6 +157,11 @@ If it still fails, separate:
 3. rust-analyzer still incompatible with task toolchain
 4. proc-macro / linker boundary still incomplete
 
+Current code improvement:
+
+- `dep_store_manifest.json` now records `stores.rust_src` keyed to the active toolchain,
+  so "rustup copied" and "usable rust-src exists" are no longer conflated.
+
 ## Minimal success evidence
 
 The re-proof is only meaningful if the artifact set proves all of this:

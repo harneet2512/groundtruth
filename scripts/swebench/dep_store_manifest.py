@@ -7,6 +7,7 @@ fail-closed when a language requires a store that is missing or empty.
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import sys
@@ -39,6 +40,48 @@ def _dir_stats(path: str | Path) -> dict[str, Any]:
     }
 
 
+def _find_rust_src(rustup_host: str | Path, active_toolchain: str = "") -> dict[str, Any]:
+    root = Path(rustup_host)
+    if not root.is_dir():
+        return {
+            "path": str(root),
+            "exists": False,
+            "file_count": 0,
+            "total_bytes": 0,
+            "active_toolchain": active_toolchain or None,
+            "source_in_task_image": None,
+        }
+    rel = os.path.join("lib", "rustlib", "src", "rust", "library")
+    candidates: list[Path] = []
+    if active_toolchain:
+        target = root / "toolchains" / active_toolchain / rel
+        stats = _dir_stats(target)
+        stats["active_toolchain"] = active_toolchain or None
+        stats["source_in_task_image"] = None
+        if stats.get("exists") and int(stats.get("file_count") or 0) > 0:
+            return stats
+        return stats
+    candidates.extend(
+        Path(p) for p in glob.glob(str(root / "toolchains" / "*" / rel))
+    )
+    seen: set[str] = set()
+    for cand in candidates:
+        key = str(cand)
+        if key in seen:
+            continue
+        seen.add(key)
+        stats = _dir_stats(cand)
+        if stats.get("exists") and int(stats.get("file_count") or 0) > 0:
+            stats["active_toolchain"] = active_toolchain or None
+            stats["source_in_task_image"] = None
+            return stats
+    return {
+        **_dir_stats(root / "toolchains" / "*" / rel),
+        "active_toolchain": active_toolchain or None,
+        "source_in_task_image": None,
+    }
+
+
 def build_manifest(
     *,
     language: str,
@@ -48,7 +91,17 @@ def build_manifest(
     cargo_source: str,
     rustup_host: str,
     rustup_source: str,
+    rust_toolchain: str = "",
 ) -> dict[str, Any]:
+    rust_src = _find_rust_src(rustup_host, rust_toolchain)
+    if rustup_source and rust_src.get("exists"):
+        active_toolchain = rust_src.get("active_toolchain")
+        if active_toolchain:
+            rust_src["source_in_task_image"] = (
+                f"{rustup_source}/toolchains/{active_toolchain}/lib/rustlib/src/rust/library"
+            )
+        else:
+            rust_src["source_in_task_image"] = f"{rustup_source}/toolchains/*/lib/rustlib/src/rust/library"
     return {
         "schema": SCHEMA,
         "language": language,
@@ -65,6 +118,7 @@ def build_manifest(
                 "source_in_task_image": rustup_source or None,
                 **_dir_stats(rustup_host),
             },
+            "rust_src": rust_src,
         },
     }
 
@@ -85,7 +139,7 @@ def validate_manifest(manifest: dict[str, Any]) -> list[str]:
             )
 
     if lang == "rust":
-        for key in ("cargo", "rustup"):
+        for key in ("cargo", "rustup", "rust_src"):
             st = stores.get(key) or {}
             if not st.get("exists") or int(st.get("file_count") or 0) == 0:
                 problems.append(
@@ -113,6 +167,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--cargo-source", default="")
     ap.add_argument("--rustup-host", default="/tmp/gt/deps/rustup")
     ap.add_argument("--rustup-source", default="")
+    ap.add_argument("--rust-toolchain", default="")
     ap.add_argument("--validate-only", action="store_true")
     args = ap.parse_args(argv)
 
@@ -131,6 +186,7 @@ def main(argv: list[str] | None = None) -> int:
             cargo_source=args.cargo_source,
             rustup_host=args.rustup_host,
             rustup_source=args.rustup_source,
+            rust_toolchain=args.rust_toolchain,
         )
         write_manifest(args.out, manifest)
 

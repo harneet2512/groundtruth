@@ -830,6 +830,7 @@ jobs:
           [ -n "$CARGO_SRC" ] || echo "no Cargo home copied from task image"
           # Missing rust-src must fail closed via the manifest/proof path; do not
           # mutate the task image here to provision toolchain components.
+          ACTIVE_RUST_TOOLCHAIN="$(docker exec gtsrc sh -lc 'rustup show active-toolchain 2>/dev/null | awk "{print \$1}" | tr -d "\r"' || true)"
           RUSTUP_SRC=""
           for CAND in \
             "$(docker exec gtsrc sh -lc 'echo ${RUSTUP_HOME:-$HOME/.rustup}' | tr -d '\r')" \
@@ -846,6 +847,7 @@ jobs:
             --gomodcache-host /tmp/gt/deps/gomodcache --gomodcache-source "$GOMOD_SRC" \
             --cargo-host /tmp/gt/deps/cargo --cargo-source "$CARGO_SRC" \
             --rustup-host /tmp/gt/deps/rustup --rustup-source "$RUSTUP_SRC" \
+            --rust-toolchain "$ACTIVE_RUST_TOOLCHAIN" \
             || { echo "DEP_STORE_MANIFEST_FAIL: required dep store missing for ${{ matrix.language }}" | tee -a trial_output.log; exit 1; }
 
           # Run provenance: the task base commit = the materialized repo's HEAD (docker cp
@@ -934,7 +936,7 @@ jobs:
               -e GT_REQUIRE_LSP=1 -e GT_REQUIRE_FULL_STACK=1 -e GT_ISSUE_FILE=/work_issue.txt \
               -e GT_LSP_READY_BUDGET_S_OVERRIDE="${GT_LSP_READY_BUDGET_S_OVERRIDE:-}" \
               -e GOPROXY=off -e GONOSUMCHECK=1 -e CARGO_HOME=/root/.cargo \
-              -e RUSTUP_HOME=/root/.rustup -e RUSTUP_TOOLCHAIN="$(docker exec gtsrc sh -lc 'rustup show active-toolchain 2>/dev/null | awk "{print \$1}" | tr -d "\r"' || true)" \
+              -e RUSTUP_HOME=/root/.rustup -e RUSTUP_TOOLCHAIN="$ACTIVE_RUST_TOOLCHAIN" \
               -e PATH="/root/.cargo/bin:/opt/gt/bin:/opt/gt/node/bin:/opt/gt/python/bin:/opt/gt/jre/bin:/opt/gt/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
               -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 -e HF_DATASETS_OFFLINE=1 \
               -e GT_GATES_DELIVER_ALWAYS="${GT_GATES_DELIVER_ALWAYS:-0}" \
