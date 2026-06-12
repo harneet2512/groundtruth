@@ -828,8 +828,8 @@ jobs:
             fi
           done
           [ -n "$CARGO_SRC" ] || echo "no Cargo home copied from task image"
-          # Ensure rust-src is present for rust-analyzer sysroot (best-effort before copy).
-          docker exec gtsrc sh -lc 'rustup component add rust-src 2>/dev/null || true' || true
+          # Missing rust-src must fail closed via the manifest/proof path; do not
+          # mutate the task image here to provision toolchain components.
           RUSTUP_SRC=""
           for CAND in \
             "$(docker exec gtsrc sh -lc 'echo ${RUSTUP_HOME:-$HOME/.rustup}' | tr -d '\r')" \
@@ -909,15 +909,8 @@ jobs:
           # SHORTEN it; on ts/js (tsserver converts) we KEEP the full budget where it pays.
           # Pure process-env (no src change, no per-server branching) — overridable via the
           # repo var GT_LSP_READY_BUDGET_S (global override) if a future task profile shifts.
-          case "${{ matrix.language }}" in
-            go)                    DEF_BUDGET=30 ;; # gopls needs module cache loaded — give it time
-            rust)                  DEF_BUDGET=45 ;; # rust-analyzer crate indexing is slower
-            typescript|javascript) DEF_BUDGET=20 ;; # tsserver converts — keep full budget
-            *)                     DEF_BUDGET=20 ;; # python (pyright warm, early-exits) + unknown
-          esac
-          # Optional global override from a repo var; vars.* indirection only, never a secret.
-          LSP_BUDGET="${GT_LSP_READY_BUDGET_S_OVERRIDE:-$DEF_BUDGET}"
-          echo "LSP readiness budget for ${{ matrix.language }}: ${LSP_BUDGET}s (early-exits on first real answer)"
+          # Workflow passes only a global override; gt-run-proof owns per-language
+          # readiness budgeting inside the substrate boundary.
           python3 -c "import json,os,time; p={'schema':'gt.run_provenance.v1','task':'${{ matrix.task }}','language':'${{ matrix.language }}','substrate_digest':os.environ.get('GT_SUBSTRATE_DIGEST',''),'git_sha':os.environ.get('GITHUB_SHA',''),'ts':time.time()}; open('/tmp/gt/run_provenance.json','w').write(json.dumps(p,indent=2)+'\n')" 2>/dev/null || true
           # ── gt-run-proof INSIDE the pinned substrate (the ONE portable command, §A) ──
           # Repo mounted /work:ro; artifacts -> /gt_artifacts. All 8 proof flags set so the
@@ -939,7 +932,7 @@ jobs:
               -e GT_PROOF_MODE=1 -e GT_CONTAINERIZED=1 -e GT_RUNTIME_STRATEGY=unified_substrate \
               -e GT_REQUIRE_FTS5=1 -e GT_REQUIRE_EMBEDDER=1 -e GT_FORCE_ONNX_EMBEDDER=1 \
               -e GT_REQUIRE_LSP=1 -e GT_REQUIRE_FULL_STACK=1 -e GT_ISSUE_FILE=/work_issue.txt \
-              -e GT_LSP_READY_BUDGET_S="$LSP_BUDGET" \
+              -e GT_LSP_READY_BUDGET_S_OVERRIDE="${GT_LSP_READY_BUDGET_S_OVERRIDE:-}" \
               -e GOPROXY=off -e GONOSUMCHECK=1 -e CARGO_HOME=/root/.cargo \
               -e RUSTUP_HOME=/root/.rustup -e RUSTUP_TOOLCHAIN="$(docker exec gtsrc sh -lc 'rustup show active-toolchain 2>/dev/null | awk "{print \$1}" | tr -d "\r"' || true)" \
               -e PATH="/root/.cargo/bin:/opt/gt/bin:/opt/gt/node/bin:/opt/gt/python/bin:/opt/gt/jre/bin:/opt/gt/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \

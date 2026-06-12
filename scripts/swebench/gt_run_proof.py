@@ -257,7 +257,7 @@ def _cert_versions(out_dir: str) -> dict:
 
 
 def build_run_manifest(*, graph_db: str, out_dir: str, languages: list, lsp_scope_files: int,
-                       lsp_max_edges: str, gate_rc: int, artifacts_present: dict,
+                       lsp_max_edges: str, lsp_ready_budgets: dict, gate_rc: int, artifacts_present: dict,
                        source_root: str) -> dict:
     """run_manifest.json — v2 = the v1 run-shape + RUN PROVENANCE (Stage-5 audit gap:
     a DeepSWE run could not prove which code produced it). Additive only: no task IDs,
@@ -269,6 +269,7 @@ def build_run_manifest(*, graph_db: str, out_dir: str, languages: list, lsp_scop
         "languages": languages,
         "lsp_scope_files": lsp_scope_files,
         "lsp_max_edges": lsp_max_edges,
+        "lsp_ready_budgets": lsp_ready_budgets,
         "gate_rc": gate_rc,
         "artifacts_present": artifacts_present,
         "source_root": source_root,
@@ -568,6 +569,31 @@ def compute_lsp_max_edges(graph_db: str, *, scoped: bool, env=None) -> int:
     return min(LSP_MAX_EDGES_CEILING, max(floor, dynamic))
 
 
+def lsp_ready_budget_seconds(language: str, env=None) -> int:
+    """Default per-language LSP readiness budget owned by the proof runtime.
+
+    This is substrate policy, not workflow policy. The workflow may pass only an
+    optional global override via ``GT_LSP_READY_BUDGET_S_OVERRIDE``. The per-run
+    env ``GT_LSP_READY_BUDGET_S`` remains the concrete value consumed by
+    ``groundtruth.resolve``.
+    """
+    env = os.environ if env is None else env
+    override = str(env.get("GT_LSP_READY_BUDGET_S_OVERRIDE", "") or "").strip()
+    if override:
+        try:
+            v = int(float(override))
+            if v > 0:
+                return v
+        except ValueError:
+            pass
+    lang = (language or "").strip().lower()
+    if lang == "go":
+        return 30
+    if lang == "rust":
+        return 45
+    return 20
+
+
 def aggregate_lsp_verdicts(lang_verdicts: dict, *, require_lsp: bool, any_success: bool):
     """P1-e polyglot aggregation rule over per-language LSP verdicts -> (ok, failures).
 
@@ -795,15 +821,27 @@ def main(argv=None) -> int:
     open(lsp_metrics_file, "w").close()
     import re as _re
     lsp_ok = False
+    lsp_ready_budgets: dict[str, int] = {}
     lang_verdicts: dict = {}  # per-language verdict (aggregated, none overwritten)
     for lg in reversed(langs):  # least-common first, dominant last
         # Per-language certificate path: NO overwrite — every language's cert persists.
         cert_lsp_lang = os.path.join(a.out, f"lsp_certificate_{lg}.json")
-        lang_env = dict(base_env, GT_LSP_CERT=cert_lsp_lang)
+        budget_s = lsp_ready_budget_seconds(lg, base_env)
+        lsp_ready_budgets[lg] = budget_s
+        lang_env = dict(
+            base_env,
+            GT_LSP_CERT=cert_lsp_lang,
+            GT_LSP_READY_BUDGET_S=str(budget_s),
+        )
         cmd = [sys.executable, "-m", "groundtruth.resolve", "--db", graph, "--root", work,
                "--resolve", "--lang", lg, "--max-edges", max_edges]
         if scope_path:
             cmd += ["--source-files", scope_path]
+        print(
+            f"[gt-run-proof] LSP ready budget for {lg}: {budget_s}s "
+            "(owned by gt-run-proof; override via GT_LSP_READY_BUDGET_S_OVERRIDE)",
+            flush=True,
+        )
         print(f"[gt-run-proof] $ {' '.join(cmd)}", flush=True)
         rr = subprocess.run(cmd, env=lang_env, capture_output=True, text=True)
         sys.stdout.write(rr.stdout or ""); sys.stderr.write(rr.stderr or "")
@@ -935,7 +973,8 @@ def main(argv=None) -> int:
                if a_ != "run_manifest.json"}
     manifest = build_run_manifest(graph_db=graph, out_dir=a.out, languages=langs,
                                   lsp_scope_files=len(scope_files), lsp_max_edges=max_edges,
-                                  gate_rc=rc, artifacts_present=present, source_root=work)
+                                  lsp_ready_budgets=lsp_ready_budgets, gate_rc=rc,
+                                  artifacts_present=present, source_root=work)
     with open(os.path.join(a.out, "run_manifest.json"), "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
     missing = [k for k, v in present.items() if not v]

@@ -39,3 +39,21 @@ def test_proof_progress_includes_memory_heartbeat(tmp_path):
     stage = data["stages"][-1]
     assert stage["stage"] == "env_validation"
     assert "rss_kb" in stage
+
+
+def test_lsp_ready_budget_owned_by_proof_runtime():
+    import importlib.util
+    import sys
+
+    path = _ROOT / "scripts" / "swebench" / "gt_run_proof.py"
+    spec = importlib.util.spec_from_file_location("gt_run_proof_budget_uut", path)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["gt_run_proof_budget_uut"] = mod
+    spec.loader.exec_module(mod)
+
+    assert mod.lsp_ready_budget_seconds("go", {}) == 30
+    assert mod.lsp_ready_budget_seconds("rust", {}) == 45
+    assert mod.lsp_ready_budget_seconds("typescript", {}) == 20
+    assert mod.lsp_ready_budget_seconds("python", {}) == 20
+    assert mod.lsp_ready_budget_seconds("go", {"GT_LSP_READY_BUDGET_S_OVERRIDE": "99"}) == 99

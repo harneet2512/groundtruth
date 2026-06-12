@@ -18,6 +18,7 @@ _spec = importlib.util.spec_from_file_location("gt_run_proof_t", _GRP)
 grp = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(grp)
 _WF = os.path.join(ROOT, ".github", "workflows", "swebench_300task.yml")
+_DEEPSWE_WF = os.path.join(ROOT, ".github", "workflows", "deepswe_full.yml")
 _WRAP = os.path.join(ROOT, "scripts", "swebench", "oh_gt_full_wrapper.py")
 
 
@@ -183,6 +184,20 @@ def test_workflow_substrate_pinned_by_digest():
 def test_workflow_no_per_task_pip_install():
     t = _read(_WF)
     assert "pip install -q onnxruntime tokenizers numpy pyright" not in t
+
+
+def test_workflow_does_not_provision_rust_src_in_task_container():
+    """Substrate/GHA boundary: workflow may extract task dep stores, but must not
+    mutate the task image to install rust-src on the fly."""
+    t = _read(_DEEPSWE_WF)
+    assert "rustup component add rust-src" not in t
+
+
+def test_deepswe_workflow_does_not_own_per_language_lsp_budget_policy():
+    """Per-language readiness budgets belong to gt-run-proof, not workflow shell."""
+    t = _read(_DEEPSWE_WF)
+    assert 'GT_LSP_READY_BUDGET_S="$LSP_BUDGET"' not in t
+    assert "GT_LSP_READY_BUDGET_S_OVERRIDE" in t
 
 
 # ── OH wrapper consumes the artifacts (does not rebuild a divergent graph) ────
