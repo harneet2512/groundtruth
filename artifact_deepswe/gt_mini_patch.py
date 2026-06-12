@@ -44,6 +44,14 @@ import re
 import subprocess
 import sys
 
+# Ensure /opt/gt/src is on sys.path so groundtruth.runtime.* imports resolve.
+# The .pth bootstrap loads this module at Python startup BEFORE the substrate's
+# src/ directory is necessarily on the path. Without this, every import from
+# groundtruth.runtime.* fails with ModuleNotFoundError in the agent container.
+_GT_SRC = os.path.join(os.environ.get("GT_HOME", "/opt/gt"), "src")
+if os.path.isdir(_GT_SRC) and _GT_SRC not in sys.path:
+    sys.path.insert(0, _GT_SRC)
+
 from groundtruth.runtime.action_translation import translate_to_action as _product_translate_to_action
 from groundtruth.runtime.context_budget import ContextBudgeter as _ProductContextBudgeter
 from groundtruth.runtime.ledger import Ledger as _ProductLedger
