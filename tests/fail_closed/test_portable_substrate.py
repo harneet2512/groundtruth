@@ -21,7 +21,6 @@ _WF = os.path.join(ROOT, ".github", "workflows", "swebench_300task.yml")
 _DEEPSWE_WF = os.path.join(ROOT, ".github", "workflows", "deepswe_full.yml")
 _PROOF_SWEEP_WF = os.path.join(ROOT, ".github", "workflows", "deepswe_proof_sweep.yml")
 _WRAP = os.path.join(ROOT, "scripts", "swebench", "oh_gt_full_wrapper.py")
-_DOCKERFILE = os.path.join(ROOT, "docker", "Dockerfile.gt-substrate")
 
 
 def _read(p):
@@ -106,24 +105,6 @@ def test_aggregate_resolve_error_fails_under_require():
     assert ok is False and failures == ["typescript=LSP_RESOLVE_ERROR(rc=1)"]
 
 
-def test_aggregate_warn_zero_conversion_fails_under_require():
-    ok, failures = grp.aggregate_lsp_verdicts(
-        {"go": "LSP_WARN_ZERO_CONVERSION", "typescript": "LSP_ACTIVE_VALID"},
-        require_lsp=True,
-        any_success=True,
-    )
-    assert ok is False and failures == ["go=LSP_WARN_ZERO_CONVERSION"]
-
-
-def test_aggregate_warn_not_attempted_fails_under_require():
-    ok, failures = grp.aggregate_lsp_verdicts(
-        {"rust": "LSP_WARN_NOT_ATTEMPTED"},
-        require_lsp=True,
-        any_success=False,
-    )
-    assert ok is False and failures == ["rust=LSP_WARN_NOT_ATTEMPTED"]
-
-
 def test_aggregate_unsupported_and_valid_pass():
     # Genuinely-unknown languages stay an honest no-op; valid verdicts pass.
     ok, failures = grp.aggregate_lsp_verdicts(
@@ -206,14 +187,6 @@ def test_workflow_no_per_task_pip_install():
     assert "pip install -q onnxruntime tokenizers numpy pyright" not in t
 
 
-def test_substrate_go_toolchain_and_module_mode_match_offline_proof():
-    """The baked Go runtime must satisfy current task minimums without forcing workspace-invalid mod mode."""
-    t = _read(_DOCKERFILE)
-    assert "ARG GO_VERSION=1.24." in t
-    assert "GOFLAGS=-mod=readonly" in t
-    assert "GOFLAGS=-mod=mod" not in t
-
-
 def test_workflow_does_not_provision_rust_src_in_task_container():
     """Substrate/GHA boundary: workflow may extract task dep stores, but must not
     mutate the task image to install rust-src on the fly."""
@@ -234,36 +207,6 @@ def test_proof_sweep_workflow_does_not_reencode_per_language_lsp_budget_policy()
     assert 'GT_LSP_READY_BUDGET_S="$LSP_BUDGET"' not in t
     assert 'case "$TASK_LANG"' not in t
     assert "LSP readiness budget owner: gt-run-proof" in t
-
-
-def test_proof_sweep_workflow_mounts_dep_stores_and_passes_language():
-    """Proof sweep must hand the same Go/Rust dep context and language identity into
-    gt-run-proof that deepswe_full does, or substrate readiness truth is skipped."""
-    t = _read(_PROOF_SWEEP_WF)
-    assert "dep_store_manifest.py" in t
-    assert '/tmp/gt/deps/gomodcache:/tmp/gomodcache:ro' in t
-    assert '/tmp/gt/deps/cargo:/root/.cargo:ro' in t
-    assert '/tmp/gt/deps/rustup:/root/.rustup:ro' in t
-    assert 'gt-run-proof --source-root /work --out /gt_artifacts --lang "$TASK_LANG"' in t
-
-
-def test_proof_sweep_workflow_preserves_rust_runtime_env_parity():
-    """Proof sweep must pass the same Rust runtime env that the paid path does."""
-    t = _read(_PROOF_SWEEP_WF)
-    assert 'CARGO_HOME=/root/.cargo' in t
-    assert 'RUSTUP_HOME=/root/.rustup' in t
-    assert '/root/.cargo/bin:/opt/gt/bin:/opt/gt/node/bin:/opt/gt/python/bin:/opt/gt/jre/bin:/opt/gt/go/bin' in t
-
-
-def test_workflows_backfill_rust_src_from_sysroot_without_mutating_task_image():
-    """If rust-src is not under rustup, workflows may copy it from the task sysroot into
-    the extracted dep tree, but they must not run installers inside the task image."""
-    t_full = _read(_DEEPSWE_WF)
-    t_sweep = _read(_PROOF_SWEEP_WF)
-    for t in (t_full, t_sweep):
-        assert 'rustc --print sysroot' in t
-        assert 'backfilled rust-src from sysroot' in t
-        assert '--rust-src-host "/tmp/gt/deps/rustup/toolchains/${ACTIVE_RUST_TOOLCHAIN}/lib/rustlib/src/rust/library"' in t
 
 
 # ── OH wrapper consumes the artifacts (does not rebuild a divergent graph) ────

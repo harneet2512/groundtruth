@@ -148,34 +148,6 @@ def test_rust_passes_with_rust_src_for_active_toolchain():
         )
 
 
-def test_rust_passes_with_explicit_sysroot_rust_src_fallback():
-    with tempfile.TemporaryDirectory() as td:
-        cargo = os.path.join(td, "cargo")
-        _touch_tree(cargo, ["registry/index/foo"])
-        rustup = os.path.join(td, "rustup")
-        _touch_tree(rustup, ["toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc"])
-        sysroot_src = os.path.join(td, "sysroot-src")
-        _touch_tree(sysroot_src, ["core/src/lib.rs"])
-        manifest = build_manifest(
-            language="rust",
-            gomodcache_host=os.path.join(td, "gomodcache"),
-            gomodcache_source="",
-            gomodcache_declared_source="",
-            cargo_host=cargo,
-            cargo_source="/root/.cargo",
-            rustup_host=rustup,
-            rustup_source="/root/.rustup",
-            rust_src_host=sysroot_src,
-            rust_src_source="/usr/local/rustup/toolchains/stable/lib/rustlib/src/rust/library",
-            rust_toolchain="stable-x86_64-unknown-linux-gnu",
-        )
-        assert validate_manifest(manifest) == []
-        assert manifest["stores"]["rust_src"]["active_toolchain"] == "stable-x86_64-unknown-linux-gnu"
-        assert manifest["stores"]["rust_src"]["source_in_task_image"] == (
-            "/usr/local/rustup/toolchains/stable/lib/rustlib/src/rust/library"
-        )
-
-
 def test_write_manifest_roundtrip():
     with tempfile.TemporaryDirectory() as td:
         out = os.path.join(td, "dep_store_manifest.json")

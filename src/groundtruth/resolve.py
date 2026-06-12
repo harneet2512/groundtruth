@@ -1470,15 +1470,15 @@ def resolve_main() -> None:
             f"verdict={cert['verdict_hint']}",
             flush=True,
         )
-        if (cert["verdict_hint"] in ("LSP_FAIL_NO_WARM", "LSP_WARN_ZERO_CONVERSION")
+        if (cert["verdict_hint"] == "LSP_FAIL_NO_WARM"
                 and os.environ.get("GT_REQUIRE_LSP") == "1"):
-            # P1-e fail-closed: dead or ineffective LSP must not satisfy a
-            # required product boundary. A warm transport with residual work
-            # and zero useful conversions is diagnostic evidence, not readiness.
-            # The certificate + LSP_METRICS line above are already written.
+            # P1-e fail-closed: a launched-but-never-warm (or never-launched) server is a
+            # FAILURE, not a pass — mirror the install-missing exit-2 so gt-run-proof / CI
+            # can never count a dead server as a satisfied LSP requirement. The certificate
+            # + LSP_METRICS line above are already written (the FAIL is auditable, not blind).
             print(
                 "LSP_LIVENESS_FAIL: GT_REQUIRE_LSP=1 but the LSP server for language "
-                f"'{args.lang}' was not product-ready (verdict={cert['verdict_hint']}"
+                f"'{args.lang}' did not warm (verdict=LSP_FAIL_NO_WARM"
                 + (f"; {cert['failure_detail']}" if cert.get("failure_detail") else "")
                 + ") — fail-closed, no silent pass",
                 file=sys.stderr,

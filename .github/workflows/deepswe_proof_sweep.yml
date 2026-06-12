@@ -32,7 +32,7 @@ on:
         required: false
         default: ""
   push:
-    branches: [gt-trial, "codex/**"]
+    branches: [gt-trial]
     paths: [".github/workflows/deepswe_proof_sweep.yml"]
 
 permissions:
@@ -241,68 +241,12 @@ jobs:
           ROOT=${ROOT:-/testbed}
           echo "repo root in task image: $ROOT"
           rm -rf /tmp/gt/src && mkdir -p /tmp/gt/src
-          mkdir -p /tmp/gt/deps/gomodcache /tmp/gt/deps/cargo /tmp/gt/deps/rustup
           if ! docker cp "gtsrc:$ROOT/." /tmp/gt/src; then
             echo "SRC_EXTRACT_FAIL: docker cp from $ROOT failed"
             echo "FAIL_CLASS=SRC_EXTRACT_FAIL" >> "$GITHUB_ENV"
             docker rm -f gtsrc 2>/dev/null || true
             exit 0
           fi
-          GOMOD_SRC=""
-          GOMOD_DECLARED="$(docker exec gtsrc sh -lc 'go env GOMODCACHE 2>/dev/null' | tr -d '\r')"
-          for CAND in \
-            "$GOMOD_DECLARED" \
-            "/root/go/pkg/mod" "/home/user/go/pkg/mod" "/go/pkg/mod"; do
-            [ -n "$CAND" ] || continue
-            if docker exec gtsrc test -d "$CAND" 2>/dev/null; then
-              docker cp "gtsrc:${CAND}/." /tmp/gt/deps/gomodcache 2>/dev/null && GOMOD_SRC="$CAND" && break
-            fi
-          done
-          [ -n "$GOMOD_SRC" ] || echo "no Go module cache copied from task image"
-          CARGO_SRC=""
-          for CAND in \
-            "$(docker exec gtsrc sh -lc 'echo ${CARGO_HOME:-$HOME/.cargo}' | tr -d '\r')" \
-            "/root/.cargo" "/home/user/.cargo"; do
-            [ -n "$CAND" ] || continue
-            if docker exec gtsrc test -d "$CAND" 2>/dev/null; then
-              docker cp "gtsrc:${CAND}/." /tmp/gt/deps/cargo 2>/dev/null && CARGO_SRC="$CAND" && break
-            fi
-          done
-          [ -n "$CARGO_SRC" ] || echo "no Cargo home copied from task image"
-          ACTIVE_RUST_TOOLCHAIN="$(docker exec gtsrc sh -lc 'rustup show active-toolchain 2>/dev/null | awk "{print \$1}" | tr -d "\r"' || true)"
-          RUST_SYSROOT="$(docker exec gtsrc sh -lc 'rustc --print sysroot 2>/dev/null' | tr -d '\r')"
-          RUSTUP_SRC=""
-          RUST_SRC_SRC=""
-          for CAND in \
-            "$(docker exec gtsrc sh -lc 'echo ${RUSTUP_HOME:-$HOME/.rustup}' | tr -d '\r')" \
-            "/root/.rustup" "/home/user/.rustup"; do
-            [ -n "$CAND" ] || continue
-            if docker exec gtsrc test -d "$CAND" 2>/dev/null; then
-              docker cp "gtsrc:${CAND}/." /tmp/gt/deps/rustup 2>/dev/null && RUSTUP_SRC="$CAND" && break
-            fi
-          done
-          [ -n "$RUSTUP_SRC" ] || echo "no rustup copied from task image"
-          if [ -n "$ACTIVE_RUST_TOOLCHAIN" ] && [ -n "$RUST_SYSROOT" ] \
-             && [ ! -d "/tmp/gt/deps/rustup/toolchains/$ACTIVE_RUST_TOOLCHAIN/lib/rustlib/src/rust/library" ]; then
-            TASK_RUST_SRC="${RUST_SYSROOT%/}/lib/rustlib/src/rust/library"
-            if docker exec gtsrc test -d "$TASK_RUST_SRC" 2>/dev/null; then
-              mkdir -p "/tmp/gt/deps/rustup/toolchains/$ACTIVE_RUST_TOOLCHAIN/lib/rustlib/src/rust/library"
-              if docker cp "gtsrc:${TASK_RUST_SRC}/." "/tmp/gt/deps/rustup/toolchains/$ACTIVE_RUST_TOOLCHAIN/lib/rustlib/src/rust/library" 2>/dev/null; then
-                RUST_SRC_SRC="$TASK_RUST_SRC"
-                echo "backfilled rust-src from sysroot: $TASK_RUST_SRC"
-              fi
-            fi
-          fi
-          python3 scripts/swebench/dep_store_manifest.py \
-            --out /tmp/gt/out/dep_store_manifest.json \
-            --language "$TASK_LANG" \
-            --gomodcache-host /tmp/gt/deps/gomodcache --gomodcache-source "$GOMOD_SRC" --gomodcache-declared-source "$GOMOD_DECLARED" \
-            --cargo-host /tmp/gt/deps/cargo --cargo-source "$CARGO_SRC" \
-            --rustup-host /tmp/gt/deps/rustup --rustup-source "$RUSTUP_SRC" \
-            --rust-src-host "/tmp/gt/deps/rustup/toolchains/${ACTIVE_RUST_TOOLCHAIN}/lib/rustlib/src/rust/library" --rust-src-source "$RUST_SRC_SRC" \
-            --rust-toolchain "$ACTIVE_RUST_TOOLCHAIN" \
-            || { echo "DEP_STORE_MANIFEST_FAIL: required dep store missing for $TASK_LANG"; echo "FAIL_CLASS=DEP_STORE_MANIFEST_FAIL" >> "$GITHUB_ENV"; docker rm -f gtsrc 2>/dev/null || true; exit 0; }
-          echo "ACTIVE_RUST_TOOLCHAIN=$ACTIVE_RUST_TOOLCHAIN" >> "$GITHUB_ENV"
           docker rm -f gtsrc 2>/dev/null || true
           # Free disk before the substrate pull (the task image is no longer needed).
           docker rmi "$IMG" "${PULL_SOURCE:-$IMG}" 2>/dev/null || true
@@ -352,9 +296,6 @@ jobs:
           docker run --rm \
             -v "/tmp/gt/src:/work:ro" \
             -v "/tmp/gt/out:/gt_artifacts" \
-            -v "/tmp/gt/deps/gomodcache:/tmp/gomodcache:ro" \
-            -v "/tmp/gt/deps/cargo:/root/.cargo:ro" \
-            -v "/tmp/gt/deps/rustup:/root/.rustup:ro" \
             -e GT_PROOF_MODE=1 \
             -e GT_CONTAINERIZED=1 \
             -e GT_RUNTIME_STRATEGY=unified_substrate \
@@ -365,11 +306,7 @@ jobs:
             -e GT_REQUIRE_FULL_STACK=1 \
             -e GT_GIT_COMMIT="${{ github.sha }}" \
             -e GT_SUBSTRATE_DIGEST="$GT_SUBSTRATE_DIGEST" \
-            -e CARGO_HOME=/root/.cargo \
-            -e RUSTUP_HOME=/root/.rustup \
-            -e RUSTUP_TOOLCHAIN="${ACTIVE_RUST_TOOLCHAIN:-}" \
-            -e PATH="/root/.cargo/bin:/opt/gt/bin:/opt/gt/node/bin:/opt/gt/python/bin:/opt/gt/jre/bin:/opt/gt/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-            "$GT_SUBSTRATE_DIGEST" gt-run-proof --source-root /work --out /gt_artifacts --lang "$TASK_LANG" \
+            "$GT_SUBSTRATE_DIGEST" gt-run-proof --source-root /work --out /gt_artifacts \
             > /tmp/gt/out/proof_run.log 2>&1
           RC=$?
           set -e

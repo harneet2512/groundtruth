@@ -27,7 +27,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Go toolchain (only to build the static, hermetic gt-index)
-ARG GO_VERSION=1.24.4
+ARG GO_VERSION=1.22.5
 RUN curl -fsSL https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz | tar -xz -C /usr/local
 ENV PATH="/usr/local/go/bin:${PATH}"
 
@@ -209,7 +209,7 @@ ENV GT_HOME=/opt/gt \
     JAVA_HOME=/opt/gt/jre \
     GOROOT=/opt/gt/go \
     GOTOOLCHAIN=local \
-    GOFLAGS=-mod=readonly \
+    GOFLAGS=-mod=mod \
     GOPROXY=off \
     GOSUMDB=off \
     GOPATH=/tmp/gopath \
