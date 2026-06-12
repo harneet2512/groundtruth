@@ -1427,7 +1427,11 @@ def _evidence_body(kind: str, rel: str, root: str) -> str:
         for w in _resolved_witnesses_for_file(con, rel, root, max_each=2):
             arrow = "called by" if w["direction"] == "caller" else "calls"
             loc = f"{w['file_path']}:{w['line']}" if w["line"] else w["file_path"]
-            sym = w["symbol"] or "?"
+            # D5 fix: for "caller" direction, the subject of "X called by -> Y"
+            # must be the CALLEE (the function in THIS file being called), not
+            # the caller.  w["target"] = callee name for caller direction;
+            # w["symbol"] = callee name for callee direction (already correct).
+            sym = (w["target"] if w["direction"] == "caller" else w["symbol"]) or "?"
             snippet = f" `{w['code']}`" if w.get("code") else ""
             ln = f"[WITNESS] {sym} {arrow} -> {loc}{snippet}".rstrip()
             if ln not in lines:

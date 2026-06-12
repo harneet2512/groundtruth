@@ -24,8 +24,9 @@ ACTION_TEMPLATES = {
     ),
 }
 
-# D5 fix: [WITNESS] X called by -> Y means Y is the CALLER of X.
-# Template must say "changing X risks breaking caller at Y", not "inspect X at Y".
+# D5 fix: [WITNESS] X called by -> Y means X is the CALLEE (the function in the
+# viewed file), Y is where the CALLER lives.  Producer (gt_mini_patch.py) emits
+# w["target"] as X for caller direction so the template binds the correct symbol.
 _WITNESS_CALLED_BY_RE = re.compile(
     r"\[WITNESS\]\s+(\S+)\s+called\s+by\s+->\s+(.+)")
 _WITNESS_CALLS_RE = re.compile(
