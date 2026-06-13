@@ -156,12 +156,18 @@ def _count_residual_method_edges(
     is capped by ``--max-edges``): the metric needs the true count of the
     population the LSP precision pass is meant to convert.
 
-    "Method-call edge" is encoded structurally and language-agnostically as a
-    ``name_match`` CALLS edge whose TARGET node is a ``Method`` — i.e. ``obj.m()``
-    whose receiver type was never resolved, so the call was matched by name across
-    classes. Per CLAUDE.md (conan-17123 trace) ~98% of name_match edges are method
-    calls; this is the population graph.db cannot trust until LSP/propagation
-    resolves the receiver type. The count is scoped to ``source_files`` (the issue
+    The residual population is encoded structurally and LANGUAGE-AGNOSTICALLY as
+    every ``name_match`` CALLS edge to an indexed target — the call whose target was
+    matched by NAME across files/classes because the receiver/import type was never
+    resolved, so the edge is a guess, not a fact. This deliberately does NOT filter
+    on ``tgt.label = 'Method'``: that filter was a Python-only artifact (only the
+    Python spec labels ``obj.m()`` targets ``Method``; the Go/JS/TS/Rust specs label
+    them ``Function``), so on a non-Python graph it counted ~0 residual and stamped a
+    FALSE ``no_op_valid`` pass while hundreds of unresolved name_match edges remained
+    (aiomonitor: ~475 residual read as 0). Per CLAUDE.md (conan-17123 trace) ~98% of
+    name_match edges are unresolved method/cross-file calls regardless of label —
+    this is the population graph.db cannot trust until LSP/propagation resolves the
+    target. The count is scoped to ``source_files`` (the issue
     subgraph) when given, else the whole graph — this is what makes a capped or
     un-scoped pass *detectable*: ``resolved/residual`` drops when only a slice of a
     large residual was touched.
@@ -186,8 +192,7 @@ def _count_residual_method_edges(
         "SELECT COUNT(*) FROM edges e "
         "JOIN nodes src ON e.source_id = src.id "
         "JOIN nodes tgt ON e.target_id = tgt.id "
-        "WHERE e.type = 'CALLS' AND e.resolution_method = 'name_match' "
-        "AND tgt.label = 'Method'"
+        "WHERE e.type = 'CALLS' AND e.resolution_method = 'name_match'"
     )
     params: list = []
     if language:
