@@ -257,6 +257,41 @@ def _cert_versions(out_dir: str) -> dict:
     return out
 
 
+def commit_parity_status() -> dict:
+    """Commit parity between the code the SUBSTRATE was BUILT from
+    (GT_SUBSTRATE_BUILD_COMMIT, baked at docker build) and the code this RUN claims
+    (GT_GIT_COMMIT, the workflow checkout sha). Integration runs the baked /opt/gt/src,
+    so a divergence means the result is attributed to a commit whose code did not run.
+    Recorded-or-null, never fabricated. status: 'match' | 'mismatch' | 'unknown'."""
+    build = _env_or_none("GT_SUBSTRATE_BUILD_COMMIT")
+    run = _env_or_none("GT_GIT_COMMIT")
+    if not build or not run or build in ("dev", "unknown"):
+        status = "unknown"
+    elif build == run:
+        status = "match"
+    else:
+        status = "mismatch"
+    return {"substrate_build_commit": build, "run_commit": run, "status": status}
+
+
+def assert_commit_parity() -> tuple[bool, str]:
+    """Fail-closed commit-parity gate. Under GT_REQUIRE_COMMIT_PARITY=1 a substrate built
+    from a DIFFERENT commit than the run claims is a stale-substrate legitimacy violation
+    -> (False, detail). Default (flag unset) is RECORD-ONLY: the manifest still carries
+    commit_parity so drift is never SILENT, but a pinned substrate that legitimately lags
+    during iteration does not abort. Returns (ok, detail)."""
+    st = commit_parity_status()
+    if os.environ.get("GT_REQUIRE_COMMIT_PARITY") != "1":
+        return True, f"commit_parity={st['status']} (gate off; record-only)"
+    if st["status"] == "mismatch":
+        return False, (
+            f"GT_COMMIT_PARITY_MISMATCH: substrate built from {st['substrate_build_commit']} "
+            f"but the run claims {st['run_commit']} — a stale substrate cannot run under "
+            "GT_REQUIRE_COMMIT_PARITY=1; rebuild + repin the substrate at the run commit."
+        )
+    return True, f"commit_parity={st['status']}"
+
+
 def build_run_manifest(*, graph_db: str, out_dir: str, languages: list, lsp_scope_files: int,
                        lsp_max_edges: str, lsp_ready_budgets: dict, gate_rc: int, artifacts_present: dict,
                        source_root: str) -> dict:
@@ -277,6 +312,11 @@ def build_run_manifest(*, graph_db: str, out_dir: str, languages: list, lsp_scop
         "out": out_dir,
         # ── provenance: which code / substrate / task repo produced this run ──
         "gt_git_commit": _gt_git_commit(),
+        # The commit the SUBSTRATE was BUILT from (baked ENV) — the code Integration
+        # actually runs is this /opt/gt/src, not the workflow checkout. Divergence from
+        # gt_git_commit = a stale substrate (see commit_parity_status / GT_REQUIRE_COMMIT_PARITY).
+        "substrate_build_commit": _env_or_none("GT_SUBSTRATE_BUILD_COMMIT"),
+        "commit_parity": commit_parity_status(),
         "substrate_digest": _env_or_none("GT_SUBSTRATE_DIGEST"),
         "task_repo_commit": _env_or_none("GT_TASK_REPO_COMMIT"),
         "runtime_flags": {k: os.environ.get(k) for k in PROOF_FLAG_KEYS},
@@ -795,6 +835,13 @@ def main(argv=None) -> int:
         assert_container_boundary("gt-run-proof")
     except Exception as e:
         return tracker.fail("env_validation", "FINAL_PIPELINE_HOST_SPLIT_FAIL", str(e))
+    # D (2026-06-13): commit-parity gate. Integration runs the BAKED /opt/gt/src, so a
+    # substrate built from a different commit than the run claims is a stale-substrate
+    # legitimacy violation. Default is RECORD-ONLY (run_manifest.commit_parity carries the
+    # status — drift is never silent); GT_REQUIRE_COMMIT_PARITY=1 makes a mismatch fail closed.
+    _cp_ok, _cp_detail = assert_commit_parity()
+    if not _cp_ok:
+        return tracker.fail("env_validation", "GT_COMMIT_PARITY_MISMATCH", _cp_detail)
     tracker.complete("env_validation")
 
     dep_manifest = os.path.join(a.out, "dep_store_manifest.json")

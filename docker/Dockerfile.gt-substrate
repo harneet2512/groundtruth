@@ -213,7 +213,15 @@ COPY --from=build /opt/gt /opt/gt
 # stderr and exits(2) BEFORE the handshake, so `initialize` read EOF). Fixed in
 # src/groundtruth/lsp/config.py; stderr is now captured + surfaced by lsp/client.py.
 COPY --from=build /usr/local/go /opt/gt/go
-ENV GT_HOME=/opt/gt \
+# Bake the GT BUILD commit into the final image (ARGs do not cross stages, so it is
+# re-declared here). This lets the running container PROVE which GT commit it was built
+# from — the code Integration actually runs comes from this baked /opt/gt/src, not the
+# workflow checkout. The proof records it as run_manifest.substrate_build_commit and (under
+# GT_REQUIRE_COMMIT_PARITY) fails closed when it diverges from the run commit (GT_GIT_COMMIT)
+# — a stale substrate can no longer run silently (D/2026-06-13).
+ARG GT_COMMIT_SHA=dev
+ENV GT_SUBSTRATE_BUILD_COMMIT=${GT_COMMIT_SHA} \
+    GT_HOME=/opt/gt \
     GT_INDEX_BINARY=/opt/gt/bin/gt-index \
     GT_PYTHON=/opt/gt/python/bin/python3 \
     GT_MODELS_ROOT=/opt/gt/models \
