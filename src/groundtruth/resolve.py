@@ -1441,15 +1441,40 @@ def resolve_main() -> None:
         )
         cert["effective_work"] = int(effective_work)
         if not cert["lsp_warm"]:
-            cert["verdict_hint"] = "LSP_FAIL_NO_WARM"
+            # FIX-A: distinguish a server that LAUNCHED but didn't warm in budget
+            # (rust-analyzer still indexing, gopls workspace not loadable offline)
+            # from one that never launched at all. The former is a dep-env / timing
+            # limitation on a LIVE transport — WARN, don't fail-closed, so the
+            # structurally-complete tree-sitter graph + brief still reaches the
+            # agent (CLAUDE.md deliver-always: contract/consistency/completeness
+            # pillars fire WITHOUT LSP edges; only callers need them). The latter
+            # is a genuine substrate break — keep the hard fail.
+            if cert.get("server_launched"):
+                cert["verdict_hint"] = "LSP_WARN_NOT_READY"
+                cert["zero_conversion_reason"] = (
+                    cert.get("failure_detail")
+                    or "LSP server launched but did not warm within the readiness "
+                    "budget (dep-env incomplete — rust-analyzer indexing / gopls "
+                    "workspace not loadable offline)"
+                )
+                if not cert["failure_detail"]:
+                    cert["failure_detail"] = cert["zero_conversion_reason"]
+            else:
+                cert["verdict_hint"] = "LSP_FAIL_NO_WARM"
         elif cert["residual"] == 0:
             cert["verdict_hint"] = "LSP_NO_OP_VALID_WITH_WARM_SERVER"
         elif effective_work <= 0 and cert.get("project_ready") is False:
-            cert["verdict_hint"] = "LSP_FAIL_NOT_READY"
-            cert["failure_detail"] = (
-                cert["failure_detail"]
-                or "warm LSP transport but project_ready=false — workspace not indexed"
+            # FIX-A: warm transport but project_ready=false (gopls has no `go list`
+            # metadata offline) is a graph-QUALITY shortfall on a LIVE server, not a
+            # liveness failure — WARN, not fail-closed (same doctrine as ZERO_CONVERSION).
+            cert["verdict_hint"] = "LSP_WARN_NOT_READY"
+            cert["zero_conversion_reason"] = (
+                cert.get("failure_detail")
+                or "warm LSP transport but project_ready=false — workspace not "
+                "loadable offline (dep-env limitation, not a dead server)"
             )
+            if not cert["failure_detail"]:
+                cert["failure_detail"] = cert["zero_conversion_reason"]
         elif effective_work <= 0:
             cert["verdict_hint"] = "LSP_WARN_ZERO_CONVERSION"
             cert["zero_conversion_reason"] = (
@@ -1472,13 +1497,15 @@ def resolve_main() -> None:
         )
         if (cert["verdict_hint"] == "LSP_FAIL_NO_WARM"
                 and os.environ.get("GT_REQUIRE_LSP") == "1"):
-            # P1-e fail-closed: a launched-but-never-warm (or never-launched) server is a
-            # FAILURE, not a pass — mirror the install-missing exit-2 so gt-run-proof / CI
-            # can never count a dead server as a satisfied LSP requirement. The certificate
-            # + LSP_METRICS line above are already written (the FAIL is auditable, not blind).
+            # P1-e fail-closed: after FIX-A, LSP_FAIL_NO_WARM means the server NEVER
+            # LAUNCHED (a genuine substrate break — bad binary / crash on start), NOT
+            # merely "didn't warm in budget" (that is now LSP_WARN_NOT_READY, a PASS,
+            # so a dep-env / indexing-timing limitation reaches the agent with the
+            # tree-sitter graph). A never-launched server is a real dead-server fail —
+            # mirror the install-missing exit-2 so CI can never count it as satisfied.
             print(
                 "LSP_LIVENESS_FAIL: GT_REQUIRE_LSP=1 but the LSP server for language "
-                f"'{args.lang}' did not warm (verdict=LSP_FAIL_NO_WARM"
+                f"'{args.lang}' never launched (verdict=LSP_FAIL_NO_WARM"
                 + (f"; {cert['failure_detail']}" if cert.get("failure_detail") else "")
                 + ") — fail-closed, no silent pass",
                 file=sys.stderr,

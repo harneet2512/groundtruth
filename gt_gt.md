@@ -529,6 +529,38 @@ produced confounded results. The gates are opt-in; the benchmark workflows arm t
 >   `GT_FORBID_PREBUILT_GRAPH`), `language_distribution` (real per-language node counts from
 >   graph.db), `graph_db_sha256`, `cert_versions` — every field recorded-or-null, never guessed.
 
+> **UPDATED (2026-06-13, FIX-A — LSP liveness verdict refined so Go/Rust reach the agent).**
+> Supersedes the `GT_REQUIRE_LSP=1 → exit 2 on … LSP_FAIL_NO_WARM` bullet above **for the
+> launched-but-not-warm case**. Root cause (`GHA_NONPYTHON_FAILURE_AUDIT.md`): pyright/tsserver
+> resolve `textDocument/definition` from source text alone, so Python/TS/JS always warm; gopls
+> needs `go list` metadata and rust-analyzer needs `cargo metadata`+`rust-src`, which the eval
+> images don't reliably ship offline — so a **live, correct** Go/Rust server lands on
+> `LSP_FAIL_NOT_READY` (gopls, `project_ready=false`) or cold `LSP_FAIL_NO_WARM` (RA still
+> indexing) and the fail-closed aggregation killed the task **before pier ran**. Python
+> structurally cannot reach those verdicts → the asymmetry was the whole "non-Python dies" gap.
+> The refinement (the existing `LSP_WARN_ZERO_CONVERSION`-is-a-PASS doctrine, extended):
+> - **The liveness axis is `server_launched`, not `lsp_warm`.** A server that **launched** but
+>   hasn't warmed in budget (cold RA; gopls workspace not loadable offline) → `LSP_WARN_NOT_READY`,
+>   a **PASS** — a graph-QUALITY shortfall on a LIVE transport, not a liveness failure. The
+>   structurally-complete tree-sitter graph + brief still reach the agent (CLAUDE.md deliver-always:
+>   items 1/2/4 fire without LSP edges; only callers need verified edges).
+> - **Hard `LSP_FAIL_NO_WARM` (exit 2 under `GT_REQUIRE_LSP=1`) is reserved for a server that
+>   NEVER LAUNCHED** (`server_launched=False` — bad binary / crash on start = a genuine substrate
+>   break). `LSP_INSTALL_MISSING` (baked server absent on PATH) stays a hard fail. The cert still
+>   records the real zero-conversion + WHY (`failure_detail`) — correct-or-quiet, never silently
+>   green.
+> - **RC-4:** the Go/Rust-only `workspace_metadata` pre-flight (`go list`/`cargo metadata`) is now
+>   recorded as a completed-with-warn stage, not a `tracker.fail` — it no longer front-load-kills a
+>   Go/Rust task before indexing.
+> - **The decision lives ONCE** (`resolve.py` sets `verdict_hint` from `server_launched`);
+>   `foundational_gates._classify_lsp` and `gt_run_proof.aggregate_lsp_verdicts` **consume** the
+>   hint (the gate's `server_launched`/`warm` branch is a consistent mirror for hint-less legacy
+>   line certs only — no drift). Env-provisioning that helps the server actually warm
+>   (FIX-B Go cache/proxy reconcile, FIX-C baked rust-src fallback) lives on the **GHA surface**,
+>   never in product logic. Proof: 42 fail_closed tests green (never-launched still exits 2;
+>   launched-not-warm WARNs); full LSP/gate/proof sweep 464 pass. Full LIPI:
+>   `GHA_FIXES_LIPI_20260613T0640Z.md`.
+
 ---
 
 ## 8. Hardcoded vs Dynamic — every fixed value, with its reason

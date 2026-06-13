@@ -162,20 +162,34 @@ def test_genuinely_unknown_language_no_ops_exit_0(tmp_path):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# P1-e — FAIL_NO_WARM fails closed under GT_REQUIRE_LSP=1 (launched != warm)
+# P1-e — LSP fail-closed under GT_REQUIRE_LSP=1.
+# FIX-A (2026-06-13): the hard fail is NEVER-LAUNCHED (server_launched=False = a real
+# substrate defect: binary missing / un-spawnable). A server that LAUNCHED but did not
+# warm in the readiness budget (cold rust-analyzer / gopls still indexing) is a WARN —
+# a live transport with a dep-env/timing limitation, not a dead server — so deliver-always
+# still ships the tree-sitter graph + contract/sibling/cochange (items 1/2/4).
 # ─────────────────────────────────────────────────────────────────────────────
 
+async def _fake_resolve_edges_never_launched(db_path, root, edges, language):
+    """A server that NEVER LAUNCHED (binary un-spawnable) — the hard FAIL_NO_WARM shape."""
+    return {"verified": 0, "corrected": 0, "deleted": 0, "failed": len(edges), "skipped": 0,
+            "server_launched": False, "warm_probe_ok": False,
+            "probe_method": "workspace/symbol", "probe_latency_ms": 0.0,
+            "failure_detail": "launch: server binary did not start"}
+
+
 async def _fake_resolve_edges_no_warm(db_path, root, edges, language):
-    """A server that LAUNCHED but never answered the warm probe (the FAIL_NO_WARM shape)."""
+    """A server that LAUNCHED but never answered the warm probe (FIX-A: the WARN shape)."""
     return {"verified": 0, "corrected": 0, "deleted": 0, "failed": len(edges), "skipped": 0,
             "server_launched": True, "warm_probe_ok": False,
             "probe_method": "workspace/symbol", "probe_latency_ms": 0.0,
             "failure_detail": "warm_probe: server initialized but never answered workspace/symbol"}
 
 
-def _run_resolve_main_inprocess(tmp_path, monkeypatch, *, require_lsp: bool):
-    """Drive resolve_main in-process with a present-but-never-warm server: server binary
-    'installed' (_detect_servers patched) and _resolve_edges returning the no-warm stats."""
+def _run_resolve_main_inprocess(tmp_path, monkeypatch, *, require_lsp: bool, resolver=None):
+    """Drive resolve_main in-process with a patched server: binary 'installed'
+    (_detect_servers patched) and _resolve_edges returning the supplied stats shape
+    (default: never-launched = the hard FAIL_NO_WARM case)."""
     import json as _json
 
     from groundtruth import resolve
@@ -190,7 +204,7 @@ def _run_resolve_main_inprocess(tmp_path, monkeypatch, *, require_lsp: bool):
     else:
         monkeypatch.delenv("GT_REQUIRE_LSP", raising=False)
     monkeypatch.setattr(resolve, "_detect_servers", lambda: {"python": True})
-    monkeypatch.setattr(resolve, "_resolve_edges", _fake_resolve_edges_no_warm)
+    monkeypatch.setattr(resolve, "_resolve_edges", resolver or _fake_resolve_edges_never_launched)
     monkeypatch.setattr(sys, "argv",
                         ["resolve", "--db", db, "--root", str(tmp_path),
                          "--resolve", "--lang", "python"])
@@ -218,13 +232,38 @@ def test_fail_no_warm_exits_nonzero_under_require_lsp(tmp_path, monkeypatch, cap
 
 
 def test_fail_no_warm_without_require_lsp_does_not_exit(tmp_path, monkeypatch, capsys):
-    """Off the flag the same no-warm pass completes (exit 0 / no SystemExit) but the FAIL
-    verdict is still surfaced in the cert + contract line (never silently green)."""
+    """Off the flag the same never-launched pass completes (exit 0 / no SystemExit) but the
+    FAIL verdict is still surfaced in the cert + contract line (never silently green)."""
     rc, cert = _run_resolve_main_inprocess(tmp_path, monkeypatch, require_lsp=False)
     out = capsys.readouterr()
     assert rc is None, f"expected no SystemExit off the flag; got {rc!r} err={out.err!r}"
     assert "verdict=LSP_FAIL_NO_WARM" in out.out
     assert cert is not None and cert["verdict_hint"] == "LSP_FAIL_NO_WARM"
+
+
+def test_launched_not_warm_warns_under_require_lsp(tmp_path, monkeypatch, capsys):
+    """FIX-A: GT_REQUIRE_LSP=1 + a server that LAUNCHED but did not warm in budget must NOT
+    exit nonzero. It is a WARN (live transport, dep-env/timing limit) — the run proceeds and
+    deliver-always ships the tree-sitter graph. This is the path that lets Go/Rust (cold
+    rust-analyzer / gopls indexing) reach the agent instead of dying at the LSP gate."""
+    rc, cert = _run_resolve_main_inprocess(tmp_path, monkeypatch, require_lsp=True,
+                                           resolver=_fake_resolve_edges_no_warm)
+    out = capsys.readouterr()
+    assert rc is None, f"expected no SystemExit (WARN, not fail); got {rc!r} err={out.err!r}"
+    assert "verdict=LSP_WARN_NOT_READY" in out.out
+    assert "LSP_LIVENESS_FAIL" not in out.err           # WARN is not a fail-closed trip
+    assert cert is not None and cert["verdict_hint"] == "LSP_WARN_NOT_READY"
+
+
+def test_launched_not_warm_warns_without_require_lsp(tmp_path, monkeypatch, capsys):
+    """FIX-A: off the flag, a launched-but-not-warm server also completes (exit 0) with the
+    WARN verdict surfaced (never silently green, never a hard fail)."""
+    rc, cert = _run_resolve_main_inprocess(tmp_path, monkeypatch, require_lsp=False,
+                                           resolver=_fake_resolve_edges_no_warm)
+    out = capsys.readouterr()
+    assert rc is None, f"expected no SystemExit; got {rc!r} err={out.err!r}"
+    assert "verdict=LSP_WARN_NOT_READY" in out.out
+    assert cert is not None and cert["verdict_hint"] == "LSP_WARN_NOT_READY"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

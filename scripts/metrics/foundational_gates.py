@@ -340,17 +340,28 @@ def _classify_lsp(cert):
     hinted = str(cert.get("verdict_hint") or "")
     if hinted.startswith("LSP_FAIL_") or hinted == "LSP_INSTALL_MISSING":
         return (hinted, False)
+    # FIX-A: a WARN verdict from resolve.py (warm-but-dep-limited: NOT_READY,
+    # ZERO_CONVERSION, NOT_ATTEMPTED) is a graph-QUALITY shortfall on a LIVE
+    # server, never a liveness failure — PASS, so the tree-sitter graph + brief
+    # reach the agent (CLAUDE.md deliver-always).
+    if hinted.startswith("LSP_WARN_"):
+        return (hinted, True)
     if cert.get("unsupported_reason"):
         # Honest "no server for this language" — explicit, never a fake LSP success.
         # (Only a language with NO entry in LSP_SERVERS reaches here; resolve.py sets
         # unsupported_reason ONLY for genuinely-no-server-exists languages.)
         return ("LSP_UNSUPPORTED_EXPLICIT", True)
     if not cert.get("server_launched"):
+        # Never launched — genuine substrate break (bad binary / crash on start).
         return ("LSP_FAIL_NO_WARM", False)
     warm = (bool(cert.get("lsp_warm")) and bool(cert.get("warm_probe_ok"))
             and float(cert.get("probe_latency_ms", 0.0) or 0.0) > 0.0)
     if not warm:
-        return ("LSP_FAIL_NO_WARM", False)
+        # FIX-A: server LAUNCHED but didn't warm in budget (rust-analyzer still
+        # indexing, gopls workspace not loadable offline). The transport is alive;
+        # the dep env / timing is incomplete — WARN, not fail. Only a never-launched
+        # server (above) is a hard liveness failure.
+        return ("LSP_WARN_NOT_READY", True)
     if cert.get("lsp_finished_at") is None:
         return ("LSP_FAIL_NOT_RUN_BEFORE_SCORING", False)
     if not cert.get("closure_rebuilt_after_lsp"):
@@ -378,8 +389,11 @@ def _classify_lsp(cert):
             + int(cert.get("deleted_edges", 0) or 0)
         )
     if cert.get("project_ready") is False and effective <= 0:
-        # Transport warm but workspace not product-ready (indexing barrier).
-        return ("LSP_FAIL_NOT_READY", False)
+        # FIX-A: transport warm but workspace not product-ready (gopls has no
+        # `go list` metadata offline). This is a graph-QUALITY shortfall on a LIVE
+        # server, not a liveness failure — WARN (PASS), same doctrine as
+        # ZERO_CONVERSION. The structurally-complete tree-sitter graph reaches the agent.
+        return ("LSP_WARN_NOT_READY", True)
     if effective <= 0:
         # Warm server that converted nothing: dep-env limitation when
         # project_ready is true/unknown — transport OK, product not ready.

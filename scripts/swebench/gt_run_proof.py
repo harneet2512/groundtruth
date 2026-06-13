@@ -603,8 +603,16 @@ def aggregate_lsp_verdicts(lang_verdicts: dict, *, require_lsp: bool, any_succes
       * LSP_FAIL_NO_WARM     — server launched (or tried) but never warmed: a
         launched-but-never-warm server is a FAILURE, not a pass;
       * LSP_RESOLVE_ERROR(..)— the resolve pass exited nonzero without a verdict.
-    Genuinely-unknown languages (LSP_UNSUPPORTED_EXPLICIT) and the two valid verdicts
+    Genuinely-unknown languages (LSP_UNSUPPORTED_EXPLICIT) and the valid verdicts
     (LSP_ACTIVE_VALID / LSP_NO_OP_VALID_WITH_WARM_SERVER) are never failures.
+
+    FIX-A: any LSP_WARN_* verdict (NOT_READY / ZERO_CONVERSION / NOT_ATTEMPTED) is a
+    graph-QUALITY shortfall on a LIVE, warm-or-launched server (Go/Rust dep-env
+    incomplete offline), NOT a liveness failure. These do NOT match the failure
+    predicate below, so a Go/Rust task with a warm-but-unproductive server reaches
+    the agent with its tree-sitter graph instead of dying at lsp_pass. Only a
+    NEVER-LAUNCHED server (LSP_FAIL_NO_WARM) or a missing binary (LSP_INSTALL_MISSING)
+    is a hard fail.
 
     Under ``require_lsp`` (GT_REQUIRE_LSP=1): ok=False if ANY known language failed —
     a sibling language succeeding must NOT mask another language's gap — or if no
@@ -864,22 +872,30 @@ def main(argv=None) -> int:
     metadata_probe = probe_workspace_metadata(proof_language, work, base_env)
     if metadata_probe.get("applicable"):
         if metadata_probe.get("status") != "ok":
-            return tracker.fail(
+            # FIX-A/RC-4: the Go/Rust-only workspace-metadata probe is DIAGNOSTIC,
+            # not a hard gate. A `go list` / `cargo metadata` failure offline is a
+            # dep-env limitation (the same one that makes the LSP pass WARN), not a
+            # substrate defect — it must NOT kill the task before the agent runs.
+            # Record it as a completed stage with a warn status so the tree-sitter
+            # graph + brief still reach the agent (consistent with the LSP-pass
+            # WARN-not-fail doctrine). Python never hits this gate; Go/Rust no longer
+            # die on it.
+            tracker.complete(
                 "workspace_metadata",
-                str(metadata_probe.get("code") or "WORKSPACE_METADATA_FAIL"),
-                str(metadata_probe.get("message") or "workspace metadata probe failed"),
                 language=proof_language,
+                status_detail="warn",
+                code=str(metadata_probe.get("code") or "WORKSPACE_METADATA_WARN"),
+                message=str(metadata_probe.get("message") or "workspace metadata probe non-ok (dep-env incomplete offline)"),
                 command=metadata_probe.get("command"),
                 returncode=metadata_probe.get("returncode"),
-                stdout_excerpt=metadata_probe.get("stdout_excerpt"),
-                stderr_excerpt=metadata_probe.get("stderr_excerpt"),
             )
-        tracker.complete(
-            "workspace_metadata",
-            language=proof_language,
-            command=metadata_probe.get("command"),
-            package_count=metadata_probe.get("package_count"),
-        )
+        else:
+            tracker.complete(
+                "workspace_metadata",
+                language=proof_language,
+                command=metadata_probe.get("command"),
+                package_count=metadata_probe.get("package_count"),
+            )
     else:
         tracker.complete(
             "workspace_metadata",

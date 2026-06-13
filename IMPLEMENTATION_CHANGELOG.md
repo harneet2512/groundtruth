@@ -1,3 +1,24 @@
+# Implementation Changelog — Session 2026-06-13 (GHA non-Python fixes A–E)
+
+Root cause + fixes: `GHA_NONPYTHON_FAILURE_AUDIT.md`. LIPI vs the 4 surfaces:
+`GHA_FIXES_LIPI_20260613T0640Z.md`. Goal: stop Go/Rust/TS/JS dying before pier.
+
+| Fix | Surface | File(s) | Change |
+|---|---|---|---|
+| **A** | Product (1) + Substrate (4) | `src/groundtruth/resolve.py`, `scripts/metrics/foundational_gates.py`, `scripts/swebench/gt_run_proof.py` | Liveness axis = `server_launched`. Launched-but-not-warm → `LSP_WARN_NOT_READY` (PASS); never-launched → `LSP_FAIL_NO_WARM` (exit 2). `_classify_lsp` consumes the `verdict_hint` (no re-derivation). `workspace_metadata` pre-flight non-fatal (RC-4). |
+| **B** | GHA (3) | `.github/workflows/deepswe_full.yml` | LSP pass reads the probe-populated **writable** gomodcache offline: `GOFLAGS=-mod=mod` + `GOPROXY=off` + `GOSUMDB=off`. |
+| **C** | GHA (3) | `.github/workflows/deepswe_full.yml` | Rustup mount RW (was `:ro`) + baked-substrate rust-src `docker cp` fallback when the task image ships none. |
+| **D** | Integration (2) | `gt_mini_patch.py`, `gt_agent.py` | Already shipped `faf8c6b1`/`00bd27fd` — `sys.path` + graceful runtime imports. Re-verified. |
+| **E** | Substrate (4) | — | Per-language `env_validation` deferred (latent; build self-test guarantees all 5 baked). |
+
+**Tests:** `tests/fail_closed/{test_lsp_liveness,test_no_fallback_hardening}.py` updated to the new
+desired state (never-launched FAILs; launched-not-warm WARNs) + 3 new WARN tests — 42 pass.
+`tests/test_workspace_metadata_probe.py` updated to `go list -e` contract — 4 pass. LSP/gate/proof
+sweep: 464 pass, 6 skip. **Separation invariant:** the LSP verdict is defined once (resolve.py) and
+consumed by the gate/aggregator — no cross-surface duplication.
+
+---
+
 # Implementation Changelog — Session 2026-05-16
 
 ## Commit: 5f52dca3 — Full flip stack
@@ -89,3 +110,20 @@ changes (BRIEFING.md §3 weights untouched) — this session is benchmark-infra 
 Code-verified locally; **GHA container/DinD wiring UNVALIDATED** — validate 1 task each before paid
 113/300. Operational runbook: `BENCHMARK_RUNBOOK.md`. The 30-task quality verdict is retracted as
 confounded (degraded pipeline). No metrics delta yet — pending the provisioned gated run.
+
+
+---
+
+# Implementation Changelog — Session 2026-06-11 (delivery engine, 5 staged commits)
+
+| Commit | Stage | Files | What |
+|---|---|---|---|
+| 0e1bd371 | S1 sensor | gt_mini_patch.py, gt_oracle_sense.py | TIDE loop_ratio/new_state_rate, TRAJEVAL edit churn, coverage ratios; sensor binds live formulas |
+| ec2c059d | S2 obligation status | gt_oracle.py, gt_mini_patch.py | review-transition status checklist, status-vector dedup, covering test per untested obligation, composite severity |
+| 4beb812a | S3 detectors | gt_mini_patch.py | detect.loop (dynamic median+MAD), detect.coherence_collapse; window-12 loop arm retired on oracle route |
+| 2fcd12c7 | S4 escalation | gt_mini_patch.py, gt_oracle.py | coverage-driven bands (GT_ESC_* channel), V from observed edit->test spans, computed severity |
+| c17271ee | S5 governor+plumbing | gt_mini_patch.py, gt_oracle.py, deepswe_full.yml | failure_persisted FP closure (zero-count/patch-noise/baseline-stash), parity_mode=False corrected replay, heredoc proof, full --ae forwarding |
+
+Research: TIDE arXiv 2602.02196 · TRAJEVAL arXiv 2603.24631 · Beyond Resolution Rates
+arXiv 2604.02547 · SWE-Next arXiv 2603.20691 · Wink arXiv 2602.17037 · Zilberstein 1996 ·
+BATS arXiv 2511.17006 · Rothermel TOSEM 1997 / Ekstazi ISSTA 2015 · Leys 2013 (median+MAD).

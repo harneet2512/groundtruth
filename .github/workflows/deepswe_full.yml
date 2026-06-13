@@ -855,6 +855,28 @@ jobs:
                 || echo "rust-src backfill failed (non-fatal)"
             fi
           fi
+          # FIX-C (2026-06-13): if the task image had NO rust-src anywhere (the copied rustup
+          # AND its sysroot both lack it), fall back to the BAKED substrate's /opt/gt/rustup —
+          # which always ships rust-src (Dockerfile.gt-substrate). Without this, the :ro-removed
+          # but rust-src-less copied rustup still shadows the baked one and rust-analyzer can't
+          # warm. Bounded + non-fatal: FIX-A already keeps the task alive on a cold RA; this only
+          # upgrades graph quality. Uses the same docker-cp-from-image pattern proven above.
+          if [ "${{ matrix.language }}" = "rust" ] && [ -n "$ACTIVE_RUST_TOOLCHAIN" ] \
+             && [ ! -d "/tmp/gt/deps/rustup/toolchains/$ACTIVE_RUST_TOOLCHAIN/lib/rustlib/src/rust/library" ] \
+             && [ -n "${GT_SUBSTRATE_DIGEST:-}" ]; then
+            BAKED_RUST_SRC="$(docker run --rm --entrypoint sh "$GT_SUBSTRATE_DIGEST" -lc \
+              'ls -d /opt/gt/rustup/toolchains/*/lib/rustlib/src/rust/library 2>/dev/null | head -1' | tr -d '\r' || true)"
+            if [ -n "$BAKED_RUST_SRC" ]; then
+              cid="$(docker create "$GT_SUBSTRATE_DIGEST" 2>/dev/null || true)"
+              if [ -n "$cid" ]; then
+                mkdir -p "/tmp/gt/deps/rustup/toolchains/$ACTIVE_RUST_TOOLCHAIN/lib/rustlib/src/rust/library"
+                docker cp "$cid:${BAKED_RUST_SRC}/." "/tmp/gt/deps/rustup/toolchains/$ACTIVE_RUST_TOOLCHAIN/lib/rustlib/src/rust/library" 2>/dev/null \
+                  && echo "FIX-C: backfilled rust-src from BAKED substrate ($BAKED_RUST_SRC)" \
+                  || echo "FIX-C: baked rust-src backfill failed (non-fatal; FIX-A keeps the task alive)"
+                docker rm -f "$cid" >/dev/null 2>&1 || true
+              fi
+            fi
+          fi
           python3 scripts/swebench/dep_store_manifest.py \
             --out /tmp/gt/dep_store_manifest.json \
             --language "${{ matrix.language }}" \
@@ -944,12 +966,13 @@ jobs:
               -v "/tmp/issue.txt:/work_issue.txt:ro" \
               -v "/tmp/gt/deps/gomodcache:/tmp/gomodcache" \
               -v "/tmp/gt/deps/cargo:/root/.cargo:ro" \
-              -v "/tmp/gt/deps/rustup:/root/.rustup:ro" \
+              -v "/tmp/gt/deps/rustup:/root/.rustup" \
               -e GT_PROOF_MODE=1 -e GT_CONTAINERIZED=1 -e GT_RUNTIME_STRATEGY=unified_substrate \
               -e GT_REQUIRE_FTS5=1 -e GT_REQUIRE_EMBEDDER=1 -e GT_FORCE_ONNX_EMBEDDER=1 \
               -e GT_REQUIRE_LSP=1 -e GT_REQUIRE_FULL_STACK=1 -e GT_ISSUE_FILE=/work_issue.txt \
               -e GT_LSP_READY_BUDGET_S_OVERRIDE="${GT_LSP_READY_BUDGET_S_OVERRIDE:-}" \
-              -e GOPROXY=off -e GONOSUMCHECK=1 -e CARGO_HOME=/root/.cargo \
+              -e GOFLAGS=-mod=mod -e GOPROXY=off -e GONOSUMCHECK=1 -e GOSUMDB=off \
+              -e CARGO_HOME=/root/.cargo \
               -e RUSTUP_HOME=/root/.rustup -e RUSTUP_TOOLCHAIN="$ACTIVE_RUST_TOOLCHAIN" \
               -e PATH="/root/.cargo/bin:/opt/gt/bin:/opt/gt/node/bin:/opt/gt/python/bin:/opt/gt/jre/bin:/opt/gt/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
               -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 -e HF_DATASETS_OFFLINE=1 \
