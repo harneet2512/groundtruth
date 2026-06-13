@@ -46,20 +46,13 @@ class TrajectoryState:
 _WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _FILE_RE = re.compile(r"([\w./-]+\.(?:py|go|rs|js|ts|tsx|jsx|java|rb|c|cpp|h|hpp|php|kt|scala|cs))")
 _GT_MARKER_RE = re.compile(r"<(gt-[a-z-]+)(?:\s+reason=['\"]([^'\"]+)['\"])?", re.I)
-_TEST_RUNNER_RE = re.compile(
-    r"(?:python[\d.]*\s+-m\s+(?:pytest|unittest|nose2?|tox)\b"
-    r"|pytest\b|py\.test\b|tox\b|nose2?\b"
-    r"|go\s+test\b|cargo\s+test\b"
-    r"|npm\s+(?:run\s+)?test\b|yarn\s+(?:run\s+)?test\b|pnpm\s+(?:run\s+)?test\b"
-    r"|jest\b|mocha\b|vitest\b|rspec\b|mvn\b.*\btest\b|gradlew?\b.*\btest\b)",
-    re.I,
+# Canonical behavioral patterns — ONE source of truth (audit RED #1, #2).
+from .patterns import (  # noqa: E402
+    TEST_RUNNER_RE as _TEST_RUNNER_RE,
+    TEST_PASS_RE as _TEST_PASS_RE,
+    TEST_FAIL_RE as _TEST_FAIL_RE,
+    ENV_FAIL_RE as _ENV_FAIL_RE,
 )
-_TEST_PASS_RE = re.compile(
-    r"(test result: ok\b|\b\d+ passed\b|\b\d+ passing\b|^OK\b|^PASS\b|BUILD SUCCESS)",
-    re.I | re.M,
-)
-_TEST_FAIL_RE = re.compile(r"(\bFAILED\b|\bAssertionError\b|\b[1-9]\d* failed\b|--- FAIL:|test result: FAILED)", re.I)
-_ENV_FAIL_RE = re.compile(r"(ModuleNotFoundError|No module named|ImportError|command not found|No matching distribution)", re.I)
 
 
 def is_source_path(path: str) -> bool:

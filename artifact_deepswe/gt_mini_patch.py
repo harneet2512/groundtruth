@@ -1962,46 +1962,56 @@ def _l5_nudge(cmd: str, out_text: str = "",
 #   3. an explicit test/assertion FAILURE marker is present (a bare
 #      Traceback / "Error:" is not proof a TEST failed).
 # ---------------------------------------------------------------------------
-_TEST_RUNNER_RE = re.compile(
-    # A `timeout N` / `time` / `env VAR=…` wrapper does not stop a command being
-    # a real test-runner invocation (2026-06-10: boa ran `timeout 60 cargo test`
-    # six times — the governor's common case is exactly the wrapped form).
-    # The timeout wrapper accepts any run of flag/duration tokens so the
-    # kill-after form (`timeout -k 5 60 cargo test`) cannot escape it (LIPI).
-    # A `python[\d.]* <script>.py` prefix is a wrapper ONLY when the next token
-    # is a .py script (G6 Finding 2: `python manage.py test` — Django's
-    # prefixed form — escaped the governor); the runner-shape alternatives
-    # below still decide, so an arbitrary `python script.py` is NOT a runner.
-    r"(?:^|[|&;]\s*)(?:timeout\s+(?:-\S+\s+|\d+\S*\s+)+|time\s+|env\s+(?:\S+=\S+\s+)+"
-    r"|python[\d.]*\s+(?=\S*\.py\b))*(?:"
-    r"python[\d.]*\s+-m\s+(?:pytest|unittest|nose2?|tox)\b"
-    r"|pytest\b|py\.test\b|tox\b|nose2?\b"
-    r"|(?:\S*/)?(?:runtests?|run_tests?)\.py\b"
-    r"|(?:\S*/)?manage\.py\s+test\b"
-    r"|go\s+test\b|cargo\s+test\b"
-    r"|npm\s+(?:run\s+)?test\b|yarn\s+(?:run\s+)?test\b|pnpm\s+(?:run\s+)?test\b"
-    r"|jest\b|mocha\b|vitest\b|rspec\b|rake\s+test\b|phpunit\b|ctest\b"
-    r"|mvn\s+\S*\s*test\b|gradlew?\s+\S*\s*test\b|make\s+(?:check|test)\b"
-    r")", re.I)
-
-_ENV_FAIL_RE = re.compile(
-    r"(ModuleNotFoundError|No module named|ImportError"
-    r"|ERROR: Could not find a version|No matching distribution found"
-    r"|Could not build wheels|subprocess-exited-with-error|metadata-generation-failed"
-    r"|error: command .* failed|fatal error: |compilation terminated"
-    r"|undefined reference to|ld returned \d+ exit status|collect2: error"
-    r"|command not found|is not recognized as an internal or external command"
-    r"|Connection refused|Network is unreachable|Temporary failure in name resolution"
-    r"|CERTIFICATE_VERIFY_FAILED|ReadTimeoutError|ProxyError"
-    r"|error while loading shared libraries|cannot open shared object"
-    r"|ImproperlyConfigured"
-    r"|AttributeError: module '[\w.]+' has no attribute"  # py-version shims (collections.Mapping)
-    r"|errors? during collection|ERROR collecting|Interrupted: \d+ error)", re.I)
-
-_TEST_FAIL_RE = re.compile(
-    r"(\bFAILED\b|\bAssertionError\b|\b\d+ failed\b|\bFAIL: "
-    r"|FAILED \(failures=|--- FAIL:|test result: FAILED"
-    r"|\b\d+ failing\b|Tests:\s+\d+ failed)")
+# Canonical behavioral patterns — import from product (audit RED #1, #2).
+# Graceful fallback keeps the IDENTICAL superset inline so the agent container
+# never diverges even when /opt/gt/src is unavailable at .pth bootstrap.
+try:
+    from groundtruth.runtime.patterns import (
+        TEST_RUNNER_RE as _TEST_RUNNER_RE,
+        ENV_FAIL_RE as _ENV_FAIL_RE,
+        TEST_FAIL_RE as _TEST_FAIL_RE,
+        TEST_PASS_RE as _TEST_PASS_RE,
+        COMPILE_FAIL_RE as _COMPILE_FAIL_RE,
+    )
+except ImportError:
+    _TEST_RUNNER_RE = re.compile(
+        r"(?:^|[|&;]\s*)(?:timeout\s+(?:-\S+\s+|\d+\S*\s+)+|time\s+|env\s+(?:\S+=\S+\s+)+"
+        r"|python[\d.]*\s+(?=\S*\.py\b))*(?:"
+        r"python[\d.]*\s+-m\s+(?:pytest|unittest|nose2?|tox)\b"
+        r"|pytest\b|py\.test\b|tox\b|nose2?\b"
+        r"|(?:\S*/)?(?:runtests?|run_tests?)\.py\b"
+        r"|(?:\S*/)?manage\.py\s+test\b"
+        r"|go\s+test\b|cargo\s+test\b"
+        r"|npm\s+(?:run\s+)?test\b|yarn\s+(?:run\s+)?test\b|pnpm\s+(?:run\s+)?test\b"
+        r"|jest\b|mocha\b|vitest\b|rspec\b|rake\s+test\b|phpunit\b|ctest\b"
+        r"|mvn\s+\S*\s*test\b|gradlew?\s+\S*\s*test\b|make\s+(?:check|test)\b"
+        r")", re.I)
+    _ENV_FAIL_RE = re.compile(
+        r"(ModuleNotFoundError|No module named|ImportError"
+        r"|ERROR: Could not find a version|No matching distribution found"
+        r"|Could not build wheels|subprocess-exited-with-error|metadata-generation-failed"
+        r"|error: command .* failed|fatal error: |compilation terminated"
+        r"|undefined reference to|ld returned \d+ exit status|collect2: error"
+        r"|command not found|is not recognized as an internal or external command"
+        r"|Connection refused|Network is unreachable|Temporary failure in name resolution"
+        r"|CERTIFICATE_VERIFY_FAILED|ReadTimeoutError|ProxyError"
+        r"|error while loading shared libraries|cannot open shared object"
+        r"|ImproperlyConfigured"
+        r"|AttributeError: module '[\w.]+' has no attribute"
+        r"|errors? during collection|ERROR collecting|Interrupted: \d+ error)", re.I)
+    _TEST_FAIL_RE = re.compile(
+        r"(\bFAILED\b|\bAssertionError\b|\b\d+ failed\b|\bFAIL: "
+        r"|FAILED \(failures=|--- FAIL:|test result: FAILED"
+        r"|\b\d+ failing\b|Tests:\s+\d+ failed)")
+    _TEST_PASS_RE = re.compile(
+        r"(test result: ok\b|\b\d+ passed\b|\b\d+ passing\b"
+        r"|^OK\b|^ok\s+\S+\s+[\d.]+s|^PASS$|^PASS\b"
+        r"|OK \(\d+ tests?\)|Tests:\s+\d+ passed|\bpassed\b.*\b0 failed\b)",
+        re.M)
+    _COMPILE_FAIL_RE = re.compile(
+        r"(error\[E\d+\]|error: could not compile|\bSyntaxError\b"
+        r"|cannot find (?:value|function|type|module|symbol)"
+        r"|undefined:\s|\bTS\d{4,}:|compilation error)")
 
 # ---------------------------------------------------------------------------
 # DELIVERY-ENGINE STAGE 5 (2026-06-11) — failure_persisted FP closure.
@@ -2076,18 +2086,6 @@ def _failure_lines(text: str) -> list[str]:
 # logic; correct-or-quiet: any observed result, env error, or compile error
 # keeps it silent.
 # ---------------------------------------------------------------------------
-_TEST_PASS_RE = re.compile(
-    r"(test result: ok\b|\b\d+ passed\b|\b\d+ passing\b"
-    r"|^OK\b|^ok\s+\S+\s+[\d.]+s|^PASS$|^PASS\b"
-    r"|OK \(\d+ tests?\)|Tests:\s+\d+ passed|\bpassed\b.*\b0 failed\b)",
-    re.M)
-
-_COMPILE_FAIL_RE = re.compile(
-    r"(error\[E\d+\]|error: could not compile|\bSyntaxError\b"
-    r"|cannot find (?:value|function|type|module|symbol)"
-    r"|undefined:\s|\bTS\d{4,}:|compilation error)")
-
-
 def _l5_no_test_evidence_nudge(cmd: str, out_text: str) -> str:
     """Fire ONCE when the agent's real test-runner invocations repeatedly
     produce NO observable test result (timeout/SIGKILL mid-build) — before it
