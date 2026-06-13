@@ -93,7 +93,9 @@ except ImportError as _import_err:
         def __init__(self, **kw): pass
     def _product_derive_phase(state): return None
     class _ProductHorizonThresholds:
-        pass
+        def __init__(self, **kwargs):
+            for _k, _v in kwargs.items():
+                setattr(self, _k, _v)
     def _product_composite_severity(base, budget, ratio):
         return float(base) + 2.0 * float(budget) + float(ratio)
     def _product_render_verify_emission(*a, **kw):
@@ -3472,7 +3474,12 @@ def _augment_output(action, out) -> None:
             # the view/edit event bounds relevance (§15.3 VIEW policy): when the
             # trigger IS a resolved post_view/post_edit, waive the empty-focus
             # irrelevant suppression — same contract as edit-bound contract/cochange.
-            _ev_text = _evidence(cmd)
+            try:
+                _ev_text = _evidence(cmd)
+            except Exception:  # noqa: BLE001 — one producer must not kill the gate
+                print("[GT_META] producer_exception kind=l3b.evidence",
+                      file=sys.stderr, flush=True)
+                _ev_text = ""
             _ev_event_bound = bool(
                 _kkind in ("post_view", "post_edit") and _kf and _ev_text)
             cands.append(
@@ -3483,7 +3490,12 @@ def _augment_output(action, out) -> None:
             # blocked a later, non-empty completeness check).
             if (_oracle_edited_rels and _oracle_nonedit_streak >= 3
                     and not _oracle_review_fired):
-                _scb = _scope_completeness_block()
+                try:
+                    _scb = _scope_completeness_block()
+                except Exception:  # noqa: BLE001 — one producer must not kill the gate
+                    print("[GT_META] producer_exception kind=consensus.scope",
+                          file=sys.stderr, flush=True)
+                    _scb = None
                 if _scb:
                     _oracle_review_fired = True
                     cands.append((_SEV_SCOPE, "consensus.scope", _scb, True))
@@ -3500,7 +3512,12 @@ def _augment_output(action, out) -> None:
             _oblig_gate = (_oracle_edited_rels and (
                 _oracle_nonedit_streak >= 3 or _budget_now > 0.90))
             if _oblig_gate:
-                _ob = _obligation_nudge_block()
+                try:
+                    _ob = _obligation_nudge_block()
+                except Exception:  # noqa: BLE001 — one producer must not kill the gate
+                    print("[GT_META] producer_exception kind=spec.obligation",
+                          file=sys.stderr, flush=True)
+                    _ob = None
                 if _ob is not None:
                     cands.append((_ob[0], "spec.obligation", _ob[1], True))
             # L5 nudges: premise-sensed event candidates (latches unchanged).
@@ -3509,24 +3526,54 @@ def _augment_output(action, out) -> None:
             # the oracle route (early-patch-intensity rho=-0.78: never penalize
             # exploration volume; 7/9 fires, 0 consumed, 1 wrong steer).
             _maybe_persist_obligation_status()
-            cands.append((_SEV_STUCK, "l5.stuck",
-                          _l5_nudge(cmd, _orig_out, loop_arm=False,
-                                    scaffold_arm=False), True))
-            cands.append((_SEV_STUCK, "l5.failure",
-                          _l5_failure_nudge(cmd, _orig_out), True))
-            cands.append((_SEV_NUDGE_VERIFY, "l5.no_test",
-                          _l5_no_test_evidence_nudge(cmd, _orig_out), True))
+            try:
+                _l5s = _l5_nudge(cmd, _orig_out, loop_arm=False,
+                                 scaffold_arm=False)
+            except Exception:  # noqa: BLE001 — one producer must not kill the gate
+                print("[GT_META] producer_exception kind=l5.stuck",
+                      file=sys.stderr, flush=True)
+                _l5s = ""
+            cands.append((_SEV_STUCK, "l5.stuck", _l5s, True))
+            try:
+                _l5f = _l5_failure_nudge(cmd, _orig_out)
+            except Exception:  # noqa: BLE001 — one producer must not kill the gate
+                print("[GT_META] producer_exception kind=l5.failure",
+                      file=sys.stderr, flush=True)
+                _l5f = ""
+            cands.append((_SEV_STUCK, "l5.failure", _l5f, True))
+            try:
+                _l5nt = _l5_no_test_evidence_nudge(cmd, _orig_out)
+            except Exception:  # noqa: BLE001 — one producer must not kill the gate
+                print("[GT_META] producer_exception kind=l5.no_test",
+                      file=sys.stderr, flush=True)
+                _l5nt = ""
+            cands.append((_SEV_NUDGE_VERIFY, "l5.no_test", _l5nt, True))
             # DELIVERY-ENGINE STAGE 3 — behavioral detectors over the Stage-1
             # signals (TIDE degenerate loop; TRAJEVAL coherence collapse).
-            _dl = _degenerate_loop_candidate(cmd, _orig_out)
+            try:
+                _dl = _degenerate_loop_candidate(cmd, _orig_out)
+            except Exception:  # noqa: BLE001 — one producer must not kill the gate
+                print("[GT_META] producer_exception kind=detect.loop",
+                      file=sys.stderr, flush=True)
+                _dl = None
             if _dl is not None:
                 cands.append((_dl[0], "detect.loop", _dl[1], True))
             if _kkind == "post_edit" and _kf:
-                _cc = _coherence_collapse_candidate(_krel)
+                try:
+                    _cc = _coherence_collapse_candidate(_krel)
+                except Exception:  # noqa: BLE001 — one producer must not kill the gate
+                    print("[GT_META] producer_exception kind=detect.coherence",
+                          file=sys.stderr, flush=True)
+                    _cc = None
                 if _cc is not None:
                     cands.append((_cc[0], "detect.coherence", _cc[1], True))
             # VERIFICATION HORIZON (Stage C H2): budget-aware self-verify candidate
-            _vh = _verification_horizon_candidate()
+            try:
+                _vh = _verification_horizon_candidate()
+            except Exception:  # noqa: BLE001 — one producer must not kill the gate
+                print("[GT_META] producer_exception kind=verify.horizon",
+                      file=sys.stderr, flush=True)
+                _vh = None
             if _vh is not None:
                 cands.append(_vh)
             _phase = _detect_phase()
@@ -3645,7 +3692,15 @@ def _augment_output(action, out) -> None:
         if ev:
             out["output"] = (out.get("output") or "") + ev
     except Exception:  # noqa: BLE001 -- never break the agent loop
-        pass
+        # LOUD-but-safe: surface the swallowed augment exception to stderr (the
+        # [gt-patch:loaded] discipline) so a silently-dying gate/producer is
+        # diagnosable, while NEVER re-raising (the agent loop must not break).
+        try:
+            import sys as _sys, traceback as _tb
+            print("[GT_META] augment_output_exception=true\n" + _tb.format_exc(),
+                  file=_sys.stderr, flush=True)
+        except Exception:
+            pass
 
 
 def _wrap_execute(orig):

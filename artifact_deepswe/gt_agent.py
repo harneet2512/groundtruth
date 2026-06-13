@@ -195,6 +195,8 @@ _PRODUCT_RUNTIME_FILES = {
         "action_translation.py",
         "verification_horizon.py",
         "obligations.py",
+        "ledger.py",
+        "patterns.py",
     )
 }
 
