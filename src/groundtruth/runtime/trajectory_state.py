@@ -138,8 +138,19 @@ SUBMIT_BUDGET_FRACTION = 0.90
 """Budget fraction above which the phase is SUBMIT (>90% of steps spent)."""
 
 
+_ORIENT_MIN_ACTIONS = 3
+"""Floor for ORIENT when no step budget is known — we do NOT assume a phantom
+300-step budget (no-hardcoded principle). With a known step_limit, ORIENT
+scales as ORIENT_ACTION_FRACTION of it."""
+
+
 def derive_phase(state: TrajectoryState) -> Phase:
-    orient_limit = max(3, int((state.step_limit or 300) * ORIENT_ACTION_FRACTION))
+    # Data-derived: ORIENT is a fraction of the KNOWN budget; absent a budget,
+    # fall back to the minimum (never invent a default budget).
+    orient_limit = (
+        max(_ORIENT_MIN_ACTIONS, int(state.step_limit * ORIENT_ACTION_FRACTION))
+        if state.step_limit else _ORIENT_MIN_ACTIONS
+    )
     if state.action_count <= orient_limit and not state.edited_files:
         return Phase.ORIENT
     if not state.edited_files:

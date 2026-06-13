@@ -94,10 +94,19 @@ def test_verification_horizon_and_budget_and_action_translation():
     assert "hidden_name" not in rendered
 
     budgeter = ContextBudgeter()
-    out1 = budgeter.trim("[WITNESS] foo by -> src/app.ts:10\nInspect src/app.ts", 20)
-    out2 = budgeter.trim("[WITNESS] foo by -> src/app.ts:10\nInspect src/app.ts", 20)
+    payload = "[WITNESS] foo by -> src/app.ts:10\nInspect src/app.ts"
+    out1 = budgeter.trim(payload, 20)
     assert out1.text
-    assert out2.text == ""
+    # D1: trim no longer auto-commits — dedup takes effect only after the gate
+    # confirms delivery via commit_delivered (gate losses must not destroy facts).
+    out_uncommitted = budgeter.trim(payload, 20)
+    assert out_uncommitted.text, "uncommitted facts must NOT be suppressed"
+    budgeter.commit_delivered(out1.pending_lines)
+    out2 = budgeter.trim(payload, 20)
+    assert out2.text == "", "committed facts must be suppressed"
 
-    action = translate_to_action("[WITNESS] foo call by -> src/app.ts:10", Phase.EDIT)
-    assert "Inspect foo at src/app.ts:10" in action
+    # D5: caller direction ("X called by -> loc") names the CALLEE at risk and
+    # keeps the original fact, appending the imperative (never replacing it).
+    action = translate_to_action("[WITNESS] foo called by -> src/app.ts:10", Phase.EDIT)
+    assert "[WITNESS] foo called by" in action
+    assert "Changing foo risks breaking the caller at src/app.ts:10" in action

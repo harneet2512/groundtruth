@@ -189,8 +189,21 @@ def _is_vendored_path(fp: str) -> bool:
     return any(m in base for m in _GENERATED_FILE_MARKERS)
 
 
+def _has_source_ext(fp: str) -> bool:
+    """EDIT-DETECTION gate: any source-extension file, INCLUDING scratch/temp.
+    The agent often stages edits in /tmp/X_new.ts then copies to src — the sensor
+    and governor (source_edit_count, failure_persisted, scaffold_trap) must count
+    these as edit ACTIONS (parity with the recorded corpus). Scratch exclusion
+    belongs ONLY in obligation CREDIT, not in edit detection (the D4 conflation
+    that broke byte-parity + the stage-0 sensor: 77/182 source writes missed)."""
+    low = (fp or "").replace("\\", "/").lower()
+    return low.endswith(tuple(e.lower() for e in _SRC_EXT))
+
+
 def _is_repo_source_path(fp: str) -> bool:
-    """Source edit accounting gate: real source file, not scratch/temp/vendor/generated."""
+    """OBLIGATION-CREDIT gate: a REAL repo source file, not scratch/temp/vendor/
+    generated. Used ONLY where an obligation is credited as 'edited' — writing a
+    /tmp/ scratch file with obligation keywords must NOT falsely credit it."""
     f = "/" + (fp or "").replace("\\", "/").lstrip("./").lstrip("/")
     low = f.lower()
     if any(m in low for m in _SCRATCH_DIR_MARKERS):
@@ -360,7 +373,8 @@ def _src_tokens(text: str) -> list[str]:
     out: list[str] = []
     for tok in re.split(r"\s+", text or ""):
         t = tok.strip("\"'`()<>;|&")
-        if _is_repo_source_path(t) and "*" not in t and "$" not in t:
+        # EDIT DETECTION: broad ext check (incl. /tmp/ staging) — see _has_source_ext.
+        if _has_source_ext(t) and "*" not in t and "$" not in t:
             out.append(t)
     return out
 
@@ -376,10 +390,10 @@ def _edit_target(cmd: str) -> str | None:
     if not cmd:
         return None
     nohd = cmd.split("<<", 1)[0] if "<<" in cmd else cmd  # shell scans exclude heredoc body
-    # 1. redirect whose TARGET is a source file
+    # 1. redirect whose TARGET is a source file (broad — incl. /tmp/ staging)
     for mm in re.finditer(r">>?\s*([^\s'\"<>|&;]+)", nohd):
         t = mm.group(1).strip("\"'`()")
-        if _is_repo_source_path(t) and "*" not in t and "$" not in t:
+        if _has_source_ext(t) and "*" not in t and "$" not in t:
             return t
     # 2. sed -i / tee / apply_patch -> the source-file argument (last source token)
     first = cmd.split("\n", 1)[0]
@@ -390,7 +404,7 @@ def _edit_target(cmd: str) -> str | None:
     # 3. python/node in-place write (scans the FULL cmd incl. heredoc body)
     for rx in (_PY_WRITE_RE, _JS_WRITE_RE):
         m = rx.search(cmd)
-        if m and _is_repo_source_path(m.group(1)) and "*" not in m.group(1):
+        if m and _has_source_ext(m.group(1)) and "*" not in m.group(1):
             return m.group(1)
     return None
 
@@ -3431,14 +3445,16 @@ def _augment_output(action, out) -> None:
                 # edit EVIDENCE tokens (plan §5.2 "edited?"): the edit command
                 # carries the code it writes (sed pattern / heredoc body) —
                 # mirrors gt_oracle_sense.DerivedState.edited_tokens exactly.
+                # D4 obligation-credit gate: tokens credit an obligation as
+                # "edited" ONLY for a real repo-source edit (not /tmp/ staging).
+                # The source_edit_count / oracle_edited_rels above already counted
+                # the edit ACTION (sensor/governor parity); this gates only CREDIT.
                 _edit_toks = {t for t in _BLOCK_TOKEN_RE.findall(cmd or "")
                               if len(t) >= 3}
-                _oracle_edited_tokens.update(_edit_toks)
-                # Stage-1 signal inputs (mirrors DerivedState exactly):
-                # per-file edit evidence (test_coverage_ratio denominator) +
-                # per-file churn (TRAJEVAL coherence; reset on observed PASS).
-                _oracle_edited_tokens_by_file.setdefault(
-                    _krel, set()).update(_edit_toks)
+                if _is_repo_source_path(_kf):
+                    _oracle_edited_tokens.update(_edit_toks)
+                    _oracle_edited_tokens_by_file.setdefault(
+                        _krel, set()).update(_edit_toks)
                 _edit_churn[_krel] = _edit_churn.get(_krel, 0) + 1
                 # H0 (Stage 4): open an edit->test cycle at the FIRST source
                 # edit after the last observed test result.
