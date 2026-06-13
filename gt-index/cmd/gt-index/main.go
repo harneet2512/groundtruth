@@ -611,6 +611,28 @@ func main() {
 	serdeElapsed := time.Since(serdeStart)
 	fmt.Fprintf(os.Stderr, "  Detected %d serialization pair properties, %d structural twin properties in %s\n", serdeCount, twinCount, serdeElapsed.Round(time.Millisecond))
 
+	// ── Pass 4f: IMPORTS edges + PROMOTE property->edges ────────────────
+	// Runs AFTER all node/edge/property passes (nodes are in the DB so the
+	// file-anchor query returns real ids; serde/READS/WRITES/exception/data_flow
+	// properties exist for promotion) and BEFORE Pass 4e (transitive closure) so the
+	// closure reflects the IMPORTS + promoted edges. Both are language-agnostic and
+	// purely additive — they only INSERT edges (and annotate CALLS metadata).
+	importStart := time.Now()
+	fmt.Fprintf(os.Stderr, "Pass 4f: materializing IMPORTS edges...\n")
+	importEdgeCount, impErr := resolver.ResolveImports(db, allImports, fileMap, files)
+	if impErr != nil {
+		// Non-fatal: a failure here must not abort the index. The agent degrades to
+		// the CALLS/closure graph without the file->module IMPORTS hops.
+		log.Printf("WARNING: IMPORTS edge materialization failed: %v", impErr)
+	}
+	promotedCount, promErr := resolver.PromotePropertyEdges(db)
+	if promErr != nil {
+		log.Printf("WARNING: property->edge promotion failed: %v", promErr)
+	}
+	importElapsed := time.Since(importStart)
+	fmt.Fprintf(os.Stderr, "  Pass 4f: %d IMPORTS edges, %d promoted relations in %s\n",
+		importEdgeCount, promotedCount, importElapsed.Round(time.Millisecond))
+
 	// ── Pass 4e: TRANSITIVE CLOSURE (C7 / RF-4) ─────────────────────────
 	// Runs AFTER CALLS resolution + edge persistence (Pass 3) so it sees the
 	// fully-resolved call graph. Computes depth-bounded transitive reach over
@@ -961,6 +983,14 @@ func runIncremental(root, relpath, dbPath string) error {
 		return fmt.Errorf("insert new edges: %w", err)
 	}
 
+	// IMPORTS edges for the reparsed file. Stale IMPORTS edges (source_file=relSlash)
+	// were already deleted by DeleteFileEdgesAndNodesTx upstream, so re-emitting here
+	// converges. Resolves pr.Imports against the in-memory post-reindex snapshot
+	// (filteredNodes/filteredIDs = all DB nodes minus the stale file, plus fresh).
+	if _, impErr := resolver.ResolveImportsTx(tx, pr.Imports, fileMap, filteredNodes, filteredIDs); impErr != nil {
+		log.Printf("WARNING: incremental IMPORTS edges: %v", impErr)
+	}
+
 	// Properties + assertions for the reparsed file.
 	propPtrs := make([]*store.Property, 0, len(pr.Properties))
 	for _, p := range pr.Properties {
@@ -1067,6 +1097,18 @@ func runIncremental(root, relpath, dbPath string) error {
 		return fmt.Errorf("commit: %w", err)
 	}
 	committed = true
+
+	// Step 10.5 — re-converge depth edges (inv-7). DeleteFileEdgesAndNodesTx stripped
+	// this file's outbound promote_% edges and ResolveImportsTx re-emitted only IMPORTS
+	// inside the tx, so the promoted READS/WRITES/RAISES/PRECEDES/CO_SERIALIZES/
+	// DATA_FLOW-standalone edges would stay deleted until the next FULL rebuild. The
+	// promote pass is idempotent (delete-before-rebuild) so re-running it whole-graph
+	// here converges the reindexed file's depth edges. Non-fatal: a failure degrades to
+	// the CALLS/IMPORTS graph, never aborts. (Perf residual: whole-graph re-promote per
+	// -file reindex; a file-scoped tx variant is the future optimization.)
+	if _, promErr := resolver.PromotePropertyEdges(db); promErr != nil {
+		log.Printf("WARNING: incremental property->edge promotion: %v", promErr)
+	}
 
 	// Stamp schema_version + indexer provenance on every incremental run.
 	// The full-index path (Pass 5) writes these in project_meta, but an older
