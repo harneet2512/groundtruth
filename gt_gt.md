@@ -222,6 +222,124 @@ Plus **co-change** (git), **closure** (transitive reach), **FTS5** (BM25 retriev
 > (substrate rebuilds only):** extend the T2 builtin drop to bare calls so future graphs stop
 > minting `verified_unique` edges onto builtin-shadow definitions.
 
+### 2.6 Graph Depth — Relationship-Edge Completeness (the 100% depth bar)
+
+> **NEW SECTION (depth definition).** This formalizes what §2.5/§10 call out as the
+> honest gap ("IMPORTS/DEFINES/REFERENCES/INHERITS edges unimplemented; relationship
+> edges language-uneven; serialization_pair/structural_twin emitted *as properties*").
+
+**DEPTH = completeness of the NAVIGABLE relationship-edge graph.** Depth is the fraction
+of relations-between-two-resolvable-symbols that are materialized as traversable `edges`
+rows (`source_id -> target_id`, JOIN-able). Depth is **not** node count, **not** the number
+of `properties` rows, **not** the count of "~23 dimensions" (§2.4), and **not** CALLS
+accuracy. A relation trapped in a per-node `properties` string is, for navigation, a
+**missing edge**: `contract_map.py` can read it as TEXT for the one node it hangs off, but
+no traversal, closure, or impact query can hop `A->B` on it. graph.db's value is the EDGES;
+a property-trapped relation is a hole in the map.
+
+#### THE 100% BAR
+Every relational class whose value encodes **two RESOLVABLE code endpoints** MUST be a
+traversable edge. **Below 100% = failure.** Formally: if a relation asserts `R(A,B)` and
+BOTH `A` and `B` resolve to a `node_id`, an `edges` row `(source_id=A, target_id=B, type=R)`
+MUST exist. Three sub-conditions (all required): (1) **completeness** — per class per repo,
+`count(promotable instances) == count(edges)`; (2) **traversability** — every new edge JOINs
+`nodes` on both endpoints, zero orphan `target_id=0`; (3) **non-invention** — zero edges
+minted onto unresolved/ambiguous targets; `trust_tier`/`candidate_count` honestly reflect the
+resolution (never the §2.5 stdlib-shadow laundering in a new place). **Correct-or-quiet
+qualifier:** the bar covers ONLY the two-resolvable-endpoint subset. A relation whose second
+endpoint is a builtin/stdlib name, a literal, or a data-only field (no node) has no target to
+point at and MUST stay a single-symbol property — promoting it to a guessed edge VIOLATES the
+bar.
+
+#### TARGET EDGE SCHEMA (what the navigable graph must contain)
+| Edge | Endpoints | present_now |
+|---|---|---|
+| CALLS | caller -> callee | PRESENT (§2.3 ladder) |
+| CONTAINS | parent -> child (the DEFINES-equivalent) | PRESENT |
+| EXTENDS (== INHERITS) | subclass -> superclass | PRESENT; INHERITS is an alias, never a 4th type |
+| IMPLEMENTS | class -> interface | PRESENT (js/ts/java/kotlin/go-CHA) |
+| IMPORTS | importer file -> imported module/symbol | **ABSENT — FRESH-EXTRACT** (re-emit the parsed imports the 6 Tier-1 extractors already feed the resolver, to a File/module-anchor node) |
+| DATA_FLOW (annotation) | def-site -> use-callee | **on CALLS.metadata** (intra-proc; 1133/2591 reach a callee). Not a standalone edge |
+| READS | reader -> read method/symbol | **PROMOTE-PARTIAL** from `field_read` (only ~12% resolve to a sibling node; field-targets stay descriptors) |
+| RAISES | raiser -> exception class | **PROMOTE-PARTIAL** from `exception_type`/`exception_flow` (39/47 distinct are internal classes; builtins stay property) |
+| CO_SERIALIZES | serialize <-> partner fn | **PROMOTE-NOW** from `serialization_pair` — **100% resolvable**, the value carries `@file:line` |
+| USES (annotation) | caller -> callee + usage kind | **on CALLS.metadata** from `caller_usage` (47% ride an existing CALLS edge) |
+| PRECEDES | earlier call-site -> later call-site | **PROMOTE-CAUTIOUS** from `call_order` (only when both endpoints are distinct internal nodes) |
+| COMPOSES / RE_EXPORTS / HANDLES_ROUTE / API_CALL | JSX / barrel / route / cross-service | PRESENT but language-narrow (breadth gap, not a promotion) |
+
+#### WHAT CORRECTLY STAYS A PROPERTY (single-symbol descriptors)
+`return_shape`, `guard_clause`, `conditional_return`, `boundary_condition`, `docstring`,
+`visibility`, `class_decorator`, `class_field`, `security_tag`, `param`, `fingerprint`,
+`side_effect` (write-target is a data-only field, no node), `resource_pattern`,
+`concurrency_pattern`, `config_read`, `exception_handler`, plus the **builtin/value-only
+residuals** of the promotable classes (data_flow rows with no callee; caller_usage/call_order/
+exception_type rows whose second endpoint is a builtin). These describe ONE node; they have no
+second resolvable endpoint and MUST NOT be forced into edges.
+
+#### APPROACH — promote-from-property vs fresh-extract (additive, must not break §4)
+- **PROMOTE-FROM-PROPERTY** (data already exists; parse the value string into source/target):
+  `serialization_pair` (carries `@file:line` -> exact `(file,name,line)` node key, 100%),
+  `exception_type`/`exception_flow` -> RAISES, `field_read` -> READS, `caller_usage`/`data_flow`
+  -> CALLS-edge annotations, `call_order` -> PRECEDES. **Target resolution** reuses the existing
+  `relationships.go` pattern (`funcFileIndex[file][name] -> nodeID`, prefer-same-file then
+  first-match); `serialization_pair` is stricter/cleaner because it supplies the line.
+- **FRESH-EXTRACT** (no property carries it): `IMPORTS` (tree-sitter import query per Tier-1
+  lang — re-emit what the 6 import extractors already parse). `DEFINES` is subsumed by CONTAINS.
+- **Generality:** the EDGE MODEL is language-agnostic (one `edges` schema, one trust model);
+  only the tree-sitter extraction is language-specific. Tier-1 relationship langs
+  (python/js/ts/java/kotlin/go/rust) promote now from their existing properties; Tier-2 (24
+  name-match langs) get edges only where a property already exists for them (most do not — that
+  is the breadth gap, tracked separately).
+- **Non-regression:** promotion is **additive** — the `properties` rows STAY (`contract_map.py`
+  reads `SELECT kind,value FROM properties` as TEXT, §4 contract pillar; that read must not
+  change). New edges are written ALONGSIDE, never instead.
+
+#### RED -> GREEN ON THE REAL graph.db (depth proof, not audit)
+On a real db (e.g. adaptix python: 3160 nodes, CALLS 4823 / CONTAINS 1276 / EXTENDS 371):
+- **CO_SERIALIZES:** `SELECT COUNT(*) FROM properties WHERE kind='serialization_pair'` == 780.
+  After promotion, `SELECT COUNT(*) FROM edges WHERE type='CO_SERIALIZES'` == 780, and the
+  JOIN `edges e JOIN nodes s ON s.id=e.source_id JOIN nodes t ON t.id=e.target_id WHERE
+  e.type='CO_SERIALIZES'` returns 780 rows with **zero orphans** (verified: 780/780 resolvable).
+- **RAISES:** property `exception_type`(393)+`exception_flow`(200) -> RAISES edges == count of
+  rows whose type resolves to an internal Class node (the 39 non-builtin distinct), traversable
+  by JOIN; builtin rows assert NO edge (bar's non-invention check: 0 edges to builtin names).
+- **READS:** `field_read`(659) -> READS edges == the sibling-method-resolvable slice (~80),
+  JOIN-clean; field-only rows assert no edge.
+- **Gate:** the test FAILS before (those edge types return 0 rows) and PASSES after, with the
+  completeness equality, zero-orphan JOIN, and zero-invention assertions all green — and
+  `contract_map.py`'s property read unchanged (same row counts in `properties`).
+
+#### IMPLEMENTED (2026-06-13) — generalized property→edge promote pass (proven by execution)
+
+The §2.6 "100% depth bar" is no longer a spec — the promote-from-property pass is **implemented and proven by execution** on real graph.db copies across 4 languages. This addendum records the implemented state; it does not change the §2.6 contract above.
+
+#### What shipped (reference port, proven) + Go production port (written, unbuilt)
+- **Reference port:** a single language-agnostic promote pass reads the EXISTING `properties` table and materializes traversable `edges` rows for every relational property whose value encodes two RESOLVABLE endpoints. Ran on **8 copied graph.db files** (originals never mutated), **8/8 RED->GREEN PASS (exit 0)**.
+- **Go production home:** `gt-index/internal/resolver/promote.go` (`PromotePropertyEdges`) + `promote_test.go` (RED->GREEN depth fixture). Mirrors the reference 1:1, idempotent (deletes prior `promote_%` edges), additive (properties rows untouched), with a builtin-exception denylist. **UNBUILT — no local Go toolchain; not yet registered in `main.go` (must sit after Pass 4d, before Pass 4e closure).**
+
+#### Six promoted edge classes (+ one annotation), per §2.6 TARGET EDGE SCHEMA
+`CO_SERIALIZES` (serialization_pair, undirected, value carries @file:line), `READS` (field_read -> owning Class), `WRITES` (side_effect write -> owning Class), `RAISES` (exception_type/flow -> internal exception Class; builtins stay property), `DATA_FLOW` (def-site -> resolvable forward-slice callee), `PRECEDES` (call_order, distinct internal nodes only). `USES` is an **annotation on CALLS.metadata** (edge-deduped), never a new edge type — CALLS count is unchanged before/after.
+
+#### Proven per-language counts (representative db per language; independently SQL-verified)
+| lang | db | before types | after types | new edges |
+|---|---|---|---|---|
+| go | abs-module-cache-flags | 4 (CALLS,CONTAINS,EXTENDS,IMPLEMENTS) | 9 | **883** — CO_SERIALIZES 39, READS 262, WRITES 57, DATA_FLOW 437, PRECEDES 88 (RAISES 0: panic/error/errors are builtins, suppressed) |
+| python | adaptix-name-mapping-aliases | 3 (CALLS,CONTAINS,EXTENDS) | 9 | **2607** — CO_SERIALIZES 390, READS 658, WRITES 365, RAISES 172, DATA_FLOW 774, PRECEDES 248 |
+| js | aiomonitor-task-snapshots-diff | 3 | 8 | **1247** — DATA_FLOW 909, PRECEDES 163, READS 107, WRITES 67, RAISES 1 (CO_SERIALIZES 0: no serialization_pair props) |
+| ts | awilix-async-container-initialization | 5 (+COMPOSES,RE_EXPORTS pre-existing) | 10 | **56** — DATA_FLOW 22, WRITES 18, READS 9, RAISES 5, PRECEDES 2 (CO_SERIALIZES 0) |
+
+#### Contract held (all four §2.6 sub-conditions, verified by INDEPENDENT SQL)
+- **Completeness:** emitted == after for every class on every db; before == 0 from a genuine RED snapshot.
+- **Traversability:** independent_orphans = 0 on all reps — every promoted source_id AND target_id is a real `nodes` row; all promoted target labels are exactly {Class,Function,Method}.
+- **Non-invention:** RAISES-to-builtin = 0 (adaptix: 143 builtin exception_type props -> 0 edges); DATA_FLOW emits only resolvable-callee segments (adaptix 2591 props -> 774 edges; external/value-flow suppressed); bad_target = 0, builtin_exception_leak = 0 on all 8.
+- **Additive / non-regression:** `properties` row count byte-for-byte unchanged before/after on all 8 — contract_map.py's §4 TEXT read is intact.
+
+#### ONE code path, per-language = MINING ONLY
+The same promote logic produced edges across go/py/js/ts with **zero per-language branch in the emit path**. Extending coverage to another language is **property-mining only** (add the upstream tree-sitter property emitter); the edge model, endpoint resolution, dedup, non-invention gate, and trust model are shared and language-agnostic.
+
+#### Still open to true 100% (honest)
+IMPORTS edges are a **fresh-extract** (no property carries them) -> needs Go tree-sitter parser change + CGO rebuild. The Go promote port needs Codespace `go build`/`go test` + main.go registration before it ships (Stage-1 DONE only when it runs in the indexer, not when the Python reference port runs over copies). TYPE_FLOW accuracy (receiver-type / 58% method gap) is a separate phase.
+
 ---
 
 ## 3. Layer — LSP enrichment
