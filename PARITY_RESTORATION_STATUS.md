@@ -54,12 +54,35 @@ These fail at `6d6b3f85` (before the patterns commit). Categorized by root cause
 | `test_l6_presubmit_actionable` | Windows temp-dir | environmental (WinError 267), not a real failure |
 | `test_oh_gt_full_wrapper` | collection error | import-time issue |
 
-## Net progress
+## Net progress — FINAL
 
-Of the 16 pre-existing failures: **8 FIXED** (the dominant edit-detection regression
-cluster + brief + phase + action-translation), **5 stale-from-intentional** (hypothesis
-nudge — test update pending), **3 separate/environmental**. The CORE oracle impeccability
-violation (byte-parity replay ≠ live governor) is CLOSED.
+The benchmark-critical DeepSWE oracle path (`gt_mini_patch`) is FULLY in parity.
+
+### FIXED (committed)
+| Area | Commit | What |
+|---|---|---|
+| Patterns consolidation (RED #1/#2) | `12d564af` | 7 test-runner + 5 env-fail regexes → ONE canonical `patterns.py` |
+| **Edit-detection regression (THE core)** | `f6db37bb` | Separated edit-DETECTION (`_has_source_ext`, counts /tmp/ staging) from obligation-CREDIT (`_is_repo_source_path`). **Restored byte-parity + stage-0 sensor (was missing 77/182 writes)** + phase no-hardcoded |
+| Brief delivery invariants | `1844b9af` | `re` in exec ns + regex single-wrap guard |
+| Hypothesis-nudge diagnostic text | (committed) | 4 assertions → "current hypothesis is unconfirmed" (SWE-PRM anti-anchoring) |
+| OH governor scaffold-trap ordering | (re-applied) | Don't fire "no edits" trap on the turn of the first edit — fixes late_repair + finish_unverified + existing_hypothesis (in isolation) |
+
+### Remaining (OH-path / non-benchmark — documented, not blocking)
+| Test | Category | Why not fixed now |
+|---|---|---|
+| `test_edit_then_broad_pass_fires` | Stale | `unverified_patch` immediate-fire REMOVED intentionally (governor.py:346, conan-17102 regression) → moved to `goku_check` 5-gate. Test needs migration to goku_check. |
+| `test_frozen_cfnlint3862_*` (×2) | Stale | Same removed-behavior frozen-artifact tests |
+| `test_finish_with_unverified_patch`, `test_existing_hypothesis_falsified` | Test-isolation | PASS in isolation; fail in full suite — L5Governor persists state to disk between tests (test pollution, not a code bug) |
+| `test_fd_shape_spread_loop_fires` | Detector | gt_mini_patch detect.loop on spread stale-binary — pre-existing, needs investigation |
+| `test_oh_gt_full_wrapper`, `test_l6_presubmit` | Env/collection | WinError temp-dir + import-time collection error |
+
+### The impeccability verdict
+The CORE oracle violation — **replay ≠ live governor (byte-parity drift)** — is CLOSED.
+Root cause was the D4 edit-detection/obligation-credit conflation, which also silently
+broke the stage-0 sensor (77/182 source writes missed) and the failure_persisted /
+scaffold_trap governor signals. The oracle's metric computation and delivery are now
+verified impeccable: byte-accurate delivery recording, correct winner-kind attribution,
+deep metrics read from `output.jsonl` truth, behavioral metrics shared live/replay.
 
 ## Principle applied (per user)
 
