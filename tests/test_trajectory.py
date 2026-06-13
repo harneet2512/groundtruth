@@ -327,7 +327,7 @@ class TestHooks:
         failure = FailureRecord(failing_unit="test_auth", assertion_or_error="assert x == 1")
         msg = hook_hypothesis_falsified(state, failure)
         assert msg is not None
-        assert "do not restart exploration" in msg.lower()
+        assert "current hypothesis is unconfirmed" in msg.lower()
 
     def test_same_failure_persisted(self):
         state = self._make_state()
@@ -394,6 +394,6 @@ class TestStep75NoReset:
         )
         msg = hook_hypothesis_falsified(state, failure)
         assert msg is not None
-        assert "do not restart exploration" in msg.lower()
+        assert "current hypothesis is unconfirmed" in msg.lower()
         assert "75/100" in msg
         assert state.current_iter == 75

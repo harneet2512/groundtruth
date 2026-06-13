@@ -195,7 +195,7 @@ class TestFullTrajectorySimulation:
             action_count=71, max_iter=100,
         )
         assert result.fired
-        assert result.message and "do not restart exploration" in result.message.lower()
+        assert result.message and "current hypothesis is unconfirmed" in result.message.lower()
         assert result.message and "71/100" in result.message
 
     def test_env_failure_suppressed(self):
@@ -344,7 +344,7 @@ class TestTTDFrozenArtifact:
         )
 
         assert result.fired
-        assert "do not restart exploration" in result.message.lower()
+        assert "current hypothesis is unconfirmed" in result.message.lower()
         assert result.message and "75/100" in result.message
         assert gov.state.current_iter == 75
 
