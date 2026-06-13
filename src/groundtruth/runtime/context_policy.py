@@ -57,6 +57,11 @@ PHASE_POLICY: dict[Phase, frozenset[str]] = {
     }),
     Phase.VIEW: frozenset({
         PayloadKind.LOCAL_EVIDENCE.value,
+        # A degenerate loop is "stuck" regardless of phase — the agent can spin
+        # on the same query/binary during exploration (fd stale-binary: same
+        # command + identical output, no edits). The loop detector must fire in
+        # VIEW, not only VERIFY (it was silent ~75 steps on the fd shape).
+        PayloadKind.LOOP_NUDGE.value,
     }),
     Phase.EDIT: frozenset({
         PayloadKind.LOCAL_EVIDENCE.value,
@@ -64,6 +69,7 @@ PHASE_POLICY: dict[Phase, frozenset[str]] = {
         PayloadKind.COCHANGE.value,
         PayloadKind.OBLIGATION_STATUS.value,
         PayloadKind.COHERENCE_RISK.value,
+        PayloadKind.LOOP_NUDGE.value,
     }),
     Phase.VERIFY: frozenset({
         PayloadKind.OBLIGATION_STATUS.value,
