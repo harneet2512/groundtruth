@@ -102,27 +102,25 @@ except ImportError as _import_err:
         return None
 
 # ---------------------------------------------------------------------------
-# DELIVERY FACT-FILTER POLICY — SINGLE SOURCE (B1, 2026-06-13).
+# DELIVERY FACT-FILTER POLICY — SINGLE SOURCE (B1, 2026-06-13) with a FUNCTIONAL
+# in-container fallback (B1-FIX, 2026-06-13, run 27462282736).
 # The path-class + name-class classifiers live in groundtruth.delivery
 # (path_policy + name_policy); the FACT gate + cross-language disqualifier live
-# in groundtruth.pretask.curation_map. ALL are imported here from the baked
-# /opt/gt/src so AGENT-TIME delivery applies the IDENTICAL exclusion decisions
-# as the PROOF-TIME brief (which imports the same modules). No inline duplicate.
+# in groundtruth.pretask.curation_map. When importable (the substrate PROOF
+# process), AGENT-TIME delivery applies the IDENTICAL decisions as the proof brief.
 #
-# In proof/benchmark mode an import failure is a substrate-PACKAGING defect: it
-# FAILS CLOSED (we never deliver facts through a stale inline copy of the
-# policy). Outside proof mode (dev / container bootstrap) a tiny, explicit,
-# logged degraded stub keeps the hook importable — it is NOT the benchmark
-# policy and is unreachable whenever groundtruth is importable (always, in CI
-# and in-container).
+# CRITICAL: this hook runs INSIDE the eval TASK CONTAINER, which legitimately does
+# NOT have the groundtruth package importable (same reason runtime.* falls back to
+# stubs). It MUST degrade GRACEFULLY — NEVER fail-closed here. The earlier proof-mode
+# `raise` (GT_DELIVERY_POLICY_IMPORT_FAILED) crashed the whole monkeypatch in-container
+# and KILLED ALL per-turn evidence (regression caught by run 27462282736: no
+# <gt-evidence>/<gt-contract>/<gt-scope> reached the agent). The fail-closed for a
+# missing delivery policy belongs ONLY in the substrate proof process (gt_run_proof),
+# where groundtruth IS importable. Here we fall back to a FUNCTIONAL inline copy (the
+# pre-B1 filter) so per-turn delivery is byte-identical; the Product single source
+# still governs the proof-time brief. (The substrate also injects the delivery modules
+# so the import path is preferred whenever available — see gt_agent injection list.)
 # ---------------------------------------------------------------------------
-def _gt_proof_or_substrate_mode() -> bool:
-    return (os.environ.get("GT_PROOF_MODE") == "1"
-            or os.environ.get("GT_PORTABLE_SUBSTRATE") == "1"
-            or bool(os.environ.get("GT_HOST_GRAPH_DB"))
-            or bool(os.environ.get("GT_CERT_DIR")))
-
-
 _DELIVERY_POLICY_AVAILABLE = False
 try:
     from groundtruth.delivery.path_policy import (
@@ -143,45 +141,119 @@ try:
     )
     _DELIVERY_POLICY_AVAILABLE = True
 except Exception as _delivery_import_err:  # noqa: BLE001
-    if _gt_proof_or_substrate_mode():
-        raise RuntimeError(
-            "GT_DELIVERY_POLICY_IMPORT_FAILED: groundtruth.delivery / curation_map "
-            f"not importable under proof/substrate mode ({_delivery_import_err}). "
-            "The substrate must bake src/groundtruth on sys.path; refusing to "
-            "deliver facts through a stale inline copy of the fact-filter."
-        ) from _delivery_import_err
-    # DEGRADED dev/bootstrap stub (NON-proof only) — logged, never silent. NOT the
-    # benchmark policy; the authoritative single source is groundtruth.delivery.
+    # GRACEFUL in-container fallback — NEVER raises (a raise kills per-turn delivery).
+    # FUNCTIONAL pre-B1 filter so agent-time exclusion decisions are unchanged.
     print(f"[GT_META] delivery_policy_import_fallback=true reason={_delivery_import_err}",
           file=sys.stderr, flush=True)
     _DETERMINISTIC_METHODS = frozenset({
         "same_file", "import", "import_type", "type_flow", "verified_unique",
         "impl_method", "inherited", "unique_method", "return_type", "lsp", "lsp_verified",
     })
-    _BUILTIN_CALLABLE_NAMES = frozenset()
-    _STDLIB_MODULES = frozenset()
+    _VENDOR_DIR_MARKERS_FB = (
+        "/extern/", "/externals/", "/vendor/", "/vendored/", "/third_party/",
+        "/thirdparty/", "/node_modules/", "/bower_components/", "/dist/",
+        "/_generated/", "/generated/", "/site-packages/")
+    _MINIFIED_SUFFIXES_FB = (".min.js", ".min.css", ".min.mjs", ".min.map")
+    _GENERATED_FILE_MARKERS_FB = (
+        "zz_generated", ".pb.go", ".pb.gw.go", "_pb2.py", "_pb2_grpc.py",
+        ".generated.", "_generated.go", ".g.dart", ".freezed.dart")
+    _MINIFIED_MEAN_LINE_LEN_FB = 200
+    _minified_cache_fb: dict = {}
 
     def _is_vendored_path(fp):
-        return False
+        f = "/" + (fp or "").replace("\\", "/").lstrip("./").lstrip("/").lower()
+        if any(m in f for m in _VENDOR_DIR_MARKERS_FB):
+            return True
+        base = f.rsplit("/", 1)[-1]
+        if base.endswith(_MINIFIED_SUFFIXES_FB):
+            return True
+        return any(m in base for m in _GENERATED_FILE_MARKERS_FB)
 
     def _is_minified_file(repo_root, rel):
-        return False
+        if rel in _minified_cache_fb:
+            return _minified_cache_fb[rel]
+        verdict = False
+        try:
+            with open(os.path.join(repo_root or "", rel), encoding="utf-8", errors="ignore") as fh:
+                head = fh.read(16384)
+            lines = [ln for ln in head.splitlines() if ln.strip()]
+            if lines:
+                verdict = (sum(len(ln) for ln in lines) / len(lines)) > _MINIFIED_MEAN_LINE_LEN_FB
+        except OSError:
+            verdict = False
+        _minified_cache_fb[rel] = verdict
+        return verdict
 
     def _is_delivery_excluded(fp, repo_root=""):
+        if _is_vendored_path(fp):
+            return True
+        if repo_root:
+            return _is_minified_file(repo_root, _norm_fp(fp))
         return False
+
+    _BUILTIN_CALLABLE_NAMES = frozenset({
+        "join", "split", "splitlines", "strip", "lstrip", "rstrip", "lower", "upper",
+        "title", "startswith", "endswith", "encode", "decode", "format", "replace",
+        "find", "rfind", "get", "keys", "values", "items", "setdefault", "update",
+        "popitem", "append", "extend", "pop", "insert", "remove", "index", "count",
+        "sort", "reverse", "add", "discard", "clear", "copy", "rsplit", "zfill",
+        "casefold", "loads", "dumps", "isinstance", "issubclass", "len", "print",
+        "open", "type", "super", "getattr", "setattr", "hasattr", "delattr", "repr",
+        "str", "int", "float", "bool", "list", "dict", "set", "tuple", "iter", "next",
+        "range", "zip", "map", "filter", "sorted", "reversed", "enumerate", "sum",
+        "min", "max", "abs", "round", "all", "any", "id", "hash", "vars", "dir",
+        "callable", "exists", "push", "shift", "unshift", "slice", "splice", "concat",
+        "indexof", "foreach", "tostring", "write", "read", "close", "new", "make",
+        "clone", "unwrap", "expect",
+    })
 
     def _is_builtin_shadow_name(name):
         n = (name or "").strip()
-        return bool(n.startswith("__") and n.endswith("__") and len(n) > 4)
+        if not n:
+            return False
+        if n.startswith("__") and n.endswith("__") and len(n) > 4:
+            return True
+        return n.lower() in _BUILTIN_CALLABLE_NAMES
+
+    _STDLIB_MODULES = frozenset({
+        "os", "sys", "re", "io", "json", "math", "time", "copy", "glob", "uuid",
+        "shutil", "random", "typing", "logging", "pathlib", "datetime", "string",
+        "decimal", "inspect", "warnings", "argparse", "textwrap", "itertools",
+        "functools", "operator", "collections", "subprocess", "contextlib",
+    })
+    _STDLIB_SHADOW_RE_FB = re.compile(r"([A-Za-z_][\w.]*)\.([A-Za-z_]\w*)\s*\(")
 
     def _is_stdlib_shadow(code, target_name):
+        if not code or not target_name:
+            return False
+        for m in _STDLIB_SHADOW_RE_FB.finditer(code):
+            if m.group(2) == target_name and m.group(1).split(".")[0] in _STDLIB_MODULES:
+                return True
         return False
+
+    _LANG_FAMILIES_FB = {
+        "javascript": "jslike", "typescript": "jslike", "jsx": "jslike", "tsx": "jslike",
+        "vue": "jslike", "svelte": "jslike", "java": "jvm", "kotlin": "jvm",
+        "scala": "jvm", "groovy": "jvm", "clojure": "jvm", "c": "cfamily",
+        "cpp": "cfamily", "c++": "cfamily", "objc": "cfamily", "objcpp": "cfamily",
+        "objective-c": "cfamily", "swift": "cfamily", "python": "python", "go": "go",
+        "rust": "rust", "ruby": "ruby", "php": "php", "csharp": "csharp", "c#": "csharp",
+        "lua": "lua", "elixir": "elixir", "erlang": "erlang", "haskell": "haskell",
+        "dart": "dart", "r": "r", "julia": "julia", "perl": "perl", "bash": "shell",
+        "shell": "shell", "sh": "shell", "zig": "zig", "ocaml": "ocaml",
+    }
 
     def _is_cross_language_pair(lang_a, lang_b):
-        return False
+        fa = _LANG_FAMILIES_FB.get(str(lang_a or "").strip().lower())
+        fb = _LANG_FAMILIES_FB.get(str(lang_b or "").strip().lower())
+        return fa is not None and fb is not None and fa != fb
 
     def _nodes_have_language(con):
-        return False
+        try:
+            cols = {r[1] for r in con.execute("PRAGMA table_info(nodes)").fetchall()}
+        except Exception:  # noqa: BLE001
+            return False
+        return "language" in cols
 
 # Strict flag parse (bug #6 parity with gt_agent / every other GT flag):
 # bool(env) made GT_BASELINE=0 enable the baseline arm.

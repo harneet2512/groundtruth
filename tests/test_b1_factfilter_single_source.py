@@ -86,28 +86,34 @@ def test_decision_parity_battery():
         assert is_stdlib_shadow(code, tgt) == gmp._is_stdlib_shadow(code, tgt), (code, tgt)
 
 
-def test_proof_mode_import_failure_fails_closed():
-    """Under GT_PROOF_MODE a broken Product-policy import ABORTS the hook
-    (GT_DELIVERY_POLICY_IMPORT_FAILED) — never silently runs a stale copy."""
+def test_proof_mode_import_failure_degrades_gracefully():
+    """B1-FIX (run 27462282736): the AGENT-TIME gt_mini_patch hook runs INSIDE the
+    eval task container, where groundtruth is legitimately NOT importable (same as
+    runtime.*). A broken delivery import MUST degrade GRACEFULLY even under
+    GT_PROOF_MODE — it must NEVER raise. The earlier proof-mode raise crashed the
+    whole monkeypatch in-container and killed ALL per-turn evidence. The fallback is
+    FUNCTIONAL (the pre-B1 filter), not permissive stubs. (The fail-closed for a
+    missing delivery policy belongs in the substrate PROOF process, not this hook.)"""
     script = textwrap.dedent(f"""
         import sys, os, importlib.util
         os.environ["GT_PROOF_MODE"] = "1"
-        # poison the Product delivery module so the import raises ImportError
+        # poison the Product delivery module -> import fails (the task-container shape)
         sys.modules["groundtruth.delivery.path_policy"] = None
         spec = importlib.util.spec_from_file_location("gmp_fc", r"{GMP}")
         m = importlib.util.module_from_spec(spec)
-        try:
-            spec.loader.exec_module(m)
-        except RuntimeError as e:
-            assert "GT_DELIVERY_POLICY_IMPORT_FAILED" in str(e), str(e)
-            print("FAILCLOSED_OK")
-            raise SystemExit(0)
-        print("NO_RAISE")
-        raise SystemExit(1)
+        spec.loader.exec_module(m)   # MUST NOT raise
+        assert m._DELIVERY_POLICY_AVAILABLE is False
+        # FUNCTIONAL fallback (not permissive stubs) — per-turn delivery unchanged:
+        assert m._is_vendored_path("vendor/x.go") is True
+        assert m._is_vendored_path("src/foo.py") is False
+        assert m._is_builtin_shadow_name("isinstance") is True
+        assert m._is_stdlib_shadow("os.walk(r)", "walk") is True
+        assert m._is_cross_language_pair("python", "rust") is True
+        print("GRACEFUL_FUNCTIONAL_OK")
     """)
     r = subprocess.run([sys.executable, "-c", script], capture_output=True,
                        text=True, cwd=str(ROOT))
-    assert "FAILCLOSED_OK" in r.stdout, f"stdout={r.stdout!r} stderr={r.stderr!r}"
+    assert "GRACEFUL_FUNCTIONAL_OK" in r.stdout, f"stdout={r.stdout!r} stderr={r.stderr!r}"
 
 
 def test_non_proof_import_failure_degrades_not_aborts():
