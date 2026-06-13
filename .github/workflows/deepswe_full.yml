@@ -1102,6 +1102,18 @@ jobs:
             fi
             echo "=== Model routed via TokenRouter: $INPUT_MODEL ==="
           fi
+          # [DIAG 2026-06-13] Resource monitor — stream RAM/disk/container-count to the GHA log
+          # every 8s so the LAST reading before a runner-reclaim (exit 143) reveals whether the
+          # agent phase OOMs (RAM near cap) or fills the runner disk on heavy tasks (arktype/arcane).
+          ( while true; do
+              echo "[RESMON] $(date +%T)" \
+                "$(free -m 2>/dev/null | awk '/Mem:/{printf "mem=%d/%dMB", $3,$2}')" \
+                "$(df -m / 2>/dev/null | awk 'NR==2{printf "disk_used=%d/%dMB free=%dMB", $3,$2,$4}')" \
+                "containers=$(docker ps -q 2>/dev/null | wc -l | tr -d ' ')"
+              sleep 8
+            done ) &
+          _RESMON_PID=$!
+          trap 'kill "$_RESMON_PID" 2>/dev/null' EXIT
           pier run \
             -p deepswe-bench/tasks/${{ matrix.task }} \
             --agent-import-path artifact_deepswe.gt_agent:GTMiniSweAgent \
