@@ -641,11 +641,15 @@ def emit_brief(out_dir: str, issue_text: str, work: str, graph: str, *, generato
     artifact — never a WARN. Returns (ok, detail); the caller fails closed on ok=False with
     GT_ARTIFACT_MISSING. ``generator`` is injectable for tests; default = the real
     generate_v1r_brief (which also writes the issue anchors mirrored below)."""
+    # A1 (2026-06-13): generate the brief ONCE per proof. gate3b (foundational_gates,
+    # the earlier subprocess) persists its V1RBriefResult to <out_dir>/brief_result.json;
+    # load it here (no second generation) and write brief.txt from it, so the
+    # gate-certified brief == the delivered brief by sha. Fail-safe: a cache miss
+    # regenerates (degrades to the prior double-generation, never blocks brief.txt).
     try:
-        if generator is None:
-            from groundtruth.pretask.v1r_brief import generate_v1r_brief as generator
-        b = generator(issue_text=issue_text, repo_root=work, graph_db=graph, bug_id="portable")
-        bt = (getattr(b, "brief_text", "") or "").strip()
+        from groundtruth.runtime.brief_cache import get_or_generate
+        result = get_or_generate(out_dir, issue_text, work, graph, generator=generator)
+        bt = (result.get("brief_text") or "").strip()
     except Exception as e:
         return False, f"brief generation raised (no swallow in proof): {type(e).__name__}: {e}"
     if not bt:
@@ -661,7 +665,9 @@ def emit_brief(out_dir: str, issue_text: str, work: str, graph: str, *, generato
             shutil.copy("/tmp/gt_issue_anchors.json", os.path.join(out_dir, "gt_issue_anchors.json"))
         except OSError:
             pass
-    return True, f"{len(bt)} chars"
+    _sha = result.get("brief_sha256", "")
+    _reused = not result.get("generated", True)
+    return True, f"{len(bt)} chars sha256={_sha[:12]} reused_gate_brief={_reused}"
 
 
 def probe_workspace_metadata(language: str, source_root: str, env: dict[str, str]) -> dict[str, object]:
@@ -1018,7 +1024,9 @@ def main(argv=None) -> int:
     tracker.complete("graph_cert", path=cert_graph)
 
     # 4. foundational gates (emits foundational_gate_report.json + embedder_certificate.json via run_v74)
-    gate_env = dict(base_env, GT_GATES_DEEP_JSON=gate_report)
+    # A1: GT_BRIEF_CACHE_DIR = the proof out dir, so gate3b PERSISTS its generated brief there;
+    # emit_brief (same a.out) then READS it instead of regenerating (single brief per proof).
+    gate_env = dict(base_env, GT_GATES_DEEP_JSON=gate_report, GT_BRIEF_CACHE_DIR=a.out)
     rc = _run([sys.executable, os.path.join(GT_HOME, "scripts/metrics/foundational_gates.py"),
                graph, work, issue_file], gate_env)
 
