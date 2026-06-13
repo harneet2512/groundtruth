@@ -162,8 +162,14 @@ class L5Governor:
                 print(f"[GT_TRACE] mech=adaptive_L5 layer=L5 action=suppress reason=NO_GRAPH_DB error={_sq_exc}", file=sys.stderr, flush=True)
             self._cached_scaffold_threshold = _scaffold_threshold
             print(f"[GT_TRACE] mech=adaptive_L5 layer=L5 threshold={_scaffold_threshold} graph_db={os.environ.get('GT_GRAPH_DB', 'unset')}", file=sys.stderr, flush=True)
+        # Don't fire the "no source edits" trap on the very turn the agent makes
+        # its first source edit — the edit must be RECORDED (below) first, or a
+        # later test failure can never find has_source_edit_before_last_failure
+        # (the edit@N / fail@N+1 hypothesis-falsified path).
+        _cur_is_source_edit = _is_source_edit(_get_edited_path_from_action(action))
         if (
             not self.state.edited_source_files
+            and not _cur_is_source_edit
             and action_count >= _scaffold_threshold
             and not getattr(self, "_scaffold_trap_fired", False)
             and action_count / max(max_iter, 1) >= 0.20
