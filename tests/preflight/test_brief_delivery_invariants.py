@@ -151,7 +151,7 @@ def test_wrap_does_not_double_wrap_already_wrapped_brief():
     block = _load_wrap_block()
     brief = _load_func("_brief_max_tokens")(STRUCTURED_BRIEF, max_tokens=2000)  # starts with <gt-task-brief>
     ns = {"brief": brief, "content": "<uploaded_files>\nrepo\n</uploaded_files>\nissue text",
-          "tools_hint": "", "_demo": "", "_core_sanitize_block": _core_sanitize_block}
+          "tools_hint": "", "_demo": "", "_core_sanitize_block": _core_sanitize_block, "re": re}
     exec(block, ns)
     final = ns["content"]
     assert final.count("<gt-task-brief>") == 1, "exactly one <gt-task-brief> open tag"
@@ -162,7 +162,7 @@ def test_wrap_does_not_double_wrap_already_wrapped_brief():
 def test_wrap_still_wraps_an_unwrapped_brief():
     block = _load_wrap_block()
     ns = {"brief": "plain brief with no tags", "content": "issue", "tools_hint": "", "_demo": "",
-          "_core_sanitize_block": _core_sanitize_block}
+          "_core_sanitize_block": _core_sanitize_block, "re": re}
     exec(block, ns)
     final = ns["content"]
     assert final.count("<gt-task-brief>") == 1
@@ -174,11 +174,13 @@ def test_source_has_no_unconditional_double_wrap():
     src = _read_source()
     assert 'content = f"<gt-task-brief>\\n{brief}\\n</gt-task-brief>' not in src, \
         "the unconditional double-wrap must not return"
-    # BUG 3 (e86151d6): the guard was upgraded from startswith() to presence (`in`)
-    # because the prepended <gt-localization> header means the block no longer STARTS
-    # with <gt-task-brief>. Lock the improved presence-based guard.
-    assert '"<gt-task-brief>" in _wrapped' in src, \
-        "the conditional single-wrap guard (presence-based) must be present"
+    # BUG 3 (e86151d6 -> regex upgrade): the guard was upgraded from startswith()
+    # to presence, then to a word-boundary REGEX `re.search(r"<gt-task-brief\b")`
+    # so attributed tags (`<gt-task-brief lang=...>`) are also recognized as an
+    # existing wrapper (no nesting). Lock the regex-based guard.
+    assert ('"<gt-task-brief>" in _wrapped' in src
+            or r'<gt-task-brief\b' in src), \
+        "the conditional single-wrap guard (presence- or regex-based) must be present"
 
 
 def test_source_has_no_reorder():
