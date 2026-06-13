@@ -115,6 +115,42 @@ def _adapter_fail(detail: str, message: str, cause: BaseException | None = None)
         raise DeepSweAdapterError(message) from cause
     raise DeepSweAdapterError(message)
 
+
+def _assert_substrate_handoff() -> None:
+    """D1 — EARLY fail-closed STARTUP guard (Priority C, 2026-06-13).
+
+    In proof/benchmark mode the run MUST consume the pinned substrate's
+    authoritative graph + certs + brief, handed off READ-ONLY. If
+    ``GT_PROOF_MODE=1`` but the handoff is absent (``_substrate_active()`` false,
+    or the required handoff env vars unset), the run would otherwise drift toward
+    a non-handoff graph and only fail LATE on a downstream ``GT_ARTIFACT_MISSING``.
+    Assert it up front — before any witness/brief/agent work — with a single
+    named error, so a missing handoff can never silently reach the agent and the
+    integration can never re-index/re-brief in proof mode.
+
+    Outside proof mode this is a no-op (legacy dev/CI may host-build). It does NOT
+    replace the downstream artifact/hash checks (witness graph-hash,
+    ``_substrate_brief`` existence/non-empty) — it front-loads the env contract."""
+    if not _proof_mode():
+        return
+    if not _substrate_active():
+        _adapter_fail(
+            "PROOF_WITHOUT_SUBSTRATE_HANDOFF",
+            "DEEPSWE_ADAPTER_FAIL: GT_PROOF_MODE=1 but the substrate handoff is "
+            "absent (none of GT_PORTABLE_SUBSTRATE / GT_HOST_GRAPH_DB / GT_CERT_DIR "
+            "is set). A proof/benchmark run must CONSUME the pinned substrate's "
+            "authoritative graph + certs + brief READ-ONLY; refusing to run without "
+            "the handoff (no in-container rebuild, no host-side brief).",
+        )
+    missing = [v for v in ("GT_HOST_GRAPH_DB", "GT_CERT_DIR") if not os.environ.get(v)]
+    if missing:
+        _adapter_fail(
+            "PROOF_HANDOFF_ENV_MISSING",
+            "DEEPSWE_ADAPTER_FAIL: GT_PROOF_MODE=1 but required substrate-handoff "
+            f"env var(s) {missing} are unset. The harness must pass the authoritative "
+            "graph (GT_HOST_GRAPH_DB) and cert dir (GT_CERT_DIR) — refusing to run.",
+        )
+
 # ---------------------------------------------------------------------------
 # Locate the two payloads we inject into the container
 # ---------------------------------------------------------------------------
@@ -1162,6 +1198,13 @@ class GTMiniSweAgent(MiniSweAgent):
             return
 
         augmented = instruction
+
+        # D1 (Priority C) — EARLY fail-closed: in proof mode the substrate handoff
+        # (authoritative graph + certs + brief) MUST be wired before any GT work.
+        # Aborts up front if GT_PROOF_MODE=1 without _substrate_active()/handoff env,
+        # so a missing handoff can never silently reach the agent (the integration
+        # never re-indexes/re-briefs in proof mode).
+        _assert_substrate_handoff()
 
         # Handoff §H — emit the consumption WITNESS before the agent runs: prove this
         # adapter read the SAME resolved graph the substrate produced (hook hash ==
