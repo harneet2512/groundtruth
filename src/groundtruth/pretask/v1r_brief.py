@@ -481,90 +481,25 @@ CALLER_CONFIDENCE_LO = 0.7
 MAX_CALLERS_PER_FUNC = 2
 
 
-# Standard-library / builtin module names whose attribute calls (os.walk,
-# os.path.join, itertools.chain, ...) get name-matched to a same-named PROJECT
-# function by the indexer. A project file with a function named walk/join/split/
-# open/load collides with stdlib on EVERY repo — this is general, not
-# benchmark-shaped.
-_STDLIB_MODULES: frozenset[str] = frozenset(
-    {
-        "os", "sys", "re", "io", "json", "math", "time", "copy", "glob", "uuid",
-        "shutil", "random", "typing", "logging", "pathlib", "datetime", "string",
-        "decimal", "inspect", "warnings", "argparse", "textwrap", "itertools",
-        "functools", "operator", "collections", "subprocess", "contextlib",
-    }
+# ---------------------------------------------------------------------------
+# DELIVERY FACT-FILTER — SINGLE-SOURCED in groundtruth.delivery (B1, 2026-06-13).
+# The SAME path_policy + name_policy modules are imported by
+# artifact_deepswe/gt_mini_patch.py, so the brief's DELIVERY surface and the
+# agent-time hook apply IDENTICAL exclusion decisions on identical inputs.
+# Two classifiers, FACT-FILTERING ONLY (no ranking/anchor/fusion effect):
+#   (a) vendored/minified/generated PATHS (path_policy) — extends the localizer's
+#       `_is_generated` W_GEN demote (ranking) to the brief's DELIVERY surface;
+#   (b) builtin/dunder-shadow + stdlib-shadow NAMES (name_policy) — a bare builtin
+#       call resolves verified_unique when one project symbol shadows the name;
+#       the resolver's T2 builtin drop (gt_gt §2.3, index-time) covers QUALIFIED
+#       calls only and substrate graphs are frozen, so the consumer fact surface
+#       is the operative guard. Correct-or-quiet: exclusion suppresses, never invents.
+# ---------------------------------------------------------------------------
+from groundtruth.delivery.path_policy import is_vendored_path as _is_vendored_path  # noqa: E402
+from groundtruth.delivery.name_policy import (  # noqa: E402
+    is_builtin_shadow_name as _is_builtin_shadow_name,
+    is_stdlib_shadow as _is_stdlib_shadow,
 )
-
-
-def _is_stdlib_shadow(code: str, target_name: str) -> bool:
-    """True when ``code`` calls ``<stdlib_module>.<target_name>(`` — i.e. a stdlib
-    attribute call the indexer name-matched to a project function of the same name
-    (the proven ``os.walk`` -> ``account.walk`` false caller).
-
-    Defends against an indexer that records such an edge with a DETERMINISTIC
-    ``resolution_method`` (so the provenance gate alone would trust it). This is a
-    secondary defense; the primary fix is the resolver's provenance. Repo- and
-    language-agnostic.
-    """
-    if not code or not target_name:
-        return False
-    for m in _re.finditer(r"([A-Za-z_][\w.]*)\.([A-Za-z_]\w*)\s*\(", code):
-        head = m.group(1).split(".")[0]
-        if m.group(2) == target_name and head in _STDLIB_MODULES:
-            return True
-    return False
-
-
-# ---------------------------------------------------------------------------
-# DELIVERY FACT-FILTER (2026-06-10, PATH B per-layer health audit, run
-# 27260307167) — FACT-FILTERING ONLY, no ranking/anchor/fusion effect.
-# Same two classifiers as gt_mini_patch.py (kept inline there by design):
-#   (a) vendored/minified/generated paths (astropy/extern/jquery/*.min.js was
-#       delivered as a resolved [WITNESS]/caller fact) — extends the
-#       localizer's `_is_generated` W_GEN demote (ranking) to the brief's
-#       DELIVERY surface;
-#   (b) builtin/dunder-shadow names (`isinstance` -> project method named
-#       isinstance rendered as a verified-caller fact): a bare builtin call
-#       resolves verified_unique when ONE project symbol shadows the name —
-#       the resolver's T2 builtin drop (gt_gt §2.3) covers QUALIFIED calls
-#       only, and substrate graphs are frozen, so the consumer fact surface
-#       is the operative guard. Same family as the stdlib-shadow guard above.
-# ---------------------------------------------------------------------------
-from groundtruth.delivery.path_policy import is_vendored_path as _is_vendored_path
-
-
-# Mirrors resolver.go builtinMethodNames + strongBuiltinMethodNames (the T2
-# builtin drop) + the shadowable language builtins the T2 drop cannot see
-# (it only fires on QUALIFIED calls). Kept identical to gt_mini_patch.py.
-_BUILTIN_CALLABLE_NAMES: frozenset[str] = frozenset({
-    "join", "split", "splitlines", "strip", "lstrip", "rstrip", "lower",
-    "upper", "title", "startswith", "endswith", "encode", "decode", "format",
-    "replace", "find", "rfind",
-    "get", "keys", "values", "items", "setdefault", "update", "popitem",
-    "append", "extend", "pop", "insert", "remove", "index", "count", "sort",
-    "reverse", "add", "discard", "clear", "copy",
-    "rsplit", "zfill", "casefold", "loads", "dumps",
-    "isinstance", "issubclass", "len", "print", "open", "type", "super",
-    "getattr", "setattr", "hasattr", "delattr", "repr", "str", "int", "float",
-    "bool", "list", "dict", "set", "tuple", "iter", "next", "range", "zip",
-    "map", "filter", "sorted", "reversed", "enumerate", "sum", "min", "max",
-    "abs", "round", "all", "any", "id", "hash", "vars", "dir", "callable",
-    "exists",
-    "push", "shift", "unshift", "slice", "splice", "concat", "indexof",
-    "foreach", "tostring", "write", "read", "close", "new", "make", "clone",
-    "unwrap", "expect",
-})
-
-
-def _is_builtin_shadow_name(name: str) -> bool:
-    """True when ``name`` is a builtin/dunder callable name whose call edges
-    cannot be trusted as facts regardless of recorded provenance."""
-    n = (name or "").strip()
-    if not n:
-        return False
-    if n.startswith("__") and n.endswith("__") and len(n) > 4:
-        return True
-    return n.lower() in _BUILTIN_CALLABLE_NAMES
 
 
 def _caller_contract_for_file(

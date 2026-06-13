@@ -101,70 +101,110 @@ except ImportError as _import_err:
     def _product_verify_horizon_band(*a, **kw):
         return None
 
+# ---------------------------------------------------------------------------
+# DELIVERY FACT-FILTER POLICY — SINGLE SOURCE (B1, 2026-06-13).
+# The path-class + name-class classifiers live in groundtruth.delivery
+# (path_policy + name_policy); the FACT gate + cross-language disqualifier live
+# in groundtruth.pretask.curation_map. ALL are imported here from the baked
+# /opt/gt/src so AGENT-TIME delivery applies the IDENTICAL exclusion decisions
+# as the PROOF-TIME brief (which imports the same modules). No inline duplicate.
+#
+# In proof/benchmark mode an import failure is a substrate-PACKAGING defect: it
+# FAILS CLOSED (we never deliver facts through a stale inline copy of the
+# policy). Outside proof mode (dev / container bootstrap) a tiny, explicit,
+# logged degraded stub keeps the hook importable — it is NOT the benchmark
+# policy and is unreachable whenever groundtruth is importable (always, in CI
+# and in-container).
+# ---------------------------------------------------------------------------
+def _gt_proof_or_substrate_mode() -> bool:
+    return (os.environ.get("GT_PROOF_MODE") == "1"
+            or os.environ.get("GT_PORTABLE_SUBSTRATE") == "1"
+            or bool(os.environ.get("GT_HOST_GRAPH_DB"))
+            or bool(os.environ.get("GT_CERT_DIR")))
+
+
+_DELIVERY_POLICY_AVAILABLE = False
+try:
+    from groundtruth.delivery.path_policy import (
+        is_vendored_path as _is_vendored_path,
+        is_minified_file as _is_minified_file,
+        is_delivery_excluded as _is_delivery_excluded,
+    )
+    from groundtruth.delivery.name_policy import (
+        BUILTIN_CALLABLE_NAMES as _BUILTIN_CALLABLE_NAMES,
+        STDLIB_MODULES as _STDLIB_MODULES,
+        is_builtin_shadow_name as _is_builtin_shadow_name,
+        is_stdlib_shadow as _is_stdlib_shadow,
+    )
+    from groundtruth.pretask.curation_map import (
+        DETERMINISTIC_RESOLUTION_METHODS as _DETERMINISTIC_METHODS,
+        _is_cross_language_pair as _is_cross_language_pair,
+        _nodes_have_language as _nodes_have_language,
+    )
+    _DELIVERY_POLICY_AVAILABLE = True
+except Exception as _delivery_import_err:  # noqa: BLE001
+    if _gt_proof_or_substrate_mode():
+        raise RuntimeError(
+            "GT_DELIVERY_POLICY_IMPORT_FAILED: groundtruth.delivery / curation_map "
+            f"not importable under proof/substrate mode ({_delivery_import_err}). "
+            "The substrate must bake src/groundtruth on sys.path; refusing to "
+            "deliver facts through a stale inline copy of the fact-filter."
+        ) from _delivery_import_err
+    # DEGRADED dev/bootstrap stub (NON-proof only) — logged, never silent. NOT the
+    # benchmark policy; the authoritative single source is groundtruth.delivery.
+    print(f"[GT_META] delivery_policy_import_fallback=true reason={_delivery_import_err}",
+          file=sys.stderr, flush=True)
+    _DETERMINISTIC_METHODS = frozenset({
+        "same_file", "import", "import_type", "type_flow", "verified_unique",
+        "impl_method", "inherited", "unique_method", "return_type", "lsp", "lsp_verified",
+    })
+    _BUILTIN_CALLABLE_NAMES = frozenset()
+    _STDLIB_MODULES = frozenset()
+
+    def _is_vendored_path(fp):
+        return False
+
+    def _is_minified_file(repo_root, rel):
+        return False
+
+    def _is_delivery_excluded(fp, repo_root=""):
+        return False
+
+    def _is_builtin_shadow_name(name):
+        n = (name or "").strip()
+        return bool(n.startswith("__") and n.endswith("__") and len(n) > 4)
+
+    def _is_stdlib_shadow(code, target_name):
+        return False
+
+    def _is_cross_language_pair(lang_a, lang_b):
+        return False
+
+    def _nodes_have_language(con):
+        return False
+
 # Strict flag parse (bug #6 parity with gt_agent / every other GT flag):
 # bool(env) made GT_BASELINE=0 enable the baseline arm.
 _GT_BASELINE = os.environ.get("GT_BASELINE") == "1"
 _ROOT_FILE = os.environ.get("GT_ROOT_FILE", "/opt/gt/gt_root.txt")
 _HOOK_TIMEOUT = int(os.environ.get("GT_HOOK_TIMEOUT", "30"))
 
-# ---------------------------------------------------------------------------
-# Categorical FACT gate (ported verbatim from groundtruth.pretask.curation_map
-# DETERMINISTIC_RESOLUTION_METHODS). A cross-file call edge is a FACT only when
-# its resolution_method is one of these STRUCTURAL methods; a `name_match` edge
-# (even a single-candidate one, scored 0.9) is a NAME GUESS, never a fact.
-# Reproduced inline because the groundtruth package is NOT importable in the
-# task container (only gt_hook.py + gt_mini_patch.py + /tmp/graph.db injected).
-# ---------------------------------------------------------------------------
-_DETERMINISTIC_METHODS: frozenset[str] = frozenset(
-    {
-        "same_file", "import", "import_type", "type_flow", "verified_unique",
-        "impl_method", "inherited", "unique_method", "return_type",
-        "lsp", "lsp_verified",
-    }
-)
+# FACT gate (_DETERMINISTIC_METHODS) + stdlib-module set (_STDLIB_MODULES) are
+# imported from the Product single source at the top of this file (B1) — the
+# previous inline copies were removed so a policy change in curation_map /
+# groundtruth.delivery reaches agent-time delivery, not just the proof brief.
 
-# Stdlib/builtin module names whose attribute calls (os.walk, json.loads, ...)
-# get name-matched to a same-named PROJECT function by the indexer. Ported from
-# v1r_brief._STDLIB_MODULES; defends against a DETERMINISTIC-tagged false fact.
-_STDLIB_MODULES: frozenset[str] = frozenset(
-    {
-        "os", "sys", "re", "io", "json", "math", "time", "copy", "glob", "uuid",
-        "shutil", "random", "typing", "logging", "pathlib", "datetime", "string",
-        "decimal", "inspect", "warnings", "argparse", "textwrap", "itertools",
-        "functools", "operator", "collections", "subprocess", "contextlib",
-    }
-)
-_STDLIB_SHADOW_RE = re.compile(r"([A-Za-z_][\w.]*)\.([A-Za-z_]\w*)\s*\(")
-
-# ---------------------------------------------------------------------------
-# DELIVERY FACT-FILTER (2026-06-10, PATH B per-layer health audit, run
-# 27260307167). Two pollution classes were DELIVERED as deterministic facts
-# through L1/L3/L3b ([WITNESS]/[CALLERS]/[CALLEE]/contract/scope):
-#   (a) vendored/minified/generated paths (astropy/extern/jquery/*.min.js
-#       cited as a "resolved caller"; raw minified jQuery as a [WITNESS]);
-#   (b) builtin/dunder-shadow laundering (`isinstance` -> a project method
-#       named isinstance, rendered "1048 verified caller(s) — preserve this
-#       interface"). A bare builtin call resolves verified_unique (0.95,
-#       deterministic) when ONE project symbol shadows the builtin name — the
-#       resolver's T2 builtin drop (gt_gt §2.3) covers QUALIFIED calls only,
-#       and PATH A/B substrate graphs are FROZEN, so the consumer fact surface
-#       is the operative guard.
-# This extends the localizer's `_is_generated` W_GEN demote (ranking) to the
-# DELIVERY surface, and the §2.5 stdlib-shadow guard (commit 55ab30eb) to the
-# bare-call residual. Three composited signals (path-class, content-class,
-# name-class); correct-or-quiet: exclusion suppresses, never invents.
-# ---------------------------------------------------------------------------
-_VENDOR_DIR_MARKERS: tuple[str, ...] = (
-    "/extern/", "/externals/", "/vendor/", "/vendored/", "/third_party/",
-    "/thirdparty/", "/node_modules/", "/bower_components/", "/dist/",
-    "/_generated/", "/generated/", "/site-packages/",
-)
-_MINIFIED_SUFFIXES: tuple[str, ...] = (".min.js", ".min.css", ".min.mjs", ".min.map")
-# Codegen file markers — mirrors graph_localizer._GENERATED_MARKERS (W_GEN).
-_GENERATED_FILE_MARKERS: tuple[str, ...] = (
-    "zz_generated", ".pb.go", ".pb.gw.go", "_pb2.py", "_pb2_grpc.py",
-    ".generated.", "_generated.go", ".g.dart", ".freezed.dart",
-)
+# DELIVERY FACT-FILTER (path-class + name-class) is SINGLE-SOURCED in
+# groundtruth.delivery (path_policy + name_policy) and imported at the top of
+# this file (B1, 2026-06-13). The previous inline path markers + _is_vendored_path
+# / _is_minified_file / _is_delivery_excluded / _BUILTIN_CALLABLE_NAMES /
+# _is_builtin_shadow_name / _is_stdlib_shadow were removed so a policy change
+# reaches BOTH the proof brief AND agent-time delivery. Mirrors the localizer's
+# `_is_generated` W_GEN demote (ranking) on the delivery surface, and resolver.go's
+# T2 builtin drop (index-time, QUALIFIED-only) on the bare-call residual.
+# The OBLIGATION-CREDIT / EDIT-DETECTION helpers below (_SOURCE_EXTS,
+# _SCRATCH_DIR_MARKERS, _has_source_ext, _is_repo_source_path) are a DIFFERENT
+# concern (which writes count as edits) and stay local.
 _SOURCE_EXTS: tuple[str, ...] = (
     ".py", ".pyi", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs", ".java",
     ".kt", ".c", ".h", ".cc", ".cpp", ".hpp", ".rb", ".php", ".cs",
@@ -173,20 +213,6 @@ _SOURCE_EXTS: tuple[str, ...] = (
 _SCRATCH_DIR_MARKERS: tuple[str, ...] = (
     "/tmp/", "/temp/", "/scratch/", "/.tmp/", "/.cache/", "/logs/",
 )
-
-
-def _is_vendored_path(fp: str) -> bool:
-    """Path-class filter: vendored / minified / generated code is never a
-    DELIVERED fact (witness, caller, callee contract, scope, co-change).
-    Language-agnostic path conventions; segment-anchored (leading '/' added so
-    a top-level `vendor/x.go` matches, while `src/distribute.py` does not)."""
-    f = "/" + (fp or "").replace("\\", "/").lstrip("./").lstrip("/").lower()
-    if any(m in f for m in _VENDOR_DIR_MARKERS):
-        return True
-    base = f.rsplit("/", 1)[-1]
-    if base.endswith(_MINIFIED_SUFFIXES):
-        return True
-    return any(m in base for m in _GENERATED_FILE_MARKERS)
 
 
 def _has_source_ext(fp: str) -> bool:
@@ -212,85 +238,6 @@ def _is_repo_source_path(fp: str) -> bool:
         return False
     return low.endswith(_SOURCE_EXTS)
 
-
-# Content-class filter: minified/bundled files outside any vendor dir. Mean
-# non-blank line length > 200 chars is unreachable for hand-written source in
-# any indexed language (minifiers strip newlines). Cached per relpath.
-_MINIFIED_MEAN_LINE_LEN = 200
-_minified_cache: dict[str, bool] = {}
-
-
-def _is_minified_file(repo_root: str, rel: str) -> bool:
-    if rel in _minified_cache:
-        return _minified_cache[rel]
-    verdict = False
-    try:
-        with open(os.path.join(repo_root or "", rel), encoding="utf-8",
-                  errors="ignore") as fh:
-            head = fh.read(16384)
-        lines = [ln for ln in head.splitlines() if ln.strip()]
-        if lines:
-            verdict = (sum(len(ln) for ln in lines) / len(lines)) > _MINIFIED_MEAN_LINE_LEN
-    except OSError:
-        verdict = False
-    _minified_cache[rel] = verdict
-    return verdict
-
-
-def _is_delivery_excluded(fp: str, repo_root: str = "") -> bool:
-    """True when ``fp`` must never appear in a DELIVERED fact. Path-class
-    always; content-class (minified heuristic) when the file is readable."""
-    if _is_vendored_path(fp):
-        return True
-    if repo_root:
-        return _is_minified_file(repo_root, _norm_fp(fp))
-    return False
-
-
-# Name-class filter: builtin/dunder callable names. Mirrors resolver.go
-# builtinMethodNames + strongBuiltinMethodNames (the T2 builtin drop, gt_gt
-# §2.3) and adds the shadowable language builtins the T2 drop cannot see
-# (it only fires on QUALIFIED calls; a bare `isinstance(...)` resolves
-# verified_unique when one project symbol shadows the name). An edge whose
-# TARGET carries one of these names is never delivered as a caller/contract
-# fact — callers overwhelmingly invoke the language builtin, not the project
-# symbol. Static set by design (consistent with the resolver's T2 list; no
-# invented distribution threshold).
-_BUILTIN_CALLABLE_NAMES: frozenset[str] = frozenset({
-    # resolver.go builtinMethodNames (str/dict/list/set methods)
-    "join", "split", "splitlines", "strip", "lstrip", "rstrip", "lower",
-    "upper", "title", "startswith", "endswith", "encode", "decode", "format",
-    "replace", "find", "rfind",
-    "get", "keys", "values", "items", "setdefault", "update", "popitem",
-    "append", "extend", "pop", "insert", "remove", "index", "count", "sort",
-    "reverse", "add", "discard", "clear", "copy",
-    # resolver.go strongBuiltinMethodNames extras
-    "rsplit", "zfill", "casefold", "loads", "dumps",
-    # shadowable Python builtins (the isinstance/len launder class) + os.path
-    "isinstance", "issubclass", "len", "print", "open", "type", "super",
-    "getattr", "setattr", "hasattr", "delattr", "repr", "str", "int", "float",
-    "bool", "list", "dict", "set", "tuple", "iter", "next", "range", "zip",
-    "map", "filter", "sorted", "reversed", "enumerate", "sum", "min", "max",
-    "abs", "round", "all", "any", "id", "hash", "vars", "dir", "callable",
-    "exists",
-    # JS/TS/Go/Rust ultra-common builtin method names
-    "push", "shift", "unshift", "slice", "splice", "concat", "indexof",
-    "foreach", "tostring", "write", "read", "close", "new", "make", "clone",
-    "unwrap", "expect",
-})
-
-
-def _is_builtin_shadow_name(name: str) -> bool:
-    """True when ``name`` is a builtin/dunder callable name whose call edges
-    cannot be trusted as facts regardless of recorded provenance (the bare
-    builtin-shadow launder; dunders are invoked via the language protocol,
-    not by callers naming the project's definition)."""
-    n = (name or "").strip()
-    if not n:
-        return False
-    if n.startswith("__") and n.endswith("__") and len(n) > 4:
-        return True
-    return n.lower() in _BUILTIN_CALLABLE_NAMES
 
 # per-file-once dedup, keyed (kind, relpath)
 _seen: set[tuple[str, str]] = set()
@@ -645,66 +592,12 @@ def _has_columns(con) -> tuple[bool, bool]:
     return ("confidence" in cols, "resolution_method" in cols)
 
 
-# ---------------------------------------------------------------------------
-# CROSS-LANGUAGE edge disqualifier (2026-06-10, DeepSWE non-Python audit, run
-# 27290157847). boa ledger [57]: a first-party JS benchmark
-# (`benches/scripts/v8-benches/deltablue.js`) rendered as a [CALLERS] FACT for
-# Rust `core/engine/src/module/source.rs` — cross-language name collision on
-# `execute`. Measured on the run's own graph.db: 214 cross-language CALLS
-# edges, 99 carrying DETERMINISTIC stamps (verified_unique=42, impl_method=26,
-# type_flow=24, unique_method=7) — the indexer's typed tiers match candidates
-# ACROSS languages, so the _DETERMINISTIC_METHODS fact gate admits them and
-# the vendored-path filter misses them (benches/ is first-party). A source-
-# level call edge between files of DIFFERENT language families is impossible
-# (tree-sitter call resolution is intra-language; FFI never surfaces as a
-# name-matched source call). Families group real same-toolchain interop so
-# legitimate mixed projects are untouched: js/ts (one compilation unit),
-# java/kotlin/scala/groovy (mixed JVM builds), c/c++/objc/swift (headers /
-# bridging). Unknown or absent languages are PERMISSIVE — never suppress an
-# edge whose languages we cannot judge (the suppression itself must be a
-# fact). The index-time residual (resolver.go candidate pools should be
-# language-scoped) is flagged for the next substrate rebuild; substrate
-# graphs are FROZEN, so this consumer filter is the operative guard.
-# ---------------------------------------------------------------------------
-_LANG_FAMILIES: dict[str, str] = {
-    "javascript": "jslike", "typescript": "jslike", "jsx": "jslike",
-    "tsx": "jslike", "vue": "jslike", "svelte": "jslike",
-    "java": "jvm", "kotlin": "jvm", "scala": "jvm", "groovy": "jvm",
-    "c": "cfamily", "cpp": "cfamily", "c++": "cfamily", "objc": "cfamily",
-    "objcpp": "cfamily", "objective-c": "cfamily", "swift": "cfamily",
-    "python": "python", "go": "go", "rust": "rust", "ruby": "ruby",
-    "php": "php", "csharp": "csharp", "c#": "csharp", "lua": "lua",
-    "elixir": "elixir", "erlang": "erlang", "haskell": "haskell",
-    "dart": "dart", "r": "r", "julia": "julia", "perl": "perl",
-    "bash": "shell", "shell": "shell", "sh": "shell", "zig": "zig",
-    "ocaml": "ocaml", "clojure": "jvm",
-}
-
-
-def _lang_family(language) -> str | None:
-    """Language-family key for ``language`` (graph ``nodes.language``), or
-    None when unknown/absent — None means 'cannot judge', never 'different'."""
-    if not language:
-        return None
-    return _LANG_FAMILIES.get(str(language).strip().lower())
-
-
-def _is_cross_language_pair(lang_a, lang_b) -> bool:
-    """True ONLY when both languages are known and their families differ —
-    such a CALLS edge cannot be a real source-level call, whatever its
-    recorded resolution_method says. Unknown on either side -> False."""
-    fa, fb = _lang_family(lang_a), _lang_family(lang_b)
-    return fa is not None and fb is not None and fa != fb
-
-
-def _nodes_have_language(con) -> bool:
-    """True when the nodes table carries the ``language`` column (legacy
-    graphs may not; they stay PERMISSIVE — no cross-language judgement)."""
-    try:
-        cols = {r[1] for r in con.execute("PRAGMA table_info(nodes)").fetchall()}
-    except Exception:  # noqa: BLE001
-        return False
-    return "language" in cols
+# CROSS-LANGUAGE edge disqualifier (_is_cross_language_pair) + the language-column
+# probe (_nodes_have_language) are imported from groundtruth.pretask.curation_map
+# at the top of this file (B1, 2026-06-13) — the previous inline copies (the
+# _LANG_FAMILIES map + helpers) were removed so the same disqualifier governs the
+# proof brief AND agent-time delivery. A cross-language CALLS edge cannot be a real
+# source call whatever its resolution_method; unknown languages stay PERMISSIVE.
 
 
 # ---------------------------------------------------------------------------
@@ -729,19 +622,6 @@ def _snippet_attests(code: str, symbol: str) -> bool:
     if not code or not symbol:
         return True
     return symbol in code
-
-
-def _is_stdlib_shadow(code: str, target_name: str) -> bool:
-    """True when ``code`` calls ``<stdlib_module>.<target_name>(`` — a stdlib
-    attribute call the indexer name-matched to a project function of the same
-    name. Ported from v1r_brief._is_stdlib_shadow. Language-agnostic."""
-    if not code or not target_name:
-        return False
-    for m in _STDLIB_SHADOW_RE.finditer(code):
-        head = m.group(1).split(".")[0]
-        if m.group(2) == target_name and head in _STDLIB_MODULES:
-            return True
-    return False
 
 
 def _code_at(repo_root: str, rel_file: str, line: int) -> str:
