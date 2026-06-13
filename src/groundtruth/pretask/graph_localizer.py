@@ -42,6 +42,7 @@ import os
 import re as _re
 import sqlite3
 import statistics
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 from groundtruth.pretask.anchors import IssueAnchors, extract_issue_anchors
@@ -170,6 +171,43 @@ _WITNESS_DEFINES_CEIL = _WITNESS_VERIFIED * (1.0 / (1.0 + _MAX_DECAY_HOP)) * 0.9
 _HUB_SCALE = 50.0
 
 _MIN_ANCHOR_LEN = 3
+
+# Degree edge-type scope (D5 fix, 2026-06-13). fan_out/fan_in and the file-level
+# in-degree centrality prior MUST count ONLY structural/navigation edges — the
+# edges that represent how an agent actually traverses the code (CALLS / CONTAINS /
+# EXTENDS / IMPLEMENTS / IMPORTS / RE_EXPORTS / COMPOSES / ...). When relationship
+# promotion ships (depth), it mints PROMOTED relationship edge types and/or stamps
+# `resolution_method LIKE 'promote_%'`. Those inflate node degree (~1.88x measured;
+# 868 nodes gain fan_out purely from promoted edges), defeating the SLOC<=4/
+# fan_out==0 trivial-validator and regressing ranking (a trivial validator suddenly
+# looks structurally connected). The trivial-validator and the degree prior must
+# EXCLUDE the promoted relationship edges so degree reflects navigation only.
+#
+# BLACKLIST, not whitelist: live graphs already carry legitimate structural types
+# beyond the canonical five (measured: RE_EXPORTS for JS/TS re-exports, COMPOSES for
+# struct/class composition). A whitelist of {CALLS,CONTAINS,EXTENDS,IMPLEMENTS,
+# IMPORTS} would WRONGLY drop those and change degree on current graphs. Excluding
+# the promoted RELATIONSHIP types (+ promote_% provenance) is the only construction
+# that is a strict no-op today and a fix once promotion ships.
+#
+# DEGRADE-SAFE: on current live graphs (no promotion pass yet) NO edge has a promoted
+# type and NO edge has `resolution_method LIKE 'promote_%'` (measured: 0 across all
+# scanned live graphs), so this predicate matches every existing edge — identical
+# counts to the unfiltered query. It becomes load-bearing only once promoted edges
+# exist.
+_PROMOTED_EDGE_TYPES: tuple[str, ...] = (
+    "DATA_FLOW", "READS", "WRITES", "RAISES", "CO_SERIALIZES", "PRECEDES",
+)
+# SQL predicate (alias-parameterized) that EXCLUDES promoted relationship edges and
+# any promoted-provenance edge from a degree count. `{a}` is the edge-table alias.
+def _degree_edge_filter(a: str) -> str:
+    types_not_in = ", ".join("'" + t + "'" for t in _PROMOTED_EDGE_TYPES)
+    return (
+        f"{a}.type NOT IN ({types_not_in}) "
+        f"AND ({a}.resolution_method IS NULL "
+        f"OR {a}.resolution_method NOT LIKE 'promote_%')"
+    )
+
 
 # Shared FTS5 DDL — single source of truth so schema changes don't diverge
 # across the Go indexer, Python fallback, and preflight script.
@@ -1058,11 +1096,17 @@ def _role_discount_for_function(
     ARISE 2025: score = α×rel×role + β×proximity (α=0.3, β=0.5).
     """
     try:
+        # fan_out/fan_in count ONLY structural/navigation edges (D5). Promoted
+        # relationship edges (DATA_FLOW/READS/WRITES/RAISES/...) must not inflate
+        # degree or a trivial validator would falsely look connected (fan_out>0).
+        _ef = _degree_edge_filter("e")
         row = conn.execute(
-            """SELECT
+            f"""SELECT
                 COALESCE(n.end_line - n.start_line, 0) as sloc,
-                (SELECT COUNT(*) FROM edges e WHERE e.source_id = n.id) as fan_out,
-                (SELECT COUNT(*) FROM edges e WHERE e.target_id = n.id) as fan_in
+                (SELECT COUNT(*) FROM edges e
+                 WHERE e.source_id = n.id AND {_ef}) as fan_out,
+                (SELECT COUNT(*) FROM edges e
+                 WHERE e.target_id = n.id AND {_ef}) as fan_in
             FROM nodes n WHERE n.file_path = ? AND n.name = ?
             AND n.is_test = 0 AND n.label IN ('Function', 'Method')
             LIMIT 1""",
@@ -1081,11 +1125,18 @@ def _role_discount_for_function(
 
 
 def _file_degrees(conn: sqlite3.Connection, files: set[str]) -> dict[str, int]:
-    """In-degree (number of incoming CALLS) per file — the centrality prior."""
+    """In-degree (incoming structural edges) per file — the centrality prior.
+
+    Counts ONLY structural/navigation edges (D5): promoted relationship edges
+    (DATA_FLOW/READS/WRITES/RAISES/...) must not inflate the degree prior that
+    feeds W_DEGREE, or hubs gain artificial centrality once promotion ships.
+    Degrade-safe: a no-op on current live graphs (all edges already structural).
+    """
     if not files:
         return {}
     deg: dict[str, int] = {}
     files_l = list(files)
+    _ef = _degree_edge_filter("e")
     for i in range(0, len(files_l), 400):
         chunk = files_l[i : i + 400]
         ph = ",".join("?" for _ in chunk)
@@ -1093,7 +1144,7 @@ def _file_degrees(conn: sqlite3.Connection, files: set[str]) -> dict[str, int]:
             rows = conn.execute(
                 f"SELECT n.file_path, COUNT(e.id) FROM nodes n "
                 f"JOIN edges e ON e.target_id = n.id "
-                f"WHERE n.file_path IN ({ph}) GROUP BY n.file_path",
+                f"WHERE n.file_path IN ({ph}) AND {_ef} GROUP BY n.file_path",
                 chunk,
             ).fetchall()
         except sqlite3.Error:

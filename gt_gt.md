@@ -260,7 +260,7 @@ bar.
 | IMPLEMENTS | class -> interface | PRESENT (js/ts/java/kotlin/go-CHA) |
 | IMPORTS | importer file -> imported module/symbol | **ABSENT — FRESH-EXTRACT** (re-emit the parsed imports the 6 Tier-1 extractors already feed the resolver, to a File/module-anchor node) |
 | DATA_FLOW (annotation) | def-site -> use-callee | **on CALLS.metadata** (intra-proc; 1133/2591 reach a callee). Not a standalone edge |
-| READS | reader -> read method/symbol | **PROMOTE-PARTIAL** from `field_read` (only ~12% resolve to a sibling node; field-targets stay descriptors) |
+| READS | reader method -> owning Class (A-cut via parent_id) | **PROMOTE-PARTIAL** from `field_read` (reader resolves to its OWNING Class via `parent_id`; field-only reads stay descriptors) |
 | RAISES | raiser -> exception class | **PROMOTE-PARTIAL** from `exception_type`/`exception_flow` (39/47 distinct are internal classes; builtins stay property) |
 | CO_SERIALIZES | serialize <-> partner fn | **PROMOTE-NOW** from `serialization_pair` — **100% resolvable**, the value carries `@file:line` |
 | USES (annotation) | caller -> callee + usage kind | **on CALLS.metadata** from `caller_usage` (47% ride an existing CALLS edge) |
@@ -309,36 +309,52 @@ On a real db (e.g. adaptix python: 3160 nodes, CALLS 4823 / CONTAINS 1276 / EXTE
   completeness equality, zero-orphan JOIN, and zero-invention assertions all green — and
   `contract_map.py`'s property read unchanged (same row counts in `properties`).
 
-#### IMPLEMENTED (2026-06-13) — generalized property→edge promote pass (proven by execution)
+#### REFERENCE-PROVEN (2026-06-13) — generalized property→edge promote pass (proven on COPIES via the Python reference port)
 
-The §2.6 "100% depth bar" is no longer a spec — the promote-from-property pass is **implemented and proven by execution** on real graph.db copies across 4 languages. This addendum records the implemented state; it does not change the §2.6 contract above.
+> **SUPERSEDED 2026-06-13 (architecture LIPI w6q8frk6x)** — earlier wording here read "implemented
+> and proven by execution" / "1:1 mirror"; that overstates the state. The promote pass is **proven on
+> COPIES via the Python REFERENCE port** only. The PRODUCTION home is the **Go indexer Pass 4f**, which
+> is **UNBUILT** (Codespace `go build`/`go test` gate, see "Still open"). Per §2.1 the Go indexer owns
+> all graph writes; the Python pass is a **copies-only reference port** that must refuse to run against a
+> live indexing graph. Stage-1 is DONE only when the Go pass runs in the indexer — NOT when the reference
+> port runs over copies.
 
-#### What shipped (reference port, proven) + Go production port (written, unbuilt)
-- **Reference port:** a single language-agnostic promote pass reads the EXISTING `properties` table and materializes traversable `edges` rows for every relational property whose value encodes two RESOLVABLE endpoints. Ran on **8 copied graph.db files** (originals never mutated), **8/8 RED->GREEN PASS (exit 0)**.
-- **Go production home:** `gt-index/internal/resolver/promote.go` (`PromotePropertyEdges`) + `promote_test.go` (RED->GREEN depth fixture). Mirrors the reference 1:1, idempotent (deletes prior `promote_%` edges), additive (properties rows untouched), with a builtin-exception denylist. **UNBUILT — no local Go toolchain; not yet registered in `main.go` (must sit after Pass 4d, before Pass 4e closure).**
+The §2.6 "100% depth bar" is no longer only a spec — the promote-from-property pass is **proven on COPIES via the Python reference port** across 4 languages (production = the Go Pass 4f port, UNBUILT). This addendum records that reference-proven state; it does not change the §2.6 contract above.
 
-#### Six promoted edge classes (+ one annotation), per §2.6 TARGET EDGE SCHEMA
-`CO_SERIALIZES` (serialization_pair, undirected, value carries @file:line), `READS` (field_read -> owning Class), `WRITES` (side_effect write -> owning Class), `RAISES` (exception_type/flow -> internal exception Class; builtins stay property), `DATA_FLOW` (def-site -> resolvable forward-slice callee), `PRECEDES` (call_order, distinct internal nodes only). `USES` is an **annotation on CALLS.metadata** (edge-deduped), never a new edge type — CALLS count is unchanged before/after.
+#### What ran (reference port, proven on copies) + Go production port (written, unbuilt)
+- **Reference port (copies-only):** a single language-agnostic promote pass reads the EXISTING `properties` table and materializes traversable `edges` rows for every relational property whose value encodes two RESOLVABLE endpoints. Ran on **8 copied graph.db files** (originals never mutated; the reference port guards/refuses against a live indexing graph), **8/8 RED->GREEN PASS (exit 0)**.
+- **Go production home (Pass 4f, UNBUILT):** `gt-index/internal/resolver/promote.go` (`PromotePropertyEdges`) + `promote_test.go` (RED->GREEN depth fixture). Intended to follow the reference port's logic (parity is a GOAL, NOT yet a verified 1:1 mirror — it has never been compiled or run), idempotent (deletes prior `promote_%` edges), additive (properties rows untouched), with a builtin-exception denylist. **UNBUILT — no local Go toolchain; not yet registered in `main.go` (must sit after Pass 4d, before Pass 4e closure). Production = Go Pass 4f, gated on the Codespace `go build`/`go test`.**
+
+#### Five promoted edge classes (+ two CALLS.metadata annotations), per §2.6 TARGET EDGE SCHEMA
+`CO_SERIALIZES` (serialization_pair, undirected, value carries @file:line), `READS` (field_read -> owning Class via parent_id), `WRITES` (side_effect write -> owning Class), `RAISES` (exception_type/flow -> internal exception Class; builtins stay property), `PRECEDES` (call_order, distinct internal nodes only). `USES` (caller_usage) AND `DATA_FLOW` (def-site -> resolvable forward-slice callee) are **annotations on CALLS.metadata** (edge-deduped), NOT new edge types — per §2.6 line 262/282 a data_flow use-segment that resolves to callee C from source S appends a dataflow tag to the EXISTING `CALLS` S->C edge (725/774 = 93.7% of segments duplicate a CALLS source->target); only the ~49 def-site->callee hops with NO existing CALLS edge mint a standalone `DATA_FLOW` edge. CALLS count is unchanged before/after for both annotations. **SUPERSEDED 2026-06-13 (architecture LIPI w6q8frk6x)** — earlier wording listed DATA_FLOW as a standalone "promoted edge class" (774 edges); corrected here to the annotation contract (mirrors how USES already rides existing CALLS edges, 0 standalone / 490 CALLS-annotated).
 
 #### Proven per-language counts (representative db per language; independently SQL-verified)
-| lang | db | before types | after types | new edges |
+
+> **SUPERSEDED 2026-06-13 (architecture LIPI w6q8frk6x):** the original "new edges" tally below counted
+> DATA_FLOW as a standalone edge class. Per D1 (line 262/321) DATA_FLOW is a **CALLS.metadata annotation** —
+> only the def-site->callee hops with NO existing CALLS edge are standalone edges (~49 on the python rep:
+> 725/774 = 93.7% of segments duplicate an existing CALLS source->target and become annotations). The
+> standalone-edge totals therefore EXCLUDE the annotated bulk; the DATA_FLOW figure shown per row is the
+> raw segment count (annotations + ~standalone), not standalone edges. Corrected per-row notes follow.
+
+| lang | db | before types | after types | standalone new edges |
 |---|---|---|---|---|
-| go | abs-module-cache-flags | 4 (CALLS,CONTAINS,EXTENDS,IMPLEMENTS) | 9 | **883** — CO_SERIALIZES 39, READS 262, WRITES 57, DATA_FLOW 437, PRECEDES 88 (RAISES 0: panic/error/errors are builtins, suppressed) |
-| python | adaptix-name-mapping-aliases | 3 (CALLS,CONTAINS,EXTENDS) | 9 | **2607** — CO_SERIALIZES 390, READS 658, WRITES 365, RAISES 172, DATA_FLOW 774, PRECEDES 248 |
-| js | aiomonitor-task-snapshots-diff | 3 | 8 | **1247** — DATA_FLOW 909, PRECEDES 163, READS 107, WRITES 67, RAISES 1 (CO_SERIALIZES 0: no serialization_pair props) |
-| ts | awilix-async-container-initialization | 5 (+COMPOSES,RE_EXPORTS pre-existing) | 10 | **56** — DATA_FLOW 22, WRITES 18, READS 9, RAISES 5, PRECEDES 2 (CO_SERIALIZES 0) |
+| go | abs-module-cache-flags | 4 (CALLS,CONTAINS,EXTENDS,IMPLEMENTS) | 9 | CO_SERIALIZES 39, READS 262, WRITES 57, PRECEDES 88 (RAISES 0: panic/error/errors are builtins, suppressed). DATA_FLOW = 437 segments **annotated onto CALLS** (standalone only for no-CALLS hops) |
+| python | adaptix-name-mapping-aliases | 3 (CALLS,CONTAINS,EXTENDS) | 9 | CO_SERIALIZES 390, READS 658, WRITES 365, RAISES 172, PRECEDES 248. DATA_FLOW = 774 segments, 725 (93.7%) **annotated onto existing CALLS**, ~49 standalone (no-CALLS def-site->callee hops) |
+| js | aiomonitor-task-snapshots-diff | 3 | 8 | PRECEDES 163, READS 107, WRITES 67, RAISES 1 (CO_SERIALIZES 0: no serialization_pair props). DATA_FLOW = 909 segments **annotated onto CALLS** (standalone only for no-CALLS hops) |
+| ts | awilix-async-container-initialization | 5 (+COMPOSES,RE_EXPORTS pre-existing) | 10 | WRITES 18, READS 9, RAISES 5, PRECEDES 2 (CO_SERIALIZES 0). DATA_FLOW = 22 segments **annotated onto CALLS** (standalone only for no-CALLS hops) |
 
 #### Contract held (all four §2.6 sub-conditions, verified by INDEPENDENT SQL)
 - **Completeness:** emitted == after for every class on every db; before == 0 from a genuine RED snapshot.
 - **Traversability:** independent_orphans = 0 on all reps — every promoted source_id AND target_id is a real `nodes` row; all promoted target labels are exactly {Class,Function,Method}.
-- **Non-invention:** RAISES-to-builtin = 0 (adaptix: 143 builtin exception_type props -> 0 edges); DATA_FLOW emits only resolvable-callee segments (adaptix 2591 props -> 774 edges; external/value-flow suppressed); bad_target = 0, builtin_exception_leak = 0 on all 8.
+- **Non-invention:** RAISES-to-builtin = 0 (adaptix: 143 builtin exception_type props -> 0 edges); DATA_FLOW resolves only resolvable-callee segments (adaptix 2591 props -> 774 resolved segments; external/value-flow suppressed) and **annotates** the 725 that ride an existing CALLS edge (93.7%), minting standalone DATA_FLOW edges only for the ~49 no-CALLS hops — so CALLS count is unchanged; bad_target = 0, builtin_exception_leak = 0 on all 8.
 - **Additive / non-regression:** `properties` row count byte-for-byte unchanged before/after on all 8 — contract_map.py's §4 TEXT read is intact.
 
 #### ONE code path, per-language = MINING ONLY
 The same promote logic produced edges across go/py/js/ts with **zero per-language branch in the emit path**. Extending coverage to another language is **property-mining only** (add the upstream tree-sitter property emitter); the edge model, endpoint resolution, dedup, non-invention gate, and trust model are shared and language-agnostic.
 
 #### Still open to true 100% (honest)
-IMPORTS edges are a **fresh-extract** (no property carries them) -> needs Go tree-sitter parser change + CGO rebuild. The Go promote port needs Codespace `go build`/`go test` + main.go registration before it ships (Stage-1 DONE only when it runs in the indexer, not when the Python reference port runs over copies). TYPE_FLOW accuracy (receiver-type / 58% method gap) is a separate phase.
+IMPORTS edges are a **fresh-extract** (no property carries them) -> needs Go tree-sitter parser change + CGO rebuild. The Go promote port (**Pass 4f**, production home — §2.1: the Go indexer owns all writes) needs Codespace `go build`/`go test` + main.go registration before it ships (Stage-1 DONE only when the Go pass runs in the indexer, NOT when the Python copies-only reference port runs over copies). TYPE_FLOW accuracy (receiver-type / 58% method gap) is a separate phase.
 
 ---
 

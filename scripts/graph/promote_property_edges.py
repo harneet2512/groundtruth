@@ -2,6 +2,14 @@
 """
 promote_property_edges.py -- gt_gt.md  2.6 PROMOTE-TO-EDGES pass.
 
+REFERENCE-ONLY (gt_gt.md  2.1): the Go indexer
+(`gt-index/internal/resolver/promote.go`) OWNS production writes to graph.db. This
+Python module is a COPIES-ONLY reference proof of the  2.6 promote logic -- it
+mirrors the Go pass 1:1 for RED->GREEN verification on a *copy* of a graph.db. It
+MUST NOT be run against a live indexing/production graph. The  2.6 'implemented and
+proven' claim is a COPIES-ONLY reference proof, not a production-write path. Pass an
+explicit copy path (or --allow-prod to override the copy guard, at your own risk).
+
 DEPTH = completeness of the navigable relationship-edge graph (gt_gt.md  2.6).
 A relation trapped in a per-node `properties` string is, for navigation, a MISSING
 edge: contract_map.py reads it as text for the one node it hangs off, but no
@@ -30,8 +38,13 @@ Edge classes (gt_gt.md  2.6 TARGET EDGE SCHEMA):
   CO_SERIALIZES  <- serialization_pair   (PROMOTE-NOW, value carries @file:line)
   READS          <- field_read           (method -> owning Class; A-cut)
   WRITES         <- side_effect           (method -> owning Class, write semantics)
-  RAISES         <- exception_type/flow   (raiser -> internal exception Class only)
-  DATA_FLOW      <- data_flow             (def-site -> resolvable use-callee)
+  RAISES         <- exception_type/flow   (raiser -> internal exception class; polyglot
+                                           labels {Class,Struct,Type,Enum,Interface};
+                                           dotted names dropped, builtins stay property)
+  DATA_FLOW(annot)<- data_flow            (annotate EXISTING CALLS edge metadata when a
+                                           CALLS S->C exists; mint a standalone DATA_FLOW
+                                           edge ONLY for the def-site->callee hops with NO
+                                           CALLS edge -- mirrors the USES annotation path)
   USES (annot.)  <- caller_usage          (annotate EXISTING CALLS edge metadata)
   PRECEDES       <- call_order            (a -> b, distinct internal nodes only)
 """
@@ -82,6 +95,12 @@ _BUILTIN_EXCEPTIONS = {
 
 # Tokens that signal the exception_type value is NOT a clean class name -> drop.
 _NON_NAME_TOKEN = re.compile(r"\s+from\s+|[.(\[]| None$")
+
+# Polyglot class-like labels an exception type may resolve to (D3 canonical: a RAISES
+# target is a user-defined type, which carries a different label per language --
+# python/js/ts=Class, go=Struct/Type/Interface, rust=Struct/Enum, etc.). Keeps Python
+# and Go 1:1 instead of the python-only 'Class' filter.
+_CLASS_LIKE_LABELS = {"Class", "Struct", "Type", "Enum", "Interface"}
 
 
 # --- the promote pass --------------------------------------------------------
@@ -318,17 +337,23 @@ def promote(db_path: str, verbose: bool = False) -> dict:
                 tok = value.strip()
             if not tok:
                 continue
-            # drop noisy non-name values ('X from e', 'X.make', 'raise', literals)
+            # D3: a DOTTED name ('mod.Err', 'errors.New') is NOT a clean internal class
+            # -> DROP it (no edge, stays property). For an exception_flow free-text
+            # value ('X from e') keep only the leading bare identifier; if that still
+            # carries a dot/paren/bracket it is dropped below by the _IDENT.fullmatch.
+            if "." in tok:
+                continue  # dotted -> not a clean internal class, stays property
             if _NON_NAME_TOKEN.search(tok):
-                base = tok.split(".")[0].split()[0].strip()
+                base = tok.split()[0].strip()
             else:
                 base = tok
             if not base or not _IDENT.fullmatch(base):
                 continue
             if base in _BUILTIN_EXCEPTIONS:
                 continue  # builtin -> NO edge, stays property (non-invention)
-            # resolve to an INTERNAL Class node
-            cands = [r for r in idx.by_name.get(base, []) if r["label"] == "Class"]
+            # resolve to an INTERNAL class-like node (polyglot labels, D3)
+            cands = [r for r in idx.by_name.get(base, [])
+                     if r["label"] in _CLASS_LIKE_LABELS]
             if not cands:
                 continue  # unresolved -> stays property
             same = [r for r in cands if r["file"] == src["file"]]
@@ -343,7 +368,17 @@ def promote(db_path: str, verbose: bool = False) -> dict:
                 "exception", json.dumps({"exception": base}), src["file"], line))
             counts["RAISES"] += 1
 
-    # ---- 5. DATA_FLOW (data_flow) -- def-site -> resolvable use-callee ----------
+    # ---- 5. DATA_FLOW (data_flow) -- ANNOTATE existing CALLS edge; mint a ---------
+    #         standalone edge ONLY for the def-site->callee hop with NO CALLS edge.
+    # D1 (gt_gt.md  2.6 line 262): DATA_FLOW is a CALLS.metadata ANNOTATION, not a
+    # standalone edge type. ~94% of the def-site->use-callee hops DUPLICATE an
+    # existing CALLS source->target -- promoting them to a standalone DATA_FLOW edge
+    # mints a redundant parallel edge. So: if a CALLS edge src->callee EXISTS, append
+    # a dataflow tag to THAT edge's metadata (mirrors the USES annotation path); ONLY
+    # mint a standalone DATA_FLOW edge for the residual def-site->callee hop that has
+    # NO CALLS edge to ride.
+    dataflow_meta = defaultdict(set)  # edge_id -> {callee names flowing along it}
+    seen_df_annot = set()             # (edge_id, callee) dedup for the annotation path
     for nid, value, line in cur.execute(
         "SELECT node_id, value, line FROM properties WHERE kind='data_flow'"
     ).fetchall():
@@ -361,6 +396,17 @@ def promote(db_path: str, verbose: bool = False) -> dict:
                 continue  # pure value flow / external -> SUPPRESS (no edge)
             callee_full = cm.group(1)
             callee = callee_full.rsplit(".", 1)[-1]  # forward-slice to the name
+            # If a CALLS edge src->callee already exists, ANNOTATE it (no new edge).
+            eid = calls_idx.get((src["id"], callee))
+            if eid is not None:
+                annot_key = (eid, callee)
+                if annot_key in seen_df_annot:
+                    continue
+                seen_df_annot.add(annot_key)
+                dataflow_meta[eid].add(callee)
+                counts["DATA_FLOW_ANNOT"] += 1
+                continue
+            # No CALLS edge to ride -> resolve + mint a STANDALONE DATA_FLOW edge.
             tgt, cc = idx.resolve(callee, src["file"])
             if tgt is None:
                 continue  # external/unresolvable callee -> SUPPRESS
@@ -439,8 +485,12 @@ def promote(db_path: str, verbose: bool = False) -> dict:
         ":verification_status)",
         new_edges,
     )
-    # ---- apply USES annotations onto existing CALLS edges (additive metadata) ---
-    for eid, ann in uses_meta.items():
+    # ---- apply USES + DATA_FLOW annotations onto existing CALLS edges -----------
+    #      (additive metadata; D1: DATA_FLOW rides the CALLS edge, like USES). One
+    #      UPDATE per touched CALLS edge merges both the usage kind and the dataflow
+    #      callee tag.
+    annot_eids = set(uses_meta) | set(dataflow_meta)
+    for eid in annot_eids:
         row = cur.execute("SELECT metadata FROM edges WHERE id=?", (eid,)).fetchone()
         meta = {}
         if row and row[0]:
@@ -448,7 +498,15 @@ def promote(db_path: str, verbose: bool = False) -> dict:
                 meta = json.loads(row[0])
             except (ValueError, TypeError):
                 meta = {"_raw": row[0]}
-        meta.update(ann)
+        if eid in uses_meta:
+            meta.update(uses_meta[eid])
+        if eid in dataflow_meta:
+            # additive 'dataflow' tag: the param/value forward-slice rides this CALLS
+            # edge (merge with any pre-existing dataflow tag for idempotence).
+            existing = meta.get("dataflow")
+            callees = set(existing) if isinstance(existing, list) else set()
+            callees |= dataflow_meta[eid]
+            meta["dataflow"] = sorted(callees)
         cur.execute("UPDATE edges SET metadata=? WHERE id=?",
                     (json.dumps(meta), eid))
 
@@ -581,18 +639,92 @@ def prove(db_path: str) -> dict:
         result["failures"].append(
             f"ADDITIVE: properties {props_before}->{props_after} (must be equal)")
 
+    # (e) D1 DATA_FLOW = CALLS.metadata ANNOTATION, not a standalone edge.
+    #     (1) NO standalone DATA_FLOW edge may duplicate an existing CALLS S->T --
+    #         a duplicate means the annotation path should have caught it.
+    #     (2) The annotation path must have tagged CALLS edges (the bulk), so CALLS
+    #         rows now carry a 'dataflow' metadata key.
+    df_dup_standalone = conn.execute(
+        "SELECT COUNT(*) FROM edges d WHERE d.resolution_method='promote_dataflow_callee' "
+        "AND EXISTS (SELECT 1 FROM edges c WHERE c.type='CALLS' "
+        "AND c.source_id=d.source_id AND c.target_id=d.target_id)").fetchone()[0]
+    df_standalone = after.get("DATA_FLOW", 0)
+    df_annotated_calls = conn.execute(
+        "SELECT COUNT(*) FROM edges WHERE type='CALLS' "
+        "AND metadata LIKE '%\"dataflow\"%'").fetchone()[0]
+    df_annot_emitted = counts.get("DATA_FLOW_ANNOT", 0)
+    result["dataflow_standalone"] = df_standalone
+    result["dataflow_dup_standalone"] = df_dup_standalone
+    result["dataflow_annotated_calls"] = df_annotated_calls
+    result["dataflow_annot_emitted"] = df_annot_emitted
+    annot_ok = (df_dup_standalone == 0 and df_annotated_calls > 0)
+    result["assertions"]["dataflow_is_calls_annotation"] = annot_ok
+    if df_dup_standalone != 0:
+        result["failures"].append(
+            f"D1 DATA_FLOW: {df_dup_standalone} standalone edges duplicate a CALLS "
+            f"S->T (should be CALLS.metadata annotations)")
+    if df_annotated_calls == 0:
+        result["failures"].append(
+            "D1 DATA_FLOW: no CALLS edge carries a 'dataflow' annotation "
+            "(annotation path did not fire)")
+
     conn.close()
     result["passed"] = len(result["failures"]) == 0
     return result
 
 
+# --- D4 copies-only guard (gt_gt.md  2.1: the Go indexer OWNS production writes) ---
+# Path tokens that mark a db as a throwaway/copy (safe to mutate). A db whose path
+# carries none of these is treated as POSSIBLY-PRODUCTION and refused unless the
+# operator passes --allow-prod to acknowledge they are pointing at a copy.
+_COPY_PATH_TOKENS = ("tmp", "temp", "copy", "work", "scratch", "_before",
+                     "_after", "fresh", "proof", "reference")
+
+
+def _is_copy_path(db_path: str) -> bool:
+    low = db_path.replace("\\", "/").lower()
+    return any(tok in low for tok in _COPY_PATH_TOKENS)
+
+
+def _reference_only_guard(db_path: str, allow_prod: bool) -> None:
+    """Print the REFERENCE-ONLY banner; refuse to run on a non-copy path.
+
+    This module is a COPIES-ONLY reference proof -- the Go indexer
+    (gt-index/internal/resolver/promote.go) owns production writes (gt_gt.md  2.1).
+    Mutating a live indexing/production graph.db with the Python reference pass would
+    fork ownership of the edges table. So: refuse unless the path looks like a copy
+    OR the operator explicitly passes --allow-prod.
+    """
+    print("=" * 72, file=sys.stderr)
+    print("REFERENCE-ONLY -- the Go indexer owns production writes (gt_gt.md  2.1).",
+          file=sys.stderr)
+    print("This Python pass is a COPIES-ONLY reference proof. Run it on a COPY of a",
+          file=sys.stderr)
+    print("graph.db, never on a live indexing/production database.", file=sys.stderr)
+    print("=" * 72, file=sys.stderr)
+    if allow_prod:
+        print("  --allow-prod set: copy guard overridden by operator.", file=sys.stderr)
+        return
+    if not _is_copy_path(db_path):
+        print(f"REFUSING: '{db_path}' does not look like a copy "
+              f"(no {_COPY_PATH_TOKENS} token in path).", file=sys.stderr)
+        print("  Copy the db first, point at the copy, or pass --allow-prod to override.",
+              file=sys.stderr)
+        sys.exit(2)
+
+
 def main():
-    ap = argparse.ArgumentParser(description="gt_gt  2.6 promote-to-edges pass")
-    ap.add_argument("db", help="path to graph.db")
+    ap = argparse.ArgumentParser(description="gt_gt  2.6 promote-to-edges pass "
+                                 "(REFERENCE-ONLY -- Go indexer owns prod writes,  2.1)")
+    ap.add_argument("db", help="path to a COPY of graph.db (reference-only)")
     ap.add_argument("--prove", action="store_true",
                     help="record BEFORE/AFTER and assert the 2.6 bar")
     ap.add_argument("--json", action="store_true", help="emit JSON")
+    ap.add_argument("--allow-prod", action="store_true",
+                    help="override the copies-only guard (you assert this is a copy)")
     args = ap.parse_args()
+
+    _reference_only_guard(args.db, args.allow_prod)
 
     if args.prove:
         res = prove(args.db)
@@ -607,6 +739,10 @@ def main():
             print(f"  orphans={res['orphan_count']} bad_target={res['bad_target_count']} "
                   f"builtin_leak={res['builtin_exception_leak']} "
                   f"props {res['props_before']}=={res['props_after']}")
+            print(f"  DATA_FLOW: standalone={res['dataflow_standalone']} "
+                  f"(dup-of-CALLS={res['dataflow_dup_standalone']}) "
+                  f"CALLS-annotated={res['dataflow_annotated_calls']} "
+                  f"annot_emitted={res['dataflow_annot_emitted']}")
             print(f"  PASSED: {res['passed']}")
             if res["failures"]:
                 print("  FAILURES:")
