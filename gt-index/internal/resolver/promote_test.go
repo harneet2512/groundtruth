@@ -207,6 +207,50 @@ func TestPromote_RedGreenDepth(t *testing.T) {
 	}
 }
 
+// TestPromote_RaisesThrowFlow_GapA proves GAP A: a conditional `throw [new] <Type>`
+// (JS/TS/Java) carried in an `exception_flow` value now mints a RAISES edge to the
+// internal error class — which the raise-only regex used to miss — while keeping ALL
+// non-invention guards: builtin throws, dotted throws, and Go `panic(...)` (a value, not
+// a named internal class) stay properties.
+func TestPromote_RaisesThrowFlow_GapA(t *testing.T) {
+	root := t.TempDir()
+	db, err := store.Open(filepath.Join(root, "graph.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// 20 Class InternalError (internal JS error class), 21 Method handle (raiser),
+	// 22 Class RangeError-decoy is a BUILTIN name (must NOT mint even if a node exists).
+	execSQL(t, db, `INSERT INTO nodes (id,label,name,file_path,start_line,signature,language,parent_id) VALUES
+	  (20,'Class', 'InternalError','e.js', 1,'',                'javascript',0),
+	  (21,'Method','handle',       'e.js', 5,'handle(req)',     'javascript',20),
+	  (22,'Class', 'RangeError',   'e.js',20,'',                'javascript',0)`)
+
+	execSQL(t, db, `INSERT INTO properties (node_id,kind,value,line,confidence) VALUES
+	  (21,'exception_flow','WHEN x < 0: throw new InternalError("bad")',6,1.0),
+	  (21,'exception_flow','WHEN y == 0: throw new RangeError("oob")',7,1.0),
+	  (21,'exception_flow','WHEN z: throw errors.Wrap(e)',8,1.0),
+	  (21,'exception_flow','WHEN q: panic("boom")',9,1.0)`)
+
+	if _, err := PromotePropertyEdges(db); err != nil {
+		t.Fatalf("PromotePropertyEdges: %v", err)
+	}
+
+	// GREEN: the `throw new InternalError` flow mints exactly ONE RAISES edge 21->20.
+	if got := countEdges(t, db, `type='RAISES' AND source_id=21 AND target_id=20 AND resolution_method LIKE 'promote_%'`); got != 1 {
+		t.Errorf("GAP A: throw-new-InternalError must mint 1 RAISES edge 21->20, got %d", got)
+	}
+	// Non-invention: builtin RangeError (even with a same-named node) mints NO edge.
+	if got := countEdges(t, db, `type='RAISES' AND target_id=22 AND resolution_method LIKE 'promote_%'`); got != 0 {
+		t.Errorf("non-invention: builtin RangeError throw must mint 0 edges, got %d", got)
+	}
+	// Dotted `errors.Wrap` and value `panic(...)` -> NO RAISES edge at all beyond the one above.
+	if got := countEdges(t, db, `type='RAISES' AND resolution_method LIKE 'promote_%'`); got != 1 {
+		t.Errorf("only the internal InternalError throw resolves; dotted/panic stay properties; total RAISES want 1, got %d", got)
+	}
+}
+
 func propertyCounts(t *testing.T, db *store.DB) map[string]int {
 	t.Helper()
 	tx, err := db.BeginTx()

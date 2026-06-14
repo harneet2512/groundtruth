@@ -395,6 +395,24 @@ func main() {
 		ftIdx := resolver.BuildFieldTypeIndex(allProps, nodeDBIDs)
 		resolver.SetFieldTypeIndex(ftIdx)
 		fmt.Fprintf(os.Stderr, "  Declared-type fields: %d classes with typed fields\n", len(ftIdx))
+
+		// GAP C: build the constructor-return-shape index for the Strategy 1.96/1.97
+		// return-type FALLBACK. Reuses the `return_shape` properties (no re-parse): a
+		// factory func whose body returns a bare constructor (`ClassName(...)` /
+		// `&Struct{...}`) gets that class as its inferred return type so `x := factory();
+		// x.M()` / `factory().M()` resolves even when the parser captured no declared
+		// return annotation. classNames is the set of internal class-like node names —
+		// a constructor not naming one is dropped (correct-or-quiet).
+		classNames := make(map[string]bool)
+		for _, m := range nodeMeta {
+			if m.Label == "Class" || m.Label == "Struct" || m.Label == "Type" ||
+				m.Label == "Enum" || m.Label == "Interface" {
+				classNames[m.Name] = true
+			}
+		}
+		rsIdx := resolver.BuildReturnShapeIndex(allProps, nodeDBIDs, classNames)
+		resolver.SetReturnShapeIndex(rsIdx)
+		fmt.Fprintf(os.Stderr, "  Return-shape receivers: %d factories with constructor returns\n", len(rsIdx))
 	}
 
 	// PyCG Step 1: build assignment index for Strategy 1.96
@@ -973,6 +991,17 @@ func runIncremental(root, relpath, dbPath string) error {
 		// reparsed file's `class_field` properties so self.<field>.method() resolves
 		// on `gt-index -file` reindex too (parity with the param index above).
 		resolver.SetFieldTypeIndex(resolver.BuildFieldTypeIndex(pr.Properties, newDBIDs))
+		// GAP C on the incremental path: constructor-return-shape index for the
+		// 1.96/1.97 return-type fallback, parity with the full-index path. classNames
+		// is the FULL cross-file class-like name set (nodeMeta spans all files).
+		classNames := make(map[string]bool)
+		for _, m := range nodeMeta {
+			if m.Label == "Class" || m.Label == "Struct" || m.Label == "Type" ||
+				m.Label == "Enum" || m.Label == "Interface" {
+				classNames[m.Name] = true
+			}
+		}
+		resolver.SetReturnShapeIndex(resolver.BuildReturnShapeIndex(pr.Properties, newDBIDs, classNames))
 	}
 
 	resolved := resolver.Resolve(pr.Calls, nameIndex, fileIndex, callerDBIDs, pr.Imports, fileMap, nodeMeta)
@@ -1519,10 +1548,10 @@ func detectSerdePairs(db *store.DB, allNodes []*store.Node, nodeDBIDs []int64) i
 	// Group function nodes by (file_path, parent_id) — functions in the same
 	// file and class/module scope are candidates for serde pairing.
 	type nodeRef struct {
-		name   string
-		dbID   int64
-		line   int
-		sig    string
+		name string
+		dbID int64
+		line int
+		sig  string
 	}
 	type groupKey struct {
 		filePath string
