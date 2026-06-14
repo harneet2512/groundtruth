@@ -110,12 +110,12 @@ func TestResolve_FieldType_UnknownFieldTypeFallsThrough(t *testing.T) {
 		"cache.py": {"CacheClient": {5}, "get": {6}},
 	}
 	meta := map[int64]NodeMeta{
-		1: {Label: "Method", File: "svc.py", Name: "handler", ParentID: 10},
+		1:  {Label: "Method", File: "svc.py", Name: "handler", ParentID: 10},
 		10: {Label: "Class", File: "svc.py", Name: "Service"},
-		3: {Label: "Class", File: "net.py", Name: "HttpClient"},
-		4: {Label: "Method", File: "net.py", Name: "get", ParentID: 3},
-		5: {Label: "Class", File: "cache.py", Name: "CacheClient"},
-		6: {Label: "Method", File: "cache.py", Name: "get", ParentID: 5},
+		3:  {Label: "Class", File: "net.py", Name: "HttpClient"},
+		4:  {Label: "Method", File: "net.py", Name: "get", ParentID: 3},
+		5:  {Label: "Class", File: "cache.py", Name: "CacheClient"},
+		6:  {Label: "Method", File: "cache.py", Name: "get", ParentID: 5},
 	}
 	calls := []parser.CallRef{
 		{CallerNodeIdx: 0, CalleeName: "get", CalleeQualified: "self.client.get", Line: 5, File: "svc.py"},
@@ -269,9 +269,9 @@ func TestBuildFieldTypeIndex_AnnotationOnlySkipsAssignment(t *testing.T) {
 	// node 10 = a Class; class_field props attach to the class node.
 	nodeDBIDs := []int64{0, 100} // NodeIdx 0 -> dbid 0 (skip), NodeIdx 1 -> dbid 100
 	props := []parser.PropertyRef{
-		{NodeIdx: 1, Kind: "class_field", Value: "client: HttpClient"},   // annotation → keep
-		{NodeIdx: 1, Kind: "class_field", Value: "x = CharField(100)"},    // assignment → SKIP
-		{NodeIdx: 1, Kind: "param", Value: "p: NotAField"},                // wrong kind → SKIP
+		{NodeIdx: 1, Kind: "class_field", Value: "client: HttpClient"}, // annotation → keep
+		{NodeIdx: 1, Kind: "class_field", Value: "x = CharField(100)"}, // assignment → SKIP
+		{NodeIdx: 1, Kind: "param", Value: "p: NotAField"},             // wrong kind → SKIP
 	}
 	idx := BuildFieldTypeIndex(props, nodeDBIDs)
 	got, ok := idx[100]
@@ -318,8 +318,8 @@ func TestResolve_FieldType_ResolverPath(t *testing.T) {
 				"HttpClient": {3}, "CacheClient": {5}, "get": {4, 6},
 			}
 			fileNodeIDs := map[string]map[string][]int64{
-				c.file:   {"handler": {1}, "Service": {10}},
-				"net.py": {"HttpClient": {3}, "get": {4}},
+				c.file:     {"handler": {1}, "Service": {10}},
+				"net.py":   {"HttpClient": {3}, "get": {4}},
 				"cache.py": {"CacheClient": {5}, "get": {6}},
 			}
 			meta := map[int64]NodeMeta{
@@ -349,11 +349,11 @@ func TestResolve_FieldType_ResolverPath(t *testing.T) {
 	}
 }
 
-// TestBuildFieldTypeIndex_LanguageScope pins the HONEST end-to-end scope of rung 2b:
-// BuildFieldTypeIndex populates from Python/Rust colon-annotation class_field values and
-// (currently) NOT from Go space-separated or TS access-modifier fields. This documents the
-// Python+Rust boundary the rung actually fires on, and will go RED (forcing this assertion
-// + the rung SCOPE comment to be updated) when the Go/TS extension lands.
+// TestBuildFieldTypeIndex_LanguageScope pins the HONEST end-to-end scope of rung 2b after
+// the Go+TS extension: BuildFieldTypeIndex now DRIVES four field shapes (Python/Rust colon,
+// Go space-separated struct field, TS access-modifier field) and ABSTAINS on the
+// non-field-declaration shapes (Go embedded field, assignment). It drives the REAL
+// BuildFieldTypeIndex on each language's class_field value.
 func TestBuildFieldTypeIndex_LanguageScope(t *testing.T) {
 	check := func(val string) map[string]string {
 		return BuildFieldTypeIndex(
@@ -365,13 +365,122 @@ func TestBuildFieldTypeIndex_LanguageScope(t *testing.T) {
 	if got := check("client: HttpClient"); got["client"] != "HttpClient" {
 		t.Errorf("py/rust colon field: got %+v, want client->HttpClient", got)
 	}
-	// Go space-separated struct field (no colon): SKIPPED entirely (the scope boundary).
-	if got := check("Client *HttpClient"); len(got) != 0 {
-		t.Errorf("go space-separated field should NOT index (no colon yet): got %+v", got)
+	// Go space-separated struct field (`Field *Type`, no colon): now POPULATES, name=field,
+	// type=Type via the pointer-stripping stripTypeWrapper.
+	if got := check("Client *HttpClient"); got["Client"] != "HttpClient" {
+		t.Errorf("go pointer struct field: got %+v, want Client->HttpClient", got)
 	}
-	// TS access-modifier field: stored under the WRONG key "private client", so a
-	// this.client.m() lookup for "client" misses it (the documented TS scope gap).
-	if got := check("private client: HttpClient"); got["client"] == "HttpClient" {
-		t.Errorf("ts modifier field unexpectedly indexed under 'client' (scope changed — update the rung SCOPE comment + extension): %+v", got)
+	if got := check("Client HttpClient"); got["Client"] != "HttpClient" {
+		t.Errorf("go value struct field: got %+v, want Client->HttpClient", got)
+	}
+	if got := check("Clients []*HttpClient"); got["Clients"] != "HttpClient" {
+		t.Errorf("go slice struct field: got %+v, want Clients->HttpClient", got)
+	}
+	// Go embedded field (single token, type only — NO field name): ABSTAINS.
+	if got := check("HttpClient"); len(got) != 0 {
+		t.Errorf("go embedded field (no name) must NOT index: got %+v", got)
+	}
+	// Go multi-name group (`A, B Type` — ambiguous which name owns the type): ABSTAINS.
+	if got := check("A, B HttpClient"); len(got) != 0 {
+		t.Errorf("go multi-name group must NOT index (ambiguous): got %+v", got)
+	}
+	// TS access-modifier field: now indexed under the REAL field name (modifier stripped).
+	if got := check("private client: HttpClient"); got["client"] != "HttpClient" {
+		t.Errorf("ts private field: got %+v, want client->HttpClient (modifier stripped)", got)
+	}
+	if got := check("public readonly client: HttpClient"); got["client"] != "HttpClient" {
+		t.Errorf("ts public-readonly field: got %+v, want client->HttpClient (modifiers stripped)", got)
+	}
+}
+
+// TestResolve_FieldType_GoReceiverVar is the Go-receiver red→green: a Go method
+// `func (r *Service) handle()` calls `r.client.Get()`. `Get` is defined on BOTH HttpClient
+// (id 4) and CacheClient (id 6) — without rung 2b the tail would name_match to an arbitrary
+// Get. Service (struct node 10) declares field `client` of type `HttpClient`, and the
+// caller's receiver var is `r` (carried in NodeMeta.ReceiverName, as BuildNodeMeta derives
+// it from the Go signature). Rung 2b accepts the `r.` receiver prefix (the Go analogue of
+// self/this), resolves `client`→HttpClient, and finds HttpClient.Get (id 4), NOT id 6.
+func TestResolve_FieldType_GoReceiverVar(t *testing.T) {
+	files := []string{"svc.go", "net.go", "cache.go"}
+	langs := []string{"go", "go", "go"}
+	fm := BuildFileMap(files, langs)
+
+	nodeIDs := map[string][]int64{
+		"handle": {1}, "Service": {10},
+		"HttpClient": {3}, "CacheClient": {5}, "Get": {4, 6},
+	}
+	fileNodeIDs := map[string]map[string][]int64{
+		"svc.go":   {"handle": {1}, "Service": {10}},
+		"net.go":   {"HttpClient": {3}, "Get": {4}},
+		"cache.go": {"CacheClient": {5}, "Get": {6}},
+	}
+	// ReceiverName "r" on the caller method (id 1) — the Go analogue of self/this.
+	meta := map[int64]NodeMeta{
+		1:  {Label: "Method", File: "svc.go", Name: "handle", ParentID: 10, ReceiverName: "r"},
+		10: {Label: "Struct", File: "svc.go", Name: "Service"},
+		3:  {Label: "Struct", File: "net.go", Name: "HttpClient"},
+		4:  {Label: "Method", File: "net.go", Name: "Get", ParentID: 3},
+		5:  {Label: "Struct", File: "cache.go", Name: "CacheClient"},
+		6:  {Label: "Method", File: "cache.go", Name: "Get", ParentID: 5},
+	}
+	calls := []parser.CallRef{
+		{CallerNodeIdx: 0, CalleeName: "Get", CalleeQualified: "r.client.Get", Line: 5, File: "svc.go"},
+	}
+	callerIDs := []int64{1}
+
+	// Service (struct 10) declares Go field `client` → HttpClient (as BuildFieldTypeIndex
+	// now parses `Client *HttpClient` / `client HttpClient`).
+	SetFieldTypeIndex(map[int64]map[string]string{10: {"client": "HttpClient"}})
+	defer SetFieldTypeIndex(nil)
+
+	resolved := Resolve(calls, nodeIDs, fileNodeIDs, callerIDs, nil, fm, meta)
+	if len(resolved) != 1 {
+		t.Fatalf("expected 1 resolved edge, got %d: %+v", len(resolved), resolved)
+	}
+	r := resolved[0]
+	if r.Method != "type_flow" || r.EvidenceType != "field_type" {
+		t.Errorf("got method=%q evidence=%q, want type_flow/field_type", r.Method, r.EvidenceType)
+	}
+	if r.TargetNodeID != 4 {
+		t.Errorf("target = %d, want 4 (HttpClient.Get) — the Go receiver var + field type prove it, NOT 6 (CacheClient.Get)", r.TargetNodeID)
+	}
+}
+
+// TestResolve_FieldType_GoReceiverVarMismatchAbstains pins correct-or-quiet: when the
+// qualifier's prefix is NOT the caller's receiver var (nor self/this), rung 2b ABSTAINS.
+// Here the caller's receiver is `r` but the call qualifier is `q.client.Get` — an unknown
+// handle → no field_type edge is minted.
+func TestResolve_FieldType_GoReceiverVarMismatchAbstains(t *testing.T) {
+	files := []string{"svc.go", "net.go"}
+	langs := []string{"go", "go"}
+	fm := BuildFileMap(files, langs)
+
+	nodeIDs := map[string][]int64{
+		"handle": {1}, "Service": {10}, "HttpClient": {3}, "Get": {4},
+	}
+	fileNodeIDs := map[string]map[string][]int64{
+		"svc.go": {"handle": {1}, "Service": {10}},
+		"net.go": {"HttpClient": {3}, "Get": {4}},
+	}
+	meta := map[int64]NodeMeta{
+		1:  {Label: "Method", File: "svc.go", Name: "handle", ParentID: 10, ReceiverName: "r"},
+		10: {Label: "Struct", File: "svc.go", Name: "Service"},
+		3:  {Label: "Struct", File: "net.go", Name: "HttpClient"},
+		4:  {Label: "Method", File: "net.go", Name: "Get", ParentID: 3},
+	}
+	calls := []parser.CallRef{
+		// `q` is NOT the receiver var `r` and not self/this → unknown handle.
+		{CallerNodeIdx: 0, CalleeName: "Get", CalleeQualified: "q.client.Get", Line: 5, File: "svc.go"},
+	}
+	callerIDs := []int64{1}
+
+	SetFieldTypeIndex(map[int64]map[string]string{10: {"client": "HttpClient"}})
+	defer SetFieldTypeIndex(nil)
+
+	resolved := Resolve(calls, nodeIDs, fileNodeIDs, callerIDs, nil, fm, meta)
+	for _, r := range resolved {
+		if r.EvidenceType == "field_type" {
+			t.Errorf("rung 2b minted a field_type edge for a non-receiver qualifier `q.`: %+v", r)
+		}
 	}
 }

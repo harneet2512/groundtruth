@@ -47,8 +47,8 @@ type ReExportRef struct {
 
 // PropertyRef is a structural fact about a function or class node, extracted during parsing.
 type PropertyRef struct {
-	NodeIdx    int // index into ParseResult.Nodes
-	Kind       string
+	NodeIdx int // index into ParseResult.Nodes
+	Kind    string
 	// Kinds: guard_clause, return_shape, exception_type, docstring, caller_usage,
 	//        conditional_return, side_effect, param, security_tag, exception_flow,
 	//        exception_handler, fingerprint, field_read, boundary_condition,
@@ -70,11 +70,11 @@ type AssertionRef struct {
 
 // CallRef is a raw (unresolved) call reference.
 type CallRef struct {
-	CallerNodeIdx     int    // index into ParseResult.Nodes
-	CalleeName        string // the function/method name being called (last component)
-	CalleeQualified   string // full qualified name if available (e.g. "obj.method")
-	Line              int
-	File              string
+	CallerNodeIdx   int    // index into ParseResult.Nodes
+	CalleeName      string // the function/method name being called (last component)
+	CalleeQualified string // full qualified name if available (e.g. "obj.method")
+	Line            int
+	File            string
 }
 
 // AssignmentRef records a variable assignment where the RHS is a constructor call.
@@ -320,7 +320,7 @@ func goReceiverType(sig string) string {
 	return t
 }
 
-// goReceiverName extracts the receiver VARIABLE NAME from a Go method signature:
+// GoReceiverName extracts the receiver VARIABLE NAME from a Go method signature:
 //
 //	"func (c *Circle) Area() float64"          -> "c"
 //	"func (s *Service[K]) Do()"                -> "s"
@@ -329,7 +329,10 @@ func goReceiverType(sig string) string {
 //
 // Returns "" when the signature has no receiver or the receiver is anonymous. Mirrors
 // goReceiverType's balanced-paren slicing so generic/func-typed receivers are handled.
-func goReceiverName(sig string) string {
+// Exported so the resolver's rung-2b shape gate can accept a Go method's receiver var
+// (`r.field.m()`) in addition to self./this. — the receiver name is the Go analogue of
+// self/this, derived structurally from the signature (no per-task logic).
+func GoReceiverName(sig string) string {
 	s := strings.TrimSpace(sig)
 	const pfx = "func ("
 	if !strings.HasPrefix(s, pfx) {
@@ -370,6 +373,35 @@ func goReceiverName(sig string) string {
 	return name
 }
 
+// goStructFieldList finds the field-list node of a Go struct type so its fields can be
+// extracted as class_field properties. Go nests the body: type_declaration → type_spec →
+// struct_type → field_declaration_list (the `type_declaration` node itself has no `body`
+// field, which is why ChildByFieldName(spec.BodyField) returns nil for Go). Returns nil for
+// non-struct type declarations (aliases, interfaces, etc.) so callers treat them as
+// body-less. The field_declaration_list children are `field_declaration` nodes, which
+// extractClassFields already handles (case ct == "field_declaration").
+func goStructFieldList(typeDecl *sitter.Node) *sitter.Node {
+	for i := 0; i < int(typeDecl.ChildCount()); i++ {
+		spec := typeDecl.Child(i)
+		if spec == nil || spec.Type() != "type_spec" {
+			continue
+		}
+		for j := 0; j < int(spec.ChildCount()); j++ {
+			st := spec.Child(j)
+			if st == nil || st.Type() != "struct_type" {
+				continue
+			}
+			for k := 0; k < int(st.ChildCount()); k++ {
+				fl := st.Child(k)
+				if fl != nil && fl.Type() == "field_declaration_list" {
+					return fl
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // linkRustImplMethods consolidates Rust impl block methods under the struct's
 // canonical node. Rust can have multiple impl blocks for the same struct (one
 // inherent `impl MyStruct`, one or more trait `impl Trait for MyStruct`). The
@@ -394,7 +426,7 @@ func linkRustImplMethods(result *ParseResult) {
 	// Since we don't store the AST node type, use a heuristic: Class nodes that have
 	// NO methods as children are struct/enum definitions (impl blocks always have methods).
 	type nodeInfo struct {
-		idx1  int    // 1-based index
+		idx1  int // 1-based index
 		name  string
 		label string
 	}
@@ -592,8 +624,16 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 			// Visibility: public/private/protected/exported/unexported
 			extractVisibility(node, src, result, idx)
 
-			// Extract class fields from class body
+			// Extract class fields from class body. Go's `type_declaration` has no `body`
+			// field (the struct body is nested: type_declaration → type_spec → struct_type
+			// → field_declaration_list), so ChildByFieldName(spec.BodyField) returns nil and
+			// Go struct fields would never be extracted. Fall back to the Go-aware body
+			// resolver so `Field *Type` declarations become class_field properties that
+			// BuildFieldTypeIndex (rung 2b) can resolve. No-op for non-Go languages.
 			classBody := node.ChildByFieldName(spec.BodyField)
+			if classBody == nil && nodeType == "type_declaration" {
+				classBody = goStructFieldList(node)
+			}
 			if classBody != nil {
 				extractClassFields(classBody, src, result, idx)
 			}
@@ -2018,7 +2058,7 @@ func extractProperties(node *sitter.Node, sf walker.SourceFile, src []byte, resu
 	// signature, no per-task logic.
 	recvName := ""
 	if sf.Language == "go" {
-		recvName = goReceiverName(node.Content(src))
+		recvName = GoReceiverName(node.Content(src))
 	}
 
 	// Extract docstring (first string child of function, common in Python/JS/Go)
@@ -2091,7 +2131,7 @@ func extractProperties(node *sitter.Node, sf walker.SourceFile, src []byte, resu
 					Confidence: 1.0,
 				})
 			}
-		}		// Implicit return: idiomatic Rust returns the body block's TAIL EXPRESSION with no
+		} // Implicit return: idiomatic Rust returns the body block's TAIL EXPRESSION with no
 		// `return` keyword, which countReturns (keyed to return_statement) cannot see. Capture it
 		// so an edit that changes the returned value produces real return_shape drift.
 		if tail := rustTailExpr(bodyNode, src); tail != "" {
@@ -3438,9 +3478,9 @@ func extractFunctionFingerprint(funcNode *sitter.Node, bodyNode *sitter.Node, sr
 	}
 
 	result.Properties = append(result.Properties, PropertyRef{
-		NodeIdx:    nodeIdx,
-		Kind:       "fingerprint",
-		Value:      value,
+		NodeIdx: nodeIdx,
+		Kind:    "fingerprint",
+		Value:   value,
 		// Aggregate fact summarizing the whole function → anchor at the FUNCTION
 		// node's start (the declaration), not the body's first statement.
 		Line:       int(funcNode.StartPoint().Row) + 1,
@@ -4398,7 +4438,7 @@ func extractSwiftImports(node *sitter.Node, file string, src []byte, line int, r
 func extractOCamlImports(node *sitter.Node, file string, src []byte, line int, result *ParseResult) {
 	text := strings.TrimSpace(node.Content(src))
 	text = strings.TrimPrefix(text, "open ")
-	text = strings.TrimPrefix(text, "!")  // open! Module
+	text = strings.TrimPrefix(text, "!") // open! Module
 	text = strings.TrimSpace(text)
 
 	if text == "" {

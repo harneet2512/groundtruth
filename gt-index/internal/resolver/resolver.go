@@ -239,12 +239,19 @@ func BuildNodeMeta(allNodes []store.Node, nodeDBIDs []int64) map[int64]NodeMeta 
 	meta := make(map[int64]NodeMeta, len(nodeDBIDs))
 	for i, n := range allNodes {
 		if i < len(nodeDBIDs) {
+			// Go receiver var (the analogue of self/this) — derived structurally from the
+			// method signature, only for Go method/function nodes. Empty everywhere else.
+			recvName := ""
+			if n.Language == "go" {
+				recvName = parser.GoReceiverName(n.Signature)
+			}
 			meta[nodeDBIDs[i]] = NodeMeta{
-				Label:      n.Label,
-				File:       n.FilePath,
-				ParentID:   n.ParentID,
-				Name:       n.Name,
-				ReturnType: n.ReturnType,
+				Label:        n.Label,
+				File:         n.FilePath,
+				ParentID:     n.ParentID,
+				Name:         n.Name,
+				ReturnType:   n.ReturnType,
+				ReceiverName: recvName,
 			}
 		}
 	}
@@ -422,6 +429,11 @@ type NodeMeta struct {
 	ParentID   int64
 	Name       string
 	ReturnType string
+	// ReceiverName is the Go method's receiver VARIABLE name (`func (r *T) M()` → "r"),
+	// derived structurally from the signature. Empty for non-Go nodes, plain functions,
+	// and anonymous receivers. Used by rung 2b to accept `<recv>.<field>.method()` as the
+	// Go analogue of self./this. — abstains (stays empty) when the receiver is unnamed.
+	ReceiverName string
 }
 
 // Resolve takes all call refs and all defined nodes, and resolves calls to definitions.
@@ -540,6 +552,127 @@ func SetFieldTypeIndex(idx map[int64]map[string]string) {
 // any `=` (annotation), so an assignment-shape field produces NO entry and the call
 // falls to rung 1.96 (assignment-graph, with its own scope-aware proof) or the tail.
 // We NEVER invent a type from a constructor name — that is 1.96's job, not 2b's.
+// tsFieldModifiers is the set of TS/JS class-field access/declaration modifiers that
+// precede the field name. A LEADING run of them is stripped before the colon split so a
+// `private readonly client: HttpClient` field indexes under "client", not "private client".
+var tsFieldModifiers = map[string]bool{
+	"private": true, "public": true, "protected": true, "readonly": true,
+	"static": true, "declare": true, "abstract": true, "override": true,
+}
+
+// stripTSFieldModifiers removes a leading run of TS access-modifier keywords from a
+// field-declaration string. It consumes ONLY a leading run of known modifiers; the first
+// non-modifier token (the field name) ends the strip. Returns the input unchanged when no
+// modifier leads (Python/Rust/Go fields). Correct-or-quiet: it never reorders or invents
+// tokens, it only drops a recognized leading keyword.
+func stripTSFieldModifiers(val string) string {
+	for {
+		sp := strings.IndexAny(val, " \t")
+		if sp <= 0 {
+			return val
+		}
+		if !tsFieldModifiers[val[:sp]] {
+			return val
+		}
+		val = strings.TrimSpace(val[sp+1:])
+	}
+}
+
+// goStructField parses a Go struct-field declaration string into (name, type) and a
+// keep/abstain flag. It is the Go analogue of the `name: Type` colon split — a Go field
+// is `Name [*][]Type [`tag`]` (whitespace-separated), so the FIRST token is the field
+// name and the SECOND is the (wrapper-stripped) type. CORRECT-OR-QUIET (every guard
+// returns ok=false so the field falls through unindexed → the call demotes to name_match
+// rather than mis-resolving):
+//   - exactly-≥2 tokens; a single token is an EMBEDDED field (type only, no name) → abstain
+//   - a comma in the name token (`A, B string` multi-name group) → ambiguous → abstain
+//   - the name must be a bare identifier (letters/digits/_, not starting with a digit) →
+//     guards tags, comments, operators, and any malformed slice
+//   - the type token, after stripTypeWrapper (`*T`/`[]T`/`&T` → T), must be non-empty
+//
+// It never invents a type and never widens beyond the declared one — pure propagation of
+// the source fact the parser wrote.
+func goStructField(val string) (name, typ string, ok bool) {
+	fields := strings.Fields(val)
+	if len(fields) < 2 {
+		return "", "", false // embedded field (type only) or empty — no field name
+	}
+	name = fields[0]
+	if name == "" || strings.ContainsAny(name, ",.[]()*&={}:`\"") {
+		return "", "", false // multi-name group, tag/comment noise, or not a bare ident
+	}
+	if !isIdent(name) {
+		return "", "", false
+	}
+	// Normalize the Go type token: strip leading slice/array/pointer markers
+	// (`[]Type`, `[N]Type`, `*Type`, `&Type`, and combinations like `[]*Type`) down to the
+	// element type, then run stripTypeWrapper for generic `Name[T]` / `Optional[T]` forms.
+	// stripTypeWrapper alone does NOT remove a LEADING `[]` (its `[` index must be >0), so
+	// the slice prefix is stripped here first.
+	typ = stripGoTypePrefix(fields[1])
+	typ = stripTypeWrapper(typ)
+	if typ == "" || strings.ContainsAny(typ, "{}=`\"[]*&") {
+		return "", "", false // unresolved wrapper / tag / map / func-type noise → abstain
+	}
+	if !isIdent(stripPkgQualifier(typ)) {
+		return "", "", false // `map[..]..`, `func(..)`, anonymous struct, etc. → abstain
+	}
+	return name, typ, true
+}
+
+// stripGoTypePrefix removes a leading run of Go slice/array/pointer markers from a type
+// string: `[]Type` / `[N]Type` / `*Type` / `&Type` (and combinations) → `Type`. It stops
+// at the first non-marker char (the element type). Generic `Name[T]` forms are left for
+// stripTypeWrapper (their `[` is not leading). Correct-or-quiet: pure prefix removal.
+func stripGoTypePrefix(t string) string {
+	for {
+		switch {
+		case strings.HasPrefix(t, "*"):
+			t = t[1:]
+		case strings.HasPrefix(t, "&"):
+			t = t[1:]
+		case strings.HasPrefix(t, "[]"):
+			t = t[2:]
+		case strings.HasPrefix(t, "[") && strings.Contains(t, "]"):
+			// fixed-size array `[N]Type` — drop through the closing bracket
+			t = t[strings.Index(t, "]")+1:]
+		default:
+			return t
+		}
+	}
+}
+
+// stripPkgQualifier returns the element name of a package-qualified type (`pkg.Type` →
+// `Type`) so the ident check accepts a qualified type while still rejecting structural
+// noise (`map[..]..`, `func(..)`). A qualified external type still produces a valid name;
+// resolution then ABSTAINS later if no internal class node matches that name.
+func stripPkgQualifier(t string) string {
+	if dot := strings.LastIndex(t, "."); dot >= 0 {
+		return t[dot+1:]
+	}
+	return t
+}
+
+// isIdent reports whether s is a bare identifier (first char a letter or '_',
+// remaining chars letters/digits/'_'). Used to reject tag/comment/operator noise.
+func isIdent(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		isLetter := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '_'
+		isDigit := r >= '0' && r <= '9'
+		if i == 0 {
+			if !isLetter {
+				return false
+			}
+		} else if !isLetter && !isDigit {
+			return false
+		}
+	}
+	return true
+}
+
 func BuildFieldTypeIndex(props []parser.PropertyRef, nodeDBIDs []int64) map[int64]map[string]string {
 	idx := make(map[int64]map[string]string)
 	for _, p := range props {
@@ -550,10 +683,38 @@ func BuildFieldTypeIndex(props []parser.PropertyRef, nodeDBIDs []int64) map[int6
 		if classDBID <= 0 {
 			continue
 		}
-		val := p.Value
+		// TS access-modifier strip (language-agnostic, applied before the colon split):
+		// a TS class field is recorded as `private client: HttpClient` /
+		// `public readonly client: HttpClient`. Drop the leading modifier keyword(s) so
+		// the field name (not "private client") becomes the index key. No-op on
+		// Python/Rust/Go field strings (their first token is already the field name).
+		val := stripTSFieldModifiers(strings.TrimSpace(p.Value))
+		// Strip a trailing Go struct tag (backtick-delimited, e.g. `json:"x"`): the tag
+		// can contain a `:` that would otherwise hijack the colon-annotation split below,
+		// mis-routing a Go field (`Client *HttpClient `+"`json:\"x\"`"+`) into the colon
+		// path and abstaining. Python/Rust/TS field strings never carry a backtick tag, so
+		// this is a safe language-uniform no-op for them. Take everything before the FIRST
+		// backtick — the field name + type always precede the tag.
+		if bt := strings.IndexByte(val, '`'); bt >= 0 {
+			val = strings.TrimSpace(val[:bt])
+		}
 		colon := strings.Index(val, ":")
 		if colon <= 0 {
-			continue // bare name / no separator — no declared type
+			// No colon-annotation: try the Go space-separated struct-field shape
+			// (`Client *HttpClient` → name "Client", type "HttpClient"). This is the Go
+			// analogue of `name: Type` — the struct field's declared type IS a source FACT,
+			// identical epistemic status to a colon annotation. CORRECT-OR-QUIET: index ONLY
+			// the unambiguous two-token shape (exactly a simple identifier name + a type);
+			// ABSTAIN on embedded fields (single token, no name), multi-token tag/comment
+			// noise, and any name that is not a bare identifier — those fall through unindexed
+			// so the call demotes to name_match rather than mis-resolving.
+			if name, typ, ok := goStructField(val); ok {
+				if idx[classDBID] == nil {
+					idx[classDBID] = make(map[string]string)
+				}
+				idx[classDBID][name] = typ
+			}
+			continue // bare name / no colon separator — Go shape handled above, else no type
 		}
 		// Annotation vs assignment discriminator: only treat as a typed annotation
 		// when the colon comes BEFORE any `=` (so `name: Type` is kept; `d = {1: 2}`
@@ -1059,7 +1220,7 @@ func Resolve(
 				// 1.94a/1.95) — a Rust Self::method() that slipped past 1.75 (no caller
 				// ParentID) must not mis-scope to an imported class literally named "Self".
 				if qualifier != "self" && qualifier != "this" && qualifier != "Self" {
-						if fileImports, ok := importIndex[call.File]; ok {
+					if fileImports, ok := importIndex[call.File]; ok {
 						if candidateFiles, ok := fileImports[qualifier]; ok {
 							for _, targetFile := range candidateFiles {
 								if fileNodes, ok := fileNodeIDs[targetFile]; ok {
@@ -1128,36 +1289,51 @@ func Resolve(
 		// class with no winner, emit NOTHING rather than pick; (5) a broken/missing
 		// inheritance chain returns (0,false) → fall through.
 		//
-		// SCOPE (honest, correct-or-quiet): resolves Python + Rust COLON-ANNOTATION fields
-		// (`field: Type`) reached via a `self.`/`this.` qualifier. Go struct fields
-		// (space-separated `Field *Type`, no colon → BuildFieldTypeIndex skips them) and TS
-		// access-modifier fields (`private field: Type` → stored under the wrong key), and
-		// Go's arbitrary receiver var (`r.field.m()`, not `self.`/`this.`), are NOT yet
-		// resolved — the rung ABSTAINS on them (falls through to name_match, never
-		// mis-resolves). Go/TS receiver-field resolution is a tracked follow-up
-		// (extend BuildFieldTypeIndex + relax the shape gate). Keys on the language-uniform
-		// `class_field` property + the parser-emitted CalleeQualified.
+		// SCOPE (honest, correct-or-quiet): resolves declared-field calls across four field
+		// shapes / four receiver shapes, all reached structurally —
+		//   FIELD shapes BuildFieldTypeIndex now indexes:
+		//     · Python/Rust colon annotation     `field: Type`
+		//     · Go space-separated struct field   `Field *Type`  (name=Field, type=Type)
+		//     · TS access-modifier field          `private field: Type` (modifier stripped)
+		//   RECEIVER prefixes the shape gate accepts:
+		//     · `self.`/`this.` (Python/Rust/TS/JS)
+		//     · the Go method's receiver VAR      `r.field.m()` (r = caller's receiver name)
+		// It STILL ABSTAINS (falls through to name_match, never mis-resolves) when: the field
+		// has no declared type, the type resolves to no internal class or to >1 ambiguously,
+		// CHA can't find the method, or the receiver prefix is an unknown chain. Keys on the
+		// language-uniform `class_field` property + the parser-emitted CalleeQualified +
+		// (for Go) the signature-derived receiver name in NodeMeta.
 		if fieldTypeIndex != nil && len(nodeMeta) > 0 && nodeMeta[0] != nil && methodsByClass != nil &&
 			call.CalleeQualified != "" && call.CalleeQualified != calleeName {
-			// Shape gate: require a self/this prefix + a SINGLE field segment, i.e.
-			// "self.<field>.<method>" — strip the "self."/"this." prefix, then confirm
-			// the remaining qualifier (the field) has no further dots.
+			// Shape gate: require a receiver prefix + a SINGLE field segment, i.e.
+			// "<recv>.<field>.<method>" — strip the receiver prefix, then confirm the
+			// remaining qualifier (the field) has no further dots. The receiver is the
+			// language-uniform instance handle: `self.`/`this.` (Python/Rust/TS/JS) OR the
+			// Go method's receiver VARIABLE name (`func (r *T) M()` → `r.<field>.<method>`),
+			// which is the Go analogue of self/this. ABSTAINS when no known receiver prefix
+			// matches (the qualifier is then an unknown chain → never mis-resolves).
 			dot2b := strings.LastIndex(call.CalleeQualified, ".")
-			if dot2b > 0 {
-				qualifier2b := call.CalleeQualified[:dot2b]      // "self.client"
-				methodName2b := call.CalleeQualified[dot2b+1:]   // "get"
+			if callerMeta, okCM := nodeMeta[0][callerID]; okCM && callerMeta.ParentID != 0 && dot2b > 0 {
+				qualifier2b := call.CalleeQualified[:dot2b]    // "self.client" / "r.client"
+				methodName2b := call.CalleeQualified[dot2b+1:] // "get"
 				var fieldName2b string
 				switch {
 				case strings.HasPrefix(qualifier2b, "self."):
 					fieldName2b = qualifier2b[len("self."):]
 				case strings.HasPrefix(qualifier2b, "this."):
 					fieldName2b = qualifier2b[len("this."):]
+				case callerMeta.ReceiverName != "" &&
+					strings.HasPrefix(qualifier2b, callerMeta.ReceiverName+"."):
+					// Go named receiver: `r.client.get()` where the caller method's receiver
+					// var is `r`. The receiver name is a per-method FACT from the signature,
+					// so this is exactly as sound as self/this and never widens scope.
+					fieldName2b = qualifier2b[len(callerMeta.ReceiverName)+1:]
 				}
 				// fieldName2b must be a single non-empty segment (no further dots) and
 				// not itself self/this (guards "self.self.x" style noise).
 				if fieldName2b != "" && !strings.Contains(fieldName2b, ".") &&
 					fieldName2b != "self" && fieldName2b != "this" {
-					if callerMeta, ok := nodeMeta[0][callerID]; ok && callerMeta.ParentID != 0 {
+					{
 						classID2b := callerMeta.ParentID // enclosing class — KNOWN fact
 						if fields, ok := fieldTypeIndex[classID2b]; ok {
 							// Inheritance-aware field lookup: the annotation may live on a
