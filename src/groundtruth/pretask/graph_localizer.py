@@ -1349,7 +1349,8 @@ _SCOPE_EDGE_TYPES: tuple[str, ...] = (
 ) + _PROMOTED_EDGE_TYPES + ("USES",)
 
 
-def _scope_edge_trust(verified: bool, method: str | None, conf_f: float) -> str | None:
+def _scope_edge_trust(verified: bool, method: str | None, conf_f: float,
+                      trust_tier: str | None = None) -> str | None:
     """Trust tier of a candidate scope edge, or None to DROP it.
 
     CERTIFIED   — deterministic resolution_method (a fact: import/same_file/type_flow/
@@ -1366,6 +1367,8 @@ def _scope_edge_trust(verified: bool, method: str | None, conf_f: float) -> str 
     components as before — the CERTIFIED/CANDIDATE/SPECULATIVE split is a render tag,
     not a new filter. The new typed promote edges (CANDIDATE) only ADD reach.
     """
+    if (trust_tier or "").strip().upper() == "SUPPRESSED":
+        return None  # parity with the witness BFS _edge_admitted; never a scope member
     if verified:
         return "CERTIFIED"
     m = (method or "").strip().lower()
@@ -1417,13 +1420,17 @@ def _build_scope_chains(
 
     conf_sel = "e.confidence" if has_conf else "1.0"
     _types_in = ",".join("'" + t + "'" for t in _SCOPE_EDGE_TYPES)
-    try:
-        # Cross-file edges between top candidates, over the widened scope edge set.
-        ph = ",".join("?" for _ in top_files)
-        rows = conn.execute(
+    # Cross-file edges between top candidates, over the widened scope edge set. Pull
+    # trust_tier so a SUPPRESSED edge is hard-excluded (parity with the witness BFS);
+    # legacy schemas without the column fall back to a neutral 'SPECULATIVE' default.
+    ph = ",".join("?" for _ in top_files)
+    _params = tuple(top_files) + tuple(top_files)
+
+    def _scope_rows(tier_sel: str):
+        return conn.execute(
             f"""
             SELECT DISTINCT ns.file_path, nt.file_path, e.type,
-                   ns.name, nt.name, {conf_sel}, e.resolution_method
+                   ns.name, nt.name, {conf_sel}, e.resolution_method, {tier_sel}
             FROM edges e
             JOIN nodes ns ON e.source_id = ns.id
             JOIN nodes nt ON e.target_id = nt.id
@@ -1431,8 +1438,15 @@ def _build_scope_chains(
               AND ns.file_path != nt.file_path
               AND e.type IN ({_types_in})
             """,
-            tuple(top_files) + tuple(top_files),
+            _params,
         ).fetchall()
+    try:
+        rows = _scope_rows("COALESCE(e.trust_tier, 'SPECULATIVE')")
+    except sqlite3.OperationalError:
+        try:
+            rows = _scope_rows("'SPECULATIVE'")  # legacy: no trust_tier column
+        except sqlite3.Error:
+            return []
     except sqlite3.Error:
         return []
 
@@ -1460,13 +1474,13 @@ def _build_scope_chains(
     # + per-edge trust rendering. Undirected for edit-set membership (a file pulled
     # in by an upward READS link belongs regardless of edge direction).
     edge_recs: list[tuple[str, str, str, str, float, str]] = []
-    for src_fp, dst_fp, etype, src_name, dst_name, conf, method in rows:
+    for src_fp, dst_fp, etype, src_name, dst_name, conf, method, trust_tier in rows:
         try:
             conf_f = float(conf) if conf is not None else 0.0
         except (TypeError, ValueError):
             conf_f = 0.0
         verified = _is_verified(method)
-        tier = _scope_edge_trust(verified, method, conf_f)
+        tier = _scope_edge_trust(verified, method, conf_f, trust_tier)
         if tier is None:
             continue  # below the name_match floor — never a scope edge
         if src_fp not in parent:

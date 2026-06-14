@@ -108,3 +108,35 @@ def test_certified_deterministic_edge_renders_bare(tmp_path):
     desc = _chain_desc(tmp_path, etype="CALLS", method="import", conf=1.0)
     assert "(unverified)" not in desc, desc
     assert "(CANDIDATE)" not in desc, desc
+
+
+def _trust_tier_db(tmp_path, tier, name="tt.db"):
+    db = str(tmp_path / name)
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE nodes (id INTEGER PRIMARY KEY, label TEXT, name TEXT, file_path TEXT)")
+    conn.execute("CREATE TABLE edges (id INTEGER PRIMARY KEY, source_id INTEGER, "
+                 "target_id INTEGER, type TEXT, resolution_method TEXT, confidence REAL, "
+                 "trust_tier TEXT)")
+    conn.executemany("INSERT INTO nodes (id,label,name,file_path) VALUES (?,?,?,?)",
+                     [(1, "Function", "alpha", _FILE_A), (2, "Function", "beta", _FILE_B)])
+    conn.execute("INSERT INTO edges (source_id,target_id,type,resolution_method,confidence,"
+                 "trust_tier) VALUES (1,2,'CALLS','import',0.95,?)", (tier,))
+    conn.commit()
+    return conn
+
+
+def test_suppressed_edge_is_never_a_scope_member(tmp_path):
+    # A SUPPRESSED edge (even high confidence) must NOT build a scope chain -- parity
+    # with the witness BFS _edge_admitted (Unit 5b, defense-in-depth).
+    conn = _trust_tier_db(tmp_path, "SUPPRESSED")
+    chains = _build_scope_chains([_Cand(_FILE_A), _Cand(_FILE_B)], conn, True)  # type: ignore[arg-type]
+    conn.close()
+    assert not chains
+
+
+def test_certified_edge_with_trust_tier_column_builds_chain(tmp_path):
+    # control: CERTIFIED -> chain built (proves the trust_tier column path works).
+    conn = _trust_tier_db(tmp_path, "CERTIFIED", name="cc.db")
+    chains = _build_scope_chains([_Cand(_FILE_A), _Cand(_FILE_B)], conn, True)  # type: ignore[arg-type]
+    conn.close()
+    assert chains
