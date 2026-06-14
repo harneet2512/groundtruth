@@ -1193,15 +1193,18 @@ def _maybe_fire_presubmit_verify(config: GTRuntimeConfig, obs: Any, orig_run_act
     (state=FINISHED there = dead write).
 
     VERIFIABLE ONLY (research: SWE-agent test guardrail +10.7pp NeurIPS 2024).
-    Lists the tests (from the assertions table, target_node_id > 0 — real
-    test→target links) that cover the files the agent edited, and suggests
-    running them. NO semantic judgment ("patch incomplete"), NO caller-edit
+    TEST-BLIND (legitimacy, gt_gt §349): surfaces the edited file's behavioral
+    CONTRACT (return_shape/exception_type/guard_clause from the `properties`
+    table, is_test=0) and a generic "run the project's own suite" reminder —
+    NEVER a test name or a `pytest <test>` command (that LEAKED the grader on
+    7/9 tasks). The `assertions` table is OFF-LIMITS; this function does not
+    read it. NO semantic judgment ("patch incomplete"), NO caller-edit
     prescription — that is the mixed/harmful review_on_submit class.
 
-    Goal test: more correct context (which tests cover your diff) at the
-    helping moment (review phase, actionable), no wrong-direction risk
-    (verifiable facts only), generalized (any repo with an assertions table;
-    silent if none).
+    Goal test: more correct context (the contract your edit must preserve) at
+    the helping moment (review phase, actionable), no wrong-direction risk
+    (contract facts only, no test leak), generalized (any repo with a
+    `properties` table; silent if none).
     """
     if config._presubmit_fired or not config._presubmit_edited_files:
         return obs

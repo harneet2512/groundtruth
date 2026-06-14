@@ -244,7 +244,7 @@ def _hierarchy_edge_filter_clause(*, alias: str = "e") -> str:
         f"(("
         f"COALESCE({alias}.resolution_method, '') IN ({methods}) "
         f"OR (COALESCE({alias}.trust_tier, 'SPECULATIVE') IN ({tiers}) "
-        f"AND LOWER(COALESCE({alias}.resolution_method, '')) != 'name_match')"
+        f"AND LOWER(COALESCE({alias}.resolution_method, '')) NOT LIKE 'name_match%')"
         f") AND COALESCE({alias}.trust_tier, 'SPECULATIVE') != '{_SUPPRESSED_TRUST_TIER}')"
     )
 

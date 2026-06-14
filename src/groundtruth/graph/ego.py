@@ -355,24 +355,12 @@ def ego_graph(
         except Exception:
             pass
 
-        # Pillar 4: Test assertions (bonus)
-        try:
-            has_assertions = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='assertions'"
-            ).fetchone()
-            if has_assertions:
-                test_rows = conn.execute(
-                    "SELECT a.expression, a.expected, n.name as test_name, n.file_path "
-                    "FROM assertions a JOIN nodes n ON a.test_node_id = n.id "
-                    "WHERE a.target_node_id = ? LIMIT 3",
-                    (cid,),
-                ).fetchall()
-                for tr in test_rows:
-                    expr = tr["expression"][:80] if tr["expression"] else ""
-                    tname = tr["test_name"] or ""
-                    result.test_assertions.append(f"{tname}: {expr}")
-        except Exception:
-            pass
+        # Pillar 4: Test assertions — DELIBERATELY NOT LOADED (legitimacy, gt_gt §349).
+        # The `assertions` table carries test NAMES + the grader's expected values; the
+        # ego render() Tests pillar is commented out and post_view nulls test_assertions,
+        # so loading it here only risks a future re-leak ("run12 leaked test_plot_hdi").
+        # The assertions table is OFF-LIMITS to every agent-facing surface; we do not even
+        # read it. result.test_assertions stays [] (its default).
 
     conn.close()
     return result
