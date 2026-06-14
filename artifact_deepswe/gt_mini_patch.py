@@ -693,6 +693,207 @@ def _classify(cmd: str) -> tuple[str | None, str | None]:
 
 
 # ---------------------------------------------------------------------------
+# STRUCTURED EDITOR CHANNEL (F3 — structured-action-first edit detection).
+#
+# The bash-string classifier above sees ONLY action["command"] as a SHELL
+# string. But the agent's DOMINANT edit surface on OH/CodeAct/Anthropic/Codex
+# harnesses is a STRUCTURED editor action — a dict whose `command` is an EDITOR
+# VERB (create / str_replace / insert / write / append), NOT a shell command,
+# and whose target + content live in explicit fields (path/file_path + file_text
+# / new_str / old_str / insert_line). On that channel action.get("command") is
+# e.g. "str_replace" — it matches NO shell verb, so _edit_target/_view_target
+# return None and the edit is 100% INVISIBLE: every post-edit consumer (the
+# F6 edit-credit, the governor source_edit_count, L3b contract, the verify
+# horizon) goes dark, and a structured READ ("view") would misclassify.
+#
+# THE GENERAL FIX (not a verb-whitelist extension): read the STRUCTURED args
+# FIRST. If the action carries an explicit editor target (a path field) AND a
+# write verb / write content, classify it as post_edit with that path and lift
+# the body/lines from the content fields for the RC5 signals. This covers the
+# agent's real edit surface on ANY structured harness — no task IDs / gold /
+# repo logic, no shell-verb growth. Correct-or-quiet: a structured action with
+# no path, or a structured READ (view), never fabricates a post_edit.
+# ---------------------------------------------------------------------------
+# Editor verbs that WRITE a file (OH str_replace_editor: create/str_replace/
+# insert; Anthropic text_editor_*: str_replace/insert/create; Codex/generic:
+# write/append/edit/overwrite). `view` is a READ (handled below).
+_STRUCT_WRITE_VERBS = frozenset({
+    "create", "str_replace", "insert", "write", "append",
+    "edit", "overwrite", "str_replace_based_edit", "modify",
+})
+# Editor verbs that READ a file (no write) — a structured view of a source file.
+_STRUCT_READ_VERBS = frozenset({"view", "read", "open", "cat"})
+# The fields a structured editor action uses to name its TARGET file.
+_STRUCT_PATH_KEYS = ("path", "file_path", "file", "filename", "target", "filepath")
+# The fields that carry the WRITTEN CONTENT (the body the agent authored).
+_STRUCT_BODY_KEYS = ("file_text", "new_str", "new_string", "content", "text",
+                     "code", "insert_text", "old_str", "old_string")
+
+
+def _struct_field(action, keys) -> str | None:
+    """First non-empty string value among ``keys`` in the action dict (the
+    structured editor names its target/content with one of several keys across
+    harnesses). None when absent — correct-or-quiet."""
+    if not isinstance(action, dict):
+        return None
+    for k in keys:
+        v = action.get(k)
+        if isinstance(v, str) and v.strip():
+            return v
+    return None
+
+
+def _struct_body(action) -> str:
+    """The CONTENT the agent WROTE in a structured edit, joined from whichever
+    body fields are present (file_text for a create; new_str [+ old_str] for a
+    str_replace; insert_text/text for an insert). The symbol the agent authored
+    lives here, NOT in the editor verb — this feeds RC5 Signal-1 (body tokens)."""
+    if not isinstance(action, dict):
+        return ""
+    parts: list[str] = []
+    for k in _STRUCT_BODY_KEYS:
+        v = action.get(k)
+        if isinstance(v, str) and v.strip():
+            parts.append(v)
+    return "\n".join(parts)
+
+
+def _struct_line_ranges(action) -> list:
+    """RC5 Signal-3 (touched line range) for a structured edit, when the action
+    carries explicit line data — an `insert_line` (insert-after index) or an
+    explicit start/end. str_replace/create carry no line numbers -> empty
+    (Signal 3 degrades to 2-of-2, correct-or-quiet, never invents a range)."""
+    if not isinstance(action, dict):
+        return []
+    ranges: list[tuple] = []
+    il = action.get("insert_line")
+    try:
+        if il is not None:
+            n = int(il)
+            if n >= 0:
+                # an insert lands the new content AT line n+1 (1-based).
+                ranges.append((n + 1, n + 1))
+    except (TypeError, ValueError):
+        pass
+    sl, el = action.get("start_line"), action.get("end_line")
+    try:
+        if sl is not None:
+            lo = int(sl)
+            hi = int(el) if el is not None else lo
+            if lo > 0:
+                ranges.append((lo, max(hi, lo)))
+    except (TypeError, ValueError):
+        pass
+    return ranges
+
+
+def _structured_edit(action):
+    """Read the STRUCTURED editor channel FIRST. Returns
+    ``(kind, path, body, line_ranges)`` when ``action`` is a structured editor
+    action (an editor VERB in ``command`` + an explicit path field), else None
+    so the caller falls back to the bash command-string parse.
+
+    A structured WRITE verb (or any structured action that carries both a path
+    and written content) -> ("post_edit", path, body, lines). A structured READ
+    verb (view) on a path -> ("post_view", path, "", []). Correct-or-quiet: no
+    path field, or a non-source path with no write content, -> None."""
+    if not isinstance(action, dict):
+        return None
+    path = _struct_field(action, _STRUCT_PATH_KEYS)
+    if not path:
+        return None
+    path = path.strip()
+    verb = action.get("command")
+    verb = verb.strip().lower() if isinstance(verb, str) else ""
+    body = _struct_body(action)
+    # A structured READ verb on a path is a view (no write content treated as edit).
+    if verb in _STRUCT_READ_VERBS and not (
+            action.get("file_text") or action.get("new_str")
+            or action.get("new_string")):
+        if _has_source_ext(path):
+            return ("post_view", path, "", [])
+        return None
+    # A structured WRITE: an explicit write verb, OR a path that carries written
+    # content (file_text/new_str/...). The verb being a NON-shell editor token
+    # (not a real bash command) is what makes the command-string parser blind to
+    # it — reading the structured args is the general fix.
+    is_write = verb in _STRUCT_WRITE_VERBS or bool(body)
+    if is_write and _has_source_ext(path):
+        return ("post_edit", path, body, _struct_line_ranges(action))
+    return None
+
+
+def _action_command(action) -> str:
+    """The bash command STRING for an action — action['command'] when that is a
+    real shell command (the bash channel), else "". A STRUCTURED editor action
+    carries an editor VERB (create/str_replace/...) in `command`, which is NOT a
+    shell command; the structured channel is handled by ``_structured_edit`` and
+    must NOT be re-parsed as bash, so return "" for it (the verb token would
+    otherwise leak into loop signatures / token sets)."""
+    if not isinstance(action, dict):
+        return str(action) if action is not None else ""
+    cmd = action.get("command", "")
+    if not isinstance(cmd, str):
+        return ""
+    # If the action is structured-edit-shaped (editor verb + path field), the
+    # `command` is an editor verb, not bash -> not a shell command.
+    if _structured_edit(action) is not None and _struct_field(action, _STRUCT_PATH_KEYS):
+        return ""
+    return cmd
+
+
+def _classify_action(action) -> tuple[str | None, str | None]:
+    """STRUCTURED-FIRST classification: read the structured editor channel
+    (_structured_edit) BEFORE the bash command-string parse. Falls back to
+    _classify on the shell command for bash edits/views. This is the general
+    edit-surface detector for ANY harness (structured editor OR bash)."""
+    se = _structured_edit(action)
+    if se is not None:
+        return se[0], se[1]
+    return _classify(_action_command(action))
+
+
+def _effective_cmd(action) -> str:
+    """The bash-equivalent command STRING the downstream string extractors
+    (_classify / _edit_body_tokens / _edited_line_ranges / _evidence / the loop
+    signature) consume for ``action``.
+
+    For a BASH action this is just action['command']. For a STRUCTURED editor
+    action — invisible to the shell parsers — synthesize a parser-faithful
+    command that carries the SAME target + body (+ line ranges when known), so
+    every existing cmd-consumer (target classification, RC5 Signal-1 body
+    tokens, Signal-3 line ranges, evidence) works UNCHANGED on the structured
+    channel. A structured WRITE with line data -> an apply_patch unified-diff
+    heredoc (target via `+++ b/`, body via `+`, lines via `@@`); a structured
+    WRITE without line data -> a `cat > <path>` heredoc (target via redirect,
+    body via heredoc); a structured READ -> `cat <path>` (view). Correct-or-
+    quiet: a non-structured / unparseable action returns its raw command."""
+    se = _structured_edit(action)
+    if se is None:
+        return _action_command(action)
+    kind, path, body, lranges = se
+    safe_path = path.replace("\n", " ").strip()
+    if kind == "post_view":
+        return f"cat {safe_path}"
+    # post_edit: prefer a unified-diff heredoc when we have explicit line ranges
+    # (so Signal-3 flows through _edited_line_ranges' `@@` reader); else a
+    # `cat >` heredoc (target via redirect, body tokens via the heredoc reader).
+    if lranges:
+        lo, hi = lranges[0]
+        count = max(hi - lo + 1, 1)
+        hunk_lines = "\n".join("+" + ln for ln in (body or "").split("\n"))
+        return (
+            f"apply_patch <<'GT_STRUCT_EOF'\n"
+            f"--- a/{safe_path}\n"
+            f"+++ b/{safe_path}\n"
+            f"@@ -{lo},{count} +{lo},{count} @@\n"
+            f"{hunk_lines}\n"
+            f"GT_STRUCT_EOF"
+        )
+    return f"cat > {safe_path} <<'GT_STRUCT_EOF'\n{body}\nGT_STRUCT_EOF"
+
+
+# ---------------------------------------------------------------------------
 # BEHAVIORAL SIGNAL PRIMITIVES (delivery-engine Stage 1, 2026-06-11).
 #
 # The validated trajectory-structure signals from RESEARCH_AGENT_BEHAVIORAL_
@@ -3934,7 +4135,13 @@ def _augment_output(action, out) -> None:
             # stderr only. It leaked into agent-visible stdout on 10/10 tasks.
             print("[gt-patch:loaded]", file=sys.stderr, flush=True)
             _marker_sent = True
-        cmd = action.get("command", "") if isinstance(action, dict) else str(action)
+        # STRUCTURED-FIRST (F3): an OH/CodeAct/Anthropic structured editor action
+        # carries an editor VERB (create/str_replace/insert) in `command` + the
+        # target/content in explicit fields — invisible to the bash parsers. Read
+        # the structured channel and normalize to a parser-faithful bash-equivalent
+        # so EVERY downstream cmd-consumer (classification, RC5 Signal-1/3, evidence,
+        # loop signature) works unchanged. A bash action passes through untouched.
+        cmd = _effective_cmd(action)
         _orig_out = out.get("output") or ""  # the command's own output (for failure detect)
 
         if not _GT_BASELINE and _ORACLE_ROUTE:
