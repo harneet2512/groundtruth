@@ -440,6 +440,13 @@ def semantic_top_k(
         if mat is None or mat.shape[0] == 0:
             file_scores.append((fp, 0.0))
             continue
+        # Correct-or-quiet: a cached matrix whose embedding dim != the query dim (e.g. an
+        # e5/384 memory-store cache meeting a gte/768 brief query) cannot be compared --
+        # ABSTAIN (score 0.0, fall to lexical) instead of crashing the WHOLE localization
+        # on a matmul shape error. The dim mismatch is a config issue; the code degrades.
+        if getattr(mat, "ndim", 0) != 2 or mat.shape[1] != issue_emb.shape[0]:
+            file_scores.append((fp, 0.0))
+            continue
         # Per-symbol cosines (vectors are unit-normalized: dot == cosine), then MaxSim.
         cosines = (mat @ issue_emb).tolist()
         cosines = [c for c in cosines if math.isfinite(c)]

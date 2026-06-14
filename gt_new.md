@@ -363,10 +363,14 @@ Triaged by actual error mode:
 - **~7 environmental (Windows test-harness):** `presubmit_verify` (4) `PermissionError
   [WinError 32]` — temp `.db` not unlinkable (sqlite conn held open); `clip_balanced` (4)
   `NotADirectoryError [WinError 267]` on temp paths. Pass on Linux/CI; not product bugs.
-- **~3 environmental (embedder):** `graph_localizer_l1` `matmul 384 != 768` in
-  `anchor_select.py` — the e5/384-cache vs gte/768-model dim mismatch (BRIEFING: semantic
-  must be ON via the container ONNX path; local env half-configured) + 1 embedder-dependent
-  ranking assertion.
-**None is a product-logic bug; none caused by depth/rank/the hardening loop.** The
-environmental ones need the CI/container env (proper embedder + Linux temp handling) to
-verify, not a code fix.
+- **2 real (FIXED):** `graph_localizer_l1` `matmul 384 != 768` in `anchor_select.py` was a
+  CRASH where it should abstain — a cache/query embedding-dim mismatch (e5/384 vs gte/768)
+  blew up the WHOLE localization. Added a dim guard: ABSTAIN (score 0.0, fall to lexical)
+  on mismatch instead of crashing. The 2 crash tests now pass (`tests/unit/test_graph_localizer_l1.py`).
+- **~1 environmental (embedder):** the remaining `graph_localizer_l1` failure is the
+  embedder-config-dependent ranking assertion (importer.py-top — needs semantic ON via the
+  container ONNX path per BRIEFING; the local cache/model are dim-mismatched).
+
+**Net: 6 of 16 were real and are FIXED** (4 legitimacy + 2 robustness); the remaining ~10
+are environmental (Windows temp-file handling + local embedder config) that need the
+CI/container env to verify, not a code fix. **None caused by depth/rank/the hardening loop.**
