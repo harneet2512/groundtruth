@@ -39,6 +39,11 @@ class TestClassifyTestTarget:
 
 
 class TestGetTargetedVerificationSuggestion:
+    """LEGITIMACY lock: _get_targeted_verification_suggestion is test-BLIND — it returns
+    "" for EVERY input (any confidence, any test file), so GT never leaks a test name or
+    a ``Run: <test>`` command (anti-benchmaxxing; swap-invariant gt_gt §349; run12 leaked
+    test_plot_hdi). These cases assert "" precisely so re-enabling the leak fails CI."""
+
     def _make_db(self, resolution_method="import", test_file="tests/test_foo.py",
                  test_name="test_bar", confidence=1.0):
         """Create a minimal graph.db with one source node, one test node, one edge."""
@@ -75,25 +80,25 @@ class TestGetTargetedVerificationSuggestion:
     def test_high_confidence_real_test(self):
         db = self._make_db(resolution_method="import", test_file="tests/test_app.py", test_name="test_my_func")
         result = _get_targeted_verification_suggestion(db, "src/app.py", ["my_func"])
-        assert "Run: pytest tests/test_app.py::test_my_func" in result
+        assert result == ""  # legitimacy: test-blind, never leaks a test name/command
         os.unlink(db)
 
     def test_medium_confidence_name_match(self):
         db = self._make_db(resolution_method="name_match", test_file="tests/test_app.py", test_name="test_my_func", confidence=0.6)
         result = _get_targeted_verification_suggestion(db, "src/app.py", ["my_func"])
-        assert "Run: pytest" in result
+        assert result == ""  # legitimacy: test-blind, never leaks a test name/command
         os.unlink(db)
 
     def test_low_confidence_conftest(self):
         db = self._make_db(resolution_method="import", test_file="tests/conftest.py", test_name="isatty")
         result = _get_targeted_verification_suggestion(db, "src/app.py", ["my_func"])
-        assert "Run: pytest" in result
+        assert result == ""  # legitimacy: test-blind, never leaks a test name/command
         os.unlink(db)
 
     def test_low_confidence_utility(self):
         db = self._make_db(resolution_method="import", test_file="test/tracing/utils.py", test_name="trace")
         result = _get_targeted_verification_suggestion(db, "src/app.py", ["my_func"])
-        assert "Run: pytest" in result
+        assert result == ""  # legitimacy: test-blind, never leaks a test name/command
         os.unlink(db)
 
     def test_low_confidence_non_test(self):

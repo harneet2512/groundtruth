@@ -2167,12 +2167,13 @@ def _format_test_command(test_file: str, test_name: str) -> str:
 def _get_targeted_verification_suggestion(
     db_path: str, file_path: str, function_names: list[str],
 ) -> str:
-    """Query graph.db for test file connected to edited function.
+    """LEGITIMACY-DISABLED: always returns "" — GT stays test-BLIND.
 
-    Returns labeled suggestion: [GT_VERIFY high/medium/low] Run: <command>
-    Labels based on edge resolution_method and test target classification.
-    Language-aware: emits the correct test runner per file extension.
-    No suppression — all confidence levels emitted with labels.
+    Surfacing a test name or a ``Run: <test>`` command is leakage/benchmaxxing (naming
+    the test that grades a task; run12 leaked test_plot_hdi) and breaks the swap-invariant
+    (gt_gt §349: output must be identical if the grading test is swapped). The agent runs
+    its OWN tests. The graph-query body below is retained for reference ONLY, behind the
+    early ``return ""``. Locked by tests/unit/test_verify_labeling.py (asserts "").
     """
     # LEGITIMACY / swap-invariant (gt_gt §349: "no test names ... assertions table untouched"):
     # GT must surface NO test name or test command — naming the test that grades a task is
