@@ -155,9 +155,12 @@ live GHA run is watchable with ONE connection — no `gh api` polling. **Do this
    sign-test on per-task delta — never avg-subtraction). flip = GT-on resolves a baseline=NO id;
    regression = GT-on fails a baseline=PASS id.
 
-2. **Spawn a VERIFIER AGENT to evaluate the trajectory against `gt_gt.md`.** The agent **READS
-   `output.jsonl` FULLY and CHRONOLOGICALLY (the AGENT-OBSERVATION rule) — it does NOT grep.** It
-   scores every gt_gt gate, with raw quotes:
+2. **Spawn a VERIFIER AGENT to evaluate the trajectory against the CURRENT architecture =
+   `gt_new.md` (gt_gt.md as amended by this session's deltas: depth promote pass, CHA/XTA
+   naming, I2 no-depth-in-rank, §349 assertions-off legitimacy, edit_risk, oracle two-lane).
+   Where gt_new and gt_gt differ, gt_new wins (it is newer); elsewhere gt_gt still holds.** The
+   agent **READS `output.jsonl` FULLY and CHRONOLOGICALLY (the AGENT-OBSERVATION rule) — it does
+   NOT grep.** It scores every gt_new/gt_gt gate, with raw quotes:
    - **DELIVERED** — payload appears in the agent's raw observation text (not telemetry/event counts).
    - **CORRECT** — claims match ground truth, AND **LEAKAGE CHECK**: GT surfaced **NO test names /
      FAIL_TO_PASS / assertions** (the run12 finding: `test_plot_hdi() [test]` + `Verify: pytest
@@ -234,11 +237,13 @@ luck/self-solve = NOT a GT win — do not count it.**
 `gold_file_reached` (GT brief named the gold file) · `first_gold_rank` (rank in GT's list, or
 "abstain") · `gold_edited` · `first_edit_action` · `edit_to_gold_action`.
 
-### Tier 3b — ARCHITECTURAL CONFORMANCE (THE MAIN THING — is GT behaving as gt_gt.md intends?) — EVERY task, PASS AND FAIL
+### Tier 3b — ARCHITECTURAL CONFORMANCE (THE MAIN THING — is GT behaving as gt_new.md intends? gt_new = gt_gt + this session's deltas; gt_new wins where they differ) — EVERY task, PASS AND FAIL
 **This is the heart of the audit, not an add-on.** Recording "localization was wrong" is useless
 without the ARCHITECTURAL ROOT CAUSE. For EVERY task (resolved AND not — a pass with wrong GT
 behavior is still a defect, and a fail with correct GT behavior is still a GT win), walk GT's actual
-pipeline execution through the trajectory + the gt_artifacts CERTS and MATCH it against the gt_gt.md
+pipeline execution through the trajectory + the gt_artifacts CERTS and MATCH it against gt_new.md
+(= gt_gt AS AMENDED by this session's deltas: depth promote feeds scope/risk NOT rank, CHA/XTA
+receiver-type naming, I2 CALLS-scoped degree, edit_risk, oracle two-lane); gt_gt's base
 pipeline (§2 graph → §3 LSP → §4 localization/rerank → §4.2 fusion/weights → brief). Then answer, per
 task: **did each architecture stage FIRE AS gt_gt SPECIFIES, and if the brief was wrong, WHICH stage
 caused it?** A wrong localization is ALWAYS one of a bounded set of architectural causes — name which:
