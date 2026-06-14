@@ -4552,6 +4552,8 @@ def _augment_output(action, out) -> None:
                 if _win:
                     out["output"] = (out.get("output") or "") + _win
                     _ledger_note_delivery(_last_gate_winner_kind, cmd)
+                    # Fire-count parity: Lane B winners count too (was Lane-A-only).
+                    _record_hook_fire(_last_gate_winner_kind)
                     _runtime_ledger_record(
                         kind=_last_gate_winner_kind,
                         outcome=_ProductSignalOutcome.DELIVERED,

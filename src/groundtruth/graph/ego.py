@@ -209,161 +209,161 @@ def ego_graph(
 
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
+    try:
+        # Find center node
+        if file_path:
+            suffix = "%" + file_path.replace("\\", "/").lstrip("/")
+            rows = conn.execute(
+                "SELECT id, name, label, file_path, start_line, is_test FROM nodes "
+                "WHERE name = ? AND file_path LIKE ? AND is_test = 0 LIMIT 1",
+                (symbol_name, suffix),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, name, label, file_path, start_line, is_test FROM nodes "
+                "WHERE name = ? AND is_test = 0 "
+                "ORDER BY (SELECT COUNT(*) FROM edges WHERE target_id = nodes.id) DESC LIMIT 1",
+                (symbol_name,),
+            ).fetchall()
 
-    # Find center node
-    if file_path:
-        suffix = "%" + file_path.replace("\\", "/").lstrip("/")
-        rows = conn.execute(
-            "SELECT id, name, label, file_path, start_line, is_test FROM nodes "
-            "WHERE name = ? AND file_path LIKE ? AND is_test = 0 LIMIT 1",
-            (symbol_name, suffix),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT id, name, label, file_path, start_line, is_test FROM nodes "
-            "WHERE name = ? AND is_test = 0 "
-            "ORDER BY (SELECT COUNT(*) FROM edges WHERE target_id = nodes.id) DESC LIMIT 1",
-            (symbol_name,),
-        ).fetchall()
+        if not rows:
+            return result
 
-    if not rows:
-        conn.close()
+        center_row = rows[0]
+        center = EgoNode(
+            id=center_row["id"],
+            name=center_row["name"],
+            label=center_row["label"],
+            file_path=center_row["file_path"],
+            start_line=center_row["start_line"] or 0,
+            is_test=bool(center_row["is_test"]),
+            hop=0,
+        )
+        result.center = center
+        result.nodes[center.id] = center
+
+        # BFS for k hops
+        frontier = {center.id}
+        for hop in range(1, k + 1):
+            next_frontier: set[int] = set()
+            for node_id in frontier:
+                # Outgoing edges (callees)
+                out_edges = conn.execute(
+                    "SELECT e.id, e.target_id, e.type, e.confidence, e.source_line, "
+                    "n.id as nid, n.name, n.label, n.file_path, n.start_line, n.is_test "
+                    "FROM edges e JOIN nodes n ON e.target_id = n.id "
+                    "WHERE e.source_id = ? AND COALESCE(e.confidence, 0.5) >= ? "
+                    "LIMIT 10",
+                    (node_id, min_confidence),
+                ).fetchall()
+                for row in out_edges:
+                    tid = row["target_id"]
+                    if tid not in result.nodes:
+                        result.nodes[tid] = EgoNode(
+                            id=tid, name=row["name"], label=row["label"],
+                            file_path=row["file_path"],
+                            start_line=row["start_line"] or 0,
+                            is_test=bool(row["is_test"]), hop=hop,
+                        )
+                        next_frontier.add(tid)
+                    result.edges.append(EgoEdge(
+                        source_id=node_id, target_id=tid,
+                        edge_type=row["type"], confidence=row["confidence"] or 0.0,
+                        source_line=row["source_line"] or 0,
+                    ))
+
+                # Incoming edges (callers)
+                in_edges = conn.execute(
+                    "SELECT e.id, e.source_id, e.type, e.confidence, e.source_line, "
+                    "n.id as nid, n.name, n.label, n.file_path, n.start_line, n.is_test "
+                    "FROM edges e JOIN nodes n ON e.source_id = n.id "
+                    "WHERE e.target_id = ? AND COALESCE(e.confidence, 0.5) >= ? "
+                    "LIMIT 10",
+                    (node_id, min_confidence),
+                ).fetchall()
+                for row in in_edges:
+                    sid = row["source_id"]
+                    if sid not in result.nodes:
+                        result.nodes[sid] = EgoNode(
+                            id=sid, name=row["name"], label=row["label"],
+                            file_path=row["file_path"],
+                            start_line=row["start_line"] or 0,
+                            is_test=bool(row["is_test"]), hop=hop,
+                        )
+                        next_frontier.add(sid)
+                    result.edges.append(EgoEdge(
+                        source_id=sid, target_id=node_id,
+                        edge_type=row["type"], confidence=row["confidence"] or 0.0,
+                        source_line=row["source_line"] or 0,
+                    ))
+
+            frontier = next_frontier
+
+        # Enrich center node with four-pillar data
+        if result.center:
+            cid = result.center.id
+            # Pillar 1: Contract — signature, return type, guard clauses
+            sig_row = conn.execute(
+                "SELECT signature, return_type FROM nodes WHERE id = ?", (cid,)
+            ).fetchone()
+            if sig_row:
+                result.signature = sig_row["signature"] or ""
+                result.return_type = sig_row["return_type"] or ""
+
+            try:
+                has_props = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='properties'"
+                ).fetchone()
+                if has_props:
+                    props = conn.execute(
+                        "SELECT kind, value FROM properties WHERE node_id = ? "
+                        "AND kind IN ('guard_clause', 'conditional_return', 'boundary_condition') "
+                        "ORDER BY line LIMIT 5",
+                        (cid,),
+                    ).fetchall()
+                    result.guards = [f"{p['kind']}: {p['value']}" for p in props]
+            except Exception:
+                pass
+
+            # Pillar 2: Consistency — shared-state obligations
+            # Find sibling methods in same class that share self.* attributes
+            try:
+                parent_row = conn.execute(
+                    "SELECT parent_id FROM nodes WHERE id = ?", (cid,)
+                ).fetchone()
+                if parent_row and parent_row["parent_id"]:
+                    siblings = conn.execute(
+                        "SELECT name FROM nodes WHERE parent_id = ? AND id != ? "
+                        "AND label IN ('Function', 'Method') AND is_test = 0 LIMIT 10",
+                        (parent_row["parent_id"], cid),
+                    ).fetchall()
+                    if siblings:
+                        sib_names = [s["name"] for s in siblings]  # noqa: F841
+                        # Use obligation_check if file is Python
+                        if result.center.file_path.endswith(".py"):
+                            try:
+                                from groundtruth.hooks.obligation_check import find_obligations
+                                repo_root = os.environ.get("GT_REPO_ROOT", "/testbed")
+                                obs = find_obligations(
+                                    result.center.file_path, repo_root,
+                                    {result.center.name},
+                                )
+                                result.obligations = obs[:3]
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+
+            # Pillar 4: Test assertions — DELIBERATELY NOT LOADED (legitimacy, gt_gt §349).
+            # The `assertions` table carries test NAMES + the grader's expected values; the
+            # ego render() Tests pillar is commented out and post_view nulls test_assertions,
+            # so loading it here only risks a future re-leak ("run12 leaked test_plot_hdi").
+            # The assertions table is OFF-LIMITS to every agent-facing surface; we do not even
+            # read it. result.test_assertions stays [] (its default).
+
         return result
-
-    center_row = rows[0]
-    center = EgoNode(
-        id=center_row["id"],
-        name=center_row["name"],
-        label=center_row["label"],
-        file_path=center_row["file_path"],
-        start_line=center_row["start_line"] or 0,
-        is_test=bool(center_row["is_test"]),
-        hop=0,
-    )
-    result.center = center
-    result.nodes[center.id] = center
-
-    # BFS for k hops
-    frontier = {center.id}
-    for hop in range(1, k + 1):
-        next_frontier: set[int] = set()
-        for node_id in frontier:
-            # Outgoing edges (callees)
-            out_edges = conn.execute(
-                "SELECT e.id, e.target_id, e.type, e.confidence, e.source_line, "
-                "n.id as nid, n.name, n.label, n.file_path, n.start_line, n.is_test "
-                "FROM edges e JOIN nodes n ON e.target_id = n.id "
-                "WHERE e.source_id = ? AND COALESCE(e.confidence, 0.5) >= ? "
-                "LIMIT 10",
-                (node_id, min_confidence),
-            ).fetchall()
-            for row in out_edges:
-                tid = row["target_id"]
-                if tid not in result.nodes:
-                    result.nodes[tid] = EgoNode(
-                        id=tid, name=row["name"], label=row["label"],
-                        file_path=row["file_path"],
-                        start_line=row["start_line"] or 0,
-                        is_test=bool(row["is_test"]), hop=hop,
-                    )
-                    next_frontier.add(tid)
-                result.edges.append(EgoEdge(
-                    source_id=node_id, target_id=tid,
-                    edge_type=row["type"], confidence=row["confidence"] or 0.0,
-                    source_line=row["source_line"] or 0,
-                ))
-
-            # Incoming edges (callers)
-            in_edges = conn.execute(
-                "SELECT e.id, e.source_id, e.type, e.confidence, e.source_line, "
-                "n.id as nid, n.name, n.label, n.file_path, n.start_line, n.is_test "
-                "FROM edges e JOIN nodes n ON e.source_id = n.id "
-                "WHERE e.target_id = ? AND COALESCE(e.confidence, 0.5) >= ? "
-                "LIMIT 10",
-                (node_id, min_confidence),
-            ).fetchall()
-            for row in in_edges:
-                sid = row["source_id"]
-                if sid not in result.nodes:
-                    result.nodes[sid] = EgoNode(
-                        id=sid, name=row["name"], label=row["label"],
-                        file_path=row["file_path"],
-                        start_line=row["start_line"] or 0,
-                        is_test=bool(row["is_test"]), hop=hop,
-                    )
-                    next_frontier.add(sid)
-                result.edges.append(EgoEdge(
-                    source_id=sid, target_id=node_id,
-                    edge_type=row["type"], confidence=row["confidence"] or 0.0,
-                    source_line=row["source_line"] or 0,
-                ))
-
-        frontier = next_frontier
-
-    # Enrich center node with four-pillar data
-    if result.center:
-        cid = result.center.id
-        # Pillar 1: Contract — signature, return type, guard clauses
-        sig_row = conn.execute(
-            "SELECT signature, return_type FROM nodes WHERE id = ?", (cid,)
-        ).fetchone()
-        if sig_row:
-            result.signature = sig_row["signature"] or ""
-            result.return_type = sig_row["return_type"] or ""
-
-        try:
-            has_props = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='properties'"
-            ).fetchone()
-            if has_props:
-                props = conn.execute(
-                    "SELECT kind, value FROM properties WHERE node_id = ? "
-                    "AND kind IN ('guard_clause', 'conditional_return', 'boundary_condition') "
-                    "ORDER BY line LIMIT 5",
-                    (cid,),
-                ).fetchall()
-                result.guards = [f"{p['kind']}: {p['value']}" for p in props]
-        except Exception:
-            pass
-
-        # Pillar 2: Consistency — shared-state obligations
-        # Find sibling methods in same class that share self.* attributes
-        try:
-            parent_row = conn.execute(
-                "SELECT parent_id FROM nodes WHERE id = ?", (cid,)
-            ).fetchone()
-            if parent_row and parent_row["parent_id"]:
-                siblings = conn.execute(
-                    "SELECT name FROM nodes WHERE parent_id = ? AND id != ? "
-                    "AND label IN ('Function', 'Method') AND is_test = 0 LIMIT 10",
-                    (parent_row["parent_id"], cid),
-                ).fetchall()
-                if siblings:
-                    sib_names = [s["name"] for s in siblings]
-                    # Use obligation_check if file is Python
-                    if result.center.file_path.endswith(".py"):
-                        try:
-                            from groundtruth.hooks.obligation_check import find_obligations
-                            repo_root = os.environ.get("GT_REPO_ROOT", "/testbed")
-                            obs = find_obligations(
-                                result.center.file_path, repo_root,
-                                {result.center.name},
-                            )
-                            result.obligations = obs[:3]
-                        except Exception:
-                            pass
-        except Exception:
-            pass
-
-        # Pillar 4: Test assertions — DELIBERATELY NOT LOADED (legitimacy, gt_gt §349).
-        # The `assertions` table carries test NAMES + the grader's expected values; the
-        # ego render() Tests pillar is commented out and post_view nulls test_assertions,
-        # so loading it here only risks a future re-leak ("run12 leaked test_plot_hdi").
-        # The assertions table is OFF-LIMITS to every agent-facing surface; we do not even
-        # read it. result.test_assertions stays [] (its default).
-
-    conn.close()
-    return result
+    finally:
+        conn.close()  # close on ALL paths — incl. an unguarded BFS/center query error
 
 
 def change_impact(

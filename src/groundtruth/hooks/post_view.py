@@ -1135,14 +1135,16 @@ def graph_navigation(
         from groundtruth.graph.ego import ego_graph as _ego
         _issue_terms = _load_issue_terms(state)  # Fix D: pass state so terms load
         _ego_conn = sqlite3.connect(db_path)
-        _ego_conn.row_factory = sqlite3.Row
-        _funcs = _ego_conn.execute(
-            "SELECT name, file_path FROM nodes "
-            "WHERE file_path = ? AND label IN ('Function','Method') AND is_test = 0 "
-            "LIMIT 10",
-            (needle,),
-        ).fetchall()
-        _ego_conn.close()
+        try:
+            _ego_conn.row_factory = sqlite3.Row
+            _funcs = _ego_conn.execute(
+                "SELECT name, file_path FROM nodes "
+                "WHERE file_path = ? AND label IN ('Function','Method') AND is_test = 0 "
+                "LIMIT 10",
+                (needle,),
+            ).fetchall()
+        finally:
+            _ego_conn.close()  # close on ALL paths — the outer except must not leak the handle
         # Pick issue-relevant function (not most-called — avoids hub bias)
         _best_func = None
         if _issue_terms and _funcs:
