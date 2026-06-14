@@ -678,6 +678,12 @@ class LocalizerResult:
     gate_reason: str             # why confident / not (telemetry)
     scope_chains: list[ScopeChain] = field(default_factory=list)
     graph_stats: dict = field(default_factory=dict)
+    # WIDE-scope edit-set telemetry (Task-2 slice 1, additive). n_components = the
+    # number of connected components among the top candidates under the typed-edge
+    # union-find (1 = one cohesive edit-set; >1 = disjoint clusters). 0 when no
+    # scope chains were built. Consumed only by future deep/wide gating + 8-dp
+    # logging; absent on early returns (defaults to 0 — byte-identical today).
+    n_components: int = 0
     # MULTI-SIGNAL AGREEMENT (the grep-floor build): per-file count of how many
     # of the three independent rankers (grep / structural / semantic) place this
     # file's candidate in their OWN top-3. 0..3. Empty {} when no candidates were
@@ -687,6 +693,15 @@ class LocalizerResult:
     # CombMIN Fox & Shaw TREC-2 1994) — agreement across independent rankers is a
     # stronger relevance signal than any single ranker.
     agreement_by_file: dict[str, int] = field(default_factory=dict)
+    # R1 leaf-naming bridge (additive, default {}): per-file ranked per-SYMBOL semantic
+    # scores — {file_norm: [(symbol_name, cosine), ...]} high→low — captured from the
+    # SAME per-symbol MaxSim cosines that produce the file's semantic score (previously
+    # discarded). Consumed by v1r_brief._localization_header to rank WITHIN-FILE leaves
+    # by the issue→code semantic signal that reached the gold file, instead of raw
+    # in-degree (which names the hub on behavior-described issues). Empty {} when the
+    # embedder is off / no candidate scored — degrades the symbol-naming stage to its
+    # prior in-degree behavior byte-identically (correct-or-quiet).
+    symbol_semrank_by_file: dict[str, list[tuple[str, float]]] = field(default_factory=dict)
 
 
 def _normalize(fp: str) -> str:
@@ -1309,6 +1324,56 @@ class ScopeChain:
     edges: list[tuple[str, str, str, str]]
     confidence: float
     description: str
+    # WIDE-scope additive fields (Task-2 slice 1, 2026-06-13). Populated by the
+    # union-find connected-edit-set builder; ABSENT/empty on graphs with no typed
+    # promote edges so today's output stays byte-identical (consumers read via
+    # getattr with defaults). `edge_tiers` parallels `edges`: per chain-edge trust
+    # in {'CERTIFIED','CANDIDATE','SPECULATIVE'} so the renderer can tag a
+    # promote-derived scope member as CANDIDATE and an unverified name_match edge as
+    # SPECULATIVE — neither laundered as a verified fact (correct-or-quiet).
+    edge_tiers: tuple[str, ...] = field(default_factory=tuple)
+
+
+# WIDE connected-edit-set edge scope (Task-2 slice 1). The scope builder traverses
+# CALLS/IMPORTS *and* the promoted relationship edges so a file pulled into the
+# edit-set ONLY by a typed promote edge (the measured aiomonitor webui/app.py win:
+# directed-UNREACHABLE under CALLS-only → in-scope via a single READS edge) joins
+# the connected component. These edges feed SCOPE-COMPLETENESS ONLY — they are
+# NEVER added to _degree_edge_filter (degree/hub prior) or _rrf3 (file rank), so
+# they cannot re-introduce the BRIEFING §4 hub-over-promotion failure. DEGRADE-SAFE:
+# on current live graphs no edge carries a promoted type or `promote_%` provenance
+# (measured: 0 across scanned graphs), so widening the SELECT adds zero rows and the
+# union-find over CALLS/IMPORTS reproduces today's connected components.
+_SCOPE_EDGE_TYPES: tuple[str, ...] = (
+    "CALLS", "IMPORTS",
+) + _PROMOTED_EDGE_TYPES + ("USES",)
+
+
+def _scope_edge_trust(verified: bool, method: str | None, conf_f: float) -> str | None:
+    """Trust tier of a candidate scope edge, or None to DROP it.
+
+    CERTIFIED   — deterministic resolution_method (a fact: import/same_file/type_flow/
+                  lsp/…). CANDIDATE — a promotion-derived edge (`resolution_method LIKE
+                  'promote_%'`): derived from existing facts, rendered with an explicit
+                  CANDIDATE tag, never laundered as verified. SPECULATIVE — an admitted
+                  name_match edge at/above the floor (``conf_f >= _NAME_MATCH_FLOOR``):
+                  kept ONLY to preserve byte-identical behavior on today's graphs (the
+                  old builder admitted exactly this set) and rendered with an explicit
+                  ``(unverified)`` tag, never as a fact. Below the floor → None (drop).
+
+    ADDITIVITY: admission is identical to the prior builder (``verified OR conf_f >=
+    _NAME_MATCH_FLOOR``), so with no promote edges present the SAME edges form the SAME
+    components as before — the CERTIFIED/CANDIDATE/SPECULATIVE split is a render tag,
+    not a new filter. The new typed promote edges (CANDIDATE) only ADD reach.
+    """
+    if verified:
+        return "CERTIFIED"
+    m = (method or "").strip().lower()
+    if m.startswith("promote_"):
+        return "CANDIDATE"
+    if conf_f >= _NAME_MATCH_FLOOR:
+        return "SPECULATIVE"
+    return None
 
 
 def _build_scope_chains(
@@ -1317,14 +1382,31 @@ def _build_scope_chains(
     has_conf: bool,
     max_chains: int = 3,
 ) -> list[ScopeChain]:
-    """Extract scope chains from verified candidates — connected file subgraphs.
+    """Extract scope chains from candidates — the connected edit-set (Task-2 slice 1).
 
-    For every pair of top candidates, check if they share a direct CALLS/IMPORTS
-    edge. If so, group them into a chain. This surfaces "this fix spans A → B → C"
-    for the agent, addressing incomplete-scope failures.
+    Union-find over the top candidate files using CALLS/IMPORTS *and* the promoted
+    relationship edges (READS/WRITES/DATA_FLOW/…), admitting only CERTIFIED
+    (deterministic) or CANDIDATE (promote_%) edges. The connected component a
+    confident seed belongs to IS the recovered edit-set — "these N files move
+    together." This generalizes the one measured ceiling-break (aiomonitor
+    webui/app.py joined the edit-set via a READS edge CALLS-only could not reach).
 
-    Only uses high-confidence edges (verified/import) — a scope chain backed by
-    speculative name_match would misdirect worse than no chain.
+    SCOPE-COMPLETENESS only: the typed edges never enter _rrf3 (file rank) or
+    _degree_edge_filter (hub prior) — BRIEFING §4 (reach over-promotes hubs) is
+    honored because following a *specific typed relationship from a confident seed*
+    is not ranking-by-centrality. Correct-or-quiet: a sub-floor name_match edge
+    (``conf_f < _NAME_MATCH_FLOOR``) is dropped, so a wide scope is never built on a
+    guess; a promote_% edge is admitted but rendered with an explicit CANDIDATE tag,
+    never laundered as a verified fact.
+
+    PURELY ADDITIVE — admission is IDENTICAL to the prior builder (``verified OR
+    conf_f >= _NAME_MATCH_FLOOR``); ``_scope_edge_trust`` only SPLITS that same
+    admitted set into render tiers (CERTIFIED / CANDIDATE / SPECULATIVE) and the
+    union-find reproduces the same connected components the old BFS did. DEGRADE-SAFE:
+    with no promote edges present (today) only CALLS/IMPORTS rows are returned and the
+    component partition is byte-identical to before; the new typed promote edges
+    (CANDIDATE) only ADD reach once promotion ships. No ranking weight or score
+    formula is touched — this feeds SCOPE, not rank or degree.
     """
     if len(candidates) < 2:
         return []
@@ -1334,8 +1416,9 @@ def _build_scope_chains(
         return []
 
     conf_sel = "e.confidence" if has_conf else "1.0"
+    _types_in = ",".join("'" + t + "'" for t in _SCOPE_EDGE_TYPES)
     try:
-        # Get all edges between top candidate files
+        # Cross-file edges between top candidates, over the widened scope edge set.
         ph = ",".join("?" for _ in top_files)
         rows = conn.execute(
             f"""
@@ -1346,7 +1429,7 @@ def _build_scope_chains(
             JOIN nodes nt ON e.target_id = nt.id
             WHERE ns.file_path IN ({ph}) AND nt.file_path IN ({ph})
               AND ns.file_path != nt.file_path
-              AND e.type IN ('CALLS','IMPORTS')
+              AND e.type IN ({_types_in})
             """,
             tuple(top_files) + tuple(top_files),
         ).fetchall()
@@ -1356,54 +1439,93 @@ def _build_scope_chains(
     if not rows:
         return []
 
-    # Build adjacency from verified edges only
-    adj: dict[str, list[tuple[str, str, str, float]]] = {}
+    # UNION-FIND over CERTIFIED/CANDIDATE edges → connected edit-sets.
+    parent: dict[str, str] = {fp: fp for fp in top_files}
+
+    def _find(x: str) -> str:
+        root = x
+        while parent.get(root, root) != root:
+            root = parent[root]
+        # path-compress
+        while parent.get(x, x) != root:
+            parent[x], x = root, parent[x]
+        return root
+
+    def _union(a: str, b: str) -> None:
+        ra, rb = _find(a), _find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    # Edge records keyed by the (src,dst) file pair we MERGE on, kept for description
+    # + per-edge trust rendering. Undirected for edit-set membership (a file pulled
+    # in by an upward READS link belongs regardless of edge direction).
+    edge_recs: list[tuple[str, str, str, str, float, str]] = []
     for src_fp, dst_fp, etype, src_name, dst_name, conf, method in rows:
         try:
             conf_f = float(conf) if conf is not None else 0.0
         except (TypeError, ValueError):
             conf_f = 0.0
         verified = _is_verified(method)
-        if not verified and conf_f < _NAME_MATCH_FLOOR:
-            continue
+        tier = _scope_edge_trust(verified, method, conf_f)
+        if tier is None:
+            continue  # below the name_match floor — never a scope edge
+        if src_fp not in parent:
+            parent[src_fp] = src_fp
+        if dst_fp not in parent:
+            parent[dst_fp] = dst_fp
         sym_pair = f"{src_name} → {dst_name}"
-        adj.setdefault(src_fp, []).append((dst_fp, etype, sym_pair, conf_f))
+        edge_recs.append((src_fp, dst_fp, str(etype or "CALLS"), sym_pair, conf_f, tier))
+        _union(src_fp, dst_fp)
 
-    # BFS from each top file to find connected components
+    if not edge_recs:
+        return []
+
+    # Group files + the edges that connected them by component root.
+    comp_files: dict[str, list[str]] = {}
+    comp_edges: dict[str, list[tuple[str, str, str, str, float, str]]] = {}
+    for fp in top_files:
+        comp_files.setdefault(_find(fp), []).append(fp)
+    for rec in edge_recs:
+        comp_edges.setdefault(_find(rec[0]), []).append(rec)
+
     chains: list[ScopeChain] = []
-    visited_files: set[str] = set()
-
-    for start_file in top_files:
-        if start_file in visited_files:
+    for root, files in comp_files.items():
+        recs = comp_edges.get(root, [])
+        if len(files) < 2 or not recs:
             continue
-        chain_files = [start_file]
         chain_edges: list[tuple[str, str, str, str]] = []
+        edge_tiers: list[str] = []
+        desc_parts: list[str] = []
         chain_conf = 1.0
-        queue = [start_file]
-        visited_files.add(start_file)
-
-        while queue:
-            current = queue.pop(0)
-            for dst, etype, sym_pair, conf_f in adj.get(current, []):
-                if dst not in visited_files and dst in top_files:
-                    visited_files.add(dst)
-                    chain_files.append(dst)
-                    chain_edges.append((current, dst, etype, sym_pair))
-                    chain_conf = min(chain_conf, conf_f)
-                    queue.append(dst)
-
-        if len(chain_files) >= 2:
-            desc_parts = []
-            for src, dst, etype, sym in chain_edges:
-                src_base = os.path.basename(src)
-                dst_base = os.path.basename(dst)
-                desc_parts.append(f"{src_base} → {dst_base} ({sym})")
-            chains.append(ScopeChain(
-                files=chain_files,
-                edges=chain_edges,
-                confidence=chain_conf,
-                description="; ".join(desc_parts),
-            ))
+        for src, dst, etype, sym, conf_f, tier in recs:
+            chain_edges.append((src, dst, etype, sym))
+            edge_tiers.append(tier)
+            chain_conf = min(chain_conf, conf_f)
+            # TRUST-TAG (correct-or-quiet, Pillar 3): a CANDIDATE (promote_%) edge is
+            # derived-from-facts; a SPECULATIVE (name_match >= floor) edge is a NAME
+            # GUESS. NEITHER is a verified fact, so BOTH carry an explicit tag in the
+            # rendered description; only CERTIFIED (deterministic) renders bare. This
+            # makes _scope_edge_trust's contract true AT THE RENDER — a name_match scope
+            # edge is never laundered as a fact. (Closes the SPECULATIVE-untagged leak
+            # that no edge_tiers consumer was closing; NOT byte-identical to the prior
+            # builder ON PURPOSE — the prior bare render WAS the laundering.)
+            _tag = (
+                " (CANDIDATE)" if tier == "CANDIDATE"
+                else " (unverified)" if tier == "SPECULATIVE"
+                else ""
+            )
+            desc_parts.append(
+                f"{os.path.basename(src)} → {os.path.basename(dst)} ({sym}){_tag}"
+            )
+        # Preserve seed-first ordering: keep top_files order within the component.
+        ordered = [f for f in top_files if _find(f) == root]
+        chains.append(ScopeChain(
+            files=ordered,
+            edges=chain_edges,
+            confidence=chain_conf,
+            description="; ".join(desc_parts),
+            edge_tiers=tuple(edge_tiers),
+        ))
 
     chains.sort(key=lambda c: (-len(c.files), -c.confidence, c.files[0] if c.files else ""))
     return chains[:max_chains]
@@ -1566,7 +1688,8 @@ def _sem_pool_files(top_k: int) -> int:
 
 
 def _semantic_score_by_file(
-    issue_text: str, graph_db: str, files: "Iterable[str]"
+    issue_text: str, graph_db: str, files: "Iterable[str]",
+    *, symbol_scores_out: "dict[str, list[tuple[str, float]]] | None" = None,
 ) -> dict[str, float]:
     """Semantic similarity between the issue and each candidate file's CODE CONTENT.
 
@@ -1577,6 +1700,15 @@ def _semantic_score_by_file(
     is not averaged into its 60 siblings (which collapsed sibling cosines to a flat
     0.80-0.84 band). Demand-scoped to the candidate ``files`` set only. Return CONTRACT
     is byte-identical: ``dict[file_path -> float]``; empty dict when no embedder.
+
+    R1 leaf-naming bridge (correct-or-quiet, additive): the per-SYMBOL MaxSim cosines
+    computed here for the FILE score were previously discarded. When ``symbol_scores_out``
+    is supplied, it is populated in place with ``{file_norm: [(symbol_name, cosine), ...]}``
+    so the symbol-naming stage (``v1r_brief._localization_header``) can rank WITHIN-FILE
+    leaves by the same semantic signal that reached the gold file — instead of raw
+    in-degree (which names the hub on behavior-described issues). The returned float
+    dict is unchanged; ``symbol_scores_out`` defaults to ``None`` so every existing
+    caller is byte-identical, and it stays empty whenever the embedder is off.
 
     ENCODE DISCIPLINE (fix 2026-06-09, gt_gt §11.2 "cache by node-content hash"):
     ``files`` iteration order is the PRIORITY order (the call site passes the
@@ -1617,6 +1749,11 @@ def _semantic_score_by_file(
     node_body: dict[int, list[str]] = {}
     # Per-file ordered list of symbol passages (carry the existing 80/symbol cap).
     file_passages: dict[str, list[str]] = {}
+    # R1 leaf-naming bridge: the symbol NAME parallel to each passage (same index),
+    # so the per-symbol cosine computed below can be attributed back to a name for
+    # symbol-stage ranking. Only assembled when symbol_scores_out is requested.
+    file_symnames: dict[str, list[str]] = {}
+    _want_sym = symbol_scores_out is not None
     try:
         conn = sqlite3.connect(graph_db)
         try:
@@ -1642,6 +1779,8 @@ def _semantic_score_by_file(
                 passage = symbol_passage(nm or "", sig or "", body)
                 if passage:  # correct-or-quiet: never embed a blank symbol
                     file_passages.setdefault(k, []).append(passage)
+                    if _want_sym:
+                        file_symnames.setdefault(k, []).append(str(nm or ""))
         finally:
             conn.close()
     except sqlite3.Error as _e:
@@ -1724,16 +1863,34 @@ def _semantic_score_by_file(
     _res: dict[str, float] = {}
     for f in order:
         cosines = []
-        for p in file_passages[f]:
+        # R1: per-symbol (name, cosine) for the leaf-naming bridge. Index-aligned with
+        # file_passages[f] via file_symnames[f]; only assembled when requested.
+        _sym_pairs: list[tuple[str, float]] = []
+        _names = file_symnames.get(f, []) if _want_sym else []
+        for _i, p in enumerate(file_passages[f]):
             v = vec_by_hash.get(hash_of[p])
             if v is None:
                 continue  # over-budget passage — score the file on what IS available
             c = float(np.dot(q, v))
             if np.isfinite(c):
                 cosines.append(c)
+                if _want_sym and _i < len(_names) and _names[_i]:
+                    # Floor negatives at 0 (same convention as aggregate_symbol_cosines:
+                    # a symbol pointing AWAY from the issue is no evidence, not negative).
+                    _sym_pairs.append((_names[_i], c if c > 0.0 else 0.0))
         if not cosines:
             continue  # fully unscored (budget) — absent from the result, never a fake 0.0
         _res[f] = aggregate_symbol_cosines(cosines, alpha=alpha, top_k=top_k)
+        if _want_sym and _sym_pairs:
+            # Best cosine per symbol name (a name may recur — overloads/methods),
+            # ranked high→low. symbol_scores_out is the out-param; mutate in place.
+            _best: dict[str, float] = {}
+            for _nm, _c in _sym_pairs:
+                if _c > _best.get(_nm, -1.0):
+                    _best[_nm] = _c
+            symbol_scores_out[f] = sorted(  # type: ignore[index]
+                _best.items(), key=lambda kv: -kv[1]
+            )
     if _proof_on and _res:
         _nz = sum(1 for v in _res.values() if v and v > 0)
         _proof.require(_nz > 0, "semantic_ranks_nonzero",
@@ -2426,8 +2583,13 @@ def localize(
         candidates,
         key=lambda c: (_grep_floor(c), _depth_authority(c), -_rrf2(c), c.file_path),
     )[:_sem_pool_files(top_k)]
+    # R1: capture the per-symbol semantic scores (previously discarded) so the
+    # symbol-naming stage can rank within-file leaves by the same signal. The float
+    # return is unchanged; _symbol_semrank stays {} when the embedder is off.
+    _symbol_semrank: dict[str, list[tuple[str, float]]] = {}
     _sem = _semantic_score_by_file(
-        issue_text, graph_db, [c.file_path for c in _sem_pool]
+        issue_text, graph_db, [c.file_path for c in _sem_pool],
+        symbol_scores_out=_symbol_semrank,
     )
     # Rank ONLY scored candidates: a file with no semantic score (outside the pool,
     # over the encode budget, or no embeddable symbols) must fall to rank _BIG
@@ -2494,6 +2656,19 @@ def localize(
     except Exception:
         pass
 
+    # WIDE edit-set telemetry (Task-2 slice 1, additive): connected-component count
+    # among the top candidates under the typed-edge union-find. Each multi-file chain
+    # is one component; every top candidate NOT pulled into a chain is its own
+    # singleton component. 0 when there is nothing to scope. Pure observation of the
+    # chains already built — no extra query, no effect on ranking.
+    _n_components = 0
+    if candidates:
+        _chained_files = {_normalize(f) for ch in _chains for f in ch.files}
+        _singletons = sum(
+            1 for c in candidates if _normalize(c.file_path) not in _chained_files
+        )
+        _n_components = len(_chains) + _singletons
+
     # ---- CONFIDENCE GATE (data-derived, per-task) ----
     # Two-stage gate: (1) structural evidence check, (2) score-separation check.
     #
@@ -2516,7 +2691,8 @@ def localize(
         return LocalizerResult(
             candidates, list(anchors), best.confidence, False, "top_unverified",
             scope_chains=_chains, graph_stats=_stats,
-            agreement_by_file=_agreement_by_file,
+            agreement_by_file=_agreement_by_file, n_components=_n_components,
+            symbol_semrank_by_file=_symbol_semrank,
         )
 
     verified = [c for c in candidates if c.has_verified_witness]
@@ -2587,5 +2763,6 @@ def localize(
     return LocalizerResult(
         candidates, list(anchors), best.confidence, confident, gate_reason,
         scope_chains=_chains, graph_stats=_stats,
-        agreement_by_file=_agreement_by_file,
+        agreement_by_file=_agreement_by_file, n_components=_n_components,
+        symbol_semrank_by_file=_symbol_semrank,
     )

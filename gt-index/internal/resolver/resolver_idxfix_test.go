@@ -197,3 +197,29 @@ func TestBuildNameIndex_ExcludesFileAnchorNodes(t *testing.T) {
 		t.Errorf("File-anchor node registered in file index: %v", m)
 	}
 }
+
+// TestBuildNodeMeta_GoReceiverNamePlumbing proves the end-to-end plumbing: BuildNodeMeta
+// derives NodeMeta.ReceiverName from a Go method's stored Signature (so rung 2b can accept
+// the `r.field.m()` receiver prefix), and leaves it EMPTY for non-Go nodes, anonymous Go
+// receivers, and plain functions. Drives the REAL BuildNodeMeta + parser.GoReceiverName.
+func TestBuildNodeMeta_GoReceiverNamePlumbing(t *testing.T) {
+	nodes := []store.Node{
+		{Label: "Method", Name: "Area", Language: "go", Signature: "func (c *Circle) Area() float64"},
+		{Label: "Method", Name: "Name", Language: "go", Signature: "func (Account) Name() string"}, // anonymous receiver
+		{Label: "Function", Name: "Plain", Language: "go", Signature: "func Plain() {}"},           // no receiver
+		{Label: "Method", Name: "handle", Language: "python", Signature: "def handle(self):"},      // non-Go
+	}
+	meta := BuildNodeMeta(nodes, []int64{1, 2, 3, 4})
+	if got := meta[1].ReceiverName; got != "c" {
+		t.Errorf("go named receiver: ReceiverName = %q, want \"c\"", got)
+	}
+	if got := meta[2].ReceiverName; got != "" {
+		t.Errorf("go anonymous receiver: ReceiverName = %q, want \"\" (no var to match)", got)
+	}
+	if got := meta[3].ReceiverName; got != "" {
+		t.Errorf("go plain function: ReceiverName = %q, want \"\"", got)
+	}
+	if got := meta[4].ReceiverName; got != "" {
+		t.Errorf("python node: ReceiverName = %q, want \"\" (Go-only)", got)
+	}
+}

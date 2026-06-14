@@ -294,10 +294,10 @@ def test_localize_semantic_pool_caps_callsite_and_encodes(tmp_path, monkeypatch)
     seen: dict[str, int] = {}
     orig = gl._semantic_score_by_file
 
-    def spy(issue, dbp, files):
+    def spy(issue, dbp, files, **kw):
         files = list(files)
         seen["n_files"] = len(files)
-        return orig(issue, dbp, files)
+        return orig(issue, dbp, files, **kw)
 
     monkeypatch.setattr(gl, "_semantic_score_by_file", spy)
 
@@ -349,8 +349,8 @@ def test_final_window_is_subset_of_semantic_pool(tmp_path, monkeypatch):
     captured: dict[str, dict] = {}
     orig = gl._semantic_score_by_file
 
-    def spy(issue, dbp, files):
-        out = orig(issue, dbp, list(files))
+    def spy(issue, dbp, files, **kw):
+        out = orig(issue, dbp, list(files), **kw)
         captured["sem"] = out
         return out
 

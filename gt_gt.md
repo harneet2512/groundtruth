@@ -2132,3 +2132,74 @@ get full LSP conversions (347/51/132 edges on the frozen run).
 
 All 10 pieces built, LIPI'd, defects closed. Quality depends on the agent's response to the
 delivered context — measurable only on a live benchmark run.
+
+---
+
+## 18. End-to-end wiring / connection map (2026-06-14)
+
+> **Last verified 2026-06-14 (direct code reads at HEAD `d8cfd3d1`).** This section records
+> the **seam-by-seam connection state** of the ONE pipeline (§1): source → `graph.db` → scope →
+> brief → naming facts → delivery lanes → ledger → oracle → the agent. It is the wiring map, not
+> a behaviour claim.
+>
+> **NON-OVERCLAIM (read first).** A seam being *statically wired* — the producer writes a column
+> / the consumer reads it / the import resolves / a test is green — is **NOT** a witnessed
+> connection. Per the DEFINITION OF DONE (`.claude/CLAUDE.md`) and the AGENT-OBSERVATION rule
+> (`CLAUDE.md`), a seam is **"connected-proven" only when data flows through it on a real run and
+> the agent is observed consuming it from `output.jsonl`.** Every row below whose proof is "code
+> + test" is therefore **WIRED, witness-pending**, never "done." There is exactly **one** gate
+> that converts the whole chain from wired→proven: the **live end-to-end witness (Task 8 /
+> jedi_WORK task #8 + the witness owed by task #6)** — §18.4. Nothing downstream of an unwitnessed
+> seam may be claimed as flowing.
+
+### 18.1 WIRED seams (static wiring present + green; witness-pending unless noted)
+
+| # | Seam (source → sink) | Where it is wired (file:line) | Proof on disk | State |
+|---|---|---|---|---|
+| W1 | **source → `graph.db`: IMPORTS edges + property→edge promote (Pass 4f)** | `gt-index/cmd/gt-index/main.go:623-643` (Pass 4f block: `ResolveImports*` → IMPORTS, `resolver.PromotePropertyEdges(db)`); promote engine `gt-index/internal/resolver/promote.go`; IMPORTS `gt-index/internal/resolver/imports.go` | commit `b5ceaf5d` (copies→production), `9860ff7e` (DATA_FLOW→CALLS annotation LIPI), `d6a50d0e` (promote pass red→green Go/Py/JS/TS); `promote_test.go` green | **WIRED** — runs in the production Go indexer; witness-pending on a live re-indexed graph |
+| W2 | **`graph.db` edges → scope → brief (v1r_brief)** | scope-chain emission `src/groundtruth/pretask/v1r_brief.py:1704-1716` (graph-connected scope chains, conf≥0.5); cross-file scope-hint `:1688-1698`; entry-point `generate_v1r_brief` `:2477`; scope computed `:3256` | the brief is the LIVE eval brief (canary→wrapper→`generate_v1r_brief`→`instance['gt_brief']`, per MEMORY: "v1r_brief is the LIVE brief, not v22"); v22_brief/curation_map-to-v22 are DEAD | **WIRED** — this is the agent-delivered path |
+| W3 | **naming facts → consumers (CHA/XTA receiver-type → fact edges → brief/curation)** | resolver rung 2b declared-FIELD-type receiver `gt-index/internal/resolver/resolver.go:446-487`, `BuildFieldTypeIndex` `:676`, `SetFieldTypeIndex` `:538`, inheritance walk `:883-888`; consumed by the DETERMINISTIC-method gate in `v1r_brief.py:499` (`name_policy`) + `curation_map.py:79` (name_match never admitted as fact) | commits `ec20d603` (Py+Rust), `71d66378` (Go+TS); `resolver_fieldtype_test.go` green | **WIRED** — a typed-field `name_match` method-edge class converts to a `type_flow` FACT (conf 0.9) and reaches the fact-gated consumers; witness-pending on a real graph |
+| W4 | **delivery hybrid lanes → ledger → oracle** | Lane A always-on data plane `_lane_a_deliver` `artifact_deepswe/gt_mini_patch.py:4062` (per-producer try/except, BEFORE Lane B); Lane B oracle gate `_oracle_gate_blocks` `:3891` (winner `:3970`); shared ledger `_oracle_delivered_hashes` `:2898` (reset `:2962`, parity hash `:3886`); oracle event emit `gt.oracle_event.v2` `:3853`, sink `GT_ORACLE_EVENTS` `:3864` | commits `35a3fb17` (bulkhead), `32e4e313` (un-stub per-turn gate), `a7a4be87`/`e6ddc06e` (RC5 edit-coverage); `tests/test_hybrid_lane_split.py`, `tests/test_oracle_gate_fires_in_container.py` green incl. negative control | **WIRED** — Lane A survives a Lane B/oracle crash (fault-proven); but every `output.jsonl` on disk predates `32e4e313` (ran the DARK binary) → **no live oracle-event witness yet** |
+| W5 | **in-container injection allow-list (Product == agent-time): real delivery/curation packages shipped** | `artifact_deepswe/gt_agent.py` ships `groundtruth.delivery.{path_policy,name_policy}` + `pretask.curation_map` into the agent container (one source of truth, fail-closed import-coverage guard) | commit `95dff1d9` (F2+F5); `tests/test_deepswe_injection_import_coverage.py` (6) green; symbols resolve, `/static/` excluded | **WIRED in code** — commit message states "Live witness owed (confirm `[GT_META]` fallback gone in-container)." Listed as IN FLIGHT in the task brief; **landed at HEAD, witness-pending** |
+| W6 | **structured-action-first edit detection (retire the verb whitelist)** | `_classify` now reads the structured editor channel FIRST (`str_replace`/`create`/`insert`) and normalizes to a parser-faithful bash-equivalent so every cmd-consumer (post-edit, oracle edit-coverage) fires unchanged — `artifact_deepswe/gt_mini_patch.py` (F3 block) | commit `d8cfd3d1` (F3, general form of `a7a4be87`); `tests/test_f3_structured_edit_detection.py` (12) + 36 artifact-regression green | **WIRED in code** — commit message: "Live witness owed (a harness emitting structured tool calls)." Listed as IN FLIGHT in the task brief; **landed at HEAD, witness-pending** |
+
+### 18.2 NEWLY WIRED this pass — R1 leaf-naming content bridge (correct-or-quiet no-op until F8)
+
+| Seam | Where (file:line) | Behaviour | State |
+|---|---|---|---|
+| **R1 leaf-naming CONTENT bridge** | `_semantic_leaf_names` `src/groundtruth/pretask/v1r_brief.py:2070-2117`; per-symbol FTS5/BM25 half `_fts5_symbol_rank` (`:2015`); RRF fusion (Cormack SIGIR'09) + per-symbol hub-demote `_symbol_fanin_fn`; **call site** `:2320-2327` (fires ONLY when the `defines_anchor` witness path named nothing) | When the gold leaf shares no token with any named anchor, rank the file's within-file functions by issue→code semantic (per-symbol MaxSim in `loc.symbol_semrank_by_file`) **fused with** per-symbol FTS5/BM25, hub-demoted, and name the bug-site leaf. **Returns `[]` when NEITHER signal is present** (`:2091-2092`) → caller degrades to the prior empty tail **byte-identically**. | **NEWLY WIRED, no-op-until-F8.** The semantic half is **dark until the F8 embedder is loader-shipped + baked** (without the ONNX embedder `symbol_semrank_by_file` is empty → only the FTS5 half can fire, and with no FTS5 match the bridge is a strict no-op). Correct-or-quiet by construction: it can only ADD a named leaf, never replace or misdirect. |
+
+### 18.3 IN FLIGHT (per the task brief) vs landed-at-HEAD — reconciliation
+
+The task brief framed three items as IN FLIGHT: **F2+F5** (injection allow-list) and **F3**
+(structured edits), under worktree `ww1qb3lcy`. **As of HEAD `d8cfd3d1` they are code-landed**
+(W5 = `95dff1d9`, W6 = `d8cfd3d1`) with green tests — but **both commit messages explicitly state
+"Live witness owed."** So the honest state is: *static wiring complete, witness-pending* — they
+move from "in flight" to "WIRED, witness-pending" (§18.1 W5/W6), NOT to "done." The only genuinely
+**not-yet-wired** content item is **F8** (the embedder loader-ship + bake) on which R1's semantic
+half depends (§18.2).
+
+### 18.4 The ONE unproven gate — the live end-to-end witness (Task 8)
+
+Nothing above is "connected-proven." The single gate that discharges the whole chain is the
+**live end-to-end witness** — `graph.db → agent`, in tandem, on a real run (jedi_WORK task #8
+"End-to-end flow verification — graph.db → agent in tandem (one pipeline)"; the witness also owed
+by task #6 "Live witness run on the post-fix binary"):
+
+- **Why it is owed:** every `output.jsonl` on disk predates `32e4e313`, so all prior runs executed
+  the DARK binary (the `_ProductHorizonThresholds` stub crash + the ≤1/turn winner-gate starvation
+  — see §15/§17 and `four_surface_failure_diagnosis_20260613T152534Z/22_layer4b_audit_strengthen.md`).
+  None of W1–W6 has been observed carrying data to the agent on the post-fix binary.
+- **What ONE witness discharges (per jedi_WORK 2026-06-13 "Next allowed action"):** the depth/naming
+  substrate (W1+W3 emit on a real re-indexed graph), the RC5 oracle path + bulkhead (W4: a contract
+  block reaches the agent AND survives a control-plane crash that loses only the steer; `gt.oracle_event.v2 > 0`
+  on a live turn; M23 review-transition > 0), the in-container injection (W5: `[GT_META]` fallback
+  gone), and structured-edit detection (W6: a harness emitting structured tool calls fires the
+  cmd-consumers).
+- **The blocker (per LATEST_TASK.md / §17.10):** `P0-01` — substrate rebuild + Go/Rust re-proof must
+  be green before the GT-on tenpack runs; the run is then **paired against the frozen baseline**
+  (`.claude/reports/full300_baseline_ohdeepseek_20260531/FINAL_resolved_300_20260531.json`, Wilcoxon),
+  read **chronologically** from `output.jsonl` (§4), on a **baseline-fails** id.
+
+**Until that witness exists, every seam in §18.1–§18.2 is WIRED, not connected-proven.** Static
+wiring is owed a live run before any "the pipeline flows end-to-end" claim is permitted.

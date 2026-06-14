@@ -82,6 +82,12 @@ if _gmp is not None:
     _classify = _gmp._classify
     _edit_target = _gmp._edit_target
     _view_target = _gmp._view_target
+    # F3 structured-action-first: normalize a STRUCTURED editor action (path +
+    # file_text/new_str + an editor verb) to the SAME parser-faithful command
+    # the live patch uses, so live and replay never disagree on edit detection
+    # (the OH/CodeAct editor channel the bash `command` string is blind to).
+    _effective_cmd = _gmp._effective_cmd
+    _structured_edit = _gmp._structured_edit
     _SRC_EXT = _gmp._SRC_EXT
     _TEST_RUNNER_RE = _gmp._TEST_RUNNER_RE
     _TEST_PASS_RE = _gmp._TEST_PASS_RE
@@ -115,6 +121,15 @@ else:  # pragma: no cover - exercised only if gt_mini_patch is truly absent
 
     def _view_target(cmd):  # type: ignore
         return None
+
+    def _structured_edit(action):  # type: ignore
+        return None
+
+    def _effective_cmd(action):  # type: ignore
+        if isinstance(action, dict):
+            c = action.get("command", "")
+            return c if isinstance(c, str) else ""
+        return str(action) if action is not None else ""
 
     _TEST_RUNNER_RE = re.compile(r"(?:pytest|go\s+test|cargo\s+test)\b", re.I)
     _TEST_PASS_RE = re.compile(r"(\b\d+ passed\b|test result: ok\b)", re.M)
@@ -243,23 +258,38 @@ def _actions_from_assistant(msg: dict) -> list[tuple[str | None, str]]:
         tcid = (tc or {}).get("id")
         fn = (tc or {}).get("function") or {}
         args = fn.get("arguments")
-        cmd = None
+        argd = None
         if isinstance(args, str):
             try:
-                cmd = json.loads(args).get("command")
+                argd = json.loads(args)
             except Exception:  # noqa: BLE001
-                cmd = None
+                argd = None
         elif isinstance(args, dict):
-            cmd = args.get("command")
+            argd = args
+        # F3 parity: route the FULL args dict through _effective_cmd so a
+        # STRUCTURED editor action (editor verb + path + file_text/new_str —
+        # blind to the bare `command` string) is normalized to the SAME
+        # parser-faithful command the live patch sees. A bash action -> its
+        # `command` string unchanged. (Live/replay can never disagree.)
+        cmd = None
+        if isinstance(argd, dict):
+            if _structured_edit(argd) is not None:
+                cmd = _effective_cmd(argd)
+            else:
+                cmd = argd.get("command")
         if isinstance(cmd, str) and cmd:
             out.append((tcid, cmd))
     if out:
         return out
     extra = msg.get("extra") or {}
     for act in (extra.get("actions") or []):
-        cmd = (act or {}).get("command")
+        ad = act or {}
+        if isinstance(ad, dict) and _structured_edit(ad) is not None:
+            cmd = _effective_cmd(ad)
+        else:
+            cmd = ad.get("command")
         if isinstance(cmd, str) and cmd:
-            out.append((act.get("tool_call_id"), cmd))
+            out.append((ad.get("tool_call_id"), cmd))
     return out
 
 

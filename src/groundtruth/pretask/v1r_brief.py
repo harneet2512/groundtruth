@@ -2011,6 +2011,112 @@ def _resolved_witness_tail(graph_db: str, file_path: str) -> str:
     return ""
 
 
+def _fts5_symbol_rank(graph_db: str, file_path: str, terms: set[str]) -> list[str]:
+    """Per-SYMBOL FTS5/BM25 rank WITHIN one file (the lexical half of the R1 leaf
+    bridge). Returns symbol names in best→worst BM25 order; [] when nodes_fts is
+    absent or no symbol matches (correct-or-quiet — no signal, no contribution).
+
+    Mirrors graph_localizer._fts5_candidates' field-weighting (BLUiR ASE 2013:
+    structured field-level lexical anchoring on names beats flat-blob BM25), but
+    SCOPED to ``file_path`` and to its non-test Function/Method symbols so the
+    rank discriminates WITHIN the file — the symbol-naming granularity, not the
+    file-seeding granularity."""
+    safe: list[str] = []
+    for t in sorted({(s or "").lower() for s in terms}, key=lambda x: (-len(x), x)):
+        c = t.replace('"', "")
+        if len(c) >= 3 and all(ch.isalnum() or ch == "_" for ch in c):
+            safe.append(f'"{c}"')
+        if len(safe) >= 20:
+            break
+    if not safe:
+        return []
+    try:
+        conn = sqlite3.connect(graph_db)
+        try:
+            tables = {
+                r[0] for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            if "nodes_fts" not in tables:
+                return []  # no FTS5 capability -> lexical half is silent
+            rows = conn.execute(
+                """SELECT n.name,
+                          bm25(nodes_fts, 1.0, 2.0, 0.5, 0.5) AS score
+                     FROM nodes_fts
+                     JOIN nodes n ON n.id = nodes_fts.rowid
+                    WHERE nodes_fts MATCH ?
+                      AND n.file_path = ?
+                      AND n.is_test = 0
+                      AND n.label IN ('Function', 'Method')
+                    ORDER BY score
+                    LIMIT 50""",
+                (" OR ".join(safe), file_path),
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for nm, _score in rows:
+        nm = str(nm or "")
+        if nm and nm not in seen:
+            seen.add(nm)
+            out.append(nm)
+    return out
+
+
+def _semantic_leaf_names(
+    loc, graph_db: str, file_path: str, issue_text: str, limit: int = 3
+) -> list[str]:
+    """R1 leaf-naming CONTENT bridge (correct-or-quiet, fires ONLY when the
+    defines_anchor witness path named nothing). Ranks the file's WITHIN-file
+    functions by the issue→code SEMANTIC signal (per-symbol MaxSim, captured in
+    ``loc.symbol_semrank_by_file``) fused with the per-symbol FTS5/BM25 lexical
+    rank, via Reciprocal Rank Fusion (Cormack SIGIR 2009), then DEMOTES symbol-
+    level hubs (``_symbol_fanin_fn`` — the symbol twin of the file hub gate) so the
+    central method is not named on a behavior-described issue. Returns [] when
+    NEITHER signal is present (embedder off AND no FTS5 match) — the caller then
+    degrades to the prior empty tail byte-identically. No task symbols, no weight
+    tuning: pure rank fusion + a per-task hub threshold (generalized)."""
+    _fn = _gl_normalize(file_path)
+    sem_pairs = (getattr(loc, "symbol_semrank_by_file", None) or {}).get(_fn, [])
+    sem_rank = {str(nm): i for i, (nm, _c) in enumerate(sem_pairs) if nm}
+
+    terms = {w.lower() for w in _re.findall(r"[A-Za-z_]\w{2,}", issue_text or "") if len(w) > 3}
+    lex_names = _fts5_symbol_rank(graph_db, file_path, terms) if terms else []
+    lex_rank = {nm: i for i, nm in enumerate(lex_names)}
+
+    if not sem_rank and not lex_rank:
+        return []  # no content signal -> caller keeps prior behavior (empty tail)
+
+    # Symbol-level hub demotion: a name in the per-task hub fan-in tail (>= thr)
+    # is the CENTRAL method, not the issue's behavior site. Hubs sort AFTER non-hubs
+    # (a stable secondary key) — never dropped, just not named first.
+    _hub_thr, _fanin_of = _symbol_fanin_fn(graph_db)
+
+    names = set(sem_rank) | set(lex_rank)
+    _BIG = 10**6
+
+    def _rrf(nm: str) -> float:
+        s = 0.0
+        if nm in sem_rank:
+            s += 1.0 / (60 + sem_rank[nm])
+        if nm in lex_rank:
+            s += 1.0 / (60 + lex_rank[nm])
+        return s
+
+    def _is_hub(nm: str) -> int:
+        try:
+            return 1 if _fanin_of(nm) >= _hub_thr else 0
+        except Exception:
+            return 0
+
+    ranked = sorted(names, key=lambda nm: (_is_hub(nm), -_rrf(nm), nm))
+    return ranked[:limit]
+
+
 def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]:
     """Confidence-graded localization block, PREPENDED to the brief.
 
@@ -2211,6 +2317,14 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
            "Candidate edit targets (reason over these):"]
     for i, c in enumerate(shown, 1):
         fs = _defines_funcs(c)
+        # R1 leaf-naming bridge: defines_anchor named NOTHING (behavior-described
+        # issue — the gold leaf shares no token with a named anchor). Fall back to
+        # the issue→code CONTENT signal (per-symbol MaxSim + per-symbol FTS5, RRF-
+        # fused, symbol-hub-demoted) so the named leaf is the bug site, not the
+        # in-degree hub. Never touches the working anchor path (only fires when fs is
+        # empty); byte-identical empty tail when no content signal exists.
+        if not fs:
+            fs = _semantic_leaf_names(loc, graph_db, c.file_path, issue_text)
         tail = f" — {', '.join(fs[:3])}" if fs else ""
         out.append(f"  {i}. {c.file_path}{tail}")
         # Surface the RESOLVED call-edge fact (already on disk) next to the
