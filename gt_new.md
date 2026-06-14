@@ -91,3 +91,55 @@ correct-or-quiet + must not feed rank). Not done in this session.
 Everything in §§1–5 is committed + tested + LIPI'd-per-commit. The gate that makes any
 of it "done" (DEFINITION OF DONE: metrics changed) is **#2, the live witness** — the one
 thing this session cannot self-certify.
+
+---
+
+## Appendix A — DEPTH before/after (gt_gt §2.6 spec vs the current code, read line by line)
+
+**Framing.** gt_gt §2.6 was updated this session to record the landing (it cites
+`b5ceaf5d`, "Pass 4f LANDED"), so it is now a spec **+** landing-record, not a clean
+"before". The true BEFORE is the pre-session state §2.6 describes; the AFTER is the code
+as it actually runs — `promote.go` (957 lines) + `imports.go` (336 lines), both read in
+full. **Verdict: the code faithfully implements the §2.6 spec; no drift found.** The
+difference is the substrate transformation + precision details the prose under-states.
+
+### Per-edge-class: gt_gt spec (BEFORE) → code reality (AFTER)
+| edge class | gt_gt §2.6 says | code does (file:line) | confidence | match |
+|---|---|---|---|---|
+| **CO_SERIALIZES** | PROMOTE-NOW, 100% resolvable, value carries `@file:line`, undirected | `promoteSerde` parses `partner:<name>@file:<line>`, exact `(file,name,line)` key + any-file fallback, undirected dedup on min/max id (`promote.go:429-464, 230-236`) | **1.0 CERTIFIED** | ✓ |
+| **READS** | PROMOTE-PARTIAL, reader → owning Class via parent_id; field-only stays property | `promoteFieldReads` → owning Class via `src.ParentID` (`label=Class`) (`:470-492`) | 0.6, **lifts to 0.9 if a declared `class_field`** (`:486`) | ✓ + precision |
+| **WRITES** | side_effect write → owning Class | `promoteWrites`, same owning-Class resolve (`:498-520`) | 0.6 / 0.9 (declared field) | ✓ |
+| **RAISES** | PROMOTE-PARTIAL, internal classes only, builtins stay property | `promoteRaises`: **drops dotted tokens** (`errors.New`, D3, `:545`), `cleanExceptionBase`, **105-name builtin denylist** (`:87-109`), polyglot `{Class,Struct,Type,Enum,Interface}` (`:526-576`) | **0.9** | ✓ |
+| **PRECEDES** | PROMOTE-CAUTIOUS, distinct internal nodes only | `promotePrecedes` parses `a→b→c`, requires distinct internal func/method nodes (`:768-806`) | **0.5** (lowest — "cautious") | ✓ |
+| **DATA_FLOW** | CALLS.metadata annotation; standalone only for no-CALLS hops | `forEachDataFlowTarget` + `promoteDataFlowStandalone` (mint only when no CALLS edge, `:632`) + `promoteDataFlowAnnotations` (append `dataflow=` tag, `:654`) | candidate count 1→0.8, 2→0.6, ≤5→0.4, **>5 suppressed** (`:751`) | ✓ |
+| **USES** | CALLS.metadata annotation from caller_usage | `promoteUsesAnnotations`: append `usage=` to matching CALLS edge, **never creates an edge** (`:817-905`) | (annotation) | ✓ |
+| **IMPORTS** | PRESENT, single→1.0 CERTIFIED, >1→0.6 CANDIDATE, stdlib→no edge | `imports.go ResolveImports`: reuses `buildImportIndex`/`resolveModulePath`, external→no edge, FILE→SYMBOL then FILE→FILE, `verification_status='verified'` (`:54-137`); **+ incremental `ResolveImportsTx`** (`:204-296`) | 1.0 / 0.6 | ✓ |
+
+### The actual depth change (pre-session → now)
+- **BEFORE:** graph = **CALLS + CONTAINS + EXTENDS + IMPLEMENTS** only. IMPORTS *declared
+  in a schema comment, never emitted*. READS/WRITES/RAISES/CO_SERIALIZES/PRECEDES
+  **trapped as property strings** (readable as text for one node, **un-traversable** —
+  no `A→B` hop). Promote pass existed only as a **Python copies-only reference**.
+- **AFTER:** `promote.go` is the **production Go pass, wired as Pass 4f**; 5 standalone
+  edge classes + 2 CALLS-metadata annotations from the existing properties; `imports.go`
+  fresh-extracts IMPORTS (full + incremental). All four §2.6 sub-conditions enforced in
+  code: **non-invention** (`addEdge` rejects `target_id=0`/self, `:226`), **idempotent**
+  (`DELETE … promote_%` first, `:946`), **additive** (properties untouched),
+  **trust-tiered** (`tierFor(conf)`, `:250`).
+
+### Precision the prose under-states (found only by reading the code)
+1. READS/WRITES confidence **lifts 0.6→0.9** for a declared `class_field` (`:486, :514`).
+2. RAISES **drops dotted tokens entirely** rather than reducing to the module prefix
+   (`:545`) — prevents minting a wrong edge onto a same-named project class.
+3. DATA_FLOW **suppresses >5-candidate** hops (`:618`) — correct-or-quiet at the
+   ambiguity boundary.
+4. The incremental `-file` path has its **own IMPORTS Tx variant** (`:204`) — depth
+   survives a single-file reindex, not just a full rebuild.
+
+### The one honest gap
+gt_gt's **per-language counts** (py CO_SERIALIZES 390, READS 658…) are claims from the
+**Python reference port on copies**, not re-verified on the Go binary's output. The Go
+binary's *actual* 5-language output measured this session: go 0→77 relationship edges,
+py 0→23, ts 13→86, rust 0→14, js 0→5. **The mechanism matches the spec; the counts are
+repo-specific and the gt_gt numbers were never re-confirmed against the Go output** —
+that reconciliation lands with the live witness on a re-indexed graph.
