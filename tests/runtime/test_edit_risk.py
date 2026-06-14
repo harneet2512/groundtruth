@@ -146,3 +146,10 @@ def test_reads_and_writes_count_as_dependents(tmp_path):
     assert not r.is_quiet()
     top = r.top_reason()
     assert top is not None and top.name == "field" and top.dependents == 8
+
+
+def test_namematch_above_floor_still_excluded(tmp_path):
+    # A 2-candidate name_match has conf 0.6 (>= the 0.5 floor) but is STILL a guess,
+    # never blast radius — must be excluded by resolution_method, not just confidence.
+    db = _build(tmp_path, [("hub", 6)], method="name_match", conf=0.6)
+    assert structural_edit_risk(db, {"hub"}).is_quiet()

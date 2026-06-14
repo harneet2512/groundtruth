@@ -52,7 +52,7 @@ _DEPENDENCY_EDGE_TYPES = ("CALLS", "READS", "WRITES", "DATA_FLOW")
 
 # Per-graph reference cache (the fan-in distribution is repo-invariant within a run;
 # the verify producer fires repeatedly — recompute once, not every fire).
-_REF_CACHE: dict[str, float] = {}
+_REF_CACHE: dict = {}
 
 
 @dataclass(frozen=True)
@@ -94,7 +94,7 @@ def _percentile(sorted_vals: list, q: float) -> float:
     return float(sorted_vals[min(k, len(sorted_vals)) - 1])
 
 
-def _repo_fanin_reference(conn, conf_clause: str, conf_params) -> float:
+def _repo_fanin_reference(conn, conf_clause: str, method_clause: str, conf_params) -> float:
     """75th-percentile of NON-ZERO verified dependency fan-in across the repo — the
     'notable dependents' baseline that defines the risky tail (dynamic, per-repo)."""
     types_in = ",".join("?" for _ in _DEPENDENCY_EDGE_TYPES)
@@ -102,7 +102,7 @@ def _repo_fanin_reference(conn, conf_clause: str, conf_params) -> float:
         rows = conn.execute(
             f"""SELECT COUNT(DISTINCT e.source_id) AS c
                   FROM edges e
-                 WHERE e.type IN ({types_in}) {conf_clause}
+                 WHERE e.type IN ({types_in}) {conf_clause} {method_clause}
                  GROUP BY e.target_id
                 HAVING c > 0""",
             (*_DEPENDENCY_EDGE_TYPES, *conf_params),
@@ -137,11 +137,21 @@ def structural_edit_risk(
         has_conf = _column_exists(conn, "edges", "confidence")
         conf_clause = "AND e.confidence >= ?" if has_conf else ""
         conf_params = (float(min_confidence),) if has_conf else ()
+        # A name_match edge is a NAME GUESS, never blast radius — exclude it by
+        # resolution_method (the confidence floor ALONE leaks a 2-candidate name_match
+        # at conf 0.6 >= floor). Mirrors _covering_tests_for_symbols' method gate and
+        # the module docstring's "a name_match guess is never blast radius".
+        has_method = _column_exists(conn, "edges", "resolution_method")
+        method_clause = (
+            "AND LOWER(COALESCE(e.resolution_method,'')) NOT LIKE 'name_match%'"
+            if has_method else ""
+        )
         types_in = ",".join("?" for _ in _DEPENDENCY_EDGE_TYPES)
-        ref = _REF_CACHE.get(str(graph_db))
+        cache_key = (str(graph_db), float(min_confidence))
+        ref = _REF_CACHE.get(cache_key)
         if ref is None:
-            ref = _repo_fanin_reference(conn, conf_clause, conf_params)
-            _REF_CACHE[str(graph_db)] = ref
+            ref = _repo_fanin_reference(conn, conf_clause, method_clause, conf_params)
+            _REF_CACHE[cache_key] = ref
         for nm in names:
             try:
                 row = conn.execute(
@@ -150,7 +160,7 @@ def structural_edit_risk(
                           JOIN nodes nt ON e.target_id = nt.id
                          WHERE e.type IN ({types_in})
                            AND LOWER(nt.name) = LOWER(?)
-                           {conf_clause}""",
+                           {conf_clause} {method_clause}""",
                     (*_DEPENDENCY_EDGE_TYPES, nm, *conf_params),
                 ).fetchone()
             except sqlite3.Error:

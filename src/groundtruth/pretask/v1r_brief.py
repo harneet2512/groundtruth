@@ -240,7 +240,7 @@ def _top_functions(graph_db: str, file_path: str, limit: int = MAX_FUNCTIONS_PER
             f"""
             SELECT n.name, n.signature, COUNT(e.id) AS ref_count
             FROM nodes n
-            LEFT JOIN edges e ON e.target_id = n.id {conf_clause}
+            LEFT JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' {conf_clause}
             WHERE n.file_path = ?
               AND n.label IN ('Function', 'Method')
               AND n.is_test = 0
@@ -297,7 +297,7 @@ def _top_function_names(
                 f"""
                 SELECT n.name, COUNT(e.id) AS ref_count
                 FROM nodes n
-                LEFT JOIN edges e ON e.target_id = n.id {conf_clause}
+                LEFT JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' {conf_clause}
                 WHERE n.file_path = ? AND n.label IN ('Function', 'Method') AND n.is_test = 0
                 GROUP BY n.id
                 ORDER BY CASE WHEN LOWER(n.name) IN ({_ph}) THEN 0 ELSE 1 END, ref_count DESC, n.name
@@ -310,7 +310,7 @@ def _top_function_names(
                 f"""
                 SELECT n.name, COUNT(e.id) AS ref_count
                 FROM nodes n
-                LEFT JOIN edges e ON e.target_id = n.id {conf_clause}
+                LEFT JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' {conf_clause}
                 WHERE n.file_path = ? AND n.label IN ('Function', 'Method') AND n.is_test = 0
                 GROUP BY n.id
                 ORDER BY ref_count DESC, n.name
@@ -1869,7 +1869,7 @@ def _hub_degree_fn(graph_db: str):
         try:
             rows = conn.execute(
                 "SELECT n.file_path, COUNT(e.id) FROM nodes n "
-                "JOIN edges e ON e.target_id = n.id GROUP BY n.file_path"
+                "JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' GROUP BY n.file_path"
             ).fetchall()
         finally:
             conn.close()
