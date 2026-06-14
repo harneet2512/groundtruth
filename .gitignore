@@ -169,3 +169,7 @@ task_ledgers/
 gha_latest_artifacts/
 .tmp_test_*
 .tmp_*
+
+# build artifact — never commit (rebuilt via golang container)
+gt-index/gt-index-linux
+gt-index/gt-index*.exe
