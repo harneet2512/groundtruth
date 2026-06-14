@@ -213,8 +213,11 @@ def normalize_file_path(file_path: str) -> str:
 
 # Stdlib modules whose attribute calls (``os.walk(``) the indexer can name-match
 # to a same-named PROJECT symbol and stamp with a DETERMINISTIC resolution_method,
-# laundering a false fact. The shared secondary defense below drops those. Kept in
-# sync with v1r_brief._STDLIB_MODULES (the witness twin imports THIS set).
+# laundering a false fact. The shared secondary defense below drops those. This set
+# MUST equal delivery.name_policy.STDLIB_MODULES (the delivery-side twin used by the
+# brief shadow guard) — a one-sided edit would drop different edges on the same repo.
+# A cross-module import is avoided (these ship in-container stdlib-only); the equality
+# is enforced by tests/test_stdlib_modules_single_source so drift cannot land silently.
 _STDLIB_MODULES: frozenset[str] = frozenset(
     {
         "os", "sys", "re", "io", "json", "math", "time", "copy", "glob", "uuid",
