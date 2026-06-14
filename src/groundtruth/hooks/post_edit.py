@@ -155,12 +155,17 @@ def _categorical_edge_filter_clause(*, alias: str = "e") -> str:
         SELECT ... FROM edges e WHERE e.type = 'CALLS' AND <clause> ...
 
     The fragment evaluates True when EITHER:
-      - resolution_method is in the strong categorical set, OR
-      - resolution_method is name_match with candidate_count <= 1 (unique
-        by name — graph could not disambiguate other candidates), OR
-      - trust_tier is CERTIFIED or CANDIDATE.
+      - resolution_method is in the strong (deterministic) categorical set, OR
+      - trust_tier is CERTIFIED or CANDIDATE *and* resolution_method is NOT
+        name_match.
 
     AND trust_tier is not SUPPRESSED (hard exclude).
+
+    I3 — name_match is NEVER admitted as a fact, regardless of candidate_count or
+    confidence: a name_match edge is a NAME GUESS, not a verified edge (CLAUDE.md P0
+    stdlib-shadow closure — os.walk -> account.walk must never launder). The SQL below
+    has NO 'name_match cc<=1' admit clause; a prior docstring claimed one (the launder
+    this fragment exists to prevent). Locked by test_categorical_filter_no_namematch_launder.
     """
     # sorted(): _STRONG_RESOLUTION_METHODS is now a frozenset (unified shared
     # constant); sort so the emitted SQL IN(...) list is byte-stable across runs.
@@ -170,7 +175,7 @@ def _categorical_edge_filter_clause(*, alias: str = "e") -> str:
         f"(("
         f"{alias}.resolution_method IN ({strong_methods}) "
         f"OR (COALESCE({alias}.trust_tier, 'SPECULATIVE') IN ({strong_tiers}) "
-        f"AND LOWER(COALESCE({alias}.resolution_method, '')) != 'name_match')"
+        f"AND LOWER(COALESCE({alias}.resolution_method, '')) NOT LIKE 'name_match%')"
         f") AND COALESCE({alias}.trust_tier, 'SPECULATIVE') != '{_SUPPRESSED_TRUST_TIER}')"
     )
 
