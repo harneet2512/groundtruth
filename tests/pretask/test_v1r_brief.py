@@ -258,6 +258,33 @@ def test_generate_v1r_brief_carries_graph_map_no_laundering(
     assert "find_files() in" not in result.brief_text  # name_match never laundered
 
 
+@patch("groundtruth.pretask.v1r_brief.run_v74")
+def test_n_components_signal_is_consumed_not_dropped(
+    mock_v74: MagicMock, tmp_path: Path, capsys
+) -> None:
+    """Regression: n_components is computed in localize() and was a DEAD signal (zero
+    consumers). It is now wired to the GT_META/stderr telemetry (its stated 8-dp-logging
+    consumer). Assert a real generate_v1r_brief run EMITS the SCOPE_COMPONENTS line at
+    8-decimal precision. RED before the wire (no consumer -> no such line); GREEN after.
+    Diagnostic only — this asserts consumption, not any brief-content/ranking change."""
+    import re as _re
+
+    db, repo = _walk_db(tmp_path, [(3, 1, "import", 1.0, 1)])
+    mock_v74.return_value = MagicMock(
+        ranked_full=[
+            {"path": "beancount/core/account.py", "score": 0.9, "components": {"path": 0.0}}
+        ]
+    )
+    generate_v1r_brief("fix account walk traversal", repo, db)
+    err = capsys.readouterr().err
+    m = _re.search(
+        r"SCOPE_COMPONENTS n_components=(\d+\.\d{8}) rendered_chains=\d+\.\d{8} "
+        r"fragmented=\d+\.\d{8}",
+        err,
+    )
+    assert m is not None, f"n_components not consumed (no SCOPE_COMPONENTS line):\n{err}"
+
+
 @pytest.fixture
 def graph_db(tmp_path: Path) -> str:
     db_path = str(tmp_path / "graph.db")

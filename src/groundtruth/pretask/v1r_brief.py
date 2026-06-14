@@ -3253,6 +3253,27 @@ def generate_v1r_brief(
     except Exception:
         pass
 
+    # WIRE n_components (was a DEAD signal: computed in localize(), zero consumers).
+    # Its stated consumer is "8-dp logging" — emit it on the SAME GT_META/stderr
+    # channel (-> gt_brief_stderr.log) the harness already captures, NOT a new sink.
+    # n_components counts ALL clusters among the top candidates (connected scope
+    # chains + disjoint singletons); >1 = a FRAGMENTED edit-set whose disjoint
+    # clusters the scope-chain section cannot show (the INCOMPLETE_SCOPE early
+    # warning). Reads the singleton count that is UNIQUE to n_components (not derivable
+    # from scope_chains alone) — no duplication. Diagnostic only: no ranking, no brief
+    # content, so no BRIEFING measurement obligation.
+    try:
+        import sys as _sys_nc
+        _nc = int(getattr(_loc, "n_components", 0) or 0)
+        _nc_chains = len(getattr(_loc, "scope_chains", None) or [])
+        print(
+            f"[GT_META] SCOPE_COMPONENTS n_components={_nc:.8f} "
+            f"rendered_chains={_nc_chains:.8f} fragmented={1.0 if _nc > 1 else 0.0:.8f}",
+            file=_sys_nc.stderr, flush=True,
+        )
+    except Exception:
+        pass
+
     # Compute cross-file scope (Signal 1)
     _scope_files: list[str] = []
     _scope_confidence = "low"
