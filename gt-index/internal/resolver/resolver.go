@@ -431,6 +431,11 @@ type NodeMeta struct {
 //  1.75  self/this/Self method via caller's class → "same_file" (conf=1.0)
 //  1.9   Verified-unique: globally unique name → "verified_unique" (conf=0.95)
 //  1.93  Import-scoped type_flow: import narrows class → "import_type" (conf=0.95)
+//  2b    Declared-FIELD-type receiver: self.<field>.m() via the field's declared
+//        annotation → "type_flow" (conf=0.9, evidence "field_type"). XTA over the
+//        class_field-type set (Tip & Palsberg OOPSLA 2000), CHA-resolved over the
+//        hierarchy. Fills the gap 1.94a/1.96/1.95 miss: an annotation-only typed
+//        field (injected/inherited/declared, never locally assigned).
 //  1.94  Single/few-implementor: method unique to 1-3 classes → "impl_method" (conf=0.4-0.85)
 //  1.95  Type-flow: qualified call on known class → "type_flow" (conf=0.9)
 //  1.96  Assignment-flow: x = ClassName(); x.method() → "type_flow" (conf=0.9)
@@ -450,6 +455,20 @@ var inheritanceMap map[int64][]int64
 // typed receiver `command.run()` resolves to the param's class without re-parsing.
 // Generalized across statically-typed languages (Go/Rust/Java/TS + annotated Python).
 var paramTypeIndex map[int64]map[string]string
+
+// fieldTypeIndex: CLASS node DB ID → {field name → declared type name}. Set before
+// Resolve() for Strategy 2b (declared-FIELD-type receiver resolution). Populated from
+// the `class_field` properties the parser already extracts (`name: Type` annotations),
+// so a typed `self.<field>.method()` whose field is annotation-only (NOT locally
+// assigned — injected via __init__ param, declared on a base class, or annotation-only)
+// resolves to the field's class without re-parsing. This is the fact promote.go reads
+// then DISCARDS at the colon (promote.go:367-369 keeps only the field NAME). Keyed by
+// the OWNING class node (class_field props attach to the class node) — NOT the caller —
+// because the same typed field is visible to every method of the class. XTA over the
+// declared field-type set (Tip & Palsberg, OOPSLA 2000). Generalized across
+// statically-typed langs (Go/Rust/TS struct/class fields + annotated Python attrs) —
+// `class_field` is language-uniform (parser.go:3817-3818).
+var fieldTypeIndex map[int64]map[string]string
 
 // builtinMethodNames: methods of language builtin/stdlib types (str/dict/list/set
 // and equivalents). A QUALIFIED call obj.method() that reaches Strategy 2 did NOT
@@ -501,6 +520,76 @@ func SetInheritanceMap(m map[int64][]int64) {
 // SetParamTypeIndex sets the caller→param→type map for Strategy 1.94b (T1).
 func SetParamTypeIndex(idx map[int64]map[string]string) {
 	paramTypeIndex = idx
+}
+
+// SetFieldTypeIndex sets the class→field→type map for Strategy 2b.
+func SetFieldTypeIndex(idx map[int64]map[string]string) {
+	fieldTypeIndex = idx
+}
+
+// BuildFieldTypeIndex builds CLASS-node-DB-ID → {fieldName → typeName} from the
+// `class_field` properties the parser extracts. It is the exact mirror of
+// BuildParamTypeIndex with two changes: (a) it keys on kind=="class_field" (not
+// "param"); (b) the value is keyed by the OWNING CLASS node, because class_field
+// props attach to the class node (parser extractClassFields nodeIdx=class).
+//
+// CORRECT-OR-QUIET PRECISION RULE (load-bearing): a type is extracted ONLY from the
+// `name: Type` ANNOTATION shape. The parser emits class_field for BOTH `name: Type`
+// (annotation — has a declared type) AND `name = expr` (assignment — NO declared
+// type, e.g. `x = CharField(100)`). A type is recorded ONLY when a colon precedes
+// any `=` (annotation), so an assignment-shape field produces NO entry and the call
+// falls to rung 1.96 (assignment-graph, with its own scope-aware proof) or the tail.
+// We NEVER invent a type from a constructor name — that is 1.96's job, not 2b's.
+func BuildFieldTypeIndex(props []parser.PropertyRef, nodeDBIDs []int64) map[int64]map[string]string {
+	idx := make(map[int64]map[string]string)
+	for _, p := range props {
+		if p.Kind != "class_field" || p.NodeIdx < 0 || p.NodeIdx >= len(nodeDBIDs) {
+			continue
+		}
+		classDBID := nodeDBIDs[p.NodeIdx]
+		if classDBID <= 0 {
+			continue
+		}
+		val := p.Value
+		colon := strings.Index(val, ":")
+		if colon <= 0 {
+			continue // bare name / no separator — no declared type
+		}
+		// Annotation vs assignment discriminator: only treat as a typed annotation
+		// when the colon comes BEFORE any `=` (so `name: Type` is kept; `d = {1: 2}`
+		// or `x = f(a=1)` is rejected). A `name = Ctor()` field has no leading colon
+		// for the field name → already excluded; this also guards `name: Type = default`
+		// (still an annotation, colon precedes `=`) which is correctly KEPT.
+		if eq := strings.Index(val, "="); eq >= 0 && eq < colon {
+			continue
+		}
+		name := strings.TrimSpace(val[:colon])
+		typ := strings.TrimSpace(val[colon+1:])
+		// Strip an inline default (`name: Type = default`) and any trailing flags.
+		if eq := strings.Index(typ, "="); eq > 0 {
+			typ = strings.TrimSpace(typ[:eq])
+		}
+		if sp := strings.IndexAny(typ, " ["); sp > 0 { // strip " [required]" suffix; keep generics for stripTypeWrapper at resolve time
+			// only strip a trailing flag introduced by a space, NOT a generic '[' that
+			// stripTypeWrapper handles — so split on the FIRST space only.
+			if strings.HasPrefix(typ[sp:], " ") {
+				typ = strings.TrimSpace(typ[:sp])
+			}
+		}
+		if name == "" || typ == "" {
+			continue
+		}
+		// field name must be a simple identifier (no dots/brackets) — a malformed
+		// annotation slice must not pollute the index.
+		if strings.ContainsAny(name, ". []()=") {
+			continue
+		}
+		if idx[classDBID] == nil {
+			idx[classDBID] = make(map[string]string)
+		}
+		idx[classDBID][name] = typ
+	}
+	return idx
 }
 
 // BuildParamTypeIndex builds caller-node-DB-ID → {paramName → typeName} from the
@@ -628,6 +717,46 @@ func Resolve(
 			current = parents[0]
 		}
 		return 0, false
+	}
+
+	// lookupFieldTypeWithInheritance walks the inheritance chain to find a field's
+	// declared type for Strategy 2b. The annotation may live on a BASE class (the field
+	// declared/typed on the superclass), so a field absent on the subclass's own
+	// fieldTypeIndex entry is searched up the hierarchy, mirroring
+	// lookupMethodWithInheritance. Returns (typeName, found). Walks up to 10 levels.
+	lookupFieldTypeWithInheritance := func(classID int64, fieldName string) (string, bool) {
+		if fieldTypeIndex == nil {
+			return "", false
+		}
+		if fields, ok := fieldTypeIndex[classID]; ok {
+			if t, ok := fields[fieldName]; ok {
+				return t, true
+			}
+		}
+		if inheritanceMap == nil {
+			return "", false
+		}
+		visited := map[int64]bool{classID: true}
+		current := classID
+		for depth := 0; depth < 10; depth++ {
+			parents, ok := inheritanceMap[current]
+			if !ok || len(parents) == 0 {
+				return "", false
+			}
+			for _, parentID := range parents {
+				if visited[parentID] {
+					continue
+				}
+				visited[parentID] = true
+				if fields, ok := fieldTypeIndex[parentID]; ok {
+					if t, ok := fields[fieldName]; ok {
+						return t, true
+					}
+				}
+			}
+			current = parents[0]
+		}
+		return "", false
 	}
 
 	// Build unique-method-class index: method names that belong to exactly one class.
@@ -960,6 +1089,123 @@ func Resolve(
 													goto nextCall
 												}
 											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// Strategy 2b: Declared-FIELD-type receiver resolution (XTA over the field-type set).
+		// For a qualified call self.<field>.method() (or this.<field>.method()) where the
+		// caller's ENCLOSING CLASS declared `<field>` with a typed annotation
+		// (`client: HttpClient`), resolve the declared field type → the class node of that
+		// type → the method via CHA (the SAME lookupMethodWithInheritance primitive rungs
+		// 1.75/1.94a use, so an INHERITED method on a typed field still resolves over the
+		// hierarchy). This fills the gap NONE of the other rungs cover: a declared-but-not-
+		// locally-assigned typed field — injected via __init__ param, declared on a base
+		// class, or annotation-only — produces NO AssignmentRef (so 1.96 misses it), is not
+		// a `param` (so 1.94a misses it), and the whole qualifier "self.<field>" is not the
+		// bare "self"/"this" 1.75 keys on. Without 2b the call falls to the demote tail and
+		// is emitted as a name_match GUESS (ambiguous across N same-named methods).
+		//
+		// XTA (Tip & Palsberg, OOPSLA 2000, +88% precision over RTA): propagate the declared
+		// type set the parser already wrote; the matcher does not re-derive types. The
+		// declared field type is a source FACT (identical epistemic status to the declared
+		// param type in 1.94a) → type_flow conf 0.9 → CERTIFIED via tierFor.
+		//
+		// CORRECT-OR-QUIET (five guards, all receiver-PROVING — it can only UPGRADE a call
+		// that would otherwise demote, it can NEVER launder a guess): (1) the field must
+		// have a declared TYPE in fieldTypeIndex (annotation-only — BuildFieldTypeIndex
+		// already excluded the assignment shape); (2) that type must resolve to a real
+		// internal Class/Struct/Interface node (an external/stdlib type like `dict`/library
+		// HttpClient has no internal node → fall through, never mint — preserves the
+		// stdlib-shadow bar); (3) CHA must FIND the method on that class or a superclass;
+		// (4) ABSTAIN on ambiguity — if the type name resolves to >1 same-named internal
+		// class with no winner, emit NOTHING rather than pick; (5) a broken/missing
+		// inheritance chain returns (0,false) → fall through.
+		//
+		// SCOPE (honest, correct-or-quiet): resolves Python + Rust COLON-ANNOTATION fields
+		// (`field: Type`) reached via a `self.`/`this.` qualifier. Go struct fields
+		// (space-separated `Field *Type`, no colon → BuildFieldTypeIndex skips them) and TS
+		// access-modifier fields (`private field: Type` → stored under the wrong key), and
+		// Go's arbitrary receiver var (`r.field.m()`, not `self.`/`this.`), are NOT yet
+		// resolved — the rung ABSTAINS on them (falls through to name_match, never
+		// mis-resolves). Go/TS receiver-field resolution is a tracked follow-up
+		// (extend BuildFieldTypeIndex + relax the shape gate). Keys on the language-uniform
+		// `class_field` property + the parser-emitted CalleeQualified.
+		if fieldTypeIndex != nil && len(nodeMeta) > 0 && nodeMeta[0] != nil && methodsByClass != nil &&
+			call.CalleeQualified != "" && call.CalleeQualified != calleeName {
+			// Shape gate: require a self/this prefix + a SINGLE field segment, i.e.
+			// "self.<field>.<method>" — strip the "self."/"this." prefix, then confirm
+			// the remaining qualifier (the field) has no further dots.
+			dot2b := strings.LastIndex(call.CalleeQualified, ".")
+			if dot2b > 0 {
+				qualifier2b := call.CalleeQualified[:dot2b]      // "self.client"
+				methodName2b := call.CalleeQualified[dot2b+1:]   // "get"
+				var fieldName2b string
+				switch {
+				case strings.HasPrefix(qualifier2b, "self."):
+					fieldName2b = qualifier2b[len("self."):]
+				case strings.HasPrefix(qualifier2b, "this."):
+					fieldName2b = qualifier2b[len("this."):]
+				}
+				// fieldName2b must be a single non-empty segment (no further dots) and
+				// not itself self/this (guards "self.self.x" style noise).
+				if fieldName2b != "" && !strings.Contains(fieldName2b, ".") &&
+					fieldName2b != "self" && fieldName2b != "this" {
+					if callerMeta, ok := nodeMeta[0][callerID]; ok && callerMeta.ParentID != 0 {
+						classID2b := callerMeta.ParentID // enclosing class — KNOWN fact
+						if fields, ok := fieldTypeIndex[classID2b]; ok {
+							// Inheritance-aware field lookup: the annotation may live on a
+							// base class (the field declared/typed on the superclass). Walk
+							// the field over the inheritance chain, mirroring the method CHA.
+							declaredType2b, hasType := fields[fieldName2b]
+							if !hasType {
+								declaredType2b, hasType = lookupFieldTypeWithInheritance(classID2b, fieldName2b)
+							}
+							if hasType && declaredType2b != "" {
+								className2b := stripTypeWrapper(declaredType2b)
+								if className2b != "" {
+									// Resolve the type name → internal class node(s),
+									// ABSTAIN on ambiguity (>1 same-named internal class with
+									// no winner → emit nothing, do not guess).
+									var fieldClassID2b int64
+									ambiguous2b := false
+									if classIDs, ok := nodeIDs[className2b]; ok {
+										for _, cid := range classIDs {
+											cm, hasMeta := nodeMeta[0][cid]
+											if !hasMeta || (cm.Label != "Class" && cm.Label != "Struct" && cm.Label != "Interface") {
+												continue
+											}
+											if fieldClassID2b == 0 {
+												fieldClassID2b = cid
+											} else if cid != fieldClassID2b {
+												ambiguous2b = true // ≥2 distinct internal classes share the type name
+											}
+										}
+									}
+									if fieldClassID2b != 0 && !ambiguous2b {
+										if targetID, found := lookupMethodWithInheritance(fieldClassID2b, methodName2b); found && targetID != callerID {
+											key := edgeKey{callerID, targetID, "CALLS"}
+											if !seen[key] {
+												seen[key] = true
+												resolved = append(resolved, ResolvedCall{
+													SourceNodeID:   callerID,
+													TargetNodeID:   targetID,
+													SourceLine:     call.Line,
+													SourceFile:     call.File,
+													Method:         "type_flow",
+													Confidence:     0.9,
+													CandidateCount: 1,
+													TrustTier:      tierFor(0.9),
+													EvidenceType:   "field_type",
+												})
+											}
+											goto nextCall
 										}
 									}
 								}

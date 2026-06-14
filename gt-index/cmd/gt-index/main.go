@@ -386,6 +386,15 @@ func main() {
 		ptIdx := resolver.BuildParamTypeIndex(allProps, nodeDBIDs)
 		resolver.SetParamTypeIndex(ptIdx)
 		fmt.Fprintf(os.Stderr, "  Declared-type receivers: %d callers with typed params\n", len(ptIdx))
+
+		// Strategy 2b: declared-FIELD-type receiver index from the SAME `class_field`
+		// properties (no re-parse): class node DB id -> {fieldName -> declared type}.
+		// Resolves `self.<field>.method()` whose field is annotation-only (not locally
+		// assigned) — the fact promote.go reads then discards at the colon. allProps'
+		// NodeIdx is global (Pass 2) and parallel to nodeDBIDs, same as the param index.
+		ftIdx := resolver.BuildFieldTypeIndex(allProps, nodeDBIDs)
+		resolver.SetFieldTypeIndex(ftIdx)
+		fmt.Fprintf(os.Stderr, "  Declared-type fields: %d classes with typed fields\n", len(ftIdx))
 	}
 
 	// PyCG Step 1: build assignment index for Strategy 1.96
@@ -960,6 +969,10 @@ func runIncremental(root, relpath, dbPath string) error {
 	// so Strategy 1.94a resolves typed-receiver method calls on `gt-index -file` too.
 	if len(pr.Properties) > 0 {
 		resolver.SetParamTypeIndex(resolver.BuildParamTypeIndex(pr.Properties, newDBIDs))
+		// Strategy 2b on the incremental path: declared-field-type index from the
+		// reparsed file's `class_field` properties so self.<field>.method() resolves
+		// on `gt-index -file` reindex too (parity with the param index above).
+		resolver.SetFieldTypeIndex(resolver.BuildFieldTypeIndex(pr.Properties, newDBIDs))
 	}
 
 	resolved := resolver.Resolve(pr.Calls, nameIndex, fileIndex, callerDBIDs, pr.Imports, fileMap, nodeMeta)
