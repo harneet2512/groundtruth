@@ -354,9 +354,19 @@ L4b promoted-edge *enrichment* (a FEATURE) and F4 cap (INFRA/CI) remain non-bugs
 
 **Comprehensive regression: 1979 passed, +30 new regression tests, 16 failed.** The 16
 failures are **PROVEN PRE-EXISTING** — identical 16-failed/35-passed at the pre-session
-baseline `32e4e313`, before any of this session's work. **The session's entire body of
-work introduced ZERO regressions.** The 16 are a separate pre-existing debt in 4 areas
-(`get_targeted_verification_suggestion` returns '', `presubmit_verify` firing,
-importer-witness localization, `clip_balanced` rendering) — not in the OWED backlog, not
-caused by depth/rank/the hardening loop. Recommended as a SEPARATE next phase, each needing
-its own spec + investigation, not a blind tail-end dive.
+baseline `32e4e313`. **The session's entire body of work introduced ZERO regressions.**
+Triaged by actual error mode:
+- **4 real (FIXED, `74b3711b`):** `test_verify_labeling` asserted the OLD test-name LEAK
+  (`Run: pytest <exact test>`); `_get_targeted_verification_suggestion` was deliberately
+  disabled (`return ""`, "run12 leaked test_plot_hdi") for legitimacy. Fixed the stale
+  docstring + converted the 4 tests to assert `""` — so re-enabling the leak fails CI.
+- **~7 environmental (Windows test-harness):** `presubmit_verify` (4) `PermissionError
+  [WinError 32]` — temp `.db` not unlinkable (sqlite conn held open); `clip_balanced` (4)
+  `NotADirectoryError [WinError 267]` on temp paths. Pass on Linux/CI; not product bugs.
+- **~3 environmental (embedder):** `graph_localizer_l1` `matmul 384 != 768` in
+  `anchor_select.py` — the e5/384-cache vs gte/768-model dim mismatch (BRIEFING: semantic
+  must be ON via the container ONNX path; local env half-configured) + 1 embedder-dependent
+  ranking assertion.
+**None is a product-logic bug; none caused by depth/rank/the hardening loop.** The
+environmental ones need the CI/container env (proper embedder + Linux temp handling) to
+verify, not a code fix.
