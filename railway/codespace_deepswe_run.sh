@@ -39,6 +39,9 @@ TASK_DIR="deepswe-bench/tasks/${TASK}"
 LOG="/tmp/gt_debug/deepswe_${TASK}.log"
 mkdir -p /tmp/gt_debug /tmp/gt
 
+# UTF-8 everywhere — on Windows-local, git/rg subprocess output + pier's braille spinner
+# crash under the cp1252 locale; UTF-8 mode fixes both. No-op on Linux/Codespaces.
+export PYTHONUTF8=1 PYTHONIOENCODING=utf-8
 # --- full-stack enforcement (deepswe_trial.yml env) + the recent hardening flags ---
 export GT_REQUIRE_FULL_POTENTIAL=1 GT_REQUIRE_FTS5=1
 export GT_FORCE_ONNX_EMBEDDER=1 GT_REQUIRE_EMBEDDER=1

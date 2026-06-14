@@ -922,6 +922,8 @@ def _last_change(file_path: str, repo_root: str) -> str:
             cwd=repo_root,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=10,
         )
         if result.returncode == 0 and result.stdout.strip():
@@ -946,6 +948,8 @@ def _co_change_files(file_path: str, repo_root: str, limit: int = 3) -> list[str
             cwd=repo_root,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=15,
         )
         if result.returncode != 0:
@@ -1167,6 +1171,8 @@ def _expand_via_cochange(
             cwd=repo_root,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=30,
         )
         if result.returncode != 0:
