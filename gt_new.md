@@ -371,6 +371,15 @@ Triaged by actual error mode:
   embedder-config-dependent ranking assertion (importer.py-top — needs semantic ON via the
   container ONNX path per BRIEFING; the local cache/model are dim-mismatched).
 
-**Net: 6 of 16 were real and are FIXED** (4 legitimacy + 2 robustness); the remaining ~10
-are environmental (Windows temp-file handling + local embedder config) that need the
-CI/container env to verify, not a code fix. **None caused by depth/rank/the hardening loop.**
+**Net (after the full resolution drive): 15 of 16 RESOLVED.**
+- 4 legitimacy (`verify_labeling`) + 2 robustness (`anchor_select` matmul dim-guard)
+- 4 `presubmit_verify`: a REAL sqlite-connection leak (`conn.close()` lived after the query
+  in the `try`, so a query error returned via `except` without closing -> Windows file lock)
+  + rewrote the stale tests (asserted the removed test-name leak) to lock test-blindness
+- 5 `clip_balanced`: 4 Windows `TemporaryDirectory` teardown errors (`ignore_cleanup_errors`)
+  + 1 STALE MOCK (`_FakeEgo` lacked the `.nodes`/`.edges` interface `post_view` now filters)
+- **1 remaining (genuinely env-gated):** `test_localize_surfaces_importer_as_top_via_witness`
+  — importer.py carries the witness but ranks #2; with semantic ON (container ONNX per
+  BRIEFING) it boosts to #1, but the local e5/384-vs-gte/768 mismatch makes semantic abstain.
+  NOT fixable as local code without overfitting the localizer ranking (BRIEFING-protected).
+  Needs the container embedder env. **None caused by depth/rank/the hardening loop.**
