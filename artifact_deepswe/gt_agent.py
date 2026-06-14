@@ -161,7 +161,8 @@ _GT_HOOK_CANDIDATES = [
 ]
 _PATCH_PATH = _THIS_DIR / "gt_mini_patch.py"
 _PHASE_POLICY_PATH = _THIS_DIR / "phase_policy.py"
-_PRODUCT_RUNTIME_DIR = _THIS_DIR.parent / "src" / "groundtruth" / "runtime"
+_PRODUCT_SRC_DIR = _THIS_DIR.parent / "src" / "groundtruth"
+_PRODUCT_RUNTIME_DIR = _PRODUCT_SRC_DIR / "runtime"
 # Oracle siblings (LIPI 2026-06-10): gt_mini_patch._load_gt_oracle() loads
 # gt_oracle.py (which requires gt_oracle_sense.py) from ITS OWN directory to
 # produce the live SPEC/obligation candidates. Without shipping both siblings
@@ -186,9 +187,25 @@ _PATCH_CONTENT = _load([_PATCH_PATH])
 _PHASE_POLICY_CONTENT = _load([_PHASE_POLICY_PATH])
 _ORACLE_CONTENT = _load([_ORACLE_PATH])
 _SENSE_CONTENT = _load([_SENSE_PATH])
-_PRODUCT_RUNTIME_FILES = {
-    name: _load([_PRODUCT_RUNTIME_DIR / name])
-    for name in (
+# ---------------------------------------------------------------------------
+# PRODUCT-PACKAGE INJECTION ALLOW-LIST (F2+F5, 2026-06-13) — the SINGLE source of
+# truth for which `groundtruth.*` modules are shipped into the task container so
+# gt_mini_patch.py imports the REAL Product policy in-container (NOT a divergent
+# inline fallback copy). Every module-scope `from groundtruth.<pkg>.<mod> import`
+# in gt_mini_patch.py MUST be covered by this map, or the import fails in-container
+# and the inline fallback (which historically drifted from Product — e.g. omitted
+# `/static//assets/` in the fact-filter) runs instead. The drift is what kept
+# Product != agent-time. `_assert_gt_mini_patch_imports_covered()` (and the pytest
+# import-coverage test) fail-closed if a future import is added without shipping it.
+#
+# Maps package-relative subdir -> the module filenames to inject under
+# /opt/gt/groundtruth/<subdir>/. The injection creates each subdir's __init__.py
+# (empty, like runtime) so the submodules import directly; the modules below import
+# only stdlib so no transitive groundtruth.* import is needed. `runtime` historically
+# carried CP011-015 control-plane modules; `delivery`+`pretask` carry the B1 single-
+# source fact-filter policy (path_policy/name_policy/curation_map).
+_PRODUCT_PACKAGE_MODULES: dict[str, tuple[str, ...]] = {
+    "runtime": (
         "context_policy.py",
         "trajectory_state.py",
         "context_budget.py",
@@ -197,8 +214,88 @@ _PRODUCT_RUNTIME_FILES = {
         "obligations.py",
         "ledger.py",
         "patterns.py",
-    )
+    ),
+    # B1 delivery fact-filter — the single source for path-class + name-class
+    # exclusion. Shipping these makes gt_mini_patch.py's `from groundtruth.delivery
+    # .{path_policy,name_policy} import` succeed in-container so the inline
+    # `delivery_policy_import_fallback` copy never runs (it omitted /static//assets/).
+    "delivery": (
+        "path_policy.py",
+        "name_policy.py",
+    ),
+    # FACT gate + cross-language disqualifier — gt_mini_patch.py imports
+    # `from groundtruth.pretask.curation_map import (...)`. curation_map imports
+    # only stdlib (os/re/sqlite3/dataclasses) so it ships standalone.
+    "pretask": (
+        "curation_map.py",
+    ),
 }
+
+# Per-package {filename: content}. _load() emits a warning + leaves the value None
+# if a source file is absent (correct-or-quiet: a missing module is skipped at
+# injection time, exactly as before for runtime).
+_PRODUCT_PACKAGE_FILES: dict[str, dict[str, str | None]] = {
+    subdir: {name: _load([_PRODUCT_SRC_DIR / subdir / name]) for name in names}
+    for subdir, names in _PRODUCT_PACKAGE_MODULES.items()
+}
+# Back-compat alias (runtime-only view; some callers/tests reference this name).
+_PRODUCT_RUNTIME_FILES = _PRODUCT_PACKAGE_FILES["runtime"]
+
+# Flat set of the dotted module names this adapter SHIPS into the container
+# (groundtruth.<subdir>.<module>) — the canonical allow-list the import-coverage
+# guard checks gt_mini_patch.py's module-scope imports against.
+_INJECTED_GT_MODULES: frozenset[str] = frozenset(
+    f"groundtruth.{subdir}.{name[:-3]}"
+    for subdir, names in _PRODUCT_PACKAGE_MODULES.items()
+    for name in names
+)
+
+
+# Module-scope `from groundtruth... import` statements at the top level of a file
+# (indent 0). Submodule imports inside a try/except are still indented under the
+# try, so we match `from groundtruth.<a>.<b> import` regardless of leading
+# whitespace but only `from ... import` (not `import groundtruth` bare).
+_GT_IMPORT_RE = re.compile(
+    r"^\s*from\s+(groundtruth(?:\.[A-Za-z_][\w]*)+)\s+import\b", re.MULTILINE
+)
+
+
+def gt_mini_patch_required_modules(patch_source: str | None = None) -> set[str]:
+    """Every `groundtruth.*` module gt_mini_patch.py imports at module scope.
+
+    Returns the set of dotted module names (``groundtruth.delivery.path_policy``,
+    ``groundtruth.pretask.curation_map``, ...) that MUST be injected for the
+    in-container import to resolve. Used by ``_assert_gt_mini_patch_imports_covered``
+    and the pytest import-coverage test so a future import can't silently
+    re-introduce the inline-fallback drift."""
+    src = patch_source
+    if src is None:
+        src = _PATCH_CONTENT if "_PATCH_CONTENT" in globals() else None
+    if src is None:
+        try:
+            src = _PATCH_PATH.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return set()
+    return {m.group(1) for m in _GT_IMPORT_RE.finditer(src)}
+
+
+def _assert_gt_mini_patch_imports_covered(patch_source: str | None = None) -> None:
+    """Fail-closed coverage guard (F2+F5): every module-scope `from groundtruth.*
+    import` in gt_mini_patch.py must be in the injection allow-list
+    (``_INJECTED_GT_MODULES``). If one is NOT shipped, the in-container import
+    fails and the DIVERGENT inline fallback runs (the root cause this fix closes) —
+    so we raise at import time rather than silently drift. Generalized: derived from
+    the actual import statements + the actual allow-list, no hardcoded module list."""
+    required = gt_mini_patch_required_modules(patch_source)
+    uncovered = sorted(required - set(_INJECTED_GT_MODULES))
+    if uncovered:
+        raise RuntimeError(
+            "gt_mini_patch.py imports groundtruth modules NOT covered by the "
+            f"injection allow-list: {uncovered}. Add them to "
+            "_PRODUCT_PACKAGE_MODULES in gt_agent.py (and confirm the source files "
+            "import only stdlib / shipped modules), or the in-container import will "
+            "fail and the divergent inline fallback will run (Product != agent-time)."
+        )
 
 # ---------------------------------------------------------------------------
 # Base64 encoding for heredoc injection (gt_hook.py is ~115KB+)
@@ -482,39 +579,58 @@ def _inject_steps() -> list[InstallStep]:
             )
         )
 
-    # --- product runtime modules: GT identity lives under groundtruth.runtime ---
-    # The task container receives only the files injected by this adapter. Ship
-    # the product-owned runtime control plane so mini-swe code delegates to GT
-    # product behavior instead of reimplementing policy/state/lifecycle locally.
-    steps.append(InstallStep(
-        user="root",
-        run=(
-            f"mkdir -p {_GT_DIR}/groundtruth/runtime "
-            f"&& touch {_GT_DIR}/groundtruth/__init__.py "
-            f"&& touch {_GT_DIR}/groundtruth/runtime/__init__.py"
-        ),
-    ))
-    for fname, content in _PRODUCT_RUNTIME_FILES.items():
-        chunks = _b64_chunks(content)
-        if not chunks:
-            continue
-        b64name = fname.replace(".py", ".b64")
-        for i, chunk in enumerate(chunks):
-            op = ">" if i == 0 else ">>"
-            steps.append(
-                InstallStep(user="root", run=f'echo "{chunk}" {op} {_GT_DIR}/{b64name}')
-            )
-        steps.append(
-            InstallStep(
-                user="root",
-                run=(
-                    f"base64 -d {_GT_DIR}/{b64name} > "
-                    f"{_GT_DIR}/groundtruth/runtime/{fname} "
-                    f"&& chmod 644 {_GT_DIR}/groundtruth/runtime/{fname} "
-                    f"&& rm -f {_GT_DIR}/{b64name}"
-                ),
-            )
+    # --- product packages: GT identity lives under groundtruth.{runtime,delivery,
+    #     pretask} (F2+F5, 2026-06-13) ---
+    # The task container receives ONLY the files injected by this adapter. Ship the
+    # product-owned modules gt_mini_patch.py imports at module scope so the REAL
+    # Product policy imports in-container and the inline fallback copies NEVER run
+    # (the divergent inline fact-filter omitted /static//assets/, so Product !=
+    # agent-time until these ship). `runtime` = the CP011-015 control plane;
+    # `delivery`+`pretask` = the B1 single-source fact-filter (path_policy /
+    # name_policy / curation_map). Each package gets an empty __init__.py (like
+    # runtime) so `from groundtruth.<pkg>.<mod> import` resolves the submodule
+    # directly. The injected modules import only stdlib — no transitive
+    # groundtruth.* import to satisfy.
+    #
+    # FAIL-CLOSED build guard: every `from groundtruth.* import` in gt_mini_patch.py
+    # MUST be in this allow-list or the in-container import fails and the inline
+    # fallback runs. Assert before emitting steps so the drift can't silently ship.
+    _assert_gt_mini_patch_imports_covered()
+    mkdir_inits = (
+        f"touch {_GT_DIR}/groundtruth/__init__.py"
+    )
+    for subdir in _PRODUCT_PACKAGE_FILES:
+        mkdir_inits = (
+            f"mkdir -p {_GT_DIR}/groundtruth/{subdir} && "
+            + mkdir_inits
+            + f" && touch {_GT_DIR}/groundtruth/{subdir}/__init__.py"
         )
+    steps.append(InstallStep(user="root", run=mkdir_inits))
+    for subdir, files in _PRODUCT_PACKAGE_FILES.items():
+        for fname, content in files.items():
+            chunks = _b64_chunks(content)
+            if not chunks:
+                continue
+            # Prefix the temp b64 name with the package so two packages can carry
+            # the same filename without clobbering each other.
+            b64name = f"{subdir}__{fname.replace('.py', '.b64')}"
+            for i, chunk in enumerate(chunks):
+                op = ">" if i == 0 else ">>"
+                steps.append(
+                    InstallStep(user="root",
+                                run=f'echo "{chunk}" {op} {_GT_DIR}/{b64name}')
+                )
+            steps.append(
+                InstallStep(
+                    user="root",
+                    run=(
+                        f"base64 -d {_GT_DIR}/{b64name} > "
+                        f"{_GT_DIR}/groundtruth/{subdir}/{fname} "
+                        f"&& chmod 644 {_GT_DIR}/groundtruth/{subdir}/{fname} "
+                        f"&& rm -f {_GT_DIR}/{b64name}"
+                    ),
+                )
+            )
 
     # --- Repo root detection ---
     steps.append(InstallStep(user="root", run=_ROOT_DETECT))
