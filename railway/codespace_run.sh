@@ -134,13 +134,22 @@ else
   fi
 fi
 
-# Semantic embedder (gt_trial §1): bake the e5-small-v2 ONNX model so semantic localization is
-# ON (no torch). Idempotent — setup_models.py skips if present. Required for GT_REQUIRE_EMBEDDER.
-if [ ! -f "${REPO}/models/e5-small-v2/model.onnx" ]; then
+# Semantic embedder (gt_trial §1): bake the Alibaba-NLP/gte-modernbert-base ONNX model (768-dim).
+# This is the CHANGE-2 PRIMARY localization embedder — the no-arg get_embedding_model() default
+# (embed.py:218-229). e5-small-v2 is ONLY the memory-store/fallback model, NOT what localization
+# uses. setup_models.py (no args) bakes gte PRIMARY + e5 fallback. Idempotent; required for
+# GT_REQUIRE_EMBEDDER. GUARD on the gte primary (not e5) — else a partial prior bake silently
+# leaves gte missing and the loader fail-closes at brief time.
+if [ ! -f "${REPO}/models/gte-modernbert-base/model.onnx" ]; then
   pip install -q onnxruntime tokenizers huggingface_hub 2>/dev/null || echo "WARN: onnxruntime install failed (semantic will fail-closed)"
   python "${REPO}/scripts/setup_models.py" 2>&1 | tail -3 || echo "WARN: embedder bake failed"
 else
-  echo "embedder model present at ${REPO}/models/e5-small-v2"
+  echo "embedder model present at ${REPO}/models/gte-modernbert-base (primary, 768-dim)"
+fi
+# Fail-closed pre-flight: the localization loader defaults to gte-modernbert-base/768; if its ONNX
+# is absent, GT_REQUIRE_EMBEDDER=1 RAISES at brief time (no silent e5 downgrade). Surface it NOW.
+if [ ! -f "${REPO}/models/gte-modernbert-base/model.onnx" ]; then
+  echo "WARN: gte-modernbert-base/model.onnx MISSING after bake — semantic will fail-closed (run aborts at brief). Re-run scripts/setup_models.py or check HF reachability before launching."
 fi
 
 # pyright (deterministic, warn-don't-fail) — setup-eval lines 61-68.
@@ -448,6 +457,27 @@ cp /tmp/gt_debug/gt_hooks.log "${CSOUT_DIR}/" 2>/dev/null || true
 echo "interaction_files=$(ls /tmp/gt_interactions_*.jsonl 2>/dev/null | wc -l)"
 
 # ---------------------------------------------------------------------------
+# (8b) DEEP 8-dp metrics — CLAUDE.md MANDATORY ("a run without its persisted 8-decimal deep
+#      log is NOT done — it cannot be cited"). Mirrors swebench_30task.yml:957-958. The
+#      telemetry writer puts gt_run_summary/gt_layer_events/gt_agent_events under GT_DEBUG_DIR
+#      (/tmp/gt_debug); gt_deep_metrics.py reads them from /tmp/ — bridge the path first.
+# ---------------------------------------------------------------------------
+echo "=== [8b] Deep 8-dp metrics (gt_deep_metrics_${TASK}.json) ==="
+cp "/tmp/gt_debug/gt_run_summary_${TASK}.json" "/tmp/gt_run_summary_${TASK}.json" 2>/dev/null || true
+cp /tmp/gt_debug/gt_layer_events_*.jsonl /tmp/ 2>/dev/null || true
+PYTHONPATH="${REPO}/src:${PYTHONPATH:-}" python "${REPO}/scripts/swebench/gt_deep_metrics.py" \
+    "${TASK}" /tmp/results --log "${LOGFILE}" 2>&1 | tail -3 || echo "WARN: deep-metrics dumper failed (non-fatal)"
+if cp "/tmp/gt_deep_metrics_${TASK}.json" "${CSOUT_DIR}/" 2>/dev/null; then
+  echo "deep metrics -> ${CSOUT_DIR}/gt_deep_metrics_${TASK}.json"
+else
+  echo "WARN: gt_deep_metrics_${TASK}.json NOT produced — run is NOT citable per CLAUDE.md"
+fi
+# Stage the /tmp/gt_debug telemetry JSONLs (the section-8 cp read /tmp/, but the writer puts
+# these under GT_DEBUG_DIR=/tmp/gt_debug).
+cp /tmp/gt_debug/gt_layer_events_*.jsonl /tmp/gt_debug/gt_agent_events_*.jsonl \
+   /tmp/gt_debug/gt_run_summary_*.json "${CSOUT_DIR}/" 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
 # (9) OFFICIAL EVAL — Microsoft SWE-bench-Live harness -> RESOLVED verdict.
 #     gt_trial §2: a run with no verdict instrument is unfalsifiable -> not allowed.
 #     CARDINAL: never a custom eval. Set GT_EVAL=0 to skip (e.g. patchless smoke).
@@ -474,6 +504,10 @@ for f in glob.glob("/tmp/results/**/output.jsonl", recursive=True):
 with open(preds, "w", encoding="utf-8") as w:
     w.write(json.dumps({"instance_id": task, "model_name_or_path": "gt", "model_patch": patch}) + "\n")
 print(f"[9] predictions: instance={task} patch_len={len(patch)}")
+if not patch:
+    print("[9][WARN] EMPTY PATCH — the eval will mark UNRESOLVED regardless of the trajectory. "
+          "A correct agent edit can still yield an empty git_patch (dirty/uncommitted runtime git "
+          "state at capture). READ the output.jsonl history before trusting a NOT-RESOLVED verdict.")
 PYEOF
   fi
   ( cd "${REPO}" && python -m swebench.harness.run_evaluation \
