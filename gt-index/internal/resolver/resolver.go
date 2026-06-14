@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -305,6 +306,52 @@ func stripTypeWrapper(t string) string {
 	return t
 }
 
+// stripCallArgs reduces a direct-call qualifier `name(args)` to its bare callee `name`,
+// so a factory chain `make_user(a, b).save()` (whose qualifier the parser records WITH the
+// args) matches the factory's function node in the return-type bridge. It strips ONLY a
+// single balanced trailing `(...)` that closes at the final character — a qualifier with a
+// trailing `.field`, an unbalanced/partial paren, or no paren is returned unchanged (so a
+// plain variable receiver `obj.method()` is untouched). Nested parens inside the args are
+// balanced. Correct-or-quiet: callers still gate the result on a real function-node lookup.
+func stripCallArgs(q string) string {
+	q = strings.TrimSpace(q)
+	if !strings.HasSuffix(q, ")") {
+		return q
+	}
+	open := strings.IndexByte(q, '(')
+	if open <= 0 {
+		return q
+	}
+	depth := 0
+	for i := open; i < len(q); i++ {
+		switch q[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				// The first balanced '(' must close at the LAST char for this to be a
+				// bare `name(args)` call (no trailing `.x` / index after the close).
+				if i != len(q)-1 {
+					return q
+				}
+				name := strings.TrimSpace(q[:open])
+				// The head must be a clean identifier (no remaining dots / operators) —
+				// `a.b()` is a method chain, not a bare factory call; leave it for 1.96.
+				if name != "" && identLikeRe.MatchString(name) {
+					return name
+				}
+				return q
+			}
+		}
+	}
+	return q
+}
+
+// identLikeRe matches a clean bare identifier (no dots, parens, or operators) — the head
+// of a direct factory call after its args are stripped.
+var identLikeRe = regexp.MustCompile(`^[A-Za-z_]\w*$`)
+
 // tierFor maps a confidence score to a TrustTier via the single CLAUDE.md threshold
 // table (CLAUDE.md:222) — the ONE source of truth so tier always follows confidence
 // and a 0.85 edge can NEVER be stamped CERTIFIED. Used at every emit site instead of a
@@ -468,6 +515,20 @@ var inheritanceMap map[int64][]int64
 // Generalized across statically-typed languages (Go/Rust/Java/TS + annotated Python).
 var paramTypeIndex map[int64]map[string]string
 
+// returnShapeIndex: function node DB ID → the internal class-like type NAME the function
+// constructs and returns, mined from the `return_shape` property ONLY when the body returns
+// a BARE CONSTRUCTOR (`ClassName(...)` for Python/JS/TS, `&Struct{...}` / `Struct{...}` for
+// Go/Rust composite literals). It is the FALLBACK declared-return-type for the return-type
+// bridges (Strategy 1.96 viaReturn + 1.97) when the parser captured no `return_type`
+// annotation (`x := factory(); x.M()` / `factory().M()` where factory has an inferred-but-
+// undeclared return). A constructor return is a FACT (the function's runtime type IS that
+// class), so it is conf-0.9 type_flow when consumed — UNLIKE data_flow, whose value is a
+// forward-slice provenance string (not a var->type binding) and is NEVER used for receivers.
+// CORRECT-OR-QUIET: populated ONLY for a clean single-constructor return whose name resolves
+// to an internal class-like node; `collection|`, `tuple|`, `none`, multi-return, and any
+// non-constructor `value|` expr (a var, a binary expr, a non-class call) record NOTHING.
+var returnShapeIndex map[int64]string
+
 // fieldTypeIndex: CLASS node DB ID → {field name → declared type name}. Set before
 // Resolve() for Strategy 2b (declared-FIELD-type receiver resolution). Populated from
 // the `class_field` properties the parser already extracts (`name: Type` annotations),
@@ -537,6 +598,137 @@ func SetParamTypeIndex(idx map[int64]map[string]string) {
 // SetFieldTypeIndex sets the class→field→type map for Strategy 2b.
 func SetFieldTypeIndex(idx map[int64]map[string]string) {
 	fieldTypeIndex = idx
+}
+
+// SetReturnShapeIndex sets the funcNodeID→constructed-class-name map used as the
+// return-type FALLBACK in the Strategy 1.96 (viaReturn) + 1.97 return-type bridges.
+func SetReturnShapeIndex(idx map[int64]string) {
+	returnShapeIndex = idx
+}
+
+// returnShapeCtorRe matches a BARE CONSTRUCTOR return expression and captures the
+// constructed type NAME, across the two language idioms:
+//
+//	Python/JS/TS  : ClassName(args)            -> ClassName
+//	Go/Rust       : &Struct{fields} / Struct{} -> Struct   (composite literal)
+//
+// It is anchored (^) and requires the whole expr to BE the constructor (the closing
+// `)`/`}` is asserted by the caller), so a method-chain (`Foo().bar()`), an arithmetic
+// expr, or a non-constructor call cannot match. Generics/qualifiers are handled by the
+// caller (drop-dotted, strip `[...]`), keeping this regex a clean leading-name extractor.
+var returnShapeCtorRe = regexp.MustCompile(`^&?([A-Za-z_][A-Za-z0-9_]*)\s*[\({]`)
+
+// ctorIsWholeExpr reports whether the constructor opened by the FIRST `open` bracket in
+// expr closes (balanced) exactly at the final character, i.e. the constructor IS the whole
+// return expression with nothing trailing it. This rejects method chains / field access on
+// a constructor (`User(a).clone()`, `&S{}.Field`) which end in the right bracket but whose
+// constructor close is INTERIOR. open is '(' or '{' (its match ')' or '}').
+func ctorIsWholeExpr(expr string, open byte) bool {
+	var close byte
+	if open == '(' {
+		close = ')'
+	} else {
+		close = '}'
+	}
+	depth := 0
+	started := false
+	for i := 0; i < len(expr); i++ {
+		switch expr[i] {
+		case open:
+			depth++
+			started = true
+		case close:
+			depth--
+			if depth == 0 && started {
+				// Constructor balanced here — it is the whole expr ONLY if this is the
+				// last non-space character.
+				rest := strings.TrimSpace(expr[i+1:])
+				return rest == ""
+			}
+		}
+	}
+	return false
+}
+
+// BuildReturnShapeIndex builds funcNodeID → constructed-class-NAME from the `return_shape`
+// properties the parser already extracts (no re-parse), keyed by the function node DB id.
+// It mirrors BuildParamTypeIndex's plumbing (props' NodeIdx is global, parallel to
+// nodeDBIDs). It records a type ONLY for a bare-constructor `value|<Ctor>(...)` /
+// `value|&<Struct>{...}` shape — abstaining (recording nothing) on `none`, `collection|`,
+// `tuple|`, dotted/qualified constructors, and non-constructor `value|` exprs — so the
+// receiver type it later supplies is a CONSTRUCTOR FACT, never a guess (correct-or-quiet).
+// classNames is the set of internal class-like node names; a constructor not naming an
+// internal class is dropped (a stdlib/builtin constructor has no internal node to bridge to).
+// When a function has MULTIPLE distinct constructor returns (rare: returns A in one branch,
+// B in another), the type is AMBIGUOUS and the function is excluded — never pick one.
+func BuildReturnShapeIndex(props []parser.PropertyRef, nodeDBIDs []int64, classNames map[string]bool) map[int64]string {
+	type acc struct {
+		typ   string
+		ambig bool
+	}
+	tmp := make(map[int64]*acc)
+	for _, p := range props {
+		if p.Kind != "return_shape" || p.NodeIdx < 0 || p.NodeIdx >= len(nodeDBIDs) {
+			continue
+		}
+		dbid := nodeDBIDs[p.NodeIdx]
+		if dbid <= 0 {
+			continue
+		}
+		val := strings.TrimSpace(p.Value)
+		// Only the `value|<expr>` shape can be a constructor. `none`, `collection|...`
+		// (`[...]`/`{...}` literal — NOT a struct constructor), `tuple|...` abstain.
+		if !strings.HasPrefix(val, "value|") {
+			continue
+		}
+		expr := strings.TrimSpace(val[len("value|"):])
+		// A bare constructor's expr must END in the matching bracket of its leading form
+		// (`)` for Name(...), `}` for &Struct{...}/Struct{...}). A trailing `.x`, operator,
+		// or index means it is NOT a clean single constructor -> abstain.
+		isCall := strings.HasSuffix(expr, ")")
+		isLit := strings.HasSuffix(expr, "}")
+		if !isCall && !isLit {
+			continue
+		}
+		m := returnShapeCtorRe.FindStringSubmatch(expr)
+		if m == nil {
+			continue
+		}
+		// The opening bracket the regex matched must agree with the closing bracket:
+		// `Name(` pairs with `)`, `&Struct{`/`Struct{` pairs with `}`. This rejects
+		// `Name(...)` that actually ends in `}` (a slice/map of structs) and vice-versa.
+		openBrace := strings.ContainsAny(m[0], "{")
+		if openBrace != isLit {
+			continue
+		}
+		// The constructor must be the WHOLE expression: the bracket the leading name
+		// opens must close at the FINAL char (nothing trailing). A method chain
+		// `User(a).clone()` ends in `)` and matches the leading-name regex, but the
+		// constructor's own `)` is interior — `.clone()` trails it. We require the open
+		// bracket (the last char of m[0]) to balance to depth 0 exactly at len(expr)-1,
+		// so any trailing `.x` / index / operator abstains (correct-or-quiet).
+		if !ctorIsWholeExpr(expr, m[0][len(m[0])-1]) {
+			continue
+		}
+		name := m[1]
+		if name == "" || !classNames[name] {
+			continue // not an internal class-like type -> no bridge target, abstain
+		}
+		a := tmp[dbid]
+		if a == nil {
+			tmp[dbid] = &acc{typ: name}
+		} else if a.typ != name {
+			a.ambig = true // two different constructor returns -> ambiguous, drop
+		}
+	}
+	idx := make(map[int64]string)
+	for dbid, a := range tmp {
+		if a.ambig || a.typ == "" {
+			continue
+		}
+		idx[dbid] = a.typ
+	}
+	return idx
 }
 
 // BuildFieldTypeIndex builds CLASS-node-DB-ID → {fieldName → typeName} from the
@@ -1632,13 +1824,23 @@ func Resolve(
 								if funcIDs, ok := nodeIDs[typeName]; ok {
 									for _, funcID := range funcIDs {
 										fm, hasMeta := nodeMeta[0][funcID]
-										if !hasMeta || fm.ReturnType == "" {
+										if !hasMeta {
 											continue
 										}
 										if fm.Label == "Class" || fm.Label == "Struct" || fm.Label == "Interface" {
 											continue
 										}
-										if rt := stripTypeWrapper(fm.ReturnType); rt != "" {
+										// Prefer the parser's declared return TYPE; when it is
+										// empty (no annotation captured), fall back to the
+										// CONSTRUCTOR return shape (GAP C) — a factory whose
+										// body returns `ClassName(...)`/`&Struct{...}` HAS that
+										// runtime type even with no declared signature. The
+										// fallback is constructor-only (a fact), never data_flow.
+										rt := stripTypeWrapper(fm.ReturnType)
+										if rt == "" && returnShapeIndex != nil {
+											rt = returnShapeIndex[funcID]
+										}
+										if rt != "" {
 											className = rt
 											break
 										}
@@ -1688,20 +1890,32 @@ func Resolve(
 			if dotIdx := strings.LastIndex(call.CalleeQualified, "."); dotIdx > 0 {
 				qualifier := call.CalleeQualified[:dotIdx]
 				methodName := call.CalleeQualified[dotIdx+1:]
+				// A DIRECT factory chain `make_user(args).save()` records the qualifier
+				// WITH its call args (`make_user(args)`), which never matches the bare
+				// function node. Strip a trailing balanced `(...)` so `make_user(args)` ->
+				// `make_user` resolves to the factory func (then bridge through its return
+				// type / constructor-return shape). Correct-or-quiet: only the bare-name
+				// lookup below admits it; a non-function qualifier still finds nothing.
+				qualifier = stripCallArgs(qualifier)
 				if qualifier != "self" && qualifier != "this" && qualifier != "super" {
 					// Check if qualifier is a function call: look for a function with this name
 					if funcIDs, ok := nodeIDs[qualifier]; ok {
 						for _, funcID := range funcIDs {
 							fm, hasMeta := nodeMeta[0][funcID]
-							if !hasMeta || fm.ReturnType == "" {
+							if !hasMeta {
 								continue
 							}
 							if fm.Label == "Class" || fm.Label == "Struct" || fm.Label == "Interface" {
 								continue
 							}
-							retType := fm.ReturnType
-							// Strip common wrappers: Optional[X] → X, list[X] → X
-							retType = stripTypeWrapper(retType)
+							// Strip common wrappers: Optional[X] → X, list[X] → X, *X → X.
+							retType := stripTypeWrapper(fm.ReturnType)
+							// GAP C fallback: no declared return type -> use the CONSTRUCTOR
+							// return shape (factory whose body returns `ClassName(...)` /
+							// `&Struct{...}`). Constructor-only fact; never data_flow.
+							if retType == "" && returnShapeIndex != nil {
+								retType = returnShapeIndex[funcID]
+							}
 							if retType == "" {
 								continue
 							}

@@ -147,10 +147,18 @@ var (
 	fieldReadRe = regexp.MustCompile(`^reads:\s*[A-Za-z_][\w.]*\.(\w+)`)
 	// 'mutates: <recv>.<field> = ...'  (WRITES)
 	fieldWriteRe = regexp.MustCompile(`^mutates:\s*[A-Za-z_][\w]*\.(\w+)`)
-	// 'WHEN ...: raise <Type>(...)'  (RAISES from exception_flow). Capture the FULL
-	// dotted token (`[\w.]*`) so a qualified name (errors.New) reaches the drop-dotted
+	// 'WHEN ...: raise <Type>(...)'  (RAISES from exception_flow, Python). Capture the
+	// FULL dotted token (`[\w.]*`) so a qualified name (errors.New) reaches the drop-dotted
 	// guard intact instead of being silently truncated to its module prefix.
 	raiseFlowRe = regexp.MustCompile(`raise\s+([A-Za-z_][\w.]*)`)
+	// 'WHEN ...: throw new <Type>(...)' / 'throw <Type>(...)'  (RAISES from exception_flow,
+	// JS/TS/Java). The exception_flow value for a JS/TS `throw new InternalError(...)` carries
+	// the `throw [new] <Type>` form, which the raise-only regex above never matched -> the JS
+	// conditional-throw RAISES fact stayed trapped in the property (GAP A). Same dotted capture
+	// + same drop-dotted/builtin/resolveByName guards downstream, so a builtin/stdlib/dotted
+	// throw still mints no edge (correct-or-quiet). Go `panic(...)`/`return fmt.Errorf(...)`
+	// carry a VALUE, not a named internal class, so they match neither form -> stay property.
+	throwFlowRe = regexp.MustCompile(`throw\s+(?:new\s+)?([A-Za-z_][\w.]*)`)
 	// a call segment '<ident>('  (DATA_FLOW forward-slice callee extraction)
 	callSegRe = regexp.MustCompile(`([A-Za-z_][A-Za-z0-9_]*)\s*\(`)
 	// '<usage>:<callee>|...'  (USES from caller_usage)
@@ -479,8 +487,13 @@ func promoteFieldReads(db *store.DB, idx *promoteIndexes, add addEdgeFunc) error
 			return
 		}
 		cls, ok := idx.byID[src.ParentID]
-		if !ok || cls.Label != "Class" {
-			return // field-target with no owning Class node STAYS property
+		// classLabels is the POLYGLOT class-like superset {Class,Struct,Type,Enum,
+		// Interface} — the SAME set RAISES resolves against. The literal `!= "Class"`
+		// used to skip any class-like owner the parser labels with a non-"Class" tag
+		// (Go/Rust receivers if ever labeled Struct/Interface) — GAP B. Mirrors how the
+		// resolver's linkGoReceiverMethods / field-type index already treat the owner.
+		if !ok || !classLabels[cls.Label] {
+			return // field-target with no owning class-like node STAYS property
 		}
 		conf := 0.6
 		if fields := idx.classFields[cls.ID]; fields != nil && fields[field] {
@@ -507,7 +520,8 @@ func promoteWrites(db *store.DB, idx *promoteIndexes, add addEdgeFunc) error {
 			return
 		}
 		cls, ok := idx.byID[src.ParentID]
-		if !ok || cls.Label != "Class" {
+		// Polyglot class-like superset (GAP B) — see promoteFieldReads above.
+		if !ok || !classLabels[cls.Label] {
 			return
 		}
 		conf := 0.6
@@ -531,11 +545,18 @@ func promoteRaises(db *store.DB, idx *promoteIndexes, add addEdgeFunc) error {
 			if k == "exception_type" {
 				etype = strings.TrimSpace(value)
 			} else {
-				m := raiseFlowRe.FindStringSubmatch(value)
-				if m == nil {
+				// exception_flow carries either `raise <Type>` (Python) or
+				// `throw [new] <Type>` (JS/TS/Java) inside the WHEN-clause shape. Try
+				// raise first, then throw, so a JS conditional throw is recovered (GAP A)
+				// while Go `panic(...)` / `return fmt.Errorf(...)` (a value, no named
+				// internal class) matches NEITHER and stays a property (non-invention).
+				if m := raiseFlowRe.FindStringSubmatch(value); m != nil {
+					etype = m[1]
+				} else if m := throwFlowRe.FindStringSubmatch(value); m != nil {
+					etype = m[1]
+				} else {
 					return
 				}
-				etype = m[1]
 			}
 			// D3 drop-dotted (1:1 with the Python reference `if "." in tok: continue`):
 			// a dotted/qualified name (errors.New, mod.MyError) is NOT a clean internal
