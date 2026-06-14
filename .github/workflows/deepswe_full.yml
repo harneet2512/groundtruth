@@ -56,6 +56,13 @@ permissions:
   packages: read
 
 env:
+  # Defensive UTF-8 (infra): hard-pin utf-8 so a stray runner locale can't reintroduce the
+  # cp1252 git/rg-subprocess decode crash (the code fix in src/groundtruth already guards it);
+  # PYTHONUTF8 also covers pier's braille-spinner encode.
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+  LANG: "C.UTF-8"
+  LC_ALL: "C.UTF-8"
   # Full-stack enforcement (same as deepswe_trial) — no silent fallback on a paid run.
   # MASTER gate: GT_REQUIRE_FULL_STACK=1 implies require-embedder/lsp/fts5 in
   # preflight_pipeline.py; the explicit per-dimension flags are kept for belt-and-braces.

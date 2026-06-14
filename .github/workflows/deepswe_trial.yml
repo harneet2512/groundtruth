@@ -16,6 +16,13 @@ on:
         default: "deepseek/deepseek-v4-flash"
 
 env:
+  # Defensive UTF-8 (infra): GHA Linux is utf-8 by default, but hard-pin it so a stray
+  # locale can't reintroduce the cp1252 git/rg-subprocess decode crash (the code fix in
+  # src/groundtruth already guards it). PYTHONUTF8 also covers pier's braille-spinner encode.
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+  LANG: "C.UTF-8"
+  LC_ALL: "C.UTF-8"
   # Full-stack enforcement on the DeepSWE path. DeepSWE uses preflight_pipeline.py
   # (FTS5 / semantic / lsp-edges) — now made HARD (not advisory) in the preflight step.
   # GT_REQUIRE_FTS5 aborts gt-index if FTS5 absent; GT_FORCE_ONNX_EMBEDDER +
