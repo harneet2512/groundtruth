@@ -428,7 +428,7 @@ func BatchInsertNodesTx(tx *sql.Tx, nodes []*Node) ([]int64, error) {
 	for i, n := range nodes {
 		res, err := stmt.Exec(
 			n.Label, n.Name, n.QualifiedName, n.FilePath, n.StartLine, n.EndLine,
-			n.Signature, n.ReturnType, n.IsExported, n.IsTest, n.Language, n.ParentID,
+			n.Signature, n.ReturnType, n.IsExported, n.IsTest, n.Language, nullableParentID(n.ParentID),
 		)
 		if err != nil {
 			return nil, fmt.Errorf("insert node %d: %w", i, err)
@@ -524,6 +524,6 @@ func InsertFileHashTx(tx *sql.Tx, filePath, hash, language string) error {
 
 // UpdateParentIDTx sets the parent_id for a node inside the given tx.
 func UpdateParentIDTx(tx *sql.Tx, nodeID, parentID int64) error {
-	_, err := tx.Exec(`UPDATE nodes SET parent_id = ? WHERE id = ?`, parentID, nodeID)
+	_, err := tx.Exec(`UPDATE nodes SET parent_id = ? WHERE id = ?`, nullableParentID(parentID), nodeID)
 	return err
 }

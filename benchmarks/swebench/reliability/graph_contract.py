@@ -14,7 +14,13 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import sys
+from pathlib import Path
 from typing import Any
+
+_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(_ROOT / "scripts" / "metrics"))
+from graph_bases import graph_bases_contract  # noqa: E402
 
 # The SAME deterministic set the consumer (foundational_gates / curation_map) uses,
 # so the contract's notion of "resolved" can never drift from the product's.
@@ -73,11 +79,13 @@ def build_graph_contract(db_path: str, closure_before_lsp: int | None = None) ->
         c["edges_count"] = _scalar(con, "SELECT COUNT(*) FROM edges")
         c["calls_count"] = _scalar(con, "SELECT COUNT(*) FROM edges WHERE type='CALLS'")
         c["contains_count"] = _scalar(con, "SELECT COUNT(*) FROM edges WHERE type='CONTAINS'")
-        c["rel_edge_counts"] = _dist(
-            con,
-            "SELECT type, COUNT(*) FROM edges WHERE type IN "
-            "('EXTENDS','IMPLEMENTS','COMPOSES','RE_EXPORTS','HANDLES_ROUTE') GROUP BY type",
-        )
+        gb = graph_bases_contract(con)
+        c["graph_bases_label"] = "[graph bases]"
+        c["graph_bases"] = gb
+        c["rel_edge_counts"] = {
+            k: v for k, v in gb["edge_type_counts"].items()
+            if k in {"EXTENDS", "IMPLEMENTS", "COMPOSES", "RE_EXPORTS", "HANDLES_ROUTE", "API_CALL"}
+        }
         c["properties_count"] = _scalar(con, "SELECT COUNT(*) FROM properties")
         c["data_flow_count"] = _scalar(con, "SELECT COUNT(*) FROM properties WHERE kind='data_flow'")
         c["assertions_count"] = _scalar(con, "SELECT COUNT(*) FROM assertions")
@@ -155,6 +163,12 @@ def build_graph_contract(db_path: str, closure_before_lsp: int | None = None) ->
         hf.append("schema_version_unexpected")
     if not pm.get("git_commit"):
         hf.append("project_meta_missing_commit")
+    gb = c.get("graph_bases") or {}
+    if (gb.get("duplicate_names") or gb.get("evaluable_missing")
+            or gb.get("required_missing") or gb.get("base_evaluable_pct", 0) < 100.0):
+        hf.append("graph_bases_incomplete")
+    if gb.get("foreign_key_violations", 0) != 0:
+        hf.append("graph_foreign_key_violations")
     # name_match dominance is NOT a graph hard-fail by itself (the consumer filters),
     # but it is the signal the classifier reads for PRODUCT/GRAPH quality.
     c["hard_fail"] = hf

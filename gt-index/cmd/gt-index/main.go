@@ -747,7 +747,9 @@ func main() {
 	fmt.Fprintf(os.Stderr, "  Stored %d co-change pairs\n", cochangeCount)
 
 	// Post-insert FK validation (non-fatal)
-	db.ValidateForeignKeys()
+	if err := db.ValidateForeignKeys(); err != nil {
+		log.Fatalf("foreign-key validation failed: %v", err)
+	}
 
 	// Fold the WAL into graph.db so the file is SELF-CONTAINED before the process
 	// exits. The DB is opened in WAL mode (sqlite.go: _journal_mode=WAL); the FTS5

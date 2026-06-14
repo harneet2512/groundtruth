@@ -17,6 +17,11 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from graph_bases import graph_bases_contract  # noqa: E402
 
 _DET_METHODS = (
     "same_file", "import", "import_type", "type_flow", "verified_unique",
@@ -116,6 +121,8 @@ def build_graph_certificate(graph_db: str, source_root: str = "", lsp_cert=None,
         "resolution_method_distribution": {}, "trust_tier_distribution": {},
         "properties_count": 0, "data_flow_count": 0, "assertions_count": 0, "closure_count": 0,
         "project_meta_present": False,
+        "graph_bases_label": "[graph bases]",
+        "graph_bases": {},
     }
     try:
         from groundtruth.runtime import proof as _proof
@@ -143,6 +150,8 @@ def build_graph_certificate(graph_db: str, source_root: str = "", lsp_cert=None,
                    "GROUP BY resolution_method")
             cert["trust_tier_distribution"] = _dist(
                 c, "SELECT trust_tier, count(*) FROM edges GROUP BY trust_tier")
+            gb = graph_bases_contract(c)
+            cert["graph_bases"] = gb
             cert["properties_count"] = _scalar(c, "SELECT count(*) FROM properties")
             cert["data_flow_count"] = _scalar(
                 c, "SELECT count(*) FROM properties WHERE kind='data_flow'")
@@ -171,7 +180,7 @@ def classify_graph(cert, *, proof_mode: bool = False):
     PASS: GRAPH_VALID.
     FAIL: GRAPH_FAIL_EMPTY, GRAPH_FAIL_FTS5, GRAPH_FAIL_BUILT_ON_HOST,
           GRAPH_FAIL_MISSING_HANDOFF, GRAPH_FAIL_HANDOFF_INACTIVE, GRAPH_FAIL_STALE_CLOSURE,
-          GRAPH_FAIL_HASH_MISMATCH, GRAPH_FAIL_HOOK_MISMATCH.
+          GRAPH_FAIL_HASH_MISMATCH, GRAPH_FAIL_HOOK_MISMATCH, GRAPH_FAIL_BASES_INCOMPLETE.
     """
     if not cert:
         return ("GRAPH_FAIL_EMPTY", False)
@@ -180,6 +189,15 @@ def classify_graph(cert, *, proof_mode: bool = False):
     if (not cert.get("fts5_exists") or cert.get("fts5_row_count", 0) <= 0
             or not cert.get("fts5_match_probe_ok")):
         return ("GRAPH_FAIL_FTS5", False)
+    gb = cert.get("graph_bases") or {}
+    if not gb:
+        return ("GRAPH_FAIL_BASES_INCOMPLETE", False)
+    if gb.get("foreign_key_violations", 0) != 0:
+        return ("GRAPH_FAIL_BASES_INCOMPLETE", False)
+    if gb.get("duplicate_names") or gb.get("evaluable_missing") or gb.get("required_missing"):
+        return ("GRAPH_FAIL_BASES_INCOMPLETE", False)
+    if gb.get("base_evaluable_pct", 0) < 100.0:
+        return ("GRAPH_FAIL_BASES_INCOMPLETE", False)
     if proof_mode and cert.get("built_inside_container") is False:
         return ("GRAPH_FAIL_BUILT_ON_HOST", False)
     if proof_mode and not cert.get("host_resolved_graph_db"):
@@ -241,11 +259,15 @@ def main():
         print(f"WARN: could not write graph certificate to {a.out}: {e}")
     _hash_match = (cert.get("graph_hash") == cert.get("graph_hash_after_lsp")
                    if cert.get("graph_hash_after_lsp") else "n/a")
+    _gb = cert.get("graph_bases", {})
     print(f"[GRAPH CERTIFICATE] {verdict} {'PASS' if ok else 'FAIL'} "
           f"fts5(exists={cert.get('fts5_exists')},rows={cert.get('fts5_row_count')},"
           f"match={cert.get('fts5_match_probe_ok')}) edges={cert.get('edges_count')} "
           f"calls={cert.get('calls_edges_count')} det={cert.get('deterministic_edge_count')} "
           f"name_match={cert.get('name_match_edge_count')} "
+          f"graph_bases={_gb.get('base_evaluable_count', 0)}/{_gb.get('base_total_count', 0)} "
+          f"depth_present={_gb.get('depth_present_count', 0)}/{_gb.get('depth_total_count', 0)} "
+          f"fk={_gb.get('foreign_key_violations', 'n/a')} "
           f"closure_after_lsp={cert.get('closure_rebuilt_after_lsp')} hash_match_lsp={_hash_match}")
     return 0 if ok else 1
 

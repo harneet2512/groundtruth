@@ -33,6 +33,13 @@ type Node struct {
 	ParentID      int64
 }
 
+func nullableParentID(parentID int64) any {
+	if parentID <= 0 {
+		return nil
+	}
+	return parentID
+}
+
 // Edge represents a relationship between nodes.
 type Edge struct {
 	ID                 int64
@@ -118,7 +125,7 @@ func (d *DB) ValidateForeignKeys() error {
 		violations++
 	}
 	if violations > 0 {
-		log.Printf("WARNING: %d foreign key violations found in graph.db", violations)
+		return fmt.Errorf("%d foreign key violations found in graph.db", violations)
 	}
 	return nil
 }
@@ -339,7 +346,7 @@ func (d *DB) InsertNode(n *Node) (int64, error) {
 		 signature, return_type, is_exported, is_test, language, parent_id)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		n.Label, n.Name, n.QualifiedName, n.FilePath, n.StartLine, n.EndLine,
-		n.Signature, n.ReturnType, n.IsExported, n.IsTest, n.Language, n.ParentID,
+		n.Signature, n.ReturnType, n.IsExported, n.IsTest, n.Language, nullableParentID(n.ParentID),
 	)
 	if err != nil {
 		return 0, err
@@ -418,7 +425,7 @@ func (d *DB) BatchInsertNodes(nodes []*Node) ([]int64, error) {
 	for i, n := range nodes {
 		res, err := stmt.Exec(
 			n.Label, n.Name, n.QualifiedName, n.FilePath, n.StartLine, n.EndLine,
-			n.Signature, n.ReturnType, n.IsExported, n.IsTest, n.Language, n.ParentID,
+			n.Signature, n.ReturnType, n.IsExported, n.IsTest, n.Language, nullableParentID(n.ParentID),
 		)
 		if err != nil {
 			tx.Rollback()
@@ -570,7 +577,7 @@ func (d *DB) LookupNodeByName(name string) []int64 {
 
 // UpdateParentID sets the parent_id for a node after batch insert.
 func (d *DB) UpdateParentID(nodeID, parentID int64) {
-	d.db.Exec("UPDATE nodes SET parent_id = ? WHERE id = ?", parentID, nodeID)
+	d.db.Exec("UPDATE nodes SET parent_id = ? WHERE id = ?", nullableParentID(parentID), nodeID)
 }
 
 // NodeCount returns total number of nodes.
