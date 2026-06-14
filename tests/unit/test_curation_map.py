@@ -678,3 +678,177 @@ def test_item59_second_hop_overfetch_survives_heavy_exclude():
         assert all(e.hops == 2 for e in hop2)
     finally:
         os.unlink(path)
+
+
+# ---------------------------------------------------------------------------
+# DEPTH trickle-down (gt_new §6 / Appendix H): the promoted READS/WRITES/
+# DATA_FLOW relationships + dataflow= annotations feed the <gt-graph-map>
+# SCOPE surface around the focus function. Correct-or-quiet + rank-safe (I2).
+# ---------------------------------------------------------------------------
+def _make_db_depth(path: str) -> sqlite3.Connection:
+    """Full schema PLUS the edges.metadata column (the dataflow= annotation
+    channel). Caller inserts focus method, owning Class, and callees."""
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE nodes (id INTEGER PRIMARY KEY, name TEXT, file_path TEXT, "
+        "label TEXT, is_test INTEGER DEFAULT 0)"
+    )
+    conn.execute(
+        "CREATE TABLE edges (id INTEGER PRIMARY KEY, source_id INT, target_id INT, "
+        "type TEXT, source_line INT, source_file TEXT, resolution_method TEXT, "
+        "confidence REAL, metadata TEXT)"
+    )
+    return conn
+
+
+def test_depth_rels_render_reads_writes_dataflow():
+    """READS/WRITES (Method->Class, 0.6/0.9) + DATA_FLOW (def-site->callee) of
+    the focus function render as agent-facing reads/writes/data-flows-to lines."""
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    conn = _make_db_depth(path)
+    conn.execute("INSERT INTO nodes VALUES (1,'register','src/ws.py','Method',0)")
+    conn.execute("INSERT INTO nodes VALUES (2,'Metrics','src/ws.py','Class',0)")
+    conn.execute("INSERT INTO nodes VALUES (3,'flush','src/sink.py','Function',0)")
+    conn.execute(
+        "INSERT INTO edges (id,source_id,target_id,type,resolution_method,confidence,metadata)"
+        " VALUES (1,1,2,'READS','promote_field_read',0.6,NULL)"
+    )
+    conn.execute(
+        "INSERT INTO edges (id,source_id,target_id,type,resolution_method,confidence,metadata)"
+        " VALUES (2,1,2,'WRITES','promote_write',0.9,NULL)"
+    )
+    conn.execute(
+        "INSERT INTO edges (id,source_id,target_id,type,resolution_method,confidence,metadata)"
+        " VALUES (3,1,3,'DATA_FLOW','promote_dataflow_callee',0.6,NULL)"
+    )
+    conn.commit()
+    conn.close()
+    try:
+        maps = cm.build_function_map(path, [("src/ws.py", "register")])
+        assert len(maps) == 1
+        fm = maps[0]
+        assert {d.kind for d in fm.depth_rels} == {"READS", "WRITES", "DATA_FLOW"}
+        assert fm.has_visible is True  # depth alone makes the function visible
+        rendered = cm.render_map(maps)
+        assert "reads: Metrics (src/ws.py)" in rendered
+        assert "writes: Metrics (src/ws.py)" in rendered
+        assert "data flows to: flush (src/sink.py)" in rendered
+        assert "(unverified)" not in rendered  # depth facts render bare
+    finally:
+        os.unlink(path)
+
+
+def test_depth_subfloor_dataflow_is_suppressed():
+    """A >5-candidate DATA_FLOW at conf 0.4 is below the floor -> SUPPRESSED
+    (correct-or-quiet), exactly like a sub-floor name_match."""
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    conn = _make_db_depth(path)
+    conn.execute("INSERT INTO nodes VALUES (1,'f','src/a.py','Function',0)")
+    conn.execute("INSERT INTO nodes VALUES (4,'ambiguous','src/b.py','Function',0)")
+    conn.execute(
+        "INSERT INTO edges (id,source_id,target_id,type,resolution_method,confidence,metadata)"
+        " VALUES (1,1,4,'DATA_FLOW','promote_dataflow_callee',0.4,NULL)"
+    )
+    conn.commit()
+    conn.close()
+    try:
+        maps = cm.build_function_map(path, [("src/a.py", "f")])
+        assert maps[0].depth_rels == []  # sub-floor depth fact dropped
+        assert cm.render_map(maps) == ""  # nothing else visible -> honest abstain
+    finally:
+        os.unlink(path)
+
+
+def test_depth_dataflow_annotation_on_calls_edge_surfaces():
+    """The bulk data-flow channel: a `dataflow=<callee>` annotation on an
+    existing CALLS edge surfaces the callee on the 'data flows to' line."""
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    conn = _make_db_depth(path)
+    conn.execute("INSERT INTO nodes VALUES (1,'f','src/a.py','Function',0)")
+    conn.execute("INSERT INTO nodes VALUES (3,'sink','src/c.py','Function',0)")
+    conn.execute(
+        "INSERT INTO edges (id,source_id,target_id,type,resolution_method,confidence,metadata)"
+        " VALUES (1,1,3,'CALLS','import',1.0,'dataflow=sink')"
+    )
+    conn.commit()
+    conn.close()
+    try:
+        maps = cm.build_function_map(path, [("src/a.py", "f")])
+        df = [d for d in maps[0].depth_rels if d.kind == "DATA_FLOW"]
+        assert any(d.target == "sink" for d in df)
+        assert "data flows to: sink (src/c.py)" in cm.render_map(maps)
+    finally:
+        os.unlink(path)
+
+
+def test_depth_never_a_witness_on_legacy_schema():
+    """On a DB without resolution_method we cannot prove provenance -> emit NO
+    depth rels (correct-or-quiet: never launder an un-provenanced edge)."""
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE nodes (id INTEGER PRIMARY KEY, name TEXT, file_path TEXT, "
+        "label TEXT, is_test INTEGER DEFAULT 0)"
+    )
+    conn.execute(
+        "CREATE TABLE edges (id INTEGER PRIMARY KEY, source_id INT, target_id INT, "
+        "type TEXT, confidence REAL)"
+    )
+    conn.execute("INSERT INTO nodes VALUES (1,'f','src/a.py','Function',0)")
+    conn.execute("INSERT INTO nodes VALUES (2,'C','src/a.py','Class',0)")
+    conn.execute("INSERT INTO edges VALUES (1,1,2,'READS',0.9)")
+    conn.commit()
+    conn.close()
+    try:
+        maps = cm.build_function_map(path, [("src/a.py", "f")])
+        assert maps[0].depth_rels == []
+    finally:
+        os.unlink(path)
+
+
+def test_depth_excludes_test_targets():
+    """A READS/WRITES/DATA_FLOW target that is a test node is never surfaced."""
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    conn = _make_db_depth(path)
+    conn.execute("INSERT INTO nodes VALUES (1,'f','src/a.py','Function',0)")
+    conn.execute("INSERT INTO nodes VALUES (2,'TestClass','tests/t.py','Class',1)")  # is_test=1
+    conn.execute(
+        "INSERT INTO edges (id,source_id,target_id,type,resolution_method,confidence,metadata)"
+        " VALUES (1,1,2,'READS','promote_field_read',0.9,NULL)"
+    )
+    conn.commit()
+    conn.close()
+    try:
+        maps = cm.build_function_map(path, [("src/a.py", "f")])
+        assert maps[0].depth_rels == []
+    finally:
+        os.unlink(path)
+
+
+def test_depth_rels_never_feed_callers_or_callees_i2():
+    """I2 guard: depth rels live on a SEPARATE field and never leak into the
+    CALLS-scoped callers/callees lists (which feed rank/degree downstream)."""
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    conn = _make_db_depth(path)
+    conn.execute("INSERT INTO nodes VALUES (1,'f','src/a.py','Function',0)")
+    conn.execute("INSERT INTO nodes VALUES (2,'C','src/a.py','Class',0)")
+    conn.execute(
+        "INSERT INTO edges (id,source_id,target_id,type,resolution_method,confidence,metadata)"
+        " VALUES (1,1,2,'WRITES','promote_write',0.9,NULL)"
+    )
+    conn.commit()
+    conn.close()
+    try:
+        maps = cm.build_function_map(path, [("src/a.py", "f")])
+        fm = maps[0]
+        assert fm.callers == []  # the WRITES edge is depth, never a call
+        assert fm.callees == []
+        assert [d.kind for d in fm.depth_rels] == ["WRITES"]
+    finally:
+        os.unlink(path)

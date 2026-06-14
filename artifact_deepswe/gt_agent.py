@@ -896,18 +896,32 @@ def _emit_gt_meta_witness() -> None:
         # GT_GRAPH_DB or GT_HOST_GRAPH_DB without entering proof-mode reject paths.
         ctx = GTRuntimeContext.from_env()
         resolved_db = ctx.graph_db or host_graph
-        prebuilt_active = bool(resolved_db and os.path.exists(resolved_db))
+        # A2 (2026-06-14): a PRESENT-but-0-BYTE handoff must NOT pass as prebuilt-active.
+        # os.path.exists() is True on an empty copy; require a non-empty file so the
+        # empty-but-present handoff is classified as a hard GT_ARTIFACT_MISSING here
+        # (the host mirror of the in-container _guard_handoff_db fail-close) rather than
+        # slipping to the graph_edges_hash_empty branch with a misleading prebuilt=true.
+        try:
+            _db_size = os.path.getsize(resolved_db) if (resolved_db and os.path.exists(resolved_db)) else -1
+        except OSError:
+            _db_size = -1
+        prebuilt_active = _db_size > 0
+        _present_but_empty = bool(resolved_db and os.path.exists(resolved_db) and _db_size <= 0)
 
         if not prebuilt_active:
-            # No substrate graph resolved/present. In proof/substrate mode this is a
-            # GT_ARTIFACT_MISSING fail-closed (the substrate graph MUST be consumable —
-            # never rebuild, never fall back). Outside proof mode it is the legacy
-            # host-fallback path (warn + return).
+            # No CONSUMABLE substrate graph (absent, or PRESENT-but-0-byte). In proof/
+            # substrate mode this is a GT_ARTIFACT_MISSING fail-closed (the substrate graph
+            # MUST be consumable — never rebuild, never fall back). Outside proof mode it is
+            # the legacy host-fallback path (warn + return).
+            _why = (f"present_but_empty (0-byte handoff copy at {resolved_db!r}; the REAL "
+                    f"graph lives at <task>/graph.db — the copy was assembled empty)"
+                    if _present_but_empty else
+                    "substrate graph is absent and rebuild/fallback is forbidden")
             if proof or _substrate_active():
                 _fail(
                     f"no_resolved_substrate_graph graph_db={resolved_db or '(unset)'} "
-                    f"cert_dir={cert_dir or '(unset)'} (GT_ARTIFACT_MISSING — the "
-                    f"substrate graph is absent and rebuild/fallback is forbidden)",
+                    f"db_size={_db_size}B cert_dir={cert_dir or '(unset)'} "
+                    f"(GT_ARTIFACT_MISSING — {_why})",
                     prebuilt="false",
                 )
                 return

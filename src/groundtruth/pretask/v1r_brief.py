@@ -31,6 +31,7 @@ from groundtruth.pretask.curation_map import (
 from groundtruth.pretask.v7_4_brief import V74BriefResult, _w_sem_floor, run_v74
 from groundtruth.pretask.contract_map import (
     _callee_sig_args,
+    _sanitize_signature,
     contract_line,
     edit_target_callee_contracts,
 )
@@ -50,6 +51,29 @@ MAX_FILES = 5
 MAX_FUNCTIONS_PER_FILE = 3
 MAX_BRIEF_TOKENS = 600
 EDGE_CONFIDENCE_FLOOR = 0.7
+
+# D1 (CLAUDE.md Core Product Contract: "compact, high-precision"): a single body
+# DETAIL line (Contract / Spec / Callers / Calls / Chain / function list) must
+# never blow the whole token budget. The store caps a raw signature at 1000 chars
+# and a scope-chain "Chain:" body can run to several thousand — a per-line cap is
+# the structural enforcement that the file-dropping cap loop cannot provide (it
+# only drops WHOLE files and stops at len==1). ~320 chars ≈ 80 tokens keeps a
+# multi-clause contract readable while making 5 entries × ~6 lines fit the 600-tok
+# rail. Language-agnostic (operates on rendered text, not syntax); the leading
+# "   Label: " stays intact, only the trailing detail is elided with "…".
+_MAX_BODY_LINE_CHARS = 320
+
+
+def _clip_body_line(line: str, limit: int = _MAX_BODY_LINE_CHARS) -> str:
+    """Cap a single rendered body line to ``limit`` chars, preserving its
+    leading indent + "Label:" prefix and eliding the trailing detail with "…".
+
+    Correct-or-quiet: this only ELIDES already-rendered detail (never invents),
+    and a line already within budget is returned byte-identical. Rank-neutral:
+    it touches presentation only, never which files/functions are selected."""
+    if len(line) <= limit:
+        return line
+    return line[: limit - 1].rstrip() + "…"
 
 _schema_cache: dict[str, bool] = {}
 
@@ -258,7 +282,16 @@ def _top_functions(graph_db: str, file_path: str, limit: int = MAX_FUNCTIONS_PER
         out: list[str] = []
         seen: set[str] = set()
         for row in rows:
-            title = row[1] if row[1] else row[0]
+            # D2 (gt_new App D, CLAUDE.md "compact, high-precision"): a SIGNATURE
+            # contract is the typed param list + return — never prose. Strip any
+            # inline docstring (Annotated[T, Doc("""…""")] / Field(description=…),
+            # Javadoc, Rust doc-comment) and cap length via sanitize_signature
+            # BEFORE this title becomes the brief's "(funcs)" line. Without it the
+            # raw n.signature (capped at 1000 chars by the store) renders a
+            # multi-hundred-char docstring wall as entry #1 (FastAPI jsonable_encoder
+            # = 1223 chars). General for ANY prose-in-signature codebase, not FastAPI;
+            # a short normal signature passes through unchanged.
+            title = _sanitize_signature(row[1]) if row[1] else row[0]
             if title in seen:
                 continue
             seen.add(title)
@@ -1389,17 +1422,28 @@ def _entry_confidence_tier(entry: FileEntry, issue_text: str = "") -> str:
     return "[INFO]"
 
 
-def _with_graph_map(brief: str, files: list[FileEntry], graph_db: str) -> str:
-    """Append the deterministic 1-hop curation map as a sibling <gt-graph-map>
+def _with_graph_map(
+    brief: str,
+    files: list[FileEntry],
+    graph_db: str,
+    body_line_cap: int = _MAX_BODY_LINE_CHARS,
+) -> str:
+    """Surface the deterministic 1-hop curation map as a LEADING <gt-graph-map>
     block — callers/callees of the top shown files' focus functions.
 
     Returns ``brief`` unchanged when graph_db is unset, when no shown file has a
     focus function, or when no connection clears the correct-or-quiet bar
     (render_map returns '' — honest abstention, never a guess). The map obeys the
     SAME categorical rule as the caller gate: a deterministic edge renders as a
-    fact; a name_match edge renders only ever as ``(unverified)``. This is the
-    graph MAP the agent's own grep loop cannot cheaply build, so it orients in
-    fewer turns and keeps budget for the fix.
+    fact; a name_match edge renders only ever as ``(unverified)``.
+
+    D3 (CLAUDE.md "the brief's value is the graph map, not the file ranking";
+    Lost-in-the-Middle TACL 2024 — primacy beats burial): this who-calls-whom map
+    is the UNIQUE value the agent's own grep loop cannot cheaply rebuild, so it is
+    placed FIRST (immediately after the <gt-task-brief> open tag), not appended at
+    ~96% position behind the evidence wall. The map's own body lines are capped the
+    same way the evidence bodies are (the "called by:" fan-in line can run long).
+    Falls back to a trailing append only when the open tag is absent.
     """
     if not graph_db or not files:
         return brief
@@ -1418,7 +1462,23 @@ def _with_graph_map(brief: str, files: list[FileEntry], graph_db: str) -> str:
         return brief
     if not block:
         return brief
-    return f"{brief}\n{block}"
+    # Cap each map body line (the "  calls:" / "  called by:" fan-in lines) so the
+    # leading map stays compact; the "<gt-graph-map>"/header/"</gt-graph-map>"
+    # structural lines pass through unchanged (already short).
+    block = "\n".join(
+        _clip_body_line(ln, body_line_cap) if ln.startswith("  ") else ln
+        for ln in block.split("\n")
+    )
+    # Place the map FIRST: inject right after the opening <gt-task-brief> tag so the
+    # actionable who-calls-whom map leads the brief the agent reads. Idempotent +
+    # correct-or-quiet: a brief without the open tag (empty-files edge case) falls
+    # back to the historical trailing append.
+    _open = "<gt-task-brief>"
+    idx = brief.find(_open)
+    if idx == -1:
+        return f"{brief}\n{block}"
+    insert_at = idx + len(_open)
+    return brief[:insert_at] + "\n" + block + brief[insert_at:]
 
 
 _MAX_EDIT_TARGET_CONTRACT_LINES = 5
@@ -1467,9 +1527,17 @@ def render_brief(
     issue_text: str = "",
     graph_db: str = "",
     emit_confident_line: bool = True,
+    body_line_cap: int = _MAX_BODY_LINE_CHARS,
 ) -> str:
     if not files:
         return "<gt-task-brief>\n</gt-task-brief>"
+    # D1: per-body-line char cap. The budget-enforcement loop in
+    # generate_v1r_brief tightens this (not the file LIST) when the brief is over
+    # the token rail — trimming DETAIL, never which files the agent is told to
+    # consider (BRIEFING.md §3). Local closure so every body-line append below
+    # honors the effective cap for this render.
+    def _cap(line: str) -> str:
+        return _clip_body_line(line, body_line_cap)
 
     # Confidence-gated framing: if top candidate clearly ahead, directive.
     # If scores are flat, exploratory. Based on score separation of #1 vs #2.
@@ -1515,18 +1583,21 @@ def render_brief(
         line = f"{i}. {f.path}"
         if funcs:
             line += f" ({funcs})"
-        lines.append(line)
+        # D1: cap the file-list line so a long (multi-signature) function list
+        # cannot dominate the budget. Signatures are already docstring-stripped
+        # (D2 sanitize_signature); this guards the concatenation length.
+        lines.append(_cap(line))
         # WITNESS first (primacy): the structural REASON this file is here — the
         # graph edge from an issue-anchored symbol (graph_localizer). This is the
         # localization fact the agent's grep loop cannot cheaply reconstruct
         # (e.g. "set_fields calls set_parse [CALLS]"). Rendered only when present;
         # a name_match witness carries its own "(unverified)" tag from the localizer.
         if getattr(f, "witness", ""):
-            lines.append(f"   Witness: {f.witness}")
+            lines.append(_cap(f"   Witness: {f.witness}"))
         # CONTRACT pillar first (primacy, Lost-in-the-Middle NeurIPS 2024): the
         # interface facts the agent must preserve — raises / guards / return shape.
         if f.contract_props:
-            lines.append(f"   Contract: {f.contract_props}")
+            lines.append(_cap(f"   Contract: {f.contract_props}"))
         if f.spec and issue_text:
             # Relevance gate: spec must overlap with issue terms to avoid red herrings
             _spec_lower = f.spec.lower()
@@ -1563,21 +1634,21 @@ def render_brief(
                 any(fn.lower() in _spec_lower for fn in f.functions) if f.functions else False
             )
             if _spec_overlap or _func_overlap:
-                lines.append(f"   Spec: {f.spec}")
+                lines.append(_cap(f"   Spec: {f.spec}"))
         elif f.spec and not issue_text:
-            lines.append(f"   Spec: {f.spec}")
+            lines.append(_cap(f"   Spec: {f.spec}"))
         if f.contract:
-            lines.append(f"   Callers: {f.contract}")
+            lines.append(_cap(f"   Callers: {f.contract}"))
         if f.pattern:
-            lines.append(f"   Context: {f.pattern}")
+            lines.append(_cap(f"   Context: {f.pattern}"))
         if f.co_changes:
             # SWAP-INVARIANT (run16 leak): drop test files from the co-change list — "Also changes:
             # …/test_plots_matplotlib.py" surfaces a test reference. Non-test co-changes are kept.
             _cc = [c for c in f.co_changes if not _is_test_path(c)]
             if _cc:
-                lines.append(f"   Also changes: {', '.join(_cc)}")
+                lines.append(_cap(f"   Also changes: {', '.join(_cc)}"))
         if f.callees:
-            lines.append(f"   Calls: {', '.join(f.callees)}")
+            lines.append(_cap(f"   Calls: {', '.join(f.callees)}"))
         # DISABLED (swap-invariant — run15 leak): never surface test FILE names to the agent.
         # if f.test_mappings:
         #     lines.append(f"   Tests: {', '.join(f.test_mappings)}")
@@ -1689,7 +1760,9 @@ def render_brief(
         _etc_lines = _edit_target_contracts_block(graph_db, files[0])
         if _etc_lines:
             lines.append("")
-            lines.extend(_etc_lines)
+            # D1: cap each EDIT-TARGET CONTRACTS callee line — a long Go/Rust typed
+            # header (no docstring, just many params) can run to ~250 chars.
+            lines.extend(_cap(_l) for _l in _etc_lines)
 
     # Cross-file scope hint (Signal 1)
     # 2026-06-10 fact-filter (DELIVERY only — scope computation untouched):
@@ -1714,18 +1787,22 @@ def render_brief(
             chain_conf = getattr(chain, "confidence", 0.0)
             if len(chain_files) >= 2 and chain_conf >= 0.5:
                 chain_basenames = [os.path.basename(f) for f in chain_files]
+                # D1: cap the basename chain (many "→"-joined files run long). The
+                # leading "\n" is preserved so the blank-line separator survives.
                 lines.append(
-                    f"\nScope chain (graph-connected, check ALL): "
-                    f"{' → '.join(chain_basenames)}"
+                    "\n" + _cap(
+                        "Scope chain (graph-connected, check ALL): "
+                        f"{' → '.join(chain_basenames)}"
+                    )
                 )
                 if chain_desc:
-                    lines.append(f"   Chain: {chain_desc}")
+                    lines.append(_cap(f"   Chain: {chain_desc}"))
 
     # Directive ending: gated on both score gap AND top tier being [VERIFIED].
     # Internal gating only — no tier displayed in directive line.
     if not files:
         lines.append("</gt-task-brief>")
-        return _with_graph_map("\n".join(lines), files, graph_db)
+        return _with_graph_map("\n".join(lines), files, graph_db, body_line_cap)
     top = files[0]
     # Task #45 (P0 HARM): naming a SINGLE highest-confidence candidate is only safe
     # when the rank is NOT a pure name_match/lexical guess. On beets ev1 the top
@@ -1788,7 +1865,7 @@ def render_brief(
                 "the edit target."
             )
     lines.append("</gt-task-brief>")
-    return _with_graph_map("\n".join(lines), files, graph_db)
+    return _with_graph_map("\n".join(lines), files, graph_db, body_line_cap)
 
 
 def _common_region(paths: list[str]) -> str:
@@ -3364,7 +3441,7 @@ def generate_v1r_brief(
     # L1-SCOPE, so entries[0] is already the header's primary — do NOT recompute here.
     _emit_old = _loc_header == ""
 
-    def _render():
+    def _render(body_line_cap: int = _MAX_BODY_LINE_CHARS):
         return render_brief(
             entries,
             scores=_scores,
@@ -3374,9 +3451,11 @@ def generate_v1r_brief(
             issue_text=issue_text,
             graph_db=graph_db,
             emit_confident_line=_emit_old,
+            body_line_cap=body_line_cap,
         )
 
-    brief_text = _render()
+    _body_cap = _MAX_BODY_LINE_CHARS
+    brief_text = _render(_body_cap)
     tok = _estimate_tokens((_loc_header + "\n" + brief_text) if _loc_header else brief_text)
 
     # Decouple localization BREADTH from the evidence token budget. The delivered
@@ -3392,7 +3471,25 @@ def generate_v1r_brief(
     while tok > max_brief_tokens and len(entries) > 1:
         entries = entries[:-1]
         _scores = _scores[: len(entries)]
-        brief_text = _render()
+        brief_text = _render(_body_cap)
+        tok = _estimate_tokens((_loc_header + "\n" + brief_text) if _loc_header else brief_text)
+
+    # D1 — ENFORCE the budget by trimming DETAIL, not the file LIST. The loop above
+    # can bottom out at len(entries)==1 while still over budget when a single
+    # entry's evidence bodies (a multi-clause Contract, a long Callers/Chain line,
+    # the leading graph-map fan-in) sum past the rail. Per CLAUDE.md ("compact,
+    # high-precision"; treat token bloat without outcome gain as a regression) and
+    # BRIEFING.md §3 (token budget trims DETAIL, never which files the agent is
+    # told to consider), progressively tighten the per-body-line cap on the SAME
+    # rendered entries until under budget. This counts the FULL brief_text — which
+    # already includes the (now-leading) <gt-graph-map> via _with_graph_map — so the
+    # graph-map's bytes are inside the rail too. Floored at a readable minimum;
+    # rank-neutral (.files / candidate order untouched). Idempotent: a brief already
+    # under budget never enters this loop and is byte-identical to before.
+    _BODY_CAP_FLOOR = 80
+    while tok > max_brief_tokens and _body_cap > _BODY_CAP_FLOOR:
+        _body_cap = max(_BODY_CAP_FLOOR, _body_cap - 60)
+        brief_text = _render(_body_cap)
         tok = _estimate_tokens((_loc_header + "\n" + brief_text) if _loc_header else brief_text)
 
     if _loc_header:

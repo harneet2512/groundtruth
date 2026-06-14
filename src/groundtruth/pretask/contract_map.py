@@ -134,35 +134,86 @@ _HOVER_KIND_RE = re.compile(
     r"^\((?:method|function|property|variable|class|parameter|field|constant|module|overload)\)\s*"
 )
 
+# Max chars for a rendered signature in the brief. A SIGNATURE contract is the typed
+# param list + return — never prose. ~200 chars holds a wide multi-arg typed header;
+# anything longer is a docstring/annotation body the compact rule (gt_new App D,
+# CLAUDE.md Core Product Contract "compact, high-precision") wants stripped.
+_MAX_RENDERED_SIG = 200
+
+# Triple-quoted docstrings embedded in a signature: ``Annotated[T, Doc("""..."""])``
+# (FastAPI/pydantic Doc()/Field(description=)), or any inline ``"""..."""`` /
+# ``'''...'''`` prose the parser captured verbatim. Non-greedy, DOTALL so it spans the
+# (whitespace-flattened) multi-line body. Both quote styles; the store caps signatures
+# at 1000 chars so the closing delimiter is often missing — a second open-ended pass
+# collapses a truncated/unterminated opener.
+_TRIPLE_DOC_RE = re.compile(r'("""|\'\'\')(?:(?!\1).)*?\1', re.DOTALL)
+_TRIPLE_DOC_OPEN_RE = re.compile(r'("""|\'\'\').*$', re.DOTALL)
+
+
+def _strip_signature_prose(sig: str) -> str:
+    """Collapse embedded docstrings out of a signature and cap its length.
+
+    Language-agnostic, render-time (no reindex). A *signature* contract is the typed
+    params + return type — NOT the ``Annotated[T, Doc(\"\"\"...long prose...\"\"\")]``
+    docstrings FastAPI/pydantic attach to each param (~1 KB each for
+    ``post``/``put``/``include_router``), Javadoc, or Rust doc-comments the parser
+    captured verbatim. This:
+
+    1. Replaces every triple-quoted ``\"\"\"...\"\"\"`` / ``'''...'''`` body inside the
+       signature with ``...`` — so ``Doc(\"\"\"long\"\"\")`` collapses to ``Doc(...)``
+       (the typed ``Annotated[str, Doc(...)]`` survives; the prose does not).
+    2. Drops a trailing *unterminated* triple-quote (the store truncates at 1000 chars,
+       so the closing delimiter is frequently absent).
+    3. Flattens whitespace runs (the parser preserved newlines/indentation).
+    4. Caps the result at ``_MAX_RENDERED_SIG`` chars with a trailing ``…``.
+
+    Short, normal signatures (``def openapi(self) -> dict[str, Any]:``) pass through
+    UNCHANGED (the fast path returns before any sub). General: any ``Annotated``+``Doc``/
+    ``Field`` codebase or long-docstring-in-signature, any language with triple-quoted
+    prose — not FastAPI-keyed.
+    """
+    if not sig:
+        return sig
+    # Fast path: a normal short signature with no embedded prose is byte-identical.
+    if '"""' not in sig and "'''" not in sig and len(sig) <= _MAX_RENDERED_SIG:
+        return sig
+    out = _TRIPLE_DOC_RE.sub("...", sig)
+    out = _TRIPLE_DOC_OPEN_RE.sub("...", out)
+    out = re.sub(r"\s+", " ", out).strip()
+    if len(out) > _MAX_RENDERED_SIG:
+        out = out[: _MAX_RENDERED_SIG - 1].rstrip() + "…"
+    return out
+
 
 def _sanitize_signature(sig: str) -> str:
-    """Strip leaked LSP/Pyright hover markdown from a stored signature.
+    """Strip leaked LSP/Pyright hover markdown AND embedded docstring prose, then cap.
 
     Reduces ```python\\n(method) def wait(self, ...) -> None\\n``` to ``def wait(self,
-    ...) -> None``. No-op on already-clean ``def ...`` / ``name(...)`` signatures
-    (fast path). Correct-or-quiet: a structurally-balanced-but-wrong fence is exactly
-    the "plausible-but-wrong context" that drops agent accuracy 6-11pp (The Distracting
-    Effect, arXiv:2505.06914, 2025) — so it is removed, not rendered. Language-agnostic
-    (operates on fences/markers, not Python AST).
+    ...) -> None``, and collapses ``Annotated[str, Doc(\"\"\"...prose...\"\"\")]`` to
+    ``Annotated[str, Doc(...)]`` capped at ``_MAX_RENDERED_SIG`` chars. No-op on
+    already-clean short ``def ...`` / ``name(...)`` signatures (fast path).
+    Correct-or-quiet: a structurally-balanced-but-wrong fence / a multi-KB docstring is
+    exactly the "plausible-but-wrong / distracting context" that drops agent accuracy
+    6-11pp (The Distracting Effect, arXiv:2505.06914, 2025) — removed, not rendered.
+    Language-agnostic (operates on fences/markers/quotes, not Python AST).
     """
     if not sig:
         return sig
     s = sig.strip()
-    if "```" not in s and not s.startswith("("):
-        return s  # already clean — no hover markdown
-    s = s.replace("```python", " ").replace("```", " ")
-    cleaned: list[str] = []
-    for ln in s.splitlines():
-        ln = _HOVER_KIND_RE.sub("", ln.strip()).strip()
-        if ln:
-            cleaned.append(ln)
-    if not cleaned:
-        return ""
-    # Prefer the first line that looks like a signature (has an arg list).
-    for ln in cleaned:
-        if "(" in ln:
-            return ln
-    return cleaned[0]
+    if "```" in s or s.startswith("("):
+        s = s.replace("```python", " ").replace("```", " ")
+        cleaned: list[str] = []
+        for ln in s.splitlines():
+            ln = _HOVER_KIND_RE.sub("", ln.strip()).strip()
+            if ln:
+                cleaned.append(ln)
+        if not cleaned:
+            return ""
+        # Prefer the first line that looks like a signature (has an arg list).
+        s = next((ln for ln in cleaned if "(" in ln), cleaned[0])
+    # Strip embedded docstring prose + cap length (D2). Fast-path no-op on a short,
+    # prose-free signature, so existing clean signatures stay byte-identical.
+    return _strip_signature_prose(s)
 
 
 def _node_meta(conn: sqlite3.Connection, node_ids: list[int]) -> tuple[str, str]:

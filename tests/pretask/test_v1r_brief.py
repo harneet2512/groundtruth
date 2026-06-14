@@ -818,3 +818,121 @@ def test_callee_witness_code_matches_definition_line(tmp_path: Path):
     # the snippet MUST be the callee DEFINITION line, not the call-site 'return helper(1)'
     assert "def helper" in w["code"], f"code should be the def line, got {w['code']!r}"
     assert "return helper(1)" not in w["code"]
+
+
+# --- CLUSTER D regression: compact, budget-enforced, graph-map-leading brief ---
+# The delivered brief was 10,880 chars / ~2720 tok (4x its 600-tok budget): a raw
+# FastAPI docstring signature wall as entry #1 (D2), a token-cap loop that only
+# dropped WHOLE files and never trimmed a body (D1), and the unique <gt-graph-map>
+# buried at 96% behind that wall (D3). These lock the fix. Deterministic — no
+# embedder, no live graph (render_brief on synthetic FileEntry).
+from groundtruth.pretask.v1r_brief import (  # noqa: E402
+    _clip_body_line,
+    _MAX_BODY_LINE_CHARS,
+    generate_v1r_brief as _gen_brief,
+)
+from groundtruth.pretask.contract_map import (  # noqa: E402
+    _sanitize_signature,
+    _MAX_RENDERED_SIG,
+)
+
+
+def test_d2_sanitize_strips_inline_docstring_prose_general():
+    """D2: a signature with embedded triple-quoted prose (FastAPI Doc / pydantic
+    Field(description=) / Javadoc / Rust doc-comment captured verbatim) collapses to
+    the typed shape, capped at _MAX_RENDERED_SIG — while a short normal signature
+    (any language) passes through BYTE-IDENTICAL."""
+    fastapi = ('def jsonable_encoder( obj: Annotated[ Any, Doc("""'
+               + "x" * 800 + '""") ] = None, exclude: int = 0)')
+    out = _sanitize_signature(fastapi)
+    assert '"""' not in out and "Doc(...)" in out
+    assert len(out) <= _MAX_RENDERED_SIG
+    # Generality (not FastAPI-keyed): a pydantic Field(description=...) prose dump.
+    pyd = 'def f(x: str = Field(description="""' + "y" * 400 + '"""))'
+    assert '"""' not in _sanitize_signature(pyd)
+    # A truncated/unterminated docstring (store caps signatures at 1000 chars).
+    trunc = 'def g( a: Annotated[str, Doc("""unterminated body cut at 1000'
+    assert '"""' not in _sanitize_signature(trunc)
+    # Short, normal signatures (3 languages) are unchanged.
+    for short in (
+        "def openapi(self) -> dict[str, Any]:",
+        "func (s *Store) Get(key string) (Entry, bool)",
+        "pub fn evict(&mut self, key: &str) -> Option<Entry>",
+    ):
+        assert _sanitize_signature(short) == short
+
+
+def test_d1_clip_body_line_caps_and_is_noop_when_short():
+    """D1: a single body DETAIL line is capped (a multi-thousand-char Chain/Contract
+    line can no longer blow the budget), and a short line is returned unchanged."""
+    short = "   Contract: returns Optional[User]"
+    assert _clip_body_line(short) == short
+    long = "   Chain: " + "a -> b; " * 600
+    clipped = _clip_body_line(long)
+    assert len(clipped) <= _MAX_BODY_LINE_CHARS
+    assert clipped.startswith("   Chain: ") and clipped.endswith("…")
+
+
+def test_d2_top_functions_line_has_no_docstring_wall():
+    """D2 end-to-end: render_brief's '(funcs)' line carries the SANITIZED signature,
+    so a stored FastAPI-style docstring signature never renders as a wall."""
+    fe = FileEntry(
+        path="fastapi/encoders.py",
+        score=1.0,
+        functions=[_sanitize_signature(
+            'def jsonable_encoder(obj: Annotated[Any, Doc("""' + "p" * 900 + '""")])'
+        )],
+    )
+    brief = render_brief([fe], issue_text="fix jsonable_encoder serialization")
+    fl = [ln for ln in brief.split("\n") if ln.startswith("1. ")]
+    assert fl, brief
+    assert '"""' not in fl[0]
+    assert max(len(ln) for ln in brief.split("\n")) <= 400
+
+
+def test_d1_d3_budget_enforced_and_graph_map_leads(tmp_path):
+    """D1+D3 end-to-end on a real (synthetic) graph: the delivered brief stays under
+    the token budget (the cap loop trims body DETAIL, not the file LIST) AND the
+    <gt-graph-map> leads the <gt-task-brief> body instead of being buried last."""
+    db = str(tmp_path / "g.db")
+    repo = tmp_path / "repo"
+    (repo / "pkg").mkdir(parents=True)
+    src = repo / "pkg" / "svc.py"
+    # A function whose stored signature is a FastAPI-style docstring wall.
+    big_sig = 'def handle(obj: Annotated[Any, Doc("""' + "w" * 950 + '""")])'
+    src.write_text("def handle(obj):\n    return caller_fn(obj)\n", encoding="utf-8")
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """CREATE TABLE nodes (id INTEGER PRIMARY KEY, label TEXT, name TEXT,
+             qualified_name TEXT, file_path TEXT, start_line INTEGER, end_line INTEGER,
+             signature TEXT, return_type TEXT, is_exported INTEGER DEFAULT 0,
+             is_test INTEGER DEFAULT 0, language TEXT DEFAULT 'python', parent_id INTEGER);
+           CREATE TABLE edges (id INTEGER PRIMARY KEY, source_id INTEGER, target_id INTEGER,
+             type TEXT, source_line INTEGER, source_file TEXT, resolution_method TEXT,
+             confidence REAL DEFAULT 1.0, metadata TEXT);"""
+    )
+    conn.execute(
+        "INSERT INTO nodes (id,label,name,file_path,start_line,end_line,signature) "
+        "VALUES (1,'Function','handle','pkg/svc.py',1,2,?)",
+        (big_sig,),
+    )
+    conn.execute(
+        "INSERT INTO nodes (id,label,name,file_path,start_line,end_line,signature) "
+        "VALUES (2,'Function','caller_fn','pkg/other.py',1,1,'def caller_fn(obj):')"
+    )
+    # caller_fn CALLS handle (deterministic import edge) -> a real graph-map fact.
+    conn.execute(
+        "INSERT INTO edges (source_id,target_id,type,source_line,resolution_method,confidence) "
+        "VALUES (2,1,'CALLS',1,'import',1.0)"
+    )
+    conn.commit(); conn.close()
+
+    res = _gen_brief("fix the handle function serialization bug", str(repo), db, max_files=5)
+    bt = res.brief_text
+    # D1: under budget.
+    assert res.token_estimate <= 600, f"over budget: {res.token_estimate}\n{bt}"
+    # D2: no docstring wall survived into the rendered text.
+    assert '"""' not in bt
+    # D3: when a graph-map renders, it LEADS the brief body (before the file list).
+    if "<gt-graph-map>" in bt:
+        assert bt.find("<gt-graph-map>") < bt.find("\n1. ")

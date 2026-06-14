@@ -107,6 +107,47 @@ _DETERMINISTIC_METHODS: frozenset[str] = DETERMINISTIC_RESOLUTION_METHODS
 _NAME_MATCH_FLOOR = 0.5
 
 # ---------------------------------------------------------------------------
+# DEPTH RELATIONSHIPS on the SCOPE/MAP surface (gt_new.md §6 + Appendix H
+# "trickle-down" — the OWED wiring). The Go promote pass (Pass 4f, promote.go)
+# materializes the relational `properties` strings into TRAVERSABLE edges:
+#   READS  (promote_field_read) Method -> owning Class whose field it reads
+#   WRITES (promote_write)      Method -> owning Class whose field it writes
+#   DATA_FLOW (promote_dataflow_callee) def-site func -> callee data flows to
+# plus `dataflow=<callee>` annotations on the matching CALLS edge metadata.
+#
+# These feed SCOPE / COMPLETENESS (the <gt-graph-map>), NEVER RANK — invariant
+# I2 (gt_new §6 / Appendix C/I): rank/degree stay CALLS-scoped because reach
+# over-promotes hubs on purpose. The depth relationships are rendered as extra
+# lines around the FOCUS function ("reads X, writes Y, data flows to Z") so the
+# agent SEES the data/read/write shape of the edit target without it ever
+# entering _rrf3 / degree / hub-p80. The helpers below run a SEPARATE read on
+# the promoted edges keyed off the focus node ids; no rank query is touched.
+#
+# CORRECT-OR-QUIET: only EDGES the promote pass actually emitted (resolution_method
+# LIKE 'promote_%') and only at/above the confidence floor are shown — a 0.4
+# DATA_FLOW (>5-candidate ambiguity) is suppressed exactly like a sub-floor
+# name_match. The promote pass already enforced non-invention (both endpoints
+# real) and trust tiers, so a rendered depth relationship is a real fact.
+#
+# Research basis: LocAgent (ACL 2025) — semantic dependency edges (not bare
+# containment) are the useful localization signal; surfacing the edit target's
+# data/field relationships is exactly such a dependency view. The Distracting
+# Effect (arXiv:2505.06914, 2025) — render only verified relationships, never a
+# sub-floor guess. RepoGraph (ICLR 2025) — tight, focus-anchored 1-hop context.
+# ---------------------------------------------------------------------------
+# Promoted depth relations rendered on the focus function, with the agent-facing
+# verb each renders as. READS/WRITES point at the OWNING CLASS (the type whose
+# field is read/written); DATA_FLOW points at the CALLEE data flows into.
+_DEPTH_REL_VERBS: dict[str, str] = {
+    "READS": "reads",
+    "WRITES": "writes",
+    "DATA_FLOW": "data flows to",
+}
+# Per-focus cap per relation kind — keep the block tight (RepoGraph 1-hop regime);
+# a write-heavy method touching 30 classes shows the first few, not a dump.
+_DEPTH_REL_MAX_PER_KIND = 4
+
+# ---------------------------------------------------------------------------
 # CROSS-LANGUAGE CALLS-edge disqualifier (2026-06-10, ported VERBATIM from the
 # per-turn mini delivery, artifact_deepswe/gt_mini_patch.py — DeepSWE
 # non-Python audit, run 27290157847, boa ledger [57]: `chainTest() in
@@ -281,6 +322,24 @@ class Edge:
 
 
 @dataclass(frozen=True)
+class DepthRel:
+    """One promoted DEPTH relationship of a focus function (READS/WRITES/DATA_FLOW).
+
+    ``kind`` is the raw promoted edge type; ``verb`` is its agent-facing wording
+    (``reads`` / ``writes`` / ``data flows to``); ``target`` is the owning Class
+    (READS/WRITES) or the callee (DATA_FLOW); ``target_file`` locates it. Every
+    DepthRel is a real promoted edge (resolution_method LIKE 'promote_%', both
+    endpoints resolved, at/above the confidence floor) — a FACT, never a guess.
+    """
+
+    kind: str
+    verb: str
+    target: str
+    target_file: str
+    confidence: float
+
+
+@dataclass(frozen=True)
 class FunctionMap:
     """The 1-hop curation map for a single focus function."""
 
@@ -288,6 +347,10 @@ class FunctionMap:
     function: str
     callers: list[Edge] = field(default_factory=list)  # incoming CALLS
     callees: list[Edge] = field(default_factory=list)  # outgoing CALLS
+    # Promoted DEPTH relationships of the focus function (SCOPE/COMPLETENESS, NOT
+    # rank): what fields/types it reads/writes and where its data flows. Empty on
+    # a graph with no promoted edges, so the map is byte-identical pre-depth.
+    depth_rels: list[DepthRel] = field(default_factory=list)
 
     @property
     def has_fact(self) -> bool:
@@ -295,7 +358,11 @@ class FunctionMap:
 
     @property
     def has_visible(self) -> bool:
-        return any(e.visible for e in self.callers) or any(e.visible for e in self.callees)
+        return (
+            any(e.visible for e in self.callers)
+            or any(e.visible for e in self.callees)
+            or bool(self.depth_rels)
+        )
 
 
 def _open_ro(graph_db_path: str) -> sqlite3.Connection | None:
@@ -557,6 +624,122 @@ def _verified_neighbor_count(
     except sqlite3.Error:
         return 0
     return int(row[0]) if row and row[0] is not None else 0
+
+
+def _focus_depth_rels(
+    conn: sqlite3.Connection,
+    node_ids: list[int],
+    *,
+    has_conf: bool,
+    has_method: bool,
+    max_per_kind: int = _DEPTH_REL_MAX_PER_KIND,
+) -> list[DepthRel]:
+    """Promoted DEPTH relationships ORIGINATING at ``node_ids`` (the focus func).
+
+    Reads the materialized depth edges the Go promote pass (Pass 4f) emitted —
+    READS / WRITES / DATA_FLOW with ``resolution_method LIKE 'promote_%'`` — where
+    the focus function is the SOURCE (the reader/writer/data-flow origin), and
+    renders each as "<verb> <target> (<file>)". This is the SCOPE/COMPLETENESS
+    view of the edit target's data shape; it NEVER feeds rank/degree (the query
+    is keyed off the focus node ids and its output goes only into the
+    <gt-graph-map> render, not into _rrf3 / hub-p80 / any degree count).
+
+    Correct-or-quiet, by construction:
+      • ``promote_%`` provenance only — a real promoted (non-invented, trust-tiered)
+        edge, never a name_match. On a legacy DB without ``resolution_method`` we
+        cannot prove a depth edge is promoted -> return [] (emit nothing).
+      • confidence-gated at ``_NAME_MATCH_FLOOR`` (0.5): READS/WRITES at 0.6/0.9
+        and DATA_FLOW at 0.6/0.8 pass; a >5-candidate DATA_FLOW at 0.4 is
+        SUPPRESSED exactly like a sub-floor name_match.
+      • is_test targets excluded (never surface a test node as a relationship).
+    Facts ordered confidence-desc within each kind, deduped by (kind,target,file),
+    capped per kind. Pure read; never raises (returns [] on any sqlite error)."""
+    if not node_ids or not has_method:
+        return []
+    placeholders = ",".join("?" for _ in node_ids)
+    conf_sel = "e.confidence" if has_conf else "0.0"
+    kinds = ",".join("'" + k + "'" for k in _DEPTH_REL_VERBS)
+    # Deterministic-provenance gate (same set the rest of the module uses) — a
+    # CALLS edge carrying a `dataflow=` annotation is only a FACT when the CALLS
+    # edge itself was resolved deterministically; the promote pass annotates
+    # `dataflow=` onto EVERY CALLS edge regardless of resolution_method, so a
+    # name_match (guessed) CALLS edge must NOT surface its dataflow target as a
+    # depth fact (correct-or-quiet).
+    _det_in = ",".join("'" + str(m).lower() + "'" for m in sorted(DETERMINISTIC_RESOLUTION_METHODS))
+    sql = (
+        f"SELECT e.type, nt.name, nt.file_path, {conf_sel} "
+        f"FROM edges e JOIN nodes nt ON e.target_id = nt.id "
+        f"WHERE e.source_id IN ({placeholders}) "
+        f"AND e.type IN ({kinds}) "
+        f"AND e.resolution_method LIKE 'promote_%' "
+        f"AND nt.is_test = 0 AND nt.name IS NOT NULL"
+    )
+    try:
+        rows = conn.execute(sql, node_ids).fetchall()
+    except sqlite3.Error:
+        return []
+    rows = list(rows)
+    # The bulk of data flow rides EXISTING CALLS edges as a `dataflow=<callee>`
+    # metadata annotation (promote.go: ~93.7% of use-segments annotate an existing
+    # CALLS edge; a standalone DATA_FLOW edge is minted only for the no-CALLS
+    # residual). Surface those annotated CALLS targets on the SAME "data flows to"
+    # line so the focus function's real data-flow shape is shown, not just the
+    # residual. The CALLS edge is itself a FACT (it has the dataflow tag only
+    # because the promote pass resolved both endpoints), so it joins the
+    # DATA_FLOW kind. Metadata-annotation read; no rank effect.
+    try:
+        ann_rows = conn.execute(
+            f"SELECT 'DATA_FLOW', nt.name, nt.file_path, {conf_sel} "
+            f"FROM edges e JOIN nodes nt ON e.target_id = nt.id "
+            f"WHERE e.source_id IN ({placeholders}) AND e.type = 'CALLS' "
+            f"AND e.metadata LIKE '%dataflow=%' "
+            f"AND LOWER(TRIM(e.resolution_method)) IN ({_det_in}) "
+            f"AND nt.is_test = 0 AND nt.name IS NOT NULL",
+            node_ids,
+        ).fetchall()
+        rows.extend(ann_rows)
+    except sqlite3.Error:
+        pass
+    # Build candidates, drop sub-floor (correct-or-quiet), dedup, order, cap/kind.
+    cands: list[DepthRel] = []
+    for kind, tgt_name, tgt_file, conf in rows:
+        if not tgt_name:
+            continue
+        try:
+            conf_f = float(conf) if conf is not None else 0.0
+        except (TypeError, ValueError):
+            conf_f = 0.0
+        # has_conf False -> the promoted edge's confidence is unknown; still trust
+        # its 'promote_%' provenance (the pass only emits non-invented facts), so
+        # a missing confidence column does not strip real depth relationships.
+        if has_conf and conf_f < _NAME_MATCH_FLOOR:
+            continue
+        verb = _DEPTH_REL_VERBS.get(kind, "")
+        if not verb:
+            continue
+        cands.append(
+            DepthRel(
+                kind=kind,
+                verb=verb,
+                target=tgt_name,
+                target_file=tgt_file or "",
+                confidence=conf_f,
+            )
+        )
+    cands.sort(key=lambda d: (d.kind, -d.confidence, d.target))
+    out: list[DepthRel] = []
+    seen: set[tuple[str, str, str]] = set()
+    per_kind: dict[str, int] = {}
+    for d in cands:
+        key = (d.kind, d.target, d.target_file)
+        if key in seen:
+            continue
+        if per_kind.get(d.kind, 0) >= max_per_kind:
+            continue
+        seen.add(key)
+        per_kind[d.kind] = per_kind.get(d.kind, 0) + 1
+        out.append(d)
+    return out
 
 
 def _apply_dynamic_budget(
@@ -829,8 +1012,21 @@ def build_function_map(
                     has_method=has_method, max_neighbors=max_neighbors,
                     repo_root=repo_root,
                 )
+            # DEPTH (gt_new §6 trickle-down): the focus function's promoted
+            # READS/WRITES/DATA_FLOW relationships — SCOPE/COMPLETENESS only,
+            # never rank (this query is keyed off the focus ids; its output goes
+            # only into the <gt-graph-map> render). [] on a no-promote graph.
+            depth_rels = _focus_depth_rels(
+                conn, ids, has_conf=has_conf, has_method=has_method
+            )
             out.append(
-                FunctionMap(file=fpath, function=fname, callers=callers, callees=callees)
+                FunctionMap(
+                    file=fpath,
+                    function=fname,
+                    callers=callers,
+                    callees=callees,
+                    depth_rels=depth_rels,
+                )
             )
         return out
     finally:
@@ -890,6 +1086,14 @@ def _fmt_edge(e: Edge) -> str:
     return base
 
 
+def _fmt_depth_rel(d: DepthRel) -> str:
+    """Render one promoted depth relationship as ``target (file)`` (or bare
+    ``target`` when the file is unknown). Promoted depth edges are FACTS — both
+    endpoints resolved at index time — so they carry no ``(unverified)`` marker,
+    parity with a fact ``_fmt_edge``."""
+    return f"{d.target} ({d.target_file})" if d.target_file else d.target
+
+
 def render_map(maps: list[FunctionMap]) -> str:
     """Render the curation map as a compact, prose-free block.
 
@@ -906,6 +1110,17 @@ def render_map(maps: list[FunctionMap]) -> str:
             lines.append("  calls: " + ", ".join(_fmt_edge(e) for e in fm.callees))
         if fm.callers:
             lines.append("  called by: " + ", ".join(_fmt_edge(e) for e in fm.callers))
+        # DEPTH relationships (gt_new §6 trickle-down): one line per verb
+        # (reads / writes / data flows to) of the focus function. These are
+        # promoted depth FACTS (never name_match) so they render BARE — no
+        # (unverified) marker — matching the correct-or-quiet contract.
+        for kind in _DEPTH_REL_VERBS:
+            rels = [d for d in fm.depth_rels if d.kind == kind]
+            if not rels:
+                continue
+            verb = _DEPTH_REL_VERBS[kind]
+            rendered = ", ".join(_fmt_depth_rel(d) for d in rels)
+            lines.append(f"  {verb}: {rendered}")
         blocks.append("\n".join(lines))
     if not blocks:
         return ""

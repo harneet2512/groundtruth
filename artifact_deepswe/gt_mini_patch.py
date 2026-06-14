@@ -1269,6 +1269,115 @@ def _substrate_active() -> bool:
     )
 
 
+# ───────────────────── A2 HANDOFF FAIL-LOUD GUARD (2026-06-14) ─────────────────────
+# Root cause A2: the substrate handoff graph.db (GT_HOST_GRAPH_DB -> /gt_artifacts/
+# graph.db) reached the container as a PRESENT-but-0-BYTE file (the real graph lives at
+# <task>/graph.db; only an empty copy was handed over). `os.path.isfile()` was True, but
+# `_connect_ro`'s schema probe failed on the empty file -> it returned None -> EVERY graph
+# producer (_graph_contract_block, _evidence_body, the witness/scope pillars) returned ""
+# -> ZERO <gt-contract>/<gt-evidence>/<gt-scope> ever reached the agent. A silently-dead
+# runtime channel that telemetry could not distinguish from "no facts to deliver".
+#
+# The fix is fail-CLOSED on a PRESENT-but-EMPTY handoff and correct-or-QUIET on a
+# legitimately-ABSENT graph. The two are NOT the same:
+#   * ABSENT  (path unset, or the named file genuinely does not exist): the substrate
+#     never handed us a graph (degraded / preindex / dev). Producers stay quiet ("").
+#   * PRESENT-but-EMPTY (the handoff file EXISTS but is 0 bytes / has no populated `nodes`
+#     table / is unreadable as sqlite) in SUBSTRATE/PROOF mode: the handoff was assembled
+#     WRONG — a copy that silently produced an empty file. This is a HARD ERROR: a blind
+#     channel that LOOKS fine is the worst failure (wrong info < no info < silent blindness).
+#
+# `GTHandoffEmptyError` derives from BaseException (NOT Exception) ON PURPOSE: the Lane-A
+# producers + per-pillar bodies wrap their work in `except Exception` (so one producer's
+# bug can't kill the data plane). A handoff-empty failure must NOT be absorbed by those
+# guards into another silent "" — it must propagate past them to the adapter boundary and
+# hard-stop the run, exactly like gt_agent._emit_gt_meta_witness's DeepSweAdapterError.
+# The classified [GT_META] line is printed at the point of detection (stderr, never the
+# agent's stdout context) so the cause is ALWAYS visible in the trajectory.
+class GTHandoffEmptyError(BaseException):
+    """A SUBSTRATE/PROOF-mode handoff graph.db is PRESENT but empty/unschema'd/unreadable.
+    Fail-closed (subclasses BaseException so Lane-A `except Exception` guards never swallow it)."""
+
+
+# Cached per-path verdict so the channel can never silently recover into the half-blind
+# state mid-run: True=usable graph, False=present-but-empty (re-raise on every later call).
+_handoff_guard_state: dict[str, bool] = {}
+
+
+def _handoff_db_is_schemad(db: str) -> bool:
+    """True iff ``db`` opens read-only AND carries the indexer's `nodes` table with at
+    least one row — i.e. a REAL non-empty graph, not a 0-byte / truncated / schema-less
+    file. Pure read; never writes. Any open/probe error -> False (treat as unusable)."""
+    import sqlite3
+    dbu = (db or "").replace("\\", "/")
+    immutable = _substrate_active() or os.environ.get("GT_PROOF_MODE") == "1"
+    uri = f"file:{dbu}?mode=ro" + ("&immutable=1" if immutable else "")
+    con = None
+    try:
+        con = sqlite3.connect(uri, uri=True, timeout=10)
+        tbls = {r[0] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        if "nodes" not in tbls:
+            return False
+        n = con.execute("SELECT COUNT(*) FROM nodes").fetchone()
+        return bool(n and n[0] and n[0] > 0)
+    except Exception:  # noqa: BLE001 — unreadable / not-a-db -> unusable
+        return False
+    finally:
+        if con is not None:
+            try:
+                con.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _raise_handoff_empty(db: str) -> None:
+    """Print the classified [GT_META] line (always visible on stderr) then raise the
+    fail-closed BaseException. Factored out so the first detection and every cached
+    re-raise emit identically."""
+    try:
+        size = os.path.getsize(db)
+    except Exception:  # noqa: BLE001
+        size = -1
+    msg = (
+        f"GT_HANDOFF_EMPTY db={db} size={size}B — the substrate handoff graph.db is "
+        f"PRESENT but empty/unschema'd (no populated `nodes` table). The runtime hooks "
+        f"would deliver NOTHING on every edit/view (silent blind channel). Fail-closed: "
+        f"the handoff copy must be the REAL non-empty graph (the real graph lives at "
+        f"<task>/graph.db, not the 0-byte handoff copy)."
+    )
+    print(f"[GT_META] error=GT_HANDOFF_EMPTY detail={msg}", file=sys.stderr, flush=True)
+    raise GTHandoffEmptyError(msg)
+
+
+def _guard_handoff_db(db: str) -> None:
+    """Fail-LOUD on a PRESENT-but-EMPTY substrate handoff; QUIET on a legitimately-absent
+    graph. Idempotent + cached per path. No-op outside SUBSTRATE/PROOF mode (the legacy
+    /tmp path is OURS and L6 may rewrite it — a transient empty window there is not a
+    handoff bug)."""
+    if not (_substrate_active() or os.environ.get("GT_PROOF_MODE") == "1"):
+        return  # legacy/dev/preindex path — correct-or-quiet, never fail-closed here
+    if not db:
+        return  # ABSENT (no handoff path) — degraded mode, producers stay quiet
+    # A handoff path that names a NON-EXISTENT file is "absent" (the substrate genuinely
+    # handed us nothing) -> quiet. Only a file that EXISTS but is empty/unschema'd is the
+    # hard error this guard exists to catch.
+    try:
+        present = os.path.isfile(db)
+    except Exception:  # noqa: BLE001
+        present = False
+    if not present:
+        return  # ABSENT — quiet (degraded)
+    if db in _handoff_guard_state:
+        if not _handoff_guard_state[db]:
+            _raise_handoff_empty(db)
+        return
+    ok = _handoff_db_is_schemad(db)
+    _handoff_guard_state[db] = ok
+    if not ok:
+        _raise_handoff_empty(db)
+
+
 def _db_path() -> str:
     """The graph the per-turn pillars read (hole #6).
 
@@ -1279,14 +1388,22 @@ def _db_path() -> str:
     dual-graph build), so a missing GT_HOST_GRAPH_DB must surface as 'no graph' (the
     pillars are correct-or-quiet on a missing db), never silently read a divergent
     rebuild. The /tmp/graph.db legacy fallback applies ONLY on the non-substrate,
-    non-proof (preindex/trial) path."""
+    non-proof (preindex/trial) path.
+
+    A2 GUARD: before returning a SUBSTRATE/PROOF-mode handoff path, `_guard_handoff_db`
+    fail-CLOSES (raises GTHandoffEmptyError) on a PRESENT-but-EMPTY/0-byte/unschema'd
+    handoff db — so a silently-empty handoff can never again blind the whole runtime
+    channel. A legitimately-absent graph stays correct-or-quiet (no raise)."""
     host = os.environ.get("GT_HOST_GRAPH_DB")
     if host:
+        _guard_handoff_db(host)
         return host
     if _substrate_active() or os.environ.get("GT_PROOF_MODE") == "1":
         # Substrate/proof mode but GT_HOST_GRAPH_DB unset -> GT_GRAPH_DB if the harness
         # used the canonical name; NEVER the legacy /tmp/graph.db (no divergent rebuild).
-        return os.environ.get("GT_GRAPH_DB") or ""
+        canon = os.environ.get("GT_GRAPH_DB") or ""
+        _guard_handoff_db(canon)
+        return canon
     return os.environ.get("GT_GRAPH_DB") or "/tmp/graph.db"
 
 
@@ -1521,9 +1638,16 @@ def _connect_ro(db: str):
     line — so a silently-dead per-turn surface becomes visible in the
     trajectory — then stays quiet on later failures (correct-or-quiet, no spam).
     Returns a connection or None.
+
+    A2 GUARD (second chokepoint): if ``db`` is a PRESENT-but-EMPTY/unschema'd
+    SUBSTRATE/PROOF handoff, ``_guard_handoff_db`` fail-CLOSES (raises
+    GTHandoffEmptyError) BEFORE the lenient probe could mask it as a quiet None.
+    A legitimately-absent graph stays correct-or-quiet (no raise -> the probe's
+    own None path handles a genuinely-missing file).
     """
     global _graph_probe_printed
     import sqlite3
+    _guard_handoff_db(db)  # A2: hard-fail a present-but-empty substrate handoff
     dbu = (db or "").replace("\\", "/")
     immutable = _substrate_active() or os.environ.get("GT_PROOF_MODE") == "1"
     uri = f"file:{dbu}?mode=ro" + ("&immutable=1" if immutable else "")
