@@ -2962,6 +2962,7 @@ def _reset_oracle_state() -> None:
     _edit_churn.clear()
     _oblig_status_emitted.clear()
     _oracle_delivered_hashes.clear()
+    _HOOK_FIRE_COUNTS.clear()
     _obligation_tracker = None
     _obligation_tracker_anchors = None
     _last_budget_pending = []
@@ -3362,6 +3363,39 @@ def _runtime_ledger_record(
         )
     )
     _runtime_ledger_flush()
+
+
+# ---------------------------------------------------------------------------
+# Layer-4b FIRE counter (auditability) — how many times each hook (producer)
+# FIRED this run, independent of whether it DELIVERED. The runtime ledger above
+# records DELIVERED / SUPPRESSED_* outcomes only; an empty correct-or-quiet
+# producer is skipped BEFORE any ledger record, so "how many times did
+# l3.contract / l3.cochange / l3b.evidence fire?" was previously unanswerable
+# from disk. This counts every fire (incl. fired-but-quiet) to a small JSON.
+# ---------------------------------------------------------------------------
+_HOOK_FIRE_COUNTS: dict[str, int] = {}
+
+
+def _hook_fire_counts_path() -> str:
+    return os.environ.get("GT_HOOK_FIRE_COUNTS", "/tmp/gt_hook_fire_counts.json")
+
+
+def _record_hook_fire(kind: str) -> None:
+    """Count ONE fire of a hook (producer invoked), regardless of delivery outcome.
+    Persisted to a JSON {kind: count} so fire counts are answerable from disk."""
+    if not kind:
+        return
+    _HOOK_FIRE_COUNTS[kind] = _HOOK_FIRE_COUNTS.get(kind, 0) + 1
+    try:
+        import json as _j
+        path = _hook_fire_counts_path()
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            _j.dump(_HOOK_FIRE_COUNTS, fh, sort_keys=True)
+    except Exception:  # noqa: BLE001 — auditability must never break delivery
+        pass
 
 
 def _filter_candidates_by_phase(cands, phase: Phase, event, *, file_path: str = ""):
@@ -4136,6 +4170,7 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
     rank-competition against higher-severity steers (they no longer LOSE the
     turn to a steer)."""
     for kind, text in lane_a:
+        _record_hook_fire(kind)  # count the FIRE before any correct-or-quiet skip
         try:
             if not text:
                 continue  # correct-or-quiet: empty producer stays silent
