@@ -49,7 +49,7 @@ def test_note_fires_on_high_risk_when_flag_on(monkeypatch):
     monkeypatch.setattr(g, "_db_path", lambda: "/x.db")
     note, trig = g._structural_risk_note()
     assert trig is True
-    assert "hub" in note and "9 verified caller" in note
+    assert "hub" in note and "9 verified dependent" in note
 
 
 def test_note_quiet_on_low_risk_when_flag_on(monkeypatch):
@@ -71,7 +71,7 @@ def test_producer_fires_structural_advisory_on_high_risk(monkeypatch):
     sev, kind, block, edit_bound = res
     assert kind == "verify.horizon.advisory"
     assert edit_bound is True
-    assert "hub" in block and "9 verified caller" in block
+    assert "hub" in block and "9 verified dependent" in block
 
 
 def test_producer_no_structural_trigger_when_flag_off(monkeypatch):

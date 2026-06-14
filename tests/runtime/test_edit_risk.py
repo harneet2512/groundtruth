@@ -14,9 +14,10 @@ import sqlite3
 from groundtruth.runtime.edit_risk import structural_edit_risk, reset_reference_cache
 
 
-def _build(tmp_path, spec, *, with_confidence=True, method="import", conf=1.0, name="graph.db"):
-    """spec = list of (target_name, n_distinct_callers). Builds nodes + CALLS edges
-    where each named target receives ``n_distinct_callers`` distinct caller nodes."""
+def _build(tmp_path, spec, *, with_confidence=True, method="import", conf=1.0,
+           name="graph.db", etype="CALLS"):
+    """spec = list of (target_name, n_distinct_callers). Builds nodes + ``etype`` edges
+    where each named target receives ``n_distinct_callers`` distinct source nodes."""
     db = str(tmp_path / name)
     conn = sqlite3.connect(db)
     conn.execute(
@@ -51,13 +52,13 @@ def _build(tmp_path, spec, *, with_confidence=True, method="import", conf=1.0, n
                 conn.execute(
                     "INSERT INTO edges (source_id, target_id, type, resolution_method, "
                     "confidence) VALUES (?,?,?,?,?)",
-                    (cid, tid, "CALLS", method, conf),
+                    (cid, tid, etype, method, conf),
                 )
             else:
                 conn.execute(
                     "INSERT INTO edges (source_id, target_id, type, resolution_method) "
                     "VALUES (?,?,?,?)",
-                    (cid, tid, "CALLS", method),
+                    (cid, tid, etype, method),
                 )
     conn.commit()
     conn.close()
@@ -71,7 +72,7 @@ def test_high_fanin_edited_symbol_is_risky(tmp_path):
     assert not r.is_quiet()
     assert r.score > 0.5, r
     top = r.top_reason()
-    assert top is not None and top.name == "hub" and top.callers == 10
+    assert top is not None and top.name == "hub" and top.dependents == 10
 
 
 def test_isolated_leaf_is_quiet(tmp_path):
@@ -126,7 +127,7 @@ def test_old_schema_without_confidence_degrades(tmp_path):
                 with_confidence=False)
     r = structural_edit_risk(db, {"hub"})
     assert not r.is_quiet()
-    assert r.top_reason().callers == 6
+    assert r.top_reason().dependents == 6
 
 
 def test_top_reason_is_the_riskiest_edited_symbol(tmp_path):
@@ -135,3 +136,13 @@ def test_top_reason_is_the_riskiest_edited_symbol(tmp_path):
     assert r.top_reason().name == "big"
     names = [sr.name for sr in r.reasons]
     assert names.index("big") < names.index("small")
+
+
+def test_reads_and_writes_count_as_dependents(tmp_path):
+    # Depth trickle-down: a field WRITTEN by many places has blast radius too. With
+    # CALLS-only this scored 0; READS/WRITES/DATA_FLOW must now count as dependents.
+    db = _build(tmp_path, [("field", 8)] + [(f"t{i}", 1) for i in range(8)], etype="WRITES")
+    r = structural_edit_risk(db, {"field"})
+    assert not r.is_quiet()
+    top = r.top_reason()
+    assert top is not None and top.name == "field" and top.dependents == 8

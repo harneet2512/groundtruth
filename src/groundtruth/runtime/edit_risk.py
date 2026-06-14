@@ -43,6 +43,13 @@ _MIN_CONFIDENCE = 0.5
 # above it scores higher. The top quartile is the conventional tail boundary.
 _TAIL_Q = 0.75
 
+# Depth trickle-down: blast radius counts incoming DEPENDENCY edges of ANY kind the
+# promote pass produces (a symbol read/written/data-flowed by many is risky too, not
+# only called-by-many). CONTAINS/IMPORTS/PRECEDES/CO_SERIALIZES are structural/ordering,
+# not dependencies, so they are excluded. Absent edge types (old graphs) contribute 0
+# -> degrades to CALLS-only, correct-or-quiet.
+_DEPENDENCY_EDGE_TYPES = ("CALLS", "READS", "WRITES", "DATA_FLOW")
+
 # Per-graph reference cache (the fan-in distribution is repo-invariant within a run;
 # the verify producer fires repeatedly — recompute once, not every fire).
 _REF_CACHE: dict[str, float] = {}
@@ -51,7 +58,7 @@ _REF_CACHE: dict[str, float] = {}
 @dataclass(frozen=True)
 class SymbolRisk:
     name: str
-    callers: int      # DISTINCT verified incoming-CALLS dependents (the blast radius)
+    dependents: int   # DISTINCT verified incoming-dependency edges (the blast radius)
     risk: float       # 0..1, saturating, relative to the repo fan-in reference
 
 
@@ -87,17 +94,18 @@ def _percentile(sorted_vals: list, q: float) -> float:
     return float(sorted_vals[min(k, len(sorted_vals)) - 1])
 
 
-def _repo_fanin_reference(conn, conf_clause: str, params) -> float:
-    """75th-percentile of NON-ZERO verified caller fan-in across the repo — the
+def _repo_fanin_reference(conn, conf_clause: str, conf_params) -> float:
+    """75th-percentile of NON-ZERO verified dependency fan-in across the repo — the
     'notable dependents' baseline that defines the risky tail (dynamic, per-repo)."""
+    types_in = ",".join("?" for _ in _DEPENDENCY_EDGE_TYPES)
     try:
         rows = conn.execute(
             f"""SELECT COUNT(DISTINCT e.source_id) AS c
                   FROM edges e
-                 WHERE e.type='CALLS' {conf_clause}
+                 WHERE e.type IN ({types_in}) {conf_clause}
                  GROUP BY e.target_id
                 HAVING c > 0""",
-            params,
+            (*_DEPENDENCY_EDGE_TYPES, *conf_params),
         ).fetchall()
     except sqlite3.Error:
         return 0.0
@@ -128,37 +136,36 @@ def structural_edit_risk(
     try:
         has_conf = _column_exists(conn, "edges", "confidence")
         conf_clause = "AND e.confidence >= ?" if has_conf else ""
+        conf_params = (float(min_confidence),) if has_conf else ()
+        types_in = ",".join("?" for _ in _DEPENDENCY_EDGE_TYPES)
         ref = _REF_CACHE.get(str(graph_db))
         if ref is None:
-            ref = _repo_fanin_reference(
-                conn, conf_clause, (float(min_confidence),) if has_conf else ()
-            )
+            ref = _repo_fanin_reference(conn, conf_clause, conf_params)
             _REF_CACHE[str(graph_db)] = ref
         for nm in names:
-            params = (nm, float(min_confidence)) if has_conf else (nm,)
             try:
                 row = conn.execute(
                     f"""SELECT COUNT(DISTINCT e.source_id)
                           FROM edges e
                           JOIN nodes nt ON e.target_id = nt.id
-                         WHERE e.type='CALLS'
+                         WHERE e.type IN ({types_in})
                            AND LOWER(nt.name) = LOWER(?)
                            {conf_clause}""",
-                    params,
+                    (*_DEPENDENCY_EDGE_TYPES, nm, *conf_params),
                 ).fetchone()
             except sqlite3.Error:
                 continue
-            callers = int(row[0]) if row and row[0] else 0
-            if callers <= 0:
+            dependents = int(row[0]) if row and row[0] else 0
+            if dependents <= 0:
                 continue
             # Saturating, relative to the repo's notable-dependents baseline (floored
             # at 1 = the minimal non-trivial fan-in, so the score is always bounded).
-            denom = callers + max(ref, 1.0)
-            risk = callers / denom if denom > 0 else 0.0
-            reasons.append(SymbolRisk(nm, callers, risk))
+            denom = dependents + max(ref, 1.0)
+            risk = dependents / denom if denom > 0 else 0.0
+            reasons.append(SymbolRisk(nm, dependents, risk))
     finally:
         conn.close()
-    reasons.sort(key=lambda r: (-r.risk, -r.callers, r.name))
+    reasons.sort(key=lambda r: (-r.risk, -r.dependents, r.name))
     reasons = reasons[:max_reasons]
     score = reasons[0].risk if reasons else 0.0
     return EditRisk(score, tuple(reasons), float(ref))

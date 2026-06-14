@@ -3732,8 +3732,8 @@ def _structural_risk_note() -> tuple[str, bool]:
     tr = er.top_reason()
     if tr is None:
         return ("", False)
-    note = (f"{tr.name} ({tr.callers} verified caller(s) in the graph) — no test has "
-            f"exercised your change to it")
+    note = (f"{tr.name} ({tr.dependents} verified dependent(s) in the graph) — no test "
+            f"has exercised your change to it")
     return (note, er.score >= _RISK_TRIGGER)
 
 
