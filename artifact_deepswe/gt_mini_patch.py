@@ -389,6 +389,147 @@ _JS_WRITE_RE = re.compile(r"""(?:writeFileSync|appendFileSync|writeFile)\(\s*['"
 # sed -i / tee / patch / apply_patch, at line start or after a shell separator.
 _EDIT_KW_RE = re.compile(r"(?:^|[|&;]\s*)(sed\s+-i|tee\b|patch\b|apply_patch\b)")
 
+# ---------------------------------------------------------------------------
+# PATCH-APPLICATION edit family (apply_patch / git apply / patch -pN). These are
+# the universal agent edit channels (apply_patch = OpenAI/Codex format; git
+# apply / patch -pN = POSIX) where the TARGET FILE is NOT a shell redirect/arg —
+# it lives inside the DIFF PAYLOAD (`*** Update File: <path>` for apply_patch,
+# `+++ b/<path>` for unified diffs). The payload is either INLINE in a heredoc
+# body or in a SEPARATE staged file the command reads via `< file` (or as the
+# trailing operand of `git apply`/`patch`). Recognizing these is a general
+# property of agent edit channels — no task IDs / gold / repo logic. Correct-or-
+# quiet: if the payload/target cannot be parsed, degrade to today's behaviour
+# (return None — never fabricate a target).
+_PATCH_APPLY_RE = re.compile(
+    r"(?:^|[|&;]\s*)(apply_patch\b|git\s+apply\b|patch\b)",
+)
+# apply_patch payload markers (OpenAI/Codex format).
+_APPLY_PATCH_FILE_RE = re.compile(
+    r"^\s*\*\*\*\s+(?:Update|Add|Delete)\s+File:\s*(.+?)\s*$", re.MULTILINE,
+)
+# unified-diff new-side / old-side path headers. The RAW path (incl. the
+# `b/`/`a/` prefix git emits) is captured; _strip_diff_path applies the `-p<n>`
+# strip count (default p1 removes the one leading `b/`/`a/` segment).
+_DIFF_PLUS_RE = re.compile(r"^\+\+\+\s+(\S+)", re.MULTILINE)
+_DIFF_MINUS_RE = re.compile(r"^---\s+(\S+)", re.MULTILINE)
+# `-p<n>` strip count for git apply / patch (default 1).
+_P_STRIP_RE = re.compile(r"(?:^|\s)-p(\d+)\b")
+# `< file` input redirection (the staged-diff form). Excludes `<<` heredocs.
+_IN_REDIR_RE = re.compile(r"(?<!<)<(?!<)\s*([^\s'\"<>|&;]+)")
+# read-back of a staged diff file is size-capped (correct-or-quiet on huge/blobs).
+_MAX_STAGED_DIFF_BYTES = 4_000_000
+
+
+def _is_patch_apply(cmd: str) -> bool:
+    """True when ``cmd`` is a patch-application channel (apply_patch / git apply /
+    patch -pN). `patch` alone is ambiguous (the legacy `patch`-keyword path
+    already routes through _EDIT_KW_RE), but it is the same edit family."""
+    if not cmd:
+        return False
+    first = cmd.split("\n", 1)[0]
+    return bool(_PATCH_APPLY_RE.search(first))
+
+
+def _strip_diff_path(raw: str, strip: int = 1) -> str:
+    """Strip the leading `b/`/`a/` and ``strip``-1 extra path components from a
+    unified-diff header path (the `-p<n>` semantics). Default p1 removes one
+    leading component (`b/<rel>` -> `<rel>`)."""
+    p = (raw or "").strip().replace("\\", "/")
+    if p in ("/dev/null", "dev/null"):
+        return ""
+    parts = [seg for seg in p.split("/")]
+    # -p<n> strips n leading path segments (git's `a/`,`b/` is one such segment).
+    if strip > 0 and len(parts) > strip:
+        parts = parts[strip:]
+    return "/".join(parts)
+
+
+def _read_staged_diff(cmd: str) -> str:
+    """Read the diff payload for a `< file` / trailing-operand patch command from
+    the staged file on disk. Correct-or-quiet: returns "" if no such operand, the
+    file is absent/unreadable, or it exceeds the size cap (never raises)."""
+    if not cmd:
+        return ""
+    first = cmd.split("\n", 1)[0]
+    path = None
+    m = _IN_REDIR_RE.search(first)
+    if m:
+        path = m.group(1).strip("\"'`()")
+    else:
+        # git apply <file> / patch ... <file>: the trailing non-flag operand.
+        toks = [t for t in re.split(r"\s+", first.strip()) if t]
+        for t in reversed(toks):
+            if t and not t.startswith("-") and t not in (
+                "git", "apply", "patch", "apply_patch", "--3way", "--3way=",
+            ):
+                # heuristic operand: looks like a path (has a slash or an ext).
+                if "/" in t or "." in t:
+                    path = t.strip("\"'`()")
+                    break
+    if not path:
+        return ""
+    try:
+        if not os.path.isfile(path):
+            return ""
+        if os.path.getsize(path) > _MAX_STAGED_DIFF_BYTES:
+            return ""
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return f.read()
+    except Exception:  # noqa: BLE001 -- unreadable staged diff -> degrade quiet
+        return ""
+
+
+def _patch_payload(cmd: str) -> str:
+    """The diff/patch PAYLOAD text for a patch-apply command, from wherever it
+    lives: the heredoc body (`<<EOF ... EOF`) inline in ``cmd``, or the staged
+    file read back for the `< file` / trailing-operand form. "" when neither
+    yields content (correct-or-quiet)."""
+    if not cmd:
+        return ""
+    if "<<" in cmd:
+        body = _edit_body(cmd)
+        if body.strip():
+            return body
+    return _read_staged_diff(cmd)
+
+
+def _patch_apply_target(cmd: str) -> str | None:
+    """The repo file a patch-apply command WRITES, parsed from the diff payload.
+    apply_patch -> `*** Update/Add/Delete File: <path>`; unified diff -> `+++ b/`
+    (falls back to `--- a/` when the new side is /dev/null, a deletion). Honours
+    the `-p<n>` strip count for git apply / patch. Prefers the FIRST repo-source
+    target. None when the payload is empty/unparseable (correct-or-quiet)."""
+    payload = _patch_payload(cmd)
+    if not payload:
+        return None
+    # 1. apply_patch markers (no path stripping — the marker path is repo-rel).
+    ap = [m.group(1).strip().replace("\\", "/")
+          for m in _APPLY_PATCH_FILE_RE.finditer(payload)]
+    cands: list[str] = []
+    for p in ap:
+        if p and p != "/dev/null":
+            cands.append(p)
+    # 2. unified-diff `+++ b/<path>` (or `--- a/<path>` on a deletion).
+    if not cands:
+        sm = _P_STRIP_RE.search(cmd.split("\n", 1)[0])
+        strip = int(sm.group(1)) if sm else 1
+        for m in _DIFF_PLUS_RE.finditer(payload):
+            tgt = _strip_diff_path(m.group(1), strip)
+            if tgt:
+                cands.append(tgt)
+        if not cands:
+            for m in _DIFF_MINUS_RE.finditer(payload):
+                tgt = _strip_diff_path(m.group(1), strip)
+                if tgt:
+                    cands.append(tgt)
+    if not cands:
+        return None
+    # Prefer the first repo-source target; else the first parsed target.
+    for c in cands:
+        if _has_source_ext(c):
+            return c
+    return cands[0]
+
 
 def _src_tokens(text: str) -> list[str]:
     out: list[str] = []
@@ -410,6 +551,14 @@ def _edit_target(cmd: str) -> str | None:
     is NOT a source write — that falls to _view_target (read) or to nothing."""
     if not cmd:
         return None
+    # 0. PATCH-APPLICATION family (apply_patch / git apply / patch -pN): the
+    #    target file lives in the DIFF PAYLOAD, not a shell redirect/arg. Parse
+    #    it from the heredoc body or the staged `< file`. Correct-or-quiet: a
+    #    None here falls through to the legacy branches (no regression).
+    if _is_patch_apply(cmd):
+        pt = _patch_apply_target(cmd)
+        if pt:
+            return pt
     nohd = cmd.split("<<", 1)[0] if "<<" in cmd else cmd  # shell scans exclude heredoc body
     # 1. redirect whose TARGET is a source file (broad — incl. /tmp/ staging)
     for mm in re.finditer(r">>?\s*([^\s'\"<>|&;]+)", nohd):
@@ -428,6 +577,78 @@ def _edit_target(cmd: str) -> str | None:
         if m and _has_source_ext(m.group(1)) and "*" not in m.group(1):
             return m.group(1)
     return None
+
+
+# RC5 Signal-1 (CONTENT lexical) + Signal-3 (line range) extractors. The edit
+# CONTENT the agent wrote lives in the patch/heredoc/write BODY — NOT the command
+# verb. apply_patch reads the diff from a heredoc/file; a sed rewrites a value not
+# a name; a python write spells the symbol inside the open()...write() string. So
+# the obligation token must be sought in the BODY, and the touched LINE RANGE is
+# read from diff hunk headers / sed addresses (the edit-site precision gate).
+_HUNK_RE = re.compile(r"@@\s*-\d+(?:,\d+)?\s+\+(\d+)(?:,(\d+))?\s*@@")
+_SED_ADDR_RE = re.compile(r"(?:^|[|&;]\s*)sed\s+-i[^\s]*\s+(?:-e\s+)?['\"]?(\d+)(?:,(\d+))?")
+
+
+def _edit_body(cmd: str) -> str:
+    """The CONTENT region of an edit command — the heredoc body / apply_patch
+    payload / sed replacement / python|node write string — as raw text. This is
+    where the symbol the agent actually wrote appears; the command verb often
+    does not name it (`apply_patch < /tmp/p`). Conservative: returns the whole
+    command when no body delimiter is found (a redirect/sed inline replacement
+    already carries its content in the command text), so we never lose Signal 1."""
+    if not cmd:
+        return ""
+    if "<<" in cmd:
+        # heredoc: everything after the FIRST << delimiter line is the body.
+        after = cmd.split("<<", 1)[1]
+        nl = after.find("\n")
+        return after[nl + 1:] if nl != -1 else after
+    # PATCH-APPLY `< file` form (`apply_patch < /tmp/p.diff`, `git apply f`,
+    # `patch -p1 < f`): the CONTENT is the STAGED diff file on disk, NOT the
+    # command string. Read it back so Signal 1 (body tokens) + Signal 3 (hunk
+    # ranges) see the symbol/`@@` the command line never carries. Correct-or-
+    # quiet: empty staged read -> fall through to the command text (unchanged).
+    if _is_patch_apply(cmd):
+        staged = _read_staged_diff(cmd)
+        if staged:
+            return staged
+    return cmd
+
+
+def _edit_body_tokens(cmd: str) -> set[str]:
+    """Identifier tokens (>=3 chars) of the edit CONTENT body (Signal 1).
+    Broadened from the old command-verb tokenization so a symbol introduced in
+    the patch/heredoc/write body is captured even when the command line lacks it."""
+    body = _edit_body(cmd)
+    return {t for t in _BLOCK_TOKEN_RE.findall(body) if len(t) >= 3}
+
+
+def _edited_line_ranges(cmd: str) -> list:
+    """The (start,end) 1-based line ranges this command writes (Signal 3), from
+    unified-diff hunk headers (`@@ -a,b +c,d @@` -> new side c..c+d-1) or a sed
+    line address (`sed -i '40,55s/.../.../'`). Empty when no line data is
+    derivable -> Signal 3 degrades to 2-of-2 (correct-or-quiet, never invents a
+    range)."""
+    if not cmd:
+        return []
+    ranges: list[tuple] = []
+    # Scan the diff PAYLOAD for `@@ ... +c,d @@` hunks. For an inline heredoc the
+    # payload is a substring of cmd; for the `< file` form _edit_body reads the
+    # STAGED diff file back, so the `< /tmp/p.diff` case now yields its hunks too.
+    payload = _edit_body(cmd)
+    for m in _HUNK_RE.finditer(payload):
+        start = int(m.group(1))
+        count = int(m.group(2)) if m.group(2) else 1
+        if start > 0 and count > 0:
+            ranges.append((start, start + count - 1))
+    if not ranges:
+        m = _SED_ADDR_RE.search(cmd)
+        if m:
+            lo = int(m.group(1))
+            hi = int(m.group(2)) if m.group(2) else lo
+            if lo > 0:
+                ranges.append((lo, max(hi, lo)))
+    return ranges
 
 
 def _view_target(cmd: str) -> str | None:
@@ -589,16 +810,213 @@ def composite_severity(base, budget_fraction, unmet_ratio) -> float:
     return _product_composite_severity(base, budget_fraction, unmet_ratio)
 
 
-def edit_coverage_ratio(obligation_syms, edited_tokens):
-    """Stage-1 (c): obligation symbols edited / total obligation symbols
-    (exact membership in the edit-evidence token set — the same intersection
-    gt_oracle._overlap uses). None = DORMANT: no obligations -> no signal ->
-    every consumer stays correct-or-quiet on this clause."""
+# ---------------------------------------------------------------------------
+# RC5 — HYBRID obligation edit-credit (>=3 signals, FACT-tier, correct-or-quiet)
+#
+# The old credit was SINGLE-SOURCE lexical: an obligation symbol counted as
+# "edited" iff its name appeared as a >=3-char token in the edit COMMAND string
+# (gt_mini_patch.py:3406 `_BLOCK_TOKEN_RE.findall(cmd)`). That violates all three
+# mandatory properties (.claude/CLAUDE.md): not dynamic, not hybrid (one signal),
+# not confidence-gated. It produced the measured inversion:
+#   - UNDER-COUNT (solved task -> 0.0): apply_patch/sed/heredoc landed the symbol
+#     in the patch BODY / file state, but the COMMAND verb (`apply_patch < p`)
+#     never spelled the token -> membership failed -> credit dropped to 0.
+#   - OVER-COUNT (failed task -> 1.0): the symbol was merely NAMED in the command
+#     (sed search pattern, grep pipe, comment, an edit to a DIFFERENT function in
+#     the same file) -> token present -> credited, though the edit never landed
+#     AT the symbol's definition.
+#
+# The fix recomputes the credit from THREE composited signals per obligation
+# symbol (gt_gt.md §15.2:1215-1221 — credit by the CONTENT written, across all
+# edit shapes, not by the command verb; §16.5 issue J:1657 — token-membership is
+# "too coarse"; rank by exactness, not first-matched token):
+#   Signal 1 (lexical, broadened to CONTENT): the symbol token is in the edit
+#     BODY (heredoc / apply_patch payload / sed replacement / python|node write
+#     string), not the command verb. Fixes the under-count.
+#   Signal 2 (structural, graph co-location): the edited file resolves to a
+#     graph Function/Method node whose NAME is the obligation symbol — a real
+#     definition in the edited file, not merely a name in the command. FACT-tier
+#     (deterministic node identity, same discipline as the contract pillar).
+#     Fixes the over-count.
+#   Signal 3 (path / line-range overlap): the edited line range overlaps the
+#     symbol node's [start_line,end_line] span. The precision tie-breaker that
+#     distinguishes "wrote AT the symbol" from "named it elsewhere in the file".
+#     REQUIRED when line data is derivable; otherwise (2-of-2) it degrades.
+#
+# Confidence gate: FACT only when the structural signal actually fired. Graph
+# unreachable (no db / _connect_ro None) -> Signals 2,3 cannot run -> degrade to
+# content-lexical-only (Signal 1) and the credit is UNCERTAIN, never asserted as
+# FACT. None=DORMANT (no obligations) is preserved verbatim. Monotone-safe: can
+# only move a wrongly-0.0 solved task UP and a wrongly-1.0 failed task DOWN.
+# ---------------------------------------------------------------------------
+def _spans_overlap(a_lo, a_hi, b_lo, b_hi) -> bool:
+    """Closed-interval [a_lo,a_hi] overlaps [b_lo,b_hi]. Any bound None/<=0 ->
+    no usable line data -> return None-equivalent (caller treats as 'no Signal 3
+    data', not 'no overlap')."""
+    if not a_lo or not b_lo:
+        return False
+    a_hi = a_hi if a_hi else a_lo
+    b_hi = b_hi if b_hi else b_lo
+    return a_lo <= b_hi and b_lo <= a_hi
+
+
+def _file_symbol_spans(db_path, rel_file):
+    """{symbol_name: (start_line, end_line)} for every Function/Method node in
+    ``rel_file``, from graph.db. Reuses the EXACT contract-pillar access path
+    (_connect_ro -> SELECT name,start_line,end_line FROM nodes WHERE
+    file_path=? AND label IN ('Function','Method')) — zero new graph plumbing,
+    fully within the read-only, fail-quiet-on-missing-graph contract.
+
+    Returns None when the graph is UNREACHABLE (no db file / open failed) — the
+    confidence-gate signal that Signals 2,3 could not run. Returns {} when the
+    graph is reachable but the file has no nodes (a real 'symbol not a
+    definition here' answer, used to REJECT the over-count)."""
+    if not db_path or not os.path.isfile(db_path):
+        return None
+    con = _connect_ro(db_path)
+    if con is None:
+        return None
+    try:
+        nfp = _norm_fp(rel_file)
+        out: dict[str, tuple] = {}
+        for name, sl, el in con.execute(
+            "SELECT name, start_line, end_line FROM nodes "
+            "WHERE file_path = ? AND label IN ('Function','Method')",
+            (nfp,),
+        ).fetchall():
+            if name:
+                out[name] = (sl, el)
+        return out
+    except Exception:  # noqa: BLE001 -- unreadable graph -> degrade (None)
+        return None
+    finally:
+        try:
+            con.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _credit_obligation_symbol(sym, content_toks, file_spans, edited_lines):
+    """Decide whether ONE obligation symbol is credited EDITED, by the >=3-signal
+    composite. Returns (credited: bool, uncertain: bool).
+
+    Signals:
+      1. content lexical — ``sym`` token is in ``content_toks`` (the edit BODY
+         tokens across all files edited this trajectory; heredoc/patch payload,
+         NOT the command verb).
+      2. structural co-location — ``sym`` is a Function/Method node-name in some
+         edited file (``file_spans`` = {rel_file: {name: (start,end)} | None}).
+      3. line-range overlap — the edit's touched line range for that file
+         overlaps the symbol node's [start,end] span.
+
+    Composition (faithful to the design's confidence gate):
+      * Graph REACHABLE for >=1 edited file -> FACT tier. The structural signal
+        (S2) is the authoritative content source — it carries the symbol even
+        when neither the command nor the inline body names it (the apply_patch
+        `< file` / sed value-rewrite UNDER-COUNT shape, where the symbol lives in
+        the edited file's node, not the command text).
+          - S2 ∧ S3 (line data on both sides) -> credit. (The OVER-COUNT killer:
+            a symbol DEFINED in the file but edited in a DIFFERENT region is
+            rejected because the touched range misses its span.)
+          - S2 ∧ (no line data) -> require S1 as the disambiguator (2-of-2): the
+            content body must mention the symbol, else a same-file-different-fn
+            edit could still over-credit. Correct-or-quiet on the residual.
+      * Graph UNREACHABLE for every edited file -> structural signal could not
+        run -> degrade to S1 alone and mark UNCERTAIN (never assert FACT on a
+        signal that did not fire; on a missing graph the obligation rides as
+        UNADDRESSED — the safe, suppress side)."""
+    if not sym:
+        return (False, False)
+    # Is ANY edited file's graph reachable? (spans is a dict; None => unreachable)
+    structural_ran = any(spans is not None for spans in file_spans.values())
+    if not structural_ran:
+        # Graph unreachable everywhere -> Signal-1-only, UNCERTAIN (degrade).
+        return ((sym in content_toks), True) if sym in content_toks else (False, True)
+    # Structural ran (FACT tier). The node-set is the authoritative content.
+    for rel_file, spans in file_spans.items():
+        if not spans:
+            continue  # unreachable graph for this file, or no nodes -> no S2 here
+        span = spans.get(sym)
+        if span is None:
+            continue  # S2 fails: sym is not a definition in this edited file
+        node_lo, node_hi = span
+        ranges = edited_lines.get(rel_file) or []
+        if node_lo and ranges:
+            # S2 ∧ S3: line data on both sides -> REQUIRE overlap (precision).
+            if any(_spans_overlap(lo, hi, node_lo, node_hi) for lo, hi in ranges):
+                return (True, False)
+            # defined here but the edit landed OUTSIDE its span -> reject for this
+            # file; keep scanning other edited files (over-count killer).
+            continue
+        # No line data on one side -> 2-of-2: S2 ∧ S1 (content disambiguates).
+        if sym in content_toks:
+            return (True, False)
+        # S2 held but no line range AND content body does not mention it ->
+        # cannot tell WHICH function was edited -> correct-or-quiet (reject here).
+        continue
+    # No edited file structurally co-locates (or line-range rejected everywhere)
+    # -> NOT credited. The OVER-COUNT killer (named-but-not-co-located).
+    return (False, False)
+
+
+def edit_coverage_ratio(obligation_syms, edited_tokens, *,
+                        content_toks=None, file_spans=None, edited_lines=None,
+                        db_path=None, edited_files=None):
+    """Stage-1 (c) — HYBRID obligation edit-credit. obligation symbols credited
+    EDITED / total obligation symbols. None = DORMANT (no obligations -> no
+    signal -> every consumer stays correct-or-quiet on this clause).
+
+    LEGACY/DEGRADE contract: called with two positional args
+    ``(obligation_syms, edited_tokens)`` only, it falls back to the module-level
+    structural evidence (the per-file edit-content tokens, line ranges, and the
+    set of edited files) populated alongside ``_oracle_edited_tokens`` at the
+    post_edit site. The denominator and the None=DORMANT return are IDENTICAL to
+    the old contract.
+
+    SOLE CONSUMER (LIPI-verified): the ONLY call site is at the verification-
+    horizon producer — ``ec = edit_coverage_ratio(_obligation_symbol_set(),
+    _oracle_edited_tokens)`` -> ``verify_horizon_band(edit_coverage=ec, ...)``,
+    where ``edit_coverage`` participates in the ADVISORY band predicate
+    (``edit_coverage > 0``). It does NOT gate ``spec.obligation`` (that gate uses
+    ObligationTracker.statuses_tuple, an unrelated path). Earlier docs that said
+    this feeds the "spec.obligation precision gate" were WRONG — it feeds
+    verify_horizon_band SEVERITY, nothing else.
+
+    Signals (>=3, composited per symbol — see _credit_obligation_symbol):
+      1. content lexical (edit BODY, not command verb),
+      2. structural graph co-location (Function/Method node in the edited file),
+      3. line-range overlap (edit landed in the symbol's span).
+    Confidence-gated: FACT when the structural signal fired; on a missing graph
+    it degrades to content-lexical-only and the credit is UNCERTAIN (never a
+    confident-on-weak-signal assertion)."""
     syms = {s for s in (obligation_syms or ()) if s}
     if not syms:
         return None
-    edited = {s for s in syms if s in (edited_tokens or ())}
-    return len(edited) / len(syms)
+    # CONTENT lexical evidence (Signal 1 domain). Explicit arg (tests) wins;
+    # otherwise the module-level per-file edit-content tokens (the BODY tokens),
+    # falling back to the command-token set so a 2-positional-arg call is never
+    # weaker than today on the lexical axis.
+    if content_toks is None:
+        content_toks = set(_oracle_edit_content_tokens) if _oracle_edit_content_tokens \
+            else set(edited_tokens or ())
+    else:
+        content_toks = set(content_toks)
+    # Structural evidence: {rel_file: {name: (start,end)} | None}. Explicit arg
+    # (tests) wins; otherwise resolve each edited file against graph.db via the
+    # same read-only path the contract pillar uses.
+    if file_spans is None:
+        files = edited_files if edited_files is not None else set(_oracle_edited_rels)
+        db = db_path if db_path is not None else _db_path()
+        file_spans = {rf: _file_symbol_spans(db, rf) for rf in files}
+    if edited_lines is None:
+        edited_lines = dict(_oracle_edited_lines_by_file)
+    credited = 0
+    for s in syms:
+        ok, _uncertain = _credit_obligation_symbol(
+            s, content_toks, file_spans, edited_lines)
+        if ok:
+            credited += 1
+    return credited / len(syms)
 
 
 def test_coverage_ratio(edited_tokens_by_file, tested_tokens):
@@ -2288,6 +2706,15 @@ _oracle_edited_tokens: set[str] = set()
 _oracle_tested_tokens: set[str] = set()
 # per-file edit-evidence tokens (Stage-1 signal: test_coverage_ratio input).
 _oracle_edited_tokens_by_file: dict[str, set] = {}
+# RC5 hybrid edit-credit evidence (Signal 1 + Signal 3). edit_content_tokens are
+# the identifier tokens of the edit BODY (heredoc/apply_patch payload, sed
+# replacement, python|node write string) — broadened from the command verb so an
+# obligation symbol introduced in the patch CONTENT is credited even when the
+# command line never spells it (the under-count fix). edited_lines_by_file are
+# the touched line ranges per repo-relative file, derived from diff hunk headers
+# (`@@ -a,b +c,d @@`) or sed line addresses — Signal 3's edit-site range.
+_oracle_edit_content_tokens: set[str] = set()
+_oracle_edited_lines_by_file: dict[str, list] = {}
 # per-file re-edit churn with no observed PASSING test between (Stage-1
 # signal; TRAJEVAL Coherence Collapse) — reset on every observed pass.
 _edit_churn: dict[str, int] = {}
@@ -2314,6 +2741,8 @@ def _reset_oracle_state() -> None:
     _oracle_tested_tokens.clear()
     _oracle_edited_tokens.clear()
     _oracle_edited_tokens_by_file.clear()
+    _oracle_edit_content_tokens.clear()
+    _oracle_edited_lines_by_file.clear()
     _edit_churn.clear()
     _oblig_status_emitted.clear()
     _oracle_delivered_hashes.clear()
@@ -3405,10 +3834,21 @@ def _augment_output(action, out) -> None:
                 # the edit ACTION (sensor/governor parity); this gates only CREDIT.
                 _edit_toks = {t for t in _BLOCK_TOKEN_RE.findall(cmd or "")
                               if len(t) >= 3}
+                # RC5 hybrid edit-credit evidence: Signal 1 (CONTENT body tokens,
+                # broadened beyond the command verb) + Signal 3 (touched line
+                # ranges from diff hunks / sed addresses). Gated by the SAME
+                # repo-source guard as the legacy tokens — scratch/temp/vendor
+                # writes never feed obligation credit.
+                _body_toks = _edit_body_tokens(cmd or "")
+                _line_ranges = _edited_line_ranges(cmd or "")
                 if _is_repo_source_path(_kf):
                     _oracle_edited_tokens.update(_edit_toks)
                     _oracle_edited_tokens_by_file.setdefault(
                         _krel, set()).update(_edit_toks)
+                    _oracle_edit_content_tokens.update(_body_toks)
+                    if _line_ranges:
+                        _oracle_edited_lines_by_file.setdefault(
+                            _krel, []).extend(_line_ranges)
                 _edit_churn[_krel] = _edit_churn.get(_krel, 0) + 1
                 # H0 (Stage 4): open an edit->test cycle at the FIRST source
                 # edit after the last observed test result.
