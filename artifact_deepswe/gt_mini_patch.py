@@ -66,10 +66,12 @@ try:
     from groundtruth.runtime.verification_horizon import composite_severity as _product_composite_severity
     from groundtruth.runtime.verification_horizon import render_verify_emission as _product_render_verify_emission
     from groundtruth.runtime.verification_horizon import verify_horizon_band as _product_verify_horizon_band
+    from groundtruth.runtime.edit_risk import structural_edit_risk as _structural_edit_risk
     _RUNTIME_AVAILABLE = True
 except ImportError as _import_err:
     # Fallback stubs — pre-CP011 behavior
     print(f"[GT_META] runtime_import_fallback=true reason={_import_err}", file=sys.stderr, flush=True)
+    _structural_edit_risk = None  # type: ignore
     def _product_translate_to_action(block, phase=None):
         return block
     class _ProductContextBudgeter:
@@ -3549,6 +3551,22 @@ try:
 except (TypeError, ValueError):
     _GT_STEP_LIMIT = None
 
+# STRUCTURAL EDIT-RISK verification trigger (flag-gated; default OFF so the existing
+# horizon behavior is byte-identical until a live witness validates the new path).
+# ON: a high-blast-radius edited-but-untested symbol earns a verification nudge from
+# WHAT was edited — budget-free, the research white space (see runtime/edit_risk.py).
+_STRUCTURAL_RISK_ON = (
+    os.environ.get("GT_VERIFY_STRUCTURAL_RISK", "").strip().lower()
+    not in ("", "0", "false", "off", "no")
+)
+try:
+    # Fire threshold on the 0..1 risk score. 0.5 = the saturation midpoint, i.e. the
+    # edited symbol's verified fan-in is at/above the repo's own notable-dependents
+    # baseline (repo-relative, not a caller-count magic number). Env-overridable.
+    _RISK_TRIGGER = float(os.environ.get("GT_VERIFY_RISK_TRIGGER", "0.5"))
+except (TypeError, ValueError):
+    _RISK_TRIGGER = 0.5
+
 try:
     _raw_vcc = os.environ.get("GT_VERIFICATION_CYCLE_COST", "").strip()
     if _raw_vcc:
@@ -3657,15 +3675,18 @@ def verify_horizon_band(action_count: int, step_limit: int | None,
     )
 
 def _render_verify_emission(band: str, action_count: int, step_limit: int,
-                            edited_rels: set, covering_tests: list) -> str:
+                            edited_rels: set, covering_tests: list,
+                            risk_note: str = "") -> str:
     """Render an agent-visible verification horizon emission.
 
     Exact test names, file paths, and single-test commands are intentionally
     not rendered. The graph query may prove that a covering test exists, but
     benchmark-valid guidance must stay at the targeted-verification level.
+    ``risk_note`` (optional) names the highest-blast-radius unverified change.
     """
     return _product_render_verify_emission(
-        band, action_count, step_limit, edited_rels, covering_tests)
+        band, action_count, step_limit, edited_rels, covering_tests,
+        risk_note=risk_note)
 
 # Obligation SYMBOLS only (the edit_coverage_ratio numerator domain) — from
 # the per-task anchors artifact's obligations[], never the anchor superset
@@ -3694,6 +3715,28 @@ def _obligation_symbol_set() -> set[str]:
     return _oblig_syms_cache
 
 
+def _structural_risk_note() -> tuple[str, bool]:
+    """(risk_note, should_trigger) from the structural edit-risk of the edited-but-
+    untested obligation symbols. ('', False) when the flag is off, the import is
+    unavailable, or the risk is quiet (correct-or-quiet). The note NAMES the highest-
+    blast-radius unverified change; should_trigger is True when that risk is at/above
+    the repo's notable-dependents baseline (score >= _RISK_TRIGGER)."""
+    if not _STRUCTURAL_RISK_ON or _structural_edit_risk is None:
+        return ("", False)
+    try:
+        er = _structural_edit_risk(_db_path(), _obligation_symbol_set())
+    except Exception:  # noqa: BLE001 — risk scoring must never break the producer
+        return ("", False)
+    if er is None or er.is_quiet():
+        return ("", False)
+    tr = er.top_reason()
+    if tr is None:
+        return ("", False)
+    note = (f"{tr.name} ({tr.callers} verified caller(s) in the graph) — no test has "
+            f"exercised your change to it")
+    return (note, er.score >= _RISK_TRIGGER)
+
+
 def _verification_horizon_candidate() -> tuple[float, str, str, bool] | None:
     """Produce the Verification Horizon candidate for this turn — delivery-
     engine STAGE 4: bands from the Stage-1 behavioral signals; V from the
@@ -3714,6 +3757,20 @@ def _verification_horizon_candidate() -> tuple[float, str, str, bool] | None:
                              _oracle_tested_tokens)
     ec = edit_coverage_ratio(_obligation_symbol_set(), _oracle_edited_tokens)
 
+    # STRUCTURAL EDIT-RISK (flag-gated, budget-free): a high-blast-radius edited-but-
+    # untested symbol earns ONE verification advisory from WHAT was edited, regardless
+    # of budget/path — the research white space. Shares the advisory latch (once per
+    # task; re-armed on gate loss). risk_note also enriches the budget bands below.
+    _risk_note, _risk_trigger = _structural_risk_note()
+    if _risk_trigger and not _horizon_advisory_fired and _oracle_edited_rels:
+        _horizon_advisory_fired = True
+        _rk_cov = _covering_tests_for_symbols(_oracle_edited_tokens)
+        _rk_block = _render_verify_emission(
+            "advisory", _action_count, max(int(_GT_STEP_LIMIT or 0), _action_count, 1),
+            _oracle_edited_rels, _rk_cov, risk_note=_risk_note)
+        if _rk_block:
+            return (float(_SEV_NUDGE_VERIFY), "verify.horizon.advisory", _rk_block, True)
+
     if _GT_STEP_LIMIT is None:
         # H0 absent (interactive surface — Cursor/Claude Code, no step
         # budget): the COVERAGE GAP alone earns ONE budget-agnostic advisory
@@ -3726,7 +3783,7 @@ def _verification_horizon_candidate() -> tuple[float, str, str, bool] | None:
         covering = _covering_tests_for_symbols(_oracle_edited_tokens)
         block = _render_verify_emission(
             "advisory", _action_count, max(_action_count, 1),
-            _oracle_edited_rels, covering)
+            _oracle_edited_rels, covering, risk_note=_risk_note)
         if not block:
             return None
         return (float(_SEV_NUDGE_VERIFY), "verify.horizon.advisory", block, True)
@@ -3780,7 +3837,8 @@ def _verification_horizon_candidate() -> tuple[float, str, str, bool] | None:
     sev = composite_severity(base, budget_b, unmet_ratio)
 
     block = _render_verify_emission(
-        band, _action_count, _GT_STEP_LIMIT, _oracle_edited_rels, covering)
+        band, _action_count, _GT_STEP_LIMIT, _oracle_edited_rels, covering,
+        risk_note=_risk_note)
 
     if not block:
         return None

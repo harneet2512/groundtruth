@@ -214,6 +214,7 @@ _PRODUCT_PACKAGE_MODULES: dict[str, tuple[str, ...]] = {
         "obligations.py",
         "ledger.py",
         "patterns.py",
+        "edit_risk.py",
     ),
     # B1 delivery fact-filter — the single source for path-class + name-class
     # exclusion. Shipping these makes gt_mini_patch.py's `from groundtruth.delivery

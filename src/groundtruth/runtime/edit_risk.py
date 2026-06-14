@@ -1,0 +1,169 @@
+"""Structural edit-risk — time verification by the BLAST RADIUS of what was edited.
+
+GT's deterministic, graph-derived answer to "which unverified edit is risky enough
+to warrant a verification nudge" — the verified caller fan-in of an edited-but-
+untested symbol, scored RELATIVE to the repo's own fan-in distribution. This is the
+signal the 2026 verification-timing literature converged toward but never built on a
+STRUCTURAL axis: the field targets where the MODEL is uncertain (perplexity / PRM /
+entropy); GT targets where the CODE is structurally risky, because GT carries the
+call graph and is LLM-free + deterministic.
+
+Research basis:
+  - risk-TARGETED (not uniform) verification: RisCoSet (arXiv 2605.12201, 2026);
+    Anytime Verified Agents (TMLR, 2026); verification is ~8x compute so target the
+    risky tail (When To Solve, When To Verify, COLM 2025).
+  - prospective edit-risk gating: PreFlect (arXiv 2602.07187, 2026).
+  - the failure it prevents — editing past a correct state unverified:
+    Coherence Collapse (arXiv 2603.24631, 2026).
+  - external deterministic control > agent self-assessment: Mirror (arXiv 2604.19809,
+    2026 — an external constraint cut confident failures 76% vs self-calibration ~0%).
+
+Properties (CLAUDE.md pillars):
+  - Generalized: pure nodes/edges schema; CALLS fan-in works for EVERY language the
+    indexer supports; no `ast`, no `.py` assumption.
+  - Dynamic: risk is RELATIVE to the repo's own fan-in distribution (a hub in a small
+    repo and a hub in a huge repo are each flagged against their OWN baseline), never
+    a hardcoded caller threshold.
+  - Correct-or-quiet: 0.0 + no reasons when the graph is absent or no edited symbol
+    has VERIFIED dependents. A name_match (guessed) caller is NEVER blast radius.
+  - LLM-free, deterministic, $0.
+"""
+from __future__ import annotations
+
+import os
+import sqlite3
+from dataclasses import dataclass
+from typing import Iterable
+
+# The fact floor consumers already use: a CALLS edge below this is a name_match
+# guess, not a verified dependent, so it must NOT count as blast radius.
+_MIN_CONFIDENCE = 0.5
+# The "notable dependents" quantile that defines the risky tail, computed per-repo
+# (dynamic — not a caller-count magic number). A symbol at this fan-in scores ~0.5;
+# above it scores higher. The top quartile is the conventional tail boundary.
+_TAIL_Q = 0.75
+
+# Per-graph reference cache (the fan-in distribution is repo-invariant within a run;
+# the verify producer fires repeatedly — recompute once, not every fire).
+_REF_CACHE: dict[str, float] = {}
+
+
+@dataclass(frozen=True)
+class SymbolRisk:
+    name: str
+    callers: int      # DISTINCT verified incoming-CALLS dependents (the blast radius)
+    risk: float       # 0..1, saturating, relative to the repo fan-in reference
+
+
+@dataclass(frozen=True)
+class EditRisk:
+    score: float          # 0..1 — the MAX symbol risk (the riskiest edited symbol)
+    reasons: tuple        # tuple[SymbolRisk, ...] high -> low
+    reference_fanin: float  # the repo fan-in reference used (telemetry)
+
+    def is_quiet(self) -> bool:
+        return self.score <= 0.0 or not self.reasons
+
+    def top_reason(self):
+        return self.reasons[0] if self.reasons else None
+
+
+def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    try:
+        return any(r[1] == column for r in conn.execute(f"PRAGMA table_info({table})"))
+    except sqlite3.Error:
+        return False
+
+
+def _percentile(sorted_vals: list, q: float) -> float:
+    """Nearest-rank percentile of a NON-EMPTY ascending list; 0.0 if empty."""
+    if not sorted_vals:
+        return 0.0
+    if q <= 0:
+        return float(sorted_vals[0])
+    if q >= 1:
+        return float(sorted_vals[-1])
+    k = max(1, int(round(q * len(sorted_vals))))
+    return float(sorted_vals[min(k, len(sorted_vals)) - 1])
+
+
+def _repo_fanin_reference(conn, conf_clause: str, params) -> float:
+    """75th-percentile of NON-ZERO verified caller fan-in across the repo — the
+    'notable dependents' baseline that defines the risky tail (dynamic, per-repo)."""
+    try:
+        rows = conn.execute(
+            f"""SELECT COUNT(DISTINCT e.source_id) AS c
+                  FROM edges e
+                 WHERE e.type='CALLS' {conf_clause}
+                 GROUP BY e.target_id
+                HAVING c > 0""",
+            params,
+        ).fetchall()
+    except sqlite3.Error:
+        return 0.0
+    vals = sorted(int(r[0]) for r in rows if r and r[0])
+    return _percentile(vals, _TAIL_Q)
+
+
+def structural_edit_risk(
+    graph_db,
+    symbols: Iterable[str],
+    *,
+    min_confidence: float = _MIN_CONFIDENCE,
+    max_reasons: int = 3,
+) -> EditRisk:
+    """Structural risk of the edited-but-untested ``symbols``, by VERIFIED caller
+    fan-in scored relative to the repo. Correct-or-quiet on any absence.
+
+    ``symbols`` are matched case-insensitively against node names; only CALLS edges
+    at/above ``min_confidence`` count (a name_match guess is never blast radius)."""
+    names = {str(s).strip() for s in (symbols or []) if str(s).strip()}
+    if not graph_db or not names or not os.path.isfile(str(graph_db)):
+        return EditRisk(0.0, (), 0.0)
+    try:
+        conn = sqlite3.connect(str(graph_db))
+    except sqlite3.Error:
+        return EditRisk(0.0, (), 0.0)
+    reasons: list = []
+    try:
+        has_conf = _column_exists(conn, "edges", "confidence")
+        conf_clause = "AND e.confidence >= ?" if has_conf else ""
+        ref = _REF_CACHE.get(str(graph_db))
+        if ref is None:
+            ref = _repo_fanin_reference(
+                conn, conf_clause, (float(min_confidence),) if has_conf else ()
+            )
+            _REF_CACHE[str(graph_db)] = ref
+        for nm in names:
+            params = (nm, float(min_confidence)) if has_conf else (nm,)
+            try:
+                row = conn.execute(
+                    f"""SELECT COUNT(DISTINCT e.source_id)
+                          FROM edges e
+                          JOIN nodes nt ON e.target_id = nt.id
+                         WHERE e.type='CALLS'
+                           AND LOWER(nt.name) = LOWER(?)
+                           {conf_clause}""",
+                    params,
+                ).fetchone()
+            except sqlite3.Error:
+                continue
+            callers = int(row[0]) if row and row[0] else 0
+            if callers <= 0:
+                continue
+            # Saturating, relative to the repo's notable-dependents baseline (floored
+            # at 1 = the minimal non-trivial fan-in, so the score is always bounded).
+            denom = callers + max(ref, 1.0)
+            risk = callers / denom if denom > 0 else 0.0
+            reasons.append(SymbolRisk(nm, callers, risk))
+    finally:
+        conn.close()
+    reasons.sort(key=lambda r: (-r.risk, -r.callers, r.name))
+    reasons = reasons[:max_reasons]
+    score = reasons[0].risk if reasons else 0.0
+    return EditRisk(score, tuple(reasons), float(ref))
+
+
+def reset_reference_cache() -> None:
+    """Clear the per-graph fan-in reference cache (tests / a fresh index)."""
+    _REF_CACHE.clear()

@@ -55,6 +55,7 @@ def render_verify_emission(
     step_limit: int,
     edited_rels: set[str],
     covering_tests: list | None = None,
+    risk_note: str = "",
 ) -> str:
     import os
 
@@ -79,7 +80,7 @@ def render_verify_emission(
             f"GT: ~{remaining} of {step_limit} steps remain. Your edits to {edited_summary} "
             "are still unverified - nothing you have run exercises them. "
             f"Run {test_action} now. A failing result with "
-            f"~{remaining} steps left is still fixable; an unverified submission is not."
+            f"~{remaining} steps left is still fixable; unverified work you finalize is not."
         )
     elif band == "gate":
         body = (
@@ -87,16 +88,18 @@ def render_verify_emission(
             f"window to verify. You edited {edited_summary}; no test has "
             f"exercised them. Run {test_action} NOW. If it passes, finish. "
             "If it fails, make the single smallest fix and re-run. "
-            "Do not submit unverified work."
+            "Do not finalize unverified work."
         )
     elif band == "pivot":
         body = (
             f"GT: the targeted verification has failed and ~{remaining} steps remain. "
             "Re-read the failing assertion once; if the fix is not one edit "
-            "away, revert to your last passing state and submit the minimal "
+            "away, revert to your last passing state and finalize the minimal "
             "correct change."
         )
     else:
         return ""
+    if risk_note:
+        body = f"{body} Highest-impact unverified change: {risk_note}."
     return f'\n<gt-verify level="{band}">\n{body}\n</gt-verify>'
 
