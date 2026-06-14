@@ -80,6 +80,12 @@ INFRA_LOG_MARKERS: tuple[str, ...] = (
     "GT_SUBSTRATE_PULL_FAIL",
     "GT_RUN_PROOF_FAIL",
     "GT_PROOF_OOM",
+    # F4: the AGENT container hit its memory cap (mem_limit/memswap_limit == ${MEMORY},
+    # symmetric to the proof container). A capacity kill (rc/exit 137), not an agent-logic
+    # or GT-delivery failure — classified INFRA (excluded from the resolved-rate
+    # denominator), the same treatment as GT_PROOF_OOM. Uncapped, this was a silent host
+    # OOM-SIGKILL that surfaced as a generic failure; now it is a classified diagnostic.
+    "GT_AGENT_OOM",
     "GT_ARTIFACT_MISSING",
     "TASK_IMAGE_PULL_FAIL",
     # The task issue could not be materialized (no instruction.md, no task.toml

@@ -234,3 +234,105 @@ def test_fix3_run_routes_through_prepend_brief(agent_mod):
     assert '<gt-task-brief>\\n{brief}' not in src, (
         "run() still carries the unconditional inline wrap"
     )
+
+
+# ===========================================================================
+# F4 — agent-container memory cap + classified OOM (symmetric to proof container)
+# ===========================================================================
+# ROOT: the agent container is pier-launched via `docker compose up` (pier
+# docker.py: ["up","--detach","--wait"], NO --compatibility). The pier compose
+# base declared the cap as deploy.resources.limits.memory — a SWARM-ONLY key
+# that plain `docker compose up` SILENTLY IGNORES -> a DEAD key -> uncapped
+# agent container -> host OOM-SIGKILL surfaced unclassified. The proof container
+# (deepswe_full.yml `docker run --memory=10g --memory-swap=10g`) was already
+# capped + classified (rc 137 -> GT_PROOF_OOM). F4 restores symmetry: a
+# compose-spec mem_limit/memswap_limit (honored WITHOUT --compatibility) + the
+# rc=137 -> GT_AGENT_OOM classification at the pier-run step.
+_PIER_DIR = (
+    _ROOT / "deepswe-pier" / "src" / "pier" / "environments" / "docker"
+)
+_COMPOSE_BASE = _PIER_DIR / "docker-compose-base.yaml"
+
+
+def test_f4_pier_compose_base_has_runtime_mem_cap():
+    """The pier compose base must carry mem_limit + memswap_limit (the compose-spec
+    runtime keys that `docker compose up` honors WITHOUT --compatibility), driven by
+    the same ${MEMORY} that feeds the (Swarm-only, dead-without-compat) deploy block.
+    memswap_limit == mem_limit so a runaway hits a hard wall (container OOM rc 137)
+    rather than swapping into a silent host OOM."""
+    import yaml  # type: ignore
+
+    assert _COMPOSE_BASE.is_file(), f"pier compose base missing at {_COMPOSE_BASE}"
+    raw = _COMPOSE_BASE.read_text(encoding="utf-8")
+    # Both runtime keys present, both bound to ${MEMORY} (the fixed, per-task-invariant
+    # bound — NOT a task-id / repo-size-gated cap).
+    assert "mem_limit: ${MEMORY}" in raw, (
+        "pier compose base lacks the runtime-honored `mem_limit: ${MEMORY}` — "
+        "the agent container is uncapped under plain `docker compose up`"
+    )
+    assert "memswap_limit: ${MEMORY}" in raw, (
+        "pier compose base lacks `memswap_limit: ${MEMORY}` — without it swap "
+        "is unbounded and a runaway defers into a silent host OOM instead of "
+        "a classified container OOM-kill"
+    )
+    # The cap must reference the substrate-driven ${MEMORY} var (generalized), never
+    # a literal per-task number baked into the compose file.
+    doc = yaml.safe_load(raw)
+    main = doc["services"]["main"]
+    assert main.get("mem_limit") == "${MEMORY}"
+    assert main.get("memswap_limit") == "${MEMORY}"
+
+
+def test_f4_pier_run_step_classifies_agent_oom(outcome_mod):
+    """The pier-run step must classify an agent-container OOM (rc/exit 137) as
+    GT_AGENT_OOM and tee it to trial_output.log, mirroring the proof container's
+    PROOF_RC=137 -> GT_PROOF_OOM branch. Detection keys on PIER_RC==137 OR the
+    container's OOM signal in the trial log (pier may surface the in-container kill
+    via result.json rather than its own rc)."""
+    wf = _FULL_WF.read_text(encoding="utf-8")
+    # GT_AGENT_OOM is now a canonical INFRA marker (capacity kill, not agent/GT logic).
+    assert "GT_AGENT_OOM" in outcome_mod.INFRA_LOG_MARKERS, (
+        "GT_AGENT_OOM must be registered in INFRA_LOG_MARKERS so an agent-container "
+        "OOM is classified INFRA (excluded from the resolved denominator), like "
+        "GT_PROOF_OOM — never charged to the agent"
+    )
+    # The pier-run step branches on rc 137.
+    assert 'PIER_RC" -eq 137' in wf, (
+        "pier-run step has no `PIER_RC == 137` branch — an agent-container OOM "
+        "still falls into the generic PIER_RUN_FAIL bucket, unclassified"
+    )
+    # ...and emits the canonical GT_AGENT_OOM marker, tee'd into the trial log.
+    sites = [
+        ln for ln in wf.splitlines()
+        if 'echo "GT_AGENT_OOM' in ln
+    ]
+    assert sites, "pier-run step never echoes the GT_AGENT_OOM marker"
+    for ln in sites:
+        assert "tee -a trial_output.log" in ln, (
+            f"GT_AGENT_OOM echo does not tee to trial_output.log (classifier scans "
+            f"that file): {ln.strip()}"
+        )
+
+
+def test_f4_agent_oom_marker_classifies_infra(outcome_mod):
+    """End-to-end: a trial log carrying the GT_AGENT_OOM line classifies INFRA — a
+    capacity kill that invalidates the clean GT-vs-baseline comparison, identical
+    treatment to the proof OOM. (Red before F4: GT_AGENT_OOM absent from the marker
+    list -> the same log classified AGENT/UNKNOWN, charging a capacity kill to the
+    agent.)"""
+    log = (
+        "earlier agent output\n"
+        "GT_AGENT_OOM: agent container hit the memory cap (rc/exit=137 — capacity "
+        "kill, not logic).\n"
+    )
+    assert "GT_AGENT_OOM" in outcome_mod.find_infra_markers(log)
+    rec = outcome_mod.build_signal_record(
+        instance_id="task-x", reward=None, n_agent_steps=None,
+        exit_status=None, trial_log=log, cert_dir=None,
+    )
+    assert rec["failure_class"] == "INFRA", (
+        f"agent-container OOM did not classify INFRA (got {rec['failure_class']!r})"
+    )
+    # And it is excluded from the resolved-rate denominator (capacity kills never
+    # count against GT's resolve rate).
+    assert "INFRA" in outcome_mod.DENOMINATOR_EXCLUDED

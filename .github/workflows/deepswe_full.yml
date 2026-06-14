@@ -1154,6 +1154,27 @@ jobs:
             echo "DEEPSWE_ADAPTER_FAIL: adapter error found via structured result.json scan" | tee -a trial_output.log
             exit 1
           fi
+          # F4: AGENT-CONTAINER OOM is now a CLASSIFIED capacity kill, not a silent host
+          # SIGKILL. The agent container is memory-capped symmetrically to the proof
+          # container (pier compose mem_limit/memswap_limit == ${MEMORY}, honored by
+          # `docker compose up` WITHOUT --compatibility — the Swarm-only deploy.resources
+          # .limits key was a DEAD key). A runaway in the agent process now OOM-kills the
+          # CONTAINER (exit 137 == 128+SIGKILL) instead of being swap-deferred into a host
+          # OOM. Mirror the proof container's PROOF_RC=137 -> GT_PROOF_OOM handling: detect
+          # 137 from pier's rc OR the container exit recorded in the trial log / job results
+          # (pier may surface the in-container kill via result.json rather than its own rc),
+          # and classify it GT_AGENT_OOM so the outcome classifier sees a capacity kill, not
+          # a generic PIER_RUN_FAIL. The cap is the same fixed bound for every task.
+          # Correct-or-quiet: the rc=137 check catches pier's own OOM; the grep fallback
+          # keys ONLY on docker-container-OOM-specific markers (OOMKilled / exit code 137),
+          # never the bare 'SIGKILL'/'signal: killed' tokens — those can legitimately appear
+          # in a CLEAN run's tee'd trajectory (test output, dmesg reads) and would FALSE-POSITIVE
+          # a resolved task into INFRA, silently dropping it from the denominator (the worst
+          # direction for flip measurement; the proof-container branch keys on rc=137 alone).
+          if [ "$PIER_RC" -eq 137 ] || grep -qE "OOMKilled|exit code 137|exited with code 137" trial_output.log; then
+            echo "GT_AGENT_OOM: agent container hit the memory cap (rc/exit=137 — capacity kill, not logic). The mem_limit/memswap_limit cap classified it; uncapped this was a silent host OOM-SIGKILL." | tee -a trial_output.log
+            exit 1
+          fi
           if [ "$PIER_RC" -ne 0 ]; then
             echo "PIER_RUN_FAIL: pier run exited rc=$PIER_RC (pipefail surfaced — not tee's 0)" | tee -a trial_output.log
             exit 1
