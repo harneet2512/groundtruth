@@ -408,6 +408,11 @@ _EDIT_KW_RE = re.compile(r"(?:^|[|&;]\s*)(sed\s+-i|tee\b|patch\b|apply_patch\b)"
 _PATCH_APPLY_RE = re.compile(
     r"(?:^|[|&;]\s*)(apply_patch\b|git\s+apply\b|patch\b)",
 )
+# A patch command carrying a no-op/inspection flag (git apply --check/--stat/
+# --numstat/--summary; patch --dry-run) WRITES NOTHING -> it must NOT classify as
+# an edit. Correct-or-quiet: never fabricate an edit event for a command that does
+# not modify a file (the LIPI-found dry-run false-positive in a7a4be87).
+_PATCH_NOOP_RE = re.compile(r"(?:^|\s)--(?:check|stat|numstat|summary|dry-run)\b")
 # apply_patch payload markers (OpenAI/Codex format).
 _APPLY_PATCH_FILE_RE = re.compile(
     r"^\s*\*\*\*\s+(?:Update|Add|Delete)\s+File:\s*(.+?)\s*$", re.MULTILINE,
@@ -432,7 +437,10 @@ def _is_patch_apply(cmd: str) -> bool:
     if not cmd:
         return False
     first = cmd.split("\n", 1)[0]
-    return bool(_PATCH_APPLY_RE.search(first))
+    if not _PATCH_APPLY_RE.search(first):
+        return False
+    # No-op/inspection flags write nothing -> not an edit (correct-or-quiet).
+    return not _PATCH_NOOP_RE.search(first)
 
 
 def _strip_diff_path(raw: str, strip: int = 1) -> str:

@@ -186,6 +186,30 @@ def test_existing_edit_shapes_unchanged():
     assert g._classify("ls -la") == (None, None)
 
 
+def test_patch_apply_dry_run_flags_are_not_edits():
+    """No-op / inspection patch flags WRITE NOTHING -> NOT an edit (correct-or-
+    quiet). git apply --check/--stat/--numstat/--summary and patch --dry-run must
+    NOT classify as a patch-apply edit. RED before the _PATCH_NOOP_RE guard
+    (a7a4be87 fabricated a phantom edit event for these); GREEN after — the LIPI
+    (w06vbwomy) found this dry-run false-positive. Generalized: universal git/patch
+    inspection flags, no task IDs."""
+    # real applies ARE edits (no regression).
+    assert g._is_patch_apply("git apply /tmp/p.diff") is True
+    assert g._is_patch_apply("patch -p1 < /tmp/p.diff") is True
+    # no-op / inspection variants WRITE NOTHING -> NOT edits.
+    for noop in (
+        "git apply --check /tmp/p.diff",
+        "git apply --stat /tmp/p.diff",
+        "git apply --numstat /tmp/p.diff",
+        "git apply --summary /tmp/p.diff",
+        "patch -p1 --dry-run < /tmp/p.diff",
+    ):
+        assert g._is_patch_apply(noop) is False, f"dry-run misread as edit: {noop!r}"
+        # and the classifier must NOT fabricate a post_edit event for it.
+        kind, _ = g._classify(noop)
+        assert kind != "post_edit", f"dry-run fabricated a post_edit: {noop!r}"
+
+
 # ===========================================================================
 # END-TO-END: drive `_augment_output` (the REAL post-edit population path), then
 # call edit_coverage_ratio in the EXACT 2-arg consumer form at gt_mini_patch:3331.
