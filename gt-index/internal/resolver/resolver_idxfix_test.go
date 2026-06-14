@@ -223,3 +223,67 @@ func TestBuildNodeMeta_GoReceiverNamePlumbing(t *testing.T) {
 		t.Errorf("python node: ReceiverName = %q, want \"\" (Go-only)", got)
 	}
 }
+
+func TestResolve_NameMatchAliasBridgesCaseStyleButStaysFallback(t *testing.T) {
+	files := []string{"src/caller.ts", "src/users.py"}
+	langs := []string{"typescript", "python"}
+	fm := BuildFileMap(files, langs)
+
+	nodeIDs := map[string][]int64{
+		"caller":   {1},
+		"get_user": {2},
+	}
+	fileNodeIDs := map[string]map[string][]int64{
+		"src/caller.ts": {"caller": {1}},
+		"src/users.py":  {"get_user": {2}},
+	}
+	meta := map[int64]NodeMeta{
+		1: {Label: "Function", File: "src/caller.ts", Name: "caller"},
+		2: {Label: "Function", File: "src/users.py", Name: "get_user"},
+	}
+	calls := []parser.CallRef{
+		{CallerNodeIdx: 0, CalleeName: "getUser", CalleeQualified: "getUser", Line: 4, File: "src/caller.ts"},
+	}
+
+	resolved := Resolve(calls, nodeIDs, fileNodeIDs, []int64{1}, nil, fm, meta)
+	if len(resolved) != 1 {
+		t.Fatalf("expected alias fallback edge, got %d: %+v", len(resolved), resolved)
+	}
+	r := resolved[0]
+	if r.TargetNodeID != 2 {
+		t.Fatalf("target = %d, want get_user node 2", r.TargetNodeID)
+	}
+	if r.Method != "name_match" || r.EvidenceType != "name_match_alias" {
+		t.Fatalf("method/evidence = %q/%q, want name_match/name_match_alias", r.Method, r.EvidenceType)
+	}
+	if r.TrustTier == "CERTIFIED" || r.Confidence >= 0.9 {
+		t.Fatalf("alias fallback certified: tier=%s confidence=%.2f", r.TrustTier, r.Confidence)
+	}
+}
+
+func TestResolve_NameMatchAliasDoesNotExpandShortNames(t *testing.T) {
+	files := []string{"src/caller.ts", "src/ids.py"}
+	langs := []string{"typescript", "python"}
+	fm := BuildFileMap(files, langs)
+
+	nodeIDs := map[string][]int64{
+		"caller": {1},
+		"id":     {2},
+	}
+	fileNodeIDs := map[string]map[string][]int64{
+		"src/caller.ts": {"caller": {1}},
+		"src/ids.py":    {"id": {2}},
+	}
+	meta := map[int64]NodeMeta{
+		1: {Label: "Function", File: "src/caller.ts", Name: "caller"},
+		2: {Label: "Function", File: "src/ids.py", Name: "id"},
+	}
+	calls := []parser.CallRef{
+		{CallerNodeIdx: 0, CalleeName: "ID", CalleeQualified: "ID", Line: 4, File: "src/caller.ts"},
+	}
+
+	resolved := Resolve(calls, nodeIDs, fileNodeIDs, []int64{1}, nil, fm, meta)
+	if len(resolved) != 0 {
+		t.Fatalf("short alias ID->id must abstain, got %+v", resolved)
+	}
+}

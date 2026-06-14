@@ -4,12 +4,14 @@ BFS from trusted anchors up to max_depth hops, traversing graph.db edges.
 Each reachable file gets a reach score that decays with path length and
 scales with edge type weight × confidence.
 
-Edge type weights (language-agnostic):
-  CALLS    = 1.0
-  USES     = 0.8
-  IMPORTS  = 0.6
-  CONTAINS = 0.4
-  INHERITS = 0.4
+Edge type weights (language-agnostic, stored graph edges only):
+  CALLS      = 1.0
+  IMPORTS    = 0.6
+  CONTAINS   = 0.4
+  EXTENDS    = 0.4
+  IMPLEMENTS = 0.4
+  COMPOSES   = 0.4
+  RE_EXPORTS = 0.5
 """
 from __future__ import annotations
 
@@ -21,10 +23,12 @@ from typing import Optional
 # Edge type → reach weight (hand-set, not per-language)
 EDGE_TYPE_WEIGHT: dict[str, float] = {
     "CALLS": 1.0,
-    "USES": 0.8,
     "IMPORTS": 0.6,
     "CONTAINS": 0.4,
-    "INHERITS": 0.4,
+    "EXTENDS": 0.4,
+    "IMPLEMENTS": 0.4,
+    "COMPOSES": 0.4,
+    "RE_EXPORTS": 0.5,
 }
 _DEFAULT_EDGE_WEIGHT = 0.3  # for unknown edge types
 

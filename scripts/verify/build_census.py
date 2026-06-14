@@ -30,6 +30,10 @@ import json
 import os
 import sqlite3
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "metrics"))
+from graph_bases import graph_bases_contract  # noqa: E402
 
 
 def _strict() -> bool:
@@ -160,6 +164,31 @@ def census_cochanges(conn: sqlite3.Connection) -> tuple[bool, str]:
     return True, f"cochanges pairs={n}" + (" (shallow clone / no git history)" if n == 0 else "")
 
 
+def census_graph_bases(conn: sqlite3.Connection) -> tuple[bool, str]:
+    gb = graph_bases_contract(conn)
+    missing = list(gb.get("evaluable_missing") or [])
+    required = list(gb.get("required_missing") or [])
+    duplicates = list(gb.get("duplicate_names") or [])
+    pct = float(gb.get("base_evaluable_pct") or 0.0)
+    detail = (
+        f"{gb.get('base_evaluable_count', 0)}/{gb.get('base_total_count', 0)} "
+        f"evaluatable ({pct:.2f}%); depth_present="
+        f"{gb.get('depth_present_count', 0)}/{gb.get('depth_total_count', 0)}; "
+        f"fk_violations={gb.get('foreign_key_violations', 0)}"
+    )
+    if gb.get("foreign_key_violations", 0) != 0:
+        return False, detail
+    if duplicates:
+        return False, f"duplicate [graph bases] names: {duplicates}; {detail}"
+    if missing:
+        return False, f"[graph bases] not evaluatable: {missing}; {detail}"
+    if required:
+        return False, f"[graph bases] required empty: {required}; {detail}"
+    if pct < 100.0:
+        return False, detail
+    return True, detail
+
+
 # ── PART B — END-TO-END PIPELINE PROOF ──────────────────────────────────────
 
 def e2e_brief(db: str, root: str) -> tuple[bool, str]:
@@ -225,6 +254,7 @@ def run_build_census(db: str, root: str) -> "tuple[bool, list]":
         lang = _dominant_lang(conn)
         checks = [
             ("census_tables", lambda: census_tables(conn)),
+            ("census_graph_bases", lambda: census_graph_bases(conn)),
             ("census_edges", lambda: census_edges(conn, lang)),
             ("census_properties", lambda: census_properties(conn, lang)),
             ("census_closure", lambda: census_closure(conn)),

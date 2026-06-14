@@ -418,12 +418,17 @@ class TestEdgeTypeMapping:
         expected_types = {
             "CALLS", "IMPORTS", "DEFINES", "INHERITS", "IMPLEMENTS",
             "EXTENDS", "COMPOSES", "RE_EXPORTS", "HANDLES_ROUTE",
+            "API_CALL", "READS", "WRITES", "DATA_FLOW", "RAISES",
+            "PRECEDES", "CO_SERIALIZES",
         }
         mapped_types = set(_EDGE_TYPE_TO_REF.keys())
+        assert expected_types.issubset(mapped_types)
 
         # Check the types we explicitly require are mapped
         for t in ("CALLS", "IMPORTS", "EXTENDS", "IMPLEMENTS",
-                  "COMPOSES", "RE_EXPORTS", "HANDLES_ROUTE"):
+                  "COMPOSES", "RE_EXPORTS", "HANDLES_ROUTE", "API_CALL",
+                  "READS", "WRITES", "DATA_FLOW", "RAISES", "PRECEDES",
+                  "CO_SERIALIZES"):
             assert t in mapped_types, (
                 f"Edge type '{t}' missing from _EDGE_TYPE_TO_REF. "
                 "Go indexer writes this type but Python cannot map it."
@@ -436,7 +441,9 @@ class TestEdgeTypeMapping:
 
         # Create a node for each edge type
         edge_types = ["CALLS", "IMPORTS", "EXTENDS", "IMPLEMENTS",
-                      "COMPOSES", "RE_EXPORTS", "HANDLES_ROUTE"]
+                      "COMPOSES", "RE_EXPORTS", "HANDLES_ROUTE", "API_CALL",
+                      "READS", "WRITES", "DATA_FLOW", "RAISES", "PRECEDES",
+                      "CO_SERIALIZES"]
         nodes = [
             {"name": "source", "file_path": "src/s.py", "language": "Python"},
         ]

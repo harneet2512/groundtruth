@@ -50,13 +50,22 @@ _LABEL_TO_KIND: dict[str, str] = {
 _EDGE_TYPE_TO_REF: dict[str, str] = {
     "CALLS": "call",
     "IMPORTS": "import",
-    "DEFINES": "call",
-    "INHERITS": "type_usage",
     "IMPLEMENTS": "type_usage",
     "EXTENDS": "type_usage",
     "COMPOSES": "type_usage",
     "RE_EXPORTS": "import",
     "HANDLES_ROUTE": "call",
+    "API_CALL": "call",
+    "READS": "data_flow",
+    "WRITES": "data_flow",
+    "DATA_FLOW": "data_flow",
+    "RAISES": "exception_flow",
+    "PRECEDES": "control_flow",
+    "CO_SERIALIZES": "data_flow",
+    # Back-compat for old Python-index DBs and lexical witness tests. The current
+    # Go graph stores hierarchy as EXTENDS/IMPLEMENTS; DEFINES is not a graph base.
+    "DEFINES": "call",
+    "INHERITS": "type_usage",
 }
 
 
