@@ -384,15 +384,97 @@ func computeConfidence(method string, candidateCount int) float64 {
 		return 0.9
 	case "name_match":
 		if candidateCount <= 1 {
-			return 0.9
+			return 0.6
 		} else if candidateCount == 2 {
 			return 0.6
 		} else if candidateCount <= 5 {
 			return 0.4
 		}
 		return 0.2
+	case "name_match_alias":
+		if candidateCount <= 1 {
+			return 0.5
+		} else if candidateCount == 2 {
+			return 0.35
+		} else if candidateCount <= 5 {
+			return 0.25
+		}
+		return 0.15
 	}
 	return 0.3
+}
+
+func canonicalNameKey(name string) string {
+	tokens := splitNameTokens(name)
+	if len(tokens) == 0 {
+		return ""
+	}
+	total := 0
+	for _, tok := range tokens {
+		total += len(tok)
+	}
+	if total < 4 {
+		return ""
+	}
+	return strings.Join(tokens, "")
+}
+
+func splitNameTokens(name string) []string {
+	var tokens []string
+	var cur []rune
+	flush := func() {
+		if len(cur) == 0 {
+			return
+		}
+		tokens = append(tokens, strings.ToLower(string(cur)))
+		cur = cur[:0]
+	}
+	rs := []rune(strings.TrimSpace(name))
+	for i, r := range rs {
+		isLetter := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
+		isDigit := r >= '0' && r <= '9'
+		if !isLetter && !isDigit {
+			flush()
+			continue
+		}
+		if len(cur) > 0 && r >= 'A' && r <= 'Z' {
+			prev := rs[i-1]
+			nextLower := i+1 < len(rs) && rs[i+1] >= 'a' && rs[i+1] <= 'z'
+			prevLowerOrDigit := (prev >= 'a' && prev <= 'z') || (prev >= '0' && prev <= '9')
+			prevUpper := prev >= 'A' && prev <= 'Z'
+			if prevLowerOrDigit || (prevUpper && nextLower) {
+				flush()
+			}
+		}
+		cur = append(cur, r)
+	}
+	flush()
+	return tokens
+}
+
+func buildNameAliasIndex(nodeIDs map[string][]int64) map[string][]int64 {
+	alias := make(map[string][]int64)
+	seen := make(map[string]map[int64]bool)
+	for name, ids := range nodeIDs {
+		key := canonicalNameKey(name)
+		if key == "" {
+			continue
+		}
+		if seen[key] == nil {
+			seen[key] = make(map[int64]bool)
+		}
+		for _, id := range ids {
+			if id <= 0 || seen[key][id] {
+				continue
+			}
+			seen[key][id] = true
+			alias[key] = append(alias[key], id)
+		}
+	}
+	for key := range alias {
+		sort.Slice(alias[key], func(i, j int) bool { return alias[key][i] < alias[key][j] })
+	}
+	return alias
 }
 
 // pickBestImportCandidate implements the same-dir tie-break the Strategy-1.5 comment
@@ -469,6 +551,41 @@ func pickBestLocalTarget(candidates []int64, callerID int64, meta map[int64]Node
 	return best
 }
 
+func pickBestNameMatchTarget(candidates []int64, callerID int64, callerFile string, meta map[int64]NodeMeta) int64 {
+	best := int64(0)
+	bestFile := ""
+	bestCallable := false
+	bestSameDir := false
+	callerDir := filepath.ToSlash(filepath.Dir(callerFile))
+	for _, tid := range candidates {
+		if tid == callerID {
+			continue
+		}
+		tf := ""
+		callable := false
+		if meta != nil {
+			if m, ok := meta[tid]; ok {
+				tf = filepath.ToSlash(m.File)
+				callable = m.Label == "Function" || m.Label == "Method"
+			}
+		}
+		sameDir := tf != "" && filepath.ToSlash(filepath.Dir(tf)) == callerDir
+		switch {
+		case best == 0:
+			best, bestFile, bestCallable, bestSameDir = tid, tf, callable, sameDir
+		case callable && !bestCallable:
+			best, bestFile, bestCallable, bestSameDir = tid, tf, true, sameDir
+		case callable == bestCallable && sameDir && !bestSameDir:
+			best, bestFile, bestSameDir = tid, tf, true
+		case callable == bestCallable && sameDir == bestSameDir:
+			if tf < bestFile || (tf == bestFile && tid < best) {
+				best, bestFile = tid, tf
+			}
+		}
+	}
+	return best
+}
+
 // NodeMeta carries class/interface membership data for self.method resolution.
 type NodeMeta struct {
 	Label      string
@@ -485,23 +602,24 @@ type NodeMeta struct {
 
 // Resolve takes all call refs and all defined nodes, and resolves calls to definitions.
 // Resolution strategies (in priority order):
-//  1.    Same-file exact name match → "same_file" (conf=1.0)
-//  1.25  Import-verified cross-file → "import" (conf=1.0)
-//  1.75  self/this/Self method via caller's class → "same_file" (conf=1.0)
-//  1.9   Verified-unique: globally unique name → "verified_unique" (conf=0.95)
-//  1.93  Import-scoped type_flow: import narrows class → "import_type" (conf=0.95)
-//  2b    Declared-FIELD-type receiver: self.<field>.m() via the field's declared
-//        annotation → "type_flow" (conf=0.9, evidence "field_type"). XTA over the
-//        class_field-type set (Tip & Palsberg OOPSLA 2000), CHA-resolved over the
-//        hierarchy. Fills the gap 1.94a/1.96/1.95 miss: an annotation-only typed
-//        field (injected/inherited/declared, never locally assigned).
-//  1.94  Single/few-implementor: method unique to 1-3 classes → "impl_method" (conf=0.4-0.85)
-//  1.95  Type-flow: qualified call on known class → "type_flow" (conf=0.9)
-//  1.96  Assignment-flow: x = ClassName(); x.method() → "type_flow" (conf=0.9)
-//        PyCG ICSE 2021: 99% precision from assignment tracking rules.
-//  1.97  Return-type bridging: get_user().save() via return type → "return_type" (conf=0.85)
-//  1.98  Unique-method-class: method name unique to one class → "unique_method" (conf=0.85)
-//  2.    Cross-file name match → "name_match" (conf=0.2-0.6, fallback)
+//  1. Same-file exact name match → "same_file" (conf=1.0)
+//     1.25  Import-verified cross-file → "import" (conf=1.0)
+//     1.75  self/this/Self method via caller's class → "same_file" (conf=1.0)
+//     1.9   Verified-unique: globally unique name → "verified_unique" (conf=0.95)
+//     1.93  Import-scoped type_flow: import narrows class → "import_type" (conf=0.95)
+//     2b    Declared-FIELD-type receiver: self.<field>.m() via the field's declared
+//     annotation → "type_flow" (conf=0.9, evidence "field_type"). XTA over the
+//     class_field-type set (Tip & Palsberg OOPSLA 2000), CHA-resolved over the
+//     hierarchy. Fills the gap 1.94a/1.96/1.95 miss: an annotation-only typed
+//     field (injected/inherited/declared, never locally assigned).
+//     1.94  Single/few-implementor: method unique to 1-3 classes → "impl_method" (conf=0.4-0.85)
+//     1.95  Type-flow: qualified call on known class → "type_flow" (conf=0.9)
+//     1.96  Assignment-flow: x = ClassName(); x.method() → "type_flow" (conf=0.9)
+//     PyCG ICSE 2021: 99% precision from assignment tracking rules.
+//     1.97  Return-type bridging: get_user().save() via return type → "return_type" (conf=0.85)
+//     1.98  Unique-method-class: method name unique to one class → "unique_method" (conf=0.85)
+//  2. Cross-file name match → "name_match" (conf=0.2-0.6, fallback)
+//
 // assignmentIndex is set by the caller before Resolve() for Strategy 1.96.
 var assignmentIndex map[string]*AssignmentMap
 
@@ -1016,6 +1134,7 @@ func Resolve(
 ) []ResolvedCall {
 	// Build import index: file → imported name → list of candidate target files
 	importIndex := buildImportIndex(allImports, fileMap)
+	nameAliasIndex := buildNameAliasIndex(nodeIDs)
 
 	// metaMap: nodeID → NodeMeta, the single accessor for the optional variadic
 	// nodeMeta[0] (nil when absent). Used by the Strategy-1.5 same-dir tie-break (#40).
@@ -1142,6 +1261,10 @@ func Resolve(
 		}
 
 		calleeName := call.CalleeName
+		var targets []int64
+		var ok bool
+		matchMethod := "name_match"
+		evidence := "name_match"
 
 		// Strategy 1: Same-file exact name match (only when unambiguous)
 		if fileNodes, ok := fileNodeIDs[call.File]; ok {
@@ -2030,24 +2153,40 @@ func Resolve(
 			}
 		}
 
-		// Strategy 2: Cross-file name match (fallback, 2+ candidates only).
+		// Strategy 2: Cross-file name match (fallback). Exact spelling matches use
+		// the raw name index; if none exists, the alias index bridges common naming
+		// style variation (getUser/get_user/GetUser) at lower confidence.
 		// Qualified builtin calls were already dropped by the last-chance block above.
-		if targets, ok := nodeIDs[calleeName]; ok {
+		targets, ok = nodeIDs[calleeName]
+		matchMethod = "name_match"
+		evidence = "name_match"
+		if !ok {
+			if key := canonicalNameKey(calleeName); key != "" {
+				targets, ok = nameAliasIndex[key]
+				if ok {
+					matchMethod = "name_match_alias"
+					evidence = "name_match_alias"
+				}
+			}
+		}
+		if ok {
 			candidateCount := 0
-			var bestTarget int64
+			var candidates []int64
 
 			for _, targetID := range targets {
 				if targetID == callerID {
 					continue
 				}
 				candidateCount++
-				if bestTarget == 0 {
-					bestTarget = targetID
-				}
+				candidates = append(candidates, targetID)
 			}
 
-			if bestTarget != 0 && candidateCount > 1 {
-				conf := computeConfidence("name_match", candidateCount)
+			if candidateCount > 0 && (matchMethod == "name_match_alias" || candidateCount > 1) {
+				bestTarget := pickBestNameMatchTarget(candidates, callerID, call.File, metaMap)
+				if bestTarget == 0 {
+					continue
+				}
+				conf := computeConfidence(matchMethod, candidateCount)
 				key := edgeKey{callerID, bestTarget, "CALLS"}
 				if !seen[key] {
 					seen[key] = true
@@ -2060,7 +2199,7 @@ func Resolve(
 						Confidence:     conf,
 						CandidateCount: candidateCount,
 						TrustTier:      tierFor(conf),
-						EvidenceType:   "name_match",
+						EvidenceType:   evidence,
 					})
 				}
 			}
@@ -2666,8 +2805,8 @@ func appendUnique(slice []string, val string) []string {
 // that symbol through the barrel.
 //
 // For each re-export {ExportedName: "Foo", SourceModule: "./Foo", File: "components/index.ts"}:
-//   1. Find the source file in fileMap via SourceModule
-//   2. Register the barrel file's fileMap keys as also pointing to the source file
+//  1. Find the source file in fileMap via SourceModule
+//  2. Register the barrel file's fileMap keys as also pointing to the source file
 //
 // This way `import { Foo } from './components'` → barrel index.ts → source Foo.ts.
 func ChainReExports(
