@@ -107,6 +107,16 @@ def _reset_oracle_state(patch_mod, monkeypatch, tmp_path):
 
 
 def test_outranked_cochange_rearms_and_delivers_later(patch_mod, monkeypatch, tmp_path):
+    """LANE-SPLIT (2026-06-13) UPDATE: contract + cochange are both Lane A now.
+
+    PRE-LANE-SPLIT this asserted the gate-competition model (contract wins,
+    cochange is outranked and re-arms to deliver on turn 2).  The data-plane /
+    control-plane bulkhead removed that competition: both context blocks deliver
+    on the edit turn, and the shared content+state ledger suppresses the
+    byte-identical turn-2 re-send.  The latch re-arm for Lane A producers is now
+    intentionally dead (they never lose the turn).  The l5.failure-vs-scope
+    re-arm path (a real Lane B competition) is still covered by
+    test_outranked_l5_failure_nudge_rearms below."""
     _reset_oracle_state(patch_mod, monkeypatch, tmp_path)
     monkeypatch.setattr(patch_mod, "_oracle_focus_cache",
                         {"capture_snapshot", "snapshots"}, raising=False)
@@ -141,22 +151,31 @@ def test_outranked_cochange_rearms_and_delivers_later(patch_mod, monkeypatch, tm
     monkeypatch.setattr(patch_mod, "_cochange_block", fake_cochange,
                         raising=False)
 
-    # Turn 1: edit -> contract wins, cochange is outranked.  The one-shot must
-    # RE-ARM (deferred), per the producer's own "only on a REAL emit" contract.
+    # LANE-SPLIT 2026-06-13: contract AND cochange are now BOTH Lane A (the
+    # always-on data plane).  They no longer COMPETE in the oracle gate — the
+    # old "contract wins, cochange outranked and deferred to turn 2" model is
+    # GONE by design (bulkhead pattern; the data plane delivers all of its
+    # always-needed context every edit turn, bounded only by the shared
+    # content+state ledger dedup).  So BOTH deliver on the edit turn.
     out1 = {"output": "x"}
     patch_mod._augment_output({"command": "sed -i 's/a/b/' pkg/m.py"}, out1)
-    assert contract in out1["output"]
-    assert cochange not in out1["output"]
-    assert patch_mod._cochange_fired is False, (
-        "outranked cochange candidate burned its one-shot latch — the "
-        "completeness signal is destroyed, not deferred"
+    assert contract in out1["output"], "Lane A contract must deliver on the edit turn"
+    assert cochange in out1["output"], (
+        "Lane A cochange must ALSO deliver on the edit turn — it is the "
+        "completeness pillar of the always-on data plane, not a gate loser"
     )
 
-    # Turn 2: same edit again -> contract dedup-suppressed ('delivered'),
-    # the re-armed cochange must now deliver.
+    # Turn 2: the SAME edit in the SAME behavioral state -> identical content ->
+    # identical content+state hash -> the SHARED _oracle_delivered_hashes ledger
+    # suppresses BOTH re-sends (no double-ship across turns either).
     out2 = {"output": "y"}
     patch_mod._augment_output({"command": "sed -i 's/a/b/' pkg/m.py"}, out2)
-    assert cochange in out2["output"]
+    assert contract not in out2["output"], (
+        "turn-2 byte-identical contract must be dedup-suppressed by the ledger"
+    )
+    assert cochange not in out2["output"], (
+        "turn-2 byte-identical cochange must be dedup-suppressed by the ledger"
+    )
 
 
 def test_outranked_l5_failure_nudge_rearms(patch_mod, monkeypatch, tmp_path):

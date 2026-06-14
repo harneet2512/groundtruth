@@ -89,6 +89,11 @@ except ImportError as _import_err:
     class _ProductSignalOutcome:
         DELIVERED = "delivered"
         SUPPRESSED_WRONG_PHASE = "suppressed_wrong_phase"
+        # LANE-SPLIT 2026-06-13: Lane A cross-lane content-hash dedup records a
+        # suppressed re-send under this outcome (parity with the real enum's
+        # SignalOutcome.SUPPRESSED_DUPLICATE — must exist on the stub too so the
+        # in-container fallback path never AttributeErrors).
+        SUPPRESSED_DUPLICATE = "suppressed_duplicate"
     class _ProductTrajectoryState:
         def __init__(self, **kw): pass
     def _product_derive_phase(state): return None
@@ -3654,6 +3659,26 @@ def _oracle_telemetry_write(suppressed, winner) -> None:
         pass
 
 
+def _oracle_bstate() -> str:
+    """The STATE-AWARE dedup key shared by BOTH delivery lanes.
+
+    Hoisted out of _oracle_gate_blocks (LANE-SPLIT 2026-06-13) so Lane A (the
+    always-on data plane: l3.contract / l3.cochange / l3b.evidence) and Lane B
+    (the oracle steer gate) hash content against the IDENTICAL behavioral-state
+    key.  Same text in a different agent state (more edits, more tests, deeper
+    into the budget) is a DIFFERENT delivery context -> a new hash -> it
+    re-competes.  Cross-lane dedup is correct ONLY if both lanes compute this
+    byte-identically; that is the entire point of the single helper."""
+    return f"{len(_oracle_edited_rels)}:{len(_oracle_tested_tokens)}:{_action_count // 30}"
+
+
+def _oracle_content_hash(text: str) -> str:
+    """The 8-char content+state hash both lanes register into
+    _oracle_delivered_hashes.  Parity with the gate's :3690 computation."""
+    import hashlib as _hl
+    return _hl.sha256((text + _oracle_bstate()).encode("utf-8")).hexdigest()[:8]
+
+
 def _oracle_gate_blocks(cands) -> str:
     """The live decision gate over this turn's candidate blocks.
 
@@ -3682,7 +3707,10 @@ def _oracle_gate_blocks(cands) -> str:
     # Same text in a different agent state (more edits, more tests, more files
     # opened, deeper into the budget) is a DIFFERENT delivery context — the
     # agent may now act on it when it previously ignored it.
-    _bstate = f"{len(_oracle_edited_rels)}:{len(_oracle_tested_tokens)}:{_action_count // 30}"
+    # LANE-SPLIT 2026-06-13: computed via the shared _oracle_bstate() helper so
+    # Lane A (early data-plane delivery) and Lane B (this gate) hash against the
+    # byte-identical state key — cross-lane content-hash dedup depends on it.
+    _bstate = _oracle_bstate()
     for sev, kind, text, edit_bound in cands:
         if not text or _ledger_should_skip_kind(kind):
             continue
@@ -3793,6 +3821,100 @@ def _scope_completeness_block() -> str:
         return ""
 
 
+# ---------------------------------------------------------------------------
+# LANE-SPLIT (2026-06-13) — the data-plane / control-plane bulkhead.
+#
+# THE HYBRID (Nygard, *Release It!* — bulkhead pattern; data-plane / control-
+# plane separation): _augment_output's oracle route used to be ONE monolithic
+# collect-then-gate block with a SINGLE delivery site DOWNSTREAM of the gate.
+# A crash anywhere upstream of, or inside, the gate returned the function having
+# delivered NOTHING — the 0/8 stub-crash failure: the contract was computed and
+# queued, but the gate died, so it never reached the agent.
+#
+# LANE A (data plane, ALWAYS-ON): the contract / consistency / completeness
+# producers (l3.contract, l3b.evidence, l3.cochange).  Delivers via its OWN
+# correct-or-quiet gate = (content non-empty) AND (content-hash NOT already in
+# the shared ledger).  Appends to out['output'] + records to the ledger EARLY,
+# each producer in its OWN try/except — a Lane A bug is isolated, never darkens
+# the next Lane A block or Lane B.  Does NOT go through _oracle_gate_blocks.
+#
+# LANE B (control plane, SITUATIONAL): the steers (verify.horizon,
+# spec.obligation, detect.loop, detect.coherence, consensus.scope, l5.*).  Goes
+# through the oracle stateless gate AFTER Lane A, wrapped in ONE try/except so a
+# crash here CANNOT undo Lane A's already-committed delivery.
+#
+# SHARED LEDGER (coordination point): both lanes write the SAME
+# _oracle_delivered_hashes (content+state hash) and the SAME
+# _ledger_note_delivery / _runtime_ledger_record.  Cross-lane dedup = a
+# content-hash lookup: a contract block (Lane A) and a steer ABOUT the same
+# function (Lane B) are DIFFERENT content -> both deliver; a byte-identical
+# re-send -> suppressed.
+# ---------------------------------------------------------------------------
+def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
+    """Deliver the always-on data-plane producers EARLY, before any control-
+    plane (Lane B / oracle gate) logic that could raise.
+
+    `lane_a`: list of (kind, text) — the contract/evidence/cochange blocks.
+    For EACH, in its OWN try/except (a Lane A bug is isolated):
+      * skip if text is empty (correct-or-quiet),
+      * compute the SHARED content+state hash (_oracle_content_hash),
+      * skip if that hash is already in _oracle_delivered_hashes (cross-lane
+        dedup — Lane A vs Lane B byte-identical re-send is suppressed),
+      * else append to out['output'], register the hash, and record the
+        delivery in BOTH ledgers (_ledger_note_delivery + _runtime_ledger_record).
+
+    NO _oracle_gate_blocks here: Lane A's gate is non-empty AND not-already-in-
+    ledger — exactly the spec.  Because these producers are edit_bound, the gate
+    waived their relevance anyway; moving them out of the gate only removes their
+    rank-competition against higher-severity steers (they no longer LOSE the
+    turn to a steer)."""
+    for kind, text in lane_a:
+        try:
+            if not text:
+                continue  # correct-or-quiet: empty producer stays silent
+            h = _oracle_content_hash(text)
+            if h in _oracle_delivered_hashes:
+                # cross-lane / re-send dedup: this exact block in this exact
+                # state already reached the agent this run.
+                _runtime_ledger_record(
+                    kind=kind,
+                    outcome=_ProductSignalOutcome.SUPPRESSED_DUPLICATE,
+                    reason="delivered",
+                    file_path=krel or "",
+                    event=event,
+                )
+                continue
+            out["output"] = (out.get("output") or "") + text
+            _oracle_delivered_hashes.add(h)
+            _ledger_note_delivery(kind, cmd)
+            _runtime_ledger_record(
+                kind=kind,
+                outcome=_ProductSignalOutcome.DELIVERED,
+                chars=len(text),
+                file_path=krel or "",
+                event=event,
+            )
+            # D1 budget-commit re-wire (risk note #5): l3b.evidence's text was
+            # budget-trimmed by _budget_trim, which staged the trimmed lines in
+            # _last_budget_pending.  In the old monolith the commit fired only on
+            # a gate win; now that l3b.evidence delivers via Lane A (never the
+            # gate, so never setting _last_gate_winner_kind), commit the pending
+            # budget HERE on the real evidence delivery so the cross-turn budget
+            # dedup stays live.  (Lane B later resets _last_budget_pending=[].)
+            if kind == "l3b.evidence" and _last_budget_pending:
+                try:
+                    _PRODUCT_BUDGETER.commit_delivered(_last_budget_pending)
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception:  # noqa: BLE001 — a Lane A bug is isolated, never
+            # blocks the next Lane A block OR Lane B.
+            try:
+                print(f"[GT_META] lane_a_exception kind={kind}",
+                      file=sys.stderr, flush=True)
+            except Exception:  # noqa: BLE001
+                pass
+
+
 def _augment_output(action, out) -> None:
     """Append GT evidence to a command's output dict."""
     global _marker_sent, _action_count, _source_edit_count, _cycle_edit_start
@@ -3817,6 +3939,11 @@ def _augment_output(action, out) -> None:
             # severities are COMPUTED floats (composite_severity) — int-base
             # constants coexist; the gate sorts numerically either way.
             cands: list[tuple[float, str, str, bool]] = []
+            # LANE A (data plane, ALWAYS-ON) — the contract / consistency /
+            # completeness producers collect HERE (as (kind, text)) and deliver
+            # EARLY (pre-gate, pre any Lane B logic that could raise).  Lane B's
+            # `cands` stays the steer pool that goes through the oracle gate.
+            lane_a: list[tuple[str, str]] = []
             _krel = ""  # bound on post_edit; hardening for the guarded uses below
             _kkind, _kf = _classify(cmd)
             if _kkind == "post_edit" and _kf:
@@ -3865,10 +3992,24 @@ def _augment_output(action, out) -> None:
                 # still suppresses an IDENTICAL contract; a CHANGED contract
                 # (new file state) has a new hash and re-arms naturally.
                 _contract_seen.discard(_krel)
-                cands.append((_SEV_CONTRACT, "l3.contract",
-                              _graph_contract_block(_krel), True))
-                cands.append((_SEV_CODEMAP, "l3.cochange",
-                              _cochange_block(_krel), True))
+                # LANE A: the edit-bound contract + co-change blocks.  Computed
+                # in their OWN try/except inside _lane_a_deliver-adjacent guards
+                # so a producer crash can't kill the data plane.  They deliver
+                # EARLY (below), NOT through the oracle gate.
+                try:
+                    _la_contract = _graph_contract_block(_krel)
+                except Exception:  # noqa: BLE001 — Lane A producer isolated
+                    print("[GT_META] producer_exception kind=l3.contract",
+                          file=sys.stderr, flush=True)
+                    _la_contract = ""
+                try:
+                    _la_cochange = _cochange_block(_krel)
+                except Exception:  # noqa: BLE001 — Lane A producer isolated
+                    print("[GT_META] producer_exception kind=l3.cochange",
+                          file=sys.stderr, flush=True)
+                    _la_cochange = ""
+                lane_a.append(("l3.contract", _la_contract))
+                lane_a.append(("l3.cochange", _la_cochange))
             else:
                 if _oracle_edited_rels:
                     _oracle_nonedit_streak += 1
@@ -3922,171 +4063,203 @@ def _augment_output(action, out) -> None:
                 _ev_text = ""
             _ev_event_bound = bool(
                 _kkind in ("post_view", "post_edit") and _kf and _ev_text)
-            cands.append(
-                (_SEV_CODEMAP, "l3b.evidence", _ev_text, _ev_event_bound))
-            # consensus K-of-N completeness at the LIVE review transition.
-            # The latch is consumed only on a NON-EMPTY production (LIPI
-            # 2026-06-10: an empty block at the first transition permanently
-            # blocked a later, non-empty completeness check).
-            if (_oracle_edited_rels and _oracle_nonedit_streak >= 3
-                    and not _oracle_review_fired):
-                try:
-                    _scb = _scope_completeness_block()
-                except Exception:  # noqa: BLE001 — one producer must not kill the gate
-                    print("[GT_META] producer_exception kind=consensus.scope",
-                          file=sys.stderr, flush=True)
-                    _scb = None
-                if _scb:
-                    _oracle_review_fired = True
-                    cands.append((_SEV_SCOPE, "consensus.scope", _scb, True))
-            # SPEC obligations at the SAME review-transition predicate (the
-            # proven GT_VERIFY shape).  Delivery-engine STAGE 2: no once-per-
-            # task latch — the producer's status-VECTOR dedup is the dose
-            # governor (same vector suppressed, changed vector re-fires; the
-            # DEEP_TRAJECTORY "review transition silent in 9/9" gap closed).
-            # edit_bound=True: the trigger IS the review event and the
-            # candidate requires >=1 edited-untested obligation by construction.
-            # D3 fix: at >90% budget, produce obligation on ANY turn with edits
-            # (drop nonedit_streak requirement — agent may edit up to submit).
-            _budget_now = (_action_count / _GT_STEP_LIMIT) if _GT_STEP_LIMIT else 0.0
-            _oblig_gate = (_oracle_edited_rels and (
-                _oracle_nonedit_streak >= 3 or _budget_now > 0.90))
-            if _oblig_gate:
-                try:
-                    _ob = _obligation_nudge_block()
-                except Exception:  # noqa: BLE001 — one producer must not kill the gate
-                    print("[GT_META] producer_exception kind=spec.obligation",
-                          file=sys.stderr, flush=True)
-                    _ob = None
-                if _ob is not None:
-                    cands.append((_ob[0], "spec.obligation", _ob[1], True))
-            # L5 nudges: premise-sensed event candidates (latches unchanged).
-            # Stage 3: loop_arm=False — detect.loop owns loops on this route.
-            # FIX 1 (2026-06-11): scaffold_arm=False — scaffold_trap RETIRED on
-            # the oracle route (early-patch-intensity rho=-0.78: never penalize
-            # exploration volume; 7/9 fires, 0 consumed, 1 wrong steer).
-            _maybe_persist_obligation_status()
-            try:
-                _l5s = _l5_nudge(cmd, _orig_out, loop_arm=False,
-                                 scaffold_arm=False)
-            except Exception:  # noqa: BLE001 — one producer must not kill the gate
-                print("[GT_META] producer_exception kind=l5.stuck",
-                      file=sys.stderr, flush=True)
-                _l5s = ""
-            cands.append((_SEV_STUCK, "l5.stuck", _l5s, True))
-            try:
-                _l5f = _l5_failure_nudge(cmd, _orig_out)
-            except Exception:  # noqa: BLE001 — one producer must not kill the gate
-                print("[GT_META] producer_exception kind=l5.failure",
-                      file=sys.stderr, flush=True)
-                _l5f = ""
-            cands.append((_SEV_STUCK, "l5.failure", _l5f, True))
-            try:
-                _l5nt = _l5_no_test_evidence_nudge(cmd, _orig_out)
-            except Exception:  # noqa: BLE001 — one producer must not kill the gate
-                print("[GT_META] producer_exception kind=l5.no_test",
-                      file=sys.stderr, flush=True)
-                _l5nt = ""
-            cands.append((_SEV_NUDGE_VERIFY, "l5.no_test", _l5nt, True))
-            # DELIVERY-ENGINE STAGE 3 — behavioral detectors over the Stage-1
-            # signals (TIDE degenerate loop; TRAJEVAL coherence collapse).
-            try:
-                _dl = _degenerate_loop_candidate(cmd, _orig_out)
-            except Exception:  # noqa: BLE001 — one producer must not kill the gate
-                print("[GT_META] producer_exception kind=detect.loop",
-                      file=sys.stderr, flush=True)
-                _dl = None
-            if _dl is not None:
-                cands.append((_dl[0], "detect.loop", _dl[1], True))
-            if _kkind == "post_edit" and _kf:
-                try:
-                    _cc = _coherence_collapse_candidate(_krel)
-                except Exception:  # noqa: BLE001 — one producer must not kill the gate
-                    print("[GT_META] producer_exception kind=detect.coherence",
-                          file=sys.stderr, flush=True)
-                    _cc = None
-                if _cc is not None:
-                    cands.append((_cc[0], "detect.coherence", _cc[1], True))
-            # VERIFICATION HORIZON (Stage C H2): budget-aware self-verify candidate
-            try:
-                _vh = _verification_horizon_candidate()
-            except Exception:  # noqa: BLE001 — one producer must not kill the gate
-                print("[GT_META] producer_exception kind=verify.horizon",
-                      file=sys.stderr, flush=True)
-                _vh = None
-            if _vh is not None:
-                cands.append(_vh)
-            _phase = _detect_phase()
-            # Event-bound candidates bypass phase filter — the trigger IS the
-            # event (post_view / post_edit / review transition); phase policy
-            # only narrows ambient producers (P5 symbol narrowing).
+            # LANE A: l3b.evidence (the resolved-witness / caller-contract /
+            # sibling code-map) is always-needed consistency context.  It joins
+            # the data plane, NOT the steer gate.  (event_bound is irrelevant
+            # for Lane A — its gate is non-empty AND not-already-in-ledger; an
+            # empty _ev_text is dropped by the correct-or-quiet check.)
+            lane_a.append(("l3b.evidence", _ev_text))
+            # ── DELIVER LANE A NOW — EARLY, isolated, BEFORE any Lane B logic ──
+            # THE NON-NEGOTIABLE ORDERING (the entire point of the bulkhead):
+            # the contract/evidence/cochange reach the agent here, each in its
+            # own try/except, using the SHARED ledger (_oracle_delivered_hashes
+            # content+state dedup + _ledger_note_delivery + _runtime_ledger_record).
+            # So a later Lane B / gate crash loses ONLY the steer — never the
+            # data-plane context (reproduces+fixes the 0/8 stub-crash).
             _event = _current_event(_kkind)
-            cands = _filter_candidates_by_phase(
-                cands, _phase, _event, file_path=_krel or _kf or ""
-            )
-            _win = _oracle_gate_blocks(cands)
-            # D1 fix: commit budget dedup ONLY when l3b.evidence wins the gate.
-            global _last_budget_pending
-            if _win and _last_budget_pending and _last_gate_winner_kind == "l3b.evidence":
-                _PRODUCT_BUDGETER.commit_delivered(_last_budget_pending)
-            _last_budget_pending = []
-            # Latch re-arm (LIPI 2026-06-10): a produced-but-not-emitted
-            # candidate is DEFERRED, not destroyed — gate losers release the
-            # production-time latches their producers consumed, so the class
-            # re-competes at a later turn ("consume the one-shot only on a
-            # REAL emit" — the cochange producer's own stated contract).
-            _lost = _oracle_last_losers
-            if _lost:
-                global _cochange_fired, _l5_fired, _l5_failure_fired, \
-                    _l5_notest_fired, _horizon_advisory_fired, \
-                    _horizon_urgent_fired, _horizon_pivot_fired, \
-                    _horizon_gate_fire_count, _detect_loop_fired
-                if "l3.contract" in _lost and _kkind == "post_edit" and _kf:
-                    _contract_seen.discard(_krel)
-                if "l3.cochange" in _lost:
-                    _cochange_fired = False
-                if "l3b.evidence" in _lost and _kkind and _kf:
-                    _seen.discard((_kkind, _to_repo_rel(_kf, _root())))
-                if "consensus.scope" in _lost:
-                    _oracle_review_fired = False
-                if "spec.obligation" in _lost:
-                    # release THIS vector so the same status re-competes at a
-                    # later review turn (deferred, not destroyed).
-                    _oracle_obligation_fired = False
-                    if _oblig_status_last_hash:
-                        _oblig_status_emitted.discard(_oblig_status_last_hash)
-                if "l5.stuck" in _lost:
-                    _l5_fired = False
-                if "l5.failure" in _lost:
-                    _l5_failure_fired = False
-                if "l5.no_test" in _lost:
-                    _l5_notest_fired = False
-                # Stage-3 detector latches: deferred, never destroyed.
-                if "detect.loop" in _lost:
-                    _detect_loop_fired = False
-                if "detect.coherence" in _lost and _coherence_last_rel:
-                    _coherence_fired_files.discard(_coherence_last_rel)
-                # Horizon latches consumed at PRODUCTION re-arm on a gate loss
-                # (deferred, not destroyed — same law as every class above).
-                if "verify.horizon.advisory" in _lost:
-                    _horizon_advisory_fired = False
-                if "verify.horizon.urgent" in _lost:
-                    _horizon_urgent_fired = False
-                if "verify.horizon.pivot" in _lost:
-                    _horizon_pivot_fired = False
-                if "verify.horizon.gate" in _lost:
-                    _horizon_gate_fire_count = max(
-                        0, _horizon_gate_fire_count - 1)
-            if _win:
-                out["output"] = (out.get("output") or "") + _win
-                _ledger_note_delivery(_last_gate_winner_kind, cmd)
-                _runtime_ledger_record(
-                    kind=_last_gate_winner_kind,
-                    outcome=_ProductSignalOutcome.DELIVERED,
-                    chars=len(_win),
-                    file_path=_krel or _kf or "",
-                    event=_event,
+            _lane_a_deliver(out, cmd, lane_a, krel=(_krel or _kf or ""),
+                            event=_event)
+            # ── LANE B (control plane, SITUATIONAL) — the steer pool ──────
+            # THE ROBUSTNESS GUARANTEE: this whole section (steer producers +
+            # phase filter + oracle gate + latch re-arm + winner append) is
+            # wrapped in ONE try/except so a crash in _filter_candidates_by_phase
+            # or _oracle_gate_blocks (the 0/8 stub-crash failure mode) CANNOT undo
+            # Lane A's already-committed data-plane delivery above.  Each steer
+            # producer keeps its OWN inner try/except for graceful degradation;
+            # this outer guard protects the gate/filter/latch glue between them.
+            try:
+                # consensus K-of-N completeness at the LIVE review transition.
+                # The latch is consumed only on a NON-EMPTY production (LIPI
+                # 2026-06-10: an empty block at the first transition permanently
+                # blocked a later, non-empty completeness check).
+                if (_oracle_edited_rels and _oracle_nonedit_streak >= 3
+                        and not _oracle_review_fired):
+                    try:
+                        _scb = _scope_completeness_block()
+                    except Exception:  # noqa: BLE001 — one producer must not kill the gate
+                        print("[GT_META] producer_exception kind=consensus.scope",
+                              file=sys.stderr, flush=True)
+                        _scb = None
+                    if _scb:
+                        _oracle_review_fired = True
+                        cands.append((_SEV_SCOPE, "consensus.scope", _scb, True))
+                # SPEC obligations at the SAME review-transition predicate (the
+                # proven GT_VERIFY shape).  Delivery-engine STAGE 2: no once-per-
+                # task latch — the producer's status-VECTOR dedup is the dose
+                # governor (same vector suppressed, changed vector re-fires; the
+                # DEEP_TRAJECTORY "review transition silent in 9/9" gap closed).
+                # edit_bound=True: the trigger IS the review event and the
+                # candidate requires >=1 edited-untested obligation by construction.
+                # D3 fix: at >90% budget, produce obligation on ANY turn with edits
+                # (drop nonedit_streak requirement — agent may edit up to submit).
+                _budget_now = (_action_count / _GT_STEP_LIMIT) if _GT_STEP_LIMIT else 0.0
+                _oblig_gate = (_oracle_edited_rels and (
+                    _oracle_nonedit_streak >= 3 or _budget_now > 0.90))
+                if _oblig_gate:
+                    try:
+                        _ob = _obligation_nudge_block()
+                    except Exception:  # noqa: BLE001 — one producer must not kill the gate
+                        print("[GT_META] producer_exception kind=spec.obligation",
+                              file=sys.stderr, flush=True)
+                        _ob = None
+                    if _ob is not None:
+                        cands.append((_ob[0], "spec.obligation", _ob[1], True))
+                # L5 nudges: premise-sensed event candidates (latches unchanged).
+                # Stage 3: loop_arm=False — detect.loop owns loops on this route.
+                # FIX 1 (2026-06-11): scaffold_arm=False — scaffold_trap RETIRED on
+                # the oracle route (early-patch-intensity rho=-0.78: never penalize
+                # exploration volume; 7/9 fires, 0 consumed, 1 wrong steer).
+                _maybe_persist_obligation_status()
+                try:
+                    _l5s = _l5_nudge(cmd, _orig_out, loop_arm=False,
+                                     scaffold_arm=False)
+                except Exception:  # noqa: BLE001 — one producer must not kill the gate
+                    print("[GT_META] producer_exception kind=l5.stuck",
+                          file=sys.stderr, flush=True)
+                    _l5s = ""
+                cands.append((_SEV_STUCK, "l5.stuck", _l5s, True))
+                try:
+                    _l5f = _l5_failure_nudge(cmd, _orig_out)
+                except Exception:  # noqa: BLE001 — one producer must not kill the gate
+                    print("[GT_META] producer_exception kind=l5.failure",
+                          file=sys.stderr, flush=True)
+                    _l5f = ""
+                cands.append((_SEV_STUCK, "l5.failure", _l5f, True))
+                try:
+                    _l5nt = _l5_no_test_evidence_nudge(cmd, _orig_out)
+                except Exception:  # noqa: BLE001 — one producer must not kill the gate
+                    print("[GT_META] producer_exception kind=l5.no_test",
+                          file=sys.stderr, flush=True)
+                    _l5nt = ""
+                cands.append((_SEV_NUDGE_VERIFY, "l5.no_test", _l5nt, True))
+                # DELIVERY-ENGINE STAGE 3 — behavioral detectors over the Stage-1
+                # signals (TIDE degenerate loop; TRAJEVAL coherence collapse).
+                try:
+                    _dl = _degenerate_loop_candidate(cmd, _orig_out)
+                except Exception:  # noqa: BLE001 — one producer must not kill the gate
+                    print("[GT_META] producer_exception kind=detect.loop",
+                          file=sys.stderr, flush=True)
+                    _dl = None
+                if _dl is not None:
+                    cands.append((_dl[0], "detect.loop", _dl[1], True))
+                if _kkind == "post_edit" and _kf:
+                    try:
+                        _cc = _coherence_collapse_candidate(_krel)
+                    except Exception:  # noqa: BLE001 — one producer must not kill the gate
+                        print("[GT_META] producer_exception kind=detect.coherence",
+                              file=sys.stderr, flush=True)
+                        _cc = None
+                    if _cc is not None:
+                        cands.append((_cc[0], "detect.coherence", _cc[1], True))
+                # VERIFICATION HORIZON (Stage C H2): budget-aware self-verify candidate
+                try:
+                    _vh = _verification_horizon_candidate()
+                except Exception:  # noqa: BLE001 — one producer must not kill the gate
+                    print("[GT_META] producer_exception kind=verify.horizon",
+                          file=sys.stderr, flush=True)
+                    _vh = None
+                if _vh is not None:
+                    cands.append(_vh)
+                _phase = _detect_phase()
+                # Event-bound candidates bypass phase filter — the trigger IS the
+                # event (post_view / post_edit / review transition); phase policy
+                # only narrows ambient producers (P5 symbol narrowing).
+                _event = _current_event(_kkind)
+                cands = _filter_candidates_by_phase(
+                    cands, _phase, _event, file_path=_krel or _kf or ""
                 )
+                _win = _oracle_gate_blocks(cands)
+                # D1 fix: commit budget dedup ONLY when l3b.evidence wins the gate.
+                global _last_budget_pending
+                if _win and _last_budget_pending and _last_gate_winner_kind == "l3b.evidence":
+                    _PRODUCT_BUDGETER.commit_delivered(_last_budget_pending)
+                _last_budget_pending = []
+                # Latch re-arm (LIPI 2026-06-10): a produced-but-not-emitted
+                # candidate is DEFERRED, not destroyed — gate losers release the
+                # production-time latches their producers consumed, so the class
+                # re-competes at a later turn ("consume the one-shot only on a
+                # REAL emit" — the cochange producer's own stated contract).
+                _lost = _oracle_last_losers
+                if _lost:
+                    global _cochange_fired, _l5_fired, _l5_failure_fired, \
+                        _l5_notest_fired, _horizon_advisory_fired, \
+                        _horizon_urgent_fired, _horizon_pivot_fired, \
+                        _horizon_gate_fire_count, _detect_loop_fired
+                    if "l3.contract" in _lost and _kkind == "post_edit" and _kf:
+                        _contract_seen.discard(_krel)
+                    if "l3.cochange" in _lost:
+                        _cochange_fired = False
+                    if "l3b.evidence" in _lost and _kkind and _kf:
+                        _seen.discard((_kkind, _to_repo_rel(_kf, _root())))
+                    if "consensus.scope" in _lost:
+                        _oracle_review_fired = False
+                    if "spec.obligation" in _lost:
+                        # release THIS vector so the same status re-competes at a
+                        # later review turn (deferred, not destroyed).
+                        _oracle_obligation_fired = False
+                        if _oblig_status_last_hash:
+                            _oblig_status_emitted.discard(_oblig_status_last_hash)
+                    if "l5.stuck" in _lost:
+                        _l5_fired = False
+                    if "l5.failure" in _lost:
+                        _l5_failure_fired = False
+                    if "l5.no_test" in _lost:
+                        _l5_notest_fired = False
+                    # Stage-3 detector latches: deferred, never destroyed.
+                    if "detect.loop" in _lost:
+                        _detect_loop_fired = False
+                    if "detect.coherence" in _lost and _coherence_last_rel:
+                        _coherence_fired_files.discard(_coherence_last_rel)
+                    # Horizon latches consumed at PRODUCTION re-arm on a gate loss
+                    # (deferred, not destroyed — same law as every class above).
+                    if "verify.horizon.advisory" in _lost:
+                        _horizon_advisory_fired = False
+                    if "verify.horizon.urgent" in _lost:
+                        _horizon_urgent_fired = False
+                    if "verify.horizon.pivot" in _lost:
+                        _horizon_pivot_fired = False
+                    if "verify.horizon.gate" in _lost:
+                        _horizon_gate_fire_count = max(
+                            0, _horizon_gate_fire_count - 1)
+                if _win:
+                    out["output"] = (out.get("output") or "") + _win
+                    _ledger_note_delivery(_last_gate_winner_kind, cmd)
+                    _runtime_ledger_record(
+                        kind=_last_gate_winner_kind,
+                        outcome=_ProductSignalOutcome.DELIVERED,
+                        chars=len(_win),
+                        file_path=_krel or _kf or "",
+                        event=_event,
+                    )
+            except Exception:  # noqa: BLE001 — Lane B (control plane) is fully
+                # isolated: a steer/gate/filter crash here loses ONLY the steer,
+                # never Lane A's data plane (already delivered above).
+                try:
+                    import traceback as _tb_b
+                    print("[GT_META] lane_b_exception=true\n" + _tb_b.format_exc(),
+                          file=sys.stderr, flush=True)
+                except Exception:  # noqa: BLE001
+                    pass
             return
 
         # ---- LEGACY PATH (GT_ORACLE_ROUTE=0): unconditional appends ----
