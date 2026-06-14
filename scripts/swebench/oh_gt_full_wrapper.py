@@ -1221,12 +1221,13 @@ def _maybe_fire_presubmit_verify(config: GTRuntimeConfig, obs: Any, orig_run_act
     # hands the agent the grader). The verify-reminder VALUE is kept, but it is now sourced from the
     # edited function's behavioral CONTRACT (`properties` table, is_test=0) — never tests/assertions.
     contracts: list[str] = []
+    _ps_conn = None
     try:
-        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=3)
+        _ps_conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=3)
         seen: set[str] = set()
         for _ef in list(config._presubmit_edited_files)[:10]:
             _norm = _ef.replace("\\", "/").lstrip("/")
-            rows = conn.execute(
+            rows = _ps_conn.execute(
                 "SELECT DISTINCT p.kind, p.value FROM properties p "
                 "JOIN nodes n ON p.node_id = n.id "
                 "WHERE n.file_path LIKE ? ESCAPE '\\' AND n.is_test = 0 "
@@ -1239,10 +1240,16 @@ def _maybe_fire_presubmit_verify(config: GTRuntimeConfig, obs: Any, orig_run_act
                 if line not in seen:
                     seen.add(line)
                     contracts.append(line)
-        conn.close()
     except Exception as _ps_exc:
         print(f"[GT_META] presubmit_verify_error: {_ps_exc}", flush=True)
         return obs
+    finally:
+        # Close in ALL paths — the prior `conn.close()` lived inside the try AFTER the
+        # query, so any query error (e.g. a graph with no `properties` table) returned via
+        # the except WITHOUT closing -> a leaked handle (Windows: the db file stays locked,
+        # surfacing as PermissionError on cleanup; Linux silently tolerates it).
+        if _ps_conn is not None:
+            _ps_conn.close()
 
     config._presubmit_fired = True
     text = (

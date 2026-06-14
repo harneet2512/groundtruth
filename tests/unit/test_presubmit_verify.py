@@ -1,8 +1,13 @@
-"""Layer 2.8 — L6 pre-submit VERIFIABLE consolidation (Option 2).
+"""Layer 2.8 — L6 pre-submit VERIFIABLE contract reminder (Option 2, SANITIZED).
 
-Fires once at the edit→review transition (not the dead finish handler).
-Verifiable only: lists tests (from assertions table, verified links) that
-cover the edited files. No semantic judgment, no caller-edit prescription.
+Fires ONCE at the edit→review transition (>=3 actions since the last source edit).
+TEST-BLIND by design: surfaces the edited file's behavioral CONTRACT (the `properties`
+table, is_test=0) plus a "run the project's own test suite" reminder — NEVER a test name
+or a ``pytest <test>`` command (that leaked the grader on 7/9 tasks; gt_gt: the assertions
+table is OFF-LIMITS). These tests lock that legitimacy + the once-only latch.
+
+(Updated: the SUT was redesigned from listing tests -> surfacing contracts; the old tests
+asserted the removed leak and used an `assertions`-table fixture the SUT no longer reads.)
 """
 import os
 import sqlite3
@@ -14,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "sweben
 import oh_gt_full_wrapper as w  # noqa: E402
 
 
-def _make_db(with_assertion: bool = True) -> str:
+def _make_db(with_contract: bool = True) -> str:
     fd, path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
     conn = sqlite3.connect(path)
@@ -23,14 +28,16 @@ def _make_db(with_assertion: bool = True) -> str:
         "label TEXT, is_test INTEGER DEFAULT 0)"
     )
     conn.execute(
-        "CREATE TABLE assertions (id INTEGER PRIMARY KEY, test_node_id INT, "
-        "target_node_id INT, kind TEXT, expression TEXT)"
+        "CREATE TABLE properties (id INTEGER PRIMARY KEY, node_id INT, kind TEXT, value TEXT)"
     )
-    # target function in src/app.py, test in tests/test_app.py
-    conn.execute("INSERT INTO nodes (id, name, file_path, label, is_test) VALUES (1, 'foo', 'src/app.py', 'Function', 0)")
-    conn.execute("INSERT INTO nodes (id, name, file_path, label, is_test) VALUES (2, 'test_foo', 'tests/test_app.py', 'Function', 1)")
-    if with_assertion:
-        conn.execute("INSERT INTO assertions (test_node_id, target_node_id, kind, expression) VALUES (2, 1, 'assertEqual', 'x==1')")
+    conn.execute(
+        "INSERT INTO nodes (id, name, file_path, label, is_test) "
+        "VALUES (1, 'foo', 'src/app.py', 'Function', 0)"
+    )
+    if with_contract:
+        conn.execute(
+            "INSERT INTO properties (node_id, kind, value) VALUES (1, 'return_shape', 'Optional[User]')"
+        )
     conn.commit()
     conn.close()
     return path
@@ -41,7 +48,7 @@ class _Obs:
         self.content = "agent output"
 
 
-def _make_config(db: str, edited: set, last_edit_action: int, action_count: int):
+def _make_config(db, edited, last_edit_action, action_count):
     cfg = w.GTRuntimeConfig()
     cfg.graph_db = db
     cfg._host_graph_db = db
@@ -52,33 +59,53 @@ def _make_config(db: str, edited: set, last_edit_action: int, action_count: int)
     return cfg
 
 
-def test_fires_at_review_transition_with_verified_test():
-    db = _make_db(with_assertion=True)
+def _assert_no_test_leak(content: str):
+    low = content.lower()
+    assert "pytest" not in low, content        # no test command
+    assert "::test_" not in content, content    # no test-node path
+    assert "test_foo" not in content, content   # no test name
+
+
+def test_fires_at_review_transition_with_contract():
+    db = _make_db(with_contract=True)
     try:
         cfg = _make_config(db, {"src/app.py"}, last_edit_action=5, action_count=8)  # 3 since edit
         obs = w._maybe_fire_presubmit_verify(cfg, _Obs(), None)
-        # Should have fired and appended the GT_VERIFY consolidation
-        assert cfg._presubmit_fired is True
         content = getattr(obs, "content", "")
+        assert cfg._presubmit_fired is True
         assert "[GT_VERIFY]" in content
-        assert "tests/test_app.py::test_foo" in content
+        assert "return_shape" in content        # the behavioral CONTRACT is surfaced
+        _assert_no_test_leak(content)            # but NEVER a test name/command
+    finally:
+        os.unlink(db)
+
+
+def test_generic_reminder_when_no_contract():
+    db = _make_db(with_contract=False)
+    try:
+        cfg = _make_config(db, {"src/app.py"}, last_edit_action=5, action_count=9)
+        obs = w._maybe_fire_presubmit_verify(cfg, _Obs(), None)
+        content = getattr(obs, "content", "")
+        assert cfg._presubmit_fired is True       # fires at the transition (won't retry)
+        assert "[GT_VERIFY]" in content
+        _assert_no_test_leak(content)             # generic reminder, no test leak
     finally:
         os.unlink(db)
 
 
 def test_does_not_fire_before_review_transition():
-    db = _make_db(with_assertion=True)
+    db = _make_db()
     try:
         cfg = _make_config(db, {"src/app.py"}, last_edit_action=5, action_count=6)  # only 1 since edit
         obs = w._maybe_fire_presubmit_verify(cfg, _Obs(), None)
-        assert cfg._presubmit_fired is False  # too soon — still editing
+        assert cfg._presubmit_fired is False
         assert "[GT_VERIFY]" not in getattr(obs, "content", "")
     finally:
         os.unlink(db)
 
 
 def test_does_not_fire_with_no_edits():
-    db = _make_db(with_assertion=True)
+    db = _make_db()
     try:
         cfg = _make_config(db, set(), last_edit_action=0, action_count=10)
         obs = w._maybe_fire_presubmit_verify(cfg, _Obs(), None)
@@ -88,41 +115,27 @@ def test_does_not_fire_with_no_edits():
         os.unlink(db)
 
 
-def test_silent_when_no_verified_test():
-    """No verified test linkage → fire once but stay silent (no guess)."""
-    db = _make_db(with_assertion=False)
-    try:
-        cfg = _make_config(db, {"src/app.py"}, last_edit_action=5, action_count=9)
-        obs = w._maybe_fire_presubmit_verify(cfg, _Obs(), None)
-        assert cfg._presubmit_fired is True  # fired (won't retry)
-        assert "[GT_VERIFY]" not in getattr(obs, "content", "")  # but silent
-    finally:
-        os.unlink(db)
-
-
 def test_fires_only_once():
-    db = _make_db(with_assertion=True)
+    db = _make_db()
     try:
         cfg = _make_config(db, {"src/app.py"}, last_edit_action=5, action_count=8)
         w._maybe_fire_presubmit_verify(cfg, _Obs(), None)
         assert cfg._presubmit_fired is True
-        # Second call must be a no-op
-        obs2 = w._maybe_fire_presubmit_verify(cfg, _Obs(), None)
+        obs2 = w._maybe_fire_presubmit_verify(cfg, _Obs(), None)  # second call = no-op
         assert "[GT_VERIFY]" not in getattr(obs2, "content", "")
     finally:
         os.unlink(db)
 
 
-def test_no_semantic_judgment_only_verifiable():
-    """Output must be verifiable test list — no 'incomplete'/'should edit' prose."""
-    db = _make_db(with_assertion=True)
+def test_no_test_name_or_pytest_leaked():
+    db = _make_db(with_contract=True)
     try:
         cfg = _make_config(db, {"src/app.py"}, last_edit_action=5, action_count=8)
         obs = w._maybe_fire_presubmit_verify(cfg, _Obs(), None)
-        content = getattr(obs, "content", "").lower()
-        assert "incomplete" not in content
-        assert "should edit" not in content
-        assert "do not submit" not in content
-        assert "pytest" in content  # verifiable action only
+        content = getattr(obs, "content", "")
+        low = content.lower()
+        assert "incomplete" not in low
+        assert "should edit" not in low
+        _assert_no_test_leak(content)             # legitimacy: test-blind
     finally:
         os.unlink(db)

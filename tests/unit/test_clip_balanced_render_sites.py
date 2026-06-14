@@ -283,7 +283,7 @@ def _build_repo_and_db(tmp: str, *, prop_kind: str, prop_value: str) -> tuple[st
 def test_behavioral_contract_property_values_balanced(kind, value):
     from groundtruth.hooks.post_edit import generate_improved_evidence
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         repo, db = _build_repo_and_db(tmp, prop_kind=kind, prop_value=value)
         out = generate_improved_evidence(
             "pkg/mod.py", ["target"], db, repo, mode="post_edit"
@@ -318,7 +318,7 @@ def test_behavioral_contract_property_value_negative_control():
     """A balanced-under-budget property value is rendered verbatim."""
     from groundtruth.hooks.post_edit import generate_improved_evidence
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         repo, db = _build_repo_and_db(
             tmp, prop_kind="guard_clause", prop_value="value is None"
         )
@@ -374,21 +374,37 @@ def _ego_db_with_viewed_callers(tmp: str, viewed: str) -> str:
 
 
 class _FakeEgoNode:
-    def __init__(self, name: str, file_path: str, start_line: int = 10):
+    def __init__(self, name: str, file_path: str, start_line: int = 10,
+                 node_id: int = 1, is_test: bool = False):
+        self.id = node_id
         self.name = name
         self.file_path = file_path
         self.start_line = start_line
+        self.is_test = is_test
+
+
+class _FakeEgoEdge:
+    def __init__(self, source_id: int, target_id: int):
+        self.source_id = source_id
+        self.target_id = target_id
 
 
 class _FakeEgo:
     """Minimal stand-in for an EgoGraphResult whose center resolved to an
-    arbitrary file, with non-empty callers and a render() that names the file."""
+    arbitrary file, with non-empty callers and a render() that names the file.
+
+    Carries the ``.nodes`` ({id: node}) + ``.edges`` interface post_view now filters on
+    (the SUT drops test nodes via ``.nodes``/``.edges`` before ``render()``; an absent
+    ``.nodes`` made the whole ego block silently error out -> empty -> over-suppressed)."""
 
     def __init__(self, center_file: str):
-        self.center = _FakeEgoNode("set_fields", center_file)
-        self.callers = [_FakeEgoNode("run_command", "beets/ui/commands.py")]
+        self.center = _FakeEgoNode("set_fields", center_file, node_id=1)
+        _caller = _FakeEgoNode("run_command", "beets/ui/commands.py", node_id=2)
+        self.callers = [_caller]
         self.guards: list = []
         self.test_assertions: list = []
+        self.nodes = {1: self.center, 2: _caller}
+        self.edges = [_FakeEgoEdge(2, 1)]  # caller -> center
 
     def render(self, max_tokens: int = 200) -> str:
         import os as _os
@@ -405,7 +421,7 @@ def test_c2_homonym_ego_block_stays_silent(monkeypatch):
     import groundtruth.graph.ego as ego_mod
 
     viewed = "beets/importer.py"
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         db = _ego_db_with_viewed_callers(tmp, viewed)
         monkeypatch.setenv("GT_REPO_ROOT", tmp)
         monkeypatch.setattr(post_view, "_load_issue_terms", lambda *a, **k: {"set_fields"})
@@ -428,7 +444,7 @@ def test_c2_negative_control_same_file_ego_renders(monkeypatch):
     import groundtruth.graph.ego as ego_mod
 
     viewed = "beets/importer.py"
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         db = _ego_db_with_viewed_callers(tmp, viewed)
         monkeypatch.setenv("GT_REPO_ROOT", tmp)
         monkeypatch.setattr(post_view, "_load_issue_terms", lambda *a, **k: {"set_fields"})
