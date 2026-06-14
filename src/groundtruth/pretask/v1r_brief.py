@@ -400,13 +400,13 @@ def _issue_relevant_neighbors(
             f"""
             SELECT DISTINCT nt.file_path, {src_lang_sel}, {tgt_lang_sel}
             FROM nodes nsrc
-            JOIN edges e ON e.source_id = nsrc.id {conf_clause}
+            JOIN edges e ON e.source_id = nsrc.id AND e.type = 'CALLS' {conf_clause}
             JOIN nodes nt ON e.target_id = nt.id
             WHERE nsrc.file_path = ? AND nt.file_path != ? AND nt.is_test = 0
             UNION
             SELECT DISTINCT nsrc.file_path, {src_lang_sel}, {tgt_lang_sel}
             FROM nodes nt
-            JOIN edges e ON e.target_id = nt.id {conf_clause}
+            JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS' {conf_clause}
             JOIN nodes nsrc ON e.source_id = nsrc.id
             WHERE nt.file_path = ? AND nsrc.file_path != ? AND nsrc.is_test = 0
             """,
@@ -2903,12 +2903,12 @@ def generate_v1r_brief(
                 rows = _nc.execute(
                     f"""
                     SELECT DISTINCT n2.file_path FROM nodes n1
-                    JOIN edges e ON e.source_id = n1.id {_conf_clause}
+                    JOIN edges e ON e.source_id = n1.id AND e.type = 'CALLS' {_conf_clause}
                     JOIN nodes n2 ON e.target_id = n2.id
                     WHERE n1.file_path = ? AND n2.file_path != ? AND n2.is_test = 0
                     UNION
                     SELECT DISTINCT n1.file_path FROM nodes n2
-                    JOIN edges e ON e.target_id = n2.id {_conf_clause}
+                    JOIN edges e ON e.target_id = n2.id AND e.type = 'CALLS' {_conf_clause}
                     JOIN nodes n1 ON e.source_id = n1.id
                     WHERE n2.file_path = ? AND n1.file_path != ? AND n1.is_test = 0
                     """,
