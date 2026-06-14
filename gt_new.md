@@ -346,3 +346,17 @@ The whole-architecture per-layer LIPI ran (58 agents). Confirmed findings + stat
 **The headline:** the LIPI caught the precise thing depth threatens -- promoted edges silently
 entering RANK through latent untyped JOINs. Fixed. The remaining OWED items are tracked above;
 none is a live laundering (all correct-or-quiet or latent).
+
+### Hardening-loop close-out (zero-regression, proven)
+The full OWED bug backlog (Units 1-5b) is FIXED + regression-locked, each spec'd + LIPI'd
++ committed (`8a882986 → 87629b7b → d3eb6944 → f4249535 → 3205afbc → 7de4004c`). Only the
+L4b promoted-edge *enrichment* (a FEATURE) and F4 cap (INFRA/CI) remain non-bugs.
+
+**Comprehensive regression: 1979 passed, +30 new regression tests, 16 failed.** The 16
+failures are **PROVEN PRE-EXISTING** — identical 16-failed/35-passed at the pre-session
+baseline `32e4e313`, before any of this session's work. **The session's entire body of
+work introduced ZERO regressions.** The 16 are a separate pre-existing debt in 4 areas
+(`get_targeted_verification_suggestion` returns '', `presubmit_verify` firing,
+importer-witness localization, `clip_balanced` rendering) — not in the OWED backlog, not
+caused by depth/rank/the hardening loop. Recommended as a SEPARATE next phase, each needing
+its own spec + investigation, not a blind tail-end dive.
