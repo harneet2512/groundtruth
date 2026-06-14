@@ -2969,7 +2969,10 @@ def generate_v1r_brief(
             all_degrees = [
                 r[0]
                 for r in conn.execute(
-                    "SELECT COUNT(e.id) FROM nodes n JOIN edges e ON e.target_id = n.id GROUP BY n.file_path"
+                    # I2 (no depth-in-rank): CALLS-scoped degree only — promoted depth
+                    # edges (READS/WRITES/DATA_FLOW/…) must not inflate the hub p80 and
+                    # reorder the delivered file rank. Matches _hub_degree_fn.
+                    "SELECT COUNT(e.id) FROM nodes n JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' GROUP BY n.file_path"
                 ).fetchall()
             ]
             if all_degrees:
@@ -2979,7 +2982,7 @@ def generate_v1r_brief(
                     top_degrees = []
                     for p in top_paths:
                         row = conn.execute(
-                            "SELECT COUNT(e.id) FROM nodes n JOIN edges e ON e.target_id = n.id WHERE n.file_path = ?",
+                            "SELECT COUNT(e.id) FROM nodes n JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' WHERE n.file_path = ?",
                             (p,),
                         ).fetchone()
                         top_degrees.append(row[0] if row else 0)
