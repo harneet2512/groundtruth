@@ -2,6 +2,42 @@
 
 Real data from every evaluation run. Measured costs (DeepSeek balance delta), not estimates.
 
+## Session 2026-06-13 (later: oracle un-stub + depth-to-production + naming/CHA-XTA Py/Rust→Go/TS + localizer LIPI + RC5 oracle + HYBRID data-plane/control-plane bulkhead)
+
+**NO new live eval run dispatched.** This session landed enabling-substrate + delivery-correctness +
+fault-isolation (**8 commits** `32e4e313`/`9860ff7e`/`9db1fe44`/`b5ceaf5d`/`ec20d603`/`71d66378`/
+`a7a4be87`/`35a3fb17`) verified ONLY by LOCAL build/test (incl. fault-injection + negative control for
+the delivery bulkhead). Per DEFINITION OF DONE, nothing here counts as "working" — the live witness is
+OWED (task #6).
+
+| Verdict surface | What ran | Result |
+|---|---|---|
+| Oracle gate un-stub (`32e4e313`) | `tests/test_oracle_gate_fires_in_container.py` drives `_augment_output` in the in-container stub shape | RED pre-fix (0 `gt.oracle_event.v2`) → GREEN post-fix (≥1 record); proven red→green by stashing the source fix |
+| Python REFERENCE promote pass (`9860ff7e`) | red→green on a real adaptix copy | 5/5 assertions, idempotent |
+| Localizer degree filter (`9860ff7e` D5) | strict no-op check on 4 live graphs | filtered == unfiltered (strict no-op) |
+| Go indexer Pass 4f + IMPORTS (`b5ceaf5d`) | `go build`/`vet` + 8 promote tests (CGO+`sqlite_fts5`, mingw gcc 16.1) | GREEN locally; dotted-RAISES decoy RED→GREEN |
+| CHA/XTA field-type rung Py+Rust (`ec20d603`) | `go build`/`vet` + resolver tests; `TestBuildFieldTypeIndex_LanguageScope` | GREEN locally; pinned Py+Rust boundary |
+| CHA/XTA extension Go+TS (`71d66378`) | `go build` + `go test ./internal/resolver -run FieldType` (CGO+`sqlite_fts5`, gcc 16.1) | GREEN locally; Go struct-field + TS access-modifier + receiver-var shape asserted; recovered after a killed workflow |
+| RC5 apply_patch `_classify` + hybrid edit_coverage (`a7a4be87`) | 16 pytest (12 patch-apply + 4 hybrid) driving the real `_classify`→`_edit_target`→`_augment_output`→`edit_coverage_ratio` chain | GREEN; no-injection discipline (the original RC5 test lacked it) |
+| HYBRID data-plane/control-plane bulkhead (`35a3fb17`) | 31 pytest — 7 hybrid (`test_hybrid_lane_split.py`, incl fault-injection: gate raise → contract still delivered; **negative control:** Lane A neutered + gate crash → contract len 0) + 16 RC5 + 8 oracle-LIPI | GREEN; the negative control makes the fault-injection proof non-vacuous (silent lane-order revert FAILS); all 4 LIPI lenses commit_ready |
+| `api_edges` `TestRoutePatternMatching/comment` | full-package run | PRE-EXISTING failure (fails on base too) — unrelated |
+| `gt_mini_patch` 3 order-dependent tests | full-file run | PRE-EXISTING (baseline-identical, git-stash A/B classified): `test_lang_family_classifier`, `test_no_test_evidence_wired_into_augment_output`, `test_unmet_obligations_raise_severity` |
+
+**Diagnosis-input runs (already in `task_ledgers/README.md` — NOT re-logged here to avoid duplication):**
+`27321848581` (oracle tenpack, 0/3, all class=AGENT), `27342218002` (delivery engine, 0/9, all
+class=AGENT), `27367976952` (validation, DARK binary), `27465183646` (the run that root-caused the
+DARK binary: `gt.oracle_event.v2`=0 on all 8 tasks → `_ProductHorizonThresholds` TypeError every
+turn, fixed by `32e4e313`). Report 22 confirms every run on disk ran the DARK binary (per-turn oracle
+gate crashed pre-fix); `32e4e313` removes that crash but no post-fix agent observation exists yet.
+
+**Owed next (the gate, report 21):** held-out multi-lang `go test` on a REAL toolchain + production
+`graph.db` (Codespace), then a paired live tenpack GT-on vs the frozen baseline on a baseline-fails
+id, read chronologically per §4. The SAME witness discharges the oracle un-stub (`gt.oracle_event.v2>0`
+on a live turn), the RC5 path, AND the hybrid bulkhead (a `<gt-contract>` block reaching the agent +
+a control-plane crash that loses only the steer).
+
+---
+
 ## Historical Runs (Session 2026-05-16/17)
 
 | Run ID | Commit | Tasks | Result | Notes |

@@ -2,6 +2,84 @@
 
 ---
 
+## Session: 2026-06-13 (later) — Oracle un-stub (DARK-binary fix) + Graph-DEPTH to production + NAMING residual/CHA-XTA (Py/Rust→Go/TS) + localizer LIPI + RC5 oracle foundation + HYBRID data-plane/control-plane bulkhead
+
+- **Owner:** Main coordinator
+- **Branch / Commit:** `gt-trial` — `32e4e313`, `9860ff7e`, `9db1fe44`, `b5ceaf5d`, `ec20d603`, `71d66378`, `a7a4be87`, `35a3fb17` (**8 commits**)
+- **Scope:** Make `graph.db` a TRUE map + make GT's delivery survive an oracle crash. Un-stub the
+  per-turn delivery gate (the DARK-binary root cause — `_augment_output` crashed every turn, 0 context;
+  `32e4e313`); land the property→edge promote pass + IMPORTS in the PRODUCTION Go indexer (Pass 4f);
+  fix the 5 architecture deviations a 4-avenue LIPI found; kill a false `LSP_NO_OP_VALID` all-clear;
+  add a CHA/XTA receiver-type rung that converts one typed-field name_match method-edge class to a
+  FACT — shipped Python+Rust first (`ec20d603`), then extended to ALL Tier-1 Go+TS (`71d66378`, closing
+  the DeepSWE non-Python gap); lay the RC5 oracle foundation (`a7a4be87`: apply_patch edit-detection +
+  hybrid edit-coverage); and SPLIT delivery into a fault-isolated data-plane (Lane A) + control-plane
+  (Lane B) BULKHEAD (`35a3fb17`) so an oracle crash loses only the steer (the 0/8 SPOF fix).
+- **Hypothesis:** richer, more-resolved map + edit-detection that sees the agent's dominant channel +
+  an always-fire context lane that a crashing oracle can't darken = enabling-substrate + delivery-
+  correctness + fault-isolation for reaching gold and for the action-hooks firing at all (Mandatory
+  Rule 2: map-connectivity + delivery-correctness, NOT a single-edge-type flip claim).
+- **The framing applied:** (1) GENERALIZED never per-task — structural properties, no task IDs.
+  (2) CORRECT-OR-QUIET — CHA/XTA ABSTAINS on ambiguity/builtin; IMPORTS no edge for stdlib; Lane B
+  never suppresses Lane A. (3) DEPTH (promote pass + Pass 4f IMPORTS) vs ACCURACY (CHA/XTA name_match→
+  fact) — two distinct levers. (4) DATA-PLANE/CONTROL-PLANE HYBRID (below). (5) DEFINITION OF DONE —
+  substrate + fault-proven is NOT done; live witness owed. (6) gt_gt §12 — judge each layer by ROLE.
+- **The data-plane / control-plane hybrid decision (task #7, IMPLEMENTED `35a3fb17` + fault-proven):**
+  per reports 24–25 §"TWO LANES, SEPARATELY BUDGETED", GT delivery splits into **Lane A
+  (context/data-plane, robust)** — `l3.contract`/`l3.cochange`/`l3b.evidence` deliver EARLY via
+  `_lane_a_deliver` (per-producer try/except; correct-or-quiet content+state-hash dedup) BEFORE any
+  Lane B logic, OUTSIDE the oracle ≤1/turn winner gate + crash; old gate-pool pushes for these kinds
+  REMOVED (the contract has exactly ONE path now) — and **Lane B (oracle steer/control-plane)** — runs
+  through `_oracle_gate_blocks` AFTER Lane A in ONE outer try/except, ADDS, never suppresses Lane A.
+  Both share ONE candidate schema + ONE `_augment_output` pipeline + ONE shared ledger
+  (`_oracle_delivered_hashes`) — ONE PRODUCT RULE preserved. The coupling that WAS broken: the single
+  `_oracle_gate_blocks` ≤1/turn winner gate (`_SEV_OBLIGATION=5` starving `_SEV_CONTRACT=3`) + the
+  swallowed `_ProductHorizonThresholds` stub crash (the DARK binary). `32e4e313` un-stubbed the gate;
+  `a7a4be87` made edit-detection see `apply_patch`; `35a3fb17` lifted Lane A off the gate + bulkheaded
+  Lane B. PROVEN by fault-injection (gate raise → contract survives) + the NEGATIVE CONTROL (Lane A
+  neutered + gate crash → contract len 0, reproducing the 0/8 mode), so the proof is non-vacuous.
+- **Files touched:** `gt-index/cmd/gt-index/main.go`, `internal/parser/parser.go`,
+  `internal/resolver/{imports,promote,resolver}.go` + `{promote,resolver_fieldtype}_test.go`,
+  `src/groundtruth/resolve.py`, `src/groundtruth/pretask/graph_localizer.py`,
+  `scripts/graph/promote_property_edges.py`, `gt_gt.md`, `artifact_deepswe/gt_mini_patch.py`,
+  `artifact_deepswe/gt_agent.py` (+ test files: `tests/test_oracle_gate_fires_in_container.py`,
+  `tests/test_oracle_lipi_audit_fixes.py`, `artifact_deepswe/tests/test_rc5_*.py`,
+  `artifact_deepswe/tests/test_hybrid_lane_split.py`).
+- **Research basis:** XTA/RTA (Tip&Palsberg OOPSLA'00), CHA (Dean/Grove/Chambers ECOOP'95), PyCG
+  (Salis et al. ICSE'21, tracked residual), SCIP/Kythe import model; Nygard *Release It!* (bulkhead);
+  gt_gt §15/§16 (oracle/RC5).
+- **Tests run:** oracle gate un-stub TTD red→green (in-container shape, 0→≥1 `gt.oracle_event.v2`);
+  Python promote 5/5 red→green (adaptix copy); Go build/vet + 8 promote + resolver tests GREEN incl.
+  `go test -run FieldType` for the Go/TS extension (CGO+`sqlite_fts5`, mingw gcc 16.1); localizer
+  degree filter strict no-op on 4 graphs; 16 RC5 pytest GREEN (real chain, no injection); 31 hybrid/
+  RC5/oracle-LIPI pytest GREEN incl the negative control. 3 pre-existing `gt_mini_patch` order-
+  dependent failures (baseline-identical).
+- **Results:** enabling-substrate + delivery-correctness + fault-isolation landed + LIPI deviations
+  fixed; the two-lane hybrid is IMPLEMENTED + fault-proven. **NO live witness** — every run on disk ran
+  the DARK binary (report 22); `32e4e313` removes that crash but no `output.jsonl` newer than the fixes
+  exists.
+- **Status per DEFINITION OF DONE:** code-fixed + fault-proven, metrics-UNWITNESSED → NOT done. Live
+  witness owed (task #6) — ONE witness discharges the depth/naming substrate, the RC5 oracle path, AND
+  the hybrid bulkhead. The held-out multi-lang real-toolchain gate (report 21) precedes any benchmark
+  number.
+- **Reports produced (indexed, not duplicated):** 19–25 under
+  `.claude/reports/four_surface_failure_diagnosis_20260613T152534Z/`:
+  - `19_lipi_depth_vs_architecture.md` — LIPI of the promote pass vs gt_gt §2.6 intent; 5 deviations (D1 DATA_FLOW standalone→annotation, D2 READS A-cut doc fix, D3 port divergence, D4 two-engines/no-consumer, D5 localizer degree inflation).
+  - `20_naming_matcher_design.md` — receiver-type propagation engine design (CHA/XTA/PyCG); supersedes `17_name_matcher_design.md`; strips all per-repo-% benchmark-shape framing.
+  - `21_generalization_goaltie_contract.md` — all four pieces tie to the goal arrow as enabling-substrate; flags benchmaxx risks (CHA builtin-drop set, IMPORTS source-anchor, multi-candidate target) as fix/re-justify (all correct-or-quiet SAFE); names THE undischarged real-toolchain gate.
+  - `22_layer4b_audit_strengthen.md` — 14 tools-as-hooks counted/audited; every run ran a DARK binary (HorizonThresholds stub crash + delivery-policy raise, both now fixed); 11/14 hooks = dark-pending-witness; strengthening specs = enrich already-firing producers' content with the now-shipping promoted edges (FACT-tier, additive-only).
+  - `23_task2_adaptive_localization.md` — depth is a RECALL lever: broke the directed ceiling on 1/7 measured tasks (aiomonitor); the other 6 are seeding/substrate-absent failures no edge bridges. CRITICAL: `v1r_brief.py` is in an UNMERGED git-conflict state — precondition to resolve before any v1r_brief change.
+  - `24_metrics_validation_tool_binding.md` — the 10-metric oracle set is NOT sufficient; keep ~5–6 independent, add 5 already-sensed signals; decouple Lane A action-hooks from the Lane B oracle budget/crash (the design now IMPLEMENTED in `35a3fb17`).
+  - `25_*` — consumed in the hybrid-bulkhead design (Lane A/Lane B fault-isolation + shared ledger).
+- **Next allowed action:** push **8 commits** → rebuild substrate → re-index Go+Rust → confirm Pass 4f
+  + CHA rung emit on a real graph (now across Go/TS too) → paired live tenpack vs frozen baseline on a
+  baseline-fails id (read chronologically per §4); the SAME witness discharges the oracle un-stub
+  (`gt.oracle_event.v2>0` on a live turn), the RC5 path (M23 review-transition > 0), AND the hybrid
+  bulkhead (a contract block reaching the agent + surviving a control-plane crash that loses only the
+  steer).
+
+---
+
 ## Session: Phase 0 — Architecture Audit
 
 - **Owner:** Main coordinator

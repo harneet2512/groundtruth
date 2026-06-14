@@ -1,3 +1,63 @@
+# Implementation Changelog — Session 2026-06-13 (later: oracle un-stub + depth-to-production + naming/CHA-XTA Py/Rust→Go/TS + localizer LIPI + RC5 oracle foundation + HYBRID data-plane/control-plane bulkhead)
+
+Diagnosis basis: reports 19–25 under
+`.claude/reports/four_surface_failure_diagnosis_20260613T152534Z/`. Goal: make `graph.db` a TRUE
+map (per the "graph.db IS THE CONTEXT GRAPH" rule) AND make GT's delivery survive an oracle crash —
+un-stub the per-turn delivery gate (the DARK-binary root cause); land the depth promote pass +
+IMPORTS in the PRODUCTION Go indexer; convert one name_match method-edge class to a FACT across ALL
+Tier-1 languages; lay the oracle/delivery foundation; and SPLIT delivery into a fault-isolated
+data-plane (Lane A, always-needed context) + control-plane (Lane B, oracle steer) bulkhead.
+**All enabling-substrate + delivery-correctness (map-connectivity + fault-isolation, Mandatory
+Rule 2) — NOT flip claims; live witness owed (DEFINITION OF DONE).**
+
+**The decision arc:** (1) GENERALIZED never per-task — every row is a structural property, no task IDs.
+(2) CORRECT-OR-QUIET — CHA/XTA ABSTAINS on ambiguity/builtin; IMPORTS emits no edge for stdlib;
+Lane B never suppresses Lane A. (3) DEPTH (promote pass + Pass 4f IMPORTS) vs ACCURACY (name_match→fact
+CHA/XTA rung) are two distinct levers, both shipped. (4) DATA-PLANE/CONTROL-PLANE HYBRID — the oracle
+is DEMOTED from gate-of-everything to a Lane-B steer-decider + shared-ledger-keeper; the always-needed
+contract/consistency/completeness (gt_gt §-philosophy "fire on EVERY edit") is Lane A, delivered EARLY
++ isolated (the 0/8 SPOF fix). (5) DEFINITION OF DONE — substrate + fault-proven is NOT "done".
+
+| Commit | Type | File(s) | Change |
+|---|---|---|---|
+| **`32e4e313`** | fix(oracle) | `artifact_deepswe/gt_mini_patch.py`, `artifact_deepswe/gt_agent.py`, `tests/test_oracle_gate_fires_in_container.py` | **DARK-binary root cause (run `27465183646`: `gt.oracle_event.v2`=0 on all 8 tasks).** `_augment_output` raised `TypeError: _ProductHorizonThresholds() takes no arguments` EVERY turn (the no-arg fallback stub constructed with 6 kwargs by `verify_horizon_band`), swallowed by the outer `except Exception: pass` BEFORE the gate's `gt.oracle_event.v2` write → ZERO per-turn context (only turn-0 brief). Stub was live because the in-container runtime import aborted on first-missing `runtime.ledger`. FIX: kwarg-accepting `__init__` on the stub; inject `ledger.py`+`patterns.py` into `_PRODUCT_RUNTIME_FILES` (`_RUNTIME_AVAILABLE=True` → REAL logic); make the outer swallow LOUD (stderr, never re-raise); wrap each per-turn producer in its own try/except (gt_gt §15.2 — gate is the single decision point). TTD: in-container-shape test RED→GREEN (0→≥1 `gt.oracle_event.v2`). |
+| **`9860ff7e`** | fix(depth-LIPI) | `scripts/graph/promote_property_edges.py`, `src/groundtruth/pretask/graph_localizer.py`, `gt_gt.md` | D1: DATA_FLOW demoted 774 standalone edges → CALLS.metadata annotation (~19 standalone for no-CALLS hops). D3: RAISES polyglot class-label superset + drop dotted names. D4: copies-only REFERENCE guard (§2.1 Go owns writes). D5: localizer fan_out/fan_in degree counts STRUCTURAL edges only (promoted edges excluded; strict no-op proven on 4 live graphs). gt_gt §2.6 reconciled + SUPERSEDED. Re-proven red→green on a real adaptix copy (5/5, idempotent). |
+| **`9db1fe44`** | fix(naming) | `src/groundtruth/resolve.py` | Dropped the Python-only `tgt.label='Method'` clause in `_count_residual_method_edges`. Go receiver / JS-TS object methods land as `Label='Function'`, so ~475 unresolved method edges read as 0 → a FALSE `LSP_NO_OP_VALID` all-clear on Go/JS/TS. Now keys on language-agnostic `resolution_method='name_match'`; JOIN to a real target retained (non-invention). |
+| **`b5ceaf5d`** | feat(depth) | `gt-index/cmd/gt-index/main.go`, `internal/resolver/imports.go`, `internal/resolver/promote.go`, `internal/resolver/promote_test.go` | Promote pass copies-only REFERENCE → PRODUCTION. Go indexer materializes IMPORTS + promoted relationship edges at index time (Pass 4f wired after serde/before closure, non-fatal+logged). `imports.go` fresh-extract correct-or-quiet (single→CERTIFIED `ast_import`; >1→CANDIDATE; stdlib/3rd-party→NO edge; zero per-language branches, SCIP/Kythe model). Fixed inv-7 (`-file` reindex re-runs idempotent promote) + D3 dotted-RAISES (drop `errors.New`, no wrong edge). Build/vet/8 tests GREEN locally (CGO+`sqlite_fts5`, gcc 16.1). |
+| **`ec20d603`** | feat(naming) | `gt-index/cmd/gt-index/main.go`, `internal/resolver/resolver.go`, `internal/resolver/resolver_fieldtype_test.go` | CHA/XTA receiver-type matcher (rung 2b): a typed `self.<field>.m()` where `<field>` is DECLARED via colon annotation but never locally assigned → FACT (`type_flow`/0.9/`field_type`/CERTIFIED), ABSTAIN on ambiguity/builtin. Sits before name_match. Shipped **Python+Rust** colon-annotation fields first; the Go/TS gap was the explicit residual, closed by `71d66378`. Build/vet/resolver tests GREEN locally; `TestBuildFieldTypeIndex_LanguageScope` pinned the Py+Rust boundary. Pre-existing `TestRoutePatternMatching/comment` failure unrelated. |
+| **`71d66378`** | feat(naming) | `gt-index/internal/parser/parser.go`, `internal/resolver/resolver.go`, `internal/resolver/resolver_fieldtype_test.go` | Extended rung-2b from Python+Rust to ALL Tier-1: Go struct fields (space-separated `Field *Type`, parsed via `goStructFieldList`) + TS access-modifier fields (strip `private`/`public`/`protected`/`readonly`); relaxed the receiver-shape gate to accept Go's receiver var (`GoReceiverName(Signature)→NodeMeta.ReceiverName`) alongside `self.`/`this.`. Still correct-or-quiet (ABSTAINS on unknown receiver/field/type). **Closes the DeepSWE non-Python generalization gap** for declared-field-type resolution. Recovered + verified after a killed workflow (`parser.go` comment-detangle repaired). Go build + `go test -run FieldType` GREEN (CGO+`sqlite_fts5`, gcc 16.1). |
+| **`a7a4be87`** | fix(oracle) | `artifact_deepswe/gt_mini_patch.py`, `artifact_deepswe/tests/test_rc5_patch_apply_edit_credit.py`, `artifact_deepswe/tests/test_rc5_hybrid_edit_credit.py` | RC5 — two coupled gt_gt-15/16-grounded, LIPI-caught fixes. **(a) FOUNDATIONAL:** `_classify`/`_edit_target` now recognize the `apply_patch`/`git-apply`/`patch -pN` edit family (target from `*** Update File:` / `+++ b/<path>`; hunk ranges from `@@`); priority-0 branch returns `('post_edit', target)`, correct-or-quiet (`None`→legacy fallthrough). The agent's DOMINANT edit channel was invisible to GT edit-detection — unblocks the contract action-hook firing on `apply_patch` edits (the Lane-A enabler for the bulkhead). **(b)** `edit_coverage_ratio` upgraded single-source-lexical → ≥3-signal hybrid (content-body lexical + graph Function/Method co-location + line-range overlap), FACT-tier/degrade contract; fixes the 0.0-solved/1.0-failed inversion; feeds `verify_horizon_band` SEVERITY, NOT `spec.obligation`. 16 pytest tests GREEN, all DRIVE the real chain (no injection). |
+| **`35a3fb17`** | feat(delivery) | `artifact_deepswe/gt_mini_patch.py`, `artifact_deepswe/tests/test_hybrid_lane_split.py`, `tests/test_oracle_lipi_audit_fixes.py` | **HYBRID data-plane/control-plane BULKHEAD (Nygard, *Release It!*)** — splits the oracle route into two failure-isolated lanes, fixing the run-27465 SPOF (one gate crash darkened ALL delivery, 0/8). **Lane A (data plane):** `l3.contract`/`l3.cochange`/`l3b.evidence` deliver EARLY via `_lane_a_deliver` (append + shared-ledger record) BEFORE any Lane B logic, each producer isolated; old gate-pool pushes REMOVED → the contract has exactly ONE path (Lane A), never the gate (CLAUDE.md: contract/consistency/completeness fire on EVERY edit). **Lane B (control plane):** steers run through `_oracle_gate_blocks` AFTER Lane A, in ONE outer try/except (stderr, no re-raise) → a gate crash CANNOT undo Lane A; the oracle is DEMOTED to steer-decider + ledger-keeper. **Shared ledger (one, not forked):** `_oracle_delivered_hashes` content+state dedup, cross-lane. **PROVEN:** fault-injection monkeypatches the REAL gate to raise, drives the REAL `_augment_output`, asserts the contract survives; the NEGATIVE CONTROL (Lane A neutered + gate crashed → contract len 0) reproduces the 0/8 mode, making the proof non-vacuous. 31 pytest GREEN (7 hybrid incl negative control + 16 RC5 + 8 oracle-LIPI); all 4 LIPI lenses commit_ready. |
+
+## Hybrid delivery decision (data-plane / control-plane — task #7, IMPLEMENTED `35a3fb17` + fault-proven)
+
+Reports 24–25 §"TWO LANES" locked the delivery architecture: **two failure-isolated lanes sharing ONE
+candidate schema + ONE `_augment_output` pipeline (ONE PRODUCT RULE preserved)** — `35a3fb17`
+IMPLEMENTS the split (no longer design-only):
+- **Lane A (context / data-plane, robust, EARLY + isolated):** `l3.contract`/`l3.cochange`/`l3b.evidence`
+  deliver via `_lane_a_deliver` (per-producer try/except; correct-or-quiet = non-empty AND content+state
+  hash not already in the shared `_oracle_delivered_hashes`) BEFORE any Lane B logic — NOT routed
+  through `_oracle_gate_blocks`, NOT subject to the oracle ≤1/turn winner gate, NOT killed by a
+  steer-producer crash. The old gate-pool pushes for these kinds were REMOVED.
+- **Lane B (oracle steer / control-plane):** runs through `_oracle_gate_blocks` AFTER Lane A, the whole
+  section wrapped in ONE outer try/except; ADDS its single band-gated candidate, NEVER suppresses Lane A.
+- **Coupling that was broken (now fixed):** both lanes previously shared ONE `<=1/turn` winner gate
+  where `_SEV_OBLIGATION=5` outranked `_SEV_CONTRACT=3` → oracle STARVED the just-edited contract; AND a
+  `_ProductHorizonThresholds` stub crash (swallowed) made the gate emit 0/9 every turn (the DARK-binary
+  root cause, report 22). `32e4e313` un-stubbed the gate; `a7a4be87` made edit-detection see
+  `apply_patch`; `35a3fb17` lifted Lane A off the gate and bulkheaded Lane B.
+
+**Local toolchain:** mingw gcc installed this session for the local Go build (CGO + `sqlite_fts5`).
+**Residuals (report 21, gate any benchmark number):** held-out multi-lang `go test` on a REAL
+toolchain + a REAL production `graph.db` (Codespace); PyCG-dynamic; demand-driven LSP; CHA
+builtin-drop per-language re-justification + held-out false-drop proof; 0.9 calibration; `35a3fb17`
+non-blocking residuals (dead `_lost` re-arm clauses for the moved kinds; `no_flood` test does not fire
+a live steer — cross-lane flood owed to the witness). **NONE validated live — no `output.jsonl` newer
+than the fixes (report 22); the bulkhead is fault-proven in code, not witnessed on a real turn.**
+(Go/TS receiver-field extension — formerly a residual — is CLOSED by `71d66378`, local-test only.)
+
+---
+
 # Implementation Changelog — Session 2026-06-13 (GHA non-Python fixes A–E)
 
 Root cause + fixes: `GHA_NONPYTHON_FAILURE_AUDIT.md`. LIPI vs the 4 surfaces:

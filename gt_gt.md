@@ -63,7 +63,9 @@ GT's edge is the **graph**. This is everything we extract from a repo.
 | 5c CO-CHANGE | git-log mining → `cochanges` pairs |
 
 Plus an incremental single-file mode (`-file`) for the runtime reindex, and a
-`-rebuild-closure` mode (run **after** the LSP pass so the closure reflects promoted edges).
+`-rebuild-closure` mode (run **after** the LSP pass so the closure — which is CALLS-only —
+reflects the LSP-resolved CALLS edges; the promote-pass relationship edges + IMPORTS are not
+CALLS and never enter the closure).
 
 ### 2.2 graph.db schema — 9 tables
 `nodes` (label, name, qualified_name, file, start/end_line, signature, return_type,
@@ -99,7 +101,14 @@ no-same-dir pick → **0.6 `ast_import_ambiguous`**) → **1.75** self/this/Self
 (1.0/0.95) → **1.9** verified-unique (0.95 — **UNQUALIFIED calls only**, see the reorder note)
 → **1.93** import-scoped type_flow (0.95) → **1.94a declared-type receiver** (`qualifier.m()`
 where the caller declared `qualifier`'s type → CHA lookup → `type_flow` **0.9**, evidence
-`param_type` — XTA over the language-uniform `param` property) → **1.94** single/few-implementor
+`param_type` — XTA over the language-uniform `param` property) → **2b declared-FIELD-type
+receiver** (`self.<field>.m()` / `r.<field>.m()` where `<field>` is DECLARED via an annotation
+(`client: HttpClient`) but never locally assigned — injected/inherited/annotation-only, the gap
+1.94a/1.95/1.96 all miss → resolve the receiver from the parser-written declared FIELD type
+(`fieldTypeIndex`, walked up the inheritance chain) → CHA method lookup
+(`lookupMethodWithInheritance`) → `type_flow` **0.9** evidence `field_type` CERTIFIED, **ABSTAINS**
+on ambiguity/unknown/builtin = correct-or-quiet; XTA Tip&Palsberg OOPSLA'00 + CHA Dean/Grove/Chambers
+ECOOP'95) → **1.94** single/few-implementor
 (`impl_method`, **CANDIDATE-capped: 1 class=0.6, 2=0.5, 3=0.4** — name-uniqueness never proves
 the receiver, so it can never be CERTIFIED) → **1.95** type-flow qualified (0.9) → **1.96**
 assignment-flow (PyCG ICSE 2021) → **1.97** return-type bridging → **1.98** unique-method-class
@@ -117,6 +126,29 @@ qualified-unresolved call with one global candidate → `name_match` **0.2 SPECU
 (`name_match_qualified_unresolved`), the stdlib-shadow guard (os.walk → account.walk) preserved.
 Previously this demote fired BEFORE 1.93–1.98 and starved e.g. `command.run()` (declared
 `command: Command`) of its type_flow resolution.
+
+> **ADDED (2026-06-13) — the 2b declared-FIELD-type rung (commits `ec20d603` py/rust, `71d66378`
+> go/ts).** 2b converts ONE specific name_match method-edge class to a FACT: a typed
+> `self.<field>.method()` (or Go `<recv>.<field>.method()`) where `<field>` is DECLARED via a type
+> annotation but never locally assigned — the injected/inherited/annotation-only shape the prior
+> receiver-typing rungs (1.75 keys on bare `self`/`this`; 1.94a keys on `param`; 1.96 needs a local
+> assignment) all miss. It proves the receiver from the parser-written declared field type
+> (`BuildFieldTypeIndex`, searched up the inheritance chain) and finds the method via the shared
+> `lookupMethodWithInheritance` CHA primitive, emitting `type_flow`/0.9/`field_type`/CERTIFIED and
+> **ABSTAINING** on ambiguity/unknown/builtin (correct-or-quiet — falls to name_match, never
+> mis-resolves). The resolved CALLS edge enters the closure and drops the §3 residual denominator.
+> **Language coverage (corrected per the ec20d603 LIPI, which caught a generality overclaim):**
+> `ec20d603` landed Python + Rust **colon-annotation** fields only (Go space-separated `Field *Type`
+> + TS access-modifier fields were NOT parsed and the shape gate accepted only `self.`/`this.`, so
+> the rung ABSTAINED on Go/TS); `71d66378` then **extended 2b to Go struct fields** (bare-name
+> types, via `goStructFieldList` — **package-qualified field types `Cache *cache.Store` still
+> ABSTAIN**, correct-or-quiet under-resolution, per the 71d66378 LIPI) **+ TS access-modifier
+> fields** (stripping `private`/`public`/`protected`/
+> `readonly`) and relaxed the shape gate to accept Go's receiver var — closing the DeepSWE
+> non-Python generalization gap for declared-field-type resolution. **NON-OVERCLAIM:** enabling-
+> substrate, NOT a flip claim; held-out real-graph proof + live witness still OWED. Open residuals
+> tracked at ec20d603: incremental-path inheritance map (documented deferral, correct-or-quiet-safe
+> under-resolution), PyCG-dynamic, demand-driven LSP, 0.9 calibration.
 
 **Go CHA IMPLEMENTS (`relationships.go`, `10368a2f`):** structural method-set satisfaction with
 **name+arity+result-presence fingerprints** (`structural_method_set_arity`): **≥2-method
@@ -159,8 +191,11 @@ Plus **co-change** (git), **closure** (transitive reach), **FTS5** (BM25 retriev
 > bullets are no longer true; struck below with what replaced them, plus new deterministic
 > facts the section predated.
 
-- **`IMPORTS` edges**: declared in a schema comment, **never emitted** — imports only feed
-  the resolver to *produce* CALLS edges. *(still true)*
+- ~~**`IMPORTS` edges**: declared in a schema comment, **never emitted** — imports only feed
+  the resolver to *produce* CALLS edges.~~ **STRUCK (2026-06-13, `b5ceaf5d`)** — IMPORTS are now
+  fresh-extracted as traversable edges in Pass 4f (`imports.go`, importer File/symbol -> imported
+  File/symbol; intra-repo resolved only, correct-or-quiet; see §2.6). They STILL also feed the
+  resolver to produce CALLS edges; the two uses are independent.
 - **`DEFINES` / `REFERENCES` / `INHERITS`**: **not implemented at all** (stale comment only;
   the real inheritance edge is `EXTENDS`). *(still true)*
 - ~~**`edges.metadata`**: effectively always empty.~~ **STRUCK** — `API_CALL` edges (4b) carry
@@ -258,7 +293,7 @@ bar.
 | CONTAINS | parent -> child (the DEFINES-equivalent) | PRESENT |
 | EXTENDS (== INHERITS) | subclass -> superclass | PRESENT; INHERITS is an alias, never a 4th type |
 | IMPLEMENTS | class -> interface | PRESENT (js/ts/java/kotlin/go-CHA) |
-| IMPORTS | importer file -> imported module/symbol | **ABSENT — FRESH-EXTRACT** (re-emit the parsed imports the 6 Tier-1 extractors already feed the resolver, to a File/module-anchor node) |
+| IMPORTS | importer file -> imported module/symbol | **PRESENT (2026-06-13, `b5ceaf5d`, Pass 4f `imports.go`)** — fresh-extracted to a File/module-anchor node; intra-repo resolved only (single->1.0 CERTIFIED `ast_import`; >1->0.6 CANDIDATE `ast_import_ambiguous`; stdlib/3rd-party->no edge). Was "ABSENT — FRESH-EXTRACT" |
 | DATA_FLOW (annotation) | def-site -> use-callee | **on CALLS.metadata** (intra-proc; 1133/2591 reach a callee). Not a standalone edge |
 | READS | reader method -> owning Class (A-cut via parent_id) | **PROMOTE-PARTIAL** from `field_read` (reader resolves to its OWNING Class via `parent_id`; field-only reads stay descriptors) |
 | RAISES | raiser -> exception class | **PROMOTE-PARTIAL** from `exception_type`/`exception_flow` (39/47 distinct are internal classes; builtins stay property) |
@@ -311,19 +346,30 @@ On a real db (e.g. adaptix python: 3160 nodes, CALLS 4823 / CONTAINS 1276 / EXTE
 
 #### REFERENCE-PROVEN (2026-06-13) — generalized property→edge promote pass (proven on COPIES via the Python reference port)
 
+> **SUPERSEDED 2026-06-13 (commit `b5ceaf5d`) — the Go-port "UNBUILT" gap below is now CLOSED.** The
+> promote pass + the IMPORTS fresh-extract are LANDED in PRODUCTION via the **Go indexer Pass 4f**
+> (`gt-index/cmd/gt-index/main.go:623–642`: `ResolveImports` + `PromotePropertyEdges` wired after Pass 4d
+> serde, BEFORE Pass 4e closure — but note the closure is CALLS-only, so the IMPORTS/promote
+relationship edges do NOT enter it; the before-closure ordering is functionally inert for them
+(corrected per the `b5ceaf5d` LIPI, which caught this rationale overstatement); `imports.go` +
+`promote.go` + `promote_test.go`). Per §2.1 the Go indexer
+> now OWNS these writes — the Python pass is demoted to a copies-only REFERENCE that refuses a live graph.
+> Build/vet/8-tests GREEN locally (CGO + sqlite_fts5, gcc 16.1). The incremental `-file` path also
+> re-runs the idempotent promote pass post-commit (`main.go:1115–1122`, inv-7 fix), so a single-file
+> reindex no longer silently strips that file's outbound depth edges. **NON-OVERCLAIM:** this is
+> enabling-substrate + locally-tested, NOT held-out-witnessed — the held-out real-graph multi-lang proof
+> (13-invariant contract) is still OWED and gates any benchmark number. (Prior "Stage-1 DONE only when the
+> Go pass runs in the indexer" bar: the build leg is met; the live-witness leg is not.)
+>
 > **SUPERSEDED 2026-06-13 (architecture LIPI w6q8frk6x)** — earlier wording here read "implemented
-> and proven by execution" / "1:1 mirror"; that overstates the state. The promote pass is **proven on
-> COPIES via the Python REFERENCE port** only. The PRODUCTION home is the **Go indexer Pass 4f**, which
-> is **UNBUILT** (Codespace `go build`/`go test` gate, see "Still open"). Per §2.1 the Go indexer owns
-> all graph writes; the Python pass is a **copies-only reference port** that must refuse to run against a
-> live indexing graph. Stage-1 is DONE only when the Go pass runs in the indexer — NOT when the reference
-> port runs over copies.
+> and proven by execution" / "1:1 mirror"; that overstated the COPIES-only reference state that preceded
+> the Go landing above. Retained for history below.
 
 The §2.6 "100% depth bar" is no longer only a spec — the promote-from-property pass is **proven on COPIES via the Python reference port** across 4 languages (production = the Go Pass 4f port, UNBUILT). This addendum records that reference-proven state; it does not change the §2.6 contract above.
 
 #### What ran (reference port, proven on copies) + Go production port (written, unbuilt)
 - **Reference port (copies-only):** a single language-agnostic promote pass reads the EXISTING `properties` table and materializes traversable `edges` rows for every relational property whose value encodes two RESOLVABLE endpoints. Ran on **8 copied graph.db files** (originals never mutated; the reference port guards/refuses against a live indexing graph), **8/8 RED->GREEN PASS (exit 0)**.
-- **Go production home (Pass 4f, UNBUILT):** `gt-index/internal/resolver/promote.go` (`PromotePropertyEdges`) + `promote_test.go` (RED->GREEN depth fixture). Intended to follow the reference port's logic (parity is a GOAL, NOT yet a verified 1:1 mirror — it has never been compiled or run), idempotent (deletes prior `promote_%` edges), additive (properties rows untouched), with a builtin-exception denylist. **UNBUILT — no local Go toolchain; not yet registered in `main.go` (must sit after Pass 4d, before Pass 4e closure). Production = Go Pass 4f, gated on the Codespace `go build`/`go test`.**
+- **Go production home (Pass 4f — LANDED, `b5ceaf5d`):** `gt-index/internal/resolver/promote.go` (`PromotePropertyEdges`) + `imports.go` (`ResolveImports`) + `promote_test.go` (RED->GREEN depth fixture). **Now REGISTERED in `main.go:623–642` as Pass 4f** — runs after Pass 4d serde, BEFORE Pass 4e closure, exactly the required slot; both calls non-fatal+logged. Idempotent (deletes prior `promote_%` edges), additive (properties rows untouched), with a builtin-exception denylist. The verify+LIPI swarm (`w0wozwqga`) caught two real bugs the green tests were blind to — both fixed + proven red->green: (i) FIX inv-7, the incremental `-file` path now re-runs the idempotent promote pass post-commit (`main.go:1115–1122`) so a `-file` reindex no longer strips that file's outbound depth edges until a full rebuild; (ii) FIX D3, `promote.go` DROPS dotted exception tokens (`errors.New`) instead of reducing to the module prefix `errors` and minting a WRONG RAISES edge onto a same-named project class (`raiseFlowRe` widened to the full dotted token; `promote_test.go` dotted-RAISES red->green case). Build/vet/8-tests GREEN locally (CGO + sqlite_fts5, gcc 16.1). **NON-OVERCLAIM:** enabling-substrate, NOT a flip claim (13-invariant contract) — held-out multi-lang real-graph proof gates any benchmark number. (`gt-index.exe` is gitignored, not committed.)
 
 #### Five promoted edge classes (+ two CALLS.metadata annotations), per §2.6 TARGET EDGE SCHEMA
 `CO_SERIALIZES` (serialization_pair, undirected, value carries @file:line), `READS` (field_read -> owning Class via parent_id), `WRITES` (side_effect write -> owning Class), `RAISES` (exception_type/flow -> internal exception Class; builtins stay property), `PRECEDES` (call_order, distinct internal nodes only). `USES` (caller_usage) AND `DATA_FLOW` (def-site -> resolvable forward-slice callee) are **annotations on CALLS.metadata** (edge-deduped), NOT new edge types — per §2.6 line 262/282 a data_flow use-segment that resolves to callee C from source S appends a dataflow tag to the EXISTING `CALLS` S->C edge (725/774 = 93.7% of segments duplicate a CALLS source->target); only the ~49 def-site->callee hops with NO existing CALLS edge mint a standalone `DATA_FLOW` edge. CALLS count is unchanged before/after for both annotations. **SUPERSEDED 2026-06-13 (architecture LIPI w6q8frk6x)** — earlier wording listed DATA_FLOW as a standalone "promoted edge class" (774 edges); corrected here to the annotation contract (mirrors how USES already rides existing CALLS edges, 0 standalone / 490 CALLS-annotated).
@@ -354,7 +400,16 @@ The §2.6 "100% depth bar" is no longer only a spec — the promote-from-propert
 The same promote logic produced edges across go/py/js/ts with **zero per-language branch in the emit path**. Extending coverage to another language is **property-mining only** (add the upstream tree-sitter property emitter); the edge model, endpoint resolution, dedup, non-invention gate, and trust model are shared and language-agnostic.
 
 #### Still open to true 100% (honest)
-IMPORTS edges are a **fresh-extract** (no property carries them) -> needs Go tree-sitter parser change + CGO rebuild. The Go promote port (**Pass 4f**, production home — §2.1: the Go indexer owns all writes) needs Codespace `go build`/`go test` + main.go registration before it ships (Stage-1 DONE only when the Go pass runs in the indexer, NOT when the Python copies-only reference port runs over copies). TYPE_FLOW accuracy (receiver-type / 58% method gap) is a separate phase.
+
+> **SUPERSEDED 2026-06-13 (commit `b5ceaf5d`):** the two "UNBUILT/needs-registration" gaps below are
+> CLOSED. IMPORTS is now a LANDED fresh-extract (`imports.go` — correct-or-quiet: single intra-repo target
+> -> conf1.0 CERTIFIED `ast_import`; >1 -> conf0.6 CANDIDATE `ast_import_ambiguous` candidate_count=N;
+> stdlib/3rd-party -> NO edge; zero per-language branches, SCIP/Kythe/Stack-Graphs model), and the Go
+> promote port is REGISTERED + running as **Pass 4f** in `main.go` (§2.1: the Go indexer owns all writes).
+> **What remains genuinely open:** the **held-out multi-lang real-graph proof** (the inv#8 leg — locally
+> green ≠ live-witnessed) and **TYPE_FLOW accuracy** (receiver-type / the 58% method gap — a separate
+> phase, partly advanced by the §2.3 1.94a declared-field-type rung, ec20d603/71d66378). The build leg is
+> met; the witness leg is owed.
 
 ---
 
@@ -378,6 +433,20 @@ graph's *guesses* into *facts*:
 
 LSP enrichment is delivered to GT as the `confidence`/`resolution_method` columns —
 verified edges get cheap path cost (higher reach), name_match is expensive/suppressed.
+
+> **ADDED (2026-06-13, `9db1fe44`) — the residual counter is now LANGUAGE-AGNOSTIC.** The gate that
+> decides whether the LSP pass is needed (and grades it) measures the unresolved-method-edge RESIDUAL
+> via `_count_residual_method_edges`. It previously gated name_match CALLS edges on
+> `tgt.label='Method'` — but **only Python labels methods `Method`**; Go receiver methods and JS/TS
+> object methods land as `Label='Function'`, so ~475 genuine unresolved method-call edges read as 0
+> → a **FALSE `LSP_NO_OP_VALID` all-clear** on Go/JS/TS while the method map stayed a name-guess. The
+> per-language label clause is DROPPED; the count now keys on the language-agnostic
+> `resolution_method='name_match'`, and the JOIN to a real target node is retained (non-invention).
+> The residual is also CAP-CONSISTENT with the `--max-edges` attempt budget (`resolve.py:175–210`):
+> capping the denominator at the attempt budget makes the fraction "of what we could attempt, how
+> many resolved" — a real-work gate, not an unpassable coin-flip against the cap on a large unscoped
+> repo. LIPI swarm `w0wozwqga`: invariant 9 satisfied, all 4 avenues clean, no test pinned the
+> removed filter.
 
 ---
 
@@ -1195,23 +1264,76 @@ attention*.
 
 ### 15.2 The architecture — GT → oracle → agent
 
+> **SUPERSEDED IN PART (2026-06-13, commit `35a3fb17`) — the "ONE gate decides everything"
+> single-decision-point design below is a SINGLE POINT OF FAILURE and is now DEMOTED.** Run-27465
+> proved the SPOF live: ONE gate crash (`_ProductHorizonThresholds()` TypeError, fixed at `32e4e313`)
+> darkened ALL delivery — 0/8 tasks got even the always-needed contract/consistency/completeness
+> context, because that context was queued DOWNSTREAM of the gate. The fix is a **DATA-PLANE /
+> CONTROL-PLANE HYBRID bulkhead** (Nygard, *Release It!* — bulkhead pattern): the oracle is demoted
+> from gate-of-everything to a **Lane-B steer-decider + shared-ledger-keeper**, and the always-needed
+> context is split into a separate **Lane A** that delivers EARLY and FAULT-ISOLATED. The original
+> single-gate text is retained below for history; the hybrid is the current architecture.
+
 ```
-Issue → FTS5 → graph → LSP → scoring → ┌──────────────────────────────┐
-                                        │  CANDIDATE POOL (all layers) │
-   agent trajectory-so-far ──────────►  │  ORACLE: pure decision gate  │ ──► one emission
-                                        │  (trigger·confidence·        │     (or silence)
-                                        │   relevance·dedup·dose)      │
-                                        └──────────────────────────────┘
+                                        ┌─ LANE A (data plane, ALWAYS-ON) ─────────────┐
+Issue → FTS5 → graph → LSP → scoring →  │  l3.contract / l3.cochange / l3b.evidence    │
+                                        │  deliver EARLY, each producer ISOLATED        │──► append (data plane)
+   agent trajectory-so-far ──────┐      │  own correct-or-quiet gate (non-empty AND     │     records to ↓
+                                 │      │  not-in-ledger); does NOT touch the oracle    │   ┌─────────────┐
+                                 │      └───────────────────────────────────────────────┘   │   SHARED     │
+                                 │      ┌─ LANE B (control plane, SITUATIONAL) ────────┐     │   LEDGER     │
+                                 └────► │  steers (verify.horizon, spec.obligation,    │──►  │ (one, not   │
+                                        │  detect.loop/coherence, consensus.scope, l5) │     │  forked)    │
+                                        │  ORACLE gate, AFTER Lane A, in ONE try/except │     └─────────────┘
+                                        │  (trigger·confidence·relevance·dedup·dose)    │──► ≤1 steer (or silence)
+                                        └───────────────────────────────────────────────┘
 ```
 
-- **Pure function:** `oracle(C, T) → E` where `C` = the candidate pool (every payload all GT
-  layers computed, one shared schema), `T` = the trajectory-so-far exactly as it appears in
-  `output.jsonl` / `mini-swe-agent.txt`, `E` = `{emit(c, channel, dose)}` with **|E| ≤ 1 per
-  turn, or ∅ (silence)**.
-- **All layers become candidate PRODUCERS** (L1, L3, L3b, L4, L5, L5b, consensus, plus the new
-  SPEC producer); ONE gate decides WHEN / WHERE / HOW-MUCH / WHAT. This is the locked "L5
-  decides WHEN, L3/L3b provide WHAT" mandate **generalized across every layer** — not a ninth
-  layer; ONE PRODUCT RULE preserved (one candidate schema, one gate, one pipeline).
+- **LANE A (data plane, ALWAYS-ON):** the contract / consistency / completeness producers
+  (`l3.contract`, `l3b.evidence`, `l3.cochange`) deliver via `_lane_a_deliver` EARLY — append +
+  record to the shared ledger BEFORE any Lane B logic runs — each producer in its OWN try/except so a
+  producer crash is isolated and never darkens the next block OR Lane B. Its gate is its OWN
+  correct-or-quiet test = (content non-empty) AND (content-hash NOT already in the shared ledger); it
+  does NOT go through `_oracle_gate_blocks`. The old gate-pool pushes for these kinds were REMOVED —
+  the contract now has exactly ONE delivery path (Lane A), never the gate. This is CLAUDE.md's
+  "contract/consistency/completeness fire on EVERY edit" made structurally true. (`gt_mini_patch.py`
+  `_lane_a_deliver:3853`; the early call at `_augment_output:4080`.)
+- **LANE B (control plane, SITUATIONAL):** the steers (`verify.horizon`, `spec.obligation`,
+  `detect.loop`, `detect.coherence`, `consensus.scope`, `l5.*`) go through the oracle stateless gate
+  AFTER Lane A, wrapped in ONE outer try/except (stderr-only, NEVER re-raises) so a gate/filter/latch
+  crash CANNOT undo Lane A's already-committed delivery. **The oracle is DEMOTED to steer-decider +
+  ledger-keeper — not bypassed:** it still owns WHEN/WHERE/HOW-MUCH for the steers, ≤1 emission per
+  turn. (`_augment_output:4082+`.)
+- **SHARED LEDGER (one, not forked):** both lanes write the SAME `_oracle_delivered_hashes` (content+
+  state hash) and the SAME `_ledger_note_delivery` / `_runtime_ledger_record`. Cross-lane dedup is a
+  content-hash lookup: a contract block (Lane A) and a steer ABOUT the same function (Lane B) are
+  DIFFERENT content → both deliver; a byte-identical re-send → suppressed.
+- **PROVEN, not asserted (fault injection + negative control):** the hybrid test
+  (`test_hybrid_lane_split.py`) monkeypatches the REAL `_oracle_gate_blocks` to raise, drives the
+  REAL `_augment_output`, and asserts the contract SURVIVES. The NEGATIVE CONTROL (Lane A neutered +
+  gate crashed → contract LOST, len 0) reproduces the 0/8 mode exactly, making the proof
+  non-vacuous — a silent revert of the lane ordering FAILS the test. 31 pytest green locally (7 hybrid
+  incl. the negative control + 16 RC5 + 8 oracle-LIPI). **NON-OVERCLAIM:** enabling-substrate +
+  fault-proven is NOT 'done' per DEFINITION OF DONE — the LIVE WITNESS (task #6, a baseline-fails id:
+  the contract reaches the agent on a real turn AND a control-plane crash loses only the steer) is
+  OWED.
+- **Pure function (preserved within each lane):** the steer decision is still
+  `oracle(C, T) → E`, `E = {emit(c, channel, dose)}`, `|E| ≤ 1 per turn or ∅`; Lane A is a
+  deterministic non-empty/not-in-ledger filter. Stateless recompute from `T` each turn is unchanged.
+- **All layers become candidate PRODUCERS** (L1, L3, L3b, L4, L5, L5b, consensus, plus the SPEC
+  producer); ONE PRODUCT RULE preserved (one candidate schema, one shared ledger, one pipeline). The
+  HYBRID refines the locked "L5 decides WHEN, L3/L3b provide WHAT" mandate: the always-needed WHAT
+  (contract/consistency/completeness) no longer LOSES its turn to a higher-severity steer (it left the
+  rank-competition), while the oracle still decides WHEN for the situational steers.
+
+> **HISTORICAL (the single-gate design, SUPERSEDED above by `35a3fb17`):**
+> - **Pure function:** `oracle(C, T) → E` where `C` = the candidate pool (every payload all GT
+>   layers computed, one shared schema), `T` = the trajectory-so-far exactly as it appears in
+>   `output.jsonl` / `mini-swe-agent.txt`, `E` = `{emit(c, channel, dose)}` with **|E| ≤ 1 per
+>   turn, or ∅ (silence)**.
+> - **All layers become candidate PRODUCERS** (L1, L3, L3b, L4, L5, L5b, consensus, plus the new
+>   SPEC producer); ONE gate decides WHEN / WHERE / HOW-MUCH / WHAT. *(This "one gate decides
+>   everything" was the SPOF — see the hybrid above.)*
 - **Stateless:** the oracle holds NO memory between turns — delivered-set (content-hash markers
   scanned from T), self-discovered-set (token-intersection with the agent's OWN observations),
   edit events (incl. heredoc/`python3 -c` writes — the current detection gap becomes a sensor
@@ -1394,17 +1516,44 @@ Full entries in REFERENCES below.
 ### 15.4 The staged build plan (Stages 0–7, each red→green, independently shippable/rollbackable)
 
 > **STATUS (2026-06-11):** Stages 0–2 COMPLETE (byte-parity proven, 78 tests — see §16.1). Stage 3 (review-transition obligation emission) code SHIPPED (`e574a91b`) but **0/9 runtime fires** in the oracle run — trigger or routing gap in the deployed build (§16.4 open issue B). Stages 4–5 code SHIPPED (governor FP closure, loop/coherence sensors, TIDE metrics) but **build lag** means the oracle run measured OLD code for `failure_persisted`/loop (7 unpushed commits at run time). Stages 6–7 NOT BUILT.
+>
+> **UPDATED (2026-06-13) — the 0/9 "review-transition silent" gap was a CRASH, not a missing feature; the gate now EXECUTES.** Root cause (verified, run 27465183646: `gt.oracle_event.v2=0` on all 8 tasks): `_augment_output` raised `TypeError: _ProductHorizonThresholds() takes no arguments` EVERY turn — the no-arg runtime-fallback stub was constructed with 6 kwargs by the `verify_horizon_band` wrapper — and the exception was swallowed silently by the outer `except: pass` BEFORE the gate's unconditional telemetry write, so ZERO per-turn context reached the agent (only the turn-0 brief). FIX (`32e4e313`, generalized + correct-or-quiet): give the stub a kwarg-accepting `__init__`; inject `ledger.py`+`patterns.py` into `_PRODUCT_RUNTIME_FILES` so the in-container import block succeeds (`_RUNTIME_AVAILABLE=True`, the REAL verification-horizon/ledger logic runs, not stubs); make the outer `_augment_output` swallow LOUD (stderr traceback, never re-raises); wrap each per-turn producer in its OWN try/except. TTD `tests/test_oracle_gate_fires_in_container.py` RED pre-fix (gate WRITER silent), GREEN post-fix (≥1 `gt.oracle_event.v2`). **`35a3fb17`** then split delivery into the DATA-PLANE/CONTROL-PLANE hybrid (§15.2) so a future gate crash can no longer darken the always-needed context. **The gate-of-everything 0/9 routing gap (§16.5-B) is closed as a CRASH;** the steer gate now executes per turn. **NON-OVERCLAIM:** DONE-DONE (`oracle_event.v2>0` on a LIVE turn, baseline-fails id) is still OWED — the live witness (task #6).
 
 | Stage | Builds | Metric it moves | Status (2026-06-11) |
 |---|---|---|---|
 | **0** | Trajectory sensor + offline replay harness (edit detection incl. heredoc/`python3 -c`, test-runner+output capture, phase detection, GT-marker delivered-set) | sensor recall on known events (the currently-missed edits are the red set) | **COMPLETE** — pre-build audit found heredoc already handled; real red set = stateless recompute + delivered-set scan; 78 tests green |
 | **1** | Issue-as-SPEC extractor (`obligations[]` + the F2 anchors-file extension) | extraction precision, hand-audited on held-out non-benchmark issues | **COMPLETE** — `spec.py`, `gt_oracle.py`; 3/3 on-target fires in oracle run |
 | **2** | Oracle core around L5 ONLY — byte-parity with current governor first, THEN dedup/relevance/budget/attribution discipline | replay red→green vs ledger ground truth (csstree harmful fire suppressed; boa fire preserved; zero new fires) | **COMPLETE** — byte-parity 10/10 trajectories; `_latch_key()` bug found+fixed; `tests/test_oracle_stage2_parity.py` 6 tests |
-| **3** | Obligation-aware candidates: Rank-1 test-evidence-gap extension, GT_VERIFY port to mini with obligation checklist, K-of-N scope re-route to review-transition, drift whitelist | consumption rate at review-transition (§4 ledgers) | **CODE SHIPPED** (`e574a91b`) — **0/9 runtime fires** at review-transition; trigger/routing gap (§16.5 issue B) |
-| **4** | Route L3/L3b/L4/consensus through the oracle (relevance-gated witnesses, edit-bound `rearm_on_change` contracts, stale-graph honesty, retire the C0 scope-chain dump) | inert rate ~80% → minority at unchanged correctness; harm rate 0 | **NOT BUILT** |
+| **3** | Obligation-aware candidates: Rank-1 test-evidence-gap extension, GT_VERIFY port to mini with obligation checklist, K-of-N scope re-route to review-transition, drift whitelist | consumption rate at review-transition (§4 ledgers) | **GATE NOW EXECUTES (2026-06-13, `32e4e313`)** — the 0/9 silence was a `_ProductHorizonThresholds` TypeError CRASH (stub un-stubbed + ledger/patterns injected + loud-swallow + per-producer try/except); TTD `test_oracle_gate_fires_in_container.py` RED→GREEN (`gt.oracle_event.v2` 0→≥1). `35a3fb17` then made the always-on context (Lane A) crash-independent of this gate. **Live witness (`oracle_event.v2>0` on a real baseline-fails turn) still OWED** (§16.5-B closed as a crash; DONE-DONE pending) |
+| **4** | Route L3/L3b/L4/consensus through the oracle (relevance-gated witnesses, edit-bound `rearm_on_change` contracts, stale-graph honesty, retire the C0 scope-chain dump) | inert rate ~80% → minority at unchanged correctness; harm rate 0 | **PARTIALLY BUILT (2026-06-13)** — the routing question was RESOLVED by the §15.2 hybrid (`35a3fb17`): rather than route the always-needed L3/L3b/consensus.scope THROUGH the oracle gate, they were moved to **Lane A (data plane)** — delivered early + fault-isolated, edit-bound `rearm_on_change` via content-hash. The oracle (Lane B) now routes only the situational STEERS. Inert-rate / harm-rate measurement still OWED (Stage 7) |
 | **5** | Contract completeness: `extractSignature` captures the full declaration header to body-open (where-clauses/bounds/generic constraints) — needs substrate rebuild | held-out typed-language fixtures; boa [86] shape renders `T: Trace + 'static` | **CODE-PRESENT** (`contract_map.py:626–665`) — zero runtime confirmation; §16.5 issue G |
 | **6** | Calibration pass: per-class distribution-derived floors, HIGH-pin kills, per-task dose caps, replay-tuning on a grown corpus | precision-of-HIGH ≈ 1.0; per-class trigger precision on HELD-OUT repos | **NOT BUILT** |
 | **7** | Paired measurement run + the efficiency instrumentation (prereq: the 4 BLOCKS-BENCHMARK metric bugs closed) | BOTH headline metrics: efficiency deltas (first measurement ever) + flips (paired Wilcoxon) | **NOT DONE** — M13/M01/M03 measured but all non-significant; prereqs (§16.5 A/E/F/K) not closed |
+
+> **ADDED (2026-06-13) — RC5 hybrid `edit_coverage` + the apply_patch/git/patch `_classify`
+> foundation (`a7a4be87`), both feeding Lane B's verify.horizon steer.** Two coupled fixes:
+> - **`_classify`/`_edit_target` now recognize the `apply_patch`/`git apply`/`patch -pN` edit
+>   family** — parse the target file from `*** Update File:` / `+++ b/<path>`, hunk line-ranges from
+>   `@@` headers, reading the staged diff for `< file`; a priority-0 branch returns
+>   `('post_edit', target)`, correct-or-quiet (None falls through to legacy). FOUNDATIONAL: the
+>   agent's DOMINANT edit channel was previously INVISIBLE to GT edit-detection (the heredoc/`cat >`
+>   sensors missed it) — this is the substrate that lets the edit-bound Lane A contract + the
+>   verify.horizon steer fire on `apply_patch` edits at all.
+> - **`edit_coverage_ratio` upgraded single-source-lexical → ≥3-signal HYBRID** (content-body
+>   lexical + graph Function/Method co-location + line-range overlap), FACT-tier/degrade contract,
+>   fixing the 0.0-solved/1.0-failed inversion. **NARRATIVE CORRECTION (this is the bar):** the RC5
+>   `edit_coverage` ratio feeds **`verify_horizon_band`** — reduced at the single consumer to the
+>   advisory-band boolean `ec_pos = (ratio > 0)`, so the ≥3-signal precision rarely changes a steer
+>   (the under-count→>0 fix is the load-bearing half), and the dry-run false-positive it could
+>   fabricate is now patched (`e6ddc06e`) (`gt_mini_patch.py:967–988,3506`:
+>   `ec = edit_coverage_ratio(_obligation_symbol_set(), _oracle_edited_tokens)` →
+>   `verify_horizon_band(edit_coverage=ec, …)`), **NOT `spec.obligation`** — any prior wording that
+>   said edit_coverage drives the obligation producer is WRONG. It modulates the verify-horizon
+>   steer's urgency, nothing else.
+> - 16 tests GREEN via pytest (12 patch-apply + 4 hybrid) — they DRIVE the real
+>   `_classify`→`_edit_target`→`_augment_output`→`edit_coverage_ratio` chain (no injection — the
+>   discipline the original RC5 test lacked). **NON-OVERCLAIM:** RC5 closes a correctness bug; the
+>   whole oracle path remains UNWITNESSED live (task #6) — not 'done' per DEFINITION OF DONE.
 
 ### 15.5 The two-leg foundation (per-stage acceptance gate, CLAUDE.md verbatim)
 
@@ -1633,7 +1782,7 @@ The oracle-arm trajectories (9 tasks, 5 languages) confirm and sharpen the §15.
 | Mechanism | Fired | Right content | Wrong/defective | Consumed | Verdict |
 |---|---|---|---|---|---|
 | `test_evidence_gap` / obligation nudge | ~9 (1/task) | always issue-verbatim | **selection**: first-matched token in 4/9 a survivable/already-safe obligation; csstree fired on false "you have edited" premise (heredoc sensor gap, `edits=0.0`) | 4–5/9 — and where it hit the right obligation, those hidden tests PASSED | **the proven lever, mis-aimed and one-shot** |
-| review-transition emission | **0 of 9** | — | **THE gap** — the canonical pre-submit moment went silent in every trajectory | — | Stage 3's Stage-1 ship proves the mechanism; zero runtime fires |
+| review-transition emission | **0 of 9** | — | **THE gap** — the canonical pre-submit moment went silent in every trajectory | — | Stage 3's Stage-1 ship proves the mechanism; zero runtime fires. **DIAGNOSED + FIXED 2026-06-13 (`32e4e313`):** the silence was a per-turn `_ProductHorizonThresholds` TypeError CRASH swallowed before the gate's telemetry write — un-stubbed + ledger/patterns injected + loud-swallow; TTD RED→GREEN. `35a3fb17` made Lane A context crash-independent. **Live-witness fire still owed.** |
 | `no_test_evidence` | 1 (boa step 188) | timing correct | satisfiable by pre-existing tests → false confidence | partial | needs obligation-targeted satisfaction |
 | `failure_persisted` | 3 | — | **3/3 false positives** (pre-existing failures ×2; fd `git apply error:` ×1) — the Stage 5 FP-closure fix is NOT holding on this build | 0 | classifier fix live in code; build/digest lag means old code ran |
 | no-new-state loop nudge | 0 | — | fd's 5× identical stale-binary loop (~75 wasted steps) hit silence | — | sensor not live or build lag |
@@ -1646,7 +1795,7 @@ The oracle-arm trajectories (9 tasks, 5 languages) confirm and sharpen the §15.
 | # | Issue | Priority | Notes |
 |---|---|---|---|
 | A | **Self-verification retry gate never armed** (`GT_RETRY_ON_VERIFIER_FAIL` in no workflow) | BLOCKS-BENCHMARK | The closer for both causal wins; missing plumbing gap; set the env var in `deepswe_full.yml` |
-| B | **Review-transition obligation emission silent 0/9** | Highest product lever | Stage 3 code shipped; zero runtime fires confirm the trigger or routing is wrong in the deployed build |
+| B | ~~**Review-transition obligation emission silent 0/9**~~ **CLOSED-AS-CRASH (2026-06-13, `32e4e313`)** | Highest product lever | Was NOT a missing feature: a per-turn `_ProductHorizonThresholds()` TypeError crashed `_augment_output` and was swallowed before the gate's telemetry write → 0 `gt.oracle_event.v2` on all 8 tasks. Fixed (kwarg stub + ledger/patterns injection + loud-swallow + per-producer try/except); TTD `test_oracle_gate_fires_in_container.py` RED→GREEN. `35a3fb17` bulkheads Lane A from this gate. **Residual: live-witness fire (`oracle_event.v2>0` on a real baseline-fails turn) OWED — task #6.** |
 | C | **FIX-A brief-level launder open** (aiomonitor `tailwind.js` at entry #2 in both arms) | High | Fact-filter protects FACT ROWS; ranking/graph-map/scope-chain surfaces unprotected; re-arms every run |
 | D | **Inverted-confidence HIGH-wrong pins systemic** (abs-stepped `functions.go::New`; aiomonitor `commands.py::format_running_task_list`) | High | Both recurring verbatim across two runs; the callee-attribution fabrication bug (wrong file in the coordinate) is distinct from the rerank issue |
 | E | **`instance_id: null`** in all outcome.json — blocks paired Wilcoxon | BLOCKS-BENCHMARK | `deepswe_outcome.py:476-479` finds nothing in pier result shape |
