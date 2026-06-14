@@ -192,13 +192,24 @@ def _read_props(conn: sqlite3.Connection, node_ids: list[int]) -> dict[str, list
         return {}
     placeholders = ",".join("?" for _ in node_ids)
     kind_ph = ",".join("?" for _ in _CONTRACT_KINDS)
+    # I1/I3 confidence gate: a property mined BELOW the fact floor (0.5) is not a
+    # contract FACT and must not be delivered (correct-or-quiet). properties.confidence
+    # carries the mining confidence (e.g. data_flow 0.8). A legacy schema WITHOUT the
+    # column falls back to ungated/permissive so gt_gt behavior is preserved (I5).
+    _base = (
+        f"SELECT kind, value FROM properties "
+        f"WHERE node_id IN ({placeholders}) AND kind IN ({kind_ph}) "
+    )
+    _params = (*node_ids, *_CONTRACT_KINDS)
     try:
         rows = conn.execute(
-            f"SELECT kind, value FROM properties "
-            f"WHERE node_id IN ({placeholders}) AND kind IN ({kind_ph}) "
-            f"ORDER BY line",
-            (*node_ids, *_CONTRACT_KINDS),
+            _base + "AND COALESCE(confidence, 1.0) >= 0.5 ORDER BY line", _params
         ).fetchall()
+    except sqlite3.OperationalError:
+        try:
+            rows = conn.execute(_base + "ORDER BY line", _params).fetchall()
+        except sqlite3.Error:
+            return {}
     except sqlite3.Error:
         return {}
     out: dict[str, list[str]] = {}

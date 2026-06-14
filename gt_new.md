@@ -311,7 +311,7 @@ The whole-architecture per-layer LIPI ran (58 agents). Confirmed findings + stat
 | **MEDIUM** | `edit_risk` counted a 2-candidate `name_match` (conf 0.6 >= floor) as a dependent -- contradicting its own docstring | **FIXED** -- excluded by `resolution_method`; regression added |
 | HIGH | `post_edit.py:157-163` docstring claims it admits `name_match cc<=1` (the old os.walk launder); the SQL correctly excludes name_match -- a "fix code to match docstring" edit would re-introduce the launder | **FIXED** -- docstring now matches SQL; SQL hardened `!= 'name_match'` -> `NOT LIKE 'name_match%'` (variants too); locked by `test_categorical_filter_no_namematch_launder` |
 | MEDIUM | `_issue_relevant_neighbors` / 1-hop expansion add candidates to the "Calls:" line via DATA_FLOW/CO_SERIALIZES (untyped UNION) | **FIXED** -- all 4 JOINs now `type='CALLS'` (matches `_static_callees` sibling); locked by `test_neighbors_calls_only` |
-| MEDIUM | `contract_map._read_props` reads properties without a confidence gate | **OWED** |
+| MEDIUM | `contract_map._read_props` reads properties without a confidence gate | **FIXED** -- `AND COALESCE(confidence,1.0) >= 0.5` (legacy no-column -> permissive); locked by `test_contract_props_confidence_gate` |
 | **MEDIUM** | **Layer 4b auditability gap** -- no per-hook FIRE counter; the ledger records only DELIVERED/SUPPRESSED, and a fired-but-quiet hook is skipped before any record. "How many times did each hook fire?" is NOT answerable from disk -- only how many DELIVERED | **OWED** -- add an invocation counter |
 | LOW | scope-chain SELECT omits `trust_tier`; `STDLIB_MODULES` duplicated in two modules (drift risk); L4b reads no promoted edges (missed enrichment) | **OWED** |
 
