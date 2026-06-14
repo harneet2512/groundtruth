@@ -58,6 +58,8 @@ def get_old_content(file_path: str, workspace: str) -> str:
             ["git", "show", f"HEAD:{file_path}"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             cwd=workspace,
             timeout=10,
         )

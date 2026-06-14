@@ -1118,6 +1118,8 @@ def _rebuild_closure(db_path: str) -> None:
             [bin_path, "-rebuild-closure", "-output", db_path],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=600,
         )
         line = next(

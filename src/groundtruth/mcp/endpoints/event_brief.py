@@ -35,6 +35,8 @@ def _get_file_diff(root_path: str, file_path: str) -> str:
             ["git", "diff", "--", file_path],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             cwd=root_path,
             timeout=10,
         )

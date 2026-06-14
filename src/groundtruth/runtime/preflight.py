@@ -37,7 +37,7 @@ def _run_census(runtime_root: str, graph_db: str, source_root: str) -> tuple[boo
     try:
         cp = subprocess.run(
             [sys.executable, script, "--db", graph_db, "--root", source_root, "--census"],
-            capture_output=True, text=True, timeout=600)
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
         tail = "\n".join((cp.stdout + cp.stderr).strip().splitlines()[-12:])
         return (cp.returncode == 0, tail)
     except Exception as e:

@@ -46,6 +46,8 @@ def _get_full_diff(root_path: str) -> str:
             ["git", "diff"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             cwd=root_path,
             timeout=15,
         )
@@ -61,6 +63,8 @@ def _get_modified_files(root_path: str) -> list[str]:
             ["git", "diff", "--name-only"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             cwd=root_path,
             timeout=10,
         )
@@ -173,6 +177,8 @@ async def handle_review_patch(
                 ["git", "diff", "--", file_path],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 cwd=root_path,
                 timeout=15,
             )

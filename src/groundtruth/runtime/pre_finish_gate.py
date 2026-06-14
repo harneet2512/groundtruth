@@ -70,6 +70,8 @@ def _edited_files(workspace: str) -> list[str]:
             ["git", "-C", workspace, "diff", "--name-only", "HEAD"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=8,
             env=env,
         )

@@ -165,6 +165,8 @@ def run_index(root: str, output: str, timeout: int = 600) -> bool:
             [binary, "-root", root, "-output", output],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
         )
         if result.returncode != 0:
@@ -203,6 +205,8 @@ def run_incremental_index(
             [binary, "-root", root, "-file", relpath, "-output", output],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
         )
         if result.returncode != 0:

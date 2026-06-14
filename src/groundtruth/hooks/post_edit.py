@@ -771,7 +771,7 @@ def _co_change_reminder(file_path: str, repo_root: str, edited_files: list[str])
             import subprocess
             result = subprocess.run(
                 ["git", "log", "--name-only", "--pretty=format:__COMMIT__", f"-{COCHANGE_WINDOW_COMMITS}"],
-                cwd=repo_root, capture_output=True, text=True, timeout=10,
+                cwd=repo_root, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
                 env=_git_env(),
             )
             if result.returncode == 0:
@@ -842,7 +842,7 @@ def _scope_completeness(edited_files: list[str], file_path: str, repo_root: str)
         import subprocess
         result = subprocess.run(
             ["git", "log", "--name-only", "--pretty=format:COMMIT", "-30", "--", file_path],
-            cwd=repo_root, capture_output=True, text=True, timeout=15,
+            cwd=repo_root, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
             env=_git_env(),
         )
         if result.returncode != 0:
@@ -3737,6 +3737,8 @@ def _detect_workspace_root(provided_root: str) -> str:
             ["git", "rev-parse", "--show-toplevel"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             cwd=provided_root,
             timeout=5,
             env=_git_env(),
@@ -3823,6 +3825,8 @@ def _get_modified_files(root: str) -> list[str]:
             ["git", "diff", "--name-only"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             cwd=root,
             timeout=10,
             env=_git_env(),
@@ -3842,6 +3846,8 @@ def _get_diff_text(root: str) -> str:
             ["git", "diff", "HEAD"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             cwd=root,
             timeout=10,
             env=_git_env(),
@@ -3857,6 +3863,8 @@ def _git_diff_path(root: str, relpath: str) -> str:
             ["git", "diff", "HEAD", "--", relpath],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             cwd=root,
             timeout=10,
             env=_git_env(),
@@ -3872,6 +3880,8 @@ def _is_untracked(root: str, relpath: str) -> bool:
             ["git", "ls-files", "--error-unmatch", relpath],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             cwd=root,
             timeout=5,
             env=_git_env(),
@@ -3916,6 +3926,8 @@ def _git_show_head_file(root: str, relpath: str) -> str:
             ["git", "show", f"HEAD:{relpath}"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             cwd=root,
             timeout=10,
             env=_git_env(),

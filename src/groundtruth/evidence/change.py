@@ -53,6 +53,8 @@ def _get_original_source(root: str, file_path: str) -> str:
             ["git", "show", f"HEAD:{file_path}"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             cwd=root,
             timeout=5,
             env=_git_env(),
@@ -1050,6 +1052,8 @@ class CoChangeCache:
                 cwd=self.repo_root,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=30,
                 env=env,
             )

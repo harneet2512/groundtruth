@@ -25,7 +25,7 @@ def _git_modified(root: str) -> list[str]:
     try:
         out = subprocess.run(
             ["git", "-C", root, "diff", "--name-only", "HEAD"],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
         )
         return [ln.strip() for ln in out.stdout.splitlines() if ln.strip()]
     except (subprocess.SubprocessError, OSError):

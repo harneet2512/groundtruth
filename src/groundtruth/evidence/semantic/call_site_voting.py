@@ -134,6 +134,8 @@ def _git_grep_call_sites(
             ["git", "grep", "-n", "--", f"{func_name}("],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             cwd=root,
             timeout=8,
             env=_git_env(),

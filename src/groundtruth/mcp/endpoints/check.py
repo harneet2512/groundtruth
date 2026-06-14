@@ -74,6 +74,8 @@ def _get_modified_files(root_path: str) -> list[str]:
             ["git", "diff", "--name-only"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             cwd=root_path,
             timeout=10,
         )
@@ -94,6 +96,8 @@ def _get_diff_text(root_path: str) -> str:
             ["git", "diff"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             cwd=root_path,
             timeout=10,
         )

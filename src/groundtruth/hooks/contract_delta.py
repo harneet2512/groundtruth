@@ -128,7 +128,7 @@ def _old_content(repo_root: str, file_rel: str) -> str:
             try:
                 r = subprocess.run(
                     ["git", "-C", repo_root, "show", f"{ref}:{rel}"],
-                    capture_output=True, text=True, timeout=10, env=_git_env(),
+                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10, env=_git_env(),
                 )
                 if r.returncode == 0 and r.stdout.strip():
                     return r.stdout
@@ -170,7 +170,7 @@ def _index_one(content: str, file_rel: str) -> str | None:
     db = os.path.join(d, "g.db")
     try:
         r = subprocess.run([binary, "-root", d, "-output", db],
-                           capture_output=True, text=True, timeout=60)
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
         if r.returncode != 0 or not os.path.exists(db):
             return None
     except (subprocess.SubprocessError, OSError):

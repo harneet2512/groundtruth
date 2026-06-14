@@ -105,7 +105,7 @@ def _changed_ranges(root: str, rel: str) -> list[tuple[int, int]]:
     try:
         out = subprocess.run(
             ["git", "-C", root, "diff", "-U0", "--", rel],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
         )
     except (subprocess.SubprocessError, OSError):
         return []

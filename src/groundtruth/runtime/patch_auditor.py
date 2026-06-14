@@ -84,6 +84,8 @@ def _git_name_status(repo_root: str) -> list[tuple[str, str]]:
             ["git", "-C", repo_root, "diff", "--name-status", "HEAD"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=20,
             check=False,
         )

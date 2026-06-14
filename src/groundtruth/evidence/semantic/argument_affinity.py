@@ -109,6 +109,8 @@ def _find_function_def(root: str, func_name: str, deadline: float) -> list[str] 
             ["git", "grep", "-n", "-E", "--", f"(def |func |function |fn |fun ){func_name}\\("],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             cwd=root,
             timeout=5,
             env=_git_env(),
