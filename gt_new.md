@@ -94,6 +94,34 @@ thing this session cannot self-certify.
 
 ---
 
+## 8. Local witness — gt_new running on a real re-indexed graph (2026-06-14)
+
+Re-indexed `src/groundtruth` (305 files, 2502 nodes, 5462 edges, **5.5s**) with the
+current binary, then ran the pipeline end-to-end:
+
+- **Reindex (prerequisite #1): coded + working.** Full Pass 4f (`main.go:623-643`) +
+  incremental re-promote (`main.go:1114-1124`). Produced the depth + naming below.
+- **Substrate.** Depth = `CALLS 3889 + CONTAINS 689 + READS 428 + PRECEDES 164 +
+  WRITES 164 + DATA_FLOW 74 + EXTENDS 46 + RAISES 4 + CO_SERIALIZES 2 + IMPORTS 2`.
+  Naming = **92.1% facts / 7.9% name_match**. **0 orphans, 0 laundered.** (IMPORTS: 1965
+  import statements → 2 edges — the rest stdlib/3rd-party, abstained, correct-or-quiet.)
+- **Brief** (`generate_v1r_brief` on a verify-horizon issue): localized candidate #2 to
+  `runtime/verification_horizon.py :: verify_horizon_band` — the **correct gold function**
+  — with its contract + emission spec (incl. the de-benchmarked "Do not finalize unverified
+  work"). `L1_SCOPE=low` + grep-fallback note (**correct-or-quiet, no over-claimed HIGH
+  steer**). Wires fired live: `SCOPE_COMPONENTS n_components`, `BUG3_ANCHOR_PROX`.
+- **Verification** (structural edit-risk on the real graph): editing `set` (209 deep
+  verified dependents) → risk **0.9905**; a leaf → **quiet**. The agent-facing advisory
+  NAMES the specific risk — *"find_symbol_by_name (28 verified dependent(s) in the graph)
+  — no test has exercised your change"* — budget-free, de-benchmarked.
+
+**STATUS: PROVEN-LOCAL.** The reindex → substrate → brief → verification path runs
+end-to-end on a real re-indexed graph and produces relevant + honest output. This is NOT
+the live agent witness — whether the AGENT consumes this and flips is still owed (Task #6).
+The DEFINITION OF DONE (metrics changed on a billed run) remains the one unconverted gate.
+
+---
+
 ## Appendix A — DEPTH before/after (gt_gt §2.6 spec vs the current code, read line by line)
 
 **Framing.** gt_gt §2.6 was updated this session to record the landing (it cites
