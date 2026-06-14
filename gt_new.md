@@ -383,3 +383,80 @@ Triaged by actual error mode:
   BRIEFING) it boosts to #1, but the local e5/384-vs-gte/768 mismatch makes semantic abstain.
   NOT fixable as local code without overfitting the localizer ranking (BRIEFING-protected).
   Needs the container embedder env. **None caused by depth/rank/the hardening loop.**
+
+---
+
+## §9 — WHOLE-GT LIPI AGAINST THE ARCHITECTURE (2026-06-14)
+
+A 4-surface LIPI (4-avenue: Logic / Implementation / Integration / Plumbing) of the **whole
+GT** read against the architecture invariants (I1–I8, §349 legitimacy, the D5 degree-scoping
+rule, correct-or-quiet), chronological reads (never grep-counts), citing file:line. Each
+finding names the invariant it serves. Result: **1 real architecture violation found + fixed,
+3 legitimacy/I3 hardening fixes, 5 LOW/doc items.** No HIGH defect left open.
+
+### Surface 1 — Indexer / resolver (naming + depth production)
+- **CLEAN** I3 stdlib-shadow demote (`resolver.go`: `qualifiedUnresolved` gates `verified_unique`;
+  `os.walk`→`account.walk` routes to SPECULATIVE `name_match_qualified_unresolved`, never CERTIFIED),
+  CHA/XTA receiver-type matcher (`ec20d603`, language-agnostic, 5 correct-or-quiet guards),
+  builtin-method drop (join/get/append/…), I7 substrate (additive/idempotent/non-inventing/
+  trust-tiered — idempotency is TESTED in `promote_test.go`, not just asserted).
+- **MED → INVARIANT WORDING (no code change):** I5 says depth "never mutates existing edges,"
+  but USES/DATA_FLOW annotations `UPDATE edges SET metadata` on existing CALLS rows (by design,
+  gt_gt §2.6). The structural map (source/target/type/confidence/trust_tier) IS immutable; only
+  `metadata` is appended. **I5 restated:** *depth never mutates edge IDENTITY/confidence/tier —
+  metadata-append is the one permitted, idempotent mutation.*
+- **LOW:** incremental `-file` re-promote is whole-graph, not changed-subgraph (perf only;
+  converges via idempotent delete-rebuild; acknowledged in `main.go` comments).
+
+### Surface 2 — Brief / localizer (the ranking surface, I2-critical)  → **REAL BUG, FIXED**
+- **I2-A (FIXED, commit `93cff789`):** the inline hub-demotion block (`v1r_brief.py:2969-2992`)
+  counted **untyped** in-degree (`JOIN edges e ON e.target_id=n.id`, no `e.type` filter) and used
+  it to **reorder `top_records`** (RANK). Its sibling `_hub_degree_fn` was CALLS-scoped in Unit 2,
+  but this parallel path was missed (classic "two paths, one fixed" Integration defect). Promoted
+  depth edges would inflate the hub p80 and shift the delivered file order — the exact I2 leak
+  ("as depth increases, treat this very seriously"; "reach over-promotes hubs, the architecture
+  subordinates it on purpose"). Added `AND e.type='CALLS'` to both COUNT queries. Degrade-safe
+  (byte-identical today; diverges only once promote ships).
+- **CLEAN (with evidence):** every OTHER edges-JOIN feeding rank/degree/reach is CALLS- or
+  CALLS/IMPORTS-typed or `_degree_edge_filter`-scoped (witness BFS `:2275`, path-decay `:504`,
+  `_file_degrees`, `_hub_degree_fn`, `_symbol_fanin_fn`, 1-hop expansion, `_top_functions`).
+  Promoted edges are quarantined to scope-chains only (`_SCOPE_EDGE_TYPES`/`_build_scope_chains`),
+  never `_rrf3`. I1 correct-or-quiet, `_read_props` ≥0.5 gate, trust_tier SUPPRESSED exclusion,
+  anchor_select dim-guard, dynamic+hybrid p80 tiers — all clean.
+
+### Surface 3 — Hooks / delivery / legitimacy  → **3 FIXED (commit `74ac3256`)**
+- **CONFIRMED:** no agent-facing path can emit a test name or `pytest <test>` (verified at 4
+  independent layers). `_categorical_edge_filter_clause` uses `NOT LIKE 'name_match%'` (I3, locked).
+- **F4 (FIXED) — §349:** `graph/ego.py` still LOADED the `assertions` table (test names + grader
+  expected) into a field the render path no longer consumes → latent re-leak. Removed the read;
+  the grader table is now genuinely untouched.
+- **I3 consistency (FIXED):** `_hierarchy_edge_filter_clause` used exact `!= 'name_match'` (missed
+  `name_match_qualified_unresolved`) → aligned to `NOT LIKE 'name_match%'`.
+- **F3 (FIXED):** L6 docstring still described the removed assertions-table behavior → rewrote to
+  match the test-blind `properties`-based body.
+- **LOW (documented, not fixed):** `ego.py`/`post_view.py` sqlite conns not in `try/finally` (same
+  class L6 fixed; only bites on Windows + a query error — the eval container is Linux/GC-finalizes;
+  wrapping the 160-line `ego_graph` body is a large non-reversible diff for a LOW Windows-only item).
+
+### Surface 4 — Oracle / mini-swe / verification controller
+- **CLEAN on every load-bearing invariant:** `edit_risk` excludes name_match (`NOT LIKE
+  'name_match%'` in BOTH the per-symbol blast-radius and the repo fan-in reference — a 2-candidate
+  name_match at conf 0.6 ≥ floor is NOT counted); the oracle is correct-or-quiet (every steer
+  producer returns `None`/`""` without a real graph/behavioral fact — the gate only selects among
+  real producer output, cannot manufacture a steer); LEGITIMACY (internal `_test_run_command`
+  computes `pytest …` but NEITHER agent-visible renderer interpolates it — only `bool(covering)`);
+  I4 (zero LLM/http in the decision path); I8 (repo-relative saturating risk, median+MAD floors).
+  Two-lane bulkhead correct (a Lane-B crash loses only the steer, never Lane-A's data plane).
+- **LOW:** (a) `_record_hook_fire` counts Lane A only (Lane B winners record via the ledger, not
+  the fire-count file) — telemetry asymmetry, not a correctness bug. (b) `_STRUCTURAL_RISK_ON` is
+  default-OFF (needs `GT_VERIFY_STRUCTURAL_RISK`) → **the edit_risk steer is INERT unless the
+  witness harness exports that env var. Verify it does, or the structural verification axis is dark
+  at the witness.**
+
+### Net
+Whole-GT LIPI against the architecture: **the only depth-into-rank leak (I2-A) is closed**, the
+legitimacy surface is hardened (assertions table truly off-limits; L6 doc no longer invites a
+re-leak), the I3 name_match-never-a-fact gate is consistent across caller + hierarchy paths. The
+substrate/oracle/verification surfaces were clean on every load-bearing invariant. Remaining items
+are LOW (Windows-only conn hygiene, telemetry asymmetry) or witness-env (`GT_VERIFY_STRUCTURAL_RISK`
+must be exported) — none blocks correctness; all named against the invariant they touch.
