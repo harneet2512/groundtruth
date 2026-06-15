@@ -2529,6 +2529,160 @@ func stripTrailingOp(s string) string {
 	return t
 }
 
+// isUpperLed reports whether s begins with an ASCII uppercase letter. A raised
+// internal error type in Rust/Go is conventionally PascalCase (`MyError`,
+// `ConfigError`); an external/stdlib path is lowercase-led at its first segment
+// (`std::io::Error`, `errors.New`, `anyhow::Error`). This is the cheap structural
+// gate that keeps the extracted token a project-error-CLASS candidate and not a
+// module/crate path — the first half of the correct-or-quiet bar (the promote pass
+// supplies the second half: it must resolve to a real internal Class node and is
+// not a known builtin). It does NOT, by itself, decide an edge is owed.
+func isUpperLed(s string) bool {
+	return s != "" && s[0] >= 'A' && s[0] <= 'Z'
+}
+
+// leadingTypeSegment reduces a raised-error expression fragment to its leading
+// type identifier: the substring up to the first `::`, `{`, `(`, `<`, `,`, `)`,
+// whitespace, or `.`. So `ConfigError::Bad` -> `ConfigError`, `MyError{}` -> `MyError`,
+// `std::io::Error::new()` -> `std`, `MyError<T>` -> `MyError`. Returns "" when the
+// fragment is empty. The caller applies isUpperLed to decide it is a project type.
+func leadingTypeSegment(frag string) string {
+	frag = strings.TrimSpace(frag)
+	if frag == "" {
+		return ""
+	}
+	cut := len(frag)
+	for i := 0; i < len(frag); i++ {
+		c := frag[i]
+		if c == ':' || c == '{' || c == '(' || c == '<' || c == ',' || c == ')' ||
+			c == ' ' || c == '\t' || c == '\n' || c == '.' {
+			cut = i
+			break
+		}
+	}
+	return strings.TrimSpace(frag[:cut])
+}
+
+// firstArgType returns the leading type identifier of the FIRST argument of the
+// first `<head>(` call found in text — used for `Err(<Type>...)` (Rust) and the
+// `bail!(<Type>::Variant)` / `anyhow!(...)` macro forms. headSet, when non-nil,
+// restricts which call heads are inspected (e.g. {"Err"} so a generic `foo(Bar)`
+// call is ignored). Returns "" if no qualifying capitalized argument type is found.
+func firstArgType(text string, headSet map[string]bool) string {
+	for i := 0; i < len(text); i++ {
+		if text[i] != '(' {
+			continue
+		}
+		// Read the head identifier immediately preceding '(' (skip a trailing '!'
+		// for macro_invocation forms like `bail!(`).
+		j := i - 1
+		if j >= 0 && text[j] == '!' {
+			j--
+		}
+		end := j + 1
+		for j >= 0 && (isIdentByte(text[j])) {
+			j--
+		}
+		head := text[j+1 : end]
+		if head == "" {
+			continue
+		}
+		if headSet != nil && !headSet[head] {
+			continue
+		}
+		arg := leadingTypeSegment(text[i+1:])
+		if isUpperLed(arg) {
+			return arg
+		}
+		if headSet != nil {
+			// The head matched (e.g. Err(...)) but its first arg is not a project
+			// type (e.g. Err(std::io::...)) -> stop, correct-or-quiet.
+			return ""
+		}
+	}
+	return ""
+}
+
+// isIdentByte reports whether b is part of an identifier (used by firstArgType to
+// walk a call head backwards).
+func isIdentByte(b byte) bool {
+	return b == '_' ||
+		(b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
+}
+
+// rustRaisedType extracts the INTERNAL error type name a Rust error-raising
+// expression names, or "" when none is named (so the fact stays a property /
+// correct-or-quiet). Generalized over the Rust error model:
+//
+//	Err(<Type>...)            -> <Type>          (struct or enum, Err(MyError) / Err(E::V))
+//	<Type>{..}.into()         -> <Type>          (the .into() conversion idiom)
+//	<Type>::<V>.into()        -> <Type>
+//	bail!(<Type>::..) etc.    -> <Type>          (anyhow/bail/ensure macros naming a type)
+//
+// A builtin/external error (`std::io::Error`, `anyhow::Error`) is lowercase-led at
+// its first path segment -> isUpperLed rejects it -> "" -> stays a property. The
+// promote pass enforces the rest of non-invention (resolve to an internal Class
+// node, drop builtins). The returned name is the bare leading type identifier; the
+// caller emits it as the property value the existing promoteRaises consumes.
+func rustRaisedType(text string) string {
+	text = strings.TrimSpace(text)
+	// 1) Err(<Type>...) — the dominant Result error path. Restrict the call head to
+	//    `Err` so a generic call argument is never mistaken for an error type.
+	if t := firstArgType(text, map[string]bool{"Err": true}); t != "" {
+		return t
+	}
+	// 2) <Type>{..}.into() / <Type>::Variant.into() — the conversion idiom. Only when
+	//    `.into()` is present AND the expression LEADS with a capitalized type (so a
+	//    `value.into()` on a non-type receiver is ignored).
+	if strings.Contains(text, ".into()") {
+		if lead := leadingTypeSegment(text); isUpperLed(lead) {
+			return lead
+		}
+	}
+	// 3) bail!/anyhow!/ensure! macros that name a concrete internal type as the first
+	//    arg (e.g. bail!(ConfigError::Bad)). A string-message macro (bail!("msg")) has
+	//    no capitalized first arg -> "" -> stays a property.
+	for _, m := range []string{"bail", "anyhow", "ensure"} {
+		if strings.Contains(text, m+"!(") {
+			if t := firstArgType(text, map[string]bool{m: true}); t != "" {
+				return t
+			}
+		}
+	}
+	return ""
+}
+
+// goRaisedType extracts the INTERNAL error type name a Go error-returning expression
+// names, or "" otherwise. Generalized over the Go error model's NAMED-type forms:
+//
+//	&<Type>{..}   -> <Type>     (return &ConfigError{..} — the custom error struct)
+//	<Type>{..}    -> <Type>     (return ConfigError{..})
+//
+// A value-only error (`errors.New(..)`, `fmt.Errorf(..)`, `pkg.ErrFoo`) names no
+// internal CLASS to point a RAISES edge at — it stays a property (correct-or-quiet);
+// the dotted forms are additionally dropped by the promote pass. Mirrors the Rust
+// path: emit only a leading capitalized type identifier.
+func goRaisedType(text string) string {
+	text = strings.TrimSpace(text)
+	// Find a `&<Type>{` or `<Type>{` composite-literal of a capitalized type. Scan for
+	// the first '{' that is preceded by a capitalized identifier (optionally '&'-led).
+	for i := 0; i < len(text); i++ {
+		if text[i] != '{' {
+			continue
+		}
+		j := i - 1
+		end := j + 1
+		for j >= 0 && isIdentByte(text[j]) {
+			j--
+		}
+		ident := text[j+1 : end]
+		if isUpperLed(ident) {
+			return ident
+		}
+	}
+	return ""
+}
+
 // extractExceptionFromNode recursively finds raise/throw/panic statements.
 func extractExceptionFromNode(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, nodeIdx int) {
 	nodeType := node.Type()
@@ -2539,16 +2693,34 @@ func extractExceptionFromNode(node *sitter.Node, sf walker.SourceFile, src []byt
 	case "raise_statement", "throw_statement", "throw_expression":
 		isException = true
 	case "expression_statement":
-		// Check for panic() calls
+		// Check for panic() calls, the Rust `<Type>{..}.into()` conversion idiom,
+		// and Rust error macros wrapped in an expression_statement.
 		text := node.Content(src)
-		if strings.Contains(text, "panic(") {
+		if strings.Contains(text, "panic(") || strings.Contains(text, "panic!(") ||
+			rustRaisedType(text) != "" {
 			isException = true
 		}
 	case "return_statement":
-		// Go: return fmt.Errorf(...) or return errors.New(...)
+		// Go: return fmt.Errorf(...) / errors.New(...) (a value -> excType "error"), OR
+		// a NAMED internal error type (return &ConfigError{..} / return ConfigError{..}),
+		// which is the RAISES-edge target the value forms never were.
 		text := node.Content(src)
 		if strings.Contains(text, "fmt.Errorf") || strings.Contains(text, "errors.New") ||
-			strings.Contains(text, "errors.Wrap") || strings.Contains(text, "errors.Errorf") {
+			strings.Contains(text, "errors.Wrap") || strings.Contains(text, "errors.Errorf") ||
+			goRaisedType(text) != "" {
+			isException = true
+		}
+	case "return_expression":
+		// Rust idiomatic raise: `return Err(<Type>..)` / `return <Type>{..}.into()`.
+		// (tree-sitter-rust models `return <expr>` as a return_expression, not a
+		// return_statement — which is why these never matched before.)
+		if rustRaisedType(node.Content(src)) != "" {
+			isException = true
+		}
+	case "macro_invocation":
+		// Rust error macros: panic!(..) / bail!(..) / anyhow!(..) / ensure!(..).
+		text := node.Content(src)
+		if strings.HasPrefix(text, "panic!") || rustRaisedType(text) != "" {
 			isException = true
 		}
 	}
@@ -2571,6 +2743,18 @@ func extractExceptionFromNode(node *sitter.Node, sf walker.SourceFile, src []byt
 			if idx := strings.Index(excType, "("); idx > 0 {
 				excType = excType[:idx]
 			}
+		case rustRaisedType(text) != "":
+			// Rust `Err(<Type>..)` / `<Type>{..}.into()` / `bail!(<Type>::..)` —
+			// the NAMED internal error type. Emit the bare type so promoteRaises
+			// resolves it to the internal Class node (struct/enum). A builtin/
+			// external (std::io::Error) yields "" here and falls through.
+			excType = rustRaisedType(text)
+		case goRaisedType(text) != "":
+			// Go `&<Type>{..}` / `<Type>{..}` composite-literal error -> bare type.
+			excType = goRaisedType(text)
+		case strings.HasPrefix(text, "panic!") || strings.Contains(text, "panic!("):
+			// Rust panic! names no internal class -> non-class marker (no edge).
+			excType = "panic"
 		case strings.Contains(text, "panic("):
 			excType = "panic"
 		case strings.Contains(text, "fmt.Errorf") || strings.Contains(text, "errors.New") ||
@@ -3327,6 +3511,38 @@ func _findRaisesInBlock(block *sitter.Node, condText string, src []byte, result 
 					raiseText = raiseText[:100]
 				}
 				value := fmt.Sprintf("WHEN %s: %s", condText, raiseText)
+				if len(value) > 200 {
+					value = value[:197] + "..."
+				}
+				result.Properties = append(result.Properties, PropertyRef{
+					NodeIdx:    nodeIdx,
+					Kind:       "exception_flow",
+					Value:      value,
+					Line:       int(child.StartPoint().Row) + 1,
+					Confidence: 1.0,
+				})
+			}
+		}
+
+		// Rust / Go conditional raise of a NAMED internal error type. The if-block's
+		// consequence holds a `return Err(<Type>)` / `return <Type>{..}.into()`
+		// (Rust: return_expression / expression_statement) or a
+		// `return ..., &<Type>{..}` (Go: return_statement). Neither carries a
+		// raise/throw keyword, so the matchers above never saw them and the Go
+		// conditional-error / Rust-error RAISES fact stayed trapped in the AST.
+		//
+		// We normalize the extracted internal type into a `raise <Type>` clause so the
+		// EXISTING promoteRaises (raiseFlowRe) mints the edge — ONE property contract,
+		// no per-language edge path. A value-only error (errors.New / panic! / Err of an
+		// external std type) yields "" here and stays a property (correct-or-quiet).
+		if ct == "return_expression" || ct == "return_statement" || ct == "expression_statement" {
+			text := child.Content(src)
+			etype := rustRaisedType(text)
+			if etype == "" {
+				etype = goRaisedType(text)
+			}
+			if etype != "" {
+				value := fmt.Sprintf("WHEN %s: raise %s", condText, etype)
 				if len(value) > 200 {
 					value = value[:197] + "..."
 				}

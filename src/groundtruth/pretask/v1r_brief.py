@@ -266,7 +266,7 @@ def _top_functions(graph_db: str, file_path: str, limit: int = MAX_FUNCTIONS_PER
             FROM nodes n
             LEFT JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' {conf_clause}
             WHERE n.file_path = ?
-              AND n.label IN ('Function', 'Method')
+              AND n.label IN ('Function', 'Method', 'Class', 'ImplBlock')
               AND n.is_test = 0
             GROUP BY n.id
             ORDER BY ref_count DESC, n.name
@@ -331,7 +331,7 @@ def _top_function_names(
                 SELECT n.name, COUNT(e.id) AS ref_count
                 FROM nodes n
                 LEFT JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' {conf_clause}
-                WHERE n.file_path = ? AND n.label IN ('Function', 'Method') AND n.is_test = 0
+                WHERE n.file_path = ? AND n.label IN ('Function', 'Method', 'Class', 'ImplBlock') AND n.is_test = 0
                 GROUP BY n.id
                 ORDER BY CASE WHEN LOWER(n.name) IN ({_ph}) THEN 0 ELSE 1 END, ref_count DESC, n.name
                 LIMIT 20
@@ -344,7 +344,7 @@ def _top_function_names(
                 SELECT n.name, COUNT(e.id) AS ref_count
                 FROM nodes n
                 LEFT JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' {conf_clause}
-                WHERE n.file_path = ? AND n.label IN ('Function', 'Method') AND n.is_test = 0
+                WHERE n.file_path = ? AND n.label IN ('Function', 'Method', 'Class', 'ImplBlock') AND n.is_test = 0
                 GROUP BY n.id
                 ORDER BY ref_count DESC, n.name
                 LIMIT 20
@@ -879,7 +879,7 @@ def _sibling_context(graph_db: str, file_path: str, func_names: list[str]) -> st
             SELECT DISTINCT n.name
             FROM nodes n
             WHERE n.file_path = ?
-              AND n.label IN ('Function', 'Method')
+              AND n.label IN ('Function', 'Method', 'Class', 'ImplBlock')
               AND n.is_test = 0
               AND n.name NOT IN ({})
             ORDER BY n.start_line
@@ -910,7 +910,7 @@ def _function_spec(
         conn = sqlite3.connect(graph_db)
         row = conn.execute(
             "SELECT start_line, end_line FROM nodes WHERE file_path = ? AND name = ? "
-            "AND label IN ('Function','Method') LIMIT 1",
+            "AND label IN ('Function', 'Method', 'Class', 'ImplBlock') LIMIT 1",
             (file_path, func_name),
         ).fetchone()
         conn.close()
@@ -1917,7 +1917,7 @@ def _edit_target_guard(graph_db: str, file_path: str, func: str) -> tuple[str, i
                 "SELECT id FROM nodes "
                 "WHERE (file_path = ? OR file_path = ? OR file_path LIKE ?) "
                 "AND name = ? AND is_test = 0 "
-                "AND label IN ('Function','Method') "
+                "AND label IN ('Function', 'Method', 'Class', 'ImplBlock') "
                 "ORDER BY start_line LIMIT 1",
                 (file_path, rel, "%/" + rel, func),
             ).fetchone()
@@ -2136,7 +2136,7 @@ def _fts5_symbol_rank(graph_db: str, file_path: str, terms: set[str]) -> list[st
                     WHERE nodes_fts MATCH ?
                       AND n.file_path = ?
                       AND n.is_test = 0
-                      AND n.label IN ('Function', 'Method')
+                      AND n.label IN ('Function', 'Method', 'Class', 'ImplBlock')
                     ORDER BY score
                     LIMIT 50""",
                 (" OR ".join(safe), file_path),
@@ -2490,7 +2490,7 @@ def _exact_issue_named_files(
         _name_files: dict[str, set[str]] = {}
         for name, fp in c.execute(
             "SELECT DISTINCT name, file_path FROM nodes "
-            "WHERE is_test=0 AND label IN ('Function','Method','Class','Interface') "
+            "WHERE is_test=0 AND label IN ('Function', 'Method', 'Class', 'ImplBlock') "
             "AND name IS NOT NULL"
         ):
             if not name or not fp:
@@ -3120,7 +3120,7 @@ def generate_v1r_brief(
                     try:
                         _func_rows = _ik_conn.execute(
                             "SELECT name FROM nodes WHERE file_path = ? "
-                            "AND label IN ('Function', 'Method') AND is_test = 0 LIMIT 10",
+                            "AND label IN ('Function', 'Method', 'Class', 'ImplBlock') AND is_test = 0 LIMIT 10",
                             (rec.get("path", ""),),
                         ).fetchall()
                         for (fn,) in _func_rows:

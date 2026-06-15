@@ -645,6 +645,22 @@ The model (e5-small-v2 ONNX, ~90MB) is baked once via `scripts/setup_models.py`.
 loader (`groundtruth.memory.enrich.embed`) is shipped (the `Memory/` gitignore that once
 excluded it is fixed).
 
+> **CONFIRMED LIVE + PREFLIGHT FIX (2026-06-15, commit `24761bd1`).** The embedder GT actually
+> ranks with is **`Alibaba-NLP/gte-modernbert-base` (768-dim)**, NOT e5. Confirmed on a live
+> codespace run: `[PASS] semantic_embedder: embedder OK: real 768-d ONNX vector, norm=1.000,
+> path=models/gte-modernbert-base (force_onnx=True)`. `get_embedding_model()` no-arg resolves to
+> `_default_embed_model()` → `DEFAULT_EMBED_MODEL = "Alibaba-NLP/gte-modernbert-base"`
+> (`embed.py:46,59`). **e5-small-v2/384 is ONLY** the sqlite-vec memory-store pin (`embed_query`'s
+> default args) and a historical runtime fallback — it is never the localization embedder.
+> **The bug fixed:** `preflight_pipeline.py:check_semantic_embedder` loaded the configured model via
+> `get_embedding_model()` but then PROBED with `embed_query("...")`, whose default args are
+> `intfloat/e5-small-v2`/384 — so the HARD gate validated a DIFFERENT model than the run uses. On a
+> codespace where the e5 ONNX is an unpulled git-LFS pointer, that failed the gate (`InvalidProtobuf`)
+> even though gte loads fine. Fixed to probe `embed_query("...", _default_embed_model(),
+> _default_embed_dim())` — the gate now exercises the gte model the run actually ranks with (closes
+> the half-on "worthless numbers" trap, BRIEFING.md §5). The §5 body's "ONNX e5-small-v2" call-site
+> labels above remain historical (the CHANGE-2 note at the top of §5 is authoritative: default = gte).
+
 ---
 
 ## 6. The tools GT hooks onto the agent (overall)
