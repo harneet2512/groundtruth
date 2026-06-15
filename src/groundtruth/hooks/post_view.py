@@ -791,325 +791,360 @@ def graph_navigation(
         # schema present; numeric fallback otherwise.
         _ef = _edge_filter(db_path)
 
-        # Callers: files that call functions in this file
-        cur.execute(
-            f"""
-            SELECT DISTINCT nsrc.file_path, COUNT(*) as cnt
-            FROM nodes nt
-            JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
-              AND {_ef}
-            JOIN nodes nsrc ON e.source_id = nsrc.id
-            WHERE nt.file_path = ?
-              AND nsrc.file_path != ?
-              AND nsrc.is_test = 0
-            GROUP BY nsrc.file_path
-            ORDER BY cnt DESC
-            LIMIT ?
-            """,
-            (needle, needle, limit * 4),  # fetch more for filtering; SWAP-INVARIANT: no test callers
-        )
-        callers = [(row[0], row[1]) for row in cur.fetchall()]
-        # Get one representative source_line + TARGET symbol per caller file. The
-        # target name (nt.name) is fetched so the stdlib-shadow guard can run
-        # per (caller_code, target_name): the SQL `_ef` gate filters by PROVENANCE
-        # (resolution_method / trust_tier), but a DETERMINISTIC-tagged edge can
-        # still be a stdlib attribute call name-matched to a same-named project
-        # symbol (os.walk -> project walk; any(...) -> project any). That false
-        # "caller" passes the provenance gate (wire.md RUN VERDICT) — exactly the
-        # audited L3b laundering ("Called by: ... any(...)"). The brief already
-        # applies this guard via v1r_brief._is_stdlib_shadow; L3b did not. Mirror it.
-        _shadow_root = os.environ.get("GT_REPO_ROOT", "/testbed")
-        try:
-            from groundtruth.pretask.v1r_brief import _is_stdlib_shadow
-        except Exception:
-            _is_stdlib_shadow = None  # type: ignore[assignment]
-
-        def _caller_is_stdlib_shadow(caller_fp: str, line: int, target: str) -> bool:
-            """True iff caller_fp's representative call line is a stdlib attribute
-            call name-matched to the project symbol ``target`` — a false caller.
-            Correct-or-quiet: no guard available / unreadable line -> not a shadow."""
-            if _is_stdlib_shadow is None or not target or not line or line <= 0:
-                return False
-            try:
-                with open(
-                    os.path.join(_shadow_root, caller_fp), encoding="utf-8", errors="ignore"
-                ) as _sf:
-                    _slines = _sf.readlines()
-                if 0 < line <= len(_slines):
-                    return _is_stdlib_shadow(_slines[line - 1].strip(), target)
-            except OSError:
-                pass
-            return False
-
+        # BULKHEAD (correct-or-quiet): each evidence sub-block (caller/callee +
+        # hub-rank compute, rendering, importers, exception-flow) is wrapped in
+        # its OWN try/except so one sub-block's failure degrades only that block —
+        # it never zeroes the evidence already accumulated in `out`. Previously a
+        # single broad try made any one error (e.g. a missing column on one query)
+        # return `[], 0`, deleting the contract/ego/caller evidence the agent
+        # needed. Shared variables are pre-initialized to safe empties so a block
+        # that aborts leaves the downstream blocks a well-defined (empty) state.
+        callers: list[tuple[str, int]] = []
+        callees: list = []
+        top_callers: list[tuple[str, int]] = []
+        top_callees: list[tuple[str, int]] = []
         _caller_source_lines: dict[str, int] = {}
-        _shadow_only_callers: set[str] = set()
-        for caller_fp, _ in callers[:10]:
-            # Fetch several candidate edges (not just the top one) and pick the first
-            # representative whose call line is NOT a stdlib shadow. A caller is only
-            # dropped when EVERY edge to this file is a stdlib shadow — correct-or-
-            # quiet: never over-suppress a file that has a real deterministic caller
-            # just because it also makes a same-named stdlib call.
-            rows = cur.execute(
-                f"""SELECT e.source_line, nt.name FROM nodes nt
+        _primary_edge_file = None
+        _primary_edge_kind = None
+
+        # --- Sub-block 1: caller/callee + hub-rank compute ---
+        try:
+            # Callers: files that call functions in this file
+            cur.execute(
+                f"""
+                SELECT DISTINCT nsrc.file_path, COUNT(*) as cnt
+                FROM nodes nt
                 JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
                   AND {_ef}
                 JOIN nodes nsrc ON e.source_id = nsrc.id
-                WHERE nt.file_path = ? AND nsrc.file_path = ? AND e.source_line > 0
-                ORDER BY e.confidence DESC LIMIT 5""",
-                (needle, caller_fp),
-            ).fetchall()
-            if not rows:
-                continue
-            _picked = None
-            _any_clean = False
-            for _src_line, _tgt_name in rows:
-                if _caller_is_stdlib_shadow(caller_fp, _src_line, _tgt_name or ""):
-                    continue
-                _any_clean = True
-                if _picked is None:
-                    _picked = _src_line
-            if not _any_clean:
-                # Every representative edge to this file is a stdlib shadow -> not a
-                # real caller. Drop it rather than render `Called by: ... <name>(...)`.
-                _shadow_only_callers.add(caller_fp)
-                continue
-            if _picked is not None:
-                _caller_source_lines[caller_fp] = _picked
-        # Remove the false (stdlib-shadow-only) callers from the delivered set so
-        # they are never rendered as `Called by:` facts (audit B fix).
-        if _shadow_only_callers:
-            callers = [(fp, cnt) for fp, cnt in callers if fp not in _shadow_only_callers]
-        total_callers = len(callers)
+                WHERE nt.file_path = ?
+                  AND nsrc.file_path != ?
+                  AND nsrc.is_test = 0
+                GROUP BY nsrc.file_path
+                ORDER BY cnt DESC
+                LIMIT ?
+                """,
+                (needle, needle, limit * 4),  # fetch more for filtering; SWAP-INVARIANT: no test callers
+            )
+            callers = [(row[0], row[1]) for row in cur.fetchall()]
+            # Get one representative source_line + TARGET symbol per caller file. The
+            # target name (nt.name) is fetched so the stdlib-shadow guard can run
+            # per (caller_code, target_name): the SQL `_ef` gate filters by PROVENANCE
+            # (resolution_method / trust_tier), but a DETERMINISTIC-tagged edge can
+            # still be a stdlib attribute call name-matched to a same-named project
+            # symbol (os.walk -> project walk; any(...) -> project any). That false
+            # "caller" passes the provenance gate (wire.md RUN VERDICT) — exactly the
+            # audited L3b laundering ("Called by: ... any(...)"). The brief already
+            # applies this guard via v1r_brief._is_stdlib_shadow; L3b did not. Mirror it.
+            _shadow_root = os.environ.get("GT_REPO_ROOT", "/testbed")
+            try:
+                from groundtruth.pretask.v1r_brief import _is_stdlib_shadow
+            except Exception:
+                _is_stdlib_shadow = None  # type: ignore[assignment]
 
-        # Callees: files this file calls into
-        cur.execute(
-            f"""
-            SELECT DISTINCT nt.file_path, COUNT(*) as cnt
-            FROM nodes nsrc
-            JOIN edges e ON e.source_id = nsrc.id AND e.type = 'CALLS'
-              AND {_ef}
-            JOIN nodes nt ON e.target_id = nt.id
-            WHERE nsrc.file_path = ?
-              AND nt.file_path != ?
-            GROUP BY nt.file_path
-            ORDER BY cnt DESC
-            LIMIT 40
-            """,
-            (needle, needle),
-        )
-        callees = cur.fetchall()
-
-        # Improvement 2: Suppress already-visited files
-        if visited_files:
-            callers = [(fp, cnt) for fp, cnt in callers if fp not in visited_files]
-            callees = [(fp, cnt) for fp, cnt in callees if fp not in visited_files]
-
-        # Filter vendor/static JS (PRIOR-005)
-        callers = [(fp, cnt) for fp, cnt in callers if not _is_vendor_path(fp)]
-        callees = [(fp, cnt) for fp, cnt in callees if not _is_vendor_path(fp)]
-
-        # Re-rank both by issue relevance
-        issue_terms = _load_issue_terms(state)
-        root = os.environ.get("GT_REPO_ROOT", "/testbed")
-        if issue_terms:
-            ranked_callers = _score_by_issue_relevance(callers, root, issue_terms)
-            ranked_callees = _score_by_issue_relevance(callees, root, issue_terms)
-            top_callers = [(f, cnt) for f, cnt, _ in ranked_callers[:limit * 2]]
-            top_callees = [(f, cnt) for f, cnt, _ in ranked_callees[:limit * 2]]
-        else:
-            top_callers = callers[:limit * 2]
-            top_callees = callees[:limit * 2]
-
-        # Improvement 4: Hub-penalized ranking (repo-relative hub scale)
-        # Compute p90 in-degree once for this graph instead of hardcoded 50
-        # Only count CALLS edges — EXTENDS/IMPLEMENTS are architectural, not hub indicators
-        # Item #32: the hub-scale denominator MUST be drawn from the SAME edge
-        # population as the caller/callee numerators (the shared categorical `_ef`),
-        # not a hardcoded `confidence >= 0.7` literal. Three different edge sets feeding
-        # one ranking formula (numerator `_ef`, in_deg unfiltered, scale conf>=0.7)
-        # miscalibrated the penalty; thread `_ef` through all three.
-        all_degrees = [r[0] for r in cur.execute(
-            f"SELECT COUNT(e.id) FROM nodes n JOIN edges e ON e.target_id = n.id "
-            f"AND e.type = 'CALLS' AND {_ef} GROUP BY n.file_path ORDER BY 1"
-        ).fetchall()]
-        hub_scale = all_degrees[int(len(all_degrees) * 0.9)] if all_degrees else 50
-
-        def _hub_penalized_score(fp: str, cnt: int) -> float:
-            in_deg = _in_degree_for_file(cur, fp, edge_filter=_ef)
-            return cnt * (1.0 - min(1.0, in_deg / float(hub_scale)))
-
-        top_callers = sorted(top_callers, key=lambda x: _hub_penalized_score(x[0], x[1]), reverse=True)[:limit]
-        top_callees = sorted(top_callees, key=lambda x: _hub_penalized_score(x[0], x[1]), reverse=True)[:limit]
-
-        # Structured capture: decay metadata + edges
-        _primary_edge_file: str | None = None
-        _primary_edge_kind: str | None = None
-        if _evidence_accumulator is not None:
-            _evidence_accumulator.append({
-                "kind": "l3b_decay_metadata",
-                "decay_applied": _decay_applied,
-                "edge_limit_before": _edge_limit_before,
-                "edge_limit_after": limit,
-                "iteration_band": _iteration_band,
-                "broad_navigation_after_60pct": iteration_ratio >= 0.60 and not _decay_applied,
-            })
-        # Mark primary edge (top caller, or top callee if no caller)
-        if top_callers:
-            _primary_edge_file = top_callers[0][0]
-            _primary_edge_kind = "READ_CALLER_CONTRACT"
-        elif top_callees:
-            _primary_edge_file = top_callees[0][0]
-            _primary_edge_kind = "READ_CONSUMER"
-
-        if _evidence_accumulator is not None:
-            for i, (fp, cnt) in enumerate(top_callers):
-                _evidence_accumulator.append({
-                    "kind": "l3b_caller_edge", "file_path": fp,
-                    "text": f"{cnt} calls", "source": "graph_db",
-                    "reason": f"calls symbol in {needle}",
-                    "primary_edge": i == 0,
-                })
-            for i, (fp, cnt) in enumerate(top_callees):
-                _evidence_accumulator.append({
-                    "kind": "l3b_callee_edge", "file_path": fp,
-                    "text": f"{cnt} calls", "source": "graph_db",
-                    "reason": f"called by symbol in {needle}",
-                    "primary_edge": i == 0 and not top_callers,
-                })
-
-        # Primary-edge rendering (GT_L3B_PRIMARY_EDGE)
-        _l3b_primary = os.environ.get("GT_L3B_PRIMARY_EDGE", "0") == "1"
-
-        # Improvement 3 + 5: Brief candidate annotation + symbol-level hints + layer tag
-        def _format_neighbor(fp: str, cnt: int, source_line: int = 0) -> str:
-            funcs = _top_functions_for_file(cur, fp, limit=2, edge_filter=_ef)
-            func_names = ",".join(name for name, _ in funcs) if funcs else ""
-            suffix = ""
-            if any(fp == c or fp.endswith("/" + c) or c.endswith("/" + fp) for c in brief_candidates):
-                suffix = " [CANDIDATE]"
-            # L3b+ Enhancement: layer classification tag
-            _layer_tag = _classify_layer_inline(fp)
-            if _layer_tag:
-                suffix += f" [{_layer_tag}]"
-            # Show actual caller code line (mechanism #1: consumption visibility)
-            code_snippet = ""
-            if source_line > 0 and root:
+            def _caller_is_stdlib_shadow(caller_fp: str, line: int, target: str) -> bool:
+                """True iff caller_fp's representative call line is a stdlib attribute
+                call name-matched to the project symbol ``target`` — a false caller.
+                Correct-or-quiet: no guard available / unreadable line -> not a shadow."""
+                if _is_stdlib_shadow is None or not target or not line or line <= 0:
+                    return False
                 try:
-                    full_path = os.path.join(root, fp)
-                    with open(full_path, encoding="utf-8", errors="ignore") as _cf:
-                        lines = _cf.readlines()
-                    if source_line <= len(lines):
-                        code_snippet = clip_balanced(lines[source_line - 1].strip(), 90)
+                    with open(
+                        os.path.join(_shadow_root, caller_fp), encoding="utf-8", errors="ignore"
+                    ) as _sf:
+                        _slines = _sf.readlines()
+                    if 0 < line <= len(_slines):
+                        return _is_stdlib_shadow(_slines[line - 1].strip(), target)
                 except OSError:
                     pass
-            if code_snippet:
-                return f"{fp}:{source_line} `{code_snippet}`{suffix}"
-            if func_names:
-                return f"{fp}::{func_names} ({cnt}x){suffix}"
-            return f"{fp} ({cnt}x){suffix}"
+                return False
 
-        # Token caps per band (approx chars = tokens * 4)
-        _char_caps = {"early_0_25": 1000, "mid_25_60": 640, "late_60_85": 320, "final_85_100": 0}
-        _char_cap = _char_caps.get(_iteration_band, 1000) if _l3b_primary else 99999
+            _caller_source_lines: dict[str, int] = {}
+            _shadow_only_callers: set[str] = set()
+            for caller_fp, _ in callers[:10]:
+                # Fetch several candidate edges (not just the top one) and pick the first
+                # representative whose call line is NOT a stdlib shadow. A caller is only
+                # dropped when EVERY edge to this file is a stdlib shadow — correct-or-
+                # quiet: never over-suppress a file that has a real deterministic caller
+                # just because it also makes a same-named stdlib call.
+                rows = cur.execute(
+                    f"""SELECT e.source_line, nt.name FROM nodes nt
+                    JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
+                      AND {_ef}
+                    JOIN nodes nsrc ON e.source_id = nsrc.id
+                    WHERE nt.file_path = ? AND nsrc.file_path = ? AND e.source_line > 0
+                    ORDER BY e.confidence DESC LIMIT 5""",
+                    (needle, caller_fp),
+                ).fetchall()
+                if not rows:
+                    continue
+                _picked = None
+                _any_clean = False
+                for _src_line, _tgt_name in rows:
+                    if _caller_is_stdlib_shadow(caller_fp, _src_line, _tgt_name or ""):
+                        continue
+                    _any_clean = True
+                    if _picked is None:
+                        _picked = _src_line
+                if not _any_clean:
+                    # Every representative edge to this file is a stdlib shadow -> not a
+                    # real caller. Drop it rather than render `Called by: ... <name>(...)`.
+                    _shadow_only_callers.add(caller_fp)
+                    continue
+                if _picked is not None:
+                    _caller_source_lines[caller_fp] = _picked
+            # Remove the false (stdlib-shadow-only) callers from the delivered set so
+            # they are never rendered as `Called by:` facts (audit B fix).
+            if _shadow_only_callers:
+                callers = [(fp, cnt) for fp, cnt in callers if fp not in _shadow_only_callers]
+            total_callers = len(callers)
 
-        if _l3b_primary and iteration_ratio >= 0.25 and _primary_edge_file:
-            # After early band: render ONLY primary edge
-            primary_formatted = _format_neighbor(_primary_edge_file, top_callers[0][1] if top_callers else (top_callees[0][1] if top_callees else 0))
-            label = "Called by" if top_callers else "Calls into"
-            line = f"{label}: {primary_formatted}"
-            if len(line) <= _char_cap:
-                out.append(line)
-        elif _l3b_primary and iteration_ratio >= 0.85:
-            pass  # Final: silent unless tied to edit/failure
-        else:
-            # Early band or flag off: render all (original behavior)
+            # Callees: files this file calls into
+            cur.execute(
+                f"""
+                SELECT DISTINCT nt.file_path, COUNT(*) as cnt
+                FROM nodes nsrc
+                JOIN edges e ON e.source_id = nsrc.id AND e.type = 'CALLS'
+                  AND {_ef}
+                JOIN nodes nt ON e.target_id = nt.id
+                WHERE nsrc.file_path = ?
+                  AND nt.file_path != ?
+                GROUP BY nt.file_path
+                ORDER BY cnt DESC
+                LIMIT 40
+                """,
+                (needle, needle),
+            )
+            callees = cur.fetchall()
+
+            # Improvement 2: Suppress already-visited files
+            if visited_files:
+                callers = [(fp, cnt) for fp, cnt in callers if fp not in visited_files]
+                callees = [(fp, cnt) for fp, cnt in callees if fp not in visited_files]
+
+            # Filter vendor/static JS (PRIOR-005)
+            callers = [(fp, cnt) for fp, cnt in callers if not _is_vendor_path(fp)]
+            callees = [(fp, cnt) for fp, cnt in callees if not _is_vendor_path(fp)]
+
+            # Re-rank both by issue relevance
+            issue_terms = _load_issue_terms(state)
+            root = os.environ.get("GT_REPO_ROOT", "/testbed")
+            if issue_terms:
+                ranked_callers = _score_by_issue_relevance(callers, root, issue_terms)
+                ranked_callees = _score_by_issue_relevance(callees, root, issue_terms)
+                top_callers = [(f, cnt) for f, cnt, _ in ranked_callers[:limit * 2]]
+                top_callees = [(f, cnt) for f, cnt, _ in ranked_callees[:limit * 2]]
+            else:
+                top_callers = callers[:limit * 2]
+                top_callees = callees[:limit * 2]
+
+            # Improvement 4: Hub-penalized ranking (repo-relative hub scale)
+            # Compute p90 in-degree once for this graph instead of hardcoded 50
+            # Only count CALLS edges — EXTENDS/IMPLEMENTS are architectural, not hub indicators
+            # Item #32: the hub-scale denominator MUST be drawn from the SAME edge
+            # population as the caller/callee numerators (the shared categorical `_ef`),
+            # not a hardcoded `confidence >= 0.7` literal. Three different edge sets feeding
+            # one ranking formula (numerator `_ef`, in_deg unfiltered, scale conf>=0.7)
+            # miscalibrated the penalty; thread `_ef` through all three.
+            all_degrees = [r[0] for r in cur.execute(
+                f"SELECT COUNT(e.id) FROM nodes n JOIN edges e ON e.target_id = n.id "
+                f"AND e.type = 'CALLS' AND {_ef} GROUP BY n.file_path ORDER BY 1"
+            ).fetchall()]
+            hub_scale = all_degrees[int(len(all_degrees) * 0.9)] if all_degrees else 50
+
+            def _hub_penalized_score(fp: str, cnt: int) -> float:
+                in_deg = _in_degree_for_file(cur, fp, edge_filter=_ef)
+                return cnt * (1.0 - min(1.0, in_deg / float(hub_scale)))
+
+            top_callers = sorted(top_callers, key=lambda x: _hub_penalized_score(x[0], x[1]), reverse=True)[:limit]
+            top_callees = sorted(top_callees, key=lambda x: _hub_penalized_score(x[0], x[1]), reverse=True)[:limit]
+
+            # Structured capture: decay metadata + edges
+            _primary_edge_file: str | None = None
+            _primary_edge_kind: str | None = None
+            if _evidence_accumulator is not None:
+                _evidence_accumulator.append({
+                    "kind": "l3b_decay_metadata",
+                    "decay_applied": _decay_applied,
+                    "edge_limit_before": _edge_limit_before,
+                    "edge_limit_after": limit,
+                    "iteration_band": _iteration_band,
+                    "broad_navigation_after_60pct": iteration_ratio >= 0.60 and not _decay_applied,
+                })
+            # Mark primary edge (top caller, or top callee if no caller)
             if top_callers:
-                caller_files = [_format_neighbor(fp, cnt, _caller_source_lines.get(fp, 0)) for fp, cnt in top_callers]
-                out.append(f"Called by: {', '.join(caller_files)}")
-            # Rule 3 (R2/R5): Suppress callees during read-only exploration.
-            # Callee info is useful for edit propagation (post_edit.py handles
-            # that). During exploration, callees add noise the agent doesn't
-            # follow. Research: Agentless phase separation, SE-agent lifecycle.
+                _primary_edge_file = top_callers[0][0]
+                _primary_edge_kind = "READ_CALLER_CONTRACT"
+            elif top_callees:
+                _primary_edge_file = top_callees[0][0]
+                _primary_edge_kind = "READ_CONSUMER"
 
+            if _evidence_accumulator is not None:
+                for i, (fp, cnt) in enumerate(top_callers):
+                    _evidence_accumulator.append({
+                        "kind": "l3b_caller_edge", "file_path": fp,
+                        "text": f"{cnt} calls", "source": "graph_db",
+                        "reason": f"calls symbol in {needle}",
+                        "primary_edge": i == 0,
+                    })
+                for i, (fp, cnt) in enumerate(top_callees):
+                    _evidence_accumulator.append({
+                        "kind": "l3b_callee_edge", "file_path": fp,
+                        "text": f"{cnt} calls", "source": "graph_db",
+                        "reason": f"called by symbol in {needle}",
+                        "primary_edge": i == 0 and not top_callers,
+                    })
+        except Exception as _sb1_exc:
+            # Caller/callee/hub-rank compute failed — degrade ONLY this block.
+            # top_callers/top_callees stay [] so rendering renders nothing here;
+            # importers + exception-flow + contract/ego (other blocks) still fire.
+            print(f"[GT_META] graph_nav_callers_error: {type(_sb1_exc).__name__}: {_sb1_exc}", file=sys.stderr, flush=True)
+
+        # --- Sub-block 2: caller/callee rendering ---
+        try:
+            # Primary-edge rendering (GT_L3B_PRIMARY_EDGE)
+            _l3b_primary = os.environ.get("GT_L3B_PRIMARY_EDGE", "0") == "1"
+
+            # Improvement 3 + 5: Brief candidate annotation + symbol-level hints + layer tag
+            def _format_neighbor(fp: str, cnt: int, source_line: int = 0) -> str:
+                funcs = _top_functions_for_file(cur, fp, limit=2, edge_filter=_ef)
+                func_names = ",".join(name for name, _ in funcs) if funcs else ""
+                suffix = ""
+                if any(fp == c or fp.endswith("/" + c) or c.endswith("/" + fp) for c in brief_candidates):
+                    suffix = " [CANDIDATE]"
+                # L3b+ Enhancement: layer classification tag
+                _layer_tag = _classify_layer_inline(fp)
+                if _layer_tag:
+                    suffix += f" [{_layer_tag}]"
+                # Show actual caller code line (mechanism #1: consumption visibility)
+                code_snippet = ""
+                if source_line > 0 and root:
+                    try:
+                        full_path = os.path.join(root, fp)
+                        with open(full_path, encoding="utf-8", errors="ignore") as _cf:
+                            lines = _cf.readlines()
+                        if source_line <= len(lines):
+                            code_snippet = clip_balanced(lines[source_line - 1].strip(), 90)
+                    except OSError:
+                        pass
+                if code_snippet:
+                    return f"{fp}:{source_line} `{code_snippet}`{suffix}"
+                if func_names:
+                    return f"{fp}::{func_names} ({cnt}x){suffix}"
+                return f"{fp} ({cnt}x){suffix}"
+
+            # Token caps per band (approx chars = tokens * 4)
+            _char_caps = {"early_0_25": 1000, "mid_25_60": 640, "late_60_85": 320, "final_85_100": 0}
+            _char_cap = _char_caps.get(_iteration_band, 1000) if _l3b_primary else 99999
+
+            if _l3b_primary and iteration_ratio >= 0.25 and _primary_edge_file:
+                # After early band: render ONLY primary edge
+                primary_formatted = _format_neighbor(_primary_edge_file, top_callers[0][1] if top_callers else (top_callees[0][1] if top_callees else 0))
+                label = "Called by" if top_callers else "Calls into"
+                line = f"{label}: {primary_formatted}"
+                if len(line) <= _char_cap:
+                    out.append(line)
+            elif _l3b_primary and iteration_ratio >= 0.85:
+                pass  # Final: silent unless tied to edit/failure
+            else:
+                # Early band or flag off: render all (original behavior)
+                if top_callers:
+                    caller_files = [_format_neighbor(fp, cnt, _caller_source_lines.get(fp, 0)) for fp, cnt in top_callers]
+                    out.append(f"Called by: {', '.join(caller_files)}")
+                # Rule 3 (R2/R5): Suppress callees during read-only exploration.
+                # Callee info is useful for edit propagation (post_edit.py handles
+                # that). During exploration, callees add noise the agent doesn't
+                # follow. Research: Agentless phase separation, SE-agent lifecycle.
+        except Exception as _sb2_exc:
+            print(f"[GT_META] graph_nav_render_error: {type(_sb2_exc).__name__}: {_sb2_exc}", file=sys.stderr, flush=True)
+
+        # --- Sub-block 3: importers ---
         # Importers: skip after 60% iteration (Change 4)
         # Importers: skip after 60% iteration, AND only then presence-probe (B10:
         # short-circuit avoids a wasted IMPORTS probe when the block is suppressed
         # anyway). Presence-probe: some indexes materialize 0 IMPORTS edges; an empty
         # "Imported by:" on such a graph FALSELY implies the file is un-imported.
-        if not (rebuild_l3b and iteration_ratio >= 0.60) and cur.execute(
-            "SELECT 1 FROM edges WHERE type = 'IMPORTS' LIMIT 1"
-        ).fetchone():
-            _resolved_imp = _resolve_file_path(conn, needle)
-            _ef_imp = _edge_filter(db_path)
-            cur.execute(
-                # B9: a conf-1.0 import edge with NULL resolution_method/trust_tier
-                # would be dropped by the categorical filter alone — keep it via the
-                # numeric fallback (latent on the current indexer, defensive).
-                f"""
-                SELECT DISTINCT nsrc.file_path
-                FROM nodes nt
-                JOIN edges e ON e.target_id = nt.id AND e.type = 'IMPORTS'
-                  AND ({_ef_imp} OR COALESCE(e.confidence, 0.5) >= 0.5)
-                JOIN nodes nsrc ON e.source_id = nsrc.id
-                WHERE nt.file_path = ?
-                  AND nsrc.file_path != ?
-                LIMIT ?
-                """,
-                (_resolved_imp, _resolved_imp, limit),
-            )
-            importers = [fp for (fp,) in cur.fetchall() if fp not in visited_files]
-            if importers:
-                out.append(f"Imported by: {', '.join(importers)}")
-                # Structured capture: importers
-                if _evidence_accumulator is not None:
-                    for fp in importers:
-                        _evidence_accumulator.append({
-                            "kind": "l3b_importer_edge", "file_path": fp,
-                            "source": "graph_db", "reason": f"imports from {needle}",
-                        })
+        try:
+            if not (rebuild_l3b and iteration_ratio >= 0.60) and cur.execute(
+                "SELECT 1 FROM edges WHERE type = 'IMPORTS' LIMIT 1"
+            ).fetchone():
+                _resolved_imp = _resolve_file_path(conn, needle)
+                _ef_imp = _edge_filter(db_path)
+                cur.execute(
+                    # B9: a conf-1.0 import edge with NULL resolution_method/trust_tier
+                    # would be dropped by the categorical filter alone — keep it via the
+                    # numeric fallback (latent on the current indexer, defensive).
+                    f"""
+                    SELECT DISTINCT nsrc.file_path
+                    FROM nodes nt
+                    JOIN edges e ON e.target_id = nt.id AND e.type = 'IMPORTS'
+                      AND ({_ef_imp} OR COALESCE(e.confidence, 0.5) >= 0.5)
+                    JOIN nodes nsrc ON e.source_id = nsrc.id
+                    WHERE nt.file_path = ?
+                      AND nsrc.file_path != ?
+                    LIMIT ?
+                    """,
+                    (_resolved_imp, _resolved_imp, limit),
+                )
+                importers = [fp for (fp,) in cur.fetchall() if fp not in visited_files]
+                if importers:
+                    out.append(f"Imported by: {', '.join(importers)}")
+                    # Structured capture: importers
+                    if _evidence_accumulator is not None:
+                        for fp in importers:
+                            _evidence_accumulator.append({
+                                "kind": "l3b_importer_edge", "file_path": fp,
+                                "source": "graph_db", "reason": f"imports from {needle}",
+                            })
+        except Exception as _sb3_exc:
+            print(f"[GT_META] graph_nav_importers_error: {type(_sb3_exc).__name__}: {_sb3_exc}", file=sys.stderr, flush=True)
 
+        # --- Sub-block 4: exception-flow ---
         # L4b-1: Exception path evidence (Calcagno et al. NFM 2015)
         # Rule 5 (R4): Only emit RAISES/CATCHES when issue keywords match
         # error-handling terms. OpenAI: "relevant context, not all context."
-        _ERROR_KEYWORDS = frozenset({
-            "error", "exception", "raise", "raises", "catch", "catches",
-            "handle", "handler", "traceback", "crash", "fail", "failure",
-            "throw", "thrown", "except", "unexpected",
-        })
-        _issue_terms_exc = set()
         try:
-            _it_path = "/tmp/gt_issue_terms.txt"
-            if os.path.exists(_it_path):
-                with open(_it_path, encoding="utf-8", errors="ignore") as _itf:
-                    _issue_terms_exc = {line.strip().lower() for line in _itf if line.strip()}
-        except Exception:
-            pass
-        _issue_has_error_kw = bool(_issue_terms_exc & _ERROR_KEYWORDS)
-        _has_props = False
-        try:
-            cur.execute("SELECT 1 FROM properties LIMIT 1")
-            _has_props = True
-        except Exception:
-            pass
-        if _has_props and _issue_has_error_kw:
-            _exc_props = cur.execute(
-                "SELECT p.kind, p.value FROM properties p "
-                "JOIN nodes n ON p.node_id = n.id "
-                "WHERE n.file_path = ? "
-                "AND p.kind IN ('exception_flow','exception_handler') "
-                "LIMIT 5",
-                (needle,),
-            ).fetchall()
-            if _exc_props:
-                _exc_parts = []
-                for kind, val in _exc_props:
-                    tag = "CATCHES" if kind == "exception_handler" else "RAISES"
-                    # C1: stored exception_flow/handler is source text; balance-aware
-                    # clip so a truncated raise/except never reaches the agent.
-                    if isinstance(val, str) and val:
-                        val = clip_balanced(val)
-                    _exc_parts.append(f"[{tag}] {val}")
-                out.append(" | ".join(_exc_parts))
+            _ERROR_KEYWORDS = frozenset({
+                "error", "exception", "raise", "raises", "catch", "catches",
+                "handle", "handler", "traceback", "crash", "fail", "failure",
+                "throw", "thrown", "except", "unexpected",
+            })
+            _issue_terms_exc = set()
+            try:
+                _it_path = "/tmp/gt_issue_terms.txt"
+                if os.path.exists(_it_path):
+                    with open(_it_path, encoding="utf-8", errors="ignore") as _itf:
+                        _issue_terms_exc = {line.strip().lower() for line in _itf if line.strip()}
+            except Exception:
+                pass
+            _issue_has_error_kw = bool(_issue_terms_exc & _ERROR_KEYWORDS)
+            _has_props = False
+            try:
+                cur.execute("SELECT 1 FROM properties LIMIT 1")
+                _has_props = True
+            except Exception:
+                pass
+            if _has_props and _issue_has_error_kw:
+                _exc_props = cur.execute(
+                    "SELECT p.kind, p.value FROM properties p "
+                    "JOIN nodes n ON p.node_id = n.id "
+                    "WHERE n.file_path = ? "
+                    "AND p.kind IN ('exception_flow','exception_handler') "
+                    "LIMIT 5",
+                    (needle,),
+                ).fetchall()
+                if _exc_props:
+                    _exc_parts = []
+                    for kind, val in _exc_props:
+                        tag = "CATCHES" if kind == "exception_handler" else "RAISES"
+                        # C1: stored exception_flow/handler is source text; balance-aware
+                        # clip so a truncated raise/except never reaches the agent.
+                        if isinstance(val, str) and val:
+                            val = clip_balanced(val)
+                        _exc_parts.append(f"[{tag}] {val}")
+                    out.append(" | ".join(_exc_parts))
+        except Exception as _sb4_exc:
+            print(f"[GT_META] graph_nav_exception_flow_error: {type(_sb4_exc).__name__}: {_sb4_exc}", file=sys.stderr, flush=True)
 
         # Progress tracking (Change 4)
         if rebuild_l3b and total_candidates > 0 and visited_files:
@@ -1120,8 +1155,13 @@ def graph_navigation(
             out.insert(0, "[FOCUS: late-phase, showing only top connection]")
 
     except Exception as exc:
+        # Final safety net for the preamble (cursor/edge-filter setup) and the
+        # progress-tag tail. The five evidence sub-blocks each catch their own
+        # errors above, so reaching here means a structural failure — but we
+        # STILL return the evidence already accumulated in `out` rather than
+        # nuking it to []. Degrade locally, never zero the agent's context.
         print(f"[GT_META] graph_navigation_error: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
-        return [], 0
+        return out, total_callers
     finally:
         conn.close()
 

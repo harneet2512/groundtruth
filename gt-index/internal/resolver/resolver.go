@@ -383,10 +383,14 @@ func computeConfidence(method string, candidateCount int) float64 {
 	case "type_flow":
 		return 0.9
 	case "name_match":
+		// P2-9: cc==2 was tied at 0.6 with the cc<=1 case — two same-named candidates
+		// is strictly MORE ambiguous than one, so it must score lower. cc==2 → 0.5
+		// (still CANDIDATE, but tier-separated from the unique 0.6) so the ambiguity
+		// gradient is monotone: 1→0.6, 2→0.5, 3-5→0.4, >5→0.2.
 		if candidateCount <= 1 {
 			return 0.6
 		} else if candidateCount == 2 {
-			return 0.6
+			return 0.5
 		} else if candidateCount <= 5 {
 			return 0.4
 		}
@@ -1924,11 +1928,17 @@ func Resolve(
 			if dotIdx := strings.LastIndex(call.CalleeQualified, "."); dotIdx > 0 {
 				qualifier := call.CalleeQualified[:dotIdx]
 				methodName := call.CalleeQualified[dotIdx+1:]
-				// Handle self.x.method() → strip "self." to get "x"
+				// Handle self.x.method() / this.x.method() / super.x.method() → strip the
+				// leading receiver keyword to get the field "x". super. was previously
+				// NOT stripped (P2-8): `super.field.method()` left qualifier as
+				// "super.field", which matched no assignment and mis-scoped the call
+				// (or fell through to a name guess) instead of resolving field x's type.
 				if strings.HasPrefix(qualifier, "self.") {
-					qualifier = qualifier[5:]
+					qualifier = qualifier[len("self."):]
 				} else if strings.HasPrefix(qualifier, "this.") {
-					qualifier = qualifier[5:]
+					qualifier = qualifier[len("this."):]
+				} else if strings.HasPrefix(qualifier, "super.") {
+					qualifier = qualifier[len("super."):]
 				}
 				if qualifier != "self" && qualifier != "this" && qualifier != "super" && qualifier != "" {
 					if fileAssignments, ok := assignmentIndex[call.File]; ok {

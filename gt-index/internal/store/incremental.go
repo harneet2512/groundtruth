@@ -121,6 +121,26 @@ var deterministicRestoreMethods = map[string]bool{
 	"import":          true,
 }
 
+// typeOrUniquenessDerivedMethods are the deterministic methods whose tier was earned
+// by a fact a BARE NAME does not re-prove: a receiver TYPE (type_flow/import_type/
+// inherited/impl_method/unique_method/return_type) or GLOBAL UNIQUENESS at index time
+// (verified_unique). When an incremental restore can only re-match by bare name (no
+// surviving node whose qualified_name equals the original target's), the original
+// receiver-type / uniqueness context is GONE — re-stamping the original CERTIFIED tier
+// onto whatever single same-named node now occupies the file would launder the tier
+// onto a possibly-wrong target. These restore CAPPED at CANDIDATE (0.6). The
+// signature-derived `same_file`/`import` methods are NOT here: their proof (the call
+// is in the same file / the file imports the name) survives a bare-name re-match.
+var typeOrUniquenessDerivedMethods = map[string]bool{
+	"verified_unique": true,
+	"type_flow":       true,
+	"import_type":     true,
+	"inherited":       true,
+	"impl_method":     true,
+	"unique_method":   true,
+	"return_type":     true,
+}
+
 // tierForConfidence mirrors resolver.tierFor (CLAUDE.md:222 — the ONE threshold
 // table) for the store package, which cannot import resolver (import cycle).
 // Keep the thresholds in lockstep with resolver.tierFor.
@@ -149,8 +169,11 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string)
 		return 0, 0, nil
 	}
 	// #B8c: ORDER BY id so the candidate list (and the ids[0] pick below) is
-	// explicitly deterministic, not an accident of SQLite scan order.
-	lookup, err := tx.Prepare(`SELECT id FROM nodes WHERE name = ? AND file_path = ? ORDER BY id`)
+	// explicitly deterministic, not an accident of SQLite scan order. Also select
+	// qualified_name so the restore can re-prove TARGET IDENTITY against the original
+	// edge's TargetQualifiedName (P0: a bare-name re-match must not launder a verified
+	// tier onto a different node that happens to share the simple name).
+	lookup, err := tx.Prepare(`SELECT id, COALESCE(qualified_name, '') FROM nodes WHERE name = ? AND file_path = ? ORDER BY id`)
 	if err != nil {
 		return 0, 0, fmt.Errorf("prepare incoming lookup: %w", err)
 	}
@@ -172,19 +195,39 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string)
 			return restored, unresolved, fmt.Errorf("lookup %s in %s: %w", r.TargetName, filePath, err)
 		}
 		var ids []int64
+		// qnameMatchID is the candidate whose qualified_name EXACTLY equals the
+		// original edge's TargetQualifiedName — the node that re-proves target
+		// identity (not merely the simple name). 0 = no exact-qname candidate.
+		var qnameMatchID int64
 		for rows.Next() {
 			var id int64
-			if err := rows.Scan(&id); err != nil {
+			var qname string
+			if err := rows.Scan(&id, &qname); err != nil {
 				rows.Close()
 				return restored, unresolved, fmt.Errorf("scan target id: %w", err)
 			}
 			ids = append(ids, id)
+			if qnameMatchID == 0 && r.TargetQualifiedName != "" && qname == r.TargetQualifiedName {
+				qnameMatchID = id
+			}
 		}
 		rows.Close()
 
 		if len(ids) == 0 {
 			unresolved++
 			continue
+		}
+
+		// Target node for the restored edge: the exact-qualified-name match when one
+		// exists (identity re-proven), else the deterministic first candidate (id ASC).
+		// qnameMatched gates whether a type/uniqueness-derived tier may be PRESERVED:
+		// without an exact-qname re-match the bare name does not re-prove the original
+		// receiver-type / global-uniqueness fact, so that tier is capped at CANDIDATE.
+		targetID := ids[0]
+		qnameMatched := false
+		if qnameMatchID != 0 {
+			targetID = qnameMatchID
+			qnameMatched = true
 		}
 
 		// PARITY with the full-index resolver's qualifiedUnresolved gate
@@ -217,6 +260,18 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string)
 				conf = 1.0
 			}
 			method = r.ResolutionMethod
+			// P0 DEMOTE: a type/uniqueness-derived tier (verified_unique/type_flow/
+			// import_type/inherited/impl_method/unique_method/return_type) was earned
+			// by a receiver TYPE or GLOBAL UNIQUENESS that a bare-name re-match does
+			// NOT re-prove. If we could not re-prove target identity via an exact
+			// qualified_name match, the single surviving same-named node may be a
+			// DIFFERENT symbol (rename-and-replace) — preserving the CERTIFIED tier
+			// would launder it onto the wrong target. Cap at CANDIDATE (0.6) and let
+			// the tier re-derive to CANDIDATE. The signature-derived same_file/import
+			// methods are exempt: their proof survives a bare-name re-match.
+			if !qnameMatched && typeOrUniquenessDerivedMethods[method] && conf > 0.6 {
+				conf = 0.6
+			}
 			tier = tierForConfidence(conf)
 			// Preserve the original evidence marker; fall back to the method-
 			// appropriate default for legacy rows that stored none.
@@ -256,15 +311,16 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string)
 			}
 			tier = tierForConfidence(conf)
 		}
-		// Pick the first candidate deterministically (id ASC from SELECT).
-		// Edge confidence reflects ambiguity across all candidates.
+		// Target is the exact-qualified-name match when one survived, else the
+		// deterministic first candidate (id ASC). Edge confidence reflects ambiguity
+		// across all candidates (candidate_count = len(ids)).
 		var srcFile interface{}
 		if r.SourceFile == "" {
 			srcFile = nil
 		} else {
 			srcFile = r.SourceFile
 		}
-		if _, err := ins.Exec(r.SourceID, ids[0], r.EdgeType, r.SourceLine, srcFile,
+		if _, err := ins.Exec(r.SourceID, targetID, r.EdgeType, r.SourceLine, srcFile,
 			method, conf, tier, len(ids), evType); err != nil {
 			return restored, unresolved, fmt.Errorf("insert restored edge: %w", err)
 		}

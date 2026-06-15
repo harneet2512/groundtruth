@@ -78,19 +78,20 @@ func normalizePath(raw string) string {
 		p = p[:idx]
 	}
 
-	// Remove path parameter segments: {id}, :id, <id>
+	// Drop ONLY DECLARED path-parameter segments: {id}, :id, <id>. (P2-10) Numeric /
+	// uuid segments are KEPT in the match key: dropping them collapsed distinct
+	// concrete routes (`/orders/42/items` and `/orders/99/items`) onto the same key,
+	// minting a false API_CALL between unrelated endpoints. A concrete-literal path now
+	// matches only another concrete-literal path with the same value — correct-or-quiet
+	// (it trades route↔parameterized-route recall for precision, the intended tradeoff).
 	segments := strings.Split(p, "/")
 	var cleaned []string
 	for _, seg := range segments {
 		if seg == "" {
 			continue
 		}
-		// Skip parameter segments
+		// Skip ONLY declared parameter segments ({id} / :id / <id>).
 		if strings.HasPrefix(seg, "{") || strings.HasPrefix(seg, ":") || strings.HasPrefix(seg, "<") {
-			continue
-		}
-		// Skip segments that look like interpolated values (purely numeric, uuid-like)
-		if isLikelyValue(seg) {
 			continue
 		}
 		cleaned = append(cleaned, seg)
@@ -102,24 +103,26 @@ func normalizePath(raw string) string {
 	return "/" + strings.Join(cleaned, "/")
 }
 
-// isLikelyValue returns true if a path segment looks like a runtime value (number, uuid).
-func isLikelyValue(seg string) bool {
-	// Pure digits
-	allDigits := true
-	for _, c := range seg {
-		if c < '0' || c > '9' {
-			allDigits = false
-			break
-		}
+// (P2-10 removed) isLikelyValue — concrete numeric/uuid segments are now KEPT in the
+// normalized match key (precision over recall), so the value-detection helper that
+// dropped them is dead and removed (no dead control).
+
+// apiRouteConfidence scales an API_CALL edge's confidence by how many routes a client
+// path matched (route ambiguity): 1 unique route is the only verified case (0.7); 2 or
+// more means the called endpoint is one of several same-path declarations, so the edge
+// is a guess that must score below the strong tier. Mirrors the name_match ambiguity
+// gradient (CLAUDE.md confidence model).
+func apiRouteConfidence(matched int) float64 {
+	switch {
+	case matched <= 1:
+		return 0.7
+	case matched == 2:
+		return 0.5
+	case matched <= 5:
+		return 0.4
+	default:
+		return 0.2
 	}
-	if allDigits && len(seg) > 0 {
-		return true
-	}
-	// UUID-shaped (8-4-4-4-12 hex)
-	if len(seg) == 36 && seg[8] == '-' && seg[13] == '-' {
-		return true
-	}
-	return false
 }
 
 // extractMethod normalizes an HTTP method string to uppercase.
@@ -275,6 +278,10 @@ func ResolveAPIEdges(db *store.DB, files []walker.SourceFile, root string) (int,
 			// BatchInsertEdges defeats the SQL column DEFAULTs). Stamp the tier
 			// from confidence via the ONE threshold table (tierFor) and record
 			// route ambiguity honestly in candidate_count.
+			// P2-10: SCALE confidence by route ambiguity. A client path matching N
+			// distinct routes resolves to an arbitrary one of them — its confidence must
+			// fall with N, not stay flat at 0.7. (1→0.7, 2→0.5, 3-5→0.4, >5→0.2.)
+			conf := apiRouteConfidence(len(matchedRoutes))
 			edges = append(edges, &store.Edge{
 				SourceID:           c.NodeID,
 				TargetID:           r.NodeID,
@@ -282,8 +289,8 @@ func ResolveAPIEdges(db *store.DB, files []walker.SourceFile, root string) (int,
 				SourceLine:         c.Line,
 				SourceFile:         c.File,
 				ResolutionMethod:   "route_match",
-				Confidence:         0.7,
-				TrustTier:          tierFor(0.7),
+				Confidence:         conf,
+				TrustTier:          tierFor(conf),
 				CandidateCount:     len(matchedRoutes),
 				EvidenceType:       "route_match",
 				VerificationStatus: "unverified",

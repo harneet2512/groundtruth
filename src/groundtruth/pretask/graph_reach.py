@@ -29,7 +29,7 @@ from typing import Optional
 # promoted-type blacklist + the `promote_%` provenance check — so the depth-type set can
 # never drift between the localizer's degree filter and this reach BFS. (graph_reach
 # imports graph_localizer; graph_localizer does NOT import graph_reach — no cycle.)
-from groundtruth.pretask.graph_localizer import _degree_edge_filter
+from groundtruth.pretask.graph_localizer import _degree_edge_filter, _normalize as _norm_path
 
 # Edge type → reach weight (hand-set, not per-language)
 EDGE_TYPE_WEIGHT: dict[str, float] = {
@@ -90,7 +90,13 @@ def _build_file_graph(
     conn.close()
     adj: dict[str, list[tuple[str, str, float]]] = defaultdict(list)
     for src, dst, etype, conf in rows:
-        adj[src].append((dst, etype, float(conf)))
+        # BUG-1 (2026-06-15): key the adjacency by the CANONICAL path. The trusted
+        # anchors that seed the BFS arrive already normalized (anchor_select._norm_path),
+        # so a RAW DB spelling here (Windows ``a\b.py`` / ``./a/b.py``) left the BFS
+        # unable to match the seed to its out-edges → reach silently EMPTY on every
+        # Windows-indexed graph (the gold callee scored reach=0). Normalize both
+        # endpoints so the seed, the adjacency, and the result keys all agree.
+        adj[_norm_path(src)].append((_norm_path(dst), etype, float(conf)))
     return dict(adj)
 
 

@@ -63,6 +63,10 @@ class LSPClient:
         # keeps the stderr pipe from filling up (see _drain_stderr).
         self._stderr_lines: list[str] = []
         self._stderr_task: asyncio.Task[None] | None = None
+        # Readiness vs transport-liveness: set True by probe_ready when a NON-error
+        # answer to a known query arrives (readiness), independent of the bool return
+        # (which reports transport-liveness — the process replied at all).
+        self.probe_answered_ok = False
 
     @property
     def is_running(self) -> bool:
@@ -249,9 +253,24 @@ class LSPClient:
     async def probe_ready(self, timeout: float = 5.0, interval: float = 1.0) -> bool:
         """Probe LSP server readiness by sending workspace/symbol queries.
 
-        Returns True on any response (success or error = server alive).
-        Returns False on full timeout (server never responded).
+        Distinguishes two facts the old code conflated:
+          * transport-liveness — the process REPLIED (Ok OR an lsp_error response).
+          * readiness          — a NON-error answer to a known query (Ok).
+
+        An ``lsp_error`` proves only that the process is alive; a server that REJECTS
+        ``workspace/symbol`` during its workspace pre-load (the gopls / rust-analyzer
+        "still indexing" case) would error here. The previous code returned True on
+        the FIRST lsp_error, so a not-yet-ready server passed as ready. Now an
+        ``lsp_error`` does NOT short-circuit: we keep probing until the deadline so a
+        server that is still warming gets the chance to converge to a real answer.
+
+        ``probe_answered_ok`` records whether any NON-error answer arrived (readiness),
+        separate from the boolean return (transport-liveness). Returns True if the
+        process ever replied (Ok or lsp_error) — a live transport, possibly not yet
+        ready; False only if it NEVER responded (dead / hung).
         """
+        self.probe_answered_ok = False
+        transport_alive = False
         loop = asyncio.get_event_loop()
         deadline = loop.time() + timeout
         while loop.time() < deadline:
@@ -259,15 +278,21 @@ class LSPClient:
                 "workspace/symbol", {"query": ""}, timeout=min(interval, deadline - loop.time())
             )
             if isinstance(result, Ok):
+                # A non-error answer == genuinely ready. Strongest signal; return now.
+                self.probe_answered_ok = True
                 return True
-            # LSP error response still means server is alive
+            # An lsp_error means the process REPLIED (transport alive) but the query was
+            # rejected — NOT ready. Do NOT short-circuit: keep probing to the deadline so a
+            # still-warming server can converge to an Ok above.
             if isinstance(result, Err) and result.error.code == "lsp_error":
-                return True
+                transport_alive = True
             remaining = deadline - loop.time()
             if remaining <= 0:
                 break
             await asyncio.sleep(min(interval, remaining))
-        return False
+        # Deadline reached with no Ok. Report transport-liveness if the process ever
+        # replied (alive but not ready); False if it never responded at all.
+        return transport_alive
 
     async def _send_response(self, msg_id: int | str, result: object = None) -> None:
         """Send a response to a server-initiated request."""
@@ -631,10 +656,20 @@ class LSPClient:
         locations = [Location.model_validate(loc) for loc in raw]
         return Ok(locations)
 
-    async def did_open(self, uri: str, language_id: str, version: int, text: str) -> None:
-        """Notify the server that a document was opened."""
+    async def did_open(
+        self, uri: str, language_id: str, version: int, text: str
+    ) -> Result[None, GroundTruthError]:
+        """Notify the server that a document was opened.
+
+        Returns the underlying send_notification Result (``Err`` when the server
+        is not running, so the document never loaded) instead of swallowing it.
+        Callers that ignore the return are unaffected; callers that need to know
+        whether the doc actually loaded (the resolve precision pass) can branch on
+        the ``Err`` and count a distinct "doc never loaded" bucket — separating
+        "didOpen failed" from "LSP found no definition".
+        """
         item = TextDocumentItem(uri=uri, language_id=language_id, version=version, text=text)
-        await self.send_notification(
+        return await self.send_notification(
             "textDocument/didOpen",
             {"textDocument": item.model_dump(by_alias=True)},
         )

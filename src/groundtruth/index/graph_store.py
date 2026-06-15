@@ -122,12 +122,20 @@ def _node_row_to_symbol(row: sqlite3.Row, usage_count: int = 0) -> SymbolRecord:
 def _edge_row_to_ref(row: sqlite3.Row) -> RefRecord:
     """Convert a Go indexer edge row to a RefRecord."""
     edge_type = row["type"] or "CALLS"
+    # Carry resolution_method through so callers can distinguish a verified
+    # edge (import/same_file/type_flow/...) from a name_match GUESS. The Go
+    # edges table always has this column; guard defensively for any partial row.
+    try:
+        _res_method = row["resolution_method"]
+    except (KeyError, IndexError):
+        _res_method = None
     return RefRecord(
         id=row["id"],
         symbol_id=row["target_id"],
         referenced_in_file=row["source_file"] or "",
         referenced_at_line=row["source_line"],
         reference_type=_EDGE_TYPE_TO_REF.get(edge_type, "call"),
+        resolution_method=_res_method,
     )
 
 

@@ -222,3 +222,74 @@ func TestIsVerifiedEdge(t *testing.T) {
 		}
 	}
 }
+
+// TestClosure_ParallelEdgeUsesBestConfidence is the BITING test for the closure dedup
+// bug (closure.go: bestEdgeConf was computed but the adjacency conf was frozen at the
+// FIRST-SCANNED edge). Node 1 reaches node 2 via TWO parallel CALLS edges: the
+// first-inserted (id-ASC, scanned first) is the WEAKER one (inherited 0.85); a second,
+// STRONGER edge (same_file 1.0) is inserted after. Node 2 -> node 3 is 1.0. The
+// weakest-link min_confidence of the 2-hop path 1->3 must reflect the STRONGER 1->2
+// edge (1.0), not the first-seen weaker one (0.85). Before the fix the BFS propagated
+// 0.85; after, it propagates 1.0.
+func TestClosure_ParallelEdgeUsesBestConfidence(t *testing.T) {
+	dir := t.TempDir()
+	db, err := store.Open(filepath.Join(dir, "graph.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	tx, err := db.BeginTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`INSERT INTO nodes (id, label, name, file_path, language) VALUES
+		(1, 'Function', 'a', 'a.py', 'python'),
+		(2, 'Function', 'b', 'b.py', 'python'),
+		(3, 'Function', 'c', 'c.py', 'python')`); err != nil {
+		tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	edges := []*store.Edge{
+		// WEAKER 1->2 inserted FIRST (lower id, scanned first by the adjacency build).
+		{SourceID: 1, TargetID: 2, Type: "CALLS", ResolutionMethod: "inherited", Confidence: 0.85, TrustTier: "CERTIFIED"},
+		// STRONGER 1->2 inserted SECOND — both are admitted (verified method, conf>=0.7).
+		{SourceID: 1, TargetID: 2, Type: "CALLS", ResolutionMethod: "same_file", Confidence: 1.0, TrustTier: "CERTIFIED"},
+		// 2->3 at full confidence; the 2-hop weakest link is therefore the 1->2 edge.
+		{SourceID: 2, TargetID: 3, Type: "CALLS", ResolutionMethod: "same_file", Confidence: 1.0, TrustTier: "CERTIFIED"},
+	}
+	if err := db.BatchInsertEdges(edges); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ComputeTransitiveClosure(db, "CALLS", 3, 0.0); err != nil {
+		t.Fatal(err)
+	}
+
+	tx2, err := db.BeginTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx2.Rollback()
+
+	// Direct 1->2 row must carry the STRONGER edge's confidence (1.0), not 0.85.
+	var directConf float64
+	if err := tx2.QueryRow(`SELECT min_confidence FROM closure WHERE source_id=1 AND target_id=2`).Scan(&directConf); err != nil {
+		t.Fatal(err)
+	}
+	if directConf != 1.0 {
+		t.Errorf("direct 1->2 min_confidence: want 1.0 (strongest parallel edge), got %v (first-seen weaker edge leaked)", directConf)
+	}
+	// THE BITE: the 2-hop path 1->3's weakest link must be 1.0, not the stale 0.85.
+	var pathConf float64
+	if err := tx2.QueryRow(`SELECT min_confidence FROM closure WHERE source_id=1 AND target_id=3`).Scan(&pathConf); err != nil {
+		t.Fatal(err)
+	}
+	if pathConf != 1.0 {
+		t.Errorf("path 1->3 min_confidence: want 1.0 (strongest 1->2 parallel edge governs the weakest link), got %v", pathConf)
+	}
+}

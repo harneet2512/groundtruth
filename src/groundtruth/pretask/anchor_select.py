@@ -180,9 +180,23 @@ def _embed(texts: list[str], model: object, *, is_query: bool = False) -> np.nda
     anchor selection silently failed and issue-named golds (arviz plot_hdi) were never anchored.
     e5 is query/passage-asymmetric, so the issue is embedded as a QUERY, files as PASSAGES."""
     if hasattr(model, "encode"):
-        return np.asarray(model.encode(
-            texts, normalize_embeddings=True, show_progress_bar=False, batch_size=128
-        ))  # type: ignore[union-attr]
+        # BUG-8 (2026-06-15): pass the role EXPLICITLY so the ONNX adapter never has to
+        # infer query-vs-passage from len(texts). A sentence-transformers .encode is
+        # symmetric (ignores the kwarg); the _OnnxEmbedderAdapter consumes it. Wrapped
+        # so a SentenceTransformer that rejects the unknown kwarg still works.
+        # _OnnxEmbedderAdapter.encode accepts is_query; sentence-transformers'
+        # .encode rejects unknown kwargs with TypeError (signature) OR ValueError
+        # (its own kwarg validation) — fall back to the symmetric call for ST, which
+        # has no query/passage asymmetry to thread anyway.
+        try:
+            return np.asarray(model.encode(
+                texts, normalize_embeddings=True, show_progress_bar=False,
+                batch_size=128, is_query=is_query,
+            ))  # type: ignore[union-attr]
+        except (TypeError, ValueError):
+            return np.asarray(model.encode(
+                texts, normalize_embeddings=True, show_progress_bar=False, batch_size=128
+            ))  # type: ignore[union-attr]
     if hasattr(model, "embed_batch"):
         return np.asarray(model.embed_batch(list(texts), is_query=is_query), dtype=np.float32)  # type: ignore[union-attr]
     if hasattr(model, "embed"):

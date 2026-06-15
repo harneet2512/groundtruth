@@ -45,6 +45,12 @@ class RefRecord:
     referenced_in_file: str
     referenced_at_line: int | None
     reference_type: str
+    # Go-indexer edges carry how the call was resolved (same_file / import /
+    # type_flow / name_match / ...). Defaulted so the Python-indexer schema
+    # (no resolution_method) and every existing positional construction stay
+    # valid; only the GraphStore bridge populates it. Consumers use it to mark
+    # a name_match caller `(unverified)` instead of laundering it as a fact.
+    resolution_method: str | None = None
 
 
 @dataclass

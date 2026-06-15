@@ -46,6 +46,42 @@ from groundtruth.pretask.traces import parse_stack_traces
 
 Ablation = Literal["A", "B0", "B1", "C", "D"]
 
+
+def _norm_path(fp: str) -> str:
+    """The ONE project-wide path canonicalizer (identical to
+    ``graph_localizer._normalize`` / ``anchor_select._norm_path``): backslashes →
+    forward slashes, then strip any leading ``./`` / ``/``.
+
+    BUG-1 fix (2026-06-15): the candidate set was assembled from a MIX of
+    normalized keys (anchor_select sem map) and RAW DB paths (graph_reach
+    ``_build_file_graph``, ``lexical_file_search().file``, the path-rescue scan).
+    The same physical file then appeared under two keys (``a/b.py`` AND
+    ``a\\b.py`` / ``./a/b.py``), each carrying HALF the signals — the component
+    maps (sem/lex/reach/prox/hub) keyed off whichever string each path arrived
+    as, so a candidate's score dropped signals it actually had. Every ingress to
+    ``candidate_set`` and every component map is re-keyed through THIS function so
+    one file is one candidate carrying ALL its signals."""
+    return (fp or "").replace("\\", "/").lstrip("./").lstrip("/")
+
+
+def _rekey_norm(m: "dict[str, Any]") -> "dict[str, Any]":
+    """Re-key a component map by ``_norm_path``, keeping the MAX value on collision
+    (two raw spellings of one file merge to the stronger signal, never the weaker —
+    correct-or-quiet: a present signal must not be lost to a normalization merge)."""
+    out: dict[str, Any] = {}
+    for k, v in m.items():
+        nk = _norm_path(k)
+        if nk not in out:
+            out[nk] = v
+        else:
+            try:
+                if v > out[nk]:
+                    out[nk] = v
+            except TypeError:
+                pass  # non-comparable values (e.g. ReachRecord) handled by caller
+    return out
+
+
 # Default coefficients (calibrated on held-out calibration subset in step 2d)
 # W_LEX is the BM25 weight — kept separate from W_SEM (dense cosine) so each
 # signal is independently weighted rather than collapsed via max-fusion.
@@ -286,18 +322,35 @@ def _apply_dense_dispersion_gate(
 
     Returns (weights, fired, sem_mad).
     """
-    vals = [
+    # BUG-6 (2026-06-15): measure DISCRIMINATION, not COVERAGE. The MAD was computed
+    # over the ZERO-PADDED full candidate vector (sem.get(fp, 0.0) for ALL files), so
+    # a dense signal that covers FEW files but separates them SHARPLY (high max, clear
+    # spread over the covered set) looked FLAT — the gate floored W_SEM exactly when
+    # the embedder was the lever. Compute the dispersion over only the COVERED
+    # (present, strictly-positive) sem values: that is the set the dense ranker can
+    # actually order. A single covered value (1-of-N coverage) still yields MAD=0 →
+    # flat (a lone file cannot discriminate); an all-equal covered set still yields
+    # MAD=0 → flat; a sharp few-but-confident covered set yields MAD>0 → NOT flat.
+    _full = [
         float(sem_component_scores.get(fp, 0.0) or 0.0) for fp in candidate_files
     ]
-    if len(vals) < 2:
+    if len(_full) < 2:
         return weights, False, 0.0
-    svals = sorted(vals)
-    n = len(svals)
-    med = svals[n // 2] if n % 2 else 0.5 * (svals[n // 2 - 1] + svals[n // 2])
-    devs = sorted(abs(v - med) for v in vals)
-    mad = devs[n // 2] if n % 2 else 0.5 * (devs[n // 2 - 1] + devs[n // 2])
-    scale = max(vals)
-    flat = (scale <= 0.0) or (mad <= _sem_flat_rel_eps() * scale)
+    covered = [v for v in _full if v > 0.0]
+    if len(covered) < 2:
+        # 0 or 1 covered file: the dense signal cannot ORDER candidates → flat.
+        # (scale<=0 when nothing is covered; a single cosine has MAD 0 by definition.)
+        scale = max(_full)
+        mad = 0.0
+        flat = True
+    else:
+        svals = sorted(covered)
+        n = len(svals)
+        med = svals[n // 2] if n % 2 else 0.5 * (svals[n // 2 - 1] + svals[n // 2])
+        devs = sorted(abs(v - med) for v in covered)
+        mad = devs[n // 2] if n % 2 else 0.5 * (devs[n // 2 - 1] + devs[n // 2])
+        scale = max(covered)
+        flat = (scale <= 0.0) or (mad <= _sem_flat_rel_eps() * scale)
     if not flat:
         return weights, False, mad
     w = dict(weights)
@@ -575,12 +628,20 @@ class _OnnxEmbedderAdapter:
         # CHANGE 2: read the model's true dim (768 gte-modernbert / 384 e5), not a literal.
         self.dim = getattr(model, "dim", DEFAULT_EMBED_DIM)
 
-    def encode(self, texts, normalize_embeddings=True, show_progress_bar=False, batch_size=128):
+    def encode(self, texts, normalize_embeddings=True, show_progress_bar=False,
+               batch_size=128, is_query=None):
         import numpy as np
         texts = list(texts)
         if not texts:
             return np.zeros((0, self.dim), dtype=np.float32)
-        is_query = len(texts) == 1  # run_v74 embeds the issue as a singleton query
+        # BUG-8 (2026-06-15): the ROLE comes from the EXPLICIT is_query flag when the
+        # caller supplies one (anchor_select._embed threads it). Only when no flag is
+        # given (a legacy bare .encode call) do we fall back to the singleton heuristic
+        # — but that fallback no longer SILENTLY mis-prefixes a single PASSAGE as a
+        # query, because the caches now fold the role into the key (passage_hash) so a
+        # mis-prefixed vector can never poison a passage entry.
+        if is_query is None:
+            is_query = len(texts) == 1  # legacy heuristic: run_v74 issue = singleton query
         embs = self._m.embed_batch(texts, is_query=is_query)
         return np.asarray(embs, dtype=np.float32)
 
@@ -1107,7 +1168,13 @@ def run_v74(
     k_lex_top: int = 10,
     tau_anchor: float = DEFAULT_TAU_ANCHOR,
     max_depth: int = DEFAULT_MAX_DEPTH,
-    min_confidence: float = 0.7,
+    # BUG-5 (2026-06-15): 0.7 dropped EVERY name_match (0.6) + NULL-confidence edge
+    # from reach/graph_expand → reach went blank on name-match-heavy graphs (70-80%
+    # of real repos). Lower to the localizer's own name_match admission floor (0.5)
+    # so name_match structural edges register; the categorical degree filter in
+    # graph_reach still excludes promoted DEPTH, so this is harm-reduction (no
+    # reach-weight increase — W_REACH unchanged, per BRIEFING §3 lever #5 / §4).
+    min_confidence: float = 0.5,
     max_graph_expand: int = DEFAULT_MAX_GRAPH_EXPAND,
     weights: dict[str, float] | None = None,
     focus_size: int = DEFAULT_FOCUS_SIZE,
@@ -1220,7 +1287,12 @@ def run_v74(
             graph_expanded = sem_files_pre | anchor_set_paths | {fp for fp, _ in by_reach[:max_graph_expand]}
 
     # Stage A candidate set = semantic top-K ∪ graph-expanded ∪ BM25 top-K ∪ path-matched
-    sem_files = set(sem_scores.keys())
+    # BUG-1 (2026-06-15): graph_expand returns RAW DB paths (graph_reach._build_file_graph
+    # selects n1.file_path verbatim) while sem_files is already normalized in anchor_select.
+    # Normalize the graph-expanded keys at ingress so a Windows-indexed (a\b.py) or
+    # ./-prefixed graph file does not fork into a second candidate carrying half the signals.
+    sem_files = {_norm_path(fp) for fp in sem_scores.keys()}
+    graph_expanded = {_norm_path(fp) for fp in graph_expanded}
     candidate_set = sem_files | graph_expanded
 
     # Stage B: full-source BM25 recall — add top BM25 results to candidate set.
@@ -1242,7 +1314,9 @@ def run_v74(
         issue_text, repo_root, graph_db, issue_anchors,
         max_files=max(50, len(candidate_set)),
     )
-    _lex_top_paths = {h.file for h in (_lex_candidates or [])[:10]}
+    # BUG-1: lexical_file_search().file is forward-slashed by graph_file_paths but NOT
+    # ./-stripped, and walked-FS hits are posix-relative — normalize at ingress.
+    _lex_top_paths = {_norm_path(h.file) for h in (_lex_candidates or [])[:10]}
     candidate_set |= _lex_top_paths
 
     # Path/name rescue: add files whose path contains issue identifiers.
@@ -1258,7 +1332,7 @@ def run_v74(
             basename = os.path.basename(fp).rsplit(".", 1)[0].lower()
             for iw in _issue_words_fn:
                 if iw in basename or basename in iw:
-                    candidate_set.add(fp)
+                    candidate_set.add(_norm_path(fp))  # BUG-1: raw DB path normalized at ingress
                     break
     except Exception:
         pass
@@ -1342,7 +1416,13 @@ def run_v74(
         _max_lex = max(h.score for h in _lex_hits)
         if _max_lex > 0:
             for h in _lex_hits:
-                lex_scores[h.file] = h.score / _max_lex
+                # BUG-1: key by the canonical path (h.file is forward-slashed but not
+                # ./-stripped) so the lex COMPONENT lookup matches the normalized
+                # all_files; keep the MAX on collision (never lose a present signal).
+                _nk = _norm_path(h.file)
+                _v = h.score / _max_lex
+                if _v > lex_scores.get(_nk, 0.0):
+                    lex_scores[_nk] = _v
 
     # Normalize reach scores to [0, 1] so the reach term is comparable to
     # the semantic term (which is cosine similarity, already in [0, 1]).
@@ -1353,15 +1433,21 @@ def run_v74(
         max_reach = max((r.reach_score for r in reach_scores.values()), default=0.0)
         if max_reach > 0:
             from groundtruth.pretask.graph_reach import ReachRecord
-            reach_scores = {
-                fp: ReachRecord(
-                    path=r.path,
+            # BUG-1: graph_reach keys by RAW DB path; re-key to canonical form (keep the
+            # higher reach_score on collision) so the reach COMPONENT matches all_files.
+            _reach_norm: dict[str, ReachRecord] = {}
+            for fp, r in reach_scores.items():
+                _nk = _norm_path(fp)
+                _rec = ReachRecord(
+                    path=_nk,
                     reach_score=r.reach_score / max_reach,
                     min_path_length=r.min_path_length,
                     entered_via_graph=r.entered_via_graph,
                 )
-                for fp, r in reach_scores.items()
-            }
+                _prev = _reach_norm.get(_nk)
+                if _prev is None or _rec.reach_score > _prev.reach_score:
+                    _reach_norm[_nk] = _rec
+            reach_scores = _reach_norm
 
     # Stage B: compute score components.
     # The `sem` COMPONENT reads the FULL cosine map (`sem_all`) so every candidate
@@ -1386,6 +1472,18 @@ def run_v74(
     # that motivated #46 is subordinate to keeping the substrate GREEN; revisit by
     # populating `sem_all` correctly, NOT by starving the component of real signal.)
     sem_component_scores = sem_all if sem_all else sem_scores
+
+    # BUG-1 (2026-06-15): re-key EVERY remaining component map to the canonical path
+    # form so the _score_variant_C lookups (keyed by the now-normalized all_files) hit.
+    # sem_all/sem_scores come from anchor_select already normalized, but prox/hub/commit
+    # come straight from their modules' RAW DB paths. A raw-keyed component on a
+    # Windows/./-prefixed graph silently scored 0 on a candidate that actually had the
+    # signal — half the evidence, the exact fragmentation this fix closes.
+    sem_component_scores = _rekey_norm(sem_component_scores)
+    prox_scores = _rekey_norm(prox_scores)
+    hub_penalties = _rekey_norm(hub_penalties)
+    if commit_scores:
+        commit_scores = _rekey_norm(commit_scores)
 
     # ── Dimension 4: DENSE-DISPERSION gate (fix 2026-06-10, §4.2 flat-dense) ──
     # Runs on the sem component AS IT REACHES the fusion (post-granularity, over

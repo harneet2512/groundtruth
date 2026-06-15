@@ -36,8 +36,16 @@ var (
 var (
 	// Java/TS: class Foo implements Bar, Baz
 	implementsRe = regexp.MustCompile(`class\s+(\w+)(?:\s*<[^>]*>)?\s+(?:extends\s+\w+\s+)?implements\s+([^{]+)`)
-	// Go: func NewFoo() MyInterface { return &myStruct{} }
-	goReturnInterfaceRe = regexp.MustCompile(`func\s+\w+\([^)]*\)\s+(\w+)\s*\{`)
+	// (P1-4 removed) goReturnInterfaceRe — a func returning an interface does NOT
+	// implement it; CHA structural method-set satisfaction (resolveGoImplements) is
+	// the correct IMPLEMENTS mechanism. The regex + its emit branch are deleted.
+	// Rust `impl [<generics>] <TraitPath> for <Type>` — skip the OPTIONAL impl-generic
+	// block `<...>` right after `impl`, capture the trait path (group 1, may carry its
+	// own generics) and the implementing type (group 2). Handles `impl<T> Trait for S`,
+	// `impl fmt::Display for Foo`, `impl<'a, T: Bound> Trait<T> for Foo<'a>`. The
+	// positional strings.Fields parse it replaces mis-read `impl<T>` as the trait and
+	// dropped path/generic forms. Inherent impls (`impl Foo {` — no `for`) never match.
+	rustImplForRe = regexp.MustCompile(`^\s*impl\s*(?:<[^>]*>)?\s+([\w:]+(?:\s*<[^>]*>)?)\s+for\s+([\w:]+)`)
 	// Go interface declaration opener: `type Reader interface {`
 	goIfaceOpenRe = regexp.MustCompile(`^\s*type\s+(\w+)\s+interface\s*\{`)
 	// Go embedded interface line: a bare type name on its own (e.g. `io.Reader` or
@@ -81,7 +89,7 @@ var (
 // COMPOSES, RE_EXPORTS) into graph.db. Returns the number of edges created.
 func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) (int, error) {
 	// Pre-build indexes from the DB: name -> []nodeID with label filter.
-	classIndex, interfaceIndex, funcFileIndex := buildRelationshipIndexes(db)
+	classIndex, interfaceIndex, funcFileIndex, funcRangeIndex := buildRelationshipIndexes(db)
 
 	// File-path -> first node ID (for file-level anchoring of edges)
 	fileNodeMap := buildFileNodeMap(db, files)
@@ -142,6 +150,7 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 		pendingRoutePath := ""  // route path from decorator, waiting for the next def
 		pendingRouteLine := 0   // line of the route decorator
 		inStruct := false       // Go: tracking struct body for embedded types
+		structDepth := 0        // Go: brace nesting depth inside the struct body (P2-7)
 		var currentStructName string
 		var currentStructLine int
 
@@ -239,9 +248,15 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 
 				// P3: JSX component composition
 				if matches := jsxComponentRe.FindAllStringSubmatch(line, -1); matches != nil {
-					// Find the enclosing function/class for this file at this line
+					// Owner = the function whose line range ENCLOSES this JSX line (the
+					// innermost on nesting). When no function encloses it (module-scope
+					// JSX) we fall back to the file node — a deterministic, correct
+					// module-scope owner — never an arbitrary first-iterated function
+					// (the P1-5 nondeterminism). When the enclosing scope is AMBIGUOUS
+					// (two equal ranges over the line), findEnclosingFunc returns 0 and we
+					// likewise fall back, rather than guess an owner.
 					sourceID := fileNodeMap[sf.Path]
-					if funcID := findEnclosingFunc(sf.Path, lineNum, funcFileIndex); funcID != 0 {
+					if funcID := findEnclosingFunc(sf.Path, lineNum, funcRangeIndex); funcID != 0 {
 						sourceID = funcID
 					}
 					for _, m := range matches {
@@ -369,70 +384,73 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 
 				// P0: Go embedded structs (inheritance-like)
 				// Detect struct opening: type Foo struct {
-				if !inInterface && strings.Contains(line, "struct") && strings.Contains(line, "{") {
+				if !inInterface && !inStruct && strings.Contains(line, "struct") && strings.Contains(line, "{") {
 					// Extract struct name
 					parts := strings.Fields(line)
 					for i, p := range parts {
 						if p == "type" && i+1 < len(parts) {
-							currentStructName = parts[i+1]
-							currentStructLine = lineNum
-							inStruct = true
+							// Only ENTER struct-body tracking if the body stays OPEN past
+							// this line (net brace delta > 0). A one-line empty struct
+							// `type Foo struct{}` opens AND closes on the same line (net 0)
+							// — it has no embeds and must not leave inStruct stuck true,
+							// which would mis-read the FOLLOWING lines as its body (the bug
+							// that swallowed the depth-1 Logger embed of the next struct).
+							depth := strings.Count(line, "{") - strings.Count(line, "}")
+							if depth > 0 {
+								currentStructName = parts[i+1]
+								currentStructLine = lineNum
+								inStruct = true
+								structDepth = depth
+							}
 							break
 						}
 					}
-				}
-				if inStruct {
-					if strings.TrimSpace(line) == "}" {
-						inStruct = false
-						currentStructName = ""
-					} else if m := goEmbedRe.FindStringSubmatch(line); m != nil {
-						embeddedType := m[2]
-						if currentStructName != "" {
+				} else if inStruct {
+					// P2-7: an embed is valid ONLY at the OUTERMOST struct body (depth 1).
+					// A nested struct/interface literal field (`cfg struct { ... }`) opens
+					// its own brace scope; its inner lines (depth >= 2) must NOT be read as
+					// embeds of the outer struct. Check the embed BEFORE applying this
+					// line's brace delta so a line that both embeds and opens a brace is
+					// attributed to the depth it sits at.
+					if structDepth == 1 {
+						if m := goEmbedRe.FindStringSubmatch(line); m != nil && currentStructName != "" {
+							embeddedType := m[2]
 							childID := resolveClassNode(currentStructName, sf.Path, classIndex)
-							baseID := resolveClassNode(embeddedType, sf.Path, classIndex)
+							// P2-7: resolve the embedded base SAME-FILE-FIRST; abstain on a
+							// cross-file name that is ambiguous (>1 same-named class in other
+							// files) rather than picking an arbitrary global first-match.
+							baseID := resolveClassNodeSameFileOrUnique(embeddedType, sf.Path, classIndex)
 							if childID != 0 && baseID != 0 {
 								addEdge(childID, baseID, "EXTENDS", sf.Path, currentStructLine, "inheritance", 1.0)
 							}
 						}
 					}
-				}
-
-				// P1: Go — detect func returning interface type (simplified)
-				if m := goReturnInterfaceRe.FindStringSubmatch(line); m != nil {
-					returnType := m[1]
-					// Only if the return type matches a known interface
-					if ifaceID := resolveInterfaceNode(returnType, sf.Path, interfaceIndex); ifaceID != 0 {
-						// Check if next few lines construct a struct
-						// (simplified: just note the edge exists from this function to the interface)
-						funcSourceID := fileNodeMap[sf.Path]
-						if funcSourceID != 0 {
-							addEdge(funcSourceID, ifaceID, "IMPLEMENTS", sf.Path, lineNum, "implements", 0.8)
-						}
+					// Apply this line's net brace delta; closing the outer body ends the struct.
+					structDepth += strings.Count(line, "{") - strings.Count(line, "}")
+					if structDepth <= 0 {
+						inStruct = false
+						structDepth = 0
+						currentStructName = ""
 					}
 				}
+
+				// P1-4 (removed): the Go factory-return regex emitted IMPLEMENTS from the
+				// file's FIRST node (fileNodeMap[sf.Path]) to ANY returned interface — a
+				// meaningless edge (a function RETURNING an interface does not IMPLEMENT it,
+				// and the source was the file anchor, not even the function). The correct
+				// mechanism is CHA structural method-set satisfaction (resolveGoImplements,
+				// below), which emits IMPLEMENTS from the concrete struct whose method set
+				// covers the interface. The regex only duplicated/contradicted CHA, so it is
+				// deleted (fail-closed: no edge beats a wrong edge).
 
 			case "rust":
-				// Rust: impl Trait for Struct
-				if strings.Contains(line, "impl ") && strings.Contains(line, " for ") {
-					parts := strings.Fields(line)
-					var traitName, structName string
-					for i, p := range parts {
-						if p == "impl" && i+1 < len(parts) {
-							traitName = parts[i+1]
-						}
-						if p == "for" && i+1 < len(parts) {
-							structName = strings.TrimSuffix(parts[i+1], "{")
-							structName = strings.TrimSpace(structName)
-						}
-					}
+				// Rust: `impl [<generics>] <TraitPath> for <Type>`. The regex skips the
+				// optional impl-generic block, captures the trait path + the implementing
+				// type, and rustLastSegment strips generics/lifetimes/path prefixes.
+				if m := rustImplForRe.FindStringSubmatch(line); m != nil {
+					traitName := rustLastSegment(m[1])
+					structName := rustLastSegment(m[2])
 					if traitName != "" && structName != "" {
-						// Strip generic bounds: Trait<T> -> Trait
-						if idx := strings.Index(traitName, "<"); idx > 0 {
-							traitName = traitName[:idx]
-						}
-						if idx := strings.Index(structName, "<"); idx > 0 {
-							structName = structName[:idx]
-						}
 						structID := resolveClassNode(structName, sf.Path, classIndex)
 						traitID := resolveInterfaceOrClassNode(traitName, sf.Path, interfaceIndex, classIndex)
 						if structID != 0 && traitID != 0 {
@@ -474,6 +492,15 @@ type classNodeEntry struct {
 	Name     string
 	FilePath string
 	ID       int64
+}
+
+// funcRange carries a function/method node's source line span so an enclosing-scope
+// lookup (P1-5: JSX COMPOSES owner) can pick the function whose [Start,End] actually
+// contains a given line, rather than the first map-iterated function in the file.
+type funcRange struct {
+	ID    int64
+	Start int
+	End   int
 }
 
 // goMethodSig is the structural fingerprint of one Go method usable at the
@@ -834,10 +861,12 @@ func buildRelationshipIndexes(db *store.DB) (
 	classIndex map[string][]classNodeEntry,
 	interfaceIndex map[string][]classNodeEntry,
 	funcFileIndex map[string]map[string]int64,
+	funcRangeIndex map[string][]funcRange,
 ) {
 	classIndex = make(map[string][]classNodeEntry)
 	interfaceIndex = make(map[string][]classNodeEntry)
-	funcFileIndex = make(map[string]map[string]int64) // file -> funcName -> nodeID
+	funcFileIndex = make(map[string]map[string]int64)    // file -> funcName -> nodeID
+	funcRangeIndex = make(map[string][]funcRange)         // file -> []{id,start,end}
 
 	tx, err := db.BeginTx()
 	if err != nil {
@@ -865,21 +894,26 @@ func buildRelationshipIndexes(db *store.DB) (
 	}
 	rows.Close()
 
-	// Function/Method nodes for file-level lookup
-	rows2, err := tx.Query(`SELECT id, name, file_path FROM nodes WHERE label IN ('Function', 'Method')`)
+	// Function/Method nodes for file-level lookup + line-range enclosing lookup.
+	rows2, err := tx.Query(`SELECT id, name, file_path, COALESCE(start_line,0), COALESCE(end_line,0) FROM nodes WHERE label IN ('Function', 'Method')`)
 	if err != nil {
 		return
 	}
 	for rows2.Next() {
 		var id int64
 		var name, filePath string
-		if err := rows2.Scan(&id, &name, &filePath); err != nil {
+		var start, end int
+		if err := rows2.Scan(&id, &name, &filePath, &start, &end); err != nil {
 			continue
 		}
 		if funcFileIndex[filePath] == nil {
 			funcFileIndex[filePath] = make(map[string]int64)
 		}
 		funcFileIndex[filePath][name] = id
+		// Only index a usable span (start>0 and end>=start) for enclosing-scope lookup.
+		if start > 0 && end >= start {
+			funcRangeIndex[filePath] = append(funcRangeIndex[filePath], funcRange{ID: id, Start: start, End: end})
+		}
 	}
 	rows2.Close()
 
@@ -904,6 +938,28 @@ func resolveClassNode(name, currentFile string, classIndex map[string][]classNod
 	}
 	// Fall back to first match
 	return entries[0].ID
+}
+
+// resolveClassNodeSameFileOrUnique resolves a class/struct name SAME-FILE-FIRST, and
+// for a cross-file match accepts it ONLY when it is GLOBALLY UNIQUE (exactly one node
+// with that name). It ABSTAINS (returns 0) on a cross-file AMBIGUOUS name (>1 same-named
+// class in other files) rather than picking an arbitrary global first-match. Used by the
+// Go struct-embed EXTENDS path (P2-7): an embedded base type names a real type, but a
+// bare embed in file A must not be wired to an arbitrary same-named type in file B.
+func resolveClassNodeSameFileOrUnique(name, currentFile string, classIndex map[string][]classNodeEntry) int64 {
+	entries := classIndex[name]
+	if len(entries) == 0 {
+		return 0
+	}
+	for _, e := range entries {
+		if e.FilePath == currentFile {
+			return e.ID // same-file is unambiguous by construction
+		}
+	}
+	if len(entries) == 1 {
+		return entries[0].ID // cross-file but globally unique — safe
+	}
+	return 0 // cross-file AND ambiguous — abstain (fail closed)
 }
 
 // resolveInterfaceNode finds an Interface node by name.
@@ -942,18 +998,50 @@ func resolveClassOrFuncNode(name, currentFile string, classIndex map[string][]cl
 	return 0
 }
 
-// findEnclosingFunc returns a function node in the file to use as the source
-// for a JSX composition edge. Simplified: returns the first function in the file.
-func findEnclosingFunc(filePath string, _ int, funcFileIndex map[string]map[string]int64) int64 {
-	funcs := funcFileIndex[filePath]
-	if len(funcs) == 0 {
+// findEnclosingFunc returns the function node whose [Start,End] line range ENCLOSES
+// `line` — the INNERMOST (tightest) such range on nesting. It returns 0 when no
+// function encloses the line (module-scope) OR when the enclosing scope is genuinely
+// ambiguous (two distinct functions with the SAME tightest range covering the line),
+// so the caller falls back to a deterministic file-scope owner rather than picking an
+// arbitrary map-iterated function (the P1-5 nondeterminism / wrong-owner bug).
+func findEnclosingFunc(filePath string, line int, funcRangeIndex map[string][]funcRange) int64 {
+	ranges := funcRangeIndex[filePath]
+	if len(ranges) == 0 {
 		return 0
 	}
-	// Return any function in this file (we don't have start_line in the index)
-	for _, id := range funcs {
-		return id
+	var bestID int64
+	bestSpan := -1
+	ambiguous := false
+	for _, r := range ranges {
+		if line < r.Start || line > r.End {
+			continue
+		}
+		span := r.End - r.Start
+		switch {
+		case bestSpan < 0 || span < bestSpan:
+			bestID, bestSpan, ambiguous = r.ID, span, false
+		case span == bestSpan && r.ID != bestID:
+			ambiguous = true // two equally-tight enclosing functions — cannot disambiguate
+		}
 	}
-	return 0
+	if ambiguous {
+		return 0
+	}
+	return bestID
+}
+
+// rustLastSegment strips generics/lifetimes (`<...>`) and any path prefix (`a::b::C`)
+// from a Rust trait/type token, yielding the bare last-segment name used for node
+// resolution. Returns "" if nothing usable remains.
+func rustLastSegment(tok string) string {
+	tok = strings.TrimSpace(tok)
+	if i := strings.IndexAny(tok, "<{ "); i >= 0 {
+		tok = tok[:i]
+	}
+	if i := strings.LastIndex(tok, "::"); i >= 0 {
+		tok = tok[i+2:]
+	}
+	return strings.TrimSpace(tok)
 }
 
 // ---------------------------------------------------------------------------

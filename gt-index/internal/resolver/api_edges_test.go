@@ -19,13 +19,14 @@ func TestNormalizePath(t *testing.T) {
 		// Strip full URL prefix
 		{"http://auth-service/api/validate", "/api/validate"},
 		{"https://localhost:8080/v1/tokens", "/v1/tokens"},
-		// Numeric path values treated as params
-		{"/api/users/123/posts", "/api/users/posts"},
-		// UUID treated as param
-		{"/api/items/550e8400-e29b-41d4-a716-446655440000/detail", "/api/items/detail"},
+		// P2-10: concrete numeric/uuid segments are KEPT in the key (precision —
+		// distinct concrete routes must not collapse to one match key). Only DECLARED
+		// params ({}/:/<>) are dropped.
+		{"/api/users/123/posts", "/api/users/123/posts"},
+		{"/api/items/550e8400-e29b-41d4-a716-446655440000/detail", "/api/items/550e8400-e29b-41d4-a716-446655440000/detail"},
 		// Root only
 		{"http://svc/", "/"},
-		// Complex
+		// Complex: the {userId} DECLARED param is still dropped; concrete v2 kept.
 		{"http://user-service:3000/api/v2/users/{userId}/roles?active=true", "/api/v2/users/roles"},
 	}
 
@@ -36,6 +37,38 @@ func TestNormalizePath(t *testing.T) {
 				t.Errorf("normalizePath(%q) = %q, want %q", tt.input, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestNormalizePathKeepsConcreteSegments is the BITING test for P2-10: two DISTINCT
+// concrete routes that differ only in a numeric/uuid segment must NOT normalize to the
+// same match key (which previously minted a false API_CALL between unrelated endpoints).
+func TestNormalizePathKeepsConcreteSegments(t *testing.T) {
+	a := normalizePath("/orders/42/items")
+	b := normalizePath("/orders/99/items")
+	if a == b {
+		t.Errorf("distinct concrete routes collapsed to the same key %q — false API_CALL risk (numeric segment dropped)", a)
+	}
+	// The uuid case likewise stays distinct.
+	u1 := normalizePath("/tenant/550e8400-e29b-41d4-a716-446655440000/config")
+	u2 := normalizePath("/tenant/6ba7b810-9dad-11d1-80b4-00c04fd430c8/config")
+	if u1 == u2 {
+		t.Errorf("distinct uuid routes collapsed to the same key %q — false API_CALL risk", u1)
+	}
+}
+
+// TestAPIRouteConfidenceScalesWithAmbiguity pins that the API_CALL confidence falls as
+// the number of matched routes rises (P2-10): a unique match is verified-tier (0.7), an
+// ambiguous match (>1 route sharing the path) is demoted below it.
+func TestAPIRouteConfidenceScalesWithAmbiguity(t *testing.T) {
+	cases := []struct {
+		matched int
+		want    float64
+	}{{1, 0.7}, {2, 0.5}, {3, 0.4}, {5, 0.4}, {6, 0.2}}
+	for _, c := range cases {
+		if got := apiRouteConfidence(c.matched); got != c.want {
+			t.Errorf("apiRouteConfidence(%d) = %v, want %v", c.matched, got, c.want)
+		}
 	}
 }
 

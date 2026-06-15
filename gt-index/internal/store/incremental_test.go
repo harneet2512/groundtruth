@@ -420,3 +420,138 @@ func TestSnapshotIncomingEdgesExcludesPromotedDepthEdges(t *testing.T) {
 		}
 	}
 }
+
+// TestResolveIncomingEdgesDemotesVerifiedUniqueOnRenameReplace is the BITING test for
+// the P0 incremental-restore laundering fix. A cross-file edge resolved as
+// `verified_unique` (conf 0.95, CERTIFIED) — a tier earned by GLOBAL UNIQUENESS of the
+// target's qualified_name at full-index time — targets `process` in src/target.py. The
+// file is reindexed and `process` is RENAMED-AND-REPLACED: the reindexed file now has
+// exactly ONE node named `process`, but it is a DIFFERENT symbol (qualified_name
+// "src.target.NewClass.process" vs the original "src.target.OldClass.process"). The
+// bare-name re-match finds that single node; before the fix it preserved the original
+// verified_unique/0.95/CERTIFIED tier VERBATIM onto the wrong node. After the fix, the
+// absence of an exact qualified_name re-match caps the restore at CANDIDATE (0.6).
+func TestResolveIncomingEdgesDemotesVerifiedUniqueOnRenameReplace(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "graph.db")
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := createSchema(db); err != nil {
+		t.Fatal(err)
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+
+	// Post-reindex state: caller survives; src/target.py now holds a DIFFERENT `process`
+	// whose qualified_name differs from the snapshot's original target.
+	if _, err := tx.Exec(
+		`INSERT INTO nodes (id, label, name, qualified_name, file_path, language) VALUES
+		 (1, 'Function', 'caller',  'src.caller.caller',          'src/caller.py', 'python'),
+		 (2, 'Method',   'process', 'src.target.NewClass.process','src/target.py', 'python')`,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	// Snapshot of the ORIGINAL verified_unique edge: its target's qualified_name was
+	// the OLD class's process, which no longer exists after the rename-replace.
+	snap := []IncomingEdgeRef{{
+		SourceID:            1,
+		SourceLine:          7,
+		EdgeType:            "CALLS",
+		SourceFile:          "src/caller.py",
+		TargetName:          "process",
+		ResolutionMethod:    "verified_unique",
+		Confidence:          0.95,
+		EvidenceType:        "verified_unique",
+		TargetQualifiedName: "src.target.OldClass.process",
+	}}
+
+	restored, unresolved, err := ResolveIncomingEdgesTx(tx, snap, "src/target.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored != 1 || unresolved != 0 {
+		t.Fatalf("restored=%d unresolved=%d", restored, unresolved)
+	}
+
+	var method, tier string
+	var confidence float64
+	if err := tx.QueryRow(
+		`SELECT resolution_method, trust_tier, confidence FROM edges WHERE source_id = 1 AND target_id = 2`,
+	).Scan(&method, &tier, &confidence); err != nil {
+		t.Fatal(err)
+	}
+	// THE BITE: a bare-name re-match with NO qualified_name re-proof must NOT preserve
+	// the verified_unique CERTIFIED tier onto the renamed-replaced node.
+	if tier == "CERTIFIED" || confidence > 0.6 {
+		t.Fatalf("laundered: verified_unique restored at tier=%q conf=%v onto a node whose qualified_name does not match the original — must cap at CANDIDATE 0.6", tier, confidence)
+	}
+	if confidence != 0.6 || tier != "CANDIDATE" {
+		t.Fatalf("demoted restore want conf=0.6 CANDIDATE, got conf=%v tier=%q", confidence, tier)
+	}
+}
+
+// TestResolveIncomingEdgesPreservesVerifiedUniqueOnQNameMatch is the COMPLEMENT: when
+// the reindexed file still contains the SAME symbol (qualified_name unchanged), the
+// verified_unique tier is legitimately re-proven and PRESERVED at CERTIFIED. This pins
+// that the demotion above is targeted (wrong-target only), not a blanket teardown of
+// every deterministic restore.
+func TestResolveIncomingEdgesPreservesVerifiedUniqueOnQNameMatch(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "graph.db")
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := createSchema(db); err != nil {
+		t.Fatal(err)
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+
+	// The reindexed file still holds the SAME process (qualified_name unchanged).
+	if _, err := tx.Exec(
+		`INSERT INTO nodes (id, label, name, qualified_name, file_path, language) VALUES
+		 (1, 'Function', 'caller',  'src.caller.caller',          'src/caller.py', 'python'),
+		 (2, 'Method',   'process', 'src.target.OldClass.process','src/target.py', 'python')`,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	snap := []IncomingEdgeRef{{
+		SourceID:            1,
+		SourceLine:          7,
+		EdgeType:            "CALLS",
+		SourceFile:          "src/caller.py",
+		TargetName:          "process",
+		ResolutionMethod:    "verified_unique",
+		Confidence:          0.95,
+		EvidenceType:        "verified_unique",
+		TargetQualifiedName: "src.target.OldClass.process",
+	}}
+
+	if _, _, err := ResolveIncomingEdgesTx(tx, snap, "src/target.py"); err != nil {
+		t.Fatal(err)
+	}
+
+	var method, tier string
+	var confidence float64
+	if err := tx.QueryRow(
+		`SELECT resolution_method, trust_tier, confidence FROM edges WHERE source_id = 1 AND target_id = 2`,
+	).Scan(&method, &tier, &confidence); err != nil {
+		t.Fatal(err)
+	}
+	if method != "verified_unique" || tier != "CERTIFIED" || confidence != 0.95 {
+		t.Fatalf("qname-matched restore must preserve verified_unique/CERTIFIED/0.95, got method=%q tier=%q conf=%v", method, tier, confidence)
+	}
+}

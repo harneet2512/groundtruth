@@ -2040,10 +2040,33 @@ def _norm_rel(p: str) -> str:
     return (p or "").replace("\\", "/").lstrip("./").lower()
 
 
+def _scope_fact_clause(con) -> str:
+    """The FACTS-ONLY edge gate for a DELIVERED <gt-scope> claim, mirroring
+    curation_map._neighbors:518-520. When the edges table carries
+    resolution_method, gate it to ``_DETERMINISTIC_METHODS`` (a name_match edge
+    is a NAME GUESS, never a fact, and must never be delivered as "graph-
+    connected"). On a LEGACY graph with no resolution_method column we cannot
+    judge provenance, so we fail closed: raise the confidence floor from the
+    permissive 0.5 to a verified-only 0.9 (CERTIFIED only) — a 0.6 name_match's
+    confidence can no longer launder it into scope."""
+    _, has_method = _has_columns(con)
+    if has_method:
+        _det = "','".join(sorted(_DETERMINISTIC_METHODS))
+        return f"AND LOWER(TRIM(e.resolution_method)) IN ('{_det}')"
+    # no provenance column -> verified-only confidence floor (fail closed).
+    return "AND COALESCE(e.confidence, 0) >= 0.9"
+
+
 def _query_scope(rel: str) -> list[str]:
-    """Graph 1-hop neighbours of `rel`, confidence-gated (>= 0.5). Shared by the
-    first-view consensus and the override re-anchor. EXACT normalized-relpath
-    match (bug #1) over a read-only URI connection (bug #5)."""
+    """Graph 1-hop neighbours of `rel`, FACTS-ONLY (resolution_method ∈
+    DETERMINISTIC; legacy no-method DB -> verified-only conf floor). Shared by
+    the first-view consensus and the override re-anchor. EXACT normalized-relpath
+    match (bug #1) over a read-only URI connection (bug #5).
+
+    A name_match edge (e.g. conf 0.6) is a NAME GUESS, not a fact — it must never
+    be delivered to the agent as "graph-connected / in scope" (mirrors
+    curation_map._neighbors / the witness path). The earlier conf-only gate
+    (>= 0.5) admitted name_match guesses; this is the corrected FACT gate."""
     db = _db_path()
     if not os.path.isfile(db):
         return []
@@ -2057,6 +2080,7 @@ def _query_scope(rel: str) -> list[str]:
         # witness/caller facts. Legacy graphs without nodes.language stay
         # PERMISSIVE ('' selects -> cannot judge -> never suppress).
         _lang_sel = ", n1.language, n2.language" if _nodes_have_language(con) else ", '', ''"
+        _fact_clause = _scope_fact_clause(con)
         q = (
             f"SELECT DISTINCT n2.file_path{_lang_sel} FROM nodes n1 "
             "JOIN edges e ON (e.source_id = n1.id OR e.target_id = n1.id) "
@@ -2064,7 +2088,7 @@ def _query_scope(rel: str) -> list[str]:
             "                          THEN e.target_id ELSE e.source_id END) "
             "WHERE n1.file_path = ? "
             "AND n2.file_path != n1.file_path AND n2.file_path IS NOT NULL "
-            "AND COALESCE(e.confidence, 0) >= 0.5 ORDER BY e.confidence DESC LIMIT 6"
+            f"{_fact_clause} ORDER BY e.confidence DESC LIMIT 6"
         )
         try:
             for fp, _l1, _l2 in con.execute(q, (_norm_fp(rel),)):
@@ -2144,20 +2168,24 @@ def _consensus_block(rel: str, root: str) -> str:
             # gate as _query_scope; legacy no-language graphs stay PERMISSIVE.
             _lang_sel = (", n1.language, n2.language" if _nodes_have_language(con)
                          else ", '', ''")
+            _fact_clause = _scope_fact_clause(con)
             q = (
                 f"SELECT DISTINCT n2.file_path{_lang_sel} FROM nodes n1 "
                 "JOIN edges e ON (e.source_id = n1.id OR e.target_id = n1.id) "
                 "JOIN nodes n2 ON n2.id = (CASE WHEN e.source_id = n1.id "
                 "                          THEN e.target_id ELSE e.source_id END) "
-                # Confidence gate (parity with OH _detect_scope, which filters >= 0.7):
-                # the graph is 70-80% name_match; without this, 0.2-confidence SPECULATIVE
-                # neighbours were shown identically to verified edges as "graph-connected".
-                # >= 0.5 keeps CERTIFIED + CANDIDATE, drops SPECULATIVE (correct-or-quiet).
+                # FACTS-ONLY gate (parity with curation_map._neighbors:518-520 and
+                # the witness path): a DELIVERED <gt-scope> claims "graph-connected",
+                # which is true ONLY for a resolved edge. resolution_method ∈
+                # DETERMINISTIC drops every name_match GUESS (the graph is 70-80%
+                # name_match; a 0.6 name_match is a NAME GUESS, not a fact, and the
+                # old conf-only >= 0.5 gate admitted it). On a legacy no-method DB
+                # the clause falls back to a verified-only conf floor (fail closed).
                 # EXACT normalized-relpath match (bug #1: basename-LIKE pulled
                 # neighbours of OTHER same-named files into this file's scope).
                 "WHERE n1.file_path = ? "
                 "AND n2.file_path != n1.file_path AND n2.file_path IS NOT NULL "
-                "AND COALESCE(e.confidence, 0) >= 0.5 "
+                f"{_fact_clause} "
                 "ORDER BY e.confidence DESC "
                 "LIMIT 6"
             )
@@ -2182,16 +2210,18 @@ def _consensus_block(rel: str, root: str) -> str:
             return "/".join(r.split("/")[-2:]) if "/" in r else r
 
         if not scope:
-            return (
-                f'\n<gt-scope files="1">\n'
-                f"1. {_short(rel)} — in scope (you are viewing this); GT could not expand "
-                f"scope from the graph — confirm the edit target with grep.\n</gt-scope>"
-            )
+            # bug #7: a <gt-scope> whose ONLY line is "you are viewing this" is
+            # zero-content noise (an empty dedup tag in prose). Correct-or-quiet:
+            # emit nothing. The edit-bound contract / co-change producers still
+            # fire on the edit, so the agent is not left without context.
+            return ""
         lines = [f"1. {_short(rel)} — in scope (you are viewing this)"]
         for i, fp in enumerate(scope[:4], 2):
             lines.append(f"{i}. {_short(fp)} — graph-connected")
         return (
-            f'\n<gt-scope files="{len(scope[:4]) + 1}">\n'
+            # bug #8: files= is the ACTUAL rendered-line count, not a hardcoded
+            # len(scope[:4])+1 that can disagree with the lines we emit.
+            f'\n<gt-scope files="{len(lines)}">\n'
             + "\n".join(lines)
             + "\nThese files are related in scope; GT has not confirmed a single primary "
             "target — confirm the edit target with grep.\n</gt-scope>"
@@ -2438,7 +2468,9 @@ def _cochange_block(rel: str) -> str:
     the graph's `cochanges` table, git-mined at index time (Zimmermann ICSE'04). This is
     the multi-file completeness signal DeepSWE entirely lacked — the recurring 'edited the
     primary gold file, missed its siblings' bottleneck. Count-gated, correct-or-quiet."""
-    global _cochange_fired
+    # bug #5: the producer READS the fire-once latch (guard) but never SETS it —
+    # the latch is consumed only on a real DELIVERED outcome in _lane_a_deliver,
+    # so a dedup collision can no longer burn it with no delivery.
     if _cochange_fired or _GT_BASELINE:
         return ""
     try:
@@ -2477,7 +2509,11 @@ def _cochange_block(rel: str) -> str:
             r = (p or "").replace("\\", "/")
             return "/".join(r.split("/")[-2:]) if "/" in r else r
 
-        _cochange_fired = True  # consume the one-shot only on a REAL emit (not an empty new-file)
+        # bug #5: the fire-once latch is NOT consumed here. Setting it at
+        # PRODUCTION burns it even when _lane_a_deliver later dedups the block
+        # (cross-lane content-hash collision) -> the co-change completeness signal
+        # is lost with no delivery. The latch is set ONLY on a real DELIVERED
+        # outcome in _lane_a_deliver (the "consume on a REAL emit" contract).
         lines = [f"- {_short(o)} (co-changed {c}x)" for o, c in rows[:4]]
         return (
             "\n<gt-cochange>\nFiles that historically change WITH "
@@ -3081,6 +3117,14 @@ _oracle_delivered_hashes: set[str] = set()
 _oracle_edited_rels: set[str] = set()
 _oracle_nonedit_streak = 0
 _oracle_review_fired = False
+# bug #4: test-turn evidence for phase derivation. _oracle_test_count is the
+# number of observed test-runner results this task; derive_phase reaches VERIFY
+# on the FIRST test (nonedit_streak >= 3 OR test_count) — without feeding this in,
+# _detect_phase always passed test_count=0 and a test turn with nonedit_streak<3
+# stayed EDIT, so the verify-axis steers (l5.failure/l5.no_test/verify.horizon.*)
+# were phase-dropped at exactly the turn they are meant to fire.
+_oracle_test_count = 0
+_oracle_test_evidence_seen = False
 # SPEC obligation state (LIPI 2026-06-10: gt_oracle.load_obligations had ZERO
 # live callers — the Rank-1 test-evidence-gap nudge fired only in replay).
 # The live producer mirrors the replay sensor's plan §5.2 surfaces:
@@ -3127,9 +3171,13 @@ def _reset_oracle_state() -> None:
     global _ledger_consumed_kinds, _ledger_ignore_counts
     global _last_delivered_kind, _last_gate_winner_kind
     global _horizon_advisory_fired
+    global _oracle_test_count, _oracle_test_evidence_seen
     _action_count = 0
     _oracle_nonedit_streak = 0
     _oracle_obligation_fired = False
+    _oracle_test_count = 0           # bug #4: reset test-evidence on retry
+    _oracle_test_evidence_seen = False
+    _reset_phase_dropped_losers()    # bug #4(c): clear per-turn phase-drop staging
     _consensus_fired = False
     _cochange_fired = False
     _l5_fired = False
@@ -3160,6 +3208,7 @@ def _reset_oracle_state() -> None:
     _ledger_ignore_counts = {}
     _last_delivered_kind = ""
     _last_gate_winner_kind = ""
+    _reset_pending_delivery()  # bug #6: clear the deferred-judgment list on retry
     _horizon_advisory_fired = False
     try:
         _oracle_last_losers.clear()
@@ -3363,12 +3412,18 @@ except ImportError:
 
 
 def _detect_phase() -> Phase:
+    # bug #4(b): feed test evidence into the trajectory state so derive_phase can
+    # reach VERIFY on the FIRST observed test (derive_phase: nonedit_streak >= 3 OR
+    # test_count). Omitting test_count pinned a test turn at EDIT and the verify-
+    # axis steers were phase-dropped exactly when they should fire.
     state = _ProductTrajectoryState(
         action_count=_action_count,
         step_limit=_GT_STEP_LIMIT,
         edited_files=set(_oracle_edited_rels),
         source_edit_count=_source_edit_count,
         nonedit_streak=_oracle_nonedit_streak,
+        test_count=_oracle_test_count,
+        test_evidence_seen=_oracle_test_evidence_seen,
     )
     return _product_derive_phase(state)
 
@@ -3377,7 +3432,23 @@ def _phase_allows(kind: str, phase: Phase) -> bool:
     return _phase_allows_policy(kind, phase, _PHASE_POLICY)
 
 
-def _current_event(kind: str) -> Event | None:
+def _current_event_for_cmd(cmd: str) -> Event | None:
+    """bug #4(a): a real test-runner command IS a TEST_RESULT event (mirrors
+    trajectory_state.command_event). The verify-axis steers are event-bound to
+    TEST_RESULT; without recognizing it the test turn classified as POST_VIEW/
+    POST_EDIT (or nothing) and the steers were dropped as wrong_phase."""
+    if cmd and _TEST_RUNNER_RE.search(cmd):
+        return Event.TEST_RESULT
+    return None
+
+
+def _current_event(kind: str, cmd: str = "") -> Event | None:
+    # bug #4(a): a test-runner command is a TEST_RESULT event REGARDLESS of how
+    # the bash classifier labelled it (a `pytest …` line carries no edited/viewed
+    # file, so _classify often returns neither post_view nor post_edit).
+    _te = _current_event_for_cmd(cmd)
+    if _te is not None:
+        return _te
     if kind == "post_view":
         return Event.POST_VIEW
     if kind == "post_edit":
@@ -3593,18 +3664,38 @@ def _record_hook_fire(kind: str) -> None:
     _flush_hook_fire_counts()
 
 
-def _record_hook_suppress(kind: str) -> None:
+def _record_hook_suppress(kind: str, reason: str = "") -> None:
     """G15 (2026-06-14): count ONE suppression of a Lane-B (oracle gate)
     candidate into the SAME GT_HOOK_FIRE_COUNTS sink, under a '<kind>.suppressed'
     key. Lane-B winners are counted by _record_hook_fire('<kind>') at emit; this
     completes the trail so eligible = fired + suppressed is reconstructable from
     ONE file (was split between GT_HOOK_FIRE_COUNTS and the oracle ledger).
-    Verify-axis producers (verify.horizon.*, spec.obligation, detect.*) included."""
+    Verify-axis producers (verify.horizon.*, spec.obligation, detect.*) included.
+
+    bug #9: a dedup (reason='delivered') is NOT a suppression — the block already
+    reached the agent this run, just not re-sent. Counting it under '.suppressed'
+    over-counted eligible (= fired + suppressed). A dedup is recorded under a
+    DISTINCT '<kind>.deduped' key so the suppression count stays clean."""
     if not kind:
         return
-    key = f"{kind}.suppressed"
+    suffix = "deduped" if reason == "delivered" else "suppressed"
+    key = f"{kind}.{suffix}"
     _HOOK_FIRE_COUNTS[key] = _HOOK_FIRE_COUNTS.get(key, 0) + 1
     _flush_hook_fire_counts()
+
+
+# bug #4(c): fire-once steers DROPPED by the phase filter must re-arm their
+# producer latch (deferred, not destroyed) — exactly as gate losers do. But the
+# gate (_oracle_gate_blocks) RESETS _oracle_last_losers to set() at its top, so a
+# kind added to _oracle_last_losers BEFORE the gate runs would be clobbered. We
+# stage phase-drops in this separate set, which the gate does NOT touch, then the
+# caller unions it into _oracle_last_losers AFTER the gate, before the re-arm.
+_phase_dropped_losers: set[str] = set()
+
+
+def _reset_phase_dropped_losers() -> None:
+    global _phase_dropped_losers
+    _phase_dropped_losers = set()
 
 
 def _filter_candidates_by_phase(cands, phase: Phase, event, *, file_path: str = ""):
@@ -3618,6 +3709,11 @@ def _filter_candidates_by_phase(cands, phase: Phase, event, *, file_path: str = 
         if decision.allowed:
             kept.append((sev, kind, text, event_bound))
             continue
+        # bug #4(c): a phase-dropped fire-once steer is DEFERRED — stage its kind
+        # so the existing latch re-arm (gate-loser path) restores its producer
+        # latch. Without this, the producer's fire-once latch (set at production)
+        # never re-arms (only gate losers re-armed) -> permanent silence.
+        _phase_dropped_losers.add(kind)
         _runtime_ledger_record(
             kind=kind,
             outcome=_ProductSignalOutcome.SUPPRESSED_WRONG_PHASE,
@@ -3637,7 +3733,18 @@ _ledger_consumed_kinds: set[str] = set()
 _ledger_ignore_counts: dict[str, int] = {}
 _last_delivered_kind: str = ""
 _last_gate_winner_kind: str = ""
-_pending_delivery: tuple[str, int] | None = None  # (kind, turn) awaiting next-turn judgment
+# bug #6: a LIST of (kind, turn) awaiting next-turn judgment — a multi-block turn
+# (e.g. l3.contract + l3b.evidence + a Lane-B steer) delivers several kinds; a
+# single overwritten tuple judged only the LAST one, mis-attributing consumption
+# (and wrongly muting an earlier kind at ignore>=3). Every kind delivered this
+# turn is judged against the NEXT command.
+_pending_delivery: list[tuple[str, int]] = []
+
+
+def _reset_pending_delivery() -> None:
+    """Clear the pending-delivery list (test/retry helper)."""
+    global _pending_delivery
+    _pending_delivery = []
 
 
 def _ledger_cmd_acted(cmd: str) -> bool:
@@ -3654,29 +3761,34 @@ def _ledger_cmd_acted(cmd: str) -> bool:
 
 
 def _ledger_judge_pending(cmd: str) -> None:
-    """D7: judge the PREVIOUS delivery from THIS turn's command (one-turn defer)."""
+    """D7: judge the PREVIOUS turn's deliveries from THIS turn's command (one-turn
+    defer). bug #6: judge EVERY kind delivered last turn (a multi-block turn
+    delivers several), not just the last-noted one."""
     global _pending_delivery
-    if _pending_delivery is None:
+    if not _pending_delivery:
         return
-    kind, _turn = _pending_delivery
-    _pending_delivery = None
-    if not kind:
-        return
+    pending = _pending_delivery
+    _pending_delivery = []
     acted = _ledger_cmd_acted(cmd)
-    if acted:
-        _ledger_consumed_kinds.add(kind)
-        # Consumed → decay ignore count by 1 (the ONLY decay path)
-        if kind in _ledger_ignore_counts:
-            _ledger_ignore_counts[kind] = max(0, _ledger_ignore_counts[kind] - 1)
-    else:
-        _ledger_ignore_counts[kind] = _ledger_ignore_counts.get(kind, 0) + 1
+    # de-dup kinds (a kind delivered twice in one turn is judged once).
+    for kind in {k for k, _turn in pending if k}:
+        if acted:
+            _ledger_consumed_kinds.add(kind)
+            # Consumed → decay ignore count by 1 (the ONLY decay path)
+            if kind in _ledger_ignore_counts:
+                _ledger_ignore_counts[kind] = max(0, _ledger_ignore_counts[kind] - 1)
+        else:
+            _ledger_ignore_counts[kind] = _ledger_ignore_counts.get(kind, 0) + 1
 
 
 def _ledger_note_delivery(kind: str, cmd: str) -> None:
-    """Record that kind was delivered; judgment deferred to next turn."""
-    global _last_delivered_kind, _pending_delivery
+    """Record that kind was delivered; judgment deferred to next turn. bug #6:
+    APPEND (don't overwrite) so every block delivered this turn is judged."""
+    global _last_delivered_kind
+    if not kind:
+        return
     _last_delivered_kind = kind
-    _pending_delivery = (kind, _action_count)
+    _pending_delivery.append((kind, _action_count))
 
 
 def _ledger_boost_severity(kind: str, sev: float) -> float:
@@ -4315,7 +4427,9 @@ def _oracle_gate_blocks(cands) -> str:
     # _oracle_telemetry_write, while _record_hook_fire counted Lane-A only.
     for _sk in suppressed:
         try:
-            _record_hook_suppress(_sk[0])
+            # bug #9: pass the reason so a dedup ('delivered') is counted under
+            # '<kind>.deduped', never '<kind>.suppressed' (eligible over-count).
+            _record_hook_suppress(_sk[0], reason=_sk[1] if len(_sk) > 1 else "")
         except Exception:  # noqa: BLE001 — auditability must never break the gate
             pass
     _oracle_telemetry_write(suppressed, winner)
@@ -4338,24 +4452,66 @@ def _consensus_collect(rel: str) -> None:
         pass
 
 
+def _verified_scope_component(edited: set[str]) -> set[str]:
+    """The issue-anchored connected component reachable from the EDITED files via
+    VERIFIED (FACTS-ONLY) edges — the correct denominator for a K-of-N
+    completeness claim (bug #2). `_consensus_scope` is the accumulated union of
+    EVERY viewed file's neighbourhood (a trajectory grab-bag), so counting against
+    it inflates N with files unrelated to the edit. Instead, start from the edited
+    files and expand 1-hop through `_query_scope` (already FACTS-ONLY after bug #1)
+    a bounded number of times, intersecting the result with the accumulated scope
+    so we never invent members the consensus layer never recorded.
+
+    Returns lowercased repo-rel paths (parity with `_norm_rel`)."""
+    component: set[str] = set(edited)
+    scope_union = {_norm_rel(s) for s in _consensus_scope}
+    frontier = set(edited)
+    # Bounded BFS (depth 2): the issue-relevant residual is a handful of files,
+    # not the repo (demand-driven, not exhaustive — CLAUDE.md SCALE rule).
+    for _ in range(2):
+        nxt: set[str] = set()
+        for f in frontier:
+            for nb in _query_scope(f):
+                n = _norm_rel(nb)
+                if n not in component:
+                    nxt.add(n)
+        if not nxt:
+            break
+        component |= nxt
+        frontier = nxt
+    # Stay within what the consensus layer actually recorded as scope (plus the
+    # edited files themselves) — never widen the denominator past the union.
+    return (component & scope_union) | set(edited)
+
+
 def _scope_completeness_block() -> str:
     """The K-of-N completeness check at the review transition (§11.4 re-route):
     emit ONLY when the sensed edit set ∩ scope is a STRICT subset of scope AND
-    the un-edited members are focus-anchored (correct-or-quiet otherwise)."""
+    the un-edited members are focus-anchored (correct-or-quiet otherwise).
+
+    bug #2: the denominator N is the issue-anchored VERIFIED component of the
+    EDITED files (`_verified_scope_component`), NOT the global accumulated
+    `_consensus_scope` union (every viewed file's polluted neighbourhood)."""
     try:
         if not _consensus_scope:
             return ""
         edited = {_norm_rel(r) for r in _oracle_edited_rels}
-        scope = set(_consensus_scope)
+        # bug #2: the verified connected component of the EDITED files, not the
+        # accumulated global scope grab-bag.
+        scope = _verified_scope_component(edited)
         if not (scope & edited):
             return ""  # nothing edited in scope -> no completeness claim
         unedited = sorted(scope - edited)
         if not unedited:
             return ""  # not a strict subset -> scope fully covered
-        focus = _oracle_focus()
+        # bug #3: the unedited members are lowercased (_norm_rel), but _oracle_focus
+        # keeps original case (CamelCase anchors). Case-fold the focus tokens so a
+        # CamelCase anchor (e.g. ParseConfig) intersects a lowercased basename
+        # token (parseconfig) — otherwise the intersection is always empty.
+        focus = {t.lower() for t in _oracle_focus()}
         anchored = []
         for m in unedited:
-            toks = {t for t in _BLOCK_TOKEN_RE.findall(os.path.basename(m))
+            toks = {t.lower() for t in _BLOCK_TOKEN_RE.findall(os.path.basename(m))
                     if len(t) >= 3}
             if toks & focus:
                 anchored.append(m)
@@ -4370,7 +4526,8 @@ def _scope_completeness_block() -> str:
         return (
             '\n<gt-scope reason="completeness">\n'
             f"You edited {len(scope & edited)} of {len(scope)} graph-connected "
-            "in-scope files. Issue-relevant scope members you have NOT touched:\n"
+            "in-scope files (verified component of your edits). Issue-relevant "
+            "scope members you have NOT touched:\n"
             + "\n".join(lines)
             + "\nConfirm whether the fix is complete without them before "
             "submitting.\n</gt-scope>"
@@ -4445,6 +4602,13 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
                 continue
             out["output"] = (out.get("output") or "") + text
             _oracle_delivered_hashes.add(h)
+            # bug #5: consume the l3.cochange fire-once latch ONLY on a real
+            # DELIVERED outcome (here), never at production — so a dedup collision
+            # (the `continue` above) leaves the latch armed and the signal can
+            # still deliver on a later, distinct co-change block.
+            if kind == "l3.cochange":
+                global _cochange_fired
+                _cochange_fired = True
             _ledger_note_delivery(kind, cmd)
             _runtime_ledger_record(
                 kind=kind,
@@ -4497,8 +4661,12 @@ def _augment_output(action, out) -> None:
         if not _GT_BASELINE and _ORACLE_ROUTE:
             # ---- STAGE-4 ORACLE ROUTING: producers -> candidates -> ONE gate ----
             global _oracle_nonedit_streak, _oracle_review_fired, \
-                _oracle_obligation_fired, _last_test_step
+                _oracle_obligation_fired, _last_test_step, \
+                _oracle_test_count, _oracle_test_evidence_seen
             _action_count += 1
+            # bug #4(c): clear the per-turn phase-drop staging set at the top of
+            # the turn (it is merged into _oracle_last_losers after the gate).
+            _reset_phase_dropped_losers()
             # D7: judge the PREVIOUS delivery from THIS turn's command.
             _ledger_judge_pending(cmd or "")
             # severities are COMPUTED floats (composite_severity) — int-base
@@ -4590,6 +4758,11 @@ def _augment_output(action, out) -> None:
             if _TEST_RUNNER_RE.search(cmd or "") and (
                     _TEST_FAIL_RE.search(_orig_out)
                     or _TEST_PASS_RE.search(_orig_out)):
+                # bug #4(b): record an observed test result so _detect_phase can
+                # reach VERIFY (derive_phase: test_count > 0 -> VERIFY). Mirrors
+                # trajectory_state.update_state on Event.TEST_RESULT.
+                _oracle_test_count += 1
+                _oracle_test_evidence_seen = True
                 _oracle_tested_tokens.update(
                     t for t in _BLOCK_TOKEN_RE.findall(_orig_out) if len(t) >= 3)
                 _oracle_tested_tokens.update(
@@ -4641,7 +4814,7 @@ def _augment_output(action, out) -> None:
             # content+state dedup + _ledger_note_delivery + _runtime_ledger_record).
             # So a later Lane B / gate crash loses ONLY the steer — never the
             # data-plane context (reproduces+fixes the 0/8 stub-crash).
-            _event = _current_event(_kkind)
+            _event = _current_event(_kkind, cmd or "")
             _lane_a_deliver(out, cmd, lane_a, krel=(_krel or _kf or ""),
                             event=_event)
             # ── LANE B (control plane, SITUATIONAL) — the steer pool ──────
@@ -4749,7 +4922,7 @@ def _augment_output(action, out) -> None:
                 # Event-bound candidates bypass phase filter — the trigger IS the
                 # event (post_view / post_edit / review transition); phase policy
                 # only narrows ambient producers (P5 symbol narrowing).
-                _event = _current_event(_kkind)
+                _event = _current_event(_kkind, cmd or "")
                 cands = _filter_candidates_by_phase(
                     cands, _phase, _event, file_path=_krel or _kf or ""
                 )
@@ -4764,7 +4937,13 @@ def _augment_output(action, out) -> None:
                 # production-time latches their producers consumed, so the class
                 # re-competes at a later turn ("consume the one-shot only on a
                 # REAL emit" — the cochange producer's own stated contract).
-                _lost = _oracle_last_losers
+                # bug #4(c): UNION the gate losers (_oracle_last_losers, repopulated
+                # by the gate which reset it at its top) with the PHASE-DROPPED
+                # fire-once steers (_phase_dropped_losers, staged before the gate and
+                # untouched by it) so the re-arm restores BOTH. Read-only on the
+                # globals here — a fresh local union (no augmented-assignment binding
+                # of a module global inside this function).
+                _lost = set(_oracle_last_losers) | _phase_dropped_losers
                 if _lost:
                     global _cochange_fired, _l5_fired, _l5_failure_fired, \
                         _l5_notest_fired, _horizon_advisory_fired, \

@@ -83,9 +83,13 @@ func promoteFixture(t *testing.T) *store.DB {
 	  (16,'data_flow','x -> helper(x) | return x',11,0.8),
 	  (16,'data_flow','y -> y + 1',12,0.8)`)
 
-	// PRECEDES: caller does helper -> validate (two distinct internal nodes).
+	// PRECEDES: Serializer.to_json (id 11, parent=10) calls its OWN sibling methods
+	// in order: self.to_json -> self.from_json. Receiver `self` resolves to the
+	// enclosing class Serializer(10); both methods are same-file, unique, and members
+	// of Serializer -> ONE type-grounded PRECEDES edge 11->12. (A free-function `self:`
+	// sequence or a cross-class pair now ABSTAINS — see TestPromote_PrecedesNoCrossClass.)
 	execSQL(t, db, `INSERT INTO properties (node_id,kind,value,line,confidence) VALUES
-	  (16,'call_order','self: helper -> validate',13,0.6)`)
+	  (11,'call_order','self: to_json -> from_json',6,0.6)`)
 
 	// USES: caller's call to helper is iterated (annotate the CALLS edge if it exists).
 	execSQL(t, db, `INSERT INTO properties (node_id,kind,value,line,confidence) VALUES
@@ -143,7 +147,7 @@ func TestPromote_RedGreenDepth(t *testing.T) {
 		// edge (annotated, not minted); the value flow 'y -> y+1' has no callee. So
 		// ZERO standalone DATA_FLOW edges — the hop is a CALLS.metadata annotation
 		// (asserted below), per gt_gt §2.6 line 262.
-		{"PRECEDES", 1}, // helper -> validate
+		{"PRECEDES", 1}, // Serializer.to_json -> Serializer.from_json (self-sequence)
 	}
 	for _, c := range cases {
 		if got := countEdges(t, db, `type = '`+c.typ+`' AND resolution_method LIKE 'promote_%'`); got != c.want {
@@ -251,14 +255,17 @@ func TestPromote_RaisesThrowFlow_GapA(t *testing.T) {
 	}
 }
 
-// TestPromote_PrecedesAmbiguousDemoted proves the honest-trust demotion branch
-// (promote.go:833-836, §2.6 non-invention): when a `call_order` step's callee name is
-// AMBIGUOUS (>1 same-named candidate across files), resolveByName returns an arbitrary
-// first-match, so the minted PRECEDES edge must carry the REAL candidate_count (>1) and be
-// demoted to confidence 0.4 / tier SPECULATIVE — BELOW the 0.5 consumer gate, so it is
-// filtered, not laundered as a fact. The RedGreenDepth fixture only exercises the cc=1 /
-// 0.5 / CANDIDATE path; this is the missing red→green for the demotion's whole point.
-func TestPromote_PrecedesAmbiguousDemoted(t *testing.T) {
+// TestPromote_PrecedesNoCrossClass is the BITING test for the P0 PRECEDES fabrication
+// fix (promote.go promotePrecedes). Two classes — Writer and Logger — live in the SAME
+// FILE a.py and EACH define a method `write`; Writer also defines `flush`. Writer.run
+// does `self.write(); self.flush()`. Because the decoy Logger.write is SAME-FILE, the
+// same-file filter alone does NOT separate it — only the receiver-type membership guard
+// (parent_id == the resolved receiver class) does. The type-blind resolver would treat
+// `write` as ambiguous/arbitrary and mint a cross-class PRECEDES; the gated resolver
+// resolves `self` to Writer and admits ONLY Writer's own members — so:
+//   - a legitimate same-class step (Writer.write -> Writer.flush) mints ONE edge, and
+//   - NO PRECEDES edge ever touches Logger.write (the same-file cross-class decoy).
+func TestPromote_PrecedesNoCrossClass(t *testing.T) {
 	root := t.TempDir()
 	db, err := store.Open(filepath.Join(root, "graph.db"))
 	if err != nil {
@@ -266,53 +273,136 @@ func TestPromote_PrecedesAmbiguousDemoted(t *testing.T) {
 	}
 	defer db.Close()
 
-	// `step` is DEFINED TWICE (a.py and b.py) -> the call_order callee "step" is ambiguous
-	// (cc=2). `setup` is unique. The chain `setup -> step` mints setup(20) -> step(21,
-	// same-file first-match) but at the ambiguous confidence.
+	// Writer (30) owns run(31), write(32), flush(33). Logger (40) owns a DECOY write(41)
+	// — SAME FILE a.py, different class. Only the parent-class membership guard can
+	// distinguish Writer.write(32) from Logger.write(41).
 	execSQL(t, db, `INSERT INTO nodes (id,label,name,file_path,start_line,signature,language,parent_id) VALUES
-	  (20,'Function','setup','a.py',1,'def setup()','python',0),
-	  (21,'Function','step', 'a.py',5,'def step()', 'python',0),
-	  (22,'Function','step', 'b.py',5,'def step()', 'python',0)`)
+	  (30,'Class', 'Writer','a.py', 1,'',                'python',0),
+	  (31,'Method','run',   'a.py', 5,'def run(self)',   'python',30),
+	  (32,'Method','write', 'a.py',10,'def write(self)', 'python',30),
+	  (33,'Method','flush', 'a.py',15,'def flush(self)', 'python',30),
+	  (40,'Class', 'Logger','a.py',20,'',                'python',0),
+	  (41,'Method','write', 'a.py',25,'def write(self)', 'python',40)`)
+	// Writer.run calls self.write -> self.flush. Receiver `self` -> class Writer(30).
 	execSQL(t, db, `INSERT INTO properties (node_id,kind,value,line,confidence) VALUES
-	  (20,'call_order','self: setup -> step',2,0.6)`)
+	  (31,'call_order','self: write -> flush',6,0.6)`)
 
 	if _, err := PromotePropertyEdges(db); err != nil {
 		t.Fatalf("PromotePropertyEdges: %v", err)
 	}
 
-	// Exactly ONE promoted PRECEDES edge (setup -> the same-file step), and it is the
-	// DEMOTED one: candidate_count=2, confidence 0.4, tier SPECULATIVE.
+	// Exactly ONE promoted PRECEDES edge: Writer.write(32) -> Writer.flush(33), 0.5/CANDIDATE.
 	if got := countEdges(t, db, `type='PRECEDES' AND resolution_method LIKE 'promote_%'`); got != 1 {
-		t.Fatalf("want exactly 1 promoted PRECEDES edge, got %d", got)
+		t.Fatalf("want exactly 1 promoted PRECEDES edge (Writer.write->Writer.flush), got %d", got)
 	}
+	if got := countEdges(t, db, `type='PRECEDES' AND source_id=32 AND target_id=33 AND resolution_method LIKE 'promote_%'`); got != 1 {
+		t.Errorf("want the same-class edge 32->33, got %d", got)
+	}
+	// THE BITE: no PRECEDES edge may touch the cross-class same-named decoy Logger.write(41).
+	if got := countEdges(t, db, `type='PRECEDES' AND (source_id=41 OR target_id=41) AND resolution_method LIKE 'promote_%'`); got != 0 {
+		t.Errorf("cross-class fabrication: %d PRECEDES edges touch the decoy Logger.write(41), want 0", got)
+	}
+	// Tier/confidence: type-grounded, single-candidate -> 0.5 CANDIDATE, cc=1.
 	tx, err := db.BeginTx()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer tx.Rollback()
 	var (
-		srcID, tgtID int64
-		cc           int
-		conf         float64
-		tier         string
+		cc   int
+		conf float64
+		tier string
 	)
 	if err := tx.QueryRow(
-		`SELECT source_id, target_id, candidate_count, confidence, trust_tier
+		`SELECT candidate_count, confidence, trust_tier
 		   FROM edges WHERE type='PRECEDES' AND resolution_method LIKE 'promote_%' LIMIT 1`,
-	).Scan(&srcID, &tgtID, &cc, &conf, &tier); err != nil {
+	).Scan(&cc, &conf, &tier); err != nil {
 		t.Fatalf("read PRECEDES edge: %v", err)
 	}
-	if srcID != 20 || tgtID != 21 {
-		t.Errorf("PRECEDES endpoints: want 20->21 (same-file step), got %d->%d", srcID, tgtID)
+	if cc != 1 || conf != 0.5 || tier != "CANDIDATE" {
+		t.Errorf("type-grounded PRECEDES: want cc=1 conf=0.5 CANDIDATE, got cc=%d conf=%.2f tier=%q", cc, conf, tier)
 	}
-	if cc <= 1 {
-		t.Errorf("ambiguous step: want candidate_count>1, got %d (the real ambiguity must be carried, not stamped 1)", cc)
+}
+
+// TestPromote_PrecedesAbstainsUnresolvableReceiver proves the fail-closed half: a
+// `call_order` whose receiver type CANNOT be proven mints NO edge. Two shapes:
+//   (a) a FREE FUNCTION (parent=0) with a `self:` receiver — `self` has no enclosing
+//       class, so the receiver type is unknown; and
+//   (b) a method with a LOCAL-VARIABLE receiver of unknown type (not self/this/field).
+// Both abstain — correct-or-quiet, no fabricated ordering.
+func TestPromote_PrecedesAbstainsUnresolvableReceiver(t *testing.T) {
+	root := t.TempDir()
+	db, err := store.Open(filepath.Join(root, "graph.db"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if conf != 0.4 {
-		t.Errorf("ambiguous PRECEDES: want confidence 0.4 (demoted), got %.2f", conf)
+	defer db.Close()
+
+	// (a) free function `setup` (parent=0) "calls" self: setup -> step — no enclosing class.
+	// (b) method `proc` on class Pipe with a local-var receiver `conn: open -> close` whose
+	//     type is undeclared (no class_field) — unknown type.
+	execSQL(t, db, `INSERT INTO nodes (id,label,name,file_path,start_line,signature,language,parent_id) VALUES
+	  (20,'Function','setup','a.py', 1,'def setup()','python',0),
+	  (21,'Function','step', 'a.py', 5,'def step()', 'python',0),
+	  (50,'Class',   'Pipe', 'c.py', 1,'',           'python',0),
+	  (51,'Method',  'proc', 'c.py', 5,'def proc(self)','python',50),
+	  (52,'Method',  'open', 'c.py',10,'def open(self)','python',50),
+	  (53,'Method',  'close','c.py',15,'def close(self)','python',50)`)
+	execSQL(t, db, `INSERT INTO properties (node_id,kind,value,line,confidence) VALUES
+	  (20,'call_order','self: setup -> step',2,0.6),
+	  (51,'call_order','conn: open -> close',6,0.6)`)
+
+	if _, err := PromotePropertyEdges(db); err != nil {
+		t.Fatalf("PromotePropertyEdges: %v", err)
 	}
-	if tier != "SPECULATIVE" {
-		t.Errorf("ambiguous PRECEDES: want tier SPECULATIVE (below the 0.5 gate), got %q", tier)
+
+	// ZERO promoted PRECEDES edges: both receivers are type-unprovable -> abstain.
+	if got := countEdges(t, db, `type='PRECEDES' AND resolution_method LIKE 'promote_%'`); got != 0 {
+		t.Errorf("unprovable receiver must mint 0 PRECEDES edges, got %d", got)
+	}
+}
+
+// TestPromote_RaisesRejectsProseExceptionType is the BITING test for P2-11. The parser
+// emits PROSE into exception_type for some shapes. The load-bearing case is prose that
+// has a SPACE but NO DOT (`X from e`, the `raise X from e` default-fallthrough form): the
+// pre-existing drop-dotted guard does NOT catch it (no dot), and cleanExceptionBase would
+// reduce it to the leading word `X` and mint a RAISES edge onto a decoy class `X`. ONLY
+// the raw-value identifierRe gate (which rejects the space) stops it — so disabling the
+// gate flips this test RED. A genuine single-identifier exception (MyError) on the same
+// node still resolves, proving the gate rejects prose, not all exception types.
+func TestPromote_RaisesRejectsProseExceptionType(t *testing.T) {
+	root := t.TempDir()
+	db, err := store.Open(filepath.Join(root, "graph.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// 60 Method raiser; 61 Class MyError (clean internal exception); 62 Class `X` — a
+	// decoy whose name is the LEADING word of the dot-free prose "X from e".
+	execSQL(t, db, `INSERT INTO nodes (id,label,name,file_path,start_line,signature,language,parent_id) VALUES
+	  (60,'Method','run',    'r.py',5,'def run()','python',0),
+	  (61,'Class', 'MyError','r.py',1,'',         'python',0),
+	  (62,'Class', 'X',      'r.py',9,'',         'python',0)`)
+	execSQL(t, db, `INSERT INTO properties (node_id,kind,value,line,confidence) VALUES
+	  (60,'exception_type','X from e',6,1.0),
+	  (60,'exception_type','panic via .unwrap',7,0.85),
+	  (60,'exception_type','MyError',8,1.0)`)
+
+	if _, err := PromotePropertyEdges(db); err != nil {
+		t.Fatalf("PromotePropertyEdges: %v", err)
+	}
+
+	// THE BITE: the dot-free prose "X from e" must mint NO RAISES edge onto decoy class X(62).
+	if got := countEdges(t, db, `type='RAISES' AND target_id=62 AND resolution_method LIKE 'promote_%'`); got != 0 {
+		t.Errorf("prose exception_type 'X from e' minted %d RAISES edges onto decoy class 'X' (62), want 0", got)
+	}
+	// Exactly ONE RAISES edge total — the clean MyError; prose and dotted both rejected.
+	if got := countEdges(t, db, `type='RAISES' AND resolution_method LIKE 'promote_%'`); got != 1 {
+		t.Errorf("want exactly 1 RAISES edge (the clean MyError), got %d", got)
+	}
+	if got := countEdges(t, db, `type='RAISES' AND target_id=61 AND resolution_method LIKE 'promote_%'`); got != 1 {
+		t.Errorf("clean MyError exception must still mint its RAISES edge 60->61, got %d", got)
 	}
 }
 

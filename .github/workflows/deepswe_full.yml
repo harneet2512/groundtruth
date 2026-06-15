@@ -1089,6 +1089,20 @@ jobs:
           echo "CONTAINER mount: ${HOST_ARTIFACTS} -> ${GT_C_ARTIFACTS} (ro); ${HOST_GT_OUT} -> /gt_out (rw)"
           echo "mounts-json: ${MOUNTS_JSON}"
 
+          # BUG#1+#2 FIX (single-source de-drift): source the canonical --ae block so the
+          # structural edit-risk axis (GT_VERIFY_STRUCTURAL_RISK / GT_VERIFY_RISK_TRIGGER) and
+          # the FULL deep-telemetry trio (GT_ORACLE_EVENTS + GT_RUNTIME_LEDGER + GT_HOOK_FIRE_COUNTS)
+          # reach the in-container agent. Without it the in-container code DEFAULTS the risk axis
+          # OFF (gt_mini_patch.py:3801) and the ledger/fire-count sinks into the ephemeral
+          # container /tmp (gt_mini_patch.py:3515,3569) where they die with it — the run stayed
+          # green over a DARK lever + LOST telemetry. GT_C_OUT=/gt_out points the block's three
+          # sinks at the writable host mount built above (recovered in Collect). This is the
+          # SAME file codespace_deepswe_run.sh sources -> codespace + full can no longer drift.
+          export GT_C_OUT=/gt_out
+          # shellcheck source=artifact_deepswe/gt_integration/gt_ae_block.sh
+          source artifact_deepswe/gt_integration/gt_ae_block.sh
+          echo "GT_AE_ARGS (block): ${GT_AE_ARGS[*]}"
+
           # Forward the SUBSTRATE-CONSUME env into the container, pointing at /gt_artifacts.
           # GT_FORBID_PREBUILT_GRAPH + GT_PORTABLE_SUBSTRATE + GT_PROOF_MODE/GT_CONTAINERIZED
           # make the in-container pillars consume-or-fail-closed and keep L6 reindex OFF.
@@ -1139,8 +1153,7 @@ jobs:
             --ae GT_STEP_LIMIT="${GT_STEP_LIMIT:-}" \
             --ae GT_VERIFICATION_CYCLE_COST="${GT_VERIFICATION_CYCLE_COST:-}" \
             --ae GT_SELF_VERIFY_ATTEMPTS="${GT_SELF_VERIFY_ATTEMPTS:-}" \
-            --ae GT_ORACLE_ROUTE="${GT_ORACLE_ROUTE:-1}" \
-            --ae GT_ORACLE_EVENTS="/gt_out/gt_oracle_events.jsonl" \
+            "${GT_AE_ARGS[@]}" \
             --ae GT_ESC_ADV_TCOV="${GT_ESC_ADV_TCOV:-}" \
             --ae GT_ESC_ADV_B="${GT_ESC_ADV_B:-}" \
             --ae GT_ESC_URG_TCOV="${GT_ESC_URG_TCOV:-}" \
@@ -1247,6 +1260,24 @@ jobs:
           # FIX 3 (2026-06-11): harvest the oracle gate's 8-dp suppression telemetry
           # (written in-container to the writable /gt_out mount = host /tmp/gt_out).
           cp /tmp/gt_out/gt_oracle_events.jsonl trial_results/gt_oracle_events_${{ matrix.task }}.jsonl 2>/dev/null || true
+          # BUG#2 FIX: harvest the FULL deep-telemetry trio the gt_ae_block.sh single-source
+          # now points at /gt_out (runtime ledger + per-hook fire counts). Without this they
+          # were lost with the ephemeral container (gt_mini_patch.py:3515,3569 default /tmp/*).
+          # WARN loudly on a zero harvest so a silently-empty mount can't leave the run green.
+          _gt_telemetry_recovered=0
+          for _f in gt_runtime_ledger.jsonl gt_hook_fire_counts.json; do
+            if [ -s "/tmp/gt_out/$_f" ]; then
+              cp "/tmp/gt_out/$_f" "trial_results/${_f%.*}_${{ matrix.task }}.${_f##*.}" 2>/dev/null \
+                && _gt_telemetry_recovered=$((_gt_telemetry_recovered + 1))
+            fi
+          done
+          [ -s /tmp/gt_out/gt_oracle_events.jsonl ] && _gt_telemetry_recovered=$((_gt_telemetry_recovered + 1))
+          if [ "$_gt_telemetry_recovered" -eq 0 ]; then
+            echo "WARN: 0/3 deep-telemetry sinks recovered from /tmp/gt_out — in-container 8-dp" \
+                 "producers wrote nothing (check the /gt_out mount is writable to the task uid)."
+          else
+            echo "deep-telemetry: recovered ${_gt_telemetry_recovered}/3 sink(s) from /tmp/gt_out"
+          fi
           # Deep 8-dp metrics (constitution mandate: token/cost efficiency + per-layer)
           cp /tmp/gt/gt_run_summary*.json /tmp/gt_run_summary_${{ matrix.task }}.json 2>/dev/null || true
           cp /tmp/gt/gt_run_summary*.json trial_results/ 2>/dev/null || true

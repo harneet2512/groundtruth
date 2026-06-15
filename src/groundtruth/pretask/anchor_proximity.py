@@ -18,7 +18,16 @@ from collections import defaultdict
 # to graph_reach) so promoted DEPTH edges (READS/WRITES/RAISES/CO_SERIALIZES/DATA_FLOW +
 # any promote_% provenance, all minted at conf 1.0) can't pass the >=0.7 gate, inflate the
 # anchor neighbor set, and shift rank. graph_localizer does NOT import this module (no cycle).
-from groundtruth.pretask.graph_localizer import _degree_edge_filter
+from groundtruth.pretask.graph_localizer import _degree_edge_filter, _normalize as _norm_path
+
+# BUG-5 (2026-06-15): the 1-hop proximity SELECT gated edges at confidence >= 0.7,
+# which BLANKED every name_match (0.6) and NULL-confidence neighbor on the
+# name-match-heavy graphs that are 70-80% of real repos — W_PROX went dark exactly
+# where the agent needs the structural signal. Lower the floor to the localizer's
+# own name_match admission floor (0.5) for consistency. The categorical degree
+# filter (promoted-DEPTH exclusion) still applies, so this admits real name_match
+# CALLS/IMPORTS neighbors, not promoted depth.
+_NAME_MATCH_FLOOR = 0.5
 
 
 def compute_anchor_proximity(
@@ -32,31 +41,37 @@ def compute_anchor_proximity(
     conn = sqlite3.connect(graph_db)
     c = conn.cursor()
 
-    # Count distinct trusted anchors that can reach each file in ≤1 hop
+    # Count distinct trusted anchors that can reach each file in ≤1 hop.
+    # BUG-1: keys are canonicalized so a normalized anchor matches a RAW DB path
+    # (Windows ``a\b.py`` / ``./a/b.py``). The anchor seed set is normalized; the
+    # edge endpoints are normalized below before comparison.
+    _anchor_set = {_norm_path(a) for a in trusted_anchors}
     neighbor_count: dict[str, set[str]] = defaultdict(set)
 
     # Self: each anchor is reachable from itself (0 hops)
-    for anchor in trusted_anchors:
+    for anchor in _anchor_set:
         neighbor_count[anchor].add(anchor)
 
-    # 1-hop neighbors
-    placeholders = ",".join("?" * len(trusted_anchors))
+    # 1-hop neighbors — fetch all qualifying cross-file edges, normalize, match the
+    # source against the normalized anchor set in Python (SQLite cannot normalize
+    # the path in-clause; matching raw against normalized anchors silently missed).
     c.execute(
         f"""
         SELECT DISTINCT n1.file_path AS src_file, n2.file_path AS dst_file
         FROM edges e
         JOIN nodes n1 ON e.source_id = n1.id
         JOIN nodes n2 ON e.target_id = n2.id
-        WHERE n1.file_path IN ({placeholders})
+        WHERE n1.file_path IS NOT NULL
           AND n2.file_path IS NOT NULL
           AND n1.file_path != n2.file_path
-          AND COALESCE(e.confidence, 0.5) >= 0.7
+          AND COALESCE(e.confidence, 0.5) >= {_NAME_MATCH_FLOOR}
           AND {_degree_edge_filter('e')}
-        """,
-        trusted_anchors,
+        """
     )
     for src, dst in c.fetchall():
-        neighbor_count[dst].add(src)
+        nsrc, ndst = _norm_path(src), _norm_path(dst)
+        if nsrc in _anchor_set and nsrc != ndst:
+            neighbor_count[ndst].add(nsrc)
 
     conn.close()
 

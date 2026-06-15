@@ -547,7 +547,9 @@ class TestLSPClientHighLevel:
         with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
             await client.start()
 
-        await client.did_open("file:///test.py", "python", 1, "x = 1")
+        result = await client.did_open("file:///test.py", "python", 1, "x = 1")
+        # Bug5: did_open now SURFACES the send_notification Result (was swallowed).
+        assert isinstance(result, Ok)
 
         # Verify notification was sent (checking written data)
         assert len(written_data) > 0
@@ -557,6 +559,121 @@ class TestLSPClientHighLevel:
         body = json.loads(raw[body_start:])
         assert body["method"] == "textDocument/didOpen"
         assert body["params"]["textDocument"]["languageId"] == "python"
+
+        mock_stdout.feed_eof()
+        await client.shutdown()
+
+
+class TestDidOpenSurfacesResult:
+    """Bug5: did_open must SURFACE the notification Result so a doc that never loaded
+    (server not running) is distinguishable from 'LSP found no definition'."""
+
+    @pytest.mark.asyncio
+    async def test_did_open_returns_err_when_server_not_running(self) -> None:
+        # Never started -> is_running is False -> send_notification returns Err.
+        client = LSPClient(server_command=["fake", "--stdio"], root_uri="file:///p")
+        result = await client.did_open("file:///x.py", "python", 1, "x = 1")
+        assert isinstance(result, Err)
+        assert result.error.code == "lsp_not_running"
+
+
+class TestProbeReadyReadinessVsLiveness:
+    """Bug6: an lsp_error response proves the process is ALIVE but NOT that the
+    workspace is READY. probe_ready must not short-circuit True on the first error;
+    it must keep probing to the deadline so a still-warming server can converge, and
+    must record readiness (a non-error answer) separately from transport-liveness."""
+
+    @staticmethod
+    def _proc(mock_stdout):
+        mock_stdin = AsyncMock()
+        mock_stdin.write = lambda data: None
+        mock_stdin.drain = AsyncMock()
+        mock_proc = AsyncMock()
+        mock_proc.stdin = mock_stdin
+        mock_proc.stdout = mock_stdout
+        mock_proc.stderr = AsyncMock()
+        mock_proc.returncode = None
+        return mock_proc
+
+    @pytest.mark.asyncio
+    async def test_lsp_error_does_not_mark_readiness(self) -> None:
+        # The server answers workspace/symbol with an ERROR for the whole window.
+        # Old code returned True on the first error AND callers could not tell it was
+        # never actually ready. Now: returns True (transport alive) BUT
+        # probe_answered_ok stays False (not ready).
+        mock_stdout = MockStreamReader()
+        with patch("asyncio.create_subprocess_exec", return_value=self._proc(mock_stdout)):
+            client = LSPClient(server_command=["fake"], root_uri="file:///p")
+            await client.start()
+
+        async def feed_errors() -> None:
+            # Answer every probe id with an error until the probe gives up.
+            for rid in range(1, 12):
+                await asyncio.sleep(0.02)
+                mock_stdout.feed_data(make_lsp_message(make_jsonrpc_error(rid, -32601, "not ready")))
+
+        asyncio.create_task(feed_errors())
+        alive = await client.probe_ready(timeout=0.5, interval=0.1)
+        assert alive is True  # transport-liveness: the process replied
+        assert client.probe_answered_ok is False  # but it was never READY
+
+        mock_stdout.feed_eof()
+        await client.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_non_error_answer_marks_readiness(self) -> None:
+        mock_stdout = MockStreamReader()
+        with patch("asyncio.create_subprocess_exec", return_value=self._proc(mock_stdout)):
+            client = LSPClient(server_command=["fake"], root_uri="file:///p")
+            await client.start()
+
+        async def feed_ok() -> None:
+            await asyncio.sleep(0.03)
+            mock_stdout.feed_data(make_lsp_message(make_jsonrpc_response(1, [])))
+
+        asyncio.create_task(feed_ok())
+        ready = await client.probe_ready(timeout=1.0, interval=0.2)
+        assert ready is True
+        assert client.probe_answered_ok is True  # a non-error answer == READY
+
+        mock_stdout.feed_eof()
+        await client.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_no_response_at_all_is_not_alive(self) -> None:
+        mock_stdout = MockStreamReader()
+        with patch("asyncio.create_subprocess_exec", return_value=self._proc(mock_stdout)):
+            client = LSPClient(server_command=["fake"], root_uri="file:///p")
+            await client.start()
+
+        # Never feed any response -> probe times out with no reply.
+        alive = await client.probe_ready(timeout=0.3, interval=0.1)
+        assert alive is False
+        assert client.probe_answered_ok is False
+
+        mock_stdout.feed_eof()
+        await client.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_error_then_ok_converges_to_ready(self) -> None:
+        # The key behavioral win: a server that errors first (still indexing) then
+        # answers must converge to READY because probe_ready no longer bails on the
+        # first error.
+        mock_stdout = MockStreamReader()
+        with patch("asyncio.create_subprocess_exec", return_value=self._proc(mock_stdout)):
+            client = LSPClient(server_command=["fake"], root_uri="file:///p")
+            await client.start()
+
+        async def feed_error_then_ok() -> None:
+            await asyncio.sleep(0.03)
+            mock_stdout.feed_data(make_lsp_message(make_jsonrpc_error(1, -32601, "indexing")))
+            await asyncio.sleep(0.05)
+            mock_stdout.feed_data(make_lsp_message(make_jsonrpc_response(2, [])))
+
+        asyncio.create_task(feed_error_then_ok())
+        ready = await client.probe_ready(timeout=1.0, interval=0.1)
+        assert ready is True
+        assert client.probe_answered_ok is True
 
         mock_stdout.feed_eof()
         await client.shutdown()

@@ -484,10 +484,24 @@ async def handle_trace(
     if direction in ("callers", "both"):
         callers_result = graph.find_callers(symbol)
         if isinstance(callers_result, Ok):
-            callers = [
-                {"file": r.file_path, "line": r.line, "context": r.context}
-                for r in callers_result.value
-            ]
+            # Fail-closed honesty: a name_match caller (is_fact=False) is a NAME
+            # GUESS across same-named symbols, not a verified call. Tag it
+            # `verified=False` and annotate the context with `(unverified)` so
+            # the agent never reads a guessed caller as a fact (The Distracting
+            # Effect, arXiv:2505.06914). Verified edges render unchanged.
+            callers = []
+            for r in callers_result.value:
+                ctx = r.context
+                if not r.is_fact:
+                    ctx = f"{ctx} (unverified)".strip()
+                callers.append(
+                    {
+                        "file": r.file_path,
+                        "line": r.line,
+                        "context": ctx,
+                        "verified": r.is_fact,
+                    }
+                )
 
     if direction in ("callees", "both"):
         callees_result = graph.find_callees(symbol, sym.file_path)
@@ -1312,9 +1326,13 @@ async def handle_impact(
     if isinstance(callers_result, Ok):
         for ref in callers_result.value:
             direct_caller_files.add(ref.file_path)
+            # Fail-closed honesty: a name_match caller (is_fact=False) is a NAME
+            # GUESS, not a verified call edge. Surface `verified` so blast-radius
+            # consumers don't treat a guessed dependent as a confirmed one.
             caller_info: dict[str, Any] = {
                 "file": ref.file_path,
                 "line": ref.line,
+                "verified": ref.is_fact,
             }
 
             # Read usage line from disk for call_style detection
@@ -1325,8 +1343,14 @@ async def handle_impact(
                     usage_snippet = file_lines[ref.line - 1]
                     caller_info["usage"] = usage_snippet.strip()
 
-            # Call style detection
-            if f"{sym.name}(" in usage_snippet:
+            # Call style detection. break_risk is a confident claim about HOW the
+            # caller invokes the symbol — only assert it for a verified edge. For
+            # a name_match GUESS the call_style is itself unproven, so render it
+            # `unverified` and never stamp a confident HIGH/MODERATE break_risk.
+            if not ref.is_fact:
+                caller_info["call_style"] = "unverified"
+                caller_info["break_risk"] = "UNVERIFIED"
+            elif f"{sym.name}(" in usage_snippet:
                 if "=" in usage_snippet.split(f"{sym.name}(", 1)[-1].split(")", 1)[0]:
                     caller_info["call_style"] = "keyword"
                     caller_info["break_risk"] = "MODERATE"

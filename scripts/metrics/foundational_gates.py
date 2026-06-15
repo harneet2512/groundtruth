@@ -464,8 +464,24 @@ def gate_lsp(lsp_metrics_text: str, cert=None) -> bool:
         }
         return ok
 
-    # No certificate file: fall back to the contract line, but residual==0 NO LONGER passes
-    # vacuously — without lsp_warm proof there is no evidence the server ran.
+    # No certificate file. Under proof/require-LSP mode the cert is MANDATORY: the line
+    # fallback cannot prove closure-rebuilt-after-LSP / lsp_finished<closure_rebuilt /
+    # effective_work (the cert-path liveness checks _classify_lsp enforces), so synthesizing
+    # a PASS from a bare LSP_METRICS line would false-green a degraded/unprovable LSP. The
+    # codespace witness writes no cert -> it MUST NOT ride the line fallback into a leaderboard
+    # PASS. Fail-closed LSP_FAIL_MISSING_CERTIFICATE.
+    _proof = (os.environ.get("GT_PROOF_MODE") == "1"
+              or os.environ.get("GT_REQUIRE_LSP", "").strip().lower() in ("1", "true", "yes", "on"))
+    if _proof:
+        print("[GATE 2 LSP ENRICHMENT] LSP_FAIL_MISSING_CERTIFICATE — no certificate under "
+              "GT_PROOF_MODE/GT_REQUIRE_LSP; the LSP_METRICS line cannot prove closure-rebuilt/"
+              "timing/effective-work (cert is mandatory in proof mode — no line synthesis).")
+        _DEEP["gate_lsp"] = {"certificate_present": False, "verdict": "LSP_FAIL_MISSING_CERTIFICATE",
+                             "proof_mode": True, "pass": False}
+        return False
+
+    # Non-proof fall back to the contract line, but residual==0 NO LONGER passes vacuously —
+    # without lsp_warm proof there is no evidence the server ran.
     parsed = parse_lsp_line(lsp_metrics_text)
     if parsed is None:
         print("[GATE 2 LSP ENRICHMENT] LSP_FAIL_MISSING_CERTIFICATE — no certificate and no "
@@ -482,13 +498,19 @@ def gate_lsp(lsp_metrics_text: str, cert=None) -> bool:
         _DEEP["gate_lsp"] = {"certificate_present": False, "verdict": "LSP_FAIL_MISSING_CERTIFICATE",
                              "lsp_warm": warm, "pass": False}
         return False
-    if parsed.get("verdict"):
-        verdict = parsed["verdict"]
+    # An EXPLICIT verdict on the line is the only PASS basis — it is the verdict _classify_lsp
+    # already computed cert-side. Do NOT synthesize LSP_ACTIVE_VALID / LSP_NO_OP from
+    # lsp_warm+residual alone: that skips the closure / stale-closure / effective_work checks
+    # the cert path enforces, the exact false-green this gate exists to prevent. A warm line
+    # with no verdict is treated as a version-skewed/under-proven cert => fail-closed.
+    verdict = parsed.get("verdict")
+    if verdict:
         ok = verdict in _LSP_VERDICTS_PASS
-    elif residual == 0:
-        verdict, ok = "LSP_NO_OP_VALID_WITH_WARM_SERVER", True
     else:
-        verdict, ok = "LSP_ACTIVE_VALID", True
+        verdict, ok = "LSP_FAIL_MISSING_CERTIFICATE", False
+        print("[GATE 2 LSP ENRICHMENT] LSP_FAIL_MISSING_CERTIFICATE — warm LSP_METRICS line "
+              "carries no verdict= field; refusing to synthesize a PASS from lsp_warm+residual "
+              "(closure/timing/effective-work unprovable without the certificate).")
     print(f"[GATE 2 LSP ENRICHMENT] {verdict} {'PASS' if ok else 'FAIL'} "
           f"(from contract line; lsp_warm={warm} residual={residual} resolved={resolved})")
     _DEEP["gate_lsp"] = {"certificate_present": False, "verdict": verdict, "lsp_warm": warm,

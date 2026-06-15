@@ -54,6 +54,29 @@ E5_DIM = 384
 # Everything else (gte-modernbert, jina-code, ...) is symmetric: no prefix, CLS pooling.
 _E5_FAMILY = {"intfloat/e5-small-v2", "intfloat/e5-base-v2", "intfloat/e5-large-v2"}
 
+# BUG-7 (2026-06-15): per-symbol passages are short (~80 tokens) and tokenize at
+# the 128-token window. But the ISSUE QUERY is long — it names the failing file,
+# symbols, and stack frames in its tail — and capping it at 128 discarded exactly
+# those discriminating hints (measured cosine-to-gold 0.866 -> 0.617). Decouple the
+# two windows: keep ~128 for symbol passages (bounds activation memory) and tokenize
+# the query at a model-appropriate larger window (e5 supports 512; gte/ModernBERT
+# supports 8192 — we use 1024 to bound the single-row query activation).
+_PASSAGE_TOKEN_WINDOW = 128
+_E5_QUERY_TOKEN_WINDOW = 512
+_GTE_QUERY_TOKEN_WINDOW = 1024
+
+
+def _passage_token_window(model: "EmbeddingModel") -> int:
+    """The truncation window for a per-SYMBOL passage (bounded, memory-safe)."""
+    return _PASSAGE_TOKEN_WINDOW
+
+
+def _query_token_window(model: "EmbeddingModel") -> int:
+    """The truncation window for the ISSUE QUERY — strictly larger than the passage
+    window so the file/symbol hints in the issue tail survive tokenization. e5 caps
+    at 512 (its max positions); gte/ModernBERT uses 1024 (well within its 8192)."""
+    return _E5_QUERY_TOKEN_WINDOW if model.model_name in _E5_FAMILY else _GTE_QUERY_TOKEN_WINDOW
+
 
 def _default_embed_model() -> str:
     return os.environ.get("GT_EMBED_MODEL_NAME") or DEFAULT_EMBED_MODEL
@@ -147,6 +170,25 @@ class EmbeddingModel:
             # Feeding an input the graph does not declare raises in onnxruntime, so we
             # build the feed dict from THIS set, never unconditionally.
             self._input_names = [i.name for i in self._session.get_inputs()]
+            # BUG-10 (2026-06-15): self.dim is config METADATA that can disagree with
+            # the model's true output width (a name-only override leaves dim at the
+            # default; a wrong GT_EMBED_DIM lies). The cache-staleness check and the
+            # zero-fallback width key off self.dim, so a lie corrupts both. Re-derive
+            # dim from the ONNX graph's declared output width after load; warn (never
+            # crash) on a mismatch — the ONNX is the source of truth.
+            try:
+                _out_shape = self._session.get_outputs()[0].shape
+                _true_dim = _out_shape[-1] if _out_shape else None
+                if isinstance(_true_dim, int) and _true_dim > 0 and _true_dim != self.dim:
+                    import warnings as _warnings
+                    _warnings.warn(
+                        f"embedder dim mismatch for {self.model_name}: declared "
+                        f"{self.dim}, ONNX output width {_true_dim}; using {_true_dim}",
+                        RuntimeWarning, stacklevel=2,
+                    )
+                    self.dim = int(_true_dim)
+            except Exception:
+                pass  # introspection best-effort — never block a load on it
             self._last_used = time.monotonic()
             return self._session, self._tokenizer
 
@@ -159,22 +201,40 @@ class EmbeddingModel:
         if self._session is not None and (time.monotonic() - self._last_used) > idle_seconds:
             self.unload()
 
-    def _embed_prefixed(self, texts: list[str]) -> list[list[float]]:
+    def _embed_prefixed(self, texts: list[str], *, is_query: bool = False) -> list[list[float]]:
         # Chunked encode: ONE session.run over N=thousands of passages allocates
         # N x seq x hidden x layers of activations (~1.8MB/passage measured) — a 4096-passage
         # budget = ~7.3GB anon-rss, OOM-killed in capped containers (proven live,
         # astropy-13236 repro 2026-06-10) and the killer of the 8-par VM sweep box.
-        # Padding is FIXED at 128 (enable_padding(length=128)), so chunking is numerically
-        # IDENTICAL to the single call — only peak memory changes (~60MB at B=32).
+        # Passages pad/truncate to the passage window (128). The QUERY (is_query) uses
+        # the larger query window (BUG-7) and is always a SINGLE row, so its activation
+        # is bounded even at the wider window.
         out: list[list[float]] = []
         B = max(1, int(os.environ.get("GT_EMBED_ENCODE_BATCH", "32")))
         for i in range(0, len(texts), B):
-            out.extend(self._embed_chunk(texts[i:i + B]))
+            out.extend(self._embed_chunk(texts[i:i + B], is_query=is_query))
         return out
 
-    def _embed_chunk(self, texts: list[str]) -> list[list[float]]:
+    def _embed_chunk(self, texts: list[str], *, is_query: bool = False) -> list[list[float]]:
         session, tokenizer = self._ensure_loaded()
-        encoded = tokenizer.encode_batch(texts)
+        # BUG-7 (2026-06-15): tokenize the QUERY at the larger query window and
+        # passages at the (smaller) passage window. enable_truncation is stateful on
+        # the shared tokenizer, so set it under the model lock around the encode so a
+        # concurrent passage encode cannot race the query's wider window onto a
+        # passage batch (or vice versa). enable_padding stays FIXED at the passage
+        # window so passage batches are numerically identical to before.
+        _window = _query_token_window(self) if is_query else _passage_token_window(self)
+        with self._lock:
+            try:
+                tokenizer.enable_truncation(max_length=_window)
+            except Exception:
+                pass
+            encoded = tokenizer.encode_batch(texts)
+            try:
+                # restore the passage default so a later passage encode is unaffected.
+                tokenizer.enable_truncation(max_length=_PASSAGE_TOKEN_WINDOW)
+            except Exception:
+                pass
         input_ids = np.array([e.ids for e in encoded], dtype=np.int64)
         attention_mask = np.array([e.attention_mask for e in encoded], dtype=np.int64)
 
@@ -204,12 +264,16 @@ class EmbeddingModel:
         return [vec.tolist() for vec in normalized]
 
     def embed(self, text: str, is_query: bool = False) -> list[float]:
+        # BUG-8: the role comes from the explicit is_query flag — never inferred from
+        # batch size — and is threaded all the way to the tokenization window.
         prefix = self.prefix_query if is_query else self.prefix_passage
-        return self._embed_prefixed([f"{prefix}{text}"])[0]
+        return self._embed_prefixed([f"{prefix}{text}"], is_query=is_query)[0]
 
     def embed_batch(self, texts: list[str], is_query: bool = False) -> list[list[float]]:
         prefix = self.prefix_query if is_query else self.prefix_passage
-        return self._embed_prefixed([f"{prefix}{text}" for text in texts])
+        return self._embed_prefixed(
+            [f"{prefix}{text}" for text in texts], is_query=is_query
+        )
 
 
 _models: dict[tuple[str, int], EmbeddingModel] = {}
@@ -322,13 +386,24 @@ def symbol_passage(name: str, signature: str, body_snippet: str = "") -> str:
     return passage[:_SYMBOL_PASSAGE_CHAR_CAP]
 
 
-def passage_hash(passage: str, model_name: str, dim: int, version: str) -> str:
+def passage_hash(
+    passage: str, model_name: str, dim: int, version: str, *, is_query: bool = False
+) -> str:
     """Content-addressed cache key for a single symbol vector.
 
-    Keyed on (version, model, dim, passage_text) so a vector is reused across
-    runs/graphs whenever the same passage is embedded by the same model — and is
-    automatically invalidated when any of those change."""
-    sig = f"{version}:{model_name}:{dim}:{passage}"
+    Keyed on (version, model, dim, ROLE, passage_text) so a vector is reused across
+    runs/graphs whenever the same TEXT is embedded by the same model IN THE SAME ROLE
+    — and is automatically invalidated when any of those change.
+
+    BUG-8 (2026-06-15): the role (query vs passage) is folded into the key. On the e5
+    family the SAME text gets a different vector depending on whether it carried the
+    ``query:`` or ``passage:`` prefix, so without the role in the key a query-prefixed
+    vector (e.g. a single-row batch the old len==1 heuristic mis-prefixed) would
+    COLLIDE with — and poison — the passage entry in the shared LRU. The role tag
+    keeps the two roles in separate cache slots. Default ``is_query=False`` keeps
+    every existing passage call site byte-identical (same hash as before)."""
+    role = "q" if is_query else "p"
+    sig = f"{version}:{model_name}:{dim}:{role}:{passage}"
     return hashlib.sha256(sig.encode("utf-8")).hexdigest()
 
 

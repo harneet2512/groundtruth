@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import re
 import shutil
 import sqlite3
 import sys
@@ -44,6 +45,101 @@ def _uri_to_path(uri: str) -> str:
     """file URI -> filesystem path, inverse of _path_to_uri (POSIX + Windows)."""
     parsed = urlparse(uri)
     return url2pathname(unquote(parsed.path))
+
+
+def _find_call_column(
+    line_text: str, target_name: str, *, expected_col: int | None = None
+) -> tuple[int, bool]:
+    """Locate the call site of ``target_name`` on ``line_text`` as a WHOLE-WORD,
+    CALL-SHAPED token, returning ``(column, found)``.
+
+    Bug fix (method-call majority): the previous ``line_text.find(target_name)``
+    returns the FIRST substring occurrence — ``find("get")`` on
+    ``config.get_key(x) or store.get(k)`` points INSIDE ``get_key`` (col of the
+    longer name), so the LSP definition query lands on the wrong identifier and
+    returns the wrong / empty target. Since 98% of the residual are method calls
+    (``get``/``join``/``append``/``items``...) whose name is a common substring of
+    LONGER same-prefixed names, that mis-aim is the dominant failure.
+
+    This finds ``\\btarget_name\\s*\\(`` (a word-bounded occurrence immediately
+    followed, modulo whitespace, by an open paren — i.e. an actual call), so:
+      * ``get`` inside ``get_key`` is rejected (no word boundary after ``get``);
+      * ``join`` inside ``rejoin(`` is rejected (no word boundary before ``join``);
+      * a bare identifier that is never called (``target = x``) is a MISS, not col 0.
+
+    When several call-shaped occurrences exist and ``expected_col`` is provided
+    (the call-site column from graph.db, if stored), the occurrence whose start is
+    NEAREST ``expected_col`` is preferred; otherwise the first is returned.
+
+    Returns ``(-1, False)`` when there is no call-shaped occurrence — the caller
+    MUST NOT silently fall back to column 0 (that queries an unrelated token); it
+    should skip the edge and count it in a distinct bucket so the miss is visible.
+    """
+    if not target_name:
+        return -1, False
+    pattern = re.compile(r"\b" + re.escape(target_name) + r"\s*\(")
+    matches = list(pattern.finditer(line_text))
+    if not matches:
+        return -1, False
+    if expected_col is not None:
+        best = min(matches, key=lambda m: abs(m.start() - expected_col))
+        return best.start(), True
+    return matches[0].start(), True
+
+
+def _find_symbol_column(line_text: str, name: str) -> tuple[int, bool]:
+    """Locate a DEFINITION name on its declaration line as a WHOLE WORD, returning
+    ``(column, found)``.
+
+    Same first-substring defect as the call-site finder (``line_text.find(name)``
+    points at ``get`` inside ``getter``), but a definition line is not always
+    call-shaped: ``class Foo:`` / ``type Foo struct`` have no ``(`` after the name,
+    so the call-shaped ``\\bname\\s*\\(`` matcher would wrongly MISS every class.
+    Here we require only a WORD BOUNDARY (``\\bname\\b``); among multiple matches we
+    prefer the first that is immediately followed (modulo whitespace) by ``(`` (the
+    actual ``def``/``func`` name over an annotation that reuses the same word), else
+    the first whole-word occurrence.
+
+    Returns ``(-1, False)`` when ``name`` does not occur as a whole word on the line.
+    """
+    if not name:
+        return -1, False
+    word = re.compile(r"\b" + re.escape(name) + r"\b")
+    matches = list(word.finditer(line_text))
+    if not matches:
+        return -1, False
+    callish = re.compile(r"\b" + re.escape(name) + r"\s*\(")
+    call_matches = list(callish.finditer(line_text))
+    if call_matches:
+        return call_matches[0].start(), True
+    return matches[0].start(), True
+
+
+def _compute_lsp_warm(server_launched: bool, warm_probe_ok: bool) -> bool:
+    """LSP liveness for the certificate.
+
+    Liveness = the server LAUNCHED and the warm probe got an answer. It MUST NOT
+    depend on ``probe_latency_ms > 0.0``: a genuinely-instant warm server (fast
+    pyright on a coarse clock) rounds the latency to 0.0ms and would be
+    mis-classified NOT warm -> LSP_FAIL_NO_WARM exit 2 on a LIVE server. The
+    "a request actually went out" guard against a fake fallback is folded into
+    ``warm_probe_ok`` upstream (probe_requests_issued > 0), not into wall-clock.
+    """
+    return bool(server_launched and warm_probe_ok)
+
+
+def _compute_degraded(lsp_warm: bool, residual: int, effective_work: int) -> bool:
+    """A DEGRADED pass: a warm server left REAL residual work UNCONVERTED.
+
+    ``effective_work == 0`` while ``residual > 0`` on a warm transport means the
+    env was incomplete (gopls needs the module cache, rust-analyzer needs cargo,
+    jdtls needs the workspace import) so the method-call majority stayed
+    name_match. This is NOT a real conversion and must be DISTINGUISHABLE from one
+    in the cert. It stays a WARN (deliver-always) when LSP is not required, but
+    under GT_REQUIRE_LSP=1 it fails-closed — the residual was real and the env did
+    not satisfy it, so it must not green.
+    """
+    return bool(lsp_warm and int(residual) > 0 and int(effective_work) <= 0)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -467,13 +563,26 @@ def _write_lsp_certificate(cert: dict) -> str:
 # Total wall-clock budget for the ONE-TIME project-readiness barrier (below). Bounded so
 # a permanently-broken project can never stall the pass; env-overridable for slow CI.
 _READY_BUDGET_S_DEFAULT = 20.0
-# Per-server readiness budget: rust-analyzer indexes a large cargo workspace FAR slower than
-# gopls/pyright/tsserver (live: boa-* converted 0 edges at 20s, cert="still indexing the
-# workspace - readiness budget too short for this project size" -> 11517 method calls stayed
-# name_match, det_pct 65.7% vs go 95.2%). The barrier returns AS SOON AS ready, so a higher
-# budget NEVER slows a fast server - it only lets a slow indexer finish. Generalized per-server
-# (keyed by the server binary basename), still overridable by GT_LSP_READY_BUDGET_S.
-_READY_BUDGET_S_BY_SERVER = {"rust-analyzer": 180.0}
+# Per-server readiness budget: some servers index a large workspace FAR slower than the 20s
+# default before they can answer textDocument/definition, so the default would quit BEFORE the
+# server is ready and the whole pass converts 0 edges.
+#   - rust-analyzer: indexes a large cargo workspace slowly (live: boa-* converted 0 edges at
+#     20s, cert="still indexing the workspace - readiness budget too short for this project
+#     size" -> 11517 method calls stayed name_match, det_pct 65.7% vs go 95.2%).
+#   - jdtls (java): the slowest indexer of all — it imports + builds the Eclipse workspace on
+#     the first request; the 20s default quit BEFORE the import finished and EVERY run converted
+#     0 edges (the exact rust-analyzer bug, never fixed for java). Same 180s ceiling.
+#   - gopls: loads package metadata lazily on the first didOpen/definition; on a large module the
+#     20s default can expire before `go list` finishes, so give it a higher floor than the
+#     default (still well under rust/java since gopls metadata load is faster than a full index).
+# The barrier returns AS SOON AS ready, so a higher budget NEVER slows a fast server - it only
+# lets a slow indexer finish. Generalized per-server (keyed by the server binary basename), still
+# overridable by GT_LSP_READY_BUDGET_S.
+_READY_BUDGET_S_BY_SERVER = {
+    "rust-analyzer": 180.0,
+    "jdtls": 180.0,
+    "gopls": 60.0,
+}
 
 
 def _note_failure_detail(stats: dict, detail: str) -> None:
@@ -604,6 +713,13 @@ async def _resolve_edges(
     stats: dict = {"verified": 0, "corrected": 0, "deleted": 0, "failed": 0, "skipped": 0,
                    "server_launched": False, "warm_probe_ok": False,
                    "probe_method": "workspace/symbol", "probe_latency_ms": 0.0,
+                   # How many real LSP requests the warm probe issued (client request-id
+                   # delta). >0 is the fake-fallback guard for lsp_warm: a no-op that never
+                   # queried the server cannot certify as warm, regardless of wall-clock.
+                   "probe_requests_issued": 0,
+                   # Readiness: a NON-error answer to the warm probe arrived (vs an
+                   # lsp_error, which is transport-liveness only — alive but not ready).
+                   "probe_answered_ok": False,
                    # WHY the launch/handshake/probe failed (server exit code + first
                    # stderr lines from the client) — lands in the LSP certificate so
                    # an LSP_FAIL_NO_WARM verdict is never blind again.
@@ -617,7 +733,15 @@ async def _resolve_edges(
                    # lsp_error = the server ANSWERED with an error (the gopls offline
                    # `no package metadata` class, the tsserver lazy-load fast-fail);
                    # empty = answered with no location; exception = client-side raise.
-                   "failed_lsp_error": 0, "failed_empty": 0, "failed_exception": 0}
+                   "failed_lsp_error": 0, "failed_empty": 0, "failed_exception": 0,
+                   # Distinct visibility buckets (NOT silent col-0 / silent drops):
+                   #   failed_didopen     = textDocument/didOpen returned Err -> the
+                   #     document never loaded, so a later "resolved nothing" is a
+                   #     load failure, not the LSP failing to find a definition.
+                   #   skipped_no_call_site = the target_name has no call-shaped
+                   #     (\bname\s*\() occurrence on the source line, so querying any
+                   #     column would aim at an unrelated token. Skipped, not col-0.
+                   "failed_didopen": 0, "skipped_no_call_site": 0}
 
     # Map the language NAME to its real file extension (LSP_SERVERS is keyed by
     # extension, e.g. ".py", not ".python"). This is the fix for the universal LSP
@@ -728,13 +852,28 @@ async def _resolve_edges(
         await client.wait_for_progress_complete(timeout=120.0)
         # WARM PROBE (Stage 1 LSP-liveness): prove the server actually ANSWERS, not just
         # that the binary launched. workspace/symbol round-trip; any response == alive.
-        _probe_t0 = time.time()
+        # Latency is measured with perf_counter (monotonic, sub-ms resolution) — NOT a
+        # liveness signal: a genuinely-instant warm server (fast pyright on a coarse
+        # clock) can round to 0.0ms, and liveness must NOT key on wall-clock advancing
+        # (the probe answer already proves a request was issued and a reply arrived).
+        # The fake-fallback guard is `probe_requests_issued > 0`: the client's monotonic
+        # request id advances iff a real request went out, so a no-op that never queried
+        # cannot pass as warm.
+        _req_before = int(getattr(client, "_request_id", 0))
+        _probe_t0 = time.perf_counter()
         try:
             _warm_ok = await client.probe_ready(timeout=5.0)
         except Exception:
             _warm_ok = False
-        stats["warm_probe_ok"] = bool(_warm_ok)
-        stats["probe_latency_ms"] = (time.time() - _probe_t0) * 1000.0
+        stats["probe_latency_ms"] = (time.perf_counter() - _probe_t0) * 1000.0
+        stats["probe_requests_issued"] = int(getattr(client, "_request_id", 0)) - _req_before
+        # Readiness (a NON-error answer arrived) is recorded separately from transport
+        # liveness (the process replied at all). An lsp_error == alive-but-not-ready.
+        stats["probe_answered_ok"] = bool(getattr(client, "probe_answered_ok", False))
+        # Liveness is launched AND a non-error/any answer arrived AND a request actually
+        # went out — never "wall-clock advanced".
+        stats["warm_probe_ok"] = bool(_warm_ok) and stats["probe_requests_issued"] > 0
+        _warm_ok = stats["warm_probe_ok"]
         if not _warm_ok:
             _stderr = client.stderr_excerpt()
             stats["failure_detail"] = (
@@ -801,13 +940,28 @@ async def _resolve_edges(
             try:
                 with open(abs_source, encoding="utf-8", errors="replace") as f:
                     text = f.read()
-                await client.did_open(uri, _lang_id_for_ext(ext), 1, text)
+                # Surface the didOpen Result: a swallowed didOpen means the document
+                # never loaded, so a later "resolved nothing" would be mis-attributed
+                # to the LSP failing to find a definition. Count a DISTINCT bucket so
+                # the cert separates "doc never loaded" from "LSP resolved nothing",
+                # and do NOT add to opened_files (so a retry can re-attempt the open).
+                _open_res = await client.did_open(uri, _lang_id_for_ext(ext), 1, text)
+                if isinstance(_open_res, LspErr):
+                    stats["failed"] += 1
+                    stats["failed_didopen"] += 1
+                    _note_failure_detail(
+                        stats, f"didOpen: {getattr(_open_res.error, 'message', _open_res)}"
+                    )
+                    continue
                 opened_files.add(uri)
             except Exception:
                 stats["failed"] += 1
                 continue
 
-        # Find column of the call on the source line
+        # Find column of the call on the source line. Use a whole-word, CALL-SHAPED
+        # match (\bname\s*\() so `get` is NOT located inside `get_key` (the method-call
+        # majority bug). NEVER silently fall to col 0 on a miss — that queries an
+        # unrelated token; skip + count a distinct bucket so the miss is visible.
         try:
             with open(abs_source, encoding="utf-8", errors="replace") as f:
                 lines = f.readlines()
@@ -815,9 +969,11 @@ async def _resolve_edges(
                 stats["skipped"] += 1
                 continue
             line_text = lines[source_line - 1]  # 1-indexed
-            col = line_text.find(target_name)
-            if col == -1:
-                col = 0
+            col, _found_call = _find_call_column(line_text, target_name)
+            if not _found_call:
+                stats["skipped"] += 1
+                stats["skipped_no_call_site"] += 1
+                continue
         except Exception:
             stats["failed"] += 1
             continue
@@ -974,13 +1130,23 @@ async def _resolve_edges(
                         text = f.read()
                     _node_ext = os.path.splitext(file_path)[1] or ext
                     lang_id = _lang_id_for_ext(_node_ext)
-                    await client.did_open(uri, lang_id, 1, text)
+                    # Surface the didOpen Result: a swallowed didOpen means the doc
+                    # never loaded, so the hover would query an unloaded document and
+                    # the failure would be mis-read as "no type info". Skip + bucket,
+                    # and do NOT mark the uri opened (a later node can retry the open).
+                    _open_res = await client.did_open(uri, lang_id, 1, text)
+                    if isinstance(_open_res, LspErr):
+                        enrich_stats["hover_skip"] += 1
+                        continue
                     opened_files.add(uri)
                 except Exception:
                     enrich_stats["hover_skip"] += 1
                     continue
 
-            # Find column of the function name on its start line
+            # Find column of the function/class name on its declaration line.
+            # Whole-word match (\bname\b, call-shaped preferred) so `get` is NOT
+            # located inside `getter`; class declarations (no `(`) still resolve.
+            # NEVER silently fall to col 0 on a miss — skip + bucket instead.
             try:
                 with open(abs_path, encoding="utf-8", errors="replace") as f:
                     lines = f.readlines()
@@ -988,9 +1154,10 @@ async def _resolve_edges(
                     enrich_stats["hover_skip"] += 1
                     continue
                 line_text = lines[start_line - 1]
-                col = line_text.find(name)
-                if col == -1:
-                    col = 0
+                col, _found_sym = _find_symbol_column(line_text, name)
+                if not _found_sym:
+                    enrich_stats["hover_skip"] += 1
+                    continue
             except Exception:
                 enrich_stats["hover_skip"] += 1
                 continue
@@ -1302,7 +1469,12 @@ def resolve_main() -> None:
             "verified_edges": 0, "corrected_edges": 0, "deleted_edges": 0,
             "failed_edges": 0, "skipped_edges": 0,
             "server_launched": False, "warm_probe_ok": False, "lsp_warm": False,
+            # degraded == warm transport but real residual left unconverted (effective_work==0
+            # while residual>0). Distinguishes an incomplete-env zero-conversion run from a real
+            # conversion; fail-closed under GT_REQUIRE_LSP=1, deliver-always otherwise.
+            "degraded": False,
             "probe_method": "workspace/symbol", "probe_latency_ms": 0.0,
+            "probe_requests_issued": 0, "probe_answered_ok": False,
             # Project-readiness barrier (lazily-loading servers, fix 27249519544-b):
             # null == barrier never exercised (no in-scope edges / pass never ran).
             "project_ready": None, "project_ready_wait_ms": 0.0,
@@ -1399,8 +1571,11 @@ def resolve_main() -> None:
         cert["warm_probe_ok"] = bool(stats.get("warm_probe_ok", False))
         cert["probe_method"] = str(stats.get("probe_method", "workspace/symbol"))
         cert["probe_latency_ms"] = float(stats.get("probe_latency_ms", 0.0))
-        cert["lsp_warm"] = bool(cert["server_launched"] and cert["warm_probe_ok"]
-                                and cert["probe_latency_ms"] > 0.0)
+        cert["probe_requests_issued"] = int(stats.get("probe_requests_issued", 0) or 0)
+        cert["probe_answered_ok"] = bool(stats.get("probe_answered_ok", False))
+        # Liveness = the server LAUNCHED and the warm probe got an answer. Do NOT gate on
+        # probe_latency_ms > 0.0 (see _compute_lsp_warm — instant warm server rounds to 0.0ms).
+        cert["lsp_warm"] = _compute_lsp_warm(cert["server_launched"], cert["warm_probe_ok"])
         cert["failure_detail"] = str(stats.get("failure_detail", "") or "")
         cert["attempted_edges"] = len(lang_edges)
         cert["verified_edges"] = int(stats.get("verified", 0))
@@ -1471,6 +1646,12 @@ def resolve_main() -> None:
             + int(stats.get("deleted", 0))
         )
         cert["effective_work"] = int(effective_work)
+        # DEGRADED: a warm server that left REAL residual work UNCONVERTED (see
+        # _compute_degraded). Distinguishes an incomplete-env zero-conversion from a real
+        # conversion; WARN (deliver-always) when LSP unrequired, fail-closed under GT_REQUIRE_LSP=1.
+        cert["degraded"] = _compute_degraded(
+            cert["lsp_warm"], cert["residual"], effective_work
+        )
         if not cert["lsp_warm"]:
             # FIX-A: distinguish a server that LAUNCHED but didn't warm in budget
             # (rust-analyzer still indexing, gopls workspace not loadable offline)
@@ -1523,9 +1704,26 @@ def resolve_main() -> None:
         print(
             f"LSP_METRICS resolved={resolved_promoted} residual={residual_method_edges} "
             f"scoped_source_files={_scoped_n} lsp_warm={1 if cert['lsp_warm'] else 0} "
+            f"degraded={1 if cert.get('degraded') else 0} "
             f"verdict={cert['verdict_hint']}",
             flush=True,
         )
+        # Bug2 fail-closed: a DEGRADED pass (warm server, real residual, ZERO conversion) is
+        # NOT a satisfied LSP requirement — the residual was real and the env did not resolve
+        # it. Under GT_REQUIRE_LSP=1 it MUST exit non-zero, exactly like a never-launched
+        # server, so CI can never count an incomplete-env zero-conversion as LSP-satisfied.
+        # Deliver-always doctrine is preserved for the NON-required path: with GT_REQUIRE_LSP
+        # unset this stays a WARN that passes, so the tree-sitter graph + brief still ship.
+        if cert.get("degraded") and os.environ.get("GT_REQUIRE_LSP") == "1":
+            print(
+                "LSP_DEGRADED_FAIL: GT_REQUIRE_LSP=1 but the warm LSP server for language "
+                f"'{args.lang}' converted ZERO of {residual_method_edges} residual edges "
+                f"(verdict={cert['verdict_hint']}"
+                + (f"; {cert['failure_detail']}" if cert.get("failure_detail") else "")
+                + ") — incomplete dep-env, fail-closed, no silent green",
+                file=sys.stderr,
+            )
+            sys.exit(2)
         if (cert["verdict_hint"] == "LSP_FAIL_NO_WARM"
                 and os.environ.get("GT_REQUIRE_LSP") == "1"):
             # P1-e fail-closed: after FIX-A, LSP_FAIL_NO_WARM means the server NEVER

@@ -262,6 +262,33 @@ def test_gate_lsp_line_with_warm_noop_passes(tmp_path, monkeypatch):
     assert fg.gate_lsp(line) is True
 
 
+def test_gate_lsp_warm_line_without_verdict_fails(tmp_path, monkeypatch):
+    # No-cert fallback hardening: a warm LSP_METRICS line with residual>0 but NO verdict=
+    # field must NOT synthesize LSP_ACTIVE_VALID (that skips the closure/timing/effective-work
+    # cert checks). Fail-closed.
+    monkeypatch.delenv("GT_PROOF_MODE", raising=False)
+    monkeypatch.delenv("GT_REQUIRE_LSP", raising=False)
+    monkeypatch.setenv("GT_LSP_CERT", str(tmp_path / "nope.json"))
+    assert fg.gate_lsp("LSP_METRICS resolved=3 residual=5 scoped_source_files=3 lsp_warm=1") is False
+    # residual==0 warm line with no verdict is ALSO no longer a vacuous NO_OP pass.
+    assert fg.gate_lsp("LSP_METRICS resolved=0 residual=0 scoped_source_files=3 lsp_warm=1") is False
+
+
+def test_gate_lsp_no_cert_under_proof_mode_fails(tmp_path, monkeypatch):
+    # Under GT_PROOF_MODE the cert is mandatory: even a warm line with an explicit pass verdict
+    # must fail-closed (the codespace witness writes no cert -> cannot ride the line fallback).
+    monkeypatch.setenv("GT_LSP_CERT", str(tmp_path / "nope.json"))
+    line = "LSP_METRICS resolved=0 residual=0 scoped_source_files=3 lsp_warm=1 verdict=LSP_NO_OP_VALID_WITH_WARM_SERVER"
+    monkeypatch.setenv("GT_PROOF_MODE", "1")
+    assert fg.gate_lsp(line) is False
+    monkeypatch.delenv("GT_PROOF_MODE", raising=False)
+    monkeypatch.setenv("GT_REQUIRE_LSP", "1")
+    assert fg.gate_lsp(line) is False
+    # With both gates off, the explicit-verdict warm line still passes (non-proof witness).
+    monkeypatch.delenv("GT_REQUIRE_LSP", raising=False)
+    assert fg.gate_lsp(line) is True
+
+
 def test_gate_lsp_loads_cert_from_file(tmp_path, monkeypatch):
     p = tmp_path / "lsp_certificate.json"
     p.write_text(json.dumps(_base_cert()), encoding="utf-8")

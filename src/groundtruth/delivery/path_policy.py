@@ -44,10 +44,29 @@ def is_vendored_path(fp: str) -> bool:
     return False
 
 
+# BUG-3 (2026-06-15): the RANKING demote must key on UNAMBIGUOUS machine-generated
+# file-SUFFIX forms only. The bare directory substrings ``/generated/`` and
+# ``.generated.`` (carried in _GENERATED_FILE_MARKERS for the delivery-exclusion
+# path, where they match a basename, never the full path) wrongly demoted a
+# HANDWRITTEN source file that merely lives under a ``generated/`` directory — it ate
+# the -0.5 ranking penalty in graph_localizer. A dir named "generated" is not proof a
+# file IN it is codegen. These suffix markers are: protobuf (.pb.go/_pb2.py/...),
+# kubernetes deepcopy (zz_generated), dart codegen (.g.dart/.freezed.dart).
+_GENERATED_RANK_DEMOTE_SUFFIXES: tuple[str, ...] = (
+    "zz_generated", ".pb.go", ".pb.gw.go", "_pb2.py", "_pb2_grpc.py",
+    "_generated.go", ".g.dart", ".freezed.dart",
+)
+
+
 def is_generated(fp: str) -> bool:
-    """Machine-generated files (protobuf, codegen) — ranking demote, not hard drop."""
-    f = (fp or "").lower()
-    return any(m in f for m in _GENERATED_FILE_MARKERS)
+    """Machine-generated files (protobuf, codegen) — RANKING demote, not hard drop.
+
+    Keys ONLY on unambiguous file-suffix markers (BUG-3): a handwritten file under a
+    ``generated/`` directory is NOT machine-generated and must not eat the ranking
+    demote. Path is normalized the way is_vendored_path normalizes (leading-slash +
+    lowercase) so the suffix test is separator-agnostic."""
+    base = _norm(fp).rsplit("/", 1)[-1]
+    return any(m in base for m in _GENERATED_RANK_DEMOTE_SUFFIXES)
 
 
 def is_delivery_excluded(fp: str, repo_root: str = "") -> bool:

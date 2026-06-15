@@ -270,6 +270,134 @@ func TestParseGoMethodSig(t *testing.T) {
 	}
 }
 
+// edgeExists reports whether an edge of `typ` from src->tgt exists.
+func edgeExists(t *testing.T, db *store.DB, typ string, src, tgt int64) bool {
+	t.Helper()
+	tx, err := db.BeginTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	var n int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM edges WHERE type=? AND source_id=? AND target_id=?`,
+		typ, src, tgt).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n > 0
+}
+
+// TestRustGenericImplParse is the BITING test for the Rust generic-impl mis-parse fix
+// (P1-6). The positional strings.Fields parse read `impl<T>` (no space) as the trait
+// and mangled path/generic forms. The regex form handles all three live shapes:
+//   impl<T> Display for Wrapper        — impl-generic block before the trait
+//   impl fmt::Display for Foo          — qualified trait path (last segment = Display)
+//   impl Iterator<Item=u8> for Bytes   — trait carries its own generics
+func TestRustGenericImplParse(t *testing.T) {
+	root := t.TempDir()
+	src := `trait Display {}
+trait Iterator {}
+
+struct Wrapper;
+struct Foo;
+struct Bytes;
+
+impl<T> Display for Wrapper {}
+impl fmt::Display for Foo {}
+impl Iterator<Item=u8> for Bytes {}
+`
+	p := filepath.Join(root, "lib.rs")
+	if err := os.WriteFile(p, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	files := []walker.SourceFile{{Path: "lib.rs", AbsPath: p, Language: "rust"}}
+
+	db, err := store.Open(filepath.Join(root, "graph.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	// 1 Display (trait→Interface), 2 Iterator (trait→Interface); 3 Wrapper, 4 Foo,
+	// 5 Bytes (structs). Lines mirror the source so resolution is same-file.
+	execSQL(t, db, `INSERT INTO nodes (id, label, name, file_path, start_line, signature, language, parent_id) VALUES
+		(1,'Interface','Display', 'lib.rs',1,'trait Display {}', 'rust',NULL),
+		(2,'Interface','Iterator','lib.rs',2,'trait Iterator {}','rust',NULL),
+		(3,'Class',    'Wrapper', 'lib.rs',4,'struct Wrapper;',  'rust',NULL),
+		(4,'Class',    'Foo',     'lib.rs',5,'struct Foo;',      'rust',NULL),
+		(5,'Class',    'Bytes',   'lib.rs',6,'struct Bytes;',    'rust',NULL)`)
+
+	if _, err := ResolveRelationships(db, files, root); err != nil {
+		t.Fatal(err)
+	}
+
+	// All three IMPLEMENTS must be wired struct -> trait, despite generics/path forms.
+	for _, want := range []struct {
+		desc     string
+		src, tgt int64
+	}{
+		{"impl<T> Display for Wrapper", 3, 1},
+		{"impl fmt::Display for Foo", 4, 1},
+		{"impl Iterator<Item=u8> for Bytes", 5, 2},
+	} {
+		if !edgeExists(t, db, "IMPLEMENTS", want.src, want.tgt) {
+			t.Errorf("%s: missing IMPLEMENTS %d->%d (regex mis-parse)", want.desc, want.src, want.tgt)
+		}
+	}
+}
+
+// TestGoEmbedBraceDepth is the BITING test for the Go struct-embed brace-depth fix
+// (P2-7). Outer struct Server embeds Logger; it ALSO has a field whose type is an
+// ANONYMOUS NESTED struct that itself contains a line matching the embed regex
+// (`Mutex`). Without brace-depth tracking, that nested-scope `Mutex` line is misread
+// as an embed of Server. With depth tracking, only the depth-1 embed (Logger) is
+// emitted; the nested `Mutex` (depth 2) is NOT, and Server does not extend Mutex.
+func TestGoEmbedBraceDepth(t *testing.T) {
+	root := t.TempDir()
+	src := `package x
+
+type Logger struct{}
+type Mutex struct{}
+
+type Server struct {
+	Logger
+	cfg struct {
+		Mutex
+	}
+}
+`
+	p := filepath.Join(root, "server.go")
+	if err := os.WriteFile(p, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	files := []walker.SourceFile{{Path: "server.go", AbsPath: p, Language: "go"}}
+
+	db, err := store.Open(filepath.Join(root, "graph.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	// 1 Logger, 2 Mutex, 3 Server. start_line of Server matches the source so the
+	// struct-open detection fires; Logger/Mutex are same-file.
+	execSQL(t, db, `INSERT INTO nodes (id, label, name, file_path, start_line, signature, language, parent_id) VALUES
+		(1,'Class','Logger','server.go',3,'type Logger struct{}','go',NULL),
+		(2,'Class','Mutex', 'server.go',4,'type Mutex struct{}', 'go',NULL),
+		(3,'Class','Server','server.go',6,'type Server struct {','go',NULL)`)
+
+	if _, err := ResolveRelationships(db, files, root); err != nil {
+		t.Fatal(err)
+	}
+
+	// Depth-1 embed: Server EXTENDS Logger.
+	if !edgeExists(t, db, "EXTENDS", 3, 1) {
+		t.Error("Server should EXTENDS Logger (depth-1 embed) — missing")
+	}
+	// THE BITE: the nested-scope Mutex (depth 2) must NOT be read as an embed of Server.
+	if edgeExists(t, db, "EXTENDS", 3, 2) {
+		t.Error("Server EXTENDS Mutex: a nested-struct-field line was mis-read as a depth-1 embed (brace-depth tracking missing)")
+	}
+}
+
 func TestParseGoStructMethodSig(t *testing.T) {
 	cases := []struct {
 		in         string

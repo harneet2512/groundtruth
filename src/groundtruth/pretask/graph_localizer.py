@@ -708,6 +708,49 @@ def _normalize(fp: str) -> str:
     return fp.replace("\\", "/").lstrip("./").lstrip("/")
 
 
+def _struct_witness_tier(c: "Candidate") -> int:
+    """SWERank hard-negative tier for the structural ranker (BUG-4). Lower = better:
+        0  verified CLOSE structural witness  (CALLS/IMPORTS, hop <= 1)
+        1  verified DISTANT structural witness (hop >= 2) — a real edge, just far
+        2  verified DEFINES only — name-equality, NOT a structural fact
+        3  unverified witness only
+        4  no witness
+    A verified distant edge (tier 1) out-ranks a bare name-equality DEFINES
+    (tier 2): the edge is a structural fact, the DEFINES a same-name coincidence."""
+    if not c.has_verified_witness:
+        return 3 if c.witnesses else 4
+    has_close = any(
+        w.verified and w.direction != "defines_anchor" and w.hop <= 1
+        for w in c.witnesses
+    )
+    if has_close:
+        return 0
+    has_distant_structural = any(
+        w.verified and w.direction != "defines_anchor" and w.hop >= 2
+        for w in c.witnesses
+    )
+    return 1 if has_distant_structural else 2
+
+
+def _final_relevance_key(
+    c: "Candidate", subject_pos: "dict[str, int]"
+) -> tuple[float, int, int, str]:
+    """The relevance-bearing tie-break appended AFTER the RRF term in the final
+    localizer sort (BUG-2). Orders by best-witness strength (desc), then issue
+    lexical-token coverage (desc), then SUBJECT POSITION (the file defining the
+    issue's first-named / broken function ranks first), then — only as the LAST
+    resort — the path string. Replaces the bare ``c.file_path`` tie-break so an
+    alphabetical path can never decide the cap slot ahead of a real relevance
+    signal. Generalized: every key is a per-task structural/issue signal, no repo
+    or task IDs."""
+    return (
+        -float(c.confidence),
+        -int(c.lex_hits),
+        int(subject_pos.get(c.file_path, 10**9)),
+        c.file_path,
+    )
+
+
 def _issue_terms(issue_text: str) -> set[str]:
     return {
         w.lower()
@@ -2481,20 +2524,19 @@ def localize(
     # SWERank hard-negative ordering with structural-edge refinement.
     # Four tiers:
     #   0 = verified CLOSE structural witness (CALLS/IMPORTS at hop <=1)
-    #   1 = verified DEFINES or verified DISTANT structural (hop >=2)
-    #   2 = unverified witness only
-    #   3 = no witness
-    # A hop-3 CALLS edge is weak structural evidence — it should NOT
-    # outrank a hop-0 DEFINES (the file literally defines the broken
-    # function). Only close structural edges (hop 0-1) get tier 0.
-    def _witness_tier(c: Candidate) -> int:
-        if not c.has_verified_witness:
-            return 2 if c.witnesses else 3
-        has_close_structural = any(
-            w.verified and w.direction != "defines_anchor" and w.hop <= 1
-            for w in c.witnesses
-        )
-        return 0 if has_close_structural else 1
+    #   1 = verified DISTANT structural (hop >=2) — a real edge, just far  (BUG-4: 1a)
+    #   2 = verified DEFINES only — name-equality, NOT a structural fact   (BUG-4: 1b)
+    #   3 = unverified witness only
+    #   4 = no witness
+    # BUG-4 (2026-06-15): the old tier 1 collapsed "verified DEFINES" and "verified
+    # DISTANT structural" into ONE bucket, so a name-equality DEFINES tied a real
+    # (if distant) CALLS/IMPORTS edge. A verified distant edge is a structural FACT;
+    # a DEFINES is only a same-name coincidence (Witness.strength already caps it
+    # below the weakest verified edge). Split them: distant-structural ABOVE
+    # defines-only. The prior worry — "don't let a far edge beat the file defining
+    # the BROKEN function" — is handled by the SUBJECT-POSITION key (BUG-2), which
+    # lifts the file defining the first-named/broken function regardless of tier.
+    _witness_tier = _struct_witness_tier
 
     # Phase 2 (GREP FLOOR): grep recall is the floor. A grep-recalled file may NEVER
     # be demoted below a non-recalled one by any name-equality signal (witness tier,
@@ -2543,10 +2585,23 @@ def localize(
     # are kept. Hybrid (two independent rankers), per-task (ranks from this task's
     # own distributions), no tuned threshold. Rank fusion / CombMIN (Fox & Shaw
     # TREC-2 1994); cf. Reciprocal Rank Fusion (Cormack et al. SIGIR 2009).
+    # BUG-2 (2026-06-15): the struct order tie-broke on `-c.score` then `c.file_path`.
+    # When the subject-defining file (the one that DEFINES the issue's first-named,
+    # i.e. BROKEN, function) and its callee both carry an equal-strength verified
+    # hop-0 witness, the callee's in-degree/BM25 mass tips the composite `score` a
+    # hair above the subject file (measured beets set_fields/set_parse: callee 0.6706
+    # vs subject 0.6540), and an alphabetically-earlier callee path then seals the cap
+    # slot. The edit target is the file defining the broken function, not its callee.
+    # Lift SUBJECT POSITION above `-c.score` (relevance before composite noise), then
+    # `-confidence` (best-witness strength) and `-lex_hits` before the path string —
+    # the path is the LAST resort, never a relevance decider. Subject position is a
+    # per-task issue-text signal (no repo/task IDs); ties on it fall back to the old
+    # `-score` ordering, so this is a strict refinement of the prior key.
     _struct_order = sorted(
         candidates,
-        key=lambda c: (_witness_tier(c), -c.score,
-                       _cand_subject_pos.get(c.file_path, 10**9), c.file_path),
+        key=lambda c: (_witness_tier(c),
+                       _cand_subject_pos.get(c.file_path, 10**9),
+                       -c.score, -c.confidence, -c.lex_hits, c.file_path),
     )
     _struct_rank = {id(c): i for i, c in enumerate(_struct_order)}
     _grecalled = sorted(
@@ -2648,12 +2703,19 @@ def localize(
             s += 1.0 / (60 + _sem_rank.get(id(c), _BIG))
         return s
 
+    # BUG-2 (2026-06-15): the final sort tie-broke `-_rrf3` ties on `c.file_path` ASC
+    # — with the embedder off and no grep recall, `_rrf3` collapses to
+    # `1/(60+struct_rank)` and rounded-score ties hand the cap slot to whichever path
+    # sorts alphabetically first (a string-world coincidence). Insert relevance-bearing
+    # keys BEFORE the path: best-witness strength, then lex_hits, then subject position.
+    # The path string is the LAST resort. No-op when `_rrf3` already separates (the
+    # common case); load-bearing only on exact ties (grep-floor-only / no-embedder).
     candidates.sort(
         key=lambda c: (
             _grep_floor(c),          # Phase 2: grep recall floor (PRIMARY)
             _depth_authority(c),     # Phase 3: string-world non-recalled sinks
             -_rrf3(c),               # lexical + structural + SEMANTIC rank fusion
-            c.file_path,
+            *_final_relevance_key(c, _cand_subject_pos),  # relevance before the path string
         )
     )
     candidates = candidates[:top_k]
@@ -2732,11 +2794,19 @@ def localize(
 
         # Signal 1: score gap < MAD (per-task, dynamic).
         # MAD = median absolute deviation of all candidate scores.
-        # If the gap between #1 and #2 is within 1 MAD, it's noise.
+        # If the gap between the top-2 SCORES is within 1 MAD, it's noise.
+        # BUG-2 follow-through (2026-06-15): the gap is the spread between the two
+        # HIGHEST RAW SCORES (`scores` is already score-sorted desc), NOT the signed
+        # difference between positions 0 and 1 of `candidates`. Since BUG-2 reorders
+        # `candidates` by RELEVANCE (subject position can put a slightly-lower-raw-
+        # score subject file at index 0), `candidates[0].score - candidates[1].score`
+        # could go NEGATIVE and spuriously trip this flatness check on a perfectly
+        # separated distribution. The score distribution's flatness is a property of
+        # the SCORES, independent of presentation order.
         _all_scores = [c.score for c in candidates]
         _median_s = statistics.median(_all_scores)
         _mad = statistics.median([abs(s - _median_s) for s in _all_scores])
-        _gap = candidates[0].score - candidates[1].score
+        _gap = scores[0] - scores[1]
         if _mad > 0 and _gap < _mad:
             _sep_flags += 1
             _sep_parts.append(f"gap<MAD({_gap:.4f}<{_mad:.4f})")

@@ -7,6 +7,7 @@ from collections import deque
 from dataclasses import dataclass
 
 from groundtruth.index.store import SymbolStore
+from groundtruth.pretask.curation_map import DETERMINISTIC_RESOLUTION_METHODS
 from groundtruth.utils.result import Err, GroundTruthError, Ok, Result
 
 # C7 (RF-4): closure-read gates. Mirror the Go-side closure build
@@ -33,6 +34,13 @@ class Reference:
     file_path: str
     line: int | None
     context: str
+    # True iff this caller edge was resolved deterministically (resolution_method
+    # in DETERMINISTIC_RESOLUTION_METHODS) — i.e. it is a FACT, not a name_match
+    # GUESS. Defaulted True so every existing 3-arg construction is unchanged;
+    # find_callers sets it from the edge's resolution_method on the BFS path. The
+    # closure fast path is fact-by-construction (the closure table admits only
+    # deterministic-method edges at build time — gt-index closure.go #B7).
+    is_fact: bool = True
 
 
 @dataclass
@@ -324,11 +332,29 @@ class ImportGraph:
                 key = (ref.referenced_in_file, ref.referenced_at_line)
                 if key not in seen:
                     seen.add(key)
+                    # The BFS fallback gates only on confidence>=0.5, which admits
+                    # a name_match@0.6 GUESS. Mark fact-status from the edge's
+                    # resolution_method so the tool layer can flag a name_match
+                    # caller `(unverified)` instead of laundering it as a fact.
+                    #
+                    # Tri-state, not a bare membership test (which would mark the
+                    # Python-indexer schema's method-less refs unverified and
+                    # over-suppress them):
+                    #   - method ∈ DETERMINISTIC set           -> FACT
+                    #   - method is a name_match* GUESS        -> unverified
+                    #   - method is None (Python `refs` schema -> no method col;
+                    #     each ref is an observed reference, not a name-guess) -> FACT
+                    _rm = ref.resolution_method
+                    if _rm is None:
+                        is_fact = True
+                    else:
+                        is_fact = _rm in DETERMINISTIC_RESOLUTION_METHODS
                     refs.append(
                         Reference(
                             file_path=ref.referenced_in_file,
                             line=ref.referenced_at_line,
                             context="",
+                            is_fact=is_fact,
                         )
                     )
 

@@ -273,3 +273,73 @@ def test_contract_pillar_caps_at_three():
         assert len(lines) <= 3
     finally:
         os.unlink(path)
+
+
+def _make_db_with_caller_and_importer() -> str:
+    """graph.db with a CALLS caller (feeds the compute sub-block) AND an IMPORTS
+    importer (feeds the importers sub-block) of src/target.py::work."""
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE nodes (id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT, name TEXT, "
+        "file_path TEXT, start_line INTEGER DEFAULT 0, signature TEXT, return_type TEXT, "
+        "is_test INTEGER DEFAULT 0, language TEXT DEFAULT 'python')"
+    )
+    conn.execute(
+        "CREATE TABLE edges (id INTEGER PRIMARY KEY AUTOINCREMENT, source_id INTEGER, "
+        "target_id INTEGER, type TEXT, source_line INTEGER DEFAULT 0, confidence REAL DEFAULT 0.0, "
+        "resolution_method TEXT, trust_tier TEXT, candidate_count INTEGER DEFAULT 1)"
+    )
+    conn.executescript(
+        """
+        INSERT INTO nodes (id,label,name,file_path,start_line,signature,return_type)
+            VALUES (1,'Function','work','src/target.py',10,'def work(x)','int');
+        INSERT INTO nodes (id,label,name,file_path,start_line,signature)
+            VALUES (2,'Function','call_site','src/caller.py',5,'def call_site()');
+        INSERT INTO nodes (id,label,name,file_path,start_line,signature)
+            VALUES (3,'Function','importer_fn','src/importer.py',5,'def importer_fn()');
+        -- CALLS edge: caller.py -> target.py::work  (compute sub-block)
+        INSERT INTO edges (source_id,target_id,type,source_line,confidence,resolution_method,trust_tier,candidate_count)
+            VALUES (2,1,'CALLS',5,1.0,'same_file','CERTIFIED',1);
+        -- IMPORTS edge: importer.py -> target.py::work  (importers sub-block)
+        INSERT INTO edges (source_id,target_id,type,source_line,confidence,resolution_method,trust_tier,candidate_count)
+            VALUES (3,1,'IMPORTS',1,1.0,'import','CERTIFIED',1);
+        """
+    )
+    conn.commit()
+    conn.close()
+    return path
+
+
+def test_graph_navigation_subblock_failure_does_not_zero_all_evidence(monkeypatch):
+    """BULKHEAD (Bug 2): a failure in ONE graph_navigation sub-block (here the
+    rendering sub-block, via a raising `_top_functions_for_file`) must degrade
+    ONLY that block — the caller-compute count AND the importers sub-block's
+    `Imported by:` evidence (a DIFFERENT sub-block) must still survive.
+
+    Pre-fix the single broad try made any one sub-block error `return [], 0`,
+    deleting ALL evidence. Post-fix each sub-block is isolated. The injected
+    failure target (`_top_functions_for_file`) is called ONLY from the render
+    path (_format_neighbor), so a clean bulkhead leaves compute + importers
+    intact."""
+    import groundtruth.hooks.post_view as pv
+
+    path = _make_db_with_caller_and_importer()
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("injected rendering-subblock failure")
+
+    monkeypatch.setattr(pv, "_top_functions_for_file", _boom)
+
+    try:
+        out, total_callers = graph_navigation("src/target.py", path)
+        # Compute sub-block survived (caller counted) despite the render failure.
+        assert total_callers > 0, "caller compute was wiped by the render failure"
+        # Importers sub-block (a DIFFERENT block) survived -> cross-block isolation,
+        # not a single try that returned [], 0.
+        assert any("Imported by:" in line and "src/importer.py" in line for line in out), (
+            f"importer evidence zeroed by an unrelated sub-block failure; out={out}"
+        )
+    finally:
+        os.unlink(path)

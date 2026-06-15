@@ -161,16 +161,57 @@ export GT_GRAPH_DB=/tmp/gt/graph.db GT_REPO_ROOT=/tmp/gt/src
 # in-container per-turn graph read.
 echo "── brief.txt (host-side v1r brief -> the mounted substrate) ──"
 ISSUE_FILE="${TASK_DIR}/instruction.md"
-GT_GRAPH_DB=/tmp/gt/graph.db GT_REPO_ROOT=/tmp/gt/src PYTHONPATH=src python - "$ISSUE_FILE" <<'PYBRIEF' || echo "WARN: brief.txt gen failed (agent degrades to no-brief)"
+# BUG#5 FIX: do NOT write a 0-byte brief.txt. gt_agent (substrate-consume, set below) raises
+# BRIEF_EMPTY LATE inside the paid pier run on an empty/absent brief (gt_agent.py:806-813) —
+# we must catch it HOST-side, before any LLM spend. The Python writes brief.txt ONLY when the
+# brief is non-empty; a hard `[ -s ]` assertion below aborts the run before `pier run` otherwise
+# (mirrors deepswe_full.yml's -s artifact test).
+rm -f /tmp/gt/brief.txt
+GT_GRAPH_DB=/tmp/gt/graph.db GT_REPO_ROOT=/tmp/gt/src PYTHONPATH=src python - "$ISSUE_FILE" <<'PYBRIEF' || echo "WARN: brief.txt gen failed (asserted below before pier)"
 import sys
 from groundtruth.runtime.brief_cache import get_or_generate
 issue = open(sys.argv[1], encoding="utf-8").read() if len(sys.argv) > 1 else ""
 r = get_or_generate("/tmp/gt", issue, "/tmp/gt/src", "/tmp/gt/graph.db")
 bt = (r.get("brief_text") or "").strip()
-open("/tmp/gt/brief.txt", "w", encoding="utf-8").write(bt)
-print("  brief.txt:", len(bt), "chars  sha=%s" % (r.get("brief_sha256", "")[:12]))
+if bt:
+    open("/tmp/gt/brief.txt", "w", encoding="utf-8").write(bt)
+    print("  brief.txt:", len(bt), "chars  sha=%s" % (r.get("brief_sha256", "")[:12]))
+else:
+    print("  brief.txt: EMPTY brief generated — not writing a 0-byte file (will abort pre-pier)")
 PYBRIEF
+# Fail-closed BEFORE the paid agent: a missing/empty brief under substrate-consume is a hard
+# stop, not a WARN. gt_agent would otherwise raise BRIEF_EMPTY mid-run after LLM spend.
+[ -s /tmp/gt/brief.txt ] || { echo "FATAL: brief.txt is empty/absent — substrate-consume requires a non-empty brief; refusing to launch the paid pier run (BRIEF_EMPTY would fail it mid-run)"; exit 1; }
 export GT_HOST_GRAPH_DB=/tmp/gt/graph.db GT_CERT_DIR=/tmp/gt
+# BUG#4 FIX: emit a minimal graph_certificate.json carrying graph_hash_after_lsp so the
+# in-container witness can prove CONSUME-IDENTITY (the consumed graph == this authority hash),
+# not merely consume-EXISTENCE. The codespace path runs substrate-active (GT_HOST_GRAPH_DB /
+# GT_CERT_DIR set) so gt_agent's witness wants an authority hash (gt_agent.py:1028-1039 reads
+# graph_certificate.graph_hash_after_lsp). proof.graph_edges_hash is the SAME canonical
+# fingerprint the in-container witness computes over the identity-mounted /tmp/gt/graph.db, so
+# hook_graph_hash_matches_post_lsp holds. Computed AFTER the LSP precision pass over the FINAL
+# graph. Without this, a substrate-active codespace run would claim a witness it cannot produce.
+PYTHONPATH=src python - <<'PYCERT' || echo "WARN: graph_certificate.json emit failed — codespace witness degrades to consume-EXISTENCE-only"
+import json, os, time
+from groundtruth.runtime.proof import graph_edges_hash
+db = "/tmp/gt/graph.db"
+h = graph_edges_hash(db)
+if not h:
+    raise SystemExit("graph_edges_hash empty — cannot certify an authority hash")
+cert = {
+    "schema": "gt.graph_certificate.codespace_witness.v1",
+    "source": "codespace_deepswe_run.sh",
+    "graph_db": db,
+    "graph_hash_after_lsp": h,
+    "graph_hash": h,
+    "emitted_at": time.time(),
+    "note": "minimal authority-hash cert for the codespace consume-IDENTITY witness "
+            "(host LSP precision pass already ran; this hashes the FINAL graph)",
+}
+with open("/tmp/gt/graph_certificate.json", "w", encoding="utf-8") as fh:
+    json.dump(cert, fh, indent=2)
+print("  graph_certificate.json: graph_hash_after_lsp=%s (consume-IDENTITY authority)" % h[:12])
+PYCERT
 # Archive THIS task's substrate (graph.db + all certs + brief) before the agent run, so a later
 # task's run reusing /tmp/gt can't overwrite it — every run's §4 PREREQS source is preserved.
 mkdir -p "/tmp/gt_archive/${TASK}" && cp /tmp/gt/graph.db /tmp/gt/*.json /tmp/gt/brief.txt "/tmp/gt_archive/${TASK}/" 2>/dev/null \

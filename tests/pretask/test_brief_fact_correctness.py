@@ -237,6 +237,69 @@ def test_edit_target_guard_binds_to_candidate_file_not_same_named_collision(tmp_
     assert line == 12, f"line must be a/db.py's guard line 12, got {line}"
 
 
+def test_edit_target_guard_exact_match_beats_smaller_startline_like_collision(tmp_path):
+    """BUG-2 (exact-vs-LIKE precedence): the requested file ``db.py`` has an EXACT
+    node at start_line 500, while a DIFFERENT file ``b/db.py`` suffix-matches
+    ``%/db.py`` at start_line 200. The prior single OR-query took
+    ``ORDER BY start_line LIMIT 1`` over the union of both arms, so the smaller
+    start_line (b/db.py:200) won and rendered b/db.py's guard under db.py's
+    header. The fix tries the EXACT path first and only falls back to LIKE when no
+    exact row exists. RED before fix (BWRONG leaks), GREEN after (CORRECT)."""
+    db = str(tmp_path / "g.db")
+    conn = sqlite3.connect(db)
+    _schema_with_properties(conn)
+    conn.executemany(
+        "INSERT INTO nodes (id,label,name,file_path,start_line,is_test) VALUES (?,?,?,?,?,0)",
+        [
+            # Colliding file inserted FIRST + with a SMALLER start_line so the old
+            # union ORDER BY start_line LIMIT 1 deterministically returned it.
+            (1, "Function", "connect", "b/db.py", 200),
+            (2, "Function", "connect", "db.py", 500),  # the EXACT requested file
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO properties (id,node_id,kind,value,line) VALUES (?,?,?,?,?)",
+        [
+            (1, 1, "guard_clause", "if not b_handle: raise BWRONG", 205),
+            (2, 2, "guard_clause", "if not handle: raise CORRECT", 505),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    txt, line = _edit_target_guard(db, "db.py", "connect")
+    assert "CORRECT" in txt, (
+        f"the EXACT-file guard must win over a smaller-start_line LIKE collision; got {txt!r}"
+    )
+    assert "BWRONG" not in txt, "a different file's guard must NEVER leak under the named file"
+    assert line == 505, f"line must be db.py's guard line 505, got {line}"
+
+
+def test_edit_target_guard_abstains_when_named_file_absent(tmp_path):
+    """BUG-2 abstain: when the NAMED file has no such node and only a same-named
+    function in another directory exists (which does NOT suffix-match the full
+    normalized rel path), the guard ABSTAINS rather than borrowing the other
+    file's line (correct-or-quiet)."""
+    db = str(tmp_path / "g.db")
+    conn = sqlite3.connect(db)
+    _schema_with_properties(conn)
+    conn.execute(
+        "INSERT INTO nodes (id,label,name,file_path,start_line,is_test) "
+        "VALUES (1,'Function','run','other/svc.py',10,0)"
+    )
+    conn.execute(
+        "INSERT INTO properties (id,node_id,kind,value,line) "
+        "VALUES (1,1,'guard_clause','if x: return WRONGFILE',12)"
+    )
+    conn.commit()
+    conn.close()
+
+    txt, line = _edit_target_guard(db, "wanted/svc.py", "run")
+    assert txt == "" and line is None, (
+        f"a request for wanted/svc.py must NOT borrow other/svc.py's guard; got {txt!r} @ {line}"
+    )
+
+
 def test_edit_target_guard_basename_substring_does_not_match_gtdb(tmp_path):
     """Bug L4 (substring half): "%db.py" wrongly matched "gtdb.py". The "%/" || rel suffix
     LIKE enforces a path-separator boundary, so a request for the bare top-level db.py must
@@ -283,3 +346,111 @@ def test_edit_target_guard_returns_real_fact_for_correct_file(tmp_path):
     txt, line = _edit_target_guard(db, "beets/importer.py", "set_fields")
     assert "return None" in txt, f"real guard fact must still be delivered; got {txt!r}"
     assert line == 645
+
+
+def _schema_no_confidence(conn: sqlite3.Connection) -> None:
+    """edges schema WITH ``resolution_method`` but NO ``confidence`` column.
+
+    On this schema ``_has_confidence`` is False; the BUG-1 fix must still gate
+    name_match categorically via resolution_method (it is NOT in the FACT set),
+    not fall back to a no-gate ``""`` clause.
+    """
+    conn.executescript(
+        """
+        CREATE TABLE nodes (
+            id INTEGER PRIMARY KEY, label TEXT, name TEXT, qualified_name TEXT,
+            file_path TEXT, start_line INTEGER, end_line INTEGER, signature TEXT,
+            return_type TEXT, is_exported INTEGER, is_test INTEGER, language TEXT,
+            parent_id INTEGER
+        );
+        CREATE TABLE edges (
+            id INTEGER PRIMARY KEY, source_id INTEGER, target_id INTEGER, type TEXT,
+            source_line INTEGER, source_file TEXT, resolution_method TEXT, metadata TEXT
+        );
+        """
+    )
+
+
+def test_edge_conf_clause_gates_name_match_when_no_confidence_column(tmp_path):
+    """BUG-1: on a DB with name_match edges and NO confidence column, the
+    ``Calls:`` surface (_static_callees) must contain NO name_match target.
+
+    Old code returned ``""`` (no gate) the moment the confidence column was
+    absent, so every name_match callee rendered as a fact. The fix falls back to
+    the categorical resolution_method gate. RED before fix (phantom.py present),
+    GREEN after (only the import fact real.py survives)."""
+    from groundtruth.pretask.v1r_brief import (
+        _edge_conf_clause,
+        _has_confidence,
+        _static_callees,
+    )
+    from groundtruth.pretask.curation_map import DETERMINISTIC_RESOLUTION_METHODS
+
+    db = str(tmp_path / "g.db")
+    conn = sqlite3.connect(db)
+    _schema_no_confidence(conn)
+    conn.executemany(
+        "INSERT INTO nodes (id,label,name,file_path,is_test) VALUES (?,?,?,?,0)",
+        [
+            (1, "Function", "caller", "focus.py"),
+            (2, "Function", "fact_callee", "real.py"),
+            (3, "Function", "guess_callee", "phantom.py"),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO edges (source_id,target_id,type,resolution_method) VALUES (?,?,?,?)",
+        [
+            (1, 2, "CALLS", "import"),      # FACT
+            (1, 3, "CALLS", "name_match"),  # name GUESS — must be gated out
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    # Precondition: this DB genuinely has no confidence column (else the test is vacuous).
+    assert not _has_confidence(db), "test DB must have no confidence column"
+    clause = _edge_conf_clause(db)
+    assert clause != "", "no-confidence DB with a resolution_method column must STILL gate"
+    # The gate is the canonical FACT set, imported — not a hardcoded list.
+    for m in DETERMINISTIC_RESOLUTION_METHODS:
+        assert m.lower() in clause.lower(), f"FACT method {m} missing from categorical gate"
+    assert "name_match" not in clause.lower(), "name_match must never appear in the gate"
+
+    callees = _static_callees(db, "focus.py")
+    assert "real.py" in callees, f"the import FACT callee must survive; got {callees}"
+    assert "phantom.py" not in callees, (
+        f"a name_match callee must NOT render in Calls: on a no-confidence DB; got {callees}"
+    )
+
+
+def _schema_no_columns(conn: sqlite3.Connection) -> None:
+    """edges schema with NEITHER confidence NOR resolution_method (last-resort)."""
+    conn.executescript(
+        """
+        CREATE TABLE nodes (
+            id INTEGER PRIMARY KEY, label TEXT, name TEXT, qualified_name TEXT,
+            file_path TEXT, start_line INTEGER, end_line INTEGER, signature TEXT,
+            return_type TEXT, is_exported INTEGER, is_test INTEGER, language TEXT,
+            parent_id INTEGER
+        );
+        CREATE TABLE edges (
+            id INTEGER PRIMARY KEY, source_id INTEGER, target_id INTEGER, type TEXT,
+            source_line INTEGER, source_file TEXT, metadata TEXT
+        );
+        """
+    )
+
+
+def test_edge_conf_clause_empty_only_when_neither_column_exists(tmp_path):
+    """BUG-1 boundary: ``""`` (no-gate) is emitted ONLY when neither confidence
+    nor resolution_method exists — the genuine last-resort case."""
+    from groundtruth.pretask.v1r_brief import _edge_conf_clause
+
+    db = str(tmp_path / "g.db")
+    conn = sqlite3.connect(db)
+    _schema_no_columns(conn)
+    conn.commit()
+    conn.close()
+    assert _edge_conf_clause(db) == "", (
+        "with neither confidence nor resolution_method, the clause is the last-resort no-gate"
+    )

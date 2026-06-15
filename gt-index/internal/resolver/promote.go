@@ -130,6 +130,14 @@ type promoteIndexes struct {
 	// classFields: classNodeID -> set of declared field names (class_field properties),
 	// used to lift READS/WRITES confidence when the field is a known class field.
 	classFields map[int64]map[string]bool
+	// fieldTypes: classNodeID -> {fieldName -> declared typeName}, parsed from the
+	// SAME class_field properties via the field-type grammar (parity with
+	// BuildFieldTypeIndex). PRECEDES receiver-type resolution reads this to turn a
+	// `self.<field>` receiver into the field's declared class.
+	fieldTypes map[int64]map[string]string
+	// classByName: typeName -> classNodeID (first writer wins, id-ordered), for
+	// resolving a declared receiver TYPE name to its class node when gating PRECEDES.
+	classByName map[string]int64
 }
 
 type fnlKey struct {
@@ -331,6 +339,8 @@ func buildPromoteIndexes(db *store.DB) (*promoteIndexes, error) {
 		fnl:         make(map[fnlKey]int64),
 		byID:        make(map[int64]promoteNodeMeta),
 		classFields: make(map[int64]map[string]bool),
+		fieldTypes:  make(map[int64]map[string]string),
+		classByName: make(map[string]int64),
 	}
 
 	tx, err := db.BeginTx()
@@ -356,6 +366,14 @@ func buildPromoteIndexes(db *store.DB) (*promoteIndexes, error) {
 		k := fnlKey{file: m.FilePath, name: m.Name, line: m.Line}
 		if _, ok := idx.fnl[k]; !ok {
 			idx.fnl[k] = m.ID
+		}
+		// classByName: a class/struct/enum/interface name -> its node id (first
+		// writer wins, id-ordered scan). Used to turn a receiver TYPE name into the
+		// class node for PRECEDES receiver-type gating.
+		if classLabels[m.Label] {
+			if _, ok := idx.classByName[m.Name]; !ok {
+				idx.classByName[m.Name] = m.ID
+			}
 		}
 		idx.byID[m.ID] = m
 	}
@@ -383,10 +401,79 @@ func buildPromoteIndexes(db *store.DB) (*promoteIndexes, error) {
 			idx.classFields[nodeID] = make(map[string]bool)
 		}
 		idx.classFields[nodeID][field] = true
+		// fieldTypes: parse the DECLARED TYPE off the same class_field value so a
+		// `self.<field>` receiver can resolve to its field's class (PRECEDES gating).
+		if fname, ftype, ok := parseClassFieldType(value); ok {
+			if idx.fieldTypes[nodeID] == nil {
+				idx.fieldTypes[nodeID] = make(map[string]string)
+			}
+			idx.fieldTypes[nodeID][fname] = ftype
+		}
 	}
 	cfRows.Close()
 
 	return idx, nil
+}
+
+// parseClassFieldType extracts (fieldName, typeName) from a class_field property
+// value. It mirrors the field-type grammar resolver.BuildFieldTypeIndex uses (colon
+// annotation `name: Type [= default]`, plus the Go space-separated `Name *Type`
+// struct-field shape) so PRECEDES receiver-type gating sees the SAME declared types
+// the rest of the resolver does. Returns ok=false for shapes with no recoverable
+// (name,type) pair — CORRECT-OR-QUIET, the receiver then fails to resolve and the
+// PRECEDES step abstains rather than guessing.
+func parseClassFieldType(value string) (string, string, bool) {
+	val := strings.TrimSpace(value)
+	// Strip a trailing Go struct tag (backtick-delimited) before the colon split.
+	if bt := strings.IndexByte(val, '`'); bt >= 0 {
+		val = strings.TrimSpace(val[:bt])
+	}
+	colon := strings.Index(val, ":")
+	if colon <= 0 {
+		// No colon-annotation: try the Go `Name *Type` two-token struct-field shape.
+		parts := strings.Fields(val)
+		if len(parts) == 2 {
+			name := parts[0]
+			typ := strings.TrimLeft(parts[1], "*&")
+			if isSimpleIdent(name) && typ != "" && !strings.ContainsAny(typ, " ()=") {
+				return name, stripTypeGenerics(typ), true
+			}
+		}
+		return "", "", false
+	}
+	// `name = Ctor()` (assignment, not annotation): reject if `=` precedes `:`.
+	if eq := strings.Index(val, "="); eq >= 0 && eq < colon {
+		return "", "", false
+	}
+	name := strings.TrimSpace(val[:colon])
+	typ := strings.TrimSpace(val[colon+1:])
+	if eq := strings.Index(typ, "="); eq > 0 { // strip inline default
+		typ = strings.TrimSpace(typ[:eq])
+	}
+	if sp := strings.IndexByte(typ, ' '); sp > 0 { // strip trailing flag introduced by a space
+		typ = strings.TrimSpace(typ[:sp])
+	}
+	if name == "" || typ == "" || !isSimpleIdent(name) {
+		return "", "", false
+	}
+	return name, stripTypeGenerics(typ), true
+}
+
+// stripTypeGenerics reduces `Foo<Bar>` / `Foo[Bar]` / `pkg.Foo` to the bare last-
+// segment type name used as the classByName key.
+func stripTypeGenerics(typ string) string {
+	if i := strings.IndexAny(typ, "<["); i > 0 {
+		typ = typ[:i]
+	}
+	if i := strings.LastIndex(typ, "."); i >= 0 {
+		typ = typ[i+1:]
+	}
+	return strings.TrimSpace(typ)
+}
+
+// isSimpleIdent is true for a bare identifier (no dot/bracket/paren/space/equals).
+func isSimpleIdent(s string) bool {
+	return s != "" && !strings.ContainsAny(s, ". []()=")
 }
 
 // resolveByName resolves a symbol name to a node id, prefer-same-file then global
@@ -544,6 +631,18 @@ func promoteRaises(db *store.DB, idx *promoteIndexes, add addEdgeFunc) error {
 			var etype string
 			if k == "exception_type" {
 				etype = strings.TrimSpace(value)
+				// P2-11: the parser emits PROSE into exception_type for some shapes —
+				// Rust `.unwrap()`/`.expect()` yield "panic via .unwrap", and the Go/Rust
+				// `default: excType = text` fallthrough can carry a whole raise/throw
+				// expression. Those are NOT class names. Gate the RAW value on the clean-
+				// identifier shape (no spaces/dots/parens) BEFORE any cleaning, so prose is
+				// rejected STRUCTURALLY (by shape), not incidentally (because it happened
+				// to contain a '.'). A genuine single-identifier exception name (MyError)
+				// passes; "panic via .unwrap", "raise X from e", and any multi-token
+				// expression is dropped — correct-or-quiet (no edge minted from prose).
+				if !identifierRe.MatchString(etype) {
+					return
+				}
 			} else {
 				// exception_flow carries either `raise <Type>` (Python) or
 				// `throw [new] <Type>` (JS/TS/Java) inside the WHEN-clause shape. Try
@@ -786,13 +885,41 @@ func dataFlowConfidence(cc int) float64 {
 // Class 7 — PRECEDES  (call_order: earlier -> later, distinct internal nodes)
 // ---------------------------------------------------------------------------
 
+// promotePrecedes mints ordering edges from `call_order` facts. The parser records
+// a method-call sequence on ONE receiver as `<receiver>: m1 -> m2 -> ...`, but it
+// DISCARDS the receiver's TYPE (extractCallOrdering, parser.go) — so the only way to
+// know which CLASS m1/m2 belong to is to re-resolve the receiver here. A bare
+// type-blind resolveByName first-match would fabricate a PRECEDES between two
+// unrelated same-named functions in different classes/files (the reported P0). The
+// gate is therefore fail-closed on THREE conditions; an edge is minted only when ALL
+// hold, else the step ABSTAINS (no edge):
+//
+//  1. RECEIVER TYPE RESOLVES to a concrete class node — `self`/`this`/`super`
+//     resolve to the caller method's enclosing class (src.ParentID); a `self.<field>`
+//     or bare-field receiver resolves through the field-type index to its declared
+//     class. A local-variable receiver of unknown type does NOT resolve → abstain.
+//  2. SAME-FILE, SINGLE-CANDIDATE resolution of each method name (cc==1, same file as
+//     the call_order) — a unique unambiguous target, never a cross-file name guess.
+//  3. BOTH methods are MEMBERS of the resolved receiver class (parent_id == classID).
+//     This is what kills "two classes each defining write" → no cross-class PRECEDES:
+//     the methods of the OTHER class are not members of THIS receiver's type.
 func promotePrecedes(db *store.DB, idx *promoteIndexes, add addEdgeFunc) error {
 	return forEachProperty(db, "call_order", func(nodeID int64, value string, line int) {
 		colon := strings.Index(value, ":")
 		if colon < 0 {
 			return
 		}
+		receiver := strings.TrimSpace(value[:colon])
 		seq := value[colon+1:]
+		src, ok := idx.byID[nodeID]
+		if !ok {
+			return
+		}
+		// (1) Resolve the receiver to its declared class node, else ABSTAIN.
+		classID, ok := idx.resolveReceiverClass(receiver, src)
+		if !ok || classID == 0 {
+			return
+		}
 		// Split the '<a> -> <b> -> <c>' chain; each step token is the first word
 		// (drop trailing annotations like '[managed]').
 		var names []string
@@ -806,38 +933,108 @@ func promotePrecedes(db *store.DB, idx *promoteIndexes, add addEdgeFunc) error {
 			}
 			names = append(names, p)
 		}
-		src, ok := idx.byID[nodeID]
-		if !ok {
-			return
-		}
 		for i := 0; i+1 < len(names); i++ {
 			a, b := names[i], names[i+1]
 			if a == b {
 				continue
 			}
-			idA, ccA := idx.resolveByName(a, src.FilePath, funcMethodLabels)
-			idB, ccB := idx.resolveByName(b, src.FilePath, funcMethodLabels)
-			if idA == 0 || idB == 0 || idA == idB {
-				continue // both must resolve to DISTINCT internal nodes
+			// (2) same-file, single-candidate resolution of EACH method, and
+			// (3) BOTH must be members (parent_id) of the resolved receiver class.
+			idA, okA := idx.resolveClassMethod(a, classID, src.FilePath)
+			idB, okB := idx.resolveClassMethod(b, classID, src.FilePath)
+			if !okA || !okB || idA == 0 || idB == 0 || idA == idB {
+				continue // a step that cannot be re-proven on the receiver's type abstains
 			}
-			// Honest trust (§2.6 non-invention): an ambiguous call_order step (>1
-			// same-named candidate at EITHER endpoint) resolves to an arbitrary
-			// first-match, so stamping candidate_count=1 / conf 0.5 (CANDIDATE)
-			// overstated certainty. Carry the real max count, and demote an
-			// ambiguous step to SPECULATIVE (0.4 < the 0.5 consumer gate) so it
-			// is filtered, not laundered as a fact — correct-or-quiet.
-			cc := ccA
-			if ccB > cc {
-				cc = ccB
-			}
-			conf := 0.5
-			if cc > 1 {
-				conf = 0.4
-			}
-			add(idA, idB, "PRECEDES", "promote_precedes", conf, cc, "call_order",
+			// Both endpoints are now a unique same-file member of the receiver class —
+			// an unambiguous, type-grounded ordering fact. CANDIDATE (0.5): call_order
+			// is weak ordering evidence even when the targets are certain.
+			add(idA, idB, "PRECEDES", "promote_precedes", 0.5, 1, "call_order",
 				a+"->"+b, src.FilePath, line, false)
 		}
 	})
+}
+
+// resolveReceiverClass turns a call_order receiver token into the class node whose
+// methods the sequence is calling. `self`/`this`/`super` → the caller method's
+// enclosing class (src.ParentID, which must be a Class). `self.<field>` or a bare
+// `<field>` known on the enclosing class → the field's declared class (via the
+// field-type index → classByName). Returns ok=false when no class can be proven.
+func (idx *promoteIndexes) resolveReceiverClass(receiver string, src promoteNodeMeta) (int64, bool) {
+	r := strings.TrimSpace(receiver)
+	if r == "" {
+		return 0, false
+	}
+	// self.<field> / this.<field> -> resolve the field on the enclosing class.
+	field := ""
+	switch {
+	case r == "self" || r == "this" || r == "super":
+		// Receiver IS the enclosing object → its class is the caller's parent class.
+		return idx.enclosingClass(src)
+	case strings.HasPrefix(r, "self."):
+		field = r[len("self."):]
+	case strings.HasPrefix(r, "this."):
+		field = r[len("this."):]
+	case strings.HasPrefix(r, "super."):
+		field = r[len("super."):]
+	default:
+		// Bare token: only treat it as a receiver if it is a KNOWN field of the
+		// enclosing class (else it is a local var of unknown type → abstain).
+		field = r
+	}
+	if field == "" || strings.ContainsAny(field, ". ") {
+		return 0, false // chained/compound receiver — too ambiguous to type-prove
+	}
+	enclosingID, ok := idx.enclosingClass(src)
+	if !ok || enclosingID == 0 {
+		return 0, false
+	}
+	typeName, ok := idx.fieldTypes[enclosingID][field]
+	if !ok || typeName == "" {
+		return 0, false // field type unknown → abstain
+	}
+	classID, ok := idx.classByName[typeName]
+	if !ok || classID == 0 {
+		return 0, false // declared type is not an indexed project class → abstain
+	}
+	return classID, true
+}
+
+// enclosingClass returns the class node that OWNS src (src.ParentID when that parent
+// is a class). A free function (parent 0, or parent not a class) has no enclosing
+// class → ok=false.
+func (idx *promoteIndexes) enclosingClass(src promoteNodeMeta) (int64, bool) {
+	if src.ParentID == 0 {
+		return 0, false
+	}
+	pm, ok := idx.byID[src.ParentID]
+	if !ok || !classLabels[pm.Label] {
+		return 0, false
+	}
+	return src.ParentID, true
+}
+
+// resolveClassMethod resolves a method name to a node that is (a) same-file as the
+// call_order, (b) the UNIQUE such candidate (single same-file same-name member), and
+// (c) a member of classID (parent_id == classID). Returns ok=false otherwise — the
+// strict gate that prevents a cross-class same-named method from being picked.
+func (idx *promoteIndexes) resolveClassMethod(name string, classID int64, curFile string) (int64, bool) {
+	var found int64
+	for _, e := range idx.nameIndex[name] {
+		if !funcMethodLabels[e.Label] {
+			continue
+		}
+		if e.FilePath != curFile || e.ParentID != classID {
+			continue
+		}
+		if found != 0 {
+			return 0, false // >1 same-file member with this name on the class → ambiguous
+		}
+		found = e.ID
+	}
+	if found == 0 {
+		return 0, false
+	}
+	return found, true
 }
 
 // ---------------------------------------------------------------------------

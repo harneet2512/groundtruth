@@ -121,6 +121,12 @@ func ComputeTransitiveClosure(db *store.DB, edgeType string, maxDepth int, minCo
 		conf   float64
 	}
 	adj := make(map[int64][]adjEdge)
+	// PASS 1: for every (source -> target) pair, record the MAX confidence across all
+	// parallel edges. (Previously the max was tracked here but the adjacency entry's
+	// conf was frozen at the FIRST-SCANNED edge's confidence — so a later, stronger
+	// parallel edge updated bestEdgeConf but the BFS, which reads adj[].conf, still
+	// propagated the weaker first-seen value, contradicting the "keep the highest-
+	// confidence edge" invariant above. The adjacency conf must come FROM bestEdgeConf.)
 	bestEdgeConf := make(map[reachKey]float64)
 	for i := range edges {
 		e := edges[i]
@@ -134,14 +140,29 @@ func ComputeTransitiveClosure(db *store.DB, edgeType string, maxDepth int, minCo
 			continue // skip unresolved endpoints and self-loops
 		}
 		k := reachKey{e.SourceID, e.TargetID}
-		if prev, ok := bestEdgeConf[k]; ok {
-			if e.Confidence > prev {
-				bestEdgeConf[k] = e.Confidence
-			}
-			continue // adjacency already has this pair
+		if prev, ok := bestEdgeConf[k]; !ok || e.Confidence > prev {
+			bestEdgeConf[k] = e.Confidence
 		}
-		bestEdgeConf[k] = e.Confidence
-		adj[e.SourceID] = append(adj[e.SourceID], adjEdge{target: e.TargetID, conf: e.Confidence})
+	}
+	// PASS 2: build the adjacency list ONCE per unique pair, reading the confidence
+	// from bestEdgeConf so each edge carries the STRONGEST parallel confidence. Iterate
+	// edges in their original (id-ordered) order and dedup pairs for deterministic
+	// adjacency order.
+	seenPair := make(map[reachKey]bool)
+	for i := range edges {
+		e := edges[i]
+		if e.Type != edgeType || !isVerifiedEdge(e) {
+			continue
+		}
+		if e.SourceID == 0 || e.TargetID == 0 || e.SourceID == e.TargetID {
+			continue
+		}
+		k := reachKey{e.SourceID, e.TargetID}
+		if seenPair[k] {
+			continue
+		}
+		seenPair[k] = true
+		adj[e.SourceID] = append(adj[e.SourceID], adjEdge{target: e.TargetID, conf: bestEdgeConf[k]})
 	}
 
 	// Per-source BFS. For each source node, walk the adjacency list up to

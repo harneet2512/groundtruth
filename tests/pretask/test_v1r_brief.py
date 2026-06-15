@@ -258,6 +258,76 @@ def test_generate_v1r_brief_carries_graph_map_no_laundering(
     assert "find_files() in" not in result.brief_text  # name_match never laundered
 
 
+def test_medium_scope_distinct_files_gates_name_match(tmp_path: Path) -> None:
+    """BUG-6: the MEDIUM `Related files to inspect:` scope line is fed by
+    `_distinct_files`, which was built with NO resolution_method gate and NO conf
+    floor (the raw `ORDER BY e.confidence DESC LIMIT 10` pull) — so a caller file
+    reached only via a name_match edge rendered as a related file.
+
+    This pins the EXACT scope-row gate the fix applies in generate_v1r_brief
+    (DETERMINISTIC_RESOLUTION_METHODS + _NAME_MATCH_FLOOR): given the same scope
+    rows the production query produces, name_match caller files are dropped from
+    `_distinct_files` while import facts are kept. RED before the fix (the old
+    `_distinct_files = dict.fromkeys(r[0] for r in _scope_rows)` kept all rows)."""
+    from groundtruth.pretask.curation_map import (
+        DETERMINISTIC_RESOLUTION_METHODS,
+        _NAME_MATCH_FLOOR,
+    )
+
+    db = str(tmp_path / "g.db")
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """CREATE TABLE nodes (id INTEGER PRIMARY KEY, label TEXT, name TEXT,
+              file_path TEXT, is_test INTEGER DEFAULT 0);
+           CREATE TABLE edges (id INTEGER PRIMARY KEY, source_id INTEGER,
+              target_id INTEGER, type TEXT, resolution_method TEXT, confidence REAL);"""
+    )
+    conn.execute("INSERT INTO nodes (id,label,name,file_path) VALUES (1,'Function','target_fn','pkg/target.py')")
+    for nid, f in [(2, "pkg/factA.py"), (3, "pkg/factB.py"), (4, "pkg/guessA.py"), (5, "pkg/guessB.py")]:
+        conn.execute("INSERT INTO nodes (id,label,name,file_path) VALUES (?,'Function','c',?)", (nid, f))
+    conn.executemany(
+        "INSERT INTO edges (source_id,target_id,type,resolution_method,confidence) "
+        "VALUES (?,1,'CALLS',?,?)",
+        [(2, "import", 1.0), (3, "import", 1.0), (4, "name_match", 0.9), (5, "name_match", 0.9)],
+    )
+    conn.commit()
+
+    # The exact HIGH-conf scope query generate_v1r_brief runs (the raw pull).
+    _scope_rows = conn.execute(
+        """SELECT DISTINCT nsrc.file_path, e.resolution_method, e.confidence
+           FROM nodes nt
+           JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
+           JOIN nodes nsrc ON e.source_id = nsrc.id
+           WHERE nt.file_path = ? AND nsrc.file_path != ?
+           ORDER BY e.confidence DESC LIMIT 10""",
+        ("pkg/target.py", "pkg/target.py"),
+    ).fetchall()
+    conn.close()
+
+    # OLD (buggy) _distinct_files: no gate -> name_match leaks.
+    _old_distinct = list(dict.fromkeys(r[0] for r in _scope_rows))
+    assert "pkg/guessA.py" in _old_distinct  # proves the ungated pull DID leak
+
+    # NEW gate (the production fix, verbatim).
+    _det_lower = {m.lower() for m in DETERMINISTIC_RESOLUTION_METHODS}
+
+    def _scope_row_is_fact(r) -> bool:
+        _m = str(r[1] or "").strip().lower()
+        if _m not in _det_lower:
+            return False
+        try:
+            return float(r[2]) >= _NAME_MATCH_FLOOR
+        except (TypeError, ValueError):
+            return False
+
+    _distinct_files = list(dict.fromkeys(r[0] for r in _scope_rows if _scope_row_is_fact(r)))
+    assert _distinct_files == ["pkg/factA.py", "pkg/factB.py"], (
+        f"name_match scope files must be gated out of _distinct_files; got {_distinct_files}"
+    )
+    assert "pkg/guessA.py" not in _distinct_files
+    assert "pkg/guessB.py" not in _distinct_files
+
+
 @patch("groundtruth.pretask.v1r_brief.run_v74")
 def test_n_components_signal_is_consumed_not_dropped(
     mock_v74: MagicMock, tmp_path: Path, capsys
@@ -341,6 +411,68 @@ def test_top_functions(graph_db: str) -> None:
 def test_top_functions_returns_by_ref_count(graph_db: str) -> None:
     funcs = _top_functions(graph_db, "src/auth/handler.py")
     assert funcs[0] == "verify_token"
+
+
+def test_top_functions_issue_anchor_survives_refcount_cap(tmp_path) -> None:
+    """BUG-3: a freshly-added gold function (0 callers, name not a generic hub)
+    must SURVIVE the ref-count cap when the issue names it. Without issue_terms a
+    pure ``ref_count DESC`` order drops it behind high-caller hubs; passing the
+    issue-anchor set floats it to the front (CASE ... THEN 0) so Contract/Spec/
+    (funcs) describe the RIGHT function, not the most-central one."""
+    import sqlite3 as _sql
+
+    db = str(tmp_path / "g.db")
+    conn = _sql.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE nodes (
+            id INTEGER PRIMARY KEY, label TEXT, name TEXT, qualified_name TEXT,
+            file_path TEXT, start_line INTEGER, end_line INTEGER, signature TEXT,
+            return_type TEXT, is_exported INTEGER, is_test INTEGER, language TEXT,
+            parent_id INTEGER
+        );
+        CREATE TABLE edges (
+            id INTEGER PRIMARY KEY, source_id INTEGER, target_id INTEGER, type TEXT,
+            source_line INTEGER, source_file TEXT, resolution_method TEXT,
+            confidence REAL, metadata TEXT
+        );
+        """
+    )
+    # gold = set_xy1 (0 callers); 30 hub functions each with 5 verified callers.
+    nodes = [(1, "Function", "set_xy1", "lines.py", 100, "def set_xy1(self, xy):")]
+    for i in range(2, 32):
+        nodes.append((i, "Function", f"hub{i}", "lines.py", 200 + i, f"def hub{i}(self):"))
+    conn.executemany(
+        "INSERT INTO nodes (id,label,name,file_path,start_line,signature,is_test) "
+        "VALUES (?,?,?,?,?,?,0)",
+        nodes,
+    )
+    conn.execute(
+        "INSERT INTO nodes (id,label,name,file_path,is_test) "
+        "VALUES (999,'Function','caller','x.py',0)"
+    )
+    eid = 1
+    for i in range(2, 32):
+        for _ in range(5):
+            conn.execute(
+                "INSERT INTO edges (id,source_id,target_id,type,resolution_method,confidence) "
+                "VALUES (?,999,?,'CALLS','import',1.0)",
+                (eid, i),
+            )
+            eid += 1
+    conn.commit()
+    conn.close()
+
+    # RED behavior: no issue_terms -> only hubs survive, set_xy1 is cut.
+    no_anchor = _top_functions(db, "lines.py")
+    assert not any("set_xy1" in s for s in no_anchor), (
+        "control: the zero-caller gold is cut by the cap without issue anchors"
+    )
+    # GREEN: passing the issue-anchor set keeps set_xy1.
+    with_anchor = _top_functions(db, "lines.py", issue_terms={"set_xy1"})
+    assert any("set_xy1" in s for s in with_anchor), (
+        f"the issue-named zero-caller gold must survive the cap; got {with_anchor}"
+    )
 
 
 def test_test_files_for(graph_db: str) -> None:
@@ -677,6 +809,139 @@ def test_l1_alignment_moves_loc_primary_to_entries_front():
     assert entries[0].path == "src/gold.py"          # == _loc.candidates[0] (Pipe A)
     # the other entries keep their relative order behind the pinned primary
     assert [e.path for e in entries] == ["src/gold.py", "src/hub.py", "src/other.py"]
+
+
+def test_localization_tier_medium_when_agreed_candidate_below_top(tmp_path: Path):
+    """BUG-4: the tier governs how the SHOWN set renders, but it must be derived
+    from the agreement distribution over `shown`, NOT cands[0] alone. Here cands[0]
+    (lexical-only) has 0 ranker agreement while cands[1] — also in the shown set —
+    has agreement 2. The header must render confidence="medium" (a named candidate
+    set worth reasoning over), never "low"."""
+    db = str(tmp_path / "g.db")
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """CREATE TABLE nodes (id INTEGER PRIMARY KEY, label TEXT, name TEXT,
+              file_path TEXT, start_line INTEGER, is_test INTEGER DEFAULT 0);
+           CREATE TABLE edges (id INTEGER PRIMARY KEY, source_id INTEGER,
+              target_id INTEGER, type TEXT, source_line INTEGER,
+              resolution_method TEXT, confidence REAL DEFAULT 0.5);"""
+    )
+    conn.commit(); conn.close()
+    # cands[0] = lexical-only #1 (0 agreement); cands[1] = multi-ranker-agreed #2.
+    # Each carries ONE issue anchor so the HIGH path (needs >=2 distinct anchors)
+    # does NOT fire — isolating the MEDIUM-vs-LOW tier decision.
+    cands = [
+        _cand("src/lexwin.py", score=0.9, anchor="a1"),
+        _cand("src/agreed.py", score=0.5, anchor="a2"),
+    ]
+    agree = {
+        _gl_normalize("src/lexwin.py"): 0,  # cands[0]: no ranker agreement
+        _gl_normalize("src/agreed.py"): 2,  # cands[1] (in shown): 2 rankers agree
+    }
+    loc = _loc_result(cands, anchors=["a1", "a2"], agree=agree)
+    header, _primary = _localization_header(loc, db, "fix the bug in agreed")
+    assert 'confidence="medium"' in header, (
+        f"a multi-ranker-agreed candidate in `shown` must lift the tier off low; got:\n{header}"
+    )
+    assert 'confidence="low"' not in header
+
+
+def test_localization_tier_low_when_no_shown_candidate_agrees(tmp_path: Path):
+    """BUG-4 control: when NO shown candidate has any ranker agreement, the tier
+    is honestly "low" (correct-or-quiet — the agent confirms with grep)."""
+    db = str(tmp_path / "g.db")
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """CREATE TABLE nodes (id INTEGER PRIMARY KEY, label TEXT, name TEXT,
+              file_path TEXT, start_line INTEGER, is_test INTEGER DEFAULT 0);
+           CREATE TABLE edges (id INTEGER PRIMARY KEY, source_id INTEGER,
+              target_id INTEGER, type TEXT, source_line INTEGER,
+              resolution_method TEXT, confidence REAL DEFAULT 0.5);"""
+    )
+    conn.commit(); conn.close()
+    cands = [
+        _cand("a/one.py", score=0.9, anchor="a1"),
+        _cand("b/two.py", score=0.5, anchor="a2"),
+    ]
+    agree = {_gl_normalize("a/one.py"): 0, _gl_normalize("b/two.py"): 0}
+    loc = _loc_result(cands, anchors=["a1", "a2"], agree=agree)
+    header, _primary = _localization_header(loc, db, "no agreement anywhere")
+    assert 'confidence="low"' in header, f"no agreement anywhere -> low; got:\n{header}"
+    assert 'confidence="medium"' not in header
+
+
+def _semleaf_db(tmp_path: Path) -> str:
+    """nodes + nodes_fts so _semantic_leaf_names' lexical half returns a match."""
+    db = str(tmp_path / "sl.db")
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """CREATE TABLE nodes (id INTEGER PRIMARY KEY, label TEXT, name TEXT,
+              qualified_name TEXT, file_path TEXT, start_line INTEGER,
+              is_test INTEGER DEFAULT 0);
+           CREATE TABLE edges (id INTEGER PRIMARY KEY, source_id INTEGER,
+              target_id INTEGER, type TEXT, source_line INTEGER,
+              resolution_method TEXT, confidence REAL DEFAULT 0.5);
+           CREATE VIRTUAL TABLE nodes_fts USING fts5(name, qualified_name, signature, content='');"""
+    )
+    conn.execute("INSERT INTO nodes (id,label,name,file_path) VALUES (1,'Function','parse_header','f.py')")
+    conn.execute("INSERT INTO nodes (id,label,name,file_path) VALUES (2,'Function','unrelated','f.py')")
+    conn.execute("INSERT INTO nodes_fts (rowid,name,qualified_name,signature) VALUES (1,'parse_header','','')")
+    conn.execute("INSERT INTO nodes_fts (rowid,name,qualified_name,signature) VALUES (2,'unrelated','','')")
+    conn.commit(); conn.close()
+    return db
+
+
+def test_semantic_leaf_names_lexical_only_match_is_quiet(tmp_path: Path):
+    """BUG-5: a lone LEXICAL signal (one symbol matched a single >=3-char issue
+    token via FTS5, with NO semantic corroboration) must NOT be named — it is the
+    best-of-a-weak-field, a confident-wrong "edit this <func>" tail. Empty result
+    -> the caller renders the FILE with no function tail (correct-or-quiet)."""
+    from groundtruth.pretask.v1r_brief import _semantic_leaf_names
+    from groundtruth.pretask.graph_localizer import LocalizerResult
+
+    db = _semleaf_db(tmp_path)
+    loc = LocalizerResult(
+        candidates=[], anchor_symbols=[], confidence=0.0, confident=True,
+        gate_reason="t", symbol_semrank_by_file={},  # NO semantic signal
+    )
+    # 'parse' matches parse_header lexically and nothing else corroborates it.
+    assert _semantic_leaf_names(loc, db, "f.py", "fix the parse bug") == [], (
+        "a lexical-only single-token match must not be named (relevance floor)"
+    )
+
+
+def test_semantic_leaf_names_cross_signal_is_named(tmp_path: Path):
+    """BUG-5 positive control A: when BOTH the semantic and lexical ranks name the
+    symbol (>=2 agreeing signals), it IS emitted — the fix suppresses weak guesses,
+    never real corroborated signal."""
+    from groundtruth.pretask.v1r_brief import _semantic_leaf_names
+    from groundtruth.pretask.graph_localizer import LocalizerResult
+
+    db = _semleaf_db(tmp_path)
+    loc = LocalizerResult(
+        candidates=[], anchor_symbols=[], confidence=0.0, confident=True,
+        gate_reason="t",
+        symbol_semrank_by_file={"f.py": [("parse_header", 0.9), ("unrelated", 0.1)]},
+    )
+    out = _semantic_leaf_names(loc, db, "f.py", "fix the parse bug")
+    assert "parse_header" in out, f"cross-signal-agreed name must be emitted; got {out}"
+
+
+def test_semantic_leaf_names_top_semantic_alone_is_named(tmp_path: Path):
+    """BUG-5 positive control B: the #1 SEMANTIC match (a graded relevance score,
+    not a binary token presence) may stand alone with no lexical corroboration."""
+    from groundtruth.pretask.v1r_brief import _semantic_leaf_names
+    from groundtruth.pretask.graph_localizer import LocalizerResult
+
+    db = _semleaf_db(tmp_path)
+    loc = LocalizerResult(
+        candidates=[], anchor_symbols=[], confidence=0.0, confident=True,
+        gate_reason="t",
+        symbol_semrank_by_file={"f.py": [("parse_header", 0.9)]},
+    )
+    # No issue terms (>3 char) -> no lexical signal; only the top semantic name.
+    out = _semantic_leaf_names(loc, db, "f.py", "")
+    assert out == ["parse_header"], f"top semantic match may stand alone; got {out}"
 
 
 # ---- #37: _entry_confidence_tier path_match — generic 4-char stems must NOT

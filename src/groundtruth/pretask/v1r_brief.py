@@ -92,6 +92,32 @@ def _has_confidence(graph_db: str) -> bool:
     return result
 
 
+# Cache of (has_confidence, has_resolution_method) per db so the no-confidence
+# categorical-gate branch (BUG-1 fix) probes the schema once.
+_method_schema_cache: dict[str, bool] = {}
+
+
+def _has_resolution_method(graph_db: str) -> bool:
+    if graph_db in _method_schema_cache:
+        return _method_schema_cache[graph_db]
+    try:
+        conn = sqlite3.connect(graph_db)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(edges)").fetchall()}
+        conn.close()
+        result = "resolution_method" in cols
+    except Exception:
+        result = False
+    _method_schema_cache[graph_db] = result
+    return result
+
+
+# Categorical method gate, built ONCE from the canonical FACT set so a
+# no-confidence-column DB still suppresses name_match. Imported, never hardcoded.
+_DET_METHOD_INLIST = ",".join(
+    "'" + str(m).lower() + "'" for m in sorted(DETERMINISTIC_RESOLUTION_METHODS)
+)
+
+
 def _edge_conf_clause(graph_db: str, alias: str = "e") -> str:
     """Edge-confidence gate as a categorical (dynamic + hybrid + confidence-gated)
     clause, reusing the SAME primitive L3/L3b use (``post_edit._edge_filter_for_db``)
@@ -108,8 +134,24 @@ def _edge_conf_clause(graph_db: str, alias: str = "e") -> str:
     Research: PyCG ICSE 2021 (structural resolution methods are the trustworthy
     signal), Anthropic "Writing Effective Tools" 2025 (filter hard upstream),
     Squeez arXiv 2604.04979 2026 (aggressive pre-display filtering).
+
+    BUG-1 (no-confidence-column DB): returning ``""`` here meant NO gate at all,
+    so the ``Calls:`` line + neighbor-expansion rendered every name_match target
+    as a fact on any DB lacking a ``confidence`` column. Fail-closed: when
+    ``confidence`` is absent but ``resolution_method`` exists, fall back to the
+    SAME categorical method gate curation_map._neighbors uses (resolution_method
+    ∈ DETERMINISTIC_RESOLUTION_METHODS). Only when NEITHER column exists do we
+    return ``""`` (last-resort no-gate; the caller marks/suppresses unverified).
     """
     if not _has_confidence(graph_db):
+        # No confidence column: gate categorically on resolution_method when present
+        # (mirrors curation_map._neighbors ~line 518). name_match is NEVER in the
+        # FACT set, so this strips every name_match target from the joined surface.
+        if _has_resolution_method(graph_db):
+            return f"AND LOWER(TRIM({alias}.resolution_method)) IN ({_DET_METHOD_INLIST})"
+        # Neither column exists -> cannot judge provenance. Last-resort no-gate;
+        # the categorical FACT cannot be asserted, so consumers must treat the
+        # joined rows as unverified (correct-or-quiet at the render layer).
         return ""
     try:
         from groundtruth.hooks.post_edit import _edge_filter_for_db
@@ -256,24 +298,57 @@ class V1RBriefResult:
     sem_components: list[float] = field(default_factory=list)  # components['sem'] over rendered candidates
 
 
-def _top_functions(graph_db: str, file_path: str, limit: int = MAX_FUNCTIONS_PER_FILE) -> list[str]:
+def _top_functions(
+    graph_db: str,
+    file_path: str,
+    limit: int = MAX_FUNCTIONS_PER_FILE,
+    issue_terms: set[str] | None = None,
+) -> list[str]:
     try:
         conn = sqlite3.connect(graph_db)
         conf_clause = _edge_conf_clause(graph_db)
-        rows = conn.execute(
-            f"""
-            SELECT n.name, n.signature, COUNT(e.id) AS ref_count
-            FROM nodes n
-            LEFT JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' {conf_clause}
-            WHERE n.file_path = ?
-              AND n.label IN ('Function', 'Method', 'Class', 'ImplBlock')
-              AND n.is_test = 0
-            GROUP BY n.id
-            ORDER BY ref_count DESC, n.name
-            LIMIT ?
-            """,
-            (file_path, max(limit * 8, 24)),
-        ).fetchall()
+        # BUG-3: a freshly-added gold function has 0 callers and (often) a name that
+        # is not a verbatim issue token, so a pure ``ref_count DESC`` order + LIMIT
+        # cuts it before it can surface — Contract/Spec/(funcs) then describe the
+        # WRONG (most-central) function. Union the issue-anchor symbol set into the
+        # candidate POOL ahead of the ref-count cap: a ``CASE WHEN LOWER(n.name) IN
+        # (...) THEN 0`` sort floats an anchor-named-but-zero-caller function to the
+        # front so it SURVIVES the cap, exactly as _top_function_names already does
+        # (SWERank ICLR 2025: issue-named entities are the edit target). No-op when
+        # no issue_terms are passed (existing positional callers unaffected).
+        _terms = sorted({t.lower() for t in (issue_terms or set()) if t and len(t) > 2})
+        if _terms:
+            _ph = ",".join("?" * len(_terms))
+            rows = conn.execute(
+                f"""
+                SELECT n.name, n.signature, COUNT(e.id) AS ref_count
+                FROM nodes n
+                LEFT JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' {conf_clause}
+                WHERE n.file_path = ?
+                  AND n.label IN ('Function', 'Method', 'Class', 'ImplBlock')
+                  AND n.is_test = 0
+                GROUP BY n.id
+                ORDER BY CASE WHEN LOWER(n.name) IN ({_ph}) THEN 0 ELSE 1 END,
+                         ref_count DESC, n.name
+                LIMIT ?
+                """,
+                (file_path, *_terms, max(limit * 8, 24)),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                f"""
+                SELECT n.name, n.signature, COUNT(e.id) AS ref_count
+                FROM nodes n
+                LEFT JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' {conf_clause}
+                WHERE n.file_path = ?
+                  AND n.label IN ('Function', 'Method', 'Class', 'ImplBlock')
+                  AND n.is_test = 0
+                GROUP BY n.id
+                ORDER BY ref_count DESC, n.name
+                LIMIT ?
+                """,
+                (file_path, max(limit * 8, 24)),
+            ).fetchall()
         conn.close()
         # Dedup title-line text (signature, else name) preserving rank order, so
         # byte-identical same-named overloads (e.g. three identical
@@ -1907,20 +1982,39 @@ def _edit_target_guard(graph_db: str, file_path: str, func: str) -> tuple[str, i
             # db.py collisions; "%db.py" even matches "gtdb.py"), so the HIGH-tier
             # "Edit target: <tgt.file_path> :: <func>" header could be followed by a
             # guard/return line that belongs to another file entirely — a confident-WRONG
-            # fact (correct-or-quiet violation). Match the full normalized path: exact on
-            # the stored form, plus a "%/" || rel suffix LIKE so a stored path that differs
-            # only by a leading prefix still resolves, while the leading "/" boundary blocks
-            # the gtdb.py/db.py basename-substring collision. is_test = 0 filters OUT only.
-            # ORDER BY start_line LIMIT 1 makes the single returned node deterministic.
+            # fact (correct-or-quiet violation).
+            #
+            # BUG-2 (exact-vs-LIKE precedence): the prior single query OR'd the exact
+            # match WITH a "%/"||rel suffix LIKE and took ORDER BY start_line LIMIT 1.
+            # When the NAMED file's def has a larger start_line than a DIFFERENT file
+            # that suffix-matches "%/"||rel (e.g. requested "db.py" matched "b/db.py"),
+            # the wrong file's node sorted first and its guard rendered under the named
+            # file's header. Fix: try the EXACT path first (stored form OR normalized
+            # form); ONLY when no exact row exists fall back to the suffix LIKE. When the
+            # named file genuinely has no such node, ABSTAIN ("" ) — never borrow another
+            # file's line. is_test = 0 filters OUT only; ORDER BY start_line LIMIT 1 keeps
+            # the chosen node deterministic within whichever arm matched.
             rel = _gl_normalize(file_path)
             row = conn.execute(
                 "SELECT id FROM nodes "
-                "WHERE (file_path = ? OR file_path = ? OR file_path LIKE ?) "
+                "WHERE (file_path = ? OR file_path = ?) "
                 "AND name = ? AND is_test = 0 "
                 "AND label IN ('Function', 'Method', 'Class', 'ImplBlock') "
                 "ORDER BY start_line LIMIT 1",
-                (file_path, rel, "%/" + rel, func),
+                (file_path, rel, func),
             ).fetchone()
+            if not row:
+                # No EXACT match on the named file. Only now consider a suffix LIKE
+                # (handles a stored path differing by a leading prefix). The "%/"||rel
+                # boundary still blocks the gtdb.py/db.py basename-substring collision.
+                row = conn.execute(
+                    "SELECT id FROM nodes "
+                    "WHERE file_path LIKE ? "
+                    "AND name = ? AND is_test = 0 "
+                    "AND label IN ('Function', 'Method', 'Class', 'ImplBlock') "
+                    "ORDER BY start_line LIMIT 1",
+                    ("%/" + rel, func),
+                ).fetchone()
             if not row:
                 return "", None
             nid = row[0]
@@ -2201,7 +2295,32 @@ def _semantic_leaf_names(
         except Exception:
             return 0
 
-    ranked = sorted(names, key=lambda nm: (_is_hub(nm), -_rrf(nm), nm))
+    # BUG-5 (relevance floor — correct-or-quiet on naming): a lone weak LEXICAL
+    # signal (one symbol matched a single >=3-char issue token via FTS5, with NO
+    # semantic corroboration) is the "best of a weak field", not a confident edit
+    # target — naming it produces a confident-WRONG "edit this <func>" tail. A
+    # bare FTS5 token presence is binary (matched / didn't), so a lexical-only name
+    # MUST be corroborated by the semantic rank to be emitted. The semantic rank
+    # (MaxSim) is a GRADED relevance score, so its TOP name (rank 0) is allowed to
+    # stand alone. A name therefore qualifies iff: it appears in BOTH signals
+    # (>=2 agreeing signals), OR it is the #1 semantic match. A lexical-only match
+    # — at ANY rank, including the single-match rank-0 case — never qualifies alone.
+    # When nothing qualifies, return [] so the caller emits the FILE with NO
+    # function tail (RRF agreement, Cormack SIGIR 2009: cross-ranker concord is the
+    # trustworthy signal). Generalized: no task symbols, no weight tuning.
+    def _qualifies(nm: str) -> bool:
+        in_sem = nm in sem_rank
+        in_lex = nm in lex_rank
+        if in_sem and in_lex:
+            return True  # >=2 agreeing signals
+        if in_sem and sem_rank[nm] == 0:
+            return True  # graded-relevance top match may stand alone
+        return False     # lexical-only (or non-top sem-only) -> correct-or-quiet
+
+    qualified = [nm for nm in names if _qualifies(nm)]
+    if not qualified:
+        return []  # no name clears the relevance floor -> file with no func tail
+    ranked = sorted(qualified, key=lambda nm: (_is_hub(nm), -_rrf(nm), nm))
     return ranked[:limit]
 
 
@@ -2375,7 +2494,18 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
     # MEDIUM (a named candidate set worth reasoning over); 0 signals agree -> LOW
     # (region-level / option list, agent confirms with grep). The region path
     # below is the LOW rendering; it only fires when agreement is absent. ----
-    _low_tier = _top_agreement < 1
+    # BUG-4: the tier governs how the SHOWN set (cands[:K]) renders, but reading
+    # only `_top_agreement` (cands[0]) stamps the whole set LOW whenever the #1
+    # happens to be a lexical-only pick — even if a multi-ranker-agreed #2/#3 sits
+    # in `shown`. Compute the tier from the agreement DISTRIBUTION over `shown`:
+    # MEDIUM iff ANY shown candidate has >=1 ranker agreement (RRF/CombMIN — a
+    # cross-ranker-agreed candidate anywhere in the contention set is real signal,
+    # not noise). Empty/missing agreement -> 0 -> LOW (correct-or-quiet).
+    _shown_max_agreement = max(
+        (int(_agree_map.get(_gl_normalize(c.file_path), 0)) for c in shown),
+        default=0,
+    )
+    _low_tier = _shown_max_agreement < 1
 
     # ---- LOW (region): no signal agreement AND the shown candidates share an
     # INFORMATIVE common region (a real sub-module, >=2 path components) — summarise
@@ -3247,7 +3377,7 @@ def generate_v1r_brief(
     for rec in top_records:
         path = str(rec.get("path", ""))
         score = float(rec.get("score", 0.0))
-        funcs = _top_functions(graph_db, path)
+        funcs = _top_functions(graph_db, path, issue_terms=_words)
         tests = _test_files_for(graph_db, path)
         neighbors = _issue_relevant_neighbors(
             graph_db,
@@ -3391,20 +3521,52 @@ def generate_v1r_brief(
                        ORDER BY e.confidence DESC LIMIT 10""",
                     (_top_path, _top_path),
                 ).fetchall()
-            else:
+            elif _has_resolution_method(graph_db):
+                # No confidence column but resolution_method present: pull the REAL
+                # method so the BUG-6 categorical gate below can drop name_match
+                # scope files. Synthesize a floor-clearing conf only for FACT rows.
                 _scope_rows = _sc.execute(
-                    """SELECT DISTINCT nsrc.file_path, '' as res, 0.5 as conf
+                    f"""SELECT DISTINCT nsrc.file_path, e.resolution_method, 1.0 as conf
                        FROM nodes nt
                        JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
                        JOIN nodes nsrc ON e.source_id = nsrc.id
                        WHERE nt.file_path = ? AND nsrc.file_path != ? AND nsrc.is_test = 0
+                         AND LOWER(TRIM(e.resolution_method)) IN ({_DET_METHOD_INLIST})
                        LIMIT 10""",
                     (_top_path, _top_path),
                 ).fetchall()
+            else:
+                # Neither column: cannot prove provenance -> emit NO scope files
+                # (correct-or-quiet; do not render unverified name_match scope).
+                _scope_rows = []
             _sc.close()
             _sc = None
 
-            _distinct_files = list(dict.fromkeys(r[0] for r in _scope_rows))
+            # BUG-6: the MEDIUM scope branch (`Related files to inspect`) below is
+            # fed by `_distinct_files`, which was built from EVERY scope row — the
+            # raw pull is `ORDER BY e.confidence DESC LIMIT 10` with NO method gate
+            # and NO confidence floor, so a file reached only via a name_match edge
+            # rendered as a related file (the fact-filter protects FACT rows, not
+            # this RANKING surface — parity gap with `_high_distinct`, which DOES
+            # gate on SCOPE_HIGH_RESOLUTION_METHODS). Gate `_distinct_files` on the
+            # canonical FACT set (DETERMINISTIC_RESOLUTION_METHODS, imported) plus
+            # the _NAME_MATCH_FLOOR confidence floor, mirroring the high branch.
+            # name_match is NEVER in the FACT set, so this strips speculative scope
+            # while keeping every structurally-resolved caller file.
+            _det_lower = {m.lower() for m in DETERMINISTIC_RESOLUTION_METHODS}
+
+            def _scope_row_is_fact(r) -> bool:
+                _m = str(r[1] or "").strip().lower()
+                if _m not in _det_lower:
+                    return False
+                try:
+                    return float(r[2]) >= _NAME_MATCH_FLOOR
+                except (TypeError, ValueError):
+                    return False
+
+            _distinct_files = list(
+                dict.fromkeys(r[0] for r in _scope_rows if _scope_row_is_fact(r))
+            )
             _high_conf_files = [
                 r[0]
                 for r in _scope_rows
