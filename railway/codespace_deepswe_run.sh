@@ -166,7 +166,10 @@ ISSUE_FILE="${TASK_DIR}/instruction.md"
 # we must catch it HOST-side, before any LLM spend. The Python writes brief.txt ONLY when the
 # brief is non-empty; a hard `[ -s ]` assertion below aborts the run before `pier run` otherwise
 # (mirrors deepswe_full.yml's -s artifact test).
-rm -f /tmp/gt/brief.txt
+# Clear BOTH the rendered brief AND the brief_cache result — a reused /tmp/gt across tasks
+# must NOT serve a prior task's cached brief (the awilix↔geo contamination, 2026-06-15). The
+# brief_cache identity-check is the real guard; this is belt-and-braces for the codespace path.
+rm -f /tmp/gt/brief.txt /tmp/gt/brief_result.json
 GT_GRAPH_DB=/tmp/gt/graph.db GT_REPO_ROOT=/tmp/gt/src PYTHONPATH=src python - "$ISSUE_FILE" <<'PYBRIEF' || echo "WARN: brief.txt gen failed (asserted below before pier)"
 import sys
 from groundtruth.runtime.brief_cache import get_or_generate

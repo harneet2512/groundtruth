@@ -61,29 +61,53 @@ def _extract_metrics(obj: Any) -> dict:
     return out
 
 
-def load_cached_brief(out_dir: str) -> Optional[dict]:
-    """Return the persisted ``{schema, brief_text, brief_sha256, metrics}`` dict, or
-    None on any miss/error (fail-safe — the caller then regenerates)."""
+def request_identity(issue_text: str, graph: str) -> str:
+    """Identity of a brief REQUEST — sha256 of (issue text + graph file path + size).
+    A cached brief may be reused ONLY when this matches the request; a different task
+    (different issue) or a rebuilt graph (different size) MUST miss → regenerate. This
+    is the guard against cross-task contamination: a reused ``out_dir`` (e.g. a codespace
+    that runs several tasks through one /tmp/gt) must NOT serve a prior task's brief."""
+    h = hashlib.sha256()
+    h.update((issue_text or "").encode("utf-8", "replace"))
+    h.update(b"\x00")
+    try:
+        st = os.stat(graph)
+        h.update(f"{graph}|{st.st_size}".encode("utf-8", "replace"))
+    except OSError:
+        h.update(f"{graph}|nostat".encode("utf-8", "replace"))
+    return h.hexdigest()
+
+
+def load_cached_brief(out_dir: str, expect_identity: Optional[str] = None) -> Optional[dict]:
+    """Return the persisted ``{schema, brief_text, brief_sha256, identity, metrics}`` dict,
+    or None on any miss/error (fail-safe — the caller then regenerates). FAIL CLOSED: when
+    ``expect_identity`` is given, a cached brief whose stored ``identity`` does not match is
+    treated as a MISS — a stale brief from a DIFFERENT task is NEVER served (the awilix↔geo
+    contamination, 2026-06-15)."""
     p = cache_path(out_dir)
     try:
         if os.path.isfile(p):
             with open(p, encoding="utf-8") as fh:
                 d = json.load(fh)
             if isinstance(d, dict) and (d.get("brief_text") or "").strip():
+                if expect_identity is not None and d.get("identity") != expect_identity:
+                    return None  # stale: cached brief is for a different issue/graph
                 return d
     except (OSError, ValueError):
         pass
     return None
 
 
-def persist_brief(out_dir: str, brief_text: str, result_obj: Any = None) -> dict:
-    """Best-effort persist of the brief text + sha + metrics for cross-process reuse.
-    Returns the dict regardless of whether the write succeeded."""
+def persist_brief(out_dir: str, brief_text: str, result_obj: Any = None,
+                  identity: str = "") -> dict:
+    """Best-effort persist of the brief text + sha + request identity + metrics for
+    cross-process reuse. Returns the dict regardless of whether the write succeeded."""
     text = (brief_text or "").strip()
     d = {
         "schema": BRIEF_RESULT_SCHEMA,
         "brief_text": text,
         "brief_sha256": brief_sha256(text),
+        "identity": identity,
         "metrics": _extract_metrics(result_obj),
     }
     try:
@@ -104,7 +128,8 @@ def get_or_generate(out_dir: str, issue_text: str, work: str, graph: str,
     ``generate_v1r_brief``), persists it, and returns (``generated=True``).
     Raising is left to the caller's contract — ``generator`` exceptions propagate so
     the proof can fail closed on a brief that cannot be produced."""
-    cached = load_cached_brief(out_dir)
+    ident = request_identity(issue_text, graph)
+    cached = load_cached_brief(out_dir, expect_identity=ident)
     if cached is not None:
         out = dict(cached)
         out["generated"] = False
@@ -113,6 +138,6 @@ def get_or_generate(out_dir: str, issue_text: str, work: str, graph: str,
         from groundtruth.pretask.v1r_brief import generate_v1r_brief as generator
     res = generator(issue_text=issue_text, repo_root=work, graph_db=graph, bug_id="portable")
     brief_text = (getattr(res, "brief_text", "") or "").strip()
-    out = persist_brief(out_dir, brief_text, res)
+    out = persist_brief(out_dir, brief_text, res, identity=ident)
     out["generated"] = True
     return out
