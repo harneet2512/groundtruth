@@ -313,6 +313,15 @@ def _b64_chunks(content: str | None) -> list[str]:
     return [enc[i : i + _B64_CHUNK_SIZE] for i in range(0, len(enc), _B64_CHUNK_SIZE)]
 
 
+def _b64_chunks_bytes(data: bytes | None) -> list[str]:
+    """Binary-safe sibling of _b64_chunks — for injecting graph.db (a SQLite
+    blob, not utf-8 text) into the container via chunked echo|base64 -d."""
+    if not data:
+        return []
+    enc = base64.b64encode(data).decode("ascii")
+    return [enc[i : i + _B64_CHUNK_SIZE] for i in range(0, len(enc), _B64_CHUNK_SIZE)]
+
+
 # GT files go to /opt/gt -- a persistent, non-volume location.
 _GT_DIR = "/opt/gt"
 
@@ -659,7 +668,41 @@ def _inject_steps() -> list[InstallStep]:
             )
         )
     else:
-        steps.append(InstallStep(user="root", run=_BUILD_GRAPH_DB))
+        # NON-SUBSTRATE (local / trial) path. The in-container _BUILD_GRAPH_DB cannot
+        # acquire gt-index (the release download 404s on a repo with no asset; no Go in
+        # a task image to build from source), so it produces NO /tmp/graph.db and EVERY
+        # per-turn producer falls silent (the 0-evidence regression). When the host
+        # already built a graph (GT_GRAPH_DB -> a readable file), inject THAT graph
+        # directly into the container at /tmp/graph.db — byte-identical to the graph the
+        # host brief used, so brief and per-turn evidence agree by construction. Falls
+        # back to the (best-effort) build only when no host graph is available.
+        _host_db = os.environ.get("GT_GRAPH_DB", "")
+        _gdb_chunks: list[str] = []
+        if _host_db and os.path.isfile(_host_db):
+            try:
+                # gzip BEFORE base64: a raw 4.2MB graph.db base64s to 5.6MB and bakes
+                # a 33.6MB Dockerfile, over BuildKit's 16MB gRPC cap (the build dies
+                # with ResourceExhausted). SQLite compresses ~4x, so gzip -> ~1.4MB
+                # base64 -> 33 chunks, comfortably under the cap.
+                import gzip as _gzip
+                _gdb_chunks = _b64_chunks_bytes(
+                    _gzip.compress(open(_host_db, "rb").read(), 9))
+            except OSError:
+                _gdb_chunks = []
+        if _gdb_chunks:
+            _b64name = f"{_GT_DIR}/graph_db.b64"
+            for _i, _chunk in enumerate(_gdb_chunks):
+                _op = ">" if _i == 0 else ">>"
+                steps.append(InstallStep(user="root",
+                                         run=f'echo "{_chunk}" {_op} {_b64name}'))
+            steps.append(InstallStep(user="root", run=(
+                f"base64 -d {_b64name} | gunzip > /tmp/graph.db "
+                f"&& chmod 644 /tmp/graph.db && rm -f {_b64name} "
+                f'&& echo "GT: injected host graph.db -> /tmp/graph.db '
+                f'($(wc -c </tmp/graph.db) bytes)" >&2 '
+                f"|| echo 'GT: graph.db injection failed' >&2")))
+        else:
+            steps.append(InstallStep(user="root", run=_BUILD_GRAPH_DB))
 
     # --- Self-test: verify patch loaded (fails build with diagnostic if not) ---
     if patch_chunks:

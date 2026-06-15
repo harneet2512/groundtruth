@@ -1404,7 +1404,19 @@ def _db_path() -> str:
         canon = os.environ.get("GT_GRAPH_DB") or ""
         _guard_handoff_db(canon)
         return canon
-    return os.environ.get("GT_GRAPH_DB") or "/tmp/graph.db"
+    # NON-SUBSTRATE (preindex / trial / local) path. GT_GRAPH_DB may be a HOST
+    # path that does NOT resolve inside the container (the local runner exports it
+    # for the host-side brief). Trusting it blind makes _connect_ro return None and
+    # blinds EVERY per-turn producer (the 0-evidence regression). Prefer GT_GRAPH_DB
+    # only when the file actually exists HERE; else fall to the injected /tmp/graph.db
+    # (gt_agent ships the host graph into the container when the in-container build
+    # can't acquire gt-index). Correct-or-quiet if neither resolves.
+    env_db = os.environ.get("GT_GRAPH_DB") or ""
+    if env_db and os.path.isfile(env_db):
+        return env_db
+    if os.path.isfile("/tmp/graph.db"):
+        return "/tmp/graph.db"
+    return env_db or "/tmp/graph.db"
 
 
 def _has_columns(con) -> tuple[bool, bool]:
