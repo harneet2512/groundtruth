@@ -20,6 +20,19 @@ from dataclasses import dataclass, field
 from collections import defaultdict
 from typing import Optional
 
+# I2 (depth↔rank isolation): the reach BFS feeds the localizer RANK (W_REACH in
+# _total_score) AND the graph_expand candidate set. Per invariant I2 ("depth never
+# enters reach/RANK"), promoted DEPTH edges (READS/WRITES/RAISES/CO_SERIALIZES/
+# PRECEDES/DATA_FLOW + any `promote_%` provenance) must NEVER accrue reach_score or
+# be admitted as graph-expansion candidates. We reuse the D5 blacklist + predicate
+# from graph_localizer as the SINGLE SOURCE OF TRUTH (G18) so the depth-type set can
+# never drift between the localizer's degree filter and this reach BFS. (graph_reach
+# imports graph_localizer; graph_localizer does NOT import graph_reach — no cycle.)
+from groundtruth.pretask.graph_localizer import (
+    _PROMOTED_EDGE_TYPES,
+    _degree_edge_filter,
+)
+
 # Edge type → reach weight (hand-set, not per-language)
 EDGE_TYPE_WEIGHT: dict[str, float] = {
     "CALLS": 1.0,
@@ -53,8 +66,16 @@ def _build_file_graph(
     """Return adjacency: {src_file: [(dst_file, edge_type, confidence), ...]}."""
     conn = sqlite3.connect(graph_db)
     c = conn.cursor()
+    # I2 guard: EXCLUDE promoted DEPTH edges (READS/WRITES/RAISES/CO_SERIALIZES/
+    # PRECEDES/DATA_FLOW + any `promote_%`-provenance edge) so depth never accrues
+    # reach_score (→ W_REACH in the localizer RANK) and is never admitted to the
+    # graph_expand candidate set. The predicate is the D5 blacklist filter from
+    # graph_localizer (single source of truth, G18). On pre-depth graphs NO edge
+    # carries a promoted type or `promote_%` method (measured 0 across live graphs),
+    # so this WHERE is byte-identical to the unfiltered query — load-bearing only
+    # once promotion ships.
     c.execute(
-        """
+        f"""
         SELECT n1.file_path, n2.file_path, e.type, COALESCE(e.confidence, 0.5)
         FROM edges e
         JOIN nodes n1 ON e.source_id = n1.id
@@ -63,6 +84,7 @@ def _build_file_graph(
           AND n2.file_path IS NOT NULL
           AND n1.file_path != n2.file_path
           AND COALESCE(e.confidence, 0.5) >= ?
+          AND {_degree_edge_filter('e')}
         """,
         (min_confidence,),
     )

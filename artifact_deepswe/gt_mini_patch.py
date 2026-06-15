@@ -66,12 +66,10 @@ try:
     from groundtruth.runtime.verification_horizon import composite_severity as _product_composite_severity
     from groundtruth.runtime.verification_horizon import render_verify_emission as _product_render_verify_emission
     from groundtruth.runtime.verification_horizon import verify_horizon_band as _product_verify_horizon_band
-    from groundtruth.runtime.edit_risk import structural_edit_risk as _structural_edit_risk
     _RUNTIME_AVAILABLE = True
 except ImportError as _import_err:
     # Fallback stubs — pre-CP011 behavior
     print(f"[GT_META] runtime_import_fallback=true reason={_import_err}", file=sys.stderr, flush=True)
-    _structural_edit_risk = None  # type: ignore
     def _product_translate_to_action(block, phase=None):
         return block
     class _ProductContextBudgeter:
@@ -109,6 +107,22 @@ except ImportError as _import_err:
         return ""
     def _product_verify_horizon_band(*a, **kw):
         return None
+
+# G10 (2026-06-14): structural_edit_risk gets its OWN import bulkhead, separate
+# from the shared runtime block above. Previously it was the LAST import inside
+# that shared try, so an edit_risk.py injection miss raised ImportError and
+# aborted the WHOLE block -> _RUNTIME_AVAILABLE=False -> EVERY verify band
+# (advisory/urgent/gate/pivot, via _product_verify_horizon_band/_product_render_
+# verify_emission stubs) went dark, not just structural risk — a §15.2
+# bulkhead/fault-isolation violation. Isolating it means an edit_risk miss
+# darkens ONLY the structural-risk note (set to None -> _structural_risk_note
+# returns ('',False)); verification_horizon/obligations stay live.
+try:
+    from groundtruth.runtime.edit_risk import structural_edit_risk as _structural_edit_risk
+except ImportError as _edit_risk_import_err:
+    print(f"[GT_META] edit_risk_import_fallback=true reason={_edit_risk_import_err}",
+          file=sys.stderr, flush=True)
+    _structural_edit_risk = None  # type: ignore
 
 # ---------------------------------------------------------------------------
 # DELIVERY FACT-FILTER POLICY — SINGLE SOURCE (B1, 2026-06-13) with a FUNCTIONAL
@@ -3099,6 +3113,15 @@ def _reset_oracle_state() -> None:
     _oblig_status_emitted.clear()
     _oracle_delivered_hashes.clear()
     _HOOK_FIRE_COUNTS.clear()
+    # G08 (2026-06-14): the two Lane-A per-file dedup sets MUST be cleared on a
+    # retry reset, else after reset every already-seen file makes Lane A
+    # (_evidence -> _seen, _graph_contract_block -> _contract_seen) return ''
+    # silently, violating §15.2 "contract/consistency/completeness deliver on
+    # EVERY edit". _consensus_scope is cleared for symmetry (Layer-B scope must
+    # also re-anchor on the fresh attempt).
+    _seen.clear()
+    _contract_seen.clear()
+    _consensus_scope.clear()
     _obligation_tracker = None
     _obligation_tracker_anchors = None
     _last_budget_pending = []
@@ -3516,12 +3539,9 @@ def _hook_fire_counts_path() -> str:
     return os.environ.get("GT_HOOK_FIRE_COUNTS", "/tmp/gt_hook_fire_counts.json")
 
 
-def _record_hook_fire(kind: str) -> None:
-    """Count ONE fire of a hook (producer invoked), regardless of delivery outcome.
-    Persisted to a JSON {kind: count} so fire counts are answerable from disk."""
-    if not kind:
-        return
-    _HOOK_FIRE_COUNTS[kind] = _HOOK_FIRE_COUNTS.get(kind, 0) + 1
+def _flush_hook_fire_counts() -> None:
+    """Persist the in-memory fire/suppress counter map to the single
+    GT_HOOK_FIRE_COUNTS JSON sink. Auditability must never break delivery."""
     try:
         import json as _j
         path = _hook_fire_counts_path()
@@ -3532,6 +3552,29 @@ def _record_hook_fire(kind: str) -> None:
             _j.dump(_HOOK_FIRE_COUNTS, fh, sort_keys=True)
     except Exception:  # noqa: BLE001 — auditability must never break delivery
         pass
+
+
+def _record_hook_fire(kind: str) -> None:
+    """Count ONE fire of a hook (producer invoked), regardless of delivery outcome.
+    Persisted to a JSON {kind: count} so fire counts are answerable from disk."""
+    if not kind:
+        return
+    _HOOK_FIRE_COUNTS[kind] = _HOOK_FIRE_COUNTS.get(kind, 0) + 1
+    _flush_hook_fire_counts()
+
+
+def _record_hook_suppress(kind: str) -> None:
+    """G15 (2026-06-14): count ONE suppression of a Lane-B (oracle gate)
+    candidate into the SAME GT_HOOK_FIRE_COUNTS sink, under a '<kind>.suppressed'
+    key. Lane-B winners are counted by _record_hook_fire('<kind>') at emit; this
+    completes the trail so eligible = fired + suppressed is reconstructable from
+    ONE file (was split between GT_HOOK_FIRE_COUNTS and the oracle ledger).
+    Verify-axis producers (verify.horizon.*, spec.obligation, detect.*) included."""
+    if not kind:
+        return
+    key = f"{kind}.suppressed"
+    _HOOK_FIRE_COUNTS[key] = _HOOK_FIRE_COUNTS.get(key, 0) + 1
+    _flush_hook_fire_counts()
 
 
 def _filter_candidates_by_phase(cands, phase: Phase, event, *, file_path: str = ""):
@@ -3890,11 +3933,42 @@ def _structural_risk_note() -> tuple[str, bool]:
     untested obligation symbols. ('', False) when the flag is off, the import is
     unavailable, or the risk is quiet (correct-or-quiet). The note NAMES the highest-
     blast-radius unverified change; should_trigger is True when that risk is at/above
-    the repo's notable-dependents baseline (score >= _RISK_TRIGGER)."""
+    the repo's notable-dependents baseline (score >= _RISK_TRIGGER).
+
+    G07 (2026-06-14, REQUIRES-I2-LIPI honesty note): `structural_edit_risk` scores
+    the incoming-dependency fan-in over edge types CALLS+READS+WRITES+DATA_FLOW.
+    BUT the promote pass targets a READS/WRITES edge at the OWNING-CLASS node, not
+    at the read/written field or the editing method (promote.go:502/531), and
+    standalone DATA_FLOW rows exist only where no CALLS edge does (~6% of the
+    bulk; the rest are metadata on the same CALLS rows). So for the DOMINANT edit
+    target — a METHOD or FUNCTION — the READS/WRITES/standalone-DATA_FLOW
+    contribution is ZERO and the score degrades to CALLS-only fan-in. The deep-graph
+    blast-radius claim therefore holds in full only when the edited symbol is itself
+    a CLASS (field-level READS/WRITES targets do not yet exist in the graph). This
+    is correct-or-quiet (an absent contribution = 0, never a wrong fact), so the
+    degradation under-counts but never over-states risk.
+
+    I2 (depth-never-enters-RANK): this score and the dependency counts it consumes
+    are RISK/verify-substrate ONLY. The returned (note, trigger) feed exclusively
+    the verify-horizon emission text (risk_note=...), node-local-or-quiet — they
+    NEVER touch the localizer reach/RANK/degree surface. Keep it that way."""
     if not _STRUCTURAL_RISK_ON or _structural_edit_risk is None:
         return ("", False)
+    # G06 (2026-06-14): score the EDITED-BUT-UNTESTED set, NOT the full static
+    # obligation set. Scoring the obligation superset could name a risk for a
+    # symbol the agent never edited (or has already tested) — a steer the
+    # correct-or-quiet contract forbids. The risk domain is exactly the symbols
+    # the agent has TOUCHED (edited) and NOT yet exercised (untested); intersect
+    # with the obligation set for relevance so an incidental edit token can't
+    # raise an off-issue advisory. Empty set -> structural_edit_risk is quiet.
+    _risky_syms = (_oracle_edited_tokens - _oracle_tested_tokens)
+    _obl = _obligation_symbol_set()
+    if _obl:
+        _risky_syms = _risky_syms & _obl
+    if not _risky_syms:
+        return ("", False)
     try:
-        er = _structural_edit_risk(_db_path(), _obligation_symbol_set())
+        er = _structural_edit_risk(_db_path(), _risky_syms)
     except Exception:  # noqa: BLE001 — risk scoring must never break the producer
         return ("", False)
     if er is None or er.is_quiet():
@@ -3932,6 +4006,13 @@ def _verification_horizon_candidate() -> tuple[float, str, str, bool] | None:
     # of budget/path — the research white space. Shares the advisory latch (once per
     # task; re-armed on gate loss). risk_note also enriches the budget bands below.
     _risk_note, _risk_trigger = _structural_risk_note()
+    # G06 (2026-06-14): the fire decision keys on the RISKY SYMBOL, not on "any
+    # file was edited". `_risk_trigger` is now True only when an edited-but-
+    # untested obligation symbol scores at/above the repo's notable-dependents
+    # baseline (see _structural_risk_note), so it already implies a genuine
+    # edited-but-unverified risk. `_oracle_edited_rels` is retained only as the
+    # render guard (the emission names the edited files) — it no longer
+    # SUBSTITUTES for the symbol-level trigger.
     if _risk_trigger and not _horizon_advisory_fired and _oracle_edited_rels:
         _horizon_advisory_fired = True
         _rk_cov = _covering_tests_for_symbols(_oracle_edited_tokens)
@@ -4197,6 +4278,16 @@ def _oracle_gate_blocks(cands) -> str:
             _oracle_last_losers.add(p[3])
         _oracle_delivered_hashes.add(winner[2])
         _last_gate_winner_kind = winner[3]
+    # G15 (2026-06-14): mirror every Lane-B suppression into the unified
+    # GT_HOOK_FIRE_COUNTS sink so eligible/emitted/suppressed for the verify
+    # axis (verify.horizon.*, spec.obligation, detect.*) is reconstructable from
+    # ONE file — it previously lived only in the oracle ledger via
+    # _oracle_telemetry_write, while _record_hook_fire counted Lane-A only.
+    for _sk in suppressed:
+        try:
+            _record_hook_suppress(_sk[0])
+        except Exception:  # noqa: BLE001 — auditability must never break the gate
+            pass
     _oracle_telemetry_write(suppressed, winner)
     return winner[4] if winner else ""
 

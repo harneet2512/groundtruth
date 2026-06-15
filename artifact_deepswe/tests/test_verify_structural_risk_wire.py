@@ -47,6 +47,11 @@ def test_note_fires_on_high_risk_when_flag_on(monkeypatch):
     monkeypatch.setattr(g, "_structural_edit_risk", lambda db, syms: _HIGH)
     monkeypatch.setattr(g, "_obligation_symbol_set", lambda: {"hub"})
     monkeypatch.setattr(g, "_db_path", lambda: "/x.db")
+    # G06 (2026-06-14): the risk domain is the EDITED-BUT-UNTESTED set, so the
+    # symbol must actually be edited (and not yet tested) for the advisory to
+    # fire — scoring the static obligation set alone is the bug G06 closes.
+    monkeypatch.setattr(g, "_oracle_edited_tokens", {"hub"})
+    monkeypatch.setattr(g, "_oracle_tested_tokens", set())
     note, trig = g._structural_risk_note()
     assert trig is True
     assert "hub" in note and "9 verified dependent" in note

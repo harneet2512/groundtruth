@@ -979,10 +979,26 @@ func runIncremental(root, relpath, dbPath string) error {
 	// (x = ClassName(); x.method()) reads was never set on the incremental path (only in
 	// full-index, main.go:380-389), so 1.96 ran DEAD on every `gt-index -file` reindex.
 	// Wire it from the reparsed file's assignments (sufficient for that file's own calls).
-	// (Inheritance-map half deferred: buildInheritanceMap needs the cross-file SourceFile list.)
 	if len(pr.Assignments) > 0 {
 		resolver.SetAssignmentIndex(resolver.BuildAssignmentIndex(pr.Assignments))
 	}
+
+	// G09 -file degradation fix: the class inheritanceMap (consumed by
+	// lookupMethodWithInheritance for the CHA rungs 1.75 super/inherited,
+	// 1.94a/2b inherited-method, 1.94 impl_method — gt_gt §2.3) was built ONLY on
+	// the full-index path (main.go:426-428). On the incremental `-file` path it was
+	// never set → nil → every inheritance-walking rung under-resolved a call whose
+	// target is an inherited method / parent-class field in another file, demoting
+	// it to name_match on each reindex (correct-or-quiet, but depth-completeness lost).
+	// buildInheritanceMap needs a WHOLE-GRAPH SourceFile list; `allFiles`/`allLangs`
+	// (the distinct file_path/language rows already loaded at the top of this fn) ARE
+	// that cross-file list. nodeMeta (built from filteredNodes above) spans every
+	// file's class nodes, and node file_path == SourceFile.Path (both relSlash), so
+	// resolveClass matches same-file then global. AbsPath="" → buildInheritanceMap
+	// reopens via filepath.Join(root, sf.Path), and the source tree is on disk here.
+	// TEMP-RED-CHECK: G09 wiring disabled to confirm the e2e test goes red.
+	_ = allFiles
+	_ = allLangs
 
 	// T1 on the incremental path: build the declared-type receiver index from the
 	// reparsed file's `param` properties (NodeIdx -> pr.Nodes, parallel to newDBIDs),

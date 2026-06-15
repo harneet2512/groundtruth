@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -337,5 +338,85 @@ func TestInsertAssertionPersistsResolutionScore(t *testing.T) {
 	}
 	if score != 0.875 {
 		t.Fatalf("resolution_score=%v; single-row InsertAssertion dropped the score (expected 0.875)", score)
+	}
+}
+
+// G02 (HIGH, plumbing): SnapshotIncomingEdgesTx must EXCLUDE incoming promoted
+// depth edges (resolution_method LIKE 'promote_%'). The whole-graph promote pass
+// (resolver.PromotePropertyEdges, Pass 4f) regenerates every promoted edge AFTER
+// the incremental tx commits, and its idempotence DELETE matches only 'promote_%'.
+// If an incoming promoted edge (e.g. another file's method READS a class in the
+// reindexed file) were snapshotted, it would be deleted by the target_id-keyed
+// DELETE, restored by ResolveIncomingEdgesTx as a phantom name_match-tier edge the
+// promote DELETE can never reach, then duplicated when the promote pass re-emits the
+// genuine promote_* edge. Excluding it from the snapshot is the convergence fix.
+//
+// Red before the fix: the unfiltered SELECT snapshots BOTH edges (len==2) and the
+// READS edge restores as a name_match phantom. Green after: only the genuine CALLS
+// edge is snapshotted (len==1); the promoted edge is left to the post-commit pass.
+func TestSnapshotIncomingEdgesExcludesPromotedDepthEdges(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "graph.db")
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := createSchema(db); err != nil {
+		t.Fatal(err)
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+
+	// node 3 (class Account) lives in the file being reindexed (src/models.py);
+	// node 1 (a genuine cross-file caller) and node 2 (a method that READS Account)
+	// both live elsewhere and survive the reindex delete.
+	if _, err := tx.Exec(
+		`INSERT INTO nodes (id, label, name, file_path, language) VALUES
+		 (1, 'Function', 'caller',  'src/caller.py',  'python'),
+		 (2, 'Method',   'reader',  'src/service.py', 'python'),
+		 (3, 'Class',    'Account', 'src/models.py',  'python'),
+		 (4, 'Method',   'save',    'src/models.py',  'python')`,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	// Two INCOMING cross-file edges targeting nodes in src/models.py:
+	//   (a) a genuine CALLS edge caller -> Account.save (must be snapshotted), and
+	//   (b) a promoted READS depth edge reader -> Account (must be EXCLUDED).
+	if _, err := tx.Exec(
+		`INSERT INTO edges
+		   (source_id, target_id, type, source_line, source_file, resolution_method, confidence, trust_tier, candidate_count, evidence_type, verification_status)
+		 VALUES
+		   (1, 4, 'CALLS', 10, 'src/caller.py',  'import',             1.0, 'CERTIFIED', 1, 'ast_call',   'unverified'),
+		   (2, 3, 'READS', 22, 'src/service.py', 'promote_field_read', 0.9, 'CERTIFIED', 1, 'field_read', 'unverified')`,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	snap, err := SnapshotIncomingEdgesTx(tx, "src/models.py", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Exactly ONE edge — the genuine CALLS — may be snapshotted. The promoted READS
+	// edge must be excluded (the whole-graph promote pass regenerates it post-commit).
+	if len(snap) != 1 {
+		methods := make([]string, len(snap))
+		for i, r := range snap {
+			methods[i] = r.EdgeType + ":" + r.ResolutionMethod
+		}
+		t.Fatalf("snapshot len=%d %v; expected exactly 1 (the CALLS edge), the promote_* READS edge must be excluded", len(snap), methods)
+	}
+	if snap[0].EdgeType != "CALLS" || snap[0].ResolutionMethod != "import" {
+		t.Fatalf("snapshotted edge = %q/%q; expected the genuine CALLS/import edge", snap[0].EdgeType, snap[0].ResolutionMethod)
+	}
+	for _, r := range snap {
+		if strings.HasPrefix(r.ResolutionMethod, "promote_") {
+			t.Fatalf("a promoted depth edge (%s) was snapshotted — it will be restored as a name_match phantom and duplicated by the post-commit promote pass", r.ResolutionMethod)
+		}
 	}
 }

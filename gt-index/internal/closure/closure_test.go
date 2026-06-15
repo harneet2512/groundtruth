@@ -95,6 +95,102 @@ func TestClosure_ExcludesGuessesAdmitsVerified(t *testing.T) {
 	}
 }
 
+// G16 (I2 invariant): the transitive closure closes over the CALLS relation
+// ONLY. Promoted DEPTH edges (DATA_FLOW / READS / WRITES / RAISES /
+// CO_SERIALIZES / PRECEDES, provenance `promote_%`) are intra-procedural /
+// blast-fact DEPTH — they must NEVER enter the closure, so depth can never ride
+// the closure into any reach/RANK consumer (invariant I2: "depth never enters
+// RANK"). They are excluded twice over: by the `e.Type != edgeType` filter
+// (edgeType=="CALLS") AND by `isVerifiedEdge` (promote_% is not a verified
+// method). This test pins BOTH so a future consumer that unions edge types or
+// loosens the method set cannot silently let intra-procedural data-flow depth
+// enter ranking.
+func TestClosure_ExcludesPromotedDepthEdges(t *testing.T) {
+	dir := t.TempDir()
+	db, err := store.Open(filepath.Join(dir, "graph.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	tx, err := db.BeginTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`INSERT INTO nodes (id, label, name, file_path, language) VALUES
+		(1, 'Function', 'a', 'a.py', 'python'),
+		(2, 'Function', 'b', 'b.py', 'python'),
+		(3, 'Class',    'C', 'c.py', 'python'),
+		(4, 'Class',    'D', 'd.py', 'python')`); err != nil {
+		tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The promoted DEPTH edge types — mirrors the Python D5 blacklist
+	// (graph_localizer._PROMOTED_EDGE_TYPES). Each is minted at FULL confidence
+	// with a promote_% method so the ONLY thing keeping it out is the I2 guard.
+	depthTypes := []string{"DATA_FLOW", "READS", "WRITES", "RAISES", "CO_SERIALIZES", "PRECEDES"}
+
+	edges := []*store.Edge{
+		// VERIFIED CALLS chain that MUST be in the closure: 1 -> 2.
+		{SourceID: 1, TargetID: 2, Type: "CALLS", ResolutionMethod: "same_file", Confidence: 1.0, TrustTier: "CERTIFIED"},
+	}
+	// Layer every promoted depth edge type on top, full confidence. None may
+	// enter the closure or extend reach: 2 -> 3 (depth) must not give 1 -> 3,
+	// and 3 -> 4 (depth) must not appear at all.
+	for _, dt := range depthTypes {
+		edges = append(edges,
+			&store.Edge{SourceID: 2, TargetID: 3, Type: dt, ResolutionMethod: "promote_" + dt, Confidence: 1.0, TrustTier: "CERTIFIED"},
+			&store.Edge{SourceID: 3, TargetID: 4, Type: dt, ResolutionMethod: "promote_" + dt, Confidence: 1.0, TrustTier: "CERTIFIED"},
+		)
+	}
+	if err := db.BatchInsertEdges(edges); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := ComputeTransitiveClosure(db, "CALLS", 3, 0.0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n == 0 {
+		t.Fatal("no closure rows written")
+	}
+
+	tx2, err := db.BeginTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx2.Rollback()
+	rows, err := tx2.Query(`SELECT source_id, target_id FROM closure`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	got := map[[2]int64]bool{}
+	for rows.Next() {
+		var s, tgt int64
+		if err := rows.Scan(&s, &tgt); err != nil {
+			t.Fatal(err)
+		}
+		got[[2]int64{s, tgt}] = true
+	}
+
+	// The verified CALLS edge IS present.
+	if !got[[2]int64{1, 2}] {
+		t.Error("verified CALLS reach 1->2 missing from closure")
+	}
+	// NO depth-derived reach may appear: the direct depth hops 2->3 and 3->4,
+	// nor any transitive extension through them (1->3, 1->4, 2->4).
+	for _, bad := range [][2]int64{{2, 3}, {3, 4}, {1, 3}, {1, 4}, {2, 4}} {
+		if got[bad] {
+			t.Errorf("promoted DEPTH reach %v leaked into the CALLS closure (I2 violation)", bad)
+		}
+	}
+}
+
 // isVerifiedEdge unit contract: AND semantics, categorical name_match exclusion.
 func TestIsVerifiedEdge(t *testing.T) {
 	cases := []struct {

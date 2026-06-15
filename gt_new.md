@@ -460,3 +460,31 @@ re-leak), the I3 name_match-never-a-fact gate is consistent across caller + hier
 substrate/oracle/verification surfaces were clean on every load-bearing invariant. Remaining items
 are LOW (Windows-only conn hygiene, telemetry asymmetry) or witness-env (`GT_VERIFY_STRUCTURAL_RISK`
 must be exported) — none blocks correctness; all named against the invariant they touch.
+
+---
+
+## §10 — DESIRED-vs-CODE conformance audit + parallel fix wave (2026-06-15)
+
+**Method (the user's mandate):** desired = gt_new/gt_gt + invariants; current = the hbali_stack
+code; every gap = a bug; found by reading desired-vs-current ONLY (no task-testing = no benchmaxxing).
+A 6-agent parallel LIPI (run `wm1frwrk8`) audited all 5 surfaces, weighted to the **Plumbing avenue**
+the prior code-logic LIPIs (§9, Appendix I) were blind to. Full catalog: `docs/GT_GAP_CATALOG_LIPI.md`.
+
+**The dominant finding (measured live, then root-caused):** gt_new App E's *"context always reaches
+the agent"* was **FALSE in runtime**. Across a 391-turn run with 34 file-ops, the per-turn
+`gt-evidence`/`gt-contract`/`gt-scope`/`gt-cochange` producers delivered **0×** — because **graph.db
+never reached the pier container** (`gt_agent._BUILD_GRAPH_DB` 404s on a release with no asset + no Go
+to build). Only the graph-FREE governors fired. The code was correct; the data didn't flow. **FIXED
+`88e97978`** — inject the host graph.db into the container (gzip+b64, under BuildKit's 16MB cap).
+
+**18 gaps catalogued** (HIGH=6, MED=6, LOW=6; **11 plumbing**, 5 REQUIRES-I2-LIPI). Worst-first:
+G01 depth→RANK leak in `graph_reach._build_file_graph` (untyped reach SELECT — the I2 violation §9
+claimed closed, on a parallel code site); G02 incremental phantom-`name_match` duplicate of promoted
+edges; G03/G04 host GT env never reaches the container (pier strips `export`; trial path has no
+`--ae`) → edit-risk + every env-gated producer dark; G05 my own graph.db fix killed L6 reindex (no
+`/tmp/gt-index`); G06 edit-risk scores the static obligation set not edited-but-untested.
+
+**Resolution: parallel worktree-isolated fix wave** (run `w30fe8rby`), 6 file-disjoint clusters,
+each: surgical fix + regression unit test + 4-avenue LIPI, rank-safety enforced for the 5 I2 gaps
+(depth must stay byte-identical out of reach/RANK). Merged results recorded on completion. **No task
+trial anywhere — every fix is a structural code change verified by unit test + LIPI, not a flip.**

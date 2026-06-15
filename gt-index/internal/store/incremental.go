@@ -53,6 +53,20 @@ type IncomingEdgeRef struct {
 // are excluded — those will be re-emitted naturally when the file is
 // re-parsed and its outgoing calls are re-resolved.
 //
+// PROMOTED DEPTH EDGES ARE EXCLUDED (resolution_method LIKE 'promote_%').
+// The promote pass (resolver.PromotePropertyEdges, Pass 4f) regenerates EVERY
+// promoted edge whole-graph AFTER the incremental tx commits (main.go Step 10.5),
+// and that DELETE-before-rebuild pass is idempotent only over the `promote_%`
+// resolution_method namespace. If an INCOMING promoted depth edge (e.g. another
+// file's method READS/WRITES a class in this reindexed file) were snapshotted
+// here, it would be deleted by DeleteFileEdgesAndNodesTx (target_id-keyed) and
+// then RESTORED by ResolveIncomingEdgesTx as a phantom `name_match`-tier edge —
+// which the post-commit promote DELETE cannot reach (it only matches 'promote_%').
+// The promote pass would then re-emit the genuine `promote_*` edge alongside the
+// phantom → a DUPLICATE the idempotence contract can never converge (edges has no
+// UNIQUE constraint). Excluding promoted edges from the snapshot is the clean fix:
+// they are never restored as guesses; the whole-graph promote pass owns them.
+//
 // Cap is a defensive upper bound on rows returned; 0 means default 50,000.
 func SnapshotIncomingEdgesTx(tx *sql.Tx, filePath string, cap int) ([]IncomingEdgeRef, error) {
 	if cap <= 0 {
@@ -66,6 +80,7 @@ func SnapshotIncomingEdgesTx(tx *sql.Tx, filePath string, cap int) ([]IncomingEd
 		   JOIN nodes n ON e.target_id = n.id
 		  WHERE n.file_path = ?
 		    AND (e.source_file IS NULL OR e.source_file != ?)
+		    AND (e.resolution_method IS NULL OR e.resolution_method NOT LIKE 'promote_%')
 		  LIMIT ?`,
 		filePath, filePath, cap,
 	)

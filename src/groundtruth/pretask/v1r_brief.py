@@ -384,11 +384,16 @@ def _test_files_for(graph_db: str, file_path: str, limit: int = 3) -> list[str]:
     try:
         conn = sqlite3.connect(graph_db)
         conf_clause = _edge_conf_clause(graph_db)
+        # G13 (gt_new Appendix I:341): the CALLS-only contract must bind every
+        # neighbor surface, incl. tests. Without "AND e.type = 'CALLS'" a test
+        # connected to the candidate via a promoted depth edge (WRITES/READS/
+        # DATA_FLOW — sharing written state, not a call) is surfaced as a related
+        # test. Mirror _static_callees: only true test-CALLERS surface here.
         rows = conn.execute(
             f"""
             SELECT DISTINCT n2.file_path
             FROM nodes n1
-            JOIN edges e ON e.target_id = n1.id {conf_clause}
+            JOIN edges e ON e.target_id = n1.id AND e.type = 'CALLS' {conf_clause}
             JOIN nodes n2 ON e.source_id = n2.id
             WHERE n1.file_path = ?
               AND n2.is_test = 1

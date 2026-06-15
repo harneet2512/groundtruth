@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from groundtruth.pretask.curation_map import (
     _DETERMINISTIC_METHODS,
@@ -106,6 +106,12 @@ class ContractEvidence:
     conditionals: tuple[str, ...] = ()  # conditional_return (Tier B)
     exc_flows: tuple[str, ...] = ()  # exception_flow (Tier B)
     flows: tuple[str, ...] = ()  # data_flow: per-param forward slice (Tier B)
+    # G17 (gt_new §6:73) — SCOPE/COMPLETENESS blast facts: the promoted READS/WRITES
+    # of the EDIT-TARGET ("writes to <field>; <N> verified readers"). Node-local
+    # (keyed to the edit-target's OWN outgoing WRITES), confidence-gated >=0.5,
+    # DISPLAY-ONLY. Never an edit-target's score/degree/reach input (I2). Only the
+    # edit-target carries these, never a callee.
+    blast: tuple[str, ...] = ()
     is_callee: bool = False  # True when this is a verified 1-hop callee's contract
 
     @property
@@ -118,6 +124,7 @@ class ContractEvidence:
             or self.conditionals
             or self.exc_flows
             or self.flows
+            or self.blast
             # A callee with a known signature IS signal — the deciding interface
             # fact the edit-target must call correctly (the set_parse(self, key,
             # string: str) the agent otherwise greps for). The is_callee guard was
@@ -291,6 +298,88 @@ def _read_props(conn: sqlite3.Connection, node_ids: list[int]) -> dict[str, list
     return out
 
 
+# G17 cap — keep the blast-fact note compact (one line of SCOPE context, not a dump).
+_MAX_BLAST_FIELDS = 3
+# Fact floor (I1/I3) — a promoted edge below 0.5 is not a fact; gate READS/WRITES on it.
+_BLAST_CONF_FLOOR = 0.5
+
+
+def _blast_facts(
+    conn: sqlite3.Connection,
+    node_ids: list[int],
+    *,
+    has_conf: bool,
+) -> tuple[str, ...]:
+    """SCOPE/COMPLETENESS blast facts for the EDIT-TARGET (G17, gt_new §6:73).
+
+    The promoted WRITES edges where the edit-target node is the SOURCE name the
+    class FIELDS this function mutates (``metadata`` carries the field name; the
+    edge target is the owning Class node). For each written field, count the
+    VERIFIED readers — distinct READS sources pointing at the SAME owning class —
+    so the agent sees the completeness fact "if I change how this field is set, N
+    other methods read it." Rendered as a node-local SCOPE note, e.g.
+    ``writes to _cache; 4 verified readers``.
+
+    DISPLAY-ONLY, node-local-or-quiet (I2): this consumes promoted depth edges but
+    NEVER feeds any rank / reach / degree / score term — the contract pillar has no
+    score path (the RRF / total-score ranking surfaces live in other modules).
+    Confidence-gated >= 0.5 on a current binary; a legacy schema with no ``confidence`` column stays
+    permissive (gt_gt I5). Correct-or-quiet: ``()`` when no WRITES is promoted.
+    Pure read; never raises. Generalized — any language the promote pass emits
+    READS/WRITES for (Python/Go/JS/TS), no benchmark- or task-specific logic.
+    """
+    if not node_ids:
+        return ()
+    placeholders = ",".join("?" for _ in node_ids)
+    # WRITES the edit-target performs: target_id = owning Class, metadata = field.
+    w_conf = "AND COALESCE(e.confidence, 1.0) >= ?" if has_conf else ""
+    w_params: list[object] = list(node_ids)
+    if has_conf:
+        w_params.append(_BLAST_CONF_FLOOR)
+    try:
+        writes = conn.execute(
+            f"SELECT DISTINCT e.target_id, e.metadata FROM edges e "
+            f"WHERE e.source_id IN ({placeholders}) AND e.type = 'WRITES' {w_conf}",
+            w_params,
+        ).fetchall()
+    except sqlite3.Error:
+        return ()
+    if not writes:
+        return ()
+    out: list[str] = []
+    seen_fields: set[str] = set()
+    for owner_class_id, field in writes:
+        field = (str(field) if field is not None else "").strip()
+        if not field or field in seen_fields:
+            continue
+        seen_fields.add(field)
+        if len(out) >= _MAX_BLAST_FIELDS:
+            break
+        # Verified readers of the SAME owning class (distinct reader methods),
+        # excluding the edit-target's own nodes so it never counts itself.
+        r_conf = "AND COALESCE(e.confidence, 1.0) >= ?" if has_conf else ""
+        r_params: list[object] = [owner_class_id]
+        if has_conf:
+            r_params.append(_BLAST_CONF_FLOOR)
+        r_params.extend(node_ids)
+        try:
+            row = conn.execute(
+                f"SELECT COUNT(DISTINCT e.source_id) FROM edges e "
+                f"WHERE e.target_id = ? AND e.type = 'READS' {r_conf} "
+                f"AND e.source_id NOT IN ({placeholders})",
+                r_params,
+            ).fetchone()
+        except sqlite3.Error:
+            row = None
+        n_readers = int(row[0]) if row and row[0] is not None else 0
+        if n_readers > 0:
+            plural = "reader" if n_readers == 1 else "readers"
+            out.append(f"writes to {field}; {n_readers} verified {plural}")
+        else:
+            out.append(f"writes to {field}")
+    return tuple(out)
+
+
 def _evidence_for(
     conn: sqlite3.Connection,
     file_path: str,
@@ -348,11 +437,10 @@ def build_contract(
     if conn is None:
         return []
     try:
-        # _has_columns drives only the callee edge query; skip the PRAGMA on the
-        # inline brief path (include_callees=False).
-        has_conf = has_method = False
-        if include_callees:
-            has_conf, has_method = _has_columns(conn)
+        # has_conf gates BOTH the callee edge query AND the G17 blast-fact gate
+        # (fires on the inline include_callees=False path too); has_method is
+        # callee-only. One cheap PRAGMA either way.
+        has_conf, has_method = _has_columns(conn)
         out: list[ContractEvidence] = []
         seen_funcs: set[tuple[str, str]] = set()
         for fpath, fname in focus:
@@ -367,6 +455,12 @@ def build_contract(
             ev = _evidence_for(conn, fpath, fname, ids=ids)
             if ev is None:
                 continue
+            # G17: attach the edit-target's SCOPE/COMPLETENESS blast facts (its own
+            # promoted WRITES + verified-reader counts). Edit-target ONLY — callees
+            # below never get blast facts. Display-only; touches no rank/score term.
+            blast = _blast_facts(conn, ids, has_conf=has_conf)
+            if blast:
+                ev = replace(ev, blast=blast)
             out.append(ev)
 
             if not include_callees:
@@ -436,6 +530,11 @@ def _fmt_one(ev: ContractEvidence) -> str:
     if ev.flows:
         # def-use: where each input value flows (calls/comparisons/returns it feeds)
         lines.append(f"  flows: {' | '.join(ev.flows)}")
+    if ev.blast and not ev.is_callee:
+        # G17: SCOPE/COMPLETENESS — the fields this edit-target WRITES + how many
+        # other methods READ them (the completeness fact: who else depends on this
+        # state). Display-only; never a rank input.
+        lines.append(f"  scope: {' | '.join(ev.blast)}")
     if ev.return_shape:
         rt = f" ({ev.return_type})" if ev.return_type else ""
         lines.append(f"  returns: {ev.return_shape}{rt}")
@@ -480,6 +579,10 @@ def contract_line(graph_db_path: str, file_path: str, func_names: list[str]) -> 
         if ev.flows:
             # one def-use flow (the edit-target's first param) — compact, single line
             parts.append("flows " + ev.flows[0])
+        if ev.blast:
+            # G17: one SCOPE/COMPLETENESS blast fact (first written field +
+            # verified-reader count) — display-only, never a rank input.
+            parts.append("scope " + ev.blast[0])
         if parts:
             return " | ".join(parts)
     return ""

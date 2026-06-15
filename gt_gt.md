@@ -296,6 +296,7 @@ bar.
 | IMPORTS | importer file -> imported module/symbol | **PRESENT (2026-06-13, `b5ceaf5d`, Pass 4f `imports.go`)** — fresh-extracted to a File/module-anchor node; intra-repo resolved only (single->1.0 CERTIFIED `ast_import`; >1->0.6 CANDIDATE `ast_import_ambiguous`; stdlib/3rd-party->no edge). Was "ABSENT — FRESH-EXTRACT" |
 | DATA_FLOW (annotation) | def-site -> use-callee | **on CALLS.metadata** (intra-proc; 1133/2591 reach a callee). Not a standalone edge |
 | READS | reader method -> owning Class (A-cut via parent_id) | **PROMOTE-PARTIAL** from `field_read` (reader resolves to its OWNING Class via `parent_id`; field-only reads stay descriptors) |
+| WRITES | writer method -> owning Class (A-cut via parent_id) | **PROMOTE-PARTIAL** from `side_effect` write (writer resolves to its OWNING Class via `parent_id`; field-only writes stay descriptors). Promote-partial sibling of READS — present in the live re-indexed graph (§8 witness `WRITES 164`) and in the D5 reach/degree blacklist (`graph_localizer._PROMOTED_EDGE_TYPES`); kept node-local-or-quiet, **never a reach/RANK input** (I2) |
 | RAISES | raiser -> exception class | **PROMOTE-PARTIAL** from `exception_type`/`exception_flow` (39/47 distinct are internal classes; builtins stay property) |
 | CO_SERIALIZES | serialize <-> partner fn | **PROMOTE-NOW** from `serialization_pair` — **100% resolvable**, the value carries `@file:line` |
 | USES (annotation) | caller -> callee + usage kind | **on CALLS.metadata** from `caller_usage` (47% ride an existing CALLS edge) |
