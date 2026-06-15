@@ -495,3 +495,43 @@ contamination — fails on baseline too).
 DEFINITION OF DONE: unit-green is NOT done. The LIVE WITNESS run on the post-fix
 binary is owed (task #6) — assert the contract reaches the agent on a real
 DeepSWE turn and a control-plane crash loses only the steer.
+
+---
+
+## 2026-06-15 (cont.) — /goal rust-parity pass: LSP dark-gap root-caused + fixed; live witness billing-blocked
+
+**Branch:** gt-trial **Commit:** `fa728e46` (this pass) on the chain `…8ab990e3 → fa728e46`
+**Objective:** continue the 5-language parity loop (/goal) — run rust on the ONE substrate, §4-audit it,
+fix every gap it surfaces, generalized. (py: gt_caused(FAIR-PROBE) · go: substrate-parity ✓ · rust: this pass.)
+
+**What this pass established (decisive, evidence-pinned):**
+- **fixes #1 (5-lang type-def label widening) + #3 (Rust/Go RAISES) GENERALIZE on the live rust graph:**
+  rust type-defs **4224** (Class 2056 + ImplBlock 2168), RAISES **409**, all depth edge-types present.
+  Rust depth+nodes+embedder are at parity with go.
+- **The rust LSP "dark" gap (lsp=0, det_pct 65.7%) is a PLUMBING defect, NOT GT logic.** LIPI avenue-4:
+  rust-analyzer spawns `cargo metadata`; `cargo`/`rustc` were not on PATH (`exit 127`) → no project model
+  → 500 empty go-to-def probes → `project_ready=False` → lsp=0. The readiness budget was a red herring;
+  the earlier "budget didn't apply" reading came off a STALE cert (07:55 < re-run 08:11) — corrected.
+- **Proof the GT LSP code is correct:** go's `gopls` converts **331 CALL edges** via the IDENTICAL
+  resolve.py path (archived go graph). rust just lacked its toolchain on PATH (rust isn't system-installed).
+
+**Fix (commit `fa728e46`, both delivery paths, generalized):** prepend the extracted
+`…/rustup/toolchains/*/bin` to PATH before the rust LSP pass (`railway/codespace_deepswe_run.sh`) and lead
+the in-container PATH with it (`.github/workflows/deepswe_full.yml`). LIPI-clean (4 avenues). Proven at the
+binary: cargo `exit 127 → 101` once the toolchain hit PATH; rust-src present; rustc 1.92.0 resolves.
+
+**Metrics before:** rust lsp=0, det_pct 65.66%, name_match 11517. **Metrics after:** UNWITNESSED — see blocker.
+
+**OPEN BLOCKER (hard, external — needs user action):** the hbali-stack codespace
+`sturdy-space-yodel-j7x5479vpjxhq59g` hit **HTTP 402 (billing) mid-validation** and will not restart. This
+blocks ALL remaining live /goal work: the rust `lsp 0→>0` witness, the rust trajectory §4 (component
+tables), and the ts + js runs. harneet2512's codespace is stale and out-of-policy (run only on hbali-stack).
+Resolve hbali-stack codespace/Actions billing, then re-run rust to witness lsp 0→>0 + det_pct climb, and
+proceed to ts/js.
+
+**Not done (honest):** rust LSP gap is root-caused + fixed but NOT witnessed closed — it remains flagged by
+`gt_layer_audit.py` (correct: green is a hypothesis until the observable). `gt_caused` for rust = PENDING
+(trajectory blocked). Parity is NOT yet proven on all 5 langs.
+
+**Next allowed action:** (user) restore hbali-stack billing → re-run rust on the ONE substrate → confirm
+`lsp>0`/det_pct↑ → trajectory §4 → ts run → js run → converge. No new code needed for rust before the witness.
