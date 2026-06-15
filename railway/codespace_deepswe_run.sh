@@ -133,10 +133,17 @@ if [ "$LANG" = "go" ] || [ "$LANG" = "rust" ]; then
   # the extracted CARGO_HOME has only the registry cache, no bin/ proxies. Prepend the extracted
   # toolchain's own bin/ (proven: cargo metadata 127→runs once on PATH). Generalized: any
   # extracted rustup toolchain, any rust repo. No-op for go (go is system-installed → gopls works).
+  # ONLY the toolchain bin/ (real cargo+rustc). Do NOT add CARGO_HOME/bin — it holds rustup
+  # SHIMS (`rust-analyzer -> rustup`, `cargo -> rustup`) and the 1.92.0 toolchain has no
+  # rust-analyzer component, so a shim on PATH SHADOWS the working standalone
+  # /usr/local/bin/rust-analyzer and dies "Unknown binary 'rust-analyzer' in official
+  # toolchain" (exit 1) → warm_probe fails → lsp=0. Toolchain bin has cargo/rustc but no
+  # rust-analyzer, so it doesn't shadow the standalone. (Proven: cargo metadata exit 0,
+  # rust-analyzer -> /usr/local/bin.)
   RUST_TC_BIN=$(ls -d /tmp/gt/deps/rustup/toolchains/*/bin 2>/dev/null | head -1)
   if [ -n "$RUST_TC_BIN" ]; then
-    export PATH="$RUST_TC_BIN:/tmp/gt/deps/cargo/bin:$PATH"
-    echo "  rust toolchain on PATH: $(cargo --version 2>/dev/null || echo 'MISSING (cargo not runnable)')"
+    export PATH="$RUST_TC_BIN:$PATH"
+    echo "  rust toolchain on PATH: cargo=$(cargo --version 2>/dev/null || echo MISSING) ra=$(command -v rust-analyzer || echo MISSING)"
   fi
   echo "  deps: gomodcache=$(du -sh /tmp/gt/deps/gomodcache 2>/dev/null|cut -f1) cargo=$(du -sh /tmp/gt/deps/cargo 2>/dev/null|cut -f1)"
 fi

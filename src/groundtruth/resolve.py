@@ -695,6 +695,16 @@ async def _resolve_edges(
             "workspace": {
                 "workspaceFolders": True,
             },
+            # Advertise work-done progress so servers that index lazily (rust-analyzer:
+            # Fetching → Building CrateGraph → Roots Scanned → Indexing; gopls: package load)
+            # EMIT $/progress. Without it they index SILENTLY → wait_for_progress_complete sees
+            # zero tokens and returns at its 5s no-token grace, BEFORE a cold rust-analyzer
+            # (~15s on a fresh crate graph) can answer → warm probe fails, LSP resolves nothing.
+            # With it the readiness wait tracks real begin/end and probes only once the server is
+            # genuinely ready. (Proven on rust-analyzer 0.3.x; spec-standard, neutral otherwise.)
+            "window": {
+                "workDoneProgress": True,
+            },
         },
         "workspaceFolders": [
             {"uri": root_uri, "name": os.path.basename(abs_root)},
