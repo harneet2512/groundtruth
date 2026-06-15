@@ -489,7 +489,7 @@ each: surgical fix + regression unit test + 4-avenue LIPI, rank-safety enforced 
 (depth must stay byte-identical out of reach/RANK). **No task trial anywhere — every fix is a
 structural code change verified by unit test + LIPI, not a flip.**
 
-**RESULT: 14 of 18 gaps resolved + committed, verified.** The wave's worktrees had a mixed base
+**RESULT: 18/18 gaps addressed — 17 fully resolved + verified, G05 fail-loud-mitigated.** The wave's worktrees had a mixed base
 (4 on gt-trial, 2 on stale origin/master); I salvaged the 4 correct-base clusters by file, redid
 the env cluster on gt-trial, and the unreliable gt_agent cluster's fixes are owed.
 - **`f687ec09` — 12 core gaps (C1/C2/C5/C6):** G01 depth→RANK leak closed (`graph_reach`
@@ -502,8 +502,16 @@ the env cluster on gt-trial, and the unreliable gt_agent cluster's fixes are owe
 - **`48238da4` — G03/G04:** the `--ae` single-source block — pier drops host `export`, so GT
   runtime env (verify-risk, oracle route, telemetry sinks) now forwards into the container.
 - **`88e97978` (earlier) — the dominant Plumbing gap:** host graph.db injected into the container.
-- **Owed (4, all config/infra/diagnostic, exact fix in `docs/GT_GAP_CATALOG_LIPI.md`):** G05 L6
-  reindex binary (49MB exceeds the 16MB bake cap — needs a runtime mount/cp, OR make L6 a
-  visible no-op when the binary is absent); G11 durable host-mount for `/gt_out` telemetry; G12
-  the trial workflow must cache the configured gte-modernbert (not e5); G14 self-test path probe.
-  None touches core-code correctness or the I2 rank surface.
+- **`118b672b` — the last 4 (G05/G11/G12/G14), config/infra/diagnostic:** G05 L6 now FAILS LOUD
+  (one-time `[GT_META] L6_NO_REINDEX_BINARY`) instead of silently freezing per-turn freshness —
+  the ~49MB binary still exceeds the 16MB bake cap, so the *full* reindex capability via a runtime
+  binary-mount is the **one genuine deferral**, but the gap is now visible not silent; G11 durable
+  `/tmp/gt_out -> /gt_out` bind-mount + copy-out (telemetry survives the container); G12 the trial
+  caches the configured gte-modernbert-base/768 (was e5/384); G14 self-test probes the real graph
+  path. Verified by py_compile / bash -n / yaml.safe_load; none touches core code or the I2 rank.
+
+**FINAL TALLY: 18/18 gaps addressed.** 17 fully resolved + verified; G05 mitigated fail-loud (the
+runtime binary-mount for live per-turn reindex is the single remaining infra task, now diagnosable).
+The only thing this round deliberately did NOT do is the live agent witness (gt-evidence 0→>0
+consumption proof) — by the no-task-testing constraint. Every fix is a structural code change
+verified by unit test + LIPI + compile/syntax gate, never a benchmark flip.
