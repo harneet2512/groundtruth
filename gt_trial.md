@@ -151,6 +151,32 @@ live GHA run is watchable with ONE connection — no `gh api` polling. **Do this
 
 ## 4. EVALUATION — mandatory after EVERY run (a run is not "done" without this)
 
+### 4.0 — DEPTH-FIRST PER-LAYER BEHAVIORAL-GAP AUDIT (the FIRST pass, every run, 5-language-agnostic)
+
+**Start from DEPTH and walk every layer.** Before the §4 component tables, run the ONE
+language-agnostic per-layer audit (`scripts/gt_layer_audit.py --graph <graph.db> --certs <dir>
+--trajectory <traj.json> --lang <lang> --task <id>`). It reads the run's artifacts GENERICALLY (edge
+types + resolution methods from graph.db, the substrate certs, the `<gt-...>` trajectory tags — the
+SAME contract for py/go/ts/js/rust, no per-language branch) and reports, for EACH layer, **did it
+FIRE this run + the live behavioral GAP (intended-per-gt_main vs actual-this-run)**:
+
+- **L0 DEPTH** (Layer 0, gt_gt §2.6) — the relationship-edge census; which of READS/WRITES/RAISES/
+  PRECEDES/DATA_FLOW/CO_SERIALIZES are present vs missing. *Gap = a missing depth class.*
+- **NAMING** — `det_pct` (resolved facts) vs `name_match` residual + typing tiers (type_flow/
+  impl_method/inherited/lsp/verified_unique). *Gap = det_pct < 80% (too many name guesses).*
+- **NODES/type-defs** — Class/ImplBlock count (the fix#1 surface: type-def edits rankable). *Gap = 0.*
+- **LSP** — server warm + converting >0. *Gap = dark/0-conversion (the §17.3 Go/Rust failure).*
+- **EMBEDDER** — gte-768, effective_w_sem>0, not zeroed. *Gap = e5/zeroed.*
+- **Per-turn layers** (L1.brief · L3b.evidence · L3.contract · consensus.scope · cochange ·
+  oracle.nudge) — fired-count from the trajectory tags. *Gap = `DELIVERED=NO` (tag never appears).*
+
+This table is the **live behavioral gap per layer** — it tells us, at a glance, which layer is dark
+on THIS language/run. It is the entry point to §4.1-§4.3; the per-component GT-SENT-vs-AGENT-DID
+tables below then prove DELIVERED/CORRECT/CONSUMED for the layers that fired. **A behavioral gap
+found on ONE language is assumed present on the others until a run proves otherwise** — the audit is
+the same for all 5, so the fix must be 5-language-generalized (no per-language patch).
+
+
 1. **Resolved verdict** from the official eval, **paired** vs the frozen baseline (Wilcoxon /
    sign-test on per-task delta — never avg-subtraction). flip = GT-on resolves a baseline=NO id;
    regression = GT-on fails a baseline=PASS id.

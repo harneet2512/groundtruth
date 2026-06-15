@@ -153,6 +153,10 @@ open("/tmp/gt/brief.txt", "w", encoding="utf-8").write(bt)
 print("  brief.txt:", len(bt), "chars  sha=%s" % (r.get("brief_sha256", "")[:12]))
 PYBRIEF
 export GT_HOST_GRAPH_DB=/tmp/gt/graph.db GT_CERT_DIR=/tmp/gt
+# Archive THIS task's substrate (graph.db + all certs + brief) before the agent run, so a later
+# task's run reusing /tmp/gt can't overwrite it — every run's §4 PREREQS source is preserved.
+mkdir -p "/tmp/gt_archive/${TASK}" && cp /tmp/gt/graph.db /tmp/gt/*.json /tmp/gt/brief.txt "/tmp/gt_archive/${TASK}/" 2>/dev/null \
+  && echo "  archived substrate -> /tmp/gt_archive/${TASK}/"
 
 echo "── preflight HARD gate (abort on a degraded stack) ──"
 python scripts/verify/preflight_pipeline.py --db /tmp/gt/graph.db --root /tmp/gt/src \
