@@ -127,6 +127,17 @@ if [ "$LANG" = "go" ] || [ "$LANG" = "rust" ]; then
   done
   export GOMODCACHE=/tmp/gt/deps/gomodcache GOFLAGS=-mod=mod \
     CARGO_HOME=/tmp/gt/deps/cargo RUSTUP_HOME=/tmp/gt/deps/rustup
+  # rust-analyzer spawns `cargo metadata` to build its crate graph; without cargo/rustc ON PATH
+  # that subprocess exits 127 → no project model → every go-to-def returns empty → lsp=0 (the
+  # §17.3 dark-LSP gap on rust). CARGO_HOME/RUSTUP_HOME alone do NOT put the binaries on PATH —
+  # the extracted CARGO_HOME has only the registry cache, no bin/ proxies. Prepend the extracted
+  # toolchain's own bin/ (proven: cargo metadata 127→runs once on PATH). Generalized: any
+  # extracted rustup toolchain, any rust repo. No-op for go (go is system-installed → gopls works).
+  RUST_TC_BIN=$(ls -d /tmp/gt/deps/rustup/toolchains/*/bin 2>/dev/null | head -1)
+  if [ -n "$RUST_TC_BIN" ]; then
+    export PATH="$RUST_TC_BIN:/tmp/gt/deps/cargo/bin:$PATH"
+    echo "  rust toolchain on PATH: $(cargo --version 2>/dev/null || echo 'MISSING (cargo not runnable)')"
+  fi
   echo "  deps: gomodcache=$(du -sh /tmp/gt/deps/gomodcache 2>/dev/null|cut -f1) cargo=$(du -sh /tmp/gt/deps/cargo 2>/dev/null|cut -f1)"
 fi
 docker rm -f gtsrc 2>/dev/null || true
