@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/harneet2512/groundtruth/gt-index/internal/parser"
 	"github.com/harneet2512/groundtruth/gt-index/internal/store"
 )
 
@@ -116,6 +117,12 @@ type promoteNodeMeta struct {
 	FilePath string
 	Line     int
 	ParentID int64
+	// Signature is the node's declared signature (nodes.signature). PRECEDES
+	// receiver-resolution reads it to recover a Go method's RECEIVER VARIABLE name
+	// (`func (r *T) M()` → "r") so a `r.open(); r.write()` call_order whose receiver
+	// token is `r` resolves to the enclosing struct T — the Go analogue of `self`
+	// (parser.GoReceiverName). Empty for self/this-keyword languages.
+	Signature string
 }
 
 // promoteIndexes are the lookup structures built ONCE from the nodes table,
@@ -350,13 +357,13 @@ func buildPromoteIndexes(db *store.DB) (*promoteIndexes, error) {
 	defer tx.Rollback()
 
 	rows, err := tx.Query(`SELECT id, label, name, file_path,
-	        COALESCE(start_line, 0), COALESCE(parent_id, 0) FROM nodes`)
+	        COALESCE(start_line, 0), COALESCE(parent_id, 0), COALESCE(signature, '') FROM nodes`)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
 		var m promoteNodeMeta
-		if err := rows.Scan(&m.ID, &m.Label, &m.Name, &m.FilePath, &m.Line, &m.ParentID); err != nil {
+		if err := rows.Scan(&m.ID, &m.Label, &m.Name, &m.FilePath, &m.Line, &m.ParentID, &m.Signature); err != nil {
 			continue
 		}
 		idx.nameIndex[m.Name] = append(idx.nameIndex[m.Name], m)
@@ -894,10 +901,15 @@ func dataFlowConfidence(cc int) float64 {
 // gate is therefore fail-closed on THREE conditions; an edge is minted only when ALL
 // hold, else the step ABSTAINS (no edge):
 //
-//  1. RECEIVER TYPE RESOLVES to a concrete class node — `self`/`this`/`super`
-//     resolve to the caller method's enclosing class (src.ParentID); a `self.<field>`
-//     or bare-field receiver resolves through the field-type index to its declared
-//     class. A local-variable receiver of unknown type does NOT resolve → abstain.
+//  1. RECEIVER TYPE RESOLVES to a concrete class node — `self`/`this`/`super` (the
+//     Python/JS/Rust keyword receivers) AND a Go method's RECEIVER VARIABLE
+//     (`func (r *T) Run()` calling `r.open()` → token `r`) resolve to the caller
+//     method's enclosing class (src.ParentID, which linkGoReceiverMethods parented to
+//     the struct); a `self.<field>` or bare-field receiver resolves through the
+//     field-type index to its declared class. A local-variable receiver of unknown
+//     type does NOT resolve → abstain. The Go receiver-var path closes a live-witness
+//     gap: a go graph had ZERO PRECEDES because `r`/`c`/`conn` matched none of the
+//     self/this/super/self.field shapes and abstained on every Go ordering fact.
 //  2. SAME-FILE, SINGLE-CANDIDATE resolution of each method name (cc==1, same file as
 //     the call_order) — a unique unambiguous target, never a cross-file name guess.
 //  3. BOTH methods are MEMBERS of the resolved receiver class (parent_id == classID).
@@ -955,14 +967,30 @@ func promotePrecedes(db *store.DB, idx *promoteIndexes, add addEdgeFunc) error {
 }
 
 // resolveReceiverClass turns a call_order receiver token into the class node whose
-// methods the sequence is calling. `self`/`this`/`super` → the caller method's
-// enclosing class (src.ParentID, which must be a Class). `self.<field>` or a bare
-// `<field>` known on the enclosing class → the field's declared class (via the
-// field-type index → classByName). Returns ok=false when no class can be proven.
+// methods the sequence is calling. `self`/`this`/`super` (and a Go method's own
+// receiver variable, `func (r *T) M()` → token `r`) → the caller method's enclosing
+// class (src.ParentID, which must be a Class). `self.<field>` or a bare `<field>`
+// known on the enclosing class → the field's declared class (via the field-type
+// index → classByName). Returns ok=false when no class can be proven.
 func (idx *promoteIndexes) resolveReceiverClass(receiver string, src promoteNodeMeta) (int64, bool) {
 	r := strings.TrimSpace(receiver)
 	if r == "" {
 		return 0, false
+	}
+	// Go/other named-receiver languages bind the instance to a VARIABLE, not the
+	// `self`/`this` keyword: `func (r *T) Run() { r.open(); r.close() }` records the
+	// call_order receiver token as `r`. When that token is EXACTLY the enclosing
+	// method's declared receiver variable (recovered structurally from its signature
+	// via parser.GoReceiverName), the receiver IS the enclosing object — the Go
+	// analogue of `self` — so its class is the caller's parent class. Fail-closed:
+	// GoReceiverName returns "" for any non-Go / anonymous-receiver / non-method
+	// signature, so this branch fires ONLY for a genuine named Go receiver method, and
+	// only on an EXACT token match (a local var of another name still falls through to
+	// the field/abstain path below). enclosingClass then still requires src.ParentID to
+	// be a real class (linkGoReceiverMethods parents Go receiver methods to their
+	// struct), so an unparented Go function abstains.
+	if recvVar := parser.GoReceiverName(src.Signature); recvVar != "" && r == recvVar {
+		return idx.enclosingClass(src)
 	}
 	// self.<field> / this.<field> -> resolve the field on the enclosing class.
 	field := ""

@@ -406,6 +406,116 @@ func TestPromote_RaisesRejectsProseExceptionType(t *testing.T) {
 	}
 }
 
+// TestPromote_PrecedesGoReceiverVar is the BITING test for the live-witness Go gap:
+// the PRECEDES receiver-resolution only recognized self/this/super/self.<field>
+// (Python/JS shapes), so a Go receiver method `func (r *T) Run()` calling
+// `r.open(); r.write()` — whose call_order receiver token is the variable `r`, not a
+// keyword — matched NONE of those and ABSTAINED. Result: a go graph had ZERO PRECEDES
+// (the depth class wiped). The fix recovers `r` as the enclosing method's declared
+// receiver variable (parser.GoReceiverName(signature)) and resolves it to the
+// enclosing struct T — the Go analogue of `self`.
+//
+// RED before: with only the self/this/super paths, `r` resolves to no class → 0 edges.
+// GREEN after: ONE type-grounded PRECEDES open→write, both methods members of Cache.
+func TestPromote_PrecedesGoReceiverVar(t *testing.T) {
+	root := t.TempDir()
+	db, err := store.Open(filepath.Join(root, "graph.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// Cache (70) is a Go struct; Run(71)/open(72)/write(73) are receiver methods of
+	// Cache — signature `func (r *Cache) M()` (linkGoReceiverMethods parents them to
+	// Cache, which this fixture pre-states via parent_id=70). Run does
+	// `r.open(); r.write()`; the call_order receiver token is the receiver VARIABLE `r`.
+	execSQL(t, db, `INSERT INTO nodes (id,label,name,file_path,start_line,signature,language,parent_id) VALUES
+	  (70,'Class', 'Cache','cache.go', 1,'',                    'go',0),
+	  (71,'Method','Run',  'cache.go', 5,'func (r *Cache) Run()',  'go',70),
+	  (72,'Method','open', 'cache.go',10,'func (r *Cache) open()', 'go',70),
+	  (73,'Method','write','cache.go',15,'func (r *Cache) write()','go',70)`)
+	// Receiver `r` (the method's own receiver var) calls open -> write in order.
+	execSQL(t, db, `INSERT INTO properties (node_id,kind,value,line,confidence) VALUES
+	  (71,'call_order','r: open -> write',6,0.6)`)
+
+	if _, err := PromotePropertyEdges(db); err != nil {
+		t.Fatalf("PromotePropertyEdges: %v", err)
+	}
+
+	// GREEN: exactly ONE promoted PRECEDES edge, Cache.open(72) -> Cache.write(73).
+	if got := countEdges(t, db, `type='PRECEDES' AND resolution_method LIKE 'promote_%'`); got != 1 {
+		t.Fatalf("Go receiver-var PRECEDES: want exactly 1 edge (open->write), got %d", got)
+	}
+	if got := countEdges(t, db, `type='PRECEDES' AND source_id=72 AND target_id=73 AND resolution_method LIKE 'promote_%'`); got != 1 {
+		t.Errorf("want the type-grounded edge 72->73 (Cache.open->Cache.write), got %d", got)
+	}
+	// Type-grounded, single-candidate -> 0.5 CANDIDATE, cc=1 (same contract as self-seq).
+	tx, err := db.BeginTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	var (
+		cc   int
+		conf float64
+		tier string
+	)
+	if err := tx.QueryRow(
+		`SELECT candidate_count, confidence, trust_tier
+		   FROM edges WHERE type='PRECEDES' AND resolution_method LIKE 'promote_%' LIMIT 1`,
+	).Scan(&cc, &conf, &tier); err != nil {
+		t.Fatalf("read PRECEDES edge: %v", err)
+	}
+	if cc != 1 || conf != 0.5 || tier != "CANDIDATE" {
+		t.Errorf("type-grounded Go PRECEDES: want cc=1 conf=0.5 CANDIDATE, got cc=%d conf=%.2f tier=%q", cc, conf, tier)
+	}
+}
+
+// TestPromote_PrecedesGoNoCrossType is the NEGATIVE control for the Go receiver-var
+// path: two UNRELATED Go structs in the same file each define a method named `write`
+// (Cache and Buffer), and Cache.Run does `r.open(); r.write()`. The receiver `r`
+// resolves to Cache (Run's enclosing struct); the membership guard (parent_id ==
+// resolved class) must admit ONLY Cache's own write/open — NEVER Buffer.write, even
+// though it is same-file and same-named. A FALSE cross-type PRECEDES would mean the
+// generalization leaked. Asserts: one edge inside Cache, zero edges touching the decoy.
+func TestPromote_PrecedesGoNoCrossType(t *testing.T) {
+	root := t.TempDir()
+	db, err := store.Open(filepath.Join(root, "graph.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// Cache (80) owns Run(81)/open(82)/write(83). Buffer (90) owns a DECOY write(91) —
+	// SAME FILE, different struct. Only the parent-class membership guard separates
+	// Cache.write(83) from Buffer.write(91).
+	execSQL(t, db, `INSERT INTO nodes (id,label,name,file_path,start_line,signature,language,parent_id) VALUES
+	  (80,'Class', 'Cache', 'io.go', 1,'',                     'go',0),
+	  (81,'Method','Run',   'io.go', 5,'func (r *Cache) Run()',   'go',80),
+	  (82,'Method','open',  'io.go',10,'func (r *Cache) open()',  'go',80),
+	  (83,'Method','write', 'io.go',15,'func (r *Cache) write()', 'go',80),
+	  (90,'Class', 'Buffer','io.go',20,'',                     'go',0),
+	  (91,'Method','write', 'io.go',25,'func (b *Buffer) write()','go',90)`)
+	execSQL(t, db, `INSERT INTO properties (node_id,kind,value,line,confidence) VALUES
+	  (81,'call_order','r: open -> write',6,0.6)`)
+
+	if _, err := PromotePropertyEdges(db); err != nil {
+		t.Fatalf("PromotePropertyEdges: %v", err)
+	}
+
+	// Exactly ONE PRECEDES edge, inside Cache: open(82) -> write(83).
+	if got := countEdges(t, db, `type='PRECEDES' AND resolution_method LIKE 'promote_%'`); got != 1 {
+		t.Fatalf("want exactly 1 promoted PRECEDES edge (Cache.open->Cache.write), got %d", got)
+	}
+	if got := countEdges(t, db, `type='PRECEDES' AND source_id=82 AND target_id=83 AND resolution_method LIKE 'promote_%'`); got != 1 {
+		t.Errorf("want the same-struct edge 82->83, got %d", got)
+	}
+	// THE BITE: no PRECEDES edge may touch the cross-type same-named decoy Buffer.write(91).
+	if got := countEdges(t, db, `type='PRECEDES' AND (source_id=91 OR target_id=91) AND resolution_method LIKE 'promote_%'`); got != 0 {
+		t.Errorf("cross-type fabrication: %d PRECEDES edges touch the decoy Buffer.write(91), want 0", got)
+	}
+}
+
 func propertyCounts(t *testing.T, db *store.DB) map[string]int {
 	t.Helper()
 	tx, err := db.BeginTx()
