@@ -4110,7 +4110,12 @@ def _structural_risk_note() -> tuple[str, bool]:
     if not _risky_syms:
         return ("", False)
     try:
-        er = _structural_edit_risk(_db_path(), _risky_syms)
+        # File-scope the risk to the agent's EDITED files: a same-named symbol DEFINED
+        # in an un-edited file (a callee hub like List.push reached via a `x.push(...)`
+        # line the diff body tokenizes) is NOT the agent's change. Without this, the
+        # note named the repo's highest-degree hub and laundered it "(71 verified
+        # dependent(s))" though the agent never touched it (csstree witness, 2026-06-15).
+        er = _structural_edit_risk(_db_path(), _risky_syms, edited_files=_oracle_edited_rels)
     except Exception:  # noqa: BLE001 — risk scoring must never break the producer
         return ("", False)
     if er is None or er.is_quiet():

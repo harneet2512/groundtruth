@@ -83,6 +83,9 @@ def _risk_env(monkeypatch, tmp_path):
     # isolate the edited/tested token sets per test
     monkeypatch.setattr(g, "_oracle_edited_tokens", set())
     monkeypatch.setattr(g, "_oracle_tested_tokens", set())
+    # edited-file set empty by default -> no file constraint (back-compat); the G08
+    # tests override it to exercise the file-scope filter.
+    monkeypatch.setattr(g, "_oracle_edited_rels", set())
     return db
 
 
@@ -135,6 +138,38 @@ def test_g06_edit_outside_obligation_set_is_quiet(_risk_env, monkeypatch):
     note, trigger = g._structural_risk_note()
     assert trigger is False
     assert note == ""
+
+
+# --------------------------------------------------------------------------- #
+# G08 — file-scope the risk to the agent's EDITED files. A same-named symbol
+# DEFINED in an un-edited file (a callee hub like List.push reached via a
+# `x.push(...)` line the diff body tokenizes) is NOT the agent's change.
+# --------------------------------------------------------------------------- #
+def test_g08_edited_token_defined_in_unedited_file_is_quiet(_risk_env):
+    """RED pre-fix: risky_func (defined in x.py) is in the edited tokens + obligation
+    set, but the agent edited only other.py -> it is a CALLEE, not the agent's change.
+    GREEN: file-scope excludes it -> quiet (the csstree `push (71 dependents)` bug)."""
+    g._oracle_edited_tokens.clear()
+    g._oracle_edited_tokens.add("risky_func")
+    g._oracle_tested_tokens.clear()
+    g._oracle_edited_rels.clear()
+    g._oracle_edited_rels.add("other.py")  # NOT x.py where risky_func is defined
+    note, trigger = g._structural_risk_note()
+    assert trigger is False
+    assert note == ""
+
+
+def test_g08_edited_token_in_edited_file_still_triggers(_risk_env):
+    """Control: the file-scope filter must NOT over-suppress. risky_func IS defined in
+    the edited file (a.py, per _make_graph) -> it stays in scope and the advisory fires."""
+    g._oracle_edited_tokens.clear()
+    g._oracle_edited_tokens.add("risky_func")
+    g._oracle_tested_tokens.clear()
+    g._oracle_edited_rels.clear()
+    g._oracle_edited_rels.add("a.py")  # the file risky_func is actually defined in
+    note, trigger = g._structural_risk_note()
+    assert trigger is True
+    assert "risky_func" in note
 
 
 # --------------------------------------------------------------------------- #

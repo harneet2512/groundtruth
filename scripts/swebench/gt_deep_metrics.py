@@ -735,10 +735,74 @@ _LSP_BY_LANG = {
 }
 
 
+def _read_lsp_cert(db_path: str) -> dict:
+    """The AUTHORITATIVE LSP record is the emitted lsp_certificate.json
+    (server_launched / lsp_warm / verified+corrected+deleted / effective_work /
+    verdict_hint) — NOT the run log. Look in GT_CERT_DIR, else alongside graph.db.
+    Returns {} when absent/unreadable (caller falls back to the log scrape)."""
+    cert_dir = os.environ.get("GT_CERT_DIR", "") or (os.path.dirname(db_path) if db_path else "")
+    if not cert_dir:
+        return {}
+    p = os.path.join(cert_dir, "lsp_certificate.json")
+    try:
+        if os.path.isfile(p):
+            with open(p, encoding="utf-8") as fh:
+                d = json.load(fh)
+            if isinstance(d, dict) and str(d.get("schema", "")).startswith("gt.lsp_certificate"):
+                return d
+    except (OSError, ValueError):
+        pass
+    return {}
+
+
 def _from_lsp(log_text: str, db_path: str) -> dict:
-    """LSP server name + launch status. Inferred from log markers, else from the
-    dominant language in graph.db (the server that WOULD be dispatched)."""
-    out = {"lsp_server_name": "unknown", "lsp_launch_status": "unknown"}
+    """LSP server name + launch status + REAL conversion counts.
+
+    AUTHORITATIVE source is lsp_certificate.json. The prior version SCRAPED the run
+    log and reported ``not_observed_in_log`` even when the cert recorded real
+    conversions (codespace witness 2026-06-15: cert effective_work=4 (ts)/107 (js)
+    while the metric said the LSP was dark — a measurement bug that would call the
+    leaderboard's LSP lever dark when it converted edges). The log scrape and the
+    graph-language inference are FALLBACKS, used only when no cert is present."""
+    out = {
+        "lsp_server_name": "unknown", "lsp_launch_status": "unknown",
+        "lsp_source": "none", "lsp_warm": False, "lsp_degraded": False,
+        "lsp_verified_edges": 0, "lsp_corrected_edges": 0,
+        "lsp_deleted_edges": 0, "lsp_effective_work": 0, "lsp_verdict_hint": "",
+    }
+    cert = _read_lsp_cert(db_path)
+    if cert:
+        verdict = str(cert.get("verdict_hint") or "").strip()
+        launched = bool(cert.get("server_launched"))
+        warm = bool(cert.get("lsp_warm"))
+        degraded = bool(cert.get("degraded"))
+        eff = int(cert.get("effective_work") or 0)
+        if verdict:
+            status = verdict.lower().replace("lsp_", "")
+        elif not launched:
+            status = "not_launched"
+        elif degraded:
+            status = "degraded"
+        elif warm and eff > 0:
+            status = "active"
+        elif warm:
+            status = "warm_no_conversion"
+        else:
+            status = "launched_not_warm"
+        out.update({
+            "lsp_server_name": str(cert.get("server_command") or "").strip() or "unknown",
+            "lsp_launch_status": status,
+            "lsp_source": "certificate",
+            "lsp_warm": warm,
+            "lsp_degraded": degraded,
+            "lsp_verified_edges": int(cert.get("verified_edges") or 0),
+            "lsp_corrected_edges": int(cert.get("corrected_edges") or 0),
+            "lsp_deleted_edges": int(cert.get("deleted_edges") or 0),
+            "lsp_effective_work": eff,
+            "lsp_verdict_hint": verdict,
+        })
+        return out
+    # FALLBACK (no cert): infer from log markers, else the graph's dominant language.
     servers = ("pyright", "gopls", "rust-analyzer", "typescript-language-server", "jdtls")
     found = ""
     for s in servers:
@@ -747,6 +811,7 @@ def _from_lsp(log_text: str, db_path: str) -> dict:
             break
     if found:
         out["lsp_server_name"] = found
+        out["lsp_source"] = "log_scrape"
         if re.search(rf"(?i){re.escape(found)}.*(launched|started|ready|initialized)", log_text):
             out["lsp_launch_status"] = "launched"
         elif re.search(rf"(?i){re.escape(found)}.*(fail|crash|not found|missing|error)", log_text):
@@ -768,6 +833,7 @@ def _from_lsp(log_text: str, db_path: str) -> dict:
             if row and row[0]:
                 out["lsp_server_name"] = _LSP_BY_LANG.get(str(row[0]).lower(), "unknown")
                 out["lsp_launch_status"] = "not_observed_in_log"
+                out["lsp_source"] = "graph_inference"
         except sqlite3.Error:
             pass
     return out
@@ -1199,9 +1265,17 @@ def build(task: str, results_dir: str, log_path: str = "",
         "enriched_bases": graph.get("enriched_bases", {}),
         "assertion_count": d8(graph["assertion_count"]),
         "linked_assertion_count": d8(graph["linked_assertion_count"]),
-        # --- LSP (TASK 2) ---
+        # --- LSP (TASK 2) — now cert-authoritative, not log-scraped ---
         "lsp_server_name": lsp["lsp_server_name"],
         "lsp_launch_status": lsp["lsp_launch_status"],
+        "lsp_status_source": lsp.get("lsp_source", "none"),
+        "lsp_warm": lsp.get("lsp_warm", False),
+        "lsp_degraded": lsp.get("lsp_degraded", False),
+        "lsp_verdict_hint": lsp.get("lsp_verdict_hint", ""),
+        "lsp_verified_edges": d8(lsp.get("lsp_verified_edges", 0)),
+        "lsp_corrected_edges": d8(lsp.get("lsp_corrected_edges", 0)),
+        "lsp_deleted_edges": d8(lsp.get("lsp_deleted_edges", 0)),
+        "lsp_effective_work": d8(lsp.get("lsp_effective_work", 0)),
         "lsp_enriched_edge_count": d8(graph["lsp_enriched_edge_count"]),
         "lsp_return_type_signature_count": d8(graph["lsp_return_type_signature_count"]),
         # --- embedder / semantic (TASK 2) ---
@@ -1419,7 +1493,8 @@ def main() -> int:
           f"verified_ratio={deep.get('verified_edge_ratio')} "
           f"fts5_rows={deep.get('fts5_row_count')} fts5_hits={deep.get('fts5_real_query_result_count')} "
           f"assertions={deep.get('assertion_count')}/{deep.get('linked_assertion_count')} "
-          f"lsp={deep.get('lsp_server_name')}/{deep.get('lsp_launch_status')} "
+          f"lsp={deep.get('lsp_server_name')}/{deep.get('lsp_launch_status')}"
+          f"(eff={deep.get('lsp_effective_work')},src={deep.get('lsp_status_source')}) "
           f"semantic={deep.get('semantic_enabled')}(dim={deep.get('embedder_vector_dim')}) "
           f"actions={agent.get('action_count')} "
           f"llm_tokens={eff.get('llm_tokens_total')} cost=${eff.get('llm_cost_usd')}")

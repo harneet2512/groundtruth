@@ -82,6 +82,23 @@ def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
         return False
 
 
+def _normalize_edited_files(edited_files) -> list[str]:
+    """Repo-relative suffix forms of the agent's edited files (strip git a//b/ and
+    leading ./), deduped. Used to scope risk to symbols the agent actually DEFINED in
+    a file it edited — a same-named symbol defined in an UN-edited file (e.g. a callee
+    hub like ``List.push``) is not the agent's change and must not be flagged."""
+    out: list[str] = []
+    for f in (edited_files or []):
+        s = str(f).strip().replace("\\", "/")
+        for pre in ("a/", "b/", "./"):
+            if s.startswith(pre):
+                s = s[len(pre):]
+        s = s.lstrip("/")
+        if s:
+            out.append(s)
+    return list(dict.fromkeys(out))
+
+
 def _percentile(sorted_vals: list, q: float) -> float:
     """Nearest-rank percentile of a NON-EMPTY ascending list; 0.0 if empty."""
     if not sorted_vals:
@@ -119,12 +136,20 @@ def structural_edit_risk(
     *,
     min_confidence: float = _MIN_CONFIDENCE,
     max_reasons: int = 3,
+    edited_files: Iterable[str] | None = None,
 ) -> EditRisk:
     """Structural risk of the edited-but-untested ``symbols``, by VERIFIED caller
     fan-in scored relative to the repo. Correct-or-quiet on any absence.
 
     ``symbols`` are matched case-insensitively against node names; only CALLS edges
-    at/above ``min_confidence`` count (a name_match guess is never blast radius)."""
+    at/above ``min_confidence`` count (a name_match guess is never blast radius).
+
+    ``edited_files`` (when non-empty) SCOPES the match to symbols DEFINED in a file the
+    agent edited: a node whose ``file_path`` is not one of these is excluded, because a
+    same-named symbol defined elsewhere (a callee hub like ``List.push`` reached via a
+    ``x.push(...)`` line in the diff body) is not the agent's change and must never be
+    flagged as its blast radius. Empty/None -> no file constraint (back-compat; the
+    repo fan-in REFERENCE is always whole-repo, only the per-symbol match is scoped)."""
     names = {str(s).strip() for s in (symbols or []) if str(s).strip()}
     if not graph_db or not names or not os.path.isfile(str(graph_db)):
         return EditRisk(0.0, (), 0.0)
@@ -147,6 +172,18 @@ def structural_edit_risk(
             if has_method else ""
         )
         types_in = ",".join("?" for _ in _DEPENDENCY_EDGE_TYPES)
+        # File-scope the per-symbol match to the agent's EDITED files (when known):
+        # only a node DEFINED in an edited file is the agent's change. Suffix match
+        # tolerates prefix differences (repo-root vs git a//b/). The repo fan-in
+        # REFERENCE stays whole-repo; only this match is scoped.
+        edited_norm = _normalize_edited_files(edited_files)
+        if edited_norm:
+            _file_or = " OR ".join("nt.file_path = ? OR nt.file_path LIKE ?" for _ in edited_norm)
+            file_clause = f"AND ({_file_or})"
+            file_params: tuple = tuple(p for f in edited_norm for p in (f, f"%/{f}"))
+        else:
+            file_clause = ""
+            file_params = ()
         cache_key = (str(graph_db), float(min_confidence))
         ref = _REF_CACHE.get(cache_key)
         if ref is None:
@@ -160,8 +197,8 @@ def structural_edit_risk(
                           JOIN nodes nt ON e.target_id = nt.id
                          WHERE e.type IN ({types_in})
                            AND LOWER(nt.name) = LOWER(?)
-                           {conf_clause} {method_clause}""",
-                    (*_DEPENDENCY_EDGE_TYPES, nm, *conf_params),
+                           {conf_clause} {method_clause} {file_clause}""",
+                    (*_DEPENDENCY_EDGE_TYPES, nm, *conf_params, *file_params),
                 ).fetchone()
             except sqlite3.Error:
                 continue
