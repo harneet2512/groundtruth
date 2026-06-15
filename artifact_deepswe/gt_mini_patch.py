@@ -301,8 +301,8 @@ _HOOK_TIMEOUT = int(os.environ.get("GT_HOOK_TIMEOUT", "30"))
 # _SCRATCH_DIR_MARKERS, _has_source_ext, _is_repo_source_path) are a DIFFERENT
 # concern (which writes count as edits) and stay local.
 _SOURCE_EXTS: tuple[str, ...] = (
-    ".py", ".pyi", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs", ".java",
-    ".kt", ".c", ".h", ".cc", ".cpp", ".hpp", ".rb", ".php", ".cs",
+    ".py", ".pyi", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".go", ".rs",
+    ".java", ".kt", ".c", ".h", ".cc", ".cpp", ".hpp", ".rb", ".php", ".cs",
     ".swift", ".scala",
 )
 _SCRATCH_DIR_MARKERS: tuple[str, ...] = (
@@ -380,9 +380,14 @@ _cochange_fired = False
 _marker_sent = False
 
 # Source-file extensions GT indexes (matches gt-index language set).
+# DRY: must stay a superset-agreement with _SOURCE_EXTS (the obligation-credit set) —
+# they drifted (_SRC_EXT lacked .pyi), so a structured/bash edit to a .pyi stub was NOT
+# classified as a source edit and its contract/evidence/cochange never fired. Aligned;
+# .mjs/.cjs added to both as the modern JS module forms gt-index also indexes.
 _SRC_EXT = (
-    ".py", ".go", ".ts", ".tsx", ".js", ".jsx", ".rs", ".java", ".rb",
-    ".c", ".cc", ".cpp", ".h", ".hpp", ".cs", ".php", ".kt", ".scala", ".swift",
+    ".py", ".pyi", ".go", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".rs",
+    ".java", ".rb", ".c", ".cc", ".cpp", ".h", ".hpp", ".cs", ".php", ".kt",
+    ".scala", ".swift",
 )
 
 # Edit-shaped commands: sed -i, tee, patch, apply_patch, redirects, heredocs.

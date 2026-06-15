@@ -693,6 +693,26 @@ def _inject_steps() -> list[InstallStep]:
             except OSError:
                 _gdb_chunks = []
         if _gdb_chunks:
+            # Size ceiling (fail loud, not a cryptic build death): the gzipped+b64 graph
+            # bakes into Dockerfile RUN layers; the whole build definition must stay under
+            # BuildKit's 16MB gRPC cap. Empirically the build def is ~1.5x the b64 payload
+            # (gzipped), so a b64 over ~12MB blows the cap and `docker build` dies with an
+            # opaque ResourceExhausted — and since this is the ONLY source of /tmp/graph.db
+            # on the inject path, a large repo SILENTLY loses all per-turn evidence
+            # ("works on any repo size" violated). Reject at spec time with the diagnostic
+            # + the durable fix (mount the graph; no size limit, no bake).
+            _b64_total = sum(len(_c) for _c in _gdb_chunks)
+            if _b64_total > 12_000_000:
+                raise RuntimeError(
+                    "GT_GRAPH_DB_TOO_LARGE_TO_BAKE: gzipped graph.db base64 is "
+                    f"{_b64_total / 1048576:.1f}MB (host db "
+                    f"{os.path.getsize(_host_db) / 1048576:.1f}MB) — over the ~12MB bake "
+                    "ceiling (BuildKit's 16MB gRPC cap). MOUNT the graph instead of baking "
+                    f"it: pier run --mounts-json '[{{\"type\":\"bind\",\"source\":\"{_host_db}\""
+                    ",\"target\":\"/tmp/graph.db\",\"read_only\":true}]' (no size limit). The "
+                    "trial/codespace launchers already mount /gt_out — add the graph mount "
+                    "there for large repos."
+                )
             _b64name = f"{_GT_DIR}/graph_db.b64"
             for _i, _chunk in enumerate(_gdb_chunks):
                 _op = ">" if _i == 0 else ">>"

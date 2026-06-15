@@ -815,12 +815,26 @@ func promotePrecedes(db *store.DB, idx *promoteIndexes, add addEdgeFunc) error {
 			if a == b {
 				continue
 			}
-			idA, _ := idx.resolveByName(a, src.FilePath, funcMethodLabels)
-			idB, _ := idx.resolveByName(b, src.FilePath, funcMethodLabels)
+			idA, ccA := idx.resolveByName(a, src.FilePath, funcMethodLabels)
+			idB, ccB := idx.resolveByName(b, src.FilePath, funcMethodLabels)
 			if idA == 0 || idB == 0 || idA == idB {
 				continue // both must resolve to DISTINCT internal nodes
 			}
-			add(idA, idB, "PRECEDES", "promote_precedes", 0.5, 1, "call_order",
+			// Honest trust (§2.6 non-invention): an ambiguous call_order step (>1
+			// same-named candidate at EITHER endpoint) resolves to an arbitrary
+			// first-match, so stamping candidate_count=1 / conf 0.5 (CANDIDATE)
+			// overstated certainty. Carry the real max count, and demote an
+			// ambiguous step to SPECULATIVE (0.4 < the 0.5 consumer gate) so it
+			// is filtered, not laundered as a fact — correct-or-quiet.
+			cc := ccA
+			if ccB > cc {
+				cc = ccB
+			}
+			conf := 0.5
+			if cc > 1 {
+				conf = 0.4
+			}
+			add(idA, idB, "PRECEDES", "promote_precedes", conf, cc, "call_order",
 				a+"->"+b, src.FilePath, line, false)
 		}
 	})

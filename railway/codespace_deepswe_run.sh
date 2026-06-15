@@ -133,7 +133,18 @@ echo "==============================================================="
 HOST_GT_OUT=/tmp/gt_out
 mkdir -p "$HOST_GT_OUT"
 export GT_C_OUT=/gt_out
-MOUNTS_JSON="[{\"type\":\"bind\",\"source\":\"${HOST_GT_OUT}\",\"target\":\"/gt_out\",\"read_only\":false}]"
+MOUNTS_JSON="[{\"type\":\"bind\",\"source\":\"${HOST_GT_OUT}\",\"target\":\"/gt_out\",\"read_only\":false}"
+# G05 (full): MOUNT the gt-index binary into the container so L6 per-turn reindex actually
+# runs (the ~49MB binary exceeds the 16MB bake cap, so it cannot be base64-injected — a
+# read-only bind mount is the durable fix). gt_mini_patch defaults GT_INDEX_BIN=/tmp/gt-index.
+GT_INDEX_BIN_HOST="${REPO}/gt-index/gt-index-linux"
+if [ -x "$GT_INDEX_BIN_HOST" ]; then
+  MOUNTS_JSON="${MOUNTS_JSON},{\"type\":\"bind\",\"source\":\"${GT_INDEX_BIN_HOST}\",\"target\":\"/tmp/gt-index\",\"read_only\":true}"
+  echo "  L6: mounting gt-index binary -> /tmp/gt-index (per-turn reindex ENABLED)"
+else
+  echo "  L6: no gt-index binary at ${GT_INDEX_BIN_HOST} — per-turn reindex DISABLED (fail-loud telemetry in-container)"
+fi
+MOUNTS_JSON="${MOUNTS_JSON}]"
 # shellcheck source=artifact_deepswe/gt_integration/gt_ae_block.sh
 source artifact_deepswe/gt_integration/gt_ae_block.sh
 # pier output -> terminal log AND the ngrok SSE relay (log_relay prints the URL).
