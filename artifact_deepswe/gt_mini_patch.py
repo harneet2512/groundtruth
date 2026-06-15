@@ -4665,9 +4665,18 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
             if not text:
                 continue  # correct-or-quiet: empty producer stays silent
             h = _oracle_content_hash(text)
-            if h in _oracle_delivered_hashes:
-                # cross-lane / re-send dedup: this exact block in this exact
-                # state already reached the agent this run.
+            # B5 (token bloat, fastapi witness): a Lane-A block is a state-INDEPENDENT
+            # FACT (brief / contract / evidence / scope / cochange). The content+state
+            # hash `h` let an IDENTICAL fact re-deliver every turn the agent re-edited
+            # the file — the routing.py <gt-contract> re-emitted verbatim 10x. Also dedup
+            # on a CONTENT-ONLY hash so a fact reaches the agent ONCE per distinct content
+            # regardless of state. Additive: a first send always delivers; only identical
+            # re-sends at a new state are now caught. (Lane-B steers keep content+state via
+            # the gate -> they still rearm_on_change; this governs only Lane-A facts.)
+            import hashlib as _hl5
+            hc = "c:" + _hl5.sha256(text.encode("utf-8")).hexdigest()[:8]
+            if h in _oracle_delivered_hashes or hc in _oracle_delivered_hashes:
+                # cross-lane / re-send dedup: this fact already reached the agent.
                 _runtime_ledger_record(
                     kind=kind,
                     outcome=_ProductSignalOutcome.SUPPRESSED_DUPLICATE,
@@ -4678,6 +4687,7 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
                 continue
             out["output"] = (out.get("output") or "") + text
             _oracle_delivered_hashes.add(h)
+            _oracle_delivered_hashes.add(hc)
             # bug #5: consume the l3.cochange fire-once latch ONLY on a real
             # DELIVERED outcome (here), never at production — so a dedup collision
             # (the `continue` above) leaves the latch armed and the signal can
