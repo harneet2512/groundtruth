@@ -591,3 +591,73 @@ match) — explicitly optional in the review, and it changes cc semantics shared
 worth the shared-behavior risk for a display nuance. **Gates:** full `gt-index` build exit 0; resolver
 + cmd/gt-index Go suites green (the lone `TestRoutePatternMatching/comment` failure is PRE-EXISTING,
 fails on base, orthogonal to this diff); 31 py tests across contract/brief/I2 green.
+
+---
+
+## §11 — 2026-06-15 functional-fix campaign (commit `d5b1e59a`) + rust-LSP fix
+
+> **Premise (the review that drove it, `.claude/reports/GT_FUNCTIONAL_CODE_REVIEW_20260615T1900Z.md`):**
+> architecture parity (docs = code) is necessary, not sufficient. The review hunted the archetype the
+> rust-LSP bugs proved real — **code that exists and matches the docs but produces wrong / missing /
+> silent output.** 10 reviewers, LIPI 4-avenue, worst-first, ~45 findings. The campaign fixed the
+> worst-first set, each pinned by a mutation-checked test. Go build+vet exit 0; 1045 integration tests
+> pass, 0 regressions (4 pre-existing contract-pillar failures unrelated, stash-proven).
+
+### (a) The DOMINANT class — name_match-as-fact gate, closed at 4 LIVE surfaces
+
+`name_match` with ≤2 candidates scores **confidence 0.6** (`resolver.go:computeConfidence`), so it
+cleared every gate that filtered on `confidence >= 0.5` WITHOUT a `resolution_method` check —
+laundering a NAME GUESS as a deterministic FACT. The fix is ONE canonical fact-set
+**`DETERMINISTIC_RESOLUTION_METHODS`** (`curation_map.py:83`:
+same_file/import/import_type/type_flow/verified_unique/impl_method/inherited/unique_method/return_type/
+lsp/lsp_verified), gated categorically at each surface (fail-closed: name_match is NEVER a fact).
+
+| surface | site | what changed | live? |
+|---|---|---|---|
+| **brief** | `v1r_brief._edge_conf_clause` (`:121`) + medium-scope `_distinct_files` (`:3545-3581`) | on a no-`confidence`-column DB the clause was `""` (NO gate) → the `Calls:` line + neighbor-expansion + "Related files to inspect" rendered every name_match target as a fact; now emits a `resolution_method`-categorical clause when confidence is absent | **LIVE** (the v1r eval brief) |
+| **consensus / L5 scope** | `gt_mini_patch._query_scope` (`:2060`) | the delivered `<gt-scope>` 1-hop neighbour set gated only `confidence>=0.5`; name_match (0.6) cleared and shipped as "graph-connected / in scope." Now `resolution_method ∈ DETERMINISTIC` (the inline "drops SPECULATIVE" comment is now TRUE) | **LIVE** (DeepSWE) |
+| **localizer** | `hub_penalty` (`:23,47`), `anchor_proximity` (`:30,67`), `graph_reach` (`:77,84`) | structural-degree floors dropped `confidence >= 0.7` → **0.5 name_match floor** so a 0.6 name_match hub is PENALIZED (was escaping penalty) AND name_match-heavy graphs (70-80%) don't blank out, while sub-floor guesses are still excluded | **LIVE** (ranking) |
+| **L4 MCP tools** | `index/graph.find_callers` `is_fact` tag (`graph.py:347-357`) ← `mcp/tools.py` | `find_callers`/`handle_trace`/`handle_impact` gated only `confidence>=0.5`, no method gate; now tri-state `is_fact` (method ∈ DETERMINISTIC → FACT; name_match → unverified; None/Python-refs-schema → FACT) | **secondary** (DEAD on DeepSWE; LIVE for Cursor/Claude-Code/Codex MCP clients) |
+
+### (b) Per-element fixes (one line each, by component)
+
+**graph.db (gt-index):**
+- **PRECEDES receiver-type gate** — `extractCallOrdering` discarded the receiver type, so `promotePrecedes` resolved each bare method name via a type-blind global `resolveByName` first-match → `PRECEDES open→write` between unrelated funcs. Now requires a resolved receiver type (`promote.go`).
+- **Incremental restore qualified_name + name-only demote** (`incremental.go:173-220`) — a single-candidate re-match preserved the original `verified_unique`/`type_flow` method+confidence VERBATIM though re-matched by bare NAME, so a surviving CERTIFIED edge rebound to an unrelated same-named node after rename-replace. Now re-proves TARGET IDENTITY against the snapshotted `TargetQualifiedName`; a bare-name re-match caps at CANDIDATE.
+- **Closure best-confidence dedup** (`closure.go:130-165`) — `bestEdgeConf` was computed then never read by the BFS (which used first-scanned `adj.conf`), under-stating `min_confidence` → strong reachability paths dropped below the 0.5 reader floor. The adjacency is now built FROM `bestEdgeConf`.
+- **Go factory-return IMPLEMENTS deleted** (`relationships.go:39,437`, #P1-4) — a func returning an interface does NOT implement it; `goReturnInterfaceRe` fabricated meaningless IMPLEMENTS + duplicated CHA wrongly. Regex path removed.
+- **JSX COMPOSES line-range owner** (`relationships.go:251-259`, `findEnclosingFunc`) — owner was the first map-iterated func (no line-range) → random component owner across runs; now the func whose `[Start,End]` ENCLOSES the JSX line (ambiguous → return 0, correct-or-quiet).
+- **Rust generic impl regex** (`relationships.go:48`, `rustImplForRe`) — `strings.Fields` positional parse mangled `impl<T> Trait for S` / `impl fmt::Display for Foo`; a regex skipping the optional `<...>` impl-generic block now captures trait + implementing type.
+- **`super.` strip + cc==2 → 0.5** — rung-1.96 stripped `self.`/`this.` but not `super.`, mis-scoping `super.field.method()`; now stripped. name_match cc==2 dropped 0.6→**0.5** (#P2-9) so the ambiguity gradient is monotone (1→0.6, 2→0.5, 3-5→0.4, >5→0.2). (gt_gt:116 re-synced.)
+
+**embedder (`memory/enrich/embed.py`):** issue-query token window **128→1024** (gte; e5=512) — the hard 128-cap truncated the issue QUERY's signal-bearing tail (named file/symbols/frames); decoupled into `_PASSAGE_TOKEN_WINDOW=128` (bounds activation memory) vs `_query_token_window` (model-appropriate). e5 query/passage role made explicit + folded into the cache key so a mis-prefixed vector can't poison the shared LRU.
+
+**LSP (`resolve.py` + `lsp/`):** per-server readiness budget table now has **`jdtls:180` and `gopls:60`** (was rust-analyzer-only at 180; jdtls/gopls fell to the 20s default and quit before workspace import → 0 conversions = a green PASS); **`degraded` flag + `LSP_DEGRADED_FAIL`** fail-closed (warm + residual>0 + 0 conversions under `GT_REQUIRE_LSP`); `lsp_warm` no longer gated on `probe_latency_ms>0` (a coarse-clock instant warm rounded to 0ms → false NOT-warm) — uses `perf_counter`; **call-site column finder is whole-word call-shaped, not `str.find(name)`** (the substring finder queried the WRONG call site for the method-call majority `get`/`join`/`append`).
+
+**localization:** path-key normalization at every candidate-set ingress (`_norm_path`) — a file appearing as `a/b.py` and `a\b.py`/`./a/b.py` split its signals so a competitor with all signals on one key outranked both halves; RRF tie-break now uses a relevance-bearing secondary key before `file_path` (was alphabetical when the embedder is off); generated-demote uses anchored markers (was bare substring `"/generated/"` → a handwritten file under `generated/` ate −0.5); dispersion MAD computed over the nonzero/covered set, not zero-padded.
+
+**brief:** HIGH-localization `_edit_target_guard` pins the EXACT named file (was `... OR file_path LIKE '%/'+rel ... ORDER BY start_line LIMIT 1` → rendered a guard/return line from a DIFFERENT file's same-named func at the primacy position); `_top_functions` unions anchor symbols into the pool BEFORE the ref-count cap (a freshly-added 0-caller gold function fell past the cap → brief shipped the WRONG function's contract).
+
+**consensus / L5:** "You edited X of N in-scope files" — N is now the issue-anchored connected component of the edits, not the global union of every viewed file's neighborhood (which inflated with exploration → false "you missed file X"); completeness anchor filter case-fixed (focus tokens lowercased to match `_norm_rel` members → CamelCase anchors now match); L5 emits a **`TEST_RESULT` event + passes `test_count` + re-arms on phase-drop** so verify/failure/no-test steers reach the agent on a test turn (they were phase-filtered out as wrong_phase, then the fire-once latch was burned → permanently silenced).
+
+**wiring:** `gt_ae_block.sh` single-sourced into `deepswe_full.yml` so `GT_VERIFY_STRUCTURAL_RISK` (the edit-risk lever) + the deep-telemetry sinks are no longer DARK on the 113-task leaderboard (were forwarded only on the codespace witness path); `gate_lsp` fail-closed on an absent cert (was synthesizing `LSP_ACTIVE_VALID` from `lsp_warm=1`+`residual>0` without the closure/timing proof the cert path enforces).
+
+**Liveness:** **7/8 surfaces are LIVE on DeepSWE.** L4 MCP tools + OH `post_view` are **secondary** (live for the MCP/OpenHands clients — Cursor/Claude-Code/Codex — DEAD on the DeepSWE pier path).
+
+### (c) The rust-LSP fix (commits `fa728e46` + `fa6b4343`) → gt_gt §3 (LSP enrichment) / §17.3
+
+rust-analyzer was dark on the eval path through three plumbing defects, all fixed this session:
+1. **`fa728e46` — toolchain on PATH.** rust-analyzer spawns `cargo metadata` to build its crate graph; the dep-extract pulled `CARGO_HOME`/`RUSTUP_HOME` but never put the toolchain `bin/` on PATH → cargo/rustc unfindable → `cargo metadata` exit 127 → no project model → all go-to-def probes empty → `project_ready=False` → 0 lsp edges (det_pct stuck 65.7%). Fix: prepend the extracted toolchain `bin/` before the resolve pass (both `codespace_deepswe_run.sh` + `deepswe_full.yml`).
+2. **`fa6b4343` FIX-1 — standalone RA over the rustup shim.** `CARGO_HOME/bin` is a dir of rustup SHIMS (`rust-analyzer -> rustup`); the 1.92.0 toolchain has no RA component so the shim exits 1 ("Unknown binary 'rust-analyzer'") and SHADOWED the working standalone `/usr/local/bin/rust-analyzer`. Fix: drop the shim dir from PATH (real cargo/rustc still on the toolchain bin); RA falls through to the standalone.
+3. **`fa6b4343` FIX-2 — advertise `window.workDoneProgress`.** The warm probe gave up before a cold RA finished indexing; advertising the capability lets the probe wait out the index.
+
+**Witnessed live on `fd-deterministic-multi-key-sorting`** (the decisive proof, not inferred): rust
+**lsp 0→186** converted edges, **det_pct 65.7%→90.21%**, verdict **`LSP_ACTIVE_VALID`**. This is the
+IDENTICAL `resolve.py` LSP path that already enriches Go CALL edges — proving the GT LSP code was
+correct and the gap was purely the un-wired rust toolchain (rust isn't system-installed; only the
+extracted toolchain). Maps to **gt_gt §3** (LSP enrichment) + **§17.3** (Go/Rust LSP status), both
+re-synced. Generalized — PATH/transport plumbing, no per-task logic, no benchmaxxing.
+
+**Status:** all of §11 is **TESTED** (mutation-checked unit/integration red→green) except the rust-LSP
+fix, which is **PROVEN** (live `fd` witness: lsp 0→186, det_pct +24.5pp, `LSP_ACTIVE_VALID`). The
+broader functional-fix campaign's live agent witness (consumption proof) remains the open Task #6 gate.

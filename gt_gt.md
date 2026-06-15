@@ -88,7 +88,7 @@ resolution_method, confidence, **trust_tier**, **candidate_count**, **evidence_t
 | **CALLS** | all | 0.2–1.0 (per the ladder below) |
 | **CONTAINS** | all (structural) | 1.0, CERTIFIED |
 | **EXTENDS** | py/js/ts/java/kotlin/go/rust | 1.0 |
-| **IMPLEMENTS** | js/ts/java/kotlin 1.0; **Go CHA 0.6–0.85** (below), plus a 0.8 return-interface path (`goReturnInterfaceRe`) | 0.6–1.0 |
+| **IMPLEMENTS** | js/ts/java/kotlin 1.0; **Go CHA 0.6–0.85** (below) — the 0.8 return-interface path (`goReturnInterfaceRe`) was **DELETED** (`d5b1e59a` #P1-4: a func returning an interface does NOT implement it; the regex fabricated meaningless IMPLEMENTS and duplicated CHA wrongly) | 0.6–1.0 |
 | **COMPOSES** | JS/TS only (JSX) | 0.9 |
 | **RE_EXPORTS** | JS/TS only (barrels) | 1.0 |
 | **HANDLES_ROUTE** | **Python (4c `decorator_route`) only** | 0.95 |
@@ -113,7 +113,9 @@ ECOOP'95) → **1.94** single/few-implementor
 the receiver, so it can never be CERTIFIED) → **1.95** type-flow qualified (0.9) → **1.96**
 assignment-flow (PyCG ICSE 2021) → **1.97** return-type bridging → **1.98** unique-method-class
 (0.85) → **last-chance gate** (below) → **2** name_match fallback (**2+ candidates ONLY**:
-==2→0.6, ≤5→0.4, else 0.2 — **the cc≤1→0.6 row of the old table (the old doc said 0.9; the
+==2→0.5, ≤5→0.4, else 0.2 — `d5b1e59a` #P2-9 tier-separated the 2-candidate row from the
+unique row so the ambiguity gradient is monotone (cc≤1→0.6, 2→0.5, 3-5→0.4, >5→0.2); two
+same-named candidates are strictly more ambiguous than one. **The cc≤1→0.6 row of the old table (the old doc said 0.9; the
 code's `computeConfidence` returns 0.6 for candidateCount≤1) never occurs on the full
 path** so the value was both wrong and unreachable (harmless): a single unqualified candidate
 is 1.9 `verified_unique` 0.95; a single qualified-unresolved candidate is the last-chance demote).
@@ -225,9 +227,9 @@ Plus **co-change** (git), **closure** (transitive reach), **FTS5** (BM25 retriev
   lookups are `ORDER BY id` (deterministic restore, `10368a2f` #6).
 - **Closure admission is now AND, not OR** (`closure.go` #B7): an edge enters the transitive
   closure iff `resolution_method ∈ deterministic set` **AND** `confidence ≥ 0.7` — the old
-  OR-rule let 0.6 guesses (2-candidate name_match, ambiguous same_file/import, impl_method)
-  propagate transitively through a "verified-only" sidecar. `impl_method` and `name_match`
-  are categorically excluded.
+  OR-rule let sub-0.7 guesses (2-candidate name_match at 0.5 (`d5b1e59a` #P2-9; was 0.6),
+  ambiguous same_file/import, impl_method at 0.5–0.6) propagate transitively through a
+  "verified-only" sidecar. `impl_method` and `name_match` are categorically excluded.
 - **Synthetic File-anchor nodes** (`label='File'`, minted for zero-symbol barrel/re-export
   files): the link-token check requires **line-start on a non-comment line** (no phantom
   nodes from prose containing " from "), and File nodes are **excluded from the call-name
@@ -439,6 +441,19 @@ graph's *guesses* into *facts*:
 
 LSP enrichment is delivered to GT as the `confidence`/`resolution_method` columns —
 verified edges get cheap path cost (higher reach), name_match is expensive/suppressed.
+
+> **UPDATED (2026-06-15) — Rust enrichment is now LIVE; the column finder is whole-word.** Two
+> classes of LSP correctness fix landed this session: (1) **rust-analyzer toolchain wiring**
+> (`fa728e46` + `fa6b4343`) — PATH-prepend the extracted rustup toolchain so `cargo metadata`
+> succeeds, drop the rustup SHIM dir so the standalone RA is reached, and advertise
+> `window.workDoneProgress` so the warm probe waits out a cold index. Witnessed live on
+> `fd-deterministic-multi-key-sorting`: rust lsp **0→186** converted edges, det_pct **65.7%→90.21%**,
+> `LSP_ACTIVE_VALID` (§17.3). This is the SAME `resolve.py` path that already enriches Go/Py/TS/JS —
+> the gap was purely the un-wired toolchain, not GT logic. (2) **`d5b1e59a` — the call-site column
+> finder is whole-word call-shaped, not `str.find(name)`.** The old finder returned the FIRST
+> substring occurrence of the callee name, so for the method-call majority (`get`/`join`/`append`)
+> it queried the WRONG call site → silently mis-corrected or emptied; it now matches the indexer's
+> stored call-site column / a whole-word call-shaped token.
 
 > **ADDED (2026-06-13, `9db1fe44`) — the residual counter is now LANGUAGE-AGNOSTIC.** The gate that
 > decides whether the LSP pass is needed (and grades it) measures the unresolved-method-edge RESIDUAL
@@ -779,6 +794,17 @@ produced confounded results. The gates are opt-in; the benchmark workflows arm t
 >   break). `LSP_INSTALL_MISSING` (baked server absent on PATH) stays a hard fail. The cert still
 >   records the real zero-conversion + WHY (`failure_detail`) — correct-or-quiet, never silently
 >   green.
+> - **ADDED (`d5b1e59a`, FIX-B2) — `degraded` flag + `LSP_DEGRADED_FAIL` (fail-closed).** A WARM
+>   server (`lsp_warm=True`) that did REAL work (`residual>0`) yet converted/deleted ZERO edges
+>   (`effective_work<=0`) sets `cert["degraded"]=True` (`_compute_degraded`, `resolve.py:131`). Under
+>   `GT_REQUIRE_LSP=1` this now **exits 2 with `LSP_DEGRADED_FAIL`** (`resolve.py:1717`) — a warm
+>   server that resolved nothing real is NOT a satisfied LSP requirement, so CI can never count an
+>   incomplete-env zero-conversion as LSP-satisfied. With `GT_REQUIRE_LSP` unset it stays the
+>   `LSP_WARN_ZERO_CONVERSION` WARN-pass (deliver-always — tree-sitter graph + brief still ship).
+>   This closes the gopls/tsserver cold-cache false-green where `effective_work==0`+warm certified
+>   as LSP-satisfied. Full verdict set: `LSP_NO_OP_VALID_WITH_WARM_SERVER`, `LSP_WARN_NOT_READY`,
+>   `LSP_WARN_ZERO_CONVERSION`, `LSP_ACTIVE_VALID` (PASS); `LSP_FAIL_NO_WARM` (never-launched),
+>   `LSP_INSTALL_MISSING`, `LSP_DEGRADED_FAIL` (warm zero-conversion under GT_REQUIRE_LSP) — fail-closed.
 > - **RC-4:** the Go/Rust-only `workspace_metadata` pre-flight (`go list`/`cargo metadata`) is now
 >   recorded as a completed-with-warn stage, not a `tracker.fail` — it no longer front-load-kills a
 >   Go/Rust task before indexing.
@@ -813,6 +839,21 @@ produced confounded results. The gates are opt-in; the benchmark workflows arm t
 
 These are **research constants or structural boundaries**, not per-benchmark tuning. None is
 derived from gold labels, task IDs, or FAIL_TO_PASS.
+
+> **UPDATED (2026-06-15, `d5b1e59a`) — the name_match-as-fact gate is now `resolution_method`-keyed
+> at 4 LIVE surfaces, via the ONE canonical `DETERMINISTIC_RESOLUTION_METHODS` set
+> (`curation_map.py`: same_file/import/import_type/type_flow/verified_unique/impl_method/inherited/
+> unique_method/return_type/lsp/lsp_verified).** `name_match` (0.6 at cc≤2) cleared every
+> `confidence >= 0.5` gate that lacked a method check, laundering a NAME GUESS as a FACT. Closed at:
+> brief `_edge_conf_clause` + medium-scope `_distinct_files` (`v1r_brief.py`), consensus `_query_scope`
+> (`gt_mini_patch.py`), L4 `find_callers` `is_fact` tag (`index/graph.py`), and the **localizer
+> structural-degree floors** — `hub_penalty` / `anchor_proximity` / `graph_reach` dropped their
+> in-degree/proximity/reach gate from `confidence >= 0.7` to a **0.5 name_match floor** so a 0.6
+> name_match hub is PENALIZED (was escaping penalty entirely) AND name_match-heavy graphs (70–80%)
+> don't go blank, while still excluding sub-floor guesses. The `EDGE_CONFIDENCE_FLOOR=0.7` /
+> `min_confidence=0.7` table rows above are the **closure-admission** boundary (the fact/guess line at
+> candidate admission) and are UNCHANGED; the 0.7→0.5 move is only the localizer DEGREE floors, now
+> paired with the categorical `resolution_method` predicate (fail-closed: name_match is never a fact).
 
 ### Dynamic (data-derived per task)
 | Param | Driven by |
@@ -2114,12 +2155,30 @@ Surface 3 passes env vars and mounts — no GT logic.
 
 ### 17.3 Go/Rust LSP status
 
-Go and Rust LSP converts zero edges because the substrate lacks their dependency environment:
+Go and Rust LSP historically converted zero edges because the substrate lacked their dependency
+environment:
 - **Go:** gopls needs `GOMODCACHE` populated; substrate has `GOPROXY=off` + empty cache
-- **Rust:** rust-analyzer needs `cargo metadata`; substrate has no cargo binary
+- **Rust:** rust-analyzer needs `cargo metadata`; the extracted CARGO_HOME shipped only the
+  registry cache, never the toolchain `bin/` (no cargo/rustc on PATH)
+
+> **UPDATED (2026-06-15) — Rust LSP now CONVERTS (the §17.3 dark-LSP gap closed for rust).**
+> Three plumbing fixes (`fa728e46` + `fa6b4343`) made rust-analyzer warm and resolve on the eval
+> path: (1) prepend the extracted rustup-toolchain `bin/` to PATH before the resolve pass so
+> `cargo metadata` exits 0 (was 127 — unfindable cargo/rustc → empty project model → 0 conversions);
+> (2) drop the rustup-SHIM dir from PATH so the standalone `/usr/local/bin/rust-analyzer` is reached
+> instead of the shim that exits "Unknown binary 'rust-analyzer'" (the 1.92.0 toolchain has no RA
+> component); (3) advertise `window.workDoneProgress` so the warm probe waits out a cold RA's index
+> instead of giving up. **Witnessed live on `fd-deterministic-multi-key-sorting`: rust lsp
+> 0→186 converted edges, det_pct 65.7%→90.21%, verdict `LSP_ACTIVE_VALID`** — the IDENTICAL
+> `resolve.py` LSP path that already converts Go CALL edges, proving the GT LSP code was correct and
+> the gap was purely the un-wired toolchain. Generalized (PATH/transport plumbing, no per-task logic),
+> mirrored on both delivery paths (`codespace_deepswe_run.sh` + `deepswe_full.yml`). gopls remains
+> dep-env-gated (empty module cache); under `GT_REQUIRE_LSP=1` a warm-but-zero-conversion run now
+> fail-closes via `LSP_DEGRADED_FAIL` (§7).
 
 **Current policy:** `LSP_WARN_ZERO_CONVERSION` and `LSP_WARN_NOT_ATTEMPTED` are soft passes
-(`ok=True`). Go/Rust tasks proceed with tree-sitter-only graph (no LSP enrichment). Py/TS/JS
+(`ok=True`) when `GT_REQUIRE_LSP` is unset. Go/Rust tasks lacking a working dep-env proceed with
+tree-sitter-only graph (no LSP enrichment); rust with its toolchain wired now converts. Py/TS/JS
 get full LSP conversions (347/51/132 edges on the frozen run).
 
 **Substrate-reproof fixes (correct but not yet integrated):**
