@@ -46,17 +46,31 @@ def _q(cur, sql, *a):
 
 
 def audit_depth(graph_db):
-    """Layer 0 - DEPTH: relationship-edge completeness + the full edge-type census."""
+    """Layer 0 - DEPTH: relationship-edge completeness + the full edge-type census.
+
+    DATA_FLOW is special: gt_gt §2.6 D1 - a data_flow that has a callee RIDES the existing CALLS edge
+    as a `dataflow=` metadata ANNOTATION rather than minting a standalone DATA_FLOW edge. So "present"
+    for DATA_FLOW = standalone edges OR annotated CALLS OR data_flow properties consumed - counting
+    only standalone edges falsely flags it missing (it is correct-or-quiet, not a gap)."""
     c = sqlite3.connect(graph_db).cursor()
     rows = c.execute("SELECT type, COUNT(*) FROM edges GROUP BY type ORDER BY COUNT(*) DESC").fetchall()
     by_type = {t: n for t, n in rows}
-    depth_present = [t for t in _DEPTH_EDGES if by_type.get(t, 0) > 0]
-    depth_missing = [t for t in _DEPTH_EDGES if by_type.get(t, 0) == 0]
+    df_annotated = _q(c, "SELECT COUNT(*) FROM edges WHERE type='CALLS' AND metadata LIKE '%dataflow%'") or 0
+    df_props = _q(c, "SELECT COUNT(*) FROM properties WHERE kind='data_flow'") or 0
+
+    def present(t):
+        if t == "DATA_FLOW":
+            # consumed via standalone edge OR a CALLS annotation (D1). Only a true gap if go/py emits
+            # data_flow PROPERTIES but NONE are consumed anywhere.
+            return by_type.get("DATA_FLOW", 0) > 0 or df_annotated > 0 or df_props == 0
+        return by_type.get(t, 0) > 0
+
+    depth_present = [t for t in _DEPTH_EDGES if present(t)]
+    depth_missing = [t for t in _DEPTH_EDGES if not present(t)]
     return {
-        "edge_types": by_type,
-        "depth_present": depth_present,
-        "depth_missing": depth_missing,
-        "intended": "all relationship-edge classes present where internally resolvable (READS/WRITES/RAISES/PRECEDES/DATA_FLOW/CO_SERIALIZES)",
+        "edge_types": by_type, "data_flow_annotated_calls": df_annotated, "data_flow_properties": df_props,
+        "depth_present": depth_present, "depth_missing": depth_missing,
+        "intended": "all relationship-edge classes present where internally resolvable; DATA_FLOW rides CALLS as an annotation (D1)",
         "fired": len(depth_present) > 0,
         "gap": ("none" if not depth_missing else f"missing depth classes: {','.join(depth_missing)}"),
     }
