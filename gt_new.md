@@ -486,5 +486,24 @@ edges; G03/G04 host GT env never reaches the container (pier strips `export`; tr
 
 **Resolution: parallel worktree-isolated fix wave** (run `w30fe8rby`), 6 file-disjoint clusters,
 each: surgical fix + regression unit test + 4-avenue LIPI, rank-safety enforced for the 5 I2 gaps
-(depth must stay byte-identical out of reach/RANK). Merged results recorded on completion. **No task
-trial anywhere — every fix is a structural code change verified by unit test + LIPI, not a flip.**
+(depth must stay byte-identical out of reach/RANK). **No task trial anywhere — every fix is a
+structural code change verified by unit test + LIPI, not a flip.**
+
+**RESULT: 14 of 18 gaps resolved + committed, verified.** The wave's worktrees had a mixed base
+(4 on gt-trial, 2 on stale origin/master); I salvaged the 4 correct-base clusters by file, redid
+the env cluster on gt-trial, and the unreliable gt_agent cluster's fixes are owed.
+- **`f687ec09` — 12 core gaps (C1/C2/C5/C6):** G01 depth→RANK leak closed (`graph_reach`
+  reuses the D5 predicate, single-source with `graph_localizer`); G16/G18 closure+schema guards;
+  G02/G09 Go incremental (phantom-name_match snapshot filter + `-file` inheritanceMap); G06/G07/
+  G08/G10/G15 oracle/verify (edited-but-untested scoring, owning-class READS/WRITES in the RISK
+  substrate, reset re-delivery, import isolation, Lane-B fire counter); G13/G17 brief (CALLS-only
+  test surface + contract READS/WRITES blast facts). **39 py tests + Go store/closure green;
+  the 4 I2 fixes LIPI-confirmed + test-pinned rank-safe.**
+- **`48238da4` — G03/G04:** the `--ae` single-source block — pier drops host `export`, so GT
+  runtime env (verify-risk, oracle route, telemetry sinks) now forwards into the container.
+- **`88e97978` (earlier) — the dominant Plumbing gap:** host graph.db injected into the container.
+- **Owed (4, all config/infra/diagnostic, exact fix in `docs/GT_GAP_CATALOG_LIPI.md`):** G05 L6
+  reindex binary (49MB exceeds the 16MB bake cap — needs a runtime mount/cp, OR make L6 a
+  visible no-op when the binary is absent); G11 durable host-mount for `/gt_out` telemetry; G12
+  the trial workflow must cache the configured gte-modernbert (not e5); G14 self-test path probe.
+  None touches core-code correctness or the I2 rank surface.
