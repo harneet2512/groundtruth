@@ -444,7 +444,10 @@ _SELFTEST_PY = (
     f"ok, os.path.exists('{_GT_DIR}/gt_mini_patch.py'), "
     f"os.path.exists('{_GT_DIR}/gt_hook.py'), "
     f"os.path.exists('{_GT_DIR}/gt_root.txt'), "
-    "os.path.exists('/tmp/graph.db')))\n"
+    # G14: probe the SAME path the per-turn producers read (substrate mode keeps the
+    # authoritative graph at GT_HOST_GRAPH_DB=/gt_artifacts/graph.db, NOT /tmp/graph.db),
+    # so db=True reflects the real graph instead of lying db=False on a correct run.
+    "os.path.exists(os.environ.get('GT_HOST_GRAPH_DB') or '/tmp/graph.db')))\n"
     "sys.exit(0 if ok else 7)\n"
 )
 _SELFTEST_B64 = base64.b64encode(_SELFTEST_PY.encode("utf-8")).decode("ascii")

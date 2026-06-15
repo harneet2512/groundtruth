@@ -64,8 +64,13 @@ jobs:
       - name: Cache ONNX embedder model (kill the per-run HF fetch flake)
         uses: actions/cache@v4
         with:
-          path: models/e5-small-v2
-          key: gt-embed-e5-small-v2-onnx-v1
+          # G12: cache the CONFIGURED gte-modernbert-base/768 — codespace_deepswe_run.sh
+          # declares it the PRIMARY embedder and setup_models.py bakes it. Caching e5/384
+          # here meant either a permanent cache MISS (re-fetch gte every run) or, worse,
+          # e5 landing while the config expects gte -> the dim-guard abstains semantic and
+          # the host brief silently degrades to lexical-only. Cache what the pipeline reads.
+          path: models/gte-modernbert-base
+          key: gt-embed-gte-modernbert-base-onnx-v1
 
       - name: Install pier, groundtruth, embedder + ALL LSP servers, build gt-index
         run: |

@@ -367,6 +367,9 @@ _test_evidence_seen = False
 # After a source EDIT we invalidate the cache + best-effort single-file reindex so the
 # next understand/consensus/verify sees the agent's NEW code, not base-commit.
 _GT_INDEX_CACHE = os.environ.get("GT_INDEX_CACHE", "/tmp/gt_index.json")
+# G05: one-time telemetry latch — warns when L6 can't reindex (binary absent) instead
+# of silently no-op'ing (so a frozen-freshness trajectory is diagnosable from the log).
+_l6_no_binary_warned = False
 # COMPLETENESS / co-change fires once on the first source edit (the multi-file scope
 # signal DeepSWE entirely lacked — OH ships it from the cochanges table).
 _cochange_fired = False
@@ -2631,6 +2634,7 @@ def _invalidate_on_edit(rel: str, root: str) -> None:
     per-task graph COPY — was rejected: it reintroduces a divergent graph the witness
     would fail to match, strictly worse for the proof.) L6 stays ENABLED only on the
     non-substrate (preindex/trial) path where the in-container /tmp/graph.db is ours."""
+    global _l6_no_binary_warned
     if _substrate_active():
         return  # substrate graph is authoritative + read-only; never mutate/rebuild it.
     try:
@@ -2646,6 +2650,24 @@ def _invalidate_on_edit(rel: str, root: str) -> None:
                 [gt_index, f"-root={root}", f"-file={rel}", f"-output={db}"],
                 capture_output=True, timeout=_HOOK_TIMEOUT,
             )
+        elif not os.path.isfile(gt_index):
+            # G05 (fail loud, not silent): the reindex binary is absent. On the
+            # host-graph-injection path gt_agent ships the graph but NOT the ~49MB
+            # gt-index binary (it exceeds BuildKit's 16MB bake cap), so L6 cannot
+            # re-index and per-turn graph freshness is FROZEN at index time. Cross-file
+            # evidence for EXISTING code stays correct (the dominant case); only symbols
+            # the agent ADDS this trajectory won't appear. Surface the gap ONCE as
+            # telemetry so it's diagnosable, instead of a silent no-op that reads as
+            # "L6 fired." (gt_new §10 owed G05: ship the binary via runtime mount/cp.)
+            global _l6_no_binary_warned
+            if not _l6_no_binary_warned:
+                _l6_no_binary_warned = True
+                print(
+                    f"[GT_META] L6_NO_REINDEX_BINARY gt_index={gt_index} present=False "
+                    f"— per-turn graph freshness frozen at index time (host-graph-inject "
+                    f"path; the ~49MB gt-index binary exceeds the 16MB bake cap)",
+                    file=sys.stderr, flush=True,
+                )
     except Exception:  # noqa: BLE001 -- best-effort, never break the loop
         pass
 

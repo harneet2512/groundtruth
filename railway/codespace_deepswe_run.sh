@@ -126,7 +126,14 @@ echo "==============================================================="
 # deep telemetry run with EMPTY GT env in-container. Forward them via the single-source
 # `--ae` block (shared with deepswe_full.yml so trial+full can't drift). GT_C_OUT=/tmp keeps
 # the telemetry sinks writable in-container (a durable host-mount = gap G11, still owed).
-export GT_C_OUT="${GT_C_OUT:-/tmp}"
+# G11: a WRITABLE host-mount for the in-container deep-telemetry sinks — without it the
+# producers default into the container and DIE with it (the 8-dp metrics lost). Mirror
+# deepswe_full.yml's contract (ServiceVolumeConfig type/source/target/read_only): bind
+# /tmp/gt_out -> /gt_out, point GT_C_OUT (the block's sink dir) at it, copy out after.
+HOST_GT_OUT=/tmp/gt_out
+mkdir -p "$HOST_GT_OUT"
+export GT_C_OUT=/gt_out
+MOUNTS_JSON="[{\"type\":\"bind\",\"source\":\"${HOST_GT_OUT}\",\"target\":\"/gt_out\",\"read_only\":false}]"
 # shellcheck source=artifact_deepswe/gt_integration/gt_ae_block.sh
 source artifact_deepswe/gt_integration/gt_ae_block.sh
 # pier output -> terminal log AND the ngrok SSE relay (log_relay prints the URL).
@@ -136,8 +143,14 @@ pier run \
   --model "$MODEL" \
   --env docker -y \
   "${GT_AE_ARGS[@]}" \
+  --mounts-json "${MOUNTS_JSON}" \
   --ak config_file=artifact_deepswe/gt_integration/deepswe_gt_pier.yaml \
   2>&1 | tee "$LOG" | python -u scripts/log_relay.py
+# G11: recover the deep 8-dp telemetry the in-container producers wrote to the mount.
+mkdir -p /tmp/gt_debug
+for _f in gt_oracle_events.jsonl gt_runtime_ledger.jsonl gt_hook_fire_counts.json; do
+  cp "$HOST_GT_OUT/$_f" /tmp/gt_debug/ 2>/dev/null || true
+done
 
 echo ""
 echo "── outcome + deep metrics ──"
