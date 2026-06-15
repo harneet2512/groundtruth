@@ -515,3 +515,60 @@ runtime binary-mount for live per-turn reindex is the single remaining infra tas
 The only thing this round deliberately did NOT do is the live agent witness (gt-evidence 0→>0
 consumption proof) — by the no-task-testing constraint. Every fix is a structural code change
 verified by unit test + LIPI + compile/syntax gate, never a benchmark flip.
+
+> **CORRECTION (§10.1, 2026-06-15) — the "17 fully resolved + verified" claim above was wrong on
+> two counts; an adversarial MAX-LIPI re-review caught them.** The fix-wave's own self-verification
+> was not adversarial enough. A second pass (`docs/GT_GAPFIX_MAX_LIPI.md`, 4-avenue per surface,
+> every claim re-read against the working tree) found **2 HIGH defects** that the §10 tally had
+> counted as resolved. Both are now genuinely closed and test-pinned; the lesson is recorded as a
+> trap (self-verified ≠ adversarially-verified). The corrections:
+
+### §10.1 — adversarial re-review corrections (this session)
+
+**HIGH #1 — I2 rank leak via `W_PROX` (the G01 fix stopped one term short).** G01 typed the reach
+term (`graph_reach._build_file_graph`) but its sibling `anchor_proximity.compute_anchor_proximity`
+— which feeds `anchor_prox` → the `W_PROX` rank term in `v7_4_brief._total_score` (0.05, boosted to
+0.12 in the function-level regime) — gated only on `confidence >= 0.7` with **no** type/provenance
+exclusion. Once the promotion pass ships, the five cross-file promoted DEPTH classes (READS/WRITES/
+RAISES/CO_SERIALIZES/DATA_FLOW, minted at conf 1.0) would pass the gate, inflate the anchor neighbor
+set, and **shift rank** — the exact I2 violation G01 claimed to close, on a parallel code site the
+catalog never enumerated. **FIXED:** `anchor_proximity` now applies the SAME D5 single-source
+predicate (`graph_localizer._degree_edge_filter`). **PINNED:** `tests/test_anchor_proximity_i2.py`
+asserts byte-identical proximity with vs without promoted edges (mutation-checked: 2 pass on the fix,
+2 FAIL when the predicate is removed). The I2 suite had covered reach/expand but **not** proximity —
+that blind spot is why it slipped; it is now covered.
+
+**HIGH #2 — G09 (`-file` inheritanceMap) was DISABLED in committed HEAD, AND a second independent
+incremental-path bug sat behind it.** `main.go` carried a `// TEMP-RED-CHECK` that left
+`_ = allFiles; _ = allLangs` in place of the `buildInheritanceMap` + `SetInheritanceMap` wiring — so
+the CHA rungs (gt_gt §2.3: 1.75/1.94/1.94a/2b) were dead on EVERY `-file` reindex, and the §10
+"resolved+verified" claim was **false against the binary**. **FIXED:** reconstructed
+`[]walker.SourceFile` from the parallel `allFiles`/`allLangs` rows, built the whole-graph inheritance
+map, and `SetInheritanceMap` before `Resolve`. **But the fable-mode mutation check then refused to go
+green even with the wiring restored** — exposing a SECOND, independent bug the map alone could not
+fix: the incremental path zeroes `pr.Nodes[i].ParentID` for the node insert (main.go:921), fixes up
+the DB row, but never restored `ParentID` on the **in-memory copy** appended to `filteredNodes` →
+`BuildNodeMeta` → `callerMeta.ParentID == 0` → the self.method()/inherited rungs cannot identify
+self's class → inherited calls demote to `name_match` on every reindex regardless of the map.
+**FIXED:** restore the parent DB id on the in-memory copy. **PINNED:** the e2e test
+(`inheritance_incremental_test.go`) was tautological (single-`save` fixture + byte-identical child →
+SHA-256 short-circuit → the resolution path never ran; it passed even on disabled code). Rebuilt to
+BITE: a competing `Other.save` makes the name ambiguous (only the hierarchy disambiguates) AND the
+child is modified before reindex (so the short-circuit doesn't fire). It now goes RED on either bug
+alone and GREEN only with both fixes (probe-confirmed: disabled→`name_match`, fixed→`inherited`).
+
+**MEDIUM/LOW/NIT (the same review, 11 more findings): 10 resolved, 1 deferred-optional.** chmod 777 +
+loud copy-out on the codespace telemetry mount (§2.3); honest downgrade of the `gt_ae_block.sh`
+"single source of truth" claim — it is wired on the codespace path only, trial/full.yml sourcing is
+OWED (§2.4); graph.db injection decode made fail-closed via temp + non-empty assert + atomic mv so
+`/tmp/graph.db` is never torn (§2.5); corrected the false `.pyi`-matches-gt-index comment (gt-index
+indexes only `.py`; `.pyi` is edit-detection parity only, deliberately graph-quiet) (§2.6); added the
+PRECEDES cc>1 SPECULATIVE-demotion test (§2.7); softened the G05 "reindex ENABLED" echo (binary mount
+≠ enabled without an in-container graph) (§2.8); made the G17 verified-reader count field-EXACT
+(`AND e.metadata = ?`) + a two-field-class test (§2.9); dropped the unused `_PROMOTED_EDGE_TYPES`
+import (§2.10); removed a redundant `global` (§2.12); fixed the self-contradicting "Default-OFF"
+comment (§2.13). **DEFERRED:** §2.11 (resolveByName returns the global candidate count for a same-file
+match) — explicitly optional in the review, and it changes cc semantics shared with DATA_FLOW; not
+worth the shared-behavior risk for a display nuance. **Gates:** full `gt-index` build exit 0; resolver
++ cmd/gt-index Go suites green (the lone `TestRoutePatternMatching/comment` failure is PRE-EXISTING,
+fails on base, orthogonal to this diff); 31 py tests across contract/brief/I2 green.

@@ -251,6 +251,71 @@ func TestPromote_RaisesThrowFlow_GapA(t *testing.T) {
 	}
 }
 
+// TestPromote_PrecedesAmbiguousDemoted proves the honest-trust demotion branch
+// (promote.go:833-836, §2.6 non-invention): when a `call_order` step's callee name is
+// AMBIGUOUS (>1 same-named candidate across files), resolveByName returns an arbitrary
+// first-match, so the minted PRECEDES edge must carry the REAL candidate_count (>1) and be
+// demoted to confidence 0.4 / tier SPECULATIVE — BELOW the 0.5 consumer gate, so it is
+// filtered, not laundered as a fact. The RedGreenDepth fixture only exercises the cc=1 /
+// 0.5 / CANDIDATE path; this is the missing red→green for the demotion's whole point.
+func TestPromote_PrecedesAmbiguousDemoted(t *testing.T) {
+	root := t.TempDir()
+	db, err := store.Open(filepath.Join(root, "graph.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// `step` is DEFINED TWICE (a.py and b.py) -> the call_order callee "step" is ambiguous
+	// (cc=2). `setup` is unique. The chain `setup -> step` mints setup(20) -> step(21,
+	// same-file first-match) but at the ambiguous confidence.
+	execSQL(t, db, `INSERT INTO nodes (id,label,name,file_path,start_line,signature,language,parent_id) VALUES
+	  (20,'Function','setup','a.py',1,'def setup()','python',0),
+	  (21,'Function','step', 'a.py',5,'def step()', 'python',0),
+	  (22,'Function','step', 'b.py',5,'def step()', 'python',0)`)
+	execSQL(t, db, `INSERT INTO properties (node_id,kind,value,line,confidence) VALUES
+	  (20,'call_order','self: setup -> step',2,0.6)`)
+
+	if _, err := PromotePropertyEdges(db); err != nil {
+		t.Fatalf("PromotePropertyEdges: %v", err)
+	}
+
+	// Exactly ONE promoted PRECEDES edge (setup -> the same-file step), and it is the
+	// DEMOTED one: candidate_count=2, confidence 0.4, tier SPECULATIVE.
+	if got := countEdges(t, db, `type='PRECEDES' AND resolution_method LIKE 'promote_%'`); got != 1 {
+		t.Fatalf("want exactly 1 promoted PRECEDES edge, got %d", got)
+	}
+	tx, err := db.BeginTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	var (
+		srcID, tgtID int64
+		cc           int
+		conf         float64
+		tier         string
+	)
+	if err := tx.QueryRow(
+		`SELECT source_id, target_id, candidate_count, confidence, trust_tier
+		   FROM edges WHERE type='PRECEDES' AND resolution_method LIKE 'promote_%' LIMIT 1`,
+	).Scan(&srcID, &tgtID, &cc, &conf, &tier); err != nil {
+		t.Fatalf("read PRECEDES edge: %v", err)
+	}
+	if srcID != 20 || tgtID != 21 {
+		t.Errorf("PRECEDES endpoints: want 20->21 (same-file step), got %d->%d", srcID, tgtID)
+	}
+	if cc <= 1 {
+		t.Errorf("ambiguous step: want candidate_count>1, got %d (the real ambiguity must be carried, not stamped 1)", cc)
+	}
+	if conf != 0.4 {
+		t.Errorf("ambiguous PRECEDES: want confidence 0.4 (demoted), got %.2f", conf)
+	}
+	if tier != "SPECULATIVE" {
+		t.Errorf("ambiguous PRECEDES: want tier SPECULATIVE (below the 0.5 gate), got %q", tier)
+	}
+}
+
 func propertyCounts(t *testing.T, db *store.DB) map[string]int {
 	t.Helper()
 	tx, err := db.BeginTx()

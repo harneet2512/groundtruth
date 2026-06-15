@@ -1,6 +1,18 @@
 # shellcheck shell=bash
 ###############################################################################
-# gt_ae_block.sh — SINGLE SOURCE OF TRUTH for the GT runtime `--ae` block.
+# gt_ae_block.sh — canonical `--ae` block for the GT runtime env.
+#
+# SCOPE / WIRED-STATUS (read before trusting this as de-drift):
+#   This block is CURRENTLY sourced by ONE caller — railway/codespace_deepswe_run.sh
+#   (the codespace witness path). It is NOT yet sourced by the GHA workflows:
+#     • .github/workflows/deepswe_trial.yml — its `pier run` passes NO --ae / --mounts-json.
+#     • .github/workflows/deepswe_full.yml  — forwards only a PARTIAL inline --ae set
+#       (GT_ORACLE_ROUTE + GT_ORACLE_EVENTS), not the full trio below.
+#   So on the two GHA paths the structural edit-risk axis (G03/G04) and the G11 deep-
+#   telemetry trio (GT_RUNTIME_LEDGER / GT_HOOK_FIRE_COUNTS / full GT_ORACLE_EVENTS sink)
+#   remain DARK. Making this a TRUE single source is OWED: source this file from those
+#   run-steps and splice "${GT_AE_ARGS[@]}" + a writable --mounts-json. Until then this is
+#   the codespace path's helper — do NOT read it as proof that trial/full are de-drifted.
 #
 # WHY THIS FILE EXISTS (catalog gaps G03 + G04, HIGH):
 #   pier does NOT blanket-forward the host's os.environ into the task container.
@@ -14,10 +26,12 @@
 #   (structural edit-risk axis, oracle two-lane route, the 8-dp deep telemetry
 #   sinks) runs with EMPTY GT env unless we pass `--ae` explicitly.
 #
-#   Before this file, deepswe_full.yml carried a partial `--ae` set inline while
-#   the TRIAL path (deepswe_trial.yml + codespace_deepswe_run.sh) passed NO `--ae`
+#   deepswe_full.yml carries a partial `--ae` set inline; the TRIAL paths
+#   (deepswe_trial.yml + codespace_deepswe_run.sh) historically passed NO `--ae`
 #   at all -> the entire structural risk axis + oracle telemetry was dark on the
-#   witness path. Centralizing the block here means trial and full CANNOT drift.
+#   witness path. This block is the canonical definition that ELIMINATES that drift
+#   ON ANY CALLER THAT SOURCES IT — today that is codespace_deepswe_run.sh only (see
+#   SCOPE above). It does not retroactively de-drift a path that does not source it.
 #
 # CONTRACT for callers:
 #   1. Define GT_C_OUT before sourcing — the IN-CONTAINER directory the deep 8-dp
@@ -44,8 +58,11 @@ GT_C_OUT="${GT_C_OUT:-/gt_out}"
 # defaults to the architecture-of-record value.
 GT_AE_ARGS=(
   # ── Verify-axis structural edit-risk (gaps G03/G04) ──────────────────────────
-  # Default-OFF in-container (byte-identical legacy) — the HARNESS turns it ON.
-  # GT_VERIFY_STRUCTURAL_RISK must be present in --ae on EVERY path incl full.yml.
+  # The in-container CODE defaults this axis OFF (byte-identical legacy). This block's
+  # JOB is to turn it ON via --ae (that is the G03/G04 fix — the axis was dark in-
+  # container). Default ON here; a host-side export of GT_VERIFY_STRUCTURAL_RISK=0
+  # overrides back to OFF. SHOULD be present in --ae on every path; currently wired
+  # only where this block is sourced (codespace) — OWED on trial/full.yml (see SCOPE).
   --ae "GT_VERIFY_STRUCTURAL_RISK=${GT_VERIFY_STRUCTURAL_RISK:-1}"
   --ae "GT_VERIFY_RISK_TRIGGER=${GT_VERIFY_RISK_TRIGGER:-0.5}"
 

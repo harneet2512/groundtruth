@@ -131,16 +131,27 @@ echo "==============================================================="
 # deepswe_full.yml's contract (ServiceVolumeConfig type/source/target/read_only): bind
 # /tmp/gt_out -> /gt_out, point GT_C_OUT (the block's sink dir) at it, copy out after.
 HOST_GT_OUT=/tmp/gt_out
-mkdir -p "$HOST_GT_OUT"
+# chmod 777: the DeepSWE task-image user is arbitrary (varied/arbitrary uid) and the
+# in-container 8-dp telemetry producers (GT_ORACLE_EVENTS/GT_RUNTIME_LEDGER/
+# GT_HOOK_FIRE_COUNTS -> /gt_out/*) must be able to append. A host dir at the default
+# umask 0755 is owned by the codespace user and is effectively read-only to a different
+# in-container uid -> the writes fail, G11 silently does nothing, and the copy-out below
+# swallows the absence. Mirror deepswe_full.yml's contract exactly.
+mkdir -p "$HOST_GT_OUT" && chmod 777 "$HOST_GT_OUT"
 export GT_C_OUT=/gt_out
 MOUNTS_JSON="[{\"type\":\"bind\",\"source\":\"${HOST_GT_OUT}\",\"target\":\"/gt_out\",\"read_only\":false}"
-# G05 (full): MOUNT the gt-index binary into the container so L6 per-turn reindex actually
-# runs (the ~49MB binary exceeds the 16MB bake cap, so it cannot be base64-injected — a
+# G05 (full): MOUNT the gt-index binary into the container so L6 per-turn reindex can run
+# (the ~49MB binary exceeds the 16MB bake cap, so it cannot be base64-injected — a
 # read-only bind mount is the durable fix). gt_mini_patch defaults GT_INDEX_BIN=/tmp/gt-index.
+# NOTE: mounting the binary is necessary but NOT sufficient on this codespace path — it does
+# NOT inject a graph.db into the AGENT container (the brief reads the HOST db). In-container
+# _db_path() resolves /tmp/graph.db, which is absent here, so the reindex is guarded off
+# (os.path.isfile == False). The binary therefore runs L6 ONLY if an in-container graph.db
+# is later present; do not report it as unconditionally ENABLED.
 GT_INDEX_BIN_HOST="${REPO}/gt-index/gt-index-linux"
 if [ -x "$GT_INDEX_BIN_HOST" ]; then
   MOUNTS_JSON="${MOUNTS_JSON},{\"type\":\"bind\",\"source\":\"${GT_INDEX_BIN_HOST}\",\"target\":\"/tmp/gt-index\",\"read_only\":true}"
-  echo "  L6: mounting gt-index binary -> /tmp/gt-index (per-turn reindex ENABLED)"
+  echo "  L6: mounted gt-index binary -> /tmp/gt-index (reindex runs only when an in-container /tmp/graph.db is present)"
 else
   echo "  L6: no gt-index binary at ${GT_INDEX_BIN_HOST} — per-turn reindex DISABLED (fail-loud telemetry in-container)"
 fi
@@ -158,10 +169,22 @@ pier run \
   --ak config_file=artifact_deepswe/gt_integration/deepswe_gt_pier.yaml \
   2>&1 | tee "$LOG" | python -u scripts/log_relay.py
 # G11: recover the deep 8-dp telemetry the in-container producers wrote to the mount.
+# Loud: count what was recovered and WARN on zero — a silent empty copy means the
+# in-container writes never landed (e.g. the mount was not writable to the task uid),
+# which the bare `|| true` would otherwise hide and leave the run falsely green.
 mkdir -p /tmp/gt_debug
+_gt_recovered=0
 for _f in gt_oracle_events.jsonl gt_runtime_ledger.jsonl gt_hook_fire_counts.json; do
-  cp "$HOST_GT_OUT/$_f" /tmp/gt_debug/ 2>/dev/null || true
+  if [ -s "$HOST_GT_OUT/$_f" ]; then
+    cp "$HOST_GT_OUT/$_f" /tmp/gt_debug/ && _gt_recovered=$((_gt_recovered + 1))
+  fi
 done
+if [ "$_gt_recovered" -eq 0 ]; then
+  echo "  WARN: 0 deep-telemetry files recovered from $HOST_GT_OUT — in-container 8-dp" \
+       "sinks wrote nothing (check the mount is writable to the task uid; G11)." >&2
+else
+  echo "  G11: recovered $_gt_recovered/3 deep-telemetry sink(s) from the mount."
+fi
 
 echo ""
 echo "── outcome + deep metrics ──"

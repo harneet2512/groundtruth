@@ -12,6 +12,14 @@ from __future__ import annotations
 import sqlite3
 from collections import defaultdict
 
+# I2 (depth never enters reach/RANK): this proximity count feeds `anchor_prox` -> the
+# W_PROX rank term in v7_4_brief._total_score (W_PROX 0.05, boosted to 0.12 in the
+# function-level regime). Reuse the D5 single-source predicate (the same one G01 applied
+# to graph_reach) so promoted DEPTH edges (READS/WRITES/RAISES/CO_SERIALIZES/DATA_FLOW +
+# any promote_% provenance, all minted at conf 1.0) can't pass the >=0.7 gate, inflate the
+# anchor neighbor set, and shift rank. graph_localizer does NOT import this module (no cycle).
+from groundtruth.pretask.graph_localizer import _degree_edge_filter
+
 
 def compute_anchor_proximity(
     trusted_anchors: list[str],
@@ -43,6 +51,7 @@ def compute_anchor_proximity(
           AND n2.file_path IS NOT NULL
           AND n1.file_path != n2.file_path
           AND COALESCE(e.confidence, 0.5) >= 0.7
+          AND {_degree_edge_filter('e')}
         """,
         trusted_anchors,
     )

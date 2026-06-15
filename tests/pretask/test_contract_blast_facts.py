@@ -160,6 +160,44 @@ def test_blast_fact_excludes_edit_target_self_as_reader(tmp_path):
     assert "verified reader" not in line
 
 
+def test_blast_fact_reader_count_is_field_exact(tmp_path):
+    """G17 §2.9 field-exactness: the verified-reader count must count readers of the
+    SPECIFIC written field, not every reader of the owning class. A reader of a
+    DIFFERENT field of the same class must NOT inflate the count.
+
+    promote.go stores the bare field name in edge.metadata for both READS and WRITES, so
+    the reader query joins on `e.metadata = field`. Pre-fix (no metadata predicate) this
+    counted BOTH readers of the class -> "2 verified readers" (over-attribution). The
+    single-field fixtures above could not catch it. Field-exact -> exactly 1."""
+    db = str(tmp_path / "twofield.db")
+    conn = sqlite3.connect(db)
+    conn.executescript(_SCHEMA)
+    nodes = [
+        (10, "Class", "Counter", "", "counter.py", 1, 40, "class Counter:", "", 0, 0, "python", None),
+        (1, "Method", "increment", "", "counter.py", 5, 9, "def increment(self):", "", 0, 0, "python", 10),
+        (2, "Method", "value", "", "counter.py", 11, 13, "def value(self) -> int:", "int", 0, 0, "python", 10),
+        (5, "Method", "name", "", "counter.py", 15, 17, "def name(self) -> str:", "str", 0, 0, "python", 10),
+    ]
+    conn.executemany("INSERT INTO nodes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", nodes)
+    conn.execute(
+        "INSERT INTO properties (node_id,kind,value,line,confidence) VALUES (1,'guard_clause','raise: x',6,1.0)"
+    )
+    conn.executemany(
+        "INSERT INTO edges (source_id,target_id,type,resolution_method,confidence,metadata) "
+        "VALUES (?,?,?,?,?,?)",
+        [
+            (1, 10, "WRITES", "promote_write", 0.9, "_count"),     # increment writes _count
+            (2, 10, "READS", "promote_field_read", 0.9, "_count"),  # value reads _count  -> COUNTED
+            (5, 10, "READS", "promote_field_read", 0.9, "_label"),  # name reads a DIFFERENT field -> NOT counted
+        ],
+    )
+    conn.commit()
+    conn.close()
+    line = contract_line(db, "counter.py", ["increment"])
+    assert "scope writes to _count; 1 verified reader" in line
+    assert "2 verified readers" not in line
+
+
 # ── 2. I2 — DEPTH NEVER ENTERS RANK ─────────────────────────────────────────
 
 

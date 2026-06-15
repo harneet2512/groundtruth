@@ -1,3 +1,27 @@
+# Implementation Changelog — Session 2026-06-15 (adversarial MAX-LIPI re-review: 2 HIGH closed + 1 bonus incremental-path bug)
+
+Input: `docs/GT_GAPFIX_MAX_LIPI.md` (adversarial re-review of the §10 gap-fix wave). Closed both HIGH
+release-blockers and 10/11 MEDIUM/LOW/NIT; 1 deferred-optional. No task-testing — structural fixes +
+biting tests only. Detail: `gt_new.md` §10.1; `SESSION_SUMMARY.md` (top).
+
+| # | Sev | File(s) | Change | Proof |
+|---|---|---|---|---|
+| §2.1 | HIGH | `anchor_proximity.py` (+`tests/test_anchor_proximity_i2.py`) | W_PROX rank leak: apply D5 `_degree_edge_filter` to the 1-hop SELECT | mutation-checked RED/GREEN; rank-leak count→0 |
+| §2.2 | HIGH | `gt-index/cmd/gt-index/main.go` (+`inheritance_incremental_test.go`) | re-enable `-file` inheritanceMap; **+ fix 2nd bug**: restore fresh-node `ParentID` on the in-memory `nodeMeta` copy (CHA rungs were dead even with the map) | biting e2e (RED on either bug, GREEN on both); probe `name_match`→`inherited`; build exit 0 |
+| §2.3 | MED | `railway/codespace_deepswe_run.sh` | `chmod 777` telemetry mount + loud copy-out (warn on 0 recovered) | bash -n |
+| §2.4 | MED | `artifact_deepswe/gt_integration/gt_ae_block.sh` | honest downgrade of "single source of truth" — wired on codespace only; trial/full.yml OWED | bash -n |
+| §2.5 | LOW | `artifact_deepswe/gt_agent.py` | graph.db decode fail-closed: temp + `[ -s ]` + atomic mv (never a torn `/tmp/graph.db`) | f-string→bash -n |
+| §2.6 | LOW | `artifact_deepswe/gt_mini_patch.py` | correct false `.pyi`-matches-gt-index comment (`.pyi` is edit-detect parity only, graph-quiet) | py_compile |
+| §2.7 | LOW | `gt-index/internal/resolver/promote_test.go` | add PRECEDES cc>1 → 0.4/SPECULATIVE demotion test | passes; bites by exact-value assert |
+| §2.8 | LOW | `railway/codespace_deepswe_run.sh` | soften G05 "reindex ENABLED" echo (mount ≠ enabled w/o in-container graph) | bash -n |
+| §2.9 | LOW | `contract_map.py` (+`tests/pretask/test_contract_blast_facts.py`) | G17 reader-count field-EXACT (`AND e.metadata = ?`) + two-field test | 9 passed (was 8) |
+| §2.10 | NIT | `graph_reach.py` | drop unused `_PROMOTED_EDGE_TYPES` import (F401) | imports clean |
+| §2.12 | NIT | `gt_mini_patch.py` | remove redundant inner `global _l6_no_binary_warned` | py_compile |
+| §2.13 | NIT | `gt_ae_block.sh` | fix self-contradicting "Default-OFF" comment vs `:-1` | bash -n |
+| §2.11 | NIT | — | DEFERRED (optional; mutates cc semantics shared with DATA_FLOW) | — |
+
+---
+
 # Implementation Changelog — Session 2026-06-13 (later: oracle un-stub + depth-to-production + naming/CHA-XTA Py/Rust→Go/TS + localizer LIPI + RC5 oracle foundation + HYBRID data-plane/control-plane bulkhead)
 
 Diagnosis basis: reports 19–25 under

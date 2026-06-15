@@ -24,14 +24,12 @@ from typing import Optional
 # _total_score) AND the graph_expand candidate set. Per invariant I2 ("depth never
 # enters reach/RANK"), promoted DEPTH edges (READS/WRITES/RAISES/CO_SERIALIZES/
 # PRECEDES/DATA_FLOW + any `promote_%` provenance) must NEVER accrue reach_score or
-# be admitted as graph-expansion candidates. We reuse the D5 blacklist + predicate
-# from graph_localizer as the SINGLE SOURCE OF TRUTH (G18) so the depth-type set can
+# be admitted as graph-expansion candidates. We reuse the D5 degree predicate from
+# graph_localizer as the SINGLE SOURCE OF TRUTH (G18) — it already encapsulates the
+# promoted-type blacklist + the `promote_%` provenance check — so the depth-type set can
 # never drift between the localizer's degree filter and this reach BFS. (graph_reach
 # imports graph_localizer; graph_localizer does NOT import graph_reach — no cycle.)
-from groundtruth.pretask.graph_localizer import (
-    _PROMOTED_EDGE_TYPES,
-    _degree_edge_filter,
-)
+from groundtruth.pretask.graph_localizer import _degree_edge_filter
 
 # Edge type → reach weight (hand-set, not per-language)
 EDGE_TYPE_WEIGHT: dict[str, float] = {

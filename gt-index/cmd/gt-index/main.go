@@ -955,6 +955,19 @@ func runIncremental(root, relpath, dbPath string) error {
 		}
 		nn := n
 		nn.ID = newDBIDs[i]
+		// Restore the parent DB id. n.ParentID was zeroed at the insert above (line 921)
+		// and the DB row fixed up via UpdateParentIDTx — but THIS in-memory copy feeds
+		// BuildNodeMeta, which the self.method()/inherited-method rungs (Strategy 1.75,
+		// 1.94a, 2b) read as the caller's enclosing class. Left at 0, callerMeta.ParentID==0
+		// → those rungs cannot identify self's class → every inherited/typed-receiver call
+		// demotes to name_match on each `-file` reindex (the deeper half of the G09 gap:
+		// the inheritance map is necessary but the caller-class link is also required).
+		if plocal := parentLocal[i]; plocal > 0 {
+			pidx := int(plocal) - 1
+			if pidx >= 0 && pidx < len(newDBIDs) && newDBIDs[pidx] > 0 {
+				nn.ParentID = newDBIDs[pidx]
+			}
+		}
 		filteredNodes = append(filteredNodes, nn)
 		filteredIDs = append(filteredIDs, newDBIDs[i])
 	}
@@ -996,9 +1009,21 @@ func runIncremental(root, relpath, dbPath string) error {
 	// file's class nodes, and node file_path == SourceFile.Path (both relSlash), so
 	// resolveClass matches same-file then global. AbsPath="" → buildInheritanceMap
 	// reopens via filepath.Join(root, sf.Path), and the source tree is on disk here.
-	// TEMP-RED-CHECK: G09 wiring disabled to confirm the e2e test goes red.
-	_ = allFiles
-	_ = allLangs
+	// allFiles/allLangs are the PARALLEL distinct (file_path, language) rows
+	// (db.GetDistinctFilesAndLanguages, zipped by BuildFileMap above); buildInheritanceMap
+	// reads only sf.Language/Path/AbsPath, so reconstructing []walker.SourceFile from them
+	// is sufficient (AbsPath="" -> reopen via filepath.Join(root, sf.Path)).
+	inhFiles := make([]walker.SourceFile, 0, len(allFiles))
+	for i, fp := range allFiles {
+		lang := ""
+		if i < len(allLangs) {
+			lang = allLangs[i]
+		}
+		inhFiles = append(inhFiles, walker.SourceFile{Path: fp, Language: lang})
+	}
+	if inhMap := buildInheritanceMap(inhFiles, root, nameIndex, nodeMeta); len(inhMap) > 0 {
+		resolver.SetInheritanceMap(inhMap)
+	}
 
 	// T1 on the incremental path: build the declared-type receiver index from the
 	// reparsed file's `param` properties (NodeIdx -> pr.Nodes, parallel to newDBIDs),

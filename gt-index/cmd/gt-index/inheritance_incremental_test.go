@@ -42,10 +42,22 @@ func TestIncrementalReindexPreservesInheritedMethodResolution(t *testing.T) {
 
 	baseRel := "pkg/base.py"
 	childRel := "pkg/child.py"
+	otherRel := "pkg/other.py"
 	// Base defines save(); Child(Base) inherits it and CALLS it via self.save().
-	// The self.save() call only resolves cross-file through the inheritance chain.
+	// CRITICAL for the test to BITE: a SECOND, unrelated class (Other) also defines
+	// save(). That makes `save` AMBIGUOUS (2 candidates across files), so the resolver's
+	// unique-name rung CANNOT resolve self.save() on its own — only the class-hierarchy
+	// (inheritance map) disambiguates Child.self.save -> Base.save specifically. Without
+	// the ambiguity the name is globally unique and a uniqueness rung resolves it even
+	// with inheritanceMap == nil, which is exactly why the prior single-`save` fixture
+	// passed on disabled wiring (tautological). With ambiguity, nil inheritanceMap ->
+	// name_match (cc>1) or a wrong-class target, both of which fail the assertions below.
 	if err := os.WriteFile(filepath.Join(repo, baseRel),
 		[]byte("class Base:\n    def save(self):\n        return 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, otherRel),
+		[]byte("class Other:\n    def save(self):\n        return 2\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(repo, childRel),
@@ -77,6 +89,17 @@ func TestIncrementalReindexPreservesInheritedMethodResolution(t *testing.T) {
 		t.Fatalf("full index did not produce a self.save() -> Base.save edge at all (test fixture invalid)")
 	} else if m == "name_match" {
 		t.Fatalf("full index resolved self.save() as name_match (expected an inheritance-chain method); fixture/resolver mismatch")
+	}
+
+	// CRITICAL for the test to BITE: the incremental `-file` path SHA-256 short-circuits
+	// (main.go:843) when the file's hash is unchanged — so reindexing the byte-identical
+	// child would no-op and leave the full-index edge untouched (the prior tautology: the
+	// resolution path never ran). MODIFY child.py first (add a method) so the hash differs
+	// and the incremental resolver ACTUALLY re-resolves self.save(). The self.save() call
+	// is preserved, so the edge is rebuilt — with inheritanceMap on the path or not.
+	if err := os.WriteFile(filepath.Join(repo, childRel),
+		[]byte("from pkg.base import Base\n\n\nclass Child(Base):\n    def run(self):\n        return self.save()\n\n    def extra(self):\n        return 0\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 
 	// Pass 2: INCREMENTAL reindex of the CHILD file. Pre-fix this rebuilt the child's

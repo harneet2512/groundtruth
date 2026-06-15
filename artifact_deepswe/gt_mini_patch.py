@@ -379,11 +379,14 @@ _cochange_fired = False
 # it leaked into the agent's context at MSG 3 on 10/10 PATH B tasks).
 _marker_sent = False
 
-# Source-file extensions GT indexes (matches gt-index language set).
-# DRY: must stay a superset-agreement with _SOURCE_EXTS (the obligation-credit set) —
-# they drifted (_SRC_EXT lacked .pyi), so a structured/bash edit to a .pyi stub was NOT
-# classified as a source edit and its contract/evidence/cochange never fired. Aligned;
-# .mjs/.cjs added to both as the modern JS module forms gt-index also indexes.
+# Source-file EDIT-DETECTION extensions (which writes count as a source edit). Most align
+# with gt-index's indexed language set; .mjs/.cjs are correct (javascript.go indexes them).
+# DRY: kept in superset-agreement with _SOURCE_EXTS (the obligation-credit set).
+# CAVEAT on .pyi: gt-index's Python spec indexes ONLY `.py` (specs/python.go:10) — `.pyi`
+# stubs are NEVER parsed into graph nodes. `.pyi` is included here for edit-detection /
+# sensor parity ONLY; a `.pyi` edit is deliberately GRAPH-QUIET — its contract/evidence/
+# cochange producers query graph.db, find no node, and stay silent (correct-or-quiet). Do
+# not read this list as an indexing alignment for .pyi.
 _SRC_EXT = (
     ".py", ".pyi", ".go", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".rs",
     ".java", ".rb", ".c", ".cc", ".cpp", ".h", ".hpp", ".cs", ".php", ".kt",
@@ -2664,7 +2667,7 @@ def _invalidate_on_edit(rel: str, root: str) -> None:
             # the agent ADDS this trajectory won't appear. Surface the gap ONCE as
             # telemetry so it's diagnosable, instead of a silent no-op that reads as
             # "L6 fired." (gt_new §10 owed G05: ship the binary via runtime mount/cp.)
-            global _l6_no_binary_warned
+            # (`global _l6_no_binary_warned` already declared at the function top.)
             if not _l6_no_binary_warned:
                 _l6_no_binary_warned = True
                 print(

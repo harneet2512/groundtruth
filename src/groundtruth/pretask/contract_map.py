@@ -355,17 +355,22 @@ def _blast_facts(
         seen_fields.add(field)
         if len(out) >= _MAX_BLAST_FIELDS:
             break
-        # Verified readers of the SAME owning class (distinct reader methods),
-        # excluding the edit-target's own nodes so it never counts itself.
+        # Verified readers of THIS SPECIFIC field (distinct reader methods), excluding the
+        # edit-target's own nodes so it never counts itself. promote.go stores the bare
+        # field name in edge.metadata for both READS (promote_field_read) and WRITES
+        # (promote_write), so `e.metadata = field` makes the count field-EXACT. Without it
+        # the query counted readers of ANY field of the owning class, over-attributing
+        # class-wide readers to this one field when the render says "writes to <field>;
+        # N verified readers" (a multi-field class would overstate field-level precision).
         r_conf = "AND COALESCE(e.confidence, 1.0) >= ?" if has_conf else ""
-        r_params: list[object] = [owner_class_id]
+        r_params: list[object] = [owner_class_id, field]
         if has_conf:
             r_params.append(_BLAST_CONF_FLOOR)
         r_params.extend(node_ids)
         try:
             row = conn.execute(
                 f"SELECT COUNT(DISTINCT e.source_id) FROM edges e "
-                f"WHERE e.target_id = ? AND e.type = 'READS' {r_conf} "
+                f"WHERE e.target_id = ? AND e.type = 'READS' AND e.metadata = ? {r_conf} "
                 f"AND e.source_id NOT IN ({placeholders})",
                 r_params,
             ).fetchone()

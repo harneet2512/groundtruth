@@ -718,12 +718,20 @@ def _inject_steps() -> list[InstallStep]:
                 _op = ">" if _i == 0 else ">>"
                 steps.append(InstallStep(user="root",
                                          run=f'echo "{_chunk}" {_op} {_b64name}'))
+            # Fail-closed on the ARTIFACT: decode to a temp, assert non-empty, then
+            # atomically mv into place. A corrupt/partial chunk (or gunzip error) leaves
+            # NO /tmp/graph.db at all — never a 0-byte/torn file that _db_path()'s
+            # os.path.isfile() would return as if it were a real db. The `||` still keeps
+            # the build green (the agent degrades to no-graph = correct-or-quiet), but the
+            # torn-db window is closed by construction (atomic mv), not by discipline.
             steps.append(InstallStep(user="root", run=(
-                f"base64 -d {_b64name} | gunzip > /tmp/graph.db "
-                f"&& chmod 644 /tmp/graph.db && rm -f {_b64name} "
+                f"base64 -d {_b64name} | gunzip > /tmp/graph.db.tmp "
+                f"&& [ -s /tmp/graph.db.tmp ] "
+                f"&& mv /tmp/graph.db.tmp /tmp/graph.db && chmod 644 /tmp/graph.db && rm -f {_b64name} "
                 f'&& echo "GT: injected host graph.db -> /tmp/graph.db '
                 f'($(wc -c </tmp/graph.db) bytes)" >&2 '
-                f"|| echo 'GT: graph.db injection failed' >&2")))
+                f"|| {{ rm -f /tmp/graph.db.tmp /tmp/graph.db {_b64name}; "
+                f"echo 'GT: graph.db injection FAILED (decode/gunzip/empty) — agent degrades to no-graph' >&2; }}")))
         else:
             steps.append(InstallStep(user="root", run=_BUILD_GRAPH_DB))
 

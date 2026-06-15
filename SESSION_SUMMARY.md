@@ -1,5 +1,47 @@
 # Session Summary
 
+## Date / Time — 2026-06-15 — Adversarial MAX-LIPI re-review: 2 HIGH defects closed + 1 bonus bug
+
+**Objective:** resolve the gaps the adversarial re-review (`docs/GT_GAPFIX_MAX_LIPI.md`) found in the
+§10 gap-fix wave — the wave's self-verification had called things "resolved + verified" that were not.
+No task-testing (per the no-benchmaxxing mandate); every fix is a structural code change + biting test.
+
+**Result (full write-up: `gt_new.md` §10.1):**
+- **HIGH #1 — W_PROX I2 rank leak (RELEASE BLOCKER): FIXED + PINNED.** G01 typed the reach term but its
+  sibling `anchor_proximity.compute_anchor_proximity` (feeds the `W_PROX` rank term, 0.05→0.12) gated
+  only on `confidence>=0.7` — the 5 promoted DEPTH classes (conf 1.0, cross-file) would shift rank once
+  promotion ships. Applied the D5 `_degree_edge_filter`; `tests/test_anchor_proximity_i2.py`
+  mutation-checked (RED w/o predicate, GREEN with). **Rank-leak count → 0.**
+- **HIGH #2 — G09 `-file` inheritanceMap DISABLED in HEAD: RE-ENABLED + a SECOND independent bug
+  found.** A `TEMP-RED-CHECK` had left the wiring stubbed (`_ = allFiles`); the §10 "resolved+verified"
+  claim was false against the binary. Re-enabled (reconstruct `[]walker.SourceFile` from
+  `allFiles`/`allLangs`, build + `SetInheritanceMap` before `Resolve`). **The fable-mode mutation
+  check then refused to go green even with the map** — exposing that the incremental path zeroes the
+  fresh nodes' `ParentID` and never restores it on the in-memory copy fed to `BuildNodeMeta` →
+  `callerMeta.ParentID==0` → CHA self.method/inherited rungs dead regardless of the map. Fixed the
+  ParentID restore. The e2e test was tautological (single-`save` fixture + byte-identical child → SHA
+  short-circuit, passed on disabled code); rebuilt to BITE (ambiguous competing `Other.save` + modify
+  child before reindex) — RED on either bug alone, GREEN only with both (probe: `name_match`→`inherited`).
+- **MEDIUM/LOW/NIT — 10 resolved, 1 deferred-optional (§2.11, shared cc semantics).** chmod 777 + loud
+  telemetry copy-out (§2.3); honest downgrade of `gt_ae_block.sh` single-source claim, trial/full.yml
+  wiring OWED (§2.4); graph.db decode made fail-closed (temp+non-empty+atomic mv) (§2.5); corrected the
+  false `.pyi`-matches-gt-index comment (§2.6); PRECEDES cc>1 SPECULATIVE-demotion test (§2.7); softened
+  G05 "ENABLED" echo (§2.8); G17 reader-count made field-EXACT + two-field test (§2.9); dropped unused
+  import (§2.10); removed redundant `global` (§2.12); fixed Default-OFF comment (§2.13).
+
+**Gates:** `gt-index` build exit 0; Go resolver+cmd suites green (lone `TestRoutePatternMatching/comment`
+fail is PRE-EXISTING/orthogonal); 31 py tests (contract/brief/I2) green; bash -n + py_compile clean;
+no import cycle. **Files:** `main.go`, `promote_test.go`, `inheritance_incremental_test.go`,
+`anchor_proximity.py`(+test), `graph_reach.py`, `contract_map.py`(+test), `gt_agent.py`,
+`gt_mini_patch.py`, `gt_ae_block.sh`, `codespace_deepswe_run.sh`, `gt_new.md`, `GT_GAPFIX_MAX_LIPI.md`.
+
+**OWED (not closeable statically this session):** live agent witness (gt-evidence 0→>0, no-task-testing
+constraint); rebuild `gt-index/gt-index-linux` (predates G02/G09/PRECEDES/ParentID — CGO linux
+cross-build, infra); actually source `gt_ae_block.sh` from trial/full.yml (paid-run change, verify-gated);
+§2.11 same-file cc scoping (optional). Uncommitted — awaiting go-ahead to commit/push to hbali-stack.
+
+---
+
 ## Date / Time
 2026-06-13 (later) — Oracle un-stub (DARK-binary fix) + Graph-DEPTH to production + NAMING
 residual/CHA-XTA matcher (Py/Rust→Go/TS) + localizer LIPI + RC5 oracle apply_patch foundation +
