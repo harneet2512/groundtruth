@@ -382,9 +382,22 @@ def check_semantic_embedder(root: str) -> tuple[bool, str]:
 
     # Real load + embed via the shared loader (offline ONNX only — no HF at runtime).
     try:
-        from groundtruth.memory.enrich.embed import embed_query, get_embedding_model
+        from groundtruth.memory.enrich.embed import (
+            _default_embed_dim,
+            _default_embed_model,
+            embed_query,
+            get_embedding_model,
+        )
         model = get_embedding_model()
-        vec = embed_query("function returns user id error handling")
+        # Probe the CONFIGURED model (gte-modernbert by default), NOT embed_query's e5
+        # default — otherwise preflight validates a DIFFERENT embedder than the run uses
+        # (the half-on "worthless numbers" trap BRIEFING.md §5 forbids), and a corrupt/
+        # absent e5 fails the gate even when the configured gte loads fine.
+        vec = embed_query(
+            "function returns user id error handling",
+            _default_embed_model(),
+            _default_embed_dim(),
+        )
     except Exception as e:  # FileNotFoundError (no baked model), import error, etc.
         msg = (f"embedder did NOT load: {type(e).__name__}: {str(e)[:160]} "
                f"-> semantic ranker OFF (GT_FORCE_ONNX_EMBEDDER={force_onnx})")
