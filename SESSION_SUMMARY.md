@@ -535,3 +535,40 @@ proceed to ts/js.
 
 **Next allowed action:** (user) restore hbali-stack billing → re-run rust on the ONE substrate → confirm
 `lsp>0`/det_pct↑ → trajectory §4 → ts run → js run → converge. No new code needed for rust before the witness.
+
+---
+
+## 2026-06-15 (cont. 2) — rust LSP gap CLOSED + WITNESSED LIVE (billing moved to hbali-stack)
+
+**Branch:** gt-trial **Commits:** `fa728e46` (toolchain) → `da8f87a4` (GT_SUBSTRATE_ONLY) → `fa6b4343` (FIX 1+2)
+
+**Billing root-caused + fixed:** the dead codespace billed `harneet2512` (active gh account), not
+hbali-stack — that's why it hit HTTP 402. Switched active account to hbali-stack, granted it the
+`codespace` scope (device flow), pushed gt-trial to hbali, created codespace `psychic-barnacle`
+(*"paid for by hbali-stack"*). Memory: [[feedback_codespaces_bill_hbali_stack]].
+
+**THE WITNESS (fd-deterministic-multi-key-sorting, $0 substrate-only):**
+rust `lsp` edges **0 → 186**, det_pct **65.7% → 87.59% → 90.21%**, `warm_probe_ok` False→**True**,
+`project_ready` False(20s)→**True(4.2s)**, verdict LSP_WARN_NOT_READY → **LSP_ACTIVE_VALID**.
+The §17.3 dark-LSP gap — dark the entire project history — is live and converting on rust.
+
+**Three defects closed (LIPI avenue-4, plumbing):**
+1. cargo not on PATH (`fa728e46`) → `cargo metadata` exit 127 → no project model → lsp=0.
+2. **rustup-shim shadow (`fa6b4343` FIX 1 — a regression #1 introduced):** CARGO_HOME/bin holds
+   `rust-analyzer -> rustup` shims; the toolchain has no rust-analyzer component → shim exits 1
+   ("Unknown binary") and shadowed the working standalone. Dropped cargo/bin from PATH.
+3. **warm probe gave up before cold RA indexed (`fa6b4343` FIX 2):** RA indexes silently without
+   `window.workDoneProgress` advertised → readiness wait returned at its 5s no-token grace.
+   Advertised it → RA emits Fetching→Building CrateGraph→Roots Scanned→Indexing → ready in 4.2s.
+
+**Tooling:** added `GT_SUBSTRATE_ONLY` (witness graph/LSP/embedder at $0, no paid agent) — let the
+LSP fix be witnessed without an agent run. Both LSP fixes mirrored to the GHA path (deepswe_full.yml).
+
+**Metrics before:** rust lsp=0, det_pct 87.59%, warm_probe_ok=False.
+**Metrics after:** rust lsp=186, det_pct 90.21%, warm_probe_ok=True, LSP_ACTIVE_VALID. **METRICS CHANGED.**
+
+**In flight:** 4-language generalization batch ($0 substrate) — pest(rust#2) + abs(go) + awilix(ts) +
+csstree(js) — to confirm the LSP fix holds on a 2nd rust project AND FIX 2 doesn't regress go/ts/js.
+
+**Next:** read the gen batch → then paid agent runs (cost_limit $3/task) for trajectory §4 on
+rust/ts/js → converge.
