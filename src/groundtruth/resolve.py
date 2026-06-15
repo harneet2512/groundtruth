@@ -467,6 +467,13 @@ def _write_lsp_certificate(cert: dict) -> str:
 # Total wall-clock budget for the ONE-TIME project-readiness barrier (below). Bounded so
 # a permanently-broken project can never stall the pass; env-overridable for slow CI.
 _READY_BUDGET_S_DEFAULT = 20.0
+# Per-server readiness budget: rust-analyzer indexes a large cargo workspace FAR slower than
+# gopls/pyright/tsserver (live: boa-* converted 0 edges at 20s, cert="still indexing the
+# workspace - readiness budget too short for this project size" -> 11517 method calls stayed
+# name_match, det_pct 65.7% vs go 95.2%). The barrier returns AS SOON AS ready, so a higher
+# budget NEVER slows a fast server - it only lets a slow indexer finish. Generalized per-server
+# (keyed by the server binary basename), still overridable by GT_LSP_READY_BUDGET_S.
+_READY_BUDGET_S_BY_SERVER = {"rust-analyzer": 180.0}
 
 
 def _note_failure_detail(stats: dict, detail: str) -> None:
@@ -490,7 +497,7 @@ def _note_failure_detail(stats: dict, detail: str) -> None:
 
 
 async def _await_project_ready(
-    client, uri: str, line: int, col: int, *, budget_s: float | None = None
+    client, uri: str, line: int, col: int, *, budget_s: float | None = None, server_cmd: str = ""
 ):
     """Readiness barrier for LAZILY-LOADING language servers — run ONCE per pass, on
     the FIRST textDocument/definition (i.e. right after the first didOpen).
@@ -524,10 +531,16 @@ async def _await_project_ready(
     from groundtruth.utils.result import GroundTruthError
 
     if budget_s is None:
-        try:
-            budget_s = float(os.environ.get("GT_LSP_READY_BUDGET_S", "") or _READY_BUDGET_S_DEFAULT)
-        except ValueError:
-            budget_s = _READY_BUDGET_S_DEFAULT
+        _env = os.environ.get("GT_LSP_READY_BUDGET_S", "")
+        if _env:
+            try:
+                budget_s = float(_env)
+            except ValueError:
+                budget_s = _READY_BUDGET_S_DEFAULT
+        else:
+            # per-server default (rust-analyzer gets a longer indexing budget); else 20s.
+            budget_s = _READY_BUDGET_S_BY_SERVER.get(
+                os.path.basename(server_cmd or ""), _READY_BUDGET_S_DEFAULT)
     t0 = time.time()
     deadline = t0 + max(0.0, float(budget_s))
 
@@ -807,7 +820,8 @@ async def _resolve_edges(
                 # reused as THIS edge's answer (no double query).
                 _barrier_pending = False
                 def_result, _ready_ms, _ready_ok, _ready_attempts = await _await_project_ready(
-                    client, uri, source_line - 1, col
+                    client, uri, source_line - 1, col,
+                    server_cmd=(config.command[0] if config and getattr(config, "command", None) else ""),
                 )
                 stats["project_ready"] = bool(_ready_ok)
                 stats["project_ready_wait_ms"] = float(_ready_ms)

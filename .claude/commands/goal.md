@@ -53,9 +53,25 @@ where each `<verdict>` is one of `·`(not run) `DEL`(delivered only) `gt_caused`
      otherwise (the audit is identical for all 5) → the fix is 5-language-generalized, never a
      per-language patch.
 
+## Convergence — the fix loop (the audit DRIVES fixes, it is not a report)
+
+Each run's audit (5a) exists to **drive fixes**, not to narrate. After a run:
+- **FIX every gap it surfaced, generalized** (back to step 2) — a gap is a code/architecture defect,
+  not a footnote. Mutation-check the fix; LIPI; commit.
+- The **NEXT language's run re-verifies the fix held** AND surfaces the next gap. Iterate across all
+  5 languages.
+- **A gap that reappears on a later language = the fix was NOT general** → fix it generally (one
+  language-agnostic change), never per-language. That is the whole point: a per-language patch is
+  benchmaxxing and fails the goal.
+
+**CONVERGENCE = DONE:** the loop runs all 5 languages; by the FINAL run every gap must be fixed —
+**ZERO gaps on all 5 languages, same substrate, same audit.** That fixpoint IS the proof the
+substrate fixes work and generalize. If the last run still surfaces a gap, the loop is not done —
+fix it and re-run the affected language.
+
 ## Definition of done
 
 Parity is proven ONLY when, on the ONE substrate, the live trajectory shows GT behaving as `gt_main`
 specifies **for all 5 languages** — code parity (logical) AND working parity (the trajectory).
 Green tests, clean compiles, or resolves alone NEVER count. The same substrate, all five, audited
-the same way.
+the same way, **converged to zero gaps**.
