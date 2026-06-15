@@ -443,13 +443,28 @@ def _top_function_names(
     return [row[0] for row in rows[:limit]]
 
 
+_TEST_DIR_SEGMENTS = frozenset({
+    "test", "tests", "__tests__", "__test__", "spec", "specs", "e2e", "testing", "test-utils",
+})
+
+
 def _is_test_path(path: str) -> bool:
-    """True if a path is a test file (swap-invariant: such paths are never surfaced to the agent)."""
+    """True if a path is a test file (swap-invariant: such paths are never surfaced to
+    the agent — it is told not to edit tests). Checks DIRECTORY segments first: a
+    top-level ``test/lexer.js`` (csstree — relative, no leading slash, and a basename
+    with NO test marker) is a test file by its DIR, which the prior ``"/test/" in p``
+    substring missed (it required a leading slash). Then basename markers."""
     p = (path or "").replace("\\", "/").lower()
-    bn = p.rsplit("/", 1)[-1]
+    if p.startswith("./"):
+        p = p[2:]
+    segs = [s for s in p.split("/") if s]
+    if not segs:
+        return False
+    if any(seg in _TEST_DIR_SEGMENTS for seg in segs[:-1]):
+        return True
+    bn = segs[-1]
     return (
-        "/test/" in p or "/tests/" in p or "/__tests__/" in p
-        or bn.startswith("test_") or bn.startswith("test")
+        bn.startswith("test_") or bn.startswith("test")
         or bn.endswith("_test.py") or bn.endswith("_test.go") or bn.endswith("_test.rs")
         or ".test." in bn or ".spec." in bn or bn.endswith("test.java")
     )

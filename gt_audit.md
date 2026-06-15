@@ -91,6 +91,24 @@ clean POSITIVE GT footprint this batch: it correctly broke a blind-rewrite loop 
    not a defect. The readiness question is whether the brief LAUNDERS any name_match as a fact — owed
    to the trajectory read (the pending _edge_conf_clause / _distinct_files gate findings).
 
+### TASK: fastapi-implicit-head-options (Python) — added to batch 2026-06-15
+
+| Component | Desired | Current (read from run) | Flag |
+|---|---|---|---|
+| graph.db substrate | built, resolved | 5140 nodes / 5119 edges; assertions 4528/1721; fts5 5140 rows, 963 hits | OK |
+| resolver / det_pct | facts ≥ floor | verified_ratio **0.77690955** | OK |
+| LSP precision pass | convert residual | **effective_work 183, corrected 25**, deleted 0; scoped_source_files **0**; verdict LSP_ACTIVE_VALID | GAP (scoped=0; B3) |
+| embedder | 768-d semantic | dim **768**, semantic=True | OK |
+| localization | gold in set | medium; fastapi/applications.py #1, fastapi/routing.py #2 (correct-task) | OK |
+| brief | correct-task | fastapi symbols (FastAPI/add_api_route/APIRouter), not contaminated | OK |
+| delivery layers | per-turn, consumed | §4.1 read OWED (trajectory archived py_substrate.tgz) | PENDING |
+| OUTCOME | right trajectory | reward 0; f2p **18/43**; p2p **3134/3134 (1.0)**; partial **0.9921**; 251 steps; has_patch=True | RIGHT-TRAJECTORY |
+
+**Read:** third right-trajectory witness — broke ZERO of 3134 existing tests, passed 42% of the new tests,
+on the correct-task brief. Telemetry note: deep_metrics logged `lsp=pyright/not_observed_in_log` but the
+cert records effective_work=183 / corrected=25 — the B2 telemetry fix (committed 64e71394) corrects exactly
+this; curly ran on the pre-fix gt_deep_metrics.py.
+
 ## DELIVERY-LAYER BUGS (from the chronological trajectory read — the real payload)
 
 - **BUG-A [P1, generalized, BOTH langs] scope/cochange surface FORBIDDEN test files.** TS consensus

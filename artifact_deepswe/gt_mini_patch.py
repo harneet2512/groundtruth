@@ -334,6 +334,58 @@ def _is_repo_source_path(fp: str) -> bool:
     return low.endswith(_SOURCE_EXTS)
 
 
+# DELIVERY-SURFACE gate: a TEST file or a NON-SOURCE/demo dir is never surfaced to
+# the agent as in-scope context. The agent is told "DO NOT MODIFY tests"; a
+# <gt-scope> or [WITNESS] line that names a test file (witnessed: the awilix
+# __tests__/awilix.test.ts scope leak) or an examples/ demo file (witnessed: the
+# csstree [WITNESS] getStuff called by examples/simple/.../functionalService.js)
+# is noise that misdirects. Generalized (any repo/language) — DIRECTORY-SEGMENT
+# match, never a '/test/' substring (a relative top-level 'test/lexer.js' has no
+# leading slash but is still a test dir). Mirrors v1r_brief._is_test_path's
+# segment approach for the test half; the demo/non-source half extends it.
+# Pure function, no deps (do NOT import across the package boundary).
+_TEST_DIR_SEGMENTS_LOCAL: frozenset[str] = frozenset({
+    "test", "tests", "__tests__", "__test__", "spec", "specs", "e2e", "testing",
+})
+_DEMO_NONSOURCE_DIR_SEGMENTS_LOCAL: frozenset[str] = frozenset({
+    "examples", "example", "demo", "demos", "sample", "samples", "fixtures",
+    "fixture", "docs", "doc", "benchmark", "benchmarks", "vendor",
+    "node_modules", "dist", "build",
+})
+
+
+def _is_test_or_demo_path(path: str) -> bool:
+    """True when ``path`` is a TEST file or lives under a NON-SOURCE/demo dir.
+
+    Checks DIRECTORY SEGMENTS (split on '/', after normalizing backslashes,
+    lowercasing, and stripping a leading './'), NOT a substring like '/test/'
+    (a relative top-level ``test/lexer.js`` has no leading slash and must still
+    match). Test = any dir segment in {test, tests, __tests__, __test__, spec,
+    specs, e2e, testing} OR a basename matching test_*/*_test.*/*.test.*/
+    *.spec.*. Demo/non-source = any dir segment in {examples, example, demo,
+    demos, sample, samples, fixtures, fixture, docs, doc, benchmark, benchmarks,
+    vendor, node_modules, dist, build}. Correct-or-quiet: such a path is never a
+    delivered scope/witness fact."""
+    p = (path or "").replace("\\", "/").lower()
+    if p.startswith("./"):
+        p = p[2:]
+    segs = [s for s in p.split("/") if s]
+    if not segs:
+        return False
+    dir_segs = segs[:-1]
+    if any(s in _TEST_DIR_SEGMENTS_LOCAL for s in dir_segs):
+        return True
+    if any(s in _DEMO_NONSOURCE_DIR_SEGMENTS_LOCAL for s in dir_segs):
+        return True
+    bn = segs[-1]
+    return (
+        bn.startswith("test_")
+        or "_test." in bn
+        or ".test." in bn
+        or ".spec." in bn
+    )
+
+
 # per-file-once dedup, keyed (kind, relpath)
 _seen: set[tuple[str, str]] = set()
 # Layer-A consensus fires once per run (first source-view), like the OH wrapper.
@@ -1775,6 +1827,11 @@ def _resolved_witnesses_for_file(con, file_path: str, repo_root: str, max_each: 
             # builtin/dunder-shadow target is never a delivered [WITNESS] fact.
             if _is_delivery_excluded(caller_file or "", repo_root):
                 continue
+            # 2026-06-15: a caller in a TEST file or a demo/non-source dir is not
+            # a real-source witness (witnessed examples/.../functionalService.js
+            # leak); correct-or-quiet — skip the whole row, no partial line.
+            if _is_test_or_demo_path(caller_file or ""):
+                continue
             if _is_builtin_shadow_name(target_name or ""):
                 continue
             # 2026-06-10 cross-language disqualifier (boa [57]): a caller in a
@@ -1813,6 +1870,10 @@ def _resolved_witnesses_for_file(con, file_path: str, repo_root: str, max_each: 
             # 2026-06-10 fact-filter: vendored/minified callee files and
             # builtin/dunder-shadow callee names are never [WITNESS] facts.
             if _is_delivery_excluded(callee_file or "", repo_root):
+                continue
+            # 2026-06-15: a callee defined in a TEST file or a demo/non-source
+            # dir is not a real-source witness; correct-or-quiet — skip the row.
+            if _is_test_or_demo_path(callee_file or ""):
                 continue
             if _is_builtin_shadow_name(callee_name or ""):
                 continue
@@ -2194,7 +2255,11 @@ def _consensus_block(rel: str, root: str) -> str:
                     # 2026-06-10 fact-filter: vendored/minified/generated
                     # neighbours are never delivered scope; nor cross-language
                     # "neighbours" (not a real call edge — boa [57]).
+                    # 2026-06-15: nor a TEST file or a demo/non-source dir — the
+                    # agent is told not to edit tests, and an examples/ demo is
+                    # not real source (witnessed __tests__/awilix.test.ts leak).
                     if (fp and fp not in scope and not _is_vendored_path(fp)
+                            and not _is_test_or_demo_path(fp)
                             and not _is_cross_language_pair(_l1, _l2)):
                         scope.append(fp)
             finally:
