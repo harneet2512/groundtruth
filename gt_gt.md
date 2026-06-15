@@ -88,7 +88,7 @@ resolution_method, confidence, **trust_tier**, **candidate_count**, **evidence_t
 | **CALLS** | all | 0.2–1.0 (per the ladder below) |
 | **CONTAINS** | all (structural) | 1.0, CERTIFIED |
 | **EXTENDS** | py/js/ts/java/kotlin/go/rust | 1.0 |
-| **IMPLEMENTS** | js/ts/java/kotlin 1.0; **Go CHA 0.6–0.85** (below) | 0.6–1.0 |
+| **IMPLEMENTS** | js/ts/java/kotlin 1.0; **Go CHA 0.6–0.85** (below), plus a 0.8 return-interface path (`goReturnInterfaceRe`) | 0.6–1.0 |
 | **COMPOSES** | JS/TS only (JSX) | 0.9 |
 | **RE_EXPORTS** | JS/TS only (barrels) | 1.0 |
 | **HANDLES_ROUTE** | **Python (4c `decorator_route`) only** | 0.95 |
@@ -113,9 +113,10 @@ ECOOP'95) → **1.94** single/few-implementor
 the receiver, so it can never be CERTIFIED) → **1.95** type-flow qualified (0.9) → **1.96**
 assignment-flow (PyCG ICSE 2021) → **1.97** return-type bridging → **1.98** unique-method-class
 (0.85) → **last-chance gate** (below) → **2** name_match fallback (**2+ candidates ONLY**:
-==2→0.6, ≤5→0.4, else 0.2 — **the cc≤1→0.9 row of the old table never occurs on the full
-path**: a single unqualified candidate is 1.9 `verified_unique` 0.95; a single qualified-
-unresolved candidate is the last-chance demote).
+==2→0.6, ≤5→0.4, else 0.2 — **the cc≤1→0.6 row of the old table (the old doc said 0.9; the
+code's `computeConfidence` returns 0.6 for candidateCount≤1) never occurs on the full
+path** so the value was both wrong and unreachable (harmless): a single unqualified candidate
+is 1.9 `verified_unique` 0.95; a single qualified-unresolved candidate is the last-chance demote).
 
 **The 2 drop/demote gates (NEW order, `10368a2f` #B5):** a QUALIFIED call now reaches the
 type-aware rungs (1.93/1.94a/1.95/1.96/1.97) **FIRST**; only after every receiver-typing rung
@@ -141,9 +142,10 @@ Previously this demote fired BEFORE 1.93–1.98 and starved e.g. `command.run()`
 > `ec20d603` landed Python + Rust **colon-annotation** fields only (Go space-separated `Field *Type`
 > + TS access-modifier fields were NOT parsed and the shape gate accepted only `self.`/`this.`, so
 > the rung ABSTAINED on Go/TS); `71d66378` then **extended 2b to Go struct fields** (bare-name
-> types, via `goStructFieldList` — **package-qualified field types `Cache *cache.Store` still
-> ABSTAIN**, correct-or-quiet under-resolution, per the 71d66378 LIPI) **+ TS access-modifier
-> fields** (stripping `private`/`public`/`protected`/
+> types, via `goStructField` — for a package-qualified field type `Cache *cache.Store` 2b
+> **strips the package qualifier (`stripPkgQualifier`) to the tail type name, then resolves if an
+> internal class matches, else abstains** (correct-or-quiet under-resolution), per the 71d66378
+> LIPI) **+ TS access-modifier fields** (stripping `private`/`public`/`protected`/
 > `readonly`) and relaxed the shape gate to accept Go's receiver var — closing the DeepSWE
 > non-Python generalization gap for declared-field-type resolution. **NON-OVERCLAIM:** enabling-
 > substrate, NOT a flip claim; held-out real-graph proof + live witness still OWED. Open residuals
@@ -247,7 +249,9 @@ Plus **co-change** (git), **closure** (transitive reach), **FTS5** (BM25 retriev
 > **consumer fact surface is the operative guard**. Fix (gt_mini_patch.py + v1r_brief.py, fact-filter
 > lines only): three composited signals — path-class (`/extern/`,`/vendor/`,`/third_party/`,
 > `/node_modules/`,`/dist/`,`/_generated/`,`*.min.js`, protobuf/codegen markers — extends the
-> localizer's `_is_generated` W_GEN demote from ranking to DELIVERY), content-class (mean non-blank
+> localizer's inline generated-file demote (−0.5 via `_is_generated`) and test demote (−0.4 via
+> `_is_test_file`), applied post-composite — there is no `W_GEN` constant — from ranking to
+> DELIVERY), content-class (mean non-blank
 > line length > 200 = minified), and name-class (builtin/dunder set mirroring resolver.go
 > `builtinMethodNames`/`strongBuiltinMethodNames` + shadowable Python/JS/Go/Rust builtins) — applied
 > to every delivered fact: `[WITNESS]`, `[CALLERS]` (incl. the recomputed verified-caller COUNT),
@@ -349,14 +353,14 @@ On a real db (e.g. adaptix python: 3160 nodes, CALLS 4823 / CONTAINS 1276 / EXTE
 
 > **SUPERSEDED 2026-06-13 (commit `b5ceaf5d`) — the Go-port "UNBUILT" gap below is now CLOSED.** The
 > promote pass + the IMPORTS fresh-extract are LANDED in PRODUCTION via the **Go indexer Pass 4f**
-> (`gt-index/cmd/gt-index/main.go:623–642`: `ResolveImports` + `PromotePropertyEdges` wired after Pass 4d
+> (`gt-index/cmd/gt-index/main.go:641–661`: `ResolveImports` + `PromotePropertyEdges` wired after Pass 4d
 > serde, BEFORE Pass 4e closure — but note the closure is CALLS-only, so the IMPORTS/promote
 relationship edges do NOT enter it; the before-closure ordering is functionally inert for them
 (corrected per the `b5ceaf5d` LIPI, which caught this rationale overstatement); `imports.go` +
 `promote.go` + `promote_test.go`). Per §2.1 the Go indexer
 > now OWNS these writes — the Python pass is demoted to a copies-only REFERENCE that refuses a live graph.
 > Build/vet/8-tests GREEN locally (CGO + sqlite_fts5, gcc 16.1). The incremental `-file` path also
-> re-runs the idempotent promote pass post-commit (`main.go:1115–1122`, inv-7 fix), so a single-file
+> re-runs the idempotent promote pass post-commit (`main.go:1194`, inv-7 fix), so a single-file
 > reindex no longer silently strips that file's outbound depth edges. **NON-OVERCLAIM:** this is
 > enabling-substrate + locally-tested, NOT held-out-witnessed — the held-out real-graph multi-lang proof
 > (13-invariant contract) is still OWED and gates any benchmark number. (Prior "Stage-1 DONE only when the
@@ -370,7 +374,7 @@ The §2.6 "100% depth bar" is no longer only a spec — the promote-from-propert
 
 #### What ran (reference port, proven on copies) + Go production port (written, unbuilt)
 - **Reference port (copies-only):** a single language-agnostic promote pass reads the EXISTING `properties` table and materializes traversable `edges` rows for every relational property whose value encodes two RESOLVABLE endpoints. Ran on **8 copied graph.db files** (originals never mutated; the reference port guards/refuses against a live indexing graph), **8/8 RED->GREEN PASS (exit 0)**.
-- **Go production home (Pass 4f — LANDED, `b5ceaf5d`):** `gt-index/internal/resolver/promote.go` (`PromotePropertyEdges`) + `imports.go` (`ResolveImports`) + `promote_test.go` (RED->GREEN depth fixture). **Now REGISTERED in `main.go:623–642` as Pass 4f** — runs after Pass 4d serde, BEFORE Pass 4e closure, exactly the required slot; both calls non-fatal+logged. Idempotent (deletes prior `promote_%` edges), additive (properties rows untouched), with a builtin-exception denylist. The verify+LIPI swarm (`w0wozwqga`) caught two real bugs the green tests were blind to — both fixed + proven red->green: (i) FIX inv-7, the incremental `-file` path now re-runs the idempotent promote pass post-commit (`main.go:1115–1122`) so a `-file` reindex no longer strips that file's outbound depth edges until a full rebuild; (ii) FIX D3, `promote.go` DROPS dotted exception tokens (`errors.New`) instead of reducing to the module prefix `errors` and minting a WRONG RAISES edge onto a same-named project class (`raiseFlowRe` widened to the full dotted token; `promote_test.go` dotted-RAISES red->green case). Build/vet/8-tests GREEN locally (CGO + sqlite_fts5, gcc 16.1). **NON-OVERCLAIM:** enabling-substrate, NOT a flip claim (13-invariant contract) — held-out multi-lang real-graph proof gates any benchmark number. (`gt-index.exe` is gitignored, not committed.)
+- **Go production home (Pass 4f — LANDED, `b5ceaf5d`):** `gt-index/internal/resolver/promote.go` (`PromotePropertyEdges`) + `imports.go` (`ResolveImports`) + `promote_test.go` (RED->GREEN depth fixture). **Now REGISTERED in `main.go:641–661` as Pass 4f** — runs after Pass 4d serde, BEFORE Pass 4e closure, exactly the required slot; both calls non-fatal+logged. Idempotent (deletes prior `promote_%` edges), additive (properties rows untouched), with a builtin-exception denylist. The verify+LIPI swarm (`w0wozwqga`) caught two real bugs the green tests were blind to — both fixed + proven red->green: (i) FIX inv-7, the incremental `-file` path now re-runs the idempotent promote pass post-commit (`main.go:1194`) so a `-file` reindex no longer strips that file's outbound depth edges until a full rebuild; (ii) FIX D3, `promote.go` DROPS dotted exception tokens (`errors.New`) instead of reducing to the module prefix `errors` and minting a WRONG RAISES edge onto a same-named project class (`raiseFlowRe` widened to the full dotted token; `promote_test.go` dotted-RAISES red->green case). Build/vet/8-tests GREEN locally (CGO + sqlite_fts5, gcc 16.1). **NON-OVERCLAIM:** enabling-substrate, NOT a flip claim (13-invariant contract) — held-out multi-lang real-graph proof gates any benchmark number. (`gt-index.exe` is gitignored, not committed.)
 
 #### Five promoted edge classes (+ two CALLS.metadata annotations), per §2.6 TARGET EDGE SCHEMA
 `CO_SERIALIZES` (serialization_pair, undirected, value carries @file:line), `READS` (field_read -> owning Class via parent_id), `WRITES` (side_effect write -> owning Class), `RAISES` (exception_type/flow -> internal exception Class; builtins stay property), `PRECEDES` (call_order, distinct internal nodes only). `USES` (caller_usage) AND `DATA_FLOW` (def-site -> resolvable forward-slice callee) are **annotations on CALLS.metadata** (edge-deduped), NOT new edge types — per §2.6 line 262/282 a data_flow use-segment that resolves to callee C from source S appends a dataflow tag to the EXISTING `CALLS` S->C edge (725/774 = 93.7% of segments duplicate a CALLS source->target); only the ~49 def-site->callee hops with NO existing CALLS edge mint a standalone `DATA_FLOW` edge. CALLS count is unchanged before/after for both annotations. **SUPERSEDED 2026-06-13 (architecture LIPI w6q8frk6x)** — earlier wording listed DATA_FLOW as a standalone "promoted edge class" (774 edges); corrected here to the annotation contract (mirrors how USES already rides existing CALLS edges, 0 standalone / 490 CALLS-annotated).
@@ -421,11 +425,12 @@ graph's *guesses* into *facts*:
 
 - Selects only **low-confidence CALLS edges** (`confidence < floor AND type='CALLS'`, ascending)
   — i.e. the name_match rows; same_file/import (1.0) are never touched.
-- Dispatches to a language server by extension via **`_LANG_TO_EXT`** (py/ts/tsx/js/jsx/go/rust/
-  java/c/cpp/ruby/kotlin) — *this map's earlier bug made the pass a no-op for all 5 languages;
-  fixed.*
+- Dispatches to a language server by extension via **`_LANG_TO_EXT`** (py/ts/tsx/js/jsx/go/rs/java
+  — derived from `LSP_SERVERS`; c/cpp/ruby/kotlin not included) — *this map's earlier bug made the
+  pass a no-op for all 5 languages; fixed.*
 - For each edge asks the server for the definition, matches the node by **exact
-  file+name+line-range** (not basename LIKE, to avoid mod.rs/index.ts collisions), then:
+  file + line-range (name is only an in-window tiebreaker, not a gate)** (not basename LIKE, to
+  avoid mod.rs/index.ts collisions; a corrected/aliased target still matches), then:
   - same target → **verified** (`confidence=1.0, resolution_method='lsp', trust_tier=CERTIFIED`)
   - different target → **corrected** (re-points `target_id`)
   - no node → **deleted** (false positive removed)
@@ -538,7 +543,7 @@ issue → ① run_v74 (candidate gen + scoring)
 >   (`v1r_brief._exact_issue_named_files`).** The guarantee was Function/Method-only, so an
 >   issue whose TITLE names the defective CLASS verbatim (unique definition — a 1-line grep for
 >   any agent) never earned it and the gold could miss every rendered slot. Labels now match
->   `_seed_node_rows`' class-like set (`Function/Method/Class/Interface` — ONE definition of
+>   `_seed_node_rows`' class-like set (`Function/Method/Class/ImplBlock` — ONE definition of
 >   "definition"); the `len<5` short-name shape skip is bypassed ONLY by reporter-confirmed
 >   provenance (`title_symbols`/`code_symbols` — BugLocator ICSE 2012 summary weighting), never
 >   unconditionally; the dunder/generic/≤3-defining-files gates are unchanged. Both call sites
@@ -696,11 +701,16 @@ GT delivers evidence by **hooking onto the agent's actions**, at the overall lev
 > not agent content).
 
 ### The hooked tool surface
-GT registers an MCP tool surface (FastMCP, stdio): the **16 core** —
+The **16 original tools** —
 `groundtruth_find_relevant, brief, validate, trace, status, dead_code, unused_packages,
-hotspots, orient, checkpoint, symbols, context, explain, impact, patterns, do` — plus ~7 newer
-additions (`groundtruth_task_map, event_brief, review_patch, investigate, orient_v2, check_v2,
-status_v2`, and `gt_plan` / `gt_contract` / `gt_run_tests`).
+hotspots, orient, checkpoint, symbols, context, explain, impact, patterns, do` — are still
+**defined but DEPRECATED (superseded)**: in `src/groundtruth/mcp/server.py` all 16 of their
+`@app.tool()` decorators are commented `# @app.tool()  # Deprecated` (so they are NOT registered),
+and `groundtruth_task_map`, `groundtruth_event_brief`, `groundtruth_review_patch` are likewise
+deprecated/unregistered. The **LIVE registered MCP surface is 7 tools** (the only uncommented
+`@app.tool()` decorators in `server.py`): `gt_plan`, `gt_run_tests`, `gt_contract`,
+`groundtruth_investigate`, `groundtruth_orient_v2`, `groundtruth_check_v2`,
+`groundtruth_status_v2`.
 
 **Reality, stated plainly:** in benchmark mode the tool *instructions* are **suppressed** because
 agent tool-adoption measured ~0%. So the tools are **registered but passive** — GT's real
@@ -751,7 +761,7 @@ produced confounded results. The gates are opt-in; the benchmark workflows arm t
 
 > **UPDATED (2026-06-13, FIX-A — LSP liveness verdict refined so Go/Rust reach the agent).**
 > Supersedes the `GT_REQUIRE_LSP=1 → exit 2 on … LSP_FAIL_NO_WARM` bullet above **for the
-> launched-but-not-warm case**. Root cause (`GHA_NONPYTHON_FAILURE_AUDIT.md`): pyright/tsserver
+> launched-but-not-warm case**. Root cause (`GHA_NONPYTHON_FAILURE_AUDIT.md`): pyright/typescript-language-server
 > resolve `textDocument/definition` from source text alone, so Python/TS/JS always warm; gopls
 > needs `go list` metadata and rust-analyzer needs `cargo metadata`+`rust-src`, which the eval
 > images don't reliably ship offline — so a **live, correct** Go/Rust server lands on
@@ -1099,7 +1109,7 @@ User directive: **full OH depth, and more.** Bring the WHOLE of GT (§1–10), n
 ### 13.5 Docker imaging of GT — REQUIRED for DeepSWE too
 GT already has a portable substrate image from the proof work: `ghcr.io/hbali-stack/gt-substrate@sha256:…` (bakes the GT package + static gt-index tree-sitter+FTS5 + ONNX embedder + node/pyright + model + the `gt-run-proof` entrypoint). For DeepSWE the image must:
 1. **Swap e5 → gte-modernbert** (CHANGE 2; multilingual, 768-dim, int8 ONNX).
-2. **Bake pyright + the per-language LSP servers (gopls, rust-analyzer, tsserver/typescript-language-server) into the image** — so the post-edit reindex (L6) **preserves LSP across all 5 languages** (the LSP-strip fix; critical for polyglot — §11.4 / 13.1).
+2. **Bake pyright + the per-language LSP servers (gopls, rust-analyzer, typescript-language-server) into the image** — so the post-edit reindex (L6) **preserves LSP across all 5 languages** (the LSP-strip fix; critical for polyglot — §11.4 / 13.1).
 3. Be runnable inside the **Pier/Harbor task environment** (DeepSWE's `task.toml` + `environment/Dockerfile`), emitting the same proof certs.
 This Docker imaging is in scope for the DeepSWE integration, not only the OH proof path.
 
@@ -1160,7 +1170,7 @@ owed). **SUPERSEDED, explicitly:**
      homonym hub-gate killed them) → W_CODE_DEF never engaged. **NOW:** `_resolve_qualified_dotted`
      confirms the qualified pair against the graph → engages W_CODE_DEF on the defining file.
    - OLD: the exact-issue-named-file recall guarantee was `Function/Method`-only and skipped short names →
-     a title-named gold CLASS never entered the candidate slots. **NOW:** covers `Class/Interface` +
+     a title-named gold CLASS never entered the candidate slots. **NOW:** covers `Class/ImplBlock` +
      provenance-confirmed short names (ambiguity gates + promote caps unchanged).
    - OLD: a FLAT dense signal (`sem_mad≈0`) at dense-led `W_SEM=0.40` still arbitrarily boosted
      coverage-carrying files, sinking anchor-defined gold. **NOW:** Dimension-4 `_apply_dense_dispersion_gate`
@@ -1314,13 +1324,13 @@ Issue → FTS5 → graph → LSP → scoring →  │  l3.contract / l3.cochange
   does NOT go through `_oracle_gate_blocks`. The old gate-pool pushes for these kinds were REMOVED —
   the contract now has exactly ONE delivery path (Lane A), never the gate. This is CLAUDE.md's
   "contract/consistency/completeness fire on EVERY edit" made structurally true. (`gt_mini_patch.py`
-  `_lane_a_deliver:3853`; the early call at `_augment_output:4080`.)
+  `_lane_a_deliver:4411`; the early Lane-A call inside `_augment_output` (def `:4477`) fires at `:4645`.)
 - **LANE B (control plane, SITUATIONAL):** the steers (`verify.horizon`, `spec.obligation`,
   `detect.loop`, `detect.coherence`, `consensus.scope`, `l5.*`) go through the oracle stateless gate
   AFTER Lane A, wrapped in ONE outer try/except (stderr-only, NEVER re-raises) so a gate/filter/latch
   crash CANNOT undo Lane A's already-committed delivery. **The oracle is DEMOTED to steer-decider +
   ledger-keeper — not bypassed:** it still owns WHEN/WHERE/HOW-MUCH for the steers, ≤1 emission per
-  turn. (`_augment_output:4082+`.)
+  turn. (inside `_augment_output` (def `:4477`); the Lane-B block opens at `:4655`.)
 - **SHARED LEDGER (one, not forked):** both lanes write the SAME `_oracle_delivered_hashes` (content+
   state hash) and the SAME `_ledger_note_delivery` / `_runtime_ledger_record`. Cross-lane dedup is a
   content-hash lookup: a contract block (Lane A) and a steer ABOUT the same function (Lane B) are
@@ -1562,9 +1572,9 @@ Full entries in REFERENCES below.
 >   `edit_coverage` ratio feeds **`verify_horizon_band`** — reduced at the single consumer to the
 >   advisory-band boolean `ec_pos = (ratio > 0)`, so the ≥3-signal precision rarely changes a steer
 >   (the under-count→>0 fix is the load-bearing half), and the dry-run false-positive it could
->   fabricate is now patched (`e6ddc06e`) (`gt_mini_patch.py:967–988,3506`:
->   `ec = edit_coverage_ratio(_obligation_symbol_set(), _oracle_edited_tokens)` →
->   `verify_horizon_band(edit_coverage=ec, …)`), **NOT `spec.obligation`** — any prior wording that
+>   fabricate is now patched (`e6ddc06e`) (`gt_mini_patch.py`: `edit_coverage_ratio` def `:1203`,
+>   `ec = edit_coverage_ratio(_obligation_symbol_set(), _oracle_edited_tokens)` `:4032` →
+>   `verify_horizon_band(… edit_coverage=ec …)` `:4077`), **NOT `spec.obligation`** — any prior wording that
 >   said edit_coverage drives the obligation producer is WRONG. It modulates the verify-horizon
 >   steer's urgency, nothing else.
 > - 16 tests GREEN via pytest (12 patch-apply + 4 hybrid) — they DRIVE the real
@@ -2173,12 +2183,12 @@ delivered context — measurable only on a live benchmark run.
 
 | # | Seam (source → sink) | Where it is wired (file:line) | Proof on disk | State |
 |---|---|---|---|---|
-| W1 | **source → `graph.db`: IMPORTS edges + property→edge promote (Pass 4f)** | `gt-index/cmd/gt-index/main.go:623-643` (Pass 4f block: `ResolveImports*` → IMPORTS, `resolver.PromotePropertyEdges(db)`); promote engine `gt-index/internal/resolver/promote.go`; IMPORTS `gt-index/internal/resolver/imports.go` | commit `b5ceaf5d` (copies→production), `9860ff7e` (DATA_FLOW→CALLS annotation LIPI), `d6a50d0e` (promote pass red→green Go/Py/JS/TS); `promote_test.go` green | **WIRED** — runs in the production Go indexer; witness-pending on a live re-indexed graph |
-| W2 | **`graph.db` edges → scope → brief (v1r_brief)** | scope-chain emission `src/groundtruth/pretask/v1r_brief.py:1704-1716` (graph-connected scope chains, conf≥0.5); cross-file scope-hint `:1688-1698`; entry-point `generate_v1r_brief` `:2477`; scope computed `:3256` | the brief is the LIVE eval brief (canary→wrapper→`generate_v1r_brief`→`instance['gt_brief']`, per MEMORY: "v1r_brief is the LIVE brief, not v22"); v22_brief/curation_map-to-v22 are DEAD | **WIRED** — this is the agent-delivered path |
-| W3 | **naming facts → consumers (CHA/XTA receiver-type → fact edges → brief/curation)** | resolver rung 2b declared-FIELD-type receiver `gt-index/internal/resolver/resolver.go:446-487`, `BuildFieldTypeIndex` `:676`, `SetFieldTypeIndex` `:538`, inheritance walk `:883-888`; consumed by the DETERMINISTIC-method gate in `v1r_brief.py:499` (`name_policy`) + `curation_map.py:79` (name_match never admitted as fact) | commits `ec20d603` (Py+Rust), `71d66378` (Go+TS); `resolver_fieldtype_test.go` green | **WIRED** — a typed-field `name_match` method-edge class converts to a `type_flow` FACT (conf 0.9) and reaches the fact-gated consumers; witness-pending on a real graph |
-| W4 | **delivery hybrid lanes → ledger → oracle** | Lane A always-on data plane `_lane_a_deliver` `artifact_deepswe/gt_mini_patch.py:4062` (per-producer try/except, BEFORE Lane B); Lane B oracle gate `_oracle_gate_blocks` `:3891` (winner `:3970`); shared ledger `_oracle_delivered_hashes` `:2898` (reset `:2962`, parity hash `:3886`); oracle event emit `gt.oracle_event.v2` `:3853`, sink `GT_ORACLE_EVENTS` `:3864` | commits `35a3fb17` (bulkhead), `32e4e313` (un-stub per-turn gate), `a7a4be87`/`e6ddc06e` (RC5 edit-coverage); `tests/test_hybrid_lane_split.py`, `tests/test_oracle_gate_fires_in_container.py` green incl. negative control | **WIRED** — Lane A survives a Lane B/oracle crash (fault-proven); but every `output.jsonl` on disk predates `32e4e313` (ran the DARK binary) → **no live oracle-event witness yet** |
+| W1 | **source → `graph.db`: IMPORTS edges + property→edge promote (Pass 4f)** | `gt-index/cmd/gt-index/main.go:641-661` (Pass 4f block: `ResolveImports*` → IMPORTS, `resolver.PromotePropertyEdges(db)`); promote engine `gt-index/internal/resolver/promote.go`; IMPORTS `gt-index/internal/resolver/imports.go` | commit `b5ceaf5d` (copies→production), `9860ff7e` (DATA_FLOW→CALLS annotation LIPI), `d6a50d0e` (promote pass red→green Go/Py/JS/TS); `promote_test.go` green | **WIRED** — runs in the production Go indexer; witness-pending on a live re-indexed graph |
+| W2 | **`graph.db` edges → scope → brief (v1r_brief)** | scope-chain emission `src/groundtruth/pretask/v1r_brief.py:1788-1804` (graph-connected scope chains, conf≥0.5); cross-file scope-hint in the `_scope_files` block (~`:3368`); entry-point `generate_v1r_brief` `:2565`; scope computed `:3368` | the brief is the LIVE eval brief (canary→wrapper→`generate_v1r_brief`→`instance['gt_brief']`, per MEMORY: "v1r_brief is the LIVE brief, not v22"); v22_brief/curation_map-to-v22 are DEAD | **WIRED** — this is the agent-delivered path |
+| W3 | **naming facts → consumers (CHA/XTA receiver-type → fact edges → brief/curation)** | resolver rung 2b declared-FIELD-type receiver `gt-index/internal/resolver/resolver.go:1578-1659`, `BuildFieldTypeIndex` `:986`, `SetFieldTypeIndex` `:717`, inheritance walk `:883-888`; consumed by the DETERMINISTIC-method gate in `v1r_brief.py:524-543` (`name_policy`) + `curation_map.py:79` (name_match never admitted as fact) | commits `ec20d603` (Py+Rust), `71d66378` (Go+TS); `resolver_fieldtype_test.go` green | **WIRED** — a typed-field `name_match` method-edge class converts to a `type_flow` FACT (conf 0.9) and reaches the fact-gated consumers; witness-pending on a real graph |
+| W4 | **delivery hybrid lanes → ledger → oracle** | Lane A always-on data plane `_lane_a_deliver` `artifact_deepswe/gt_mini_patch.py:4411` (per-producer try/except, BEFORE Lane B); Lane B oracle gate `_oracle_gate_blocks` `:4230` (winner `:4305`); shared ledger `_oracle_delivered_hashes` `:3080` (reset `:3144`, parity hash `_oracle_content_hash` `:4223`); oracle event emit `gt.oracle_event.v2` `:4192`, sink `GT_ORACLE_EVENTS` `:3427`/`:4203` | commits `35a3fb17` (bulkhead), `32e4e313` (un-stub per-turn gate), `a7a4be87`/`e6ddc06e` (RC5 edit-coverage); lane-split bulkhead present at `gt_mini_patch.py` `_lane_a_deliver`/`_augment_output` — the regression pin is `artifact_deepswe/tests/test_hybrid_lane_split.py` (7 tests incl. the negative control; the old `tests/test_hybrid_lane_split.py` path was wrong) + `tests/test_oracle_gate_fires_in_container.py` green | **WIRED** — Lane A survives a Lane B/oracle crash (fault-proven); but every `output.jsonl` on disk predates `32e4e313` (ran the DARK binary) → **no live oracle-event witness yet** |
 | W5 | **in-container injection allow-list (Product == agent-time): real delivery/curation packages shipped** | `artifact_deepswe/gt_agent.py` ships `groundtruth.delivery.{path_policy,name_policy}` + `pretask.curation_map` into the agent container (one source of truth, fail-closed import-coverage guard) | commit `95dff1d9` (F2+F5); `tests/test_deepswe_injection_import_coverage.py` (6) green; symbols resolve, `/static/` excluded | **WIRED in code** — commit message states "Live witness owed (confirm `[GT_META]` fallback gone in-container)." Listed as IN FLIGHT in the task brief; **landed at HEAD, witness-pending** |
-| W6 | **structured-action-first edit detection (retire the verb whitelist)** | `_classify` now reads the structured editor channel FIRST (`str_replace`/`create`/`insert`) and normalizes to a parser-faithful bash-equivalent so every cmd-consumer (post-edit, oracle edit-coverage) fires unchanged — `artifact_deepswe/gt_mini_patch.py` (F3 block) | commit `d8cfd3d1` (F3, general form of `a7a4be87`); `tests/test_f3_structured_edit_detection.py` (12) + 36 artifact-regression green | **WIRED in code** — commit message: "Live witness owed (a harness emitting structured tool calls)." Listed as IN FLIGHT in the task brief; **landed at HEAD, witness-pending** |
+| W6 | **structured-action-first edit detection (retire the verb whitelist)** | structured-action-first detection present at `gt_mini_patch.py` `_classify` (`:707`) / `_structured_edit` (`:817`): `_classify` now reads the structured editor channel FIRST (`str_replace`/`create`/`insert`) and normalizes to a parser-faithful bash-equivalent so every cmd-consumer (post-edit, oracle edit-coverage) fires unchanged — `artifact_deepswe/gt_mini_patch.py` (F3 block) | commit `d8cfd3d1` (F3, general form of `a7a4be87`); the regression pin is `artifact_deepswe/tests/test_f3_structured_edit_detection.py` (12 tests; the old `tests/test_f3_structured_edit_detection.py` path was wrong) + 36 artifact-regression green | **WIRED in code** — commit message: "Live witness owed (a harness emitting structured tool calls)." Listed as IN FLIGHT in the task brief; **landed at HEAD, witness-pending** |
 
 ### 18.2 NEWLY WIRED this pass — R1 leaf-naming content bridge (correct-or-quiet no-op until F8)
 

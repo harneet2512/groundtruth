@@ -127,19 +127,19 @@ The DEFINITION OF DONE (metrics changed on a billed run) remains the one unconve
 **Framing.** gt_gt §2.6 was updated this session to record the landing (it cites
 `b5ceaf5d`, "Pass 4f LANDED"), so it is now a spec **+** landing-record, not a clean
 "before". The true BEFORE is the pre-session state §2.6 describes; the AFTER is the code
-as it actually runs — `promote.go` (957 lines) + `imports.go` (336 lines), both read in
+as it actually runs — `promote.go` (991 lines) + `imports.go` (335 lines), both read in
 full. **Verdict: the code faithfully implements the §2.6 spec; no drift found.** The
 difference is the substrate transformation + precision details the prose under-states.
 
 ### Per-edge-class: gt_gt spec (BEFORE) → code reality (AFTER)
 | edge class | gt_gt §2.6 says | code does (file:line) | confidence | match |
 |---|---|---|---|---|
-| **CO_SERIALIZES** | PROMOTE-NOW, 100% resolvable, value carries `@file:line`, undirected | `promoteSerde` parses `partner:<name>@file:<line>`, exact `(file,name,line)` key + any-file fallback, undirected dedup on min/max id (`promote.go:429-464, 230-236`) | **1.0 CERTIFIED** | ✓ |
-| **READS** | PROMOTE-PARTIAL, reader → owning Class via parent_id; field-only stays property | `promoteFieldReads` → owning Class via `src.ParentID` (`label=Class`) (`:470-492`) | 0.6, **lifts to 0.9 if a declared `class_field`** (`:486`) | ✓ + precision |
-| **WRITES** | side_effect write → owning Class | `promoteWrites`, same owning-Class resolve (`:498-520`) | 0.6 / 0.9 (declared field) | ✓ |
-| **RAISES** | PROMOTE-PARTIAL, internal classes only, builtins stay property | `promoteRaises`: **drops dotted tokens** (`errors.New`, D3, `:545`), `cleanExceptionBase`, **105-name builtin denylist** (`:87-109`), polyglot `{Class,Struct,Type,Enum,Interface}` (`:526-576`) | **0.9** | ✓ |
-| **PRECEDES** | PROMOTE-CAUTIOUS, distinct internal nodes only | `promotePrecedes` parses `a→b→c`, requires distinct internal func/method nodes (`:768-806`) | **0.5** (lowest — "cautious") | ✓ |
-| **DATA_FLOW** | CALLS.metadata annotation; standalone only for no-CALLS hops | `forEachDataFlowTarget` + `promoteDataFlowStandalone` (mint only when no CALLS edge, `:632`) + `promoteDataFlowAnnotations` (append `dataflow=` tag, `:654`) | candidate count 1→0.8, 2→0.6, ≤5→0.4, **>5 suppressed** (`:751`) | ✓ |
+| **CO_SERIALIZES** | PROMOTE-NOW, 100% resolvable, value carries `@file:line`, undirected | `promoteSerde` parses `partner:<name>@file:<line>`, exact `(file,name,line)` key + any-file fallback, undirected dedup on min/max id (`promote.go:437-472, 230-236`) | **1.0 CERTIFIED** | ✓ |
+| **READS** | PROMOTE-PARTIAL, reader → owning Class via parent_id; field-only stays property | `promoteFieldReads` → owning Class via `src.ParentID` (`label=Class`) (`:478-505`) | 0.6, **lifts to 0.9 if a declared `class_field`** (`:486`) | ✓ + precision |
+| **WRITES** | side_effect write → owning Class | `promoteWrites`, same owning-Class resolve (`:511-534`) | 0.6 / 0.9 (declared field) | ✓ |
+| **RAISES** | PROMOTE-PARTIAL, internal classes only, builtins stay property | `promoteRaises`: **drops dotted tokens** (`errors.New`, D3, `:545`), `cleanExceptionBase`, **105-name builtin denylist** (`:87-109`), polyglot `{Class,Struct,Type,Enum,Interface}` (`:540-597`) | **0.9** | ✓ |
+| **PRECEDES** | PROMOTE-CAUTIOUS, distinct internal nodes only | `promotePrecedes` parses `a→b→c`, requires distinct internal func/method nodes (`:789-841`) | **0.5** (lowest — "cautious") | ✓ |
+| **DATA_FLOW** | CALLS.metadata annotation; standalone only for no-CALLS hops | `forEachDataFlowTarget` + `promoteDataFlowStandalone` (mint only when no CALLS edge, `:653`) + `promoteDataFlowAnnotations` (append `dataflow=` tag, `:675`) | candidate count 1→0.8, 2→0.6, ≤5→0.4, **>5 suppressed** (`:751`) | ✓ |
 | **USES** | CALLS.metadata annotation from caller_usage | `promoteUsesAnnotations`: append `usage=` to matching CALLS edge, **never creates an edge** (`:817-905`) | (annotation) | ✓ |
 | **IMPORTS** | PRESENT, single→1.0 CERTIFIED, >1→0.6 CANDIDATE, stdlib→no edge | `imports.go ResolveImports`: reuses `buildImportIndex`/`resolveModulePath`, external→no edge, FILE→SYMBOL then FILE→FILE, `verification_status='verified'` (`:54-137`); **+ incremental `ResolveImportsTx`** (`:204-296`) | 1.0 / 0.6 | ✓ |
 
@@ -159,7 +159,7 @@ difference is the substrate transformation + precision details the prose under-s
 1. READS/WRITES confidence **lifts 0.6→0.9** for a declared `class_field` (`:486, :514`).
 2. RAISES **drops dotted tokens entirely** rather than reducing to the module prefix
    (`:545`) — prevents minting a wrong edge onto a same-named project class.
-3. DATA_FLOW **suppresses >5-candidate** hops (`:618`) — correct-or-quiet at the
+3. DATA_FLOW **suppresses >5-candidate** hops (`:772-783`) — correct-or-quiet at the
    ambiguity boundary.
 4. The incremental `-file` path has its **own IMPORTS Tx variant** (`:204`) — depth
    survives a single-file reindex, not just a full rebuild.
@@ -189,9 +189,10 @@ method via the shared `lookupMethodWithInheritance` CHA primitive → emits
 `type_flow / 0.9 / field_type / CERTIFIED`, and **ABSTAINS** on ambiguity/unknown/builtin
 (correct-or-quiet, falls to name_match). Coverage: Python+Rust colon-annotation fields
 (`ec20d603`), then Go struct fields + TS access-modifier fields (`71d66378`);
-**package-qualified Go field types (`Cache *cache.Store`) still ABSTAIN** (correct-or-quiet
-under-resolution). Research: XTA (Tip & Palsberg OOPSLA'00) + CHA (Dean/Grove/Chambers
-ECOOP'95).
+for **package-qualified Go field types (`Cache *cache.Store`)** `goStructField` →
+`stripPkgQualifier` **strips the package qualifier to the tail type name, resolves if an
+internal class matches, else abstains** (correct-or-quiet under-resolution). Research: XTA
+(Tip & Palsberg OOPSLA'00) + CHA (Dean/Grove/Chambers ECOOP'95).
 
 **THE CHANGE:** one specific `name_match` method-edge class → a FACT (`type_flow`).
 gt_gt §2.3 was updated this session to document 2b; the genuine before is the ladder
@@ -228,6 +229,13 @@ or `_degree_edge_filter` as reach. The §4.2 invariant ("reach over-promotes hub
 the promoted edges only ADD scope reach from a confident seed, never rank-by-centrality.
 On graphs with no promote edges, the union-find reproduces today's components byte-identical.
 
+**Generated/test demote (no `W_GEN` constant — that token is stale comment-only at `:229`):**
+the generated-file demote is the inline `score -= 0.5` via `_is_generated` (`:2465-2466`) and
+the test-file demote is `score -= 0.4` via `_is_test_file` (`:2467-2468`) — penalty, not hard
+drop. `ppr.py` (PPR) and `recency.py` are reachable only via the legacy `brief_v5` entry
+(`pretask.__init__.generate_brief`), NOT the live v1r path — dead on the live localization path,
+like v22_brief.
+
 ---
 
 ## Appendix D — BRIEF (gt_gt §4) → v1r_brief.py
@@ -242,14 +250,20 @@ graph **fact** (the laundering finding A). `_localization_header` named leaves f
   **CANDIDATE → `(CANDIDATE)`**, CERTIFIED → bare (`graph_localizer.py:1504-1521` producer
   tags the description; the contract `_scope_edge_trust` promised it). A name_match scope
   edge is never laundered as a fact again. Regression: `test_scope_chain_trust_tags`.
-- **R1 leaf-naming bridge** (`_semantic_leaf_names`, `:2070-2118`): fires ONLY when
+- **R1 leaf-naming bridge** (`_semantic_leaf_names`, `:2158-2206`): fires ONLY when
   `defines_anchor` named nothing; ranks within-file leaves by per-symbol MaxSim + per-symbol
   FTS5, **RRF-fused** (Cormack SIGIR'09), **symbol-hub-demoted**; `[]` when no signal.
-- **n_components wired** to the GT_META/8-dp telemetry (`SCOPE_COMPONENTS …`, `:3256` area)
+- **n_components wired** to the GT_META/8-dp telemetry (`SCOPE_COMPONENTS …`, `:3361` area)
   — the dead nerve, now a consumer. Regression: `test_n_components_signal_is_consumed`.
 
 **THE CHANGE:** the brief OUTPUT volume is unchanged; the depth makes its scope-chain trust
 **honest** and its leaf-naming **relevant** (the per-symbol semantic signal that reached gold).
+
+**Code-file mapping (live vs dead):** the LIVE v1r path is `v1r_brief.py` and it imports only
+`contract_map.py` (`:32`) + `spec.py` (`:2830`, lazy). `render.py`, `contract.py`, `test_link.py`,
+and `cochange.py` are LEGACY-brief code — imported only by the DEAD briefs (`render` ← `brief_v5.py`/
+`v7_brief.py`; `contract` ← `v7_brief.py`; `test_link` ← `v2_ranker.py`; `cochange` ← `v7_brief.py`)
+— dead on the v1r path.
 
 ---
 
@@ -263,8 +277,8 @@ in-container ran a divergent inline fallback; edit detection = closed verb white
 **AFTER (code: `gt_mini_patch.py` + `gt_agent.py`).**
 | change | code | commit |
 |---|---|---|
-| **hybrid bulkhead** — Lane A (context, always-on) delivers BEFORE Lane B (steers, one isolated try/except) → a steer crash can't undo context | `_lane_a_deliver` (`:4062`), Lane B (`:4297-4478`) | `35a3fb17`,`32e4e313` |
-| **RC5 hybrid edit-credit** — apply_patch/git-apply/patch + staged diffs, ≥3-signal FACT-tier; dry-run flags excluded | `_classify`, `_is_patch_apply` (`:433`), `edit_coverage_ratio` | `a7a4be87`,`e6ddc06e` |
+| **hybrid bulkhead** — Lane A (context, always-on) delivers BEFORE Lane B (steers, one isolated try/except) → a steer crash can't undo context | `_lane_a_deliver` (`:4411`), Lane B (`:4655-4830`) | `35a3fb17`,`32e4e313` |
+| **RC5 hybrid edit-credit** — apply_patch/git-apply/patch + staged diffs, ≥3-signal FACT-tier; dry-run flags excluded | `_classify`, `_is_patch_apply` (`:460`), `edit_coverage_ratio` | `a7a4be87`,`e6ddc06e` |
 | **F3 structured-action edit detection** (retire the verb whitelist) + replay parity | `_classify_action`, `_structured_edit`; `gt_oracle_sense.py` | `d8cfd3d1`,`74e90817` |
 | **F2+F5 in-container Product parity** — ship real `runtime`/`delivery`/`pretask` packages, fail-closed import-coverage | `gt_agent._PRODUCT_PACKAGE_MODULES` (`:207`) | `95dff1d9` |
 
@@ -287,6 +301,9 @@ across every patch channel + harness, and in-container == Product. ~1150 net lin
   never counts. **The white space no 2026 paper occupies** — they target MODEL uncertainty
   (RisCoSet/PreFlect/Anytime-Verified-Agents 2026); GT targets CODE structural risk
   (Mirror 2026: external deterministic control > self-assessment, 76% vs ~0%).
+  **Caveat (G07):** READS/WRITES blast radius is realized in full only for CLASS targets; for
+  method/function targets it currently degrades to CALLS-only fan-in (field-level READS/WRITES
+  targets are not yet in the graph) — `_structural_risk_note` honesty note, `gt_mini_patch.py:3968-3979`.
 - Wired into the verify producer behind `GT_VERIFY_STRUCTURAL_RISK` (**default OFF** →
   byte-identical to today): a high-blast-radius untested edit earns a **budget-free**
   advisory that NAMES the risk (`_structural_risk_note`, `gt_mini_patch.py`).
@@ -335,7 +352,7 @@ The whole-architecture per-layer LIPI ran (58 agents). Confirmed findings + stat
 
 | severity | finding | status |
 |---|---|---|
-| **HIGH** | **Depth LEAKED INTO RANK** -- untyped edge JOINs in `v1r_brief.py` (`_top_functions:243`, `_top_function_names:300/313`, `_hub_degree_fn:1871`) counted promoted READS/WRITES/PRECEDES/DATA_FLOW into function ranking + the hub p80 (the section 4.2 "reach over-promotes hubs" violation, activated by the depth landing) | **FIXED** -- added `type='CALLS'`; depth feeds SCOPE only, never RANK |
+| **HIGH** | **Depth LEAKED INTO RANK** -- untyped edge JOINs in `v1r_brief.py` (`_top_functions:267`, `_top_function_names:333/346`, `_hub_degree_fn:1943`) counted promoted READS/WRITES/PRECEDES/DATA_FLOW into function ranking + the hub p80 (the section 4.2 "reach over-promotes hubs" violation, activated by the depth landing) | **FIXED** -- added `type='CALLS'`; depth feeds SCOPE only, never RANK |
 | **MEDIUM** | `edit_risk` counted a 2-candidate `name_match` (conf 0.6 >= floor) as a dependent -- contradicting its own docstring | **FIXED** -- excluded by `resolution_method`; regression added |
 | HIGH | `post_edit.py:157-163` docstring claims it admits `name_match cc<=1` (the old os.walk launder); the SQL correctly excludes name_match -- a "fix code to match docstring" edit would re-introduce the launder | **FIXED** -- docstring now matches SQL; SQL hardened `!= 'name_match'` -> `NOT LIKE 'name_match%'` (variants too); locked by `test_categorical_filter_no_namematch_launder` |
 | MEDIUM | `_issue_relevant_neighbors` / 1-hop expansion add candidates to the "Calls:" line via DATA_FLOW/CO_SERIALIZES (untyped UNION) | **FIXED** -- all 4 JOINs now `type='CALLS'` (matches `_static_callees` sibling); locked by `test_neighbors_calls_only` |
@@ -409,14 +426,16 @@ finding names the invariant it serves. Result: **1 real architecture violation f
   converges via idempotent delete-rebuild; acknowledged in `main.go` comments).
 
 ### Surface 2 — Brief / localizer (the ranking surface, I2-critical)  → **REAL BUG, FIXED**
-- **I2-A (FIXED, commit `93cff789`):** the inline hub-demotion block (`v1r_brief.py:2969-2992`)
-  counted **untyped** in-degree (`JOIN edges e ON e.target_id=n.id`, no `e.type` filter) and used
+- **I2-A (FIXED, commit `93cff789`):** the inline hub-demotion block (`v1r_brief.py`) counted
+  **untyped** in-degree (`JOIN edges e ON e.target_id=n.id`, no `e.type` filter) and used
   it to **reorder `top_records`** (RANK). Its sibling `_hub_degree_fn` was CALLS-scoped in Unit 2,
   but this parallel path was missed (classic "two paths, one fixed" Integration defect). Promoted
   depth edges would inflate the hub p80 and shift the delivered file order — the exact I2 leak
   ("as depth increases, treat this very seriously"; "reach over-promotes hubs, the architecture
-  subordinates it on purpose"). Added `AND e.type='CALLS'` to both COUNT queries. Degrade-safe
-  (byte-identical today; diverges only once promote ships).
+  subordinates it on purpose"). The fix IS present: the hub-demote COUNT queries now carry
+  `AND e.type='CALLS'` — the 1-hop neighbor UNION at `:2994`/`:2999` and the hub p80 / per-path
+  fan-in COUNT queries at `:3063`/`:3073`. Degrade-safe (byte-identical today; diverges only once
+  promote ships).
 - **CLEAN (with evidence):** every OTHER edges-JOIN feeding rank/degree/reach is CALLS- or
   CALLS/IMPORTS-typed or `_degree_edge_filter`-scoped (witness BFS `:2275`, path-decay `:504`,
   `_file_degrees`, `_hub_degree_fn`, `_symbol_fanin_fn`, 1-hop expansion, `_top_functions`).
