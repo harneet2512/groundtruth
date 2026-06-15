@@ -173,6 +173,17 @@ echo "── preflight HARD gate (abort on a degraded stack) ──"
 python scripts/verify/preflight_pipeline.py --db /tmp/gt/graph.db --root /tmp/gt/src \
   || { echo "FATAL: preflight failed — refusing a half-on run"; exit 1; }
 
+# Substrate witness without the paid agent: when only validating the graph / LSP / embedder
+# (e.g. confirming a substrate fix landed), stop here — the substrate is built + preflight is
+# GREEN, no pier run, no LLM, $0. Generalized: any task, any language. Leaves the archived
+# substrate + certs for a §4 PREREQS audit.
+if [ "${GT_SUBSTRATE_ONLY:-0}" = "1" ]; then
+  echo "── GT_SUBSTRATE_ONLY=1 — substrate built + preflight GREEN; stopping before the paid agent run ──"
+  echo "  lsp edges: $(sqlite3 /tmp/gt/graph.db "SELECT COUNT(*) FROM edges WHERE resolution_method='lsp'" 2>/dev/null || echo '?')"
+  echo "  det_pct:   $(sqlite3 /tmp/gt/graph.db "SELECT printf('%.2f', 100.0*SUM(resolution_method NOT IN ('name_match'))/COUNT(*)) FROM edges WHERE type='CALLS'" 2>/dev/null || echo '?')%"
+  exit 0
+fi
+
 echo ""
 echo "==============================================================="
 echo " LIVE: the next lines stream to the ngrok SSE URL below."
