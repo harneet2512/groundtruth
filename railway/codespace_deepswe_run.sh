@@ -121,12 +121,21 @@ echo "==============================================================="
 echo " LIVE: the next lines stream to the ngrok SSE URL below."
 echo " Paste the  curl -N '<url>'  line to Claude to watch live."
 echo "==============================================================="
+# G03/G04 (HIGH): pier DROPS host `export` — only `--ae KEY=VAL` reaches the in-container
+# agent interpreter. Without it the structural edit-risk axis + oracle two-lane route +
+# deep telemetry run with EMPTY GT env in-container. Forward them via the single-source
+# `--ae` block (shared with deepswe_full.yml so trial+full can't drift). GT_C_OUT=/tmp keeps
+# the telemetry sinks writable in-container (a durable host-mount = gap G11, still owed).
+export GT_C_OUT="${GT_C_OUT:-/tmp}"
+# shellcheck source=artifact_deepswe/gt_integration/gt_ae_block.sh
+source artifact_deepswe/gt_integration/gt_ae_block.sh
 # pier output -> terminal log AND the ngrok SSE relay (log_relay prints the URL).
 pier run \
   -p "$TASK_DIR" \
   --agent-import-path artifact_deepswe.gt_agent:GTMiniSweAgent \
   --model "$MODEL" \
   --env docker -y \
+  "${GT_AE_ARGS[@]}" \
   --ak config_file=artifact_deepswe/gt_integration/deepswe_gt_pier.yaml \
   2>&1 | tee "$LOG" | python -u scripts/log_relay.py
 
