@@ -1686,17 +1686,23 @@ func matchesSerdePair(nameA, nameB string) bool {
 	return false
 }
 
-// twinPrefixes defines common structural twin prefix pairs. Functions sharing
-// a prefix pair and the same suffix within the same scope are behavioral twins —
+// twinPrefixes defines common structural twin verb pairs. Functions sharing a
+// verb pair and the same remainder within the same scope are behavioral twins —
 // modifying one without considering the other is a common source of bugs.
+//
+// The verbs are BARE (no trailing "_"). matchesTwinPair compares them against the
+// first word of each name extracted by splitFirstWord, which handles snake_case,
+// camelCase, and PascalCase uniformly. Bare verbs are required so the word-split
+// matcher can demand an EXACT first-word match (e.g. "create"), not a substring
+// (which would false-positive "created" against "create_").
 var twinPrefixes = [][2]string{
-	{"create_", "update_"}, {"create_", "delete_"},
-	{"update_", "delete_"}, {"get_", "set_"},
-	{"add_", "remove_"}, {"start_", "stop_"},
-	{"open_", "close_"}, {"enable_", "disable_"},
-	{"show_", "hide_"}, {"register_", "unregister_"},
-	{"subscribe_", "unsubscribe_"}, {"lock_", "unlock_"},
-	{"begin_", "end_"}, {"init_", "cleanup_"},
+	{"create", "update"}, {"create", "delete"},
+	{"update", "delete"}, {"get", "set"},
+	{"add", "remove"}, {"start", "stop"},
+	{"open", "close"}, {"enable", "disable"},
+	{"show", "hide"}, {"register", "unregister"},
+	{"subscribe", "unsubscribe"}, {"lock", "unlock"},
+	{"begin", "end"}, {"init", "cleanup"},
 }
 
 // detectStructuralTwins finds pairs of functions in the same scope whose names
@@ -1767,30 +1773,53 @@ func detectStructuralTwins(db *store.DB, allNodes []*store.Node, nodeDBIDs []int
 	return len(props)
 }
 
-// matchesTwinPair checks whether two function names match a twin prefix pattern.
-// Both names must match opposite sides of a prefix pair, and the suffix after
-// the prefix must be identical (case-insensitive comparison).
-func matchesTwinPair(nameA, nameB string) (bool, string) {
-	lowerA := strings.ToLower(nameA)
-	lowerB := strings.ToLower(nameB)
-	for _, pair := range twinPrefixes {
-		p0 := strings.ToLower(pair[0])
-		p1 := strings.ToLower(pair[1])
-		// Check A=p0, B=p1
-		if strings.HasPrefix(lowerA, p0) && strings.HasPrefix(lowerB, p1) {
-			suffixA := lowerA[len(p0):]
-			suffixB := lowerB[len(p1):]
-			if suffixA != "" && suffixA == suffixB {
-				return true, pair[0] + "/" + pair[1]
-			}
+// splitFirstWord splits an identifier into its first word and the remainder,
+// generalized across snake_case, camelCase, and PascalCase. Both returned parts
+// are lower-cased so downstream comparison is case-insensitive.
+//
+//	create_user -> ("create", "user")   // snake_case: split at first '_' (idx>0)
+//	createUser  -> ("create", "user")   // camelCase: split at lower->upper boundary
+//	CreateUser  -> ("create", "user")   // PascalCase: same boundary (i>=1)
+//	createuser  -> ("createuser", "")    // no boundary: whole name, empty remainder
+//	get_value   -> ("get", "value")
+func splitFirstWord(name string) (first, rest string) {
+	// (a) snake_case: an underscore at index > 0 is the word boundary.
+	if idx := strings.IndexByte(name, '_'); idx > 0 {
+		return strings.ToLower(name[:idx]), strings.ToLower(name[idx+1:])
+	}
+	// (b) camelCase / PascalCase: first lower->upper boundary at i >= 1.
+	for i := 1; i < len(name); i++ {
+		c := name[i]
+		if c >= 'A' && c <= 'Z' {
+			return strings.ToLower(name[:i]), strings.ToLower(name[i:])
 		}
-		// Check A=p1, B=p0
-		if strings.HasPrefix(lowerA, p1) && strings.HasPrefix(lowerB, p0) {
-			suffixA := lowerA[len(p1):]
-			suffixB := lowerB[len(p0):]
-			if suffixA != "" && suffixA == suffixB {
-				return true, pair[0] + "/" + pair[1]
-			}
+	}
+	// (c) no boundary: whole name is the first word, no remainder.
+	return strings.ToLower(name), ""
+}
+
+// matchesTwinPair checks whether two function names form a structural twin pair.
+// Each name is split into (firstWord, remainder) by splitFirstWord, so the matcher
+// works uniformly across snake_case, camelCase, and PascalCase. A pair matches when
+// the two first-words are the two halves of a twinPrefixes verb pair (in either
+// order) AND the remainders are non-empty and identical.
+//
+// Requiring an EXACT first-word verb match (not a substring) plus an identical
+// non-empty remainder prevents false positives: "created"/"deleted" split to
+// ("created","")/("deleted","") whose first words are not the bare verbs and whose
+// remainders are empty, so they do not match; "createUser"/"createPost" share a
+// verb but differ in remainder, so they do not match.
+func matchesTwinPair(nameA, nameB string) (bool, string) {
+	firstA, restA := splitFirstWord(nameA)
+	firstB, restB := splitFirstWord(nameB)
+	if restA == "" || restA != restB {
+		return false, ""
+	}
+	for _, pair := range twinPrefixes {
+		p0 := pair[0]
+		p1 := pair[1]
+		if (firstA == p0 && firstB == p1) || (firstA == p1 && firstB == p0) {
+			return true, p0 + "/" + p1
 		}
 	}
 	return false, ""
