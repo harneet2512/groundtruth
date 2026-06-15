@@ -2157,6 +2157,7 @@ def _query_scope(rel: str) -> list[str]:
                 # are never delivered scope; nor are cross-language "neighbours"
                 # (a call edge between language families is not a real edge).
                 if (fp and fp not in out and not _is_vendored_path(fp)
+                        and not _is_test_or_demo_path(fp)
                         and not _is_cross_language_pair(_l1, _l2)):
                     out.append(fp)
         finally:
@@ -2559,7 +2560,11 @@ def _cochange_block(rel: str) -> str:
                 other = fb if _norm_fp(fa) == nfp else fa
                 # 2026-06-10 fact-filter: vendored/minified/generated co-change
                 # partners are never delivered (jquery churn is not completeness).
-                if other and _is_vendored_path(other):
+                # 2026-06-15: also drop test + demo/non-source co-change partners —
+                # the agent is told not to edit tests, and a `test/x.js` co-change is
+                # never a completeness target for a source edit (BUG-A, 4th leak site:
+                # <gt-cochange> mirrored the brief's "Also changes:" test-file leak).
+                if other and (_is_vendored_path(other) or _is_test_or_demo_path(other)):
                     continue
                 if other and _norm_fp(other) != nfp and other not in [r[0] for r in rows]:
                     rows.append((other, cnt))

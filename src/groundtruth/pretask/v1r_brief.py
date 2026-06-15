@@ -1864,7 +1864,11 @@ def render_brief(
     # vendored/minified/generated files (extern/jquery.dataTables.js, PATH B
     # audit) are never rendered as "Related files to inspect".
     if scope_files and scope_confidence in ("high", "medium"):
-        _deliverable_scope = [f for f in scope_files if not _is_vendored_path(f)]
+        # also drop test files — the agent is told not to edit tests, so a test path
+        # rendered as "Related files to inspect" is noise (BUG-A surfaced-path leak).
+        _deliverable_scope = [
+            f for f in scope_files if not _is_vendored_path(f) and not _is_test_path(f)
+        ]
         scope_names = [os.path.basename(f) for f in _deliverable_scope[:3]]
         if scope_names and scope_confidence == "high":
             lines.append(f"\nLikely multi-file scope: {', '.join(scope_names)}")
@@ -1880,8 +1884,11 @@ def render_brief(
             chain_files = getattr(chain, "files", [])
             chain_desc = getattr(chain, "description", "")
             chain_conf = getattr(chain, "confidence", 0.0)
-            if len(chain_files) >= 2 and chain_conf >= 0.5:
-                chain_basenames = [os.path.basename(f) for f in chain_files]
+            # drop test files from the displayed chain — a test in "check ALL" is
+            # noise (the agent must not edit tests); emit only if >=2 source files remain.
+            _chain_src = [f for f in chain_files if not _is_test_path(f)]
+            if len(_chain_src) >= 2 and chain_conf >= 0.5:
+                chain_basenames = [os.path.basename(f) for f in _chain_src]
                 # D1: cap the basename chain (many "→"-joined files run long). The
                 # leading "\n" is preserved so the blank-line separator survives.
                 lines.append(
