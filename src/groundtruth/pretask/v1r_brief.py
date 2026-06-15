@@ -2145,8 +2145,11 @@ def _render_witness_line(w) -> str:
             direction = getattr(w, "direction", "")
             far = w.src_symbol if direction == "calls_anchor" else w.dst_symbol
             return f"{w.anchor} -> ... -> {far} [{w.edge_type}, {w.hop}-hop]"
-        rel = "calls" if getattr(w, "direction", "") == "calls_anchor" else "called by"
-        return f"{w.src_symbol} {rel} {w.dst_symbol} [{w.edge_type}]"
+        # src_symbol is ALWAYS the caller, dst_symbol the callee (graph_localizer BFS).
+        # `{src} called by {dst}` was INVERTED for called_by_anchor; render correctly.
+        if getattr(w, "direction", "") == "calls_anchor":
+            return f"{w.src_symbol} calls {w.dst_symbol} [{w.edge_type}]"
+        return f"{w.dst_symbol} called by {w.src_symbol} [{w.edge_type}]"
     except Exception:
         return ""
 

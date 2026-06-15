@@ -79,6 +79,28 @@ def test_render_witness_multihop_unverified_tagged():
     assert "2-hop" in out
 
 
+def test_render_witness_calls_anchor_direction():
+    """calls_anchor: candidate(src) CALLS anchor(dst). Render `src calls dst`."""
+    w = Witness(file_path="a.py", anchor="set_parse", edge_type="CALLS",
+                direction="calls_anchor", verified=True, confidence=1.0, hop=1,
+                src_symbol="set_fields", dst_symbol="set_parse")
+    out = _cand([w]).render_witness()
+    assert "set_fields calls set_parse" in out
+
+
+def test_render_witness_called_by_anchor_not_inverted():
+    """BUG-E (go witness): for called_by_anchor, src_symbol is the CALLER (anchor) and
+    dst the CALLEE (candidate). The prior `{src} called by {dst}` inverted it —
+    `main called by BeginRepl` though main CALLS BeginRepl. Render must read the callee
+    called by the caller: `BeginRepl called by main`."""
+    w = Witness(file_path="main.go", anchor="main", edge_type="CALLS",
+                direction="called_by_anchor", verified=True, confidence=1.0, hop=1,
+                src_symbol="main", dst_symbol="BeginRepl")  # main (caller) CALLS BeginRepl
+    out = _cand([w]).render_witness()
+    assert "BeginRepl called by main" in out
+    assert "main called by BeginRepl" not in out
+
+
 # ---------------------------------------------------------------------------
 # (2) Seed provenance — only exact-name seeds mint the DEFINES issue-symbol fact
 # ---------------------------------------------------------------------------

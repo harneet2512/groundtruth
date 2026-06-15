@@ -637,7 +637,12 @@ class Candidate:
                 return (1 if generic else 0, -x.strength())
 
             w = min(edge_wits, key=_display_key)
-            rel = "calls" if w.direction == "calls_anchor" else "called by"
+            # src_symbol is ALWAYS the caller, dst_symbol ALWAYS the callee (the BFS at
+            # ~line 2351 assigns src=caller/dst=callee for BOTH directions). The prior
+            # `{src} called by {dst}` for called_by_anchor was INVERTED — it read as
+            # "caller called by callee" (witnessed: `main called by BeginRepl` when main
+            # CALLS BeginRepl). Render the caller->callee fact correctly, candidate-first.
+            _calls_anchor = w.direction == "calls_anchor"
             # PROVENANCE TAG (fix 2026-06-09, correct-or-quiet): an edge whose
             # resolution_method is NOT in curation_map.DETERMINISTIC_RESOLUTION_METHODS
             # renders with an explicit "(unverified)" marker. Witness.verified IS
@@ -653,7 +658,11 @@ class Candidate:
                     f"{w.anchor} -> ... -> {far} "
                     f"[{w.edge_type}, {w.hop}-hop]{tag}"
                 )
-            return f"{w.src_symbol} {rel} {w.dst_symbol} [{w.edge_type}]{tag}"
+            body = (
+                f"{w.src_symbol} calls {w.dst_symbol}" if _calls_anchor
+                else f"{w.dst_symbol} called by {w.src_symbol}"
+            )
+            return f"{body} [{w.edge_type}]{tag}"
         w = max(self.witnesses, key=lambda x: x.strength())
         # SEED-TYPED witnesses (fix 2026-06-09): only the exact-name seeder mints
         # the "defines {name} (issue symbol)" DEFINES fact. A grep/path/FTS5 seed
