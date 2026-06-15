@@ -105,12 +105,54 @@ docker cp gt-index/gt-index-linux gtsrc:/tmp/gt-index && docker exec gtsrc chmod
 docker exec gtsrc /tmp/gt-index -root="$ROOT" -output=/tmp/graph.db 2>&1 | tail -3 || echo "WARN: gt-index run"
 docker cp gtsrc:/tmp/graph.db /tmp/gt/graph.db || { echo "FATAL: no graph.db"; exit 1; }
 mkdir -p /tmp/gt/src && docker cp "gtsrc:$ROOT/." /tmp/gt/src 2>/dev/null || echo "WARN: no source"
-docker rm -f gtsrc 2>/dev/null || true
 LANG=$(python3 -c "import tomllib;print(tomllib.load(open('$TASK_DIR/task.toml','rb')).get('metadata',{}).get('language','python'))")
+# #4 (Go/Rust LSP dep-env): the HOST precision pass needs the task's module/crate cache —
+# gopls needs GOMODCACHE, rust-analyzer needs cargo+rustup, else 0 conversions on go/rust
+# (the §17.3 dark-LSP gap). Extract from the live task container BEFORE removing it (mirror
+# deepswe_full.yml:815-879), then point the host LSP at them. No-op for py/ts/js.
+if [ "$LANG" = "go" ] || [ "$LANG" = "rust" ]; then
+  mkdir -p /tmp/gt/deps/gomodcache /tmp/gt/deps/cargo /tmp/gt/deps/rustup
+  GOMOD=$(docker exec gtsrc sh -lc 'go env GOMODCACHE 2>/dev/null' | tr -d '\r')
+  for CAND in "$GOMOD" "$ROOT/go/pkg/mod" /root/go/pkg/mod /home/user/go/pkg/mod; do
+    [ -n "$CAND" ] && docker exec gtsrc test -d "$CAND" 2>/dev/null \
+      && docker cp "gtsrc:${CAND}/." /tmp/gt/deps/gomodcache 2>/dev/null && break || true
+  done
+  for CAND in /root/.cargo /home/user/.cargo; do
+    docker exec gtsrc test -d "$CAND" 2>/dev/null \
+      && docker cp "gtsrc:${CAND}/." /tmp/gt/deps/cargo 2>/dev/null && break || true
+  done
+  for CAND in /root/.rustup /home/user/.rustup; do
+    docker exec gtsrc test -d "$CAND" 2>/dev/null \
+      && docker cp "gtsrc:${CAND}/." /tmp/gt/deps/rustup 2>/dev/null && break || true
+  done
+  export GOMODCACHE=/tmp/gt/deps/gomodcache GOFLAGS=-mod=mod \
+    CARGO_HOME=/tmp/gt/deps/cargo RUSTUP_HOME=/tmp/gt/deps/rustup
+  echo "  deps: gomodcache=$(du -sh /tmp/gt/deps/gomodcache 2>/dev/null|cut -f1) cargo=$(du -sh /tmp/gt/deps/cargo 2>/dev/null|cut -f1)"
+fi
+docker rm -f gtsrc 2>/dev/null || true
 echo "  LSP precision pass (lang=$LANG)…"
 python -m groundtruth.resolve --db /tmp/gt/graph.db --root /tmp/gt/src --resolve --lang "$LANG" 2>&1 | tail -3 || echo "WARN: lsp"
 echo "  lsp edges: $(sqlite3 /tmp/gt/graph.db "SELECT COUNT(*) FROM edges WHERE resolution_method='lsp'" 2>/dev/null || echo '?')"
 export GT_GRAPH_DB=/tmp/gt/graph.db GT_REPO_ROOT=/tmp/gt/src
+# ── SUBSTRATE-CONSUME (gt_gt §17.2 / §6 substrate note): the graph is MOUNTED, never baked.
+# Produce brief.txt host-side (mirror gt_run_proof.emit_brief), then hand off the whole /tmp/gt
+# as the authoritative substrate via GT_HOST_GRAPH_DB + GT_CERT_DIR. gt_agent sees _substrate_active
+# -> SKIPS the b64 bake (the 16MB BuildKit cap that killed the agent at 0 steps) and reads the
+# mounted graph; gt_mini_patch._db_path resolves GT_HOST_GRAPH_DB. /tmp/gt is IDENTITY-mounted
+# (host path == container path) so the same path is valid for the host-side brief read AND the
+# in-container per-turn graph read.
+echo "── brief.txt (host-side v1r brief -> the mounted substrate) ──"
+ISSUE_FILE="${TASK_DIR}/instruction.md"
+GT_GRAPH_DB=/tmp/gt/graph.db GT_REPO_ROOT=/tmp/gt/src PYTHONPATH=src python - "$ISSUE_FILE" <<'PYBRIEF' || echo "WARN: brief.txt gen failed (agent degrades to no-brief)"
+import sys
+from groundtruth.runtime.brief_cache import get_or_generate
+issue = open(sys.argv[1], encoding="utf-8").read() if len(sys.argv) > 1 else ""
+r = get_or_generate("/tmp/gt", issue, "/tmp/gt/src", "/tmp/gt/graph.db")
+bt = (r.get("brief_text") or "").strip()
+open("/tmp/gt/brief.txt", "w", encoding="utf-8").write(bt)
+print("  brief.txt:", len(bt), "chars  sha=%s" % (r.get("brief_sha256", "")[:12]))
+PYBRIEF
+export GT_HOST_GRAPH_DB=/tmp/gt/graph.db GT_CERT_DIR=/tmp/gt
 
 echo "── preflight HARD gate (abort on a degraded stack) ──"
 python scripts/verify/preflight_pipeline.py --db /tmp/gt/graph.db --root /tmp/gt/src \
@@ -140,14 +182,15 @@ HOST_GT_OUT=/tmp/gt_out
 mkdir -p "$HOST_GT_OUT" && chmod 777 "$HOST_GT_OUT"
 export GT_C_OUT=/gt_out
 MOUNTS_JSON="[{\"type\":\"bind\",\"source\":\"${HOST_GT_OUT}\",\"target\":\"/gt_out\",\"read_only\":false}"
-# G05 (full): MOUNT the gt-index binary into the container so L6 per-turn reindex can run
-# (the ~49MB binary exceeds the 16MB bake cap, so it cannot be base64-injected — a
-# read-only bind mount is the durable fix). gt_mini_patch defaults GT_INDEX_BIN=/tmp/gt-index.
-# NOTE: mounting the binary is necessary but NOT sufficient on this codespace path — it does
-# NOT inject a graph.db into the AGENT container (the brief reads the HOST db). In-container
-# _db_path() resolves /tmp/graph.db, which is absent here, so the reindex is guarded off
-# (os.path.isfile == False). The binary therefore runs L6 ONLY if an in-container graph.db
-# is later present; do not report it as unconditionally ENABLED.
+# SUBSTRATE MOUNT (the graph-delivery fix): bind the whole /tmp/gt (graph.db + brief.txt + src)
+# into the container at the SAME path (identity) read-only. With GT_HOST_GRAPH_DB/GT_CERT_DIR set
+# (above + forwarded via --ae below) gt_agent substrate-CONSUMES this instead of baking the graph
+# as b64 RUN layers — no 16MB BuildKit cap (the thing that killed the agent at 0 steps), and the
+# per-turn producers read the authoritative mounted graph.
+MOUNTS_JSON="${MOUNTS_JSON},{\"type\":\"bind\",\"source\":\"/tmp/gt\",\"target\":\"/tmp/gt\",\"read_only\":true}"
+# G05: MOUNT the gt-index binary for parity. NOTE: in substrate-consume mode L6 reindex is gated
+# OFF (the mounted graph is authoritative/immutable, §6 substrate note) — the per-turn pillars
+# read the ONE mounted graph unchanged; do not report L6 as ENABLED here.
 GT_INDEX_BIN_HOST="${REPO}/gt-index/gt-index-linux"
 if [ -x "$GT_INDEX_BIN_HOST" ]; then
   MOUNTS_JSON="${MOUNTS_JSON},{\"type\":\"bind\",\"source\":\"${GT_INDEX_BIN_HOST}\",\"target\":\"/tmp/gt-index\",\"read_only\":true}"
@@ -158,6 +201,10 @@ fi
 MOUNTS_JSON="${MOUNTS_JSON}]"
 # shellcheck source=artifact_deepswe/gt_integration/gt_ae_block.sh
 source artifact_deepswe/gt_integration/gt_ae_block.sh
+# Hand the substrate off to the in-container agent: GT_HOST_GRAPH_DB + GT_CERT_DIR make
+# gt_agent (build-time, skip bake) + gt_mini_patch (per-turn _db_path) consume the mounted
+# /tmp/gt. Identity-mounted, so /tmp/gt/{graph.db,brief.txt} resolve at the same path in-container.
+GT_AE_ARGS+=(--ae "GT_HOST_GRAPH_DB=/tmp/gt/graph.db" --ae "GT_CERT_DIR=/tmp/gt")
 # pier output -> terminal log AND the ngrok SSE relay (log_relay prints the URL).
 pier run \
   -p "$TASK_DIR" \
