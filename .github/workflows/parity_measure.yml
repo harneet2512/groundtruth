@@ -150,6 +150,10 @@ jobs:
           echo "DETERMINISM ${{ matrix.task_id }}: raw=$H1 reindex=$H2 $([ "$H1" = "$H2" ] && echo IDENTICAL || echo DRIFT)"
 
       - name: Measure whole-pipeline coverage (steps 4-5)
+        env:
+          # Per-signal rank dump (grep/struct/sem) to stderr -> reveals WHICH ranker
+          # buries gold. Diagnostic only; no product behavior change.
+          GT_LOCALIZE_DEBUG: "1"
         run: |
           mkdir -p parity_out
           python scripts/parity/measure_whole_pipeline.py \

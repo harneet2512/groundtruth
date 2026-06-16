@@ -2727,6 +2727,18 @@ def localize(
             *_final_relevance_key(c, _cand_subject_pos),  # relevance before the path string
         )
     )
+    # Diagnostic-only (env-gated, stderr, zero behavior change): per-candidate
+    # component ranks so a parity audit can see WHICH ranker (grep/struct/sem)
+    # buries a known-gold candidate. Off unless GT_LOCALIZE_DEBUG is set.
+    if os.environ.get("GT_LOCALIZE_DEBUG"):
+        import sys as _sys
+        for _i, _c in enumerate(candidates[:25], start=1):
+            _sys.stderr.write(
+                f"[L1DBG] #{_i:2} {os.path.basename(_c.file_path):28} "
+                f"grep={_grep_rank.get(id(_c), -1)} struct={_struct_rank.get(id(_c), -1)} "
+                f"sem={_sem_rank.get(id(_c), -1)} floor={_grep_floor(_c)} "
+                f"depth={_depth_authority(_c)} score={_c.score}\n"
+            )
     candidates = candidates[:top_k]
 
     # ---- SCOPE CHAINS (structural edit-scope from graph edges) ----
