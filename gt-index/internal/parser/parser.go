@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	sitter "github.com/smacker/go-tree-sitter"
@@ -5081,9 +5082,28 @@ func extractCallOrdering(bodyNode *sitter.Node, src []byte, result *ParseResult,
 	receiverLine := make(map[string]int)
 	_walkCallOrdering(bodyNode, src, receiverCalls, receiverCtx, receiverLine, 0)
 
-	// Emit properties for receivers with 2+ calls. Cap at first 5 receivers.
+	// Emit properties for receivers with 2+ calls. Cap at 5 receivers.
+	// DETERMINISM (Step-1 parity, all languages): Go map iteration order is randomized,
+	// so ranging receiverCalls directly + capping at 5 keeps a DIFFERENT 5 receivers each
+	// run. Witnessed on go expr-lang/expr: the `vm: push -> ... -> pop` call_order survived
+	// the cap intermittently -> the PRECEDES pop<->push pair flickered -> graph.db edge
+	// count flipped 6497<->6499 (non-deterministic substrate). Iterate a STABLE order
+	// instead: earliest-appearing receiver first (receiverLine, the first-call line),
+	// receiver name as tiebreak. Same input -> same 5 -> same graph.db, every language.
+	recvOrder := make([]string, 0, len(receiverCalls))
+	for receiver := range receiverCalls {
+		recvOrder = append(recvOrder, receiver)
+	}
+	sort.Slice(recvOrder, func(i, j int) bool {
+		li, lj := receiverLine[recvOrder[i]], receiverLine[recvOrder[j]]
+		if li != lj {
+			return li < lj
+		}
+		return recvOrder[i] < recvOrder[j]
+	})
 	emitted := 0
-	for receiver, calls := range receiverCalls {
+	for _, receiver := range recvOrder {
+		calls := receiverCalls[receiver]
 		if len(calls) < 2 {
 			continue
 		}
