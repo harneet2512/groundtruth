@@ -141,6 +141,24 @@ def main() -> int:
                     "dirs": sorted({getattr(w, "direction", "?") for w in wits}),
                 }
         out["gold_witness"] = by_base
+
+        # TOP-20 with gold marked -> resolves bug-vs-ceiling: are the non-gold files
+        # OUTRANKING buried gold actually more relevant, or noise? Dump score/lex/vedge.
+        top20 = []
+        for i, c in enumerate(res.candidates[:20], start=1):
+            b = os.path.basename(c.file_path)
+            wits = list(getattr(c, "witnesses", []) or [])
+            vedge = sum(
+                1 for w in wits
+                if getattr(w, "verified", False)
+                and getattr(w, "direction", "") != "defines_anchor"
+            )
+            top20.append({
+                "rank": i, "file": b, "is_gold": b in gold,
+                "score": round(float(getattr(c, "score", 0.0)), 4),
+                "lex": int(getattr(c, "lex_hits", 0)), "vedge": vedge,
+            })
+        out["top20"] = top20
     except Exception as exc:
         out["loc_error"] = f"{type(exc).__name__}: {exc}"
 
@@ -166,6 +184,9 @@ def main() -> int:
             f"WIT  {b[:28]:28}: rank={w['rank']} score={w['score']} lex={w['lex_hits']} "
             f"vedge={w['vedge']} n_wit={w['n_wit']} min_hop={w['min_hop']} dirs={w['dirs']}"
         )
+    for r in out.get("top20", []):
+        mark = "GOLD" if r["is_gold"] else "----"
+        print(f"TOP20 #{r['rank']:2} [{mark}] {r['file'][:30]:30} score={r['score']} lex={r['lex']} vedge={r['vedge']}")
     print("PARITY_JSON " + json.dumps(out, sort_keys=True))
     return 0
 
