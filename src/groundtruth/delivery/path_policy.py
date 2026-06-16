@@ -69,6 +69,60 @@ def is_generated(fp: str) -> bool:
     return any(m in base for m in _GENERATED_RANK_DEMOTE_SUFFIXES)
 
 
+# ---------------------------------------------------------------------------
+# TEST / DEMO path predicate — the SINGLE SOURCE for the test+demo dir filter.
+# De-dup seam (2026-06-15): v1r_brief._is_test_path, the nested _is_test_file in
+# _localization_header, graph_localizer._is_test_file, and gt_mini_patch.
+# _is_test_or_demo_path were 4 divergent copies — the brief ones MISSED the demo
+# half, leaking docs_src/ tutorial files as candidate edit targets (fastapi). All
+# consumers now delegate here. DIRECTORY-SEGMENT match, never substring, so
+# `contest/`/`latest/` are NOT test dirs (the load-bearing invariant the parity
+# test pins). gt_mini_patch imports this with a local fallback (in-container the
+# groundtruth import may fail — same pattern as the fact set).
+_TEST_DIR_SEGMENTS: frozenset[str] = frozenset({
+    "test", "tests", "__tests__", "__test__", "spec", "specs", "e2e", "testing",
+})
+_DEMO_NONSOURCE_DIR_SEGMENTS: frozenset[str] = frozenset({
+    "examples", "example", "demo", "demos", "sample", "samples", "fixtures",
+    "fixture", "docs", "doc", "docs_src", "doc_src", "documentation",
+    "tutorial", "tutorials", "benchmark", "benchmarks", "vendor",
+    "node_modules", "dist", "build",
+})
+
+
+def _path_segments(path: str) -> tuple[list[str], str]:
+    p = (path or "").replace("\\", "/").lower()
+    if p.startswith("./"):
+        p = p[2:]
+    segs = [s for s in p.split("/") if s]
+    return segs, (segs[-1] if segs else "")
+
+
+def is_test_path(path: str) -> bool:
+    """True iff a TEST file — by DIRECTORY SEGMENT (a relative top-level ``test/x.js``
+    is caught; ``contest/``/``latest/`` are NOT — substring is never enough) OR a
+    basename marker (``test_*`` / ``*_test.*`` / ``*.test.*`` / ``*.spec.*``)."""
+    segs, bn = _path_segments(path)
+    if not segs:
+        return False
+    if any(s in _TEST_DIR_SEGMENTS for s in segs[:-1]):
+        return True
+    return (
+        bn.startswith("test_") or "_test." in bn or ".test." in bn or ".spec." in bn
+    )
+
+
+def is_test_or_demo(path: str) -> bool:
+    """``is_test_path`` OR a DEMO/non-source dir segment (examples/demo/docs/docs_src/
+    tutorial/fixtures/vendor/node_modules/dist/build). The candidate-emit + scope +
+    witness + cochange surfaces use THIS; the brief copies missing the demo half were
+    the docs_src/ leak. Never a delivered scope/witness/candidate."""
+    segs, _ = _path_segments(path)
+    if any(s in _DEMO_NONSOURCE_DIR_SEGMENTS for s in segs[:-1]):
+        return True
+    return is_test_path(path)
+
+
 def is_delivery_excluded(fp: str, repo_root: str = "") -> bool:
     """True when path must never appear in a DELIVERED fact."""
     if is_vendored_path(fp):

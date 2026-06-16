@@ -82,6 +82,16 @@ def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
         return False
 
 
+def _normalize_path(f) -> str:
+    """Repo-relative suffix form of one path: strip git ``a/``/``b/``/``./`` and any
+    leading slash. Empty string for an empty/blank input."""
+    s = str(f).strip().replace("\\", "/")
+    for pre in ("a/", "b/", "./"):
+        if s.startswith(pre):
+            s = s[len(pre):]
+    return s.lstrip("/")
+
+
 def _normalize_edited_files(edited_files) -> list[str]:
     """Repo-relative suffix forms of the agent's edited files (strip git a//b/ and
     leading ./), deduped. Used to scope risk to symbols the agent actually DEFINED in
@@ -89,14 +99,57 @@ def _normalize_edited_files(edited_files) -> list[str]:
     hub like ``List.push``) is not the agent's change and must not be flagged."""
     out: list[str] = []
     for f in (edited_files or []):
-        s = str(f).strip().replace("\\", "/")
-        for pre in ("a/", "b/", "./"):
-            if s.startswith(pre):
-                s = s[len(pre):]
-        s = s.lstrip("/")
+        s = _normalize_path(f)
         if s:
             out.append(s)
     return list(dict.fromkeys(out))
+
+
+def _normalize_edited_ranges(edited_ranges) -> dict[str, list[tuple[int, int]]]:
+    """Repo-rel-keyed map of edited (start,end) 1-based line hunks. Keys normalized
+    like ``_normalize_edited_files``; each value coerced to a list of ordered
+    (lo,hi) int pairs (lo<=hi, both >0). Malformed entries are dropped, never raised
+    (correct-or-quiet substrate). Empty/None -> {}."""
+    out: dict[str, list[tuple[int, int]]] = {}
+    for f, ranges in (edited_ranges or {}).items():
+        key = _normalize_path(f)
+        if not key:
+            continue
+        clean: list[tuple[int, int]] = []
+        for r in (ranges or []):
+            try:
+                a, b = int(r[0]), int(r[1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            lo, hi = (a, b) if a <= b else (b, a)
+            if lo > 0:
+                clean.append((lo, hi))
+        if clean:
+            out.setdefault(key, []).extend(clean)
+    return out
+
+
+def _line_in_edited_ranges(file_path: str, start_line, ranges_by_file: dict) -> bool:
+    """True iff ``start_line`` (a node's definition line) falls inside an edited hunk
+    of the file ``file_path`` matches. The node's ``file_path`` is matched against the
+    edited-file keys SUFFIX-tolerantly (repo-root vs git a//b/ prefixes), mirroring the
+    file-scope match. A node with no usable ``start_line`` fails closed (excluded) when
+    ranges are enforced — an unlocatable definition is not provably the agent's edit."""
+    try:
+        sl = int(start_line)
+    except (TypeError, ValueError):
+        return False
+    if sl <= 0:
+        return False
+    npath = _normalize_path(file_path)
+    for key, ranges in ranges_by_file.items():
+        # suffix-tolerant file identity: the node path and the edited key name the
+        # same file when either is a path-suffix of the other.
+        if npath == key or npath.endswith("/" + key) or key.endswith("/" + npath):
+            for lo, hi in ranges:
+                if lo <= sl <= hi:
+                    return True
+    return False
 
 
 def _percentile(sorted_vals: list, q: float) -> float:
@@ -130,6 +183,45 @@ def _repo_fanin_reference(conn, conf_clause: str, method_clause: str, conf_param
     return _percentile(vals, _TAIL_Q)
 
 
+def _ranged_dependents(
+    conn, nm, types_in, conf_clause, method_clause, file_clause,
+    conf_params, file_params, ranges_by_file,
+) -> int:
+    """Distinct verified incoming-dependency sources of the nodes named ``nm`` whose
+    DEFINITION line is inside an edited hunk (R3). Two passes: (1) the candidate target
+    nodes (name + file-scope), filtered to those whose ``start_line`` is in their file's
+    edited ranges; (2) the distinct verified dependency fan-in over only those survivors.
+    Returns 0 when no node's definition falls in an edited range (correct-or-quiet)."""
+    try:
+        cand = conn.execute(
+            f"""SELECT nt.id, nt.file_path, nt.start_line
+                  FROM nodes nt
+                 WHERE LOWER(nt.name) = LOWER(?) {file_clause}""",
+            (nm, *file_params),
+        ).fetchall()
+    except sqlite3.Error:
+        return 0
+    target_ids = [
+        int(r[0]) for r in cand
+        if r and _line_in_edited_ranges(r[1], r[2], ranges_by_file)
+    ]
+    if not target_ids:
+        return 0
+    ids_in = ",".join("?" for _ in target_ids)
+    try:
+        row = conn.execute(
+            f"""SELECT COUNT(DISTINCT e.source_id)
+                  FROM edges e
+                 WHERE e.type IN ({types_in})
+                   AND e.target_id IN ({ids_in})
+                   {conf_clause} {method_clause}""",
+            (*_DEPENDENCY_EDGE_TYPES, *target_ids, *conf_params),
+        ).fetchone()
+    except sqlite3.Error:
+        return 0
+    return int(row[0]) if row and row[0] else 0
+
+
 def structural_edit_risk(
     graph_db,
     symbols: Iterable[str],
@@ -137,6 +229,7 @@ def structural_edit_risk(
     min_confidence: float = _MIN_CONFIDENCE,
     max_reasons: int = 3,
     edited_files: Iterable[str] | None = None,
+    edited_ranges: dict | None = None,
 ) -> EditRisk:
     """Structural risk of the edited-but-untested ``symbols``, by VERIFIED caller
     fan-in scored relative to the repo. Correct-or-quiet on any absence.
@@ -149,7 +242,19 @@ def structural_edit_risk(
     same-named symbol defined elsewhere (a callee hub like ``List.push`` reached via a
     ``x.push(...)`` line in the diff body) is not the agent's change and must never be
     flagged as its blast radius. Empty/None -> no file constraint (back-compat; the
-    repo fan-in REFERENCE is always whole-repo, only the per-symbol match is scoped)."""
+    repo fan-in REFERENCE is always whole-repo, only the per-symbol match is scoped).
+
+    ``edited_ranges`` (when non-empty) TIGHTENS the file scope to the agent's edited
+    LINE HUNKS: a per-repo-rel-file map of edited ``[(start,end), ...]`` 1-based ranges.
+    A matched node counts ONLY when its ``start_line`` (its DEFINITION line) falls inside
+    one of its file's edited ranges — i.e. the agent edited the symbol's DEFINITION, not
+    merely REFERENCED its name on an edited line. This closes R3: a hub (``fastapi`` /
+    ``push`` / ``run``) defined high in an edited file but only *called* in the agent's
+    actual hunk (def-line outside the hunk) no longer wins on degree. Enforced only for
+    files present in the map AND only when the graph carries a ``start_line`` column;
+    None/empty (or an old graph without ``start_line``) -> unchanged file-scope (back-
+    compat). Fail-closed: a node with no usable ``start_line`` is excluded when ranges
+    are enforced for its file (an unlocatable definition is not provably the edit)."""
     names = {str(s).strip() for s in (symbols or []) if str(s).strip()}
     if not graph_db or not names or not os.path.isfile(str(graph_db)):
         return EditRisk(0.0, (), 0.0)
@@ -184,25 +289,36 @@ def structural_edit_risk(
         else:
             file_clause = ""
             file_params = ()
+        # Line-range tightening (R3): enforce only when ranges are given AND the graph
+        # carries start_line. Absence of either -> degrade to file-scope (back-compat).
+        ranges_by_file = _normalize_edited_ranges(edited_ranges)
+        has_start_line = _column_exists(conn, "nodes", "start_line")
+        enforce_ranges = bool(ranges_by_file) and has_start_line
         cache_key = (str(graph_db), float(min_confidence))
         ref = _REF_CACHE.get(cache_key)
         if ref is None:
             ref = _repo_fanin_reference(conn, conf_clause, method_clause, conf_params)
             _REF_CACHE[cache_key] = ref
         for nm in names:
-            try:
-                row = conn.execute(
-                    f"""SELECT COUNT(DISTINCT e.source_id)
-                          FROM edges e
-                          JOIN nodes nt ON e.target_id = nt.id
-                         WHERE e.type IN ({types_in})
-                           AND LOWER(nt.name) = LOWER(?)
-                           {conf_clause} {method_clause} {file_clause}""",
-                    (*_DEPENDENCY_EDGE_TYPES, nm, *conf_params, *file_params),
-                ).fetchone()
-            except sqlite3.Error:
-                continue
-            dependents = int(row[0]) if row and row[0] else 0
+            if enforce_ranges:
+                dependents = _ranged_dependents(
+                    conn, nm, types_in, conf_clause, method_clause, file_clause,
+                    conf_params, file_params, ranges_by_file,
+                )
+            else:
+                try:
+                    row = conn.execute(
+                        f"""SELECT COUNT(DISTINCT e.source_id)
+                              FROM edges e
+                              JOIN nodes nt ON e.target_id = nt.id
+                             WHERE e.type IN ({types_in})
+                               AND LOWER(nt.name) = LOWER(?)
+                               {conf_clause} {method_clause} {file_clause}""",
+                        (*_DEPENDENCY_EDGE_TYPES, nm, *conf_params, *file_params),
+                    ).fetchone()
+                except sqlite3.Error:
+                    continue
+                dependents = int(row[0]) if row and row[0] else 0
             if dependents <= 0:
                 continue
             # Saturating, relative to the repo's notable-dependents baseline (floored

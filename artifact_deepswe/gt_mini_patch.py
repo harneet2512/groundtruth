@@ -4190,7 +4190,18 @@ def _structural_risk_note() -> tuple[str, bool]:
         # line the diff body tokenizes) is NOT the agent's change. Without this, the
         # note named the repo's highest-degree hub and laundered it "(71 verified
         # dependent(s))" though the agent never touched it (csstree witness, 2026-06-15).
-        er = _structural_edit_risk(_db_path(), _risky_syms, edited_files=_oracle_edited_rels)
+        #
+        # R3 (2026-06-15): file-scope ALONE still mis-named a hub DEFINED in the edited
+        # file but only REFERENCED in the agent's actual hunk (fastapi/push/run named
+        # though the agent edited construct_config in the SAME file). Thread the per-file
+        # edited LINE RANGES (real diff-hunk/sed ranges, tracked in
+        # _oracle_edited_lines_by_file) so a node counts only when its DEFINITION line is
+        # inside an edited hunk. Empty map -> unchanged file-scope (correct-or-quiet).
+        er = _structural_edit_risk(
+            _db_path(), _risky_syms,
+            edited_files=_oracle_edited_rels,
+            edited_ranges=dict(_oracle_edited_lines_by_file),
+        )
     except Exception:  # noqa: BLE001 — risk scoring must never break the producer
         return ("", False)
     if er is None or er.is_quiet():
