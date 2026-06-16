@@ -324,11 +324,12 @@ def test_dim1_direct_assignment_preserved_off_identifier_heavy():
 
 
 @pytest.fixture
-def graph_db_impl_method(tmp_path: Path) -> str:
-    """A graph whose CALLS edges are ALL resolution_method='impl_method' — a
-    deterministic method per curation_map.DETERMINISTIC_RESOLUTION_METHODS that
-    the old hand-rolled Dim-3 subset omitted."""
-    db = tmp_path / "graph_impl.db"
+def graph_db_typeflow(tmp_path: Path) -> str:
+    """A graph whose CALLS edges are ALL resolution_method='type_flow' — a
+    receiver-PROVEN deterministic method in curation_map.DETERMINISTIC_RESOLUTION_METHODS
+    that the old hand-rolled Dim-3 subset omitted. (impl_method was REMOVED from the fact
+    set 2026-06-15 — receiver-unproven; type_flow is the canonical proven rung.)"""
+    db = tmp_path / "graph_typeflow.db"
     conn = sqlite3.connect(str(db))
     conn.executescript(_SCHEMA)
     conn.execute(
@@ -342,26 +343,26 @@ def graph_db_impl_method(tmp_path: Path) -> str:
     for _ in range(10):
         conn.execute(
             "INSERT INTO edges (source_id, target_id, type, resolution_method, confidence) "
-            "VALUES (1, 2, 'CALLS', 'impl_method', 0.95)"
+            "VALUES (1, 2, 'CALLS', 'type_flow', 0.95)"
         )
     conn.commit()
     conn.close()
     return str(db)
 
 
-def test_dim3_counts_impl_method_as_deterministic(graph_db_impl_method: str):
-    """RED before the fix: Dim-3 hand-rolled a 7-method literal WITHOUT
-    impl_method/inherited/unique_method/return_type, so a 100%-impl_method graph
-    measured det_pct=0 (<0.30) and W_REACH was REDUCED to 0.03. With the shared
-    curation_map set, det_pct=1.0 (>0.70) and W_REACH is boosted to 0.12."""
+def test_dim3_counts_type_flow_as_deterministic(graph_db_typeflow: str):
+    """Dim-3 reuses the shared curation_map.DETERMINISTIC_RESOLUTION_METHODS set, so a
+    100%-receiver-proven (type_flow) graph measures det_pct=1.0 (>0.70) and W_REACH is
+    boosted to 0.12. (impl_method/unique_method were removed from the set 2026-06-15 as
+    receiver-unproven; type_flow/inherited/return_type remain the proven method rungs.)"""
     w = _adapt_weights_for_issue(
         {}, {}, dict(DEFAULT_WEIGHTS),
-        graph_db=graph_db_impl_method,
+        graph_db=graph_db_typeflow,
         issue_anchors=IssueAnchors(),
         issue_text="broken",
     )
     assert w["W_REACH"] == pytest.approx(0.12), (
-        f"impl_method edges not counted deterministic: W_REACH={w['W_REACH']}"
+        f"type_flow edges not counted deterministic: W_REACH={w['W_REACH']}"
     )
 
 

@@ -172,9 +172,11 @@ _NODES = [
 
 _EDGES = [
     # TRUE same-language fact (must survive): caller.rs run_loop -> execute
-    ("run_loop", "execute", "CALLS", 3, "impl_method", 0.9),
+    # (type_flow = a receiver-PROVEN fact; impl_method was removed from the fact set
+    # 2026-06-15 as receiver-unproven, so use a proven rung for the "must survive" edge)
+    ("run_loop", "execute", "CALLS", 3, "type_flow", 0.9),
     # CROSS-LANGUAGE pollution (boa [57]): js chainTest -> rust execute, det stamp
-    ("chainTest", "execute", "CALLS", 2, "impl_method", 0.6),
+    ("chainTest", "execute", "CALLS", 2, "type_flow", 0.6),
     # Rust load_module -> rust parse_module (true callee, survives)
     ("load_module", "parse_module", "CALLS", 7, "same_file", 1.0),
     # Rust load_module -> JS format_output (cross-language callee, det stamp)

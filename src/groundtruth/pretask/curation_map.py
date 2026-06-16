@@ -80,6 +80,19 @@ from dataclasses import dataclass, field
 # maximally-harmful plausible-but-wrong context (The Distracting Effect,
 # arXiv:2505.06914, 2025). Widening this set only widens facts; it can never let
 # a name_match edge classify as a fact.
+# RECEIVER-UNPROVEN RUNGS EXCLUDED (2026-06-15 — adversarial gt_audit, verified on real
+# graph.db; CLAUDE.md fact definition = import/same_file/type_flow/lsp/verified_unique).
+#   impl_method (1.94) and unique_method (1.98) resolve `obj.method()` on GLOBAL method-name
+#   uniqueness with ZERO receiver-type check (resolver.go:1811-1821 caps them CANDIDATE 0.6,
+#   "CERTIFIED stays reserved for stages that PROVE the receiver type"). External libs are
+#   un-indexed, so the only same-named method is in-repo → they LAUNDER cross-receiver/external
+#   collisions as facts: witnessed `httpx.post()`(scripts/*.py)→fastapi `post`, SQLModel
+#   `Session.delete()`→fastapi `delete`, Rust `Stdout::lock()`→`Batch.lock` — all impl_method
+#   0.5-0.6 delivered as [CALLERS]/[WITNESS]. 30.7% (py) / 44% (js) of CALLS. Correct-or-quiet
+#   (CLAUDE.md Pillar 3): a name-uniqueness guess that may be a collision is demoted to
+#   (unverified) — NOT deleted (still delivered as a lead), never a fact. The consumer FACT set
+#   now AGREES with the resolver's CANDIDATE tier. Receiver-PROVEN method rungs keep fact status:
+#   inherited (CHA self/super), return_type, type_flow, import_type.
 DETERMINISTIC_RESOLUTION_METHODS: frozenset[str] = frozenset(
     {
         "same_file",
@@ -87,9 +100,7 @@ DETERMINISTIC_RESOLUTION_METHODS: frozenset[str] = frozenset(
         "import_type",
         "type_flow",
         "verified_unique",
-        "impl_method",
         "inherited",
-        "unique_method",
         "return_type",
         "lsp",
         "lsp_verified",

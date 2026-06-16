@@ -168,9 +168,13 @@ except Exception as _delivery_import_err:  # noqa: BLE001
     # FUNCTIONAL pre-B1 filter so agent-time exclusion decisions are unchanged.
     print(f"[GT_META] delivery_policy_import_fallback=true reason={_delivery_import_err}",
           file=sys.stderr, flush=True)
+    # impl_method + unique_method EXCLUDED — receiver-unproven name-uniqueness rungs that
+    # launder external/cross-receiver collisions (httpx.post/Session.delete/Stdout::lock).
+    # Mirror curation_map.DETERMINISTIC_RESOLUTION_METHODS exactly (fallback fires only on
+    # import failure in-container).
     _DETERMINISTIC_METHODS = frozenset({
         "same_file", "import", "import_type", "type_flow", "verified_unique",
-        "impl_method", "inherited", "unique_method", "return_type", "lsp", "lsp_verified",
+        "inherited", "return_type", "lsp", "lsp_verified",
     })
     _VENDOR_DIR_MARKERS_FB = (
         "/extern/", "/externals/", "/vendor/", "/vendored/", "/third_party/",
