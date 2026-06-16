@@ -122,9 +122,10 @@ jobs:
           # Snapshot the RAW resolution-method histogram BEFORE the LSP pass. The
           # determinism test must compare raw-index vs raw-reindex (LSP-enriched-vs-raw
           # is a guaranteed false DRIFT: the resolve pass adds lsp edges + demotes).
-          RAW_HIST=$(sqlite3 /tmp/gt/graph.db "SELECT resolution_method,COUNT(*) FROM edges GROUP BY 1 ORDER BY 1" 2>/dev/null | md5sum | cut -d' ' -f1)
+          sqlite3 /tmp/gt/graph.db "SELECT resolution_method,COUNT(*) FROM edges GROUP BY 1 ORDER BY 1" 2>/dev/null > /tmp/gt/raw_hist.txt
+          RAW_HIST=$(md5sum /tmp/gt/raw_hist.txt | cut -d' ' -f1)
           echo "GT_RAW_HIST=$RAW_HIST" >> "$GITHUB_ENV"
-          echo "raw histogram: $RAW_HIST"
+          echo "raw histogram ($RAW_HIST):"; cat /tmp/gt/raw_hist.txt
           # offline LSP precision pass on the TASK's language (the cumulative enrichment)
           python -m groundtruth.resolve --db /tmp/gt/graph.db --root /tmp/gt/src --resolve --lang "${{ matrix.lang }}" 2>&1 | tail -3 || echo "WARN: lsp"
           echo "lsp edges: $(sqlite3 /tmp/gt/graph.db "SELECT COUNT(*) FROM edges WHERE resolution_method='lsp'" 2>/dev/null || echo '?')"
@@ -146,8 +147,15 @@ jobs:
           # Compare RAW-index (snapshot before LSP) vs RAW-reindex (g2, no LSP). Both
           # are the bare indexer output -> a true +=+ determinism test of steps 1-2.
           H1="$GT_RAW_HIST"
-          H2=$(sqlite3 /tmp/gt/g2.db "SELECT resolution_method,COUNT(*) FROM edges GROUP BY 1 ORDER BY 1" 2>/dev/null | md5sum | cut -d' ' -f1)
-          echo "DETERMINISM ${{ matrix.task_id }}: raw=$H1 reindex=$H2 $([ "$H1" = "$H2" ] && echo IDENTICAL || echo DRIFT)"
+          sqlite3 /tmp/gt/g2.db "SELECT resolution_method,COUNT(*) FROM edges GROUP BY 1 ORDER BY 1" 2>/dev/null > /tmp/gt/g2_hist.txt
+          H2=$(md5sum /tmp/gt/g2_hist.txt | cut -d' ' -f1)
+          G2EDGES=$(sqlite3 /tmp/gt/g2.db "SELECT COUNT(*) FROM edges" 2>/dev/null || echo "0(BUILD-FAILED)")
+          echo "DETERMINISM ${{ matrix.task_id }}: raw=$H1 reindex=$H2 g2_edges=$G2EDGES $([ "$H1" = "$H2" ] && echo IDENTICAL || echo DRIFT)"
+          if [ "$H1" != "$H2" ]; then
+            echo "::group::DRIFT diff (raw-index histogram  vs  g2-reindex histogram)"
+            diff <(cat /tmp/gt/raw_hist.txt) <(cat /tmp/gt/g2_hist.txt) || true
+            echo "::endgroup::"
+          fi
 
       - name: Measure whole-pipeline coverage (steps 4-5)
         env:
