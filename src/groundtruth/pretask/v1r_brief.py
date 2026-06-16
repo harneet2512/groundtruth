@@ -449,25 +449,12 @@ _TEST_DIR_SEGMENTS = frozenset({
 
 
 def _is_test_path(path: str) -> bool:
-    """True if a path is a test file (swap-invariant: such paths are never surfaced to
-    the agent — it is told not to edit tests). Checks DIRECTORY segments first: a
-    top-level ``test/lexer.js`` (csstree — relative, no leading slash, and a basename
-    with NO test marker) is a test file by its DIR, which the prior ``"/test/" in p``
-    substring missed (it required a leading slash). Then basename markers."""
-    p = (path or "").replace("\\", "/").lower()
-    if p.startswith("./"):
-        p = p[2:]
-    segs = [s for s in p.split("/") if s]
-    if not segs:
-        return False
-    if any(seg in _TEST_DIR_SEGMENTS for seg in segs[:-1]):
-        return True
-    bn = segs[-1]
-    return (
-        bn.startswith("test_") or bn.startswith("test")
-        or bn.endswith("_test.py") or bn.endswith("_test.go") or bn.endswith("_test.rs")
-        or ".test." in bn or ".spec." in bn or bn.endswith("test.java")
-    )
+    """De-dup'd (2026-06-15) to the single canonical predicate
+    ``delivery.path_policy.is_test_or_demo``: a TEST **or** DEMO/non-source path is never
+    surfaced to the agent. The brief copies previously caught only the TEST half and
+    missed DEMO dirs (docs_src/examples), which leaked docs_src/ tutorial files as
+    candidate edit targets (fastapi witness). Dir-segment match, never substring."""
+    return _is_test_or_demo(path)
 
 
 def _test_files_for(graph_db: str, file_path: str, limit: int = 3) -> list[str]:
@@ -623,7 +610,10 @@ MAX_CALLERS_PER_FUNC = 2
 #       calls only and substrate graphs are frozen, so the consumer fact surface
 #       is the operative guard. Correct-or-quiet: exclusion suppresses, never invents.
 # ---------------------------------------------------------------------------
-from groundtruth.delivery.path_policy import is_vendored_path as _is_vendored_path  # noqa: E402
+from groundtruth.delivery.path_policy import (  # noqa: E402
+    is_vendored_path as _is_vendored_path,
+    is_test_or_demo as _is_test_or_demo,
+)
 from groundtruth.delivery.name_policy import (  # noqa: E402
     is_builtin_shadow_name as _is_builtin_shadow_name,
     is_stdlib_shadow as _is_stdlib_shadow,
@@ -2877,33 +2867,17 @@ def generate_v1r_brief(
         ".txt",
     }
 
-    def _is_test_file(path: str) -> bool:
-        bn = os.path.basename(path)
-        name_no_ext = os.path.splitext(bn)[0]
-        return (
-            bn.startswith("test_")
-            or bn.startswith("tests_")
-            or bn.endswith("_test.py")
-            or bn.endswith("_test.go")
-            or bn.endswith(".test.ts")
-            or bn.endswith(".test.js")
-            or bn.endswith(".spec.ts")
-            or bn.endswith(".spec.js")
-            or name_no_ext.endswith("Test")      # Java: UserServiceTest.java
-            or name_no_ext.startswith("Test")     # Java: TestUserService.java
-            or bn.endswith("_test.rs")            # Rust: foo_test.rs
-            or "/test/" in path
-            or "/tests/" in path
-            or "/test_" in path
-            or "/__tests__/" in path              # JS/React convention
-        )
-
+    # De-dup'd (2026-06-15): the nested test-only _is_test_file MISSED demo dirs, so a
+    # docs_src/ tutorial .py (no test basename, .py not in _NON_SOURCE_EXTS) survived the
+    # candidate filter and was emitted as an edit target (fastapi witness, the real
+    # docs_src leak — at candidate RANKING, not render). The single canonical test+demo
+    # predicate drops docs_src/examples/... here too.
     top_records = [
         r
         for r in top_records
         if os.path.basename(r.get("path", "")) not in _NON_SOURCE
         and os.path.splitext(r.get("path", ""))[1].lower() not in _NON_SOURCE_EXTS
-        and not _is_test_file(r.get("path", ""))
+        and not _is_test_or_demo(r.get("path", ""))
     ]
     if not top_records:
         top_records = v74.ranked_full[:max_files]  # fallback if all filtered

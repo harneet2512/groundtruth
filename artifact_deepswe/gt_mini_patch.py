@@ -150,6 +150,7 @@ try:
         is_vendored_path as _is_vendored_path,
         is_minified_file as _is_minified_file,
         is_delivery_excluded as _is_delivery_excluded,
+        is_test_or_demo as _pp_is_test_or_demo,
     )
     from groundtruth.delivery.name_policy import (
         BUILTIN_CALLABLE_NAMES as _BUILTIN_CALLABLE_NAMES,
@@ -176,6 +177,7 @@ except Exception as _delivery_import_err:  # noqa: BLE001
         "same_file", "import", "import_type", "type_flow", "verified_unique",
         "inherited", "return_type", "lsp", "lsp_verified",
     })
+    _pp_is_test_or_demo = None  # import failed -> _is_test_or_demo_path uses local fallback
     _VENDOR_DIR_MARKERS_FB = (
         "/extern/", "/externals/", "/vendor/", "/vendored/", "/third_party/",
         "/thirdparty/", "/node_modules/", "/bower_components/", "/dist/",
@@ -370,7 +372,13 @@ def _is_test_or_demo_path(path: str) -> bool:
     *.spec.*. Demo/non-source = any dir segment in {examples, example, demo,
     demos, sample, samples, fixtures, fixture, docs, doc, benchmark, benchmarks,
     vendor, node_modules, dist, build}. Correct-or-quiet: such a path is never a
-    delivered scope/witness fact."""
+    delivered scope/witness fact.
+
+    De-dup (2026-06-15): delegates to the single canonical
+    ``delivery.path_policy.is_test_or_demo`` when the import succeeded (the live path);
+    the local segment logic below is the byte-equivalent in-container fallback."""
+    if _pp_is_test_or_demo is not None:
+        return _pp_is_test_or_demo(path)
     p = (path or "").replace("\\", "/").lower()
     if p.startswith("./"):
         p = p[2:]
