@@ -88,18 +88,30 @@ def main() -> int:
     except Exception as exc:  # measurement must not crash the matrix leg
         out["whole_brief_error"] = f"{type(exc).__name__}: {exc}"
 
-    # ---- localization recall (the file RANKER, step 4) ----
+    # ---- localization recall + REACHABILITY diagnostic (the file RANKER, step 4) ----
+    # top_k=500 does NOT change the ranking (sort is before the top_k cut, line ~2730);
+    # it only reveals where each gold ACTUALLY ranks. This forks the diagnosis:
+    #   * gold in top-500 but rank > 15  -> reachable-but-MISRANKED (a ranking bug to fix)
+    #   * gold NOT in top-500 at all      -> not a candidate = UNREACHABLE from issue
+    #     anchors (a reachability ceiling; cochange/scope pillars are the lever, not L1)
     try:
         from groundtruth.pretask.graph_localizer import localize
 
-        res = localize(issue, args.db, top_k=15, repo_root=args.src)
+        res = localize(issue, args.db, top_k=500, repo_root=args.src)
         ranked = [os.path.basename(c.file_path) for c in res.candidates]
-        ranks = sorted(
-            ranked.index(g) + 1 for g in gold if g in ranked
-        )
-        out["loc_ranks"] = ranks
+        full_rank = {}  # gold basename -> 1-indexed full rank, or None if not a candidate
+        for g in gold:
+            full_rank[g] = (ranked.index(g) + 1) if g in ranked else None
+        ranks = sorted(r for r in full_rank.values() if r is not None)
+        out["loc_ranks"] = [r for r in ranks if r <= 15]
         out["recall_at_8"] = sum(1 for r in ranks if r <= 8)
         out["recall_at_15"] = sum(1 for r in ranks if r <= 15)
+        out["gold_candidates"] = sum(1 for r in full_rank.values() if r is not None)
+        out["gold_full_ranks"] = {g: full_rank[g] for g in sorted(gold)}
+        out["unreachable_gold"] = sorted(g for g, r in full_rank.items() if r is None)
+        out["misranked_gold"] = sorted(
+            g for g, r in full_rank.items() if r is not None and r > 15
+        )
         out["loc_confident"] = bool(getattr(res, "confident", False))
     except Exception as exc:
         out["loc_error"] = f"{type(exc).__name__}: {exc}"
@@ -114,6 +126,11 @@ def main() -> int:
     print(
         f"CUM {task_id[:34]:34} [{args.lang[:4]:4}]: N={n_gold:2} "
         f"recall@8={r8}/{n_gold} recall@15={r15}/{n_gold} ranks={out.get('loc_ranks', 'ERR')}"
+    )
+    print(
+        f"DIAG {task_id[:33]:33} [{args.lang[:4]:4}]: candidates={out.get('gold_candidates','ERR')}/{n_gold} "
+        f"MISRANKED(in500,>15)={out.get('misranked_gold','ERR')} "
+        f"UNREACHABLE(not-cand)={out.get('unreachable_gold','ERR')}"
     )
     print("PARITY_JSON " + json.dumps(out, sort_keys=True))
     return 0

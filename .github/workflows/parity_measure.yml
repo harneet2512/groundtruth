@@ -119,6 +119,12 @@ jobs:
           mkdir -p /tmp/gt/src && docker cp "gtsrc:$ROOT/." /tmp/gt/src 2>/dev/null || echo "WARN: no source"
           docker rm -f gtsrc 2>/dev/null || true
           echo "edges total: $(sqlite3 /tmp/gt/graph.db "SELECT COUNT(*) FROM edges" 2>/dev/null || echo '?')"
+          # Snapshot the RAW resolution-method histogram BEFORE the LSP pass. The
+          # determinism test must compare raw-index vs raw-reindex (LSP-enriched-vs-raw
+          # is a guaranteed false DRIFT: the resolve pass adds lsp edges + demotes).
+          RAW_HIST=$(sqlite3 /tmp/gt/graph.db "SELECT resolution_method,COUNT(*) FROM edges GROUP BY 1 ORDER BY 1" 2>/dev/null | md5sum | cut -d' ' -f1)
+          echo "GT_RAW_HIST=$RAW_HIST" >> "$GITHUB_ENV"
+          echo "raw histogram: $RAW_HIST"
           # offline LSP precision pass on the TASK's language (the cumulative enrichment)
           python -m groundtruth.resolve --db /tmp/gt/graph.db --root /tmp/gt/src --resolve --lang "${{ matrix.lang }}" 2>&1 | tail -3 || echo "WARN: lsp"
           echo "lsp edges: $(sqlite3 /tmp/gt/graph.db "SELECT COUNT(*) FROM edges WHERE resolution_method='lsp'" 2>/dev/null || echo '?')"
@@ -137,9 +143,11 @@ jobs:
           docker exec gtdet /tmp/gt-index -root="$ROOT" -output=/tmp/g2.db >/dev/null 2>&1 || true
           docker cp gtdet:/tmp/g2.db /tmp/gt/g2.db 2>/dev/null || true
           docker rm -f gtdet 2>/dev/null || true
-          H1=$(sqlite3 /tmp/gt/graph.db "SELECT resolution_method,COUNT(*) FROM edges GROUP BY 1 ORDER BY 1" 2>/dev/null | md5sum | cut -d' ' -f1)
-          H2=$(sqlite3 /tmp/gt/g2.db   "SELECT resolution_method,COUNT(*) FROM edges GROUP BY 1 ORDER BY 1" 2>/dev/null | md5sum | cut -d' ' -f1)
-          echo "DETERMINISM ${{ matrix.task_id }}: h1=$H1 h2=$H2 $([ "$H1" = "$H2" ] && echo IDENTICAL || echo DRIFT)"
+          # Compare RAW-index (snapshot before LSP) vs RAW-reindex (g2, no LSP). Both
+          # are the bare indexer output -> a true +=+ determinism test of steps 1-2.
+          H1="$GT_RAW_HIST"
+          H2=$(sqlite3 /tmp/gt/g2.db "SELECT resolution_method,COUNT(*) FROM edges GROUP BY 1 ORDER BY 1" 2>/dev/null | md5sum | cut -d' ' -f1)
+          echo "DETERMINISM ${{ matrix.task_id }}: raw=$H1 reindex=$H2 $([ "$H1" = "$H2" ] && echo IDENTICAL || echo DRIFT)"
 
       - name: Measure whole-pipeline coverage (steps 4-5)
         run: |
