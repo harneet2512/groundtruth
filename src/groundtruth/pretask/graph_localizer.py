@@ -2719,27 +2719,9 @@ def localize(
     # keys BEFORE the path: best-witness strength, then lex_hits, then subject position.
     # The path string is the LAST resort. No-op when `_rrf3` already separates (the
     # common case); load-bearing only on exact ties (grep-floor-only / no-embedder).
-    # SEMANTIC RECALL SPINE / agreement-escape (re-test on the faithful metric; SACL
-    # 2506.20081 textual-bias de-bias + SpIDER 2512.16956 Γ_d∩S_N). A non-grep-recalled
-    # candidate joins the recall floor iff the structural AND semantic rankers BOTH place
-    # it within the result window — two independent signals agreeing it belongs on the
-    # page. Dynamic (window = top_k), hybrid (struct ∧ sem), embedder-gated, hub-safe (a
-    # hub wins struct via in-degree but not sem). Env-gated for clean A/B; default ON.
-    _escape_on = os.environ.get("GT_AGREEMENT_ESCAPE", "1") != "0"
-
-    def _effective_floor(c: Candidate) -> int:
-        f = _grep_floor(c)
-        if f == 0:
-            return 0
-        if (_escape_on and _sem_rank
-                and _struct_rank.get(id(c), _BIG) < top_k
-                and _sem_rank.get(id(c), _BIG) < top_k):
-            return 0
-        return f
-
     candidates.sort(
         key=lambda c: (
-            _effective_floor(c),     # Phase 2: grep recall floor + multi-signal escape (PRIMARY)
+            _grep_floor(c),          # Phase 2: grep recall floor (PRIMARY)
             _depth_authority(c),     # Phase 3: string-world non-recalled sinks
             -_rrf3(c),               # lexical + structural + SEMANTIC rank fusion
             *_final_relevance_key(c, _cand_subject_pos),  # relevance before the path string
