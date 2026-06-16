@@ -356,8 +356,15 @@ func buildPromoteIndexes(db *store.DB) (*promoteIndexes, error) {
 	}
 	defer tx.Rollback()
 
+	// ORDER BY id: this scan's consumers ASSUME id-order (fnl/classByName
+	// "first writer wins, id-ordered scan"; nameIndex slices feed resolveByName's
+	// "prefer same-file / first match"). Without it SQLite's scan order is not
+	// guaranteed, so a name with multiple matches resolved a run-dependent callee
+	// — measured: textual promote_dataflow_callee 164 vs 139 across re-indexes
+	// (a Step-1 +=+ break). Make the documented assumption real. (Same bug class
+	// as the parser.go receiverCalls map-iteration fix.)
 	rows, err := tx.Query(`SELECT id, label, name, file_path,
-	        COALESCE(start_line, 0), COALESCE(parent_id, 0), COALESCE(signature, '') FROM nodes`)
+	        COALESCE(start_line, 0), COALESCE(parent_id, 0), COALESCE(signature, '') FROM nodes ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
