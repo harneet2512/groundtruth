@@ -98,6 +98,17 @@ def main() -> int:
     try:
         from groundtruth.pretask.graph_localizer import localize
 
+        # BRIEF-FAITHFUL recall (BRIEFING.md §1: measure what the brief renders, not
+        # localize() in isolation). generate_v1r_brief calls localize(top_k=8) — a
+        # larger top_k changes the semantic POOL and thus the ranking, so the verdict
+        # metric MUST use the brief's top_k. (top_k=500 below is for the reachability
+        # fork only: candidate-or-not is pool-independent.)
+        res8 = localize(issue, args.db, top_k=8, repo_root=args.src)
+        ranked8 = [os.path.basename(c.file_path) for c in res8.candidates]
+        out["brief_recall_at_5"] = sum(1 for g in gold if g in ranked8[:5])
+        out["brief_recall_at_8"] = sum(1 for g in gold if g in ranked8)
+        out["brief_top8"] = ranked8
+
         res = localize(issue, args.db, top_k=500, repo_root=args.src)
         ranked = [os.path.basename(c.file_path) for c in res.candidates]
         full_rank = {}  # gold basename -> 1-indexed full rank, or None if not a candidate
@@ -172,6 +183,12 @@ def main() -> int:
     print(
         f"CUM {task_id[:34]:34} [{args.lang[:4]:4}]: N={n_gold:2} "
         f"recall@8={r8}/{n_gold} recall@15={r15}/{n_gold} ranks={out.get('loc_ranks', 'ERR')}"
+    )
+    print(
+        f"BRIEF{task_id[:33]:33} [{args.lang[:4]:4}]: N={n_gold:2} "
+        f"first@5={out.get('brief_recall_at_5','ERR')}/{n_gold} "
+        f"brief_recall@8={out.get('brief_recall_at_8','ERR')}/{n_gold} "
+        f"top8={out.get('brief_top8','ERR')}"
     )
     print(
         f"DIAG {task_id[:33]:33} [{args.lang[:4]:4}]: candidates={out.get('gold_candidates','ERR')}/{n_gold} "
