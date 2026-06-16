@@ -80,8 +80,29 @@ def main() -> int:
     try:
         from groundtruth.pretask.v1r_brief import generate_v1r_brief
 
-        brief = generate_v1r_brief(issue, args.src, args.db, gold_files=None)
-        brief_text = brief if isinstance(brief, str) else str(brief)
+        _VFOCUS = re.compile(
+            r"(^|/)(vendor|node_modules|third_party|thirdparty)/|/(testify|spew|difflib|go-spew)(/|$)"
+        )
+
+        def _gen_focus(env_val: str):
+            os.environ["GT_TEST_TOOLING_DEMOTE"] = env_val
+            _b = generate_v1r_brief(issue, args.src, args.db, gold_files=None)
+            _bt = _b if isinstance(_b, str) else str(_b)
+            _m = re.search(r"focus_set=\[([^\]]*)\]", _bt)
+            _fs = re.findall(r"'([^']+)'", _m.group(1)) if _m else []
+            _v = sum(1 for f in _fs if _VFOCUS.search(f))
+            _g = sum(1 for f in _fs if os.path.basename(f) in gold)
+            return _bt, _fs, _v, _g
+
+        # PAIRED focus-set A/B (run_v74 test-tooling filter): OFF vs ON, SAME substrate.
+        # Proves the fix removes vendored noise where it exists AND doesn't over-filter
+        # where it doesn't — on held-out validation cases (generalization).
+        _bt_off, _fs_off, _v_off, _g_off = _gen_focus("0")
+        brief_text, _fs_on, _v_on, _g_on = _gen_focus("1")
+        os.environ.pop("GT_TEST_TOOLING_DEMOTE", None)
+        out["focus_vendored_off"], out["focus_vendored_on"] = _v_off, _v_on
+        out["focus_gold_off"], out["focus_gold_on"] = _g_off, _g_on
+        out["focus_set_on"] = _fs_on
         mentioned = {os.path.basename(m) for m in _SRC_FILE.findall(brief_text)}
         wp_cov = sorted(g for g in gold if g in mentioned)
         out["whole_brief_cov"] = len(wp_cov)
@@ -249,8 +270,10 @@ def main() -> int:
         f"order={out.get('brief_order','ERR')}"
     )
     print(
-        f"FOCUS{task_id[:33]:33} [{args.lang[:4]:4}]: vendored_in_focus={out.get('focus_vendored','?')} "
-        f"gold_in_focus={out.get('focus_gold','?')} focus_set={out.get('focus_set','?')}"
+        f"FOCUS{task_id[:33]:33} [{args.lang[:4]:4}]: "
+        f"vendored OFF->ON={out.get('focus_vendored_off','?')}->{out.get('focus_vendored_on','?')} "
+        f"gold OFF->ON={out.get('focus_gold_off','?')}->{out.get('focus_gold_on','?')} "
+        f"focus_on={out.get('focus_set_on','?')}"
     )
     print(
         f"ESC  {task_id[:33]:33} [{args.lang[:4]:4}]: N={n_gold:2} anchors={out.get('anchors_present','?')} "
