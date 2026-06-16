@@ -119,13 +119,33 @@ def main() -> int:
         try:
             from groundtruth.pretask.anchors import extract_issue_anchors
             _anchors = extract_issue_anchors(issue, args.db)
-        except Exception:
+        except Exception as _ae:
             _anchors = None
-        res8 = localize(issue, args.db, top_k=8, issue_anchors=_anchors, repo_root=args.src)
-        ranked8 = [os.path.basename(c.file_path) for c in res8.candidates]
-        out["brief_recall_at_5"] = sum(1 for g in gold if g in ranked8[:5])
-        out["brief_recall_at_8"] = sum(1 for g in gold if g in ranked8)
-        out["brief_top8"] = ranked8
+            out["anchor_error"] = f"{type(_ae).__name__}: {_ae}"
+        out["anchors_present"] = _anchors is not None
+
+        # PAIRED SAME-SUBSTRATE A/B: run localize escape-OFF and escape-ON on the SAME
+        # graph + SAME anchors (toggle only the env), so the delta is the escape alone.
+        # Cross-RUN comparison is confounded (each GHA job rebuilds the graph + re-extracts
+        # anchors -> a transient anchor failure flips the whole ranking).
+        def _recall(_res):
+            r = [os.path.basename(c.file_path) for c in _res.candidates]
+            return sum(1 for g in gold if g in r[:5]), sum(1 for g in gold if g in r), r
+
+        os.environ["GT_AGREEMENT_ESCAPE"] = "0"
+        _r5_off, _r8_off, _top_off = _recall(
+            localize(issue, args.db, top_k=8, issue_anchors=_anchors, repo_root=args.src))
+        os.environ["GT_AGREEMENT_ESCAPE"] = "1"
+        _r5_on, _r8_on, _top_on = _recall(
+            localize(issue, args.db, top_k=8, issue_anchors=_anchors, repo_root=args.src))
+        os.environ.pop("GT_AGREEMENT_ESCAPE", None)
+        out["brief_recall_at_5"] = _r5_off          # OFF = the current-product baseline
+        out["brief_recall_at_8"] = _r8_off
+        out["brief_top8"] = _top_off
+        out["escape_first5_off"], out["escape_recall8_off"] = _r5_off, _r8_off
+        out["escape_first5_on"], out["escape_recall8_on"] = _r5_on, _r8_on
+        out["escape_top8_on"] = _top_on
+        out["escape_delta_recall8"] = _r8_on - _r8_off
 
         res = localize(issue, args.db, top_k=500, issue_anchors=_anchors, repo_root=args.src)
         ranked = [os.path.basename(c.file_path) for c in res.candidates]
@@ -207,6 +227,12 @@ def main() -> int:
         f"brief_first@5={out.get('brief_first5','ERR')}/{n_gold} "
         f"brief_first@8={out.get('brief_first8','ERR')}/{n_gold} "
         f"order={out.get('brief_order','ERR')}"
+    )
+    print(
+        f"ESC  {task_id[:33]:33} [{args.lang[:4]:4}]: N={n_gold:2} anchors={out.get('anchors_present','?')} "
+        f"OFF(f5/r8)={out.get('escape_first5_off','E')}/{out.get('escape_recall8_off','E')} "
+        f"ON(f5/r8)={out.get('escape_first5_on','E')}/{out.get('escape_recall8_on','E')} "
+        f"delta_r8={out.get('escape_delta_recall8','E')}"
     )
     print(
         f"BRIEF{task_id[:33]:33} [{args.lang[:4]:4}]: N={n_gold:2} "
