@@ -45,34 +45,57 @@ def _q(cur, sql, *a):
         return None
 
 
-def audit_depth(graph_db):
-    """Layer 0 - DEPTH: relationship-edge completeness + the full edge-type census.
+# The §2.6 depth EDGE class -> the parser SOURCE PROPERTY that is its raw edge-construct.
+# A class is correct-or-quiet (NOT a gap) when its source property is ABSENT (the repo lacks the
+# construct). It NEEDS-ADJUDICATION (possible gap; the internal-target check decides) when the source
+# property is PRESENT but 0 edges were minted — that is either a builtin/external target (correct-or-
+# quiet, non-invention) or a real promote gap. See .claude/reports/DEPTH_PARITY_METHODOLOGY.md.
+_DEPTH_SOURCE_PROP = {
+    "READS": "field_read", "WRITES": "field_write", "RAISES": "exception_type",
+    "PRECEDES": "call_order", "CO_SERIALIZES": "serialization_pair", "DATA_FLOW": "data_flow",
+}
 
-    DATA_FLOW is special: gt_gt §2.6 D1 - a data_flow that has a callee RIDES the existing CALLS edge
-    as a `dataflow=` metadata ANNOTATION rather than minting a standalone DATA_FLOW edge. So "present"
-    for DATA_FLOW = standalone edges OR annotated CALLS OR data_flow properties consumed - counting
-    only standalone edges falsely flags it missing (it is correct-or-quiet, not a gap)."""
+
+def audit_depth(graph_db):
+    """Layer 0 - DEPTH (gt_gt §2.6, the 100% bar): CONSTRUCT-AWARE per-class status. The lenient
+    `depth_present>0` verdict is gone (it false-GREENed). The raw-construct check is gone (it false-
+    REDed builtin throws). Instead, per class compare EDGES vs the source-PROPERTY (the edge-construct):
+      PRESENT            edges>0
+      CONSTRUCT-ABSENT   source-property==0  (the repo lacks the construct -> correct-or-quiet, N/A)
+      NEEDS-ADJUDICATION source-property>0 AND edges==0  (builtin/external target = correct-or-quiet,
+                         OR a real promote gap -> the internal-target check decides; never auto-GREEN).
+    DATA_FLOW rides CALLS as a `dataflow=` annotation (D1): present = standalone OR annotated."""
     c = sqlite3.connect(graph_db).cursor()
     rows = c.execute("SELECT type, COUNT(*) FROM edges GROUP BY type ORDER BY COUNT(*) DESC").fetchall()
     by_type = {t: n for t, n in rows}
     df_annotated = _q(c, "SELECT COUNT(*) FROM edges WHERE type='CALLS' AND metadata LIKE '%dataflow%'") or 0
-    df_props = _q(c, "SELECT COUNT(*) FROM properties WHERE kind='data_flow'") or 0
 
-    def present(t):
-        if t == "DATA_FLOW":
-            # consumed via standalone edge OR a CALLS annotation (D1). Only a true gap if go/py emits
-            # data_flow PROPERTIES but NONE are consumed anywhere.
-            return by_type.get("DATA_FLOW", 0) > 0 or df_annotated > 0 or df_props == 0
-        return by_type.get(t, 0) > 0
+    per_class = {}
+    present, construct_absent, needs_adjudication = [], [], []
+    for cls in _DEPTH_EDGES:
+        edges = by_type.get(cls, 0)
+        if cls == "DATA_FLOW":
+            edges = edges or df_annotated  # D1: annotation counts as present
+        props = _q(c, "SELECT COUNT(*) FROM properties WHERE kind=?", _DEPTH_SOURCE_PROP[cls]) or 0
+        if edges > 0:
+            status = "PRESENT"; present.append(cls)
+        elif props == 0:
+            status = "CONSTRUCT-ABSENT"; construct_absent.append(cls)
+        else:
+            status = "NEEDS-ADJUDICATION"; needs_adjudication.append(cls)
+        per_class[cls] = {"edges": edges, "source_props": props, "status": status}
 
-    depth_present = [t for t in _DEPTH_EDGES if present(t)]
-    depth_missing = [t for t in _DEPTH_EDGES if not present(t)]
+    # Construct-aware verdict: depth is OK when every class is PRESENT or CONSTRUCT-ABSENT. A
+    # NEEDS-ADJUDICATION class (props>0, edges==0) is NOT auto-GREEN (could be a real promote gap) and
+    # NOT auto-RED (could be builtin-target correct-or-quiet) -> surfaced for the internal-target check.
+    depth_ok = not needs_adjudication
     return {
-        "edge_types": by_type, "data_flow_annotated_calls": df_annotated, "data_flow_properties": df_props,
-        "depth_present": depth_present, "depth_missing": depth_missing,
-        "intended": "all relationship-edge classes present where internally resolvable; DATA_FLOW rides CALLS as an annotation (D1)",
-        "fired": len(depth_present) > 0,
-        "gap": ("none" if not depth_missing else f"missing depth classes: {','.join(depth_missing)}"),
+        "edge_types": by_type, "per_class": per_class,
+        "present": present, "construct_absent": construct_absent, "needs_adjudication": needs_adjudication,
+        "intended": "every class with its internal-target edge-construct -> edge minted (§2.6 100% bar); construct-absent = correct-or-quiet",
+        "fired": depth_ok,
+        "gap": ("none (all classes PRESENT or construct-absent)" if depth_ok
+                else f"NEEDS-ADJUDICATION (source-prop present, 0 edges -> internal-target check): {','.join(needs_adjudication)}"),
     }
 
 
@@ -247,7 +270,9 @@ def main(argv=None):
         print("-- per-turn layers: trajectory not provided (substrate-only audit) --")
     print("\n-- detail --")
     print(f"L0 depth edge types: { {k:v for k,v in report['L0_depth']['edge_types'].items()} }")
-    print(f"depth present: {report['L0_depth']['depth_present']}  missing: {report['L0_depth']['depth_missing']}")
+    print(f"depth per-class (edges/source_props/status):")
+    for cls, d in report['L0_depth']['per_class'].items():
+        print(f"    {cls:14} edges={d['edges']:<5} props={d['source_props']:<5} {d['status']}")
     print(f"naming det_pct={report['naming']['det_pct']}% name_match={report['naming']['name_match']} tiers={report['naming']['typing_tiers']}")
     print(f"facts/#2 receiver_unproven={report['facts']['receiver_unproven']} cap={report['facts']['cap']} violations={report['facts']['violations']}")
     print(f"nodes typedef={report['nodes']['typedef_nodes']} labels={report['nodes']['labels']}")
@@ -260,7 +285,7 @@ def main(argv=None):
     sub_checks = {
         "nodes>0": (report["nodes"]["labels"] and sum(report["nodes"]["labels"].values()) > 0),
         "calls_edges>0": report["naming"]["calls_edges"] > 0,
-        "depth_present": len(report["L0_depth"]["depth_present"]) > 0,
+        "depth_construct_aware": report["L0_depth"]["fired"],  # no class is NEEDS-ADJUDICATION (§2.6 bar)
         "facts_#2_caps": report["facts"]["fired"],  # impl_method/unique_method conf <= 0.6
     }
     substrate_pass = all(sub_checks.values())

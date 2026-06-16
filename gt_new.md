@@ -661,3 +661,21 @@ re-synced. Generalized — PATH/transport plumbing, no per-task logic, no benchm
 **Status:** all of §11 is **TESTED** (mutation-checked unit/integration red→green) except the rust-LSP
 fix, which is **PROVEN** (live `fd` witness: lsp 0→186, det_pct +24.5pp, `LSP_ACTIVE_VALID`). The
 broader functional-fix campaign's live agent witness (consumption proof) remains the open Task #6 gate.
+
+---
+
+## §12.X — Depth-parity bar (§2.6 100%) + construct-aware audit (OFFICIAL, 2026-06-16)
+
+The §2.6 depth bar is **100% where the EDGE-CONSTRUCT exists**, identical across all 5 languages — NOT
+`depth_present>0` (lenient false-GREEN) and NOT "has a raw throw/json-tag" (false-RED). A depth EDGE
+points at an INTERNAL node; the raw lexical construct is not the test:
+- RAISES ← throw/raise of an **internal exception class** (builtin Error/TypeError stays a property).
+- PRECEDES ← call sequence on a receiver that **resolves to an internal class** (untyped/builtin → abstain).
+- CO_SERIALIZES ← a **serialize↔deserialize FUNCTION PAIR** (`detectSerdePairs`/`serdePairs`, incl
+  marshal/unmarshal, dump/load), NOT json struct tags.
+RED only when the source PROPERTY (exception_type/call_order/serialization_pair/field_read/field_write/
+data_flow) is present with an internal target AND the edge is absent. Property-with-builtin-target +
+0 edges = correct-or-quiet. `gt_layer_audit.audit_depth` is now construct-aware (PRESENT / CONSTRUCT-
+ABSENT / NEEDS-ADJUDICATION). Depth parity is CONFOUNDED across different repos (each has different
+constructs), so a positive proof needs a per-language repo that EXERCISES each class. Full:
+`.claude/reports/DEPTH_PARITY_METHODOLOGY.md`.
