@@ -113,6 +113,33 @@ def main() -> int:
             g for g, r in full_rank.items() if r is not None and r > 15
         )
         out["loc_confident"] = bool(getattr(res, "confident", False))
+
+        # WITNESS DUMP per gold candidate -> settles the fix layer:
+        #   lex=0 AND vedge=0  -> Tier C: reached only by name_match/DEFINES = the
+        #     edge-CONVERSION cause (Step 1-2 receiver-type resolution), NOT the ranker.
+        #   vedge>0 but rank>15 -> verified reach yet buried = a Step-4 RANKER bug.
+        # vedge = verified, non-defines_anchor witnesses (the _depth_authority criterion).
+        by_base: dict[str, object] = {}
+        for c in res.candidates:
+            b = os.path.basename(c.file_path)
+            if b in gold and b not in by_base:
+                wits = list(getattr(c, "witnesses", []) or [])
+                vedge = sum(
+                    1 for w in wits
+                    if getattr(w, "verified", False)
+                    and getattr(w, "direction", "") != "defines_anchor"
+                )
+                hops = [getattr(w, "hop", -1) for w in wits]
+                by_base[b] = {
+                    "rank": full_rank.get(b),
+                    "score": round(float(getattr(c, "score", 0.0)), 6),
+                    "lex_hits": int(getattr(c, "lex_hits", 0)),
+                    "n_wit": len(wits),
+                    "vedge": vedge,
+                    "min_hop": min(hops) if hops else None,
+                    "dirs": sorted({getattr(w, "direction", "?") for w in wits}),
+                }
+        out["gold_witness"] = by_base
     except Exception as exc:
         out["loc_error"] = f"{type(exc).__name__}: {exc}"
 
@@ -132,6 +159,11 @@ def main() -> int:
         f"MISRANKED(in500,>15)={out.get('misranked_gold','ERR')} "
         f"UNREACHABLE(not-cand)={out.get('unreachable_gold','ERR')}"
     )
+    for b, w in sorted(out.get("gold_witness", {}).items()):
+        print(
+            f"WIT  {b[:28]:28}: rank={w['rank']} score={w['score']} lex={w['lex_hits']} "
+            f"vedge={w['vedge']} n_wit={w['n_wit']} min_hop={w['min_hop']} dirs={w['dirs']}"
+        )
     print("PARITY_JSON " + json.dumps(out, sort_keys=True))
     return 0
 
