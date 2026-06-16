@@ -94,6 +94,37 @@ def audit_naming(graph_db):
     }
 
 
+# Receiver-UNPROVEN method-resolution rungs: name-uniqueness guesses, capped CANDIDATE (<=0.6) by the
+# resolver, NEVER a deterministic fact (CLAUDE.md fact definition; commit 6fdf572b). The substrate-parity
+# invariant: in a REAL graph.db, no edge of these methods may carry confidence > 0.6 (that would be the
+# pre-#2 launder where unique_method emitted 0.85 and cleared the closure 0.7 reach floor).
+_RECEIVER_UNPROVEN_METHODS = ("impl_method", "unique_method")
+_RECEIVER_UNPROVEN_CAP = 0.6
+
+
+def audit_facts(graph_db):
+    """FACT-TIER invariant (#2): receiver-unproven rungs (impl_method/unique_method) are capped at the
+    CANDIDATE ceiling (conf <= 0.6) so they can never read as a deterministic fact or clear the closure
+    reach floor (0.7). Asserts on the REAL graph.db edges. A single such edge with conf > 0.6 is a launder."""
+    c = sqlite3.connect(graph_db).cursor()
+    rows = {}
+    violations = []
+    for m in _RECEIVER_UNPROVEN_METHODS:
+        cnt = _q(c, "SELECT COUNT(*) FROM edges WHERE resolution_method=?", m) or 0
+        mx = _q(c, "SELECT MAX(confidence) FROM edges WHERE resolution_method=?", m)
+        rows[m] = {"count": cnt, "max_conf": mx}
+        if mx is not None and mx > _RECEIVER_UNPROVEN_CAP + 1e-9:
+            violations.append(f"{m} max_conf={mx} > {_RECEIVER_UNPROVEN_CAP} ({cnt} edges) -- LAUNDER")
+    # closure presence: a unique_method/impl_method edge must NOT appear in the verified closure (it is
+    # excluded from closure.verifiedMethods). The closure table stores (source,target) reach, not method,
+    # so we check the invariant at the edge tier (conf cap) which gates closure admission upstream.
+    ok = not violations
+    return {"receiver_unproven": rows, "cap": _RECEIVER_UNPROVEN_CAP, "violations": violations,
+            "intended": "impl_method/unique_method conf <= 0.6 (CANDIDATE) — receiver-unproven, never a fact (#2/6fdf572b)",
+            "fired": ok,
+            "gap": "none" if ok else "; ".join(violations)}
+
+
 def audit_nodes(graph_db):
     """NODE LABELS - confirms type-def nodes exist (the fix#1 surface: Class/ImplBlock rankable)."""
     c = sqlite3.connect(graph_db).cursor()
@@ -178,6 +209,8 @@ def main(argv=None):
     ap.add_argument("--trajectory", default="")
     ap.add_argument("--lang", default="?")
     ap.add_argument("--task", default="?")
+    ap.add_argument("--substrate-strict", action="store_true",
+                    help="exit non-zero on a RED substrate (gt_gt §2) cell — for the parity-matrix gate")
     a = ap.parse_args(argv)
     certs = a.certs or os.path.dirname(a.graph)
 
@@ -185,6 +218,7 @@ def main(argv=None):
         "task": a.task, "lang": a.lang,
         "L0_depth": audit_depth(a.graph),
         "naming": audit_naming(a.graph),
+        "facts": audit_facts(a.graph),
         "nodes": audit_nodes(a.graph),
         "lsp": audit_lsp(certs),
         "embedder": audit_embedder(certs),
@@ -196,6 +230,7 @@ def main(argv=None):
     order = [
         ("L0 DEPTH", report["L0_depth"]),
         ("NAMING/resolver", report["naming"]),
+        ("FACTS/#2-caps", report["facts"]),
         ("NODES/type-defs", report["nodes"]),
         ("LSP", report["lsp"]),
         ("EMBEDDER", report["embedder"]),
@@ -214,9 +249,28 @@ def main(argv=None):
     print(f"L0 depth edge types: { {k:v for k,v in report['L0_depth']['edge_types'].items()} }")
     print(f"depth present: {report['L0_depth']['depth_present']}  missing: {report['L0_depth']['depth_missing']}")
     print(f"naming det_pct={report['naming']['det_pct']}% name_match={report['naming']['name_match']} tiers={report['naming']['typing_tiers']}")
+    print(f"facts/#2 receiver_unproven={report['facts']['receiver_unproven']} cap={report['facts']['cap']} violations={report['facts']['violations']}")
     print(f"nodes typedef={report['nodes']['typedef_nodes']} labels={report['nodes']['labels']}")
     print(f"lsp warm={report['lsp']['warm']} effective_work={report['lsp']['effective_work']} verdict={report['lsp']['verdict_hint']}")
     print(f"embedder class={report['embedder']['class']} dim={report['embedder']['dim']} w_sem={report['embedder']['effective_w_sem']} zeroed={report['embedder']['is_zero']}")
+
+    # ---- STEP-1 SUBSTRATE PARITY VERDICT (graph.db, gt_gt §2): the per-(layer x language) cell. ----
+    # Asserts the §2 trust model + #2 caps + §2.6 depth on the REAL graph.db. PASS only when ALL hold.
+    # Each sub-check is read from real edges; a single violation is a RED cell (scoped to this language).
+    sub_checks = {
+        "nodes>0": (report["nodes"]["labels"] and sum(report["nodes"]["labels"].values()) > 0),
+        "calls_edges>0": report["naming"]["calls_edges"] > 0,
+        "depth_present": len(report["L0_depth"]["depth_present"]) > 0,
+        "facts_#2_caps": report["facts"]["fired"],  # impl_method/unique_method conf <= 0.6
+    }
+    substrate_pass = all(sub_checks.values())
+    print("\n-- SUBSTRATE PARITY (gt_gt §2 cell) --")
+    for k, v in sub_checks.items():
+        print(f"  {('PASS' if v else 'FAIL'):4} {k}")
+    print(f"SUBSTRATE_VERDICT[{a.lang}] = {'PASS' if substrate_pass else 'FAIL'} "
+          f"(det_pct={report['naming']['det_pct']}% name_match={report['naming']['name_match']} "
+          f"depth={report['L0_depth']['depth_present']} #2={report['facts']['violations'] or 'capped'})")
+    report["substrate_verdict"] = {"pass": substrate_pass, "checks": sub_checks}
 
     out = os.path.join(certs, f"gt_layer_audit_{a.task}.json")
     try:
@@ -224,6 +278,9 @@ def main(argv=None):
         print(f"\nwrote {out}")
     except Exception:
         pass
+    # --substrate-strict: non-zero exit on a RED substrate cell (so the matrix gate can branch).
+    if getattr(a, "substrate_strict", False) and not substrate_pass:
+        return 1
     return 0
 
 
