@@ -14,6 +14,10 @@ on:
         description: "task_id:lang CSV (default = frozen TRAIN split, 1/lang)"
         required: true
         default: "expr-try-catch-errors:go,testem-per-launcher-reports:javascript,mashumaro-flattened-dataclass-fields:python,superjson-error-stack-serialization:typescript,pest-character-class-coalescing:rust"
+      escape:
+        description: "agreement-escape: 1=on (fix), 0=off (A/B baseline)"
+        required: false
+        default: "1"
 
 env:
   PYTHONUTF8: "1"
@@ -154,6 +158,8 @@ jobs:
           # Per-signal rank dump (grep/struct/sem) to stderr -> reveals WHICH ranker
           # buries gold. Diagnostic only; no product behavior change.
           GT_LOCALIZE_DEBUG: "1"
+          # A/B the agreement-escape: 1=fix on, 0=baseline. Default on in product.
+          GT_AGREEMENT_ESCAPE: ${{ inputs.escape }}
         run: |
           mkdir -p parity_out
           python scripts/parity/measure_whole_pipeline.py \

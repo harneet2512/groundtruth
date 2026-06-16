@@ -86,6 +86,19 @@ def main() -> int:
         out["whole_brief_cov"] = len(wp_cov)
         out["whole_brief_covered"] = wp_cov
         out["brief_chars"] = len(brief_text)
+        # BRIEF-FAITHFUL RANK (BRIEFING.md §1/§5: measure what the brief RENDERS, not
+        # localize() in isolation). The localization section renders first, so the order
+        # of distinct source-file first-mentions in the brief text ≈ the rank the agent
+        # sees. This is the only metric that reflects the real brief (incl. issue_anchors
+        # + render_brief cap/hub-demotion), which an isolated localize() call cannot.
+        _order: list[str] = []
+        for _m in _SRC_FILE.finditer(brief_text):
+            _b = os.path.basename(_m.group(0))
+            if _b not in _order:
+                _order.append(_b)
+        out["brief_order"] = _order[:15]
+        out["brief_first5"] = sum(1 for g in gold if g in _order[:5])
+        out["brief_first8"] = sum(1 for g in gold if g in _order[:8])
     except Exception as exc:  # measurement must not crash the matrix leg
         out["whole_brief_error"] = f"{type(exc).__name__}: {exc}"
 
@@ -183,6 +196,12 @@ def main() -> int:
     print(
         f"CUM {task_id[:34]:34} [{args.lang[:4]:4}]: N={n_gold:2} "
         f"recall@8={r8}/{n_gold} recall@15={r15}/{n_gold} ranks={out.get('loc_ranks', 'ERR')}"
+    )
+    print(
+        f"FAITH{task_id[:33]:33} [{args.lang[:4]:4}]: N={n_gold:2} "
+        f"brief_first@5={out.get('brief_first5','ERR')}/{n_gold} "
+        f"brief_first@8={out.get('brief_first8','ERR')}/{n_gold} "
+        f"order={out.get('brief_order','ERR')}"
     )
     print(
         f"BRIEF{task_id[:33]:33} [{args.lang[:4]:4}]: N={n_gold:2} "

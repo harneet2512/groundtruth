@@ -2732,11 +2732,13 @@ def localize(
     # structural rank via raw in-degree but the semantic ranker does NOT favor it, so it
     # fails the AND — the exact failure mode the grep spine exists to prevent (BRIEFING
     # §4) is preserved. Promote-only; never demotes a grep-recalled file.
+    _escape_on = os.environ.get("GT_AGREEMENT_ESCAPE", "1") != "0"  # default ON; "0" = A/B baseline
+
     def _effective_floor(c: Candidate) -> int:
         f = _grep_floor(c)
         if f == 0:
             return 0
-        if (_sem_rank
+        if (_escape_on and _sem_rank
                 and _struct_rank.get(id(c), _BIG) < top_k
                 and _sem_rank.get(id(c), _BIG) < top_k):
             return 0
