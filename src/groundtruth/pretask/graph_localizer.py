@@ -2719,34 +2719,9 @@ def localize(
     # keys BEFORE the path: best-witness strength, then lex_hits, then subject position.
     # The path string is the LAST resort. No-op when `_rrf3` already separates (the
     # common case); load-bearing only on exact ties (grep-floor-only / no-embedder).
-    # AGREEMENT-ESCAPE (BRIEFING.md §2/§3): the grep floor is the recall SPINE, but as
-    # an ABSOLUTE primary key it strands token-mismatched gold below grep-recalled noise
-    # — the embedder (the issue→code bridge for golds sharing no tokens) cannot lift it
-    # across tiers (measured: expr checker.go lex8/struct7/sem3 floored under utils.go
-    # struct28/sem11, purely because grep-to-seed missed it). The escape lets a
-    # non-grep-recalled candidate JOIN the floor iff BOTH independent rankers — the
-    # structural AND the semantic — place it within the result window (top_k): two
-    # signals agreeing it belongs on the page. Dynamic (window = the caller's top_k,
-    # not a tuned constant), hybrid (struct ∧ sem, never one signal), embedder-gated
-    # (no _sem_rank → no escape, the pure grep floor stands). HUB-SAFE: a hub wins the
-    # structural rank via raw in-degree but the semantic ranker does NOT favor it, so it
-    # fails the AND — the exact failure mode the grep spine exists to prevent (BRIEFING
-    # §4) is preserved. Promote-only; never demotes a grep-recalled file.
-    _escape_on = os.environ.get("GT_AGREEMENT_ESCAPE", "1") != "0"  # default ON; "0" = A/B baseline
-
-    def _effective_floor(c: Candidate) -> int:
-        f = _grep_floor(c)
-        if f == 0:
-            return 0
-        if (_escape_on and _sem_rank
-                and _struct_rank.get(id(c), _BIG) < top_k
-                and _sem_rank.get(id(c), _BIG) < top_k):
-            return 0
-        return f
-
     candidates.sort(
         key=lambda c: (
-            _effective_floor(c),     # Phase 2: grep recall floor + multi-signal escape (PRIMARY)
+            _grep_floor(c),          # Phase 2: grep recall floor (PRIMARY)
             _depth_authority(c),     # Phase 3: string-world non-recalled sinks
             -_rrf3(c),               # lexical + structural + SEMANTIC rank fusion
             *_final_relevance_key(c, _cand_subject_pos),  # relevance before the path string
