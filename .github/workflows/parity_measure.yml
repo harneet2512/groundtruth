@@ -150,6 +150,11 @@ jobs:
           sqlite3 /tmp/gt/g2.db "SELECT resolution_method,COUNT(*) FROM edges GROUP BY 1 ORDER BY 1" 2>/dev/null > /tmp/gt/g2_hist.txt
           H2=$(md5sum /tmp/gt/g2_hist.txt | cut -d' ' -f1)
           G2EDGES=$(sqlite3 /tmp/gt/g2.db "SELECT COUNT(*) FROM edges" 2>/dev/null || echo "0(BUILD-FAILED)")
+          # Disambiguate: is the data_flow PROPERTY set (parser output) non-deterministic,
+          # or only the promote EDGES derived from it? DIFFER => parser; SAME => promote.
+          DF1=$(sqlite3 /tmp/gt/graph.db "SELECT COUNT(*) FROM properties WHERE kind='data_flow'" 2>/dev/null)
+          DF2=$(sqlite3 /tmp/gt/g2.db "SELECT COUNT(*) FROM properties WHERE kind='data_flow'" 2>/dev/null)
+          echo "DATAFLOW_PROPS ${{ matrix.task_id }}: graph=$DF1 g2=$DF2 $([ "$DF1" = "$DF2" ] && echo SAME || echo DIFFER)"
           echo "DETERMINISM ${{ matrix.task_id }}: raw=$H1 reindex=$H2 g2_edges=$G2EDGES $([ "$H1" = "$H2" ] && echo IDENTICAL || echo DRIFT)"
           if [ "$H1" != "$H2" ]; then
             echo "::group::DRIFT diff (raw-index histogram  vs  g2-reindex histogram)"
