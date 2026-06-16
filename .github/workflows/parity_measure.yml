@@ -157,8 +157,19 @@ jobs:
           echo "DATAFLOW_PROPS ${{ matrix.task_id }}: graph=$DF1 g2=$DF2 $([ "$DF1" = "$DF2" ] && echo SAME || echo DIFFER)"
           echo "DETERMINISM ${{ matrix.task_id }}: raw=$H1 reindex=$H2 g2_edges=$G2EDGES $([ "$H1" = "$H2" ] && echo IDENTICAL || echo DRIFT)"
           if [ "$H1" != "$H2" ]; then
-            echo "::group::DRIFT diff (raw-index histogram  vs  g2-reindex histogram)"
+            echo "::group::DRIFT histogram diff"
             diff <(cat /tmp/gt/raw_hist.txt) <(cat /tmp/gt/g2_hist.txt) || true
+            echo "::endgroup::"
+            # GROUND TRUTH 1 — is the data_flow PROPERTY content (not just count) identical?
+            # id-independent key: src node (file:line:name) + the property value.
+            echo "::group::DRIFT data_flow property CONTENT diff (graph vs g2; empty=parser deterministic)"
+            DFC="SELECT n.file_path||':'||COALESCE(n.start_line,0)||' '||n.name||' || '||p.value FROM properties p JOIN nodes n ON n.id=p.node_id WHERE p.kind='data_flow' ORDER BY 1"
+            diff <(sqlite3 /tmp/gt/graph.db "$DFC" 2>/dev/null) <(sqlite3 /tmp/gt/g2.db "$DFC" 2>/dev/null) | head -50 || true
+            echo "::endgroup::"
+            # GROUND TRUTH 2 — the EXACT promote_dataflow_callee edges that differ.
+            echo "::group::DRIFT promote_dataflow_callee EDGE diff (graph vs g2; id-independent)"
+            EDG="SELECT s.file_path||':'||COALESCE(s.start_line,0)||' '||s.name||' -> '||t.file_path||':'||COALESCE(t.start_line,0)||' '||t.name||' @'||COALESCE(e.source_line,0) FROM edges e JOIN nodes s ON s.id=e.source_id JOIN nodes t ON t.id=e.target_id WHERE e.resolution_method='promote_dataflow_callee' ORDER BY 1"
+            diff <(sqlite3 /tmp/gt/graph.db "$EDG" 2>/dev/null) <(sqlite3 /tmp/gt/g2.db "$EDG" 2>/dev/null) | head -80 || true
             echo "::endgroup::"
           fi
 
