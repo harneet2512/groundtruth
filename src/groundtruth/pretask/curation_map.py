@@ -7,9 +7,12 @@ writing the fix. The value is the graph MAP, not a ranked file list.
 
 Correct-or-quiet (the agreement-guard in mechanism form): an edge is rendered
 as a FACT only when its ``resolution_method`` is one the Go resolver assigns by
-STRUCTURAL resolution — the unified ``DETERMINISTIC_RESOLUTION_METHODS`` set
-(same_file / import / import_type / type_flow / verified_unique / impl_method /
-inherited / unique_method / return_type / lsp / lsp_verified).
+STRUCTURAL resolution that PROVES the receiver/target — the unified
+``DETERMINISTIC_RESOLUTION_METHODS`` set (same_file / import / import_type /
+type_flow / verified_unique / inherited / return_type / lsp / lsp_verified).
+The receiver-UNPROVEN rungs impl_method / unique_method are NOT facts (they
+resolve obj.method() on global method-name uniqueness with no receiver-type
+check — see the rationale block above the frozenset); they render (unverified).
 A ``name_match`` edge is NEVER a fact — no matter how many lexical/structural
 signals agree with it — because plausible-but-wrong context is the maximally
 harmful output. name_match edges below a confidence floor are SUPPRESSED;
@@ -38,6 +41,17 @@ import re as _re
 import sqlite3
 from dataclasses import dataclass, field
 
+# THE SEAM (single canonical path predicate): the brief's <gt-graph-map> scope
+# must exclude test/demo/vendored neighbour FILES exactly as the live per-turn
+# twin does (artifact_deepswe/gt_mini_patch._query_scope:2172-2174). Without it
+# a FACT edge to examples/sample.py was surfaced by the brief but dropped by the
+# twin — delivery drift (agent-C parity recon). Dir-SEGMENT match, never
+# substring, language-/repo-agnostic. Mirrors the v1r_brief.py import.
+from groundtruth.delivery.path_policy import (
+    is_test_or_demo as _is_test_or_demo,
+    is_vendored_path as _is_vendored_path,
+)
+
 # SINGLE SOURCE OF TRUTH for the FACT (deterministically-resolved) CALLS-edge
 # resolution_method set. Every consumer (this module's Edge.is_fact, the live
 # brief's caller-gate + [VERIFIED] tag in v1r_brief.py, contract_map's callee
@@ -52,19 +66,20 @@ from dataclasses import dataclass, field
 #   import_type     Strategy 1.93  (resolver.go:~866 region) — import-scoped type
 #   type_flow       Strategy 1.95/1.96 (resolver.go:866/1005/1084) — assignment-/type-flow
 #   verified_unique Strategy 1.9   (resolver.go)  — globally unique by name
-#   impl_method     Strategy 1.94  (resolver.go:959) — single/few-implementor class
 #   inherited       Strategy 1.75  (resolver.go:684) — CHA self/super lookup
-#   unique_method   Strategy 1.98  (resolver.go:1175) — method name unique to one class
 #   return_type     Strategy 1.97  (resolver.go:1141) — return-type bridging
 #   lsp / lsp_verified  offline LSP promotion pass (closure.go verifiedMethods)
+#   (impl_method Strategy 1.94 / unique_method Strategy 1.98 are RESOLVER strategies
+#    too, but they are NOT in this fact set — see the RECEIVER-UNPROVEN block below.)
 #
-# These are exactly the structurally-resolved CALLS methods. The Go closure's own
-# verified set (gt-index/internal/closure/closure.go:59) admits the first five +
-# lsp/lsp_verified by NAME, and admits impl_method/inherited/return_type/unique_method
-# by the confidence>=0.5 floor (resolver assigns them 0.85-1.0). The Python
-# consumers gate on the METHOD NAME alone (no confidence-floor fallback), so those
-# four MUST be listed explicitly here or genuinely-resolved edges get demoted to
-# (unverified) — the audited 15% (738/4874 on a real graph) FACT loss.
+# These are exactly the receiver-/target-PROVEN CALLS methods. The Go closure's own
+# verified set (gt-index/internal/closure/closure.go:59) admits the first five by
+# NAME + lsp/lsp_verified, and ALSO admits impl_method/unique_method by the
+# confidence>=0.5 floor — but those two prove only NAME-uniqueness, not the
+# receiver type, so the Python FACT consumers (gating on method NAME) deliberately
+# OMIT them here and render them (unverified). Receiver-proven rungs (inherited /
+# return_type / type_flow / import_type) MUST stay listed or genuinely-resolved
+# edges get demoted — the audited FACT-loss risk this set guards against.
 #
 # EXCLUDED ON PURPOSE:
 #   param_type  — it is an EvidenceType, NOT a resolution_method (resolver.go:870
@@ -545,6 +560,14 @@ def _neighbors(
     candidates: list[Edge] = []
     for name, fpath, conf, method, target_name, src_file, src_line, n_lang, foc_lang in rows:
         if not name:
+            continue
+        # FILE-LEVEL test/demo/vendored exclusion (parity with the live twin's
+        # _query_scope:2172-2174). The is_test=0 SQL filter above drops test
+        # NODES, but a DEMO file (examples/sample.py, conf-tier is_test=0) and a
+        # vendored file survive it — the brief surfaced them as scope while the
+        # twin dropped them (delivery drift). A neighbour the agent must never be
+        # steered to edit is never legitimate scope, whatever its provenance.
+        if _is_test_or_demo(fpath or "") or _is_vendored_path(fpath or ""):
             continue
         # CROSS-LANGUAGE disqualifier (FIX 2): a CALLS edge whose endpoints are
         # in DIFFERENT language families cannot be a real source-level call,

@@ -377,9 +377,25 @@ def test_curation_map_neighbors_same_family_survives(crosslang_repo):
         f"same-family js->ts caller wrongly suppressed: {callers}")
 
 
+# A NON-vendored cross-language (JS) neighbour, so the legacy-permissive LANGUAGE
+# behaviour can be isolated from the orthogonal vendored/test/demo PATH filter that
+# _neighbors now applies (parity with gt_mini_patch._query_scope). _JS_TAILWIND is
+# BOTH cross-language AND vendored (assets/), so on a legacy graph it drops by PATH
+# regardless of language — it can no longer demonstrate language-permissiveness.
+_JS_WIDGET = "web/widget.js"
+
+
 def test_curation_map_neighbors_legacy_schema_permissive(tmp_path):
+    nodes = _PY_NODES + [
+        {"label": "Function", "name": "widget_render", "key": "widget_render",
+         "file_path": _JS_WIDGET, "signature": "function widget_render()",
+         "start_line": 1, "end_line": 2, "language": "javascript"},
+    ]
+    edges = _PY_EDGES + [
+        ("format_running", "widget_render", "CALLS", 4, "verified_unique", 0.95),
+    ]
     db = tmp_path / "graph.db"
-    _create_graph_db(db, _PY_NODES, _PY_EDGES, with_language=False)
+    _create_graph_db(db, nodes, edges, with_language=False)
     conn = sqlite3.connect(db)
     try:
         ids = curation_map._node_ids(conn, _PY_MAIN, "format_running")
@@ -388,8 +404,15 @@ def test_curation_map_neighbors_legacy_schema_permissive(tmp_path):
             max_neighbors=5)
     finally:
         conn.close()
-    assert _JS_TAILWIND in [e.file for e in callees], (
+    callee_files = [e.file for e in callees]
+    # LANGUAGE permissiveness on legacy schema: the cross-language disqualifier
+    # cannot judge (no language column) -> the clean JS neighbour survives.
+    assert _JS_WIDGET in callee_files, (
         "legacy schema must stay permissive (cannot judge language)")
+    # PATH filter (parity with the per-turn twin): a vendored neighbour is dropped
+    # from delivered scope regardless of language/legacy schema.
+    assert _JS_TAILWIND not in callee_files, (
+        "vendored neighbour must be dropped by the file-level path filter")
 
 
 # ===========================================================================

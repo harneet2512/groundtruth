@@ -160,6 +160,7 @@ try:
     )
     from groundtruth.pretask.curation_map import (
         DETERMINISTIC_RESOLUTION_METHODS as _DETERMINISTIC_METHODS,
+        _lang_family as _lang_family,
         _is_cross_language_pair as _is_cross_language_pair,
         _nodes_have_language as _nodes_have_language,
     )
@@ -272,9 +273,15 @@ except Exception as _delivery_import_err:  # noqa: BLE001
         "shell": "shell", "sh": "shell", "zig": "zig", "ocaml": "ocaml",
     }
 
+    def _lang_family(language):
+        """Fallback language-family classifier (parity with curation_map._lang_family);
+        None when unknown/absent -> 'cannot judge', never 'different'."""
+        if not language:
+            return None
+        return _LANG_FAMILIES_FB.get(str(language).strip().lower())
+
     def _is_cross_language_pair(lang_a, lang_b):
-        fa = _LANG_FAMILIES_FB.get(str(lang_a or "").strip().lower())
-        fb = _LANG_FAMILIES_FB.get(str(lang_b or "").strip().lower())
+        fa, fb = _lang_family(lang_a), _lang_family(lang_b)
         return fa is not None and fb is not None and fa != fb
 
     def _nodes_have_language(con):

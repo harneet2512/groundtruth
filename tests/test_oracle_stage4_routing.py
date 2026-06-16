@@ -334,12 +334,26 @@ def test_live_gate_function_relevance_dedup_budget(patch_mod, tmp_path, monkeypa
 
 def test_live_scope_completeness_reroute(patch_mod, monkeypatch):
     """Consensus K-of-N goes to review-transition: emits ONLY when the edit set
-    is a strict subset of scope AND un-edited members are focus-anchored."""
+    is a strict subset of scope AND un-edited members are focus-anchored.
+
+    bug #2: the denominator N is the VERIFIED connected component reachable from
+    the EDITED files (`_verified_scope_component` -> `_query_scope` over FACTS-ONLY
+    edges), intersected with the recorded `_consensus_scope` union — NOT the
+    accumulated grab-bag itself. So an un-edited member must be GRAPH-REACHABLE
+    from the edit, not merely present in the viewed-neighbourhood union. We stub
+    `_query_scope` to stand in for that verified graph connection (no graph.db in a
+    unit test); production reads it from the read-only graph.db."""
     monkeypatch.setattr(patch_mod, "_consensus_scope",
                         {"pkg/a.py", "pkg/b.py", "pkg/snapshots.py"}, raising=False)
     monkeypatch.setattr(patch_mod, "_oracle_edited_rels", {"pkg/a.py"}, raising=False)
     monkeypatch.setattr(patch_mod, "_oracle_focus_cache",
                         {"snapshots"}, raising=False)
+    # a.py is VERIFIED-graph-connected to b.py + snapshots.py (the component the
+    # completeness check expands from the edited file via FACTS-ONLY edges).
+    _verified_nbrs = {"pkg/a.py": ["pkg/b.py", "pkg/snapshots.py"]}
+    monkeypatch.setattr(patch_mod, "_query_scope",
+                        lambda rel: _verified_nbrs.get(patch_mod._norm_rel(rel), []),
+                        raising=False)
     block = patch_mod._scope_completeness_block()
     assert block and "<gt-scope" in block
     assert "snapshots.py" in block
