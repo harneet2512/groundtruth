@@ -514,21 +514,28 @@ func (idx *promoteIndexes) resolveByName(name, curFile string, labels map[string
 		return 0, 0
 	}
 	cc := len(filtered)
-	// Prefer same-file.
+	// CONTENT-deterministic order (file_path, line, id) so the picks below do NOT
+	// depend on node-ID assignment, which is non-deterministic across re-indexes
+	// (parallel-parse insertion order). The prior smallest-ID tiebreak resolved an
+	// ambiguous callee to a run-dependent LOGICAL target -> different mint/skip ->
+	// residual textual promote_dataflow_callee drift (162 vs 169) AFTER the
+	// forEachProperty content-order fix. file_path+line is insertion-order-invariant.
+	sort.Slice(filtered, func(i, j int) bool {
+		if filtered[i].FilePath != filtered[j].FilePath {
+			return filtered[i].FilePath < filtered[j].FilePath
+		}
+		if filtered[i].Line != filtered[j].Line {
+			return filtered[i].Line < filtered[j].Line
+		}
+		return filtered[i].ID < filtered[j].ID
+	})
+	// Prefer same-file (first in content order).
 	for _, e := range filtered {
 		if e.FilePath == curFile {
 			return e.ID, cc
 		}
 	}
-	// Deterministic global first-match: pick the smallest id (map slice order is
-	// id-ordered from the scan, but sort defensively for stability).
-	best := filtered[0]
-	for _, e := range filtered[1:] {
-		if e.ID < best.ID {
-			best = e
-		}
-	}
-	return best.ID, cc
+	return filtered[0].ID, cc
 }
 
 // ---------------------------------------------------------------------------
