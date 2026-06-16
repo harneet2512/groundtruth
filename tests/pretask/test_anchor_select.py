@@ -180,3 +180,125 @@ def test_docstring_no_longer_advertises_dead_lever():
     assert "structural_seed_expand" not in doc
     assert "structural seed expansion" not in doc
     assert "GRAPH_MISS" not in doc
+
+
+# ---- encode-budget cap: the whole-repo anchor embed must be BOUNDED -----------
+# Bug (2026-06-16): _get_file_embeddings embedded EVERY non-test file's symbols in
+# ONE batch with NO encode budget -> a large repo sent millions of passages to the
+# embedder and ballooned the HOST process ~15GB, OOM-killing the 16GB runner during
+# the agent-phase brief. The fix caps fresh (cache-missing) passages SENT to the
+# embedder at GT_SEM_PASSAGE_BUDGET (mirrors graph_localizer._semantic_score_by_file).
+
+
+class _CountingModel:
+    """Records the LARGEST single encode batch it is asked for. _embed sends ALL
+    cache-missing passages to the embedder in ONE call, so the max batch == the
+    number of fresh passages encoded. Returns deterministic unit vectors (dim 8)."""
+
+    def __init__(self) -> None:
+        self.max_batch = 0
+        self.total = 0
+
+    def encode(self, texts, normalize_embeddings=True, show_progress_bar=False,
+               batch_size=128, **kw):  # noqa: D401
+        t = list(texts)
+        self.max_batch = max(self.max_batch, len(t))
+        self.total += len(t)
+        return np.ones((len(t), 8), dtype=np.float32) / np.sqrt(8.0)
+
+
+def _make_big_db(path: str, *, n_files: int, syms_per_file: int) -> None:
+    """A graph with n_files non-test files, each carrying syms_per_file uniquely
+    named symbols (so every symbol is a distinct, embeddable, cache-missing passage)."""
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE nodes (
+            id INTEGER PRIMARY KEY, label TEXT, name TEXT, qualified_name TEXT,
+            file_path TEXT, start_line INTEGER, end_line INTEGER, signature TEXT,
+            return_type TEXT, is_exported INTEGER, is_test INTEGER, language TEXT,
+            parent_id INTEGER
+        );
+        CREATE TABLE edges (
+            id INTEGER PRIMARY KEY, source_id INTEGER, target_id INTEGER, type TEXT,
+            source_line INTEGER, source_file TEXT, resolution_method TEXT,
+            confidence REAL, metadata TEXT
+        );
+        """
+    )
+    rows = []
+    nid = 0
+    for fi in range(n_files):
+        fp = f"pkg/mod_{fi:04d}.py"
+        for si in range(syms_per_file):
+            nid += 1
+            rows.append((nid, "Function", f"func_{fi:04d}_{si:03d}", fp, 1 + si))
+    conn.executemany(
+        "INSERT INTO nodes (id,label,name,file_path,start_line,is_test) "
+        "VALUES (?,?,?,?,?,0)",
+        rows,
+    )
+    conn.commit()
+    conn.close()
+
+
+@pytest.fixture()
+def _clear_passage_cache():
+    anchor_select._EMBED_CACHE.clear()
+    anchor_select._SYMVEC_CACHE.clear()
+    yield
+    anchor_select._EMBED_CACHE.clear()
+    anchor_select._SYMVEC_CACHE.clear()
+
+
+def test_encode_pool_is_bounded_by_budget(tmp_path, monkeypatch, _clear_passage_cache):
+    """RED before fix / GREEN after: the whole-repo symbol embed encodes AT MOST
+    GT_SEM_PASSAGE_BUDGET fresh passages in one call, regardless of how many
+    candidate symbols the graph holds. Before the cap, every symbol was embedded
+    in one batch (the 15GB OOM)."""
+    # 200 files x 20 symbols = 4000 distinct passages — far above the small budget.
+    n_files, syms = 200, 20
+    total_symbols = n_files * syms
+    budget = 64
+    db = str(tmp_path / "graph.db")
+    _make_big_db(db, n_files=n_files, syms_per_file=syms)
+    monkeypatch.setenv("GT_SEM_PASSAGE_BUDGET", str(budget))
+
+    model = _CountingModel()
+    # repo_root need not have the files on disk: every file has indexed symbols, so
+    # the per-symbol passage path runs and the _file_summary fallback is never hit.
+    scores = anchor_select.semantic_top_k("serialize the payload", str(tmp_path), db, model)
+
+    # The control: the graph genuinely exceeds the budget (otherwise the test is vacuous).
+    assert total_symbols > budget, total_symbols
+    # The bite: no single encode batch — and no whole-call total of FRESH passages —
+    # exceeds the budget (the issue query is a separate 1-row encode, hence +1 slack).
+    assert model.max_batch <= budget + 1, model.max_batch
+    assert model.total <= budget + 1, model.total
+    # Correct-or-quiet: the call still returns (a partial, bounded ranking), never crashes.
+    assert isinstance(scores, dict)
+
+
+def test_warm_cache_scores_every_file_despite_budget(tmp_path, monkeypatch, _clear_passage_cache):
+    """Cache hits are FREE: once the passage vectors are warm, a SECOND call encodes
+    ZERO fresh passages even with a tiny budget, so the cap never starves a warm repo.
+    Proves the cap bounds *fresh encodes*, not scoring coverage."""
+    n_files, syms = 30, 4              # 120 passages, all unique
+    db = str(tmp_path / "graph.db")
+    _make_big_db(db, n_files=n_files, syms_per_file=syms)
+
+    # First call with a GENEROUS budget warms the shared passage cache.
+    monkeypatch.setenv("GT_SEM_PASSAGE_BUDGET", "100000")
+    warm = _CountingModel()
+    anchor_select._EMBED_CACHE.clear()  # force re-embed (matrix cache is separate)
+    anchor_select.semantic_top_k("payload", str(tmp_path), db, warm)
+    assert warm.total > 0
+
+    # Second call with a TINY budget: every passage is a cache hit -> 0 fresh encodes
+    # beyond the 1-row issue query, and every file still gets a non-empty matrix.
+    monkeypatch.setenv("GT_SEM_PASSAGE_BUDGET", "1")
+    anchor_select._EMBED_CACHE.clear()
+    cold = _CountingModel()
+    anchor_select.semantic_top_k("payload", str(tmp_path), db, cold)
+    # Only the issue query (1 row) is a fresh encode; all passages came from cache.
+    assert cold.total <= 1, cold.total

@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 import pickle
 import re
 import sqlite3
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -249,6 +251,27 @@ def _matrices_match_dim(file_matrix: dict, dim: int) -> bool:
         return False
 
 
+def _anchor_passage_budget() -> int:
+    """``GT_SEM_PASSAGE_BUDGET``: hard per-call ENCODE budget for the anchor-half
+    whole-repo symbol embed (encode-blowup fix 2026-06-16 — the SAME 29/113-SIGKILL
+    failure mode the localizer half closed 2026-06-09, but on this UNCAPPED half:
+    ``_get_file_embeddings`` embeds EVERY non-test file's symbols, so a big repo
+    (thousands of files x <=60 passages) sent millions of passages to the embedder in
+    one call and ballooned the HOST RSS ~15GB -> OOM on a 16GB runner). Counts fresh
+    passages SENT to the embedder this call — cache hits are free. Reads the SAME env
+    var + default (4096) as graph_localizer._sem_passage_budget so ONE knob bounds both
+    semantic halves. Clamped to >=1 so there is never silent infinite work; a malformed
+    value falls back to the default (correct-or-quiet)."""
+    default = 4096
+    raw = os.environ.get("GT_SEM_PASSAGE_BUDGET")
+    if raw:
+        try:
+            return max(1, int(raw))
+        except (TypeError, ValueError):
+            pass
+    return default
+
+
 def _get_file_embeddings(
     graph_db: str,
     repo_root: str,
@@ -358,6 +381,17 @@ def _get_file_embeddings(
     miss_hashes: list[str] = []
     miss_passages: list[str] = []
     seen_miss: set[str] = set()
+    # HARD ENCODE BUDGET (encode-blowup fix 2026-06-16): without this the anchor half
+    # embedded EVERY non-test file's symbols in ONE batch — a large repo sent millions
+    # of passages and ballooned the HOST process ~15GB -> OOM on a 16GB runner. Cap the
+    # number of FRESH (cache-missing) passages SENT to the embedder, exactly as
+    # graph_localizer._semantic_score_by_file does. file_paths iteration order is the
+    # caller's priority order, so over-budget passages are the LOWEST-priority files;
+    # they simply stay unscored (their file gets its symbols' available vectors, or the
+    # zero-vector fallback below) — bounded beats killed, correct-or-quiet. Cache hits
+    # are FREE (already paid), so warm caches still score every file.
+    _budget = _anchor_passage_budget()
+    _n_skipped = 0
     for fp in file_paths:
         for passage in file_passages[fp]:
             h = passage_hash(passage, model_name, dim, _SUMMARY_VERSION)
@@ -366,23 +400,38 @@ def _get_file_embeddings(
             cached = _SYMVEC_CACHE.get(h)
             if cached is not None:
                 vec_by_hash[h] = np.asarray(cached, dtype=np.float32)
-            else:
+            elif len(miss_passages) < _budget:
                 seen_miss.add(h)
                 miss_hashes.append(h)
                 miss_passages.append(passage)
+            else:
+                # Over budget: this passage stays unscored (never re-counted).
+                _n_skipped += 1
     if miss_passages:
         new_embs = _embed(miss_passages, model)  # PASSAGE prefix (is_query=False)
         for h, vec in zip(miss_hashes, new_embs):
             v = np.asarray(vec, dtype=np.float32)
             vec_by_hash[h] = v
             _SYMVEC_CACHE[h] = v
+    if _n_skipped > 0:
+        # Correct-or-quiet: ONE line, stderr only (never agent-visible stdout).
+        print(
+            f"[GT_SEM] anchor passage budget hit ({len(miss_passages)}/"
+            f"{len(miss_passages) + _n_skipped} fresh passages encoded; "
+            f"{_n_skipped} over-budget passages skipped)",
+            file=sys.stderr,
+        )
 
     # Assemble the per-file symbol-vector matrices from this call's pinned vectors.
     file_matrix: dict[str, np.ndarray] = {}
     for fp in file_paths:
+        # A passage skipped by the encode budget has no vector — skip it (None) so the
+        # file scores on its remaining symbols rather than KeyError-ing the brief.
         vecs = [
-            vec_by_hash[passage_hash(p, model_name, dim, _SUMMARY_VERSION)]
-            for p in file_passages[fp]
+            v for v in (
+                vec_by_hash.get(passage_hash(p, model_name, dim, _SUMMARY_VERSION))
+                for p in file_passages[fp]
+            ) if v is not None
         ]
         if vecs:
             file_matrix[fp] = np.vstack(vecs).astype(np.float32)
