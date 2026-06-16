@@ -253,6 +253,7 @@ func BuildNodeMeta(allNodes []store.Node, nodeDBIDs []int64) map[int64]NodeMeta 
 				Name:         n.Name,
 				ReturnType:   n.ReturnType,
 				ReceiverName: recvName,
+				StartLine:    n.StartLine,
 			}
 		}
 	}
@@ -556,6 +557,24 @@ func pickBestLocalTarget(candidates []int64, callerID int64, meta map[int64]Node
 }
 
 func pickBestNameMatchTarget(candidates []int64, callerID int64, callerFile string, meta map[int64]NodeMeta) int64 {
+	// CONTENT-deterministic candidate order (file_path, start_line, id) BEFORE the picks
+	// below. Node IDs are assigned non-deterministically by the parallel parse, so an
+	// ambiguous name_match (e.g. `query()`, defined in many classes) resolved to a
+	// different LOGICAL target run-to-run — the first-match (callable/same-dir) branches
+	// AND the final `tid < best` tiebreak both depended on node-id iteration order. Ground
+	// truth: textual `promote_dataflow_callee` flipped run-to-run while the CALLS count
+	// stayed constant (the canary). file_path+start_line is insertion-order-invariant, so
+	// the same logical target wins every run. (id is a degenerate-case last resort only.)
+	sort.Slice(candidates, func(a, b int) bool {
+		ma, mb := meta[candidates[a]], meta[candidates[b]]
+		if ma.File != mb.File {
+			return ma.File < mb.File
+		}
+		if ma.StartLine != mb.StartLine {
+			return ma.StartLine < mb.StartLine
+		}
+		return candidates[a] < candidates[b]
+	})
 	best := int64(0)
 	bestFile := ""
 	bestCallable := false
@@ -602,6 +621,10 @@ type NodeMeta struct {
 	// and anonymous receivers. Used by rung 2b to accept `<recv>.<field>.method()` as the
 	// Go analogue of self./this. — abstains (stays empty) when the receiver is unnamed.
 	ReceiverName string
+	// StartLine is the node's definition line. Used ONLY as a CONTENT-based, insertion-
+	// order-invariant tiebreak in name_match candidate selection (node IDs are assigned
+	// non-deterministically by the parallel parse — see pickBestNameMatchTarget).
+	StartLine int
 }
 
 // Resolve takes all call refs and all defined nodes, and resolves calls to definitions.
