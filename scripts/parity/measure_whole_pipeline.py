@@ -111,18 +111,23 @@ def main() -> int:
     try:
         from groundtruth.pretask.graph_localizer import localize
 
-        # BRIEF-FAITHFUL recall (BRIEFING.md §1: measure what the brief renders, not
-        # localize() in isolation). generate_v1r_brief calls localize(top_k=8) — a
-        # larger top_k changes the semantic POOL and thus the ranking, so the verdict
-        # metric MUST use the brief's top_k. (top_k=500 below is for the reachability
-        # fork only: candidate-or-not is pool-independent.)
-        res8 = localize(issue, args.db, top_k=8, repo_root=args.src)
+        # BRIEF-FAITHFUL recall: replicate generate_v1r_brief's EXACT localize call
+        # (v1r_brief.py:2978) — top_k=8 AND issue_anchors=extract_issue_anchors(issue,db).
+        # The anchors change the ranking; omitting them (or using top_k=500) measures a
+        # config the agent never sees (BRIEFING.md §1). This res8.candidates IS the
+        # brief's localization rank (the ranker layer my changes touch).
+        try:
+            from groundtruth.pretask.anchors import extract_issue_anchors
+            _anchors = extract_issue_anchors(issue, args.db)
+        except Exception:
+            _anchors = None
+        res8 = localize(issue, args.db, top_k=8, issue_anchors=_anchors, repo_root=args.src)
         ranked8 = [os.path.basename(c.file_path) for c in res8.candidates]
         out["brief_recall_at_5"] = sum(1 for g in gold if g in ranked8[:5])
         out["brief_recall_at_8"] = sum(1 for g in gold if g in ranked8)
         out["brief_top8"] = ranked8
 
-        res = localize(issue, args.db, top_k=500, repo_root=args.src)
+        res = localize(issue, args.db, top_k=500, issue_anchors=_anchors, repo_root=args.src)
         ranked = [os.path.basename(c.file_path) for c in res.candidates]
         full_rank = {}  # gold basename -> 1-indexed full rank, or None if not a candidate
         for g in gold:
