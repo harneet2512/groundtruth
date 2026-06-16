@@ -1123,6 +1123,21 @@ jobs:
             fi
             echo "=== Model routed via TokenRouter: $INPUT_MODEL ==="
           fi
+          # [OOM FIX 2026-06-16] RESMON ground truth (run 27650378892, expr): the GT HOST
+          # process balloons mem=2.8->15.3GB in ~100s during the agent phase (containers=0,
+          # disk 79GB free) and OOM-kills the 16GB runner -> exit 143, VM reclaimed, the
+          # if:always() upload never runs -> total_count=0, no trajectory. It is a HOST-process
+          # OOM, NOT a container OOM (so the F4 container cap does not reach it). Add swap from
+          # the ample free disk so the working set pages out instead of triggering the host
+          # OOM-killer; the runner then survives to upload the trajectory. Infra band-aid only —
+          # the PROPER fix is capping the agent-phase semantic encode (graph_localizer, the same
+          # class as the 2026-06-09 brief cap). Generalized, every task; no benchmark shape.
+          if ! swapon --show 2>/dev/null | grep -q /gt_swap; then
+            sudo fallocate -l 24G /gt_swap 2>/dev/null || sudo dd if=/dev/zero of=/gt_swap bs=1M count=24576 status=none 2>/dev/null
+            sudo chmod 600 /gt_swap 2>/dev/null && sudo mkswap /gt_swap >/dev/null 2>&1 && sudo swapon /gt_swap 2>/dev/null \
+              && echo "[OOMFIX] swap enabled; $(free -m | grep -i swap)" \
+              || echo "[OOMFIX] swap setup failed (continuing without it)"
+          fi
           # [DIAG 2026-06-13] Resource monitor — stream RAM/disk/container-count to the GHA log
           # every 8s so the LAST reading before a runner-reclaim (exit 143) reveals whether the
           # agent phase OOMs (RAM near cap) or fills the runner disk on heavy tasks (arktype/arcane).
