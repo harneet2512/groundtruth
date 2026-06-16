@@ -139,13 +139,14 @@ def main() -> int:
             r = [os.path.basename(c.file_path) for c in _res.candidates]
             return sum(1 for g in gold if g in r[:5]), sum(1 for g in gold if g in r), r
 
-        os.environ["GT_AGREEMENT_ESCAPE"] = "0"
+        _AB_ENV = "GT_TEST_TOOLING_DEMOTE"  # the lever under test
+        os.environ[_AB_ENV] = "0"
         _r5_off, _r8_off, _top_off = _recall(
             localize(issue, args.db, top_k=8, issue_anchors=_anchors, repo_root=args.src))
-        os.environ["GT_AGREEMENT_ESCAPE"] = "1"
+        os.environ[_AB_ENV] = "1"
         _r5_on, _r8_on, _top_on = _recall(
             localize(issue, args.db, top_k=8, issue_anchors=_anchors, repo_root=args.src))
-        os.environ.pop("GT_AGREEMENT_ESCAPE", None)
+        os.environ.pop(_AB_ENV, None)
         out["brief_recall_at_5"] = _r5_off          # OFF = the current-product baseline
         out["brief_recall_at_8"] = _r8_off
         out["brief_top8"] = _top_off

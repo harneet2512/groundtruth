@@ -123,6 +123,60 @@ def is_test_or_demo(path: str) -> bool:
     return is_test_path(path)
 
 
+def test_tooling_roots(graph_db: str) -> frozenset[str]:
+    """Directories that are TEST-TOOLING — every importer OUTSIDE the directory is a
+    test file. These are vendored assertion/debug/diff libraries (testify, spew,
+    difflib, …) copied under ``internal/`` / ``pkg/`` where the ``vendor/`` markers
+    miss them: they lexically match an issue's error/panic vocabulary and out-rank the
+    real gold, yet are NEVER a feature edit target. Graph-derived from IMPORTS edges —
+    no library names, no benchmark shape, language-agnostic (Tip&Palsberg dependency
+    analysis). A file under any such root reuses the EXISTING test-file demote (no new
+    weight/threshold). Conservative: a root needs >=1 external importer and ALL of them
+    must be tests; ``require``→``assert`` (both non-test, same vendored tree) does NOT
+    disqualify the ``internal/testify`` root because that importer is INSIDE it."""
+    import sqlite3
+    pairs: list[tuple[str, str]] = []
+    try:
+        conn = sqlite3.connect(graph_db)
+        try:
+            pairs = [
+                (str(a).replace("\\", "/"), str(b).replace("\\", "/"))
+                for a, b in conn.execute(
+                    """
+                    SELECT DISTINCT tgt.file_path, src.file_path
+                    FROM edges e
+                    JOIN nodes tgt ON tgt.id = e.target_id
+                    JOIN nodes src ON src.id = e.source_id
+                    WHERE e.type = 'IMPORTS'
+                      AND tgt.file_path IS NOT NULL AND src.file_path IS NOT NULL
+                    """
+                ).fetchall()
+            ]
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return frozenset()
+    # For each ancestor dir D of an imported file, record importers that are OUTSIDE D.
+    ext_importers: dict[str, set[str]] = {}
+    for imported, importer in pairs:
+        segs = [s for s in imported.split("/") if s][:-1]  # dirs of the imported file
+        d = ""
+        for seg in segs:
+            d = f"{d}/{seg}" if d else seg
+            if not (importer == d or importer.startswith(d + "/")):  # importer outside D
+                ext_importers.setdefault(d, set()).add(importer)
+    return frozenset(
+        d for d, imps in ext_importers.items()
+        if imps and all(is_test_path(i) for i in imps)
+    )
+
+
+def is_test_tooling(fp: str, roots: frozenset[str]) -> bool:
+    """True iff ``fp`` lives under any test-tooling root (see ``test_tooling_roots``)."""
+    f = (fp or "").replace("\\", "/").lstrip("./").lstrip("/")
+    return any(f == r or f.startswith(r + "/") for r in roots)
+
+
 def is_delivery_excluded(fp: str, repo_root: str = "") -> bool:
     """True when path must never appear in a DELIVERED fact."""
     if is_vendored_path(fp):

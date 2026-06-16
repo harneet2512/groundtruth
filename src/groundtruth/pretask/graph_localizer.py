@@ -2480,6 +2480,22 @@ def localize(
     _decay_max = max(_decay_vals) if _decay_vals else 1.0
 
 
+    # TEST-TOOLING demote (vendored assertion/debug libs imported only by tests, e.g.
+    # internal/testify, internal/spew — escape the vendor/ markers, lexically match an
+    # issue's error/panic vocabulary, and out-rank the real gold; NEVER a feature edit
+    # target). Graph-derived from IMPORTS edges (no library names), reuses the EXISTING
+    # test-file demote magnitude (no new weight/threshold). Computed ONCE.
+    try:
+        from groundtruth.delivery.path_policy import (
+            test_tooling_roots as _tt_roots_fn, is_test_tooling as _is_tt,
+        )
+        _tt_roots = _tt_roots_fn(graph_db) if graph_db else frozenset()
+    except Exception:
+        _tt_roots = frozenset()
+
+        def _is_tt(fp: str, roots: frozenset) -> bool:
+            return False
+
     candidates: list[Candidate] = []
     _cand_subject_pos: dict[str, int] = {}
     for fp, wits in witnesses_by_file.items():
@@ -2516,7 +2532,8 @@ def localize(
         score = _raw_score / _weight_sum if _weight_sum > 0 else _raw_score
         if _is_generated(fp):
             score -= 0.5
-        if _is_test_file(fp):
+        _tt_on = os.environ.get("GT_TEST_TOOLING_DEMOTE", "1") != "0"  # default ON; "0"=A/B baseline
+        if _is_test_file(fp) or (_tt_on and _is_tt(fp, _tt_roots)):
             score -= 0.4
         candidates.append(
             Candidate(
