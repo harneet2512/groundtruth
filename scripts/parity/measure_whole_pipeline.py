@@ -21,6 +21,7 @@ import json
 import os
 import re
 import sys
+from typing import Any
 
 # Exclude test / fixture / generated paths from GOLD: a feature task's gold is the
 # product files it changes; test edits are the harness, not the localization target.
@@ -66,7 +67,7 @@ def main() -> int:
     gold = _gold_basenames(patch)
     n_gold = len(gold)
 
-    out: dict[str, object] = {
+    out: dict[str, Any] = {
         "task_id": task_id,
         "lang": args.lang,
         "n_gold": n_gold,
@@ -119,7 +120,7 @@ def main() -> int:
         #     edge-CONVERSION cause (Step 1-2 receiver-type resolution), NOT the ranker.
         #   vedge>0 but rank>15 -> verified reach yet buried = a Step-4 RANKER bug.
         # vedge = verified, non-defines_anchor witnesses (the _depth_authority criterion).
-        by_base: dict[str, object] = {}
+        by_base: dict[str, Any] = {}
         for c in res.candidates:
             b = os.path.basename(c.file_path)
             if b in gold and b not in by_base:
@@ -159,7 +160,8 @@ def main() -> int:
         f"MISRANKED(in500,>15)={out.get('misranked_gold','ERR')} "
         f"UNREACHABLE(not-cand)={out.get('unreachable_gold','ERR')}"
     )
-    for b, w in sorted(out.get("gold_witness", {}).items()):
+    _gw: dict[str, Any] = out.get("gold_witness", {})
+    for b, w in sorted(_gw.items()):
         print(
             f"WIT  {b[:28]:28}: rank={w['rank']} score={w['score']} lex={w['lex_hits']} "
             f"vedge={w['vedge']} n_wit={w['n_wit']} min_hop={w['min_hop']} dirs={w['dirs']}"
