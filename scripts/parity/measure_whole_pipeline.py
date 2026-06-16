@@ -59,6 +59,7 @@ def main() -> int:
     ap.add_argument("--task-dir", required=True)
     ap.add_argument("--lang", required=True)
     ap.add_argument("--task-id", default="")
+    ap.add_argument("--brief-out", default="", help="write the full rendered brief here (Step-5 pillar audit)")
     args = ap.parse_args()
 
     task_id = args.task_id or os.path.basename(args.task_dir.rstrip("/"))
@@ -86,6 +87,12 @@ def main() -> int:
         out["whole_brief_cov"] = len(wp_cov)
         out["whole_brief_covered"] = wp_cov
         out["brief_chars"] = len(brief_text)
+        if args.brief_out:
+            try:
+                with open(args.brief_out, "w", encoding="utf-8") as _bf:
+                    _bf.write(brief_text)
+            except OSError:
+                pass
         # BRIEF-FAITHFUL RANK (BRIEFING.md §1/§5: measure what the brief RENDERS, not
         # localize() in isolation). The localization section renders first, so the order
         # of distinct source-file first-mentions in the brief text ≈ the rank the agent

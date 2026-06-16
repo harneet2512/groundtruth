@@ -160,6 +160,7 @@ jobs:
             --db "$GT_GRAPH_DB" --src "$GT_REPO_ROOT" \
             --task-dir "deepswe-bench/tasks/${{ matrix.task_id }}" \
             --lang "${{ matrix.lang }}" --task-id "${{ matrix.task_id }}" \
+            --brief-out "parity_out/${{ matrix.task_id }}.brief.txt" \
             2>&1 | tee "parity_out/${{ matrix.task_id }}.txt"
           grep '^PARITY_JSON ' "parity_out/${{ matrix.task_id }}.txt" | tail -1 | sed 's/^PARITY_JSON //' > "parity_out/${{ matrix.task_id }}.json" || true
 
