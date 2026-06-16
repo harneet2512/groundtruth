@@ -1181,7 +1181,16 @@ type addEdgeFunc func(sourceID, targetID int64, edgeType, method string, conf fl
 	candidateCount int, evidenceType, metadata, sourceFile string, sourceLine int, undirected bool)
 
 // forEachProperty streams every (node_id, value, line) row of one property kind
-// to fn, in id-ordered (deterministic) sequence. Read-only transaction.
+// to fn, in a CONTENT-ordered (deterministic) sequence. Read-only transaction.
+// Ordering by `id` (AUTOINCREMENT = parallel-parse INSERTION order) was NOT
+// deterministic: a node with MANY properties of one kind (e.g. a function with
+// several data_flow forward-slice rows) got them in run-dependent order, and the
+// shared `seen` dedup in PromotePropertyEdges is first-key-wins -> the
+// promote_dataflow_callee edge COUNT drifted run-to-run (textual 137 vs 168, the
+// determinism RED held-out validation caught). Order by (node_id, value, line) —
+// the property CONTENT, insertion-independent — so iteration is stable regardless
+// of parse worker completion order. (id kept as a last-resort tiebreak.) Fixes all
+// six promoters that share this helper.
 func forEachProperty(db *store.DB, kind string, fn func(nodeID int64, value string, line int)) error {
 	tx, err := db.BeginTx()
 	if err != nil {
@@ -1189,7 +1198,7 @@ func forEachProperty(db *store.DB, kind string, fn func(nodeID int64, value stri
 	}
 	defer tx.Rollback()
 	rows, err := tx.Query(
-		`SELECT node_id, value, COALESCE(line, 0) FROM properties WHERE kind = ? ORDER BY node_id, id`,
+		`SELECT node_id, value, COALESCE(line, 0) FROM properties WHERE kind = ? ORDER BY node_id, value, COALESCE(line, 0), id`,
 		kind)
 	if err != nil {
 		return err
