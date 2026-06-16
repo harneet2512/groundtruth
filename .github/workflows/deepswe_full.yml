@@ -1267,7 +1267,13 @@ jobs:
           cp /tmp/gt/adapter_witness.json trial_results/adapter_witness.json 2>/dev/null || true
           cp /tmp/gt/obligation_status.json trial_results/obligation_status.json 2>/dev/null || true
           cp /tmp/gt/run_provenance.json trial_results/gt_artifacts/run_provenance.json 2>/dev/null || true
-          python3 scripts/swebench/task_truth.py jobs trial_results/task_truth.json 2>/dev/null || true
+          # FIX 2026-06-16: task_truth reads the runtime witness ([GT_META] gt_prebuilt_active +
+          # hook_graph_hash_matches_post_lsp) ONLY from $GT_TRIAL_LOG (task_truth.py:293). Without
+          # it, build_signal_record sees no witness -> reconcile_graph_handoff keeps the FALSE
+          # GRAPH_FAIL_MISSING_HANDOFF (the pre-agent cert) and reconciled_substrate_verdict.json
+          # wrongly stamps outcome_failure_class=GT, contradicting the (correct) outcome authority.
+          # trial_output.log (tee'd by the agent step, carries the post-agent [GT_META]) is at CWD.
+          GT_TRIAL_LOG=trial_output.log python3 scripts/swebench/task_truth.py jobs trial_results/task_truth.json 2>/dev/null || true
           cp -r jobs trial_results/jobs 2>/dev/null || true
           cp /tmp/gt/*.log              trial_results/ 2>/dev/null || true
           cp /tmp/gt/gt_interactions*.jsonl trial_results/ 2>/dev/null || true
