@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import glob
 import json
+import os
+import shutil
 from pathlib import Path
 from typing import Any, cast
 
@@ -25,6 +28,32 @@ from groundtruth.utils.result import Err, GroundTruthError, Ok, Result
 logger = get_logger(__name__)
 
 DEFAULT_TIMEOUT = 30.0
+
+
+def _ensure_rust_toolchain_on_path(server_command: list[str] | str) -> None:
+    """rust-analyzer shells out to `cargo metadata` to build its crate graph; if `cargo`/`rustc` are
+    not on PATH it NEVER reaches project_ready and converts 0 edges (the §17.3 dark-LSP gap; witnessed
+    live: pest project_ready=False after 180s, effective_work=0). The eval container / harness normally
+    provides the toolchain, but make GT robust on ANY machine where a rust toolchain EXISTS but is not
+    yet on PATH: locate it via the STANDARD rustup layout and prepend the toolchain bin. Idempotent,
+    rust-analyzer-only, no-op when `cargo` already resolves. No hardcoded harness dir — uses the
+    standard env (RUSTUP_HOME/CARGO_HOME, harness-set or default), so it generalizes to any rust task."""
+    cmd0 = server_command[0] if isinstance(server_command, (list, tuple)) else str(server_command)
+    if "rust-analyzer" not in os.path.basename(str(cmd0)):
+        return
+    if shutil.which("cargo"):
+        return  # already resolvable -> nothing to do (the common container case)
+    rustup_home = os.environ.get("RUSTUP_HOME") or os.path.expanduser("~/.rustup")
+    cargo_home = os.environ.get("CARGO_HOME") or os.path.expanduser("~/.cargo")
+    # Prefer the rustup TOOLCHAIN bin (real cargo/rustc), then CARGO_HOME/bin shims as a last resort
+    # (an extracted CARGO_HOME may carry only the registry cache, no bin proxies — the memoried trap).
+    candidates = sorted(glob.glob(os.path.join(rustup_home, "toolchains", "*", "bin")))
+    candidates.append(os.path.join(cargo_home, "bin"))
+    for d in candidates:
+        if os.path.isfile(os.path.join(d, "cargo")):
+            os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
+            logger.info("rust toolchain located off-PATH; prepended %s for rust-analyzer", d)
+            return
 
 _TRACE_TRUNCATE_BYTES = 10 * 1024  # 10KB
 _TRACE_MAX_FILES = 3
@@ -80,6 +109,9 @@ class LSPClient:
         try:
             if self._trace_path is not None:
                 self._rotate_traces()
+            # rust-analyzer needs cargo/rustc on PATH (cargo metadata builds its crate graph) or it
+            # never reaches project_ready -> 0 conversions. Robustly locate an off-PATH toolchain.
+            _ensure_rust_toolchain_on_path(self._server_command)
             resolved_cmd = resolve_command(self._server_command)
             self._process = await asyncio.create_subprocess_exec(
                 *resolved_cmd,
