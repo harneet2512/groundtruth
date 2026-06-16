@@ -2092,6 +2092,14 @@ func Resolve(
 		// e.g., "filter" exists only in QuerySet → any x.filter() resolves to QuerySet.filter.
 		// #B5: builtin-named calls are excluded — 1.98 does not prove the receiver, and an
 		// internal class happening to define `update`/`get` must not claim every dict call.
+		// CONFIDENCE: 1.98 is the SAME receiver-unproven class as 1.94 (impl_method) —
+		// global method-name uniqueness, ZERO check that `obj` is actually that class.
+		// Name-uniqueness != receiver-proof, so it MUST be capped at CANDIDATE (0.6),
+		// identical to 1.94's 1-class case — NEVER 0.85 (which read as a type-derived
+		// fact, cleared the closure's 0.7 reach floor, and disagreed with the consumer
+		// fact set that excludes unique_method). CERTIFIED/type-derived tiers stay
+		// reserved for the rungs that PROVE the receiver (1.75 self, 1.93/1.94a
+		// import/declared-type, 1.95/1.96 type_flow, 1.97 return_type).
 		if !builtinQualified && call.CalleeQualified != "" && call.CalleeQualified != calleeName {
 			if classID, ok := uniqueMethodClass[calleeName]; ok {
 				if methods, ok := methodsByClass[classID]; ok {
@@ -2105,9 +2113,9 @@ func Resolve(
 								SourceLine:     call.Line,
 								SourceFile:     call.File,
 								Method:         "unique_method",
-								Confidence:     0.85,
+								Confidence:     0.6,
 								CandidateCount: 1,
-								TrustTier:      tierFor(0.85),
+								TrustTier:      tierFor(0.6),
 								EvidenceType:   "unique_method_class",
 							})
 						}

@@ -202,7 +202,6 @@ func TestIsVerifiedEdge(t *testing.T) {
 		{"import", 1.0, true},
 		{"type_flow", 0.9, true},
 		{"inherited", 0.95, true},
-		{"unique_method", 0.85, true},
 		{"return_type", 0.85, true},
 		{"lsp", 0.95, true},
 		// Sub-floor variants of deterministic methods (ambiguity demotes): out.
@@ -214,6 +213,14 @@ func TestIsVerifiedEdge(t *testing.T) {
 		{"name_match", 0.2, false},
 		// impl_method never proves the receiver: out.
 		{"impl_method", 0.6, false},
+		// unique_method is the SAME receiver-unproven class as impl_method (global
+		// method-name uniqueness, no receiver-type proof — resolver.go rung 1.98's
+		// own comment: "1.98 does not prove the receiver"). It must be OUT of the
+		// verified closure exactly like impl_method, on BOTH gates: the method is
+		// not in verifiedMethods, AND the resolver now caps its confidence at 0.6
+		// (matching 1.94's CANDIDATE tier) so it cannot clear the 0.7 floor either.
+		{"unique_method", 0.85, false},
+		{"unique_method", 0.6, false},
 	}
 	for _, tc := range cases {
 		e := &store.Edge{ResolutionMethod: tc.method, Confidence: tc.conf}

@@ -145,6 +145,61 @@ func TestResolve_BuiltinNameOnUnprovenReceiverStillDropped(t *testing.T) {
 	}
 }
 
+// Strategy 1.98 (unique_method) is the SAME receiver-unproven class as 1.94
+// (impl_method): it resolves obj.method() purely on GLOBAL method-name uniqueness
+// with ZERO check that the receiver is that class. It must therefore be capped at
+// the CANDIDATE tier (conf 0.6) exactly like 1.94 — NEVER 0.85, which read as a
+// receiver-PROVEN type-derived fact, cleared the closure's 0.7 reach floor, and
+// disagreed with the consumer fact set that excludes unique_method. This pins the
+// cap: a `self.frobnicate()` where `frobnicate` is unique to a DIFFERENT class
+// (so 1.75 self-resolution fails and 1.94 skips on isSelfLike) reaches 1.98.
+func TestResolve_UniqueMethod_CappedAtCandidate06(t *testing.T) {
+	files := []string{"a.py", "b.py"}
+	langs := []string{"python", "python"}
+	fm := BuildFileMap(files, langs)
+
+	// `frobnicate` is a non-builtin method on exactly ONE class (Widget), which is
+	// NOT the caller's class — so self.frobnicate() cannot be receiver-proven.
+	nodeIDs := map[string][]int64{
+		"run":        {1},
+		"CallerCls":  {2},
+		"Widget":     {3},
+		"frobnicate": {4},
+	}
+	fileNodeIDs := map[string]map[string][]int64{
+		"a.py": {"run": {1}, "CallerCls": {2}},
+		"b.py": {"Widget": {3}, "frobnicate": {4}},
+	}
+	meta := map[int64]NodeMeta{
+		1: {Label: "Method", File: "a.py", Name: "run", ParentID: 2},
+		2: {Label: "Class", File: "a.py", Name: "CallerCls"},
+		3: {Label: "Class", File: "b.py", Name: "Widget"},
+		4: {Label: "Method", File: "b.py", Name: "frobnicate", ParentID: 3},
+	}
+	calls := []parser.CallRef{
+		{CallerNodeIdx: 0, CalleeName: "frobnicate", CalleeQualified: "self.frobnicate", Line: 5, File: "a.py"},
+	}
+	callerIDs := []int64{1}
+
+	resolved := Resolve(calls, nodeIDs, fileNodeIDs, callerIDs, nil, fm, meta)
+
+	var found bool
+	for _, r := range resolved {
+		if r.TargetNodeID == 4 && r.Method == "unique_method" {
+			found = true
+			if r.Confidence != 0.6 {
+				t.Errorf("unique_method conf = %.2f, want 0.6 (receiver-unproven CANDIDATE, parity with 1.94 impl_method)", r.Confidence)
+			}
+			if r.TrustTier == "CERTIFIED" {
+				t.Errorf("unique_method (conf %.2f) stamped CERTIFIED — a name-uniqueness guess must never be CERTIFIED", r.Confidence)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("Strategy 1.98 (unique_method) did not fire for self.frobnicate(); got %+v", resolved)
+	}
+}
+
 // #B8b: RegisterGoModulePaths on a VERSIONED module must register each
 // module-prefixed key exactly ONCE (no double-append of the same file) and
 // must not mint recursive garbage keys like "mod/mod/v2/pkg".

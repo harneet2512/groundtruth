@@ -53,18 +53,27 @@ const MaxDepth = 3
 
 // MinEdgeConfidence is the VERIFIED-edge floor (RF-4, #B7: raised 0.5 → 0.7).
 // 0.5 admitted the 0.6 ambiguity tier (2-candidate name_match, ambiguous
-// same_file/import picks, 1-class impl_method) — guesses, not verified facts.
-// 0.7 sits above every ambiguity score the resolver emits (max 0.6) and below
-// the weakest deterministic type-derived score (return_type/unique_method 0.85).
+// same_file/import picks, 1-class impl_method/unique_method) — guesses, not
+// verified facts. 0.7 sits above every receiver-unproven score the resolver
+// emits (max 0.6 — impl_method AND unique_method are both capped there) and
+// below the weakest receiver-PROVEN type-derived score (return_type 0.85).
 const MinEdgeConfidence = 0.7
 
-// verifiedMethods is the set of resolution methods produced by the
-// deterministic resolver strategies (same_file/import/type-derived rungs) and
-// the offline LSP promotion pass (C6: lsp / lsp_verified). #B7: extended with
-// the deterministic type-derived methods (inherited / unique_method /
-// return_type) the original set predated. impl_method and name_match stay OUT:
-// impl_method never proves the receiver (conf <= 0.6, global name-uniqueness
-// only) and name_match is never a deterministic fact.
+// verifiedMethods is the set of resolution methods produced by the receiver-
+// PROVEN deterministic resolver strategies (same_file/import/type-derived rungs)
+// and the offline LSP promotion pass (C6: lsp / lsp_verified). It must agree
+// edge-for-edge with the consumer fact set (curation_map.DETERMINISTIC_RESOLUTION_METHODS):
+// reach may only walk what the brief renders as a fact, so a name-uniqueness
+// guess can never enter the transitive closure.
+//
+// impl_method AND unique_method stay OUT — they are the SAME receiver-unproven
+// class (global method-name uniqueness, ZERO receiver-type check; rung 1.98's
+// own comment: "1.98 does not prove the receiver"). Previously unique_method was
+// admitted here at 0.85, classified as "type-derived" — but it is name-derived,
+// not type-derived, so it laundered cross-class collisions into reach while the
+// fact set correctly excluded it (the reach-vs-fact asymmetry). The resolver now
+// caps both at 0.6 (CANDIDATE), and both are excluded here. name_match is never
+// a fact at any confidence.
 var verifiedMethods = map[string]bool{
 	"same_file":       true,
 	"import":          true,
@@ -72,7 +81,6 @@ var verifiedMethods = map[string]bool{
 	"type_flow":       true,
 	"import_type":     true,
 	"inherited":       true,
-	"unique_method":   true,
 	"return_type":     true,
 	"lsp_verified":    true,
 	"lsp":             true,
