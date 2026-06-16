@@ -165,10 +165,25 @@ def test_tooling_roots(graph_db: str) -> frozenset[str]:
             d = f"{d}/{seg}" if d else seg
             if not (importer == d or importer.startswith(d + "/")):  # importer outside D
                 ext_importers.setdefault(d, set()).add(importer)
-    return frozenset(
-        d for d, imps in ext_importers.items()
-        if imps and all(is_test_path(i) for i in imps)
-    )
+    # Fixpoint: a dir is test-tooling if every external importer is a test file OR is
+    # itself already inside a test-tooling dir. Catches TRANSITIVE vendoring — testify
+    # (round 1: all importers are tests) pulls in spew (round 2: imported only by
+    # testify + tests), the chain a single pass misses. Monotone over a finite dir set
+    # => terminates.
+    roots: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for d, imps in ext_importers.items():
+            if d in roots:
+                continue
+            if imps and all(
+                is_test_path(i) or any(i == r or i.startswith(r + "/") for r in roots)
+                for i in imps
+            ):
+                roots.add(d)
+                changed = True
+    return frozenset(roots)
 
 
 def is_test_tooling(fp: str, roots: frozenset[str]) -> bool:
