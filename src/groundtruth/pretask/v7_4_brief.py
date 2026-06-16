@@ -1618,6 +1618,28 @@ def run_v74(
             adjusted.append((fp, sc, comps))
         scored = adjusted
 
+    # TEST-TOOLING filter: drop vendored assertion/debug libs (testify/spew under
+    # internal/) whose EXTERNAL importers are ALL tests — never a feature edit target,
+    # but they lexically match an issue's error/panic vocabulary (W_LEX dominant) and
+    # dominate the focus_set the agent reasons over (measured: expr focus_set = 5
+    # vendored testify files, gold buried). Graph-derived from IMPORTS edges (no library
+    # names, no benchmark shape, language-agnostic), HARD drop (a hard-negative is never
+    # the edit target; the localizer's soft demote still surfaces it if ever relevant) —
+    # no new weight/threshold/number. Env-gated for A/B; empty-guard keeps the brief
+    # non-empty in the pathological all-vendored case.
+    if graph_db and os.environ.get("GT_TEST_TOOLING_DEMOTE", "1") != "0":
+        try:
+            from groundtruth.delivery.path_policy import (
+                test_tooling_roots as _ttr, is_test_tooling as _istt,
+            )
+            _tt_roots = _ttr(graph_db)
+            if _tt_roots:
+                _kept = [t for t in scored if not _istt(t[0], _tt_roots)]
+                if _kept:
+                    scored = _kept
+        except Exception:
+            pass
+
     # Deterministic tie-break by path. The hub floor (max(0.0,...)) and equal
     # weak signals can tie many files at the same score; without a secondary key
     # their order falls back to list(candidate_set) = PYTHONHASHSEED (non-

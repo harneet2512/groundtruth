@@ -106,6 +106,18 @@ def main() -> int:
         out["brief_order"] = _order[:15]
         out["brief_first5"] = sum(1 for g in gold if g in _order[:5])
         out["brief_first8"] = sum(1 for g in gold if g in _order[:8])
+        # FOCUS_SET vendored-leak (the run_v74 test-tooling fix target — the 5 files the
+        # agent actually reasons over). Measurement-only vendored proxy.
+        _fsm = re.search(r"focus_set=\[([^\]]*)\]", brief_text)
+        if _fsm:
+            _fs = re.findall(r"'([^']+)'", _fsm.group(1))
+            out["focus_set"] = _fs
+            out["focus_vendored"] = sum(
+                1 for f in _fs
+                if re.search(r"(^|/)(vendor|node_modules|third_party|thirdparty)/"
+                             r"|/(testify|spew|difflib|go-spew)(/|$)", f)
+            )
+            out["focus_gold"] = sum(1 for f in _fs if os.path.basename(f) in gold)
     except Exception as exc:  # measurement must not crash the matrix leg
         out["whole_brief_error"] = f"{type(exc).__name__}: {exc}"
 
@@ -235,6 +247,10 @@ def main() -> int:
         f"brief_first@5={out.get('brief_first5','ERR')}/{n_gold} "
         f"brief_first@8={out.get('brief_first8','ERR')}/{n_gold} "
         f"order={out.get('brief_order','ERR')}"
+    )
+    print(
+        f"FOCUS{task_id[:33]:33} [{args.lang[:4]:4}]: vendored_in_focus={out.get('focus_vendored','?')} "
+        f"gold_in_focus={out.get('focus_gold','?')} focus_set={out.get('focus_set','?')}"
     )
     print(
         f"ESC  {task_id[:33]:33} [{args.lang[:4]:4}]: N={n_gold:2} anchors={out.get('anchors_present','?')} "
