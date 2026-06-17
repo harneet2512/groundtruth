@@ -52,8 +52,8 @@ jobs:
           file: docker/Dockerfile.gt-substrate
           push: true
           tags: |
-            ghcr.io/hbali-stack/gt-substrate:latest
-            ghcr.io/hbali-stack/gt-substrate:${{ github.sha }}
+            ghcr.io/${{ github.repository_owner }}/gt-substrate:latest
+            ghcr.io/${{ github.repository_owner }}/gt-substrate:${{ github.sha }}
           # RC-17 build stamp: gt-index embeds this commit via -X main.commitSHA so the
           # baked binary never prints "Commit/Toolchain: unknown" (preflight provenance).
           build-args: |
@@ -66,7 +66,7 @@ jobs:
       - name: Confirm the published image's closure runs on glibc 2.31
         run: |
           set -euo pipefail
-          docker run --rm ghcr.io/hbali-stack/gt-substrate:latest bash -lc '
+          docker run --rm ghcr.io/${{ github.repository_owner }}/gt-substrate:latest bash -lc '
             gt-index -h >/dev/null 2>&1 && echo "gt-index ok"
             /opt/gt/python/bin/python3 -c "import onnxruntime,numpy,pydantic,tokenizers; print(\"py ok\")"
             pyright --version
@@ -81,13 +81,13 @@ jobs:
 
       - name: Verify gt-run-proof portable entrypoint is baked (Stage 4.2)
         run: |
-          docker run --rm "ghcr.io/hbali-stack/gt-substrate@${{ steps.build.outputs.digest }}" \
+          docker run --rm "ghcr.io/${{ github.repository_owner }}/gt-substrate@${{ steps.build.outputs.digest }}" \
             gt-run-proof --print-contract | head -8
 
       - name: Capture immutable digest (the pinned proof input — NOT a mutable tag)
         run: |
           DIGEST="${{ steps.build.outputs.digest }}"
-          PINNED="ghcr.io/hbali-stack/gt-substrate@${DIGEST}"
+          PINNED="ghcr.io/${{ github.repository_owner }}/gt-substrate@${DIGEST}"
           echo "GT_SUBSTRATE_DIGEST=$PINNED"
           { echo "## GT substrate pinned digest"; echo '```'; \
             echo "GT_SUBSTRATE_DIGEST=$PINNED"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
