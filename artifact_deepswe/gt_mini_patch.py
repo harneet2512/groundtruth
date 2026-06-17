@@ -1604,6 +1604,43 @@ def _norm_fp(file_path: str) -> str:
     return (file_path or "").replace("\\", "/").lstrip("./").lstrip("/")
 
 
+# CALLER/CALLEE/SCOPE NEIGHBOR-PATH chokepoint (2026-06-17). THE single predicate
+# every render surface uses to decide "may this NEIGHBOR path be named to the agent
+# as a Caller / callee / scope / cochange / witness." It composes the two path-class
+# halves through ONE entry so a NEW (or missed) builder cannot silently lack the
+# test/demo filter — the whack-a-mole that scattered `_is_test_or_demo_path` lines
+# across builders (each builder filtered differently; an examples/ docs/ benches/
+# caller leaked wherever the per-builder line was absent — witnessed
+# examples/custom_adapter in testem's post_view).
+#
+#   excluded  <=>  NOT deliverable  OR  (repo_root AND content-minified)
+#
+# `is_deliverable` (delivery.path_policy, the Class-A chokepoint) is
+# `NOT (is_test_or_demo OR is_vendored)` — it covers vendored+test+examples+docs+
+# benches in ONE place by dir-segment + file-suffix markers (generalized, no
+# per-repo/benchmark logic). The minified half is content-based (mean line length),
+# needs the on-disk file, so it stays a separate clause gated on a real repo_root.
+# This is exactly the UNION of the old `_is_delivery_excluded(x, repo_root)` +
+# `_is_test_or_demo_path(x)` pair every caller/callee/scope site used to spell out.
+#
+# FAIL-CLOSED (correct-or-quiet): when the delivery policy is unimportable AND
+# path_policy.py is absent on disk (triple-failure), `_pp_is_deliverable` is None.
+# We then EXCLUDE — a neighbor we cannot prove deliverable is never leaked.
+#
+# NOT for the VIEWED/EDITED subject file: `_evidence_body` / `_graph_contract_block`
+# decide whether to emit evidence ON the file the agent is itself viewing/editing —
+# suppressing a test the agent legitimately works on is WRONG. Those keep
+# `_is_delivery_excluded` (vendored/minified only). Only NEIGHBOR paths route here.
+def _caller_path_excluded(fp: str, repo_root: str = "") -> bool:
+    if _pp_is_deliverable is None:
+        return True  # fail-closed: cannot prove deliverable -> never leak
+    if not _pp_is_deliverable(fp):
+        return True
+    if repo_root:
+        return _is_minified_file(repo_root, _norm_fp(fp))
+    return False
+
+
 # Container repo-root prefixes the AGENT'S observations carry. The task runs in
 # the eval CONTAINER (verified_gt.yaml cwd=/testbed); its `docker exec` output
 # names files as /testbed/<repo-rel> (or the other roots the workflow probes:
@@ -1867,14 +1904,11 @@ def _resolved_witnesses_for_file(con, file_path: str, repo_root: str, max_each: 
             (nfp, max_each * 4),
         ).fetchall()
         for caller_file, line, caller_name, target_name, src_lang, tgt_lang in caller_rows:
-            # 2026-06-10 fact-filter: a vendored/minified caller or a
-            # builtin/dunder-shadow target is never a delivered [WITNESS] fact.
-            if _is_delivery_excluded(caller_file or "", repo_root):
-                continue
-            # 2026-06-15: a caller in a TEST file or a demo/non-source dir is not
-            # a real-source witness (witnessed examples/.../functionalService.js
-            # leak); correct-or-quiet — skip the whole row, no partial line.
-            if _is_test_or_demo_path(caller_file or ""):
+            # NEIGHBOR-path chokepoint (2026-06-17): a vendored/minified/test/demo
+            # caller is never a delivered [WITNESS] fact (witnessed examples/.../
+            # functionalService.js leak); correct-or-quiet — skip the whole row.
+            # A builtin/dunder-shadow target is filtered below by name.
+            if _caller_path_excluded(caller_file or "", repo_root):
                 continue
             if _is_builtin_shadow_name(target_name or ""):
                 continue
@@ -1911,13 +1945,10 @@ def _resolved_witnesses_for_file(con, file_path: str, repo_root: str, max_each: 
         ).fetchall()
         for (callee_file, source_line, callee_name, src_name, def_line,
              tgt_lang, src_lang) in callee_rows:
-            # 2026-06-10 fact-filter: vendored/minified callee files and
-            # builtin/dunder-shadow callee names are never [WITNESS] facts.
-            if _is_delivery_excluded(callee_file or "", repo_root):
-                continue
-            # 2026-06-15: a callee defined in a TEST file or a demo/non-source
-            # dir is not a real-source witness; correct-or-quiet — skip the row.
-            if _is_test_or_demo_path(callee_file or ""):
+            # NEIGHBOR-path chokepoint (2026-06-17): a vendored/minified/test/demo
+            # callee file is never a real-source [WITNESS] fact; correct-or-quiet —
+            # skip the row. Builtin/dunder-shadow callee names filtered below.
+            if _caller_path_excluded(callee_file or "", repo_root):
                 continue
             if _is_builtin_shadow_name(callee_name or ""):
                 continue
@@ -1984,17 +2015,13 @@ def _caller_contract_for_file(con, file_path: str, repo_root: str, func_names: l
                 (fname, nfp, 8),
             ).fetchall()
             for caller_file, source_line, caller_name, conf, method, src_lang, tgt_lang in rows:
-                # 2026-06-10 fact-filter: a vendored/minified caller is never a
-                # fact NOR an unverified location hint.
-                if _is_delivery_excluded(caller_file or "", repo_root):
-                    continue
-                # Class-A residual (2026-06-17): _is_delivery_excluded covers
-                # vendored/minified but NOT the test/demo non-source class, and
-                # COALESCE(is_test,0)=0 (the SQL gate above) only catches DB-marked
-                # test files — an `examples/` dir is neither, so it leaked into the
-                # post_view [CALLERS] (witnessed: examples/custom_adapter in testem).
-                # Route the caller through the canonical path chokepoint.
-                if _is_test_or_demo_path(caller_file or ""):
+                # NEIGHBOR-path chokepoint (2026-06-17): a vendored/minified/test/
+                # demo caller is never a fact NOR a location hint. COALESCE(is_test,0)
+                # =0 (the SQL gate above) only catches DB-marked test files — an
+                # `examples/` dir is neither, so it leaked into the post_view
+                # [CALLERS] (witnessed: examples/custom_adapter in testem). The ONE
+                # path predicate covers vendored+minified+test+examples+docs+benches.
+                if _caller_path_excluded(caller_file or "", repo_root):
                     continue
                 # 2026-06-10 cross-language disqualifier (boa [57]): a caller in
                 # a different language family is never a fact nor a hint —
@@ -2117,15 +2144,11 @@ def _edit_target_callee_contracts(con, file_path: str, func_names: list[str],
                 # different language family is never a [CALLEE] fact.
                 if _is_cross_language_pair(src_lang, tgt_lang):
                     continue
-                # 2026-06-10 fact-filter: vendored callee files / builtin-shadow
-                # callee names are never [CALLEE] facts.
-                if _is_delivery_excluded(callee_file or "", repo_root):
-                    continue
-                # Class-A residual (2026-06-17): _is_delivery_excluded is vendored/
-                # minified only — route the callee through the path chokepoint so a
-                # test/demo callee (examples/ docs/ benches/) never renders as a
-                # [CALLEE] fact (sibling of the _caller_contract [CALLERS] gap).
-                if _is_test_or_demo_path(callee_file or ""):
+                # NEIGHBOR-path chokepoint (2026-06-17): a vendored/minified/test/
+                # demo callee file (examples/ docs/ benches/) never renders as a
+                # [CALLEE] fact (sibling of the _caller_contract [CALLERS] gap). The
+                # ONE path predicate covers all of vendored+minified+test+demo.
+                if _caller_path_excluded(callee_file or "", repo_root):
                     continue
                 if _is_builtin_shadow_name(callee_name or ""):
                     continue
@@ -2211,11 +2234,11 @@ def _query_scope(rel: str) -> list[str]:
         )
         try:
             for fp, _l1, _l2 in con.execute(q, (_norm_fp(rel),)):
-                # 2026-06-10 fact-filter: vendored/minified/generated neighbours
-                # are never delivered scope; nor are cross-language "neighbours"
-                # (a call edge between language families is not a real edge).
-                if (fp and fp not in out and not _is_vendored_path(fp)
-                        and not _is_test_or_demo_path(fp)
+                # NEIGHBOR-path chokepoint (2026-06-17): vendored/minified/generated
+                # /test/demo neighbours are never delivered scope (the ONE predicate);
+                # nor cross-language "neighbours" (a call edge between language
+                # families is not a real edge).
+                if (fp and fp not in out and not _caller_path_excluded(fp)
                         and not _is_cross_language_pair(_l1, _l2)):
                     out.append(fp)
         finally:
@@ -2311,14 +2334,13 @@ def _consensus_block(rel: str, root: str) -> str:
             )
             try:
                 for fp, _l1, _l2 in con.execute(q, (_norm_fp(rel),)):
-                    # 2026-06-10 fact-filter: vendored/minified/generated
-                    # neighbours are never delivered scope; nor cross-language
-                    # "neighbours" (not a real call edge — boa [57]).
-                    # 2026-06-15: nor a TEST file or a demo/non-source dir — the
-                    # agent is told not to edit tests, and an examples/ demo is
-                    # not real source (witnessed __tests__/awilix.test.ts leak).
-                    if (fp and fp not in scope and not _is_vendored_path(fp)
-                            and not _is_test_or_demo_path(fp)
+                    # NEIGHBOR-path chokepoint (2026-06-17): vendored/minified/
+                    # generated/test/demo neighbours are never delivered scope (the
+                    # ONE predicate — the agent is told not to edit tests, and an
+                    # examples/ demo is not real source: witnessed __tests__/
+                    # awilix.test.ts leak); nor cross-language "neighbours" (not a
+                    # real call edge — boa [57]).
+                    if (fp and fp not in scope and not _caller_path_excluded(fp)
                             and not _is_cross_language_pair(_l1, _l2)):
                         scope.append(fp)
             finally:
@@ -2616,13 +2638,14 @@ def _cochange_block(rel: str) -> str:
             )
             for fa, fb, cnt in con.execute(q, (nfp, nfp)):
                 other = fb if _norm_fp(fa) == nfp else fa
-                # 2026-06-10 fact-filter: vendored/minified/generated co-change
-                # partners are never delivered (jquery churn is not completeness).
-                # 2026-06-15: also drop test + demo/non-source co-change partners —
-                # the agent is told not to edit tests, and a `test/x.js` co-change is
-                # never a completeness target for a source edit (BUG-A, 4th leak site:
-                # <gt-cochange> mirrored the brief's "Also changes:" test-file leak).
-                if other and (_is_vendored_path(other) or _is_test_or_demo_path(other)):
+                # NEIGHBOR-path chokepoint (2026-06-17): vendored/minified/generated
+                # co-change partners are never delivered (jquery churn is not
+                # completeness), nor test/demo partners — the agent is told not to
+                # edit tests, and a `test/x.js` co-change is never a completeness
+                # target for a source edit (BUG-A, 4th leak site: <gt-cochange>
+                # mirrored the brief's "Also changes:" test-file leak). The ONE
+                # predicate covers vendored+minified+test+demo.
+                if other and _caller_path_excluded(other):
                     continue
                 if other and _norm_fp(other) != nfp and other not in [r[0] for r in rows]:
                     rows.append((other, cnt))
