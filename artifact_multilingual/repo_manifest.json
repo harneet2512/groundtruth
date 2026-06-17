@@ -1,0 +1,181 @@
+{
+  "benchmark": "SWE-bench-Multilingual+Verified(python)",
+  "source": "https://huggingface.co/datasets/SWE-bench/SWE-bench_Multilingual + https://huggingface.co/datasets/princeton-nlp/SWE-bench_Verified",
+  "note": "Anti-overfit iteration/validation surface. DeepSWE (artifact_deepswe) stays HELD OUT. Selection rule lives in scripts/build_multilingual_manifest.py (picker), never in src/groundtruth/. Routing metadata only -- no gold/F2P.",
+  "total_tasks": 15,
+  "total_repos": 11,
+  "language_distribution": {
+    "go": 3,
+    "javascript": 3,
+    "python": 3,
+    "rust": 3,
+    "typescript": 3
+  },
+  "tasks": [
+    {
+      "instance_id": "hashicorp__terraform-34900",
+      "repo_url": "https://github.com/hashicorp/terraform",
+      "language": "go",
+      "commit_hash": "f2e4cb411ed6dfd36fd4f9960a74d8f29c7b8882",
+      "docker_image": "swebench/sweb.eval.x86_64.hashicorp_1776_terraform-34900:latest",
+      "category": "swebench_multilingual",
+      "display_title": "hashicorp__terraform-34900",
+      "agent_timeout_sec": 5400.0,
+      "instruction_chars": 0
+    },
+    {
+      "instance_id": "hashicorp__terraform-35543",
+      "repo_url": "https://github.com/hashicorp/terraform",
+      "language": "go",
+      "commit_hash": "24833a2b062126a71ef30a86a6d1fc3823afdfdb",
+      "docker_image": "swebench/sweb.eval.x86_64.hashicorp_1776_terraform-35543:latest",
+      "category": "swebench_multilingual",
+      "display_title": "hashicorp__terraform-35543",
+      "agent_timeout_sec": 5400.0,
+      "instruction_chars": 0
+    },
+    {
+      "instance_id": "prometheus__prometheus-10633",
+      "repo_url": "https://github.com/prometheus/prometheus",
+      "language": "go",
+      "commit_hash": "64fc3e58fec13af55968db89a484b9e0c5425bd6",
+      "docker_image": "swebench/sweb.eval.x86_64.prometheus_1776_prometheus-10633:latest",
+      "category": "swebench_multilingual",
+      "display_title": "prometheus__prometheus-10633",
+      "agent_timeout_sec": 5400.0,
+      "instruction_chars": 0
+    },
+    {
+      "instance_id": "tokio-rs__axum-2096",
+      "repo_url": "https://github.com/tokio-rs/axum",
+      "language": "rust",
+      "commit_hash": "6f7ff8556587d51c6919a864926e4b8090f92c3f",
+      "docker_image": "swebench/sweb.eval.x86_64.tokio-rs_1776_axum-2096:latest",
+      "category": "swebench_multilingual",
+      "display_title": "tokio-rs__axum-2096",
+      "agent_timeout_sec": 5400.0,
+      "instruction_chars": 0
+    },
+    {
+      "instance_id": "sharkdp__bat-2835",
+      "repo_url": "https://github.com/sharkdp/bat",
+      "language": "rust",
+      "commit_hash": "db66e4459bc4e66c03629d7cbc235f59245280c0",
+      "docker_image": "swebench/sweb.eval.x86_64.sharkdp_1776_bat-2835:latest",
+      "category": "swebench_multilingual",
+      "display_title": "sharkdp__bat-2835",
+      "agent_timeout_sec": 5400.0,
+      "instruction_chars": 0
+    },
+    {
+      "instance_id": "tokio-rs__axum-1934",
+      "repo_url": "https://github.com/tokio-rs/axum",
+      "language": "rust",
+      "commit_hash": "e97462d45251c21ffd1ba4fb5db30f3cf6f6cb6c",
+      "docker_image": "swebench/sweb.eval.x86_64.tokio-rs_1776_axum-1934:latest",
+      "category": "swebench_multilingual",
+      "display_title": "tokio-rs__axum-1934",
+      "agent_timeout_sec": 5400.0,
+      "instruction_chars": 0
+    },
+    {
+      "instance_id": "facebook__docusaurus-9183",
+      "repo_url": "https://github.com/facebook/docusaurus",
+      "language": "typescript",
+      "commit_hash": "b96004e77ebfb23e7349fa495d2177008186bd42",
+      "docker_image": "swebench/sweb.eval.x86_64.facebook_1776_docusaurus-9183:latest",
+      "category": "swebench_multilingual",
+      "display_title": "facebook__docusaurus-9183",
+      "agent_timeout_sec": 5400.0,
+      "instruction_chars": 0
+    },
+    {
+      "instance_id": "vuejs__core-11589",
+      "repo_url": "https://github.com/vuejs/core",
+      "language": "typescript",
+      "commit_hash": "3653bc0f45d6fedf84e29b64ca52584359c383c0",
+      "docker_image": "swebench/sweb.eval.x86_64.vuejs_1776_core-11589:latest",
+      "category": "swebench_multilingual",
+      "display_title": "vuejs__core-11589",
+      "agent_timeout_sec": 5400.0,
+      "instruction_chars": 0
+    },
+    {
+      "instance_id": "preactjs__preact-3689",
+      "repo_url": "https://github.com/preactjs/preact",
+      "language": "typescript",
+      "commit_hash": "9457b221fdacd1052ffdb385918e1bab4b10e833",
+      "docker_image": "swebench/sweb.eval.x86_64.preactjs_1776_preact-3689:latest",
+      "category": "swebench_multilingual",
+      "display_title": "preactjs__preact-3689",
+      "agent_timeout_sec": 5400.0,
+      "instruction_chars": 0
+    },
+    {
+      "instance_id": "mrdoob__three.js-26589",
+      "repo_url": "https://github.com/mrdoob/three.js",
+      "language": "javascript",
+      "commit_hash": "8d9f8d50b923d5f8a673590ae138bc5d86a3a256",
+      "docker_image": "swebench/sweb.eval.x86_64.mrdoob_1776_three.js-26589:latest",
+      "category": "swebench_multilingual",
+      "display_title": "mrdoob__three.js-26589",
+      "agent_timeout_sec": 5400.0,
+      "instruction_chars": 0
+    },
+    {
+      "instance_id": "mrdoob__three.js-25687",
+      "repo_url": "https://github.com/mrdoob/three.js",
+      "language": "javascript",
+      "commit_hash": "114134e195a451fdbaa8d2e9492d869d5c853814",
+      "docker_image": "swebench/sweb.eval.x86_64.mrdoob_1776_three.js-25687:latest",
+      "category": "swebench_multilingual",
+      "display_title": "mrdoob__three.js-25687",
+      "agent_timeout_sec": 5400.0,
+      "instruction_chars": 0
+    },
+    {
+      "instance_id": "immutable-js__immutable-js-2005",
+      "repo_url": "https://github.com/immutable-js/immutable-js",
+      "language": "javascript",
+      "commit_hash": "77434b3cbbc8ee21206f4cc6965e1c9b09cc92b6",
+      "docker_image": "swebench/sweb.eval.x86_64.immutable-js_1776_immutable-js-2005:latest",
+      "category": "swebench_multilingual",
+      "display_title": "immutable-js__immutable-js-2005",
+      "agent_timeout_sec": 5400.0,
+      "instruction_chars": 0
+    },
+    {
+      "instance_id": "django__django-15563",
+      "repo_url": "https://github.com/django/django",
+      "language": "python",
+      "commit_hash": "9ffd4eae2ce7a7100c98f681e2b6ab818df384a4",
+      "docker_image": "swebench/sweb.eval.x86_64.django_1776_django-15563:latest",
+      "category": "swebench_multilingual",
+      "display_title": "django__django-15563",
+      "agent_timeout_sec": 5400.0,
+      "instruction_chars": 0
+    },
+    {
+      "instance_id": "sympy__sympy-13877",
+      "repo_url": "https://github.com/sympy/sympy",
+      "language": "python",
+      "commit_hash": "1659712001810f5fc563a443949f8e3bb38af4bd",
+      "docker_image": "swebench/sweb.eval.x86_64.sympy_1776_sympy-13877:latest",
+      "category": "swebench_multilingual",
+      "display_title": "sympy__sympy-13877",
+      "agent_timeout_sec": 5400.0,
+      "instruction_chars": 0
+    },
+    {
+      "instance_id": "django__django-11885",
+      "repo_url": "https://github.com/django/django",
+      "language": "python",
+      "commit_hash": "04ac9b45a34440fa447feb6ae934687aacbfc5f4",
+      "docker_image": "swebench/sweb.eval.x86_64.django_1776_django-11885:latest",
+      "category": "swebench_multilingual",
+      "display_title": "django__django-11885",
+      "agent_timeout_sec": 5400.0,
+      "instruction_chars": 0
+    }
+  ]
+}
