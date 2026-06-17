@@ -1988,6 +1988,14 @@ def _caller_contract_for_file(con, file_path: str, repo_root: str, func_names: l
                 # fact NOR an unverified location hint.
                 if _is_delivery_excluded(caller_file or "", repo_root):
                     continue
+                # Class-A residual (2026-06-17): _is_delivery_excluded covers
+                # vendored/minified but NOT the test/demo non-source class, and
+                # COALESCE(is_test,0)=0 (the SQL gate above) only catches DB-marked
+                # test files — an `examples/` dir is neither, so it leaked into the
+                # post_view [CALLERS] (witnessed: examples/custom_adapter in testem).
+                # Route the caller through the canonical path chokepoint.
+                if _is_test_or_demo_path(caller_file or ""):
+                    continue
                 # 2026-06-10 cross-language disqualifier (boa [57]): a caller in
                 # a different language family is never a fact nor a hint —
                 # whatever its recorded resolution_method claims.
