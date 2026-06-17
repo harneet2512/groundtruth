@@ -574,7 +574,18 @@ def gt_replan_cmd(
     log_dir: str | None = None,
     task_id: str = "unknown",
 ) -> None:
-    """Evaluate replan triggers, or recompute v7 when issue text is available."""
+    """Evaluate replan triggers, or recompute v7 when issue text is available.
+
+    DEAD — OH/kernel-era replan scaffolding (OpenHands RETIRED). Not CLI-registered, no live
+    invoker (run_kernel_paired_gate.py is run by no live workflow), no tests. It recomputed the
+    brief via the SUPERSEDED v7_brief.generate_brief while the live brief is
+    v1r_brief.generate_v1r_brief (via gt_run_proof) — the last duplicate brief surface. Fail-closed
+    so it cannot route; the v7_brief import below is now unreachable. See GT_ARCHITECTURE_LINEAGE.md.
+    """
+    raise RuntimeError(
+        "DEAD SURFACE: gt_replan_cmd is OH/kernel-era replan scaffolding (OpenHands retired); "
+        "the live brief is v1r_brief.generate_v1r_brief via gt_run_proof. Not routable."
+    )
     from groundtruth.runtime.patch_auditor import audit_patch
     from groundtruth.runtime.replan import evaluate_replan_triggers
 
