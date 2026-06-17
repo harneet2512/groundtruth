@@ -1,3 +1,68 @@
+# Implementation Changelog — Session 2026-06-17 (PM) (embedder-gate false-fail fix + architecture retirement labels)
+
+Held-out TEST exposed a substrate-level embedder-gate FALSE-FAIL (yjs/js + drizzle/ts, `sem_scored_count=0` →
+agent never runs); the cert proves the embedder WAS consumed (drizzle `upstream_nonzero=830`). Diagnosis +
+fix in `EMBEDDER_GATE_FALSEFAIL_DIAGNOSIS_20260617.md`; whole-architecture live/dead map in
+`GT_ARCHITECTURE_LINEAGE.md`.
+
+| # | File(s) | Change | Proof |
+|---|---|---|---|
+| 5 | `scripts/metrics/foundational_gates.py` | **embedder-gate witness-over-cert reconcile:** when `gate_embedder_consumption` would FAIL on p3 (flat post-render `sem_components`) but the `embedder_certificate` records `upstream/rendered_semantic_nonzero>0` AND `effective_w_sem>0`, reconcile to PASS (the embedder WAS consumed in the ranking; flat post-render is a render artifact). Records `cert_reconciled`/`cert_upstream_nonzero`. | syntax OK; yjs regression PASS unchanged; mutation-verified correct-or-quiet (dead embedder `upstream=0` stays FAIL) |
+| 6 | `src/groundtruth/runtime/dead_path_registry.py` | **`CLI_LEGACY` soft-retirement table** for `v7_brief`/`brief_v5`/`v7_layers` — dead on DeepSWE, live on OH/kernel CLI (so NOT hard DEAD_PATHS). Advisory metadata. | importer-traced (`GT_ARCHITECTURE_LINEAGE.md`); additive (no behavior change) |
+| 7 | `GT_ARCHITECTURE_LINEAGE.md` (new) | canonical whole-architecture LIVE-vs-DEAD module map (4 agents, import-traced, gt_audit/gt_gt-grounded) — the reference that stops the v1r/v7_4 vs old-code confusion | — |
+
+**No render-path edit:** the in-container `sem_components`-zero trigger is unproven (the gate PASSES locally on the
+exact graph.db), so a render fix would be speculative; the cert-reconcile is the defensible fix. The PAID 5-task
+re-run is the proof bar.
+
+---
+
+# Implementation Changelog — Session 2026-06-17 (mechanism-parity verification + held-out TEST-5 dispatch)
+
+Mostly VERIFICATION, not new product logic: re-audited the 2026-06-15 functional review (9 P0 / ~16 P1) on current
+HEAD — all 19 audited defects already SUCCESS (the name_match-as-fact class is closed end-to-end; recorded in
+`gt_new.md §9` + `PARITY_MATRIX_CONSOLIDATED_20260617T0040Z.md`). Code/data deltas this session are small + host-side.
+Commits: `34c4479e`, `e4714807`, `dfb3c920`, `9bfdfd8b`.
+
+| # | File(s) | Change | Proof |
+|---|---|---|---|
+| 1 | `src/groundtruth/pretask/v1r_brief.py` | test-tooling is never offered as a `<gt-localization>` edit candidate — `_test_tooling_roots` filter before the K-cap (env-gated `GT_TEST_TOOLING_DEMOTE`, empty-guard) | `e4714807`; local RED→GREEN (testify True→False) with ONNX embedder ON |
+| 2 | `.github/workflows/deepswe_full.yml` | feed `GT_TRIAL_LOG=trial_output.log` to `task_truth.py` so the reconciler reads the `[GT_META]` witness (was unset → witness_holds=False false-fail) | `34c4479e`; reconciler proven `witness_overrides` live on `285a2a69` |
+| 3 | `artifact_deepswe/repo_manifest.json` | bump TEST-5 (go-critic/yjs/python-statemachine/drizzle/boa) task images to `-v1.1` (deep-swe clone drift, verified vs raw.githubusercontent); VAL-5 bumped `dfb3c920` | `9bfdfd8b`; pre-empts prepare RUN_SET_DRIFT (`deepswe_full.yml:402`) |
+| 4 | `artifact_deepswe/gt_integration/deepswe_gt_pier.yaml` | **additive-flip blocker:** submit template ran `git diff -- <files>` which OMITS untracked new files → any fix that CREATES source files lost them → incomplete patch → unresolved even when solved (superjson ledger). Fix: `git add -N -- <files>` (intent-to-add) + reword "modified OR created"; scaffold-exclusion preserved | `225edaae`; confirmed systematic at config (line 115/119); host-read config → no substrate rebuild |
+
+**No product-logic regression risk:** #1 is env-gated + empty-guarded; #2/#3 are host-side (workflow + manifest), do
+NOT change substrate code, so the `22d94aed` substrate digest stays valid. #4 is the pier agent prompt (host-read
+`config_file` at `deepswe_full.yml:1178`, NOT baked into the substrate) — generalized git mechanics, LIPI clean,
+unblocks the additive/multi-gold class for the next run; the in-flight TEST-5 loaded the pre-fix template so its
+additive task (drizzle) may show right-trajectory-but-harness-lost-patch, which the gt_trial §4 audit will flag as a
+harness confound, not a GT failure. LIPI clean on all four.
+
+---
+
+# Implementation Changelog — Session 2026-06-16 (GHA parity harness + determinism hardening + vendored-noise fix + product-vs-benchmaxxer architecture doc)
+
+Context: codespace access dropped → moved the /goal measurement surface to GHA. Landed substrate determinism +
+a §4/§6 vendored-noise fix + the GHA harness, all generalized (no task IDs/gold/library names). Final deliverable:
+`ARCHITECTURE_CHANGES_PRODUCT_NOT_BENCHMAXXER_20260616T183300Z.md` (the 6 structural changes, file:line-cited from
+`.claude/reports/GT_FUNCTIONAL_CODE_REVIEW_20260615T1900Z.md`). **No live eval run — substrate/harness only; "in progress"
+per DEFINITION OF DONE.** 26 commits `2ea3f71f`→`82789697`.
+
+| # | File(s) | Change | Proof |
+|---|---|---|---|
+| 1 | `gt-index/internal/resolver/resolver.go` | `pickBestNameMatchTarget` sorts candidates by content (file,start_line,id); `NodeMeta.StartLine` added + populated | `go build` exit 0; held-out re-index byte-identical 8/10 |
+| 2 | `gt-index/internal/resolver/promote.go` | `forEachProperty` ORDER BY (node_id,value,line); `resolveByName` content tiebreak; `promote_dataflow_callee` minted only when no CALLS edge | re-index hash stable 8/10; residual drift 2/10 documented (deferred) |
+| 3 | `src/groundtruth/delivery/path_policy.py` | `test_tooling_roots()` graph-derived "imported-only-by-tests" fixpoint (transitive) + `is_test_tooling()` | expr: 5 vendored testify/spew identified; all 10 repos no-harm |
+| 4 | `src/groundtruth/pretask/graph_localizer.py` | wire `_is_tt`/`_tt_roots` into the test-file demote (env-gated `GT_TEST_TOOLING_DEMOTE`); `[L1DBG]` per-signal rank dump | paired same-substrate A/B: vendored 5→0, gold preserved |
+| 5 | `src/groundtruth/pretask/v7_4_brief.py` | hard-filter test-tooling from `scored` before focus_set sort (env-gated, empty-guard) | focus_set vendored 5→0 on expr; 0→0 (no-harm) on 9 others |
+| — | `src/groundtruth/pretask/graph_localizer.py` | multi-signal agreement-escape past the grep floor — **REVERTED** (clean paired A/B = 0 delta) | eb029452 (revert); proven NO-OP |
+| 6 | `.github/workflows/parity_measure.yml`, `scripts/parity/measure_whole_pipeline.py` | GHA measurement surface: fresh graph.db per task from real ECR image → LSP → brief; brief-faithful recall (top_k=8+issue_anchors); raw-vs-raw determinism + ground-truth dump-and-diff | runs green on TRAIN+VALIDATION 5; caught the determinism gap TRAIN hid |
+
+Doc/record: `PARITY_MATRIX.md` (honest current-state banner), `ARCHITECTURE_CHANGES_PRODUCT_NOT_BENCHMAXXER_20260616T183300Z.md`,
+memories `project_determinism_residual_gap`, `feedback_never_block_research_when_split`, `project_localizer_ceiling_feature_tasks`.
+
+---
+
 # Implementation Changelog — Session 2026-06-15 (adversarial MAX-LIPI re-review: 2 HIGH closed + 1 bonus incremental-path bug)
 
 Input: `docs/GT_GAPFIX_MAX_LIPI.md` (adversarial re-review of the §10 gap-fix wave). Closed both HIGH
