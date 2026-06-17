@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+import importlib
 import importlib.util
+import sys
+import types
+
+import pytest
+
 from pathlib import Path
 
 
@@ -74,3 +80,79 @@ def test_stale_snapshots_cannot_masquerade_as_live():
     assert str(origin).startswith(str(live_src)), origin
     for snap in ("pregen_gt", "gen_lab"):
         assert snap not in origin.parts, f"v22_brief resolved into snapshot {snap}: {origin}"
+
+
+# --------------------------------------------------------------------------------------
+# Runtime teeth: assert_no_dead_surface_loaded() — fail-closed guard on the proof path.
+# These are TRIPWIRE tests (TTD): the guard must PASS on a clean live chain, RAISE when a
+# DEAD_PATHS module is loaded under proof mode, and stay a NO-OP outside proof mode.
+# Mutation-check: weakening the guard (drop the proof-mode/loaded check) turns these RED.
+# --------------------------------------------------------------------------------------
+
+LIVE_CHAIN_MODULES = [
+    "groundtruth.runtime.brief_cache",
+    "groundtruth.pretask.v1r_brief",
+    "groundtruth.pretask.v7_4_brief",
+    "groundtruth.pretask.graph_localizer",
+    "groundtruth.pretask.anchor_select",
+    "groundtruth.pretask.anchor_proximity",
+    "groundtruth.pretask.hybrid",
+    "groundtruth.lsp.config",
+    "groundtruth.memory.enrich.embed",
+]
+
+
+def test_guard_passes_on_clean_live_chain_under_proof_mode():
+    """The guard must NOT false-fail: importing the real live DeepSWE brief chain
+    (v1r_brief -> v7_4_brief -> localizers/anchors + embedder + LSP config) loads ZERO
+    DEAD_PATHS module, so the guard returns cleanly even with proof mode active."""
+    from groundtruth.runtime.dead_path_registry import (
+        DEAD_PATHS,
+        assert_no_dead_surface_loaded,
+    )
+
+    for m in LIVE_CHAIN_MODULES:
+        importlib.import_module(m)
+
+    # Sanity: the real live chain leaves no dead module in sys.modules.
+    assert [d for d in DEAD_PATHS if d in sys.modules] == []
+    # Proof mode active, clean chain -> must not raise.
+    assert_no_dead_surface_loaded(env={"GT_PROOF_MODE": "1"}) is None
+    assert_no_dead_surface_loaded(env={"GT_REQUIRE_FULL_STACK": "1"}) is None
+
+
+@pytest.mark.parametrize("flag", ["GT_PROOF_MODE", "GT_REQUIRE_FULL_STACK"])
+def test_guard_raises_when_dead_module_loaded_under_proof_mode(flag):
+    """Force a DEAD_PATHS module into the injected module map under proof mode; the guard
+    MUST raise, and the error MUST name the dead module + its live replacement."""
+    from groundtruth.runtime.dead_path_registry import (
+        DEAD_PATHS,
+        DeadSurfaceLoadedError,
+        assert_no_dead_surface_loaded,
+    )
+
+    dead_name = "groundtruth.pretask.v22_brief"
+    fake_modules = {dead_name: types.ModuleType(dead_name)}
+    with pytest.raises(DeadSurfaceLoadedError) as exc:
+        assert_no_dead_surface_loaded(env={flag: "1"}, modules=fake_modules)
+
+    msg = str(exc.value)
+    assert dead_name in msg, msg
+    assert DEAD_PATHS[dead_name]["replacement"] in msg, msg
+
+
+def test_guard_is_noop_outside_proof_mode():
+    """Off the proof/substrate path (no proof flags) the guard is a strict no-op even with
+    a dead module loaded — OH/MCP/CLI harnesses that legitimately reach CLI-legacy surface
+    must never be tripped."""
+    from groundtruth.runtime.dead_path_registry import assert_no_dead_surface_loaded
+
+    fake_modules = {"groundtruth.pretask.v22_brief": types.ModuleType("x")}
+    # No proof flags set -> no-op, regardless of loaded dead modules.
+    assert assert_no_dead_surface_loaded(env={}, modules=fake_modules) is None
+    assert (
+        assert_no_dead_surface_loaded(
+            env={"GT_PROOF_MODE": "0"}, modules=fake_modules
+        )
+        is None
+    )

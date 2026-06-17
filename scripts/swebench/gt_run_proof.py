@@ -842,6 +842,17 @@ def main(argv=None) -> int:
     _cp_ok, _cp_detail = assert_commit_parity()
     if not _cp_ok:
         return tracker.fail("env_validation", "GT_COMMIT_PARITY_MISMATCH", _cp_detail)
+
+    # Fail-closed dead-surface guard (runtime teeth for dead_path_registry). On the proof/
+    # substrate path a retired DEAD_PATHS module must NEVER be loaded — if one is in
+    # sys.modules here (before indexing), abort naming the dead module + its live replacement.
+    # No-op outside proof mode, so OH/MCP/CLI harnesses are unaffected. sys.path already has
+    # $GT_HOME/src (set above), so the registry import resolves to the baked live src.
+    try:
+        from groundtruth.runtime.dead_path_registry import assert_no_dead_surface_loaded
+        assert_no_dead_surface_loaded()
+    except Exception as e:
+        return tracker.fail("env_validation", "GT_DEAD_SURFACE_LOADED", str(e))
     tracker.complete("env_validation")
 
     dep_manifest = os.path.join(a.out, "dep_store_manifest.json")
