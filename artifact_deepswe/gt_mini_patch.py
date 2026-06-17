@@ -4656,8 +4656,9 @@ def _scope_completeness_block() -> str:
         return (
             '\n<gt-scope reason="completeness">\n'
             f"You edited {len(scope & edited)} of {len(scope)} graph-connected "
-            "in-scope files (verified component of your edits). Issue-relevant "
-            "scope members you have NOT touched:\n"
+            "in-scope files (verified component of your edits). Graph-connected, "
+            "issue-focus-named files you have NOT touched (a name match is not "
+            "proof they need changes — verify):\n"
             + "\n".join(lines)
             + "\nConfirm whether the fix is complete without them before "
             "submitting.\n</gt-scope>"
