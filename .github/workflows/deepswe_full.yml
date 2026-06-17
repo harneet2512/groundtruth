@@ -1321,7 +1321,7 @@ jobs:
           GT_TRIAL_LOG=trial_output.log GT_CERT_DIR=/tmp/gt \
             GT_DEEPSWE_OUTCOME_JSON=trial_results/outcome.json \
             python3 scripts/verify/deepswe_outcome.py jobs || echo "WARN: outcome extract failed"
-          find trial_results -type f | head -40
+          find trial_results -type f 2>/dev/null | head -40 || true
 
       - name: Upload results
         if: always()
