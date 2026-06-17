@@ -1774,11 +1774,23 @@ def _render_obligations_block(
     issue_text: str,
     files: list[FileEntry],
     cap,
+    anchor_symbols: set[str] | None = None,
 ) -> list[str]:
     """Render the ``<gt-obligations>`` behavioral-spec block, or ``[]`` when quiet.
 
     ``cap`` is the body-line clip closure from ``render_brief``. Returns a list of
     rendered lines (block tags included) or an empty list (correct-or-quiet).
+
+    ``anchor_symbols`` are the issue's own curated code identifiers
+    (``IssueAnchors.symbols`` ∪ ``code_symbols`` ∪ ``unresolved_code_symbols`` —
+    BugLocator ICSE 2012 issue-subject tokens). They are unioned with the focus
+    function tokens to form the relevance anchor. This is the SUBJECT of the issue
+    (``range`` / ``coredump`` / ``bytes``), which an obligation legitimately
+    describes even when that symbol is (a) a net-new feature not yet present in any
+    indexed function (feature-add tasks — e.g. wasmi ``coredump``), or (b) a
+    low-ref-count function truncated out of the top-N focus list (e.g. pest
+    ``range`` at rank #13, beyond MAX_FUNCTIONS_PER_FILE). Focus tokens alone miss
+    both cases → the whole obligation block was silently dropped on those tasks.
     """
     if not issue_text:
         return []
@@ -1794,14 +1806,15 @@ def _render_obligations_block(
     if not spec.obligations:
         return []
 
-    # FOCUS ANCHOR — the rendered edit-target functions' identifier tokens. An
-    # obligation is rendered ONLY when it overlaps THIS focus (the functions GT
-    # actually surfaced as edit targets), NOT merely the issue text. Issue-terms
-    # alone never discriminate (obligations ARE drawn from the issue, so they would
-    # always "overlap"); keying on the focus is what makes the gate bite — an
-    # obligation about an UNRELATED subsystem (no focus-token overlap) stays quiet.
-    # When the brief surfaced no focus functions, we cannot anchor → stay quiet for
-    # the whole block (correct-or-quiet; never launder the entire issue spec).
+    # RELEVANCE ANCHOR — the union of (1) the rendered edit-target functions'
+    # identifier tokens and (2) the issue's own curated anchor symbols. An
+    # obligation is rendered ONLY when it overlaps THIS anchor, NOT merely the
+    # issue text. Raw issue-terms never discriminate (obligations ARE drawn from
+    # the issue, so they would always "overlap"); keying on the focus + the
+    # curated code-symbols is what makes the gate bite — an obligation about an
+    # UNRELATED subsystem (no token overlap) stays quiet. When neither focus
+    # functions NOR anchor symbols exist, we cannot anchor → stay quiet for the
+    # whole block (correct-or-quiet; never launder the entire issue spec).
     fn_tokens: set[str] = set()
     gold_path_tokens: set[str] = set()
     for f in files:
@@ -1818,8 +1831,16 @@ def _render_obligations_block(
         for seg in _re.split(r"[/\\.]+", str(getattr(f, "path", ""))):
             if len(seg) >= 3:
                 gold_path_tokens.add(seg.lower())
+    # Issue-SUBJECT anchor: tokenize the curated issue code-symbols and union them
+    # in. These are the localizer's own BugLocator-style anchors — the same
+    # provenance the brief already trusts for file ranking — so trusting them as an
+    # obligation relevance anchor is consistent, not a new heuristic. They are NOT
+    # added to gold_path_tokens, so the leakage guard is unaffected (an anchor
+    # symbol that coincides with a gold-path segment is still caught there).
+    for s in (anchor_symbols or set()):
+        fn_tokens |= _id_tokens(str(s))
     if not fn_tokens:
-        return []  # no focus to anchor against — stay quiet
+        return []  # no anchor to gate against — stay quiet
 
     rendered: list[str] = []
     seen: set[str] = set()
@@ -1867,6 +1888,7 @@ def render_brief(
     graph_db: str = "",
     emit_confident_line: bool = True,
     body_line_cap: int = _MAX_BODY_LINE_CHARS,
+    anchor_symbols: set[str] | None = None,
 ) -> str:
     if not files:
         return "<gt-task-brief>\n</gt-task-brief>"
@@ -2111,7 +2133,7 @@ def render_brief(
     # coalescing-semantics requirement). Gated on focus-anchor overlap (correct-or-
     # quiet) + a fail-closed leakage guard (no test-name / FAIL_TO_PASS / gold-path
     # token). Generalized — pure requirement grammar, any repo/language.
-    _oblig_lines = _render_obligations_block(issue_text, files, _cap)
+    _oblig_lines = _render_obligations_block(issue_text, files, _cap, anchor_symbols)
     if _oblig_lines:
         lines.extend(_oblig_lines)
 
@@ -3967,6 +3989,25 @@ def generate_v1r_brief(
     # L1-SCOPE, so entries[0] is already the header's primary — do NOT recompute here.
     _emit_old = _loc_header == ""
 
+    # Issue-SUBJECT anchor symbols for the obligation relevance gate. The curated
+    # code identifiers the localizer already extracted from the issue (the same
+    # provenance used for file ranking + persisted to gt_issue_anchors.json). They
+    # let an obligation about a net-new feature (wasmi `coredump`) or a low-ref
+    # truncated function (pest `range`) anchor against the issue's own subject when
+    # it is absent from the top-N focus functions. Empty when anchors unavailable
+    # → the gate falls back to focus-only (byte-identical to prior behavior).
+    _oblig_anchor_syms: set[str] = set()
+    if _anchors_obj is not None:
+        _oblig_anchor_syms = {
+            s
+            for s in (
+                set(getattr(_anchors_obj, "symbols", set()) or set())
+                | set(getattr(_anchors_obj, "code_symbols", set()) or set())
+                | set(getattr(_anchors_obj, "unresolved_code_symbols", set()) or set())
+            )
+            if s
+        }
+
     def _render(body_line_cap: int = _MAX_BODY_LINE_CHARS):
         return render_brief(
             entries,
@@ -3978,6 +4019,7 @@ def generate_v1r_brief(
             graph_db=graph_db,
             emit_confident_line=_emit_old,
             body_line_cap=body_line_cap,
+            anchor_symbols=_oblig_anchor_syms,
         )
 
     _body_cap = _MAX_BODY_LINE_CHARS

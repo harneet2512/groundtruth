@@ -189,3 +189,108 @@ def test_empty_issue_quiet() -> None:
                   functions=["parse_node"], function_names=["parse_node"])
     ]
     assert _render_obligations_block("", files, _cap) == []
+
+
+# --- ISSUE-SUBJECT ANCHOR: obligations about a symbol NOT in the focus ---------
+#
+# Run-grounded gap (2 rust data points: pest-character-class-coalescing AND
+# wasmi-trap-coredumps): both rust issues carry obligation-language yet rendered
+# count=0, because the obligation's subject symbol was NOT among the top-N focus
+# functions. Two distinct sub-cases the focus-only gate could never anchor:
+#   * FEATURE-ADD — the subject is a net-new symbol (wasmi ``coredump``) that does
+#     not exist in ANY indexed function yet, so it can never be a focus token.
+#   * TRUNCATION — the subject IS a function (pest ``range``) but ranks below the
+#     top-N (MAX_FUNCTIONS_PER_FILE=3), so it is truncated out of the focus list.
+# The fix anchors obligations on the issue's OWN curated anchor symbols too.
+
+# Mirrors pest: the obligation's only content anchor ("ranges") is the issue
+# symbol ``range``, NOT the focus function (``optimize``/``new``). Verbatim has no
+# test-name / FAIL_TO_PASS / focus token — so the focus-only gate drops it.
+_FEATURE_ADD_ISSUE = (
+    "Add a CharClass variant. A coalesced result is emitted only when merging "
+    "produces fewer ranges than the original alternative count.\n"
+)
+
+
+def test_obligations_render_on_anchor_symbol_not_in_focus() -> None:
+    """GREEN: an obligation whose subject is an ISSUE ANCHOR SYMBOL (``range``)
+    that is NOT among the focus functions renders when ``anchor_symbols`` carries
+    the issue's curated code identifiers. This is the rust pest/wasmi gap."""
+    files = [
+        # focus functions deliberately exclude any token in the obligation —
+        # exactly the live pest case (focus = optimize/new, subject = range).
+        FileEntry(path="meta/src/optimizer/mod.rs", score=0.9,
+                  functions=["optimize", "new"],
+                  function_names=["optimize", "new"])
+    ]
+    out = _render_obligations_block(
+        _FEATURE_ADD_ISSUE, files, _cap, anchor_symbols={"range", "CharClass"}
+    )
+    assert out, "obligation did not render despite an issue-anchor-symbol overlap"
+    assert any("fewer ranges" in ln for ln in out), (
+        f"the issue-subject obligation was not rendered: {out!r}"
+    )
+
+
+def test_anchor_symbol_param_bites_mutation() -> None:
+    """MUTATION proof that ``anchor_symbols`` DRIVES the new render: the SAME
+    obligation + focus that renders WITH anchor_symbols renders NOTHING WITHOUT
+    it. Reverting the fix (focus-only gate) makes this RED — proving the param,
+    not some incidental focus-token overlap, is what surfaces the obligation."""
+    files = [
+        FileEntry(path="meta/src/optimizer/mod.rs", score=0.9,
+                  functions=["optimize", "new"],
+                  function_names=["optimize", "new"])
+    ]
+    with_anchor = _render_obligations_block(
+        _FEATURE_ADD_ISSUE, files, _cap, anchor_symbols={"range", "CharClass"}
+    )
+    focus_only = _render_obligations_block(_FEATURE_ADD_ISSUE, files, _cap)
+    assert with_anchor, "anchor-symbol overlap failed to render (fix is a no-op)"
+    assert not focus_only, (
+        "obligation rendered with focus-only gate — the anchor_symbols param is "
+        f"not what drives it (mutation would pass): {focus_only!r}"
+    )
+
+
+def test_anchor_symbol_gate_still_correct_or_quiet() -> None:
+    """NO-LAUNDER preservation: supplying anchor_symbols does NOT launder an
+    obligation that overlaps NEITHER the focus NOR the anchor symbols. The gate
+    still bites — an unrelated-subsystem obligation stays quiet."""
+    issue = (
+        "validate_schema must reject malformed input.\n"
+        "It should always raise a SchemaError when the version is missing.\n"
+    )
+    files = [
+        FileEntry(path="src/render.rs", score=0.9,
+                  functions=["draw_pixel"], function_names=["draw_pixel"])
+    ]
+    # anchor symbols about a DIFFERENT subsystem — no overlap with the obligation.
+    out = _render_obligations_block(
+        issue, files, _cap, anchor_symbols={"draw_pixel", "framebuffer"}
+    )
+    assert out == [], (
+        f"unrelated obligation laundered through anchor_symbols: {out!r}"
+    )
+
+
+def test_render_brief_threads_anchor_symbols() -> None:
+    """INTEGRATION: render_brief forwards anchor_symbols to the obligation block,
+    so an issue-subject obligation reaches the brief end-to-end (the live wiring
+    gap — anchors were computed but never reached the gate)."""
+    files = [
+        FileEntry(path="meta/src/optimizer/mod.rs", score=0.9,
+                  functions=["optimize", "new"],
+                  function_names=["optimize", "new"])
+    ]
+    out_with = render_brief(
+        files, issue_text=_FEATURE_ADD_ISSUE, anchor_symbols={"range", "CharClass"}
+    )
+    out_without = render_brief(files, issue_text=_FEATURE_ADD_ISSUE)
+    assert "<gt-obligations>" in out_with, (
+        f"render_brief did not thread anchor_symbols into the block: {out_with!r}"
+    )
+    assert "<gt-obligations>" not in out_without, (
+        "obligation rendered without anchor_symbols — focus-only path changed "
+        f"(unexpected regression): {out_without!r}"
+    )
