@@ -163,22 +163,22 @@ RUN mkdir -p /opt/gt/jdtls /opt/gt/jre \
 ARG E5_BASE=https://github.com/harneet2512/groundtruth/releases/download/pipeline-assets-v1
 ARG HF_CDN=https://huggingface.co/Alibaba-NLP/gte-modernbert-base/resolve/main
 RUN mkdir -p /opt/gt/models/gte-modernbert-base /opt/gt/models/e5-small-v2 \
-    && ( curl -fsSL --retry 3 --retry-delay 5 -o /opt/gt/models/gte-modernbert-base/model.onnx \
+    && ( curl -fsSL --retry 8 --retry-max-time 300 -o /opt/gt/models/gte-modernbert-base/model.onnx \
            "${HF_CDN}/onnx/model_int8.onnx" \
-         || curl -fsSL --retry 3 --retry-delay 5 -o /opt/gt/models/gte-modernbert-base/model.onnx \
+         || curl -fsSL --retry 8 --retry-max-time 300 -o /opt/gt/models/gte-modernbert-base/model.onnx \
               "${HF_CDN}/onnx/model_quantized.onnx" \
-         || curl -fsSL --retry 3 --retry-delay 5 -o /opt/gt/models/gte-modernbert-base/model.onnx \
+         || curl -fsSL --retry 8 --retry-max-time 300 -o /opt/gt/models/gte-modernbert-base/model.onnx \
               "${HF_CDN}/onnx/model_uint8.onnx" \
-         || curl -fsSL --retry 3 --retry-delay 5 -o /opt/gt/models/gte-modernbert-base/model.onnx \
+         || curl -fsSL --retry 8 --retry-max-time 300 -o /opt/gt/models/gte-modernbert-base/model.onnx \
               "${HF_CDN}/onnx/model.onnx" ) \
     && test -s /opt/gt/models/gte-modernbert-base/model.onnx \
     && echo "OK gte-modernbert-base ONNX ($(du -sh /opt/gt/models/gte-modernbert-base/model.onnx | cut -f1))" \
-    && curl -fsSL --retry 3 --retry-delay 5 -o /opt/gt/models/gte-modernbert-base/tokenizer.json \
+    && curl -fsSL --retry 8 --retry-max-time 300 -o /opt/gt/models/gte-modernbert-base/tokenizer.json \
          "${HF_CDN}/tokenizer.json" \
     && test -s /opt/gt/models/gte-modernbert-base/tokenizer.json \
     && echo "OK gte-modernbert-base tokenizer"
-RUN curl -fsSL "${E5_BASE}/model.onnx"     -o /opt/gt/models/e5-small-v2/model.onnx \
-    && curl -fsSL "${E5_BASE}/tokenizer.json" -o /opt/gt/models/e5-small-v2/tokenizer.json
+RUN curl -fsSL --retry 8 --retry-max-time 300 "${E5_BASE}/model.onnx"     -o /opt/gt/models/e5-small-v2/model.onnx \
+    && curl -fsSL --retry 8 --retry-max-time 300 "${E5_BASE}/tokenizer.json" -o /opt/gt/models/e5-small-v2/tokenizer.json
 
 # (5) the GT pipeline code + the substrate launcher
 # Cache-bust: GT_COMMIT_SHA changes every commit, forcing Docker to re-COPY
