@@ -972,7 +972,7 @@ jobs:
               -v "/tmp/gt/src:/work:ro" -v "/tmp/gt:/gt_artifacts" \
               -v "/tmp/issue.txt:/work_issue.txt:ro" \
               -v "/tmp/gt/deps/gomodcache:/tmp/gomodcache" \
-              -v "/tmp/gt/deps/cargo:/root/.cargo:ro" \
+              -v "/tmp/gt/deps/cargo:/root/.cargo" \
               -v "/tmp/gt/deps/rustup:/root/.rustup" \
               -e GT_PROOF_MODE=1 -e GT_CONTAINERIZED=1 -e GT_RUNTIME_STRATEGY=unified_substrate \
               -e GT_REQUIRE_FTS5=1 -e GT_REQUIRE_EMBEDDER=1 -e GT_FORCE_ONNX_EMBEDDER=1 \
@@ -980,6 +980,7 @@ jobs:
               -e GT_LSP_READY_BUDGET_S_OVERRIDE="${GT_LSP_READY_BUDGET_S_OVERRIDE:-}" \
               -e GOFLAGS=-mod=mod -e GOPROXY=off -e GONOSUMCHECK=1 -e GOSUMDB=off \
               -e CARGO_HOME=/root/.cargo \
+              -e CARGO_TARGET_DIR=/tmp/cargo-target -e CARGO_NET_OFFLINE=true \
               -e RUSTUP_HOME=/root/.rustup -e RUSTUP_TOOLCHAIN="$ACTIVE_RUST_TOOLCHAIN" \
               -e PATH="/root/.rustup/toolchains/$ACTIVE_RUST_TOOLCHAIN/bin:/opt/gt/bin:/opt/gt/node/bin:/opt/gt/python/bin:/opt/gt/jre/bin:/opt/gt/go/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
               -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 -e HF_DATASETS_OFFLINE=1 \
