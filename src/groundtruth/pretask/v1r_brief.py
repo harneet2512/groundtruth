@@ -1958,7 +1958,11 @@ def render_brief(
         # also drop test files — the agent is told not to edit tests, so a test path
         # rendered as "Related files to inspect" is noise (BUG-A surfaced-path leak).
         _deliverable_scope = [
-            f for f in scope_files if not _is_vendored_path(f) and not _is_test_path(f)
+            f
+            for f in scope_files
+            if not _is_vendored_path(f)
+            and not _is_test_path(f)
+            and not _is_test_or_demo(f)
         ]
         scope_names = [os.path.basename(f) for f in _deliverable_scope[:3]]
         if scope_names and scope_confidence == "high":
@@ -1977,7 +1981,17 @@ def render_brief(
             chain_conf = getattr(chain, "confidence", 0.0)
             # drop test files from the displayed chain — a test in "check ALL" is
             # noise (the agent must not edit tests); emit only if >=2 source files remain.
-            _chain_src = [f for f in chain_files if not _is_test_path(f)]
+            # Honor the same deliverable-path filter as Signal 1 + the localization
+            # entries (line ~3534): a vendored/minified lib (qunit.js, jquery.dataTables.js)
+            # or a demo/example path in the "check ALL" chain is the worst noise — it tells
+            # the agent to inspect a third-party file. Drop vendored + demo + test alike.
+            _chain_src = [
+                f
+                for f in chain_files
+                if not _is_test_path(f)
+                and not _is_vendored_path(f)
+                and not _is_test_or_demo(f)
+            ]
             if len(_chain_src) >= 2 and chain_conf >= 0.5:
                 chain_basenames = [os.path.basename(f) for f in _chain_src]
                 # D1: cap the basename chain (many "→"-joined files run long). The

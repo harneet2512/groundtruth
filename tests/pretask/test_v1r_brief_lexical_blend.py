@@ -326,3 +326,55 @@ def test_vendored_candidate_dropped_from_brief_entries(
     assert "src/common.py" in result.brief_text, (
         "the real source file was wrongly dropped (over-reach)"
     )
+
+
+# --- ROOT CAUSE C (scope chain): vendored/demo files never enter "check ALL" ----
+
+def test_vendored_file_dropped_from_scope_chain(tmp_path: Path) -> None:
+    """A pure-vendored-dir file (``third_party/``) connected into a scope chain must
+    NOT be rendered in the 'Scope chain (graph-connected, check ALL)' directive — the
+    worst place for noise, since it tells the agent to inspect a third-party file. The
+    chain must honor the SAME deliverable-path predicates the rest of the brief uses.
+
+    The biting path is ``third_party/`` specifically: ``is_test_path`` (the chain's only
+    pre-fix filter) does NOT catch it, but ``is_vendored_path`` does — so before the fix
+    it leaked into 'check ALL', after the fix it is dropped. (node_modules/examples were
+    already caught by is_test_path; third_party is the class this fix actually closes.)
+
+    RED before the fix (chain filtered is_test_path only → third_party rendered);
+    GREEN after it also drops is_vendored_path + is_test_or_demo.
+    """
+    import types
+
+    db = str(tmp_path / "chain.db")
+    conn = sqlite3.connect(db)
+    conn.executescript(_BLEND_SCHEMA)
+    conn.executemany(
+        "INSERT INTO nodes (id, label, name, file_path) VALUES (?,?,?,?)",
+        [(1, "Function", "f", "src/a.js"), (2, "Function", "g", "src/b.js")],
+    )
+    conn.commit()
+    conn.close()
+    files = [FileEntry(path="src/a.js", score=0.99, function_names=["f"])]
+    # third_party/ FIRST so it renders visibly (not truncated) when the filter misses it
+    chain = types.SimpleNamespace(
+        files=[
+            "third_party/jquery/qunit.js",
+            "src/a.js",
+            "src/b.js",
+        ],
+        description="a.js -> b.js",
+        confidence=0.9,
+    )
+    out = render_brief(files, graph_db=db, scope_chains=[chain])
+    chain_lines = [ln for ln in out.splitlines() if "Scope chain" in ln]
+    assert chain_lines, f"scope chain not rendered at all: {out!r}"
+    chain_line = chain_lines[0]
+    # the two real source files survive (>=2 → chain still emits)
+    assert "a.js" in chain_line and "b.js" in chain_line, (
+        f"real source files dropped from the chain: {chain_line!r}"
+    )
+    # the third_party vendored file is gone (correct-or-quiet: never inspect third-party)
+    assert "qunit.js" not in chain_line, (
+        f"third_party vendored file leaked into 'check ALL': {chain_line!r}"
+    )
