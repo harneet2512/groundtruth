@@ -314,10 +314,22 @@ def _resolved_from_log(text: str) -> bool | None:
 
 
 def _from_trajectory(task: str, results_dir: str) -> dict:
-    """The AGENT'S side — derived from output.jsonl history (the only delivery truth)."""
+    """The AGENT'S side — derived from the agent's OWN trajectory (the only delivery
+    truth). Two official pipelines write two formats: OpenHands writes ``output.jsonl``
+    (a JSON-lines history); DeepSWE/pier + mini-swe-agent writes
+    ``mini-swe-agent.trajectory.json``. When ``output.jsonl`` is absent (the LIVE
+    DeepSWE path) this falls back to ``_find_miniswe_trajectory`` and populates the
+    SAME output keys, so the function returns REAL agent metrics on either pipeline
+    instead of all-zeros off the OH path. ``trajectory_source`` records which one was
+    used so every downstream record (and the companion .md) is self-describing.
+
+    Note: ``build()`` performs an equivalent miniswe merge guarded on
+    ``not action_count``; because this function now populates ``action_count`` on the
+    DeepSWE path, that merge short-circuits — no double counting."""
     oj = _find_output_jsonl(task, results_dir)
     out = {
         "output_jsonl": oj or "",
+        "trajectory_source": "none",
         "action_count": 0,
         "edits": 0,
         "first_edit_action": 0,
@@ -330,7 +342,29 @@ def _from_trajectory(task: str, results_dir: str) -> dict:
         "has_patch": False,
     }
     if not oj or not os.path.exists(oj):
+        # No OpenHands output.jsonl — on the DeepSWE/pier path the truth lives in
+        # mini-swe-agent.trajectory.json. Parse it and map onto the SAME keys so the
+        # function returns real metrics (steps / edits / first_edit / brief delivery /
+        # GT observation chars) instead of zeros.
+        mini = _from_miniswe_trajectory(task, results_dir)
+        if mini.get("found"):
+            out["trajectory_source"] = "miniswe_trajectory"
+            out["miniswe_trajectory_path"] = mini.get("trajectory_path", "")
+            out["action_count"] = mini["action_count"]
+            out["assistant_steps"] = mini.get("assistant_steps", mini["action_count"])
+            out["edits"] = mini["edits"]
+            out["first_edit_action"] = mini["first_edit_action"]
+            out["has_patch"] = mini["has_patch"]
+            out["resolved"] = mini["resolved"]
+            out["gt_brief_delivered"] = mini["gt_brief_delivered"]
+            out["gt_evidence_delivered"] = mini["gt_evidence_delivered"]
+            out["gt_graph_map_delivered"] = mini["gt_graph_map_delivered"]
+            out["gt_nudge_delivered"] = mini["gt_nudge_delivered"]
+            out["gt_understand_calls"] = mini["gt_understand_calls"]
+            out["gt_verify_calls"] = mini["gt_verify_calls"]
+            out["gt_observation_chars_total"] = mini["gt_observation_chars_total"]
         return out
+    out["trajectory_source"] = "output_jsonl"
     try:
         d = json.loads(open(oj, encoding="utf-8").readline())
     except (OSError, json.JSONDecodeError, StopIteration):
@@ -1337,6 +1371,10 @@ def build(task: str, results_dir: str, log_path: str = "",
         "inputs_present": {
             "gt_run_summary": summ_present,
             "output_jsonl": bool(oj and os.path.exists(oj)),
+            "miniswe_trajectory": bool(mini.get("found")),
+            # which trajectory actually populated the agent-side metrics: the OH
+            # output.jsonl, the DeepSWE/pier mini-swe-agent trajectory, or neither.
+            "trajectory_source": traj.get("trajectory_source", "none"),
             "run_log": bool(log_path and os.path.exists(log_path)),
             "graph_db": bool(db_resolved),
             "cost_log": bool(cost["llm_calls"]),
@@ -1389,7 +1427,7 @@ def _write_markdown(deep: dict, md_path: str) -> None:
     rows = lambda pairs: "\n".join(f"| {k} | {v} |" for k, v in pairs)
     md = f"""# DeepSWE deep metrics — `{deep.get('task_id')}`
 
-- pipeline: `{deep.get('pipeline')}`  ·  model: `{eff.get('model') or 'n/a'}`
+- pipeline: `{deep.get('pipeline')}`  ·  model: `{eff.get('model') or 'n/a'}`  ·  trajectory source: `{(deep.get('inputs_present') or {}).get('trajectory_source', 'none')}`
 - branch `{deep.get('branch')}` @ `{(deep.get('git_commit') or '')[:12]}`
 - **outcome: {deep.get('outcome')}**  ·  resolved={deep.get('resolved')}  ·  has_patch={deep.get('has_patch')}
 
