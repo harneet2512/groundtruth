@@ -613,6 +613,8 @@ MAX_CALLERS_PER_FUNC = 2
 from groundtruth.delivery.path_policy import (  # noqa: E402
     is_vendored_path as _is_vendored_path,
     is_test_or_demo as _is_test_or_demo,
+    is_test_tooling as _is_test_tooling,
+    test_tooling_roots as _test_tooling_roots,
 )
 from groundtruth.delivery.name_policy import (  # noqa: E402
     is_builtin_shadow_name as _is_builtin_shadow_name,
@@ -2402,6 +2404,19 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
     # score peak (e.g. weasyprint-2300 block.py at #4) inside the shown options —
     # which an above-median score cut dropped at the boundary. Falls back to the top
     # candidates when none are witnessed. [3..6] is a token-budget rail. ----
+    # Test-tooling is NEVER an edit candidate: a vendored / imported-only-by-tests file
+    # (testify/spew/...) shown in <gt-localization> misdirects the agent to edit vendored
+    # code (witnessed: expr go offered internal/testify/assert as candidate #4). The
+    # run_v74 focus-set already hard-filters these; the header candidate list did not.
+    # test_tooling_roots is graph-derived (imported only by tests, transitive fixpoint) —
+    # language-agnostic, no library names. Correct-or-quiet: keep the original set if the
+    # filter would empty it. Same GT_TEST_TOOLING_DEMOTE gate as run_v74 (default ON).
+    if os.environ.get("GT_TEST_TOOLING_DEMOTE", "1") != "0":
+        _tt_roots = _test_tooling_roots(graph_db)
+        if _tt_roots:
+            _kept = [c for c in cands if not _is_test_tooling(c.file_path, _tt_roots)]
+            if _kept:
+                cands = _kept
     _evidenced = sum(1 for c in cands if c.has_verified_witness) or 3
     K = min(max(3, _evidenced), 6, len(cands))
     shown = cands[:K]
