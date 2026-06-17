@@ -173,3 +173,7 @@ gha_latest_artifacts/
 # build artifact — never commit (rebuilt via golang container)
 gt-index/gt-index-linux
 gt-index/gt-index*.exe
+
+# internal audit + run artifacts — never publish
+.claude/reports/
+.claude/CURRENT_VALIDATION_RUN.json
