@@ -2121,6 +2121,12 @@ def _edit_target_callee_contracts(con, file_path: str, func_names: list[str],
                 # callee names are never [CALLEE] facts.
                 if _is_delivery_excluded(callee_file or "", repo_root):
                     continue
+                # Class-A residual (2026-06-17): _is_delivery_excluded is vendored/
+                # minified only — route the callee through the path chokepoint so a
+                # test/demo callee (examples/ docs/ benches/) never renders as a
+                # [CALLEE] fact (sibling of the _caller_contract [CALLERS] gap).
+                if _is_test_or_demo_path(callee_file or ""):
+                    continue
                 if _is_builtin_shadow_name(callee_name or ""):
                     continue
                 # 2026-06-10 snippet attestation (parity with the witness-callee
