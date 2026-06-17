@@ -246,6 +246,62 @@ def test_b2_denominator_is_verified_component_not_global_union(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# B2-tripwire — exercise the REAL _verified_scope_component (NOT monkeypatched).
+#
+# The B2 test above stubs out _verified_scope_component, so it pins ONLY that
+# _scope_completeness_block CONSUMES the producer's N. It does NOT guard the
+# producer itself — the BFS over the FACTS-ONLY _query_scope and the
+# `(component & scope_union)` intersection that is the actual Bug #2 fix. Proven
+# blind spot: regressing the real producer to `return scope_union | set(edited)`
+# (the pre-fix grab-bag) leaves all monkeypatched tests GREEN. This drives the
+# REAL function against the REAL graph so that regression goes RED.
+# --------------------------------------------------------------------------- #
+def test_b2_real_component_excludes_unreachable_and_name_match(scope_db):
+    """The REAL _verified_scope_component, over the real graph.db:
+      * KEEPS the edited file + its FACT (import) neighbour (graph-reachable),
+      * DROPS accumulated-scope files NOT reachable from the edit (grab-bag
+        pollution — the `& scope_union` BFS would re-add only reachable ones,
+        and these are unreachable), and
+      * NEVER admits the name_match neighbour (FACTS-ONLY _query_scope)."""
+    g._consensus_scope.clear()
+    g._oracle_edited_rels.clear()
+    # Accumulated scope = the edit + its real fact neighbour + the name_match
+    # guess file + THREE unrelated viewed files with NO edge from focus.py.
+    g._consensus_scope.update({
+        "focus.py", "fact_neighbor.py", "guess_neighbor.py",
+        "pollution_a.py", "pollution_b.py", "pollution_c.py",
+    })
+    edited = {"focus.py"}
+
+    comp = g._verified_scope_component(edited)
+
+    # edited file is always retained.
+    assert "focus.py" in comp, comp
+    # FACT (import) neighbour is graph-reachable -> in the component.
+    assert "fact_neighbor.py" in comp, (
+        "verified import neighbour missing from the real component: %r" % comp
+    )
+    # name_match neighbour is NOT a fact -> _query_scope drops it -> not reachable
+    # -> excluded even though it sits in the accumulated scope_union.
+    assert "guess_neighbor.py" not in comp, (
+        "name_match guess laundered into the verified component: %r" % comp
+    )
+    # The grab-bag pollution (no edge from focus.py) must NOT inflate N, even
+    # though every one of these is in _consensus_scope. If the producer regresses
+    # to `scope_union | edited`, these reappear and this assertion goes RED.
+    for p in ("pollution_a.py", "pollution_b.py", "pollution_c.py"):
+        assert p not in comp, (
+            "unreachable accumulated-scope file %r inflated the verified "
+            "component (denominator regressed to the global grab-bag): %r"
+            % (p, comp)
+        )
+    # Tight cardinality pin: exactly the edit + its one fact neighbour.
+    assert comp == {"focus.py", "fact_neighbor.py"}, (
+        "component is not the FACTS-ONLY reachable set of the edit: %r" % comp
+    )
+
+
+# --------------------------------------------------------------------------- #
 # B5 — l3.cochange latch is consumed only on a real DELIVERED outcome.
 # --------------------------------------------------------------------------- #
 def test_b5_cochange_latch_survives_dedup_collision(monkeypatch):
