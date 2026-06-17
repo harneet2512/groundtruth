@@ -85,7 +85,7 @@ _TEST_DIR_SEGMENTS: frozenset[str] = frozenset({
 _DEMO_NONSOURCE_DIR_SEGMENTS: frozenset[str] = frozenset({
     "examples", "example", "demo", "demos", "sample", "samples", "fixtures",
     "fixture", "docs", "doc", "docs_src", "doc_src", "documentation",
-    "tutorial", "tutorials", "benchmark", "benchmarks", "vendor",
+    "tutorial", "tutorials", "benchmark", "benchmarks", "benches", "bench", "vendor",
     "node_modules", "dist", "build",
 })
 
