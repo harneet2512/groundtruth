@@ -298,11 +298,64 @@ class V1RBriefResult:
     sem_components: list[float] = field(default_factory=list)  # components['sem'] over rendered candidates
 
 
+def _provenance_order_clause(
+    code_syms: list[str],
+    nl_terms: list[str],
+    *,
+    nl_hoist: bool,
+) -> tuple[str, list]:
+    """Build the PROVENANCE-AWARE ``ORDER BY`` for the per-file function ranker.
+
+    The lexical-false-positive blend (2026-06-17). Two anchor provenances rank
+    differently:
+
+    * ``code_syms`` — names the reporter marked as CODE (backtick/fence,
+      ``IssueAnchors.code_symbols``). HIGH confidence: a match HOISTS to the
+      front (tier 0), so a low-ref edit target (``set_fields``, ref=0) survives
+      the LIMIT — the case the anchor-first sort was built for.
+    * ``nl_terms`` — the raw NL word bag. When ``nl_hoist`` is False (the caller
+      separated provenance, so these are KNOWN to be prose-only) a name that
+      coincidentally matches a word (``start``, ``template``, ``check``) must NOT
+      out-rank a structurally-central function — it is only a TIEBREAK *under*
+      ``ref_count DESC``. When ``nl_hoist`` is True (LEGACY callers that pass no
+      ``code_symbols`` channel, so provenance is unknown) NL terms keep the old
+      absolute hoist — back-compat for direct callers and the ``set_fields``
+      single-channel guarantee.
+
+    Returns ``(order_by_sql, params)``. The caller binds ``file_path`` FIRST,
+    then these params, then any trailing LIMIT param.
+
+    Research: Reformulate-Retrieve-Localize (arXiv:2512.07022, 2025) —
+    distinguish code mentions from prose; raw keywords are noisy queries.
+    """
+    parts: list[str] = []
+    params: list = []
+    # Code-symbol hoist (always tier 0). In legacy mode the NL hoist joins it at
+    # the SAME tier so a single-channel issue-term match still floats to the front.
+    hoist_terms = list(code_syms)
+    if nl_hoist:
+        hoist_terms = sorted(set(hoist_terms) | set(nl_terms))
+    if hoist_terms:
+        _ph = ",".join("?" * len(hoist_terms))
+        parts.append(f"CASE WHEN LOWER(n.name) IN ({_ph}) THEN 0 ELSE 1 END")
+        params.extend(hoist_terms)
+    # Degree dominates everything below the hoist tier.
+    parts.append("ref_count DESC")
+    if not nl_hoist and nl_terms:
+        # Provenance-known mode: prose-word match is a tiebreak UNDER degree only.
+        _ph = ",".join("?" * len(nl_terms))
+        parts.append(f"CASE WHEN LOWER(n.name) IN ({_ph}) THEN 0 ELSE 1 END")
+        params.extend(nl_terms)
+    parts.append("n.name")
+    return ", ".join(parts), params
+
+
 def _top_functions(
     graph_db: str,
     file_path: str,
     limit: int = MAX_FUNCTIONS_PER_FILE,
     issue_terms: set[str] | None = None,
+    code_symbols: set[str] | None = None,
 ) -> list[str]:
     try:
         conn = sqlite3.connect(graph_db)
@@ -310,15 +363,21 @@ def _top_functions(
         # BUG-3: a freshly-added gold function has 0 callers and (often) a name that
         # is not a verbatim issue token, so a pure ``ref_count DESC`` order + LIMIT
         # cuts it before it can surface — Contract/Spec/(funcs) then describe the
-        # WRONG (most-central) function. Union the issue-anchor symbol set into the
-        # candidate POOL ahead of the ref-count cap: a ``CASE WHEN LOWER(n.name) IN
-        # (...) THEN 0`` sort floats an anchor-named-but-zero-caller function to the
-        # front so it SURVIVES the cap, exactly as _top_function_names already does
-        # (SWERank ICLR 2025: issue-named entities are the edit target). No-op when
-        # no issue_terms are passed (existing positional callers unaffected).
+        # WRONG (most-central) function. The PROVENANCE-AWARE order (lexical-false-
+        # positive blend, 2026-06-17) hoists a CODE-SYMBOL-anchored function (e.g.
+        # set_fields, ref=0) ahead of the ref-count cap so it survives, while a bare
+        # NL-WORD match (start/template/check) is only a tiebreak UNDER degree — so a
+        # ref=1 word-coincidence never beats a ref=32 central function. No-op when no
+        # terms are passed (existing positional callers unaffected).
+        # nl_hoist: LEGACY callers pass no code_symbols channel (None) -> provenance
+        # is unknown, so an issue_terms match keeps the old absolute hoist (the
+        # set_fields single-channel guarantee). A caller that DID separate provenance
+        # passes code_symbols (even an empty set) -> NL match is demoted to a tiebreak.
+        _nl_hoist = code_symbols is None
+        _syms = sorted({t.lower() for t in (code_symbols or set()) if t and len(t) > 2})
         _terms = sorted({t.lower() for t in (issue_terms or set()) if t and len(t) > 2})
-        if _terms:
-            _ph = ",".join("?" * len(_terms))
+        if _syms or _terms:
+            _order, _oparams = _provenance_order_clause(_syms, _terms, nl_hoist=_nl_hoist)
             rows = conn.execute(
                 f"""
                 SELECT n.name, n.signature, COUNT(e.id) AS ref_count
@@ -328,11 +387,10 @@ def _top_functions(
                   AND n.label IN ('Function', 'Method', 'Class', 'ImplBlock')
                   AND n.is_test = 0
                 GROUP BY n.id
-                ORDER BY CASE WHEN LOWER(n.name) IN ({_ph}) THEN 0 ELSE 1 END,
-                         ref_count DESC, n.name
+                ORDER BY {_order}
                 LIMIT ?
                 """,
-                (file_path, *_terms, max(limit * 8, 24)),
+                (file_path, *_oparams, max(limit * 8, 24)),
             ).fetchall()
         else:
             rows = conn.execute(
@@ -383,24 +441,33 @@ def _top_function_names(
     file_path: str,
     limit: int = MAX_FUNCTIONS_PER_FILE,
     issue_terms: set[str] | None = None,
+    code_symbols: set[str] | None = None,
 ) -> list[str]:
     """Return raw function NAMES (not signatures) for contract lookup.
 
-    Prioritizes functions whose names appear in issue_terms (bug-relevant),
-    then falls back to most-referenced functions.
+    Ranking is PROVENANCE-AWARE (lexical-false-positive blend, 2026-06-17), via
+    ``_provenance_order_clause``:
+
+    * ``code_symbols`` (backtick/fence provenance, ``IssueAnchors.code_symbols``)
+      — a match HOISTS to the front so a low-ref edit target (e.g. ``set_fields``,
+      ref=0) SURVIVES the LIMIT, exactly the case the anchor-first sort was built
+      for (SWERank ICLR 2025: issue-named entities are the edit target).
+    * ``issue_terms`` (raw NL word bag) — a coincidental prose-word match
+      (``start``, ``template``, ``check``) is only a TIEBREAK UNDER ``ref_count
+      DESC``; it never out-ranks a structurally-central function. Without this
+      split, ``span.rs::start`` (ref=1) beat ``new`` (ref=32) — the lexical
+      false-positive that led the brief on rust/py/js.
     """
     try:
         conn = sqlite3.connect(graph_db)
         conf_clause = _edge_conf_clause(graph_db)
-        # Issue-matched function names sort to the FRONT (CASE ... THEN 0) so a
-        # low-ref-count issue function (e.g. set_fields) SURVIVES the LIMIT. The old
-        # query ordered by ref_count THEN issue-matched in Python, so an issue
-        # function outside the top-20-by-references was dropped before the match
-        # could see it — the same large-file cut that hid the L3b contract (live
-        # beets-5495). SWERank ICLR 2025: issue-named entities are the edit target.
+        # nl_hoist: see _top_functions — None code_symbols channel = legacy absolute
+        # hoist (set_fields single-channel guarantee); a provided set = NL is a tiebreak.
+        _nl_hoist = code_symbols is None
+        _syms = sorted({t.lower() for t in (code_symbols or set()) if t and len(t) > 2})
         _terms = sorted({t.lower() for t in (issue_terms or set()) if t and len(t) > 2})
-        if _terms:
-            _ph = ",".join("?" * len(_terms))
+        if _syms or _terms:
+            _order, _oparams = _provenance_order_clause(_syms, _terms, nl_hoist=_nl_hoist)
             rows = conn.execute(
                 f"""
                 SELECT n.name, COUNT(e.id) AS ref_count
@@ -408,10 +475,10 @@ def _top_function_names(
                 LEFT JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' {conf_clause}
                 WHERE n.file_path = ? AND n.label IN ('Function', 'Method', 'Class', 'ImplBlock') AND n.is_test = 0
                 GROUP BY n.id
-                ORDER BY CASE WHEN LOWER(n.name) IN ({_ph}) THEN 0 ELSE 1 END, ref_count DESC, n.name
+                ORDER BY {_order}
                 LIMIT 20
                 """,
-                (file_path, *_terms),
+                (file_path, *_oparams),
             ).fetchall()
         else:
             rows = conn.execute(
@@ -1534,16 +1601,48 @@ def _with_graph_map(
     """
     if not graph_db or not files:
         return brief
+    try:
+        from groundtruth.pretask.curation_map import build_function_map, render_map
+    except Exception:
+        return brief
+
+    # FOCUS SELECTION (root cause B, 2026-06-17): the leading <gt-graph-map> must
+    # honor the LOCALIZER FILE RANK. The old loop took ONLY function_names[0] per
+    # file, so when the #1 file's chosen focus ABSTAINED (empty fact-map, e.g. a
+    # freshly-added 0-caller gold or a function with no confident edges),
+    # render_map silently skipped it and rendered a LOWER-ranked file instead —
+    # the lead ceded, the gold's map block erased. Fix: for each file try its
+    # candidate focus functions IN RANK ORDER and keep the FIRST that yields a
+    # visible block, so the #1 file's lead is preserved via its NEXT structurally-
+    # central function before any lower file can take the lead. Per file we still
+    # contribute at most ONE visible block (compact, correct-or-quiet).
+    _PER_FILE_FOCUS_TRIES = 3
+
+    def _first_visible_focus(_path: str, _fns: list[str]) -> tuple[str, str] | None:
+        for _fn in [x for x in (_fns or []) if x][:_PER_FILE_FOCUS_TRIES]:
+            try:
+                _m = build_function_map(graph_db, [(_path, _fn)])
+            except Exception:
+                return None
+            if _m and _m[0].has_visible:
+                return (_path, _fn)
+        return None
+
     focus: list[tuple[str, str]] = []
     for f in files[:3]:
-        for fn in (f.function_names or [])[:1]:
-            if fn:
-                focus.append((f.path, fn))
+        _hit = _first_visible_focus(f.path, f.function_names or [])
+        if _hit is not None:
+            focus.append(_hit)
+        elif f.function_names:
+            # No visible focus in this file — keep the rank-0 function so a file
+            # with edges below the visibility bar is still REPRESENTED in rank
+            # order (render_map will drop it if truly empty; this never reorders).
+            _f0 = next((x for x in f.function_names if x), "")
+            if _f0:
+                focus.append((f.path, _f0))
     if not focus:
         return brief
     try:
-        from groundtruth.pretask.curation_map import build_function_map, render_map
-
         block = render_map(build_function_map(graph_db, focus))
     except Exception:
         return brief
@@ -2417,6 +2516,21 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
             _kept = [c for c in cands if not _is_test_tooling(c.file_path, _tt_roots)]
             if _kept:
                 cands = _kept
+    # VENDORED / DEMO demote (root cause C, 2026-06-17): a vendored / demo copy
+    # (benchmark/libs/mashumaro/common.py, examples/**/qunit.js, third_party/…,
+    # site-packages/…) shown in <gt-localization> misdirects the agent to edit
+    # vendored code — the same harm the test-tooling filter above prevents, on the
+    # path-class axis the graph-derived tooling roots miss. Reuses the single
+    # canonical predicates (is_test_or_demo: benchmark/examples/vendor segments;
+    # is_vendored_path: third_party/node_modules/site-packages dir markers) — no new
+    # ad-hoc list. Correct-or-quiet: keep the original set if the filter would empty
+    # it (a vendored-only candidate set still gets a region-level option list).
+    _kept = [
+        c for c in cands
+        if not _is_test_or_demo(c.file_path) and not _is_vendored_path(c.file_path)
+    ]
+    if _kept:
+        cands = _kept
     _evidenced = sum(1 for c in cands if c.has_verified_witness) or 3
     K = min(max(3, _evidenced), 6, len(cands))
     shown = cands[:K]
@@ -3231,6 +3345,22 @@ def generate_v1r_brief(
                 conn.close()
 
     _words = set(w.lower() for w in _re.findall(r"[A-Za-z_]\w{2,}", issue_text) if len(w) > 3)
+    # CODE-SYMBOL provenance (backtick/fence-marked, IssueAnchors.code_symbols +
+    # unresolved_code_symbols). The per-file function rankers (_top_functions /
+    # _top_function_names) HOIST a code-symbol-anchored function but only TIEBREAK
+    # on an NL word from _words — so a coincidental prose-word match (start /
+    # template / check) never out-ranks a structurally-central function. Empty when
+    # anchors are unavailable -> rankers fall back to NL-tiebreak-under-degree.
+    _code_syms: set[str] = set()
+    if _anchors_obj is not None:
+        _code_syms = {
+            s.lower()
+            for s in (
+                set(getattr(_anchors_obj, "code_symbols", set()) or set())
+                | set(getattr(_anchors_obj, "unresolved_code_symbols", set()) or set())
+            )
+            if s
+        }
 
     # Bug 8 fix: issue-keyword boost — re-rank candidates by path/function overlap
     # with issue text. Structural ranking alone puts the correct file at #3/#4 when
@@ -3387,11 +3517,30 @@ def generate_v1r_brief(
                 continue
             _seen.add(_k); _dedup.append(_r)
         top_records = _dedup
+    # VENDORED / DEMO demote (root cause C, 2026-06-17) — FAIL-CLOSED chokepoint.
+    # The upstream candidate filter drops test/demo paths, but the LATER injection
+    # paths (path-rescue, _exact_issue_named_files front/back promotion, hub
+    # re-sort) re-admit candidates WITHOUT re-checking the path class — so a
+    # vendored copy (benchmark/libs/mashumaro/common.py, examples/**/qunit.js,
+    # third_party/…) leaked into the brief's edit-target list (py+js §4). Drop them
+    # here, after EVERY injection, so no path can re-admit them. Reuses the single
+    # canonical predicates (is_test_or_demo catches benchmark/examples/vendor
+    # segments; is_vendored_path catches third_party/node_modules/site-packages dir
+    # markers) — no new ad-hoc list. Correct-or-quiet: if this would empty the set,
+    # keep the pre-filter records (never collapse to a blank brief), mirroring the
+    # upstream candidate-filter fallback.
+    _kept = [
+        r for r in top_records
+        if not _is_test_or_demo(r.get("path", "") or "")
+        and not _is_vendored_path(r.get("path", "") or "")
+    ]
+    if _kept:
+        top_records = _kept
     entries: list[FileEntry] = []
     for rec in top_records:
         path = str(rec.get("path", ""))
         score = float(rec.get("score", 0.0))
-        funcs = _top_functions(graph_db, path, issue_terms=_words)
+        funcs = _top_functions(graph_db, path, issue_terms=_words, code_symbols=_code_syms)
         tests = _test_files_for(graph_db, path)
         neighbors = _issue_relevant_neighbors(
             graph_db,
@@ -3399,7 +3548,7 @@ def generate_v1r_brief(
             repo_root,
             _words,
         )
-        func_names = _top_function_names(graph_db, path, issue_terms=_words)
+        func_names = _top_function_names(graph_db, path, issue_terms=_words, code_symbols=_code_syms)
         contract = _caller_contract_for_file(graph_db, path, repo_root, func_names)
         contract_props = contract_line(graph_db, path, func_names)
         siblings = _sibling_context(graph_db, path, func_names)
