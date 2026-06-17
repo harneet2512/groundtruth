@@ -1224,9 +1224,19 @@ def _co_change_from_table(graph_db: str, file_path: str, limit: int = 3) -> list
             "WHERE other <> ? AND other NOT LIKE '%.md' AND other NOT LIKE '%.rst' "
             "  AND other NOT LIKE '%.txt' AND other NOT LIKE '%.yml' AND other NOT LIKE '%.yaml' "
             "ORDER BY count DESC LIMIT ?",
-            (_norm, _norm, _norm, _norm, limit),
+            (_norm, _norm, _norm, _norm, max(limit * 5, 30)),
         ).fetchall()
-        return [r[0] for r in rows if r[0]]
+        # BUG-A / Class-A residual (2026-06-17): the SQL above excludes doc/config
+        # by EXTENSION but never the test/demo/vendored DIRS (whole-segment, not an
+        # extension) — a test co-change leaked into <gt-cochange>. Route through the
+        # canonical deliverable chokepoint (is_deliverable = not test_or_demo/vendored),
+        # fetching extra above so the filter does not starve real source co-changes
+        # below the limit (the B6 lesson). This is the cochange path-emitter the
+        # Class-A generalization missed.
+        return [
+            r[0] for r in rows
+            if r[0] and not _is_test_or_demo(r[0]) and not _is_vendored_path(r[0])
+        ][:limit]
     except sqlite3.Error:
         return []
     finally:
