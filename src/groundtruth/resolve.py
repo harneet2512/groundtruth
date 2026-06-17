@@ -582,6 +582,15 @@ _READY_BUDGET_S_BY_SERVER = {
     "rust-analyzer": 180.0,
     "jdtls": 180.0,
     "gopls": 60.0,
+    # typescript-language-server (.ts/.tsx/.js/.jsx): lazily loads the WHOLE configured
+    # tsconfig PROJECT on the first didOpen (Fix 27249519544-b above). On a large TS repo the
+    # 20s default expires mid-load, so definitions return EMPTY (not error) — witnessed on
+    # drizzle-orm (held-out TEST 27659201551): cert failed_breakdown.empty=3052, lsp_error=0,
+    # project_ready=false@20s -> only 450/7779 resolved -> name_match DOMINATES -> gate_resolution
+    # pred_B fail -> agent never runs. A bigger budget lets the project load converge (the barrier
+    # is a WAIT with early-exit on the first real answer, so warm servers are NOT slowed). 150s:
+    # heavier than gopls metadata (60), lighter than a full rust/java index (180).
+    "typescript-language-server": 150.0,
 }
 
 
