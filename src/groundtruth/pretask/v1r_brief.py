@@ -510,17 +510,18 @@ def _top_function_names(
     return [row[0] for row in rows[:limit]]
 
 
-_TEST_DIR_SEGMENTS = frozenset({
-    "test", "tests", "__tests__", "__test__", "spec", "specs", "e2e", "testing", "test-utils",
-})
-
-
 def _is_test_path(path: str) -> bool:
     """De-dup'd (2026-06-15) to the single canonical predicate
     ``delivery.path_policy.is_test_or_demo``: a TEST **or** DEMO/non-source path is never
     surfaced to the agent. The brief copies previously caught only the TEST half and
     missed DEMO dirs (docs_src/examples), which leaked docs_src/ tutorial files as
-    candidate edit targets (fastapi witness). Dir-segment match, never substring."""
+    candidate edit targets (fastapi witness). Dir-segment match, never substring.
+
+    Class-A collapse (2026-06-17): the orphan module-level ``_TEST_DIR_SEGMENTS``
+    frozenset that used to sit above this function was a DEAD duplicate of
+    ``path_policy._TEST_DIR_SEGMENTS`` (had even drifted to carry an extra
+    ``test-utils`` segment) — nothing referenced it once this wrapper delegated to
+    the canonical predicate. Deleted so ONE segment literal exists in the repo."""
     return _is_test_or_demo(path)
 
 

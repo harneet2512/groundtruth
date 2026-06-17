@@ -123,6 +123,17 @@ def is_test_or_demo(path: str) -> bool:
     return is_test_path(path)
 
 
+def is_deliverable(path: str) -> bool:
+    """THE single "may this path be shown to the agent" predicate (Class-A chokepoint,
+    2026-06-17). True iff ``path`` is genuine source the agent may be pointed at as a
+    Caller / scope / witness / candidate — i.e. NOT a test/demo/docs path AND NOT a
+    vendored/minified/generated path. Composes the two existing path-class predicates so
+    every render surface has ONE entry: no surface re-implements "is this non-source."
+    Correct-or-quiet (excludes on either class); generalized (dir-segment + file-suffix
+    markers, no per-repo/benchmark logic)."""
+    return not (is_test_or_demo(path) or is_vendored_path(path))
+
+
 def test_tooling_roots(graph_db: str) -> frozenset[str]:
     """Directories that are TEST-TOOLING — every importer OUTSIDE the directory is a
     test file. These are vendored assertion/debug/diff libraries (testify, spew,

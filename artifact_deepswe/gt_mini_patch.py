@@ -151,6 +151,7 @@ try:
         is_minified_file as _is_minified_file,
         is_delivery_excluded as _is_delivery_excluded,
         is_test_or_demo as _pp_is_test_or_demo,
+        is_deliverable as _pp_is_deliverable,
     )
     from groundtruth.delivery.name_policy import (
         BUILTIN_CALLABLE_NAMES as _BUILTIN_CALLABLE_NAMES,
@@ -178,7 +179,46 @@ except Exception as _delivery_import_err:  # noqa: BLE001
         "same_file", "import", "import_type", "type_flow", "verified_unique",
         "inherited", "return_type", "lsp", "lsp_verified",
     })
-    _pp_is_test_or_demo = None  # import failed -> _is_test_or_demo_path uses local fallback
+    # Class-A chokepoint (2026-06-17): when the package import fails we do NOT
+    # re-declare the non-source SEGMENT lists inline — re-syncing two literals is the
+    # whack-a-mole that d0684d83 fought. Instead load the SAME path_policy.py FILE
+    # directly from disk (it is injected at /opt/gt/groundtruth/delivery/path_policy.py
+    # and imports only stdlib). The fallback then reuses the ONE canonical literal —
+    # drift is impossible because no second segment list exists. Only if even the file
+    # is absent does _pp_is_test_or_demo stay None (true triple-failure), and the
+    # wrapper degrades to a basename-only test predicate (still no segment literal).
+    _pp_is_test_or_demo = None
+    _pp_is_deliverable = None
+    try:
+        import importlib.util as _pp_ilu
+
+        _pp_candidates = [
+            os.path.join(os.environ.get("GT_HOME", "/opt/gt"),
+                         "groundtruth", "delivery", "path_policy.py"),
+            os.path.join(os.environ.get("GT_HOME", "/opt/gt"),
+                         "src", "groundtruth", "delivery", "path_policy.py"),
+        ]
+        for _pp_path in _pp_candidates:
+            if not os.path.isfile(_pp_path):
+                continue
+            _pp_spec = _pp_ilu.spec_from_file_location("gt_path_policy_fb", _pp_path)
+            if _pp_spec is None or _pp_spec.loader is None:
+                continue
+            _pp_mod = _pp_ilu.module_from_spec(_pp_spec)
+            _pp_spec.loader.exec_module(_pp_mod)
+            _pp_is_test_or_demo = getattr(_pp_mod, "is_test_or_demo", None)
+            _pp_is_deliverable = getattr(_pp_mod, "is_deliverable", None)
+            # Reuse the canonical vendored predicate too so the path-class half routes
+            # through ONE module (the inline _is_vendored_path above stays only for a
+            # total file-load failure). Keeps the literal lists single-sourced.
+            if getattr(_pp_mod, "is_vendored_path", None) is not None:
+                _is_vendored_path = _pp_mod.is_vendored_path  # noqa: F811
+            print("[GT_META] delivery_policy_fileload_fallback=true "
+                  f"path={_pp_path}", file=sys.stderr, flush=True)
+            break
+    except Exception as _pp_fileload_err:  # noqa: BLE001
+        print(f"[GT_META] delivery_policy_fileload_failed=true reason={_pp_fileload_err}",
+              file=sys.stderr, flush=True)
     _VENDOR_DIR_MARKERS_FB = (
         "/extern/", "/externals/", "/vendor/", "/vendored/", "/third_party/",
         "/thirdparty/", "/node_modules/", "/bower_components/", "/dist/",
@@ -354,50 +394,34 @@ def _is_repo_source_path(fp: str) -> bool:
 # csstree [WITNESS] getStuff called by examples/simple/.../functionalService.js)
 # is noise that misdirects. Generalized (any repo/language) — DIRECTORY-SEGMENT
 # match, never a '/test/' substring (a relative top-level 'test/lexer.js' has no
-# leading slash but is still a test dir). Mirrors v1r_brief._is_test_path's
-# segment approach for the test half; the demo/non-source half extends it.
-# Pure function, no deps (do NOT import across the package boundary).
-_TEST_DIR_SEGMENTS_LOCAL: frozenset[str] = frozenset({
-    "test", "tests", "__tests__", "__test__", "spec", "specs", "e2e", "testing",
-})
-_DEMO_NONSOURCE_DIR_SEGMENTS_LOCAL: frozenset[str] = frozenset({
-    "examples", "example", "demo", "demos", "sample", "samples", "fixtures",
-    "fixture", "docs", "doc", "docs_src", "doc_src", "documentation",
-    "tutorial", "tutorials", "benchmark", "benchmarks", "benches", "bench", "vendor",
-    "node_modules", "dist", "build",
-})
-
-
+# leading slash but is still a test dir).
+#
+# Class-A chokepoint (2026-06-17): the SEGMENT lists used to live here as two
+# `*_LOCAL` frozensets that were byte-duplicates of path_policy's canonical sets —
+# the exact drift d0684d83 had to re-sync. They are DELETED. The non-source segment
+# truth now lives in ONE place (path_policy), reached via the normal import OR the
+# file-load fallback above (both bind `_pp_is_test_or_demo`). The only residual
+# in-container path (true triple-failure: package not importable AND path_policy.py
+# absent on disk) degrades to a BASENAME-ONLY test marker — which needs NO segment
+# literal at all — so there is nothing left to drift.
 def _is_test_or_demo_path(path: str) -> bool:
     """True when ``path`` is a TEST file or lives under a NON-SOURCE/demo dir.
 
-    Checks DIRECTORY SEGMENTS (split on '/', after normalizing backslashes,
-    lowercasing, and stripping a leading './'), NOT a substring like '/test/'
-    (a relative top-level ``test/lexer.js`` has no leading slash and must still
-    match). Test = any dir segment in {test, tests, __tests__, __test__, spec,
-    specs, e2e, testing} OR a basename matching test_*/*_test.*/*.test.*/
-    *.spec.*. Demo/non-source = any dir segment in {examples, example, demo,
-    demos, sample, samples, fixtures, fixture, docs, doc, benchmark, benchmarks,
-    vendor, node_modules, dist, build}. Correct-or-quiet: such a path is never a
-    delivered scope/witness fact.
+    Delegates to the SINGLE canonical predicate ``delivery.path_policy.is_test_or_demo``
+    — bound either by the normal package import (live substrate) or by the file-load
+    fallback that exec's the SAME path_policy.py from disk (in-container). Both reuse
+    the ONE segment literal; no second copy exists.
 
-    De-dup (2026-06-15): delegates to the single canonical
-    ``delivery.path_policy.is_test_or_demo`` when the import succeeded (the live path);
-    the local segment logic below is the byte-equivalent in-container fallback."""
+    Triple-failure residual ONLY (`_pp_is_test_or_demo is None`, i.e. the package is
+    unimportable AND path_policy.py is absent on disk): degrade to basename-only test
+    markers (``test_*`` / ``*_test.*`` / ``*.test.*`` / ``*.spec.*``). This carries NO
+    directory-segment list, so it cannot drift from canonical; it intentionally under-
+    covers (it cannot catch a `docs/`/`examples/` dir without the segment set) rather
+    than re-introduce a duplicate literal. Correct-or-quiet: under-filtering here is a
+    near-impossible degraded mode (path_policy.py is a shipped, build-guarded dep)."""
     if _pp_is_test_or_demo is not None:
         return _pp_is_test_or_demo(path)
-    p = (path or "").replace("\\", "/").lower()
-    if p.startswith("./"):
-        p = p[2:]
-    segs = [s for s in p.split("/") if s]
-    if not segs:
-        return False
-    dir_segs = segs[:-1]
-    if any(s in _TEST_DIR_SEGMENTS_LOCAL for s in dir_segs):
-        return True
-    if any(s in _DEMO_NONSOURCE_DIR_SEGMENTS_LOCAL for s in dir_segs):
-        return True
-    bn = segs[-1]
+    bn = (path or "").replace("\\", "/").rsplit("/", 1)[-1].lower()
     return (
         bn.startswith("test_")
         or "_test." in bn
