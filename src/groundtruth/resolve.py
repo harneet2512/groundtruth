@@ -1096,7 +1096,14 @@ async def _resolve_edges(
         # ordered by ref_count so the most-called (= most-likely-delivered-as-a-callee-contract)
         # functions are enriched first; bounded by GT_LSP_ENRICH_LIMIT so a huge repo (boa ~9k fns)
         # stays under the per-pass budget while small/medium repos get near-complete type depth.
-        _enrich_limit = max(50, int(os.environ.get("GT_LSP_ENRICH_LIMIT", "800") or "800"))
+        # "Remove the 800 cap": enrich ALL non-test functions (still ORDER BY ref_count so
+        # the most-referenced — the likeliest delivered-callee contracts — go first), bounded
+        # by a WALL-CLOCK budget instead of a node count so a huge repo (boa ~9k fns) gets the
+        # most-referenced first up to the time budget rather than running unbounded. Default
+        # limit is effectively all; GT_LSP_ENRICH_BUDGET_S caps the time.
+        _enrich_limit = max(50, int(os.environ.get("GT_LSP_ENRICH_LIMIT", "100000") or "100000"))
+        _enrich_budget_s = float(os.environ.get("GT_LSP_ENRICH_BUDGET_S", "1200") or "1200")
+        _enrich_t0 = time.time()
         _enrich_conn = sqlite3.connect(db_path)
         _enrich_conn.row_factory = sqlite3.Row
         _enrich_conn.execute("PRAGMA journal_mode=WAL")
@@ -1117,6 +1124,8 @@ async def _resolve_edges(
 
         _enriched = 0
         for node in _top_nodes:
+            if (time.time() - _enrich_t0) > _enrich_budget_s:
+                break  # wall-clock budget hit; most-referenced (ordered first) are done
             node_id = node["id"]
             file_path = node["file_path"]
             start_line = node["start_line"]
@@ -1169,8 +1178,21 @@ async def _resolve_edges(
                 if start_line <= 0 or start_line > len(lines):
                     enrich_stats["hover_skip"] += 1
                     continue
-                line_text = lines[start_line - 1]
-                col, _found_sym = _find_symbol_column(line_text, name)
+                # Search a SMALL WINDOW from start_line down for the name. A node's
+                # start_line is not always the line carrying the name: Python @decorator(s)
+                # sit ABOVE `def name`, and multi-line signatures push the name a line or two
+                # below — checking ONLY start_line was the dominant hover_skip cause. 0..3
+                # lines covers decorated/wrapped declarations; hover then queries that line.
+                _hover_line = start_line - 1
+                col, _found_sym = -1, False
+                for _dl in range(0, 4):
+                    _li = start_line - 1 + _dl
+                    if _li < 0 or _li >= len(lines):
+                        continue
+                    col, _found_sym = _find_symbol_column(lines[_li], name)
+                    if _found_sym:
+                        _hover_line = _li
+                        break
                 if not _found_sym:
                     enrich_stats["hover_skip"] += 1
                     continue
@@ -1180,7 +1202,7 @@ async def _resolve_edges(
 
             # Query hover
             try:
-                hover_result = await client.hover(uri, start_line - 1, col, timeout=5.0)
+                hover_result = await client.hover(uri, _hover_line, col, timeout=5.0)
                 if isinstance(hover_result, LspErr):
                     enrich_stats["hover_fail"] += 1
                     continue
