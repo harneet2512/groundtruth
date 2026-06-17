@@ -112,11 +112,11 @@ agent:
     When you've completed your work, submit your changes as a git diff patch.
 
     Step 1: Create the patch file
-    Run `cd $(cat /opt/gt/gt_root.txt) && git diff -- <file1> <file2> > /tmp/patch.txt` listing only source files you modified.
-    Do NOT commit your changes.
+    Run `cd $(cat /opt/gt/gt_root.txt) && git add -N -- <file1> <file2> && git diff -- <file1> <file2> > /tmp/patch.txt` listing every source file you modified OR created.
+    The `git add -N` registers any newly-created files as intent-to-add so they appear in the diff — a plain `git diff` silently OMITS untracked new files, which would drop a fix that adds files. Do NOT commit your changes.
 
     <IMPORTANT>
-    The patch must only contain changes to source files you modified.
+    The patch must contain ALL source files you modified OR created (new files included — a feature that adds files is incomplete without them).
     Do not include test files, helper scripts, build configs, or binary files.
     </IMPORTANT>
 
