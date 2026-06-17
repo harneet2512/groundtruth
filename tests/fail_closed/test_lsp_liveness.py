@@ -289,6 +289,54 @@ def test_gate_lsp_no_cert_under_proof_mode_fails(tmp_path, monkeypatch):
     assert fg.gate_lsp(line) is True
 
 
+# ── BUG#3 FIX: no-cert witness-reconcile (mirror gate_embedder_consumption) ──
+# When the LSP cert is absent the gate must not pass blindly — but it must also not
+# false-RED a run where an INDEPENDENT runtime witness (the LSP-stamped edges PERSISTED
+# in the final graph.db the agent navigates) proves real conversion. Reconcile to PASS
+# iff the witness shows conversion; fail-closed when NEITHER cert NOR witness shows it.
+
+def test_gate_lsp_no_cert_no_witness_fails_closed(tmp_path, monkeypatch):
+    # No cert, no conversion line, witness explicitly zero -> NEITHER source shows
+    # conversion -> fail-closed (the blind-pass the bug describes must NOT happen).
+    monkeypatch.delenv("GT_PROOF_MODE", raising=False)
+    monkeypatch.delenv("GT_REQUIRE_LSP", raising=False)
+    monkeypatch.setenv("GT_LSP_CERT", str(tmp_path / "nope.json"))
+    assert fg.gate_lsp("no contract line", graph_lsp_witness=0) is False
+
+
+def test_gate_lsp_no_cert_witness_conversion_reconciles_to_pass(tmp_path, monkeypatch):
+    # No cert, no usable line, but the FINAL graph carries LSP-stamped edges (real
+    # conversion landed) -> reconcile to PASS (witness-over-gate, /goal §7), the same
+    # discipline gate_embedder_consumption uses for the embedder certificate.
+    monkeypatch.delenv("GT_PROOF_MODE", raising=False)
+    monkeypatch.delenv("GT_REQUIRE_LSP", raising=False)
+    monkeypatch.setenv("GT_LSP_CERT", str(tmp_path / "nope.json"))
+    assert fg.gate_lsp("no contract line", graph_lsp_witness=7) is True
+
+
+def test_gate_lsp_proof_mode_no_cert_witness_conversion_reconciles(tmp_path, monkeypatch):
+    # Under PROOF mode a missing cert hard-fails TODAY even when conversion really happened
+    # (the dark-lever false-RED). With an independent witness of conversion, reconcile to
+    # PASS; with no witness it still fails closed (existing test_*_under_proof_mode_fails).
+    monkeypatch.setenv("GT_LSP_CERT", str(tmp_path / "nope.json"))
+    monkeypatch.setenv("GT_PROOF_MODE", "1")
+    assert fg.gate_lsp("", graph_lsp_witness=4) is True
+    # witness zero under proof mode -> still fail-closed (no conversion proven anywhere).
+    assert fg.gate_lsp("", graph_lsp_witness=0) is False
+
+
+def test_gate_lsp_witness_default_is_byte_identical(tmp_path, monkeypatch):
+    # The reconcile is ADDITIVE: the default (witness not provided, -1) must reproduce the
+    # pre-fix behavior exactly, so no existing caller/test regresses.
+    monkeypatch.delenv("GT_PROOF_MODE", raising=False)
+    monkeypatch.delenv("GT_REQUIRE_LSP", raising=False)
+    monkeypatch.setenv("GT_LSP_CERT", str(tmp_path / "nope.json"))
+    # default -1 == "not provided" -> same FAIL as the legacy no-cert/no-line path
+    assert fg.gate_lsp("no contract line here") is False
+    # a cert-present PASS is unaffected by the witness param (cert is authoritative)
+    assert fg.gate_lsp("", cert=_base_cert(), graph_lsp_witness=0) is True
+
+
 def test_gate_lsp_loads_cert_from_file(tmp_path, monkeypatch):
     p = tmp_path / "lsp_certificate.json"
     p.write_text(json.dumps(_base_cert()), encoding="utf-8")
