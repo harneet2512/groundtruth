@@ -177,3 +177,19 @@ gt-index/gt-index*.exe
 # internal audit + run artifacts — never publish
 .claude/reports/
 .claude/CURRENT_VALIDATION_RUN.json
+
+# GITHUB REPO IS CODE-ONLY (CLAUDE.md line 1) — docs/reports are LOCAL working artifacts
+/gt_math.md
+/gt_gt.md
+/gt_new.md
+/gt_trial.md
+/jedi_WORK.md
+/*_AUDIT*.md
+/*_REPORT*.md
+/GO_NO_GO*.md
+/SESSION_SUMMARY*.md
+/RUN_LEDGER*.md
+/DOC_OF_HONOR.md
+/BRIEFING.md
+.tmp_gt_*/
+.tmp_*/

@@ -1,3 +1,5 @@
+> 🚫 **GITHUB REPO IS CODE-ONLY (public for GHA + codespaces).** NEVER commit or push docs / reports / analysis `.md` — `gt_math`, `gt_gt`, `gt_new`, `gt_trial`, `*_AUDIT*.md`, `*_REPORT*.md`, `GO_NO_GO*`, `.claude/reports/`, `SESSION_SUMMARY`, `RUN_LEDGER`, `.tmp_*`, etc. They are **LOCAL working artifacts only**. Only `README.md`, `LICENSE`, and source/scripts/workflows/tests/manifests ship. Gitignore every new doc; the public snapshot is code-only — no internal doc/report ever reaches GitHub.
+
 # CLAUDE.md -- GroundTruth
 
 > **Read this entire file before writing any code.**
