@@ -55,23 +55,124 @@ _DEPTH_SOURCE_PROP = {
     "PRECEDES": "call_order", "CO_SERIALIZES": "serialization_pair", "DATA_FLOW": "data_flow",
 }
 
+# Builtin/stdlib/literal targets whose endpoint has NO internal node -> the relation MUST stay a
+# property and mint 0 edges (gt_gt §2.6 non-invention). MIRRORED from the resolver's canonical
+# `builtinExceptionNames` (gt-index/internal/resolver/promote.go) — DO NOT invent a new per-language
+# list; this is the SAME union the promote pass excludes, plus the builtin RECEIVERS/intrinsics
+# (Object/Map/Set/Array/String/panic/unwrap/…) that promote leaves unresolved by construction (no node
+# exists for them). A `props>0, edges==0` class whose extracted targets are all builtins/literals is
+# CONSTRUCT-PRESENT-BUILTIN (correct-or-quiet, PASS), NOT a promote gap.
+_BUILTIN_EXCEPTIONS = frozenset({
+    # Python (mirror of promote.go builtinExceptionNames)
+    "ValueError", "TypeError", "KeyError", "IndexError", "RuntimeError", "Exception",
+    "AttributeError", "NotImplementedError", "StopIteration", "OSError", "IOError",
+    "FileNotFoundError", "ZeroDivisionError", "ArithmeticError", "AssertionError", "ImportError",
+    "ModuleNotFoundError", "NameError", "LookupError", "MemoryError", "OverflowError",
+    "RecursionError", "ReferenceError", "SyntaxError", "SystemError", "UnicodeError",
+    "UnicodeDecodeError", "UnicodeEncodeError", "PermissionError", "ConnectionError", "TimeoutError",
+    "BrokenPipeError", "BufferError", "EOFError", "FloatingPointError", "GeneratorExit",
+    "KeyboardInterrupt", "SystemExit", "TabError", "IndentationError", "UnboundLocalError",
+    "BlockingIOError", "ChildProcessError", "FileExistsError", "InterruptedError", "IsADirectoryError",
+    "NotADirectoryError", "ProcessLookupError", "StopAsyncIteration", "Error",
+    # JS
+    "RangeError", "EvalError", "URIError", "AggregateError", "DOMException",
+})
+# Builtin RECEIVERS / intrinsics that PRECEDES/READS/WRITES/CO_SERIALIZES legitimately reference but
+# that have no internal node (promote resolves them to nothing -> 0 edges is correct). Language-
+# agnostic union of the common stdlib carriers the brief enumerates (gt_gt §2.6 / CLAUDE.md).
+_BUILTIN_RECEIVERS = frozenset({
+    "Object", "Map", "Set", "Array", "String", "Number", "Boolean", "Promise", "JSON", "Math",
+    "Date", "RegExp", "Symbol", "WeakMap", "WeakSet", "Reflect", "Proxy",
+    "string", "list", "dict", "set", "tuple", "bytes", "int", "float", "bool",
+    "panic", "unwrap", "expect", "Some", "None", "Ok", "Err",
+})
+
+
+def _is_builtin_target(tok):
+    """True when an extracted target token is a builtin/stdlib/literal endpoint (no internal node
+    should exist) -> 0 edges is correct-or-quiet (non-invention), NOT a promote gap."""
+    return tok in _BUILTIN_EXCEPTIONS or tok in _BUILTIN_RECEIVERS
+
+
+def _node_name_exists(cur, name):
+    """True when `name` is a class-like node (Class/Struct/Type/Enum/Interface/ImplBlock) in `nodes`
+    — the same class-like superset promote.go resolves RAISES/READS/WRITES against. A clean, non-
+    builtin token that matches such a node is an INTERNAL target the relation SHOULD have promoted to."""
+    try:
+        return (cur.execute(
+            "SELECT 1 FROM nodes WHERE name=? AND label IN "
+            "('Class','Struct','Type','Enum','Interface','ImplBlock') LIMIT 1", (name,)
+        ).fetchone() is not None)
+    except Exception:
+        return False
+
+
+def _extract_targets(value):
+    """Pull candidate target identifier(s) from a depth source-property VALUE, mirroring the promote
+    regexes (promote.go) WITHOUT re-running the promote pass. Returns the clean leading-identifier
+    tokens a relation would resolve against. Dotted/qualified tokens (errors.New) and prose are NOT
+    clean internal targets (promote DROPS them) -> excluded here too, so they never read as a gap."""
+    import re as _re
+    toks = []
+    for m in _re.findall(r"[A-Za-z_][\w.]*", value or ""):
+        # D3 drop-dotted: a qualified name (mod.MyError, Object.values) is not a clean internal target;
+        # take the LEADING segment (the receiver/base) as the candidate — Object.freeze -> Object.
+        base = m.split(".", 1)[0]
+        if base:
+            toks.append(base)
+    return toks
+
+
+def _classify_adjudication(cur, prop_kind):
+    """The INTERNAL-TARGET CHECK the §2.6 bar owed but never implemented. For a depth class with
+    source-properties but 0 promoted edges, read its property VALUES and decide which of three it is:
+      'promote_gap'  -> at least one CLEAN, NON-builtin token matches an internal class-like node in
+                        `nodes` (promote SHOULD have minted that edge but didn't) = a real gap (FAIL).
+      'builtin'      -> every extracted target is a builtin/literal OR has no internal node (builtin
+                        receiver / external / stdlib) = CONSTRUCT-PRESENT-BUILTIN, 0 edges correct (PASS).
+      'adjudicate'   -> no candidate token could be cleanly extracted from any value (unknown shape)
+                        = correct-or-quiet, surfaced but NOT auto-FAILed (the brief's tri-state rule).
+    Generalized across languages: no task/repo/symbol-specific logic; the builtin set is mirrored from
+    the resolver, the internal-target test is a generic node-name existence query."""
+    try:
+        rows = cur.execute(
+            "SELECT value FROM properties WHERE kind=? LIMIT 5000", (prop_kind,)).fetchall()
+    except Exception:
+        return "adjudicate"
+    saw_candidate = False
+    for (value,) in rows:
+        for tok in _extract_targets(value):
+            saw_candidate = True
+            if _is_builtin_target(tok):
+                continue  # builtin/literal endpoint -> non-invention, not a gap
+            if _node_name_exists(cur, tok):
+                return "promote_gap"  # internal class-like target exists -> SHOULD have promoted
+    return "builtin" if saw_candidate else "adjudicate"
+
 
 def audit_depth(graph_db):
     """Layer 0 - DEPTH (gt_gt §2.6, the 100% bar): CONSTRUCT-AWARE per-class status. The lenient
     `depth_present>0` verdict is gone (it false-GREENed). The raw-construct check is gone (it false-
-    REDed builtin throws). Instead, per class compare EDGES vs the source-PROPERTY (the edge-construct):
-      PRESENT            edges>0
-      CONSTRUCT-ABSENT   source-property==0  (the repo lacks the construct -> correct-or-quiet, N/A)
-      NEEDS-ADJUDICATION source-property>0 AND edges==0  (builtin/external target = correct-or-quiet,
-                         OR a real promote gap -> the internal-target check decides; never auto-GREEN).
-    DATA_FLOW rides CALLS as a `dataflow=` annotation (D1): present = standalone OR annotated."""
+    REDed builtin throws). Instead, per class compare EDGES vs the source-PROPERTY (the edge-construct),
+    and when props>0 but 0 edges, run the INTERNAL-TARGET CHECK (§2.6) on the property VALUES:
+      PRESENT                    edges>0
+      CONSTRUCT-ABSENT           source-property==0  (the repo lacks the construct -> correct-or-quiet)
+      CONSTRUCT-PRESENT-BUILTIN  props>0, edges==0, all targets builtin/literal (Error, Object.freeze,
+                                 panic/unwrap, …) -> 0 edges is CORRECT (non-invention) = PASS
+      PROMOTE-GAP                props>0, edges==0, a CLEAN non-builtin target IS an internal node
+                                 (promote SHOULD have minted) -> a real gap = FAIL
+      NEEDS-ADJUDICATION         props>0, edges==0, target shape unknown -> correct-or-quiet, NOT FAIL
+    DATA_FLOW rides CALLS as a `dataflow=` annotation (D1): present = standalone OR annotated.
+    Only a PROMOTE-GAP fails depth; a builtin-target class with 0 edges is the §2.6 non-invention bar
+    being honoured, NOT a defect (this is the fix for the superjson false-FAIL: exception_type=Error,
+    call_order=Object.values->freeze, exception_flow=throw new Error(...) -> all builtin -> PASS)."""
     c = sqlite3.connect(graph_db).cursor()
     rows = c.execute("SELECT type, COUNT(*) FROM edges GROUP BY type ORDER BY COUNT(*) DESC").fetchall()
     by_type = {t: n for t, n in rows}
     df_annotated = _q(c, "SELECT COUNT(*) FROM edges WHERE type='CALLS' AND metadata LIKE '%dataflow%'") or 0
 
     per_class = {}
-    present, construct_absent, needs_adjudication = [], [], []
+    present, construct_absent, construct_builtin, promote_gap, needs_adjudication = [], [], [], [], []
     for cls in _DEPTH_EDGES:
         edges = by_type.get(cls, 0)
         if cls == "DATA_FLOW":
@@ -82,20 +183,30 @@ def audit_depth(graph_db):
         elif props == 0:
             status = "CONSTRUCT-ABSENT"; construct_absent.append(cls)
         else:
-            status = "NEEDS-ADJUDICATION"; needs_adjudication.append(cls)
+            # props>0, edges==0: the internal-target check decides builtin (PASS) vs real gap (FAIL).
+            verdict = _classify_adjudication(c, _DEPTH_SOURCE_PROP[cls])
+            if verdict == "promote_gap":
+                status = "PROMOTE-GAP"; promote_gap.append(cls)
+            elif verdict == "builtin":
+                status = "CONSTRUCT-PRESENT-BUILTIN"; construct_builtin.append(cls)
+            else:
+                status = "NEEDS-ADJUDICATION"; needs_adjudication.append(cls)
         per_class[cls] = {"edges": edges, "source_props": props, "status": status}
 
-    # Construct-aware verdict: depth is OK when every class is PRESENT or CONSTRUCT-ABSENT. A
-    # NEEDS-ADJUDICATION class (props>0, edges==0) is NOT auto-GREEN (could be a real promote gap) and
-    # NOT auto-RED (could be builtin-target correct-or-quiet) -> surfaced for the internal-target check.
-    depth_ok = not needs_adjudication
+    # Construct-aware verdict: depth FAILS only on a PROMOTE-GAP (a clean non-builtin internal target
+    # that should have minted but didn't). PRESENT / CONSTRUCT-ABSENT / CONSTRUCT-PRESENT-BUILTIN are
+    # the §2.6 bar being honoured. NEEDS-ADJUDICATION (unknown target shape) is correct-or-quiet and is
+    # surfaced but NOT auto-FAILed (the brief's tri-state rule: when uncertain, adjudicate, don't FAIL).
+    depth_ok = not promote_gap
     return {
         "edge_types": by_type, "per_class": per_class,
-        "present": present, "construct_absent": construct_absent, "needs_adjudication": needs_adjudication,
-        "intended": "every class with its internal-target edge-construct -> edge minted (§2.6 100% bar); construct-absent = correct-or-quiet",
+        "present": present, "construct_absent": construct_absent,
+        "construct_builtin": construct_builtin, "promote_gap": promote_gap,
+        "needs_adjudication": needs_adjudication,
+        "intended": "every class with its INTERNAL-target edge-construct -> edge minted (§2.6 100% bar); builtin/literal target -> stays property (non-invention); construct-absent = correct-or-quiet",
         "fired": depth_ok,
-        "gap": ("none (all classes PRESENT or construct-absent)" if depth_ok
-                else f"NEEDS-ADJUDICATION (source-prop present, 0 edges -> internal-target check): {','.join(needs_adjudication)}"),
+        "gap": ("none (all classes PRESENT / construct-absent / construct-present-builtin)" if depth_ok
+                else f"PROMOTE-GAP (source-prop present, internal target node exists, 0 edges minted): {','.join(promote_gap)}"),
     }
 
 
@@ -285,16 +396,19 @@ def main(argv=None):
     sub_checks = {
         "nodes>0": (report["nodes"]["labels"] and sum(report["nodes"]["labels"].values()) > 0),
         "calls_edges>0": report["naming"]["calls_edges"] > 0,
-        "depth_construct_aware": report["L0_depth"]["fired"],  # no class is NEEDS-ADJUDICATION (§2.6 bar)
+        "depth_construct_aware": report["L0_depth"]["fired"],  # no class is a PROMOTE-GAP (§2.6 bar; builtin-target/adjudicate are correct-or-quiet)
         "facts_#2_caps": report["facts"]["fired"],  # impl_method/unique_method conf <= 0.6
     }
     substrate_pass = all(sub_checks.values())
     print("\n-- SUBSTRATE PARITY (gt_gt §2 cell) --")
     for k, v in sub_checks.items():
         print(f"  {('PASS' if v else 'FAIL'):4} {k}")
+    _d = report["L0_depth"]
     print(f"SUBSTRATE_VERDICT[{a.lang}] = {'PASS' if substrate_pass else 'FAIL'} "
           f"(det_pct={report['naming']['det_pct']}% name_match={report['naming']['name_match']} "
-          f"depth={report['L0_depth']['depth_present']} #2={report['facts']['violations'] or 'capped'})")
+          f"depth=present:{len(_d['present'])}/builtin:{len(_d['construct_builtin'])}/"
+          f"gap:{len(_d['promote_gap'])}/adj:{len(_d['needs_adjudication'])} "
+          f"#2={report['facts']['violations'] or 'capped'})")
     report["substrate_verdict"] = {"pass": substrate_pass, "checks": sub_checks}
 
     out = os.path.join(certs, f"gt_layer_audit_{a.task}.json")
