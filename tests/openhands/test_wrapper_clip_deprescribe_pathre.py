@@ -30,8 +30,24 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from scripts.swebench import oh_gt_full_wrapper as ohgt
-from groundtruth.runtime.sanitizer import is_well_formed_clause
+import pytest
+
+# DEAD: OpenHands RETIRED — the live harnesses are mini-swe + GT-MCP. Scope file is
+# the retired OH wrapper (scripts/swebench/oh_gt_full_wrapper.py); is_well_formed_clause
+# is only used here as an assertion oracle on wrapper output (the sanitizer itself has
+# live coverage in tests/unit/). Skip declared BEFORE the wrapper import (and the import
+# guarded) so a collection-time ModuleNotFoundError from the retired OH glue cannot mask
+# the skip. See GT_ARCHITECTURE_LINEAGE.md.
+pytestmark = pytest.mark.skip(
+    reason="DEAD: OpenHands RETIRED — OH-wrapper tests retired; live harnesses are mini-swe + GT-MCP. See GT_ARCHITECTURE_LINEAGE.md"
+)
+
+try:
+    from scripts.swebench import oh_gt_full_wrapper as ohgt
+    from groundtruth.runtime.sanitizer import is_well_formed_clause
+except Exception:  # retired OH glue may not import; module is skipped regardless
+    ohgt = None  # type: ignore[assignment]
+    is_well_formed_clause = None  # type: ignore[assignment]
 
 
 # --------------------------------------------------------------------------

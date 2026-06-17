@@ -34,7 +34,21 @@ sys.modules.setdefault(
     ),
 )
 
-from scripts.swebench import oh_gt_full_wrapper as ohgt
+import pytest
+
+# DEAD: OpenHands RETIRED — the live harnesses are mini-swe + GT-MCP. This whole
+# module exercises the retired OH wrapper (scripts/swebench/oh_gt_full_wrapper.py)
+# and is skipped. The skip is declared BEFORE the wrapper import (and the import is
+# guarded) so a collection-time ModuleNotFoundError from the retired OH glue cannot
+# mask the skip. See GT_ARCHITECTURE_LINEAGE.md.
+pytestmark = pytest.mark.skip(
+    reason="DEAD: OpenHands RETIRED — OH-wrapper tests retired; live harnesses are mini-swe + GT-MCP. See GT_ARCHITECTURE_LINEAGE.md"
+)
+
+try:
+    from scripts.swebench import oh_gt_full_wrapper as ohgt
+except Exception:  # retired OH glue may not import; module is skipped regardless
+    ohgt = None  # type: ignore[assignment]
 
 
 class Observation:
