@@ -155,6 +155,31 @@ def test_namematch_above_floor_still_excluded(tmp_path):
     assert structural_edit_risk(db, {"hub"}).is_quiet()
 
 
+def test_implmethod_is_not_blast_radius(tmp_path):
+    # impl_method resolves obj.method() by GLOBAL name-uniqueness with NO receiver-type
+    # check (curation_map:98-110) — a cross-receiver/external collision (Array.push ->
+    # List.push), NEVER blast radius. conf 0.6 >= floor AND not name_match, so the old
+    # NOT-LIKE-name_match blacklist LEAKED it; the canonical fact-set excludes it.
+    db = _build(tmp_path, [("hub", 8)], method="impl_method", conf=0.6)
+    assert structural_edit_risk(db, {"hub"}).is_quiet()
+
+
+def test_uniquemethod_is_not_blast_radius(tmp_path):
+    # unique_method is the same receiver-unproven rung (curation_map excludes both) —
+    # never blast radius.
+    db = _build(tmp_path, [("hub", 8)], method="unique_method", conf=0.6)
+    assert structural_edit_risk(db, {"hub"}).is_quiet()
+
+
+def test_promoted_depth_still_counts(tmp_path):
+    # the promote pass mints the dependency-DEPTH edges (READS/WRITES/DATA_FLOW) with
+    # 'promote_%' provenance — VERIFIED (non-inventing, both endpoints real), so they
+    # MUST still count after the fact-set tightening (regression guard: don't nuke the
+    # deep-graph blast radius the whitelist alone would drop).
+    db = _build(tmp_path, [("field", 8)], method="promote_field_read", conf=0.6, etype="READS")
+    assert not structural_edit_risk(db, {"field"}).is_quiet()
+
+
 # --------------------------------------------------------------------------- #
 # R3 — line-range scoping: a node counts only when its DEFINITION line is inside
 # an edited hunk. A hub DEFINED high in an edited file but only CALLED in the

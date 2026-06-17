@@ -35,6 +35,22 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Iterable
 
+# The ONE canonical fact-set every consumer surface gates on (curation_map). Imported
+# with a fallback so edit_risk stays import-safe behind the gt_mini_patch bulkhead and
+# in any harness where pretask is not importable; the literal mirrors curation_map and
+# is kept in sync by test_edit_risk + the curation_map tests.
+try:  # pragma: no cover - import shape varies by harness
+    from groundtruth.pretask.curation_map import (
+        DETERMINISTIC_RESOLUTION_METHODS as _DETERMINISTIC_METHODS,
+    )
+except Exception:  # pragma: no cover
+    _DETERMINISTIC_METHODS = frozenset(
+        {
+            "same_file", "import", "import_type", "type_flow", "verified_unique",
+            "inherited", "return_type", "lsp", "lsp_verified",
+        }
+    )
+
 # The fact floor consumers already use: a CALLS edge below this is a name_match
 # guess, not a verified dependent, so it must NOT count as blast radius.
 _MIN_CONFIDENCE = 0.5
@@ -267,15 +283,31 @@ def structural_edit_risk(
         has_conf = _column_exists(conn, "edges", "confidence")
         conf_clause = "AND e.confidence >= ?" if has_conf else ""
         conf_params = (float(min_confidence),) if has_conf else ()
-        # A name_match edge is a NAME GUESS, never blast radius — exclude it by
-        # resolution_method (the confidence floor ALONE leaks a 2-candidate name_match
-        # at conf 0.6 >= floor). Mirrors _covering_tests_for_symbols' method gate and
-        # the module docstring's "a name_match guess is never blast radius".
+        # Blast radius counts ONLY VERIFIED dependents (I3 / curation_map): the canonical
+        # fact-set DETERMINISTIC_RESOLUTION_METHODS, PLUS the promote-pass dependency-DEPTH
+        # edges (READS/WRITES/DATA_FLOW carry 'promote_%' provenance — non-inventing, both
+        # endpoints real). A bare NOT-LIKE-name_match blacklist is NOT enough: it admits
+        # impl_method/unique_method, which resolve obj.method() by GLOBAL name-uniqueness
+        # with NO receiver-type check (curation_map:98-110) — a cross-receiver/external
+        # collision (Array.push -> List.push), never a real dependent. Gating to
+        # (fact-set ∪ promote_%) makes edit_risk count the SAME facts every other surface
+        # does (generalized, not a per-repo patch); the per-symbol count AND the repo
+        # reference distribution use this same clause, so the baseline stays consistent.
         has_method = _column_exists(conn, "edges", "resolution_method")
-        method_clause = (
-            "AND LOWER(COALESCE(e.resolution_method,'')) NOT LIKE 'name_match%'"
-            if has_method else ""
-        )
+        if has_method:
+            _det_in = ",".join(f"'{m}'" for m in sorted(_DETERMINISTIC_METHODS))
+            method_clause = (
+                f"AND (LOWER(TRIM(e.resolution_method)) IN ({_det_in}) "
+                f"OR LOWER(COALESCE(e.resolution_method,'')) LIKE 'promote_%')"
+            )
+        elif has_conf:
+            # No provenance column -> cannot prove a dependent is verified. Fail closed to
+            # a CERTIFIED-grade floor so a 0.6 name_match/impl_method guess cannot launder
+            # into blast radius (parity with gt_mini_patch._scope_fact_clause).
+            method_clause = "AND COALESCE(e.confidence, 0) >= 0.9"
+        else:
+            # Neither provenance nor confidence -> cannot prove anything verified -> quiet.
+            method_clause = "AND 1=0"
         types_in = ",".join("?" for _ in _DEPENDENCY_EDGE_TYPES)
         # File-scope the per-symbol match to the agent's EDITED files (when known):
         # only a node DEFINED in an edited file is the agent's change. Suffix match
