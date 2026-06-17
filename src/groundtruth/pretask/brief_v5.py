@@ -1,5 +1,10 @@
 """GT pre-task brief v5 — orchestrator.
 
+DEAD-SUPERSEDED by the live ``v1r_brief.generate_v1r_brief -> v7_4_brief.run_v74``
+brief. NOTE: ``v7_brief.generate_brief`` is still imported by ``cli/commands.py:633``
+(replan path) — a DUPLICATE brief generator on the CLI surface, flagged for
+retire/repoint; do NOT change that logic here.
+
 Single public entry point: :func:`generate_brief`. Wires the five
 deterministic modules in sequence, computes the candidate set, renders
 the brief, and writes the per-task telemetry record.

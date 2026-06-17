@@ -1,5 +1,15 @@
 """Track B v2 ranker: file ranking (B1) + function ranking (B2).
 
+==============================================================================
+DEAD SURFACE — superseded by groundtruth.pretask.v7_4_brief.run_v74 (the live
+ranker core). NOT routable on any live path: reachable ONLY from the (also-dead)
+v22_brief — no live DeepSWE/OH entrypoint imports it. Retained ONLY for the
+dead-path registry test (tests/unit/test_dead_path_registry.py asserts it is
+quarantined + reachable only from v22_brief). A plain import still succeeds;
+CALLING any ranker producer (``rank_files`` / ``rank_functions`` / ``rank``)
+raises by design. See GT_ARCHITECTURE_LINEAGE.md.
+==============================================================================
+
 B1 is a thin adapter over v7.4 (ablation C). B2 scores every Function/Method
 node in the top-50 files using six signals fused via Reciprocal Rank Fusion
 (Cormack et al. 2009). Direct-mention is weighted 2x; all other signals
@@ -143,6 +153,11 @@ def rank_files(
     repo_path: str,
     graph_db_path: str,
 ) -> list[RankedFile]:
+    raise RuntimeError(
+        "DEAD SURFACE: groundtruth.pretask.v2_ranker superseded by "
+        "groundtruth.pretask.v7_4_brief.run_v74; not routable. "
+        "See GT_ARCHITECTURE_LINEAGE.md."
+    )
     augmented_tokens: list[tuple[str, float]] = []
     if _V22_TIER1_ENABLED:
         from groundtruth.pretask.query_augment import augment_query_with_graph
@@ -480,6 +495,11 @@ def rank_functions(
     repo_path: str,
     graph_db_path: str,
 ) -> list[RankedFunction]:
+    raise RuntimeError(
+        "DEAD SURFACE: groundtruth.pretask.v2_ranker superseded by "
+        "groundtruth.pretask.v7_4_brief.run_v74; not routable. "
+        "See GT_ARCHITECTURE_LINEAGE.md."
+    )
     if not ranked_files:
         return []
     top_files = ranked_files[:_MAX_FILES]
@@ -669,6 +689,11 @@ def rank(
     repo_path: str,
     graph_db_path: str,
 ) -> RankedResults:
+    raise RuntimeError(
+        "DEAD SURFACE: groundtruth.pretask.v2_ranker superseded by "
+        "groundtruth.pretask.v7_4_brief.run_v74; not routable. "
+        "See GT_ARCHITECTURE_LINEAGE.md."
+    )
     files = rank_files(query, repo_path, graph_db_path)
     functions = rank_functions(query, files, repo_path, graph_db_path)
     return RankedResults(files=files, functions=functions)

@@ -1,5 +1,15 @@
 """Layer-6 incremental re-indexing helper for the post-edit hook (v1.0.5).
 
+==============================================================================
+DEAD SURFACE — superseded by oh_gt_full_wrapper.make_reindex_command (the live
+wrapper constructs the ``gt-index -file`` reindex command directly; L6 in the
+DeepSWE path is gated OFF in gt_mini_patch). NOT routable on any live path (no
+live entrypoint imports it; only a docstring comment references it). Retained
+ONLY for the dead-path registry. A plain import still succeeds; CALLING the
+producer (``check_and_reindex_modified_files``) raises by design.
+See GT_ARCHITECTURE_LINEAGE.md.
+==============================================================================
+
 Runs at the top of the post-edit hook, before evidence queries. For each
 modified file:
 
@@ -116,6 +126,12 @@ def check_and_reindex_modified_files(
     "elapsed_ms": float, "db_mtime_before": float, "db_mtime_after": float,
     "file_mtime": float}}``. Never raises.
     """
+    raise RuntimeError(
+        "DEAD SURFACE: groundtruth.runtime.reindex_helper."
+        "check_and_reindex_modified_files superseded by "
+        "oh_gt_full_wrapper.make_reindex_command; not routable. "
+        "See GT_ARCHITECTURE_LINEAGE.md."
+    )
     outcomes: dict[str, dict[str, Any]] = {}
     if not modified_files:
         return outcomes

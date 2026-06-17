@@ -3,8 +3,12 @@
 > **Read this FIRST when touching any GT layer.** It exists to stop the recurring confusion about
 > *which module is the live DeepSWE path* vs old/superseded code. Grounded in `gt_audit.md` (layer
 > inventory) + `gt_gt.md`/`gt_new.md` §12 (flow), verified by import-tracing (4 parallel mapping
-> agents, 2026-06-17). "LIVE" = on the DeepSWE substrate proof path (`gt_run_proof.py` → agent).
-> "DEAD-on-DeepSWE" = real importer exists but only on the OH/MCP/CLI path, never DeepSWE.
+> agents, 2026-06-17). **OpenHands is RETIRED — there is NO live OH harness.** The TWO live
+> harnesses are (1) mini-swe / DeepSWE (`gt_mini_patch.py` + the substrate proof path
+> `gt_run_proof.py` → agent) and (2) GT-MCP (the 'gt' product, `mcp/server.py` + `mcp/tools.py`).
+> "LIVE" = on the DeepSWE substrate proof path. "DEAD-on-DeepSWE" = real importer exists but only on
+> the MCP/CLI path, never DeepSWE. The old `groundtruth.hooks.*` (post_view/post_edit) are DEAD —
+> OH is retired, so they run on NO live surface; retained only as byte-parity test oracles.
 
 ## THE ONE LIVE DEEPSWE CHAIN (memorize this)
 
@@ -66,8 +70,8 @@ LocalEnvironment. **No `groundtruth.hooks.*` and no `groundtruth.mcp.*` run on D
 |---|---|---|
 | `artifact_deepswe/gt_mini_patch.py` | **LIVE-CORE** | ALL §6 producers INLINE (consensus `_consensus_block`/`_consensus_progressive`, L3b post_view `_evidence`, L3 contract `_graph_contract_block`, cochange `_cochange_block`, L5/L5b `_l5_nudge`/`_structural_risk_note`, L6 `_l6_reindex` — gated OFF in substrate mode) |
 | `gt_agent.py` (GTMiniSweAgent), `gt_oracle.py`, `gt_oracle_sense.py`, `phase_policy.py` | **LIVE** | harness adapter + per-emission decision gate + phase shim |
-| `src/groundtruth/hooks/post_view.py`, `post_edit.py` | **DEAD-on-DeepSWE (OH-only)** | docstring "Called by OpenHands PostToolUse hook"; NOT in `gt_agent.py:207-233` injection allow-list; `post_view` survives only as a byte-parity ORACLE for `test_producer_parity.py` |
-| `src/groundtruth/mcp/server.py`, `mcp/tools.py` | **DEAD-on-DeepSWE (MCP-only)** | FastMCP stdio server for Cursor/Claude-Code/Codex/OpenHands; pier path never starts MCP |
+| `src/groundtruth/hooks/post_view.py`, `post_edit.py` | **DEAD — OH RETIRED (test-oracle only)** | OH is retired, so these route on NO live surface; the live per-turn/post-view producer is `artifact_deepswe/gt_mini_patch.py`. NOT in `gt_agent.py:207-233` injection allow-list; retained ONLY as byte-parity ORACLEs (imported by 20+ tests, e.g. `test_producer_parity.py`) — keep CALLABLE, never route |
+| `src/groundtruth/mcp/server.py`, `mcp/tools.py` | **LIVE — GT-MCP product surface; DEAD-on-DeepSWE** | this is 'gt': the FastMCP stdio product for Cursor / Claude-Code / Codex. DEAD on the mini-swe/DeepSWE eval path (pier never starts MCP). KEEP — live product surface |
 
 ## §7 gates / proof / reconcile
 
@@ -89,7 +93,9 @@ The `dead_path_registry.py` `DEAD_PATHS` are **hard-dead** (no importer anywhere
 **Do NOT hard-retire `v7_brief`/`brief_v5`/`v7_layers`** — they have a live CLI/kernel importer
 (`cli/commands.py`, `control/kernel.py`, `run_kernel_paired_gate.py`, `run_live_lite_paired.py`).
 A hard DEAD_PATH would break those runners. They get a **soft `CLI_LEGACY` / `DEAD_ON_DEEPSWE`** label
-(advisory metadata) — dead on the DeepSWE substrate path, live only on the OH/kernel CLI path.
+(advisory metadata) — dead on the DeepSWE substrate path, live only on the kernel/CLI path (OH is
+retired). NOTE: `v7_brief.generate_brief` is a DUPLICATE brief generator vs the live
+`v1r_brief.generate_v1r_brief → v7_4_brief.run_v74` chain, flagged for retire/repoint.
 
 **Registry has no teeth:** `DEAD_PATHS` is enforced by a unit test against 4 hard-coded
 `LIVE_ENTRYPOINTS`, NOT a runtime import guard. A wrapper importing a quarantined module is caught only

@@ -217,6 +217,7 @@ def test_cmd_append_corrupt_classification_exits_clean(tmp_path, capsys):
 
 # --- v22_brief silent-failure wiring -----------------------------------------
 
+@pytest.mark.skip(reason="DEAD SURFACE retired — v22_brief guarded fail-closed (zero live importer); see test_dead_surface_guards.py")
 def test_v22_brief_records_rank_files_failure(tmp_path, monkeypatch):
     """rank_files raises → record() is called via the new wrapper, NOT pass."""
     sf = tmp_path / "sf.jsonl"

@@ -1,5 +1,15 @@
 """Graph-map brief generator — core module.
 
+==============================================================================
+DEAD SURFACE — superseded by the v1r ``<gt-graph-map>`` rendering
+(groundtruth.pretask.v1r_brief.generate_v1r_brief -> render_brief, which appends
+the graph-map block via groundtruth.pretask.curation_map). NOT routable on any
+live path (no DeepSWE/OH entrypoint imports it; audit Grep=0). Retained ONLY for
+the dead-path registry test (tests/unit/test_dead_path_registry.py asserts it is
+quarantined). A plain import still succeeds; CALLING the producer
+(``build_graph_map``) raises by design. See GT_ARCHITECTURE_LINEAGE.md.
+==============================================================================
+
 DEPRECATED / NOT ON THE LIVE PATH (wire.md, 2026-05-29). This module is never
 imported by the eval path (audit Grep=0). The live first-turn brief is
 ``groundtruth.pretask.v1r_brief.generate_v1r_brief`` — its ``render_brief`` now
@@ -104,6 +114,11 @@ def build_graph_map(
         max_callers: max callers per file
         max_callees: max callees per file
     """
+    raise RuntimeError(
+        "DEAD SURFACE: groundtruth.brief.graph_map.build_graph_map superseded by "
+        "v1r <gt-graph-map> rendering (v1r_brief + curation_map); not routable. "
+        "See GT_ARCHITECTURE_LINEAGE.md."
+    )
     if not os.path.exists(graph_db_path):
         return GraphMapBrief()
 

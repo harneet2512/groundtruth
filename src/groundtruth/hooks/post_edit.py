@@ -1,6 +1,13 @@
 """Post-edit hook v5 -- graph.db-driven evidence with priority-ordered output.
 
-Called by OpenHands PostToolUse hook on file_editor operations.
+DEAD — OpenHands is RETIRED (no live OH harness). NOT a live router on any
+surface. The live per-turn / post-view producer is
+``artifact_deepswe/gt_mini_patch.py`` (mini-swe). This module is retained ONLY
+as a byte-parity test oracle (imported by 20+ tests) — keep it CALLABLE, never
+route it.
+
+(Historically invoked by the OpenHands PostToolUse hook on file_editor
+operations.)
 Priority order (stop when 300 tokens / ~1200 chars reached):
   1. Caller CODE lines (from graph.db edges.source_line -> read actual line from file)
   2. Sibling function pattern (from graph.db parent_id -> read sibling body snippet)

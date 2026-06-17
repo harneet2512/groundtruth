@@ -27,6 +27,11 @@ from groundtruth.pretask.v2_types import (
     RankedResults,
 )
 
+# DEAD SURFACE retired: v2_ranker has zero live importer and is guarded fail-closed
+# (its entry fns raise). Its tests exercise dead code, so the whole module is skipped.
+# See test_dead_surface_guards.py / GT_ARCHITECTURE_LINEAGE.md.
+pytestmark = pytest.mark.skip(reason="DEAD SURFACE retired — v2_ranker guarded fail-closed (zero live importer)")
+
 
 @pytest.fixture
 def tiny_db(tmp_path: Path) -> str:

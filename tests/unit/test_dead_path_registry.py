@@ -104,21 +104,26 @@ LIVE_CHAIN_MODULES = [
 
 def test_guard_passes_on_clean_live_chain_under_proof_mode():
     """The guard must NOT false-fail: importing the real live DeepSWE brief chain
-    (v1r_brief -> v7_4_brief -> localizers/anchors + embedder + LSP config) loads ZERO
-    DEAD_PATHS module, so the guard returns cleanly even with proof mode active."""
+    (v1r_brief -> v7_4_brief -> localizers/anchors + embedder + LSP config) imports ZERO
+    DEAD_PATHS module, so the guard returns cleanly even with proof mode active. Hermetic:
+    measured as a DELTA (the live chain must not NEWLY load a dead module) and the guard is
+    checked against the live-chain module map only, so a dead module another test left in the
+    global sys.modules cannot pollute this assertion (the real proof runs in a fresh process)."""
     from groundtruth.runtime.dead_path_registry import (
         DEAD_PATHS,
         assert_no_dead_surface_loaded,
     )
 
+    dead_before = {d for d in DEAD_PATHS if d in sys.modules}
     for m in LIVE_CHAIN_MODULES:
         importlib.import_module(m)
-
-    # Sanity: the real live chain leaves no dead module in sys.modules.
-    assert [d for d in DEAD_PATHS if d in sys.modules] == []
-    # Proof mode active, clean chain -> must not raise.
-    assert_no_dead_surface_loaded(env={"GT_PROOF_MODE": "1"}) is None
-    assert_no_dead_surface_loaded(env={"GT_REQUIRE_FULL_STACK": "1"}) is None
+    dead_after = {d for d in DEAD_PATHS if d in sys.modules}
+    # The live chain itself imports no dead module (delta, not global process state).
+    assert dead_after - dead_before == set(), f"live chain newly imported dead: {dead_after - dead_before}"
+    # Proof mode active, live-chain-only module map -> must not raise.
+    live_only = {m: sys.modules[m] for m in LIVE_CHAIN_MODULES if m in sys.modules}
+    assert assert_no_dead_surface_loaded(env={"GT_PROOF_MODE": "1"}, modules=live_only) is None
+    assert assert_no_dead_surface_loaded(env={"GT_REQUIRE_FULL_STACK": "1"}, modules=live_only) is None
 
 
 @pytest.mark.parametrize("flag", ["GT_PROOF_MODE", "GT_REQUIRE_FULL_STACK"])

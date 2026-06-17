@@ -1,8 +1,14 @@
 """Post-view hook — structural coupling enrichment for file reads.
 
-Called by OpenHands PostToolUse hook on file_editor view operations.
-Composes: PatternRoleClassifier + shared-state coupling detection.
-Outputs 0-5 compact structural notes to stdout.
+DEAD — OpenHands is RETIRED (no live OH harness). NOT a live router on any
+surface. The live per-turn / post-view producer is
+``artifact_deepswe/gt_mini_patch.py`` (mini-swe). This module is retained ONLY
+as a byte-parity test oracle (imported by 20+ tests) — keep it CALLABLE, never
+route it.
+
+(Historically invoked by the OpenHands PostToolUse hook on file_editor view
+operations.) Composes: PatternRoleClassifier + shared-state coupling
+detection. Outputs 0-5 compact structural notes to stdout.
 
 Usage:
     python -m groundtruth.hooks.post_view --root=/testbed --db=/tmp/gt_index.db --file=<path>

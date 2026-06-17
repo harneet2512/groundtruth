@@ -102,6 +102,7 @@ def test_v22_brief_no_rank_based_tier_helpers():
     assert not hasattr(v22, "_func_tier")
 
 
+@pytest.mark.skip(reason="DEAD SURFACE retired — v22_brief guarded fail-closed (zero live importer); see test_dead_surface_guards.py")
 def test_v22_brief_empty_issue_returns_empty_string(tmp_path):
     from groundtruth.pretask.v22_brief import generate_brief
 
@@ -110,6 +111,7 @@ def test_v22_brief_empty_issue_returns_empty_string(tmp_path):
     assert generate_brief("   \n\t  ", "/no", "/no") == ""
 
 
+@pytest.mark.skip(reason="DEAD SURFACE retired — v22_brief guarded fail-closed (zero live importer); see test_dead_surface_guards.py")
 def test_v22_brief_missing_db_returns_empty(tmp_path):
     from groundtruth.pretask.v22_brief import generate_brief
 

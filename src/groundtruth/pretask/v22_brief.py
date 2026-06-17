@@ -1,5 +1,15 @@
 """v8.2.2 brief generator (host-side).
 
+==============================================================================
+DEAD SURFACE — superseded by groundtruth.pretask.v1r_brief.generate_v1r_brief
+(the live first-turn brief) -> v7_4_brief.run_v74 (the live ranker). NOT
+routable on any live path (DeepSWE: gt_run_proof.py/gt_agent.py/gt_mini_patch.py;
+OH: oh_gt_full_wrapper.py — none import this). Retained ONLY for the dead-path
+registry test (tests/unit/test_dead_path_registry.py imports it to assert it is
+quarantined). A plain import still succeeds; CALLING the producer
+(``generate_brief``) raises by design. See GT_ARCHITECTURE_LINEAGE.md.
+==============================================================================
+
 DEPRECATED / NOT REACHED ON THE LIVE PATH (wire.md, 2026-05-29). In the canary,
 ``oh_gt_full_wrapper`` populates ``instance['gt_brief']`` from
 ``v1r_brief.generate_v1r_brief`` first; ``generate_task_brief`` returns that
@@ -131,6 +141,11 @@ def generate_brief(
     a non-empty brief string on success, or an empty string on hard failure
     (caller decides whether to fall back).
     """
+    raise RuntimeError(
+        "DEAD SURFACE: groundtruth.pretask.v22_brief.generate_brief superseded by "
+        "groundtruth.pretask.v1r_brief.generate_v1r_brief; not routable. "
+        "See GT_ARCHITECTURE_LINEAGE.md."
+    )
     if not issue_text or not issue_text.strip():
         return ""
     if not os.path.exists(graph_db_path):

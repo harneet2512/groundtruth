@@ -1,4 +1,9 @@
-"""MCP server using stdio transport."""
+"""MCP server using stdio transport.
+
+LIVE = the GT-MCP product surface (Cursor / Claude-Code / Codex via FastMCP
+stdio). This is 'gt'. DEAD on the mini-swe/DeepSWE eval path (pier never starts
+MCP). KEEP — this is a live product surface; do not guard or remove.
+"""
 
 from __future__ import annotations
 
