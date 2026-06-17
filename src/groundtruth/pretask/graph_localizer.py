@@ -714,7 +714,27 @@ class LocalizerResult:
 
 
 def _normalize(fp: str) -> str:
-    return fp.replace("\\", "/").lstrip("./").lstrip("/")
+    """Canonical candidate-map key — the SINGLE path chokepoint every candidate
+    map in this module keys through (witnesses/degrees/decay/grep/sem/agreement/
+    scope). Backslashes -> '/', then a './' PREFIX is stripped (repeatable: '././'),
+    then exactly one leading '/' (absolute tolerance).
+
+    BUG-1 (path-key over-strip): the prior body was ``.lstrip("./").lstrip("/")``.
+    ``str.lstrip("./")`` is a CHARSET strip, not a prefix strip — it greedily ate
+    EVERY leading '.'/'/' char, so a real top-level dotfile dir lost its dot
+    (``.github/x.py`` -> ``github/x.py``) and two genuinely-distinct files collapsed
+    to one key (``./.config/app.py`` and ``config/app.py`` both -> ``config/app.py``),
+    splitting/merging the gold candidate. control/paths.py:normalize documents this
+    exact hazard. Fix: anchored ``./``-PREFIX strip (leading dots in real path
+    components preserved), then one leading '/'. Common cases are byte-identical
+    (``./beets/importer.py`` -> ``beets/importer.py``; ``beets/importer.py`` ->
+    itself); only the over-strip pathology changes."""
+    text = fp.replace("\\", "/")
+    while text.startswith("./"):
+        text = text[2:]
+    if text.startswith("/"):
+        text = text[1:]
+    return text
 
 
 def _struct_witness_tier(c: "Candidate") -> int:
