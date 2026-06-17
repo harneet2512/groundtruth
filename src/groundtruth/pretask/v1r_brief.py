@@ -769,6 +769,16 @@ def _caller_contract_for_file(
                 # is never a fact NOR an unverified location hint.
                 if _is_vendored_path(caller_file or ""):
                     continue
+                # 2026-06-17 demo-filter: a caller located in a docs/examples/
+                # demo path is NOISE, not a real dependent — it tells the agent to
+                # inspect a tutorial, not a function that USES the edit target. The
+                # scope-chain (c15d306f) + localization entries already drop these
+                # via the SAME canonical predicate; the brief Callers pillar missed
+                # it (textual-richlog leaked `compose() in docs/examples/...`).
+                # `_is_vendored_path` does NOT catch examples/ or docs/ — only
+                # `_is_test_or_demo` does. Correct-or-quiet: keep real source callers.
+                if _is_test_or_demo(caller_file or ""):
+                    continue
                 # Cross-language disqualifier (mini-delivery port, boa [57]): a
                 # CALLS edge whose endpoint files are in DIFFERENT language
                 # families cannot be a real source-level call, whatever its
@@ -930,6 +940,14 @@ def _resolved_witnesses_for_file(
             # builtin/dunder-shadow targets are never [WITNESS] facts.
             if _is_vendored_path(caller_file or ""):
                 continue
+            # 2026-06-17 demo-filter: a caller in a docs/examples/ demo path is
+            # never a resolved-caller WITNESS — it points the L1 `resolved caller:`
+            # annotation at a tutorial file, not a real dependent (textual-richlog
+            # leaked `resolved caller: compose() in docs/examples/...`). Same
+            # canonical predicate the localization/scope surfaces use; `_is_vendored_path`
+            # misses examples/ + docs/, so this is the load-bearing drop.
+            if _is_test_or_demo(caller_file or ""):
+                continue
             if _is_builtin_shadow_name(target_name or ""):
                 continue
             # Cross-language disqualifier (mini-delivery port, boa [57]): an
@@ -981,6 +999,12 @@ def _resolved_witnesses_for_file(
             # 2026-06-10 fact-filter: vendored/minified callee files and
             # builtin/dunder-shadow callee names are never [WITNESS] facts.
             if _is_vendored_path(callee_file or ""):
+                continue
+            # 2026-06-17 demo-filter (symmetry with the caller branch): a callee
+            # defined in a docs/examples/ demo path is never a resolved-call
+            # WITNESS — `resolved call: -> x() in docs/examples/...` is the same
+            # tutorial-misdirection noise. `_is_vendored_path` misses examples/+docs/.
+            if _is_test_or_demo(callee_file or ""):
                 continue
             if _is_builtin_shadow_name(callee_name or ""):
                 continue
