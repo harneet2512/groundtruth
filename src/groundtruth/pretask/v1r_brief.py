@@ -2144,7 +2144,24 @@ def render_brief(
                     )
                 )
                 if chain_desc:
-                    lines.append(_cap(f"   Chain: {chain_desc}"))
+                    # Scrub desc segments that reference a dropped (vendored/test/demo)
+                    # file. The desc describes edges over ALL chain files, so a vendored
+                    # node (qunit.js, jquery.js) leaks into "Chain:" even when the
+                    # basenames above are clean (the witnessed js-Consistency leak:
+                    # `qunit.js -> qunit.js (process -> process)`). Keep only segments
+                    # free of every dropped basename; if none survive, emit no Chain line.
+                    _dropped_bn = {os.path.basename(f) for f in chain_files} - {
+                        os.path.basename(f) for f in _chain_src
+                    }
+                    if _dropped_bn:
+                        _segs = [
+                            s
+                            for s in chain_desc.split(";")
+                            if s.strip() and not any(bn in s for bn in _dropped_bn)
+                        ]
+                        chain_desc = "; ".join(s.strip() for s in _segs)
+                    if chain_desc:
+                        lines.append(_cap(f"   Chain: {chain_desc}"))
 
     # Directive ending: gated on both score gap AND top tier being [VERIFIED].
     # Internal gating only — no tier displayed in directive line.

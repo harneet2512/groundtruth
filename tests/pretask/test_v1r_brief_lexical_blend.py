@@ -357,13 +357,15 @@ def test_vendored_file_dropped_from_scope_chain(tmp_path: Path) -> None:
     conn.close()
     files = [FileEntry(path="src/a.js", score=0.99, function_names=["f"])]
     # third_party/ FIRST so it renders visibly (not truncated) when the filter misses it
+    # the description ALSO references the vendored node — the witnessed leak shape
+    # (`qunit.js -> reporter.js`), which the basename filter alone does NOT scrub.
     chain = types.SimpleNamespace(
         files=[
             "third_party/jquery/qunit.js",
             "src/a.js",
             "src/b.js",
         ],
-        description="a.js -> b.js",
+        description="qunit.js -> b.js (emit -> fn); a.js -> b.js (run -> emit)",
         confidence=0.9,
     )
     out = render_brief(files, graph_db=db, scope_chains=[chain])
@@ -374,7 +376,18 @@ def test_vendored_file_dropped_from_scope_chain(tmp_path: Path) -> None:
     assert "a.js" in chain_line and "b.js" in chain_line, (
         f"real source files dropped from the chain: {chain_line!r}"
     )
-    # the third_party vendored file is gone (correct-or-quiet: never inspect third-party)
+    # the third_party vendored file is gone from the basename chain
     assert "qunit.js" not in chain_line, (
         f"third_party vendored file leaked into 'check ALL': {chain_line!r}"
     )
+    # AND gone from the "Chain:" description (the real delivered leak) — the
+    # qunit.js segment is scrubbed, the source-only segment survives
+    desc_lines = [ln for ln in out.splitlines() if ln.strip().startswith("Chain:")]
+    if desc_lines:
+        desc_line = desc_lines[0]
+        assert "qunit.js" not in desc_line, (
+            f"vendored node leaked into the Chain: description: {desc_line!r}"
+        )
+        assert "a.js -> b.js" in desc_line, (
+            f"source-only segment wrongly scrubbed from Chain: {desc_line!r}"
+        )
