@@ -371,5 +371,97 @@ def test_final_window_is_subset_of_semantic_pool(tmp_path, monkeypatch):
         )
 
 
+# ---------------------------------------------------------------------------
+# 4. ANCHOR-HALF BUDGET PRIORITY: the issue-relevant file in the DB-TAIL is still
+#    encoded under a tight budget (RED pre-fix: budget skipped by raw DB-row order)
+# ---------------------------------------------------------------------------
+
+def _make_tail_relevant_graph(path: str, n_filler: int, syms_per_file: int) -> str:
+    """A flat graph where every file is irrelevant filler EXCEPT one issue-relevant
+    file inserted LAST (so it sits in the DB-row tail of SELECT DISTINCT file_path).
+    The relevant file's symbols are named for the issue subject (frobnicate_widget);
+    filler symbols share NO issue tokens. Returns the relevant file path."""
+    conn = sqlite3.connect(path)
+    conn.executescript(_SCHEMA)
+    rows = []
+    for i in range(n_filler):
+        fp = f"src/unrelated_{i:03d}.py"
+        for j in range(syms_per_file):
+            rows.append(("Function", f"helper_{i}_{j}", fp, f"(a{j})"))
+    # The issue-relevant file goes in LAST -> DB-tail under SELECT DISTINCT.
+    relevant = "src/zzz_widget_module.py"
+    for j in range(syms_per_file):
+        rows.append(("Function", f"frobnicate_widget_{j}", relevant, "(cfg)"))
+    conn.executemany(
+        "INSERT INTO nodes (label, name, file_path, signature, is_test, language) "
+        "VALUES (?, ?, ?, ?, 0, 'python')",
+        rows,
+    )
+    conn.commit()
+    conn.close()
+    return relevant
+
+
+def test_anchor_budget_prioritizes_issue_relevant_tail_file(tmp_path, monkeypatch):
+    """The anchor-half (_get_file_embeddings) encode budget must visit the
+    issue-relevant file FIRST even when it is last in DB-row order, so a tight
+    budget on a big repo still scores the gold-bearing file.
+
+    RED pre-fix (budget iterated raw `SELECT DISTINCT file_path` order): the tail
+    relevant file was skipped -> its symbols never encoded -> zero matrix -> score
+    absent from semantic_top_k. GREEN: priority order encodes it within budget."""
+    _clear_caches()
+    n_filler, spf = 80, 10                       # 800 filler passages
+    db = str(tmp_path / "graph.db")
+    relevant = _make_tail_relevant_graph(db, n_filler, spf)
+
+    # Budget smaller than the filler set so DB-order would exhaust the budget on
+    # filler before ever reaching the tail relevant file.
+    monkeypatch.setenv("GT_SEM_PASSAGE_BUDGET", "200")
+    monkeypatch.delenv("GT_PROOF_MODE", raising=False)
+
+    model = CountingEmbedder()
+    issue = "frobnicate widget crashes when the config is reloaded"
+
+    file_paths, file_matrix = anchor_select._get_file_embeddings(
+        db, str(tmp_path), model, issue
+    )
+    rel_key = relevant.replace("\\", "/").lstrip("./").lstrip("/")
+
+    # PRIMARY (deterministic, embedder-cosine-independent): the issue-relevant tail
+    # file's symbols were ENCODED within budget — its matrix is non-empty. This is
+    # exactly what the priority fix guarantees; it does NOT depend on the random
+    # CountingEmbedder cosine sign. RED under raw DB order: the tail file is skipped,
+    # its passages never encoded, the matrix is the (0, dim) zero-row fallback.
+    rel_mat = file_matrix.get(rel_key)
+    assert rel_mat is not None and rel_mat.shape[0] > 0, (
+        f"issue-relevant tail file {rel_key} got an EMPTY matrix — its symbols were "
+        f"skipped by the encode budget (raw DB order), defeating relevance ranking"
+    )
+    # CORROBORATING: at least one filler file is STARVED of its vectors (empty
+    # matrix), proving the budget actually bound — the win is PRIORITY, not an
+    # over-large budget that encoded everything.
+    starved = [
+        fp for fp in file_paths
+        if fp != rel_key and (
+            file_matrix.get(fp) is None or file_matrix[fp].shape[0] == 0
+        )
+    ]
+    assert starved, (
+        "no file was starved by the budget — it did not bind, so the priority "
+        "ordering is untested (raise n_filler or lower GT_SEM_PASSAGE_BUDGET)"
+    )
+
+
+def test_budget_priority_order_is_db_order_without_issue_tokens():
+    """issue_text='' (or token-less) must leave the budget order byte-identical to
+    the input file_paths — issue-less / warm-cache callers are unchanged."""
+    fps = ["a/x.py", "b/y.py", "c/z.py"]
+    passages = {fp: [f"sym_{fp} ()"] for fp in fps}
+    assert anchor_select._budget_priority_order(fps, passages, "") == fps
+    # A pure-number issue (no >=3-char identifier parts) also yields no reordering.
+    assert anchor_select._budget_priority_order(fps, passages, "12 34") == fps
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q", "-s"]))

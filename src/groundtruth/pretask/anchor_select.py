@@ -272,10 +272,54 @@ def _anchor_passage_budget() -> int:
     return default
 
 
+def _budget_priority_order(
+    file_paths: list[str],
+    file_passages: dict[str, list[str]],
+    issue_text: str,
+) -> list[str]:
+    """Order ``file_paths`` so the most issue-relevant files are visited FIRST by the
+    encode budget — the structural fix for the budget skipping by raw DB-row order.
+
+    Relevance = the count of issue normalized word-parts that appear in the file's
+    symbol passages OR its path's normalized parts (the SAME lexical signal
+    ``_symbol_anchors`` uses). This is a CHEAP pure-Python pass over passages already
+    built in memory — no DB, no embed, inside the demand-scope cost bound.
+
+    Stable: a higher-overlap file sorts ahead of a lower-overlap one; ties keep the
+    original ``file_paths`` order (Python's sort is stable). When ``issue_text`` is
+    blank (no issue tokens) EVERY file scores 0 overlap, so the order is byte-
+    identical to the input — issue-less / warm-cache callers are unchanged.
+    Generalized: pure lexical token overlap, no gold labels, no benchmark logic."""
+    issue_parts = _issue_word_parts(issue_text)
+    if not issue_parts:
+        return list(file_paths)
+
+    def _overlap(fp: str) -> int:
+        parts: set[str] = set()
+        # Path segments contribute their normalized parts (a file named for the
+        # subject — e.g. importer.py for an "importer" issue — ranks up even with
+        # no symbol-name hit).
+        for seg in fp.replace("\\", "/").split("/"):
+            seg = seg.rsplit(".", 1)[0]  # drop extension
+            parts.update(_normalize_identifier(seg))
+        # Symbol-name parts: the passage head is "{name} {signature}"; take the
+        # leading identifier-ish tokens of each passage so we don't tokenize whole
+        # bodies (bounded work).
+        for passage in file_passages.get(fp, ()):
+            head = passage.split("\n", 1)[0]
+            for tok in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", head):
+                parts.update(_normalize_identifier(tok))
+        return len(parts & issue_parts)
+
+    # Higher overlap first; stable sort preserves DB order within an overlap tier.
+    return sorted(file_paths, key=_overlap, reverse=True)
+
+
 def _get_file_embeddings(
     graph_db: str,
     repo_root: str,
     model: object,
+    issue_text: str = "",
 ) -> tuple[list[str], dict[str, np.ndarray]]:
     """Return (file_paths, {file_path -> (n_symbols, dim) symbol-vector matrix}).
 
@@ -385,14 +429,32 @@ def _get_file_embeddings(
     # embedded EVERY non-test file's symbols in ONE batch — a large repo sent millions
     # of passages and ballooned the HOST process ~15GB -> OOM on a 16GB runner. Cap the
     # number of FRESH (cache-missing) passages SENT to the embedder, exactly as
-    # graph_localizer._semantic_score_by_file does. file_paths iteration order is the
-    # caller's priority order, so over-budget passages are the LOWEST-priority files;
-    # they simply stay unscored (their file gets its symbols' available vectors, or the
-    # zero-vector fallback below) — bounded beats killed, correct-or-quiet. Cache hits
-    # are FREE (already paid), so warm caches still score every file.
+    # graph_localizer._semantic_score_by_file does. The budget visit is ordered by
+    # issue relevance (see _budget_priority_order below), so over-budget passages are
+    # the LEAST issue-relevant files; they simply stay unscored (their file gets its
+    # symbols' available vectors, or the zero-vector fallback below) — bounded beats
+    # killed, correct-or-quiet. Cache hits are FREE (already paid), so warm caches
+    # still score every file.
     _budget = _anchor_passage_budget()
     _n_skipped = 0
-    for fp in file_paths:
+    # ENCODE-BUDGET PRIORITY (bug fix 2026-06-17): the budget truncates from the
+    # BACK of the iteration order, so whichever files are visited LAST stay unscored
+    # on a >budget repo. `file_paths` is `SELECT DISTINCT file_path` — raw DB-ROW
+    # order, NOT relevance — so on a big repo the issue's own candidate/anchor files
+    # can land in the skipped tail and score 0.0 (the gold file unranked, defeating
+    # the MaxSim granularity fix on exactly the repos where it matters). Unlike the
+    # localizer half (graph_localizer._semantic_score_by_file), which receives `files`
+    # ALREADY in caller-priority order, this half builds file_paths itself with no
+    # priority signal. Order the budget visit by issue-token overlap (the SAME
+    # lexical signal _symbol_anchors uses: a file's symbols + path normalized parts
+    # intersected with the issue's normalized parts), highest overlap first; ties
+    # keep DB order (stable sort). issue_text="" (no issue) => unchanged DB order, so
+    # warm-cache and issue-less callers are byte-identical. This only reorders WHICH
+    # files spend the cold-path encode budget — the returned file_paths list and the
+    # path-keyed score map are unchanged (generalized, no gold labels, no benchmark
+    # logic).
+    _budget_order = _budget_priority_order(file_paths, file_passages, issue_text)
+    for fp in _budget_order:
         for passage in file_passages[fp]:
             h = passage_hash(passage, model_name, dim, _SUMMARY_VERSION)
             if h in vec_by_hash or h in seen_miss:
@@ -489,7 +551,9 @@ def semantic_top_k(
     ``alpha*max_i(cos_i) + (1-alpha)*mean(top_k cos_i)`` (``aggregate_symbol_cosines``)
     — so the gold function is not averaged into 60 siblings. The return CONTRACT is
     byte-identical: ``dict[file_path -> float]`` in [0, 1]."""
-    file_paths, file_matrix = _get_file_embeddings(graph_db, repo_root, model)
+    file_paths, file_matrix = _get_file_embeddings(
+        graph_db, repo_root, model, issue_text
+    )
     if not file_paths:
         return {}
 
