@@ -122,6 +122,73 @@ The DEFINITION OF DONE (metrics changed on a billed run) remains the one unconve
 
 ---
 
+## 9. Mechanism-parity verification — the name_match-as-fact class, re-proven on integrated current code (2026-06-17)
+
+A MAX functional-correctness review (`GT_FUNCTIONAL_CODE_REVIEW_20260615T1900Z.md`, 9 P0 + ~16 P1)
+hunted the archetype "code that exists + matches the docs but produces wrong/missing/silent output."
+This session re-audited every claim **on current HEAD** (`e4714807`) — 6 independent read-only passes
+(5 parallel agents + 1 direct read), each pinned to current `file:line` with the gate quoted. **Result:
+the review is a PRE-FIX snapshot — all 19 audited defects are SUCCESS on current code**, each carrying a
+`BUG-N (2026-06-15)` fix-comment that landed right after it. The dominant `name_match`-as-fact class is
+**closed end-to-end** — a name-guess (conf 0.6) is never laundered as a fact in any layer, any language.
+
+| audited site (gt_gt §) | the gate that makes it SUCCESS | evidence (current pin) | status |
+|---|---|---|---|
+| consensus scope `_query_scope` (§6) | `resolution_method ∈ DETERMINISTIC`; legacy no-method DB → 0.9 fail-closed | `gt_mini_patch.py:2124` `_scope_fact_clause` | **PROVEN-AUDIT** |
+| brief `_edge_conf_clause`/Calls/Callers/`_top_functions`/`_edit_target_guard` (§4) | categorical det-clause on no-conf DB; name_match → `(unverified)` only; anchor symbols floated before LIMIT; exact-file-or-abstain guard | `v1r_brief.py:146-155,740,331-333,2012-2033` (BUG-1/2/3) | **PROVEN-AUDIT** |
+| localizer floor/RRF/generated-demote/key-norm (§4,§11) | floor 0.5 (admits name_match+coalesces NULL); relevance keys before file_path; suffix-only basename demote; `_norm_path` at every ingress | `hub_penalty.py:23`, `graph_localizer.py:2744`, `path_policy.py:55-69` (BUG-5/2/3/1) | **PROVEN-AUDIT** |
+| Go indexer PRECEDES/incremental/closure (§2) | receiver re-resolved to a concrete class, fail-closed; restore caps name-only at CANDIDATE + matches qualified_name; closure adjacency reads `bestEdgeConf` | `promote.go:945`, `incremental.go:210-231`, `closure.go:159-174` | **PROVEN-AUDIT** |
+| LSP per-server budget / cold-cache / column / warm (§3) | jdtls=180s, gopls=60s budget; `_compute_degraded`+`exit 2` under GT_REQUIRE_LSP; whole-word `\btarget\s*\(` regex (no str.find); warm = launched∧probe_ok via perf_counter | `resolve.py:581-585,131-142,50-87,118-128` | **PROVEN-AUDIT** |
+| embedder query truncation (§5) | query window decoupled from passage: gte=1024 / e5=512, passages=128 — closes measured cosine 0.866→0.617 | `embed.py:64-78` (BUG-7) | **PROVEN-AUDIT** |
+| wiring `GT_VERIFY_STRUCTURAL_RISK` + L4 `find_callers` (§7,§15) | workflow sources+forwards the lever (default-OFF read load-bearing); `is_fact` tri-state → MCP renders name_match callers `(unverified)`/`break_risk=UNVERIFIED` | `deepswe_full.yml:1103,1171`, `graph.py:347-358`, `tools.py:495-502` | **PROVEN-AUDIT** |
+| L5 per-turn steer phase-filter (§6,§15) | test turn → VERIFY (`test_count` fed); `Event.TEST_RESULT` event-bound so phase filter ALLOWS; latch re-arms after gate via `_phase_dropped_losers` | `gt_mini_patch.py:3515,3530,5062-5100` (bug #4a/b/c) | **PROVEN-AUDIT** |
+
+**Cosmetic residuals (NOT FAILs, logged):** `gt_ae_block.sh:5-15` header doc-drift (claims "not yet
+sourced" though `:1103` sources it); `path_policy._norm` differs from the 3 candidate-key normalizers
+(path-class predicates only — no key split); `_find_call_column.expected_col` wired-but-unused.
+
+**Substrate lock + TEST witness.** All fixes committed at HEAD `e4714807`; the all-fixes substrate is
+**built+pushed** — `ghcr.io/hbali-stack/gt-substrate@sha256:22d94aed…` (builder `27656503258`, sha
+`e4714807`). The held-out **TEST-5** (go-critic · yjs · python-statemachine · drizzle-orm · boa — 1/lang,
+never tuned on) is the final generalization gate, dispatched once on that substrate (`gt_trial §4` audit
+on completion). **STATUS: mechanism-parity PROVEN-AUDIT on the integrated current code; the live TEST
+witness converts it to PROVEN.**
+
+---
+
+## 10. DEPTH = full codebase knowledge in the graph (offline audit on the 5 TEST graphs, 2026-06-17)
+
+**Depth means: the FULL codebase's knowledge captured INTO graph.db so the agent can use it as CONTEXT** —
+not just nodes+edges, but the **columns** (`signature`/`return_type`/`qualified_name`) and the **22 property
+kinds** (`param` w/ types, `data_flow`, `return_shape`, `field_read`, `side_effect`, `call_order`,
+`exception_type/flow/handler`, `boundary_condition`, `caller_usage`, …). Every column should be FULL where
+the source has it; a thin column = missing depth.
+
+**Offline audit (production code, `is_test=0`, the 5 held-out TEST graphs, substrate 22d94aed):**
+| col | go | py | js | ts | rust | verdict |
+|---|---|---|---|---|---|---|
+| `signature` | 100 | 100 | 100 | 100 | 100 | **COMPLETE** (ts 53% over-all was test-callback noise) |
+| `qualified_name` | 100 | 100 | 100 | 100 | 100 | **COMPLETE** |
+| `return_type` | 28 | 42 | 4 | 58 | 72 | **INCOMPLETE — the type-depth gap** |
+
+**Why `return_type` is thin (diagnosed, not guessed):** two causes — (a) inference-based functions declare
+no static return type (js/ts/py legitimately lower); (b) the LSP hover type-enrichment that WOULD infer it
+is **capped at the top-50 most-referenced functions per language** — `resolve.py:1108 LIMIT 50` (the static
+parser captures `return_type` correctly where DECLARED: go `prepareArchive(...) error`→`error`, `main()`→`''`).
+So the long tail — and any issue-relevant function not in the top-50 — keeps only its declared type.
+
+**NOT gaps (my earlier false alarms, corrected):** RAISES is not missing — js 0-internal-class throws → 0
+edges (100%); go 1/1; `throw new Error()`/`panic("…")` are builtins with no node and correctly stay
+PROPERTIES (§2.6 non-invention). I had wrongly compared throw-instances to unique edges.
+
+**To close the depth gate (offline-first, then ONE targeted live re-index):** make the type-enrichment
+**demand-driven** (hover-enrich the issue-relevant / brief-candidate nodes + their callees, so the delivered
+contracts carry full types) and/or raise the `LIMIT 50` — bounded by the demand-driven principle (CLAUDE.md
+§SCALE), not whole-repo. Verify offline (re-index a TEST repo, assert `return_type` fills on the brief's
+candidate set), then a single live re-index proves it before climbing the stack.
+
+---
+
 ## Appendix A — DEPTH before/after (gt_gt §2.6 spec vs the current code, read line by line)
 
 **Framing.** gt_gt §2.6 was updated this session to record the landing (it cites

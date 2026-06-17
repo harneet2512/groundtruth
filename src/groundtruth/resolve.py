@@ -1089,12 +1089,19 @@ async def _resolve_edges(
     # ONE pipeline: edge verification + type enrichment in the same LSP session.
     enrich_stats = {"hover_ok": 0, "hover_fail": 0, "hover_skip": 0}
     try:
-        # Get top-50 most-referenced non-test functions (by incoming edge count)
+        # Type-depth enrichment (per-language; runs for EVERY language the LSP pass dispatches
+        # — go/py/ts/js/rust). Query is `WHERE n.language = ?` so the cap is PER LANGUAGE.
+        # Was a flat 50, which left `return_type` thin (the long tail of callees kept only their
+        # statically-declared type — empty for inference-based code; gt_new §10). Raise it,
+        # ordered by ref_count so the most-called (= most-likely-delivered-as-a-callee-contract)
+        # functions are enriched first; bounded by GT_LSP_ENRICH_LIMIT so a huge repo (boa ~9k fns)
+        # stays under the per-pass budget while small/medium repos get near-complete type depth.
+        _enrich_limit = max(50, int(os.environ.get("GT_LSP_ENRICH_LIMIT", "800") or "800"))
         _enrich_conn = sqlite3.connect(db_path)
         _enrich_conn.row_factory = sqlite3.Row
         _enrich_conn.execute("PRAGMA journal_mode=WAL")
         _enrich_conn.execute("PRAGMA busy_timeout=5000")
-        _top_nodes = _enrich_conn.execute("""
+        _top_nodes = _enrich_conn.execute(f"""
             SELECT n.id, n.name, n.file_path, n.start_line, n.signature, n.return_type,
                    COUNT(e.id) as ref_count
             FROM nodes n
@@ -1105,7 +1112,7 @@ async def _resolve_edges(
               AND n.language = ?
             GROUP BY n.id
             ORDER BY ref_count DESC
-            LIMIT 50
+            LIMIT {_enrich_limit}
         """, (language,)).fetchall()
 
         _enriched = 0
