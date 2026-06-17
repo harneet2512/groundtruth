@@ -986,6 +986,18 @@ def main(argv=None) -> int:
     # (LSP_UNSUPPORTED_EXPLICIT) remain an honest no-op.
     langs = _detect_langs(graph) or ([a.lang] if a.lang else [_detect_lang(graph)])
     scope_files = _demand_scope_files(graph, _read_issue(issue_file))
+    # Deliverable-path filter (parity with the brief's scope rendering): a vendored/
+    # test/demo fixture (examples/qunit.js, third_party/, node_modules/) is neither an
+    # edit target nor worth LSP budget — drop it from the delivered scope artifact AND
+    # the demand-scoped LSP pass. Correct-or-quiet, fail-safe. (js-Consistency hygiene.)
+    try:
+        from groundtruth.delivery.path_policy import (
+            is_test_or_demo as _itd,
+            is_vendored_path as _ivp,
+        )
+        scope_files = [f for f in scope_files if not _itd(f) and not _ivp(f)]
+    except Exception:
+        pass
     scope_path = ""
     if scope_files:
         scope_path = os.path.join(a.out, "gt_scope_files.txt")
