@@ -200,7 +200,8 @@ def classify_graph(cert, *, proof_mode: bool = False):
         return ("GRAPH_FAIL_BASES_INCOMPLETE", False)
     if proof_mode and cert.get("built_inside_container") is False:
         return ("GRAPH_FAIL_BUILT_ON_HOST", False)
-    if proof_mode and not cert.get("host_resolved_graph_db"):
+    if (proof_mode and not cert.get("built_inside_container")
+            and not cert.get("host_resolved_graph_db")):
         return ("GRAPH_FAIL_MISSING_HANDOFF", False)
     if (proof_mode and cert.get("host_resolved_graph_db")
             and cert.get("prebuilt_active") is False):
