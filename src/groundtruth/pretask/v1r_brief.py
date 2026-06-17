@@ -1703,6 +1703,135 @@ def _edit_target_contracts_block(graph_db: str, top: FileEntry) -> list[str]:
     return out if len(out) > 1 else []
 
 
+# Behavioral-obligation block (the contract/obligation pillar). The issue's own
+# requirement sentences (modals / behavior verbs / API-shape qualifiers) are mined
+# DETERMINISTICALLY by spec.extract_spec and ALREADY persisted to
+# gt_issue_anchors.json, but were never RENDERED into the brief — so the agent never
+# saw the parsed behavioral spec (run-grounded: the rust pest task whose failure was
+# coalescing SEMANTICS; the agent never saw the obligation). This block closes that
+# gap for ANY issue that states behavioral requirements (generalized — pure regex
+# over English requirement grammar, no repo/task/keyword logic; spec.py LEG 1).
+#
+# Correct-or-quiet (Cursor mentality): an obligation is rendered ONLY when its
+# verbatim text overlaps a FOCUS ANCHOR — the rendered edit-target functions'
+# identifier tokens (NOT the issue text, which would always "overlap" since the
+# obligations are drawn from it) — reusing the SAME passes_relevance_gate the other
+# non-edge signals use. No overlap → emit nothing. Fail-closed leakage guard: an
+# obligation that names a pytest test (test_*/*_test), a FAIL_TO_PASS / PASS_TO_PASS
+# token, or a rendered gold-file path token is DROPPED whole (never benchmaxx off
+# the grader's test names — gt_trial §6 leakage rule).
+_OBLIGATION_BUDGET = 4  # at most N obligation lines (compact, high-precision)
+_OBLIGATION_LINE_CHARS = 200  # per-obligation verbatim cap
+_F2P_TOKEN_RE = _re.compile(r"\b(?:FAIL_TO_PASS|PASS_TO_PASS|fail_to_pass|pass_to_pass)\b")
+_OBLIG_TEST_NAME_RE = _re.compile(r"\b(?:test_[A-Za-z0-9_]+|[A-Za-z0-9_]+_test)\b")
+
+
+def _obligation_is_leaky(verbatim: str, symbols, gold_path_tokens: set[str]) -> bool:
+    """Fail-closed: True if the obligation must NOT be rendered.
+
+    Drops the obligation WHOLE if its verbatim text (or any named symbol) carries a
+    pytest test name, a FAIL_TO_PASS / PASS_TO_PASS marker, or a token that equals a
+    rendered gold-file path component. These are grader-coupled surfaces — GT must
+    surface ZERO test references so its output is identical if the grader swaps.
+    """
+    low = (verbatim or "")
+    if _F2P_TOKEN_RE.search(low) or _OBLIG_TEST_NAME_RE.search(low):
+        return True
+    for s in (symbols or set()):
+        sl = str(s)
+        if _OBLIG_TEST_NAME_RE.search(sl) or _F2P_TOKEN_RE.search(sl):
+            return True
+        if sl.lower() in gold_path_tokens:
+            return True
+    return False
+
+
+def _render_obligations_block(
+    issue_text: str,
+    files: list[FileEntry],
+    cap,
+) -> list[str]:
+    """Render the ``<gt-obligations>`` behavioral-spec block, or ``[]`` when quiet.
+
+    ``cap`` is the body-line clip closure from ``render_brief``. Returns a list of
+    rendered lines (block tags included) or an empty list (correct-or-quiet).
+    """
+    if not issue_text:
+        return []
+    try:
+        from groundtruth.pretask.spec import extract_spec as _extract_spec
+        from groundtruth.config.evidence_markers import (
+            identifier_tokens as _id_tokens,
+            passes_relevance_gate as _rel_gate,
+        )
+        spec = _extract_spec(issue_text)
+    except Exception:
+        return []
+    if not spec.obligations:
+        return []
+
+    # FOCUS ANCHOR — the rendered edit-target functions' identifier tokens. An
+    # obligation is rendered ONLY when it overlaps THIS focus (the functions GT
+    # actually surfaced as edit targets), NOT merely the issue text. Issue-terms
+    # alone never discriminate (obligations ARE drawn from the issue, so they would
+    # always "overlap"); keying on the focus is what makes the gate bite — an
+    # obligation about an UNRELATED subsystem (no focus-token overlap) stays quiet.
+    # When the brief surfaced no focus functions, we cannot anchor → stay quiet for
+    # the whole block (correct-or-quiet; never launder the entire issue spec).
+    fn_tokens: set[str] = set()
+    gold_path_tokens: set[str] = set()
+    for f in files:
+        # bare names (function_names) are the focus anchor; `functions` holds
+        # signatures ("def foo(...)") whose tokens we also harvest as a fallback.
+        for fn in (
+            list(getattr(f, "function_names", []) or [])
+            + list(getattr(f, "functions", []) or [])
+        ):
+            fn_tokens |= _id_tokens(fn)
+        # gold-path tokens for the leakage guard — a rendered candidate's path
+        # components (basename stem + dir segments) must never appear AS an
+        # obligation symbol (that would couple the spec to the located file).
+        for seg in _re.split(r"[/\\.]+", str(getattr(f, "path", ""))):
+            if len(seg) >= 3:
+                gold_path_tokens.add(seg.lower())
+    if not fn_tokens:
+        return []  # no focus to anchor against — stay quiet
+
+    rendered: list[str] = []
+    seen: set[str] = set()
+    # to_serializable() yields plain dicts (verbatim_text / kind / symbols / …) —
+    # the SAME shape already persisted to gt_issue_anchors.json, so this block and
+    # the in-container consumers read an identical obligation view.
+    for o in spec.to_serializable():
+        if len(rendered) >= _OBLIGATION_BUDGET:
+            break
+        verbatim = (o.get("verbatim_text") or "").strip() if isinstance(o, dict) else ""
+        if not verbatim:
+            continue
+        kind = o.get("kind", "") if isinstance(o, dict) else ""
+        symbols = o.get("symbols", []) if isinstance(o, dict) else []
+        # Fail-closed leakage guard FIRST (drop whole obligation).
+        if _obligation_is_leaky(verbatim, symbols, gold_path_tokens):
+            continue
+        # Relevance gate: render only when the obligation overlaps the FOCUS anchor
+        # (the rendered edit-target functions). No focus overlap → drop this
+        # obligation. (issue_terms intentionally empty — focus is the discriminator.)
+        if not _rel_gate(verbatim, None, fn_tokens):
+            continue
+        # Collapse whitespace + cap so a long requirement sentence stays one line.
+        compact = " ".join(verbatim.split())[:_OBLIGATION_LINE_CHARS].strip()
+        key = compact.lower()
+        if not compact or key in seen:
+            continue
+        seen.add(key)
+        tag = f"[{kind}] " if kind else ""
+        rendered.append(cap(f"  - {tag}{compact}"))
+
+    if not rendered:
+        return []
+    return ["", "<gt-obligations>"] + rendered + ["</gt-obligations>"]
+
+
 def render_brief(
     files: list[FileEntry],
     *,
@@ -1949,6 +2078,18 @@ def render_brief(
             # D1: cap each EDIT-TARGET CONTRACTS callee line — a long Go/Rust typed
             # header (no docstring, just many params) can run to ~250 chars.
             lines.extend(_cap(_l) for _l in _etc_lines)
+
+    # BEHAVIORAL OBLIGATIONS (the contract/obligation pillar, after the contract
+    # section + before the scope chain). spec.extract_spec mines the issue's own
+    # requirement sentences (modals / behavior verbs / API-shape qualifiers) — they
+    # are already persisted to gt_issue_anchors.json but were never RENDERED, so the
+    # agent never saw the parsed behavioral spec (run-grounded: the rust pest task's
+    # coalescing-semantics requirement). Gated on focus-anchor overlap (correct-or-
+    # quiet) + a fail-closed leakage guard (no test-name / FAIL_TO_PASS / gold-path
+    # token). Generalized — pure requirement grammar, any repo/language.
+    _oblig_lines = _render_obligations_block(issue_text, files, _cap)
+    if _oblig_lines:
+        lines.extend(_oblig_lines)
 
     # Cross-file scope hint (Signal 1)
     # 2026-06-10 fact-filter (DELIVERY only — scope computation untouched):
