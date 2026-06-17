@@ -445,7 +445,17 @@ def _find_miniswe_trajectory(task: str, results_dir: str) -> str | None:
         if not hits:
             continue
         if task:
+            # pier TRUNCATES the trial dir to <truncated-task>__<hash>/agent/... so the
+            # full task id is often NOT a substring (superjson-error-stack-serialization
+            # vs ...serializat__7t9KqdK) — the exact-`in` filter then rejected the CORRECT
+            # trajectory → trajectory_source=none → false-zero deep_metrics (bug 9 residual).
+            # Match the pier trial stem as a PREFIX of the task id (truncation only shortens).
             scoped = [h for h in hits if task in h]
+            if not scoped:
+                for h in hits:
+                    m = re.search(r"([^/\\]+?)__[^/\\]+[/\\]agent", h)
+                    if m and len(m.group(1)) >= 8 and task.startswith(m.group(1)):
+                        scoped.append(h)
             if scoped:
                 return scoped[0]
             # P1-24: never borrow a sibling task's trajectory when task id is known.
