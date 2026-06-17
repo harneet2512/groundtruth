@@ -1102,7 +1102,10 @@ async def _resolve_edges(
         # most-referenced first up to the time budget rather than running unbounded. Default
         # limit is effectively all; GT_LSP_ENRICH_BUDGET_S caps the time.
         _enrich_limit = max(50, int(os.environ.get("GT_LSP_ENRICH_LIMIT", "100000") or "100000"))
-        _enrich_budget_s = float(os.environ.get("GT_LSP_ENRICH_BUDGET_S", "1200") or "1200")
+        # 600s, NOT 1200: the proof task timeout is 20 min (deepswe_proof_sweep.yml:128);
+        # index + LSP-readiness + edge-resolution + gates + brief need ~8 min, so the
+        # enrichment must finish in ~10-12 min or the whole task times out and uploads nothing.
+        _enrich_budget_s = float(os.environ.get("GT_LSP_ENRICH_BUDGET_S", "600") or "600")
         _enrich_t0 = time.time()
         _enrich_conn = sqlite3.connect(db_path)
         _enrich_conn.row_factory = sqlite3.Row
@@ -1117,6 +1120,11 @@ async def _resolve_edges(
               AND n.label IN ('Function', 'Method', 'Class')
               AND n.start_line IS NOT NULL
               AND n.language = ?
+              -- only hover the RESIDUAL the parser couldn't statically fill: a node that
+              -- already has a return_type (go/rust declare ~72% in-source) does NOT need an
+              -- LSP round-trip. This shrinks the hover set to the inference funcs, so typed
+              -- langs finish fast and a big repo stays well under the 20-min task timeout.
+              AND (n.return_type IS NULL OR TRIM(n.return_type) = '')
             GROUP BY n.id
             ORDER BY ref_count DESC
             LIMIT {_enrich_limit}
