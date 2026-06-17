@@ -260,3 +260,50 @@ func hasTestDirSegment(dir string) bool {
 	return false
 }
 
+// nonSourceDirSegments is the union of test + demo/non-source directory names.
+// A file under ANY of these (as a whole path segment) is NOT product source: its
+// call edges must never enter the FACT surface (reach / localization / callers),
+// because a benchmark/example/fixture caller of an internal symbol is a phantom
+// caller — the dacite→mashumaro `from_dict` class of false fact (10,444 such edges
+// measured live). This is the Go-indexer half of the same path policy; it MIRRORS
+// src/groundtruth/delivery/path_policy.py (_TEST_DIR_SEGMENTS ∪
+// _DEMO_NONSOURCE_DIR_SEGMENTS) so Go and Python classify a path identically. If
+// you add a segment here, add it there too (DUPLICATION TRAP — the two copies
+// drifting is exactly the leak path_policy.py warns about).
+var nonSourceDirSegments = map[string]bool{
+	// test dirs (superset of hasTestDirSegment; "e2e"/"testing" are Python-side too)
+	"test": true, "tests": true, "spec": true, "specs": true,
+	"e2e": true, "testing": true,
+	// demo / example
+	"example": true, "examples": true, "demo": true, "demos": true,
+	"sample": true, "samples": true,
+	// fixtures / test data
+	"testdata": true, "fixtures": true, "fixture": true,
+	// docs
+	"docs": true, "doc": true, "docs_src": true, "doc_src": true,
+	"documentation": true, "tutorial": true, "tutorials": true,
+	// benchmarks
+	"benchmark": true, "benchmarks": true, "benches": true, "bench": true,
+	// vendored / third-party / build output
+	"vendor": true, "node_modules": true, "third_party": true,
+	"dist": true, "build": true,
+}
+
+// IsNonSourceFile reports whether relPath lives under a non-source directory —
+// test, demo/example, fixtures/testdata, docs, benchmark, or vendored/build dirs
+// (see nonSourceDirSegments). Whole-segment, case-insensitive, underscore-trimmed
+// match (so "benchmarking/"/"docstore/"/"sampler/" are NOT flagged — substring is
+// never enough). Used to mark such nodes is_test so the resolver + consumer FACT
+// filters exclude their call edges. Distinct from IsTestFile (which also keys off
+// basename markers + extracts test assertions for the consistency pillar) — this
+// one is DIRECTORY-only, purely for the fact-surface exclusion.
+func IsNonSourceFile(relPath string) bool {
+	p := strings.ToLower(filepath.ToSlash(relPath))
+	for _, seg := range strings.Split(p, "/") {
+		if nonSourceDirSegments[strings.Trim(seg, "_")] {
+			return true
+		}
+	}
+	return false
+}
+

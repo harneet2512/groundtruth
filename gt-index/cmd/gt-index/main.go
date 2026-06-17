@@ -174,7 +174,9 @@ func main() {
 			defer wg.Done()
 			for idx := range fileCh {
 				sf := files[idx]
-				isTest := walker.IsTestFile(sf.Path)
+				// Mark test AND non-source (benchmark/example/fixture/docs/vendored)
+				// nodes is_test so their call edges stay OUT of the fact surface.
+				isTest := walker.IsTestFile(sf.Path) || walker.IsNonSourceFile(sf.Path)
 				result, err := parser.ParseFile(sf, isTest)
 				resultCh <- fileParseResult{fileIdx: idx, result: result, err: err}
 			}
@@ -859,7 +861,10 @@ func runIncremental(root, relpath, dbPath string) error {
 		Language: spec.Name,
 		Spec:     spec,
 	}
-	isTest := walker.IsTestFile(relSlash)
+	// Mark test AND non-source (benchmark/example/fixture/docs/vendored) nodes
+	// is_test so their call edges stay OUT of the fact surface (same as the bulk
+	// parse path above) — the incremental -file reindex must classify identically.
+	isTest := walker.IsTestFile(relSlash) || walker.IsNonSourceFile(relSlash)
 	pr, err := parser.ParseFile(sf, isTest)
 	if err != nil {
 		return fmt.Errorf("parse %s: %w", relSlash, err)

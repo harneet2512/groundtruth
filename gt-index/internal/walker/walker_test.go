@@ -78,6 +78,73 @@ func TestIsTestFile(t *testing.T) {
 	}
 }
 
+func TestIsNonSourceFile(t *testing.T) {
+	// RUN VERDICT: 10,444 non-source-as-FACT CALLS edges in the live graphs because
+	// nodes under benchmark/ examples/ testdata/ docs/ vendor/ fixtures/ etc. were
+	// NOT marked is_test — their edges entered the fact surface and pollute reach /
+	// localization (e.g. mashumaro benchmark/libs/dacite → from_dict). IsNonSourceFile
+	// flags ANY path with a non-source DIRECTORY SEGMENT (whole-segment, case-
+	// insensitive, underscore-trimmed) so the existing is_test filters exclude them.
+	// Whole-segment matching rejects false positives like "benchmarking/"/"docstore/".
+	tests := []struct {
+		name string
+		path string
+		want bool
+	}{
+		// Test dirs (already covered by IsTestFile, must also be non-source)
+		{"tests dir", "tests/foo.py", true},
+		{"test dir", "test/foo.py", true},
+		{"spec dir", "spec/foo.rb", true},
+		// Demo / example dirs
+		{"benchmark dir", "benchmark/libs/dacite/common.py", true},
+		{"benchmarks dir", "benchmarks/run.py", true},
+		{"benches dir", "benches/bench.rs", true},
+		{"bench dir", "bench/x.go", true},
+		{"example dir", "example/main.go", true},
+		{"examples dir", "examples/demo/app.ts", true},
+		{"demo dir", "demo/index.js", true},
+		{"demos dir", "demos/x.py", true},
+		{"sample dir", "sample/a.py", true},
+		{"samples dir", "samples/b.py", true},
+		// Fixtures / test data
+		{"testdata dir", "internal/parser/testdata/foo.go", true},
+		{"fixtures dir", "src/fixtures/data.py", true},
+		{"fixture dir", "src/fixture/data.py", true},
+		// Docs
+		{"docs dir", "docs/guide.py", true},
+		{"doc dir", "doc/x.py", true},
+		{"docs_src dir", "docs_src/tut.py", true},
+		{"tutorial dir", "tutorial/step1.py", true},
+		{"tutorials dir", "tutorials/step1.py", true},
+		{"documentation dir", "documentation/x.py", true},
+		// Vendored / third-party / build
+		{"vendor dir", "vendor/lib/x.go", true},
+		{"node_modules dir", "node_modules/pkg/index.js", true},
+		{"third_party dir", "third_party/lib/x.cc", true},
+		{"dist dir", "dist/bundle.js", true},
+		{"build dir", "build/out.js", true},
+		// Underscore-wrapped variants
+		{"__tests__ dir", "src/__tests__/foo.js", true},
+		// Negative guards: whole-segment, never substring
+		{"normal source", "src/users.py", false},
+		{"benchmarking not bench", "src/benchmarking/x.py", false},
+		{"docstore not doc", "lib/docstore/x.py", false},
+		{"sampler not sample", "ml/sampler/x.py", false},
+		{"contests not test", "src/contests/foo.js", false},
+		{"vendored substring", "src/vendored_helper.py", false},
+		{"deep normal", "a/b/c/d/service.go", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := IsNonSourceFile(tc.path)
+			if got != tc.want {
+				t.Errorf("IsNonSourceFile(%q) = %v, want %v", tc.path, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestIsIgnored(t *testing.T) {
 	tests := []struct {
 		name     string

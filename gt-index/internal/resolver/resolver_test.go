@@ -399,6 +399,128 @@ func TestResolve_UnqualifiedUniqueCall_StaysVerifiedUnique(t *testing.T) {
 	}
 }
 
+func TestResolve_VerifiedUnique_CrossPackageNoImport_Demoted(t *testing.T) {
+	// RUN VERDICT (mashumaro graph): benchmark/libs/dacite/common.py `warmup` calls
+	// `from_dict`. dacite calls dacite's OWN from_dict, but the ONLY node named
+	// from_dict is mashumaro/codecs/basic.py::from_dict — so Strategy 1.9
+	// (verified-unique, conf 0.95) stamps a CROSS-PACKAGE name collision as a FACT,
+	// even though the caller never imports mashumaro. The ACG/ECOOP-2022 unique-name
+	// property only holds when the unique node is actually REACHABLE from the caller
+	// (same package OR imported); a cross-package bare-name collision is a false fact.
+	//
+	// Provenance gate: keep verified_unique ONLY when caller and target share a dir
+	// OR the caller imports a module resolving to the target's file. Here: different
+	// dirs, no import => DEMOTE to name_match (low trust), never a fact.
+	//
+	// The gate engages only when nodeMeta is present (the target's file is then
+	// visible) — the real index path always passes it. RED before the gate; GREEN
+	// after.
+	files := []string{"benchmark/libs/dacite/common.py", "mashumaro/codecs/basic.py"}
+	langs := []string{"python", "python"}
+	fm := BuildFileMap(files, langs)
+
+	calls := []parser.CallRef{
+		{CallerNodeIdx: 0, CalleeName: "from_dict", CalleeQualified: "from_dict", Line: 5, File: "benchmark/libs/dacite/common.py"},
+	}
+	nodeIDs := map[string][]int64{"warmup": {1}, "from_dict": {2}}
+	fileNodeIDs := map[string]map[string][]int64{
+		"benchmark/libs/dacite/common.py": {"warmup": {1}},
+		"mashumaro/codecs/basic.py":       {"from_dict": {2}},
+	}
+	callerIDs := []int64{1}
+	meta := map[int64]NodeMeta{
+		1: {Label: "Function", Name: "warmup", File: "benchmark/libs/dacite/common.py"},
+		2: {Label: "Function", Name: "from_dict", File: "mashumaro/codecs/basic.py"},
+	}
+
+	resolved := Resolve(calls, nodeIDs, fileNodeIDs, callerIDs, nil, fm, meta)
+	if len(resolved) != 1 {
+		t.Fatalf("expected 1 resolved call, got %d", len(resolved))
+	}
+	if resolved[0].Method == "verified_unique" {
+		t.Errorf(
+			"cross-package unique call from_dict laundered as verified_unique (conf %.2f) — "+
+				"caller never imports the target's package; want name_match demote",
+			resolved[0].Confidence,
+		)
+	}
+	if resolved[0].Method != "name_match" || resolved[0].Confidence >= 0.5 {
+		t.Errorf("demote shape = (%q, conf %.2f); want name_match below SPECULATIVE (0.5)",
+			resolved[0].Method, resolved[0].Confidence)
+	}
+}
+
+func TestResolve_VerifiedUnique_SamePackage_StaysVerifiedUnique(t *testing.T) {
+	// Legitimate control for the provenance gate: caller and the globally-unique
+	// target live in the SAME directory (same package). No import line is needed —
+	// same-package use is genuine reachability — so the verified_unique fact STANDS.
+	// Pins that the gate demotes ONLY cross-package collisions, not real same-package
+	// unique resolution (the property the strategy exists to capture).
+	files := []string{"pkg/caller.py", "pkg/target.py"}
+	langs := []string{"python", "python"}
+	fm := BuildFileMap(files, langs)
+
+	calls := []parser.CallRef{
+		{CallerNodeIdx: 0, CalleeName: "uniquefunc", CalleeQualified: "uniquefunc", Line: 5, File: "pkg/caller.py"},
+	}
+	nodeIDs := map[string][]int64{"caller": {1}, "uniquefunc": {2}}
+	fileNodeIDs := map[string]map[string][]int64{
+		"pkg/caller.py": {"caller": {1}},
+		"pkg/target.py": {"uniquefunc": {2}},
+	}
+	callerIDs := []int64{1}
+	meta := map[int64]NodeMeta{
+		1: {Label: "Function", Name: "caller", File: "pkg/caller.py"},
+		2: {Label: "Function", Name: "uniquefunc", File: "pkg/target.py"},
+	}
+
+	resolved := Resolve(calls, nodeIDs, fileNodeIDs, callerIDs, nil, fm, meta)
+	if len(resolved) != 1 {
+		t.Fatalf("expected 1 resolved call, got %d", len(resolved))
+	}
+	if resolved[0].Method != "verified_unique" {
+		t.Errorf("same-package unique call: method = %q, want verified_unique (provenance via same dir)", resolved[0].Method)
+	}
+}
+
+func TestResolve_VerifiedUnique_CrossPackageImported_StaysFact(t *testing.T) {
+	// Second legitimate control: cross-DIRECTORY but the caller IMPORTS a module that
+	// resolves to the target's file. Genuine reachability => the edge stays a
+	// deterministic FACT (Strategy 1.5 may certify it as `import`; otherwise the
+	// verified_unique provenance branch keeps it). The FAILURE we guard against is a
+	// name_match demote of a genuinely-imported target.
+	files := []string{"app/caller.py", "lib/target.py"}
+	langs := []string{"python", "python"}
+	fm := BuildFileMap(files, langs)
+
+	imports := []parser.ImportRef{
+		// import the target module (wildcard/package import) — resolves to lib/target.py
+		{ImportedName: "*", ModulePath: "lib.target", File: "app/caller.py", Line: 1},
+	}
+	calls := []parser.CallRef{
+		{CallerNodeIdx: 0, CalleeName: "uniquefunc", CalleeQualified: "uniquefunc", Line: 5, File: "app/caller.py"},
+	}
+	nodeIDs := map[string][]int64{"caller": {1}, "uniquefunc": {2}}
+	fileNodeIDs := map[string]map[string][]int64{
+		"app/caller.py": {"caller": {1}},
+		"lib/target.py": {"uniquefunc": {2}},
+	}
+	callerIDs := []int64{1}
+	meta := map[int64]NodeMeta{
+		1: {Label: "Function", Name: "caller", File: "app/caller.py"},
+		2: {Label: "Function", Name: "uniquefunc", File: "lib/target.py"},
+	}
+
+	resolved := Resolve(calls, nodeIDs, fileNodeIDs, callerIDs, imports, fm, meta)
+	if len(resolved) != 1 {
+		t.Fatalf("expected 1 resolved call, got %d", len(resolved))
+	}
+	if resolved[0].Method == "name_match" {
+		t.Errorf("imported cross-package unique call demoted to name_match (conf %.2f) — import provenance holds; want a deterministic method",
+			resolved[0].Confidence)
+	}
+}
+
 func TestParseTSConfig(t *testing.T) {
 	dir := t.TempDir()
 	tsconfig := `{"compilerOptions":{"baseUrl":".","paths":{"@/*":["src/*"]}}}`

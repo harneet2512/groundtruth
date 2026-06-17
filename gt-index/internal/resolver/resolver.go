@@ -372,6 +372,34 @@ func tierFor(conf float64) string {
 	return "SPECULATIVE"
 }
 
+// sameDirFile reports whether two files live in the same directory (same package,
+// the strongest free provenance signal). Slash-normalized so "/" and "\\" agree.
+func sameDirFile(a, b string) bool {
+	return filepath.ToSlash(filepath.Dir(a)) == filepath.ToSlash(filepath.Dir(b))
+}
+
+// callerImportsFile reports whether callerFile has ANY import (by any imported
+// name) that resolves to targetFile. This is the module-level provenance the
+// verified_unique gate needs: Strategy 1.5 already ran a NAME-scoped import check
+// (callee-name → file) and failed, but a globally-unique callee may still be
+// genuinely reachable because the caller imports the target's MODULE (a re-export,
+// a package import, or an aliased name). Slash-normalized comparison.
+func callerImportsFile(callerFile, targetFile string, importIndex map[string]map[string][]string) bool {
+	fileImports, ok := importIndex[callerFile]
+	if !ok {
+		return false
+	}
+	tgt := filepath.ToSlash(targetFile)
+	for _, targetFiles := range fileImports {
+		for _, tf := range targetFiles {
+			if filepath.ToSlash(tf) == tgt {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // computeConfidence returns a confidence score based on resolution method and ambiguity.
 func computeConfidence(method string, candidateCount int) float64 {
 	switch method {
@@ -1522,7 +1550,46 @@ func Resolve(
 				}
 				if len(candidates) == 1 {
 					targetID := candidates[0]
+					// PROVENANCE GATE (B fix): the ACG/ECOOP-2022 unique-name property
+					// ("a globally-unique name is 99%+ correct") only holds when the unique
+					// node is actually REACHABLE from the caller. A cross-package bare-name
+					// collision — caller in benchmark/libs/dacite, the only `from_dict` node
+					// in mashumaro/codecs, no import linking them — is a FALSE fact (10,444
+					// such CALLS edges measured live). Keep verified_unique ONLY with
+					// provenance: caller and target share a directory (same package) OR the
+					// caller imports a module resolving to the target's file. Otherwise DEMOTE
+					// to a speculative name_match (the agent still gets the hint, never as a
+					// fact). The gate engages only when nodeMeta supplies the target's file —
+					// the real index path always passes it; meta-less unit paths keep the
+					// legacy behavior (correct-or-quiet: we cannot judge what we cannot see).
+					provenanceOK := true
+					if metaMap != nil {
+						if targetFile := metaMap[targetID].File; targetFile != "" {
+							provenanceOK = sameDirFile(call.File, targetFile) ||
+								callerImportsFile(call.File, targetFile, importIndex)
+						}
+					}
 					key := edgeKey{callerID, targetID, "CALLS"}
+					if !provenanceOK {
+						if !seen[key] {
+							seen[key] = true
+							// Demote shape mirrors the qualified-unresolved last-chance demote
+							// (conf 0.2, sub-SPECULATIVE) so tierFor agrees and Strategy 2 does
+							// not re-CERTIFY this single candidate at name_match conf 0.9.
+							resolved = append(resolved, ResolvedCall{
+								SourceNodeID:   callerID,
+								TargetNodeID:   targetID,
+								SourceLine:     call.Line,
+								SourceFile:     call.File,
+								Method:         "name_match",
+								Confidence:     0.2,
+								CandidateCount: 1,
+								TrustTier:      tierFor(0.2),
+								EvidenceType:   "name_match_verified_unique_no_provenance",
+							})
+						}
+						continue
+					}
 					if !seen[key] {
 						seen[key] = true
 						resolved = append(resolved, ResolvedCall{
