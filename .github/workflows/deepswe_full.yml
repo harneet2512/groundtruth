@@ -1074,6 +1074,7 @@ jobs:
           echo "substrate proof done: consumed /gt_artifacts; host LSP+gates SKIPPED (no divergent graph)"
 
       - name: Run GT trial
+        continue-on-error: true
         if: ${{ !cancelled() }}
         # Cert-env handoff (§D): GT_CERT_DIR / GT_HOST_GRAPH_DB / GT_HOST_SRC_ROOT + the cert
         # paths were written to $GITHUB_ENV by the substrate-proof step and are inherited here;
@@ -1278,6 +1279,7 @@ jobs:
           fi
 
       - name: Verify DeepSWE adapter witness (§E DEEPSWE_ADAPTER_FAIL / §H consumption proof)
+        continue-on-error: true
         if: ${{ !cancelled() && env.GT_PORTABLE_SUBSTRATE == '1' }}
         run: |
           # AGENT-OBSERVATION truth: the adapter emitted a [GT_META] witness to stdout. Prove

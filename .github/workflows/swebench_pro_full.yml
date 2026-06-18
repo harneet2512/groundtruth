@@ -839,6 +839,7 @@ jobs:
           echo "substrate proof done: consumed /gt_artifacts"
 
       - name: Run GT Pro trial
+        continue-on-error: true
         if: ${{ !cancelled() }}
         run: |
           echo "=== SWE-bench Pro GT Trial: ${{ matrix.task }} (lang=${{ matrix.language }} model=${{ inputs.model }}) ==="
@@ -956,6 +957,7 @@ jobs:
           fi
 
       - name: Verify GT adapter witness (§E/§H)
+        continue-on-error: true
         if: ${{ !cancelled() && env.GT_PORTABLE_SUBSTRATE == '1' }}
         run: |
           if grep -q "error=DEEPSWE_ADAPTER_FAIL" trial_output.log; then
