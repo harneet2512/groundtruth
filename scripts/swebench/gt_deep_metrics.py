@@ -1434,6 +1434,14 @@ def build(task: str, results_dir: str, log_path: str = "",
             "cost_log": bool(cost["llm_calls"]),
         },
     }
+    # Performance metrics (sections 1-6, 8-9 of MANDATORY_METRICS.md)
+    try:
+        from gt_performance_metrics import compute_performance_metrics
+        tj_path = _find_miniswe_trajectory(task, results_dir)
+        perf = compute_performance_metrics(tj_path, results_dir) if tj_path else {}
+        deep["performance"] = perf
+    except Exception:
+        deep["performance"] = {}
     return deep
 
 
