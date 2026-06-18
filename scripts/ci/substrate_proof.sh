@@ -498,13 +498,32 @@ else
       "$GT_SUBSTRATE_DIGEST" gt-run-proof --source-root /work --out /gt_artifacts || PROOF_RC=$?
 fi
 
+PROOF_RECONCILABLE_GRAPH_HANDOFF=0
 if [ "$PROOF_RC" -ne 0 ]; then
+  # graph_certificate.py is written before the agent can emit its runtime
+  # witness. GRAPH_FAIL_MISSING_HANDOFF is therefore the one proof verdict that
+  # must be reconciled by the agent [GT_META] line instead of blocking it.
+  PROOF_VERDICT="$(python3 - <<'PY'
+import json, pathlib
+p = pathlib.Path("/tmp/gt/graph_certificate.json")
+try:
+    print((json.loads(p.read_text(encoding="utf-8")).get("verdict") or "").strip())
+except Exception:
+    print("")
+PY
+)"
+  if [ "$PROOF_VERDICT" = "GRAPH_FAIL_MISSING_HANDOFF" ]; then
+    PROOF_RECONCILABLE_GRAPH_HANDOFF=1
+    echo "PROOF_RECONCILABLE_GRAPH_HANDOFF: graph cert is pre-agent; agent witness must prove handoff" | tee -a trial_output.log
+  fi
   if [ "$PROOF_RC" -eq 137 ]; then
-    echo "GT_PROOF_OOM: gt-run-proof rc=137 — killed by the container memory cap (capacity kill, not logic; the fail-closed print never ran)" | tee -a trial_output.log
+    echo "GT_PROOF_OOM: gt-run-proof rc=137 - killed by the container memory cap" | tee -a trial_output.log
     write_proof_status failed GT_PROOF_OOM "gt-run-proof rc=137"
   else
-    echo "GT_RUN_PROOF_FAIL: gt-run-proof rc=$PROOF_RC (boundary/leak/missing-baked-dep)" | tee -a trial_output.log
-    write_proof_status failed GT_RUN_PROOF_FAIL "gt-run-proof rc=$PROOF_RC"
+    if [ "$PROOF_RECONCILABLE_GRAPH_HANDOFF" != "1" ]; then
+      echo "GT_RUN_PROOF_FAIL: gt-run-proof rc=$PROOF_RC (boundary/leak/missing-baked-dep)" | tee -a trial_output.log
+      write_proof_status failed GT_RUN_PROOF_FAIL "gt-run-proof rc=$PROOF_RC"
+    fi
     if [ -f /tmp/gt/proof_failure.json ]; then
       echo "proof_failure.json:" | tee -a trial_output.log
       cat /tmp/gt/proof_failure.json | tee -a trial_output.log
@@ -519,8 +538,11 @@ if [ "$PROOF_RC" -ne 0 ]; then
     fi
   fi
   docker rm -f gtsrc 2>/dev/null || true
-  echo "::error::gt-run-proof exited $PROOF_RC — agent trial will be skipped by proof_status gate"
-  exit 1
+  if [ "$PROOF_RECONCILABLE_GRAPH_HANDOFF" != "1" ]; then
+    echo "::error::gt-run-proof exited $PROOF_RC - agent trial will be skipped by proof_status gate"
+    exit 1
+  fi
+  echo "::warning::gt-run-proof exited $PROOF_RC only because graph handoff is pre-agent; continuing to agent witness gate"
 else
   docker rm -f gtsrc 2>/dev/null || true
 fi
@@ -535,7 +557,11 @@ for c in graph.db runtime_context.json lsp_certificate.json graph_certificate.js
   test -s "/tmp/gt/$c" || fail_artifact "/gt_artifacts/$c absent after gt-run-proof"
 done
 echo "all 8 GT artifacts present under /tmp/gt (= /gt_artifacts)"
-write_proof_status ok PROOF_OK "all 8 GT artifacts present"
+if [ "$PROOF_RECONCILABLE_GRAPH_HANDOFF" = "1" ]; then
+  write_proof_status ok PROOF_RECONCILABLE_GRAPH_HANDOFF "all 8 GT artifacts present; agent witness must prove graph handoff"
+else
+  write_proof_status ok PROOF_OK "all 8 GT artifacts present"
+fi
 
 # ── Cert-env handoff into the agent (§D) — the adapter reads these READ-ONLY ──
 # GT_HOST_GRAPH_DB + GT_CERT_DIR are the canonical host->agent handoff (proof.py
