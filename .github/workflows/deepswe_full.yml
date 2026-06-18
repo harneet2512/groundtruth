@@ -486,7 +486,7 @@ jobs:
           echo "  Docker CLI pre-check done"
           # 3. Disk space (need >= 10GB for substrate + task image + artifacts)
           FREE_GB=$(df --output=avail / | tail -1 | awk '{printf "%.0f", $1/1048576}')
-          [ "$FREE_GB" -ge 20 ] || { echo "::error::Low disk: ${FREE_GB}GB free (need >=20GB for substrate + task images + artifacts)"; exit 1; }
+          [ "$FREE_GB" -ge 10 ] || { echo "::error::Low disk: ${FREE_GB}GB free (need >=10GB for substrate + task images + artifacts)"; exit 1; }
           echo "  Disk: ${FREE_GB}GB free"
           # 4. Network / GHCR reachable (warning only — Docker Hub fallback exists)
           curl -sf --max-time 10 https://ghcr.io/v2/ -o /dev/null || echo "::warning::GHCR not reachable — Docker Hub fallback will be used"
