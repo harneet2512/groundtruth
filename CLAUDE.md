@@ -1,5 +1,23 @@
 > 📊 **MANDATORY METRICS (read `MANDATORY_METRICS.md` FIRST).** Every paid run MUST compute ALL metrics in that file. A run without its `gt_deep_metrics_<task>.json` is NOT done. Behavioral impact (pivots/deliveries), localization (files_to_gold), edit quality (rewrite_count), interface preservation (contract_compliance), scope (coverage), stuck/recovery, verify-before-submit, token efficiency, correctness (f2p/p2p), and comparative deltas — ALL at 8-decimal precision. No metric skipped. No run cited without its metrics.
 
+> 🔍 **MANDATORY AUDIT METHODOLOGY (gt_trial §4 — the ONLY way to audit a run).** Every run audit follows THIS process exactly. No shortcuts. No summary tables replacing the real data.
+>
+> **§4.0 DEPTH-FIRST behavioral-gap audit (FIRST pass, every run):** Run the language-agnostic per-layer audit — reads graph.db + certs + trajectory tags. Reports per-layer FIRED/GAP: L0-depth, naming det_pct, nodes/type-defs, LSP, embedder, per-turn layers (L1·L3b·L3·consensus·cochange·oracle.nudge). A gap on ONE language is assumed present on ALL until proven otherwise.
+>
+> **§4.1-§4.3 PER-COMPONENT TABLES (the audit deliverable, per task):**
+> - **(a) PREREQS table** — 8-dp REAL numbers from gate-deep JSON: `det_pct · name_match_count · typing_tiers · calls_edges · resolution_method_breakdown · cos_related · cos_unrelated · embedder_class`. One column = GREEN?; one column = HOW it reached the agent.
+> - **(b) ONE TABLE PER gt_gt COMPONENT** (L1 · L3b · consensus · L3/GT_VERIFY · L4 · L5 · L5b · L6). Columns EXACTLY: `turn | GT SENT (verbatim bytes the agent saw) | AGENT DID (verbatim action at/after that turn) | DELIVERED/CORRECT/CONSUMED`. Both middle columns hold REAL VALUES — exact payload + exact agent action side by side. Component that never delivered = one row: `DELIVERED=NO — <reason>`.
+> - **(c) Per-table verdict** (D/C/C + leakage count) + cross-component line (total leakage MUST be 0; consumed-count; fair-probe-count).
+>
+> **Rules (non-negotiable):**
+> - Read trajectory CHRONOLOGICALLY, NEVER grep.
+> - Quote VERBATIM, never paraphrase. No verdict without its quote.
+> - LEAKAGE CHECK: GT surfaced ZERO test names / FAIL_TO_PASS / assertions. Any leak = CORRECT fails.
+> - FAIR PROBE: GT caused the behavior vs agent self-localizing from the issue traceback.
+> - RIGHT TRAJECTORY: correct context → consumed → reasoned through → correct fix FOR THAT REASON.
+> - VERDICT GATE: "works" ONLY when DELIVERED + CORRECT + CONSUMED all hold on a fair probe.
+> - A single summary/gate table is NOT the audit — it hides what was sent and what the agent did.
+
 > 🚫 **GITHUB REPO IS CODE-ONLY (public for GHA + codespaces).** NEVER commit or push docs / reports / analysis `.md` — `gt_math`, `gt_gt`, `gt_new`, `gt_trial`, `*_AUDIT*.md`, `*_REPORT*.md`, `GO_NO_GO*`, `.claude/reports/`, `SESSION_SUMMARY`, `RUN_LEDGER`, `.tmp_*`, etc. They are **LOCAL working artifacts only**. Only `README.md`, `LICENSE`, and source/scripts/workflows/tests/manifests ship. Gitignore every new doc; the public snapshot is code-only — no internal doc/report ever reaches GitHub.
 
 # CLAUDE.md -- GroundTruth
