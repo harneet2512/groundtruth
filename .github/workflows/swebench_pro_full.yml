@@ -419,7 +419,7 @@ jobs:
       fail-fast: false
       max-parallel: ${{ fromJson(inputs.max_parallel) }}
     env:
-      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      TOKENROUTER_API_KEY: ${{ secrets.TOKENROUTER_API_KEY }}
     steps:
       - name: Checkout GroundTruth
         uses: actions/checkout@v4
@@ -432,13 +432,13 @@ jobs:
 
       - name: Preflight checks (fail-fast on infra, warn on quality)
         env:
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          TOKENROUTER_API_KEY: ${{ secrets.TOKENROUTER_API_KEY }}
         shell: bash
         run: |
           set -e
           echo "=== INFRA PREFLIGHT (fail-fast) ==="
-          [ "${#DEEPSEEK_API_KEY}" -gt 10 ] || { echo "::error::DEEPSEEK_API_KEY missing or too short"; exit 1; }
-          echo "  DEEPSEEK_API_KEY present (${#DEEPSEEK_API_KEY} chars)"
+          [ "${#TOKENROUTER_API_KEY}" -gt 10 ] || { echo "::error::TOKENROUTER_API_KEY missing or too short"; exit 1; }
+          echo "  TOKENROUTER_API_KEY present (${#TOKENROUTER_API_KEY} chars)"
           docker --version 2>/dev/null || true
           echo "  Docker CLI pre-check done"
           FREE_GB=$(df --output=avail / | tail -1 | awk '{printf "%.0f", $1/1048576}')
