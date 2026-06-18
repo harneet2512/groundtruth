@@ -80,6 +80,28 @@ def evidence_counts(cache: Path) -> tuple[int, int]:
     return ok, total
 
 
+def patch_counts(cache: Path) -> tuple[int, int]:
+    total = 0
+    patched = 0
+    for task_dir in cache.iterdir() if cache.exists() else []:
+        if not task_dir.is_dir():
+            continue
+        total += 1
+        has_patch = False
+        for path in task_dir.rglob("*"):
+            if path.suffix.lower() not in {".patch", ".diff"}:
+                continue
+            try:
+                if path.is_file() and path.stat().st_size > 0:
+                    has_patch = True
+                    break
+            except OSError:
+                continue
+        if has_patch:
+            patched += 1
+    return patched, total
+
+
 def class_counts(recs: list[dict[str, Any]]) -> dict[str, int]:
     counts = {"RESOLVED": 0, "AGENT": 0, "GT": 0, "INFRA": 0, "UNKNOWN": 0}
     for rec in recs:
@@ -113,14 +135,24 @@ def summarize(repo: str, run_id: str, benchmark: str, cache: Path) -> str:
     evidence_ok, evidence_total = evidence_counts(cache)
     evidence_latch = (evidence_ok / evidence_total) if evidence_total else 0.0
     artifact_latch = (len(artifacts) / len(jobs)) if jobs else 0.0
+    patched, patch_total = patch_counts(cache)
+    patch_rate = (patched / patch_total) if patch_total else 0.0
+    running = status_counts.get("in_progress", 0)
+    completed = status_counts.get("completed", 0)
+    queued = status_counts.get("queued", 0)
+    success = conclusion_counts.get("success", 0)
+    failure = conclusion_counts.get("failure", 0)
 
     return (
         f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {benchmark} run={run_id} "
         f"status={view.get('status')} conclusion={view.get('conclusion') or '-'} "
-        f"jobs(total={len(jobs)} status={status_counts} conclusion={conclusion_counts}) "
+        f"running={running} queued={queued} completed={completed} "
+        f"success={success} failure={failure} "
+        f"resolution_rate={resolved_rate:.8f} "
+        f"patch_rate={patch_rate:.2%} ({patched}/{patch_total}) "
         f"artifacts={len(artifacts)} artifact_latch={artifact_latch:.2%} "
-        f"outcomes={len(recs)} classes={counts} resolution_rate={resolved_rate:.8f} "
         f"evidence_latch={evidence_latch:.2%} ({evidence_ok}/{evidence_total}) "
+        f"outcomes={len(recs)} classes={counts} "
         f"url={view.get('url')}"
     )
 
