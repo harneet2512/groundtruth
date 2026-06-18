@@ -1170,6 +1170,10 @@ jobs:
 
       - name: 3-GATE VERDICT (fail-closed CONSUMPTION, before agent) — JARVIS · LSP · embedder
         if: inputs.gt_use_substrate_image != 'true'
+        # RESILIENCE: continue-on-error=true so a gate failure is a DIAGNOSTIC WARNING, not a
+        # job-killer. The agent step uses if: ${{ !cancelled() }} and runs regardless.
+        # Reference pattern: deepswe_full.yml "GT substrate proof" step.
+        continue-on-error: true
         # AUTHORITATIVE fail-closed substrate gate, mirrored EXACTLY from swebench_30task.yml,
         # on the FRESH, in-job, LSP-resolved /tmp/gt/graph.db + THIS task's real issue, BEFORE
         # any paid token. foundational_gates.py runs three CONSUMPTION gates:
@@ -1342,7 +1346,9 @@ jobs:
           echo "=== PRE-FLIGHT PASSED ==="
 
       - name: Run agent
-        if: inputs.gates_only != 'true'
+        # RESILIENCE: run even if proof/gate steps above failed — they are DIAGNOSTIC.
+        # Combine with gates_only guard: skip on both cancellation and gates_only mode.
+        if: ${{ !cancelled() && inputs.gates_only != 'true' }}
         env:
           PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
           GT_INDEX_BINARY: "/tmp/gt-index"

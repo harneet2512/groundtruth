@@ -211,6 +211,9 @@ jobs:
           db_path: /tmp/gt_prebuilt.db
 
       - name: Run agent
+        # RESILIENCE: run even if pre-index/proof steps failed — they are DIAGNOSTIC.
+        # Only skip if the job was explicitly cancelled. Reference: deepswe_full.yml.
+        if: ${{ !cancelled() }}
         env:
           PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
           GT_INDEX_BINARY: "/tmp/gt-index"

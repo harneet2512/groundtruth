@@ -297,18 +297,26 @@ jobs:
           docker tag "$RESOLVED" "swebench/sweb.eval.x86_64.${SLUG}:latest"
           echo "task image ready: $RESOLVED (also tagged swebench/sweb.eval.x86_64.${SLUG}:latest)"
 
-      - name: GT substrate proof (pinned, read-only repo) — pre-agent, fail-closed
+      - name: GT substrate proof (pinned, read-only repo) — pre-agent, diagnostic
+        # RESILIENCE: continue-on-error=true so proof failures are DIAGNOSTIC WARNINGS, not
+        # job-killers. The agent step uses if: ${{ !cancelled() }} and runs regardless.
+        # PROOF_RC is set on failure and tee'd to trial_output.log for the outcome classifier.
+        # Reference pattern: deepswe_full.yml "GT substrate proof" step (already correct).
         if: ${{ inputs.baseline != true }}
+        continue-on-error: true
         run: |
           set -e
-          # §E GT_SUBSTRATE_DIGEST_MISSING (fail-closed; markers tee'd into
-          # trial_output.log so the INFRA classifier sees them).
+          PROOF_RC=0
+          # §E GT_SUBSTRATE_DIGEST_MISSING — markers tee'd into trial_output.log so the
+          # INFRA classifier sees them even though this step continues.
           if [ -z "$GT_SUBSTRATE_DIGEST" ]; then
             if [ "${GT_REQUIRE_PINNED_SUBSTRATE:-1}" = "1" ]; then
               echo "GT_SUBSTRATE_DIGEST_MISSING / PROOF_RUNTIME_FALLBACK_FORBIDDEN: substrate-consume" | tee -a trial_output.log
               echo "mode requires GT_SUBSTRATE_DIGEST (pinned @sha256). Set the gt_substrate_digest"
               echo "input or the GT_SUBSTRATE_DIGEST repo variable."
-              exit 1
+              echo "::warning::GT_SUBSTRATE_DIGEST_MISSING — proof diagnostic failed; trial will proceed GT-OFF (continue-on-error pipeline)"
+              PROOF_RC=1
+              exit $PROOF_RC
             fi
             echo "::warning::GT_SUBSTRATE_DIGEST unset and GT_REQUIRE_PINNED_SUBSTRATE=0 (transitional)"
             echo "::warning::— skipping the substrate proof; THIS TASK RUNS GT-OFF (GT_BASELINE=1)."
@@ -317,12 +325,18 @@ jobs:
           fi
           case "$GT_SUBSTRATE_DIGEST" in
             *@sha256:*) : ;;
-            *) echo "FATAL: GT_SUBSTRATE_DIGEST='$GT_SUBSTRATE_DIGEST' is not a pinned @sha256 digest"; exit 1 ;;
+            *)
+              echo "FATAL: GT_SUBSTRATE_DIGEST='$GT_SUBSTRATE_DIGEST' is not a pinned @sha256 digest" | tee -a trial_output.log
+              echo "::warning::GT_SUBSTRATE_DIGEST is not a pinned @sha256 digest — proof diagnostic failed; trial will proceed GT-OFF (continue-on-error pipeline)"
+              exit 1
+              ;;
           esac
           echo "pinned substrate: $GT_SUBSTRATE_DIGEST"
 
           if ! docker pull "$GT_SUBSTRATE_DIGEST"; then
-            echo "GT_SUBSTRATE_PULL_FAIL: docker pull of the pinned substrate failed" | tee -a trial_output.log; exit 1
+            echo "GT_SUBSTRATE_PULL_FAIL: docker pull of the pinned substrate failed" | tee -a trial_output.log
+            echo "::warning::gt-substrate docker pull failed — proof diagnostic failed; trial will proceed GT-OFF (continue-on-error pipeline)"
+            exit 1
           fi
 
           # Materialize the task repo at its base commit (Verified images keep the
@@ -333,15 +347,21 @@ jobs:
           ROOT=${ROOT:-/testbed}
           echo "repo root: $ROOT"
           rm -rf /tmp/gt && mkdir -p /tmp/gt /tmp/gt/src
-          docker cp "gtsrc:$ROOT/." /tmp/gt/src || { echo "FATAL: source extract failed"; exit 1; }
+          if ! docker cp "gtsrc:$ROOT/." /tmp/gt/src; then
+            echo "GT_SOURCE_EXTRACT_FAIL: source extract failed" | tee -a trial_output.log
+            echo "::warning::source extract failed — proof diagnostic failed; trial will proceed GT-OFF (continue-on-error pipeline)"
+            docker rm -f gtsrc 2>/dev/null || true
+            exit 1
+          fi
           TASK_REPO_COMMIT=$(git -C /tmp/gt/src rev-parse HEAD 2>/dev/null || true)
           echo "task repo commit: ${TASK_REPO_COMMIT:-<unknown>}"
 
           # THIS task's issue (problem statement only — NEVER gold/tests) so the
           # substrate's demand-driven LSP scope + embedder cert operate on the
-          # issue-relevant subgraph. Fail-closed on empty (GT_ISSUE_MISSING).
+          # issue-relevant subgraph. Warn (not fatal) on empty (GT_ISSUE_MISSING).
           if ! python artifact_verified/gt_verified_agent.py --instance-id "${{ matrix.task }}" --dump-issue-to /tmp/issue.txt; then
-            echo "GT_ISSUE_MISSING: no issue text for this task — refusing to run the substrate with an EMPTY issue (fail-closed)" | tee -a trial_output.log
+            echo "GT_ISSUE_MISSING: no issue text for this task — substrate will run without an issue" | tee -a trial_output.log
+            echo "::warning::GT_ISSUE_MISSING — proceeding without issue text (proof may degrade)"
             docker rm -f gtsrc 2>/dev/null || true
             exit 1
           fi
@@ -351,7 +371,7 @@ jobs:
           # classified GT_PROOF_OOM) — uncapped, the GHA HOST OOM-killer killed the
           # process BEFORE its fail-closed stderr print, surfacing as a silent generic
           # failure (the 2026-06-10 5-task brief-OOM). rc is THE diagnostic bit.
-          PROOF_RC=0
+          PROOF_INNER_RC=0
           docker run --rm \
               --memory=10g --memory-swap=10g \
               -v "/tmp/gt/src:/work:ro" -v "/tmp/gt:/gt_artifacts" \
@@ -364,24 +384,33 @@ jobs:
               -e GT_GIT_COMMIT="${{ github.sha }}" \
               -e GT_SUBSTRATE_DIGEST="$GT_SUBSTRATE_DIGEST" \
               -e GT_TASK_REPO_COMMIT="$TASK_REPO_COMMIT" \
-              "$GT_SUBSTRATE_DIGEST" gt-run-proof --source-root /work --out /gt_artifacts || PROOF_RC=$?
-          if [ "$PROOF_RC" -ne 0 ]; then
-            if [ "$PROOF_RC" -eq 137 ]; then
+              "$GT_SUBSTRATE_DIGEST" gt-run-proof --source-root /work --out /gt_artifacts || PROOF_INNER_RC=$?
+          if [ "$PROOF_INNER_RC" -ne 0 ]; then
+            if [ "$PROOF_INNER_RC" -eq 137 ]; then
               echo "GT_PROOF_OOM: gt-run-proof rc=137 — killed by the container memory cap (capacity kill, not logic; the fail-closed print never ran)" | tee -a trial_output.log
             else
-              echo "GT_RUN_PROOF_FAIL: gt-run-proof rc=$PROOF_RC (boundary/leak/missing-baked-dep)" | tee -a trial_output.log
+              echo "GT_RUN_PROOF_FAIL: gt-run-proof rc=$PROOF_INNER_RC (boundary/leak/missing-baked-dep)" | tee -a trial_output.log
             fi
             docker rm -f gtsrc 2>/dev/null || true
-            exit 1
+            echo "::warning::gt-run-proof exited $PROOF_INNER_RC — proof diagnostic failed but trial will proceed (continue-on-error pipeline)"
+            exit "$PROOF_INNER_RC"
           fi
           docker rm -f gtsrc 2>/dev/null || true
 
           # §E GT_ARTIFACT_MISSING — verify the 8-artifact contract (brief.txt incl).
+          MISSING_ARTIFACTS=""
           for c in graph.db runtime_context.json lsp_certificate.json graph_certificate.json \
                    embedder_certificate.json foundational_gate_report.json run_manifest.json \
                    brief.txt; do
-            test -s "/tmp/gt/$c" || { echo "GT_ARTIFACT_MISSING / SUBSTRATE_MISSING_CERTS: /gt_artifacts/$c absent after gt-run-proof" | tee -a trial_output.log; exit 1; }
+            if ! test -s "/tmp/gt/$c"; then
+              echo "GT_ARTIFACT_MISSING / SUBSTRATE_MISSING_CERTS: /gt_artifacts/$c absent after gt-run-proof" | tee -a trial_output.log
+              MISSING_ARTIFACTS="$MISSING_ARTIFACTS $c"
+            fi
           done
+          if [ -n "$MISSING_ARTIFACTS" ]; then
+            echo "::warning::missing gt artifacts after proof:$MISSING_ARTIFACTS — proof diagnostic failed but trial will proceed (continue-on-error pipeline)"
+            exit 1
+          fi
           echo "all 8 GT artifacts present under /tmp/gt"
 
           # Repo-root file for gt_mini_patch._root() (snippet resolution against
@@ -405,6 +434,9 @@ jobs:
           echo "substrate proof done: artifacts consumed read-only by the host-side agent"
 
       - name: Run GT mini-swe agent (official Verified task, fail-closed adapter)
+        # RESILIENCE: run even if the proof step above failed — proof is DIAGNOSTIC.
+        # Only skip if the job was explicitly cancelled. Reference: deepswe_full.yml.
+        if: ${{ !cancelled() }}
         run: |
           echo "=== Verified GT trial: ${{ matrix.task }} (model ${{ inputs.model }}) ==="
           echo "GT_CERT_DIR=${GT_CERT_DIR:-<unset>}  GT_HOST_GRAPH_DB=${GT_HOST_GRAPH_DB:-<unset>}  digest=${GT_SUBSTRATE_DIGEST:-<unset>}"

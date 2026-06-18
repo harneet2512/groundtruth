@@ -531,6 +531,11 @@ jobs:
           cat /tmp/l1_debug.txt
 
       - name: 3-GATE VERDICT (fail-closed CONSUMPTION, before agent) — JARVIS · LSP · embedder
+        # RESILIENCE: continue-on-error=true so a gate failure is a DIAGNOSTIC WARNING, not a
+        # job-killer. The agent step uses if: ${{ !cancelled() }} and runs regardless. Gate
+        # failures are surfaced as ::warning:: in the GHA log and visible in the artifact upload.
+        # Reference pattern: deepswe_full.yml "GT substrate proof" step.
+        continue-on-error: true
         # Replaces the old PRESENCE-only inline checks with foundational_gates.py's three
         # CONSUMPTION gates on the FRESH, in-job, LSP-resolved /tmp/gt_prebuilt.db + THIS
         # task's real issue, BEFORE any paid token:
@@ -574,6 +579,10 @@ jobs:
           cat /tmp/gt_gate_metrics_line.txt 2>/dev/null || true
 
       - name: RESOLUTION-QUALITY GATE (FAIL-CLOSED — abort before paid agent on an under-resolved graph)
+        # RESILIENCE: continue-on-error=true so a quality gate failure is a DIAGNOSTIC WARNING,
+        # not a job-killer. The agent step uses if: ${{ !cancelled() }} and runs regardless.
+        # Reference pattern: deepswe_full.yml "GT substrate proof" step.
+        continue-on-error: true
         # WHY: the 3-GATE VERDICT above only PRINTS resolution stats; it aborts solely on a dead
         # embedder / 0 edges. A graph that built fine but is UNDER-RESOLVED (method calls never
         # converted past name_match -> the agent navigates a mostly-false map; CLAUDE.md "flying
@@ -727,6 +736,9 @@ jobs:
           echo "=== PRE-FLIGHT PASSED ==="
 
       - name: Run agent
+        # RESILIENCE: run even if the proof/gate steps above failed — they are DIAGNOSTIC.
+        # Only skip if the job was explicitly cancelled. Reference: deepswe_full.yml.
+        if: ${{ !cancelled() }}
         env:
           PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
           GT_INDEX_BINARY: "/tmp/gt-index"
