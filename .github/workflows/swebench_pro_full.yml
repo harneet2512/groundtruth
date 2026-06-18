@@ -627,6 +627,7 @@ jobs:
 
       - name: Run GT Pro trial
         if: ${{ !cancelled() }}
+        continue-on-error: true
         run: |
           echo "=== SWE-bench Pro GT Trial: ${{ matrix.task }} (lang=${{ matrix.language }} model=${{ inputs.model }}) ==="
           echo "HOST  GT_CERT_DIR=${GT_CERT_DIR:-<unset>}  GT_HOST_GRAPH_DB=${GT_HOST_GRAPH_DB:-<unset>}"

@@ -748,6 +748,7 @@ jobs:
 
       - name: Run GT trial
         if: ${{ !cancelled() }}
+        continue-on-error: true
         # Cert-env handoff (§D): GT_CERT_DIR / GT_HOST_GRAPH_DB / GT_HOST_SRC_ROOT + the cert
         # paths were written to $GITHUB_ENV by the substrate-proof step and are inherited here;
         # GT_PROOF_MODE / GT_CONTAINERIZED / GT_RUNTIME_STRATEGY come from the top-level env.
