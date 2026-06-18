@@ -730,10 +730,8 @@ jobs:
         with:
           path: /tmp/gt-substrate.tar.gz
           key: ${{ steps.substrate_cache_key.outputs.key }}
-        continue-on-error: true
 
       - name: GT substrate proof (handoff §B-AFTER/§D/§G) — pre-agent, pinned, read-only repo
-        continue-on-error: true
         env:
           GT_MATRIX_TASK: ${{ matrix.task }}
           GT_MATRIX_IMAGE: ${{ matrix.image }}
@@ -977,7 +975,6 @@ jobs:
           fi
 
       - name: Verify DeepSWE adapter witness (§E DEEPSWE_ADAPTER_FAIL / §H consumption proof)
-        continue-on-error: true
         if: ${{ !cancelled() && env.GT_PORTABLE_SUBSTRATE == '1' }}
         run: |
           # AGENT-OBSERVATION truth: the adapter emitted a [GT_META] witness to stdout. Prove
