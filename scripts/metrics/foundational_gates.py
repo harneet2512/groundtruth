@@ -50,10 +50,12 @@ try:
     _DET_SET = frozenset(DETERMINISTIC_RESOLUTION_METHODS)
     _DET_SET_SOURCE = "curation_map.DETERMINISTIC_RESOLUTION_METHODS"
 except Exception:  # pragma: no cover - fallback only when src not importable
+    # DUP-001 fix: fallback MUST match curation_map — exclude impl_method/unique_method
+    # (receiver-unproven, inflate det_pct without receiver-type proof).
     _DET_SET = frozenset(
         {
             "same_file", "import", "import_type", "type_flow", "verified_unique",
-            "impl_method", "inherited", "unique_method", "return_type", "lsp", "lsp_verified",
+            "inherited", "return_type", "lsp", "lsp_verified",
         }
     )
     _DET_SET_SOURCE = "fallback_literal(curation_map import failed)"

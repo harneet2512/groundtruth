@@ -23,10 +23,18 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from graph_bases import graph_bases_contract  # noqa: E402
 
-_DET_METHODS = (
-    "same_file", "import", "import_type", "type_flow", "verified_unique",
-    "impl_method", "inherited", "unique_method", "return_type", "lsp", "lsp_verified",
-)
+# DUP-001 fix: ONE canonical det-set (curation_map excludes receiver-unproven
+# impl_method/unique_method — they resolve by global name-uniqueness with no
+# receiver-type check, so they inflate det_pct and can over-credit graph quality).
+try:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "src"))
+    from groundtruth.pretask.curation_map import DETERMINISTIC_RESOLUTION_METHODS as _DET_METHODS_SET
+    _DET_METHODS = tuple(sorted(_DET_METHODS_SET))
+except Exception:
+    _DET_METHODS = (
+        "same_file", "import", "import_type", "type_flow", "verified_unique",
+        "inherited", "return_type", "lsp", "lsp_verified",
+    )
 
 
 def graph_edges_hash(db: str) -> str:
