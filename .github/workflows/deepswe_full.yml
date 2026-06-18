@@ -1111,16 +1111,43 @@ jobs:
           # exited 0 without creating /tmp/gt — an absent bind source would fail compose.
           mkdir -p "${HOST_ARTIFACTS}"
 
+          # SPEED-OPT E: pre-stage all GT files on the host and bind-mount /opt/gt:ro into
+          # the container.  This replaces 30 base64-echo RUN layers (12+ min per task) with
+          # a single host-side cp + a 2-step install (import-chain patch + self-test ~10s).
+          # GT_MOUNT_MODE=1 tells gt_agent._inject_steps() to skip the b64-injection path.
+          # The .pth / default.py writes go into container-internal site-packages — not
+          # /opt/gt — so the :ro mount is correct.
+          HOST_GT_INJECT=/tmp/gt_inject/opt/gt
+          mkdir -p "${HOST_GT_INJECT}"
+          mkdir -p "${HOST_GT_INJECT}/groundtruth"
+          cp artifact_deepswe/gt_mini_patch.py "${HOST_GT_INJECT}/"
+          cp artifact_deepswe/gt_hook.py        "${HOST_GT_INJECT}/" 2>/dev/null || true
+          cp artifact_deepswe/gt_oracle.py      "${HOST_GT_INJECT}/" 2>/dev/null || true
+          cp artifact_deepswe/gt_oracle_sense.py "${HOST_GT_INJECT}/" 2>/dev/null || true
+          cp artifact_deepswe/phase_policy.py   "${HOST_GT_INJECT}/" 2>/dev/null || true
+          # Product packages (groundtruth.{runtime,delivery,pretask}) — the single-source
+          # fact-filter modules gt_mini_patch.py imports at module scope.
+          for pkg in runtime delivery pretask; do
+            if [ -d "src/groundtruth/${pkg}" ]; then
+              mkdir -p "${HOST_GT_INJECT}/groundtruth/${pkg}"
+              cp src/groundtruth/${pkg}/*.py "${HOST_GT_INJECT}/groundtruth/${pkg}/" 2>/dev/null || true
+              touch "${HOST_GT_INJECT}/groundtruth/${pkg}/__init__.py"
+            fi
+          done
+          touch "${HOST_GT_INJECT}/groundtruth/__init__.py"
+          echo "GT inject staged: $(find "${HOST_GT_INJECT}" -name '*.py' | wc -l) Python files"
+
           # Bind-mount the host substrate dir into the task container READ-ONLY. JSON is the
           # pier --mounts-json contract (ServiceVolumeConfig: type/source/target/read_only).
           # FIX 3 (2026-06-11): a SECOND, WRITABLE mount (/tmp/gt_out -> /gt_out) carries the
           # oracle's 8-dp suppression telemetry (GT_ORACLE_EVENTS) out of the task container —
           # it was written to the in-container /tmp and lost on every prior run. chmod 777:
           # the task-image user is arbitrary and must be able to append.
+          # SPEED-OPT E: THIRD mount — /tmp/gt_inject/opt/gt -> /opt/gt:ro (pre-staged GT files).
           HOST_GT_OUT=/tmp/gt_out
           mkdir -p "${HOST_GT_OUT}" && chmod 777 "${HOST_GT_OUT}"
-          MOUNTS_JSON="[{\"type\":\"bind\",\"source\":\"${HOST_ARTIFACTS}\",\"target\":\"${GT_C_ARTIFACTS}\",\"read_only\":true},{\"type\":\"bind\",\"source\":\"${HOST_GT_OUT}\",\"target\":\"/gt_out\",\"read_only\":false}]"
-          echo "CONTAINER mount: ${HOST_ARTIFACTS} -> ${GT_C_ARTIFACTS} (ro); ${HOST_GT_OUT} -> /gt_out (rw)"
+          MOUNTS_JSON="[{\"type\":\"bind\",\"source\":\"${HOST_ARTIFACTS}\",\"target\":\"${GT_C_ARTIFACTS}\",\"read_only\":true},{\"type\":\"bind\",\"source\":\"${HOST_GT_OUT}\",\"target\":\"/gt_out\",\"read_only\":false},{\"type\":\"bind\",\"source\":\"/tmp/gt_inject/opt/gt\",\"target\":\"/opt/gt\",\"read_only\":true}]"
+          echo "CONTAINER mount: ${HOST_ARTIFACTS} -> ${GT_C_ARTIFACTS} (ro); ${HOST_GT_OUT} -> /gt_out (rw); /tmp/gt_inject/opt/gt -> /opt/gt (ro)"
           echo "mounts-json: ${MOUNTS_JSON}"
 
           # BUG#1+#2 FIX (single-source de-drift): source the canonical --ae block so the
@@ -1202,6 +1229,7 @@ jobs:
             --ae GT_STEP_LIMIT="${GT_STEP_LIMIT:-}" \
             --ae GT_VERIFICATION_CYCLE_COST="${GT_VERIFICATION_CYCLE_COST:-}" \
             --ae GT_SELF_VERIFY_ATTEMPTS="${GT_SELF_VERIFY_ATTEMPTS:-}" \
+            --ae GT_MOUNT_MODE="1" \
             "${GT_AE_ARGS[@]}" \
             --ae GT_ESC_ADV_TCOV="${GT_ESC_ADV_TCOV:-}" \
             --ae GT_ESC_ADV_B="${GT_ESC_ADV_B:-}" \

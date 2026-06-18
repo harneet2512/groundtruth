@@ -506,8 +506,47 @@ _GT_MANUAL_PREAMBLE = textwrap.dedent("""\
 """)
 
 
-def _inject_steps() -> list[InstallStep]:
-    """Build the install steps for GT injection.
+def _inject_steps_mount_mode() -> list[InstallStep]:
+    """Fast-path inject when GT_MOUNT_MODE=1 (GHA host-mount optimisation).
+
+    The workflow pre-stages all GT files under /tmp/gt_inject/opt/gt on the
+    host and bind-mounts that dir into the container as /opt/gt:ro.  All we
+    need to do inside the container is:
+      1. Wire the already-present gt_mini_patch.py into mini-swe-agent's
+         import chain (writes into site-packages and default.py — container-
+         internal paths that the :ro mount cannot reach).
+      2. Run the self-test to verify the patch loaded.
+
+    This replaces ~30 base64-echo RUN layers (12+ min) with 2 fast steps
+    (~10 s total).  Backward-compat: GT_MOUNT_MODE unset falls back to the
+    full base64-injection path via _inject_steps_b64().
+    """
+    # Import-coverage guard still runs — the allow-list must cover gt_mini_patch
+    # even though we skip the injection (the files arrive via the host mount, but
+    # we still need to verify they'll import correctly).
+    _assert_gt_mini_patch_imports_covered()
+
+    steps: list[InstallStep] = [
+        # Ensure /opt/gt exists and is accessible.  In mount-mode the directory
+        # is created by the workflow before pier starts, but the mkdir is
+        # idempotent and costs nothing.
+        InstallStep(
+            user="root",
+            run=(
+                f"mkdir -p {_GT_DIR} && chmod 755 {_GT_DIR} && "
+                f'echo "GT mount-mode: files pre-staged by host at {_GT_DIR}" >&2'
+            ),
+        ),
+        # Wire the import chain (writes to container-internal site-packages).
+        InstallStep(user="root", run=_APPEND_TO_MINI),
+        # Verify the patch loaded correctly.
+        InstallStep(user="root", run=_SELFTEST_STEP),
+    ]
+    return steps
+
+
+def _inject_steps_b64() -> list[InstallStep]:
+    """Full base64-injection path (legacy / non-mount-mode runners).
 
     Each InstallStep maps to one Dockerfile RUN line.  Docker caps a line at
     65535 bytes, so the ~115KB gt_hook.py is chunked into multiple echo lines.
@@ -740,6 +779,20 @@ def _inject_steps() -> list[InstallStep]:
         steps.append(InstallStep(user="root", run=_SELFTEST_STEP))
 
     return steps
+
+
+def _inject_steps() -> list[InstallStep]:
+    """Dispatcher: return mount-mode steps (fast) or full b64 steps (legacy).
+
+    GT_MOUNT_MODE=1 (set by deepswe_full.yml / swebench_pro_full.yml) means the
+    workflow pre-staged all GT files on the host and bind-mounted /opt/gt:ro into
+    the container — the 30 base64-echo RUN layers are unnecessary.  Any other
+    value (including unset) falls back to the full base64-injection path so older
+    runners and local usage continue to work without change.
+    """
+    if os.environ.get("GT_MOUNT_MODE") == "1":
+        return _inject_steps_mount_mode()
+    return _inject_steps_b64()
 
 
 def _cert_dir() -> str:
@@ -1291,6 +1344,33 @@ class GTMiniSweAgent(MiniSweAgent):
     @staticmethod
     def name() -> str:
         return "gt-mini-swe-agent"
+
+    @staticmethod
+    def gt_host_mounts(host_gt_inject_dir: str = "/tmp/gt_inject/opt/gt") -> list[dict]:
+        """Return the pier --mounts-json entry that pre-stages GT files into the container.
+
+        Used by the GHA workflows (deepswe_full.yml / swebench_pro_full.yml) when
+        GT_MOUNT_MODE=1: the caller stages all GT files under ``host_gt_inject_dir`` on
+        the host, then passes this mount spec to ``pier run --mounts-json``.
+
+        The mount is READ-ONLY (/opt/gt:ro).  The import-chain patch (_APPEND_TO_MINI)
+        writes to container-internal site-packages, not to /opt/gt, so :ro is correct.
+
+        Args:
+            host_gt_inject_dir: Absolute host path where the workflow staged GT files.
+                Defaults to ``/tmp/gt_inject/opt/gt`` (the GHA convention).
+
+        Returns:
+            A list with one ServiceVolumeConfig-compatible dict (pier --mounts-json).
+        """
+        return [
+            {
+                "type": "bind",
+                "source": host_gt_inject_dir,
+                "target": _GT_DIR,
+                "read_only": True,
+            }
+        ]
 
     def install_spec(self) -> AgentInstallSpec:
         """Extend parent install_spec with GT injection steps."""
