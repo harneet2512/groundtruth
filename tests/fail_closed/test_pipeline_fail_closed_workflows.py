@@ -162,6 +162,16 @@ def test_deepswe_uses_explicit_harness_pier_across_steps():
     assert 'test -x "$GT_HARNESS_PIER"' in run
 
 
+def test_deepswe_forwards_semantic_capacity_caps_to_agent_container():
+    doc = _load(WF_DEEPSWE)
+    env = doc.get("env") or {}
+    assert env.get("GT_SEM_PASSAGE_BUDGET") == "512"
+    assert env.get("GT_SEM_POOL_FILES") == "24"
+    run = _step(doc, "trial", "Run GT trial")["run"]
+    assert '--ae GT_SEM_PASSAGE_BUDGET="${GT_SEM_PASSAGE_BUDGET:-}"' in run
+    assert '--ae GT_SEM_POOL_FILES="${GT_SEM_POOL_FILES:-}"' in run
+
+
 def test_pro_full_uses_same_harness_python_for_import_check_and_runner():
     doc = _load(WF_PRO_FULL)
     install = _step(doc, "trial", "Install host harness deps")["run"]
@@ -173,6 +183,17 @@ def test_pro_full_uses_same_harness_python_for_import_check_and_runner():
     assert 'test -x "$GT_HARNESS_PYTHON"' in run
     assert '"$GT_HARNESS_PYTHON" benchmarks/swebench/run_mini_gt_pro_v10.py' in run
     assert "python3 benchmarks/swebench/run_mini_gt_pro_v10.py" not in run
+
+
+def test_pro_full_unsets_hf_offline_before_native_dataset_runner():
+    doc = _load(WF_PRO_FULL)
+    env = doc.get("env") or {}
+    assert env.get("HF_DATASETS_OFFLINE") == "1"
+    run = _step(doc, "trial", "Run GT Pro trial")["run"]
+    unset_i = run.index("unset HF_DATASETS_OFFLINE HF_HUB_OFFLINE TRANSFORMERS_OFFLINE")
+    runner_i = run.index('"$GT_HARNESS_PYTHON" benchmarks/swebench/run_mini_gt_pro_v10.py')
+    assert unset_i < runner_i
+    assert "--subset ScaleAI/SWE-bench_Pro" in run
 
 
 def test_cancelled_full_runs_are_reported_as_partial_not_structural_failures():

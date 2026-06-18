@@ -119,6 +119,12 @@ env:
   GT_STEP_LIMIT: "300"
   GT_SELF_VERIFY_ATTEMPTS: "2"
   GT_VERIFICATION_CYCLE_COST: "25"
+  # Bound semantic encode work in the agent path. This is a generalized capacity
+  # rail for large repos: the code already treats GT_SEM_PASSAGE_BUDGET as the
+  # shared hard encode cap for both semantic halves; the workflow must actually
+  # set and forward it so a single task cannot consume the 16GB hosted runner.
+  GT_SEM_PASSAGE_BUDGET: "512"
+  GT_SEM_POOL_FILES: "24"
   # ── MODEL ROUTING (litellm OpenAI-compatible) ──────────────────────────────
   # When model input contains "MiniMax" or uses TokenRouter, route via the
   # OpenAI-compatible path. TOKENROUTER_API_KEY is in secrets (never in code).
@@ -939,6 +945,8 @@ jobs:
             --ae GT_CONTAINERIZED="1" \
             --ae GT_RUNTIME_STRATEGY="${GT_RUNTIME_STRATEGY:-unified_substrate}" \
             --ae GT_STEP_LIMIT="${GT_STEP_LIMIT:-}" \
+            --ae GT_SEM_PASSAGE_BUDGET="${GT_SEM_PASSAGE_BUDGET:-}" \
+            --ae GT_SEM_POOL_FILES="${GT_SEM_POOL_FILES:-}" \
             --ae GT_VERIFICATION_CYCLE_COST="${GT_VERIFICATION_CYCLE_COST:-}" \
             --ae GT_SELF_VERIFY_ATTEMPTS="${GT_SELF_VERIFY_ATTEMPTS:-}" \
             --ae GT_MOUNT_MODE="1" \

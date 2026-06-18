@@ -747,6 +747,12 @@ jobs:
 
           # Pro uses its native mini-swe-agent SWE-bench runner, filtered to the
           # single matrix instance. It is not a Pier benchmark path.
+          # The workflow keeps HF offline for substrate/proof code, but the native
+          # mini-swe-agent Pro runner loads ScaleAI/SWE-bench_Pro via datasets.
+          # Unset the offline switches immediately before that runner so a matrix
+          # job cannot deterministically fail with OfflineModeIsEnabled before
+          # producing jobs/preds.json.
+          unset HF_DATASETS_OFFLINE HF_HUB_OFFLINE TRANSFORMERS_OFFLINE
           "$GT_HARNESS_PYTHON" benchmarks/swebench/run_mini_gt_pro_v10.py \
             -c benchmarks/swebench/mini_swebench_pro_gt_v10.yaml \
             --model "$INPUT_MODEL" \
