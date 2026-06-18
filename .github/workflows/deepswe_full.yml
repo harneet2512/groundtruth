@@ -471,6 +471,36 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Preflight checks (fail-fast on infra, warn on quality)
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        shell: bash
+        run: |
+          set -e
+          echo "=== INFRA PREFLIGHT (fail-fast) ==="
+          # 1. API key — must be present before any LLM spend
+          [ "${#DEEPSEEK_API_KEY}" -gt 10 ] || { echo "::error::DEEPSEEK_API_KEY missing or too short"; exit 1; }
+          echo "  DEEPSEEK_API_KEY present (${#DEEPSEEK_API_KEY} chars)"
+          # 2. Docker CLI (required for substrate pull + pier + task images)
+          docker --version || { echo "::error::docker CLI not available (will be installed below — this is a pre-check)"; true; }
+          echo "  Docker CLI pre-check done"
+          # 3. Disk space (need >= 10GB for substrate + task image + artifacts)
+          FREE_GB=$(df --output=avail / | tail -1 | awk '{printf "%.0f", $1/1048576}')
+          [ "$FREE_GB" -ge 10 ] || { echo "::error::Low disk: ${FREE_GB}GB free (need >=10GB for substrate + task images)"; exit 1; }
+          echo "  Disk: ${FREE_GB}GB free"
+          # 4. Network / GHCR reachable (warning only — Docker Hub fallback exists)
+          curl -sf --max-time 10 https://ghcr.io/v2/ -o /dev/null || echo "::warning::GHCR not reachable — Docker Hub fallback will be used"
+          echo "  Network check done"
+          # 5. Substrate digest format (when provided — hard format check before any pull attempt)
+          if [ -n "${GT_SUBSTRATE_DIGEST:-}" ]; then
+            echo "$GT_SUBSTRATE_DIGEST" | grep -qE '^.+@sha256:[a-f0-9]{64}$' || { echo "::error::GT_SUBSTRATE_DIGEST malformed: $GT_SUBSTRATE_DIGEST"; exit 1; }
+            echo "  Substrate digest format valid"
+          fi
+          # 6. GT source syntax (key Python modules — catches bad merges before paid matrix)
+          python -c "import ast; ast.parse(open('src/groundtruth/mcp/tools.py').read()); print('  GT mcp/tools.py syntax OK')" || echo "::warning::GT mcp/tools.py syntax check failed"
+          python -c "import ast; ast.parse(open('src/groundtruth/mcp/server.py').read()); print('  GT mcp/server.py syntax OK')" || echo "::warning::GT mcp/server.py syntax check failed"
+          echo "=== PREFLIGHT PASS ==="
+
       # ── TOOLCHAIN CACHE (scalability) ──────────────────────────────────────────
       # SPEED-OPT B restore: harness venv built ONCE in prepare (pier==0.2.0 + GT
       # editable install). Restore the tarball here → unpack → activate. Falls back

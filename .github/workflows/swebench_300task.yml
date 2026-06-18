@@ -350,9 +350,21 @@ jobs:
       # STRICT PREFLIGHT (Stage-0, fail-closed) — assert every failure class we hit this
       # session is closed BEFORE the paid matrix. A failure here costs $0 (no agent runs).
       - name: Strict preflight — fail-closed before the paid matrix
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: |
           set -e
           echo "=== STRICT PREFLIGHT (Stage-0) ==="
+          # [INFRA-1] API key — must be present before any LLM spend
+          [ "${#DEEPSEEK_API_KEY}" -gt 10 ] || { echo "::error::DEEPSEEK_API_KEY missing or too short"; exit 1; }
+          echo "  [INFRA-1] DEEPSEEK_API_KEY present (${#DEEPSEEK_API_KEY} chars)"
+          # [INFRA-2] Disk space (need >= 10GB for task images + artifacts + model)
+          FREE_GB=$(df --output=avail / | tail -1 | awk '{printf "%.0f", $1/1048576}')
+          [ "$FREE_GB" -ge 10 ] || { echo "::error::Low disk: ${FREE_GB}GB free (need >=10GB for task images + artifacts)"; exit 1; }
+          echo "  [INFRA-2] Disk: ${FREE_GB}GB free"
+          # [INFRA-3] Network / GHCR reachable (warning only — image pre-verify and pulls have fallback)
+          curl -sf --max-time 10 https://ghcr.io/v2/ -o /dev/null || echo "::warning::GHCR not reachable at Stage-0 — image pre-verify may rely on Docker Hub"
+          echo "  [INFRA-3] Network check done"
           # [1] No real lfs:true YAML KEY (anchor to line-start so comment MENTIONS of
           # "lfs:true" don't false-positive). A real key would re-hit the dead LFS quota.
           if grep -nE '^[[:space:]]*lfs:[[:space:]]*true([[:space:]]|$)' .github/workflows/swebench_300task.yml; then
