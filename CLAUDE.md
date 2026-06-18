@@ -1,3 +1,5 @@
+> 📊 **MANDATORY METRICS (read `MANDATORY_METRICS.md` FIRST).** Every paid run MUST compute ALL metrics in that file. A run without its `gt_deep_metrics_<task>.json` is NOT done. Behavioral impact (pivots/deliveries), localization (files_to_gold), edit quality (rewrite_count), interface preservation (contract_compliance), scope (coverage), stuck/recovery, verify-before-submit, token efficiency, correctness (f2p/p2p), and comparative deltas — ALL at 8-decimal precision. No metric skipped. No run cited without its metrics.
+
 > 🚫 **GITHUB REPO IS CODE-ONLY (public for GHA + codespaces).** NEVER commit or push docs / reports / analysis `.md` — `gt_math`, `gt_gt`, `gt_new`, `gt_trial`, `*_AUDIT*.md`, `*_REPORT*.md`, `GO_NO_GO*`, `.claude/reports/`, `SESSION_SUMMARY`, `RUN_LEDGER`, `.tmp_*`, etc. They are **LOCAL working artifacts only**. Only `README.md`, `LICENSE`, and source/scripts/workflows/tests/manifests ship. Gitignore every new doc; the public snapshot is code-only — no internal doc/report ever reaches GitHub.
 
 # CLAUDE.md -- GroundTruth
