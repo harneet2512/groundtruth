@@ -21,7 +21,7 @@ on:
       model:
         description: "LLM model"
         required: true
-        default: "deepseek/deepseek-v4-flash"
+        default: "MiniMax-M3"
       language:
         description: "Language filter (all, python, go, typescript, javascript, rust)"
         required: true
@@ -35,7 +35,7 @@ on:
         required: false
         default: ""
       max_parallel:
-        description: "Concurrent jobs. Default 20 — DeepSeek API is NOT the bound (confirmed not rate-limited at 20; litellm num_retries=3 absorbs any transient 429s). Use 1 for the demo, lower if your GHA account runner ceiling is below 20."
+        description: "Concurrent jobs. Default 20 for MiniMax-M3 via TokenRouter; use 1 for the demo, lower if your GHA account runner ceiling is below 20."
         required: true
         default: "20"
       assets_repo:
@@ -154,6 +154,11 @@ jobs:
             .github/workflows/deepswe_full.yml \
             .github/actions/setup-eval/action.yml
 
+      - name: Benchmark legitimacy audit
+        shell: bash
+        run: |
+          python3 scripts/ci/audit_benchmark_legitimacy.py --benchmark deepswe --json /tmp/benchmark_legitimacy_audit.json
+
       - name: Digest precheck (fail-closed at run level — abort BEFORE the paid matrix)
         shell: bash
         run: |
@@ -183,7 +188,11 @@ jobs:
           # agent.cost_limit (USD). A config without BOTH finite positive bounds
           # means an unbounded paid matrix — abort in Stage-0. Stdlib regex (no
           # pyyaml dependency in the cheap job); the keys are flat scalars.
-          GT_PIER_CFG=artifact_deepswe/gt_integration/deepswe_gt_pier.yaml python3 << 'PYEOF'
+          for cfg in \
+            artifact_deepswe/gt_integration/deepswe_gt_pier.yaml \
+            artifact_deepswe/gt_integration/deepswe_gt_pier_minimax.yaml \
+            artifact_deepswe/gt_integration/deepswe_gt_pier_gemini.yaml; do
+            GT_PIER_CFG="$cfg" python3 << 'PYEOF'
           import os, re, sys
           cfg = os.environ["GT_PIER_CFG"]
           txt = open(cfg, encoding="utf-8").read()
@@ -196,6 +205,7 @@ jobs:
           print(f"cost guard OK: step_limit={sl.group(1)} (DeepSWE official 300) "
                 f"cost_limit=${cl.group(1)} USD per task")
           PYEOF
+          done
       - name: Clone deepswe-bench
         id: bench_clone
         run: |
@@ -748,7 +758,6 @@ jobs:
 
       - name: Run GT trial
         if: ${{ !cancelled() }}
-        continue-on-error: true
         # Cert-env handoff (§D): GT_CERT_DIR / GT_HOST_GRAPH_DB / GT_HOST_SRC_ROOT + the cert
         # paths were written to $GITHUB_ENV by the substrate-proof step and are inherited here;
         # GT_PROOF_MODE / GT_CONTAINERIZED / GT_RUNTIME_STRATEGY come from the top-level env.
@@ -875,6 +884,8 @@ jobs:
             fi
             echo "=== Model routed via TokenRouter: $INPUT_MODEL ==="
           fi
+          PIER_CONFIG="$(bash scripts/ci/select_pier_config.sh deepswe "$INPUT_MODEL")"
+          echo "Pier config selected: ${PIER_CONFIG}"
           # [OOM FIX 2026-06-16] RESMON ground truth (run 27650378892, expr): the GT HOST
           # process balloons mem=2.8->15.3GB in ~100s during the agent phase (containers=0,
           # disk 79GB free) and OOM-kills the 16GB runner -> exit 143, VM reclaimed, the
@@ -936,7 +947,7 @@ jobs:
             --ae GT_ORACLE_EVENTS="${GT_C_OUT}/gt_oracle_events.jsonl" \
             --ae GT_RUNTIME_LEDGER="${GT_C_OUT}/gt_runtime_ledger.jsonl" \
             --ae GT_HOOK_FIRE_COUNTS="${GT_C_OUT}/gt_hook_fire_counts.json" \
-            --ak config_file=artifact_deepswe/gt_integration/deepswe_gt_pier.yaml \
+            --ak config_file="${PIER_CONFIG}" \
             2>&1 | tee trial_output.log
           PIER_RC=${PIPESTATUS[0]}
           set -e
@@ -1102,6 +1113,10 @@ jobs:
           GT_TRIAL_LOG=trial_output.log GT_CERT_DIR=/tmp/gt \
             GT_DEEPSWE_OUTCOME_JSON=trial_results/outcome.json \
             python3 scripts/verify/deepswe_outcome.py jobs || echo "WARN: outcome extract failed"
+          python3 scripts/ci/verify_task_evidence.py \
+            --benchmark deepswe \
+            --dir trial_results \
+            --task "${{ matrix.task }}"
           find trial_results -type f 2>/dev/null | head -40 || true
 
       - name: Upload results
@@ -1127,6 +1142,10 @@ jobs:
           pattern: deepswe-full-*
       - name: Aggregate DeepSWE benchmark results
         run: |
+          if [ "${{ needs.prepare.result }}" != "success" ]; then
+            echo "PREPARE_FAILED: prepare result=${{ needs.prepare.result }}; no benchmark denominator is valid" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
           echo "## DeepSWE full benchmark — ${{ needs.prepare.outputs.total }} tasks" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           # Run provenance (Stage-5): which code produced this run.
@@ -1165,7 +1184,12 @@ jobs:
           sys.path.insert(0, "scripts/verify")
           from deepswe_outcome import tally_classes
           recs, missing = [], []
-          for d in sorted(glob.glob("/tmp/all/deepswe-full-*")):
+          expected = int("${{ needs.prepare.outputs.total }}" or "0")
+          artifacts = sorted(glob.glob("/tmp/all/deepswe-full-*"))
+          if len(artifacts) != expected:
+              print(f"ARTIFACT_COUNT_MISMATCH: expected {expected}, downloaded {len(artifacts)}")
+              sys.exit(1)
+          for d in artifacts:
               task = d.split("deepswe-full-", 1)[-1]
               try:
                   with open(f"{d}/outcome.json", encoding="utf-8") as f:
@@ -1188,6 +1212,7 @@ jobs:
               print(f"outcome.json MISSING for {len(missing)} task(s) (job died before "
                     f"Collect — triage in the per-task artifact): {', '.join(missing[:10])}"
                     + (" ..." if len(missing) > 10 else ""))
+              sys.exit(1)
           PYEOF
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "Per-task detail: \`outcome.json\` (classification) + \`gt_deep_metrics_<task>.json\` (8-dp) + \`gt_artifacts/\` (8-artifact proof set incl. brief.txt + issue.txt) + \`jobs/\` (trajectory + verifier) inside each \`deepswe-full-<task>\` artifact." >> "$GITHUB_STEP_SUMMARY"

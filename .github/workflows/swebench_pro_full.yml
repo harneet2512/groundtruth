@@ -3,7 +3,7 @@ name: "SWE-bench Pro: Full benchmark (parallel matrix, 731 tasks)"
 # Runs the WHOLE SWE-bench Pro benchmark in parallel — one task per job,
 # fanned across max-parallel runners — using the EXACT same substrate-consume
 # proof path as deepswe_full.yml: pinned substrate by @sha256, gt-run-proof
-# inside the container, GTMiniSweAgent via pier, 8-artifact collection.
+# inside the container, native SWE-bench Pro mini-swe-agent runner, artifact collection.
 #
 # DIFFERENCES from DeepSWE:
 # - 731 tasks (vs 113), 4 languages: go/js/python/ts (no rust in the Pro set)
@@ -11,14 +11,14 @@ name: "SWE-bench Pro: Full benchmark (parallel matrix, 731 tasks)"
 #   mirrored by swebench_pro_mirror.yml from docker.io/jefzda/sweap-images)
 #   The dockerhub_tag is NOT the instance_id — it is a separate field from
 #   benchmarks/data/swebench_pro_public_tags.jsonl (the source of truth).
-# - No bench-clone cross-check (Pro has no public pier task-dir repository);
+# - No DeepSWE-style task-dir cross-check (Pro is dataset/image driven);
 #   the matrix is driven entirely from swebench_pro_public_tags.jsonl.
 # - Pro task instructions come from scaleapi/SWE-bench_Pro-os (instruction.md
 #   or problem_statement); the prepare job clones it once and caches it.
-# - Eval: the Pro verifier is run_script.sh (from SWE-bench_Pro-os/run_scripts/
-#   <instance_id>/run_script.sh), not pier's reward.txt. The Collect step runs
-#   it inside the task image and writes a reward.txt-compatible file so the
-#   outcome classifier chain is unchanged.
+# - Eval: the official Pro evaluator is SWE-bench_Pro-os/swe_bench_pro_eval.py.
+#   It runs run_scripts/<instance_id>/run_script.sh + parser.py inside the task
+#   image and writes eval_results.json; the workflow mirrors that result into
+#   reward.txt so the existing outcome classifier chain is unchanged.
 #
 # Legitimacy: GT_FORBID_PREBUILT_GRAPH=1 (per-task graph built FRESH in-
 # container); no task IDs or gold labels in product logic; benchmark is
@@ -30,7 +30,7 @@ on:
       model:
         description: "LLM model (litellm-compatible)"
         required: true
-        default: "deepseek/deepseek-v4-flash"
+        default: "MiniMax-M3"
       mode:
         description: "Run mode: smoke (5 tasks), pilot (20), pilot100 (100), full (731)"
         required: true
@@ -95,8 +95,8 @@ env:
   GT_CONTAINERIZED: "1"
   GT_RUNTIME_STRATEGY: "unified_substrate"
   GT_LSP_READY_BUDGET_S_OVERRIDE: ${{ vars.GT_LSP_READY_BUDGET_S_OVERRIDE }}
-  # Verification horizon (step budget — same as DeepSWE).
-  GT_STEP_LIMIT: "300"
+  # Verification horizon (Pro-specific; DeepSWE uses 300).
+  GT_STEP_LIMIT: "250"
   GT_SELF_VERIFY_ATTEMPTS: "2"
   GT_VERIFICATION_CYCLE_COST: "25"
   # Model routing.
@@ -137,6 +137,11 @@ jobs:
             .github/actions/setup-eval/action.yml \
             || echo "::warning::lint incomplete (setup-eval/action.yml may be absent in Pro path) — review before scaling to full mode"
 
+      - name: Benchmark legitimacy audit
+        shell: bash
+        run: |
+          python3 scripts/ci/audit_benchmark_legitimacy.py --benchmark pro --json /tmp/benchmark_legitimacy_audit.json
+
       - name: Digest precheck (fail-closed at run level — abort BEFORE the paid matrix)
         shell: bash
         run: |
@@ -158,9 +163,12 @@ jobs:
       - name: Cost guard — step_limit + cost_limit MUST be set
         shell: bash
         run: |
-          GT_PIER_CFG=artifact_deepswe/gt_integration/deepswe_gt_pier.yaml python3 << 'PYEOF'
+          for cfg in \
+            benchmarks/swebench/mini_swebench_pro_gt_v10.yaml \
+            benchmarks/swebench/mini_swebench_pro_gt_v10_hooked.yaml; do
+            GT_PRO_CFG="$cfg" python3 << 'PYEOF'
           import os, re, sys
-          cfg = os.environ["GT_PIER_CFG"]
+          cfg = os.environ["GT_PRO_CFG"]
           txt = open(cfg, encoding="utf-8").read()
           sl = re.search(r"^\s*step_limit:\s*([0-9]+)\s*$", txt, re.M)
           cl = re.search(r"^\s*cost_limit:\s*([0-9.]+)\s*$", txt, re.M)
@@ -170,6 +178,7 @@ jobs:
               sys.exit(f"FATAL: agent.cost_limit missing/zero in {cfg}")
           print(f"cost guard OK: step_limit={sl.group(1)} cost_limit=${cl.group(1)}")
           PYEOF
+          done
 
       - name: Clone scaleapi/SWE-bench_Pro-os (task instructions + run_scripts)
         id: pro_bench_clone
@@ -203,7 +212,7 @@ jobs:
           key: ${{ steps.pro_bench_archive.outputs.pro_bench_cache_key }}
 
       # ── SPEED-OPT B: pre-build harness venv ONCE in prepare ──────────────────
-      - name: Build and cache harness venv (pier==0.2.0 + GT editable install)
+      - name: Build and cache harness venv (mini-swe-agent + GT editable install)
         shell: bash
         run: |
           set -e
@@ -211,7 +220,7 @@ jobs:
           python -m venv "$VENV_DIR"
           source "$VENV_DIR/bin/activate"
           python -m pip install --upgrade pip --quiet
-          python -m pip install "datacurve-pier==0.2.0" --quiet
+          python -m pip install "mini-swe-agent==2.2.8" datasets docker --quiet
           python -m pip install -e . --quiet
           deactivate
           tar -czf /tmp/gt-harness-venv.tar.gz -C /tmp gt-harness-venv/
@@ -221,7 +230,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: /tmp/gt-harness-venv.tar.gz
-          key: gt-harness-venv-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}-pier020
+          key: gt-pro-harness-venv-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}-mini-swe-agent-228
 
       # ── SPEED-OPT C: pull + save substrate image ONCE ────────────────────────
       - name: Pull + save substrate image for matrix job cache
@@ -303,7 +312,7 @@ jobs:
           #   (never exit 1 — lets users run 256 at a time while warning they need shards for all).
           #
           # Key difference from deepswe_full.yml: the Pro manifest has no bench-clone
-          # to cross-check against (no public pier task-dir repo). Validation is
+          # to cross-check against (no public task-dir repo). Validation is
           # instance_id + dockerhub_tag presence only (both required fields).
           python3 << 'PYEOF'
           import json, math, os, sys
@@ -459,9 +468,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: /tmp/gt-harness-venv.tar.gz
-          key: gt-harness-venv-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}-pier020
+          key: gt-pro-harness-venv-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}-mini-swe-agent-228
 
-      - name: Install host harness deps (pier + GT python deps for the adapter ONLY)
+      - name: Install host harness deps (mini-swe-agent + GT python deps)
         run: |
           set -e
           if [ -f /tmp/gt-harness-venv.tar.gz ]; then
@@ -474,14 +483,13 @@ jobs:
             echo "PATH=/tmp/gt-harness-venv/bin:$PATH" >> "$GITHUB_ENV"
             echo "VIRTUAL_ENV=/tmp/gt-harness-venv" >> "$GITHUB_ENV"
             export PATH="/tmp/gt-harness-venv/bin:$PATH"
-            command -v pier >/dev/null || { echo "FATAL: pier not on PATH after venv restore"; exit 1; }
-            echo "host harness ready (venv cache): pier=$(command -v pier)"
+            python -c "import minisweagent; print('host harness ready: mini-swe-agent import OK')"
           else
             echo "venv cache MISS — installing harness from scratch"
             python -m pip install --upgrade pip
-            python -m pip install "datacurve-pier==0.2.0" || { echo "FATAL: pier install failed"; exit 1; }
-            command -v pier >/dev/null || { echo "FATAL: pier not on PATH after install"; exit 1; }
-            echo "host harness ready: pier=$(command -v pier)"
+            python -m pip install "mini-swe-agent==2.2.8" datasets docker
+            python -m pip install -e . --quiet
+            python -c "import minisweagent; print('host harness ready: mini-swe-agent import OK')"
           fi
 
       - name: Trust the workspace for git (CI checkout uid mismatch)
@@ -627,7 +635,6 @@ jobs:
 
       - name: Run GT Pro trial
         if: ${{ !cancelled() }}
-        continue-on-error: true
         run: |
           echo "=== SWE-bench Pro GT Trial: ${{ matrix.task }} (lang=${{ matrix.language }} model=${{ inputs.model }}) ==="
           echo "HOST  GT_CERT_DIR=${GT_CERT_DIR:-<unset>}  GT_HOST_GRAPH_DB=${GT_HOST_GRAPH_DB:-<unset>}"
@@ -715,144 +722,67 @@ jobs:
           if echo "$INPUT_MODEL" | grep -qiE "minimax|tokenrouter"; then
             export OPENAI_API_KEY="${TOKENROUTER_API_KEY}"
             export OPENAI_API_BASE="${TOKENROUTER_API_BASE}"
+            export OPENAI_BASE_URL="${TOKENROUTER_API_BASE}"
             if ! echo "$INPUT_MODEL" | grep -q "^openai/"; then
               INPUT_MODEL="openai/${INPUT_MODEL}"
             fi
             echo "=== Model routed via TokenRouter: $INPUT_MODEL ==="
           fi
+          export MSWEA_COST_TRACKING=ignore_errors
 
-          # Pro task image: jefzda/sweap-images:<dockerhub_tag> — pier runs the agent
-          # inside it via --env docker; the GT substrate artifacts are bind-mounted as above.
-          pier run \
-            -p "$GITHUB_WORKSPACE" \
-            --agent-import-path artifact_deepswe.gt_agent:GTMiniSweAgent \
+          # Pro uses its native mini-swe-agent SWE-bench runner, filtered to the
+          # single matrix instance. It is not a Pier benchmark path.
+          python3 benchmarks/swebench/run_mini_gt_pro_v10.py \
+            -c benchmarks/swebench/mini_swebench_pro_gt_v10.yaml \
             --model "$INPUT_MODEL" \
-            --env docker \
-            -y \
-            --mounts-json "${MOUNTS_JSON}" \
-            --ae GT_HOST_GRAPH_DB="${GT_C_ARTIFACTS}/graph.db" \
-            --ae GT_CERT_DIR="${GT_C_ARTIFACTS}" \
-            --ae GT_HOST_SRC_ROOT="${GT_C_ARTIFACTS}/src" \
-            --ae GT_PORTABLE_SUBSTRATE="1" \
-            --ae GT_FORBID_PREBUILT_GRAPH="1" \
-            --ae GT_PROOF_MODE="${GT_PROOF_MODE:-1}" \
-            --ae GT_CONTAINERIZED="1" \
-            --ae GT_RUNTIME_STRATEGY="${GT_RUNTIME_STRATEGY:-unified_substrate}" \
-            --ae GT_STEP_LIMIT="${GT_STEP_LIMIT:-}" \
-            --ae GT_VERIFICATION_CYCLE_COST="${GT_VERIFICATION_CYCLE_COST:-}" \
-            --ae GT_SELF_VERIFY_ATTEMPTS="${GT_SELF_VERIFY_ATTEMPTS:-}" \
-            --ae GT_MOUNT_MODE="1" \
-            --ae GT_ORACLE_EVENTS="${GT_C_OUT}/gt_oracle_events.jsonl" \
-            --ae GT_RUNTIME_LEDGER="${GT_C_OUT}/gt_runtime_ledger.jsonl" \
-            --ae GT_HOOK_FIRE_COUNTS="${GT_C_OUT}/gt_hook_fire_counts.json" \
-            "${GT_AE_ARGS[@]}" \
-            --ak config_file=artifact_deepswe/gt_integration/deepswe_gt_pier.yaml \
-            --ak task="$(cat /tmp/issue.txt 2>/dev/null || echo 'Fix issue in repository')" \
-            --ak image="jefzda/sweap-images:${{ matrix.dockerhub_tag }}" \
+            --subset ScaleAI/SWE-bench_Pro \
+            --split test \
+            --filter "^${{ matrix.task }}$" \
+            -w 1 \
+            -o jobs \
             2>&1 | tee trial_output.log
-          PIER_RC=${PIPESTATUS[0]}
+          PRO_RC=${PIPESTATUS[0]}
           set -e
-          echo "=== Pro Trial complete (pier rc=$PIER_RC) ==="
+          echo "=== Pro Trial complete (native runner rc=$PRO_RC) ==="
 
-          if ! python3 scripts/swebench/adapter_error_scan.py jobs trial_output.log; then
-            echo "DEEPSWE_ADAPTER_FAIL: adapter error found via structured result.json scan" | tee -a trial_output.log
-            exit 1
-          fi
-          if [ "$PIER_RC" -eq 137 ] || grep -qE "OOMKilled|exit code 137|exited with code 137" trial_output.log; then
+          if [ "$PRO_RC" -eq 137 ] || grep -qE "OOMKilled|exit code 137|exited with code 137" trial_output.log; then
             echo "GT_AGENT_OOM: agent container hit the memory cap (rc/exit=137)" | tee -a trial_output.log
             exit 1
           fi
-          if [ "$PIER_RC" -ne 0 ]; then
-            echo "PIER_RUN_FAIL: pier run exited rc=$PIER_RC" | tee -a trial_output.log
+          if [ "$PRO_RC" -ne 0 ]; then
+            echo "PRO_RUN_FAIL: native Pro runner exited rc=$PRO_RC" | tee -a trial_output.log
             exit 1
           fi
 
-      - name: Verify GT adapter witness (§E/§H)
-        if: ${{ !cancelled() && env.GT_PORTABLE_SUBSTRATE == '1' }}
-        run: |
-          if grep -q "error=DEEPSWE_ADAPTER_FAIL" trial_output.log; then
-            echo "DEEPSWE_ADAPTER_FAIL: the adapter failed to wire/consume the substrate artifacts:"
-            grep "DEEPSWE_ADAPTER_FAIL" trial_output.log | head -5
-            exit 1
-          fi
-          if ! grep -q "gt_prebuilt_active=true" trial_output.log; then
-            echo "GT_ARTIFACT_NOT_CONSUMED: no [GT_META] witness with gt_prebuilt_active=true"
-            grep "\[GT_META\]" trial_output.log | head -5 || echo "(no [GT_META] line at all)"
-            exit 1
-          fi
-          if grep -q "hook_graph_hash_matches_post_lsp=False" trial_output.log; then
-            echo "GRAPH_FAIL_HASH_MISMATCH: hook_graph_hash != graph_hash_after_lsp"
-            grep "hook_graph_hash_matches_post_lsp" trial_output.log | head -3
-            exit 1
-          fi
-          echo "adapter witness OK: substrate graph consumed read-only"
-          grep "\[GT_META\] graph_witness" trial_output.log | head -2 || true
-
-      - name: Run Pro eval (run_script.sh verifier) + emit reward outcome
+      - name: Verify GT Pro runner output
         if: ${{ !cancelled() }}
         run: |
-          # Pro verification: run_script.sh from scaleapi/SWE-bench_Pro-os inside
-          # the task image, with the agent's patch applied. Emits a reward.txt-
-          # compatible file so the outcome classifier chain is unchanged.
-          TASK_ID="${{ matrix.task }}"
-          DOCKERHUB_TAG="${{ matrix.dockerhub_tag }}"
-          IMG="jefzda/sweap-images:${DOCKERHUB_TAG}"
-          RUN_SCRIPT="swebench-pro-os/run_scripts/${TASK_ID}/run_script.sh"
-          mkdir -p trial_results
-
-          # Extract the agent's patch from pier jobs dir (same location as DeepSWE).
-          PATCH_FILE=$(find jobs -name "patch.diff" -o -name "*.patch" 2>/dev/null | head -1 || true)
-          if [ -z "$PATCH_FILE" ]; then
-            # Try preds.json output
-            PATCH_TEXT=$(python3 -c "
-          import glob, json, sys
-          for f in glob.glob('jobs/**/*.json', recursive=True):
-              try:
-                  d = json.load(open(f))
-                  p = d.get('model_patch') or d.get('patch') or ''
-                  if p and len(p.strip()) > 5:
-                      print(p)
-                      sys.exit(0)
-              except Exception:
-                  pass
-          " 2>/dev/null || true)
-            if [ -n "$PATCH_TEXT" ]; then
-              echo "$PATCH_TEXT" > /tmp/pro_patch.diff
-              PATCH_FILE=/tmp/pro_patch.diff
-            fi
+          if [ ! -s jobs/preds.json ]; then
+            echo "PRO_OUTPUT_MISSING: native Pro runner did not emit jobs/preds.json"
+            exit 1
           fi
-
-          REWARD=0
-          if [ -z "$PATCH_FILE" ] || [ ! -s "$PATCH_FILE" ]; then
-            echo "PRO_EVAL_SKIP: no agent patch found — task did not produce output" | tee -a trial_output.log
-          elif [ ! -f "$RUN_SCRIPT" ]; then
-            echo "::warning::PRO_RUN_SCRIPT_MISSING: ${RUN_SCRIPT} absent (clone failed or task not in Pro-OS) — eval skipped" | tee -a trial_output.log
-          else
-            # Apply patch and run the Pro verifier inside the task image.
-            docker run --rm \
-              -v "$(realpath "$PATCH_FILE"):/tmp/pro_patch.diff:ro" \
-              -v "$(realpath "$RUN_SCRIPT"):/tmp/run_test.sh:ro" \
-              --entrypoint "" \
-              "$IMG" \
-              bash -c '
-                set -e
-                cd /app 2>/dev/null || cd /testbed 2>/dev/null || true
-                git apply /tmp/pro_patch.diff 2>/dev/null || patch -p1 < /tmp/pro_patch.diff 2>/dev/null || true
-                bash /tmp/run_test.sh 2>&1 | tail -30
-                echo "_PRO_EXIT_CODE=$?"
-              ' 2>&1 | tee /tmp/pro_eval_output.txt || true
-            if grep -q "_PRO_EXIT_CODE=0" /tmp/pro_eval_output.txt; then
-              REWARD=1
-              echo "PRO_EVAL_PASS: run_script.sh exited 0 — task RESOLVED" | tee -a trial_output.log
-            else
-              echo "PRO_EVAL_FAIL: run_script.sh non-zero exit — task not resolved" | tee -a trial_output.log
-            fi
+          if ! python3 - <<'PY'
+          import json, sys
+          d = json.load(open("jobs/preds.json", encoding="utf-8"))
+          sys.exit(0 if d else 1)
+          PY
+          then
+            echo "PRO_OUTPUT_EMPTY: native Pro runner emitted empty preds.json"
+            exit 1
           fi
+          echo "Pro native runner output OK"
 
-          # Emit reward.txt (same format as DeepSWE's pier verifier output so
-          # deepswe_outcome.py can classify this run without changes).
-          echo "${REWARD}" > trial_results/reward.txt
-          echo "Pro verifier reward: ${REWARD}"
+      - name: Run Pro eval (official run_script.sh verifier) + emit reward outcome
+        if: ${{ !cancelled() }}
+        run: |
+          python3 scripts/ci/pro_official_eval.py \
+            --preds jobs/preds.json \
+            --instance-id "${{ matrix.task }}" \
+            --dockerhub-tag "${{ matrix.dockerhub_tag }}" \
+            --pro-os-dir swebench-pro-os \
+            --output-dir trial_results/pro_eval \
+            --reward-file trial_results/reward.txt \
+            --trial-log trial_output.log
 
       - name: Cleanup runner disk before result collection
         if: always()
@@ -923,6 +853,10 @@ jobs:
           GT_TRIAL_LOG=trial_output.log GT_CERT_DIR=/tmp/gt \
             GT_DEEPSWE_OUTCOME_JSON=trial_results/outcome.json \
             python3 scripts/verify/deepswe_outcome.py jobs || echo "WARN: outcome extract failed"
+          python3 scripts/ci/verify_task_evidence.py \
+            --benchmark pro \
+            --dir trial_results \
+            --task "${{ matrix.task }}"
           find trial_results -type f 2>/dev/null | head -40 || true
 
       - name: Upload results
@@ -948,6 +882,10 @@ jobs:
 
       - name: Aggregate SWE-bench Pro results
         run: |
+          if [ "${{ needs.prepare.result }}" != "success" ]; then
+            echo "PREPARE_FAILED: prepare result=${{ needs.prepare.result }}; no benchmark denominator is valid" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
           echo "## SWE-bench Pro full benchmark — ${{ needs.prepare.outputs.total }} tasks" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Provenance** — GT commit: \`${{ github.sha }}\` | Pro-OS clone SHA: \`${{ needs.prepare.outputs.pro_bench_sha }}\` | substrate digest: \`${GT_SUBSTRATE_DIGEST:-<unset>}\`" >> $GITHUB_STEP_SUMMARY
@@ -977,7 +915,12 @@ jobs:
           sys.path.insert(0, "scripts/verify")
           from deepswe_outcome import tally_classes
           recs, missing = [], []
-          for d in sorted(glob.glob("/tmp/all/pro-full-*")):
+          expected = int("${{ needs.prepare.outputs.total }}" or "0")
+          artifacts = sorted(glob.glob("/tmp/all/pro-full-*"))
+          if len(artifacts) != expected:
+              print(f"ARTIFACT_COUNT_MISMATCH: expected {expected}, downloaded {len(artifacts)}")
+              sys.exit(1)
+          for d in artifacts:
               task = d.split("pro-full-", 1)[-1]
               try:
                   with open(f"{d}/outcome.json", encoding="utf-8") as f:
@@ -999,6 +942,7 @@ jobs:
               print()
               print(f"outcome.json MISSING for {len(missing)} task(s): "
                     + ", ".join(missing[:10]) + (" ..." if len(missing) > 10 else ""))
+              sys.exit(1)
           PYEOF
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "Per-task detail: \`outcome.json\` + \`gt_deep_metrics_<task>.json\` + \`gt_artifacts/\` inside each \`pro-full-<task>\` artifact." >> "$GITHUB_STEP_SUMMARY"
