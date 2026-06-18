@@ -233,7 +233,6 @@ class FileEntry:
     path: str
     score: float
     functions: list[str] = field(default_factory=list)
-    test_mappings: list[str] = field(default_factory=list)
     callees: list[str] = field(default_factory=list)
     co_changes: list[str] = field(default_factory=list)
     contract: str = ""
@@ -523,34 +522,6 @@ def _is_test_path(path: str) -> bool:
     ``test-utils`` segment) — nothing referenced it once this wrapper delegated to
     the canonical predicate. Deleted so ONE segment literal exists in the repo."""
     return _is_test_or_demo(path)
-
-
-def _test_files_for(graph_db: str, file_path: str, limit: int = 3) -> list[str]:
-    try:
-        conn = sqlite3.connect(graph_db)
-        conf_clause = _edge_conf_clause(graph_db)
-        # G13 (gt_new Appendix I:341): the CALLS-only contract must bind every
-        # neighbor surface, incl. tests. Without "AND e.type = 'CALLS'" a test
-        # connected to the candidate via a promoted depth edge (WRITES/READS/
-        # DATA_FLOW — sharing written state, not a call) is surfaced as a related
-        # test. Mirror _static_callees: only true test-CALLERS surface here.
-        rows = conn.execute(
-            f"""
-            SELECT DISTINCT n2.file_path
-            FROM nodes n1
-            JOIN edges e ON e.target_id = n1.id AND e.type = 'CALLS' {conf_clause}
-            JOIN nodes n2 ON e.source_id = n2.id
-            WHERE n1.file_path = ?
-              AND n2.is_test = 1
-              AND n2.file_path != n1.file_path
-            LIMIT ?
-            """,
-            (file_path, limit),
-        ).fetchall()
-        conn.close()
-        return [row[0] for row in rows]
-    except Exception:
-        return []
 
 
 def _issue_relevant_neighbors(
@@ -919,23 +890,29 @@ def _resolved_witnesses_for_file(
         # CALLERS: cross-file functions that CALL a symbol defined in this file
         # (DETERMINISTIC edges only). The target symbol (nt.name) is required so the
         # stdlib-shadow guard can be applied per (code, target_name).
-        caller_rows = conn.execute(
-            f"""
+        caller_sql = f"""
             SELECT nsrc.file_path, e.source_line, nsrc.name, nt.name,
                    {_src_lang_sel}, {_tgt_lang_sel}
             FROM nodes nt
             JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
             JOIN nodes nsrc ON e.source_id = nsrc.id
-            WHERE nt.file_path LIKE ?
+            WHERE {{file_predicate}}
               AND nsrc.file_path != nt.file_path
               AND nsrc.is_test = 0
               AND e.source_line > 0
               AND LOWER(TRIM(e.resolution_method)) IN ('{_det_sql}')
             ORDER BY e.source_line
             LIMIT ?
-            """,
-            (f"%{_norm_fp}", max_each * 4),
+            """
+        caller_rows = conn.execute(
+            caller_sql.format(file_predicate="(nt.file_path = ? OR nt.file_path = ?)"),
+            (_norm_fp, "./" + _norm_fp, max_each * 4),
         ).fetchall()
+        if not caller_rows:
+            caller_rows = conn.execute(
+                caller_sql.format(file_predicate="nt.file_path LIKE ?"),
+                ("%/" + _norm_fp, max_each * 4),
+            ).fetchall()
         for caller_file, line, caller_name, target_name, _slang, _tlang in caller_rows:
             # 2026-06-10 fact-filter: vendored/minified caller files and
             # builtin/dunder-shadow targets are never [WITNESS] facts.
@@ -971,22 +948,28 @@ def _resolved_witnesses_for_file(
                 break
 
         # CALLEES: cross-file symbols this file CALLS into (DETERMINISTIC edges only).
-        callee_rows = conn.execute(
-            f"""
+        callee_sql = f"""
             SELECT nt.file_path, e.source_line, nt.name, nsrc.name, nt.start_line,
                    {_src_lang_sel}, {_tgt_lang_sel}
             FROM nodes nsrc
             JOIN edges e ON e.source_id = nsrc.id AND e.type = 'CALLS'
             JOIN nodes nt ON e.target_id = nt.id
-            WHERE nsrc.file_path LIKE ?
+            WHERE {{file_predicate}}
               AND nt.file_path != nsrc.file_path
               AND nt.is_test = 0
               AND LOWER(TRIM(e.resolution_method)) IN ('{_det_sql}')
             ORDER BY e.source_line
             LIMIT ?
-            """,
-            (f"%{_norm_fp}", max_each * 4),
+            """
+        callee_rows = conn.execute(
+            callee_sql.format(file_predicate="(nsrc.file_path = ? OR nsrc.file_path = ?)"),
+            (_norm_fp, "./" + _norm_fp, max_each * 4),
         ).fetchall()
+        if not callee_rows:
+            callee_rows = conn.execute(
+                callee_sql.format(file_predicate="nsrc.file_path LIKE ?"),
+                ("%/" + _norm_fp, max_each * 4),
+            ).fetchall()
         for callee_file, source_line, callee_name, src_name, def_line, _slang, _tlang in callee_rows:
             # `source_line` is the CALL SITE in THIS candidate file — use it ONLY for the
             # stdlib-shadow check on the call (`os.walk(` must be read at the call site).
@@ -1187,7 +1170,7 @@ def _co_change_files(file_path: str, repo_root: str, limit: int = 3) -> list[str
             if f != file_path and not f.endswith((".md", ".rst", ".txt", ".yml", ".yaml")):
                 co_counts[f] = co_counts.get(f, 0) + 1
 
-    ranked = sorted(co_counts.items(), key=lambda x: -x[1])
+    ranked = sorted(co_counts.items(), key=lambda x: (-x[1], x[0]))
     # Dynamic threshold: >= 1 when sparse data, >= 2 when dense
     # Research: "Lost in the Noise" — single co-change may be noise on dense repos
     counts = sorted(co_counts.values())
@@ -1223,7 +1206,7 @@ def _co_change_from_table(graph_db: str, file_path: str, limit: int = 3) -> list
             "SELECT other FROM cc "
             "WHERE other <> ? AND other NOT LIKE '%.md' AND other NOT LIKE '%.rst' "
             "  AND other NOT LIKE '%.txt' AND other NOT LIKE '%.yml' AND other NOT LIKE '%.yaml' "
-            "ORDER BY count DESC LIMIT ?",
+            "ORDER BY count DESC, other ASC LIMIT ?",
             (_norm, _norm, _norm, _norm, max(limit * 5, 30)),
         ).fetchall()
         # BUG-A / Class-A residual (2026-06-17): the SQL above excludes doc/config
@@ -1438,7 +1421,7 @@ def _expand_via_cochange(
                     cochange_counts[f] = cochange_counts.get(f, 0) + 1
 
     # Rank by co-change frequency, require >= 2
-    ranked = sorted(cochange_counts.items(), key=lambda x: -x[1])
+    ranked = sorted(cochange_counts.items(), key=lambda x: (-x[1], x[0]))
     return [
         {"path": f, "score": 0.0, "components": {"cochange": count}, "entered_via": "cochange"}
         for f, count in ranked[:max_expansion]
@@ -1538,8 +1521,6 @@ def _entry_confidence_tier(entry: FileEntry, issue_text: str = "") -> str:
     # false positives from paths containing the substring " in ".
     contract_has_func_names = "() in " in (entry.contract or "")
     contract_present = bool(entry.contract)
-    has_test_mapping = bool(entry.test_mappings)
-
     # Use function_names (raw names) for issue matching, not functions
     # (which are signatures). Threshold len(fn) > 2 to keep names like "cli".
     issue_match = False
@@ -1606,7 +1587,7 @@ def _entry_confidence_tier(entry: FileEntry, issue_text: str = "") -> str:
     # leaving the witnessed non-gold hub _base.py as the sole primary edit-target).
     if getattr(entry, "anchor_prox", 0.0) >= _ANCHOR_PROX_WARN_FLOOR:
         return "[WARNING]"
-    if contract_present or has_test_mapping or issue_match or path_match:
+    if contract_present or issue_match or path_match:
         return "[WARNING]"
     return "[INFO]"
 
@@ -2021,10 +2002,6 @@ def render_brief(
                 lines.append(_cap(f"   Also changes: {', '.join(_cc)}"))
         if f.callees:
             lines.append(_cap(f"   Calls: {', '.join(f.callees)}"))
-        # DISABLED (swap-invariant — run15 leak): never surface test FILE names to the agent.
-        # if f.test_mappings:
-        #     lines.append(f"   Tests: {', '.join(f.test_mappings)}")
-
     # EXPECTED BEHAVIOR from issue text — the reporter's own spec for what the code
     # SHOULD do. Extracted from markdown sections like "### Expected Behavior",
     # "Expected:", "Should:", "The fix should". Leakage-safe (it's the issue text
@@ -2267,14 +2244,10 @@ def render_brief(
         # De-prescribed (C2; SWE-PRM NeurIPS 2025: imperative mid-task guidance
         # lowers success, and on a mislocalized rank it actively misdirects — beets
         # was pushed to edit the WRONG file). State the highest-confidence candidate
-        # as EVIDENCE; never command an edit ("Edit X first") or a test run
-        # ("Verify: pytest"). The file is already ranked #1 with its Tests: line.
+        # as EVIDENCE; never command an edit ("Edit X first") or a test run.
         note = f"\nHighest-confidence candidate (graph + issue signals): {top.path}"
         if getattr(top, "witness", ""):
             note += f" — graph witness: {top.witness}"
-        # DISABLED (swap-invariant — run15 leak): never name a covering test to the agent.
-        # if top.test_mappings:
-        #     note += f" — covering test: {top.test_mappings[0]}"
         lines.append(note)
     elif emit_confident_line and not any(getattr(f, "witness_verified", False) for f in files):
         # No candidate carries a verified witness: honest fallback (correct-or-
@@ -3038,20 +3011,26 @@ def _exact_name_has_verified_caller(graph_db: str, file_path: str, func_names: l
         _det_sql = "','".join(sorted(_DETERMINISTIC_METHODS))
         _norm_fp = file_path.replace("\\", "/").lstrip("./").lstrip("/")
         for fname in func_names[:5]:
-            row = conn.execute(
-                f"""
+            support_sql = f"""
                 SELECT 1
                 FROM nodes nt
                 JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
                 JOIN nodes nsrc ON e.source_id = nsrc.id
-                WHERE nt.name = ? AND nt.file_path LIKE ?
+                WHERE nt.name = ? AND {{file_predicate}}
                   AND nsrc.file_path != nt.file_path
                   AND nsrc.is_test = 0
                   AND LOWER(TRIM(e.resolution_method)) IN ('{_det_sql}')
                 LIMIT 1
-                """,
-                (fname, f"%{_norm_fp}"),
+                """
+            row = conn.execute(
+                support_sql.format(file_predicate="(nt.file_path = ? OR nt.file_path = ?)"),
+                (fname, _norm_fp, "./" + _norm_fp),
             ).fetchone()
+            if row is None:
+                row = conn.execute(
+                    support_sql.format(file_predicate="nt.file_path LIKE ?"),
+                    (fname, "%/" + _norm_fp),
+                ).fetchone()
             if row is not None:
                 return True
         return False
@@ -3770,7 +3749,6 @@ def generate_v1r_brief(
         path = str(rec.get("path", ""))
         score = float(rec.get("score", 0.0))
         funcs = _top_functions(graph_db, path, issue_terms=_words, code_symbols=_code_syms)
-        tests = _test_files_for(graph_db, path)
         neighbors = _issue_relevant_neighbors(
             graph_db,
             path,
@@ -3812,7 +3790,6 @@ def generate_v1r_brief(
                 path=path,
                 score=score,
                 functions=funcs,
-                test_mappings=tests,
                 callees=neighbors,
                 co_changes=co_changes,
                 contract=contract,
@@ -4302,7 +4279,6 @@ def generate_v1r_brief(
                 "sem_components": _sem_components,
                 # legacy proxy (callees present) kept for back-compat readers
                 "neighbor_present_count": sum(1 for e in entries if e.callees),
-                "test_edge_count": sum(1 for e in entries if e.test_mappings),
                 "signature_count": sum(1 for e in entries if e.functions),
                 "witnessed_count": sum(1 for e in entries if e.witness),
                 "verified_witness_count": sum(1 for e in entries if e.witness_verified),

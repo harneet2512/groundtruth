@@ -1573,7 +1573,7 @@ def main(argv: list[str] | None = None) -> int:
             from dataclasses import asdict
             telemetry = {
                 'brief_mode': 'v1r',
-                'files': [{'path': f.path, 'score': f.score, 'functions': f.functions, 'test_mappings': f.test_mappings} for f in result.files],
+                'files': [{'path': f.path, 'score': f.score, 'functions': f.functions} for f in result.files],
                 'token_estimate': result.token_estimate,
                 'v74_focus_set': result.v74_result.focus_set,
                 'v74_gold_in_focus': result.v74_result.gold_in_focus,

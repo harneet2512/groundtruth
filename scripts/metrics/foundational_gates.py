@@ -143,6 +143,44 @@ def _mad(xs, med=None):
 _DEEP: dict = {"det_set_source": _DET_SET_SOURCE}
 
 
+def _name_match_diagnostics(con: sqlite3.Connection, limit: int = 50) -> list[dict]:
+    """Top unresolved name_match families for Gate B failure debugging."""
+    try:
+        cols = {r[1] for r in con.execute("PRAGMA table_info(edges)").fetchall()}
+        ev_sel = "COALESCE(e.evidence_type, '')" if "evidence_type" in cols else "''"
+        rows = con.execute(
+            f"""
+            SELECT COALESCE(src.file_path, '') AS source_file,
+                   COALESCE(src.language, '') AS language,
+                   COALESCE(tgt.name, '') AS target_name,
+                   {ev_sel} AS evidence_type,
+                   COALESCE(e.resolution_method, '') AS resolution_method,
+                   COUNT(*) AS n
+            FROM edges e
+            JOIN nodes src ON src.id = e.source_id
+            JOIN nodes tgt ON tgt.id = e.target_id
+            WHERE e.type='CALLS' AND COALESCE(e.resolution_method, '') LIKE 'name_match%'
+            GROUP BY source_file, language, target_name, evidence_type, resolution_method
+            ORDER BY n DESC, source_file ASC, target_name ASC, evidence_type ASC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [
+            {
+                "source_file": r[0],
+                "language": r[1],
+                "target_name": r[2],
+                "evidence_type": r[3],
+                "resolution_method": r[4],
+                "count": int(r[5]),
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        return [{"error": str(e)}]
+
+
 # ===========================================================================
 # GATE 1 — RESOLUTION / JARVIS (graph.db CALL graph is mostly deterministic)
 # ===========================================================================
@@ -188,6 +226,7 @@ def gate_resolution(db: str) -> bool:
     breakdown = con.execute(
         "SELECT resolution_method, count(*) FROM edges WHERE type='CALLS' GROUP BY 1 ORDER BY 2 DESC"
     ).fetchall()
+    name_match_diagnostics = _name_match_diagnostics(con) if name_match > det else []
 
     # (C) typing tiers — resolution_method tiers + the assignment_tracked evidence_type.
     tier_counts: dict = {}
@@ -256,6 +295,7 @@ def gate_resolution(db: str) -> bool:
         "typing_fired": bool(typing_fired),
         "typing_tier_counts": {k: int(v) for k, v in tier_counts.items()},
         "resolution_method_breakdown": {(m or "NULL"): int(c) for m, c in breakdown},
+        "name_match_diagnostics": name_match_diagnostics,
         "pred_A_det_floor": bool(a_ok),
         "pred_B_nondominance": bool(b_ok),
         "pred_C_typing": bool(c_ok),
@@ -1029,6 +1069,12 @@ def main() -> int:
         with open(deep_path, "w", encoding="utf-8") as f:
             json.dump(_DEEP, f, indent=2)
         print(f"  deep metrics (8-dp) -> {deep_path}")
+        diag = _DEEP.get("gate_resolution", {}).get("name_match_diagnostics") or []
+        if diag:
+            diag_path = os.path.join(os.path.dirname(deep_path), "gate_b_name_match_diagnostics.json")
+            with open(diag_path, "w", encoding="utf-8") as f:
+                json.dump(diag, f, indent=2)
+            print(f"  Gate B name_match diagnostics -> {diag_path}")
     except Exception as e:
         print(f"  WARN: could not persist deep metrics: {e}", file=sys.stderr)
 

@@ -147,10 +147,10 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 		scanner := bufio.NewScanner(f)
 		scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB buffer for long lines
 		lineNum := 0
-		pendingRoutePath := ""  // route path from decorator, waiting for the next def
-		pendingRouteLine := 0   // line of the route decorator
-		inStruct := false       // Go: tracking struct body for embedded types
-		structDepth := 0        // Go: brace nesting depth inside the struct body (P2-7)
+		pendingRoutePath := "" // route path from decorator, waiting for the next def
+		pendingRouteLine := 0  // line of the route decorator
+		inStruct := false      // Go: tracking struct body for embedded types
+		structDepth := 0       // Go: brace nesting depth inside the struct body (P2-7)
 		var currentStructName string
 		var currentStructLine int
 
@@ -865,8 +865,8 @@ func buildRelationshipIndexes(db *store.DB) (
 ) {
 	classIndex = make(map[string][]classNodeEntry)
 	interfaceIndex = make(map[string][]classNodeEntry)
-	funcFileIndex = make(map[string]map[string]int64)    // file -> funcName -> nodeID
-	funcRangeIndex = make(map[string][]funcRange)         // file -> []{id,start,end}
+	funcFileIndex = make(map[string]map[string]int64) // file -> funcName -> nodeID
+	funcRangeIndex = make(map[string][]funcRange)     // file -> []{id,start,end}
 
 	tx, err := db.BeginTx()
 	if err != nil {
@@ -1086,7 +1086,7 @@ func resolveModuleToFile(modulePath, currentFile string, files []walker.SourceFi
 	}
 
 	// Try common extensions
-	exts := []string{"", ".ts", ".tsx", ".js", ".jsx", "/index.ts", "/index.tsx", "/index.js", "/index.jsx"}
+	exts := []string{"", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", "/index.ts", "/index.tsx", "/index.js", "/index.jsx", "/index.mjs", "/index.cjs"}
 	fileSet := make(map[string]bool, len(files))
 	for _, f := range files {
 		fileSet[f.Path] = true
@@ -1141,4 +1141,3 @@ func isHTMLElement(name string) bool {
 	}
 	return false
 }
-

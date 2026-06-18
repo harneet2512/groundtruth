@@ -9,7 +9,6 @@ def _make_entry(path: str, **kwargs) -> FileEntry:
         path=path,
         score=kwargs.get("score", 0.5),
         functions=kwargs.get("functions", []),
-        test_mappings=kwargs.get("test_mappings", []),
         callees=kwargs.get("callees", []),
         co_changes=kwargs.get("co_changes", []),
         contract=kwargs.get("contract", ""),
@@ -81,7 +80,6 @@ class TestScopeInBrief:
         # entry. Add a function-name contract so it qualifies.
         entries = [_make_entry(
             "src/app.py",
-            test_mappings=["tests/test_app.py"],
             contract="run() in src/main.py:10 `app.run()`",
         )]
         scores = [0.9, 0.3]  # big gap → high confidence directive

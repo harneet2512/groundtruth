@@ -301,6 +301,20 @@ def test_b2_real_component_excludes_unreachable_and_name_match(scope_db):
     )
 
 
+def test_b2_scope_completeness_does_not_shrink_consensus(scope_db, monkeypatch):
+    """Completeness is a readout over the verified edit component; it must not
+    mutate or shrink the accumulated consensus membership."""
+    g._consensus_scope.clear()
+    g._oracle_edited_rels.clear()
+    g._consensus_scope.update({"focus.py", "fact_neighbor.py", "pollution_a.py"})
+    g._oracle_edited_rels.add("focus.py")
+    monkeypatch.setattr(g, "_oracle_focus", lambda: {"fact"})
+
+    before = set(g._consensus_scope)
+    _ = g._scope_completeness_block()
+    assert set(g._consensus_scope) == before
+
+
 # --------------------------------------------------------------------------- #
 # B5 — l3.cochange latch is consumed only on a real DELIVERED outcome.
 # --------------------------------------------------------------------------- #

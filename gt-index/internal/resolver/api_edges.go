@@ -33,11 +33,11 @@ type ClientCall struct {
 // Route definition patterns (Python Flask/FastAPI, Go, Express/JS).
 var routePatterns = []*regexp.Regexp{
 	// Python: @app.route("/path") or @router.get("/path")
-	regexp.MustCompile(`@(?:app|router)\.(get|post|put|delete|patch|route)\s*\(\s*["']([^"']+)["']`),
+	regexp.MustCompile(`^\s*@(?:app|router)\.(get|post|put|delete|patch|route)\s*\(\s*["']([^"']+)["']`),
 	// Go: r.HandleFunc("/path", ...) or mux.Handle("/path", ...)
-	regexp.MustCompile(`\.(HandleFunc|Handle)\s*\(\s*["']([^"']+)["']`),
+	regexp.MustCompile(`^\s*[\w.]+\.(HandleFunc|Handle)\s*\(\s*["']([^"']+)["']`),
 	// JS/TS: app.get("/path", ...) or router.post("/path", ...)
-	regexp.MustCompile(`(?:app|router)\.(get|post|put|delete|patch)\s*\(\s*["']([^"']+)["']`),
+	regexp.MustCompile(`^\s*(?:app|router)\.(get|post|put|delete|patch)\s*\(\s*["']([^"']+)["']`),
 }
 
 // Client call patterns (requests, httpx, fetch, axios, Go http).

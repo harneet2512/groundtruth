@@ -47,16 +47,15 @@ def test_warning_when_contract_only_file_paths():
     assert _entry_confidence_tier(entry, "unrelated issue") == "[WARNING]"
 
 
-def test_warning_when_test_mapping_only():
-    """No contract but test mapping present → [WARNING]."""
+def test_warning_when_localizer_confidence_only():
+    """No contract but positive graph-localizer confidence -> [WARNING]."""
     entry = FileEntry(
         path="src/foo.py",
         score=0.5,
         functions=["bar"],
-        test_mappings=["tests/test_foo.py"],
+        localizer_confidence=0.2,
     )
     assert _entry_confidence_tier(entry, "issue") == "[WARNING]"
-
 
 def test_warning_when_issue_match_no_contract():
     """Issue-text symbol match but no caller contract → [WARNING]."""

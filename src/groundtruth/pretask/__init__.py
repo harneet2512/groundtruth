@@ -1,8 +1,6 @@
-"""GT pre-task brief v5 — deterministic localization pipeline.
+"""GT pre-task brief public entry point.
 
-Five modules + telemetry + render + orchestration. No LLM calls anywhere.
-
-Public entry point: ``brief_v5.generate_brief(issue_text, repo_root, graph_db)``.
+The live package-level shim routes to ``v1r_brief.generate_v1r_brief``.
 """
 
 from __future__ import annotations
@@ -12,6 +10,6 @@ __all__ = ["generate_brief"]
 
 def generate_brief(*args, **kwargs):
     """Lazy re-export to avoid import cycles."""
-    from groundtruth.pretask.brief_v5 import generate_brief as _gen
+    from groundtruth.pretask.v1r_brief import generate_v1r_brief as _gen
 
     return _gen(*args, **kwargs)

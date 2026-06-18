@@ -35,7 +35,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).parent))
 from groundtruth.pretask.v7_4_brief import run_v74, V74BriefResult
-from groundtruth.pretask.v7_brief import generate_brief, V7BriefResult
+from groundtruth.pretask._deprecated.v7_brief import generate_brief, V7BriefResult
 
 _WRITE_LOCK = threading.Lock()
 

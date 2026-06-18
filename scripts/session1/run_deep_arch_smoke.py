@@ -74,19 +74,28 @@ def main() -> int:
         db_path = os.path.join(tmpdir, "graph.db")
         create_test_graph_db(db_path)
 
-        # 1. L1 graph-map brief generated
-        print("Check 1: L1 graph-map brief")
+        # 1. L1 v1r brief generated. The old groundtruth.brief.graph_map producer
+        # is deleted; graph-map content is rendered only through the live v1r path.
+        print("Check 1: L1 v1r brief")
         try:
-            from groundtruth.brief.graph_map import build_graph_map
-            brief = build_graph_map(
-                [{"file": "src/auth.py", "score": 0.9}, {"file": "src/api.py", "score": 0.7}],
-                db_path,
+            from groundtruth.pretask.v1r_brief import render_brief, FileEntry
+            rendered = render_brief(
+                "auth issue",
+                [
+                    FileEntry(
+                        path="src/auth.py",
+                        score=0.9,
+                        functions=["login"],
+                        contract="validate token",
+                    )
+                ],
+                graph_db=db_path,
             )
-            rendered = brief.render()
-            check("L1_graph_map_brief", len(rendered) > 50 and "<gt-task-brief>" in rendered,
+            check("L1_v1r_brief", len(rendered) > 50 and "<gt-task-brief>" in rendered,
                   f"{len(rendered)} chars")
         except Exception as e:
-            check("L1_graph_map_brief", False, str(e))
+            rendered = ""
+            check("L1_v1r_brief", False, str(e))
 
         # 2. Brief reaches OH agent path
         print("Check 2: Brief format for OH")

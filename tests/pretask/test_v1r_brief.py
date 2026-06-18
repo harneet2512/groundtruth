@@ -11,7 +11,6 @@ import pytest
 from groundtruth.pretask.v1r_brief import (
     FileEntry,
     _top_functions,
-    _test_files_for,
     _caller_contract_for_file,
     render_brief,
     generate_v1r_brief,
@@ -191,7 +190,6 @@ def test_render_brief_appends_graph_map(tmp_path: Path) -> None:
             score=0.9,
             functions=["walk"],
             function_names=["walk"],
-            test_mappings=["tests/test_account.py"],
         )
     ]
     out = render_brief(files, graph_db=db)
@@ -208,7 +206,6 @@ def test_render_brief_no_graph_map_without_db() -> None:
             score=0.9,
             functions=["walk"],
             function_names=["walk"],
-            test_mappings=["tests/test_account.py"],
         )
     ]
     out = render_brief(files)
@@ -224,7 +221,6 @@ def test_render_brief_graph_map_quiet_when_no_confident_edge(tmp_path: Path) -> 
             score=0.9,
             functions=["walk"],
             function_names=["walk"],
-            test_mappings=["tests/test_account.py"],
         )
     ]
     out = render_brief(files, graph_db=db)
@@ -475,16 +471,6 @@ def test_top_functions_issue_anchor_survives_refcount_cap(tmp_path) -> None:
     )
 
 
-def test_test_files_for(graph_db: str) -> None:
-    tests = _test_files_for(graph_db, "src/auth/handler.py")
-    assert "tests/test_auth.py" in tests
-
-
-def test_test_files_empty_for_unknown(graph_db: str) -> None:
-    tests = _test_files_for(graph_db, "nonexistent.py")
-    assert tests == []
-
-
 def test_render_brief_no_prose() -> None:
     # Tier-as-filter revert (commit 11aab174, v1r_brief.py:697-716): tiers are an
     # internal filter, [INFO] entries are dropped. Both entries here carry graph
@@ -495,7 +481,7 @@ def test_render_brief_no_prose() -> None:
             path="src/auth/handler.py",
             score=0.9,
             functions=["login_user", "verify_token"],
-            test_mappings=["tests/test_auth.py"],
+            contract="login_user() in src/auth/middleware.py:1 `login_user()`",
         ),
         FileEntry(
             path="src/auth/middleware.py",
@@ -509,10 +495,6 @@ def test_render_brief_no_prose() -> None:
     assert text.endswith("</gt-task-brief>")
     assert "login_user" in text
     assert "require_auth" in text
-    # SWAP-INVARIANT (run15 leak, v1r_brief.py:1661-1663): the "Tests:" line is
-    # DISABLED by design — test FILE names must never surface to the agent. The
-    # entry still survives the tier filter via its test_mappings evidence.
-    assert "Tests: tests/test_auth.py" not in text
     assert "tests/test_auth.py" not in text
     # No in-band tier labels and no prose directives in agent-facing output.
     for forbidden in [
@@ -540,8 +522,8 @@ def test_render_brief_numbered() -> None:
     # survive. Both entries get a test mapping ([WARNING] tier) so both render
     # and the numbered "N. path" format is exercised.
     files = [
-        FileEntry(path="a.py", score=1.0, functions=["foo"], test_mappings=["tests/test_a.py"]),
-        FileEntry(path="b.py", score=0.5, functions=["bar"], test_mappings=["tests/test_b.py"]),
+        FileEntry(path="a.py", score=1.0, functions=["foo"], contract="foo()"),
+        FileEntry(path="b.py", score=0.5, functions=["bar"], contract="bar()"),
     ]
     text = render_brief(files)
     assert "1. a.py" in text
@@ -558,8 +540,7 @@ def test_generate_v1r_brief_empty_on_no_signal(mock_v74: MagicMock) -> None:
 
 @patch("groundtruth.pretask.v1r_brief.run_v74")
 @patch("groundtruth.pretask.v1r_brief._top_functions", return_value=[])
-@patch("groundtruth.pretask.v1r_brief._test_files_for", return_value=[])
-def test_generate_v1r_brief_emits_low_score_candidates(_t, _f, mock_v74: MagicMock) -> None:
+def test_generate_v1r_brief_emits_low_score_candidates(_mock_funcs, mock_v74: MagicMock) -> None:
     mock_v74.return_value = MagicMock(ranked_full=[{"path": "a.py", "score": 0.1}])
     result = generate_v1r_brief("fix auth bug", "/repo", "/db.sqlite")
     assert len(result.files) == 1
@@ -569,8 +550,7 @@ def test_generate_v1r_brief_emits_low_score_candidates(_t, _f, mock_v74: MagicMo
 
 @patch("groundtruth.pretask.v1r_brief.run_v74")
 @patch("groundtruth.pretask.v1r_brief._top_functions", return_value=["foo"])
-@patch("groundtruth.pretask.v1r_brief._test_files_for", return_value=["tests/test_a.py"])
-def test_generate_v1r_brief_respects_max_files(_mock_tests, _mock_funcs, mock_v74) -> None:
+def test_generate_v1r_brief_respects_max_files(_mock_funcs, mock_v74) -> None:
     mock_v74.return_value = MagicMock(
         ranked_full=[{"path": f"file{i}.py", "score": 0.9 - i * 0.1} for i in range(10)]
     )
@@ -580,8 +560,7 @@ def test_generate_v1r_brief_respects_max_files(_mock_tests, _mock_funcs, mock_v7
 
 @patch("groundtruth.pretask.v1r_brief.run_v74")
 @patch("groundtruth.pretask.v1r_brief._top_functions", return_value=["foo"])
-@patch("groundtruth.pretask.v1r_brief._test_files_for", return_value=[])
-def test_generate_v1r_brief_token_cap(_mock_tests, _mock_funcs, mock_v74) -> None:
+def test_generate_v1r_brief_token_cap(_mock_funcs, mock_v74) -> None:
     mock_v74.return_value = MagicMock(
         ranked_full=[{"path": f"very/long/path/to/file{i}.py", "score": 0.9} for i in range(10)]
     )
@@ -635,9 +614,8 @@ def sparse_graph_db(tmp_path: Path) -> str:
 
 @patch("groundtruth.pretask.v1r_brief.run_v74")
 @patch("groundtruth.pretask.v1r_brief._top_functions", return_value=[])
-@patch("groundtruth.pretask.v1r_brief._test_files_for", return_value=[])
 def test_sparse_graph_no_suppression(
-    _mock_tests, _mock_funcs, mock_v74, sparse_graph_db: str
+    _mock_funcs, mock_v74, sparse_graph_db: str
 ) -> None:
     """On sparse graphs, modulus gate must NOT suppress the brief."""
     mock_v74.return_value = MagicMock(
@@ -654,8 +632,7 @@ def test_sparse_graph_no_suppression(
 
 @patch("groundtruth.pretask.v1r_brief.run_v74")
 @patch("groundtruth.pretask.v1r_brief._top_functions", return_value=[])
-@patch("groundtruth.pretask.v1r_brief._test_files_for", return_value=[])
-def test_path_match_preservation(_mock_tests, _mock_funcs, mock_v74, tmp_path: Path) -> None:
+def test_path_match_preservation(_mock_funcs, mock_v74, tmp_path: Path) -> None:
     """Files with strong path-name match must survive into top-5 even if BM25-outranked."""
     db_path = str(tmp_path / "test.db")
     conn = sqlite3.connect(db_path)
@@ -1153,6 +1130,28 @@ def test_d2_top_functions_line_has_no_docstring_wall():
     assert fl, brief
     assert '"""' not in fl[0]
     assert max(len(ln) for ln in brief.split("\n")) <= 400
+
+
+def test_render_brief_replay_is_deterministic_without_graph_db():
+    entries = [
+        FileEntry(
+            path="pkg/a.py",
+            score=0.7,
+            functions=["def alpha():"],
+            callees=["pkg/b.py::beta()"],
+            co_changes=["pkg/neighbor.py"],
+            contract="returns bool",
+        ),
+        FileEntry(
+            path="pkg/b.py",
+            score=0.5,
+            functions=["def beta():"],
+            contract="raises ValueError",
+        ),
+    ]
+    first = render_brief(entries, issue_text="fix alpha beta interaction")
+    second = render_brief(entries, issue_text="fix alpha beta interaction")
+    assert second == first
 
 
 def test_d1_d3_budget_enforced_and_graph_map_leads(tmp_path):

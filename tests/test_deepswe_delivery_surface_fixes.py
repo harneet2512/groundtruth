@@ -474,14 +474,15 @@ def test_bug5_probe_prints_classified_line_once(tmp_path, patch_mod, capsys):
     bad = tmp_path / "bad.db"
     bad.write_text("this is not a sqlite database " * 30, encoding="utf-8")
     assert patch_mod._connect_ro(str(bad)) is None
-    out1 = capsys.readouterr().out
-    assert "[gt-patch] GRAPH_UNREADABLE_IN_CONTAINER:" in out1, (
-        f"BUG5: unreadable graph did not print the classified probe line: {out1!r}"
+    captured1 = capsys.readouterr()
+    assert "[gt-patch] GRAPH_UNREADABLE_IN_CONTAINER:" in captured1.err, (
+        f"BUG5: unreadable graph did not print the classified probe line: {captured1!r}"
     )
+    assert "GRAPH_UNREADABLE_IN_CONTAINER" not in captured1.out
     # second use: quiet (correct-or-quiet, no per-turn spam)
     assert patch_mod._connect_ro(str(bad)) is None
-    out2 = capsys.readouterr().out
-    assert "GRAPH_UNREADABLE_IN_CONTAINER" not in out2, "BUG5: probe line spammed"
+    captured2 = capsys.readouterr()
+    assert "GRAPH_UNREADABLE_IN_CONTAINER" not in captured2.out + captured2.err, "BUG5: probe line spammed"
 
 
 def test_bug5_all_pillars_route_through_connect_ro(two_init_repo, patch_mod, monkeypatch):

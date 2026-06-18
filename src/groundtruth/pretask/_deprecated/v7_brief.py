@@ -20,8 +20,8 @@ from pathlib import Path
 from typing import Any
 
 from groundtruth.pretask.anchors import extract_issue_anchors
-from groundtruth.pretask.brief_v5 import BriefResult as V6BriefResult
-from groundtruth.pretask.brief_v5 import generate_brief as generate_v6_brief
+from groundtruth.pretask._deprecated.brief_v5 import BriefResult as V6BriefResult
+from groundtruth.pretask._deprecated.brief_v5 import generate_brief as generate_v6_brief
 from groundtruth.pretask.cochange import (
     CochangeResult,
     cochange_cluster,
@@ -40,7 +40,7 @@ from groundtruth.pretask.project_instructions import (
 )
 from groundtruth.pretask.render import Candidate
 from groundtruth.pretask.telemetry import TelemetryRecord, utc_timestamp, write_record
-from groundtruth.pretask.v7_layers import (
+from groundtruth.pretask._deprecated.v7_layers import (
     CallerEvidenceEntry,
     ContractFingerprint,
     FocusFunction,

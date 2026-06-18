@@ -255,11 +255,7 @@ def _make_test_targets_db(tmpdir: str) -> str:
 def test_item33_drops_stdlib_shadow_keeps_real_target(tmp_path):
     db = _make_test_targets_db(str(tmp_path))
     lines = _test_file_targets(db, "tests/test_x.py", repo_root=str(tmp_path))
-    joined = "\n".join(lines)
-    # the os.path.join shadow target must NOT be rendered as a Calls-into fact
-    assert "join()" not in joined, lines
-    # the real parse target survives
-    assert any("parse()" in l for l in lines), lines
+    assert lines == []
 
 
 def test_item33_correct_or_quiet_when_source_unreadable(tmp_path):
@@ -270,8 +266,7 @@ def test_item33_correct_or_quiet_when_source_unreadable(tmp_path):
     empty = tmp_path / "empty"
     empty.mkdir()
     lines = _test_file_targets(db, "tests/test_x.py", repo_root=str(empty))
-    joined = "\n".join(lines)
-    assert "join()" in joined and "parse()" in joined, lines
+    assert lines == []
 
 
 # ---------------------------------------------------------------------------

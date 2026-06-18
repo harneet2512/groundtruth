@@ -20,28 +20,31 @@ type TSConfig struct {
 	Paths   map[string][]string
 }
 
-// ParseTSConfig reads tsconfig.json and extracts baseUrl and paths.
+// ParseTSConfig reads tsconfig.json or jsconfig.json and extracts baseUrl and paths.
 func ParseTSConfig(root string) *TSConfig {
-	data, err := os.ReadFile(filepath.Join(root, "tsconfig.json"))
-	if err != nil {
-		return nil
+	for _, name := range []string{"tsconfig.json", "jsconfig.json"} {
+		data, err := os.ReadFile(filepath.Join(root, name))
+		if err != nil {
+			continue
+		}
+		var raw struct {
+			CompilerOptions struct {
+				BaseURL string              `json:"baseUrl"`
+				Paths   map[string][]string `json:"paths"`
+			} `json:"compilerOptions"`
+		}
+		if err := json.Unmarshal(data, &raw); err != nil {
+			continue
+		}
+		if raw.CompilerOptions.BaseURL == "" && len(raw.CompilerOptions.Paths) == 0 {
+			continue
+		}
+		return &TSConfig{
+			BaseURL: raw.CompilerOptions.BaseURL,
+			Paths:   raw.CompilerOptions.Paths,
+		}
 	}
-	var raw struct {
-		CompilerOptions struct {
-			BaseURL string              `json:"baseUrl"`
-			Paths   map[string][]string `json:"paths"`
-		} `json:"compilerOptions"`
-	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil
-	}
-	if raw.CompilerOptions.BaseURL == "" && len(raw.CompilerOptions.Paths) == 0 {
-		return nil
-	}
-	return &TSConfig{
-		BaseURL: raw.CompilerOptions.BaseURL,
-		Paths:   raw.CompilerOptions.Paths,
-	}
+	return nil
 }
 
 // ExpandTSConfigPath resolves a tsconfig path alias (e.g., "@/auth/login" → "src/auth/login").
@@ -85,6 +88,125 @@ func RegisterTSConfigPaths(fm map[string][]string, cfg *TSConfig) {
 			}
 		}
 	}
+}
+
+// RegisterJSPackagePaths adds in-repo package.json aliases to the file map.
+// It only registers targets that resolve to already-indexed files, so external
+// packages and stale export targets never become name-match escape hatches.
+func RegisterJSPackagePaths(fm map[string][]string, root string) {
+	if root == "" {
+		return
+	}
+	type packageJSON struct {
+		Name    string          `json:"name"`
+		Main    string          `json:"main"`
+		Module  string          `json:"module"`
+		Types   string          `json:"types"`
+		Typings string          `json:"typings"`
+		Exports json.RawMessage `json:"exports"`
+	}
+	addAlias := func(alias, target string) {
+		alias = strings.Trim(alias, "/")
+		target = strings.TrimPrefix(strings.TrimSpace(target), "./")
+		if alias == "" || target == "" || strings.HasPrefix(target, ".") {
+			return
+		}
+		if files := resolveModulePath(target, fm); len(files) > 0 {
+			fm[alias] = appendUniqueMany(fm[alias], files)
+		}
+	}
+	collectExportTargets := func(raw json.RawMessage) map[string][]string {
+		out := make(map[string][]string)
+		var walk func(key string, v any)
+		walk = func(key string, v any) {
+			switch x := v.(type) {
+			case string:
+				out[key] = append(out[key], x)
+			case []any:
+				for _, item := range x {
+					walk(key, item)
+				}
+			case map[string]any:
+				for k, item := range x {
+					nextKey := key
+					if strings.HasPrefix(k, ".") {
+						nextKey = k
+					}
+					walk(nextKey, item)
+				}
+			}
+		}
+		if len(raw) == 0 {
+			return out
+		}
+		var v any
+		if json.Unmarshal(raw, &v) != nil {
+			return out
+		}
+		walk(".", v)
+		return out
+	}
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			base := d.Name()
+			if base == ".git" || base == "node_modules" || base == "dist" || base == "build" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.Name() != "package.json" {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		var pkg packageJSON
+		if json.Unmarshal(data, &pkg) != nil || pkg.Name == "" {
+			return nil
+		}
+		dir, err := filepath.Rel(root, filepath.Dir(path))
+		if err != nil {
+			return nil
+		}
+		dir = filepath.ToSlash(dir)
+		if dir == "." {
+			dir = ""
+		}
+		joinTarget := func(spec string) string {
+			spec = strings.TrimPrefix(strings.TrimSpace(spec), "./")
+			if spec == "" {
+				return ""
+			}
+			if dir == "" {
+				return spec
+			}
+			return dir + "/" + spec
+		}
+		for _, target := range []string{pkg.Module, pkg.Main, pkg.Types, pkg.Typings} {
+			addAlias(pkg.Name, joinTarget(target))
+		}
+		for exportKey, targets := range collectExportTargets(pkg.Exports) {
+			alias := pkg.Name
+			if exportKey != "." && exportKey != "" {
+				alias = pkg.Name + "/" + strings.TrimPrefix(exportKey, "./")
+			}
+			for _, target := range targets {
+				addAlias(alias, joinTarget(target))
+			}
+		}
+		return nil
+	})
+}
+
+func appendUniqueMany(slice []string, vals []string) []string {
+	for _, v := range vals {
+		slice = appendUnique(slice, v)
+	}
+	return slice
 }
 
 // FindGoModulePath parses go.mod in the given root directory and returns
@@ -2405,12 +2527,12 @@ func resolveModulePath(modulePath string, fileMap map[string][]string) []string 
 		if files, ok := fileMap[cleaned]; ok {
 			return files
 		}
-		for _, ext := range []string{".ts", ".tsx", ".js", ".jsx", ".py", ".rs"} {
+		for _, ext := range []string{".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".rs"} {
 			if files, ok := fileMap[cleaned+ext]; ok {
 				return files
 			}
 		}
-		for _, idx := range []string{"/index.ts", "/index.js", "/index.tsx"} {
+		for _, idx := range []string{"/index.ts", "/index.js", "/index.tsx", "/index.jsx", "/index.mjs", "/index.cjs"} {
 			if files, ok := fileMap[cleaned+idx]; ok {
 				return files
 			}
@@ -2938,11 +3060,6 @@ func ChainReExports(
 	chained := 0
 
 	for _, re := range reExports {
-		if re.ExportedName == "*" {
-			// Star re-exports are too broad to chain precisely — the resolver
-			// handles these via wildcard import fallback.
-			continue
-		}
 
 		// Resolve the source module to file(s)
 		sourceFiles := resolveModulePath(re.SourceModule, fm)
@@ -2970,8 +3087,8 @@ func ChainReExports(
 				base = rel
 			}
 			// Try common extensions
-			for _, ext := range []string{"", ".ts", ".tsx", ".js", ".jsx", ".py", ".rs",
-				"/index.ts", "/index.js", "/index.tsx", "/mod.rs"} {
+			for _, ext := range []string{"", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".rs",
+				"/index.ts", "/index.js", "/index.tsx", "/index.jsx", "/index.mjs", "/index.cjs", "/mod.rs"} {
 				if files, ok := fm[base+ext]; ok {
 					sourceFiles = files
 					break

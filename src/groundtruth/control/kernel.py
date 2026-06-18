@@ -44,52 +44,57 @@ def _to_path(p: Any) -> Path:
 def brief(task: TaskInput) -> BriefResult:
     """Generate the pre-task brief.
 
-    Wraps ``pretask.v7_brief.generate_brief`` (v7_brief.py:459). Boundary 1
-    filter: drops ``telemetry`` (internal module scores) and ``plan_path``
-    (host-only path); projects ``pretask.render.Candidate`` (which carries
-    ``tags`` and ``is_test`` provenance) into ``control.types.Candidate``
-    keeping only ``path`` + ``score``.
+    Wraps the live ``pretask.v1r_brief.generate_v1r_brief`` path. Boundary 1
+    filter: projects rich ``FileEntry`` records into canonical control types and
+    drops internal provenance, graph witnesses, host paths, and telemetry.
     """
-    from groundtruth.pretask.v7_brief import V7BriefResult, generate_brief
+    from groundtruth.pretask.v1r_brief import V1RBriefResult, generate_v1r_brief
 
-    raw = generate_brief(
+    raw = generate_v1r_brief(
         issue_text=task.issue_text,
         repo_root=str(task.repo_root),
         graph_db=None,
         task_id=task.task_id,
-        return_telemetry=True,
     )
-    if not isinstance(raw, V7BriefResult):
+    if not isinstance(raw, V1RBriefResult):
         raise RuntimeError(
-            "generate_brief returned str despite return_telemetry=True; "
-            "internal contract drift -- investigate v7_brief.py"
+            "generate_v1r_brief returned unexpected value; internal contract drift"
         )
 
-    plan = raw.plan
-    focus_raw = plan.get("agent_focus_files") or []
-    cluster_raw = raw.cluster_files
+    files = list(raw.files or [])
+    focus_raw = [f.path for f in files[:3] if getattr(f, "path", "")]
+    cluster_raw = [f.path for f in files if getattr(f, "path", "")]
+    contracts = [f.contract for f in files if getattr(f, "contract", "")]
+    confidence = float(files[0].score) if files else 0.0
 
     candidates_filtered = [
-        Candidate(path=_to_path(c.file), score=float(c.score))
-        for c in raw.candidates
-        if getattr(c, "file", None)
+        Candidate(path=_to_path(f.path), score=float(f.score))
+        for f in files
+        if getattr(f, "path", None)
     ]
 
     return BriefResult(
-        brief_text=raw.brief,
+        brief_text=raw.brief_text,
         candidates=candidates_filtered,
         focus_files=[_to_path(p) for p in focus_raw[:3]],
         cluster_files=[_to_path(p) for p in cluster_raw],
-        contracts=[str(line) for line in plan.get("contract_lines", [])],
-        constraints=[str(line) for line in plan.get("constraints", [])],
-        confidence=float(plan.get("confidence", 0.0)),
-        plan=plan,
+        contracts=[str(line) for line in contracts],
+        constraints=[],
+        confidence=confidence,
+        plan={
+            "source": "v1r",
+            "confidence_tier": raw.confidence_tier,
+            "graph_edge_count": raw.graph_edge_count,
+            "semantic_signal_count": raw.semantic_signal_count,
+            "structural_signal_count": raw.structural_signal_count,
+            "fts5_signal_count": raw.fts5_signal_count,
+        },
         plan_path=None,
     )
 
 
 _RULE_VERSION = "kernel-0.1"
-HIGH_CONFIDENCE_MIN = 0.6  # mirrors pretask.v7_brief.HIGH_CONFIDENCE_MIN
+HIGH_CONFIDENCE_MIN = 0.6
 
 # Root-scaffold patterns from the v7 brief constraints. Match only at the
 # repo root (no path separator) per the existing constraint line:

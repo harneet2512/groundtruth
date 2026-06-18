@@ -22,7 +22,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-from groundtruth.pretask.v7_brief import generate_brief, V7BriefResult
+from groundtruth.pretask._deprecated.v7_brief import generate_brief, V7BriefResult
 
 _WRITE_LOCK = threading.Lock()
 

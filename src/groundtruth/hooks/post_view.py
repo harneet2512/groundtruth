@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 from groundtruth.hooks.logger import log_hook
 from groundtruth.runtime.sanitizer import clip_balanced
 
+from groundtruth.delivery.path_policy import is_deliverable as _path_policy_is_deliverable
 from groundtruth.delivery.path_policy import is_vendored_path as _path_policy_vendored
 
 # ---------------------------------------------------------------------------
@@ -366,6 +367,11 @@ def _contract_pillar(conn: sqlite3.Connection, needle: str, issue_terms: set[str
 def _is_vendor_path(fp: str) -> bool:
     """Return True if file path looks like vendored/static/minified code."""
     return _path_policy_vendored(fp)
+
+
+def _is_deliverable_path(fp: str) -> bool:
+    """Return True iff a path can be shown to the agent as source evidence."""
+    return _path_policy_is_deliverable(fp)
 
 # Layer 2 (Agent-State Tracker) — FINAL_ARCH_V2 §3. Imported lazily inside
 # functions where the in-process AgentState is passed; otherwise the loaders
@@ -928,13 +934,16 @@ def graph_navigation(
                 callers = [(fp, cnt) for fp, cnt in callers if fp not in visited_files]
                 callees = [(fp, cnt) for fp, cnt in callees if fp not in visited_files]
 
-            # Filter vendor/static JS (PRIOR-005)
-            callers = [(fp, cnt) for fp, cnt in callers if not _is_vendor_path(fp)]
-            callees = [(fp, cnt) for fp, cnt in callees if not _is_vendor_path(fp)]
+            root = os.environ.get("GT_REPO_ROOT", "/testbed")
+
+            # Delivery chokepoint: no test/demo/docs/vendor/generated path may be
+            # rendered as read-time navigation, even when the underlying edge is
+            # deterministic.
+            callers = [(fp, cnt) for fp, cnt in callers if _is_deliverable_path(fp)]
+            callees = [(fp, cnt) for fp, cnt in callees if _is_deliverable_path(fp)]
 
             # Re-rank both by issue relevance
             issue_terms = _load_issue_terms(state)
-            root = os.environ.get("GT_REPO_ROOT", "/testbed")
             if issue_terms:
                 ranked_callers = _score_by_issue_relevance(callers, root, issue_terms)
                 ranked_callees = _score_by_issue_relevance(callees, root, issue_terms)
@@ -1430,6 +1439,7 @@ def _file_function_spec(db_path: str, file_path: str, repo_root: str) -> str:
 
 def _test_file_targets(db_path: str, test_file_path: str, repo_root: str = "") -> list[str]:
     """Find source functions called by this test file and issue-relevant assertions."""
+    return []
     try:
         conn = sqlite3.connect(db_path)
         _resolved_test = _resolve_file_path(conn, test_file_path)
@@ -1521,13 +1531,7 @@ def main() -> None:
 
     filepath = args.file
     if _is_test_file(filepath):
-        targets = _test_file_targets(args.db, filepath, repo_root=args.root)
-        if targets:
-            for t in targets:
-                print(t)
-            status = _status_line("success", f"test_targets:{len(targets)}")
-        else:
-            status = _status_line("skipped", "test_file_no_targets")
+        status = _status_line("skipped", "test_file_no_delivery")
         print(status, file=sys.stderr)
         _append_gt_log("status", status)
         log_entry["wall_time_ms"] = int((time.time() - start) * 1000)

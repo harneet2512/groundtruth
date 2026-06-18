@@ -578,91 +578,14 @@ def gt_replan_cmd(
 
     DEAD — OH/kernel-era replan scaffolding (OpenHands RETIRED). Not CLI-registered, no live
     invoker (run_kernel_paired_gate.py is run by no live workflow), no tests. It recomputed the
-    brief via the SUPERSEDED v7_brief.generate_brief while the live brief is
+    brief via the superseded v7 lineage while the live brief is
     v1r_brief.generate_v1r_brief (via gt_run_proof) — the last duplicate brief surface. Fail-closed
-    so it cannot route; the v7_brief import below is now unreachable. See GT_ARCHITECTURE_LINEAGE.md.
+    so it cannot route. See GT_ARCHITECTURE_LINEAGE.md.
     """
     raise RuntimeError(
         "DEAD SURFACE: gt_replan_cmd is OH/kernel-era replan scaffolding (OpenHands retired); "
         "the live brief is v1r_brief.generate_v1r_brief via gt_run_proof. Not routable."
     )
-    from groundtruth.runtime.patch_auditor import audit_patch
-    from groundtruth.runtime.replan import evaluate_replan_triggers
-
-    plan = _load_plan_json(plan_path, log_dir)
-
-    test_result: dict[str, object] | None = None
-    if run_tests:
-        from groundtruth.runtime.test_runner import (
-            execute_test_command,
-            select_test_command,
-        )
-
-        pre_patch = audit_patch(root, plan=plan)
-        pre_changed = (
-            pre_patch["source_files_touched"]
-            + pre_patch["test_files_touched"]
-            + pre_patch["outside_cluster_files"]
-        )
-        selection = select_test_command(
-            root,
-            mode=test_mode,
-            plan=plan,
-            changed_files=pre_changed,
-            log_dir=log_dir,
-            task_id=task_id,
-        )
-        test_result = execute_test_command(
-            root,
-            list(selection.get("command", []) or []),
-            timeout_seconds=test_timeout_seconds,
-            log_dir=log_dir,
-            task_id=task_id,
-        )
-
-    patch = audit_patch(
-        root,
-        plan=plan,
-        test_result=test_result,
-        log_dir=log_dir,
-        task_id=task_id,
-    )
-    edited = patch["source_files_touched"] + patch["test_files_touched"] + patch[
-        "outside_cluster_files"
-    ]
-    decision = evaluate_replan_triggers(
-        edited_files=edited,
-        plan=plan,
-        warning_history=patch["warnings"],
-        test_result=test_result,
-        patch_shape=patch,
-        log_dir=log_dir,
-        task_id=task_id,
-    )
-    result: dict[str, object] = {"decision": decision}
-    if issue_text_file and decision["should_replan"]:
-        from groundtruth.pretask.v7_brief import V7BriefResult, generate_brief
-
-        try:
-            issue_text = Path(issue_text_file).read_text(encoding="utf-8")
-        except OSError:
-            issue_text = ""
-        if issue_text:
-            replanned = generate_brief(
-                issue_text,
-                root,
-                graph_db,
-                task_id=task_id,
-                log_dir=log_dir,
-                return_telemetry=True,
-            )
-            if isinstance(replanned, V7BriefResult):
-                result["revised_cluster"] = replanned.plan.get("cluster_files", [])
-                result["changed_contract"] = replanned.plan.get("contract_lines") != plan.get(
-                    "contract_lines"
-                )
-                result["plan_path"] = replanned.plan_path
-    print(json.dumps(result, indent=2, sort_keys=True))
 
 
 def gt_project_memory_cmd(

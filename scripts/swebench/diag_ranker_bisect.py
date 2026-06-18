@@ -48,7 +48,7 @@ def main():
     else:
         print(f"  query repr: {str(query)[:400]}")
 
-    from groundtruth.pretask.v2_ranker import rank_files, rank_functions
+    from groundtruth.pretask._deprecated.v2_ranker import rank_files, rank_functions
     print(f"\n=== stage 2: rank_files(query, repo_path, graph_db) ===")
     try:
         ranked_files = rank_files(query, repo_path, graph_db)

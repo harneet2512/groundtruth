@@ -156,7 +156,7 @@ def generate_brief(
 
     try:
         from groundtruth.pretask.query_preprocessor import preprocess
-        from groundtruth.pretask.v2_ranker import rank_files, rank_functions
+        from groundtruth.pretask._deprecated.v2_ranker import rank_files, rank_functions
     except ImportError:
         return ""
 

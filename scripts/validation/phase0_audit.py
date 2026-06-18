@@ -72,7 +72,7 @@ def main():
 import json
 import sys
 import os
-from groundtruth.pretask.v7_brief import generate_brief
+from groundtruth.pretask._deprecated.v7_brief import generate_brief
 
 def main():
     meta_path = sys.argv[1]

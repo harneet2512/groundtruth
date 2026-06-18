@@ -314,7 +314,6 @@ def _verified_entry(path: str):
         function_names=["run"],
         # _entry_confidence_tier returns [VERIFIED] when contract has "() in ".
         contract="run() in " + os.path.basename(path) + ":12 `self.run()`",
-        test_mappings=["tests/test_x.py::test_run"],
     )
 
 
@@ -349,7 +348,6 @@ def test_highest_confidence_line_present_on_verified_top():
             functions=["def handler(req):"],
             function_names=["handler"],
             contract="handler() in " + os.path.basename(mod) + ":12 `handler(r)`",
-            test_mappings=["tests/test_api.py::test_handler"],
         )
         runner_up = FileEntry(path="pkg/other.py", score=0.4)
         brief = render_brief([top, runner_up], scores=[0.95, 0.4], graph_db=db)

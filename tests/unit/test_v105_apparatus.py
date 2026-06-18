@@ -1,10 +1,10 @@
-"""Unit tests for the v1.0.5 apparatus modules.
+﻿"""Unit tests for the v1.0.5 apparatus modules.
 
 Covers:
-  - groundtruth.mcp.composite              — budget counter + format helpers
-  - groundtruth.pretask.v22_brief          — tier mapping + format + degradation
-  - groundtruth.runtime.v105_telemetry     — sink writers + payload sidecar
-  - groundtruth.runtime.pre_finish_gate    — coverage detection + soft-escape
+  - groundtruth.mcp.composite              â€” budget counter + format helpers
+  - groundtruth.pretask.v22_brief          â€” tier mapping + format + degradation
+  - groundtruth.runtime.v105_telemetry     â€” sink writers + payload sidecar
+  - groundtruth.runtime.pre_finish_gate    â€” coverage detection + soft-escape
 
 Tests do NOT depend on a real graph.db, OH SDK, or VM. They're hermetic.
 """
@@ -85,72 +85,14 @@ def test_composite_unknown_endpoint_passes_through(isolated_counter):
     assert allowed is True
     assert msg == ""
 
-
 # ---------------------------------------------------------------------------
-# v22_brief.py
+# retired v22_brief.py
 # ---------------------------------------------------------------------------
 
+def test_v22_old_import_name_is_removed():
+    import importlib.util
 
-def test_v22_brief_no_rank_based_tier_helpers():
-    # The rank-as-confidence tier helpers (_file_tier/_func_tier) were removed:
-    # RRF rank is dimensionless, so neither the delivered brief NOR telemetry may
-    # assert a rank-position [VERIFIED]/[WARNING]/[INFO] tiering. Only real,
-    # dimensionful signals (rank + score) are kept.
-    import groundtruth.pretask.v22_brief as v22
-
-    assert not hasattr(v22, "_file_tier")
-    assert not hasattr(v22, "_func_tier")
-
-
-@pytest.mark.skip(reason="DEAD SURFACE retired — v22_brief guarded fail-closed (zero live importer); see test_dead_surface_guards.py")
-def test_v22_brief_empty_issue_returns_empty_string(tmp_path):
-    from groundtruth.pretask.v22_brief import generate_brief
-
-    assert generate_brief("", "/no", "/no") == ""
-    # Whitespace-only also degrades.
-    assert generate_brief("   \n\t  ", "/no", "/no") == ""
-
-
-@pytest.mark.skip(reason="DEAD SURFACE retired — v22_brief guarded fail-closed (zero live importer); see test_dead_surface_guards.py")
-def test_v22_brief_missing_db_returns_empty(tmp_path):
-    from groundtruth.pretask.v22_brief import generate_brief
-
-    out = generate_brief("real issue text", str(tmp_path), str(tmp_path / "absent.db"))
-    assert out == ""
-
-
-def test_v22_brief_format_with_files_and_funcs():
-    from groundtruth.pretask.v22_brief import _format_brief
-    from groundtruth.pretask.v2_types import RankedFile, RankedFunction
-
-    files = [
-        RankedFile(file="src/foo.py", score=0.9),
-        RankedFile(file="src/bar.py", score=0.7),
-    ]
-    funcs = [
-        (RankedFunction(file="src/foo.py", function="handle", score=0.8), 42),
-        (RankedFunction(file="src/foo.py", function="_validate", score=0.6), 0),  # unknown line
-    ]
-    text = _format_brief(files, funcs)
-    assert "<gt-task-brief>" in text
-    assert "</gt-task-brief>" in text
-    assert "<gt-focus-functions>" in text
-    assert "</gt-focus-functions>" in text
-    assert "src/foo.py" in text
-    # No rank-position fake tier labels in the rendered brief (correct-or-quiet:
-    # tier is a filter, not a display — a rank-1 entry is not "verified" because
-    # it ranked first). Honest per-edge provenance lives in <gt-graph-map>, not here.
-    assert "[VERIFIED]" not in text
-    assert "[WARNING]" not in text
-    assert "[INFO]" not in text
-    assert "tier=" not in text
-    assert "rank=" in text  # rank included
-    assert "score=" in text  # score included
-    # Unknown line renders as ":?" — never blanks.
-    assert ":?" in text
-    # The known line renders with line number.
-    assert ":42" in text
-
+    assert importlib.util.find_spec("groundtruth.pretask.v22_brief") is None
 
 # ---------------------------------------------------------------------------
 # v105_telemetry.py
@@ -241,7 +183,7 @@ def test_telemetry_log_brief_estimates_tokens(telemetry_root):
     log_brief(instance_id="t_b", text="x" * 400)
     p = Path(layer_path("layer2_brief", "t_b"))
     rec = json.loads(p.read_text(encoding="utf-8").strip())
-    # ~4 chars per token → 100.
+    # ~4 chars per token â†’ 100.
     assert rec["token_estimate"] == 100
 
 
@@ -291,7 +233,7 @@ def test_gate_no_edits_allows_finish(gate_env):
     rc = pfg.main()
     captured = capsys.readouterr()
     assert rc == 0
-    assert captured.out == ""  # silent → finish allowed
+    assert captured.out == ""  # silent â†’ finish allowed
 
 
 def test_gate_full_coverage_allows_finish(gate_env):

@@ -35,6 +35,7 @@ import time
 from datetime import datetime, timezone
 
 from groundtruth.hooks.logger import log_hook
+from groundtruth.delivery.path_policy import is_deliverable as _path_policy_is_deliverable
 from groundtruth.pretask.curation_map import DETERMINISTIC_RESOLUTION_METHODS
 from groundtruth.runtime.sanitizer import clip_balanced
 
@@ -758,15 +759,18 @@ def _co_change_reminder(file_path: str, repo_root: str, edited_files: list[str])
             _cc_conn.row_factory = _sq.Row
             _tables = {r[0] for r in _cc_conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
             if "cochanges" in _tables:
-                _esc = _escape_like(norm_fp)
                 for row in _cc_conn.execute(
-                    "SELECT file_b AS partner, count FROM cochanges WHERE file_a LIKE ? ESCAPE '\\' "
-                    "UNION SELECT file_a AS partner, count FROM cochanges WHERE file_b LIKE ? ESCAPE '\\' "
-                    "ORDER BY count DESC LIMIT 10",
-                    (f"%{_esc}", f"%{_esc}"),
+                    "SELECT file_b AS partner, count FROM cochanges WHERE file_a = ? "
+                    "UNION SELECT file_a AS partner, count FROM cochanges WHERE file_b = ? "
+                    "ORDER BY count DESC, partner ASC LIMIT 10",
+                    (norm_fp, norm_fp),
                 ).fetchall():
                     partner = row["partner"]
-                    if partner and not norm_fp.endswith(partner) and not partner.endswith(norm_fp):
+                    if (
+                        partner
+                        and partner != norm_fp
+                        and _path_policy_is_deliverable(partner)
+                    ):
                         co_counts[partner] = row["count"]
             _cc_conn.close()
         except Exception:
@@ -801,7 +805,7 @@ def _co_change_reminder(file_path: str, repo_root: str, edited_files: list[str])
 
     edited_set = set(edited_files)
     unedited_co = [(f, c) for f, c in co_counts.items() if f not in edited_set and c >= COCHANGE_MEDIUM_THRESHOLD]
-    unedited_co.sort(key=lambda x: -x[1])
+    unedited_co.sort(key=lambda x: (-x[1], x[0]))
 
     if not unedited_co:
         print(f"[GT_META] cochange: source=git_log file={file_path} pairs=0", file=sys.stderr, flush=True)
@@ -3197,6 +3201,10 @@ def generate_improved_evidence(
                         (resolved_target_id, _resolved_callees_fp),
                     ).fetchall()
                     _callees_conn.close()
+                    _callees = [
+                        c for c in _callees
+                        if _path_policy_is_deliverable(c["file_path"])
+                    ]
                 if _callees:
                     # TASK #49: render each callee WITH its signature so the
                     # agent sees the contract it must satisfy at the call site

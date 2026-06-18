@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """GT v1.0.5 wrapper for the SWE-bench-Live/OpenHands fork.
 
 Targets `evaluation.benchmarks.swe_bench.run_infer` (the fork's older
@@ -6,27 +6,27 @@ controller-based pattern) instead of the upstream OpenHands SDK pattern.
 
 Layer port status:
 
-  L1 (v8.2.2 RRF localization)  — host-side, using prebuilt graph.db
+  L1 (v8.2.2 RRF localization)  â€” host-side, using prebuilt graph.db
                                   at GT_PREBUILT_INDEXES_ROOT/<id>/graph.db.
                                   Confidence: high (existing v22_brief.generate_brief).
-  L2 (brief delivery)            — patches get_instruction() to prepend the
+  L2 (brief delivery)            â€” patches get_instruction() to prepend the
                                   v8.2.2 brief to the first user-turn content.
                                   Confidence: high (single-injection point).
-  L3 (post-edit hook)            — patches initialize_runtime() to runtime.copy_to
+  L3 (post-edit hook)            â€” patches initialize_runtime() to runtime.copy_to
                                   gt_hook.py + a polling watcher that re-runs
                                   the hook on .py mtime changes. Confidence: moderate
                                   (depends on python3 + git available in container).
-  L4 (gt_lookup/impact/check)    — DEFERRED. Fork hard-codes enable_mcp=False at
+  L4 (gt_lookup/impact/check)    â€” DEFERRED. Fork hard-codes enable_mcp=False at
                                   run_infer.py:249. Re-enabling requires patching
                                   AgentConfig + registering an MCP server inside
                                   the container, which the OH controller does not
                                   expose cleanly without code changes. Documented
                                   as a known gap for v1.0.6.
-  L5 (pre_finish gate)           — DEFERRED. CodeActAgent's `finish` action is
+  L5 (pre_finish gate)           â€” DEFERRED. CodeActAgent's `finish` action is
                                   resolved by the controller's main loop; there
                                   is no `pre_finish` hook surface in this fork.
                                   Documented as a known gap for v1.0.6.
-  L6 (incremental re-indexing)   — runs *inside* gt_hook.py (already wired via
+  L6 (incremental re-indexing)   â€” runs *inside* gt_hook.py (already wired via
                                   reindex_helper.check_and_reindex_modified_files
                                   + the gt-index-linux binary copied into the
                                   container under /tmp/gt-index). Confidence:
@@ -68,7 +68,7 @@ sys.path.insert(0, _REPO_DIR)
 _HOOK_TOOL  = os.path.join(_REPO_DIR, "benchmarks", "swebench", "gt_hook.py")
 _GT_INDEX   = os.environ.get("GT_INDEX_BINARY", "/tmp/gt-index-linux")
 
-# v1.0.5 system message — same content as oh_gt_live_lite_wrapper.py but
+# v1.0.5 system message â€” same content as oh_gt_live_lite_wrapper.py but
 # applied via metadata.details rather than SDK-style system_message.
 _V104_OH_QWEN3_SYSTEM_MESSAGE = """\
 You are a helpful coding assistant that solves real software engineering tasks
@@ -78,7 +78,7 @@ intelligence tools (delivered as <gt-evidence> blocks after edits).
 Treat <gt-evidence> blocks as ground truth. Do NOT retry the same lookup; act
 on the information provided. Pre-edit context is delivered in the first user
 turn as a <gt-task-brief> map of the most likely files and functions. Use it
-as a starting point — files outside the brief are still editable, but a first
+as a starting point â€” files outside the brief are still editable, but a first
 edit on a brief-listed file is the expected path.
 
 When your fix is complete, call the `finish` tool. Do NOT echo "task completed".
@@ -86,7 +86,7 @@ When your fix is complete, call the `finish` tool. Do NOT echo "task completed".
 
 
 # ---------------------------------------------------------------------------
-# Layer 1 + 2 — host-side brief generation, injected into first user turn
+# Layer 1 + 2 â€” host-side brief generation, injected into first user turn
 # ---------------------------------------------------------------------------
 
 _DIAG_LOG = "/tmp/gt_v105_diag.log"
@@ -117,7 +117,7 @@ def _generate_brief_for(instance) -> str:
     )
     graph_db = os.path.join(indexes_root, instance_id, "graph.db")
     if not os.path.exists(graph_db):
-        _diag(f"  L1: no graph.db at {graph_db} — brief skipped")
+        _diag(f"  L1: no graph.db at {graph_db} â€” brief skipped")
         return ""
 
     repo_extracts_root = os.environ.get(
@@ -125,7 +125,7 @@ def _generate_brief_for(instance) -> str:
     )
     repo_path = os.path.join(repo_extracts_root, instance_id)
     if not os.path.isdir(repo_path):
-        _diag(f"  L1: repo_path missing {repo_path} — using empty path")
+        _diag(f"  L1: repo_path missing {repo_path} â€” using empty path")
         repo_path = ""
 
     issue_text = getattr(instance, "problem_statement", "") or ""
@@ -135,7 +135,7 @@ def _generate_brief_for(instance) -> str:
     _diag(f"  L1: issue_text len={len(issue_text)} graph_db_size={os.path.getsize(graph_db)}")
 
     # Primary: gt_intel.generate_enhanced_briefing (mini path's measured pipeline,
-    # produces 7-family taxonomy + tier tags). Falls back to v22_brief on empty —
+    # produces 7-family taxonomy + tier tags). Falls back to v22_brief on empty â€”
     # that handles the ~18% degenerate tail (HTML/CSS/prose-only issues, e.g. kozea)
     # where extract_identifiers_from_issue returns no Python-style identifiers.
     brief = ""
@@ -156,7 +156,7 @@ def _generate_brief_for(instance) -> str:
                 conn = sqlite3.connect(graph_db)
                 brief = generate_enhanced_briefing(conn, repo_path, identifiers) or ""
             else:
-                _diag(f"  L1: no identifiers extracted for {instance_id} — primary empty")
+                _diag(f"  L1: no identifiers extracted for {instance_id} â€” primary empty")
         except Exception as exc:
             import traceback
             _diag(f"  L1: gt_intel brief gen failed for {instance_id}: {exc}\n{traceback.format_exc()}")
@@ -164,20 +164,9 @@ def _generate_brief_for(instance) -> str:
             if conn is not None:
                 conn.close()
 
-    # Fallback: v22_brief on empty primary. RRF map-only (no family tags),
-    # but handles non-Python-identifier issues. Logged as L1_FALLBACK for
-    # downstream rate accounting.
+    # Correct-or-quiet on empty primary; retired fallbacks are not live surfaces.
     if not brief.strip():
-        _diag(f"  L1_FALLBACK: gt_intel empty for {instance_id} — trying v22_brief")
-        try:
-            from groundtruth.pretask.v22_brief import generate_brief as _v22_generate_brief
-            brief = _v22_generate_brief(issue_text, repo_path, graph_db) or ""
-            if brief.strip():
-                _diag(f"  L1_FALLBACK: v22_brief produced {len(brief)} chars")
-            else:
-                _diag(f"  L1_FALLBACK: v22_brief also empty for {instance_id}")
-        except Exception as exc:
-            _diag(f"  L1_FALLBACK: v22_brief failed: {exc}")
+        _diag(f"  L1: gt_intel empty for {instance_id}; retired fallback suppressed")
 
     _diag(f"  L1: brief generated len={len(brief or '')}")
     return brief or ""
@@ -196,7 +185,7 @@ def patched_get_instruction(instance, metadata):
     iid = getattr(instance, "instance_id", "?")
     _diag(f"  L2: ENTER patched_get_instruction iid={iid!r} orig={_ORIG_GET_INSTRUCTION!r}")
     if _ORIG_GET_INSTRUCTION is None:
-        _diag("  L2: _ORIG_GET_INSTRUCTION is None — patch did NOT propagate to worker")
+        _diag("  L2: _ORIG_GET_INSTRUCTION is None â€” patch did NOT propagate to worker")
         raise RuntimeError("L2 patch lost in worker process")
     brief = _generate_brief_for(instance)
     msg_action = _ORIG_GET_INSTRUCTION(instance, metadata)
@@ -220,7 +209,7 @@ def patched_get_instruction(instance, metadata):
             msg_action = MessageAction(content=new_content, **extra)
             _diag(f"  L2: rebuilt MessageAction len={len(new_content)}")
     else:
-        _diag(f"  L2: brief empty for {iid} — not delivered")
+        _diag(f"  L2: brief empty for {iid} â€” not delivered")
     return msg_action
 
 
@@ -232,7 +221,7 @@ def _patch_get_instruction(ri_module):
 
 
 # ---------------------------------------------------------------------------
-# Layer 3 + 6 — gt_hook.py + watcher + gt-index binary inside container
+# Layer 3 + 6 â€” gt_hook.py + watcher + gt-index binary inside container
 # ---------------------------------------------------------------------------
 
 def _b64_chunks(payload: bytes, chunk: int = 8000) -> list[str]:
@@ -321,12 +310,12 @@ while True:
         with open(LOG, "a") as fh:
             fh.write("---\nfired_for={}\n".format(changed[:5]))
 
-        # L6 — refresh graph.db before evidence query
+        # L6 â€” refresh graph.db before evidence query
         r = reindex("post_edit:n={}".format(len(changed)))
         with open(LOG, "a") as fh:
             fh.write("L6_REINDEX {}\n".format(json.dumps(r)))
 
-        # L3 — emit OH families from gt_hook.py
+        # L3 â€” emit OH families from gt_hook.py
         try:
             res = subprocess.run(HOOK_CMD, capture_output=True, text=True, timeout=20)
             with open(LOG, "a") as fh:
@@ -385,7 +374,7 @@ def patched_initialize_runtime(runtime, instance, metadata):
     # polling the watcher's sentinel file (replaces the racy pgrep pattern).
     # Env-flag: GT_DISABLE_WATCHER=1 skips this step (B-probe isolation).
     if os.environ.get("GT_DISABLE_WATCHER", "0") == "1":
-        _diag(f"  L3: GT_DISABLE_WATCHER=1 — skipping watcher install for {instance.instance_id}")
+        _diag(f"  L3: GT_DISABLE_WATCHER=1 â€” skipping watcher install for {instance.instance_id}")
     else:
         watcher_b64 = base64.b64encode(_WATCHER_SCRIPT.encode("utf-8")).decode("ascii")
         cmd = CmdRunAction(
@@ -413,7 +402,7 @@ def patched_initialize_runtime(runtime, instance, metadata):
             print(f"  L3: gt_hook + watcher live for {instance.instance_id}", flush=True)
         else:
             print(
-                f"  L3: watcher start FAILED for {instance.instance_id} — "
+                f"  L3: watcher start FAILED for {instance.instance_id} â€” "
                 f"obs_tail={obs_content[-300:]!r}",
                 flush=True,
             )
@@ -427,7 +416,7 @@ def patched_initialize_runtime(runtime, instance, metadata):
     # receives. This gives the agent the post-edit signal as part of the tool_result.
     # Env-flag: GT_DISABLE_L3_PUSH=1 skips the monkey-patch (B-probe isolation).
     if os.environ.get("GT_DISABLE_L3_PUSH", "0") == "1":
-        _diag(f"  L3_PUSH: GT_DISABLE_L3_PUSH=1 — skipping run_action monkey-patch for {instance.instance_id}")
+        _diag(f"  L3_PUSH: GT_DISABLE_L3_PUSH=1 â€” skipping run_action monkey-patch for {instance.instance_id}")
     else:
         _install_runtime_run_action_wrapper(runtime, instance)
 
@@ -437,7 +426,7 @@ _TEST_PATH_RE = __import__("re").compile(
 )
 _MUTATING_EDITOR_CMDS = frozenset({"create", "str_replace", "insert"})
 _EDIT_ACTION_CLASSES = frozenset({"FileEditAction", "FileWriteAction", "CmdRunAction"})
-# Action classes whose skip we DO want logged for filter-observability — especially
+# Action classes whose skip we DO want logged for filter-observability â€” especially
 # FileReadAction so reviewers can see "read was filtered, not just edits."
 _LOGGED_SKIP_CLASSES = frozenset({"FileReadAction", "FileWriteAction", "FileEditAction", "CmdRunAction"})
 
@@ -448,12 +437,12 @@ def _action_is_source_edit(action) -> tuple[bool, str, str]:
     Skips read-only operations (view, undo_edit, FileReadAction, browse, etc.) and test-file paths.
     Returns (is_edit, edited_path, skip_reason).
     skip_reason is "" when is_edit=True; otherwise one of:
-      - "non_edit_class"      → action class not in edit allow-list (e.g. FileReadAction)
-      - "no_editor_invocation"→ CmdRunAction without str_replace_editor/file_editor verb
-      - "no_path"             → FileEdit/Write/CmdRun without resolvable path
-      - "non_mutating_verb:V" → str_replace_editor view/undo_edit (V = the verb)
-      - "non_source_ext"      → CmdRun with non-source-extension path
-      - "test_path"           → path matches test/spec pattern
+      - "non_edit_class"      â†’ action class not in edit allow-list (e.g. FileReadAction)
+      - "no_editor_invocation"â†’ CmdRunAction without str_replace_editor/file_editor verb
+      - "no_path"             â†’ FileEdit/Write/CmdRun without resolvable path
+      - "non_mutating_verb:V" â†’ str_replace_editor view/undo_edit (V = the verb)
+      - "non_source_ext"      â†’ CmdRun with non-source-extension path
+      - "test_path"           â†’ path matches test/spec pattern
     """
     cls_name = type(action).__name__
     if cls_name not in _EDIT_ACTION_CLASSES:
@@ -520,13 +509,13 @@ def _install_runtime_run_action_wrapper(runtime, instance):
         try:
             is_edit, edited_path, skip_reason = _action_is_source_edit(action)
             if not is_edit:
-                # Near-miss skip logging — emit only for action classes we care about
+                # Near-miss skip logging â€” emit only for action classes we care about
                 # (FileReadAction, FileEditAction on test paths, CmdRunAction with
                 # str_replace_editor view/undo_edit, etc.). Silent for the floods:
                 # MessageAction, AgentDelegateAction, BrowseAction, plain CmdRun w/o editor.
                 cls = type(action).__name__
                 if cls in _LOGGED_SKIP_CLASSES and skip_reason not in (
-                    "no_editor_invocation",  # plain bash CmdRun — silent (would flood)
+                    "no_editor_invocation",  # plain bash CmdRun â€” silent (would flood)
                 ):
                     _diag(
                         f"  L3_FILTER[{iid}]: SKIP cls={cls} "
@@ -537,7 +526,7 @@ def _install_runtime_run_action_wrapper(runtime, instance):
             n = edit_count["n"]
             _diag(f"  L3_PUSH[{iid}]: edit #{n} path={edited_path}")
 
-            # L6 — reindex before evidence query so graph.db reflects post-edit state
+            # L6 â€” reindex before evidence query so graph.db reflects post-edit state
             t0 = __import__("time").time()
             reindex_out = _exec(
                 "/tmp/gt-index-linux -root=/workspace -output=/tmp/gt_index.db "
@@ -546,7 +535,7 @@ def _install_runtime_run_action_wrapper(runtime, instance):
             )
             reindex_dt = __import__("time").time() - t0
 
-            # L3 — fire gt_hook.py inline against the fresh graph.db
+            # L3 â€” fire gt_hook.py inline against the fresh graph.db
             hook_out = _exec(
                 "python3 /tmp/gt_hook.py --root=/workspace --db=/tmp/gt_index.db "
                 f"--quiet --max-items=3 --file={edited_path} 2>&1 | head -200",
@@ -566,7 +555,7 @@ def _install_runtime_run_action_wrapper(runtime, instance):
             except Exception:
                 pass  # Some observations may freeze content; degrade gracefully
 
-            # Telemetry — append to the same hook log the watcher uses, so
+            # Telemetry â€” append to the same hook log the watcher uses, so
             # patched_complete_runtime extracts it post-task.
             log_line = "\\n---\\nrun_action_push edit_n=%d path=%s reindex_ms=%d hook_chars=%d" % (
                 n, edited_path, int(reindex_dt * 1000), len(hook_out),
@@ -586,10 +575,10 @@ def _patch_initialize_runtime(ri_module):
     global _ORIG_INITIALIZE_RUNTIME, _HOOK_BYTES
 
     if not os.path.exists(_HOOK_TOOL):
-        print(f"  L3: gt_hook.py missing at {_HOOK_TOOL} — L3 disabled")
+        print(f"  L3: gt_hook.py missing at {_HOOK_TOOL} â€” L3 disabled")
         return
     if not os.path.exists(_GT_INDEX):
-        print(f"  L6: gt-index missing at {_GT_INDEX} — L6 disabled (hook still runs without reindex)")
+        print(f"  L6: gt-index missing at {_GT_INDEX} â€” L6 disabled (hook still runs without reindex)")
 
     with open(_HOOK_TOOL, "rb") as fh:
         _HOOK_BYTES = fh.read()
@@ -598,7 +587,7 @@ def _patch_initialize_runtime(ri_module):
 
 
 # ---------------------------------------------------------------------------
-# Wrapper for process_instance — drains telemetry artifacts after agent finish
+# Wrapper for process_instance â€” drains telemetry artifacts after agent finish
 # ---------------------------------------------------------------------------
 
 def patched_process_instance(instance, metadata, reset_logger=True, runtime_failure_count=0):
@@ -614,7 +603,7 @@ def _patch_process_instance(ri_module):
 
 
 # ---------------------------------------------------------------------------
-# patched_complete_runtime — runs INSIDE process_instance, AFTER the agent
+# patched_complete_runtime â€” runs INSIDE process_instance, AFTER the agent
 # loop finishes but BEFORE runtime.close(). This is our last chance to pull
 # telemetry artifacts (gt_hook_stdout.log, watcher.out) out of the container.
 # ---------------------------------------------------------------------------
@@ -636,7 +625,7 @@ def patched_complete_runtime(runtime, instance):
 
     _diag(f"  TELEM: ENTER patched_complete_runtime iid={iid!r} out_dir={out_dir}")
 
-    # Files we care about. Some may not exist (watcher never fired, etc.) —
+    # Files we care about. Some may not exist (watcher never fired, etc.) â€”
     # tolerate per-file failure rather than aborting the whole drain.
     targets = [
         "/tmp/gt_hook_stdout.log",
@@ -771,13 +760,13 @@ def main() -> None:
                 f.write("selected_ids = " + json.dumps(ids) + "\n")
 
     # Hand off to the fork's __main__ logic.
-    # IMPORTANT: do NOT use runpy.run_module — it re-executes the module's
+    # IMPORTANT: do NOT use runpy.run_module â€” it re-executes the module's
     # top-level code, which redefines get_instruction/initialize_runtime/
     # process_instance and CLOBBERS our patches. Instead, replicate the
     # __main__ block here, calling into the (now-patched) module attributes.
     sys.argv = ["run_infer.py"] + remainder
 
-    import openhands.agenthub  # noqa: F401  — needed for Agent.get_cls
+    import openhands.agenthub  # noqa: F401  â€” needed for Agent.get_cls
     from datasets import load_dataset
     from openhands.core.config import (
         get_llm_config_arg,

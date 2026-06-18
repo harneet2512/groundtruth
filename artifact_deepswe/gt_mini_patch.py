@@ -1835,7 +1835,7 @@ def _connect_ro(db: str):
         if not _graph_probe_printed:
             _graph_probe_printed = True
             try:
-                print(f"[gt-patch] GRAPH_UNREADABLE_IN_CONTAINER: {e}", flush=True)
+                print(f"[gt-patch] GRAPH_UNREADABLE_IN_CONTAINER: {e}", file=sys.stderr, flush=True)
             except Exception:  # noqa: BLE001
                 pass
         return None
@@ -2477,10 +2477,11 @@ def _graph_contract_block(rel: str) -> str:
     once. Correct-or-quiet: empty graph / no functions -> nothing."""
     if _GT_BASELINE or rel in _contract_seen:
         return ""
-    _contract_seen.add(rel)
+    root = _root()
     # 2026-06-10 fact-filter: no contract for a vendored/minified/generated file.
-    if _is_delivery_excluded(rel):
+    if _is_delivery_excluded(rel, root):
         return ""
+    _contract_seen.add(rel)
     try:
         db = _db_path()
         if not os.path.isfile(db):
@@ -2566,7 +2567,7 @@ def _graph_contract_block(rel: str) -> str:
                     # language callers (boa [57]) are excluded from the
                     # DELIVERED "N verified caller(s)" count.
                     _keep = [(s, fp) for s, fp, _sl, _tl in _crows
-                             if not _is_vendored_path(fp or "")
+                             if not _caller_path_excluded(fp or "", root)
                              and not _is_cross_language_pair(_sl, _tl)]
                     _fixed.append((_rid, _name, _sig,
                                    len({s for s, _ in _keep}),
@@ -2634,9 +2635,10 @@ def _cochange_block(rel: str) -> str:
             q = (
                 "SELECT file_a, file_b, count FROM cochanges "
                 "WHERE (file_a = ? OR file_b = ?) "
-                "AND count >= 2 ORDER BY count DESC LIMIT 8"
+                "AND count >= 2 "
+                "ORDER BY count DESC, CASE WHEN file_a = ? THEN file_b ELSE file_a END ASC LIMIT 8"
             )
-            for fa, fb, cnt in con.execute(q, (nfp, nfp)):
+            for fa, fb, cnt in con.execute(q, (nfp, nfp, nfp)):
                 other = fb if _norm_fp(fa) == nfp else fa
                 # NEIGHBOR-path chokepoint (2026-06-17): vendored/minified/generated
                 # co-change partners are never delivered (jquery churn is not
@@ -2645,7 +2647,7 @@ def _cochange_block(rel: str) -> str:
                 # target for a source edit (BUG-A, 4th leak site: <gt-cochange>
                 # mirrored the brief's "Also changes:" test-file leak). The ONE
                 # predicate covers vendored+minified+test+demo.
-                if other and _caller_path_excluded(other):
+                if other and _caller_path_excluded(other, _root()):
                     continue
                 if other and _norm_fp(other) != nfp and other not in [r[0] for r in rows]:
                     rows.append((other, cnt))

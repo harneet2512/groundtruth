@@ -25,8 +25,8 @@ def test_graph_navigation_error_goes_to_stderr(capsys, tmp_path):
     assert count == 0
 
 
-def test_test_file_targets_returns_source_connections(tmp_path):
-    """Patch 2: _test_file_targets returns source functions called by test file."""
+def test_test_file_targets_returns_no_agent_visible_connections(tmp_path):
+    """_test_file_targets is retained for compatibility but emits no hints."""
     from groundtruth.hooks.post_view import _test_file_targets
 
     db_path = str(tmp_path / "test.db")
@@ -53,8 +53,7 @@ def test_test_file_targets_returns_source_connections(tmp_path):
     conn.close()
 
     targets = _test_file_targets(db_path, "test/test_build_order.py")
-    assert len(targets) >= 1
-    assert any("install_order" in t and "Calls into:" in t for t in targets)
+    assert targets == []
 
 
 def test_test_file_targets_empty_on_no_edges(tmp_path):

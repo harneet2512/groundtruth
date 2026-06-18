@@ -375,7 +375,7 @@ def _from_trajectory(task: str, results_dir: str) -> dict:
         if e.get("action"):
             n += 1
             a = e.get("args", {})
-            if e.get("action") in ("edit",) or "str_replace" in str(a.get("command", "")):
+            if _is_mutating_editor_command(str(e.get("action") or ""), a):
                 out["edits"] += 1
                 if not out["first_edit_action"]:
                     out["first_edit_action"] = n
@@ -406,6 +406,31 @@ DEEPSEEK_PRICING = {
     "deepseek-v4-pro": {"hit": 0.003625, "miss": 0.435, "out": 0.87},
     "deepseek-chat": {"hit": 0.0028, "miss": 0.14, "out": 0.28},
 }
+
+
+_EDIT_VERBS = {"create", "str_replace", "insert", "write", "append", "edit", "modify", "overwrite"}
+_NON_EDIT_VERBS = {"view", "open", "read", "undo_edit", "undo", "show"}
+
+
+def _is_mutating_editor_command(tool_or_action: str, args_or_text) -> bool:
+    """True only for source-changing editor commands, not view/read calls."""
+    tool = (tool_or_action or "").lower()
+    if isinstance(args_or_text, dict):
+        cmd = str(args_or_text.get("command") or args_or_text.get("cmd") or "").strip().lower()
+        path = str(args_or_text.get("path") or args_or_text.get("file_path") or "").strip()
+        if cmd in _NON_EDIT_VERBS:
+            return False
+        if cmd in _EDIT_VERBS and path:
+            return True
+        if tool in {"edit", "write", "create"} and path:
+            return True
+        return False
+    text = str(args_or_text or "").lower()
+    if "str_replace_editor" in text or "file_editor" in text:
+        m = re.search(r"(?:str_replace_editor|file_editor)\s+([a-z_]+)", text)
+        if m:
+            return m.group(1) in _EDIT_VERBS
+    return any(tok in text for tok in ("sed -i", "apply_patch", "tee ", "cat >"))
 
 
 def _deepseek_price_for(model: str) -> dict:
@@ -546,8 +571,7 @@ def _from_miniswe_trajectory(task: str, results_dir: str) -> dict:
                 cmd += content
             out["gt_understand_calls"] += cmd.count("gt_hook.py understand")
             out["gt_verify_calls"] += cmd.count("gt_hook.py verify")
-            if ("sed -i" in cmd or "str_replace" in cmd
-                    or "apply_patch" in cmd or "tee " in cmd):
+            if _is_mutating_editor_command("", cmd):
                 out["edits"] += 1
                 if not out["first_edit_action"]:
                     out["first_edit_action"] = step

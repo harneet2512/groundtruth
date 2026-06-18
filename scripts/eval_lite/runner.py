@@ -99,7 +99,7 @@ def _worker(args: tuple[Any, ...]) -> dict[str, Any]:
     instance_id = instance.get("instance_id", "<unknown>")
     try:
         from groundtruth.pretask.query_preprocessor import preprocess
-        from groundtruth.pretask.v2_ranker import rank
+        from groundtruth.pretask._deprecated.v2_ranker import rank
         from scripts.eval_lite.acc_at_k import (
             hit_at_k_files,
             hit_at_k_functions,

@@ -86,8 +86,8 @@ func TestBuildFileMap(t *testing.T) {
 			langs: []string{"php"},
 			wantKeys: map[string]string{
 				`App\Http\Controllers\UserController`: "src/App/Http/Controllers/UserController.php",
-				"App/Http/Controllers/UserController":  "src/App/Http/Controllers/UserController.php",
-				"UserController":                       "src/App/Http/Controllers/UserController.php",
+				"App/Http/Controllers/UserController": "src/App/Http/Controllers/UserController.php",
+				"UserController":                      "src/App/Http/Controllers/UserController.php",
 			},
 		},
 		{
@@ -555,8 +555,8 @@ func TestExpandTSConfigPath(t *testing.T) {
 	}{
 		{"@/auth/login", "src/auth/login"},
 		{"@/utils/crypto", "src/utils/crypto"},
-		{"./relative", ""},     // not an alias
-		{"express", ""},        // not an alias
+		{"./relative", ""}, // not an alias
+		{"express", ""},    // not an alias
 	}
 	for _, tc := range tests {
 		got := ExpandTSConfigPath(tc.input, cfg)
@@ -887,9 +887,9 @@ func TestResolve_ImportSameDirWinner_Certified(t *testing.T) {
 	}
 	nodeIDs := map[string][]int64{"main": {1}, "thing": {2, 3}}
 	fileNodeIDs := map[string]map[string][]int64{
-		"pkg/main.py":   {"main": {1}},
-		"pkg/mod.py":    {"thing": {2}}, // same dir as caller
-		"other/mod.py":  {"thing": {3}},
+		"pkg/main.py":  {"main": {1}},
+		"pkg/mod.py":   {"thing": {2}}, // same dir as caller
+		"other/mod.py": {"thing": {3}},
 	}
 	meta := map[int64]NodeMeta{
 		1: {Label: "Function", File: "pkg/main.py", Name: "main"},
@@ -950,4 +950,112 @@ func TestResolve_ImportType_GuardsSelfQualifier(t *testing.T) {
 			t.Errorf("Self::build() mis-resolved via import_type to a class named Self — #41 guard must exclude Self")
 		}
 	}
+}
+
+func TestParseJSConfigPaths(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "jsconfig.json"), []byte(`{
+		"compilerOptions": {
+			"baseUrl": ".",
+			"paths": {"@app/*": ["src/*"]}
+		}
+	}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := ParseTSConfig(dir)
+	if cfg == nil {
+		t.Fatal("ParseTSConfig returned nil for jsconfig.json")
+	}
+	if got := ExpandTSConfigPath("@app/runtime/name", cfg); got != "src/runtime/name" {
+		t.Fatalf("alias expansion = %q, want src/runtime/name", got)
+	}
+}
+
+func TestResolveModulePath_JSRuntimeExtensions(t *testing.T) {
+	files := []string{
+		"src/runtime.mjs",
+		"src/legacy.cjs",
+		"src/view/index.jsx",
+		"src/esm/index.mjs",
+		"src/common/index.cjs",
+	}
+	langs := []string{"javascript", "javascript", "javascript", "javascript", "javascript"}
+	fm := BuildFileMap(files, langs)
+	for spec, want := range map[string]string{
+		"./src/runtime": "src/runtime.mjs",
+		"./src/legacy":  "src/legacy.cjs",
+		"./src/view":    "src/view/index.jsx",
+		"./src/esm":     "src/esm/index.mjs",
+		"./src/common":  "src/common/index.cjs",
+	} {
+		got := resolveModulePath(spec, fm)
+		if len(got) == 0 || got[0] != want {
+			t.Fatalf("resolveModulePath(%q) = %v, want %s", spec, got, want)
+		}
+	}
+}
+
+func TestRegisterJSPackagePaths_ExportsMainModuleTypes(t *testing.T) {
+	dir := t.TempDir()
+	pkgDir := filepath.Join(dir, "packages", "lib")
+	if err := os.MkdirAll(filepath.Join(pkgDir, "src"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkgDir, "package.json"), []byte(`{
+		"name": "@scope/lib",
+		"main": "./src/index.cjs",
+		"module": "./src/index.mjs",
+		"types": "./src/index.d.ts",
+		"exports": {
+			".": {"import": "./src/index.mjs", "require": "./src/index.cjs"},
+			"./feature": {"import": "./src/feature.mjs", "types": "./src/feature.d.ts"}
+		}
+	}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	fm := BuildFileMap(
+		[]string{
+			"packages/lib/src/index.mjs",
+			"packages/lib/src/index.cjs",
+			"packages/lib/src/index.d.ts",
+			"packages/lib/src/feature.mjs",
+			"packages/lib/src/feature.d.ts",
+		},
+		[]string{"javascript", "javascript", "typescript", "javascript", "typescript"},
+	)
+	RegisterJSPackagePaths(fm, dir)
+	if got := fm["@scope/lib"]; !containsString(got, "packages/lib/src/index.mjs") || !containsString(got, "packages/lib/src/index.cjs") {
+		t.Fatalf("package root alias = %v, want both module/main targets", got)
+	}
+	if got := fm["@scope/lib/feature"]; !containsString(got, "packages/lib/src/feature.mjs") {
+		t.Fatalf("package export alias = %v, want feature.mjs", got)
+	}
+}
+
+func TestChainReExports_StarJSInRepo(t *testing.T) {
+	fm := BuildFileMap(
+		[]string{"src/index.js", "src/runtime.mjs"},
+		[]string{"javascript", "javascript"},
+	)
+	chained := ChainReExports(
+		fm,
+		[]parser.ReExportRef{{ExportedName: "*", SourceModule: "./runtime", File: "src/index.js", Line: 1}},
+		[]string{"src/index.js", "src/runtime.mjs"},
+		[]string{"javascript", "javascript"},
+	)
+	if chained == 0 {
+		t.Fatal("star re-export did not chain")
+	}
+	if got := fm["src"]; !containsString(got, "src/runtime.mjs") {
+		t.Fatalf("barrel key src = %v, want src/runtime.mjs", got)
+	}
+}
+
+func containsString(xs []string, want string) bool {
+	for _, x := range xs {
+		if x == want {
+			return true
+		}
+	}
+	return false
 }

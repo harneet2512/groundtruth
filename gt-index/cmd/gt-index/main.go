@@ -37,7 +37,9 @@ import (
 )
 
 // RC-17 (F-003): build-stamp variables. Populated at link time via
-//   go build -ldflags='-X main.commitSHA=... -X main.buildTimeUTC=... -X main.goToolchain=...'
+//
+//	go build -ldflags='-X main.commitSHA=... -X main.buildTimeUTC=... -X main.goToolchain=...'
+//
 // Defaults of "unknown" let `go run` and bare `go build` still produce a
 // usable binary for development (the smoke-runner preflight refuses
 // "unknown" so paid runs cannot ship with an unstamped binary).
@@ -340,6 +342,7 @@ func main() {
 		resolver.RegisterTSConfigPaths(fileMap, tsCfg)
 		fmt.Fprintf(os.Stderr, "  TS config: baseUrl=%s, %d path aliases\n", tsCfg.BaseURL, len(tsCfg.Paths))
 	}
+	resolver.RegisterJSPackagePaths(fileMap, *root)
 
 	// Register Go package names as fileMap aliases + vendor paths
 	resolver.RegisterGoPackageNames(fileMap, filePaths, fileLangs)
@@ -978,6 +981,10 @@ func runIncremental(root, relpath, dbPath string) error {
 	}
 	nameIndex, fileIndex := resolver.BuildNameIndex(db, filteredNodes, filteredIDs)
 	fileMap := resolver.BuildFileMap(allFiles, allLangs)
+	if tsCfg := resolver.ParseTSConfig(root); tsCfg != nil {
+		resolver.RegisterTSConfigPaths(fileMap, tsCfg)
+	}
+	resolver.RegisterJSPackagePaths(fileMap, root)
 
 	callerDBIDs := make([]int64, len(pr.Calls))
 	for i, call := range pr.Calls {

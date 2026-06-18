@@ -230,8 +230,6 @@ def check_layer2_imports() -> None:
          "groundtruth.hooks.post_edit", "generate_improved_evidence"),
         ("2.3", "post_view.graph_navigation",
          "groundtruth.hooks.post_view", "graph_navigation"),
-        ("2.1", "graph_map.build_graph_map",
-         "groundtruth.brief.graph_map", "build_graph_map"),
         ("2.x", "graph_store.GraphStore + is_graph_db",
          "groundtruth.index.graph_store", "GraphStore"),
         ("2.x", "graph_store.is_graph_db",
@@ -604,17 +602,9 @@ def check_session_20260526_fixes(db_path: str) -> None:
         _record("6.P10", "git log fallback preserved",
                 "git log" in pe_src)
 
-    # --- B1: graph_map.py LIKE fix ---
-    try:
-        gm_src = Path("src/groundtruth/brief/graph_map.py").read_text(encoding="utf-8")
-        _record("6.B1", "graph_map uses LIKE not exact match",
-                "LIKE ? ESCAPE" in gm_src and "file_path = ?" not in gm_src)
-        _record("6.B1", "same-file exclusion uses != not NOT LIKE",
-                "!= nt.file_path" in gm_src or "!= ns.file_path" in gm_src)
-        _record("6.B1", "_escape_like defined in graph_map",
-                "def _escape_like" in gm_src)
-    except Exception as exc:
-        _record("6.B1", "graph_map.py readable", False, f"error: {exc}")
+    # --- B1: retired graph_map.py producer ---
+    _record("6.B1", "dead graph_map.py producer deleted",
+            not Path("src/groundtruth/brief/graph_map.py").exists())
 
     # --- Evidence markers ---
     try:
