@@ -87,6 +87,10 @@ _DEMO_NONSOURCE_DIR_SEGMENTS: frozenset[str] = frozenset({
     "fixture", "docs", "doc", "docs_src", "doc_src", "documentation",
     "tutorial", "tutorials", "benchmark", "benchmarks", "benches", "bench", "vendor",
     "node_modules", "dist", "build",
+    # fuzz / property-based / mutation test dirs (mirrors walker.go nonSourceDirSegments —
+    # DUPLICATION TRAP: keep these two sets in sync; the wasmi leak was fuzz/ missing here)
+    "fuzz", "fuzzing", "fuzz_targets", "corpus", "testcases",
+    "conformance", "compat", "integration_tests", "e2e_tests",
 })
 
 

@@ -63,6 +63,20 @@ func TestIsTestFile(t *testing.T) {
 		{"__tests dir (csstree)", "lib/__tests/clone.js", true},
 		{"__test__ dir", "src/__test__/foo.js", true},
 		{"specs dir", "specs/user.js", true},
+		// Rust: tests.rs and *_test.rs / *_tests.rs (wasmi-leak fix)
+		{"rust tests.rs", "crates/wasmi/src/tests.rs", true},
+		{"rust test.rs", "src/test.rs", true},
+		{"rust _test.rs suffix", "crates/foo/src/parser_test.rs", true},
+		{"rust _tests.rs suffix", "crates/foo/src/parser_tests.rs", true},
+		{"rust normal lib.rs", "src/lib.rs", false},
+		{"rust normal mod", "crates/wasmi/src/engine/mod.rs", false},
+		// Fuzz dir (wasmi-leak fix)
+		{"fuzz dir", "crates/fuzz/src/config.rs", true},
+		{"fuzz_targets dir", "fuzz_targets/fuzz_main.rs", true},
+		{"fuzzing dir", "fuzzing/corpus/seed.rs", true},
+		// C++: *_test.cc / *_test.cpp
+		{"cpp gtest", "src/parser_test.cc", true},
+		{"cpp gtest cpp", "src/engine_test.cpp", true},
 		// Negative guards: underscore-trim must not over-match
 		{"contests not test", "src/contests/foo.js", false},
 		{"attestations not test", "lib/attestations/sign.js", false},
@@ -123,6 +137,16 @@ func TestIsNonSourceFile(t *testing.T) {
 		{"third_party dir", "third_party/lib/x.cc", true},
 		{"dist dir", "dist/bundle.js", true},
 		{"build dir", "build/out.js", true},
+		// Fuzz dirs (wasmi-leak fix — Part 1 generalized segments)
+		{"fuzz dir", "crates/fuzz/src/config.rs", true},
+		{"fuzzing dir", "fuzzing/main.rs", true},
+		{"fuzz_targets dir", "fuzz_targets/fuzz_parse.rs", true},
+		{"corpus dir", "corpus/seed.bin.go", true},
+		{"testcases dir", "testcases/case001.go", true},
+		{"conformance dir", "conformance/spec_test.go", true},
+		{"compat dir", "compat/old_api.py", true},
+		{"integration_tests dir", "integration_tests/flow_test.py", true},
+		{"e2e_tests dir", "e2e_tests/login.ts", true},
 		// Underscore-wrapped variants
 		{"__tests__ dir", "src/__tests__/foo.js", true},
 		// Negative guards: whole-segment, never substring

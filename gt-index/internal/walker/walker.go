@@ -230,6 +230,24 @@ func IsTestFile(relPath string) bool {
 	if strings.HasSuffix(stem, "_spec") && ext == ".rb" {
 		return true
 	}
+	// Rust: tests.rs / test.rs (inline test module files), *_test.rs, *_tests.rs
+	// These are Rust files that ARE test modules but live inside source dirs, so
+	// directory-segment matching alone won't catch them.
+	if ext == ".rs" {
+		if base == "tests.rs" || base == "test.rs" {
+			return true
+		}
+		if strings.HasSuffix(stem, "_test") || strings.HasSuffix(stem, "_tests") {
+			return true
+		}
+	}
+	// C/C++: *_test.cc, *_test.cpp, *_test.cxx (Google Test / CTest convention)
+	if strings.HasSuffix(stem, "_test") {
+		switch ext {
+		case ".cc", ".cpp", ".cxx", ".c":
+			return true
+		}
+	}
 	// Directory-based: tests/, test/, spec/, Jest __tests__/, and underscore-
 	// wrapped variants (csstree __tests/, __test__/) — common in JS/TS repos.
 	// Whole-segment matching (after trimming wrapping underscores) avoids false
@@ -239,6 +257,14 @@ func IsTestFile(relPath string) bool {
 	}
 	// JVM convention: src/test/ directory
 	if strings.Contains(dir, "src/test/") {
+		return true
+	}
+	// Any path that IsNonSourceFile classifies as non-source (e.g. fuzz/, fuzzing/,
+	// fuzz_targets/, corpus/, conformance/, compat/, integration_tests/, e2e_tests/,
+	// as well as demo/example/docs/vendor dirs already in hasTestDirSegment or
+	// nonSourceDirSegments) should also be flagged by IsTestFile so that the
+	// is_test bit is set regardless of which predicate is the entry point.
+	if IsNonSourceFile(relPath) {
 		return true
 	}
 	return false
@@ -274,6 +300,15 @@ var nonSourceDirSegments = map[string]bool{
 	// test dirs (superset of hasTestDirSegment; "e2e"/"testing" are Python-side too)
 	"test": true, "tests": true, "spec": true, "specs": true,
 	"e2e": true, "testing": true,
+	// fuzz / mutation / property-based test dirs (universal across all languages)
+	// e.g. crates/fuzz/src/... (Rust), fuzz_targets/ (cargo-fuzz), corpus/ (AFL/libFuzzer),
+	// testcases/ (AFL), conformance/ (protocol/spec conformance suites),
+	// compat/ (compatibility test suites), integration_tests/ (Python pytest),
+	// e2e_tests/ (end-to-end test dirs distinct from "e2e")
+	"fuzz": true, "fuzzing": true, "fuzz_targets": true,
+	"corpus": true, "testcases": true,
+	"conformance": true, "compat": true,
+	"integration_tests": true, "e2e_tests": true,
 	// demo / example
 	"example": true, "examples": true, "demo": true, "demos": true,
 	"sample": true, "samples": true,
