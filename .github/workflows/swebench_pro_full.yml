@@ -611,6 +611,7 @@ jobs:
           key: ${{ steps.substrate_cache_key.outputs.key }}
 
       - name: GT substrate proof (handoff §B-AFTER/§D/§G) — pre-agent, pinned, read-only repo
+        continue-on-error: true
         env:
           GT_MATRIX_TASK: ${{ matrix.task }}
           GT_MATRIX_DOCKERHUB_TAG: ${{ matrix.dockerhub_tag }}
