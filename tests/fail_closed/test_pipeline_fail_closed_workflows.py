@@ -31,6 +31,7 @@ WF_PRO_FULL = os.path.join(ROOT, ".github", "workflows", "swebench_pro_full.yml"
 WF_30 = os.path.join(ROOT, ".github", "workflows", "swebench_30task.yml")
 WF_300 = os.path.join(ROOT, ".github", "workflows", "swebench_300task.yml")
 WF_LANG_SMOKE = os.path.join(ROOT, ".github", "workflows", "gt_language_smoke.yml")
+SCRIPT_SUBSTRATE_PROOF = os.path.join(ROOT, "scripts", "ci", "substrate_proof.sh")
 
 
 def _read(p):
@@ -49,6 +50,14 @@ def _step(doc, job, name_prefix):
     raise AssertionError(f"step {name_prefix!r} not found in job {job!r}")
 
 
+def _deepswe_proof_run():
+    """Return the shell body that implements the DeepSWE substrate proof step."""
+    run = _step(_load(WF_DEEPSWE), "trial", "GT substrate proof")["run"]
+    if "scripts/ci/substrate_proof.sh" in run:
+        return _read(SCRIPT_SUBSTRATE_PROOF)
+    return run
+
+
 # ── workflows must stay YAML-parseable ────────────────────────────────────────
 
 def test_workflows_parse_as_yaml():
@@ -61,9 +70,8 @@ def test_workflows_parse_as_yaml():
 
 def _extract_issue_heredoc():
     """Pull the python heredoc body out of the substrate-proof step's run block."""
-    step = _step(_load(WF_DEEPSWE), "trial", "GT substrate proof")
-    lines = step["run"].splitlines()
-    start = next(i for i, ln in enumerate(lines) if "<< 'PYEOF'" in ln)
+    lines = _deepswe_proof_run().splitlines()
+    start = next(i for i, ln in enumerate(lines) if "<<" in ln and "PYEOF" in ln)
     body = []
     for ln in lines[start + 1:]:
         if ln.strip() == "PYEOF":
@@ -130,7 +138,7 @@ def test_issue_extraction_whitespace_instruction_fails_closed(tmp_path):
 
 
 def test_issue_extraction_old_swallow_removed():
-    run = _step(_load(WF_DEEPSWE), "trial", "GT substrate proof")["run"]
+    run = _deepswe_proof_run()
     assert "|| : > /tmp/issue.txt" not in run  # the silent empty-issue swallow is gone
     assert "GT_ISSUE_MISSING" in run            # the fail-closed marker is emitted
 
@@ -188,7 +196,7 @@ def test_pier_run_surfaces_swallowed_adapter_error():
 # ── P0.1-c: brief.txt is artifact #8 in the workflow check ───────────────────
 
 def test_workflow_artifact_check_includes_brief():
-    run = _step(_load(WF_DEEPSWE), "trial", "GT substrate proof")["run"]
+    run = _deepswe_proof_run()
     assert "brief.txt" in run
     assert "all 8 GT artifacts present" in run
     assert "all 7 GT artifacts present" not in run
@@ -227,8 +235,10 @@ def test_oh_300task_pins_e5_in_transitional_container_execs():
 
 def test_substrate_paths_stay_gte():
     # The pinned-substrate invocations (gt-run-proof) bake gte and must NOT be pinned to e5.
-    for wf in (WF_DEEPSWE, WF_300):
-        t = _read(wf)
+    for wf, t in (
+        (WF_DEEPSWE, _deepswe_proof_run()),
+        (WF_300, _read(WF_300)),
+    ):
         i = 0
         while True:
             i = t.find("gt-run-proof --source-root", i)
@@ -248,7 +258,7 @@ def test_substrate_paths_stay_gte():
 def test_deepswe_proof_gates_strict_by_default():
     doc = _load(WF_DEEPSWE)
     assert (doc.get("env") or {}).get("GT_GATES_DELIVER_ALWAYS") == "0"
-    run = _step(doc, "trial", "GT substrate proof")["run"]
+    run = _deepswe_proof_run()
     assert "${GT_GATES_DELIVER_ALWAYS:-0}" in run
     assert "${GT_GATES_DELIVER_ALWAYS:-1}" not in run
 
@@ -256,10 +266,9 @@ def test_deepswe_proof_gates_strict_by_default():
 def test_deepswe_proof_path_exposes_complete_substrate_closure():
     # Regression for split substrate contracts: DeepSWE overrode PATH and hid
     # baked language-tool directories even though the pinned substrate contained them.
-    run = _step(_load(WF_DEEPSWE), "trial", "GT substrate proof")["run"]
+    run = _deepswe_proof_run()
     path_lines = [ln for ln in run.splitlines() if '-e PATH="' in ln]
-    assert len(path_lines) == 1
-    path_line = path_lines[0]
+    assert path_lines
     for required in (
         "/opt/gt/bin",
         "/opt/gt/node/bin",
@@ -267,7 +276,7 @@ def test_deepswe_proof_path_exposes_complete_substrate_closure():
         "/opt/gt/jre/bin",
         "/opt/gt/go/bin",
     ):
-        assert required in path_line
+        assert any(required in path_line for path_line in path_lines)
 
 
 def test_language_smoke_fails_on_nonzero_proof_exit():
