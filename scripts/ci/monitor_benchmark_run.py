@@ -102,6 +102,41 @@ def patch_counts(cache: Path) -> tuple[int, int]:
     return patched, total
 
 
+def metric_totals(cache: Path) -> dict[str, float | int]:
+    totals: dict[str, float | int] = {
+        "metrics": 0,
+        "llm_calls": 0.0,
+        "tokens_in": 0.0,
+        "tokens_out": 0.0,
+        "tokens_total": 0.0,
+        "tokens_cached": 0.0,
+        "cost_usd": 0.0,
+        "gt_tokens": 0.0,
+        "metric_patches": 0,
+    }
+    if not cache.exists():
+        return totals
+    for path in cache.glob("*/gt_deep_metrics_*.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        eff = data.get("efficiency") or {}
+        totals["metrics"] = int(totals["metrics"]) + 1
+        totals["llm_calls"] = float(totals["llm_calls"]) + float(eff.get("llm_calls") or 0.0)
+        totals["tokens_in"] = float(totals["tokens_in"]) + float(eff.get("llm_tokens_in") or 0.0)
+        totals["tokens_out"] = float(totals["tokens_out"]) + float(eff.get("llm_tokens_out") or 0.0)
+        totals["tokens_total"] = float(totals["tokens_total"]) + float(eff.get("llm_tokens_total") or 0.0)
+        totals["tokens_cached"] = float(totals["tokens_cached"]) + float(eff.get("llm_tokens_cached") or 0.0)
+        totals["cost_usd"] = float(totals["cost_usd"]) + float(eff.get("llm_cost_usd") or 0.0)
+        totals["gt_tokens"] = float(totals["gt_tokens"]) + float(
+            eff.get("gt_injected_tokens_total") or data.get("gt_injected_tokens_total") or 0.0
+        )
+        if data.get("has_patch") is True:
+            totals["metric_patches"] = int(totals["metric_patches"]) + 1
+    return totals
+
+
 def class_counts(recs: list[dict[str, Any]]) -> dict[str, int]:
     counts = {"RESOLVED": 0, "AGENT": 0, "GT": 0, "INFRA": 0, "UNKNOWN": 0}
     for rec in recs:
@@ -136,7 +171,14 @@ def summarize(repo: str, run_id: str, benchmark: str, cache: Path) -> str:
     evidence_latch = (evidence_ok / evidence_total) if evidence_total else 0.0
     artifact_latch = (len(artifacts) / len(jobs)) if jobs else 0.0
     patched, patch_total = patch_counts(cache)
+    metrics = metric_totals(cache)
     patch_rate = (patched / patch_total) if patch_total else 0.0
+    metric_patch_total = int(metrics["metrics"])
+    metric_patches = int(metrics["metric_patches"])
+    if metric_patch_total:
+        patched = max(patched, metric_patches)
+        patch_total = max(patch_total, metric_patch_total)
+        patch_rate = patched / patch_total
     running = status_counts.get("in_progress", 0)
     completed = status_counts.get("completed", 0)
     queued = status_counts.get("queued", 0)
@@ -150,6 +192,14 @@ def summarize(repo: str, run_id: str, benchmark: str, cache: Path) -> str:
         f"success={success} failure={failure} "
         f"resolution_rate={resolved_rate:.8f} "
         f"patch_rate={patch_rate:.2%} ({patched}/{patch_total}) "
+        f"metrics={int(metrics['metrics'])}/{len(artifacts)} "
+        f"llm_calls={float(metrics['llm_calls']):.8f} "
+        f"tokens_in={float(metrics['tokens_in']):.8f} "
+        f"tokens_out={float(metrics['tokens_out']):.8f} "
+        f"tokens_total={float(metrics['tokens_total']):.8f} "
+        f"tokens_cached={float(metrics['tokens_cached']):.8f} "
+        f"cost_usd={float(metrics['cost_usd']):.8f} "
+        f"gt_tokens={float(metrics['gt_tokens']):.8f} "
         f"artifacts={len(artifacts)} artifact_latch={artifact_latch:.2%} "
         f"evidence_latch={evidence_latch:.2%} ({evidence_ok}/{evidence_total}) "
         f"outcomes={len(recs)} classes={counts} "
