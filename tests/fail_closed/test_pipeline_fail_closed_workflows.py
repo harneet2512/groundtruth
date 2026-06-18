@@ -27,6 +27,7 @@ import yaml
 
 ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
 WF_DEEPSWE = os.path.join(ROOT, ".github", "workflows", "deepswe_full.yml")
+WF_PRO_FULL = os.path.join(ROOT, ".github", "workflows", "swebench_pro_full.yml")
 WF_30 = os.path.join(ROOT, ".github", "workflows", "swebench_30task.yml")
 WF_300 = os.path.join(ROOT, ".github", "workflows", "swebench_300task.yml")
 WF_LANG_SMOKE = os.path.join(ROOT, ".github", "workflows", "gt_language_smoke.yml")
@@ -51,7 +52,7 @@ def _step(doc, job, name_prefix):
 # ── workflows must stay YAML-parseable ────────────────────────────────────────
 
 def test_workflows_parse_as_yaml():
-    for p in (WF_DEEPSWE, WF_30, WF_300, WF_LANG_SMOKE):
+    for p in (WF_DEEPSWE, WF_PRO_FULL, WF_30, WF_300, WF_LANG_SMOKE):
         doc = _load(p)
         assert isinstance(doc, dict) and "jobs" in doc, p
 
@@ -141,6 +142,41 @@ def test_pier_run_has_pipefail_and_pipestatus():
     assert "set -o pipefail" in run
     assert "PIPESTATUS[0]" in run
     assert "PIER_RC" in run
+
+
+def test_deepswe_uses_explicit_harness_pier_across_steps():
+    doc = _load(WF_DEEPSWE)
+    install = _step(doc, "trial", "Install host harness deps")["run"]
+    run = _step(doc, "trial", "Run GT trial")["run"]
+    assert 'echo "GT_HARNESS_PIER=${VENV_DIR}/bin/pier" >> "$GITHUB_ENV"' in install
+    assert 'echo "${VENV_DIR}/bin" >> "$GITHUB_PATH"' in install
+    assert '"$GT_HARNESS_PIER" run' in run
+    assert 'test -x "$GT_HARNESS_PIER"' in run
+
+
+def test_pro_full_uses_same_harness_python_for_import_check_and_runner():
+    doc = _load(WF_PRO_FULL)
+    install = _step(doc, "trial", "Install host harness deps")["run"]
+    run = _step(doc, "trial", "Run GT Pro trial")["run"]
+    assert 'echo "GT_HARNESS_PYTHON=${VENV_DIR}/bin/python" >> "$GITHUB_ENV"' in install
+    assert 'echo "${VENV_DIR}/bin" >> "$GITHUB_PATH"' in install
+    assert "import minisweagent" in install
+    assert "PRO_HARNESS_READY" in run
+    assert 'test -x "$GT_HARNESS_PYTHON"' in run
+    assert '"$GT_HARNESS_PYTHON" benchmarks/swebench/run_mini_gt_pro_v10.py' in run
+    assert "python3 benchmarks/swebench/run_mini_gt_pro_v10.py" not in run
+
+
+def test_cancelled_full_runs_are_reported_as_partial_not_structural_failures():
+    for wf, job, prefix in (
+        (WF_DEEPSWE, "summarize", "Classification tally"),
+        (WF_PRO_FULL, "summarize", "Classification tally"),
+    ):
+        run = _step(_load(wf), job, prefix)["run"]
+        assert 'trial_result = "${{ needs.trial.result }}"' in run
+        assert "PARTIAL_RUN_ARTIFACT_COUNT_MISMATCH" in run
+        assert 'if trial_result != "cancelled":' in run
+        assert 'print(f"ARTIFACT_COUNT_MISMATCH: expected' not in run
 
 
 def test_pier_run_surfaces_swallowed_adapter_error():

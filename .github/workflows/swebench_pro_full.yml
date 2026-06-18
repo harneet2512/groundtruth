@@ -473,24 +473,31 @@ jobs:
       - name: Install host harness deps (mini-swe-agent + GT python deps)
         run: |
           set -e
+          VENV_DIR=/tmp/gt-harness-venv
           if [ -f /tmp/gt-harness-venv.tar.gz ]; then
             echo "venv cache HIT — unpacking harness venv"
             tar -xzf /tmp/gt-harness-venv.tar.gz -C /tmp/
-            VENV_SITE=$(/tmp/gt-harness-venv/bin/python -c "import site; print(site.getsitepackages()[0])")
+            VENV_SITE=$("${VENV_DIR}/bin/python" -c "import site; print(site.getsitepackages()[0])")
             find "$VENV_SITE" -name "groundtruth*.egg-link" -delete 2>/dev/null || true
             find "$VENV_SITE" -name "__editable__.groundtruth*.pth" -delete 2>/dev/null || true
-            /tmp/gt-harness-venv/bin/python -m pip install -e . --no-deps --quiet 2>&1 | tail -3 || true
-            echo "PATH=/tmp/gt-harness-venv/bin:$PATH" >> "$GITHUB_ENV"
-            echo "VIRTUAL_ENV=/tmp/gt-harness-venv" >> "$GITHUB_ENV"
-            export PATH="/tmp/gt-harness-venv/bin:$PATH"
-            python -c "import minisweagent; print('host harness ready: mini-swe-agent import OK')"
+            "${VENV_DIR}/bin/python" -m pip install -e . --no-deps --quiet 2>&1 | tail -3 || true
           else
-            echo "venv cache MISS — installing harness from scratch"
-            python -m pip install --upgrade pip
-            python -m pip install "mini-swe-agent==2.2.8" datasets docker
-            python -m pip install -e . --quiet
-            python -c "import minisweagent; print('host harness ready: mini-swe-agent import OK')"
+            echo "venv cache MISS — installing harness from scratch into ${VENV_DIR}"
+            python -m venv "${VENV_DIR}"
+            "${VENV_DIR}/bin/python" -m pip install --upgrade pip
+            "${VENV_DIR}/bin/python" -m pip install "mini-swe-agent==2.2.8" datasets docker
+            "${VENV_DIR}/bin/python" -m pip install -e . --quiet
           fi
+          test -x "${VENV_DIR}/bin/python" || { echo "PRO_HARNESS_PYTHON_MISSING: ${VENV_DIR}/bin/python"; exit 1; }
+          echo "${VENV_DIR}/bin" >> "$GITHUB_PATH"
+          echo "VIRTUAL_ENV=${VENV_DIR}" >> "$GITHUB_ENV"
+          echo "GT_HARNESS_PYTHON=${VENV_DIR}/bin/python" >> "$GITHUB_ENV"
+          "${VENV_DIR}/bin/python" - <<'PY'
+          import sys
+          import minisweagent
+          from minisweagent.run.benchmarks.swebench import app
+          print(f"host harness ready: python={sys.executable} minisweagent={minisweagent.__file__}")
+          PY
 
       - name: Trust the workspace for git (CI checkout uid mismatch)
         run: |
@@ -729,10 +736,18 @@ jobs:
             echo "=== Model routed via TokenRouter: $INPUT_MODEL ==="
           fi
           export MSWEA_COST_TRACKING=ignore_errors
+          : "${GT_HARNESS_PYTHON:=/tmp/gt-harness-venv/bin/python}"
+          test -x "$GT_HARNESS_PYTHON" || { echo "PRO_HARNESS_PYTHON_MISSING: $GT_HARNESS_PYTHON" | tee -a trial_output.log; exit 1; }
+          "$GT_HARNESS_PYTHON" - <<'PY' | tee -a trial_output.log
+          import sys
+          import minisweagent
+          from minisweagent.run.benchmarks.swebench import app
+          print(f"PRO_HARNESS_READY python={sys.executable} minisweagent={minisweagent.__file__}")
+          PY
 
           # Pro uses its native mini-swe-agent SWE-bench runner, filtered to the
           # single matrix instance. It is not a Pier benchmark path.
-          python3 benchmarks/swebench/run_mini_gt_pro_v10.py \
+          "$GT_HARNESS_PYTHON" benchmarks/swebench/run_mini_gt_pro_v10.py \
             -c benchmarks/swebench/mini_swebench_pro_gt_v10.yaml \
             --model "$INPUT_MODEL" \
             --subset ScaleAI/SWE-bench_Pro \
@@ -916,10 +931,12 @@ jobs:
           from deepswe_outcome import tally_classes
           recs, missing = [], []
           expected = int("${{ needs.prepare.outputs.total }}" or "0")
+          trial_result = "${{ needs.trial.result }}"
           artifacts = sorted(glob.glob("/tmp/all/pro-full-*"))
           if len(artifacts) != expected:
-              print(f"ARTIFACT_COUNT_MISMATCH: expected {expected}, downloaded {len(artifacts)}")
-              sys.exit(1)
+              print(f"PARTIAL_RUN_ARTIFACT_COUNT_MISMATCH: expected {expected}, downloaded {len(artifacts)}; trial_result={trial_result}")
+              if trial_result != "cancelled":
+                  sys.exit(1)
           for d in artifacts:
               task = d.split("pro-full-", 1)[-1]
               try:

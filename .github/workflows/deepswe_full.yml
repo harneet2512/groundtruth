@@ -534,6 +534,7 @@ jobs:
           #
           # SPEED-OPT B: if the venv tarball was restored from cache, unpack + activate it
           # instead of running pip (saves 20-60s per job on the hot path).
+          VENV_DIR=/tmp/gt-harness-venv
           if [ -f /tmp/gt-harness-venv.tar.gz ]; then
             echo "venv cache HIT — unpacking harness venv"
             tar -xzf /tmp/gt-harness-venv.tar.gz -C /tmp/
@@ -545,24 +546,26 @@ jobs:
             find "$VENV_SITE" -name "groundtruth*.egg-link" -delete 2>/dev/null || true
             find "$VENV_SITE" -name "__editable__.groundtruth*.pth" -delete 2>/dev/null || true
             # Re-install just the GT package editable (no-deps, wheel already present → fast).
-            /tmp/gt-harness-venv/bin/python -m pip install -e . --no-deps --quiet 2>&1 | tail -3 || true
-            # Activate: prepend venv bin so pier + python resolve here.
-            echo "PATH=/tmp/gt-harness-venv/bin:$PATH" >> "$GITHUB_ENV"
-            echo "VIRTUAL_ENV=/tmp/gt-harness-venv" >> "$GITHUB_ENV"
-            export PATH="/tmp/gt-harness-venv/bin:$PATH"
+            "${VENV_DIR}/bin/python" -m pip install -e . --no-deps --quiet 2>&1 | tail -3 || true
+            export PATH="${VENV_DIR}/bin:$PATH"
             command -v pier >/dev/null || { echo "FATAL: pier not on PATH after venv restore"; exit 1; }
             echo "host harness ready (venv cache): pier=$(command -v pier)"
           else
-            echo "venv cache MISS — installing harness from scratch (first run / pyproject changed)"
-            python -m pip install --upgrade pip
+            echo "venv cache MISS — installing harness from scratch into ${VENV_DIR} (first run / pyproject changed)"
+            python -m venv "${VENV_DIR}"
+            "${VENV_DIR}/bin/python" -m pip install --upgrade pip
             # PINNED: the whole --ae/--mounts-json env+mount integration was source-verified
             # against pier 0.2.0 (cli/jobs.py:620,629 -> factory extra_env -> DockerEnvironment
             # exec -e). An unpinned install lets an upstream release silently change that
             # plumbing mid-run — never float the harness contract on a paid matrix.
-            python -m pip install "datacurve-pier==0.2.0" || { echo "FATAL: pier install failed"; exit 1; }
-            command -v pier >/dev/null || { echo "FATAL: pier not on PATH after install"; exit 1; }
-            echo "host harness ready: pier=$(command -v pier) (LSP/gates/graph run inside the substrate)"
+            "${VENV_DIR}/bin/python" -m pip install "datacurve-pier==0.2.0" || { echo "FATAL: pier install failed"; exit 1; }
+            "${VENV_DIR}/bin/pier" --help >/dev/null || { echo "FATAL: pier install failed"; exit 1; }
+            echo "host harness ready: pier=${VENV_DIR}/bin/pier (LSP/gates/graph run inside the substrate)"
           fi
+          test -x "${VENV_DIR}/bin/pier" || { echo "FATAL: pier missing at ${VENV_DIR}/bin/pier"; exit 1; }
+          echo "${VENV_DIR}/bin" >> "$GITHUB_PATH"
+          echo "VIRTUAL_ENV=${VENV_DIR}" >> "$GITHUB_ENV"
+          echo "GT_HARNESS_PIER=${VENV_DIR}/bin/pier" >> "$GITHUB_ENV"
 
       - name: Trust the workspace for git (CI checkout uid mismatch)
         run: |
@@ -918,7 +921,9 @@ jobs:
             done ) &
           _RESMON_PID=$!
           trap 'kill "$_RESMON_PID" 2>/dev/null' EXIT
-          pier run \
+          : "${GT_HARNESS_PIER:=/tmp/gt-harness-venv/bin/pier}"
+          test -x "$GT_HARNESS_PIER" || { echo "FATAL: pier missing at $GT_HARNESS_PIER" | tee -a trial_output.log; exit 1; }
+          "$GT_HARNESS_PIER" run \
             -p deepswe-bench/tasks/${{ matrix.task }} \
             --agent-import-path artifact_deepswe.gt_agent:GTMiniSweAgent \
             --model "$INPUT_MODEL" \
@@ -1185,10 +1190,12 @@ jobs:
           from deepswe_outcome import tally_classes
           recs, missing = [], []
           expected = int("${{ needs.prepare.outputs.total }}" or "0")
+          trial_result = "${{ needs.trial.result }}"
           artifacts = sorted(glob.glob("/tmp/all/deepswe-full-*"))
           if len(artifacts) != expected:
-              print(f"ARTIFACT_COUNT_MISMATCH: expected {expected}, downloaded {len(artifacts)}")
-              sys.exit(1)
+              print(f"PARTIAL_RUN_ARTIFACT_COUNT_MISMATCH: expected {expected}, downloaded {len(artifacts)}; trial_result={trial_result}")
+              if trial_result != "cancelled":
+                  sys.exit(1)
           for d in artifacts:
               task = d.split("deepswe-full-", 1)[-1]
               try:
