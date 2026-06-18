@@ -1199,6 +1199,20 @@ def build(task: str, results_dir: str, log_path: str = "",
     if (not traj.get("action_count")) and log_text:
         traj["has_patch"] = traj.get("has_patch") or _log_has_patch(log_text)
 
+    # GT Behavioral Impact — measures whether GT deliveries CHANGE agent behavior.
+    # A "pivot" = the agent's action type changed after receiving GT content.
+    behavioral_impact = {"total_deliveries": 0, "total_pivots": 0, "impact_rate": 0.0, "per_tag": {}}
+    try:
+        from gt_behavioral_impact import analyze_trajectory as _analyze_bi
+        tj_path = _find_miniswe_trajectory(task, results_dir)
+        if tj_path:
+            tj_data = _load_json(tj_path)
+            if isinstance(tj_data, dict):
+                bi = _analyze_bi(tj_data)
+                behavioral_impact = bi.get("summary", behavioral_impact)
+    except Exception:
+        pass
+
     token_accounting_source = "gt_run_summary" if per_layer_raw else "none"
     fallback_per_layer, fallback_layers, fallback_tokens = _trajectory_layer_fallback(traj)
     if not per_layer_raw and fallback_tokens > 0:
@@ -1387,6 +1401,12 @@ def build(task: str, results_dir: str, log_path: str = "",
             "understand_calls": d8(traj.get("gt_understand_calls", 0)),
             "verify_calls": d8(traj.get("gt_verify_calls", 0)),
             "gt_observation_chars_total": d8(traj.get("gt_observation_chars_total", 0)),
+        },
+        "behavioral_impact": {
+            "total_deliveries": behavioral_impact.get("total_deliveries", 0),
+            "total_pivots": behavioral_impact.get("total_pivots", 0),
+            "impact_rate": d8(behavioral_impact.get("impact_rate", 0)),
+            "per_tag": behavioral_impact.get("per_tag", {}),
         },
         "gt_blocks_delivered": d8(consumption.get("gt_blocks_delivered", 0)),
         "gt_blocks_consumed": d8(consumption.get("gt_blocks_consumed", 0)),
