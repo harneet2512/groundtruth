@@ -1,5 +1,8 @@
 name: "DeepSWE: Pre-index repos + smoke run"
 
+# DEPRECATED: substrate bakes gt-index; pre-indexing is redundant. This workflow
+# exists only for historical reference. Do NOT dispatch on paid runs.
+#
 # Pull DeepSWE Docker images from ECR Public, run gt-index inside each
 # container to build graph.db, upload as artifacts. Optionally run a
 # smoke test via pier with GT MCP server.
@@ -32,6 +35,8 @@ env:
 
 jobs:
   build-matrix:
+    # DEPRECATED: if: false prevents accidental dispatch (substrate bakes gt-index).
+    if: false
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.gen.outputs.matrix }}

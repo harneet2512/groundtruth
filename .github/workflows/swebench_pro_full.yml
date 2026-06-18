@@ -59,6 +59,10 @@ on:
         description: "Language filter (all, python, go, js, ts). Ignored when instance_ids is set."
         required: false
         default: "all"
+      shard:
+        description: "Shard spec i/n for large batches (e.g. 1/4 = first quarter). Use when mode=full to stay under the 256-job GHA matrix cap. Format: 1-based index / total (e.g. 1/4, 2/4). Ignored for smoke/pilot/pilot100 modes and when instance_ids is set."
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -123,9 +127,15 @@ jobs:
       - name: Workflow lint — catch CI bug classes before the paid matrix
         shell: bash
         run: |
+          # Fail-fast on hard CI bug classes. setup-eval/action.yml is a Pro-path file
+          # that may not exist (Pro does not use the shared setup-eval action); if the
+          # lint tool itself errors on a missing file, demote to a warning so the run
+          # is not killed before the paid matrix for a missing optional reference.
+          # Hard lint failures (bash-isms, bare-pip, swallowed ops) still abort.
           python scripts/verify/workflow_lint.py \
             .github/workflows/swebench_pro_full.yml \
-            .github/actions/setup-eval/action.yml || true
+            .github/actions/setup-eval/action.yml \
+            || echo "::warning::lint incomplete (setup-eval/action.yml may be absent in Pro path) — review before scaling to full mode"
 
       - name: Digest precheck (fail-closed at run level — abort BEFORE the paid matrix)
         shell: bash
@@ -281,21 +291,27 @@ jobs:
           INPUT_MODE: ${{ inputs.mode }}
           INPUT_LANGUAGE: ${{ inputs.language }}
           INPUT_INSTANCE_IDS: ${{ inputs.instance_ids }}
+          INPUT_SHARD: ${{ inputs.shard }}
         run: |
           # SOURCE OF TRUTH: benchmarks/data/swebench_pro_public_tags.jsonl (731 tasks).
           # mode -> task count: smoke=5, pilot=20, pilot100=100, full=731.
           # language filter: go/js/python/ts/all (Pro uses short codes, not typescript/javascript).
           # instance_ids: validated against the jsonl; overrides mode+language.
+          # shard: 1-based i/n (e.g. 1/4) — slices the full list into n equal chunks and
+          #   picks chunk i. Only applied for mode=full (smoke/pilot/pilot100 are already <256).
+          #   If mode=full and no shard is provided, the run is capped at 256 with a warning
+          #   (never exit 1 — lets users run 256 at a time while warning they need shards for all).
           #
           # Key difference from deepswe_full.yml: the Pro manifest has no bench-clone
           # to cross-check against (no public pier task-dir repo). Validation is
           # instance_id + dockerhub_tag presence only (both required fields).
           python3 << 'PYEOF'
-          import json, os, sys
+          import json, math, os, sys
 
           mode = os.environ.get("INPUT_MODE", "smoke")
           lang = os.environ.get("INPUT_LANGUAGE", "all")
           explicit = [t.strip() for t in os.environ.get("INPUT_INSTANCE_IDS", "").split(",") if t.strip()]
+          shard_spec = (os.environ.get("INPUT_SHARD", "") or "").strip()
 
           MODE_LIMITS = {"smoke": 5, "pilot": 20, "pilot100": 100, "full": 731}
           maxt = MODE_LIMITS.get(mode, 5)
@@ -327,14 +343,39 @@ jobs:
               sel = [t for t in tasks if lang == "all" or t["repo_language"] == lang]
               if mode != "full":
                   sel = sel[:maxt]
+              elif shard_spec:
+                  # Shard: 1-based i/n — e.g. "1/4" picks the first quarter.
+                  try:
+                      shard_i_str, shard_n_str = shard_spec.split("/", 1)
+                      shard_i = int(shard_i_str)
+                      shard_n = int(shard_n_str)
+                      assert shard_n >= 1 and 1 <= shard_i <= shard_n
+                  except Exception:
+                      sys.exit(f"FATAL: bad shard spec {shard_spec!r} (want 1-based i/n, e.g. 1/4)")
+                  total = len(sel)
+                  chunk = math.ceil(total / shard_n)
+                  start = (shard_i - 1) * chunk
+                  end = min(shard_i * chunk, total)
+                  sel = sel[start:end]
+                  print(f"shard {shard_i}/{shard_n}: tasks [{start}:{end}] = {len(sel)} tasks", file=sys.stderr)
 
-          # GHA matrix cap is 256; fail loudly — never truncate silently (corrupts denominator).
+          # GHA matrix hard-cap is 256.  For mode=full without a shard we warn and cap at 256
+          # (don't exit 1 — lets users run up to 256 at a time; warn so they know to shard for all).
           if len(sel) > 256:
-              sys.exit(
-                  f"FATAL: {len(sel)} selected tasks exceed the 256 GHA matrix cap. "
-                  f"Use mode=pilot100 or a language filter to reduce the batch, or "
-                  f"split across multiple dispatches with instance_ids."
-              )
+              if mode == "full" and not shard_spec:
+                  print(
+                      f"::warning::Pro full run selected {len(sel)} tasks (exceeds the 256 GHA matrix "
+                      f"cap). Capping at 256. To run all {len(sel)} tasks, dispatch with shard=1/3, "
+                      f"2/3, 3/3 (or however many shards keep each slice <=256).",
+                      file=sys.stderr,
+                  )
+                  sel = sel[:256]
+              else:
+                  sys.exit(
+                      f"FATAL: {len(sel)} selected tasks exceed the 256 GHA matrix cap. "
+                      f"Use mode=pilot100 or a language filter to reduce the batch, or "
+                      f"use the shard input (e.g. shard=1/4) to split mode=full runs."
+                  )
 
           include = [
               {
@@ -719,6 +760,13 @@ jobs:
             REPO="${{ matrix.task }}"
             ISSUE_TEXT="Fix issue in ${REPO}. See the repository for context."
             echo "::warning::GT_ISSUE_FALLBACK: no problem_statement found for ${TASK_ID} — using synthesized issue text"
+          fi
+
+          # Detect synthesized fallback and classify before the substrate run (INFRA diagnostic,
+          # not an abort — the substrate handles empty-issue fail-closed internally).
+          if echo "$ISSUE_TEXT" | grep -qE "^Fix issue in "; then
+            echo "GT_ISSUE_MISSING: no real issue text — synthesized fallback detected (Pro-OS clone may have failed or run_scripts/${TASK_ID}/ absent)" | tee -a trial_output.log
+            echo "::warning::Running with synthesized issue text for ${TASK_ID} (no real Pro-OS problem_statement found)"
           fi
 
           echo "$ISSUE_TEXT" > /tmp/issue.txt

@@ -1339,6 +1339,12 @@ jobs:
           PYTHONPATH=${{ github.workspace }}/src python3 scripts/swebench/gt_deep_metrics.py "${{ matrix.task }}" /tmp/gt --log trial_output.log 2>&1 | tail -2 || echo DEEP_METRICS_WARN
           cp /tmp/gt_deep_metrics_${{ matrix.task }}.json trial_results/ 2>/dev/null || true
           cp /tmp/gt_deep_metrics_${{ matrix.task }}.md   trial_results/ 2>/dev/null || true   # human-readable: steps/tokens/money/GT-delivery
+          # Explicit artifact files for performance and behavioral-impact metrics.
+          # gt_deep_metrics.py already imports these internally, but producing explicit
+          # per-task artifact files makes them independently verifiable without parsing
+          # the deep metrics blob.
+          PYTHONPATH=${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench python3 scripts/swebench/gt_performance_metrics.py "$(find trial_results -name '*.trajectory.json' | head -1)" /tmp/gt --out trial_results/gt_performance_metrics_${{ matrix.task }}.json 2>&1 | tail -2 || echo PERF_METRICS_WARN
+          PYTHONPATH=${{ github.workspace }}/scripts/swebench python3 scripts/swebench/gt_behavioral_impact.py "$(find trial_results -name '*.trajectory.json' | head -1)" --out trial_results/gt_behavioral_impact_${{ matrix.task }}.json 2>&1 | tail -2 || echo IMPACT_METRICS_WARN
           # Run provenance on the DeepSWE path: the REAL provenance manifest is
           # run_manifest.json (emitted by gt-run-proof inside the substrate; copied into
           # trial_results/gt_artifacts/ above — gt_git_commit / substrate_digest /
