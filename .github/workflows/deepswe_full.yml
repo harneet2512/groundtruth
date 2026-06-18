@@ -748,7 +748,6 @@ jobs:
         # as env vars above; the script behaviour is identical to the former inline block.
 
       - name: Run GT trial
-        continue-on-error: true
         if: ${{ !cancelled() }}
         # Cert-env handoff (§D): GT_CERT_DIR / GT_HOST_GRAPH_DB / GT_HOST_SRC_ROOT + the cert
         # paths were written to $GITHUB_ENV by the substrate-proof step and are inherited here;
@@ -1007,7 +1006,6 @@ jobs:
 
       - name: Cleanup runner disk before result collection
         if: always()
-        continue-on-error: true
         run: |
           echo "disk before cleanup:"; df -h /
           docker rm -f gtsrc 2>/dev/null || true
@@ -1019,7 +1017,6 @@ jobs:
 
       - name: Collect results
         if: always()
-        continue-on-error: true
         run: |
           mkdir -p trial_results trial_results/gt_artifacts
           cp trial_output.log trial_results/ 2>/dev/null || true
@@ -1110,7 +1107,6 @@ jobs:
 
       - name: Upload results
         if: always()
-        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: deepswe-full-${{ matrix.task }}

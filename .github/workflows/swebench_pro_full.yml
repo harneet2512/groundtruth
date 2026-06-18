@@ -627,7 +627,6 @@ jobs:
         # as env vars above; the script behaviour is identical to the former inline block.
 
       - name: Run GT Pro trial
-        continue-on-error: true
         if: ${{ !cancelled() }}
         run: |
           echo "=== SWE-bench Pro GT Trial: ${{ matrix.task }} (lang=${{ matrix.language }} model=${{ inputs.model }}) ==="
@@ -858,7 +857,6 @@ jobs:
 
       - name: Cleanup runner disk before result collection
         if: always()
-        continue-on-error: true
         run: |
           echo "disk before cleanup:"; df -h /
           docker rm -f gtsrc 2>/dev/null || true
@@ -870,7 +868,6 @@ jobs:
 
       - name: Collect results
         if: always()
-        continue-on-error: true
         run: |
           mkdir -p trial_results trial_results/gt_artifacts
           cp trial_output.log trial_results/ 2>/dev/null || true
@@ -931,7 +928,6 @@ jobs:
 
       - name: Upload results
         if: always()
-        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: pro-full-${{ matrix.task }}
