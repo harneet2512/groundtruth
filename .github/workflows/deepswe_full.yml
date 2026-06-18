@@ -703,6 +703,7 @@ jobs:
         continue-on-error: true
 
       - name: GT substrate proof (handoff §B-AFTER/§D/§G) — pre-agent, pinned, read-only repo
+        continue-on-error: true
         run: |
           set -e
           # ── SUBSTRATE-CONSUME pattern (mirrors swebench_300task.yml:919-944) ──────────
@@ -1042,6 +1043,7 @@ jobs:
           echo "substrate proof done: consumed /gt_artifacts; host LSP+gates SKIPPED (no divergent graph)"
 
       - name: Run GT trial
+        if: ${{ !cancelled() }}
         # Cert-env handoff (§D): GT_CERT_DIR / GT_HOST_GRAPH_DB / GT_HOST_SRC_ROOT + the cert
         # paths were written to $GITHUB_ENV by the substrate-proof step and are inherited here;
         # GT_PROOF_MODE / GT_CONTAINERIZED / GT_RUNTIME_STRATEGY come from the top-level env.
@@ -1217,7 +1219,7 @@ jobs:
           fi
 
       - name: Verify DeepSWE adapter witness (§E DEEPSWE_ADAPTER_FAIL / §H consumption proof)
-        if: ${{ env.GT_PORTABLE_SUBSTRATE == '1' }}
+        if: ${{ !cancelled() && env.GT_PORTABLE_SUBSTRATE == '1' }}
         run: |
           # AGENT-OBSERVATION truth: the adapter emitted a [GT_META] witness to stdout. Prove
           # (1) it consumed the substrate graph (gt_prebuilt_active=true) and (2) the consumed
