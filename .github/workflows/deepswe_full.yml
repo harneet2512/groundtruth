@@ -1336,7 +1336,7 @@ jobs:
           # Deep 8-dp metrics (constitution mandate: token/cost efficiency + per-layer)
           cp /tmp/gt/gt_run_summary*.json /tmp/gt_run_summary_${{ matrix.task }}.json 2>/dev/null || true
           cp /tmp/gt/gt_run_summary*.json trial_results/ 2>/dev/null || true
-          PYTHONPATH=${{ github.workspace }}/src python3 scripts/swebench/gt_deep_metrics.py "${{ matrix.task }}" /tmp/gt --log trial_output.log 2>&1 | tail -2 || echo DEEP_METRICS_WARN
+          PYTHONPATH=${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:${{ github.workspace }}/scripts/metrics python3 scripts/swebench/gt_deep_metrics.py "${{ matrix.task }}" /tmp/gt --log trial_output.log 2>&1 | tail -2 || echo DEEP_METRICS_WARN
           cp /tmp/gt_deep_metrics_${{ matrix.task }}.json trial_results/ 2>/dev/null || true
           cp /tmp/gt_deep_metrics_${{ matrix.task }}.md   trial_results/ 2>/dev/null || true   # human-readable: steps/tokens/money/GT-delivery
           # Explicit artifact files for performance and behavioral-impact metrics.
