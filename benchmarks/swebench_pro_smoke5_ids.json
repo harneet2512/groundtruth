@@ -1,0 +1,10 @@
+{
+  "_comment": "5 Pro task IDs for smoke testing — one per language (go/js/python/ts) + one extra go. Derived from benchmarks/data/swebench_pro_public_tags.jsonl.",
+  "instance_ids": [
+    "instance_flipt-io__flipt-02e21636c58e86c51119b63e0fb5ca7b813b07b1",
+    "instance_NodeBB__NodeBB-00c70ce7b0541cfc94afe567921d7668cdc8f4ac-vnan",
+    "instance_ansible__ansible-0ea40e09d1b35bcb69ff4d9cecf3d0defa4b36e8-v30a923fb5c164d6cd18280c02422f75e611e8fb2",
+    "instance_tutao__tutanota-09c2776c0fce3db5c6e18da92b5a45dce9f013aa-vbc0d9ba8f0071fbe982809910959a6ff8884dbbf",
+    "instance_flipt-io__flipt-05d7234fa582df632f70a7cd10194d61bd7043b9"
+  ]
+}
