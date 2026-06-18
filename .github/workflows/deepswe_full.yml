@@ -486,7 +486,7 @@ jobs:
           echo "  Docker CLI pre-check done"
           # 3. Disk space (need >= 10GB for substrate + task image + artifacts)
           FREE_GB=$(df --output=avail / | tail -1 | awk '{printf "%.0f", $1/1048576}')
-          [ "$FREE_GB" -ge 10 ] || { echo "::error::Low disk: ${FREE_GB}GB free (need >=10GB for substrate + task images)"; exit 1; }
+          [ "$FREE_GB" -ge 20 ] || { echo "::error::Low disk: ${FREE_GB}GB free (need >=20GB for substrate + task images + artifacts)"; exit 1; }
           echo "  Disk: ${FREE_GB}GB free"
           # 4. Network / GHCR reachable (warning only — Docker Hub fallback exists)
           curl -sf --max-time 10 https://ghcr.io/v2/ -o /dev/null || echo "::warning::GHCR not reachable — Docker Hub fallback will be used"
@@ -743,6 +743,39 @@ jobs:
           # and emits the 8 artifacts to /gt_artifacts; the agent CONSUMES them read-only.
           TASK_DIR="deepswe-bench/tasks/${{ matrix.task }}"
 
+          mkdir -p /tmp/gt
+          PROOF_STATUS=/tmp/gt/proof_status.json
+          write_proof_status() {
+            python3 - "$PROOF_STATUS" "$1" "$2" "${3:-}" <<'PY'
+          import json, os, sys, time
+          path, state, code, detail = sys.argv[1:5]
+          os.makedirs(os.path.dirname(path), exist_ok=True)
+          with open(path, "w", encoding="utf-8") as f:
+              json.dump({
+                  "schema": "gt.proof_status.v1",
+                  "state": state,
+                  "code": code,
+                  "detail": detail,
+                  "ts": time.time(),
+              }, f, indent=2, sort_keys=True)
+              f.write("\n")
+          PY
+          }
+          fail_proof() {
+            _code="$1"; shift || true
+            _detail="$*"
+            echo "GT_RUN_PROOF_FAIL: ${_code}: ${_detail}" | tee -a trial_output.log
+            write_proof_status failed "$_code" "$_detail"
+            exit 1
+          }
+          fail_artifact() {
+            _detail="$*"
+            echo "GT_ARTIFACT_MISSING / SUBSTRATE_MISSING_CERTS: ${_detail}" | tee -a trial_output.log
+            write_proof_status failed GT_ARTIFACT_MISSING "$_detail"
+            exit 1
+          }
+          write_proof_status running PROOF_STARTED "substrate proof step started"
+
           # §E GT_SUBSTRATE_DIGEST_MISSING / PROOF_RUNTIME_FALLBACK_FORBIDDEN (fail-closed).
           # G1: every §E marker echo ALSO appends to trial_output.log (tee -a creates it) —
           # this step exits BEFORE the agent step creates the log, and deepswe_outcome.py's
@@ -751,6 +784,7 @@ jobs:
           if [ -z "$GT_SUBSTRATE_DIGEST" ]; then
             if [ "${GT_REQUIRE_PINNED_SUBSTRATE:-1}" = "1" ]; then
               echo "GT_SUBSTRATE_DIGEST_MISSING / PROOF_RUNTIME_FALLBACK_FORBIDDEN: proof/substrate-consume" | tee -a trial_output.log
+              write_proof_status failed GT_SUBSTRATE_DIGEST_MISSING "mode requires GT_SUBSTRATE_DIGEST"
               echo "mode requires GT_SUBSTRATE_DIGEST (the pinned portable substrate, by @sha256 digest)."
               echo "Host GT execution + per-task provisioning are forbidden. Set the gt_substrate_digest"
               echo "input or the GT_SUBSTRATE_DIGEST repo variable to the published image digest."
@@ -763,14 +797,14 @@ jobs:
           # §F.1 immutable-digest assertion: a mutable tag is NOT a valid proof input.
           case "$GT_SUBSTRATE_DIGEST" in
             *@sha256:*) : ;;
-            *) echo "FATAL: GT_SUBSTRATE_DIGEST='$GT_SUBSTRATE_DIGEST' is not a pinned @sha256 digest"; exit 1 ;;
+            *) fail_proof GT_SUBSTRATE_DIGEST_MISSING "GT_SUBSTRATE_DIGEST='$GT_SUBSTRATE_DIGEST' is not a pinned @sha256 digest" ;;
           esac
           echo "pinned substrate: $GT_SUBSTRATE_DIGEST"
 
           # Task image comes from the MATRIX (manifest-driven; prepare already
           # cross-checked it byte-equal against the clone's task.toml docker_image).
           IMG="${{ matrix.image }}"
-          [ -z "$IMG" ] && { echo "FATAL: matrix carried no task image — manifest/matrix bug"; exit 1; }
+          [ -z "$IMG" ] && fail_proof TASK_IMAGE_PULL_FAIL "matrix carried no task image"
           echo "task image: $IMG"
           # GHCR-FIRST pull (cache_deepswe_images.yml mirrors the source images to GHCR
           # from the SAME manifest, so the cache-set == this run-set). MULTI-CANDIDATE
@@ -796,9 +830,9 @@ jobs:
             for i in 1 2 3 4; do docker pull "$IMG" && { PULLED="$IMG"; break; } || { echo "pull attempt $i failed, retrying..."; sleep 15; }; done
             # G1: canonical token (deepswe_outcome.INFRA_LOG_MARKERS) — the old
             # "FATAL: task image pull failed" echo could never classify INFRA.
-            [ -n "$PULLED" ] || { echo "TASK_IMAGE_PULL_FAIL: task image pull failed after 4 attempts ($IMG)" | tee -a trial_output.log; exit 1; }
+            [ -n "$PULLED" ] || { echo "TASK_IMAGE_PULL_FAIL: task image pull failed after 4 attempts ($IMG)" | tee -a trial_output.log; write_proof_status failed TASK_IMAGE_PULL_FAIL "task image pull failed after 4 attempts ($IMG)"; exit 1; }
           fi
-          docker image inspect "$IMG" >/dev/null 2>&1 || { echo "TASK_IMAGE_PULL_FAIL: task image not present after pull ($IMG)" | tee -a trial_output.log; exit 1; }
+          docker image inspect "$IMG" >/dev/null 2>&1 || { echo "TASK_IMAGE_PULL_FAIL: task image not present after pull ($IMG)" | tee -a trial_output.log; write_proof_status failed TASK_IMAGE_PULL_FAIL "task image not present after pull ($IMG)"; exit 1; }
 
           # ── SPEED-OPT C: load substrate from GHA cache or pull from GHCR ────
           # If prepare saved the substrate tarball and the cache restored it above,
@@ -824,23 +858,26 @@ jobs:
           if [ "$SUBSTRATE_LOADED" -eq 0 ]; then
             echo "substrate cache miss — pulling from GHCR (pinned digest)"
             if ! docker pull "$GT_SUBSTRATE_DIGEST"; then
-              echo "GT_SUBSTRATE_PULL_FAIL: docker pull of the pinned substrate failed" | tee -a trial_output.log; exit 1
+              echo "GT_SUBSTRATE_PULL_FAIL: docker pull of the pinned substrate failed" | tee -a trial_output.log
+              write_proof_status failed GT_SUBSTRATE_PULL_FAIL "docker pull of the pinned substrate failed"
+              exit 1
             fi
           fi
+          rm -f /tmp/gt-substrate.tar.gz 2>/dev/null || true
 
           # Materialize the task repo at its base commit and copy it OUT to a host dir we
           # then mount READ-ONLY into the substrate (the substrate copies to its own writable
           # scratch internally; the task image is never mutated).
           docker rm -f gtsrc 2>/dev/null || true
-          docker run -d --name gtsrc "$IMG" sleep 1800 >/dev/null
-          ROOT=$(docker exec gtsrc bash -c 'for d in /home/user /testbed /workspace /app /repo; do [ -d "$d/.git" ] && echo "$d" && break; done')
+          docker run -d --entrypoint sh --name gtsrc "$IMG" -lc 'sleep 1800' >/tmp/gtsrc_create.log 2>&1 \
+            || fail_proof TASK_IMAGE_EXTRACT_FAIL "task image container failed to start: $(tail -20 /tmp/gtsrc_create.log | tr '\n' ' ')"
+          ROOT=$(docker exec gtsrc sh -lc 'for d in /home/user /testbed /workspace /app /repo; do [ -e "$d/.git" ] && echo "$d" && break; done' 2>/tmp/gt_root_probe.err || true)
           if [ -z "$ROOT" ]; then
-            echo "FATAL: no git repo root found in task image (fail-closed — refuse /testbed guess)"
-            exit 1
+            fail_proof TASK_IMAGE_EXTRACT_FAIL "no git repo root found in task image (tried /home/user /testbed /workspace /app /repo); $(cat /tmp/gt_root_probe.err 2>/dev/null | tail -5 | tr '\n' ' ')"
           fi
           echo "repo root: $ROOT"
           rm -rf /tmp/gt && mkdir -p /tmp/gt /tmp/gt/src
-          docker cp "gtsrc:$ROOT/." /tmp/gt/src || { echo "FATAL: source extract failed"; exit 1; }
+          docker cp "gtsrc:$ROOT/." /tmp/gt/src || fail_proof TASK_IMAGE_EXTRACT_FAIL "source extract failed from $ROOT"
 
           # ── Extract dep stores so the substrate's LSP servers can resolve ──────
           # gopls needs the Go module cache; rust-analyzer needs cargo + rustup.
@@ -1023,8 +1060,10 @@ jobs:
           if [ "$PROOF_RC" -ne 0 ]; then
             if [ "$PROOF_RC" -eq 137 ]; then
               echo "GT_PROOF_OOM: gt-run-proof rc=137 — killed by the container memory cap (capacity kill, not logic; the fail-closed print never ran)" | tee -a trial_output.log
+              write_proof_status failed GT_PROOF_OOM "gt-run-proof rc=137"
             else
               echo "GT_RUN_PROOF_FAIL: gt-run-proof rc=$PROOF_RC (boundary/leak/missing-baked-dep)" | tee -a trial_output.log
+              write_proof_status failed GT_RUN_PROOF_FAIL "gt-run-proof rc=$PROOF_RC"
               if [ -f /tmp/gt/proof_failure.json ]; then
                 echo "proof_failure.json:" | tee -a trial_output.log
                 cat /tmp/gt/proof_failure.json | tee -a trial_output.log
@@ -1039,7 +1078,8 @@ jobs:
               fi
             fi
             docker rm -f gtsrc 2>/dev/null || true
-            echo "::warning::gt-run-proof exited $PROOF_RC — proof diagnostic failed but trial will proceed (continue-on-error pipeline)"
+            echo "::error::gt-run-proof exited $PROOF_RC — agent trial will be skipped by proof_status gate"
+            exit 1
           else
             docker rm -f gtsrc 2>/dev/null || true
           fi
@@ -1051,9 +1091,10 @@ jobs:
           for c in graph.db runtime_context.json lsp_certificate.json graph_certificate.json \
                    embedder_certificate.json foundational_gate_report.json run_manifest.json \
                    brief.txt; do
-            test -s "/tmp/gt/$c" || { echo "::warning::GT_ARTIFACT_MISSING: /gt_artifacts/$c absent after gt-run-proof — trial proceeds with degraded GT" | tee -a trial_output.log; PROOF_RC=1; }
+            test -s "/tmp/gt/$c" || fail_artifact "/gt_artifacts/$c absent after gt-run-proof"
           done
           echo "all 8 GT artifacts present under /tmp/gt (= /gt_artifacts)"
+          write_proof_status ok PROOF_OK "all 8 GT artifacts present"
 
           # ── Cert-env handoff into the agent (§D) — the adapter reads these READ-ONLY ──
           # GT_HOST_GRAPH_DB + GT_CERT_DIR are the canonical host->agent handoff (proof.py
@@ -1111,6 +1152,23 @@ jobs:
           # Transitional no-substrate path (require_pinned_substrate=0): the proof step
           # exited 0 without creating /tmp/gt — an absent bind source would fail compose.
           mkdir -p "${HOST_ARTIFACTS}"
+
+          PROOF_STATE=$(python3 - <<'PY'
+          import json, pathlib
+          p = pathlib.Path("/tmp/gt/proof_status.json")
+          if not p.exists():
+              print("missing")
+          else:
+              try:
+                  print(json.loads(p.read_text(encoding="utf-8")).get("state") or "missing")
+              except Exception:
+                  print("invalid")
+          PY
+          )
+          if [ "$PROOF_STATE" != "ok" ]; then
+            echo "GT_RUN_PROOF_FAIL: refusing paid agent run because substrate proof_status state=${PROOF_STATE}" | tee -a trial_output.log
+            exit 1
+          fi
 
           # SPEED-OPT E: pre-stage all GT files on the host and bind-mount /opt/gt:ro into
           # the container.  This replaces 30 base64-echo RUN layers (12+ min per task) with
@@ -1195,10 +1253,15 @@ jobs:
           # the PROPER fix is capping the agent-phase semantic encode (graph_localizer, the same
           # class as the 2026-06-09 brief cap). Generalized, every task; no benchmark shape.
           if ! swapon --show 2>/dev/null | grep -q /gt_swap; then
-            sudo fallocate -l 24G /gt_swap 2>/dev/null || sudo dd if=/dev/zero of=/gt_swap bs=1M count=24576 status=none 2>/dev/null
-            sudo chmod 600 /gt_swap 2>/dev/null && sudo mkswap /gt_swap >/dev/null 2>&1 && sudo swapon /gt_swap 2>/dev/null \
-              && echo "[OOMFIX] swap enabled; $(free -m | grep -i swap)" \
-              || echo "[OOMFIX] swap setup failed (continuing without it)"
+            FREE_GB=$(df --output=avail -BG / | tail -1 | tr -dc '0-9')
+            if [ "${FREE_GB:-0}" -ge 35 ]; then
+              sudo fallocate -l 8G /gt_swap 2>/dev/null || sudo dd if=/dev/zero of=/gt_swap bs=1M count=8192 status=none 2>/dev/null
+              sudo chmod 600 /gt_swap 2>/dev/null && sudo mkswap /gt_swap >/dev/null 2>&1 && sudo swapon /gt_swap 2>/dev/null \
+                && echo "[OOMFIX] bounded 8G swap enabled; $(free -m | grep -i swap)" \
+                || echo "[OOMFIX] swap setup failed (continuing without it)"
+            else
+              echo "[OOMFIX] skip swap: only ${FREE_GB:-0}GB free, preserving disk for artifacts"
+            fi
           fi
           # [DIAG 2026-06-13] Resource monitor — stream RAM/disk/container-count to the GHA log
           # every 8s so the LAST reading before a runner-reclaim (exit 143) reveals whether the
@@ -1238,6 +1301,9 @@ jobs:
             --ae GT_ESC_URG_B="${GT_ESC_URG_B:-}" \
             --ae GT_ESC_GATE_TCOV="${GT_ESC_GATE_TCOV:-}" \
             --ae GT_ESC_GATE_KV="${GT_ESC_GATE_KV:-}" \
+            --ae GT_ORACLE_EVENTS="${GT_C_OUT}/gt_oracle_events.jsonl" \
+            --ae GT_RUNTIME_LEDGER="${GT_C_OUT}/gt_runtime_ledger.jsonl" \
+            --ae GT_HOOK_FIRE_COUNTS="${GT_C_OUT}/gt_hook_fire_counts.json" \
             --ak config_file=artifact_deepswe/gt_integration/deepswe_gt_pier.yaml \
             2>&1 | tee trial_output.log
           PIER_RC=${PIPESTATUS[0]}
@@ -1306,8 +1372,21 @@ jobs:
           echo "adapter witness OK: substrate graph consumed read-only; hook hash == post-LSP hash"
           grep "\[GT_META\] graph_witness" trial_output.log | head -2 || true
 
+      - name: Cleanup runner disk before result collection
+        if: always()
+        continue-on-error: true
+        run: |
+          echo "disk before cleanup:"; df -h /
+          docker rm -f gtsrc 2>/dev/null || true
+          docker system prune -af --volumes 2>/dev/null || true
+          sudo swapoff /gt_swap 2>/dev/null || true
+          sudo rm -f /gt_swap 2>/dev/null || true
+          rm -f /tmp/gt-substrate.tar.gz /tmp/docker.tgz /tmp/deepswe-bench.tar.gz 2>/dev/null || true
+          echo "disk after cleanup:"; df -h /
+
       - name: Collect results
         if: always()
+        continue-on-error: true
         run: |
           mkdir -p trial_results trial_results/gt_artifacts
           cp trial_output.log trial_results/ 2>/dev/null || true
@@ -1318,7 +1397,7 @@ jobs:
           for a in runtime_context.json lsp_certificate.json graph_certificate.json \
                    embedder_certificate.json foundational_gate_report.json run_manifest.json \
                    brief.txt gt_issue_anchors.json gt_scope_files.txt gt_lsp_metrics.txt \
-                   proof_progress.json proof_failure.json dep_store_manifest.json; do
+                   proof_progress.json proof_failure.json proof_status.json dep_store_manifest.json; do
             cp "/tmp/gt/$a" "trial_results/gt_artifacts/$a" 2>/dev/null || true
           done
           # P1-e: per-language LSP certificates (polyglot aggregation — no FAIL cert overwritten)
@@ -1338,7 +1417,11 @@ jobs:
           # wrongly stamps outcome_failure_class=GT, contradicting the (correct) outcome authority.
           # trial_output.log (tee'd by the agent step, carries the post-agent [GT_META]) is at CWD.
           GT_TRIAL_LOG=trial_output.log python3 scripts/swebench/task_truth.py jobs trial_results/task_truth.json 2>/dev/null || true
-          cp -r jobs trial_results/jobs 2>/dev/null || true
+          if [ -d jobs ]; then
+            mkdir -p trial_results/jobs
+            find jobs -type f \( -name 'result.json' -o -name 'patch.diff' -o -name '*.patch' -o -name '*.trajectory.json' -o -name '*.json' -o -name '*.log' \) -size -25M -print0 \
+              | xargs -0 -r cp --parents -t trial_results/jobs 2>/dev/null || true
+          fi
           cp /tmp/gt/*.log              trial_results/ 2>/dev/null || true
           cp /tmp/gt/gt_interactions*.jsonl trial_results/ 2>/dev/null || true
           cp /tmp/gt/gt_hooks*.log      trial_results/ 2>/dev/null || true
@@ -1394,6 +1477,7 @@ jobs:
 
       - name: Upload results
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: deepswe-full-${{ matrix.task }}

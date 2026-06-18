@@ -442,7 +442,7 @@ jobs:
           docker --version 2>/dev/null || true
           echo "  Docker CLI pre-check done"
           FREE_GB=$(df --output=avail / | tail -1 | awk '{printf "%.0f", $1/1048576}')
-          [ "$FREE_GB" -ge 10 ] || { echo "::error::Low disk: ${FREE_GB}GB free (need >=10GB for substrate + task images)"; exit 1; }
+          [ "$FREE_GB" -ge 20 ] || { echo "::error::Low disk: ${FREE_GB}GB free (need >=20GB for substrate + task images + artifacts)"; exit 1; }
           echo "  Disk: ${FREE_GB}GB free"
           curl -sf --max-time 10 https://ghcr.io/v2/ -o /dev/null || echo "::warning::GHCR not reachable — Docker Hub fallback will be used"
           echo "  Network check done"
@@ -616,10 +616,44 @@ jobs:
         run: |
           set -e
 
+          mkdir -p /tmp/gt
+          PROOF_STATUS=/tmp/gt/proof_status.json
+          write_proof_status() {
+            python3 - "$PROOF_STATUS" "$1" "$2" "${3:-}" <<'PY'
+          import json, os, sys, time
+          path, state, code, detail = sys.argv[1:5]
+          os.makedirs(os.path.dirname(path), exist_ok=True)
+          with open(path, "w", encoding="utf-8") as f:
+              json.dump({
+                  "schema": "gt.proof_status.v1",
+                  "state": state,
+                  "code": code,
+                  "detail": detail,
+                  "ts": time.time(),
+              }, f, indent=2, sort_keys=True)
+              f.write("\n")
+          PY
+          }
+          fail_proof() {
+            _code="$1"; shift || true
+            _detail="$*"
+            echo "GT_RUN_PROOF_FAIL: ${_code}: ${_detail}" | tee -a trial_output.log
+            write_proof_status failed "$_code" "$_detail"
+            exit 1
+          }
+          fail_artifact() {
+            _detail="$*"
+            echo "GT_ARTIFACT_MISSING / SUBSTRATE_MISSING_CERTS: ${_detail}" | tee -a trial_output.log
+            write_proof_status failed GT_ARTIFACT_MISSING "$_detail"
+            exit 1
+          }
+          write_proof_status running PROOF_STARTED "substrate proof step started"
+
           # §E GT_SUBSTRATE_DIGEST_MISSING / PROOF_RUNTIME_FALLBACK_FORBIDDEN.
           if [ -z "$GT_SUBSTRATE_DIGEST" ]; then
             if [ "${GT_REQUIRE_PINNED_SUBSTRATE:-1}" = "1" ]; then
               echo "GT_SUBSTRATE_DIGEST_MISSING / PROOF_RUNTIME_FALLBACK_FORBIDDEN: substrate-consume" | tee -a trial_output.log
+              write_proof_status failed GT_SUBSTRATE_DIGEST_MISSING "mode requires GT_SUBSTRATE_DIGEST"
               echo "mode requires GT_SUBSTRATE_DIGEST. Set gt_substrate_digest input or GT_SUBSTRATE_DIGEST var."
               exit 1
             fi
@@ -628,7 +662,7 @@ jobs:
           fi
           case "$GT_SUBSTRATE_DIGEST" in
             *@sha256:*) : ;;
-            *) echo "FATAL: GT_SUBSTRATE_DIGEST='$GT_SUBSTRATE_DIGEST' is not a pinned @sha256 digest"; exit 1 ;;
+            *) fail_proof GT_SUBSTRATE_DIGEST_MISSING "GT_SUBSTRATE_DIGEST='$GT_SUBSTRATE_DIGEST' is not a pinned @sha256 digest" ;;
           esac
           echo "pinned substrate: $GT_SUBSTRATE_DIGEST"
 
@@ -636,7 +670,7 @@ jobs:
           # The dockerhub_tag from the matrix drives the pull. GHCR-primary (mirrored
           # by swebench_pro_mirror.yml); Docker Hub fallback (jefzda/sweap-images).
           DOCKERHUB_TAG="${{ matrix.dockerhub_tag }}"
-          [ -z "$DOCKERHUB_TAG" ] && { echo "FATAL: matrix carried no dockerhub_tag — manifest/matrix bug" | tee -a trial_output.log; exit 1; }
+          [ -z "$DOCKERHUB_TAG" ] && fail_proof TASK_IMAGE_PULL_FAIL "matrix carried no dockerhub_tag"
           A_OWNER=$(echo "${{ inputs.assets_repo }}" | cut -d/ -f1 | tr '[:upper:]' '[:lower:]')
           R_OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           PULLED=""
@@ -660,10 +694,10 @@ jobs:
             for i in 1 2 3 4; do
               docker pull "$DH_IMG" && { PULLED="$DH_IMG"; break; } || { echo "pull attempt $i failed, retrying..."; sleep 15; }
             done
-            [ -n "$PULLED" ] || { echo "TASK_IMAGE_PULL_FAIL: task image pull failed after 4 attempts (${DH_IMG})" | tee -a trial_output.log; exit 1; }
+            [ -n "$PULLED" ] || { echo "TASK_IMAGE_PULL_FAIL: task image pull failed after 4 attempts (${DH_IMG})" | tee -a trial_output.log; write_proof_status failed TASK_IMAGE_PULL_FAIL "task image pull failed after 4 attempts (${DH_IMG})"; exit 1; }
           fi
           IMG="jefzda/sweap-images:${DOCKERHUB_TAG}"
-          docker image inspect "$IMG" >/dev/null 2>&1 || { echo "TASK_IMAGE_PULL_FAIL: task image not present after pull ($IMG)" | tee -a trial_output.log; exit 1; }
+          docker image inspect "$IMG" >/dev/null 2>&1 || { echo "TASK_IMAGE_PULL_FAIL: task image not present after pull ($IMG)" | tee -a trial_output.log; write_proof_status failed TASK_IMAGE_PULL_FAIL "task image not present after pull ($IMG)"; exit 1; }
 
           # ── SPEED-OPT C: load substrate from GHA cache or pull ────────────────
           SUBSTRATE_LOADED=0
@@ -683,25 +717,26 @@ jobs:
           fi
           if [ "$SUBSTRATE_LOADED" -eq 0 ]; then
             echo "substrate cache miss — pulling from GHCR (pinned digest)"
-            docker pull "$GT_SUBSTRATE_DIGEST" || { echo "GT_SUBSTRATE_PULL_FAIL: docker pull of the pinned substrate failed" | tee -a trial_output.log; exit 1; }
+            docker pull "$GT_SUBSTRATE_DIGEST" || { echo "GT_SUBSTRATE_PULL_FAIL: docker pull of the pinned substrate failed" | tee -a trial_output.log; write_proof_status failed GT_SUBSTRATE_PULL_FAIL "docker pull of the pinned substrate failed"; exit 1; }
           fi
+          rm -f /tmp/gt-substrate.tar.gz 2>/dev/null || true
 
           # ── Extract the task repo from the Pro image ───────────────────────────
           # Pro images use /app as the repo root (confirmed: eval_pro_simple.py `cd /app`).
           # Fall back to scanning common paths if /app/.git absent.
           docker rm -f gtsrc 2>/dev/null || true
-          docker run -d --name gtsrc "$IMG" sleep 1800 >/dev/null
-          ROOT=$(docker exec gtsrc bash -c '
+          docker run -d --entrypoint sh --name gtsrc "$IMG" -lc 'sleep 1800' >/tmp/gtsrc_create.log 2>&1 \
+            || fail_proof TASK_IMAGE_EXTRACT_FAIL "task image container failed to start: $(tail -20 /tmp/gtsrc_create.log | tr '\n' ' ')"
+          ROOT=$(docker exec gtsrc sh -lc '
             for d in /app /testbed /workspace /repo /home/user; do
-              [ -d "$d/.git" ] && echo "$d" && break
-            done' 2>/dev/null)
+              [ -e "$d/.git" ] && echo "$d" && break
+            done' 2>/tmp/gt_root_probe.err || true)
           if [ -z "$ROOT" ]; then
-            echo "FATAL: no git repo root found in Pro task image (tried /app /testbed /workspace /repo /home/user)"
-            exit 1
+            fail_proof TASK_IMAGE_EXTRACT_FAIL "no git repo root found in Pro task image (tried /app /testbed /workspace /repo /home/user); $(cat /tmp/gt_root_probe.err 2>/dev/null | tail -5 | tr '\n' ' ')"
           fi
           echo "Pro repo root: $ROOT"
           rm -rf /tmp/gt && mkdir -p /tmp/gt /tmp/gt/src
-          docker cp "gtsrc:$ROOT/." /tmp/gt/src || { echo "FATAL: source extract failed"; exit 1; }
+          docker cp "gtsrc:$ROOT/." /tmp/gt/src || fail_proof TASK_IMAGE_EXTRACT_FAIL "source extract failed from $ROOT"
 
           # ── Extract dep stores for LSP (same as deepswe_full.yml) ─────────────
           mkdir -p /tmp/gt/deps/gomodcache /tmp/gt/deps/cargo /tmp/gt/deps/rustup
@@ -770,8 +805,8 @@ jobs:
           fi
 
           echo "$ISSUE_TEXT" > /tmp/issue.txt
-          [ -s /tmp/issue.txt ] || { echo "GT_ISSUE_MISSING: issue text empty after all fallbacks" | tee -a trial_output.log; exit 1; }
-          python3 scripts/swebench/issue_manifest.py /tmp/issue.txt /tmp/gt/issue_manifest.json --source pro || exit 1
+          [ -s /tmp/issue.txt ] || { echo "GT_ISSUE_MISSING: issue text empty after all fallbacks" | tee -a trial_output.log; write_proof_status failed GT_ISSUE_MISSING "issue text empty after all fallbacks"; exit 1; }
+          python3 scripts/swebench/issue_manifest.py /tmp/issue.txt /tmp/gt/issue_manifest.json --source pro || fail_proof GT_ISSUE_MISSING "issue manifest write failed"
 
           # Run provenance
           TASK_REPO_COMMIT=$(git -C /tmp/gt/src rev-parse HEAD 2>/dev/null || true)
@@ -806,12 +841,15 @@ jobs:
           if [ "$PROOF_RC" -ne 0 ]; then
             if [ "$PROOF_RC" -eq 137 ]; then
               echo "GT_PROOF_OOM: gt-run-proof rc=137 — killed by the container memory cap" | tee -a trial_output.log
+              write_proof_status failed GT_PROOF_OOM "gt-run-proof rc=137"
             else
               echo "GT_RUN_PROOF_FAIL: gt-run-proof rc=$PROOF_RC" | tee -a trial_output.log
               [ -f /tmp/gt/proof_failure.json ] && cat /tmp/gt/proof_failure.json | tee -a trial_output.log
+              write_proof_status failed GT_RUN_PROOF_FAIL "gt-run-proof rc=$PROOF_RC"
             fi
             docker rm -f gtsrc 2>/dev/null || true
-            echo "::warning::gt-run-proof exited $PROOF_RC — trial will proceed (continue-on-error)"
+            echo "::error::gt-run-proof exited $PROOF_RC — agent trial will be skipped by proof_status gate"
+            exit 1
           else
             docker rm -f gtsrc 2>/dev/null || true
           fi
@@ -820,9 +858,10 @@ jobs:
           for c in graph.db runtime_context.json lsp_certificate.json graph_certificate.json \
                    embedder_certificate.json foundational_gate_report.json run_manifest.json \
                    brief.txt; do
-            test -s "/tmp/gt/$c" || { echo "::warning::GT_ARTIFACT_MISSING: /gt_artifacts/$c absent after gt-run-proof — trial proceeds with degraded GT" | tee -a trial_output.log; PROOF_RC=1; }
+            test -s "/tmp/gt/$c" || fail_artifact "/gt_artifacts/$c absent after gt-run-proof"
           done
           echo "all 8 GT artifacts checked under /tmp/gt"
+          write_proof_status ok PROOF_OK "all 8 GT artifacts present"
 
           # Cert-env handoff into the agent (§D).
           {
@@ -844,6 +883,22 @@ jobs:
         run: |
           echo "=== SWE-bench Pro GT Trial: ${{ matrix.task }} (lang=${{ matrix.language }} model=${{ inputs.model }}) ==="
           echo "HOST  GT_CERT_DIR=${GT_CERT_DIR:-<unset>}  GT_HOST_GRAPH_DB=${GT_HOST_GRAPH_DB:-<unset>}"
+          PROOF_STATE=$(python3 - <<'PY'
+          import json, pathlib
+          p = pathlib.Path("/tmp/gt/proof_status.json")
+          if not p.exists():
+              print("missing")
+          else:
+              try:
+                  print(json.loads(p.read_text(encoding="utf-8")).get("state") or "missing")
+              except Exception:
+                  print("invalid")
+          PY
+          )
+          if [ "$PROOF_STATE" != "ok" ]; then
+            echo "GT_RUN_PROOF_FAIL: refusing paid agent run because substrate proof_status state=${PROOF_STATE}" | tee -a trial_output.log
+            exit 1
+          fi
 
           GT_C_ARTIFACTS=/gt_artifacts
           HOST_ARTIFACTS="${GT_CERT_DIR:-/tmp/gt}"
@@ -882,12 +937,17 @@ jobs:
           source artifact_deepswe/gt_integration/gt_ae_block.sh
           echo "GT_AE_ARGS (block): ${GT_AE_ARGS[*]}"
 
-          # OOM swap (same as deepswe_full.yml OOM FIX 2026-06-16).
+          # Bounded swap: only create a small swap file when disk can afford it.
           if ! swapon --show 2>/dev/null | grep -q /gt_swap; then
-            sudo fallocate -l 24G /gt_swap 2>/dev/null || sudo dd if=/dev/zero of=/gt_swap bs=1M count=24576 status=none 2>/dev/null
-            sudo chmod 600 /gt_swap 2>/dev/null && sudo mkswap /gt_swap >/dev/null 2>&1 && sudo swapon /gt_swap 2>/dev/null \
-              && echo "[OOMFIX] swap enabled; $(free -m | grep -i swap)" \
-              || echo "[OOMFIX] swap setup failed (continuing without it)"
+            FREE_GB=$(df --output=avail -BG / | tail -1 | tr -dc '0-9')
+            if [ "${FREE_GB:-0}" -ge 35 ]; then
+              sudo fallocate -l 8G /gt_swap 2>/dev/null || sudo dd if=/dev/zero of=/gt_swap bs=1M count=8192 status=none 2>/dev/null
+              sudo chmod 600 /gt_swap 2>/dev/null && sudo mkswap /gt_swap >/dev/null 2>&1 && sudo swapon /gt_swap 2>/dev/null \
+                && echo "[OOMFIX] bounded 8G swap enabled; $(free -m | grep -i swap)" \
+                || echo "[OOMFIX] swap setup failed (continuing without it)"
+            else
+              echo "[OOMFIX] skip swap: only ${FREE_GB:-0}GB free, preserving disk for artifacts"
+            fi
           fi
 
           # Resource monitor.
@@ -934,6 +994,9 @@ jobs:
             --ae GT_VERIFICATION_CYCLE_COST="${GT_VERIFICATION_CYCLE_COST:-}" \
             --ae GT_SELF_VERIFY_ATTEMPTS="${GT_SELF_VERIFY_ATTEMPTS:-}" \
             --ae GT_MOUNT_MODE="1" \
+            --ae GT_ORACLE_EVENTS="${GT_C_OUT}/gt_oracle_events.jsonl" \
+            --ae GT_RUNTIME_LEDGER="${GT_C_OUT}/gt_runtime_ledger.jsonl" \
+            --ae GT_HOOK_FIRE_COUNTS="${GT_C_OUT}/gt_hook_fire_counts.json" \
             "${GT_AE_ARGS[@]}" \
             --ak config_file=artifact_deepswe/gt_integration/deepswe_gt_pier.yaml \
             --ak task="$(cat /tmp/issue.txt 2>/dev/null || echo 'Fix issue in repository')" \
@@ -1044,8 +1107,21 @@ jobs:
           echo "${REWARD}" > trial_results/reward.txt
           echo "Pro verifier reward: ${REWARD}"
 
+      - name: Cleanup runner disk before result collection
+        if: always()
+        continue-on-error: true
+        run: |
+          echo "disk before cleanup:"; df -h /
+          docker rm -f gtsrc 2>/dev/null || true
+          docker system prune -af --volumes 2>/dev/null || true
+          sudo swapoff /gt_swap 2>/dev/null || true
+          sudo rm -f /gt_swap 2>/dev/null || true
+          rm -f /tmp/gt-substrate.tar.gz /tmp/docker.tgz /tmp/swebench-pro-os.tar.gz 2>/dev/null || true
+          echo "disk after cleanup:"; df -h /
+
       - name: Collect results
         if: always()
+        continue-on-error: true
         run: |
           mkdir -p trial_results trial_results/gt_artifacts
           cp trial_output.log trial_results/ 2>/dev/null || true
@@ -1053,7 +1129,7 @@ jobs:
           for a in runtime_context.json lsp_certificate.json graph_certificate.json \
                    embedder_certificate.json foundational_gate_report.json run_manifest.json \
                    brief.txt gt_issue_anchors.json gt_scope_files.txt gt_lsp_metrics.txt \
-                   proof_progress.json proof_failure.json dep_store_manifest.json; do
+                   proof_progress.json proof_failure.json proof_status.json dep_store_manifest.json; do
             cp "/tmp/gt/$a" "trial_results/gt_artifacts/$a" 2>/dev/null || true
           done
           cp /tmp/gt/lsp_certificate_*.json trial_results/gt_artifacts/ 2>/dev/null || true
@@ -1064,7 +1140,11 @@ jobs:
           cp /tmp/pro_eval_output.txt trial_results/ 2>/dev/null || true
 
           GT_TRIAL_LOG=trial_output.log python3 scripts/swebench/task_truth.py jobs trial_results/task_truth.json 2>/dev/null || true
-          cp -r jobs trial_results/jobs 2>/dev/null || true
+          if [ -d jobs ]; then
+            mkdir -p trial_results/jobs
+            find jobs -type f \( -name 'result.json' -o -name 'patch.diff' -o -name '*.patch' -o -name '*.trajectory.json' -o -name '*.json' -o -name '*.log' \) -size -25M -print0 \
+              | xargs -0 -r cp --parents -t trial_results/jobs 2>/dev/null || true
+          fi
           cp /tmp/gt/*.log trial_results/ 2>/dev/null || true
           cp /tmp/gt/gt_interactions*.jsonl trial_results/ 2>/dev/null || true
 
@@ -1102,6 +1182,7 @@ jobs:
 
       - name: Upload results
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: pro-full-${{ matrix.task }}
