@@ -116,7 +116,7 @@ env:
   # DeepSWE). GT_SELF_VERIFY_ATTEMPTS is the post-exit outer safety ring (the
   # retry loop, product name for GT_RETRY_ON_VERIFIER_FAIL). V is the estimated
   # cost (in steps) of one edit->test->edit cycle, railed to [8, 40].
-  GT_STEP_LIMIT: "5"
+  GT_STEP_LIMIT: "300"
   GT_SELF_VERIFY_ATTEMPTS: "2"
   GT_VERIFICATION_CYCLE_COST: "25"
   # ── MODEL ROUTING (litellm OpenAI-compatible) ──────────────────────────────
