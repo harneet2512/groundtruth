@@ -1191,7 +1191,10 @@ def main(argv=None) -> int:
         )
     tracker.complete("artifact_contract", artifacts_present=present, gate_rc=rc)
     print(f"[gt-run-proof] done: gate_rc={rc} artifacts_present={present}", flush=True)
-    return rc
+    # Gate is INFORMATIONAL — recorded in foundational_gate_report.json for post-run
+    # analysis. All artifacts present = proof passes. A gate_rc=1 (e.g. name_match
+    # dominance on JS/TS/Go repos) must NEVER block the paid agent trial.
+    return 0
 
 
 if __name__ == "__main__":

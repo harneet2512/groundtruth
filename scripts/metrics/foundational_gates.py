@@ -160,7 +160,7 @@ def _name_match_diagnostics(con: sqlite3.Connection, limit: int = 50) -> list[di
             JOIN nodes src ON src.id = e.source_id
             JOIN nodes tgt ON tgt.id = e.target_id
             WHERE e.type='CALLS' AND COALESCE(e.resolution_method, '') LIKE 'name_match%'
-            GROUP BY source_file, language, target_name, evidence_type, resolution_method
+            GROUP BY source_file, src.language, target_name, evidence_type, resolution_method
             ORDER BY n DESC, source_file ASC, target_name ASC, evidence_type ASC
             LIMIT ?
             """,
