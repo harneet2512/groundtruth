@@ -26,8 +26,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl git xz-utils file musl-tools build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Go toolchain (only to build the static, hermetic gt-index)
-ARG GO_VERSION=1.24.4
+# Go toolchain. It builds gt-index/gopls and is copied into the final image because
+# gopls shells out to `go list` when loading task workspaces. Pin to Go >=1.25:
+# real DeepSWE canary repos already require `go 1.25` in go.mod.
+ARG GO_VERSION=1.25.11
 RUN curl -fsSL https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz | tar -xz -C /usr/local
 ENV PATH="/usr/local/go/bin:${PATH}"
 
@@ -205,8 +207,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends gcc ca-certific
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /opt/gt /opt/gt
 # Go toolchain for gopls WORKSPACE LOADING: gopls shells out to the `go` command
-# (`go env`/`go list`) to load packages, so the toolchain stays baked + pinned OFFLINE
-# (GOTOOLCHAIN=local, GOPROXY=off) so workspace loading never needs network.
+# (`go env`/`go list`) to load packages, so the toolchain stays baked + pinned.
+# The final default remains offline; production proof runs override GOPROXY when a
+# task has an incomplete module cache and gopls must hydrate metadata.
 # NOTE (root-caused 2026-06-09): the go smoke's `initialize` failure (run 27240730335,
 # UNCHANGED by baking this toolchain) was NOT the toolchain — it was the invalid launch
 # flag `gopls serve -stdio` (gopls has no -stdio flag; flag.ExitOnError prints usage to
@@ -252,6 +255,7 @@ RUN /opt/gt/bin/gt-index -h >/dev/null 2>&1 \
     && typescript-language-server --version \
     && gopls version \
     && /opt/gt/go/bin/go version \
+    && /opt/gt/python/bin/python3 -c "import re, subprocess, sys; out=subprocess.check_output(['/opt/gt/go/bin/go','version'], text=True); m=re.search(r'go(\\d+)\\.(\\d+)(?:\\.(\\d+))?', out); ok=bool(m) and tuple(map(int, m.groups(default='0')[:2])) >= (1,25); print('GT_GO_TOOLCHAIN_MIN_OK' if ok else 'GT_GO_TOOLCHAIN_TOO_OLD', out.strip()); sys.exit(0 if ok else 1)" \
     && rust-analyzer --version \
     && test -x /opt/gt/bin/jdtls \
     && test -n "$(ls /opt/gt/jdtls/plugins/org.eclipse.equinox.launcher_*.jar 2>/dev/null | head -1)" \

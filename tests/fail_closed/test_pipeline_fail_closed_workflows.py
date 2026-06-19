@@ -20,6 +20,7 @@ Covers the 4-reviewer LIPI audit fixes that live in WORKFLOW YAML (not importabl
 No task IDs, no gold, no benchmark logic — pure pipeline contracts, identical for every task.
 """
 import os
+import re
 import subprocess
 import sys
 
@@ -32,7 +33,9 @@ WF_30 = os.path.join(ROOT, ".github", "workflows", "swebench_30task.yml")
 WF_300 = os.path.join(ROOT, ".github", "workflows", "swebench_300task.yml")
 WF_LANG_SMOKE = os.path.join(ROOT, ".github", "workflows", "gt_language_smoke.yml")
 WF_PREREQ = os.path.join(ROOT, ".github", "workflows", "groundtruth_prereq_gate.yml")
+WF_SUBSTRATE_IMAGE = os.path.join(ROOT, ".github", "workflows", "gt_substrate_image.yml")
 SCRIPT_SUBSTRATE_PROOF = os.path.join(ROOT, "scripts", "ci", "substrate_proof.sh")
+DOCKERFILE_GT_SUBSTRATE = os.path.join(ROOT, "docker", "Dockerfile.gt-substrate")
 
 
 def _read(p):
@@ -203,6 +206,22 @@ def test_substrate_proof_go_lsp_path_uses_live_proxy_like_metadata_probe():
 def test_substrate_proof_forwards_commit_parity_gate_into_container():
     script = _read(SCRIPT_SUBSTRATE_PROOF)
     assert '-e GT_REQUIRE_COMMIT_PARITY="${GT_REQUIRE_COMMIT_PARITY:-1}"' in script
+
+
+def test_substrate_bakes_go_toolchain_new_enough_for_workspace_canaries():
+    dockerfile = _read(DOCKERFILE_GT_SUBSTRATE)
+    match = re.search(r"(?m)^ARG GO_VERSION=(\d+)\.(\d+)(?:\.(\d+))?$", dockerfile)
+    assert match, "Dockerfile.gt-substrate must pin GO_VERSION"
+    assert tuple(map(int, match.groups(default="0")[:2])) >= (1, 25)
+    assert "GT_GO_TOOLCHAIN_MIN_OK" in dockerfile
+    assert "(1,25)" in dockerfile.replace(" ", "")
+
+
+def test_substrate_image_workflow_confirms_go_toolchain_minimum():
+    run = _step(_load(WF_SUBSTRATE_IMAGE), "build-push", "Confirm the published image")["run"]
+    assert "/opt/gt/go/bin/go" in run
+    assert "GT_GO_TOOLCHAIN_MIN_OK" in run
+    assert "(1, 25)" in run
 
 
 def test_prereq_gate_executes_production_proof_canaries():

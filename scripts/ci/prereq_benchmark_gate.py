@@ -145,6 +145,18 @@ def audit(args: argparse.Namespace) -> tuple[list[dict], dict]:
     else:
         _ok(checks, "substrate_forbidden_global_go_mod_flag", "absent")
 
+    dockerfile = _read(ROOT / "docker" / "Dockerfile.gt-substrate")
+    go_version_match = re.search(r"(?m)^ARG GO_VERSION=(\d+)\.(\d+)(?:\.(\d+))?$", dockerfile)
+    if go_version_match and tuple(map(int, go_version_match.groups(default="0")[:2])) >= (1, 25):
+        _ok(checks, "substrate_go_toolchain_minimum", f"GO_VERSION={go_version_match.group(0).split('=', 1)[1]}")
+    else:
+        found = go_version_match.group(0).split("=", 1)[1] if go_version_match else "<missing>"
+        _fail(checks, "substrate_go_toolchain_minimum", f"Dockerfile.gt-substrate must bake Go >=1.25, found {found}")
+    if "GT_GO_TOOLCHAIN_MIN_OK" in dockerfile and "(1,25)" in dockerfile.replace(" ", ""):
+        _ok(checks, "substrate_go_toolchain_build_self_test", "Docker build fails closed when Go <1.25")
+    else:
+        _fail(checks, "substrate_go_toolchain_build_self_test", "Dockerfile.gt-substrate must self-test the baked Go minimum")
+
     proof_py = _read(ROOT / "scripts" / "swebench" / "gt_run_proof.py")
     if "_required_lsp_languages" in proof_py and "required_languages=_required_langs" in proof_py:
         _ok(checks, "primary_language_lsp_scope", "declared task language is hard fail-closed")
