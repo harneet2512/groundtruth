@@ -66,7 +66,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         include:
           - harness: deepswe
@@ -171,7 +171,17 @@ jobs:
         with:
           name: prereq-proof-canary-${{ matrix.harness }}-${{ matrix.task }}
           path: |
-            /tmp/gt/
+            /tmp/gt/graph.db
+            /tmp/gt/runtime_context.json
+            /tmp/gt/lsp_certificate.json
+            /tmp/gt/graph_certificate.json
+            /tmp/gt/embedder_certificate.json
+            /tmp/gt/foundational_gate_report.json
+            /tmp/gt/brief.txt
+            /tmp/gt/proof_status.json
+            /tmp/gt/proof_failure.json
+            /tmp/gt/proof_progress.json
+            /tmp/gt/dep_store_manifest.json
             trial_output.log
           retention-days: 30
           if-no-files-found: warn

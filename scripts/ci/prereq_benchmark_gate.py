@@ -147,21 +147,21 @@ def audit(args: argparse.Namespace) -> tuple[list[dict], dict]:
 
     dockerfile = _read(ROOT / "docker" / "Dockerfile.gt-substrate")
     go_version_match = re.search(r"(?m)^ARG GO_VERSION=(\d+)\.(\d+)(?:\.(\d+))?$", dockerfile)
-    if go_version_match and tuple(map(int, go_version_match.groups(default="0")[:2])) >= (1, 25):
+    if go_version_match and tuple(map(int, go_version_match.groups(default="0")[:2])) >= (1, 26):
         _ok(checks, "substrate_go_toolchain_minimum", f"GO_VERSION={go_version_match.group(0).split('=', 1)[1]}")
     else:
         found = go_version_match.group(0).split("=", 1)[1] if go_version_match else "<missing>"
-        _fail(checks, "substrate_go_toolchain_minimum", f"Dockerfile.gt-substrate must bake Go >=1.25, found {found}")
-    if "GT_GO_TOOLCHAIN_MIN_OK" in dockerfile and "(1,25)" in dockerfile.replace(" ", ""):
-        _ok(checks, "substrate_go_toolchain_build_self_test", "Docker build fails closed when Go <1.25")
+        _fail(checks, "substrate_go_toolchain_minimum", f"Dockerfile.gt-substrate must bake Go >=1.26, found {found}")
+    if "GT_GO_TOOLCHAIN_MIN_OK" in dockerfile and "(1,26)" in dockerfile.replace(" ", ""):
+        _ok(checks, "substrate_go_toolchain_build_self_test", "Docker build fails closed when Go <1.26")
     else:
         _fail(checks, "substrate_go_toolchain_build_self_test", "Dockerfile.gt-substrate must self-test the baked Go minimum")
     gopls_version_match = re.search(r"(?m)^ARG GOPLS_VERSION=v(\d+)\.(\d+)\.(\d+)$", dockerfile)
-    if gopls_version_match and tuple(map(int, gopls_version_match.groups())) >= (0, 21, 1):
-        _ok(checks, "substrate_gopls_go125_compatible", f"GOPLS_VERSION=v{'.'.join(gopls_version_match.groups())}")
+    if gopls_version_match and tuple(map(int, gopls_version_match.groups())) >= (0, 22, 0):
+        _ok(checks, "substrate_gopls_go126_compatible", f"GOPLS_VERSION=v{'.'.join(gopls_version_match.groups())}")
     else:
         found = f"v{'.'.join(gopls_version_match.groups())}" if gopls_version_match else "<missing>"
-        _fail(checks, "substrate_gopls_go125_compatible", f"Dockerfile.gt-substrate must build gopls compatible with Go 1.25, found {found}")
+        _fail(checks, "substrate_gopls_go126_compatible", f"Dockerfile.gt-substrate must build gopls compatible with Go 1.26, found {found}")
 
     proof_py = _read(ROOT / "scripts" / "swebench" / "gt_run_proof.py")
     if "_required_lsp_languages" in proof_py and "required_languages=_required_langs" in proof_py:

@@ -73,7 +73,7 @@ jobs:
             typescript-language-server --version
             gopls version
             /opt/gt/go/bin/go version
-            /opt/gt/python/bin/python3 -c "import re, subprocess, sys; out=subprocess.check_output([\"/opt/gt/go/bin/go\",\"version\"], text=True); m=re.search(\"go(\\\\d+)\\\\.(\\\\d+)(?:\\\\.(\\\\d+))?\", out); ok=bool(m) and tuple(map(int, m.groups(default=\"0\")[:2])) >= (1,25); print(\"GT_GO_TOOLCHAIN_MIN_OK\" if ok else \"GT_GO_TOOLCHAIN_TOO_OLD\", out.strip()); sys.exit(0 if ok else 1)"
+            /opt/gt/python/bin/python3 -c "import re, subprocess, sys; out=subprocess.check_output([\"/opt/gt/go/bin/go\",\"version\"], text=True); m=re.search(\"go(\\\\d+)\\\\.(\\\\d+)(?:\\\\.(\\\\d+))?\", out); ok=bool(m) and tuple(map(int, m.groups(default=\"0\")[:2])) >= (1,26); print(\"GT_GO_TOOLCHAIN_MIN_OK\" if ok else \"GT_GO_TOOLCHAIN_TOO_OLD\", out.strip()); sys.exit(0 if ok else 1)"
             rust-analyzer --version
             test -x /opt/gt/bin/jdtls && /opt/gt/jre/bin/java -version
             test -s /opt/gt/models/gte-modernbert-base/model.onnx && echo "gte ok"

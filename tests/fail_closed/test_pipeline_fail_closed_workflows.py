@@ -212,31 +212,38 @@ def test_substrate_bakes_go_toolchain_new_enough_for_workspace_canaries():
     dockerfile = _read(DOCKERFILE_GT_SUBSTRATE)
     match = re.search(r"(?m)^ARG GO_VERSION=(\d+)\.(\d+)(?:\.(\d+))?$", dockerfile)
     assert match, "Dockerfile.gt-substrate must pin GO_VERSION"
-    assert tuple(map(int, match.groups(default="0")[:2])) >= (1, 25)
+    assert tuple(map(int, match.groups(default="0")[:2])) >= (1, 26)
     assert "GT_GO_TOOLCHAIN_MIN_OK" in dockerfile
-    assert "(1,25)" in dockerfile.replace(" ", "")
+    assert "(1,26)" in dockerfile.replace(" ", "")
 
 
-def test_substrate_bakes_gopls_compatible_with_go_125():
+def test_substrate_bakes_gopls_compatible_with_go_126():
     dockerfile = _read(DOCKERFILE_GT_SUBSTRATE)
     match = re.search(r"(?m)^ARG GOPLS_VERSION=v(\d+)\.(\d+)\.(\d+)$", dockerfile)
     assert match, "Dockerfile.gt-substrate must pin GOPLS_VERSION"
-    assert tuple(map(int, match.groups())) >= (0, 21, 1)
+    assert tuple(map(int, match.groups())) >= (0, 22, 0)
 
 
 def test_substrate_image_workflow_confirms_go_toolchain_minimum():
     run = _step(_load(WF_SUBSTRATE_IMAGE), "build-push", "Confirm the published image")["run"]
     assert "/opt/gt/go/bin/go" in run
     assert "GT_GO_TOOLCHAIN_MIN_OK" in run
-    assert "(1,25)" in run.replace(" ", "")
+    assert "(1,26)" in run.replace(" ", "")
     assert "<<PY" not in run
 
 
 def test_prereq_gate_executes_production_proof_canaries():
     doc = _load(WF_PREREQ)
     assert "proof_canaries" in doc["jobs"]
+    assert doc["jobs"]["proof_canaries"]["strategy"]["fail-fast"] is False
     run = _step(doc, "proof_canaries", "Production substrate proof canary")["run"]
     assert "scripts/ci/substrate_proof.sh" in run
+    upload = _step(doc, "proof_canaries", "Upload canary proof artifacts")
+    upload_path = upload["with"]["path"]
+    assert "/tmp/gt/src" not in upload_path
+    assert "/tmp/gt/" not in [line.strip() for line in upload_path.splitlines()]
+    assert "/tmp/gt/graph.db" in upload_path
+    assert "/tmp/gt/brief.txt" in upload_path
     matrix = doc["jobs"]["proof_canaries"]["strategy"]["matrix"]["include"]
     tasks = {row["task"] for row in matrix}
     assert "arcane-drift-detection-baselines" in tasks

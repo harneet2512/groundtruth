@@ -27,9 +27,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Go toolchain. It builds gt-index/gopls and is copied into the final image because
-# gopls shells out to `go list` when loading task workspaces. Pin to Go >=1.25:
-# real DeepSWE canary repos already require `go 1.25` in go.mod.
-ARG GO_VERSION=1.25.11
+# gopls shells out to `go list` when loading task workspaces. Pin to Go >=1.26:
+# real DeepSWE canary repos already require `go 1.26` in go.work.
+ARG GO_VERSION=1.26.4
 RUN curl -fsSL https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz | tar -xz -C /usr/local
 ENV PATH="/usr/local/go/bin:${PATH}"
 
@@ -81,7 +81,7 @@ RUN curl -fsSL https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-li
 #      A static-ish Go binary; launches with no runtime Go toolchain. (Type-aware
 #      go-to-def across packages may still need the task's resolved module cache —
 #      flagged as the Go D1-probe item.)
-ARG GOPLS_VERSION=v0.21.1
+ARG GOPLS_VERSION=v0.22.0
 RUN GOBIN=/opt/gt/bin GOFLAGS=-trimpath GOPATH=/tmp/gopath GOTOOLCHAIN=local \
       go install golang.org/x/tools/gopls@${GOPLS_VERSION} \
     && rm -rf /tmp/gopath \
@@ -255,7 +255,7 @@ RUN /opt/gt/bin/gt-index -h >/dev/null 2>&1 \
     && typescript-language-server --version \
     && gopls version \
     && /opt/gt/go/bin/go version \
-    && /opt/gt/python/bin/python3 -c "import re, subprocess, sys; out=subprocess.check_output(['/opt/gt/go/bin/go','version'], text=True); m=re.search(r'go(\\d+)\\.(\\d+)(?:\\.(\\d+))?', out); ok=bool(m) and tuple(map(int, m.groups(default='0')[:2])) >= (1,25); print('GT_GO_TOOLCHAIN_MIN_OK' if ok else 'GT_GO_TOOLCHAIN_TOO_OLD', out.strip()); sys.exit(0 if ok else 1)" \
+    && /opt/gt/python/bin/python3 -c "import re, subprocess, sys; out=subprocess.check_output(['/opt/gt/go/bin/go','version'], text=True); m=re.search(r'go(\\d+)\\.(\\d+)(?:\\.(\\d+))?', out); ok=bool(m) and tuple(map(int, m.groups(default='0')[:2])) >= (1,26); print('GT_GO_TOOLCHAIN_MIN_OK' if ok else 'GT_GO_TOOLCHAIN_TOO_OLD', out.strip()); sys.exit(0 if ok else 1)" \
     && rust-analyzer --version \
     && test -x /opt/gt/bin/jdtls \
     && test -n "$(ls /opt/gt/jdtls/plugins/org.eclipse.equinox.launcher_*.jar 2>/dev/null | head -1)" \
