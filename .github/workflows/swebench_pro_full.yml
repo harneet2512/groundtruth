@@ -719,6 +719,10 @@ jobs:
               INPUT_MODEL="openai/${INPUT_MODEL}"
             fi
             echo "=== Model routed via TokenRouter: $INPUT_MODEL ==="
+          elif echo "$INPUT_MODEL" | grep -qiE "deepseek"; then
+            export DEEPSEEK_API_KEY="${{ secrets.DEEPSEEK_API_KEY }}"
+            GT_AE_ARGS+=(--ae "DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}")
+            echo "=== Model routed via DeepSeek native: $INPUT_MODEL ==="
           fi
 
           # Pro task image: jefzda/sweap-images:<dockerhub_tag> — pier runs the agent

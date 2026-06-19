@@ -869,11 +869,14 @@ jobs:
           if echo "$INPUT_MODEL" | grep -qiE "minimax|tokenrouter"; then
             export OPENAI_API_KEY="${TOKENROUTER_API_KEY}"
             export OPENAI_API_BASE="${TOKENROUTER_API_BASE}"
-            # litellm OpenAI-compatible: prefix with openai/ if not already
             if ! echo "$INPUT_MODEL" | grep -q "^openai/"; then
               INPUT_MODEL="openai/${INPUT_MODEL}"
             fi
             echo "=== Model routed via TokenRouter: $INPUT_MODEL ==="
+          elif echo "$INPUT_MODEL" | grep -qiE "deepseek"; then
+            export DEEPSEEK_API_KEY="${{ secrets.DEEPSEEK_API_KEY }}"
+            GT_AE_ARGS+=(--ae "DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}")
+            echo "=== Model routed via DeepSeek native: $INPUT_MODEL ==="
           fi
           # [OOM FIX 2026-06-16] RESMON ground truth (run 27650378892, expr): the GT HOST
           # process balloons mem=2.8->15.3GB in ~100s during the agent phase (containers=0,
