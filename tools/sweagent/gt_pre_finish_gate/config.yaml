@@ -1,0 +1,46 @@
+tools:
+  # IMPORTANT: this bundle declares a tool named `submit` whose `bin/submit`
+  # OVERRIDES the default tools/submit/bin/submit at install time. SWE-agent
+  # resolves tool name to the bundle that declares it; whichever bundle is
+  # listed LAST in the agent's tools list wins. To activate this gate, ensure
+  # the agent config lists `gt_pre_finish_gate` AFTER `submit` (and any other
+  # bundle that declares `submit`, e.g. `review_on_submit_m`).
+  #
+  # Wrap mechanism (verified against tools/review_on_submit_m/bin/submit):
+  # - `bin/submit` runs gate logic via lib/gt_pre_finish_gate.py
+  # - on flag: prints warning text + `sys.exit(0)` -> agent sees text, no submit
+  # - on pass OR after 3 blocks (soft-escape): prints `<<SWE_AGENT_SUBMISSION>>`
+  #   markers + the patch (same contract as the default submit).
+  #
+  # The agent can force-submit via `submit -f`.
+  submit:
+    signature: "submit [<force>]"
+    docstring: |
+      Submit your changes. Before submission, GroundTruth runs a structural
+      pre-finish gate over the diff:
+        - HALLUCINATED-IMPORT: new imports unresolved against graph.db
+        - CALLER-BLIND-EDIT: edited symbols with >=3 callers and no test edited
+        - CONTRACT-BREAK: signature changes that need acknowledgment
+      If any check flags, the gate returns a warning instead of submitting.
+      Fix the issue (or re-edit) and call submit again. After 3 consecutive
+      blocks the gate soft-escapes and submits anyway. `submit -f` forces an
+      immediate bypass.
+    arguments:
+      - name: force
+        type: boolean
+        description: "Force submit, skipping the GroundTruth gate."
+        required: false
+        # Without an explicit argument_format, SWE-agent's default is
+        # ``{{value}}`` — which renders boolean ``True`` as the literal
+        # string ``True``. With ``signature: submit [<force>]``, that
+        # produces the bash command ``submit True`` for force-submit
+        # tool calls — and the gate's argparse only declares
+        # ``-f/--force``, so the positional ``True`` is silently
+        # consumed by ``parse_known_args`` and ``args.force`` stays
+        # False (observed across multiple force-submit attempts in smoke).
+        # Render the boolean as the ``--force`` CLI flag instead so
+        # argparse picks it up. ``[<force>]`` in the signature stays
+        # because invoke_format validation requires one of <force>,
+        # [<force>], {force}, or --force to be present (see
+        # SWE-agent/sweagent/tools/commands.py invoke_format).
+        argument_format: "{% if value %}--force{% endif %}"

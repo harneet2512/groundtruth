@@ -1,0 +1,58 @@
+# VM-only patch to run_infer.py — extends GT_PATCH_V3 to forward --gold-paths-out
+# Apply on robbymd-umls-t0 at /home/Lenovo/oh-benchmarks/evaluation/benchmarks/swe_bench/run_infer.py
+# Backup recommended: cp run_infer.py run_infer.py.bak_pre_teg1_<ts>
+#
+# Why: TEG-1 needs the V1R-map brief to write a sidecar /tmp/teg1_gold_paths.txt
+# at brief-generation time so the in-container commit-prompt hook can read which
+# files are gold candidates. The bundle launcher already supports --gold-paths-out
+# (added 2026-05-03 to build_v1r_bundle.py and rebuilt into gt_pretask_brief_v1r.py);
+# this patch teaches run_infer.py's GT_PATCH_V3 block to forward the env var
+# GT_TEG1_GOLD_PATHS_OUT as --gold-paths-out=<value> when it invokes the bundle.
+#
+# Effect: when GT_TEG1_GOLD_PATHS_OUT env is set, the brief generator writes
+# the ranked candidate path list (one per line) to that file inside the
+# container. When the env var is unset, behavior is unchanged — V1R-map runs
+# without TEG-1 stay byte-identical to the 2026-05-03 paranoid run.
+#
+# Locate the GT_PATCH_V3 block (the one that calls the brief bundle). It looks like:
+#
+#     # >>> GT_PATCH_V3: pre-task restrictive brief
+#     _gt_brief_path = os.environ.get("GT_PRETASK_PATH", "")
+#     ...
+#     _brief_cmd = f"python3 /tmp/gt_pretask_brief.py --db=... --root=... --issue-text-file=... --task-id=..."
+#
+# Find the _brief_cmd construction and append the new arg conditionally.
+#
+# REPLACE the cmd construction (illustrative — actual lines vary by current file state):
+
+--- run_infer.py.bak_pre_teg1
++++ run_infer.py
+@@ GT_PATCH_V3 cmd construction @@
+-                _brief_cmd = (
+-                    f"python3 /tmp/gt_pretask_brief.py "
+-                    f"--db=/tmp/graph.db "
+-                    f"--root=$(ls -d /workspace/*/ 2>/dev/null | head -1) "
+-                    f"--issue-text-file=/tmp/gt_issue.txt "
+-                    f"--task-id={_iid}"
+-                )
++                _teg1_out = os.environ.get("GT_TEG1_GOLD_PATHS_OUT", "")
++                _brief_cmd = (
++                    f"python3 /tmp/gt_pretask_brief.py "
++                    f"--db=/tmp/graph.db "
++                    f"--root=$(ls -d /workspace/*/ 2>/dev/null | head -1) "
++                    f"--issue-text-file=/tmp/gt_issue.txt "
++                    f"--task-id={_iid}"
++                )
++                if _teg1_out:
++                    _brief_cmd += f" --gold-paths-out={_teg1_out}"
+
+# After applying, verify with:
+#   grep -n "gold-paths-out\|GT_TEG1_GOLD_PATHS_OUT" \
+#     /home/Lenovo/oh-benchmarks/evaluation/benchmarks/swe_bench/run_infer.py
+# Expected: 2 matches (the env-var read line + the conditional append line).
+#
+# Verify the bundle has the flag:
+#   python3 /home/Lenovo/v1r_experiment/gt_pretask_brief_v1r.py --help 2>&1 | grep gold-paths
+#
+# (Apply this patch BEFORE running TEG-1. Without it, GT_TEG1_GOLD_PATHS_OUT is
+# ignored and the commit-prompt hook will see an empty gold-paths file and never fire.)

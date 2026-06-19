@@ -1,0 +1,20 @@
+{
+  "id": "wmp-017",
+  "category": "wrong-module-path",
+  "subcategory": "module-doesnt-exist",
+  "description": "getUserById imported from nonexistent './database/users'",
+  "input": {
+    "code": "import { getUserById } from './database/users';\n\nconst user = await getUserById(42);",
+    "filePath": "src/app.ts",
+    "intent": "look up a user"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "module_not_found",
+    "fixType": "cross_file_resolution",
+    "correctSymbol": "getUserById",
+    "correctImport": "src/users",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

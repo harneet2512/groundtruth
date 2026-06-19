@@ -1,0 +1,9 @@
+{
+  "model": "openai/kimi-k2-thinking",
+  "base_url": "http://172.17.0.1:4000/v1",
+  "api_key": "dummy",
+  "temperature": 1.0,
+  "top_p": 0.95,
+  "max_tokens": 16384,
+  "_comment": "Routes via litellm proxy on host -> Vertex AI MaaS kimi-k2-thinking (serious-water-484116-j0, global). Published params: temp=1.0, top_p=0.95. Thinking model needs high max_tokens. Start proxy first: bash oh_setup_proxy_kimi.sh"
+}

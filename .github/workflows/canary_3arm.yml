@@ -1,0 +1,501 @@
+name: "FINAL_ARCH_V2 Canary (2-3 task, 3-arm paired)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      gt_commit:
+        description: 'GT commit/branch'
+        required: true
+        default: 'jedi__branch'
+      task_ids:
+        description: 'Comma-separated SWE-Bench-Live task IDs (2 or 3)'
+        required: true
+        default: 'beetbox__beets-5495,delgan__loguru-1297,beancount__beancount-931'
+      arm:
+        description: 'Arm to run: baseline | old_gt | v2_live'
+        required: true
+        default: 'v2_live'
+      max_iterations:
+        description: 'Max agent iterations'
+        required: true
+        default: '100'
+      temperature:
+        description: 'Temperature'
+        required: false
+        default: '0.7'
+      top_p:
+        description: 'Top P'
+        required: false
+        default: '0.8'
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+  # Full-stack enforcement (commit 51de7275) — no silent fallback on a paid run.
+  # Abort LOUD if FTS5 / ONNX embeddings / LSP aren't behaviorally live (the prior
+  # canary + 30-task runs silently degraded to a grep+CALLS localizer).
+  GT_REQUIRE_FULL_STACK: "1"
+  GT_FORCE_ONNX_EMBEDDER: "1"
+  GT_REQUIRE_FTS5: "1"
+  GT_REQUIRE_EMBEDDER: "1"
+  GT_REQUIRE_LSP: "1"
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.split.outputs.matrix }}
+      baseline_flag: ${{ steps.split.outputs.baseline_flag }}
+      router_v2_mode: ${{ steps.split.outputs.router_v2_mode }}
+    steps:
+      - id: split
+        run: |
+          IFS=',' read -ra TASKS <<< "${{ inputs.task_ids }}"
+          MATRIX='{"include":['
+          for i in "${!TASKS[@]}"; do
+            t=$(echo "${TASKS[$i]}" | xargs)
+            [ $i -gt 0 ] && MATRIX+=','
+            MATRIX+="{\"task\":\"$t\"}"
+          done
+          MATRIX+=']}'
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          # Map arm name → flags.
+          ARM='${{ inputs.arm }}'
+          case "$ARM" in
+            baseline) echo "baseline_flag=true"  >> "$GITHUB_OUTPUT"; echo "router_v2_mode=off"    >> "$GITHUB_OUTPUT" ;;
+            old_gt)   echo "baseline_flag=false" >> "$GITHUB_OUTPUT"; echo "router_v2_mode=off"    >> "$GITHUB_OUTPUT" ;;
+            v2_live)  echo "baseline_flag=false" >> "$GITHUB_OUTPUT"; echo "router_v2_mode=live"   >> "$GITHUB_OUTPUT" ;;
+            v2_shadow)echo "baseline_flag=false" >> "$GITHUB_OUTPUT"; echo "router_v2_mode=shadow" >> "$GITHUB_OUTPUT" ;;
+            *) echo "ERROR: unknown arm '$ARM'"; exit 1 ;;
+          esac
+          echo "queued ${#TASKS[@]} tasks for arm=$ARM"
+
+  agent:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+      fail-fast: false
+      max-parallel: 13
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.gt_commit }}
+
+      - uses: ./.github/actions/setup-eval
+
+      # Fail-fast delivery gate: runs BEFORE the Docker pull and the paid "Run agent"
+      # step below. If a change re-introduces the _brief_max_tokens reorder (empties
+      # <gt-graph-map>) or the <gt-task-brief> double-wrap, these deterministic tests
+      # fail here and the expensive agent run never executes. Catches the exact bug
+      # class canary 26651360055 shipped. Pure-source/ast tests — no heavy deps.
+      - name: GT L1 delivery preflight (gate before paid agent run)
+        run: |
+          set -e
+          python -m pip install -q pytest >/dev/null 2>&1 || true
+          python -m py_compile scripts/swebench/oh_gt_full_wrapper.py
+          python -m pytest tests/preflight/test_brief_delivery_invariants.py tests/preflight/test_check_brief_delivery.py -q
+
+      - name: Write OH config
+        run: |
+          cat > config.toml << TOML
+          [core]
+          max_iterations = ${{ inputs.max_iterations }}
+          default_agent = "CodeActAgent"
+          # condenser disabled — GT evidence must survive in context
+
+          [llm.eval]
+          model = "deepseek/deepseek-v4-flash"
+          api_key = "${{ secrets.DEEPSEEK_API_KEY }}"
+          base_url = "https://api.deepseek.com"
+          temperature = ${{ inputs.temperature }}
+          top_p = ${{ inputs.top_p }}
+          max_output_tokens = 65536
+          drop_params = true
+          caching_prompt = false
+          num_retries = 10
+          timeout = 300
+
+          [sandbox]
+          runtime_container_image = "ghcr.io/all-hands-ai/runtime:0.54-nikolaik"
+          TOML
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Pull Docker image
+        run: |
+          TASK="${{ matrix.task }}"
+          REPO=$(echo "$TASK" | cut -d'_' -f1)
+          REST=$(echo "$TASK" | sed "s/^${REPO}__//")
+          BASENAME="sweb.eval.x86_64.${REPO}_1776_${REST}"
+          GHCR_IMAGE="ghcr.io/${{ github.repository_owner }}/${BASENAME}:latest"
+          DOCKERHUB_IMAGE="docker.io/starryzhang/${BASENAME}:latest"
+          docker pull "$GHCR_IMAGE" 2>/dev/null && docker tag "$GHCR_IMAGE" "$DOCKERHUB_IMAGE" \
+            || docker pull "$DOCKERHUB_IMAGE" || echo "WARN: pull failed for $TASK"
+
+      - name: Pre-flight GT health check
+        env:
+          PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
+          GT_INDEX_BINARY: "/tmp/gt-index"
+        run: |
+          echo "=== GT PRE-FLIGHT ==="
+          test -x /tmp/gt-index && echo "gt-index binary OK" || { echo "FAIL: gt-index missing"; exit 1; }
+          mkdir -p /tmp/preflight && echo 'def hello(): pass' > /tmp/preflight/test.py
+          /tmp/gt-index -root /tmp/preflight -output /tmp/preflight/test.db 2>&1 || {
+            echo "FAIL: gt-index crashed. Exit code: $?"
+            echo "Attempting with verbose output:"
+            /tmp/gt-index -root /tmp/preflight -output /tmp/preflight/test.db 2>&1 || true
+            exit 1
+          }
+          echo "=== GT PRE-FLIGHT (DOC_OF_HONOR validation) ==="
+          python3 $GITHUB_WORKSPACE/scripts/verify/preflight_doc_of_honor.py /tmp/preflight/test.db
+          echo "=== DOC_OF_HONOR PRE-FLIGHT PASSED ==="
+          # C7 closure table presence (WARN-only here; the FATAL C7 gate is ci.yml
+          # go-build). The preflight repo has no calls, so the table is checked for
+          # existence, not population. See RUNTIME_FUCKUPS.md (RF-4).
+          python3 $GITHUB_WORKSPACE/scripts/verify/preflight_delivery_layer.py /tmp/preflight/test.db --schema --closure \
+            || echo "WARN: closure table absent — C7 not in this gt-index build?"
+
+      - name: DeepSeek API auth probe
+        run: |
+          echo "DeepSeek API auth probe..."
+          curl -sf -o /tmp/preflight/deepseek_probe.json \
+            -X POST "https://api.deepseek.com/chat/completions" \
+            -H "Authorization: Bearer ${{ secrets.DEEPSEEK_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"say ok"}],"max_tokens":5}' \
+          && echo "DeepSeek API auth OK" \
+          || { echo "FAIL: DeepSeek API"; cat /tmp/preflight/deepseek_probe.json; exit 1; }
+
+      - name: caching_prompt safety check
+        run: |
+          echo "caching_prompt safety for DeepSeek..."
+          if grep -q 'caching_prompt = true' config.toml 2>/dev/null; then
+            echo "FAIL: caching_prompt=true is DANGEROUS for DeepSeek — corrupts completions"
+            echo "Fix: add 'caching_prompt = false' to [llm.eval] in config.toml"
+            exit 1
+          fi
+          if ! grep -q 'caching_prompt = false' config.toml 2>/dev/null; then
+            echo "WARN: caching_prompt not explicitly set — defaulting to OH's true which breaks DeepSeek"
+            echo "Fix: add 'caching_prompt = false' to [llm.eval] in config.toml"
+            exit 1
+          fi
+          echo "caching_prompt=false OK"
+
+      - name: Compute task Docker image
+        id: taskimg
+        run: |
+          TASK="${{ matrix.task }}"
+          REPO=$(echo "$TASK" | cut -d'_' -f1)
+          REST=$(echo "$TASK" | sed "s/^${REPO}__//")
+          BASENAME="sweb.eval.x86_64.${REPO}_1776_${REST}"
+          DOCKERHUB_IMAGE="docker.io/starryzhang/${BASENAME}:latest"
+          echo "image=$DOCKERHUB_IMAGE" >> "$GITHUB_OUTPUT"
+
+      # C6: offline pre-index + LSP promotion (extracted to a composite so the
+      # primary scale gates are NOT touched until proven on canary). See
+      # RUNTIME_FUCKUPS.md (RF-2). Byte-equivalent to the prior inline block:
+      # docker create/cp /testbed -> gt-index offline -> count name_match CALLS
+      # -> pip install pyright -> resolve --resolve (timeout 120, || WARN
+      # non-fatal) -> recount -> export GT_PREBUILT_GRAPH_DB.
+      - name: Pre-index target repo
+        uses: ./.github/actions/preindex-promote
+        with:
+          task_image: ${{ steps.taskimg.outputs.image }}
+          lang: python
+          db_path: /tmp/gt_prebuilt.db
+
+      - name: Run agent
+        # RESILIENCE: run even if pre-index/proof steps failed — they are DIAGNOSTIC.
+        # Only skip if the job was explicitly cancelled. Reference: deepswe_full.yml.
+        if: ${{ !cancelled() }}
+        env:
+          PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
+          GT_INDEX_BINARY: "/tmp/gt-index"
+          GT_PREBUILT_GRAPH_DB: "/tmp/gt_prebuilt.db"
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          EVAL_CONDENSER: ""
+          GT_DEBUG_DIR: "/tmp/gt_debug"
+          GT_MAX_LLM_CALLS: "300"
+          GT_REBUILD_L1: "1"
+          GT_REBUILD_L3: "1"
+          GT_REBUILD_L3B: "1"
+          GT_REBUILD_L5: "1"
+          GT_LAYER_EVENTS: "1"
+          GT_STRUCTURED_EVENTS: "1"
+          GT_STRUCTURAL_NEXT_ACTION: "1"
+          GT_L3B_PRIMARY_EDGE: "1"
+          GT_L5_STRUCTURAL_UNVERIFIED: "1"
+          GT_L5_GOKU_EVENTS: "0"
+          GT_DEEP_LAYER_GROUNDED_METRICS: "1"
+          GT_L5B_SAFETY_REQUIRED: "1"
+          # Runtime LSP: promotes name_match→lsp_verified on L6 reindex delta.
+          GT_LSP_VERIFY: "1"
+          GT_ROUTER_V2: ${{ needs.prepare.outputs.router_v2_mode }}
+        run: |
+          mkdir -p /tmp/gt_debug /tmp/results
+          if [ "${{ needs.prepare.outputs.baseline_flag }}" = "true" ]; then
+            echo "=== BASELINE ARM ==="
+            export GT_BASELINE=1
+          else
+            echo "=== GT ARM (router_v2=${{ needs.prepare.outputs.router_v2_mode }}) ==="
+          fi
+          python scripts/swebench/oh_gt_full_wrapper.py \
+              --instance-ids '${{ matrix.task }}' \
+              -l eval \
+              -i ${{ inputs.max_iterations }} \
+              --eval-num-workers 1 \
+              --eval-output-dir /tmp/results \
+              --dataset 'SWE-bench-Live/SWE-bench-Live' \
+              --split lite \
+              2>&1 | tee /tmp/gt_debug/full_run.log
+
+          LLM_CALLS=$(grep -c 'GT_COST.*call=' /tmp/gt_debug/full_run.log 2>/dev/null || echo 0)
+          echo "POST-RUN: llm_calls=$LLM_CALLS"
+          [ "$LLM_CALLS" -lt 2 ] && { echo "FATAL: $LLM_CALLS LLM calls — run broken"; exit 1; }
+
+          # Pipeline preflight: verify all GT layers fired correctly
+          echo "=== POST-RUN PIPELINE CHECK ==="
+          FATAL_COUNT=$(grep -c 'GT_FATAL' /tmp/gt_debug/full_run.log 2>/dev/null || echo 0)
+          SCHEMA_MISS=$(grep -c 'SchemaMismatch' /tmp/gt_debug/full_run.log 2>/dev/null || echo 0)
+          L3B_DELIVER=$(grep -c 'l3b_delivery status=DELIVERED' /tmp/gt_debug/full_run.log 2>/dev/null || echo 0)
+          TEST_ASSERT=$(grep -c 'test_assertions_view' /tmp/gt_debug/full_run.log 2>/dev/null || echo 0)
+          CONSENSUS=$(grep -c 'CONSENSUS at' /tmp/gt_debug/full_run.log 2>/dev/null || echo 0)
+          echo "  GT_FATAL=$FATAL_COUNT SchemaMismatch=$SCHEMA_MISS L3b_deliveries=$L3B_DELIVER test_assertions=$TEST_ASSERT consensus=$CONSENSUS"
+          [ "$FATAL_COUNT" -gt 0 ] && echo "WARN: $FATAL_COUNT GT_FATAL errors in run"
+          [ "$SCHEMA_MISS" -gt 0 ] && { echo "FATAL: SchemaMismatch — schema_version not stamped"; exit 1; }
+          [ "$L3B_DELIVER" -lt 1 ] && echo "WARN: 0 L3b deliveries — post-view evidence may be broken"
+
+          # Wrapper writes per-task gt_interactions to /tmp/, not /tmp/results.
+          echo "interaction_files=$(ls /tmp/gt_interactions_*.jsonl 2>/dev/null | wc -l)"
+
+          # Track-A fail-fast: V2 arms must produce L3_router_v2 events.
+          MODE="${{ needs.prepare.outputs.router_v2_mode }}"
+          if [ "$MODE" = "shadow" ] || [ "$MODE" = "live" ]; then
+            EV=$(grep -hc '"L3_router_v2"' /tmp/gt_interactions_*.jsonl 2>/dev/null | paste -sd+ - | bc 2>/dev/null || echo 0)
+            EV=${EV:-0}
+            [ "$EV" -lt 1 ] && { echo "FATAL: router_v2=$MODE but 0 L3_router_v2 events"; exit 1; }
+            echo "router_v2_events=$EV"
+            if [ "$MODE" = "live" ]; then
+              SK=$(grep -hc '"router_v2_legacy_skip"' /tmp/gt_interactions_*.jsonl 2>/dev/null | paste -sd+ - | bc 2>/dev/null || echo 0)
+              SK=${SK:-0}
+              [ "$SK" -lt 1 ] && { echo "FATAL: router_v2=live but legacy never bypassed"; exit 1; }
+              echo "router_v2_legacy_skips=$SK"
+            fi
+          fi
+
+          # GT enabled: fail fast if wrapper never loaded (zero interactions = wrapper broken).
+          if [ "${{ needs.prepare.outputs.baseline_flag }}" != "true" ]; then
+            INTER=$(find /tmp -maxdepth 1 -name 'gt_interactions_*.jsonl' -size +0c 2>/dev/null | wc -l)
+            [ "$INTER" -lt 1 ] && { echo "FATAL: GT enabled but 0 non-empty gt_interactions — wrapper not loaded"; exit 1; }
+          fi
+
+          # Stage GT artifacts beside output.jsonl so upload-artifact picks them up.
+          find /tmp/results -name 'output.jsonl' -print0 2>/dev/null | while IFS= read -r -d '' f; do
+            d=$(dirname "$f")
+            cp /tmp/gt_interactions_*.jsonl  "$d/" 2>/dev/null || true
+            cp /tmp/gt_layer_events_*.jsonl  "$d/" 2>/dev/null || true
+            cp /tmp/gt_belief_*.jsonl        "$d/" 2>/dev/null || true
+            cp /tmp/gt_debug/gt_hooks.log    "$d/" 2>/dev/null || true
+          done
+
+      - name: Pull graph.db beside output.jsonl
+        if: always()
+        run: |
+          find /tmp/results -name 'output.jsonl' -print0 | while IFS= read -r -d '' f; do
+            d=$(dirname "$f")
+            for candidate in /tmp/gt_debug/graph.db /tmp/gt_debug/*/graph.db ; do
+              if [ -f "$candidate" ]; then
+                cp "$candidate" "$d/graph.db" 2>/dev/null && echo "graph.db -> $d" && break
+              fi
+            done
+          done
+
+      - name: Eval harness
+        if: always()
+        run: |
+          PATCH=$(find /tmp/results -name 'output.jsonl' -exec grep -l 'git_patch.*diff' {} \; 2>/dev/null | head -1)
+          if [ -z "$PATCH" ]; then
+            echo '{"resolved_ids":[],"task":"${{ matrix.task }}","status":"no_patch"}' > /tmp/eval_result.json
+            exit 0
+          fi
+          mkdir -p /tmp/merged
+          find /tmp/results -name 'output.jsonl' -exec cat {} + > /tmp/merged/output.jsonl
+          python scripts/swebench/convert_to_submission.py /tmp/merged/output.jsonl --output-dir /tmp/merged
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          python -m swebench.harness.run_evaluation \
+            --dataset_name SWE-bench-Live/SWE-bench-Live \
+            --split lite \
+            --namespace starryzhang \
+            --predictions_path /tmp/merged/predictions.jsonl \
+            --max_workers 1 \
+            --run_id canary_eval \
+            2>&1 | tee /tmp/merged/eval.log
+          # BUGFIX: SWE-bench run_evaluation writes its summary report to
+          # ./<model>.<run_id>.json in the CWD (model-named, may contain spaces),
+          # NOT logs/report.json. The old `find logs -name report.json` returned
+          # empty and silently dropped REAL resolutions to no_patch (verified:
+          # beets resolved=1 was reported as no_patch). Look in the CWD summary
+          # first; keep logs/ as a fallback for older harness layouts.
+          REPORT=$(find . -maxdepth 1 -name '*canary_eval.json' 2>/dev/null | head -1)
+          [ -z "$REPORT" ] && REPORT=$(find logs -name 'report.json' 2>/dev/null | head -1)
+          if [ -n "$REPORT" ]; then
+            cp "$REPORT" /tmp/eval_result.json
+          else
+            echo '{"resolved_ids":[],"task":"${{ matrix.task }}","status":"eval_no_report"}' > /tmp/eval_result.json
+          fi
+          echo "[EVAL_REPORT] report_file='${REPORT:-NONE}'"
+          cat /tmp/eval_result.json
+
+      - name: Phase 5 evidence metrics
+        if: always()
+        env:
+          PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench"
+        run: |
+          echo "=== PHASE 5: EVIDENCE METRICS ==="
+          TASK="${{ matrix.task }}"
+
+          # Find run artifacts
+          RUN_DIR=$(find /tmp/results -name 'output.jsonl' -exec dirname {} \; 2>/dev/null | head -1)
+          if [ -z "$RUN_DIR" ]; then
+            echo '{"precision":0,"recall":0,"uptake":0,"error":"no_output_dir"}' > /tmp/evidence_metrics.json
+            echo "SKIP: no output.jsonl found"
+            exit 0
+          fi
+
+          # Gather GT interaction log
+          GT_LOG="$RUN_DIR/gt_interactions.jsonl"
+          if [ ! -f "$GT_LOG" ]; then
+            GT_LOG=$(ls /tmp/gt_interactions_*.jsonl 2>/dev/null | head -1)
+            [ -n "$GT_LOG" ] && cp "$GT_LOG" "$RUN_DIR/gt_interactions.jsonl" 2>/dev/null
+          fi
+
+          # Get gold patch from eval artifacts
+          GOLD_PATCH=$(find logs -name '*.patch' 2>/dev/null | head -1)
+          if [ -z "$GOLD_PATCH" ]; then
+            GOLD_PATCH=$(find /tmp -maxdepth 3 -name 'gold_patch.diff' -o -name 'test_patch.diff' 2>/dev/null | head -1)
+          fi
+          if [ -n "$GOLD_PATCH" ]; then
+            cp "$GOLD_PATCH" "$RUN_DIR/gold_patch.diff" 2>/dev/null || true
+          fi
+
+          # Debug: show what's in the run dir
+          echo "RUN_DIR=$RUN_DIR"
+          ls -la "$RUN_DIR"/ 2>/dev/null | head -20
+          echo "GT_LOG exists: $(test -f "$RUN_DIR/gt_interactions.jsonl" && echo YES || echo NO)"
+          echo "GOLD_PATCH=$GOLD_PATCH"
+
+          # Run evidence scorer — works even without gold patch
+          python -c "
+          import json, sys, os, glob
+          sys.path.insert(0, '${{ github.workspace }}/src')
+          run_dir = '$RUN_DIR'
+          # Find GT log
+          gt_log = None
+          for pattern in ['gt_interactions.jsonl', 'gt_interactions_*.jsonl', 'gt_layer_events_*.jsonl']:
+              matches = glob.glob(os.path.join(run_dir, pattern))
+              if matches:
+                  gt_log = matches[0]
+                  break
+          if not gt_log:
+              for f in glob.glob('/tmp/gt_interactions_*.jsonl'):
+                  gt_log = f
+                  break
+          print(f'GT_LOG: {gt_log}')
+          print(f'GOLD_PATCH: {os.path.exists(os.path.join(run_dir, \"gold_patch.diff\"))}')
+
+          from groundtruth.metrics.evidence_scorer import parse_injections
+          injections = parse_injections(gt_log) if gt_log else []
+          print(f'Total injections parsed: {len(injections)}')
+          for inj in injections[:5]:
+              print(f'  {inj.layer}: {inj.file_path} [{inj.target_function}] {len(inj.content)} chars')
+
+          # Try full scoring if gold patch available
+          from groundtruth.metrics.evidence_scorer import score_run_from_artifacts
+          result = score_run_from_artifacts(run_dir)
+          metrics = {}
+          if result:
+              print(result.summary())
+              metrics = {
+                  'precision': result.precision, 'recall': result.recall,
+                  'uptake': result.uptake, 'total_injections': result.total_injections,
+                  'correct_injections': result.correct_injections,
+              }
+          else:
+              print(f'No gold patch — reporting injection count only')
+              metrics = {
+                  'total_injections': len(injections),
+                  'layers_present': list(set(i.layer for i in injections)),
+                  'files_covered': list(set(i.file_path for i in injections if i.file_path)),
+              }
+          with open('/tmp/evidence_metrics.json', 'w') as f:
+              json.dump(metrics, f, indent=2)
+          "
+          echo "=== EVIDENCE METRICS COMPLETE ==="
+
+      - name: Cost and token summary
+        if: always()
+        run: |
+          echo "=== COST & TOKEN SUMMARY ==="
+          # LiteLLM cost log
+          if [ -f /tmp/litellm_costs.jsonl ]; then
+            TOTAL_COST=$(python3 -c "
+          import json
+          total = 0
+          with open('/tmp/litellm_costs.jsonl') as f:
+              for line in f:
+                  try:
+                      obj = json.loads(line)
+                      total += float(obj.get('response_cost', 0) or 0)
+                  except: pass
+          print(f'{total:.4f}')
+          ")
+            echo "LLM_COST_USD=$TOTAL_COST"
+          else
+            echo "LLM_COST_USD=unknown (no litellm_costs.jsonl)"
+          fi
+
+          # Token counts from run log
+          if [ -f /tmp/gt_debug/full_run.log ]; then
+            INPUT_TOKENS=$(grep -oP 'prompt_tokens=\K[0-9]+' /tmp/gt_debug/full_run.log 2>/dev/null | paste -sd+ - | bc 2>/dev/null || echo 0)
+            OUTPUT_TOKENS=$(grep -oP 'completion_tokens=\K[0-9]+' /tmp/gt_debug/full_run.log 2>/dev/null | paste -sd+ - | bc 2>/dev/null || echo 0)
+            echo "INPUT_TOKENS=$INPUT_TOKENS"
+            echo "OUTPUT_TOKENS=$OUTPUT_TOKENS"
+          fi
+
+          # Action count
+          ACTION_COUNT=$(grep -c 'action_count=' /tmp/gt_debug/full_run.log 2>/dev/null || echo 0)
+          echo "ACTION_COUNT=$ACTION_COUNT"
+
+          # Eval result
+          if [ -f /tmp/eval_result.json ]; then
+            RESOLVED=$(python3 -c "import json; r=json.load(open('/tmp/eval_result.json')); print(len(r.get('resolved_ids',r.get('resolved',[]))))" 2>/dev/null || echo "?")
+            echo "RESOLVED=$RESOLVED"
+          fi
+
+          # Evidence metrics
+          if [ -f /tmp/evidence_metrics.json ]; then
+            cat /tmp/evidence_metrics.json
+          fi
+          echo "=== SUMMARY COMPLETE ==="
+
+      - name: Upload canary artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-${{ inputs.arm }}-${{ matrix.task }}
+          path: |
+            /tmp/gt_debug/
+            /tmp/results/**/output.jsonl
+            /tmp/results/**/graph.db
+            /tmp/results/**/gt_interactions.jsonl
+            /tmp/results/**/gt_hooks.log
+            /tmp/eval_result.json
+            /tmp/evidence_metrics.json
+            /tmp/litellm_costs.jsonl
+          retention-days: 30

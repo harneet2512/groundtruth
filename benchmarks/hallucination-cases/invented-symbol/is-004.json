@@ -1,0 +1,20 @@
+{
+  "id": "is-004",
+  "category": "invented-symbol",
+  "language": "typescript",
+  "description": "Invented 'registerUser' — should be 'createUser' from users/queries",
+  "input": {
+    "code": "import { registerUser } from './users/queries';\n\nconst newUser = await registerUser({ name: 'Alice' });",
+    "filePath": "src/routes/users.ts",
+    "intent": "register a new user account"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "ai_semantic",
+    "correctSymbol": "createUser",
+    "correctImport": "src/users/queries",
+    "shouldRequireAI": true,
+    "briefingWouldPrevent": true
+  }
+}

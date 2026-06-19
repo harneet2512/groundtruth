@@ -1,0 +1,20 @@
+{
+  "id": "wlc-008",
+  "category": "wrong-language-convention",
+  "language": "go",
+  "description": "Used Python-style snake_case 'hash_password' in Go — should be 'HashPassword'",
+  "input": {
+    "code": "package auth\n\nimport \"myapp/utils\"\n\nfunc Register() {\n\thash, err := utils.hash_password(pw)\n}",
+    "filePath": "auth/register.go",
+    "intent": "hash a user password"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "levenshtein",
+    "correctSymbol": "HashPassword",
+    "correctImport": "utils/crypto",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

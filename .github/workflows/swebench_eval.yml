@@ -1,0 +1,1067 @@
+name: Vertex 480B Cascade (1→5→20)
+
+on:
+  workflow_dispatch:
+    inputs:
+      gt_commit:
+        description: 'GT commit/branch to evaluate'
+        required: true
+        default: 'general_start'
+      max_iterations:
+        description: 'Max agent iterations per task'
+        required: true
+        default: '100'
+      run_name:
+        description: 'Run name (artifact prefix)'
+        required: true
+        default: 'vertex_cascade'
+      start_stage:
+        description: 'Start at stage (1, 2, or 3) — skip prior stages'
+        required: false
+        type: choice
+        options: ['1', '2', '3']
+        default: '1'
+      skip_eval:
+        description: 'Skip Microsoft harness eval (transport probes only)'
+        required: false
+        type: boolean
+        default: false
+      model_override:
+        description: 'Override model (e.g. openrouter/qwen/qwen3-coder:free for $0 diagnostic)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  id-token: write
+  packages: read
+
+env:
+  MODEL: "openai/qwen/qwen3-coder-480b-a35b-instruct-maas"
+  GCP_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
+  GCP_WIF_PROVIDER: ${{ secrets.GCP_WIF_PROVIDER }}
+  GCP_SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+# ============================================================
+#  TASK POOL (shared reference — hardcoded per stage below)
+#  Stage 1: cfn-lint-4023 (hard task, exercises L3/L4/L5/L6)
+#  Stage 2: first 5 from pool (diverse repos)
+#  Stage 3: all 20
+# ============================================================
+
+jobs:
+  # ==================== STAGE 1: Single hard task ====================
+  stage1:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    if: inputs.start_stage == '1'
+    outputs:
+      passed: ${{ steps.gate.outputs.passed }}
+      resolved: ${{ steps.gate.outputs.resolved }}
+      cost: ${{ steps.gate.outputs.cost }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.gt_commit }}
+
+      - name: Setup eval environment
+        uses: ./.github/actions/setup-eval
+
+      - name: Authenticate to GCP
+        id: gcp-auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.GCP_WIF_PROVIDER }}
+          service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
+          token_format: 'access_token'
+
+      - name: Canary (Vertex MaaS)
+        run: |
+          TOKEN="${{ steps.gcp-auth.outputs.access_token }}"
+          CANARY_RESP=$(curl -s --max-time 60 \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "x-goog-user-project: ${{ env.GCP_PROJECT }}" \
+            -H "Content-Type: application/json" \
+            "https://aiplatform.googleapis.com/v1/projects/${{ env.GCP_PROJECT }}/locations/global/endpoints/openapi/chat/completions" \
+            -d '{"model":"qwen/qwen3-coder-480b-a35b-instruct-maas","messages":[{"role":"user","content":"What does enumerate() do? One sentence."}],"max_tokens":100,"temperature":0.7,"top_p":0.8}')
+
+          echo "$CANARY_RESP" > /tmp/canary_response.json
+          echo "$CANARY_RESP" | python3 -m json.tool 2>/dev/null || echo "$CANARY_RESP"
+
+          python3 << 'PYCHECK'
+          import json, sys
+          with open("/tmp/canary_response.json") as f:
+              raw = f.read().strip()
+          if not raw:
+              print("CANARY FAILED: empty response"); sys.exit(1)
+          d = json.loads(raw)
+          if isinstance(d, list): d = d[0]
+          if "error" in d:
+              print(f"CANARY FAILED: {d['error']}"); sys.exit(1)
+          assert "choices" in d, f"No choices: {list(d.keys())}"
+          content = d["choices"][0].get("message", {}).get("content", "")
+          assert len(content) > 0, f"Empty content"
+          usage = d.get("usage", {})
+          cached = usage.get("prompt_tokens_details", {}).get("cached_tokens", 0)
+          print(f"CANARY PASSED: {len(content)} chars, {usage.get('prompt_tokens',0)} in / {usage.get('completion_tokens',0)} out, cached: {cached}")
+          PYCHECK
+
+      - name: Write OH config
+        run: |
+          MODEL="${{ inputs.model_override }}"
+          if [ -z "$MODEL" ]; then
+            MODEL="openai/qwen/qwen3-coder-480b-a35b-instruct-maas"
+            API_KEY="${{ steps.gcp-auth.outputs.access_token }}"
+            BASE_URL="https://aiplatform.googleapis.com/v1/projects/${{ env.GCP_PROJECT }}/locations/global/endpoints/openapi"
+            PROVIDER="openai"
+          elif [[ "$MODEL" == openrouter/* ]]; then
+            API_KEY="${{ secrets.OPENROUTER_KEY }}"
+            BASE_URL="https://openrouter.ai/api/v1"
+            PROVIDER=""
+          else
+            API_KEY="${{ steps.gcp-auth.outputs.access_token }}"
+            BASE_URL="https://aiplatform.googleapis.com/v1/projects/${{ env.GCP_PROJECT }}/locations/global/endpoints/openapi"
+            PROVIDER="openai"
+          fi
+          cat > config.toml << TOML
+          [core]
+          max_iterations = ${{ inputs.max_iterations }}
+          default_agent = "CodeActAgent"
+
+          [llm.eval]
+          model = "$MODEL"
+          api_key = "$API_KEY"
+          base_url = "$BASE_URL"
+          custom_llm_provider = "$PROVIDER"
+          temperature = 0.7
+          top_p = 0.8
+          max_output_tokens = 65536
+          caching_prompt = false
+          drop_params = true
+          num_retries = 5
+          timeout = 300
+
+          [sandbox]
+          runtime_container_image = "ghcr.io/all-hands-ai/runtime:0.54-nikolaik"
+
+          # condenser OFF — GCP baseline had no condenser
+          TOML
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull Docker image
+        run: |
+          TASK="aws-cloudformation__cfn-lint-4023"
+          GHCR_IMAGE="ghcr.io/${{ github.repository_owner }}/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-4023:latest"
+          DOCKERHUB_IMAGE="docker.io/starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-4023:latest"
+          docker pull "$GHCR_IMAGE" 2>/dev/null && docker tag "$GHCR_IMAGE" "$DOCKERHUB_IMAGE" \
+            || docker pull "$DOCKERHUB_IMAGE" || echo "WARN: pull failed"
+
+      - name: Run evaluation
+        env:
+          PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
+          GT_INDEX_BINARY: "/tmp/gt-index"
+          VERTEX_AI_PROJECT: ${{ env.GCP_PROJECT }}
+          VERTEX_AI_LOCATION: "global"
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ steps.gcp-auth.outputs.credentials_file_path }}
+          EVAL_CONDENSER: ""
+        run: |
+          mkdir -p /tmp/results
+          python scripts/swebench/oh_gt_full_wrapper.py \
+            --instance-ids 'aws-cloudformation__cfn-lint-4023' \
+            -l eval \
+            -i ${{ inputs.max_iterations }} \
+            --eval-num-workers 1 \
+            --eval-output-dir /tmp/results \
+            --dataset 'SWE-bench-Live/SWE-bench-Live' \
+            --split lite \
+            2>&1 | tee /tmp/results/run.log
+
+      - name: LiteLLM cost summary
+        if: always()
+        run: |
+          python3 -c "
+          import json, glob
+          total_cost = 0; total_in = 0; total_out = 0; calls = 0
+          for f in glob.glob('/tmp/litellm*.log') + glob.glob('/tmp/litellm_costs.jsonl'):
+              try:
+                  for line in open(f):
+                      try:
+                          d = json.loads(line)
+                          if 'response_cost' in d:
+                              total_cost += float(d.get('response_cost', 0))
+                              total_in += int(d.get('input_tokens', 0) or d.get('prompt_tokens', 0) or 0)
+                              total_out += int(d.get('output_tokens', 0) or d.get('completion_tokens', 0) or 0)
+                              calls += 1
+                      except: pass
+              except: pass
+          print(f'Calls: {calls}  In: {total_in:,}  Out: {total_out:,}  Cost: \${total_cost:.4f}')
+          " || echo "No cost data"
+
+      - name: Run harness (stage 1)
+        if: inputs.skip_eval != true
+        run: |
+          git clone --depth 1 --branch python-only --recursive \
+            https://github.com/microsoft/SWE-bench-Live.git /tmp/SWE-bench-Live
+          cd /tmp/SWE-bench-Live && pip install -e . && cd -
+          cd ${{ github.workspace }}
+
+          mkdir -p /tmp/merged
+          find /tmp/results -name 'output.jsonl' -exec cat {} + > /tmp/merged/output.jsonl
+          python scripts/swebench/convert_to_submission.py /tmp/merged/output.jsonl --output-dir /tmp/merged
+
+          python -m swebench.harness.run_evaluation \
+            --dataset_name SWE-bench-Live/SWE-bench-Live \
+            --split lite \
+            --namespace starryzhang \
+            --predictions_path /tmp/merged/predictions.jsonl \
+            --max_workers 1 \
+            --run_id stage1_eval \
+            2>&1 | tee /tmp/merged/eval.log
+
+          cp -v *.stage1_eval.json /tmp/merged/ 2>/dev/null || true
+          cp -v logs/run_evaluation/stage1_eval/report.json /tmp/merged/harness_report.json 2>/dev/null || true
+
+      - name: Gate check
+        id: gate
+        if: always()
+        run: |
+          python3 << 'GATE'
+          import json, os, re, glob
+
+          passed = True
+          resolved = 0
+          cost_total = 0.0
+          errors = []
+
+          # Gate 1: no reasoning tokens
+          reasoning_count = 0
+          cost_log = "/tmp/litellm_costs.jsonl"
+          if os.path.exists(cost_log):
+              for line in open(cost_log):
+                  try:
+                      r = json.loads(line)
+                      if r.get("has_reasoning"):
+                          reasoning_count += 1
+                      cost_total += r.get("cost_usd_litellm") or 0
+                  except: pass
+          if reasoning_count > 0:
+              print(f"  NOTE: reasoning in {reasoning_count} calls (non-blocking for V4-Flash)")
+
+          # Gate 2: abort flag (report only)
+          if os.path.exists("/tmp/gt_abort_reasoning.flag"):
+              print("  NOTE: abort flag present (non-blocking)")
+
+          # Gate 3: cost per task
+          cost_per = cost_total / 1  # stage 1 = 1 task
+          if cost_per > 0.20:
+              errors.append(f"cost ${cost_per:.4f} > $0.20/task")
+              passed = False
+
+          # Gate 4: L1 brief has real content
+          gt_log = "/tmp/gt_interactions.jsonl"
+          l1_bad = 0
+          if os.path.exists(gt_log):
+              for line in open(gt_log):
+                  try:
+                      r = json.loads(line)
+                      if r.get("layer") == "L1" and "Traceback" in r.get("gt_sent", ""):
+                          l1_bad += 1
+                  except: pass
+          if l1_bad > 0:
+              errors.append(f"L1 brief contains traceback ({l1_bad})")
+              passed = False
+
+          def extract_patch(record):
+              return (
+                  record.get("test_result", {}).get("git_patch", "")
+                  or record.get("git_patch", "")
+                  or ""
+              )
+
+          def extract_resolved_count(report):
+              if isinstance(report.get("resolved_instances"), int):
+                  return report["resolved_instances"]
+              if isinstance(report.get("resolved_ids"), list):
+                  return len(report["resolved_ids"])
+              if isinstance(report.get("resolved"), list):
+                  return len(report["resolved"])
+              if isinstance(report.get("resolved"), int):
+                  return report["resolved"]
+              return 0
+
+          # Gate 5: source-edit patch (report-only for stage 1 single task)
+          source_edits = 0
+          has_any_patch = 0
+          for f in glob.glob("/tmp/results/**/output.jsonl", recursive=True):
+              for line in open(f):
+                  try:
+                      r = json.loads(line)
+                      patch = extract_patch(r)
+                      if patch.strip():
+                          has_any_patch += 1
+                      if patch and re.search(r'\+\+\+ b/(?!reproduce_|debug_|test_simple).*\.py', patch):
+                          source_edits += 1
+                  except: pass
+          print(f"  Patches: {has_any_patch} total, {source_edits} source-edit (report-only for stage 1)")
+
+          # Resolved count from harness
+          for f in glob.glob("/tmp/merged/harness_report.json"):
+              try:
+                  report = json.loads(open(f).read())
+                  resolved = extract_resolved_count(report)
+              except: pass
+
+          result = "true" if passed else "false"
+          print(f"=== STAGE 1 GATE: {'PASS' if passed else 'FAIL'} ===")
+          print(f"  Reasoning: {reasoning_count}, Cost: ${cost_total:.4f} (${cost_per:.4f}/task)")
+          print(f"  L1 bad: {l1_bad}, Source edits: {source_edits}, Resolved: {resolved}")
+          if errors:
+              for e in errors: print(f"  ::error::{e}")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"passed={result}\n")
+              f.write(f"resolved={resolved}\n")
+              f.write(f"cost={cost_total:.4f}\n")
+          GATE
+
+      - name: Upload stage1 results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: stage1-results
+          path: |
+            /tmp/results/**/output.jsonl
+            /tmp/results/**/infer_logs/
+            /tmp/canary_response.json
+            /tmp/results/run.log
+            /tmp/gt_interactions.jsonl
+            /tmp/litellm_costs.jsonl
+            /tmp/gt_abort_reasoning.flag
+            /tmp/gt_iter_metrics.jsonl
+            /tmp/gt_diff_timeline.jsonl
+            /tmp/gt_task_metrics.jsonl
+            /tmp/merged/
+          retention-days: 30
+
+  # ==================== STAGE 2: 5-task breadth test ====================
+  stage2_prepare:
+    needs: stage1
+    runs-on: ubuntu-latest
+    if: always() && (needs.stage1.outputs.passed == 'true' || inputs.start_stage == '2')
+    outputs:
+      matrix: ${{ steps.split.outputs.matrix }}
+    steps:
+      - id: split
+        run: |
+          TASKS=(
+            "delgan__loguru-1297"
+            "delgan__loguru-1306"
+            "flexget__flexget-4306"
+            "flexget__flexget-4244"
+            "kozea__weasyprint-2300"
+          )
+          MATRIX='{"include":['
+          for i in "${!TASKS[@]}"; do
+            [ $i -gt 0 ] && MATRIX+=','
+            MATRIX+="{\"batch_id\":$i,\"tasks\":\"${TASKS[$i]}\"}"
+          done
+          MATRIX+=']}'
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "Stage 2 matrix: 5 tasks"
+
+  stage2_eval:
+    needs: stage2_prepare
+    if: always() && needs.stage2_prepare.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      matrix: ${{ fromJson(needs.stage2_prepare.outputs.matrix) }}
+      fail-fast: false
+      max-parallel: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.gt_commit }}
+
+      - name: Setup eval environment
+        uses: ./.github/actions/setup-eval
+
+      - name: Authenticate to GCP
+        id: gcp-auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.GCP_WIF_PROVIDER }}
+          service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
+          token_format: 'access_token'
+
+      - name: Canary (Vertex MaaS)
+        run: |
+          TOKEN="${{ steps.gcp-auth.outputs.access_token }}"
+          RESP=$(curl -s --max-time 60 \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "x-goog-user-project: ${{ env.GCP_PROJECT }}" \
+            -H "Content-Type: application/json" \
+            "https://aiplatform.googleapis.com/v1/projects/${{ env.GCP_PROJECT }}/locations/global/endpoints/openapi/chat/completions" \
+            -d '{"model":"qwen/qwen3-coder-480b-a35b-instruct-maas","messages":[{"role":"user","content":"What is 2+2?"}],"max_tokens":50,"temperature":0.7}')
+          echo "$RESP" > /tmp/canary_response.json
+          python3 -c "import json; d=json.loads(open('/tmp/canary_response.json').read()); d=d[0] if isinstance(d,list) else d; assert 'choices' in d, f'Canary failed: {d}'; print(f'Canary OK: {d[\"usage\"]}')"
+
+      - name: Write OH config
+        run: |
+          MODEL="${{ inputs.model_override }}"
+          if [ -z "$MODEL" ]; then
+            MODEL="openai/qwen/qwen3-coder-480b-a35b-instruct-maas"
+            API_KEY="${{ steps.gcp-auth.outputs.access_token }}"
+            BASE_URL="https://aiplatform.googleapis.com/v1/projects/${{ env.GCP_PROJECT }}/locations/global/endpoints/openapi"
+            PROVIDER="openai"
+          elif [[ "$MODEL" == openrouter/* ]]; then
+            API_KEY="${{ secrets.OPENROUTER_KEY }}"
+            BASE_URL="https://openrouter.ai/api/v1"
+            PROVIDER=""
+          else
+            API_KEY="${{ steps.gcp-auth.outputs.access_token }}"
+            BASE_URL="https://aiplatform.googleapis.com/v1/projects/${{ env.GCP_PROJECT }}/locations/global/endpoints/openapi"
+            PROVIDER="openai"
+          fi
+          cat > config.toml << TOML
+          [core]
+          max_iterations = ${{ inputs.max_iterations }}
+          default_agent = "CodeActAgent"
+
+          [llm.eval]
+          model = "$MODEL"
+          api_key = "$API_KEY"
+          base_url = "$BASE_URL"
+          custom_llm_provider = "$PROVIDER"
+          temperature = 0.7
+          top_p = 0.8
+          max_output_tokens = 65536
+          caching_prompt = false
+          drop_params = true
+          num_retries = 5
+          timeout = 300
+
+          [sandbox]
+          runtime_container_image = "ghcr.io/all-hands-ai/runtime:0.54-nikolaik"
+
+          # condenser OFF — GCP baseline had no condenser
+          TOML
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull Docker images
+        run: |
+          GHCR_PREFIX="ghcr.io/${{ github.repository_owner }}"
+          IFS=',' read -ra TASK_ARRAY <<< "${{ matrix.tasks }}"
+          for TASK in "${TASK_ARRAY[@]}"; do
+            REPO=$(echo "$TASK" | cut -d'_' -f1)
+            REST=$(echo "$TASK" | sed "s/^${REPO}__//")
+            BASENAME="sweb.eval.x86_64.${REPO}_1776_${REST}"
+            GHCR_IMAGE="${GHCR_PREFIX}/${BASENAME}:latest"
+            DOCKERHUB_IMAGE="docker.io/starryzhang/${BASENAME}:latest"
+            docker pull "$GHCR_IMAGE" 2>/dev/null && docker tag "$GHCR_IMAGE" "$DOCKERHUB_IMAGE" \
+              || docker pull "$DOCKERHUB_IMAGE" || echo "WARN: pull failed for $TASK"
+          done
+
+      - name: Run evaluation
+        env:
+          PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
+          GT_INDEX_BINARY: "/tmp/gt-index"
+          VERTEX_AI_PROJECT: ${{ env.GCP_PROJECT }}
+          VERTEX_AI_LOCATION: "global"
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ steps.gcp-auth.outputs.credentials_file_path }}
+          EVAL_CONDENSER: ""
+        run: |
+          mkdir -p /tmp/results
+          python scripts/swebench/oh_gt_full_wrapper.py \
+            --instance-ids '${{ matrix.tasks }}' \
+            -l eval \
+            -i ${{ inputs.max_iterations }} \
+            --eval-num-workers 1 \
+            --eval-output-dir /tmp/results \
+            --dataset 'SWE-bench-Live/SWE-bench-Live' \
+            --split lite \
+            2>&1 | tee /tmp/results/run.log
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: stage2-batch-${{ matrix.batch_id }}
+          path: |
+            /tmp/results/**/output.jsonl
+            /tmp/results/**/infer_logs/
+            /tmp/canary_response.json
+            /tmp/results/run.log
+            /tmp/gt_interactions.jsonl
+            /tmp/litellm_costs.jsonl
+            /tmp/gt_abort_reasoning.flag
+            /tmp/gt_iter_metrics.jsonl
+            /tmp/gt_diff_timeline.jsonl
+            /tmp/gt_task_metrics.jsonl
+          retention-days: 30
+
+  stage2_gate:
+    needs: [stage2_eval, stage2_prepare]
+    runs-on: ubuntu-latest
+    if: always() && needs.stage2_eval.result != 'skipped'
+    outputs:
+      passed: ${{ steps.gate.outputs.passed }}
+      resolved: ${{ steps.gate.outputs.resolved }}
+      cost: ${{ steps.gate.outputs.cost }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Download stage2 artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/all_results
+          pattern: stage2-batch-*
+
+      - name: Merge results
+        run: |
+          mkdir -p /tmp/merged
+          find /tmp/all_results -name 'output.jsonl' -exec cat {} + > /tmp/merged/output.jsonl
+          echo "Merged $(wc -l < /tmp/merged/output.jsonl) tasks"
+
+          # Merge cost + GT interaction logs
+          find /tmp/all_results -name 'litellm_costs.jsonl' -exec cat {} + > /tmp/merged/litellm_costs.jsonl 2>/dev/null || true
+          find /tmp/all_results -name 'gt_interactions.jsonl' -exec cat {} + > /tmp/merged/gt_interactions.jsonl 2>/dev/null || true
+          find /tmp/all_results -name 'gt_abort_reasoning.flag' -exec cp {} /tmp/merged/ \; 2>/dev/null || true
+
+      - name: Run harness
+        if: inputs.skip_eval != true
+        run: |
+          git clone --depth 1 --branch python-only --recursive \
+            https://github.com/microsoft/SWE-bench-Live.git /tmp/SWE-bench-Live
+          cd /tmp/SWE-bench-Live && pip install -e . && cd -
+          pip install datasets
+
+          python scripts/swebench/convert_to_submission.py \
+            /tmp/merged/output.jsonl --output-dir /tmp/merged
+
+          # Log in to GHCR for harness Docker pulls
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin 2>/dev/null || true
+
+          python -m swebench.harness.run_evaluation \
+            --dataset_name SWE-bench-Live/SWE-bench-Live \
+            --split lite \
+            --namespace starryzhang \
+            --predictions_path /tmp/merged/predictions.jsonl \
+            --max_workers 4 \
+            --run_id stage2_eval \
+            2>&1 | tee /tmp/merged/eval.log
+
+          cp -v *.stage2_eval.json /tmp/merged/ 2>/dev/null || true
+          cp -v logs/run_evaluation/stage2_eval/report.json /tmp/merged/harness_report.json 2>/dev/null || true
+
+      - name: Gate check
+        id: gate
+        if: always()
+        run: |
+          python3 << 'GATE'
+          import json, os, re, glob
+
+          TASK_COUNT = 5
+          passed = True
+          resolved = 0
+          cost_total = 0.0
+          errors = []
+
+          cost_log = "/tmp/merged/litellm_costs.jsonl"
+          reasoning_count = 0
+          if os.path.exists(cost_log):
+              for line in open(cost_log):
+                  try:
+                      r = json.loads(line)
+                      if r.get("has_reasoning"): reasoning_count += 1
+                      cost_total += r.get("cost_usd_litellm") or 0
+                  except: pass
+          if reasoning_count > 0:
+              print(f"  NOTE: reasoning in {reasoning_count} calls (non-blocking for V4-Flash)")
+
+          if os.path.exists("/tmp/merged/gt_abort_reasoning.flag"):
+              print("  NOTE: abort flag present (non-blocking)")
+
+          cost_per = cost_total / max(TASK_COUNT, 1)
+          if cost_per > 0.20:
+              errors.append(f"cost ${cost_per:.4f} > $0.20/task"); passed = False
+
+          gt_log = "/tmp/merged/gt_interactions.jsonl"
+          l1_bad = 0
+          if os.path.exists(gt_log):
+              for line in open(gt_log):
+                  try:
+                      r = json.loads(line)
+                      if r.get("layer") == "L1" and "Traceback" in r.get("gt_sent", ""):
+                          l1_bad += 1
+                  except: pass
+          if l1_bad > 0:
+              errors.append(f"L1 traceback ({l1_bad})"); passed = False
+
+          def extract_patch(record):
+              return (
+                  record.get("test_result", {}).get("git_patch", "")
+                  or record.get("git_patch", "")
+                  or ""
+              )
+
+          def extract_resolved_count(report):
+              if isinstance(report.get("resolved_instances"), int):
+                  return report["resolved_instances"]
+              if isinstance(report.get("resolved_ids"), list):
+                  return len(report["resolved_ids"])
+              if isinstance(report.get("resolved"), list):
+                  return len(report["resolved"])
+              if isinstance(report.get("resolved"), int):
+                  return report["resolved"]
+              return 0
+
+          source_edits = 0
+          output_file = "/tmp/merged/output.jsonl"
+          if os.path.exists(output_file):
+              for line in open(output_file):
+                  try:
+                      r = json.loads(line)
+                      patch = extract_patch(r)
+                      if patch and re.search(r'\+\+\+ b/(?!reproduce_|debug_|test_simple).*\.py', patch):
+                          source_edits += 1
+                  except: pass
+          if source_edits < 1:
+              errors.append(f"no source-edit patches ({source_edits})"); passed = False
+
+          for f in glob.glob("/tmp/merged/harness_report.json"):
+              try:
+                  report = json.loads(open(f).read())
+                  resolved = extract_resolved_count(report)
+              except: pass
+
+          result = "true" if passed else "false"
+          print(f"=== STAGE 2 GATE: {'PASS' if passed else 'FAIL'} ===")
+          print(f"  Tasks: {TASK_COUNT}, Reasoning: {reasoning_count}, Cost: ${cost_total:.4f} (${cost_per:.4f}/task)")
+          print(f"  L1 bad: {l1_bad}, Source edits: {source_edits}, Resolved: {resolved}/{TASK_COUNT}")
+          for e in errors: print(f"  ::error::{e}")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"passed={result}\n")
+              f.write(f"resolved={resolved}\n")
+              f.write(f"cost={cost_total:.4f}\n")
+          GATE
+
+      - name: Upload stage2 merged
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: stage2-merged
+          path: /tmp/merged/
+          retention-days: 30
+
+  # ==================== STAGE 3: Full 20-task run ====================
+  stage3_prepare:
+    needs: stage2_gate
+    runs-on: ubuntu-latest
+    if: always() && (needs.stage2_gate.outputs.passed == 'true' || inputs.start_stage == '3')
+    outputs:
+      matrix: ${{ steps.split.outputs.matrix }}
+    steps:
+      - id: split
+        run: |
+          TASKS=(
+            "delgan__loguru-1297"
+            "delgan__loguru-1306"
+            "flexget__flexget-4306"
+            "flexget__flexget-4244"
+            "kozea__weasyprint-2300"
+            "kozea__weasyprint-2387"
+            "kozea__weasyprint-2405"
+            "kozea__weasyprint-2398"
+            "kozea__weasyprint-2303"
+            "pypsa__pypsa-1172"
+            "pypsa__pypsa-1112"
+            "pypsa__pypsa-1091"
+            "pypsa__pypsa-1195"
+            "aiogram__aiogram-1594"
+            "amoffat__sh-744"
+            "arviz-devs__arviz-2413"
+            "aws-cloudformation__cfn-lint-3875"
+            "aws-cloudformation__cfn-lint-3890"
+            "aws-cloudformation__cfn-lint-3855"
+            "aws-cloudformation__cfn-lint-4023"
+          )
+          MATRIX='{"include":['
+          for i in "${!TASKS[@]}"; do
+            [ $i -gt 0 ] && MATRIX+=','
+            MATRIX+="{\"batch_id\":$i,\"tasks\":\"${TASKS[$i]}\"}"
+          done
+          MATRIX+=']}'
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "Stage 3 matrix: 20 tasks"
+
+  stage3_eval:
+    needs: stage3_prepare
+    if: always() && needs.stage3_prepare.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      matrix: ${{ fromJson(needs.stage3_prepare.outputs.matrix) }}
+      fail-fast: false
+      max-parallel: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.gt_commit }}
+
+      - name: Setup eval environment
+        uses: ./.github/actions/setup-eval
+
+      - name: Authenticate to GCP
+        id: gcp-auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.GCP_WIF_PROVIDER }}
+          service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
+          token_format: 'access_token'
+
+      - name: Canary (Vertex MaaS)
+        run: |
+          TOKEN="${{ steps.gcp-auth.outputs.access_token }}"
+          RESP=$(curl -s --max-time 60 \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "x-goog-user-project: ${{ env.GCP_PROJECT }}" \
+            -H "Content-Type: application/json" \
+            "https://aiplatform.googleapis.com/v1/projects/${{ env.GCP_PROJECT }}/locations/global/endpoints/openapi/chat/completions" \
+            -d '{"model":"qwen/qwen3-coder-480b-a35b-instruct-maas","messages":[{"role":"user","content":"What is 2+2?"}],"max_tokens":50,"temperature":0.7}')
+          echo "$RESP" > /tmp/canary_response.json
+          python3 -c "import json; d=json.loads(open('/tmp/canary_response.json').read()); d=d[0] if isinstance(d,list) else d; assert 'choices' in d, f'Canary failed: {d}'; print(f'Canary OK: {d[\"usage\"]}')"
+
+      - name: Write OH config
+        run: |
+          MODEL="${{ inputs.model_override }}"
+          if [ -z "$MODEL" ]; then
+            MODEL="openai/qwen/qwen3-coder-480b-a35b-instruct-maas"
+            API_KEY="${{ steps.gcp-auth.outputs.access_token }}"
+            BASE_URL="https://aiplatform.googleapis.com/v1/projects/${{ env.GCP_PROJECT }}/locations/global/endpoints/openapi"
+            PROVIDER="openai"
+          elif [[ "$MODEL" == openrouter/* ]]; then
+            API_KEY="${{ secrets.OPENROUTER_KEY }}"
+            BASE_URL="https://openrouter.ai/api/v1"
+            PROVIDER=""
+          else
+            API_KEY="${{ steps.gcp-auth.outputs.access_token }}"
+            BASE_URL="https://aiplatform.googleapis.com/v1/projects/${{ env.GCP_PROJECT }}/locations/global/endpoints/openapi"
+            PROVIDER="openai"
+          fi
+          cat > config.toml << TOML
+          [core]
+          max_iterations = ${{ inputs.max_iterations }}
+          default_agent = "CodeActAgent"
+
+          [llm.eval]
+          model = "$MODEL"
+          api_key = "$API_KEY"
+          base_url = "$BASE_URL"
+          custom_llm_provider = "$PROVIDER"
+          temperature = 0.7
+          top_p = 0.8
+          max_output_tokens = 65536
+          caching_prompt = false
+          drop_params = true
+          num_retries = 5
+          timeout = 300
+
+          [sandbox]
+          runtime_container_image = "ghcr.io/all-hands-ai/runtime:0.54-nikolaik"
+
+          # condenser OFF — GCP baseline had no condenser
+          TOML
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull Docker images
+        run: |
+          GHCR_PREFIX="ghcr.io/${{ github.repository_owner }}"
+          IFS=',' read -ra TASK_ARRAY <<< "${{ matrix.tasks }}"
+          for TASK in "${TASK_ARRAY[@]}"; do
+            REPO=$(echo "$TASK" | cut -d'_' -f1)
+            REST=$(echo "$TASK" | sed "s/^${REPO}__//")
+            BASENAME="sweb.eval.x86_64.${REPO}_1776_${REST}"
+            GHCR_IMAGE="${GHCR_PREFIX}/${BASENAME}:latest"
+            DOCKERHUB_IMAGE="docker.io/starryzhang/${BASENAME}:latest"
+            docker pull "$GHCR_IMAGE" 2>/dev/null && docker tag "$GHCR_IMAGE" "$DOCKERHUB_IMAGE" \
+              || docker pull "$DOCKERHUB_IMAGE" || echo "WARN: pull failed for $TASK"
+          done
+
+      - name: Run evaluation
+        env:
+          PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
+          GT_INDEX_BINARY: "/tmp/gt-index"
+          VERTEX_AI_PROJECT: ${{ env.GCP_PROJECT }}
+          VERTEX_AI_LOCATION: "global"
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ steps.gcp-auth.outputs.credentials_file_path }}
+          EVAL_CONDENSER: ""
+        run: |
+          mkdir -p /tmp/results
+          python scripts/swebench/oh_gt_full_wrapper.py \
+            --instance-ids '${{ matrix.tasks }}' \
+            -l eval \
+            -i ${{ inputs.max_iterations }} \
+            --eval-num-workers 1 \
+            --eval-output-dir /tmp/results \
+            --dataset 'SWE-bench-Live/SWE-bench-Live' \
+            --split lite \
+            2>&1 | tee /tmp/results/run.log
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: stage3-batch-${{ matrix.batch_id }}
+          path: |
+            /tmp/results/**/output.jsonl
+            /tmp/results/**/infer_logs/
+            /tmp/canary_response.json
+            /tmp/results/run.log
+            /tmp/gt_interactions.jsonl
+            /tmp/litellm_costs.jsonl
+            /tmp/gt_abort_reasoning.flag
+            /tmp/gt_iter_metrics.jsonl
+            /tmp/gt_diff_timeline.jsonl
+            /tmp/gt_task_metrics.jsonl
+          retention-days: 30
+
+  stage3_gate:
+    needs: [stage3_eval, stage3_prepare]
+    runs-on: ubuntu-latest
+    if: always() && needs.stage3_eval.result != 'skipped'
+    outputs:
+      passed: ${{ steps.gate.outputs.passed }}
+      resolved: ${{ steps.gate.outputs.resolved }}
+      cost: ${{ steps.gate.outputs.cost }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Download stage3 artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/all_results
+          pattern: stage3-batch-*
+
+      - name: Merge results
+        run: |
+          mkdir -p /tmp/merged
+          find /tmp/all_results -name 'output.jsonl' -exec cat {} + > /tmp/merged/output.jsonl
+          echo "Merged $(wc -l < /tmp/merged/output.jsonl) tasks"
+          find /tmp/all_results -name 'litellm_costs.jsonl' -exec cat {} + > /tmp/merged/litellm_costs.jsonl 2>/dev/null || true
+          find /tmp/all_results -name 'gt_interactions.jsonl' -exec cat {} + > /tmp/merged/gt_interactions.jsonl 2>/dev/null || true
+          find /tmp/all_results -name 'gt_abort_reasoning.flag' -exec cp {} /tmp/merged/ \; 2>/dev/null || true
+
+      - name: Run harness
+        if: inputs.skip_eval != true
+        run: |
+          git clone --depth 1 --branch python-only --recursive \
+            https://github.com/microsoft/SWE-bench-Live.git /tmp/SWE-bench-Live
+          cd /tmp/SWE-bench-Live && pip install -e . && cd -
+          pip install datasets
+
+          python scripts/swebench/convert_to_submission.py \
+            /tmp/merged/output.jsonl --output-dir /tmp/merged
+
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin 2>/dev/null || true
+
+          python -m swebench.harness.run_evaluation \
+            --dataset_name SWE-bench-Live/SWE-bench-Live \
+            --split lite \
+            --namespace starryzhang \
+            --predictions_path /tmp/merged/predictions.jsonl \
+            --max_workers 4 \
+            --run_id stage3_eval \
+            2>&1 | tee /tmp/merged/eval.log
+
+          cp -v *.stage3_eval.json /tmp/merged/ 2>/dev/null || true
+          cp -v logs/run_evaluation/stage3_eval/report.json /tmp/merged/harness_report.json 2>/dev/null || true
+
+      - name: Gate check
+        id: gate
+        if: always()
+        run: |
+          python3 << 'GATE'
+          import json, os, re, glob
+
+          TASK_COUNT = 20
+          passed = True
+          resolved = 0
+          cost_total = 0.0
+          errors = []
+
+          cost_log = "/tmp/merged/litellm_costs.jsonl"
+          reasoning_count = 0
+          if os.path.exists(cost_log):
+              for line in open(cost_log):
+                  try:
+                      r = json.loads(line)
+                      if r.get("has_reasoning"): reasoning_count += 1
+                      cost_total += r.get("cost_usd_litellm") or 0
+                  except: pass
+          if reasoning_count > 0:
+              print(f"  NOTE: reasoning in {reasoning_count} calls (non-blocking for V4-Flash)")
+
+          if os.path.exists("/tmp/merged/gt_abort_reasoning.flag"):
+              print("  NOTE: abort flag present (non-blocking)")
+
+          cost_per = cost_total / max(TASK_COUNT, 1)
+          if cost_per > 0.20:
+              errors.append(f"cost ${cost_per:.4f} > $0.20/task"); passed = False
+
+          gt_log = "/tmp/merged/gt_interactions.jsonl"
+          l1_bad = 0
+          if os.path.exists(gt_log):
+              for line in open(gt_log):
+                  try:
+                      r = json.loads(line)
+                      if r.get("layer") == "L1" and "Traceback" in r.get("gt_sent", ""):
+                          l1_bad += 1
+                  except: pass
+          if l1_bad > 0:
+              errors.append(f"L1 traceback ({l1_bad})"); passed = False
+
+          def extract_patch(record):
+              return (
+                  record.get("test_result", {}).get("git_patch", "")
+                  or record.get("git_patch", "")
+                  or ""
+              )
+
+          def extract_resolved_count(report):
+              if isinstance(report.get("resolved_instances"), int):
+                  return report["resolved_instances"]
+              if isinstance(report.get("resolved_ids"), list):
+                  return len(report["resolved_ids"])
+              if isinstance(report.get("resolved"), list):
+                  return len(report["resolved"])
+              if isinstance(report.get("resolved"), int):
+                  return report["resolved"]
+              return 0
+
+          source_edits = 0
+          output_file = "/tmp/merged/output.jsonl"
+          if os.path.exists(output_file):
+              for line in open(output_file):
+                  try:
+                      r = json.loads(line)
+                      patch = extract_patch(r)
+                      if patch and re.search(r'\+\+\+ b/(?!reproduce_|debug_|test_simple).*\.py', patch):
+                          source_edits += 1
+                  except: pass
+          if source_edits < 1:
+              errors.append(f"no source-edit patches ({source_edits})"); passed = False
+
+          for f in glob.glob("/tmp/merged/harness_report.json"):
+              try:
+                  report = json.loads(open(f).read())
+                  resolved = extract_resolved_count(report)
+              except: pass
+
+          result = "true" if passed else "false"
+          print(f"=== STAGE 3 GATE: {'PASS' if passed else 'FAIL'} ===")
+          print(f"  Tasks: {TASK_COUNT}, Reasoning: {reasoning_count}, Cost: ${cost_total:.4f} (${cost_per:.4f}/task)")
+          print(f"  L1 bad: {l1_bad}, Source edits: {source_edits}, Resolved: {resolved}/{TASK_COUNT}")
+          for e in errors: print(f"  ::error::{e}")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"passed={result}\n")
+              f.write(f"resolved={resolved}\n")
+              f.write(f"cost={cost_total:.4f}\n")
+          GATE
+
+      - name: Upload stage3 merged
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: stage3-merged
+          path: /tmp/merged/
+          retention-days: 30
+
+  # ==================== SUMMARY ====================
+  summary:
+    needs: [stage1, stage2_gate, stage3_gate]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Build summary
+        run: |
+          python3 << 'SUMMARY'
+          import os
+
+          s1_passed = "${{ needs.stage1.outputs.passed }}" or "skipped"
+          s1_resolved = "${{ needs.stage1.outputs.resolved }}" or "?"
+          s1_cost = "${{ needs.stage1.outputs.cost }}" or "?"
+
+          s2_passed = "${{ needs.stage2_gate.outputs.passed }}" or "skipped"
+          s2_resolved = "${{ needs.stage2_gate.outputs.resolved }}" or "?"
+          s2_cost = "${{ needs.stage2_gate.outputs.cost }}" or "?"
+
+          s3_passed = "${{ needs.stage3_gate.outputs.passed }}" or "skipped"
+          s3_resolved = "${{ needs.stage3_gate.outputs.resolved }}" or "?"
+          s3_cost = "${{ needs.stage3_gate.outputs.cost }}" or "?"
+
+          def verdict(p):
+              if p == "true": return "PASS"
+              if p == "false": return "FAIL"
+              return "SKIPPED"
+
+          all_passed = s1_passed == "true" and s2_passed == "true" and s3_passed == "true"
+          scale = "YES" if all_passed else "NO"
+          if s3_passed == "skipped" and s2_passed == "true":
+              scale = "NEEDS-REVIEW (stage 3 not reached)"
+
+          md = f"""# 480B Direct Cascade Results
+
+          | Stage | Tasks | Resolved | Cost | Verdict |
+          |-------|-------|----------|------|---------|
+          | 1 (cfn-lint-4023) | 1 | {s1_resolved} | ${s1_cost} | {verdict(s1_passed)} |
+          | 2 (5 tasks) | 5 | {s2_resolved} | ${s2_cost} | {verdict(s2_passed)} |
+          | 3 (20 tasks) | 20 | {s3_resolved} | ${s3_cost} | {verdict(s3_passed)} |
+
+          **READY TO SCALE TO 300-TASK LIVE LITE: {scale}**
+          """
+
+          import textwrap
+          md = textwrap.dedent(md)
+          print(md)
+
+          os.makedirs("/tmp/summary", exist_ok=True)
+          with open("/tmp/summary/summary.md", "w") as f:
+              f.write(md)
+          SUMMARY
+
+      - name: Upload summary
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cascade-summary
+          path: /tmp/summary/summary.md
+          retention-days: 90

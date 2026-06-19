@@ -1,0 +1,444 @@
+"""Four-pillar ego-graph — the context an agent needs to write correct code.
+
+GT Context Philosophy (CLAUDE.md):
+  1. Contract (signature, return type) — ALWAYS needed
+  2. Consistency (structural twins, parallel patterns) — ALWAYS needed
+  3. Callers (who uses this, how) — ALWAYS needed
+  4. Completeness (co-change, scope) — ALWAYS needed
+
+Items 1, 2, 4 don't require verified graph edges. Only item 3 (callers)
+requires them. The ego-graph carries all four in one compact structure.
+
+Research:
+  RepoGraph (ICLR 2025): k-hop ego-graphs, 32.8% relative improvement
+  RepoScope (2025): four-view context (callers, call chains, similar, fragments)
+  CodePlan (FSE 2024): change-may-impact via CalledBy edges
+  ORACLE-SWE (2026): test assertions #1 signal when available, but not always available
+  Codebase-Memory (2026): 10x fewer tokens via structured rendering
+
+Our edge: 100% deterministic. No embeddings, no LLM. Same graph.db = same output.
+"""
+from __future__ import annotations
+
+import os
+import sqlite3
+from dataclasses import dataclass, field
+
+
+@dataclass
+class EgoNode:
+    id: int
+    name: str
+    label: str  # Function, Method, Class, etc.
+    file_path: str
+    start_line: int = 0
+    is_test: bool = False
+    hop: int = 0  # distance from center
+
+
+@dataclass
+class EgoEdge:
+    source_id: int
+    target_id: int
+    edge_type: str  # CALLS, IMPORTS, EXTENDS, IMPLEMENTS
+    confidence: float = 0.0
+    source_line: int = 0
+
+
+@dataclass
+class EgoGraph:
+    center: EgoNode | None = None
+    nodes: dict[int, EgoNode] = field(default_factory=dict)
+    edges: list[EgoEdge] = field(default_factory=list)
+    k: int = 1
+    # Pillar 1: Contract
+    signature: str = ""
+    return_type: str = ""
+    guards: list[str] = field(default_factory=list)  # guard_clause properties
+    # Pillar 2: Consistency
+    obligations: list[str] = field(default_factory=list)  # shared-state siblings
+    # Pillar 4: Completeness (tests as bonus)
+    test_assertions: list[str] = field(default_factory=list)
+
+    @property
+    def callers(self) -> list[EgoNode]:
+        if not self.center:
+            return []
+        caller_ids = {e.source_id for e in self.edges
+                      if e.target_id == self.center.id and e.edge_type == "CALLS"}
+        return [self.nodes[i] for i in caller_ids if i in self.nodes]
+
+    @property
+    def callees(self) -> list[EgoNode]:
+        if not self.center:
+            return []
+        callee_ids = {e.target_id for e in self.edges
+                      if e.source_id == self.center.id and e.edge_type == "CALLS"}
+        return [self.nodes[i] for i in callee_ids if i in self.nodes]
+
+    @property
+    def parent_class(self) -> EgoNode | None:
+        if not self.center:
+            return None
+        for e in self.edges:
+            if e.source_id == self.center.id and e.edge_type in ("EXTENDS", "IMPLEMENTS"):
+                return self.nodes.get(e.target_id)
+        return None
+
+    def render(self, max_tokens: int = 200) -> str:
+        """Four-pillar rendering: Contract → Callers → Consistency → Tests.
+
+        CLAUDE.md: Contract first (ALWAYS needed), callers second,
+        consistency third, tests as bonus. Structure-preserving
+        indentation (RepoScope 2025).
+        """
+        if not self.center:
+            return ""
+        parts = [f"{self.center.name}() in {_basename(self.center.file_path)}:{self.center.start_line}"]
+
+        # Pillar 1: Contract (ALWAYS needed, ALWAYS available)
+        if self.signature:
+            parts.append(f"  sig: {self.signature[:100]}")
+        if self.return_type:
+            parts.append(f"  returns: {self.return_type}")
+        for g in self.guards[:3]:
+            parts.append(f"  PRESERVE: {g[:80]}")
+
+        # Pillar 3: Callers (needs verified edges). SWAP-INVARIANT: test callers are NEVER
+        # surfaced — a test function's name is a grader reference (run15 leak class). Filter
+        # is_test out at the source so no consumer of render() can leak it.
+        callers = [c for c in self.callers if not c.is_test]
+        if callers:
+            parts.append("Called by:")
+            for c in sorted(callers, key=lambda x: x.file_path)[:5]:
+                parts.append(f"  {c.name}() {_basename(c.file_path)}:{c.start_line}")
+                if self.k >= 2:
+                    c_callers = [e for e in self.edges
+                                 if e.target_id == c.id and e.edge_type == "CALLS"
+                                 and e.source_id != self.center.id]
+                    for cc_edge in c_callers[:2]:
+                        cc = self.nodes.get(cc_edge.source_id)
+                        if cc and not cc.is_test:
+                            parts.append(f"    {cc.name}() {_basename(cc.file_path)}:{cc.start_line}")
+
+        # Pillar 2: Consistency (shared state = change-may-impact)
+        if self.obligations:
+            parts.append("Shares state with:")
+            for o in self.obligations[:3]:
+                parts.append(f"  {o}")
+
+        # Pillar 4: Tests — DISABLED (swap-invariant — run15 leak): the Tests: block surfaced
+        # test names + assertion bodies. GT surfaces ZERO test references.
+        # if self.test_assertions:
+        #     parts.append("Tests:")
+        #     for t in self.test_assertions[:2]:
+        #         parts.append(f"  {t[:100]}")
+
+        # Callees (navigation aid, lower priority)
+        callees = self.callees
+        if callees:
+            parts.append("Calls:")
+            for c in callees[:3]:
+                parts.append(f"  {c.name}() in {_basename(c.file_path)}")
+
+        pc = self.parent_class
+        if pc:
+            parts.append(f"Parent: {pc.name}")
+
+        rendered = "\n".join(parts)
+        if len(rendered) > max_tokens * 4:
+            last_nl = rendered.rfind("\n", 0, max_tokens * 4)
+            rendered = rendered[:last_nl] if last_nl > 0 else rendered[:max_tokens * 4]
+        return rendered
+
+    def render_impact(self, changed_function: str = "") -> str:
+        """Render change impact analysis (CodePlan FSE 2024 format).
+
+        Shows what breaks if the center function changes:
+        transitive callers organized by hop distance.
+        """
+        if not self.center:
+            return ""
+        parts = [f"Impact of changing {self.center.name}():"]
+        callers_by_hop: dict[int, list[EgoNode]] = {}
+        for node in self.nodes.values():
+            if node.id != self.center.id and node.hop > 0:
+                is_caller = any(e.target_id == self.center.id and e.source_id == node.id
+                                for e in self.edges)
+                is_transitive = any(
+                    e.source_id == node.id and e.edge_type == "CALLS"
+                    for e in self.edges
+                ) and not is_caller
+                if is_caller or is_transitive:
+                    callers_by_hop.setdefault(node.hop, []).append(node)
+        for hop in sorted(callers_by_hop):
+            label = "direct" if hop == 1 else f"{hop}-hop"
+            parts.append(f"  {label}:")
+            for n in callers_by_hop[hop][:5]:
+                tag = " [test]" if n.is_test else ""
+                parts.append(f"    {n.name}() in {_basename(n.file_path)}:{n.start_line}{tag}")
+        if not callers_by_hop:
+            parts.append("  (no cross-file callers found)")
+        return "\n".join(parts)
+
+
+def _basename(path: str) -> str:
+    return os.path.basename(path) if path else "?"
+
+
+def ego_graph(
+    db_path: str,
+    symbol_name: str,
+    file_path: str = "",
+    *,
+    k: int = 1,
+    min_confidence: float = 0.5,
+) -> EgoGraph:
+    """Build k-hop ego-graph centered on a symbol.
+
+    Args:
+        db_path: path to graph.db
+        symbol_name: function/method/class name
+        file_path: optional file path for disambiguation
+        k: number of hops (1 or 2 recommended)
+        min_confidence: minimum edge confidence
+    """
+    result = EgoGraph(k=k)
+    if not os.path.isfile(db_path):
+        return result
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        # Find center node
+        if file_path:
+            suffix = "%" + file_path.replace("\\", "/").lstrip("/")
+            rows = conn.execute(
+                "SELECT id, name, label, file_path, start_line, is_test FROM nodes "
+                "WHERE name = ? AND file_path LIKE ? AND is_test = 0 LIMIT 1",
+                (symbol_name, suffix),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, name, label, file_path, start_line, is_test FROM nodes "
+                "WHERE name = ? AND is_test = 0 "
+                "ORDER BY (SELECT COUNT(*) FROM edges WHERE target_id = nodes.id) DESC LIMIT 1",
+                (symbol_name,),
+            ).fetchall()
+
+        if not rows:
+            return result
+
+        center_row = rows[0]
+        center = EgoNode(
+            id=center_row["id"],
+            name=center_row["name"],
+            label=center_row["label"],
+            file_path=center_row["file_path"],
+            start_line=center_row["start_line"] or 0,
+            is_test=bool(center_row["is_test"]),
+            hop=0,
+        )
+        result.center = center
+        result.nodes[center.id] = center
+
+        # BFS for k hops
+        frontier = {center.id}
+        for hop in range(1, k + 1):
+            next_frontier: set[int] = set()
+            for node_id in frontier:
+                # Outgoing edges (callees)
+                out_edges = conn.execute(
+                    "SELECT e.id, e.target_id, e.type, e.confidence, e.source_line, "
+                    "n.id as nid, n.name, n.label, n.file_path, n.start_line, n.is_test "
+                    "FROM edges e JOIN nodes n ON e.target_id = n.id "
+                    "WHERE e.source_id = ? AND COALESCE(e.confidence, 0.5) >= ? "
+                    "LIMIT 10",
+                    (node_id, min_confidence),
+                ).fetchall()
+                for row in out_edges:
+                    tid = row["target_id"]
+                    if tid not in result.nodes:
+                        result.nodes[tid] = EgoNode(
+                            id=tid, name=row["name"], label=row["label"],
+                            file_path=row["file_path"],
+                            start_line=row["start_line"] or 0,
+                            is_test=bool(row["is_test"]), hop=hop,
+                        )
+                        next_frontier.add(tid)
+                    result.edges.append(EgoEdge(
+                        source_id=node_id, target_id=tid,
+                        edge_type=row["type"], confidence=row["confidence"] or 0.0,
+                        source_line=row["source_line"] or 0,
+                    ))
+
+                # Incoming edges (callers)
+                in_edges = conn.execute(
+                    "SELECT e.id, e.source_id, e.type, e.confidence, e.source_line, "
+                    "n.id as nid, n.name, n.label, n.file_path, n.start_line, n.is_test "
+                    "FROM edges e JOIN nodes n ON e.source_id = n.id "
+                    "WHERE e.target_id = ? AND COALESCE(e.confidence, 0.5) >= ? "
+                    "LIMIT 10",
+                    (node_id, min_confidence),
+                ).fetchall()
+                for row in in_edges:
+                    sid = row["source_id"]
+                    if sid not in result.nodes:
+                        result.nodes[sid] = EgoNode(
+                            id=sid, name=row["name"], label=row["label"],
+                            file_path=row["file_path"],
+                            start_line=row["start_line"] or 0,
+                            is_test=bool(row["is_test"]), hop=hop,
+                        )
+                        next_frontier.add(sid)
+                    result.edges.append(EgoEdge(
+                        source_id=sid, target_id=node_id,
+                        edge_type=row["type"], confidence=row["confidence"] or 0.0,
+                        source_line=row["source_line"] or 0,
+                    ))
+
+            frontier = next_frontier
+
+        # Enrich center node with four-pillar data
+        if result.center:
+            cid = result.center.id
+            # Pillar 1: Contract — signature, return type, guard clauses
+            sig_row = conn.execute(
+                "SELECT signature, return_type FROM nodes WHERE id = ?", (cid,)
+            ).fetchone()
+            if sig_row:
+                result.signature = sig_row["signature"] or ""
+                result.return_type = sig_row["return_type"] or ""
+
+            try:
+                has_props = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='properties'"
+                ).fetchone()
+                if has_props:
+                    props = conn.execute(
+                        "SELECT kind, value FROM properties WHERE node_id = ? "
+                        "AND kind IN ('guard_clause', 'conditional_return', 'boundary_condition') "
+                        "ORDER BY line LIMIT 5",
+                        (cid,),
+                    ).fetchall()
+                    result.guards = [f"{p['kind']}: {p['value']}" for p in props]
+            except Exception:
+                pass
+
+            # Pillar 2: Consistency — shared-state obligations
+            # Find sibling methods in same class that share self.* attributes
+            try:
+                parent_row = conn.execute(
+                    "SELECT parent_id FROM nodes WHERE id = ?", (cid,)
+                ).fetchone()
+                if parent_row and parent_row["parent_id"]:
+                    siblings = conn.execute(
+                        "SELECT name FROM nodes WHERE parent_id = ? AND id != ? "
+                        "AND label IN ('Function', 'Method') AND is_test = 0 LIMIT 10",
+                        (parent_row["parent_id"], cid),
+                    ).fetchall()
+                    if siblings:
+                        sib_names = [s["name"] for s in siblings]  # noqa: F841
+                        # Use obligation_check if file is Python
+                        if result.center.file_path.endswith(".py"):
+                            try:
+                                from groundtruth.hooks.obligation_check import find_obligations
+                                repo_root = os.environ.get("GT_REPO_ROOT", "/testbed")
+                                obs = find_obligations(
+                                    result.center.file_path, repo_root,
+                                    {result.center.name},
+                                )
+                                result.obligations = obs[:3]
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+
+            # Pillar 4: Test assertions — DELIBERATELY NOT LOADED (legitimacy, gt_gt §349).
+            # The `assertions` table carries test NAMES + the grader's expected values; the
+            # ego render() Tests pillar is commented out and post_view nulls test_assertions,
+            # so loading it here only risks a future re-leak ("run12 leaked test_plot_hdi").
+            # The assertions table is OFF-LIMITS to every agent-facing surface; we do not even
+            # read it. result.test_assertions stays [] (its default).
+
+        return result
+    finally:
+        conn.close()  # close on ALL paths — incl. an unguarded BFS/center query error
+
+
+def change_impact(
+    db_path: str,
+    changed_function: str,
+    file_path: str = "",
+    *,
+    max_depth: int = 2,
+    min_confidence: float = 0.7,
+) -> list[dict]:
+    """Trace transitive callers impacted by a function change.
+
+    CodePlan (FSE 2024): change-may-impact analysis via CalledBy edges.
+    Returns list of impacted functions with hop distance and file path.
+    """
+    if not os.path.isfile(db_path):
+        return []
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+
+    # Find the changed node
+    if file_path:
+        suffix = "%" + file_path.replace("\\", "/").lstrip("/")
+        rows = conn.execute(
+            "SELECT id, name, file_path FROM nodes "
+            "WHERE name = ? AND file_path LIKE ? AND is_test = 0 LIMIT 1",
+            (changed_function, suffix),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT id, name, file_path FROM nodes "
+            "WHERE name = ? AND is_test = 0 LIMIT 1",
+            (changed_function,),
+        ).fetchall()
+
+    if not rows:
+        conn.close()
+        return []
+
+    center_id = rows[0]["id"]
+    impacted: list[dict] = []
+    visited: set[int] = {center_id}
+    frontier = {center_id}
+
+    for depth in range(1, max_depth + 1):
+        next_frontier: set[int] = set()
+        for node_id in frontier:
+            callers = conn.execute(
+                "SELECT DISTINCT n.id, n.name, n.file_path, n.start_line, n.is_test, "
+                "e.source_line, e.confidence "
+                "FROM edges e JOIN nodes n ON e.source_id = n.id "
+                "WHERE e.target_id = ? AND e.type = 'CALLS' "
+                "AND COALESCE(e.confidence, 0.5) >= ? "
+                # Test-blind by construction (legitimacy / swap-invariant): GT must NEVER
+                # surface a test name or count — so even if the grading test is swapped, GT's
+                # output is identical. is_test is a graph property -> language/repo-agnostic.
+                "AND n.is_test = 0 "
+                "AND n.file_path != (SELECT file_path FROM nodes WHERE id = ?) "
+                "LIMIT 10",
+                (node_id, min_confidence, center_id),
+            ).fetchall()
+            for c in callers:
+                if c["id"] not in visited:
+                    visited.add(c["id"])
+                    next_frontier.add(c["id"])
+                    impacted.append({
+                        "name": c["name"],
+                        "file": c["file_path"],
+                        "line": c["start_line"] or 0,
+                        "is_test": bool(c["is_test"]),
+                        "hop": depth,
+                        "confidence": c["confidence"] or 0.0,
+                    })
+        frontier = next_frontier
+
+    conn.close()
+    return impacted

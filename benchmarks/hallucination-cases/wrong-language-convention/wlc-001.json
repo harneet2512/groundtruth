@@ -1,0 +1,20 @@
+{
+  "id": "wlc-001",
+  "category": "wrong-language-convention",
+  "language": "typescript",
+  "description": "Used snake_case 'get_user_by_id' in TS — should be 'getUserById'",
+  "input": {
+    "code": "import { get_user_by_id } from './users/queries';\n\nconst user = await get_user_by_id(42);",
+    "filePath": "src/routes/users.ts",
+    "intent": "fetch a user by ID"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "levenshtein",
+    "correctSymbol": "getUserById",
+    "correctImport": "src/users/queries",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

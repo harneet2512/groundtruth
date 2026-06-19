@@ -1,0 +1,240 @@
+name: "Parity: whole-pipeline coverage (steps 1-5, no agent)"
+
+# Stage-1 parity measurement. For each frozen task: build graph.db FRESH from the
+# task base-commit source, run the offline LSP precision pass (cumulative substrate),
+# then measure the WHOLE pipeline (localize + generate_v1r_brief, gold_files=None) gold
+# coverage. NO agent, NO LLM, NO Docker-for-the-agent -- steps 1-5 are deterministic.
+# Run on the BASE commit (baseline) and a FIX commit (after) -> clean paired delta,
+# same runner env. Gold is the measurement yardstick only (never enters product logic).
+
+on:
+  workflow_dispatch:
+    inputs:
+      tasks:
+        description: "task_id:lang CSV (default = frozen TRAIN split, 1/lang)"
+        required: true
+        default: "expr-try-catch-errors:go,testem-per-launcher-reports:javascript,mashumaro-flattened-dataclass-fields:python,superjson-error-stack-serialization:typescript,pest-character-class-coalescing:rust"
+
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+  LANG: "C.UTF-8"
+  LC_ALL: "C.UTF-8"
+  # Whole pipeline at full potential: FTS5 in the graph, ONNX embedder ON (gte/768),
+  # forbid any prebuilt-db reuse -- index fresh per task from the base-commit source.
+  GT_REQUIRE_FTS5: "1"
+  GT_FORCE_ONNX_EMBEDDER: "1"
+  GT_REQUIRE_EMBEDDER: "1"
+  GT_FORBID_PREBUILT_GRAPH: "1"
+  GT_MODELS_ROOT: "${{ github.workspace }}/models"
+
+jobs:
+  build-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+    steps:
+      - id: gen
+        run: |
+          python3 - <<'PY'
+          import json, os
+          pairs = [p for p in os.environ["TASKS"].split(",") if p.strip()]
+          include = []
+          for p in pairs:
+              tid, _, lang = p.partition(":")
+              include.append({"task_id": tid.strip(), "lang": (lang.strip() or "python")})
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write("matrix=" + json.dumps({"include": include}) + "\n")
+          print(include)
+          PY
+        env:
+          TASKS: ${{ inputs.tasks }}
+
+  measure:
+    needs: build-matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    strategy:
+      matrix: ${{ fromJson(needs.build-matrix.outputs.matrix) }}
+      fail-fast: false
+      max-parallel: 3
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Cache ONNX embedder model
+        uses: actions/cache@v4
+        with:
+          path: models/gte-modernbert-base
+          key: gt-embed-gte-modernbert-base-onnx-v1
+
+      - name: Install groundtruth + embedder + ALL LSP servers, build gt-index
+        run: |
+          pip install -e .
+          pip install onnxruntime tokenizers huggingface_hub pyright || echo "WARN: py deps"
+          python scripts/setup_models.py || echo "WARN: embedder model fetch failed"
+          go install golang.org/x/tools/gopls@latest && sudo cp "$(go env GOPATH)/bin/gopls" /usr/local/bin/ || echo "WARN: gopls"
+          npm install -g typescript typescript-language-server || echo "WARN: ts-language-server"
+          curl -fsSL https://github.com/rust-lang/rust-analyzer/releases/latest/download/rust-analyzer-x86_64-unknown-linux-gnu.gz | gunzip -c | sudo tee /usr/local/bin/rust-analyzer >/dev/null && sudo chmod +x /usr/local/bin/rust-analyzer || echo "WARN: rust-analyzer"
+          sudo apt-get install -y ripgrep sqlite3 >/dev/null 2>&1 && echo "  rg+sqlite3 OK" || echo "WARN: rg/sqlite3"
+          (cd gt-index && CGO_ENABLED=1 go build -tags sqlite_fts5 -o gt-index-linux ./cmd/gt-index/ && chmod +x gt-index-linux) || echo "WARN: gt-index build"
+          echo "=== installed LSP servers ==="
+          for s in pyright-langserver gopls rust-analyzer typescript-language-server; do command -v $s && echo "  $s OK" || echo "  $s MISSING"; done
+
+      - name: Clone deepswe-bench (tasks + gold)
+        run: |
+          if [ ! -d "deepswe-bench/tasks" ]; then
+            git clone --depth 1 https://github.com/datacurve-ai/deep-swe.git deepswe-bench
+          fi
+          TASK_DIR="deepswe-bench/tasks/${{ matrix.task_id }}"
+          [ -d "$TASK_DIR" ] || { echo "::error::task dir missing: $TASK_DIR"; ls deepswe-bench/tasks | head; exit 1; }
+
+      - name: Build graph.db + LSP-enrich (cumulative substrate, steps 1-2-3)
+        run: |
+          set -e
+          TASK_DIR="deepswe-bench/tasks/${{ matrix.task_id }}"
+          IMG=$(python3 -c "import tomllib;t=tomllib.load(open('$TASK_DIR/task.toml','rb'));print(t.get('environment',{}).get('docker_image',''))")
+          [ -z "$IMG" ] && { echo "::error::no docker_image in task.toml"; exit 1; }
+          echo "task image: $IMG"
+          for i in 1 2 3 4; do docker pull "$IMG" && break || { echo "pull attempt $i failed"; sleep 15; }; done
+          docker image inspect "$IMG" >/dev/null 2>&1 || { echo "::error::image pull failed"; exit 1; }
+          docker rm -f gtsrc 2>/dev/null || true
+          docker run -d --name gtsrc "$IMG" sleep 1800 >/dev/null
+          ROOT=$(docker exec gtsrc bash -c 'for d in /home/user /testbed /workspace /app /repo; do [ -d "$d/.git" ] && echo "$d" && break; done')
+          ROOT=${ROOT:-/testbed}
+          echo "repo root: $ROOT"
+          mkdir -p /tmp/gt
+          docker cp gt-index/gt-index-linux gtsrc:/tmp/gt-index && docker exec gtsrc chmod +x /tmp/gt-index
+          docker exec gtsrc /tmp/gt-index -root="$ROOT" -output=/tmp/graph.db 2>&1 | tail -3 || echo "WARN: gt-index run"
+          docker cp gtsrc:/tmp/graph.db /tmp/gt/graph.db 2>/dev/null || { echo "::error::no graph.db"; exit 1; }
+          mkdir -p /tmp/gt/src && docker cp "gtsrc:$ROOT/." /tmp/gt/src 2>/dev/null || echo "WARN: no source"
+          docker rm -f gtsrc 2>/dev/null || true
+          echo "edges total: $(sqlite3 /tmp/gt/graph.db "SELECT COUNT(*) FROM edges" 2>/dev/null || echo '?')"
+          # Snapshot the RAW resolution-method histogram BEFORE the LSP pass. The
+          # determinism test must compare raw-index vs raw-reindex (LSP-enriched-vs-raw
+          # is a guaranteed false DRIFT: the resolve pass adds lsp edges + demotes).
+          sqlite3 /tmp/gt/graph.db "SELECT resolution_method,COUNT(*) FROM edges GROUP BY 1 ORDER BY 1" 2>/dev/null > /tmp/gt/raw_hist.txt
+          RAW_HIST=$(md5sum /tmp/gt/raw_hist.txt | cut -d' ' -f1)
+          echo "GT_RAW_HIST=$RAW_HIST" >> "$GITHUB_ENV"
+          echo "raw histogram ($RAW_HIST):"; cat /tmp/gt/raw_hist.txt
+          # offline LSP precision pass on the TASK's language (the cumulative enrichment)
+          python -m groundtruth.resolve --db /tmp/gt/graph.db --root /tmp/gt/src --resolve --lang "${{ matrix.lang }}" 2>&1 | tail -3 || echo "WARN: lsp"
+          echo "lsp edges: $(sqlite3 /tmp/gt/graph.db "SELECT COUNT(*) FROM edges WHERE resolution_method='lsp'" 2>/dev/null || echo '?')"
+          echo "GT_GRAPH_DB=/tmp/gt/graph.db" >> "$GITHUB_ENV"
+          echo "GT_REPO_ROOT=/tmp/gt/src" >> "$GITHUB_ENV"
+
+      - name: Determinism check (steps 1-2 byte-stable on re-index)
+        run: |
+          # +=+ : re-index the SAME source -> resolution-method histogram must be identical.
+          docker rm -f gtdet 2>/dev/null || true
+          TASK_DIR="deepswe-bench/tasks/${{ matrix.task_id }}"
+          IMG=$(python3 -c "import tomllib;t=tomllib.load(open('$TASK_DIR/task.toml','rb'));print(t['environment']['docker_image'])")
+          docker run -d --name gtdet "$IMG" sleep 600 >/dev/null
+          ROOT=$(docker exec gtdet bash -c 'for d in /home/user /testbed /workspace /app /repo; do [ -d "$d/.git" ] && echo "$d" && break; done'); ROOT=${ROOT:-/testbed}
+          docker cp gt-index/gt-index-linux gtdet:/tmp/gt-index && docker exec gtdet chmod +x /tmp/gt-index
+          docker exec gtdet /tmp/gt-index -root="$ROOT" -output=/tmp/g2.db >/dev/null 2>&1 || true
+          docker cp gtdet:/tmp/g2.db /tmp/gt/g2.db 2>/dev/null || true
+          docker rm -f gtdet 2>/dev/null || true
+          # Compare RAW-index (snapshot before LSP) vs RAW-reindex (g2, no LSP). Both
+          # are the bare indexer output -> a true +=+ determinism test of steps 1-2.
+          H1="$GT_RAW_HIST"
+          sqlite3 /tmp/gt/g2.db "SELECT resolution_method,COUNT(*) FROM edges GROUP BY 1 ORDER BY 1" 2>/dev/null > /tmp/gt/g2_hist.txt
+          H2=$(md5sum /tmp/gt/g2_hist.txt | cut -d' ' -f1)
+          G2EDGES=$(sqlite3 /tmp/gt/g2.db "SELECT COUNT(*) FROM edges" 2>/dev/null || echo "0(BUILD-FAILED)")
+          # Disambiguate: is the data_flow PROPERTY set (parser output) non-deterministic,
+          # or only the promote EDGES derived from it? DIFFER => parser; SAME => promote.
+          DF1=$(sqlite3 /tmp/gt/graph.db "SELECT COUNT(*) FROM properties WHERE kind='data_flow'" 2>/dev/null)
+          DF2=$(sqlite3 /tmp/gt/g2.db "SELECT COUNT(*) FROM properties WHERE kind='data_flow'" 2>/dev/null)
+          echo "DATAFLOW_PROPS ${{ matrix.task_id }}: graph=$DF1 g2=$DF2 $([ "$DF1" = "$DF2" ] && echo SAME || echo DIFFER)"
+          echo "DETERMINISM ${{ matrix.task_id }}: raw=$H1 reindex=$H2 g2_edges=$G2EDGES $([ "$H1" = "$H2" ] && echo IDENTICAL || echo DRIFT)"
+          if [ "$H1" != "$H2" ]; then
+            echo "::group::DRIFT histogram diff"
+            diff <(cat /tmp/gt/raw_hist.txt) <(cat /tmp/gt/g2_hist.txt) || true
+            echo "::endgroup::"
+            # GROUND TRUTH 1 — is the data_flow PROPERTY content (not just count) identical?
+            # id-independent key: src node (file:line:name) + the property value.
+            echo "::group::DRIFT data_flow property CONTENT diff (graph vs g2; empty=parser deterministic)"
+            DFC="SELECT n.file_path||':'||COALESCE(n.start_line,0)||' '||n.name||' || '||p.value FROM properties p JOIN nodes n ON n.id=p.node_id WHERE p.kind='data_flow' ORDER BY 1"
+            diff <(sqlite3 /tmp/gt/graph.db "$DFC" 2>/dev/null) <(sqlite3 /tmp/gt/g2.db "$DFC" 2>/dev/null) | head -50 || true
+            echo "::endgroup::"
+            # GROUND TRUTH 2 — the EXACT promote_dataflow_callee edges that differ.
+            echo "::group::DRIFT promote_dataflow_callee EDGE diff (graph vs g2; id-independent)"
+            EDG="SELECT s.file_path||':'||COALESCE(s.start_line,0)||' '||s.name||' -> '||t.file_path||':'||COALESCE(t.start_line,0)||' '||t.name||' @'||COALESCE(e.source_line,0) FROM edges e JOIN nodes s ON s.id=e.source_id JOIN nodes t ON t.id=e.target_id WHERE e.resolution_method='promote_dataflow_callee' ORDER BY 1"
+            diff <(sqlite3 /tmp/gt/graph.db "$EDG" 2>/dev/null) <(sqlite3 /tmp/gt/g2.db "$EDG" 2>/dev/null) | head -80 || true
+            echo "::endgroup::"
+          fi
+
+      - name: Measure whole-pipeline coverage (steps 4-5)
+        env:
+          # Per-signal rank dump (grep/struct/sem) to stderr -> reveals WHICH ranker
+          # buries gold. Diagnostic only; no product behavior change.
+          GT_LOCALIZE_DEBUG: "1"
+        run: |
+          mkdir -p parity_out
+          python scripts/parity/measure_whole_pipeline.py \
+            --db "$GT_GRAPH_DB" --src "$GT_REPO_ROOT" \
+            --task-dir "deepswe-bench/tasks/${{ matrix.task_id }}" \
+            --lang "${{ matrix.lang }}" --task-id "${{ matrix.task_id }}" \
+            --brief-out "parity_out/${{ matrix.task_id }}.brief.txt" \
+            2>&1 | tee "parity_out/${{ matrix.task_id }}.txt"
+          grep '^PARITY_JSON ' "parity_out/${{ matrix.task_id }}.txt" | tail -1 | sed 's/^PARITY_JSON //' > "parity_out/${{ matrix.task_id }}.json" || true
+
+      - name: Upload per-task result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-${{ matrix.task_id }}
+          path: parity_out/
+          retention-days: 30
+          if-no-files-found: warn
+
+  summarize:
+    needs: measure
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Download all
+        uses: actions/download-artifact@v4
+        with:
+          pattern: parity-*
+          path: all
+          merge-multiple: true
+      - name: Aggregate 5-lang table
+        run: |
+          python3 - <<'PY'
+          import json, glob, os
+          rows = []
+          for jf in sorted(glob.glob("all/*.json")):
+              try:
+                  rows.append(json.load(open(jf)))
+              except Exception as e:
+                  print(f"skip {jf}: {e}")
+          summ = os.environ.get("GITHUB_STEP_SUMMARY")
+          lines = ["## Parity whole-pipeline coverage (steps 1-5)", "",
+                   "| lang | task | N_gold | whole_brief_cov | recall@8 | recall@15 | loc_ranks |",
+                   "|---|---|---:|:--:|:--:|:--:|---|"]
+          for r in rows:
+              lines.append(
+                  f"| {r.get('lang','?')} | {r.get('task_id','?')} | {r.get('n_gold','?')} "
+                  f"| {r.get('whole_brief_cov','ERR')}/{r.get('n_gold','?')} "
+                  f"| {r.get('recall_at_8','ERR')}/{r.get('n_gold','?')} "
+                  f"| {r.get('recall_at_15','ERR')}/{r.get('n_gold','?')} "
+                  f"| {r.get('loc_ranks','ERR')} |"
+              )
+          out = "\n".join(lines)
+          print(out)
+          if summ:
+              open(summ, "a").write(out + "\n")
+          PY

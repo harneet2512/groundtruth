@@ -1,0 +1,8 @@
+{
+  "id": "find-017",
+  "language": "go",
+  "task": "add password hashing to user creation",
+  "entry_symbols": ["CreateUser", "HashPassword"],
+  "expected_files": ["users/queries.go", "utils/crypto.go"],
+  "should_not_include": ["utils/dates.go"]
+}

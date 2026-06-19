@@ -1,0 +1,20 @@
+{
+  "id": "is-013",
+  "category": "invented-symbol",
+  "language": "go",
+  "description": "Invented 'VerifyCredentials' — should be 'Login' from auth",
+  "input": {
+    "code": "package handlers\n\nimport \"myapp/auth\"\n\nfunc AuthHandler() {\n\tresult, err := auth.VerifyCredentials(email, password)\n}",
+    "filePath": "handlers/auth.go",
+    "intent": "authenticate user with email and password"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "ai_semantic",
+    "correctSymbol": "Login",
+    "correctImport": "auth/login",
+    "shouldRequireAI": true,
+    "briefingWouldPrevent": true
+  }
+}

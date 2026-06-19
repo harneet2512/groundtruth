@@ -1,0 +1,17 @@
+{
+  "id": "ws-012",
+  "category": "wrong-signature",
+  "description": "validateEmail() called with 2 args instead of 1",
+  "input": {
+    "code": "import { validateEmail } from './utils/validation';\n\nconst ok = validateEmail(email, strict);",
+    "filePath": "src/app.ts",
+    "intent": "validate an email"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "signature_mismatch",
+    "correctSymbol": "validateEmail",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

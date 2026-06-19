@@ -1,0 +1,252 @@
+# mini-swe-agent config for DeepSWE with GroundTruth — Pier native, GEMINI variant.
+#
+# IDENTICAL GT integration to deepswe_gt_pier.yaml (same agent templates, same
+# environment, same observation contract). ONLY the model: section differs —
+# tuned for Vertex AI gemini-3-flash instead of DeepSeek.
+#
+# MODEL STRING (verified against installed litellm 1.86.1 model cost map +
+# Vertex Model Garden): `vertex_ai/gemini-3-flash-preview`. There is NO
+# `vertex_ai/gemini-3-flash` (non-preview) entry — Gemini 3 Flash is Pre-GA.
+# The model name is passed via `pier run --model ...`, NOT in this file
+# (pier injects it as mini-swe-agent's --model flag; this config carries only
+# model_kwargs/templates).
+#
+# AUTH / ENV (NO project ID, NO credentials in this file — runtime env ONLY):
+#   - pier REQUIRES `VERTEXAI_PROJECT` exported on the host for any vertex_ai/*
+#     model (pier/agents/utils.py PROVIDER_KEYS["vertex_ai"]="VERTEXAI_PROJECT");
+#     pier forwards it into the task container automatically (mini_swe_agent.py
+#     run() -> env[api_key_var] -> docker exec -e). litellm consumes it via
+#     get_secret("VERTEXAI_PROJECT") (litellm/main.py vertex_ai branch).
+#   - `VERTEXAI_LOCATION` is NOT auto-forwarded by pier (not in PROVIDER_KEYS);
+#     litellm defaults to us-central1 when unset (vertex_llm_base.py:252).
+#     Gemini 3 preview models are served via the global endpoint — the runner
+#     (scripts/vm/gt_agent_run.sh) forwards VERTEXAI_LOCATION (default: global)
+#     via --ae.
+#   - Credentials: litellm falls back to google.auth.default() (ADC) when
+#     VERTEXAI_CREDENTIALS is unset. NOTE: DeepSWE tasks set allow_internet=false,
+#     so pier puts the task container on an internal-only docker network behind a
+#     squid egress proxy allowlisting only .googleapis.com — the GCE metadata
+#     server (169.254.169.254) is NOT reachable from inside, so metadata-ADC does
+#     not work in-container. Use a service-account JSON: the runner bind-mounts
+#     $GOOGLE_APPLICATION_CREDENTIALS read-only into the container and forwards
+#     the env; its token endpoint (oauth2.googleapis.com:443) passes the proxy.
+#   - Neither pier's config heredoc (single-quoted marker, no shell expansion)
+#     nor mini-swe-agent's yaml load performs ${ENV_VAR} interpolation — which is
+#     why NO project/location value appears here at all; litellm reads them from
+#     the process env at runtime.
+#
+# Usage:
+#   VERTEXAI_PROJECT=<your-gcp-project> VERTEXAI_LOCATION=global \
+#   pier run -p deepswe-bench/tasks/<task> \
+#     --agent-import-path artifact_deepswe.gt_agent:GTMiniSweAgent \
+#     --model vertex_ai/gemini-3-flash-preview \
+#     --env docker -y \
+#     --ak config_file=artifact_deepswe/gt_integration/deepswe_gt_pier_gemini.yaml
+
+agent:
+  system_template: |
+    You are a helpful assistant that can interact with a computer shell to solve programming tasks.
+  instance_template: |
+    <pr_description>
+    Consider the following task description:
+    {{task}}
+    </pr_description>
+
+    <instructions>
+    # Task Instructions
+
+    ## Overview
+
+    You're a software engineer interacting continuously with a computer by submitting commands.
+    Your task is to implement the changes described above in the codebase.
+    Make changes to non-test source files to satisfy the requirements.
+    <IMPORTANT>This is an interactive process where you will think and issue AT LEAST ONE command, see the result, then think and issue your next command(s).</important>
+
+    For each response:
+
+    1. Include a THOUGHT section explaining your reasoning and what you're trying to accomplish
+    2. Provide one or more bash tool calls to execute
+
+    ## Codebase Intelligence Tool
+
+    GroundTruth automatically appends evidence to command output inside
+    <gt-evidence> tags when you read or edit source files. This evidence is
+    built from the codebase call graph (any language -- Go, Rust, TS, JS,
+    Python, ...) and includes:
+    - Cross-file callers of the functions in the file you opened, and how they
+      use the result (so you do not break them).
+    - Behavioral contracts: the typed signatures of the functions your edit
+      target CALLS (so you call them correctly).
+    - Sibling functions at the same scope (the patterns you must match).
+
+    Read those <gt-evidence> tags. Lines such as [WITNESS] and [CALLEE] are
+    deterministically resolved cross-file facts you cannot get from the file
+    alone; [CALLERS] location hints and scope neighbors may be unverified --
+    those are labeled "(unverified)", so treat them as leads to confirm with
+    grep, not facts. The tags appear automatically; you do not call anything.
+
+    GroundTruth may also append these blocks when relevant:
+    - <gt-contract>: signatures and verified caller counts for functions in a file you edited -- preserve those interfaces.
+    - <gt-scope>: graph-connected files around the file you are viewing -- candidate scope; confirm the edit target with grep.
+    - <gt-cochange>: files that historically changed together with the file you edited -- check whether your fix needs them too.
+    - <gt-nudge>: a one-time course-correction when your trajectory looks stuck.
+
+    ## Important Boundaries
+
+    - MODIFY: Source code files in the repository
+    - DO NOT MODIFY: Tests, configuration files, build scripts (unless directly part of the task)
+
+    ## Recommended Workflow
+
+    1. Read the task carefully. Identify the key symbols/files involved.
+    2. Explore the codebase structure: `find . -name "*.go" -o -name "*.ts" -o -name "*.py" | head -30`
+    3. Use grep/find to locate relevant files.
+    4. Read the relevant source files to understand current behavior. As you
+       read and edit, GroundTruth appends <gt-evidence> tags with the cross-file
+       callers, callee contracts, and sibling patterns -- read them.
+    5. Implement the changes. Cross-check against the callers and contracts in
+       the <gt-evidence> tags.
+    6. Run existing tests to verify: check for test scripts, Makefiles, or standard test commands.
+    7. Submit your patch.
+
+    ## Command Execution Rules
+
+    You are operating in an environment where:
+
+    1. You issue at least one command
+    2. The system executes the command(s) in a subshell
+    3. You see the result(s)
+    4. You write your next command(s)
+
+    Each response should include:
+
+    1. **Reasoning text** where you explain your analysis and plan
+    2. At least one tool call with your command
+
+    **CRITICAL REQUIREMENTS:**
+
+    - Your response SHOULD include reasoning text explaining what you're doing
+    - Your response MUST include AT LEAST ONE bash tool call
+    - You can make MULTIPLE tool calls in a single response when commands are independent
+    - Directory or environment variable changes are not persistent between commands
+    - Prefix commands with `cd $(cat /opt/gt/gt_root.txt) &&` if needed
+
+    ## Environment Details
+
+    - Full Linux shell environment
+    - Always use non-interactive flags (-y, -f) for commands
+    - Avoid interactive tools like vi, nano
+    - You can use bash commands or invoke any tool in the environment
+    - /opt/gt/gt_root.txt contains the repository root path
+
+    ## Submission
+
+    When you've completed your work, submit your changes as a git diff patch.
+
+    Step 1: Create the patch file
+    Run `cd $(cat /opt/gt/gt_root.txt) && git diff -- <file1> <file2> > /tmp/patch.txt` listing only source files you modified.
+    Do NOT commit your changes.
+
+    <IMPORTANT>
+    The patch must only contain changes to source files you modified.
+    Do not include test files, helper scripts, build configs, or binary files.
+    </IMPORTANT>
+
+    Step 2: Verify your patch
+    Inspect /tmp/patch.txt to confirm it only contains your intended changes.
+
+    Step 3: Submit (EXACT command required)
+    ```bash
+    echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat /tmp/patch.txt
+    ```
+
+    <CRITICAL>
+    - Creating the patch and submitting MUST be separate commands.
+    - You CANNOT continue working after submitting.
+    </CRITICAL>
+    </instructions>
+  step_limit: 300
+  cost_limit: 3.0
+
+# mini-swe-agent runs INSIDE the pier-managed task container (pier's `--env docker`
+# provisions the container and execs the agent there). So mini-swe-agent's OWN
+# environment must be `local` — it runs commands in the container it is already in.
+# (Same rationale as deepswe_gt_pier.yaml: `docker` here would mean docker-in-docker,
+# crash in DockerEnvironmentConfig validation, and bypass the GT LocalEnvironment patch.)
+environment:
+  # NO hardcoded cwd (LocalEnvironment falls back to os.getcwd() = the container
+  # WORKDIR = the repo root). See deepswe_gt_pier.yaml for the full rationale.
+  timeout: 120
+  env:
+    PAGER: cat
+    MANPAGER: cat
+    LESS: -R
+    PIP_PROGRESS_BAR: "off"
+    TQDM_DISABLE: "1"
+  environment_class: local
+
+model:
+  observation_template: |
+    {% if output.exception_info -%}
+    <exception>{{output.exception_info}}</exception>
+    {% endif -%}
+    <returncode>{{output.returncode}}</returncode>
+    {% if output.output | length < 10000 -%}
+    <output>
+    {{ output.output -}}
+    </output>
+    {%- else -%}
+    <warning>
+    The output of your last command was too long.
+    Please try a different command that produces less output.
+    Use head, tail, or sed to view smaller sections of files.
+    Use more selective grep/find patterns.
+    Redirect output to a file and search within it.
+    </warning>
+    {%- set elided_chars = output.output | length - 10000 -%}
+    <output_head>
+    {{ output.output[:5000] }}
+    </output_head>
+    <elided_chars>
+    {{ elided_chars }} characters elided
+    </elided_chars>
+    <output_tail>
+    {{ output.output[-5000:] }}
+    </output_tail>
+    {%- endif -%}
+  format_error_template: |
+    Tool call error:
+
+    {{error}}
+
+    You made an invalid tool call. Please retry with the correct tool call format.
+  cost_tracking: "ignore_errors"
+  model_kwargs:
+    # Gemini-3 official sampling guidance (ai.google.dev/gemini-api/docs/gemini-3 +
+    # the Gemini 3 prompting guide): keep temperature at its DEFAULT 1.0 for all
+    # Gemini 3 models — the reasoning stack is optimized for it, and lowering it
+    # "may lead to unexpected behavior, such as looping or degraded performance,
+    # particularly in complex mathematical or reasoning tasks". No top_p / penalty
+    # overrides — leave Gemini's server-side defaults (the DeepSeek-spec knobs in
+    # the sibling yaml are provider-locked, NOT portable).
+    temperature: 1.0
+    max_tokens: 8192
+    # litellm-level retry on transient API errors (rate limits / 5xx). VERIFIED
+    # passthrough: LitellmModelConfig.model_kwargs -> LitellmModel._query ->
+    # litellm.completion(**(model_kwargs | kwargs)) -> litellm utils.py client
+    # wrapper (_get_wrapper_num_retries; sync path utils.py:1712-1720) ->
+    # litellm.completion_with_retries (tenacity, stop_after_attempt(num_retries)).
+    # This sits UNDER mini-swe-agent's own outer tenacity retry (10 attempts,
+    # MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT) — inner retries absorb transient
+    # provider errors fast; the outer loop stays the safety net.
+    num_retries: 3
+    # The inner litellm retry above has NO backoff between attempts by default, so a
+    # 429 burst gets 3 rapid-fire retries that all re-hit the rate limit. Force litellm's
+    # exponential backoff between retries (litellm honors retry_strategy=
+    # "exponential_backoff_retry" in completion_with_retries -> tenacity wait_exponential).
+    # Gemini-3 preview on the shared serving pool is 429-prone — this is the cheap,
+    # provider-correct mitigation; us-east1 (not global) is the primary one.
+    retry_strategy: exponential_backoff_retry
+    # NOTE (deliberate omissions): no extra_body.thinking (DeepSeek-only payload);
+    # Gemini-3 thinking is controlled via reasoning_effort -> thinking_level if
+    # ever needed (litellm maps it for gemini-3*) — left at model default here.

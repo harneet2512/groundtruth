@@ -1,0 +1,5593 @@
+// Package parser extracts definitions and calls from source files using tree-sitter.
+package parser
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"sort"
+	"strings"
+
+	sitter "github.com/smacker/go-tree-sitter"
+
+	"github.com/harneet2512/groundtruth/gt-index/internal/specs"
+	"github.com/harneet2512/groundtruth/gt-index/internal/store"
+	"github.com/harneet2512/groundtruth/gt-index/internal/walker"
+)
+
+// ParseResult holds the extracted data from one file.
+type ParseResult struct {
+	Nodes       []store.Node
+	Calls       []CallRef
+	Imports     []ImportRef
+	Properties  []PropertyRef
+	Assertions  []AssertionRef
+	Assignments []AssignmentRef // PyCG Rule 1: x = ClassName() type tracking
+	ModDecls    []ModDecl       // Rust mod declarations (mod foo;)
+	ReExports   []ReExportRef   // Re-export declarations (barrel files, pub use, __init__.py)
+}
+
+// ModDecl is a Rust module declaration (mod foo;) extracted from the AST.
+// These tell the compiler which files are part of the module tree, enabling
+// module path resolution from crate root to leaf files.
+type ModDecl struct {
+	Name string // module name (e.g., "routing" from "mod routing;")
+	File string // file containing this declaration
+	Line int
+}
+
+// ReExportRef is a re-export that makes a symbol from another module importable
+// from the re-exporting file. Covers TS/JS barrel files (export { X } from './X'),
+// Rust pub use, and Python __init__.py re-exports.
+type ReExportRef struct {
+	ExportedName string // the symbol being re-exported (e.g., "Router")
+	SourceModule string // the module it originates from (e.g., "./Router", "crate::routing")
+	File         string // the file containing this re-export
+	Line         int
+}
+
+// PropertyRef is a structural fact about a function or class node, extracted during parsing.
+type PropertyRef struct {
+	NodeIdx int // index into ParseResult.Nodes
+	Kind    string
+	// Kinds: guard_clause, return_shape, exception_type, docstring, caller_usage,
+	//        conditional_return, side_effect, param, security_tag, exception_flow,
+	//        exception_handler, fingerprint, field_read, boundary_condition,
+	//        class_field, class_decorator, concurrency_pattern, config_read,
+	//        call_order, resource_pattern, visibility
+	Value      string
+	Line       int
+	Confidence float64
+}
+
+// AssertionRef is an assertion extracted from a test function during parsing.
+type AssertionRef struct {
+	TestNodeIdx int    // index into ParseResult.Nodes (the test function)
+	Kind        string // assertEqual, assertRaises, expect, assert, assert_eq, etc.
+	Expression  string // readable assertion expression
+	Expected    string // expected value if extractable
+	Line        int
+}
+
+// CallRef is a raw (unresolved) call reference.
+type CallRef struct {
+	CallerNodeIdx   int    // index into ParseResult.Nodes
+	CalleeName      string // the function/method name being called (last component)
+	CalleeQualified string // full qualified name if available (e.g. "obj.method")
+	Line            int
+	File            string
+}
+
+// AssignmentRef records a variable assignment where the RHS is a constructor call.
+// PyCG Rule 1: x = ClassName() → x has type ClassName.
+// Used by resolver Strategy 1.96 for x.method() resolution.
+type AssignmentRef struct {
+	VarName       string // LHS variable name ("x", "self.client")
+	TypeName      string // RHS class name (constructor) OR callee name (when ViaReturn)
+	TypeQualified string // full qualified RHS if available ("requests.Session")
+	Scope         string // enclosing function name (empty = module level)
+	File          string
+	Line          int
+	// ViaReturn marks x = factory() (non-constructor call): TypeName holds the CALLEE
+	// name, and the resolver bridges through that callee's declared return type
+	// (PyCG Rule 4 / JARVIS return-type chaining) rather than treating it as a class.
+	ViaReturn bool
+}
+
+// ImportRef is a parsed import statement — maps an imported name to its source module.
+type ImportRef struct {
+	ImportedName string // the symbol name being imported ("*" for wildcard/package imports)
+	ModulePath   string // the module/file path (e.g., "os.path", "./utils", "fmt")
+	File         string // the file containing this import statement
+	Line         int
+}
+
+// ParseFile parses a single source file and extracts definitions + calls.
+func ParseFile(sf walker.SourceFile, isTest bool) (*ParseResult, error) {
+	src, err := os.ReadFile(sf.AbsPath)
+	if err != nil {
+		return nil, err
+	}
+
+	parser := sitter.NewParser()
+	parser.SetLanguage(sf.Spec.Language)
+
+	tree, err := parser.ParseCtx(context.Background(), nil, src)
+	if err != nil {
+		return nil, err
+	}
+	defer tree.Close()
+
+	result := &ParseResult{}
+	root := tree.RootNode()
+
+	// Walk the AST to extract definitions and calls
+	walkNode(root, sf, src, isTest, result, 0)
+
+	// Go: link receiver methods (func (r *T) M()) to their struct T. Go methods
+	// are not lexically nested in the type, so walkNode labels them "Function"
+	// with ParentID=0 — restore the Method->Struct parenting that the L3
+	// Consistency pillar (siblings by parent) and self/type_flow resolution
+	// (methodsByClass keys on ParentID!=0) depend on.
+	if sf.Language == "go" {
+		linkGoReceiverMethods(result)
+	}
+
+	// Rust: link impl block methods to their struct. The walkNode impl_item fix
+	// now names impl nodes after the struct (not the trait), but methods inside
+	// trait impls still need to be parented to the struct's node. Also, when the
+	// struct has a separate struct_item node, re-parent the impl methods to THAT
+	// node so all methods (inherent + trait) share the same parent. This is the
+	// Rust analog of linkGoReceiverMethods.
+	if sf.Language == "rust" {
+		linkRustImplMethods(result)
+	}
+
+	// Synthetic file-anchor node for module-linking files that define NO symbols.
+	// A barrel/re-export file (e.g. TS `index.ts` containing only `export … from
+	// "./x"`) parses to zero symbol nodes, so file→file relationship edges
+	// (RE_EXPORTS, IMPORTS) have nothing to anchor on the source side and are
+	// silently dropped. Emit one File node so such files can anchor those edges.
+	// Generalized: fires for ANY language whose file has zero symbol nodes but
+	// contains a module-linking construct (export/import/from/require/use/mod) —
+	// not TS-specific, no per-repo logic. Skips genuinely empty/comment-only files
+	// so the graph isn't polluted with content-free anchors.
+	maybeAddFileAnchorNode(sf, src, result)
+
+	return result, nil
+}
+
+// maybeAddFileAnchorNode appends a synthetic File node when a file yields zero
+// symbol nodes yet carries module-linking structure. See ParseFile caller for why.
+func maybeAddFileAnchorNode(sf walker.SourceFile, src []byte, result *ParseResult) {
+	if len(result.Nodes) > 0 {
+		return
+	}
+	text := string(src)
+	if strings.TrimSpace(text) == "" {
+		return
+	}
+	// Module-linking tokens common across languages. A barrel/re-export or pure
+	// import/use file STARTS a line with one of these even though it defines no
+	// symbols. #B3: the previous whole-text substring scan matched module-link
+	// tokens inside COMMENTS and string prose (any sentence containing " from ")
+	// and minted phantom File nodes for content-free files. Require the token at
+	// LINE START (after optional whitespace) on a non-comment line.
+	linkTokens := []string{"export ", "export*", "export{", "import ", "import{",
+		"from ", "require(", "use ", "pub use", "mod ", "pub mod "}
+	hasLink := false
+	for _, line := range strings.Split(text, "\n") {
+		t := strings.TrimSpace(line)
+		if t == "" {
+			continue
+		}
+		// Skip comment lines (//, #, /* and block-comment continuations '*').
+		if strings.HasPrefix(t, "//") || strings.HasPrefix(t, "#") ||
+			strings.HasPrefix(t, "/*") || strings.HasPrefix(t, "*") {
+			continue
+		}
+		for _, tok := range linkTokens {
+			if strings.HasPrefix(t, tok) {
+				hasLink = true
+				break
+			}
+		}
+		if hasLink {
+			break
+		}
+	}
+	if !hasLink {
+		return
+	}
+	// Derive a stable module name from the file's base name (sans extension).
+	base := sf.Path
+	if idx := strings.LastIndexAny(base, "/\\"); idx >= 0 {
+		base = base[idx+1:]
+	}
+	if dot := strings.LastIndexByte(base, '.'); dot > 0 {
+		base = base[:dot]
+	}
+	if base == "" {
+		base = sf.Path
+	}
+	endLine := strings.Count(text, "\n") + 1
+	result.Nodes = append(result.Nodes, store.Node{
+		Label:         "File",
+		Name:          base,
+		QualifiedName: sf.Path,
+		FilePath:      sf.Path,
+		StartLine:     1,
+		EndLine:       endLine,
+		Language:      sf.Language,
+		IsExported:    true,
+	})
+}
+
+// linkGoReceiverMethods sets Label="Method" and ParentID for Go receiver methods
+// by matching the receiver type in the signature to a same-file type node. Go
+// methods are top-level in the AST, so the lexical walk cannot parent them;
+// without this the Consistency pillar and method resolution silently no-op on Go
+// (1890 receiver methods in crossplane were all unparented "Function" nodes).
+// Same-file only (the Go convention: methods live with their type); cross-file
+// package methods stay unparented — additive, no regression to existing nodes.
+func linkGoReceiverMethods(result *ParseResult) {
+	typeIdx := make(map[string]int) // type name -> 1-based node index (parentNodeIdx convention)
+	for i := range result.Nodes {
+		if result.Nodes[i].Label == "Class" {
+			typeIdx[result.Nodes[i].Name] = i + 1
+		}
+	}
+	if len(typeIdx) == 0 {
+		return
+	}
+	for i := range result.Nodes {
+		n := &result.Nodes[i]
+		if n.Label != "Function" || n.ParentID != 0 {
+			continue
+		}
+		recv := goReceiverType(n.Signature)
+		if recv == "" {
+			continue
+		}
+		if pidx, ok := typeIdx[recv]; ok {
+			n.Label = "Method"
+			n.ParentID = int64(pidx)
+			if n.QualifiedName == "" || n.QualifiedName == n.Name {
+				n.QualifiedName = recv + "." + n.Name
+			}
+		}
+	}
+}
+
+// goReceiverType extracts the receiver type from a Go method signature:
+//
+//	"func (r *RequiredResourceSelector) GetKind() string" -> "RequiredResourceSelector"
+//	"func (a Account) Name() string"                      -> "Account"
+//	"func (s *Stack[T]) Push(v T)"                        -> "Stack"
+//
+// Returns "" when the signature has no receiver (a plain function).
+func goReceiverType(sig string) string {
+	s := strings.TrimSpace(sig)
+	const pfx = "func ("
+	if !strings.HasPrefix(s, pfx) {
+		return ""
+	}
+	// Find the receiver's CLOSING paren by balanced matching from just inside the
+	// opening "func (" — NOT the first ')' in the string. A generic or func-typed
+	// receiver such as `func (s *Service[K, func() error]) Do()` has an inner ')'
+	// (closing the embedded func()) that is not the receiver's; taking the first
+	// ')' mis-slices the receiver span and the method never parents to its struct.
+	// We track () and [] depth and stop at the ')' that returns paren-depth to 0.
+	end := -1
+	depth := 1 // we are already inside the receiver's '('
+	for i := len(pfx); i < len(s); i++ {
+		switch s[i] {
+		case '(':
+			depth++
+		case '[':
+			depth++
+		case ']':
+			depth--
+		case ')':
+			depth--
+			if depth == 0 {
+				end = i
+			}
+		}
+		if end >= 0 {
+			break
+		}
+	}
+	if end < 0 || end <= len(pfx) {
+		return ""
+	}
+	fields := strings.Fields(s[len(pfx):end]) // "r *RequiredResourceSelector" or "a Account"
+	if len(fields) == 0 {
+		return ""
+	}
+	// Go receiver grammar is "<name> <type>": the TYPE is the token right after the
+	// receiver var name (fields[1]). Taking the LAST field breaks a generic receiver
+	// whose type-args span spaces, e.g. `s *Service[K, func() error]` → Fields last =
+	// "error]". The base type name always starts at fields[1] and is cut at the first
+	// '[' (generic params). Fall back to the sole field when the name is omitted.
+	typeTok := fields[len(fields)-1]
+	if len(fields) >= 2 {
+		typeTok = fields[1]
+	}
+	t := strings.TrimPrefix(typeTok, "*")
+	if b := strings.IndexByte(t, '['); b >= 0 {
+		t = t[:b] // generic receiver Stack[T] -> Stack
+	}
+	return t
+}
+
+// GoReceiverName extracts the receiver VARIABLE NAME from a Go method signature:
+//
+//	"func (c *Circle) Area() float64"          -> "c"
+//	"func (s *Service[K]) Do()"                -> "s"
+//	"func (Account) Name() string"            -> ""   (receiver type only, unnamed)
+//	"func Plain() {}"                          -> ""   (no receiver)
+//
+// Returns "" when the signature has no receiver or the receiver is anonymous. Mirrors
+// goReceiverType's balanced-paren slicing so generic/func-typed receivers are handled.
+// Exported so the resolver's rung-2b shape gate can accept a Go method's receiver var
+// (`r.field.m()`) in addition to self./this. — the receiver name is the Go analogue of
+// self/this, derived structurally from the signature (no per-task logic).
+func GoReceiverName(sig string) string {
+	s := strings.TrimSpace(sig)
+	const pfx = "func ("
+	if !strings.HasPrefix(s, pfx) {
+		return ""
+	}
+	end := -1
+	depth := 1 // already inside the receiver's '('
+	for i := len(pfx); i < len(s); i++ {
+		switch s[i] {
+		case '(', '[':
+			depth++
+		case ']':
+			depth--
+		case ')':
+			depth--
+			if depth == 0 {
+				end = i
+			}
+		}
+		if end >= 0 {
+			break
+		}
+	}
+	if end < 0 || end <= len(pfx) {
+		return ""
+	}
+	fields := strings.Fields(s[len(pfx):end]) // "c *Circle" or "Account"
+	// Named receiver is "<name> <type>" (>=2 fields). A single field is the type only
+	// (anonymous receiver) — no variable name to match field access against.
+	if len(fields) < 2 {
+		return ""
+	}
+	name := fields[0]
+	// Guard against odd tokens (must be a plain identifier).
+	if name == "" || name == "_" {
+		return ""
+	}
+	return name
+}
+
+// goStructFieldList finds the field-list node of a Go struct type so its fields can be
+// extracted as class_field properties. Go nests the body: type_declaration → type_spec →
+// struct_type → field_declaration_list (the `type_declaration` node itself has no `body`
+// field, which is why ChildByFieldName(spec.BodyField) returns nil for Go). Returns nil for
+// non-struct type declarations (aliases, interfaces, etc.) so callers treat them as
+// body-less. The field_declaration_list children are `field_declaration` nodes, which
+// extractClassFields already handles (case ct == "field_declaration").
+func goStructFieldList(typeDecl *sitter.Node) *sitter.Node {
+	for i := 0; i < int(typeDecl.ChildCount()); i++ {
+		spec := typeDecl.Child(i)
+		if spec == nil || spec.Type() != "type_spec" {
+			continue
+		}
+		for j := 0; j < int(spec.ChildCount()); j++ {
+			st := spec.Child(j)
+			if st == nil || st.Type() != "struct_type" {
+				continue
+			}
+			for k := 0; k < int(st.ChildCount()); k++ {
+				fl := st.Child(k)
+				if fl != nil && fl.Type() == "field_declaration_list" {
+					return fl
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// linkRustImplMethods consolidates Rust impl block methods under the struct's
+// canonical node. Rust can have multiple impl blocks for the same struct (one
+// inherent `impl MyStruct`, one or more trait `impl Trait for MyStruct`). The
+// walkNode impl_item fix now names each impl_item node after the struct, so
+// methods are parented to their impl_item node. This function merges them:
+//
+//  1. Find the struct_item/enum_item node for each type name (the canonical node).
+//  2. For each impl_item node with the same name, re-parent its methods to the
+//     canonical struct node, then mark the impl_item as Label="ImplBlock" so it
+//     doesn't masquerade as a standalone Class.
+//
+// When there's no separate struct_item (e.g., type alias or external type), the
+// first impl_item stays as-is. Same-file only. Additive — cannot regress.
+func linkRustImplMethods(result *ParseResult) {
+	if len(result.Nodes) == 0 {
+		return
+	}
+
+	// Phase 1: Build a map of struct/enum names → 1-based index (the canonical struct node).
+	// Only struct_item and enum_item are canonical; impl_item and trait_item are not.
+	// We identify these by label + checking if they came from struct_item/enum_item.
+	// Since we don't store the AST node type, use a heuristic: Class nodes that have
+	// NO methods as children are struct/enum definitions (impl blocks always have methods).
+	type nodeInfo struct {
+		idx1  int // 1-based index
+		name  string
+		label string
+	}
+	structNodes := make(map[string]int) // type name → 1-based index of canonical struct node
+	var implNodes []nodeInfo            // impl_item Class nodes
+
+	// First pass: identify which Class nodes have children (methods).
+	hasChildren := make(map[int]bool) // 1-based index → has method children
+	for i := range result.Nodes {
+		if result.Nodes[i].ParentID > 0 {
+			hasChildren[int(result.Nodes[i].ParentID)] = true
+		}
+	}
+
+	for i := range result.Nodes {
+		n := &result.Nodes[i]
+		if n.Language != "rust" || n.Label != "Class" {
+			continue
+		}
+		idx1 := i + 1
+		if !hasChildren[idx1] {
+			// No children → this is a struct_item/enum_item definition (canonical)
+			if _, exists := structNodes[n.Name]; !exists {
+				structNodes[n.Name] = idx1
+			}
+		} else {
+			// Has children → this is an impl_item block
+			implNodes = append(implNodes, nodeInfo{idx1: idx1, name: n.Name, label: n.Label})
+		}
+	}
+
+	if len(structNodes) == 0 || len(implNodes) == 0 {
+		return
+	}
+
+	// Phase 2: For each impl_item whose name matches a struct_item, re-parent
+	// all its methods to the struct_item node.
+	for _, impl := range implNodes {
+		canonIdx, ok := structNodes[impl.name]
+		if !ok || canonIdx == impl.idx1 {
+			continue // no canonical struct, or is the canonical struct itself
+		}
+
+		// Re-parent methods from this impl block to the canonical struct
+		for i := range result.Nodes {
+			if result.Nodes[i].ParentID == int64(impl.idx1) {
+				result.Nodes[i].ParentID = int64(canonIdx)
+				// Update qualified name to use the struct name
+				if result.Nodes[i].QualifiedName == impl.name+"."+result.Nodes[i].Name {
+					// Already correct (impl was named after struct)
+				}
+			}
+		}
+
+		// Mark the impl_item node itself so it doesn't show up as a separate Class
+		// in the graph. We keep it as a node for provenance but demote its label.
+		result.Nodes[impl.idx1-1].Label = "ImplBlock"
+	}
+}
+
+func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, result *ParseResult, parentNodeIdx int) {
+	spec := sf.Spec
+	nodeType := node.Type()
+
+	// Check for function definition
+	if spec.IsFunctionNode(nodeType) {
+		name := extractFieldText(node, spec.NameField, src)
+		if name == "" {
+			name = extractFirstIdentifier(node, src)
+		}
+		// JS/TS fix: arrow functions assigned to variables have no name field.
+		// The name lives on the parent variable_declarator node.
+		// e.g. const handler = async (req, res) => {}
+		if name == "" && nodeType == "arrow_function" {
+			parent := node.Parent()
+			if parent != nil && parent.Type() == "variable_declarator" {
+				name = extractFieldText(parent, "name", src)
+			}
+		}
+		if name != "" {
+			sig := extractSignature(node, src, spec.BodyField)
+			retType := extractFieldText(node, spec.ReturnTypeField, src)
+
+			// Compute qualified name: Parent.Name for methods, just Name for top-level
+			qualName := name
+			if parentNodeIdx > 0 && parentNodeIdx-1 < len(result.Nodes) {
+				qualName = result.Nodes[parentNodeIdx-1].Name + "." + name
+			}
+
+			n := store.Node{
+				Label:         "Function",
+				Name:          name,
+				QualifiedName: qualName,
+				FilePath:      sf.Path,
+				StartLine:     int(node.StartPoint().Row) + 1,
+				EndLine:       int(node.EndPoint().Row) + 1,
+				Signature:     sig,
+				ReturnType:    retType,
+				IsExported:    spec.IsExported != nil && spec.IsExported(name),
+				IsTest:        isTest,
+				Language:      sf.Language,
+			}
+
+			// Check if this is a method (inside a class)
+			if parentNodeIdx > 0 {
+				n.Label = "Method"
+				n.ParentID = int64(parentNodeIdx)
+			}
+
+			idx := len(result.Nodes)
+			result.Nodes = append(result.Nodes, n)
+
+			// Extract calls from this function's body
+			bodyNode := node.ChildByFieldName(spec.BodyField)
+			if bodyNode != nil {
+				extractCalls(bodyNode, sf, src, result, idx)
+				// PyCG Rule 1: extract x = ClassName() assignments for type tracking
+				extractAssignments(bodyNode, sf, src, result, name)
+			}
+
+			// Extract properties (guard clauses, exception types, return shape)
+			extractProperties(node, sf, src, result, idx)
+
+			// Extract assertions from test functions
+			if isTest {
+				extractAssertionRefs(node, sf, src, result, idx)
+			}
+			return // don't recurse into children (we already extracted from body)
+		}
+	}
+
+	// Check for class definition
+	if spec.IsClassNode(nodeType) {
+		name := extractFieldText(node, spec.NameField, src)
+		if name == "" {
+			name = extractFirstIdentifier(node, src)
+		}
+		// Go fix: type_declaration wraps type_spec children.
+		// The "name" field lives on type_spec, not type_declaration.
+		if name == "" && nodeType == "type_declaration" {
+			for i := 0; i < int(node.ChildCount()); i++ {
+				child := node.Child(i)
+				if child.Type() == "type_spec" {
+					name = extractFieldText(child, spec.NameField, src)
+					if name != "" {
+						break
+					}
+				}
+			}
+		}
+		// Rust fix: impl_item has no "name" field. The struct being implemented
+		// is under the "type" field, and the optional trait is under the "trait"
+		// field. For `impl Trait for Struct { fn next() {} }`, extractFirstIdentifier
+		// grabs "Trait" (the first type_identifier), but the correct Class name is
+		// "Struct" (the type being implemented). The "type" field always holds the
+		// concrete struct/enum being implemented, regardless of whether a trait is
+		// present. Use it as the canonical name for the impl_item node.
+		if nodeType == "impl_item" && sf.Language == "rust" {
+			typeNode := node.ChildByFieldName("type")
+			if typeNode != nil {
+				// Extract the base type name, stripping generics (e.g., MyStruct<T> → MyStruct)
+				typeName := typeNode.Content(src)
+				if bracketIdx := strings.IndexByte(typeName, '<'); bracketIdx > 0 {
+					typeName = typeName[:bracketIdx]
+				}
+				typeName = strings.TrimSpace(typeName)
+				if typeName != "" {
+					name = typeName
+				}
+			}
+		}
+		if name != "" {
+			// Classes are top-level or nested; use name as qualified name
+			classQualName := name
+			if parentNodeIdx > 0 && parentNodeIdx-1 < len(result.Nodes) {
+				classQualName = result.Nodes[parentNodeIdx-1].Name + "." + name
+			}
+			n := store.Node{
+				Label:         "Class",
+				Name:          name,
+				QualifiedName: classQualName,
+				FilePath:      sf.Path,
+				StartLine:     int(node.StartPoint().Row) + 1,
+				EndLine:       int(node.EndPoint().Row) + 1,
+				IsExported:    spec.IsExported != nil && spec.IsExported(name),
+				IsTest:        isTest,
+				Language:      sf.Language,
+			}
+			idx := len(result.Nodes)
+			result.Nodes = append(result.Nodes, n)
+
+			// Extract class decorators (above the class definition)
+			extractClassDecorators(node, src, result, idx)
+
+			// Visibility: public/private/protected/exported/unexported
+			extractVisibility(node, src, result, idx)
+
+			// Extract class fields from class body. Go's `type_declaration` has no `body`
+			// field (the struct body is nested: type_declaration → type_spec → struct_type
+			// → field_declaration_list), so ChildByFieldName(spec.BodyField) returns nil and
+			// Go struct fields would never be extracted. Fall back to the Go-aware body
+			// resolver so `Field *Type` declarations become class_field properties that
+			// BuildFieldTypeIndex (rung 2b) can resolve. No-op for non-Go languages.
+			classBody := node.ChildByFieldName(spec.BodyField)
+			if classBody == nil && nodeType == "type_declaration" {
+				classBody = goStructFieldList(node)
+			}
+			if classBody != nil {
+				extractClassFields(classBody, src, result, idx)
+			}
+
+			// Recurse into class body to find methods
+			for i := 0; i < int(node.ChildCount()); i++ {
+				child := node.Child(i)
+				walkNode(child, sf, src, isTest, result, idx+1) // +1 because node IDs are 1-based in DB
+			}
+			return
+		}
+	}
+
+	// Check for import statement
+	if spec.IsImportNode(nodeType) {
+		extractImports(node, sf, src, result)
+		// If this node type also matches CallNodes (e.g. Ruby "call", Lua "function_call"),
+		// do NOT return — fall through so calls are still extracted from this subtree.
+		if !spec.IsCallNode(nodeType) {
+			return
+		}
+		// Fall through: node is both an import and a call node.
+		// Import extraction already ran; now let normal recursion handle call extraction.
+	}
+
+	// Rust: extract mod declarations (mod foo;) which define the module tree.
+	// mod_item with no body = external module declaration (maps to foo.rs or foo/mod.rs).
+	// mod_item with a body = inline module (mod foo { ... }) — skip those.
+	if sf.Language == "rust" && nodeType == "mod_item" {
+		nameNode := node.ChildByFieldName("name")
+		if nameNode != nil {
+			modName := nameNode.Content(src)
+			// Only record external mod declarations (no body block).
+			// Inline modules have a declaration_list child as their body.
+			hasBody := false
+			for i := 0; i < int(node.ChildCount()); i++ {
+				if node.Child(i).Type() == "declaration_list" {
+					hasBody = true
+					break
+				}
+			}
+			if !hasBody && modName != "" {
+				result.ModDecls = append(result.ModDecls, ModDecl{
+					Name: modName,
+					File: sf.Path,
+					Line: int(node.StartPoint().Row) + 1,
+				})
+			}
+		}
+	}
+
+	// JS/TS: extract re-exports from export_statement nodes.
+	// export { Foo, Bar } from './module'  → ReExportRef for each name
+	// export * from './module'             → ReExportRef with "*"
+	// export { default as Foo } from './module' → ReExportRef for "Foo"
+	if (sf.Language == "javascript" || sf.Language == "typescript") && nodeType == "export_statement" {
+		extractJSTSReExports(node, sf.Path, src, result)
+	}
+
+	// JS/TS test frameworks: describe('name', () => { ... }), it('name', () => { ... }), test('name', fn)
+	// These are call_expressions with a callback argument. We extract assertions from the callback body.
+	if isTest && spec.IsCallNode(nodeType) && (sf.Language == "javascript" || sf.Language == "typescript" || sf.Language == "coffeescript") {
+		simple, _ := extractCalleeInfo(node, src)
+		if simple == "it" || simple == "test" || simple == "describe" {
+			// Extract test name from first string argument
+			testName := ""
+			argsNode := node.ChildByFieldName("arguments")
+			// Fallback: some grammars use different field names
+			if argsNode == nil {
+				for k := 0; k < int(node.ChildCount()); k++ {
+					child := node.Child(k)
+					if child.Type() == "arguments" || child.Type() == "argument_list" {
+						argsNode = child
+						break
+					}
+				}
+			}
+			if argsNode != nil {
+				for j := 0; j < int(argsNode.ChildCount()); j++ {
+					arg := argsNode.Child(j)
+					if arg.Type() == "string" || arg.Type() == "template_string" {
+						testName = stripQuotes(strings.TrimSpace(arg.Content(src)))
+						break
+					}
+				}
+			}
+
+			// Find callback argument (arrow_function or function_expression)
+			if argsNode != nil {
+				for j := 0; j < int(argsNode.ChildCount()); j++ {
+					arg := argsNode.Child(j)
+					argType := arg.Type()
+					if argType == "arrow_function" || argType == "function" || argType == "function_expression" {
+						// For "it"/"test" blocks: create a test function node and extract assertions
+						if simple == "it" || simple == "test" {
+							funcName := simple + ": " + testName
+							if funcName == "" {
+								funcName = simple
+							}
+							n := store.Node{
+								Label:         "Function",
+								Name:          funcName,
+								QualifiedName: funcName,
+								FilePath:      sf.Path,
+								StartLine:     int(arg.StartPoint().Row) + 1,
+								EndLine:       int(arg.EndPoint().Row) + 1,
+								IsTest:        true,
+								Language:      sf.Language,
+							}
+							idx := len(result.Nodes)
+							result.Nodes = append(result.Nodes, n)
+
+							// Extract calls from the callback body
+							bodyNode := arg.ChildByFieldName("body")
+							if bodyNode != nil {
+								extractCalls(bodyNode, sf, src, result, idx)
+								extractAssignments(bodyNode, sf, src, result, n.Name)
+								findAssertions(bodyNode, sf, src, result, idx, 0)
+							} else {
+								// Arrow function with expression body: () => expr
+								extractCalls(arg, sf, src, result, idx)
+								findAssertions(arg, sf, src, result, idx, 0)
+							}
+						}
+
+						// For "describe" blocks: recurse into the callback to find nested it/test
+						if simple == "describe" {
+							bodyNode := arg.ChildByFieldName("body")
+							if bodyNode != nil {
+								for k := 0; k < int(bodyNode.ChildCount()); k++ {
+									walkNode(bodyNode.Child(k), sf, src, true, result, parentNodeIdx)
+								}
+							}
+						}
+						break
+					}
+				}
+			}
+			return // handled
+		}
+	}
+
+	// Recurse into children
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		walkNode(child, sf, src, isTest, result, parentNodeIdx)
+	}
+}
+
+func extractCalls(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, callerIdx int) {
+	extractCallsWithParent(node, sf, src, result, callerIdx, "")
+}
+
+func extractCallsWithParent(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, callerIdx int, parentType string) {
+	spec := sf.Spec
+	nodeType := node.Type()
+
+	if spec.IsCallNode(nodeType) {
+		simple, qualified := extractCalleeInfo(node, src)
+		if simple != "" {
+			// JS/TS CommonJS require(): const X = require('./module')
+			// Convert to import ref so the module path feeds into import resolution.
+			if simple == "require" && (sf.Language == "javascript" || sf.Language == "typescript") {
+				argsNode := node.ChildByFieldName("arguments")
+				if argsNode == nil {
+					for k := 0; k < int(node.ChildCount()); k++ {
+						if c := node.Child(k); c.Type() == "arguments" {
+							argsNode = c
+							break
+						}
+					}
+				}
+				if argsNode != nil {
+					for k := 0; k < int(argsNode.ChildCount()); k++ {
+						arg := argsNode.Child(k)
+						if arg.Type() == "string" || arg.Type() == "template_string" {
+							modPath := stripQuotes(arg.Content(src))
+							if modPath != "" {
+								name := modPath
+								if slashIdx := strings.LastIndex(modPath, "/"); slashIdx >= 0 {
+									name = modPath[slashIdx+1:]
+								}
+								// Derive binding names from parent assignment
+								if p := node.Parent(); p != nil {
+									if p.Type() == "variable_declarator" || p.Type() == "assignment_expression" {
+										nameNode := p.ChildByFieldName("name")
+										if nameNode == nil {
+											nameNode = p.ChildByFieldName("left")
+										}
+										if nameNode != nil {
+											if nameNode.Type() == "object_pattern" || nameNode.Type() == "object" {
+												// Destructured: const {a, b} = require('...')
+												for di := 0; di < int(nameNode.ChildCount()); di++ {
+													dc := nameNode.Child(di)
+													if dc.Type() == "shorthand_property_identifier_pattern" || dc.Type() == "shorthand_property_identifier" || dc.Type() == "identifier" {
+														result.Imports = append(result.Imports, ImportRef{
+															ImportedName: dc.Content(src),
+															ModulePath:   modPath,
+															File:         sf.Path,
+															Line:         int(node.StartPoint().Row) + 1,
+														})
+													}
+												}
+												name = ""
+											} else {
+												name = nameNode.Content(src)
+											}
+										}
+									}
+								}
+								if name != "" {
+									result.Imports = append(result.Imports, ImportRef{
+										ImportedName: name,
+										ModulePath:   modPath,
+										File:         sf.Path,
+										Line:         int(node.StartPoint().Row) + 1,
+									})
+								}
+							}
+							break
+						}
+					}
+				}
+			}
+
+			result.Calls = append(result.Calls, CallRef{
+				CallerNodeIdx:   callerIdx,
+				CalleeName:      simple,
+				CalleeQualified: qualified,
+				Line:            int(node.StartPoint().Row) + 1,
+				File:            sf.Path,
+			})
+
+			// Classify caller usage context from parent node type
+			usage := classifyCallContext(parentType, node, src)
+			if usage != "" {
+				callerLine := ""
+				if node.Parent() != nil {
+					callerLine = strings.TrimSpace(node.Parent().Content(src))
+					if nlIdx := strings.IndexByte(callerLine, '\n'); nlIdx > 0 {
+						callerLine = callerLine[:nlIdx]
+					}
+					if len(callerLine) > 120 {
+						callerLine = callerLine[:120]
+					}
+				}
+				val := usage + ":" + simple
+				if callerLine != "" {
+					val += "|" + callerLine
+				}
+				result.Properties = append(result.Properties, PropertyRef{
+					NodeIdx:    callerIdx,
+					Kind:       "caller_usage",
+					Value:      val,
+					Line:       int(node.StartPoint().Row) + 1,
+					Confidence: 0.8,
+				})
+			}
+		}
+	}
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		extractCallsWithParent(node.Child(i), sf, src, result, callerIdx, nodeType)
+	}
+}
+
+// extractAssignments finds variable assignments where the RHS is a constructor call.
+// PyCG Rule 1: x = ClassName() → varTypes[x] = ClassName
+// Looks for assignment nodes where right side is a call to a capitalized name.
+func extractAssignments(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, scopeName string) {
+	nodeType := node.Type()
+
+	// Python: assignment, augmented_assignment
+	// JS/TS: variable_declarator, assignment_expression
+	// Go: short_var_declaration, assignment_statement
+	isAssignment := nodeType == "assignment" || nodeType == "variable_declarator" ||
+		nodeType == "short_var_declaration" || nodeType == "assignment_statement" ||
+		nodeType == "assignment_expression"
+
+	if isAssignment {
+		// Find LHS (variable name) and RHS (value)
+		var lhsName string
+
+		left := node.ChildByFieldName("left")
+		right := node.ChildByFieldName("right")
+		if left == nil {
+			left = node.ChildByFieldName("name") // JS variable_declarator
+		}
+		if right == nil {
+			right = node.ChildByFieldName("value") // JS variable_declarator
+		}
+
+		if left != nil {
+			lhsText := left.Content(src)
+			// Simple variable: x = ...
+			if left.Type() == "identifier" {
+				lhsName = lhsText
+			}
+			// Attribute: self.x = ...
+			if left.Type() == "attribute" || left.Type() == "member_expression" {
+				lhsName = lhsText
+			}
+		}
+
+		if lhsName != "" && right != nil {
+			// Check if RHS is a call expression: x = ClassName()
+			callNode := right
+			if callNode.Type() == "call" || callNode.Type() == "call_expression" ||
+				callNode.Type() == "new_expression" {
+				simple, qualified := extractCalleeInfo(callNode, src)
+				if simple != "" {
+					typeName := ""
+					// Heuristic 1: capitalized bare name = likely constructor (PyCG ICSE 2021).
+					// Covers: Python `x = MyClass()`, TS/JS `x = new Foo()`.
+					// EXCLUDE Go: an exported Go func is Capitalized but is NOT a constructor
+					// (`x := Marshal()` returns []byte, not a `Marshal` instance). Stamping
+					// TypeName="Marshal" pollutes the resolver with a non-existent type, so for
+					// Go a capitalized bare call falls through to the ViaReturn path below
+					// (bridge through the callee's declared return type). PyCG's capital=ctor
+					// rule is Python/JS/TS-shaped, not Go-shaped.
+					if sf.Language != "go" && len(simple) > 0 && simple[0] >= 'A' && simple[0] <= 'Z' {
+						typeName = simple
+					}
+					// Heuristic 2: Rust/Go qualified constructor — Type::new() / Type::default() / Type::from()
+					// The qualifier IS the type; the method is the constructor idiom.
+					if typeName == "" && qualified != "" && strings.Contains(qualified, "::") {
+						if sepIdx := strings.LastIndex(qualified, "::"); sepIdx > 0 {
+							qual := qualified[:sepIdx]
+							method := qualified[sepIdx+2:]
+							if (method == "new" || method == "default" || method == "from" || method == "from_str" || method == "with_capacity") &&
+								len(qual) > 0 && qual[0] >= 'A' && qual[0] <= 'Z' {
+								typeName = qual
+							}
+						}
+					}
+					if typeName != "" {
+						result.Assignments = append(result.Assignments, AssignmentRef{
+							VarName:       lhsName,
+							TypeName:      typeName,
+							TypeQualified: qualified,
+							Scope:         scopeName,
+							File:          sf.Path,
+							Line:          int(node.StartPoint().Row) + 1,
+						})
+					} else {
+						// PyCG Rule 4 / JARVIS return-type chaining: x = factory() where the
+						// callee is a (non-constructor) function — record the CALLEE name with
+						// ViaReturn so the resolver bridges through factory's declared return
+						// type (e.g. `x = get_client(); x.run()` → return type of get_client).
+						// Lowercase simple name (capitalized = ctor, handled above) OR, in Go,
+						// a capitalized bare call (`x := Marshal()`) which is an exported func,
+						// not a constructor — it too must bridge through its return type. Skip
+						// qualified receiver-method calls (obj.method()) — their type is unknown
+						// here, left for the demand-driven residual.
+						isLowerBare := simple[0] >= 'a' && simple[0] <= 'z'
+						isGoCapBare := sf.Language == "go" && simple[0] >= 'A' && simple[0] <= 'Z'
+						if (isLowerBare || isGoCapBare) && (qualified == "" || qualified == simple) {
+							result.Assignments = append(result.Assignments, AssignmentRef{
+								VarName:       lhsName,
+								TypeName:      simple,
+								TypeQualified: qualified,
+								Scope:         scopeName,
+								File:          sf.Path,
+								Line:          int(node.StartPoint().Row) + 1,
+								ViaReturn:     true,
+							})
+						}
+					}
+				}
+			}
+		}
+
+		// PyCG Rule 4: Type annotations — x: ClassName = ... or x: ClassName
+		// Python: type annotation on assignment or standalone annotation
+		if lhsName != "" {
+			typeAnnot := node.ChildByFieldName("type")
+			if typeAnnot != nil {
+				typeName := typeAnnot.Content(src)
+				// Strip Optional[], List[], etc. to get base type
+				if idx := strings.Index(typeName, "["); idx > 0 {
+					typeName = typeName[:idx]
+				}
+				if pipe := strings.Index(typeName, " | "); pipe > 0 {
+					typeName = typeName[:pipe]
+				}
+				typeName = strings.TrimSpace(typeName)
+				if len(typeName) > 0 && typeName[0] >= 'A' && typeName[0] <= 'Z' {
+					result.Assignments = append(result.Assignments, AssignmentRef{
+						VarName:       lhsName,
+						TypeName:      typeName,
+						TypeQualified: typeName,
+						Scope:         scopeName,
+						File:          sf.Path,
+						Line:          int(node.StartPoint().Row) + 1,
+					})
+				}
+			}
+		}
+	}
+
+	// Recurse
+	for i := 0; i < int(node.ChildCount()); i++ {
+		extractAssignments(node.Child(i), sf, src, result, scopeName)
+	}
+}
+
+// classifyCallContext determines how a call's return value is used based on the parent AST node.
+func classifyCallContext(parentType string, callNode *sitter.Node, src []byte) string {
+	switch parentType {
+	// Destructuring: a, b = func() / const {x, y} = func()
+	// Covers: Go (assignment, short_var_declaration), JS/TS (variable_declaration,
+	// variable_declarator, assignment_expression), Java (local_variable_declaration),
+	// Rust (let_declaration), Python (assignment, augmented_assignment)
+	case "assignment", "short_var_declaration", "variable_declaration",
+		"variable_declarator", "assignment_expression", "augmented_assignment",
+		"local_variable_declaration", "let_declaration":
+		lineText := ""
+		if callNode.Parent() != nil {
+			lineText = callNode.Parent().Content(src)
+		}
+		if strings.Contains(lineText, ",") && (strings.Contains(lineText, "=") || strings.Contains(lineText, ":=") || strings.Contains(lineText, "let")) {
+			return "destructure_tuple"
+		}
+		return ""
+
+	// Iteration: for x := range func() / for (x of func()) / for x in func()
+	case "for_statement", "for_in_statement", "for_in_clause", "for_clause",
+		"for_of_statement", "enhanced_for_statement":
+		return "iterated"
+
+	// Boolean check: if func() / if (func())
+	case "if_statement", "if_clause", "if_expression", "conditional_expression",
+		"ternary_expression", "parenthesized_expression":
+		return "boolean_check"
+
+	// Exception guard: try { func() } catch / except
+	case "try_statement", "try_expression", "try_with_resources_statement":
+		return "exception_guard"
+
+	// Argument to another call: func(other_func())
+	case "arguments", "argument_list":
+		return ""
+
+	// Return: return func()
+	case "return_statement":
+		return ""
+	}
+	return ""
+}
+
+// extractCalleeInfo returns (simpleName, qualifiedName) for a call expression.
+// simpleName is the last identifier (e.g. "baz" from "foo.bar.baz()").
+// qualifiedName is the full dotted path (e.g. "foo.bar.baz").
+func extractCalleeInfo(callNode *sitter.Node, src []byte) (string, string) {
+	if callNode.ChildCount() == 0 {
+		return "", ""
+	}
+	funcNode := callNode.Child(0)
+	if funcNode == nil {
+		return "", ""
+	}
+
+	// Direct call: foo(...)
+	if funcNode.Type() == "identifier" {
+		name := funcNode.Content(src)
+		return name, name
+	}
+
+	// Rust scoped call: Type::new() or module::func()
+	if funcNode.Type() == "scoped_identifier" {
+		qualified := funcNode.Content(src)
+		// Last component after "::" is the simple name
+		if lastSep := strings.LastIndex(qualified, "::"); lastSep >= 0 {
+			return qualified[lastSep+2:], qualified
+		}
+		return qualified, qualified
+	}
+
+	// Method/attribute call: obj.method(...) or module.func(...)
+	if funcNode.Type() == "attribute" || funcNode.Type() == "member_expression" ||
+		funcNode.Type() == "selector_expression" || funcNode.Type() == "field_expression" {
+		// Get the full qualified text
+		qualified := funcNode.Content(src)
+
+		// Get the simple name (last identifier)
+		simpleName := ""
+		for i := int(funcNode.ChildCount()) - 1; i >= 0; i-- {
+			child := funcNode.Child(i)
+			if child.Type() == "identifier" || child.Type() == "property_identifier" ||
+				child.Type() == "field_identifier" {
+				simpleName = child.Content(src)
+				break
+			}
+		}
+		if simpleName == "" {
+			simpleName = qualified
+		}
+		// T2 (parser-level): a method call on a LITERAL receiver — ",".join(), [..].append(),
+		// {..}.get() — is a builtin (str/list/dict/...) call, NOT an internal graph edge. Skip it
+		// so it never becomes a name_match guess to an arbitrary same-named internal method.
+		// (The dominant garbage: conan-17123 join×1106, split×122 are string-literal receivers.)
+		if recv := funcNode.Child(0); recv != nil && receiverRootIsLiteral(recv, 0) {
+			return "", ""
+		}
+		return simpleName, qualified
+	}
+
+	content := funcNode.Content(src)
+	return content, content
+}
+
+// isLiteralReceiver reports whether a tree-sitter node type is a literal value
+// (string / list / dict / set / number / bool / etc.) across Python, JS/TS, Go, Rust.
+// A method call whose receiver is a literal is a stdlib/builtin call, never an
+// internal call-graph edge — so it must not be resolved to a same-named internal method.
+func isLiteralReceiver(t string) bool {
+	switch t {
+	case "string", "concatenated_string", "raw_string_literal", "interpreted_string_literal",
+		"template_string", "char_literal", "byte_string", "string_literal", "rune_literal",
+		"list", "dictionary", "set", "tuple", "list_literal", "dictionary_literal",
+		"array", "object", "composite_literal", "array_literal",
+		"integer", "float", "integer_literal", "float_literal", "number",
+		"true", "false", "none", "null", "nil", "boolean", "boolean_literal":
+		return true
+	}
+	return false
+}
+
+// receiverRootIsLiteral reports whether the ROOT of a (possibly chained / wrapped)
+// method-call receiver is a literal value. The depth-1 type check misses two shapes:
+//   - chained: `"x".strip().split()` — the receiver of the outer `.split` is the
+//     `call` node `"x".strip()`, not the string literal; we descend through the
+//     chain head (the call's function's receiver) to the ultimate base.
+//   - parenthesized: `("a").join()` — the receiver is a `parenthesized_expression`
+//     wrapping the literal; we unwrap it.
+// When the chain's ultimate base is a literal, the whole call is a stdlib/builtin
+// call (str/list/dict/…), never an internal call-graph edge. Conservative: any
+// unrecognized shape returns false (keeps the edge — correct-or-quiet, never drops
+// a real internal call). Language-agnostic: driven by the literal type-set + the
+// shared call/attribute node-type sets.
+func receiverRootIsLiteral(node *sitter.Node, depth int) bool {
+	if node == nil || depth > 16 {
+		return false
+	}
+	t := node.Type()
+	if isLiteralReceiver(t) {
+		return true
+	}
+	// Unwrap a parenthesized expression: descend to its inner expression.
+	if t == "parenthesized_expression" {
+		for i := 0; i < int(node.ChildCount()); i++ {
+			c := node.Child(i)
+			if c == nil {
+				continue
+			}
+			ct := c.Type()
+			if ct == "(" || ct == ")" {
+				continue
+			}
+			return receiverRootIsLiteral(c, depth+1)
+		}
+		return false
+	}
+	// Chained call: the receiver is itself a call (`"x".strip()`); descend into the
+	// call's function child, then into THAT function's receiver (Child(0)).
+	if t == "call" || t == "call_expression" || t == "method_invocation" {
+		fn := node.Child(0)
+		if fn == nil {
+			return false
+		}
+		ft := fn.Type()
+		if ft == "attribute" || ft == "member_expression" ||
+			ft == "selector_expression" || ft == "field_expression" {
+			return receiverRootIsLiteral(fn.Child(0), depth+1)
+		}
+		return false
+	}
+	return false
+}
+
+func extractFieldText(node *sitter.Node, fieldName string, src []byte) string {
+	if fieldName == "" {
+		return ""
+	}
+	child := node.ChildByFieldName(fieldName)
+	if child == nil {
+		return ""
+	}
+	return child.Content(src)
+}
+
+func extractFirstIdentifier(node *sitter.Node, src []byte) string {
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "identifier" || child.Type() == "type_identifier" {
+			return child.Content(src)
+		}
+	}
+	return ""
+}
+
+// extractSignature returns the FULL declaration header of a function node:
+// everything from the node start up to (not including) its body child — so
+// trait bounds, where-clauses, generic constraints, throws clauses, and
+// multi-line parameter lists are preserved for every language whose spec maps
+// a BodyField (Stage 5, ORACLE_ARCHITECTURE_PLAN.md — the old first-line
+// truncation stripped boa's `T: Trace + 'static` where-clause, so the
+// [CALLEE] renderer, which renders nodes.signature verbatim, could not carry
+// the killing fact). Language-uniform: the cut point is the grammar's own
+// body node, never a language-specific delimiter.
+func extractSignature(node *sitter.Node, src []byte, bodyField string) string {
+	if bodyField != "" {
+		if body := node.ChildByFieldName(bodyField); body != nil {
+			start, end := node.StartByte(), body.StartByte()
+			if end > start && int(end) <= len(src) {
+				return normalizeSignature(string(src[start:end]))
+			}
+		}
+	}
+	// No body child (bodyless signature items — Rust trait fns, Java
+	// interface methods — or a spec without a BodyField): keep the legacy
+	// first-line behavior. Taking the whole node text here could swallow a
+	// body the grammar exposes under a different field name.
+	text := node.Content(src)
+	if idx := strings.Index(text, "\n"); idx >= 0 {
+		text = text[:idx]
+	}
+	return normalizeSignature(text)
+}
+
+// normalizeSignature flattens a (possibly multi-line) declaration header onto
+// ONE line: each physical line is trimmed and clipped at 200 chars (the
+// pre-existing per-line clip, kept), non-empty lines are joined with single
+// spaces, and the result is capped at 1000 chars to bound pathological
+// headers. Single-line output keeps every existing consumer working unchanged
+// (goReceiverType, the resolver's signature-fingerprint parsers, the
+// [CALLEE]/_sanitize_signature render path) while carrying the full header.
+func normalizeSignature(text string) string {
+	lines := strings.Split(text, "\n")
+	parts := make([]string, 0, len(lines))
+	for _, ln := range lines {
+		ln = strings.TrimSpace(ln)
+		if ln == "" {
+			continue
+		}
+		if len(ln) > 200 {
+			ln = strings.TrimSpace(ln[:200])
+		}
+		parts = append(parts, ln)
+	}
+	out := strings.Join(parts, " ")
+	if len(out) > 1000 {
+		out = strings.TrimSpace(out[:1000])
+	}
+	return out
+}
+
+// ── Import extraction ─────────────────────────────────────────────────────
+
+// extractImports extracts import references from an import AST node.
+// Language-agnostic: uses tree-sitter node types that vary by grammar.
+func extractImports(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult) {
+	lang := sf.Spec.Name
+	line := int(node.StartPoint().Row) + 1
+
+	switch lang {
+	case "python":
+		extractPythonImports(node, sf.Path, src, line, result)
+	case "javascript", "typescript":
+		extractJSTSImports(node, sf.Path, src, line, result)
+	case "go":
+		extractGoImports(node, sf.Path, src, line, result)
+	case "java", "kotlin", "groovy":
+		extractJavaImports(node, sf.Path, src, line, result)
+	case "scala":
+		extractScalaImports(node, sf.Path, src, line, result)
+	case "rust":
+		extractRustImports(node, sf.Path, src, line, result)
+	case "csharp":
+		extractCSharpImports(node, sf.Path, src, line, result)
+	case "php":
+		extractPHPImports(node, sf.Path, src, line, result)
+	case "c", "cpp":
+		extractCCppImports(node, sf.Path, src, line, result)
+	case "swift":
+		extractSwiftImports(node, sf.Path, src, line, result)
+	case "ocaml":
+		extractOCamlImports(node, sf.Path, src, line, result)
+	case "ruby":
+		extractRubyImports(node, sf.Path, src, line, result)
+	case "elixir":
+		extractElixirImports(node, sf.Path, src, line, result)
+	case "lua":
+		extractLuaImports(node, sf.Path, src, line, result)
+	}
+}
+
+// extractPythonImports handles:
+//   - import_statement: "import os.path" → ImportRef{Name:"path", Module:"os.path"}
+//   - import_from_statement: "from os.path import join, exists" → ImportRef{Name:"join", Module:"os.path"}, ...
+//   - In __init__.py, "from .submodule import X" also emits ReExportRef (Python re-export pattern).
+func extractPythonImports(node *sitter.Node, file string, src []byte, line int, result *ParseResult) {
+	nodeType := node.Type()
+
+	// Detect if this file is an __init__.py (Python package init = re-export surface)
+	isInitPy := strings.HasSuffix(file, "__init__.py")
+
+	if nodeType == "import_from_statement" {
+		// Get module name from "module_name" field or first dotted_name child
+		modulePath := ""
+		if mn := node.ChildByFieldName("module_name"); mn != nil {
+			modulePath = mn.Content(src)
+		} else {
+			// Fallback: find dotted_name child
+			for i := 0; i < int(node.ChildCount()); i++ {
+				c := node.Child(i)
+				if c.Type() == "dotted_name" {
+					modulePath = c.Content(src)
+					break
+				}
+			}
+		}
+
+		// Check for relative import prefix in the raw source text.
+		// Tree-sitter may strip dots from module_name; check for "relative_import"
+		// child or dots in the raw statement to detect relative imports.
+		rawText := strings.TrimSpace(node.Content(src))
+		isRelativeImport := strings.HasPrefix(rawText, "from .") || strings.HasPrefix(rawText, "from ..")
+		// Re-exports: __init__.py + relative import (from .submodule import X)
+		isReExport := isInitPy && isRelativeImport && modulePath != ""
+
+		// Extract imported names
+		for i := 0; i < int(node.ChildCount()); i++ {
+			child := node.Child(i)
+			switch child.Type() {
+			case "dotted_name":
+				// After "import" keyword — this is an imported name
+				name := child.Content(src)
+				// Skip if this is the module path (before "import" keyword)
+				if name != modulePath && modulePath != "" {
+					importedName := lastDotComponent(name)
+					result.Imports = append(result.Imports, ImportRef{
+						ImportedName: importedName,
+						ModulePath:   modulePath,
+						File:         file,
+						Line:         line,
+					})
+					if isReExport {
+						result.ReExports = append(result.ReExports, ReExportRef{
+							ExportedName: importedName,
+							SourceModule: modulePath,
+							File:         file,
+							Line:         line,
+						})
+					}
+				}
+			case "aliased_import":
+				// "from X import Y as Z" — extract the original name Y
+				if nameNode := child.ChildByFieldName("name"); nameNode != nil {
+					importedName := nameNode.Content(src)
+					result.Imports = append(result.Imports, ImportRef{
+						ImportedName: importedName,
+						ModulePath:   modulePath,
+						File:         file,
+						Line:         line,
+					})
+					if isReExport {
+						// For aliased re-exports, the exported name is the alias
+						exportName := importedName
+						if aliasNode := child.ChildByFieldName("alias"); aliasNode != nil {
+							exportName = aliasNode.Content(src)
+						}
+						result.ReExports = append(result.ReExports, ReExportRef{
+							ExportedName: exportName,
+							SourceModule: modulePath,
+							File:         file,
+							Line:         line,
+						})
+					}
+				}
+			case "identifier":
+				text := child.Content(src)
+				// Skip keywords: from, import, as
+				if text != "from" && text != "import" && text != "as" && modulePath != "" {
+					result.Imports = append(result.Imports, ImportRef{
+						ImportedName: text,
+						ModulePath:   modulePath,
+						File:         file,
+						Line:         line,
+					})
+					if isReExport {
+						result.ReExports = append(result.ReExports, ReExportRef{
+							ExportedName: text,
+							SourceModule: modulePath,
+							File:         file,
+							Line:         line,
+						})
+					}
+				}
+			case "wildcard_import":
+				result.Imports = append(result.Imports, ImportRef{
+					ImportedName: "*",
+					ModulePath:   modulePath,
+					File:         file,
+					Line:         line,
+				})
+				if isReExport {
+					result.ReExports = append(result.ReExports, ReExportRef{
+						ExportedName: "*",
+						SourceModule: modulePath,
+						File:         file,
+						Line:         line,
+					})
+				}
+			}
+		}
+	} else if nodeType == "import_statement" {
+		// "import os.path" or "import os.path as op"
+		for i := 0; i < int(node.ChildCount()); i++ {
+			child := node.Child(i)
+			if child.Type() == "dotted_name" {
+				fullPath := child.Content(src)
+				result.Imports = append(result.Imports, ImportRef{
+					ImportedName: lastDotComponent(fullPath),
+					ModulePath:   fullPath,
+					File:         file,
+					Line:         line,
+				})
+			} else if child.Type() == "aliased_import" {
+				if nameNode := child.ChildByFieldName("name"); nameNode != nil {
+					fullPath := nameNode.Content(src)
+					result.Imports = append(result.Imports, ImportRef{
+						ImportedName: lastDotComponent(fullPath),
+						ModulePath:   fullPath,
+						File:         file,
+						Line:         line,
+					})
+				}
+			}
+		}
+	}
+}
+
+// extractJSTSImports handles:
+//   - import_statement: "import { foo, bar } from './utils'" → ImportRef for each name
+//   - Also handles: import X from './utils', import * as X from './utils'
+func extractJSTSImports(node *sitter.Node, file string, src []byte, line int, result *ParseResult) {
+	// Get source path (the string literal after "from")
+	sourceNode := node.ChildByFieldName("source")
+	if sourceNode == nil {
+		// Fallback: find the string child
+		for i := 0; i < int(node.ChildCount()); i++ {
+			c := node.Child(i)
+			if c.Type() == "string" || c.Type() == "template_string" {
+				sourceNode = c
+				break
+			}
+		}
+	}
+	if sourceNode == nil {
+		return
+	}
+	modulePath := stripQuotes(sourceNode.Content(src))
+	if modulePath == "" {
+		return
+	}
+
+	// Find named imports: import { foo, bar } from '...'
+	foundNames := false
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "import_clause" {
+			extractJSImportClause(child, modulePath, file, src, line, result)
+			foundNames = true
+		} else if child.Type() == "named_imports" {
+			extractJSNamedImports(child, modulePath, file, src, line, result)
+			foundNames = true
+		}
+	}
+
+	// If no named imports found, this might be a side-effect import
+	if !foundNames {
+		// Check for default import: import X from '...'
+		for i := 0; i < int(node.ChildCount()); i++ {
+			child := node.Child(i)
+			if child.Type() == "identifier" {
+				result.Imports = append(result.Imports, ImportRef{
+					ImportedName: child.Content(src),
+					ModulePath:   modulePath,
+					File:         file,
+					Line:         line,
+				})
+				foundNames = true
+			}
+		}
+	}
+
+	// Fallback: at minimum register a wildcard import for the module
+	if !foundNames {
+		result.Imports = append(result.Imports, ImportRef{
+			ImportedName: "*",
+			ModulePath:   modulePath,
+			File:         file,
+			Line:         line,
+		})
+	}
+}
+
+func extractJSImportClause(node *sitter.Node, modulePath, file string, src []byte, line int, result *ParseResult) {
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "identifier":
+			// Default import
+			result.Imports = append(result.Imports, ImportRef{
+				ImportedName: child.Content(src),
+				ModulePath:   modulePath,
+				File:         file,
+				Line:         line,
+			})
+		case "named_imports":
+			extractJSNamedImports(child, modulePath, file, src, line, result)
+		case "namespace_import":
+			// import * as X — wildcard
+			result.Imports = append(result.Imports, ImportRef{
+				ImportedName: "*",
+				ModulePath:   modulePath,
+				File:         file,
+				Line:         line,
+			})
+		}
+	}
+}
+
+func extractJSNamedImports(node *sitter.Node, modulePath, file string, src []byte, line int, result *ParseResult) {
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "import_specifier" {
+			// Named import: { foo } or { foo as bar }
+			nameNode := child.ChildByFieldName("name")
+			if nameNode == nil {
+				nameNode = child.Child(0) // fallback: first child
+			}
+			if nameNode != nil && nameNode.Type() == "identifier" {
+				result.Imports = append(result.Imports, ImportRef{
+					ImportedName: nameNode.Content(src),
+					ModulePath:   modulePath,
+					File:         file,
+					Line:         line,
+				})
+			}
+		}
+	}
+}
+
+// extractJSTSReExports handles re-export statements in JS/TS:
+//   - export { Foo, Bar } from './module'       → ReExportRef for each name
+//   - export * from './module'                   → ReExportRef with "*"
+//   - export { default as Foo } from './module'  → ReExportRef for "Foo"
+//
+// These are export_statement nodes (not import_statement), so they are not
+// caught by extractJSTSImports. The source module is the string after "from".
+func extractJSTSReExports(node *sitter.Node, file string, src []byte, result *ParseResult) {
+	line := int(node.StartPoint().Row) + 1
+
+	// Find the source module (string literal after "from")
+	sourceNode := node.ChildByFieldName("source")
+	if sourceNode == nil {
+		// Fallback: find a string child
+		for i := 0; i < int(node.ChildCount()); i++ {
+			c := node.Child(i)
+			if c.Type() == "string" || c.Type() == "template_string" {
+				sourceNode = c
+				break
+			}
+		}
+	}
+	if sourceNode == nil {
+		// No "from" clause → not a re-export (e.g., export { localVar })
+		return
+	}
+	sourceModule := stripQuotes(sourceNode.Content(src))
+	if sourceModule == "" {
+		return
+	}
+
+	// Check for export * from '...'
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "namespace_export" || child.Content(src) == "*" {
+			result.ReExports = append(result.ReExports, ReExportRef{
+				ExportedName: "*",
+				SourceModule: sourceModule,
+				File:         file,
+				Line:         line,
+			})
+			return
+		}
+	}
+
+	// Check for export { Foo, Bar } from '...'
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "export_clause" {
+			for j := 0; j < int(child.ChildCount()); j++ {
+				spec := child.Child(j)
+				if spec.Type() == "export_specifier" {
+					// export { X } or export { X as Y }
+					// The exported name is the "alias" field if present, else the "name" field
+					exportedName := ""
+					if aliasNode := spec.ChildByFieldName("alias"); aliasNode != nil {
+						exportedName = aliasNode.Content(src)
+					} else if nameNode := spec.ChildByFieldName("name"); nameNode != nil {
+						exportedName = nameNode.Content(src)
+					} else if spec.ChildCount() > 0 {
+						// Fallback: first identifier child
+						exportedName = spec.Child(0).Content(src)
+					}
+					if exportedName != "" {
+						result.ReExports = append(result.ReExports, ReExportRef{
+							ExportedName: exportedName,
+							SourceModule: sourceModule,
+							File:         file,
+							Line:         line,
+						})
+					}
+				}
+			}
+		}
+	}
+}
+
+// extractGoImports handles:
+//   - import_declaration with import_spec children: import "fmt", import "os/path"
+//   - Also import blocks: import ( "fmt" \n "os" )
+func extractGoImports(node *sitter.Node, file string, src []byte, line int, result *ParseResult) {
+	// Walk children looking for import_spec nodes
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "import_spec" || child.Type() == "import_spec_list" {
+			extractGoImportSpec(child, file, src, result)
+		}
+	}
+}
+
+func extractGoImportSpec(node *sitter.Node, file string, src []byte, result *ParseResult) {
+	if node.Type() == "import_spec_list" {
+		// Block import: iterate children
+		for i := 0; i < int(node.ChildCount()); i++ {
+			extractGoImportSpec(node.Child(i), file, src, result)
+		}
+		return
+	}
+
+	if node.Type() != "import_spec" {
+		return
+	}
+
+	// Get the path (interpreted_string_literal)
+	pathNode := node.ChildByFieldName("path")
+	if pathNode == nil {
+		// Fallback: find string literal
+		for i := 0; i < int(node.ChildCount()); i++ {
+			c := node.Child(i)
+			if c.Type() == "interpreted_string_literal" || c.Type() == "raw_string_literal" {
+				pathNode = c
+				break
+			}
+		}
+	}
+	if pathNode == nil {
+		return
+	}
+
+	modulePath := stripQuotes(pathNode.Content(src))
+	if modulePath == "" {
+		return
+	}
+
+	// Go imports the entire package — use "*" as the imported name,
+	// but also extract the package name (last path component)
+	pkgName := lastSlashComponent(modulePath)
+	line := int(node.StartPoint().Row) + 1
+
+	// Check for alias: import alias "path"
+	if nameNode := node.ChildByFieldName("name"); nameNode != nil {
+		pkgName = nameNode.Content(src)
+		if pkgName == "." {
+			pkgName = "*" // dot import
+		}
+	}
+
+	result.Imports = append(result.Imports, ImportRef{
+		ImportedName: pkgName,
+		ModulePath:   modulePath,
+		File:         file,
+		Line:         line,
+	})
+}
+
+// extractJavaImports handles:
+//   - import_declaration: "import com.foo.Bar;" → ImportRef{Name:"Bar", Module:"com.foo"}
+//   - "import com.foo.*;" → ImportRef{Name:"*", Module:"com.foo"}
+func extractJavaImports(node *sitter.Node, file string, src []byte, line int, result *ParseResult) {
+	// The import path is a scoped_identifier or identifier
+	text := strings.TrimSpace(node.Content(src))
+	// Remove "import " prefix and ";" suffix
+	text = strings.TrimPrefix(text, "import ")
+	text = strings.TrimPrefix(text, "static ")
+	text = strings.TrimSuffix(text, ";")
+	text = strings.TrimSpace(text)
+
+	if text == "" {
+		return
+	}
+
+	if strings.HasSuffix(text, ".*") {
+		// Wildcard import
+		modulePath := strings.TrimSuffix(text, ".*")
+		result.Imports = append(result.Imports, ImportRef{
+			ImportedName: "*",
+			ModulePath:   modulePath,
+			File:         file,
+			Line:         line,
+		})
+	} else {
+		// Named import: last dot component is the class name
+		lastDot := strings.LastIndex(text, ".")
+		if lastDot >= 0 {
+			result.Imports = append(result.Imports, ImportRef{
+				ImportedName: text[lastDot+1:],
+				ModulePath:   text[:lastDot],
+				File:         file,
+				Line:         line,
+			})
+		} else {
+			result.Imports = append(result.Imports, ImportRef{
+				ImportedName: text,
+				ModulePath:   "",
+				File:         file,
+				Line:         line,
+			})
+		}
+	}
+}
+
+// extractRustImports handles:
+//   - use_declaration: "use crate::foo::Bar;" → ImportRef{Name:"Bar", Module:"crate::foo"}
+//   - "use std::collections::{HashMap, HashSet};" → multiple ImportRefs
+//   - "pub use crate::foo::Bar;" → also emits ReExportRef (pub use = re-export)
+func extractRustImports(node *sitter.Node, file string, src []byte, line int, result *ParseResult) {
+	text := strings.TrimSpace(node.Content(src))
+
+	// Detect pub use → re-export. Strip the visibility modifier before parsing.
+	isPubUse := strings.HasPrefix(text, "pub use ") ||
+		strings.HasPrefix(text, "pub(crate) use ") ||
+		strings.HasPrefix(text, "pub(super) use ")
+
+	text = strings.TrimPrefix(text, "pub(super) ")
+	text = strings.TrimPrefix(text, "pub(crate) ")
+	text = strings.TrimPrefix(text, "pub ")
+	text = strings.TrimPrefix(text, "use ")
+	text = strings.TrimSuffix(text, ";")
+	text = strings.TrimSpace(text)
+
+	if text == "" {
+		return
+	}
+
+	// Handle use_list: use foo::{Bar, Baz}
+	if braceStart := strings.Index(text, "{"); braceStart >= 0 {
+		prefix := strings.TrimSuffix(text[:braceStart], "::")
+		braceEnd := strings.Index(text, "}")
+		if braceEnd > braceStart {
+			items := strings.Split(text[braceStart+1:braceEnd], ",")
+			for _, item := range items {
+				name := strings.TrimSpace(item)
+				// Handle "self" in use list
+				if name == "self" {
+					name = lastColonComponent(prefix)
+				}
+				if name != "" {
+					result.Imports = append(result.Imports, ImportRef{
+						ImportedName: name,
+						ModulePath:   prefix,
+						File:         file,
+						Line:         line,
+					})
+					if isPubUse {
+						result.ReExports = append(result.ReExports, ReExportRef{
+							ExportedName: name,
+							SourceModule: prefix,
+							File:         file,
+							Line:         line,
+						})
+					}
+				}
+			}
+		}
+		return
+	}
+
+	// Handle glob: use foo::*
+	if strings.HasSuffix(text, "::*") {
+		modulePath := strings.TrimSuffix(text, "::*")
+		result.Imports = append(result.Imports, ImportRef{
+			ImportedName: "*",
+			ModulePath:   modulePath,
+			File:         file,
+			Line:         line,
+		})
+		if isPubUse {
+			result.ReExports = append(result.ReExports, ReExportRef{
+				ExportedName: "*",
+				SourceModule: modulePath,
+				File:         file,
+				Line:         line,
+			})
+		}
+		return
+	}
+
+	// Simple import: use foo::Bar or use foo::Bar as Baz
+	// Handle alias
+	originalText := text
+	if asIdx := strings.Index(text, " as "); asIdx >= 0 {
+		text = text[:asIdx]
+	}
+
+	lastSep := strings.LastIndex(text, "::")
+	if lastSep >= 0 {
+		importedName := text[lastSep+2:]
+		modulePath := text[:lastSep]
+		result.Imports = append(result.Imports, ImportRef{
+			ImportedName: importedName,
+			ModulePath:   modulePath,
+			File:         file,
+			Line:         line,
+		})
+		if isPubUse {
+			// For aliased re-exports (pub use foo::Bar as Baz), the exported name
+			// is the alias, not the original name.
+			exportName := importedName
+			if asIdx := strings.Index(originalText, " as "); asIdx >= 0 {
+				exportName = strings.TrimSpace(originalText[asIdx+4:])
+			}
+			result.ReExports = append(result.ReExports, ReExportRef{
+				ExportedName: exportName,
+				SourceModule: modulePath,
+				File:         file,
+				Line:         line,
+			})
+		}
+	} else {
+		result.Imports = append(result.Imports, ImportRef{
+			ImportedName: text,
+			ModulePath:   "",
+			File:         file,
+			Line:         line,
+		})
+		if isPubUse && text != "" {
+			result.ReExports = append(result.ReExports, ReExportRef{
+				ExportedName: text,
+				SourceModule: "",
+				File:         file,
+				Line:         line,
+			})
+		}
+	}
+}
+
+// ── Property & Assertion extraction ──────────────────────────────────────
+
+// collectParamNames returns the parameter identifier names of a function node,
+// language-agnostically (the param name is the FIRST identifier of each entry in
+// the params field). Skips self/cls and punctuation. Used by the data-flow pass.
+func collectParamNames(node *sitter.Node, spec *specs.Spec, src []byte) []string {
+	var names []string
+	if spec == nil || spec.ParamsField == "" {
+		return names
+	}
+	pn := node.ChildByFieldName(spec.ParamsField)
+	if pn == nil {
+		return names
+	}
+	seen := map[string]bool{}
+	for i := 0; i < int(pn.ChildCount()); i++ {
+		param := pn.Child(i)
+		if param == nil {
+			continue
+		}
+		t := param.Type()
+		if t == "(" || t == ")" || t == "," || t == "{" || t == "}" {
+			continue
+		}
+		// first identifier descendant = the param NAME (not its type/default)
+		name := firstParamIdent(param, src)
+		if name == "" || name == "self" || name == "cls" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		names = append(names, name)
+	}
+	return names
+}
+
+// firstParamIdent finds the first identifier in a parameter node (its name).
+func firstParamIdent(n *sitter.Node, src []byte) string {
+	if n == nil {
+		return ""
+	}
+	tp := n.Type()
+	if tp == "identifier" || tp == "shorthand_property_identifier_pattern" {
+		return n.Content(src)
+	}
+	for i := 0; i < int(n.ChildCount()); i++ {
+		if r := firstParamIdent(n.Child(i), src); r != "" {
+			return r
+		}
+	}
+	return ""
+}
+
+// classifyFlow returns the immediate enclosing expression where a parameter
+// identifier is used (the forward-slice context), collapsed and truncated. An
+// argument-list parent is unwrapped to the call so "x" in foo(x) yields "foo(x)".
+func classifyFlow(idNode *sitter.Node, name string, src []byte) string {
+	p := idNode.Parent()
+	if p == nil {
+		return ""
+	}
+	if t := p.Type(); t == "argument_list" || t == "arguments" {
+		if gp := p.Parent(); gp != nil {
+			p = gp
+		}
+	}
+	txt := strings.Join(strings.Fields(strings.TrimSpace(p.Content(src))), " ")
+	if txt == "" || txt == name {
+		return "" // bare self-reference / the parameter declaration itself
+	}
+	if len(txt) > 50 {
+		txt = txt[:50]
+	}
+	return txt
+}
+
+// collectFlowUses walks a body and records the distinct forward-slice contexts of
+// a parameter name (language-agnostic identifier match).
+func collectFlowUses(node *sitter.Node, name string, src []byte, uses *[]string, seen map[string]bool, firstLine *int) {
+	if node == nil || len(*uses) >= 4 {
+		return
+	}
+	if node.Type() == "identifier" && node.Content(src) == name {
+		if ctx := classifyFlow(node, name, src); ctx != "" && !seen[ctx] {
+			seen[ctx] = true
+			*uses = append(*uses, ctx)
+			// Anchor the per-parameter data_flow fact at the FIRST use of the param,
+			// not at the function-body start (the wrong-fact line class).
+			if firstLine != nil && *firstLine == 0 {
+				*firstLine = int(node.StartPoint().Row) + 1
+			}
+		}
+	}
+	for i := 0; i < int(node.ChildCount()); i++ {
+		collectFlowUses(node.Child(i), name, src, uses, seen, firstLine)
+	}
+}
+
+// extractDataFlow records, per function parameter, where its value FLOWS within the
+// body (def-use / forward slice): the concrete expressions the input feeds — calls,
+// field reads, comparisons, returns. This is the value-provenance dimension the
+// call graph lacks (the Go off-by-one was a flow question: where count is checked
+// vs incremented). RESEARCH: def-use chains (dragon book) / forward program slicing
+// (Weiser, ICSE 1981). Language-agnostic: identifier match + enclosing-expr text.
+// Confidence 0.8 — static name match, not full alias/scope analysis (correct-or-quiet
+// downstream: a heuristic flow, not a verified fact).
+func extractDataFlow(node *sitter.Node, bodyNode *sitter.Node, spec *specs.Spec, src []byte, result *ParseResult, nodeIdx int) {
+	if bodyNode == nil {
+		return
+	}
+	params := collectParamNames(node, spec, src)
+	if len(params) == 0 {
+		return
+	}
+	if len(params) > 6 {
+		params = params[:6] // budget rail
+	}
+	for _, p := range params {
+		var uses []string
+		seen := map[string]bool{}
+		firstLine := 0
+		collectFlowUses(bodyNode, p, src, &uses, seen, &firstLine)
+		if len(uses) == 0 {
+			continue
+		}
+		line := int(bodyNode.StartPoint().Row) + 1
+		if firstLine > 0 {
+			line = firstLine
+		}
+		result.Properties = append(result.Properties, PropertyRef{
+			NodeIdx:    nodeIdx,
+			Kind:       "data_flow",
+			Value:      p + " -> " + strings.Join(uses, " | "),
+			Line:       line,
+			Confidence: 0.8,
+		})
+	}
+}
+
+// extractProperties extracts structural facts from a function AST node.
+// Works across all languages by walking tree-sitter nodes generically.
+func extractProperties(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, nodeIdx int) {
+	bodyNode := node.ChildByFieldName(sf.Spec.BodyField)
+	if bodyNode == nil {
+		return
+	}
+
+	// Receiver variable for named-receiver methods (Go: `func (c *Circle) ...` → "c").
+	// Empty for self/this languages and plain functions. Passed to the side-effect and
+	// field-read extractors so receiver methods get the same instance-field facts that
+	// self/this methods already get. Generalized: derived structurally from the Go method
+	// signature, no per-task logic.
+	recvName := ""
+	if sf.Language == "go" {
+		recvName = GoReceiverName(node.Content(src))
+	}
+
+	// Extract docstring (first string child of function, common in Python/JS/Go)
+	extractDocstring(node, bodyNode, sf, src, result, nodeIdx)
+
+	// Walk top-level statements in body for guard clauses and exception types
+	for i := 0; i < int(bodyNode.ChildCount()); i++ {
+		stmt := bodyNode.Child(i)
+		stmtType := stmt.Type()
+
+		// Guard clauses: if-raise/if-return/if-throw at the top of function body
+		// Only first 5 statements count as "guards"
+		if i < 5 {
+			extractGuardFromStmt(stmt, stmtType, sf, src, result, nodeIdx)
+		}
+
+		// Exception types: raise/throw statements anywhere in body
+		extractExceptionFromNode(stmt, sf, src, result, nodeIdx)
+	}
+
+	// Return shape: examine return statements
+	extractReturnShape(node, bodyNode, sf, src, result, nodeIdx)
+
+	// Rust-specific: detect ? operator usage (early return on error)
+	// and Result<T,E>/Option<T> return types as properties
+	if sf.Language == "rust" {
+		bodyText := bodyNode.Content(src)
+		// ? operator = implicit guard clause for Result/Option
+		if strings.Contains(bodyText, "?") {
+			qCount := strings.Count(bodyText, "?")
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "guard_clause",
+				Value:      fmt.Sprintf("return: ? operator (%d early returns)", qCount),
+				Line:       int(bodyNode.StartPoint().Row) + 1,
+				Confidence: 0.9,
+			})
+		}
+		// .unwrap() / .expect() = potential panic points
+		for _, method := range []string{".unwrap()", ".expect("} {
+			if strings.Contains(bodyText, method) {
+				result.Properties = append(result.Properties, PropertyRef{
+					NodeIdx:    nodeIdx,
+					Kind:       "exception_type",
+					Value:      "panic via " + strings.TrimSuffix(method, "("),
+					Line:       int(bodyNode.StartPoint().Row) + 1,
+					Confidence: 0.85,
+				})
+				break
+			}
+		}
+		// Return type: detect Result<T,E> or Option<T> from function signature
+		sigNode := node.ChildByFieldName("return_type")
+		if sigNode != nil {
+			retText := sigNode.Content(src)
+			if strings.Contains(retText, "Result") {
+				result.Properties = append(result.Properties, PropertyRef{
+					NodeIdx:    nodeIdx,
+					Kind:       "return_shape",
+					Value:      "Result<T,E>",
+					Line:       int(node.StartPoint().Row) + 1,
+					Confidence: 1.0,
+				})
+			} else if strings.Contains(retText, "Option") {
+				result.Properties = append(result.Properties, PropertyRef{
+					NodeIdx:    nodeIdx,
+					Kind:       "return_shape",
+					Value:      "Option<T>",
+					Line:       int(node.StartPoint().Row) + 1,
+					Confidence: 1.0,
+				})
+			}
+		} // Implicit return: idiomatic Rust returns the body block's TAIL EXPRESSION with no
+		// `return` keyword, which countReturns (keyed to return_statement) cannot see. Capture it
+		// so an edit that changes the returned value produces real return_shape drift.
+		if tail := rustTailExpr(bodyNode, src); tail != "" {
+			shape := "value|" + tail
+			if strings.HasPrefix(tail, "vec!") || strings.HasPrefix(tail, "[") {
+				shape = "collection|" + tail
+			} else if tail == "None" {
+				shape = "none"
+			}
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "return_shape",
+				Value:      shape,
+				Line:       int(bodyNode.StartPoint().Row) + 1,
+				Confidence: 0.9,
+			})
+		}
+	}
+
+	// ── New property extractors ──────────────────────────────────────────
+
+	// Conditional returns: if/elif with return statements
+	extractConditionalReturns(bodyNode, src, result, nodeIdx)
+
+	// Side effects: self./this./<recv>. attribute mutations
+	extractSideEffects(bodyNode, src, result, nodeIdx, recvName)
+
+	// Structured parameters: name, type, default
+	extractStructuredParams(node, sf.Spec, src, result, nodeIdx)
+
+	// Security tags: authentication/authorization keywords in function name/decorators
+	extractSecurityTags(node, src, result, nodeIdx)
+
+	// Exception flow: raise/throw inside conditional blocks
+	extractExceptionFlow(bodyNode, src, result, nodeIdx)
+
+	// Exception handlers: except/catch clauses
+	extractExceptionHandlers(bodyNode, src, result, nodeIdx)
+
+	// Function fingerprint: complexity proxy + unique call names
+	extractFunctionFingerprint(node, bodyNode, src, result, nodeIdx)
+
+	// Field reads: self.x/this.x/<recv>.x attribute reads (not assignments)
+	extractFieldReads(bodyNode, src, result, nodeIdx, recvName)
+
+	// Data flow: per-parameter forward slice (where each input value flows) — the
+	// def-use / value-provenance dimension the call graph lacks.
+	extractDataFlow(node, bodyNode, sf.Spec, src, result, nodeIdx)
+
+	// Boundary conditions: comparisons with len(), 0, None, null, nil, index access
+	extractBoundaryConditions(bodyNode, src, result, nodeIdx)
+
+	// Concurrency patterns: locks, mutexes, goroutines, channels, atomics
+	extractConcurrencyPatterns(bodyNode, src, result, nodeIdx)
+
+	// Config reads: os.environ, os.getenv, process.env, viper, settings
+	extractConfigReads(bodyNode, src, result, nodeIdx)
+
+	// Call ordering: method call sequences on the same receiver
+	extractCallOrdering(bodyNode, src, result, nodeIdx)
+
+	// Resource patterns: with/using/defer statements
+	extractResourcePatterns(bodyNode, src, result, nodeIdx)
+
+	// Visibility: public/private/protected/exported/unexported
+	extractVisibility(node, src, result, nodeIdx)
+}
+
+// extractDocstring extracts a docstring from a function node.
+// Checks: (1) preceding sibling comment (Go/Java/Rust/TS/C++), (2) first body child (Python/JS).
+func extractDocstring(funcNode, bodyNode *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, nodeIdx int) {
+	// Strategy 1: Check preceding sibling of the function node for doc comments.
+	// In Go, Java, Rust, TS, C++, doc comments appear BEFORE the function.
+	prevSibling := funcNode.PrevSibling()
+	if prevSibling != nil && prevSibling.Type() == "comment" {
+		text := _cleanComment(prevSibling.Content(src))
+		if len(text) >= 5 {
+			if len(text) > 200 {
+				text = text[:200]
+			}
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "docstring",
+				Value:      text,
+				Line:       int(prevSibling.StartPoint().Row) + 1,
+				Confidence: 1.0,
+			})
+			return
+		}
+	}
+
+	// Strategy 1a-fallback: Check parent's prev sibling (for TS: export_statement > function)
+	if prevSibling == nil || (prevSibling.Type() != "comment" && prevSibling.Type() != "block_comment") {
+		parent := funcNode.Parent()
+		if parent != nil {
+			parentPrev := parent.PrevSibling()
+			if parentPrev != nil && (parentPrev.Type() == "comment" || parentPrev.Type() == "block_comment") {
+				text := _cleanComment(parentPrev.Content(src))
+				if len(text) >= 5 {
+					if len(text) > 200 {
+						text = text[:200]
+					}
+					result.Properties = append(result.Properties, PropertyRef{
+						NodeIdx:    nodeIdx,
+						Kind:       "docstring",
+						Value:      text,
+						Line:       int(parentPrev.StartPoint().Row) + 1,
+						Confidence: 0.9,
+					})
+					return
+				}
+			}
+		}
+	}
+
+	// Strategy 1b: Check for multi-line block comment (Java /** */, C++ /** */)
+	if prevSibling != nil && (prevSibling.Type() == "block_comment" || prevSibling.Type() == "line_comment") {
+		text := _cleanComment(prevSibling.Content(src))
+		if len(text) >= 5 {
+			if len(text) > 200 {
+				text = text[:200]
+			}
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "docstring",
+				Value:      text,
+				Line:       int(prevSibling.StartPoint().Row) + 1,
+				Confidence: 1.0,
+			})
+			return
+		}
+	}
+
+	if bodyNode.ChildCount() == 0 {
+		return
+	}
+	firstChild := bodyNode.Child(0)
+	if firstChild == nil {
+		return
+	}
+	childType := firstChild.Type()
+
+	// Strategy 2: Python — expression_statement containing a string (docstring)
+	if childType == "expression_statement" && firstChild.ChildCount() > 0 {
+		inner := firstChild.Child(0)
+		if inner != nil && inner.Type() == "string" {
+			text := strings.TrimSpace(inner.Content(src))
+			text = strings.Trim(text, `"'`)
+			text = strings.Trim(text, "`")
+			if len(text) > 200 {
+				text = text[:200]
+			}
+			if text != "" {
+				result.Properties = append(result.Properties, PropertyRef{
+					NodeIdx:    nodeIdx,
+					Kind:       "docstring",
+					Value:      text,
+					Line:       int(firstChild.StartPoint().Row) + 1,
+					Confidence: 1.0,
+				})
+			}
+			return
+		}
+	}
+
+	// Strategy 3: comment node inside function body (fallback)
+	if childType == "comment" {
+		text := _cleanComment(firstChild.Content(src))
+		if len(text) > 200 {
+			text = text[:200]
+		}
+		if text != "" {
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "docstring",
+				Value:      text,
+				Line:       int(firstChild.StartPoint().Row) + 1,
+				Confidence: 0.8,
+			})
+		}
+	}
+}
+
+// _cleanComment strips comment markers from a comment string.
+func _cleanComment(raw string) string {
+	text := strings.TrimSpace(raw)
+	// Block comments: /* ... */ or /** ... */
+	text = strings.TrimPrefix(text, "/**")
+	text = strings.TrimPrefix(text, "/*")
+	text = strings.TrimSuffix(text, "*/")
+	// Line comments: // or /// or #
+	lines := strings.Split(text, "\n")
+	var cleaned []string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		line = strings.TrimPrefix(line, "///")
+		line = strings.TrimPrefix(line, "//!")
+		line = strings.TrimPrefix(line, "//")
+		line = strings.TrimPrefix(line, "#")
+		line = strings.TrimPrefix(line, "* ")
+		line = strings.TrimPrefix(line, "*")
+		line = strings.TrimSpace(line)
+		if line != "" {
+			cleaned = append(cleaned, line)
+		}
+	}
+	return strings.Join(cleaned, " ")
+}
+
+// extractGuardFromStmt checks if a statement is a guard clause (if-raise, if-return, if-throw).
+func extractGuardFromStmt(stmt *sitter.Node, stmtType string, sf walker.SourceFile, src []byte, result *ParseResult, nodeIdx int) {
+	// Rust (and some grammars) wrap a top-level `if {...}` guard in an expression_statement;
+	// unwrap it so the guard clause is seen by the scanner below.
+	if stmtType == "expression_statement" && stmt.NamedChildCount() > 0 {
+		if inner := stmt.NamedChild(0); inner.Type() == "if_expression" {
+			stmt = inner
+			stmtType = "if_expression"
+		}
+	}
+	if stmtType != "if_statement" && stmtType != "if_expression" {
+		return
+	}
+
+	// Check if the body of the if contains a raise/throw/return
+	text := stmt.Content(src)
+	isGuard := false
+	guardType := ""
+
+	// Look for raise/throw/return/? operator in the if body
+	for _, kw := range []string{"raise ", "throw ", "return", "panic(", "panic!(", "error(", "Error(", "abort(", "Err("} {
+		if strings.Contains(text, kw) {
+			isGuard = true
+			switch {
+			case strings.Contains(text, "raise ") || strings.Contains(text, "throw "):
+				guardType = "raise"
+			case strings.Contains(text, "panic(") || strings.Contains(text, "panic!(") || strings.Contains(text, "abort("):
+				guardType = "panic"
+			default:
+				guardType = "return"
+			}
+			break
+		}
+	}
+
+	if isGuard {
+		// Extract the condition from the if statement
+		condNode := stmt.ChildByFieldName("condition")
+		condText := ""
+		if condNode != nil {
+			condText = strings.TrimSpace(condNode.Content(src))
+		}
+		if condText == "" {
+			// Fallback: take text between "if" and ":"/"{"
+			condText = text
+			if idx := strings.Index(condText, "{"); idx > 0 {
+				condText = condText[3:idx]
+			} else if idx := strings.Index(condText, ":"); idx > 0 {
+				condText = condText[3:idx]
+			}
+			condText = strings.TrimSpace(condText)
+		}
+		condText = clipBalanced(condText, 120)
+
+		// Extract the consequence body to show what happens when the guard fires.
+		// Try "consequence" (Python) then "body" (Go/JS/Java/C).
+		consequenceText := ""
+		consNode := stmt.ChildByFieldName("consequence")
+		if consNode == nil {
+			consNode = stmt.ChildByFieldName("body")
+		}
+		if consNode != nil && consNode.ChildCount() > 0 {
+			firstStmt := consNode.Child(0)
+			if firstStmt != nil {
+				consequenceText = strings.TrimSpace(firstStmt.Content(src))
+				// Collapse multi-line to single line
+				if nlIdx := strings.IndexByte(consequenceText, '\n'); nlIdx > 0 {
+					consequenceText = consequenceText[:nlIdx]
+				}
+				if len(consequenceText) > 60 {
+					consequenceText = clipBalanced(consequenceText, 60)
+				}
+			}
+		}
+
+		value := guardType + ": " + condText
+		if consequenceText != "" {
+			value += " -> " + consequenceText
+		}
+		result.Properties = append(result.Properties, PropertyRef{
+			NodeIdx:    nodeIdx,
+			Kind:       "guard_clause",
+			Value:      value,
+			Line:       int(stmt.StartPoint().Row) + 1,
+			Confidence: 1.0,
+		})
+	}
+}
+
+// clipBalanced returns the longest prefix of s (first clipped to max bytes when
+// s is longer) that is well-formed: quotes balanced, bracket depth zero, not
+// ending mid-identifier or on a dangling binary operator. Truncating source text
+// (a guard condition, a raise statement) at a fixed byte budget can split inside
+// a string literal or expression, leaving an unterminated value that is malformed
+// when surfaced to an agent (correct-or-quiet). Operates on quotes/brackets only,
+// so it is language-agnostic. Returns "" when no non-trivial prefix is well-formed.
+func clipBalanced(s string, maxLen int) string {
+	s = strings.TrimRight(s, " \t")
+	if s == "" {
+		return ""
+	}
+	budget := len(s)
+	if maxLen > 0 && budget > maxLen {
+		budget = maxLen
+	}
+	var inStr byte // 0 = outside any string, else the opening quote byte
+	esc := false
+	depth := 0
+	safe := 0 // furthest prefix length that is balanced and outside a string
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if i <= budget && inStr == 0 && depth == 0 {
+			safe = i
+		}
+		if esc {
+			esc = false
+			continue
+		}
+		if inStr != 0 {
+			if ch == '\\' {
+				esc = true
+			} else if ch == inStr {
+				inStr = 0
+			}
+			continue
+		}
+		switch ch {
+		case '"', '\'', '`':
+			inStr = ch
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			if depth > 0 {
+				depth--
+			}
+		}
+	}
+	if inStr == 0 && depth == 0 && len(s) <= budget {
+		safe = len(s)
+	}
+	// never end mid-identifier (only when the cut fell inside a word)
+	if safe > 0 && safe < len(s) && isWordByte(s[safe-1]) && isWordByte(s[safe]) {
+		j := safe
+		for j > 0 && isWordByte(s[j-1]) {
+			j--
+		}
+		safe = j
+	}
+	prefix := strings.TrimRight(s[:safe], " \t")
+	for {
+		stripped := stripTrailingOp(prefix)
+		if stripped == prefix {
+			break
+		}
+		prefix = strings.TrimRight(stripped, " \t")
+	}
+	return prefix
+}
+
+func isWordByte(b byte) bool {
+	return b == '_' ||
+		(b >= '0' && b <= '9') ||
+		(b >= 'a' && b <= 'z') ||
+		(b >= 'A' && b <= 'Z')
+}
+
+// stripTrailingOp removes a single dangling binary/word operator at the end of s
+// (a sign the expression was cut mid-way). Multi-char operators are checked
+// before their single-char prefixes.
+func stripTrailingOp(s string) string {
+	t := strings.TrimRight(s, " \t")
+	for _, op := range []string{"->", "<=", ">=", "==", "!=", "&&", "||",
+		"+", "-", "*", "/", "%", "<", ">", "&", "|", "^", "~", "=", ","} {
+		if strings.HasSuffix(t, op) {
+			return strings.TrimRight(t[:len(t)-len(op)], " \t")
+		}
+	}
+	for _, op := range []string{"and", "or", "not", "in", "is"} {
+		if t == op {
+			return ""
+		}
+		if strings.HasSuffix(t, " "+op) {
+			return strings.TrimRight(t[:len(t)-len(op)-1], " \t")
+		}
+	}
+	return t
+}
+
+// isUpperLed reports whether s begins with an ASCII uppercase letter. A raised
+// internal error type in Rust/Go is conventionally PascalCase (`MyError`,
+// `ConfigError`); an external/stdlib path is lowercase-led at its first segment
+// (`std::io::Error`, `errors.New`, `anyhow::Error`). This is the cheap structural
+// gate that keeps the extracted token a project-error-CLASS candidate and not a
+// module/crate path — the first half of the correct-or-quiet bar (the promote pass
+// supplies the second half: it must resolve to a real internal Class node and is
+// not a known builtin). It does NOT, by itself, decide an edge is owed.
+func isUpperLed(s string) bool {
+	return s != "" && s[0] >= 'A' && s[0] <= 'Z'
+}
+
+// leadingTypeSegment reduces a raised-error expression fragment to its leading
+// type identifier: the substring up to the first `::`, `{`, `(`, `<`, `,`, `)`,
+// whitespace, or `.`. So `ConfigError::Bad` -> `ConfigError`, `MyError{}` -> `MyError`,
+// `std::io::Error::new()` -> `std`, `MyError<T>` -> `MyError`. Returns "" when the
+// fragment is empty. The caller applies isUpperLed to decide it is a project type.
+func leadingTypeSegment(frag string) string {
+	frag = strings.TrimSpace(frag)
+	if frag == "" {
+		return ""
+	}
+	cut := len(frag)
+	for i := 0; i < len(frag); i++ {
+		c := frag[i]
+		if c == ':' || c == '{' || c == '(' || c == '<' || c == ',' || c == ')' ||
+			c == ' ' || c == '\t' || c == '\n' || c == '.' {
+			cut = i
+			break
+		}
+	}
+	return strings.TrimSpace(frag[:cut])
+}
+
+// firstArgType returns the leading type identifier of the FIRST argument of the
+// first `<head>(` call found in text — used for `Err(<Type>...)` (Rust) and the
+// `bail!(<Type>::Variant)` / `anyhow!(...)` macro forms. headSet, when non-nil,
+// restricts which call heads are inspected (e.g. {"Err"} so a generic `foo(Bar)`
+// call is ignored). Returns "" if no qualifying capitalized argument type is found.
+func firstArgType(text string, headSet map[string]bool) string {
+	for i := 0; i < len(text); i++ {
+		if text[i] != '(' {
+			continue
+		}
+		// Read the head identifier immediately preceding '(' (skip a trailing '!'
+		// for macro_invocation forms like `bail!(`).
+		j := i - 1
+		if j >= 0 && text[j] == '!' {
+			j--
+		}
+		end := j + 1
+		for j >= 0 && (isIdentByte(text[j])) {
+			j--
+		}
+		head := text[j+1 : end]
+		if head == "" {
+			continue
+		}
+		if headSet != nil && !headSet[head] {
+			continue
+		}
+		arg := leadingTypeSegment(text[i+1:])
+		if isUpperLed(arg) {
+			return arg
+		}
+		if headSet != nil {
+			// The head matched (e.g. Err(...)) but its first arg is not a project
+			// type (e.g. Err(std::io::...)) -> stop, correct-or-quiet.
+			return ""
+		}
+	}
+	return ""
+}
+
+// isIdentByte reports whether b is part of an identifier (used by firstArgType to
+// walk a call head backwards).
+func isIdentByte(b byte) bool {
+	return b == '_' ||
+		(b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
+}
+
+// rustRaisedType extracts the INTERNAL error type name a Rust error-raising
+// expression names, or "" when none is named (so the fact stays a property /
+// correct-or-quiet). Generalized over the Rust error model:
+//
+//	Err(<Type>...)            -> <Type>          (struct or enum, Err(MyError) / Err(E::V))
+//	<Type>{..}.into()         -> <Type>          (the .into() conversion idiom)
+//	<Type>::<V>.into()        -> <Type>
+//	bail!(<Type>::..) etc.    -> <Type>          (anyhow/bail/ensure macros naming a type)
+//
+// A builtin/external error (`std::io::Error`, `anyhow::Error`) is lowercase-led at
+// its first path segment -> isUpperLed rejects it -> "" -> stays a property. The
+// promote pass enforces the rest of non-invention (resolve to an internal Class
+// node, drop builtins). The returned name is the bare leading type identifier; the
+// caller emits it as the property value the existing promoteRaises consumes.
+func rustRaisedType(text string) string {
+	text = strings.TrimSpace(text)
+	// 1) Err(<Type>...) — the dominant Result error path. Restrict the call head to
+	//    `Err` so a generic call argument is never mistaken for an error type.
+	if t := firstArgType(text, map[string]bool{"Err": true}); t != "" {
+		return t
+	}
+	// 2) <Type>{..}.into() / <Type>::Variant.into() — the conversion idiom. Only when
+	//    `.into()` is present AND the expression LEADS with a capitalized type (so a
+	//    `value.into()` on a non-type receiver is ignored).
+	if strings.Contains(text, ".into()") {
+		if lead := leadingTypeSegment(text); isUpperLed(lead) {
+			return lead
+		}
+	}
+	// 3) bail!/anyhow!/ensure! macros that name a concrete internal type as the first
+	//    arg (e.g. bail!(ConfigError::Bad)). A string-message macro (bail!("msg")) has
+	//    no capitalized first arg -> "" -> stays a property.
+	for _, m := range []string{"bail", "anyhow", "ensure"} {
+		if strings.Contains(text, m+"!(") {
+			if t := firstArgType(text, map[string]bool{m: true}); t != "" {
+				return t
+			}
+		}
+	}
+	return ""
+}
+
+// goRaisedType extracts the INTERNAL error type name a Go error-returning expression
+// names, or "" otherwise. Generalized over the Go error model's NAMED-type forms:
+//
+//	&<Type>{..}   -> <Type>     (return &ConfigError{..} — the custom error struct)
+//	<Type>{..}    -> <Type>     (return ConfigError{..})
+//
+// A value-only error (`errors.New(..)`, `fmt.Errorf(..)`, `pkg.ErrFoo`) names no
+// internal CLASS to point a RAISES edge at — it stays a property (correct-or-quiet);
+// the dotted forms are additionally dropped by the promote pass. Mirrors the Rust
+// path: emit only a leading capitalized type identifier.
+func goRaisedType(text string) string {
+	text = strings.TrimSpace(text)
+	// Find a `&<Type>{` or `<Type>{` composite-literal of a capitalized type. Scan for
+	// the first '{' that is preceded by a capitalized identifier (optionally '&'-led).
+	for i := 0; i < len(text); i++ {
+		if text[i] != '{' {
+			continue
+		}
+		j := i - 1
+		end := j + 1
+		for j >= 0 && isIdentByte(text[j]) {
+			j--
+		}
+		ident := text[j+1 : end]
+		if isUpperLed(ident) {
+			return ident
+		}
+	}
+	return ""
+}
+
+// extractExceptionFromNode recursively finds raise/throw/panic statements.
+func extractExceptionFromNode(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, nodeIdx int) {
+	nodeType := node.Type()
+
+	// Match raise/throw/panic statements
+	isException := false
+	switch nodeType {
+	case "raise_statement", "throw_statement", "throw_expression":
+		isException = true
+	case "expression_statement":
+		// Check for panic() calls, the Rust `<Type>{..}.into()` conversion idiom,
+		// and Rust error macros wrapped in an expression_statement.
+		text := node.Content(src)
+		if strings.Contains(text, "panic(") || strings.Contains(text, "panic!(") ||
+			rustRaisedType(text) != "" {
+			isException = true
+		}
+	case "return_statement":
+		// Go: return fmt.Errorf(...) / errors.New(...) (a value -> excType "error"), OR
+		// a NAMED internal error type (return &ConfigError{..} / return ConfigError{..}),
+		// which is the RAISES-edge target the value forms never were.
+		text := node.Content(src)
+		if strings.Contains(text, "fmt.Errorf") || strings.Contains(text, "errors.New") ||
+			strings.Contains(text, "errors.Wrap") || strings.Contains(text, "errors.Errorf") ||
+			goRaisedType(text) != "" {
+			isException = true
+		}
+	case "return_expression":
+		// Rust idiomatic raise: `return Err(<Type>..)` / `return <Type>{..}.into()`.
+		// (tree-sitter-rust models `return <expr>` as a return_expression, not a
+		// return_statement — which is why these never matched before.)
+		if rustRaisedType(node.Content(src)) != "" {
+			isException = true
+		}
+	case "macro_invocation":
+		// Rust error macros: panic!(..) / bail!(..) / anyhow!(..) / ensure!(..).
+		text := node.Content(src)
+		if strings.HasPrefix(text, "panic!") || rustRaisedType(text) != "" {
+			isException = true
+		}
+	}
+
+	if isException {
+		text := strings.TrimSpace(node.Content(src))
+		// Extract the exception type
+		excType := ""
+		switch {
+		case strings.HasPrefix(text, "raise "):
+			excType = strings.TrimPrefix(text, "raise ")
+			if idx := strings.Index(excType, "("); idx > 0 {
+				excType = excType[:idx]
+			}
+		case strings.HasPrefix(text, "throw "):
+			excType = strings.TrimPrefix(text, "throw ")
+			if strings.HasPrefix(excType, "new ") {
+				excType = strings.TrimPrefix(excType, "new ")
+			}
+			if idx := strings.Index(excType, "("); idx > 0 {
+				excType = excType[:idx]
+			}
+		case rustRaisedType(text) != "":
+			// Rust `Err(<Type>..)` / `<Type>{..}.into()` / `bail!(<Type>::..)` —
+			// the NAMED internal error type. Emit the bare type so promoteRaises
+			// resolves it to the internal Class node (struct/enum). A builtin/
+			// external (std::io::Error) yields "" here and falls through.
+			excType = rustRaisedType(text)
+		case goRaisedType(text) != "":
+			// Go `&<Type>{..}` / `<Type>{..}` composite-literal error -> bare type.
+			excType = goRaisedType(text)
+		case strings.HasPrefix(text, "panic!") || strings.Contains(text, "panic!("):
+			// Rust panic! names no internal class -> non-class marker (no edge).
+			excType = "panic"
+		case strings.Contains(text, "panic("):
+			excType = "panic"
+		case strings.Contains(text, "fmt.Errorf") || strings.Contains(text, "errors.New") ||
+			strings.Contains(text, "errors.Wrap") || strings.Contains(text, "errors.Errorf"):
+			excType = "error"
+		default:
+			excType = text
+		}
+		excType = strings.TrimSpace(excType)
+		if len(excType) > 80 {
+			excType = excType[:80]
+		}
+		if excType != "" {
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "exception_type",
+				Value:      excType,
+				Line:       int(node.StartPoint().Row) + 1,
+				Confidence: 1.0,
+			})
+		}
+		return
+	}
+
+	// Recurse into children
+	for i := 0; i < int(node.ChildCount()); i++ {
+		extractExceptionFromNode(node.Child(i), sf, src, result, nodeIdx)
+	}
+}
+
+// extractReturnShape classifies the return pattern of a function.
+func extractReturnShape(funcNode *sitter.Node, bodyNode *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, nodeIdx int) {
+	shapes := make(map[string]bool)
+	countReturns(bodyNode, src, shapes)
+
+	if len(shapes) == 0 {
+		return
+	}
+
+	// Aggregate fact summarizing the function's return behavior → anchor at the
+	// FUNCTION node's start (the declaration), not the body's first statement.
+	shapeLine := int(bodyNode.StartPoint().Row) + 1
+	if funcNode != nil {
+		shapeLine = int(funcNode.StartPoint().Row) + 1
+	}
+
+	// Summarize
+	for shape := range shapes {
+		result.Properties = append(result.Properties, PropertyRef{
+			NodeIdx:    nodeIdx,
+			Kind:       "return_shape",
+			Value:      shape,
+			Line:       shapeLine,
+			Confidence: 0.9,
+		})
+	}
+}
+
+// countReturns recursively finds return statements and classifies their shape.
+func countReturns(node *sitter.Node, src []byte, shapes map[string]bool) {
+	if node.Type() == "return_statement" {
+		text := strings.TrimSpace(node.Content(src))
+		text = strings.TrimPrefix(text, "return ")
+		text = strings.TrimSuffix(text, ";")
+		text = strings.TrimSpace(text)
+
+		expr := text
+		if len(expr) > 80 {
+			expr = expr[:80]
+		}
+		switch {
+		case text == "" || text == "return" || text == "None" || text == "nil" || text == "null" || text == "undefined":
+			shapes["none"] = true
+		case strings.HasPrefix(text, "(") && strings.Contains(text, ","):
+			shapes["tuple|"+expr] = true
+		case strings.HasPrefix(text, "[") || strings.HasPrefix(text, "{"):
+			shapes["collection|"+expr] = true
+		default:
+			shapes["value|"+expr] = true
+		}
+		return
+	}
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		countReturns(node.Child(i), src, shapes)
+	}
+}
+
+// rustTailExpr returns a Rust function body block's implicit-return tail expression (the final
+// expression with no trailing `;`), or "" when the block ends in a statement/declaration. Rust
+// returns its block's last expression without a `return` keyword, so countReturns cannot see it.
+func rustTailExpr(bodyNode *sitter.Node, src []byte) string {
+	for i := int(bodyNode.NamedChildCount()) - 1; i >= 0; i-- {
+		c := bodyNode.NamedChild(i)
+		t := c.Type()
+		if t == "line_comment" || t == "block_comment" {
+			continue // skip trailing comments
+		}
+		if strings.HasSuffix(t, "_statement") || strings.HasSuffix(t, "_declaration") {
+			return "" // block ends in a statement -> no implicit return
+		}
+		txt := strings.TrimSpace(c.Content(src))
+		if len(txt) > 80 {
+			txt = txt[:80]
+		}
+		return txt
+	}
+	return ""
+}
+
+// ── New property extractors ─────────────────────────────────────────────────
+
+// extractConditionalReturns finds if/elif blocks that contain return statements.
+// Kind: conditional_return. Value: "if cond: return val" or "ELSE: return val".
+func extractConditionalReturns(bodyNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int) {
+	_walkConditionalReturns(bodyNode, src, result, nodeIdx, 0)
+}
+
+func _walkConditionalReturns(node *sitter.Node, src []byte, result *ParseResult, nodeIdx int, depth int) {
+	if depth > 10 {
+		return
+	}
+	nodeType := node.Type()
+
+	// Track the start byte of the alternative node to avoid double-processing.
+	// Without this, elif_clause is visited both via the alternative field AND
+	// the child iteration loop, producing duplicate conditional_return properties.
+	altStartByte := uint32(0)
+	altVisited := false
+
+	if nodeType == "if_statement" || nodeType == "elif_clause" || nodeType == "if_expression" {
+		// Check for return_statement children inside the consequence/body
+		consNode := node.ChildByFieldName("consequence")
+		if consNode == nil {
+			consNode = node.ChildByFieldName("body")
+		}
+		if consNode != nil {
+			_findReturnsInBlock(consNode, node, src, result, nodeIdx, false)
+		}
+		// Check alternative (else/elif) — mark as visited so child loop skips it
+		altNode := node.ChildByFieldName("alternative")
+		if altNode != nil {
+			altStartByte = altNode.StartByte()
+			altVisited = true
+			if altNode.Type() == "else_clause" || altNode.Type() == "else" {
+				_findReturnsInBlock(altNode, node, src, result, nodeIdx, true)
+			} else if altNode.Type() == "elif_clause" || altNode.Type() == "if_statement" {
+				// Recurse into elif
+				_walkConditionalReturns(altNode, src, result, nodeIdx, depth+1)
+			}
+		}
+	}
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child == nil {
+			continue
+		}
+		// Skip the alternative node already visited above
+		if altVisited && child.StartByte() == altStartByte {
+			ct := child.Type()
+			if ct == "elif_clause" || ct == "else_clause" || ct == "else" || ct == "if_statement" {
+				continue
+			}
+		}
+		ct := child.Type()
+		if ct == "if_statement" || ct == "elif_clause" || ct == "if_expression" {
+			_walkConditionalReturns(child, src, result, nodeIdx, depth+1)
+		}
+	}
+}
+
+func _findReturnsInBlock(block *sitter.Node, ifNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int, isElse bool) {
+	for i := 0; i < int(block.ChildCount()); i++ {
+		child := block.Child(i)
+		if child == nil {
+			continue
+		}
+		if child.Type() == "return_statement" {
+			retText := strings.TrimSpace(child.Content(src))
+			retText = strings.TrimPrefix(retText, "return ")
+			retText = strings.TrimSuffix(retText, ";")
+			retText = strings.TrimSpace(retText)
+			if retText == "" {
+				retText = "None"
+			}
+
+			var value string
+			if isElse {
+				value = fmt.Sprintf("ELSE: return %s", retText)
+			} else {
+				condNode := ifNode.ChildByFieldName("condition")
+				condText := ""
+				if condNode != nil {
+					condText = strings.TrimSpace(condNode.Content(src))
+				}
+				if condText == "" {
+					condText = "?"
+				}
+				value = fmt.Sprintf("if %s: return %s", condText, retText)
+			}
+			if len(value) > 200 {
+				value = value[:197] + "..."
+			}
+
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "conditional_return",
+				Value:      value,
+				Line:       int(child.StartPoint().Row) + 1,
+				Confidence: 1.0,
+			})
+		}
+	}
+}
+
+// extractSideEffects finds assignment expressions where the left side starts with
+// the instance prefix (self./this./this-> or, for Go/other named-receiver methods,
+// the receiver variable like `c.`). Kind: side_effect. Value: "mutates: <recv>.field".
+//
+// recvName is the receiver variable for languages whose methods bind the instance to
+// a NAMED receiver instead of the self/this keyword (Go: `func (c *Circle) ...` → "c").
+// Empty for self/this languages. Generalized: any non-empty receiver is matched as an
+// instance-field write, so Go/other receiver methods get the same field-mutation facts
+// Python/JS already get from self/this.
+func extractSideEffects(bodyNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int, recvName string) {
+	_walkSideEffects(bodyNode, src, result, nodeIdx, 0, recvName)
+}
+
+func _walkSideEffects(node *sitter.Node, src []byte, result *ParseResult, nodeIdx int, depth int, recvName string) {
+	if depth > 15 {
+		return
+	}
+	nodeType := node.Type()
+
+	// Go uses "assignment_statement" (and "short_var_declaration" for :=); the
+	// self/this languages use "assignment"/"assignment_expression". Include all so
+	// named-receiver mutations (c.field = ...) are seen, not just self/this ones.
+	if nodeType == "assignment" || nodeType == "augmented_assignment" ||
+		nodeType == "assignment_expression" || nodeType == "expression_statement" ||
+		nodeType == "assignment_statement" {
+		if _tryExtractSideEffect(node, src, result, nodeIdx, recvName) {
+			return
+		}
+	}
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child != nil {
+			_walkSideEffects(child, src, result, nodeIdx, depth+1, recvName)
+		}
+	}
+}
+
+// _tryExtractSideEffect checks if an assignment node mutates instance fields via
+// self./this. or a named receiver (recvName). Returns true if a side effect was found
+// and emitted (caller should not recurse).
+func _tryExtractSideEffect(node *sitter.Node, src []byte, result *ParseResult, nodeIdx int, recvName string) bool {
+	text := strings.TrimSpace(node.Content(src))
+	// Check for self. or this. on the left side of =
+	eqIdx := strings.Index(text, "=")
+	if eqIdx < 0 {
+		return false
+	}
+	// Avoid ==, !=, <=, >=
+	if len(text) > eqIdx+1 && text[eqIdx+1] == '=' {
+		return false
+	}
+	if eqIdx > 0 && (text[eqIdx-1] == '!' || text[eqIdx-1] == '<' || text[eqIdx-1] == '>') {
+		return false
+	}
+
+	lhsEnd := eqIdx
+	// Strip augmented assignment operators: +=, -=, *=, /=, |=, &=, ^=, %=
+	if lhsEnd > 0 && strings.ContainsRune("+-*/%|&^", rune(text[lhsEnd-1])) {
+		lhsEnd--
+	}
+	lhs := strings.TrimSpace(text[:lhsEnd])
+
+	// Named-receiver instance write (Go etc.): `<recv>.field = ...`. Treated exactly
+	// like self./this. so receiver methods produce the same field-mutation fact.
+	if recvName != "" && strings.HasPrefix(lhs, recvName+".") {
+		field := strings.TrimPrefix(lhs, recvName+".")
+		if dotIdx := strings.Index(field, "."); dotIdx > 0 {
+			field = field[:dotIdx]
+		}
+		if bIdx := strings.Index(field, "["); bIdx > 0 {
+			field = field[:bIdx]
+		}
+		if field != "" {
+			rhs := ""
+			if eqIdx >= 0 && eqIdx+1 < len(text) {
+				rhs = strings.TrimSpace(text[eqIdx+1:])
+				if len(rhs) > 60 {
+					rhs = rhs[:60]
+				}
+			}
+			value := "mutates: " + recvName + "." + field
+			if rhs != "" {
+				value += " = " + rhs
+			}
+			if len(value) > 200 {
+				value = value[:197] + "..."
+			}
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "side_effect",
+				Value:      value,
+				Line:       int(node.StartPoint().Row) + 1,
+				Confidence: 1.0,
+			})
+		}
+		return true
+	}
+
+	if strings.HasPrefix(lhs, "self.") {
+		field := strings.TrimPrefix(lhs, "self.")
+		// Strip further attribute access (only first level)
+		if dotIdx := strings.Index(field, "."); dotIdx > 0 {
+			field = field[:dotIdx]
+		}
+		// Strip brackets
+		if bIdx := strings.Index(field, "["); bIdx > 0 {
+			field = field[:bIdx]
+		}
+		if field != "" {
+			rhs := ""
+			if eqIdx >= 0 && eqIdx+1 < len(text) {
+				rhs = strings.TrimSpace(text[eqIdx+1:])
+				if len(rhs) > 60 {
+					rhs = rhs[:60]
+				}
+			}
+			value := "mutates: self." + field
+			if rhs != "" {
+				value += " = " + rhs
+			}
+			if len(value) > 200 {
+				value = value[:197] + "..."
+			}
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "side_effect",
+				Value:      value,
+				Line:       int(node.StartPoint().Row) + 1,
+				Confidence: 1.0,
+			})
+		}
+		return true
+	}
+	if strings.HasPrefix(lhs, "this.") || strings.HasPrefix(lhs, "this->") {
+		sep := "."
+		if strings.HasPrefix(lhs, "this->") {
+			sep = "->"
+		}
+		field := lhs[len("this"+sep):]
+		if dotIdx := strings.Index(field, "."); dotIdx > 0 {
+			field = field[:dotIdx]
+		}
+		if bIdx := strings.Index(field, "["); bIdx > 0 {
+			field = field[:bIdx]
+		}
+		if field != "" {
+			value := "mutates: this." + field
+			if len(value) > 200 {
+				value = value[:197] + "..."
+			}
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "side_effect",
+				Value:      value,
+				Line:       int(node.StartPoint().Row) + 1,
+				Confidence: 1.0,
+			})
+		}
+		return true
+	}
+	return false
+}
+
+// extractStructuredParams extracts function parameters with type annotations and defaults.
+// Kind: param. Value: "name:type [required]" or "name:type opt=default_value".
+func extractStructuredParams(node *sitter.Node, spec *specs.Spec, src []byte, result *ParseResult, nodeIdx int) {
+	paramsField := spec.ParamsField
+	if paramsField == "" {
+		return
+	}
+	paramsNode := node.ChildByFieldName(paramsField)
+	if paramsNode == nil {
+		return
+	}
+
+	for i := 0; i < int(paramsNode.ChildCount()); i++ {
+		param := paramsNode.Child(i)
+		if param == nil {
+			continue
+		}
+		paramType := param.Type()
+
+		// Skip punctuation: (, ), commas
+		if paramType == "(" || paramType == ")" || paramType == "," ||
+			paramType == "{" || paramType == "}" {
+			continue
+		}
+		// Skip 'self' / 'cls' in Python
+		if paramType == "identifier" {
+			pText := param.Content(src)
+			if pText == "self" || pText == "cls" {
+				continue
+			}
+		}
+
+		// Common param types across languages
+		name := ""
+		typeAnnotation := ""
+		defaultVal := ""
+		hasDefault := false
+
+		switch paramType {
+		case "identifier":
+			// Plain parameter without type: e.g. Python `def f(x):`
+			name = param.Content(src)
+
+		case "typed_parameter", "typed_default_parameter":
+			// Python: x: int or x: int = 5
+			nameNode := param.ChildByFieldName("name")
+			if nameNode != nil {
+				name = nameNode.Content(src)
+			}
+			typeNode := param.ChildByFieldName("type")
+			if typeNode != nil {
+				typeAnnotation = typeNode.Content(src)
+			}
+			defNode := param.ChildByFieldName("value")
+			if defNode != nil {
+				defaultVal = defNode.Content(src)
+				hasDefault = true
+			}
+
+		case "default_parameter":
+			// Python: x=5 (no type)
+			nameNode := param.ChildByFieldName("name")
+			if nameNode != nil {
+				name = nameNode.Content(src)
+			}
+			defNode := param.ChildByFieldName("value")
+			if defNode != nil {
+				defaultVal = defNode.Content(src)
+				hasDefault = true
+			}
+
+		case "formal_parameter", "required_parameter", "optional_parameter":
+			// JS/TS/Java: formal parameter
+			// Try "name" field first, then "pattern"
+			nameNode := param.ChildByFieldName("name")
+			if nameNode == nil {
+				nameNode = param.ChildByFieldName("pattern")
+			}
+			if nameNode != nil {
+				name = nameNode.Content(src)
+			}
+			typeNode := param.ChildByFieldName("type")
+			if typeNode != nil {
+				typeAnnotation = typeNode.Content(src)
+			}
+			defNode := param.ChildByFieldName("value")
+			if defNode != nil {
+				defaultVal = defNode.Content(src)
+				hasDefault = true
+			}
+			if paramType == "optional_parameter" {
+				hasDefault = true
+				if defaultVal == "" {
+					defaultVal = "undefined"
+				}
+			}
+
+		case "parameter_declaration", "parameter":
+			// Go, Rust, C, etc.
+			nameNode := param.ChildByFieldName("name")
+			if nameNode == nil {
+				nameNode = param.ChildByFieldName("pattern")
+			}
+			if nameNode != nil {
+				name = nameNode.Content(src)
+			}
+			typeNode := param.ChildByFieldName("type")
+			if typeNode != nil {
+				typeAnnotation = typeNode.Content(src)
+			}
+
+		default:
+			// Fallback: try extracting name field, then first identifier
+			nameNode := param.ChildByFieldName("name")
+			if nameNode != nil {
+				name = nameNode.Content(src)
+			} else {
+				name = extractFirstIdentifier(param, src)
+			}
+			typeNode := param.ChildByFieldName("type")
+			if typeNode != nil {
+				typeAnnotation = typeNode.Content(src)
+			}
+		}
+
+		if name == "" || name == "self" || name == "cls" {
+			continue
+		}
+
+		var value string
+		if typeAnnotation != "" {
+			if hasDefault {
+				if defaultVal != "" {
+					value = fmt.Sprintf("%s:%s opt=%s", name, typeAnnotation, defaultVal)
+				} else {
+					value = fmt.Sprintf("%s:%s opt", name, typeAnnotation)
+				}
+			} else {
+				value = fmt.Sprintf("%s:%s [required]", name, typeAnnotation)
+			}
+		} else {
+			if hasDefault {
+				if defaultVal != "" {
+					value = fmt.Sprintf("%s opt=%s", name, defaultVal)
+				} else {
+					value = fmt.Sprintf("%s opt", name)
+				}
+			} else {
+				value = fmt.Sprintf("%s [required]", name)
+			}
+		}
+		if len(value) > 200 {
+			value = value[:197] + "..."
+		}
+
+		result.Properties = append(result.Properties, PropertyRef{
+			NodeIdx:    nodeIdx,
+			Kind:       "param",
+			Value:      value,
+			Line:       int(param.StartPoint().Row) + 1,
+			Confidence: 1.0,
+		})
+	}
+}
+
+// containsKeywordAtBoundary checks if keyword appears in text at a word boundary.
+// Both the character before and after the match must NOT be a lowercase letter (a-z)
+// or digit, preventing false positives like "hash" matching inside "rehash_map",
+// "auth" matching inside "author_name", or "token" matching inside "tokenize".
+// Valid boundaries: start/end of string, underscore, uppercase letter, non-alnum.
+func containsKeywordAtBoundary(text, keyword string) bool {
+	idx := strings.Index(text, keyword)
+	for idx >= 0 {
+		leftOk := true
+		rightOk := true
+		// Check left boundary: character before must not be a-z or 0-9
+		if idx > 0 {
+			prev := text[idx-1]
+			if (prev >= 'a' && prev <= 'z') || (prev >= '0' && prev <= '9') {
+				leftOk = false
+			}
+		}
+		// Check right boundary: character after must not be a-z or 0-9
+		end := idx + len(keyword)
+		if end < len(text) {
+			next := text[end]
+			if (next >= 'a' && next <= 'z') || (next >= '0' && next <= '9') {
+				rightOk = false
+			}
+		}
+		if leftOk && rightOk {
+			return true
+		}
+		// Not a word boundary — search for next occurrence
+		if end < len(text) {
+			nextIdx := strings.Index(text[idx+1:], keyword)
+			if nextIdx < 0 {
+				return false
+			}
+			idx = idx + 1 + nextIdx
+			continue
+		}
+		return false
+	}
+	return false
+}
+
+// extractSecurityTags checks function name and decorator names for security-related keywords.
+// Kind: security_tag. Value: "authentication: keyword_found" or "authorization: keyword_found".
+func extractSecurityTags(node *sitter.Node, src []byte, result *ParseResult, nodeIdx int) {
+	// Security keyword categories
+	authenticationKW := []string{"auth", "login", "token", "password", "secret", "encrypt", "decrypt", "hash", "csrf"}
+	authorizationKW := []string{"permission", "role", "sanitize", "validate_input"}
+
+	// Check function name
+	nameNode := node.ChildByFieldName("name")
+	funcName := ""
+	if nameNode != nil {
+		funcName = strings.ToLower(nameNode.Content(src))
+	}
+
+	// Check decorators (Python: tree-sitter puts "decorator" as children before the function)
+	decoratorNames := []string{}
+	// Walk siblings before the function for decorator nodes
+	prev := node.PrevSibling()
+	for prev != nil && prev.Type() == "decorator" {
+		decText := strings.ToLower(strings.TrimSpace(prev.Content(src)))
+		decoratorNames = append(decoratorNames, decText)
+		prev = prev.PrevSibling()
+	}
+	// Also check parent for decorators (some grammars nest function inside decorated_definition)
+	parent := node.Parent()
+	if parent != nil && parent.Type() == "decorated_definition" {
+		for i := 0; i < int(parent.ChildCount()); i++ {
+			child := parent.Child(i)
+			if child != nil && child.Type() == "decorator" {
+				decText := strings.ToLower(strings.TrimSpace(child.Content(src)))
+				decoratorNames = append(decoratorNames, decText)
+			}
+		}
+	}
+
+	// Combine all text to search
+	searchTexts := append([]string{funcName}, decoratorNames...)
+	seen := make(map[string]bool)
+
+	for _, text := range searchTexts {
+		if text == "" {
+			continue
+		}
+		for _, kw := range authenticationKW {
+			if containsKeywordAtBoundary(text, kw) && !seen["authentication:"+kw] {
+				seen["authentication:"+kw] = true
+				value := "authentication: " + kw
+				result.Properties = append(result.Properties, PropertyRef{
+					NodeIdx:    nodeIdx,
+					Kind:       "security_tag",
+					Value:      value,
+					Line:       int(node.StartPoint().Row) + 1,
+					Confidence: 1.0,
+				})
+			}
+		}
+		for _, kw := range authorizationKW {
+			if containsKeywordAtBoundary(text, kw) && !seen["authorization:"+kw] {
+				seen["authorization:"+kw] = true
+				value := "authorization: " + kw
+				result.Properties = append(result.Properties, PropertyRef{
+					NodeIdx:    nodeIdx,
+					Kind:       "security_tag",
+					Value:      value,
+					Line:       int(node.StartPoint().Row) + 1,
+					Confidence: 1.0,
+				})
+			}
+		}
+	}
+}
+
+// extractExceptionFlow finds raise/throw statements inside conditional blocks.
+// Kind: exception_flow. Value: "WHEN cond: raise ExcType(msg)".
+func extractExceptionFlow(bodyNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int) {
+	_walkExceptionFlow(bodyNode, src, result, nodeIdx, 0)
+}
+
+func _walkExceptionFlow(node *sitter.Node, src []byte, result *ParseResult, nodeIdx int, depth int) {
+	if depth > 10 {
+		return
+	}
+	nodeType := node.Type()
+
+	if nodeType == "if_statement" || nodeType == "elif_clause" || nodeType == "if_expression" {
+		condNode := node.ChildByFieldName("condition")
+		condText := ""
+		if condNode != nil {
+			condText = strings.TrimSpace(condNode.Content(src))
+		}
+		if condText == "" {
+			condText = "?"
+		}
+		if len(condText) > 80 {
+			condText = condText[:80]
+		}
+
+		// Check consequence/body for raise/throw
+		consNode := node.ChildByFieldName("consequence")
+		if consNode == nil {
+			consNode = node.ChildByFieldName("body")
+		}
+		if consNode != nil {
+			_findRaisesInBlock(consNode, condText, src, result, nodeIdx)
+		}
+	}
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child != nil {
+			_walkExceptionFlow(child, src, result, nodeIdx, depth+1)
+		}
+	}
+}
+
+func _findRaisesInBlock(block *sitter.Node, condText string, src []byte, result *ParseResult, nodeIdx int) {
+	for i := 0; i < int(block.ChildCount()); i++ {
+		child := block.Child(i)
+		if child == nil {
+			continue
+		}
+		ct := child.Type()
+		if ct == "raise_statement" || ct == "throw_statement" || ct == "throw_expression" {
+			raiseText := strings.TrimSpace(child.Content(src))
+			if len(raiseText) > 100 {
+				raiseText = raiseText[:100]
+			}
+			// Collect preceding siblings (cleanup/logging before raise)
+			preamble := ""
+			for j := 0; j < i && j < 2; j++ {
+				sib := block.Child(j)
+				if sib != nil {
+					line := strings.TrimSpace(sib.Content(src))
+					if nlIdx := strings.IndexByte(line, '\n'); nlIdx > 0 {
+						line = line[:nlIdx]
+					}
+					if len(line) > 60 {
+						line = line[:60]
+					}
+					if preamble != "" {
+						preamble += "; "
+					}
+					preamble += line
+				}
+			}
+			value := fmt.Sprintf("WHEN %s: %s", condText, raiseText)
+			if preamble != "" && len(value)+len(preamble) < 195 {
+				value += " [after: " + preamble + "]"
+			}
+			if len(value) > 200 {
+				value = value[:197] + "..."
+			}
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "exception_flow",
+				Value:      value,
+				Line:       int(child.StartPoint().Row) + 1,
+				Confidence: 1.0,
+			})
+		}
+		// Check for expression_statement containing panic()
+		if ct == "expression_statement" {
+			text := child.Content(src)
+			if strings.Contains(text, "panic(") {
+				raiseText := strings.TrimSpace(text)
+				if len(raiseText) > 100 {
+					raiseText = raiseText[:100]
+				}
+				value := fmt.Sprintf("WHEN %s: %s", condText, raiseText)
+				if len(value) > 200 {
+					value = value[:197] + "..."
+				}
+				result.Properties = append(result.Properties, PropertyRef{
+					NodeIdx:    nodeIdx,
+					Kind:       "exception_flow",
+					Value:      value,
+					Line:       int(child.StartPoint().Row) + 1,
+					Confidence: 1.0,
+				})
+			}
+		}
+
+		// Rust / Go conditional raise of a NAMED internal error type. The if-block's
+		// consequence holds a `return Err(<Type>)` / `return <Type>{..}.into()`
+		// (Rust: return_expression / expression_statement) or a
+		// `return ..., &<Type>{..}` (Go: return_statement). Neither carries a
+		// raise/throw keyword, so the matchers above never saw them and the Go
+		// conditional-error / Rust-error RAISES fact stayed trapped in the AST.
+		//
+		// We normalize the extracted internal type into a `raise <Type>` clause so the
+		// EXISTING promoteRaises (raiseFlowRe) mints the edge — ONE property contract,
+		// no per-language edge path. A value-only error (errors.New / panic! / Err of an
+		// external std type) yields "" here and stays a property (correct-or-quiet).
+		if ct == "return_expression" || ct == "return_statement" || ct == "expression_statement" {
+			text := child.Content(src)
+			etype := rustRaisedType(text)
+			if etype == "" {
+				etype = goRaisedType(text)
+			}
+			if etype != "" {
+				value := fmt.Sprintf("WHEN %s: raise %s", condText, etype)
+				if len(value) > 200 {
+					value = value[:197] + "..."
+				}
+				result.Properties = append(result.Properties, PropertyRef{
+					NodeIdx:    nodeIdx,
+					Kind:       "exception_flow",
+					Value:      value,
+					Line:       int(child.StartPoint().Row) + 1,
+					Confidence: 1.0,
+				})
+			}
+		}
+	}
+}
+
+// extractExceptionHandlers finds except/catch clauses.
+// Kind: exception_handler. Value: "except ExcType as var:" or "catch (ExcType var)".
+func extractExceptionHandlers(bodyNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int) {
+	_walkExceptionHandlers(bodyNode, src, result, nodeIdx, 0)
+}
+
+func _walkExceptionHandlers(node *sitter.Node, src []byte, result *ParseResult, nodeIdx int, depth int) {
+	if depth > 10 {
+		return
+	}
+	nodeType := node.Type()
+
+	if nodeType == "except_clause" || nodeType == "catch_clause" || nodeType == "rescue" {
+		text := strings.TrimSpace(node.Content(src))
+		// Take only the first line (the clause header)
+		if idx := strings.Index(text, "\n"); idx >= 0 {
+			text = text[:idx]
+		}
+		text = strings.TrimSpace(text)
+		// Strip trailing colon and braces
+		text = strings.TrimSuffix(text, ":")
+		text = strings.TrimSuffix(text, "{")
+		text = strings.TrimSpace(text)
+		if len(text) > 200 {
+			text = text[:197] + "..."
+		}
+		if text != "" {
+			// Classify handler action from body children
+			action := ""
+			for i := 0; i < int(node.ChildCount()); i++ {
+				child := node.Child(i)
+				if child == nil {
+					continue
+				}
+				ct := child.Type()
+				if ct == "raise_statement" || ct == "throw_statement" {
+					action = "re-raises"
+				} else if ct == "return_statement" {
+					retText := strings.TrimSpace(child.Content(src))
+					if len(retText) > 40 {
+						retText = retText[:40]
+					}
+					action = "returns: " + retText
+				} else if ct == "block" {
+					for j := 0; j < int(child.ChildCount()); j++ {
+						bc := child.Child(j)
+						if bc == nil {
+							continue
+						}
+						bct := bc.Type()
+						if bct == "raise_statement" || bct == "throw_statement" {
+							action = "re-raises"
+							break
+						}
+						if bct == "return_statement" {
+							retText := strings.TrimSpace(bc.Content(src))
+							if len(retText) > 40 {
+								retText = retText[:40]
+							}
+							action = "returns: " + retText
+							break
+						}
+					}
+				}
+				if action != "" {
+					break
+				}
+			}
+			if action == "" {
+				action = "handles"
+			}
+			handlerValue := text + " -> " + action
+			if len(handlerValue) > 200 {
+				handlerValue = handlerValue[:197] + "..."
+			}
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "exception_handler",
+				Value:      handlerValue,
+				Line:       int(node.StartPoint().Row) + 1,
+				Confidence: 1.0,
+			})
+		}
+		return // don't recurse inside the handler
+	}
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child != nil {
+			_walkExceptionHandlers(child, src, result, nodeIdx, depth+1)
+		}
+	}
+}
+
+// extractFunctionFingerprint computes a complexity proxy from named child count and unique calls.
+// Kind: fingerprint. Value: "complexity:N|calls:func1,func2,func3".
+func extractFunctionFingerprint(funcNode *sitter.Node, bodyNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int) {
+	complexity := int(bodyNode.NamedChildCount())
+	calls := make(map[string]bool)
+	_collectCallNames(bodyNode, src, calls, 0)
+
+	callNames := make([]string, 0, len(calls))
+	for name := range calls {
+		callNames = append(callNames, name)
+	}
+	// Sort for determinism — simple insertion sort to avoid importing sort
+	for i := 1; i < len(callNames); i++ {
+		for j := i; j > 0 && callNames[j] < callNames[j-1]; j-- {
+			callNames[j], callNames[j-1] = callNames[j-1], callNames[j]
+		}
+	}
+
+	callList := strings.Join(callNames, ",")
+	if len(callList) > 150 {
+		callList = callList[:147] + "..."
+	}
+
+	// Extract return type annotation from function node
+	retType := ""
+	rtNode := funcNode.ChildByFieldName("return_type")
+	if rtNode != nil {
+		retType = strings.TrimSpace(rtNode.Content(src))
+		if len(retType) > 60 {
+			retType = retType[:60]
+		}
+	}
+
+	value := fmt.Sprintf("complexity:%d|calls:%s", complexity, callList)
+	if retType != "" {
+		value += "|returns:" + retType
+	}
+	if len(value) > 200 {
+		value = value[:197] + "..."
+	}
+
+	result.Properties = append(result.Properties, PropertyRef{
+		NodeIdx: nodeIdx,
+		Kind:    "fingerprint",
+		Value:   value,
+		// Aggregate fact summarizing the whole function → anchor at the FUNCTION
+		// node's start (the declaration), not the body's first statement.
+		Line:       int(funcNode.StartPoint().Row) + 1,
+		Confidence: 0.9,
+	})
+}
+
+func _collectCallNames(node *sitter.Node, src []byte, calls map[string]bool, depth int) {
+	if depth > 15 {
+		return
+	}
+	nodeType := node.Type()
+
+	// Match common call node types across languages
+	if nodeType == "call" || nodeType == "call_expression" || nodeType == "method_invocation" {
+		if node.ChildCount() > 0 {
+			funcChild := node.Child(0)
+			if funcChild != nil {
+				// Get the simple name
+				name := ""
+				fType := funcChild.Type()
+				if fType == "identifier" {
+					name = funcChild.Content(src)
+				} else if fType == "attribute" || fType == "member_expression" ||
+					fType == "selector_expression" || fType == "field_expression" {
+					// Get last identifier
+					for j := int(funcChild.ChildCount()) - 1; j >= 0; j-- {
+						child := funcChild.Child(j)
+						if child != nil && (child.Type() == "identifier" || child.Type() == "property_identifier" || child.Type() == "field_identifier") {
+							name = child.Content(src)
+							break
+						}
+					}
+				}
+				if name != "" {
+					calls[name] = true
+				}
+			}
+		}
+	}
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child != nil {
+			_collectCallNames(child, src, calls, depth+1)
+		}
+	}
+}
+
+// extractFieldReads finds self.x / this.x / <recv>.x attribute access NOT on the left
+// side of assignment. Kind: field_read. Value: "reads: self.field_name".
+//
+// recvName is the named receiver variable (Go: `func (c *Circle) ...` → "c"); empty for
+// self/this languages. Generalized so receiver methods get the same field-read facts.
+func extractFieldReads(bodyNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int, recvName string) {
+	seen := make(map[string]bool)
+	_walkFieldReads(bodyNode, src, result, nodeIdx, seen, 0, recvName)
+}
+
+func _walkFieldReads(node *sitter.Node, src []byte, result *ParseResult, nodeIdx int, seen map[string]bool, depth int, recvName string) {
+	if depth > 15 {
+		return
+	}
+	nodeType := node.Type()
+
+	// Skip assignment left-hand sides: those are side_effects, not reads. Go uses
+	// "assignment_statement"; self/this languages use "assignment"/"assignment_expression".
+	if nodeType == "assignment" || nodeType == "augmented_assignment" ||
+		nodeType == "assignment_expression" || nodeType == "assignment_statement" {
+		// The left child is the LHS — skip it, only walk the RHS
+		lhsNode := node.ChildByFieldName("left")
+		rhsNode := node.ChildByFieldName("right")
+		if rhsNode != nil {
+			_walkFieldReads(rhsNode, src, result, nodeIdx, seen, depth+1, recvName)
+		}
+		// Also walk value field (Python augmented_assignment uses 'right')
+		valNode := node.ChildByFieldName("value")
+		if valNode != nil {
+			_walkFieldReads(valNode, src, result, nodeIdx, seen, depth+1, recvName)
+		}
+		// Walk any non-LHS, non-RHS children (shouldn't matter much, but be safe)
+		for i := 0; i < int(node.ChildCount()); i++ {
+			child := node.Child(i)
+			if child != nil && child != lhsNode && child != rhsNode && child != valNode {
+				_walkFieldReads(child, src, result, nodeIdx, seen, depth+1, recvName)
+			}
+		}
+		return
+	}
+
+	// attribute / member_expression / selector_expression / field_expression nodes:
+	// check for self.x / this.x / <recv>.x. Go field access is `selector_expression`
+	// (receiver.field); Rust field access is `field_expression` (self.field) — both
+	// of which the attribute/member_expression check alone would miss.
+	//
+	// #B4: a METHOD CALL parses as call(function=selector/attribute) — the selector
+	// node `c.Area` of `c.Area()` is NOT a field read. When this node is the callee
+	// of a call parent, skip the emit and fall through to the child recursion so a
+	// genuine receiver read inside a chained call (`self.x` in `self.x.area()`)
+	// is still captured.
+	isCalleeOfCall := false
+	if parent := node.Parent(); parent != nil {
+		pt := parent.Type()
+		if pt == "call" || pt == "call_expression" || pt == "method_invocation" {
+			fn := parent.ChildByFieldName("function")
+			if fn == nil ||
+				(fn.StartByte() == node.StartByte() && fn.EndByte() == node.EndByte()) {
+				isCalleeOfCall = true
+			}
+		}
+	}
+	if !isCalleeOfCall && (nodeType == "attribute" || nodeType == "member_expression" ||
+		nodeType == "selector_expression" || nodeType == "field_expression") {
+		text := node.Content(src)
+		prefix := ""
+		if strings.HasPrefix(text, "self.") {
+			prefix = "self."
+		} else if strings.HasPrefix(text, "this.") {
+			prefix = "this."
+		} else if strings.HasPrefix(text, "this->") {
+			prefix = "this->"
+		} else if recvName != "" && strings.HasPrefix(text, recvName+".") {
+			prefix = recvName + "."
+		}
+		if prefix != "" {
+			field := text[len(prefix):]
+			// Strip further chained access
+			if dotIdx := strings.Index(field, "."); dotIdx > 0 {
+				field = field[:dotIdx]
+			}
+			if dotIdx := strings.Index(field, "->"); dotIdx > 0 {
+				field = field[:dotIdx]
+			}
+			// Strip brackets / parens
+			if bIdx := strings.Index(field, "["); bIdx > 0 {
+				field = field[:bIdx]
+			}
+			if bIdx := strings.Index(field, "("); bIdx > 0 {
+				field = field[:bIdx]
+			}
+			key := prefix + field
+			// Normalize this-> to this.
+			if prefix == "this->" {
+				key = "this." + field
+			}
+			if field != "" && !seen[key] {
+				seen[key] = true
+				ctx := ""
+				ancestor := node.Parent()
+				for ancestor != nil && ctx == "" {
+					at := ancestor.Type()
+					switch at {
+					case "if_statement", "if_clause", "if_expression":
+						ctx = "in_condition"
+					case "return_statement":
+						ctx = "in_return"
+					case "for_statement", "for_in_statement", "while_statement":
+						ctx = "in_loop"
+					case "arguments", "argument_list":
+						ctx = "as_argument"
+					}
+					ancestor = ancestor.Parent()
+				}
+				value := "reads: " + key
+				if ctx != "" {
+					value += " [" + ctx + "]"
+				}
+				if len(value) > 200 {
+					value = value[:197] + "..."
+				}
+				result.Properties = append(result.Properties, PropertyRef{
+					NodeIdx:    nodeIdx,
+					Kind:       "field_read",
+					Value:      value,
+					Line:       int(node.StartPoint().Row) + 1,
+					Confidence: 0.9,
+				})
+			}
+			// Don't recurse further into this attribute access node
+			return
+		}
+	}
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child != nil {
+			_walkFieldReads(child, src, result, nodeIdx, seen, depth+1, recvName)
+		}
+	}
+}
+
+// extractBoundaryConditions finds comparisons involving len(), 0, 1, -1, None, null, nil, array indexing.
+// Kind: boundary_condition. Value: "length_check|len(items) > max" or "zero_check|x == 0".
+func extractBoundaryConditions(bodyNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int) {
+	seen := make(map[string]bool)
+	_walkBoundaryConditions(bodyNode, src, result, nodeIdx, seen, 0)
+}
+
+func _walkBoundaryConditions(node *sitter.Node, src []byte, result *ParseResult, nodeIdx int, seen map[string]bool, depth int) {
+	if depth > 12 {
+		return
+	}
+	nodeType := node.Type()
+
+	if nodeType == "comparison_operator" || nodeType == "binary_expression" ||
+		nodeType == "comparison_expression" {
+		text := strings.TrimSpace(node.Content(src))
+		if len(text) > 150 {
+			text = text[:150]
+		}
+
+		category := ""
+		switch {
+		case strings.Contains(text, "len(") || strings.Contains(text, ".length") ||
+			strings.Contains(text, ".size()") || strings.Contains(text, ".count()") ||
+			strings.Contains(text, "len!(") || strings.Contains(text, ".len()"):
+			category = "length_check"
+		case _containsBoundaryLiteral(text, "None") || _containsBoundaryLiteral(text, "null") ||
+			_containsBoundaryLiteral(text, "nil") || _containsBoundaryLiteral(text, "nullptr") ||
+			strings.Contains(text, "is None") || strings.Contains(text, "is not None") ||
+			strings.Contains(text, "== null") || strings.Contains(text, "!= null") ||
+			strings.Contains(text, "== nil") || strings.Contains(text, "!= nil"):
+			category = "null_check"
+		case _containsBoundaryLiteral(text, "0") || _containsBoundaryLiteral(text, "-1"):
+			category = "zero_check"
+		case strings.Contains(text, "[0]") || strings.Contains(text, "[-1]") ||
+			strings.Contains(text, "[1]"):
+			category = "index_boundary"
+		}
+
+		if category != "" && !seen[category+"|"+text] {
+			seen[category+"|"+text] = true
+			// Walk up to find containing if_statement consequence
+			consequence := ""
+			p := node.Parent()
+			for p != nil {
+				pt := p.Type()
+				if pt == "if_statement" || pt == "if_expression" {
+					consNode := p.ChildByFieldName("consequence")
+					if consNode == nil {
+						consNode = p.ChildByFieldName("body")
+					}
+					if consNode != nil && consNode.ChildCount() > 0 {
+						firstChild := consNode.Child(0)
+						if firstChild != nil {
+							consequence = strings.TrimSpace(firstChild.Content(src))
+							if nlIdx := strings.IndexByte(consequence, '\n'); nlIdx > 0 {
+								consequence = consequence[:nlIdx]
+							}
+							if len(consequence) > 60 {
+								consequence = consequence[:60]
+							}
+						}
+					}
+					break
+				}
+				p = p.Parent()
+			}
+			value := category + "|" + text
+			if consequence != "" {
+				value += " => " + consequence
+			}
+			if len(value) > 200 {
+				value = value[:197] + "..."
+			}
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "boundary_condition",
+				Value:      value,
+				Line:       int(node.StartPoint().Row) + 1,
+				Confidence: 0.9,
+			})
+		}
+		return // don't recurse into comparison sub-nodes
+	}
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child != nil {
+			_walkBoundaryConditions(child, src, result, nodeIdx, seen, depth+1)
+		}
+	}
+}
+
+// _containsBoundaryLiteral checks if text contains a literal value that appears as a
+// comparison operand (surrounded by spaces/operators), not as part of a variable name.
+func _containsBoundaryLiteral(text, literal string) bool {
+	idx := strings.Index(text, literal)
+	if idx < 0 {
+		return false
+	}
+	// Check it's not part of a longer identifier
+	if idx > 0 {
+		prev := text[idx-1]
+		if (prev >= 'a' && prev <= 'z') || (prev >= 'A' && prev <= 'Z') || prev == '_' || (prev >= '0' && prev <= '9') {
+			return false
+		}
+	}
+	end := idx + len(literal)
+	if end < len(text) {
+		next := text[end]
+		if (next >= 'a' && next <= 'z') || (next >= 'A' && next <= 'Z') || next == '_' || (next >= '0' && next <= '9') {
+			return false
+		}
+	}
+	return true
+}
+
+// extractClassFields finds assignment statements in class body that are NOT inside methods.
+// Kind: class_field. Value: "name = CharField(max_length=100)" or "name: str".
+// Called from walkNode for ClassNodes, not from extractProperties.
+func extractClassFields(classBodyNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int) {
+	for i := 0; i < int(classBodyNode.ChildCount()); i++ {
+		child := classBodyNode.Child(i)
+		if child == nil {
+			continue
+		}
+		ct := child.Type()
+
+		// Skip method definitions and nested class definitions — we only want class-level fields
+		if ct == "function_definition" || ct == "method_definition" || ct == "method_declaration" ||
+			ct == "constructor_declaration" || ct == "class_definition" || ct == "class_declaration" ||
+			ct == "decorated_definition" || ct == "comment" || ct == "block_comment" {
+			continue
+		}
+
+		// Python: expression_statement containing assignment
+		if ct == "expression_statement" {
+			innerCount := int(child.ChildCount())
+			for j := 0; j < innerCount; j++ {
+				inner := child.Child(j)
+				if inner == nil {
+					continue
+				}
+				it := inner.Type()
+				if it == "assignment" || it == "augmented_assignment" {
+					text := strings.TrimSpace(inner.Content(src))
+					if len(text) > 200 {
+						text = text[:197] + "..."
+					}
+					if text != "" {
+						result.Properties = append(result.Properties, PropertyRef{
+							NodeIdx:    nodeIdx,
+							Kind:       "class_field",
+							Value:      text,
+							Line:       int(inner.StartPoint().Row) + 1,
+							Confidence: 1.0,
+						})
+					}
+				}
+			}
+			continue
+		}
+
+		// Python type annotation: name: str (type node)
+		if ct == "type" {
+			text := strings.TrimSpace(child.Content(src))
+			if len(text) > 200 {
+				text = text[:197] + "..."
+			}
+			if text != "" {
+				result.Properties = append(result.Properties, PropertyRef{
+					NodeIdx:    nodeIdx,
+					Kind:       "class_field",
+					Value:      text,
+					Line:       int(child.StartPoint().Row) + 1,
+					Confidence: 1.0,
+				})
+			}
+			continue
+		}
+
+		// Direct assignment at class body level (JS/TS class property)
+		if ct == "assignment" || ct == "public_field_definition" || ct == "field_declaration" ||
+			ct == "field_definition" {
+			text := strings.TrimSpace(child.Content(src))
+			if len(text) > 200 {
+				text = text[:197] + "..."
+			}
+			if text != "" {
+				result.Properties = append(result.Properties, PropertyRef{
+					NodeIdx:    nodeIdx,
+					Kind:       "class_field",
+					Value:      text,
+					Line:       int(child.StartPoint().Row) + 1,
+					Confidence: 1.0,
+				})
+			}
+			continue
+		}
+	}
+}
+
+// extractClassDecorators finds decorator nodes above the class definition.
+// Kind: class_decorator. Value: "@dataclass" or "@pytest.fixture".
+// Called from walkNode for ClassNodes.
+func extractClassDecorators(classNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int) {
+	// Strategy 1: Check if parent is a decorated_definition (Python)
+	parent := classNode.Parent()
+	if parent != nil && parent.Type() == "decorated_definition" {
+		for i := 0; i < int(parent.ChildCount()); i++ {
+			child := parent.Child(i)
+			if child == nil {
+				continue
+			}
+			if child.Type() == "decorator" {
+				text := strings.TrimSpace(child.Content(src))
+				if len(text) > 200 {
+					text = text[:197] + "..."
+				}
+				if text != "" {
+					result.Properties = append(result.Properties, PropertyRef{
+						NodeIdx:    nodeIdx,
+						Kind:       "class_decorator",
+						Value:      text,
+						Line:       int(child.StartPoint().Row) + 1,
+						Confidence: 1.0,
+					})
+				}
+			}
+		}
+		return
+	}
+
+	// Strategy 2: Check preceding siblings for decorator nodes
+	prev := classNode.PrevSibling()
+	for prev != nil && prev.Type() == "decorator" {
+		text := strings.TrimSpace(prev.Content(src))
+		if len(text) > 200 {
+			text = text[:197] + "..."
+		}
+		if text != "" {
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "class_decorator",
+				Value:      text,
+				Line:       int(prev.StartPoint().Row) + 1,
+				Confidence: 1.0,
+			})
+		}
+		prev = prev.PrevSibling()
+	}
+
+	// Strategy 3: Java/Kotlin annotations (marker_annotation, annotation)
+	prev = classNode.PrevSibling()
+	for prev != nil {
+		pt := prev.Type()
+		if pt == "marker_annotation" || pt == "annotation" {
+			text := strings.TrimSpace(prev.Content(src))
+			if len(text) > 200 {
+				text = text[:197] + "..."
+			}
+			if text != "" {
+				result.Properties = append(result.Properties, PropertyRef{
+					NodeIdx:    nodeIdx,
+					Kind:       "class_decorator",
+					Value:      text,
+					Line:       int(prev.StartPoint().Row) + 1,
+					Confidence: 1.0,
+				})
+			}
+			prev = prev.PrevSibling()
+		} else {
+			break
+		}
+	}
+}
+
+// extractAssertionRefs extracts assertions from test function bodies.
+func extractAssertionRefs(funcNode *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, testNodeIdx int) {
+	bodyNode := funcNode.ChildByFieldName(sf.Spec.BodyField)
+	if bodyNode == nil {
+		return
+	}
+	findAssertions(bodyNode, sf, src, result, testNodeIdx, 0)
+}
+
+// findAssertions recursively finds assertion calls in test function body.
+func findAssertions(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, testNodeIdx int, depth int) {
+	if depth > 10 { // prevent deep recursion
+		return
+	}
+
+	nodeType := node.Type()
+
+	// Match call expressions that look like assertions
+	if sf.Spec.IsCallNode(nodeType) {
+		simple, qualified := extractCalleeInfo(node, src)
+		name := qualified
+		if name == "" {
+			name = simple
+		}
+
+		kind, isAssertion := classifyAssertion(name, simple)
+		if isAssertion {
+			text := strings.TrimSpace(node.Content(src))
+			if len(text) > 200 {
+				text = text[:200]
+			}
+
+			// Try to extract expected value from arguments
+			expected := ""
+			argsNode := node.ChildByFieldName("arguments")
+			if argsNode != nil && argsNode.ChildCount() >= 3 {
+				// Find the second real argument by skipping punctuation
+				// children (parens and commas). Tree-sitter argument_list
+				// children are: [open_paren, arg1, comma, arg2, ...close_paren]
+				argCount := 0
+				for j := 0; j < int(argsNode.ChildCount()); j++ {
+					child := argsNode.Child(j)
+					if child == nil {
+						continue
+					}
+					ct := child.Type()
+					if ct == "(" || ct == ")" || ct == "," {
+						continue
+					}
+					argCount++
+					if argCount == 2 {
+						expected = strings.TrimSpace(child.Content(src))
+						if len(expected) > 80 {
+							expected = expected[:80]
+						}
+						break
+					}
+				}
+			}
+
+			result.Assertions = append(result.Assertions, AssertionRef{
+				TestNodeIdx: testNodeIdx,
+				Kind:        kind,
+				Expression:  text,
+				Expected:    expected,
+				Line:        int(node.StartPoint().Row) + 1,
+			})
+			return // don't recurse into assertion args
+		}
+	}
+
+	// Also match plain assert statements (Python: assert x == y)
+	if nodeType == "assert_statement" || nodeType == "assert" {
+		text := strings.TrimSpace(node.Content(src))
+		if len(text) > 200 {
+			text = text[:200]
+		}
+		result.Assertions = append(result.Assertions, AssertionRef{
+			TestNodeIdx: testNodeIdx,
+			Kind:        "assert",
+			Expression:  text,
+			Line:        int(node.StartPoint().Row) + 1,
+		})
+		return
+	}
+
+	// Also match Rust assert! and assert_eq! macros
+	if nodeType == "macro_invocation" {
+		text := node.Content(src)
+		if strings.HasPrefix(text, "assert") {
+			trimmed := strings.TrimSpace(text)
+			if len(trimmed) > 200 {
+				trimmed = trimmed[:200]
+			}
+			kind := "assert"
+			if strings.HasPrefix(trimmed, "assert_eq!") {
+				kind = "assert_eq"
+			} else if strings.HasPrefix(trimmed, "assert_ne!") {
+				kind = "assert_ne"
+			}
+			result.Assertions = append(result.Assertions, AssertionRef{
+				TestNodeIdx: testNodeIdx,
+				Kind:        kind,
+				Expression:  trimmed,
+				Line:        int(node.StartPoint().Row) + 1,
+			})
+			return
+		}
+	}
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		findAssertions(node.Child(i), sf, src, result, testNodeIdx, depth+1)
+	}
+}
+
+// classifyAssertion checks if a function call name is an assertion and returns its kind.
+func classifyAssertion(qualified, simple string) (kind string, isAssertion bool) {
+	// Normalize to lowercase for matching
+	lowerSimple := strings.ToLower(simple)
+	lowerQual := strings.ToLower(qualified)
+
+	// Python unittest: self.assertEqual, self.assertRaises, etc.
+	if strings.HasPrefix(lowerQual, "self.assert") {
+		return simple, true
+	}
+
+	// Python pytest: pytest.raises
+	if lowerQual == "pytest.raises" || strings.HasPrefix(lowerQual, "pytest.") {
+		return simple, true
+	}
+
+	// Go testify: assert.Equal, require.NoError, etc.
+	if strings.HasPrefix(lowerQual, "assert.") || strings.HasPrefix(lowerQual, "require.") {
+		return simple, true
+	}
+
+	// Go testing.T methods: t.Error, t.Fatal, t.Fail, etc.
+	if strings.HasPrefix(lowerQual, "t.") {
+		switch lowerSimple {
+		case "error", "errorf", "fatal", "fatalf", "fail", "failnow", "log", "logf":
+			return simple, true
+		}
+	}
+
+	// JS/TS expect().toBe() — the outer call is expect(), inner is method
+	if lowerSimple == "expect" {
+		return "expect", true
+	}
+
+	// Jest/Vitest matcher methods: expect(x).toBe(y), expect(x).toEqual(y), etc.
+	if strings.HasPrefix(lowerSimple, "to") && strings.Contains(lowerQual, "expect") {
+		return simple, true
+	}
+	// Jest matchers after .not: expect(x).not.toBe(y)
+	if strings.HasPrefix(lowerSimple, "to") && strings.Contains(lowerQual, ".not.") {
+		return simple, true
+	}
+
+	// JS/TS assert.strictEqual, assert.deepEqual, etc.
+	if strings.HasPrefix(lowerQual, "assert.") {
+		return simple, true
+	}
+
+	// C# Assert.AreEqual, Assert.That, etc.
+	if strings.HasPrefix(qualified, "Assert.") {
+		return simple, true
+	}
+
+	// JUnit/Kotlin: assertEquals, assertTrue, assertFalse, etc.
+	if strings.HasPrefix(lowerSimple, "assert") && len(simple) > 6 {
+		return simple, true
+	}
+
+	// PHP: $this->assertEquals, $this->assertSame, etc.
+	if strings.Contains(lowerQual, "->assert") {
+		return simple, true
+	}
+
+	// Ruby RSpec: expect(...).to, should, etc.
+	if lowerSimple == "should" || lowerSimple == "expect" {
+		return simple, true
+	}
+
+	// Swift: XCTAssertEqual, XCTAssertTrue, etc.
+	if strings.HasPrefix(simple, "XCT") {
+		return simple, true
+	}
+
+	// C++ Google Test: EXPECT_EQ, ASSERT_EQ, EXPECT_TRUE, ASSERT_FALSE, etc.
+	if strings.HasPrefix(simple, "EXPECT_") || strings.HasPrefix(simple, "ASSERT_") {
+		return simple, true
+	}
+
+	// C++ Catch2: REQUIRE, CHECK, REQUIRE_FALSE, CHECK_THAT, etc.
+	if simple == "REQUIRE" || simple == "CHECK" ||
+		strings.HasPrefix(simple, "REQUIRE_") || strings.HasPrefix(simple, "CHECK_") {
+		return simple, true
+	}
+
+	// C++ Boost.Test: BOOST_CHECK, BOOST_REQUIRE, BOOST_TEST, etc.
+	if strings.HasPrefix(simple, "BOOST_") {
+		return simple, true
+	}
+
+	// C++ Google Test: TEST, TEST_F, TEST_P (test case macros, not assertions but test markers)
+	if simple == "TEST" || simple == "TEST_F" || simple == "TEST_P" || simple == "TEST_CASE" {
+		return simple, true
+	}
+
+	return "", false
+}
+
+// extractScalaImports handles:
+//   - import_declaration: "import com.foo.Bar" → ImportRef{Name:"Bar", Module:"com.foo"}
+//   - "import com.foo.{Bar, Baz}" → multiple ImportRefs
+//   - "import com.foo._" → ImportRef{Name:"*", Module:"com.foo"}
+func extractScalaImports(node *sitter.Node, file string, src []byte, line int, result *ParseResult) {
+	text := strings.TrimSpace(node.Content(src))
+	text = strings.TrimPrefix(text, "import ")
+	text = strings.TrimSpace(text)
+
+	if text == "" {
+		return
+	}
+
+	// Handle brace imports: import com.foo.{Bar, Baz}
+	if braceStart := strings.Index(text, "{"); braceStart >= 0 {
+		prefix := strings.TrimSuffix(strings.TrimSpace(text[:braceStart]), ".")
+		braceEnd := strings.Index(text, "}")
+		if braceEnd > braceStart {
+			items := strings.Split(text[braceStart+1:braceEnd], ",")
+			for _, item := range items {
+				name := strings.TrimSpace(item)
+				// Handle rename: Bar => B
+				if asIdx := strings.Index(name, "=>"); asIdx >= 0 {
+					name = strings.TrimSpace(name[:asIdx])
+				}
+				if name == "_" {
+					name = "*"
+				}
+				if name != "" {
+					result.Imports = append(result.Imports, ImportRef{
+						ImportedName: name,
+						ModulePath:   prefix,
+						File:         file,
+						Line:         line,
+					})
+				}
+			}
+		}
+		return
+	}
+
+	// Wildcard: import com.foo._
+	if strings.HasSuffix(text, "._") {
+		modulePath := strings.TrimSuffix(text, "._")
+		result.Imports = append(result.Imports, ImportRef{
+			ImportedName: "*",
+			ModulePath:   modulePath,
+			File:         file,
+			Line:         line,
+		})
+		return
+	}
+
+	// Simple import: import com.foo.Bar
+	lastDot := strings.LastIndex(text, ".")
+	if lastDot >= 0 {
+		result.Imports = append(result.Imports, ImportRef{
+			ImportedName: text[lastDot+1:],
+			ModulePath:   text[:lastDot],
+			File:         file,
+			Line:         line,
+		})
+	} else {
+		result.Imports = append(result.Imports, ImportRef{
+			ImportedName: text,
+			ModulePath:   "",
+			File:         file,
+			Line:         line,
+		})
+	}
+}
+
+// extractCSharpImports handles:
+//   - using_directive: "using System.Collections.Generic;" → ImportRef{Name:"Generic", Module:"System.Collections"}
+//   - "using Foo = System.IO;" → ImportRef{Name:"Foo", Module:"System.IO"} (alias)
+func extractCSharpImports(node *sitter.Node, file string, src []byte, line int, result *ParseResult) {
+	text := strings.TrimSpace(node.Content(src))
+	text = strings.TrimPrefix(text, "using ")
+	text = strings.TrimPrefix(text, "static ")
+	text = strings.TrimPrefix(text, "global::")
+	text = strings.TrimSuffix(text, ";")
+	text = strings.TrimSpace(text)
+
+	if text == "" {
+		return
+	}
+
+	// Handle alias: using Foo = System.IO
+	if eqIdx := strings.Index(text, "="); eqIdx >= 0 {
+		alias := strings.TrimSpace(text[:eqIdx])
+		modulePath := strings.TrimSpace(text[eqIdx+1:])
+		result.Imports = append(result.Imports, ImportRef{
+			ImportedName: alias,
+			ModulePath:   modulePath,
+			File:         file,
+			Line:         line,
+		})
+		return
+	}
+
+	// Standard: using System.Collections.Generic
+	lastDot := strings.LastIndex(text, ".")
+	if lastDot >= 0 {
+		result.Imports = append(result.Imports, ImportRef{
+			ImportedName: text[lastDot+1:],
+			ModulePath:   text[:lastDot],
+			File:         file,
+			Line:         line,
+		})
+	} else {
+		result.Imports = append(result.Imports, ImportRef{
+			ImportedName: text,
+			ModulePath:   "",
+			File:         file,
+			Line:         line,
+		})
+	}
+}
+
+// extractPHPImports handles:
+//   - namespace_use_declaration: "use App\Http\Controllers\FooController;" → ImportRef
+//   - "use App\Models\{User, Post};" → multiple ImportRefs
+//   - "use App\Services\UserService as US;" → ImportRef with alias
+func extractPHPImports(node *sitter.Node, file string, src []byte, line int, result *ParseResult) {
+	text := strings.TrimSpace(node.Content(src))
+	text = strings.TrimPrefix(text, "use ")
+	text = strings.TrimPrefix(text, "function ")
+	text = strings.TrimPrefix(text, "const ")
+	text = strings.TrimSuffix(text, ";")
+	text = strings.TrimSpace(text)
+
+	if text == "" {
+		return
+	}
+
+	// Handle grouped imports: use App\Models\{User, Post}
+	if braceStart := strings.Index(text, "{"); braceStart >= 0 {
+		prefix := strings.TrimSuffix(strings.TrimSpace(text[:braceStart]), `\`)
+		braceEnd := strings.Index(text, "}")
+		if braceEnd > braceStart {
+			items := strings.Split(text[braceStart+1:braceEnd], ",")
+			for _, item := range items {
+				name := strings.TrimSpace(item)
+				// Handle alias: User as U
+				if asIdx := strings.Index(name, " as "); asIdx >= 0 {
+					name = strings.TrimSpace(name[:asIdx])
+				}
+				if name != "" {
+					// Get the last component after any remaining backslash
+					importName := name
+					if lastBS := strings.LastIndex(name, `\`); lastBS >= 0 {
+						importName = name[lastBS+1:]
+					}
+					result.Imports = append(result.Imports, ImportRef{
+						ImportedName: importName,
+						ModulePath:   prefix + `\` + strings.TrimSuffix(name, importName),
+						File:         file,
+						Line:         line,
+					})
+				}
+			}
+		}
+		return
+	}
+
+	// Handle alias: use App\Services\UserService as US
+	if asIdx := strings.Index(text, " as "); asIdx >= 0 {
+		text = text[:asIdx]
+	}
+
+	// Standard: use App\Http\Controllers\FooController
+	// Convert backslash to dot for module path
+	lastBS := strings.LastIndex(text, `\`)
+	if lastBS >= 0 {
+		result.Imports = append(result.Imports, ImportRef{
+			ImportedName: text[lastBS+1:],
+			ModulePath:   text[:lastBS],
+			File:         file,
+			Line:         line,
+		})
+	} else {
+		result.Imports = append(result.Imports, ImportRef{
+			ImportedName: text,
+			ModulePath:   "",
+			File:         file,
+			Line:         line,
+		})
+	}
+}
+
+// extractCCppImports handles:
+//   - preproc_include: '#include "path/file.h"' → ImportRef{Name:"file", Module:"path/file.h"}
+//   - '#include <system/header.h>' → skipped (system headers)
+//   - using_declaration (C++): 'using namespace std;' → ImportRef{Name:"*", Module:"std"}
+func extractCCppImports(node *sitter.Node, file string, src []byte, line int, result *ParseResult) {
+	text := strings.TrimSpace(node.Content(src))
+	nodeType := node.Type()
+
+	if nodeType == "preproc_include" {
+		// Only extract quoted includes (project-local), skip angle-bracket (system)
+		if quoteStart := strings.Index(text, `"`); quoteStart >= 0 {
+			quoteEnd := strings.LastIndex(text, `"`)
+			if quoteEnd > quoteStart {
+				path := text[quoteStart+1 : quoteEnd]
+				name := lastSlashComponent(path)
+				// Strip extension for the imported name
+				if dotIdx := strings.LastIndex(name, "."); dotIdx >= 0 {
+					name = name[:dotIdx]
+				}
+				result.Imports = append(result.Imports, ImportRef{
+					ImportedName: name,
+					ModulePath:   path,
+					File:         file,
+					Line:         line,
+				})
+			}
+		}
+		return
+	}
+
+	if nodeType == "using_declaration" {
+		// using namespace std; → wildcard import
+		text = strings.TrimPrefix(text, "using ")
+		text = strings.TrimPrefix(text, "namespace ")
+		text = strings.TrimSuffix(text, ";")
+		text = strings.TrimSpace(text)
+		if text != "" {
+			result.Imports = append(result.Imports, ImportRef{
+				ImportedName: "*",
+				ModulePath:   text,
+				File:         file,
+				Line:         line,
+			})
+		}
+	}
+}
+
+// extractSwiftImports handles:
+//   - import_declaration: "import Foundation" → ImportRef{Name:"Foundation", Module:"Foundation"}
+//   - "import struct Foundation.Date" → ImportRef{Name:"Date", Module:"Foundation"}
+func extractSwiftImports(node *sitter.Node, file string, src []byte, line int, result *ParseResult) {
+	text := strings.TrimSpace(node.Content(src))
+	text = strings.TrimPrefix(text, "import ")
+	// Strip kind keywords: struct, class, enum, protocol, typealias, func, var, let
+	for _, kw := range []string{"struct ", "class ", "enum ", "protocol ", "typealias ", "func ", "var ", "let "} {
+		text = strings.TrimPrefix(text, kw)
+	}
+	text = strings.TrimSpace(text)
+
+	if text == "" {
+		return
+	}
+
+	// Sub-module import: Foundation.Date
+	if lastDot := strings.LastIndex(text, "."); lastDot >= 0 {
+		result.Imports = append(result.Imports, ImportRef{
+			ImportedName: text[lastDot+1:],
+			ModulePath:   text[:lastDot],
+			File:         file,
+			Line:         line,
+		})
+	} else {
+		// Simple module import: import Foundation
+		result.Imports = append(result.Imports, ImportRef{
+			ImportedName: "*",
+			ModulePath:   text,
+			File:         file,
+			Line:         line,
+		})
+	}
+}
+
+// extractOCamlImports handles:
+//   - open_statement: "open Module_name" → ImportRef{Name:"*", Module:"Module_name"}
+func extractOCamlImports(node *sitter.Node, file string, src []byte, line int, result *ParseResult) {
+	text := strings.TrimSpace(node.Content(src))
+	text = strings.TrimPrefix(text, "open ")
+	text = strings.TrimPrefix(text, "!") // open! Module
+	text = strings.TrimSpace(text)
+
+	if text == "" {
+		return
+	}
+
+	// OCaml open is always a wildcard — all module symbols become available
+	result.Imports = append(result.Imports, ImportRef{
+		ImportedName: "*",
+		ModulePath:   text,
+		File:         file,
+		Line:         line,
+	})
+}
+
+// extractRubyImports handles:
+//   - require "module" → ImportRef{Name:"module", Module:"module"}
+//   - require_relative "./foo" → ImportRef{Name:"foo", Module:"./foo"}
+//
+// Ruby's require/require_relative are method calls, so the ImportNodes spec
+// uses "call". We filter by callee name here.
+func extractRubyImports(node *sitter.Node, file string, src []byte, line int, result *ParseResult) {
+	text := strings.TrimSpace(node.Content(src))
+
+	// Match: require "module" or require_relative "./module"
+	for _, prefix := range []string{"require_relative ", "require "} {
+		if strings.HasPrefix(text, prefix) {
+			arg := strings.TrimPrefix(text, prefix)
+			arg = stripQuotes(strings.TrimSpace(arg))
+			if arg == "" {
+				continue
+			}
+			name := lastSlashComponent(arg)
+			result.Imports = append(result.Imports, ImportRef{
+				ImportedName: name,
+				ModulePath:   arg,
+				File:         file,
+				Line:         line,
+			})
+			return
+		}
+	}
+}
+
+// extractElixirImports handles:
+//   - alias Module.Foo → ImportRef{Name:"Foo", Module:"Module.Foo"}
+//   - import Module → ImportRef{Name:"*", Module:"Module"}
+//   - use Module → ImportRef{Name:"*", Module:"Module"}
+func extractElixirImports(node *sitter.Node, file string, src []byte, line int, result *ParseResult) {
+	text := strings.TrimSpace(node.Content(src))
+
+	// alias Module.Foo
+	if strings.HasPrefix(text, "alias ") {
+		modPath := strings.TrimPrefix(text, "alias ")
+		modPath = strings.TrimSpace(modPath)
+		// Handle "alias Module.Foo, as: Bar"
+		if commaIdx := strings.Index(modPath, ","); commaIdx >= 0 {
+			modPath = strings.TrimSpace(modPath[:commaIdx])
+		}
+		name := lastDotComponent(modPath)
+		result.Imports = append(result.Imports, ImportRef{
+			ImportedName: name,
+			ModulePath:   modPath,
+			File:         file,
+			Line:         line,
+		})
+		return
+	}
+
+	// import Module or use Module
+	for _, kw := range []string{"import ", "use "} {
+		if strings.HasPrefix(text, kw) {
+			modPath := strings.TrimPrefix(text, kw)
+			modPath = strings.TrimSpace(modPath)
+			if commaIdx := strings.Index(modPath, ","); commaIdx >= 0 {
+				modPath = strings.TrimSpace(modPath[:commaIdx])
+			}
+			if modPath != "" {
+				result.Imports = append(result.Imports, ImportRef{
+					ImportedName: "*",
+					ModulePath:   modPath,
+					File:         file,
+					Line:         line,
+				})
+			}
+			return
+		}
+	}
+}
+
+// extractLuaImports handles:
+//   - require("module") → ImportRef{Name:"module", Module:"module"}
+//   - require "module" → ImportRef{Name:"module", Module:"module"}
+func extractLuaImports(node *sitter.Node, file string, src []byte, line int, result *ParseResult) {
+	text := strings.TrimSpace(node.Content(src))
+
+	if !strings.HasPrefix(text, "require") {
+		return
+	}
+
+	// Extract the argument: require("foo") or require "foo" or require 'foo'
+	arg := strings.TrimPrefix(text, "require")
+	arg = strings.TrimSpace(arg)
+	arg = strings.TrimPrefix(arg, "(")
+	arg = strings.TrimSuffix(arg, ")")
+	arg = stripQuotes(strings.TrimSpace(arg))
+
+	if arg == "" {
+		return
+	}
+
+	// Lua modules use dots: "lfs.path" → name is "path"
+	name := arg
+	if dotIdx := strings.LastIndex(arg, "."); dotIdx >= 0 {
+		name = arg[dotIdx+1:]
+	}
+
+	result.Imports = append(result.Imports, ImportRef{
+		ImportedName: name,
+		ModulePath:   arg,
+		File:         file,
+		Line:         line,
+	})
+}
+
+// ── Extractors: concurrency, config, call ordering, resources, visibility ──
+
+// bodyOffsetLine converts a byte offset INTO a function-body's text into the
+// absolute 1-based source line of that hit. The text-scan extractors below
+// (config_read, concurrency, …) locate a fact at an arbitrary interior offset
+// `idx`; attributing it to the body's first line (`bodyNode.StartPoint().Row+1`)
+// is the WRONG-FACT class — a value from row A paired with the line of row B.
+// We count newlines in body[:idx] and add the body's start row. Language-agnostic.
+func bodyOffsetLine(bodyNode *sitter.Node, bodyText string, idx int) int {
+	base := int(bodyNode.StartPoint().Row) + 1
+	if idx < 0 || idx > len(bodyText) {
+		return base
+	}
+	return base + strings.Count(bodyText[:idx], "\n")
+}
+
+// extractConcurrencyPatterns detects concurrency-related keywords in function body text.
+// Kind: concurrency_pattern. Value: "lock: keyword_found" or "shared_state: keyword_found".
+func extractConcurrencyPatterns(bodyNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int) {
+	if bodyNode == nil {
+		return
+	}
+	bodyText := bodyNode.Content(src)
+	if len(bodyText) == 0 {
+		return
+	}
+
+	// Lock/mutex keywords → "lock: ..."
+	lockKW := []string{
+		"Lock()", "Unlock()", "RLock()", "mutex", "Mutex",
+		"synchronized", "asyncio.Lock", "threading.Lock",
+		"Semaphore",
+	}
+	// Shared-state / concurrency primitives → "shared_state: ..."
+	sharedKW := []string{
+		"atomic", "Atomic", "WaitGroup",
+		"channel", "chan ", "select {", "go func",
+		"goroutine", "Thread",
+	}
+
+	seen := make(map[string]bool)
+
+	for _, kw := range lockKW {
+		idx := strings.Index(bodyText, kw)
+		if idx >= 0 && containsKeywordAtBoundary(bodyText, kw) && !seen["lock:"+kw] {
+			seen["lock:"+kw] = true
+			// Extract the line containing the keyword for full context
+			lineStart := strings.LastIndexByte(bodyText[:idx], '\n')
+			if lineStart < 0 {
+				lineStart = 0
+			} else {
+				lineStart++
+			}
+			lineEnd := strings.IndexByte(bodyText[idx:], '\n')
+			if lineEnd < 0 {
+				lineEnd = len(bodyText) - idx
+			}
+			lockLine := strings.TrimSpace(bodyText[lineStart : idx+lineEnd])
+			if len(lockLine) > 120 {
+				lockLine = lockLine[:120]
+			}
+			value := "lock: " + lockLine
+			if len(value) > 200 {
+				value = value[:197] + "..."
+			}
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "concurrency_pattern",
+				Value:      value,
+				Line:       bodyOffsetLine(bodyNode, bodyText, idx),
+				Confidence: 0.7,
+			})
+		}
+	}
+
+	for _, kw := range sharedKW {
+		sIdx := strings.Index(bodyText, kw)
+		if sIdx >= 0 && containsKeywordAtBoundary(bodyText, kw) && !seen["shared_state:"+kw] {
+			seen["shared_state:"+kw] = true
+			value := "shared_state: " + kw
+			if len(value) > 200 {
+				value = value[:197] + "..."
+			}
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "concurrency_pattern",
+				Value:      value,
+				Line:       bodyOffsetLine(bodyNode, bodyText, sIdx),
+				Confidence: 0.7,
+			})
+		}
+	}
+}
+
+// extractConfigReads detects environment variable and configuration reads in function body text.
+// Kind: config_read. Value: "env: KEY_NAME" or "config: key_name".
+func extractConfigReads(bodyNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int) {
+	if bodyNode == nil {
+		return
+	}
+	bodyText := bodyNode.Content(src)
+	if len(bodyText) == 0 {
+		return
+	}
+
+	seen := make(map[string]bool)
+
+	// Helper: extract a quoted key after a pattern prefix at a given index.
+	// Returns the key string or "" if not found.
+	extractQuotedKey := func(text string, startIdx int) string {
+		rest := text[startIdx:]
+		// Look for quoted string
+		qIdx := -1
+		quoteChar := byte(0)
+		for j := 0; j < len(rest) && j < 80; j++ {
+			if rest[j] == '"' || rest[j] == '\'' {
+				qIdx = j
+				quoteChar = rest[j]
+				break
+			}
+		}
+		if qIdx < 0 {
+			return ""
+		}
+		endQ := strings.IndexByte(rest[qIdx+1:], quoteChar)
+		if endQ < 0 || endQ > 120 {
+			return ""
+		}
+		key := rest[qIdx+1 : qIdx+1+endQ]
+		if len(key) > 80 {
+			key = key[:80]
+		}
+		return key
+	}
+
+	// Helper: extract the next identifier after a given index (for process.env.KEY style).
+	extractNextIdent := func(text string, startIdx int) string {
+		rest := text[startIdx:]
+		// Skip whitespace
+		i := 0
+		for i < len(rest) && (rest[i] == ' ' || rest[i] == '\t') {
+			i++
+		}
+		// Collect identifier chars
+		start := i
+		for i < len(rest) && i < start+80 {
+			c := rest[i]
+			if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' {
+				i++
+			} else {
+				break
+			}
+		}
+		if i > start {
+			return rest[start:i]
+		}
+		return ""
+	}
+
+	// Pattern: os.environ[ or os.getenv( or os.Getenv(
+	envPatterns := []struct {
+		pattern string
+		prefix  string
+	}{
+		{"os.environ[", "env"},
+		{"os.getenv(", "env"},
+		{"os.Getenv(", "env"},
+		{"System.getenv(", "env"},
+		{"System.getProperty(", "env"},
+		{"viper.Get(", "config"},
+		{"viper.GetString(", "config"},
+		{"config.get(", "config"},
+		{"config[", "config"},
+	}
+
+	for _, ep := range envPatterns {
+		idx := strings.Index(bodyText, ep.pattern)
+		for idx >= 0 {
+			key := extractQuotedKey(bodyText, idx+len(ep.pattern)-1)
+			if key != "" && !seen[ep.prefix+":"+key] {
+				seen[ep.prefix+":"+key] = true
+				// Try to extract default value (second arg after comma)
+				dflt := ""
+				keyEnd := idx + len(ep.pattern) + len(key) + 2
+				if keyEnd < len(bodyText) {
+					rest := bodyText[keyEnd:]
+					commaIdx := strings.IndexByte(rest, ',')
+					if commaIdx >= 0 && commaIdx < 40 {
+						dfltPart := strings.TrimSpace(rest[commaIdx+1:])
+						endIdx := strings.IndexAny(dfltPart, ")]\n")
+						if endIdx > 0 {
+							dflt = strings.TrimSpace(dfltPart[:endIdx])
+							if len(dflt) > 40 {
+								dflt = dflt[:40]
+							}
+						}
+					}
+				}
+				value := fmt.Sprintf("%s: %s", ep.prefix, key)
+				if dflt != "" {
+					value += " (default=" + dflt + ")"
+				}
+				if len(value) > 200 {
+					value = value[:197] + "..."
+				}
+				result.Properties = append(result.Properties, PropertyRef{
+					NodeIdx:    nodeIdx,
+					Kind:       "config_read",
+					Value:      value,
+					Line:       bodyOffsetLine(bodyNode, bodyText, idx),
+					Confidence: 0.8,
+				})
+			}
+			// Search for next occurrence
+			nextStart := idx + len(ep.pattern)
+			if nextStart >= len(bodyText) {
+				break
+			}
+			nextIdx := strings.Index(bodyText[nextStart:], ep.pattern)
+			if nextIdx < 0 {
+				break
+			}
+			idx = nextStart + nextIdx
+		}
+	}
+
+	// Pattern: process.env.KEY
+	procEnvPrefix := "process.env."
+	idx := strings.Index(bodyText, procEnvPrefix)
+	for idx >= 0 {
+		key := extractNextIdent(bodyText, idx+len(procEnvPrefix))
+		if key != "" && !seen["env:"+key] {
+			seen["env:"+key] = true
+			value := "env: " + key
+			if len(value) > 200 {
+				value = value[:197] + "..."
+			}
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "config_read",
+				Value:      value,
+				Line:       bodyOffsetLine(bodyNode, bodyText, idx),
+				Confidence: 0.8,
+			})
+		}
+		nextStart := idx + len(procEnvPrefix)
+		if nextStart >= len(bodyText) {
+			break
+		}
+		nextIdx := strings.Index(bodyText[nextStart:], procEnvPrefix)
+		if nextIdx < 0 {
+			break
+		}
+		idx = nextStart + nextIdx
+	}
+
+	// Pattern: settings.KEY (attribute access on settings object)
+	settingsPrefix := "settings."
+	sIdx := strings.Index(bodyText, settingsPrefix)
+	for sIdx >= 0 {
+		key := extractNextIdent(bodyText, sIdx+len(settingsPrefix))
+		if key != "" && !seen["config:"+key] {
+			seen["config:"+key] = true
+			value := "config: " + key
+			if len(value) > 200 {
+				value = value[:197] + "..."
+			}
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "config_read",
+				Value:      value,
+				Line:       bodyOffsetLine(bodyNode, bodyText, sIdx),
+				Confidence: 0.8,
+			})
+		}
+		nextStart := sIdx + len(settingsPrefix)
+		if nextStart >= len(bodyText) {
+			break
+		}
+		nextIdx := strings.Index(bodyText[nextStart:], settingsPrefix)
+		if nextIdx < 0 {
+			break
+		}
+		sIdx = nextStart + nextIdx
+	}
+}
+
+// extractCallOrdering finds method call sequences on the same receiver within a function body.
+// Kind: call_order. Value: "conn: open -> write -> close".
+func extractCallOrdering(bodyNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int) {
+	if bodyNode == nil {
+		return
+	}
+	// receiverCalls maps receiver name → ordered list of method names
+	receiverCalls := make(map[string][]string)
+	receiverCtx := make(map[string]string)
+	// receiverLine maps receiver name → source line of its FIRST call in the sequence,
+	// so the call_order fact is anchored at the hit, not at the function-body start.
+	receiverLine := make(map[string]int)
+	_walkCallOrdering(bodyNode, src, receiverCalls, receiverCtx, receiverLine, 0)
+
+	// Emit properties for receivers with 2+ calls. Cap at 5 receivers.
+	// DETERMINISM (Step-1 parity, all languages): Go map iteration order is randomized,
+	// so ranging receiverCalls directly + capping at 5 keeps a DIFFERENT 5 receivers each
+	// run. Witnessed on go expr-lang/expr: the `vm: push -> ... -> pop` call_order survived
+	// the cap intermittently -> the PRECEDES pop<->push pair flickered -> graph.db edge
+	// count flipped 6497<->6499 (non-deterministic substrate). Iterate a STABLE order
+	// instead: earliest-appearing receiver first (receiverLine, the first-call line),
+	// receiver name as tiebreak. Same input -> same 5 -> same graph.db, every language.
+	recvOrder := make([]string, 0, len(receiverCalls))
+	for receiver := range receiverCalls {
+		recvOrder = append(recvOrder, receiver)
+	}
+	sort.Slice(recvOrder, func(i, j int) bool {
+		li, lj := receiverLine[recvOrder[i]], receiverLine[recvOrder[j]]
+		if li != lj {
+			return li < lj
+		}
+		return recvOrder[i] < recvOrder[j]
+	})
+	emitted := 0
+	for _, receiver := range recvOrder {
+		calls := receiverCalls[receiver]
+		if len(calls) < 2 {
+			continue
+		}
+		if emitted >= 5 {
+			break
+		}
+		// Cap at first 5 calls per receiver
+		if len(calls) > 5 {
+			calls = calls[:5]
+		}
+		value := receiver + ": " + strings.Join(calls, " -> ")
+		if ctx, ok := receiverCtx[receiver]; ok && ctx != "" {
+			value += " [" + ctx + "]"
+		}
+		if len(value) > 200 {
+			value = value[:197] + "..."
+		}
+		line := int(bodyNode.StartPoint().Row) + 1
+		if l, ok := receiverLine[receiver]; ok && l > 0 {
+			line = l
+		}
+		result.Properties = append(result.Properties, PropertyRef{
+			NodeIdx:    nodeIdx,
+			Kind:       "call_order",
+			Value:      value,
+			Line:       line,
+			Confidence: 0.6,
+		})
+		emitted++
+	}
+}
+
+func _walkCallOrdering(node *sitter.Node, src []byte, receiverCalls map[string][]string, receiverCtx map[string]string, receiverLine map[string]int, depth int) {
+	if depth > 10 {
+		return
+	}
+	if node == nil {
+		return
+	}
+	nodeType := node.Type()
+
+	// Match call expressions with an attribute/member receiver
+	if nodeType == "call" || nodeType == "call_expression" || nodeType == "method_invocation" {
+		if node.ChildCount() > 0 {
+			funcChild := node.Child(0)
+			if funcChild != nil {
+				fType := funcChild.Type()
+				if fType == "attribute" || fType == "member_expression" ||
+					fType == "selector_expression" || fType == "field_expression" {
+					// Extract receiver and method name
+					receiver := ""
+					method := ""
+					// Receiver is typically the first child, method is the last identifier
+					if funcChild.ChildCount() >= 2 {
+						recNode := funcChild.Child(0)
+						if recNode != nil {
+							recType := recNode.Type()
+							if recType == "identifier" || recType == "this" || recType == "self" {
+								receiver = recNode.Content(src)
+							}
+						}
+						// Method name: last identifier child
+						for j := int(funcChild.ChildCount()) - 1; j >= 0; j-- {
+							child := funcChild.Child(j)
+							if child != nil {
+								ct := child.Type()
+								if ct == "identifier" || ct == "property_identifier" || ct == "field_identifier" {
+									method = child.Content(src)
+									break
+								}
+							}
+						}
+					}
+					if receiver != "" && method != "" {
+						// Cap stored calls per receiver at 5
+						if len(receiverCalls[receiver]) < 5 {
+							receiverCalls[receiver] = append(receiverCalls[receiver], method)
+						}
+						// Record the source line of the FIRST call seen for this receiver.
+						if _, ok := receiverLine[receiver]; !ok {
+							receiverLine[receiver] = int(node.StartPoint().Row) + 1
+						}
+						// Check parent for resource context
+						if receiverCtx[receiver] == "" {
+							p := node.Parent()
+							for p != nil {
+								pt := p.Type()
+								if pt == "with_statement" || pt == "try_with_resources_statement" || pt == "using_statement" {
+									receiverCtx[receiver] = "managed"
+									break
+								} else if pt == "try_statement" || pt == "try_expression" {
+									receiverCtx[receiver] = "guarded"
+									break
+								}
+								p = p.Parent()
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child != nil {
+			_walkCallOrdering(child, src, receiverCalls, receiverCtx, receiverLine, depth+1)
+		}
+	}
+}
+
+// extractResourcePatterns finds resource management AST nodes: with/using/defer statements.
+// Kind: resource_pattern. Value: "context_manager: expr" or "defer: expr" or "using: expr".
+func extractResourcePatterns(bodyNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int) {
+	if bodyNode == nil {
+		return
+	}
+	_walkResourcePatterns(bodyNode, src, result, nodeIdx, 0)
+}
+
+func _walkResourcePatterns(node *sitter.Node, src []byte, result *ParseResult, nodeIdx int, depth int) {
+	if depth > 10 {
+		return
+	}
+	if node == nil {
+		return
+	}
+	nodeType := node.Type()
+
+	switch nodeType {
+	case "with_statement", "with_clause":
+		// Python context manager: extract the resource expression
+		// Try "object" field first (with_clause), then first named child
+		resNode := node.ChildByFieldName("object")
+		if resNode == nil {
+			// Fallback: scan children for the first non-keyword node
+			for i := 0; i < int(node.ChildCount()); i++ {
+				child := node.Child(i)
+				if child == nil {
+					continue
+				}
+				ct := child.Type()
+				if ct != "with" && ct != ":" && ct != "as" && ct != "as_pattern" &&
+					ct != "identifier" && ct != "block" {
+					resNode = child
+					break
+				}
+			}
+		}
+		resText := ""
+		if resNode != nil {
+			resText = strings.TrimSpace(resNode.Content(src))
+		}
+		if resText == "" {
+			// Fallback: take first line of with statement
+			text := strings.TrimSpace(node.Content(src))
+			if nlIdx := strings.IndexByte(text, '\n'); nlIdx > 0 {
+				text = text[:nlIdx]
+			}
+			resText = text
+		}
+		if len(resText) > 150 {
+			resText = resText[:150]
+		}
+		// Try to find the "as" alias (Python: with expr as name)
+		asName := ""
+		for i := 0; i < int(node.ChildCount()); i++ {
+			asChild := node.Child(i)
+			if asChild == nil {
+				continue
+			}
+			if asChild.Type() == "as_pattern" {
+				for j := 0; j < int(asChild.ChildCount()); j++ {
+					gc := asChild.Child(j)
+					if gc != nil && gc.Type() == "identifier" {
+						asName = gc.Content(src)
+						break
+					}
+				}
+				break
+			}
+		}
+		value := "context_manager: " + resText
+		if asName != "" {
+			value += " as " + asName
+		}
+		if len(value) > 200 {
+			value = value[:197] + "..."
+		}
+		result.Properties = append(result.Properties, PropertyRef{
+			NodeIdx:    nodeIdx,
+			Kind:       "resource_pattern",
+			Value:      value,
+			Line:       int(node.StartPoint().Row) + 1,
+			Confidence: 1.0,
+		})
+		// Still recurse into body for nested resource patterns
+		for i := 0; i < int(node.ChildCount()); i++ {
+			child := node.Child(i)
+			if child != nil {
+				_walkResourcePatterns(child, src, result, nodeIdx, depth+1)
+			}
+		}
+		return
+
+	case "defer_statement":
+		// Go defer statement
+		text := strings.TrimSpace(node.Content(src))
+		text = strings.TrimPrefix(text, "defer ")
+		if len(text) > 150 {
+			text = text[:150]
+		}
+		value := "defer: " + text
+		if len(value) > 200 {
+			value = value[:197] + "..."
+		}
+		result.Properties = append(result.Properties, PropertyRef{
+			NodeIdx:    nodeIdx,
+			Kind:       "resource_pattern",
+			Value:      value,
+			Line:       int(node.StartPoint().Row) + 1,
+			Confidence: 1.0,
+		})
+		return
+
+	case "using_statement", "using_declaration":
+		// C# using statement
+		resText := ""
+		// Try to extract the resource expression from first non-keyword child
+		for i := 0; i < int(node.ChildCount()); i++ {
+			child := node.Child(i)
+			if child == nil {
+				continue
+			}
+			ct := child.Type()
+			if ct != "using" && ct != "(" && ct != ")" && ct != "{" && ct != "}" &&
+				ct != "block" {
+				resText = strings.TrimSpace(child.Content(src))
+				break
+			}
+		}
+		if resText == "" {
+			text := strings.TrimSpace(node.Content(src))
+			if nlIdx := strings.IndexByte(text, '\n'); nlIdx > 0 {
+				text = text[:nlIdx]
+			}
+			resText = text
+		}
+		if len(resText) > 150 {
+			resText = resText[:150]
+		}
+		value := "using: " + resText
+		if len(value) > 200 {
+			value = value[:197] + "..."
+		}
+		result.Properties = append(result.Properties, PropertyRef{
+			NodeIdx:    nodeIdx,
+			Kind:       "resource_pattern",
+			Value:      value,
+			Line:       int(node.StartPoint().Row) + 1,
+			Confidence: 1.0,
+		})
+		return
+
+	case "try_with_resources_statement":
+		// Java try-with-resources
+		resNode := node.ChildByFieldName("resources")
+		resText := ""
+		if resNode != nil {
+			resText = strings.TrimSpace(resNode.Content(src))
+		}
+		if resText == "" {
+			text := strings.TrimSpace(node.Content(src))
+			if nlIdx := strings.IndexByte(text, '\n'); nlIdx > 0 {
+				text = text[:nlIdx]
+			}
+			resText = text
+		}
+		if len(resText) > 150 {
+			resText = resText[:150]
+		}
+		value := "context_manager: " + resText
+		if len(value) > 200 {
+			value = value[:197] + "..."
+		}
+		result.Properties = append(result.Properties, PropertyRef{
+			NodeIdx:    nodeIdx,
+			Kind:       "resource_pattern",
+			Value:      value,
+			Line:       int(node.StartPoint().Row) + 1,
+			Confidence: 1.0,
+		})
+		// Recurse into try body for nested patterns
+		for i := 0; i < int(node.ChildCount()); i++ {
+			child := node.Child(i)
+			if child != nil {
+				_walkResourcePatterns(child, src, result, nodeIdx, depth+1)
+			}
+		}
+		return
+	}
+
+	// Default: recurse into children
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child != nil {
+			_walkResourcePatterns(child, src, result, nodeIdx, depth+1)
+		}
+	}
+}
+
+// extractVisibility determines the access modifier of a function or class node.
+// Kind: visibility. Value: "public", "private", "protected", "internal", "exported", "unexported".
+// Called from extractProperties (for functions) and walkNode (for classes).
+func extractVisibility(node *sitter.Node, src []byte, result *ParseResult, nodeIdx int) {
+	if node == nil {
+		return
+	}
+
+	// Strategy 1: Check for explicit access modifier keywords in modifiers/decorators.
+	// Java/C#/TS place modifiers before the function/class keyword.
+	modifierKWs := []struct {
+		keyword string
+		value   string
+	}{
+		{"public", "public"},
+		{"private", "private"},
+		{"protected", "protected"},
+		{"internal", "internal"},
+	}
+
+	// Check the node itself and its parent for modifier children
+	nodesToCheck := []*sitter.Node{node}
+	parent := node.Parent()
+	if parent != nil {
+		nodesToCheck = append(nodesToCheck, parent)
+	}
+
+	for _, checkNode := range nodesToCheck {
+		// Look for modifier/modifiers child nodes
+		modNode := checkNode.ChildByFieldName("modifiers")
+		if modNode != nil {
+			modText := strings.ToLower(modNode.Content(src))
+			for _, mkw := range modifierKWs {
+				if containsKeywordAtBoundary(modText, mkw.keyword) {
+					result.Properties = append(result.Properties, PropertyRef{
+						NodeIdx:    nodeIdx,
+						Kind:       "visibility",
+						Value:      mkw.value,
+						Line:       int(node.StartPoint().Row) + 1,
+						Confidence: 1.0,
+					})
+					return
+				}
+			}
+		}
+
+		// Some grammars put modifiers as direct children (e.g. "accessibility_modifier")
+		for i := 0; i < int(checkNode.ChildCount()); i++ {
+			child := checkNode.Child(i)
+			if child == nil {
+				continue
+			}
+			ct := child.Type()
+			if ct == "accessibility_modifier" || ct == "modifier" || ct == "modifiers" ||
+				ct == "marker_annotation" || ct == "annotation" {
+				childText := strings.ToLower(strings.TrimSpace(child.Content(src)))
+				for _, mkw := range modifierKWs {
+					if containsKeywordAtBoundary(childText, mkw.keyword) {
+						result.Properties = append(result.Properties, PropertyRef{
+							NodeIdx:    nodeIdx,
+							Kind:       "visibility",
+							Value:      mkw.value,
+							Line:       int(node.StartPoint().Row) + 1,
+							Confidence: 1.0,
+						})
+						return
+					}
+				}
+			}
+		}
+	}
+
+	// Strategy 2: Language-specific naming conventions
+	nameNode := node.ChildByFieldName("name")
+	if nameNode == nil {
+		return
+	}
+	name := nameNode.Content(src)
+	if name == "" {
+		return
+	}
+
+	// Python: __ prefix (mangled) → private, _ prefix → private
+	if strings.HasPrefix(name, "__") && !strings.HasSuffix(name, "__") {
+		result.Properties = append(result.Properties, PropertyRef{
+			NodeIdx:    nodeIdx,
+			Kind:       "visibility",
+			Value:      "private",
+			Line:       int(node.StartPoint().Row) + 1,
+			Confidence: 1.0,
+		})
+		return
+	}
+	if strings.HasPrefix(name, "_") {
+		result.Properties = append(result.Properties, PropertyRef{
+			NodeIdx:    nodeIdx,
+			Kind:       "visibility",
+			Value:      "private",
+			Line:       int(node.StartPoint().Row) + 1,
+			Confidence: 1.0,
+		})
+		return
+	}
+
+	// Go: uppercase first char → exported, lowercase → unexported
+	if len(name) > 0 {
+		first := name[0]
+		if first >= 'A' && first <= 'Z' {
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "visibility",
+				Value:      "exported",
+				Line:       int(node.StartPoint().Row) + 1,
+				Confidence: 1.0,
+			})
+			return
+		}
+		// Only emit "unexported" for Go-like identifiers (lowercase start, no special prefix)
+		// We check if the node text contains "func" or if parent looks like Go
+		nodeText := node.Content(src)
+		if strings.Contains(nodeText, "func ") || strings.Contains(nodeText, "type ") {
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "visibility",
+				Value:      "unexported",
+				Line:       int(node.StartPoint().Row) + 1,
+				Confidence: 1.0,
+			})
+			return
+		}
+	}
+
+	// JS: # prefix → private class field/method
+	if strings.HasPrefix(name, "#") {
+		result.Properties = append(result.Properties, PropertyRef{
+			NodeIdx:    nodeIdx,
+			Kind:       "visibility",
+			Value:      "private",
+			Line:       int(node.StartPoint().Row) + 1,
+			Confidence: 1.0,
+		})
+		return
+	}
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────
+
+func lastDotComponent(s string) string {
+	if idx := strings.LastIndex(s, "."); idx >= 0 {
+		return s[idx+1:]
+	}
+	return s
+}
+
+func lastSlashComponent(s string) string {
+	if idx := strings.LastIndex(s, "/"); idx >= 0 {
+		return s[idx+1:]
+	}
+	return s
+}
+
+func lastColonComponent(s string) string {
+	if idx := strings.LastIndex(s, "::"); idx >= 0 {
+		return s[idx+2:]
+	}
+	return s
+}
+
+func stripQuotes(s string) string {
+	if len(s) >= 2 {
+		if (s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '\'' && s[len(s)-1] == '\'') || (s[0] == '`' && s[len(s)-1] == '`') {
+			return s[1 : len(s)-1]
+		}
+	}
+	return s
+}

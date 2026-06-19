@@ -1,0 +1,19 @@
+{
+  "id": "win-021",
+  "category": "wrong-import-name",
+  "subcategory": "no-close-match",
+  "description": "Hallucinated 'findUser' instead of 'getUserById'",
+  "input": {
+    "code": "import { findUser } from './users';\n\nconst user = await findUser(42);",
+    "filePath": "src/app.ts",
+    "intent": "find a specific user"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "ai_semantic",
+    "correctSymbol": "getUserById",
+    "shouldRequireAI": true,
+    "briefingWouldPrevent": true
+  }
+}

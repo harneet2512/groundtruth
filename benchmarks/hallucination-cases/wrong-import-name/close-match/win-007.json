@@ -1,0 +1,19 @@
+{
+  "id": "win-007",
+  "category": "wrong-import-name",
+  "subcategory": "close-match",
+  "description": "Typo: 'genrateSalt' instead of 'generateSalt' (distance 1)",
+  "input": {
+    "code": "import { genrateSalt } from './utils/crypto';\n\nconst salt = genrateSalt();",
+    "filePath": "src/app.ts",
+    "intent": "generate a salt for password hashing"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "levenshtein",
+    "correctSymbol": "generateSalt",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "id": "wlc-003",
+  "category": "wrong-language-convention",
+  "language": "typescript",
+  "description": "Used Go-style PascalCase 'CreateUser' in TS — should be 'createUser'",
+  "input": {
+    "code": "import { CreateUser } from './users/queries';\n\nconst user = await CreateUser({ name: 'Alice' });",
+    "filePath": "src/routes/users.ts",
+    "intent": "create a new user"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "levenshtein",
+    "correctSymbol": "createUser",
+    "correctImport": "src/users/queries",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

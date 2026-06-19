@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# gt_validate — read-only structural diff check (hallucinated imports +
+# caller-blind edits + contract breaks) on a single file.
+set -u
+THIS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BUNDLE_DIR="$(dirname "$THIS_DIR")"
+PY="${GT_PYTHON:-python3}"
+exec "$PY" "$BUNDLE_DIR/lib/gt_validate.py" "$@"

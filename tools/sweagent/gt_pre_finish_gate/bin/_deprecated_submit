@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# gt_pre_finish_gate/bin/submit — overrides default `submit`.
+# Runs the GT structural gate; on warn, prints message + exits 0 (no submit).
+# On pass / soft-escape / -f, emits the standard <<SWE_AGENT_SUBMISSION>>
+# markers + patch.
+set -u
+THIS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BUNDLE_DIR="$(dirname "$THIS_DIR")"
+PY="${GT_PYTHON:-python3}"
+exec "$PY" "$BUNDLE_DIR/lib/gt_pre_finish_gate.py" "$@"

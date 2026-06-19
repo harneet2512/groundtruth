@@ -1,0 +1,19 @@
+{
+  "id": "win-018",
+  "category": "wrong-import-name",
+  "subcategory": "no-close-match",
+  "description": "Hallucinated 'encryptPassword' instead of 'hashPassword'",
+  "input": {
+    "code": "import { encryptPassword } from './utils/crypto';\n\nconst hashed = await encryptPassword(password);",
+    "filePath": "src/app.ts",
+    "intent": "hash a user password for storage"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "ai_semantic",
+    "correctSymbol": "hashPassword",
+    "shouldRequireAI": true,
+    "briefingWouldPrevent": true
+  }
+}

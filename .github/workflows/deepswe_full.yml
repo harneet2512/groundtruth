@@ -1,0 +1,1193 @@
+name: "DeepSWE: Full benchmark (parallel matrix)"
+
+# Runs the WHOLE DeepSWE benchmark in parallel — one task per job, fanned across
+# max-parallel runners — instead of the single-task deepswe_trial. Each job is the
+# EXACT legitimate per-task flow from deepswe_trial: pull the task image, index the
+# base-commit repo FRESH in-container, run the shipped LSP resolve pass, HARD-gate
+# the full stack, then run the 300-step GT mini-swe-agent and collect the trajectory.
+#
+# Legitimacy: no preindex artifacts, no prebuilt graph reuse — every task indexes its
+# own repo live (GT_FORBID_PREBUILT_GRAPH=1). Full-stack gates abort a degraded task
+# before it spends. Use deepswe_trial for single-task debugging; this for the benchmark.
+#
+# Parallel-account scaling: a mirror on a second GitHub account runs this concurrently
+# on its own runner pool. Both accounts read ONE shared public cache via the assets_repo
+# input (default harneet2512/groundtruth) — the GHCR task images + the pipeline-assets-v1
+# model release — so neither re-mirrors and the LFS quota is never touched.
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "LLM model"
+        required: true
+        default: "deepseek/deepseek-v4-flash"
+      language:
+        description: "Language filter (all, python, go, typescript, javascript, rust)"
+        required: true
+        default: "all"
+      max_tasks:
+        description: "Max tasks to run (0 = all 113). max_tasks=1 + max_parallel=1 = the 1-task demo."
+        required: true
+        default: "0"
+      instance_ids:
+        description: "Explicit comma-separated instance IDs (overrides language/max_tasks; validated against the 113-task manifest — e.g. one id for a precise 1-task demo)"
+        required: false
+        default: ""
+      max_parallel:
+        description: "Concurrent jobs. Default 20 — DeepSeek API is NOT the bound (confirmed not rate-limited at 20; litellm num_retries=3 absorbs any transient 429s). Use 1 for the demo, lower if your GHA account runner ceiling is below 20."
+        required: true
+        default: "20"
+      assets_repo:
+        description: "owner/repo that hosts the shared GHCR image cache + pipeline-assets-v1 release (a mirror on another account points here so both share ONE public cache)"
+        required: true
+        default: "harneet2512/groundtruth"
+      gt_substrate_digest:
+        description: "Pinned GT substrate image by IMMUTABLE digest (ghcr.io/<org>/gt-substrate@sha256:<digest>). Overrides vars.GT_SUBSTRATE_DIGEST. Proof input — never a mutable tag."
+        required: false
+        default: ""
+      require_pinned_substrate:
+        description: "Fail-closed if no pinned digest is set (1 = enforce the substrate-consume proof path; 0 = transitional warn-and-skip). Default 1 per the handoff hard rule."
+        required: true
+        default: "1"
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  # Defensive UTF-8 (infra): hard-pin utf-8 so a stray runner locale can't reintroduce the
+  # cp1252 git/rg-subprocess decode crash (the code fix in src/groundtruth already guards it);
+  # PYTHONUTF8 also covers pier's braille-spinner encode.
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+  LANG: "C.UTF-8"
+  LC_ALL: "C.UTF-8"
+  # Full-stack enforcement (same as deepswe_trial) — no silent fallback on a paid run.
+  # MASTER gate: GT_REQUIRE_FULL_STACK=1 implies require-embedder/lsp/fts5 in
+  # preflight_pipeline.py; the explicit per-dimension flags are kept for belt-and-braces.
+  GT_REQUIRE_FULL_STACK: "1"
+  GT_REQUIRE_FULL_POTENTIAL: "1"
+  GT_REQUIRE_FTS5: "1"
+  GT_FORCE_ONNX_EMBEDDER: "1"
+  GT_REQUIRE_EMBEDDER: "1"
+  GT_REQUIRE_LSP: "1"
+  # Legitimacy: the per-task graph must be built FRESH from THIS task's repo — never a
+  # cross-run / stale / out-of-repo prebuilt graph.db. In substrate-consume mode the graph
+  # the substrate emits to /gt_artifacts FROM the mounted /work:ro IS that fresh per-task
+  # graph (built inside the pinned image, this task, this commit); the adapter consumes it
+  # read-only. This flag forbids a STALE/cross-run injection, not the legitimate substrate
+  # handoff (proof.py HOST_HANDOFF; same reconciliation as the OH wrapper freshness check).
+  GT_FORBID_PREBUILT_GRAPH: "1"
+  # HF must be fully offline: the embedder + dataset come from the baked model / local
+  # files only. Any HF network read on a paid run is a degraded-stack signal -> fail.
+  HF_DATASETS_OFFLINE: "1"
+  TRANSFORMERS_OFFLINE: "1"
+  HF_HUB_OFFLINE: "1"
+  # ── SUBSTRATE-CONSUME (handoff §A/§B-AFTER/§D/§G) ───────────────────────────
+  # The GT proof runtime is a PINNED, portable substrate image (Option B). It is
+  # referenced by IMMUTABLE DIGEST, never a mutable tag (§F.1). gt-run-proof runs
+  # INSIDE that image with the task repo mounted /work:ro and emits the 8 artifacts
+  # (incl. brief.txt) to /gt_artifacts; the DeepSWE adapter CONSUMES them read-only
+  # and NEVER rebuilds.
+  GT_SUBSTRATE_DIGEST: ${{ inputs.gt_substrate_digest || vars.GT_SUBSTRATE_DIGEST }}
+  # Fail-closed digest pin (§E GT_SUBSTRATE_DIGEST_MISSING / PROOF_RUNTIME_FALLBACK_FORBIDDEN):
+  # with this =1 a run with no pinned digest ABORTS (no host fallback, no per-task provisioning).
+  GT_REQUIRE_PINNED_SUBSTRATE: ${{ inputs.require_pinned_substrate }}
+  # Gates policy (P1-f decision: STRICT proof default). gt-run-proof's foundational gates
+  # ARE the proof contract on this pipeline — deliver-always there converts a gate failure
+  # into a green zero-run (the P0.1 chain), and unlike the OH live-agent workflows there is
+  # no separate agent-path consumer of this flag here (it is not forwarded via --ae). So the
+  # proof container is strict by DEFAULT ("0"); deliver-always is an EXPLICIT opt-in (set
+  # this to "1" deliberately). The OH workflows keep their own explicit "1" (agent path).
+  GT_GATES_DELIVER_ALWAYS: "0"
+  # Proof env for the AGENT path (hook validation in-container): the adapter consumes the
+  # substrate certs and validates the in-container graph reads against the resolved graph.
+  GT_PROOF_MODE: "1"
+  GT_CONTAINERIZED: "1"
+  GT_RUNTIME_STRATEGY: "unified_substrate"
+  # Optional GLOBAL override of the per-language LSP readiness budget (seconds). Empty =
+  # use the per-language default chosen in the proof step (go/rust=5s no-op floor,
+  # ts/js/python=20s). vars.* indirection only — never a secret, never a hardcoded value.
+  GT_LSP_READY_BUDGET_S_OVERRIDE: ${{ vars.GT_LSP_READY_BUDGET_S_OVERRIDE }}
+  # ── VERIFICATION HORIZON (self-verification gate) ────────────────────────────
+  # Budget-aware self-verification: GT proactively reminds the agent to test
+  # before shipping. GT_STEP_LIMIT reads the pier config's step_limit (300 for
+  # DeepSWE). GT_SELF_VERIFY_ATTEMPTS is the post-exit outer safety ring (the
+  # retry loop, product name for GT_RETRY_ON_VERIFIER_FAIL). V is the estimated
+  # cost (in steps) of one edit->test->edit cycle, railed to [8, 40].
+  GT_STEP_LIMIT: "300"
+  GT_SELF_VERIFY_ATTEMPTS: "2"
+  GT_VERIFICATION_CYCLE_COST: "25"
+  # ── MODEL ROUTING (litellm OpenAI-compatible) ──────────────────────────────
+  # When model input contains "MiniMax" or uses TokenRouter, route via the
+  # OpenAI-compatible path. TOKENROUTER_API_KEY is in secrets (never in code).
+  # For deepseek: DEEPSEEK_API_KEY is used directly (litellm native).
+  TOKENROUTER_API_KEY: ${{ secrets.TOKENROUTER_API_KEY }}
+  TOKENROUTER_API_BASE: "https://api.tokenrouter.com/v1"
+
+jobs:
+  # ── Stage-0 / prepare: ENV-ONLY. Leaderboard legitimacy. ────────────────────
+  # This job builds the TASK MATRIX from the bench clone (dataset metadata) and
+  # NOTHING ELSE. It must NOT build graph.db for any benchmark task repo — per-task
+  # graphs are built FRESH, in-container, in the `trial` job (GT_FORBID_PREBUILT_GRAPH=1).
+  # A prebuilt / cross-job graph would be benchmark-shape leakage. The guard below
+  # asserts no graph.db was produced here.
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+      total: ${{ steps.gen.outputs.total }}
+      bench_sha: ${{ steps.bench_clone.outputs.bench_sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Workflow lint — catch CI bug classes before the paid matrix
+        shell: bash
+        run: |
+          # Fail-fast in cheap Stage-0: a bash-ism-under-sh, bare-pip, unguarded
+          # dataset fetch, or a swallowed required-op in either official workflow
+          # aborts HERE instead of sliding into the paid trial matrix.
+          python scripts/verify/workflow_lint.py \
+            .github/workflows/deepswe_full.yml \
+            .github/actions/setup-eval/action.yml
+
+      - name: Digest precheck (fail-closed at run level — abort BEFORE the paid matrix)
+        shell: bash
+        run: |
+          # Mirrors deepswe_proof_sweep.yml/verified_run.yml: a missing/mutable digest
+          # must kill the run HERE (one cheap job), not 113 times inside the matrix.
+          # Respects the require_pinned_substrate transitional escape hatch (=0).
+          if [ -z "${GT_SUBSTRATE_DIGEST:-}" ]; then
+            if [ "${GT_REQUIRE_PINNED_SUBSTRATE:-1}" = "1" ]; then
+              echo "GT_SUBSTRATE_DIGEST_MISSING: no pinned substrate digest (gt_substrate_digest" | tee -a trial_output.log
+              echo "input or vars.GT_SUBSTRATE_DIGEST). NOTE: harneet2512/groundtruth has NO repo"
+              echo "vars — dispatches there MUST pass the gt_substrate_digest input explicitly."
+              exit 1
+            fi
+            echo "::warning::GT_SUBSTRATE_DIGEST unset + GT_REQUIRE_PINNED_SUBSTRATE=0 (transitional) — per-task steps will skip the substrate proof"
+            exit 0
+          fi
+          case "$GT_SUBSTRATE_DIGEST" in
+            *@sha256:*) echo "pinned substrate OK: $GT_SUBSTRATE_DIGEST" ;;
+            *) echo "GT_SUBSTRATE_DIGEST_MISSING: '$GT_SUBSTRATE_DIGEST' is not an immutable @sha256 digest (mutable tags are not a valid proof input)" | tee -a trial_output.log; exit 1 ;;
+          esac
+
+      - name: Cost guard — per-task step_limit + cost_limit MUST be set (no unlimited spend)
+        shell: bash
+        run: |
+          # The per-task spend bounds live in the pier agent config (consumed via
+          # --ak config_file=...): agent.step_limit (DeepSWE official = 300) and
+          # agent.cost_limit (USD). A config without BOTH finite positive bounds
+          # means an unbounded paid matrix — abort in Stage-0. Stdlib regex (no
+          # pyyaml dependency in the cheap job); the keys are flat scalars.
+          GT_PIER_CFG=artifact_deepswe/gt_integration/deepswe_gt_pier.yaml python3 << 'PYEOF'
+          import os, re, sys
+          cfg = os.environ["GT_PIER_CFG"]
+          txt = open(cfg, encoding="utf-8").read()
+          sl = re.search(r"^\s*step_limit:\s*([0-9]+)\s*$", txt, re.M)
+          cl = re.search(r"^\s*cost_limit:\s*([0-9.]+)\s*$", txt, re.M)
+          if not sl or int(sl.group(1)) <= 0:
+              sys.exit(f"FATAL: agent.step_limit missing/zero in {cfg} — unbounded steps forbidden")
+          if not cl or float(cl.group(1)) <= 0:
+              sys.exit(f"FATAL: agent.cost_limit missing/zero in {cfg} — unbounded cost forbidden")
+          print(f"cost guard OK: step_limit={sl.group(1)} (DeepSWE official 300) "
+                f"cost_limit=${cl.group(1)} USD per task")
+          PYEOF
+      - name: Clone deepswe-bench
+        id: bench_clone
+        run: |
+          if [ ! -d "deepswe-bench" ]; then
+            git clone --depth 1 https://github.com/datacurve-ai/deep-swe.git deepswe-bench
+          fi
+          # Run provenance: record WHICH deepswe-bench commit defined this run's task set
+          # (a --depth 1 clone of the default branch can drift between runs). Surfaced in
+          # the run summary (summarize job) + uploaded per-task (run_provenance.json).
+          BENCH_SHA=$(git -C deepswe-bench rev-parse HEAD 2>/dev/null || true)
+          echo "bench_sha=${BENCH_SHA}" >> "$GITHUB_OUTPUT"
+          echo "deepswe-bench clone SHA: ${BENCH_SHA:-<unknown>}"
+
+      # ── SPEED-OPT A: cache deepswe-bench across runs (keyed on commit SHA) ──
+      # The bench repo is cloned in every matrix job (113×) for task validation and
+      # pier's task dir. After the clone above, archive it ONCE here in prepare so each
+      # trial job restores the tarball from cache (fast local decompress) instead of
+      # git-cloning over the network.
+      - name: Cache deepswe-bench clone (bench_sha-keyed, archive for matrix jobs)
+        shell: bash
+        run: |
+          BENCH_SHA="${{ steps.bench_clone.outputs.bench_sha }}"
+          BENCH_CACHE_KEY="deepswe-bench-clone-${BENCH_SHA:-unknown}"
+          echo "BENCH_CACHE_KEY=${BENCH_CACHE_KEY}" >> "$GITHUB_ENV"
+          # Write the key out so the actions/cache step below can reference it.
+          echo "bench_cache_key=${BENCH_CACHE_KEY}" >> "$GITHUB_OUTPUT"
+          # Archive the clone so actions/cache can store it.
+          tar -czf /tmp/deepswe-bench.tar.gz deepswe-bench/
+          echo "deepswe-bench archived: $(du -sh /tmp/deepswe-bench.tar.gz | cut -f1)"
+        id: bench_archive
+
+      - name: Save deepswe-bench tarball to GHA cache
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/deepswe-bench.tar.gz
+          key: ${{ steps.bench_archive.outputs.bench_cache_key }}
+
+      # ── SPEED-OPT B: pre-build harness venv ONCE in prepare → restore per job ──
+      # pier + GT python package install runs per job even with the wheel cache
+      # (pip resolver + egg-link scan costs 20-60s each). Build a fully-installed
+      # venv here, tar it to a fixed path, cache with pyproject-hash key, and
+      # restore + activate in each trial job — pip never runs in the hot path.
+      - name: Build and cache harness venv (pier==0.2.0 + GT editable install)
+        shell: bash
+        run: |
+          set -e
+          VENV_DIR=/tmp/gt-harness-venv
+          python -m venv "$VENV_DIR"
+          source "$VENV_DIR/bin/activate"
+          python -m pip install --upgrade pip --quiet
+          python -m pip install "datacurve-pier==0.2.0" --quiet
+          python -m pip install -e . --quiet
+          deactivate
+          tar -czf /tmp/gt-harness-venv.tar.gz -C /tmp gt-harness-venv/
+          echo "harness venv archived: $(du -sh /tmp/gt-harness-venv.tar.gz | cut -f1)"
+
+      - name: Save harness venv to GHA cache
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/gt-harness-venv.tar.gz
+          key: gt-harness-venv-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}-pier020
+
+      # ── SPEED-OPT C: pull + save substrate image ONCE → restore per job ──────
+      # The ~8GB substrate is pulled from GHCR in every matrix job (113×). Save it
+      # ONCE here (docker save | gzip → cache) so each trial job loads from cache
+      # instead of pulling from the network. The GHA cache cap is 10GB total; a
+      # docker save of the substrate (compressed) is typically 2-5GB. If the save
+      # would exceed the cap (10GB limit), the cache/save step will silently fail-
+      # to-save and each job falls back to the direct GHCR pull — graceful degradation.
+      # Key is the immutable @sha256 digest so a substrate update automatically busts.
+      - name: Pull + save substrate image for matrix job cache
+        shell: bash
+        if: ${{ env.GT_SUBSTRATE_DIGEST != '' }}
+        run: |
+          set -e
+          # Install docker CLI so prepare can pull + save the substrate.
+          if ! command -v docker >/dev/null 2>&1; then
+            DVER=27.3.1
+            curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DVER}.tgz" -o /tmp/docker.tgz \
+              && tar -xzf /tmp/docker.tgz -C /tmp \
+              && cp /tmp/docker/docker /usr/local/bin/docker \
+              && chmod +x /usr/local/bin/docker
+          fi
+          # GHCR login so prepare can pull from the authenticated registry.
+          OWNER=$(echo "${{ inputs.assets_repo }}" | cut -d/ -f1 | tr '[:upper:]' '[:lower:]')
+          echo "${{ secrets.GHCR_PULL_TOKEN || secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "$OWNER" --password-stdin
+          echo "pulling substrate: $GT_SUBSTRATE_DIGEST"
+          if docker pull "$GT_SUBSTRATE_DIGEST"; then
+            echo "saving substrate image to /tmp/gt-substrate.tar.gz ..."
+            docker save "$GT_SUBSTRATE_DIGEST" | gzip -1 > /tmp/gt-substrate.tar.gz
+            SAVED_SIZE=$(du -sh /tmp/gt-substrate.tar.gz | cut -f1)
+            echo "substrate image saved: $SAVED_SIZE"
+            # Extract the digest fingerprint (sha256 hex, no colon prefix) for the cache key.
+            DIGEST_HEX=$(echo "$GT_SUBSTRATE_DIGEST" | sed 's/.*@sha256://')
+            echo "SUBSTRATE_CACHE_KEY=gt-substrate-img-${DIGEST_HEX:0:16}" >> "$GITHUB_ENV"
+            echo "substrate_cache_key=gt-substrate-img-${DIGEST_HEX:0:16}" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::substrate pull in prepare failed — each trial job will pull directly from GHCR"
+            echo "SUBSTRATE_CACHE_KEY=" >> "$GITHUB_ENV"
+            echo "substrate_cache_key=" >> "$GITHUB_OUTPUT"
+          fi
+        id: substrate_save
+        env:
+          GHCR_TOKEN: ${{ secrets.GHCR_PULL_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Save substrate image tarball to GHA cache
+        if: ${{ steps.substrate_save.outputs.substrate_cache_key != '' }}
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/gt-substrate.tar.gz
+          key: ${{ steps.substrate_save.outputs.substrate_cache_key }}
+
+      # ── SPEED-OPT D: pull + save static docker CLI + compose binaries once ───
+      # Each trial job downloads docker CLI (~50MB) + compose plugin (~30MB) when
+      # absent. Cache the two binaries keyed on version so the per-job install is
+      # a cache restore + cp instead of a curl download.
+      - name: Fetch + cache static docker CLI and compose plugin
+        shell: bash
+        run: |
+          DVER=27.3.1
+          CVER=2.29.7
+          DOCKER_BIN=/tmp/docker-cli-cache/docker
+          COMPOSE_BIN=/tmp/docker-cli-cache/docker-compose
+          mkdir -p /tmp/docker-cli-cache
+          if [ ! -x "$DOCKER_BIN" ]; then
+            curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DVER}.tgz" -o /tmp/docker.tgz \
+              && tar -xzf /tmp/docker.tgz -C /tmp/docker-cli-cache --strip-components=1 docker/docker \
+              && chmod +x "$DOCKER_BIN"
+          fi
+          if [ ! -x "$COMPOSE_BIN" ]; then
+            curl -fsSL "https://github.com/docker/compose/releases/download/v${CVER}/docker-compose-linux-x86_64" \
+              -o "$COMPOSE_BIN" && chmod +x "$COMPOSE_BIN"
+          fi
+          echo "docker CLI: $(${DOCKER_BIN} --version 2>&1 | head -1)"
+          echo "compose: $($COMPOSE_BIN version 2>&1 | head -1)"
+
+      - name: Save docker CLI + compose binaries to GHA cache
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/docker-cli-cache
+          key: docker-cli-27.3.1-compose-2.29.7-linux-x86_64
+
+      - id: gen
+        name: Build task matrix (manifest-driven; clone cross-checked — run-set == cache-set)
+        env:
+          INPUT_LANGUAGE: ${{ inputs.language }}
+          INPUT_MAX_TASKS: ${{ inputs.max_tasks }}
+          INPUT_INSTANCE_IDS: ${{ inputs.instance_ids }}
+        run: |
+          # SOURCE OF TRUTH: artifact_deepswe/repo_manifest.json (the version-controlled
+          # 113-task set — the SAME file cache_deepswe_images.yml mirrors from, so the
+          # run-set and the GHCR cache-set can never drift apart). The deep-swe clone is
+          # CROSS-CHECKED per selected task (dir + task.toml exist, docker_image matches
+          # the manifest) so a bench-repo drift fails HERE, deterministically, instead of
+          # surfacing as a mid-matrix pull/validate failure. Selection order is the
+          # manifest order (stable across runs) — never the clone's glob order.
+          python3 << 'PYEOF'
+          import json, os, sys
+          try:
+              import tomllib
+          except ModuleNotFoundError:
+              import tomli as tomllib
+          lang = os.environ.get("INPUT_LANGUAGE", "all")
+          maxt = int(os.environ.get("INPUT_MAX_TASKS", "0") or "0")
+          explicit = [t.strip() for t in os.environ.get("INPUT_INSTANCE_IDS", "").split(",") if t.strip()]
+          with open("artifact_deepswe/repo_manifest.json", encoding="utf-8") as f:
+              man = json.load(f)
+          tasks = man.get("tasks") or []
+          if not tasks:
+              sys.exit("FATAL: repo_manifest.json has no tasks")
+          for t in tasks:
+              for k in ("instance_id", "language", "docker_image"):
+                  if not t.get(k):
+                      sys.exit(f"FATAL: manifest entry missing {k!r}: {t}")
+          by_id = {t["instance_id"]: t for t in tasks}
+          if explicit:
+              unknown = [t for t in explicit if t not in by_id]
+              if unknown:
+                  sys.exit(f"FATAL: unknown instance ids (not in the 113-task manifest): {unknown}")
+              sel = [by_id[t] for t in explicit]
+          else:
+              sel = [t for t in tasks if lang == "all" or t["language"] == lang]
+              if maxt > 0:
+                  sel = sel[:maxt]
+          # GHA matrix cap is 256; DeepSWE is 113, but guard anyway (fail-closed, never
+          # truncate — a truncated run looks complete and corrupts the denominator).
+          if len(sel) > 256:
+              sys.exit(f"FATAL: {len(sel)} selected tasks exceed the 256 GHA matrix cap")
+          # Cross-check every SELECTED task against the bench clone (the dir pier runs).
+          drift = []
+          for t in sel:
+              tid = t["instance_id"]
+              toml_path = os.path.join("deepswe-bench", "tasks", tid, "task.toml")
+              if not os.path.isfile(toml_path):
+                  drift.append(f"{tid}: task dir/task.toml missing in the deep-swe clone")
+                  continue
+              try:
+                  with open(toml_path, "rb") as fh:
+                      tt = tomllib.load(fh)
+              except Exception as e:
+                  drift.append(f"{tid}: task.toml unparseable ({e})")
+                  continue
+              clone_img = (tt.get("environment", {}) or {}).get("docker_image", "")
+              if clone_img != t["docker_image"]:
+                  drift.append(f"{tid}: image drift manifest={t['docker_image']} clone={clone_img}")
+          if drift:
+              print("FATAL: RUN_SET_DRIFT — manifest vs deep-swe clone mismatch "
+                    "(refresh repo_manifest.json + re-run cache_deepswe_images.yml):", file=sys.stderr)
+              for d in drift:
+                  print(f"  {d}", file=sys.stderr)
+              sys.exit(1)
+          include = [{"task": t["instance_id"], "language": t["language"],
+                      "image": t["docker_image"]} for t in sel]
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write("matrix=" + json.dumps({"include": include}) + "\n")
+              f.write(f"total={len(include)}\n")
+          langs = {}
+          for t in sel:
+              langs[t["language"]] = langs.get(t["language"], 0) + 1
+          print(f"{len(include)} tasks queued (lang={lang}, max={maxt}, "
+                f"explicit={len(explicit)}) langs={langs}", file=sys.stderr)
+          PYEOF
+
+      - name: Legitimacy guard — Stage-0 built NO task graph.db (env-only)
+        run: |
+          # Fail-closed: if any graph.db materialized in this env-only job, a per-task
+          # graph leaked into prepare -> reject (would be benchmark-shape preindexing).
+          FOUND=$(find "$GITHUB_WORKSPACE" -name 'graph.db' 2>/dev/null | head -5)
+          if [ -n "$FOUND" ]; then
+            echo "FATAL: prepare/Stage-0 produced graph.db — must be env/metadata only:"
+            echo "$FOUND"
+            exit 1
+          fi
+          echo "legitimacy OK: no graph.db built in Stage-0 (per-task graphs are fresh in-container)"
+
+  trial:
+    needs: prepare
+    runs-on: ubuntu-latest
+    name: "${{ matrix.task }} (${{ matrix.language }})"
+    # 120 not 90: the manifest's largest agent_timeout_sec is 5400 (=90 min) and the
+    # pull+proof prologue adds 5-15 min — a 90-min job cap could kill a legitimately
+    # long task as a timeout-INFRA. step_limit=300 + cost_limit bound the spend; the
+    # job timeout is only the backstop.
+    timeout-minutes: 120
+    # The container's default shell is sh/dash; our steps use bash-isms (PIPESTATUS,
+    # ${!...}). Pin the whole job to bash so fail-closed guards evaluate correctly
+    # (the "Bad substitution" / "declare -A" crashes were sh running bash syntax).
+    defaults:
+      run:
+        shell: bash
+    # BARE runner (NO container:). pier runs the task env + verifier as sibling containers
+    # on the runner's OWN docker, so bind-mount sources resolve on the host — fixing the
+    # "bind source path does not exist: .../verifier" that the in-container setup hit (the
+    # container saw /__w but the host has /home/runner/work, so sibling containers couldn't
+    # find the in-container paths). Bare ubuntu HAS g++/docker/compose/git-lfs; we install
+    # pier + go toolchain + gopls + onnxruntime here (the image used to bake them).
+    strategy:
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+      fail-fast: false
+      max-parallel: ${{ fromJson(inputs.max_parallel) }}
+    env:
+      TOKENROUTER_API_KEY: ${{ secrets.TOKENROUTER_API_KEY }}
+    steps:
+      - name: Checkout GroundTruth
+        uses: actions/checkout@v4
+        with:
+          lfs: false  # LFS QUOTA EXHAUSTED (2026-06-05): the e5 model is fetched from the
+                      # pipeline-assets-v1 RELEASE ASSET below (release bandwidth is separate
+                      # and unmetered — NOT LFS). lfs:true here now fails the whole job
+                      # ("failed to fetch some objects"), as it did on the Live path.
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Preflight checks (fail-fast on infra, warn on quality)
+        env:
+          TOKENROUTER_API_KEY: ${{ secrets.TOKENROUTER_API_KEY }}
+        shell: bash
+        run: |
+          set -e
+          echo "=== INFRA PREFLIGHT (fail-fast) ==="
+          # 1. API key — must be present before any LLM spend
+          [ "${#TOKENROUTER_API_KEY}" -gt 10 ] || { echo "::error::TOKENROUTER_API_KEY missing or too short"; exit 1; }
+          echo "  TOKENROUTER_API_KEY present (${#TOKENROUTER_API_KEY} chars)"
+          # 2. Docker CLI (required for substrate pull + pier + task images)
+          docker --version || { echo "::error::docker CLI not available (will be installed below — this is a pre-check)"; true; }
+          echo "  Docker CLI pre-check done"
+          # 3. Disk space (need >= 10GB for substrate + task image + artifacts)
+          FREE_GB=$(df --output=avail / | tail -1 | awk '{printf "%.0f", $1/1048576}')
+          [ "$FREE_GB" -ge 10 ] || { echo "::error::Low disk: ${FREE_GB}GB free (need >=10GB for substrate + task images + artifacts)"; exit 1; }
+          echo "  Disk: ${FREE_GB}GB free"
+          # 4. Network / GHCR reachable (warning only — Docker Hub fallback exists)
+          curl -sf --max-time 10 https://ghcr.io/v2/ -o /dev/null || echo "::warning::GHCR not reachable — Docker Hub fallback will be used"
+          echo "  Network check done"
+          # 5. Substrate digest format (when provided — hard format check before any pull attempt)
+          if [ -n "${GT_SUBSTRATE_DIGEST:-}" ]; then
+            echo "$GT_SUBSTRATE_DIGEST" | grep -qE '^.+@sha256:[a-f0-9]{64}$' || { echo "::error::GT_SUBSTRATE_DIGEST malformed: $GT_SUBSTRATE_DIGEST"; exit 1; }
+            echo "  Substrate digest format valid"
+          fi
+          # 6. GT source syntax (key Python modules — catches bad merges before paid matrix)
+          python -c "import ast; ast.parse(open('src/groundtruth/mcp/tools.py').read()); print('  GT mcp/tools.py syntax OK')" || echo "::warning::GT mcp/tools.py syntax check failed"
+          python -c "import ast; ast.parse(open('src/groundtruth/mcp/server.py').read()); print('  GT mcp/server.py syntax OK')" || echo "::warning::GT mcp/server.py syntax check failed"
+          echo "=== PREFLIGHT PASS ==="
+
+      # ── TOOLCHAIN CACHE (scalability) ──────────────────────────────────────────
+      # SPEED-OPT B restore: harness venv built ONCE in prepare (pier==0.2.0 + GT
+      # editable install). Restore the tarball here → unpack → activate. Falls back
+      # to a direct pip install if the cache miss (e.g. first run or pyproject change).
+      - name: Restore harness venv from cache
+        id: venv_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/gt-harness-venv.tar.gz
+          key: gt-harness-venv-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}-pier020
+
+      - name: Install host harness deps (pier + GT python deps for the adapter ONLY — NO host LSP)
+        run: |
+          set -e
+          # SUBSTRATE-CONSUME (handoff §B-AFTER + §F.2 "no host GT execution"): LSP/gates/graph
+          # build all run INSIDE the pinned substrate. The runner therefore installs ONLY what
+          # the HARNESS needs: pier (to run the agent) and the GT python deps the ADAPTER imports
+          # host-side (GTRuntimeContext / proof.graph_edges_hash for the §H witness, and the brief
+          # fallback). NO gopls/rust-analyzer/tsserver/pyright on the runner — host LSP is exactly
+          # the §B BEFORE/invalid host-split this change removes.
+          #
+          # SPEED-OPT B: if the venv tarball was restored from cache, unpack + activate it
+          # instead of running pip (saves 20-60s per job on the hot path).
+          if [ -f /tmp/gt-harness-venv.tar.gz ]; then
+            echo "venv cache HIT — unpacking harness venv"
+            tar -xzf /tmp/gt-harness-venv.tar.gz -C /tmp/
+            # Relink the editable install to THIS checkout (the venv was built in prepare
+            # against a different GITHUB_WORKSPACE path; update the .pth / egg-link so
+            # the adapter imports from the current checkout, not the prepare workspace).
+            VENV_SITE=$(/tmp/gt-harness-venv/bin/python -c "import site; print(site.getsitepackages()[0])")
+            # Remove stale groundtruth egg-link/direct_url pointing to prepare workspace.
+            find "$VENV_SITE" -name "groundtruth*.egg-link" -delete 2>/dev/null || true
+            find "$VENV_SITE" -name "__editable__.groundtruth*.pth" -delete 2>/dev/null || true
+            # Re-install just the GT package editable (no-deps, wheel already present → fast).
+            /tmp/gt-harness-venv/bin/python -m pip install -e . --no-deps --quiet 2>&1 | tail -3 || true
+            # Activate: prepend venv bin so pier + python resolve here.
+            echo "PATH=/tmp/gt-harness-venv/bin:$PATH" >> "$GITHUB_ENV"
+            echo "VIRTUAL_ENV=/tmp/gt-harness-venv" >> "$GITHUB_ENV"
+            export PATH="/tmp/gt-harness-venv/bin:$PATH"
+            command -v pier >/dev/null || { echo "FATAL: pier not on PATH after venv restore"; exit 1; }
+            echo "host harness ready (venv cache): pier=$(command -v pier)"
+          else
+            echo "venv cache MISS — installing harness from scratch (first run / pyproject changed)"
+            python -m pip install --upgrade pip
+            # PINNED: the whole --ae/--mounts-json env+mount integration was source-verified
+            # against pier 0.2.0 (cli/jobs.py:620,629 -> factory extra_env -> DockerEnvironment
+            # exec -e). An unpinned install lets an upstream release silently change that
+            # plumbing mid-run — never float the harness contract on a paid matrix.
+            python -m pip install "datacurve-pier==0.2.0" || { echo "FATAL: pier install failed"; exit 1; }
+            command -v pier >/dev/null || { echo "FATAL: pier not on PATH after install"; exit 1; }
+            echo "host harness ready: pier=$(command -v pier) (LSP/gates/graph run inside the substrate)"
+          fi
+
+      - name: Trust the workspace for git (CI checkout uid mismatch)
+        run: |
+          git config --global --add safe.directory '*' || true
+          git config --global --add safe.directory "$GITHUB_WORKSPACE" || true
+
+      - name: Mark job-start epoch (legitimacy freshness baseline)
+        run: |
+          # Any GT artifact (graph.db, brief, closure) with an mtime BEFORE this is
+          # carried over from an earlier run and is illegitimate. The legitimacy
+          # guard uses GT_JOB_STARTED as the fresh-build cut-off.
+          echo "GT_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
+
+      - name: Verify env armed (fail-closed — abort before any paid work)
+        shell: bash
+        run: |
+          set -e
+          # Each var MUST be present and == 1. A missing/overridden flag silently
+          # re-enables a degraded fallback -> fail immediately. POSIX-safe (no bash
+          # arrays) AND pinned to bash so it runs under sh-default container jobs too.
+          BAD=0
+          for k in GT_REQUIRE_FTS5 GT_REQUIRE_EMBEDDER GT_FORCE_ONNX_EMBEDDER \
+                   GT_REQUIRE_LSP GT_REQUIRE_FULL_STACK GT_FORBID_PREBUILT_GRAPH \
+                   HF_DATASETS_OFFLINE TRANSFORMERS_OFFLINE HF_HUB_OFFLINE; do
+            v=$(printenv "$k" || true)
+            if [ "$v" = "1" ]; then echo "  $k=1 OK"; else echo "FATAL: env $k='$v' expected '1' — fail-closed gate"; BAD=1; fi
+          done
+          [ "$BAD" -eq 0 ] || { echo "FATAL: fail-closed env not armed"; exit 1; }
+          echo "=== fail-closed env ARMED ==="
+
+      # ── SPEED-OPT D restore: docker CLI + compose from cache ────────────────────
+      - name: Restore docker CLI + compose binaries from cache
+        id: docker_cli_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/docker-cli-cache
+          key: docker-cli-27.3.1-compose-2.29.7-linux-x86_64
+
+      - name: Install docker CLI (socket is mounted, CLI binary not baked)
+        run: |
+          # The container mounts /var/run/docker.sock but the baked image lacks the
+          # docker CLI -> "Unable to locate executable file: docker" on GHCR login +
+          # pier --env docker. Install the client best-effort.
+          # docker CLI is REQUIRED (GHCR login + pier --env docker + task image pulls).
+          # A true absence must fail the job — never run degraded.
+          # SPEED-OPT D: use cached binaries from prepare when available (avoids curl download).
+          if ! command -v docker >/dev/null; then
+            if [ -x /tmp/docker-cli-cache/docker ]; then
+              echo "docker CLI from cache"
+              cp /tmp/docker-cli-cache/docker /usr/local/bin/docker
+              chmod +x /usr/local/bin/docker
+            else
+              echo "docker CLI absent and no cache — fetching static client binary"
+              DVER=27.3.1
+              curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DVER}.tgz" -o /tmp/docker.tgz \
+                && tar -xzf /tmp/docker.tgz -C /tmp \
+                && cp /tmp/docker/docker /usr/local/bin/docker \
+                && chmod +x /usr/local/bin/docker \
+                || (apt-get update -qq && apt-get install -y -qq docker.io) \
+                || { echo "FATAL: docker CLI missing and static+apt install failed"; exit 1; }
+            fi
+          fi
+          docker --version 2>&1 | head -1 || { echo "FATAL: docker CLI still missing"; exit 1; }
+          # pier uses `docker compose` (v2 plugin) — the static client + docker.io DON'T
+          # include it ("unknown flag: --project-name" => compose subcommand absent).
+          # Install the compose v2 plugin binary into the CLI-plugins dir.
+          if ! docker compose version >/dev/null 2>&1; then
+            mkdir -p /usr/local/lib/docker/cli-plugins
+            if [ -x /tmp/docker-cli-cache/docker-compose ]; then
+              echo "compose plugin from cache"
+              cp /tmp/docker-cli-cache/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
+              chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+            else
+              echo "compose plugin absent and no cache — fetching"
+              curl -fsSL "https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-x86_64" \
+                -o /usr/local/lib/docker/cli-plugins/docker-compose \
+                && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose \
+                || { echo "FATAL: docker compose plugin install failed"; exit 1; }
+            fi
+          fi
+          docker compose version 2>&1 | head -1 || { echo "FATAL: docker compose still missing"; exit 1; }
+
+      - name: Install current GT host-side (adapter imports ONLY — no gt-index build, no host LSP)
+        run: |
+          set -e
+          # The graph build / FTS5 / LSP / closure / embedder / gates all run INSIDE the pinned
+          # substrate (handoff §F.2/§F.3/§F.4 — no host GT execution, no per-task pip into the
+          # task image, no host gt-index build). Host-side we install ONLY the current checkout's
+          # GT so the DeepSWE adapter can import groundtruth.runtime (GTRuntimeContext +
+          # proof.graph_edges_hash) for the §H witness and the brief fallback.
+          # SPEED-OPT B: if the venv was restored, the -e install already ran in harness setup
+          # above (re-linked to this workspace). Skip if already importable.
+          if python -c "import groundtruth.runtime.proof, groundtruth.runtime.context" 2>/dev/null; then
+            echo "GT runtime already importable (venv cache active) — no install needed"
+          else
+            python -m pip install -e .
+          fi
+          # PYTHONPATH: THIS checkout's src (current adapter/runtime code, not any baked snapshot)
+          # + scripts/swebench + scripts/metrics (so the canonical graph_certificate.format_graph_witness
+          # the adapter MAY call is importable host-side; the adapter also self-adds it to sys.path).
+          echo "PYTHONPATH=$GITHUB_WORKSPACE/src:$GITHUB_WORKSPACE/scripts/swebench:$GITHUB_WORKSPACE/scripts/metrics" >> "$GITHUB_ENV"
+          python -c "import groundtruth.runtime.proof as p, groundtruth.runtime.context as c; print('GT runtime importable host-side:', bool(p.graph_edges_hash and c.GTRuntimeContext))"
+
+      - name: Log in to GHCR for the shared image cache (token-aware, cross-account)
+        env:
+          # On a MIRROR account, GHCR_PULL_TOKEN = the assets_repo owner's packages token
+          # (read:packages) so we pull their PRIVATE shared cache without making it public
+          # (no API exists to flip user-package visibility). On the OWNER account the secret
+          # is absent -> fall back to the job's own GITHUB_TOKEN (reads its own packages).
+          GHCR_TOKEN: ${{ secrets.GHCR_PULL_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          OWNER=$(echo "${{ inputs.assets_repo }}" | cut -d/ -f1 | tr '[:upper:]' '[:lower:]')
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$OWNER" --password-stdin
+          echo "GHCR login OK as $OWNER (cache: ghcr.io/$OWNER/swe-bench-202605)"
+
+      # ── SPEED-OPT A restore: deepswe-bench from cache ────────────────────────────
+      - name: Restore deepswe-bench from cache
+        id: bench_cache_restore
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/deepswe-bench.tar.gz
+          key: deepswe-bench-clone-${{ needs.prepare.outputs.bench_sha }}
+
+      - name: Clone deepswe-bench (or restore from cache)
+        run: |
+          if [ -f /tmp/deepswe-bench.tar.gz ] && [ ! -d "deepswe-bench" ]; then
+            echo "bench cache HIT — unpacking deepswe-bench from cache"
+            tar -xzf /tmp/deepswe-bench.tar.gz
+          fi
+          if [ ! -d "deepswe-bench" ]; then
+            echo "bench cache MISS — cloning deepswe-bench from GitHub"
+            git clone --depth 1 https://github.com/datacurve-ai/deep-swe.git deepswe-bench
+          fi
+          # Run provenance: record what SHA this task actually ran from. On a cache hit
+          # this equals prepare's bench_sha (same tarball); on a cache miss it is the
+          # live clone SHA (document any drift).
+          BENCH_SHA=$(git -C deepswe-bench rev-parse HEAD 2>/dev/null || true)
+          echo "GT_DEEPSWE_BENCH_SHA=${BENCH_SHA}" >> "$GITHUB_ENV"
+          echo "deepswe-bench clone/cache SHA: ${BENCH_SHA:-<unknown>}"
+
+      - name: Validate task exists
+        run: |
+          TASK_DIR="deepswe-bench/tasks/${{ matrix.task }}"
+          if [ ! -d "$TASK_DIR" ]; then
+            echo "::error::Task directory not found: $TASK_DIR"; exit 1
+          fi
+          echo "Task directory: $TASK_DIR"
+
+      # ── SPEED-OPT C restore: substrate image from GHA cache ──────────────────
+      # Restore the tarball saved in prepare (docker save | gzip). If the cache hit,
+      # docker load below is ~10-30s vs a cold GHCR pull (~3-8 min). The cache key is
+      # the first 16 hex chars of the @sha256 digest so a new substrate automatically
+      # busts the cache. GHA cache max is 10GB total — substrate compressed is ~2-5GB;
+      # if the save failed in prepare (exceeded cap) the restore will miss and the job
+      # falls back to the regular GHCR pull without failing.
+      # NOTE: the cache key must be computed at step-time since GT_SUBSTRATE_DIGEST is
+      # set as a top-level env var (not an input expression); we derive it in a small
+      # bash step first and then pass it to cache/restore via an output + env write.
+      - name: Compute substrate cache key
+        id: substrate_cache_key
+        shell: bash
+        run: |
+          DIGEST_HEX=$(echo "${GT_SUBSTRATE_DIGEST:-}" | sed 's/.*@sha256://')
+          if [ -n "$DIGEST_HEX" ]; then
+            KEY="gt-substrate-img-${DIGEST_HEX:0:16}"
+          else
+            KEY="gt-substrate-img-none"
+          fi
+          echo "key=${KEY}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore substrate image tarball from cache
+        id: substrate_cache_restore
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/gt-substrate.tar.gz
+          key: ${{ steps.substrate_cache_key.outputs.key }}
+
+      - name: GT substrate proof (handoff §B-AFTER/§D/§G) — pre-agent, pinned, read-only repo
+        continue-on-error: true
+        env:
+          GT_MATRIX_TASK: ${{ matrix.task }}
+          GT_MATRIX_IMAGE: ${{ matrix.image }}
+          GT_MATRIX_LANGUAGE: ${{ matrix.language }}
+          GT_INPUTS_ASSETS_REPO: ${{ inputs.assets_repo }}
+          GT_GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+          GT_GITHUB_SHA: ${{ github.sha }}
+          GT_PROOF_HARNESS: deepswe
+        run: bash scripts/ci/substrate_proof.sh
+        # ^^ Inline shell code was extracted to scripts/ci/substrate_proof.sh to stay
+        # under GHA's 21,000-character expression limit. All ${{ }} values are passed
+        # as env vars above; the script behaviour is identical to the former inline block.
+
+      - name: Run GT trial
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        # Cert-env handoff (§D): GT_CERT_DIR / GT_HOST_GRAPH_DB / GT_HOST_SRC_ROOT + the cert
+        # paths were written to $GITHUB_ENV by the substrate-proof step and are inherited here;
+        # GT_PROOF_MODE / GT_CONTAINERIZED / GT_RUNTIME_STRATEGY come from the top-level env.
+        # The HOST-SIDE adapter (gt_agent.py witness/brief) consumes the HOST paths READ-ONLY
+        # and emits the §H [GT_META] witness to stdout (captured in trial_output.log).
+        #
+        # ── hole #5: UNCONDITIONAL env passthrough INTO THE TASK CONTAINER ──────────────
+        # The in-container patch (gt_mini_patch.py) runs as part of the mini-swe-agent
+        # PROCESS, which pier launches via `docker compose exec -e KEY=VALUE main ...`. The
+        # GHA top-level env: / $GITHUB_ENV reach ONLY the host runner (pier) — pier does NOT
+        # blanket-forward os.environ into the task container. The VERIFIED forwarding path is
+        # `pier run --ae KEY=VALUE` -> AgentConfig.env (cli/jobs.py:620,629) -> factory
+        # extra_env (agents/factory.py:120) -> agent._extra_env -> build_process_env
+        # (agents/installed/base.py:251-255) -> exec_as_agent(env=) -> environment.exec(env=)
+        # -> DockerEnvironment.exec appends `-e KEY=VALUE` (environments/docker/docker.py:
+        # 679-681). So the consume path is NOT conditional on a launcher that may not set it —
+        # every GT var is forwarded EXPLICITLY here.
+        #
+        # CONTAINER paths, not host paths: gt_mini_patch is INSIDE the container, so the env it
+        # reads must point at /gt_artifacts — the in-container mount target. `--mounts-json`
+        # bind-mounts the host substrate dir (/tmp/gt) -> /gt_artifacts READ-ONLY so the path
+        # the env names actually exists in the container (the substrate graph is the ONE graph;
+        # ro => the in-container patch can never mutate/rebuild it — no divergent reindex).
+        run: |
+          echo "=== DeepSWE GT Trial: ${{ matrix.task }} (model ${{ inputs.model }}) ==="
+          echo "HOST  GT_CERT_DIR=${GT_CERT_DIR:-<unset>}  GT_HOST_GRAPH_DB=${GT_HOST_GRAPH_DB:-<unset>}"
+          echo "GT_PROOF_MODE=${GT_PROOF_MODE:-<unset>}  GT_CONTAINERIZED=${GT_CONTAINERIZED:-<unset>}  GT_SUBSTRATE_DIGEST=${GT_SUBSTRATE_DIGEST:-<unset>}"
+
+          # In-container substrate dir (mount target). The host substrate dir is /tmp/gt
+          # (written by the substrate-proof step); the container sees it as /gt_artifacts:ro.
+          GT_C_ARTIFACTS=/gt_artifacts
+          HOST_ARTIFACTS="${GT_CERT_DIR:-/tmp/gt}"
+          # Transitional no-substrate path (require_pinned_substrate=0): the proof step
+          # exited 0 without creating /tmp/gt — an absent bind source would fail compose.
+          mkdir -p "${HOST_ARTIFACTS}"
+
+          PROOF_STATE=$(python3 - <<'PY'
+          import json, pathlib
+          p = pathlib.Path("/tmp/gt/proof_status.json")
+          if not p.exists():
+              print("missing")
+          else:
+              try:
+                  print(json.loads(p.read_text(encoding="utf-8")).get("state") or "missing")
+              except Exception:
+                  print("invalid")
+          PY
+          )
+          if [ "$PROOF_STATE" != "ok" ]; then
+            echo "GT_RUN_PROOF_FAIL: refusing paid agent run because substrate proof_status state=${PROOF_STATE}" | tee -a trial_output.log
+            exit 1
+          fi
+
+          # SPEED-OPT E: pre-stage all GT files on the host and bind-mount /opt/gt:ro into
+          # the container.  This replaces 30 base64-echo RUN layers (12+ min per task) with
+          # a single host-side cp + a 2-step install (import-chain patch + self-test ~10s).
+          # GT_MOUNT_MODE=1 tells gt_agent._inject_steps() to skip the b64-injection path.
+          # The .pth / default.py writes go into container-internal site-packages — not
+          # /opt/gt — so the :ro mount is correct.
+          HOST_GT_INJECT=/tmp/gt_inject/opt/gt
+          mkdir -p "${HOST_GT_INJECT}"
+          mkdir -p "${HOST_GT_INJECT}/groundtruth"
+          cp artifact_deepswe/gt_mini_patch.py "${HOST_GT_INJECT}/"
+          cp artifact_deepswe/gt_hook.py        "${HOST_GT_INJECT}/" 2>/dev/null || true
+          cp artifact_deepswe/gt_oracle.py      "${HOST_GT_INJECT}/" 2>/dev/null || true
+          cp artifact_deepswe/gt_oracle_sense.py "${HOST_GT_INJECT}/" 2>/dev/null || true
+          cp artifact_deepswe/phase_policy.py   "${HOST_GT_INJECT}/" 2>/dev/null || true
+          # Product packages (groundtruth.{runtime,delivery,pretask}) — the single-source
+          # fact-filter modules gt_mini_patch.py imports at module scope.
+          for pkg in runtime delivery pretask; do
+            if [ -d "src/groundtruth/${pkg}" ]; then
+              mkdir -p "${HOST_GT_INJECT}/groundtruth/${pkg}"
+              cp src/groundtruth/${pkg}/*.py "${HOST_GT_INJECT}/groundtruth/${pkg}/" 2>/dev/null || true
+              touch "${HOST_GT_INJECT}/groundtruth/${pkg}/__init__.py"
+            fi
+          done
+          touch "${HOST_GT_INJECT}/groundtruth/__init__.py"
+          echo "GT inject staged: $(find "${HOST_GT_INJECT}" -name '*.py' | wc -l) Python files"
+
+          # Bind-mount the host substrate dir into the task container READ-ONLY. JSON is the
+          # pier --mounts-json contract (ServiceVolumeConfig: type/source/target/read_only).
+          # FIX 3 (2026-06-11): a SECOND, WRITABLE mount (/tmp/gt_out -> /gt_out) carries the
+          # oracle's 8-dp suppression telemetry (GT_ORACLE_EVENTS) out of the task container —
+          # it was written to the in-container /tmp and lost on every prior run. chmod 777:
+          # the task-image user is arbitrary and must be able to append.
+          # SPEED-OPT E: THIRD mount — /tmp/gt_inject/opt/gt -> /opt/gt:ro (pre-staged GT files).
+          HOST_GT_OUT=/tmp/gt_out
+          mkdir -p "${HOST_GT_OUT}" && chmod 777 "${HOST_GT_OUT}"
+          MOUNTS_JSON="[{\"type\":\"bind\",\"source\":\"${HOST_ARTIFACTS}\",\"target\":\"${GT_C_ARTIFACTS}\",\"read_only\":true},{\"type\":\"bind\",\"source\":\"${HOST_GT_OUT}\",\"target\":\"/gt_out\",\"read_only\":false},{\"type\":\"bind\",\"source\":\"/tmp/gt_inject/opt/gt\",\"target\":\"/opt/gt\",\"read_only\":true}]"
+          echo "CONTAINER mount: ${HOST_ARTIFACTS} -> ${GT_C_ARTIFACTS} (ro); ${HOST_GT_OUT} -> /gt_out (rw); /tmp/gt_inject/opt/gt -> /opt/gt (ro)"
+          echo "mounts-json: ${MOUNTS_JSON}"
+
+          # BUG#1+#2 FIX (single-source de-drift): source the canonical --ae block so the
+          # structural edit-risk axis (GT_VERIFY_STRUCTURAL_RISK / GT_VERIFY_RISK_TRIGGER) and
+          # the FULL deep-telemetry trio (GT_ORACLE_EVENTS + GT_RUNTIME_LEDGER + GT_HOOK_FIRE_COUNTS)
+          # reach the in-container agent. Without it the in-container code DEFAULTS the risk axis
+          # OFF (gt_mini_patch.py:3801) and the ledger/fire-count sinks into the ephemeral
+          # container /tmp (gt_mini_patch.py:3515,3569) where they die with it — the run stayed
+          # green over a DARK lever + LOST telemetry. GT_C_OUT=/gt_out points the block's three
+          # sinks at the writable host mount built above (recovered in Collect). This is the
+          # SAME file codespace_deepswe_run.sh sources -> codespace + full can no longer drift.
+          export GT_C_OUT=/gt_out
+          # shellcheck source=artifact_deepswe/gt_integration/gt_ae_block.sh
+          source artifact_deepswe/gt_integration/gt_ae_block.sh
+          echo "GT_AE_ARGS (block): ${GT_AE_ARGS[*]}"
+
+          # Forward the SUBSTRATE-CONSUME env into the container, pointing at /gt_artifacts.
+          # GT_FORBID_PREBUILT_GRAPH + GT_PORTABLE_SUBSTRATE + GT_PROOF_MODE/GT_CONTAINERIZED
+          # make the in-container pillars consume-or-fail-closed and keep L6 reindex OFF.
+          # P0.1-b: pipefail + ${PIPESTATUS[0]} (the swebench_30task pattern) — without it
+          # `pier ... | tee` returned tee's 0 and a swallowed adapter raise stayed GREEN.
+          set +e
+          set -o pipefail
+          # Model routing: if the input model contains "MiniMax" or "tokenrouter",
+          # set litellm's OpenAI-compatible env so it routes through TokenRouter.
+          # Otherwise deepseek/other models use their native litellm provider.
+          INPUT_MODEL="${{ inputs.model }}"
+          if echo "$INPUT_MODEL" | grep -qiE "minimax|tokenrouter"; then
+            export OPENAI_API_KEY="${TOKENROUTER_API_KEY}"
+            export OPENAI_API_BASE="${TOKENROUTER_API_BASE}"
+            # litellm OpenAI-compatible: prefix with openai/ if not already
+            if ! echo "$INPUT_MODEL" | grep -q "^openai/"; then
+              INPUT_MODEL="openai/${INPUT_MODEL}"
+            fi
+            echo "=== Model routed via TokenRouter: $INPUT_MODEL ==="
+          fi
+          # [OOM FIX 2026-06-16] RESMON ground truth (run 27650378892, expr): the GT HOST
+          # process balloons mem=2.8->15.3GB in ~100s during the agent phase (containers=0,
+          # disk 79GB free) and OOM-kills the 16GB runner -> exit 143, VM reclaimed, the
+          # if:always() upload never runs -> total_count=0, no trajectory. It is a HOST-process
+          # OOM, NOT a container OOM (so the F4 container cap does not reach it). Add swap from
+          # the ample free disk so the working set pages out instead of triggering the host
+          # OOM-killer; the runner then survives to upload the trajectory. Infra band-aid only —
+          # the PROPER fix is capping the agent-phase semantic encode (graph_localizer, the same
+          # class as the 2026-06-09 brief cap). Generalized, every task; no benchmark shape.
+          if ! swapon --show 2>/dev/null | grep -q /gt_swap; then
+            FREE_GB=$(df --output=avail -BG / | tail -1 | tr -dc '0-9')
+            if [ "${FREE_GB:-0}" -ge 35 ]; then
+              sudo fallocate -l 8G /gt_swap 2>/dev/null || sudo dd if=/dev/zero of=/gt_swap bs=1M count=8192 status=none 2>/dev/null
+              sudo chmod 600 /gt_swap 2>/dev/null && sudo mkswap /gt_swap >/dev/null 2>&1 && sudo swapon /gt_swap 2>/dev/null \
+                && echo "[OOMFIX] bounded 8G swap enabled; $(free -m | grep -i swap)" \
+                || echo "[OOMFIX] swap setup failed (continuing without it)"
+            else
+              echo "[OOMFIX] skip swap: only ${FREE_GB:-0}GB free, preserving disk for artifacts"
+            fi
+          fi
+          # [DIAG 2026-06-13] Resource monitor — stream RAM/disk/container-count to the GHA log
+          # every 8s so the LAST reading before a runner-reclaim (exit 143) reveals whether the
+          # agent phase OOMs (RAM near cap) or fills the runner disk on heavy tasks (arktype/arcane).
+          ( while true; do
+              echo "[RESMON] $(date +%T)" \
+                "$(free -m 2>/dev/null | awk '/Mem:/{printf "mem=%d/%dMB", $3,$2}')" \
+                "$(df -m / 2>/dev/null | awk 'NR==2{printf "disk_used=%d/%dMB free=%dMB", $3,$2,$4}')" \
+                "containers=$(docker ps -q 2>/dev/null | wc -l | tr -d ' ')"
+              sleep 8
+            done ) &
+          _RESMON_PID=$!
+          trap 'kill "$_RESMON_PID" 2>/dev/null' EXIT
+          pier run \
+            -p deepswe-bench/tasks/${{ matrix.task }} \
+            --agent-import-path artifact_deepswe.gt_agent:GTMiniSweAgent \
+            --model "$INPUT_MODEL" \
+            --env docker \
+            -y \
+            --mounts-json "${MOUNTS_JSON}" \
+            --ae GT_HOST_GRAPH_DB="${GT_C_ARTIFACTS}/graph.db" \
+            --ae GT_CERT_DIR="${GT_C_ARTIFACTS}" \
+            --ae GT_HOST_SRC_ROOT="${GT_C_ARTIFACTS}/src" \
+            --ae GT_PORTABLE_SUBSTRATE="1" \
+            --ae GT_FORBID_PREBUILT_GRAPH="1" \
+            --ae GT_PROOF_MODE="${GT_PROOF_MODE:-1}" \
+            --ae GT_CONTAINERIZED="1" \
+            --ae GT_RUNTIME_STRATEGY="${GT_RUNTIME_STRATEGY:-unified_substrate}" \
+            --ae GT_STEP_LIMIT="${GT_STEP_LIMIT:-}" \
+            --ae GT_VERIFICATION_CYCLE_COST="${GT_VERIFICATION_CYCLE_COST:-}" \
+            --ae GT_SELF_VERIFY_ATTEMPTS="${GT_SELF_VERIFY_ATTEMPTS:-}" \
+            --ae GT_MOUNT_MODE="1" \
+            "${GT_AE_ARGS[@]}" \
+            --ae GT_ESC_ADV_TCOV="${GT_ESC_ADV_TCOV:-}" \
+            --ae GT_ESC_ADV_B="${GT_ESC_ADV_B:-}" \
+            --ae GT_ESC_URG_TCOV="${GT_ESC_URG_TCOV:-}" \
+            --ae GT_ESC_URG_B="${GT_ESC_URG_B:-}" \
+            --ae GT_ESC_GATE_TCOV="${GT_ESC_GATE_TCOV:-}" \
+            --ae GT_ESC_GATE_KV="${GT_ESC_GATE_KV:-}" \
+            --ae GT_ORACLE_EVENTS="${GT_C_OUT}/gt_oracle_events.jsonl" \
+            --ae GT_RUNTIME_LEDGER="${GT_C_OUT}/gt_runtime_ledger.jsonl" \
+            --ae GT_HOOK_FIRE_COUNTS="${GT_C_OUT}/gt_hook_fire_counts.json" \
+            --ak config_file=artifact_deepswe/gt_integration/deepswe_gt_pier.yaml \
+            2>&1 | tee trial_output.log
+          PIER_RC=${PIPESTATUS[0]}
+          set -e
+          echo "=== Trial complete (pier rc=$PIER_RC) ==="
+          # P0.1-b: pier SWALLOWS adapter exceptions into result files (exception_message in
+          # jobs/<ts>/<task>__*/result.json) — a DeepSweAdapterError can end the run with
+          # pier rc=0. Surface it: any DeepSweAdapterError in the jobs dir or the trial log
+          # fails the step with the DEEPSWE_ADAPTER_FAIL class (the witness step + the
+          # outcome classifier both key on that marker -> class GT, never silent green).
+          if ! python3 scripts/swebench/adapter_error_scan.py jobs trial_output.log; then
+            echo "DEEPSWE_ADAPTER_FAIL: adapter error found via structured result.json scan" | tee -a trial_output.log
+            exit 1
+          fi
+          # F4: AGENT-CONTAINER OOM is now a CLASSIFIED capacity kill, not a silent host
+          # SIGKILL. The agent container is memory-capped symmetrically to the proof
+          # container (pier compose mem_limit/memswap_limit == ${MEMORY}, honored by
+          # `docker compose up` WITHOUT --compatibility — the Swarm-only deploy.resources
+          # .limits key was a DEAD key). A runaway in the agent process now OOM-kills the
+          # CONTAINER (exit 137 == 128+SIGKILL) instead of being swap-deferred into a host
+          # OOM. Mirror the proof container's PROOF_RC=137 -> GT_PROOF_OOM handling: detect
+          # 137 from pier's rc OR the container exit recorded in the trial log / job results
+          # (pier may surface the in-container kill via result.json rather than its own rc),
+          # and classify it GT_AGENT_OOM so the outcome classifier sees a capacity kill, not
+          # a generic PIER_RUN_FAIL. The cap is the same fixed bound for every task.
+          # Correct-or-quiet: the rc=137 check catches pier's own OOM; the grep fallback
+          # keys ONLY on docker-container-OOM-specific markers (OOMKilled / exit code 137),
+          # never the bare 'SIGKILL'/'signal: killed' tokens — those can legitimately appear
+          # in a CLEAN run's tee'd trajectory (test output, dmesg reads) and would FALSE-POSITIVE
+          # a resolved task into INFRA, silently dropping it from the denominator (the worst
+          # direction for flip measurement; the proof-container branch keys on rc=137 alone).
+          if [ "$PIER_RC" -eq 137 ] || grep -qE "OOMKilled|exit code 137|exited with code 137" trial_output.log; then
+            echo "GT_AGENT_OOM: agent container hit the memory cap (rc/exit=137 — capacity kill, not logic)." | tee -a trial_output.log
+          elif [ "$PIER_RC" -ne 0 ]; then
+            echo "PIER_RUN_FAIL: pier run exited rc=$PIER_RC (agent crashed — artifacts will be captured)" | tee -a trial_output.log
+          fi
+          # NEVER exit 1 from trial — Collect/Upload MUST run to capture partial artifacts.
+
+      - name: Verify DeepSWE adapter witness (§E DEEPSWE_ADAPTER_FAIL / §H consumption proof)
+        continue-on-error: true
+        if: ${{ !cancelled() && env.GT_PORTABLE_SUBSTRATE == '1' }}
+        run: |
+          # AGENT-OBSERVATION truth: the adapter emitted a [GT_META] witness to stdout. Prove
+          # (1) it consumed the substrate graph (gt_prebuilt_active=true) and (2) the consumed
+          # graph fingerprints to the substrate's post-LSP hash (hook_graph_hash_matches_post_lsp=True).
+          # Any error=DEEPSWE_ADAPTER_FAIL or a hash mismatch fails the task (no silent degrade).
+          if grep -q "error=DEEPSWE_ADAPTER_FAIL" trial_output.log; then
+            echo "DEEPSWE_ADAPTER_FAIL: the adapter failed to wire/consume the substrate artifacts:"
+            grep "DEEPSWE_ADAPTER_FAIL" trial_output.log | head -5
+            exit 1
+          fi
+          if ! grep -q "gt_prebuilt_active=true" trial_output.log; then
+            echo "GT_ARTIFACT_NOT_CONSUMED: no [GT_META] witness with gt_prebuilt_active=true — the"
+            echo "adapter did not consume the substrate graph (delivery, not telemetry)."
+            grep "\[GT_META\]" trial_output.log | head -5 || echo "(no [GT_META] line at all)"
+            exit 1
+          fi
+          if grep -q "hook_graph_hash_matches_post_lsp=False" trial_output.log; then
+            echo "GRAPH_FAIL_HASH_MISMATCH: hook_graph_hash != graph_hash_after_lsp — the consumed"
+            echo "graph diverges from the substrate's LSP-resolved graph."
+            grep "hook_graph_hash_matches_post_lsp" trial_output.log | head -3
+            exit 1
+          fi
+          echo "adapter witness OK: substrate graph consumed read-only; hook hash == post-LSP hash"
+          grep "\[GT_META\] graph_witness" trial_output.log | head -2 || true
+
+      - name: Cleanup runner disk before result collection
+        if: always()
+        run: |
+          echo "disk before cleanup:"; df -h /
+          docker rm -f gtsrc 2>/dev/null || true
+          docker system prune -af --volumes 2>/dev/null || true
+          sudo swapoff /gt_swap 2>/dev/null || true
+          sudo rm -f /gt_swap 2>/dev/null || true
+          rm -f /tmp/gt-substrate.tar.gz /tmp/docker.tgz /tmp/deepswe-bench.tar.gz 2>/dev/null || true
+          echo "disk after cleanup:"; df -h /
+
+      - name: Collect results
+        if: always()
+        run: |
+          mkdir -p trial_results trial_results/gt_artifacts
+          cp trial_output.log trial_results/ 2>/dev/null || true
+          cp /tmp/gt/graph.db trial_results/graph.db 2>/dev/null || true
+          # §F.10 — upload the 8 GT artifacts the substrate emitted (the proof set, incl.
+          # brief.txt + per-language LSP certs), even on task failure. graph.db is already
+          # copied above; mirror the certs + manifests + brief.
+          for a in runtime_context.json lsp_certificate.json graph_certificate.json \
+                   embedder_certificate.json foundational_gate_report.json run_manifest.json \
+                   brief.txt gt_issue_anchors.json gt_scope_files.txt gt_lsp_metrics.txt \
+                   proof_progress.json proof_failure.json proof_status.json dep_store_manifest.json; do
+            cp "/tmp/gt/$a" "trial_results/gt_artifacts/$a" 2>/dev/null || true
+          done
+          # P1-e: per-language LSP certificates (polyglot aggregation — no FAIL cert overwritten)
+          cp /tmp/gt/lsp_certificate_*.json trial_results/gt_artifacts/ 2>/dev/null || true
+          # The EXACT issue text the substrate ran with (§4 audit: what GT was given —
+          # mirrors verified_run.yml's issue.txt upload).
+          cp /tmp/issue.txt trial_results/gt_artifacts/issue.txt 2>/dev/null || true
+          cp /tmp/gt/issue_manifest.json trial_results/gt_artifacts/issue_manifest.json 2>/dev/null || true
+          cp /tmp/gt/delivered_instruction.txt trial_results/ 2>/dev/null || true
+          cp /tmp/gt/adapter_witness.json trial_results/adapter_witness.json 2>/dev/null || true
+          cp /tmp/gt/obligation_status.json trial_results/obligation_status.json 2>/dev/null || true
+          cp /tmp/gt/run_provenance.json trial_results/gt_artifacts/run_provenance.json 2>/dev/null || true
+          # FIX 2026-06-16: task_truth reads the runtime witness ([GT_META] gt_prebuilt_active +
+          # hook_graph_hash_matches_post_lsp) ONLY from $GT_TRIAL_LOG (task_truth.py:293). Without
+          # it, build_signal_record sees no witness -> reconcile_graph_handoff keeps the FALSE
+          # GRAPH_FAIL_MISSING_HANDOFF (the pre-agent cert) and reconciled_substrate_verdict.json
+          # wrongly stamps outcome_failure_class=GT, contradicting the (correct) outcome authority.
+          # trial_output.log (tee'd by the agent step, carries the post-agent [GT_META]) is at CWD.
+          GT_TRIAL_LOG=trial_output.log python3 scripts/swebench/task_truth.py jobs trial_results/task_truth.json 2>/dev/null || true
+          if [ -d jobs ]; then
+            mkdir -p trial_results/jobs
+            find jobs -type f \( -name 'result.json' -o -name 'patch.diff' -o -name '*.patch' -o -name '*.trajectory.json' -o -name '*.json' -o -name '*.log' \) -size -25M -print0 \
+              | xargs -0 -r cp --parents -t trial_results/jobs 2>/dev/null || true
+          fi
+          cp /tmp/gt/*.log              trial_results/ 2>/dev/null || true
+          cp /tmp/gt/gt_interactions*.jsonl trial_results/ 2>/dev/null || true
+          cp /tmp/gt/gt_hooks*.log      trial_results/ 2>/dev/null || true
+          # FIX 3 (2026-06-11): harvest the oracle gate's 8-dp suppression telemetry
+          # (written in-container to the writable /gt_out mount = host /tmp/gt_out).
+          cp /tmp/gt_out/gt_oracle_events.jsonl trial_results/gt_oracle_events_${{ matrix.task }}.jsonl 2>/dev/null || true
+          # BUG#2 FIX: harvest the FULL deep-telemetry trio the gt_ae_block.sh single-source
+          # now points at /gt_out (runtime ledger + per-hook fire counts). Without this they
+          # were lost with the ephemeral container (gt_mini_patch.py:3515,3569 default /tmp/*).
+          # WARN loudly on a zero harvest so a silently-empty mount can't leave the run green.
+          _gt_telemetry_recovered=0
+          for _f in gt_runtime_ledger.jsonl gt_hook_fire_counts.json; do
+            if [ -s "/tmp/gt_out/$_f" ]; then
+              cp "/tmp/gt_out/$_f" "trial_results/${_f%.*}_${{ matrix.task }}.${_f##*.}" 2>/dev/null \
+                && _gt_telemetry_recovered=$((_gt_telemetry_recovered + 1))
+            fi
+          done
+          [ -s /tmp/gt_out/gt_oracle_events.jsonl ] && _gt_telemetry_recovered=$((_gt_telemetry_recovered + 1))
+          if [ "$_gt_telemetry_recovered" -eq 0 ]; then
+            echo "WARN: 0/3 deep-telemetry sinks recovered from /tmp/gt_out — in-container 8-dp" \
+                 "producers wrote nothing (check the /gt_out mount is writable to the task uid)."
+          else
+            echo "deep-telemetry: recovered ${_gt_telemetry_recovered}/3 sink(s) from /tmp/gt_out"
+          fi
+          # Deep 8-dp metrics (constitution mandate: token/cost efficiency + per-layer)
+          cp /tmp/gt/gt_run_summary*.json /tmp/gt_run_summary_${{ matrix.task }}.json 2>/dev/null || true
+          cp /tmp/gt/gt_run_summary*.json trial_results/ 2>/dev/null || true
+          PYTHONPATH=${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:${{ github.workspace }}/scripts/metrics python3 scripts/swebench/gt_deep_metrics.py "${{ matrix.task }}" /tmp/gt --log trial_output.log 2>&1 | tail -2 || echo DEEP_METRICS_WARN
+          cp /tmp/gt_deep_metrics_${{ matrix.task }}.json trial_results/ 2>/dev/null || true
+          cp /tmp/gt_deep_metrics_${{ matrix.task }}.md   trial_results/ 2>/dev/null || true   # human-readable: steps/tokens/money/GT-delivery
+          # Explicit artifact files for performance and behavioral-impact metrics.
+          # gt_deep_metrics.py already imports these internally, but producing explicit
+          # per-task artifact files makes them independently verifiable without parsing
+          # the deep metrics blob.
+          PYTHONPATH=${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench python3 scripts/swebench/gt_performance_metrics.py "$(find trial_results -name '*.trajectory.json' | head -1)" /tmp/gt --out trial_results/gt_performance_metrics_${{ matrix.task }}.json 2>&1 | tail -2 || echo PERF_METRICS_WARN
+          PYTHONPATH=${{ github.workspace }}/scripts/swebench python3 scripts/swebench/gt_behavioral_impact.py "$(find trial_results -name '*.trajectory.json' | head -1)" --out trial_results/gt_behavioral_impact_${{ matrix.task }}.json 2>&1 | tail -2 || echo IMPACT_METRICS_WARN
+          # Run provenance on the DeepSWE path: the REAL provenance manifest is
+          # run_manifest.json (emitted by gt-run-proof inside the substrate; copied into
+          # trial_results/gt_artifacts/ above — gt_git_commit / substrate_digest /
+          # task_repo_commit / runtime_flags / language_distribution / graph_db_sha256 /
+          # cert_versions). The old gt_legitimacy_manifest_*.json copy was DEAD — no
+          # DeepSWE step ever wrote it (scripts/verify/legitimacy.py is OH-path only).
+          # Plus a small per-job provenance file: bench clone SHA + GT commit + digest.
+          python3 -c "import json,os;json.dump({'schema':'gt.deepswe_run_provenance.v1','task':'${{ matrix.task }}','deepswe_bench_sha':os.environ.get('GT_DEEPSWE_BENCH_SHA') or None,'gt_git_commit':os.environ.get('GITHUB_SHA') or None,'substrate_digest':os.environ.get('GT_SUBSTRATE_DIGEST') or None,'workflow_run_id':os.environ.get('GITHUB_RUN_ID') or None,'workflow_run_attempt':os.environ.get('GITHUB_RUN_ATTEMPT') or None},open('trial_results/gt_artifacts/run_provenance.json','w'),indent=2)" \
+            || echo "WARN: run_provenance.json write failed"
+          # Outcome classification (INFRA > GT > RESOLVED > AGENT) — PERSISTED as
+          # outcome.json in the artifact (GT_DEEPSWE_OUTCOME_JSON), not just printed:
+          # the summarize job + the §4/§5 audit consume the machine-readable record.
+          GT_TRIAL_LOG=trial_output.log GT_CERT_DIR=/tmp/gt \
+            GT_DEEPSWE_OUTCOME_JSON=trial_results/outcome.json \
+            python3 scripts/verify/deepswe_outcome.py jobs || echo "WARN: outcome extract failed"
+          find trial_results -type f 2>/dev/null | head -40 || true
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deepswe-full-${{ matrix.task }}
+          path: trial_results/
+          retention-days: 30
+          if-no-files-found: warn
+
+  summarize:
+    # prepare is in needs so its outputs (total, bench_sha) are guaranteed in the needs
+    # context here (GHA populates needs.<job> only for DIRECT dependencies).
+    needs: [prepare, trial]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/all
+          pattern: deepswe-full-*
+      - name: Aggregate DeepSWE benchmark results
+        run: |
+          echo "## DeepSWE full benchmark — ${{ needs.prepare.outputs.total }} tasks" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          # Run provenance (Stage-5): which code produced this run.
+          echo "**Provenance** — GT commit: \`${{ github.sha }}\` | deepswe-bench clone SHA: \`${{ needs.prepare.outputs.bench_sha }}\` | substrate digest: \`${GT_SUBSTRATE_DIGEST:-<unset>}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Per-task: \`gt_artifacts/run_manifest.json\` (gt_git_commit / substrate_digest / task_repo_commit / runtime_flags / language_distribution / graph_db_sha256 / cert_versions) + \`gt_artifacts/run_provenance.json\` (per-job bench SHA)." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          # P0.1-d: parse the n_agent_steps VALUE and require >0. The old check counted the
+          # mere PRESENCE of the token "AGENT_RAN_STEPS|n_agent_steps" — a 0-step / None /
+          # UNKNOWN launch failure carries the token too, so a whole-run launch outage still
+          # summarized as "agent-ran" (the green-zero-run chain). Numeric-only match:
+          # AGENT_RAN_STEPS=None / =UNKNOWN do NOT parse; absent or ==0 counts as launch-fail.
+          RAN=0; TOTAL=0; LAUNCH_FAIL=0
+          for d in /tmp/all/deepswe-full-*; do
+            [ -d "$d" ] || continue
+            TOTAL=$((TOTAL+1))
+            STEPS=$(grep -rhoE "AGENT_RAN_STEPS=[0-9]+" "$d" 2>/dev/null | head -1 | grep -oE "[0-9]+$" || true)
+            if [ -z "$STEPS" ]; then
+              STEPS=$(grep -rhoE '"n_agent_steps"[[:space:]]*:[[:space:]]*[0-9]+' "$d" 2>/dev/null | head -1 | grep -oE "[0-9]+$" || true)
+            fi
+            if [ -n "$STEPS" ] && [ "$STEPS" -gt 0 ]; then
+              RAN=$((RAN+1))
+            else
+              LAUNCH_FAIL=$((LAUNCH_FAIL+1))
+              echo "launch-fail (n_agent_steps=${STEPS:-absent}): $(basename "$d")"
+            fi
+          done
+          echo "Artifacts collected: $TOTAL  |  agent-ran (n_agent_steps>0 PARSED): $RAN  |  launch-fail (steps 0/absent): $LAUNCH_FAIL" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+      - name: Classification tally (INFRA > GT > RESOLVED > AGENT, infra-excluded denominator)
+        run: |
+          # Aggregate the per-task outcome.json records the Collect step persisted.
+          # Same denominator rule as scripts/verify/deepswe_outcome.py (imported, not
+          # re-implemented): INFRA/UNKNOWN excluded; resolved_rate at 8-dp.
+          python3 << 'PYEOF' >> "$GITHUB_STEP_SUMMARY"
+          import glob, json, sys
+          sys.path.insert(0, "scripts/verify")
+          from deepswe_outcome import tally_classes
+          recs, missing = [], []
+          for d in sorted(glob.glob("/tmp/all/deepswe-full-*")):
+              task = d.split("deepswe-full-", 1)[-1]
+              try:
+                  with open(f"{d}/outcome.json", encoding="utf-8") as f:
+                      recs.extend(json.load(f).get("tasks") or [])
+              except (OSError, ValueError):
+                  missing.append(task)
+          t = tally_classes(recs)
+          print("### Outcome classification (per-task `outcome.json`)")
+          print()
+          print("| class | count |")
+          print("|---|---:|")
+          for k in ("RESOLVED", "AGENT", "GT", "INFRA", "UNKNOWN"):
+              print(f"| {k} | {t['counts'].get(k, 0)} |")
+          print()
+          print(f"**resolved_rate = {t['resolved_rate']}** over denominator "
+                f"{t['denominator_excluding_infra']} (INFRA/UNKNOWN excluded: "
+                f"{t['excluded_from_denominator']})")
+          if missing:
+              print()
+              print(f"outcome.json MISSING for {len(missing)} task(s) (job died before "
+                    f"Collect — triage in the per-task artifact): {', '.join(missing[:10])}"
+                    + (" ..." if len(missing) > 10 else ""))
+          PYEOF
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Per-task detail: \`outcome.json\` (classification) + \`gt_deep_metrics_<task>.json\` (8-dp) + \`gt_artifacts/\` (8-artifact proof set incl. brief.txt + issue.txt) + \`jobs/\` (trajectory + verifier) inside each \`deepswe-full-<task>\` artifact." >> "$GITHUB_STEP_SUMMARY"
+          echo "Pull any task MID-RUN once its job finishes: \`gh run download <run_id> -n deepswe-full-<task> -R <owner>/groundtruth\`." >> "$GITHUB_STEP_SUMMARY"

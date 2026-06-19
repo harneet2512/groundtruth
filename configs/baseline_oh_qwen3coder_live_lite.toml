@@ -1,0 +1,90 @@
+# Baseline-family calibration config for:
+#   SWE-bench-Live/OpenHands fork @ f4da691c  +  Vertex AI MaaS Qwen3-Coder-480B-A35B
+#
+# This file pins the behavior-changing knobs that define the baseline family.
+# Operational knobs (num_workers, shard layout, OUTDIR) live in scripts/runners, not here.
+#
+# IS:     infra validation + baseline-family calibration + cost/runtime estimate
+# IS NOT: proof of reproducing the 24.67% leaderboard row (snapshot divergence)
+#
+# Corresponding OpenHands config.toml block (written verbatim on the runner into
+# $OH/config.toml, where $OH is the SWE-bench-Live/OpenHands fork checkout):
+#
+#   [llm.qwen3_coder_vertex]
+#   model = "vertex_ai/qwen/qwen3-coder-480b-a35b-instruct-maas"
+#   temperature = 0.0
+#   top_p = 1.0
+#   max_output_tokens = 8192
+#   native_tool_calling = true
+#   caching_prompt = false
+#   drop_params = true
+#   num_retries = 5
+#   timeout = 300
+
+[baseline_family]
+# Behavior-changing knobs. Changing any of these invalidates a later GT A/B delta.
+harness_repo         = "https://github.com/SWE-bench-Live/OpenHands.git"
+harness_commit       = "f4da691c"
+agent_class          = "CodeActAgent"
+dataset              = "SWE-bench-Live/SWE-bench-Live"
+split                = "lite"
+max_iterations       = 100
+samples_per_instance = 1
+evaluator_repo       = "https://github.com/microsoft/SWE-bench-Live.git"
+evaluator_branch     = "python-only"
+evaluator_namespace  = "starryzhang"
+
+[llm]
+# LLM block OpenHands consumes. Keep aligned with the OH config.toml written on the runner.
+section              = "llm.qwen3_coder_vertex"
+model                = "vertex_ai/qwen/qwen3-coder-480b-a35b-instruct-maas"
+temperature          = 0.0
+top_p                = 1.0
+max_output_tokens    = 8192
+native_tool_calling  = true
+caching_prompt       = false
+drop_params          = true
+num_retries          = 5
+timeout              = 300
+
+[vertex]
+# Regions are CANDIDATES. Final region is decided by preflight evidence and written to
+# $OUTDIR/preflight/region_decision.json. Do NOT hard-code a winner here.
+candidate_regions    = ["us-south1", "global"]
+auth_mode            = "service_account_json"
+auth_env_var         = "GOOGLE_APPLICATION_CREDENTIALS"
+
+[manifest]
+# 20-task deterministic sample.
+path                 = "benchmarks/swebench/cal20_live_lite_oh.txt"
+manifest_path        = "benchmarks/swebench/cal20_live_lite_oh.manifest.json"
+seed                 = 42
+n                    = 20
+
+[pricing]
+# Anchor: Portkey + two aggregators agree at $0.22 / $1.80 (USD per 1M tokens).
+# Dissent: cloudprice.net lists $1.00 / $4.00 online. Flagged as a pricing-risk item;
+# preflight verifies against a test call and GCP billing.
+input_usd_per_mtok_anchor       = 0.22
+output_usd_per_mtok_anchor      = 1.80
+cached_input_usd_per_mtok       = 0.02
+input_usd_per_mtok_worstcase    = 1.00
+output_usd_per_mtok_worstcase   = 4.00
+
+[smoke]
+# Strict health gate. Any failure = stop, do not scale to 300.
+health_total_instances           = 20
+health_max_empty_patch           = 0
+health_max_malformed_patch       = 0
+health_max_vertex_400            = 0
+health_max_retry_ratio           = 0.05
+health_max_wall_seconds_per_task = 2700  # 45 min
+health_max_steps_per_task        = 100
+
+[smoke.fidelity]
+# Qualitative signal only. Outside the band = investigate, not fail.
+expected_p                       = 0.2467
+sigma_1_band_resolved            = [3, 7]
+sigma_2_band_resolved            = [1, 9]
+median_steps_sane_range          = [10, 60]
+median_input_tokens_sane_range   = [20000, 80000]

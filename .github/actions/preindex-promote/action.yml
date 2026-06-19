@@ -1,0 +1,81 @@
+name: 'Pre-index + Offline LSP Promotion (C6)'
+description: >-
+  Extract /testbed from a task's Docker image, build graph.db offline with
+  gt-index, then run the LSP precision pass (Pyright) to promote ambiguous
+  name_match CALLS edges. Reports before/after name_match counts so yield is
+  measurable. Zero-infra-failure: a pyright miss or resolve timeout WARNs and
+  never fails the job. Exports GT_PREBUILT_GRAPH_DB to $GITHUB_ENV on success.
+
+inputs:
+  task_image:
+    description: 'Docker image to extract /testbed from (e.g. docker.io/starryzhang/sweb.eval.x86_64...:latest)'
+    required: true
+  lang:
+    description: 'Language for the LSP precision pass (groundtruth.resolve --lang)'
+    required: false
+    default: 'python'
+  db_path:
+    description: 'Output path for the pre-built graph.db'
+    required: false
+    default: '/tmp/gt_prebuilt.db'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Pre-index target repo
+      shell: bash
+      env:
+        GT_PREINDEX_IMAGE: ${{ inputs.task_image }}
+        GT_PREINDEX_LANG: ${{ inputs.lang }}
+        GT_PREINDEX_DB: ${{ inputs.db_path }}
+      run: |
+        echo "=== PRE-INDEX: building graph.db for target repo ==="
+        DOCKERHUB_IMAGE="$GT_PREINDEX_IMAGE"
+
+        # Extract /testbed from the task's Docker image
+        CONTAINER_ID=$(docker create "$DOCKERHUB_IMAGE" 2>/dev/null || true)
+        if [ -n "$CONTAINER_ID" ]; then
+          mkdir -p /tmp/testbed_src
+          docker cp "$CONTAINER_ID:/testbed/." /tmp/testbed_src/ 2>/dev/null || echo "WARN: could not copy /testbed"
+          docker rm "$CONTAINER_ID" >/dev/null 2>&1 || true
+
+          # Run gt-index on extracted source
+          if [ -d /tmp/testbed_src ] && [ "$(find /tmp/testbed_src -name '*.py' -o -name '*.js' -o -name '*.ts' -o -name '*.go' -o -name '*.java' -o -name '*.rs' | head -1)" ]; then
+            echo "Indexing /tmp/testbed_src..."
+            /tmp/gt-index -root /tmp/testbed_src -output "$GT_PREINDEX_DB" 2>&1 | tail -5
+            if [ -f "$GT_PREINDEX_DB" ]; then
+              ASSERTIONS=$(sqlite3 "$GT_PREINDEX_DB" "SELECT COUNT(*) FROM assertions WHERE target_node_id > 0" 2>/dev/null || echo 0)
+              TOTAL_ASSERTIONS=$(sqlite3 "$GT_PREINDEX_DB" "SELECT COUNT(*) FROM assertions" 2>/dev/null || echo 0)
+              NODES=$(sqlite3 "$GT_PREINDEX_DB" "SELECT COUNT(*) FROM nodes" 2>/dev/null || echo 0)
+              echo "PRE-INDEX OK: nodes=$NODES assertions=$TOTAL_ASSERTIONS resolved=$ASSERTIONS"
+
+              # LSP precision pass: resolve ambiguous name_match edges via Pyright
+              AMBIGUOUS=$(sqlite3 "$GT_PREINDEX_DB" "SELECT COUNT(*) FROM edges WHERE resolution_method='name_match' AND type='CALLS'" 2>/dev/null || echo 0)
+              echo "Ambiguous edges before LSP: $AMBIGUOUS"
+              if [ "$AMBIGUOUS" -gt 0 ] && pip install pyright 2>/dev/null; then
+                echo "Running LSP precision pass..."
+                timeout 120 python -m groundtruth.resolve --db "$GT_PREINDEX_DB" --root /tmp/testbed_src --resolve --lang "$GT_PREINDEX_LANG" 2>&1 | tail -20 || echo "WARN: LSP resolve failed (non-fatal)"
+                REMAINING=$(sqlite3 "$GT_PREINDEX_DB" "SELECT COUNT(*) FROM edges WHERE resolution_method='name_match' AND type='CALLS'" 2>/dev/null || echo 0)
+                echo "Ambiguous edges after LSP: $REMAINING (was $AMBIGUOUS)"
+              else
+                echo "Skipping LSP pass (no ambiguous edges or pyright unavailable)"
+              fi
+
+              echo "GT_PREBUILT_GRAPH_DB=$GT_PREINDEX_DB" >> "$GITHUB_ENV"
+
+              # Surface C6 promotion yield + C7 closure (non-fatal) so a silently
+              # un-promoted db (pyright miss / resolve timeout swallowed above) is
+              # VISIBLE in logs, not benign. See RUNTIME_FUCKUPS.md (RF-1/RF-2).
+              python3 "$GITHUB_WORKSPACE/scripts/verify/preflight_delivery_layer.py" \
+                "$GT_PREINDEX_DB" --lsp-report --closure \
+                || echo "WARN: delivery-layer preflight flagged an issue (non-fatal; see RUNTIME_FUCKUPS.md)"
+            else
+              echo "WARN: gt-index produced no output"
+            fi
+          else
+            echo "WARN: no source files found in /testbed"
+          fi
+          rm -rf /tmp/testbed_src
+        else
+          echo "WARN: could not create container from $DOCKERHUB_IMAGE"
+        fi

@@ -1,0 +1,29 @@
+{
+  "trajectory": [
+    {
+      "action": "str_replace_editor str_replace /testbed/src/foo.py --old_str 'a' --new_str 'b'",
+      "thought": "Edit with None evidence.",
+      "state": {"gt_evidence": null}
+    },
+    {
+      "action": "str_replace_editor create /testbed/src/bar.py --file_text 'hello'",
+      "thought": "Edit with empty-dict state-evidence.",
+      "state": {"gt_evidence": {}}
+    },
+    {
+      "action": "str_replace_editor insert /testbed/src/baz.py --insert_line 5 --new_str 'pass'",
+      "thought": "Edit with state itself missing.",
+      "state": null
+    },
+    {
+      "action": "execute_bash",
+      "thought": "Plumbing.",
+      "observation": "ls"
+    },
+    {
+      "action": "execute_bash",
+      "thought": "Plumbing.",
+      "observation": "ls"
+    }
+  ]
+}

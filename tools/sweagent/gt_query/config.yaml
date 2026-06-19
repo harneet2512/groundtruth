@@ -1,0 +1,15 @@
+tools:
+  gt_query:
+    signature: "gt_query <symbol>"
+    docstring: |
+      Find callers, callees, imports, signature, sibling functions, and tests of a function / class / method using the indexed call graph. PREFER THIS over `grep -r`, `find`, or `rg` for any caller / usage / contract / "who-references-X" / "what-tests-cover-X" question — it is deterministic and complete across the whole repo, while grep is text-only and misses dynamic dispatch. Accepts plain (`parse_date`), qualified (`MyClass.parse_date`, `mod.MyClass.parse_date`), or case-insensitive forms; returns a "did you mean:" hint when the case is ambiguous. Output is tagged [VERIFIED] for same-file / import edges, [POSSIBLE] for name-match, capped at ~30 lines. Reads `graph.db` via `GT_GRAPH_DB`.
+    arguments:
+      - name: symbol
+        type: string
+        description: |
+          Symbol to look up. Plain (`parse_date`), qualified (`MyClass.parse_date`
+          or `module.MyClass.parse_date`), or any-case (`parse_date` —
+          returns a did-you-mean hint if multiple matches). The qualified form
+          is resolved by walking parent_id, so it works even when the indexer
+          left `qualified_name` empty (common on Python rows).
+        required: true

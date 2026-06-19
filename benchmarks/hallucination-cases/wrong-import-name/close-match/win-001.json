@@ -1,0 +1,19 @@
+{
+  "id": "win-001",
+  "category": "wrong-import-name",
+  "subcategory": "close-match",
+  "description": "Typo: 'loign' instead of 'login' (distance 2)",
+  "input": {
+    "code": "import { loign } from './auth';\n\nconst result = await loign(email, password);",
+    "filePath": "src/app.ts",
+    "intent": "authenticate a user with email and password"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "levenshtein",
+    "correctSymbol": "login",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

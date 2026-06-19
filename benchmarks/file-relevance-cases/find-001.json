@@ -1,0 +1,8 @@
+{
+  "id": "find-001",
+  "language": "typescript",
+  "task": "fix getUserById returning null instead of throwing NotFoundError",
+  "entry_symbols": ["getUserById", "NotFoundError"],
+  "expected_files": ["src/users/queries.ts", "src/utils/errors.ts"],
+  "should_not_include": ["src/utils/dates.ts"]
+}

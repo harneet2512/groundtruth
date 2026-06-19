@@ -1,0 +1,19 @@
+{
+  "id": "win-006",
+  "category": "wrong-import-name",
+  "subcategory": "close-match",
+  "description": "Typo: 'comparePasswod' instead of 'comparePassword' (distance 1)",
+  "input": {
+    "code": "import { comparePasswod } from './utils/crypto';\n\nconst match = await comparePasswod(plain, hashed);",
+    "filePath": "src/app.ts",
+    "intent": "compare a plain password against a hash"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "levenshtein",
+    "correctSymbol": "comparePassword",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

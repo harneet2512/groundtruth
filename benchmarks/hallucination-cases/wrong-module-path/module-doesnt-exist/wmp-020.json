@@ -1,0 +1,20 @@
+{
+  "id": "wmp-020",
+  "category": "wrong-module-path",
+  "subcategory": "module-doesnt-exist",
+  "description": "validateEmail imported from nonexistent './lib/validation'",
+  "input": {
+    "code": "import { validateEmail } from './lib/validation';\n\nconst valid = validateEmail(email);",
+    "filePath": "src/app.ts",
+    "intent": "validate email input"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "module_not_found",
+    "fixType": "cross_file_resolution",
+    "correctSymbol": "validateEmail",
+    "correctImport": "src/utils/validation",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

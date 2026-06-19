@@ -1,0 +1,20 @@
+# gt_edit — L3 + L6 GroundTruth state-command bundle for SWE-agent.
+#
+# This bundle declares NO new tools. It hooks into SWE-agent's `state_command`
+# extension point (verified at /home/ubuntu/SWE-agent/sweagent/tools/tools.py:159
+# and /home/ubuntu/SWE-agent/sweagent/tools/bundle.py:14) which runs the named
+# script after every agent action and merges its `/root/state.json` output
+# into the next prompt's Jinja2 context.
+#
+# The state command (`bin/_state_gt_edit`) detects source-file edits by
+# comparing the working-tree git state against a per-instance baseline,
+# fires `gt-index -file` (L6 incremental reindex) and `gt_hook.py` (L3
+# post-edit family brief), and writes the brief into the state dict under
+# the `gt_evidence` key for `{{gt_evidence}}` template substitution.
+#
+# Companion module on host: src/groundtruth/edit_predicates.py — used by
+# downstream harnesses that DO have action-context (OH wrapper port, etc.)
+# and want to call is_source_edit(tool_name, args) directly. Inside SWE-agent
+# we cannot get tool_name/args at state time, so we use git-diff inspection.
+tools: {}
+state_command: "_state_gt_edit"

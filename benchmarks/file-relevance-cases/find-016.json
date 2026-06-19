@@ -1,0 +1,8 @@
+{
+  "id": "find-016",
+  "language": "go",
+  "task": "fix GetUserByID returning nil instead of NotFoundError",
+  "entry_symbols": ["GetUserByID", "NotFoundError"],
+  "expected_files": ["users/queries.go", "utils/errors.go"],
+  "should_not_include": ["utils/dates.go"]
+}

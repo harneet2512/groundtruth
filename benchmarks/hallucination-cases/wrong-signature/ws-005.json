@@ -1,0 +1,17 @@
+{
+  "id": "ws-005",
+  "category": "wrong-signature",
+  "description": "comparePassword() called with 1 arg instead of 2",
+  "input": {
+    "code": "import { comparePassword } from './utils/crypto';\n\nconst match = await comparePassword(password);",
+    "filePath": "src/app.ts",
+    "intent": "compare passwords"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "signature_mismatch",
+    "correctSymbol": "comparePassword",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

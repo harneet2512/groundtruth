@@ -1,0 +1,20 @@
+{
+  "id": "wmp-018",
+  "category": "wrong-module-path",
+  "subcategory": "module-doesnt-exist",
+  "description": "hashPassword imported from nonexistent './helpers/crypto'",
+  "input": {
+    "code": "import { hashPassword } from './helpers/crypto';\n\nconst hashed = await hashPassword(password);",
+    "filePath": "src/app.ts",
+    "intent": "hash a password"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "module_not_found",
+    "fixType": "cross_file_resolution",
+    "correctSymbol": "hashPassword",
+    "correctImport": "src/utils/crypto",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

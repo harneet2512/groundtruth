@@ -1,0 +1,264 @@
+# syntax=docker/dockerfile:1
+# =============================================================================
+# GT SUBSTRATE IMAGE — the agent-with-GT's library closure, containerized.
+# rebuild 2026-06-09T2245: bake the 4 fixer surfaces (9bf106ca pipeline+gates / dc5844f8 localization / ffc6c7dc delivery / 10368a2f indexer)
+# -----------------------------------------------------------------------------
+# WHY: the baseline (GT off) is reliable because the SWE-bench-Live eval image
+# guarantees the TASK's libraries (python + repo deps + test runner). GT-on adds a
+# second closure — gt-index(FTS5), pyright+pydantic, onnxruntime+tokenizers+e5,
+# numpy+pipeline — and today those are pip-installed per job, so they silently go
+# missing (gt_trial §1.5) and the gates run split across host/image (conan's
+# sem_count=0). This image makes GT's closure a guaranteed dependency the SAME way
+# the eval image guarantees the task's: it is BUILT ONCE here, on the SAME base as
+# the eval images (Ubuntu 20.04 / glibc 2.31), so everything in /opt/gt runs,
+# unchanged, INSIDE any eval container. The pipeline copies /opt/gt into the eval
+# container and runs the whole substrate (index -> resolve -> embed -> gates) there,
+# against the repo's own source + deps. No per-job install, no host/image split.
+# /opt/gt is fully self-contained and relocatable: a static gt-index, a portable
+# Python, a bundled Node — none depend on the eval image's interpreter or libs, and
+# none pollute them (so the baseline comparison stays fair).
+# =============================================================================
+
+# ---- stage 1: build everything against the eval-image glibc ----
+FROM ubuntu:20.04 AS build
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl git xz-utils file musl-tools build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Go toolchain (only to build the static, hermetic gt-index)
+ARG GO_VERSION=1.24.4
+RUN curl -fsSL https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz | tar -xz -C /usr/local
+ENV PATH="/usr/local/go/bin:${PATH}"
+
+# (1) STATIC gt-index — musl + FTS5, zero glibc dependency -> runs on ANY base.
+#     Build-stamped via -X main.{commitSHA,buildTimeUTC,goToolchain} (RC-17/F-003,
+#     cmd/gt-index/main.go) so the binary never prints "Toolchain:  unknown" — the
+#     smoke-runner preflight refuses unstamped binaries on paid runs. GT_COMMIT_SHA
+#     is passed by gt_substrate_image.yml (--build-arg GT_COMMIT_SHA=${{ github.sha }}).
+ARG GT_COMMIT_SHA=unknown
+COPY gt-index /src/gt-index
+RUN cd /src/gt-index \
+    && GO_TC="$(go version | cut -d' ' -f3)" \
+    && BUILD_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    && CC=musl-gcc CGO_ENABLED=1 go build -tags 'sqlite_fts5 osusergo netgo' \
+       -ldflags "-linkmode external -extldflags '-static' -X main.commitSHA=${GT_COMMIT_SHA} -X main.buildTimeUTC=${BUILD_TS} -X main.goToolchain=${GO_TC}" \
+       -o /opt/gt/bin/gt-index ./cmd/gt-index/ \
+    && file /opt/gt/bin/gt-index | tee /opt/gt/.gt-index.fileinfo
+
+# (2) Self-contained Python (python-build-standalone, relocatable) + GT runtime deps.
+#     Its own interpreter + wheels => independent of the eval image's python version.
+COPY docker/fetch-python.sh /tmp/fetch-python.sh
+RUN --mount=type=secret,id=github_token bash /tmp/fetch-python.sh   # -> /opt/gt/python
+RUN /opt/gt/python/bin/python3 -m pip install --no-cache-dir --upgrade pip \
+    && /opt/gt/python/bin/python3 -m pip install --no-cache-dir \
+       onnxruntime tokenizers numpy pydantic
+
+# (3) LSP: bundled Node + the GT-SUPPORTED language-server set, baked OFFLINE so the
+#     resolve pass never needs network in-image. The set is the canonical one in
+#     src/groundtruth/lsp/config.py::LSP_SERVERS (NOT "DeepSWE's 5" — that would be
+#     benchmark-shaped). resolve.py spawns EXACTLY these binaries by name:
+#       .py            -> pyright-langserver   (npm, bundled Node)
+#       .ts/.js/.tsx   -> typescript-language-server (npm, bundled Node)
+#       .go            -> gopls               (go install, build-stage toolchain)
+#       .rs            -> rust-analyzer        (prebuilt release binary, gunzip)
+#       .java          -> jdtls               (Eclipse release tarball + bundled JRE)
+#     All land on /opt/gt/... and are reachable via the final image PATH. None need a
+#     runtime toolchain merely to LAUNCH (see HONESTY note: full type-aware go-to-def
+#     for go/rust/ts may still need the TASK build env — a per-language D1 probe item).
+ARG NODE_VERSION=20.16.0
+RUN curl -fsSL https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz \
+      | tar -xJ -C /opt/gt \
+    && mv /opt/gt/node-v${NODE_VERSION}-linux-x64 /opt/gt/node \
+    && export PATH="/opt/gt/node/bin:$PATH" \
+    && npm install -g --prefix /opt/gt/node pyright typescript-language-server typescript \
+    && pyright --version \
+    && typescript-language-server --version
+
+# (3b) gopls — built with the build-stage Go toolchain, installed into /opt/gt/bin.
+#      A static-ish Go binary; launches with no runtime Go toolchain. (Type-aware
+#      go-to-def across packages may still need the task's resolved module cache —
+#      flagged as the Go D1-probe item.)
+ARG GOPLS_VERSION=v0.16.2
+RUN GOBIN=/opt/gt/bin GOFLAGS=-trimpath GOPATH=/tmp/gopath GOTOOLCHAIN=local \
+      go install golang.org/x/tools/gopls@${GOPLS_VERSION} \
+    && rm -rf /tmp/gopath \
+    && /opt/gt/bin/gopls version
+
+# (3c) rust-analyzer + minimal Rust toolchain (cargo + rustc + rust-src for RA).
+#      rust-analyzer needs `cargo metadata` for workspace discovery and rust-src
+#      for stdlib type resolution. Without both, RA returns empty on every query.
+ARG RUST_ANALYZER_VERSION=2026-06-08
+RUN curl -fsSL "https://github.com/rust-lang/rust-analyzer/releases/download/${RUST_ANALYZER_VERSION}/rust-analyzer-x86_64-unknown-linux-gnu.gz" \
+      | gunzip > /opt/gt/bin/rust-analyzer \
+    && chmod +x /opt/gt/bin/rust-analyzer \
+    && /opt/gt/bin/rust-analyzer --version
+# Minimal rustup + stable toolchain with rust-src (for RA stdlib resolution).
+# Task images have their own toolchains — this is the SUBSTRATE's fallback so
+# RA can at least do cargo metadata + stdlib lookups when task deps are mounted.
+ENV RUSTUP_HOME=/opt/gt/rustup CARGO_HOME=/opt/gt/cargo
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --component rust-src --no-modify-path \
+    && /opt/gt/cargo/bin/rustc --version \
+    && /opt/gt/cargo/bin/cargo --version
+
+# (3d) jdtls (Eclipse JDT language server) — the Eclipse JDT.LS product tarball + a
+#      bundled headless JRE, so it LAUNCHES with NO system Java and NO runtime download.
+#      resolve.py spawns the bare `jdtls` name, so /opt/gt/bin/jdtls is a launcher that
+#      invokes the Eclipse Equinox launcher jar directly with the bundled JRE (the
+#      offline-deterministic path — NOT the pip `jdtls` wrapper, which downloads JDT.LS
+#      at runtime and would fail under allow_internet=false). The launcher resolves the
+#      versioned equinox launcher jar + the platform config dir at run, writes its
+#      workspace under a writable tmp dir.
+#      (Full Java type resolution needs the task's compiled classpath / Maven-Gradle deps
+#      — flagged as the Java D1-probe item; bare launch + workspace/symbol still work.)
+ARG JDTLS_VERSION=1.40.0
+ARG JDTLS_TIMESTAMP=202409261450
+# Temurin JRE 21 — the URL path-segment (%2B == '+') and the filename token ('_') are kept
+# as SEPARATE pre-encoded ARGs so the RUN needs NO bash `${var//+/_}` substitution (the
+# Docker default shell is dash, which does not support that expansion).
+ARG JRE_TAG=jdk-21.0.4%2B7
+ARG JRE_FILE_TOKEN=21.0.4_7
+RUN mkdir -p /opt/gt/jdtls /opt/gt/jre \
+    && curl -fsSL "https://download.eclipse.org/jdtls/milestones/${JDTLS_VERSION}/jdt-language-server-${JDTLS_VERSION}-${JDTLS_TIMESTAMP}.tar.gz" \
+       | tar -xz -C /opt/gt/jdtls \
+    && curl -fsSL "https://github.com/adoptium/temurin21-binaries/releases/download/${JRE_TAG}/OpenJDK21U-jre_x64_linux_hotspot_${JRE_FILE_TOKEN}.tar.gz" \
+       | tar -xz -C /opt/gt/jre --strip-components=1 \
+    && printf '%s\n' \
+       '#!/bin/sh' \
+       'JDTLS_HOME=/opt/gt/jdtls' \
+       'JAVA=/opt/gt/jre/bin/java' \
+       'LAUNCHER=$(ls "$JDTLS_HOME"/plugins/org.eclipse.equinox.launcher_*.jar 2>/dev/null | head -1)' \
+       'CONFIG="$JDTLS_HOME/config_linux"' \
+       'WORKSPACE="${JDTLS_WORKSPACE:-/tmp/jdtls-workspace}"' \
+       'mkdir -p "$WORKSPACE"' \
+       'exec "$JAVA" -Declipse.application=org.eclipse.jdt.ls.core.id1 -Dosgi.bundles.defaultStartLevel=4 -Declipse.product=org.eclipse.jdt.ls.core.product -Dosgi.checkConfiguration=true -Dosgi.sharedConfiguration.area="$CONFIG" -Dosgi.sharedConfiguration.area.readOnly=true -Dosgi.configuration.cascaded=true -Xms256m --add-modules=ALL-SYSTEM --add-opens java.base/java.util=ALL-UNNAMED --add-opens java.base/java.lang=ALL-UNNAMED -jar "$LAUNCHER" -configuration "$CONFIG" -data "$WORKSPACE" "$@"' \
+       > /opt/gt/bin/jdtls \
+    && chmod +x /opt/gt/bin/jdtls \
+    && test -n "$(ls /opt/gt/jdtls/plugins/org.eclipse.equinox.launcher_*.jar 2>/dev/null | head -1)" \
+    && /opt/gt/jre/bin/java -version \
+    # jdtls LIVENESS probe (the sweep shipped a launcher whose printf'd exec lacked the
+    # -jar line: java printed usage + exit 1, caught only at runtime on the one task with
+    # .java files). A broken launcher dies instantly; a working one starts Equinox and
+    # stays up waiting on stdio. Launch with a held-open stdin, require survival at 8s.
+    && ( sleep 30 | /opt/gt/bin/jdtls > /tmp/jdtls_probe.out 2>&1 & echo $! > /tmp/jdtls.pid; \
+         sleep 8; \
+         if kill -0 "$(cat /tmp/jdtls.pid)" 2>/dev/null; then \
+           kill "$(cat /tmp/jdtls.pid)" 2>/dev/null; echo 'jdtls launch-survival probe OK'; \
+         else \
+           echo 'jdtls DIED at launch:'; cat /tmp/jdtls_probe.out; exit 1; \
+         fi )
+
+# (4) Embedder models, baked OFFLINE at BUILD time (the build stage has network; the
+#     eval/DeepSWE container has allow_internet=false, so NOTHING is downloaded at run).
+#     PRIMARY = code-tuned multilingual gte-modernbert-base, INT8 ONNX (~150MB) so the
+#     loader DEFAULT (embed.DEFAULT_EMBED_MODEL = "Alibaba-NLP/gte-modernbert-base") loads
+#     with no download. e5-small-v2 (384-dim) stays baked as the runtime fallback. The
+#     dest dirnames are the HF basenames ("gte-modernbert-base", "e5-small-v2"), exactly
+#     how EmbeddingModel.model_dir + proof.embedder_model_path resolve the baked files
+#     (model_name.split('/')[-1]); the ONNX is saved as the canonical "model.onnx" so the
+#     loader finds it by primary name. The gte fetch uses huggingface_hub at build time
+#     (the SAME candidate list as scripts/setup_models.py::_GTE_MODERNBERT — int8 first,
+#     then quantized/uint8/fp32) so we never depend on an unverified release mirror.
+#     e5 keeps the proven curl-from-release pattern (its assets already exist there).
+ARG E5_BASE=https://github.com/harneet2512/groundtruth/releases/download/pipeline-assets-v1
+ARG HF_CDN=https://huggingface.co/Alibaba-NLP/gte-modernbert-base/resolve/main
+RUN mkdir -p /opt/gt/models/gte-modernbert-base /opt/gt/models/e5-small-v2 \
+    && ( curl -fsSL --retry 8 --retry-max-time 300 -o /opt/gt/models/gte-modernbert-base/model.onnx \
+           "${HF_CDN}/onnx/model_int8.onnx" \
+         || curl -fsSL --retry 8 --retry-max-time 300 -o /opt/gt/models/gte-modernbert-base/model.onnx \
+              "${HF_CDN}/onnx/model_quantized.onnx" \
+         || curl -fsSL --retry 8 --retry-max-time 300 -o /opt/gt/models/gte-modernbert-base/model.onnx \
+              "${HF_CDN}/onnx/model_uint8.onnx" \
+         || curl -fsSL --retry 8 --retry-max-time 300 -o /opt/gt/models/gte-modernbert-base/model.onnx \
+              "${HF_CDN}/onnx/model.onnx" ) \
+    && test -s /opt/gt/models/gte-modernbert-base/model.onnx \
+    && echo "OK gte-modernbert-base ONNX ($(du -sh /opt/gt/models/gte-modernbert-base/model.onnx | cut -f1))" \
+    && curl -fsSL --retry 8 --retry-max-time 300 -o /opt/gt/models/gte-modernbert-base/tokenizer.json \
+         "${HF_CDN}/tokenizer.json" \
+    && test -s /opt/gt/models/gte-modernbert-base/tokenizer.json \
+    && echo "OK gte-modernbert-base tokenizer"
+RUN curl -fsSL --retry 8 --retry-max-time 300 "${E5_BASE}/model.onnx"     -o /opt/gt/models/e5-small-v2/model.onnx \
+    && curl -fsSL --retry 8 --retry-max-time 300 "${E5_BASE}/tokenizer.json" -o /opt/gt/models/e5-small-v2/tokenizer.json
+
+# (5) the GT pipeline code + the substrate launcher
+# Cache-bust: GT_COMMIT_SHA changes every commit, forcing Docker to re-COPY
+# src/ and scripts/ even when the GHA cache has a stale layer. Without this,
+# Docker sees "COPY src" as unchanged and serves the old layer — which caused
+# the ModuleNotFoundError: No module named 'groundtruth.runtime.ledger' regression.
+ARG GT_COMMIT_SHA=dev
+RUN echo "gt_src_cache_bust=${GT_COMMIT_SHA}" > /dev/null
+COPY src                 /opt/gt/src
+COPY scripts             /opt/gt/scripts
+COPY benchmarks/swebench /opt/gt/benchmarks/swebench
+COPY docker/gt-substrate-run.sh /opt/gt/bin/gt-substrate
+RUN chmod +x /opt/gt/bin/gt-substrate
+# Stage 4.2: the PORTABLE proof entrypoint (Option B). ONE command an external benchmark team runs
+# to produce all GT artifacts from a mounted read-only repo — no per-task pip / model download.
+RUN printf '#!/bin/sh\nexec "${GT_PYTHON:-python3}" /opt/gt/scripts/swebench/gt_run_proof.py "$@"\n' \
+        > /opt/gt/bin/gt-run-proof \
+ && chmod +x /opt/gt/bin/gt-run-proof
+
+# ---- stage 2: thin final image whose entire payload is the portable /opt/gt ----
+FROM ubuntu:20.04
+# rust-analyzer/cargo metadata probes need a C linker when task rustup is mounted.
+RUN apt-get update && apt-get install -y --no-install-recommends gcc ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /opt/gt /opt/gt
+# Go toolchain for gopls WORKSPACE LOADING: gopls shells out to the `go` command
+# (`go env`/`go list`) to load packages, so the toolchain stays baked + pinned OFFLINE
+# (GOTOOLCHAIN=local, GOPROXY=off) so workspace loading never needs network.
+# NOTE (root-caused 2026-06-09): the go smoke's `initialize` failure (run 27240730335,
+# UNCHANGED by baking this toolchain) was NOT the toolchain — it was the invalid launch
+# flag `gopls serve -stdio` (gopls has no -stdio flag; flag.ExitOnError prints usage to
+# stderr and exits(2) BEFORE the handshake, so `initialize` read EOF). Fixed in
+# src/groundtruth/lsp/config.py; stderr is now captured + surfaced by lsp/client.py.
+COPY --from=build /usr/local/go /opt/gt/go
+# Bake the GT BUILD commit into the final image (ARGs do not cross stages, so it is
+# re-declared here). This lets the running container PROVE which GT commit it was built
+# from — the code Integration actually runs comes from this baked /opt/gt/src, not the
+# workflow checkout. The proof records it as run_manifest.substrate_build_commit and (under
+# GT_REQUIRE_COMMIT_PARITY) fails closed when it diverges from the run commit (GT_GIT_COMMIT)
+# — a stale substrate can no longer run silently (D/2026-06-13).
+ARG GT_COMMIT_SHA=dev
+ENV GT_SUBSTRATE_BUILD_COMMIT=${GT_COMMIT_SHA} \
+    GT_HOME=/opt/gt \
+    GT_INDEX_BINARY=/opt/gt/bin/gt-index \
+    GT_PYTHON=/opt/gt/python/bin/python3 \
+    GT_MODELS_ROOT=/opt/gt/models \
+    GT_FORCE_ONNX_EMBEDDER=1 \
+    JDTLS_HOME=/opt/gt/jdtls \
+    JAVA_HOME=/opt/gt/jre \
+    GOROOT=/opt/gt/go \
+    GOTOOLCHAIN=local \
+    GOFLAGS=-mod=readonly \
+    GOPROXY=off \
+    GOSUMDB=off \
+    GOPATH=/tmp/gopath \
+    GOMODCACHE=/tmp/gomodcache \
+    GOCACHE=/tmp/gocache \
+    GO111MODULE=on \
+    RUSTUP_HOME=/opt/gt/rustup \
+    CARGO_HOME=/opt/gt/cargo \
+    PATH="/opt/gt/bin:/opt/gt/cargo/bin:/opt/gt/node/bin:/opt/gt/python/bin:/opt/gt/jre/bin:/opt/gt/go/bin:${PATH}" \
+    PYTHONPATH="/opt/gt/src:/opt/gt/scripts/swebench:/opt/gt/benchmarks/swebench"
+
+# Build-time SELF-TEST: the whole closure must be present + runnable on glibc 2.31,
+# or the image fails to build (you can never ship a missing-library substrate). This
+# asserts EVERY LSP server resolve.py spawns (config.py::LSP_SERVERS) launches, AND that
+# the loader-default embedder (gte-modernbert-base) + the e5 fallback are both baked.
+RUN /opt/gt/bin/gt-index -h >/dev/null 2>&1 \
+    && /opt/gt/python/bin/python3 -c "import onnxruntime, numpy, pydantic, tokenizers; print('py-deps ok')" \
+    && pyright --version \
+    && typescript-language-server --version \
+    && gopls version \
+    && /opt/gt/go/bin/go version \
+    && rust-analyzer --version \
+    && test -x /opt/gt/bin/jdtls \
+    && test -n "$(ls /opt/gt/jdtls/plugins/org.eclipse.equinox.launcher_*.jar 2>/dev/null | head -1)" \
+    && /opt/gt/jre/bin/java -version \
+    && test -s /opt/gt/models/gte-modernbert-base/model.onnx \
+    && test -s /opt/gt/models/gte-modernbert-base/tokenizer.json \
+    && test -s /opt/gt/models/e5-small-v2/model.onnx \
+    && /opt/gt/python/bin/python3 -c "import sys; sys.path.insert(0,'/opt/gt/src'); from groundtruth.memory.enrich.embed import _default_embed_model, get_embedding_model; m=_default_embed_model(); print('default embedder:', m); mod=get_embedding_model(); v=mod.embed('database connection pool', is_query=True); assert len(v)==mod.dim and any(v), 'embedder produced empty/zero vector'; print('embedder loaded + non-zero, dim=', mod.dim)" \
+    && /opt/gt/python/bin/python3 -c "import sys, resource; sys.path.insert(0,'/opt/gt/src'); from groundtruth.memory.enrich.embed import get_embedding_model; mod=get_embedding_model(); vs=mod.embed_batch(['def f%d(x): return x+%d  # synthetic passage body'%(i,i) for i in range(4096)]); assert len(vs)==4096 and any(vs[0]) and any(vs[-1]); peak=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024.0; print('capacity peak_rss=%.0fMB for a 4096-passage encode'%peak); assert peak < 3000, 'CAPACITY REGRESSION: peak RSS %.0fMB exceeds the 3000MB ceiling — the encode is O(N) again (gt_gt s5: must be O(GT_EMBED_ENCODE_BATCH); the unchunked path hit ~7300MB and OOM-killed real runs 2026-06-10)'%peak; print('capacity invariant OK (RSS-gauged, the metric the OOM killer acts on)')" \
+    && echo '=== GT substrate closure present + runnable on glibc 2.31 (LSP: py/ts/go/rust/java; embedder: gte+e5) ==='

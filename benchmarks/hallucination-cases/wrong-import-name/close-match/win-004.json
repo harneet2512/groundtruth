@@ -1,0 +1,19 @@
+{
+  "id": "win-004",
+  "category": "wrong-import-name",
+  "subcategory": "close-match",
+  "description": "Typo: 'hashPasswrd' instead of 'hashPassword' (distance 1)",
+  "input": {
+    "code": "import { hashPasswrd } from './utils/crypto';\n\nconst hashed = await hashPasswrd(password);",
+    "filePath": "src/app.ts",
+    "intent": "hash a user password"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "levenshtein",
+    "correctSymbol": "hashPassword",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

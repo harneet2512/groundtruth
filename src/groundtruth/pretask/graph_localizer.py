@@ -1,0 +1,2910 @@
+"""Symbol-anchored multi-hop graph-witness localizer (L1 core).
+
+THE DIAGNOSED FAILURE this module exists to close (real beets-5495 run,
+gt_run_summary): the L1 ranker selected candidate files by LEXICAL keyword
+overlap -> l1_candidate_files=['beets/util/pipeline.py','beets/library.py']
+with the gold file beets/importer.py NOT a candidate, those candidates had 0
+call/import/test edges, l1_confidence_score=0.0, yet a "Highest-confidence
+candidate" line still rendered. The lexical path never TRAVERSED graph.db, so it
+missed importer.py even though importer.py::set_fields has a CALLS edge to
+dbcore/db.py::set_parse — the exact symbol pair the issue names.
+
+This module fixes that by anchoring on issue SYMBOLS (not file blobs) and
+walking graph.db edges from those symbol nodes, recording a structural WITNESS
+for every candidate file it surfaces.
+
+RESEARCH BASIS (deterministic parts only — no embeddings / no GNN / no LLM):
+  * KGCompass 2025: 89.7% of localizable bugs carry NO explicit file/line hint
+    and are recoverable ONLY via multi-hop traversal over a code graph from
+    issue-anchored entities. => seed on symbols, BFS the graph.
+  * SWERank 2025 (retrieve -> rerank): down-rank "hard negatives" — files that
+    are lexically similar to the issue but structurally UNWITNESSED (our
+    pipeline.py / library.py). => a witnessed candidate MUST outrank a
+    witness-less lexical-only one.
+  * RepoGraph (ICLR 2025): a k=1 ego-graph is the strongest single hop; FILTER
+    stdlib / third-party edges so the walk stays repo-internal. => default 1-hop,
+    optional 2nd hop; stdlib-shadow guard on edges.
+  * BLUiR (ASE 2013): structured field-level lexical anchoring on
+    function/class/identifier names beats flat-blob BM25. => the lexical
+    component of the rerank scores issue-term ∩ symbol/path identifiers, not a
+    document blob.
+  * CoSIL 2025: a pruner that drops unrelated directions + top-K narrowing keeps
+    precision high. => top-K cap on witnessed candidates.
+
+We deliberately do NOT adopt SWERank's neural reranker / GREPO's GNN — those
+violate GroundTruth's LLM-free, deterministic-only core contract.
+
+Everything here is pure sqlite + regex over graph.db. No model, no network.
+"""
+from __future__ import annotations
+
+import os
+import re as _re
+import sqlite3
+import statistics
+from collections.abc import Iterable
+from dataclasses import dataclass, field
+
+from groundtruth.pretask.anchors import IssueAnchors, extract_issue_anchors
+from groundtruth.pretask.curation_map import (
+    _DETERMINISTIC_METHODS,
+    _NAME_MATCH_FLOOR,
+    _has_columns,
+    _open_ro,
+)
+from groundtruth.confidence import dynamic_cutoff, is_seed_pollutant
+
+# _STDLIB_HEADS deleted (Step 2): it was DEAD — the code's own comment noted the
+# `nbr_name in _STDLIB_HEADS` guard never fired (the shadow token is the attribute,
+# not the module head).
+
+# Stdlib-shadow ATTRIBUTE guard (TEMPORARY, Python-only band-aid). The indexer
+# name-matches a stdlib attribute call (os.walk / json.loads) to a same-named
+# PROJECT function, fabricating a spurious name_match edge. This conservative list of
+# attribute tokens (almost never a project edit target) drops those shadows from
+# WITNESS DISPLAY — applied to name_match (unverified) edges ONLY; verified edges are
+# never filtered.
+#
+# Frontier-correct fix (DEFERRED to Step 6 / Go indexer): IMPORT-SCOPE resolution —
+# accept a name_match edge as project-internal only if the caller file imports the
+# module that defines that name (RepoGraph ICLR 2025 documents WHY name-match
+# over-connects; Aider's defines∩references membership predicate). That generalizes
+# to every language with an import extractor; a literal stdlib-attr list does not.
+# A membership test alone cannot catch this case because the project DOES define a
+# same-named symbol. Kept here as a no-op-on-non-Python safety net (os/walk/loads
+# never collide in Go/Rust/JS) until the indexer resolves qualifiers — correct-or-
+# quiet (it only SUPPRESSES a known-spurious unverified edge), not poison.
+_STDLIB_ATTRS: frozenset[str] = frozenset(
+    {
+        "walk", "loads", "dumps", "utcnow", "getlogger", "basicconfig",
+        "deepcopy", "namedtuple", "defaultdict", "fromtimestamp",
+    }
+)
+
+# ---------------------------------------------------------------------------
+# Composite rerank weights (the Hybrid pillar: >=3 independent signals).
+#
+# A witnessed candidate's score is:
+#   score = W_WITNESS * witness_strength      # structural (graph)  -- PRIMARY
+#         + W_LEX     * structured_lexical    # field-level lexical (BLUiR)
+#         + W_DEGREE  * degree_prior          # caller-frequency / centrality
+#
+# Rationale for the ordering W_WITNESS > W_LEX > W_DEGREE:
+#   * W_WITNESS dominates because the whole point (SWERank hard-negative
+#     principle + KGCompass) is that a structural edge from an issue-named symbol
+#     is stronger evidence of the edit target than keyword overlap, which is
+#     exactly what mislocalized beets-5495 (pipeline.py won on lexical alone).
+#   * W_LEX is a real but secondary signal (BLUiR): a file whose own
+#     symbol/path identifiers intersect the issue terms is more likely relevant,
+#     but only as a tie-breaker among witnessed files, never enough to beat a
+#     verified-edge witness on its own.
+#   * W_DEGREE is the weakest (RepoGraph hub caution): high in-degree is a hub
+#     prior, useful only to break ties, and it is hub-penalized so a pure hub
+#     never wins on degree alone.
+# These are NOT calibrated magic constants in the benchmark sense — they encode
+# the cited research ordering. The CONFIDENCE GATE downstream is data-derived
+# (per-task median gap), so the absolute scale of these weights is not load-
+# bearing; only their ORDER is.
+W_WITNESS = 0.60
+W_LEX = 0.30
+# Degree prior: weak centrality tie-breaker, hub-capped by tanh. NOTE: a hub-PENALTY
+# variant (degree as `- W_HUB*deg_norm`) was tested on the v15.2 holdout and REVERTED
+# — it regressed python hit@1 (8->6) while only helping rust (net wash), because some
+# real edit targets are themselves high-degree (crossplane gold deg 250 > the hub
+# beating it at 201). The data FALSIFIED the RepoGraph hub-penalty hypothesis for this
+# localization metric, so the original small positive prior is kept (measure-first).
+W_DEGREE = 0.10
+# Generated / codegen files are NEVER hand-edited fix targets -> heavy demote (kept as
+# a last-resort, not hard-dropped). Cross-ecosystem markers, not benchmark-shaped. This
+# SURVIVED measurement: run_function.pb.go (a protobuf) no longer out-ranks the gold.
+# Subject bonus: a file that DEFINES the issue's SUBJECT symbol (the broken
+# function, named earliest in the issue) is the likely EDIT TARGET. This must
+# dominate the raw centrality (degree) prior — otherwise a high-in-degree CALLEE
+# (db.py::set_parse) out-ranks the CALLER the issue is actually about
+# (importer.py::set_fields), which is the RepoGraph/SWERank hub-bias failure.
+# Set above W_DEGREE so the subject always beats a pure centrality tie, but below
+# W_LEX/W_WITNESS so it never overturns a stronger structural/lexical signal.
+W_SUBJECT = 0.15
+# Inter-candidate connectivity: how many OTHER candidate files this file has
+# verified edges to/from. The edit target sits at the structural crossroads
+# of the issue-relevant code. This is the graph's value-add over grep —
+# grep finds files with keywords, the graph finds files at the CENTER of
+# the keyword-relevant code cluster. Weight above W_DEGREE (it's a stronger
+# structural signal) but below W_WITNESS (direct edge > neighborhood count).
+# PPR: Personalized PageRank structural signal. The graph's depth advantage
+# over grep — PPR propagates mass through the call graph from seed nodes,
+# capturing multi-hop structural proximity. Weight above W_DEGREE (it's a
+# richer structural signal from the full graph) but below W_WITNESS (a
+# direct verified edge is stronger than diffused PPR mass).
+
+# Witness strength by edge provenance (correct-or-quiet).
+# EDGE witnesses (CALLS/IMPORTS): structural evidence — the file is connected
+# to an issue symbol via a real code dependency. This is the GRAPH's value-add.
+# DEFINES witnesses: lexical evidence — the file merely defines a symbol whose
+# name appears in the issue. This is what grep/BM25 already gives you; it
+# carries no structural depth. Must score BELOW edge witnesses so the graph
+# actually adds ranking value over grep (LIPI diagnosis: when both scored 1.0,
+# the localizer degenerated to expensive BM25 — 23% hit@1).
+_WITNESS_VERIFIED = 1.0     # verified EDGE witness (CALLS/IMPORTS)
+_WITNESS_DEFINES = 0.55     # DEFINES witness — above name_match but below edges
+_WITNESS_NAMEMATCH = 0.45   # unverified name_match edge
+# Hop decay is applied inline in Witness.strength() as 1/(1+hop).
+#
+# DEFINES vs verified-EDGE strength inversion guard (#57). A DEFINES witness is
+# ALWAYS hop-0, so its raw decay factor is 1/(1+0)=1.0 and `0.55*conf` could BEAT
+# a verified 1-hop CALLS edge (1.0*conf*0.5=0.50) on the raw scalar that feeds
+# Candidate.confidence (the [VERIFIED] render gate) and the W_WITNESS score term.
+# That is a lexical signal out-ranking a structural one — the exact inversion this
+# module exists to kill. The sort already tiers correctly (_witness_tier), but the
+# SCALAR did not. Fix: the DEFINES scalar is CAPPED strictly below the minimum
+# possible verified-EDGE strength. The deepest BFS hop is bounded by
+# _dynamic_max_hop (ceiling 3) and localize(max_hop=3), so a verified edge's
+# weakest decay factor is 1/(1+_MAX_DECAY_HOP). _WITNESS_DEFINES_CEIL sits just
+# under _WITNESS_VERIFIED*that-decay, so any verified edge (hop 1..max) outranks
+# any DEFINES regardless of confidence. Generalized (no repo/task logic); the cap
+# is derived from the module's own hop bound, not tuned.
+_MAX_DECAY_HOP = 3
+_WITNESS_DEFINES_CEIL = _WITNESS_VERIFIED * (1.0 / (1.0 + _MAX_DECAY_HOP)) * 0.95
+
+# Hub guard for the degree prior — tanh saturates so a 500-caller hub doesn't
+# linearly dominate a 5-caller specific module. Matches hub_penalty.HUB_SCALE.
+_HUB_SCALE = 50.0
+
+_MIN_ANCHOR_LEN = 3
+
+# Degree edge-type scope (D5 fix, 2026-06-13). fan_out/fan_in and the file-level
+# in-degree centrality prior MUST count ONLY structural/navigation edges — the
+# edges that represent how an agent actually traverses the code (CALLS / CONTAINS /
+# EXTENDS / IMPLEMENTS / IMPORTS / RE_EXPORTS / COMPOSES / ...). When relationship
+# promotion ships (depth), it mints PROMOTED relationship edge types and/or stamps
+# `resolution_method LIKE 'promote_%'`. Those inflate node degree (~1.88x measured;
+# 868 nodes gain fan_out purely from promoted edges), defeating the SLOC<=4/
+# fan_out==0 trivial-validator and regressing ranking (a trivial validator suddenly
+# looks structurally connected). The trivial-validator and the degree prior must
+# EXCLUDE the promoted relationship edges so degree reflects navigation only.
+#
+# BLACKLIST, not whitelist: live graphs already carry legitimate structural types
+# beyond the canonical five (measured: RE_EXPORTS for JS/TS re-exports, COMPOSES for
+# struct/class composition). A whitelist of {CALLS,CONTAINS,EXTENDS,IMPLEMENTS,
+# IMPORTS} would WRONGLY drop those and change degree on current graphs. Excluding
+# the promoted RELATIONSHIP types (+ promote_% provenance) is the only construction
+# that is a strict no-op today and a fix once promotion ships.
+#
+# DEGRADE-SAFE: on current live graphs (no promotion pass yet) NO edge has a promoted
+# type and NO edge has `resolution_method LIKE 'promote_%'` (measured: 0 across all
+# scanned live graphs), so this predicate matches every existing edge — identical
+# counts to the unfiltered query. It becomes load-bearing only once promoted edges
+# exist.
+_PROMOTED_EDGE_TYPES: tuple[str, ...] = (
+    "DATA_FLOW", "READS", "WRITES", "RAISES", "CO_SERIALIZES", "PRECEDES",
+)
+# SQL predicate (alias-parameterized) that EXCLUDES promoted relationship edges and
+# any promoted-provenance edge from a degree count. `{a}` is the edge-table alias.
+def _degree_edge_filter(a: str) -> str:
+    types_not_in = ", ".join("'" + t + "'" for t in _PROMOTED_EDGE_TYPES)
+    return (
+        f"{a}.type NOT IN ({types_not_in}) "
+        f"AND ({a}.resolution_method IS NULL "
+        f"OR {a}.resolution_method NOT LIKE 'promote_%')"
+    )
+
+
+# Shared FTS5 DDL — single source of truth so schema changes don't diverge
+# across the Go indexer, Python fallback, and preflight script.
+_FTS5_CREATE = """
+CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
+    name, qualified_name, signature, file_path,
+    content='nodes', content_rowid='id'
+)"""
+_FTS5_POPULATE = """
+INSERT INTO nodes_fts(rowid, name, qualified_name, signature, file_path)
+SELECT id, name, COALESCE(qualified_name, ''), COALESCE(signature, ''), file_path
+FROM nodes WHERE is_test = 0
+"""
+
+# Composite rerank weights (Phase 1: FTS5 + path decay added).
+# The formula is:
+#   Score(f) = W_BM25 * BM25_norm + W_PATH_DECAY * PathDecay_norm
+#            + W_WITNESS * witness_norm + W_SUBJECT * subject_norm
+#            + W_LEX * lex_norm + W_DEGREE * deg_norm - W_GEN * gen_flag
+#
+# BM25 and PathDecay are NEW signals that ADD to the existing witness/lex/degree
+# scoring. They do not replace any existing signal — backward compatible.
+W_BM25 = 0.35
+W_PATH_DECAY = 0.30
+
+# GREP-FLOOR (Phase 4) — placement of depth-injected (grep-MISSED) candidates
+# relative to the grep-recalled floor. The human's call; default conservative.
+#   "strictly_below_floor"        — injected candidates sit BENEATH all grep-recalled
+#                                    files, no interleaving (default, precision-safe).
+#   "interleave_short_deterministic" — allow <=1-hop deterministic injections to
+#                                    interleave into the floor (recall-leaning; tune
+#                                    on the 5-lang set AFTER the human sees numbers).
+INJECTION_PLACEMENT = os.environ.get("GT_INJECTION_PLACEMENT", "strictly_below_floor")
+
+
+def _is_generic_symbol(sym: str) -> bool:
+    """DUNDER-SHAPE language invariant ONLY — used for WITNESS DISPLAY choice (prefer
+    an informative 'set_fields calls set_parse' edge over a generic '__init__ called
+    by _setup'). The former literal set (setUp/tearDown/setUpClass/__call__/__eq__...)
+    was poison: those are unittest/Python conventions, NOT language invariants, and
+    fail the moment the repo is pytest-style / Go / JS. Frontier precedent (Aider
+    repomap.py `if ident.startswith('_'): mul *= 0.1`) penalizes by name SHAPE, not a
+    list. DATA-DERIVED genericness (homonym/hub) lives in is_seed_pollutant (used for
+    the DEFINES trust gate below); a fuller symbol_specificity ordering of the display
+    needs a conn threaded into render_witness — deferred follow-up."""
+    s = (sym or "").strip()
+    return s.startswith("__") and s.endswith("__")
+
+
+from groundtruth.delivery.path_policy import is_generated as _is_generated
+
+
+# Test file detection — language-agnostic patterns covering all 5+ Tier-1
+# languages. Test files are observation/verification artifacts, never the edit
+# target for a bug fix. They often DEFINE issue-named symbols (test functions
+# for the broken feature) so they score high on DEFINES witnesses, but they
+# are structurally wrong targets — applying the same heavy demote as generated
+# files (score -= penalty, not hard drop) keeps them in the candidate list for
+# reference while preventing them from ranking #1.
+_TEST_PATTERNS: tuple[str, ...] = (
+    "test_", "_test.", ".test.", ".spec.", "_spec.",
+    "/tests/", "/test/", "/__tests__/",
+    "testing/", "testutil", "test_helper",
+)
+
+
+def _is_test_file(fp: str) -> bool:
+    """True for test/spec files across all supported languages."""
+    f = os.path.basename((fp or "").lower())
+    p = (fp or "").replace("\\", "/").lower()
+    return any(m in f or m in p for m in _TEST_PATTERNS)
+
+
+def _fts5_candidates(
+    conn: sqlite3.Connection,
+    issue_tokens: set[str],
+    limit: int = 50,
+) -> list[tuple[int, str, str, float]]:
+    """BM25 retrieval over function names/signatures/paths via FTS5.
+
+    Returns (node_id, name, file_path, bm25_score) tuples.
+    Matches grep's recall but ranks by relevance using SQLite's built-in BM25.
+
+    Research: BLUiR (ASE 2013) — structured field-level lexical anchoring on
+    function/class/identifier names beats flat-blob BM25. FTS5 over the nodes
+    table is exactly that: structured per-symbol indexing, not whole-file text.
+
+    Graceful fallback: returns [] when nodes_fts table doesn't exist (old
+    graph.db without FTS5, incremental-only builds). The caller merges FTS5
+    candidates with name-match seeds; an empty return means name-match-only.
+    """
+    import sys
+
+    if not issue_tokens:
+        return []
+
+    # PROOF MODE (Stage 2): FTS5 is a MANDATORY Go-built capability, not a helper.
+    # nodes_fts must already exist (Go indexer with -tags sqlite_fts5), be populated,
+    # and answer a real MATCH — else this is the silent degrade to a python-side
+    # rebuild the plan forbids. Raises in proof mode; no-op (returns) otherwise so
+    # the dev/CI fallback below is byte-identical.
+    from groundtruth.runtime import proof as _proof
+    if _proof.is_proof_mode():
+        _proof.assert_fts5_native(conn, where="L1 retrieval")
+
+    # Check if nodes_fts exists. If not (Go-SQLite lacked FTS5), create it
+    # with a writable conn AND use that same conn for queries (the read-only
+    # conn has a stale WAL snapshot and won't see the new table).
+    _fts_conn = conn  # default: use the caller's read-only conn
+    _fts_conn_owned = False  # True if we opened our own conn (must close it)
+    try:
+        tables = {
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if "nodes_fts" not in tables:
+            _db_path = conn.execute("PRAGMA database_list").fetchone()[2]
+            if not _db_path:
+                print("[GT L1] FTS5: no database path available, skipping", file=sys.stderr)
+                return []
+            try:
+                print("[GT L1] FTS5: nodes_fts missing, attempting Python-side creation", file=sys.stderr)
+                # Intentional WRITE to graph.db: create FTS5 virtual table as a
+                # Python-side fallback when nodes_fts doesn't exist. This mutates
+                # the DB during what is otherwise a read-only query path. The
+                # sqlite3.Error catch below handles read-only filesystems gracefully
+                # (returns [] without crashing).
+                _fts_conn = sqlite3.connect(_db_path)
+                _fts_conn_owned = True
+                _fts_conn.execute(_FTS5_CREATE)
+                _fts_conn.execute(_FTS5_POPULATE)
+                _fts_conn.commit()
+                _n_rows = _fts_conn.execute("SELECT COUNT(*) FROM nodes_fts").fetchone()[0]
+                print(f"[GT L1] FTS5: Python-side creation OK ({_n_rows} rows)", file=sys.stderr)
+            except sqlite3.Error as _fts_err:
+                print(f"[GT L1] FTS5: Python-side creation FAILED: {_fts_err}", file=sys.stderr)
+                if _fts_conn_owned:
+                    try:
+                        _fts_conn.close()
+                    except Exception:
+                        pass
+                return []
+        else:
+            print("[GT L1] FTS5: nodes_fts exists, querying directly", file=sys.stderr)
+    except sqlite3.Error as _tbl_err:
+        print(f"[GT L1] FTS5: table check failed: {_tbl_err}", file=sys.stderr)
+        return []
+
+    # Build FTS5 MATCH query: join tokens with OR for broad recall.
+    # Filter tokens: skip very short (< 3 chars) and escape FTS5 special chars.
+    safe_tokens = []
+    for t in sorted(issue_tokens, key=lambda x: (-len(x), x)):
+        # FTS5 special chars: *, ^, ", (, ), :, +, -, NOT, AND, OR, NEAR
+        # Wrap each token in double quotes to treat as literal phrase.
+        cleaned = t.replace('"', '')
+        if len(cleaned) >= 3 and all(c.isalnum() or c == '_' for c in cleaned):
+            safe_tokens.append(f'"{cleaned}"')
+        if len(safe_tokens) >= 20:
+            break
+
+    if not safe_tokens:
+        if _fts_conn_owned:
+            try:
+                _fts_conn.close()
+            except Exception:
+                pass
+        return []
+
+    match_expr = " OR ".join(safe_tokens)
+
+    try:
+        rows = _fts_conn.execute(
+            """SELECT rowid, name, file_path,
+                      bm25(nodes_fts, 1.0, 2.0, 0.5, 0.5) as score
+               FROM nodes_fts
+               WHERE nodes_fts MATCH ?
+               ORDER BY score
+               LIMIT ?""",
+            (match_expr, limit),
+        ).fetchall()
+    except sqlite3.Error as _q_err:
+        print(f"[GT L1] FTS5: query failed: {_q_err}", file=sys.stderr)
+        return []
+    finally:
+        if _fts_conn_owned:
+            try:
+                _fts_conn.close()
+            except Exception:
+                pass
+
+    results: list[tuple[int, str, str, float]] = []
+    for row in rows:
+        if row and row[0] is not None:
+            score = -float(row[3]) if row[3] is not None else 0.0
+            results.append((int(row[0]), str(row[1]), _normalize(str(row[2])), score))
+    if results:
+        print(f"[GT L1] FTS5: query returned {len(results)} candidates", file=sys.stderr)
+    else:
+        print("[GT L1] FTS5: no candidates found", file=sys.stderr)
+    return results
+
+
+def _path_decay_scores(
+    conn: sqlite3.Connection,
+    seed_node_ids: list[int],
+    has_conf: bool,
+    max_hop: int = 3,
+    beta: float = 0.85,
+    min_edge_conf: float = 0.5,
+    has_method: bool = False,
+    has_trust_tier: bool = False,
+) -> dict[str, float]:
+    """KGCompass-style path decay scoring over the call graph.
+
+    Walk call graph from seeds using Dijkstra-style BFS. Edge weight =
+    1/confidence, so high-confidence edges (verified imports at 1.0) are
+    cheap paths and speculative name_match edges (0.4) are expensive.
+
+    Path cost L(f) = sum(1/confidence) along the shortest path from any seed.
+    Score S(f) = beta^L(f). Verified import edges yield short paths with
+    minimal decay; speculative name_match edges yield long paths with heavy
+    decay — exactly the correct-or-quiet property.
+
+    Edge ADMISSION uses _edge_admitted — the SAME predicate as the witness BFS
+    (#54): SUPPRESSED tier and stdlib-shadow name_match edges are HARD-EXCLUDED,
+    and an unverified edge below ``min_edge_conf`` is dropped, so a file can never
+    earn decay mass through an edge the witness layer rejected. ``has_method`` /
+    ``has_trust_tier`` let the SELECT pull ``resolution_method`` / ``trust_tier``
+    so the predicate sees the same provenance the witness BFS does.
+
+    Research: KGCompass (2025) — confidence-weighted path traversal for
+    entity retrieval in knowledge graphs. RepoGraph (ICLR 2025) — k-hop
+    ego-graph with diminishing returns beyond k=2 for dense graphs.
+
+    Returns {file_path: decay_score} for all reachable files within max_hop.
+    """
+    import heapq
+
+    if not seed_node_ids:
+        return {}
+
+    # Priority queue: (cost, node_id, hop_count)
+    pq: list[tuple[float, int, int]] = [(0.0, nid, 0) for nid in seed_node_ids]
+    heapq.heapify(pq)
+    # Best cost to reach each node.
+    best_cost: dict[int, float] = {nid: 0.0 for nid in seed_node_ids}
+    # File path for each visited node.
+    node_file: dict[int, str] = {}
+
+    # Pre-fetch seed file paths.
+    for i in range(0, len(seed_node_ids), 400):
+        chunk = seed_node_ids[i:i + 400]
+        ph = ",".join("?" for _ in chunk)
+        try:
+            rows = conn.execute(
+                f"SELECT id, file_path FROM nodes WHERE id IN ({ph})",
+                chunk,
+            ).fetchall()
+        except sqlite3.Error:
+            continue
+        for r in rows:
+            if r and r[0] is not None and r[1]:
+                node_file[int(r[0])] = _normalize(str(r[1]))
+
+    conf_sel = "e.confidence" if has_conf else "1.0"
+    method_sel = "e.resolution_method" if has_method else "''"
+    tier_sel = "e.trust_tier" if has_trust_tier else "''"
+
+    while pq:
+        cost, nid, hops = heapq.heappop(pq)
+
+        # Skip if we already found a cheaper path to this node.
+        if cost > best_cost.get(nid, float('inf')):
+            continue
+
+        if hops >= max_hop:
+            continue
+
+        # Expand neighbors in both directions (out-edges and in-edges). SELECT the
+        # same provenance columns the witness BFS reads (name / method / tier) so
+        # the shared _edge_admitted predicate (#54) sees identical inputs — no
+        # SQL-level conf_where; admission happens once, in Python, for both walks.
+        for match_col, join_col in [("e.source_id", "e.target_id"),
+                                     ("e.target_id", "e.source_id")]:
+            try:
+                rows = conn.execute(
+                    f"""SELECT {join_col} AS nbr_id, n.file_path, {conf_sel},
+                               n.name, {method_sel}, {tier_sel}
+                        FROM edges e
+                        JOIN nodes n ON {join_col} = n.id
+                        WHERE {match_col} = ?
+                          AND e.type IN ('CALLS', 'IMPORTS')
+                          AND n.is_test = 0
+                        LIMIT 100""",
+                    (nid,),
+                ).fetchall()
+            except sqlite3.Error:
+                continue
+
+            for nbr_id, nbr_file, conf, nbr_name, method, tier in rows:
+                if nbr_id is None or nbr_file is None:
+                    continue
+                nbr_id = int(nbr_id)
+                nbr_file = _normalize(str(nbr_file))
+                verified = _is_verified(method)
+                # ADMISSION (shared predicate). Use the witness-BFS conf convention
+                # (0.0 when missing) so the SAME edge is admitted/rejected in both
+                # traversals; the cost weight below keeps its own 1.0 default.
+                try:
+                    admit_conf = float(conf) if conf is not None else 0.0
+                except (TypeError, ValueError):
+                    admit_conf = 0.0
+                if not _edge_admitted(
+                    verified, admit_conf, tier, str(nbr_name or ""), min_edge_conf
+                ):
+                    continue
+                try:
+                    conf_f = float(conf) if conf is not None else 1.0
+                except (TypeError, ValueError):
+                    conf_f = 1.0
+                if conf_f <= 0:
+                    conf_f = 0.1  # avoid division by zero
+
+                edge_cost = 1.0 / conf_f
+                new_cost = cost + edge_cost
+
+                if new_cost < best_cost.get(nbr_id, float('inf')):
+                    best_cost[nbr_id] = new_cost
+                    node_file[nbr_id] = nbr_file
+                    heapq.heappush(pq, (new_cost, nbr_id, hops + 1))
+
+    # Aggregate to file level: take the minimum cost (best path) to each file.
+    file_cost: dict[str, float] = {}
+    for nid, cost in best_cost.items():
+        fp = node_file.get(nid)
+        if fp:
+            if fp not in file_cost or cost < file_cost[fp]:
+                file_cost[fp] = cost
+
+    # Convert cost to decay score: S(f) = beta^cost.
+    return {fp: beta ** cost for fp, cost in file_cost.items()}
+
+
+@dataclass(frozen=True)
+class Witness:
+    """The structural reason a file is a localization candidate.
+
+    anchor: the issue symbol that seeded this witness (e.g. ``set_parse``).
+    edge_type: 'CALLS' | 'IMPORTS' (the edge that connects the candidate file's
+        symbol to / from the anchor symbol).
+    direction: 'calls_anchor' (candidate symbol CALLS the anchor) or
+        'called_by_anchor' (anchor CALLS the candidate symbol).
+    verified: True iff the edge's resolution_method is deterministic.
+    confidence: the edge confidence (0..1).
+    hop: graph hop distance from the seed symbol's file (0 = seed file itself).
+    src_symbol / dst_symbol: the two endpoints, so the renderer can state the
+        fact ``set_fields -> set_parse`` without re-querying.
+    """
+
+    file_path: str
+    anchor: str
+    edge_type: str
+    direction: str
+    verified: bool
+    confidence: float
+    hop: int
+    src_symbol: str
+    dst_symbol: str
+
+    def strength(self) -> float:
+        conf = self.confidence if self.confidence > 0 else (1.0 if self.verified else 0.5)
+        decay = 1.0 / (1.0 + self.hop)
+        if self.direction == "defines_anchor":
+            # DEFINES is lexical (the file merely defines a same-named symbol) and is
+            # ALWAYS hop-0, so its decay is 1.0. Cap the scalar strictly below the
+            # weakest possible verified-EDGE strength (#57) so a hop-0 DEFINES can
+            # never out-rank a real structural edge on the scalar that feeds
+            # Candidate.confidence / the [VERIFIED] gate / the W_WITNESS term. The
+            # _witness_tier sort already orders tiers; this keeps the SCALAR honest.
+            return min(_WITNESS_DEFINES * conf * decay, _WITNESS_DEFINES_CEIL)
+        if self.verified:
+            base = _WITNESS_VERIFIED
+        else:
+            base = _WITNESS_NAMEMATCH
+        return base * conf * decay
+
+
+@dataclass(frozen=True)
+class Candidate:
+    file_path: str
+    score: float
+    witnesses: list[Witness]
+    lex_hits: int  # # of issue terms intersecting this file's symbol/path identifiers
+    degree: int
+    confidence: float  # best-witness strength, 0..1 (drives the render gate)
+
+    @property
+    def has_verified_witness(self) -> bool:
+        return any(w.verified for w in self.witnesses)
+
+    def render_witness(self) -> str:
+        """Human-facing one-liner for the most INFORMATIVE witness, or '' if none.
+
+        Prefers a real edge witness (CALLS/IMPORTS connecting this file's symbol
+        to a DIFFERENT issue-anchored symbol) over a self-DEFINES witness, since
+        "set_fields calls set_parse [CALLS]" tells the agent the structural fact
+        it needs, whereas "set_fields defines set_fields" is uninformative. Among
+        edge witnesses, the strongest (verified, lowest-hop) wins. Falls back to
+        the DEFINES witness only when no edge witness exists (the file merely
+        defines the anchor and nothing connects it onward).
+        """
+        if not self.witnesses:
+            return ""
+        edge_wits = [
+            w for w in self.witnesses if w.direction != "defines_anchor"
+            and w.src_symbol != w.dst_symbol
+        ]
+        if edge_wits:
+            # Prefer a MEANINGFUL edge (neither endpoint a generic constructor/
+            # dunder) over a generic one — all hop-0 verified edges tie on strength,
+            # so without this the display picks an arbitrary "__init__ called by X"
+            # and hides the real "set_fields calls set_parse" (live beets-5495 bug).
+            def _display_key(x: Witness) -> tuple[int, float]:
+                generic = _is_generic_symbol(x.src_symbol) or _is_generic_symbol(x.dst_symbol)
+                return (1 if generic else 0, -x.strength())
+
+            w = min(edge_wits, key=_display_key)
+            # src_symbol is ALWAYS the caller, dst_symbol ALWAYS the callee (the BFS at
+            # ~line 2351 assigns src=caller/dst=callee for BOTH directions). The prior
+            # `{src} called by {dst}` for called_by_anchor was INVERTED — it read as
+            # "caller called by callee" (witnessed: `main called by BeginRepl` when main
+            # CALLS BeginRepl). Render the caller->callee fact correctly, candidate-first.
+            _calls_anchor = w.direction == "calls_anchor"
+            # PROVENANCE TAG (fix 2026-06-09, correct-or-quiet): an edge whose
+            # resolution_method is NOT in curation_map.DETERMINISTIC_RESOLUTION_METHODS
+            # renders with an explicit "(unverified)" marker. Witness.verified IS
+            # that single-source predicate (_is_verified(method) == method in
+            # _DETERMINISTIC_METHODS). v1r_brief's renderer documented this tag
+            # ("a name_match witness carries its own '(unverified)' tag from the
+            # localizer") but it was never emitted — a name guess rendered exactly
+            # like a structural fact (witness-pipe laundering).
+            tag = "" if w.verified else " (unverified)"
+            if w.hop >= 2:
+                far = w.src_symbol if w.direction == "calls_anchor" else w.dst_symbol
+                return (
+                    f"{w.anchor} -> ... -> {far} "
+                    f"[{w.edge_type}, {w.hop}-hop]{tag}"
+                )
+            body = (
+                f"{w.src_symbol} calls {w.dst_symbol}" if _calls_anchor
+                else f"{w.dst_symbol} called by {w.src_symbol}"
+            )
+            return f"{body} [{w.edge_type}]{tag}"
+        w = max(self.witnesses, key=lambda x: x.strength())
+        # SEED-TYPED witnesses (fix 2026-06-09): only the exact-name seeder mints
+        # the "defines {name} (issue symbol)" DEFINES fact. A grep/path/FTS5 seed
+        # is a retrieval ENTRY POINT — render it as what it is, never as a
+        # fabricated issue-symbol definition.
+        if w.edge_type == "DEFINES":
+            return f"defines {w.anchor} (issue symbol)"
+        _seed_label = {
+            "GREP_SEED": "grep match",
+            "PATH_SEED": "path match",
+            "FTS5_SEED": "fts5 match",
+        }.get(w.edge_type, "seed match")
+        return f"{_seed_label}: {w.src_symbol or w.anchor}"
+
+
+@dataclass(frozen=True)
+class LocalizerResult:
+    candidates: list[Candidate]
+    anchor_symbols: list[str]
+    confidence: float            # best candidate confidence (0 when no anchor hit)
+    confident: bool              # passes the per-task data-derived gate
+    gate_reason: str             # why confident / not (telemetry)
+    scope_chains: list[ScopeChain] = field(default_factory=list)
+    graph_stats: dict = field(default_factory=dict)
+    # WIDE-scope edit-set telemetry (Task-2 slice 1, additive). n_components = the
+    # number of connected components among the top candidates under the typed-edge
+    # union-find (1 = one cohesive edit-set; >1 = disjoint clusters). 0 when no
+    # scope chains were built. Consumed only by future deep/wide gating + 8-dp
+    # logging; absent on early returns (defaults to 0 — byte-identical today).
+    n_components: int = 0
+    # MULTI-SIGNAL AGREEMENT (the grep-floor build): per-file count of how many
+    # of the three independent rankers (grep / structural / semantic) place this
+    # file's candidate in their OWN top-3. 0..3. Empty {} when no candidates were
+    # ranked (early returns). The graded header consumes this so confidence="X"
+    # means "X of {grep,semantic,structural} agree" rather than a structural-only
+    # witness count. Rank fusion / multi-signal agreement (Cormack RRF SIGIR 2009;
+    # CombMIN Fox & Shaw TREC-2 1994) — agreement across independent rankers is a
+    # stronger relevance signal than any single ranker.
+    agreement_by_file: dict[str, int] = field(default_factory=dict)
+    # R1 leaf-naming bridge (additive, default {}): per-file ranked per-SYMBOL semantic
+    # scores — {file_norm: [(symbol_name, cosine), ...]} high→low — captured from the
+    # SAME per-symbol MaxSim cosines that produce the file's semantic score (previously
+    # discarded). Consumed by v1r_brief._localization_header to rank WITHIN-FILE leaves
+    # by the issue→code semantic signal that reached the gold file, instead of raw
+    # in-degree (which names the hub on behavior-described issues). Empty {} when the
+    # embedder is off / no candidate scored — degrades the symbol-naming stage to its
+    # prior in-degree behavior byte-identically (correct-or-quiet).
+    symbol_semrank_by_file: dict[str, list[tuple[str, float]]] = field(default_factory=dict)
+
+
+def _normalize(fp: str) -> str:
+    """Canonical candidate-map key — the SINGLE path chokepoint every candidate
+    map in this module keys through (witnesses/degrees/decay/grep/sem/agreement/
+    scope). Backslashes -> '/', then a './' PREFIX is stripped (repeatable: '././'),
+    then exactly one leading '/' (absolute tolerance).
+
+    BUG-1 (path-key over-strip): the prior body was ``.lstrip("./").lstrip("/")``.
+    ``str.lstrip("./")`` is a CHARSET strip, not a prefix strip — it greedily ate
+    EVERY leading '.'/'/' char, so a real top-level dotfile dir lost its dot
+    (``.github/x.py`` -> ``github/x.py``) and two genuinely-distinct files collapsed
+    to one key (``./.config/app.py`` and ``config/app.py`` both -> ``config/app.py``),
+    splitting/merging the gold candidate. control/paths.py:normalize documents this
+    exact hazard. Fix: anchored ``./``-PREFIX strip (leading dots in real path
+    components preserved), then one leading '/'. Common cases are byte-identical
+    (``./beets/importer.py`` -> ``beets/importer.py``; ``beets/importer.py`` ->
+    itself); only the over-strip pathology changes."""
+    text = fp.replace("\\", "/")
+    while text.startswith("./"):
+        text = text[2:]
+    if text.startswith("/"):
+        text = text[1:]
+    return text
+
+
+def _struct_witness_tier(c: "Candidate") -> int:
+    """SWERank hard-negative tier for the structural ranker (BUG-4). Lower = better:
+        0  verified CLOSE structural witness  (CALLS/IMPORTS, hop <= 1)
+        1  verified DISTANT structural witness (hop >= 2) — a real edge, just far
+        2  verified DEFINES only — name-equality, NOT a structural fact
+        3  unverified witness only
+        4  no witness
+    A verified distant edge (tier 1) out-ranks a bare name-equality DEFINES
+    (tier 2): the edge is a structural fact, the DEFINES a same-name coincidence."""
+    if not c.has_verified_witness:
+        return 3 if c.witnesses else 4
+    has_close = any(
+        w.verified and w.direction != "defines_anchor" and w.hop <= 1
+        for w in c.witnesses
+    )
+    if has_close:
+        return 0
+    has_distant_structural = any(
+        w.verified and w.direction != "defines_anchor" and w.hop >= 2
+        for w in c.witnesses
+    )
+    return 1 if has_distant_structural else 2
+
+
+def _final_relevance_key(
+    c: "Candidate", subject_pos: "dict[str, int]"
+) -> tuple[float, int, int, str]:
+    """The relevance-bearing tie-break appended AFTER the RRF term in the final
+    localizer sort (BUG-2). Orders by best-witness strength (desc), then issue
+    lexical-token coverage (desc), then SUBJECT POSITION (the file defining the
+    issue's first-named / broken function ranks first), then — only as the LAST
+    resort — the path string. Replaces the bare ``c.file_path`` tie-break so an
+    alphabetical path can never decide the cap slot ahead of a real relevance
+    signal. Generalized: every key is a per-task structural/issue signal, no repo
+    or task IDs."""
+    return (
+        -float(c.confidence),
+        -int(c.lex_hits),
+        int(subject_pos.get(c.file_path, 10**9)),
+        c.file_path,
+    )
+
+
+def _issue_terms(issue_text: str) -> set[str]:
+    return {
+        w.lower()
+        for w in _re.findall(r"[A-Za-z_]\w{2,}", issue_text or "")
+        if len(w) >= _MIN_ANCHOR_LEN
+    }
+
+
+# camelCase / snake_case / digit boundaries — split an identifier into its
+# semantic components so lexical matching is BOUNDARY-aware, not substring.
+_IDENT_SPLIT_RE = _re.compile(r"[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Za-z])(?=[0-9])")
+
+
+def _ident_components(sym: str) -> set[str]:
+    """Lowercased components of an identifier (set_fields -> {set, fields};
+    setUpClass -> {set, up, class}; offset -> {offset}). The component set is
+    what boundary-aware lexical matching tests membership against, so a 3-char
+    issue term like ``set`` matches ``set_fields`` (a real component) but NOT
+    ``settings`` / ``reset`` / ``offset`` (single, indivisible tokens). Mirrors
+    the path-seed component discipline (#56)."""
+    if not sym:
+        return set()
+    parts = {p.lower() for p in _IDENT_SPLIT_RE.split(sym) if p}
+    parts.add(sym.lower())  # the whole identifier is itself a component
+    return parts
+
+
+def _lex_hit(term: str, symset: set[str]) -> bool:
+    """Boundary-aware BLUiR field-level lexical hit (#56). A term scores iff it
+    equals a whole identifier COMPONENT of some symbol (the precise signal), or
+    — only for distinctive terms (len >= 4, mirroring the path-seed >= 4 floor)
+    — it equals the full symbol stem. Replaces the old ``t in s or s in t``
+    unbounded substring, which made ``set`` match settings/reset/offset/dataset
+    and re-introduced the exact lexical-overconnect this module exists to kill."""
+    t = term.lower()
+    if len(t) < _MIN_ANCHOR_LEN:
+        return False
+    for s in symset:
+        if not s or len(s) <= 2:
+            continue
+        if t == s:
+            return True
+        if t in _ident_components(s):
+            return True
+    return False
+
+
+def _seed_node_rows(
+    conn: sqlite3.Connection, anchors: set[str]
+) -> list[tuple[int, str, str]]:
+    """(node_id, name, file_path) for every Function/Method/Class node whose name
+    is an issue anchor. These are the BFS seeds (KGCompass entity seeding)."""
+    if not anchors:
+        return []
+    out: list[tuple[int, str, str]] = []
+    anchors_l = list(anchors)
+    # Chunk to stay under SQLite's variable limit on huge anchor sets.
+    for i in range(0, len(anchors_l), 400):
+        chunk = anchors_l[i : i + 400]
+        ph = ",".join("?" for _ in chunk)
+        try:
+            rows = conn.execute(
+                f"SELECT id, name, file_path FROM nodes "
+                f"WHERE name IN ({ph}) AND is_test = 0 "
+                f"AND label IN ('Function','Method','Class','Interface')",
+                tuple(chunk),
+            ).fetchall()
+        except sqlite3.Error:
+            continue
+        for r in rows:
+            if r and r[0] is not None and r[2]:
+                out.append((int(r[0]), str(r[1]), _normalize(str(r[2]))))
+
+    # QUALIFIED dotted anchors (fix 2026-06-10 — §4 anchor-extraction defect):
+    # anchors like ``Class.method`` can never match the bare-name IN(...) query
+    # (nodes store bare names), so the issue's most specific anchor seeded
+    # NOTHING here. Resolve the qualified pair: the node named ``tail`` whose
+    # parent is named ``qualifier`` (or whose qualified_name matches). Pure
+    # recall addition — a dotted anchor that resolves seeds its REAL definition
+    # node; unresolvable dotted anchors stay non-seeding (correct-or-quiet).
+    _seen_ids = {nid for nid, _, _ in out}
+    for anc in anchors:
+        if "." not in anc:
+            continue
+        parts = [p for p in anc.split(".") if p]
+        if len(parts) < 2:
+            continue
+        qualifier, tail = parts[-2], parts[-1]
+        try:
+            qrows = conn.execute(
+                "SELECT c.id, c.name, c.file_path FROM nodes c "
+                "JOIN nodes p ON c.parent_id = p.id "
+                "WHERE c.name = ? AND p.name = ? AND c.is_test = 0",
+                (tail, qualifier),
+            ).fetchall()
+            if not qrows:
+                qrows = conn.execute(
+                    "SELECT id, name, file_path FROM nodes "
+                    "WHERE (qualified_name = ? OR qualified_name LIKE ?) "
+                    "AND is_test = 0",
+                    (anc, f"%.{qualifier}.{tail}"),
+                ).fetchall()
+        except sqlite3.Error:
+            continue
+        for r in qrows:
+            if r and r[0] is not None and r[2] and int(r[0]) not in _seen_ids:
+                _seen_ids.add(int(r[0]))
+                out.append((int(r[0]), str(r[1]), _normalize(str(r[2]))))
+    return out
+
+
+def _path_to_seeds(
+    conn: sqlite3.Connection,
+    issue_tokens: set[str],
+    existing_seed_files: set[str],
+    limit: int = 10,
+) -> list[tuple[int, str, str]]:
+    """Seed from files whose PATH contains an issue token.
+
+    When "flex" doesn't match any function name but matches
+    layout/flex.py, add functions from that file as seeds.
+    This closes the gap where issue tokens name MODULES not FUNCTIONS.
+
+    Research: KGCompass (2025) -- 89.7% of bugs need multi-hop from
+    the issue-mentioned entity. The entity can be a MODULE, not just
+    a function. BLUiR (ASE 2013) -- structured field-level anchoring
+    on file paths catches module-level references that function-name
+    seeding misses.
+
+    Args:
+        conn: read-only connection to graph.db.
+        issue_tokens: lowercased issue tokens (len >= 3).
+        existing_seed_files: normalized file paths already seeded by
+            _seed_node_rows. Tokens whose path matches a file that is
+            ALREADY seeded (by any mechanism) are SKIPPED here to
+            avoid double-seeding the same file.
+        limit: max total path-seeded nodes returned.
+
+    Returns:
+        (node_id, name, file_path) tuples for functions/methods/classes
+        in path-matched files.
+    """
+    import sys
+
+    if not issue_tokens:
+        return []
+
+    # Filter: tokens >= 4 chars (3 is too short for path matching — "set"
+    # matches settings/, dataset/, reset.py).
+    path_tokens = sorted(
+        (t for t in issue_tokens if len(t) >= 4),
+        key=lambda t: (-len(t), t),
+    )
+    if not path_tokens:
+        return []
+
+    out: list[tuple[int, str, str]] = []
+    seen_ids: set[int] = set()
+    seen_files: set[str] = set(existing_seed_files)  # dedup by file, not just node ID
+
+    for token in path_tokens:
+        if len(out) >= limit:
+            break
+        # Match token as a path COMPONENT only — no broad substring.
+        # /token.ext (file stem) or /token/ (directory name).
+        # token.ext (root-level file like setup.py).
+        # Broad %token% was noise (LIPI review: "set" → settings/).
+        # Directory patterns first (stronger), then root-level last.
+        patterns = [f"%/{token}.%", f"%/{token}/%", f"{token}.%"]
+        _found_any = False
+        for pat in patterns:
+            if len(out) >= limit:
+                break
+            try:
+                rows = conn.execute(
+                    "SELECT id, name, file_path FROM nodes "
+                    "WHERE file_path LIKE ? AND is_test = 0 "
+                    "AND label IN ('Function','Method','Class') "
+                    "LIMIT 5",
+                    (pat,),
+                ).fetchall()
+                if rows:
+                    _found_any = True
+            except sqlite3.Error:
+                continue
+            for r in rows:
+                fp = _normalize(str(r[2])) if r and r[2] else ""
+                if r and r[0] is not None and fp and int(r[0]) not in seen_ids and fp not in seen_files:
+                    seen_ids.add(int(r[0]))
+                    seen_files.add(fp)
+                    out.append((int(r[0]), str(r[1]), fp))
+                    if len(out) >= limit:
+                        break
+
+    if out:
+        print(
+            f"[GT L1] path-to-seed: {len(out)} nodes seeded from "
+            f"{len(path_tokens)} path tokens",
+            file=sys.stderr,
+        )
+
+    return out
+
+
+def _path_match_token(fp: str, issue_tokens: set[str]) -> str:
+    """The issue token that PATH-matched this file — re-derived with the same
+    component patterns ``_path_to_seeds`` matched on (``/{token}.``, ``/{token}/``,
+    leading ``{token}.``). Longest hit wins; ``""`` when nothing re-derives.
+    Display-only (the seed-typed witness line); never affects ranking."""
+    fpl = "/" + (fp or "").lower()
+    hits = [
+        t for t in issue_tokens
+        if len(t) >= 4 and (f"/{t}." in fpl or f"/{t}/" in fpl)
+    ]
+    return max(hits, key=len) if hits else ""
+
+
+def _grep_to_seeds(
+    issue_tokens: set[str],
+    repo_root: str,
+    conn: sqlite3.Connection,
+    max_seeds: int = 20,
+    priority_tokens: set[str] | None = None,
+) -> list[tuple[int, str, str]]:
+    """Grep-recall seeding: subsume grep so GT can never have worse recall.
+
+    Runs ripgrep (or fallback grep) over the repo for issue tokens, maps hit
+    file:line pairs to the enclosing graph node (the function/method/class
+    containing that line), and returns those nodes as additional BFS seeds.
+
+    This is mechanism B from the recall analysis: use grep for recall, graph
+    for rank. GT seeds only on name-matched Function/Method/Class/Interface
+    nodes today (_seed_node_rows), missing files whose code CONTAINS issue
+    tokens in string literals, attributes, variable names, or function bodies.
+    Grep finds those. This function bridges the gap.
+
+    Research: SWERank (2025) retrieve→rerank — the retrieve must have at
+    least grep-grade recall; the rerank adds structural depth.
+    """
+    import shutil
+    import subprocess
+    import sys as _sys_grep
+
+    if not repo_root or not (issue_tokens or priority_tokens):
+        return []
+
+    # GREENFIELD priority (gt_gt §4 grep-fallback wiring, 2026-06-10):
+    # reporter-marked code tokens with ZERO graph nodes
+    # (IssueAnchors.unresolved_code_symbols — go `require`, env vars, rust
+    # `::`-pair tails) are the MOST specific grep anchors for feature issues,
+    # but the length-sorted top-10 cut below crowds them out behind longer
+    # prose words. They go FIRST, capped at 5 (longest first) so a fenced
+    # example block can never flood the grep query. No-op when empty.
+    _prio = sorted(
+        {t for t in (priority_tokens or set()) if len(t) >= _MIN_ANCHOR_LEN},
+        key=lambda t: (-len(t), t),
+    )[:5]
+    _prio_low = {t.lower() for t in _prio}
+
+    # Pick distinctive tokens (skip very short or very common words)
+    tokens = _prio + [t for t in sorted(
+        (t for t in issue_tokens if len(t) >= 4 and t not in {
+            "that", "this", "with", "from", "have", "been", "will",
+            "when", "what", "which", "were", "they", "their", "does",
+            "should", "would", "could", "about", "some", "other",
+            "into", "more", "than", "each", "also", "after", "before",
+        }),
+        key=lambda t: (-len(t), t),
+    )[:10] if t.lower() not in _prio_low]
+
+    if not tokens:
+        return []
+
+    print(
+        f"[GT L1] grep-to-seed: searching {len(tokens)} tokens in {repo_root}",
+        file=_sys_grep.stderr,
+    )
+
+    # Check rg availability ONCE before the loop. If rg is in PATH, use
+    # it for ALL tokens. If not, use Python walk for ALL. Don't switch
+    # mid-loop (Bug 4: inconsistent coverage from partial rg failures).
+    _rg_available = shutil.which("rg") is not None
+    if not _rg_available:
+        print(
+            "[GT L1] grep-to-seed: rg not in PATH, using Python walk",
+            file=_sys_grep.stderr,
+        )
+
+    # Run ripgrep (or Python walk) for each token, collect file hits
+    hit_files: dict[str, set[int]] = {}
+    if _rg_available:
+        for token in tokens:
+            try:
+                result = subprocess.run(
+                    ["rg", "-n", "--no-heading", "-l", "-i", token, repo_root],
+                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
+                )
+                if result.returncode == 0:
+                    for line in result.stdout.strip().splitlines():
+                        fp = line.strip()
+                        if fp:
+                            rel = os.path.relpath(fp, repo_root).replace("\\", "/")
+                            hit_files.setdefault(rel, set()).add(0)
+            except subprocess.TimeoutExpired:
+                continue
+            except FileNotFoundError:
+                # rg invocation failed for THIS token (binary vanished after the
+                # shutil.which check / transient spawn failure). Fix 2026-06-09:
+                # CONTINUE to the next token — the prior `break` silently aborted
+                # the remaining tokens' recall (and no Python-walk fallback runs
+                # on this branch, so those tokens were simply LOST).
+                continue
+        print(
+            f"[GT L1] grep-to-seed: rg found {len(hit_files)} files",
+            file=_sys_grep.stderr,
+        )
+    else:
+        # Python fallback: walk once, check all tokens per file
+        _source_exts = (
+            ".py", ".go", ".rs", ".ts", ".js", ".java", ".rb",
+            ".c", ".cpp", ".h", ".cs",
+        )
+        try:
+            for dirpath, _, filenames in os.walk(repo_root):
+                for fname in filenames:
+                    if not any(fname.endswith(ext) for ext in _source_exts):
+                        continue
+                    fpath = os.path.join(dirpath, fname)
+                    try:
+                        with open(fpath, encoding="utf-8", errors="ignore") as fh:
+                            content = fh.read(500_000).lower()
+                        for token in tokens:
+                            if token.lower() in content:
+                                rel = os.path.relpath(fpath, repo_root).replace("\\", "/")
+                                hit_files.setdefault(rel, set()).add(0)
+                                break  # file matched at least one token, no need to check more
+                    except OSError:
+                        continue
+        except Exception as _walk_err:
+            print(
+                f"[GT L1] grep-to-seed: Python walk FAILED: {_walk_err}",
+                file=_sys_grep.stderr,
+            )
+
+    if not hit_files:
+        print("[GT L1] grep-to-seed: no files matched", file=_sys_grep.stderr)
+        return []
+
+    # Score files by number of distinct tokens they contain
+    file_scores: list[tuple[str, int]] = []
+    for fp, lines in hit_files.items():
+        # Count how many distinct issue tokens hit this file
+        try:
+            fpath = os.path.join(repo_root, fp)
+            with open(fpath, encoding="utf-8", errors="ignore") as _fh:
+                content = _fh.read(500_000).lower()
+            hits = sum(1 for t in tokens if t.lower() in content)
+            file_scores.append((fp, hits))
+        except OSError:
+            file_scores.append((fp, 1))
+
+    file_scores.sort(key=lambda x: -x[1])
+    top_files = [fp for fp, _ in file_scores[:max_seeds]]
+
+    # Map hit files to enclosing graph nodes
+    seeds: list[tuple[int, str, str]] = []
+    seen_ids: set[int] = set()
+    for fp in top_files:
+        norm = _normalize(fp)
+        try:
+            rows = conn.execute(
+                "SELECT id, name, file_path FROM nodes "
+                "WHERE file_path = ? AND is_test = 0 "
+                "AND label IN ('Function','Method','Class','Interface') "
+                "LIMIT 5",
+                (norm,),
+            ).fetchall()
+        except sqlite3.Error:
+            continue
+        for r in rows:
+            if r and r[0] is not None and r[0] not in seen_ids:
+                seen_ids.add(int(r[0]))
+                seeds.append((int(r[0]), str(r[1]), _normalize(str(r[2]))))
+    print(
+        f"[GT L1] grep-to-seed: mapped to {len(seeds)} seed nodes",
+        file=_sys_grep.stderr,
+    )
+    return seeds
+
+
+def _role_discount_for_function(
+    conn: sqlite3.Connection, file_path: str, func_name: str,
+) -> float:
+    """Research-backed role discount for a SPECIFIC function (not file-level).
+
+    Checks the DEFINES-witnessed function's own SLOC + fan_out + fan_in.
+    A trivial validator `overflow(keyword)` (SLOC=3, fan_out=0) gets 0.2.
+    A complex implementation `block_box_layout()` (SLOC=50+) gets 1.0.
+
+    Herbold PeerJ 2019: {SLOC < 4, NoMethodInvocations} => NotFaulty (90%+).
+    ARISE 2025: score = α×rel×role + β×proximity (α=0.3, β=0.5).
+    """
+    try:
+        # fan_out/fan_in count ONLY structural/navigation edges (D5). Promoted
+        # relationship edges (DATA_FLOW/READS/WRITES/RAISES/...) must not inflate
+        # degree or a trivial validator would falsely look connected (fan_out>0).
+        _ef = _degree_edge_filter("e")
+        row = conn.execute(
+            f"""SELECT
+                COALESCE(n.end_line - n.start_line, 0) as sloc,
+                (SELECT COUNT(*) FROM edges e
+                 WHERE e.source_id = n.id AND {_ef}) as fan_out,
+                (SELECT COUNT(*) FROM edges e
+                 WHERE e.target_id = n.id AND {_ef}) as fan_in
+            FROM nodes n WHERE n.file_path = ? AND n.name = ?
+            AND n.is_test = 0 AND n.label IN ('Function', 'Method')
+            LIMIT 1""",
+            (file_path, func_name),
+        ).fetchone()
+        if not row:
+            return 1.0
+        sloc, fan_out, fan_in = row[0] or 0, row[1] or 0, row[2] or 0
+        if sloc <= 4 and fan_out == 0:
+            return 0.2
+        if sloc <= 10 and fan_in > 0 and (fan_in / max(fan_out, 1)) > 3:
+            return 0.5
+        return 1.0
+    except sqlite3.Error:
+        return 1.0
+
+
+def _file_degrees(conn: sqlite3.Connection, files: set[str]) -> dict[str, int]:
+    """In-degree (incoming structural edges) per file — the centrality prior.
+
+    Counts ONLY structural/navigation edges (D5): promoted relationship edges
+    (DATA_FLOW/READS/WRITES/RAISES/...) must not inflate the degree prior that
+    feeds W_DEGREE, or hubs gain artificial centrality once promotion ships.
+    Degrade-safe: a no-op on current live graphs (all edges already structural).
+    """
+    if not files:
+        return {}
+    deg: dict[str, int] = {}
+    files_l = list(files)
+    _ef = _degree_edge_filter("e")
+    for i in range(0, len(files_l), 400):
+        chunk = files_l[i : i + 400]
+        ph = ",".join("?" for _ in chunk)
+        try:
+            rows = conn.execute(
+                f"SELECT n.file_path, COUNT(e.id) FROM nodes n "
+                f"JOIN edges e ON e.target_id = n.id "
+                f"WHERE n.file_path IN ({ph}) AND {_ef} GROUP BY n.file_path",
+                chunk,
+            ).fetchall()
+        except sqlite3.Error:
+            continue
+        for r in rows:
+            if r and r[0]:
+                deg[_normalize(str(r[0]))] = int(r[1] or 0)
+    return deg
+
+
+
+
+def _is_verified(method: str) -> bool:
+    return (method or "").strip().lower() in _DETERMINISTIC_METHODS
+
+
+def _edge_admitted(
+    verified: bool,
+    conf_f: float,
+    tier: str | None,
+    nbr_name: str | None,
+    min_edge_conf: float,
+) -> bool:
+    """ONE edge-admission predicate, shared by the witness BFS and the path-decay
+    traversal (#54). Both walks must reject the SAME edges so a file can never earn
+    path-decay mass through an edge the witness layer dropped (a phantom decay path
+    with zero admitted witnesses). The categorical rule (curation_map.py): admit IFF
+      * trust_tier is NOT 'SUPPRESSED' (hard exclude), AND
+      * the edge is a deterministic FACT (verified) OR confidence >= min_edge_conf, AND
+      * it is NOT a stdlib-shadow name_match (nbr_name in _STDLIB_ATTRS, unverified).
+    Verified edges are never confidence- or shadow-filtered. Generalized, no
+    repo/task logic — purely a function of the edge's own provenance fields."""
+    if str(tier or "").strip().upper() == "SUPPRESSED":
+        return False
+    if not verified and conf_f < min_edge_conf:
+        return False
+    if not verified and nbr_name and nbr_name in _STDLIB_ATTRS:
+        return False
+    return True
+
+
+def _graph_stats(conn: sqlite3.Connection, has_conf: bool) -> dict:
+    """Per-graph density + confidence distribution for dynamic BFS calibration.
+
+    Reuses confidence._repo_stats (cached by db path+mtime+size) for the
+    heavy queries, then adds the confidence percentiles that _repo_stats
+    doesn't compute. One source of truth for "is this graph dense/sparse."
+    """
+    stats: dict = {"node_count": 0, "edge_count": 0, "avg_degree": 0.0,
+                   "conf_p50": 1.0, "conf_p90": 1.0, "high_conf_frac": 1.0}
+    try:
+        # Reuse the cached _repo_stats for node/edge/degree data
+        from groundtruth.confidence import _repo_stats
+        rs = _repo_stats(conn)
+        stats["node_count"] = rs.n_files * 5  # approximate: ~5 functions/file
+        # Get actual counts only if _repo_stats didn't cover them
+        stats["node_count"] = conn.execute(
+            "SELECT COUNT(*) FROM nodes WHERE is_test = 0"
+        ).fetchone()[0] or 0
+        stats["edge_count"] = conn.execute(
+            "SELECT COUNT(*) FROM edges WHERE type IN ('CALLS','IMPORTS')"
+        ).fetchone()[0] or 0
+        if stats["node_count"] > 0:
+            stats["avg_degree"] = stats["edge_count"] / stats["node_count"]
+        if has_conf and stats["edge_count"] > 0:
+            row = conn.execute(
+                "SELECT COUNT(*), "
+                "       SUM(CASE WHEN confidence >= 0.5 THEN 1 ELSE 0 END) "
+                "FROM edges WHERE type IN ('CALLS','IMPORTS') AND confidence IS NOT NULL"
+            ).fetchone()
+            total_conf = row[0] or 0
+            high_count = row[1] or 0
+            if total_conf > 0:
+                stats["high_conf_frac"] = high_count / total_conf
+            p50_row = conn.execute(
+                "SELECT confidence FROM edges "
+                "WHERE type IN ('CALLS','IMPORTS') AND confidence IS NOT NULL "
+                "ORDER BY confidence LIMIT 1 OFFSET ?",
+                (total_conf // 2,),
+            ).fetchone()
+            p90_row = conn.execute(
+                "SELECT confidence FROM edges "
+                "WHERE type IN ('CALLS','IMPORTS') AND confidence IS NOT NULL "
+                "ORDER BY confidence LIMIT 1 OFFSET ?",
+                (int(total_conf * 0.9),),
+            ).fetchone()
+            if p50_row:
+                stats["conf_p50"] = p50_row[0]
+            if p90_row:
+                stats["conf_p90"] = p90_row[0]
+    except Exception:
+        pass
+    return stats
+
+
+def _dynamic_max_hop(stats: dict) -> int:
+    """Adapt BFS depth to graph density — dynamic, not hardcoded.
+
+    Sparse graphs (avg_degree < 3): 3 hops — need deeper traversal to reach
+    anything useful. Verified edges dominate → low false-positive risk.
+    Medium graphs (3-10): 2 hops — standard.
+    Dense graphs (avg_degree > 10): 2 hops but with tighter confidence floor
+    (handled by _dynamic_conf_floor). Going deeper in a dense graph explodes
+    the candidate set without adding signal.
+
+    Research basis:
+    - KGCompass (2025): 74% of bugs at 2-hop, 14.4% at 3-hop, 1.4% at 4-hop.
+      With β=0.6 decay: 3-hop score = 0.216 (significant), 4-hop = 0.13 (marginal).
+      Practical maximum is 3 hops.
+    - RepoGraph (ICLR 2025): k=1 ego-graph is strongest; diminishing returns
+      beyond k=2 for dense graphs.
+
+    Dynamic: uses graph density + high-confidence edge fraction.
+    Dense graphs with many verified edges → 2 hops (plenty of reliable paths).
+    Sparse graphs OR low verified fraction → 3 hops (need more reach).
+    """
+    deg = stats.get("avg_degree", 0.0)
+    hi_frac = stats.get("high_conf_frac", 1.0)
+    if deg >= 5.0 and hi_frac >= 0.7:
+        return 2  # dense + mostly verified → 2 hops enough
+    if deg < 2.0:
+        return 3  # very sparse → need depth
+    if hi_frac < 0.4:
+        return 3  # mostly speculative → need more paths to find verified ones
+    return 2  # default for medium graphs
+
+
+def _dynamic_conf_floor(stats: dict) -> float:
+    """Adapt confidence admission floor to the graph's confidence distribution.
+
+    High-quality graphs (conf_p50 >= 0.8): floor at 0.6 — most edges are
+    reliable, a higher floor keeps only the best.
+    Mixed graphs (conf_p50 0.3-0.8): floor at 0.5 — standard.
+    Low-quality graphs (conf_p50 < 0.3): floor stays at 0.5 — going below 0.5
+    admits speculative name_match edges, which creates noise. Better to find
+    fewer candidates than to flood with false positives.
+    Correct-or-quiet: the floor NEVER drops below 0.5 (the _NAME_MATCH_FLOOR
+    from curation_map). Noise is worse than silence.
+    """
+    p50 = stats.get("conf_p50", 1.0)
+    if p50 >= 0.8:
+        return 0.6
+    return _NAME_MATCH_FLOOR  # 0.5 — the categorical minimum
+
+
+@dataclass(frozen=True)
+class ScopeChain:
+    """A connected subgraph of files that should be edited together.
+
+    files: ordered list of file paths in the chain (source → target direction).
+    edges: list of (src_file, dst_file, edge_type, symbol_pair) connecting them.
+    confidence: minimum edge confidence in the chain (weakest link).
+    description: human-readable one-liner describing the chain.
+
+    Research: co-change analysis (Zimmermann+ ICSE 2004) — files that change
+    together in commits form edit scope chains. This is the GRAPH version: files
+    connected by call/import edges from anchor symbols form a structural scope.
+    Addresses the 32% INCOMPLETE_SCOPE failures: agent finds 1 file but the fix
+    needs 2-8 connected files.
+    """
+    files: list[str]
+    edges: list[tuple[str, str, str, str]]
+    confidence: float
+    description: str
+    # WIDE-scope additive fields (Task-2 slice 1, 2026-06-13). Populated by the
+    # union-find connected-edit-set builder; ABSENT/empty on graphs with no typed
+    # promote edges so today's output stays byte-identical (consumers read via
+    # getattr with defaults). `edge_tiers` parallels `edges`: per chain-edge trust
+    # in {'CERTIFIED','CANDIDATE','SPECULATIVE'} so the renderer can tag a
+    # promote-derived scope member as CANDIDATE and an unverified name_match edge as
+    # SPECULATIVE — neither laundered as a verified fact (correct-or-quiet).
+    edge_tiers: tuple[str, ...] = field(default_factory=tuple)
+
+
+# WIDE connected-edit-set edge scope (Task-2 slice 1). The scope builder traverses
+# CALLS/IMPORTS *and* the promoted relationship edges so a file pulled into the
+# edit-set ONLY by a typed promote edge (the measured aiomonitor webui/app.py win:
+# directed-UNREACHABLE under CALLS-only → in-scope via a single READS edge) joins
+# the connected component. These edges feed SCOPE-COMPLETENESS ONLY — they are
+# NEVER added to _degree_edge_filter (degree/hub prior) or _rrf3 (file rank), so
+# they cannot re-introduce the BRIEFING §4 hub-over-promotion failure. DEGRADE-SAFE:
+# on current live graphs no edge carries a promoted type or `promote_%` provenance
+# (measured: 0 across scanned graphs), so widening the SELECT adds zero rows and the
+# union-find over CALLS/IMPORTS reproduces today's connected components.
+_SCOPE_EDGE_TYPES: tuple[str, ...] = (
+    "CALLS", "IMPORTS",
+) + _PROMOTED_EDGE_TYPES + ("USES",)
+
+
+def _scope_edge_trust(verified: bool, method: str | None, conf_f: float,
+                      trust_tier: str | None = None) -> str | None:
+    """Trust tier of a candidate scope edge, or None to DROP it.
+
+    CERTIFIED   — deterministic resolution_method (a fact: import/same_file/type_flow/
+                  lsp/…). CANDIDATE — a promotion-derived edge (`resolution_method LIKE
+                  'promote_%'`): derived from existing facts, rendered with an explicit
+                  CANDIDATE tag, never laundered as verified. SPECULATIVE — an admitted
+                  name_match edge at/above the floor (``conf_f >= _NAME_MATCH_FLOOR``):
+                  kept ONLY to preserve byte-identical behavior on today's graphs (the
+                  old builder admitted exactly this set) and rendered with an explicit
+                  ``(unverified)`` tag, never as a fact. Below the floor → None (drop).
+
+    ADDITIVITY: admission is identical to the prior builder (``verified OR conf_f >=
+    _NAME_MATCH_FLOOR``), so with no promote edges present the SAME edges form the SAME
+    components as before — the CERTIFIED/CANDIDATE/SPECULATIVE split is a render tag,
+    not a new filter. The new typed promote edges (CANDIDATE) only ADD reach.
+    """
+    if (trust_tier or "").strip().upper() == "SUPPRESSED":
+        return None  # parity with the witness BFS _edge_admitted; never a scope member
+    if verified:
+        return "CERTIFIED"
+    m = (method or "").strip().lower()
+    if m.startswith("promote_"):
+        return "CANDIDATE"
+    if conf_f >= _NAME_MATCH_FLOOR:
+        return "SPECULATIVE"
+    return None
+
+
+def _build_scope_chains(
+    candidates: list["Candidate"],
+    conn: sqlite3.Connection,
+    has_conf: bool,
+    max_chains: int = 3,
+) -> list[ScopeChain]:
+    """Extract scope chains from candidates — the connected edit-set (Task-2 slice 1).
+
+    Union-find over the top candidate files using CALLS/IMPORTS *and* the promoted
+    relationship edges (READS/WRITES/DATA_FLOW/…), admitting only CERTIFIED
+    (deterministic) or CANDIDATE (promote_%) edges. The connected component a
+    confident seed belongs to IS the recovered edit-set — "these N files move
+    together." This generalizes the one measured ceiling-break (aiomonitor
+    webui/app.py joined the edit-set via a READS edge CALLS-only could not reach).
+
+    SCOPE-COMPLETENESS only: the typed edges never enter _rrf3 (file rank) or
+    _degree_edge_filter (hub prior) — BRIEFING §4 (reach over-promotes hubs) is
+    honored because following a *specific typed relationship from a confident seed*
+    is not ranking-by-centrality. Correct-or-quiet: a sub-floor name_match edge
+    (``conf_f < _NAME_MATCH_FLOOR``) is dropped, so a wide scope is never built on a
+    guess; a promote_% edge is admitted but rendered with an explicit CANDIDATE tag,
+    never laundered as a verified fact.
+
+    PURELY ADDITIVE — admission is IDENTICAL to the prior builder (``verified OR
+    conf_f >= _NAME_MATCH_FLOOR``); ``_scope_edge_trust`` only SPLITS that same
+    admitted set into render tiers (CERTIFIED / CANDIDATE / SPECULATIVE) and the
+    union-find reproduces the same connected components the old BFS did. DEGRADE-SAFE:
+    with no promote edges present (today) only CALLS/IMPORTS rows are returned and the
+    component partition is byte-identical to before; the new typed promote edges
+    (CANDIDATE) only ADD reach once promotion ships. No ranking weight or score
+    formula is touched — this feeds SCOPE, not rank or degree.
+    """
+    if len(candidates) < 2:
+        return []
+
+    top_files = [c.file_path for c in candidates[:8]]
+    if not top_files:
+        return []
+
+    conf_sel = "e.confidence" if has_conf else "1.0"
+    _types_in = ",".join("'" + t + "'" for t in _SCOPE_EDGE_TYPES)
+    # Cross-file edges between top candidates, over the widened scope edge set. Pull
+    # trust_tier so a SUPPRESSED edge is hard-excluded (parity with the witness BFS);
+    # legacy schemas without the column fall back to a neutral 'SPECULATIVE' default.
+    ph = ",".join("?" for _ in top_files)
+    _params = tuple(top_files) + tuple(top_files)
+
+    def _scope_rows(tier_sel: str):
+        return conn.execute(
+            f"""
+            SELECT DISTINCT ns.file_path, nt.file_path, e.type,
+                   ns.name, nt.name, {conf_sel}, e.resolution_method, {tier_sel}
+            FROM edges e
+            JOIN nodes ns ON e.source_id = ns.id
+            JOIN nodes nt ON e.target_id = nt.id
+            WHERE ns.file_path IN ({ph}) AND nt.file_path IN ({ph})
+              AND ns.file_path != nt.file_path
+              AND e.type IN ({_types_in})
+            """,
+            _params,
+        ).fetchall()
+    try:
+        rows = _scope_rows("COALESCE(e.trust_tier, 'SPECULATIVE')")
+    except sqlite3.OperationalError:
+        try:
+            rows = _scope_rows("'SPECULATIVE'")  # legacy: no trust_tier column
+        except sqlite3.Error:
+            return []
+    except sqlite3.Error:
+        return []
+
+    if not rows:
+        return []
+
+    # UNION-FIND over CERTIFIED/CANDIDATE edges → connected edit-sets.
+    parent: dict[str, str] = {fp: fp for fp in top_files}
+
+    def _find(x: str) -> str:
+        root = x
+        while parent.get(root, root) != root:
+            root = parent[root]
+        # path-compress
+        while parent.get(x, x) != root:
+            parent[x], x = root, parent[x]
+        return root
+
+    def _union(a: str, b: str) -> None:
+        ra, rb = _find(a), _find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    # Edge records keyed by the (src,dst) file pair we MERGE on, kept for description
+    # + per-edge trust rendering. Undirected for edit-set membership (a file pulled
+    # in by an upward READS link belongs regardless of edge direction).
+    edge_recs: list[tuple[str, str, str, str, float, str]] = []
+    for src_fp, dst_fp, etype, src_name, dst_name, conf, method, trust_tier in rows:
+        try:
+            conf_f = float(conf) if conf is not None else 0.0
+        except (TypeError, ValueError):
+            conf_f = 0.0
+        verified = _is_verified(method)
+        tier = _scope_edge_trust(verified, method, conf_f, trust_tier)
+        if tier is None:
+            continue  # below the name_match floor — never a scope edge
+        if src_fp not in parent:
+            parent[src_fp] = src_fp
+        if dst_fp not in parent:
+            parent[dst_fp] = dst_fp
+        sym_pair = f"{src_name} → {dst_name}"
+        edge_recs.append((src_fp, dst_fp, str(etype or "CALLS"), sym_pair, conf_f, tier))
+        _union(src_fp, dst_fp)
+
+    if not edge_recs:
+        return []
+
+    # Group files + the edges that connected them by component root.
+    comp_files: dict[str, list[str]] = {}
+    comp_edges: dict[str, list[tuple[str, str, str, str, float, str]]] = {}
+    for fp in top_files:
+        comp_files.setdefault(_find(fp), []).append(fp)
+    for rec in edge_recs:
+        comp_edges.setdefault(_find(rec[0]), []).append(rec)
+
+    chains: list[ScopeChain] = []
+    for root, files in comp_files.items():
+        recs = comp_edges.get(root, [])
+        if len(files) < 2 or not recs:
+            continue
+        chain_edges: list[tuple[str, str, str, str]] = []
+        edge_tiers: list[str] = []
+        desc_parts: list[str] = []
+        chain_conf = 1.0
+        for src, dst, etype, sym, conf_f, tier in recs:
+            chain_edges.append((src, dst, etype, sym))
+            edge_tiers.append(tier)
+            chain_conf = min(chain_conf, conf_f)
+            # TRUST-TAG (correct-or-quiet, Pillar 3): a CANDIDATE (promote_%) edge is
+            # derived-from-facts; a SPECULATIVE (name_match >= floor) edge is a NAME
+            # GUESS. NEITHER is a verified fact, so BOTH carry an explicit tag in the
+            # rendered description; only CERTIFIED (deterministic) renders bare. This
+            # makes _scope_edge_trust's contract true AT THE RENDER — a name_match scope
+            # edge is never laundered as a fact. (Closes the SPECULATIVE-untagged leak
+            # that no edge_tiers consumer was closing; NOT byte-identical to the prior
+            # builder ON PURPOSE — the prior bare render WAS the laundering.)
+            _tag = (
+                " (CANDIDATE)" if tier == "CANDIDATE"
+                else " (unverified)" if tier == "SPECULATIVE"
+                else ""
+            )
+            desc_parts.append(
+                f"{os.path.basename(src)} → {os.path.basename(dst)} ({sym}){_tag}"
+            )
+        # Preserve seed-first ordering: keep top_files order within the component.
+        ordered = [f for f in top_files if _find(f) == root]
+        chains.append(ScopeChain(
+            files=ordered,
+            edges=chain_edges,
+            confidence=chain_conf,
+            description="; ".join(desc_parts),
+            edge_tiers=tuple(edge_tiers),
+        ))
+
+    chains.sort(key=lambda c: (-len(c.files), -c.confidence, c.files[0] if c.files else ""))
+    return chains[:max_chains]
+
+
+
+
+_EMBEDDER = None
+_EMBEDDER_TRIED = False
+
+
+class _OnnxEmbedderAdapter:
+    """Adapts the deterministic ONNX EmbeddingModel (groundtruth.memory.enrich.embed,
+    no torch) to the SentenceTransformer `.encode(texts)` interface that
+    _semantic_score_by_file uses. By construction texts[0] is the issue (QUERY) and
+    texts[1:] are file docs (PASSAGES) — preserving the E5 query/passage asymmetry a
+    uniform encode would lose. This is the container-viable embedder path: light
+    (~90MB onnx), fast, deps = onnxruntime + tokenizers (vs torch's ~2GB)."""
+
+    def __init__(self, model):
+        from groundtruth.memory.enrich.embed import DEFAULT_EMBED_DIM
+        self._m = model
+        # Width of the zero-fallback vectors when encode() is called with no texts.
+        # Read the model's true dim (CHANGE 2: 768 for gte-modernbert, 384 for e5).
+        self.dim = getattr(model, "dim", DEFAULT_EMBED_DIM)
+
+    def encode(self, texts, normalize_embeddings=True, show_progress_bar=False):
+        import numpy as np
+        texts = list(texts)
+        if not texts:
+            return np.zeros((0, self.dim), dtype=np.float32)
+        q = self._m.embed(texts[0], is_query=True)
+        ps = self._m.embed_batch(texts[1:], is_query=False) if len(texts) > 1 else []
+        return np.asarray([q, *ps], dtype=np.float32)
+
+
+def _get_embedder():
+    """Embedder for issue->code SEMANTIC retrieval — the bridge for cases where the
+    gold shares no surface tokens with the issue (the wall grep/graph cannot cross).
+    Loaded once. Tries, in order: (1) sentence-transformers (if installed); (2) the
+    deterministic ONNX EmbeddingModel (container-viable, no torch — works only if
+    onnxruntime + the model files under models/ are present, baked into the image);
+    (3) None -> semantic signal off, deterministic 2-signal fallback. Research: dense
+    passage / code retrieval (CodeBERT/UniXcoder) localizes where lexical IR fails."""
+    global _EMBEDDER, _EMBEDDER_TRIED
+    if _EMBEDDER_TRIED:
+        return _EMBEDDER
+    _EMBEDDER_TRIED = True
+    # Warm ONCE here (cached via _EMBEDDER/_EMBEDDER_TRIED). The wrapper calls this
+    # at task INIT — off the brief's critical path — so the 90MB onnx load never
+    # cold-starts mid-brief while the agent waits. The two failures are captured so
+    # the GT_REQUIRE_EMBEDDER gate can report exactly which path was unavailable
+    # instead of silently zeroing the semantic ranker (the 30-task-run failure mode).
+    _st_err: Exception | None = None
+    _onnx_err: Exception | None = None
+    # GT_FORCE_ONNX_EMBEDDER=1 skips sentence-transformers so this half uses the
+    # IDENTICAL container ONNX _OnnxEmbedderAdapter (code-tuned default, e5 fallback) that
+    # run_v74 uses — BRIEFING.md §5: block sentence_transformers, BOTH halves on the SAME
+    # surface, or the numbers are worthless. Both halves call get_embedding_model() no-arg
+    # so they resolve to the identical (model, dim) — the invariant holds across CHANGE 2.
+    _force_onnx = os.environ.get("GT_FORCE_ONNX_EMBEDDER") == "1"
+    # GT_REQUIRE_EMBEDDER=1 means the CONFIGURED model, full stop (ST-hole fix
+    # 2026-06-09, mirrors v7_4_brief._get_model): without this, sentence-transformers
+    # loaded FIRST and satisfied "required" with an ARBITRARY host model — silent
+    # substitution that desyncs the two semantic halves (BRIEFING.md §2: block
+    # sentence_transformers; both halves on the SAME ONNX surface). Under require,
+    # the ST step is skipped: configured-ONNX-or-raise. ST stays available when off.
+    _require_embedder = os.environ.get("GT_REQUIRE_EMBEDDER") == "1"
+    if not _force_onnx and not _require_embedder:
+        try:
+            from sentence_transformers import SentenceTransformer
+            # CODE-AWARE embedder (CodeSearchNet query->code; LIPI on sqllineage-557:
+            # a general sentence model ranks generic files above the specific code gold).
+            _EMBEDDER = SentenceTransformer(
+                os.environ.get("GT_EMBED_MODEL", "flax-sentence-embeddings/st-codesearch-distilroberta-base"))
+            return _EMBEDDER
+        except Exception as e:
+            _st_err = e
+    # Container-viable ONNX path (no torch). CHANGE 2 chain: the code-tuned default
+    # (gte-modernbert) ONNX → e5/384 → None. Each step loads only if onnxruntime + that
+    # model's files are baked; both halves (run_v74 + localize) walk the SAME chain so they
+    # stay matched (BRIEFING.md §2 — a half-on / mismatched pipeline gives worthless numbers).
+    from groundtruth.memory.enrich.embed import (
+        E5_DIM,
+        E5_MODEL,
+        _default_embed_model,
+        get_embedding_model,
+    )
+    try:
+        _m = get_embedding_model()  # code-tuned default (GT_EMBED_MODEL_NAME/DIM)
+        _m._ensure_loaded()         # raises if onnxruntime / model files absent
+        _EMBEDDER = _OnnxEmbedderAdapter(_m)
+        return _EMBEDDER
+    except Exception as e:
+        _onnx_err = e
+    # NO-FALLBACK under GT_REQUIRE_EMBEDDER (audit Stage-3 fix): when the run REQUIRES the
+    # embedder, the CONFIGURED model (gte-modernbert) must LOAD or the run RAISES. We MUST NOT
+    # silently substitute e5 here — that is the silent-substitution the audit flagged, and it
+    # would also DESYNC the two halves if one loaded gte and the other e5. e5 stays available
+    # ONLY for the sqlite-vec MEMORY store (which calls get_embedding_model(E5_MODEL, E5_DIM)
+    # directly) and for the GRACEFUL non-proof path — NEVER as a proof-path embedder
+    # fallback. (_require_embedder is read ONCE above: it now also gates the ST step,
+    # so "required" can never be satisfied by an arbitrary host model.)
+    if not _require_embedder:
+        try:
+            # Transition fallback: e5/384 if the code-tuned ONNX is absent/unloadable.
+            _m5 = get_embedding_model(E5_MODEL, E5_DIM)
+            _m5._ensure_loaded()
+            _EMBEDDER = _OnnxEmbedderAdapter(_m5)
+            return _EMBEDDER
+        except Exception as e:
+            _onnx_err = RuntimeError(f"code-tuned: {_onnx_err!r}; e5: {e!r}")
+    _EMBEDDER = None
+    # Fail-loud on a paid run: a silently-off OR silently-substituted semantic ranker collapses
+    # the HIGH tier's 3-ranker agreement to 2 and poisons every localization-quality result.
+    if _require_embedder:
+        _configured = _default_embed_model()
+        raise RuntimeError(
+            f"GT_REQUIRE_EMBEDDER=1 but the CONFIGURED embedder '{_configured}' did not load "
+            "(no silent e5 substitution on the proof path) — semantic ranking would be 0 or run "
+            f"on the wrong model. sentence-transformers: {_st_err!r}; configured ONNX "
+            f"(onnxruntime + baked model files): {_onnx_err!r}. "
+            "Install onnxruntime and ship the configured model files (or sentence-transformers), "
+            "or unset GT_REQUIRE_EMBEDDER. Refusing to run a degraded/substituted paid localization."
+        )
+    return _EMBEDDER
+
+
+def _sem_passage_budget() -> int:
+    """``GT_SEM_PASSAGE_BUDGET``: hard per-call ENCODE budget for
+    _semantic_score_by_file (encode-blowup fix 2026-06-09; run 27249519544:
+    29/113 tasks SIGKILL exit-137 during BRIEF generation on big repos). Counts
+    passages actually SENT to the embedder — cache hits are free. Generous but
+    FINITE default; clamped to >=1 so there is never silent infinite work.
+    Malformed values fall back to the default (correct-or-quiet)."""
+    default = 4096
+    raw = os.environ.get("GT_SEM_PASSAGE_BUDGET")
+    if raw:
+        try:
+            return max(1, int(raw))
+        except (TypeError, ValueError):
+            pass
+    return default
+
+
+def _sem_pool_files(top_k: int) -> int:
+    """``GT_SEM_POOL_FILES``: how many top pre-semantic candidates the semantic
+    ranker scores (the localize call-site pool). Default ``max(6*top_k, 48)`` —
+    generous headroom above the final window so the semantic signal can still
+    PROMOTE a mid-pack candidate. Clamped to >= top_k so the final window is
+    always fully inside the scored pool (the final-top_k ⊆ pool invariant)."""
+    default = max(6 * max(top_k, 1), 48)
+    raw = os.environ.get("GT_SEM_POOL_FILES")
+    if raw:
+        try:
+            return max(int(raw), max(top_k, 1))
+        except (TypeError, ValueError):
+            pass
+    return default
+
+
+def _semantic_score_by_file(
+    issue_text: str, graph_db: str, files: "Iterable[str]",
+    *, symbol_scores_out: "dict[str, list[tuple[str, float]]] | None" = None,
+) -> dict[str, float]:
+    """Semantic similarity between the issue and each candidate file's CODE CONTENT.
+
+    CHANGE 1 — symbol-level granularity. Each non-test SYMBOL in a candidate file is
+    embedded as its own short ``"{name} {signature}\\n{behavioral props}"`` passage
+    (~80-token cap) and the file scores by ColBERT MaxSim over its symbols —
+    ``alpha*max_i(cos_i) + (1-alpha)*mean(top_k cos_i)`` — so a file's gold function
+    is not averaged into its 60 siblings (which collapsed sibling cosines to a flat
+    0.80-0.84 band). Demand-scoped to the candidate ``files`` set only. Return CONTRACT
+    is byte-identical: ``dict[file_path -> float]``; empty dict when no embedder.
+
+    R1 leaf-naming bridge (correct-or-quiet, additive): the per-SYMBOL MaxSim cosines
+    computed here for the FILE score were previously discarded. When ``symbol_scores_out``
+    is supplied, it is populated in place with ``{file_norm: [(symbol_name, cosine), ...]}``
+    so the symbol-naming stage (``v1r_brief._localization_header``) can rank WITHIN-FILE
+    leaves by the same semantic signal that reached the gold file — instead of raw
+    in-degree (which names the hub on behavior-described issues). The returned float
+    dict is unchanged; ``symbol_scores_out`` defaults to ``None`` so every existing
+    caller is byte-identical, and it stays empty whenever the embedder is off.
+
+    ENCODE DISCIPLINE (fix 2026-06-09, gt_gt §11.2 "cache by node-content hash"):
+    ``files`` iteration order is the PRIORITY order (the call site passes the
+    pre-semantic candidate ranking). Vectors are content-addressed in the shared
+    bounded-LRU ``embed._PASSAGE_VEC_CACHE`` (model+dim+version-keyed
+    ``passage_hash``) so the SAME passage — scored again this task by the other
+    semantic half, or on a later call — is never re-encoded. Fresh encodes are
+    hard-capped by ``GT_SEM_PASSAGE_BUDGET``; past the budget, the lowest-priority
+    files simply stay unscored (absent from the result, never a fake 0.0) and ONE
+    ``[GT_SEM] passage budget hit (X/Y encoded)`` line goes to stderr — bounded
+    beats killed."""
+    files = list(files)
+    model = _get_embedder()
+    # PROOF MODE (Stage 3): a required embedder with a non-empty candidate set must
+    # produce a real semantic ranking — the silent {} returns below (DB error, no
+    # docs, encode exception, all-zero) hide a dark semantic ranker, which collapses
+    # localize's 3-ranker agreement. Guard each, raise in proof mode only.
+    from groundtruth.runtime import proof as _proof
+    from groundtruth.memory.enrich.embed import (
+        _PASSAGE_VEC_CACHE,
+        PASSAGE_CACHE_VERSION,
+        aggregate_symbol_cosines,
+        model_identity,
+        passage_hash,
+        read_agg_params,
+        symbol_passage,
+    )
+    # Stage 3: prove localize uses the SAME embedder identity as run_v74/v1r (model-root
+    # divergence -> raise in proof mode). Wires the never-called assert_same_embedder_identity.
+    _proof.assert_same_embedder_identity(graph_db, "localize")
+    _proof_on = _proof.is_proof_mode() and _proof.require_embedder() and bool(files)
+    if model is None or not files:
+        return {}
+    want = {_normalize(f) for f in files}
+    # Per-node behavioral body snippet (docstring/call_order/guards/conditional_return)
+    # so each symbol carries ITS OWN body, not the whole file's. Same source as before,
+    # regrouped per-symbol.
+    node_body: dict[int, list[str]] = {}
+    # Per-file ordered list of symbol passages (carry the existing 80/symbol cap).
+    file_passages: dict[str, list[str]] = {}
+    # R1 leaf-naming bridge: the symbol NAME parallel to each passage (same index),
+    # so the per-symbol cosine computed below can be attributed back to a name for
+    # symbol-stage ranking. Only assembled when symbol_scores_out is requested.
+    file_symnames: dict[str, list[str]] = {}
+    _want_sym = symbol_scores_out is not None
+    try:
+        conn = sqlite3.connect(graph_db)
+        try:
+            # Properties are ADDITIVE — isolate so a missing `properties` table (older
+            # graphs) degrades to name+signature passages, NOT a proof-mode fail-close.
+            try:
+                for nid, val in conn.execute(
+                    "SELECT p.node_id, p.value FROM properties p JOIN nodes n ON n.id=p.node_id "
+                    "WHERE n.is_test=0 AND p.kind IN ('docstring','call_order','guard_clause','conditional_return')"):
+                    if nid is None:
+                        continue
+                    lst = node_body.setdefault(int(nid), [])
+                    if len(lst) < 4:
+                        lst.append(str(val))
+            except sqlite3.Error:
+                pass  # properties table absent -> name+signature passages only
+            for nid, fp, nm, sig in conn.execute(
+                "SELECT id, file_path, name, COALESCE(signature,'') FROM nodes WHERE is_test=0"):
+                k = _normalize(fp)
+                if k not in want or len(file_passages.get(k, [])) >= 80:
+                    continue
+                body = " ".join(node_body.get(int(nid), [])) if nid is not None else ""
+                passage = symbol_passage(nm or "", sig or "", body)
+                if passage:  # correct-or-quiet: never embed a blank symbol
+                    file_passages.setdefault(k, []).append(passage)
+                    if _want_sym:
+                        file_symnames.setdefault(k, []).append(str(nm or ""))
+        finally:
+            conn.close()
+    except sqlite3.Error as _e:
+        if _proof_on:
+            _proof.require(False, "semantic_db_read", str(_e))
+        return {}
+    # Drop files that yielded no embeddable symbol.
+    file_passages = {k: v for k, v in file_passages.items() if v}
+    if not file_passages:
+        if _proof_on:
+            _proof.require(False, "semantic_docs_present",
+                           f"{len(want)} candidates but 0 symbol passages assembled from graph.db")
+        return {}
+    import numpy as np
+    # PRIORITY ORDER = the caller's iteration order (the call site passes the
+    # pre-semantic candidate ranking). The encode budget truncates from the BACK,
+    # so the lowest-priority candidates lose their semantic scores first.
+    order: list[str] = []
+    _seen_f: set[str] = set()
+    for f in files:
+        k = _normalize(f)
+        if k in file_passages and k not in _seen_f:
+            _seen_f.add(k)
+            order.append(k)
+    # CONTENT-ADDRESSED CACHE + HARD ENCODE BUDGET (fix 2026-06-09). Every unique
+    # passage is looked up in the shared bounded-LRU (embed._PASSAGE_VEC_CACHE,
+    # model+dim+version-keyed passage_hash — gt_gt §11.2 "cache by node-content
+    # hash"); only MISSES are encoded, capped at GT_SEM_PASSAGE_BUDGET. vec_by_hash
+    # pins this call's vectors locally so LRU eviction can never drop one between
+    # lookup and scoring.
+    model_name, dim = model_identity(model)
+    budget = _sem_passage_budget()
+    hash_of: dict[str, str] = {}
+    vec_by_hash: dict[str, "np.ndarray"] = {}
+    seen_hashes: set[str] = set()
+    to_encode: list[str] = []
+    to_encode_hashes: list[str] = []
+    for f in order:
+        for p in file_passages[f]:
+            h = hash_of.get(p)
+            if h is None:
+                h = passage_hash(p, model_name, dim, PASSAGE_CACHE_VERSION)
+                hash_of[p] = h
+            if h in seen_hashes:
+                continue
+            seen_hashes.add(h)
+            cached = _PASSAGE_VEC_CACHE.get(h)
+            if cached is not None:
+                vec_by_hash[h] = np.asarray(cached, dtype=np.float32)
+            elif len(to_encode) < budget:
+                to_encode.append(p)
+                to_encode_hashes.append(h)
+            # else: over budget — this passage stays unscored (bounded beats killed).
+    n_hits = len(vec_by_hash)
+    # ONE encode over the issue (texts[0] -> QUERY) + the cache-missed passages
+    # (texts[1:] -> PASSAGES); the _OnnxEmbedderAdapter preserves the e5 asymmetry.
+    texts = [issue_text[:2000]] + to_encode
+    try:
+        embs = model.encode(texts, normalize_embeddings=True, show_progress_bar=False)
+    except Exception as _e:
+        if _proof_on:
+            _proof.require(False, "semantic_encode", str(_e))
+        return {}
+    embs = np.asarray(embs, dtype=np.float32)
+    q = embs[0]
+    for h, vec in zip(to_encode_hashes, embs[1:]):
+        v = np.asarray(vec, dtype=np.float32)
+        vec_by_hash[h] = v
+        _PASSAGE_VEC_CACHE[h] = v
+    n_skipped = len(seen_hashes) - n_hits - len(to_encode)
+    if n_skipped > 0:
+        # Correct-or-quiet: ONE line, stderr only (never agent-visible stdout).
+        import sys as _sys
+        print(
+            f"[GT_SEM] passage budget hit ({len(to_encode)}/{len(seen_hashes)} encoded; "
+            f"{n_hits} cached; {n_skipped} unique passages skipped)",
+            file=_sys.stderr,
+        )
+    alpha, top_k = read_agg_params()
+    _res: dict[str, float] = {}
+    for f in order:
+        cosines = []
+        # R1: per-symbol (name, cosine) for the leaf-naming bridge. Index-aligned with
+        # file_passages[f] via file_symnames[f]; only assembled when requested.
+        _sym_pairs: list[tuple[str, float]] = []
+        _names = file_symnames.get(f, []) if _want_sym else []
+        for _i, p in enumerate(file_passages[f]):
+            v = vec_by_hash.get(hash_of[p])
+            if v is None:
+                continue  # over-budget passage — score the file on what IS available
+            c = float(np.dot(q, v))
+            if np.isfinite(c):
+                cosines.append(c)
+                if _want_sym and _i < len(_names) and _names[_i]:
+                    # Floor negatives at 0 (same convention as aggregate_symbol_cosines:
+                    # a symbol pointing AWAY from the issue is no evidence, not negative).
+                    _sym_pairs.append((_names[_i], c if c > 0.0 else 0.0))
+        if not cosines:
+            continue  # fully unscored (budget) — absent from the result, never a fake 0.0
+        _res[f] = aggregate_symbol_cosines(cosines, alpha=alpha, top_k=top_k)
+        if _want_sym and _sym_pairs:
+            # Best cosine per symbol name (a name may recur — overloads/methods),
+            # ranked high→low. symbol_scores_out is the out-param; mutate in place.
+            _best: dict[str, float] = {}
+            for _nm, _c in _sym_pairs:
+                if _c > _best.get(_nm, -1.0):
+                    _best[_nm] = _c
+            symbol_scores_out[f] = sorted(  # type: ignore[index]
+                _best.items(), key=lambda kv: -kv[1]
+            )
+    if _proof_on and _res:
+        _nz = sum(1 for v in _res.values() if v and v > 0)
+        _proof.require(_nz > 0, "semantic_ranks_nonzero",
+                       f"all {len(_res)} semantic ranks zero/flat for {len(want)} candidates")
+    return _res
+
+
+def localize(
+    issue_text: str,
+    graph_db: str,
+    *,
+    issue_anchors: IssueAnchors | None = None,
+    max_hop: int = 3,
+    top_k: int = 8,
+    repo_root: str = "",
+) -> LocalizerResult:
+    """RETRIEVE (grep-grade recall) -> TRAVERSE (graph depth) -> RERANK -> GATE.
+
+    Seeding is TWO-STAGE: (1) exact symbol-name match (the original path),
+    then (2) grep-to-seed — run grep for issue tokens, map hit files to
+    enclosing graph nodes, add those as BFS seeds. Stage 2 gives GT at least
+    grep's recall, then the graph rerank adds depth grep cannot.
+
+    BFS depth and confidence floor are DYNAMIC — adapted per-graph based on
+    density and confidence distribution (_dynamic_max_hop, _dynamic_conf_floor).
+    """
+    import math
+    import sys
+
+    if not graph_db or not os.path.exists(graph_db):
+        return LocalizerResult([], [], 0.0, False, "no_graph_db")
+
+    if issue_anchors is None:
+        try:
+            issue_anchors = extract_issue_anchors(issue_text, graph_db)
+        except Exception:
+            issue_anchors = IssueAnchors()
+
+    anchors = {a for a in issue_anchors.symbols if len(a) >= _MIN_ANCHOR_LEN}
+    # Phase 1 (grep-floor): issue-token-node-name anchors are a TIE-BREAK HINT, not
+    # the seed. Do NOT early-return when no issue token equals a node name — grep
+    # recall (string match over file CONTENT, incl. data-access sites like
+    # box.style['overflow']) is the seed/floor and runs below. Only bail when there
+    # is neither a symbol anchor NOR a repo to grep.
+    if not anchors and not repo_root:
+        return LocalizerResult([], [], 0.0, False, "no_anchor_hit")
+
+    # Phase 1/2: the set of files GREP recalled (string match over content). This is
+    # the FLOOR — no name-equality signal may demote a grep-recalled file below a
+    # non-recalled one. Populated in the grep block; empty when no repo_root.
+    grep_recalled: set[str] = set()
+    # Per-file grep STRENGTH (distinct issue-token coverage). Drives the within-floor
+    # rank fusion so a lexically-strong gold (grep #1) is not buried by structural
+    # reranking — the go-cli regression. Empty when no repo_root.
+    grep_score_by_file: dict[str, int] = {}
+
+    conn = _open_ro(graph_db)
+    if conn is None:
+        try:
+            conn = sqlite3.connect(graph_db)
+        except sqlite3.Error:
+            return LocalizerResult([], [], 0.0, False, "graph_open_failed")
+
+    try:
+        has_conf, has_method = _has_columns(conn)
+        # trust_tier column (schema v15.2+): when present, a SUPPRESSED edge is
+        # HARD-EXCLUDED at admission per the categorical filter (CLAUDE.md edge
+        # rule + Pillar 4 "confidence-gated AT THE FILTER LEVEL"). Detected locally
+        # because the shared _has_columns only reports (confidence, method).
+        try:
+            _edge_cols = {r[1] for r in conn.execute("PRAGMA table_info(edges)").fetchall()}
+        except sqlite3.Error:
+            _edge_cols = set()
+        has_trust_tier = "trust_tier" in _edge_cols
+
+        # DYNAMIC BFS CALIBRATION: adapt hop depth and confidence floor to
+        # THIS graph's density and quality (Pillar 1: dynamic, not hardcoded).
+        _stats = _graph_stats(conn, has_conf)
+        _dyn_hop = min(max_hop, _dynamic_max_hop(_stats))
+        _dyn_conf = _dynamic_conf_floor(_stats)
+
+        seeds = _seed_node_rows(conn, anchors)
+
+        # SEED PROVENANCE (fix 2026-06-09): ONLY these exact-name seeds — the
+        # issue literally names a symbol defined in the file — may mint the
+        # "defines {name} (issue symbol)" DEFINES witness below. Grep/path/FTS5
+        # seeds are retrieval ENTRY POINTS (string/path/BM25 matches), recorded
+        # here so the witness loop can mint an honest seed-typed witness instead
+        # of a fabricated DEFINES at confidence 1.0.
+        _exact_seed_ids: set[int] = {s[0] for s in seeds}
+        _seed_provenance: dict[int, tuple[str, str]] = {}
+        _grep_token_by_file: dict[str, str] = {}
+
+        # PATH-TO-SEED: match issue tokens against file PATHS, not just
+        # function NAMES. Closes the gap where "flex" matches layout/flex.py
+        # but no function is named "flex" (function is flex_layout). Only
+        # tokens that did NOT already match a function name are considered
+        # (name-match seeds are stronger). Additive: can never remove seeds.
+        # Research: KGCompass (2025) — the issue-mentioned entity can be a
+        # MODULE, not just a function.
+        terms = _issue_terms(issue_text)
+        _existing_seed_files = {s[2] for s in seeds}  # normalized file paths already seeded
+        try:
+            _path_seeds = _path_to_seeds(conn, terms, _existing_seed_files, limit=10)
+            if _path_seeds:
+                existing_ids = {s[0] for s in seeds}
+                for ps in _path_seeds:
+                    if ps[0] not in existing_ids:
+                        seeds.append(ps)
+                        existing_ids.add(ps[0])
+                        _seed_provenance[ps[0]] = (
+                            "PATH_SEED", _path_match_token(ps[2], terms)
+                        )
+        except Exception as _path_err:
+            print(
+                f"[GT L1] path-to-seed: FAILED: {_path_err}",
+                file=sys.stderr,
+            )
+
+        # GREP-TO-SEED: dynamically gated by seed QUALITY, not count.
+        # Three signals compose the gate (hybrid, ≥3 signals):
+        #   1. Diversity: how many distinct files are seeds from?
+        #   2. Coverage: what fraction of issue tokens are covered by seeds?
+        #   3. Confidence: do any seeds have verified-edge backing?
+        # The gate produces a quality score [0,1]. Grep runs when quality
+        # is below the per-task MEDIAN of what "good" seeding looks like —
+        # i.e., dynamically, not against a hardcoded floor.
+        # Grep is additive (can never remove seeds), so even at high quality
+        # it's safe — it just adds less. The composite scoring downstream
+        # handles the rest.
+        _grep_seed_used = False
+        _seed_files = set(fp for _, _, fp in seeds)
+        _seed_diversity = len(_seed_files)
+        _n_terms = max(len(terms), 1)
+        _covered_terms = {s[1].lower() for s in seeds} & {t.lower() for t in terms}
+        _anchor_coverage = len(_covered_terms) / _n_terms
+        # Diversity score: tanh normalizes so 5+ files → ~1.0, 1 file → ~0.2
+        import math
+        _diversity_score = math.tanh(_seed_diversity / 3.0)
+        # Confidence score: fraction of seeds with a verified edge backing
+        _verified_seed_files = set()
+        if has_method:
+            # Deterministic fact-set from curation_map (single source — fix
+            # 2026-06-09): the prior hand-rolled ('import','same_file','lsp')
+            # subset missed type_flow/verified_unique/impl_method/… so genuinely
+            # verified seeds counted as unverified in the quality gate.
+            _det_in_sq = ",".join("'" + m + "'" for m in sorted(_DETERMINISTIC_METHODS))
+            for _, sname, sfp in seeds:
+                try:
+                    _v = conn.execute(
+                        "SELECT "
+                        "(SELECT COUNT(*) FROM edges e JOIN nodes n ON n.id = e.source_id "
+                        f" WHERE n.file_path = ? AND e.resolution_method IN ({_det_in_sq})) "
+                        "+ "
+                        "(SELECT COUNT(*) FROM edges e JOIN nodes n ON n.id = e.target_id "
+                        f" WHERE n.file_path = ? AND e.resolution_method IN ({_det_in_sq}))",
+                        (sfp, sfp),
+                    ).fetchone()
+                    if _v and _v[0] > 0:
+                        _verified_seed_files.add(sfp)
+                except sqlite3.Error:
+                    pass
+        _conf_score = len(_verified_seed_files) / max(_seed_diversity, 1)
+        # Composite seed quality: 3 signals, equal weight
+        _seed_quality = (_diversity_score + _anchor_coverage + _conf_score) / 3.0
+        # Gate: grep adds value when quality < 0.5 (below the midpoint).
+        # When quality ≥ 0.5, grep still runs but with a reduced seed limit
+        # (fewer candidates, less noise). Truly zero-gate would always run
+        # at full capacity, which wastes time on well-seeded tasks.
+        # Phase 1 (grep-floor): grep recall is the SEED/FLOOR, not a quality-gated
+        # supplement. Seed quality never gates grep OFF — a high name-match seed
+        # quality must not suppress the string-world recall that is the whole point
+        # (box.style['overflow'] in layout/*.py). Every grep-hit file mapping to a
+        # graph node enters `grep_recalled` (floor membership).
+        # DYNAMIC recall budget: scale grep breadth with repo SIZE (more files -> more
+        # legitimate candidates to recall) and widen further when name-match seed
+        # quality is below the composite midpoint (we lean harder on grep). Per-task,
+        # not a fixed cap; the rails (15..60) are an operational token budget only.
+        _base_limit = max(15, min(60, int(_stats.get("node_count", 0) / 60)))
+        _grep_limit = _base_limit if _seed_quality >= 0.5 else int(_base_limit * 1.6)
+        if repo_root:
+            try:
+                # GREENFIELD wiring (gt_gt §4, 2026-06-10): unresolved code
+                # symbols (0 graph nodes — the feature TO BE BUILT) have no
+                # name-match/FTS5 node to seed; the literal-token grep over
+                # source is their ONLY entry into the candidate set.
+                grep_seeds = _grep_to_seeds(
+                    terms, repo_root, conn, max_seeds=_grep_limit,
+                    priority_tokens=set(getattr(
+                        issue_anchors, "unresolved_code_symbols", None) or set()),
+                )
+                if grep_seeds:
+                    existing_ids = {s[0] for s in seeds}
+                    for gs in grep_seeds:
+                        grep_recalled.add(_normalize(gs[2]))
+                        if gs[0] not in existing_ids:
+                            seeds.append(gs)
+                            existing_ids.add(gs[0])
+                            _seed_provenance[gs[0]] = ("GREP_SEED", "")
+                    _grep_seed_used = True
+                # Grep STRENGTH per recalled file = distinct issue-token coverage
+                # (the same signal grep-only ranks by). Used for within-floor rank
+                # fusion. One read per recalled file (recalled set is small).
+                _gtoks = [t.lower() for t in terms if len(t) >= 4]
+                for _fp in grep_recalled:
+                    try:
+                        _txt = open(os.path.join(repo_root, _fp), encoding="utf-8",
+                                    errors="ignore").read(500_000).lower()
+                        _hit_toks = [t for t in _gtoks if t in _txt]
+                        grep_score_by_file[_fp] = len(_hit_toks)
+                        if _hit_toks:
+                            # Longest matched token = the displayed grep-witness
+                            # token ("grep match: {token}"). Display-only.
+                            _grep_token_by_file[_fp] = max(_hit_toks, key=len)
+                    except OSError:
+                        grep_score_by_file[_fp] = 0
+            except Exception as _grep_err:
+                print(
+                    f"[GT L1] grep-to-seed: FAILED: {_grep_err}",
+                    file=sys.stderr,
+                )
+
+        # FTS5-TO-SEED (mechanism C): BM25 retrieval over the nodes_fts
+        # virtual table. Matches grep's recall by searching function names,
+        # signatures, qualified names, and file paths — but ranks by
+        # relevance. FTS5 candidates are MERGED with name-match + grep seeds.
+        # Graceful fallback: returns [] when nodes_fts doesn't exist.
+        #
+        # Research: BLUiR (ASE 2013) — structured field-level lexical
+        # anchoring beats flat-blob BM25. FTS5 over nodes is structured.
+        _fts5_score_by_file: dict[str, float] = {}
+        _fts5_seed_used = False
+        try:
+            fts5_hits = _fts5_candidates(conn, terms, limit=50)
+            if fts5_hits:
+                existing_ids = {s[0] for s in seeds}
+                for nid, name, fp, bm25_score in fts5_hits:
+                    # Track BM25 score per file (best across nodes in file).
+                    if fp not in _fts5_score_by_file or bm25_score > _fts5_score_by_file[fp]:
+                        _fts5_score_by_file[fp] = bm25_score
+                    # Add as BFS seed if not already present.
+                    if nid not in existing_ids:
+                        seeds.append((nid, name, fp))
+                        existing_ids.add(nid)
+                        _seed_provenance[nid] = ("FTS5_SEED", str(name or ""))
+                _fts5_seed_used = True
+        except Exception as _fts_err:
+            print(
+                f"[GT L1] FTS5-to-seed: FAILED: {_fts_err}",
+                file=sys.stderr,
+            )
+
+        if not seeds:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+            return LocalizerResult([], list(anchors), 0.0, False, "no_anchor_hit")
+
+        # Seed files themselves are hop-0 candidates: the issue named a symbol that
+        # lives there. Witness = self-anchor (the named symbol is defined here).
+        witnesses_by_file: dict[str, list[Witness]] = {}
+
+        # Anchor SUBJECT position: where each anchor symbol first appears in the
+        # issue text. The reporter typically names the BROKEN function as the
+        # subject (earliest mention) — e.g. "set_fields does not parse" puts
+        # set_fields before set_parse. This is a deterministic, generalized
+        # tiebreaker between two co-witnessed seed files (importer.py defines
+        # set_fields, db.py defines set_parse — both verified-witnessed; the one
+        # whose anchor is the issue SUBJECT wins). Lower position = earlier =
+        # stronger subject. Files with no defined anchor get a large sentinel.
+        _it_lower = (issue_text or "").lower()
+        _anchor_pos: dict[str, int] = {}
+        for a in anchors:
+            idx = _it_lower.find(a.lower())
+            _anchor_pos[a] = idx if idx >= 0 else 10**9
+
+        seed_ids = [s[0] for s in seeds]
+        seed_name_by_id = {s[0]: s[1] for s in seeds}
+
+        for sid, name, fp in seeds:
+            if sid not in _exact_seed_ids:
+                # Fix 2026-06-09 (witness provenance): a grep/path/FTS5 seed is a
+                # retrieval ENTRY POINT — the issue did NOT name this symbol.
+                # Minting "defines {name} (issue symbol)" for it fabricated a
+                # verified-grade DEFINES fact (conf 1.0) out of a string/path/BM25
+                # match, which the [VERIFIED] gate, verified-first sort and HIGH
+                # header then consumed as structural truth. These seeds now carry
+                # a seed-typed, UNVERIFIED witness (rendered "grep match: …" /
+                # "path match: …" / "fts5 match: …") at confidence 0.35 — below
+                # the demoted-DEFINES grade (0.45) so an exact-name DEFINES always
+                # outranks them. BFS traversal from these seeds is unchanged.
+                _kind, _tok = _seed_provenance.get(sid, ("SEED", ""))
+                if _kind == "GREP_SEED" and not _tok:
+                    _tok = _grep_token_by_file.get(fp, "")
+                witnesses_by_file.setdefault(fp, []).append(
+                    Witness(
+                        file_path=fp, anchor=name, edge_type=_kind,
+                        direction="defines_anchor", verified=False,
+                        confidence=0.35, hop=0,
+                        src_symbol=_tok or name, dst_symbol=name,
+                    )
+                )
+                continue
+            # A DEFINES seed is a NAME MATCH: "the issue token equals a symbol
+            # defined in this file". For a DISTINCTIVE symbol (set_fields,
+            # aware_now, _to_geo) that is strong localization evidence -> verified
+            # fact. For a GENERIC symbol (__format__, __init__, a dunder) it is
+            # LAUNDERING: __format__ is defined in many files, so a same-name file
+            # (loguru _recattrs.py) must NOT be stamped [VERIFIED] and tie the gold
+            # on the verified-first sort. Non-generic stays a verified fact;
+            # generic drops to name_match-grade so has_verified_witness / the
+            # confidence gate / the [VERIFIED] tier cannot launder it.
+            # (audit: defines-witness-stamped-verified; .claude/CLAUDE.md Pillar 3.)
+            # Demote a HOMONYM definition out of [VERIFIED] (data-derived, repo P95
+            # def-count — is_seed_pollutant), not a hardcoded generic list. __format__
+            # in many files, or a project `Config` defined in 20 files, must NOT be
+            # stamped a verified DEFINES fact and tie the gold on the verified-first
+            # sort; a UNIQUELY-defined domain symbol stays verified even when highly
+            # called (a unique definition is unambiguous — in-degree is NOT a demotion
+            # signal here; Step-2 finding #1). Aider `len(defines[ident])>5: mul*=0.1`
+            # generalized to per-repo P95; never PROMOTE on uniqueness.
+            _def_verified = not is_seed_pollutant(name, conn)
+            witnesses_by_file.setdefault(fp, []).append(
+                Witness(
+                    file_path=fp, anchor=name, edge_type="DEFINES",
+                    direction="defines_anchor", verified=_def_verified,
+                    confidence=1.0 if _def_verified else 0.45,
+                    hop=0, src_symbol=name, dst_symbol=name,
+                )
+            )
+
+        # ---- TRAVERSE: 1..max_hop BFS over CALLS/IMPORTS, both directions ----
+        # Frontier of node-ids; each hop pulls neighbors and records a witness on
+        # the NEIGHBOR's file. We follow neighbor node-ids to extend the BFS, but
+        # the witness is always anchored to the original seed symbol semantics.
+        frontier_ids = list(seed_ids)
+        # Map a frontier node-id -> the seed anchor name it descends from, so a
+        # 2-hop witness still cites the ISSUE anchor, not an intermediate symbol.
+        anchor_of_id: dict[int, str] = {nid: seed_name_by_id[nid] for nid in seed_ids}
+        # Map node-id -> the symbol name at that node (for src/dst rendering).
+        name_of_id: dict[int, str] = dict(seed_name_by_id)
+        visited_ids: set[int] = set(seed_ids)
+
+        for hop in range(1, _dyn_hop + 1):
+            if not frontier_ids:
+                break
+            # OUT edges (frontier symbol CALLS/IMPORTS neighbor) and IN edges
+            # (neighbor CALLS/IMPORTS frontier symbol). We need neighbor node-ids
+            # to continue BFS, so re-query with ids selected.
+            next_ids: list[int] = []
+            for direction, edge_dir in (("out", "called_by_anchor"), ("in", "calls_anchor")):
+                if direction == "out":
+                    match_col, join_col = "e.source_id", "e.target_id"
+                else:
+                    match_col, join_col = "e.target_id", "e.source_id"
+                conf_sel = "e.confidence" if has_conf else "1.0"
+                method_sel = "e.resolution_method" if has_method else "''"
+                tier_sel = "e.trust_tier" if has_trust_tier else "''"
+                for i in range(0, len(frontier_ids), 300):
+                    chunk = frontier_ids[i : i + 300]
+                    ph = ",".join("?" for _ in chunk)
+                    sql = (
+                        f"SELECT {match_col} AS frontier_id, {join_col} AS nbr_id, "
+                        f"n.name, n.file_path, e.type, {conf_sel}, {method_sel}, {tier_sel} "
+                        f"FROM edges e JOIN nodes n ON {join_col} = n.id "
+                        f"WHERE {match_col} IN ({ph}) "
+                        f"AND e.type IN ('CALLS','IMPORTS') AND n.is_test = 0"
+                    )
+                    try:
+                        rows = conn.execute(sql, chunk).fetchall()
+                    except sqlite3.Error:
+                        continue
+                    for fr_id, nbr_id, nbr_name, nbr_file, etype, conf, method, tier in rows:
+                        if nbr_id is None or nbr_file is None:
+                            continue
+                        nbr_id = int(nbr_id)
+                        nbr_file = _normalize(str(nbr_file))
+                        nbr_name = str(nbr_name or "")
+                        try:
+                            conf_f = float(conf) if conf is not None else 0.0
+                        except (TypeError, ValueError):
+                            conf_f = 0.0
+                        verified = _is_verified(method)
+
+                        # ---- CATEGORICAL ADMISSION FILTER (single source of truth)
+                        # _edge_admitted is the ONE predicate shared with the
+                        # path-decay traversal (#54): admit IFF the edge is a FACT
+                        # (deterministic resolution_method) OR confidence >=
+                        # _dyn_conf, with trust_tier='SUPPRESSED' and stdlib-shadow
+                        # name_match edges HARD-EXCLUDED. Sharing it guarantees a file
+                        # can never earn path-decay mass through an edge this BFS
+                        # rejects. CLAUDE.md edge-filter rule + Pillar 4
+                        # (.claude/CLAUDE.md:24 "confidence-gated AT THE FILTER LEVEL").
+                        if not _edge_admitted(verified, conf_f, tier, nbr_name, _dyn_conf):
+                            continue
+
+                        frontier_anchor = anchor_of_id.get(int(fr_id), "")
+                        src_name = name_of_id.get(int(fr_id), frontier_anchor)
+
+                        if edge_dir == "calls_anchor":
+                            src_sym, dst_sym = nbr_name, src_name
+                        else:
+                            src_sym, dst_sym = src_name, nbr_name
+
+                        witnesses_by_file.setdefault(nbr_file, []).append(
+                            Witness(
+                                file_path=nbr_file,
+                                anchor=frontier_anchor or src_name,
+                                edge_type=str(etype or "CALLS"),
+                                direction=edge_dir,
+                                verified=verified,
+                                confidence=conf_f,
+                                hop=hop,
+                                src_symbol=src_sym,
+                                dst_symbol=dst_sym,
+                            )
+                        )
+                        if nbr_id not in visited_ids:
+                            visited_ids.add(nbr_id)
+                            anchor_of_id[nbr_id] = frontier_anchor or src_name
+                            name_of_id[nbr_id] = nbr_name
+                            next_ids.append(nbr_id)
+            frontier_ids = next_ids
+
+        if not witnesses_by_file:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+            return LocalizerResult([], list(anchors), 0.0, False, "no_witness",
+                                   graph_stats=_stats)
+
+        # ---- PATH DECAY SCORING (KGCompass-style) ----
+        # Dijkstra-style BFS from ALL seed nodes. Edge weight = 1/confidence,
+        # so verified import edges (1.0) are cheap and speculative name_match
+        # edges (0.4) are expensive. Score = beta^cost. This adds a CONTINUOUS
+        # decay signal on top of the discrete hop count in witnesses.
+        _path_decay_by_file: dict[str, float] = {}
+        try:
+            _path_decay_by_file = _path_decay_scores(
+                conn, seed_ids, has_conf,
+                max_hop=_dyn_hop, beta=0.85, min_edge_conf=_dyn_conf,
+                has_method=has_method, has_trust_tier=has_trust_tier,
+            )
+        except Exception:
+            pass
+
+        # ---- RERANK ----
+        all_files = set(witnesses_by_file.keys())
+        degrees = _file_degrees(conn, all_files)
+        # Pre-compute role discounts for DEFINES-witness functions (Herbold 2019).
+        # Checks the SPECIFIC function that matched the issue keyword, not
+        # the file's largest function. Must run before conn closes.
+        _role_discounts: dict[str, float] = {}
+        for fp, wits in witnesses_by_file.items():
+            defines_wits = [w for w in wits if w.direction == "defines_anchor"]
+            if defines_wits:
+                # Use the strongest DEFINES witness's anchor (the function name)
+                best_def = max(defines_wits, key=lambda w: w.strength())
+                _role_discounts[fp] = _role_discount_for_function(
+                    conn, fp, best_def.anchor
+                )
+        # Downgrade DEFINES witnesses for Herbold-trivial functions
+        # (SLOC<=4, fan_out=0). A trivial function matching an issue keyword
+        # by name is NOT a verified structural fact — it's a lexical coincidence.
+        # Demoting verified→unverified moves it from the verified bucket to
+        # the unverified bucket in the sort, so structural-edge-witnessed
+        # files rank above it. Research: Herbold PeerJ 2019 (90%+ NotFaulty).
+        for fp, rd in _role_discounts.items():
+            if rd <= 0.2:
+                new_wits = []
+                for w in witnesses_by_file.get(fp, []):
+                    if w.direction == "defines_anchor" and w.verified:
+                        new_wits.append(Witness(
+                            file_path=w.file_path, anchor=w.anchor,
+                            edge_type=w.edge_type, direction=w.direction,
+                            verified=False, confidence=0.45,
+                            hop=w.hop, src_symbol=w.src_symbol,
+                            dst_symbol=w.dst_symbol,
+                        ))
+                    else:
+                        new_wits.append(w)
+                witnesses_by_file[fp] = new_wits
+
+        _has_conf_for_chains = has_conf
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    # Per-file SUBJECT position: the earliest issue-text position of any anchor
+    # this file DEFINES (hop-0). A file defining the subject function (set_fields,
+    # named first) gets a lower position than one defining the object (set_parse).
+    _subject_pos_by_file: dict[str, int] = {}
+    for fp, wits in witnesses_by_file.items():
+        best = 10**9
+        for w in wits:
+            if w.direction == "defines_anchor":
+                best = min(best, _anchor_pos.get(w.anchor, 10**9))
+        _subject_pos_by_file[fp] = best
+
+    # Rank the DEFINING files by subject position so the earliest-mentioned-anchor
+    # file gets the full subject bonus and later ones decay. Files that define no
+    # anchor (pure graph neighbors) get 0. Deterministic, generalized.
+    _defining_files = sorted(
+        (fp for fp, p in _subject_pos_by_file.items() if p < 10**9),
+        key=lambda fp: (_subject_pos_by_file[fp], fp),
+    )
+    _subject_bonus_by_file: dict[str, float] = {
+        fp: 1.0 / (1.0 + rank) for rank, fp in enumerate(_defining_files)
+    }
+
+    # Normalize BM25 scores to [0, 1] over the candidate set for composite.
+    _bm25_vals = [v for v in _fts5_score_by_file.values() if v > 0]
+    _bm25_max = max(_bm25_vals) if _bm25_vals else 1.0
+
+    # Normalize path decay scores to [0, 1] over the candidate set.
+    _decay_vals = [v for v in _path_decay_by_file.values() if v > 0]
+    _decay_max = max(_decay_vals) if _decay_vals else 1.0
+
+
+    # TEST-TOOLING demote (vendored assertion/debug libs imported only by tests, e.g.
+    # internal/testify, internal/spew — escape the vendor/ markers, lexically match an
+    # issue's error/panic vocabulary, and out-rank the real gold; NEVER a feature edit
+    # target). Graph-derived from IMPORTS edges (no library names), reuses the EXISTING
+    # test-file demote magnitude (no new weight/threshold). Computed ONCE.
+    try:
+        from groundtruth.delivery.path_policy import (
+            test_tooling_roots as _tt_roots_fn, is_test_tooling as _is_tt,
+        )
+        _tt_roots = _tt_roots_fn(graph_db) if graph_db else frozenset()
+    except Exception:
+        _tt_roots = frozenset()
+
+        def _is_tt(fp: str, roots: frozenset) -> bool:
+            return False
+
+    candidates: list[Candidate] = []
+    _cand_subject_pos: dict[str, int] = {}
+    for fp, wits in witnesses_by_file.items():
+        best_strength = max((w.strength() for w in wits), default=0.0)
+        stem = os.path.splitext(os.path.basename(fp))[0].lower()
+        symset = {stem}
+        for w in wits:
+            symset.add(w.src_symbol.lower())
+            symset.add(w.dst_symbol.lower())
+        lex_hits = sum(1 for t in terms if _lex_hit(t, symset))
+        lex_norm = min(1.0, lex_hits / 5.0)
+        deg = degrees.get(fp, 0)
+        deg_norm = math.tanh(deg / _HUB_SCALE)
+        subject_bonus = _subject_bonus_by_file.get(fp, 0.0)
+
+        bm25_raw = _fts5_score_by_file.get(fp, 0.0)
+        bm25_norm = (bm25_raw / _bm25_max) if _bm25_max > 0 else 0.0
+        decay_raw = _path_decay_by_file.get(fp, 0.0)
+        decay_norm = (decay_raw / _decay_max) if _decay_max > 0 else 0.0
+
+        _rd = _role_discounts.get(fp, 1.0)
+        _best_wit = max(wits, key=lambda w: w.strength()) if wits else None
+        _best_is_defines = _best_wit and _best_wit.direction == "defines_anchor"
+        _text_discount = _rd if _best_is_defines else 1.0
+        _raw_score = (
+            W_BM25 * bm25_norm * _text_discount
+            + W_PATH_DECAY * decay_norm * _text_discount
+            + W_WITNESS * best_strength * _text_discount
+            + W_LEX * lex_norm * _text_discount
+            + W_SUBJECT * subject_bonus * _text_discount
+            + W_DEGREE * deg_norm
+        )
+        _weight_sum = W_BM25 + W_PATH_DECAY + W_WITNESS + W_LEX + W_SUBJECT + W_DEGREE
+        score = _raw_score / _weight_sum if _weight_sum > 0 else _raw_score
+        if _is_generated(fp):
+            score -= 0.5
+        _tt_on = os.environ.get("GT_TEST_TOOLING_DEMOTE", "1") != "0"  # default ON; "0"=A/B baseline
+        if _is_test_file(fp) or (_tt_on and _is_tt(fp, _tt_roots)):
+            score -= 0.4
+        candidates.append(
+            Candidate(
+                file_path=fp,
+                score=round(score, 6),
+                witnesses=sorted(wits, key=lambda w: -w.strength()),
+                lex_hits=lex_hits,
+                degree=deg,
+                confidence=round(best_strength, 6),
+            )
+        )
+        _cand_subject_pos[fp] = _subject_pos_by_file.get(fp, 10**9)
+
+    # SWERank hard-negative ordering with structural-edge refinement.
+    # Four tiers:
+    #   0 = verified CLOSE structural witness (CALLS/IMPORTS at hop <=1)
+    #   1 = verified DISTANT structural (hop >=2) — a real edge, just far  (BUG-4: 1a)
+    #   2 = verified DEFINES only — name-equality, NOT a structural fact   (BUG-4: 1b)
+    #   3 = unverified witness only
+    #   4 = no witness
+    # BUG-4 (2026-06-15): the old tier 1 collapsed "verified DEFINES" and "verified
+    # DISTANT structural" into ONE bucket, so a name-equality DEFINES tied a real
+    # (if distant) CALLS/IMPORTS edge. A verified distant edge is a structural FACT;
+    # a DEFINES is only a same-name coincidence (Witness.strength already caps it
+    # below the weakest verified edge). Split them: distant-structural ABOVE
+    # defines-only. The prior worry — "don't let a far edge beat the file defining
+    # the BROKEN function" — is handled by the SUBJECT-POSITION key (BUG-2), which
+    # lifts the file defining the first-named/broken function regardless of tier.
+    _witness_tier = _struct_witness_tier
+
+    # Phase 2 (GREP FLOOR): grep recall is the floor. A grep-recalled file may NEVER
+    # be demoted below a non-recalled one by any name-equality signal (witness tier,
+    # subject, lex). PRIMARY sort key; the existing structural ordering only reorders
+    # WITHIN a floor bucket. When grep did not run (grep_recalled empty) the floor is
+    # a no-op and the legacy ordering stands unchanged (backward compatible).
+    #
+    # Phase 4 (INJECTION_PLACEMENT): a non-recalled candidate that depth INJECTED sits
+    # strictly below the floor (default) or, under interleave_short_deterministic,
+    # joins the floor iff it has a <=1-hop deterministic-edge witness.
+    _have_floor = bool(grep_recalled)
+
+    def _grep_floor(c: Candidate) -> int:
+        if not _have_floor:
+            return 0
+        if _normalize(c.file_path) in grep_recalled:
+            return 0
+        if INJECTION_PLACEMENT == "interleave_short_deterministic" and any(
+            w.verified and w.direction != "defines_anchor" and w.hop <= 1
+            for w in c.witnesses
+        ):
+            return 0
+        return 1
+
+    # Phase 3 (EDGE-vs-STRING discriminator): a NON-recalled candidate earns a rank
+    # slot only if it reaches the recalled set as an EDGE — a verified non-DEFINES
+    # CALLS/IMPORTS witness (deterministic structural reach). A non-recalled file
+    # whose only evidence is a DEFINES (name-equality) or unverified witness is a
+    # string-world coincidence (the `overflow` validator case): verified-but-
+    # irrelevant -> it sinks below everything (content-only, never displaces grep
+    # recall). No-op for grep-recalled files (authority comes from recall, not depth).
+    def _depth_authority(c: Candidate) -> int:
+        if not _have_floor or _normalize(c.file_path) in grep_recalled:
+            return 0
+        has_edge_reach = any(
+            w.verified and w.direction != "defines_anchor" for w in c.witnesses
+        )
+        return 0 if has_edge_reach else 1
+
+    # ---- WITHIN-FLOOR RANK FUSION (fixes the go-cli regression) ----
+    # Order grep-recalled candidates by the BETTER of two ranks: their grep rank
+    # (lexical token coverage) and their structural rank (witness tier + score). A
+    # file that is #1 in EITHER ranker floats up — so a lexically-strong gold
+    # (grep #1, structurally weak among many same-named files: go-cli api.go) is no
+    # longer buried by structural-only reranking, while structural wins (ts/js/py)
+    # are kept. Hybrid (two independent rankers), per-task (ranks from this task's
+    # own distributions), no tuned threshold. Rank fusion / CombMIN (Fox & Shaw
+    # TREC-2 1994); cf. Reciprocal Rank Fusion (Cormack et al. SIGIR 2009).
+    # BUG-2 (2026-06-15): the struct order tie-broke on `-c.score` then `c.file_path`.
+    # When the subject-defining file (the one that DEFINES the issue's first-named,
+    # i.e. BROKEN, function) and its callee both carry an equal-strength verified
+    # hop-0 witness, the callee's in-degree/BM25 mass tips the composite `score` a
+    # hair above the subject file (measured beets set_fields/set_parse: callee 0.6706
+    # vs subject 0.6540), and an alphabetically-earlier callee path then seals the cap
+    # slot. The edit target is the file defining the broken function, not its callee.
+    # Lift SUBJECT POSITION above `-c.score` (relevance before composite noise), then
+    # `-confidence` (best-witness strength) and `-lex_hits` before the path string —
+    # the path is the LAST resort, never a relevance decider. Subject position is a
+    # per-task issue-text signal (no repo/task IDs); ties on it fall back to the old
+    # `-score` ordering, so this is a strict refinement of the prior key.
+    _struct_order = sorted(
+        candidates,
+        key=lambda c: (_witness_tier(c),
+                       _cand_subject_pos.get(c.file_path, 10**9),
+                       -c.score, -c.confidence, -c.lex_hits, c.file_path),
+    )
+    _struct_rank = {id(c): i for i, c in enumerate(_struct_order)}
+    _grecalled = sorted(
+        (c for c in candidates if _normalize(c.file_path) in grep_recalled),
+        key=lambda c: (-grep_score_by_file.get(_normalize(c.file_path), 0), c.file_path),
+    )
+    _grep_rank = {id(c): i for i, c in enumerate(_grecalled)}
+    _BIG = 10**6
+    # WITHIN-FLOOR ORDER = GREP SPINE + SPECIFIC-EVIDENCE PROMOTION.
+    # Held-out lesson (flow-traced on sqllineage/privacyidea): structural reranking by
+    # witness VOLUME is net-harmful vs grep — hub files with 100s of generic witnesses
+    # buried the specific gold, and neither RRF nor degree-normalization fixed it. So
+    # grep order is the SPINE; the graph PROMOTES a file above grep order ONLY when it
+    # carries a verified, non-DEFINES (edge) witness anchored on an ISSUE symbol —
+    # specific structural evidence, never popularity. Hubs have volume but no
+    # issue-anchored witness, so they do not promote and grep order stands: GT MATCHES
+    # grep where it has no specific signal, and only BEATS grep where the graph sees a
+    # real issue-anchored edge grep cannot. SWERank retrieve->rerank applied
+    # conservatively (promote-only). struct_rank is a tiebreaker, never a demoter.
+    # SEMANTIC RANKER — the issue->code bridge grep and graph cannot cross. Dense
+    # cosine between the issue and each candidate file's code content (names +
+    # docstrings + call_order/guards from the graph). This is the signal that finally
+    # localizes the cases where the gold shares NO surface tokens with the issue
+    # (weasyprint overflow->block_box_layout; sqllineage MetaDataProvider->create_insert).
+    # Fused with grep (lexical) and struct (graph) by 3-way Reciprocal Rank Fusion —
+    # ONE pipeline, three signals. No-op (deterministic) when no embedder is available.
+    #
+    # ENCODE ONLY WHAT GETS RANKED (fix 2026-06-09; run 27249519544: 29/113 tasks
+    # SIGKILL exit-137 during BRIEF generation on big repos): this used to score the
+    # FULL pre-truncation candidate set — hundreds of witnessed files × ≤80
+    # ONNX-encoded passages per task, before the top_k cut below. The semantic pool
+    # is now the top _sem_pool_files(top_k) candidates under the DETERMINISTIC
+    # pre-semantic ordering (grep floor, depth authority, 2-way grep+struct RRF —
+    # the SAME primary keys as the final sort). Soundness of the cap: the semantic
+    # term can only ADD RRF mass, pool members are exactly the candidates with the
+    # most 2-way mass within each (floor, authority) stratum, and every non-pool /
+    # unscored candidate falls to rank _BIG in _sem_rank — so at least pool-size
+    # candidates always outrank any non-pool candidate and the final top_k window
+    # is ALWAYS a subset of the pool. The agreement vote's semantic top-3 is
+    # therefore computed over every candidate that can actually render. What is
+    # given up: a candidate BELOW the pool cutoff can no longer be promoted into
+    # the window by semantic rank alone (bounded beats killed).
+    def _rrf2(c: Candidate) -> float:
+        return (1.0 / (60 + _grep_rank.get(id(c), _BIG))
+                + 1.0 / (60 + _struct_rank.get(id(c), _BIG)))
+
+    _sem_pool = sorted(
+        candidates,
+        key=lambda c: (_grep_floor(c), _depth_authority(c), -_rrf2(c), c.file_path),
+    )[:_sem_pool_files(top_k)]
+    # R1: capture the per-symbol semantic scores (previously discarded) so the
+    # symbol-naming stage can rank within-file leaves by the same signal. The float
+    # return is unchanged; _symbol_semrank stays {} when the embedder is off.
+    _symbol_semrank: dict[str, list[tuple[str, float]]] = {}
+    _sem = _semantic_score_by_file(
+        issue_text, graph_db, [c.file_path for c in _sem_pool],
+        symbol_scores_out=_symbol_semrank,
+    )
+    # Rank ONLY scored candidates: a file with no semantic score (outside the pool,
+    # over the encode budget, or no embeddable symbols) must fall to rank _BIG
+    # (≈0 RRF mass) — never inherit a small list-position rank from a 0.0 default.
+    _sem_order = sorted(
+        (c for c in candidates if _normalize(c.file_path) in _sem),
+        key=lambda c: -_sem.get(_normalize(c.file_path), 0.0),
+    ) if _sem else []
+    _sem_rank = {id(c): i for i, c in enumerate(_sem_order)}
+
+    # ---- MULTI-SIGNAL AGREEMENT COUNT (the grep-floor build) ----
+    # For each candidate, count how many of the THREE independent rankers
+    # (grep / structural / semantic) place it in their OWN top-3. This is a
+    # multi-signal AGREEMENT measure, not a structural-witness count: a file the
+    # three independent signals all surface near the top is far more likely the
+    # edit target than one only the graph (structure) witnesses. The graded
+    # header consumes this so `<gt-localization confidence=X>` means "X of the 3
+    # signals agree." The within-floor sort is NOT touched — this only OBSERVES
+    # the rank dicts. _sem_rank is absent when no embedder is available, so the
+    # max attainable agreement is 2 in the deterministic (no-semantic) path.
+    # Research: Reciprocal Rank Fusion (Cormack et al. SIGIR 2009) / CombMIN
+    # (Fox & Shaw TREC-2 1994) — cross-ranker agreement is a stronger relevance
+    # signal than any single ranker's score.
+    _TOP_N_AGREE = 3
+    _agreement_by_file: dict[str, int] = {}
+    for c in candidates:
+        _agree = 0
+        if _grep_rank.get(id(c), _BIG) < _TOP_N_AGREE:
+            _agree += 1
+        if _struct_rank.get(id(c), _BIG) < _TOP_N_AGREE:
+            _agree += 1
+        if _sem_rank and _sem_rank.get(id(c), _BIG) < _TOP_N_AGREE:
+            _agree += 1
+        _fnorm = _normalize(c.file_path)
+        # A file may have multiple candidate rows; keep the MAX agreement seen.
+        if _agree > _agreement_by_file.get(_fnorm, -1):
+            _agreement_by_file[_fnorm] = _agree
+
+    def _rrf3(c: Candidate) -> float:
+        s = 1.0 / (60 + _grep_rank.get(id(c), _BIG)) + 1.0 / (60 + _struct_rank.get(id(c), _BIG))
+        if _sem_rank:
+            s += 1.0 / (60 + _sem_rank.get(id(c), _BIG))
+        return s
+
+    # BUG-2 (2026-06-15): the final sort tie-broke `-_rrf3` ties on `c.file_path` ASC
+    # — with the embedder off and no grep recall, `_rrf3` collapses to
+    # `1/(60+struct_rank)` and rounded-score ties hand the cap slot to whichever path
+    # sorts alphabetically first (a string-world coincidence). Insert relevance-bearing
+    # keys BEFORE the path: best-witness strength, then lex_hits, then subject position.
+    # The path string is the LAST resort. No-op when `_rrf3` already separates (the
+    # common case); load-bearing only on exact ties (grep-floor-only / no-embedder).
+    candidates.sort(
+        key=lambda c: (
+            _grep_floor(c),          # Phase 2: grep recall floor (PRIMARY)
+            _depth_authority(c),     # Phase 3: string-world non-recalled sinks
+            -_rrf3(c),               # lexical + structural + SEMANTIC rank fusion
+            *_final_relevance_key(c, _cand_subject_pos),  # relevance before the path string
+        )
+    )
+    # Diagnostic-only (env-gated, stderr, zero behavior change): per-candidate
+    # component ranks so a parity audit can see WHICH ranker (grep/struct/sem)
+    # buries a known-gold candidate. Off unless GT_LOCALIZE_DEBUG is set.
+    if os.environ.get("GT_LOCALIZE_DEBUG"):
+        import sys as _sys
+        for _i, _c in enumerate(candidates[:25], start=1):
+            _sys.stderr.write(
+                f"[L1DBG] #{_i:2} {os.path.basename(_c.file_path):28} "
+                f"grep={_grep_rank.get(id(_c), -1)} struct={_struct_rank.get(id(_c), -1)} "
+                f"sem={_sem_rank.get(id(_c), -1)} floor={_grep_floor(_c)} "
+                f"depth={_depth_authority(_c)} score={_c.score}\n"
+            )
+    candidates = candidates[:top_k]
+
+    # ---- SCOPE CHAINS (structural edit-scope from graph edges) ----
+    # Opens its own connection — the BFS conn is already closed above.
+    _chains: list[ScopeChain] = []
+    try:
+        _sc_conn = sqlite3.connect(graph_db)
+        try:
+            _chains = _build_scope_chains(candidates, _sc_conn, _has_conf_for_chains)
+        finally:
+            _sc_conn.close()
+    except Exception:
+        pass
+
+    # WIDE edit-set telemetry (Task-2 slice 1, additive): connected-component count
+    # among the top candidates under the typed-edge union-find. Each multi-file chain
+    # is one component; every top candidate NOT pulled into a chain is its own
+    # singleton component. 0 when there is nothing to scope. Pure observation of the
+    # chains already built — no extra query, no effect on ranking.
+    _n_components = 0
+    if candidates:
+        _chained_files = {_normalize(f) for ch in _chains for f in ch.files}
+        _singletons = sum(
+            1 for c in candidates if _normalize(c.file_path) not in _chained_files
+        )
+        _n_components = len(_chains) + _singletons
+
+    # ---- CONFIDENCE GATE (data-derived, per-task) ----
+    # Two-stage gate: (1) structural evidence check, (2) score-separation check.
+    #
+    # Stage 1 checks whether the top candidate has verified structural edges.
+    # Stage 2 validates whether the score distribution actually discriminates
+    # the top candidate from the rest — preventing the "confident-but-wrong"
+    # failure where verified witnesses exist everywhere but the ranking is flat.
+    #
+    # Research basis for Stage 2:
+    #   - NQC / QPP (Shtok et al. SIGIR 2012, revisited 2019): score stdev as
+    #     a retrieval confidence proxy; low variance = flat ranking = uncertain.
+    #   - Score gap (QPP since Cronen-Townsend SIGIR 2002): simplest confidence
+    #     signal; calibrated per-task via MAD (not absolute threshold).
+    #   - DEFINES witness ratio (data-derived, 0.80σ separation on holdout):
+    #     high ratio = evidence is lexical name-match, not structural edges.
+    #   - TOIS 2025 caveat: QPP thresholds don't transfer across collections,
+    #     so all checks use per-task distribution metrics (MAD, CV), not absolutes.
+    best = candidates[0]
+    if not best.has_verified_witness:
+        return LocalizerResult(
+            candidates, list(anchors), best.confidence, False, "top_unverified",
+            scope_chains=_chains, graph_stats=_stats,
+            agreement_by_file=_agreement_by_file, n_components=_n_components,
+            symbol_semrank_by_file=_symbol_semrank,
+        )
+
+    verified = [c for c in candidates if c.has_verified_witness]
+    scores = sorted((c.score for c in candidates), reverse=True)
+
+    if len(candidates) == 1:
+        confident, gate_reason = True, "single_verified_candidate"
+    elif len(verified) >= 2 and all(c.score > 0 for c in verified):
+        confident, gate_reason = True, f"verified_cluster(n={len(verified)})"
+    else:
+        _dt = dynamic_cutoff(list(scores))
+        confident = bool(_dt.tiers) and _dt.tiers[0] == "high"
+        _top_tier = _dt.tiers[0] if _dt.tiers else "none"
+        gate_reason = f"top_tier={_top_tier} median={_dt.median:.3f}"
+
+    # ---- STAGE 2: score-separation check (QPP-inspired) ----
+    # Even with verified witnesses, if the score distribution is flat the
+    # system cannot distinguish #1 from #2 and should not stamp "primary
+    # target." Three intrinsic signals vote; if >=2 fire, downgrade.
+    if confident and len(candidates) >= 2:
+        _sep_flags = 0
+        _sep_parts: list[str] = []
+
+        # Signal 1: score gap < MAD (per-task, dynamic).
+        # MAD = median absolute deviation of all candidate scores.
+        # If the gap between the top-2 SCORES is within 1 MAD, it's noise.
+        # BUG-2 follow-through (2026-06-15): the gap is the spread between the two
+        # HIGHEST RAW SCORES (`scores` is already score-sorted desc), NOT the signed
+        # difference between positions 0 and 1 of `candidates`. Since BUG-2 reorders
+        # `candidates` by RELEVANCE (subject position can put a slightly-lower-raw-
+        # score subject file at index 0), `candidates[0].score - candidates[1].score`
+        # could go NEGATIVE and spuriously trip this flatness check on a perfectly
+        # separated distribution. The score distribution's flatness is a property of
+        # the SCORES, independent of presentation order.
+        _all_scores = [c.score for c in candidates]
+        _median_s = statistics.median(_all_scores)
+        _mad = statistics.median([abs(s - _median_s) for s in _all_scores])
+        _gap = scores[0] - scores[1]
+        if _mad > 0 and _gap < _mad:
+            _sep_flags += 1
+            _sep_parts.append(f"gap<MAD({_gap:.4f}<{_mad:.4f})")
+
+        # Signal 2: defines ratio > 0.5 in top-5 (categorical evidence check).
+        # DEFINES witnesses = lexical name match only, no structural edge.
+        # High ratio = the localizer found names, not call/import edges.
+        _top5 = candidates[:5]
+        _total_wit = sum(len(c.witnesses) for c in _top5)
+        _defines_wit = sum(
+            1 for c in _top5 for w in c.witnesses
+            if w.direction == "defines_anchor"
+        )
+        _def_ratio = _defines_wit / _total_wit if _total_wit > 0 else 0.0
+        if _def_ratio > 0.5:
+            _sep_flags += 1
+            _sep_parts.append(f"defines={_def_ratio:.2f}>0.5")
+
+        # Signal 3: coefficient of variation < 0.03 in top-5 (flat scores).
+        # CV = stdev / mean; low CV = all top candidates score nearly the same.
+        _top5_scores = [c.score for c in _top5]
+        if len(_top5_scores) >= 2:
+            _cv_mean = statistics.mean(_top5_scores)
+            _cv = statistics.stdev(_top5_scores) / _cv_mean if _cv_mean > 0 else 0.0
+            if _cv < 0.03:
+                _sep_flags += 1
+                _sep_parts.append(f"cv={_cv:.4f}<0.03")
+
+        if _sep_flags >= 2:
+            confident = False
+            gate_reason = f"score_separation_fail({'+'.join(_sep_parts)})"
+            import sys
+            print(
+                f"[GT L1] score-separation downgrade: {gate_reason}",
+                file=sys.stderr,
+            )
+
+    return LocalizerResult(
+        candidates, list(anchors), best.confidence, confident, gate_reason,
+        scope_chains=_chains, graph_stats=_stats,
+        agreement_by_file=_agreement_by_file, n_components=_n_components,
+        symbol_semrank_by_file=_symbol_semrank,
+    )

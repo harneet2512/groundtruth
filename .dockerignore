@@ -1,0 +1,34 @@
+# Git and IDE
+.git
+.gitignore
+.cursor
+.vscode
+*.md
+!README.md
+
+# Python
+__pycache__
+*.py[cod]
+*.egg-info
+.eggs
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+*.db
+*.sqlite
+.groundtruth
+
+# Tests (benchmarks/ is needed for harness and case JSONs)
+tests/
+
+# Node (if any)
+node_modules
+dist
+
+# Misc
+.DS_Store
+*.log
+.env
+.env.*

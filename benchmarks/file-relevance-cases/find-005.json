@@ -1,0 +1,8 @@
+{
+  "id": "find-005",
+  "language": "typescript",
+  "task": "add login rate limiting to prevent brute force attacks",
+  "entry_symbols": ["login"],
+  "expected_files": ["src/auth/login.ts"],
+  "should_not_include": ["src/utils/dates.ts"]
+}

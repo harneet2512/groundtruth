@@ -1,0 +1,17 @@
+{
+  "id": "mp-006",
+  "category": "missing-package",
+  "description": "Import cors (not in package.json)",
+  "input": {
+    "code": "import cors from 'cors';\n\napp.use(cors());",
+    "filePath": "src/app.ts"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "package_not_installed",
+    "fixType": "none",
+    "correctSymbol": "cors",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": false
+  }
+}

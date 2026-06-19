@@ -1,0 +1,17 @@
+{
+  "id": "ws-014",
+  "category": "wrong-signature",
+  "description": "sanitizeInput() called with 0 args instead of 1",
+  "input": {
+    "code": "import { sanitizeInput } from './utils/validation';\n\nconst clean = sanitizeInput();",
+    "filePath": "src/app.ts",
+    "intent": "sanitize user input"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "signature_mismatch",
+    "correctSymbol": "sanitizeInput",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

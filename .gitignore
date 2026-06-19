@@ -1,0 +1,195 @@
+node_modules/
+dist/
+*.js.map
+*.d.ts
+!src/**/*.d.ts
+
+# Secrets — never commit
+.env
+.env.*
+
+# SQLite databases (generated at runtime)
+*.db
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+
+# GroundTruth
+.groundtruth/
+
+# Coverage
+coverage/
+
+# Benchmarks
+benchmarks/results/
+benchmarks/experiments/results/
+benchmarks/verify/results/
+
+# IDE
+.vscode/
+.idea/
+
+# GCP credentials (never commit)
+*sa_key*.json
+*credentials*.json
+*service-account*.json
+gcp_key*.json
+
+# Claude Code local state
+.claude/skills/
+.claude/settings.local.json
+
+# gstack local state (security reports, analytics)
+.gstack/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+
+# Logs
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+htmlcov/
+
+# Local-only docs (not tracked in git)
+CURSOR_START.md
+FINDINGS.md
+INITIAL_PROMPT.md
+PLAN_REVIEW.md
+PRD.md
+START.md
+TODOS.md
+audit_report.md
+benchmarks.md
+tmp_*.py
+tmp_*.sh
+
+# Internal analysis (saved locally, not for GitHub)
+*_ANALYSIS.md
+*_RESULTS.md
+FINDINGS.md
+TODOS.md
+newtodos.md
+PRD.md
+PROGRESS.md
+SCENARIO.md
+SESSION_*.md
+PLAN_REVIEW.md
+START.md
+CURSOR_START.md
+INITIAL_PROMPT.md
+LEADERBOARD_*.md
+gt-theory.md
+gt_research_sprint.md
+benchmark_update.md
+audit_report.md
+screenshots/
+screenshots_v2/
+groundtruth_cityview.gif
+cityview_*.html
+
+# Go binary (built locally, released via CI)
+gt-index/gt-index.exe
+gt-index/gt-index
+bin/gt-index-linux
+
+# Test temp files
+*.test.ts.tmp.*
+
+# Memory folder (local notes)
+Memory/
+# BUT ship JUST the ONNX semantic loader chain (embed.py + its package __init__s) — it
+# was silently caught by the case-insensitive "Memory/" rule, so semantic was OFF in the
+# container (the loader never shipped). Idiom: re-include the dir, re-exclude its
+# contents, then re-include ONLY the embedder files (not the 54-file memory subsystem,
+# not __pycache__).
+!src/groundtruth/memory/
+src/groundtruth/memory/*
+!src/groundtruth/memory/__init__.py
+!src/groundtruth/memory/enrich/
+src/groundtruth/memory/enrich/*
+!src/groundtruth/memory/enrich/__init__.py
+!src/groundtruth/memory/enrich/embed.py
+.llm_config/
+*.key
+
+# local-only VM/GCP handoff — NEVER commit (contains project ID)
+GT_VM_HANDOFF.md
+
+# GCP rules doc — names the project, NEVER commit
+gcp_fuckery.md
+
+# run archive: keep records, not reproducible binaries
+.claude/reports/runs/**/*.db
+.claude/reports/runs/**/graph.db
+
+# generated submission packages (re-create with package_submission.py)
+submissions/**/trajs/
+submissions/**/logs/
+
+# full-runtime proof reports/docs — kept LOCAL-ONLY (copied to Downloads), NOT pushed to GitHub
+/GO_NO_GO.md
+/PIPELINE_PROOF_REPORT.md
+/STAGE4_RUNTIME_STRATEGY_DECISION.md
+/LSP_LIVENESS_REPORT.md
+/GRAPH_HANDOFF_REPORT.md
+/EMBEDDER_USAGE_REPORT.md
+/PHASE0_RUNTIME_MAP.md
+/docs/SWE_LIVE_LITE_OH_GT_INTEGRATION_HANDOFF.md
+/docs/DEEPSWE_GT_INTEGRATION_HANDOFF.md
+/LSP_STAMPING_DISCREPANCY_REPORT.md
+# gt-index local build/test strays
+gt-index/*.exe
+gt-index/runs/
+*.db-shm
+*.db-wal
+
+# SECRET-LEAK GUARD (2026-06-10): run artifacts embed pier PROXY_TOKEN + verbatim agent
+# trajectories — NEVER commit. Reports/ledgers are LOCAL-ONLY ("only code goes").
+.claude/reports/runs/
+task_ledgers/
+**/docker-compose-egress-proxy.json
+**/mini-swe-agent.trajectory.json
+**/*.trajectory.json
+**/gt_artifacts/
+
+# one-shot scratch + pulled GHA artifacts (may embed secrets) — never commit
+gha_latest_artifacts/
+.tmp_test_*
+.tmp_*
+
+# build artifact — never commit (rebuilt via golang container)
+gt-index/gt-index-linux
+gt-index/gt-index*.exe
+
+# internal audit + run artifacts — never publish
+.claude/reports/
+.claude/CURRENT_VALIDATION_RUN.json
+
+# GITHUB REPO IS CODE-ONLY (CLAUDE.md line 1) — docs/reports are LOCAL working artifacts
+/gt_math.md
+/gt_gt.md
+/gt_new.md
+/gt_trial.md
+/jedi_WORK.md
+/*_AUDIT*.md
+/*_REPORT*.md
+/GO_NO_GO*.md
+/SESSION_SUMMARY*.md
+/RUN_LEDGER*.md
+/DOC_OF_HONOR.md
+/BRIEFING.md
+.tmp_gt_*/
+.tmp_*/

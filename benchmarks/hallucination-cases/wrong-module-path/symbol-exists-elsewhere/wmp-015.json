@@ -1,0 +1,20 @@
+{
+  "id": "wmp-015",
+  "category": "wrong-module-path",
+  "subcategory": "symbol-exists-elsewhere",
+  "description": "User type imported from './auth' instead of './users'",
+  "input": {
+    "code": "import { User } from './auth';\n\nfunction getProfile(user: User) { return user; }",
+    "filePath": "src/app.ts",
+    "intent": "use User type"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "cross_file_resolution",
+    "correctSymbol": "User",
+    "correctImport": "src/users",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

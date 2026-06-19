@@ -1,0 +1,10 @@
+{
+  "expected_return": {
+    "first_edit_misses_focus": false,
+    "root_scaffold_added": false,
+    "edits_outside_cluster_count_min": 1,
+    "graph_distance_growth_min": 0.0,
+    "downstream_replan_stage_must_be": "corrective"
+  },
+  "expected_kernel_event": null
+}
