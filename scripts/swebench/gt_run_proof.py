@@ -646,13 +646,10 @@ def aggregate_lsp_verdicts(lang_verdicts: dict, *, require_lsp: bool, any_succes
     Genuinely-unknown languages (LSP_UNSUPPORTED_EXPLICIT) and the valid verdicts
     (LSP_ACTIVE_VALID / LSP_NO_OP_VALID_WITH_WARM_SERVER) are never failures.
 
-    FIX-A: any LSP_WARN_* verdict (NOT_READY / ZERO_CONVERSION / NOT_ATTEMPTED) is a
-    graph-QUALITY shortfall on a LIVE, warm-or-launched server (Go/Rust dep-env
-    incomplete offline), NOT a liveness failure. These do NOT match the failure
-    predicate below, so a Go/Rust task with a warm-but-unproductive server reaches
-    the agent with its tree-sitter graph instead of dying at lsp_pass. Only a
-    NEVER-LAUNCHED server (LSP_FAIL_NO_WARM) or a missing binary (LSP_INSTALL_MISSING)
-    is a hard fail.
+    Any LSP_WARN_* verdict (NOT_READY / ZERO_CONVERSION / NOT_ATTEMPTED) is a
+    degraded proof. Under GT_REQUIRE_LSP=1 it must fail closed before a paid
+    benchmark run reaches the agent; "live transport but no useful product work"
+    is still a fallback path for these correctness runs.
 
     Under ``require_lsp`` (GT_REQUIRE_LSP=1): ok=False if ANY known language failed —
     a sibling language succeeding must NOT mask another language's gap — or if no
@@ -661,7 +658,9 @@ def aggregate_lsp_verdicts(lang_verdicts: dict, *, require_lsp: bool, any_succes
     failures = [
         f"{lg}={v}" for lg, v in lang_verdicts.items()
         if v in ("LSP_INSTALL_MISSING", "LSP_FAIL_NO_WARM")
-        or str(v).startswith("LSP_RESOLVE_ERROR") or str(v).startswith("LSP_FAIL_")
+        or str(v).startswith("LSP_RESOLVE_ERROR")
+        or str(v).startswith("LSP_FAIL_")
+        or str(v).startswith("LSP_WARN_")
     ]
     if not require_lsp:
         return True, failures
@@ -1082,8 +1081,8 @@ def main(argv=None) -> int:
             "GT_REQUIRE_LSP=1 but known language(s) failed the LSP pass: "
             f"{', '.join(_agg_failures)}"
         )
-        print(f"[gt-run-proof] LSP_LIVENESS_WARN: {_msg} — continuing with degraded LSP "
-              "(correct-or-quiet: degraded LSP is better than no trial)", flush=True)
+        return tracker.fail("lsp_pass", "LSP_DEGRADED_FAIL", _msg,
+                            lang_verdicts=lang_verdicts, failures=_agg_failures)
     tracker.complete("lsp_pass", lang_verdicts=lang_verdicts)
 
     # 3. graph certificate

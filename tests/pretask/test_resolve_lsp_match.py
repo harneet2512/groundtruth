@@ -152,11 +152,9 @@ def test_name_is_only_a_tiebreaker_inside_window(db):
 
 # ─────────────────────────────── item #28 ───────────────────────────────
 
-def test_external_definition_never_deletes(db):
-    """item #28 RED→GREEN: the LSP resolves the call to an EXTERNAL file (relpath
-    escaped the repo root, starts with '..' — stdlib/third-party os.path.join et al).
-    The pre-squash code DELETEd the edge (`row is None` → DELETE). It must now be
-    LEFT INTACT (correct-or-quiet) and counted as skipped, never deleted."""
+def test_external_definition_deletes_false_internal_edge(db):
+    """The LSP resolves outside the repo. That proves the current internal
+    low-confidence name_match edge is false graph evidence, so delete it."""
     conn = _conn(db)
     stats = _fresh_stats()
     out = _apply_lsp_resolution(
@@ -164,14 +162,14 @@ def test_external_definition_never_deletes(db):
         target_line=120, target_name="join", stats=stats, has_trust_tier=False,
     )
     conn.commit()
-    assert out == "skipped"
-    assert stats["deleted"] == 0
-    assert _edge_exists(conn), "an external-target edge must NEVER be deleted"
+    assert out == "deleted"
+    assert stats["deleted"] == 1
+    assert not _edge_exists(conn), "external-target proof must delete the false internal edge"
 
 
-def test_absolute_path_target_never_deletes(db):
+def test_absolute_path_target_deletes_false_internal_edge(db):
     """An absolute target_path (relpath failed / not under root) is external too —
-    must not delete."""
+    it also deletes the false internal edge."""
     conn = _conn(db)
     stats = _fresh_stats()
     out = _apply_lsp_resolution(
@@ -179,8 +177,8 @@ def test_absolute_path_target_never_deletes(db):
         target_line=5, target_name="loads", stats=stats, has_trust_tier=False,
     )
     conn.commit()
-    assert out == "skipped"
-    assert stats["deleted"] == 0 and _edge_exists(conn)
+    assert out == "deleted"
+    assert stats["deleted"] == 1 and not _edge_exists(conn)
 
 
 def test_not_indexed_file_window_miss_never_deletes(db):

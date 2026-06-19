@@ -106,6 +106,15 @@ class TestCallSiteColumnFinder:
         col, ok = R._find_call_column(line, "join")
         assert ok is False and col == -1
 
+    def test_rust_enum_variant_case_fallback(self):
+        # BOA regression: Rust graph names may be normalized lower-case while
+        # source uses enum constructors like Some(...). The Rust LSP pass must
+        # query that real call site instead of classifying it as no_call_site.
+        line = "    return Some(Ordering::Equal)\n"
+        col, ok = R._find_call_column(line, "some", case_insensitive=True)
+        assert ok is True
+        assert line[col:].startswith("Some(")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Bug3 — lsp_warm must NOT gate on probe_latency_ms > 0.0

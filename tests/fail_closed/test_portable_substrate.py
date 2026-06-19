@@ -105,6 +105,12 @@ def test_aggregate_resolve_error_fails_under_require():
     assert ok is False and failures == ["typescript=LSP_RESOLVE_ERROR(rc=1)"]
 
 
+def test_aggregate_warn_verdict_fails_under_require():
+    ok, failures = grp.aggregate_lsp_verdicts(
+        {"go": "LSP_WARN_NOT_READY"}, require_lsp=True, any_success=True)
+    assert ok is False and failures == ["go=LSP_WARN_NOT_READY"]
+
+
 def test_aggregate_unsupported_and_valid_pass():
     # Genuinely-unknown languages stay an honest no-op; valid verdicts pass.
     ok, failures = grp.aggregate_lsp_verdicts(

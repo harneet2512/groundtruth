@@ -48,7 +48,11 @@ def _uri_to_path(uri: str) -> str:
 
 
 def _find_call_column(
-    line_text: str, target_name: str, *, expected_col: int | None = None
+    line_text: str,
+    target_name: str,
+    *,
+    expected_col: int | None = None,
+    case_insensitive: bool = False,
 ) -> tuple[int, bool]:
     """Locate the call site of ``target_name`` on ``line_text`` as a WHOLE-WORD,
     CALL-SHAPED token, returning ``(column, found)``.
@@ -77,7 +81,8 @@ def _find_call_column(
     """
     if not target_name:
         return -1, False
-    pattern = re.compile(r"\b" + re.escape(target_name) + r"\s*\(")
+    flags = re.IGNORECASE if case_insensitive else 0
+    pattern = re.compile(r"\b" + re.escape(target_name) + r"\s*\(", flags)
     matches = list(pattern.finditer(line_text))
     if not matches:
         return -1, False
@@ -505,8 +510,9 @@ def _apply_lsp_resolution(
         or os.path.isabs(target_rel)
     )
     if _is_external:
-        stats["skipped"] += 1
-        return "skipped"
+        conn.execute("DELETE FROM edges WHERE id = ?", (edge["id"],))
+        stats["deleted"] += 1
+        return "deleted"
 
     _file_indexed = conn.execute(
         "SELECT 1 FROM nodes WHERE file_path = ? LIMIT 1",
@@ -978,7 +984,11 @@ async def _resolve_edges(
                 stats["skipped"] += 1
                 continue
             line_text = lines[source_line - 1]  # 1-indexed
-            col, _found_call = _find_call_column(line_text, target_name)
+            col, _found_call = _find_call_column(
+                line_text,
+                target_name,
+                case_insensitive=(language == "rust"),
+            )
             if not _found_call:
                 stats["skipped"] += 1
                 stats["skipped_no_call_site"] += 1

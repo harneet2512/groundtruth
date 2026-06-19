@@ -98,15 +98,13 @@ def test_demand_present_never_launched_fails():
 
 
 def test_demand_present_launched_not_warm_warns():
-    # FIX-A: demand present, server LAUNCHED but not yet warm (cold rust-analyzer /
-    # gopls still indexing) → WARN, not fail. The tree-sitter graph + contract/sibling/
-    # cochange (deliver-always items 1/2/4) still reach the agent; the LSP residual is a
-    # known dep-env/timing limitation on a live server, not a substrate defect.
+    # Demand present, server LAUNCHED but not yet warm. The verdict stays explicit,
+    # but proof mode must fail closed instead of letting a degraded LSP reach spend.
     cert = _base_cert(demand_edges=5, residual=5, attempted_edges=0,
                       server_launched=True,
                       lsp_warm=False, warm_probe_ok=False, probe_latency_ms=0.0)
     v, ok = fg._classify_lsp(cert)
-    assert v == "LSP_WARN_NOT_READY" and ok
+    assert v == "LSP_WARN_NOT_READY" and not ok
 
 
 def test_stale_closure_fails():
@@ -122,12 +120,11 @@ def test_closure_not_rebuilt_fails():
 
 
 def test_server_command_exists_probe_not_run_warns():
-    # FIX-A: binary launched but workspace/symbol probe never returned (latency 0) is a
-    # WARN, not a fail — a live server still warming/indexing. Never-launched is the only
-    # hard NO_WARM fail (see test_*_never_launched_fails).
+    # Binary launched but workspace/symbol probe never returned. Keep the WARN verdict
+    # for diagnosis, but treat it as a proof failure.
     cert = _base_cert(server_launched=True, lsp_warm=False, warm_probe_ok=False, probe_latency_ms=0.0)
     v, ok = fg._classify_lsp(cert)
-    assert v == "LSP_WARN_NOT_READY" and ok
+    assert v == "LSP_WARN_NOT_READY" and not ok
 
 
 def test_non_python_python_only_lsp_unsupported_explicit():
@@ -194,14 +191,12 @@ def test_warm_residual_zero_effective_work_warns_when_project_ready():
         verdict_hint="LSP_WARN_ZERO_CONVERSION",
     )
     v, ok = fg._classify_lsp(cert)
-    assert v == "LSP_WARN_ZERO_CONVERSION" and ok
+    assert v == "LSP_WARN_ZERO_CONVERSION" and not ok
 
 
 def test_project_ready_false_zero_effective_work_warns():
-    # FIX-A: a WARM server (transport answering) that cannot load the project
-    # (project_ready=False — e.g. gopls with no `go list` metadata offline) and does
-    # zero effective work is a WARN, not a fail. The server is live; the workspace just
-    # isn't resolvable in this dep-env. deliver-always still ships the tree-sitter graph.
+    # A WARM server that cannot load the project and does zero effective work is
+    # diagnosed as WARN_NOT_READY, but the proof gate must fail closed.
     cert = _base_cert(
         residual=5,
         demand_edges=5,
@@ -214,7 +209,7 @@ def test_project_ready_false_zero_effective_work_warns():
         verdict_hint="LSP_WARN_NOT_READY",
     )
     v, ok = fg._classify_lsp(cert)
-    assert v == "LSP_WARN_NOT_READY" and ok
+    assert v == "LSP_WARN_NOT_READY" and not ok
 
 
 def test_deleted_edges_count_as_effective_lsp_work():
@@ -238,10 +233,10 @@ def test_gate_lsp_reads_cert_arg():
     assert fg.gate_lsp("", cert=_base_cert(server_launched=False, lsp_warm=False,
                                            warm_probe_ok=False,
                                            probe_latency_ms=0.0)) is False
-    # A launched-but-not-warm server is a WARN → gate PASSES (deliver-always).
+    # A launched-but-not-warm server is a WARN verdict but a failed proof gate.
     assert fg.gate_lsp("", cert=_base_cert(server_launched=True, lsp_warm=False,
                                            warm_probe_ok=False,
-                                           probe_latency_ms=0.0)) is True
+                                           probe_latency_ms=0.0)) is False
 
 
 def test_gate_lsp_missing_cert_and_no_line_fails(tmp_path, monkeypatch):
