@@ -34,18 +34,21 @@ on:
         description: "Image-cache owner/repo used for GHCR candidate ordering."
         required: false
         default: "harneet2512/groundtruth"
+  push:
+    tags:
+      - "pro-proof-*-of-*"
 
 permissions:
   contents: read
   packages: read
 
 concurrency:
-  group: pro-proof-sweep-${{ github.ref }}-${{ inputs.shard || inputs.mode }}
+  group: pro-proof-sweep-${{ github.ref }}-${{ inputs.shard || github.ref_name }}
   cancel-in-progress: false
 
 env:
-  GT_SUBSTRATE_DIGEST: ${{ inputs.gt_substrate_digest }}
-  GT_CODE_COMMIT: ${{ inputs.gt_code_commit || github.sha }}
+  GT_SUBSTRATE_DIGEST: ${{ inputs.gt_substrate_digest || 'ghcr.io/hbali-stack/gt-substrate@sha256:f1dedc36a865c8306aa17c8edeb6215bb9a8bfb8481796b95ad73deb39ded433' }}
+  GT_CODE_COMMIT: ${{ inputs.gt_code_commit || '75f31b586d7d77823aadde4b416479e8ec010306' }}
   GT_REQUIRE_PINNED_SUBSTRATE: "1"
   GT_REQUIRE_FTS5: "1"
   GT_REQUIRE_EMBEDDER: "1"
@@ -114,14 +117,19 @@ jobs:
           INPUT_LANGUAGE: ${{ inputs.language }}
           INPUT_INSTANCE_IDS: ${{ inputs.instance_ids }}
           INPUT_SHARD: ${{ inputs.shard }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
         run: |
           python3 << 'PYEOF'
-          import json, math, os, sys
+          import json, math, os, re, sys
 
-          mode = os.environ.get("INPUT_MODE", "full")
-          lang = os.environ.get("INPUT_LANGUAGE", "all")
+          mode = os.environ.get("INPUT_MODE") or "full"
+          lang = os.environ.get("INPUT_LANGUAGE") or "all"
           explicit = [t.strip() for t in os.environ.get("INPUT_INSTANCE_IDS", "").split(",") if t.strip()]
           shard_spec = (os.environ.get("INPUT_SHARD", "") or "").strip()
+          if not shard_spec:
+              match = re.match(r"^pro-proof-(\d+)-of-(\d+)$", os.environ.get("GITHUB_REF_NAME", ""))
+              if match:
+                  shard_spec = f"{match.group(1)}/{match.group(2)}"
           mode_limits = {"smoke": 5, "pilot": 20, "pilot100": 100, "full": 731}
           if mode not in mode_limits:
               sys.exit(f"FATAL: unsupported mode {mode!r}")
@@ -219,7 +227,7 @@ jobs:
     strategy:
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
       fail-fast: false
-      max-parallel: ${{ fromJson(inputs.max_parallel) }}
+      max-parallel: ${{ fromJson(inputs.max_parallel || '20') }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -232,7 +240,7 @@ jobs:
         env:
           GHCR_TOKEN: ${{ secrets.GHCR_PULL_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
-          OWNER=$(echo "${{ inputs.assets_repo }}" | cut -d/ -f1 | tr '[:upper:]' '[:lower:]')
+          OWNER=$(echo "${{ inputs.assets_repo || 'harneet2512/groundtruth' }}" | cut -d/ -f1 | tr '[:upper:]' '[:lower:]')
           echo "$GHCR_TOKEN" | docker login ghcr.io -u "$OWNER" --password-stdin || true
 
       - name: Restore SWE-bench_Pro-os from cache
@@ -275,7 +283,7 @@ jobs:
           GT_MATRIX_TASK: ${{ matrix.task }}
           GT_MATRIX_DOCKERHUB_TAG: ${{ matrix.dockerhub_tag }}
           GT_MATRIX_LANGUAGE: ${{ matrix.language }}
-          GT_INPUTS_ASSETS_REPO: ${{ inputs.assets_repo }}
+          GT_INPUTS_ASSETS_REPO: ${{ inputs.assets_repo || 'harneet2512/groundtruth' }}
           GT_GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
           GT_GITHUB_SHA: ${{ env.GT_CODE_COMMIT }}
           GT_PROOF_HARNESS: pro
