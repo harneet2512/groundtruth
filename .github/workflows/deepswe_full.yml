@@ -1002,17 +1002,6 @@ jobs:
           echo "adapter witness OK: substrate graph consumed read-only; hook hash == post-LSP hash"
           grep "\[GT_META\] graph_witness" trial_output.log | head -2 || true
 
-      - name: Cleanup runner disk before result collection
-        if: always()
-        run: |
-          echo "disk before cleanup:"; df -h /
-          docker rm -f gtsrc 2>/dev/null || true
-          docker system prune -af --volumes 2>/dev/null || true
-          sudo swapoff /gt_swap 2>/dev/null || true
-          sudo rm -f /gt_swap 2>/dev/null || true
-          rm -f /tmp/gt-substrate.tar.gz /tmp/docker.tgz /tmp/deepswe-bench.tar.gz 2>/dev/null || true
-          echo "disk after cleanup:"; df -h /
-
       - name: Collect results
         if: always()
         run: |
@@ -1111,6 +1100,15 @@ jobs:
           path: trial_results/
           retention-days: 30
           if-no-files-found: warn
+
+      - name: Cleanup runner disk (post-upload, non-critical)
+        if: always()
+        continue-on-error: true
+        run: |
+          docker rm -f gtsrc 2>/dev/null || true
+          docker system prune -af --volumes 2>/dev/null || true
+          sudo swapoff /gt_swap 2>/dev/null; sudo rm -f /gt_swap 2>/dev/null
+          rm -f /tmp/gt-substrate.tar.gz /tmp/docker.tgz /tmp/deepswe-bench.tar.gz 2>/dev/null || true
 
   summarize:
     # prepare is in needs so its outputs (total, bench_sha) are guaranteed in the needs
