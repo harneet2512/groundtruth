@@ -889,13 +889,13 @@ jobs:
           # class as the 2026-06-09 brief cap). Generalized, every task; no benchmark shape.
           if ! swapon --show 2>/dev/null | grep -q /gt_swap; then
             FREE_GB=$(df --output=avail -BG / | tail -1 | tr -dc '0-9')
-            if [ "${FREE_GB:-0}" -ge 35 ]; then
-              sudo fallocate -l 8G /gt_swap 2>/dev/null || sudo dd if=/dev/zero of=/gt_swap bs=1M count=8192 status=none 2>/dev/null
+            if [ "${FREE_GB:-0}" -ge 30 ]; then
+              sudo fallocate -l 24G /gt_swap 2>/dev/null || sudo dd if=/dev/zero of=/gt_swap bs=1M count=24576 status=none 2>/dev/null
               sudo chmod 600 /gt_swap 2>/dev/null && sudo mkswap /gt_swap >/dev/null 2>&1 && sudo swapon /gt_swap 2>/dev/null \
-                && echo "[OOMFIX] bounded 8G swap enabled; $(free -m | grep -i swap)" \
+                && echo "[OOMFIX] 24G swap enabled; $(free -m | grep -i swap)" \
                 || echo "[OOMFIX] swap setup failed (continuing without it)"
             else
-              echo "[OOMFIX] skip swap: only ${FREE_GB:-0}GB free, preserving disk for artifacts"
+              echo "[OOMFIX] skip swap: only ${FREE_GB:-0}GB free"
             fi
           fi
           # [DIAG 2026-06-13] Resource monitor — stream RAM/disk/container-count to the GHA log

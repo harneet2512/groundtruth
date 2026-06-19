@@ -68,6 +68,18 @@ fail_artifact() {
 }
 write_proof_status running PROOF_STARTED "substrate proof step started"
 
+# Memory logger: runs in background, writes to trial_output.log every 10s.
+# Survives partial writes on SIGTERM — each line is flushed independently.
+# This is the ONLY way to get memory evidence when the runner OOM-kills.
+(
+  while true; do
+    echo "[MEMLOG $(date +%H:%M:%S)] $(free -m | grep Mem | awk '{printf "used=%sMB total=%sMB swap_used=", $3, $2}')$(free -m | grep Swap | awk '{print $3"MB"}')" >> trial_output.log 2>/dev/null
+    sleep 10
+  done
+) &
+_MEMLOG_PID=$!
+trap 'kill "$_MEMLOG_PID" 2>/dev/null' EXIT
+
 # §E GT_SUBSTRATE_DIGEST_MISSING / PROOF_RUNTIME_FALLBACK_FORBIDDEN (fail-closed).
 # G1: every §E marker echo ALSO appends to trial_output.log (tee -a creates it) —
 # this step exits BEFORE the agent step creates the log, and deepswe_outcome.py's
