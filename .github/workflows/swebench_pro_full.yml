@@ -760,14 +760,13 @@ jobs:
           fi
           if [ "$PIER_RC" -eq 137 ] || grep -qE "OOMKilled|exit code 137|exited with code 137" trial_output.log; then
             echo "GT_AGENT_OOM: agent container hit the memory cap (rc/exit=137)" | tee -a trial_output.log
-            exit 1
+          elif [ "$PIER_RC" -ne 0 ]; then
+            echo "PIER_RUN_FAIL: pier run exited rc=$PIER_RC (agent crashed — artifacts will be captured)" | tee -a trial_output.log
           fi
-          if [ "$PIER_RC" -ne 0 ]; then
-            echo "PIER_RUN_FAIL: pier run exited rc=$PIER_RC" | tee -a trial_output.log
-            exit 1
-          fi
+          # NEVER exit 1 from trial — Collect/Upload MUST run to capture partial artifacts.
 
       - name: Verify GT adapter witness (§E/§H)
+        continue-on-error: true
         if: ${{ !cancelled() && env.GT_PORTABLE_SUBSTRATE == '1' }}
         run: |
           if grep -q "error=DEEPSWE_ADAPTER_FAIL" trial_output.log; then

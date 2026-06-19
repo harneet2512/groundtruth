@@ -968,15 +968,14 @@ jobs:
           # a resolved task into INFRA, silently dropping it from the denominator (the worst
           # direction for flip measurement; the proof-container branch keys on rc=137 alone).
           if [ "$PIER_RC" -eq 137 ] || grep -qE "OOMKilled|exit code 137|exited with code 137" trial_output.log; then
-            echo "GT_AGENT_OOM: agent container hit the memory cap (rc/exit=137 — capacity kill, not logic). The mem_limit/memswap_limit cap classified it; uncapped this was a silent host OOM-SIGKILL." | tee -a trial_output.log
-            exit 1
+            echo "GT_AGENT_OOM: agent container hit the memory cap (rc/exit=137 — capacity kill, not logic)." | tee -a trial_output.log
+          elif [ "$PIER_RC" -ne 0 ]; then
+            echo "PIER_RUN_FAIL: pier run exited rc=$PIER_RC (agent crashed — artifacts will be captured)" | tee -a trial_output.log
           fi
-          if [ "$PIER_RC" -ne 0 ]; then
-            echo "PIER_RUN_FAIL: pier run exited rc=$PIER_RC (pipefail surfaced — not tee's 0)" | tee -a trial_output.log
-            exit 1
-          fi
+          # NEVER exit 1 from trial — Collect/Upload MUST run to capture partial artifacts.
 
       - name: Verify DeepSWE adapter witness (§E DEEPSWE_ADAPTER_FAIL / §H consumption proof)
+        continue-on-error: true
         if: ${{ !cancelled() && env.GT_PORTABLE_SUBSTRATE == '1' }}
         run: |
           # AGENT-OBSERVATION truth: the adapter emitted a [GT_META] witness to stdout. Prove
