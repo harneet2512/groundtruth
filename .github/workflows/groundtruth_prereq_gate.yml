@@ -1,0 +1,61 @@
+name: "Groundtruth: prerequisite gate (no benchmark, no full sweep)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      gt_substrate_digest:
+        description: "Pinned GT substrate image by immutable digest."
+        required: true
+      gt_code_commit:
+        description: "GT code commit baked into the substrate."
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: groundtruth-prereq-gate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prereq:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+
+      - name: Workflow lint
+        run: python3 scripts/verify/workflow_lint.py .github/workflows/groundtruth_prereq_gate.yml
+
+      - name: Substrate identity smoke
+        run: |
+          set -e
+          docker pull "${{ inputs.gt_substrate_digest }}"
+          BUILD_COMMIT=$(docker run --rm --entrypoint sh "${{ inputs.gt_substrate_digest }}" -lc 'printf "%s" "${GT_SUBSTRATE_BUILD_COMMIT:-}"')
+          if [ "$BUILD_COMMIT" != "${{ inputs.gt_code_commit }}" ]; then
+            echo "GT_COMMIT_PARITY_MISMATCH: substrate=$BUILD_COMMIT input=${{ inputs.gt_code_commit }}"
+            exit 1
+          fi
+          docker run --rm "${{ inputs.gt_substrate_digest }}" gt-run-proof --print-contract >/tmp/gt-proof-contract.json
+          test -s /tmp/gt-proof-contract.json
+
+      - name: Static prerequisite gate
+        run: |
+          python3 scripts/ci/prereq_benchmark_gate.py \
+            --gt-substrate-digest "${{ inputs.gt_substrate_digest }}" \
+            --gt-code-commit "${{ inputs.gt_code_commit }}" \
+            --json prereq_gate_report.json
+
+      - name: Upload prereq report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prereq-gate-report-${{ github.run_id }}
+          path: prereq_gate_report.json
+          retention-days: 30
+          if-no-files-found: warn

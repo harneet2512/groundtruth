@@ -111,6 +111,31 @@ def test_aggregate_warn_verdict_fails_under_require():
     assert ok is False and failures == ["go=LSP_WARN_NOT_READY"]
 
 
+def test_aggregate_warn_in_incidental_language_does_not_fail_primary_task():
+    ok, failures = grp.aggregate_lsp_verdicts(
+        {"javascript": "LSP_WARN_ZERO_CONVERSION", "go": "LSP_ACTIVE_VALID"},
+        require_lsp=True,
+        any_success=True,
+        required_languages={"go"},
+    )
+    assert ok is True and failures == []
+
+
+def test_aggregate_warn_in_primary_language_still_fails():
+    ok, failures = grp.aggregate_lsp_verdicts(
+        {"javascript": "LSP_WARN_ZERO_CONVERSION", "go": "LSP_ACTIVE_VALID"},
+        require_lsp=True,
+        any_success=True,
+        required_languages={"javascript"},
+    )
+    assert ok is False and failures == ["javascript=LSP_WARN_ZERO_CONVERSION"]
+
+
+def test_task_language_alias_selects_required_lsp_language(monkeypatch):
+    monkeypatch.setenv("GT_TASK_LANGUAGE", "js")
+    assert grp._required_lsp_languages({"javascript": "LSP_ACTIVE_VALID"}) == {"javascript"}
+
+
 def test_aggregate_unsupported_and_valid_pass():
     # Genuinely-unknown languages stay an honest no-op; valid verdicts pass.
     ok, failures = grp.aggregate_lsp_verdicts(

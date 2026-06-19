@@ -466,6 +466,7 @@ if [ "$HARNESS" = "deepswe" ]; then
       -e PATH="$RUST_PATH_PREFIX:/opt/gt/bin:/opt/gt/node/bin:/opt/gt/python/bin:/opt/gt/jre/bin:/opt/gt/go/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
       -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 -e HF_DATASETS_OFFLINE=1 \
       -e GT_GATES_DELIVER_ALWAYS="${GT_GATES_DELIVER_ALWAYS:-0}" \
+      -e GT_TASK_LANGUAGE="${GT_MATRIX_LANGUAGE}" \
       -e GT_GIT_COMMIT="${GT_GITHUB_SHA}" \
       -e GT_SUBSTRATE_DIGEST="$GT_SUBSTRATE_DIGEST" \
       -e GT_TASK_REPO_COMMIT="$TASK_REPO_COMMIT" \
@@ -485,6 +486,7 @@ else
       -e GOFLAGS=-mod=mod -e GOPROXY=off -e GONOSUMCHECK=1 -e GOSUMDB=off \
       -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 -e HF_DATASETS_OFFLINE=1 \
       -e GT_GATES_DELIVER_ALWAYS="${GT_GATES_DELIVER_ALWAYS:-0}" \
+      -e GT_TASK_LANGUAGE="${GT_MATRIX_LANGUAGE}" \
       -e GT_GIT_COMMIT="${GT_GITHUB_SHA}" \
       -e GT_SUBSTRATE_DIGEST="$GT_SUBSTRATE_DIGEST" \
       -e GT_TASK_REPO_COMMIT="$TASK_REPO_COMMIT" \

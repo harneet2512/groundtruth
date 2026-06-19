@@ -671,6 +671,84 @@ def aggregate_lsp_verdicts(lang_verdicts: dict, *, require_lsp: bool, any_succes
     return True, failures
 
 
+# Task-language scoped override for benchmark proof runs. The substrate still probes
+# every detected language and records every verdict, but the benchmark matrix carries
+# the declared task language; that language is the hard fail-closed requirement.
+_LANG_ALIASES = {
+    "py": "python",
+    "python": "python",
+    "js": "javascript",
+    "jsx": "javascript",
+    "javascript": "javascript",
+    "javascriptreact": "javascript",
+    "ts": "typescript",
+    "tsx": "typescript",
+    "typescript": "typescript",
+    "typescriptreact": "typescript",
+    "rs": "rust",
+    "rust": "rust",
+    "go": "go",
+    "java": "java",
+    "c": "c",
+    "cpp": "cpp",
+    "c++": "cpp",
+}
+
+
+def _norm_lang(lang: str) -> str:
+    l = (lang or "").strip().lower()
+    return _LANG_ALIASES.get(l, l)
+
+
+def _required_lsp_languages(lang_verdicts: dict, env=None) -> set[str]:
+    env = os.environ if env is None else env
+    raw = (
+        env.get("GT_TASK_LANGUAGE")
+        or env.get("GT_MATRIX_LANGUAGE")
+        or env.get("GT_PRIMARY_LANGUAGE")
+        or ""
+    )
+    required = {_norm_lang(p) for p in raw.replace(",", " ").split() if p.strip()}
+    required = {p for p in required if p in _LSP_LANGS}
+    if required:
+        return required
+    return {_norm_lang(k) for k in lang_verdicts}
+
+
+def aggregate_lsp_verdicts(lang_verdicts: dict, *, require_lsp: bool, any_success: bool,
+                           required_languages: set[str] | None = None):
+    required_norm = {_norm_lang(x) for x in required_languages} if required_languages else {
+        _norm_lang(k) for k in lang_verdicts
+    }
+
+    def _is_failure(v: str) -> bool:
+        return (
+            v in ("LSP_INSTALL_MISSING", "LSP_FAIL_NO_WARM")
+            or str(v).startswith("LSP_RESOLVE_ERROR")
+            or str(v).startswith("LSP_FAIL_")
+            or str(v).startswith("LSP_WARN_")
+        )
+
+    failures = [
+        f"{lg}={v}" for lg, v in lang_verdicts.items()
+        if _norm_lang(lg) in required_norm and _is_failure(str(v))
+    ]
+    if not require_lsp:
+        return True, failures
+    if failures:
+        return False, failures
+    required_success = any(
+        _norm_lang(lg) in required_norm
+        and v in ("LSP_ACTIVE_VALID", "LSP_NO_OP_VALID_WITH_WARM_SERVER")
+        for lg, v in lang_verdicts.items()
+    )
+    if required_norm and not required_success:
+        return False, [f"{','.join(sorted(required_norm))}=NO_REQUIRED_LANGUAGE_RESOLVED"]
+    if not required_norm and not any_success:
+        return False, ["<none>=NO_LANGUAGE_RESOLVED"]
+    return True, failures
+
+
 def emit_brief(out_dir: str, issue_text: str, work: str, graph: str, *, generator=None):
     """Emit the curated brief to <out>/brief.txt — proof artifact #8 (P0.1-c).
 
@@ -1067,6 +1145,8 @@ def main(argv=None) -> int:
         except OSError as _ce:
             print(f"WARN: could not copy dominant LSP cert to canonical path: {_ce}", file=sys.stderr)
     print(f"[gt-run-proof] per-language LSP verdicts: {lang_verdicts}", flush=True)
+    _required_langs = _required_lsp_languages(lang_verdicts, base_env)
+    print(f"[gt-run-proof] required LSP language(s): {sorted(_required_langs)}", flush=True)
     # P1-e fail-closed aggregation: ANY known language INSTALL_MISSING / FAIL_NO_WARM /
     # resolve-error fails the proof under GT_REQUIRE_LSP=1 — a sibling language's success
     # must never mask another language's gap (audit defect #1), and a launched-but-
@@ -1075,6 +1155,7 @@ def main(argv=None) -> int:
         lang_verdicts,
         require_lsp=os.environ.get("GT_REQUIRE_LSP") == "1",
         any_success=lsp_ok,
+        required_languages=_required_langs,
     )
     if not _agg_ok:
         _msg = (
