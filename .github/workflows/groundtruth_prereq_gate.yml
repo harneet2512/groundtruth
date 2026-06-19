@@ -12,6 +12,7 @@ on:
 
 permissions:
   contents: read
+  packages: read
 
 concurrency:
   group: groundtruth-prereq-gate-${{ github.ref }}
@@ -57,5 +58,120 @@ jobs:
         with:
           name: prereq-gate-report-${{ github.run_id }}
           path: prereq_gate_report.json
+          retention-days: 30
+          if-no-files-found: warn
+
+  proof_canaries:
+    needs: prereq
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - harness: deepswe
+            task: arcane-drift-detection-baselines
+            language: go
+          - harness: deepswe
+            task: dasel-html-document-format
+            language: go
+          - harness: pro
+            task: instance_flipt-io__flipt-02e21636c58e86c51119b63e0fb5ca7b813b07b1
+            language: go
+          - harness: pro
+            task: instance_navidrome__navidrome-89b12b34bea5687c70e4de2109fd1e7330bb2ba2
+            language: go
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.repository_owner }}" --password-stdin
+
+      - name: Prepare canary metadata
+        env:
+          GT_CANARY_HARNESS: ${{ matrix.harness }}
+          GT_CANARY_TASK: ${{ matrix.task }}
+        run: |
+          set -euo pipefail
+          if [ "$GT_CANARY_HARNESS" = "deepswe" ]; then
+            git clone --depth 1 https://github.com/datacurve-ai/deep-swe.git deepswe-bench
+            python3 - <<'PY'
+          import json, os, sys
+          task = os.environ["GT_CANARY_TASK"]
+          rows = json.load(open("artifact_deepswe/repo_manifest.json", encoding="utf-8"))["tasks"]
+          row = next((r for r in rows if r.get("instance_id") == task), None)
+          if not row:
+              raise SystemExit(f"missing DeepSWE canary {task}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as fh:
+              fh.write(f"GT_MATRIX_IMAGE={row['docker_image']}\n")
+          PY
+          else
+            git clone --depth 1 https://github.com/scaleapi/SWE-bench_Pro-os.git swebench-pro-os
+            python3 - <<'PY'
+          import json, os
+          task = os.environ["GT_CANARY_TASK"]
+          tag = None
+          with open("benchmarks/data/swebench_pro_public_tags.jsonl", encoding="utf-8") as fh:
+              for line in fh:
+                  if not line.strip():
+                      continue
+                  row = json.loads(line)
+                  if row.get("instance_id") == task:
+                      tag = row.get("dockerhub_tag")
+                      break
+          if not tag:
+              raise SystemExit(f"missing Pro canary {task}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as fh:
+              fh.write(f"GT_MATRIX_DOCKERHUB_TAG={tag}\n")
+          PY
+            python3 scripts/ci/build_pro_local_dataset.py \
+              --pro-os-dir swebench-pro-os \
+              --tag-manifest benchmarks/data/swebench_pro_public_tags.jsonl \
+              --instance-ids "$GT_CANARY_TASK" \
+              --out /tmp/pro-local-dataset.jsonl
+            echo "GT_PRO_LOCAL_DATASET_JSONL=/tmp/pro-local-dataset.jsonl" >> "$GITHUB_ENV"
+          fi
+
+      - name: Production substrate proof canary
+        env:
+          GT_PROOF_HARNESS: ${{ matrix.harness }}
+          GT_MATRIX_TASK: ${{ matrix.task }}
+          GT_MATRIX_LANGUAGE: ${{ matrix.language }}
+          GT_INPUTS_ASSETS_REPO: harneet2512/groundtruth
+          GT_GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+          GT_GITHUB_SHA: ${{ inputs.gt_code_commit }}
+          GT_SUBSTRATE_DIGEST: ${{ inputs.gt_substrate_digest }}
+          GT_REQUIRE_PINNED_SUBSTRATE: "1"
+          GT_REQUIRE_COMMIT_PARITY: "1"
+          GT_REQUIRE_FULL_STACK: "1"
+          GT_REQUIRE_FULL_POTENTIAL: "1"
+          GT_REQUIRE_FTS5: "1"
+          GT_FORCE_ONNX_EMBEDDER: "1"
+          GT_REQUIRE_EMBEDDER: "1"
+          GT_REQUIRE_LSP: "1"
+          GT_GATES_DELIVER_ALWAYS: "0"
+          GT_LSP_READY_BUDGET_S_OVERRIDE: ""
+          HF_DATASETS_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+          HF_HUB_OFFLINE: "1"
+        run: bash scripts/ci/substrate_proof.sh
+
+      - name: Upload canary proof artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prereq-proof-canary-${{ matrix.harness }}-${{ matrix.task }}
+          path: |
+            /tmp/gt/
+            trial_output.log
           retention-days: 30
           if-no-files-found: warn

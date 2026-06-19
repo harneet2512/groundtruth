@@ -21,6 +21,7 @@ DIGEST_RE = re.compile(r"^ghcr\.io/[^/]+/gt-substrate@sha256:[0-9a-f]{64}$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 DEEPSWE_CANARIES = {
+    "arcane-drift-detection-baselines",
     "awilix-async-container-initialization",
     "boa-hierarchical-evaluation-cancellation",
     "dasel-html-document-format",
@@ -122,6 +123,18 @@ def audit(args: argparse.Namespace) -> tuple[list[dict], dict]:
         _ok(checks, "go_mod_cache_exported", "mounted Go module cache is exported into proof containers")
     else:
         _fail(checks, "go_mod_cache_exported", "substrate proof must export GOMODCACHE=/tmp/gomodcache")
+    if "GOPROXY=https://proxy.golang.org,direct" in substrate and "GOPROXY=off" not in substrate:
+        _ok(checks, "go_lsp_live_proxy_matches_metadata_probe", "proof gopls path can load Go package metadata")
+    else:
+        _fail(
+            checks,
+            "go_lsp_live_proxy_matches_metadata_probe",
+            "substrate proof must not force GOPROXY=off while metadata probe uses live GOPROXY",
+        )
+    if 'GT_REQUIRE_COMMIT_PARITY="${GT_REQUIRE_COMMIT_PARITY:-1}"' in substrate:
+        _ok(checks, "proof_container_commit_parity_enforced", "proof containers receive GT_REQUIRE_COMMIT_PARITY")
+    else:
+        _fail(checks, "proof_container_commit_parity_enforced", "proof docker run must pass GT_REQUIRE_COMMIT_PARITY")
     for forbidden in ("pip install", "rustup component add rust-src", "load_dataset("):
         if forbidden in substrate:
             _fail(checks, f"substrate_forbidden_{forbidden}", f"found {forbidden!r}")
@@ -163,6 +176,16 @@ def audit(args: argparse.Namespace) -> tuple[list[dict], dict]:
         _ok(checks, "pro_proof_uses_production_path", str(pro_proof))
     else:
         _fail(checks, "pro_proof_uses_production_path", "missing production-wrapper Pro proof gate")
+
+    prereq_workflow = _read(ROOT / ".github" / "workflows" / "groundtruth_prereq_gate.yml")
+    if "proof_canaries:" in prereq_workflow and "scripts/ci/substrate_proof.sh" in prereq_workflow:
+        _ok(checks, "prereq_executes_production_proof_canaries", "manual gate runs bounded production proof canaries")
+    else:
+        _fail(
+            checks,
+            "prereq_executes_production_proof_canaries",
+            "manual prereq gate must execute production substrate_proof.sh canaries before launch",
+        )
 
     meta = {
         "deepswe_canaries": sorted(DEEPSWE_CANARIES),

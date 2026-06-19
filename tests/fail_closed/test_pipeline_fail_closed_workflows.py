@@ -31,6 +31,7 @@ WF_PRO_FULL = os.path.join(ROOT, ".github", "workflows", "swebench_pro_full.yml"
 WF_30 = os.path.join(ROOT, ".github", "workflows", "swebench_30task.yml")
 WF_300 = os.path.join(ROOT, ".github", "workflows", "swebench_300task.yml")
 WF_LANG_SMOKE = os.path.join(ROOT, ".github", "workflows", "gt_language_smoke.yml")
+WF_PREREQ = os.path.join(ROOT, ".github", "workflows", "groundtruth_prereq_gate.yml")
 SCRIPT_SUBSTRATE_PROOF = os.path.join(ROOT, "scripts", "ci", "substrate_proof.sh")
 
 
@@ -191,6 +192,29 @@ def test_substrate_proof_exports_go_mod_cache_without_global_mod_flag():
     assert "-v \"/tmp/gt/deps/gomodcache:/tmp/gomodcache\"" in script
     assert "-e GOMODCACHE=/tmp/gomodcache" in script
     assert "GOFLAGS=-mod=mod" not in script
+
+
+def test_substrate_proof_go_lsp_path_uses_live_proxy_like_metadata_probe():
+    script = _read(SCRIPT_SUBSTRATE_PROOF)
+    assert "-e GOPROXY=https://proxy.golang.org,direct" in script
+    assert "-e GOPROXY=off" not in script
+
+
+def test_substrate_proof_forwards_commit_parity_gate_into_container():
+    script = _read(SCRIPT_SUBSTRATE_PROOF)
+    assert '-e GT_REQUIRE_COMMIT_PARITY="${GT_REQUIRE_COMMIT_PARITY:-1}"' in script
+
+
+def test_prereq_gate_executes_production_proof_canaries():
+    doc = _load(WF_PREREQ)
+    assert "proof_canaries" in doc["jobs"]
+    run = _step(doc, "proof_canaries", "Production substrate proof canary")["run"]
+    assert "scripts/ci/substrate_proof.sh" in run
+    matrix = doc["jobs"]["proof_canaries"]["strategy"]["matrix"]["include"]
+    tasks = {row["task"] for row in matrix}
+    assert "arcane-drift-detection-baselines" in tasks
+    assert "dasel-html-document-format" in tasks
+    assert "instance_flipt-io__flipt-02e21636c58e86c51119b63e0fb5ca7b813b07b1" in tasks
 
 
 def test_pro_full_uses_same_harness_python_for_import_check_and_runner():
