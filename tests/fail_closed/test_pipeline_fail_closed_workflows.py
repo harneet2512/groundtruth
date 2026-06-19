@@ -228,7 +228,8 @@ def test_substrate_image_workflow_confirms_go_toolchain_minimum():
     run = _step(_load(WF_SUBSTRATE_IMAGE), "build-push", "Confirm the published image")["run"]
     assert "/opt/gt/go/bin/go" in run
     assert "GT_GO_TOOLCHAIN_MIN_OK" in run
-    assert "(1, 25)" in run
+    assert "(1,25)" in run.replace(" ", "")
+    assert "<<PY" not in run
 
 
 def test_prereq_gate_executes_production_proof_canaries():
