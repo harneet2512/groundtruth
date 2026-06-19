@@ -81,7 +81,7 @@ RUN curl -fsSL https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-li
 #      A static-ish Go binary; launches with no runtime Go toolchain. (Type-aware
 #      go-to-def across packages may still need the task's resolved module cache —
 #      flagged as the Go D1-probe item.)
-ARG GOPLS_VERSION=v0.16.2
+ARG GOPLS_VERSION=v0.21.1
 RUN GOBIN=/opt/gt/bin GOFLAGS=-trimpath GOPATH=/tmp/gopath GOTOOLCHAIN=local \
       go install golang.org/x/tools/gopls@${GOPLS_VERSION} \
     && rm -rf /tmp/gopath \

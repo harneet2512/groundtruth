@@ -217,6 +217,13 @@ def test_substrate_bakes_go_toolchain_new_enough_for_workspace_canaries():
     assert "(1,25)" in dockerfile.replace(" ", "")
 
 
+def test_substrate_bakes_gopls_compatible_with_go_125():
+    dockerfile = _read(DOCKERFILE_GT_SUBSTRATE)
+    match = re.search(r"(?m)^ARG GOPLS_VERSION=v(\d+)\.(\d+)\.(\d+)$", dockerfile)
+    assert match, "Dockerfile.gt-substrate must pin GOPLS_VERSION"
+    assert tuple(map(int, match.groups())) >= (0, 21, 1)
+
+
 def test_substrate_image_workflow_confirms_go_toolchain_minimum():
     run = _step(_load(WF_SUBSTRATE_IMAGE), "build-push", "Confirm the published image")["run"]
     assert "/opt/gt/go/bin/go" in run

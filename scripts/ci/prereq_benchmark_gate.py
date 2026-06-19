@@ -156,6 +156,12 @@ def audit(args: argparse.Namespace) -> tuple[list[dict], dict]:
         _ok(checks, "substrate_go_toolchain_build_self_test", "Docker build fails closed when Go <1.25")
     else:
         _fail(checks, "substrate_go_toolchain_build_self_test", "Dockerfile.gt-substrate must self-test the baked Go minimum")
+    gopls_version_match = re.search(r"(?m)^ARG GOPLS_VERSION=v(\d+)\.(\d+)\.(\d+)$", dockerfile)
+    if gopls_version_match and tuple(map(int, gopls_version_match.groups())) >= (0, 21, 1):
+        _ok(checks, "substrate_gopls_go125_compatible", f"GOPLS_VERSION=v{'.'.join(gopls_version_match.groups())}")
+    else:
+        found = f"v{'.'.join(gopls_version_match.groups())}" if gopls_version_match else "<missing>"
+        _fail(checks, "substrate_gopls_go125_compatible", f"Dockerfile.gt-substrate must build gopls compatible with Go 1.25, found {found}")
 
     proof_py = _read(ROOT / "scripts" / "swebench" / "gt_run_proof.py")
     if "_required_lsp_languages" in proof_py and "required_languages=_required_langs" in proof_py:
