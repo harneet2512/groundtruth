@@ -185,15 +185,17 @@ def test_pro_full_uses_same_harness_python_for_import_check_and_runner():
     assert "python3 benchmarks/swebench/run_mini_gt_pro_v10.py" not in run
 
 
-def test_pro_full_unsets_hf_offline_before_native_dataset_runner():
+def test_pro_full_uses_offline_local_dataset_for_native_runner():
     doc = _load(WF_PRO_FULL)
     env = doc.get("env") or {}
     assert env.get("HF_DATASETS_OFFLINE") == "1"
     run = _step(doc, "trial", "Run GT Pro trial")["run"]
-    unset_i = run.index("unset HF_DATASETS_OFFLINE HF_HUB_OFFLINE TRANSFORMERS_OFFLINE")
     runner_i = run.index('"$GT_HARNESS_PYTHON" benchmarks/swebench/run_mini_gt_pro_v10.py')
-    assert unset_i < runner_i
-    assert "--subset ScaleAI/SWE-bench_Pro" in run
+    local_i = run.index("GT_PRO_LOCAL_DATASET_JSONL")
+    assert local_i < runner_i
+    assert "--subset gt-local-swebench-pro" in run
+    assert "--subset ScaleAI/SWE-bench_Pro" not in run
+    assert "unset HF_DATASETS_OFFLINE" not in run
 
 
 def test_cancelled_full_runs_are_reported_as_partial_not_structural_failures():

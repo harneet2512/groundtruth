@@ -138,12 +138,24 @@ def audit_workflows(results: list[dict[str, str]], benchmark: str) -> None:
             "native_runner",
             [
                 "benchmarks/swebench/run_mini_gt_pro_v10.py",
-                "--subset ScaleAI/SWE-bench_Pro",
+                "GT_PRO_LOCAL_DATASET_JSONL",
+                "--subset gt-local-swebench-pro",
                 "--filter \"^${{ matrix.task }}$\"",
                 "benchmarks/data/swebench_pro_public_tags.jsonl",
                 "scaleapi/SWE-bench_Pro-os",
+                "scripts/ci/build_pro_local_dataset.py",
                 "scripts/ci/pro_official_eval.py",
                 "GT_FORBID_PREBUILT_GRAPH: \"1\"",
+            ],
+        )
+        require_absent(
+            results,
+            pro,
+            "pro",
+            "no_huggingface_runtime",
+            [
+                "--subset ScaleAI/SWE-bench_Pro",
+                "unset HF_DATASETS_OFFLINE",
             ],
         )
         require_absent(
@@ -171,6 +183,7 @@ def audit_workflows(results: list[dict[str, str]], benchmark: str) -> None:
                 "--raw_sample_path",
                 "--patch_path",
                 "--scripts_dir",
+                "--dataset-jsonl",
                 "--use_local_docker",
                 "eval_results.json",
                 "fail_to_pass",

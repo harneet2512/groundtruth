@@ -369,49 +369,29 @@ print(f"issue text: {len(issue)} chars from {source} -> {out_path}")
 PYEOF
   python3 scripts/swebench/issue_manifest.py /tmp/issue.txt /tmp/gt/issue_manifest.json --source instruction || exit 1
 else
-  # Pro harness: issue text from Pro-OS run_scripts or fallback to in-image paths.
+  # Pro harness: issue text comes from the offline Pro dataset row built from
+  # SWE-bench_Pro-os/helper_code/sweap_eval_full_v2.jsonl. Never synthesize an
+  # issue for a paid run; a missing local dataset row is an infra failure.
   TASK_ID="${GT_MATRIX_TASK}"
-  PRO_RUN_SCRIPTS="swebench-pro-os/run_scripts"
-  ISSUE_TEXT=""
-
-  # Try Pro-OS run_scripts dir first
-  for candidate in \
-      "${PRO_RUN_SCRIPTS}/${TASK_ID}/problem_statement.md" \
-      "${PRO_RUN_SCRIPTS}/${TASK_ID}/README.md" \
-      "${PRO_RUN_SCRIPTS}/${TASK_ID}/instruction.md"; do
-    if [ -s "$candidate" ]; then
-      ISSUE_TEXT="$(cat "$candidate")"
-      echo "issue text from ${candidate}: ${#ISSUE_TEXT} chars"
-      break
-    fi
-  done
-
-  # Fallback: extract from inside the image
-  if [ -z "$ISSUE_TEXT" ]; then
-    for cand_path in /opt/problem_statement.txt /opt/issue.txt /tmp/problem_statement.txt; do
-      TEXT="$(docker exec gtsrc cat "$cand_path" 2>/dev/null | tr -d '\r' || true)"
-      if [ -n "$TEXT" ]; then
-        ISSUE_TEXT="$TEXT"
-        echo "issue text from in-image ${cand_path}: ${#ISSUE_TEXT} chars"
-        break
-      fi
-    done
-  fi
-
-  # Final fallback: synthesize a minimal issue from the task ID
-  if [ -z "$ISSUE_TEXT" ]; then
-    ISSUE_TEXT="Fix issue in ${TASK_ID}. See the repository for context."
-    echo "::warning::GT_ISSUE_FALLBACK: no problem_statement found for ${TASK_ID} — using synthesized issue text"
-  fi
-
-  # Detect synthesized fallback and classify before the substrate run (INFRA diagnostic,
-  # not an abort — the substrate handles empty-issue fail-closed internally).
-  if echo "$ISSUE_TEXT" | grep -qE "^Fix issue in "; then
-    echo "GT_ISSUE_MISSING: no real issue text — synthesized fallback detected (Pro-OS clone may have failed or run_scripts/${TASK_ID}/ absent)" | tee -a trial_output.log
-    echo "::warning::Running with synthesized issue text for ${TASK_ID} (no real Pro-OS problem_statement found)"
-  fi
-
-  echo "$ISSUE_TEXT" > /tmp/issue.txt
+  DATASET_JSONL="${GT_PRO_LOCAL_DATASET_JSONL:-/tmp/pro-local-dataset.jsonl}"
+  python3 - "$TASK_ID" "$DATASET_JSONL" /tmp/issue.txt <<'PYEOF' || { echo "GT_ISSUE_MISSING: no offline Pro dataset problem_statement for ${TASK_ID}" | tee -a trial_output.log; write_proof_status failed GT_ISSUE_MISSING "no offline Pro dataset problem_statement"; exit 1; }
+import json, sys
+task_id, dataset_jsonl, out_path = sys.argv[1:4]
+issue = ""
+with open(dataset_jsonl, encoding="utf-8") as fh:
+    for line in fh:
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        if row.get("instance_id") == task_id:
+            issue = str(row.get("problem_statement") or "").strip()
+            break
+if not issue:
+    raise SystemExit(1)
+with open(out_path, "w", encoding="utf-8") as fh:
+    fh.write(issue)
+print(f"issue text from offline Pro dataset: {len(issue)} chars -> {out_path}")
+PYEOF
   [ -s /tmp/issue.txt ] || { echo "GT_ISSUE_MISSING: issue text empty after all fallbacks" | tee -a trial_output.log; write_proof_status failed GT_ISSUE_MISSING "issue text empty after all fallbacks"; exit 1; }
   python3 scripts/swebench/issue_manifest.py /tmp/issue.txt /tmp/gt/issue_manifest.json --source pro || fail_proof GT_ISSUE_MISSING "issue manifest write failed"
 fi

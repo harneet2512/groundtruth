@@ -220,7 +220,7 @@ jobs:
           python -m venv "$VENV_DIR"
           source "$VENV_DIR/bin/activate"
           python -m pip install --upgrade pip --quiet
-          python -m pip install "mini-swe-agent==2.2.8" datasets docker --quiet
+          python -m pip install "mini-swe-agent==2.2.8" docker --quiet
           python -m pip install -e . --quiet
           deactivate
           tar -czf /tmp/gt-harness-venv.tar.gz -C /tmp gt-harness-venv/
@@ -230,7 +230,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: /tmp/gt-harness-venv.tar.gz
-          key: gt-pro-harness-venv-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}-mini-swe-agent-228
+          key: gt-pro-harness-venv-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}-mini-swe-agent-228-nohf
 
       # ── SPEED-OPT C: pull + save substrate image ONCE ────────────────────────
       - name: Pull + save substrate image for matrix job cache
@@ -485,7 +485,7 @@ jobs:
             echo "venv cache MISS — installing harness from scratch into ${VENV_DIR}"
             python -m venv "${VENV_DIR}"
             "${VENV_DIR}/bin/python" -m pip install --upgrade pip
-            "${VENV_DIR}/bin/python" -m pip install "mini-swe-agent==2.2.8" datasets docker
+            "${VENV_DIR}/bin/python" -m pip install "mini-swe-agent==2.2.8" docker
             "${VENV_DIR}/bin/python" -m pip install -e . --quiet
           fi
           test -x "${VENV_DIR}/bin/python" || { echo "PRO_HARNESS_PYTHON_MISSING: ${VENV_DIR}/bin/python"; exit 1; }
@@ -604,6 +604,22 @@ jobs:
           PRO_SHA=$(git -C swebench-pro-os rev-parse HEAD 2>/dev/null || true)
           echo "GT_PRO_BENCH_SHA=${PRO_SHA}" >> "$GITHUB_ENV"
           echo "swebench-pro-os SHA: ${PRO_SHA:-<unknown or clone-failed>}"
+
+      - name: Build offline Pro dataset row (no Hugging Face at trial time)
+        run: |
+          python3 scripts/ci/build_pro_local_dataset.py \
+            --pro-os-dir swebench-pro-os \
+            --tag-manifest benchmarks/data/swebench_pro_public_tags.jsonl \
+            --instance-ids "${{ matrix.task }}" \
+            --out /tmp/pro-local-dataset.jsonl
+          echo "GT_PRO_LOCAL_DATASET_JSONL=/tmp/pro-local-dataset.jsonl" >> "$GITHUB_ENV"
+          python3 - <<'PY'
+          import json
+          row = json.loads(open("/tmp/pro-local-dataset.jsonl", encoding="utf-8").readline())
+          assert "patch" not in row and "test_patch" not in row
+          assert row.get("problem_statement") and row.get("docker_image")
+          print(f"offline Pro dataset OK: {row['instance_id']} -> {row['docker_image']}")
+          PY
 
       # ── SPEED-OPT C restore: substrate image ─────────────────────────────────
       - name: Compute substrate cache key
@@ -746,17 +762,14 @@ jobs:
           PY
 
           # Pro uses its native mini-swe-agent SWE-bench runner, filtered to the
-          # single matrix instance. It is not a Pier benchmark path.
-          # The workflow keeps HF offline for substrate/proof code, but the native
-          # mini-swe-agent Pro runner loads ScaleAI/SWE-bench_Pro via datasets.
-          # Unset the offline switches immediately before that runner so a matrix
-          # job cannot deterministically fail with OfflineModeIsEnabled before
-          # producing jobs/preds.json.
-          unset HF_DATASETS_OFFLINE HF_HUB_OFFLINE TRANSFORMERS_OFFLINE
+          # single matrix instance. It is not a Pier benchmark path. The wrapper
+          # serves mini-swe-agent's dataset request from GT_PRO_LOCAL_DATASET_JSONL,
+          # so Hugging Face stays offline for the entire paid matrix job.
+          test -s "${GT_PRO_LOCAL_DATASET_JSONL:-}" || { echo "PRO_LOCAL_DATASET_MISSING: ${GT_PRO_LOCAL_DATASET_JSONL:-<unset>}" | tee -a trial_output.log; exit 1; }
           "$GT_HARNESS_PYTHON" benchmarks/swebench/run_mini_gt_pro_v10.py \
             -c benchmarks/swebench/mini_swebench_pro_gt_v10.yaml \
             --model "$INPUT_MODEL" \
-            --subset ScaleAI/SWE-bench_Pro \
+            --subset gt-local-swebench-pro \
             --split test \
             --filter "^${{ matrix.task }}$" \
             -w 1 \
@@ -803,7 +816,8 @@ jobs:
             --pro-os-dir swebench-pro-os \
             --output-dir trial_results/pro_eval \
             --reward-file trial_results/reward.txt \
-            --trial-log trial_output.log
+            --trial-log trial_output.log \
+            --dataset-jsonl "${GT_PRO_LOCAL_DATASET_JSONL}"
 
       - name: Cleanup runner disk before result collection
         if: always()

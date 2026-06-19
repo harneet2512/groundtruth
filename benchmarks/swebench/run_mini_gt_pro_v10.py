@@ -3,7 +3,7 @@
 
 Same logic as run_mini_gt_v8_precompute.py but:
   - Uses /app as root (SWE-bench Pro containers use /app, not /testbed)
-  - Loads from ScaleAI/SWE-bench_Pro dataset
+  - Loads from GT_PRO_LOCAL_DATASET_JSONL (offline Pro-os JSONL), never HF
   - Docker images: jefzda/sweap-images:{dockerhub_tag}
 
 Usage:
@@ -16,8 +16,12 @@ Usage:
 from __future__ import annotations
 
 import base64
+import json
+import os
 import re
+import sys
 import traceback
+import types
 from pathlib import Path
 
 from minisweagent.run.benchmarks.swebench import (
@@ -42,6 +46,50 @@ _CHUNKS = [_GT_HOOK_B64[i:i + _CHUNK_SIZE] for i in range(0, len(_GT_HOOK_B64), 
 
 logger.info("GT v10 Pro precompute: %d bytes, %d chunks, root=%s",
             GT_HOOK_PATH.stat().st_size, len(_CHUNKS), REPO_ROOT)
+
+
+def _install_offline_dataset_loader() -> None:
+    """Serve mini-swe-agent's load_dataset call from local JSONL, never HF."""
+    dataset_jsonl = os.environ.get("GT_PRO_LOCAL_DATASET_JSONL", "").strip()
+    if not dataset_jsonl:
+        return
+    path = Path(dataset_jsonl)
+    if not path.is_file():
+        raise SystemExit(f"GT_PRO_LOCAL_DATASET_MISSING: {path}")
+
+    rows: list[dict] = []
+    with path.open(encoding="utf-8") as fh:
+        for lineno, line in enumerate(fh, 1):
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if "instance_id" not in row or "problem_statement" not in row:
+                raise SystemExit(
+                    f"GT_PRO_LOCAL_DATASET_BAD_ROW: {path}:{lineno} lacks "
+                    "instance_id/problem_statement"
+                )
+            if "docker_image" not in row and "dockerhub_tag" not in row:
+                raise SystemExit(
+                    f"GT_PRO_LOCAL_DATASET_BAD_ROW: {path}:{lineno} lacks "
+                    "docker_image/dockerhub_tag"
+                )
+            rows.append(row)
+    if not rows:
+        raise SystemExit(f"GT_PRO_LOCAL_DATASET_EMPTY: {path}")
+
+    def load_dataset(dataset_path: str, split: str = "test", **_: object) -> list[dict]:
+        logger.info(
+            "Loading offline Pro dataset %s (requested dataset=%s split=%s rows=%d)",
+            path,
+            dataset_path,
+            split,
+            len(rows),
+        )
+        return [dict(row) for row in rows]
+
+    module = types.ModuleType("datasets")
+    module.load_dataset = load_dataset  # type: ignore[attr-defined]
+    sys.modules["datasets"] = module
 
 
 def _exec(env, cmd: str, timeout: int = 60):
@@ -316,4 +364,5 @@ def v10_pro_process_instance(
 swebench_module.process_instance = v10_pro_process_instance
 
 if __name__ == "__main__":
+    _install_offline_dataset_loader()
     app()

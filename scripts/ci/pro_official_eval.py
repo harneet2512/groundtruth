@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -56,29 +55,21 @@ def write_patch_json(output_dir: Path, instance_id: str, patch_text: str) -> Pat
     return patch_path
 
 
-def load_dataset_row(instance_id: str) -> dict[str, Any]:
-    old_env = {
-        key: os.environ.get(key)
-        for key in ("HF_DATASETS_OFFLINE", "TRANSFORMERS_OFFLINE", "HF_HUB_OFFLINE")
-    }
-    for key in old_env:
-        os.environ.pop(key, None)
-    try:
-        from datasets import load_dataset
-
-        ds = load_dataset("ScaleAI/SWE-bench_Pro", split="test")
-        for row in ds:
+def load_dataset_row(instance_id: str, dataset_jsonl: Path) -> dict[str, Any]:
+    if not dataset_jsonl.is_file():
+        raise RuntimeError(f"offline Pro dataset missing: {dataset_jsonl}")
+    with dataset_jsonl.open(encoding="utf-8") as fh:
+        for line in fh:
+            if not line.strip():
+                continue
+            row = json.loads(line)
             if row.get("instance_id") == instance_id:
                 return dict(row)
-    finally:
-        for key, value in old_env.items():
-            if value is not None:
-                os.environ[key] = value
-    raise RuntimeError(f"{instance_id} not found in ScaleAI/SWE-bench_Pro test split")
+    raise RuntimeError(f"{instance_id} not found in offline Pro dataset {dataset_jsonl}")
 
 
-def write_raw_sample_csv(output_dir: Path, instance_id: str) -> Path:
-    row = load_dataset_row(instance_id)
+def write_raw_sample_csv(output_dir: Path, instance_id: str, dataset_jsonl: Path) -> Path:
+    row = load_dataset_row(instance_id, dataset_jsonl)
     if "FAIL_TO_PASS" in row and "fail_to_pass" not in row:
         row["fail_to_pass"] = row["FAIL_TO_PASS"]
     if "PASS_TO_PASS" in row and "pass_to_pass" not in row:
@@ -100,6 +91,7 @@ def main() -> int:
     parser.add_argument("--output-dir", default="trial_results/pro_eval", type=Path)
     parser.add_argument("--reward-file", default="trial_results/reward.txt", type=Path)
     parser.add_argument("--trial-log", default="trial_output.log", type=Path)
+    parser.add_argument("--dataset-jsonl", required=True, type=Path)
     parser.add_argument("--num-workers", type=int, default=1)
     args = parser.parse_args()
 
@@ -151,7 +143,7 @@ def main() -> int:
 
     try:
         patch_path = write_patch_json(args.output_dir, args.instance_id, patch_text)
-        raw_sample_path = write_raw_sample_csv(args.output_dir, args.instance_id)
+        raw_sample_path = write_raw_sample_csv(args.output_dir, args.instance_id, args.dataset_jsonl)
     except Exception as exc:
         return finish(0, "PRO_EVAL_INPUT_FAIL", repr(exc), exit_code=2)
 
