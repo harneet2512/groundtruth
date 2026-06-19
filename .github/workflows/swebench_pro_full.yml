@@ -94,6 +94,7 @@ env:
   GT_PROOF_MODE: "1"
   GT_CONTAINERIZED: "1"
   GT_RUNTIME_STRATEGY: "unified_substrate"
+  GT_REQUIRE_COMMIT_PARITY: "1"
   GT_LSP_READY_BUDGET_S_OVERRIDE: ${{ vars.GT_LSP_READY_BUDGET_S_OVERRIDE }}
   # Verification horizon (Pro-specific; DeepSWE uses 300).
   GT_STEP_LIMIT: "250"

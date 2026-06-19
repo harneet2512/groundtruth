@@ -172,6 +172,20 @@ def test_deepswe_forwards_semantic_capacity_caps_to_agent_container():
     assert '--ae GT_SEM_POOL_FILES="${GT_SEM_POOL_FILES:-}"' in run
 
 
+def test_full_benchmarks_require_substrate_commit_parity():
+    for wf in (WF_DEEPSWE, WF_PRO_FULL):
+        env = _load(wf).get("env") or {}
+        assert env.get("GT_REQUIRE_COMMIT_PARITY") == "1"
+
+
+def test_deepswe_rust_proof_uses_baked_substrate_rustup():
+    script = _read(SCRIPT_SUBSTRATE_PROOF)
+    assert "RUSTUP_HOME_FOR_PROOF='/opt/gt/rustup'" in script
+    assert "RUSTUP_TOOLCHAIN_FOR_PROOF='stable'" in script
+    assert "task CARGO_HOME is mounted for registry/cache only" in script
+    assert '-e RUSTUP_HOME="$RUSTUP_HOME_FOR_PROOF"' in script
+
+
 def test_pro_full_uses_same_harness_python_for_import_check_and_runner():
     doc = _load(WF_PRO_FULL)
     install = _step(doc, "trial", "Install host harness deps")["run"]

@@ -194,6 +194,10 @@ def audit_workflows(results: list[dict[str, str]], benchmark: str) -> None:
             record(results, "FAIL", "pro", "trial_fail_closed", "trial step has continue-on-error")
         else:
             record(results, "OK", "pro", "trial_fail_closed", "trial step is fail-closed")
+        if 'GT_REQUIRE_COMMIT_PARITY: "1"' in pro:
+            record(results, "OK", "pro", "substrate_commit_parity", "full run requires substrate/run commit parity")
+        else:
+            record(results, "FAIL", "pro", "substrate_commit_parity", "full run can use a stale substrate image")
 
     if benchmark in {"all", "deepswe"}:
         require_present(
@@ -223,6 +227,10 @@ def audit_workflows(results: list[dict[str, str]], benchmark: str) -> None:
             record(results, "FAIL", "deepswe", "trial_fail_closed", "trial step has continue-on-error")
         else:
             record(results, "OK", "deepswe", "trial_fail_closed", "trial step is fail-closed")
+        if 'GT_REQUIRE_COMMIT_PARITY: "1"' in deepswe:
+            record(results, "OK", "deepswe", "substrate_commit_parity", "full run requires substrate/run commit parity")
+        else:
+            record(results, "FAIL", "deepswe", "substrate_commit_parity", "full run can use a stale substrate image")
 
     write_patterns = [
         r">\s*(?:benchmarks/data/swebench_pro_public_tags\.jsonl|artifact_deepswe/repo_manifest\.json)",

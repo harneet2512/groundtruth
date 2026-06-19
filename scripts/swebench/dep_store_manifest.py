@@ -140,6 +140,13 @@ def validate_manifest(manifest: dict[str, Any]) -> list[str]:
                     f"(source={st.get('source_in_task_image')!r}, "
                     f"path={st.get('path')!r})"
                 )
+        rust_src = stores.get("rust_src") or {}
+        if not rust_src.get("exists") or int(rust_src.get("file_count") or 0) == 0:
+            problems.append(
+                "DEP_STORE_EMPTY: rust task requires rust_src for the active "
+                f"toolchain (active_toolchain={rust_src.get('active_toolchain')!r}, "
+                f"path={rust_src.get('path')!r})"
+            )
     return problems
 
 

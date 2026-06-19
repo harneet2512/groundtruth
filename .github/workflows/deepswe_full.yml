@@ -106,6 +106,7 @@ env:
   GT_PROOF_MODE: "1"
   GT_CONTAINERIZED: "1"
   GT_RUNTIME_STRATEGY: "unified_substrate"
+  GT_REQUIRE_COMMIT_PARITY: "1"
   # Optional GLOBAL override of the per-language LSP readiness budget (seconds). Empty =
   # use the per-language default chosen in the proof step (go/rust=5s no-op floor,
   # ts/js/python=20s). vars.* indirection only — never a secret, never a hardcoded value.

@@ -318,6 +318,20 @@ else
     || { echo "DEP_STORE_MANIFEST_WARN: dep store incomplete for ${GT_MATRIX_LANGUAGE}" | tee -a trial_output.log; }
 fi
 
+RUSTUP_DOCKER_MOUNT_ARGS='-v /tmp/gt/deps/rustup:/root/.rustup'
+RUSTUP_HOME_FOR_PROOF='/root/.rustup'
+RUSTUP_TOOLCHAIN_FOR_PROOF="$ACTIVE_RUST_TOOLCHAIN"
+RUST_PATH_PREFIX="/root/.rustup/toolchains/$ACTIVE_RUST_TOOLCHAIN/bin:/opt/gt/cargo/bin"
+if [ "$HARNESS" = "deepswe" ] && [ "${GT_MATRIX_LANGUAGE}" = "rust" ]; then
+  # A copied task rustup can be incomplete or newer than the baked rust-analyzer
+  # proc-macro ABI. Do not let it shadow the substrate's self-tested Rust closure.
+  RUSTUP_DOCKER_MOUNT_ARGS=''
+  RUSTUP_HOME_FOR_PROOF='/opt/gt/rustup'
+  RUSTUP_TOOLCHAIN_FOR_PROOF='stable'
+  RUST_PATH_PREFIX='/opt/gt/cargo/bin'
+  echo "rust proof uses baked substrate rustup/toolchain; task CARGO_HOME is mounted for registry/cache only"
+fi
+
 # Run provenance: the task base commit = the materialized repo's HEAD (docker cp
 # carries .git). Recorded-or-empty — gt-run-proof writes null when absent, never
 # a guess. Provenance only; no task IDs in product logic, no gate behavior change.
@@ -440,7 +454,7 @@ if [ "$HARNESS" = "deepswe" ]; then
       -v "/tmp/issue.txt:/work_issue.txt:ro" \
       -v "/tmp/gt/deps/gomodcache:/tmp/gomodcache" \
       -v "/tmp/gt/deps/cargo:/root/.cargo" \
-      -v "/tmp/gt/deps/rustup:/root/.rustup" \
+      ${RUSTUP_DOCKER_MOUNT_ARGS} \
       -e GT_PROOF_MODE=1 -e GT_CONTAINERIZED=1 -e GT_RUNTIME_STRATEGY=unified_substrate \
       -e GT_REQUIRE_FTS5=1 -e GT_REQUIRE_EMBEDDER=1 -e GT_FORCE_ONNX_EMBEDDER=1 \
       -e GT_REQUIRE_LSP=1 -e GT_REQUIRE_FULL_STACK=1 -e GT_ISSUE_FILE=/work_issue.txt \
@@ -448,8 +462,8 @@ if [ "$HARNESS" = "deepswe" ]; then
       -e GOFLAGS=-mod=mod -e GOPROXY=off -e GONOSUMCHECK=1 -e GOSUMDB=off \
       -e CARGO_HOME=/root/.cargo \
       -e CARGO_TARGET_DIR=/tmp/cargo-target -e CARGO_NET_OFFLINE=true \
-      -e RUSTUP_HOME=/root/.rustup -e RUSTUP_TOOLCHAIN="$ACTIVE_RUST_TOOLCHAIN" \
-      -e PATH="/root/.rustup/toolchains/$ACTIVE_RUST_TOOLCHAIN/bin:/opt/gt/bin:/opt/gt/node/bin:/opt/gt/python/bin:/opt/gt/jre/bin:/opt/gt/go/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+      -e RUSTUP_HOME="$RUSTUP_HOME_FOR_PROOF" -e RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN_FOR_PROOF" \
+      -e PATH="$RUST_PATH_PREFIX:/opt/gt/bin:/opt/gt/node/bin:/opt/gt/python/bin:/opt/gt/jre/bin:/opt/gt/go/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
       -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 -e HF_DATASETS_OFFLINE=1 \
       -e GT_GATES_DELIVER_ALWAYS="${GT_GATES_DELIVER_ALWAYS:-0}" \
       -e GT_GIT_COMMIT="${GT_GITHUB_SHA}" \
