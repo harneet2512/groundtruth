@@ -36,6 +36,8 @@ import pytest
 _ROOT = Path(__file__).resolve().parents[1]
 _WF_DIR = _ROOT / ".github" / "workflows"
 _FULL_WF = _WF_DIR / "deepswe_full.yml"
+_SUBSTRATE_PROOF = _ROOT / "scripts" / "ci" / "substrate_proof.sh"
+_PIER_COMPOSE_PATCH = _ROOT / "scripts" / "ci" / "patch_pier_compose_memory.py"
 _OUTCOME_PATH = _ROOT / "scripts" / "verify" / "deepswe_outcome.py"
 _AGENT_PATH = _ROOT / "artifact_deepswe" / "gt_agent.py"
 
@@ -59,6 +61,15 @@ def _gt_env_clear(monkeypatch):
     for k in list(os.environ):
         if k.startswith("GT_"):
             monkeypatch.delenv(k, raising=False)
+
+
+def _delivery_shell_lines() -> list[tuple[str, int, str]]:
+    """Workflow shell plus delegated substrate-proof implementation."""
+    out: list[tuple[str, int, str]] = []
+    for p in (_FULL_WF, _SUBSTRATE_PROOF):
+        for lineno, ln in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
+            out.append((str(p.relative_to(_ROOT)), lineno, ln))
+    return out
 
 
 @pytest.fixture
@@ -106,21 +117,20 @@ def test_fix1_every_pier_install_is_pinned_to_0_2_0():
 # FIX 2 — G1: every §E marker echo site tees the marker line into trial_output.log
 # ===========================================================================
 def test_fix2_every_infra_marker_echo_site_tees_to_trial_log(outcome_mod):
-    """For each canonical INFRA_LOG_MARKERS token: deepswe_full.yml must echo it
+    """For each canonical INFRA_LOG_MARKERS token: the delivery shell must echo it
     (line-start inside the quoted string) AND pipe that echo through
     `tee -a trial_output.log` so the classifier sees it even when the job exits
     before the agent step creates the log."""
-    wf_lines = _FULL_WF.read_text(encoding="utf-8").splitlines()
     for marker in outcome_mod.INFRA_LOG_MARKERS:
-        sites = [(i, ln) for i, ln in enumerate(wf_lines, 1)
+        sites = [(path, i, ln) for path, i, ln in _delivery_shell_lines()
                  if f'echo "{marker}' in ln]
         assert sites, (
-            f"deepswe_full.yml has NO echo site for canonical marker {marker!r} "
+            f"delivery shell has NO echo site for canonical marker {marker!r} "
             f"(INFRA_LOG_MARKERS expects the workflow to emit this exact token)"
         )
-        for lineno, ln in sites:
+        for path, lineno, ln in sites:
             assert "tee -a trial_output.log" in ln, (
-                f"G1: marker echo at deepswe_full.yml:{lineno} does not append to "
+                f"G1: marker echo at {path}:{lineno} does not append to "
                 f"trial_output.log — the classifier scans that file, and this "
                 f"failure site exits before the agent step creates it:\n  {ln.strip()}"
             )
@@ -129,15 +139,15 @@ def test_fix2_every_infra_marker_echo_site_tees_to_trial_log(outcome_mod):
 def test_fix2_task_image_pull_fail_uses_canonical_token():
     """The audit found TASK_IMAGE_PULL_FAIL in INFRA_LOG_MARKERS while the workflow
     echoed 'FATAL: task image pull failed' — a token the classifier can never match."""
-    wf = _FULL_WF.read_text(encoding="utf-8")
-    assert 'echo "FATAL: task image pull failed"' not in wf, (
+    shell = "\n".join(ln for _, _, ln in _delivery_shell_lines())
+    assert 'echo "FATAL: task image pull failed"' not in shell, (
         "G1: non-canonical task-image failure echo still present (classifier "
         "matches TASK_IMAGE_PULL_FAIL, not 'FATAL: ...')"
     )
-    assert 'echo "FATAL: task image not present after pull"' not in wf, (
+    assert 'echo "FATAL: task image not present after pull"' not in shell, (
         "G1: non-canonical post-pull inspect failure echo still present"
     )
-    assert 'echo "TASK_IMAGE_PULL_FAIL' in wf
+    assert 'echo "TASK_IMAGE_PULL_FAIL' in shell
 
 
 def test_fix2_workflow_echoed_strings_classify_infra(outcome_mod):
@@ -145,10 +155,9 @@ def test_fix2_workflow_echoed_strings_classify_infra(outcome_mod):
     for each marker, feed them to find_infra_markers + build_signal_record, and
     require class INFRA. Proves the workflow emission and the classifier tokens
     can never drift apart silently."""
-    wf_lines = _FULL_WF.read_text(encoding="utf-8").splitlines()
     for marker in outcome_mod.INFRA_LOG_MARKERS:
         emitted: list[str] = []
-        for ln in wf_lines:
+        for _, _, ln in _delivery_shell_lines():
             m = re.search(r'echo "([^"]+)"', ln)
             if m and m.group(1).startswith(marker):
                 emitted.append(m.group(1))
@@ -248,12 +257,6 @@ def test_fix3_run_routes_through_prepend_brief(agent_mod):
 # capped + classified (rc 137 -> GT_PROOF_OOM). F4 restores symmetry: a
 # compose-spec mem_limit/memswap_limit (honored WITHOUT --compatibility) + the
 # rc=137 -> GT_AGENT_OOM classification at the pier-run step.
-_PIER_DIR = (
-    _ROOT / "deepswe-pier" / "src" / "pier" / "environments" / "docker"
-)
-_COMPOSE_BASE = _PIER_DIR / "docker-compose-base.yaml"
-
-
 def test_f4_pier_compose_base_has_runtime_mem_cap():
     """The pier compose base must carry mem_limit + memswap_limit (the compose-spec
     runtime keys that `docker compose up` honors WITHOUT --compatibility), driven by
@@ -262,25 +265,58 @@ def test_f4_pier_compose_base_has_runtime_mem_cap():
     rather than swapping into a silent host OOM."""
     import yaml  # type: ignore
 
-    assert _COMPOSE_BASE.is_file(), f"pier compose base missing at {_COMPOSE_BASE}"
-    raw = _COMPOSE_BASE.read_text(encoding="utf-8")
+    patch_mod = _load(_PIER_COMPOSE_PATCH, "pier_compose_patch_uut")
+    raw = """
+services:
+  main:
+    volumes: []
+    deploy:
+      resources:
+        limits:
+          cpus: ${CPUS}
+          memory: ${MEMORY}
+""".lstrip()
+    patched, changed = patch_mod.patch_text(raw)
+    assert changed
     # Both runtime keys present, both bound to ${MEMORY} (the fixed, per-task-invariant
     # bound — NOT a task-id / repo-size-gated cap).
-    assert "mem_limit: ${MEMORY}" in raw, (
+    assert "mem_limit: ${MEMORY}" in patched, (
         "pier compose base lacks the runtime-honored `mem_limit: ${MEMORY}` — "
         "the agent container is uncapped under plain `docker compose up`"
     )
-    assert "memswap_limit: ${MEMORY}" in raw, (
+    assert "memswap_limit: ${MEMORY}" in patched, (
         "pier compose base lacks `memswap_limit: ${MEMORY}` — without it swap "
         "is unbounded and a runaway defers into a silent host OOM instead of "
         "a classified container OOM-kill"
     )
     # The cap must reference the substrate-driven ${MEMORY} var (generalized), never
     # a literal per-task number baked into the compose file.
-    doc = yaml.safe_load(raw)
+    doc = yaml.safe_load(patched)
     main = doc["services"]["main"]
     assert main.get("mem_limit") == "${MEMORY}"
     assert main.get("memswap_limit") == "${MEMORY}"
+    patched_again, changed_again = patch_mod.patch_text(patched)
+    assert patched_again == patched
+    assert not changed_again
+
+
+def test_f4_every_pier_install_path_patches_compose_base():
+    """Every DeepSWE path that installs/restores pier must patch its compose base
+    before `pier run`; cached harness venvs count too."""
+    checks = {
+        ".github/workflows/deepswe_full.yml": 3,
+        ".github/workflows/deepswe_trial.yml": 1,
+        ".github/workflows/deepswe_preindex.yml": 1,
+        "scripts/vm/gt_agent_run.sh": 1,
+    }
+    for rel, min_count in checks.items():
+        raw = (_ROOT / rel).read_text(encoding="utf-8")
+        count = raw.count("patch_pier_compose_memory.py")
+        assert count >= min_count, (
+            f"{rel} has {count} pier compose patch call(s), expected at least "
+            f"{min_count}; an unpatched pier install can leave the agent "
+            f"container uncapped under plain docker compose"
+        )
 
 
 def test_f4_pier_run_step_classifies_agent_oom(outcome_mod):

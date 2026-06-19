@@ -263,6 +263,7 @@ jobs:
           source "$VENV_DIR/bin/activate"
           python -m pip install --upgrade pip --quiet
           python -m pip install "datacurve-pier==0.2.0" --quiet
+          python scripts/ci/patch_pier_compose_memory.py
           python -m pip install -e . --quiet
           deactivate
           tar -czf /tmp/gt-harness-venv.tar.gz -C /tmp gt-harness-venv/
@@ -553,6 +554,7 @@ jobs:
             find "$VENV_SITE" -name "__editable__.groundtruth*.pth" -delete 2>/dev/null || true
             # Re-install just the GT package editable (no-deps, wheel already present → fast).
             "${VENV_DIR}/bin/python" -m pip install -e . --no-deps --quiet 2>&1 | tail -3 || true
+            "${VENV_DIR}/bin/python" scripts/ci/patch_pier_compose_memory.py
             export PATH="${VENV_DIR}/bin:$PATH"
             command -v pier >/dev/null || { echo "FATAL: pier not on PATH after venv restore"; exit 1; }
             echo "host harness ready (venv cache): pier=$(command -v pier)"
@@ -565,6 +567,7 @@ jobs:
             # exec -e). An unpinned install lets an upstream release silently change that
             # plumbing mid-run — never float the harness contract on a paid matrix.
             "${VENV_DIR}/bin/python" -m pip install "datacurve-pier==0.2.0" || { echo "FATAL: pier install failed"; exit 1; }
+            "${VENV_DIR}/bin/python" scripts/ci/patch_pier_compose_memory.py
             "${VENV_DIR}/bin/pier" --help >/dev/null || { echo "FATAL: pier install failed"; exit 1; }
             echo "host harness ready: pier=${VENV_DIR}/bin/pier (LSP/gates/graph run inside the substrate)"
           fi

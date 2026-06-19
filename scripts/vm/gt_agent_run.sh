@@ -264,6 +264,13 @@ if [ "$SKIP_HOST_PREFLIGHT" != "1" ]; then
     python3 -m pip install "datacurve-pier==0.2.0" || { echo "FATAL: pier install failed (need Python>=3.12 or GT_PIER_VENV)"; exit 1; }
   fi
   command -v pier >/dev/null 2>&1 || { echo "FATAL: pier not on PATH after install"; exit 1; }
+  PIER_BIN="$(command -v pier)"
+  PIER_PY="$(head -n 1 "$PIER_BIN" 2>/dev/null | sed 's/^#!//')"
+  if [ -x "$PIER_PY" ]; then
+    "$PIER_PY" "$REPO_ROOT/scripts/ci/patch_pier_compose_memory.py"
+  else
+    python3 "$REPO_ROOT/scripts/ci/patch_pier_compose_memory.py"
+  fi
   # Current GT importable host-side (adapter imports ONLY — no host LSP, no gt-index build).
   export PYTHONPATH="$REPO_ROOT:$REPO_ROOT/src:$REPO_ROOT/scripts/swebench:$REPO_ROOT/scripts/metrics${PYTHONPATH:+:$PYTHONPATH}"
   if ! python3 -c "import groundtruth.runtime.proof as p, groundtruth.runtime.context as c; assert p.graph_edges_hash and c.GTRuntimeContext" 2>/dev/null; then
