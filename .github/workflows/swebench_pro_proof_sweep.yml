@@ -1,0 +1,498 @@
+name: "SWE-bench Pro: substrate proof SWEEP (731 tasks, NO LLM, $0)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      gt_substrate_digest:
+        description: "Pinned GT substrate image by immutable digest."
+        required: true
+      gt_code_commit:
+        description: "GT code commit baked into the substrate. Empty uses this workflow SHA."
+        required: false
+        default: ""
+      mode:
+        description: "smoke, pilot, pilot100, or full."
+        required: false
+        default: "full"
+      language:
+        description: "all, go, js, python, or ts."
+        required: false
+        default: "all"
+      instance_ids:
+        description: "Optional comma-separated instance_ids. Overrides mode/language/shard."
+        required: false
+        default: ""
+      shard:
+        description: "For full mode, 1-based i/n shard such as 1/3."
+        required: false
+        default: ""
+      max_parallel:
+        description: "Matrix max-parallel."
+        required: false
+        default: "20"
+      assets_repo:
+        description: "Image-cache owner/repo used for GHCR candidate ordering."
+        required: false
+        default: "harneet2512/groundtruth"
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: pro-proof-sweep-${{ github.ref }}-${{ inputs.shard || inputs.mode }}
+  cancel-in-progress: false
+
+env:
+  GT_SUBSTRATE_DIGEST: ${{ inputs.gt_substrate_digest }}
+  GT_CODE_COMMIT: ${{ inputs.gt_code_commit || github.sha }}
+  GT_REQUIRE_PINNED_SUBSTRATE: "1"
+  GT_REQUIRE_FTS5: "1"
+  GT_REQUIRE_EMBEDDER: "1"
+  GT_FORCE_ONNX_EMBEDDER: "1"
+  GT_REQUIRE_LSP: "1"
+  GT_REQUIRE_FULL_STACK: "1"
+  GT_FORBID_PREBUILT_GRAPH: "1"
+  GT_GATES_DELIVER_ALWAYS: "0"
+  HF_DATASETS_OFFLINE: "1"
+  TRANSFORMERS_OFFLINE: "1"
+  HF_HUB_OFFLINE: "1"
+  GT_LSP_READY_BUDGET_S_OVERRIDE: ${{ vars.GT_LSP_READY_BUDGET_S_OVERRIDE }}
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+      total: ${{ steps.gen.outputs.total }}
+      pro_bench_sha: ${{ steps.pro_bench_clone.outputs.pro_bench_sha }}
+      substrate_cache_key: ${{ steps.substrate_cache.outputs.key }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+
+      - name: Workflow lint
+        run: python3 scripts/verify/workflow_lint.py .github/workflows/swebench_pro_proof_sweep.yml
+
+      - name: Digest and provenance precheck
+        run: |
+          set -e
+          case "${GT_SUBSTRATE_DIGEST:-}" in
+            *@sha256:*) echo "pinned substrate OK: $GT_SUBSTRATE_DIGEST" ;;
+            *) echo "GT_SUBSTRATE_DIGEST_MISSING: '$GT_SUBSTRATE_DIGEST' is not an immutable @sha256 digest"; exit 1 ;;
+          esac
+          echo "$GT_CODE_COMMIT" | grep -Eq '^[0-9a-f]{40}$' || {
+            echo "FATAL: gt_code_commit must be a 40-char commit SHA, got '$GT_CODE_COMMIT'";
+            exit 1;
+          }
+          echo "substrate code commit: $GT_CODE_COMMIT"
+
+      - name: Clone scaleapi/SWE-bench_Pro-os for offline problem statements
+        id: pro_bench_clone
+        run: |
+          git clone --depth 1 https://github.com/scaleapi/SWE-bench_Pro-os.git swebench-pro-os
+          PRO_SHA=$(git -C swebench-pro-os rev-parse HEAD)
+          echo "pro_bench_sha=${PRO_SHA}" >> "$GITHUB_OUTPUT"
+          tar -czf /tmp/swebench-pro-os.tar.gz swebench-pro-os/
+          echo "SWE-bench_Pro-os SHA: ${PRO_SHA}"
+
+      - name: Save SWE-bench_Pro-os tarball to GHA cache
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/swebench-pro-os.tar.gz
+          key: swebench-pro-os-clone-${{ steps.pro_bench_clone.outputs.pro_bench_sha }}
+
+      - id: gen
+        name: Build Pro proof matrix from committed 731-task tag manifest
+        env:
+          INPUT_MODE: ${{ inputs.mode }}
+          INPUT_LANGUAGE: ${{ inputs.language }}
+          INPUT_INSTANCE_IDS: ${{ inputs.instance_ids }}
+          INPUT_SHARD: ${{ inputs.shard }}
+        run: |
+          python3 << 'PYEOF'
+          import json, math, os, sys
+
+          mode = os.environ.get("INPUT_MODE", "full")
+          lang = os.environ.get("INPUT_LANGUAGE", "all")
+          explicit = [t.strip() for t in os.environ.get("INPUT_INSTANCE_IDS", "").split(",") if t.strip()]
+          shard_spec = (os.environ.get("INPUT_SHARD", "") or "").strip()
+          mode_limits = {"smoke": 5, "pilot": 20, "pilot100": 100, "full": 731}
+          if mode not in mode_limits:
+              sys.exit(f"FATAL: unsupported mode {mode!r}")
+
+          ds_path = "benchmarks/data/swebench_pro_public_tags.jsonl"
+          tasks = []
+          with open(ds_path, encoding="utf-8") as f:
+              for line in f:
+                  if not line.strip():
+                      continue
+                  row = json.loads(line)
+                  for k in ("instance_id", "repo_language", "dockerhub_tag"):
+                      if not row.get(k):
+                          sys.exit(f"FATAL: Pro manifest row missing {k}: {row}")
+                  tasks.append(row)
+          if len(tasks) != 731:
+              sys.exit(f"FATAL: expected 731 Pro tasks, found {len(tasks)}")
+
+          by_id = {t["instance_id"]: t for t in tasks}
+          if explicit:
+              unknown = [t for t in explicit if t not in by_id]
+              if unknown:
+                  sys.exit(f"FATAL: unknown instance_ids: {unknown}")
+              selected = [by_id[t] for t in explicit]
+          else:
+              selected = [t for t in tasks if lang == "all" or t["repo_language"] == lang]
+              if mode != "full":
+                  selected = selected[:mode_limits[mode]]
+              elif shard_spec:
+                  try:
+                      shard_i_s, shard_n_s = shard_spec.split("/", 1)
+                      shard_i, shard_n = int(shard_i_s), int(shard_n_s)
+                      assert shard_n >= 1 and 1 <= shard_i <= shard_n
+                  except Exception:
+                      sys.exit(f"FATAL: bad shard spec {shard_spec!r}; use i/n, for example 1/3")
+                  chunk = math.ceil(len(selected) / shard_n)
+                  start = (shard_i - 1) * chunk
+                  end = min(shard_i * chunk, len(selected))
+                  selected = selected[start:end]
+                  print(f"shard {shard_i}/{shard_n}: selected [{start}:{end}] = {len(selected)} tasks")
+
+          if len(selected) > 256:
+              sys.exit(f"FATAL: selected {len(selected)} tasks exceeds GitHub matrix cap 256; use shards")
+
+          include = [
+              {
+                  "task": t["instance_id"],
+                  "language": t["repo_language"],
+                  "dockerhub_tag": t["dockerhub_tag"],
+              }
+              for t in selected
+          ]
+          langs = {}
+          for task in include:
+              langs[task["language"]] = langs.get(task["language"], 0) + 1
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write("matrix=" + json.dumps({"include": include}, separators=(",", ":")) + "\n")
+              out.write(f"total={len(include)}\n")
+          print(f"{len(include)} Pro proof tasks queued; langs={langs}")
+          PYEOF
+
+      - name: Legitimacy guard - prepare produced no task graph
+        run: |
+          FOUND=$(find "$GITHUB_WORKSPACE" -name graph.db 2>/dev/null | head -5)
+          if [ -n "$FOUND" ]; then
+            echo "FATAL: prepare produced graph.db; task graphs must be per-task substrate artifacts"
+            echo "$FOUND"
+            exit 1
+          fi
+          echo "legitimacy OK: no graph.db built in prepare"
+
+      - name: Pull and cache substrate image
+        id: substrate_cache
+        run: |
+          set -e
+          DIGEST_HEX=$(echo "$GT_SUBSTRATE_DIGEST" | sed 's/.*@sha256://')
+          echo "key=gt-substrate-img-${DIGEST_HEX:0:16}" >> "$GITHUB_OUTPUT"
+          docker pull "$GT_SUBSTRATE_DIGEST"
+          docker save "$GT_SUBSTRATE_DIGEST" | gzip -1 > /tmp/gt-substrate.tar.gz
+
+      - name: Save substrate image tarball to GHA cache
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/gt-substrate.tar.gz
+          key: ${{ steps.substrate_cache.outputs.key }}
+
+  proof:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    name: "${{ matrix.task }} (${{ matrix.language }})"
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+      fail-fast: false
+      max-parallel: ${{ fromJson(inputs.max_parallel) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+
+      - name: Trust workspace for git
+        run: git config --global --add safe.directory '*'
+
+      - name: Log in to GHCR for image cache
+        env:
+          GHCR_TOKEN: ${{ secrets.GHCR_PULL_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          OWNER=$(echo "${{ inputs.assets_repo }}" | cut -d/ -f1 | tr '[:upper:]' '[:lower:]')
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$OWNER" --password-stdin || true
+
+      - name: Restore SWE-bench_Pro-os from cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/swebench-pro-os.tar.gz
+          key: swebench-pro-os-clone-${{ needs.prepare.outputs.pro_bench_sha }}
+
+      - name: Restore offline Pro dataset source
+        run: |
+          test -s /tmp/swebench-pro-os.tar.gz
+          tar -xzf /tmp/swebench-pro-os.tar.gz
+          test -s swebench-pro-os/helper_code/sweap_eval_full_v2.jsonl
+
+      - name: Build one-row offline Pro dataset
+        run: |
+          python3 scripts/ci/build_pro_local_dataset.py \
+            --pro-os-dir swebench-pro-os \
+            --tag-manifest benchmarks/data/swebench_pro_public_tags.jsonl \
+            --instance-ids "${{ matrix.task }}" \
+            --out /tmp/pro-local-dataset.jsonl
+          python3 - <<'PYEOF'
+          import json
+          row = json.loads(open("/tmp/pro-local-dataset.jsonl", encoding="utf-8").readline())
+          assert "patch" not in row and "test_patch" not in row
+          assert row.get("problem_statement") and row.get("docker_image")
+          print(f"offline Pro dataset OK: {row['instance_id']}")
+          PYEOF
+
+      - name: Restore substrate image tarball from cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/gt-substrate.tar.gz
+          key: ${{ needs.prepare.outputs.substrate_cache_key }}
+
+      - id: gt_proof
+        name: GT substrate proof only - no agent, no LLM
+        continue-on-error: true
+        env:
+          GT_MATRIX_TASK: ${{ matrix.task }}
+          GT_MATRIX_DOCKERHUB_TAG: ${{ matrix.dockerhub_tag }}
+          GT_MATRIX_LANGUAGE: ${{ matrix.language }}
+          GT_INPUTS_ASSETS_REPO: ${{ inputs.assets_repo }}
+          GT_GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+          GT_GITHUB_SHA: ${{ env.GT_CODE_COMMIT }}
+          GT_PROOF_HARNESS: pro
+          GT_PRO_LOCAL_DATASET_JSONL: /tmp/pro-local-dataset.jsonl
+        run: bash scripts/ci/substrate_proof.sh
+
+      - name: Build per-task proof row
+        if: always()
+        env:
+          TASK_ID: ${{ matrix.task }}
+          TASK_LANG: ${{ matrix.language }}
+          DOCKERHUB_TAG: ${{ matrix.dockerhub_tag }}
+          GT_PROOF_OUTCOME: ${{ steps.gt_proof.outcome }}
+          PRO_BENCH_SHA: ${{ needs.prepare.outputs.pro_bench_sha }}
+          WORKFLOW_SHA: ${{ github.sha }}
+          GT_GIT_COMMIT: ${{ env.GT_CODE_COMMIT }}
+        run: |
+          mkdir -p /tmp/proof_out/gt_artifacts
+          if [ -d /tmp/gt ]; then cp -a /tmp/gt/. /tmp/proof_out/gt_artifacts/; fi
+          python3 << 'PYEOF'
+          import json, os, sys, time
+          from pathlib import Path
+
+          root = Path("/tmp/proof_out")
+          gt = root / "gt_artifacts"
+          gt.mkdir(parents=True, exist_ok=True)
+
+          def jload(path):
+              try:
+                  return json.loads(Path(path).read_text(encoding="utf-8"))
+              except Exception:
+                  return None
+
+          req = [
+              "graph.db",
+              "runtime_context.json",
+              "lsp_certificate.json",
+              "graph_certificate.json",
+              "embedder_certificate.json",
+              "foundational_gate_report.json",
+              "run_manifest.json",
+              "brief.txt",
+          ]
+          present = {name: (gt / name).is_file() and (gt / name).stat().st_size > 0 for name in req}
+          proof_status = jload(gt / "proof_status.json") or {}
+          lsp = jload(gt / "lsp_certificate.json") or {}
+          emb = jload(gt / "embedder_certificate.json") or {}
+          gates = jload(gt / "foundational_gate_report.json") or {}
+          man = jload(gt / "run_manifest.json") or {}
+          progress = jload(gt / "proof_progress.json") or {}
+          failure = jload(gt / "proof_failure.json") or {}
+
+          verdict, ok = "EMBEDDER_CERT_ABSENT", False
+          if emb:
+              try:
+                  sys.path.insert(0, str(Path(os.environ.get("GITHUB_WORKSPACE", ".")) / "scripts" / "metrics"))
+                  from embedder_certificate import classify_embedder
+                  verdict, ok = classify_embedder(emb, proof_mode=True, require_embedder=True)
+              except Exception as exc:
+                  verdict, ok = f"CLASSIFY_ERROR:{type(exc).__name__}", False
+
+          def inum(v, default=0):
+              try:
+                  return int(v)
+              except (TypeError, ValueError):
+                  return default
+
+          def fnum(v, default=0.0):
+              try:
+                  return float(v)
+              except (TypeError, ValueError):
+                  return default
+
+          state = str(proof_status.get("state") or "").strip()
+          status_code = str(proof_status.get("code") or "").strip()
+          failure_class = ""
+          if state and state != "ok":
+              failure_class = status_code or "GT_RUN_PROOF_FAIL"
+          elif os.environ.get("GT_PROOF_OUTCOME") != "success":
+              failure_class = status_code or "GT_RUN_PROOF_FAIL"
+          elif not all(present.values()):
+              failure_class = "GT_ARTIFACT_MISSING"
+
+          gv = gates.get("verdict") or {}
+          gr = gates.get("gate_resolution") or {}
+          ge = (gates.get("gate_embedder") or {}).get("consumption") or {}
+          resolved = inum(lsp.get("verified_edges")) + inum(lsp.get("corrected_edges")) + inum(lsp.get("deleted_edges"))
+          row = {
+              "benchmark": "swebench_pro",
+              "instance_id": os.environ.get("TASK_ID", ""),
+              "language": os.environ.get("TASK_LANG", ""),
+              "dockerhub_tag": os.environ.get("DOCKERHUB_TAG", ""),
+              "image": "jefzda/sweap-images:" + os.environ.get("DOCKERHUB_TAG", ""),
+              "failure_class": failure_class,
+              "failure_detail": proof_status.get("detail") or failure.get("reason") or failure.get("message") or "",
+              "proof_status": proof_status,
+              "proof_exit_code": 0 if not failure_class else 1,
+              "artifacts_present": present,
+              "artifacts_present_count": sum(1 for value in present.values() if value),
+              "lsp": {
+                  "verdict_hint": lsp.get("verdict_hint", ""),
+                  "lsp_warm": bool(lsp.get("lsp_warm", False)),
+                  "server_launched": bool(lsp.get("server_launched", False)),
+                  "warm_probe_ok": bool(lsp.get("warm_probe_ok", False)),
+                  "probe_latency_ms": fnum(lsp.get("probe_latency_ms")),
+                  "resolved": resolved,
+                  "verified_edges": inum(lsp.get("verified_edges")),
+                  "corrected_edges": inum(lsp.get("corrected_edges")),
+                  "deleted_edges": inum(lsp.get("deleted_edges")),
+                  "residual": inum(lsp.get("residual")),
+                  "attempted_edges": inum(lsp.get("attempted_edges")),
+                  "language": lsp.get("language", ""),
+                  "scoped_source_files": inum(lsp.get("scoped_source_files")),
+              },
+              "embedder": {
+                  "verdict": verdict,
+                  "ok": bool(ok),
+                  "class": emb.get("embedder_class", ""),
+                  "dim": emb.get("embedder_dim"),
+                  "models_root": emb.get("GT_MODELS_ROOT", ""),
+                  "discrimination_margin": emb.get("discrimination_margin"),
+                  "model_download_attempted": bool(emb.get("model_download_attempted", False)),
+                  "semantic_candidate_count": inum(emb.get("semantic_candidate_count")),
+                  "rendered_semantic_nonzero_count": inum(emb.get("rendered_semantic_nonzero_count")),
+                  "effective_w_sem": emb.get("effective_w_sem"),
+              },
+              "gates": {
+                  "gate1_resolution": gv.get("resolution_jarvis"),
+                  "gate2_lsp": gv.get("lsp_enrichment"),
+                  "gate3_embedder": gv.get("embedder"),
+                  "all_on": gv.get("all_on"),
+                  "det_pct": gr.get("det_pct"),
+                  "w_sem": ge.get("effective_w_sem"),
+              },
+              "progress": {
+                  "failure_class": progress.get("failure_class"),
+                  "failure_reason": progress.get("failure_reason"),
+                  "proof_exit_code": progress.get("proof_exit_code"),
+              },
+              "timings_s": {"task_pull": -1, "extract": -1, "substrate_pull": -1, "proof": -1},
+              "languages_in_graph": man.get("languages"),
+              "pro_bench_sha": os.environ.get("PRO_BENCH_SHA", ""),
+              "workflow_sha": os.environ.get("WORKFLOW_SHA", ""),
+              "gt_git_commit": os.environ.get("GT_GIT_COMMIT", ""),
+              "substrate_digest": os.environ.get("GT_SUBSTRATE_DIGEST", ""),
+              "run_id": os.environ.get("GITHUB_RUN_ID", ""),
+              "run_url": f"{os.environ.get('GITHUB_SERVER_URL')}/{os.environ.get('GITHUB_REPOSITORY')}/actions/runs/{os.environ.get('GITHUB_RUN_ID')}",
+              "ts_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+          }
+          (root / "row.json").write_text(json.dumps(row, separators=(",", ":")) + "\n", encoding="utf-8")
+          print(json.dumps(row, separators=(",", ":")))
+          PYEOF
+
+      - name: Upload per-task proof artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pro-proof-${{ matrix.task }}
+          path: /tmp/proof_out
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Enforce per-task proof verdict
+        run: |
+          python3 - <<'PYEOF'
+          import json, sys
+          row = json.load(open("/tmp/proof_out/row.json", encoding="utf-8"))
+          if row.get("failure_class") or row.get("proof_exit_code") != 0:
+              print(f"::error title={row.get('instance_id')}::{row.get('failure_class')} {row.get('failure_detail')}")
+              sys.exit(1)
+          print(f"OK: {row['instance_id']} proof clean")
+          PYEOF
+
+  summarize:
+    needs: [prepare, proof]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/rows
+          pattern: pro-proof-*
+
+      - name: Aggregate Pro proof sweep
+        env:
+          MATRIX_JSON: ${{ needs.prepare.outputs.matrix }}
+        run: |
+          python3 << 'PYEOF'
+          import json, os
+          expected = json.loads(os.environ.get("MATRIX_JSON") or '{"include":[]}')
+          expected["benchmark"] = "SWE-bench Pro"
+          expected["substrate_digest"] = os.environ.get("GT_SUBSTRATE_DIGEST", "")
+          expected["gt_git_commit"] = os.environ.get("GT_CODE_COMMIT", "")
+          expected["run_id"] = os.environ.get("GITHUB_RUN_ID", "")
+          with open("/tmp/rows/sweep_tasks.json", "w", encoding="utf-8") as fh:
+              json.dump(expected, fh, separators=(",", ":"))
+          PYEOF
+          python3 scripts/vm/aggregate_sweep.py \
+            --out-dir /tmp/rows \
+            --tasks /tmp/rows/sweep_tasks.json \
+            --report SWEEP_REPORT.md \
+            --run-id "$GITHUB_RUN_ID"
+          cat SWEEP_REPORT.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Pro proof sweep report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pro-proof-sweep-report-${{ github.run_id }}
+          path: SWEEP_REPORT.md
+          retention-days: 30
+          if-no-files-found: error
