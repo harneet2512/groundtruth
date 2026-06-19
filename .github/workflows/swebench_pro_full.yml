@@ -749,14 +749,14 @@ jobs:
             --ak config_file=artifact_deepswe/gt_integration/deepswe_gt_pier.yaml \
             --ak task="$(cat /tmp/issue.txt 2>/dev/null || echo 'Fix issue in repository')" \
             --ak image="jefzda/sweap-images:${{ matrix.dockerhub_tag }}" \
-            2>&1 | tee trial_output.log
+            2>&1 | tee trial_output.log || true
           PIER_RC=${PIPESTATUS[0]}
           set -e
-          echo "=== Pro Trial complete (pier rc=$PIER_RC) ==="
+          echo "=== Pro Trial complete (pier rc=$PIER_RC) ===" | tee -a trial_output.log
+          echo "PIER_EXIT_CODE=$PIER_RC" >> trial_output.log
 
           if ! python3 scripts/swebench/adapter_error_scan.py jobs trial_output.log; then
             echo "DEEPSWE_ADAPTER_FAIL: adapter error found via structured result.json scan" | tee -a trial_output.log
-            exit 1
           fi
           if [ "$PIER_RC" -eq 137 ] || grep -qE "OOMKilled|exit code 137|exited with code 137" trial_output.log; then
             echo "GT_AGENT_OOM: agent container hit the memory cap (rc/exit=137)" | tee -a trial_output.log

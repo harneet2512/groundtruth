@@ -937,10 +937,11 @@ jobs:
             --ae GT_RUNTIME_LEDGER="${GT_C_OUT}/gt_runtime_ledger.jsonl" \
             --ae GT_HOOK_FIRE_COUNTS="${GT_C_OUT}/gt_hook_fire_counts.json" \
             --ak config_file=artifact_deepswe/gt_integration/deepswe_gt_pier.yaml \
-            2>&1 | tee trial_output.log
+            2>&1 | tee trial_output.log || true
           PIER_RC=${PIPESTATUS[0]}
           set -e
-          echo "=== Trial complete (pier rc=$PIER_RC) ==="
+          echo "=== Trial complete (pier rc=$PIER_RC) ===" | tee -a trial_output.log
+          echo "PIER_EXIT_CODE=$PIER_RC" >> trial_output.log
           # P0.1-b: pier SWALLOWS adapter exceptions into result files (exception_message in
           # jobs/<ts>/<task>__*/result.json) — a DeepSweAdapterError can end the run with
           # pier rc=0. Surface it: any DeepSweAdapterError in the jobs dir or the trial log
@@ -948,7 +949,6 @@ jobs:
           # outcome classifier both key on that marker -> class GT, never silent green).
           if ! python3 scripts/swebench/adapter_error_scan.py jobs trial_output.log; then
             echo "DEEPSWE_ADAPTER_FAIL: adapter error found via structured result.json scan" | tee -a trial_output.log
-            exit 1
           fi
           # F4: AGENT-CONTAINER OOM is now a CLASSIFIED capacity kill, not a silent host
           # SIGKILL. The agent container is memory-capped symmetrically to the proof
