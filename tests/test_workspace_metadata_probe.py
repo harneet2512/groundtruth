@@ -19,8 +19,8 @@ _SPEC.loader.exec_module(_MOD)
 
 def test_go_workspace_metadata_probe_success(monkeypatch, tmp_path):
     def _run(cmd, cwd=None, env=None, capture_output=None, text=None, timeout=None):
-        # d8fe8b37: probe uses `go list -e` + a probe-only env override (-mod=mod + live
-        # GOPROXY) so an incomplete offline cache can still resolve the transitive set.
+        # Plain module repos use `-mod=mod` + live GOPROXY so an incomplete offline
+        # cache can still resolve the transitive set.
         assert cmd == ["go", "list", "-e", "./..."]
         assert cwd == str(tmp_path)
         assert env is not None and env.get("GOFLAGS") == "-mod=mod"
@@ -31,6 +31,26 @@ def test_go_workspace_metadata_probe_success(monkeypatch, tmp_path):
     result = _MOD.probe_workspace_metadata("go", str(tmp_path), os.environ.copy())
     assert result["status"] == "ok"
     assert result["package_count"] == 2
+
+
+def test_go_workspace_metadata_probe_does_not_force_mod_flag(monkeypatch, tmp_path):
+    (tmp_path / "go.work").write_text("go 1.22\n\nuse ./app\n", encoding="utf-8")
+
+    def _run(cmd, cwd=None, env=None, capture_output=None, text=None, timeout=None):
+        assert cmd == ["go", "list", "-e", "./..."]
+        assert cwd == str(tmp_path)
+        assert env is not None and "-mod=mod" not in env.get("GOFLAGS", "")
+        assert env.get("GOPROXY") == "https://proxy.golang.org,direct"
+        return subprocess.CompletedProcess(cmd, 0, stdout="repo/app\n", stderr="")
+
+    monkeypatch.setattr(_MOD.subprocess, "run", _run)
+    result = _MOD.probe_workspace_metadata(
+        "go",
+        str(tmp_path),
+        dict(os.environ, GOFLAGS="-tags=ci -mod=mod"),
+    )
+    assert result["status"] == "ok"
+    assert result["package_count"] == 1
 
 
 def test_go_workspace_metadata_probe_failure(monkeypatch, tmp_path):

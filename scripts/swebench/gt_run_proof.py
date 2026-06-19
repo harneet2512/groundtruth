@@ -25,6 +25,7 @@ import os
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 # The artifact contract the external benchmark team relies on (all written under --out).
 # brief.txt IS part of the contract (P0.1-c): the agent CONSUMES /gt_artifacts/brief.txt
@@ -804,11 +805,13 @@ def probe_workspace_metadata(language: str, source_root: str, env: dict[str, str
 
     if lang == "go":
         # -e: don't fail on build-constraint errors (syscall/js, platform-specific)
-        # Override GOFLAGS + GOPROXY for probe only: the mounted module cache may
-        # be incomplete (missing transitive deps). The probe downloads what's needed
-        # to prove workspace readiness. The actual LSP pass runs offline.
+        # Override GOPROXY for probe only: the mounted module cache may be incomplete
+        # (missing transitive deps). For plain module repos, -mod=mod proves readiness
+        # by allowing the probe to resolve the transitive set. For Go workspace repos,
+        # -mod=mod is invalid unless GOWORK=off, so preserve workspace mode and strip
+        # any inherited -mod=mod before probing.
         cmd = ["go", "list", "-e", "./..."]
-        env = dict(env, GOFLAGS="-mod=mod", GOPROXY="https://proxy.golang.org,direct")
+        env = _go_metadata_probe_env(source_root, env)
         code = "GO_WORKSPACE_METADATA_FAIL"
     else:
         cmd = ["cargo", "metadata", "--format-version=1", "--no-deps"]
@@ -867,6 +870,36 @@ def probe_workspace_metadata(language: str, source_root: str, env: dict[str, str
         "stdout_excerpt": stdout[:300],
         "stderr_excerpt": stderr[:300],
     }
+
+
+def _go_metadata_probe_env(source_root: str, env: dict[str, str]) -> dict[str, str]:
+    out = dict(env)
+    out["GOPROXY"] = "https://proxy.golang.org,direct"
+    if _go_workspace_mode(source_root, out):
+        out["GOFLAGS"] = _drop_go_mod_flag(out.get("GOFLAGS", ""))
+    else:
+        out["GOFLAGS"] = _with_go_mod_flag(out.get("GOFLAGS", ""))
+    return out
+
+
+def _go_workspace_mode(source_root: str, env: dict[str, str]) -> bool:
+    if str(env.get("GOWORK") or "").strip().lower() == "off":
+        return False
+    root = Path(source_root).resolve()
+    for path in (root, *root.parents):
+        if (path / "go.work").exists():
+            return True
+    return False
+
+
+def _drop_go_mod_flag(flags: str) -> str:
+    return " ".join(part for part in str(flags or "").split() if not part.startswith("-mod="))
+
+
+def _with_go_mod_flag(flags: str) -> str:
+    parts = [part for part in str(flags or "").split() if not part.startswith("-mod=")]
+    parts.append("-mod=mod")
+    return " ".join(parts)
 
 
 def main(argv=None) -> int:

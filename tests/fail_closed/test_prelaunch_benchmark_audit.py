@@ -57,6 +57,36 @@ def test_pro_full_requires_shard_before_dispatch():
     assert "PRELAUNCH_PRO_FULL_SHARD_MISSING" in result.stderr
 
 
+def test_expected_head_sha_rejects_wrong_explicit_ref():
+    result = _run(
+        "--surface", "deepswe",
+        "--repo", "hbali-stack/groundtruth",
+        "--ref", "0" * 40,
+        "--expected-head-sha", "1" * 40,
+        "--gt-substrate-digest", DIGEST,
+        "--require-pinned-substrate", "1",
+    )
+
+    assert result.returncode != 0
+    assert "PRELAUNCH_REF_SHA_MISMATCH" in result.stderr
+
+
+def test_expected_head_sha_allows_matching_explicit_ref():
+    sha = "1" * 40
+    result = _run(
+        "--surface", "deepswe",
+        "--repo", "hbali-stack/groundtruth",
+        "--ref", sha,
+        "--expected-head-sha", sha,
+        "--gt-substrate-digest", DIGEST,
+        "--max-parallel", "20",
+        "--require-pinned-substrate", "1",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "PRELAUNCH_AUDIT_PASS" in result.stdout
+
+
 def test_current_pro_dispatch_plan_passes_prelaunch_audit():
     result = _run(
         "--surface", "pro",

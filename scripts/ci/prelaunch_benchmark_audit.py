@@ -8,16 +8,37 @@ from __future__ import annotations
 
 import argparse
 import re
+import subprocess
 import sys
+from pathlib import Path
 
 
 DIGEST_RE = re.compile(r"^ghcr\.io/[^@\s]+@sha256:[0-9a-f]{64}$")
 SHARD_RE = re.compile(r"^(?P<index>[1-9][0-9]*)/(?P<total>[1-9][0-9]*)$")
+SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def _fail(code: str, message: str) -> int:
     print(f"{code}: {message}", file=sys.stderr)
     return 1
+
+
+def _read(path: Path) -> str:
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def _resolve_ref(repo: str, ref: str) -> str:
+    if SHA_RE.match(ref.strip().lower()):
+        return ref.strip().lower()
+    try:
+        return subprocess.check_output(
+            ["gh", "api", f"repos/{repo}/commits/{ref}", "--jq", ".sha"],
+            text=True,
+            stderr=subprocess.STDOUT,
+        ).strip().lower()
+    except Exception as exc:
+        raise RuntimeError(f"could not resolve {repo}@{ref}: {exc}") from exc
 
 
 def _audit(args: argparse.Namespace) -> int:
@@ -59,6 +80,29 @@ def _audit(args: argparse.Namespace) -> int:
 
     if not args.ref:
         return _fail("PRELAUNCH_REF_MISSING", "dispatch ref must be explicit.")
+    if args.expected_head_sha:
+        expected = args.expected_head_sha.strip().lower()
+        if not SHA_RE.match(expected):
+            return _fail("PRELAUNCH_EXPECTED_HEAD_INVALID", "expected head SHA must be 40 lowercase hex chars.")
+        try:
+            actual = _resolve_ref(args.repo, args.ref)
+        except RuntimeError as exc:
+            return _fail("PRELAUNCH_REF_RESOLVE_FAILED", str(exc))
+        if actual != expected:
+            return _fail("PRELAUNCH_REF_SHA_MISMATCH", f"dispatch ref {args.ref} resolves to {actual}, expected {expected}.")
+
+    if args.surface == "pro":
+        workflow = _read(ROOT / ".github" / "workflows" / "swebench_pro_full.yml")
+        if '"$GT_HARNESS_PYTHON" benchmarks/swebench/run_mini_gt_pro_v10.py' not in workflow:
+            return _fail("PRELAUNCH_PRO_HARNESS_PYTHON_MISSING", "Pro workflow must run the native runner via GT_HARNESS_PYTHON.")
+        if "PRO_HARNESS_READY" not in workflow or 'test -x "$GT_HARNESS_PYTHON"' not in workflow:
+            return _fail("PRELAUNCH_PRO_HARNESS_READY_MISSING", "Pro workflow must assert the runner interpreter before trial.")
+        if "load_dataset" in workflow or "huggingface" in workflow.lower():
+            return _fail("PRELAUNCH_PRO_HF_RUNTIME_FORBIDDEN", "Pro workflow must not depend on Hugging Face at trial time.")
+    else:
+        workflow = _read(ROOT / ".github" / "workflows" / "deepswe_full.yml")
+        if '"$GT_HARNESS_PIER" run' not in workflow or 'test -x "$GT_HARNESS_PIER"' not in workflow:
+            return _fail("PRELAUNCH_DEEPSWE_HARNESS_PIER_MISSING", "DeepSWE workflow must run pier via explicit GT_HARNESS_PIER.")
 
     print("PRELAUNCH_AUDIT_PASS")
     return 0
@@ -74,6 +118,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--mode", default="", help="Pro mode: smoke, pilot, pilot100, or full.")
     parser.add_argument("--shard", default="", help="Pro full shard spec, e.g. 1/3.")
     parser.add_argument("--max-parallel", default="20")
+    parser.add_argument("--expected-head-sha", default="", help="Optional audited commit SHA expected for dispatch.")
     return _audit(parser.parse_args(argv))
 
 

@@ -27,6 +27,7 @@ DEEPSWE_CANARIES = {
 }
 
 PRO_CANARIES = {
+    "instance_flipt-io__flipt-02e21636c58e86c51119b63e0fb5ca7b813b07b1",
     "instance_navidrome__navidrome-89b12b34bea5687c70e4de2109fd1e7330bb2ba2",
 }
 
@@ -117,17 +118,29 @@ def audit(args: argparse.Namespace) -> tuple[list[dict], dict]:
         _ok(checks, "task_language_passed_into_substrate", "GT_TASK_LANGUAGE is exported to gt-run-proof")
     else:
         _fail(checks, "task_language_passed_into_substrate", "substrate proof must pass GT_TASK_LANGUAGE")
+    if "GOMODCACHE=/tmp/gomodcache" in substrate:
+        _ok(checks, "go_mod_cache_exported", "mounted Go module cache is exported into proof containers")
+    else:
+        _fail(checks, "go_mod_cache_exported", "substrate proof must export GOMODCACHE=/tmp/gomodcache")
     for forbidden in ("pip install", "rustup component add rust-src", "load_dataset("):
         if forbidden in substrate:
             _fail(checks, f"substrate_forbidden_{forbidden}", f"found {forbidden!r}")
         else:
             _ok(checks, f"substrate_forbidden_{forbidden}", "absent")
+    if "GOFLAGS=-mod=mod" in substrate:
+        _fail(checks, "substrate_forbidden_global_go_mod_flag", "global GOFLAGS=-mod=mod breaks Go workspace-mode repos")
+    else:
+        _ok(checks, "substrate_forbidden_global_go_mod_flag", "absent")
 
     proof_py = _read(ROOT / "scripts" / "swebench" / "gt_run_proof.py")
     if "_required_lsp_languages" in proof_py and "required_languages=_required_langs" in proof_py:
         _ok(checks, "primary_language_lsp_scope", "declared task language is hard fail-closed")
     else:
         _fail(checks, "primary_language_lsp_scope", "gt-run-proof must aggregate LSP verdicts by declared task language")
+    if "_go_metadata_probe_env" in proof_py and "_go_workspace_mode" in proof_py and "_drop_go_mod_flag" in proof_py:
+        _ok(checks, "go_workspace_metadata_probe", "Go workspace-mode probes do not force -mod=mod")
+    else:
+        _fail(checks, "go_workspace_metadata_probe", "gt-run-proof must avoid GOFLAGS=-mod=mod in Go workspace mode")
 
     pro_full = _read(ROOT / ".github" / "workflows" / "swebench_pro_full.yml")
     if "load_dataset" not in pro_full and "huggingface" not in pro_full.lower():

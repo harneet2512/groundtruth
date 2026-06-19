@@ -145,6 +145,19 @@ def class_counts(recs: list[dict[str, Any]]) -> dict[str, int]:
     return counts
 
 
+def validity_signal(*, failure: int, counts: dict[str, int]) -> tuple[str, str]:
+    reasons: list[str] = []
+    if failure > 0:
+        reasons.append(f"failure={failure}")
+    if counts.get("INFRA", 0) > 0:
+        reasons.append(f"INFRA={counts['INFRA']}")
+    if counts.get("UNKNOWN", 0) > 0:
+        reasons.append(f"UNKNOWN={counts['UNKNOWN']}")
+    if reasons:
+        return "INVALID_ACTIONABLE", ",".join(reasons)
+    return "OBSERVE", "-"
+
+
 def trial_job(job: dict[str, Any]) -> bool:
     name = str(job.get("name") or "")
     return name not in {"prepare", "summarize"} and not name.startswith("${{ matrix.task }}")
@@ -184,12 +197,16 @@ def summarize(repo: str, run_id: str, benchmark: str, cache: Path) -> str:
     queued = status_counts.get("queued", 0)
     success = conclusion_counts.get("success", 0)
     failure = conclusion_counts.get("failure", 0)
+    cancelled = conclusion_counts.get("cancelled", 0)
+    left = max(0, len(jobs) - completed)
+    validity, diagnosis = validity_signal(failure=failure, counts=counts)
 
     return (
         f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {benchmark} run={run_id} "
         f"status={view.get('status')} conclusion={view.get('conclusion') or '-'} "
         f"running={running} queued={queued} completed={completed} "
-        f"success={success} failure={failure} "
+        f"left={left} success={success} failure={failure} cancelled={cancelled} "
+        f"validity={validity} diagnosis={diagnosis} "
         f"resolution_rate={resolved_rate:.8f} "
         f"patch_rate={patch_rate:.2%} ({patched}/{patch_total}) "
         f"metrics={int(metrics['metrics'])}/{len(artifacts)} "

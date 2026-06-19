@@ -186,6 +186,13 @@ def test_deepswe_rust_proof_uses_baked_substrate_rustup():
     assert '-e RUSTUP_HOME="$RUSTUP_HOME_FOR_PROOF"' in script
 
 
+def test_substrate_proof_exports_go_mod_cache_without_global_mod_flag():
+    script = _read(SCRIPT_SUBSTRATE_PROOF)
+    assert "-v \"/tmp/gt/deps/gomodcache:/tmp/gomodcache\"" in script
+    assert "-e GOMODCACHE=/tmp/gomodcache" in script
+    assert "GOFLAGS=-mod=mod" not in script
+
+
 def test_pro_full_uses_same_harness_python_for_import_check_and_runner():
     doc = _load(WF_PRO_FULL)
     install = _step(doc, "trial", "Install host harness deps")["run"]
