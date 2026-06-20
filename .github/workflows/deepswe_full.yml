@@ -927,15 +927,14 @@ jobs:
             # `mem_limit:` (which `docker compose up` DOES enforce) + `memswap_limit: -1` so the cap
             # is actually applied and the overflow pages into the 24G host swap. ${MEMORY} is the
             # env pier already substitutes (= the --override-memory-mb value, e.g. 9000M).
-            # SETTLE TEST (2026-06-20): hardcode mem_limit: 6g AND delete the swarm
-            # deploy.resources.memory line so the LEGACY mem_limit is the sole, unambiguous,
-            # docker-compose-up-ENFORCED cap. Tells us definitively: if drizzle then survives
-            # (host stays <~14GB, build pages to the 24G swap) the cap BINDS -> 16G solvable;
-            # if it still host-143s at ~15.5GB the 14.6GB is dockerd-itself -> 32G machine.
-            sed -i '/^          memory: ${MEMORY}/d' "$PIER_COMPOSE"
-            grep -q "mem_limit" "$PIER_COMPOSE" || sed -i '/^  main:/a\    mem_limit: 6g\n    memswap_limit: -1' "$PIER_COMPOSE"
-            echo "[OOMFIX] SETTLE: mem_limit=6g (sole enforced legacy cap, deploy.memory removed) + memswap_limit=-1 at $PIER_COMPOSE"
-            grep -nE "main:|mem_limit|memswap_limit|memory:" "$PIER_COMPOSE" | head
+            # Keep pier's deploy.resources cap UNTOUCHED (compose v2 enforces it); only ADD
+            # memswap_limit so the capped container can page overflow into the 24G host swap.
+            # (Reverted the 6g/deploy-removal settle hack — it produced an invalid compose that
+            # docker compose up rejected, so the agent never ran. We OBSERVE the applied cap via
+            # `docker inspect` in RESMON instead of mutating the compose.)
+            grep -q "memswap_limit" "$PIER_COMPOSE" || sed -i '/^  main:/a\    memswap_limit: -1' "$PIER_COMPOSE"
+            echo "[OOMFIX] pier eval container memswap_limit=-1 added (deploy.resources cap kept) at $PIER_COMPOSE"
+            grep -nE "main:|memswap_limit|memory:" "$PIER_COMPOSE" | head
           else
             echo "::error::[OOMFIX] pier docker-compose-base.yaml NOT FOUND — cap NOT enforced, giants will OOM. PATH resolution broken."
           fi
@@ -952,6 +951,11 @@ jobs:
               # tsc/node vs gt). RSS in MB, host-side (eval-container procs show too, host kernel).
               echo "[RESTOP] $(ps -eo rss=,comm=,args= --sort=-rss 2>/dev/null | head -4 \
                 | awk '{rss=int($1/1024); $1=""; cmd=substr($0,2,70); printf "%dMB:%s | ", rss, cmd}')"
+              # [CAPCHK 2026-06-20] OBSERVE the eval container's ACTUAL applied memory limit —
+              # settles 'is pier's cap enforced?' without mutating the compose. HostConfig.Memory
+              # in bytes: 0 = UNENFORCED (cap never bound -> fixable on 16G); 9437184000 = 9000MB
+              # enforced (cap binds, yet host still OOMs -> dockerd-itself -> 32G).
+              echo "[CAPCHK] $(for c in $(docker ps -q 2>/dev/null); do docker inspect -f '{{.Name}} memLimitBytes={{.HostConfig.Memory}} memSwapBytes={{.HostConfig.MemorySwap}}' "$c" 2>/dev/null; done | tr '\n' ' ')"
               sleep 8
             done ) &
           _RESMON_PID=$!
