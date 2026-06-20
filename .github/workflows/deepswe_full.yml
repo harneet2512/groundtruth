@@ -925,22 +925,8 @@ jobs:
           else
             echo "::error::[OOMFIX] pier docker-compose-base.yaml NOT FOUND — cap NOT enforced, giants will OOM. PATH resolution broken."
           fi
-          # [OOM ROOT FIX 2026-06-20] RESTOP proved the OOM is dockerd holding TWO giant images at
-          # once: the proof step (done) loaded the ~8GB substrate image (dockerd RSS ~7.6GB), then
-          # pier pulls the giant task image (~6GB more) -> ~14GB -> host OOM. The cap/cpus levers
-          # failed because the memory is image-extraction, not the build. Free the substrate image
-          # NOW (before pier's task-image pull): its artifacts are already on disk + mounted, and the
-          # agent runs in the TASK image with GT_PROOF_MODE=1 (consumes the prebuilt brief, never
-          # re-indexes), so the substrate IMAGE is not needed for the trial. NON-DEGRADING.
-          if [ -n "${GT_SUBSTRATE_DIGEST:-}" ]; then
-            BEFORE=$(free -m | awk '/Mem:/{print $3}')
-            docker rmi -f "$GT_SUBSTRATE_DIGEST" >/dev/null 2>&1 \
-              && echo "[OOMFIX] substrate image pruned to free dockerd before task-image pull" \
-              || echo "[OOMFIX] substrate image prune skipped (still in use / already gone)"
-            docker image prune -f >/dev/null 2>&1 || true
-            AFTER=$(free -m | awk '/Mem:/{print $3}')
-            echo "[OOMFIX] host mem used: ${BEFORE}MB -> ${AFTER}MB after substrate prune"
-          fi
+          # (Removed the substrate-image prune — it was a red herring: the OOM is the TASK image
+          # extraction, not the substrate, and pruning is a suspect for the broken GT mount.)
           # [OOM FIX #6+#4, ZERO-DEGRADATION] 15GB = dockerd anon heap unpacking the giant image; Docker29
           # containerd-store unpacks ALL layers before cleanup. #6 force legacy overlay2 (layer-by-layer
           # WITH cleanup, byte-identical rootfs). #4 MemoryHigh=11G THROTTLES dockerd (not Max=kill) +
