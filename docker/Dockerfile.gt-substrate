@@ -112,52 +112,12 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --de
               /opt/gt/rustup/toolchains/*/share/doc \
     && echo "rustup pruned (caches+docs only): $(du -sh /opt/gt/rustup /opt/gt/cargo 2>/dev/null | tr '\n' ' ')"
 
-# (3d) jdtls (Eclipse JDT language server) — the Eclipse JDT.LS product tarball + a
-#      bundled headless JRE, so it LAUNCHES with NO system Java and NO runtime download.
-#      resolve.py spawns the bare `jdtls` name, so /opt/gt/bin/jdtls is a launcher that
-#      invokes the Eclipse Equinox launcher jar directly with the bundled JRE (the
-#      offline-deterministic path — NOT the pip `jdtls` wrapper, which downloads JDT.LS
-#      at runtime and would fail under allow_internet=false). The launcher resolves the
-#      versioned equinox launcher jar + the platform config dir at run, writes its
-#      workspace under a writable tmp dir.
-#      (Full Java type resolution needs the task's compiled classpath / Maven-Gradle deps
-#      — flagged as the Java D1-probe item; bare launch + workspace/symbol still work.)
-ARG JDTLS_VERSION=1.40.0
-ARG JDTLS_TIMESTAMP=202409261450
-# Temurin JRE 21 — the URL path-segment (%2B == '+') and the filename token ('_') are kept
-# as SEPARATE pre-encoded ARGs so the RUN needs NO bash `${var//+/_}` substitution (the
-# Docker default shell is dash, which does not support that expansion).
-ARG JRE_TAG=jdk-21.0.4%2B7
-ARG JRE_FILE_TOKEN=21.0.4_7
-RUN mkdir -p /opt/gt/jdtls /opt/gt/jre \
-    && curl -fsSL "https://download.eclipse.org/jdtls/milestones/${JDTLS_VERSION}/jdt-language-server-${JDTLS_VERSION}-${JDTLS_TIMESTAMP}.tar.gz" \
-       | tar -xz -C /opt/gt/jdtls \
-    && curl -fsSL "https://github.com/adoptium/temurin21-binaries/releases/download/${JRE_TAG}/OpenJDK21U-jre_x64_linux_hotspot_${JRE_FILE_TOKEN}.tar.gz" \
-       | tar -xz -C /opt/gt/jre --strip-components=1 \
-    && printf '%s\n' \
-       '#!/bin/sh' \
-       'JDTLS_HOME=/opt/gt/jdtls' \
-       'JAVA=/opt/gt/jre/bin/java' \
-       'LAUNCHER=$(ls "$JDTLS_HOME"/plugins/org.eclipse.equinox.launcher_*.jar 2>/dev/null | head -1)' \
-       'CONFIG="$JDTLS_HOME/config_linux"' \
-       'WORKSPACE="${JDTLS_WORKSPACE:-/tmp/jdtls-workspace}"' \
-       'mkdir -p "$WORKSPACE"' \
-       'exec "$JAVA" -Declipse.application=org.eclipse.jdt.ls.core.id1 -Dosgi.bundles.defaultStartLevel=4 -Declipse.product=org.eclipse.jdt.ls.core.product -Dosgi.checkConfiguration=true -Dosgi.sharedConfiguration.area="$CONFIG" -Dosgi.sharedConfiguration.area.readOnly=true -Dosgi.configuration.cascaded=true -Xms256m --add-modules=ALL-SYSTEM --add-opens java.base/java.util=ALL-UNNAMED --add-opens java.base/java.lang=ALL-UNNAMED -jar "$LAUNCHER" -configuration "$CONFIG" -data "$WORKSPACE" "$@"' \
-       > /opt/gt/bin/jdtls \
-    && chmod +x /opt/gt/bin/jdtls \
-    && test -n "$(ls /opt/gt/jdtls/plugins/org.eclipse.equinox.launcher_*.jar 2>/dev/null | head -1)" \
-    && /opt/gt/jre/bin/java -version \
-    # jdtls LIVENESS probe (the sweep shipped a launcher whose printf'd exec lacked the
-    # -jar line: java printed usage + exit 1, caught only at runtime on the one task with
-    # .java files). A broken launcher dies instantly; a working one starts Equinox and
-    # stays up waiting on stdio. Launch with a held-open stdin, require survival at 8s.
-    && ( sleep 30 | /opt/gt/bin/jdtls > /tmp/jdtls_probe.out 2>&1 & echo $! > /tmp/jdtls.pid; \
-         sleep 8; \
-         if kill -0 "$(cat /tmp/jdtls.pid)" 2>/dev/null; then \
-           kill "$(cat /tmp/jdtls.pid)" 2>/dev/null; echo 'jdtls launch-survival probe OK'; \
-         else \
-           echo 'jdtls DIED at launch:'; cat /tmp/jdtls_probe.out; exit 1; \
-         fi )
+# (3d) jdtls (Java LSP) — REMOVED 2026-06-20. The 113 DeepSWE tasks are go/python/ts/rust/js
+#      with ZERO Java; resolve.py dispatches LSP by file extension, so the bare `jdtls`
+#      launcher was never spawned. The Eclipse JDT.LS tarball + bundled Temurin JRE 21 were
+#      ~400-500MB of dead weight (nothing reads /opt/gt/jdtls or /opt/gt/jre on this benchmark).
+#      Zero degradation by construction — no task has a .java file to trigger the dispatch.
+#      (Restore the jdtls + JRE RUN block from git history if a Java task set is ever added.)
 
 # (4) Embedder models, baked OFFLINE at BUILD time (the build stage has network; the
 #     eval/DeepSWE container has allow_internet=false, so NOTHING is downloaded at run).
@@ -173,7 +133,7 @@ RUN mkdir -p /opt/gt/jdtls /opt/gt/jre \
 #     e5 keeps the proven curl-from-release pattern (its assets already exist there).
 ARG E5_BASE=https://github.com/harneet2512/groundtruth/releases/download/pipeline-assets-v1
 ARG HF_CDN=https://huggingface.co/Alibaba-NLP/gte-modernbert-base/resolve/main
-RUN mkdir -p /opt/gt/models/gte-modernbert-base /opt/gt/models/e5-small-v2 \
+RUN mkdir -p /opt/gt/models/gte-modernbert-base \
     && ( curl -fsSL --retry 8 --retry-max-time 300 -o /opt/gt/models/gte-modernbert-base/model.onnx \
            "${HF_CDN}/onnx/model_int8.onnx" \
          || curl -fsSL --retry 8 --retry-max-time 300 -o /opt/gt/models/gte-modernbert-base/model.onnx \
@@ -188,8 +148,11 @@ RUN mkdir -p /opt/gt/models/gte-modernbert-base /opt/gt/models/e5-small-v2 \
          "${HF_CDN}/tokenizer.json" \
     && test -s /opt/gt/models/gte-modernbert-base/tokenizer.json \
     && echo "OK gte-modernbert-base tokenizer"
-RUN curl -fsSL --retry 8 --retry-max-time 300 "${E5_BASE}/model.onnx"     -o /opt/gt/models/e5-small-v2/model.onnx \
-    && curl -fsSL --retry 8 --retry-max-time 300 "${E5_BASE}/tokenizer.json" -o /opt/gt/models/e5-small-v2/tokenizer.json
+# e5-small-v2 fallback embedder — REMOVED 2026-06-20. gte-modernbert-base is the PRIMARY
+# (embed.DEFAULT_EMBED_MODEL) and is baked + build-verified above (test -s model.onnx), so it
+# always loads; e5 was only the gte-load-failure safety net + the legacy memory/ module default
+# (not on the DeepSWE proof path). Removing it drops ~hundreds of MB. If gte ever fails to load,
+# restore the e5 curl from git history.
 
 # (5) the GT pipeline code + the substrate launcher
 # Cache-bust: GT_COMMIT_SHA changes every commit, forcing Docker to re-COPY
@@ -283,13 +246,8 @@ RUN /opt/gt/bin/gt-index -h >/dev/null 2>&1 \
     && gopls version \
     && /opt/gt/go/bin/go version \
     && rust-analyzer --version \
-    && test -x /opt/gt/bin/jdtls \
-    && test -n "$(ls /opt/gt/jdtls/plugins/org.eclipse.equinox.launcher_*.jar 2>/dev/null | head -1)" \
-    && /opt/gt/jre/bin/java -version \
     && test -s /opt/gt/models/gte-modernbert-base/model.onnx \
     && test -s /opt/gt/models/gte-modernbert-base/tokenizer.json \
-    && test -s /opt/gt/models/e5-small-v2/model.onnx \
-    && test -s /opt/gt/models/e5-small-v2/tokenizer.json \
     && ( command -v cc >/dev/null 2>&1 || (echo 'FAIL: cc (C linker rust-analyzer needs for build scripts/proc-macros) not resolvable' && exit 1) ) \
     && printf 'int main(){return 0;}\n' > /tmp/_cc_probe.c \
     && ( cc /tmp/_cc_probe.c -o /tmp/_cc_probe && /tmp/_cc_probe || (echo 'FAIL: cc cannot link+run a trivial program — rust-analyzer build-data WILL fail (the boa/pest/wasmi cc-not-found class)' && exit 1) ) \
