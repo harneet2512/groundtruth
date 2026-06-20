@@ -920,6 +920,7 @@ jobs:
             --agent-import-path artifact_deepswe.gt_agent:GTMiniSweAgent \
             --model "$INPUT_MODEL" \
             --env docker \
+            --override-memory "${GT_EVAL_CONTAINER_MEM_MB:-11000}" \
             -y \
             --mounts-json "${MOUNTS_JSON}" \
             --ae GT_HOST_GRAPH_DB="${GT_C_ARTIFACTS}/graph.db" \
