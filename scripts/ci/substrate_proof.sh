@@ -468,7 +468,7 @@ open('/tmp/gt/run_provenance.json', 'w').write(json.dumps(p, indent=2) + '\n')
 PROOF_RC=0
 if [ "$HARNESS" = "deepswe" ]; then
   docker run --rm \
-      --memory=14g --memory-swap=38g \
+      --memory=14g --memory-swap=34g \
       -v "/tmp/gt/src:/work:ro" -v "/tmp/gt:/gt_artifacts" \
       -v "/tmp/issue.txt:/work_issue.txt:ro" \
       -v "/tmp/gt/deps/gomodcache:/tmp/gomodcache" \
@@ -492,7 +492,7 @@ if [ "$HARNESS" = "deepswe" ]; then
   PROOF_RC=${PIPESTATUS[0]:-$PROOF_RC}
 else
   docker run --rm \
-      --memory=14g --memory-swap=38g \
+      --memory=14g --memory-swap=34g \
       -v "/tmp/gt/src:/work:ro" -v "/tmp/gt:/gt_artifacts" \
       -v "/tmp/issue.txt:/work_issue.txt:ro" \
       -v "/tmp/gt/deps/gomodcache:/tmp/gomodcache" \

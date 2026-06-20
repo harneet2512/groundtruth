@@ -113,11 +113,37 @@ class LSPClient:
             # never reaches project_ready -> 0 conversions. Robustly locate an off-PATH toolchain.
             _ensure_rust_toolchain_on_path(self._server_command)
             resolved_cmd = resolve_command(self._server_command)
+            # Cap the LANGUAGE SERVER's heap. A huge monorepo (drizzle-orm/effect: tsserver
+            # loads the WHOLE project per tsconfig at `initialize`, 10-15GB) with no cap
+            # exhausts the runner's RAM+swap and the HOST OOM-killer SIGTERMs the job (exit
+            # 143, nothing uploads — the 6 TS/Go failures on run 27855582405). Scoping our
+            # QUERIES doesn't help: the server auto-loads the workspace from its project
+            # config, not from which files we open. NODE_OPTIONS caps the V8 heap for
+            # pyright/tsserver (inherited by the tsserver child that typescript-language-
+            # server spawns); GOMEMLIMIT makes gopls' GC aggressive at the ceiling. A server
+            # that hits the cap GCs harder / degrades / exits cleanly -> the proof falls back
+            # to the tree-sitter graph + brief (correct-or-quiet), instead of OOM-killing the
+            # whole run. rust-analyzer has no such knob (and Rust repos warmed fine), so it is
+            # left uncapped. Tunable via GT_LSP_SERVER_MAX_MB (default 8192).
+            _srv_env = dict(os.environ)
+            _cmd0 = os.path.basename(str(resolved_cmd[0])) if resolved_cmd else ""
+            try:
+                _cap_mb = int(os.environ.get("GT_LSP_SERVER_MAX_MB", "8192") or "8192")
+            except ValueError:
+                _cap_mb = 8192
+            if _cap_mb > 0:
+                if any(n in _cmd0 for n in ("typescript-language-server", "pyright", "node")):
+                    _node_opts = _srv_env.get("NODE_OPTIONS", "")
+                    if "max-old-space-size" not in _node_opts:
+                        _srv_env["NODE_OPTIONS"] = f"{_node_opts} --max-old-space-size={_cap_mb}".strip()
+                elif "gopls" in _cmd0:
+                    _srv_env.setdefault("GOMEMLIMIT", f"{_cap_mb}MiB")
             self._process = await asyncio.create_subprocess_exec(
                 *resolved_cmd,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=_srv_env,
             )
             # Drain stderr from the start: stderr=PIPE that nobody reads both hides
             # the server's die-reason AND can deadlock a chatty server once the OS
