@@ -927,8 +927,14 @@ jobs:
             # `mem_limit:` (which `docker compose up` DOES enforce) + `memswap_limit: -1` so the cap
             # is actually applied and the overflow pages into the 24G host swap. ${MEMORY} is the
             # env pier already substitutes (= the --override-memory-mb value, e.g. 9000M).
-            grep -q "memswap_limit" "$PIER_COMPOSE" || sed -i '/^  main:/a\    mem_limit: ${MEMORY}\n    memswap_limit: -1' "$PIER_COMPOSE"
-            echo "[OOMFIX] pier eval container mem_limit=\${MEMORY} (ENFORCED, legacy key) + memswap_limit=-1 at $PIER_COMPOSE"
+            # SETTLE TEST (2026-06-20): hardcode mem_limit: 6g AND delete the swarm
+            # deploy.resources.memory line so the LEGACY mem_limit is the sole, unambiguous,
+            # docker-compose-up-ENFORCED cap. Tells us definitively: if drizzle then survives
+            # (host stays <~14GB, build pages to the 24G swap) the cap BINDS -> 16G solvable;
+            # if it still host-143s at ~15.5GB the 14.6GB is dockerd-itself -> 32G machine.
+            sed -i '/^          memory: ${MEMORY}/d' "$PIER_COMPOSE"
+            grep -q "mem_limit" "$PIER_COMPOSE" || sed -i '/^  main:/a\    mem_limit: 6g\n    memswap_limit: -1' "$PIER_COMPOSE"
+            echo "[OOMFIX] SETTLE: mem_limit=6g (sole enforced legacy cap, deploy.memory removed) + memswap_limit=-1 at $PIER_COMPOSE"
             grep -nE "main:|mem_limit|memswap_limit|memory:" "$PIER_COMPOSE" | head
           else
             echo "::error::[OOMFIX] pier docker-compose-base.yaml NOT FOUND — cap NOT enforced, giants will OOM. PATH resolution broken."
