@@ -697,8 +697,19 @@ async def _resolve_edges(
     root: str,
     edges: list[dict],
     language: str,
+    source_files: list[str] | None = None,
 ) -> dict:
     """Resolve ambiguous edges using LSP textDocument/definition.
+
+    ``source_files`` is the demand-driven issue scope (the same set passed to
+    ``_get_ambiguous_edges``). When present it bounds the type-ENRICHMENT phase to
+    the issue subgraph + its 1-hop callers/callees — the ONLY functions whose
+    contracts the brief can deliver — instead of hovering every function in the
+    repo (the whole-workspace ``didOpen`` that loaded the entire monorepo into the
+    LSP server's RSS and OOM-killed large-repo proofs). Correct-or-quiet: every
+    delivered callee/caller contract is in the 1-hop subgraph, so nothing the brief
+    renders loses its enrichment; only never-delivered repo-wide functions are
+    skipped. Absent/empty scope ⇒ whole-repo enrichment (legacy behavior preserved).
 
     For each ambiguous edge:
     1. Open the source file in the LSP server
@@ -1111,6 +1122,29 @@ async def _resolve_edges(
         _enrich_conn.row_factory = sqlite3.Row
         _enrich_conn.execute("PRAGMA journal_mode=WAL")
         _enrich_conn.execute("PRAGMA busy_timeout=5000")
+        # Demand-scope the enrichment to the issue subgraph + 1-hop callers/callees.
+        # Whole-repo hover (no scope) didOpen'd every file into the LSP server -> the
+        # entire monorepo loaded into the (uncapped) server RSS -> OOM on large repos.
+        # The brief only delivers contracts for the issue files + their direct
+        # callers/callees, so this subgraph is the exact set that can be rendered;
+        # nodes with no call relationship to the issue are never delivered (correct-or-
+        # quiet preserved). Empty scope -> whole-repo (legacy behavior unchanged).
+        _scope_clause = ""
+        _scope_params: list = [language]
+        if source_files:
+            _ph = ",".join("?" for _ in source_files)
+            _scope_clause = (
+                f"\n              AND (\n"
+                f"                n.file_path IN ({_ph})\n"
+                f"                OR n.id IN (SELECT e2.target_id FROM edges e2 "
+                f"JOIN nodes ns ON e2.source_id = ns.id WHERE ns.file_path IN ({_ph}))\n"
+                f"                OR n.id IN (SELECT e2.source_id FROM edges e2 "
+                f"JOIN nodes nt ON e2.target_id = nt.id WHERE nt.file_path IN ({_ph}))\n"
+                f"              )"
+            )
+            _scope_params.extend(source_files)  # n.file_path IN (issue files)
+            _scope_params.extend(source_files)  # callees of issue files (1-hop out)
+            _scope_params.extend(source_files)  # callers of issue files (1-hop in)
         _top_nodes = _enrich_conn.execute(f"""
             SELECT n.id, n.name, n.file_path, n.start_line, n.signature, n.return_type,
                    COUNT(e.id) as ref_count
@@ -1119,7 +1153,7 @@ async def _resolve_edges(
             WHERE n.is_test = 0
               AND n.label IN ('Function', 'Method', 'Class')
               AND n.start_line IS NOT NULL
-              AND n.language = ?
+              AND n.language = ?{_scope_clause}
               -- only hover the RESIDUAL the parser couldn't statically fill: a node that
               -- already has a return_type (go/rust declare ~72% in-source) does NOT need an
               -- LSP round-trip. This shrinks the hover set to the inference funcs, so typed
@@ -1128,7 +1162,7 @@ async def _resolve_edges(
             GROUP BY n.id
             ORDER BY ref_count DESC
             LIMIT {_enrich_limit}
-        """, (language,)).fetchall()
+        """, tuple(_scope_params)).fetchall()
 
         _enriched = 0
         for node in _top_nodes:
@@ -1609,7 +1643,8 @@ def resolve_main() -> None:
         print(f"\nResolving {len(lang_edges)} {args.lang} edges via LSP "
               f"(launch + warm-probe even on no-op)...")
         _t0 = time.time()
-        stats = asyncio.run(_resolve_edges(args.db, args.root, lang_edges, args.lang))
+        stats = asyncio.run(_resolve_edges(args.db, args.root, lang_edges, args.lang,
+                                           source_files=source_files))
         _elapsed = time.time() - _t0
         cert["lsp_started_at"] = _t0
         cert["lsp_finished_at"] = _t0 + _elapsed

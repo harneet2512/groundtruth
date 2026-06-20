@@ -200,8 +200,15 @@ RUN printf '#!/bin/sh\nexec "${GT_PYTHON:-python3}" /opt/gt/scripts/swebench/gt_
 
 # ---- stage 2: thin final image whose entire payload is the portable /opt/gt ----
 FROM ubuntu:20.04
-# rust-analyzer/cargo metadata probes need a C linker when task rustup is mounted.
-RUN apt-get update && apt-get install -y --no-install-recommends gcc ca-certificates \
+# rust-analyzer/cargo metadata probes need a C linker `cc` when a task rustup is
+# mounted (cargo compiles build scripts + proc-macros, e.g. `quote`, via cc). The
+# prior `gcc`-only install did NOT guarantee `/usr/bin/cc` in this minimal final
+# stage — rust-analyzer failed with "error: linker `cc` not found" → FetchBuildDataError
+# → project_ready=False → LSP_FAIL_NO_WARM → proof aborted before brief (boa/pest/wasmi).
+# build-essential provides cc (the alternatives symlink) + make + libc-dev, matching
+# the build stage (line 26) which always had cc. The self-test below now LINKS with cc
+# so a linkerless substrate can never ship green again.
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /opt/gt /opt/gt
 # Go toolchain for gopls WORKSPACE LOADING: gopls shells out to the `go` command
@@ -246,6 +253,10 @@ ENV GT_SUBSTRATE_BUILD_COMMIT=${GT_COMMIT_SHA} \
 # or the image fails to build (you can never ship a missing-library substrate). This
 # asserts EVERY LSP server resolve.py spawns (config.py::LSP_SERVERS) launches, AND that
 # the loader-default embedder (gte-modernbert-base) + the e5 fallback are both baked.
+# FUNCTIONAL (not just --version) probes added 2026-06-19: the cc-not-found class
+# (boa/pest/wasmi) shipped green because the self-test only checked `--version`. A
+# component that LAUNCHES but cannot do its job is the silent-fail class. cc now LINKS,
+# gt-index now INDEXES+queries FTS5, the embedder now DISCRIMINATES (related>unrelated).
 RUN /opt/gt/bin/gt-index -h >/dev/null 2>&1 \
     && /opt/gt/python/bin/python3 -c "import onnxruntime, numpy, pydantic, tokenizers; print('py-deps ok')" \
     && pyright --version \
@@ -259,6 +270,16 @@ RUN /opt/gt/bin/gt-index -h >/dev/null 2>&1 \
     && test -s /opt/gt/models/gte-modernbert-base/model.onnx \
     && test -s /opt/gt/models/gte-modernbert-base/tokenizer.json \
     && test -s /opt/gt/models/e5-small-v2/model.onnx \
-    && /opt/gt/python/bin/python3 -c "import sys; sys.path.insert(0,'/opt/gt/src'); from groundtruth.memory.enrich.embed import _default_embed_model, get_embedding_model; m=_default_embed_model(); print('default embedder:', m); mod=get_embedding_model(); v=mod.embed('database connection pool', is_query=True); assert len(v)==mod.dim and any(v), 'embedder produced empty/zero vector'; print('embedder loaded + non-zero, dim=', mod.dim)" \
+    && test -s /opt/gt/models/e5-small-v2/tokenizer.json \
+    && ( command -v cc >/dev/null 2>&1 || (echo 'FAIL: cc (C linker rust-analyzer needs for build scripts/proc-macros) not resolvable' && exit 1) ) \
+    && printf 'int main(){return 0;}\n' > /tmp/_cc_probe.c \
+    && ( cc /tmp/_cc_probe.c -o /tmp/_cc_probe && /tmp/_cc_probe || (echo 'FAIL: cc cannot link+run a trivial program — rust-analyzer build-data WILL fail (the boa/pest/wasmi cc-not-found class)' && exit 1) ) \
+    && rm -f /tmp/_cc_probe.c /tmp/_cc_probe \
+    && ( mkdir -p /tmp/_fts && printf 'def f():\n    return 1\n' > /tmp/_fts/a.py \
+         && GT_REQUIRE_FTS5=1 /opt/gt/bin/gt-index -root /tmp/_fts -output /tmp/_fts/g.db >/dev/null 2>&1 \
+         && /opt/gt/python/bin/python3 -c "import sqlite3; sqlite3.connect('/tmp/_fts/g.db').execute('SELECT * FROM nodes_fts LIMIT 1'); print('FTS5 nodes_fts OK')" \
+         || (echo 'FAIL: gt-index built WITHOUT working FTS5 (nodes_fts absent) — would degrade to name-match' && exit 1) ) \
+    && rm -rf /tmp/_fts \
+    && /opt/gt/python/bin/python3 -c "import sys; sys.path.insert(0,'/opt/gt/src'); from groundtruth.memory.enrich.embed import _default_embed_model, get_embedding_model; m=_default_embed_model(); print('default embedder:', m); mod=get_embedding_model(); v=mod.embed('database connection pool', is_query=True); assert len(v)==mod.dim and any(v), 'embedder produced empty/zero vector'; print('embedder loaded + non-zero, dim=', mod.dim); vr=mod.embed('database connection pool retry', is_query=False); vrel=mod.embed('connection pool timeout', is_query=False); vunrel=mod.embed('the quick brown fox jumps lazily', is_query=False); cos=lambda a,b: sum(x*y for x,y in zip(a,b))/((sum(x*x for x in a)**0.5)*(sum(y*y for y in b)**0.5)+1e-9); disc=cos(vr,vrel)-cos(vr,vunrel); assert disc>0.05, 'EMBEDDER NOT DISCRIMINATING: related-unrelated margin=%.4f (degenerate/constant embedder; localization would be dead)'%disc; print('embedder discriminates, margin=%.4f'%disc)" \
     && /opt/gt/python/bin/python3 -c "import sys, resource; sys.path.insert(0,'/opt/gt/src'); from groundtruth.memory.enrich.embed import get_embedding_model; mod=get_embedding_model(); vs=mod.embed_batch(['def f%d(x): return x+%d  # synthetic passage body'%(i,i) for i in range(4096)]); assert len(vs)==4096 and any(vs[0]) and any(vs[-1]); peak=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024.0; print('capacity peak_rss=%.0fMB for a 4096-passage encode'%peak); assert peak < 3000, 'CAPACITY REGRESSION: peak RSS %.0fMB exceeds the 3000MB ceiling — the encode is O(N) again (gt_gt s5: must be O(GT_EMBED_ENCODE_BATCH); the unchunked path hit ~7300MB and OOM-killed real runs 2026-06-10)'%peak; print('capacity invariant OK (RSS-gauged, the metric the OOM killer acts on)')" \
     && echo '=== GT substrate closure present + runnable on glibc 2.31 (LSP: py/ts/go/rust/java; embedder: gte+e5) ==='
