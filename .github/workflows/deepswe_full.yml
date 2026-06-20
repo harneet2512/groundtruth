@@ -443,7 +443,7 @@ jobs:
     # pull+proof prologue adds 5-15 min — a 90-min job cap could kill a legitimately
     # long task as a timeout-INFRA. step_limit=300 + cost_limit bound the spend; the
     # job timeout is only the backstop.
-    timeout-minutes: 120
+    timeout-minutes: 150
     # The container's default shell is sh/dash; our steps use bash-isms (PIPESTATUS,
     # ${!...}). Pin the whole job to bash so fail-closed guards evaluate correctly
     # (the "Bad substitution" / "declare -A" crashes were sh running bash syntax).
