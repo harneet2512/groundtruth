@@ -964,15 +964,27 @@ jobs:
             AFTER=$(free -m | awk '/Mem:/{print $3}')
             echo "[OOMFIX] host mem used: ${BEFORE}MB -> ${AFTER}MB after substrate prune"
           fi
-          # [OOM LEVER 2026-06-20] The REAL driver (proven once substrate ruled out): host is ~1.2GB
-          # here, then pier pulls drizzle's 29-layer task image and dockerd climbs to ~14.7GB EXTRACTING
-          # layers in parallel (default max-concurrent-downloads=3) -> host reclaim at ~15GB. Limit
-          # extraction to ONE layer at a time so only one layer's decompression buffer is resident ->
-          # ~1/3 the peak. Non-degrading: same image, just a slower pull (150min timeout covers it).
-          # Safe to restart docker now — proof is done, its artifacts are on disk/mounted, host ~1.2GB.
-          echo '{"max-concurrent-downloads":1,"max-concurrent-uploads":1}' | sudo tee /etc/docker/daemon.json >/dev/null 2>&1 || true
-          (sudo systemctl restart docker 2>/dev/null || sudo service docker restart 2>/dev/null) && sleep 6 || true
-          docker info 2>/dev/null | grep -iE "concurrent downloads" | sed 's/^/[OOMFIX] /' || echo "[OOMFIX] docker restarted with max-concurrent-downloads=1 (pull will extract 1 layer at a time)"
+          # [OOM FIX #6+#4 2026-06-20, ultracode-recommended, ZERO-DEGRADATION] The ~15GB is dockerd's
+          # ANONYMOUS heap (RssAnon) while it UNPACKS the giant task image (gzip-decompress -> untar).
+          # Docker 29 (now default on ubuntu-latest) uses the containerd image store, which UNPACKS ALL
+          # LAYERS BEFORE CLEANUP -> every decompressed layer resident in anon RSS at once. Two daemon
+          # levers that leave the extracted rootfs BYTE-IDENTICAL (same image -> same build/test/GT, only
+          # a slower unpack — the 150min timeout covers it):
+          #  #6 force the LEGACY overlay2 graphdriver (containerd-snapshotter:false) -> extracts
+          #     LAYER-BY-LAYER WITH CLEANUP, so peak anon = one layer's decompress, not all 29.
+          #  #4 constrain the daemon: MemoryHigh THROTTLES dockerd + triggers cgroup reclaim (pages its
+          #     anon overflow to the 24G swap) at 11G — NOT MemoryMax (which would OOM-KILL the daemon
+          #     and every container); GOMEMLIMIT forces the Go runtime to GC harder; vm.dirty_bytes
+          #     flushes decompressed data to disk fast so it doesn't pile up as dirty pages.
+          # Safe to reconfigure+restart docker now — proof done, artifacts on disk/mounted, host ~1.2GB,
+          # task image re-pulls fresh into overlay2 (the proof's containerd-store images aren't needed).
+          echo '{"storage-driver":"overlay2","features":{"containerd-snapshotter":false},"max-concurrent-downloads":3}' | sudo tee /etc/docker/daemon.json >/dev/null 2>&1 || true
+          sudo mkdir -p /etc/systemd/system/docker.service.d 2>/dev/null || true
+          printf '[Service]\nEnvironment=GOMEMLIMIT=10GiB\nMemoryHigh=11G\nMemoryAccounting=true\n' | sudo tee /etc/systemd/system/docker.service.d/gt-oomfix.conf >/dev/null 2>&1 || true
+          sudo sysctl -w vm.dirty_bytes=268435456 vm.dirty_background_bytes=134217728 >/dev/null 2>&1 || true
+          sudo systemctl daemon-reload 2>/dev/null || true
+          (sudo systemctl restart docker 2>/dev/null || sudo service docker restart 2>/dev/null) && sleep 8 || true
+          echo "[OOMFIX] daemon: storage-driver=$(docker info -f '{{.Driver}}' 2>/dev/null) | containerd-snapshotter=off | MemoryHigh=11G GOMEMLIMIT=10GiB vm.dirty_bytes=256M (overlay2 layer-by-layer + throttle)"
           # [DIAG 2026-06-13] Resource monitor — stream RAM/disk/container-count to the GHA log
           # every 8s so the LAST reading before a runner-reclaim (exit 143) reveals whether the
           # agent phase OOMs (RAM near cap) or fills the runner disk on heavy tasks (arktype/arcane).
