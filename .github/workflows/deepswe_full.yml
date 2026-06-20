@@ -46,6 +46,10 @@ on:
         description: "CPUs for the eval container (--override-cpus). 2 = demand-shrink to fit 16GB on heavy builds (non-degrading, only slows verification). 4 = full (baseline, for the no-degradation A/B). Overrides GT_EVAL_CONTAINER_CPUS."
         required: false
         default: "2"
+      eval_livecap_mb:
+        description: "If set (e.g. 8000), live `docker update --memory=<MB>m --memory-swap=-1` the eval container the instant it starts — last-lever OOM test for the heavy giants. Empty = off."
+        required: false
+        default: ""
       assets_repo:
         description: "owner/repo that hosts the shared GHCR image cache + pipeline-assets-v1 release (a mirror on another account points here so both share ONE public cache)"
         required: true
@@ -126,6 +130,7 @@ env:
   # cost (in steps) of one edit->test->edit cycle, railed to [8, 40].
   GT_STEP_LIMIT: ${{ inputs.step_limit || '300' }}
   GT_EVAL_CONTAINER_CPUS: ${{ inputs.eval_cpus || '2' }}
+  GT_EVAL_CONTAINER_LIVECAP_MB: ${{ inputs.eval_livecap_mb || '' }}
   GT_SELF_VERIFY_ATTEMPTS: "2"
   GT_VERIFICATION_CYCLE_COST: "25"
   # ── MODEL ROUTING (litellm OpenAI-compatible) ──────────────────────────────
@@ -986,6 +991,22 @@ jobs:
               # in bytes: 0 = UNENFORCED (cap never bound -> fixable on 16G); 9437184000 = 9000MB
               # enforced (cap binds, yet host still OOMs -> dockerd-itself -> 32G).
               echo "[CAPCHK] $(for c in $(docker ps -q 2>/dev/null); do docker inspect -f '{{.Name}} memLimitBytes={{.HostConfig.Memory}} memSwapBytes={{.HostConfig.MemorySwap}}' "$c" 2>/dev/null; done | tr '\n' ' ')"
+              # [LIVECAP 2026-06-20] LAST LEVER: force an ENFORCED cap on the running eval container
+              # the instant it appears (compose deploy.resources may never have bound; mem_limit broke
+              # the compose). `docker update` writes the cgroup limit LIVE. 8GB RAM + unlimited swap:
+              # if the ~15GB is the BUILD's container memory it now pages into the 24G host swap instead
+              # of host-OOM. If it's dockerd's own heap, this won't help (we'll see). Once per container.
+              if [ -n "${GT_EVAL_CONTAINER_LIVECAP_MB:-}" ]; then
+                for c in $(docker ps -q 2>/dev/null); do
+                  if [ ! -f "/tmp/livecap_$c" ]; then
+                    if docker update --memory="${GT_EVAL_CONTAINER_LIVECAP_MB}m" --memory-swap=-1 "$c" >/dev/null 2>&1; then
+                      touch "/tmp/livecap_$c"; echo "[LIVECAP] applied --memory=${GT_EVAL_CONTAINER_LIVECAP_MB}m --memory-swap=-1 to $c"
+                    else
+                      echo "[LIVECAP] docker update failed/unsupported for $c"
+                    fi
+                  fi
+                done
+              fi
               sleep 8
             done ) &
           _RESMON_PID=$!
