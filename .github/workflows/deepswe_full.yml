@@ -912,36 +912,13 @@ jobs:
               echo "[OOMFIX] skip swap: only ${FREE_GB:-0}GB free"
             fi
           fi
-          # [OOM FIX 2026-06-20] Let the EVAL CONTAINER page into the 24G host swap above.
-          # pier's docker-compose-base.yaml sets deploy.resources.limits.memory (-> --memory)
-          # but NO memswap_limit, so compose pins memory-swap == memory == ZERO container swap:
-          # a ~15GB monorepo build (drizzle/effect/arktype/vitest/query-persist/goreleaser) hard-
-          # OOMs the container cap (rc=137 GT_AGENT_OOM) instead of paging into the host swap.
-          # Inject memswap_limit=-1 (swap bounded by the host's 24G) so the capped container's
-          # working set overflows to swap and the build COMPLETES (slow, swap-thrash) rather than
-          # OOM-failing. Container RAM stays at the --override-memory cap (12G), so host RAM
-          # (12G + ~3G overhead) never reaches the 16G ceiling -> no HOST OOM either. This is the
-          # no-extra-hardware path to a 0-failure full run on the standard 16GB runner. Idempotent.
-          # Resolve pier's base compose ROBUSTLY (the prior import-path failed in the runner ->
-          # compose-not-found -> swap never applied). Use pier's own COMPOSE_BASE_PATH constant,
-          # then fall back to a filesystem find so it can NEVER silently miss again.
+          # Inject memswap_limit=-1 into pier's compose so the eval container can page into the 24G
+          # host swap (safety net under the daemon fix). Resolve pier's base compose robustly.
           PIER_COMPOSE=$(python -c "from pier.environments.docker import COMPOSE_BASE_PATH; print(COMPOSE_BASE_PATH)" 2>/dev/null || true)
           if [ -z "$PIER_COMPOSE" ] || [ ! -f "$PIER_COMPOSE" ]; then
             PIER_COMPOSE=$(find / -name docker-compose-base.yaml -path '*pier*' 2>/dev/null | head -1)
           fi
           if [ -n "$PIER_COMPOSE" ] && [ -f "$PIER_COMPOSE" ]; then
-            # ROOT-CAUSE (2026-06-20): pier sets the cap via deploy.resources.limits.memory,
-            # which is a SWARM directive that `docker compose up` (non-swarm) does NOT enforce —
-            # so --override-memory-mb was accepted by pier but the container ran UNCAPPED, and the
-            # giants host-OOM'd at ~15.5GB regardless of cap=12000 or 9000. Inject the LEGACY
-            # `mem_limit:` (which `docker compose up` DOES enforce) + `memswap_limit: -1` so the cap
-            # is actually applied and the overflow pages into the 24G host swap. ${MEMORY} is the
-            # env pier already substitutes (= the --override-memory-mb value, e.g. 9000M).
-            # Keep pier's deploy.resources cap UNTOUCHED (compose v2 enforces it); only ADD
-            # memswap_limit so the capped container can page overflow into the 24G host swap.
-            # (Reverted the 6g/deploy-removal settle hack — it produced an invalid compose that
-            # docker compose up rejected, so the agent never ran. We OBSERVE the applied cap via
-            # `docker inspect` in RESMON instead of mutating the compose.)
             grep -q "memswap_limit" "$PIER_COMPOSE" || sed -i '/^  main:/a\    memswap_limit: -1' "$PIER_COMPOSE"
             echo "[OOMFIX] pier eval container memswap_limit=-1 added (deploy.resources cap kept) at $PIER_COMPOSE"
             grep -nE "main:|memswap_limit|memory:" "$PIER_COMPOSE" | head
@@ -964,20 +941,10 @@ jobs:
             AFTER=$(free -m | awk '/Mem:/{print $3}')
             echo "[OOMFIX] host mem used: ${BEFORE}MB -> ${AFTER}MB after substrate prune"
           fi
-          # [OOM FIX #6+#4 2026-06-20, ultracode-recommended, ZERO-DEGRADATION] The ~15GB is dockerd's
-          # ANONYMOUS heap (RssAnon) while it UNPACKS the giant task image (gzip-decompress -> untar).
-          # Docker 29 (now default on ubuntu-latest) uses the containerd image store, which UNPACKS ALL
-          # LAYERS BEFORE CLEANUP -> every decompressed layer resident in anon RSS at once. Two daemon
-          # levers that leave the extracted rootfs BYTE-IDENTICAL (same image -> same build/test/GT, only
-          # a slower unpack — the 150min timeout covers it):
-          #  #6 force the LEGACY overlay2 graphdriver (containerd-snapshotter:false) -> extracts
-          #     LAYER-BY-LAYER WITH CLEANUP, so peak anon = one layer's decompress, not all 29.
-          #  #4 constrain the daemon: MemoryHigh THROTTLES dockerd + triggers cgroup reclaim (pages its
-          #     anon overflow to the 24G swap) at 11G — NOT MemoryMax (which would OOM-KILL the daemon
-          #     and every container); GOMEMLIMIT forces the Go runtime to GC harder; vm.dirty_bytes
-          #     flushes decompressed data to disk fast so it doesn't pile up as dirty pages.
-          # Safe to reconfigure+restart docker now — proof done, artifacts on disk/mounted, host ~1.2GB,
-          # task image re-pulls fresh into overlay2 (the proof's containerd-store images aren't needed).
+          # [OOM FIX #6+#4, ZERO-DEGRADATION] 15GB = dockerd anon heap unpacking the giant image; Docker29
+          # containerd-store unpacks ALL layers before cleanup. #6 force legacy overlay2 (layer-by-layer
+          # WITH cleanup, byte-identical rootfs). #4 MemoryHigh=11G THROTTLES dockerd (not Max=kill) +
+          # GOMEMLIMIT + vm.dirty_bytes. Safe here (proof done, host ~1.2GB, task image re-pulls fresh).
           echo '{"storage-driver":"overlay2","features":{"containerd-snapshotter":false},"max-concurrent-downloads":3}' | sudo tee /etc/docker/daemon.json >/dev/null 2>&1 || true
           sudo mkdir -p /etc/systemd/system/docker.service.d 2>/dev/null || true
           printf '[Service]\nEnvironment=GOMEMLIMIT=10GiB\nMemoryHigh=11G\nMemoryAccounting=true\n' | sudo tee /etc/systemd/system/docker.service.d/gt-oomfix.conf >/dev/null 2>&1 || true
@@ -1003,28 +970,7 @@ jobs:
               # meminfo (AnonPages vs Cached vs Slab) + docker's own accounting. Settles the root cause.
               DPID=$(pgrep -x dockerd 2>/dev/null | head -1)
               [ -n "$DPID" ] && echo "[MEMDIAG] dockerd($DPID): $(grep -E '^Vm(RSS|Swap)|^Rss(Anon|File|Shmem)' /proc/$DPID/status 2>/dev/null | awk '{printf "%s=%s%s ",$1,$2,$3}')"
-              echo "[MEMDIAG] meminfo: $(grep -E '^(MemTotal|MemFree|MemAvailable|Buffers|Cached|AnonPages|Slab|SReclaimable|Shmem|Mapped):' /proc/meminfo 2>/dev/null | awk '{printf "%s=%dMB ",$1,int($2/1024)}')"
-              # [CAPCHK 2026-06-20] OBSERVE the eval container's ACTUAL applied memory limit —
-              # settles 'is pier's cap enforced?' without mutating the compose. HostConfig.Memory
-              # in bytes: 0 = UNENFORCED (cap never bound -> fixable on 16G); 9437184000 = 9000MB
-              # enforced (cap binds, yet host still OOMs -> dockerd-itself -> 32G).
-              echo "[CAPCHK] $(for c in $(docker ps -q 2>/dev/null); do docker inspect -f '{{.Name}} memLimitBytes={{.HostConfig.Memory}} memSwapBytes={{.HostConfig.MemorySwap}}' "$c" 2>/dev/null; done | tr '\n' ' ')"
-              # [LIVECAP 2026-06-20] LAST LEVER: force an ENFORCED cap on the running eval container
-              # the instant it appears (compose deploy.resources may never have bound; mem_limit broke
-              # the compose). `docker update` writes the cgroup limit LIVE. 8GB RAM + unlimited swap:
-              # if the ~15GB is the BUILD's container memory it now pages into the 24G host swap instead
-              # of host-OOM. If it's dockerd's own heap, this won't help (we'll see). Once per container.
-              if [ -n "${GT_EVAL_CONTAINER_LIVECAP_MB:-}" ]; then
-                for c in $(docker ps -q 2>/dev/null); do
-                  if [ ! -f "/tmp/livecap_$c" ]; then
-                    if docker update --memory="${GT_EVAL_CONTAINER_LIVECAP_MB}m" --memory-swap=-1 "$c" >/dev/null 2>&1; then
-                      touch "/tmp/livecap_$c"; echo "[LIVECAP] applied --memory=${GT_EVAL_CONTAINER_LIVECAP_MB}m --memory-swap=-1 to $c"
-                    else
-                      echo "[LIVECAP] docker update failed/unsupported for $c"
-                    fi
-                  fi
-                done
-              fi
+              echo "[MEMDIAG] meminfo: $(grep -E '^(MemTotal|MemFree|MemAvailable|Cached|AnonPages|Slab|Mapped):' /proc/meminfo 2>/dev/null | awk '{printf "%s=%dMB ",$1,int($2/1024)}')"
               sleep 8
             done ) &
           _RESMON_PID=$!
