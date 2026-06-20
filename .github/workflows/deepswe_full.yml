@@ -948,7 +948,7 @@ jobs:
             --agent-import-path artifact_deepswe.gt_agent:GTMiniSweAgent \
             --model "$INPUT_MODEL" \
             --env docker \
-            --override-memory "${GT_EVAL_CONTAINER_MEM_MB:-12000}" \
+            --override-memory-mb "${GT_EVAL_CONTAINER_MEM_MB:-12000}" \
             -y \
             --mounts-json "${MOUNTS_JSON}" \
             --ae GT_HOST_GRAPH_DB="${GT_C_ARTIFACTS}/graph.db" \
@@ -979,6 +979,17 @@ jobs:
           set -e
           echo "=== Trial complete (pier rc=$PIER_RC) ===" | tee -a trial_output.log
           echo "PIER_EXIT_CODE=$PIER_RC" >> trial_output.log
+          # FAIL-LOUD on a pier USAGE/ARG error (the agent never ran). The `|| true` above
+          # keeps a legit agent CRASH from failing the step (so artifacts still upload), but
+          # it also masked a wrong flag (`--override-memory` vs `--override-memory-mb`, fixed
+          # 2026-06-20): pier rejected the command, ran NOTHING, the run produced no jobs/
+          # result.json, and EVERY task classified INFRA on empty signals. A click arg error
+          # is NOT an agent outcome — make it unrepresentable: abort the step loudly.
+          if grep -qE "No such option|Usage: pier run|Error: Invalid value|Try 'pier run --help'" trial_output.log; then
+            echo "::error::PIER_USAGE_ERROR — pier rejected its arguments and never ran the agent (see trial_output.log). This is a workflow/flag bug, not an agent outcome."
+            grep -E "No such option|Usage: pier run|Error:" trial_output.log | head -5
+            exit 1
+          fi
           # P0.1-b: pier SWALLOWS adapter exceptions into result files (exception_message in
           # jobs/<ts>/<task>__*/result.json) — a DeepSweAdapterError can end the run with
           # pier rc=0. Surface it: any DeepSweAdapterError in the jobs dir or the trial log
