@@ -745,6 +745,24 @@ jobs:
           path: /tmp/gt-substrate.tar.gz
           key: ${{ steps.substrate_cache_key.outputs.key }}
 
+      - name: Configure docker overlay2 + low-mem extraction (OOM fix — before any image load)
+        shell: bash
+        run: |
+          # [OOM FIX #6+#4, ZERO-DEGRADATION] Force the legacy overlay2 graphdriver + constrain dockerd
+          # ONCE here, BEFORE the substrate proof docker-loads the substrate or pier pulls the task image.
+          # Docker 29's containerd image store unpacks ALL layers before cleanup (~15GB anon RSS); overlay2
+          # unpacks layer-by-layer WITH cleanup (peak ~12GB). MemoryHigh=11G THROTTLES dockerd (not kill);
+          # GOMEMLIMIT + vm.dirty_bytes bound its heap + force writeback. Doing it HERE (not mid-trial)
+          # means NO docker restart between the proof writing /tmp/gt and the trial mounting it — the
+          # mid-trial restart was breaking the GT mount (GT_ARTIFACT_MISSING). Byte-identical extract.
+          echo '{"storage-driver":"overlay2","features":{"containerd-snapshotter":false},"max-concurrent-downloads":3}' | sudo tee /etc/docker/daemon.json >/dev/null 2>&1 || true
+          sudo mkdir -p /etc/systemd/system/docker.service.d 2>/dev/null || true
+          printf '[Service]\nEnvironment=GOMEMLIMIT=10GiB\nMemoryHigh=11G\nMemoryAccounting=true\n' | sudo tee /etc/systemd/system/docker.service.d/gt-oomfix.conf >/dev/null 2>&1 || true
+          sudo sysctl -w vm.dirty_bytes=268435456 vm.dirty_background_bytes=134217728 >/dev/null 2>&1 || true
+          sudo systemctl daemon-reload 2>/dev/null || true
+          (sudo systemctl restart docker 2>/dev/null || sudo service docker restart 2>/dev/null) && sleep 8 || true
+          echo "[OOMFIX] daemon (job-start): storage-driver=$(docker info -f '{{.Driver}}' 2>/dev/null) | MemoryHigh=11G GOMEMLIMIT=10GiB vm.dirty_bytes=256M (overlay2 layer-by-layer + throttle, no mid-job restart)"
+
       - name: GT substrate proof (handoff §B-AFTER/§D/§G) — pre-agent, pinned, read-only repo
         continue-on-error: true
         env:
@@ -925,19 +943,9 @@ jobs:
           else
             echo "::error::[OOMFIX] pier docker-compose-base.yaml NOT FOUND — cap NOT enforced, giants will OOM. PATH resolution broken."
           fi
-          # (Removed the substrate-image prune — it was a red herring: the OOM is the TASK image
-          # extraction, not the substrate, and pruning is a suspect for the broken GT mount.)
-          # [OOM FIX #6+#4, ZERO-DEGRADATION] 15GB = dockerd anon heap unpacking the giant image; Docker29
-          # containerd-store unpacks ALL layers before cleanup. #6 force legacy overlay2 (layer-by-layer
-          # WITH cleanup, byte-identical rootfs). #4 MemoryHigh=11G THROTTLES dockerd (not Max=kill) +
-          # GOMEMLIMIT + vm.dirty_bytes. Safe here (proof done, host ~1.2GB, task image re-pulls fresh).
-          echo '{"storage-driver":"overlay2","features":{"containerd-snapshotter":false},"max-concurrent-downloads":3}' | sudo tee /etc/docker/daemon.json >/dev/null 2>&1 || true
-          sudo mkdir -p /etc/systemd/system/docker.service.d 2>/dev/null || true
-          printf '[Service]\nEnvironment=GOMEMLIMIT=10GiB\nMemoryHigh=11G\nMemoryAccounting=true\n' | sudo tee /etc/systemd/system/docker.service.d/gt-oomfix.conf >/dev/null 2>&1 || true
-          sudo sysctl -w vm.dirty_bytes=268435456 vm.dirty_background_bytes=134217728 >/dev/null 2>&1 || true
-          sudo systemctl daemon-reload 2>/dev/null || true
-          (sudo systemctl restart docker 2>/dev/null || sudo service docker restart 2>/dev/null) && sleep 8 || true
-          echo "[OOMFIX] daemon: storage-driver=$(docker info -f '{{.Driver}}' 2>/dev/null) | containerd-snapshotter=off | MemoryHigh=11G GOMEMLIMIT=10GiB vm.dirty_bytes=256M (overlay2 layer-by-layer + throttle)"
+          # (overlay2 + daemon constraints are now configured ONCE in the pre-proof step
+          # "Configure docker overlay2 ..." — NO mid-trial docker restart, so the GT mount
+          # set up by pier below is never disrupted. Substrate-prune removed as a red herring.)
           # [DIAG 2026-06-13] Resource monitor — stream RAM/disk/container-count to the GHA log
           # every 8s so the LAST reading before a runner-reclaim (exit 143) reveals whether the
           # agent phase OOMs (RAM near cap) or fills the runner disk on heavy tasks (arktype/arcane).
