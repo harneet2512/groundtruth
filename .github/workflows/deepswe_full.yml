@@ -966,6 +966,7 @@ jobs:
             --model "$INPUT_MODEL" \
             --env docker \
             --override-memory-mb "${GT_EVAL_CONTAINER_MEM_MB:-9000}" \
+            --override-cpus "${GT_EVAL_CONTAINER_CPUS:-2}" \
             -y \
             --mounts-json "${MOUNTS_JSON}" \
             --ae GT_HOST_GRAPH_DB="${GT_C_ARTIFACTS}/graph.db" \
@@ -980,6 +981,7 @@ jobs:
             --ae GT_VERIFICATION_CYCLE_COST="${GT_VERIFICATION_CYCLE_COST:-}" \
             --ae GT_SELF_VERIFY_ATTEMPTS="${GT_SELF_VERIFY_ATTEMPTS:-}" \
             --ae GT_MOUNT_MODE="1" \
+            --ae NODE_OPTIONS="--max-old-space-size=${GT_NODE_HEAP_MB:-3072}" \
             "${GT_AE_ARGS[@]}" \
             --ae GT_ESC_ADV_TCOV="${GT_ESC_ADV_TCOV:-}" \
             --ae GT_ESC_ADV_B="${GT_ESC_ADV_B:-}" \
