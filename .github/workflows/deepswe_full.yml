@@ -906,6 +906,11 @@ jobs:
                 "$(free -m 2>/dev/null | awk '/Mem:/{printf "mem=%d/%dMB", $3,$2}')" \
                 "$(df -m / 2>/dev/null | awk 'NR==2{printf "disk_used=%d/%dMB free=%dMB", $3,$2,$4}')" \
                 "containers=$(docker ps -q 2>/dev/null | wc -l | tr -d ' ')"
+              # [DIAG 2026-06-20] top-RSS processes — answers leak-vs-capacity: WHICH process
+              # holds the GB when mem fills to the ceiling (pier/python agent vs an eval-container
+              # tsc/node vs gt). RSS in MB, host-side (eval-container procs show too, host kernel).
+              echo "[RESTOP] $(ps -eo rss=,comm=,args= --sort=-rss 2>/dev/null | head -4 \
+                | awk '{rss=int($1/1024); $1=""; cmd=substr($0,2,70); printf "%dMB:%s | ", rss, cmd}')"
               sleep 8
             done ) &
           _RESMON_PID=$!
