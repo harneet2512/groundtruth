@@ -908,13 +908,19 @@ jobs:
           # OOM-failing. Container RAM stays at the --override-memory cap (12G), so host RAM
           # (12G + ~3G overhead) never reaches the 16G ceiling -> no HOST OOM either. This is the
           # no-extra-hardware path to a 0-failure full run on the standard 16GB runner. Idempotent.
-          PIER_COMPOSE=$(python -c "import pier,os;print(os.path.join(os.path.dirname(pier.__file__),'environments','docker','docker-compose-base.yaml'))" 2>/dev/null || true)
-          if [ -n "$PIER_COMPOSE" ] && [ -f "$PIER_COMPOSE" ] && ! grep -q "memswap_limit" "$PIER_COMPOSE"; then
-            sed -i '/^  main:/a\    memswap_limit: -1' "$PIER_COMPOSE"
+          # Resolve pier's base compose ROBUSTLY (the prior import-path failed in the runner ->
+          # compose-not-found -> swap never applied). Use pier's own COMPOSE_BASE_PATH constant,
+          # then fall back to a filesystem find so it can NEVER silently miss again.
+          PIER_COMPOSE=$(python -c "from pier.environments.docker import COMPOSE_BASE_PATH; print(COMPOSE_BASE_PATH)" 2>/dev/null || true)
+          if [ -z "$PIER_COMPOSE" ] || [ ! -f "$PIER_COMPOSE" ]; then
+            PIER_COMPOSE=$(find / -name docker-compose-base.yaml -path '*pier*' 2>/dev/null | head -1)
+          fi
+          if [ -n "$PIER_COMPOSE" ] && [ -f "$PIER_COMPOSE" ]; then
+            grep -q "memswap_limit" "$PIER_COMPOSE" || sed -i '/^  main:/a\    memswap_limit: -1' "$PIER_COMPOSE"
             echo "[OOMFIX] pier eval container swap ENABLED (memswap_limit=-1) at $PIER_COMPOSE"
             grep -nE "main:|memswap_limit|memory:" "$PIER_COMPOSE" | head
           else
-            echo "[OOMFIX] pier compose memswap: $( ([ -n "$PIER_COMPOSE" ] && grep -c memswap_limit "$PIER_COMPOSE" 2>/dev/null) || echo 'compose-not-found' )"
+            echo "::error::[OOMFIX] pier docker-compose-base.yaml NOT FOUND — swap NOT enabled, giants will OOM. PATH resolution broken."
           fi
           # [DIAG 2026-06-13] Resource monitor — stream RAM/disk/container-count to the GHA log
           # every 8s so the LAST reading before a runner-reclaim (exit 143) reveals whether the
