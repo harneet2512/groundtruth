@@ -1180,10 +1180,17 @@ jobs:
       - name: Cleanup runner disk (post-upload, non-critical)
         if: always()
         continue-on-error: true
+        timeout-minutes: 2
         run: |
-          docker rm -f gtsrc 2>/dev/null || true
-          docker system prune -af --volumes 2>/dev/null || true
-          sudo swapoff /gt_swap 2>/dev/null; sudo rm -f /gt_swap 2>/dev/null
+          # Results are already UPLOADED (prior step) and the GitHub runner is EPHEMERAL
+          # (destroyed after the job) — so this cleanup is purely cosmetic. The heavy
+          # `docker system prune -af --volumes` over a GIANT task image's layers ran ~6 min on
+          # goreleaser and the runner went unresponsive under the prune I/O → GHA reclaimed it →
+          # step CANCELLED → the job was marked FAILURE on a run whose agent + GT + upload ALL
+          # SUCCEEDED. Drop the heavy docker prune (pointless on an ephemeral, post-upload runner);
+          # keep only instant ops. timeout-minutes:2 + continue-on-error make this step structurally
+          # unable to fail a clean job (a hang times out → continue-on-error swallows it).
+          sudo swapoff /gt_swap 2>/dev/null || true; sudo rm -f /gt_swap 2>/dev/null || true
           rm -f /tmp/gt-substrate.tar.gz /tmp/docker.tgz /tmp/deepswe-bench.tar.gz 2>/dev/null || true
 
   summarize:
