@@ -920,11 +920,18 @@ jobs:
             PIER_COMPOSE=$(find / -name docker-compose-base.yaml -path '*pier*' 2>/dev/null | head -1)
           fi
           if [ -n "$PIER_COMPOSE" ] && [ -f "$PIER_COMPOSE" ]; then
-            grep -q "memswap_limit" "$PIER_COMPOSE" || sed -i '/^  main:/a\    memswap_limit: -1' "$PIER_COMPOSE"
-            echo "[OOMFIX] pier eval container swap ENABLED (memswap_limit=-1) at $PIER_COMPOSE"
-            grep -nE "main:|memswap_limit|memory:" "$PIER_COMPOSE" | head
+            # ROOT-CAUSE (2026-06-20): pier sets the cap via deploy.resources.limits.memory,
+            # which is a SWARM directive that `docker compose up` (non-swarm) does NOT enforce —
+            # so --override-memory-mb was accepted by pier but the container ran UNCAPPED, and the
+            # giants host-OOM'd at ~15.5GB regardless of cap=12000 or 9000. Inject the LEGACY
+            # `mem_limit:` (which `docker compose up` DOES enforce) + `memswap_limit: -1` so the cap
+            # is actually applied and the overflow pages into the 24G host swap. ${MEMORY} is the
+            # env pier already substitutes (= the --override-memory-mb value, e.g. 9000M).
+            grep -q "memswap_limit" "$PIER_COMPOSE" || sed -i '/^  main:/a\    mem_limit: ${MEMORY}\n    memswap_limit: -1' "$PIER_COMPOSE"
+            echo "[OOMFIX] pier eval container mem_limit=\${MEMORY} (ENFORCED, legacy key) + memswap_limit=-1 at $PIER_COMPOSE"
+            grep -nE "main:|mem_limit|memswap_limit|memory:" "$PIER_COMPOSE" | head
           else
-            echo "::error::[OOMFIX] pier docker-compose-base.yaml NOT FOUND — swap NOT enabled, giants will OOM. PATH resolution broken."
+            echo "::error::[OOMFIX] pier docker-compose-base.yaml NOT FOUND — cap NOT enforced, giants will OOM. PATH resolution broken."
           fi
           # [DIAG 2026-06-13] Resource monitor — stream RAM/disk/container-count to the GHA log
           # every 8s so the LAST reading before a runner-reclaim (exit 143) reveals whether the
