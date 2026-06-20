@@ -986,6 +986,12 @@ jobs:
               # tsc/node vs gt). RSS in MB, host-side (eval-container procs show too, host kernel).
               echo "[RESTOP] $(ps -eo rss=,comm=,args= --sort=-rss 2>/dev/null | head -4 \
                 | awk '{rss=int($1/1024); $1=""; cmd=substr($0,2,70); printf "%dMB:%s | ", rss, cmd}')"
+              # [MEMDIAG 2026-06-20] WHAT is in dockerd's 15GB? RssAnon=heap (real buffer/leak) vs
+              # RssFile=mmap'd layers (reclaimable page cache the kernel isn't dropping). + system
+              # meminfo (AnonPages vs Cached vs Slab) + docker's own accounting. Settles the root cause.
+              DPID=$(pgrep -x dockerd 2>/dev/null | head -1)
+              [ -n "$DPID" ] && echo "[MEMDIAG] dockerd($DPID): $(grep -E '^Vm(RSS|Swap)|^Rss(Anon|File|Shmem)' /proc/$DPID/status 2>/dev/null | awk '{printf "%s=%s%s ",$1,$2,$3}')"
+              echo "[MEMDIAG] meminfo: $(grep -E '^(MemTotal|MemFree|MemAvailable|Buffers|Cached|AnonPages|Slab|SReclaimable|Shmem|Mapped):' /proc/meminfo 2>/dev/null | awk '{printf "%s=%dMB ",$1,int($2/1024)}')"
               # [CAPCHK 2026-06-20] OBSERVE the eval container's ACTUAL applied memory limit —
               # settles 'is pier's cap enforced?' without mutating the compose. HostConfig.Memory
               # in bytes: 0 = UNENFORCED (cap never bound -> fixable on 16G); 9437184000 = 9000MB
