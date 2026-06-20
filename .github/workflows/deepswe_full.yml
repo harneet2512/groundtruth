@@ -1010,6 +1010,7 @@ jobs:
         run: |
           mkdir -p trial_results trial_results/gt_artifacts
           cp trial_output.log trial_results/ 2>/dev/null || true
+          cp /tmp/gt/proof_output.log trial_results/ 2>/dev/null || true
           cp /tmp/gt/graph.db trial_results/graph.db 2>/dev/null || true
           # §F.10 — upload the 8 GT artifacts the substrate emitted (the proof set, incl.
           # brief.txt + per-language LSP certs), even on task failure. graph.db is already

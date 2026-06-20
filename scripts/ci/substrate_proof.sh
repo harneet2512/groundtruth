@@ -488,7 +488,8 @@ if [ "$HARNESS" = "deepswe" ]; then
       -e GT_GIT_COMMIT="${GT_GITHUB_SHA}" \
       -e GT_SUBSTRATE_DIGEST="$GT_SUBSTRATE_DIGEST" \
       -e GT_TASK_REPO_COMMIT="$TASK_REPO_COMMIT" \
-      "$GT_SUBSTRATE_DIGEST" gt-run-proof --source-root /work --out /gt_artifacts || PROOF_RC=$?
+      "$GT_SUBSTRATE_DIGEST" gt-run-proof --source-root /work --out /gt_artifacts 2>&1 | tee /tmp/gt/proof_output.log || PROOF_RC=$?
+  PROOF_RC=${PIPESTATUS[0]:-$PROOF_RC}
 else
   docker run --rm \
       --memory=14g --memory-swap=38g \
@@ -508,7 +509,8 @@ else
       -e GT_SUBSTRATE_DIGEST="$GT_SUBSTRATE_DIGEST" \
       -e GT_TASK_REPO_COMMIT="$TASK_REPO_COMMIT" \
       -e PATH="/opt/gt/bin:/opt/gt/node/bin:/opt/gt/python/bin:/opt/gt/jre/bin:/opt/gt/go/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-      "$GT_SUBSTRATE_DIGEST" gt-run-proof --source-root /work --out /gt_artifacts || PROOF_RC=$?
+      "$GT_SUBSTRATE_DIGEST" gt-run-proof --source-root /work --out /gt_artifacts 2>&1 | tee /tmp/gt/proof_output.log || PROOF_RC=$?
+  PROOF_RC=${PIPESTATUS[0]:-$PROOF_RC}
 fi
 
 if [ "$PROOF_RC" -ne 0 ]; then
