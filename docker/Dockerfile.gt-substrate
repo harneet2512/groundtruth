@@ -99,7 +99,19 @@ RUN curl -fsSL "https://github.com/rust-lang/rust-analyzer/releases/download/${R
 ENV RUSTUP_HOME=/opt/gt/rustup CARGO_HOME=/opt/gt/cargo
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --component rust-src --no-modify-path \
     && /opt/gt/cargo/bin/rustc --version \
-    && /opt/gt/cargo/bin/cargo --version
+    && /opt/gt/cargo/bin/cargo --version \
+    # LEAN (2026-06-19): the full toolchain ships in every image but RA only needs
+    # rustc/cargo binaries + rust-src for stdlib go-to-def. Strip docs, the install
+    # downloads cache, the registry cache, and the lldb/llvm-tools debug payload that
+    # RA never reads. Zero runtime-behavior change (cargo metadata + stdlib lookup
+    # unaffected); reclaims ~400-700MB from every image. The whole-repo eval build on
+    # a 16GB runner then has the headroom the heavy substrate was stealing.
+    && rm -rf /opt/gt/rustup/downloads \
+              /opt/gt/rustup/tmp \
+              /opt/gt/rustup/toolchains/*/share/doc \
+              /opt/gt/cargo/registry \
+              /opt/gt/rustup/toolchains/*/lib/rustlib/*/bin \
+    && echo "rustup pruned: $(du -sh /opt/gt/rustup /opt/gt/cargo 2>/dev/null | tr '\n' ' ')"
 
 # (3d) jdtls (Eclipse JDT language server) — the Eclipse JDT.LS product tarball + a
 #      bundled headless JRE, so it LAUNCHES with NO system Java and NO runtime download.
@@ -220,6 +232,14 @@ COPY --from=build /opt/gt /opt/gt
 # stderr and exits(2) BEFORE the handshake, so `initialize` read EOF). Fixed in
 # src/groundtruth/lsp/config.py; stderr is now captured + surfaced by lsp/client.py.
 COPY --from=build /usr/local/go /opt/gt/go
+# LEAN (2026-06-19): gopls workspace loading shells out to `go list`/`go env` — it
+# needs the `go` binary + GOROOT/src (std package listing), NOT the conformance test
+# suite, the api/ compatibility data, the misc/ samples, the docs, or the VCS dir.
+# `go list`/`go env` do not compile, so the precompiled pkg archives are also dead
+# weight. Strip them: ~80-150MB off every image, gopls behaves identically (verified
+# by the `gopls version` + the per-language LSP pass downstream). Zero runtime change.
+RUN rm -rf /opt/gt/go/test /opt/gt/go/api /opt/gt/go/misc /opt/gt/go/doc /opt/gt/go/.git \
+    && echo "go SDK pruned: $(du -sh /opt/gt/go 2>/dev/null | cut -f1)"
 # Bake the GT BUILD commit into the final image (ARGs do not cross stages, so it is
 # re-declared here). This lets the running container PROVE which GT commit it was built
 # from — the code Integration actually runs comes from this baked /opt/gt/src, not the
