@@ -100,18 +100,17 @@ ENV RUSTUP_HOME=/opt/gt/rustup CARGO_HOME=/opt/gt/cargo
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --component rust-src --no-modify-path \
     && /opt/gt/cargo/bin/rustc --version \
     && /opt/gt/cargo/bin/cargo --version \
-    # LEAN (2026-06-19): the full toolchain ships in every image but RA only needs
-    # rustc/cargo binaries + rust-src for stdlib go-to-def. Strip docs, the install
-    # downloads cache, the registry cache, and the lldb/llvm-tools debug payload that
-    # RA never reads. Zero runtime-behavior change (cargo metadata + stdlib lookup
-    # unaffected); reclaims ~400-700MB from every image. The whole-repo eval build on
-    # a 16GB runner then has the headroom the heavy substrate was stealing.
+    # LEAN (2026-06-19): delete ONLY install-time caches + human docs — paths that are
+    # provably NEVER on rust-analyzer's read path (it reads rustc/cargo binaries +
+    # rust-src; it never opens the download cache or the doc tree). KEPT (load-bearing,
+    # NOT pruned): rustc/cargo binaries, the std rlibs, rust-src (stdlib go-to-def),
+    # cargo/registry (RA's fallback cargo-metadata path), and rustlib/*/bin (rust-lld for
+    # lld-linked targets). Zero behavior change by construction — nothing reads what's
+    # deleted. Verified downstream by the rerun's rust LSP verdict staying LSP_ACTIVE_VALID.
     && rm -rf /opt/gt/rustup/downloads \
               /opt/gt/rustup/tmp \
               /opt/gt/rustup/toolchains/*/share/doc \
-              /opt/gt/cargo/registry \
-              /opt/gt/rustup/toolchains/*/lib/rustlib/*/bin \
-    && echo "rustup pruned: $(du -sh /opt/gt/rustup /opt/gt/cargo 2>/dev/null | tr '\n' ' ')"
+    && echo "rustup pruned (caches+docs only): $(du -sh /opt/gt/rustup /opt/gt/cargo 2>/dev/null | tr '\n' ' ')"
 
 # (3d) jdtls (Eclipse JDT language server) — the Eclipse JDT.LS product tarball + a
 #      bundled headless JRE, so it LAUNCHES with NO system Java and NO runtime download.
