@@ -959,6 +959,15 @@ jobs:
             AFTER=$(free -m | awk '/Mem:/{print $3}')
             echo "[OOMFIX] host mem used: ${BEFORE}MB -> ${AFTER}MB after substrate prune"
           fi
+          # [OOM LEVER 2026-06-20] The REAL driver (proven once substrate ruled out): host is ~1.2GB
+          # here, then pier pulls drizzle's 29-layer task image and dockerd climbs to ~14.7GB EXTRACTING
+          # layers in parallel (default max-concurrent-downloads=3) -> host reclaim at ~15GB. Limit
+          # extraction to ONE layer at a time so only one layer's decompression buffer is resident ->
+          # ~1/3 the peak. Non-degrading: same image, just a slower pull (150min timeout covers it).
+          # Safe to restart docker now — proof is done, its artifacts are on disk/mounted, host ~1.2GB.
+          echo '{"max-concurrent-downloads":1,"max-concurrent-uploads":1}' | sudo tee /etc/docker/daemon.json >/dev/null 2>&1 || true
+          (sudo systemctl restart docker 2>/dev/null || sudo service docker restart 2>/dev/null) && sleep 6 || true
+          docker info 2>/dev/null | grep -iE "concurrent downloads" | sed 's/^/[OOMFIX] /' || echo "[OOMFIX] docker restarted with max-concurrent-downloads=1 (pull will extract 1 layer at a time)"
           # [DIAG 2026-06-13] Resource monitor — stream RAM/disk/container-count to the GHA log
           # every 8s so the LAST reading before a runner-reclaim (exit 143) reveals whether the
           # agent phase OOMs (RAM near cap) or fills the runner disk on heavy tasks (arktype/arcane).
