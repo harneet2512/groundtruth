@@ -775,10 +775,29 @@ jobs:
           GT_GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
           GT_GITHUB_SHA: ${{ github.sha }}
           GT_PROOF_HARNESS: deepswe
-        run: bash scripts/ci/substrate_proof.sh
-        # ^^ Inline shell code was extracted to scripts/ci/substrate_proof.sh to stay
-        # under GHA's 21,000-character expression limit. All ${{ }} values are passed
-        # as env vars above; the script behaviour is identical to the former inline block.
+        run: |
+          # [WARM-CACHE TIME-SAVER] Pull the task image in the BACKGROUND, OVERLAPPING the substrate
+          # proof (~15 min indexing — needs no task image). The pull (~10 min) hides fully under the
+          # proof, so by the trial the docker daemon ALREADY HOLDS the image: the trial has ZERO pull
+          # wait (saves ~the full pull time per task) AND never crosses pier's env-start timeout. The
+          # image persists in the daemon across steps (same runner). overlay2 layer-by-layer keeps the
+          # concurrent extract low-peak — the OOM fix still holds (RESMON/host143 verify). Best-effort:
+          # a miss/timeout just leaves the trial's own pre-pull guard to pull it (no regression).
+          if [ -n "${GT_MATRIX_IMAGE:-}" ]; then
+            ( docker pull "$GT_MATRIX_IMAGE" >/tmp/gt_warmpull.log 2>&1 \
+                && echo "[WARMPULL] task image warm in daemon (overlapped the proof — zero trial pull wait)" \
+                || echo "[WARMPULL] background warm-pull miss — trial pre-pull will fetch it (fallback)" ) &
+            _WARMPULL_PID=$!
+          fi
+          bash scripts/ci/substrate_proof.sh
+          PROOF_RC=$?
+          # Let the warm-pull finish before the step ends so the image is resident for the trial.
+          [ -n "${_WARMPULL_PID:-}" ] && wait "$_WARMPULL_PID" 2>/dev/null
+          cat /tmp/gt_warmpull.log 2>/dev/null | tail -1 || true
+          exit $PROOF_RC
+        # ^^ substrate_proof.sh holds the (extracted, 21k-limited) proof body; the wrapper above only
+        # adds a background warm-pull of the task image so its ~10-min extract overlaps the ~15-min
+        # proof instead of blocking the trial serially. All ${{ }} values are passed as env vars above.
 
       - name: Run GT trial
         if: ${{ !cancelled() }}
