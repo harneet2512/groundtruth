@@ -971,14 +971,9 @@ jobs:
             done ) &
           _RESMON_PID=$!
           trap 'kill "$_RESMON_PID" 2>/dev/null' EXIT
-          # [ENV-START FIX 2026-06-20] Pre-pull the task image HERE, BEFORE pier's `--env docker`
-          # startup. pier otherwise pulls+EXTRACTS the giant image inside its own env-start wait, and
-          # the overlay2 + MemoryHigh OOM throttle slows that extract enough that a giant can cross
-          # pier's internal start timeout -> EnvironmentStartTimeoutError (the goreleaser blip, 1/5
-          # giants — agent never ran, classified INFRA). Warming the image first moves the slow
-          # extract OUT of pier's timed env-start: pier then finds the image LOCAL and starts fast.
-          # Best-effort: a miss just falls back to pier pulling it (no regression). matrix.image is
-          # the manifest docker_image — the same ref the task compose references.
+          # [ENV-START FIX] Pre-pull the task image so the slow overlay2+throttle EXTRACT happens
+          # OUTSIDE pier's timed --env docker startup (else a giant crosses pier's start timeout ->
+          # EnvironmentStartTimeoutError, the goreleaser blip). Best-effort; a miss -> pier pulls it.
           echo "[PREPULL] warming task image before pier env-start: ${{ matrix.image }}"
           if timeout 1800 docker pull "${{ matrix.image }}" >/dev/null 2>&1; then
             echo "[PREPULL] task image warm (local) — pier env-start will be fast, no extract in the timed wait"
