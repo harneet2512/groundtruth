@@ -759,11 +759,17 @@ jobs:
           # mid-trial restart was breaking the GT mount (GT_ARTIFACT_MISSING). Byte-identical extract.
           echo '{"storage-driver":"overlay2","features":{"containerd-snapshotter":false},"max-concurrent-downloads":3}' | sudo tee /etc/docker/daemon.json >/dev/null 2>&1 || true
           sudo mkdir -p /etc/systemd/system/docker.service.d 2>/dev/null || true
-          printf '[Service]\nEnvironment=GOMEMLIMIT=10GiB\nMemoryHigh=11G\nMemoryAccounting=true\n' | sudo tee /etc/systemd/system/docker.service.d/gt-oomfix.conf >/dev/null 2>&1 || true
+          # GOMEMLIMIT=4GiB (was 10GiB): the ROOT of the env-start blip — after extraction dockerd held
+          # ~9.3GB of GC-able heap (serving 0 containers), leaving only ~4.5GB free, so the 9GB eval
+          # container could NOT start (containers=0 -> pier EnvironmentStartTimeoutError, goreleaser/
+          # query-persist). 4GiB forces Go to GC that garbage -> dockerd settles ~4GB -> 4 + 9 (container)
+          # + ~1.5 (system) = ~14.5GB, the container fits. No degradation: this is dockerd's heap, not
+          # the container's build memory (--override-memory-mb stays 9000). MemoryHigh=8G cgroup backstop.
+          printf '[Service]\nEnvironment=GOMEMLIMIT=4GiB\nMemoryHigh=8G\nMemoryAccounting=true\n' | sudo tee /etc/systemd/system/docker.service.d/gt-oomfix.conf >/dev/null 2>&1 || true
           sudo sysctl -w vm.dirty_bytes=268435456 vm.dirty_background_bytes=134217728 >/dev/null 2>&1 || true
           sudo systemctl daemon-reload 2>/dev/null || true
           (sudo systemctl restart docker 2>/dev/null || sudo service docker restart 2>/dev/null) && sleep 8 || true
-          echo "[OOMFIX] daemon (job-start): storage-driver=$(docker info -f '{{.Driver}}' 2>/dev/null) | MemoryHigh=11G GOMEMLIMIT=10GiB vm.dirty_bytes=256M (overlay2 layer-by-layer + throttle, no mid-job restart)"
+          echo "[OOMFIX] daemon (job-start): storage-driver=$(docker info -f '{{.Driver}}' 2>/dev/null) | MemoryHigh=8G GOMEMLIMIT=4GiB vm.dirty_bytes=256M (overlay2 + lean dockerd heap so the 9GB eval container fits)"
 
       - name: GT substrate proof (handoff §B-AFTER/§D/§G) — pre-agent, pinned, read-only repo
         continue-on-error: true
