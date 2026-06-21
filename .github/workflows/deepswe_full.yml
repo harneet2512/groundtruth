@@ -64,7 +64,7 @@ on:
         default: "1"
 
 permissions:
-  contents: read
+  contents: write   # live-log bridge force-pushes per-task logs to gha-live-logs/<task> branches
   packages: read
 
 env:
@@ -832,6 +832,11 @@ jobs:
         # the env names actually exists in the container (the substrate graph is the ONE graph;
         # ro => the in-container patch can never mutate/rebuild it — no divergent reindex).
         run: |
+          # [LIVE LOG BRIDGE] tee this job's FULL output to a file + a daemon force-pushes it to
+          # gha-live-logs/<task> every 20s so it can be read MID-RUN (read: scripts/ci/read_live.sh <task>).
+          _LIVE_TASK="${{ matrix.task }}"; _STEPLOG="/tmp/gha_step_${_LIVE_TASK}.log"
+          exec > >(tee -a "$_STEPLOG") 2>&1
+          bash scripts/ci/live_log_push.sh "$_LIVE_TASK" "$_STEPLOG" "$(pwd)/trial_output.log" 20 >/dev/null 2>&1 &
           echo "=== DeepSWE GT Trial: ${{ matrix.task }} (model ${{ inputs.model }}) ==="
           echo "HOST  GT_CERT_DIR=${GT_CERT_DIR:-<unset>}  GT_HOST_GRAPH_DB=${GT_HOST_GRAPH_DB:-<unset>}"
           echo "GT_PROOF_MODE=${GT_PROOF_MODE:-<unset>}  GT_CONTAINERIZED=${GT_CONTAINERIZED:-<unset>}  GT_SUBSTRATE_DIGEST=${GT_SUBSTRATE_DIGEST:-<unset>}"
