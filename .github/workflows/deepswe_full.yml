@@ -1072,10 +1072,19 @@ jobs:
             echo "[ENV-START] pier exited early on attempt $_A (rc=$PIER_RC) — taking outcome, no retry"
             break
           fi
-          echo "::warning::[ENV-START] NO container in $((_ENV_WATCH_TICKS*10))s on attempt $_A — hung swerex deploy; dumping docker state + retrying"
-          echo "[ENV-START-DIAG] docker ps -a:"; docker ps -a 2>&1 | head -8
-          echo "[ENV-START-DIAG] dockerd journal tail:"; { sudo journalctl -u docker --no-pager -n 30 2>/dev/null || journalctl -u docker --no-pager -n 30 2>/dev/null; } 2>&1 | tail -30
-          echo "[ENV-START-DIAG] pier output tail:"; tail -20 trial_output.log 2>/dev/null
+          echo "::warning::[ENV-START] NO container in $((_ENV_WATCH_TICKS*10))s on attempt $_A — hung swerex deploy; capturing FULL docker state to diagnose the root cause"
+          echo "[ENV-START-DIAG] docker ps -a:"; docker ps -a 2>&1 | head -10
+          # Per-container WHY (covers the 'container created but exited' mode): state + exit code +
+          # OOM flag + the container's OWN logs (the entrypoint/swerex error that pier hides).
+          for _cid in $(docker ps -aq 2>/dev/null | head -3); do
+            echo "[ENV-START-DIAG] container $_cid inspect:"; docker inspect --format '  status={{.State.Status}} exitcode={{.State.ExitCode}} oomkilled={{.State.OOMKilled}} error={{.State.Error}}' "$_cid" 2>&1
+            echo "[ENV-START-DIAG] container $_cid logs:"; docker logs --tail 25 "$_cid" 2>&1 | tail -25
+          done
+          # Covers the 'container never created' mode (the observed arktype failure: containers=0):
+          echo "[ENV-START-DIAG] dockerd journal:"; { sudo journalctl -u docker --no-pager -n 40 2>/dev/null || journalctl -u docker --no-pager -n 40 2>/dev/null; } 2>&1 | tail -40
+          echo "[ENV-START-DIAG] kernel/OOM (dmesg):"; { sudo dmesg 2>/dev/null || dmesg 2>/dev/null; } | tail -15
+          echo "[ENV-START-DIAG] stuck procs:"; ps -eo pid,rss,comm,args --sort=-rss 2>/dev/null | grep -iE 'pier|swerex|docker|python' | grep -v grep | head -8
+          echo "[ENV-START-DIAG] pier output tail:"; tail -25 trial_output.log 2>/dev/null
           kill "$_PIER_PID" 2>/dev/null; sleep 5; kill -9 "$_PIER_PID" 2>/dev/null
           pkill -9 -f "pier run" 2>/dev/null || true
           docker ps -aq 2>/dev/null | xargs -r docker rm -f >/dev/null 2>&1 || true
