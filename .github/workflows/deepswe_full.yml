@@ -1087,7 +1087,14 @@ jobs:
           echo "[ENV-START-DIAG] pier output tail:"; tail -25 trial_output.log 2>/dev/null
           kill "$_PIER_PID" 2>/dev/null; sleep 5; kill -9 "$_PIER_PID" 2>/dev/null
           pkill -9 -f "pier run" 2>/dev/null || true
+          # [CLEANUP FIX] pier provisions via `docker compose up`; killing pier alone LEAKS the
+          # compose children (diag proved them accumulating 1->2->3 across attempts). Kill the
+          # compose/swerex procs + remove all containers + prune networks so each retry is a CLEAN
+          # slate (a leaked half-up compose can hold the project network/lock + poison the next try).
+          pkill -9 -f "docker.compose|docker-compose|swerex" 2>/dev/null || true
           docker ps -aq 2>/dev/null | xargs -r docker rm -f >/dev/null 2>&1 || true
+          docker container prune -f >/dev/null 2>&1 || true
+          docker network prune -f >/dev/null 2>&1 || true
           PIER_RC=124
           done
           cat trial_output.log 2>/dev/null || true

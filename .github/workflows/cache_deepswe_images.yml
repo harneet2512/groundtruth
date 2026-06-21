@@ -8,6 +8,10 @@ name: "Cache DeepSWE images to GHCR"
 on:
   workflow_dispatch:
     inputs:
+      instance_ids:
+        description: "Comma/space-separated instance_ids to mirror (empty = all). Prove the 6 before scaling."
+        required: false
+        default: ""
       max_images:
         description: "Max images to cache (0 = all 113)"
         required: true
@@ -46,11 +50,19 @@ jobs:
         env:
           INPUT_MAX: ${{ inputs.max_images }}
           INPUT_BATCH: ${{ inputs.batch_size }}
+          INPUT_INSTANCE_IDS: ${{ inputs.instance_ids }}
         run: |
           python3 << 'PYEOF'
           import json, os
           m = json.load(open("artifact_deepswe/repo_manifest.json"))
-          imgs = sorted({t["docker_image"] for t in m["tasks"] if t.get("docker_image")})
+          tasks = m["tasks"]
+          # Mirror ONLY specific tasks when instance_ids given (prove the 6 giants before the 113).
+          ids_in = (os.environ.get("INPUT_INSTANCE_IDS") or "").strip()
+          if ids_in:
+              want = {x.strip() for x in ids_in.replace(",", " ").split() if x.strip()}
+              tasks = [t for t in tasks if t.get("instance_id") in want]
+              print(f"filtered to {len(tasks)} tasks by instance_ids: {sorted(t.get('instance_id') for t in tasks)}")
+          imgs = sorted({t["docker_image"] for t in tasks if t.get("docker_image")})
           # On a PUSH event there are no workflow_dispatch inputs, so INPUT_MAX/INPUT_BATCH
           # are empty strings (dispatch defaults do NOT apply to push) — `... or "0"` falls
           # back to the default instead of int("") -> ValueError.
