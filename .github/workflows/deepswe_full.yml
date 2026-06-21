@@ -999,12 +999,37 @@ jobs:
           # [ENV-START FIX] Pre-pull the task image so the slow overlay2+throttle EXTRACT happens
           # OUTSIDE pier's timed --env docker startup (else a giant crosses pier's start timeout ->
           # EnvironmentStartTimeoutError, the goreleaser blip). Best-effort; a miss -> pier pulls it.
-          echo "[PREPULL] warming task image before pier env-start: ${{ matrix.image }}"
-          if timeout 1800 docker pull "${{ matrix.image }}" >/dev/null 2>&1; then
-            echo "[PREPULL] task image warm (local) — pier env-start will be fast, no extract in the timed wait"
+          echo "[PREPULL] ensuring task image is local before pier env-start: ${{ matrix.image }}"
+          if docker image inspect "${{ matrix.image }}" >/dev/null 2>&1; then
+            echo "[PREPULL] task image ALREADY LOCAL (GHCR mirror + tag from the proof) — zero ECR contact"
+          elif timeout 1800 docker pull "${{ matrix.image }}" >/dev/null 2>&1; then
+            echo "[PREPULL] task image warm (local)"
           else
-            echo "[PREPULL] pre-pull miss/timeout — pier will pull in env-start (fallback, no worse than before)"
+            echo "[PREPULL] pre-pull miss/timeout — pier will pull in env-start (fallback)"
           fi
+          # [COMPOSE PULL-NEVER SHIM] (2026-06-21) ROOT CAUSE of the residual env-start hang: pier
+          # provisions via `docker compose up`, which RE-PULLS the task image from the flaky ECR
+          # registry EVEN THOUGH the proof pulled it from GHCR + tagged it to the ECR ref locally
+          # (substrate_proof.sh:130, asserted by `docker image inspect`). The re-pull stalls on
+          # 'Pulling fs layer' -> no container -> timeout. NOT memory, NOT the mirror (mirror works;
+          # compose ignores the local cache). Fix: a `docker` PATH shim forcing `compose up --pull
+          # never` (+ no-op a standalone `compose pull`) so compose USES the local image. The image is
+          # GUARANTEED local -> correct-or-fail-fast, never a silent wrong image. Tested offline.
+          mkdir -p /tmp/gt-shim
+          {
+            echo '#!/usr/bin/env bash'
+            echo 'R=/usr/bin/docker'
+            echo 'if [ "$1" = compose ]; then'
+            echo '  u=0; p=0; f=0'
+            echo '  for a in "$@"; do [ "$a" = up ]&&u=1; [ "$a" = pull ]&&p=1; [ "$a" = --pull ]&&f=1; done'
+            echo '  if [ "$p" = 1 ] && [ "$u" = 0 ]; then echo "[gt-shim] skip compose pull (image pre-cached local)" >&2; exit 0; fi'
+            echo '  if [ "$u" = 1 ] && [ "$f" = 0 ]; then o=(); for a in "$@"; do o+=("$a"); [ "$a" = up ]&&o+=(--pull never); done; echo "[gt-shim] compose up --pull never (local image, no ECR re-pull)" >&2; exec "$R" "${o[@]}"; fi'
+            echo 'fi'
+            echo 'exec "$R" "$@"'
+          } > /tmp/gt-shim/docker
+          chmod +x /tmp/gt-shim/docker
+          export PATH="/tmp/gt-shim:$PATH"
+          echo "[gt-shim] compose pull-never shim active at $(command -v docker)"
           # [ENV-START FAIL-FAST + RETRY] (2026-06-21) The env-start failures are a FLAKY
           # pier/swerex Docker DEPLOYMENT — containers=0 for pier's full ~1h timeout with ~8GB
           # FREE and the image already cached (verified: NOT memory, NOT the 72s pull, NOT the
