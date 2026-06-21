@@ -764,7 +764,9 @@ jobs:
           # container could NOT start (containers=0 -> pier EnvironmentStartTimeoutError, goreleaser/
           # query-persist). 4GiB forces Go to GC that garbage -> dockerd settles ~4GB -> 4 + 9 (container)
           # + ~1.5 (system) = ~14.5GB, the container fits. No degradation: this is dockerd's heap, not
-          # the container's build memory (--override-memory-mb stays 9000). MemoryHigh=8G cgroup backstop.
+          # the container's build memory. --override-memory-mb lowered 9000->7000 so the eval container
+          # FITS beside dockerd's ~5.8GB working set on a 16GB runner (5.8+7+2 = ~14.8GB; 9GB never fit
+          # -> env-start timeout on goreleaser/query-persist). MemoryHigh=8G cgroup backstop.
           printf '[Service]\nEnvironment=GOMEMLIMIT=4GiB\nMemoryHigh=8G\nMemoryAccounting=true\n' | sudo tee /etc/systemd/system/docker.service.d/gt-oomfix.conf >/dev/null 2>&1 || true
           sudo sysctl -w vm.dirty_bytes=268435456 vm.dirty_background_bytes=134217728 >/dev/null 2>&1 || true
           sudo systemctl daemon-reload 2>/dev/null || true
@@ -1010,7 +1012,7 @@ jobs:
             --agent-import-path artifact_deepswe.gt_agent:GTMiniSweAgent \
             --model "$INPUT_MODEL" \
             --env docker \
-            --override-memory-mb "${GT_EVAL_CONTAINER_MEM_MB:-9000}" \
+            --override-memory-mb "${GT_EVAL_CONTAINER_MEM_MB:-7000}" \
             --override-cpus "${GT_EVAL_CONTAINER_CPUS:-2}" \
             -y \
             --mounts-json "${MOUNTS_JSON}" \

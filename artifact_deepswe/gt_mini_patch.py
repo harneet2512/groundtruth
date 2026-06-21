@@ -1604,6 +1604,51 @@ def _norm_fp(file_path: str) -> str:
     return (file_path or "").replace("\\", "/").lstrip("./").lstrip("/")
 
 
+def _resolve_frame(con, rel: str, repo_root: str) -> tuple[str, str]:
+    """Map the agent's view path to the GRAPH'S stored frame when they differ.
+
+    The agent may run from a SUB-DIR (gt_root, e.g. ``<repo>/ark``) and view
+    ``json-schema/x.ts``, while the graph was indexed from the repo root and stores
+    ``ark/json-schema/x.ts``. An EXACT ``file_path = rel`` lookup then misses 100%
+    of the time -> every witness/contract goes dark on monorepos (the arktype
+    path-frame break: 100 post_view fires, 0 delivered). Resolve by the FULL
+    package-relative SUFFIX (NOT a bare basename -- bug #1's ``%__init__.py`` matched
+    every package; the full segment path ``%/json-schema/x.ts`` is unambiguous,
+    verified UNIQUE on the real arktype graph).
+
+    Returns ``(db_path, code_root)``: ``db_path`` = the graph-frame path for SQL
+    lookups; ``code_root`` = the dir to join graph-frame paths against for ``_code_at``
+    so the on-disk read still resolves under the agent's actual tree. Correct-or-quiet:
+    an exact hit, 0 matches, or an AMBIGUOUS (>1) suffix match -> ``(rel, repo_root)``
+    unchanged (never guess)."""
+    nfp = _norm_fp(rel)
+    try:
+        if con.execute(
+            "SELECT 1 FROM nodes WHERE file_path = ? LIMIT 1", (nfp,)
+        ).fetchone():
+            return nfp, repo_root  # frames already aligned (single-package repo)
+        rows = con.execute(
+            "SELECT DISTINCT file_path FROM nodes WHERE file_path LIKE ? LIMIT 2",
+            ("%/" + nfp,),
+        ).fetchall()
+    except Exception:  # noqa: BLE001 -- correct-or-quiet
+        return nfp, repo_root
+    if len(rows) != 1:  # 0 = genuinely absent; >1 = ambiguous -> never guess
+        return nfp, repo_root
+    db_path = _norm_fp(rows[0][0])
+    if not db_path.endswith(nfp):
+        return nfp, repo_root
+    prefix = db_path[: len(db_path) - len(nfp)].strip("/")  # e.g. 'ark'
+    rr = (repo_root or "").rstrip("/")
+    if prefix and rr.endswith("/" + prefix):
+        code_root = rr[: len(rr) - len(prefix) - 1]
+    elif prefix and rr == prefix:
+        code_root = ""
+    else:
+        code_root = repo_root  # cannot align _code_at; SQL lookups still benefit
+    return db_path, code_root
+
+
 # CALLER/CALLEE/SCOPE NEIGHBOR-PATH chokepoint (2026-06-17). THE single predicate
 # every render surface uses to decide "may this NEIGHBOR path be named to the agent
 # as a Caller / callee / scope / cochange / witness." It composes the two path-class
@@ -2398,17 +2443,23 @@ def _evidence_body(kind: str, rel: str, root: str) -> str:
     con = _connect_ro(db)
     if con is None:
         return ""
+    # [PATH-FRAME FIX] The agent may view files in a SUB-DIR frame (gt_root, e.g.
+    # <repo>/ark -> 'json-schema/x.ts') while the graph indexed from the repo root
+    # ('ark/json-schema/x.ts'). Resolve rel -> the graph frame (dbrel) + the on-disk
+    # root for _code_at (code_root) so witnesses are FOUND and ATTESTED on monorepos
+    # (was: 100 post_view fires, 0 delivered on arktype). Single-package repos: no-op.
+    dbrel, code_root = _resolve_frame(con, rel, root)
     lines: list[str] = []
     try:
-        func_names = _top_func_names(con, rel, limit=3)
+        func_names = _top_func_names(con, dbrel, limit=3)
         if kind == "post_edit":
             # What the edited functions CALL, and how to call it correctly.
-            for cl in _edit_target_callee_contracts(con, rel, func_names,
-                                                    repo_root=root):
+            for cl in _edit_target_callee_contracts(con, dbrel, func_names,
+                                                    repo_root=code_root):
                 if cl not in lines:
                     lines.append(cl)
         # Resolved cross-file witnesses (caller + callee FACTS) for both kinds.
-        for w in _resolved_witnesses_for_file(con, rel, root, max_each=2):
+        for w in _resolved_witnesses_for_file(con, dbrel, code_root, max_each=2):
             arrow = "called by" if w["direction"] == "caller" else "calls"
             loc = f"{w['file_path']}:{w['line']}" if w["line"] else w["file_path"]
             # D5 fix: for "caller" direction, the subject of "X called by -> Y"
@@ -2423,12 +2474,12 @@ def _evidence_body(kind: str, rel: str, root: str) -> str:
         # Caller-contract line for the viewed file (facts-first, unverified hint
         # only when no fact exists). Mainly meaningful on a view.
         if kind == "post_view":
-            cc = _caller_contract_for_file(con, rel, root, func_names)
+            cc = _caller_contract_for_file(con, dbrel, code_root, func_names)
             if cc:
                 ln = f"[CALLERS] {cc}"
                 if ln not in lines:
                     lines.append(ln)
-            sib = _sibling_context(con, rel, func_names)
+            sib = _sibling_context(con, dbrel, func_names)
             if sib:
                 ln = f"[SIBLINGS] {sib}"
                 if ln not in lines:
