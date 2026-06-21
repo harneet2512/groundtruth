@@ -614,6 +614,7 @@ def main(argv: list[str]) -> int:
     n_agent_steps: int | None = None
     exit_status: str | None = None
     instance_id: str | None = None
+    exc_type: str | None = None
 
     trials = sorted(glob.glob(os.path.join(jobs, "*", "*__*", "result.json")))
     if not trials:
@@ -623,6 +624,7 @@ def main(argv: list[str]) -> int:
         info = d.get("info") or {}
         vr = d.get("verifier_result") or {}
         exc = d.get("exception_info")
+        exc_type = (exc or {}).get("exception_type")
         n_agent_steps = d.get("n_agent_steps")
         exit_status = traj_info.get("exit_status") or info.get("exit_status")
         reward = (vr.get("rewards") or {}).get("reward")
@@ -674,6 +676,15 @@ def main(argv: list[str]) -> int:
     trial_log = _read_trial_log(log_path)
     eval_no_report = _detect_eval_no_report(jobs)
     infra_subtype = detect_infra_subtype(jobs, trial_log)
+    # A pier environment/container START failure (EnvironmentStartTimeoutError &c) means the eval
+    # CONTAINER never came up: the agent never ran and GT never delivered into it. That is a
+    # harness/INFRA failure (excluded from the resolved denominator), NOT a GT-delivery break —
+    # without this, the pre-agent GRAPH_FAIL_MISSING_HANDOFF cert cannot reconcile (no runtime
+    # witness, gt_prebuilt_active=None) and the task is wrongly stamped GT (the goreleaser blip).
+    # Under the OOM fix (overlay2 + MemoryHigh throttle) a giant image's extraction can
+    # occasionally cross pier's start timeout — a flaky infra event, never a GT/agent fault.
+    if not infra_subtype and exc_type and "environmentstart" in exc_type.replace("_", "").lower():
+        infra_subtype = "INFRA_ENV_START_TIMEOUT"
 
     rec = build_signal_record(
         instance_id=instance_id,
