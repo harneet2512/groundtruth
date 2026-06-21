@@ -1,24 +1,20 @@
 #!/usr/bin/env bash
-# Install a `docker` shim that forces `docker compose up --pull never` (+ no-ops a standalone
-# `docker compose pull`) so pier's compose uses the locally-cached task image (GHCR mirror + the
-# ECR-ref tag from substrate_proof.sh:130) instead of RE-PULLING it from the flaky ECR registry
-# (which stalls on 'Pulling fs layer' -> no container -> env-start timeout). The image is GUARANTEED
-# local (proof asserts `docker image inspect`), so this is correct-or-fail-fast.
+# Force `docker compose up --pull never` (+ no-op a standalone `docker compose pull`) so pier's compose
+# uses the locally-cached task image (GHCR mirror + ECR-ref tag from substrate_proof.sh:130) instead of
+# RE-PULLING from flaky ECR (which stalls on 'Pulling fs layer' -> no container -> env-start timeout).
 #
-# BULLETPROOF install — intercepts compose no matter how pier resolves docker:
-#   (1) PATH shim at /tmp/gt-shim/docker (caller must `export PATH="/tmp/gt-shim:$PATH"` after), AND
-#   (2) IN-PLACE replacement at the real docker binary path (catches absolute-path callers too).
-# Both exec the moved-aside real docker for everything except `compose up`/`compose pull`.
-set -e
+# v3 — shim EVERY docker binary, not just `command -v docker`. The workflow installs several dockers
+# (/usr/bin/docker system, /usr/local/bin/docker, /tmp/docker/docker, /tmp/docker-cli-cache/docker) and
+# pier may invoke ANY of them by absolute path — a single-binary shim is bypassed (proven: shimmed
+# /usr/bin/docker but pier used /usr/local/bin/docker). So move each aside (.gtreal) and replace each
+# in place + a PATH shim. The shimmed docker execs the real with `--pull never` injected; the real then
+# invokes the compose plugin with that flag, so the plugin can't re-pull regardless of which docker ran.
+set +e
 mkdir -p /tmp/gt-shim
-R=$(command -v docker || echo /usr/bin/docker)   # real docker, e.g. /usr/local/bin/docker
-RREAL="${R}.gtreal"
-# Copy the real docker aside (idempotent) so both shim copies can exec it.
-if [ ! -x "$RREAL" ]; then sudo cp "$R" "$RREAL" 2>/dev/null || cp "$R" "$RREAL"; fi
 
-build_shim() {
+build_shim() {  # $1 = path to the REAL (moved-aside) docker this shim should exec
   echo '#!/usr/bin/env bash'
-  echo "R=$RREAL"
+  echo "R=$1"
   echo 'if [ "$1" = compose ]; then'
   echo '  u=0; p=0; f=0'
   echo '  for a in "$@"; do [ "$a" = up ]&&u=1; [ "$a" = pull ]&&p=1; [ "$a" = --pull ]&&f=1; done'
@@ -28,10 +24,23 @@ build_shim() {
   echo 'exec "$R" "$@"'
 }
 
-# (1) PATH shim
-build_shim > /tmp/gt-shim/docker
+# Every docker pier might use: known install targets + anything resolvable on PATH.
+CANDS="/usr/bin/docker /usr/local/bin/docker /tmp/docker/docker /tmp/docker-cli-cache/docker $(type -ap docker 2>/dev/null)"
+DONE=""
+for d in $(printf '%s\n' $CANDS | sort -u); do
+  [ -x "$d" ] || continue
+  case " $DONE " in *" $d "*) continue ;; esac
+  R="${d}.gtreal"
+  # already shimmed (R exists and d execs it)? skip re-copy so we never copy a shim onto itself.
+  if [ ! -e "$R" ]; then sudo cp "$d" "$R" 2>/dev/null || cp "$d" "$R" 2>/dev/null; fi
+  [ -e "$R" ] || continue
+  if build_shim "$R" | sudo tee "$d" >/dev/null 2>&1 && sudo chmod +x "$d" 2>/dev/null; then
+    DONE="$DONE $d"
+  fi
+done
+
+# PATH shim (covers `docker` resolved via $PATH after the caller exports /tmp/gt-shim).
+RPATH="$(command -v docker)"; [ -e "${RPATH}.gtreal" ] && RPATH="${RPATH}.gtreal"
+build_shim "$RPATH" > /tmp/gt-shim/docker
 chmod +x /tmp/gt-shim/docker
-# (2) in-place replacement at the real binary (catches absolute-path callers; best-effort under sudo)
-build_shim | sudo tee "$R" >/dev/null 2>&1 && sudo chmod +x "$R" 2>/dev/null \
-  && echo "[gt-shim] installed PATH(/tmp/gt-shim) + IN-PLACE($R); real=$RREAL" \
-  || echo "[gt-shim] installed PATH(/tmp/gt-shim) only (in-place replace failed); real=$RREAL"
+echo "[gt-shim] installed in-place at:${DONE:- (none)} + PATH(/tmp/gt-shim); real-suffix=.gtreal"
