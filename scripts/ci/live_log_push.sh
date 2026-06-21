@@ -9,7 +9,7 @@
 # Best-effort: every failure is swallowed; this NEVER fails the job.
 set +e
 TASK="${1:?task}"; STEPLOG="${2:-/dev/null}"; PIERLOG="${3:-/dev/null}"; INTERVAL="${4:-15}"
-REPO="${GITHUB_REPOSITORY:-}"; TOKEN="${GITHUB_TOKEN:-}"
+REPO="${GITHUB_REPOSITORY:-}"; TOKEN="${GH_LIVE_TOKEN:-${GITHUB_TOKEN:-}}"   # GHA does NOT auto-export GITHUB_TOKEN; caller passes GH_LIVE_TOKEN
 [ -z "$REPO" ] || [ -z "$TOKEN" ] && { echo "[live-log] no repo/token — disabled"; exit 0; }
 BRANCH="gha-live-logs/${TASK}"
 URL="https://x-access-token:${TOKEN}@github.com/${REPO}.git"
