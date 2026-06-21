@@ -449,11 +449,13 @@ jobs:
     needs: prepare
     runs-on: ubuntu-latest
     name: "${{ matrix.task }} (${{ matrix.language }})"
-    # 120 not 90: the manifest's largest agent_timeout_sec is 5400 (=90 min) and the
-    # pull+proof prologue adds 5-15 min — a 90-min job cap could kill a legitimately
-    # long task as a timeout-INFRA. step_limit=300 + cost_limit bound the spend; the
-    # job timeout is only the backstop.
-    timeout-minutes: 150
+    # The REAL agent budget is step_limit=300 + cost_limit=$3.0 (enforced by the cost guard) —
+    # NOT a wall-clock cut. The job timeout is only a runaway backstop, set near GHA's 360-min
+    # max so a legitimately long run (300 steps on a giant, slowed by the overlay2 OOM throttle,
+    # + the 5-15 min pull/proof prologue) is NEVER killed as a time-out. A time cut that ends a
+    # clean run is a false failure (the goreleaser class); the step cap bounds the agent, time
+    # does not. (Per user directive: remove the time cuts, keep the 300-step cap.)
+    timeout-minutes: 350
     # The container's default shell is sh/dash; our steps use bash-isms (PIPESTATUS,
     # ${!...}). Pin the whole job to bash so fail-closed guards evaluate correctly
     # (the "Bad substitution" / "declare -A" crashes were sh running bash syntax).
@@ -969,6 +971,20 @@ jobs:
             done ) &
           _RESMON_PID=$!
           trap 'kill "$_RESMON_PID" 2>/dev/null' EXIT
+          # [ENV-START FIX 2026-06-20] Pre-pull the task image HERE, BEFORE pier's `--env docker`
+          # startup. pier otherwise pulls+EXTRACTS the giant image inside its own env-start wait, and
+          # the overlay2 + MemoryHigh OOM throttle slows that extract enough that a giant can cross
+          # pier's internal start timeout -> EnvironmentStartTimeoutError (the goreleaser blip, 1/5
+          # giants — agent never ran, classified INFRA). Warming the image first moves the slow
+          # extract OUT of pier's timed env-start: pier then finds the image LOCAL and starts fast.
+          # Best-effort: a miss just falls back to pier pulling it (no regression). matrix.image is
+          # the manifest docker_image — the same ref the task compose references.
+          echo "[PREPULL] warming task image before pier env-start: ${{ matrix.image }}"
+          if timeout 1800 docker pull "${{ matrix.image }}" >/dev/null 2>&1; then
+            echo "[PREPULL] task image warm (local) — pier env-start will be fast, no extract in the timed wait"
+          else
+            echo "[PREPULL] pre-pull miss/timeout — pier will pull in env-start (fallback, no worse than before)"
+          fi
           pier run \
             -p deepswe-bench/tasks/${{ matrix.task }} \
             --agent-import-path artifact_deepswe.gt_agent:GTMiniSweAgent \
