@@ -1016,9 +1016,10 @@ jobs:
           # never` (+ no-op a standalone `compose pull`) so compose USES the local image. The image is
           # GUARANTEED local -> correct-or-fail-fast, never a silent wrong image. Tested offline.
           mkdir -p /tmp/gt-shim
+          _REALDOCKER=$(command -v docker || echo /usr/bin/docker)   # capture the REAL docker BEFORE PATH export (workflow installs it at /usr/local/bin/docker, not /usr/bin)
           {
             echo '#!/usr/bin/env bash'
-            echo 'R=/usr/bin/docker'
+            echo "R=${_REALDOCKER}"
             echo 'if [ "$1" = compose ]; then'
             echo '  u=0; p=0; f=0'
             echo '  for a in "$@"; do [ "$a" = up ]&&u=1; [ "$a" = pull ]&&p=1; [ "$a" = --pull ]&&f=1; done'
@@ -1029,7 +1030,7 @@ jobs:
           } > /tmp/gt-shim/docker
           chmod +x /tmp/gt-shim/docker
           export PATH="/tmp/gt-shim:$PATH"
-          echo "[gt-shim] compose pull-never shim active at $(command -v docker)"
+          echo "[gt-shim] compose pull-never shim active; real=${_REALDOCKER}; resolved=$(command -v docker)"
           # [ENV-START FAIL-FAST + RETRY] (2026-06-21) The env-start failures are a FLAKY
           # pier/swerex Docker DEPLOYMENT — containers=0 for pier's full ~1h timeout with ~8GB
           # FREE and the image already cached (verified: NOT memory, NOT the 72s pull, NOT the
