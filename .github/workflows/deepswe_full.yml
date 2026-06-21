@@ -1007,39 +1007,14 @@ jobs:
           else
             echo "[PREPULL] pre-pull miss/timeout — pier will pull in env-start (fallback)"
           fi
-          # [COMPOSE PULL-NEVER SHIM] (2026-06-21) ROOT CAUSE of the residual env-start hang: pier
-          # provisions via `docker compose up`, which RE-PULLS the task image from the flaky ECR
-          # registry EVEN THOUGH the proof pulled it from GHCR + tagged it to the ECR ref locally
-          # (substrate_proof.sh:130, asserted by `docker image inspect`). The re-pull stalls on
-          # 'Pulling fs layer' -> no container -> timeout. NOT memory, NOT the mirror (mirror works;
-          # compose ignores the local cache). Fix: a `docker` PATH shim forcing `compose up --pull
-          # never` (+ no-op a standalone `compose pull`) so compose USES the local image. The image is
-          # GUARANTEED local -> correct-or-fail-fast, never a silent wrong image. Tested offline.
-          mkdir -p /tmp/gt-shim
-          _REALDOCKER=$(command -v docker || echo /usr/bin/docker)   # capture the REAL docker BEFORE PATH export (workflow installs it at /usr/local/bin/docker, not /usr/bin)
-          {
-            echo '#!/usr/bin/env bash'
-            echo "R=${_REALDOCKER}"
-            echo 'if [ "$1" = compose ]; then'
-            echo '  u=0; p=0; f=0'
-            echo '  for a in "$@"; do [ "$a" = up ]&&u=1; [ "$a" = pull ]&&p=1; [ "$a" = --pull ]&&f=1; done'
-            echo '  if [ "$p" = 1 ] && [ "$u" = 0 ]; then echo "[gt-shim] skip compose pull (image pre-cached local)" >&2; exit 0; fi'
-            echo '  if [ "$u" = 1 ] && [ "$f" = 0 ]; then o=(); for a in "$@"; do o+=("$a"); [ "$a" = up ]&&o+=(--pull never); done; echo "[gt-shim] compose up --pull never (local image, no ECR re-pull)" >&2; exec "$R" "${o[@]}"; fi'
-            echo 'fi'
-            echo 'exec "$R" "$@"'
-          } > /tmp/gt-shim/docker
-          chmod +x /tmp/gt-shim/docker
+          # [COMPOSE PULL-NEVER SHIM] pier's `docker compose up` re-pulls the task image from flaky
+          # ECR though it's local (GHCR mirror+tag, substrate_proof.sh:130). A `docker` PATH shim
+          # forces `up --pull never` + no-ops a standalone `compose pull` so compose uses the local image.
+          bash scripts/ci/install_compose_shim.sh
           export PATH="/tmp/gt-shim:$PATH"
-          echo "[gt-shim] compose pull-never shim active; real=${_REALDOCKER}; resolved=$(command -v docker)"
-          # [ENV-START FAIL-FAST + RETRY] (2026-06-21) The env-start failures are a FLAKY
-          # pier/swerex Docker DEPLOYMENT — containers=0 for pier's full ~1h timeout with ~8GB
-          # FREE and the image already cached (verified: NOT memory, NOT the 72s pull, NOT the
-          # agent; pier hides the docker-level cause). A fresh attempt usually catches a healthy
-          # window. So: run pier in the BACKGROUND + watch `docker ps` for the eval container; if
-          # none appears within the window the deploy is hung -> DUMP docker state (reveal the
-          # cause) + kill + retry (survive). A healthy deploy creates the container in ~1-5min, so
-          # the 900s window never clips a real start. PIER_RC = the attempt that brought the
-          # container up (or the last failed attempt). Loop runs under set +e (restored below).
+          echo "[gt-shim] active; resolved=$(command -v docker)"
+          # [ENV-START FAIL-FAST + RETRY] pier (bg) + watch docker ps; no container in 900s -> dump
+          # docker state + kill + retry (3x). PIER_RC from the attempt that started. set +e for the loop.
           set +e
           docker ps -aq 2>/dev/null | xargs -r docker rm -f >/dev/null 2>&1 || true
           PIER_RC=124
@@ -1098,19 +1073,7 @@ jobs:
             echo "[ENV-START] pier exited early on attempt $_A (rc=$PIER_RC) — taking outcome, no retry"
             break
           fi
-          echo "::warning::[ENV-START] NO container in $((_ENV_WATCH_TICKS*10))s on attempt $_A — hung swerex deploy; capturing FULL docker state to diagnose the root cause"
-          echo "[ENV-START-DIAG] docker ps -a:"; docker ps -a 2>&1 | head -10
-          # Per-container WHY (covers the 'container created but exited' mode): state + exit code +
-          # OOM flag + the container's OWN logs (the entrypoint/swerex error that pier hides).
-          for _cid in $(docker ps -aq 2>/dev/null | head -3); do
-            echo "[ENV-START-DIAG] container $_cid inspect:"; docker inspect --format '  status={{.State.Status}} exitcode={{.State.ExitCode}} oomkilled={{.State.OOMKilled}} error={{.State.Error}}' "$_cid" 2>&1
-            echo "[ENV-START-DIAG] container $_cid logs:"; docker logs --tail 25 "$_cid" 2>&1 | tail -25
-          done
-          # Covers the 'container never created' mode (the observed arktype failure: containers=0):
-          echo "[ENV-START-DIAG] dockerd journal:"; { sudo journalctl -u docker --no-pager -n 40 2>/dev/null || journalctl -u docker --no-pager -n 40 2>/dev/null; } 2>&1 | tail -40
-          echo "[ENV-START-DIAG] kernel/OOM (dmesg):"; { sudo dmesg 2>/dev/null || dmesg 2>/dev/null; } | tail -15
-          echo "[ENV-START-DIAG] stuck procs:"; ps -eo pid,rss,comm,args --sort=-rss 2>/dev/null | grep -iE 'pier|swerex|docker|python' | grep -v grep | head -8
-          echo "[ENV-START-DIAG] pier output tail:"; tail -25 trial_output.log 2>/dev/null
+          bash scripts/ci/dump_envstart_diag.sh "$_A" "$_ENV_WATCH_TICKS"
           kill "$_PIER_PID" 2>/dev/null; sleep 5; kill -9 "$_PIER_PID" 2>/dev/null
           pkill -9 -f "pier run" 2>/dev/null || true
           # [CLEANUP FIX] pier provisions via `docker compose up`; killing pier alone LEAKS the
@@ -1127,12 +1090,8 @@ jobs:
           set -e
           echo "=== Trial complete (pier rc=$PIER_RC) ===" | tee -a trial_output.log
           echo "PIER_EXIT_CODE=$PIER_RC" >> trial_output.log
-          # FAIL-LOUD on a pier USAGE/ARG error (the agent never ran). The `|| true` above
-          # keeps a legit agent CRASH from failing the step (so artifacts still upload), but
-          # it also masked a wrong flag (`--override-memory` vs `--override-memory-mb`, fixed
-          # 2026-06-20): pier rejected the command, ran NOTHING, the run produced no jobs/
-          # result.json, and EVERY task classified INFRA on empty signals. A click arg error
-          # is NOT an agent outcome — make it unrepresentable: abort the step loudly.
+          # FAIL-LOUD on a pier USAGE/ARG error (agent never ran) — a click arg error is a workflow
+          # bug, not an agent outcome (the `|| true` above keeps a legit agent CRASH non-fatal).
           if grep -qE "No such option|Usage: pier run|Error: Invalid value|Try 'pier run --help'" trial_output.log; then
             echo "::error::PIER_USAGE_ERROR — pier rejected its arguments and never ran the agent (see trial_output.log). This is a workflow/flag bug, not an agent outcome."
             grep -E "No such option|Usage: pier run|Error:" trial_output.log | head -5
@@ -1146,17 +1105,8 @@ jobs:
           if ! python3 scripts/swebench/adapter_error_scan.py jobs trial_output.log; then
             echo "DEEPSWE_ADAPTER_FAIL: adapter error found via structured result.json scan" | tee -a trial_output.log
           fi
-          # F4: AGENT-CONTAINER OOM is now a CLASSIFIED capacity kill, not a silent host
-          # SIGKILL. The agent container is memory-capped symmetrically to the proof
-          # container (pier compose mem_limit/memswap_limit == ${MEMORY}, honored by
-          # `docker compose up` WITHOUT --compatibility — the Swarm-only deploy.resources
-          # .limits key was a DEAD key). A runaway in the agent process now OOM-kills the
-          # CONTAINER (exit 137 == 128+SIGKILL) instead of being swap-deferred into a host
-          # OOM. Mirror the proof container's PROOF_RC=137 -> GT_PROOF_OOM handling: detect
-          # 137 from pier's rc OR the container exit recorded in the trial log / job results
-          # (pier may surface the in-container kill via result.json rather than its own rc),
-          # and classify it GT_AGENT_OOM so the outcome classifier sees a capacity kill, not
-          # a generic PIER_RUN_FAIL. The cap is the same fixed bound for every task.
+          # F4: AGENT-CONTAINER OOM = a CLASSIFIED capacity kill (exit 137), not a silent SIGKILL.
+          # Detect 137 from pier rc OR the container exit in the trial log -> classify GT_AGENT_OOM.
           # Correct-or-quiet: the rc=137 check catches pier's own OOM; the grep fallback
           # keys ONLY on docker-container-OOM-specific markers (OOMKilled / exit code 137),
           # never the bare 'SIGKILL'/'signal: killed' tokens — those can legitimately appear
