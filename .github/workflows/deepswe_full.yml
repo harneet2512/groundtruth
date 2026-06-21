@@ -1012,7 +1012,7 @@ jobs:
             --agent-import-path artifact_deepswe.gt_agent:GTMiniSweAgent \
             --model "$INPUT_MODEL" \
             --env docker \
-            --override-memory-mb "${GT_EVAL_CONTAINER_MEM_MB:-7000}" \
+            --override-memory-mb "${GT_EVAL_CONTAINER_MEM_MB:-9000}" \
             --override-cpus "${GT_EVAL_CONTAINER_CPUS:-2}" \
             -y \
             --mounts-json "${MOUNTS_JSON}" \
