@@ -1005,6 +1005,23 @@ jobs:
           else
             echo "[PREPULL] pre-pull miss/timeout — pier will pull in env-start (fallback, no worse than before)"
           fi
+          # [ENV-START FAIL-FAST + RETRY] (2026-06-21) The env-start failures are a FLAKY
+          # pier/swerex Docker DEPLOYMENT — containers=0 for pier's full ~1h timeout with ~8GB
+          # FREE and the image already cached (verified: NOT memory, NOT the 72s pull, NOT the
+          # agent; pier hides the docker-level cause). A fresh attempt usually catches a healthy
+          # window. So: run pier in the BACKGROUND + watch `docker ps` for the eval container; if
+          # none appears within the window the deploy is hung -> DUMP docker state (reveal the
+          # cause) + kill + retry (survive). A healthy deploy creates the container in ~1-5min, so
+          # the 900s window never clips a real start. PIER_RC = the attempt that brought the
+          # container up (or the last failed attempt). Loop runs under set +e (restored below).
+          set +e
+          docker ps -aq 2>/dev/null | xargs -r docker rm -f >/dev/null 2>&1 || true
+          PIER_RC=124
+          _ENV_ATTEMPTS="${GT_ENV_START_ATTEMPTS:-3}"
+          _ENV_WATCH_TICKS="${GT_ENV_START_WATCH_TICKS:-90}"   # 90 * 10s = 900s = 15min window
+          for _A in $(seq 1 "$_ENV_ATTEMPTS"); do
+          echo "[ENV-START] attempt $_A/$_ENV_ATTEMPTS — pier (bg) + container watcher (window=$((_ENV_WATCH_TICKS*10))s)"
+          : > trial_output.log
           pier run \
             -p deepswe-bench/tasks/${{ matrix.task }} \
             --agent-import-path artifact_deepswe.gt_agent:GTMiniSweAgent \
@@ -1037,8 +1054,34 @@ jobs:
             --ae GT_RUNTIME_LEDGER="${GT_C_OUT}/gt_runtime_ledger.jsonl" \
             --ae GT_HOOK_FIRE_COUNTS="${GT_C_OUT}/gt_hook_fire_counts.json" \
             --ak config_file=artifact_deepswe/gt_integration/deepswe_gt_pier.yaml \
-            2>&1 | tee trial_output.log || true
-          PIER_RC=${PIPESTATUS[0]}
+            > trial_output.log 2>&1 &
+          _PIER_PID=$!
+          _STARTED=0
+          for _i in $(seq 1 "$_ENV_WATCH_TICKS"); do
+            sleep 10
+            if ! kill -0 "$_PIER_PID" 2>/dev/null; then _STARTED=2; break; fi
+            if [ "$(docker ps -q 2>/dev/null | wc -l)" -gt 0 ]; then _STARTED=1; break; fi
+          done
+          if [ "$_STARTED" -eq 1 ]; then
+            echo "[ENV-START] eval container UP on attempt $_A (~$((_i*10))s) — agent running, awaiting completion"
+            wait "$_PIER_PID"; PIER_RC=$?
+            break
+          fi
+          if [ "$_STARTED" -eq 2 ]; then
+            wait "$_PIER_PID"; PIER_RC=$?
+            echo "[ENV-START] pier exited early on attempt $_A (rc=$PIER_RC) — taking outcome, no retry"
+            break
+          fi
+          echo "::warning::[ENV-START] NO container in $((_ENV_WATCH_TICKS*10))s on attempt $_A — hung swerex deploy; dumping docker state + retrying"
+          echo "[ENV-START-DIAG] docker ps -a:"; docker ps -a 2>&1 | head -8
+          echo "[ENV-START-DIAG] dockerd journal tail:"; { sudo journalctl -u docker --no-pager -n 30 2>/dev/null || journalctl -u docker --no-pager -n 30 2>/dev/null; } 2>&1 | tail -30
+          echo "[ENV-START-DIAG] pier output tail:"; tail -20 trial_output.log 2>/dev/null
+          kill "$_PIER_PID" 2>/dev/null; sleep 5; kill -9 "$_PIER_PID" 2>/dev/null
+          pkill -9 -f "pier run" 2>/dev/null || true
+          docker ps -aq 2>/dev/null | xargs -r docker rm -f >/dev/null 2>&1 || true
+          PIER_RC=124
+          done
+          cat trial_output.log 2>/dev/null || true
           set -e
           echo "=== Trial complete (pier rc=$PIER_RC) ===" | tee -a trial_output.log
           echo "PIER_EXIT_CODE=$PIER_RC" >> trial_output.log
