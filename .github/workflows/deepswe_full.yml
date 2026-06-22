@@ -933,6 +933,11 @@ jobs:
           if echo "$INPUT_MODEL" | grep -qiE "minimax|tokenrouter"; then
             export OPENAI_API_KEY="${TOKENROUTER_API_KEY}"
             export OPENAI_API_BASE="${TOKENROUTER_API_BASE}"
+            # FIX: forward the model creds INTO the container. The agent runs in-container via
+            # pier; the gt_ae_block was sourced above (before this export) so it never captured
+            # OPENAI_*. Host export alone leaves in-container litellm with no creds -> 0 tokens
+            # (proven on the IBM box: adding these two --ae args unstuck the agent).
+            GT_AE_ARGS+=(--ae "OPENAI_API_KEY=${OPENAI_API_KEY}" --ae "OPENAI_API_BASE=${OPENAI_API_BASE}")
             if ! echo "$INPUT_MODEL" | grep -q "^openai/"; then
               INPUT_MODEL="openai/${INPUT_MODEL}"
             fi
