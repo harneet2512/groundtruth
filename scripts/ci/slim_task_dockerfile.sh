@@ -24,3 +24,4 @@ if [ -z "$IMG" ] || [ ! -f "$DF" ]; then
 fi
 printf 'FROM %s\nCMD ["/bin/bash"]\n' "$IMG" > "$DF"
 echo "[DOCKERFILE SLIM] ${DF} -> FROM ${IMG} (use pre-built local image; skip the from-scratch env rebuild that OOM-hung env-start 900s)"
+echo "[SLIM-VERIFY] rewritten Dockerfile is now:"; cat "$DF" | sed 's/^/[SLIM-VERIFY]   /'

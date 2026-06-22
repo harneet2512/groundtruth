@@ -22,11 +22,16 @@ while true; do
   N=$((N+1))
   {
     echo "=== LIVE SNAPSHOT #$N | $(date -u +%FT%TZ) | task=$TASK ==="
-    echo "--- step stdout (RESMON / [ENV-START] / [gt-shim] / events) [tail 300] ---"
-    tail -300 "$STEPLOG" 2>/dev/null
-    echo ""
-    echo "--- pier / agent output (trial_output.log) [tail 400] ---"
-    tail -400 "$PIERLOG" 2>/dev/null
+    # KEY EVENTS first (grep the FULL logs, not a tail) so the once-emitted env-start/slim/build
+    # lines are never drowned by the per-8s RESMON flood that fills any tail window.
+    echo "--- KEY EVENTS (full logs, non-RESMON) ---"
+    grep -aE 'DOCKERFILE SLIM|SLIM-VERIFY|ENV-START|gt-shim|FROM |go build|go test|go mod|npm |cargo |pnpm |buildx|bake|Pulling fs|naming to|CACHED|exporting|writing image|container UP|exited early|EXCEPTION|Traceback|Error response' "$STEPLOG" "$PIERLOG" 2>/dev/null | tail -50
+    echo "--- mem trend (last 6) ---"
+    grep -aE 'MEMDIAG.*MemFree|containers=' "$STEPLOG" 2>/dev/null | tail -6
+    echo "--- pier tail (last 15, non-RESMON) ---"
+    grep -aviE 'RESMON|MEMDIAG|RESTOP' "$PIERLOG" 2>/dev/null | tail -15
+    echo "--- step tail (last 8) ---"
+    tail -8 "$STEPLOG" 2>/dev/null
   } > "$W/live.log"
   ( cd "$W" \
       && cp /dev/null .keep 2>/dev/null \
