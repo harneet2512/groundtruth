@@ -1012,8 +1012,7 @@ jobs:
           else
             echo "[PREPULL] pre-pull miss/timeout — pier will pull in env-start (fallback)"
           fi
-          # [ENV-START FIX] Rewrite the task Dockerfile to FROM the pre-built image (= matrix.image, the
-          # baked env) so pier's compose build is instant instead of a from-scratch rebuild that OOM-hung 900s.
+          # [ENV-START FIX] FROM pre-built image, not a from-scratch rebuild (the OOM-hang). See script.
           bash scripts/ci/slim_task_dockerfile.sh "${{ matrix.task }}" "${{ matrix.image }}"
           # [COMPOSE PULL-NEVER SHIM] pier's `docker compose up` re-pulls the task image from flaky
           # ECR though it's local (GHCR mirror+tag, substrate_proof.sh:130). A `docker` PATH shim
