@@ -1243,6 +1243,26 @@ def _maybe_fire_presubmit_verify(config: GTRuntimeConfig, obs: Any, orig_run_act
                 if line not in seen:
                     seen.add(line)
                     contracts.append(line)
+        # COMPLETENESS (structural co-change) at the CONSUMABLE moment. The turn-0 brief's
+        # <gt-completeness> was delivered+correct (value()/values()) but inert — the agent
+        # had forgotten it by the edit (run 28003130902). Fire the sibling check HERE, at the
+        # edit->review transition, against the files the agent ACTUALLY edited. Structural
+        # (nodes table, not tests/assertions); framed as a CHECK, not a caller-edit
+        # prescription (the harmful class this function avoids). Correct-or-quiet.
+        try:
+            from groundtruth.pretask.structural_cochange import (
+                twin_pairs_in_files as _twin_pairs,
+            )
+            for _h in _twin_pairs(_ps_conn, list(config._presubmit_edited_files)[:10], limit=3):
+                _ln = (
+                    f"  sibling check: {_h['a']}() and {_h['b']}() in {_h['file']} "
+                    "share a name family - confirm your change covers both if applicable"
+                )
+                if _ln not in seen:
+                    seen.add(_ln)
+                    contracts.append(_ln)
+        except Exception as _cc_exc:
+            print(f"[GT_META] presubmit_cochange_error: {_cc_exc}", flush=True)
     except Exception as _ps_exc:
         print(f"[GT_META] presubmit_verify_error: {_ps_exc}", flush=True)
         return obs
