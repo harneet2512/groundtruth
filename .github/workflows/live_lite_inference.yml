@@ -466,6 +466,11 @@ jobs:
             /tmp/results/token_summary_*.json
             /tmp/gt_interactions.jsonl
             /tmp/disk_report.txt
+            /tmp/gt_debug/**
+            /tmp/gt/*.json
+            /tmp/gt/**/*certificate*.json
+            /tmp/gt_gates_deep_*.json
+            /tmp/litellm_costs*.jsonl
           retention-days: 30
           compression-level: 9
           if-no-files-found: warn
