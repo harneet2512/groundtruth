@@ -7690,7 +7690,9 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                         _tiers = _decomp_tiers([x["signals"] for x in _scored_top])
                         _orientation_lines, _orient_counts = _render_orient(_scored_top, _tiers)
 
-                        # Edit target = top-scored candidate (for logging only)
+                        # Edit target = top-scored candidate. Logged below AND, when
+                        # [VERIFIED], rendered as the PRIMARY localization (see L1-FUSION
+                        # FIX) so the proof-path witness-less brief does not bury it.
                         if _scored_dedup:
                             _edit_target = {
                                 "func": _scored_dedup[0]["func"],
@@ -7782,6 +7784,54 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                         _cfg.brief_candidates.add(_isf)
                         if _ws and not _isf.startswith(_ws):
                             _cfg.brief_candidates.add(f"{_ws}/{_isf}")
+                # L1-FUSION FIX (2026-06-23): on the proof / portable-substrate path the
+                # agent-facing <gt-localization> is BAKED in-substrate from a WITNESS-LESS
+                # candidate path (all candidates confidence=0.0, source=graph_db), so the
+                # pre-task localization can name the wrong files while GT's OWN composite
+                # scorer holds the correct target. That target was computed "for logging
+                # only" (see _edit_target above) — logged as GT_META + fed to consensus,
+                # but NEVER rendered to the agent. RENDER it here: when the host composite
+                # scorer produced a [VERIFIED] edit target that the baked <gt-localization>
+                # head does NOT already name, PREPEND it as the PRIMARY target.
+                # Confidence-gated to [VERIFIED] only (correct-or-quiet); prepend-only
+                # (never delete the baked block, so a wrong gate cannot remove correct
+                # context); no-op when the target is already surfaced.
+                try:
+                    if isinstance(_edit_target, dict) and _edit_target.get("tier") == "[VERIFIED]":
+                        _et_file = (_edit_target.get("file") or "").replace("\\", "/").lstrip("/")
+                        _et_func = _edit_target.get("func") or ""
+                        if _et_file and _et_func:
+                            _et_base = _et_file.rsplit("/", 1)[-1]
+                            _loc_m = re.search(
+                                r"<gt-localization[^>]*>(.*?)</gt-localization>",
+                                brief, re.DOTALL,
+                            )
+                            _loc_head = _loc_m.group(1)[:400] if _loc_m else ""
+                            if _et_base and _et_base not in _loc_head:
+                                _alt = sorted(
+                                    f.replace("\\", "/").lstrip("/")
+                                    for f in (_issue_symbol_files or set())
+                                    if f.replace("\\", "/").lstrip("/") != _et_file
+                                )
+                                _alt_line = (
+                                    "\n  symbol also defined in: " + ", ".join(_alt[:3])
+                                    if _alt else ""
+                                )
+                                _primary_loc = (
+                                    '<gt-localization confidence="high">\n'
+                                    f"GT [VERIFIED] primary edit target: {_et_func}() in {_et_file}"
+                                    f"{_alt_line}\n"
+                                    "Reason over this target first; any graph candidates below are secondary.\n"
+                                    "</gt-localization>\n"
+                                )
+                                brief = _primary_loc + brief
+                                print(
+                                    f"[GT_META] l1_fusion: rendered [VERIFIED] {_et_func} in "
+                                    f"{_et_file} as PRIMARY localization (baked head lacked it)",
+                                    flush=True,
+                                )
+                except Exception as _fuse_exc:
+                    print(f"[GT_META] l1_fusion_error: {_fuse_exc}", flush=True)
             except Exception as _l1_exc:
                 print(f"[GT_META] l1_enhance_error: {_l1_exc}", flush=True)
 
