@@ -884,75 +884,6 @@ def _scope_completeness(edited_files: list[str], file_path: str, repo_root: str)
     return ""
 
 
-def _callsite_contract(func_name: str, repo_root: str, file_path: str, limit: int = 3) -> str:
-    """Demand-driven call-CONTRACT: how the edited symbol is actually invoked in-repo.
-
-    The resolved-edge caller path (graph.db) is DETERMINISTIC-only and excludes the
-    receiver-UNPROVEN method rung (impl_method), so the edit-target's real call
-    convention frequently never reaches the agent — the audited context gap
-    (CLAUDE.md:495 "the delta is the product bug"; e.g. mpl-29249 needed
-    "_translate_tick_params is called bare, no axis_name"). Read it straight from
-    SOURCE via grep: verbatim call lines for ``func_name(``. Correct-or-quiet — this
-    is a LEAD ("verify receiver"), source text, never a resolved-fact claim; never a
-    test name / FAIL_TO_PASS. Returns '' when nothing calls it.
-    """
-    if not func_name or not repo_root or len(func_name) < 4:
-        return ""
-    # Generic-name guard (correct-or-quiet): a common method name greps cross-receiver
-    # call-sites repo-wide (wrong-class noise the source can't disambiguate), so skip it —
-    # the call-contract is only a useful lead for a SPECIFIC symbol.
-    if func_name.lower() in {
-        "value", "values", "items", "build", "parse", "setup", "config", "result",
-        "update", "create", "delete", "remove", "append", "handle", "process",
-        "format", "render", "execute", "validate", "serialize", "main", "init",
-    }:
-        return ""
-    import re as _re
-    import subprocess
-    try:
-        # grep the bare WORD (no regex parens — grep dialects differ on `\(`); the
-        # `name(` call check is done in Python below via _callre, so this stays portable.
-        r = subprocess.run(
-            ["grep", "-rnw", "--include=*.py", func_name, "."],
-            cwd=repo_root, capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=10,
-        )
-    except Exception:
-        return ""
-    if r.returncode != 0:
-        return ""
-    _defre = _re.compile(rf"^\s*(async\s+def|def|class)\s+{_re.escape(func_name)}\b")
-    _callre = _re.compile(rf"\b{_re.escape(func_name)}\s*\(")
-    seen: set[str] = set()
-    hits: list[str] = []
-    for ln in r.stdout.splitlines():
-        parts = ln.split(":", 2)
-        if len(parts) < 3:
-            continue
-        path, _no, code = parts
-        code = code.strip()
-        if _defre.match(code) or not _callre.search(code):
-            continue
-        # Leakage guard (CLAUDE.md): never surface a test NAME, FAIL_TO_PASS, or an
-        # assertion line — even when the call-site sits inside an existing repo test.
-        # A usage line (`x = f(...)`) is fine; an `assert f(...) == gold` is not.
-        if _re.search(r"\bassert\b|FAIL_TO_PASS|PASS_TO_PASS|::test|\bdef test_", code):
-            continue
-        key = code[:80]
-        if key in seen:
-            continue
-        seen.add(key)
-        hits.append(f"{os.path.basename(path)}: {code[:90]}")
-        if len(hits) >= limit:
-            break
-    if not hits:
-        return ""
-    return (
-        f"[GT] {func_name}() is called in-repo as (preserve this call contract; verify receiver):\n    "
-        + "\n    ".join(hits)
-    )
-
-
 def _compose_scope_signal(
     db_path: str, file_path: str, func_name: str, repo_root: str, edited_files: list[str],
 ) -> str:
@@ -2847,18 +2778,6 @@ def generate_improved_evidence(
         callers: list[dict[str, str]] = []
         total_callers = 0
 
-        # Call-CONTRACT (demand-driven, source-truth) — LIVE path. How this symbol is
-        # invoked in-repo, read from source via grep. Closes the CLAUDE.md:495 gap: the
-        # resolved-edge caller blocks below are deterministic-only and drop receiver-
-        # unproven (impl_method) method calls, so the real call convention never reaches
-        # the agent (mpl-29249: "_translate_tick_params called bare, no axis_name"). A
-        # lead ("verify receiver"), not a fact; correct-or-quiet; leak-guarded.
-        if chars_used < effective_max_chars - 200:
-            _cc = _callsite_contract(func_name, repo_root, file_path)
-            if _cc and chars_used + len(_cc) <= effective_max_chars:
-                output_parts.append(_cc)
-                chars_used += len(_cc) + 1
-
         # --- Late-repair: only signature + top 1 caller (Change 4) ---
         if effective_ratio >= 0.80 and effective_mode == "post_edit":
             sig = _get_signature_from_graph(db_path, file_path, func_name)
@@ -3614,15 +3533,6 @@ def generate_improved_evidence(
             )
             if scope_signal:
                 func_parts.append(f"  {scope_signal}")
-
-        # Call-CONTRACT (demand-driven, source-truth): how the edited symbol is invoked
-        # in-repo, read from source via grep — surfaces the call convention the resolved-
-        # edge caller path drops for receiver-unproven (impl_method) method calls. The
-        # audited context gap (CLAUDE.md:495). Correct-or-quiet; a lead, not a fact.
-        if len(func_parts) < 10:
-            _cc_contract = _callsite_contract(func_name, repo_root, file_path)
-            if _cc_contract:
-                func_parts.append(f"  {_cc_contract}")
 
         # --- Priority 6: Issue obligation check + mismatch + format contracts ---
         try:
