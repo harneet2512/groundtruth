@@ -7595,10 +7595,25 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                     # scored without _direct=True if they came from the per-file loop
                     # for a different file. The rescue ensures +1000 scoring.
                     if _issue_kws and _l1_issue_text:
+                        # B3 (review): the rescue stamps score~1000 ("[VERIFIED]"-eligible) on
+                        # any >=4-char issue token that is a node name. Generic CODE identifiers
+                        # (tag/run/get/load/parse/value...) appear in nearly every issue and
+                        # match unrelated nodes -> manufactured rank-1 (tag()->github-release.py).
+                        # Veto generic identifiers, AND skip AMBIGUOUS names (>1 node) — an
+                        # ambiguous name is not a verified target, do not manufacture a rank-1.
+                        _GENERIC_CODE = {
+                            "tag","run","get","set","add","put","pop","new","init","main","load",
+                            "save","parse","build","make","call","send","read","write","open","close",
+                            "start","stop","value","values","name","names","data","item","items",
+                            "list","dict","keys","type","types","node","path","file","check","update",
+                            "create","delete","remove","insert","append","handle","process","format",
+                            "result","return","object","method","class","func","args","kwargs",
+                        }
                         _direct_names = [
                             w for w in re.findall(r"[A-Za-z_]\w{3,}", _l1_issue_text)
                             if w.lower() in _issue_kws
                             and w.lower() not in {"that","this","with","from","have","been","when","then","should","would","could","file","line","code","test","error","issue","none","true","false"}
+                            and w.lower() not in _GENERIC_CODE
                         ]
                         for _dn in _direct_names[:5]:
                             try:
@@ -7607,6 +7622,8 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                                     "WHERE name = ? AND is_test = 0 LIMIT 3",
                                     (_dn,),
                                 ).fetchall()
+                                if len(_dn_rows) > 1:
+                                    continue  # ambiguous name across files -> not a verified target
                                 for _dr in _dn_rows:
                                     _is_cls = _dr["label"] in ("Class", "Interface", "Struct")
                                     # Symmetric caller count: gate this rescue COUNT with
@@ -7786,13 +7803,15 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                         # never the gold func "values"/"value"). Find name-twin method PAIRS
                         # WITHIN those files (value<->values). Top candidate files are a backstop.
                         # Anchor-gated on issue keywords; dunders/generics excluded in the helper.
+                        # A5 (review): key co-change to the ISSUE/GOLD symbol files ONLY. v2
+                        # re-appended _all_candidates[:4] (the composite ranking the lever was
+                        # built to escape), so a twin in a mis-ranked composite candidate could
+                        # expand scope to a file the localization never named. Correct-or-quiet:
+                        # if the issue names no symbol files, emit nothing rather than guess.
                         _cc_files = list(_issue_symbol_files or [])
-                        for _c in _all_candidates[:4]:
-                            if _c.get("file") and _c["file"] not in _cc_files:
-                                _cc_files.append(_c["file"])
                         _cc_hits = _twin_pairs(
                             _l1_conn, _cc_files, anchor_terms=_issue_kws, limit=4,
-                        )
+                        ) if _cc_files else []
                     except Exception as _cc_exc:
                         print(f"[GT_META] structural_cochange_error: {_cc_exc}", flush=True)
                 finally:
