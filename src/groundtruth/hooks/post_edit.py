@@ -898,6 +898,15 @@ def _callsite_contract(func_name: str, repo_root: str, file_path: str, limit: in
     """
     if not func_name or not repo_root or len(func_name) < 4:
         return ""
+    # Generic-name guard (correct-or-quiet): a common method name greps cross-receiver
+    # call-sites repo-wide (wrong-class noise the source can't disambiguate), so skip it —
+    # the call-contract is only a useful lead for a SPECIFIC symbol.
+    if func_name.lower() in {
+        "value", "values", "items", "build", "parse", "setup", "config", "result",
+        "update", "create", "delete", "remove", "append", "handle", "process",
+        "format", "render", "execute", "validate", "serialize", "main", "init",
+    }:
+        return ""
     import re as _re
     import subprocess
     try:
