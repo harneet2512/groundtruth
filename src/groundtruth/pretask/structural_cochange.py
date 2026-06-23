@@ -43,9 +43,13 @@ def _stem_twin(a: str, b: str) -> bool:
     # singular/plural: value <-> values, key <-> keys (any length)
     if la + "s" == lb or lb + "s" == la:
         return True
-    # prefix family sharing a >=4 char stem: load <-> load_many (NOT get/set/add — 3-char,
-    # too common -> would spam). One name must be a prefix of the other.
-    if len(la) >= 4 and len(lb) >= 4 and (la.startswith(lb) or lb.startswith(la)):
+    # snake_case family: load <-> load_many, value <-> value_set. The longer name must
+    # extend the shorter at an UNDERSCORE boundary (shorter + "_" + suffix). A bare shared
+    # prefix (parse/parser, list/listen, read/reader, handle/handler, connect/connection)
+    # is a COINCIDENTAL stem, not a co-change twin — emitting it misdirects the agent
+    # (worse than silence, per correct-or-quiet), so reject it.
+    short, long = (la, lb) if len(la) <= len(lb) else (lb, la)
+    if len(short) >= 4 and long.startswith(short + "_"):
         return True
     return False
 
@@ -63,7 +67,10 @@ def twin_pairs_in_files(
     """
     anchor = {str(a).lower() for a in (anchor_terms or set())}
     seen_files: set[str] = set()
-    pairs: list[dict] = []
+    # group methods by their REAL file_path (the suffix fallback can return rows from
+    # several real files; pair only WITHIN one file and report that file, never the query
+    # stem — v2 dropped the real path and rendered a wrong location).
+    by_file: dict[str, list] = {}
     for f in files or []:
         fp = _norm(f)
         if not fp or fp in seen_files:
@@ -71,7 +78,7 @@ def twin_pairs_in_files(
         seen_files.add(fp)
         try:
             rows = conn.execute(
-                "SELECT name, parent_id FROM nodes "
+                "SELECT name, parent_id, file_path FROM nodes "
                 "WHERE file_path = ? AND label IN ('Function','Method') "
                 "AND COALESCE(is_test,0)=0",
                 (fp,),
@@ -83,10 +90,16 @@ def twin_pairs_in_files(
                     "AND COALESCE(is_test,0)=0",
                     (f"%/{fp}",),
                 ).fetchall()
-                rows = [(r[0], r[1]) for r in rows]
         except sqlite3.Error:
             continue
-        names = [(r[0], r[1]) for r in rows if r[0] and not r[0].startswith("__")]
+        for r in rows:
+            nm, par, real = r[0], r[1], _norm(r[2])
+            if not nm or nm.startswith("__"):
+                continue
+            by_file.setdefault(real, []).append((nm, par))
+
+    pairs: list[dict] = []
+    for real, names in by_file.items():
         n = len(names)
         for i in range(n):
             for j in range(i + 1, n):
@@ -94,8 +107,12 @@ def twin_pairs_in_files(
                 b, pb = names[j]
                 if not _stem_twin(a, b):
                     continue
-                same_class = pa is not None and pa == pb
-                pairs.append({"a": a, "b": b, "file": fp, "same_class": same_class})
+                # require SAME CLASS: a cross-method same-file twin that is not in the same
+                # class is mostly coincidence (correct-or-quiet). The cfn-3764 target
+                # (value/values, both methods of one class) is same-class.
+                if pa is None or pa != pb:
+                    continue
+                pairs.append({"a": a, "b": b, "file": real, "same_class": True})
 
     def _rank(h: dict) -> tuple:
         amatch = h["a"].lower() in anchor or h["b"].lower() in anchor

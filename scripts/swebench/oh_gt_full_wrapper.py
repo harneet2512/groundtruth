@@ -7865,40 +7865,22 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                 # Confidence-gated to [VERIFIED] only (correct-or-quiet); prepend-only
                 # (never delete the baked block, so a wrong gate cannot remove correct
                 # context); no-op when the target is already surfaced.
+                # L1-FUSION DISABLED (2026-06-23 code review). The prepend fired ONLY when the
+                # host composite target DISAGREED with the baked <gt-localization> head
+                # (`_et_base not in _loc_head`) — i.e. on 84/84 disagreements across the 300-run
+                # — stamping the WEAKER composite scorer's pick as "[VERIFIED] primary" over the
+                # reconciled v1r localization. Two rankers, contradictory, the confident one
+                # frequently wrong (github-release.py, pylinter.py). That is a duplicate-localizer
+                # integration defect and is net-harmful; disabled pending Tier-2 single-localizer
+                # reconciliation. Telemetry retained; the brief is NOT mutated.
                 try:
                     if isinstance(_edit_target, dict) and _edit_target.get("tier") == "[VERIFIED]":
-                        _et_file = (_edit_target.get("file") or "").replace("\\", "/").lstrip("/")
-                        _et_func = _edit_target.get("func") or ""
-                        if _et_file and _et_func:
-                            _et_base = _et_file.rsplit("/", 1)[-1]
-                            _loc_m = re.search(
-                                r"<gt-localization[^>]*>(.*?)</gt-localization>",
-                                brief, re.DOTALL,
-                            )
-                            _loc_head = _loc_m.group(1)[:400] if _loc_m else ""
-                            if _et_base and _et_base not in _loc_head:
-                                _alt = sorted(
-                                    f.replace("\\", "/").lstrip("/")
-                                    for f in (_issue_symbol_files or set())
-                                    if f.replace("\\", "/").lstrip("/") != _et_file
-                                )
-                                _alt_line = (
-                                    "\n  symbol also defined in: " + ", ".join(_alt[:3])
-                                    if _alt else ""
-                                )
-                                _primary_loc = (
-                                    '<gt-localization confidence="high">\n'
-                                    f"GT [VERIFIED] primary edit target: {_et_func}() in {_et_file}"
-                                    f"{_alt_line}\n"
-                                    "Reason over this target first; any graph candidates below are secondary.\n"
-                                    "</gt-localization>\n"
-                                )
-                                brief = _primary_loc + brief
-                                print(
-                                    f"[GT_META] l1_fusion: rendered [VERIFIED] {_et_func} in "
-                                    f"{_et_file} as PRIMARY localization (baked head lacked it)",
-                                    flush=True,
-                                )
+                        print(
+                            f"[GT_META] l1_fusion_disabled: would-be [VERIFIED] target "
+                            f"{_edit_target.get('func')} in {_edit_target.get('file')} NOT "
+                            "prepended (duplicate-localizer; reconciliation pending)",
+                            flush=True,
+                        )
                 except Exception as _fuse_exc:
                     print(f"[GT_META] l1_fusion_error: {_fuse_exc}", flush=True)
             except Exception as _l1_exc:
