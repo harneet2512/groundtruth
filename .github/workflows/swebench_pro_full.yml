@@ -725,8 +725,17 @@ jobs:
             echo "=== Model routed via DeepSeek native: $INPUT_MODEL ==="
           fi
 
-          # Pro task image: jefzda/sweap-images:<dockerhub_tag> — pier runs the agent
-          # inside it via --env docker; the GT substrate artifacts are bind-mounted as above.
+          # GHCR-CACHE-ONLY (requirement): the Pro task image comes from the GHCR mirror
+          # (731 cached by swebench_pro_mirror.yml). Pre-pull it and FAIL CLOSED on a cache
+          # miss so NOTHING is ever pulled from docker.io/jefzda at runtime.
+          _GHCR_IMG="ghcr.io/hbali-stack/sweap-images:${{ matrix.dockerhub_tag }}"
+          if ! docker pull "$_GHCR_IMG"; then
+            echo "::error::GHCR cache MISS for $_GHCR_IMG — refusing Docker Hub fallback (cache-only policy)"
+            exit 1
+          fi
+          echo "[GT_META] pro image from GHCR cache: $_GHCR_IMG (no dockerhub pull)"
+          # pier runs the agent inside the (now-local, GHCR-sourced) task image via --env docker;
+          # the GT substrate artifacts are bind-mounted as above.
           pier run \
             -p "$GITHUB_WORKSPACE" \
             --agent-import-path artifact_deepswe.gt_agent:GTMiniSweAgent \
@@ -752,7 +761,7 @@ jobs:
             "${GT_AE_ARGS[@]}" \
             --ak config_file=artifact_deepswe/gt_integration/deepswe_gt_pier.yaml \
             --ak task="$(cat /tmp/issue.txt 2>/dev/null || echo 'Fix issue in repository')" \
-            --ak image="jefzda/sweap-images:${{ matrix.dockerhub_tag }}" \
+            --ak image="ghcr.io/hbali-stack/sweap-images:${{ matrix.dockerhub_tag }}" \
             2>&1 | tee trial_output.log || true
           PIER_RC=${PIPESTATUS[0]}
           set -e
@@ -799,7 +808,7 @@ jobs:
           # compatible file so the outcome classifier chain is unchanged.
           TASK_ID="${{ matrix.task }}"
           DOCKERHUB_TAG="${{ matrix.dockerhub_tag }}"
-          IMG="jefzda/sweap-images:${DOCKERHUB_TAG}"
+          IMG="ghcr.io/hbali-stack/sweap-images:${DOCKERHUB_TAG}"
           RUN_SCRIPT="swebench-pro-os/run_scripts/${TASK_ID}/run_script.sh"
           mkdir -p trial_results
 
