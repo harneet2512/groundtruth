@@ -224,22 +224,30 @@ def test_class_label_generalized_across_languages():
 # Signal-decomposition tiering (Option B — Cursor-style categorical)
 # ---------------------------------------------------------------------------
 
-def test_tier_verified_on_direct_match():
-    """direct == 1.0 -> [VERIFIED] regardless of other signals."""
+def test_tier_warning_on_lone_direct_match():
+    """CORROBORATION GATE (B1): a LONE direct match is [WARNING], not [VERIFIED] — a
+    generic function name appearing once in the issue text is not, by itself, verified
+    (this is what produced 'tag() in github-release.py' at [VERIFIED])."""
     signals = {"direct": 1.0, "part": 0.0, "path": 0.0, "inverse_hub": 0.3, "prop": 0.0}
+    assert _tier_from_signals(signals) == "[WARNING]"
+
+
+def test_tier_verified_on_corroborated_signals():
+    """>=2 independent dominant signals -> [VERIFIED] (Hybrid pillar)."""
+    signals = {"direct": 1.0, "part": 0.6, "path": 0.0, "inverse_hub": 0.3, "prop": 0.0}
     assert _tier_from_signals(signals) == "[VERIFIED]"
 
 
-def test_tier_verified_on_majority_part_overlap():
-    """part >= 0.5 -> [VERIFIED]."""
+def test_tier_warning_on_lone_part_overlap():
+    """A lone majority part-overlap is [WARNING] (single-source, B1 gate)."""
     signals = {"direct": 0.0, "part": 0.5, "path": 0.0, "inverse_hub": 0.5, "prop": 0.0}
-    assert _tier_from_signals(signals) == "[VERIFIED]"
+    assert _tier_from_signals(signals) == "[WARNING]"
 
 
-def test_tier_verified_on_property_match():
-    """prop == 1.0 -> [VERIFIED]."""
+def test_tier_warning_on_lone_property_match():
+    """A lone property match is [WARNING] (single-source, B1 gate)."""
     signals = {"direct": 0.0, "part": 0.0, "path": 0.0, "inverse_hub": 0.5, "prop": 1.0}
-    assert _tier_from_signals(signals) == "[VERIFIED]"
+    assert _tier_from_signals(signals) == "[WARNING]"
 
 
 def test_tier_warning_on_partial_part_overlap():
@@ -265,21 +273,23 @@ def test_tier_info_on_empty_signals():
     assert _tier_from_signals({}) == "[INFO]"
 
 
-def test_tier_no_composite_total_used():
-    """Tier is determined by signal categories, not composite total.
-    A candidate with high direct + zero everything else and a candidate
-    with high direct + many other signals both get [VERIFIED]."""
-    minimal = {"direct": 1.0, "part": 0.0, "path": 0.0, "inverse_hub": 0.2, "prop": 0.0}
+def test_tier_corroboration_not_composite_total():
+    """Tier is from signal CATEGORIES (>=2 dominant), not composite total. Two
+    corroborated dominant signals -> [VERIFIED] regardless of magnitude; a lone
+    dominant signal -> [WARNING] (B1 corroboration gate)."""
+    corroborated = {"direct": 1.0, "part": 0.5, "path": 0.0, "inverse_hub": 0.2, "prop": 0.0}
     full = {"direct": 1.0, "part": 1.0, "path": 1.0, "inverse_hub": 1.0, "prop": 1.0}
-    assert _tier_from_signals(minimal) == "[VERIFIED]"
+    lone = {"direct": 1.0, "part": 0.0, "path": 0.0, "inverse_hub": 0.2, "prop": 0.0}
+    assert _tier_from_signals(corroborated) == "[VERIFIED]"
     assert _tier_from_signals(full) == "[VERIFIED]"
+    assert _tier_from_signals(lone) == "[WARNING]"
 
 
 def test_signal_decomposition_tiers_list():
     signals_list = [
-        {"direct": 1.0, "part": 0, "path": 0, "inverse_hub": 0.5, "prop": 0},
-        {"direct": 0.0, "part": 0.2, "path": 0, "inverse_hub": 0.5, "prop": 0},
-        {"direct": 0.0, "part": 0, "path": 0, "inverse_hub": 1.0, "prop": 0},
+        {"direct": 1.0, "part": 0.6, "path": 0, "inverse_hub": 0.5, "prop": 0},  # 2 dominant
+        {"direct": 0.0, "part": 0.2, "path": 0, "inverse_hub": 0.5, "prop": 0},  # weak anchor
+        {"direct": 0.0, "part": 0, "path": 0, "inverse_hub": 1.0, "prop": 0},    # no anchor
     ]
     tiers = signal_decomposition_tiers(signals_list)
     assert tiers == ["[VERIFIED]", "[WARNING]", "[INFO]"]
@@ -291,7 +301,7 @@ def test_signal_decomposition_empty_list():
 
 def test_backward_compat_dynamic_tiers_with_dicts():
     """dynamic_tiers (shim) accepts signal dicts and routes to decomposition."""
-    signals_list = [{"direct": 1.0, "part": 0, "path": 0, "inverse_hub": 0.5, "prop": 0}]
+    signals_list = [{"direct": 1.0, "part": 0.6, "path": 0, "inverse_hub": 0.5, "prop": 0}]
     assert dynamic_tiers(signals_list) == ["[VERIFIED]"]
 
 

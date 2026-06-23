@@ -244,7 +244,19 @@ def _tier_from_signals(signals: dict[str, float]) -> str:
     path = signals.get("path", 0.0)
     prop = signals.get("prop", 0.0)
 
-    if direct >= 1.0 or part >= _PART_DOMINANT_FRACTION or prop >= 1.0:
+    # CORROBORATION GATE (Hybrid pillar — never single-source). [VERIFIED] requires >=2
+    # INDEPENDENT dominant signals. A lone signal is NOT verified — especially `direct`,
+    # which is a bare substring of the function name in the issue text (a generic name
+    # like `tag`/`run`/`get` appearing anywhere in the issue tripped [VERIFIED] before,
+    # producing confident-wrong targets like `tag() in github-release.py`). One dominant
+    # signal, or any weak anchor, is [WARNING]; no anchor is [INFO].
+    dominant = sum((
+        direct >= 1.0,
+        part >= _PART_DOMINANT_FRACTION,
+        prop >= 1.0,
+        path >= 1.0,
+    ))
+    if dominant >= 2:
         return "[VERIFIED]"
     if direct > 0.0 or part > 0.0 or path > 0.0 or prop > 0.0:
         return "[WARNING]"
