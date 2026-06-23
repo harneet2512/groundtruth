@@ -7759,27 +7759,20 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                     # name-twins + import-mirrors). Correct-or-quiet: [] when nothing structural.
                     try:
                         from groundtruth.pretask.structural_cochange import (
-                            structural_cochange as _struct_cc,
+                            twin_pairs_in_files as _twin_pairs,
                         )
-                        # Cover the edit_target AND the top brief candidates — the edit_target's
-                        # func name (e.g. "transform"/"context") is often not the gold function
-                        # (e.g. "values"/"get_value"), so co-change keyed only on it would miss
-                        # the real sibling. Run over the top scored candidates too.
-                        _cc_srcs: list[tuple[str, str]] = []
-                        if (isinstance(_edit_target, dict)
-                                and _edit_target.get("func") and _edit_target.get("file")):
-                            _cc_srcs.append((_edit_target["func"], _edit_target["file"]))
+                        # v2: target the GOLD / issue-symbol files (not a guessed edit_target —
+                        # v1's bug was keying on the composite-top func "transform"/"context",
+                        # never the gold func "values"/"value"). Find name-twin method PAIRS
+                        # WITHIN those files (value<->values). Top candidate files are a backstop.
+                        # Anchor-gated on issue keywords; dunders/generics excluded in the helper.
+                        _cc_files = list(_issue_symbol_files or [])
                         for _c in _all_candidates[:4]:
-                            if _c.get("func") and _c.get("file"):
-                                _cc_srcs.append((_c["func"], _c["file"]))
-                        _cc_seen: set[tuple[str, str]] = set()
-                        for _fn, _ff in _cc_srcs:
-                            for _h in _struct_cc(_l1_conn, _fn, _ff, limit=3):
-                                _k = (_h["name"], _h["file"])
-                                if _k not in _cc_seen:
-                                    _cc_seen.add(_k)
-                                    _cc_hits.append(_h)
-                        _cc_hits = _cc_hits[:5]
+                            if _c.get("file") and _c["file"] not in _cc_files:
+                                _cc_files.append(_c["file"])
+                        _cc_hits = _twin_pairs(
+                            _l1_conn, _cc_files, anchor_terms=_issue_kws, limit=4,
+                        )
                     except Exception as _cc_exc:
                         print(f"[GT_META] structural_cochange_error: {_cc_exc}", flush=True)
                 finally:
@@ -7796,25 +7789,21 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                 # Completeness lever: render structural co-change partners so the agent
                 # doesn't ship a partial fix (the aiogram/cfn-3764 loss class).
                 if _cc_hits:
-                    _why = {
-                        "name_twin": "sibling method — likely co-changes",
-                        "import_mirror": "mirror in an importing file — likely co-changes",
-                        "same_class_sibling": "same-class method",
-                    }
+                    # ASCII-only (v1 leaked a mojibake em-dash into the agent instruction).
                     _cc_lines = [
-                        f"  {_h['name']}() in {_h['file']} — {_why.get(_h['reason'], _h['reason'])}"
+                        f"  {_h['a']}() and {_h['b']}() in {_h['file']} are sibling methods "
+                        f"(same name family); a fix to one is often incomplete without the other"
                         for _h in _cc_hits
                     ]
                     _l1_extra += (
                         "\n<gt-completeness>\n"
-                        "Before finishing, check whether your fix to the primary target must ALSO "
-                        "touch these structural siblings (partial fixes pass visible tests but fail "
-                        "hidden ones):\n" + "\n".join(_cc_lines) + "\n</gt-completeness>"
+                        "Structural sibling methods - if your fix touches one, check whether the "
+                        "other needs the same change (a one-site fix may be incomplete):\n"
+                        + "\n".join(_cc_lines) + "\n</gt-completeness>"
                     )
                     print(
-                        f"[GT_META] structural_cochange: {len(_cc_hits)} partner(s) for "
-                        f"{_edit_target.get('func') if isinstance(_edit_target, dict) else '?'} "
-                        f"-> {[h['name'] for h in _cc_hits]}",
+                        f"[GT_META] structural_cochange: {len(_cc_hits)} twin pair(s) -> "
+                        f"{[(h['a'], h['b']) for h in _cc_hits]}",
                         flush=True,
                     )
 
