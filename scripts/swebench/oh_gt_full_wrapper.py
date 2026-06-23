@@ -7460,6 +7460,7 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
 
                     _edit_target = None  # (file, func_name, signature, callers, constraints)
                     _plan_lines: list[str] = []
+                    _cc_hits: list[dict] = []  # structural co-change partners (completeness lever)
 
                     # BUG-003 fix: evaluate ALL candidates, score, pick best.
                     # Invariant 3: issue-named function beats high-caller functions.
@@ -7747,6 +7748,40 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                                 "Note: GT could not anchor any candidates. Use grep "
                                 "on issue keywords to localize."
                             )
+
+                    # STRUCTURAL CO-CHANGE (completeness lever, non-git). The historical
+                    # `cochanges` table is empty on the eval surface (no .git at the indexed
+                    # root, gt_run_proof.py:176), but the completeness loss it caught is real
+                    # and language-agnostic: the agent fixes the primary target and ships a
+                    # partial patch that misses a sibling site the hidden tests exercise
+                    # (values()/value(); FSMContext.get_value / SceneWizard mirror). Recover the
+                    # signal from graph facts the indexer already has (same-class siblings +
+                    # name-twins + import-mirrors). Correct-or-quiet: [] when nothing structural.
+                    try:
+                        from groundtruth.pretask.structural_cochange import (
+                            structural_cochange as _struct_cc,
+                        )
+                        # Cover the edit_target AND the top brief candidates — the edit_target's
+                        # func name (e.g. "transform"/"context") is often not the gold function
+                        # (e.g. "values"/"get_value"), so co-change keyed only on it would miss
+                        # the real sibling. Run over the top scored candidates too.
+                        _cc_srcs: list[tuple[str, str]] = []
+                        if (isinstance(_edit_target, dict)
+                                and _edit_target.get("func") and _edit_target.get("file")):
+                            _cc_srcs.append((_edit_target["func"], _edit_target["file"]))
+                        for _c in _all_candidates[:4]:
+                            if _c.get("func") and _c.get("file"):
+                                _cc_srcs.append((_c["func"], _c["file"]))
+                        _cc_seen: set[tuple[str, str]] = set()
+                        for _fn, _ff in _cc_srcs:
+                            for _h in _struct_cc(_l1_conn, _fn, _ff, limit=3):
+                                _k = (_h["name"], _h["file"])
+                                if _k not in _cc_seen:
+                                    _cc_seen.add(_k)
+                                    _cc_hits.append(_h)
+                        _cc_hits = _cc_hits[:5]
+                    except Exception as _cc_exc:
+                        print(f"[GT_META] structural_cochange_error: {_cc_exc}", flush=True)
                 finally:
                     _l1_conn.close()
 
@@ -7756,6 +7791,31 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                         f"\n<gt-orientation>\n"
                         + "\n".join(_orientation_lines)
                         + f"\n</gt-orientation>"
+                    )
+
+                # Completeness lever: render structural co-change partners so the agent
+                # doesn't ship a partial fix (the aiogram/cfn-3764 loss class).
+                if _cc_hits:
+                    _why = {
+                        "name_twin": "sibling method — likely co-changes",
+                        "import_mirror": "mirror in an importing file — likely co-changes",
+                        "same_class_sibling": "same-class method",
+                    }
+                    _cc_lines = [
+                        f"  {_h['name']}() in {_h['file']} — {_why.get(_h['reason'], _h['reason'])}"
+                        for _h in _cc_hits
+                    ]
+                    _l1_extra += (
+                        "\n<gt-completeness>\n"
+                        "Before finishing, check whether your fix to the primary target must ALSO "
+                        "touch these structural siblings (partial fixes pass visible tests but fail "
+                        "hidden ones):\n" + "\n".join(_cc_lines) + "\n</gt-completeness>"
+                    )
+                    print(
+                        f"[GT_META] structural_cochange: {len(_cc_hits)} partner(s) for "
+                        f"{_edit_target.get('func') if isinstance(_edit_target, dict) else '?'} "
+                        f"-> {[h['name'] for h in _cc_hits]}",
+                        flush=True,
                     )
 
                 # BUG-002 fix: emit [GT KEY CONTRACTS] marker when contracts exist
