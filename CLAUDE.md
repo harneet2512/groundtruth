@@ -634,3 +634,52 @@ harness). Product-level 5-lang is PROVEN (indexer demote + consumer suppress + d
 matrix on real graphs). Re-running beets live no-op'd (harness loaded prior finished output.jsonl).
 
 ### Commits this session: `55ab30eb` (P0 consumer), `b83c36c9` (record+5lang fixtures), `e1bc266b` (Go methods).
+
+---
+
+## OPERATIONAL WIRING & CACHE STATE (2026-06-23) — read before any run
+
+### SWE-bench Pro — GHCR-CACHE-ONLY (731/731 verified, FAIL-CLOSED)
+- Dataset: `benchmarks/data/swebench_pro_public_tags.jsonl` (731 tasks, field `dockerhub_tag`).
+- **ALL 731 task images mirrored to `ghcr.io/hbali-stack/sweap-images:<dockerhub_tag>`** — verified
+  1:1 vs the dataset (0 missing, 0 extra; exact-tag match). Mirror: `swebench_pro_mirror.yml`.
+- `swebench_pro_full.yml` pulls the task image from the **GHCR cache** and **FAILS CLOSED** on a
+  cache miss — **NOTHING is pulled from `docker.io/jefzda` at runtime.** NEVER revert the image refs
+  to `jefzda/...` (that re-pulls the dockerhub original mid-run).
+- Re-verify coverage (expect 0 missing — sort BOTH files the same way; `comm` is byte/order-exact):
+  ```
+  bash scripts/ghh.sh api --paginate "users/hbali-stack/packages/container/sweap-images/versions" \
+    --jq '.[].metadata.container.tags[]' | sort -u > /tmp/g.txt
+  python -c "import json;[print(json.loads(l)['dockerhub_tag']) for l in open('benchmarks/data/swebench_pro_public_tags.jsonl') if l.strip()]" | sort -u > /tmp/d.txt
+  comm -23 /tmp/d.txt /tmp/g.txt | wc -l    # MUST be 0
+  ```
+
+### SWE-bench Live Lite — frozen baseline 87/300 (NEVER rerun the baseline)
+- Baseline: `.claude/reports/full300_baseline_ohdeepseek_20260531/FINAL_resolved_300_20260531.json`
+  (`resolved_ids` = the 87 passes). Run: `swebench_300task.yml`, **2×150 batches** (300 in one
+  matrix = 0 jobs — GitHub 256-matrix cap). Canonical 300 = `benchmarks/data/swebench_live_lite.jsonl`.
+
+### Substrate digest — repo var `GT_SUBSTRATE_DIGEST`
+- **USE `7ada105e…`** (PROVEN: gte-768 + LSP warm + FTS5; certs green on every task).
+- **NEVER `bfe40bfc`** (hbali `:latest`) — LSP does NOT warm → `GT_REQUIRE_LSP=1` fail-closes 5/5.
+  "latest tag" ≠ "latest good". GT Python logic is synced into the container from the checkout
+  (`/tmp` PYTHONPATH, wrapper ~L4141) — only graph.db + gt-index are baked, so code fixes need NO rebuild.
+
+### gh multi-account (two parallel sessions) — USE THE LEVER
+- Dispatch needs the `harneet2512` account (admin). A parallel session flips the global active account
+  → `HTTP 403 Must have admin rights`. Lever: **`bash scripts/ghh.sh <gh args>`** (per-command
+  `GH_TOKEN=$(gh auth token --user harneet2512)`, no global switch, no conflict with the other session).
+
+### MEASUREMENT WIRING (this file's metrics mandate → the ACTUAL commands)
+- **DEEP 8-dp per-run metrics + paired deltas** (MANDATORY_METRICS / "DEFINITION OF DONE: metrics changed"):
+  `bash scripts/swebench/run_local_deep_metrics.sh <run_id>` → `D:/gt_runs/<run_id>/metrics/`
+  (per-task `gt_deep_metrics_<task>.json` 8-dp + `gt_metrics_delta_<task>.json` + `AGGREGATE.json`
+  flips/regressions). `gt_deep_metrics.py` reads the gate-deep cert via `GT_CERT_DIR` — no graph.db needed.
+- **RESOLVED / FLIPS / REGRESSIONS**: merge per-task `eval_result.json` by `completed_ids`, dedupe
+  (retry wins), diff vs the 87 baseline. Windows python glob uses `D:/...` NOT `/d/...` (silent empty).
+  Per-task artifacts are downloadable MID-RUN (`gh run download -n task-<id>`); run LOGS are gated until complete.
+- **LOCALIZATION ranking** (BRIEFING.md §5 — ranking-not-recall): measure `generate_v1r_brief` (NOT
+  `localize()`), semantic-ON, ONE weight at a time. ⚠️ **`measure_brief.py` is NOT in the repo** (only
+  `MEASURE_BRIEF_PROTOCOL.md`) — it MUST be added (+ a local ONNX env) before any ranker-weight change.
+  The live run on `7ada105e` IS a valid semantic-on measure (certs prove semantic on).
+- **§4 gt_math audit** per task → `task_ledgers/<task>.md` (APPEND-ONLY across runs).
