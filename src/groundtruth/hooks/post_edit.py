@@ -2847,6 +2847,18 @@ def generate_improved_evidence(
         callers: list[dict[str, str]] = []
         total_callers = 0
 
+        # Call-CONTRACT (demand-driven, source-truth) — LIVE path. How this symbol is
+        # invoked in-repo, read from source via grep. Closes the CLAUDE.md:495 gap: the
+        # resolved-edge caller blocks below are deterministic-only and drop receiver-
+        # unproven (impl_method) method calls, so the real call convention never reaches
+        # the agent (mpl-29249: "_translate_tick_params called bare, no axis_name"). A
+        # lead ("verify receiver"), not a fact; correct-or-quiet; leak-guarded.
+        if chars_used < effective_max_chars - 200:
+            _cc = _callsite_contract(func_name, repo_root, file_path)
+            if _cc and chars_used + len(_cc) <= effective_max_chars:
+                output_parts.append(_cc)
+                chars_used += len(_cc) + 1
+
         # --- Late-repair: only signature + top 1 caller (Change 4) ---
         if effective_ratio >= 0.80 and effective_mode == "post_edit":
             sig = _get_signature_from_graph(db_path, file_path, func_name)
