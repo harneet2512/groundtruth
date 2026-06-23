@@ -508,7 +508,7 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 			}
 		}
 		if name != "" {
-			sig := extractSignature(node, src, spec.BodyField)
+			sig := extractDecoratorPrefix(node, src) + extractSignature(node, src, spec.BodyField)
 			retType := extractFieldText(node, spec.ReturnTypeField, src)
 
 			// Compute qualified name: Parent.Name for methods, just Name for top-level
@@ -1234,6 +1234,48 @@ func extractFirstIdentifier(node *sitter.Node, src []byte) string {
 		}
 	}
 	return ""
+}
+
+// extractDecoratorPrefix returns a function/method's decorators (Python
+// @classmethod/@staticmethod/@property, JS/TS @Component, ...) as a single
+// trailing-spaced prefix to prepend to the signature, so the [SIBLINGS] /
+// [CALLEE] renderers carry the modifier the bare `def`/header omits (the
+// @classmethod-vs-@staticmethod fix-shaping fact, 2026-06-23). Mirrors
+// extractClassDecorators' two strategies: a decorated_definition parent
+// (Python) and preceding `decorator` siblings (JS/TS). Language-uniform:
+// returns "" for any node with no adjacent decorator (Go/Rust/plain fns).
+func extractDecoratorPrefix(node *sitter.Node, src []byte) string {
+	clean := func(n *sitter.Node) string {
+		t := strings.TrimSpace(n.Content(src))
+		if i := strings.IndexByte(t, '\n'); i >= 0 {
+			t = strings.TrimSpace(t[:i])
+		}
+		if len(t) > 80 {
+			t = t[:77] + "..."
+		}
+		return t
+	}
+	var decs []string
+	if parent := node.Parent(); parent != nil && parent.Type() == "decorated_definition" {
+		for i := 0; i < int(parent.ChildCount()); i++ {
+			if c := parent.Child(i); c != nil && c.Type() == "decorator" {
+				if t := clean(c); t != "" {
+					decs = append(decs, t)
+				}
+			}
+		}
+	} else {
+		// preceding decorator siblings come closest-first; prepend to keep order
+		for prev := node.PrevSibling(); prev != nil && prev.Type() == "decorator"; prev = prev.PrevSibling() {
+			if t := clean(prev); t != "" {
+				decs = append([]string{t}, decs...)
+			}
+		}
+	}
+	if len(decs) == 0 {
+		return ""
+	}
+	return strings.Join(decs, " ") + " "
 }
 
 // extractSignature returns the FULL declaration header of a function node:

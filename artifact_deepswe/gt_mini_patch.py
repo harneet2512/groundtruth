@@ -2112,16 +2112,34 @@ def _caller_contract_for_file(con, file_path: str, repo_root: str, func_names: l
     return ""
 
 
+def _compact_sig(sig: str) -> str:
+    """Compact a stored signature to the pattern shape for the [SIBLINGS] line:
+    sanitize LSP markdown, strip a leading Python ``def``/``async def`` (other
+    languages keep their native ``func``/``fn``/method head), bound the length so
+    several siblings fit one line. Correct-or-quiet: empty in -> empty out."""
+    s = _sanitize_signature((sig or "").strip())
+    if not s:
+        return ""
+    s = re.sub(r"^\s*(async\s+)?def\s+", "", s).rstrip(":").strip()
+    return (s[:88] + "...") if len(s) > 88 else s
+
+
 def _sibling_context(con, file_path: str, func_names: list[str]) -> str:
     """Sibling functions at the same scope — parallel patterns to follow.
     Ported from v1r_brief._sibling_context. EXACT normalized-relpath match
     (bug #1: a basename suffix-LIKE pulled "siblings" from OTHER files with the
-    same basename — e.g. every other package's __init__.py). Cross-language."""
+    same basename — e.g. every other package's __init__.py). Cross-language.
+
+    2026-06-23 fix-shaping: each sibling now carries its compact SIGNATURE
+    (receiver/params/return) — the pattern a new or edited member must MATCH —
+    not just the bare name, so the agent writes a member consistent with its
+    siblings. Correct-or-quiet: a sibling with no clean signature falls back to
+    its bare name; nothing fabricated. Pure SQL over nodes.signature."""
     if not func_names:
         return ""
     try:
         rows = con.execute(
-            "SELECT DISTINCT n.name FROM nodes n "
+            "SELECT DISTINCT n.name, n.signature FROM nodes n "
             "WHERE n.file_path = ? "
             "AND n.label IN ('Function','Method') AND COALESCE(n.is_test,0)=0 "
             "AND n.name NOT IN ({}) ORDER BY n.start_line LIMIT 8".format(
@@ -2129,9 +2147,18 @@ def _sibling_context(con, file_path: str, func_names: list[str]) -> str:
             (_norm_fp(file_path), *func_names),
         ).fetchall()
         # 2026-06-10 fact-filter: builtin-shadow names are not sibling patterns.
-        names = [r[0] for r in rows if r[0] and len(r[0]) > 2 and not r[0].startswith("_")
-                 and not _is_builtin_shadow_name(r[0])]
-        return ", ".join(names[:5]) if names else ""
+        out: list[str] = []
+        seen: set[str] = set()
+        for name, sig in rows:
+            if (not name or len(name) <= 2 or name.startswith("_")
+                    or _is_builtin_shadow_name(name) or name in seen):
+                continue
+            seen.add(name)
+            csig = _compact_sig(sig)
+            out.append(csig if csig else name)
+            if len(out) >= 4:
+                break
+        return ", ".join(out) if out else ""
     except Exception:  # noqa: BLE001
         return ""
 
