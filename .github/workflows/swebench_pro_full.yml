@@ -124,6 +124,28 @@ jobs:
         with:
           python-version: "3.12"
 
+      # benchmarks/data/*.jsonl is LFS-tracked; lfs:false leaves a ~131-byte pointer,
+      # which the matrix build can't parse (JSONDecodeError). Release assets bypass the
+      # LFS quota — fetch the real Pro dataset before anything reads it. (Mirrors the
+      # Live-Lite swebench_300task.yml LFS-bypass pattern.)
+      - name: Fetch Pro dataset from release (LFS bypass)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          REL=pipeline-assets-v1
+          mkdir -p benchmarks/data
+          for ATTEMPT in 1 2 3 4 5; do
+            gh release download "$REL" -R "${{ github.repository }}" \
+              -p swebench_pro_public_tags.jsonl \
+              -O benchmarks/data/swebench_pro_public_tags.jsonl --clobber && \
+              [ "$(stat -c%s benchmarks/data/swebench_pro_public_tags.jsonl 2>/dev/null || echo 0)" -gt 100000 ] && \
+              { echo "  Pro dataset ok (attempt $ATTEMPT)"; break; }
+            echo "::warning::Pro dataset download attempt $ATTEMPT failed — retrying"; sleep 10
+            [ "$ATTEMPT" = 5 ] && { echo "FATAL: could not fetch Pro dataset"; exit 1; }
+          done
+          echo "Pro dataset: $(stat -c%s benchmarks/data/swebench_pro_public_tags.jsonl)B, rows=$(wc -l < benchmarks/data/swebench_pro_public_tags.jsonl)"
+
       - name: Workflow lint — catch CI bug classes before the paid matrix
         shell: bash
         run: |
