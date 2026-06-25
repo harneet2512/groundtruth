@@ -203,11 +203,12 @@ jobs:
           txt = open(cfg, encoding="utf-8").read()
           sl = re.search(r"^\s*step_limit:\s*([0-9]+)\s*$", txt, re.M)
           cl = re.search(r"^\s*cost_limit:\s*([0-9.]+)\s*$", txt, re.M)
-          if not sl or int(sl.group(1)) <= 0:
-              sys.exit(f"FATAL: agent.step_limit missing/zero in {cfg} — unbounded steps forbidden")
+          # DeepSWE uses step_limit=0 (unlimited) + cost_limit=$3 as the bound.
+          # step_limit=0 is valid (means unlimited, cost_limit is the real cap).
           if not cl or float(cl.group(1)) <= 0:
               sys.exit(f"FATAL: agent.cost_limit missing/zero in {cfg} — unbounded cost forbidden")
-          print(f"cost guard OK: step_limit={sl.group(1)} (DeepSWE official 300) "
+          sl_val = int(sl.group(1)) if sl else 0
+          print(f"cost guard OK: step_limit={sl_val} ({'unlimited' if sl_val==0 else sl_val}) "
                 f"cost_limit=${cl.group(1)} USD per task")
           PYEOF
       - name: Clone deepswe-bench

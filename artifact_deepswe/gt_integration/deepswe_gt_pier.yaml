@@ -133,7 +133,7 @@ agent:
     - You CANNOT continue working after submitting.
     </CRITICAL>
     </instructions>
-  step_limit: 300
+  step_limit: 0
   cost_limit: 3.0
 
 # mini-swe-agent runs INSIDE the pier-managed task container (pier's `--env docker`
@@ -202,24 +202,7 @@ model:
     You made an invalid tool call. Please retry with the correct tool call format.
   cost_tracking: "ignore_errors"
   model_kwargs:
-    # DeepSeek official-spec sampling (paper-locked, matches .llm_config/*deepseek_v32.json):
-    # temp 1.0 / top_p 0.95 / max 8192 / penalties 0. Same for flash AND pro.
-    temperature: 1.0
-    top_p: 0.95
-    max_tokens: 8192
-    presence_penalty: 0
-    frequency_penalty: 0
-    # litellm-level retry on transient API errors (rate limits / 5xx). VERIFIED
-    # passthrough: LitellmModelConfig.model_kwargs -> LitellmModel._query ->
-    # litellm.completion(**(model_kwargs | kwargs)) -> litellm utils.py client
-    # wrapper (_get_wrapper_num_retries; sync path utils.py:1712-1720) ->
-    # litellm.completion_with_retries (tenacity, stop_after_attempt(num_retries)).
-    # Sits UNDER mini-swe-agent's own outer tenacity retry (10 attempts).
+    # DeepSWE baseline parity: empty model_kwargs = provider defaults apply.
+    # MiMo-v2.5-Pro: thinking ENABLED (default), temp=1.0 (forced), top_p=0.95 (forced).
+    # DeepSWE config name = mini_swe_agent_mimo_v2_5_pro_default = no overrides.
     num_retries: 3
-    # Disable DeepSeek-V4 thinking (default is THINKING-ON, which bloats output
-    # tokens + cost + latency, and the V3.2 paper notes thinking is incompatible with
-    # multi-turn harnesses). Same payload the OH path injects via extra_body.
-    # litellm forwards extra_body to the DeepSeek API. Applies to flash AND pro.
-    extra_body:
-      thinking:
-        type: disabled
