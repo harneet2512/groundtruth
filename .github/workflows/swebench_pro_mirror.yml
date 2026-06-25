@@ -61,6 +61,18 @@ jobs:
         with:
           lfs: false
 
+      - name: Fetch Pro dataset from release (LFS bypass)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          DS=benchmarks/data/swebench_pro_public_tags.jsonl
+          # The checkout has lfs:false so $DS is a 131-byte pointer, not real data.
+          # Fetch the real file from pipeline-assets-v1 (same fix as swebench_pro_full.yml).
+          gh release download pipeline-assets-v1 -p swebench_pro_public_tags.jsonl -D benchmarks/data/ --clobber \
+            || echo "WARN: release download failed; falling back to checkout (may be LFS pointer)"
+          head -c 80 "$DS"
+
       - id: split
         shell: bash
         env:
