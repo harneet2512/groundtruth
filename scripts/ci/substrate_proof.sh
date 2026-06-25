@@ -231,11 +231,76 @@ fi
 echo "repo root: $ROOT"
 rm -rf /tmp/gt && mkdir -p /tmp/gt /tmp/gt/src
 docker cp "gtsrc:$ROOT/." /tmp/gt/src || fail_proof TASK_IMAGE_EXTRACT_FAIL "source extract failed from $ROOT"
+# C1 (parity w/ OH host-src gate): `docker cp` returns rc=0 even when $ROOT was
+# misdetected and the copied tree holds NO source — gt-run-proof then finds nothing
+# and SILENTLY degrades GT (correct-or-quiet), which corrupts run accounting (looks
+# like "GT ran" when it had zero source). Validate CONTENT, not just rc: a no-source
+# extract is the same severity as a failed extract -> LOUD, classified hard-fail.
+if ! find /tmp/gt/src -type f \( \
+      -name '*.py' -o -name '*.go' -o -name '*.rs' -o -name '*.ts' -o -name '*.tsx' \
+   -o -name '*.js' -o -name '*.jsx' -o -name '*.java' -o -name '*.c' -o -name '*.cc' \
+   -o -name '*.cpp' -o -name '*.h' -o -name '*.hpp' -o -name '*.cs' \
+   \) -print -quit 2>/dev/null | grep -q .; then
+  fail_proof TASK_IMAGE_EXTRACT_EMPTY \
+    "extracted /tmp/gt/src has NO LSP-supported source file (ROOT='$ROOT' misdetected or empty image tree) — refusing a silent zero-source degrade"
+fi
+
+# ── Deepen git history so cochange mining has commits to walk (COCHANGE DATA fix) ──
+# The cochanges table populates ONLY from `git log --name-only -n 500` (gt-index
+# mineCochanges). Task images are built from a SHALLOW checkout (`git clone --depth 1`),
+# so the extracted /tmp/gt/src/.git carries ONE commit -> `git log` returns ≤1 commit ->
+# 0 co-change pairs on EVERY substrate graph, even though the producer is correct
+# (proven: a multi-commit repo stores pairs; a 1-commit/shallow repo stores 0).
+#
+# Fix: deepen the WRITABLE host copy (/tmp/gt/src) HERE, BEFORE it is mounted /work:ro
+# into the substrate where gt-index runs — the read-only mount makes an in-container
+# unshallow impossible, so it must happen on the host.
+#
+# Correct-or-quiet + fail-closed by construction (never aborts the proof):
+#   - acts ONLY when the repo is actually shallow (.git/shallow present);
+#   - `--unshallow` DEEPENS history reachable from existing refs; it does NOT move HEAD,
+#     so the base commit + tree the agent edits are byte-identical afterward (verified:
+#     rev-list tip is unchanged, only ancestors are added);
+#   - if there is no `origin`, the remote is unreachable (offline/auth), or the fetch
+#     fails for any reason, the repo is LEFT AS-IS and cochange simply stays empty —
+#     exactly today's behavior. A missing/unavailable remote is never a hard failure.
+if [ -d /tmp/gt/src/.git ] && [ -f /tmp/gt/src/.git/shallow ]; then
+  _COMMITS_BEFORE=$(git -C /tmp/gt/src rev-list --count HEAD 2>/dev/null || echo 0)
+  if git -C /tmp/gt/src remote get-url origin >/dev/null 2>&1; then
+    # --depth=500 (not --unshallow): the cochange miner reads only the last 500
+    # commits (change.py: `git log -n 500`), so cap the host fetch at 500 commits
+    # to avoid pulling unbounded monorepo history. Deepens depth-1 -> 500,
+    # HEAD/tree-preserving; a timeout/failure degrades gracefully to shallow below.
+    if git -C /tmp/gt/src fetch --quiet --depth=500 origin 2>/tmp/gt_unshallow.err; then
+      _COMMITS_AFTER=$(git -C /tmp/gt/src rev-list --count HEAD 2>/dev/null || echo 0)
+      echo "cochange: deepened git history ${_COMMITS_BEFORE} -> ${_COMMITS_AFTER} commits (depth=500 OK)"
+    else
+      echo "::warning::cochange: git fetch --depth=500 failed ($(tail -1 /tmp/gt_unshallow.err 2>/dev/null | tr -d '\n')) — proceeding with shallow history (cochange will be empty, correct-or-quiet)"
+    fi
+  else
+    echo "::warning::cochange: repo is shallow but has no 'origin' remote — cannot deepen history (cochange will be empty, correct-or-quiet)"
+  fi
+elif [ -d /tmp/gt/src/.git ]; then
+  echo "cochange: git history already full (not shallow), $(git -C /tmp/gt/src rev-list --count HEAD 2>/dev/null || echo '?') commits"
+else
+  echo "cochange: no .git in extracted source — cochange mining will be empty (correct-or-quiet)"
+fi
 
 # ── Extract dep stores so the substrate's LSP servers can resolve ──────
 # gopls needs the Go module cache; rust-analyzer needs cargo + rustup.
 # Discover paths inside gtsrc (mars-base images use non-default GOMODCACHE).
 mkdir -p /tmp/gt/deps/gomodcache /tmp/gt/deps/cargo /tmp/gt/deps/rustup
+# Copy a dep-cache tree from gtsrc to the host. Caches are IMMUTABLE (Go/cargo stamp
+# every dir 0555), and `docker cp` preserves those modes then cannot write children
+# into them -> it aborts after the first dir (measured: 1 of 146484 files). tar writes
+# a dir's children BEFORE stamping its mode, so it copies the whole tree;
+# --no-same-permissions keeps the host copy readable for the language server. ONE
+# mechanism for every language's cache (go/cargo/rustup/rust-src). rc 0 only if files landed.
+copy_store(){  # $1=src-in-container  $2=host-dest
+  docker exec gtsrc tar -C "$1" -cf - . 2>/dev/null | tar -C "$2" -xf - --no-same-permissions 2>/dev/null
+  chmod -R u+w "$2" 2>/dev/null   # caches arrive 0555; make host copy writable so rm-cleanup works later
+  [ -n "$(ls -A "$2" 2>/dev/null)" ]
+}
 GOMOD_SRC=""
 GOMOD_DECLARED="$(docker exec gtsrc sh -lc 'go env GOMODCACHE 2>/dev/null' | tr -d '\r')"
 for CAND in \
@@ -243,7 +308,7 @@ for CAND in \
   "/root/go/pkg/mod" "/home/user/go/pkg/mod" "/go/pkg/mod"; do
   [ -n "$CAND" ] || continue
   if docker exec gtsrc test -d "$CAND" 2>/dev/null; then
-    docker cp "gtsrc:${CAND}/." /tmp/gt/deps/gomodcache 2>/dev/null && GOMOD_SRC="$CAND" && break
+    copy_store "$CAND" /tmp/gt/deps/gomodcache && GOMOD_SRC="$CAND" && break
   fi
 done
 [ -n "$GOMOD_SRC" ] || echo "no Go module cache copied from task image"
@@ -255,7 +320,7 @@ if [ "$HARNESS" = "deepswe" ]; then
     "/root/.cargo" "/home/user/.cargo"; do
     [ -n "$CAND" ] || continue
     if docker exec gtsrc test -d "$CAND" 2>/dev/null; then
-      docker cp "gtsrc:${CAND}/." /tmp/gt/deps/cargo 2>/dev/null && CARGO_SRC="$CAND" && break
+      copy_store "$CAND" /tmp/gt/deps/cargo && CARGO_SRC="$CAND" && break
     fi
   done
   [ -n "$CARGO_SRC" ] || echo "no Cargo home copied from task image"
@@ -268,7 +333,7 @@ if [ "$HARNESS" = "deepswe" ]; then
     "/root/.rustup" "/home/user/.rustup"; do
     [ -n "$CAND" ] || continue
     if docker exec gtsrc test -d "$CAND" 2>/dev/null; then
-      docker cp "gtsrc:${CAND}/." /tmp/gt/deps/rustup 2>/dev/null && RUSTUP_SRC="$CAND" && break
+      copy_store "$CAND" /tmp/gt/deps/rustup && RUSTUP_SRC="$CAND" && break
     fi
   done
   [ -n "$RUSTUP_SRC" ] || echo "no rustup copied from task image"
@@ -280,7 +345,7 @@ if [ "$HARNESS" = "deepswe" ]; then
     TASK_RUST_SRC="${RUST_SYSROOT%/}/lib/rustlib/src/rust/library"
     if docker exec gtsrc test -d "$TASK_RUST_SRC" 2>/dev/null; then
       mkdir -p "/tmp/gt/deps/rustup/toolchains/$ACTIVE_RUST_TOOLCHAIN/lib/rustlib/src/rust/library"
-      docker cp "gtsrc:${TASK_RUST_SRC}/." "/tmp/gt/deps/rustup/toolchains/$ACTIVE_RUST_TOOLCHAIN/lib/rustlib/src/rust/library" 2>/dev/null \
+      copy_store "$TASK_RUST_SRC" "/tmp/gt/deps/rustup/toolchains/$ACTIVE_RUST_TOOLCHAIN/lib/rustlib/src/rust/library" \
         && echo "backfilled rust-src from sysroot: $TASK_RUST_SRC" \
         || echo "rust-src backfill failed (non-fatal)"
     fi
@@ -381,6 +446,13 @@ with open(out_path, "w", encoding="utf-8") as f:
 print(f"issue text: {len(issue)} chars from {source} -> {out_path}")
 PYEOF
   python3 scripts/swebench/issue_manifest.py /tmp/issue.txt /tmp/gt/issue_manifest.json --source instruction || echo "::warning::issue_manifest.py failed — non-fatal, continuing"
+  # P0 (2026-06-23): write the verbatim issue into the substrate (/tmp/gt -> mounted
+  # read-only at /gt_artifacts) so the runtime re-surface (gt_mini_patch) can read
+  # $GT_CERT_DIR/issue.txt as the requirement fallback when the structured
+  # obligations[] array is empty (the common case — the extractor is remove-param-only).
+  cp /tmp/issue.txt /tmp/gt/issue.txt 2>/dev/null \
+    && echo "issue.txt -> substrate ($(wc -c </tmp/gt/issue.txt) chars)" \
+    || echo "::warning::issue.txt copy failed — re-surface fallback unavailable"
 else
   # Pro harness: issue text from Pro-OS run_scripts or fallback to in-image paths.
   TASK_ID="${GT_MATRIX_TASK}"
@@ -478,7 +550,7 @@ if [ "$HARNESS" = "deepswe" ]; then
       -e GT_REQUIRE_FTS5=1 -e GT_REQUIRE_EMBEDDER=1 -e GT_FORCE_ONNX_EMBEDDER=1 \
       -e GT_REQUIRE_LSP=1 -e GT_REQUIRE_FULL_STACK=1 -e GT_ISSUE_FILE=/work_issue.txt \
       -e GT_LSP_READY_BUDGET_S_OVERRIDE="${GT_LSP_READY_BUDGET_S_OVERRIDE:-}" \
-      -e GOFLAGS=-mod=mod -e GOPROXY=off -e GONOSUMCHECK=1 -e GOSUMDB=off \
+      -e GOMODCACHE=/tmp/gomodcache -e GOFLAGS=-mod=mod -e GOPROXY=off -e GONOSUMCHECK=1 -e GOSUMDB=off \
       -e CARGO_HOME=/root/.cargo \
       -e CARGO_TARGET_DIR=/tmp/cargo-target -e CARGO_NET_OFFLINE=true \
       -e RUSTUP_HOME=/root/.rustup -e RUSTUP_TOOLCHAIN="$ACTIVE_RUST_TOOLCHAIN" \
@@ -502,7 +574,7 @@ else
       -e GT_REQUIRE_FTS5=1 -e GT_REQUIRE_EMBEDDER=1 -e GT_FORCE_ONNX_EMBEDDER=1 \
       -e GT_REQUIRE_LSP=1 -e GT_REQUIRE_FULL_STACK=1 -e GT_ISSUE_FILE=/work_issue.txt \
       -e GT_LSP_READY_BUDGET_S_OVERRIDE="${GT_LSP_READY_BUDGET_S_OVERRIDE:-}" \
-      -e GOFLAGS=-mod=mod -e GOPROXY=off -e GONOSUMCHECK=1 -e GOSUMDB=off \
+      -e GOMODCACHE=/tmp/gomodcache -e GOFLAGS=-mod=mod -e GOPROXY=off -e GONOSUMCHECK=1 -e GOSUMDB=off \
       -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 -e HF_DATASETS_OFFLINE=1 \
       -e GT_GATES_DELIVER_ALWAYS="${GT_GATES_DELIVER_ALWAYS:-0}" \
       -e GT_GIT_COMMIT="${GT_GITHUB_SHA}" \

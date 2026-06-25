@@ -193,3 +193,12 @@ gt-index/gt-index*.exe
 /BRIEFING.md
 .tmp_gt_*/
 .tmp_*/
+
+box_run_artifacts/
+RUN_113_SETUP_AND_FINDINGS_*.md
+HANDOFF_*.md
+GT_LIVELITE_GTMATH_MATRIX_*.md
+GT_DASHBOARD.html
+gen_gt_dashboard.py
+LOCALIZATION_RANKING_FIX_*.md
+gt_wiring_map.md

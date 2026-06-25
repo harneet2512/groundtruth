@@ -23,6 +23,7 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1837,11 +1838,66 @@ func matchesTwinPair(nameA, nameB string) (bool, string) {
 	return false, ""
 }
 
+// cochangeMinCount is the single shared co-occurrence floor: a pair must be
+// changed together at least this many times to be stored. The consumer query
+// (gt_mini_patch.py `_cochange_block`, "AND count >= 2") MUST equal this value,
+// so no row is advertised that the producer never stored, and no stored row is
+// excluded by the query. One value, both sides.
+const cochangeMinCount = 2
+
+// normCochangePath re-frames a git-log path into the SAME frame walker.go stores
+// (filepath.Rel(root, abs) + ToSlash), so the producer's file_a/file_b keys are
+// byte-identical to what the consumer's `_norm_fp(rel)` produces and the EXACT
+// `file_a = ?` join lands regardless of where the repo toplevel sits relative to
+// the gt-index -root. Steps: (i) un-quote a C-quoted git path; (ii) re-base the
+// git-toplevel-relative path onto -root; (iii) ToSlash + strip leading "./".
+// Returns "" (dropped, correct-or-quiet) on unquote error or if the path escapes
+// root (Rel begins with "..").
+func normCochangePath(p, root, gitTop string) string {
+	if p == "" {
+		return ""
+	}
+	// (i) git C-quotes paths with special bytes: "\303\244/x.go". Unquote.
+	if strings.HasPrefix(p, "\"") {
+		uq, err := strconv.Unquote(p)
+		if err != nil {
+			return "" // unquotable -> drop (quiet), never a wrong key
+		}
+		p = uq
+	}
+	// (ii) git-log paths are relative to the repo toplevel; re-base onto -root.
+	if gitTop != "" && gitTop != root {
+		abs := filepath.Join(gitTop, p)
+		rel, err := filepath.Rel(root, abs)
+		if err != nil {
+			return ""
+		}
+		p = rel
+	}
+	// (iii) slash-normalize, drop a leading "./", and reject out-of-tree paths.
+	p = filepath.ToSlash(p)
+	p = strings.TrimPrefix(p, "./")
+	if p == ".." || strings.HasPrefix(p, "../") {
+		return "" // escapes root -> drop
+	}
+	return p
+}
+
 // mineCochanges analyzes the last 500 git commits to find files that are
-// frequently changed together. Pairs with >= 3 co-occurrences are stored
-// in the cochanges table. Returns the number of pairs stored.
+// frequently changed together. Pairs with >= cochangeMinCount (2) co-occurrences
+// are stored in the cochanges table. Returns the number of pairs stored.
 // Silently returns 0 if git is unavailable or the repo has no history.
 func mineCochanges(db *store.DB, root string) int {
+	// Resolve the repo toplevel once so each git-log path can be re-based onto
+	// -root before keying the map (git-log is toplevel-relative; walker stores
+	// root-relative). When toplevel == root the re-base is a no-op.
+	gitTop := ""
+	if tcmd := exec.Command("git", "rev-parse", "--show-toplevel"); true {
+		tcmd.Dir = root
+		if tout, terr := tcmd.Output(); terr == nil {
+			gitTop = strings.TrimSpace(string(tout))
+		}
+	}
 	// Two fixes vs the original: (1) "tformat:%x1e" is a VALID pretty-format —
 	// bare "--format=COMMIT" is not a builtin format name, git rejects it
 	// (exit 128), so this silently returned 0 on EVERY repo since b4761cc6
@@ -1861,7 +1917,7 @@ func mineCochanges(db *store.DB, root string) int {
 	for _, commit := range commits {
 		files := []string{}
 		for _, line := range strings.Split(strings.TrimSpace(commit), "\n") {
-			f := strings.TrimSpace(line)
+			f := normCochangePath(strings.TrimSpace(line), root, gitTop)
 			if f != "" {
 				files = append(files, f)
 			}
@@ -1880,10 +1936,11 @@ func mineCochanges(db *store.DB, root string) int {
 		}
 	}
 
-	// Filter: min 3 co-occurrences
+	// Filter: min cochangeMinCount co-occurrences (the single shared floor;
+	// must equal the consumer query floor in gt_mini_patch.py _cochange_block).
 	filtered := make(map[[2]string]int)
 	for pair, count := range cooccurrence {
-		if count >= 3 {
+		if count >= cochangeMinCount {
 			filtered[pair] = count
 		}
 	}

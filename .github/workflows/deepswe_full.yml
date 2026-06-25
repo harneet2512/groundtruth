@@ -892,6 +892,25 @@ jobs:
           touch "${HOST_GT_INJECT}/groundtruth/__init__.py"
           echo "GT inject staged: $(find "${HOST_GT_INJECT}" -name '*.py' | wc -l) Python files"
 
+          # L6-FRESH: stage the gt-index binary into /opt/gt so the in-container post-edit
+          # reindex (GT_L6_FRESH, default-off in code) can refresh the WRITABLE work-copy.
+          # PORTABILITY (RC-13): task containers run older-glibc (Debian) or musl (Alpine),
+          # so a naive ubuntu CGO_ENABLED=1 build (glibc 2.39) fails to EXEC there and L6
+          # silently no-ops. Build a STATIC musl binary (runs on glibc AND musl) WITH FTS5
+          # (the substrate graph.db carries nodes_fts). Correct-or-quiet: any failure leaves
+          # no binary -> _invalidate_on_edit falls back AND emits L6_REINDEX_FAILED /
+          # L6_NO_REINDEX_BINARY telemetry (a glibc/musl mismatch is diagnosable, not silent).
+          command -v musl-gcc >/dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y musl-tools; } >/dev/null 2>&1 || true
+          if command -v musl-gcc >/dev/null 2>&1 && command -v go >/dev/null 2>&1 && [ -d gt-index ]; then
+            (cd gt-index && CGO_ENABLED=1 CC=musl-gcc go build -tags 'netgo,osusergo,sqlite_fts5' \
+               -ldflags='-s -w -extldflags "-static"' -o "${HOST_GT_INJECT}/gt-index" ./cmd/gt-index/) \
+              && chmod +x "${HOST_GT_INJECT}/gt-index" \
+              && echo "L6 gt-index built static/musl+FTS5: $(file "${HOST_GT_INJECT}/gt-index" 2>/dev/null)" \
+              || echo "WARN: gt-index musl build failed — L6-fresh reindex falls back (correct-or-quiet)"
+          else
+            echo "WARN: musl-gcc/go/gt-index absent — L6-fresh reindex falls back (correct-or-quiet)"
+          fi
+
           # Bind-mount the host substrate dir into the task container READ-ONLY. JSON is the
           # pier --mounts-json contract (ServiceVolumeConfig: type/source/target/read_only).
           # FIX 3 (2026-06-11): a SECOND, WRITABLE mount (/tmp/gt_out -> /gt_out) carries the
@@ -919,9 +938,18 @@ jobs:
           source artifact_deepswe/gt_integration/gt_ae_block.sh
           echo "GT_AE_ARGS (block): ${GT_AE_ARGS[*]}"
 
+          # L6-FRESH activation: point the in-container reindex at the staged binary and
+          # enable the writable work-copy path (gt_mini_patch._ensure_l6_work_copy -> _db_path,
+          # in-container). The HOST witness still fingerprints the READ-ONLY mount
+          # (GT_HOST_GRAPH_DB), so hook==post-LSP parity holds; only the per-turn pillars
+          # read the fresh copy.
+          GT_AE_ARGS+=(--ae "GT_INDEX_BIN=/opt/gt/gt-index" --ae "GT_L6_FRESH=1")
+
           # Forward the SUBSTRATE-CONSUME env into the container, pointing at /gt_artifacts.
           # GT_FORBID_PREBUILT_GRAPH + GT_PORTABLE_SUBSTRATE + GT_PROOF_MODE/GT_CONTAINERIZED
-          # make the in-container pillars consume-or-fail-closed and keep L6 reindex OFF.
+          # make the in-container pillars consume-or-fail-closed. L6 reindex no longer
+          # mutates the authoritative mount: under GT_L6_FRESH (set below) it refreshes a
+          # WRITABLE /tmp work-copy — the witness fingerprints the untouched mount, parity holds.
           # P0.1-b: pipefail + ${PIPESTATUS[0]} (the swebench_30task pattern) — without it
           # `pier ... | tee` returned tee's 0 and a swallowed adapter raise stayed GREEN.
           set +e

@@ -127,6 +127,33 @@ def check_lsp(workspace: str | None, graph_db: str | None) -> tuple[bool, str]:
         return (False, f"LSP: probe failed {e!r}")
 
 
+def check_host_src(host_src: str | None) -> tuple[bool, str]:
+    """C1 (run 300_e51cc3f0 fix): the GT_REQUIRE_LSP warm gate runs on the HOST and
+    cannot read the in-container /workspace; it must warm against the host-readable
+    Point-A export (GT_HOST_SRC_ROOT). 8 tasks fail-closed because that export was
+    missing/scaffold-only and the gate had a DEAD fallback to the container path.
+    Assert the export exists AND holds real source BEFORE the run, so a Point-A miss
+    is a named setup failure — not 8 silent mid-run deaths mislabeled image-pull."""
+    host_src = (host_src or "").strip()
+    if not host_src:
+        # No host export configured: only an error when LSP is REQUIRED (paid run on
+        # the host-LSP path). Otherwise this stage is not applicable.
+        return (not _required("GT_REQUIRE_LSP"),
+                "HOST_SRC: GT_HOST_SRC_ROOT unset — host-LSP warm has no source to warm against"
+                if _required("GT_REQUIRE_LSP")
+                else "HOST_SRC: GT_HOST_SRC_ROOT unset (host-LSP path not in use)")
+    try:
+        from groundtruth.lsp.edge_verifier import host_src_has_lsp_source
+    except Exception as e:
+        return (False, f"HOST_SRC: import failed {e!r}")
+    if not os.path.isdir(host_src):
+        return (False, f"HOST_SRC: GT_HOST_SRC_ROOT={host_src!r} is not a directory (Point-A export missing)")
+    if not host_src_has_lsp_source(host_src):
+        return (False, f"HOST_SRC: {host_src!r} holds NO LSP-supported source file "
+                       "(scaffold-only/incomplete Point-A export)")
+    return (True, f"HOST_SRC: OK — host-readable source present at {host_src}")
+
+
 def check_structure(graph_db: str | None) -> tuple[bool, str]:
     if not graph_db or not os.path.exists(graph_db):
         return (False, "STRUCT: no --graph-db given")
@@ -167,6 +194,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--graph-db", default=os.environ.get("GT_GRAPH_DB"))
     ap.add_argument("--workspace", default=os.environ.get("GT_WORKSPACE_ROOT"))
+    ap.add_argument("--host-src", default=os.environ.get("GT_HOST_SRC_ROOT"))
     args = ap.parse_args()
 
     # FTS5 and STRUCT are GRAPH-dependent: they need a per-task graph.db, which does
@@ -181,6 +209,7 @@ def main() -> int:
         ("FTS5", "GT_REQUIRE_FTS5", check_fts5(args.graph_db), have_graph),
         ("SEMANTIC", "GT_REQUIRE_EMBEDDER", check_semantic(), True),
         ("LSP", "GT_REQUIRE_LSP", check_lsp(args.workspace, args.graph_db), True),
+        ("HOST_SRC", "GT_REQUIRE_LSP", check_host_src(args.host_src), True),
         ("STRUCT", "GT_REQUIRE_STRUCT", check_structure(args.graph_db), have_graph),
     ]
 

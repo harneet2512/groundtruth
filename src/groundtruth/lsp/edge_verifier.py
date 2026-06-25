@@ -35,6 +35,71 @@ from groundtruth.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+# --- GT_REQUIRE_LSP warm-gate failure taxonomy (C3) ---------------------------
+# The host wrapper warms a HOST-readable copy of the base-commit source (the
+# "Point A" export), NOT the in-container /workspace/<task> (which the host
+# process cannot read). Three distinct ways the gate can fail — kept separate so
+# the operator is sent to the RIGHT fix instead of "install pyright" for all.
+LSP_FAIL_NO_HOST_SRC = "LSP_FAIL_NO_HOST_SRC"  # GT_HOST_SRC_ROOT missing/empty — Point-A plumbing miss
+LSP_FAIL_NO_SOURCE = "LSP_FAIL_NO_SOURCE"      # root exists but holds no LSP-supported source file
+LSP_FAIL_NO_WARM = "LSP_FAIL_NO_WARM"          # server launched path but did not handshake
+
+
+def resolve_warm_source_root(
+    host_src: str | None, container_root: str | None, require_lsp: bool
+) -> tuple[str | None, str | None]:
+    """Pick the path the HOST warm gate walks, and classify the failure (C2+C3).
+
+    The host wrapper process cannot read the in-container workspace, so under a
+    paid ``GT_REQUIRE_LSP`` run the warm MUST run against the host-readable
+    base-commit source (``GT_HOST_SRC_ROOT``). The previous code fell back to
+    ``container_root`` when that was absent — a DEAD control on the host: the
+    walk always finds nothing -> NO_SOURCE_EXT -> fail-closed, mislabeled
+    "image-pull/network". This refuses that fallback and names the real miss.
+
+    Returns ``(root_or_None, failure_class_or_None)``:
+      - host source present        -> (host_src, None)
+      - absent AND require_lsp      -> (None, LSP_FAIL_NO_HOST_SRC)   # C2: no dead fallback
+      - absent AND not require_lsp  -> (container_root, None)         # legacy / non-GHA only
+    """
+    host_src = (host_src or "").strip()
+    if host_src and os.path.isdir(host_src):
+        return (host_src, None)
+    if require_lsp:
+        return (None, LSP_FAIL_NO_HOST_SRC)
+    return (container_root, None)
+
+
+def host_src_has_lsp_source(root: str | None, max_files: int = 4000) -> bool:
+    """True iff ``root`` is a host dir holding >=1 LSP-supported source file (C1).
+
+    Mirrors ``LazyEdgeVerifier._dominant_ext`` so the preflight check and the warm
+    gate agree on "is there source to warm against". A scaffold-only export
+    (``.openhands/TASKS.md`` + ``README.md``) returns False — the exact shape that
+    fail-closed 8 tasks in run 300_e51cc3f0."""
+    if not root or not os.path.isdir(root):
+        return False
+    from groundtruth.lsp.config import LSP_SERVERS
+
+    seen = 0
+    try:
+        for _root, dirs, files in os.walk(root):
+            dirs[:] = [
+                d for d in dirs
+                if not d.startswith(".")
+                and d not in ("node_modules", "vendor", "venv", "__pycache__", "target", "dist", "build")
+            ]
+            for fn in files:
+                if os.path.splitext(fn)[1].lower() in LSP_SERVERS:
+                    return True
+            seen += len(files)
+            if seen >= max_files:
+                break
+    except OSError:
+        return False
+    return False
+
+
 @dataclass
 class VerifiedEdge:
     source_file: str

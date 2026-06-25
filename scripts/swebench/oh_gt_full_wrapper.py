@@ -6849,7 +6849,34 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
             # when the host build is absent (legacy / non-GHA invocations).
             _host_src = os.environ.get("GT_HOST_SRC_ROOT", "").strip()
             _host_gdb = os.environ.get("GT_HOST_GRAPH_DB", "").strip()
-            _ver_root = _host_src if (_host_src and os.path.isdir(_host_src)) else config.workspace_root
+            from groundtruth.lsp.edge_verifier import (
+                resolve_warm_source_root, host_src_has_lsp_source,
+                LSP_FAIL_NO_HOST_SRC,
+            )
+            _require_lsp = os.environ.get("GT_REQUIRE_LSP") == "1"
+            # C2/C3 (run 300_e51cc3f0 fix): the host wrapper CANNOT read the in-container
+            # /workspace/<task>, so under a paid GT_REQUIRE_LSP run the warm MUST run
+            # against the host-readable Point-A export (GT_HOST_SRC_ROOT). The old code
+            # fell back to the container path — a DEAD control that always walked an empty
+            # tree -> NO_SOURCE_EXT -> fail-closed, mislabeled "image-pull/network". No
+            # dead fallback now; classify the real miss so the operator fixes the RIGHT thing.
+            _ver_root, _warm_fail = resolve_warm_source_root(
+                _host_src, config.workspace_root, _require_lsp)
+            if _warm_fail == LSP_FAIL_NO_HOST_SRC:
+                raise RuntimeError(
+                    f"{LSP_FAIL_NO_HOST_SRC}: GT_REQUIRE_LSP=1 but no host-readable base-commit "
+                    f"source was exported (GT_HOST_SRC_ROOT={_host_src!r}). This is a Point-A "
+                    "PLUMBING miss (docker cp + `groundtruth.resolve --resolve`), NOT a pyright "
+                    "problem and NOT image-pull. Fix the host export (preflight check_host_src) "
+                    "or unset GT_REQUIRE_LSP. Refusing a degraded paid run."
+                )
+            # Export present but holds no LSP-supported source (scaffold-only tree): a
+            # distinct class from "pyright didn't warm". Fail closed with the right cause.
+            if _require_lsp and not host_src_has_lsp_source(_ver_root):
+                raise RuntimeError(
+                    f"LSP_FAIL_NO_SOURCE: host source root {_ver_root!r} holds no LSP-supported "
+                    "source file (incomplete/scaffold-only Point-A export). Refusing a degraded paid run."
+                )
             _ver_gdb = _host_gdb if (_host_gdb and os.path.exists(_host_gdb)) else config.graph_db
             if _host_src and os.path.isdir(_host_src):
                 print(f"[GT_META] Edge verifier warming against HOST source "
@@ -6868,13 +6895,14 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
             _lsp_ok = asyncio.get_event_loop().run_until_complete(config._edge_verifier.start(warm=True))
             print(f"[GT_META] Edge verifier (LSP) initialized for {workspace_name} (available={_lsp_ok})", flush=True)
             # GT_REQUIRE_LSP=1: a paid run must NOT verify via the confidence-filter fallback.
-            # If the server didn't warm, real verification is impossible — abort now rather
-            # than emit 0ms "VERIFIED" stamps that are not real LSP resolution.
-            if os.environ.get("GT_REQUIRE_LSP") == "1" and not _lsp_ok:
+            # By here the host source is proven present, so a non-warm result is a REAL
+            # pyright handshake failure (NO_WARM), distinct from the NO_HOST_SRC plumbing miss.
+            if _require_lsp and not _lsp_ok:
                 raise RuntimeError(
-                    "GT_REQUIRE_LSP=1 but the LSP server did not warm — edge verification would "
-                    "use the confidence-filter fallback (0ms, no real resolution). Install pyright/the "
-                    "language server in the image, or unset GT_REQUIRE_LSP. Refusing a degraded paid run."
+                    f"LSP_FAIL_NO_WARM: GT_REQUIRE_LSP=1 but the LSP server did not handshake on "
+                    f"host source {_ver_root!r} — edge verification would use the confidence-filter "
+                    "fallback (0ms, no real resolution). Install/repair pyright in the host env, or "
+                    "unset GT_REQUIRE_LSP. Refusing a degraded paid run."
                 )
             # RESOLVE proof now if a prebuilt/uploaded db already exists; otherwise this
             # is a no-op and the first L3 verify proves resolution (graph.db built later).

@@ -466,6 +466,7 @@ _GT_INDEX_CACHE = os.environ.get("GT_INDEX_CACHE", "/tmp/gt_index.json")
 # G05: one-time telemetry latch — warns when L6 can't reindex (binary absent) instead
 # of silently no-op'ing (so a frozen-freshness trajectory is diagnosable from the log).
 _l6_no_binary_warned = False
+_l6_reindex_failed_warned = False
 # COMPLETENESS / co-change fires once on the first source edit (the multi-file scope
 # signal DeepSWE entirely lacked — OH ships it from the cochanges table).
 _cochange_fired = False
@@ -506,6 +507,77 @@ def _root() -> str:
         return (open(_ROOT_FILE).read().strip()) or "/"
     except Exception:  # noqa: BLE001
         return "/"
+
+
+# SUBPROCESS-WRITE CATCH-ALL (mtime baseline). _edit_target is a STRING parser:
+# it cannot see a write done INSIDE a subprocess script (`python3 /tmp/x.py`
+# whose body writes Lexer.js). This snapshots mtime+size of tracked source files
+# under the repo root so a post-command diff catches a source mutation by ANY
+# write channel (subprocess/codegen/build/compiler), language-agnostic via the
+# existing _SRC_EXT set. Bounded: stat() only (no read), file-count capped,
+# excludes scratch/vendor; correct-or-quiet (any walk error -> empty baseline ->
+# no fallback fire).
+_GT_MTIME_SCAN_CAP = int(os.environ.get("GT_MTIME_SCAN_CAP", "20000"))
+_mtime_baseline: dict[str, tuple[float, int]] = {}
+_mtime_baseline_seeded = False
+_MTIME_PRUNE_DIRS = frozenset({
+    ".git", "node_modules", "vendor", ".venv", "venv", "__pycache__",
+    ".tox", ".mypy_cache", ".pytest_cache", "dist", "build", ".cache",
+})
+
+
+def _scan_source_mtimes(root: str) -> dict[str, tuple[float, int]]:
+    """(abs_path -> (mtime, size)) for every TRACKED source file under ``root``.
+    stat-only (no read), capped at _GT_MTIME_SCAN_CAP files, prunes VCS/dep/
+    cache dirs and scratch markers. Empty on any error (correct-or-quiet)."""
+    out: dict[str, tuple[float, int]] = {}
+    # FAIL-CLOSED (review): _root() fails-open to "/" if gt_root.txt is absent.
+    # NEVER walk a filesystem root (would seed stdlib /usr/lib paths and could
+    # misroute one into the post_edit dispatch). Reject "/", "\\", drive-roots.
+    if (not root or root in ("/", "\\") or root.rstrip("/\\").endswith(":")
+            or not os.path.isdir(root)):
+        return out
+    seen = 0
+    try:
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d not in _MTIME_PRUNE_DIRS]
+            for fn in filenames:
+                if not _has_source_ext(fn):
+                    continue
+                ap = os.path.join(dirpath, fn)
+                if any(m in ("/" + ap.replace("\\", "/").lower())
+                       for m in _SCRATCH_DIR_MARKERS):
+                    continue
+                try:
+                    st = os.stat(ap)
+                except OSError:
+                    continue
+                out[ap] = (st.st_mtime, st.st_size)
+                seen += 1
+                if seen >= _GT_MTIME_SCAN_CAP:
+                    return out
+    except Exception:  # noqa: BLE001 — walk error -> quiet, no fallback fire
+        return {}
+    return out
+
+
+def _subprocess_write_targets(root: str) -> list[str]:
+    """Tracked source files whose (mtime,size) CHANGED (or that newly appeared)
+    since the last baseline — the catch-all for a write done via a subprocess
+    the command parser cannot see. Re-seeds the baseline in place. Empty when
+    the baseline is unseeded or nothing changed (correct-or-quiet)."""
+    global _mtime_baseline, _mtime_baseline_seeded
+    if not _mtime_baseline_seeded:
+        _mtime_baseline = _scan_source_mtimes(root)
+        _mtime_baseline_seeded = True
+        return []
+    now = _scan_source_mtimes(root)
+    changed: list[str] = []
+    for ap, sig in now.items():
+        if _mtime_baseline.get(ap) != sig:
+            changed.append(ap)
+    _mtime_baseline = now
+    return changed
 
 
 # Python/Node in-place file WRITE (the agent's DOMINANT JS edit shape: a python heredoc
@@ -1499,6 +1571,43 @@ def _guard_handoff_db(db: str) -> None:
         _raise_handoff_empty(db)
 
 
+_l6_work_db: "str | None" = None
+
+
+def _ensure_l6_work_copy() -> str:
+    """L6-FRESH (in-container): lazily stage a WRITABLE copy of the authoritative
+    substrate mount (GT_HOST_GRAPH_DB -> /gt_artifacts/graph.db) at /tmp/gt_work.db so
+    the per-turn pillars + post-edit reindex operate on a FRESH copy while the mount
+    itself stays untouched. Runs in the SAME in-container interpreter as the pillars
+    (the .pth hook), so the copy, the `-file` reindex, and the read-path share one
+    process + one /tmp. The HOST-side consumption witness fingerprints the mount
+    directly READ-ONLY; this only READS the mount to copy it, so hook==post-LSP parity
+    is preserved. Idempotent (one copy per process, then reindexed in place by
+    _invalidate_on_edit). Correct-or-quiet: any failure returns '' and _db_path falls
+    back to the read-only mount (byte-identical to the L6-off behavior)."""
+    global _l6_work_db
+    if _l6_work_db is not None:
+        return _l6_work_db
+    src = os.environ.get("GT_HOST_GRAPH_DB", "")
+    if not src or not os.path.isfile(src):
+        _l6_work_db = ""
+        return ""
+    try:
+        import shutil
+        work = "/tmp/gt_work.db"
+        shutil.copy(src, work)
+        _l6_work_db = work
+        print(
+            f"[GT_META] L6_FRESH staged in-container work-graph={work} "
+            f"(mount {src} untouched; witness parity preserved)",
+            file=sys.stderr, flush=True,
+        )
+        return work
+    except Exception:  # noqa: BLE001 — fall back to the read-only mount
+        _l6_work_db = ""
+        return ""
+
+
 def _db_path() -> str:
     """The graph the per-turn pillars read (hole #6).
 
@@ -1514,7 +1623,19 @@ def _db_path() -> str:
     A2 GUARD: before returning a SUBSTRATE/PROOF-mode handoff path, `_guard_handoff_db`
     fail-CLOSES (raises GTHandoffEmptyError) on a PRESENT-but-EMPTY/0-byte/unschema'd
     handoff db — so a silently-empty handoff can never again blind the whole runtime
-    channel. A legitimately-absent graph stays correct-or-quiet (no raise)."""
+    channel. A legitimately-absent graph stays correct-or-quiet (no raise).
+
+    L6-FRESH (GT_L6_FRESH=1): the per-turn pillars read a WRITABLE in-container copy of
+    the mount (_ensure_l6_work_copy, staged lazily in THIS interpreter — the same .pth
+    process as the reindex), kept fresh by the post-edit L6 reindex, so the agent's OWN
+    added structure stays visible through the solve. The HOST-side consumption witness
+    fingerprints GT_HOST_GRAPH_DB (the untouched mount) directly, so hook==post-LSP
+    parity still holds — the copy only READS the mount. Flag unset => no copy, returns
+    the mount; byte-identical to the mount-only path."""
+    if os.environ.get("GT_L6_FRESH") == "1":
+        _work = _ensure_l6_work_copy()
+        if _work:
+            return _work
     host = os.environ.get("GT_HOST_GRAPH_DB")
     if host:
         _guard_handoff_db(host)
@@ -2713,7 +2834,7 @@ def _cochange_block(rel: str) -> str:
             q = (
                 "SELECT file_a, file_b, count FROM cochanges "
                 "WHERE (file_a = ? OR file_b = ?) "
-                "AND count >= 2 "
+                "AND count >= 2 "  # MUST equal gt-index cochangeMinCount; one shared floor
                 "ORDER BY count DESC, CASE WHEN file_a = ? THEN file_b ELSE file_a END ASC LIMIT 8"
             )
             for fa, fb, cnt in con.execute(q, (nfp, nfp, nfp)):
@@ -2909,9 +3030,13 @@ def _invalidate_on_edit(rel: str, root: str) -> None:
     per-task graph COPY — was rejected: it reintroduces a divergent graph the witness
     would fail to match, strictly worse for the proof.) L6 stays ENABLED only on the
     non-substrate (preindex/trial) path where the in-container /tmp/graph.db is ours."""
-    global _l6_no_binary_warned
-    if _substrate_active():
+    global _l6_no_binary_warned, _l6_reindex_failed_warned
+    if _substrate_active() and os.environ.get("GT_L6_FRESH") != "1":
         return  # substrate graph is authoritative + read-only; never mutate/rebuild it.
+    # GT_L6_FRESH: _db_path() returns the writable work-copy (NOT the mount), so the
+    # `-file` reindex below writes the COPY — the authoritative mount stays pristine
+    # for the consumption witness. Correct-or-quiet: a missing binary/copy or a failed
+    # reindex falls through harmlessly (the pillars then read a slightly-staler copy).
     try:
         if os.path.isfile(_GT_INDEX_CACHE):
             os.remove(_GT_INDEX_CACHE)
@@ -2921,10 +3046,24 @@ def _invalidate_on_edit(rel: str, root: str) -> None:
         gt_index = os.environ.get("GT_INDEX_BIN", "/tmp/gt-index")
         db = _db_path()
         if os.path.isfile(gt_index) and os.path.isfile(db):
-            subprocess.run(
+            _rc = subprocess.run(
                 [gt_index, f"-root={root}", f"-file={rel}", f"-output={db}"],
                 capture_output=True, timeout=_HOOK_TIMEOUT,
             )
+            # G05b (L6-fresh review): a runner-built binary that can't EXEC in the task
+            # container (glibc/musl mismatch) leaves the file present (isfile True) but
+            # makes the reindex a NO-OP — the silent failure mode the review flagged. A
+            # non-zero rc here is that case; surface it ONCE so post-edit freshness loss
+            # is diagnosable, never a green silent no-op.
+            if _rc.returncode != 0 and not _l6_reindex_failed_warned:
+                _l6_reindex_failed_warned = True
+                _err = (_rc.stderr or b"")[:200]
+                print(
+                    f"[GT_META] L6_REINDEX_FAILED rc={_rc.returncode} bin={gt_index} "
+                    f"— post-edit graph freshness FROZEN (likely glibc/musl exec "
+                    f"mismatch or schema error); stderr={_err!r}",
+                    file=sys.stderr, flush=True,
+                )
         elif not os.path.isfile(gt_index):
             # G05 (fail loud, not silent): the reindex binary is absent. On the
             # host-graph-injection path gt_agent ships the graph but NOT the ~49MB
@@ -3326,6 +3465,58 @@ def _l5_failure_nudge(cmd: str, out_text: str) -> str:
     return ""
 
 
+# Semantic-drift candidate (2026-06-23): wires the previously-DEAD
+# src/groundtruth/hooks/semantic_check (guard/return diff before/after an edit)
+# into the live DeepSWE turn loop. A source edit that silently DELETES a guard
+# clause (`if <cond>:` -> return/raise/throw) or a return path the file had on
+# its prior snapshot is the classic invisible regression. Self-contained (the
+# hooks package is not importable in-container); pure-text on the guard idiom,
+# language-uniform. Correct-or-quiet: first sight is baseline (never fires);
+# unreadable file is not drift; only a LOST guard/return steers.
+_SEM_GUARD_RE = re.compile(r"\bif\s+(.+?):", re.M)
+_sem_cache: dict[str, tuple[frozenset, frozenset]] = {}
+
+
+def _sem_extract(text: str) -> tuple[frozenset, frozenset]:
+    guards: set[str] = set()
+    for m in _SEM_GUARD_RE.finditer(text or ""):
+        region = text[m.end():m.end() + 200]
+        if any(kw in region for kw in ("return", "raise", "throw")):
+            guards.add(m.group(1).strip()[:120])
+    returns = {ln.strip()[:120] for ln in (text or "").splitlines()
+               if ln.strip().startswith("return ") or ln.strip() == "return"}
+    return frozenset(guards), frozenset(returns)
+
+
+def _semantic_drift_candidate(rel: str) -> tuple[float, str] | None:
+    if not rel:
+        return None
+    try:
+        path = rel if os.path.isabs(rel) else os.path.join(_root(), rel)
+        text = open(path, encoding="utf-8", errors="replace").read()
+    except Exception:  # noqa: BLE001 — unreadable file is not drift evidence
+        return None
+    guards, returns = _sem_extract(text)
+    prev = _sem_cache.get(rel)
+    _sem_cache[rel] = (guards, returns)
+    if prev is None:
+        return None  # first sight = baseline snapshot, never a drift signal
+    lost_g = prev[0] - guards
+    lost_r = prev[1] - returns
+    if not lost_g and not lost_r:
+        return None
+    bits = []
+    if lost_g:
+        bits.append("guard `%s`" % sorted(lost_g)[0][:60])
+    if lost_r:
+        bits.append("return path `%s`" % sorted(lost_r)[0][:60])
+    return (_SEV_NUDGE_VERIFY,
+            "\n<gt-nudge reason=\"semantic_drift\">\nGT: your edit to %s removed a %s "
+            "that was present before -- confirm that deletion is intended, not an "
+            "accidental regression of existing behavior.\n</gt-nudge>"
+            % (rel, " and a ".join(bits)))
+
+
 # ---------------------------------------------------------------------------
 # STAGE-4 ORACLE ROUTING (gt_gt §15.4 Stage 4 / ORACLE_ARCHITECTURE_PLAN §2.2).
 # The block producers (L3 contract, L3 cochange, L3b evidence, consensus scope,
@@ -3396,7 +3587,7 @@ _gt_oracle_tried = False
 def _reset_oracle_state() -> None:
     """Clear ALL oracle/delivery state — call between retry attempts (D2 fix)."""
     global _action_count, _oracle_nonedit_streak, _oracle_obligation_fired
-    global _consensus_fired, _cochange_fired, _l5_fired
+    global _consensus_fired, _cochange_fired, _l5_fired, _oblig_resurface_fired
     global _obligation_tracker, _obligation_tracker_anchors
     global _last_budget_pending
     global _ledger_consumed_kinds, _ledger_ignore_counts
@@ -3441,6 +3632,11 @@ def _reset_oracle_state() -> None:
     _last_gate_winner_kind = ""
     _reset_pending_delivery()  # bug #6: clear the deferred-judgment list on retry
     _horizon_advisory_fired = False
+    _oblig_resurface_fired = False  # 2026-06-23 re-surface latch resets per task
+    try:
+        _sem_cache.clear()  # 2026-06-23 semantic-drift snapshot resets per task
+    except Exception:
+        pass
     try:
         _oracle_last_losers.clear()
     except Exception:
@@ -3490,6 +3686,69 @@ def _load_gt_oracle():
     except Exception:  # noqa: BLE001 -- correct-or-quiet, never break the loop
         _gt_oracle_mod = None
     return _gt_oracle_mod
+
+
+_oblig_resurface_fired = False
+
+
+def _obligation_resurface_candidate() -> tuple[float, str] | None:
+    """PRE-SUBMIT obligation re-surfacing (Cursor-principled INSIGHT, 2026-06-23).
+    The issue's requirements were delivered once in the brief; by the near-submit
+    turn they are thousands of lines stale, so the agent sees GREEN LOCAL TESTS and
+    concludes "done" without re-checking the requirement -- the false-confident-
+    submit shape (cattrs/adaptix: 849/2812 local passed, hidden requirement missed).
+    This re-states the obligations as the decision-moment checklist, EASING the
+    agent's reasoning ("did I actually handle each?"). GT does NOT verify the patch
+    or run anything -- it hands back the ammo the agent had lost. Deterministic
+    (obligations already extracted), correct-or-quiet (no obligations -> None),
+    fires ONCE. NOT coverage-gated: passing local tests does not prove an obligation
+    met, so this fires regardless of edited/tested status."""
+    global _oblig_resurface_fired
+    if _oblig_resurface_fired or _GT_BASELINE:
+        return None
+    lines: list[str] = []
+    seen: set[str] = set()
+    # Primary: the structured obligations[] (the extractor's output, when present).
+    om = _load_gt_oracle()
+    if om is not None:
+        try:
+            for o in (om.load_obligations(_anchors_path()) or []):
+                t = str(o.get("verbatim_text") or "").strip().replace("\n", " ")
+                if t and t not in seen:
+                    seen.add(t)
+                    lines.append("  - %s" % (t[:160]))
+                if len(lines) >= 6:
+                    break
+        except Exception:  # noqa: BLE001 — correct-or-quiet
+            lines = []
+    # Fallback: the structured array is empty for tasks the extractor cannot
+    # decompose into obligations. Re-surface the
+    # ISSUE TEXT itself -- the requirement GT already holds, written into the
+    # substrate as issue.txt. Deterministic, no pattern-extraction (no
+    # benchmaxxing): the first paragraph (the core requirement statement), compact.
+    if not lines:
+        for cand in (os.path.join(os.environ.get("GT_CERT_DIR", "/gt_artifacts"), "issue.txt"),
+                     os.environ.get("GT_ISSUE_FILE", "")):
+            if not cand or not os.path.exists(cand):
+                continue
+            try:
+                txt = open(cand, encoding="utf-8", errors="replace").read().strip()
+            except Exception:  # noqa: BLE001 — unreadable is not a signal
+                continue
+            if not txt:
+                continue
+            para = txt.split("\n\n")[0].strip().replace("\n", " ")
+            if len(para) >= 20:
+                lines = ["  - %s" % para[:400]]
+                break
+    if not lines:
+        return None
+    _oblig_resurface_fired = True
+    return (_SEV_OBLIGATION,
+            "\n<gt-nudge reason=\"obligation_resurface\">\nGT: before you submit, the "
+            "issue requires the following -- re-read it against your patch and confirm "
+            "it is handled (passing local tests does NOT prove the requirement is met):\n%s\n"
+            "</gt-nudge>" % "\n".join(lines))
 
 
 def _obligation_nudge_block() -> tuple[float, str] | None:
@@ -4699,6 +4958,67 @@ def _consensus_collect(rel: str) -> None:
         pass
 
 
+def _consensus_scope_block(rel: str) -> str:
+    """Stage-4 consensus DELIVERY — the in-scope map at the ACTIONABLE moment.
+
+    THE GAP THIS CLOSES (2026-06-24): on the LIVE oracle route `_consensus_collect`
+    builds `_consensus_scope` membership SILENTLY and the only consensus block that
+    reached the agent was `_scope_completeness_block`, gated to a rare submit-time
+    review transition (edited + 3-turn pause + an unedited focus-anchored sibling).
+    The standalone first-view `_consensus_block` is on the DEAD legacy route (below
+    the oracle `return`). So the orientation role consensus plays on OpenHands — "here
+    is the graph-connected SCOPE around the file you are working on" — had NO live
+    delivery path. This producer restores it on the live route as a Lane-A fact.
+
+    It delivers the graph-connected 1-hop neighbours of `rel` (the FACTS-ONLY
+    `_query_scope` set the collect pass already computed) the moment the agent EDITS
+    or VIEWS a file that IS in the established consensus scope — exactly when the map
+    helps it decide what else the fix touches.
+
+    Correct-or-quiet + no per-view spam:
+      * fires ONLY when `rel` is in `_consensus_scope` AND has ≥1 graph-connected
+        neighbour (an isolated file gets no scope claim — bug #7 parity);
+      * latched per (kind, rel) via `_seen` so it delivers ONCE per distinct file,
+        not per view (the retired per-view dump fired on EVERY view, unconditionally);
+      * Lane-A content-hash dedup (`_lane_a_deliver`) suppresses a byte-identical
+        re-send across files whose neighbour set coincides.
+    Language-agnostic: pure `_consensus_scope` / `_query_scope` membership, no language
+    keys. Returns '' (no delivery) on baseline, empty scope, or a latched repeat."""
+    if _GT_BASELINE or not _consensus_scope:
+        return ""
+    n = _norm_rel(rel)
+    if n not in _consensus_scope:
+        return ""  # the file the agent touched is not part of the GT scope
+    key = ("consensus_scope", n)
+    if key in _seen:
+        return ""  # once-per-file: never re-dump the same map (no per-view spam)
+    try:
+        scope = _query_scope(rel)
+    except Exception:  # noqa: BLE001 — correct-or-quiet, never break the loop
+        return ""
+    # NEIGHBOUR-path chokepoint parity + drop self.
+    neigh = [s for s in scope if _norm_rel(s) != n]
+    if not neigh:
+        return ""  # isolated file -> no scope claim (bug #7: no zero-content tag)
+    # Latch only on a REAL non-empty production (an empty block never consumes the
+    # one-shot, mirroring the gate's "consume the one-shot only on a real emit").
+    _seen.add(key)
+
+    def _short(p: str) -> str:
+        r = (p or "").replace("\\", "/")
+        return "/".join(r.split("/")[-2:]) if "/" in r else r
+
+    lines = [f"1. {_short(rel)} — in scope (you are working here)"]
+    for i, fp in enumerate(neigh[:4], 2):
+        lines.append(f"{i}. {_short(fp)} — graph-connected")
+    return (
+        f'\n<gt-scope files="{len(lines)}">\n'
+        + "\n".join(lines)
+        + "\nThese files are graph-connected in scope; GT has not confirmed a single "
+        "primary target — confirm the edit target with grep.\n</gt-scope>"
+    )
+
+
 def _verified_scope_component(edited: set[str]) -> set[str]:
     """The issue-anchored connected component reachable from the EDITED files via
     VERIFIED (FACTS-ONLY) edges — the correct denominator for a K-of-N
@@ -4937,6 +5257,30 @@ def _augment_output(action, out) -> None:
             lane_a: list[tuple[str, str]] = []
             _krel = ""  # bound on post_edit; hardening for the guarded uses below
             _kkind, _kf = _classify(cmd)
+            # SUBPROCESS-WRITE CATCH-ALL: _classify/_edit_target is a STRING
+            # parser blind to a write done INSIDE a subprocess (`python3 x.py`
+            # writing Lexer.js). When the fast path found NO edit target,
+            # mtime-diff the tracked source tree; if a source file actually
+            # changed, route the FIRST changed file through the SAME post_edit
+            # path. Only on a fast-path miss -> no double-fire. Correct-or-quiet:
+            # a non-write command changes nothing -> empty -> no fallback edit.
+            if _kkind != "post_edit":
+                try:
+                    _chg = _subprocess_write_targets(_root())
+                except Exception:  # noqa: BLE001 — fallback isolated
+                    _chg = []
+                if _chg:
+                    _kkind, _kf = "post_edit", _chg[0]
+                    print("[GT_META] subprocess_write_fallback n=%d f=%s"
+                          % (len(_chg), _kf), file=sys.stderr, flush=True)
+            else:
+                # fast path already credited this edit; keep the baseline in
+                # lock-step so the NEXT command diffs against post-edit state
+                # (avoids re-reporting this same change on the next command).
+                try:
+                    _subprocess_write_targets(_root())
+                except Exception:  # noqa: BLE001
+                    pass
             if _kkind == "post_edit" and _kf:
                 _source_edit_count += 1
                 _kroot = _root()
@@ -5001,6 +5345,19 @@ def _augment_output(action, out) -> None:
                     _la_cochange = ""
                 lane_a.append(("l3.contract", _la_contract))
                 lane_a.append(("l3.cochange", _la_cochange))
+                # consensus DELIVERY on EDIT (2026-06-24): when the agent edits a file
+                # that is part of the established GT scope, deliver the in-scope graph
+                # map alongside the edit-bound contract — the actionable moment for the
+                # "what else does this fix touch" orientation. Same Lane-A fact: isolated,
+                # content-hash deduped, latched once-per-file (no spam). Correct-or-quiet:
+                # off-scope / isolated / latched / file never collected -> '' -> dropped.
+                try:
+                    _csb_e = _consensus_scope_block(_krel)
+                except Exception:  # noqa: BLE001 — Lane A producer isolated
+                    print("[GT_META] producer_exception kind=consensus.scope_map",
+                          file=sys.stderr, flush=True)
+                    _csb_e = ""
+                lane_a.append(("consensus.scope_map", _csb_e))
             else:
                 if _oracle_edited_rels:
                     _oracle_nonedit_streak += 1
@@ -5009,6 +5366,19 @@ def _augment_output(action, out) -> None:
                 _crel = _to_repo_rel(_kf, _croot)
                 # consensus: collect scope membership QUIETLY (re-routed).
                 _consensus_collect(_crel)
+                # consensus DELIVERY (2026-06-24): the in-scope graph map reaches the
+                # agent the moment it VIEWS a file that is part of the GT scope — a
+                # Lane-A fact (always-on, isolated, content-hash deduped), latched
+                # once-per-file (no per-view spam). Restores the OH orientation role
+                # the dead legacy `_consensus_block` used to play. Correct-or-quiet:
+                # off-scope / isolated / latched -> '' -> Lane A drops it.
+                try:
+                    _csb = _consensus_scope_block(_crel)
+                except Exception:  # noqa: BLE001 — Lane A producer isolated
+                    print("[GT_META] producer_exception kind=consensus.scope_map",
+                          file=sys.stderr, flush=True)
+                    _csb = ""
+                lane_a.append(("consensus.scope_map", _csb))
             # tested EVIDENCE tokens (plan §5.2 "tested?"): a real test-runner
             # invocation whose output carries an observed pass/fail result —
             # mirrors gt_oracle_sense.DerivedState.tested_tokens (tokens of the
@@ -5148,6 +5518,10 @@ def _augment_output(action, out) -> None:
                           file=sys.stderr, flush=True)
                     _l5nt = ""
                 cands.append((_SEV_NUDGE_VERIFY, "l5.no_test", _l5nt, True))
+                # (Obligation RE-SURFACE lives in the post_edit block below as a
+                # DIRECT delivery, Oracle-phase-timed. Removed the duplicate gated
+                # cands.append that fired here and burned the latch BEFORE the direct
+                # path could deliver -> cattrs12 fired=True but delivered=0. 2026-06-23)
                 # DELIVERY-ENGINE STAGE 3 — behavioral detectors over the Stage-1
                 # signals (TIDE degenerate loop; TRAJEVAL coherence collapse).
                 try:
@@ -5167,6 +5541,55 @@ def _augment_output(action, out) -> None:
                         _cc = None
                     if _cc is not None:
                         cands.append((_cc[0], "detect.coherence", _cc[1], True))
+                    # Semantic-drift (2026-06-23): the now-WIRED semantic_check —
+                    # a deterministic guard/return-deletion observation -> insight.
+                    try:
+                        _sd = _semantic_drift_candidate(_krel)
+                    except Exception:  # noqa: BLE001 — one producer must not kill the gate
+                        print("[GT_META] producer_exception kind=semantic_drift",
+                              file=sys.stderr, flush=True)
+                        _sd = None
+                    if _sd is not None:
+                        cands.append((_sd[0], "semantic_drift", _sd[1], True))
+                    # Obligation RE-SURFACE via the PROVEN post_edit channel
+                    # (2026-06-23): the every-turn test-pass trigger never reached
+                    # the agent on cattrs7/8 (8 passes, 0 fire); coherence_collapse
+                    # DOES deliver here. Gate: the agent edited a REAL repo-source
+                    # file (not /tmp scratch) AND has already run tests (a refinement
+                    # near submit), or budget is nearly spent. Latch -> once.
+                    # The agent builds in /tmp scratch + integrates via cp (0 repo
+                    # edits mid-run, git diff empty), so a repo-source gate is dead.
+                    # Fire once after the agent has TESTED (a candidate exists) or
+                    # after enough actions (the guaranteed net). Diagnostic logs every
+                    # post_edit so the gate state is visible.
+                    # TIMING via the ORACLE (2026-06-23): the architecture's
+                    # derive_phase IS the timing mechanism, not a hand-rolled budget
+                    # gate. Fire when the phase is VERIFY (edited + tested/stopped ->
+                    # a candidate is being checked) or SUBMIT (edited + budget past
+                    # SUBMIT_BUDGET_FRACTION) -- the decision moment when the
+                    # requirement has gone stale. The latch -> once.
+                    _ph = _detect_phase()
+                    try:
+                        open("/logs/gt_resurf_debug.txt", "a").write(
+                            "post_edit kf=%s phase=%s tested=%s acc=%d budget=%.2f fired=%s\n" % (
+                                _kf, getattr(_ph, "value", _ph), _test_evidence_seen,
+                                _action_count, _budget_now, _oblig_resurface_fired))
+                    except Exception:  # noqa: BLE001 — diagnostic best-effort
+                        pass
+                    if _ph in (Phase.VERIFY, Phase.SUBMIT):
+                        try:
+                            _obr = _obligation_resurface_candidate()
+                        except Exception:  # noqa: BLE001 — one producer must not kill the gate
+                            print("[GT_META] producer_exception kind=obligation.resurface",
+                                  file=sys.stderr, flush=True)
+                            _obr = None
+                        if _obr is not None:
+                            # DIRECT delivery (bypass the steer gate): the once-per-task
+                            # requirement reminder is always-needed context (a Lane A
+                            # fact), NOT a competing steer. The gate's <=1-steer/turn
+                            # rule suppressed it live (cattrs10: latch fired=True, 0
+                            # delivered). The latch guarantees one delivery.
+                            out["output"] = (out.get("output") or "") + _obr[1]
                 # VERIFICATION HORIZON (Stage C H2): budget-aware self-verify candidate
                 try:
                     _vh = _verification_horizon_candidate()

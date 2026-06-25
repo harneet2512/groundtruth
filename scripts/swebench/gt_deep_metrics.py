@@ -1137,6 +1137,37 @@ def _trajectory_layer_fallback(traj: dict) -> tuple[dict, list[str], float]:
     return per_layer, active, total_tokens
 
 
+def _from_graph_cert(cert_dir: str) -> dict:
+    """Substrate fallback when graph.db is NOT present locally (the run uploads the
+    6 KB certs, not the multi-MB graph.db). graph_certificate.json carries the same
+    census the DB query would yield — so the §4.1 substrate fields populate from the
+    uploaded cert instead of being silently 0 (the deep-metrics 'blindness')."""
+    if not cert_dir:
+        return {}
+    for cand in (os.path.join(cert_dir, "graph_certificate.json"),
+                 os.path.join(cert_dir, "gt", "graph_certificate.json")):
+        if not os.path.exists(cand):
+            continue
+        c = _load_json(cand) or {}
+        edges = int(c.get("edges_count", 0) or 0)
+        det = int(c.get("deterministic_edge_count", 0) or 0)
+        rmd = c.get("resolution_method_distribution", {}) or {}
+        return {
+            "graph_nodes": int(c.get("nodes_count", 0) or 0),
+            "graph_edges": edges,
+            "verified_edge_count": det,
+            "verified_edge_ratio": d8(det / edges) if edges else 0.0,
+            "fts5_row_count": int(c.get("fts5_row_count", 0) or 0),
+            "fts5_real_query_result_count": (
+                int(c.get("fts5_row_count", 0) or 0) if c.get("fts5_match_probe_ok") else 0),
+            "assertion_count": int(c.get("assertions_count", 0) or 0),
+            "data_flow_row_count": int(c.get("data_flow_count", 0) or 0),
+            "lsp_enriched_edge_count": int(rmd.get("lsp", 0) or 0),
+            "graph_substrate_source": "graph_certificate.json",
+        }
+    return {}
+
+
 def build(task: str, results_dir: str, log_path: str = "",
           db_path: str = "", pipeline_arg: str = "") -> dict:
     summ = _load_json(f"/tmp/gt_run_summary_{task}.json") or {}
@@ -1274,6 +1305,11 @@ def build(task: str, results_dir: str, log_path: str = "",
 
     # --- TASK 2: required spec-F field set ----------------------------------
     graph = _from_graph_db(db_resolved)
+    if not graph.get("graph_nodes"):
+        # graph.db absent locally — read the uploaded graph_certificate.json instead.
+        _cert_fb = _from_graph_cert(os.environ.get("GT_CERT_DIR", "") or results_dir)
+        if _cert_fb.get("graph_nodes"):
+            graph.update(_cert_fb)
     lsp = _from_lsp(log_text, db_resolved)
     embedder = _from_embedder(embedder_cert_path)
     env_snap = _env_snapshot()
