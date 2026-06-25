@@ -380,7 +380,18 @@ def _baked_lsp_problems() -> list[str]:
         # Fail-closed to the known set if config can't be imported (still NOT benchmark-shaped).
         commands = ["pyright-langserver", "typescript-language-server", "gopls",
                     "rust-analyzer", "jdtls"]
+    # A substrate MAY deliberately omit a language's server (jdtls/Java was dropped from
+    # docker/Dockerfile.gt-substrate 2026-06-20 — zero Java in the 113 tasks, ~500MB saved;
+    # config.py keeps the entry because the PRODUCT still supports Java when jdtls is present).
+    # The image declares its omissions via GT_PROOF_OMIT_LSP so the portability gate stays
+    # honest: assert only the servers THIS image bakes, not every language config can dispatch.
+    # Generalized (any server name, env-driven); default mirrors the Dockerfile's documented
+    # removal so the gate matches the standard build. resolve.py dispatches by extension, so an
+    # omitted server is correct-or-quiet at spawn time — never a wrong-context risk.
+    _omit = {s.strip() for s in os.environ.get("GT_PROOF_OMIT_LSP", "jdtls").split(",") if s.strip()}
     for cmd in commands:
+        if cmd in _omit:
+            continue
         cands = aliases.get(cmd, (cmd,))
         if not any(shutil.which(c) for c in cands):
             problems.append(f"LSP server {cmd!r} not baked on PATH "
