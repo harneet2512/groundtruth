@@ -1059,7 +1059,7 @@ jobs:
           docker ps -aq 2>/dev/null | xargs -r docker rm -f >/dev/null 2>&1 || true
           PIER_RC=124
           _ENV_ATTEMPTS="${GT_ENV_START_ATTEMPTS:-3}"
-          _ENV_WATCH_TICKS="${GT_ENV_START_WATCH_TICKS:-90}"   # 90 * 10s = 900s = 15min window
+          _ENV_WATCH_TICKS="${GT_ENV_START_WATCH_TICKS:-180}"  # 180 * 10s = 1800s = 30min window (was 90/15min; arktype/TS consistently timed out at 900s with 1.3GB free — the SLIM Dockerfile is instant but docker compose overlay extraction is slow on heavy TS images)
           for _A in $(seq 1 "$_ENV_ATTEMPTS"); do
           echo "[ENV-START] attempt $_A/$_ENV_ATTEMPTS — pier (bg) + container watcher (window=$((_ENV_WATCH_TICKS*10))s)"
           : > trial_output.log
