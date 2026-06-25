@@ -176,7 +176,7 @@ jobs:
             dh_login $(( (i % 2) + 1 ))
             OK=0
             for a in 1 2 3 4; do
-              if docker pull "$UP:$TAG" >/dev/null 2>&1; then OK=1; break; fi
+              if docker pull "$UP:$TAG" 2>&1 | tail -3; then OK=1; break; fi
               echo "::warning::pull $TAG attempt $a failed (rate limit?) — backing off"; sleep $((a*15))
               # swap account on retry in case THIS account hit its 6hr cap
               dh_login $(( ((i+a) % 2) + 1 ))
@@ -189,10 +189,10 @@ jobs:
             printf 'FROM %s\nLABEL org.opencontainers.image.source=%s\n' "$UP:$TAG" "$SRC_REPO" \
               | docker build -q -t "$GH:$TAG" - >/dev/null 2>&1 \
               || docker tag "$UP:$TAG" "$GH:$TAG"   # fallback: plain retag if build hiccups
-            if docker push "$GH:$TAG" >/dev/null 2>&1; then
+            if docker push "$GH:$TAG" 2>&1 | tee /tmp/push_out.txt | tail -3; then
               echo "  [done] $TAG -> $GH:$TAG"; done=$((done+1))
             else
-              echo "::error::push FAILED $GH:$TAG"; failed=$((failed+1))
+              echo "::error::push FAILED $GH:$TAG — $(cat /tmp/push_out.txt | tail -5)"; failed=$((failed+1))
             fi
             # (4) Reclaim runner disk immediately (images are ~1-2 GB each; runner has ~14 GB).
             docker rmi "$UP:$TAG" "$GH:$TAG" >/dev/null 2>&1 || true
