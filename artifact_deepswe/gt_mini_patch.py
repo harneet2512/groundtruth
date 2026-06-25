@@ -2827,6 +2827,21 @@ def _cochange_block(rel: str) -> str:
         if con is None:
             return ""
         nfp = _norm_fp(rel)
+        # PATH-FRAME FIX (2026-06-25): _edit_target returns a bare filename
+        # ("node.go") but the cochanges table stores repo-relative paths
+        # ("ast/node.go") from git log --name-only. An exact WHERE match on
+        # the bare name always misses. Resolve via the nodes table (which
+        # stores the same repo-relative frame as cochanges).
+        if "/" not in nfp:
+            try:
+                row = con.execute(
+                    "SELECT file_path FROM nodes WHERE file_path LIKE ? LIMIT 1",
+                    ("%" + nfp,),
+                ).fetchone()
+                if row:
+                    nfp = _norm_fp(row[0])
+            except Exception:  # noqa: BLE001
+                pass
         rows: list[tuple[str, int]] = []
         try:
             # EXACT normalized-relpath match (bug #1): basename-LIKE attributed
