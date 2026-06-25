@@ -2827,21 +2827,28 @@ def _cochange_block(rel: str) -> str:
         if con is None:
             return ""
         nfp = _norm_fp(rel)
-        # PATH-FRAME FIX (2026-06-25): _edit_target returns a bare filename
-        # ("node.go") but the cochanges table stores repo-relative paths
-        # ("ast/node.go") from git log --name-only. An exact WHERE match on
-        # the bare name always misses. Resolve via the nodes table (which
-        # stores the same repo-relative frame as cochanges).
-        if "/" not in nfp:
-            try:
+        # PATH-FRAME RESOLUTION (generalized): the agent's edit path can be
+        # bare ("Lexer.js"), repo-relative ("lib/lexer/Lexer.js"), or prefixed
+        # ("gt_artifacts/src/lib/lexer/Lexer.js"). The cochanges table stores
+        # repo-relative paths from git log. Resolve ANY shape to the graph's
+        # frame: try exact match in cochanges first; on miss, suffix-match via
+        # the nodes table (same pattern as _resolve_frame in _evidence_body).
+        try:
+            hit = con.execute(
+                "SELECT 1 FROM cochanges WHERE file_a = ? OR file_b = ? LIMIT 1",
+                (nfp, nfp),
+            ).fetchone()
+            if not hit:
+                # exact miss — resolve via nodes table suffix-match
+                suffix = nfp.rsplit("/", 1)[-1] if "/" in nfp else nfp
                 row = con.execute(
                     "SELECT file_path FROM nodes WHERE file_path LIKE ? LIMIT 1",
-                    ("%" + nfp,),
+                    ("%/" + suffix if "/" not in suffix else "%" + suffix,),
                 ).fetchone()
                 if row:
                     nfp = _norm_fp(row[0])
-            except Exception:  # noqa: BLE001
-                pass
+        except Exception:  # noqa: BLE001
+            pass
         rows: list[tuple[str, int]] = []
         try:
             # EXACT normalized-relpath match (bug #1): basename-LIKE attributed
