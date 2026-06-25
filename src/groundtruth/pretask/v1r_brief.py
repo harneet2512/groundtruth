@@ -1792,7 +1792,29 @@ def _render_obligations_block(
             identifier_tokens as _id_tokens,
             passes_relevance_gate as _rel_gate,
         )
-        spec = _extract_spec(issue_text)
+        # Row-11 fix (gt_math_oh 2026-06-25): read the ALREADY-PERSISTED structured
+        # obligations from /tmp/gt_issue_anchors.json (written by generate_v1r_brief
+        # at :3342 via spec.to_serializable()). The DeepSWE path reads these via
+        # load_obligations; the OH path re-extracted thin — producing weaker output.
+        # Bridge: try the persisted file first; fall back to live extraction.
+        spec = None
+        try:
+            import json as _obl_json
+            with open("/tmp/gt_issue_anchors.json", encoding="utf-8") as _obl_f:
+                _obl_data = _obl_json.load(_obl_f)
+            _persisted = _obl_data.get("obligations") or []
+            if _persisted:
+                from groundtruth.pretask.spec import Obligation, IssueSpec
+                _obls = [Obligation(
+                    verbatim_text=o.get("verbatim_text", ""),
+                    kind=o.get("kind", "behavior"),
+                ) for o in _persisted if isinstance(o, dict) and o.get("verbatim_text")]
+                if _obls:
+                    spec = IssueSpec(obligations=_obls)
+        except Exception:
+            pass
+        if spec is None:
+            spec = _extract_spec(issue_text)
     except Exception:
         return []
     if not spec.obligations:
@@ -1951,6 +1973,12 @@ def render_brief(
         # interface facts the agent must preserve — raises / guards / return shape.
         if f.contract_props:
             lines.append(_cap(f"   Contract: {f.contract_props}"))
+        # Row-9 fix (gt_math_oh 2026-06-25): siblings/Context rendered LAST
+        # (after Callers/Calls/Spec) and was budget-cut every time (600 tokens).
+        # Move it up — consistency (sibling functions in the same class/module)
+        # is the same importance tier as contract (what to preserve).
+        if f.pattern:
+            lines.append(_cap(f"   Context: {f.pattern}"))
         if f.spec and issue_text:
             # Relevance gate: spec must overlap with issue terms to avoid red herrings
             _spec_lower = f.spec.lower()
@@ -1992,8 +2020,6 @@ def render_brief(
             lines.append(_cap(f"   Spec: {f.spec}"))
         if f.contract:
             lines.append(_cap(f"   Callers: {f.contract}"))
-        if f.pattern:
-            lines.append(_cap(f"   Context: {f.pattern}"))
         if f.co_changes:
             # SWAP-INVARIANT (run16 leak): drop test files from the co-change list — "Also changes:
             # …/test_plots_matplotlib.py" surfaces a test reference. Non-test co-changes are kept.
