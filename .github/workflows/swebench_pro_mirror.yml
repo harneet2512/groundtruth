@@ -168,10 +168,15 @@ jobs:
             TAG="$(echo "$TAG" | tr -d '\r' | xargs)"
             [ -n "$TAG" ] || continue
             i=$((i+1))
-            # (1) Idempotent skip: already mirrored?
-            if docker manifest inspect "$GH:$TAG" >/dev/null 2>&1; then
-              echo "  [skip] $TAG already on GHCR"; skipped=$((skipped+1)); continue
-            fi
+            # (1) Idempotent skip DISABLED: `docker manifest inspect` resolves
+            # against Docker Hub (jefzda) after dh_login overwrites GHCR auth,
+            # producing false-positives that skip every image. Force pull+push
+            # until the GHCR package is populated, then re-enable with an
+            # API-based check. This is safe: docker push is itself idempotent
+            # (re-pushing an identical image is a no-op at the registry layer).
+            # if docker manifest inspect "$GH:$TAG" >/dev/null 2>&1; then
+            #   echo "  [skip] $TAG already on GHCR"; skipped=$((skipped+1)); continue
+            # fi
             # (2) Pull upstream with PAT rotation (alternate accounts per image) + retry.
             dh_login $(( (i % 2) + 1 ))
             OK=0
