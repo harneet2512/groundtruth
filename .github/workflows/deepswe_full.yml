@@ -832,8 +832,7 @@ jobs:
         # the env names actually exists in the container (the substrate graph is the ONE graph;
         # ro => the in-container patch can never mutate/rebuild it — no divergent reindex).
         run: |
-          # [LIVE LOG BRIDGE] tee this job's FULL output to a file + a daemon force-pushes it to
-          # gha-live-logs/<task> every 20s so it can be read MID-RUN (read: scripts/ci/read_live.sh <task>).
+          # Live log bridge + dockerd health check
           _LIVE_TASK="${{ matrix.task }}"; _STEPLOG="/tmp/gha_step_${_LIVE_TASK}.log"
           exec > >(tee -a "$_STEPLOG") 2>&1
           GH_LIVE_TOKEN="${{ secrets.GITHUB_TOKEN }}" bash scripts/ci/live_log_push.sh "$_LIVE_TASK" "$_STEPLOG" "$(pwd)/trial_output.log" 20 >/dev/null 2>&1 &
@@ -844,12 +843,10 @@ jobs:
           echo "HOST  GT_CERT_DIR=${GT_CERT_DIR:-<unset>}  GT_HOST_GRAPH_DB=${GT_HOST_GRAPH_DB:-<unset>}"
           echo "GT_PROOF_MODE=${GT_PROOF_MODE:-<unset>}  GT_CONTAINERIZED=${GT_CONTAINERIZED:-<unset>}  GT_SUBSTRATE_DIGEST=${GT_SUBSTRATE_DIGEST:-<unset>}"
 
-          # In-container substrate dir (mount target). The host substrate dir is /tmp/gt
-          # (written by the substrate-proof step); the container sees it as /gt_artifacts:ro.
+          # In-container paths (host /tmp/gt -> /gt_artifacts:ro).
           GT_C_ARTIFACTS=/gt_artifacts
           HOST_ARTIFACTS="${GT_CERT_DIR:-/tmp/gt}"
-          # Transitional no-substrate path (require_pinned_substrate=0): the proof step
-          # exited 0 without creating /tmp/gt — an absent bind source would fail compose.
+          # Ensure bind source exists.
           mkdir -p "${HOST_ARTIFACTS}"
 
           PROOF_STATE=$(python3 - <<'PY'
@@ -869,12 +866,7 @@ jobs:
             exit 1
           fi
 
-          # SPEED-OPT E: pre-stage all GT files on the host and bind-mount /opt/gt:ro into
-          # the container.  This replaces 30 base64-echo RUN layers (12+ min per task) with
-          # a single host-side cp + a 2-step install (import-chain patch + self-test ~10s).
-          # GT_MOUNT_MODE=1 tells gt_agent._inject_steps() to skip the b64-injection path.
-          # The .pth / default.py writes go into container-internal site-packages — not
-          # /opt/gt — so the :ro mount is correct.
+          # SPEED-OPT E: host-side /opt/gt:ro mount (replaces 30 b64 layers).
           HOST_GT_INJECT=/tmp/gt_inject/opt/gt
           mkdir -p "${HOST_GT_INJECT}"
           mkdir -p "${HOST_GT_INJECT}/groundtruth"
@@ -884,7 +876,6 @@ jobs:
           cp artifact_deepswe/gt_oracle_sense.py "${HOST_GT_INJECT}/" 2>/dev/null || true
           cp artifact_deepswe/phase_policy.py   "${HOST_GT_INJECT}/" 2>/dev/null || true
           # Product packages (groundtruth.{runtime,delivery,pretask}) — the single-source
-          # fact-filter modules gt_mini_patch.py imports at module scope.
           for pkg in runtime delivery pretask; do
             if [ -d "src/groundtruth/${pkg}" ]; then
               mkdir -p "${HOST_GT_INJECT}/groundtruth/${pkg}"
@@ -896,13 +887,6 @@ jobs:
           echo "GT inject staged: $(find "${HOST_GT_INJECT}" -name '*.py' | wc -l) Python files"
 
           # L6-FRESH: stage the gt-index binary into /opt/gt so the in-container post-edit
-          # reindex (GT_L6_FRESH, default-off in code) can refresh the WRITABLE work-copy.
-          # PORTABILITY (RC-13): task containers run older-glibc (Debian) or musl (Alpine),
-          # so a naive ubuntu CGO_ENABLED=1 build (glibc 2.39) fails to EXEC there and L6
-          # silently no-ops. Build a STATIC musl binary (runs on glibc AND musl) WITH FTS5
-          # (the substrate graph.db carries nodes_fts). Correct-or-quiet: any failure leaves
-          # no binary -> _invalidate_on_edit falls back AND emits L6_REINDEX_FAILED /
-          # L6_NO_REINDEX_BINARY telemetry (a glibc/musl mismatch is diagnosable, not silent).
           command -v musl-gcc >/dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y musl-tools; } >/dev/null 2>&1 || true
           if command -v musl-gcc >/dev/null 2>&1 && command -v go >/dev/null 2>&1 && [ -d gt-index ]; then
             (cd gt-index && CGO_ENABLED=1 CC=musl-gcc go build -tags 'netgo,osusergo,sqlite_fts5' \
@@ -915,12 +899,6 @@ jobs:
           fi
 
           # Bind-mount the host substrate dir into the task container READ-ONLY. JSON is the
-          # pier --mounts-json contract (ServiceVolumeConfig: type/source/target/read_only).
-          # FIX 3 (2026-06-11): a SECOND, WRITABLE mount (/tmp/gt_out -> /gt_out) carries the
-          # oracle's 8-dp suppression telemetry (GT_ORACLE_EVENTS) out of the task container —
-          # it was written to the in-container /tmp and lost on every prior run. chmod 777:
-          # the task-image user is arbitrary and must be able to append.
-          # SPEED-OPT E: THIRD mount — /tmp/gt_inject/opt/gt -> /opt/gt:ro (pre-staged GT files).
           HOST_GT_OUT=/tmp/gt_out
           mkdir -p "${HOST_GT_OUT}" && chmod 777 "${HOST_GT_OUT}"
           MOUNTS_JSON="[{\"type\":\"bind\",\"source\":\"${HOST_ARTIFACTS}\",\"target\":\"${GT_C_ARTIFACTS}\",\"read_only\":true},{\"type\":\"bind\",\"source\":\"${HOST_GT_OUT}\",\"target\":\"/gt_out\",\"read_only\":false},{\"type\":\"bind\",\"source\":\"/tmp/gt_inject/opt/gt\",\"target\":\"/opt/gt\",\"read_only\":true}]"
@@ -928,46 +906,23 @@ jobs:
           echo "mounts-json: ${MOUNTS_JSON}"
 
           # BUG#1+#2 FIX (single-source de-drift): source the canonical --ae block so the
-          # structural edit-risk axis (GT_VERIFY_STRUCTURAL_RISK / GT_VERIFY_RISK_TRIGGER) and
-          # the FULL deep-telemetry trio (GT_ORACLE_EVENTS + GT_RUNTIME_LEDGER + GT_HOOK_FIRE_COUNTS)
-          # reach the in-container agent. Without it the in-container code DEFAULTS the risk axis
-          # OFF (gt_mini_patch.py:3801) and the ledger/fire-count sinks into the ephemeral
-          # container /tmp (gt_mini_patch.py:3515,3569) where they die with it — the run stayed
-          # green over a DARK lever + LOST telemetry. GT_C_OUT=/gt_out points the block's three
-          # sinks at the writable host mount built above (recovered in Collect). This is the
-          # SAME file codespace_deepswe_run.sh sources -> codespace + full can no longer drift.
           export GT_C_OUT=/gt_out
           # shellcheck source=artifact_deepswe/gt_integration/gt_ae_block.sh
           source artifact_deepswe/gt_integration/gt_ae_block.sh
           echo "GT_AE_ARGS (block): ${GT_AE_ARGS[*]}"
 
           # L6-FRESH activation: point the in-container reindex at the staged binary and
-          # enable the writable work-copy path (gt_mini_patch._ensure_l6_work_copy -> _db_path,
-          # in-container). The HOST witness still fingerprints the READ-ONLY mount
-          # (GT_HOST_GRAPH_DB), so hook==post-LSP parity holds; only the per-turn pillars
-          # read the fresh copy.
           GT_AE_ARGS+=(--ae "GT_INDEX_BIN=/opt/gt/gt-index" --ae "GT_L6_FRESH=1")
 
           # Forward the SUBSTRATE-CONSUME env into the container, pointing at /gt_artifacts.
-          # GT_FORBID_PREBUILT_GRAPH + GT_PORTABLE_SUBSTRATE + GT_PROOF_MODE/GT_CONTAINERIZED
-          # make the in-container pillars consume-or-fail-closed. L6 reindex no longer
-          # mutates the authoritative mount: under GT_L6_FRESH (set below) it refreshes a
-          # WRITABLE /tmp work-copy — the witness fingerprints the untouched mount, parity holds.
-          # P0.1-b: pipefail + ${PIPESTATUS[0]} (the swebench_30task pattern) — without it
-          # `pier ... | tee` returned tee's 0 and a swallowed adapter raise stayed GREEN.
           set +e
           set -o pipefail
           # Model routing: if the input model contains "MiniMax" or "tokenrouter",
-          # set litellm's OpenAI-compatible env so it routes through TokenRouter.
-          # Otherwise deepseek/other models use their native litellm provider.
           INPUT_MODEL="${{ inputs.model }}"
           if echo "$INPUT_MODEL" | grep -qiE "minimax|tokenrouter"; then
             export OPENAI_API_KEY="${TOKENROUTER_API_KEY}"
             export OPENAI_API_BASE="${TOKENROUTER_API_BASE}"
             # FIX: forward the model creds INTO the container. The agent runs in-container via
-            # pier; the gt_ae_block was sourced above (before this export) so it never captured
-            # OPENAI_*. Host export alone leaves in-container litellm with no creds -> 0 tokens
-            # (proven on the IBM box: adding these two --ae args unstuck the agent).
             GT_AE_ARGS+=(--ae "OPENAI_API_KEY=${OPENAI_API_KEY}" --ae "OPENAI_API_BASE=${OPENAI_API_BASE}")
             if ! echo "$INPUT_MODEL" | grep -q "^openai/"; then
               INPUT_MODEL="openai/${INPUT_MODEL}"
@@ -979,14 +934,6 @@ jobs:
             echo "=== Model routed via DeepSeek native: $INPUT_MODEL ==="
           fi
           # [OOM FIX 2026-06-16] RESMON ground truth (run 27650378892, expr): the GT HOST
-          # process balloons mem=2.8->15.3GB in ~100s during the agent phase (containers=0,
-          # disk 79GB free) and OOM-kills the 16GB runner -> exit 143, VM reclaimed, the
-          # if:always() upload never runs -> total_count=0, no trajectory. It is a HOST-process
-          # OOM, NOT a container OOM (so the F4 container cap does not reach it). Add swap from
-          # the ample free disk so the working set pages out instead of triggering the host
-          # OOM-killer; the runner then survives to upload the trajectory. Infra band-aid only —
-          # the PROPER fix is capping the agent-phase semantic encode (graph_localizer, the same
-          # class as the 2026-06-09 brief cap). Generalized, every task; no benchmark shape.
           if ! swapon --show 2>/dev/null | grep -q /gt_swap; then
             FREE_GB=$(df --output=avail -BG / | tail -1 | tr -dc '0-9')
             if [ "${FREE_GB:-0}" -ge 30 ]; then
@@ -999,7 +946,6 @@ jobs:
             fi
           fi
           # Inject memswap_limit=-1 into pier's compose so the eval container can page into the 24G
-          # host swap (safety net under the daemon fix). Resolve pier's base compose robustly.
           PIER_COMPOSE=$(python -c "from pier.environments.docker import COMPOSE_BASE_PATH; print(COMPOSE_BASE_PATH)" 2>/dev/null || true)
           if [ -z "$PIER_COMPOSE" ] || [ ! -f "$PIER_COMPOSE" ]; then
             PIER_COMPOSE=$(find / -name docker-compose-base.yaml -path '*pier*' 2>/dev/null | head -1)
@@ -1012,24 +958,15 @@ jobs:
             echo "::error::[OOMFIX] pier docker-compose-base.yaml NOT FOUND — cap NOT enforced, giants will OOM. PATH resolution broken."
           fi
           # (overlay2 + daemon constraints are now configured ONCE in the pre-proof step
-          # "Configure docker overlay2 ..." — NO mid-trial docker restart, so the GT mount
-          # set up by pier below is never disrupted. Substrate-prune removed as a red herring.)
-          # [DIAG 2026-06-13] Resource monitor — stream RAM/disk/container-count to the GHA log
-          # every 8s so the LAST reading before a runner-reclaim (exit 143) reveals whether the
-          # agent phase OOMs (RAM near cap) or fills the runner disk on heavy tasks (arktype/arcane).
           ( while true; do
               echo "[RESMON] $(date +%T)" \
                 "$(free -m 2>/dev/null | awk '/Mem:/{printf "mem=%d/%dMB", $3,$2}')" \
                 "$(df -m / 2>/dev/null | awk 'NR==2{printf "disk_used=%d/%dMB free=%dMB", $3,$2,$4}')" \
                 "containers=$(docker ps -q 2>/dev/null | wc -l | tr -d ' ')"
               # [DIAG 2026-06-20] top-RSS processes — answers leak-vs-capacity: WHICH process
-              # holds the GB when mem fills to the ceiling (pier/python agent vs an eval-container
-              # tsc/node vs gt). RSS in MB, host-side (eval-container procs show too, host kernel).
               echo "[RESTOP] $(ps -eo rss=,comm=,args= --sort=-rss 2>/dev/null | head -4 \
                 | awk '{rss=int($1/1024); $1=""; cmd=substr($0,2,70); printf "%dMB:%s | ", rss, cmd}')"
               # [MEMDIAG 2026-06-20] WHAT is in dockerd's 15GB? RssAnon=heap (real buffer/leak) vs
-              # RssFile=mmap'd layers (reclaimable page cache the kernel isn't dropping). + system
-              # meminfo (AnonPages vs Cached vs Slab) + docker's own accounting. Settles the root cause.
               DPID=$(pgrep -x dockerd 2>/dev/null | head -1)
               [ -n "$DPID" ] && echo "[MEMDIAG] dockerd($DPID): $(grep -E '^Vm(RSS|Swap)|^Rss(Anon|File|Shmem)' /proc/$DPID/status 2>/dev/null | awk '{printf "%s=%s%s ",$1,$2,$3}')"
               echo "[MEMDIAG] meminfo: $(grep -E '^(MemTotal|MemFree|MemAvailable|Cached|AnonPages|Slab|Mapped):' /proc/meminfo 2>/dev/null | awk '{printf "%s=%dMB ",$1,int($2/1024)}')"
@@ -1038,8 +975,6 @@ jobs:
           _RESMON_PID=$!
           trap 'kill "$_RESMON_PID" 2>/dev/null' EXIT
           # [ENV-START FIX] Pre-pull the task image so the slow overlay2+throttle EXTRACT happens
-          # OUTSIDE pier's timed --env docker startup (else a giant crosses pier's start timeout ->
-          # EnvironmentStartTimeoutError, the goreleaser blip). Best-effort; a miss -> pier pulls it.
           echo "[PREPULL] ensuring task image is local before pier env-start: ${{ matrix.image }}"
           if docker image inspect "${{ matrix.image }}" >/dev/null 2>&1; then
             echo "[PREPULL] task image ALREADY LOCAL (GHCR mirror + tag from the proof) — zero ECR contact"
@@ -1051,13 +986,10 @@ jobs:
           # [ENV-START FIX] FROM pre-built image, not a from-scratch rebuild (the OOM-hang). See script.
           bash scripts/ci/slim_task_dockerfile.sh "${{ matrix.task }}" "${{ matrix.image }}"
           # [COMPOSE PULL-NEVER SHIM] pier's `docker compose up` re-pulls the task image from flaky
-          # ECR though it's local (GHCR mirror+tag, substrate_proof.sh:130). A `docker` PATH shim
-          # forces `up --pull never` + no-ops a standalone `compose pull` so compose uses the local image.
           bash scripts/ci/install_compose_shim.sh
           export PATH="/tmp/gt-shim:$PATH"
           echo "[gt-shim] active; resolved=$(command -v docker)"
           # [ENV-START FAIL-FAST + RETRY] pier (bg) + watch docker ps; no container in 900s -> dump
-          # docker state + kill + retry (3x). PIER_RC from the attempt that started. set +e for the loop.
           set +e
           docker ps -aq 2>/dev/null | xargs -r docker rm -f >/dev/null 2>&1 || true
           PIER_RC=124
@@ -1120,9 +1052,6 @@ jobs:
           kill "$_PIER_PID" 2>/dev/null; sleep 5; kill -9 "$_PIER_PID" 2>/dev/null
           pkill -9 -f "pier run" 2>/dev/null || true
           # [CLEANUP FIX] pier provisions via `docker compose up`; killing pier alone LEAKS the
-          # compose children (diag proved them accumulating 1->2->3 across attempts). Kill the
-          # compose/swerex procs + remove all containers + prune networks so each retry is a CLEAN
-          # slate (a leaked half-up compose can hold the project network/lock + poison the next try).
           pkill -9 -f "docker.compose|docker-compose|swerex" 2>/dev/null || true
           docker ps -aq 2>/dev/null | xargs -r docker rm -f >/dev/null 2>&1 || true
           docker container prune -f >/dev/null 2>&1 || true
@@ -1134,28 +1063,16 @@ jobs:
           echo "=== Trial complete (pier rc=$PIER_RC) ===" | tee -a trial_output.log
           echo "PIER_EXIT_CODE=$PIER_RC" >> trial_output.log
           # FAIL-LOUD on a pier USAGE/ARG error (agent never ran) — a click arg error is a workflow
-          # bug, not an agent outcome (the `|| true` above keeps a legit agent CRASH non-fatal).
           if grep -qE "No such option|Usage: pier run|Error: Invalid value|Try 'pier run --help'" trial_output.log; then
             echo "::error::PIER_USAGE_ERROR — pier rejected its arguments and never ran the agent (see trial_output.log). This is a workflow/flag bug, not an agent outcome."
             grep -E "No such option|Usage: pier run|Error:" trial_output.log | head -5
             exit 1
           fi
           # P0.1-b: pier SWALLOWS adapter exceptions into result files (exception_message in
-          # jobs/<ts>/<task>__*/result.json) — a DeepSweAdapterError can end the run with
-          # pier rc=0. Surface it: any DeepSweAdapterError in the jobs dir or the trial log
-          # fails the step with the DEEPSWE_ADAPTER_FAIL class (the witness step + the
-          # outcome classifier both key on that marker -> class GT, never silent green).
           if ! python3 scripts/swebench/adapter_error_scan.py jobs trial_output.log; then
             echo "DEEPSWE_ADAPTER_FAIL: adapter error found via structured result.json scan" | tee -a trial_output.log
           fi
           # F4: AGENT-CONTAINER OOM = a CLASSIFIED capacity kill (exit 137), not a silent SIGKILL.
-          # Detect 137 from pier rc OR the container exit in the trial log -> classify GT_AGENT_OOM.
-          # Correct-or-quiet: the rc=137 check catches pier's own OOM; the grep fallback
-          # keys ONLY on docker-container-OOM-specific markers (OOMKilled / exit code 137),
-          # never the bare 'SIGKILL'/'signal: killed' tokens — those can legitimately appear
-          # in a CLEAN run's tee'd trajectory (test output, dmesg reads) and would FALSE-POSITIVE
-          # a resolved task into INFRA, silently dropping it from the denominator (the worst
-          # direction for flip measurement; the proof-container branch keys on rc=137 alone).
           if [ "$PIER_RC" -eq 137 ] || grep -qE "OOMKilled|exit code 137|exited with code 137" trial_output.log; then
             echo "GT_AGENT_OOM: agent container hit the memory cap (rc/exit=137 — capacity kill, not logic)." | tee -a trial_output.log
           elif [ "$PIER_RC" -ne 0 ]; then
