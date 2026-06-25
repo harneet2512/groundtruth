@@ -5481,7 +5481,13 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     router_emitted=False,
                 )
                 print(f"[GT_TRACE] l3 router_suppressed, falling through to legacy path file={rel_p or event.path}", flush=True)
-            if _router_v2_pe_emit:
+            # Row-13 fix (gt_math_oh 2026-06-25): the L3 hook MUST run regardless
+            # of the router verdict — the invariant at :5261 says "the router NEVER
+            # suppresses L3 delivery." Previously this was `if _router_v2_pe_emit:`
+            # which SKIPPED the entire hook when the router said emit=False, violating
+            # the stated invariant and leaving L3 dark on 4/5 tasks. The router
+            # selects QUALITY (shadow/live path), not WHETHER to deliver.
+            if _router_v2_pe_emit or _v2_mode_pe in ("live", "off", "shadow"):
                 _write_router_v2_legacy_skip(
                     config,
                     trigger="on_edit",
