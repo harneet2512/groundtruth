@@ -2986,6 +2986,44 @@ def _exact_issue_named_files(
                 out.setdefault(fp, [])
                 if name not in out[fp]:
                     out[fp].append(name)
+        # CAUSE B (gt_math_oh diag, 2026-06-24): the issue often names the gold
+        # MODULE (file basename) not its defining SYMBOL — "leafonly plugin",
+        # "plugins.chzzk" name leafonly.py / chzzk.py, but the symbol is
+        # validate_leaf_only / class Chzzk, so the symbol loop above misses the
+        # file. Guarantee a file whose BASENAME STEM the issue names verbatim,
+        # under the SAME gates (generic/len/ambiguity) so it cannot flood. This
+        # is the GUARANTEE surface (force-promote-past-cut), distinct from the
+        # path-rescue recall in v7_4_brief.py:1322 which only seeds candidate_set.
+        _stem_files: dict[str, set[str]] = {}
+        for (fp,) in c.execute(
+            "SELECT DISTINCT file_path FROM nodes WHERE is_test=0 AND file_path IS NOT NULL"
+        ):
+            if not fp:
+                continue
+            stem = os.path.splitext(os.path.basename(str(fp).replace("\\", "/")))[0].lower()
+            if len(stem) < 5:                                   # short stems collide with prose
+                continue
+            if stem in _GENERIC_CODE_NAMES:                     # generic module names are never anchors
+                continue
+            # SELECTIVE: fire ONLY when the issue references the stem AS A MODULE/FILE
+            # (dotted path "plugins.chzzk", "<stem>.py", or "<stem> plugin/module"), NOT
+            # merely the bare word in prose. A bare-word match floods the guarantee on a
+            # long issue (8 files here) and the downstream _promote[:3] cap then drops the
+            # real gold. Module-reference is the specific "the issue names this file" signal.
+            if _re.search(
+                rf"{_re.escape(stem)}\.py\b|\.{_re.escape(stem)}\b|\b{_re.escape(stem)}\."
+                rf"|\b{_re.escape(stem)}\s+(?:plugin|module|file|script)\b"
+                rf"|\b(?:plugin|module|file|script)\s+{_re.escape(stem)}\b",
+                issue_text or "", _re.IGNORECASE,
+            ):
+                _stem_files.setdefault(stem, set()).add(fp)
+        for stem, files in _stem_files.items():
+            if len(files) > _MAX_FILES_PER_NAME:                # ambiguous stem -> not a specific anchor
+                continue
+            for fp in files:
+                out.setdefault(fp, [])
+                if stem not in out[fp]:
+                    out[fp].append(stem)
         c.close()
     except Exception:
         pass

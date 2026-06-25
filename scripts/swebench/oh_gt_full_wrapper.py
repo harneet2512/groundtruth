@@ -1255,9 +1255,18 @@ def _maybe_fire_presubmit_verify(config: GTRuntimeConfig, obs: Any, orig_run_act
             _ps_conn.close()
 
     config._presubmit_fired = True
+    # Row-18 fix (gt_math_oh diag 2026-06-24): NAME the edited files. The message
+    # previously reported only the COUNT, so an agent that tried gt_validate had no
+    # path and passed the literal "unknown" -> "nothing to validate". The exact
+    # paths are already in config._presubmit_edited_files at this point; surface them
+    # (capped) so the affected modules — and any gt_validate <file> — are concrete.
+    _edited = list(config._presubmit_edited_files)
+    _edited_str = ", ".join(_edited[:5]) + (f" (+{len(_edited) - 5} more)" if len(_edited) > 5 else "")
     text = (
         "[GT_VERIFY] You edited "
-        f"{len(config._presubmit_edited_files)} file(s). Before finishing, run the project's own "
+        f"{len(_edited)} file(s)"
+        + (f": {_edited_str}" if _edited else "")
+        + ". Before finishing, run the project's own "
         "test suite for the affected modules and confirm your change preserves the behavioral "
         "contract"
         + ((":\n" + "\n".join(contracts[:8])) if contracts else " (return shape, error handling).")
@@ -1867,27 +1876,23 @@ def _build_rescue_payload(config: GTRuntimeConfig, rescue_level: int = 0) -> str
     # a stronger signal for rescue redirection.
     top_cand = ""
     top_base = ""
-    # Check if agent has viewed files with GT evidence that are NOT
-    # in the consensus scope — if so, prefer the latest of those.
-    if config._gt_delivered_evidence_files:
-        _consensus_set = set(config._consensus_scope) if config._consensus_scope else set()
-        _non_consensus_evidence = {
-            f: t for f, t in config._gt_delivered_evidence_files.items()
-            if f not in _consensus_set
-        }
-        if _non_consensus_evidence:
-            # Agent explored beyond consensus — use the most recent
-            top_cand = max(_non_consensus_evidence,
-                           key=_non_consensus_evidence.get)
-            top_base = os.path.basename(top_cand)
-    # Fall back to consensus scope if no divergent evidence
-    if not top_base and config._consensus_scope:
+    # Row-15 fix (gt_math_oh diag 2026-06-24): the CONSENSUS scope is the
+    # corroborated localization target — prefer it. The old heuristic preferred
+    # the most-recently-viewed GT-evidenced file NOT in consensus, on the theory
+    # that recent-view "reflects what the agent is working on". That is wrong:
+    # agents read sibling/reference files (e.g. kick.py while editing chzzk.py),
+    # so a recent non-consensus view is NOT a reliable edit-target and must not
+    # OVERRIDE the corroborated consensus with no confidence gate (str->kick.py
+    # misdirect). Corroborated consensus first; recent-view only as last resort.
+    if config._consensus_scope:
         top_cand = config._consensus_scope[0]
         top_base = os.path.basename(top_cand)
-    elif not top_base and config._consensus_confirmed:
+    elif config._consensus_confirmed:
         top_cand = next(iter(config._consensus_confirmed))
         top_base = os.path.basename(top_cand)
-    elif not top_base and config._gt_delivered_evidence_files:
+    # No corroborated consensus at all -> fall back to most-recently-viewed
+    # GT-evidenced file (a genuine last resort, never an override of consensus).
+    if not top_base and config._gt_delivered_evidence_files:
         top_cand = max(config._gt_delivered_evidence_files,
                        key=config._gt_delivered_evidence_files.get)
         top_base = os.path.basename(top_cand)
