@@ -66,6 +66,11 @@ env:
   GT_EMBED_MODEL_NAME: "intfloat/e5-small-v2"
   GT_EMBED_DIM: "384"
   GT_REQUIRE_LSP: "1"
+  # Preflight HOST_SRC gate: the per-task step sets this to /tmp/gt/src (the
+  # in-container export), but the global preflight runs BEFORE any task and
+  # needs a valid source dir to pass the HOST_SRC check. Point it at the
+  # checkout's src/ dir (always valid); per-task steps override later.
+  GT_HOST_SRC_ROOT: "${{ github.workspace }}/src"
   # LEGITIMACY: the 300-task benchmark must index FRESH per task, in-container, from
   # the base-commit repo — never a prebuilt / cross-run graph.db. This hard-disables
   # the wrapper's prebuilt path so the agent gets the graph a real GT user would.
