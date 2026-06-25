@@ -3208,7 +3208,9 @@ def generate_v1r_brief(
             if fp in _have:
                 continue
             if fp in _by_path:                       # retrieved-but-cut -> pull to front
-                _promote.append(_by_path[fp])
+                _rec = dict(_by_path[fp])
+                _rec["_exact_issue_named"] = True    # survive the localize re-rank at :3397
+                _promote.append(_rec)
             else:                                    # recall miss -> synthesize a top record
                 _promote.append({
                     "path": fp, "score": _top_score + 0.01,
