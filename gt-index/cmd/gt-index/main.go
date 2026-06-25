@@ -1909,7 +1909,11 @@ func mineCochanges(db *store.DB, root string) int {
 	cmd.Dir = root
 	out, err := cmd.Output()
 	if err != nil {
-		return 0 // git unavailable, not a repo, or shallow clone with no history
+		// Was a silent return: a missing git binary (ENOENT — git not in the runtime
+		// image, the 2026-06-25 bug) or a non-repo gave 0 pairs with NO signal, hiding an
+		// EMPTY cochanges table on every task/language. Log so it can never hide again.
+		fmt.Fprintf(os.Stderr, "  co-change: git log failed (%v) — 0 pairs stored\n", err)
+		return 0
 	}
 
 	cooccurrence := make(map[[2]string]int)

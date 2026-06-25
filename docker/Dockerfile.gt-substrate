@@ -182,7 +182,12 @@ FROM ubuntu:20.04
 # build-essential provides cc (the alternatives symlink) + make + libc-dev, matching
 # the build stage (line 26) which always had cc. The self-test below now LINKS with cc
 # so a linkerless substrate can never ship green again.
-RUN apt-get update && apt-get install -y --no-install-recommends build-essential ca-certificates \
+# git (2026-06-25): gt-index Pass-5c CO-CHANGE MINING shells out to `git log` and the
+# run-provenance records `git rev-parse HEAD` — both run INSIDE this runtime image. git was
+# installed only in the `build` stage (line 26), never copied here, so `exec("git")` hit
+# ENOENT (~0.6ms) and mineCochanges silently `return 0` → cochanges table EMPTY on every task,
+# every language (the cochange delivery layer had no data to ship). One package fixes it.
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /opt/gt /opt/gt
 # Go toolchain for gopls WORKSPACE LOADING: gopls shells out to the `go` command
