@@ -837,6 +837,15 @@ jobs:
           _LIVE_TASK="${{ matrix.task }}"; _STEPLOG="/tmp/gha_step_${_LIVE_TASK}.log"
           exec > >(tee -a "$_STEPLOG") 2>&1
           GH_LIVE_TOKEN="${{ secrets.GITHUB_TOKEN }}" bash scripts/ci/live_log_push.sh "$_LIVE_TASK" "$_STEPLOG" "$(pwd)/trial_output.log" 20 >/dev/null 2>&1 &
+          # DOCKERD HEALTH CHECK (2026-06-25): the proof step's heavy LSP work can crash
+          # dockerd (rust-analyzer on boa, tsserver on arktype). If dockerd dies during the
+          # proof and never comes back, the trial step hits "Docker daemon is not running"
+          # and pier rc=1 with 0 agent steps. Check + restart before anything else.
+          if ! docker info >/dev/null 2>&1; then
+            echo "[DOCKERD-FIX] daemon not running at trial start — restarting"
+            (sudo systemctl restart docker 2>/dev/null || sudo service docker restart 2>/dev/null) && sleep 10 || true
+            docker info >/dev/null 2>&1 && echo "[DOCKERD-FIX] daemon recovered" || echo "[DOCKERD-FIX] WARN: daemon still down after restart"
+          fi
           echo "=== DeepSWE GT Trial: ${{ matrix.task }} (model ${{ inputs.model }}) ==="
           echo "HOST  GT_CERT_DIR=${GT_CERT_DIR:-<unset>}  GT_HOST_GRAPH_DB=${GT_HOST_GRAPH_DB:-<unset>}"
           echo "GT_PROOF_MODE=${GT_PROOF_MODE:-<unset>}  GT_CONTAINERIZED=${GT_CONTAINERIZED:-<unset>}  GT_SUBSTRATE_DIGEST=${GT_SUBSTRATE_DIGEST:-<unset>}"
