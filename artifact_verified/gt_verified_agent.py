@@ -382,6 +382,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="Print the primary + fallback image refs and exit")
     ap.add_argument("--dump-issue-to", default="",
                     help="Write the instance problem_statement to PATH and exit")
+    ap.add_argument("--issue-file", default="",
+                    help="Read issue text from FILE instead of fetching from HF (Pro path)")
     args = ap.parse_args(argv)
 
     if args.print_image:
@@ -411,7 +413,12 @@ def main(argv: list[str] | None = None) -> int:
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    inst = load_instance(args.instance_id, args.subset, args.split)
+    if args.issue_file and Path(args.issue_file).exists():
+        issue_text = Path(args.issue_file).read_text(encoding="utf-8").strip()
+        inst = {"instance_id": args.instance_id, "problem_statement": issue_text}
+        print(f"[gt-verified] issue from file: {args.issue_file} ({len(issue_text)} chars)")
+    else:
+        inst = load_instance(args.instance_id, args.subset, args.split)
     try:
         exit_status = run_instance(inst, config, output_dir, image=args.image)
     except DeepSweAdapterError as e:

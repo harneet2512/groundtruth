@@ -203,6 +203,7 @@ jobs:
             --image "$TASK_IMAGE" \
             --config artifact_verified/verified_gt.yaml \
             --output /tmp/pro_output \
+            --issue-file /tmp/issue.txt \
             2>&1 | tee /tmp/trial_output.log || true
       - name: Upload artifacts
         if: always()
