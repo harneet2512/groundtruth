@@ -660,6 +660,18 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 		// Import extraction already ran; now let normal recursion handle call extraction.
 	}
 
+	// JS/TS CommonJS require(): extract as import in Pass 2 so the import index
+	// (built between Pass 2 and Pass 3) includes require()-based module refs.
+	// Without this, require() imports are only extracted in Pass 3's extractCalls
+	// — too late for the import index, so every cross-file require() call falls
+	// to name_match instead of import-resolved.
+	if spec.IsCallNode(nodeType) && (sf.Language == "javascript" || sf.Language == "typescript") {
+		simple, _ := extractCalleeInfo(node, src)
+		if simple == "require" {
+			extractRequireImport(node, sf, src, result)
+		}
+	}
+
 	// Rust: extract mod declarations (mod foo;) which define the module tree.
 	// mod_item with no body = external module declaration (maps to foo.rs or foo/mod.rs).
 	// mod_item with a body = inline module (mod foo { ... }) — skip those.
@@ -1332,6 +1344,74 @@ func normalizeSignature(text string) string {
 		out = strings.TrimSpace(out[:1000])
 	}
 	return out
+}
+
+// extractRequireImport extracts CommonJS require() as an ImportRef during Pass 2.
+// const X = require('./module')       → ImportRef{ImportedName:"X", ModulePath:"./module"}
+// const {a,b} = require('./module')   → ImportRef per destructured name
+// This runs in walkNode (Pass 2) so the import index includes require() refs
+// before Pass 3 resolves calls. Language: JS/TS only.
+func extractRequireImport(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult) {
+	argsNode := node.ChildByFieldName("arguments")
+	if argsNode == nil {
+		for k := 0; k < int(node.ChildCount()); k++ {
+			if c := node.Child(k); c.Type() == "arguments" {
+				argsNode = c
+				break
+			}
+		}
+	}
+	if argsNode == nil {
+		return
+	}
+	for k := 0; k < int(argsNode.ChildCount()); k++ {
+		arg := argsNode.Child(k)
+		if arg.Type() == "string" || arg.Type() == "template_string" {
+			modPath := stripQuotes(arg.Content(src))
+			if modPath == "" {
+				break
+			}
+			name := modPath
+			if slashIdx := strings.LastIndex(modPath, "/"); slashIdx >= 0 {
+				name = modPath[slashIdx+1:]
+			}
+			if p := node.Parent(); p != nil {
+				if p.Type() == "variable_declarator" || p.Type() == "assignment_expression" {
+					nameNode := p.ChildByFieldName("name")
+					if nameNode == nil {
+						nameNode = p.ChildByFieldName("left")
+					}
+					if nameNode != nil {
+						if nameNode.Type() == "object_pattern" || nameNode.Type() == "object" {
+							for di := 0; di < int(nameNode.ChildCount()); di++ {
+								dc := nameNode.Child(di)
+								if dc.Type() == "shorthand_property_identifier_pattern" || dc.Type() == "shorthand_property_identifier" || dc.Type() == "identifier" {
+									result.Imports = append(result.Imports, ImportRef{
+										ImportedName: dc.Content(src),
+										ModulePath:   modPath,
+										File:         sf.Path,
+										Line:         int(node.StartPoint().Row) + 1,
+									})
+								}
+							}
+							name = ""
+						} else {
+							name = nameNode.Content(src)
+						}
+					}
+				}
+			}
+			if name != "" {
+				result.Imports = append(result.Imports, ImportRef{
+					ImportedName: name,
+					ModulePath:   modPath,
+					File:         sf.Path,
+					Line:         int(node.StartPoint().Row) + 1,
+				})
+			}
+			break
+		}
+	}
 }
 
 // ── Import extraction ─────────────────────────────────────────────────────
