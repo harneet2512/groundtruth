@@ -743,10 +743,39 @@ jobs:
             exit 1
           fi
           echo "[GT_META] pro image from GHCR cache: $_GHCR_IMG (no dockerhub pull)"
+
+          # Synthesize a pier-compatible task directory from the Pro data.
+          # pier expects -p <dir> containing task.toml; Pro tasks don't ship one.
+          PRO_TASK_DIR="/tmp/pro_task/${{ matrix.task }}"
+          mkdir -p "$PRO_TASK_DIR"
+          # Issue text: prefer SWE-bench_Pro-os instruction, fall back to /tmp/issue.txt
+          PRO_ISSUE=""
+          for _ipath in "swebench-pro-os/instructions/${{ matrix.task }}/instruction.md" \
+                        "swebench-pro-os/instructions/${{ matrix.task }}.md" \
+                        "/tmp/issue.txt"; do
+            if [ -s "$_ipath" ]; then PRO_ISSUE="$_ipath"; break; fi
+          done
+          [ -n "$PRO_ISSUE" ] && cp "$PRO_ISSUE" "$PRO_TASK_DIR/problem_statement.md" \
+            || echo "Fix the issue in the repository." > "$PRO_TASK_DIR/problem_statement.md"
+          # task.toml (pier's required manifest)
+          cat > "$PRO_TASK_DIR/task.toml" <<TOML
+          version = "1.0"
+          [metadata]
+          task_id = "${{ matrix.task }}"
+          language = "${{ matrix.language }}"
+          [environment]
+          docker_image = "$_GHCR_IMG"
+          [agent]
+          timeout_sec = 5400.0
+          [verifier]
+          timeout_sec = 1800.0
+          TOML
+          echo "[GT_META] synthesized pier task dir at $PRO_TASK_DIR"
+
           # pier runs the agent inside the (now-local, GHCR-sourced) task image via --env docker;
           # the GT substrate artifacts are bind-mounted as above.
           pier run \
-            -p "$GITHUB_WORKSPACE" \
+            -p "$PRO_TASK_DIR" \
             --agent-import-path artifact_deepswe.gt_agent:GTMiniSweAgent \
             --model "$INPUT_MODEL" \
             --env docker \
