@@ -599,6 +599,30 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 				}
 			}
 		}
+		// Anonymous class expression assigned to a variable/property:
+		// `const X = class { ... }` / `internals.X = class { ... }` / `module.exports = class { ... }`
+		// Use the LHS name so methods inside get parented to a named class node.
+		// Language-agnostic: any class expression with no name that's the RHS of an assignment.
+		if name == "" && (nodeType == "class" || nodeType == "class_expression") {
+			if p := node.Parent(); p != nil {
+				ptype := p.Type()
+				if ptype == "variable_declarator" || ptype == "assignment_expression" || ptype == "assignment" {
+					lhs := p.ChildByFieldName("name")
+					if lhs == nil {
+						lhs = p.ChildByFieldName("left")
+					}
+					if lhs != nil {
+						lhsText := lhs.Content(src)
+						// For member expressions (internals.Server), use the last segment
+						if dotIdx := strings.LastIndex(lhsText, "."); dotIdx >= 0 {
+							name = lhsText[dotIdx+1:]
+						} else {
+							name = lhsText
+						}
+					}
+				}
+			}
+		}
 		if name != "" {
 			// Classes are top-level or nested; use name as qualified name
 			classQualName := name
@@ -681,6 +705,16 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 		nodeType == "short_var_declaration" || nodeType == "assignment_statement" ||
 		nodeType == "assignment_expression" {
 		extractAssignments(node, sf, src, result, "")
+		// CommonJS/Node module exports: exports.x = Y / module.exports.x = Y / module.exports = Y
+		// These are assignment_expression nodes where the LHS is a member_expression
+		// starting with "exports." or "module.exports". Extract as ReExportRef so the
+		// resolver knows this module exports symbol X which IS the node Y. Generalized:
+		// the same ReExportRef mechanism handles ES6, Python __init__.py, Rust pub use,
+		// and now CommonJS. The resolver chains re-exports across files so a require()
+		// that imports this module can resolve method calls on the imported symbol.
+		if nodeType == "assignment_expression" {
+			extractCommonJSExports(node, sf, src, result)
+		}
 	}
 
 	// Rust: extract mod declarations (mod foo;) which define the module tree.
@@ -1355,6 +1389,49 @@ func normalizeSignature(text string) string {
 		out = strings.TrimSpace(out[:1000])
 	}
 	return out
+}
+
+// extractCommonJSExports handles `exports.x = Y` and `module.exports.x = Y`
+// and `module.exports = { x: Y }` by emitting ReExportRef entries. This is the
+// CommonJS counterpart to the ES6 `export { X } from './mod'` / Python
+// `from .mod import X` / Rust `pub use mod::X` re-export extraction.
+// Language: JS/TS (CommonJS patterns use assignment_expression, not export_statement).
+func extractCommonJSExports(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult) {
+	if sf.Language != "javascript" && sf.Language != "typescript" {
+		return
+	}
+	left := node.ChildByFieldName("left")
+	right := node.ChildByFieldName("right")
+	if left == nil || right == nil {
+		return
+	}
+	lhs := left.Content(src)
+	// exports.x = Y  or  module.exports.x = Y
+	if strings.HasPrefix(lhs, "exports.") || strings.HasPrefix(lhs, "module.exports.") {
+		exportName := lhs
+		if strings.HasPrefix(lhs, "module.exports.") {
+			exportName = lhs[len("module.exports."):]
+		} else {
+			exportName = lhs[len("exports."):]
+		}
+		if exportName == "" {
+			return
+		}
+		// The RHS is the value being exported. If it's an identifier, it names
+		// a symbol defined in this file → the import resolver can match it.
+		rhsText := strings.TrimSpace(right.Content(src))
+		if right.Type() == "identifier" && len(rhsText) > 0 {
+			// exports.server = Server → ReExportRef{ExportedName:"server", SourceModule: this file}
+			// This tells the resolver: when another file does require('./this') and calls
+			// the result's .server(), the symbol "server" IS "Server" defined here.
+			result.ReExports = append(result.ReExports, ReExportRef{
+				ExportedName: exportName,
+				SourceModule: rhsText, // the local symbol name (e.g. "Server")
+				File:         sf.Path,
+				Line:         int(node.StartPoint().Row) + 1,
+			})
+		}
+	}
 }
 
 // isModuleLoadCall returns true if the callee name is a module-loading function
