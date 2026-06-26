@@ -183,7 +183,7 @@ jobs:
           iid = '${{ matrix.task }}'
           try:
               from datasets import load_dataset
-              ds = load_dataset('SWE-bench-Live/SWE-bench-Pro', split='test')
+              ds = load_dataset('ScaleAI/SWE-bench_Pro', split='test')
               for row in ds:
                   if row.get('instance_id') == iid:
                       open('/tmp/issue.txt', 'w').write(row.get('problem_statement', 'Fix the issue.'))
@@ -198,7 +198,7 @@ jobs:
         run: |
           python artifact_verified/gt_verified_agent.py \
             --instance-id "${{ matrix.task }}" \
-            --subset "SWE-bench-Live/SWE-bench-Pro" \
+            --subset "ScaleAI/SWE-bench_Pro" \
             --model "${{ inputs.model }}" \
             --image "$TASK_IMAGE" \
             --config artifact_verified/verified_gt.yaml \
