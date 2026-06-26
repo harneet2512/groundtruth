@@ -902,16 +902,18 @@ func SetReturnShapeIndex(idx map[int64]string) {
 }
 
 // returnShapeCtorRe matches a BARE CONSTRUCTOR return expression and captures the
-// constructed type NAME, across the two language idioms:
+// constructed type NAME, across language idioms:
 //
 //	Python/JS/TS  : ClassName(args)            -> ClassName
+//	JS/TS         : new ClassName(args)        -> ClassName
 //	Go/Rust       : &Struct{fields} / Struct{} -> Struct   (composite literal)
+//	Qualified     : Mod.ClassName(args)        -> ClassName (last dot-segment)
+//	JS new qual   : new Mod.ClassName(args)    -> ClassName
 //
-// It is anchored (^) and requires the whole expr to BE the constructor (the closing
-// `)`/`}` is asserted by the caller), so a method-chain (`Foo().bar()`), an arithmetic
-// expr, or a non-constructor call cannot match. Generics/qualifiers are handled by the
-// caller (drop-dotted, strip `[...]`), keeping this regex a clean leading-name extractor.
-var returnShapeCtorRe = regexp.MustCompile(`^&?([A-Za-z_][A-Za-z0-9_]*)\s*[\({]`)
+// Anchored (^), closing bracket asserted by caller. The regex captures the LAST
+// capitalized name before the opening bracket — this IS the type regardless of
+// whether it's bare, prefixed with `new`, or qualified with a module path.
+var returnShapeCtorRe = regexp.MustCompile(`^(?:new\s+)?(?:[A-Za-z_][A-Za-z0-9_]*\.)*&?([A-Z][A-Za-z0-9_]*)\s*[\({]`)
 
 // ctorIsWholeExpr reports whether the constructor opened by the FIRST `open` bracket in
 // expr closes (balanced) exactly at the final character, i.e. the constructor IS the whole
