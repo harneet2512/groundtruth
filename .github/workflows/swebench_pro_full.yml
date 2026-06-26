@@ -758,18 +758,10 @@ jobs:
           [ -n "$PRO_ISSUE" ] && cp "$PRO_ISSUE" "$PRO_TASK_DIR/problem_statement.md" \
             || echo "Fix the issue in the repository." > "$PRO_TASK_DIR/problem_statement.md"
           # task.toml (pier's required manifest)
-          cat > "$PRO_TASK_DIR/task.toml" <<TOML
-          version = "1.0"
-          [metadata]
-          task_id = "${{ matrix.task }}"
-          language = "${{ matrix.language }}"
-          [environment]
-          docker_image = "$_GHCR_IMG"
-          [agent]
-          timeout_sec = 5400.0
-          [verifier]
-          timeout_sec = 1800.0
-          TOML
+          printf 'version = "1.0"\n\n[metadata]\ntask_id = "%s"\nlanguage = "%s"\n\n[environment]\ndocker_image = "%s"\nallow_internet = false\nbuild_timeout_sec = 1800.0\ncpus = 2\nmemory_mb = 8192\nstorage_mb = 20480\n\n[agent]\ntimeout_sec = 5400.0\n\n[verifier]\ntimeout_sec = 1800.0\n' \
+            "${{ matrix.task }}" "${{ matrix.language }}" "$_GHCR_IMG" > "$PRO_TASK_DIR/task.toml"
+          # instruction.md (pier reads this as the problem statement)
+          [ -s "$PRO_TASK_DIR/problem_statement.md" ] && cp "$PRO_TASK_DIR/problem_statement.md" "$PRO_TASK_DIR/instruction.md" || true
           echo "[GT_META] synthesized pier task dir at $PRO_TASK_DIR"
 
           # pier runs the agent inside the (now-local, GHCR-sourced) task image via --env docker;
