@@ -133,12 +133,9 @@ env:
   GT_EVAL_CONTAINER_LIVECAP_MB: ${{ inputs.eval_livecap_mb || '' }}
   GT_SELF_VERIFY_ATTEMPTS: "2"
   GT_VERIFICATION_CYCLE_COST: "25"
-  # ── MODEL ROUTING (litellm OpenAI-compatible) ──────────────────────────────
-  # When model input contains "MiniMax" or uses TokenRouter, route via the
-  # OpenAI-compatible path. TOKENROUTER_API_KEY is in secrets (never in code).
-  # For deepseek: DEEPSEEK_API_KEY is used directly (litellm native).
-  TOKENROUTER_API_KEY: ${{ secrets.TOKENROUTER_API_KEY }}
-  TOKENROUTER_API_BASE: "https://api.tokenrouter.com/v1"
+  # Model API keys are set ONLY inside the per-model routing branch (Run GT trial
+  # step), never at top-level — a top-level key pollutes every model path and causes
+  # pier's provider detection to concatenate competing keys.
 
 jobs:
   # ── Stage-0 / prepare: ENV-ONLY. Leaderboard legitimacy. ────────────────────
@@ -921,8 +918,9 @@ jobs:
           # Model routing: if the input model contains "MiniMax" or "tokenrouter",
           INPUT_MODEL="${{ inputs.model }}"
           if echo "$INPUT_MODEL" | grep -qiE "minimax|tokenrouter"; then
+            export TOKENROUTER_API_KEY="${{ secrets.TOKENROUTER_API_KEY }}"
             export OPENAI_API_KEY="${TOKENROUTER_API_KEY}"
-            export OPENAI_API_BASE="${TOKENROUTER_API_BASE}"
+            export OPENAI_API_BASE="https://api.tokenrouter.com/v1"
             # FIX: forward the model creds INTO the container. The agent runs in-container via
             GT_AE_ARGS+=(--ae "OPENAI_API_KEY=${OPENAI_API_KEY}" --ae "OPENAI_API_BASE=${OPENAI_API_BASE}")
             if ! echo "$INPUT_MODEL" | grep -q "^openai/"; then
@@ -931,11 +929,7 @@ jobs:
             echo "=== Model routed via TokenRouter: $INPUT_MODEL ==="
           elif echo "$INPUT_MODEL" | grep -qiE "openrouter/|xiaomi/mimo"; then
             export OPENROUTER_API_KEY="${{ secrets.OPENROUTER_API_KEY }}"
-            export TOKENROUTER_API_KEY=""
-            export OPENAI_API_KEY=""
-            export OPENAI_API_BASE=""
-            export DEEPSEEK_API_KEY=""
-            echo "=== Model routed via OpenRouter: $INPUT_MODEL (competing keys blanked) ==="
+            echo "=== Model routed via OpenRouter: $INPUT_MODEL ==="
           elif echo "$INPUT_MODEL" | grep -qiE "deepseek"; then
             export DEEPSEEK_API_KEY="${{ secrets.DEEPSEEK_API_KEY }}"
             GT_AE_ARGS+=(--ae "DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}")
