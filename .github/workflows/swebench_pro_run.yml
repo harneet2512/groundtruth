@@ -154,6 +154,7 @@ jobs:
           docker run --rm \
             -v "$TESTBED:/work:ro" \
             -v "$GT_CERT_DIR:/gt_artifacts" \
+            -e GT_PROOF_MODE=1 -e GT_CONTAINERIZED=1 \
             -e GT_REQUIRE_FULL_STACK=1 -e GT_REQUIRE_FTS5=1 \
             -e GT_FORCE_ONNX_EMBEDDER=1 -e GT_REQUIRE_EMBEDDER=1 \
             -e GT_REQUIRE_LSP=1 -e GT_FORBID_PREBUILT_GRAPH=1 \
