@@ -153,12 +153,12 @@ jobs:
           mkdir -p "$GT_CERT_DIR"
           docker run --rm \
             -v "$TESTBED:/work:ro" \
-            -v "$GT_CERT_DIR:/out" \
+            -v "$GT_CERT_DIR:/gt_artifacts" \
             -e GT_REQUIRE_FULL_STACK=1 -e GT_REQUIRE_FTS5=1 \
             -e GT_FORCE_ONNX_EMBEDDER=1 -e GT_REQUIRE_EMBEDDER=1 \
             -e GT_REQUIRE_LSP=1 -e GT_FORBID_PREBUILT_GRAPH=1 \
             "$DIGEST" \
-            /opt/gt/bin/gt-run-proof /work /out "${{ matrix.language }}" \
+            gt-run-proof --source-root /work --out /gt_artifacts \
             || { echo "::error::substrate proof failed"; exit 1; }
           echo "GT_CERT_DIR=$GT_CERT_DIR" >> "$GITHUB_ENV"
           echo "GT_HOST_GRAPH_DB=$GT_CERT_DIR/graph.db" >> "$GITHUB_ENV"
