@@ -1502,18 +1502,26 @@ func Resolve(
 		if fileImports, ok := importIndex[call.File]; ok {
 			var importCandidates []int64
 
-			// Check specific imports
-			if candidateFiles, ok := fileImports[calleeName]; ok {
-				for _, targetFile := range candidateFiles {
-					if fileNodes, ok := fileNodeIDs[targetFile]; ok {
-						if targetIDs, ok := fileNodes[calleeName]; ok {
-							for _, tid := range targetIDs {
-								if tid != callerID {
-									importCandidates = append(importCandidates, tid)
+			// Check specific imports first, then "*" wildcard (whole-module require).
+			// Specific match wins: destructured `const {error} = require('./args')`
+			// creates a specific entry for "error". Whole-module `const x = require('./args')`
+			// creates a "*" entry so ANY function in args.js is import-reachable.
+			for _, lookupName := range []string{calleeName, "*"} {
+				if candidateFiles, ok := fileImports[lookupName]; ok {
+					for _, targetFile := range candidateFiles {
+						if fileNodes, ok := fileNodeIDs[targetFile]; ok {
+							if targetIDs, ok := fileNodes[calleeName]; ok {
+								for _, tid := range targetIDs {
+									if tid != callerID {
+										importCandidates = append(importCandidates, tid)
+									}
 								}
 							}
 						}
 					}
+				}
+				if len(importCandidates) > 0 {
+					break
 				}
 			}
 
@@ -2497,6 +2505,16 @@ func buildImportIndex(imports []parser.ImportRef, fileMap map[string][]string) m
 
 		if len(targetFiles) > 0 {
 			fileEntry[imp.ImportedName] = append(fileEntry[imp.ImportedName], targetFiles...)
+			// CommonJS whole-module require: `const x = require('./mod')` binds ALL
+			// exports of mod to x. Any call to a function defined in mod is reachable
+			// from this file. Add a "*" wildcard entry so Strategy 1.5 can match ANY
+			// callee name against the target files (industry standard: PyCG, TAJS, Flow
+			// all model require() as returning the full module.exports object).
+			// Destructured requires (`const {a,b} = require(...)`) already add specific
+			// entries per name, so the wildcard is redundant for those (harmless).
+			if imp.ImportedName != "*" {
+				fileEntry["*"] = append(fileEntry["*"], targetFiles...)
+			}
 		}
 	}
 
