@@ -760,9 +760,17 @@ jobs:
           # task.toml (pier's required manifest)
           printf 'version = "1.0"\n\n[metadata]\ntask_id = "%s"\nlanguage = "%s"\n\n[environment]\ndocker_image = "%s"\nallow_internet = false\nbuild_timeout_sec = 1800.0\ncpus = 2\nmemory_mb = 8192\nstorage_mb = 20480\n\n[agent]\ntimeout_sec = 5400.0\n\n[verifier]\ntimeout_sec = 1800.0\n' \
             "${{ matrix.task }}" "${{ matrix.language }}" "$_GHCR_IMG" > "$PRO_TASK_DIR/task.toml"
-          # instruction.md (pier reads this as the problem statement)
-          [ -s "$PRO_TASK_DIR/problem_statement.md" ] && cp "$PRO_TASK_DIR/problem_statement.md" "$PRO_TASK_DIR/instruction.md" || true
-          echo "[GT_META] synthesized pier task dir at $PRO_TASK_DIR"
+          # instruction.md (pier reads this, not problem_statement.md)
+          [ -s "$PRO_TASK_DIR/problem_statement.md" ] && cp "$PRO_TASK_DIR/problem_statement.md" "$PRO_TASK_DIR/instruction.md"
+          [ -s "$PRO_TASK_DIR/instruction.md" ] || echo "Fix the issue in the repository." > "$PRO_TASK_DIR/instruction.md"
+          # environment/ dir (pier requires it for is_valid)
+          mkdir -p "$PRO_TASK_DIR/environment"
+          echo "FROM $_GHCR_IMG" > "$PRO_TASK_DIR/environment/Dockerfile"
+          # tests/ dir with a stub (pier requires discovered_test_path unless --disable-verification)
+          mkdir -p "$PRO_TASK_DIR/tests"
+          echo '#!/bin/bash' > "$PRO_TASK_DIR/tests/test.sh" && chmod +x "$PRO_TASK_DIR/tests/test.sh"
+          echo "[GT_META] synthesized pier task dir at $PRO_TASK_DIR (task.toml + instruction.md + environment/ + tests/)"
+          cat "$PRO_TASK_DIR/task.toml"
 
           # pier runs the agent inside the (now-local, GHCR-sourced) task image via --env docker;
           # the GT substrate artifacts are bind-mounted as above.
