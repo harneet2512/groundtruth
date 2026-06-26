@@ -1338,7 +1338,10 @@ def _format_test_feedback(attempt: int, display_cmd: str, rc: int,
     )
 
 
-class GTMiniSweAgent(MiniSweAgent):
+_BASE_AGENT = MiniSweAgent if MiniSweAgent is not None else object
+
+
+class GTMiniSweAgent(_BASE_AGENT):  # type: ignore[misc]
     """MiniSweAgent with full 3-phase GroundTruth integration.
 
     Phase 1: graph.db indexing in the container (install_spec)
