@@ -170,6 +170,10 @@ environment:
   cwd: "/testbed"
   timeout: 60
   interpreter: ["bash", "-c"]
+  # Pro/Verified images may have an ENTRYPOINT that overrides `sleep 2h` →
+  # container exits immediately → "No such container" on every command.
+  # Clear the entrypoint so sleep runs as CMD.
+  run_args: ["--rm", "--entrypoint", ""]
   env:
     PAGER: cat
     MANPAGER: cat
