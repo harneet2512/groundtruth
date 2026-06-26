@@ -1,0 +1,209 @@
+name: "SWE-bench Pro: GT-on mini-swe-agent (731 tasks, no pier)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance_ids:
+        description: "Comma-separated instance IDs (overrides max_tasks/shard)"
+        required: false
+        default: ""
+      max_tasks:
+        description: "Max tasks (0 = all in shard)"
+        required: true
+        default: "10"
+      shard:
+        description: "Shard i/n (e.g. 0/4)"
+        required: true
+        default: "0/1"
+      model:
+        description: "LLM model"
+        required: true
+        default: "deepseek/deepseek-v4-flash"
+      max_parallel:
+        description: "Concurrent jobs"
+        required: true
+        default: "20"
+      gt_substrate_digest:
+        description: "Pinned GT substrate digest"
+        required: false
+        default: ""
+      baseline:
+        description: "GT-off baseline arm"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  GT_REQUIRE_FULL_STACK: "1"
+  GT_REQUIRE_FTS5: "1"
+  GT_FORCE_ONNX_EMBEDDER: "1"
+  GT_REQUIRE_EMBEDDER: "1"
+  GT_REQUIRE_LSP: "1"
+  GT_FORBID_PREBUILT_GRAPH: "1"
+  GT_PROOF_MODE: "1"
+  GT_CONTAINERIZED: "1"
+  GT_RUNTIME_STRATEGY: "unified_substrate"
+  GT_SUBSTRATE_DIGEST: ${{ inputs.gt_substrate_digest || vars.GT_SUBSTRATE_DIGEST }}
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+      total: ${{ steps.gen.outputs.total }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Fetch Pro dataset (LFS bypass)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download pipeline-assets-v1 -p swebench_pro_public_tags.jsonl -D benchmarks/data/ --clobber || true
+          head -c 80 benchmarks/data/swebench_pro_public_tags.jsonl
+      - id: gen
+        name: Build matrix (731 Pro tasks)
+        env:
+          INPUT_INSTANCE_IDS: ${{ inputs.instance_ids }}
+          INPUT_MAX_TASKS: ${{ inputs.max_tasks }}
+          INPUT_SHARD: ${{ inputs.shard }}
+        shell: python
+        run: |
+          import json, os, sys
+          ds = "benchmarks/data/swebench_pro_public_tags.jsonl"
+          tasks = []
+          for line in open(ds, encoding="utf-8"):
+              line = line.strip()
+              if not line:
+                  continue
+              r = json.loads(line)
+              tasks.append({"task": r["instance_id"], "language": r["repo_language"], "dockerhub_tag": r["dockerhub_tag"]})
+          explicit = [t.strip() for t in os.environ.get("INPUT_INSTANCE_IDS", "").split(",") if t.strip()]
+          if explicit:
+              by_id = {t["task"]: t for t in tasks}
+              unknown = [e for e in explicit if e not in by_id]
+              if unknown:
+                  sys.exit(f"FATAL: unknown instance ids: {unknown[:5]}")
+              sel = [by_id[e] for e in explicit]
+          else:
+              shard = os.environ.get("INPUT_SHARD", "0/1").strip() or "0/1"
+              i, n = (int(x) for x in shard.split("/", 1))
+              sel = tasks[i::n]
+              maxt = int(os.environ.get("INPUT_MAX_TASKS", "10") or "0")
+              if maxt > 0:
+                  sel = sel[:maxt]
+          if len(sel) > 256:
+              sys.exit(f"FATAL: {len(sel)} > 256 GHA matrix cap - use shards")
+          matrix = {"include": sel}
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"matrix={json.dumps(matrix)}\n")
+              f.write(f"total={len(sel)}\n")
+          print(f"{len(sel)} tasks queued", file=sys.stderr)
+
+  trial:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+      fail-fast: false
+      max-parallel: ${{ fromJson(inputs.max_parallel) }}
+    env:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install host deps
+        run: |
+          pip install --upgrade pip
+          pip install -e .
+          pip install "mini-swe-agent==2.2.8" "swebench==4.1.0" datasets
+          echo "PYTHONPATH=$GITHUB_WORKSPACE/src:$GITHUB_WORKSPACE/scripts/swebench:$GITHUB_WORKSPACE/scripts/metrics" >> "$GITHUB_ENV"
+      - name: GHCR login
+        run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "$OWNER" --password-stdin
+      - name: Pull task image
+        run: |
+          IMG="ghcr.io/hbali-stack/sweap-images:${{ matrix.dockerhub_tag }}"
+          docker pull "$IMG" || { echo "::error::GHCR MISS $IMG"; exit 1; }
+          echo "TASK_IMAGE=$IMG" >> "$GITHUB_ENV"
+      - name: Pull substrate + run proof
+        run: |
+          DIGEST="${GT_SUBSTRATE_DIGEST}"
+          [ -n "$DIGEST" ] || { echo "::error::no substrate digest"; exit 1; }
+          docker pull "$DIGEST"
+          CID=$(docker create "$TASK_IMAGE")
+          TESTBED=/tmp/testbed_src
+          mkdir -p "$TESTBED"
+          docker cp "$CID:/testbed/." "$TESTBED/" 2>/dev/null || docker cp "$CID:/app/." "$TESTBED/" 2>/dev/null || true
+          docker rm "$CID"
+          GT_CERT_DIR=/tmp/gt
+          mkdir -p "$GT_CERT_DIR"
+          docker run --rm \
+            -v "$TESTBED:/work:ro" \
+            -v "$GT_CERT_DIR:/out" \
+            -e GT_REQUIRE_FULL_STACK=1 -e GT_REQUIRE_FTS5=1 \
+            -e GT_FORCE_ONNX_EMBEDDER=1 -e GT_REQUIRE_EMBEDDER=1 \
+            -e GT_REQUIRE_LSP=1 -e GT_FORBID_PREBUILT_GRAPH=1 \
+            "$DIGEST" \
+            /opt/gt/bin/gt-run-proof /work /out "${{ matrix.language }}" \
+            || { echo "::error::substrate proof failed"; exit 1; }
+          echo "GT_CERT_DIR=$GT_CERT_DIR" >> "$GITHUB_ENV"
+          echo "GT_HOST_GRAPH_DB=$GT_CERT_DIR/graph.db" >> "$GITHUB_ENV"
+          echo "GT_HOST_SRC_ROOT=$TESTBED" >> "$GITHUB_ENV"
+      - name: Get issue text
+        run: |
+          python3 -c "
+          import json
+          iid = '${{ matrix.task }}'
+          try:
+              from datasets import load_dataset
+              ds = load_dataset('SWE-bench-Live/SWE-bench-Pro', split='test')
+              for row in ds:
+                  if row.get('instance_id') == iid:
+                      open('/tmp/issue.txt', 'w').write(row.get('problem_statement', 'Fix the issue.'))
+                      break
+              else:
+                  open('/tmp/issue.txt', 'w').write('Fix the issue in the repository.')
+          except Exception:
+              open('/tmp/issue.txt', 'w').write('Fix the issue in the repository.')
+          "
+      - name: Run GT-injected mini-swe-agent
+        if: ${{ !inputs.baseline }}
+        run: |
+          python artifact_verified/gt_verified_agent.py \
+            --instance-id "${{ matrix.task }}" \
+            --model "${{ inputs.model }}" \
+            --issue-file /tmp/issue.txt \
+            --image "$TASK_IMAGE" \
+            --gt-cert-dir "$GT_CERT_DIR" \
+            --output-dir /tmp/pro_output \
+            2>&1 | tee /tmp/trial_output.log || true
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pro-${{ matrix.task }}
+          path: |
+            /tmp/trial_output.log
+            /tmp/pro_output/
+            /tmp/gt/
+
+  summarize:
+    needs: [prepare, trial]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Pro run complete. ${{ needs.prepare.outputs.total }} tasks."
