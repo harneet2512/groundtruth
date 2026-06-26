@@ -57,11 +57,19 @@ import os
 import re
 import textwrap
 from pathlib import Path
-from pier.agents.installed.mini_swe_agent import MiniSweAgent
-from pier.environments.base import BaseEnvironment
-from pier.models.agent.context import AgentContext
-from pier.models.agent.install import AgentInstallSpec, InstallStep
-from pier.models.trial.paths import EnvironmentPaths
+try:
+    from pier.agents.installed.mini_swe_agent import MiniSweAgent
+    from pier.environments.base import BaseEnvironment
+    from pier.models.agent.context import AgentContext
+    from pier.models.agent.install import AgentInstallSpec, InstallStep
+    from pier.models.trial.paths import EnvironmentPaths
+except ImportError:
+    MiniSweAgent = None  # type: ignore[assignment,misc]
+    BaseEnvironment = None  # type: ignore[assignment,misc]
+    AgentContext = None  # type: ignore[assignment,misc]
+    AgentInstallSpec = None  # type: ignore[assignment,misc]
+    InstallStep = None  # type: ignore[assignment,misc]
+    EnvironmentPaths = None  # type: ignore[assignment,misc]
 
 logger = logging.getLogger(__name__)
 
