@@ -2273,6 +2273,14 @@ def localize(
         seed_ids = [s[0] for s in seeds]
         seed_name_by_id = {s[0]: s[1] for s in seeds}
 
+        # ALL-POLLUTANT detection: are ALL exact-name seeds generic homonyms?
+        # When yes, name-match seeds are all noise — demote them below
+        # grep/path so content-match leads. Data-driven via is_seed_pollutant.
+        _exact_names = [s[1] for s in seeds if s[0] in _exact_seed_ids]
+        _all_seeds_pollutant = bool(_exact_names) and all(
+            is_seed_pollutant(n, conn) for n in _exact_names
+        )
+
         # IDF-scaled seed confidence (2026-06-26, BLUiR ASE 2013).
         # Non-exact seeds (path, grep, fts5) carry domain-match signal whose
         # value is inversely proportional to how many files the matched token
@@ -2378,11 +2386,22 @@ def localize(
             # signal here; Step-2 finding #1). Aider `len(defines[ident])>5: mul*=0.1`
             # generalized to per-repo P95; never PROMOTE on uniqueness.
             _def_verified = not is_seed_pollutant(name, conn)
+            # ALL-POLLUTANT demotion (2026-06-26): when EVERY exact-name seed
+            # is a pollutant (zero unique definitions — all anchors are generic
+            # verbs like create/display/login), name-match seeds are ALL noise.
+            # Demote them to 0.30 (below the grep/path IDF floor 0.35) so
+            # file-content overlap and path-domain signals LEAD the ranking
+            # instead of being buried under generic homonym seeds. Data-driven:
+            # _all_seeds_pollutant is computed once from is_seed_pollutant over
+            # the exact-seed set (not hardcoded per anchor). When at least ONE
+            # seed is unique, pollutants stay at 0.45 (existing behavior —
+            # the unique seed anchors the ranking, pollutants are tiebreakers).
+            _poll_conf = 0.30 if _all_seeds_pollutant else 0.45
             witnesses_by_file.setdefault(fp, []).append(
                 Witness(
                     file_path=fp, anchor=name, edge_type="DEFINES",
                     direction="defines_anchor", verified=_def_verified,
-                    confidence=1.0 if _def_verified else 0.45,
+                    confidence=1.0 if _def_verified else _poll_conf,
                     hop=0, src_symbol=name, dst_symbol=name,
                 )
             )
