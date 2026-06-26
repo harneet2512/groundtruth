@@ -660,16 +660,27 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 		// Import extraction already ran; now let normal recursion handle call extraction.
 	}
 
-	// JS/TS CommonJS require(): extract as import in Pass 2 so the import index
-	// (built between Pass 2 and Pass 3) includes require()-based module refs.
-	// Without this, require() imports are only extracted in Pass 3's extractCalls
-	// — too late for the import index, so every cross-file require() call falls
-	// to name_match instead of import-resolved.
-	if spec.IsCallNode(nodeType) && (sf.Language == "javascript" || sf.Language == "typescript") {
+	// Pass 2 module-import extraction: extract module-loading calls as ImportRef
+	// so the import index (built between Pass 2 and Pass 3) includes them.
+	// Language-agnostic: covers require() (JS/TS CommonJS), importlib.import_module()
+	// (Python), and any future module-loading pattern by checking if the call's
+	// first string argument looks like a module path.
+	if spec.IsCallNode(nodeType) {
 		simple, _ := extractCalleeInfo(node, src)
-		if simple == "require" {
-			extractRequireImport(node, sf, src, result)
+		if isModuleLoadCall(simple, sf.Language) {
+			extractModuleImport(node, sf, src, result)
 		}
+	}
+
+	// Pass 2 top-level assignment extraction (PyCG assignment-graph, generalized):
+	// Module-level `const x = new Server()` / `x = factory()` / `x = Mod.create()`
+	// must be captured so Strategy 1.96 can resolve `x.method()`. walkNode calls
+	// extractAssignments inside function bodies (line ~548) but NOT for top-level
+	// code. This handles the top-level case: any assignment node at module scope.
+	if nodeType == "variable_declarator" || nodeType == "assignment" ||
+		nodeType == "short_var_declaration" || nodeType == "assignment_statement" ||
+		nodeType == "assignment_expression" {
+		extractAssignments(node, sf, src, result, "")
 	}
 
 	// Rust: extract mod declarations (mod foo;) which define the module tree.
@@ -996,24 +1007,24 @@ func extractAssignments(node *sitter.Node, sf walker.SourceFile, src []byte, res
 						// callee is a (non-constructor) function — record the CALLEE name with
 						// ViaReturn so the resolver bridges through factory's declared return
 						// type (e.g. `x = get_client(); x.run()` → return type of get_client).
-						// Lowercase simple name (capitalized = ctor, handled above) OR, in Go,
-						// a capitalized bare call (`x := Marshal()`) which is an exported func,
-						// not a constructor — it too must bridge through its return type. Skip
-						// qualified receiver-method calls (obj.method()) — their type is unknown
-						// here, left for the demand-driven residual.
-						isLowerBare := simple[0] >= 'a' && simple[0] <= 'z'
-						isGoCapBare := sf.Language == "go" && simple[0] >= 'A' && simple[0] <= 'Z'
-						if (isLowerBare || isGoCapBare) && (qualified == "" || qualified == simple) {
-							result.Assignments = append(result.Assignments, AssignmentRef{
-								VarName:       lhsName,
-								TypeName:      simple,
-								TypeQualified: qualified,
-								Scope:         scopeName,
-								File:          sf.Path,
-								Line:          int(node.StartPoint().Row) + 1,
-								ViaReturn:     true,
-							})
+						// Handles ALL call shapes including qualified calls (Hapi.server(),
+						// http.createServer()) — the type of x is determined by the return
+						// value, and Strategy 1.96 bridges through the callee's return type.
+						// This is the generalized PyCG assignment-graph approach: every
+						// x = f() is an assignment whose type flows from f's return.
+						calleeName196 := simple
+						if qualified != "" {
+							calleeName196 = qualified
 						}
+						result.Assignments = append(result.Assignments, AssignmentRef{
+							VarName:       lhsName,
+							TypeName:      calleeName196,
+							TypeQualified: qualified,
+							Scope:         scopeName,
+							File:          sf.Path,
+							Line:          int(node.StartPoint().Row) + 1,
+							ViaReturn:     true,
+						})
 					}
 				}
 			}
@@ -1346,12 +1357,30 @@ func normalizeSignature(text string) string {
 	return out
 }
 
-// extractRequireImport extracts CommonJS require() as an ImportRef during Pass 2.
+// isModuleLoadCall returns true if the callee name is a module-loading function
+// in the given language. Language-agnostic: each language has its own patterns
+// but the MECHANISM (extract the module path from the first string arg) is shared.
+func isModuleLoadCall(calleeName, language string) bool {
+	switch calleeName {
+	case "require": // JS/TS CommonJS, Lua, Ruby
+		return language == "javascript" || language == "typescript" ||
+			language == "lua" || language == "ruby"
+	case "import_module": // Python importlib
+		return language == "python"
+	case "dynamic_import", "__import__": // Python builtins
+		return language == "python"
+	case "define": // AMD (JS)
+		return language == "javascript"
+	}
+	return false
+}
+
+// extractModuleImport extracts a module-loading call as ImportRef during Pass 2.
+// Generalized: handles any call where the first string argument is a module path.
 // const X = require('./module')       → ImportRef{ImportedName:"X", ModulePath:"./module"}
 // const {a,b} = require('./module')   → ImportRef per destructured name
-// This runs in walkNode (Pass 2) so the import index includes require() refs
-// before Pass 3 resolves calls. Language: JS/TS only.
-func extractRequireImport(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult) {
+// importlib.import_module('package')  → ImportRef{ImportedName:"package", ModulePath:"package"}
+func extractModuleImport(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult) {
 	argsNode := node.ChildByFieldName("arguments")
 	if argsNode == nil {
 		for k := 0; k < int(node.ChildCount()); k++ {
