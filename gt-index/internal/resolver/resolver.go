@@ -2371,19 +2371,58 @@ func Resolve(
 					key := edgeKey{callerID, targetID, "CALLS"}
 					if !seen[key] {
 						seen[key] = true
-						// Confidence must sit below the SPECULATIVE threshold so tierFor
-						// agrees with the demote (a sub-0.5 conf, not the 0.9 single-
-						// candidate name_match score that tierFor would re-CERTIFY).
+						// Single candidate, qualified call, all receiver-typing strategies
+						// exhausted. Two cases:
+						//   (a) target is in the SAME file or imported by the caller file
+						//       → it's internal, 0 ambiguity → verified_unique conf=0.9
+						//   (b) target is in a file the caller doesn't import and isn't
+						//       same-dir → likely stdlib/external → demote conf=0.2
+						// This replaces the blanket demote that penalized internal single-
+						// candidate calls (fastify: 1277 calls to the ONLY 'fastify' func).
+						conf := 0.2
+						method := "name_match"
+						evidence := "name_match_qualified_unresolved"
+						if metaMap != nil {
+							tm := metaMap[targetID]
+							if tm.File != "" {
+								// The target is internal (has a file) and is the ONLY
+								// candidate. Promote if caller imports that file OR
+								// if caller imports ANY file from the same package.
+								isImported := tm.File == call.File ||
+									callerImportsFile(call.File, tm.File, importIndex)
+								// Wildcard: if caller has a "*" import (whole-module
+								// require) that resolved to ANY file in the target's
+								// directory, the target is reachable.
+								if !isImported {
+									if fileImps, ok := importIndex[call.File]; ok {
+										if starFiles, ok := fileImps["*"]; ok {
+											tgtDir := filepath.ToSlash(filepath.Dir(tm.File))
+											for _, sf := range starFiles {
+												if filepath.ToSlash(filepath.Dir(sf)) == tgtDir || sf == tm.File {
+													isImported = true
+													break
+												}
+											}
+										}
+									}
+								}
+								if isImported {
+									conf = 0.9
+									method = "verified_unique"
+									evidence = "verified_unique_qualified_imported"
+								}
+							}
+						}
 						resolved = append(resolved, ResolvedCall{
 							SourceNodeID:   callerID,
 							TargetNodeID:   targetID,
 							SourceLine:     call.Line,
 							SourceFile:     call.File,
-							Method:         "name_match",
-							Confidence:     0.2,
+							Method:         method,
+							Confidence:     conf,
 							CandidateCount: 1,
-							TrustTier:      tierFor(0.2),
-							EvidenceType:   "name_match_qualified_unresolved",
+							TrustTier:      tierFor(conf),
+							EvidenceType:   evidence,
 						})
 					}
 					continue
