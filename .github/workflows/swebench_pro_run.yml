@@ -151,6 +151,27 @@ jobs:
           IMG="ghcr.io/hbali-stack/sweap-images:${{ matrix.dockerhub_tag }}"
           docker pull "$IMG" || { echo "::error::GHCR MISS $IMG"; exit 1; }
           echo "TASK_IMAGE=$IMG" >> "$GITHUB_ENV"
+      - name: Get issue text (BEFORE substrate proof — brief needs it)
+        run: |
+          python3 -c "
+          import json
+          iid = '${{ matrix.task }}'
+          try:
+              from datasets import load_dataset
+              ds = load_dataset('ScaleAI/SWE-bench_Pro', split='test')
+              for row in ds:
+                  if row.get('instance_id') == iid:
+                      txt = row.get('problem_statement', 'Fix the issue.')
+                      open('/tmp/issue.txt', 'w').write(txt)
+                      print(f'issue: {len(txt)} chars from HF')
+                      break
+              else:
+                  open('/tmp/issue.txt', 'w').write('Fix the issue in the repository.')
+                  print('issue: fallback (not found)')
+          except Exception as e:
+              open('/tmp/issue.txt', 'w').write('Fix the issue in the repository.')
+              print(f'issue: fallback ({e})')
+          "
       - name: Pull substrate + run proof
         run: |
           DIGEST="${GT_SUBSTRATE_DIGEST}"
@@ -163,36 +184,23 @@ jobs:
           docker rm "$CID"
           GT_CERT_DIR=/tmp/gt
           mkdir -p "$GT_CERT_DIR"
+          # Pass the issue text to the substrate so the brief has real anchors
+          ISSUE_FILE=/tmp/issue.txt
           docker run --rm \
             -v "$TESTBED:/work:ro" \
             -v "$GT_CERT_DIR:/gt_artifacts" \
+            -v "$ISSUE_FILE:/issue.txt:ro" \
             -e GT_PROOF_MODE=1 -e GT_CONTAINERIZED=1 \
             -e GT_REQUIRE_FULL_STACK=1 -e GT_REQUIRE_FTS5=1 \
             -e GT_FORCE_ONNX_EMBEDDER=1 -e GT_REQUIRE_EMBEDDER=1 \
             -e GT_REQUIRE_LSP=1 -e GT_FORBID_PREBUILT_GRAPH=1 \
+            -e GT_ISSUE_FILE=/issue.txt \
             "$DIGEST" \
             gt-run-proof --source-root /work --out /gt_artifacts \
             || { echo "::error::substrate proof failed"; exit 1; }
           echo "GT_CERT_DIR=$GT_CERT_DIR" >> "$GITHUB_ENV"
           echo "GT_HOST_GRAPH_DB=$GT_CERT_DIR/graph.db" >> "$GITHUB_ENV"
           echo "GT_HOST_SRC_ROOT=$TESTBED" >> "$GITHUB_ENV"
-      - name: Get issue text
-        run: |
-          python3 -c "
-          import json
-          iid = '${{ matrix.task }}'
-          try:
-              from datasets import load_dataset
-              ds = load_dataset('ScaleAI/SWE-bench_Pro', split='test')
-              for row in ds:
-                  if row.get('instance_id') == iid:
-                      open('/tmp/issue.txt', 'w').write(row.get('problem_statement', 'Fix the issue.'))
-                      break
-              else:
-                  open('/tmp/issue.txt', 'w').write('Fix the issue in the repository.')
-          except Exception:
-              open('/tmp/issue.txt', 'w').write('Fix the issue in the repository.')
-          "
       - name: Run GT-injected mini-swe-agent
         if: ${{ !inputs.baseline }}
         run: |
