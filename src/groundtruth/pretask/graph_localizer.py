@@ -243,6 +243,20 @@ W_PATH_DECAY = 0.30
 INJECTION_PLACEMENT = os.environ.get("GT_INJECTION_PLACEMENT", "strictly_below_floor")
 
 
+def _is_test_block_name(sym: str) -> bool:
+    """Test-framework block names that carry test DESCRIPTIONS, not code symbols.
+    Mocha `it('should remove...')`, Jest `test('...')`, describe blocks.
+    The indexer stores these as node names; rendering them as witnesses leaks
+    test descriptions into the brief (LEAKAGE). Defense-in-depth: the BFS
+    already filters is_test=0 on neighbors, but this catches any that slip
+    through (e.g. from seed-minting or cross-hop provenance)."""
+    s = (sym or "").strip()
+    return (s.startswith("it:") or s.startswith("it ") or
+            s.startswith("describe:") or s.startswith("describe ") or
+            s.startswith("test(") or s.startswith("test ") or
+            " should " in s)
+
+
 def _is_generic_symbol(sym: str) -> bool:
     """DUNDER-SHAPE language invariant ONLY — used for WITNESS DISPLAY choice (prefer
     an informative 'set_fields calls set_parse' edge over a generic '__init__ called
@@ -626,6 +640,8 @@ class Candidate:
         edge_wits = [
             w for w in self.witnesses if w.direction != "defines_anchor"
             and w.src_symbol != w.dst_symbol
+            and not _is_test_block_name(w.src_symbol)
+            and not _is_test_block_name(w.dst_symbol)
         ]
         if edge_wits:
             # Prefer a MEANINGFUL edge (neither endpoint a generic constructor/
@@ -2257,26 +2273,88 @@ def localize(
         seed_ids = [s[0] for s in seeds]
         seed_name_by_id = {s[0]: s[1] for s in seeds}
 
+        # IDF-scaled seed confidence (2026-06-26, BLUiR ASE 2013).
+        # Non-exact seeds (path, grep, fts5) carry domain-match signal whose
+        # value is inversely proportional to how many files the matched token
+        # covers (IDF). A token matching 1 file is highly discriminating; a
+        # token matching 500 files is noise. Continuous — no hardcoded tier
+        # boundaries. Adapts to every codebase via the graph's own file count.
+        #
+        # confidence = FLOOR + (CEILING - FLOOR) * idf_ratio
+        # idf_ratio  = log2(N / df) / log2(N)   ∈ [0, 1]
+        #
+        # FLOOR (0.35) = existing non-exact seed grade (grep/fts5 baseline).
+        # CEILING (0.60) = between demoted-DEFINES (0.45) and verified (1.0) —
+        # a maximally specific non-exact seed outranks any homonym but not a
+        # unique verified name. Both are architectural constants from the
+        # existing witness hierarchy, not arbitrary picks.
+        _SEED_CONF_FLOOR = 0.35
+        _SEED_CONF_CEILING = 0.60
+        try:
+            _total_graph_files = conn.execute(
+                "SELECT COUNT(DISTINCT file_path) FROM nodes"
+            ).fetchone()[0] or 1
+        except sqlite3.Error:
+            _total_graph_files = 1
+
+        def _idf_seed_confidence(df: int) -> float:
+            if _total_graph_files <= 1 or df <= 0:
+                return _SEED_CONF_FLOOR
+            _idf = math.log2(_total_graph_files / max(1, df)) / math.log2(
+                max(2, _total_graph_files)
+            )
+            return _SEED_CONF_FLOOR + (_SEED_CONF_CEILING - _SEED_CONF_FLOOR) * min(
+                1.0, _idf
+            )
+
+        # Precompute per-token document frequency for path seeds.
+        _path_token_df: dict[str, int] = {}
+        for sid, name, fp in seeds:
+            _kind, _tok = _seed_provenance.get(sid, ("SEED", ""))
+            if _kind == "PATH_SEED" and _tok and _tok not in _path_token_df:
+                try:
+                    _pats = [f"%/{_tok}.%", f"%/{_tok}/%", f"{_tok}.%"]
+                    _df = 0
+                    for _pp in _pats:
+                        _c = conn.execute(
+                            "SELECT COUNT(DISTINCT file_path) FROM nodes "
+                            "WHERE file_path LIKE ?", (_pp,)
+                        ).fetchone()
+                        _df += (_c[0] if _c else 0)
+                    _path_token_df[_tok] = max(1, _df)
+                except sqlite3.Error:
+                    _path_token_df[_tok] = 1
+
+        # Precompute per-token document frequency for grep seeds.
+        _grep_token_df: dict[str, int] = {}
+        for sid, name, fp in seeds:
+            _kind, _tok = _seed_provenance.get(sid, ("SEED", ""))
+            if _kind == "GREP_SEED":
+                _gt = _tok or _grep_token_by_file.get(fp, "")
+                if _gt and _gt not in _grep_token_df:
+                    _grep_token_df[_gt] = sum(
+                        1 for _gf in grep_recalled
+                        if _gt.lower() in _gf.lower()
+                    ) or 1
+
         for sid, name, fp in seeds:
             if sid not in _exact_seed_ids:
-                # Fix 2026-06-09 (witness provenance): a grep/path/FTS5 seed is a
-                # retrieval ENTRY POINT — the issue did NOT name this symbol.
-                # Minting "defines {name} (issue symbol)" for it fabricated a
-                # verified-grade DEFINES fact (conf 1.0) out of a string/path/BM25
-                # match, which the [VERIFIED] gate, verified-first sort and HIGH
-                # header then consumed as structural truth. These seeds now carry
-                # a seed-typed, UNVERIFIED witness (rendered "grep match: …" /
-                # "path match: …" / "fts5 match: …") at confidence 0.35 — below
-                # the demoted-DEFINES grade (0.45) so an exact-name DEFINES always
-                # outranks them. BFS traversal from these seeds is unchanged.
                 _kind, _tok = _seed_provenance.get(sid, ("SEED", ""))
                 if _kind == "GREP_SEED" and not _tok:
                     _tok = _grep_token_by_file.get(fp, "")
+                if _kind == "PATH_SEED" and _tok:
+                    _seed_conf = _idf_seed_confidence(_path_token_df.get(_tok, 1))
+                elif _kind == "GREP_SEED" and _tok:
+                    _seed_conf = _idf_seed_confidence(
+                        _grep_token_df.get(_tok, len(grep_recalled) or 1)
+                    )
+                else:
+                    _seed_conf = _SEED_CONF_FLOOR
                 witnesses_by_file.setdefault(fp, []).append(
                     Witness(
                         file_path=fp, anchor=name, edge_type=_kind,
                         direction="defines_anchor", verified=False,
-                        confidence=0.35, hop=0,
+                        confidence=_seed_conf, hop=0,
                         src_symbol=_tok or name, dst_symbol=name,
                     )
                 )

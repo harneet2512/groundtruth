@@ -768,11 +768,18 @@ def _edit_target(cmd: str) -> str | None:
         if pt:
             return pt
     nohd = cmd.split("<<", 1)[0] if "<<" in cmd else cmd  # shell scans exclude heredoc body
-    # 1. redirect whose TARGET is a source file (broad — incl. /tmp/ staging)
+    # 1. redirect whose TARGET is a source file (broad — incl. /tmp/ staging).
+    #    SCRATCH DEFER (2026-06-26): a redirect to /tmp/ is a scratch script, not the
+    #    real edit. Defer it as fallback so step 3 can find the actual target inside
+    #    the heredoc body (e.g. `cat > /tmp/fix.py << 'EOF' ... open('Facade.ts','w') ...`).
+    _redir_fallback: str | None = None
     for mm in re.finditer(r">>?\s*([^\s'\"<>|&;]+)", nohd):
         t = mm.group(1).strip("\"'`()")
         if _has_source_ext(t) and "*" not in t and "$" not in t:
-            return t
+            if t.startswith("/tmp/") or t.startswith("/tmp\\"):
+                _redir_fallback = _redir_fallback or t
+            else:
+                return t
     # 2. sed -i / tee / apply_patch -> the source-file argument (last source token)
     first = cmd.split("\n", 1)[0]
     if _EDIT_KW_RE.search(first.lstrip()) or _EDIT_KW_RE.search(first):
@@ -784,7 +791,7 @@ def _edit_target(cmd: str) -> str | None:
         m = rx.search(cmd)
         if m and _has_source_ext(m.group(1)) and "*" not in m.group(1):
             return m.group(1)
-    return None
+    return _redir_fallback
 
 
 # RC5 Signal-1 (CONTENT lexical) + Signal-3 (line range) extractors. The edit

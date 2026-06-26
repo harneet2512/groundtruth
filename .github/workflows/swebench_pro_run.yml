@@ -186,10 +186,15 @@ jobs:
           mkdir -p "$GT_CERT_DIR"
           # Pass the issue text to the substrate so the brief has real anchors
           ISSUE_FILE=/tmp/issue.txt
+          # Mount the checkout's Python code + scripts into the substrate so
+          # fixes to graph_localizer/v1r_brief/gt_mini_patch take effect without
+          # a substrate rebuild. The baked gt-index binary + ONNX model stay as-is.
           docker run --rm \
             -v "$TESTBED:/work:ro" \
             -v "$GT_CERT_DIR:/gt_artifacts" \
             -v "$ISSUE_FILE:/issue.txt:ro" \
+            -v "$GITHUB_WORKSPACE/src/groundtruth:/opt/gt/src/groundtruth:ro" \
+            -v "$GITHUB_WORKSPACE/scripts/swebench:/opt/gt/scripts/swebench:ro" \
             -e GT_PROOF_MODE=1 -e GT_CONTAINERIZED=1 \
             -e GT_REQUIRE_FULL_STACK=1 -e GT_REQUIRE_FTS5=1 \
             -e GT_FORCE_ONNX_EMBEDDER=1 -e GT_REQUIRE_EMBEDDER=1 \
