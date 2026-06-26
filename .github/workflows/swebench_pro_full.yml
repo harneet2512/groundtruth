@@ -285,6 +285,15 @@ jobs:
           path: /tmp/docker-cli-cache
           key: docker-cli-27.3.1-compose-2.29.7-linux-x86_64
 
+      - name: Fetch Pro dataset from release (LFS bypass)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          DS=benchmarks/data/swebench_pro_public_tags.jsonl
+          gh release download pipeline-assets-v1 -p swebench_pro_public_tags.jsonl -D benchmarks/data/ --clobber \
+            || echo "WARN: release download failed — falling back to checkout"
+          head -c 80 "$DS"
+
       - id: gen
         name: Build Pro task matrix (swebench_pro_public_tags.jsonl-driven)
         env:
