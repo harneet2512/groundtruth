@@ -198,6 +198,7 @@ jobs:
         run: |
           python artifact_verified/gt_verified_agent.py \
             --instance-id "${{ matrix.task }}" \
+            --subset "SWE-bench-Live/SWE-bench-Pro" \
             --model "${{ inputs.model }}" \
             --image "$TASK_IMAGE" \
             --config artifact_verified/verified_gt.yaml \
