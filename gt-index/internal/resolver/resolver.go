@@ -1667,11 +1667,9 @@ func Resolve(
 		builtinQualified := qualifiedUnresolved && (strongBuiltinMethodNames[calleeName] || builtinMethodNames[calleeName])
 
 		// Strategy 1.9 fires here ONLY for UNQUALIFIED calls (the ACG/ECOOP 2022
-		// globally-unique-name property holds for bare names). #B5: a QUALIFIED call
-		// previously got demoted to name_match conf=0.2 here, BEFORE the type-aware
-		// rungs 1.93-1.98 ever ran — starving e.g. a declared-type receiver
-		// (`command.run()` with `command: Command`) of its type_flow resolution. The
-		// qualified-unresolved demote now runs as the true last chance after 1.98.
+		// globally-unique-name property holds for bare names). Qualified calls go
+		// through the receiver-typing strategies (1.75/1.93/1.94/1.95/1.96/1.97/1.98)
+		// which prove the receiver type before promoting.
 		if !qualifiedUnresolved {
 			if targets, ok := nodeIDs[calleeName]; ok {
 				var candidates []int64
