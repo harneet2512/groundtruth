@@ -127,9 +127,21 @@ jobs:
       - name: Install host deps
         run: |
           pip install --upgrade pip
-          pip install -e .
+          # mini-swe-agent ships its own 'pier' package that conflicts with datacurve-pier.
+          # Install mini-swe-agent FIRST, then GT editable (which may need datacurve-pier
+          # for the DeepSWE path but the Pro path doesn't use it).
           pip install "mini-swe-agent==2.2.8" "swebench==4.1.0" datasets
-          echo "PYTHONPATH=$GITHUB_WORKSPACE/src:$GITHUB_WORKSPACE/scripts/swebench:$GITHUB_WORKSPACE/scripts/metrics" >> "$GITHUB_ENV"
+          pip install -e . --no-deps
+          # Clear any stale bytecode so the try/except pier import in gt_agent.py is fresh.
+          find artifact_deepswe -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+          echo "PYTHONPATH=$GITHUB_WORKSPACE/src:$GITHUB_WORKSPACE/artifact_deepswe:$GITHUB_WORKSPACE/scripts/swebench:$GITHUB_WORKSPACE/scripts/metrics" >> "$GITHUB_ENV"
+          python -c "
+          try:
+              from pier.models.trial.paths import EnvironmentPaths
+              print('pier.models.trial available (datacurve-pier)')
+          except (ImportError, ModuleNotFoundError):
+              print('pier.models.trial NOT available (mini-swe-agent pier) — gt_agent try/except will handle this')
+          "
       - name: GHCR login
         run: |
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
