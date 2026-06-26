@@ -199,10 +199,9 @@ jobs:
           python artifact_verified/gt_verified_agent.py \
             --instance-id "${{ matrix.task }}" \
             --model "${{ inputs.model }}" \
-            --issue-file /tmp/issue.txt \
             --image "$TASK_IMAGE" \
-            --gt-cert-dir "$GT_CERT_DIR" \
-            --output-dir /tmp/pro_output \
+            --config artifact_verified/verified_gt.yaml \
+            --output /tmp/pro_output \
             2>&1 | tee /tmp/trial_output.log || true
       - name: Upload artifacts
         if: always()
