@@ -295,6 +295,10 @@ class V1RBriefResult:
     rendered_candidate_count: int = 0     # number of rendered/delivered candidates (== len(files))
     k_sem_top: int = 0                    # the relative sem-component cap actually used (from run_v74)
     sem_components: list[float] = field(default_factory=list)  # components['sem'] over rendered candidates
+    # Per-rendered-candidate proof payload persisted to substrate ``brief_result.json``.
+    # Observability only: lets Stage-1 audits explain why each delivered file ranked
+    # where it did without changing the brief text or ranking behavior.
+    localization_proof: list[dict[str, object]] = field(default_factory=list)
 
 
 def _provenance_order_clause(
@@ -3269,6 +3273,13 @@ def generate_v1r_brief(
         ".md",
         ".txt",
     }
+    _NON_SOURCE_NAMES = {name.lower() for name in _NON_SOURCE}
+
+    def _is_non_source_candidate_path(path: str) -> bool:
+        _path = str(path or "")
+        _basename = os.path.basename(_path).lower()
+        _ext = os.path.splitext(_path)[1].lower()
+        return _basename in _NON_SOURCE_NAMES or _ext in _NON_SOURCE_EXTS
 
     # De-dup'd (2026-06-15): the nested test-only _is_test_file MISSED demo dirs, so a
     # docs_src/ tutorial .py (no test basename, .py not in _NON_SOURCE_EXTS) survived the
@@ -3278,8 +3289,7 @@ def generate_v1r_brief(
     top_records = [
         r
         for r in top_records
-        if os.path.basename(r.get("path", "")) not in _NON_SOURCE
-        and os.path.splitext(r.get("path", ""))[1].lower() not in _NON_SOURCE_EXTS
+        if not _is_non_source_candidate_path(r.get("path", ""))
         and not _is_test_or_demo(r.get("path", ""))
     ]
     if not top_records:
@@ -3296,9 +3306,7 @@ def generate_v1r_brief(
             continue
         comps = r.get("components", {})
         if comps.get("path", 0.0) >= 0.5:
-            bn = os.path.basename(r.get("path", ""))
-            ext = os.path.splitext(bn)[1].lower()
-            if bn not in _NON_SOURCE and ext not in _NON_SOURCE_EXTS:
+            if not _is_non_source_candidate_path(r.get("path", "")):
                 _path_rescued.append(r)
         if len(_path_rescued) >= 2:
             break
@@ -3392,9 +3400,7 @@ def generate_v1r_brief(
             _witness_verified_by_file[cf] = cand.has_verified_witness
             _loc_conf_by_file[cf] = cand.confidence
             _loc_rank_by_file[cf] = _ci
-            bn = os.path.basename(cf)
-            ext = os.path.splitext(bn)[1].lower()
-            if bn in _NON_SOURCE or ext in _NON_SOURCE_EXTS:
+            if _is_non_source_candidate_path(cf):
                 continue
             # A witnessed file the lexical path missed is ADDED — this is exactly
             # the beets-5495 case (importer.py absent from lexical candidates).
@@ -3500,9 +3506,7 @@ def generate_v1r_brief(
                 _best_sem = max(
                     _sem_pool, key=lambda r: float(r.get("components", {}).get("sem", 0.0) or 0.0)
                 )
-                _bn = os.path.basename(str(_best_sem.get("path", "")))
-                _ext = os.path.splitext(_bn)[1].lower()
-                if _bn not in _NON_SOURCE and _ext not in _NON_SOURCE_EXTS:
+                if not _is_non_source_candidate_path(str(_best_sem.get("path", ""))):
                     top_records.insert(min(len(_all_verified) + 1, len(top_records)), _best_sem)
 
     # Graph neighbor expansion: callers/callees of top-ranked files become
@@ -3537,9 +3541,7 @@ def generate_v1r_brief(
                 for (neighbor,) in rows:
                     if neighbor in _existing_paths:
                         continue
-                    bn = os.path.basename(neighbor)
-                    ext = os.path.splitext(bn)[1].lower()
-                    if bn in _NON_SOURCE or ext in _NON_SOURCE_EXTS:
+                    if _is_non_source_candidate_path(neighbor):
                         continue
                     _neighbor_candidates.append(
                         {
@@ -3805,11 +3807,38 @@ def generate_v1r_brief(
     # upstream candidate-filter fallback.
     _kept = [
         r for r in top_records
-        if not _is_test_or_demo(r.get("path", "") or "")
+        if not _is_non_source_candidate_path(r.get("path", "") or "")
+        and not _is_test_or_demo(r.get("path", "") or "")
         and not _is_vendored_path(r.get("path", "") or "")
     ]
     if _kept:
         top_records = _kept
+
+    def _issue_evidence_strength(rec: dict) -> float:
+        comps = rec.get("components", {}) if isinstance(rec, dict) else {}
+        if not isinstance(comps, dict):
+            return 0.0
+        total = 0.0
+        for key in ("lex", "sem", "path", "reach", "anchor_prox", "witness", "code_def", "frame"):
+            try:
+                total += max(0.0, float(comps.get(key, 0.0) or 0.0))
+            except Exception:
+                continue
+        if rec.get("witness_verified", False):
+            total += 1.0
+        return total
+
+    _with_order = list(enumerate(top_records))
+    _evidence_records = [
+        (idx, rec, _issue_evidence_strength(rec))
+        for idx, rec in _with_order
+    ]
+    if any(strength > 0.0 for _, _, strength in _evidence_records):
+        _supported = [(idx, rec, strength) for idx, rec, strength in _evidence_records if strength > 0.0]
+        _hollow = [(idx, rec, strength) for idx, rec, strength in _evidence_records if strength <= 0.0]
+        _supported.sort(key=lambda item: (-item[2], item[0]))
+        top_records = [rec for _, rec, _ in _supported] + [rec for _, rec, _ in _hollow]
+
     entries: list[FileEntry] = []
     for rec in top_records:
         path = str(rec.get("path", ""))
@@ -3891,7 +3920,6 @@ def generate_v1r_brief(
         )
         if _pi not in (None, 0):
             entries.insert(0, entries.pop(_pi))
-
     # BUG-3 instrumentation: prove whether anchor_prox actually reaches the FileEntry on
     # the LIVE brief path (the l1_ranking_diagnosis showed 1.0, but the rendered brief
     # dropped those files — telemetry-vs-delivery gap). Logs the per-entry tier + anchor_prox
@@ -4158,6 +4186,32 @@ def generate_v1r_brief(
     ]
     _eff_w_sem = float(getattr(v74, "effective_w_sem", 0.0) or 0.0)
     _k_sem_top = int(getattr(v74, "k_sem_top_effective", 0) or 0)
+    _localization_proof: list[dict[str, object]] = []
+    for _i, (_e, _r) in enumerate(zip(_delivered, _aligned_records), start=1):
+        _comps_raw = (_r.get("components", {}) if isinstance(_r, dict) else {}) or {}
+        _components: dict[str, float] = {}
+        for _ck, _cv in _comps_raw.items():
+            try:
+                _components[str(_ck)] = float(_cv or 0.0)
+            except Exception:
+                continue
+        _localization_proof.append({
+            "rank": _i,
+            "path": getattr(_e, "path", ""),
+            "score": float(getattr(_e, "score", 0.0) or 0.0),
+            "function_names": list(getattr(_e, "function_names", []) or [])[:8],
+            "witness": getattr(_e, "witness", "") or "",
+            "witness_verified": bool(getattr(_e, "witness_verified", False)),
+            "localizer_confidence": float(getattr(_e, "localizer_confidence", 0.0) or 0.0),
+            "anchor_prox": float(getattr(_e, "anchor_prox", 0.0) or 0.0),
+            "components": _components,
+            "semantic_component": float(_components.get("sem", 0.0) or 0.0),
+            "lex_component": float(_components.get("lex", 0.0) or 0.0),
+            "reach_component": float(_components.get("reach", 0.0) or 0.0),
+            "path_component": float(_components.get("path", 0.0) or 0.0),
+            "witness_component": float(_components.get("witness", 0.0) or 0.0),
+            "entered_via": str(_r.get("entered_via", "") if isinstance(_r, dict) else ""),
+        })
 
     # --- AUDIT snapshots (READ-ONLY; gated by GT_AUDIT_DIR; no ranking effect) ---
     # Persists the absorption lineage: for each rendered entry, the LIVE (exact-path)
@@ -4225,6 +4279,7 @@ def generate_v1r_brief(
         rendered_candidate_count=len(_delivered),
         k_sem_top=_k_sem_top,
         sem_components=_sem_components,
+        localization_proof=_localization_proof,
     )
 
     # Structured telemetry: emit L1 candidates as JSON for wrapper to parse

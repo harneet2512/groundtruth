@@ -75,6 +75,31 @@ func TestFileAnchor_BarrelStillMintsNode(t *testing.T) {
 // not be recorded as a field_read; a genuine read (`self.width`) must be.
 // A chained call's receiver (`self.x` in `self.x.compute()`) is a genuine read
 // and must survive.
+func TestJSFunctionExpression_CommonJSExportIsIndexed(t *testing.T) {
+	src := "'use strict';\n" +
+		"module.exports = function query(options) {\n" +
+		"  return function handler(req, res, next) { next(); };\n" +
+		"};\n" +
+		"exports.extra = function () { return 1; };\n"
+	res := parseFixture(t, "query.js", src)
+
+	names := map[string]bool{}
+	paths := map[string]bool{}
+	for _, n := range res.Nodes {
+		names[n.Name] = true
+		paths[n.FilePath] = true
+	}
+	if !names["query"] {
+		t.Fatalf("CommonJS named function expression was not indexed; nodes=%v", res.Nodes)
+	}
+	if !names["extra"] {
+		t.Fatalf("CommonJS property function expression was not named from export target; nodes=%v", res.Nodes)
+	}
+	if !paths["query.js"] {
+		t.Fatalf("indexed nodes did not preserve source path; nodes=%v", res.Nodes)
+	}
+}
+
 func TestFieldRead_SkipsMethodCalls_Python(t *testing.T) {
 	src := "class C:\n" +
 		"    def f(self):\n" +

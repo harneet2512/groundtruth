@@ -56,6 +56,18 @@ def _brief_obj(text):
     return _B()
 
 
+def _brief_obj_with_localization(text, *, sem_count=1, proof=None):
+    class _B:
+        brief_text = text
+        effective_w_sem = 0.5
+        semantic_signal_count = sem_count
+        rendered_candidate_count = len(proof or [])
+        k_sem_top = len(proof or [])
+        sem_components = [float((r.get("components", {}) or {}).get("sem", 0.0) or 0.0) for r in (proof or [])]
+        localization_proof = proof or []
+    return _B()
+
+
 def test_emit_brief_empty_is_fail_closed(tmp_path):
     ok, detail = grp.emit_brief(str(tmp_path), "fix the bug", "/work", "/g.db",
                                 generator=lambda **kw: _brief_obj(""))
@@ -78,6 +90,36 @@ def test_emit_brief_writes_nonempty_brief(tmp_path):
     assert ok is True
     with open(os.path.join(str(tmp_path), "brief.txt"), encoding="utf-8") as f:
         assert f.read() == "EDIT-TARGET: src/x.py"
+
+
+def test_emit_brief_live_localization_diagnostic_halts_before_delivery(tmp_path, monkeypatch):
+    monkeypatch.setenv("GT_FULL_POTENTIAL", "1")
+    bad = _brief_obj_with_localization(
+        "EDIT-TARGET: src/x.py",
+        sem_count=0,
+        proof=[{"path": "src/x.py", "components": {}}],
+    )
+    ok, detail = grp.emit_brief(str(tmp_path), "fix the bug", "/work", "/g.db",
+                                generator=lambda **kw: bad)
+    assert ok is False
+    assert "live localization diagnostic HALT" in detail
+    assert "ZERO_EVIDENCE_DELIVERED" in detail
+    assert "SEMANTIC_SIGNAL_ZERO" in detail
+    assert not os.path.exists(os.path.join(str(tmp_path), "brief.txt"))
+    assert os.path.exists(os.path.join(str(tmp_path), "localization_diagnostic.json"))
+
+
+def test_emit_brief_live_localization_diagnostic_allows_supported_brief(tmp_path):
+    good = _brief_obj_with_localization(
+        "EDIT-TARGET: src/x.py",
+        sem_count=1,
+        proof=[{"path": "src/x.py", "components": {"sem": 0.42, "lex": 0.2}}],
+    )
+    ok, detail = grp.emit_brief(str(tmp_path), "fix the bug", "/work", "/g.db",
+                                generator=lambda **kw: good)
+    assert ok is True, detail
+    assert os.path.exists(os.path.join(str(tmp_path), "brief.txt"))
+    assert os.path.exists(os.path.join(str(tmp_path), "localization_diagnostic.json"))
 
 
 # ── P1-e: polyglot per-language verdict AGGREGATION (no sibling masking) ──────

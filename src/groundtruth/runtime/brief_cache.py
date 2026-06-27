@@ -28,6 +28,7 @@ BRIEF_RESULT_SCHEMA = "gt.brief_result.v1"
 _METRIC_FIELDS = (
     "effective_w_sem", "semantic_signal_count",
     "rendered_candidate_count", "k_sem_top", "sem_components",
+    "localization_proof",
 )
 
 
@@ -51,8 +52,9 @@ def _extract_metrics(obj: Any) -> dict:
     out = {}
     for k in _METRIC_FIELDS:
         v = _get(k)
-        # sem_components may be a non-JSON-able object; keep only JSON-safe scalars/lists.
-        if k == "sem_components" and v is not None and not isinstance(v, (list, dict, int, float, str, bool)):
+        # Some metric payloads may carry dataclass-ish or iterator values; keep only
+        # JSON-safe scalars/lists/dicts so proof persistence cannot affect briefing.
+        if k in {"sem_components", "localization_proof"} and v is not None and not isinstance(v, (list, dict, int, float, str, bool)):
             try:
                 v = list(v)
             except TypeError:

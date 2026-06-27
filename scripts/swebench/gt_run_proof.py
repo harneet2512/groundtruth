@@ -707,6 +707,51 @@ def emit_brief(out_dir: str, issue_text: str, work: str, graph: str, *, generato
         return False, ("portable brief EMPTY — proof mode requires a non-empty brief.txt "
                        "(the agent consumes /gt_artifacts/brief.txt; there is no host fallback)")
     try:
+        from groundtruth.runtime.localization_diagnostic import validate_brief_payload
+
+        _gold_env = os.environ.get("GT_LOCALIZATION_GOLD_FILES", "")
+        _gold_files = [p.strip() for p in _gold_env.replace(";", ",").split(",") if p.strip()]
+        _full_potential = os.environ.get("GT_FULL_POTENTIAL", "0") == "1"
+        _strict_diag = (
+            _full_potential
+            or os.environ.get("GT_LOCALIZATION_DIAGNOSTIC_STRICT", "0") == "1"
+        )
+        _require_semantic = (
+            _full_potential
+            or os.environ.get("GT_LOCALIZATION_REQUIRE_SEMANTIC", "0") == "1"
+        )
+        _require_gold = (
+            bool(_gold_files)
+            and (
+                _full_potential
+                or os.environ.get("GT_LOCALIZATION_REQUIRE_GOLD", "0") == "1"
+            )
+        )
+        _diag = validate_brief_payload(
+            result,
+            gold_files=_gold_files,
+            require_gold=_require_gold,
+            require_semantic=_require_semantic,
+        )
+        with open(os.path.join(out_dir, "localization_diagnostic.json"), "w", encoding="utf-8") as _df:
+            json.dump(_diag, _df, indent=2, sort_keys=True)
+        if _strict_diag and not _diag.get("ok", False):
+            return False, (
+                "live localization diagnostic HALT before brief delivery: "
+                + ",".join(str(v) for v in _diag.get("violations", []))
+            )
+    except Exception as e:
+        if (
+            os.environ.get("GT_LOCALIZATION_DIAGNOSTIC_STRICT", "0") == "1"
+            or os.environ.get("GT_FULL_POTENTIAL", "0") == "1"
+        ):
+            return False, f"live localization diagnostic raised: {type(e).__name__}: {e}"
+        try:
+            with open(os.path.join(out_dir, "localization_diagnostic_error.txt"), "w", encoding="utf-8") as _ef:
+                _ef.write(f"{type(e).__name__}: {e}")
+        except OSError:
+            pass
+    try:
         with open(os.path.join(out_dir, "brief.txt"), "w", encoding="utf-8") as bf:
             bf.write(bt)
     except OSError as e:

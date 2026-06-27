@@ -507,6 +507,14 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 				name = extractFieldText(parent, "name", src)
 			}
 		}
+		// JS/TS fix: function expressions assigned to variables/properties/exports
+		// are executable module entry points even when they are not declarations:
+		// `const fn = function() {}`, `exports.fn = function() {}`,
+		// `module.exports = function() {}`. Name them from the assignment target so
+		// source files do not disappear from the substrate graph.
+		if name == "" && (nodeType == "function_expression" || nodeType == "arrow_function") {
+			name = assignedFunctionExpressionName(node, sf, src)
+		}
 		if name != "" {
 			sig := extractDecoratorPrefix(node, src) + extractSignature(node, src, spec.BodyField)
 			retType := extractFieldText(node, spec.ReturnTypeField, src)
@@ -839,6 +847,49 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 		child := node.Child(i)
 		walkNode(child, sf, src, isTest, result, parentNodeIdx)
 	}
+}
+
+func assignedFunctionExpressionName(node *sitter.Node, sf walker.SourceFile, src []byte) string {
+	parent := node.Parent()
+	if parent == nil {
+		return ""
+	}
+	switch parent.Type() {
+	case "variable_declarator":
+		return normalizeAssignedSymbolName(extractFieldText(parent, "name", src), sf)
+	case "assignment_expression", "assignment":
+		lhs := parent.ChildByFieldName("left")
+		if lhs == nil {
+			lhs = parent.ChildByFieldName("name")
+		}
+		if lhs == nil {
+			return ""
+		}
+		return normalizeAssignedSymbolName(lhs.Content(src), sf)
+	}
+	return ""
+}
+
+func normalizeAssignedSymbolName(raw string, sf walker.SourceFile) string {
+	name := strings.TrimSpace(raw)
+	if name == "" {
+		return ""
+	}
+	if name == "module.exports" || name == "exports" {
+		base := sf.Path
+		if idx := strings.LastIndexAny(base, "/\\"); idx >= 0 {
+			base = base[idx+1:]
+		}
+		if dot := strings.LastIndexByte(base, '.'); dot > 0 {
+			base = base[:dot]
+		}
+		return strings.TrimSpace(base)
+	}
+	if dotIdx := strings.LastIndex(name, "."); dotIdx >= 0 {
+		name = name[dotIdx+1:]
+	}
+	name = strings.Trim(name, " \t\r\n[]'\"`")
+	return name
 }
 
 func extractCalls(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, callerIdx int) {
