@@ -164,28 +164,39 @@ func loadGitignore(path string) []string {
 
 func isIgnored(relPath string, patterns []string) bool {
 	base := filepath.Base(relPath)
+	ignored := false
 	for _, p := range patterns {
-		// Glob matching against basename
-		if matched, _ := filepath.Match(p, base); matched {
-			return true
+		// Gitignore negation: !pattern unignores a previously ignored file.
+		// The last matching rule wins (git semantics).
+		negate := false
+		pat := p
+		if strings.HasPrefix(p, "!") {
+			negate = true
+			pat = p[1:]
 		}
-		// Directory-level matching: pattern matches a directory component
-		// e.g. "vendor" matches "vendor/foo.go" but NOT "foo_vendor.go"
-		// e.g. "_test" matches "_test/foo.go" but NOT "foo_test.go"
-		if strings.Contains(p, "/") {
-			// Path pattern: match against full relative path
-			if matched, _ := filepath.Match(p, relPath); matched {
-				return true
+		matched := false
+		// Glob matching against basename
+		if m, _ := filepath.Match(pat, base); m {
+			matched = true
+		}
+		if !matched {
+			// Directory-level matching
+			if strings.Contains(pat, "/") {
+				if m, _ := filepath.Match(pat, relPath); m {
+					matched = true
+				}
+			} else {
+				dirPart := "/" + filepath.ToSlash(relPath) + "/"
+				if strings.Contains(dirPart, "/"+pat+"/") {
+					matched = true
+				}
 			}
-		} else {
-			// Simple name: match as directory component only
-			dirPart := "/" + filepath.ToSlash(relPath) + "/"
-			if strings.Contains(dirPart, "/"+p+"/") {
-				return true
-			}
+		}
+		if matched {
+			ignored = !negate
 		}
 	}
-	return false
+	return ignored
 }
 
 // IsTestFile checks if a file path is a test file based on conventions.
