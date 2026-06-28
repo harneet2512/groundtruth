@@ -10,7 +10,7 @@ def _payload(path: str, components: dict, *, sem_count: int = 1) -> dict:
             "rendered_candidate_count": 1,
             "semantic_signal_count": sem_count,
             "sem_components": [float(components.get("sem", 0.0) or 0.0)],
-            "localization_proof": [{"path": path, "components": components}],
+            "localization_proof": [{"path": path, "components": components, "entered_via": "test_route"}],
         },
     }
 
@@ -80,3 +80,18 @@ def test_missing_proof_and_missing_semantic_log_fail_closed():
     assert report["ok"] is False
     assert "LOCALIZATION_PROOF_MISSING" in report["violations"]
     assert "SEMANTIC_COMPONENT_LOG_MISSING" in report["violations"]
+
+
+def test_evidence_candidate_without_route_fails_closed():
+    payload = {
+        "brief_text": "EDIT-TARGET: src/x.py",
+        "metrics": {
+            "rendered_candidate_count": 1,
+            "semantic_signal_count": 1,
+            "sem_components": [0.3],
+            "localization_proof": [{"path": "src/x.py", "components": {"sem": 0.3}}],
+        },
+    }
+    report = validate_brief_payload(payload, require_semantic=True)
+    assert report["ok"] is False
+    assert "CANDIDATE_ROUTE_MISSING" in report["violations"]

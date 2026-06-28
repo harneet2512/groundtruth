@@ -92,6 +92,25 @@ _DEMO_NONSOURCE_DIR_SEGMENTS: frozenset[str] = frozenset({
     "fuzz", "fuzzing", "fuzz_targets", "corpus", "testcases",
     "conformance", "compat", "integration_tests", "e2e_tests",
 })
+_TEST_TOOLING_ROOT_SEGMENTS: frozenset[str] = frozenset(
+    set(_TEST_DIR_SEGMENTS)
+    | set(_DEMO_NONSOURCE_DIR_SEGMENTS)
+    | {
+        "support",
+        "supports",
+        "helper",
+        "helpers",
+        "mock",
+        "mocks",
+        "stub",
+        "stubs",
+        "fake",
+        "fakes",
+        "testdata",
+        "testutils",
+        "testutil",
+    }
+)
 
 
 def _path_segments(path: str) -> tuple[list[str], str]:
@@ -125,6 +144,18 @@ def is_test_or_demo(path: str) -> bool:
     if any(s in _DEMO_NONSOURCE_DIR_SEGMENTS for s in segs[:-1]):
         return True
     return is_test_path(path)
+
+
+def _has_test_tooling_root_marker(path: str) -> bool:
+    """True when a candidate root's own path indicates test/support/tooling.
+
+    Import topology alone is not a source-role proof: normal production roots can
+    be imported mostly or only by tests in sparse graphs. Hard test-tooling
+    exclusion therefore needs an independent path-role marker before the graph
+    import fixpoint may classify the root.
+    """
+    segs, _ = _path_segments(path)
+    return any(s in _TEST_TOOLING_ROOT_SEGMENTS for s in segs)
 
 
 def is_deliverable(path: str) -> bool:
@@ -191,6 +222,8 @@ def test_tooling_roots(graph_db: str) -> frozenset[str]:
         changed = False
         for d, imps in ext_importers.items():
             if d in roots:
+                continue
+            if not _has_test_tooling_root_marker(d):
                 continue
             if imps and all(
                 is_test_path(i) or any(i == r or i.startswith(r + "/") for r in roots)

@@ -1,5 +1,13 @@
 """CP009 — centralized path_policy tests."""
-from groundtruth.delivery.path_policy import is_delivery_excluded, is_generated, is_vendored_path
+import sqlite3
+
+from groundtruth.delivery.path_policy import (
+    is_delivery_excluded,
+    is_generated,
+    is_test_tooling,
+    is_vendored_path,
+    test_tooling_roots as tooling_roots,
+)
 
 
 def test_vendor_paths_excluded():
@@ -16,3 +24,65 @@ def test_generated_markers():
 def test_tailwind_asset_excluded():
     assert is_delivery_excluded("static/tailwind.min.js")
     assert is_delivery_excluded("assets/tailwind.config.js")
+
+
+def test_test_imports_do_not_make_generic_source_root_tooling(tmp_path):
+    db = tmp_path / "graph.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE nodes (
+            id INTEGER PRIMARY KEY,
+            file_path TEXT
+        );
+        CREATE TABLE edges (
+            id INTEGER PRIMARY KEY,
+            source_id INTEGER,
+            target_id INTEGER,
+            type TEXT
+        );
+        INSERT INTO nodes(id, file_path) VALUES
+            (1, 'test/request.test.js'),
+            (2, 'lib/utils.js'),
+            (3, 'lib/request.js');
+        INSERT INTO edges(source_id, target_id, type) VALUES
+            (1, 2, 'IMPORTS'),
+            (1, 3, 'IMPORTS');
+        """
+    )
+    conn.close()
+
+    roots = tooling_roots(str(db))
+
+    assert "lib" not in roots
+    assert not is_test_tooling("lib/utils.js", roots)
+
+
+def test_test_support_root_can_be_tooling_when_imported_only_by_tests(tmp_path):
+    db = tmp_path / "graph.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE nodes (
+            id INTEGER PRIMARY KEY,
+            file_path TEXT
+        );
+        CREATE TABLE edges (
+            id INTEGER PRIMARY KEY,
+            source_id INTEGER,
+            target_id INTEGER,
+            type TEXT
+        );
+        INSERT INTO nodes(id, file_path) VALUES
+            (1, 'test/request.test.js'),
+            (2, 'test/support/utils.js');
+        INSERT INTO edges(source_id, target_id, type) VALUES
+            (1, 2, 'IMPORTS');
+        """
+    )
+    conn.close()
+
+    roots = tooling_roots(str(db))
+
+    assert "test/support" in roots
+    assert is_test_tooling("test/support/utils.js", roots)

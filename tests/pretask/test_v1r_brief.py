@@ -540,12 +540,48 @@ def test_generate_v1r_brief_empty_on_no_signal(mock_v74: MagicMock) -> None:
 
 @patch("groundtruth.pretask.v1r_brief.run_v74")
 @patch("groundtruth.pretask.v1r_brief._top_functions", return_value=[])
-def test_generate_v1r_brief_emits_low_score_candidates(_mock_funcs, mock_v74: MagicMock) -> None:
+def test_generate_v1r_brief_does_not_deliver_blind_low_score_candidates(_mock_funcs, mock_v74: MagicMock) -> None:
     mock_v74.return_value = MagicMock(ranked_full=[{"path": "a.py", "score": 0.1}])
     result = generate_v1r_brief("fix auth bug", "/repo", "/db.sqlite")
-    assert len(result.files) == 1
-    assert result.files[0].path == "a.py"
-    assert "1. a.py" in result.brief_text
+    assert result.files == []
+    assert "1. a.py" not in result.brief_text
+
+
+@patch("groundtruth.pretask.v1r_brief.run_v74")
+@patch("groundtruth.pretask.v1r_brief._top_functions", return_value=["foo"])
+def test_generate_v1r_brief_drops_hollow_candidates_when_supported_exists(_mock_funcs, mock_v74: MagicMock) -> None:
+    mock_v74.return_value = MagicMock(
+        ranked_full=[
+            {"path": "src/hollow.py", "score": 0.99, "components": {}},
+            {"path": "src/supported.py", "score": 0.10, "components": {"sem": 0.4, "lex": 0.2}},
+        ]
+    )
+    result = generate_v1r_brief("fix auth bug", "/repo", "/db.sqlite")
+    assert [f.path for f in result.files] == ["src/supported.py"]
+    assert result.localization_proof[0]["entered_via"] == "evidence:lexical+semantic"
+
+
+@patch("groundtruth.pretask.v1r_brief.run_v74")
+@patch("groundtruth.pretask.v1r_brief._top_functions", return_value=["foo"])
+def test_generate_v1r_brief_drops_declaration_test_candidates(_mock_funcs, mock_v74: MagicMock) -> None:
+    mock_v74.return_value = MagicMock(
+        ranked_full=[
+            {
+                "path": "packages-private/dts-test/component.test-d.ts",
+                "score": 0.99,
+                "components": {"sem": 0.8, "lex": 0.2},
+                "entered_via": "semantic_seed",
+            },
+            {
+                "path": "packages/runtime-core/src/component.ts",
+                "score": 0.10,
+                "components": {"sem": 0.3},
+                "entered_via": "semantic_seed",
+            },
+        ]
+    )
+    result = generate_v1r_brief("fix component behavior", "/repo", "/db.sqlite")
+    assert [f.path for f in result.files] == ["packages/runtime-core/src/component.ts"]
 
 
 @patch("groundtruth.pretask.v1r_brief.run_v74")
@@ -620,9 +656,9 @@ def test_sparse_graph_no_suppression(
     """On sparse graphs, modulus gate must NOT suppress the brief."""
     mock_v74.return_value = MagicMock(
         ranked_full=[
-            {"path": "src/urls.py", "score": 0.8, "components": {"path": 0.0}},
-            {"path": "src/validator.py", "score": 0.7, "components": {"path": 0.0}},
-            {"path": "src/render.py", "score": 0.6, "components": {"path": 0.0}},
+            {"path": "src/urls.py", "score": 0.8, "components": {"lex": 0.4}},
+            {"path": "src/validator.py", "score": 0.7, "components": {"lex": 0.3}},
+            {"path": "src/render.py", "score": 0.6, "components": {"lex": 0.2}},
         ]
     )
     result = generate_v1r_brief("fix url parsing bug", "/repo", sparse_graph_db)

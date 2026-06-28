@@ -122,6 +122,14 @@ def validate_brief_payload(
     if non_source_paths:
         violations.append("NON_SOURCE_OR_TEST_DELIVERED")
 
+    missing_route_paths = [
+        _norm(str(rec.get("path", "")))
+        for rec in proof
+        if evidence_sum(rec) > 0.0 and not str(rec.get("entered_via", "") or "").strip()
+    ]
+    if missing_route_paths:
+        violations.append("CANDIDATE_ROUTE_MISSING")
+
     sem_components = metrics.get("sem_components")
     if not isinstance(sem_components, list):
         violations.append("SEMANTIC_COMPONENT_LOG_MISSING")
@@ -151,8 +159,10 @@ def validate_brief_payload(
             "gold_rank": gold_rank,
             "zero_evidence_count": len(zero_evidence_paths),
             "non_source_or_test_count": len(non_source_paths),
+            "missing_route_count": len(missing_route_paths),
         },
         "zero_evidence_paths": zero_evidence_paths,
         "non_source_or_test_paths": non_source_paths,
+        "missing_route_paths": missing_route_paths,
         "gold_files": gold,
     }

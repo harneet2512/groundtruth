@@ -3272,6 +3272,10 @@ def generate_v1r_brief(
         ".rst",
         ".md",
         ".txt",
+        ".yml",
+        ".yaml",
+        ".toml",
+        ".lock",
     }
     _NON_SOURCE_NAMES = {name.lower() for name in _NON_SOURCE}
 
@@ -3279,6 +3283,11 @@ def generate_v1r_brief(
         _path = str(path or "")
         _basename = os.path.basename(_path).lower()
         _ext = os.path.splitext(_path)[1].lower()
+        if _basename.endswith((".test-d.ts", ".test-d.tsx", ".spec-d.ts", ".spec-d.tsx")):
+            return True
+        _parts = [p for p in _path.replace("\\", "/").lower().split("/") if p]
+        if "dts-test" in _parts:
+            return True
         return _basename in _NON_SOURCE_NAMES or _ext in _NON_SOURCE_EXTS
 
     # De-dup'd (2026-06-15): the nested test-only _is_test_file MISSED demo dirs, so a
@@ -3811,8 +3820,7 @@ def generate_v1r_brief(
         and not _is_test_or_demo(r.get("path", "") or "")
         and not _is_vendored_path(r.get("path", "") or "")
     ]
-    if _kept:
-        top_records = _kept
+    top_records = _kept
 
     def _issue_evidence_strength(rec: dict) -> float:
         comps = rec.get("components", {}) if isinstance(rec, dict) else {}
@@ -3828,16 +3836,69 @@ def generate_v1r_brief(
             total += 1.0
         return total
 
+    def _positive_evidence_classes(rec: dict) -> dict[str, float]:
+        comps = rec.get("components", {}) if isinstance(rec, dict) else {}
+        if not isinstance(comps, dict):
+            comps = {}
+
+        def _pos(key: str) -> float:
+            try:
+                return max(0.0, float(comps.get(key, 0.0) or 0.0))
+            except Exception:
+                return 0.0
+
+        structural = _pos("reach") + _pos("anchor_prox") + _pos("witness")
+        if rec.get("witness_verified", False):
+            structural += 1.0
+        return {
+            "lexical": _pos("lex") + _pos("code_def"),
+            "semantic": _pos("sem"),
+            "structural": structural,
+            "path": _pos("path"),
+            "historical": _pos("frame"),
+        }
+
+    def _class_count(rec: dict) -> int:
+        return sum(1 for v in _positive_evidence_classes(rec).values() if v > 0.0)
+
+    def _ensure_entered_via(rec: dict) -> dict:
+        if str(rec.get("entered_via", "") or "").strip():
+            return rec
+        classes = [k for k, v in _positive_evidence_classes(rec).items() if v > 0.0]
+        if not classes:
+            return rec
+        out = dict(rec)
+        out["entered_via"] = "evidence:" + "+".join(classes)
+        return out
+
+    def _rrf_evidence_scores(records: list[dict]) -> dict[int, float]:
+        scores = {id(rec): 0.0 for rec in records}
+        for cls in ("lexical", "semantic", "structural", "path", "historical"):
+            ranked = []
+            for idx, rec in enumerate(records):
+                val = _positive_evidence_classes(rec).get(cls, 0.0)
+                if val > 0.0:
+                    ranked.append((idx, rec, val))
+            ranked.sort(key=lambda item: (-item[2], item[0]))
+            for rank, (_idx, rec, _val) in enumerate(ranked, start=1):
+                scores[id(rec)] += 1.0 / float(60 + rank)
+        return scores
+
     _with_order = list(enumerate(top_records))
     _evidence_records = [
-        (idx, rec, _issue_evidence_strength(rec))
+        (idx, _ensure_entered_via(rec), _issue_evidence_strength(rec))
         for idx, rec in _with_order
     ]
-    if any(strength > 0.0 for _, _, strength in _evidence_records):
-        _supported = [(idx, rec, strength) for idx, rec, strength in _evidence_records if strength > 0.0]
-        _hollow = [(idx, rec, strength) for idx, rec, strength in _evidence_records if strength <= 0.0]
-        _supported.sort(key=lambda item: (-item[2], item[0]))
-        top_records = [rec for _, rec, _ in _supported] + [rec for _, rec, _ in _hollow]
+    _supported = [(idx, rec, strength) for idx, rec, strength in _evidence_records if strength > 0.0]
+    if _supported:
+        _rrf = _rrf_evidence_scores([rec for _, rec, _ in _supported])
+        _supported.sort(key=lambda item: (-_rrf.get(id(item[1]), 0.0), -_class_count(item[1]), -item[2], item[0]))
+        top_records = [rec for _, rec, _ in _supported]
+    else:
+        # Product invariant: no blind delivery. An all-hollow candidate set is a
+        # localization failure, not an edit-target list. The live diagnostic gate
+        # records/halts this as empty proof instead of silently delivering noise.
+        top_records = []
 
     entries: list[FileEntry] = []
     for rec in top_records:

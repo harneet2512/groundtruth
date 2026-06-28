@@ -85,7 +85,7 @@ def _is_non_source_or_test(path: str) -> bool:
         return True
     if any(part in {"node_modules", "vendor", "third_party", "site-packages"} for part in parts):
         return True
-    if "dts-test" in parts or (len(parts) >= 2 and parts[0] == "packages-private"):
+    if "dts-test" in parts:
         return True
     return False
 

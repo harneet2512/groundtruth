@@ -113,7 +113,7 @@ def test_emit_brief_live_localization_diagnostic_allows_supported_brief(tmp_path
     good = _brief_obj_with_localization(
         "EDIT-TARGET: src/x.py",
         sem_count=1,
-        proof=[{"path": "src/x.py", "components": {"sem": 0.42, "lex": 0.2}}],
+        proof=[{"path": "src/x.py", "components": {"sem": 0.42, "lex": 0.2}, "entered_via": "semantic_seed"}],
     )
     ok, detail = grp.emit_brief(str(tmp_path), "fix the bug", "/work", "/g.db",
                                 generator=lambda **kw: good)
