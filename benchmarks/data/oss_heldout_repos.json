@@ -1,0 +1,22 @@
+{
+  "gin": {
+    "url": "https://github.com/gin-gonic/gin",
+    "commit": "da1e108614ecbbadfa5736b1b297b16121d23b9b"
+  },
+  "axios": {
+    "url": "https://github.com/axios/axios",
+    "commit": "1792eda11aff8fe0f8c8a6e5ae6ff305740a6460"
+  },
+  "hono": {
+    "url": "https://github.com/honojs/hono",
+    "commit": "fab3b13639339cbd5ba1166a5b23d9ac30c5f64f"
+  },
+  "serde": {
+    "url": "https://github.com/serde-rs/serde",
+    "commit": "babafa54d283fb087fa94f50a2cf82fa9e582a7c"
+  },
+  "requests": {
+    "url": "https://github.com/psf/requests",
+    "commit": "661970d171d9c3e12e4c789c4768db647d8c4da0"
+  }
+}

@@ -7,6 +7,14 @@ on:
         description: "Pinned GT substrate digest"
         required: true
         default: ""
+      cases_file:
+        description: "Cases manifest (relative to benchmarks/data/)"
+        required: false
+        default: "oss_localization_cases.json"
+      repos_file:
+        description: "Repos manifest (relative to benchmarks/data/)"
+        required: false
+        default: "oss_repos.json"
 
 permissions:
   contents: read
@@ -29,13 +37,15 @@ jobs:
           docker pull "$DIGEST"
           echo "DIGEST=$DIGEST" >> "$GITHUB_ENV"
       - name: Clone OSS repos at pinned commits
+        env:
+          CASES_FILE: ${{ inputs.cases_file }}
+          REPOS_FILE: ${{ inputs.repos_file }}
         run: |
           mkdir -p /tmp/repos
           python3 -c "
           import json, subprocess, os
-          repos = json.load(open('benchmarks/data/oss_repos.json'))
-          # only clone repos referenced by the cases
-          cases = json.load(open('benchmarks/data/oss_localization_cases.json'))
+          repos = json.load(open('benchmarks/data/' + os.environ['REPOS_FILE']))
+          cases = json.load(open('benchmarks/data/' + os.environ['CASES_FILE']))
           needed = {c['repo'] for c in cases}
           for name in sorted(needed):
               meta = repos[name]
@@ -45,13 +55,15 @@ jobs:
               print(f'cloned {name} @ {meta[\"commit\"][:10]}')
           "
       - name: Run localization pipeline + diagnostic (default fusion)
+        env:
+          CASES_FILE: ${{ inputs.cases_file }}
         run: |
           mkdir -p /tmp/proof_out
           # Mount the checkout's Python over the baked code so the proof tests
           # HEAD (the IDF path fix lands after the substrate was built). gt-index
           # binary + ONNX model + LSP servers stay baked.
           docker run --rm \
-            -v "$GITHUB_WORKSPACE/benchmarks/data/oss_localization_cases.json:/cases.json:ro" \
+            -v "$GITHUB_WORKSPACE/benchmarks/data/$CASES_FILE:/cases.json:ro" \
             -v "$GITHUB_WORKSPACE/scripts/oss_full_pipeline_proof.py:/proof.py:ro" \
             -v "$GITHUB_WORKSPACE/src/groundtruth:/opt/gt/src/groundtruth:ro" \
             -v "/tmp/repos:/repos:ro" \
