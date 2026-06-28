@@ -81,6 +81,26 @@ def main() -> int:
 
     results = []
     cases = json.load(open(cases_file, encoding="utf-8-sig"))
+    # SHARD by language so 5 jobs run in parallel (GT_PROOF_LANG set per matrix leg).
+    _lang_filter = os.environ.get("GT_PROOF_LANG", "").strip().lower()
+    if _lang_filter:
+        cases = [c for c in cases if c.get("language", "").lower() == _lang_filter]
+
+    # Per-case wall-clock cap (fail-closed): one stalled case (e.g. an LSP hang)
+    # can never sink the shard. SIGALRM is Unix-only (the substrate is Linux).
+    import signal
+    _PER_CASE_TIMEOUT = int(os.environ.get("GT_PROOF_CASE_TIMEOUT", "180"))
+
+    class _CaseTimeout(Exception):
+        pass
+
+    def _alarm(_sig, _frm):
+        raise _CaseTimeout()
+    try:
+        signal.signal(signal.SIGALRM, _alarm)
+        _have_alarm = True
+    except Exception:
+        _have_alarm = False
 
     import re as _re_reg
 
@@ -144,7 +164,13 @@ def main() -> int:
 
         # 2. FULL PIPELINE: generate_v1r_brief (embedder + LSP-graph + FTS5 + all fixes)
         try:
-            result = generate_v1r_brief(issue, repo_root, db, gold_files=gold_files)
+            if _have_alarm:
+                signal.alarm(_PER_CASE_TIMEOUT)
+            try:
+                result = generate_v1r_brief(issue, repo_root, db, gold_files=gold_files)
+            finally:
+                if _have_alarm:
+                    signal.alarm(0)
             bt = result.brief_text or ""
             # RENDERED rank: what the agent actually sees (top of brief).
             rendered_rank = _gold_rank(bt, gold_files)

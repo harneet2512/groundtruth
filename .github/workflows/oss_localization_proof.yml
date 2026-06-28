@@ -1,4 +1,4 @@
-name: "OSS localization proof (full pipeline, 5 langs)"
+name: "OSS localization proof (full pipeline, 5 langs, parallel)"
 
 on:
   workflow_dispatch:
@@ -10,11 +10,11 @@ on:
       cases_file:
         description: "Cases manifest (relative to benchmarks/data/)"
         required: false
-        default: "oss_localization_cases.json"
+        default: "oss_all60_cases.json"
       repos_file:
         description: "Repos manifest (relative to benchmarks/data/)"
         required: false
-        default: "oss_repos.json"
+        default: "oss_all60_repos.json"
 
 permissions:
   contents: read
@@ -23,7 +23,11 @@ permissions:
 jobs:
   proof:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [python, go, javascript, typescript, rust]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -36,37 +40,43 @@ jobs:
           [ -n "$DIGEST" ] || { echo "::error::no substrate digest"; exit 1; }
           docker pull "$DIGEST"
           echo "DIGEST=$DIGEST" >> "$GITHUB_ENV"
-      - name: Clone OSS repos at pinned commits
+      - name: Clone this language's repos
         env:
           CASES_FILE: ${{ inputs.cases_file }}
           REPOS_FILE: ${{ inputs.repos_file }}
+          LANG: ${{ matrix.language }}
         run: |
           mkdir -p /tmp/repos
           python3 -c "
           import json, subprocess, os
           repos = json.load(open('benchmarks/data/' + os.environ['REPOS_FILE']))
           cases = json.load(open('benchmarks/data/' + os.environ['CASES_FILE']))
-          needed = {c['repo'] for c in cases}
+          lang = os.environ['LANG'].lower()
+          needed = {c['repo'] for c in cases if c.get('language','').lower()==lang}
+          import shutil
           for name in sorted(needed):
-              meta = repos[name]
-              dst = f'/tmp/repos/{name}'
-              subprocess.run(['git','clone','--quiet','--no-checkout', meta['url'], dst], check=True)
-              subprocess.run(['git','-C',dst,'checkout','--quiet', meta['commit']], check=True)
-              print(f'cloned {name} @ {meta[\"commit\"][:10]}')
+              meta = repos[name]; dst = f'/tmp/repos/{name}'
+              # Fast path: shallow init + fetch the exact commit by SHA.
+              subprocess.run(['git','init','--quiet',dst], check=False)
+              subprocess.run(['git','-C',dst,'remote','add','origin',meta['url']], check=False)
+              f = subprocess.run(['git','-C',dst,'fetch','--quiet','--depth','1','origin', meta['commit']], capture_output=True)
+              ok = (f.returncode == 0) and (subprocess.run(['git','-C',dst,'checkout','--quiet','FETCH_HEAD'], capture_output=True).returncode == 0)
+              if not ok:  # fallback: full clone + checkout
+                  shutil.rmtree(dst, ignore_errors=True)
+                  subprocess.run(['git','clone','--quiet','--no-checkout', meta['url'], dst], check=False)
+                  subprocess.run(['git','-C',dst,'checkout','--quiet', meta['commit']], check=False)
+              print(f'cloned {name} @ {meta[\"commit\"][:10]} ({\"shallow\" if ok else \"full\"})', flush=True)
           "
-      - name: Run controlled falsifier — linear (baseline) vs RRF (bias-free)
+      - name: Run falsifier (linear vs RRF) for this language
         env:
           CASES_FILE: ${{ inputs.cases_file }}
+          LANG: ${{ matrix.language }}
         run: |
-          # Controlled A/B: ONE variable = fusion. linear = current default
-          # (magnitude weighted sum); rrf = rank fusion (bias-free, parameter-free).
-          # Same substrate, same fresh-indexed graphs, same 60 cases. The mount
-          # gives HEAD's Python (IDF fix etc.) on both arms — only the fusion differs.
-          mkdir -p /tmp/gt_idx_cache   # per-repo graph cache shared across both arms
+          mkdir -p /tmp/gt_idx_cache
           for arm in linear rrf; do
             mode=""; [ "$arm" = "rrf" ] && mode="on"
             out="/tmp/proof_out/$arm"; mkdir -p "$out"
-            echo "::group::ARM=$arm (GT_RRF_FUSION='$mode')"
+            echo "::group::ARM=$arm LANG=$LANG (GT_RRF_FUSION='$mode')"
             docker run --rm \
               -v "$GITHUB_WORKSPACE/benchmarks/data/$CASES_FILE:/cases.json:ro" \
               -v "$GITHUB_WORKSPACE/scripts/oss_full_pipeline_proof.py:/proof.py:ro" \
@@ -78,36 +88,29 @@ jobs:
               -e GT_REQUIRE_LSP=1 -e GT_REQUIRE_FTS5=1 \
               -e GT_INDEX_BIN=gt-index -e GT_SRC=/opt/gt/src \
               -e GT_INDEX_CACHE=/idx_cache \
+              -e GT_PROOF_LANG="$LANG" \
+              -e GT_PROOF_CASE_TIMEOUT=180 \
               -e GT_RRF_FUSION="$mode" \
               "$DIGEST" \
-              python /proof.py /cases.json /repos /out || echo "::warning::arm $arm failed"
+              python /proof.py /cases.json /repos /out || echo "::warning::arm $arm ($LANG) failed"
             echo "::endgroup::"
           done
-      - name: Do-no-harm verdict (per regime)
+      - name: Show this language's result
         if: always()
         run: |
           python3 -c "
           import json, os
-          def load(a):
+          for a in ['linear','rrf']:
               p=f'/tmp/proof_out/{a}/SUMMARY.json'
-              return json.load(open(p)) if os.path.exists(p) else None
-          lin=load('linear'); rrf=load('rrf')
-          for tag,d in [('LINEAR baseline',lin),('RRF bias-free',rrf)]:
-              if not d: print(tag,'MISSING'); continue
-              n=d['total_cases']
-              print(f'=== {tag}: @1={d[\"gold_at_1\"]}/{n} in8={d[\"gold_in_8\"]}/{n} diag_clean={d.get(\"diagnostic_clean\")}/{n} viol={d.get(\"violation_counts\",{})}')
+              if not os.path.exists(p): print(a,'MISSING'); continue
+              d=json.load(open(p)); n=d['total_cases']
+              print(f'{a}: @1={d[\"gold_at_1\"]}/{n} in8={d[\"gold_in_8\"]}/{n} diag_clean={d.get(\"diagnostic_clean\")}/{n} viol={d.get(\"violation_counts\",{})}')
               for k,v in sorted(d.get('by_regime',{}).items()):
                   print(f'    {k}: @1={v[\"at_1\"]}/{v[\"n\"]} in8={v[\"in_8\"]}/{v[\"n\"]} miss={v[\"miss\"]}')
-          if lin and rrf:
-              print('=== DO-NO-HARM GATE (regime in8 delta, RRF - linear) ===')
-              for k in sorted(set(lin.get('by_regime',{}))|set(rrf.get('by_regime',{}))):
-                  a=lin['by_regime'].get(k,{}); b=rrf['by_regime'].get(k,{})
-                  print(f'    {k}: in8 {a.get(\"in_8\",0)} -> {b.get(\"in_8\",0)}  (@1 {a.get(\"at_1\",0)} -> {b.get(\"at_1\",0)})')
-              print('PASS iff A_file_named & B_pure_behavior hold and C_area_named improves.')
           "
-      - name: Upload proof artifacts
+      - name: Upload artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: oss-localization-proof
+          name: oss-proof-${{ matrix.language }}
           path: /tmp/proof_out/
