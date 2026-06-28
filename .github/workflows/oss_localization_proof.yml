@@ -73,8 +73,11 @@ jobs:
           LANG: ${{ matrix.language }}
         run: |
           mkdir -p /tmp/gt_idx_cache
-          for arm in linear rrf; do
-            mode=""; [ "$arm" = "rrf" ] && mode="on"
+          # Decision made on principle: RRF (bias-free rank fusion) is the adopted
+          # fusion. We run it ONLY — this is a falsifier of the decided system,
+          # not a linear-vs-rrf bake-off (linear baselines are already on record).
+          for arm in rrf; do
+            mode="on"
             out="/tmp/proof_out/$arm"; mkdir -p "$out"
             echo "::group::ARM=$arm LANG=$LANG (GT_RRF_FUSION='$mode')"
             docker run --rm \
