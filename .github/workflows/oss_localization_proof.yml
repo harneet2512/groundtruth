@@ -92,7 +92,6 @@ jobs:
               -e GT_INDEX_BIN=gt-index -e GT_SRC=/opt/gt/src \
               -e GT_INDEX_CACHE=/idx_cache \
               -e GT_PROOF_LANG="$LANG" \
-              -e GT_PROOF_CASE_TIMEOUT=600 \
               -e GT_RRF_FUSION="$mode" \
               "$DIGEST" \
               python /proof.py /cases.json /repos /out || echo "::warning::arm $arm ($LANG) failed"

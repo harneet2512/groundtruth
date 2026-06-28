@@ -86,21 +86,25 @@ def main() -> int:
     if _lang_filter:
         cases = [c for c in cases if c.get("language", "").lower() == _lang_filter]
 
-    # Per-case wall-clock cap (fail-closed): one stalled case (e.g. an LSP hang)
-    # can never sink the shard. SIGALRM is Unix-only (the substrate is Linux).
+    # Per-case wall-clock cap: DISABLED by default (0). A hardcoded cap guillotines
+    # slow-but-healthy large-repo cases (the 180s/600s mistake). The real backstop is
+    # the per-shard job timeout + sharding (a genuine hang kills one language shard,
+    # not the run). Only arm SIGALRM if an explicit positive cap is set.
     import signal
-    _PER_CASE_TIMEOUT = int(os.environ.get("GT_PROOF_CASE_TIMEOUT", "180"))
+    _PER_CASE_TIMEOUT = int(os.environ.get("GT_PROOF_CASE_TIMEOUT", "0"))
 
     class _CaseTimeout(Exception):
         pass
 
     def _alarm(_sig, _frm):
         raise _CaseTimeout()
-    try:
-        signal.signal(signal.SIGALRM, _alarm)
-        _have_alarm = True
-    except Exception:
-        _have_alarm = False
+    _have_alarm = False
+    if _PER_CASE_TIMEOUT > 0:
+        try:
+            signal.signal(signal.SIGALRM, _alarm)
+            _have_alarm = True
+        except Exception:
+            _have_alarm = False
 
     import re as _re_reg
 
