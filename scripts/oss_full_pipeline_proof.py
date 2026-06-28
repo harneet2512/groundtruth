@@ -141,14 +141,20 @@ def main() -> int:
                 payload, gold_files=gold_files,
                 require_gold=True, require_semantic=True,
             )
+            # TRUSTWORTHY rank = the diagnostic's gold_rank over the DELIVERED
+            # localization_proof (strict exact-path match, localization_diagnostic.py).
+            # full_rank/rendered_rank use loose suffix matching that collides on
+            # shared basenames (aws-lambda/handler.ts vs lambda-edge/handler.ts) —
+            # kept only as secondary debug signals, never the headline.
+            deliv_rank = diag["metrics"].get("gold_rank")
             results.append({
                 "id": cid, "language": lang,
+                "delivered_rank": deliv_rank,
                 "full_rank": full_rank, "rendered_rank": rendered_rank,
                 "nodes": nodes, "files": stats.get("files", 0),
                 "semantic_signal_count": sem,
-                "gold_at_1": full_rank == 1,
-                "gold_in_8": full_rank is not None and full_rank <= 8,
-                "rendered_at_1": rendered_rank == 1,
+                "gold_at_1": deliv_rank == 1,
+                "gold_in_8": deliv_rank is not None and deliv_rank <= 8,
                 "diagnostic_ok": diag["ok"],
                 "violations": diag["violations"],
                 "warnings": diag["warnings"],
@@ -158,9 +164,9 @@ def main() -> int:
                 f.write(bt)
             with open(os.path.join(out_dir, f"{cid}.diagnostic.json"), "w", encoding="utf-8") as f:
                 json.dump(diag, f, indent=2)
-            mark = "✓@1" if full_rank == 1 else (f"@{full_rank}" if full_rank else "MISS")
+            mark = "✓@1" if deliv_rank == 1 else (f"@{deliv_rank}" if deliv_rank else "MISS")
             dmark = "OK" if diag["ok"] else "VIOL:" + ",".join(diag["violations"])
-            print(f"[{mark}] {cid} ({lang}) full={full_rank} rendered={rendered_rank} sem={sem} diag={dmark}", file=sys.stderr)
+            print(f"[{mark}] {cid} ({lang}) delivered={deliv_rank} full={full_rank} sem={sem} diag={dmark}", file=sys.stderr)
         except Exception as e:
             import traceback
             results.append({"id": cid, "language": lang, "full_rank": None, "rendered_rank": None, "nodes": nodes, "error": f"{type(e).__name__}: {e}"})
@@ -179,7 +185,7 @@ def main() -> int:
                 b["at_1"] += 1
             if r.get("gold_in_8"):
                 b["in_8"] += 1
-            if r.get("full_rank") is None:
+            if r.get("delivered_rank") is None:
                 b["miss"] += 1
             if r.get("semantic_signal_count", 0) == 0:
                 b["sem_zero"] += 1
