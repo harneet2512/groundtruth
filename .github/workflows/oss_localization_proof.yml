@@ -1,0 +1,71 @@
+name: "OSS localization proof (full pipeline, 5 langs)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      gt_substrate_digest:
+        description: "Pinned GT substrate digest"
+        required: true
+        default: ""
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+      - name: GHCR login
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" --password-stdin
+      - name: Pull substrate
+        run: |
+          DIGEST="${{ inputs.gt_substrate_digest }}"
+          [ -n "$DIGEST" ] || { echo "::error::no substrate digest"; exit 1; }
+          docker pull "$DIGEST"
+          echo "DIGEST=$DIGEST" >> "$GITHUB_ENV"
+      - name: Clone OSS repos at pinned commits
+        run: |
+          mkdir -p /tmp/repos
+          python3 -c "
+          import json, subprocess, os
+          repos = json.load(open('benchmarks/data/oss_repos.json'))
+          # only clone repos referenced by the cases
+          cases = json.load(open('benchmarks/data/oss_localization_cases.json'))
+          needed = {c['repo'] for c in cases}
+          for name in sorted(needed):
+              meta = repos[name]
+              dst = f'/tmp/repos/{name}'
+              subprocess.run(['git','clone','--quiet','--no-checkout', meta['url'], dst], check=True)
+              subprocess.run(['git','-C',dst,'checkout','--quiet', meta['commit']], check=True)
+              print(f'cloned {name} @ {meta[\"commit\"][:10]}')
+          "
+      - name: Run full-pipeline proof inside substrate
+        run: |
+          mkdir -p /tmp/proof_out
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE/benchmarks/data/oss_localization_cases.json:/cases.json:ro" \
+            -v "$GITHUB_WORKSPACE/scripts/oss_full_pipeline_proof.py:/proof.py:ro" \
+            -v "/tmp/repos:/repos:ro" \
+            -v "/tmp/proof_out:/out" \
+            -e GT_FORCE_ONNX_EMBEDDER=1 -e GT_REQUIRE_EMBEDDER=1 \
+            -e GT_REQUIRE_LSP=1 -e GT_REQUIRE_FTS5=1 \
+            -e GT_INDEX_BIN=gt-index \
+            -e GT_SRC=/opt/gt/src \
+            "$DIGEST" \
+            python /proof.py /cases.json /repos /out
+      - name: Show summary
+        if: always()
+        run: |
+          echo "=== SUMMARY ==="
+          cat /tmp/proof_out/SUMMARY.json | python3 -c "import json,sys; d=json.load(sys.stdin); print(f'gold_at_1: {d[\"gold_at_1\"]}/{d[\"total_cases\"]}'); print(f'gold_in_8: {d[\"gold_in_8\"]}/{d[\"total_cases\"]}'); print(f'semantic_zero_violations: {d[\"semantic_zero_violations\"]}'); [print(f'  {k}: @1={v[\"at_1\"]}/{v[\"n\"]} in8={v[\"in_8\"]}/{v[\"n\"]} miss={v[\"miss\"]} sem_zero={v[\"sem_zero\"]}') for k,v in sorted(d['by_language'].items())]" || cat /tmp/proof_out/SUMMARY.json
+      - name: Upload proof artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oss-localization-proof
+          path: /tmp/proof_out/
