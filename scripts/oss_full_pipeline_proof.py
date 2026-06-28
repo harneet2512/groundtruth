@@ -82,11 +82,31 @@ def main() -> int:
     results = []
     cases = json.load(open(cases_file, encoding="utf-8-sig"))
 
+    import re as _re_reg
+
+    def _regime(issue_text: str, gold: str) -> str:
+        """Intrinsic task type from issue->gold reference (outcome-independent):
+        A = issue names the file (a token from the gold filename stem appears);
+        C = issue names the AREA (a gold directory token appears) but not the file;
+        B = neither (pure behavioral description). Matches the measured 3-regime
+        distribution; computed from issue+gold only, never from the result."""
+        it = set(_re_reg.findall(r"[a-z][a-z0-9]{2,}", issue_text.lower()))
+        g = gold.replace("\\", "/").lstrip("./").lstrip("/").lower()
+        stem = g.split("/")[-1].rsplit(".", 1)[0]
+        stem_toks = {p for p in _re_reg.split(r"[_\-.]", stem) if len(p) >= 3} or {stem}
+        dir_toks = {p for d in g.split("/")[:-1] for p in _re_reg.split(r"[_\-.]", d) if len(p) >= 3}
+        if stem_toks & it:
+            return "A_file_named"
+        if dir_toks & it:
+            return "C_area_named_sibling"
+        return "B_pure_behavior"
+
     for case in cases:
         cid = case["id"]
         lang = case.get("language", "?")
         issue = case["issue_text"]
         gold_files = case["gold_files"]
+        regime = _regime(issue, gold_files[0]) if gold_files else "B_pure_behavior"
         repo_name = case["repo"]
         repo_root = os.path.join(repos_dir, repo_name)
 
@@ -95,10 +115,24 @@ def main() -> int:
             print(f"[SKIP] {cid}: repo not mounted at {repo_root}", file=sys.stderr)
             continue
 
-        # 1. INDEX with the baked gt-index (walker fix)
-        db = os.path.join(tempfile.gettempdir(), f"{cid}.db")
-        stats = _index_repo(repo_root, db)
-        nodes = stats.get("nodes", 0)
+        # 1. INDEX with the baked gt-index (walker fix). Cache PER REPO: the graph
+        # is a property of the repo, not the case — 60 cases share 27 repos, and
+        # the same db is reused across cases AND both fusion arms. Cuts 120 index
+        # passes to 27. A persisted graph dir survives across the arm loop.
+        cache_dir = os.environ.get("GT_INDEX_CACHE", os.path.join(tempfile.gettempdir(), "gt_idx_cache"))
+        os.makedirs(cache_dir, exist_ok=True)
+        db = os.path.join(cache_dir, f"repo_{repo_name}.db")
+        if os.path.exists(db):
+            try:
+                import sqlite3 as _sq
+                _c = _sq.connect(db)
+                nodes = _c.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+                _c.close()
+                stats = {"nodes": nodes, "files": -1, "cached": True}
+            except Exception:
+                stats = _index_repo(repo_root, db); nodes = stats.get("nodes", 0)
+        else:
+            stats = _index_repo(repo_root, db); nodes = stats.get("nodes", 0)
 
         if nodes == 0:
             results.append({
@@ -148,7 +182,7 @@ def main() -> int:
             # kept only as secondary debug signals, never the headline.
             deliv_rank = diag["metrics"].get("gold_rank")
             results.append({
-                "id": cid, "language": lang,
+                "id": cid, "language": lang, "regime": regime,
                 "delivered_rank": deliv_rank,
                 "full_rank": full_rank, "rendered_rank": rendered_rank,
                 "nodes": nodes, "files": stats.get("files", 0),
@@ -194,6 +228,8 @@ def main() -> int:
     by_lang = _agg(lambda r: r["language"])
     # SCALE bands prove scale-invariance: small (<150 files) vs large (>=150).
     by_scale = _agg(lambda r: "small" if (r.get("files", 0) < 150) else "large")
+    # REGIME bands: the do-no-harm gate reads here (A/B hold, C improves).
+    by_regime = _agg(lambda r: r.get("regime", "B_pure_behavior"))
 
     total_at_1 = sum(1 for r in results if r.get("gold_at_1"))
     total_in_8 = sum(1 for r in results if r.get("gold_in_8"))
@@ -217,6 +253,7 @@ def main() -> int:
         "violation_counts": violation_counts,
         "by_language": by_lang,
         "by_scale": by_scale,
+        "by_regime": by_regime,
         "cases": results,
     }
     with open(os.path.join(out_dir, "SUMMARY.json"), "w", encoding="utf-8") as f:

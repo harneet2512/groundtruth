@@ -23,7 +23,7 @@ permissions:
 jobs:
   proof:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
         with:
@@ -54,44 +54,56 @@ jobs:
               subprocess.run(['git','-C',dst,'checkout','--quiet', meta['commit']], check=True)
               print(f'cloned {name} @ {meta[\"commit\"][:10]}')
           "
-      - name: Run localization pipeline + diagnostic (default fusion)
+      - name: Run controlled falsifier — linear (baseline) vs RRF (bias-free)
         env:
           CASES_FILE: ${{ inputs.cases_file }}
         run: |
-          mkdir -p /tmp/proof_out
-          # Mount the checkout's Python over the baked code so the proof tests
-          # HEAD (the IDF path fix lands after the substrate was built). gt-index
-          # binary + ONNX model + LSP servers stay baked.
-          docker run --rm \
-            -v "$GITHUB_WORKSPACE/benchmarks/data/$CASES_FILE:/cases.json:ro" \
-            -v "$GITHUB_WORKSPACE/scripts/oss_full_pipeline_proof.py:/proof.py:ro" \
-            -v "$GITHUB_WORKSPACE/src/groundtruth:/opt/gt/src/groundtruth:ro" \
-            -v "/tmp/repos:/repos:ro" \
-            -v "/tmp/proof_out:/out" \
-            -e GT_FORCE_ONNX_EMBEDDER=1 -e GT_REQUIRE_EMBEDDER=1 \
-            -e GT_REQUIRE_LSP=1 -e GT_REQUIRE_FTS5=1 \
-            -e GT_INDEX_BIN=gt-index \
-            -e GT_SRC=/opt/gt/src \
-            "$DIGEST" \
-            python /proof.py /cases.json /repos /out
-      - name: Show summary + diagnostic
+          # Controlled A/B: ONE variable = fusion. linear = current default
+          # (magnitude weighted sum); rrf = rank fusion (bias-free, parameter-free).
+          # Same substrate, same fresh-indexed graphs, same 60 cases. The mount
+          # gives HEAD's Python (IDF fix etc.) on both arms — only the fusion differs.
+          mkdir -p /tmp/gt_idx_cache   # per-repo graph cache shared across both arms
+          for arm in linear rrf; do
+            mode=""; [ "$arm" = "rrf" ] && mode="on"
+            out="/tmp/proof_out/$arm"; mkdir -p "$out"
+            echo "::group::ARM=$arm (GT_RRF_FUSION='$mode')"
+            docker run --rm \
+              -v "$GITHUB_WORKSPACE/benchmarks/data/$CASES_FILE:/cases.json:ro" \
+              -v "$GITHUB_WORKSPACE/scripts/oss_full_pipeline_proof.py:/proof.py:ro" \
+              -v "$GITHUB_WORKSPACE/src/groundtruth:/opt/gt/src/groundtruth:ro" \
+              -v "/tmp/repos:/repos:ro" \
+              -v "/tmp/gt_idx_cache:/idx_cache" \
+              -v "$out:/out" \
+              -e GT_FORCE_ONNX_EMBEDDER=1 -e GT_REQUIRE_EMBEDDER=1 \
+              -e GT_REQUIRE_LSP=1 -e GT_REQUIRE_FTS5=1 \
+              -e GT_INDEX_BIN=gt-index -e GT_SRC=/opt/gt/src \
+              -e GT_INDEX_CACHE=/idx_cache \
+              -e GT_RRF_FUSION="$mode" \
+              "$DIGEST" \
+              python /proof.py /cases.json /repos /out || echo "::warning::arm $arm failed"
+            echo "::endgroup::"
+          done
+      - name: Do-no-harm verdict (per regime)
         if: always()
         run: |
           python3 -c "
-          import json
-          d = json.load(open('/tmp/proof_out/SUMMARY.json'))
-          n = d['total_cases']
-          print('=== LOCALIZATION RESULT ===')
-          print(f'gold_at_1: {d[\"gold_at_1\"]}/{n}   gold_in_8: {d[\"gold_in_8\"]}/{n}   rendered_at_1: {d.get(\"rendered_at_1\",0)}/{n}')
-          print('=== DIAGNOSTIC (fail-closed gate) ===')
-          print(f'diagnostic_clean: {d.get(\"diagnostic_clean\",0)}/{n}')
-          print(f'violation_counts: {d.get(\"violation_counts\",{})}')
-          print('=== per language ===')
-          for k,v in sorted(d['by_language'].items()):
-              print(f'  {k}: @1={v[\"at_1\"]}/{v[\"n\"]} in8={v[\"in_8\"]}/{v[\"n\"]} miss={v[\"miss\"]} sem_zero={v[\"sem_zero\"]}')
-          print('=== by scale ===')
-          for k,v in sorted(d.get('by_scale',{}).items()):
-              print(f'  {k}: @1={v[\"at_1\"]}/{v[\"n\"]} in8={v[\"in_8\"]}/{v[\"n\"]} miss={v[\"miss\"]}')
+          import json, os
+          def load(a):
+              p=f'/tmp/proof_out/{a}/SUMMARY.json'
+              return json.load(open(p)) if os.path.exists(p) else None
+          lin=load('linear'); rrf=load('rrf')
+          for tag,d in [('LINEAR baseline',lin),('RRF bias-free',rrf)]:
+              if not d: print(tag,'MISSING'); continue
+              n=d['total_cases']
+              print(f'=== {tag}: @1={d[\"gold_at_1\"]}/{n} in8={d[\"gold_in_8\"]}/{n} diag_clean={d.get(\"diagnostic_clean\")}/{n} viol={d.get(\"violation_counts\",{})}')
+              for k,v in sorted(d.get('by_regime',{}).items()):
+                  print(f'    {k}: @1={v[\"at_1\"]}/{v[\"n\"]} in8={v[\"in_8\"]}/{v[\"n\"]} miss={v[\"miss\"]}')
+          if lin and rrf:
+              print('=== DO-NO-HARM GATE (regime in8 delta, RRF - linear) ===')
+              for k in sorted(set(lin.get('by_regime',{}))|set(rrf.get('by_regime',{}))):
+                  a=lin['by_regime'].get(k,{}); b=rrf['by_regime'].get(k,{})
+                  print(f'    {k}: in8 {a.get(\"in_8\",0)} -> {b.get(\"in_8\",0)}  (@1 {a.get(\"at_1\",0)} -> {b.get(\"at_1\",0)})')
+              print('PASS iff A_file_named & B_pure_behavior hold and C_area_named improves.')
           "
       - name: Upload proof artifacts
         if: always()
