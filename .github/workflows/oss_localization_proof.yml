@@ -47,9 +47,13 @@ jobs:
       - name: Run localization pipeline + diagnostic (default fusion)
         run: |
           mkdir -p /tmp/proof_out
+          # Mount the checkout's Python over the baked code so the proof tests
+          # HEAD (the IDF path fix lands after the substrate was built). gt-index
+          # binary + ONNX model + LSP servers stay baked.
           docker run --rm \
             -v "$GITHUB_WORKSPACE/benchmarks/data/oss_localization_cases.json:/cases.json:ro" \
             -v "$GITHUB_WORKSPACE/scripts/oss_full_pipeline_proof.py:/proof.py:ro" \
+            -v "$GITHUB_WORKSPACE/src/groundtruth:/opt/gt/src/groundtruth:ro" \
             -v "/tmp/repos:/repos:ro" \
             -v "/tmp/proof_out:/out" \
             -e GT_FORCE_ONNX_EMBEDDER=1 -e GT_REQUIRE_EMBEDDER=1 \
