@@ -44,25 +44,48 @@ jobs:
               subprocess.run(['git','-C',dst,'checkout','--quiet', meta['commit']], check=True)
               print(f'cloned {name} @ {meta[\"commit\"][:10]}')
           "
-      - name: Run full-pipeline proof inside substrate
+      - name: Run full-pipeline proof — 3 fusion arms (linear / rrf-full / rrf-det)
         run: |
-          mkdir -p /tmp/proof_out
-          docker run --rm \
-            -v "$GITHUB_WORKSPACE/benchmarks/data/oss_localization_cases.json:/cases.json:ro" \
-            -v "$GITHUB_WORKSPACE/scripts/oss_full_pipeline_proof.py:/proof.py:ro" \
-            -v "/tmp/repos:/repos:ro" \
-            -v "/tmp/proof_out:/out" \
-            -e GT_FORCE_ONNX_EMBEDDER=1 -e GT_REQUIRE_EMBEDDER=1 \
-            -e GT_REQUIRE_LSP=1 -e GT_REQUIRE_FTS5=1 \
-            -e GT_INDEX_BIN=gt-index \
-            -e GT_SRC=/opt/gt/src \
-            "$DIGEST" \
-            python /proof.py /cases.json /repos /out
-      - name: Show summary
+          # Controlled experiment: ONE variable = the fusion mode. Same substrate,
+          # same fresh-indexed graphs, same 25 cases. linear = current default
+          # (hand-weighted sum); rrf/det = scale-invariant Reciprocal Rank Fusion
+          # (Cormack SIGIR 2009). Evidence decides which becomes the default.
+          for arm in linear rrf det; do
+            mode=""
+            [ "$arm" = "rrf" ] && mode="on"
+            [ "$arm" = "det" ] && mode="det"
+            out="/tmp/proof_out/$arm"
+            mkdir -p "$out"
+            echo "::group::ARM=$arm (GT_RRF_FUSION='$mode')"
+            docker run --rm \
+              -v "$GITHUB_WORKSPACE/benchmarks/data/oss_localization_cases.json:/cases.json:ro" \
+              -v "$GITHUB_WORKSPACE/scripts/oss_full_pipeline_proof.py:/proof.py:ro" \
+              -v "/tmp/repos:/repos:ro" \
+              -v "$out:/out" \
+              -e GT_FORCE_ONNX_EMBEDDER=1 -e GT_REQUIRE_EMBEDDER=1 \
+              -e GT_REQUIRE_LSP=1 -e GT_REQUIRE_FTS5=1 \
+              -e GT_INDEX_BIN=gt-index \
+              -e GT_SRC=/opt/gt/src \
+              -e GT_RRF_FUSION="$mode" \
+              "$DIGEST" \
+              python /proof.py /cases.json /repos /out || echo "::warning::arm $arm failed"
+            echo "::endgroup::"
+          done
+      - name: Compare arms
         if: always()
         run: |
-          echo "=== SUMMARY ==="
-          cat /tmp/proof_out/SUMMARY.json | python3 -c "import json,sys; d=json.load(sys.stdin); print(f'gold_at_1: {d[\"gold_at_1\"]}/{d[\"total_cases\"]}'); print(f'gold_in_8: {d[\"gold_in_8\"]}/{d[\"total_cases\"]}'); print(f'semantic_zero_violations: {d[\"semantic_zero_violations\"]}'); [print(f'  {k}: @1={v[\"at_1\"]}/{v[\"n\"]} in8={v[\"in_8\"]}/{v[\"n\"]} miss={v[\"miss\"]} sem_zero={v[\"sem_zero\"]}') for k,v in sorted(d['by_language'].items())]" || cat /tmp/proof_out/SUMMARY.json
+          python3 -c "
+          import json, os
+          print('=== FUSION ARM COMPARISON (gold rank over full list) ===')
+          print(f'{\"arm\":8} {\"@1\":>6} {\"in8\":>6} {\"rendered@1\":>11} {\"sem_zero\":>9}  small@1  large@1')
+          for arm in ['linear','rrf','det']:
+              p = f'/tmp/proof_out/{arm}/SUMMARY.json'
+              if not os.path.exists(p): print(f'{arm:8} MISSING'); continue
+              d = json.load(open(p))
+              n = d['total_cases']
+              sm = d.get('by_scale',{}).get('small',{}); lg = d.get('by_scale',{}).get('large',{})
+              print(f'{arm:8} {d[\"gold_at_1\"]:>3}/{n} {d[\"gold_in_8\"]:>3}/{n} {d.get(\"rendered_at_1\",0):>8}/{n} {d[\"semantic_zero_violations\"]:>9}  {sm.get(\"at_1\",0)}/{sm.get(\"n\",0)}    {lg.get(\"at_1\",0)}/{lg.get(\"n\",0)}')
+          "
       - name: Upload proof artifacts
         if: always()
         uses: actions/upload-artifact@v4

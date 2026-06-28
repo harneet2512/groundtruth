@@ -111,62 +111,89 @@ def main() -> int:
         try:
             result = generate_v1r_brief(issue, repo_root, db, gold_files=gold_files)
             bt = result.brief_text or ""
-            rank = _gold_rank(bt, gold_files)
+            # RENDERED rank: what the agent actually sees (top of brief).
+            rendered_rank = _gold_rank(bt, gold_files)
+            # TRUE full-list rank from the pipeline's own ranked_full (apples-to-apples
+            # with the prior diagnostic; not gated by what's rendered).
+            full_rank = None
+            v74 = getattr(result, "v74_result", None)
+            if v74 is not None and getattr(v74, "ranked_full", None):
+                gold_norm = {g.replace("\\", "/").lstrip("./").lstrip("/").lower() for g in gold_files}
+                for i, r in enumerate(v74.ranked_full):
+                    p = (r.get("path") or r.get("file") or "").replace("\\", "/").lstrip("./").lstrip("/").lower()
+                    if p in gold_norm or any(p == g or p.endswith("/" + g) or g.endswith("/" + p) for g in gold_norm):
+                        full_rank = i + 1
+                        break
             sem = getattr(result, "semantic_signal_count", 0)
             results.append({
-                "id": cid, "language": lang, "gold_rank": rank,
+                "id": cid, "language": lang,
+                "full_rank": full_rank, "rendered_rank": rendered_rank,
                 "nodes": nodes, "files": stats.get("files", 0),
                 "semantic_signal_count": sem,
-                "gold_at_1": rank == 1,
-                "gold_in_8": rank is not None and rank <= 8,
+                "gold_at_1": full_rank == 1,
+                "gold_in_8": full_rank is not None and full_rank <= 8,
+                "rendered_at_1": rendered_rank == 1,
             })
-            # save the brief for audit
             with open(os.path.join(out_dir, f"{cid}.brief.txt"), "w", encoding="utf-8") as f:
                 f.write(bt)
-            mark = "✓@1" if rank == 1 else (f"@{rank}" if rank else "MISS")
-            print(f"[{mark}] {cid} ({lang}) nodes={nodes} sem={sem}", file=sys.stderr)
+            mark = "✓@1" if full_rank == 1 else (f"@{full_rank}" if full_rank else "MISS")
+            print(f"[{mark}] {cid} ({lang}) full={full_rank} rendered={rendered_rank} nodes={nodes} sem={sem}", file=sys.stderr)
         except Exception as e:
             import traceback
-            results.append({"id": cid, "language": lang, "gold_rank": None, "nodes": nodes, "error": f"{type(e).__name__}: {e}"})
+            results.append({"id": cid, "language": lang, "full_rank": None, "rendered_rank": None, "nodes": nodes, "error": f"{type(e).__name__}: {e}"})
             print(f"[ERR] {cid}: {type(e).__name__}: {e}", file=sys.stderr)
             traceback.print_exc()
 
-    # AGGREGATE
-    by_lang: dict = {}
-    for r in results:
-        by_lang.setdefault(r["language"], {"at_1": 0, "in_8": 0, "miss": 0, "sem_zero": 0, "n": 0})
-        b = by_lang[r["language"]]
-        b["n"] += 1
-        if r.get("gold_at_1"):
-            b["at_1"] += 1
-        if r.get("gold_in_8"):
-            b["in_8"] += 1
-        if r.get("gold_rank") is None:
-            b["miss"] += 1
-        if r.get("semantic_signal_count", 0) == 0:
-            b["sem_zero"] += 1
+    # AGGREGATE (full_rank = pipeline's true rank over the full list)
+    def _agg(keyfn):
+        d: dict = {}
+        for r in results:
+            k = keyfn(r)
+            d.setdefault(k, {"at_1": 0, "in_8": 0, "miss": 0, "sem_zero": 0, "n": 0})
+            b = d[k]
+            b["n"] += 1
+            if r.get("gold_at_1"):
+                b["at_1"] += 1
+            if r.get("gold_in_8"):
+                b["in_8"] += 1
+            if r.get("full_rank") is None:
+                b["miss"] += 1
+            if r.get("semantic_signal_count", 0) == 0:
+                b["sem_zero"] += 1
+        return d
+
+    by_lang = _agg(lambda r: r["language"])
+    # SCALE bands prove scale-invariance: small (<150 files) vs large (>=150).
+    by_scale = _agg(lambda r: "small" if (r.get("files", 0) < 150) else "large")
 
     total_at_1 = sum(1 for r in results if r.get("gold_at_1"))
     total_in_8 = sum(1 for r in results if r.get("gold_in_8"))
+    total_rendered_at_1 = sum(1 for r in results if r.get("rendered_at_1"))
     total_sem_zero = sum(1 for r in results if r.get("semantic_signal_count", 0) == 0)
 
     summary = {
+        "fusion_mode": os.environ.get("GT_RRF_FUSION", "") or "linear",
         "total_cases": len(results),
         "gold_at_1": total_at_1,
         "gold_in_8": total_in_8,
+        "rendered_at_1": total_rendered_at_1,
         "semantic_zero_violations": total_sem_zero,
         "by_language": by_lang,
+        "by_scale": by_scale,
         "cases": results,
     }
     with open(os.path.join(out_dir, "SUMMARY.json"), "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
 
-    print(f"\n=== FULL PIPELINE PROOF ===", file=sys.stderr)
-    print(f"gold_at_1: {total_at_1}/{len(results)}", file=sys.stderr)
-    print(f"gold_in_8: {total_in_8}/{len(results)}", file=sys.stderr)
+    print(f"\n=== FULL PIPELINE PROOF (fusion={summary['fusion_mode']}) ===", file=sys.stderr)
+    print(f"gold_at_1 (full list): {total_at_1}/{len(results)}", file=sys.stderr)
+    print(f"gold_in_8 (full list): {total_in_8}/{len(results)}", file=sys.stderr)
+    print(f"rendered_at_1 (agent sees): {total_rendered_at_1}/{len(results)}", file=sys.stderr)
     print(f"semantic_zero_violations: {total_sem_zero} (MUST be 0)", file=sys.stderr)
     for lang, b in sorted(by_lang.items()):
         print(f"  {lang}: @1={b['at_1']}/{b['n']} in8={b['in_8']}/{b['n']} miss={b['miss']} sem_zero={b['sem_zero']}", file=sys.stderr)
+    for scale, b in sorted(by_scale.items()):
+        print(f"  [{scale} repos]: @1={b['at_1']}/{b['n']} in8={b['in_8']}/{b['n']} miss={b['miss']}", file=sys.stderr)
     return 0
 
 
