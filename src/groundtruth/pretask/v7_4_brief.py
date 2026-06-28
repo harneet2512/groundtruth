@@ -1519,7 +1519,18 @@ def run_v74(
     # Path-name prior: boost files whose path/name matches issue terms.
     # Uses bidirectional substring: "color" in issue matches "colorama" in filename.
     import re as _re_path
-    _issue_words = set(w.lower() for w in _re_path.findall(r"[A-Za-z_]\w{2,}", issue_text) if len(w) >= 4)
+    _issue_words_raw = set(w.lower() for w in _re_path.findall(r"[A-Za-z_]\w{2,}", issue_text) if len(w) >= 4)
+    # NEGATION detection (2026-06-27): issue phrases like "not request/response",
+    # "doesn't belong in X", "should not be in Y" negate the token that follows.
+    # A negated token DEMOTES path matches instead of promoting them. Generalized:
+    # any issue in any language where the reporter names a file/module to EXCLUDE.
+    _neg_patterns = _re_path.findall(
+        r"(?:not?\s+|doesn'?t\s+belong\s+in\s+|should\s+not\s+be\s+in\s+|"
+        r"not\s+in\s+|outside\s+of\s+|instead\s+of\s+)([A-Za-z_]\w{2,})",
+        issue_text, _re_path.IGNORECASE,
+    )
+    _negated_words = {w.lower() for w in _neg_patterns if len(w) >= 4}
+    _issue_words = _issue_words_raw - _negated_words
     path_scores: dict[str, float] = {}
     for fp in all_files:
         basename = os.path.basename(fp).rsplit(".", 1)[0].lower()
@@ -1531,6 +1542,11 @@ def run_v74(
                 score = max(score, 0.7)
             elif iw in basename.replace("_", ""):
                 score = max(score, 0.5)
+        # Negated-word demotion: if a NEGATED issue word matches the basename,
+        # halve the path score (the issue explicitly excluded this file/module).
+        for nw in _negated_words:
+            if nw == basename or nw in basename:
+                score *= 0.5
         # Directory matches
         for part in Path(fp).parts[:-1]:
             part_l = part.lower()
@@ -1539,6 +1555,13 @@ def run_v74(
                     if iw in part_l or part_l in iw:
                         score = max(score, 0.4)
                         break
+        # internal/ demotion (2026-06-27): files under an internal/ directory
+        # are implementation details. When a public counterpart exists (same
+        # basename without internal/ prefix), the internal file scores lower.
+        # Generalized: Go convention (internal/ = package-private), but the
+        # pattern exists in any language with internal/private directories.
+        if "/internal/" in fp.replace("\\", "/"):
+            score *= 0.7
         if score > 0:
             path_scores[fp] = score
 

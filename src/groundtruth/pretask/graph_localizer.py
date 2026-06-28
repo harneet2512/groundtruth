@@ -990,9 +990,58 @@ def _path_to_seeds(
                     if len(out) >= limit:
                         break
 
+    # COMPOUND path-token recall (2026-06-27): when the issue contains
+    # multiple tokens and a file path contains TWO OR MORE of them, that
+    # file is more specific than one matching a single token. Promotes
+    # child implementations over parent modules: issue "HOTP token" →
+    # tokens/hotptoken.py (both "hotp" and "token" in path) outranks
+    # token.py (only "token"). Runs AFTER single-token pass so compound
+    # matches get PRIORITY (prepended, not appended). Generalized: any
+    # repo structure where child files combine qualifier + stem in their
+    # path (the standard naming convention across all languages).
+    if len(path_tokens) >= 2:
+        try:
+            all_files = [
+                r[0] for r in conn.execute(
+                    "SELECT DISTINCT file_path FROM nodes WHERE is_test = 0"
+                ).fetchall() if r[0]
+            ]
+            compound_hits: list[tuple[str, int]] = []
+            for fp in all_files:
+                fp_lower = fp.lower()
+                hit_count = sum(1 for t in path_tokens if t in fp_lower)
+                if hit_count >= 2:
+                    compound_hits.append((fp, hit_count))
+            compound_hits.sort(key=lambda x: -x[1])
+            compound_new: list[tuple[int, str, str]] = []
+            for fp, _hc in compound_hits[:limit]:
+                nfp = _normalize(fp)
+                if nfp in seen_files:
+                    continue
+                rows = conn.execute(
+                    "SELECT id, name FROM nodes WHERE file_path = ? "
+                    "AND is_test = 0 AND label IN ('Function','Method','Class') "
+                    "LIMIT 1", (fp,)
+                ).fetchall()
+                if rows and rows[0][0] is not None:
+                    nid = int(rows[0][0])
+                    if nid not in seen_ids:
+                        seen_ids.add(nid)
+                        seen_files.add(nfp)
+                        compound_new.append((nid, str(rows[0][1]), nfp))
+            if compound_new:
+                out = compound_new + out
+                print(
+                    f"[GT L1] path-to-seed: {len(compound_new)} COMPOUND nodes "
+                    f"(2+ tokens in path) prepended",
+                    file=sys.stderr,
+                )
+        except (sqlite3.Error, Exception):
+            pass
+
     if out:
         print(
-            f"[GT L1] path-to-seed: {len(out)} nodes seeded from "
+            f"[GT L1] path-to-seed: {len(out)} total nodes seeded from "
             f"{len(path_tokens)} path tokens",
             file=sys.stderr,
         )
