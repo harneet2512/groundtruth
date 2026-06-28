@@ -1518,8 +1518,13 @@ def run_v74(
 
     # Path-name prior: boost files whose path/name matches issue terms.
     # Uses bidirectional substring: "color" in issue matches "colorama" in filename.
+    import math as _math_path
     import re as _re_path
-    _issue_words_raw = set(w.lower() for w in _re_path.findall(r"[A-Za-z_]\w{2,}", issue_text) if len(w) >= 4)
+    # Floor 3 (was 4): a 3-char term like "hex" is the SOLE discriminating signal
+    # for fmt/hex.rs, yet the old >=4 floor dropped it -> path=0 -> gold buried.
+    # Noise from short common words (lib/src/get/api) is now suppressed by IDF
+    # (high document-frequency -> ~0 weight) instead of a blunt length cutoff.
+    _issue_words_raw = set(w.lower() for w in _re_path.findall(r"[A-Za-z_]\w{2,}", issue_text) if len(w) >= 3)
     # NEGATION detection (2026-06-27): issue phrases like "not request/response",
     # "doesn't belong in X", "should not be in Y" negate the token that follows.
     # A negated token DEMOTES path matches instead of promoting them. Generalized:
@@ -1529,31 +1534,61 @@ def run_v74(
         r"not\s+in\s+|outside\s+of\s+|instead\s+of\s+)([A-Za-z_]\w{2,})",
         issue_text, _re_path.IGNORECASE,
     )
-    _negated_words = {w.lower() for w in _neg_patterns if len(w) >= 4}
+    _negated_words = {w.lower() for w in _neg_patterns if len(w) >= 3}
     _issue_words = _issue_words_raw - _negated_words
+
+    # IDF SPECIFICITY (BLUiR ASE 2013, file-name field): a path match is worth
+    # its term's rarity across THIS repo's paths, not a fixed exact/substring
+    # tier. df(term) = #files whose lowercased path contains the term. A term
+    # pinning ONE file (hex->1, hotp->1) gets full weight; a term in many files
+    # (token->~20, lib->hundreds) collapses toward 0. Per-repo + scale-invariant:
+    # idf_factor = log2(N/df)/log2(N) in [0,1]. This is the load-bearing fix for
+    # both the "rare term filtered by length" and the "specific term ties generic
+    # term" failure modes; the exact/substring tiers below only break ties WITHIN
+    # a specificity level.
+    _norm_paths = {fp: fp.replace("\\", "/").lstrip("./").lstrip("/").lower() for fp in all_files}
+    _N_files = max(2, len(all_files))
+    _logN = _math_path.log2(_N_files)
+    _idf: dict[str, float] = {}
+    for iw in _issue_words:
+        df = 0
+        for fp in all_files:
+            if iw in _norm_paths[fp]:
+                df += 1
+        # df==0 -> term matches nothing -> irrelevant (idf unused). df>=1.
+        _idf[iw] = (_math_path.log2(_N_files / max(1, df)) / _logN) if df > 0 else 0.0
+
     path_scores: dict[str, float] = {}
     for fp in all_files:
         basename = os.path.basename(fp).rsplit(".", 1)[0].lower()
         score = 0.0
         for iw in _issue_words:
+            idf = _idf.get(iw, 0.0)
+            if idf <= 0.0:
+                continue
             if iw == basename:
-                score = max(score, 1.0)
+                tier = 1.0
             elif iw in basename or basename in iw:
-                score = max(score, 0.7)
+                tier = 0.7
             elif iw in basename.replace("_", ""):
-                score = max(score, 0.5)
+                tier = 0.5
+            else:
+                tier = 0.0
+            if tier > 0.0:
+                score = max(score, tier * idf)
         # Negated-word demotion: if a NEGATED issue word matches the basename,
         # halve the path score (the issue explicitly excluded this file/module).
         for nw in _negated_words:
             if nw == basename or nw in basename:
                 score *= 0.5
-        # Directory matches
+        # Directory matches (IDF-weighted, floor 3 to match the basename pass).
         for part in Path(fp).parts[:-1]:
             part_l = part.lower()
-            if len(part_l) >= 4:
+            if len(part_l) >= 3:
                 for iw in _issue_words:
-                    if iw in part_l or part_l in iw:
-                        score = max(score, 0.4)
+                    idf = _idf.get(iw, 0.0)
+                    if idf > 0.0 and (iw in part_l or part_l in iw):
+                        score = max(score, 0.4 * idf)
                         break
         # internal/ demotion (2026-06-27): files under an internal/ directory
         # are implementation details. When a public counterpart exists (same
