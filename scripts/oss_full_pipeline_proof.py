@@ -74,9 +74,10 @@ def main() -> int:
     cases_file, repos_dir, out_dir = sys.argv[1], sys.argv[2], sys.argv[3]
     os.makedirs(out_dir, exist_ok=True)
 
-    # Import the pipeline (baked at /opt/gt/src)
+    # Import the pipeline + diagnostic (baked at /opt/gt/src)
     sys.path.insert(0, os.environ.get("GT_SRC", "/opt/gt/src"))
     from groundtruth.pretask.v1r_brief import generate_v1r_brief
+    from groundtruth.runtime.localization_diagnostic import validate_brief_payload
 
     results = []
     cases = json.load(open(cases_file, encoding="utf-8-sig"))
@@ -125,6 +126,21 @@ def main() -> int:
                         full_rank = i + 1
                         break
             sem = getattr(result, "semantic_signal_count", 0)
+            # DIAGNOSTIC: run the fail-closed gate on this brief's payload.
+            # Build the brief-cache-shaped payload from the result, then validate.
+            payload = {
+                "brief_text": bt,
+                "metrics": {
+                    "localization_proof": getattr(result, "localization_proof", []) or [],
+                    "sem_components": getattr(result, "sem_components", []) or [],
+                    "semantic_signal_count": sem,
+                    "rendered_candidate_count": getattr(result, "rendered_candidate_count", 0),
+                },
+            }
+            diag = validate_brief_payload(
+                payload, gold_files=gold_files,
+                require_gold=True, require_semantic=True,
+            )
             results.append({
                 "id": cid, "language": lang,
                 "full_rank": full_rank, "rendered_rank": rendered_rank,
@@ -133,11 +149,18 @@ def main() -> int:
                 "gold_at_1": full_rank == 1,
                 "gold_in_8": full_rank is not None and full_rank <= 8,
                 "rendered_at_1": rendered_rank == 1,
+                "diagnostic_ok": diag["ok"],
+                "violations": diag["violations"],
+                "warnings": diag["warnings"],
+                "diag_metrics": diag["metrics"],
             })
             with open(os.path.join(out_dir, f"{cid}.brief.txt"), "w", encoding="utf-8") as f:
                 f.write(bt)
+            with open(os.path.join(out_dir, f"{cid}.diagnostic.json"), "w", encoding="utf-8") as f:
+                json.dump(diag, f, indent=2)
             mark = "✓@1" if full_rank == 1 else (f"@{full_rank}" if full_rank else "MISS")
-            print(f"[{mark}] {cid} ({lang}) full={full_rank} rendered={rendered_rank} nodes={nodes} sem={sem}", file=sys.stderr)
+            dmark = "OK" if diag["ok"] else "VIOL:" + ",".join(diag["violations"])
+            print(f"[{mark}] {cid} ({lang}) full={full_rank} rendered={rendered_rank} sem={sem} diag={dmark}", file=sys.stderr)
         except Exception as e:
             import traceback
             results.append({"id": cid, "language": lang, "full_rank": None, "rendered_rank": None, "nodes": nodes, "error": f"{type(e).__name__}: {e}"})
@@ -170,6 +193,12 @@ def main() -> int:
     total_in_8 = sum(1 for r in results if r.get("gold_in_8"))
     total_rendered_at_1 = sum(1 for r in results if r.get("rendered_at_1"))
     total_sem_zero = sum(1 for r in results if r.get("semantic_signal_count", 0) == 0)
+    # DIAGNOSTIC rollup: count each violation class across all cases.
+    diag_clean = sum(1 for r in results if r.get("diagnostic_ok"))
+    violation_counts: dict = {}
+    for r in results:
+        for v in r.get("violations", []):
+            violation_counts[v] = violation_counts.get(v, 0) + 1
 
     summary = {
         "fusion_mode": os.environ.get("GT_RRF_FUSION", "") or "linear",
@@ -178,6 +207,8 @@ def main() -> int:
         "gold_in_8": total_in_8,
         "rendered_at_1": total_rendered_at_1,
         "semantic_zero_violations": total_sem_zero,
+        "diagnostic_clean": diag_clean,
+        "violation_counts": violation_counts,
         "by_language": by_lang,
         "by_scale": by_scale,
         "cases": results,
@@ -190,6 +221,8 @@ def main() -> int:
     print(f"gold_in_8 (full list): {total_in_8}/{len(results)}", file=sys.stderr)
     print(f"rendered_at_1 (agent sees): {total_rendered_at_1}/{len(results)}", file=sys.stderr)
     print(f"semantic_zero_violations: {total_sem_zero} (MUST be 0)", file=sys.stderr)
+    print(f"DIAGNOSTIC clean (0 violations): {diag_clean}/{len(results)}", file=sys.stderr)
+    print(f"DIAGNOSTIC violation counts: {violation_counts}", file=sys.stderr)
     for lang, b in sorted(by_lang.items()):
         print(f"  {lang}: @1={b['at_1']}/{b['n']} in8={b['in_8']}/{b['n']} miss={b['miss']} sem_zero={b['sem_zero']}", file=sys.stderr)
     for scale, b in sorted(by_scale.items()):
