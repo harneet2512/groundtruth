@@ -283,8 +283,15 @@ GT_LOC_FUSION_EXCLUDE_INDEP = os.environ.get("GT_LOC_FUSION_EXCLUDE_INDEP", "0")
 # CALLS/IMPORTS by default, mirroring the CALLS-pure transitive closure. With
 # GT_LOC_REACH_DEPTH=1 it ALSO follows the structural depth edges (RE_EXPORTS
 # barrel->source, COMPOSES class->field-type, EXTENDS/IMPLEMENTS) so the newly-emitted
-# depth edges feed @1. DEFAULT OFF: this moves @1 and MUST be A/B'd on OSS-60 + held-out
-# before baking (blind reach-scope changes regressed TS before — RANKING_RECALL_SYNTHESIS).
+# depth edges feed @1.
+# DEFAULT OFF — KEEP OFF (measured harmful, 2026-06-29). A/B on the depth-fixed digest:
+# OSS-60 @1 flat (+0) / in8 -1 (rust regressed). Root cause (rnd_rust_regex_1308 miss_diag):
+# depth edges give non-gold files nonzero reach (regex has ~137 IMPLEMENTS + many COMPOSES =
+# hubs), and a lexically-perfect gold with reach=0.0 gets outranked by depth-reach-boosted
+# hubs -> falls out of delivered top-8. This is BRIEFING #3 (reach over-promotes hubs;
+# Rust worst-hit, traits implemented by many structs). The depth edges trickle-down via the
+# MAP + degree + brief (where they belong), NOT the @1 reach. Do NOT enable without a
+# hub-gated redesign that proves a held-out lift with 0 per-lang regression.
 GT_LOC_REACH_DEPTH = os.environ.get("GT_LOC_REACH_DEPTH", "0") != "0"
 _REACH_EDGE_TYPES = ("CALLS", "IMPORTS")
 if GT_LOC_REACH_DEPTH:
