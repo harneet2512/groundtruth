@@ -63,7 +63,10 @@ try:
     from pier.models.agent.context import AgentContext
     from pier.models.agent.install import AgentInstallSpec, InstallStep
     from pier.models.trial.paths import EnvironmentPaths
-except ImportError:
+except Exception:  # pier is an OPTIONAL dep (DeepSWE-harness only). Absent OR
+    # broken -> degrade to None so the no-pier Pro path imports these GT functions
+    # with ZERO pier and NO stub-shim. The GTMiniSweAgent class (the only consumer
+    # of these names) is never instantiated off the pier path.
     MiniSweAgent = None  # type: ignore[assignment,misc]
     BaseEnvironment = None  # type: ignore[assignment,misc]
     AgentContext = None  # type: ignore[assignment,misc]

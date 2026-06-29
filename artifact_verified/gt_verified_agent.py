@@ -30,12 +30,12 @@ The TWO GT injection points map onto that as:
       (_invalidate_on_edit, :1081-1082) — the substrate graph stays immutable.
 
 REUSE, not port: the brief/witness/fail-closed logic is IMPORTED from
-artifact_deepswe.gt_agent (zero drift, ONE product). gt_agent.py's module
-imports require `pier` (gt_agent.py:59-62) which the Verified path does not
-use; `_ensure_pier_importable()` installs inert stub modules ONLY when pier is
-absent, so the REAL module-level functions (_generate_brief, _prepend_brief,
-_emit_gt_meta_witness, DeepSweAdapterError, ...) load unchanged. The pier
-class surface (GTMiniSweAgent / install_spec) is never used here.
+artifact_deepswe.gt_agent (zero drift, ONE product). pier is an OPTIONAL dep
+used ONLY by the DeepSWE GTMiniSweAgent class; gt_agent.py guards its pier
+import (try/except -> None), so the REAL module-level functions (_generate_brief,
+_prepend_brief, _emit_gt_meta_witness, DeepSweAdapterError, ...) load with ZERO
+pier and NO stub-shim. The pier class surface (GTMiniSweAgent / install_spec)
+is never used here.
 
 Fail-closed contract (identical to DeepSWE):
   * GT_PROOF_MODE=1 / substrate active (GT_HOST_GRAPH_DB / GT_CERT_DIR /
@@ -71,85 +71,11 @@ _THIS_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _THIS_DIR.parent
 _DEEPSWE_DIR = _REPO_ROOT / "artifact_deepswe"
 
-# ---------------------------------------------------------------------------
-# pier import shim — artifact_deepswe.gt_agent imports pier at module level
-# (gt_agent.py:59-62) purely for the GTMiniSweAgent class surface, which the
-# Verified path NEVER uses. When pier is installed (the DeepSWE runner, local
-# dev) the real package is used untouched. When it is absent (the Verified GHA
-# runner), inert stubs make the import succeed so the REAL module-level
-# functions are reused by import — no ported copies, no drift.
-# ---------------------------------------------------------------------------
-_PIER_STUB_MODULES = (
-    "pier",
-    "pier.agents",
-    "pier.agents.installed",
-    "pier.agents.installed.mini_swe_agent",
-    "pier.environments",
-    "pier.environments.base",
-    "pier.models",
-    "pier.models.agent",
-    "pier.models.agent.context",
-    "pier.models.agent.install",
-)
-
-
-def _ensure_pier_importable() -> bool:
-    """Return True when the REAL pier package is importable; install inert stub
-    modules (and return False) when it is not. Idempotent."""
-    try:
-        import pier.agents.installed.mini_swe_agent  # noqa: F401
-        import pier.environments.base  # noqa: F401
-        import pier.models.agent.context  # noqa: F401
-        import pier.models.agent.install  # noqa: F401
-        return True
-    except Exception:  # noqa: BLE001 — pier absent or broken -> stub
-        pass
-
-    import types
-
-    mods: dict[str, types.ModuleType] = {}
-    for name in _PIER_STUB_MODULES:
-        mod = sys.modules.get(name)
-        if mod is None:
-            mod = types.ModuleType(name)
-            mod.__gt_pier_stub__ = True  # type: ignore[attr-defined]
-            sys.modules[name] = mod
-        mods[name] = mod
-    # parent.child attribute wiring so `import pier.x.y` attribute access works
-    for name in _PIER_STUB_MODULES:
-        if "." in name:
-            parent, child = name.rsplit(".", 1)
-            setattr(mods[parent], child, mods[name])
-
-    class _StubMiniSweAgent:
-        """Inert stand-in base class. The Verified path never instantiates
-        GTMiniSweAgent; using it through this stub is a hard error."""
-
-        def install_spec(self):  # pragma: no cover - guard only
-            raise RuntimeError("pier is not installed — GTMiniSweAgent is unusable "
-                              "on the Verified path (stubbed base class)")
-
-        async def run(self, *a, **k):  # pragma: no cover - guard only
-            raise RuntimeError("pier is not installed — GTMiniSweAgent is unusable "
-                              "on the Verified path (stubbed base class)")
-
-    class _StubAgentInstallSpec:  # pragma: no cover - never constructed here
-        def __init__(self, *a, **k):
-            self.steps = list(k.get("steps", []) or [])
-
-    class _StubInstallStep:  # pragma: no cover - never constructed here
-        def __init__(self, *a, **k):
-            self.__dict__.update(k)
-
-    mods["pier.agents.installed.mini_swe_agent"].MiniSweAgent = _StubMiniSweAgent
-    mods["pier.environments.base"].BaseEnvironment = object
-    mods["pier.models.agent.context"].AgentContext = object
-    mods["pier.models.agent.install"].AgentInstallSpec = _StubAgentInstallSpec
-    mods["pier.models.agent.install"].InstallStep = _StubInstallStep
-    return False
-
-
-_PIER_REAL = _ensure_pier_importable()
+# NO PIER on this path. pier is an OPTIONAL dependency used ONLY by the DeepSWE
+# harness (the GTMiniSweAgent class). gt_agent.py already guards its pier import
+# (try/except -> None), so importing its module-level GT FUNCTIONS here needs zero
+# pier and NO stub-shim. The earlier _ensure_pier_importable() fake-module shim was
+# redundant with that guard and is deleted — this path imports no pier, real or stub.
 
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
