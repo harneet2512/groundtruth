@@ -3629,6 +3629,35 @@ def generate_v1r_brief(
             if conn is not None:
                 conn.close()
 
+    # EXACT-PATH COVERAGE FLOOR (2026-06-28). The LAST word on delivered membership,
+    # after every reshuffle above (exact-named, path-rescue, witness-promote, sem-
+    # inject, neighbor-extend, hub-demote). A file whose path component is an EXACT
+    # match (==1.0 — the issue token IS the file stem) is a near-certain localization
+    # fact; the magnitude-free RRF fusion flattens it to one-rank-among-N and the
+    # downstream reorders can then push it below the delivered cut. Confirmed: bytes
+    # `hex.rs` path=1.000 dropped rank-3 (linear) -> not-delivered (rrf). This floor
+    # guarantees an EXACT path-match file sits inside the delivered window. It is
+    # NOT a threshold (1.0 is categorical exact-match, like an exact issue-named
+    # symbol) and NOT signal-magnitude tuning, so a weak path argmax (e.g. 0.3 in a
+    # pure-behavior task) is never injected -> no harm to the working regimes. The
+    # displaced boundary record stays in top_records (shifts out of the top max_files,
+    # not dropped). Membership only; ordering of the rest is untouched.
+    if top_records and v74 and getattr(v74, "ranked_full", None):
+        _exact = [
+            r for r in v74.ranked_full
+            if float((r.get("components") or {}).get("path", 0.0) or 0.0) >= 0.999
+            and str(r.get("path", "")) and not _is_non_source_candidate_path(str(r.get("path", "")))
+        ]
+        if _exact:
+            _win = {str(r.get("path", "")) for r in top_records[:max_files]}
+            for _el in _exact:
+                _ep = str(_el.get("path", ""))
+                if _ep in _win:
+                    continue
+                top_records = [r for r in top_records if str(r.get("path", "")) != _ep]
+                top_records.insert(min(max_files - 1, len(top_records)), _el)
+                _win = {str(r.get("path", "")) for r in top_records[:max_files]}
+
     _words = set(w.lower() for w in _re.findall(r"[A-Za-z_]\w{2,}", issue_text) if len(w) > 3)
     # CODE-SYMBOL provenance (backtick/fence-marked, IssueAnchors.code_symbols +
     # unresolved_code_symbols). The per-file function rankers (_top_functions /
