@@ -48,6 +48,7 @@ env:
   GT_PROOF_MODE: "1"
   GT_CONTAINERIZED: "1"
   GT_RUNTIME_STRATEGY: "unified_substrate"
+  GT_RRF_FUSION: "on"                 # banked localizer = RRF (bias-free) + exact-path floor (53/60 proven)
   # GT-MAX per-turn layers (no pier: the agent + gt_mini_patch run in THIS host
   # process and read these os.environ vars directly — no --ae forwarding needed).
   GT_VERIFY_STRUCTURAL_RISK: "1"     # row 21 structural-risk half (was dark)
@@ -212,6 +213,7 @@ jobs:
             -e GT_REQUIRE_FULL_STACK=1 -e GT_REQUIRE_FULL_POTENTIAL=1 -e GT_REQUIRE_FTS5=1 \
             -e GT_FORCE_ONNX_EMBEDDER=1 -e GT_REQUIRE_EMBEDDER=1 \
             -e GT_REQUIRE_LSP=1 -e GT_FORBID_PREBUILT_GRAPH=1 \
+            -e GT_RRF_FUSION=on \
             -e GT_ISSUE_FILE=/issue.txt \
             "$DIGEST" \
             gt-run-proof --source-root /work --out /gt_artifacts \
