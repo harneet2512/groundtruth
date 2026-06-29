@@ -550,6 +550,7 @@ if [ "$HARNESS" = "deepswe" ]; then
       -e GT_HOST_GRAPH_DB=/tmp/gt/graph.db \
       -e GT_REQUIRE_FTS5=1 -e GT_REQUIRE_EMBEDDER=1 -e GT_FORCE_ONNX_EMBEDDER=1 \
       -e GT_REQUIRE_LSP=1 -e GT_REQUIRE_FULL_STACK=1 -e GT_ISSUE_FILE=/work_issue.txt \
+      -e GT_RRF_FUSION="${GT_RRF_FUSION:-on}" \
       -e GT_LSP_READY_BUDGET_S_OVERRIDE="${GT_LSP_READY_BUDGET_S_OVERRIDE:-}" \
       -e GOMODCACHE=/tmp/gomodcache -e GOFLAGS=-mod=mod -e GOPROXY=off -e GONOSUMCHECK=1 -e GOSUMDB=off \
       -e CARGO_HOME=/root/.cargo \
@@ -575,6 +576,7 @@ else
       -e GT_HOST_GRAPH_DB=/tmp/gt/graph.db \
       -e GT_REQUIRE_FTS5=1 -e GT_REQUIRE_EMBEDDER=1 -e GT_FORCE_ONNX_EMBEDDER=1 \
       -e GT_REQUIRE_LSP=1 -e GT_REQUIRE_FULL_STACK=1 -e GT_ISSUE_FILE=/work_issue.txt \
+      -e GT_RRF_FUSION="${GT_RRF_FUSION:-on}" \
       -e GT_LSP_READY_BUDGET_S_OVERRIDE="${GT_LSP_READY_BUDGET_S_OVERRIDE:-}" \
       -e GOMODCACHE=/tmp/gomodcache -e GOFLAGS=-mod=mod -e GOPROXY=off -e GONOSUMCHECK=1 -e GOSUMDB=off \
       -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 -e HF_DATASETS_OFFLINE=1 \
