@@ -465,7 +465,8 @@ def _find_miniswe_trajectory(task: str, results_dir: str) -> str | None:
         # Both the bare name and the pier jobs/**/agent layout the VM runner produces.
         hits: list[str] = []
         for pat in ("mini-swe-agent.trajectory.json",
-                    os.path.join("jobs", "**", "agent", "*.trajectory.json")):
+                    os.path.join("jobs", "**", "agent", "*.trajectory.json"),
+                    "*.traj.json"):  # no-pier path (gt_verified_agent): <iid>.traj.json
             hits.extend(glob.glob(os.path.join(base, "**", pat), recursive=True))
         if not hits:
             continue
@@ -504,6 +505,7 @@ def _from_miniswe_trajectory(task: str, results_dir: str) -> dict:
         "recorded_cost_usd": 0.0, "cost_source": "",
         "gt_brief_delivered": 0, "gt_evidence_delivered": 0, "gt_graph_map_delivered": 0,
         "gt_nudge_delivered": 0, "gt_understand_calls": 0, "gt_verify_calls": 0,
+        "gt_scope_delivered": 0, "gt_contract_delivered": 0, "gt_cochange_delivered": 0,
         "gt_observation_chars_total": 0,
     }
     tj = _find_miniswe_trajectory(task, results_dir)
@@ -575,14 +577,26 @@ def _from_miniswe_trajectory(task: str, results_dir: str) -> dict:
                 out["edits"] += 1
                 if not out["first_edit_action"]:
                     out["first_edit_action"] = step
-        elif role in ("tool", "user"):
-            # GT content in the agent's OBSERVATIONS = fired AND delivered (the truth)
-            out["gt_brief_delivered"] += content.count("<gt-task-brief>")
-            out["gt_evidence_delivered"] += content.count("<gt-evidence>")
-            out["gt_graph_map_delivered"] += content.count("<gt-graph-map>")
-            out["gt_nudge_delivered"] += content.count("<gt-nudge")
-            if "<gt-" in content or content.lstrip().startswith("GT:"):
-                out["gt_observation_chars_total"] += len(content)
+        elif role in ("tool", "user", "exit") or m.get("type") == "function_call_output":
+            # GT content in the agent's OBSERVATIONS = fired AND delivered (the truth).
+            # Two trajectory shapes: chat (role=tool/user, text in `content`) and the
+            # OpenAI Responses-API shape pier emits on deepseek (role=None,
+            # type=function_call_output, text in `output`). Read whichever is present;
+            # count ALL delivered GT block types (brief/evidence/graph-map/scope/
+            # contract/cochange/nudge) using the prefix form so attributed tags match.
+            obs = content or m.get("output") or m.get("result") or ""
+            if isinstance(obs, list):
+                obs = json.dumps(obs)
+            obs = obs or ""
+            out["gt_brief_delivered"] += obs.count("<gt-task-brief")
+            out["gt_evidence_delivered"] += obs.count("<gt-evidence")
+            out["gt_graph_map_delivered"] += obs.count("<gt-graph-map")
+            out["gt_scope_delivered"] += obs.count("<gt-scope")
+            out["gt_contract_delivered"] += obs.count("<gt-contract")
+            out["gt_cochange_delivered"] += obs.count("<gt-cochange")
+            out["gt_nudge_delivered"] += obs.count("<gt-nudge")
+            if "<gt-" in obs or obs.lstrip().startswith("GT:"):
+                out["gt_observation_chars_total"] += len(obs)
     out["assistant_steps"] = n_assist
     if out["action_count"] == 0:
         out["action_count"] = n_assist
