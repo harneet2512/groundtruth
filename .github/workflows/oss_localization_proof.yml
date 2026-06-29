@@ -23,7 +23,7 @@ permissions:
 jobs:
   proof:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 110
     strategy:
       fail-fast: false
       matrix:
@@ -136,18 +136,23 @@ jobs:
           #   gte_semdom    = gte + semantic-dominant magnitude fusion (does the ALGORITHM fix help @1?)
           #   jina_semdom   = jina + semantic-dominant magnitude fusion (THE hypothesis)
           #   jina_semdom_r1= + recall path/bundle filter
+          # GENERALIZATION TUNING (jina_semdom overfit: OSS-60 +4 @1 / held-out -3). The fix is
+          # CONFIDENCE-GATED semantic lead (GT_SEM_LED_GATE=1 default: lead with semantic only when
+          # the embedder discriminates; flat -> fall back). 3 arms for speed (big-repo encode-bound):
+          #   control       = gte + RRF (current default baseline)
+          #   jina_semgated = jina + GT_SEM_DOMINANT(0.60) + GT_LOC_SEM_LED + GATE (does the gate fix overfit?)
+          #   jina_semco    = jina + GT_W_SEM=0.40 co-lead + GT_LOC_SEM_LED + GATE (gentler dominance)
+          # Compare jina_semgated vs the prior un-gated jina_semdom (JS+TS already on record).
           JINA=jinaai/jina-embeddings-v2-base-code
-          run_arm control       on
-          run_arm jina_rrf      on  -e GT_EMBED_MODEL_NAME="$JINA" -e GT_EMBED_DIM=768 -e GT_SEM_TOP_K=30
-          run_arm gte_semdom    off -e GT_SEM_DOMINANT=1 -e GT_LOC_SEM_LED=1
-          run_arm jina_semdom   off -e GT_EMBED_MODEL_NAME="$JINA" -e GT_EMBED_DIM=768 -e GT_SEM_TOP_K=30 -e GT_SEM_DOMINANT=1 -e GT_LOC_SEM_LED=1
-          run_arm jina_semdom_r1 off -e GT_EMBED_MODEL_NAME="$JINA" -e GT_EMBED_DIM=768 -e GT_SEM_TOP_K=30 -e GT_SEM_DOMINANT=1 -e GT_LOC_SEM_LED=1 -e GT_RECALL_PATHCLASS_FILTER=1
+          run_arm control      on
+          run_arm jina_semgated off -e GT_EMBED_MODEL_NAME="$JINA" -e GT_EMBED_DIM=768 -e GT_SEM_TOP_K=30 -e GT_SEM_DOMINANT=1 -e GT_LOC_SEM_LED=1
+          run_arm jina_semco    off -e GT_EMBED_MODEL_NAME="$JINA" -e GT_EMBED_DIM=768 -e GT_SEM_TOP_K=30 -e GT_W_SEM=0.40 -e GT_LOC_SEM_LED=1
       - name: Show this language's result
         if: always()
         run: |
           python3 -c "
           import json, os
-          for a in ['control','jina_rrf','gte_semdom','jina_semdom','jina_semdom_r1']:
+          for a in ['control','jina_semgated','jina_semco']:
               p=f'/tmp/proof_out/{a}/SUMMARY.json'
               if not os.path.exists(p): print(a,'MISSING'); continue
               d=json.load(open(p)); n=d['total_cases']

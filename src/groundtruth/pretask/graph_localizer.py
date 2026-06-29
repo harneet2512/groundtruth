@@ -2926,6 +2926,22 @@ def localize(
     # => _sem_led_key returns 0.0 for every candidate => the sort is byte-identical. Pairs with
     # the LINEAR (magnitude) run_v74 fusion + a code embedder; measured on OSS-60 + held-out.
     _sem_led = bool(_sem) and os.environ.get("GT_LOC_SEM_LED", "") == "1"
+    # CONFIDENCE GATE (generalization fix). FORCED semantic-lead overfits: it helped the tuned
+    # OSS-60 but REGRESSED unseen held-out repos (TS recall 4/5->1/3), because on cases where the
+    # embedder is wrong it OVERRIDES the correct lexical/structural pick. Fix: lead with semantic
+    # ONLY when the embedder DISCRIMINATES for this issue — the top per-file score clearly above
+    # the field (dispersion = (top-median)/top >= threshold). On a FLAT distribution the embedder
+    # "doesn't know", so fall back to grep/struct. NQC score-dispersion (Shtok et al. TOIS 2012).
+    # GT_SEM_LED_MIN_DISP default 0.15; GT_SEM_LED_GATE=0 disables the gate (= old forced lead).
+    if _sem_led and os.environ.get("GT_SEM_LED_GATE", "1") != "0":
+        _svals = sorted((v for v in _sem.values() if v > 0), reverse=True)
+        if len(_svals) >= 3:
+            _stop, _smed = _svals[0], _svals[len(_svals) // 2]
+            _sdisp = (_stop - _smed) / _stop if _stop > 0 else 0.0
+            if _sdisp < float(os.environ.get("GT_SEM_LED_MIN_DISP", "0.15")):
+                _sem_led = False  # flat -> embedder uncertain -> don't override lex/struct
+        else:
+            _sem_led = False  # too few scored files to judge confidence
 
     def _sem_led_key(c: "Candidate") -> float:
         if not _sem_led:
