@@ -3166,7 +3166,11 @@ def generate_v1r_brief(
         gold_files=gold_files,
         ablation="C",
         k_anchor=3,
-        k_sem_top=10,
+        # Dense seed depth. Env-tunable (default 10 = unchanged): a code-trained embedder
+        # ranks the behavior-gold higher, but a top-10 seed cut can still drop it on large
+        # repos — deepening the SEED (not just re-ranking) lets the better embedder's recall
+        # land (recall agent ab384a9ad8cf05d1a). Pairs with the jina-code A/B.
+        k_sem_top=int(os.environ.get("GT_SEM_TOP_K", "10")),
         tau_anchor=0.20,
         max_depth=3,
         min_confidence=EDGE_CONFIDENCE_FLOOR,

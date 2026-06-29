@@ -41,6 +41,23 @@ _GTE_MODERNBERT = {
     ],
 }
 
+# Code-retrieval embedder (Track 2 A/B lever). Xenova transformers.js no-torch ONNX port of
+# jinaai/jina-embeddings-v2-base-code (Apache-2.0, 768-dim, BERT+ALiBi, MEAN pooling, symmetric
+# = no query/passage prefix). Baked ALONGSIDE gte so GT_EMBED_MODEL_NAME=jinaai/jina-embeddings-
+# v2-base-code selects it with no re-fetch. The behavior->code bridge: changes which files enter
+# the dense top-K SEED (recall) AND their cosine order (ranking) — the root lever for behavior-
+# described issues. Non-fatal here (gte stays primary if this is absent).
+_JINA_CODE = {
+    "model.onnx": [
+        ("jinaai/jina-embeddings-v2-base-code", "onnx/model_quantized.onnx"),
+        ("jinaai/jina-embeddings-v2-base-code", "onnx/model_fp16.onnx"),
+        ("jinaai/jina-embeddings-v2-base-code", "onnx/model.onnx"),
+    ],
+    "tokenizer.json": [
+        ("jinaai/jina-embeddings-v2-base-code", "tokenizer.json"),
+    ],
+}
+
 # Runtime FALLBACK (MIT). Xenova transformers.js no-torch ONNX port of intfloat/e5-small-v2.
 _E5_SMALL_V2 = {
     "model.onnx": [
@@ -85,12 +102,20 @@ def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     e5_only = "--e5-only" in args
     gte_only = "--gte-only" in args
+    jina_only = "--jina-only" in args
 
     targets: list[tuple[str, dict]] = []
-    if not e5_only:
-        targets.append(("gte-modernbert-base", _GTE_MODERNBERT))
-    if not gte_only:
-        targets.append(("e5-small-v2", _E5_SMALL_V2))
+    if jina_only:
+        targets.append(("jina-embeddings-v2-base-code", _JINA_CODE))
+    else:
+        if not e5_only:
+            targets.append(("gte-modernbert-base", _GTE_MODERNBERT))
+        # jina-code baked alongside gte (the Track-2 A/B lever); skipped under the
+        # single-model flags. Non-fatal: gte remains targets[0] = the verdict driver.
+        if not e5_only and not gte_only:
+            targets.append(("jina-embeddings-v2-base-code", _JINA_CODE))
+        if not gte_only:
+            targets.append(("e5-small-v2", _E5_SMALL_V2))
 
     all_ok = True
     primary_ok = True  # the FIRST target is the one that drives the verdict

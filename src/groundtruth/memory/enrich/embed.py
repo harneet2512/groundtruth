@@ -54,6 +54,16 @@ E5_DIM = 384
 # Everything else (gte-modernbert, jina-code, ...) is symmetric: no prefix, CLS pooling.
 _E5_FAMILY = {"intfloat/e5-small-v2", "intfloat/e5-base-v2", "intfloat/e5-large-v2"}
 
+# Code-retrieval embedders that use MEAN pooling (not the gte/ModernBERT CLS default).
+# jina-embeddings-v2-base-code (BERT+ALiBi; Jina's sentence-transformers config pools by
+# mean over the attention mask, symmetric so no query/passage prefix). Registering it here
+# makes get_embedding_model pick mean pooling automatically when GT_EMBED_MODEL_NAME selects
+# it — the Track-2 code-embedder A/B lever (behavior->code recall + ranking).
+_MEAN_POOL_FAMILY = {
+    "jinaai/jina-embeddings-v2-base-code",
+    "jina-embeddings-v2-base-code",
+}
+
 # BUG-7 (2026-06-15): per-symbol passages are short (~80 tokens) and tokenize at
 # the 128-token window. But the ISSUE QUERY is long — it names the failing file,
 # symbols, and stack frames in its tail — and capping it at 128 discarded exactly
@@ -120,8 +130,10 @@ class EmbeddingModel:
         # Prefix: e5 needs query:/passage:; everything else is symmetric (no prefix).
         self.prefix_query = prefix_query if prefix_query is not None else ("query: " if _is_e5 else "")
         self.prefix_passage = prefix_passage if prefix_passage is not None else ("passage: " if _is_e5 else "")
-        # Pooling: e5 = mean (over attention mask); ModernBERT/gte/jina-code = CLS ([:,0]).
-        self.pooling = pooling if pooling is not None else ("mean" if _is_e5 else "cls")
+        # Pooling: e5 + jina-code = mean (over attention mask); gte/ModernBERT = CLS ([:,0]).
+        self.pooling = pooling if pooling is not None else (
+            "mean" if (_is_e5 or model_name in _MEAN_POOL_FAMILY) else "cls"
+        )
         self._session: "ort.InferenceSession | None" = None
         self._tokenizer: "Tokenizer | None" = None
         # The exact input names the loaded ONNX graph declares (introspected once).

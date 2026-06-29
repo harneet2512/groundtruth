@@ -148,6 +148,28 @@ RUN mkdir -p /opt/gt/models/gte-modernbert-base \
          "${HF_CDN}/tokenizer.json" \
     && test -s /opt/gt/models/gte-modernbert-base/tokenizer.json \
     && echo "OK gte-modernbert-base tokenizer"
+# (4b) Code-retrieval embedder jinaai/jina-embeddings-v2-base-code (Track 2 A/B lever),
+#      baked ALONGSIDE gte. Selected at runtime via GT_EMBED_MODEL_NAME=jinaai/jina-
+#      embeddings-v2-base-code (embed._MEAN_POOL_FAMILY -> mean pooling, symmetric/no prefix;
+#      the loader feeds inputs dynamically so its BERT token_type_ids is handled). The
+#      behavior->code bridge: changes the dense top-K SEED (recall) + cosine order (ranking).
+#      NON-FATAL by construction (trailing `|| echo WARN`): gte is the build-verified primary,
+#      so a jina mirror miss must NEVER fail the build. Prefer int8 (~160MB) then fp16 then fp32.
+ARG JINA_CDN=https://huggingface.co/jinaai/jina-embeddings-v2-base-code/resolve/main
+RUN mkdir -p /opt/gt/models/jina-embeddings-v2-base-code \
+    && ( ( curl -fsSL --retry 8 --retry-max-time 300 -o /opt/gt/models/jina-embeddings-v2-base-code/model.onnx \
+             "${JINA_CDN}/onnx/model_quantized.onnx" \
+           || curl -fsSL --retry 8 --retry-max-time 300 -o /opt/gt/models/jina-embeddings-v2-base-code/model.onnx \
+                "${JINA_CDN}/onnx/model_fp16.onnx" \
+           || curl -fsSL --retry 8 --retry-max-time 300 -o /opt/gt/models/jina-embeddings-v2-base-code/model.onnx \
+                "${JINA_CDN}/onnx/model.onnx" ) \
+         && curl -fsSL --retry 8 --retry-max-time 300 -o /opt/gt/models/jina-embeddings-v2-base-code/tokenizer.json \
+              "${JINA_CDN}/tokenizer.json" \
+         && test -s /opt/gt/models/jina-embeddings-v2-base-code/model.onnx \
+         && test -s /opt/gt/models/jina-embeddings-v2-base-code/tokenizer.json \
+         && echo "OK jina-embeddings-v2-base-code ONNX ($(du -sh /opt/gt/models/jina-embeddings-v2-base-code/model.onnx | cut -f1))" ) \
+    || echo "WARN jina-embeddings-v2-base-code not baked (non-fatal; gte stays primary)"
+
 # e5-small-v2 fallback embedder — REMOVED 2026-06-20. gte-modernbert-base is the PRIMARY
 # (embed.DEFAULT_EMBED_MODEL) and is baked + build-verified above (test -s model.onnx), so it
 # always loads; e5 was only the gte-load-failure safety net + the legacy memory/ module default
