@@ -295,6 +295,9 @@ func PromotePropertyEdges(db *store.DB) (int, error) {
 	if err := promotePrecedes(db, idx, addEdge); err != nil {
 		return 0, err
 	}
+	if err := promoteComposes(db, idx, addEdge); err != nil {
+		return 0, err
+	}
 	// DATA_FLOW is a CALLS.metadata ANNOTATION (§2.6 line 262), NOT a standalone
 	// edge: for a use-segment resolving to callee C from source S, if a CALLS S->C
 	// edge EXISTS we annotate it; a standalone DATA_FLOW edge is minted ONLY for the
@@ -609,6 +612,42 @@ func promoteFieldReads(db *store.DB, idx *promoteIndexes, add addEdgeFunc) error
 		}
 		add(nodeID, cls.ID, "READS", "promote_field_read", conf, 1, "field_read",
 			field, src.FilePath, line, false)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Class 6 — COMPOSES  (class_field declared TYPE: owning Class -> field's Class)
+// ---------------------------------------------------------------------------
+// A class/struct whose field's DECLARED TYPE is another indexed class-like node
+// COMPOSES that type (composition / has-a). Language-agnostic by construction:
+// the `class_field` property is emitted uniformly for every language, its declared
+// type is parsed by the SAME parseClassFieldType the PRECEDES receiver gating uses
+// (colon annotation `name: Type` + Go `Name *Type`), and classByName indexes every
+// class-like label {Class,Struct,Type,Enum,Interface}. Builtins/primitives/external
+// types are absent from classByName, so they produce NO edge — CORRECT-OR-QUIET, no
+// guessing onto an unresolved type. This is the structural depth edge that was
+// previously emitted ONLY for JSX components (relationships.go) -> 0 on every
+// non-React repo; it now generalizes to all 5 languages.
+func promoteComposes(db *store.DB, idx *promoteIndexes, add addEdgeFunc) error {
+	return forEachProperty(db, "class_field", func(nodeID int64, value string, line int) {
+		_, ftype, ok := parseClassFieldType(value)
+		if !ok {
+			return // no recoverable declared type -> STAY property (no guess)
+		}
+		typ := stripTypeGenerics(strings.TrimLeft(strings.TrimSpace(ftype), "*&"))
+		if typ == "" {
+			return
+		}
+		owner, ok := idx.byID[nodeID]
+		if !ok || !classLabels[owner.Label] {
+			return // class_field whose owner is not a class-like node -> skip
+		}
+		targetID, ok := idx.classByName[typ]
+		if !ok || targetID == nodeID {
+			return // builtin/external/unresolved type, or self -> correct-or-quiet
+		}
+		add(nodeID, targetID, "COMPOSES", "promote_composes", 0.9, 1, "class_field",
+			typ, owner.FilePath, line, false)
 	})
 }
 

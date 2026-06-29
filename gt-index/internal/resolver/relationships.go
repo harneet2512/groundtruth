@@ -272,29 +272,10 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 					}
 				}
 
-				// P4: Re-exports
-				if m := namedReExportRe.FindStringSubmatch(line); m != nil {
-					sourceModule := m[1]
-					targetFile := resolveModuleToFile(sourceModule, sf.Path, files)
-					if targetFile != "" {
-						sourceID := fileNodeMap[sf.Path]
-						targetID := fileNodeMap[targetFile]
-						if sourceID != 0 && targetID != 0 {
-							addEdge(sourceID, targetID, "RE_EXPORTS", sf.Path, lineNum, "re_export", 1.0)
-						}
-					}
-				}
-				if m := starReExportRe.FindStringSubmatch(line); m != nil {
-					sourceModule := m[1]
-					targetFile := resolveModuleToFile(sourceModule, sf.Path, files)
-					if targetFile != "" {
-						sourceID := fileNodeMap[sf.Path]
-						targetID := fileNodeMap[targetFile]
-						if sourceID != 0 && targetID != 0 {
-							addEdge(sourceID, targetID, "RE_EXPORTS", sf.Path, lineNum, "re_export", 1.0)
-						}
-					}
-				}
+				// P4: Re-exports — RETIRED. RE_EXPORTS edges are now emitted by
+				// resolver.ResolveReExports from the parser's ReExportRef AST (all 5
+				// languages), replacing this JS/TS-only line-regex that resolved to ~0
+				// on real repos and double-emitted on the cases it did match.
 
 			case "java", "kotlin":
 				// P0: Java/Kotlin extends

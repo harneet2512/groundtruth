@@ -658,13 +658,20 @@ func main() {
 		// the CALLS/closure graph without the file->module IMPORTS hops.
 		log.Printf("WARNING: IMPORTS edge materialization failed: %v", impErr)
 	}
+	// RE_EXPORTS edges from the parser's ReExportRef AST (TS/JS barrels, Python
+	// __init__.py, Rust pub use) — language-agnostic, replaces the JS/TS-only regex
+	// that left RE_EXPORTS at 0 edges. Non-fatal, additive (file->file anchors).
+	reExportCount, reErr := resolver.ResolveReExports(db, allReExports, fileMap, files)
+	if reErr != nil {
+		log.Printf("WARNING: RE_EXPORTS edge materialization failed: %v", reErr)
+	}
 	promotedCount, promErr := resolver.PromotePropertyEdges(db)
 	if promErr != nil {
 		log.Printf("WARNING: property->edge promotion failed: %v", promErr)
 	}
 	importElapsed := time.Since(importStart)
-	fmt.Fprintf(os.Stderr, "  Pass 4f: %d IMPORTS edges, %d promoted relations in %s\n",
-		importEdgeCount, promotedCount, importElapsed.Round(time.Millisecond))
+	fmt.Fprintf(os.Stderr, "  Pass 4f: %d IMPORTS edges, %d RE_EXPORTS edges, %d promoted relations in %s\n",
+		importEdgeCount, reExportCount, promotedCount, importElapsed.Round(time.Millisecond))
 
 	// ── Pass 4e: TRANSITIVE CLOSURE (C7 / RF-4) ─────────────────────────
 	// Runs AFTER CALLS resolution + edge persistence (Pass 3) so it sees the

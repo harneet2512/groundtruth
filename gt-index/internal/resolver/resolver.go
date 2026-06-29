@@ -12,6 +12,7 @@ import (
 
 	"github.com/harneet2512/groundtruth/gt-index/internal/parser"
 	"github.com/harneet2512/groundtruth/gt-index/internal/store"
+	"github.com/harneet2512/groundtruth/gt-index/internal/walker"
 )
 
 // TSConfig represents the relevant fields from tsconfig.json.
@@ -3118,41 +3119,10 @@ func ChainReExports(
 
 	for _, re := range reExports {
 
-		// Resolve the source module to file(s)
-		sourceFiles := resolveModulePath(re.SourceModule, fm)
-		if len(sourceFiles) == 0 {
-			// Try relative resolution from the re-exporting file's directory
-			dir := filepath.ToSlash(filepath.Dir(re.File))
-			rel := re.SourceModule
-			if strings.HasPrefix(rel, "./") {
-				rel = rel[2:]
-			} else if strings.HasPrefix(rel, "../") {
-				if didx := strings.LastIndex(dir, "/"); didx >= 0 {
-					dir = dir[:didx]
-				} else {
-					dir = ""
-				}
-				rel = rel[3:]
-			} else if !strings.HasPrefix(rel, ".") {
-				// Absolute module path — resolveModulePath already tried
-				continue
-			}
-			var base string
-			if dir != "" {
-				base = dir + "/" + rel
-			} else {
-				base = rel
-			}
-			// Try common extensions
-			for _, ext := range []string{"", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".rs",
-				"/index.ts", "/index.js", "/index.tsx", "/index.jsx", "/index.mjs", "/index.cjs", "/mod.rs"} {
-				if files, ok := fm[base+ext]; ok {
-					sourceFiles = files
-					break
-				}
-			}
-		}
-
+		// Resolve the source module to file(s) via the shared 4-language resolver
+		// (resolveReExportTargets) — the SAME path ResolveReExports uses to emit
+		// RE_EXPORTS edges, so alias-chaining and edge-emission can never diverge.
+		sourceFiles := resolveReExportTargets(re, fm)
 		if len(sourceFiles) == 0 {
 			continue
 		}
@@ -3172,6 +3142,130 @@ func ChainReExports(
 	}
 
 	return chained
+}
+
+// resolveReExportTargets resolves a re-export's SourceModule to the indexed
+// source file(s) it points at. Shared by ChainReExports (alias chaining) and
+// ResolveReExports (RE_EXPORTS edge emission) so the two can never use different
+// resolution and silently disagree — the exact bug that left RE_EXPORTS at 0
+// edges (alias chaining worked off the AST ReExportRef while the edge used a
+// weaker JS/TS-only line-regex). Language-agnostic: the extension/index/mod.rs
+// probing covers TS/JS barrels, Python __init__.py, and Rust pub use alike.
+func resolveReExportTargets(re parser.ReExportRef, fm map[string][]string) []string {
+	sourceFiles := resolveModulePath(re.SourceModule, fm)
+	if len(sourceFiles) > 0 {
+		return sourceFiles
+	}
+	// Relative resolution from the re-exporting file's directory.
+	dir := filepath.ToSlash(filepath.Dir(re.File))
+	rel := re.SourceModule
+	if strings.HasPrefix(rel, "./") {
+		rel = rel[2:]
+	} else if strings.HasPrefix(rel, "../") {
+		if didx := strings.LastIndex(dir, "/"); didx >= 0 {
+			dir = dir[:didx]
+		} else {
+			dir = ""
+		}
+		rel = rel[3:]
+	} else if strings.HasPrefix(rel, ".") {
+		// Python relative import (.mod / ..pkg.mod): leading dots are package
+		// levels (one = current package dir, each extra = one parent up); the
+		// remainder is a dotted submodule path (a.b -> a/b).
+		dots := 0
+		for dots < len(rel) && rel[dots] == '.' {
+			dots++
+		}
+		for i := 1; i < dots; i++ {
+			if didx := strings.LastIndex(dir, "/"); didx >= 0 {
+				dir = dir[:didx]
+			} else {
+				dir = ""
+			}
+		}
+		rel = strings.ReplaceAll(rel[dots:], ".", "/")
+	} else {
+		// Bare module name. Tree-sitter strips Python's leading dot from
+		// module_name (parser.go:1641), so a same-package re-export arrives here
+		// as a plain "mod"; resolve it relative to the re-exporting file's dir
+		// (dotted submodule -> path). resolveModulePath already tried the absolute
+		// form, so an external package simply finds no local file -> nil (quiet).
+		rel = strings.ReplaceAll(rel, ".", "/")
+	}
+	var base string
+	if dir != "" {
+		base = dir + "/" + rel
+	} else {
+		base = rel
+	}
+	for _, ext := range []string{"", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".rs",
+		"/index.ts", "/index.js", "/index.tsx", "/index.jsx", "/index.mjs", "/index.cjs", "/mod.rs"} {
+		if files, ok := fm[base+ext]; ok {
+			return files
+		}
+	}
+	return nil
+}
+
+// ResolveReExports materializes RE_EXPORTS edges (re-exporting file -> source
+// file) from the parser's ReExportRef AST extraction. This REPLACES the JS/TS-only
+// line-regex that previously left RE_EXPORTS at 0 edges on every real repo: the
+// parser already emits ReExportRef for TS/JS barrels, Python __init__.py, and Rust
+// pub use, and resolveReExportTargets resolves all of them — so this is one
+// language-agnostic pass with no per-language branch. Non-invention: an edge is
+// emitted only when BOTH the barrel file and the resolved source file have real
+// anchor nodes; an unresolved source is dropped (correct-or-quiet).
+func ResolveReExports(db *store.DB, reExports []parser.ReExportRef, fm map[string][]string, files []walker.SourceFile) (int, error) {
+	if len(reExports) == 0 {
+		return 0, nil
+	}
+	fileNodeMap := buildFileNodeMap(db, files)
+	if len(fileNodeMap) == 0 {
+		return 0, nil
+	}
+	var edges []*store.Edge
+	seen := make(map[edgeKey]bool)
+	for _, re := range reExports {
+		sourceFiles := resolveReExportTargets(re, fm)
+		if len(sourceFiles) == 0 {
+			continue
+		}
+		srcID := fileNodeMap[filepath.ToSlash(re.File)]
+		if srcID == 0 {
+			continue
+		}
+		for _, tf := range sourceFiles {
+			tgtID := fileNodeMap[tf]
+			if tgtID == 0 || tgtID == srcID {
+				continue // non-invention / no self-edge
+			}
+			key := edgeKey{sourceID: srcID, targetID: tgtID, typ: "RE_EXPORTS"}
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			edges = append(edges, &store.Edge{
+				SourceID:           srcID,
+				TargetID:           tgtID,
+				Type:               "RE_EXPORTS",
+				SourceLine:         re.Line,
+				SourceFile:         re.File,
+				ResolutionMethod:   "re_export",
+				Confidence:         1.0,
+				TrustTier:          tierFor(1.0),
+				CandidateCount:     1,
+				EvidenceType:       "re_export",
+				VerificationStatus: "unverified",
+			})
+		}
+	}
+	if len(edges) == 0 {
+		return 0, nil
+	}
+	if err := db.BatchInsertEdges(edges); err != nil {
+		return 0, err
+	}
+	return len(edges), nil
 }
 
 // BuildNameIndex creates a map from symbol name to list of node IDs.
