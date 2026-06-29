@@ -279,6 +279,23 @@ jobs:
           fi
           echo "substrate pulled in ${T_SP}s"
 
+      - name: Baked-code audit (HEAD fixes physically baked, not a stale buildx COPY layer)
+        run: |
+          if [ -n "${FAIL_CLASS:-}" ]; then echo "skip: $FAIL_CLASS"; exit 0; fi
+          # The brief-gen fixes (exact-path floor + embedder harden) are BAKED into the
+          # substrate; a stale buildx cache layer could serve OLD src and the runtime proof
+          # might still look fine. Grep the BAKED source to prove the fix is in the image.
+          FLOOR=$(docker run --rm "$GT_SUBSTRATE_DIGEST" sh -lc 'grep -c "EXACT-PATH COVERAGE FLOOR" /opt/gt/src/groundtruth/pretask/v1r_brief.py 2>/dev/null || true')
+          HARDEN=$(docker run --rm "$GT_SUBSTRATE_DIGEST" sh -lc 'grep -c "semantic_embedder_present" /opt/gt/src/groundtruth/pretask/graph_localizer.py 2>/dev/null || true')
+          NAMEFLOOR=$(docker run --rm "$GT_SUBSTRATE_DIGEST" sh -lc 'grep -c "EXACT-NAME COVERAGE FLOOR" /opt/gt/src/groundtruth/pretask/v1r_brief.py 2>/dev/null || true')
+          echo "baked-code: exact_path_floor=${FLOOR:-0} embedder_harden=${HARDEN:-0} exact_name_floor(must=0)=${NAMEFLOOR:-0}"
+          if [ "${FLOOR:-0}" -lt 1 ] || [ "${HARDEN:-0}" -lt 1 ] || [ "${NAMEFLOOR:-0}" -ne 0 ]; then
+            echo "BAKED_CODE_STALE: substrate does NOT match HEAD (floor=${FLOOR:-0} harden=${HARDEN:-0} name=${NAMEFLOOR:-0}) — rebuild with --no-cache"
+            echo "FAIL_CLASS=BAKED_CODE_STALE" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo "BAKED_CODE_OK: HEAD brief-gen fixes physically present in the substrate"
+
       - name: gt-run-proof inside the pinned substrate (the ONE identical command per task)
         run: |
           if [ -n "${FAIL_CLASS:-}" ]; then echo "skip: $FAIL_CLASS"; exit 0; fi
