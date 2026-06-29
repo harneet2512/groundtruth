@@ -181,6 +181,7 @@ def main() -> int:
             # TRUE full-list rank from the pipeline's own ranked_full (apples-to-apples
             # with the prior diagnostic; not gated by what's rendered).
             full_rank = None
+            gold_record = None
             v74 = getattr(result, "v74_result", None)
             if v74 is not None and getattr(v74, "ranked_full", None):
                 gold_norm = {g.replace("\\", "/").lstrip("./").lstrip("/").lower() for g in gold_files}
@@ -188,6 +189,7 @@ def main() -> int:
                     p = (r.get("path") or r.get("file") or "").replace("\\", "/").lstrip("./").lstrip("/").lower()
                     if p in gold_norm or any(p == g or p.endswith("/" + g) or g.endswith("/" + p) for g in gold_norm):
                         full_rank = i + 1
+                        gold_record = r
                         break
             sem = getattr(result, "semantic_signal_count", 0)
             # DIAGNOSTIC: run the fail-closed gate on this brief's payload.
@@ -211,6 +213,24 @@ def main() -> int:
             # shared basenames (aws-lambda/handler.ts vs lambda-edge/handler.ts) —
             # kept only as secondary debug signals, never the headline.
             deliv_rank = diag["metrics"].get("gold_rank")
+            # MISS DIAGNOSTIC (ranking-bound class): on a miss, capture the gold's own
+            # signal components + what outranked it, so a buried-in-set gold can be
+            # classified hub-demoted / weak-signal / absent without a local repro.
+            miss_diag = None
+            if deliv_rank is None:
+                def _csub(r):
+                    c = (r.get("components") or {}) if isinstance(r, dict) else {}
+                    return {k: round(float(c.get(k, 0.0) or 0.0), 4) for k in ("sem", "lex", "path", "reach", "anchor_prox")}
+                _top8 = []
+                if v74 is not None and getattr(v74, "ranked_full", None):
+                    for r in v74.ranked_full[:8]:
+                        _top8.append({"path": (r.get("path") or r.get("file") or "")[-40:],
+                                      "score": round(float(r.get("score", 0.0) or 0.0), 4), **_csub(r)})
+                miss_diag = {
+                    "gold_full_rank": full_rank,
+                    "gold_components": _csub(gold_record) if gold_record else None,
+                    "top8_outranking": _top8,
+                }
             results.append({
                 "id": cid, "language": lang, "regime": regime,
                 "delivered_rank": deliv_rank,
@@ -223,6 +243,7 @@ def main() -> int:
                 "violations": diag["violations"],
                 "warnings": diag["warnings"],
                 "diag_metrics": diag["metrics"],
+                "miss_diag": miss_diag,
             })
             with open(os.path.join(out_dir, f"{cid}.brief.txt"), "w", encoding="utf-8") as f:
                 f.write(bt)
