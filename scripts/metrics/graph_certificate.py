@@ -188,7 +188,8 @@ def classify_graph(cert, *, proof_mode: bool = False):
     PASS: GRAPH_VALID.
     FAIL: GRAPH_FAIL_EMPTY, GRAPH_FAIL_FTS5, GRAPH_FAIL_BUILT_ON_HOST,
           GRAPH_FAIL_MISSING_HANDOFF, GRAPH_FAIL_HANDOFF_INACTIVE, GRAPH_FAIL_STALE_CLOSURE,
-          GRAPH_FAIL_HASH_MISMATCH, GRAPH_FAIL_HOOK_MISMATCH, GRAPH_FAIL_BASES_INCOMPLETE.
+          GRAPH_FAIL_HASH_MISMATCH, GRAPH_FAIL_HOOK_MISMATCH, GRAPH_FAIL_BASES_INCOMPLETE,
+          GRAPH_FAIL_DEPTH_INCOMPLETE (persistence invariant: property>0 but edge==0).
     """
     if not cert:
         return ("GRAPH_FAIL_EMPTY", False)
@@ -206,6 +207,13 @@ def classify_graph(cert, *, proof_mode: bool = False):
         return ("GRAPH_FAIL_BASES_INCOMPLETE", False)
     if gb.get("base_evaluable_pct", 0) < 100.0:
         return ("GRAPH_FAIL_BASES_INCOMPLETE", False)
+    # PERSISTENCE INVARIANT — per-language depth completeness (mandatory, generalized,
+    # non-arbitrary): the parser detected a construct as a property but the promoter
+    # emitted ZERO of its edge type = parsed-but-not-persisted = broken extractor for
+    # this language (the COMPOSES/RE_EXPORTS bug class). Fail closed so the depth break
+    # can never recur silently on ANY language.
+    if gb.get("promotion_violations"):
+        return ("GRAPH_FAIL_DEPTH_INCOMPLETE", False)
     if proof_mode and cert.get("built_inside_container") is False:
         return ("GRAPH_FAIL_BUILT_ON_HOST", False)
     if proof_mode and not cert.get("host_resolved_graph_db"):

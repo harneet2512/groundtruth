@@ -116,6 +116,33 @@ def graph_bases_contract(con: sqlite3.Connection) -> dict[str, Any]:
     )
     depth_present = [name for name in depth_names if int(bases[name]["count"]) > 0]
 
+    # PERSISTENCE INVARIANT (generalized, NON-arbitrary, per-language depth completeness).
+    # The parser detects a structural construct as a PROPERTY; the promoter MUST persist it
+    # as the corresponding EDGE. A `property > 0 AND edge == 0` is parsed-but-not-persisted —
+    # a BROKEN extractor for THIS language (the exact COMPOSES/RE_EXPORTS bug class). Strict
+    # implication, not a count threshold — language-uniform, catches a TOTAL promoter failure
+    # while tolerating partial resolution (edge>0).
+    #
+    # ONLY UNCONDITIONAL promotions belong here — where the property STRICTLY implies the
+    # edge with no legitimate filter. EXCLUDED (verified on real OSS graphs, would false-fail):
+    #   exception_flow -> RAISES : RAISES excludes BUILTIN exceptions, so JS/TS throwing
+    #                              `new Error()` yields exception_flow>0 but raises=0 (correct-
+    #                              or-quiet, not a bug).
+    #   call_order     -> PRECEDES: PRECEDES is receiver-TYPE-gated, so typeless JS/JS-class
+    #                              code yields call_order>0 but precedes=0 (correct-or-quiet).
+    # READS/WRITES/DATA_FLOW have no such filter: a working promoter always emits >=1.
+    _PROMOTION = (
+        ("field_reads_raw", "reads"),
+        ("field_writes_raw", "writes"),
+        ("data_flow_raw", "data_flow"),
+    )
+    promotion_violations = [
+        {"property": p, "edge": e, "property_count": int(bases[p]["count"])}
+        for p, e in _PROMOTION
+        if p in bases and e in bases
+        and int(bases[p]["count"]) > 0 and int(bases[e]["count"]) <= 0
+    ]
+
     return {
         "label": "[graph bases]",
         "bases": bases,
@@ -135,4 +162,5 @@ def graph_bases_contract(con: sqlite3.Connection) -> dict[str, Any]:
         "depth_present": depth_present,
         "depth_present_count": len(depth_present),
         "depth_total_count": len(depth_names),
+        "promotion_violations": promotion_violations,
     }
