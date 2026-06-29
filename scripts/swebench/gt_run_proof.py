@@ -1023,9 +1023,43 @@ def main(argv=None) -> int:
             skipped_reason=metadata_probe.get("reason"),
         )
 
-    # 1. graph build (FTS5 enforced at index time under GT_REQUIRE_FTS5)
-    if _run([_gt_index_bin(), "-root", work, "-output", graph], base_env) != 0:
-        return tracker.fail("index", "GT_INDEX_FAIL", "gt-index failed")
+    # 1. graph build — RETRY + VERIFY (industrial hardening). A transient index failure
+    # (OOM, disk, flaky parse) or a silently-thin graph must NOT sink the task on the first
+    # try the way a single fail-on-rc did. Retry up to N, VERIFY nodes>0 (a 0-node graph is
+    # a failure even at rc=0), LOG every attempt + its cause, wipe the partial db between
+    # tries so a corrupt WAL can't poison the retry, and fail closed with a clear diagnostic.
+    # gt-index itself now fail-closes loud on 0-files/0-nodes/parse-rate, so rc!=0 carries the
+    # cause; this loop adds the recover-and-identify layer around it. (FTS5 enforced in-index
+    # under GT_REQUIRE_FTS5.)
+    _gt_index_retries = int(os.environ.get("GT_INDEX_RETRIES", "3") or "3")
+    _index_ok = False
+    _last = ""
+    for _attempt in range(1, _gt_index_retries + 1):
+        _rc = _run([_gt_index_bin(), "-root", work, "-output", graph], base_env)
+        _nodes = 0
+        if _rc == 0 and os.path.exists(graph):
+            try:
+                import sqlite3 as _sq
+                _c = _sq.connect(graph)
+                _nodes = _c.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+                _c.close()
+            except Exception as _e:  # noqa: BLE001
+                _last = f"graph verify error: {_e}"
+        if _rc == 0 and _nodes > 0:
+            _index_ok = True
+            if _attempt > 1:
+                print(f"[gt-index] recovered on attempt {_attempt}/{_gt_index_retries} ({_nodes} nodes)", flush=True)
+            break
+        _last = f"attempt {_attempt}/{_gt_index_retries}: rc={_rc} nodes={_nodes}" + (f" ({_last})" if _last else "")
+        _tag = "WARN" if _attempt < _gt_index_retries else "FAIL"
+        print(f"[gt-index][{_tag}] {_last}", flush=True)
+        for _ext in ("", "-shm", "-wal"):  # wipe partial db so the retry is clean
+            try:
+                os.remove(graph + _ext)
+            except OSError:
+                pass
+    if not _index_ok:
+        return tracker.fail("index", "GT_INDEX_FAIL", f"gt-index failed after {_gt_index_retries} attempts: {_last}")
     tracker.complete("index", graph_db=graph)
     # 2. LSP enrichment — demand-driven + polyglot + un-throttled within the issue scope.
     # gt_gt §3/§7 + CLAUDE.md "demand-driven, not exhaustive": resolve the issue-relevant subgraph

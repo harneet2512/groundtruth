@@ -198,15 +198,50 @@ func main() {
 		close(resultCh)
 	}()
 
-	// Collect results
+	// Collect results — COUNT + SAMPLE parse failures (industrial hardening: never
+	// silently ship a thin graph. SAY the problem, LOG it, IDENTIFY the files. A failure
+	// here used to be dropped on the floor — a repo where N% of files failed to parse
+	// produced a thin graph with zero warning. Now it is surfaced + fail-closed.)
+	parseFailures := 0
+	var failSample []string
 	for pr := range resultCh {
 		if pr.err == nil && pr.result != nil {
 			results[pr.fileIdx] = pr.result
+		} else if pr.err != nil {
+			parseFailures++
+			if len(failSample) < 10 && pr.fileIdx >= 0 && pr.fileIdx < len(files) {
+				failSample = append(failSample, fmt.Sprintf("%s: %v", files[pr.fileIdx].Path, pr.err))
+			}
 		}
 	}
 
 	parseElapsed := time.Since(parseStart)
-	fmt.Fprintf(os.Stderr, "  Parsed in %s\n", parseElapsed.Round(time.Millisecond))
+	parsedOK := len(files) - parseFailures
+	failRate := 0.0
+	if len(files) > 0 {
+		failRate = float64(parseFailures) / float64(len(files))
+	}
+	fmt.Fprintf(os.Stderr, "  Parsed %d/%d files in %s (%d parse failures, %.1f%%)\n",
+		parsedOK, len(files), parseElapsed.Round(time.Millisecond), parseFailures, failRate*100)
+	if parseFailures > 0 {
+		fmt.Fprintf(os.Stderr, "  [WARN] parse failures (first %d, IDENTIFY the cause):\n", len(failSample))
+		for _, s := range failSample {
+			fmt.Fprintf(os.Stderr, "    - %s\n", s)
+		}
+	}
+	// Fail-closed on a catastrophic index — a non-zero exit lets the runtime RETRY,
+	// and the log above IDENTIFIES the cause. A silent thin graph is forbidden.
+	if len(files) > 0 && parsedOK == 0 {
+		log.Fatalf("INDEX FAILED: 0/%d files parsed — graph would be empty (sample: %v)", len(files), failSample)
+	}
+	if reqRate := os.Getenv("GT_REQUIRE_PARSE_RATE"); reqRate != "" {
+		var minRate float64
+		fmt.Sscanf(reqRate, "%f", &minRate)
+		if minRate > 0 && len(files) >= 20 && (1.0-failRate) < minRate {
+			log.Fatalf("GT_REQUIRE_PARSE_RATE=%.2f but only %.1f%% of %d files parsed — index too thin, failing closed (sample: %v)",
+				minRate, (1.0-failRate)*100, len(files), failSample)
+		}
+	}
 
 	// Collect all nodes for batch insert
 	var allNodePtrs []*store.Node
@@ -268,6 +303,12 @@ func main() {
 			parentFixups[i] = n.ParentID
 			n.ParentID = 0 // insert with 0, fix up after
 		}
+	}
+
+	// Fail-closed: files parsed but 0 nodes extracted = a broken graph the cert would
+	// later reject anyway. Fail HERE with a clear cause so the runtime can retry.
+	if len(files) > 0 && len(allNodePtrs) == 0 {
+		log.Fatalf("INDEX FAILED: %d files parsed but 0 nodes extracted — empty graph (lang specs? walker filter?)", parsedOK)
 	}
 
 	// Batch insert all nodes in one transaction
