@@ -247,6 +247,37 @@ W_PATH_DECAY = float(os.environ.get("GT_LOC_W_PATH_DECAY", "0.30"))
 #                                    on the 5-lang set AFTER the human sees numbers).
 INJECTION_PLACEMENT = os.environ.get("GT_INJECTION_PLACEMENT", "strictly_below_floor")
 
+# ── LOCALIZER FUSION V2 (Reciprocal-Rank-Fusion re-architecture) ──────────────
+# Default OFF. When OFF, NONE of the V2 code paths are entered and the emitted
+# ranking is byte-identical to the magnitude composite (the mandatory diff gate).
+#
+# Rationale (Cormack et al., SIGIR 2009; k=60): the magnitude composite at the
+# score body AVERAGES zero-valued companion terms for file classes that
+# structurally can't score on an axis (config files, binary entrypoints,
+# proc-macro crates), drowning a surface that already maxes at gold (path=1.0 or
+# lex=1.0). RRF is rank-based and dilution-immune: a list that ranks gold #1
+# contributes 1/(k+1) regardless of the other lists' scores. It also needs no
+# score normalization and is robust when any one list is weak.
+#
+# Two genuinely independent surfaces are added (the only ones not keyed on
+# nodes.name, per CLAUDE.md Lim#6): L5 file-CONTENT IDF-coverage (on-disk body
+# tokens) and L6 path-IDF coverage (file_path tokens). On behavior-described
+# issues (`nl_gap`, via the already-shipped _classify_issue_lexicality) the name
+# lists L1/L2/L4 are demoted by widening their RRF-k (~10x smaller contribution)
+# so the independents LEAD. SPLADE/dense are explicitly OUT of scope (add a model;
+# overfit risk). The Go-indexer body-FTS (true BM25F) is Phase 2 (needs REBUILD).
+GT_LOC_FUSION_V2 = os.environ.get("GT_LOC_FUSION_V2", "0") != "0"          # master, default OFF
+GT_LOC_BEHAVIOR_LEAD = os.environ.get("GT_LOC_BEHAVIOR_LEAD", "1") != "0"  # nl_gap demotion (only matters if fusion on)
+GT_LOC_RRF_K = int(os.environ.get("GT_LOC_RRF_K", "60"))                    # Cormack default
+GT_LOC_RRF_K_DEMOTE = int(os.environ.get("GT_LOC_RRF_K_DEMOTE", "600"))     # name-list k on nl_gap
+GT_LOC_CONTENT_MAXFILES = int(os.environ.get("GT_LOC_CONTENT_MAXFILES", "200"))  # bound on-disk reads
+GT_LOC_PRF = os.environ.get("GT_LOC_PRF", "0") != "0"                       # optional RM3, default OFF
+# Ablation control (Arm 3): RRF re-fusion of the EXISTING name-keyed surfaces
+# only — excludes the two new independent lists L5/L6. Default OFF (no effect
+# unless fusion on). Separates the magnitude-dilution win from the independent-
+# surface win in the A/B (see arm definitions).
+GT_LOC_FUSION_EXCLUDE_INDEP = os.environ.get("GT_LOC_FUSION_EXCLUDE_INDEP", "0") != "0"
+
 
 def _is_test_block_name(sym: str) -> bool:
     """Test-framework block names that carry test DESCRIPTIONS, not code symbols.
@@ -2677,6 +2708,148 @@ def localize(
         def _is_tt(fp: str, roots: frozenset) -> bool:
             return False
 
+    # ── LOCALIZER FUSION V2 (RRF over per-surface rank lists) ─────────────────
+    # Computed ONCE, before the per-candidate scoring loop, only when the master
+    # flag is set. Produces _rrf_score_by_file[fp]; the scoring loop swaps the
+    # magnitude composite for this rank-fused score. When the flag is OFF this
+    # block is skipped entirely and `score` is byte-identical to the prior path.
+    _rrf_score_by_file: dict[str, float] = {}
+    if GT_LOC_FUSION_V2:
+        # Lazy imports (only on the gated path; avoids any import-cycle on the
+        # default path and keeps OFF byte-identical).
+        from groundtruth.pretask.hybrid import (
+            SignalHit as _SignalHit,
+            reciprocal_rank_fusion as _rrf,
+        )
+        from groundtruth.pretask.v7_4_brief import (
+            _classify_issue_lexicality as _classify_lex,
+        )
+
+        _issue_toks = sorted({t.lower() for t in terms if len(t) >= 4})
+
+        # L1 witness/structural + L4 lex — per-file, same computation the scoring
+        # loop uses (kept in lockstep so the lists reflect the real surfaces).
+        _l1_witness: dict[str, float] = {}
+        _l4_lex: dict[str, float] = {}
+        for _fp, _wits in witnesses_by_file.items():
+            _l1_witness[_fp] = max((w.strength() for w in _wits), default=0.0)
+            _ss = {os.path.splitext(os.path.basename(_fp))[0].lower()}
+            for _w in _wits:
+                _ss.add(_w.src_symbol.lower())
+                _ss.add(_w.dst_symbol.lower())
+            _lh = sum(1 for t in terms if _lex_hit(t, _ss))
+            _l4_lex[_fp] = min(1.0, _lh / 5.0)
+
+        # L5 file-CONTENT IDF-coverage (INDEPENDENT of nodes.name — reads bodies).
+        # Bounded to GT_LOC_CONTENT_MAXFILES candidate files. Each token weighted
+        # by its IDF over the READ set (NOT raw count — the Lim#6 "calendar in 34
+        # files" guard). Bodies cached for optional PRF (RM3) below.
+        _l5_content: dict[str, float] = {}
+        _bodies: dict[str, str] = {}
+        if not GT_LOC_FUSION_EXCLUDE_INDEP and repo_root and _issue_toks:
+            _cand_files = sorted(witnesses_by_file.keys())[:GT_LOC_CONTENT_MAXFILES]
+            _tok_present: dict[str, list[str]] = {}  # fp -> tokens present
+            _tok_df: dict[str, int] = {}             # token -> distinct files in read set
+            for _fp in _cand_files:
+                try:
+                    _txt = open(
+                        os.path.join(repo_root, _fp), encoding="utf-8",
+                        errors="ignore",
+                    ).read(500_000).lower()
+                except OSError:
+                    continue
+                _bodies[_fp] = _txt
+                _present = [t for t in _issue_toks if t in _txt]
+                if _present:
+                    _tok_present[_fp] = _present
+                    for t in _present:
+                        _tok_df[t] = _tok_df.get(t, 0) + 1
+            _nread = max(1, len(_bodies))
+            for _fp, _present in _tok_present.items():
+                _l5_content[_fp] = sum(
+                    math.log((_nread + 1.0) / _tok_df[t]) for t in _present
+                )
+
+            # Optional RM3/PRF (Phase 1.5, gated): expand the content query once
+            # from the top content files' bodies, then recompute L5. Amplifies an
+            # existing content foothold; no-op when no file matched. Reuses the
+            # cached bodies (no extra disk).
+            if GT_LOC_PRF and _l5_content:
+                from collections import Counter as _Counter
+                _top = sorted(_l5_content, key=lambda f: -_l5_content[f])[:3]
+                _ctr: _Counter = _Counter()
+                for _fp in _top:
+                    for _bt in _re.findall(r"[a-z_]\w{3,}", _bodies.get(_fp, "")):
+                        _ctr[_bt] += 1
+                _expand = [
+                    t for t, _ in _ctr.most_common(40)
+                    if t not in _issue_toks
+                ][:10]
+                if _expand:
+                    _edf = {
+                        t: max(1, sum(1 for b in _bodies.values() if t in b))
+                        for t in _expand
+                    }
+                    for _fp, _txt in _bodies.items():
+                        _extra = sum(
+                            math.log((_nread + 1.0) / _edf[t])
+                            for t in _expand if t in _txt
+                        )
+                        if _extra:
+                            _l5_content[_fp] = _l5_content.get(_fp, 0.0) + _extra
+
+        # L6 path-IDF coverage (INDEPENDENT of nodes.name — file_path tokens).
+        # df computed over the candidate path set; weight via the existing
+        # _idf_seed_confidence. Pure string, no disk.
+        _l6_path_idf: dict[str, float] = {}
+        if not GT_LOC_FUSION_EXCLUDE_INDEP and _issue_toks:
+            _cand_paths = list(witnesses_by_file.keys())
+            _path_df: dict[str, int] = {}
+            for t in _issue_toks:
+                _path_df[t] = sum(1 for p in _cand_paths if t in p.lower())
+            for _fp in _cand_paths:
+                _pl = _fp.lower()
+                _hit = [t for t in _issue_toks if t in _pl]
+                if _hit:
+                    _l6_path_idf[_fp] = sum(
+                        _idf_seed_confidence(_path_df[t]) for t in _hit
+                    )
+
+        # Behavior-lead gate: on nl_gap, widen the name lists' RRF-k (~10x smaller
+        # contribution) so the independent + reach lists LEAD. identifier_heavy /
+        # mixed keep all lists at k=60 (regression-safe).
+        _lexclass = _classify_lex(issue_text, issue_anchors, graph_db=graph_db)
+        _demote = GT_LOC_BEHAVIOR_LEAD and _lexclass == "nl_gap"
+        _k_name = GT_LOC_RRF_K_DEMOTE if _demote else GT_LOC_RRF_K
+
+        def _mklist(_d: dict[str, float]) -> list:
+            _items = [(f, s) for f, s in _d.items() if s > 0]
+            _items.sort(key=lambda kv: (-kv[1], kv[0]))  # deterministic ties
+            return [_SignalHit(file=f, score=s) for f, s in _items]
+
+        # Name-keyed lists (k_name) and independent/reach lists (k_base). RRF is
+        # additive across lists, so fusing the two groups separately and summing
+        # the per-file scores == one fused pass with per-list k. (The shipped
+        # reciprocal_rank_fusion takes a single k; this is how we get per-list k.)
+        _name_lists = {
+            "witness": _mklist(_l1_witness),         # L1
+            "fts5": _mklist(_fts5_score_by_file),    # L2
+            "lex": _mklist(_l4_lex),                 # L4
+        }
+        _indep_lists = {"path_decay": _mklist(_path_decay_by_file)}  # L3 (reach)
+        if not GT_LOC_FUSION_EXCLUDE_INDEP:
+            _indep_lists["content"] = _mklist(_l5_content)    # L5
+            _indep_lists["path_idf"] = _mklist(_l6_path_idf)  # L6
+        _maxf = max(50, len(witnesses_by_file) + 1)
+        for _fh in _rrf(_name_lists, k=_k_name, max_files=_maxf):
+            _rrf_score_by_file[_fh.file] = (
+                _rrf_score_by_file.get(_fh.file, 0.0) + _fh.score
+            )
+        for _fh in _rrf(_indep_lists, k=GT_LOC_RRF_K, max_files=_maxf):
+            _rrf_score_by_file[_fh.file] = (
+                _rrf_score_by_file.get(_fh.file, 0.0) + _fh.score
+            )
+
     candidates: list[Candidate] = []
     _cand_subject_pos: dict[str, int] = {}
     for fp, wits in witnesses_by_file.items():
@@ -2710,7 +2883,13 @@ def localize(
             + W_DEGREE * deg_norm
         )
         _weight_sum = W_BM25 + W_PATH_DECAY + W_WITNESS + W_LEX + W_SUBJECT + W_DEGREE
-        score = _raw_score / _weight_sum if _weight_sum > 0 else _raw_score
+        if GT_LOC_FUSION_V2:
+            # RRF re-fusion (rank-based, dilution-immune). Files absent from every
+            # list score 0.0 here — they still sit inside the downstream grep
+            # floor / tier ordering, which RRF only reorders within/above.
+            score = _rrf_score_by_file.get(fp, 0.0)
+        else:
+            score = _raw_score / _weight_sum if _weight_sum > 0 else _raw_score
         if _is_generated(fp):
             score -= 0.5
         _tt_on = os.environ.get("GT_TEST_TOOLING_DEMOTE", "1") != "0"  # default ON; "0"=A/B baseline
