@@ -1,0 +1,122 @@
+{
+ "caddy": {
+  "url": "https://github.com/caddyserver/caddy",
+  "commit": "704394d9d18e9fdcae2202117a617b4e50ef32f2"
+ },
+ "traefik": {
+  "url": "https://github.com/traefik/traefik",
+  "commit": "43cad79453e0e404c31adad46a33bee67768aada"
+ },
+ "hugo": {
+  "url": "https://github.com/gohugoio/hugo",
+  "commit": "21e9868fe28c3a00eb49a4a2d98bc0aa5d302b0b"
+ },
+ "prometheus": {
+  "url": "https://github.com/prometheus/prometheus",
+  "commit": "24582595efe2adad0f1c052c87b3fd4ad1339703"
+ },
+ "echo": {
+  "url": "https://github.com/labstack/echo",
+  "commit": "d17c907c24fad76621a644b3448a3e423de45afc"
+ },
+ "gorm": {
+  "url": "https://github.com/go-gorm/gorm",
+  "commit": "6e7eb0a07326fd20533a79022ea9a08237356d65"
+ },
+ "fastify": {
+  "url": "https://github.com/fastify/fastify",
+  "commit": "8b9c07b645a8156c23a1d2619267fc84ea879250"
+ },
+ "preact": {
+  "url": "https://github.com/preactjs/preact",
+  "commit": "c859700e53196465607b2a351a2133b1a4d8834a"
+ },
+ "webpack": {
+  "url": "https://github.com/webpack/webpack",
+  "commit": "322b0603d6cae784063482cdc3cf8ca0b135a422"
+ },
+ "prettier": {
+  "url": "https://github.com/prettier/prettier",
+  "commit": "dae99edbe5a2d8dc852807ebeabb2a46dfa6a33b"
+ },
+ "koa": {
+  "url": "https://github.com/koajs/koa",
+  "commit": "1ddb048adce65fdf11402cc19d7b8eae4e176f78"
+ },
+ "eslint": {
+  "url": "https://github.com/eslint/eslint",
+  "commit": "8fd8741009a3ed7845c89bfe2fb3eaa2119b2d15"
+ },
+ "httpx": {
+  "url": "https://github.com/encode/httpx",
+  "commit": "6c7af967734bafd011164f2a1653abc87905a62b"
+ },
+ "rich": {
+  "url": "https://github.com/Textualize/rich",
+  "commit": "d43db994181f91cfa996f2f3df3b557ba87494e4"
+ },
+ "click": {
+  "url": "https://github.com/pallets/click",
+  "commit": "3c12ce7050bf63c9fa522e5d7b95543037da0f63"
+ },
+ "starlette": {
+  "url": "https://github.com/encode/starlette",
+  "commit": "65765470827be550cdbc1a2e7165da494da7f6e8"
+ },
+ "sqlalchemy": {
+  "url": "https://github.com/sqlalchemy/sqlalchemy",
+  "commit": "75163df8ef4896589d00b682813f01e1a436afcb"
+ },
+ "werkzeug": {
+  "url": "https://github.com/pallets/werkzeug",
+  "commit": "11c9fe9272e281b90abe89dc59f86e44ee453bab"
+ },
+ "ripgrep": {
+  "url": "https://github.com/BurntSushi/ripgrep",
+  "commit": "916415857f084e63efda03cf25a67fe7f6d24244"
+ },
+ "alacritty": {
+  "url": "https://github.com/alacritty/alacritty",
+  "commit": "83f64435375216466a87c853ed1eb0d9c58b4470"
+ },
+ "helix": {
+  "url": "https://github.com/helix-editor/helix",
+  "commit": "26a2d55dec9a52de1d6915bc2f4fd7e9e907ead7"
+ },
+ "starship": {
+  "url": "https://github.com/starship/starship",
+  "commit": "05ee20141e3ed92cbf05b166c54265237648d27d"
+ },
+ "fd": {
+  "url": "https://github.com/sharkdp/fd",
+  "commit": "0e74d5b75dfd65e756dcb934ff505682a6f18e83"
+ },
+ "axum": {
+  "url": "https://github.com/tokio-rs/axum",
+  "commit": "a480d71f6d55cef84f273e5a5e0563d5354ab328"
+ },
+ "typeorm": {
+  "url": "https://github.com/typeorm/typeorm",
+  "commit": "883ed8eb7efaf4dc3068632563b72c7317d7c82a"
+ },
+ "nest": {
+  "url": "https://github.com/nestjs/nest",
+  "commit": "57d74129159a9e137861dc01def49e52653b9a80"
+ },
+ "vite": {
+  "url": "https://github.com/vitejs/vite",
+  "commit": "5876b2cc2e1a01df9363e1e3d1d19f474ba68285"
+ },
+ "immer": {
+  "url": "https://github.com/immerjs/immer",
+  "commit": "570c8009c40990fe5b0f742c5ae114c107a5024f"
+ },
+ "xstate": {
+  "url": "https://github.com/statelyai/xstate",
+  "commit": "c35cb81dc0fb1bc182466c1c1cf462c8d212c21e"
+ },
+ "slate": {
+  "url": "https://github.com/ianstormtaylor/slate",
+  "commit": "5d5239b8608bfb18c5950afe25821aa2629e8fbc"
+ }
+}

@@ -1,0 +1,72 @@
+{
+  "cases": [
+    {
+      "id": "ho_js_fastify_dblslash",
+      "language": "javascript",
+      "repo": "fastify",
+      "issue_text": "Routes registered under nested plugins with a trailing slash on the parent prefix and no leading slash on the child prefix are mounted with a double slash. For example, registering an inner plugin with prefix 'inner' inside an outer plugin with prefix '/v1/' mounts the route at /v1//inner/route instead of /v1/inner/route. With the default ignoreDuplicateSlashes: false, GET /v1/inner/route then returns 404. Exactly one '/' should be kept between a parent and child prefix.",
+      "gold_files": ["lib/plugin-override.js"]
+    },
+    {
+      "id": "ho_js_preact_domorder",
+      "language": "javascript",
+      "repo": "preact",
+      "issue_text": "Incorrect DOM result with certain 'key' and ContextProvider combination. When combining specific Preact key and ContextProvider usage, the rendered DOM order is unexpected compared to the VNodes generated. Steps: expand all rows, then collapse row 1 or 2 and observe the rows in the wrong order versus the expected DOM. The same setup in React does not reproduce the issue.",
+      "gold_files": ["src/diff/children.js"]
+    },
+    {
+      "id": "ho_js_webpack_profiling",
+      "language": "javascript",
+      "repo": "webpack",
+      "issue_text": "ProfilingPlugin not rendering in Chrome. I'm getting an error when using the ProfilingPlugin: 'n.args.data.frames is not iterable' is reported when dropping the generated events.json into Chrome DevTools. The same trace file loads fine in Firefox's profiler.",
+      "gold_files": ["lib/debug/ProfilingPlugin.js"]
+    },
+    {
+      "id": "ho_js_prettier_tsinstparen",
+      "language": "javascript",
+      "repo": "prettier",
+      "issue_text": "Prettier drops the parentheses required around a TSInstantiationExpression, producing invalid output. The parenthesized instantiation expression should be preserved so the formatted code still parses. (Originally found in Biome.)",
+      "gold_files": ["src/language-js/parentheses/parent-needs-parentheses.js"]
+    },
+    {
+      "id": "ho_js_koa_attachment",
+      "language": "javascript",
+      "repo": "koa",
+      "issue_text": "ctx.attachment() / response.attachment overwrites an already-set Content-Type, which can lead to Content-Type sniffing and XSS when serving HTML or SVG files as attachments (security advisory GHSA-c5vw-j4hf-j526). An existing Content-Type should be preserved, while still being set when none was previously defined for backwards compatibility.",
+      "gold_files": ["lib/response.js"]
+    },
+    {
+      "id": "ho_js_eslint_boolcast",
+      "language": "javascript",
+      "repo": "eslint",
+      "issue_text": "Bug: no-extra-boolean-cast fires on a shadowed Boolean, and --fix rewrites the code. When Boolean is a function parameter rather than the global, Boolean(input) is a call to the passed-in function, not a redundant cast, but the rule still reports it and the autofix removes the call, changing program behavior.",
+      "gold_files": ["lib/rules/no-extra-boolean-cast.js"]
+    }
+  ],
+  "repos": {
+    "fastify": {
+      "url": "https://github.com/fastify/fastify",
+      "commit": "8b9c07b645a8156c23a1d2619267fc84ea879250"
+    },
+    "preact": {
+      "url": "https://github.com/preactjs/preact",
+      "commit": "c859700e53196465607b2a351a2133b1a4d8834a"
+    },
+    "webpack": {
+      "url": "https://github.com/webpack/webpack",
+      "commit": "322b0603d6cae784063482cdc3cf8ca0b135a422"
+    },
+    "prettier": {
+      "url": "https://github.com/prettier/prettier",
+      "commit": "dae99edbe5a2d8dc852807ebeabb2a46dfa6a33b"
+    },
+    "koa": {
+      "url": "https://github.com/koajs/koa",
+      "commit": "1ddb048adce65fdf11402cc19d7b8eae4e176f78"
+    },
+    "eslint": {
+      "url": "https://github.com/eslint/eslint",
+      "commit": "8fd8741009a3ed7845c89bfe2fb3eaa2119b2d15"
+    }
+  }
+}

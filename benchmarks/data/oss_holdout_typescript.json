@@ -1,0 +1,72 @@
+{
+  "cases": [
+    {
+      "id": "ho_ts_typeorm_cacherunner",
+      "language": "typescript",
+      "repo": "typeorm",
+      "issue_text": "fix(cache): query runner not released on error in storeInCache. When storeInCache creates an internal master query runner (slave or undefined caller), a throwing execute() leaves the pooled connection unreleased and leaks a connection from the pool. The internally-created query runner must be released even when the cache write fails (wrap the execute block in try/finally so release always runs).",
+      "gold_files": ["src/cache/DbQueryResultCache.ts"]
+    },
+    {
+      "id": "ho_ts_nest_gatewayguard",
+      "language": "typescript",
+      "repo": "nest",
+      "issue_text": "fix(websockets): type guard checks the key instead of the value. In GatewayMetadataExplorer.scanForServerHooks, the isFunction guard checks propertyKey (always a string coming from for...in) instead of instance[propertyKey] (the actual property value). The guard therefore never fires the way it should, and all enumerable properties, including non-method values, get scanned for GATEWAY_SERVER_METADATA metadata. The guard should test the property value, not its key.",
+      "gold_files": ["packages/websockets/gateway-metadata-explorer.ts"]
+    },
+    {
+      "id": "ho_ts_vite_indexhtmluri",
+      "language": "typescript",
+      "repo": "vite",
+      "issue_text": "Dev server crashes on a malformed .html request. The fullBundle branch of indexHtmlMiddleware calls decodeURIComponent(url) without a guard. A request for a malformed .html URL such as /%c0.html therefore throws `URIError: URI malformed` and crashes the middleware instead of falling through to the next handler. The decode should be wrapped in try/catch and fall through (return next()) on failure, mirroring the existing guard in the memory-files middleware.",
+      "gold_files": ["packages/vite/src/node/server/middlewares/indexHtml.ts"]
+    },
+    {
+      "id": "ho_ts_immer_arrayproxy",
+      "language": "typescript",
+      "repo": "immer",
+      "issue_text": "When enableArrayMethods() is enabled, immer does not always commit nested drafts, resulting in illegally accessing revoked proxies. This happens when copying an existing draft object and then adding it back to the array via mutation.\n\nRepro:\n  enableArrayMethods();\n  const oldState = [{ nestedArray: [] }];\n  const newState = produce(oldState, (state) => {\n    const newVal = { ...state[0] };\n    state.push(newVal);\n  });\n  newState[1].nestedArray.length; // throws: illegal operation attempted on a revoked proxy\n\nObserved: newState[1].nestedArray is a revoked proxy, indicating the draft was not committed. Expected: the nested draft is committed and reading it works.",
+      "gold_files": ["src/plugins/arrayMethods.ts"]
+    },
+    {
+      "id": "ho_ts_xstate_wildcardfallback",
+      "language": "typescript",
+      "repo": "xstate",
+      "issue_text": "When a transition for an exact event descriptor has a guard that returns false, a matching wildcard descriptor is not used as a fallback and no transition is taken at all. For example, given handlers `'foo.bar': { guard: () => false, target: 'fail' }` and `'foo.*': 'pass'`, sending `{ type: 'foo.bar' }` does nothing instead of taking the `'foo.*'` transition to `pass`. Two wildcard descriptors already fall back correctly (`'foo.bar.*'` falls back to `'foo.*'`); only the exact-plus-wildcard combination is broken. Candidate selection short-circuits on the exact match, so the wildcard candidates are never even built when an exact descriptor exists.",
+      "gold_files": ["packages/core/src/stateUtils.ts"]
+    },
+    {
+      "id": "ho_ts_slate_normalizehang",
+      "language": "typescript",
+      "repo": "slate",
+      "issue_text": "Calling Editor.normalize(editor, { force: true }) can hang indefinitely (the call never returns) when normalization processes adjacent text inside a custom non-selectable element. With an `editor.isSelectable` override that returns false for a particular element type, and adjacent text fragments seeded under that element, normalization enters an infinite loop and makes no progress. Because Editor.positions honors editor.isSelectable, traversal skips the non-selectable subtree, so combining the adjacent text fragments never advances and normalization spins forever.",
+      "gold_files": ["packages/slate/src/transforms-node/merge-nodes.ts"]
+    }
+  ],
+  "repos": {
+    "typeorm": {
+      "url": "https://github.com/typeorm/typeorm",
+      "commit": "883ed8eb7efaf4dc3068632563b72c7317d7c82a"
+    },
+    "nest": {
+      "url": "https://github.com/nestjs/nest",
+      "commit": "57d74129159a9e137861dc01def49e52653b9a80"
+    },
+    "vite": {
+      "url": "https://github.com/vitejs/vite",
+      "commit": "5876b2cc2e1a01df9363e1e3d1d19f474ba68285"
+    },
+    "immer": {
+      "url": "https://github.com/immerjs/immer",
+      "commit": "570c8009c40990fe5b0f742c5ae114c107a5024f"
+    },
+    "xstate": {
+      "url": "https://github.com/statelyai/xstate",
+      "commit": "c35cb81dc0fb1bc182466c1c1cf462c8d212c21e"
+    },
+    "slate": {
+      "url": "https://github.com/ianstormtaylor/slate",
+      "commit": "5d5239b8608bfb18c5950afe25821aa2629e8fbc"
+    }
+  }
+}

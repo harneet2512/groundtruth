@@ -1,0 +1,85 @@
+{
+  "cases": [
+    {
+      "id": "ho_python_httpx_3571",
+      "language": "python",
+      "repo": "httpx",
+      "issue_text": "Display proxy protocol scheme on error. The error message raised when a proxy connection fails does not show which proxy protocol was in use. It should evaluate and include the proxy URL scheme (`proxy.url.scheme`) in the error message so users can see which proxy protocol was being used when the failure occurred.",
+      "gold_files": [
+        "httpx/_transports/default.py"
+      ]
+    },
+    {
+      "id": "ho_python_rich_3678",
+      "language": "python",
+      "repo": "rich",
+      "issue_text": "Don't underline indentation in exception code highlights. When rendering exceptions and tracebacks, the syntax highlighter underlines the leading indentation of code lines. Previously indentation was underlined, which didn't look good. Code highlights shown in exceptions should not highlight (underline) the indentation.",
+      "gold_files": [
+        "rich/default_styles.py",
+        "rich/traceback.py"
+      ]
+    },
+    {
+      "id": "ho_python_click_2994",
+      "language": "python",
+      "repo": "click",
+      "issue_text": "`launch()` cannot locate files with spaces in the name on Windows. When a Windows program uses `click.launch(some_path, locate=True)` and `some_path` contains spaces, Windows Explorer opens showing the user's Documents folder instead of the specified file. Dispatching the call to `powershell` rather than `cmd` seems to fix the problem.",
+      "gold_files": [
+        "src/click/_termui_impl.py"
+      ]
+    },
+    {
+      "id": "ho_python_starlette_3298",
+      "language": "python",
+      "repo": "starlette",
+      "issue_text": "Adding `requires('scope')` to a function whose `request` parameter is not of type `Request` currently throws a bare `AssertionError` with no explanation. The `requires()` decorator asserts `isinstance(request, Request)` but gives no guidance when the parameter is mis-typed. It should raise a clear, descriptive error explaining that the decorated function's parameter must be a `Request`.",
+      "gold_files": [
+        "starlette/authentication.py"
+      ]
+    },
+    {
+      "id": "ho_python_sqlalchemy_12726",
+      "language": "python",
+      "repo": "sqlalchemy",
+      "issue_text": "Make `__aiter__` in `AsyncTupleResult` a sync function. According to PEP 525, `__aiter__` should be a synchronous function that returns an async iterator, but `AsyncTupleResult.__aiter__` is currently defined as an async function. This should be corrected so the async-tuple result object conforms to the async iterator protocol.",
+      "gold_files": [
+        "lib/sqlalchemy/ext/asyncio/result.py"
+      ]
+    },
+    {
+      "id": "ho_python_werkzeug_3089",
+      "language": "python",
+      "repo": "werkzeug",
+      "issue_text": "Multipart parsing breaks on the last newline with multiple parts and chunked data. The search for the last newline should happen after `data_start`; without this it may return a newline that occurs before `data_start` and break subsequent parsing (as seen for multipart bodies with multiple parts and chunked transfer).",
+      "gold_files": [
+        "src/werkzeug/sansio/multipart.py"
+      ]
+    }
+  ],
+  "repos": {
+    "httpx": {
+      "url": "https://github.com/encode/httpx",
+      "commit": "6c7af967734bafd011164f2a1653abc87905a62b"
+    },
+    "rich": {
+      "url": "https://github.com/Textualize/rich",
+      "commit": "d43db994181f91cfa996f2f3df3b557ba87494e4"
+    },
+    "click": {
+      "url": "https://github.com/pallets/click",
+      "commit": "3c12ce7050bf63c9fa522e5d7b95543037da0f63"
+    },
+    "starlette": {
+      "url": "https://github.com/encode/starlette",
+      "commit": "65765470827be550cdbc1a2e7165da494da7f6e8"
+    },
+    "sqlalchemy": {
+      "url": "https://github.com/sqlalchemy/sqlalchemy",
+      "commit": "75163df8ef4896589d00b682813f01e1a436afcb"
+    },
+    "werkzeug": {
+      "url": "https://github.com/pallets/werkzeug",
+      "commit": "11c9fe9272e281b90abe89dc59f86e44ee453bab"
+    }
+  }
+}
