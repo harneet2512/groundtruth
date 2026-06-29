@@ -202,7 +202,17 @@ model:
     You made an invalid tool call. Please retry with the correct tool call format.
   cost_tracking: "ignore_errors"
   model_kwargs:
-    # DeepSWE baseline parity: empty model_kwargs = provider defaults apply.
-    # MiMo-v2.5-Pro: thinking ENABLED (default), temp=1.0 (forced), top_p=0.95 (forced).
-    # DeepSWE config name = mini_swe_agent_mimo_v2_5_pro_default = no overrides.
+    # deepseek-v4-flash on BOTH benchmarks, thinking OFF (byte-parity with
+    # verified_gt.yaml). V4 default is THINKING-ON which bloats tokens+cost and is
+    # incompatible with the multi-turn harness — disable via extra_body. DeepSeek
+    # official-spec sampling: temp 1.0 / top_p 0.95 / max 8192 / penalties 0.
+    drop_params: true
+    temperature: 1.0
+    top_p: 0.95
+    max_tokens: 8192
+    presence_penalty: 0
+    frequency_penalty: 0
     num_retries: 3
+    extra_body:
+      thinking:
+        type: disabled
