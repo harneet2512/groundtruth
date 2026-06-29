@@ -506,6 +506,7 @@ def _from_miniswe_trajectory(task: str, results_dir: str) -> dict:
         "gt_brief_delivered": 0, "gt_evidence_delivered": 0, "gt_graph_map_delivered": 0,
         "gt_nudge_delivered": 0, "gt_understand_calls": 0, "gt_verify_calls": 0,
         "gt_scope_delivered": 0, "gt_contract_delivered": 0, "gt_cochange_delivered": 0,
+        "gt_verify_delivered": 0,
         "gt_observation_chars_total": 0,
     }
     tj = _find_miniswe_trajectory(task, results_dir)
@@ -537,75 +538,121 @@ def _from_miniswe_trajectory(task: str, results_dir: str) -> dict:
             out["cost_source"] = f"trajectory_model_stats.{ck}"
             break
 
+    # SHAPE-AWARE parse — mini-swe-agent emits two message shapes and we must read BOTH
+    # correctly or every agent-behaviour + token + cost metric false-zeros:
+    #   chat:           role in {assistant, tool, user}; action in tool_calls; usage in
+    #                   extra.response.usage (prompt_/completion_ keys).
+    #   Responses-API:  role=None; the model turn carries an `output` LIST (one
+    #                   function_call w/ arguments.command) + top-level `usage`
+    #                   (input_tokens/output_tokens/total_tokens/input_tokens_details.
+    #                   cached_tokens); the observation is type=function_call_output with
+    #                   text in `output`. deepseek-v4-flash (DeepSWE + Pro) uses THIS shape.
+    # DELIVERY counting (gt-math §4): the first user/system message is the brief+LEGEND;
+    # its per-turn tag EXAMPLES are documentation, NOT deliveries. So the L1 brief blocks
+    # (task-brief, graph-map) are counted from the brief message; per-turn blocks
+    # (evidence/scope/contract/cochange/nudge/verify) are counted from OBSERVATIONS ONLY.
     step = 0
     n_assist = 0
     for m in d.get("messages", []) or []:
         role = m.get("role")
-        content = m.get("content") or ""
-        usage = None
-        extra = m.get("extra")
-        if isinstance(extra, dict):
-            resp = extra.get("response") or {}
-            usage = resp.get("usage")
-            # litellm stashes the per-call dollar cost it computed in _hidden_params
-            # (response_cost) — model-agnostic; sum it as the recorded cost when no
-            # run-level rollup was present.
-            if not out["cost_source"]:
-                hp = resp.get("_hidden_params") or {}
-                rc = hp.get("response_cost")
-                if not isinstance(rc, (int, float)):
-                    rc = extra.get("cost") or extra.get("response_cost")
-                if isinstance(rc, (int, float)) and rc > 0:
-                    out["recorded_cost_usd"] += float(rc)
-        if isinstance(usage, dict):
-            out["prompt_tokens"] += int(usage.get("prompt_tokens", 0) or 0)
-            out["completion_tokens"] += int(usage.get("completion_tokens", 0) or 0)
-            out["total_tokens"] += int(usage.get("total_tokens", 0) or 0)
-            out["cache_hit_tokens"] += int(usage.get("prompt_cache_hit_tokens", 0) or 0)
-            out["cache_miss_tokens"] += int(usage.get("prompt_cache_miss_tokens", 0) or 0)
-        if role == "assistant":
+        mtype = m.get("type")
+        content = m.get("content")
+        if isinstance(content, list):
+            content = json.dumps(content)
+        content = content or ""
+        extra = m.get("extra") if isinstance(m.get("extra"), dict) else {}
+
+        is_responses_turn = role is None and mtype is None and isinstance(m.get("output"), list)
+        is_chat_turn = role == "assistant"
+
+        # ---------------- MODEL TURN (action + tokens + cost) ----------------
+        if is_responses_turn or is_chat_turn:
             n_assist += 1
             step += 1
-            # The executed command lives in tool_calls (mini-swe-agent), NOT content
-            # (content is just the THOUGHT). Scan the structured tool_calls text.
-            cmd = json.dumps(m.get("tool_calls") or "")
-            if isinstance(content, str):
-                cmd += content
-            out["gt_understand_calls"] += cmd.count("gt_hook.py understand")
-            out["gt_verify_calls"] += cmd.count("gt_hook.py verify")
-            if _is_mutating_editor_command("", cmd):
-                out["edits"] += 1
-                if not out["first_edit_action"]:
-                    out["first_edit_action"] = step
-        elif role in ("tool", "user", "exit") or m.get("type") == "function_call_output":
-            # GT content in the agent's OBSERVATIONS = fired AND delivered (the truth).
-            # Two trajectory shapes: chat (role=tool/user, text in `content`) and the
-            # OpenAI Responses-API shape pier emits on deepseek (role=None,
-            # type=function_call_output, text in `output`). Read whichever is present;
-            # count ALL delivered GT block types (brief/evidence/graph-map/scope/
-            # contract/cochange/nudge) using the prefix form so attributed tags match.
+            usage = m.get("usage")
+            if not isinstance(usage, dict):
+                usage = (extra.get("response") or {}).get("usage")
+            if isinstance(usage, dict):
+                pin = int(usage.get("input_tokens", usage.get("prompt_tokens", 0)) or 0)
+                pout = int(usage.get("output_tokens", usage.get("completion_tokens", 0)) or 0)
+                ptot = int(usage.get("total_tokens", pin + pout) or 0)
+                cached = int((usage.get("input_tokens_details") or {}).get(
+                    "cached_tokens", usage.get("prompt_cache_hit_tokens", 0)) or 0)
+                _miss = usage.get("prompt_cache_miss_tokens")
+                miss = int(_miss) if isinstance(_miss, (int, float)) else max(pin - cached, 0)
+                out["prompt_tokens"] += pin
+                out["completion_tokens"] += pout
+                out["total_tokens"] += ptot
+                out["cache_hit_tokens"] += cached
+                out["cache_miss_tokens"] += miss
+            if not out["cost_source"]:
+                rc = usage.get("cost") if isinstance(usage, dict) else None
+                if not isinstance(rc, (int, float)):
+                    hp = (extra.get("response") or {}).get("_hidden_params") or {}
+                    rc = hp.get("response_cost") or extra.get("cost") or extra.get("response_cost")
+                if isinstance(rc, (int, float)) and rc > 0:
+                    out["recorded_cost_usd"] += float(rc)
+            # Executed command(s): Responses-API → output[].function_call.arguments.command;
+            # chat → tool_calls (the action) + content (the thought).
+            cmds: list[str] = []
+            if is_responses_turn:
+                for it in m.get("output") or []:
+                    if isinstance(it, dict) and it.get("type") == "function_call":
+                        a = it.get("arguments") or ""
+                        try:
+                            cmds.append(str((json.loads(a) or {}).get("command", a)))
+                        except (ValueError, TypeError):
+                            cmds.append(str(a))
+            else:
+                cmds.append(json.dumps(m.get("tool_calls") or "") + content)
+            for cmd in cmds:
+                out["gt_understand_calls"] += cmd.count("gt_hook.py understand")
+                out["gt_verify_calls"] += cmd.count("gt_hook.py verify")
+                if _is_mutating_editor_command("", cmd):
+                    out["edits"] += 1
+                    if not out["first_edit_action"]:
+                        out["first_edit_action"] = step
+            continue
+
+        # ---------------- L1 BRIEF (first user/system instruction message) ----------------
+        # Count ONLY the L1 blocks the brief legitimately carries. The per-turn tag
+        # examples here are the injected LEGEND (documentation) — never count them as
+        # deliveries (that was the over-count: phantom cochange, inflated evidence).
+        if role in ("user", "system"):
+            out["gt_brief_delivered"] += content.count("<gt-task-brief")
+            out["gt_graph_map_delivered"] += content.count("<gt-graph-map")
+            continue
+
+        # ---------------- OBSERVATION (per-turn delivery, rows 11-21) ----------------
+        if mtype == "function_call_output" or role in ("tool", "exit"):
             obs = content or m.get("output") or m.get("result") or ""
             if isinstance(obs, list):
                 obs = json.dumps(obs)
             obs = obs or ""
-            out["gt_brief_delivered"] += obs.count("<gt-task-brief")
             out["gt_evidence_delivered"] += obs.count("<gt-evidence")
-            out["gt_graph_map_delivered"] += obs.count("<gt-graph-map")
             out["gt_scope_delivered"] += obs.count("<gt-scope")
             out["gt_contract_delivered"] += obs.count("<gt-contract")
             out["gt_cochange_delivered"] += obs.count("<gt-cochange")
             out["gt_nudge_delivered"] += obs.count("<gt-nudge")
+            out["gt_verify_delivered"] += obs.count("<gt-verify")
             if "<gt-" in obs or obs.lstrip().startswith("GT:"):
                 out["gt_observation_chars_total"] += len(obs)
     out["assistant_steps"] = n_assist
     if out["action_count"] == 0:
         out["action_count"] = n_assist
 
-    # resolved from the pier verifier reward.txt (sibling of the agent/ dir)
-    reward_path = os.path.join(os.path.dirname(os.path.dirname(tj)), "verifier", "reward.txt")
-    if os.path.exists(reward_path):
+    # resolved: pier verifier reward.json ({"reward": N}); the .txt rarely exists.
+    _vdir = os.path.join(os.path.dirname(os.path.dirname(tj)), "verifier")
+    _rj = os.path.join(_vdir, "reward.json")
+    _rt = os.path.join(_vdir, "reward.txt")
+    if os.path.exists(_rj):
         try:
-            out["resolved"] = bool(float(open(reward_path).read().strip() or "0") >= 1.0)
+            out["resolved"] = bool(float((_load_json(_rj) or {}).get("reward", 0) or 0) >= 1.0)
+        except (ValueError, TypeError):
+            pass
+    elif os.path.exists(_rt):
+        try:
+            out["resolved"] = bool(float(open(_rt).read().strip() or "0") >= 1.0)
         except (OSError, ValueError):
             pass
 
