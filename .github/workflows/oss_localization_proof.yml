@@ -134,16 +134,20 @@ jobs:
           #   fuse_full   = GT_LOC_FUSION_V2 + BEHAVIOR_LEAD (the proposal)
           #   fuse_nolead = FUSION_V2 without the behavior gate (isolates the gate)
           #   fuse_ablate = FUSION_V2 RRF of EXISTING surfaces only (isolates magnitude-fix vs independent-surface win)
-          run_arm control     on
-          run_arm fuse_full   on -e GT_LOC_FUSION_V2=1 -e GT_LOC_BEHAVIOR_LEAD=1
-          run_arm fuse_nolead on -e GT_LOC_FUSION_V2=1 -e GT_LOC_BEHAVIOR_LEAD=0
-          run_arm fuse_ablate on -e GT_LOC_FUSION_V2=1 -e GT_LOC_BEHAVIOR_LEAD=1 -e GT_LOC_FUSION_EXCLUDE_INDEP=1
+          # STEP 3 — reach A/B: does feeding the new depth edges (RE_EXPORTS/COMPOSES/
+          # EXTENDS/IMPLEMENTS) into the @1 path-decay reach help ranking? fuse_nolead is
+          # now the BAKED default, so control already = independent-surface fusion; this
+          # only toggles GT_LOC_REACH_DEPTH. Prior SKEPTICAL (BRIEFING #3: reach
+          # over-promotes hubs; barrels/composition targets are hubs) — bake only on a
+          # held-out lift with 0 per-lang regression.
+          run_arm control    on
+          run_arm reachdepth on -e GT_LOC_REACH_DEPTH=1
       - name: Show this language's result
         if: always()
         run: |
           python3 -c "
           import json, os
-          for a in ['control','fuse_full','fuse_nolead','fuse_ablate']:
+          for a in ['control','reachdepth']:
               p=f'/tmp/proof_out/{a}/SUMMARY.json'
               if not os.path.exists(p): print(a,'MISSING'); continue
               d=json.load(open(p)); n=d['total_cases']
