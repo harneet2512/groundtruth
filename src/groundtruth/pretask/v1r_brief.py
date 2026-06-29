@@ -3658,6 +3658,47 @@ def generate_v1r_brief(
                 top_records.insert(min(max_files - 1, len(top_records)), _el)
                 _win = {str(r.get("path", "")) for r in top_records[:max_files]}
 
+    # EXACT-NAME COVERAGE FLOOR (2026-06-28). The name-signal twin of the path floor
+    # above. A symbol named VERBATIM in the issue + present in the graph (`_issue_named`,
+    # already specificity-guarded at line ~3228: not a dunder, len>=5, spread over <=3
+    # files) is the strongest content anchor that exists (gt_gt §4.1). It IS promoted
+    # early (3228) and protected inside the witness-localization block (3440/3456), but
+    # that protection is GATED on the block running; when a task yields no graph
+    # witnesses the exact-named gold is only promoted early and the later sem-inject /
+    # neighbor / hub-demote reorders push it back below the delivered cut — the same
+    # displacement class as exact-path. Confirmed: serde `ser.rs` (issue names
+    # `serialize_struct`) sat at full_rank=10 under RRF, not delivered. This is the LAST
+    # word: an exact issue-named file is guaranteed inside the delivered window. Pulls
+    # the live record from ranked_full / top_records when present; synthesizes a minimal
+    # one only on a true recall miss (the file passed the specificity guard, so it is a
+    # real anchor). Membership only; bounded by the <=3-file specificity guard.
+    if top_records and _issue_named:
+        def _np_floor(p):
+            return str(p or "").replace("\\", "/").lstrip("./").lstrip("/")
+        _rf_by_np: dict[str, dict] = {}
+        for _r in (getattr(v74, "ranked_full", None) or []):
+            _k = _np_floor(_r.get("path", ""))
+            if _k and _k not in _rf_by_np:
+                _rf_by_np[_k] = _r
+        _tr_by_np: dict[str, dict] = {}
+        for _r in top_records:
+            _k = _np_floor(_r.get("path", ""))
+            if _k and _k not in _tr_by_np:
+                _tr_by_np[_k] = _r
+        for _nf, _fns in _issue_named.items():
+            _nfn = _np_floor(_nf)
+            if not _nfn or _is_non_source_candidate_path(_nf):
+                continue
+            _win = {_np_floor(r.get("path", "")) for r in top_records[:max_files]}
+            if _nfn in _win:
+                continue
+            _rec = _rf_by_np.get(_nfn) or _tr_by_np.get(_nfn)
+            if _rec is None:
+                _rec = {"path": _nf, "score": 0.0, "functions": list(_fns or [])[:3],
+                        "components": {}, "_exact_issue_named": True}
+            top_records = [r for r in top_records if _np_floor(r.get("path", "")) != _nfn]
+            top_records.insert(min(max_files - 1, len(top_records)), _rec)
+
     _words = set(w.lower() for w in _re.findall(r"[A-Za-z_]\w{2,}", issue_text) if len(w) > 3)
     # CODE-SYMBOL provenance (backtick/fence-marked, IssueAnchors.code_symbols +
     # unresolved_code_symbols). The per-file function rankers (_top_functions /
