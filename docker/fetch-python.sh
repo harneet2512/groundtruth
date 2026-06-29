@@ -20,12 +20,17 @@ for a in 1 2 3 4 5; do
   sleep 8
 done
 
-# Pinned fallbacks (only used if the API never returned a URL).
+# Pinned fallbacks (used when the API 'latest' release no longer carries a 3.11
+# install_only asset — it rolls forward, so 'latest' eventually drops 3.11). Probe with
+# a 1-byte RANGE GET, NOT `-I` (HEAD): GitHub release URLs 302 to a signed S3 object that
+# rejects HEAD, so `curl -fsSLI` false-fails on URLs that GET fine (the bug that broke a
+# cold-cache build 2026-06-29). Newest-first; all verified live.
 if [ -z "$PBS" ]; then
   for U in \
-    "https://github.com/astral-sh/python-build-standalone/releases/download/20241016/cpython-3.11.10+20241016-x86_64-unknown-linux-gnu-install_only.tar.gz" \
-    "https://github.com/astral-sh/python-build-standalone/releases/download/20240814/cpython-3.11.9+20240814-x86_64-unknown-linux-gnu-install_only.tar.gz" ; do
-    if curl -fsSLI "$U" >/dev/null 2>&1; then PBS="$U"; break; fi
+    "https://github.com/astral-sh/python-build-standalone/releases/download/20250115/cpython-3.11.11+20250115-x86_64-unknown-linux-gnu-install_only.tar.gz" \
+    "https://github.com/astral-sh/python-build-standalone/releases/download/20241219/cpython-3.11.11+20241219-x86_64-unknown-linux-gnu-install_only.tar.gz" \
+    "https://github.com/astral-sh/python-build-standalone/releases/download/20241016/cpython-3.11.10+20241016-x86_64-unknown-linux-gnu-install_only.tar.gz" ; do
+    if curl -fsSL -r 0-0 -o /dev/null "$U" 2>/dev/null; then PBS="$U"; break; fi
   done
 fi
 
