@@ -67,19 +67,24 @@ jobs:
                   subprocess.run(['git','-C',dst,'checkout','--quiet', meta['commit']], check=False)
               print(f'cloned {name} @ {meta[\"commit\"][:10]} ({\"shallow\" if ok else \"full\"})', flush=True)
           "
-      - name: Run falsifier (linear vs RRF) for this language
+      - name: Run falsifier (RRF reach-drop A/B/C) for this language
         env:
           CASES_FILE: ${{ inputs.cases_file }}
           LANG: ${{ matrix.language }}
         run: |
           mkdir -p /tmp/gt_idx_cache
-          # Decision made on principle: RRF (bias-free rank fusion) is the adopted
-          # fusion. We run it ONLY — this is a falsifier of the decided system,
-          # not a linear-vs-rrf bake-off (linear baselines are already on record).
-          for arm in rrf; do
-            mode="on"
-            out="/tmp/proof_out/$arm"; mkdir -p "$out"
-            echo "::group::ARM=$arm LANG=$LANG (GT_RRF_FUSION='$mode')"
+          # wRRF reach-drop falsifier. BRIEFING §4: reach over-promotes hubs; the RRF
+          # gave it a full equal vote (the bug). Proven lever (toy + OSS misses): drop
+          # reach's vote so content (sem/lex/path) decides. ONE variable at a time:
+          #   control        = current baked fusion (unweighted RRF, reach votes) -> 53/60 ref
+          #   reachdrop      = wRRF with GT_RRF_W_REACH=0 (the isolated lever)
+          #   reachdrop_sem2 = + GT_RRF_W_SEM=2.0 (does sem-boost add anything on top)
+          # Graphs are indexed ONCE (arm 1) then reused from /idx_cache (re-rank only),
+          # so 3 arms ~= 1 index cost. No dedup anywhere.
+          run_arm () {
+            local arm="$1" mode="$2"; shift 2
+            local out="/tmp/proof_out/$arm"; mkdir -p "$out"
+            echo "::group::ARM=$arm LANG=$LANG (GT_RRF_FUSION='$mode' $*)"
             docker run --rm \
               -v "$GITHUB_WORKSPACE/benchmarks/data/$CASES_FILE:/cases.json:ro" \
               -v "$GITHUB_WORKSPACE/scripts/oss_full_pipeline_proof.py:/proof.py:ro" \
@@ -93,16 +98,20 @@ jobs:
               -e GT_INDEX_CACHE=/idx_cache \
               -e GT_PROOF_LANG="$LANG" \
               -e GT_RRF_FUSION="$mode" \
+              "$@" \
               "$DIGEST" \
               python /proof.py /cases.json /repos /out || echo "::warning::arm $arm ($LANG) failed"
             echo "::endgroup::"
-          done
+          }
+          run_arm control        on
+          run_arm reachdrop      wrrf -e GT_RRF_W_REACH=0
+          run_arm reachdrop_sem2 wrrf -e GT_RRF_W_REACH=0 -e GT_RRF_W_SEM=2.0
       - name: Show this language's result
         if: always()
         run: |
           python3 -c "
           import json, os
-          for a in ['linear','rrf']:
+          for a in ['control','reachdrop','reachdrop_sem2']:
               p=f'/tmp/proof_out/{a}/SUMMARY.json'
               if not os.path.exists(p): print(a,'MISSING'); continue
               d=json.load(open(p)); n=d['total_cases']

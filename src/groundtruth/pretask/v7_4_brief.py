@@ -890,23 +890,36 @@ def _rrf_fuse(
     files: list[str],
     signals: tuple[str, ...],
     k: int = 60,
+    weights: dict[str, float] | None = None,
 ) -> dict[str, float]:
-    """Reciprocal Rank Fusion over per-signal rankings.
+    """(Weighted) Reciprocal Rank Fusion over per-signal rankings.
 
     For each signal, rank the files with a POSITIVE value for it; each such file
-    gains 1/(k + rank). A file with a zero/absent value for a signal gets nothing
-    from it (treated as unranked), so a single strong signal cannot dominate the
-    way it does in a weighted sum. k=60 is the SIGIR-2009 convention.
+    gains ``w_sig / (k + rank)``. A file with a zero/absent value for a signal gets
+    nothing from it (treated as unranked), so a single strong signal cannot dominate
+    the way it does in a weighted sum. k=60 is the SIGIR-2009 convention.
+
+    ``weights`` implements WEIGHTED RRF (wRRF) — the industry-standard
+    generalization (Elasticsearch / Weaviate hybrid search expose per-retriever
+    RRF weights): a per-signal multiplier on its ``1/(k+rank)`` term. ``None`` (the
+    default) gives every signal weight 1.0 = the unweighted Cormack-2009 RRF,
+    byte-identical to the prior behavior. A weight of 0.0 drops the signal entirely.
+    Per-signal weights NEVER touch the per-signal RANK order (still by raw value) —
+    they only scale how much that signal's rank contributes to the fused score, so
+    a demoted signal (e.g. graph reach at 0.25) becomes a tiebreak, not a vote.
     """
     agg: dict[str, float] = {fp: 0.0 for fp in files}
     for sig in signals:
+        w = 1.0 if weights is None else float(weights.get(sig, 1.0))
+        if w == 0.0:
+            continue
         ranked = sorted(
             (fp for fp in files if components_map.get(fp, {}).get(sig, 0.0) > 0.0),
             key=lambda fp: components_map[fp].get(sig, 0.0),
             reverse=True,
         )
         for rank, fp in enumerate(ranked, start=1):
-            agg[fp] += 1.0 / (k + rank)
+            agg[fp] += w / (k + rank)
     return agg
 
 
@@ -1649,8 +1662,41 @@ def run_v74(
         hub_pen = components_map.get(fp, {}).get("hub_pen", 0.0)
         return raw * max(0.0, 1.0 - _w_hub_rrf * hub_pen)
 
+    # WEIGHTED RRF (wRRF) — sem-primary / graph-tiebreak. BRIEFING §3-§4: the
+    # localization lever is CONTENT (dense sem) + hub-demotion, NOT graph reach
+    # ("reach over-promotes hubs; the architecture subordinates it on purpose").
+    # The unweighted RRF ("on") gives reach + anchor_prox EQUAL votes with sem, so a
+    # wrong but graph-central file (reach>0, ap=1.0) out-ranks a sem-strong gold that
+    # is unreachable from the issue anchors (reach=0) — proven on the OSS misses
+    # (express: gold lex=1.0+path=1.0 lost to reach=1.0+ap=1.0). wRRF restores the
+    # intended ordering: dense sem PRIMARY, lexical/path co-primary, graph a low-weight
+    # tiebreak. Weights are env-tunable (ONE variable at a time per the measurement
+    # protocol) with principled, task-blind defaults — sem 2x, graph 0.25x; both
+    # default to 1.0 so an unset wRRF is byte-identical to "on".
+    # Per-signal wRRF weights, each its OWN env so the falsifier can vary ONE at a
+    # time (measurement protocol). Unset -> the signal keeps weight 1.0 (via
+    # weights.get(sig, 1.0)), so wRRF with no envs == unweighted "on" exactly.
+    # The proven lever (toy + OSS misses): GT_RRF_W_REACH=0 DROPS reach's vote —
+    # RRF is rank-based, so demoting reach to 0.25 still lets a hub bank reach
+    # points the reach=0 gold cannot; only weight 0 removes the hub-promoter so the
+    # content signals (sem/lex/path) decide. Exactly BRIEFING §4.
+    def _wrrf_weights() -> dict[str, float]:
+        out: dict[str, float] = {}
+        for sig, env in (
+            ("sem", "GT_RRF_W_SEM"), ("lex", "GT_RRF_W_LEX"), ("path", "GT_RRF_W_PATH"),
+            ("reach", "GT_RRF_W_REACH"), ("anchor_prox", "GT_RRF_W_ANCHOR"),
+            ("frame", "GT_RRF_W_FRAME"), ("code_def", "GT_RRF_W_CODE_DEF"),
+        ):
+            v = os.environ.get(env, "").strip()
+            if v:
+                out[sig] = float(v)
+        return out
+
     _rrf_mode = os.environ.get("GT_RRF_FUSION", "").strip().lower()
-    if _rrf_mode in ("1", "on", "full", "rrf"):
+    if _rrf_mode in ("wrrf", "sem_primary", "dense_primary"):
+        _rrf = _rrf_fuse(components_map, all_files, _RRF_SIGNALS_FULL, weights=_wrrf_weights())
+        scored = [(fp, _hub_demote(fp, _rrf.get(fp, 0.0)), components_map[fp]) for fp in all_files]
+    elif _rrf_mode in ("1", "on", "full", "rrf"):
         _rrf = _rrf_fuse(components_map, all_files, _RRF_SIGNALS_FULL)
         scored = [(fp, _hub_demote(fp, _rrf.get(fp, 0.0)), components_map[fp]) for fp in all_files]
     elif _rrf_mode in ("det", "deterministic", "nosem"):
