@@ -49,6 +49,8 @@ env:
   GT_CONTAINERIZED: "1"
   GT_RUNTIME_STRATEGY: "unified_substrate"
   GT_RRF_FUSION: "on"                 # banked localizer = RRF (bias-free) + exact-path floor (53/60 proven)
+  GT_LOC_FUSION_V2: "1"               # BAKED: independent-surface RRF localizer (generalizing: OSS-60 +2, held-out +1, 0 regression)
+  GT_LOC_BEHAVIOR_LEAD: "0"           # BAKED: behavior-gate OFF (suppressed held-out lift)
   # GT-MAX per-turn layers (no pier: the agent + gt_mini_patch run in THIS host
   # process and read these os.environ vars directly — no --ae forwarding needed).
   GT_VERIFY_STRUCTURAL_RISK: "1"     # row 21 structural-risk half (was dark)
@@ -214,6 +216,7 @@ jobs:
             -e GT_FORCE_ONNX_EMBEDDER=1 -e GT_REQUIRE_EMBEDDER=1 \
             -e GT_REQUIRE_LSP=1 -e GT_FORBID_PREBUILT_GRAPH=1 \
             -e GT_RRF_FUSION=on \
+            -e GT_LOC_FUSION_V2=1 -e GT_LOC_BEHAVIOR_LEAD=0 \
             -e GT_RUNTIME_STRATEGY=unified_substrate \
             -e GT_HOST_GRAPH_DB=/gt_artifacts/graph.db \
             -e GT_HOST_SRC_ROOT=/work \

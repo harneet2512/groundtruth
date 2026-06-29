@@ -266,8 +266,8 @@ INJECTION_PLACEMENT = os.environ.get("GT_INJECTION_PLACEMENT", "strictly_below_f
 # lists L1/L2/L4 are demoted by widening their RRF-k (~10x smaller contribution)
 # so the independents LEAD. SPLADE/dense are explicitly OUT of scope (add a model;
 # overfit risk). The Go-indexer body-FTS (true BM25F) is Phase 2 (needs REBUILD).
-GT_LOC_FUSION_V2 = os.environ.get("GT_LOC_FUSION_V2", "0") != "0"          # master, default OFF
-GT_LOC_BEHAVIOR_LEAD = os.environ.get("GT_LOC_BEHAVIOR_LEAD", "1") != "0"  # nl_gap demotion (only matters if fusion on)
+GT_LOC_FUSION_V2 = os.environ.get("GT_LOC_FUSION_V2", "1") != "0"          # BAKED default ON — independent-surface RRF fusion. Proven generalizing 2026-06-29: OSS-60 +2 @1/+2 in8 AND held-out +1, 0 per-lang regression (vs every prior approach that overfit). Revert: GT_LOC_FUSION_V2=0.
+GT_LOC_BEHAVIOR_LEAD = os.environ.get("GT_LOC_BEHAVIOR_LEAD", "0") != "0"  # BAKED default OFF — the behavior-gate SUPPRESSED the held-out lift (fuse_full held-out +0 vs fuse_nolead +1); plain RRF+independents generalizes better.
 GT_LOC_RRF_K = int(os.environ.get("GT_LOC_RRF_K", "60"))                    # Cormack default
 GT_LOC_RRF_K_DEMOTE = int(os.environ.get("GT_LOC_RRF_K_DEMOTE", "600"))     # name-list k on nl_gap
 GT_LOC_CONTENT_MAXFILES = int(os.environ.get("GT_LOC_CONTENT_MAXFILES", "200"))  # bound on-disk reads

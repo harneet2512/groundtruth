@@ -85,6 +85,8 @@ env:
   GT_REQUIRE_EMBEDDER: "1"
   GT_REQUIRE_LSP: "1"
   GT_RRF_FUSION: "on"   # brief fusion parity with Pro: RRF (bias-free) + exact-path floor (53/60)
+  GT_LOC_FUSION_V2: "1"        # BAKED: independent-surface RRF localizer (generalizing: OSS-60 +2, held-out +1, 0 regression)
+  GT_LOC_BEHAVIOR_LEAD: "0"    # BAKED: behavior-gate OFF (it suppressed the held-out lift)
   # Legitimacy: the per-task graph must be built FRESH from THIS task's repo — never a
   # cross-run / stale / out-of-repo prebuilt graph.db. In substrate-consume mode the graph
   # the substrate emits to /gt_artifacts FROM the mounted /work:ro IS that fresh per-task
