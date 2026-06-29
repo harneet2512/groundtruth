@@ -34,11 +34,12 @@ on:
         default: false
 
 permissions:
-  contents: read
+  contents: write   # live-log bridge force-pushes per-task progress to gha-live-logs/<task>
   packages: read
 
 env:
   GT_REQUIRE_FULL_STACK: "1"
+  GT_REQUIRE_FULL_POTENTIAL: "1"     # GT-MAX parity (was missing): LSP-edge gate strictness
   GT_REQUIRE_FTS5: "1"
   GT_FORCE_ONNX_EMBEDDER: "1"
   GT_REQUIRE_EMBEDDER: "1"
@@ -47,6 +48,18 @@ env:
   GT_PROOF_MODE: "1"
   GT_CONTAINERIZED: "1"
   GT_RUNTIME_STRATEGY: "unified_substrate"
+  # GT-MAX per-turn layers (no pier: the agent + gt_mini_patch run in THIS host
+  # process and read these os.environ vars directly — no --ae forwarding needed).
+  GT_VERIFY_STRUCTURAL_RISK: "1"     # row 21 structural-risk half (was dark)
+  GT_VERIFY_RISK_TRIGGER: "0.5"
+  GT_VERIFICATION_CYCLE_COST: "25"
+  GT_ORACLE_ROUTE: "1"               # row 20 oracle two-lane route
+  GT_STEP_LIMIT: "250"               # rows 14/20 verify-horizon ladder; matches verified_gt.yaml step_limit
+  GT_SELF_VERIFY_ATTEMPTS: "2"       # outer retry ring (consumed by the runner loop, added below)
+  # deep 8-dp telemetry sinks -> uploaded dir so gt_math can audit per-layer firing
+  GT_ORACLE_EVENTS: "/tmp/gt/gt_oracle_events.jsonl"
+  GT_RUNTIME_LEDGER: "/tmp/gt/gt_runtime_ledger.jsonl"
+  GT_HOOK_FIRE_COUNTS: "/tmp/gt/gt_hook_fire_counts.json"
   GT_SUBSTRATE_DIGEST: ${{ inputs.gt_substrate_digest || vars.GT_SUBSTRATE_DIGEST }}
 
 jobs:
@@ -196,7 +209,7 @@ jobs:
             -v "$GITHUB_WORKSPACE/src/groundtruth:/opt/gt/src/groundtruth:ro" \
             -v "$GITHUB_WORKSPACE/scripts/swebench:/opt/gt/scripts/swebench:ro" \
             -e GT_PROOF_MODE=1 -e GT_CONTAINERIZED=1 \
-            -e GT_REQUIRE_FULL_STACK=1 -e GT_REQUIRE_FTS5=1 \
+            -e GT_REQUIRE_FULL_STACK=1 -e GT_REQUIRE_FULL_POTENTIAL=1 -e GT_REQUIRE_FTS5=1 \
             -e GT_FORCE_ONNX_EMBEDDER=1 -e GT_REQUIRE_EMBEDDER=1 \
             -e GT_REQUIRE_LSP=1 -e GT_FORBID_PREBUILT_GRAPH=1 \
             -e GT_ISSUE_FILE=/issue.txt \
@@ -206,9 +219,17 @@ jobs:
           echo "GT_CERT_DIR=$GT_CERT_DIR" >> "$GITHUB_ENV"
           echo "GT_HOST_GRAPH_DB=$GT_CERT_DIR/graph.db" >> "$GITHUB_ENV"
           echo "GT_HOST_SRC_ROOT=$TESTBED" >> "$GITHUB_ENV"
-      - name: Run GT-injected mini-swe-agent
+      - name: Run GT-injected mini-swe-agent (+ live-log bridge)
         if: ${{ !inputs.baseline }}
+        env:
+          GH_LIVE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          mkdir -p /tmp/gt
+          # LIVE observability (no flying blind): background daemon force-pushes per-task
+          # progress to gha-live-logs/<task> every 20s — read mid-run with scripts/ci/read_live.sh.
+          touch /tmp/trial_output.log
+          bash scripts/ci/live_log_push.sh "${{ matrix.task }}" /tmp/trial_output.log /tmp/trial_output.log 20 &
+          _LIVE_PID=$!
           python artifact_verified/gt_verified_agent.py \
             --instance-id "${{ matrix.task }}" \
             --subset "ScaleAI/SWE-bench_Pro" \
@@ -218,6 +239,19 @@ jobs:
             --output /tmp/pro_output \
             --issue-file /tmp/issue.txt \
             2>&1 | tee /tmp/trial_output.log || true
+          kill "$_LIVE_PID" 2>/dev/null || true
+      - name: Deep metrics (gt_math 21-row inputs)
+        if: ${{ always() && !inputs.baseline }}
+        env:
+          GT_CERT_DIR: /tmp/gt
+        run: |
+          # Per-task deep metrics so the gt_math 21-row gate can audit this run.
+          # --pipeline deepswe-miniswe routes to the mini-swe-agent trajectory reader
+          # (handles the no-pier {iid}.traj.json + both message shapes).
+          python scripts/swebench/gt_deep_metrics.py "${{ matrix.task }}" /tmp/pro_output \
+            --pipeline deepswe-miniswe \
+            --out /tmp/gt/gt_deep_metrics_${{ matrix.task }}.json \
+            || echo "::warning::deep_metrics failed for ${{ matrix.task }}"
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4

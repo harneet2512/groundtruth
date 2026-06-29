@@ -359,6 +359,10 @@ def _from_trajectory(task: str, results_dir: str) -> dict:
             out["gt_brief_delivered"] = mini["gt_brief_delivered"]
             out["gt_evidence_delivered"] = mini["gt_evidence_delivered"]
             out["gt_graph_map_delivered"] = mini["gt_graph_map_delivered"]
+            out["gt_scope_delivered"] = mini.get("gt_scope_delivered", 0)
+            out["gt_contract_delivered"] = mini.get("gt_contract_delivered", 0)
+            out["gt_cochange_delivered"] = mini.get("gt_cochange_delivered", 0)
+            out["gt_verify_delivered"] = mini.get("gt_verify_delivered", 0)
             out["gt_nudge_delivered"] = mini["gt_nudge_delivered"]
             out["gt_understand_calls"] = mini["gt_understand_calls"]
             out["gt_verify_calls"] = mini["gt_verify_calls"]
@@ -1282,6 +1286,10 @@ def build(task: str, results_dir: str, log_path: str = "",
         traj["gt_brief_delivered"] = mini["gt_brief_delivered"]
         traj["gt_evidence_delivered"] = mini["gt_evidence_delivered"]
         traj["gt_graph_map_delivered"] = mini["gt_graph_map_delivered"]
+        traj["gt_scope_delivered"] = mini.get("gt_scope_delivered", 0)
+        traj["gt_contract_delivered"] = mini.get("gt_contract_delivered", 0)
+        traj["gt_cochange_delivered"] = mini.get("gt_cochange_delivered", 0)
+        traj["gt_verify_delivered"] = mini.get("gt_verify_delivered", 0)
         traj["gt_nudge_delivered"] = mini["gt_nudge_delivered"]
         traj["gt_understand_calls"] = mini["gt_understand_calls"]
         traj["gt_verify_calls"] = mini["gt_verify_calls"]
@@ -1494,6 +1502,10 @@ def build(task: str, results_dir: str, log_path: str = "",
             "brief_delivered": d8(traj.get("gt_brief_delivered", 0)),
             "evidence_delivered": d8(traj.get("gt_evidence_delivered", 0)),
             "graph_map_delivered": d8(traj.get("gt_graph_map_delivered", 0)),
+            "scope_delivered": d8(traj.get("gt_scope_delivered", 0)),
+            "contract_delivered": d8(traj.get("gt_contract_delivered", 0)),
+            "cochange_delivered": d8(traj.get("gt_cochange_delivered", 0)),
+            "verify_delivered": d8(traj.get("gt_verify_delivered", 0)),
             "nudge_delivered": d8(traj.get("gt_nudge_delivered", 0)),
             "understand_calls": d8(traj.get("gt_understand_calls", 0)),
             "verify_calls": d8(traj.get("gt_verify_calls", 0)),
