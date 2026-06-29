@@ -1891,7 +1891,17 @@ def _semantic_score_by_file(
     # divergence -> raise in proof mode). Wires the never-called assert_same_embedder_identity.
     _proof.assert_same_embedder_identity(graph_db, "localize")
     _proof_on = _proof.is_proof_mode() and _proof.require_embedder() and bool(files)
-    if model is None or not files:
+    if model is None:
+        # FAIL-CLOSED by construction (not by relying on _get_embedder's raise winning
+        # the race): under GT_REQUIRE_EMBEDDER a None localize embedder is a silent-OFF
+        # semantic pipeline — refuse it. Outside proof/require it degrades quietly.
+        _proof.require(
+            not (_proof.is_proof_mode() and _proof.require_embedder()),
+            "semantic_embedder_present",
+            "GT_REQUIRE_EMBEDDER=1 but the localize embedder is None — semantic OFF",
+        )
+        return {}
+    if not files:
         return {}
     want = {_normalize(f) for f in files}
     # Per-node behavioral body snippet (docstring/call_order/guards/conditional_return)
