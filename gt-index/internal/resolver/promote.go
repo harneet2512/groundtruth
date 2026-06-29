@@ -145,6 +145,11 @@ type promoteIndexes struct {
 	// classByName: typeName -> classNodeID (first writer wins, id-ordered), for
 	// resolving a declared receiver TYPE name to its class node when gating PRECEDES.
 	classByName map[string]int64
+	// classNameCount: bare class name -> how many class-like nodes carry it. Lets
+	// COMPOSES resolve a cross-package qualified/wrapped field type (e.g. *store.DB,
+	// []pkg.Node) to its class ONLY when the bare name is unambiguous (count==1) —
+	// never guessing across packages the way name_match would (correct-or-quiet).
+	classNameCount map[string]int
 }
 
 type fnlKey struct {
@@ -351,6 +356,7 @@ func buildPromoteIndexes(db *store.DB) (*promoteIndexes, error) {
 		classFields: make(map[int64]map[string]bool),
 		fieldTypes:  make(map[int64]map[string]string),
 		classByName: make(map[string]int64),
+		classNameCount: make(map[string]int),
 	}
 
 	tx, err := db.BeginTx()
@@ -391,6 +397,7 @@ func buildPromoteIndexes(db *store.DB) (*promoteIndexes, error) {
 			if _, ok := idx.classByName[m.Name]; !ok {
 				idx.classByName[m.Name] = m.ID
 			}
+			idx.classNameCount[m.Name]++
 		}
 		idx.byID[m.ID] = m
 	}
@@ -634,21 +641,69 @@ func promoteComposes(db *store.DB, idx *promoteIndexes, add addEdgeFunc) error {
 		if !ok {
 			return // no recoverable declared type -> STAY property (no guess)
 		}
-		typ := stripTypeGenerics(strings.TrimLeft(strings.TrimSpace(ftype), "*&"))
-		if typ == "" {
-			return
-		}
 		owner, ok := idx.byID[nodeID]
 		if !ok || !classLabels[owner.Label] {
 			return // class_field whose owner is not a class-like node -> skip
 		}
-		targetID, ok := idx.classByName[typ]
-		if !ok || targetID == nodeID {
-			return // builtin/external/unresolved type, or self -> correct-or-quiet
+		// (1) Exact same-package simple type: strip pointer/ref + generics, match the
+		// declared name directly. Highest confidence — the type is in this package.
+		exact := stripTypeGenerics(strings.TrimLeft(strings.TrimSpace(ftype), "*&"))
+		var targetID int64
+		var matched string
+		if exact != "" {
+			if id, ok := idx.classByName[exact]; ok && id != nodeID {
+				targetID, matched = id, exact
+			}
+		}
+		// (2) Cross-package / wrapped fallback: a slice/array/map/qualified field type
+		// (*store.DB, []pkg.Node, crate::Type) whose bare class name resolves to EXACTLY
+		// ONE class. Unambiguous-only — never guess across packages (that is name_match,
+		// which the architecture forbids as a fact); ambiguous bare names stay quiet.
+		if targetID == 0 {
+			base := composesBaseTypeName(ftype)
+			if base != "" && base != exact && idx.classNameCount[base] == 1 {
+				if id, ok := idx.classByName[base]; ok && id != nodeID {
+					targetID, matched = id, base
+				}
+			}
+		}
+		if targetID == 0 {
+			return // builtin/external/ambiguous -> correct-or-quiet, no edge
 		}
 		add(nodeID, targetID, "COMPOSES", "promote_composes", 0.9, 1, "class_field",
-			typ, owner.FilePath, line, false)
+			matched, owner.FilePath, line, false)
 	})
+}
+
+// composesBaseTypeName reduces a declared field type to its bare class name for the
+// unambiguous cross-package COMPOSES fallback: strips Go pointer/ref/slice/array
+// wrappers, then generics, then a package/namespace qualifier (last component after
+// the final '.' or ':'). map/chan value types and exotic shapes are intentionally NOT
+// unwrapped — they stay quiet rather than risk a wrong target.
+func composesBaseTypeName(ftype string) string {
+	t := strings.TrimSpace(ftype)
+	for {
+		switch {
+		case strings.HasPrefix(t, "*"), strings.HasPrefix(t, "&"):
+			t = t[1:]
+		case strings.HasPrefix(t, "[]"):
+			t = t[2:]
+		case strings.HasPrefix(t, "["): // fixed-size array [N]T
+			if rb := strings.IndexByte(t, ']'); rb > 0 {
+				t = t[rb+1:]
+			} else {
+				return ""
+			}
+		default:
+			goto unwrapped
+		}
+	}
+unwrapped:
+	t = stripTypeGenerics(strings.TrimSpace(t))
+	if i := strings.LastIndexAny(t, ".:"); i >= 0 {
+		t = t[i+1:]
+	}
+	return strings.TrimSpace(t)
 }
 
 // ---------------------------------------------------------------------------
