@@ -278,6 +278,19 @@ GT_LOC_PRF = os.environ.get("GT_LOC_PRF", "0") != "0"                       # op
 # surface win in the A/B (see arm definitions).
 GT_LOC_FUSION_EXCLUDE_INDEP = os.environ.get("GT_LOC_FUSION_EXCLUDE_INDEP", "0") != "0"
 
+# Reach edge-type scope — trickle-down of the indexer depth fix (RE_EXPORTS/COMPOSES,
+# 2026-06-29). The path-decay reach (the @1 ranking lever, W_PATH_DECAY) traverses
+# CALLS/IMPORTS by default, mirroring the CALLS-pure transitive closure. With
+# GT_LOC_REACH_DEPTH=1 it ALSO follows the structural depth edges (RE_EXPORTS
+# barrel->source, COMPOSES class->field-type, EXTENDS/IMPLEMENTS) so the newly-emitted
+# depth edges feed @1. DEFAULT OFF: this moves @1 and MUST be A/B'd on OSS-60 + held-out
+# before baking (blind reach-scope changes regressed TS before — RANKING_RECALL_SYNTHESIS).
+GT_LOC_REACH_DEPTH = os.environ.get("GT_LOC_REACH_DEPTH", "0") != "0"
+_REACH_EDGE_TYPES = ("CALLS", "IMPORTS")
+if GT_LOC_REACH_DEPTH:
+    _REACH_EDGE_TYPES = ("CALLS", "IMPORTS", "RE_EXPORTS", "COMPOSES", "EXTENDS", "IMPLEMENTS")
+_REACH_EDGE_TYPES_SQL = ", ".join("'" + _t + "'" for _t in _REACH_EDGE_TYPES)
+
 
 def _is_test_block_name(sym: str) -> bool:
     """Test-framework block names that carry test DESCRIPTIONS, not code symbols.
@@ -551,7 +564,7 @@ def _path_decay_scores(
                         FROM edges e
                         JOIN nodes n ON {join_col} = n.id
                         WHERE {match_col} = ?
-                          AND e.type IN ('CALLS', 'IMPORTS')
+                          AND e.type IN ({_REACH_EDGE_TYPES_SQL})
                           AND n.is_test = 0
                         LIMIT 100""",
                     (nid,),
