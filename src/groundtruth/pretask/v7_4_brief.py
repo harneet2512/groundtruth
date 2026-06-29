@@ -266,6 +266,25 @@ def _adapt_weights_for_issue(
     if enforce_floor:
         w["W_SEM"] = max(w.get("W_SEM", 0.0), w_sem_floor)
 
+    # GT_SEM_DOMINANT / per-weight env override — "give semantic more power" (the embedder
+    # understands code + meaning; bm25/path/reach are raw token+graph matchers that go blind on
+    # a behavior-described issue). Applies to the LINEAR (magnitude) fusion only — under RRF the
+    # weights are ignored (rank-based, magnitude discarded). Gated on enforce_floor so a dead/
+    # absent dense is never made dominant. Default (no env) => w unchanged (byte-identical).
+    if enforce_floor:
+        if os.environ.get("GT_SEM_DOMINANT", "") == "1":
+            w["W_SEM"] = max(w.get("W_SEM", 0.0), 0.60)
+            w["W_LEX"] = min(w.get("W_LEX", 1.0), 0.25)
+            w["W_PATH"] = min(w.get("W_PATH", 1.0), 0.20)
+            w["W_REACH"] = min(w.get("W_REACH", 1.0), 0.05)
+        for _wk, _env in (
+            ("W_SEM", "GT_W_SEM"), ("W_LEX", "GT_W_LEX"),
+            ("W_PATH", "GT_W_PATH"), ("W_REACH", "GT_W_REACH"),
+        ):
+            _wv = os.environ.get(_env, "").strip()
+            if _wv:
+                w[_wk] = float(_wv)
+
     return w
 
 

@@ -2917,9 +2917,25 @@ def localize(
     # keys BEFORE the path: best-witness strength, then lex_hits, then subject position.
     # The path string is the LAST resort. No-op when `_rrf3` already separates (the
     # common case); load-bearing only on exact ties (grep-floor-only / no-embedder).
+    # GT_LOC_SEM_LED — "give semantic more power" (the embedder understands code+meaning;
+    # grep/struct/bm25/path-decay/degree are lexical+graph matchers that go BLIND on a
+    # behavior-described issue with no shared tokens, yet they currently decide entries[0]).
+    # When the flag is set AND the embedder produced per-file scores, lead the final order
+    # with the semantic MAGNITUDE (the cosine itself — NOT its RRF rank, because RRF discards
+    # the very margin that is the signal); grep-floor/depth/rrf become tiebreaks. Default off
+    # => _sem_led_key returns 0.0 for every candidate => the sort is byte-identical. Pairs with
+    # the LINEAR (magnitude) run_v74 fusion + a code embedder; measured on OSS-60 + held-out.
+    _sem_led = bool(_sem) and os.environ.get("GT_LOC_SEM_LED", "") == "1"
+
+    def _sem_led_key(c: "Candidate") -> float:
+        if not _sem_led:
+            return 0.0
+        return -round(_sem.get(_normalize(c.file_path), 0.0), 4)
+
     candidates.sort(
         key=lambda c: (
-            _grep_floor(c),          # Phase 2: grep recall floor (PRIMARY)
+            _sem_led_key(c),         # GT_LOC_SEM_LED: semantic magnitude LEADS (else 0.0 no-op)
+            _grep_floor(c),          # Phase 2: grep recall floor (PRIMARY when sem not led)
             _depth_authority(c),     # Phase 3: string-world non-recalled sinks
             -_rrf3(c),               # lexical + structural + SEMANTIC rank fusion
             *_final_relevance_key(c, _cand_subject_pos),  # relevance before the path string
