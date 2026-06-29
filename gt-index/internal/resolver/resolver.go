@@ -3268,6 +3268,123 @@ func ResolveReExports(db *store.DB, reExports []parser.ReExportRef, fm map[strin
 	return len(edges), nil
 }
 
+// ResolveComposesFromAssignments emits COMPOSES edges for INSTANCE-attribute
+// composition — `self.x = ClassName()` / `self.x: ClassName` (Python __init__) and
+// `this.x = new Foo()` (JS/TS constructor) — the dominant dynamic-language composition
+// idiom that extractClassFields (class-body-only) cannot see, leaving COMPOSES at 0 on
+// __init__-style repos (httpx) even though they compose heavily. The parser already
+// records these as AssignmentRef (VarName="self.x", TypeName=ClassName, non-ViaReturn);
+// this turns the receiver-attribute ones into the structural edge. Resolution is
+// unambiguous-only (the bare type name maps to exactly ONE class) and deduped against
+// any class-level COMPOSES already emitted — never a guess, never a double.
+func ResolveComposesFromAssignments(db *store.DB, assignments []parser.AssignmentRef) (int, error) {
+	if len(assignments) == 0 {
+		return 0, nil
+	}
+	type classRange struct {
+		id         int64
+		start, end int
+	}
+	ranges := map[string][]classRange{}
+	nameCount := map[string]int{}
+	nameID := map[string]int64{}
+	classLabelsSet := map[string]bool{"Class": true, "Struct": true, "Interface": true, "Enum": true, "Type": true}
+	tx, err := db.BeginTx()
+	if err != nil {
+		return 0, err
+	}
+	rows, err := tx.Query(`SELECT id, name, file_path, COALESCE(start_line,0), COALESCE(end_line,0), label FROM nodes`)
+	if err != nil {
+		tx.Rollback()
+		return 0, err
+	}
+	for rows.Next() {
+		var id int64
+		var name, file, label string
+		var start, end int
+		if err := rows.Scan(&id, &name, &file, &start, &end, &label); err != nil {
+			continue
+		}
+		if !classLabelsSet[label] {
+			continue
+		}
+		ranges[file] = append(ranges[file], classRange{id, start, end})
+		nameCount[name]++
+		if _, ok := nameID[name]; !ok {
+			nameID[name] = id
+		}
+	}
+	rows.Close()
+
+	// Dedup against COMPOSES already in the DB (class-level promoteComposes ran first).
+	seen := map[edgeKey]bool{}
+	if er, err := tx.Query(`SELECT source_id, target_id FROM edges WHERE type='COMPOSES'`); err == nil {
+		for er.Next() {
+			var s, t int64
+			if er.Scan(&s, &t) == nil {
+				seen[edgeKey{sourceID: s, targetID: t, typ: "COMPOSES"}] = true
+			}
+		}
+		er.Close()
+	}
+	tx.Rollback() // read-only — release before BatchInsertEdges opens its own tx
+
+	var edges []*store.Edge
+	for _, a := range assignments {
+		if a.ViaReturn {
+			continue // factory call, not a constructor — TypeName is a callee, not a class
+		}
+		if !strings.HasPrefix(a.VarName, "self.") && !strings.HasPrefix(a.VarName, "this.") {
+			continue // only receiver-attribute composition
+		}
+		typ := a.TypeName
+		if i := strings.LastIndexAny(typ, ".:"); i >= 0 {
+			typ = typ[i+1:]
+		}
+		typ = stripTypeGenerics(strings.TrimLeft(strings.TrimSpace(typ), "*&"))
+		if typ == "" || nameCount[typ] != 1 {
+			continue // unambiguous-only — never guess across same-named classes
+		}
+		targetID := nameID[typ]
+		// Owner = the innermost class whose line range contains the assignment.
+		var ownerID int64
+		bestSize := 1 << 30
+		for _, cr := range ranges[a.File] {
+			if cr.start <= a.Line && a.Line <= cr.end && (cr.end-cr.start) < bestSize {
+				ownerID, bestSize = cr.id, cr.end-cr.start
+			}
+		}
+		if ownerID == 0 || ownerID == targetID {
+			continue
+		}
+		key := edgeKey{sourceID: ownerID, targetID: targetID, typ: "COMPOSES"}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		edges = append(edges, &store.Edge{
+			SourceID:           ownerID,
+			TargetID:           targetID,
+			Type:               "COMPOSES",
+			SourceLine:         a.Line,
+			SourceFile:         a.File,
+			ResolutionMethod:   "promote_composes_init",
+			Confidence:         0.85,
+			TrustTier:          tierFor(0.85),
+			CandidateCount:     1,
+			EvidenceType:       "instance_field",
+			VerificationStatus: "unverified",
+		})
+	}
+	if len(edges) == 0 {
+		return 0, nil
+	}
+	if err := db.BatchInsertEdges(edges); err != nil {
+		return 0, err
+	}
+	return len(edges), nil
+}
+
 // BuildNameIndex creates a map from symbol name to list of node IDs.
 // fileIndex maps file → name → []nodeIDs to handle duplicate names
 // (e.g., Java method overloading, Python nested classes with same-named methods).

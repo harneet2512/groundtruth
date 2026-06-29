@@ -669,9 +669,16 @@ func main() {
 	if promErr != nil {
 		log.Printf("WARNING: property->edge promotion failed: %v", promErr)
 	}
+	// Instance-attribute COMPOSES: self.x=Class() / self.x:Class (Python __init__) +
+	// this.x=new Foo() (JS/TS ctor) — the dynamic-language composition idiom invisible to
+	// the class-body field scan. Runs AFTER promote so it dedups against class-level COMPOSES.
+	composesInitCount, ciErr := resolver.ResolveComposesFromAssignments(db, allAssignments)
+	if ciErr != nil {
+		log.Printf("WARNING: instance-attribute COMPOSES failed: %v", ciErr)
+	}
 	importElapsed := time.Since(importStart)
-	fmt.Fprintf(os.Stderr, "  Pass 4f: %d IMPORTS edges, %d RE_EXPORTS edges, %d promoted relations in %s\n",
-		importEdgeCount, reExportCount, promotedCount, importElapsed.Round(time.Millisecond))
+	fmt.Fprintf(os.Stderr, "  Pass 4f: %d IMPORTS, %d RE_EXPORTS, %d promoted, %d init-COMPOSES in %s\n",
+		importEdgeCount, reExportCount, promotedCount, composesInitCount, importElapsed.Round(time.Millisecond))
 
 	// ── Pass 4e: TRANSITIVE CLOSURE (C7 / RF-4) ─────────────────────────
 	// Runs AFTER CALLS resolution + edge persistence (Pass 3) so it sees the
