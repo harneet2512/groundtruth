@@ -1323,13 +1323,18 @@ def run_v74(
     # single larger pass is a strict superset of the old seed slice. Reused below
     # for both candidate seeding (top-10) and component scoring → one normalizer,
     # diagnostic matches the score.
+    # R2 (env-gated): BM25 recall depth. lexical_file_search already retrieves max(50);
+    # only the [:10] admit slice throttled recall, so a token-sharing gold (tutanota)
+    # could be evicted from the seed by higher-TF files. Deepening the admit is ~free
+    # (same retrieval pass). Default 10 = unchanged (recall agent ab384a9ad8cf05d1a).
+    _bm25_recall_k = int(os.environ.get("GT_BM25_RECALL_K", "10"))
     _lex_candidates = lexical_file_search(
         issue_text, repo_root, graph_db, issue_anchors,
-        max_files=max(50, len(candidate_set)),
+        max_files=max(50, _bm25_recall_k, len(candidate_set)),
     )
     # BUG-1: lexical_file_search().file is forward-slashed by graph_file_paths but NOT
     # ./-stripped, and walked-FS hits are posix-relative — normalize at ingress.
-    _lex_top_paths = {_norm_path(h.file) for h in (_lex_candidates or [])[:10]}
+    _lex_top_paths = {_norm_path(h.file) for h in (_lex_candidates or [])[:_bm25_recall_k]}
     candidate_set |= _lex_top_paths
 
     # Path/name rescue: add files whose path contains issue identifiers.

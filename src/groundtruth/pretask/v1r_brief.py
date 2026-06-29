@@ -655,6 +655,7 @@ MAX_CALLERS_PER_FUNC = 2
 # ---------------------------------------------------------------------------
 from groundtruth.delivery.path_policy import (  # noqa: E402
     is_vendored_path as _is_vendored_path,
+    is_minified_file as _is_minified_file,
     is_test_or_demo as _is_test_or_demo,
     is_test_tooling as _is_test_tooling,
     test_tooling_roots as _test_tooling_roots,
@@ -3288,7 +3289,23 @@ def generate_v1r_brief(
         _parts = [p for p in _path.replace("\\", "/").lower().split("/") if p]
         if "dts-test" in _parts:
             return True
-        return _basename in _NON_SOURCE_NAMES or _ext in _NON_SOURCE_EXTS
+        if _basename in _NON_SOURCE_NAMES or _ext in _NON_SOURCE_EXTS:
+            return True
+        # R1 (env-gated): vendored / minified-bundle guard at the DELIVERED seam.
+        # A concatenated bundle (e.g. libs/s.js) matches NO path pattern but wins BM25
+        # on raw term frequency, evicting the gold from the shallow recall slots and
+        # ranking #1 (tutanota). is_vendored_path is path-only; is_minified_file is
+        # content-based (mean line length > threshold), so it catches the bundle no
+        # path rule sees. This predicate is reused across all candidate seams, so the
+        # filter applies coherently everywhere (recall agent ab384a9ad8cf05d1a). Reads
+        # the file from repo_root (in closure scope); OSError -> False (safe degrade).
+        if os.environ.get("GT_RECALL_PATHCLASS_FILTER", "") == "1":
+            try:
+                if _is_vendored_path(_path) or _is_minified_file(repo_root, _path):
+                    return True
+            except Exception:
+                pass
+        return False
 
     # De-dup'd (2026-06-15): the nested test-only _is_test_file MISSED demo dirs, so a
     # docs_src/ tutorial .py (no test basename, .py not in _NON_SOURCE_EXTS) survived the

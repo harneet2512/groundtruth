@@ -103,16 +103,27 @@ jobs:
               python /proof.py /cases.json /repos /out || echo "::warning::arm $arm ($LANG) failed"
             echo "::endgroup::"
           }
-          run_arm control       on
-          run_arm reachdrop     wrrf -e GT_RRF_W_REACH=0
-          run_arm reach_ap_drop wrrf -e GT_RRF_W_REACH=0 -e GT_RRF_W_ANCHOR=0
-          run_arm reach_ap_sem2 wrrf -e GT_RRF_W_REACH=0 -e GT_RRF_W_ANCHOR=0 -e GT_RRF_W_SEM=2.0
+          # Comprehensive cheap-lever falsifier, ONE variable per arm, all correctly
+          # wired to the DELIVERED brief (harness deliv_rank = gold_rank over the
+          # delivered localization_proof, so each lever's effect is measured):
+          #   control     = baseline (current 53/60 ref)
+          #   wpathdecay  = C: localize W_PATH_DECAY 0.30->0.15 (the @1 lever; BRIEFING §3 #2)
+          #   recallfilter= R1: drop vendored/minified bundles at the delivered seam (tutanota)
+          #   bm25depth   = R2: BM25 recall admit 10->50 (recall depth; ~free)
+          #   combined    = C+R1+R2 together
+          # (run_v74 reach-drop / wRRF is the candidate-window lever, measured in the
+          #  prior run 28351851187 — weak for @1 per the integration audit, so not re-run here.)
+          run_arm control      on
+          run_arm wpathdecay   on -e GT_LOC_W_PATH_DECAY=0.15
+          run_arm recallfilter on -e GT_RECALL_PATHCLASS_FILTER=1
+          run_arm bm25depth    on -e GT_BM25_RECALL_K=50
+          run_arm combined     on -e GT_LOC_W_PATH_DECAY=0.15 -e GT_RECALL_PATHCLASS_FILTER=1 -e GT_BM25_RECALL_K=50
       - name: Show this language's result
         if: always()
         run: |
           python3 -c "
           import json, os
-          for a in ['control','reachdrop','reach_ap_drop','reach_ap_sem2']:
+          for a in ['control','wpathdecay','recallfilter','bm25depth','combined']:
               p=f'/tmp/proof_out/{a}/SUMMARY.json'
               if not os.path.exists(p): print(a,'MISSING'); continue
               d=json.load(open(p)); n=d['total_cases']

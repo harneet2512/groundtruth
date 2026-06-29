@@ -231,7 +231,12 @@ FROM nodes WHERE is_test = 0
 # BM25 and PathDecay are NEW signals that ADD to the existing witness/lex/degree
 # scoring. They do not replace any existing signal — backward compatible.
 W_BM25 = 0.35
-W_PATH_DECAY = 0.30
+# W_PATH_DECAY = path-decay reach in localize()'s composite (feeds entries[0], the
+# agent's #1). BRIEFING §3 lever #2: 0.30→0.15 "cut reach-family dominance" (BLUiR
+# ASE 2013). This is the @1 lever (the run_v74 RRF reach-drop only moves the candidate
+# window, not the headline — integration audit a728d099c70ce7213). Env-tunable so the
+# OSS-60 falsifier can A/B it one variable at a time; default 0.30 = unchanged.
+W_PATH_DECAY = float(os.environ.get("GT_LOC_W_PATH_DECAY", "0.30"))
 
 # GREP-FLOOR (Phase 4) — placement of depth-injected (grep-MISSED) candidates
 # relative to the grep-recalled floor. The human's call; default conservative.
