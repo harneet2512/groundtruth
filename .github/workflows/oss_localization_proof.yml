@@ -103,15 +103,16 @@ jobs:
               python /proof.py /cases.json /repos /out || echo "::warning::arm $arm ($LANG) failed"
             echo "::endgroup::"
           }
-          run_arm control        on
-          run_arm reachdrop      wrrf -e GT_RRF_W_REACH=0
-          run_arm reachdrop_sem2 wrrf -e GT_RRF_W_REACH=0 -e GT_RRF_W_SEM=2.0
+          run_arm control       on
+          run_arm reachdrop     wrrf -e GT_RRF_W_REACH=0
+          run_arm reach_ap_drop wrrf -e GT_RRF_W_REACH=0 -e GT_RRF_W_ANCHOR=0
+          run_arm reach_ap_sem2 wrrf -e GT_RRF_W_REACH=0 -e GT_RRF_W_ANCHOR=0 -e GT_RRF_W_SEM=2.0
       - name: Show this language's result
         if: always()
         run: |
           python3 -c "
           import json, os
-          for a in ['control','reachdrop','reachdrop_sem2']:
+          for a in ['control','reachdrop','reach_ap_drop','reach_ap_sem2']:
               p=f'/tmp/proof_out/{a}/SUMMARY.json'
               if not os.path.exists(p): print(a,'MISSING'); continue
               d=json.load(open(p)); n=d['total_cases']
