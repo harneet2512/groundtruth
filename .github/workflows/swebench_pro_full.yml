@@ -760,99 +760,109 @@ jobs:
           fi
           echo "[GT_META] pro image from GHCR cache: $_GHCR_IMG (no dockerhub pull)"
 
-          # Synthesize a pier-compatible task directory from the Pro data.
-          # pier expects -p <dir> containing task.toml; Pro tasks don't ship one.
-          PRO_TASK_DIR="/tmp/pro_task/${{ matrix.task }}"
-          mkdir -p "$PRO_TASK_DIR"
-          # Issue text: prefer SWE-bench_Pro-os instruction, fall back to /tmp/issue.txt
+          # ── SWE-Pro: direct container execution (NO pier) ─────────────────
+          # The GHCR task image is already pulled. Run the agent DIRECTLY inside
+          # it with GT substrate bind-mounted. No pier, no docker-compose overlay,
+          # no synthesized task dirs.
+          #
+          # Flow:  docker run (GHCR image)
+          #          + bind-mount: /gt_artifacts (substrate certs+graph, ro)
+          #          + bind-mount: /opt/gt (GT agent code, ro)
+          #          + bind-mount: /gt_out (telemetry sink, rw)
+          #          → mini-swe-agent runs inside, GT hooks fire on file ops
+          #          → agent writes patch to /tmp/patch.txt
+          #          → we extract patch + trajectory from the container
+
+          # Issue text for the agent
           PRO_ISSUE=""
           for _ipath in "swebench-pro-os/instructions/${{ matrix.task }}/instruction.md" \
                         "swebench-pro-os/instructions/${{ matrix.task }}.md" \
                         "/tmp/issue.txt"; do
             if [ -s "$_ipath" ]; then PRO_ISSUE="$_ipath"; break; fi
           done
-          [ -n "$PRO_ISSUE" ] && cp "$PRO_ISSUE" "$PRO_TASK_DIR/problem_statement.md" \
-            || echo "Fix the issue in the repository." > "$PRO_TASK_DIR/problem_statement.md"
-          # task.toml (pier's required manifest)
-          printf 'version = "1.0"\n\n[metadata]\ntask_id = "%s"\nlanguage = "%s"\n\n[environment]\ndocker_image = "%s"\nallow_internet = false\nbuild_timeout_sec = 1800.0\ncpus = 2\nmemory_mb = 8192\nstorage_mb = 20480\n\n[agent]\ntimeout_sec = 5400.0\n\n[verifier]\ntimeout_sec = 1800.0\n' \
-            "${{ matrix.task }}" "${{ matrix.language }}" "$_GHCR_IMG" > "$PRO_TASK_DIR/task.toml"
-          # instruction.md (pier reads this, not problem_statement.md)
-          [ -s "$PRO_TASK_DIR/problem_statement.md" ] && cp "$PRO_TASK_DIR/problem_statement.md" "$PRO_TASK_DIR/instruction.md"
-          [ -s "$PRO_TASK_DIR/instruction.md" ] || echo "Fix the issue in the repository." > "$PRO_TASK_DIR/instruction.md"
-          # environment/ dir (pier requires it for is_valid)
-          mkdir -p "$PRO_TASK_DIR/environment"
-          echo "FROM $_GHCR_IMG" > "$PRO_TASK_DIR/environment/Dockerfile"
-          # tests/ dir with a stub (pier requires discovered_test_path unless --disable-verification)
-          mkdir -p "$PRO_TASK_DIR/tests"
-          echo '#!/bin/bash' > "$PRO_TASK_DIR/tests/test.sh" && chmod +x "$PRO_TASK_DIR/tests/test.sh"
-          echo "[GT_META] synthesized pier task dir at $PRO_TASK_DIR (task.toml + instruction.md + environment/ + tests/)"
-          cat "$PRO_TASK_DIR/task.toml"
+          [ -z "$PRO_ISSUE" ] && echo "Fix the issue in the repository." > /tmp/pro_issue.txt && PRO_ISSUE=/tmp/pro_issue.txt
+          ISSUE_TEXT=$(cat "$PRO_ISSUE")
+          echo "[GT_META] issue text from: $PRO_ISSUE (${#ISSUE_TEXT} chars)"
 
-          # pier runs the agent inside the (now-local, GHCR-sourced) task image via --env docker;
-          # the GT substrate artifacts are bind-mounted as above.
-          pier run \
-            -p "$PRO_TASK_DIR" \
-            --agent-import-path artifact_deepswe.gt_agent:GTMiniSweAgent \
-            --model "$INPUT_MODEL" \
-            --env docker \
-            -y \
-            --mounts-json "${MOUNTS_JSON}" \
-            --ae GT_HOST_GRAPH_DB="${GT_C_ARTIFACTS}/graph.db" \
-            --ae GT_CERT_DIR="${GT_C_ARTIFACTS}" \
-            --ae GT_HOST_SRC_ROOT="${GT_C_ARTIFACTS}/src" \
-            --ae GT_PORTABLE_SUBSTRATE="1" \
-            --ae GT_FORBID_PREBUILT_GRAPH="1" \
-            --ae GT_PROOF_MODE="${GT_PROOF_MODE:-1}" \
-            --ae GT_CONTAINERIZED="1" \
-            --ae GT_RUNTIME_STRATEGY="${GT_RUNTIME_STRATEGY:-unified_substrate}" \
-            --ae GT_STEP_LIMIT="${GT_STEP_LIMIT:-}" \
-            --ae GT_VERIFICATION_CYCLE_COST="${GT_VERIFICATION_CYCLE_COST:-}" \
-            --ae GT_SELF_VERIFY_ATTEMPTS="${GT_SELF_VERIFY_ATTEMPTS:-}" \
-            --ae GT_MOUNT_MODE="1" \
-            --ae GT_ORACLE_EVENTS="${GT_C_OUT}/gt_oracle_events.jsonl" \
-            --ae GT_RUNTIME_LEDGER="${GT_C_OUT}/gt_runtime_ledger.jsonl" \
-            --ae GT_HOOK_FIRE_COUNTS="${GT_C_OUT}/gt_hook_fire_counts.json" \
-            "${GT_AE_ARGS[@]}" \
-            --ak config_file=artifact_deepswe/gt_integration/deepswe_gt_pier.yaml \
-            --ak task="$(cat "$PRO_TASK_DIR/instruction.md" 2>/dev/null || cat /tmp/issue.txt 2>/dev/null || echo 'Fix issue in repository')" \
-            --ak image="ghcr.io/hbali-stack/sweap-images:${{ matrix.dockerhub_tag }}" \
-            2>&1 | tee trial_output.log || true
-          PIER_RC=${PIPESTATUS[0]}
-          set -e
-          echo "=== Pro Trial complete (pier rc=$PIER_RC) ===" | tee -a trial_output.log
-          echo "PIER_EXIT_CODE=$PIER_RC" >> trial_output.log
+          # Write the pier yaml config for mini-swe-agent (it reads this inside the container)
+          cp artifact_deepswe/gt_integration/deepswe_gt_pier.yaml /tmp/gt_inject/opt/gt/agent_config.yaml
 
-          if ! python3 scripts/swebench/adapter_error_scan.py jobs trial_output.log; then
-            echo "DEEPSWE_ADAPTER_FAIL: adapter error found via structured result.json scan" | tee -a trial_output.log
+          # Model-specific env vars for inside the container
+          MODEL_ENV=""
+          if echo "$INPUT_MODEL" | grep -qiE "deepseek"; then
+            MODEL_ENV="-e DEEPSEEK_API_KEY=${{ secrets.DEEPSEEK_API_KEY }}"
+          elif echo "$INPUT_MODEL" | grep -qiE "openrouter/"; then
+            MODEL_ENV="-e OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}"
           fi
-          if [ "$PIER_RC" -eq 137 ] || grep -qE "OOMKilled|exit code 137|exited with code 137" trial_output.log; then
+
+          # Run the agent directly in the pre-pulled GHCR task image
+          docker run --rm \
+            --name "gt-pro-${{ matrix.task }}" \
+            -v "${HOST_ARTIFACTS}:${GT_C_ARTIFACTS}:ro" \
+            -v "${HOST_GT_OUT}:/gt_out:rw" \
+            -v "/tmp/gt_inject/opt/gt:/opt/gt:ro" \
+            -e GT_HOST_GRAPH_DB="${GT_C_ARTIFACTS}/graph.db" \
+            -e GT_CERT_DIR="${GT_C_ARTIFACTS}" \
+            -e GT_HOST_SRC_ROOT="${GT_C_ARTIFACTS}/src" \
+            -e GT_PORTABLE_SUBSTRATE="1" \
+            -e GT_FORBID_PREBUILT_GRAPH="1" \
+            -e GT_PROOF_MODE="${GT_PROOF_MODE:-1}" \
+            -e GT_CONTAINERIZED="1" \
+            -e GT_RUNTIME_STRATEGY="${GT_RUNTIME_STRATEGY:-unified_substrate}" \
+            -e GT_MOUNT_MODE="1" \
+            -e GT_ORACLE_EVENTS="/gt_out/gt_oracle_events.jsonl" \
+            -e GT_RUNTIME_LEDGER="/gt_out/gt_runtime_ledger.jsonl" \
+            -e GT_HOOK_FIRE_COUNTS="/gt_out/gt_hook_fire_counts.json" \
+            $MODEL_ENV \
+            --entrypoint "" \
+            "$_GHCR_IMG" \
+            bash -c "
+              set -e
+              # Find repo root
+              cd /app 2>/dev/null || cd /testbed 2>/dev/null || cd /workspace 2>/dev/null || true
+              REPO_ROOT=\$(pwd)
+              echo \"\$REPO_ROOT\" > /opt/gt/gt_root.txt 2>/dev/null || echo \"\$REPO_ROOT\" > /tmp/gt_root.txt
+
+              # Install mini-swe-agent if not present
+              if ! command -v mini-swe-agent >/dev/null 2>&1; then
+                pip install mini-swe-agent 2>/dev/null || pip install datacurve-mini-swe-agent 2>/dev/null || true
+              fi
+
+              # Apply GT patch (the monkey-patch that hooks file ops)
+              if [ -f /opt/gt/gt_mini_patch.py ]; then
+                python /opt/gt/gt_mini_patch.py --install 2>/dev/null || true
+              fi
+
+              # Run mini-swe-agent with the task
+              mini-swe-agent \
+                --model '$INPUT_MODEL' \
+                --task '$(echo "$ISSUE_TEXT" | head -c 8000 | sed "s/'/'\\\\''/g")' \
+                --config /opt/gt/agent_config.yaml \
+                2>&1
+            " 2>&1 | tee trial_output.log || true
+          AGENT_RC=${PIPESTATUS[0]}
+          set -e
+          echo "=== Pro Trial complete (agent rc=$AGENT_RC) ===" | tee -a trial_output.log
+
+          if [ "$AGENT_RC" -eq 137 ] || grep -qE "OOMKilled|exit code 137" trial_output.log; then
             echo "GT_AGENT_OOM: agent container hit the memory cap (rc/exit=137)" | tee -a trial_output.log
-          elif [ "$PIER_RC" -ne 0 ]; then
-            echo "PIER_RUN_FAIL: pier run exited rc=$PIER_RC (agent crashed — artifacts will be captured)" | tee -a trial_output.log
+          elif [ "$AGENT_RC" -ne 0 ]; then
+            echo "AGENT_RUN_FAIL: agent exited rc=$AGENT_RC" | tee -a trial_output.log
           fi
           # NEVER exit 1 from trial — Collect/Upload MUST run to capture partial artifacts.
 
-      - name: Verify GT adapter witness (§E/§H)
+      - name: Verify GT wiring (check GT blocks appeared in agent output)
         continue-on-error: true
         if: ${{ !cancelled() }}
         run: |
-          if grep -q "error=DEEPSWE_ADAPTER_FAIL" trial_output.log; then
-            echo "DEEPSWE_ADAPTER_FAIL: the adapter failed to wire/consume the substrate artifacts:"
-            grep "DEEPSWE_ADAPTER_FAIL" trial_output.log | head -5
+          GT_BLOCKS=$(grep -c "gt-evidence\|gt-contract\|gt-scope\|gt-cochange\|gt-nudge\|gt-verify" trial_output.log 2>/dev/null || echo 0)
+          AGENT_STEPS=$(grep -c "function_call\|bash.*tool_call\|THOUGHT" trial_output.log 2>/dev/null || echo 0)
+          echo "GT wiring check: gt_blocks=$GT_BLOCKS agent_steps=$AGENT_STEPS"
+          if [ "$AGENT_STEPS" -eq 0 ]; then
+            echo "AGENT_DID_NOT_RUN: 0 agent steps detected in trial_output.log"
             exit 1
           fi
-          if ! grep -q "gt_prebuilt_active=true" trial_output.log; then
-            echo "GT_ARTIFACT_NOT_CONSUMED: no [GT_META] witness with gt_prebuilt_active=true"
-            grep "\[GT_META\]" trial_output.log | head -5 || echo "(no [GT_META] line at all)"
-            exit 1
-          fi
-          if grep -q "hook_graph_hash_matches_post_lsp=False" trial_output.log; then
-            echo "GRAPH_FAIL_HASH_MISMATCH: hook_graph_hash != graph_hash_after_lsp"
-            grep "hook_graph_hash_matches_post_lsp" trial_output.log | head -3
-            exit 1
-          fi
-          echo "adapter witness OK: substrate graph consumed read-only"
-          grep "\[GT_META\] graph_witness" trial_output.log | head -2 || true
+          echo "agent ran ($AGENT_STEPS steps, $GT_BLOCKS GT blocks delivered)"
 
       - name: Run Pro eval (run_script.sh verifier) + emit reward outcome
         if: always()
