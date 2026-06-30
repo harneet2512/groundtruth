@@ -419,7 +419,7 @@ jobs:
     needs: prepare
     runs-on: ubuntu-latest
     name: "${{ matrix.task }} (${{ matrix.language }})"
-    timeout-minutes: 120
+    timeout-minutes: 150
     defaults:
       run:
         shell: bash
@@ -835,7 +835,7 @@ jobs:
 
       - name: Verify GT adapter witness (§E/§H)
         continue-on-error: true
-        if: ${{ !cancelled() && env.GT_PORTABLE_SUBSTRATE == '1' }}
+        if: ${{ !cancelled() }}
         run: |
           if grep -q "error=DEEPSWE_ADAPTER_FAIL" trial_output.log; then
             echo "DEEPSWE_ADAPTER_FAIL: the adapter failed to wire/consume the substrate artifacts:"
@@ -856,7 +856,7 @@ jobs:
           grep "\[GT_META\] graph_witness" trial_output.log | head -2 || true
 
       - name: Run Pro eval (run_script.sh verifier) + emit reward outcome
-        if: ${{ !cancelled() }}
+        if: always()
         run: |
           # Pro verification: run_script.sh from scaleapi/SWE-bench_Pro-os inside
           # the task image, with the agent's patch applied. Emits a reward.txt-
