@@ -851,6 +851,16 @@ jobs:
               fi
               echo "[GT] mini-swe-agent installed: $(command -v mini-swe-agent)"
 
+              # Write mini-swe-agent config to skip the interactive setup wizard
+              mkdir -p /root/.config/mini-swe-agent
+              cat > /root/.config/mini-swe-agent/.env << MSWECFG
+model='"$INPUT_MODEL"'
+DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+OPENAI_API_KEY=${OPENAI_API_KEY:-}
+MSWECFG
+              echo "[GT] mini-swe-agent config written"
+
               # Apply GT patch (monkey-patches LocalEnvironment to append GT evidence)
               if [ -f /opt/gt/gt_mini_patch.py ]; then
                 python /opt/gt/gt_mini_patch.py --install 2>&1 || echo "WARN: gt_mini_patch install failed"
