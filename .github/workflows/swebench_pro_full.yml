@@ -920,22 +920,9 @@ jobs:
           if [ -z "$PATCH_FILE" ]; then
             PATCH_FILE=$(find jobs -name "patch.diff" -o -name "*.patch" 2>/dev/null | head -1 || true)
           fi
-          # Source 3: preds.json
+          # Source 3: preds.json (legacy pier path)
           if [ -z "$PATCH_FILE" ]; then
-            PATCH_TEXT=$(python3 -c "
-import glob, json, sys
-for f in glob.glob('jobs/**/*.json', recursive=True):
-    try:
-        d = json.load(open(f))
-        p = d.get('model_patch') or d.get('patch') or ''
-        if p and len(p.strip()) > 5:
-            print(p); sys.exit(0)
-    except: pass
-" 2>/dev/null || true)
-            if [ -n "$PATCH_TEXT" ]; then
-              echo "$PATCH_TEXT" > /tmp/pro_patch.diff
-              PATCH_FILE=/tmp/pro_patch.diff
-            fi
+            python3 -c "import glob,json,sys;[sys.stdout.write(d.get('model_patch',''))or sys.exit(0)for f in glob.glob('jobs/**/*.json',recursive=True)for d in[json.load(open(f))]if(d.get('model_patch')or'').strip()]" > /tmp/pro_patch_preds.diff 2>/dev/null && [ -s /tmp/pro_patch_preds.diff ] && PATCH_FILE=/tmp/pro_patch_preds.diff || true
           fi
 
           REWARD=0
