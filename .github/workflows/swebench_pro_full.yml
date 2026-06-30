@@ -851,9 +851,12 @@ jobs:
               fi
               echo "[GT] mini-swe-agent installed: $(command -v mini-swe-agent)"
 
-              # Write mini-swe-agent config to skip the interactive setup wizard
+              # Write mini-swe-agent config AND set env vars to skip interactive wizard
               mkdir -p /root/.config/mini-swe-agent
-              printf "model=%s\nDEEPSEEK_API_KEY=%s\nOPENROUTER_API_KEY=%s\nOPENAI_API_KEY=%s\n" "'"$INPUT_MODEL"'" "${DEEPSEEK_API_KEY:-}" "${OPENROUTER_API_KEY:-}" "${OPENAI_API_KEY:-}" > /root/.config/mini-swe-agent/.env
+              printf "model='"$INPUT_MODEL"'\nDEEPSEEK_API_KEY=%s\nOPENROUTER_API_KEY=%s\n" "${DEEPSEEK_API_KEY:-}" "${OPENROUTER_API_KEY:-}" > /root/.config/mini-swe-agent/.env
+              # Also use mini-extra to set model non-interactively
+              mini-extra config set model "'"$INPUT_MODEL"'" 2>/dev/null || true
+              mini-extra config set DEEPSEEK_API_KEY "${DEEPSEEK_API_KEY:-}" 2>/dev/null || true
               echo "[GT] mini-swe-agent config written"
 
               # Apply GT patch (monkey-patches LocalEnvironment to append GT evidence)
@@ -861,12 +864,12 @@ jobs:
                 python /opt/gt/gt_mini_patch.py --install 2>&1 || echo "WARN: gt_mini_patch install failed"
               fi
 
-              # Run the agent with the issue text from the writable mount
-              mini-swe-agent \
+              # Run the agent — pipe yes to skip any remaining interactive prompts
+              yes "" 2>/dev/null | mini-swe-agent \
                 --model "'"$INPUT_MODEL"'" \
                 --task "$(cat /gt_out/issue.txt 2>/dev/null || echo Fix the issue in the repository.)" \
                 --config /opt/gt/agent_config.yaml \
-                2>&1
+                2>&1 || true
             ' 2>&1 | tee trial_output.log || true
           AGENT_RC=${PIPESTATUS[0]}
           set -e
