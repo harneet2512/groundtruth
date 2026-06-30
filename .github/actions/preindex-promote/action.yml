@@ -42,7 +42,11 @@ runs:
           # Run gt-index on extracted source
           if [ -d /tmp/testbed_src ] && [ "$(find /tmp/testbed_src -name '*.py' -o -name '*.js' -o -name '*.ts' -o -name '*.go' -o -name '*.java' -o -name '*.rs' | head -1)" ]; then
             echo "Indexing /tmp/testbed_src..."
-            /tmp/gt-index -root /tmp/testbed_src -output "$GT_PREINDEX_DB" 2>&1 | tail -5
+            # M6: this is DIAGNOSTIC pre-index (the action's contract is "never fails the
+            # job"). The bare `gt-index ... | tail -5` is an undefended pipe — under GHA's
+            # default `set -o pipefail` a gt-index crash propagates the failure exit and
+            # hard-fails the job. Wrap so a crash WARNs and stays non-fatal.
+            (/tmp/gt-index -root /tmp/testbed_src -output "$GT_PREINDEX_DB" 2>&1 | tail -5) || echo "WARN: gt-index failed (non-fatal)"
             if [ -f "$GT_PREINDEX_DB" ]; then
               ASSERTIONS=$(sqlite3 "$GT_PREINDEX_DB" "SELECT COUNT(*) FROM assertions WHERE target_node_id > 0" 2>/dev/null || echo 0)
               TOTAL_ASSERTIONS=$(sqlite3 "$GT_PREINDEX_DB" "SELECT COUNT(*) FROM assertions" 2>/dev/null || echo 0)

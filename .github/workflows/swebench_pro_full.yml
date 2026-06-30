@@ -82,6 +82,9 @@ env:
   GT_REQUIRE_LSP: "1"
   # Legitimacy: per-task graph built FRESH in-container from THIS task's repo.
   GT_FORBID_PREBUILT_GRAPH: "1"
+  # Legitimacy: arm the commit-parity gate (parity with deepswe_full.yml) so a
+  # stale-bake / wrong-commit proof FAILS CLOSED (consumed by substrate_proof.sh).
+  GT_REQUIRE_COMMIT_PARITY: "1"
   # HF must be fully offline.
   HF_DATASETS_OFFLINE: "1"
   TRANSFORMERS_OFFLINE: "1"
@@ -899,6 +902,7 @@ jobs:
           fi
 
           REWARD=0
+          PRO_INFRA=0
           if [ -z "$PATCH_FILE" ] || [ ! -s "$PATCH_FILE" ]; then
             echo "PRO_EVAL_SKIP: no agent patch found — task did not produce output" | tee -a trial_output.log
           elif [ ! -f "$RUN_SCRIPT" ]; then
@@ -912,12 +916,37 @@ jobs:
               "$IMG" \
               bash -c '
                 set -e
-                cd /app 2>/dev/null || cd /testbed 2>/dev/null || true
-                git apply /tmp/pro_patch.diff 2>/dev/null || patch -p1 < /tmp/pro_patch.diff 2>/dev/null || true
-                bash /tmp/run_test.sh 2>&1 | tail -30
-                echo "_PRO_EXIT_CODE=$?"
+                set -o pipefail
+                # Assert the repo dir exists before patching (else the patch would apply to
+                # the wrong tree / the container root). No repo dir = PATCH_APPLY_FAIL.
+                REPO_DIR=""
+                for _d in /app /testbed /workspace; do
+                  if [ -d "$_d" ]; then REPO_DIR="$_d"; break; fi
+                done
+                if [ -z "$REPO_DIR" ]; then
+                  echo "PATCH_APPLY_FAIL: no repo dir (/app|/testbed|/workspace) in eval image"
+                  exit 90
+                fi
+                cd "$REPO_DIR"
+                # Apply the agent patch; on failure emit PATCH_APPLY_FAIL and ABORT so the
+                # verifier never runs on UNPATCHED code (no silent false pass).
+                if ! { git apply /tmp/pro_patch.diff 2>/dev/null || patch -p1 < /tmp/pro_patch.diff 2>/dev/null; }; then
+                  echo "PATCH_APPLY_FAIL: agent patch did not apply in $REPO_DIR"
+                  exit 91
+                fi
+                # Capture the REAL run_test.sh exit code (not tail status), per-trap fix.
+                rc=0
+                bash /tmp/run_test.sh >/tmp/_pro_out 2>&1 || rc=$?
+                tail -30 /tmp/_pro_out
+                echo "_PRO_EXIT_CODE=$rc"
               ' 2>&1 | tee /tmp/pro_eval_output.txt || true
-            if grep -q "_PRO_EXIT_CODE=0" /tmp/pro_eval_output.txt; then
+            if grep -qE "^PATCH_APPLY_FAIL" /tmp/pro_eval_output.txt; then
+              # Patch never applied -> verifier never ran on patched code. INFRA-class
+              # (the grade comparison was never clean): record NO pass/fail reward so the
+              # task is neither a silent pass on unpatched code nor a false agent-miss.
+              PRO_INFRA=1
+              echo "PATCH_APPLY_FAIL: agent patch did not apply in the eval container — INFRA (verifier not run; excluded from resolved denominator)" | tee -a trial_output.log
+            elif grep -q "_PRO_EXIT_CODE=0" /tmp/pro_eval_output.txt; then
               REWARD=1
               echo "PRO_EVAL_PASS: run_script.sh exited 0 — task RESOLVED" | tee -a trial_output.log
             else
@@ -925,10 +954,28 @@ jobs:
             fi
           fi
 
-          # Emit reward.txt (same format as DeepSWE's pier verifier output so
-          # deepswe_outcome.py can classify this run without changes).
-          echo "${REWARD}" > trial_results/reward.txt
-          echo "Pro verifier reward: ${REWARD}"
+          # L2: the Pro grade was historically written ONLY to trial_results/reward.txt,
+          # which NO consumer reads (gt_deep_metrics.py reads jobs/<ts>/<task>__*/verifier/
+          # reward.json; deepswe_outcome.py reads jobs/<ts>/<task>__*/result.json). On a
+          # patch-apply INFRA outcome, record NO reward at all (excluded from denominator).
+          if [ "$PRO_INFRA" = "1" ]; then
+            echo "PRO_EVAL_INFRA: patch-apply infra — no reward recorded (excluded from resolved denominator)" | tee -a trial_output.log
+          else
+            # Keep reward.txt (human/back-compat) ...
+            echo "${REWARD}" > trial_results/reward.txt
+            echo "Pro verifier reward: ${REWARD}"
+            # ... AND bridge the grade into the pier verifier path the readers actually glob
+            # (jobs/*/*__*/verifier/reward.json), reusing an existing pier task dir if present
+            # else synthesizing one for this Pro task, so the grade is consumed downstream.
+            BRIDGE_DIR=$(python3 -c "import glob,os,sys,time; d=sorted(x for x in glob.glob(os.path.join('jobs','*','*__*')) if os.path.isdir(x)); print(d[-1] if d else os.path.join('jobs',str(int(time.time())),sys.argv[1]+'__pro'))" "$TASK_ID")
+            mkdir -p "$BRIDGE_DIR/verifier"
+            python3 -c "import json,sys; json.dump({'reward': float(sys.argv[1])}, open(sys.argv[2],'w',encoding='utf-8'))" "$REWARD" "$BRIDGE_DIR/verifier/reward.json"
+            echo "${REWARD}" > "$BRIDGE_DIR/verifier/reward.txt"
+            # Assert the bridged reward matches REWARD (fail-closed on a write/serialize bug).
+            BRIDGED=$(python3 -c "import json,sys; print(int(float((json.load(open(sys.argv[1],encoding='utf-8')) or {}).get('reward',-1))))" "$BRIDGE_DIR/verifier/reward.json")
+            [ "$BRIDGED" = "$REWARD" ] || { echo "::error::REWARD_BRIDGE_MISMATCH bridged=$BRIDGED reward=$REWARD"; exit 1; }
+            echo "[GT_META] reward bridged to $BRIDGE_DIR/verifier/reward.json (reward=$REWARD)"
+          fi
 
       - name: Collect results
         if: always()
@@ -984,7 +1031,8 @@ jobs:
           python3 -c "import json,os; json.dump({'schema':'gt.pro_run_provenance.v1','task':'${{ matrix.task }}','dockerhub_tag':'${{ matrix.dockerhub_tag }}','language':'${{ matrix.language }}','pro_bench_sha':os.environ.get('GT_PRO_BENCH_SHA') or None,'gt_git_commit':os.environ.get('GITHUB_SHA') or None,'substrate_digest':os.environ.get('GT_SUBSTRATE_DIGEST') or None,'workflow_run_id':os.environ.get('GITHUB_RUN_ID') or None},open('trial_results/gt_artifacts/run_provenance.json','w'),indent=2)" \
             || echo "WARN: run_provenance.json write failed"
 
-          # Outcome classification — reads reward.txt + trial_output.log.
+          # Outcome classification — reads jobs/<ts>/<task>__*/result.json (verifier_result)
+          # + the bridged verifier/reward.json + trial_output.log markers (NOT reward.txt).
           GT_TRIAL_LOG=trial_output.log GT_CERT_DIR=/tmp/gt \
             GT_DEEPSWE_OUTCOME_JSON=trial_results/outcome.json \
             python3 scripts/verify/deepswe_outcome.py jobs || echo "WARN: outcome extract failed"

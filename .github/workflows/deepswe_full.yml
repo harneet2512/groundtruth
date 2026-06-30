@@ -1332,3 +1332,55 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "Per-task detail: \`outcome.json\` (classification) + \`gt_deep_metrics_<task>.json\` (8-dp) + \`gt_artifacts/\` (8-artifact proof set incl. brief.txt + issue.txt) + \`jobs/\` (trajectory + verifier) inside each \`deepswe-full-<task>\` artifact." >> "$GITHUB_STEP_SUMMARY"
           echo "Pull any task MID-RUN once its job finishes: \`gh run download <run_id> -n deepswe-full-<task> -R <owner>/groundtruth\`." >> "$GITHUB_STEP_SUMMARY"
+      - name: Enforce run verdict (red ONLY on systemic failure — a few INFRA stays green)
+        run: |
+          # H8: the PAID run must NOT pass GREEN on a wholesale agent/launch/collect outage.
+          # Every per-task step stays continue-on-error/always() (capture EVERYTHING — telemetry
+          # is never lost), so ONLY this AGGREGATE gate can red the run, and ONLY on SYSTEMIC
+          # failure. A handful of INFRA / missing tasks among many is BEST-EFFORT and stays
+          # green (PRODUCT RULE: GT never refuses for quality; a few infra tasks ≠ lost signal).
+          # Hard-red ONLY when the run carried no usable signal: 0 artifacts, 0 agents ran, or
+          # launch-fail / INFRA / missing-outcome EACH exceeding 50% of tasks. Mirrors the
+          # 'Enforce ... verdict ... exit 1' aggregate gate in deepswe_proof_sweep.yml.
+          RAN=0; TOTAL=0; LAUNCH_FAIL=0
+          for d in /tmp/all/deepswe-full-*; do
+            [ -d "$d" ] || continue
+            TOTAL=$((TOTAL+1))
+            # Same numeric n_agent_steps parse as the Aggregate step (None/UNKNOWN do NOT parse).
+            STEPS=$(grep -rhoE "AGENT_RAN_STEPS=[0-9]+" "$d" 2>/dev/null | head -1 | grep -oE "[0-9]+$" || true)
+            if [ -z "$STEPS" ]; then
+              STEPS=$(grep -rhoE '"n_agent_steps"[[:space:]]*:[[:space:]]*[0-9]+' "$d" 2>/dev/null | head -1 | grep -oE "[0-9]+$" || true)
+            fi
+            if [ -n "$STEPS" ] && [ "$STEPS" -gt 0 ]; then RAN=$((RAN+1)); else LAUNCH_FAIL=$((LAUNCH_FAIL+1)); fi
+          done
+          # INFRA(+UNKNOWN) and missing-outcome.json counts via the SAME tally_classes the
+          # Classification step uses (imported, not re-implemented).
+          python3 << 'PYEOF' > /tmp/enforce_counts
+          import glob, json, sys
+          sys.path.insert(0, "scripts/verify")
+          from deepswe_outcome import tally_classes
+          recs, missing = [], 0
+          for d in sorted(glob.glob("/tmp/all/deepswe-full-*")):
+              try:
+                  with open(f"{d}/outcome.json", encoding="utf-8") as f:
+                      recs.extend(json.load(f).get("tasks") or [])
+              except (OSError, ValueError):
+                  missing += 1
+          t = tally_classes(recs)
+          print(t["counts"].get("INFRA", 0) + t["counts"].get("UNKNOWN", 0), missing)
+          PYEOF
+          read INFRA MISSING < /tmp/enforce_counts
+          INFRA=${INFRA:-0}; MISSING=${MISSING:-0}
+          echo "enforce: total=$TOTAL ran=$RAN launch_fail=$LAUNCH_FAIL infra=$INFRA missing_outcome=$MISSING (systemic threshold: >50% of total, or 0 agents ran)"
+          FAIL=""
+          if [ "$TOTAL" -eq 0 ]; then FAIL="${FAIL}0 task artifacts collected (whole-run outage); "; fi
+          if [ "$TOTAL" -gt 0 ] && [ "$RAN" -eq 0 ]; then FAIL="${FAIL}0 agents ran (n_agent_steps>0 on NO task); "; fi
+          # integer-safe '>50%': 2*count > total
+          if [ "$TOTAL" -gt 0 ] && [ $((LAUNCH_FAIL*2)) -gt "$TOTAL" ]; then FAIL="${FAIL}launch-fail $LAUNCH_FAIL > 50% of $TOTAL; "; fi
+          if [ "$TOTAL" -gt 0 ] && [ $((INFRA*2)) -gt "$TOTAL" ]; then FAIL="${FAIL}INFRA/UNKNOWN $INFRA > 50% of $TOTAL; "; fi
+          if [ "$TOTAL" -gt 0 ] && [ $((MISSING*2)) -gt "$TOTAL" ]; then FAIL="${FAIL}missing outcome.json $MISSING > 50% of $TOTAL; "; fi
+          if [ -n "$FAIL" ]; then
+            echo "::error title=systemic run failure::$FAIL"
+            exit 1
+          fi
+          echo "OK: run not systemically broken — per-task INFRA/misses are best-effort (green)"

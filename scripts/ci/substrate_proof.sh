@@ -42,6 +42,16 @@ write_proof_status() {
 import json, os, sys, time
 path, state, code, detail = sys.argv[1:5]
 os.makedirs(os.path.dirname(path), exist_ok=True)
+# Fail-closed by construction: never downgrade a 'failed' verdict to 'ok' (a legitimacy/
+# anti-cheat/OOM/no-build failure must stay failed so the paid-run gate refuses to spend).
+# Only an explicit GT_PROOF_FORCE_OK=1 may override (none of the launder paths set it).
+try:
+    with open(path, encoding="utf-8") as _pf:
+        if json.load(_pf).get("state") == "failed" and state == "ok" \
+           and os.environ.get("GT_PROOF_FORCE_OK") != "1":
+            sys.exit(0)
+except Exception:
+    pass
 with open(path, "w", encoding="utf-8") as f:
     json.dump({
         "schema": "gt.proof_status.v1",
@@ -443,8 +453,20 @@ if not issue:
           "— using synthesized fallback (agent has its own instruction)", file=sys.stderr)
 with open(out_path, "w", encoding="utf-8") as f:
     f.write(issue)
+try:
+    with open("/tmp/gt/issue_source.txt", "w", encoding="utf-8") as sf:
+        sf.write(source)
+except Exception:
+    pass
 print(f"issue text: {len(issue)} chars from {source} -> {out_path}")
 PYEOF
+  # M2 fix: surface the synthesized-fallback marker to trial_output.log (the INFRA classifier
+  # deepswe_outcome.py scans it). DeepSWE previously printed GT_ISSUE_MISSING only to stderr, so a
+  # malformed task ran paid on a generic issue and was miscounted as a normal GT-on trial. Best-effort:
+  # SURFACE it (classified INFRA-diagnostic, excluded from the resolved denominator) — never refuse.
+  if [ "$(cat /tmp/gt/issue_source.txt 2>/dev/null)" = "synthesized_fallback" ]; then
+    echo "GT_ISSUE_MISSING: no instruction.md/task.toml issue — synthesized fallback (DeepSWE); INFRA-diagnostic, excluded from resolved denominator" | tee -a trial_output.log
+  fi
   python3 scripts/swebench/issue_manifest.py /tmp/issue.txt /tmp/gt/issue_manifest.json --source instruction || echo "::warning::issue_manifest.py failed — non-fatal, continuing"
   # P0 (2026-06-23): write the verbatim issue into the substrate (/tmp/gt -> mounted
   # read-only at /gt_artifacts) so the runtime re-surface (gt_mini_patch) can read
@@ -623,13 +645,27 @@ if [ "$PROOF_RC" -ne 0 ]; then
   # This closes the line-619 laundering that previously overrode EMBEDDER_USAGE_FAIL /
   # GT_INDEX_FAIL / GRAPH_CERT_INVALID / missing-brief to ok. The degraded-proceed path is
   # kept ONLY for non-fail-closed iteration runs.
-  # PRODUCT RULE: never refuse a task for GT-quality. A degraded/thin proof -> agent runs BEST-EFFORT
-  # (GT correct-or-quiet, cert recorded for honest attribution). The ONLY hard abort is a LEGITIMACY
-  # breach: a commit-parity mismatch means the proof ran STALE code, so results would be attributed
-  # to the wrong commit. Everything else (thin graph, degraded LSP/embedder/index) proceeds best-effort.
-  if grep -q "COMMIT_PARITY" /tmp/gt/proof_failure.json 2>/dev/null; then
-    echo "::error::gt-run-proof failed on COMMIT_PARITY (stale code, legitimacy) — task FAILS" | tee -a trial_output.log
-    # proof_status stays 'failed' (written above); do not override.
+  # PRODUCT RULE: never refuse a task for GT-QUALITY (thin graph, degraded depth/LSP/embedder/index)
+  # -> agent runs BEST-EFFORT (correct-or-quiet, cert recorded for honest attribution). But HARD-ABORT
+  # (flag-independent) on a LEGITIMACY / ANTI-CHEAT / NO-BUILD breach — these make the results INVALID,
+  # not merely thin, so spending on them would be worse than refusing:
+  #   COMMIT_PARITY               proof ran STALE code (wrong-commit attribution)
+  #   EVAL_LEAKAGE_FORBIDDEN      test names/FAIL_TO_PASS leaked into the brief (anti-cheat)
+  #   SUBSTRATE_NOT_PORTABLE      substrate can't run in the eval env (handoff invalid)
+  #   FINAL_PIPELINE_HOST_SPLIT_FAIL  host/container split broken (invalid handoff)
+  #   GT_DEAD_SURFACE_LOADED      the wrong/dead GT code path was loaded
+  #   GT_PROOF_OOM (rc=137)       substrate did not build at all
+  # Everything else (thin graph, degraded depth/LSP/embedder) proceeds best-effort.
+  if [ "$PROOF_RC" -eq 137 ]; then
+    echo "::error::gt-run-proof OOM (rc=137) — substrate did NOT build; task FAILS (no laundering)" | tee -a trial_output.log
+    exit 1
+  fi
+  _LEGIT="COMMIT_PARITY|EVAL_LEAKAGE_FORBIDDEN|SUBSTRATE_NOT_PORTABLE|FINAL_PIPELINE_HOST_SPLIT_FAIL|GT_DEAD_SURFACE_LOADED"
+  if grep -qE "$_LEGIT" /tmp/gt/proof_failure.json 2>/dev/null; then
+    _LC=$(grep -oE "$_LEGIT" /tmp/gt/proof_failure.json 2>/dev/null | head -1)
+    echo "::error::gt-run-proof failed on ${_LC} (legitimacy/anti-cheat — results would be INVALID) — task FAILS" | tee -a trial_output.log
+    # proof_status stays 'failed' (written above); HARD ABORT so no paid spend on an invalid substrate.
+    exit 1
   else
     echo "::warning::gt-run-proof exited $PROOF_RC — trial proceeds BEST-EFFORT with degraded GT (correct-or-quiet; never refuse a task for quality)"
     write_proof_status ok PROOF_DEGRADED "gt-run-proof exited $PROOF_RC but agent trial proceeds best-effort"
@@ -643,20 +679,27 @@ fi
 # in proof mode an empty/missing brief is GT_ARTIFACT_MISSING, never a WARN (there
 # is no host fallback — host run_v74 is fail-closed by the container boundary).
 _MISSING=0
+_MISSING_CORE=0
 for c in graph.db runtime_context.json lsp_certificate.json graph_certificate.json \
          embedder_certificate.json foundational_gate_report.json run_manifest.json \
          brief.txt; do
   if ! test -s "/tmp/gt/$c"; then
     fail_artifact "/gt_artifacts/$c absent after gt-run-proof"
     _MISSING=$((_MISSING + 1))
+    # graph.db + brief.txt are the CORE substrate the agent consumes; absent = no usable substrate.
+    case "$c" in graph.db|brief.txt) _MISSING_CORE=$((_MISSING_CORE + 1)) ;; esac
   fi
 done
-if [ "$_MISSING" -eq 0 ]; then
+if [ "$_MISSING_CORE" -ne 0 ]; then
+  echo "::error::core substrate artifact(s) missing (graph.db/brief.txt) — no usable substrate; task FAILS" | tee -a trial_output.log
+  write_proof_status failed GT_ARTIFACT_MISSING "${_MISSING_CORE} core artifacts (graph.db/brief.txt) missing"
+  exit 1
+elif [ "$_MISSING" -eq 0 ]; then
   echo "all 8 GT artifacts present under /tmp/gt (= /gt_artifacts)"
   write_proof_status ok PROOF_OK "all 8 GT artifacts present"
 else
-  echo "::warning::${_MISSING} GT artifacts missing — proceeding with degraded GT"
-  write_proof_status ok PROOF_DEGRADED "${_MISSING} artifacts missing but trial proceeds"
+  echo "::warning::${_MISSING} non-core GT artifacts missing — proceeding with degraded GT (best-effort)"
+  write_proof_status ok PROOF_DEGRADED "${_MISSING} non-core artifacts missing but trial proceeds"
 fi
 
 # ── Cert-env handoff into the agent (§D) — the adapter reads these READ-ONLY ──

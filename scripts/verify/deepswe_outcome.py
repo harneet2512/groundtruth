@@ -80,6 +80,10 @@ INFRA_LOG_MARKERS: tuple[str, ...] = (
     "GT_SUBSTRATE_PULL_FAIL",
     "GT_RUN_PROOF_FAIL",
     "GT_PROOF_OOM",
+    # L3 (Pro eval): the task patch could not be applied (wrong cwd / non-applying patch).
+    # The verifier never ran on patched code, so this is INFRA (no reward recorded, excluded
+    # from the resolved denominator) — never a false agent-miss. Surfaced by swebench_pro_full.yml.
+    "PATCH_APPLY_FAIL",
     # F4: the AGENT container hit its memory cap (mem_limit/memswap_limit == ${MEMORY},
     # symmetric to the proof container). A capacity kill (rc/exit 137), not an agent-logic
     # or GT-delivery failure — classified INFRA (excluded from the resolved-rate

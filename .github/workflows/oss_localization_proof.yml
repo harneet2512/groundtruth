@@ -48,12 +48,13 @@ jobs:
         run: |
           mkdir -p /tmp/repos
           python3 -c "
-          import json, subprocess, os
+          import json, subprocess, os, sys
           repos = json.load(open('benchmarks/data/' + os.environ['REPOS_FILE']))
           cases = json.load(open('benchmarks/data/' + os.environ['CASES_FILE']))
           lang = os.environ['LANG'].lower()
           needed = {c['repo'] for c in cases if c.get('language','').lower()==lang}
           import shutil
+          failures = []
           for name in sorted(needed):
               meta = repos[name]; dst = f'/tmp/repos/{name}'
               # Fast path: shallow init + fetch the exact commit by SHA.
@@ -65,7 +66,18 @@ jobs:
                   shutil.rmtree(dst, ignore_errors=True)
                   subprocess.run(['git','clone','--quiet','--no-checkout', meta['url'], dst], check=False)
                   subprocess.run(['git','-C',dst,'checkout','--quiet', meta['commit']], check=False)
-              print(f'cloned {name} @ {meta[\"commit\"][:10]} ({\"shallow\" if ok else \"full\"})', flush=True)
+              # H4: LEGITIMACY — assert the working tree is AT the pinned commit. A
+              # wrong-commit checkout is stale/illegitimate code -> the proof would
+              # measure the wrong source. Fail the step on ANY miss (hard-fail: legitimacy).
+              head = subprocess.run(['git','-C',dst,'rev-parse','HEAD'], capture_output=True, text=True)
+              got = (head.stdout or '').strip(); want = str(meta['commit']).strip()
+              at_commit = (head.returncode == 0) and bool(got) and (got == want or got.startswith(want) or want.startswith(got))
+              if not at_commit:
+                  failures.append(f'{name}: HEAD={got[:12] or \"<none>\"} != pinned {want[:12]}')
+              print(f'cloned {name} @ {want[:10]} ({\"shallow\" if ok else \"full\"}) at_commit={at_commit}', flush=True)
+          if failures:
+              print('::error::repos NOT at pinned commit (legitimacy breach): ' + '; '.join(failures), flush=True)
+              sys.exit(1)
           "
       - name: Run falsifier (RRF reach-drop A/B/C) for this language
         env:
@@ -97,6 +109,8 @@ jobs:
               -e GT_INDEX_BIN=gt-index -e GT_SRC=/opt/gt/src \
               -e GT_INDEX_CACHE=/idx_cache \
               -e GT_PROOF_LANG="$LANG" \
+              -e GT_CHECKOUT_SHA="$GITHUB_SHA" \
+              -e GT_SUBSTRATE_DIGEST="$DIGEST" \
               -e GT_RRF_FUSION="$mode" \
               "$@" \
               "$DIGEST" \
@@ -142,18 +156,45 @@ jobs:
           # held-out lift with 0 per-lang regression.
           run_arm control    on
           run_arm reachdepth on -e GT_LOC_REACH_DEPTH=1
+          # L4/H5: a TOTAL (or partial) proof failure must RED this step, never report
+          # green. After BOTH arms, the CONTROL SUMMARY.json MUST exist, MUST NOT be a
+          # partial (a partial = the shard was killed mid-run = LOST data), and MUST have
+          # attempted the expected number of cases for this language. Any miss -> exit 1.
+          python3 -c "
+          import json, os, sys
+          lang = os.environ['LANG'].lower()
+          cases = json.load(open('benchmarks/data/' + os.environ['CASES_FILE']))
+          expected = sum(1 for c in cases if c.get('language','').lower()==lang)
+          p = '/tmp/proof_out/control/SUMMARY.json'
+          if not os.path.exists(p):
+              print(f'::error::control SUMMARY.json MISSING for {lang} (proof produced no measurement)'); sys.exit(1)
+          d = json.load(open(p))
+          if d.get('partial'):
+              print(f'::error::control SUMMARY.json is PARTIAL for {lang} (shard killed mid-run): {d.get(\"total_cases\")}/{expected}'); sys.exit(1)
+          got = int(d.get('total_cases', 0))
+          if expected and got != expected:
+              print(f'::error::control attempted {got} != expected {expected} cases for {lang} (incomplete measurement)'); sys.exit(1)
+          print(f'control OK: {lang} attempted={got}/{expected} scored={d.get(\"scored_cases\")} infra={d.get(\"infra_failures\")} @1={d.get(\"gold_at_1\")} embedder_loaded={d.get(\"embedder_loaded\")}')
+          "
       - name: Show this language's result
         if: always()
         run: |
           python3 -c "
-          import json, os
+          import json, os, sys
+          missing = []
           for a in ['control','reachdepth']:
               p=f'/tmp/proof_out/{a}/SUMMARY.json'
-              if not os.path.exists(p): print(a,'MISSING'); continue
+              if not os.path.exists(p):
+                  print(a,'MISSING')
+                  if a == 'control': missing.append(a)
+                  continue
               d=json.load(open(p)); n=d['total_cases']
-              print(f'{a}: @1={d[\"gold_at_1\"]}/{n} in8={d[\"gold_in_8\"]}/{n} diag_clean={d.get(\"diagnostic_clean\")}/{n} viol={d.get(\"violation_counts\",{})}')
+              tag=' [PARTIAL]' if d.get('partial') else ''
+              print(f'{a}{tag}: @1={d[\"gold_at_1\"]}/{n} in8={d[\"gold_in_8\"]}/{n} scored={d.get(\"scored_cases\")} infra={d.get(\"infra_failures\")} diag_clean={d.get(\"diagnostic_clean\")}/{n} viol={d.get(\"violation_counts\",{})}')
               for k,v in sorted(d.get('by_regime',{}).items()):
                   print(f'    {k}: @1={v[\"at_1\"]}/{v[\"n\"]} in8={v[\"in_8\"]}/{v[\"n\"]} miss={v[\"miss\"]}')
+          if missing:
+              print('::error::control SUMMARY.json absent — proof produced no measurement'); sys.exit(1)
           "
       - name: Upload artifact
         if: always()
@@ -161,3 +202,49 @@ jobs:
         with:
           name: oss-proof-${{ matrix.language }}
           path: /tmp/proof_out/
+          # L4: an empty artifact = the proof produced nothing (LOST data). Fail the
+          # upload loudly instead of shipping a green run with no results.
+          if-no-files-found: error
+
+  # L4(d): FINAL cross-language PROOF GATE. The per-leg steps can only see one language;
+  # this job (runs after all legs, always) reds the workflow if ANY language is missing /
+  # partial, or if the aggregate CONTROL @1 regresses below the 53/60 reference. This is a
+  # PROOF/measurement gate (regression-gating is correct here) — NOT a task refusal, and
+  # NOT a GT-quality refusal (per-case quality failures are surfaced upstream as
+  # infra_failures and excluded from the @1 denominator).
+  gate:
+    needs: proof
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all language artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/all_proof
+      - name: Final proof gate (all langs present + no regression vs reference)
+        env:
+          GT_PROOF_AT1_REFERENCE: "53"
+        run: |
+          python3 -c "
+          import json, os, sys
+          langs = ['python','go','javascript','typescript','rust']
+          ref = int(os.environ.get('GT_PROOF_AT1_REFERENCE','53'))
+          missing, partial, total_at1, total_n = [], [], 0, 0
+          for lang in langs:
+              p = f'/tmp/all_proof/oss-proof-{lang}/control/SUMMARY.json'
+              if not os.path.exists(p):
+                  missing.append(lang); continue
+              d = json.load(open(p))
+              if d.get('partial'): partial.append(lang)
+              total_at1 += int(d.get('gold_at_1',0)); total_n += int(d.get('total_cases',0))
+              print(f'{lang}: @1={d.get(\"gold_at_1\")}/{d.get(\"total_cases\")} scored={d.get(\"scored_cases\")} infra={d.get(\"infra_failures\")} sha={str(d.get(\"checkout_sha\",\"\"))[:10]} digest={str(d.get(\"substrate_digest\",\"\"))[:24]} embedder={d.get(\"embedder_loaded\")}')
+          errs = []
+          if missing: errs.append(f'LANGS MISSING: {missing}')
+          if partial: errs.append(f'LANGS PARTIAL (killed mid-run): {partial}')
+          if total_at1 < ref: errs.append(f'REGRESSION: control @1 total {total_at1} < reference {ref}')
+          print(f'TOTAL control @1 = {total_at1}/{total_n} (reference {ref})')
+          if errs:
+              for e in errs: print('::error::' + e)
+              sys.exit(1)
+          print('PROOF GATE GREEN: all 5 langs present, no regression vs reference')
+          "

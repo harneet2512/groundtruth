@@ -224,6 +224,13 @@ def classify_graph(cert, *, proof_mode: bool = False):
     if cert.get("closure_rebuilt_after_lsp") is False:
         return ("GRAPH_FAIL_STALE_CLOSURE", False)
     _gh = cert.get("graph_hash")
+    # M4 backstop: graph_edges_hash() returns "" on any read exception, and BOTH identity
+    # gates below are guarded `if _gh and ...` — so an empty/missing graph_hash silently
+    # DISABLES HASH_MISMATCH + HOOK_MISMATCH and the cert still returns GRAPH_VALID/PASS =
+    # fail-OPEN on the cross-stage "same graph" guarantee. A missing identity hash is a
+    # LEGITIMACY failure (can't prove same-graph), NOT a quality issue, so hard-fail here.
+    if not _gh:
+        return ("GRAPH_FAIL_HASH_MISMATCH", False)
     _lsp = cert.get("graph_hash_after_lsp")
     if _gh and _lsp and _gh != _lsp:
         return ("GRAPH_FAIL_HASH_MISMATCH", False)
@@ -269,10 +276,22 @@ def main():
         _d = os.path.dirname(a.out)
         if _d:
             os.makedirs(_d, exist_ok=True)
-        with open(a.out, "w", encoding="utf-8") as f:
+        # M3: write to a temp file + atomic os.replace() so a partial/failed write never
+        # corrupts or half-replaces the only persisted verdict. In PROOF mode the cert IS
+        # the only persisted verdict — a swallowed write failure makes it vanish and
+        # downstream then false-attributes an EMPTY graph (lost data), so a write failure
+        # is FATAL (non-zero exit) under proof mode, WARN-only off-proof (best-effort).
+        _tmp = f"{a.out}.tmp.{os.getpid()}"
+        with open(_tmp, "w", encoding="utf-8") as f:
             json.dump(cert, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(_tmp, a.out)
     except Exception as e:
         print(f"WARN: could not write graph certificate to {a.out}: {e}")
+        if a.proof_mode:
+            print(f"FATAL: graph certificate write failed in PROOF mode (lost verdict): {e}")
+            return 1
     _hash_match = (cert.get("graph_hash") == cert.get("graph_hash_after_lsp")
                    if cert.get("graph_hash_after_lsp") else "n/a")
     _gb = cert.get("graph_bases", {})

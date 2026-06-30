@@ -37,7 +37,12 @@ runs:
         # If anything under gt-index/**.go changes, invalidate the Python
         # cache so any installed groundtruth import paths that reference the
         # new schema are not served from a stale wheel.
-        key: eval-env-oh054v2-pip-${{ hashFiles('pyproject.toml', 'gt-index/**/*.go') }}
+        # M5: also hash patches/oh054/** + src/groundtruth/**. The GT-tools
+        # registration patch (apply_gt_tools.py) runs ONLY in the cache-MISS
+        # install branch below; on a cache HIT it never re-applies, so a change
+        # to the patch or to the GT tools it registers would silently never land.
+        # Hashing them busts the cache (→ reinstall → re-patch) when they change.
+        key: eval-env-oh054v2-pip-${{ hashFiles('pyproject.toml', 'gt-index/**/*.go', 'patches/oh054/**', 'src/groundtruth/**') }}
 
     - name: Install Python packages (skip if cached)
       shell: bash
@@ -84,7 +89,16 @@ runs:
         # bandwidth cap. ONLY LFS-pull here if the model isn't already present (a direct
         # caller, e.g. canary, that didn't pre-place it) — never on the big matrices.
         _M="$GITHUB_WORKSPACE/models/e5-small-v2/model.onnx"
-        if [ ! -s "$_M" ] || [ "$(wc -c < "$_M" 2>/dev/null || echo 0)" -lt 1048576 ]; then
+        # M7 size floor: a 1MB floor let a TRUNCATED/partial download (or an LFS
+        # pointer ~130B) pass as "present". A complete e5-small-v2 ONNX is ~133MB
+        # (fp32) or ~33MB (int8 quantized fallback — setup_models.py also accepts
+        # onnx/model_quantized.onnx). Floor at 20MB rejects pointers, empty files,
+        # and gross truncation WITHOUT false-rejecting the legitimate quantized
+        # variant. The AUTHORITATIVE completeness check is the load+embed PROBE
+        # below (onnxruntime rejects a truncated/corrupt protobuf); this size gate
+        # is only a fast pre-filter.
+        _E5_MIN_BYTES=$((20 * 1024 * 1024))
+        if [ ! -s "$_M" ] || [ "$(wc -c < "$_M" 2>/dev/null || echo 0)" -lt "$_E5_MIN_BYTES" ]; then
           echo "  e5 model absent/pointer — downloading from HuggingFace (setup_models.py, NO Git LFS — the"
           echo "  LFS budget is exhausted on this repo; HF is the same e5-small-v2 ONNX as the codespace)."
           # The repo ships model.onnx as an LFS POINTER (~130B). setup_models.py skips when the file
@@ -113,17 +127,38 @@ runs:
         fi
         echo "GT_MODELS_ROOT=$GITHUB_WORKSPACE/models" >> "$GITHUB_ENV"
         export GT_MODELS_ROOT="$GITHUB_WORKSPACE/models"
-        # NO SILENT FAILURE: under GT_REQUIRE_EMBEDDER the model MUST be a real binary AND
-        # MUST actually load + embed a non-zero vector. "If the transformer/embedder isn't
-        # there, install it — we don't go without it." A pointer/absent model or a broken
-        # onnxruntime ABORTS setup here (not deferred to a FULL_STACK-gated preflight).
+        # M7: ALWAYS probe the embedder (BEST-EFFORT surfacing). Load the model and embed
+        # a real vector, then RECORD `[GT_EMBEDDER] loaded=<bool> dim=<n>` to the log, the
+        # eval env (GITHUB_ENV), and the job summary — so a semantic-zero (degraded) run is
+        # VISIBLE, never silent, even when the caller did NOT arm GT_REQUIRE_*. The probe
+        # (onnxruntime load + non-zero finite vector) is the AUTHORITATIVE completeness
+        # check: it catches a truncated/corrupt model the size floor cannot, and it does
+        # NOT false-reject a working int8 quantized model. `$(...) && rc=0 || rc=$?` keeps
+        # `set -e` from killing an unarmed degraded run when the probe exits non-zero.
+        _E5_SZ=$(wc -c < "$_M" 2>/dev/null || echo 0)
+        _EMBED_OUT=$(GT_FORCE_ONNX_EMBEDDER=1 python -c "import math; from groundtruth.memory.enrich.embed import get_embedding_model as g; m=g(); m._ensure_loaded(); v=m.embed('def f(): return 1'); ok=bool(v) and any(abs(x)>1e-9 for x in v) and all(math.isfinite(x) for x in v); print('[GT_EMBEDDER] loaded=%s dim=%d'%(('true' if ok else 'false'), (len(v) if v else 0))); import sys; sys.exit(0 if ok else 1)" 2>/dev/null) && _EMBED_RC=0 || _EMBED_RC=$?
+        _EMBED_LINE=$(printf '%s\n' "$_EMBED_OUT" | grep -m1 '\[GT_EMBEDDER\]' || true)
+        [ -n "$_EMBED_LINE" ] || _EMBED_LINE="[GT_EMBEDDER] loaded=false dim=0"
+        echo "$_EMBED_LINE size_bytes=$_E5_SZ"
+        echo "GT_EMBEDDER_PROBE=$_EMBED_LINE" >> "$GITHUB_ENV"
+        printf '%s size_bytes=%s\n' "$_EMBED_LINE" "$_E5_SZ" >> "${GITHUB_STEP_SUMMARY:-/dev/null}" 2>/dev/null || true
+        # NO SILENT FAILURE only when ARMED: under GT_REQUIRE_EMBEDDER/FULL_STACK the model
+        # MUST clear the size floor AND the probe MUST pass — "we don't go without it" —
+        # else ABORT. The probe (not the size heuristic) is the real gate, so a working
+        # quantized model is not false-rejected and a truncated fp32 that fails to load IS
+        # caught. UNARMED: SURFACE the degraded state and PROCEED best-effort (no refusal).
         if [ "${GT_REQUIRE_EMBEDDER:-0}" = "1" ] || [ "${GT_REQUIRE_FULL_STACK:-0}" = "1" ]; then
-          [ -s "$GITHUB_WORKSPACE/models/e5-small-v2/model.onnx" ] && \
-            [ "$(wc -c < "$GITHUB_WORKSPACE/models/e5-small-v2/model.onnx")" -gt 1048576 ] || \
-            { echo "FATAL: e5-small-v2 model missing/pointer under GT_REQUIRE_EMBEDDER"; exit 1; }
-          GT_FORCE_ONNX_EMBEDDER=1 python -c "import math; from groundtruth.memory.enrich.embed import get_embedding_model as g; m=g(); m._ensure_loaded(); v=m.embed('def f(): return 1'); assert v and any(abs(x)>1e-9 for x in v) and all(math.isfinite(x) for x in v), 'embedder zero/NaN'; print('  embedder PROBE OK: real %d-d ONNX vector'%len(v))" || { echo "FATAL: embedder did not load+embed a real vector (onnxruntime/model broken)"; exit 1; }
+          { [ -s "$_M" ] && [ "$_E5_SZ" -ge "$_E5_MIN_BYTES" ]; } || \
+            { echo "FATAL: e5-small-v2 model missing/truncated under GT_REQUIRE_EMBEDDER (size_bytes=$_E5_SZ < $_E5_MIN_BYTES; expected ~133MB fp32 / ~33MB int8)"; exit 1; }
+          [ "$_EMBED_RC" -eq 0 ] || \
+            { echo "FATAL: embedder did not load+embed a real vector under GT_REQUIRE_EMBEDDER ($_EMBED_LINE; onnxruntime/model broken)"; exit 1; }
+          echo "  embedder PROBE OK (armed): $_EMBED_LINE"
         else
-          [ -s "$GITHUB_WORKSPACE/models/e5-small-v2/model.onnx" ] && echo "  e5 model present" || echo "  WARN: e5 model absent (GT_REQUIRE_EMBEDDER not armed)"
+          if [ "$_EMBED_RC" -eq 0 ]; then
+            echo "  embedder live (best-effort): $_EMBED_LINE"
+          else
+            echo "  WARN: embedder degraded / semantic-zero (GT_REQUIRE_EMBEDDER not armed) — SURFACED, proceeding best-effort: $_EMBED_LINE size_bytes=$_E5_SZ"
+          fi
         fi
         # LSP: pyright. Under GT_REQUIRE_LSP it MUST be runnable — install + hard-verify.
         if ! (python -c "import pyright" 2>/dev/null || command -v pyright >/dev/null 2>&1); then

@@ -86,12 +86,13 @@ def main() -> int:
     if _lang_filter:
         cases = [c for c in cases if c.get("language", "").lower() == _lang_filter]
 
-    # Per-case wall-clock cap: DISABLED by default (0). A hardcoded cap guillotines
-    # slow-but-healthy large-repo cases (the 180s/600s mistake). The real backstop is
-    # the per-shard job timeout + sharding (a genuine hang kills one language shard,
-    # not the run). Only arm SIGALRM if an explicit positive cap is set.
+    # Per-case wall-clock cap (H5): a sane DEFAULT of 300s so one hung case skips
+    # ONLY that case (SIGALRM -> _CaseTimeout -> surfaced infra_failure -> next case),
+    # instead of the hang eating the whole language shard. A genuinely slow-but-healthy
+    # large repo can override via GT_PROOF_CASE_TIMEOUT (set 0 to fully disable). The
+    # per-shard job timeout + sharding remain the outer backstop.
     import signal
-    _PER_CASE_TIMEOUT = int(os.environ.get("GT_PROOF_CASE_TIMEOUT", "0"))
+    _PER_CASE_TIMEOUT = int(os.environ.get("GT_PROOF_CASE_TIMEOUT", "300"))
 
     class _CaseTimeout(Exception):
         pass
@@ -125,7 +126,71 @@ def main() -> int:
             return "C_area_named_sibling"
         return "B_pure_behavior"
 
+    # H3: LOAD THE EMBEDDER ONCE, before the case loop. The proof overlays the HOST
+    # src/groundtruth over the baked digest, so a broken host checkout (import error /
+    # absent model under an explicit require) must fail the STEP LOUDLY here — not
+    # silently zero the semantic signal on all N cases (which would read as a
+    # localization catastrophe instead of a build/LOST-measurement error). Best-effort
+    # preserved: when GT_REQUIRE_EMBEDDER is NOT set, a load failure is SURFACED (warn +
+    # embedder_loaded=False in SUMMARY) and the run proceeds correct-or-quiet; only the
+    # caller's explicit require contract (NO-BUILD on a broken host src) hard-fails.
+    _embedder_loaded = False
+    _embedder_err = ""
+    try:
+        from groundtruth.pretask.graph_localizer import _get_embedder
+        _embedder_loaded = _get_embedder() is not None
+    except Exception as _ee:
+        _embedder_err = f"{type(_ee).__name__}: {_ee}"
+    if not _embedder_loaded:
+        if os.environ.get("GT_REQUIRE_EMBEDDER") == "1":
+            print(
+                "[PROOF-FAIL] GT_REQUIRE_EMBEDDER=1 but the embedder did not load once "
+                "before the case loop (broken host src / absent model — NO-BUILD, would "
+                f"zero every case): {_embedder_err}",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"[WARN] embedder not loaded (best-effort, semantic OFF): {_embedder_err}", file=sys.stderr)
+
+    # H5: a partial aggregate MUST survive an abrupt kill (OOM SIGKILL / job-timeout
+    # SIGTERM) so the gate sees REAL data, never a silent absence (which L4 launders as
+    # green). The only thing that survives SIGKILL is what is already on disk, so flush a
+    # partial SUMMARY.json at the top of every case iteration, and also on atexit/SIGTERM.
+    # The final complete summary sets _flush_partial.done so it is never clobbered.
+    import atexit
+    _summary_path = os.path.join(out_dir, "SUMMARY.json")
+
+    def _flush_partial():
+        if getattr(_flush_partial, "done", False):
+            return
+        try:
+            _sc = [r for r in results if not r.get("error")]
+            with open(_summary_path, "w", encoding="utf-8") as _f:
+                json.dump({
+                    "partial": True,
+                    "fusion_mode": os.environ.get("GT_RRF_FUSION", "") or "linear",
+                    "total_cases": len(results),
+                    "scored_cases": len(_sc),
+                    "infra_failures": len(results) - len(_sc),
+                    "gold_at_1": sum(1 for r in _sc if r.get("gold_at_1")),
+                    "gold_in_8": sum(1 for r in _sc if r.get("gold_in_8")),
+                    "cases": results,
+                }, _f, indent=2)
+        except Exception:
+            pass
+
+    atexit.register(_flush_partial)
+
+    def _on_term(_sig_n, _frm):
+        _flush_partial()
+        os._exit(143)
+    try:
+        signal.signal(signal.SIGTERM, _on_term)
+    except Exception:
+        pass
+
     for case in cases:
+        _flush_partial()  # H5: persist all prior completed cases before this one runs
         cid = case["id"]
         lang = case.get("language", "?")
         issue = case["issue_text"]
@@ -252,16 +317,31 @@ def main() -> int:
             mark = "✓@1" if deliv_rank == 1 else (f"@{deliv_rank}" if deliv_rank else "MISS")
             dmark = "OK" if diag["ok"] else "VIOL:" + ",".join(diag["violations"])
             print(f"[{mark}] {cid} ({lang}) delivered={deliv_rank} full={full_rank} sem={sem} diag={dmark}", file=sys.stderr)
+        except _CaseTimeout:
+            # H5: a single hung case is surfaced as an infra_failure (excluded from the
+            # @1 denominator) and the shard CONTINUES — one hang skips ONE case.
+            results.append({"id": cid, "language": lang, "gold_rank": None, "nodes": nodes, "error": "case_timeout"})
+            print(f"[TIMEOUT] {cid}: exceeded {_PER_CASE_TIMEOUT}s — skipped (1 case, not the shard)", file=sys.stderr)
+            continue
         except Exception as e:
             import traceback
             results.append({"id": cid, "language": lang, "full_rank": None, "rendered_rank": None, "nodes": nodes, "error": f"{type(e).__name__}: {e}"})
             print(f"[ERR] {cid}: {type(e).__name__}: {e}", file=sys.stderr)
             traceback.print_exc()
 
+    # H4: an infra/quality failure (repo not mounted, empty graph, index/case timeout,
+    # pipeline crash) is NOT a localization MISS. Excluding it from the @1 denominator
+    # prevents laundering a LOST/CORRUPTED measurement into a ranking miss; it is
+    # reported SEPARATELY as infra_failures (surfaced, best-effort — never silently
+    # counted against ranking). Only genuine in-graph misses (gold absent from the
+    # delivered list despite a valid graph) count toward miss/denominator.
+    infra = [r for r in results if r.get("error")]
+    scored = [r for r in results if not r.get("error")]
+
     # AGGREGATE (full_rank = pipeline's true rank over the full list)
     def _agg(keyfn):
         d: dict = {}
-        for r in results:
+        for r in scored:
             k = keyfn(r)
             d.setdefault(k, {"at_1": 0, "in_8": 0, "miss": 0, "sem_zero": 0, "n": 0})
             b = d[k]
@@ -282,12 +362,12 @@ def main() -> int:
     # REGIME bands: the do-no-harm gate reads here (A/B hold, C improves).
     by_regime = _agg(lambda r: r.get("regime", "B_pure_behavior"))
 
-    total_at_1 = sum(1 for r in results if r.get("gold_at_1"))
-    total_in_8 = sum(1 for r in results if r.get("gold_in_8"))
+    total_at_1 = sum(1 for r in scored if r.get("gold_at_1"))
+    total_in_8 = sum(1 for r in scored if r.get("gold_in_8"))
     total_rendered_at_1 = sum(1 for r in results if r.get("rendered_at_1"))
-    total_sem_zero = sum(1 for r in results if r.get("semantic_signal_count", 0) == 0)
+    total_sem_zero = sum(1 for r in scored if r.get("semantic_signal_count", 0) == 0)
     # DIAGNOSTIC rollup: count each violation class across all cases.
-    diag_clean = sum(1 for r in results if r.get("diagnostic_ok"))
+    diag_clean = sum(1 for r in scored if r.get("diagnostic_ok"))
     violation_counts: dict = {}
     for r in results:
         for v in r.get("violations", []):
@@ -295,7 +375,18 @@ def main() -> int:
 
     summary = {
         "fusion_mode": os.environ.get("GT_RRF_FUSION", "") or "linear",
+        # H3: provenance — the host checkout SHA overlaid on the baked digest, so the
+        # headline can never be silently attributed to the wrong code.
+        "checkout_sha": os.environ.get("GT_CHECKOUT_SHA", ""),
+        "substrate_digest": os.environ.get("GT_SUBSTRATE_DIGEST", "") or os.environ.get("DIGEST", ""),
+        "embedder_loaded": _embedder_loaded,
         "total_cases": len(results),
+        # H4: scored = real measurements; infra_failures kept OUT of the @1 denominator.
+        "scored_cases": len(scored),
+        "infra_failures": len(infra),
+        "infra_failure_detail": [
+            {"id": r.get("id"), "language": r.get("language"), "error": r.get("error")} for r in infra
+        ],
         "gold_at_1": total_at_1,
         "gold_in_8": total_in_8,
         "rendered_at_1": total_rendered_at_1,
@@ -307,8 +398,9 @@ def main() -> int:
         "by_regime": by_regime,
         "cases": results,
     }
-    with open(os.path.join(out_dir, "SUMMARY.json"), "w", encoding="utf-8") as f:
+    with open(_summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
+    _flush_partial.done = True  # complete summary written — atexit/SIGTERM must not clobber it
 
     print(f"\n=== FULL PIPELINE PROOF (fusion={summary['fusion_mode']}) ===", file=sys.stderr)
     print(f"gold_at_1 (full list): {total_at_1}/{len(results)}", file=sys.stderr)
@@ -321,6 +413,20 @@ def main() -> int:
         print(f"  {lang}: @1={b['at_1']}/{b['n']} in8={b['in_8']}/{b['n']} miss={b['miss']} sem_zero={b['sem_zero']}", file=sys.stderr)
     for scale, b in sorted(by_scale.items()):
         print(f"  [{scale} repos]: @1={b['at_1']}/{b['n']} in8={b['in_8']}/{b['n']} miss={b['miss']}", file=sys.stderr)
+    print(f"scored={len(scored)} infra_failures={len(infra)} (excluded from @1 denominator)", file=sys.stderr)
+
+    # L4: a TOTAL proof failure must NOT report green. Hard-fail (NO-BUILD / LOST DATA)
+    # ONLY when no measurement survived — zero cases attempted, or every case failed
+    # infra/quality so nothing was scored. Per-case GT-quality failures are surfaced as
+    # infra_failures and do NOT red the shard (best-effort, correct-or-quiet); the
+    # workflow-level gate handles per-lang MISSING + regression vs the reference.
+    if len(results) == 0 or len(scored) == 0:
+        print(
+            f"[PROOF-FAIL] no measurement survived: total={len(results)} scored={len(scored)} "
+            f"infra={len(infra)} — refusing to report green on an empty proof",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 

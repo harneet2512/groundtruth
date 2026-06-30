@@ -125,7 +125,9 @@ jobs:
   proof:
     needs: prepare
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # M1: cold ~8GB substrate pull + ~15min index needs headroom; 20 SIGKILLed mid-index
+    # ($0 compute, so the larger budget costs nothing but prevents false timeout-failures).
+    timeout-minutes: 40
     name: "${{ matrix.task }} (${{ matrix.language }})"
     defaults:
       run:
