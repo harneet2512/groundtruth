@@ -96,12 +96,11 @@ env:
   GT_RUNTIME_STRATEGY: "unified_substrate"
   GT_LSP_READY_BUDGET_S_OVERRIDE: ${{ vars.GT_LSP_READY_BUDGET_S_OVERRIDE }}
   # Verification horizon (step budget — same as DeepSWE).
-  GT_STEP_LIMIT: "300"
+  GT_STEP_LIMIT: "0"
   GT_SELF_VERIFY_ATTEMPTS: "2"
   GT_VERIFICATION_CYCLE_COST: "25"
-  # Model routing.
-  TOKENROUTER_API_KEY: ${{ secrets.TOKENROUTER_API_KEY }}
-  TOKENROUTER_API_BASE: "https://api.tokenrouter.com/v1"
+  # Model routing — per-model API keys are set in the trial step's model-aware
+  # routing block (DeepSeek/OpenRouter/TokenRouter). No top-level key needed.
 
 jobs:
   # ── Stage-0 / prepare: build the Pro task matrix ────────────────────────────

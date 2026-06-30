@@ -133,7 +133,7 @@ agent:
     - You CANNOT continue working after submitting.
     </CRITICAL>
     </instructions>
-  step_limit: 300
+  step_limit: 0
   cost_limit: 3.0
 
 # mini-swe-agent runs INSIDE the pier-managed task container (pier's `--env docker`
