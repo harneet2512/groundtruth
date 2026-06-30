@@ -60,7 +60,13 @@ env:
   GT_VERIFICATION_CYCLE_COST: "25"
   GT_ORACLE_ROUTE: "1"               # row 20 oracle two-lane route
   GT_STEP_LIMIT: "250"               # rows 14/20 verify-horizon ladder; matches verified_gt.yaml step_limit
-  GT_SELF_VERIFY_ATTEMPTS: "2"       # outer retry ring (consumed by the runner loop, added below)
+  # H6 (LIPI): RESERVED, currently INERT on Pro. The Pro path runs stock DefaultAgent with a single
+  # agent.run(task) (artifact_verified/gt_verified_agent.py:262-263) — there is NO outer retry loop
+  # reading this var (the prior "consumed by the runner loop" comment was false). The retry ring is
+  # pier-only (gt_agent.py GTMiniSweAgent.run). Implementing it here for parity is a deliberate
+  # cost decision (up to 2x LLM per retried task on a 731-run) + needs the pier's retry-TRIGGER
+  # semantics (retry on verification-fail, not a blind 2x); left as a tracked parity item, not wired.
+  GT_SELF_VERIFY_ATTEMPTS: "2"
   # deep 8-dp telemetry sinks -> uploaded dir so gt_math can audit per-layer firing
   GT_ORACLE_EVENTS: "/tmp/gt/gt_oracle_events.jsonl"
   GT_RUNTIME_LEDGER: "/tmp/gt/gt_runtime_ledger.jsonl"
