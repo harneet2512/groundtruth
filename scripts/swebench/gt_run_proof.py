@@ -1200,10 +1200,21 @@ def main(argv=None) -> int:
                 _gv = (json.load(_gf) or {}).get("verdict", "unknown")
         except Exception:
             pass
-        if _gv in _CONTENT_FAIL:
+        # Context-aware enforcement (the discriminator is whether a real agent handoff is configured):
+        #  - REAL handoff (GT_HOST_GRAPH_DB set — the paid deepswe/pro runs ALWAYS set it): enforce the
+        #    FULL verdict. A genuine MISSING_HANDOFF / HANDOFF_INACTIVE / STALE_CLOSURE / HASH_MISMATCH
+        #    here means the agent will NOT receive a valid graph -> MUST fail-close. Good tasks reach
+        #    GRAPH_VALID in this context (smoke: 17/18), so no false-fail.
+        #  - PROOF-ONLY (no GT_HOST_GRAPH_DB, e.g. the $0 proof-sweep): the handoff verdicts are expected
+        #    artifacts (no agent to hand off to) -> enforce only the content-quality class, so the sweep
+        #    does not false-fail. A thin/broken graph (DEPTH_INCOMPLETE etc.) fails closed in BOTH modes.
+        _real_handoff = bool(os.environ.get("GT_HOST_GRAPH_DB", "").strip())
+        _fail = (_gv != "GRAPH_VALID") if _real_handoff else (_gv in _CONTENT_FAIL)
+        if _fail:
             return tracker.fail("graph_cert", "GRAPH_CERT_INVALID",
                                 f"graph_certificate verdict={_gv} under GT_REQUIRE_GRAPH_VALID=1 "
-                                "— refusing the paid agent run on a thin/broken graph (content gate)")
+                                f"(real_handoff={_real_handoff}) — refusing the paid agent run on a "
+                                "non-valid graph")
     tracker.complete("graph_cert", path=cert_graph)
 
     # 4. foundational gates (emits foundational_gate_report.json + embedder_certificate.json via run_v74)
