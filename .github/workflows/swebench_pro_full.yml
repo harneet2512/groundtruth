@@ -787,8 +787,10 @@ jobs:
           ISSUE_TEXT=$(cat "$PRO_ISSUE")
           echo "[GT_META] issue text from: $PRO_ISSUE (${#ISSUE_TEXT} chars)"
 
-          # Write the pier yaml config for mini-swe-agent (it reads this inside the container)
+          # Write the config + issue text to the writable gt_out mount (not ro /opt/gt)
           cp artifact_deepswe/gt_integration/deepswe_gt_pier.yaml /tmp/gt_inject/opt/gt/agent_config.yaml
+          # Write issue text to a file the container can read
+          echo "$ISSUE_TEXT" > "${HOST_GT_OUT}/issue.txt"
 
           # Model-specific env vars for inside the container
           MODEL_ENV=""
@@ -819,30 +821,46 @@ jobs:
             $MODEL_ENV \
             --entrypoint "" \
             "$_GHCR_IMG" \
-            bash -c "
+            bash -c '
               set -e
-              # Find repo root
-              cd /app 2>/dev/null || cd /testbed 2>/dev/null || cd /workspace 2>/dev/null || true
-              REPO_ROOT=\$(pwd)
-              echo \"\$REPO_ROOT\" > /opt/gt/gt_root.txt 2>/dev/null || echo \"\$REPO_ROOT\" > /tmp/gt_root.txt
+              # Find repo root (/testbed for SWE-bench images, /app for others)
+              cd /testbed 2>/dev/null || cd /app 2>/dev/null || cd /workspace 2>/dev/null || true
+              REPO_ROOT=$(pwd)
+              echo "$REPO_ROOT" > /tmp/gt_root.txt
+              export GT_ROOT_FILE=/tmp/gt_root.txt
+              echo "[GT] repo root: $REPO_ROOT"
 
-              # Install mini-swe-agent if not present
+              # Install mini-swe-agent (not in task images — they are bare repos)
+              echo "[GT] installing mini-swe-agent..."
+              pip install --quiet datacurve-pier 2>/dev/null || pip install --quiet mini-swe-agent 2>/dev/null || {
+                # Fallback: try uv
+                curl -LsSf https://astral.sh/uv/install.sh 2>/dev/null | sh 2>/dev/null
+                export PATH="$HOME/.local/bin:$PATH"
+                uv tool install mini-swe-agent 2>/dev/null || uv pip install --system mini-swe-agent 2>/dev/null
+              }
+              # Verify installation
               if ! command -v mini-swe-agent >/dev/null 2>&1; then
-                pip install mini-swe-agent 2>/dev/null || pip install datacurve-mini-swe-agent 2>/dev/null || true
+                # Try finding it in common locations
+                export PATH="$HOME/.local/bin:/root/.local/bin:$PATH"
+                if ! command -v mini-swe-agent >/dev/null 2>&1; then
+                  echo "FATAL: mini-swe-agent not found after install"
+                  exit 1
+                fi
               fi
+              echo "[GT] mini-swe-agent installed: $(command -v mini-swe-agent)"
 
-              # Apply GT patch (the monkey-patch that hooks file ops)
+              # Apply GT patch (monkey-patches LocalEnvironment to append GT evidence)
               if [ -f /opt/gt/gt_mini_patch.py ]; then
-                python /opt/gt/gt_mini_patch.py --install 2>/dev/null || true
+                python /opt/gt/gt_mini_patch.py --install 2>&1 || echo "WARN: gt_mini_patch install failed"
               fi
 
-              # Run mini-swe-agent with the task
+              # Run the agent with the issue text from the writable mount
               mini-swe-agent \
-                --model '$INPUT_MODEL' \
-                --task '$(echo "$ISSUE_TEXT" | head -c 8000 | sed "s/'/'\\\\''/g")' \
+                --model "'"$INPUT_MODEL"'" \
+                --task "$(cat /gt_out/issue.txt 2>/dev/null || echo Fix the issue in the repository.)" \
                 --config /opt/gt/agent_config.yaml \
                 2>&1
-            " 2>&1 | tee trial_output.log || true
+            ' 2>&1 | tee trial_output.log || true
           AGENT_RC=${PIPESTATUS[0]}
           set -e
           echo "=== Pro Trial complete (agent rc=$AGENT_RC) ===" | tee -a trial_output.log
