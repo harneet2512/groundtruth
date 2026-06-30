@@ -84,10 +84,12 @@ env:
   GT_FORCE_ONNX_EMBEDDER: "1"
   GT_REQUIRE_EMBEDDER: "1"
   GT_REQUIRE_LSP: "1"
-  # Blocker 3: a non-GRAPH_VALID graph cert (thin/broken graph, persistence-invariant
-  # GRAPH_FAIL_DEPTH_INCOMPLETE, source-coverage gap) FAILS the proof -> the agent gate
-  # (proof_status != ok) refuses the paid run. No more running blind on a false map.
-  GT_REQUIRE_GRAPH_VALID: "1"
+  # PRODUCT RULE: NEVER refuse a task for GT-quality reasons. A thin/broken graph means GT has
+  # LESS to offer (correct-or-quiet) — the agent still has the full real repo + self-localizes, so
+  # we run BEST-EFFORT. The graph_certificate verdict is still RECORDED (telemetry / honest
+  # attribution: we know it was thin, we just don't refuse the task). DISARMED (=0): the cert is
+  # informational, never a gate. element-web etc. RUN, not skipped.
+  GT_REQUIRE_GRAPH_VALID: "0"
   # Blocker 2: a substrate whose BAKED build-commit != this run's checkout commit ABORTS
   # (stale-bake guard). Makes Blocker 1 self-enforcing: a forgotten rebuild fails closed
   # instead of silently running old localizer/depth code.

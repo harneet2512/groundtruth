@@ -625,12 +625,16 @@ if [ "$PROOF_RC" -ne 0 ]; then
   # This closes the line-619 laundering that previously overrode EMBEDDER_USAGE_FAIL /
   # GT_INDEX_FAIL / GRAPH_CERT_INVALID / missing-brief to ok. The degraded-proceed path is
   # kept ONLY for non-fail-closed iteration runs.
-  if [ "${GT_REQUIRE_FULL_STACK:-0}" = "1" ] || [ "${GT_REQUIRE_GRAPH_VALID:-0}" = "1" ]; then
-    echo "::error::gt-run-proof exited $PROOF_RC under fail-closed (FULL_STACK/GRAPH_VALID) — task FAILS (not degraded); paid agent refused" | tee -a trial_output.log
+  # PRODUCT RULE: never refuse a task for GT-quality. A degraded/thin proof -> agent runs BEST-EFFORT
+  # (GT correct-or-quiet, cert recorded for honest attribution). The ONLY hard abort is a LEGITIMACY
+  # breach: a commit-parity mismatch means the proof ran STALE code, so results would be attributed
+  # to the wrong commit. Everything else (thin graph, degraded LSP/embedder/index) proceeds best-effort.
+  if grep -q "COMMIT_PARITY" /tmp/gt/proof_failure.json 2>/dev/null; then
+    echo "::error::gt-run-proof failed on COMMIT_PARITY (stale code, legitimacy) — task FAILS" | tee -a trial_output.log
     # proof_status stays 'failed' (written above); do not override.
   else
-    echo "::warning::gt-run-proof exited $PROOF_RC — trial will proceed with degraded GT (correct-or-quiet)"
-    write_proof_status ok PROOF_DEGRADED "gt-run-proof exited $PROOF_RC but agent trial proceeds"
+    echo "::warning::gt-run-proof exited $PROOF_RC — trial proceeds BEST-EFFORT with degraded GT (correct-or-quiet; never refuse a task for quality)"
+    write_proof_status ok PROOF_DEGRADED "gt-run-proof exited $PROOF_RC but agent trial proceeds best-effort"
   fi
 else
   docker rm -f gtsrc 2>/dev/null || true

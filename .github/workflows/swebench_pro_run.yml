@@ -44,7 +44,7 @@ env:
   GT_FORCE_ONNX_EMBEDDER: "1"
   GT_REQUIRE_EMBEDDER: "1"
   GT_REQUIRE_LSP: "1"
-  GT_REQUIRE_GRAPH_VALID: "1"      # Blocker 3: non-GRAPH_VALID cert fails the proof (already || exit 1 here)
+  GT_REQUIRE_GRAPH_VALID: "0"      # PRODUCT RULE: never refuse a task for GT-quality; thin graph -> best-effort, cert RECORDED (telemetry), not a gate
   GT_REQUIRE_COMMIT_PARITY: "1"    # Blocker 2: baked build-commit != run commit -> abort (stale-bake guard)
   GT_REQUIRE_PARSE_RATE: "0.2"     # H8: catastrophic parse-floor (measured 100% parse; 0.2=80pp margin, >=20-file repos)
   GT_FORBID_PREBUILT_GRAPH: "1"
@@ -236,14 +236,22 @@ jobs:
             -e GT_HOST_GRAPH_DB=/gt_artifacts/graph.db \
             -e GT_HOST_SRC_ROOT=/work \
             -e GT_ISSUE_FILE=/issue.txt \
-            -e GT_REQUIRE_GRAPH_VALID="${GT_REQUIRE_GRAPH_VALID:-1}" \
+            -e GT_REQUIRE_GRAPH_VALID="${GT_REQUIRE_GRAPH_VALID:-0}" \
             -e GT_REQUIRE_COMMIT_PARITY="${GT_REQUIRE_COMMIT_PARITY:-1}" \
             -e GT_REQUIRE_PARSE_RATE="${GT_REQUIRE_PARSE_RATE:-0.2}" \
             -e GT_GIT_COMMIT="$GITHUB_SHA" \
             -e GT_SUBSTRATE_DIGEST="$DIGEST" \
             "$DIGEST" \
-            gt-run-proof --source-root /work --out /gt_artifacts \
-            || { echo "::error::substrate proof failed"; exit 1; }
+            gt-run-proof --source-root /work --out /gt_artifacts; PROOF_RC=$?
+          # PRODUCT RULE: never refuse a task for GT-quality. A degraded/thin proof -> agent runs
+          # BEST-EFFORT (GT correct-or-quiet, cert recorded). The ONLY hard abort is a LEGITIMACY
+          # breach (commit-parity mismatch = ran STALE code -> results would be mis-attributed).
+          if [ "$PROOF_RC" -ne 0 ]; then
+            if grep -q "COMMIT_PARITY" "$GT_CERT_DIR/proof_failure.json" 2>/dev/null; then
+              echo "::error::substrate proof failed on COMMIT_PARITY (stale code, legitimacy) — abort"; exit 1
+            fi
+            echo "::warning::gt-run-proof rc=$PROOF_RC — agent proceeds BEST-EFFORT with degraded GT (never refuse a task for quality)"
+          fi
           echo "GT_CERT_DIR=$GT_CERT_DIR" >> "$GITHUB_ENV"
           echo "GT_HOST_GRAPH_DB=$GT_CERT_DIR/graph.db" >> "$GITHUB_ENV"
           echo "GT_HOST_SRC_ROOT=$TESTBED" >> "$GITHUB_ENV"
