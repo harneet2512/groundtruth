@@ -563,7 +563,6 @@ if [ "$HARNESS" = "deepswe" ]; then
       -e GT_GIT_COMMIT="${GT_GITHUB_SHA}" \
       -e GT_REQUIRE_COMMIT_PARITY="${GT_REQUIRE_COMMIT_PARITY:-0}" \
       -e GT_REQUIRE_GRAPH_VALID="${GT_REQUIRE_GRAPH_VALID:-0}" \
-      -e GT_REQUIRE_PARSE_RATE="${GT_REQUIRE_PARSE_RATE:-0.2}" \
       -e GT_SUBSTRATE_DIGEST="$GT_SUBSTRATE_DIGEST" \
       -e GT_TASK_REPO_COMMIT="$TASK_REPO_COMMIT" \
       "$GT_SUBSTRATE_DIGEST" gt-run-proof --source-root /work --out /gt_artifacts 2>&1 | tee /tmp/gt/proof_output.log || PROOF_RC=$?
@@ -589,7 +588,6 @@ else
       -e GT_GIT_COMMIT="${GT_GITHUB_SHA}" \
       -e GT_REQUIRE_COMMIT_PARITY="${GT_REQUIRE_COMMIT_PARITY:-0}" \
       -e GT_REQUIRE_GRAPH_VALID="${GT_REQUIRE_GRAPH_VALID:-0}" \
-      -e GT_REQUIRE_PARSE_RATE="${GT_REQUIRE_PARSE_RATE:-0.2}" \
       -e GT_SUBSTRATE_DIGEST="$GT_SUBSTRATE_DIGEST" \
       -e GT_TASK_REPO_COMMIT="$TASK_REPO_COMMIT" \
       -e PATH="/opt/gt/bin:/opt/gt/node/bin:/opt/gt/python/bin:/opt/gt/jre/bin:/opt/gt/go/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \

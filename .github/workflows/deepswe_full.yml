@@ -94,10 +94,11 @@ env:
   # (stale-bake guard). Makes Blocker 1 self-enforcing: a forgotten rebuild fails closed
   # instead of silently running old localizer/depth code.
   GT_REQUIRE_COMMIT_PARITY: "1"
-  # H8: catastrophic parse-rate floor (proof-sweep measured 100% parse on every sampled task;
-  # 0.2 = 80pp margin below the observed minimum, applies only to >=20-file repos per main.go).
-  # Insurance against a total tree-sitter collapse; the absolute 0-parse case is already fatal.
-  GT_REQUIRE_PARSE_RATE: "0.2"
+  # H8 DISARMED (best-effort rule): GT_REQUIRE_PARSE_RATE would log.Fatalf the indexer on a low
+  # fractional parse rate (main.go:241), THROWING AWAY the partial graph it could produce — that
+  # refuses GT help on a hard repo. Under "never refuse / best of effort" we keep whatever partial
+  # graph parses. The parse-failure LOGGING (Parsed X/Y + failSample) + the 0-parse DETECTION
+  # (main.go:234, unconditional) stay — that is the detect/log/identify hardening, not a refusal.
   GT_RRF_FUSION: "on"   # brief fusion parity with Pro: RRF (bias-free) + exact-path floor (53/60)
   GT_LOC_FUSION_V2: "1"        # BAKED: independent-surface RRF localizer (generalizing: OSS-60 +2, held-out +1, 0 regression)
   GT_LOC_BEHAVIOR_LEAD: "0"    # BAKED: behavior-gate OFF (it suppressed the held-out lift)

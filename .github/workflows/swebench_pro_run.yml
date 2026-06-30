@@ -46,7 +46,8 @@ env:
   GT_REQUIRE_LSP: "1"
   GT_REQUIRE_GRAPH_VALID: "0"      # PRODUCT RULE: never refuse a task for GT-quality; thin graph -> best-effort, cert RECORDED (telemetry), not a gate
   GT_REQUIRE_COMMIT_PARITY: "1"    # Blocker 2: baked build-commit != run commit -> abort (stale-bake guard)
-  GT_REQUIRE_PARSE_RATE: "0.2"     # H8: catastrophic parse-floor (measured 100% parse; 0.2=80pp margin, >=20-file repos)
+  # H8 DISARMED (best-effort): GT_REQUIRE_PARSE_RATE aborts gt-index on low parse -> throws away the
+  # partial graph -> refuses GT help. Keep whatever parses; 0-parse detection + logging stay (main.go).
   GT_FORBID_PREBUILT_GRAPH: "1"
   GT_PROOF_MODE: "1"
   GT_CONTAINERIZED: "1"
@@ -238,7 +239,6 @@ jobs:
             -e GT_ISSUE_FILE=/issue.txt \
             -e GT_REQUIRE_GRAPH_VALID="${GT_REQUIRE_GRAPH_VALID:-0}" \
             -e GT_REQUIRE_COMMIT_PARITY="${GT_REQUIRE_COMMIT_PARITY:-1}" \
-            -e GT_REQUIRE_PARSE_RATE="${GT_REQUIRE_PARSE_RATE:-0.2}" \
             -e GT_GIT_COMMIT="$GITHUB_SHA" \
             -e GT_SUBSTRATE_DIGEST="$DIGEST" \
             "$DIGEST" \
