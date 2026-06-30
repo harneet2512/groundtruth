@@ -907,22 +907,59 @@ jobs:
           RUN_SCRIPT="swebench-pro-os/run_scripts/${TASK_ID}/run_script.sh"
           mkdir -p trial_results
 
-          # Extract the agent's patch from pier jobs dir (same location as DeepSWE).
-          PATCH_FILE=$(find jobs -name "patch.diff" -o -name "*.patch" 2>/dev/null | head -1 || true)
+          # Extract the agent's patch. Three sources, in priority order:
+          # 1. trial_output.log after COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT (direct container)
+          # 2. jobs/ dir patch.diff (pier path, legacy)
+          # 3. preds.json model_patch field
+          PATCH_FILE=""
+          # Source 1: extract from trial log (agent prints patch after COMPLETE_TASK marker)
+          if [ -f trial_output.log ]; then
+            python3 -c "
+import sys
+log = open('trial_output.log', encoding='utf-8', errors='replace').read()
+marker = 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT'
+idx = log.rfind(marker)
+if idx < 0:
+    sys.exit(1)
+after = log[idx + len(marker):]
+# The patch starts after the marker — find the diff content
+lines = after.strip().split('\n')
+patch_lines = []
+in_diff = False
+for line in lines:
+    if line.startswith('diff --git') or line.startswith('---') or line.startswith('+++') or line.startswith('@@') or line.startswith('+') or line.startswith('-') or line.startswith(' ') or line.startswith('index '):
+        in_diff = True
+        patch_lines.append(line)
+    elif in_diff and line.strip() == '':
+        patch_lines.append(line)
+    elif in_diff and line.startswith('=== Pro Trial'):
+        break
+    elif in_diff:
+        patch_lines.append(line)
+if patch_lines and len('\n'.join(patch_lines).strip()) > 10:
+    with open('/tmp/pro_patch.diff', 'w') as f:
+        f.write('\n'.join(patch_lines) + '\n')
+    print(f'extracted {len(patch_lines)} lines from trial log')
+else:
+    sys.exit(1)
+" 2>/dev/null && PATCH_FILE=/tmp/pro_patch.diff
+          fi
+          # Source 2: pier jobs dir (legacy)
           if [ -z "$PATCH_FILE" ]; then
-            # Try preds.json output
+            PATCH_FILE=$(find jobs -name "patch.diff" -o -name "*.patch" 2>/dev/null | head -1 || true)
+          fi
+          # Source 3: preds.json
+          if [ -z "$PATCH_FILE" ]; then
             PATCH_TEXT=$(python3 -c "
-          import glob, json, sys
-          for f in glob.glob('jobs/**/*.json', recursive=True):
-              try:
-                  d = json.load(open(f))
-                  p = d.get('model_patch') or d.get('patch') or ''
-                  if p and len(p.strip()) > 5:
-                      print(p)
-                      sys.exit(0)
-              except Exception:
-                  pass
-          " 2>/dev/null || true)
+import glob, json, sys
+for f in glob.glob('jobs/**/*.json', recursive=True):
+    try:
+        d = json.load(open(f))
+        p = d.get('model_patch') or d.get('patch') or ''
+        if p and len(p.strip()) > 5:
+            print(p); sys.exit(0)
+    except: pass
+" 2>/dev/null || true)
             if [ -n "$PATCH_TEXT" ]; then
               echo "$PATCH_TEXT" > /tmp/pro_patch.diff
               PATCH_FILE=/tmp/pro_patch.diff
