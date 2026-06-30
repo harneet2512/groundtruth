@@ -46,6 +46,7 @@ env:
   GT_REQUIRE_LSP: "1"
   GT_REQUIRE_GRAPH_VALID: "1"      # Blocker 3: non-GRAPH_VALID cert fails the proof (already || exit 1 here)
   GT_REQUIRE_COMMIT_PARITY: "1"    # Blocker 2: baked build-commit != run commit -> abort (stale-bake guard)
+  GT_REQUIRE_PARSE_RATE: "0.2"     # H8: catastrophic parse-floor (measured 100% parse; 0.2=80pp margin, >=20-file repos)
   GT_FORBID_PREBUILT_GRAPH: "1"
   GT_PROOF_MODE: "1"
   GT_CONTAINERIZED: "1"
@@ -237,6 +238,7 @@ jobs:
             -e GT_ISSUE_FILE=/issue.txt \
             -e GT_REQUIRE_GRAPH_VALID="${GT_REQUIRE_GRAPH_VALID:-1}" \
             -e GT_REQUIRE_COMMIT_PARITY="${GT_REQUIRE_COMMIT_PARITY:-1}" \
+            -e GT_REQUIRE_PARSE_RATE="${GT_REQUIRE_PARSE_RATE:-0.2}" \
             -e GT_GIT_COMMIT="$GITHUB_SHA" \
             -e GT_SUBSTRATE_DIGEST="$DIGEST" \
             "$DIGEST" \
