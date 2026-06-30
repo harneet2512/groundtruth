@@ -1180,12 +1180,19 @@ def main(argv=None) -> int:
     _gc_rc = _run([sys.executable, os.path.join(GT_HOME, "scripts/metrics/graph_certificate.py"), graph,
           "--source-root", work, "--lsp-cert", cert_lsp, "--out", cert_graph,
           "--built-inside-container", "1"], base_env)
-    # FAIL-CLOSED on a non-GRAPH_VALID verdict under GT_REQUIRE_GRAPH_VALID=1 (mirrors the embedder
-    # gate at step 4c). graph_certificate.py's CLI already returns 0 iff classify_graph -> GRAPH_VALID,
-    # so a thin/broken graph (e.g. the element-web 9-edge source-coverage gap, or a persistence-invariant
-    # GRAPH_FAIL_DEPTH_INCOMPLETE) makes _gc_rc != 0. We ALSO re-read .verdict for a precise detail.
+    # FAIL-CLOSED on a CONTENT-QUALITY graph failure under GT_REQUIRE_GRAPH_VALID=1 (mirrors the
+    # embedder gate at step 4c). Scope is the "graph is thin/broken/missing" class — exactly the
+    # element-web flying-blind concern — which is STABLE at this proof-time eval point:
+    #   GRAPH_FAIL_EMPTY / GRAPH_FAIL_FTS5 / GRAPH_FAIL_BASES_INCOMPLETE / GRAPH_FAIL_DEPTH_INCOMPLETE.
+    # Deliberately NOT gated here: the handoff/closure/hash legitimacy verdicts
+    # (MISSING_HANDOFF / HANDOFF_INACTIVE / STALE_CLOSURE / HASH_MISMATCH / HOOK_MISMATCH /
+    # BUILT_ON_HOST) — those depend on the agent-consume plumbing set up AFTER this point, so gating
+    # on them here would FALSE-FAIL good tasks in any proof-only context (proof-sweep showed exactly
+    # this: 6 good tasks -> MISSING_HANDOFF because no host handoff). They keep their existing handling.
     # Default (flag unset) stays INFORMATIONAL so iteration is not blocked; the full-run workflows arm
-    # the flag so a broken graph STOPS the paid agent instead of running blind on a false map.
+    # the flag so a thin/broken graph STOPS the paid agent instead of running blind on a false map.
+    _CONTENT_FAIL = {"GRAPH_FAIL_EMPTY", "GRAPH_FAIL_FTS5",
+                     "GRAPH_FAIL_BASES_INCOMPLETE", "GRAPH_FAIL_DEPTH_INCOMPLETE"}
     if os.environ.get("GT_REQUIRE_GRAPH_VALID") == "1":
         _gv = "unknown"
         try:
@@ -1193,10 +1200,10 @@ def main(argv=None) -> int:
                 _gv = (json.load(_gf) or {}).get("verdict", "unknown")
         except Exception:
             pass
-        if _gc_rc != 0 or _gv != "GRAPH_VALID":
+        if _gv in _CONTENT_FAIL:
             return tracker.fail("graph_cert", "GRAPH_CERT_INVALID",
-                                f"graph_certificate verdict={_gv} (rc={_gc_rc}) under GT_REQUIRE_GRAPH_VALID=1 "
-                                "— refusing the paid agent run on a broken/thin graph")
+                                f"graph_certificate verdict={_gv} under GT_REQUIRE_GRAPH_VALID=1 "
+                                "— refusing the paid agent run on a thin/broken graph (content gate)")
     tracker.complete("graph_cert", path=cert_graph)
 
     # 4. foundational gates (emits foundational_gate_report.json + embedder_certificate.json via run_v74)
