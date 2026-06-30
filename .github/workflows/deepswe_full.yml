@@ -84,6 +84,14 @@ env:
   GT_FORCE_ONNX_EMBEDDER: "1"
   GT_REQUIRE_EMBEDDER: "1"
   GT_REQUIRE_LSP: "1"
+  # Blocker 3: a non-GRAPH_VALID graph cert (thin/broken graph, persistence-invariant
+  # GRAPH_FAIL_DEPTH_INCOMPLETE, source-coverage gap) FAILS the proof -> the agent gate
+  # (proof_status != ok) refuses the paid run. No more running blind on a false map.
+  GT_REQUIRE_GRAPH_VALID: "1"
+  # Blocker 2: a substrate whose BAKED build-commit != this run's checkout commit ABORTS
+  # (stale-bake guard). Makes Blocker 1 self-enforcing: a forgotten rebuild fails closed
+  # instead of silently running old localizer/depth code.
+  GT_REQUIRE_COMMIT_PARITY: "1"
   GT_RRF_FUSION: "on"   # brief fusion parity with Pro: RRF (bias-free) + exact-path floor (53/60)
   GT_LOC_FUSION_V2: "1"        # BAKED: independent-surface RRF localizer (generalizing: OSS-60 +2, held-out +1, 0 regression)
   GT_LOC_BEHAVIOR_LEAD: "0"    # BAKED: behavior-gate OFF (it suppressed the held-out lift)

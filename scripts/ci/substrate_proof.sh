@@ -561,6 +561,8 @@ if [ "$HARNESS" = "deepswe" ]; then
       -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 -e HF_DATASETS_OFFLINE=1 \
       -e GT_GATES_DELIVER_ALWAYS="${GT_GATES_DELIVER_ALWAYS:-0}" \
       -e GT_GIT_COMMIT="${GT_GITHUB_SHA}" \
+      -e GT_REQUIRE_COMMIT_PARITY="${GT_REQUIRE_COMMIT_PARITY:-0}" \
+      -e GT_REQUIRE_GRAPH_VALID="${GT_REQUIRE_GRAPH_VALID:-0}" \
       -e GT_SUBSTRATE_DIGEST="$GT_SUBSTRATE_DIGEST" \
       -e GT_TASK_REPO_COMMIT="$TASK_REPO_COMMIT" \
       "$GT_SUBSTRATE_DIGEST" gt-run-proof --source-root /work --out /gt_artifacts 2>&1 | tee /tmp/gt/proof_output.log || PROOF_RC=$?
@@ -584,6 +586,8 @@ else
       -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 -e HF_DATASETS_OFFLINE=1 \
       -e GT_GATES_DELIVER_ALWAYS="${GT_GATES_DELIVER_ALWAYS:-0}" \
       -e GT_GIT_COMMIT="${GT_GITHUB_SHA}" \
+      -e GT_REQUIRE_COMMIT_PARITY="${GT_REQUIRE_COMMIT_PARITY:-0}" \
+      -e GT_REQUIRE_GRAPH_VALID="${GT_REQUIRE_GRAPH_VALID:-0}" \
       -e GT_SUBSTRATE_DIGEST="$GT_SUBSTRATE_DIGEST" \
       -e GT_TASK_REPO_COMMIT="$TASK_REPO_COMMIT" \
       -e PATH="/opt/gt/bin:/opt/gt/node/bin:/opt/gt/python/bin:/opt/gt/jre/bin:/opt/gt/go/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
@@ -612,11 +616,20 @@ if [ "$PROOF_RC" -ne 0 ]; then
     fi
   fi
   docker rm -f gtsrc 2>/dev/null || true
-  echo "::warning::gt-run-proof exited $PROOF_RC — trial will proceed with degraded GT (correct-or-quiet)"
-  # Override to ok — a proof failure means degraded GT, not "can't run the agent."
-  # The agent still has its instruction and can self-localize. GT layers suppress
-  # when certs are missing (correct-or-quiet by design).
-  write_proof_status ok PROOF_DEGRADED "gt-run-proof exited $PROOF_RC but agent trial proceeds"
+  # FAIL-CLOSED under the master gate. On a paid full run (GT_REQUIRE_FULL_STACK=1 or
+  # GT_REQUIRE_GRAPH_VALID=1) a proof failure means the substrate is NOT real — do NOT
+  # launder it to ok. Leaving proof_status=failed makes the agent gate (PROOF_STATE != ok,
+  # deepswe_full.yml) refuse the paid trial, so we never spend money on a false/thin map.
+  # This closes the line-619 laundering that previously overrode EMBEDDER_USAGE_FAIL /
+  # GT_INDEX_FAIL / GRAPH_CERT_INVALID / missing-brief to ok. The degraded-proceed path is
+  # kept ONLY for non-fail-closed iteration runs.
+  if [ "${GT_REQUIRE_FULL_STACK:-0}" = "1" ] || [ "${GT_REQUIRE_GRAPH_VALID:-0}" = "1" ]; then
+    echo "::error::gt-run-proof exited $PROOF_RC under fail-closed (FULL_STACK/GRAPH_VALID) — task FAILS (not degraded); paid agent refused" | tee -a trial_output.log
+    # proof_status stays 'failed' (written above); do not override.
+  else
+    echo "::warning::gt-run-proof exited $PROOF_RC — trial will proceed with degraded GT (correct-or-quiet)"
+    write_proof_status ok PROOF_DEGRADED "gt-run-proof exited $PROOF_RC but agent trial proceeds"
+  fi
 else
   docker rm -f gtsrc 2>/dev/null || true
 fi

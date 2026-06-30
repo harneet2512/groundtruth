@@ -1177,9 +1177,26 @@ def main(argv=None) -> int:
     tracker.complete("lsp_pass", lang_verdicts=lang_verdicts)
 
     # 3. graph certificate
-    _run([sys.executable, os.path.join(GT_HOME, "scripts/metrics/graph_certificate.py"), graph,
+    _gc_rc = _run([sys.executable, os.path.join(GT_HOME, "scripts/metrics/graph_certificate.py"), graph,
           "--source-root", work, "--lsp-cert", cert_lsp, "--out", cert_graph,
           "--built-inside-container", "1"], base_env)
+    # FAIL-CLOSED on a non-GRAPH_VALID verdict under GT_REQUIRE_GRAPH_VALID=1 (mirrors the embedder
+    # gate at step 4c). graph_certificate.py's CLI already returns 0 iff classify_graph -> GRAPH_VALID,
+    # so a thin/broken graph (e.g. the element-web 9-edge source-coverage gap, or a persistence-invariant
+    # GRAPH_FAIL_DEPTH_INCOMPLETE) makes _gc_rc != 0. We ALSO re-read .verdict for a precise detail.
+    # Default (flag unset) stays INFORMATIONAL so iteration is not blocked; the full-run workflows arm
+    # the flag so a broken graph STOPS the paid agent instead of running blind on a false map.
+    if os.environ.get("GT_REQUIRE_GRAPH_VALID") == "1":
+        _gv = "unknown"
+        try:
+            with open(cert_graph, encoding="utf-8") as _gf:
+                _gv = (json.load(_gf) or {}).get("verdict", "unknown")
+        except Exception:
+            pass
+        if _gc_rc != 0 or _gv != "GRAPH_VALID":
+            return tracker.fail("graph_cert", "GRAPH_CERT_INVALID",
+                                f"graph_certificate verdict={_gv} (rc={_gc_rc}) under GT_REQUIRE_GRAPH_VALID=1 "
+                                "— refusing the paid agent run on a broken/thin graph")
     tracker.complete("graph_cert", path=cert_graph)
 
     # 4. foundational gates (emits foundational_gate_report.json + embedder_certificate.json via run_v74)
