@@ -853,12 +853,7 @@ jobs:
 
               # Write mini-swe-agent config to skip the interactive setup wizard
               mkdir -p /root/.config/mini-swe-agent
-              cat > /root/.config/mini-swe-agent/.env << MSWECFG
-model='"$INPUT_MODEL"'
-DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
-OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
-OPENAI_API_KEY=${OPENAI_API_KEY:-}
-MSWECFG
+              printf "model=%s\nDEEPSEEK_API_KEY=%s\nOPENROUTER_API_KEY=%s\nOPENAI_API_KEY=%s\n" "'"$INPUT_MODEL"'" "${DEEPSEEK_API_KEY:-}" "${OPENROUTER_API_KEY:-}" "${OPENAI_API_KEY:-}" > /root/.config/mini-swe-agent/.env
               echo "[GT] mini-swe-agent config written"
 
               # Apply GT patch (monkey-patches LocalEnvironment to append GT evidence)
