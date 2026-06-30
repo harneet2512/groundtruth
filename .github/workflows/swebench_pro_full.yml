@@ -96,7 +96,7 @@ env:
   GT_RUNTIME_STRATEGY: "unified_substrate"
   GT_LSP_READY_BUDGET_S_OVERRIDE: ${{ vars.GT_LSP_READY_BUDGET_S_OVERRIDE }}
   # Verification horizon (step budget — same as DeepSWE).
-  GT_STEP_LIMIT: "0"
+  GT_STEP_LIMIT: "300"
   GT_SELF_VERIFY_ATTEMPTS: "2"
   GT_VERIFICATION_CYCLE_COST: "25"
   # Model routing — per-model API keys are set in the trial step's model-aware
@@ -163,9 +163,8 @@ jobs:
           txt = open(cfg, encoding="utf-8").read()
           sl = re.search(r"^\s*step_limit:\s*([0-9]+)\s*$", txt, re.M)
           cl = re.search(r"^\s*cost_limit:\s*([0-9.]+)\s*$", txt, re.M)
-          if not sl:
-              sys.exit(f"FATAL: agent.step_limit missing in {cfg}")
-          # step_limit=0 is valid (unlimited — cost_limit is the real cap)
+          if not sl or int(sl.group(1)) <= 0:
+              sys.exit(f"FATAL: agent.step_limit missing/zero in {cfg}")
           if not cl or float(cl.group(1)) <= 0:
               sys.exit(f"FATAL: agent.cost_limit missing/zero in {cfg}")
           print(f"cost guard OK: step_limit={sl.group(1)} cost_limit=${cl.group(1)}")
