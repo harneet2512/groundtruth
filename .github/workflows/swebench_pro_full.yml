@@ -427,8 +427,6 @@ jobs:
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
       fail-fast: false
       max-parallel: ${{ fromJson(inputs.max_parallel) }}
-    env:
-      TOKENROUTER_API_KEY: ${{ secrets.TOKENROUTER_API_KEY }}
     steps:
       - name: Checkout GroundTruth
         uses: actions/checkout@v4
@@ -442,11 +440,26 @@ jobs:
       - name: Preflight checks (fail-fast on infra, warn on quality)
         env:
           TOKENROUTER_API_KEY: ${{ secrets.TOKENROUTER_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         shell: bash
         run: |
           set -e
           echo "=== INFRA PREFLIGHT (fail-fast) ==="
-          [ "${#TOKENROUTER_API_KEY}" -gt 10 ] || { echo "::error::TOKENROUTER_API_KEY missing or too short"; exit 1; }
+          INPUT_MODEL="${{ inputs.model }}"
+          # Model-aware API key check: only require the key for the provider we're using
+          if echo "$INPUT_MODEL" | grep -qiE "deepseek"; then
+            [ "${#DEEPSEEK_API_KEY}" -gt 10 ] || { echo "::error::DEEPSEEK_API_KEY missing (model=$INPUT_MODEL)"; exit 1; }
+            echo "  DEEPSEEK_API_KEY present (${#DEEPSEEK_API_KEY} chars)"
+          elif echo "$INPUT_MODEL" | grep -qiE "openrouter"; then
+            [ "${#OPENROUTER_API_KEY}" -gt 10 ] || { echo "::error::OPENROUTER_API_KEY missing (model=$INPUT_MODEL)"; exit 1; }
+            echo "  OPENROUTER_API_KEY present (${#OPENROUTER_API_KEY} chars)"
+          elif echo "$INPUT_MODEL" | grep -qiE "minimax|tokenrouter"; then
+            [ "${#TOKENROUTER_API_KEY}" -gt 10 ] || { echo "::error::TOKENROUTER_API_KEY missing (model=$INPUT_MODEL)"; exit 1; }
+            echo "  TOKENROUTER_API_KEY present (${#TOKENROUTER_API_KEY} chars)"
+          else
+            echo "  model=$INPUT_MODEL — no specific API key check (will use litellm auto-detection)"
+          fi
           echo "  TOKENROUTER_API_KEY present (${#TOKENROUTER_API_KEY} chars)"
           docker --version 2>/dev/null || true
           echo "  Docker CLI pre-check done"
@@ -732,6 +745,10 @@ jobs:
             export DEEPSEEK_API_KEY="${{ secrets.DEEPSEEK_API_KEY }}"
             GT_AE_ARGS+=(--ae "DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}")
             echo "=== Model routed via DeepSeek native: $INPUT_MODEL ==="
+          elif echo "$INPUT_MODEL" | grep -qiE "openrouter/"; then
+            export OPENROUTER_API_KEY="${{ secrets.OPENROUTER_API_KEY }}"
+            GT_AE_ARGS+=(--ae "OPENROUTER_API_KEY=${OPENROUTER_API_KEY}")
+            echo "=== Model routed via OpenRouter: $INPUT_MODEL ==="
           fi
 
           # GHCR-CACHE-ONLY (requirement): the Pro task image comes from the GHCR mirror
@@ -798,7 +815,7 @@ jobs:
             --ae GT_HOOK_FIRE_COUNTS="${GT_C_OUT}/gt_hook_fire_counts.json" \
             "${GT_AE_ARGS[@]}" \
             --ak config_file=artifact_deepswe/gt_integration/deepswe_gt_pier.yaml \
-            --ak task="$(cat /tmp/issue.txt 2>/dev/null || echo 'Fix issue in repository')" \
+            --ak task="$(cat "$PRO_TASK_DIR/instruction.md" 2>/dev/null || cat /tmp/issue.txt 2>/dev/null || echo 'Fix issue in repository')" \
             --ak image="ghcr.io/hbali-stack/sweap-images:${{ matrix.dockerhub_tag }}" \
             2>&1 | tee trial_output.log || true
           PIER_RC=${PIPESTATUS[0]}
