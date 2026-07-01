@@ -41,6 +41,7 @@ package closure
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/harneet2512/groundtruth/gt-index/internal/store"
 )
@@ -191,7 +192,21 @@ func ComputeTransitiveClosure(db *store.DB, edgeType string, maxDepth int, minCo
 		pathMin float64
 	}
 
+	// Determinism: a Go map has randomized range order, so `for src := range adj`
+	// would append closure rows (and thus assign closure-table AUTOINCREMENT ids) in
+	// a different order on every build → a non-byte-deterministic graph.db. Each
+	// source's BFS is fully independent (best/seenRow are per-source or (src,target)-
+	// keyed), so the source order only affects row *insertion order* — sorting the
+	// source ids makes that order, and the persisted table, byte-deterministic. The
+	// inner neighbor iteration (adj[cur.node]) is already deterministic: PASS 2 builds
+	// each adjacency slice in id-order.
+	srcs := make([]int64, 0, len(adj))
 	for src := range adj {
+		srcs = append(srcs, src)
+	}
+	sort.Slice(srcs, func(i, j int) bool { return srcs[i] < srcs[j] })
+
+	for _, src := range srcs {
 		// best[node] = the best (depth, minConf) we have committed for this src.
 		best := make(map[int64]seen)
 		queue := []bfsItem{{node: src, depth: 0, pathMin: 1.0}}

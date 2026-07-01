@@ -495,6 +495,32 @@ func tierFor(conf float64) string {
 	return "SPECULATIVE"
 }
 
+// sortNodeIDsByContent returns ids ordered by (file, startLine, id) using meta — a
+// CONTENT-deterministic order independent of the run-dependent node-ID assignment from the
+// parallel parse. The type-flow rungs pick the FIRST same-named class/function that
+// resolves; with ≥2 same-named candidates the raw nodeIDs[name] slice order is run-
+// dependent, so the pick (and thus graph.db) becomes non-deterministic. This makes the
+// pick content-stable. Mirrors resolveByName / pickBestNameMatchTarget (file,line,id).
+// Fast-path: 0/1 candidates are already deterministic — return as-is (no allocation).
+func sortNodeIDsByContent(ids []int64, meta map[int64]NodeMeta) []int64 {
+	if len(ids) <= 1 {
+		return ids
+	}
+	out := make([]int64, len(ids))
+	copy(out, ids)
+	sort.Slice(out, func(a, b int) bool {
+		ma, mb := meta[out[a]], meta[out[b]]
+		if ma.File != mb.File {
+			return ma.File < mb.File
+		}
+		if ma.StartLine != mb.StartLine {
+			return ma.StartLine < mb.StartLine
+		}
+		return out[a] < out[b]
+	})
+	return out
+}
+
 // sameDirFile reports whether two files live in the same directory (same package,
 // the strongest free provenance signal). Slash-normalized so "/" and "\\" agree.
 func sameDirFile(a, b string) bool {
@@ -1432,7 +1458,27 @@ func Resolve(
 	}
 
 	var resolved []ResolvedCall
-	seen := make(map[edgeKey]bool) // deduplication
+	// KEEP-BEST-CONFIDENCE dedup (replaces the old first-wins `seen` bool guard).
+	// edgeSlot maps a (caller,target,"CALLS") key to its index in `resolved`. putEdge
+	// records rc iff the pair is NEW or rc has STRICTLY higher confidence than the edge
+	// already stored for that pair — so an early LOW-confidence resolution at one call
+	// site (e.g. a cross-file name_match at line 10) never suppresses a LATER higher-
+	// confidence proof of the SAME (caller,target) pair (e.g. a type_flow at line 20).
+	// Ties keep the earlier (priority-ordered, therefore deterministic) resolution.
+	// Mirrors the closure.go bestEdgeConf two-pass. Every CALLS emit in this loop goes
+	// through putEdge, so there is exactly one (best) edge per (caller,target) pair.
+	edgeSlot := make(map[edgeKey]int)
+	putEdge := func(rc ResolvedCall) {
+		key := edgeKey{rc.SourceNodeID, rc.TargetNodeID, "CALLS"}
+		if i, ok := edgeSlot[key]; ok {
+			if rc.Confidence > resolved[i].Confidence {
+				resolved[i] = rc
+			}
+			return
+		}
+		edgeSlot[key] = len(resolved)
+		resolved = append(resolved, rc)
+	}
 
 	for i, call := range allCalls {
 		callerID := callerNodeIDs[i]
@@ -1450,21 +1496,17 @@ func Resolve(
 		if fileNodes, ok := fileNodeIDs[call.File]; ok {
 			if targetIDs, ok := fileNodes[calleeName]; ok && len(targetIDs) == 1 && targetIDs[0] != callerID {
 				targetID := targetIDs[0]
-				key := edgeKey{callerID, targetID, "CALLS"}
-				if !seen[key] {
-					seen[key] = true
-					resolved = append(resolved, ResolvedCall{
-						SourceNodeID:   callerID,
-						TargetNodeID:   targetID,
-						SourceLine:     call.Line,
-						SourceFile:     call.File,
-						Method:         "same_file",
-						Confidence:     1.0,
-						CandidateCount: 1,
-						TrustTier:      tierFor(1.0),
-						EvidenceType:   "ast_call",
-					})
-				}
+				putEdge(ResolvedCall{
+					SourceNodeID:   callerID,
+					TargetNodeID:   targetID,
+					SourceLine:     call.Line,
+					SourceFile:     call.File,
+					Method:         "same_file",
+					Confidence:     1.0,
+					CandidateCount: 1,
+					TrustTier:      tierFor(1.0),
+					EvidenceType:   "ast_call",
+				})
 				continue
 			}
 			// #39: Multiple same-name definitions in this file. Previously this
@@ -1478,23 +1520,19 @@ func Resolve(
 			isUnqualified := call.CalleeQualified == "" || call.CalleeQualified == calleeName
 			if targetIDs, ok := fileNodes[calleeName]; ok && len(targetIDs) > 1 && isUnqualified {
 				if best := pickBestLocalTarget(targetIDs, callerID, metaMap); best != 0 {
-					key := edgeKey{callerID, best, "CALLS"}
-					if !seen[key] {
-						seen[key] = true
-						// 0.6 = CANDIDATE: locality is strong, but WHICH same-named
-						// local definition is the target is not certain → not CERTIFIED.
-						resolved = append(resolved, ResolvedCall{
-							SourceNodeID:   callerID,
-							TargetNodeID:   best,
-							SourceLine:     call.Line,
-							SourceFile:     call.File,
-							Method:         "same_file",
-							Confidence:     0.6,
-							CandidateCount: len(targetIDs),
-							TrustTier:      tierFor(0.6),
-							EvidenceType:   "same_file_ambiguous",
-						})
-					}
+					// 0.6 = CANDIDATE: locality is strong, but WHICH same-named
+					// local definition is the target is not certain → not CERTIFIED.
+					putEdge(ResolvedCall{
+						SourceNodeID:   callerID,
+						TargetNodeID:   best,
+						SourceLine:     call.Line,
+						SourceFile:     call.File,
+						Method:         "same_file",
+						Confidence:     0.6,
+						CandidateCount: len(targetIDs),
+						TrustTier:      tierFor(0.6),
+						EvidenceType:   "same_file_ambiguous",
+					})
 					continue
 				}
 			}
@@ -1580,21 +1618,17 @@ func Resolve(
 					conf = 0.6 // CANDIDATE: import is real, the among-files pick is not certain
 					evidence = "ast_import_ambiguous"
 				}
-				key := edgeKey{callerID, bestTarget, "CALLS"}
-				if !seen[key] {
-					seen[key] = true
-					resolved = append(resolved, ResolvedCall{
-						SourceNodeID:   callerID,
-						TargetNodeID:   bestTarget,
-						SourceLine:     call.Line,
-						SourceFile:     call.File,
-						Method:         "import",
-						Confidence:     conf,
-						CandidateCount: len(importCandidates),
-						TrustTier:      tierFor(conf),
-						EvidenceType:   evidence,
-					})
-				}
+				putEdge(ResolvedCall{
+					SourceNodeID:   callerID,
+					TargetNodeID:   bestTarget,
+					SourceLine:     call.Line,
+					SourceFile:     call.File,
+					Method:         "import",
+					Confidence:     conf,
+					CandidateCount: len(importCandidates),
+					TrustTier:      tierFor(conf),
+					EvidenceType:   evidence,
+				})
 				continue
 			}
 		}
@@ -1627,21 +1661,17 @@ func Resolve(
 								conf = 0.95
 								evidence = "inheritance_chain"
 							}
-							key := edgeKey{callerID, targetID, "CALLS"}
-							if !seen[key] {
-								seen[key] = true
-								resolved = append(resolved, ResolvedCall{
-									SourceNodeID:   callerID,
-									TargetNodeID:   targetID,
-									SourceLine:     call.Line,
-									SourceFile:     call.File,
-									Method:         method,
-									Confidence:     conf,
-									CandidateCount: 1,
-									TrustTier:      tierFor(conf),
-									EvidenceType:   evidence,
-								})
-							}
+							putEdge(ResolvedCall{
+								SourceNodeID:   callerID,
+								TargetNodeID:   targetID,
+								SourceLine:     call.Line,
+								SourceFile:     call.File,
+								Method:         method,
+								Confidence:     conf,
+								CandidateCount: 1,
+								TrustTier:      tierFor(conf),
+								EvidenceType:   evidence,
+							})
 							continue
 						}
 					}
@@ -1700,41 +1730,34 @@ func Resolve(
 								callerImportsFile(call.File, targetFile, importIndex)
 						}
 					}
-					key := edgeKey{callerID, targetID, "CALLS"}
 					if !provenanceOK {
-						if !seen[key] {
-							seen[key] = true
-							// Demote shape mirrors the qualified-unresolved last-chance demote
-							// (conf 0.2, sub-SPECULATIVE) so tierFor agrees and Strategy 2 does
-							// not re-CERTIFY this single candidate at name_match conf 0.9.
-							resolved = append(resolved, ResolvedCall{
-								SourceNodeID:   callerID,
-								TargetNodeID:   targetID,
-								SourceLine:     call.Line,
-								SourceFile:     call.File,
-								Method:         "name_match",
-								Confidence:     0.2,
-								CandidateCount: 1,
-								TrustTier:      tierFor(0.2),
-								EvidenceType:   "name_match_verified_unique_no_provenance",
-							})
-						}
-						continue
-					}
-					if !seen[key] {
-						seen[key] = true
-						resolved = append(resolved, ResolvedCall{
+						// Demote shape mirrors the qualified-unresolved last-chance demote
+						// (conf 0.2, sub-SPECULATIVE) so tierFor agrees and Strategy 2 does
+						// not re-CERTIFY this single candidate at name_match conf 0.9.
+						putEdge(ResolvedCall{
 							SourceNodeID:   callerID,
 							TargetNodeID:   targetID,
 							SourceLine:     call.Line,
 							SourceFile:     call.File,
-							Method:         "verified_unique",
-							Confidence:     0.95,
+							Method:         "name_match",
+							Confidence:     0.2,
 							CandidateCount: 1,
-							TrustTier:      tierFor(0.95),
-							EvidenceType:   "name_unique",
+							TrustTier:      tierFor(0.2),
+							EvidenceType:   "name_match_verified_unique_no_provenance",
 						})
+						continue
 					}
+					putEdge(ResolvedCall{
+						SourceNodeID:   callerID,
+						TargetNodeID:   targetID,
+						SourceLine:     call.Line,
+						SourceFile:     call.File,
+						Method:         "verified_unique",
+						Confidence:     0.95,
+						CandidateCount: 1,
+						TrustTier:      tierFor(0.95),
+						EvidenceType:   "name_unique",
+					})
 					continue
 				}
 			}
@@ -1772,21 +1795,17 @@ func Resolve(
 											}
 											if methods, ok := methodsByClass[classID]; ok {
 												if targetID, ok := methods[methodName]; ok && targetID != callerID {
-													key := edgeKey{callerID, targetID, "CALLS"}
-													if !seen[key] {
-														seen[key] = true
-														resolved = append(resolved, ResolvedCall{
-															SourceNodeID:   callerID,
-															TargetNodeID:   targetID,
-															SourceLine:     call.Line,
-															SourceFile:     call.File,
-															Method:         "import_type",
-															Confidence:     0.95,
-															CandidateCount: 1,
-															TrustTier:      tierFor(0.95),
-															EvidenceType:   "import_scoped_type",
-														})
-													}
+													putEdge(ResolvedCall{
+														SourceNodeID:   callerID,
+														TargetNodeID:   targetID,
+														SourceLine:     call.Line,
+														SourceFile:     call.File,
+														Method:         "import_type",
+														Confidence:     0.95,
+														CandidateCount: 1,
+														TrustTier:      tierFor(0.95),
+														EvidenceType:   "import_scoped_type",
+													})
 													goto nextCall
 												}
 											}
@@ -1906,21 +1925,17 @@ func Resolve(
 									}
 									if fieldClassID2b != 0 && !ambiguous2b {
 										if targetID, found := lookupMethodWithInheritance(fieldClassID2b, methodName2b); found && targetID != callerID {
-											key := edgeKey{callerID, targetID, "CALLS"}
-											if !seen[key] {
-												seen[key] = true
-												resolved = append(resolved, ResolvedCall{
-													SourceNodeID:   callerID,
-													TargetNodeID:   targetID,
-													SourceLine:     call.Line,
-													SourceFile:     call.File,
-													Method:         "type_flow",
-													Confidence:     0.9,
-													CandidateCount: 1,
-													TrustTier:      tierFor(0.9),
-													EvidenceType:   "field_type",
-												})
-											}
+											putEdge(ResolvedCall{
+												SourceNodeID:   callerID,
+												TargetNodeID:   targetID,
+												SourceLine:     call.Line,
+												SourceFile:     call.File,
+												Method:         "type_flow",
+												Confidence:     0.9,
+												CandidateCount: 1,
+												TrustTier:      tierFor(0.9),
+												EvidenceType:   "field_type",
+											})
 											goto nextCall
 										}
 									}
@@ -1960,27 +1975,23 @@ func Resolve(
 							className194a := stripTypeWrapper(declaredType)
 							if className194a != "" {
 								if classIDs, ok := nodeIDs[className194a]; ok {
-									for _, classID := range classIDs {
+									for _, classID := range sortNodeIDsByContent(classIDs, nodeMeta[0]) {
 										cm, hasMeta := nodeMeta[0][classID]
 										if !hasMeta || (cm.Label != "Class" && cm.Label != "Struct" && cm.Label != "Interface") {
 											continue
 										}
 										if targetID, found := lookupMethodWithInheritance(classID, methodName194a); found && targetID != callerID {
-											key := edgeKey{callerID, targetID, "CALLS"}
-											if !seen[key] {
-												seen[key] = true
-												resolved = append(resolved, ResolvedCall{
-													SourceNodeID:   callerID,
-													TargetNodeID:   targetID,
-													SourceLine:     call.Line,
-													SourceFile:     call.File,
-													Method:         "type_flow",
-													Confidence:     0.9,
-													CandidateCount: 1,
-													TrustTier:      tierFor(0.9),
-													EvidenceType:   "param_type",
-												})
-											}
+											putEdge(ResolvedCall{
+												SourceNodeID:   callerID,
+												TargetNodeID:   targetID,
+												SourceLine:     call.Line,
+												SourceFile:     call.File,
+												Method:         "type_flow",
+												Confidence:     0.9,
+												CandidateCount: 1,
+												TrustTier:      tierFor(0.9),
+												EvidenceType:   "param_type",
+											})
 											goto nextCall
 										}
 									}
@@ -2071,21 +2082,17 @@ func Resolve(
 							}
 						}
 						if bestTarget194 != 0 {
-							key := edgeKey{callerID, bestTarget194, "CALLS"}
-							if !seen[key] {
-								seen[key] = true
-								resolved = append(resolved, ResolvedCall{
-									SourceNodeID:   callerID,
-									TargetNodeID:   bestTarget194,
-									SourceLine:     call.Line,
-									SourceFile:     call.File,
-									Method:         "impl_method",
-									Confidence:     conf194,
-									CandidateCount: numClasses,
-									TrustTier:      tierFor(conf194),
-									EvidenceType:   "single_implementor",
-								})
-							}
+							putEdge(ResolvedCall{
+								SourceNodeID:   callerID,
+								TargetNodeID:   bestTarget194,
+								SourceLine:     call.Line,
+								SourceFile:     call.File,
+								Method:         "impl_method",
+								Confidence:     conf194,
+								CandidateCount: numClasses,
+								TrustTier:      tierFor(conf194),
+								EvidenceType:   "single_implementor",
+							})
 							resolved194 = true
 						}
 					}
@@ -2110,28 +2117,24 @@ func Resolve(
 				methodName := call.CalleeQualified[dotIdx195+sep195:]
 				if qualifier != "self" && qualifier != "this" && qualifier != "Self" {
 					if classIDs, ok := nodeIDs[qualifier]; ok {
-						for _, classID := range classIDs {
+						for _, classID := range sortNodeIDsByContent(classIDs, nodeMeta[0]) {
 							cm, hasMeta := nodeMeta[0][classID]
 							if !hasMeta || (cm.Label != "Class" && cm.Label != "Struct" && cm.Label != "Interface") {
 								continue
 							}
 							if methods, ok := methodsByClass[classID]; ok {
 								if targetID, ok := methods[methodName]; ok && targetID != callerID {
-									key := edgeKey{callerID, targetID, "CALLS"}
-									if !seen[key] {
-										seen[key] = true
-										resolved = append(resolved, ResolvedCall{
-											SourceNodeID:   callerID,
-											TargetNodeID:   targetID,
-											SourceLine:     call.Line,
-											SourceFile:     call.File,
-											Method:         "type_flow",
-											Confidence:     0.9,
-											CandidateCount: 1,
-											TrustTier:      tierFor(0.9),
-											EvidenceType:   "type_qualified",
-										})
-									}
+									putEdge(ResolvedCall{
+										SourceNodeID:   callerID,
+										TargetNodeID:   targetID,
+										SourceLine:     call.Line,
+										SourceFile:     call.File,
+										Method:         "type_flow",
+										Confidence:     0.9,
+										CandidateCount: 1,
+										TrustTier:      tierFor(0.9),
+										EvidenceType:   "type_qualified",
+									})
 									goto nextCall
 								}
 							}
@@ -2176,7 +2179,7 @@ func Resolve(
 							className := ""
 							if viaReturn {
 								if funcIDs, ok := nodeIDs[typeName]; ok {
-									for _, funcID := range funcIDs {
+									for _, funcID := range sortNodeIDsByContent(funcIDs, nodeMeta[0]) {
 										fm, hasMeta := nodeMeta[0][funcID]
 										if !hasMeta {
 											continue
@@ -2206,27 +2209,23 @@ func Resolve(
 							if className != "" {
 								// Look up the class in nodeIDs, then find the method via CHA.
 								if classIDs, ok := nodeIDs[className]; ok {
-									for _, classID := range classIDs {
+									for _, classID := range sortNodeIDsByContent(classIDs, nodeMeta[0]) {
 										cm, hasMeta := nodeMeta[0][classID]
 										if !hasMeta || (cm.Label != "Class" && cm.Label != "Struct" && cm.Label != "Interface") {
 											continue
 										}
 										if targetID, found := lookupMethodWithInheritance(classID, methodName); found && targetID != callerID {
-											key := edgeKey{callerID, targetID, "CALLS"}
-											if !seen[key] {
-												seen[key] = true
-												resolved = append(resolved, ResolvedCall{
-													SourceNodeID:   callerID,
-													TargetNodeID:   targetID,
-													SourceLine:     call.Line,
-													SourceFile:     call.File,
-													Method:         "type_flow",
-													Confidence:     0.9,
-													CandidateCount: 1,
-													TrustTier:      tierFor(0.9),
-													EvidenceType:   "assignment_tracked",
-												})
-											}
+											putEdge(ResolvedCall{
+												SourceNodeID:   callerID,
+												TargetNodeID:   targetID,
+												SourceLine:     call.Line,
+												SourceFile:     call.File,
+												Method:         "type_flow",
+												Confidence:     0.9,
+												CandidateCount: 1,
+												TrustTier:      tierFor(0.9),
+												EvidenceType:   "assignment_tracked",
+											})
 											goto nextCall
 										}
 									}
@@ -2254,7 +2253,7 @@ func Resolve(
 				if qualifier != "self" && qualifier != "this" && qualifier != "super" {
 					// Check if qualifier is a function call: look for a function with this name
 					if funcIDs, ok := nodeIDs[qualifier]; ok {
-						for _, funcID := range funcIDs {
+						for _, funcID := range sortNodeIDsByContent(funcIDs, nodeMeta[0]) {
 							fm, hasMeta := nodeMeta[0][funcID]
 							if !hasMeta {
 								continue
@@ -2274,28 +2273,24 @@ func Resolve(
 								continue
 							}
 							if classIDs, ok := nodeIDs[retType]; ok {
-								for _, classID := range classIDs {
+								for _, classID := range sortNodeIDsByContent(classIDs, nodeMeta[0]) {
 									cm, hasMeta := nodeMeta[0][classID]
 									if !hasMeta || (cm.Label != "Class" && cm.Label != "Struct" && cm.Label != "Interface") {
 										continue
 									}
 									if methods, ok := methodsByClass[classID]; ok {
 										if targetID, ok := methods[methodName]; ok && targetID != callerID {
-											key := edgeKey{callerID, targetID, "CALLS"}
-											if !seen[key] {
-												seen[key] = true
-												resolved = append(resolved, ResolvedCall{
-													SourceNodeID:   callerID,
-													TargetNodeID:   targetID,
-													SourceLine:     call.Line,
-													SourceFile:     call.File,
-													Method:         "return_type",
-													Confidence:     0.85,
-													CandidateCount: 1,
-													TrustTier:      tierFor(0.85),
-													EvidenceType:   "return_type_flow",
-												})
-											}
+											putEdge(ResolvedCall{
+												SourceNodeID:   callerID,
+												TargetNodeID:   targetID,
+												SourceLine:     call.Line,
+												SourceFile:     call.File,
+												Method:         "return_type",
+												Confidence:     0.85,
+												CandidateCount: 1,
+												TrustTier:      tierFor(0.85),
+												EvidenceType:   "return_type_flow",
+											})
 											goto nextCall
 										}
 									}
@@ -2325,21 +2320,17 @@ func Resolve(
 			if classID, ok := uniqueMethodClass[calleeName]; ok {
 				if methods, ok := methodsByClass[classID]; ok {
 					if targetID, ok := methods[calleeName]; ok && targetID != callerID {
-						key := edgeKey{callerID, targetID, "CALLS"}
-						if !seen[key] {
-							seen[key] = true
-							resolved = append(resolved, ResolvedCall{
-								SourceNodeID:   callerID,
-								TargetNodeID:   targetID,
-								SourceLine:     call.Line,
-								SourceFile:     call.File,
-								Method:         "unique_method",
-								Confidence:     0.6,
-								CandidateCount: 1,
-								TrustTier:      tierFor(0.6),
-								EvidenceType:   "unique_method_class",
-							})
-						}
+						putEdge(ResolvedCall{
+							SourceNodeID:   callerID,
+							TargetNodeID:   targetID,
+							SourceLine:     call.Line,
+							SourceFile:     call.File,
+							Method:         "unique_method",
+							Confidence:     0.6,
+							CandidateCount: 1,
+							TrustTier:      tierFor(0.6),
+							EvidenceType:   "unique_method_class",
+						})
 						continue
 					}
 				}
@@ -2369,63 +2360,64 @@ func Resolve(
 				}
 				if len(candidates) == 1 {
 					targetID := candidates[0]
-					key := edgeKey{callerID, targetID, "CALLS"}
-					if !seen[key] {
-						seen[key] = true
-						// Single candidate, qualified call, all receiver-typing strategies
-						// exhausted. Two cases:
-						//   (a) target is in the SAME file or imported by the caller file
-						//       → it's internal, 0 ambiguity → verified_unique conf=0.9
-						//   (b) target is in a file the caller doesn't import and isn't
-						//       same-dir → likely stdlib/external → demote conf=0.2
-						// This replaces the blanket demote that penalized internal single-
-						// candidate calls (fastify: 1277 calls to the ONLY 'fastify' func).
-						conf := 0.2
-						method := "name_match"
-						evidence := "name_match_qualified_unresolved"
-						if metaMap != nil {
-							tm := metaMap[targetID]
-							if tm.File != "" {
-								// The target is internal (has a file) and is the ONLY
-								// candidate. Promote if caller imports that file OR
-								// if caller imports ANY file from the same package.
-								isImported := tm.File == call.File ||
-									callerImportsFile(call.File, tm.File, importIndex)
-								// Wildcard: if caller has a "*" import (whole-module
-								// require) that resolved to ANY file in the target's
-								// directory, the target is reachable.
-								if !isImported {
-									if fileImps, ok := importIndex[call.File]; ok {
-										if starFiles, ok := fileImps["*"]; ok {
-											tgtDir := filepath.ToSlash(filepath.Dir(tm.File))
-											for _, sf := range starFiles {
-												if filepath.ToSlash(filepath.Dir(sf)) == tgtDir || sf == tm.File {
-													isImported = true
-													break
-												}
+					// Single candidate, qualified call, all receiver-typing strategies
+					// exhausted. Two cases:
+					//   (a) target is in the SAME file or imported by the caller file
+					//       → internal, reachable, single candidate → CANDIDATE 0.6
+					//       (receiver-type UNPROVEN → NOT CERTIFIED verified_unique)
+					//   (b) target is in a file the caller doesn't import and isn't
+					//       same-dir → likely stdlib/external → demote conf=0.2
+					// This replaces the blanket demote that penalized internal single-
+					// candidate calls (fastify: 1277 calls to the ONLY 'fastify' func).
+					conf := 0.2
+					method := "name_match"
+					evidence := "name_match_qualified_unresolved"
+					if metaMap != nil {
+						tm := metaMap[targetID]
+						if tm.File != "" {
+							// The target is internal (has a file) and is the ONLY
+							// candidate. Promote if caller imports that file OR
+							// if caller imports ANY file from the same package.
+							isImported := tm.File == call.File ||
+								callerImportsFile(call.File, tm.File, importIndex)
+							// Wildcard: if caller has a "*" import (whole-module
+							// require) that resolved to ANY file in the target's
+							// directory, the target is reachable.
+							if !isImported {
+								if fileImps, ok := importIndex[call.File]; ok {
+									if starFiles, ok := fileImps["*"]; ok {
+										tgtDir := filepath.ToSlash(filepath.Dir(tm.File))
+										for _, sf := range starFiles {
+											if filepath.ToSlash(filepath.Dir(sf)) == tgtDir || sf == tm.File {
+												isImported = true
+												break
 											}
 										}
 									}
 								}
-								if isImported {
-									conf = 0.9
-									method = "verified_unique"
-									evidence = "verified_unique_qualified_imported"
-								}
+							}
+							if isImported {
+								// Reachable + single candidate, but the receiver TYPE is
+								// UNPROVEN (all typing rungs failed) → CANDIDATE (0.6), NOT
+								// CERTIFIED verified_unique. Import/dir reachability is not
+								// receiver-type proof; mirror the sibling receiver-unproven
+								// rungs (1.94 impl_method / 1.98 unique_method = 0.6).
+								conf = 0.6
+								evidence = "name_match_qualified_imported"
 							}
 						}
-						resolved = append(resolved, ResolvedCall{
-							SourceNodeID:   callerID,
-							TargetNodeID:   targetID,
-							SourceLine:     call.Line,
-							SourceFile:     call.File,
-							Method:         method,
-							Confidence:     conf,
-							CandidateCount: 1,
-							TrustTier:      tierFor(conf),
-							EvidenceType:   evidence,
-						})
 					}
+					putEdge(ResolvedCall{
+						SourceNodeID:   callerID,
+						TargetNodeID:   targetID,
+						SourceLine:     call.Line,
+						SourceFile:     call.File,
+						Method:         method,
+						Confidence:     conf,
+						CandidateCount: 1,
+						TrustTier:      tierFor(conf),
+						EvidenceType:   evidence,
+					})
 					continue
 				}
 			}
@@ -2465,21 +2457,17 @@ func Resolve(
 					continue
 				}
 				conf := computeConfidence(matchMethod, candidateCount)
-				key := edgeKey{callerID, bestTarget, "CALLS"}
-				if !seen[key] {
-					seen[key] = true
-					resolved = append(resolved, ResolvedCall{
-						SourceNodeID:   callerID,
-						TargetNodeID:   bestTarget,
-						SourceLine:     call.Line,
-						SourceFile:     call.File,
-						Method:         "name_match",
-						Confidence:     conf,
-						CandidateCount: candidateCount,
-						TrustTier:      tierFor(conf),
-						EvidenceType:   evidence,
-					})
-				}
+				putEdge(ResolvedCall{
+					SourceNodeID:   callerID,
+					TargetNodeID:   bestTarget,
+					SourceLine:     call.Line,
+					SourceFile:     call.File,
+					Method:         "name_match",
+					Confidence:     conf,
+					CandidateCount: candidateCount,
+					TrustTier:      tierFor(conf),
+					EvidenceType:   evidence,
+				})
 			}
 		}
 	nextCall:
@@ -2545,16 +2533,19 @@ func buildImportIndex(imports []parser.ImportRef, fileMap map[string][]string) m
 
 		if len(targetFiles) > 0 {
 			fileEntry[imp.ImportedName] = append(fileEntry[imp.ImportedName], targetFiles...)
-			// CommonJS whole-module require: `const x = require('./mod')` binds ALL
-			// exports of mod to x. Any call to a function defined in mod is reachable
-			// from this file. Add a "*" wildcard entry so Strategy 1.5 can match ANY
-			// callee name against the target files (industry standard: PyCG, TAJS, Flow
-			// all model require() as returning the full module.exports object).
-			// Destructured requires (`const {a,b} = require(...)`) already add specific
-			// entries per name, so the wildcard is redundant for those (harmless).
-			if imp.ImportedName != "*" {
-				fileEntry["*"] = append(fileEntry["*"], targetFiles...)
-			}
+			// The bare-name "*" wildcard (Strategy 1.5 resolves an UNQUALIFIED call to ANY
+			// file behind a "*" entry at import conf 1.0) is ONLY sound for a GENUINE whole-
+			// module/star import that brings names into unqualified scope: Python `from m
+			// import *`, ES `import * as x`, Go package / dot-import, Java `import p.*` — all
+			// of which the parser already emits with ImportedName=="*", so they populate
+			// fileEntry["*"] via the line above. It must NOT be seeded for a SPECIFIC named
+			// import (`from m import foo`, `import {foo}`, `const {foo}=require`): that binds
+			// only `foo`, so a bare same-named call to an UNRELATED symbol must not resolve
+			// via "*" at 1.0 (correct-or-quiet). A whole-module require binding
+			// (`const x=require('./m')`) is called QUALIFIED (`x.foo()`) and resolves via its
+			// own `x` package-alias entry (the loop above + the Go-package-qualified path in
+			// Strategy 1.5), so it needs no "*" seed either. Previously a "*" was seeded for
+			// EVERY non-"*" import, letting any bare same-named call laundered onto the module.
 		}
 	}
 

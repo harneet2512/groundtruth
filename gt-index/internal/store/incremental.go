@@ -123,13 +123,16 @@ var deterministicRestoreMethods = map[string]bool{
 
 // typeOrUniquenessDerivedMethods are the deterministic methods whose tier was earned
 // by a fact a BARE NAME does not re-prove: a receiver TYPE (type_flow/import_type/
-// inherited/impl_method/unique_method/return_type) or GLOBAL UNIQUENESS at index time
-// (verified_unique). When an incremental restore can only re-match by bare name (no
-// surviving node whose qualified_name equals the original target's), the original
-// receiver-type / uniqueness context is GONE — re-stamping the original CERTIFIED tier
-// onto whatever single same-named node now occupies the file would launder the tier
-// onto a possibly-wrong target. These restore CAPPED at CANDIDATE (0.6). The
-// signature-derived `same_file`/`import` methods are NOT here: their proof (the call
+// inherited/impl_method/unique_method/return_type), GLOBAL UNIQUENESS at index time
+// (verified_unique), or a language-server go-to-definition proof (lsp/lsp_verified).
+// When an incremental restore can only re-match by bare name (no surviving node whose
+// qualified_name equals the original target's), the original receiver-type / uniqueness /
+// LSP-definition context is GONE — re-stamping the original CERTIFIED tier onto whatever
+// single same-named node now occupies the file would launder the tier onto a possibly-
+// wrong target. These restore CAPPED at CANDIDATE (0.6). The `-file`/L6 incremental path
+// never re-runs the LSP, so an `lsp`/`lsp_verified` edge cannot re-prove its go-to-
+// definition target here — it belongs in the cap set exactly like the type-derived rungs.
+// The signature-derived `same_file`/`import` methods are NOT here: their proof (the call
 // is in the same file / the file imports the name) survives a bare-name re-match.
 var typeOrUniquenessDerivedMethods = map[string]bool{
 	"verified_unique": true,
@@ -139,6 +142,8 @@ var typeOrUniquenessDerivedMethods = map[string]bool{
 	"impl_method":     true,
 	"unique_method":   true,
 	"return_type":     true,
+	"lsp":             true,
+	"lsp_verified":    true,
 }
 
 // tierForConfidence mirrors resolver.tierFor (CLAUDE.md:222 — the ONE threshold
@@ -260,10 +265,11 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string)
 				conf = 1.0
 			}
 			method = r.ResolutionMethod
-			// P0 DEMOTE: a type/uniqueness-derived tier (verified_unique/type_flow/
-			// import_type/inherited/impl_method/unique_method/return_type) was earned
-			// by a receiver TYPE or GLOBAL UNIQUENESS that a bare-name re-match does
-			// NOT re-prove. If we could not re-prove target identity via an exact
+			// P0 DEMOTE: a type/uniqueness/LSP-derived tier (verified_unique/type_flow/
+			// import_type/inherited/impl_method/unique_method/return_type/lsp/lsp_verified)
+			// was earned by a receiver TYPE, GLOBAL UNIQUENESS, or an LSP go-to-definition
+			// proof that a bare-name re-match does NOT re-prove (the -file/L6 path never
+			// re-runs the LSP). If we could not re-prove target identity via an exact
 			// qualified_name match, the single surviving same-named node may be a
 			// DIFFERENT symbol (rename-and-replace) — preserving the CERTIFIED tier
 			// would launder it onto the wrong target. Cap at CANDIDATE (0.6) and let

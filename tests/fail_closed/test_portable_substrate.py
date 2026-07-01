@@ -324,3 +324,130 @@ def test_demand_scope_empty_issue_is_whole_repo():
 def test_detect_langs_graceful_and_lsp_only():
     assert grp._detect_langs("/tmp/nonexistent.db") == []  # graceful on missing db
     assert "python" in grp._LSP_LANGS and "typescript" in grp._LSP_LANGS
+
+
+# ── Fix #5: eval-leak env match is WORD-BOUNDARY, not substring ───────────────
+
+def test_env_leak_allowlists_gt_localization_gold_files():
+    # GT's own diagnostic var CONTAINS "GOLD_FILES" but is NOT an evaluator injection —
+    # the old `any(tok in ku ...)` substring match false-tripped it and aborted the run
+    # before emit_brief's gold diagnostic could run.
+    assert grp._env_is_eval_leak("GT_LOCALIZATION_GOLD_FILES") is False
+
+
+def test_env_leak_still_catches_real_leaks():
+    # Bare + prefixed evaluator artifacts still trip (word-run match, not disabled).
+    assert grp._env_is_eval_leak("GOLD_FILES") is True
+    assert grp._env_is_eval_leak("SWE_GOLD_FILES") is True
+    assert grp._env_is_eval_leak("FAIL_TO_PASS") is True
+    assert grp._env_is_eval_leak("SWE_TEST_PATCH") is True
+
+
+def test_env_leak_word_boundary_not_substring():
+    # MUTATION-CHECK: a token embedded MID-WORD is NOT a leak (a substring match would
+    # wrongly flag these; word-boundary must not). Reverting to `tok in ku` fails here.
+    assert grp._env_is_eval_leak("LATEST_PATCHSET") is False   # substring has "TEST_PATCH"
+    assert grp._env_is_eval_leak("PYTHONPATH") is False
+
+
+def test_eval_leakage_gt_localization_var_not_flagged(monkeypatch, tmp_path):
+    for v in ("FAIL_TO_PASS", "PASS_TO_PASS", "GOLD_PATCH", "TEST_PATCH", "GOLD_FILES"):
+        monkeypatch.delenv(v, raising=False)
+    monkeypatch.setenv("GT_LOCALIZATION_GOLD_FILES", "src/a.py,src/b.py")
+    assert "env:GT_LOCALIZATION_GOLD_FILES" not in grp.eval_leakage(str(tmp_path))
+    # and a real leak alongside it IS still caught
+    monkeypatch.setenv("GOLD_FILES", "secret")
+    assert any(x == "env:GOLD_FILES" for x in grp.eval_leakage(str(tmp_path)))
+
+
+# ── Fix #6: the Go workspace-metadata probe is OFFLINE by default ─────────────
+
+class _FakeCP:
+    def __init__(self, rc=0, out="", err=""):
+        self.returncode = rc
+        self.stdout = out
+        self.stderr = err
+
+
+def test_go_probe_defaults_goproxy_offline(monkeypatch, tmp_path):
+    captured = {}
+
+    def _fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        captured["env"] = kw.get("env")
+        return _FakeCP(rc=0, out="pkgA\npkgB\n")
+
+    monkeypatch.setattr(grp.subprocess, "run", _fake_run)
+    monkeypatch.delenv("GT_PROOF_ALLOW_NETWORK", raising=False)
+    r = grp.probe_workspace_metadata("go", str(tmp_path), {"PATH": "/x"})
+    assert captured["env"]["GOPROXY"] == "off", "sealed proof probe must not reach the network"
+    assert captured["env"]["GOFLAGS"] == "-mod=mod"
+    assert r["status"] == "ok"
+
+
+def test_go_probe_network_only_when_explicitly_allowed(monkeypatch, tmp_path):
+    captured = {}
+
+    def _fake_run(cmd, **kw):
+        captured["env"] = kw.get("env")
+        return _FakeCP(rc=0, out="")
+
+    monkeypatch.setattr(grp.subprocess, "run", _fake_run)
+    monkeypatch.setenv("GT_PROOF_ALLOW_NETWORK", "1")
+    grp.probe_workspace_metadata("go", str(tmp_path), {"PATH": "/x"})
+    assert "proxy.golang.org" in captured["env"]["GOPROXY"]
+
+
+# ── Fix #1: STRICT (GT_GATES_DELIVER_ALWAYS=0) fails-closed on genuinely-broken
+#            signals ONLY — the name_match-dominance carve-out is preserved ─────
+
+def _write_report(tmp_path, *, g1=True, g2=True, embedder_present=True, stamp=""):
+    rep = {
+        "verdict": {"resolution_jarvis": g1, "lsp_enrichment": g2,
+                    "embedder": True, "all_on": g1 and g2},
+        "gate_lsp": {"stamp_mismatch": stamp},
+        "gate_embedder": {"present": {"pass": embedder_present}},
+    }
+    p = tmp_path / "foundational_gate_report.json"
+    p.write_text(json.dumps(rep), encoding="utf-8")
+    return str(p)
+
+
+def test_strict_all_green_is_deliverable(tmp_path):
+    assert grp._strict_broken_gate_signals(_write_report(tmp_path)) == []
+
+
+def test_strict_name_match_dominance_g1_off_is_carved_out(tmp_path):
+    # MUTATION-CHECK: GATE 1 off (name_match-heavy JS/TS/Go map) is EXPECTED and must NOT be
+    # a broken signal. If the helper mistakenly included g1, this returns non-empty and fails.
+    assert grp._strict_broken_gate_signals(_write_report(tmp_path, g1=False)) == []
+
+
+def test_strict_stamp_drop_is_broken(tmp_path):
+    broken = grp._strict_broken_gate_signals(
+        _write_report(tmp_path, stamp="LSP_STAMP_DROPPED_AFTER_RESOLVE"))
+    assert any("LSP_STAMP_DROPPED_AFTER_RESOLVE" in b for b in broken)
+
+
+def test_strict_lsp_dark_is_broken(tmp_path):
+    broken = grp._strict_broken_gate_signals(_write_report(tmp_path, g2=False))
+    assert any("LSP_DARK" in b for b in broken)
+
+
+def test_strict_dead_embedder_is_broken(tmp_path):
+    broken = grp._strict_broken_gate_signals(_write_report(tmp_path, embedder_present=False))
+    assert any("EMBEDDER_DEAD" in b for b in broken)
+
+
+def test_strict_unreadable_report_returns_none(tmp_path):
+    assert grp._strict_broken_gate_signals(str(tmp_path / "missing.json")) is None
+
+
+# ── Fix #2: GT_REQUIRE_LSP aggregate failure is FAIL-CLOSED (not WARN-continue) ─
+
+def test_require_lsp_aggregate_failure_is_fail_closed():
+    src = _read(_GRP)
+    assert "LSP_LIVENESS_FAIL" in src           # the fail-closed path exists
+    assert "LSP_LIVENESS_WARN" not in src        # the old warn-and-continue is gone
+    # the fail-closed return is wired to the aggregate check
+    assert 'tracker.fail(\n            "lsp_pass",\n            "LSP_LIVENESS_FAIL"' in src

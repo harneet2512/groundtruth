@@ -1236,3 +1236,61 @@ def test_d1_d3_budget_enforced_and_graph_map_leads(tmp_path):
     # D3: when a graph-map renders, it LEADS the brief body (before the file list).
     if "<gt-graph-map>" in bt:
         assert bt.find("<gt-graph-map>") < bt.find("\n1. ")
+
+
+# --- P0 #2: terminal evidence-RRF must not silently drop recall/neighbor/bridge
+#     records, and must let side-dict-verified gold out-rank multi-signal hubs.
+#     (GT_SUBSTRATE_LIPI_REVIEW_20260701 finding P0 #2.) --------------------------
+from groundtruth.pretask.v1r_brief import _apply_evidence_rrf
+
+
+def test_rrf_keeps_recall_neighbor_and_bridge_records() -> None:
+    """The strength>0 filter used to DROP every record whose evidence fell outside
+    the 8-key sum: the synthesized exact-issue-named recall-miss gold (no
+    ``components``), graph-neighbor (``{"path":0.0}``), and cochange/test_coimport
+    bridges. RED before the fix (only the real-evidence record survives); GREEN
+    after (all are kept, recall injections sort below real gold)."""
+    real = {"path": "src/real.py", "components": {"lex": 0.4, "sem": 0.5}}
+    exact = {"path": "src/exact.py", "_exact_issue_named": True, "score": 1.0}  # no components
+    neighbor = {"path": "src/neighbor.py", "components": {"path": 0.0}, "entered_via": "graph_neighbor"}
+    cochange = {"path": "src/co.py", "components": {"cochange": 3}, "entered_via": "cochange"}
+    tcoimp = {"path": "src/tc.py", "components": {"test_coimport": 2}, "entered_via": "test_coimport"}
+
+    out = _apply_evidence_rrf([real, neighbor, cochange, exact, tcoimp])
+    paths = [r["path"] for r in out]
+
+    # (a)/(b)/(c): NONE of the injected recall/neighbor/bridge records are dropped.
+    for p in ("src/real.py", "src/exact.py", "src/neighbor.py", "src/co.py", "src/tc.py"):
+        assert p in paths, f"{p} was silently dropped by the strength filter: {paths}"
+    # The exact-issue-named gold is treated as verified evidence, so it out-ranks
+    # the un-verified neighbor/bridge recall injections.
+    assert paths.index("src/exact.py") < paths.index("src/neighbor.py"), paths
+
+
+def test_rrf_side_dict_verified_gold_outranks_hub() -> None:
+    """The verified-witness flag lived ONLY in ``_witness_verified_by_file`` and was
+    never on the record, so a multi-signal hub (2 evidence classes) out-sorted a
+    single-signal but verified gold. Stamping ``witness_verified`` restores the
+    structural class + strength bonus so gold wins. RED before the fix (hub #1);
+    GREEN after (gold #1)."""
+    gold = {"path": "src/gold.py", "components": {"sem": 0.5}}
+    hub = {"path": "src/hub.py", "components": {"lex": 0.3, "path": 0.2}}
+
+    out = _apply_evidence_rrf(
+        [hub, gold],
+        witness_verified_by_file={"src/gold.py": True},
+        loc_rank_by_file={"src/gold.py": 0},
+    )
+    paths = [r["path"] for r in out]
+    assert paths[0] == "src/gold.py", f"hub out-sorted verified gold: {paths}"
+    # The stamp is written onto the record so downstream consumers see it.
+    assert out[0].get("witness_verified") is True
+    assert out[0].get("_loc_rank") == 0
+
+
+def test_rrf_genuinely_hollow_set_returns_empty() -> None:
+    """Correct-or-quiet invariant preserved: a set with NO real evidence AND no
+    recall/neighbor/bridge marker still returns [] (the empty-proof gate must be
+    able to halt, not deliver noise)."""
+    hollow = [{"path": "src/noise.py", "components": {"lex": 0.0, "sem": 0.0}}]
+    assert _apply_evidence_rrf(hollow) == []

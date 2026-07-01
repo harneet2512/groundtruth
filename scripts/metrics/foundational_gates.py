@@ -187,16 +187,20 @@ def _name_match_diagnostics(con: sqlite3.Connection, limit: int = 50) -> list[di
 def gate_resolution(db: str) -> bool:
     """Fail-closed: the CALL graph (type='CALLS') must be RESOLVED, not name-guessed.
 
-    Predicates (ALL must hold):
+    PASS predicates (A AND B must hold; the pass is ``ok = a_ok and b_ok``):
       (A) det% >= SAFETY_DET_FLOOR_PCT      — conservative relative backstop on
           deterministic CALLS fraction (deterministic == resolution_method in the
           unified DETERMINISTIC_RESOLUTION_METHODS set; name_match* EXCLUDED).
       (B) det >= name_match                 — name_match non-dominance (fully relative
           to THIS graph's own resolved population; the map is not mostly a guess).
+
+    Reported DIAGNOSTIC (NOT a refusal — see the OUTCOME-based-pass note at ``ok=``):
       (C) typing tiers fired                — at least one receiver-type tier edge
           exists (type_flow/impl_method/inherited resolution_method OR
-          assignment_tracked evidence_type). A graph with ZERO typing tiers never
-          converted method calls structurally -> the 58% method gap is wide open.
+          assignment_tracked evidence_type). A wide-open method gap is ALREADY caught
+          by (B) (it means name_match DOMINATES), and a perfect same_file/import map
+          with zero method-call ambiguity legitimately has no typing tiers — so (C) is
+          recorded (pred_C_typing) for visibility but never fails the gate.
     """
     if not os.path.exists(db):
         print(f"[GATE 1 RESOLUTION/JARVIS] FAIL — graph.db missing: {db}")
@@ -506,45 +510,46 @@ def gate_lsp(lsp_metrics_text: str, cert=None, graph_lsp_witness: int = -1) -> b
         }
         return ok
 
-    # No certificate file. CERT-RECONCILE (BUG#3, 2026-06-17): the cert path above is the
-    # authoritative liveness witness, but it is not the ONLY proof of LSP conversion. The
+    # No certificate file. Proof/require-LSP mode makes the certificate MANDATORY, so decide
+    # that FIRST — the cert-path liveness checks (_classify_lsp: warm-probe, lsp_finished <
+    # closure_rebuilt, effective_work) cannot be substituted by any weaker signal.
+    _proof = (os.environ.get("GT_PROOF_MODE") == "1"
+              or os.environ.get("GT_REQUIRE_LSP", "").strip().lower() in ("1", "true", "yes", "on"))
+
+    # CERT-RECONCILE (BUG#3, 2026-06-17) — NON-PROOF ONLY (P1 #10 / gt_gt §8): the
     # LSP-stamped edges PERSISTED in the FINAL graph.db (resolution_method IN
     # ('lsp','lsp_verified'), counted by _lsp_graph_count) are an INDEPENDENT runtime
     # witness of conversion — the graph the agent actually navigates, written by the real
-    # resolve.py pass, not a self-reported stdout line and not the missing cert. When the
-    # cert is absent for a transient reason (race / unwritten / codespace witness path) but
-    # that independent witness shows real conversion landed, hard-failing on the missing
-    # cert is a FALSE-RED that darkens a working LSP on the leaderboard. Reconcile to PASS
-    # iff the witness shows conversion (>0) — witness-over-gate, the SAME rule
-    # gate_embedder_consumption uses for the embedder_certificate (/goal §7). This is
-    # ADDITIVE-ONLY: it can upgrade a would-be no-cert FAIL to PASS, never strip a
-    # legitimate pass. A genuinely-dark LSP has witness==0 (or the caller passes -1 = not
-    # provided) -> no reconcile -> the fail-closed branches below stand (correct-or-quiet).
-    if graph_lsp_witness > 0:
+    # resolve.py pass, not a self-reported stdout line. Outside proof mode (e.g. the
+    # codespace witness path that writes no cert) that witness upgrades a would-be no-cert
+    # FAIL to PASS — witness-over-gate, ADDITIVE-ONLY, never strips a legitimate pass.
+    # BUT under proof mode a persisted lsp-stamp count is NOT liveness: it cannot prove the
+    # server WARMED on THIS run or that the closure was rebuilt after the LSP, so a
+    # stale-closure / degraded LSP with leftover stamps must NOT ride the witness into a
+    # false-green. Therefore the reconcile is gated on ``not _proof`` — in proof mode the
+    # cert is mandatory and the fail-closed branch below stands.
+    if graph_lsp_witness > 0 and not _proof:
         print(f"[GATE 2 LSP ENRICHMENT] LSP_RECONCILE_GRAPH_WITNESS PASS — no certificate, but "
               f"the FINAL graph carries {graph_lsp_witness} LSP-stamped edge(s) (resolution_method="
               f"'lsp'/'lsp_verified'); real conversion landed on the graph the agent navigates "
-              f"-> reconcile to PASS (witness-over-gate, /goal §7).")
+              f"-> reconcile to PASS (witness-over-gate, non-proof only, /goal §7).")
         _DEEP["gate_lsp"] = {"certificate_present": False, "verdict": "LSP_RECONCILE_GRAPH_WITNESS",
                              "graph_lsp_witness": int(graph_lsp_witness), "cert_reconciled": True,
                              "pass": True}
         return True
 
-    # Under proof/require-LSP mode the cert is MANDATORY: the line
-    # fallback cannot prove closure-rebuilt-after-LSP / lsp_finished<closure_rebuilt /
-    # effective_work (the cert-path liveness checks _classify_lsp enforces), so synthesizing
-    # a PASS from a bare LSP_METRICS line would false-green a degraded/unprovable LSP. The
-    # codespace witness writes no cert -> it MUST NOT ride the line fallback into a leaderboard
-    # PASS. Fail-closed LSP_FAIL_MISSING_CERTIFICATE (UNLESS the graph-witness reconcile above
-    # fired — an independent persisted-conversion proof, not a line synthesis).
-    _proof = (os.environ.get("GT_PROOF_MODE") == "1"
-              or os.environ.get("GT_REQUIRE_LSP", "").strip().lower() in ("1", "true", "yes", "on"))
+    # Proof/require-LSP mode: cert MANDATORY. Synthesizing a PASS from a bare LSP_METRICS
+    # line (or a persisted-stamp witness) would false-green a degraded/unprovable LSP —
+    # fail-closed LSP_FAIL_MISSING_CERTIFICATE. graph_lsp_witness is recorded so a "stamps
+    # present but no valid cert" break is diagnosable.
     if _proof:
         print("[GATE 2 LSP ENRICHMENT] LSP_FAIL_MISSING_CERTIFICATE — no certificate under "
-              "GT_PROOF_MODE/GT_REQUIRE_LSP; the LSP_METRICS line cannot prove closure-rebuilt/"
-              "timing/effective-work (cert is mandatory in proof mode — no line synthesis).")
+              "GT_PROOF_MODE/GT_REQUIRE_LSP; a persisted lsp-stamp witness cannot prove warm/"
+              "closure-timing/effective-work (cert is mandatory in proof mode — no reconcile, "
+              "no line synthesis).")
         _DEEP["gate_lsp"] = {"certificate_present": False, "verdict": "LSP_FAIL_MISSING_CERTIFICATE",
-                             "proof_mode": True, "pass": False}
+                             "proof_mode": True, "graph_lsp_witness": int(graph_lsp_witness),
+                             "pass": False}
         return False
 
     # Non-proof fall back to the contract line, but residual==0 NO LONGER passes vacuously —
@@ -839,19 +844,25 @@ def gate_embedder_consumption(db: str, repo: str, issue_text: str) -> bool:
     return ok
 
 
-def _persist_brief_for_emit(result_obj) -> None:
+def _persist_brief_for_emit(result_obj, issue_text: str, graph: str) -> None:
     """A1: persist the gate's generated V1RBriefResult to GT_BRIEF_CACHE_DIR (the proof
     out dir) so emit_brief in gt_run_proof REUSES it instead of regenerating — one brief
-    per proof, gate-certified == delivered. Best-effort; never raises (a failure here
+    per proof, gate-certified == delivered.
+
+    The identity MUST match what emit_brief's get_or_generate computes, else the cache
+    ALWAYS misses (the A1 dead-cache bug): persist with request_identity(issue_text, graph)
+    — the SAME (issue_text, graph_db) pair emit_brief keys on — so load_cached_brief's
+    fail-closed identity guard admits the reuse. Best-effort; never raises (a failure here
     just degrades to emit_brief regenerating, the prior behaviour)."""
     cache_dir = os.environ.get("GT_BRIEF_CACHE_DIR", "")
     if not cache_dir:
         return
     try:
-        from groundtruth.runtime.brief_cache import persist_brief
+        from groundtruth.runtime.brief_cache import persist_brief, request_identity
         bt = (getattr(result_obj, "brief_text", "") or "").strip()
         if bt:
-            persist_brief(cache_dir, bt, result_obj)
+            persist_brief(cache_dir, bt, result_obj,
+                          identity=request_identity(issue_text, graph))
     except Exception:  # noqa: BLE001 -- best-effort optimization, never fatal
         pass
 
@@ -916,8 +927,9 @@ def _load_brief_metrics(db: str, repo: str, issue_text: str):
             ex = _extract(r)
             if ex is not None:
                 # A1 (2026-06-13): persist THIS generated brief so emit_brief reuses it
-                # (single generation per proof — gate-certified == delivered by sha).
-                _persist_brief_for_emit(r)
+                # (single generation per proof — gate-certified == delivered by sha). Key it
+                # on the SAME (issue_text, graph) pair emit_brief uses so the cache HITS.
+                _persist_brief_for_emit(r, issue_text, db)
                 return ex
             print("  [contract] generate_v1r_brief result lacks the contract attributes "
                   "(effective_w_sem/semantic_signal_count/sem_components) -> T1 contract not shipped",
@@ -1010,7 +1022,10 @@ def main() -> int:
         sys.argv[4] if len(sys.argv) > 4
         else os.environ.get("GT_LSP_METRICS_FILE", "/tmp/gt_lsp_metrics.txt")
     )
-    issue_text = _read_text(issue_file)[:2500] if os.path.exists(issue_file) else ""
+    # FULL issue (no [:2500] truncation): gate3b generates the brief that emit_brief REUSES
+    # (A1 single-generation). emit_brief reads the full issue, so truncating here would make
+    # the certified brief diverge from the delivered brief (different sha) AND the cache miss.
+    issue_text = _read_text(issue_file) if os.path.exists(issue_file) else ""
     lsp_text = _read_text(lsp_file) if os.path.exists(lsp_file) else os.environ.get("GT_LSP_METRICS", "")
 
     print("=" * 72)

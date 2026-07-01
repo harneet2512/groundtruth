@@ -3151,6 +3151,168 @@ def _exact_name_has_verified_caller(graph_db: str, file_path: str, func_names: l
                 pass
 
 
+def _apply_evidence_rrf(
+    records: list[dict],
+    *,
+    witness_verified_by_file: dict[str, bool] | None = None,
+    loc_rank_by_file: dict[str, int] | None = None,
+) -> list[dict]:
+    """Final evidence-class RRF reorder of the candidate records.
+
+    Fuses per-class (lexical/semantic/structural/path/historical) reciprocal-rank
+    scores so a file backed by MANY independent evidence classes ranks above a
+    single-signal file, tie-broken by class count, raw strength, then the
+    localizer's own rank and the incoming order.
+
+    P0 #2 fix (2026-07-01) — two defects in the pre-extraction inline version:
+      (1) The ``strength > 0`` filter SILENTLY DROPPED records whose evidence
+          lives outside the 8-key strength sum — synthesized exact-issue-named
+          recall-miss gold (no ``components``), graph-neighbor (``{"path":0.0}``),
+          and cochange/test_coimport bridges — undoing the recall/neighborhood
+          machinery upstream. They are now KEPT (``_keep_recall_or_bridge``); with
+          strength 0 they RRF-sort to the BOTTOM, so recall is preserved without
+          ever floating them above real-evidence gold.
+      (2) The verified-witness flag lived ONLY in the side-dict
+          ``witness_verified_by_file`` and was never written onto the record, so
+          ``_issue_evidence_strength`` / ``_positive_evidence_classes`` scored
+          verified gold as un-witnessed and multi-signal HUBS out-sorted it. The
+          flag (and the localizer rank) are now STAMPED onto each record first.
+
+    Correct-or-quiet: a genuinely hollow set (no real evidence AND no
+    recall/neighbor/bridge anchor) still returns ``[]`` so the empty-proof gate
+    can halt instead of delivering noise.
+    """
+    wv = witness_verified_by_file or {}
+    lr = loc_rank_by_file or {}
+
+    # (2) Stamp the localizer's side-dict verification ONTO each record so the
+    # strength/RRF stage below actually SEES it.
+    for _rec in records:
+        if not isinstance(_rec, dict):
+            continue
+        _p = str(_rec.get("path", ""))
+        _pn = _p.replace("\\", "/").lstrip("./").lstrip("/")
+        if not _rec.get("witness_verified", False) and (
+            _rec.get("_exact_issue_named") or wv.get(_p) or wv.get(_pn)
+        ):
+            _rec["witness_verified"] = True
+        if "_loc_rank" not in _rec:
+            _r = lr.get(_p)
+            if _r is None:
+                _r = lr.get(_pn)
+            if _r is not None:
+                _rec["_loc_rank"] = _r
+
+    def _issue_evidence_strength(rec: dict) -> float:
+        comps = rec.get("components", {}) if isinstance(rec, dict) else {}
+        if not isinstance(comps, dict):
+            return 0.0
+        total = 0.0
+        for key in ("lex", "sem", "path", "reach", "anchor_prox", "witness", "code_def", "frame"):
+            try:
+                total += max(0.0, float(comps.get(key, 0.0) or 0.0))
+            except Exception:
+                continue
+        if rec.get("witness_verified", False):
+            total += 1.0
+        return total
+
+    def _positive_evidence_classes(rec: dict) -> dict[str, float]:
+        comps = rec.get("components", {}) if isinstance(rec, dict) else {}
+        if not isinstance(comps, dict):
+            comps = {}
+
+        def _pos(key: str) -> float:
+            try:
+                return max(0.0, float(comps.get(key, 0.0) or 0.0))
+            except Exception:
+                return 0.0
+
+        structural = _pos("reach") + _pos("anchor_prox") + _pos("witness")
+        if rec.get("witness_verified", False):
+            structural += 1.0
+        return {
+            "lexical": _pos("lex") + _pos("code_def"),
+            "semantic": _pos("sem"),
+            "structural": structural,
+            "path": _pos("path"),
+            "historical": _pos("frame"),
+        }
+
+    def _class_count(rec: dict) -> int:
+        return sum(1 for v in _positive_evidence_classes(rec).values() if v > 0.0)
+
+    def _ensure_entered_via(rec: dict) -> dict:
+        if str(rec.get("entered_via", "") or "").strip():
+            return rec
+        classes = [k for k, v in _positive_evidence_classes(rec).items() if v > 0.0]
+        if not classes:
+            return rec
+        out = dict(rec)
+        out["entered_via"] = "evidence:" + "+".join(classes)
+        return out
+
+    def _rrf_evidence_scores(recs: list[dict]) -> dict[int, float]:
+        scores = {id(rec): 0.0 for rec in recs}
+        for cls in ("lexical", "semantic", "structural", "path", "historical"):
+            ranked = []
+            for idx, rec in enumerate(recs):
+                val = _positive_evidence_classes(rec).get(cls, 0.0)
+                if val > 0.0:
+                    ranked.append((idx, rec, val))
+            ranked.sort(key=lambda item: (-item[2], item[0]))
+            for rank, (_idx, rec, _val) in enumerate(ranked, start=1):
+                scores[id(rec)] += 1.0 / float(60 + rank)
+        return scores
+
+    def _keep_recall_or_bridge(rec: dict) -> bool:
+        # Recall/neighborhood/bridge records carry a real localization purpose but
+        # no summable evidence component (exact-issue-named recall-miss gold has no
+        # `components`; graph-neighbor is {"path":0.0}; cochange/test_coimport
+        # bridges use keys outside the strength sum). Keep them so the strength
+        # filter can't SILENTLY DROP them; strength-0 records RRF-sort to the
+        # bottom, so recall is preserved without floating them above gold.
+        if not isinstance(rec, dict):
+            return False
+        if rec.get("_exact_issue_named"):
+            return True
+        if str(rec.get("entered_via", "") or "") in (
+            "cochange",
+            "test_coimport",
+            "graph_neighbor",
+        ):
+            return True
+        comps = rec.get("components", {})
+        return isinstance(comps, dict) and ("cochange" in comps or "test_coimport" in comps)
+
+    _with_order = list(enumerate(records))
+    _evidence_records = [
+        (idx, _ensure_entered_via(rec), _issue_evidence_strength(rec))
+        for idx, rec in _with_order
+    ]
+    _supported = [
+        (idx, rec, strength)
+        for idx, rec, strength in _evidence_records
+        if strength > 0.0 or _keep_recall_or_bridge(rec)
+    ]
+    if _supported:
+        _rrf = _rrf_evidence_scores([rec for _, rec, _ in _supported])
+        _supported.sort(
+            key=lambda item: (
+                -_rrf.get(id(item[1]), 0.0),
+                -_class_count(item[1]),
+                -item[2],
+                int(item[1].get("_loc_rank", 10 ** 6)),
+                item[0],
+            )
+        )
+        return [rec for _, rec, _ in _supported]
+    # Product invariant: no blind delivery. An all-hollow candidate set is a
+    # localization failure, not an edit-target list. The live diagnostic gate
+    # records/halts this as empty proof instead of silently delivering noise.
+    return []
+
+
 def generate_v1r_brief(
     issue_text: str,
     repo_root: str,
@@ -3616,6 +3778,7 @@ def generate_v1r_brief(
                             "path": neighbor,
                             "score": rec.get("score", 0) * 0.8,
                             "components": {"path": 0.0},
+                            "entered_via": "graph_neighbor",
                         }
                     )
                     _existing_paths.add(neighbor)
@@ -3920,83 +4083,16 @@ def generate_v1r_brief(
     ]
     top_records = _kept
 
-    def _issue_evidence_strength(rec: dict) -> float:
-        comps = rec.get("components", {}) if isinstance(rec, dict) else {}
-        if not isinstance(comps, dict):
-            return 0.0
-        total = 0.0
-        for key in ("lex", "sem", "path", "reach", "anchor_prox", "witness", "code_def", "frame"):
-            try:
-                total += max(0.0, float(comps.get(key, 0.0) or 0.0))
-            except Exception:
-                continue
-        if rec.get("witness_verified", False):
-            total += 1.0
-        return total
-
-    def _positive_evidence_classes(rec: dict) -> dict[str, float]:
-        comps = rec.get("components", {}) if isinstance(rec, dict) else {}
-        if not isinstance(comps, dict):
-            comps = {}
-
-        def _pos(key: str) -> float:
-            try:
-                return max(0.0, float(comps.get(key, 0.0) or 0.0))
-            except Exception:
-                return 0.0
-
-        structural = _pos("reach") + _pos("anchor_prox") + _pos("witness")
-        if rec.get("witness_verified", False):
-            structural += 1.0
-        return {
-            "lexical": _pos("lex") + _pos("code_def"),
-            "semantic": _pos("sem"),
-            "structural": structural,
-            "path": _pos("path"),
-            "historical": _pos("frame"),
-        }
-
-    def _class_count(rec: dict) -> int:
-        return sum(1 for v in _positive_evidence_classes(rec).values() if v > 0.0)
-
-    def _ensure_entered_via(rec: dict) -> dict:
-        if str(rec.get("entered_via", "") or "").strip():
-            return rec
-        classes = [k for k, v in _positive_evidence_classes(rec).items() if v > 0.0]
-        if not classes:
-            return rec
-        out = dict(rec)
-        out["entered_via"] = "evidence:" + "+".join(classes)
-        return out
-
-    def _rrf_evidence_scores(records: list[dict]) -> dict[int, float]:
-        scores = {id(rec): 0.0 for rec in records}
-        for cls in ("lexical", "semantic", "structural", "path", "historical"):
-            ranked = []
-            for idx, rec in enumerate(records):
-                val = _positive_evidence_classes(rec).get(cls, 0.0)
-                if val > 0.0:
-                    ranked.append((idx, rec, val))
-            ranked.sort(key=lambda item: (-item[2], item[0]))
-            for rank, (_idx, rec, _val) in enumerate(ranked, start=1):
-                scores[id(rec)] += 1.0 / float(60 + rank)
-        return scores
-
-    _with_order = list(enumerate(top_records))
-    _evidence_records = [
-        (idx, _ensure_entered_via(rec), _issue_evidence_strength(rec))
-        for idx, rec in _with_order
-    ]
-    _supported = [(idx, rec, strength) for idx, rec, strength in _evidence_records if strength > 0.0]
-    if _supported:
-        _rrf = _rrf_evidence_scores([rec for _, rec, _ in _supported])
-        _supported.sort(key=lambda item: (-_rrf.get(id(item[1]), 0.0), -_class_count(item[1]), -item[2], item[0]))
-        top_records = [rec for _, rec, _ in _supported]
-    else:
-        # Product invariant: no blind delivery. An all-hollow candidate set is a
-        # localization failure, not an edit-target list. The live diagnostic gate
-        # records/halts this as empty proof instead of silently delivering noise.
-        top_records = []
+    # Final evidence-class RRF reorder. Extracted to module scope (_apply_evidence_rrf)
+    # so the terminal ranking stage is unit-testable in isolation, and so the two P0 #2
+    # fixes live in one place: (1) recall/neighbor/bridge records are not silently
+    # dropped by the strength filter; (2) the localizer's side-dict verification is
+    # stamped onto each record so verified gold is not out-sorted by multi-signal hubs.
+    top_records = _apply_evidence_rrf(
+        top_records,
+        witness_verified_by_file=_witness_verified_by_file,
+        loc_rank_by_file=_loc_rank_by_file,
+    )
 
     entries: list[FileEntry] = []
     for rec in top_records:

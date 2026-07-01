@@ -25,6 +25,13 @@ type ParseResult struct {
 	Assignments []AssignmentRef // PyCG Rule 1: x = ClassName() type tracking
 	ModDecls    []ModDecl       // Rust mod declarations (mod foo;)
 	ReExports   []ReExportRef   // Re-export declarations (barrel files, pub use, __init__.py)
+	// RustImplIdx records the 1-based Nodes index of every Rust `impl_item` Class
+	// node, captured at parse time from the AST node kind. linkRustImplMethods uses
+	// this to distinguish impl blocks from struct/enum/trait definitions — a
+	// const-only or empty `impl Foo {}` has zero child method nodes, so the old
+	// "no children ⇒ canonical struct" heuristic misclassified it and minted a
+	// duplicate `Class` node named Foo.
+	RustImplIdx []int
 }
 
 // ModDecl is a Rust module declaration (mod foo;) extracted from the AST.
@@ -422,10 +429,14 @@ func linkRustImplMethods(result *ParseResult) {
 	}
 
 	// Phase 1: Build a map of struct/enum names → 1-based index (the canonical struct node).
-	// Only struct_item and enum_item are canonical; impl_item and trait_item are not.
-	// We identify these by label + checking if they came from struct_item/enum_item.
-	// Since we don't store the AST node type, use a heuristic: Class nodes that have
-	// NO methods as children are struct/enum definitions (impl blocks always have methods).
+	// Only struct_item/enum_item/trait_item are canonical; impl_item is not. We classify
+	// AUTHORITATIVELY by AST node kind: walkNode recorded each impl_item Class node's
+	// 1-based index in result.RustImplIdx. The previous heuristic ("a Class with method
+	// children is an impl, one without is a struct") misclassified a const-only or empty
+	// `impl Foo {}` — which has zero child method nodes — as a canonical struct, minting a
+	// DUPLICATE Class node named Foo (and, when the empty impl was parsed before the real
+	// struct, hijacking the canonical slot so later impl methods reparented to the empty
+	// block). Distinguishing by node kind fixes both.
 	type nodeInfo struct {
 		idx1  int // 1-based index
 		name  string
@@ -434,12 +445,9 @@ func linkRustImplMethods(result *ParseResult) {
 	structNodes := make(map[string]int) // type name → 1-based index of canonical struct node
 	var implNodes []nodeInfo            // impl_item Class nodes
 
-	// First pass: identify which Class nodes have children (methods).
-	hasChildren := make(map[int]bool) // 1-based index → has method children
-	for i := range result.Nodes {
-		if result.Nodes[i].ParentID > 0 {
-			hasChildren[int(result.Nodes[i].ParentID)] = true
-		}
+	implIdxSet := make(map[int]bool, len(result.RustImplIdx))
+	for _, idx1 := range result.RustImplIdx {
+		implIdxSet[idx1] = true
 	}
 
 	for i := range result.Nodes {
@@ -448,14 +456,14 @@ func linkRustImplMethods(result *ParseResult) {
 			continue
 		}
 		idx1 := i + 1
-		if !hasChildren[idx1] {
-			// No children → this is a struct_item/enum_item definition (canonical)
+		if implIdxSet[idx1] {
+			// impl_item block (authoritative from AST node kind, incl. empty/const-only)
+			implNodes = append(implNodes, nodeInfo{idx1: idx1, name: n.Name, label: n.Label})
+		} else {
+			// struct_item/enum_item/trait_item definition (canonical)
 			if _, exists := structNodes[n.Name]; !exists {
 				structNodes[n.Name] = idx1
 			}
-		} else {
-			// Has children → this is an impl_item block
-			implNodes = append(implNodes, nodeInfo{idx1: idx1, name: n.Name, label: n.Label})
 		}
 	}
 
@@ -650,6 +658,14 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 			}
 			idx := len(result.Nodes)
 			result.Nodes = append(result.Nodes, n)
+
+			// Authoritative impl-block marker (Rust): record this node's 1-based index
+			// so linkRustImplMethods can distinguish an impl_item from a struct/enum/
+			// trait definition by AST node kind, not by the (broken-for-childless-impls)
+			// "has method children" heuristic.
+			if sf.Language == "rust" && nodeType == "impl_item" {
+				result.RustImplIdx = append(result.RustImplIdx, idx+1) // 1-based
+			}
 
 			// Extract class decorators (above the class definition)
 			extractClassDecorators(node, src, result, idx)

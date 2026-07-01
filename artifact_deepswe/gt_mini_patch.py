@@ -928,8 +928,19 @@ _STRUCT_READ_VERBS = frozenset({"view", "read", "open", "cat"})
 # The fields a structured editor action uses to name its TARGET file.
 _STRUCT_PATH_KEYS = ("path", "file_path", "file", "filename", "target", "filepath")
 # The fields that carry the WRITTEN CONTENT (the body the agent authored).
+# NOTE: old_str/old_string is the code a str_replace REMOVES. It stays in this
+# set for write-DETECTION / target classification / _effective_cmd (a pure
+# deletion is still an edit, and the shell-equivalent must reflect the change),
+# but it is EXCLUDED from the obligation edit-CREDIT domain below — see
+# _STRUCT_CONTENT_BODY_KEYS / _edit_credit_body_tokens.
 _STRUCT_BODY_KEYS = ("file_text", "new_str", "new_string", "content", "text",
                      "code", "insert_text", "old_str", "old_string")
+# The subset that carries only ADDED/authored content (no old_str/old_string) —
+# the domain for obligation EDIT-CREDIT. Crediting an obligation as "edited" from
+# code the agent DELETED (old_str) is a false credit: the removed symbol is not
+# the fix. The credit domain is what was written, not what was taken away.
+_STRUCT_CONTENT_BODY_KEYS = ("file_text", "new_str", "new_string", "content",
+                             "text", "code", "insert_text")
 
 
 def _struct_field(action, keys) -> str | None:
@@ -958,6 +969,36 @@ def _struct_body(action) -> str:
         if isinstance(v, str) and v.strip():
             parts.append(v)
     return "\n".join(parts)
+
+
+def _struct_content_body(action) -> str:
+    """The ADDED/authored content of a structured edit (create file_text; the
+    NEW side of a str_replace; insert_text/text) — EXCLUDING old_str/old_string.
+    This is the obligation edit-CREDIT domain: a str_replace's old_str is the
+    code being REMOVED, and a symbol the agent deleted must not be credited as
+    "edited". A pure deletion (only old_str present) yields "" -> no credit."""
+    if not isinstance(action, dict):
+        return ""
+    parts: list[str] = []
+    for k in _STRUCT_CONTENT_BODY_KEYS:
+        v = action.get(k)
+        if isinstance(v, str) and v.strip():
+            parts.append(v)
+    return "\n".join(parts)
+
+
+def _edit_credit_body_tokens(action, cmd: str) -> set[str]:
+    """Content-body identifier tokens for OBLIGATION EDIT-CREDIT (RC5 Signal 1).
+    For a STRUCTURED editor action, tokenize ONLY the ADDED content
+    (_struct_content_body) so removed code (old_str/old_string) never credits an
+    obligation as "edited" — a pure deletion contributes NO credit tokens. For a
+    bash / non-structured action, fall back to the command-body tokens
+    (_edit_body_tokens) unchanged (a bash str_replace has no separate old-side
+    field; its heredoc/patch body is the added content)."""
+    if _structured_edit(action) is not None:
+        return {t for t in _BLOCK_TOKEN_RE.findall(_struct_content_body(action))
+                if len(t) >= 3}
+    return _edit_body_tokens(cmd)
 
 
 def _struct_line_ranges(action) -> list:
@@ -2423,17 +2464,27 @@ def _query_scope(rel: str) -> list[str]:
         # PERMISSIVE ('' selects -> cannot judge -> never suppress).
         _lang_sel = ", n1.language, n2.language" if _nodes_have_language(con) else ", '', ''"
         _fact_clause = _scope_fact_clause(con)
+        # DETERMINISTIC ordering: the old form was
+        #   SELECT DISTINCT n2.file_path[,lang] ... ORDER BY e.confidence DESC
+        # — ORDER BY referenced e.confidence, a column ABSENT from the DISTINCT
+        # projection, so which duplicate edge's confidence ranked each file (and
+        # thus which files survived LIMIT 6, and in what order) was implementation-
+        # defined -> the delivered <gt-scope> set/order could differ across
+        # indexings. Aggregate MAX(confidence) per file (GROUP BY the projected
+        # columns) and break ties on file_path so the set AND order are stable.
         q = (
-            f"SELECT DISTINCT n2.file_path{_lang_sel} FROM nodes n1 "
+            f"SELECT n2.file_path{_lang_sel}, MAX(e.confidence) AS conf FROM nodes n1 "
             "JOIN edges e ON (e.source_id = n1.id OR e.target_id = n1.id) "
             "JOIN nodes n2 ON n2.id = (CASE WHEN e.source_id = n1.id "
             "                          THEN e.target_id ELSE e.source_id END) "
             "WHERE n1.file_path = ? "
             "AND n2.file_path != n1.file_path AND n2.file_path IS NOT NULL "
-            f"{_fact_clause} ORDER BY e.confidence DESC LIMIT 6"
+            f"{_fact_clause} "
+            f"GROUP BY n2.file_path{_lang_sel} "
+            "ORDER BY conf DESC, n2.file_path ASC LIMIT 6"
         )
         try:
-            for fp, _l1, _l2 in con.execute(q, (_norm_fp(rel),)):
+            for fp, _l1, _l2, _conf in con.execute(q, (_norm_fp(rel),)):
                 # NEIGHBOR-path chokepoint (2026-06-17): vendored/minified/generated
                 # /test/demo neighbours are never delivered scope (the ONE predicate);
                 # nor cross-language "neighbours" (a call edge between language
@@ -2513,7 +2564,7 @@ def _consensus_block(rel: str, root: str) -> str:
                          else ", '', ''")
             _fact_clause = _scope_fact_clause(con)
             q = (
-                f"SELECT DISTINCT n2.file_path{_lang_sel} FROM nodes n1 "
+                f"SELECT n2.file_path{_lang_sel}, MAX(e.confidence) AS conf FROM nodes n1 "
                 "JOIN edges e ON (e.source_id = n1.id OR e.target_id = n1.id) "
                 "JOIN nodes n2 ON n2.id = (CASE WHEN e.source_id = n1.id "
                 "                          THEN e.target_id ELSE e.source_id END) "
@@ -2529,11 +2580,17 @@ def _consensus_block(rel: str, root: str) -> str:
                 "WHERE n1.file_path = ? "
                 "AND n2.file_path != n1.file_path AND n2.file_path IS NOT NULL "
                 f"{_fact_clause} "
-                "ORDER BY e.confidence DESC "
+                # DETERMINISTIC ordering (same fix as _query_scope): aggregate
+                # MAX(confidence) per file and break ties on file_path. The old
+                # `SELECT DISTINCT ... ORDER BY e.confidence` ranked on a column
+                # outside the DISTINCT projection -> implementation-defined which
+                # neighbours survived LIMIT 6 -> nondeterministic <gt-scope>.
+                f"GROUP BY n2.file_path{_lang_sel} "
+                "ORDER BY conf DESC, n2.file_path ASC "
                 "LIMIT 6"
             )
             try:
-                for fp, _l1, _l2 in con.execute(q, (_norm_fp(rel),)):
+                for fp, _l1, _l2, _conf in con.execute(q, (_norm_fp(rel),)):
                     # NEIGHBOR-path chokepoint (2026-06-17): vendored/minified/
                     # generated/test/demo neighbours are never delivered scope (the
                     # ONE predicate — the agent is told not to edit tests, and an
@@ -5330,7 +5387,11 @@ def _augment_output(action, out) -> None:
                 # ranges from diff hunks / sed addresses). Gated by the SAME
                 # repo-source guard as the legacy tokens — scratch/temp/vendor
                 # writes never feed obligation credit.
-                _body_toks = _edit_body_tokens(cmd or "")
+                # Credit is the ADDED content only: for a structured str_replace,
+                # _edit_credit_body_tokens tokenizes the NEW side and drops
+                # old_str/old_string, so a symbol the agent DELETED is never
+                # credited as "edited" (a pure deletion yields no credit tokens).
+                _body_toks = _edit_credit_body_tokens(action, cmd or "")
                 _line_ranges = _edited_line_ranges(cmd or "")
                 if _is_repo_source_path(_kf):
                     _oracle_edited_tokens.update(_edit_toks)
@@ -5598,13 +5659,18 @@ def _augment_output(action, out) -> None:
                     # SUBMIT_BUDGET_FRACTION) -- the decision moment when the
                     # requirement has gone stale. The latch -> once.
                     _ph = _detect_phase()
-                    try:
-                        open("/logs/gt_resurf_debug.txt", "a").write(
-                            "post_edit kf=%s phase=%s tested=%s acc=%d budget=%.2f fired=%s\n" % (
-                                _kf, getattr(_ph, "value", _ph), _test_evidence_seen,
-                                _action_count, _budget_now, _oblig_resurface_fired))
-                    except Exception:  # noqa: BLE001 — diagnostic best-effort
-                        pass
+                    # Diagnostic gate-state trace — OPT-IN only (GT_RESURF_DEBUG=1).
+                    # Ungated it wrote /logs/gt_resurf_debug.txt on EVERY post_edit
+                    # turn in production (disk churn, an unowned path). The trace is
+                    # a dev aid, not part of delivery — default OFF, keep best-effort.
+                    if os.environ.get("GT_RESURF_DEBUG") == "1":
+                        try:
+                            open("/logs/gt_resurf_debug.txt", "a").write(
+                                "post_edit kf=%s phase=%s tested=%s acc=%d budget=%.2f fired=%s\n" % (
+                                    _kf, getattr(_ph, "value", _ph), _test_evidence_seen,
+                                    _action_count, _budget_now, _oblig_resurface_fired))
+                        except Exception:  # noqa: BLE001 — diagnostic best-effort
+                            pass
                     if _ph in (Phase.VERIFY, Phase.SUBMIT):
                         try:
                             _obr = _obligation_resurface_candidate()

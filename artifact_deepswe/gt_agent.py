@@ -954,6 +954,92 @@ def _prepend_brief(brief: str, instruction: str) -> str:
     return f"<gt-task-brief>\n{brief}\n</gt-task-brief>\n\n{instruction}"
 
 
+# G1-1 workspace artifact --------------------------------------------------------
+# The relative path of the persistent brief copy inside the agent's repo working
+# tree. The filesystem is the ONE delivery channel every harness/agent/IDE shares
+# (ls/cat), so this is the generalized survival channel for the (fail-closed)
+# turn-0 prepend: when the brief scrolls out of context, the agent re-reads it here.
+_GT_ARTIFACT_REL = ".groundtruth/BRIEF.md"
+
+# Orientation-only pointer appended to the delivered instruction — ONLY when the
+# artifact write is CONFIRMED and git-ignored (correct-or-quiet: never point the agent
+# at a file that is not there or that would pollute its patch). Uses the ABSOLUTE path
+# so the re-read still works after the agent changes cwd.
+def _artifact_pointer(art_path: str) -> str:
+    return (
+        f"[GT] The brief above is also saved in this repo at {art_path} "
+        "(git-ignored — it is NOT part of your patch). If it scrolls out of context "
+        f"later, re-read it with:  cat {art_path}"
+    )
+
+
+async def _write_brief_artifact(brief: str, environment: "BaseEnvironment") -> str | None:
+    """G1-1: persist the curated brief into the repo working tree at
+    ``.groundtruth/BRIEF.md`` so the agent can RE-READ it after context decay — the
+    harness-agnostic survival channel (filesystem). Returns the ABSOLUTE artifact path
+    on success, else ``None``.
+
+    Runs IN the container (``environment.exec`` — the adapter's ``run`` executes on the
+    host; a bare ``open`` would write the host FS, not the agent's tree). Repo root
+    prefers the canonical ``/opt/gt/gt_root.txt`` (the same source the retry autodetect
+    uses), then ``git rev-parse --show-toplevel``, then ``pwd``. Content is base64-echoed
+    (NOT a heredoc — a heredoc breaks the ``&&``-chain).
+
+    PATCH-SAFE for ALL repo shapes: the ignore rule is written to
+    ``git rev-parse --git-path info/exclude`` — the CORRECT exclude even for a git
+    worktree/submodule (where ``.git`` is a FILE, so a ``[ -d .git ]`` test wrongly skips
+    it), BEFORE the file is written. The result is then self-verified with
+    ``git check-ignore``: if the artifact is NOT ignored (e.g. exclude unwritable) the
+    file is REMOVED and we fail — so it can never be staged into the agent's patch.
+    FAIL-OPEN: any failure returns ``None`` and leaves the already-prepended brief
+    untouched — this survival channel must never break a run.
+    """
+    if not brief:
+        return None
+    try:
+        import base64 as _b64
+
+        b64 = _b64.b64encode(brief.encode("utf-8")).decode("ascii")
+        rel = _GT_ARTIFACT_REL
+        cmd = (
+            'ROOT="$(cat /opt/gt/gt_root.txt 2>/dev/null || '
+            'git rev-parse --show-toplevel 2>/dev/null || pwd)"; '
+            'cd "$ROOT" 2>/dev/null || true; '
+            # ignore rule FIRST, to the CORRECT exclude (worktree/submodule-safe)
+            'EXCL="$(git rev-parse --git-path info/exclude 2>/dev/null)"; '
+            'if [ -n "$EXCL" ]; then mkdir -p "$(dirname "$EXCL")"; '
+            "grep -qxF '.groundtruth/' \"$EXCL\" 2>/dev/null "
+            "|| echo '.groundtruth/' >> \"$EXCL\"; fi; "
+            f'mkdir -p "$ROOT/.groundtruth" && echo {b64} | base64 -d > "$ROOT/{rel}" && '
+            # self-verify: inside a work tree but NOT ignored -> remove + fail-closed
+            'if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then '
+            f'if git check-ignore -q "{rel}" 2>/dev/null; then echo "GT_BRIEF_ARTIFACT_OK $ROOT"; '
+            f'else rm -f "$ROOT/{rel}"; echo GT_BRIEF_ARTIFACT_FAILED_NOT_IGNORED; fi; '
+            'else echo "GT_BRIEF_ARTIFACT_OK $ROOT"; fi'
+        )
+        res = await environment.exec(command=cmd, timeout_sec=30)
+        out = (getattr(res, "stdout", "") or "")
+        if "GT_BRIEF_ARTIFACT_OK" in out:
+            root = ""
+            for line in out.splitlines():
+                if line.startswith("GT_BRIEF_ARTIFACT_OK"):
+                    _p = line.split(None, 1)
+                    root = _p[1].strip() if len(_p) > 1 else ""
+            art = (root.rstrip("/\\") + "/" + rel) if root else rel
+            logger.info("GT: wrote workspace brief artifact %s (%d chars, patch-excluded)",
+                        art, len(brief))
+            return art
+        logger.warning(
+            "GT: workspace brief artifact not confirmed/ignored (out=%r) -- "
+            "brief still delivered via prepend", out[:200])
+        return None
+    except Exception as e:  # noqa: BLE001 -- survival channel must never break the run
+        logger.warning(
+            "GT: workspace brief artifact write failed (%s) -- skipping "
+            "(brief still delivered via prepend)", e)
+        return None
+
+
 def _emit_gt_meta_witness() -> None:
     """Handoff §H — the DeepSWE adapter CONSUMPTION WITNESS.
 
@@ -1521,6 +1607,20 @@ class GTMiniSweAgent(_BASE_AGENT):  # type: ignore[misc]
         # substrate brief is already tagged (v1r_brief.py:1417); never wrap it twice.
         brief = _generate_brief(instruction)
         augmented = _prepend_brief(brief, augmented)
+
+        # G1-1 workspace artifact: persist the curated brief into the repo working
+        # tree (.groundtruth/BRIEF.md) so the agent can RE-READ it after context
+        # decay — the generalized, harness-agnostic survival channel (filesystem).
+        # ADDITIVE: the turn-0 prepend above is unchanged (fail-closed delivery).
+        # Patch-safe (.git/info/exclude) + fail-open; the pointer is appended ONLY
+        # when the write is confirmed (correct-or-quiet — never point at a missing file).
+        try:
+            if brief:
+                _art = await _write_brief_artifact(brief, environment)
+                if _art:
+                    augmented = augmented.rstrip() + "\n" + _artifact_pointer(_art)
+        except Exception:  # noqa: BLE001 -- survival channel must never break run()
+            pass
 
         # Phase 3 preamble: tell the agent about automatic evidence injection.
         # If the patch is available, use the automatic preamble; otherwise

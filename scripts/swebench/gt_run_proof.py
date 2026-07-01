@@ -452,9 +452,32 @@ def _run(cmd: list[str], env: dict | None = None) -> int:
 
 _EVAL_LEAK_ENV = ("FAIL_TO_PASS", "PASS_TO_PASS", "GOLD_PATCH", "GOLD_FILES", "TEST_PATCH",
                   "GT_GOLD", "SWE_GOLD", "SWE_TEST_PATCH")
+# GT-owned diagnostic env vars that legitimately CONTAIN a leak token but are NOT an
+# evaluator injection (GT sets these itself — e.g. emit_brief's GT_LOCALIZATION_GOLD_FILES
+# localization diagnostic). They must never trip EVAL_LEAKAGE_FORBIDDEN.
+_EVAL_LEAK_ENV_ALLOW = frozenset({"GT_LOCALIZATION_GOLD_FILES"})
 _EVAL_LEAK_FILES = {"test_patch.diff", "gold_patch.diff", "test_patch", "gold_patch",
                     "fail_to_pass.json", "pass_to_pass.json", "eval.sh", "run_tests.sh",
                     "eval_spec.json", "run_instance.sh", "fail_to_pass", "pass_to_pass"}
+
+
+def _env_is_eval_leak(key: str) -> bool:
+    """True iff an env key carries an evaluator-artifact token as a WHOLE underscore-
+    delimited word-run — NOT a mere substring. ``GOLD_FILES`` / ``SWE_GOLD_FILES`` leak;
+    GT's own ``GT_LOCALIZATION_GOLD_FILES`` diagnostic does NOT (word-boundary + allowlist).
+    Fixes the ``'GOLD_FILES' in 'GT_LOCALIZATION_GOLD_FILES'`` substring false-trip that
+    aborted the run before emit_brief's gold diagnostic could run."""
+    ku = key.upper()
+    if ku in _EVAL_LEAK_ENV_ALLOW:
+        return False
+    segs = ku.split("_")
+    for tok in _EVAL_LEAK_ENV:
+        tks = tok.split("_")
+        n = len(tks)
+        for i in range(len(segs) - n + 1):
+            if segs[i:i + n] == tks:  # token present as a contiguous whole-word run
+                return True
+    return False
 
 
 def eval_leakage(source_root: str) -> list:
@@ -465,8 +488,7 @@ def eval_leakage(source_root: str) -> list:
     never flagged — we inspect only env keys + top-level injected names, not the repo's test tree."""
     leaks = []
     for k in os.environ:
-        ku = k.upper()
-        if any(tok in ku for tok in _EVAL_LEAK_ENV):
+        if _env_is_eval_leak(k):
             leaks.append(f"env:{k}")
     try:
         for name in os.listdir(source_root):
@@ -782,12 +804,18 @@ def probe_workspace_metadata(language: str, source_root: str, env: dict[str, str
         }
 
     if lang == "go":
-        # -e: don't fail on build-constraint errors (syscall/js, platform-specific)
-        # Override GOFLAGS + GOPROXY for probe only: the mounted module cache may
-        # be incomplete (missing transitive deps). The probe downloads what's needed
-        # to prove workspace readiness. The actual LSP pass runs offline.
+        # -e: don't fail on build-constraint errors (syscall/js, platform-specific).
+        # OFFLINE by default: the sealed proof substrate ships GOPROXY=off + GOTOOLCHAIN=local
+        # (docker/Dockerfile.gt-substrate) and the module cache is mounted from the dep store —
+        # a proof run must NOT reach the network (the "no per-task download" contract). We keep
+        # GOFLAGS=-mod=mod (use the cache, don't require a complete go.sum) but force GOPROXY=off
+        # so a missing transitive dep degrades to a diagnostic WARN, never a network fetch. The
+        # network proxy is used ONLY when an operator explicitly opts in via
+        # GT_PROOF_ALLOW_NETWORK=1 (e.g. a non-sealed dev probe).
         cmd = ["go", "list", "-e", "./..."]
-        env = dict(env, GOFLAGS="-mod=mod", GOPROXY="https://proxy.golang.org,direct")
+        _goproxy = ("https://proxy.golang.org,direct"
+                    if os.environ.get("GT_PROOF_ALLOW_NETWORK") == "1" else "off")
+        env = dict(env, GOFLAGS="-mod=mod", GOPROXY=_goproxy)
         code = "GO_WORKSPACE_METADATA_FAIL"
     else:
         cmd = ["cargo", "metadata", "--format-version=1", "--no-deps"]
@@ -846,6 +874,39 @@ def probe_workspace_metadata(language: str, source_root: str, env: dict[str, str
         "stdout_excerpt": stdout[:300],
         "stderr_excerpt": stderr[:300],
     }
+
+
+def _strict_broken_gate_signals(gate_report_path: str):
+    """Under STRICT (GT_GATES_DELIVER_ALWAYS=0), the GENUINELY-broken foundational signals
+    that must fail-close the paid run — EXCLUDING the benign name_match-dominance carve-out.
+
+    A name_match-heavy CALL map (GATE 1 pred_B off) is EXPECTED on JS/TS/Go repos (CLAUDE.md
+    Known Limitations #1: 70-80% name_match on large repos) and is DELIBERATELY not a refusal
+    (the deliver-always doctrine) — so GATE 1 being OFF is never returned here. Genuinely
+    broken = the LSP work was lost after resolve (LSP_STAMP_DROPPED_AFTER_RESOLVE), the LSP is
+    dark (GATE 2 OFF: no warm server / missing cert), or the embedder is DEAD (GATE 3a
+    present-FAIL — semantic ranking cannot run). WEAK per-issue semantic consumption (3a ON,
+    3b OFF) is DELIVERABLE (measurement), matching the deliver-always split in
+    foundational_gates.main.
+
+    Returns the list of broken-signal strings (empty == deliverable), or None when the report
+    cannot be read (caller falls back to the raw gate rc — conservative STRICT posture)."""
+    try:
+        with open(gate_report_path, encoding="utf-8") as fh:
+            rep = json.load(fh)
+    except Exception:
+        return None
+    broken: list[str] = []
+    lp = (rep.get("gate_lsp") or {})
+    if lp.get("stamp_mismatch"):
+        broken.append(f"LSP_STAMP_DROPPED_AFTER_RESOLVE ({lp.get('stamp_mismatch')})")
+    verdict = (rep.get("verdict") or {})
+    if verdict.get("lsp_enrichment") is False:
+        broken.append("LSP_DARK (GATE 2 LSP-liveness OFF)")
+    present = ((rep.get("gate_embedder") or {}).get("present") or {})
+    if present.get("pass") is False:
+        broken.append("EMBEDDER_DEAD (GATE 3a present-FAIL)")
+    return broken
 
 
 def main(argv=None) -> int:
@@ -1168,12 +1229,21 @@ def main(argv=None) -> int:
         any_success=lsp_ok,
     )
     if not _agg_ok:
-        _msg = (
+        # FAIL-CLOSED (gt_gt §7 + the P1-e comment above): _agg_ok is only False when
+        # GT_REQUIRE_LSP=1 AND a known language is INSTALL_MISSING / FAIL_NO_WARM
+        # (crash-on-start) / resolve-error — a genuine substrate liveness break. Do NOT run
+        # the paid agent on a dark LSP (the old WARN-and-continue silently discarded the
+        # computed fail verdict). WARN verdicts (Go/Rust dep-env incomplete offline) are NOT
+        # in _agg_failures, so a warm-but-unproductive server still reaches the agent
+        # (correct-or-quiet preserved); INSTALL_MISSING is additionally guarded earlier by
+        # _baked_lsp_problems at env_validation.
+        return tracker.fail(
+            "lsp_pass",
+            "LSP_LIVENESS_FAIL",
             "GT_REQUIRE_LSP=1 but known language(s) failed the LSP pass: "
-            f"{', '.join(_agg_failures)}"
+            f"{', '.join(_agg_failures)}",
+            lang_verdicts=lang_verdicts,
         )
-        print(f"[gt-run-proof] LSP_LIVENESS_WARN: {_msg} — continuing with degraded LSP "
-              "(correct-or-quiet: degraded LSP is better than no trial)", flush=True)
     tracker.complete("lsp_pass", lang_verdicts=lang_verdicts)
 
     # 3. graph certificate
@@ -1316,9 +1386,42 @@ def main(argv=None) -> int:
         )
     tracker.complete("artifact_contract", artifacts_present=present, gate_rc=rc)
     print(f"[gt-run-proof] done: gate_rc={rc} artifacts_present={present}", flush=True)
-    # Gate is INFORMATIONAL — recorded in foundational_gate_report.json for post-run
-    # analysis. All artifacts present = proof passes. A gate_rc=1 (e.g. name_match
-    # dominance on JS/TS/Go repos) must NEVER block the paid agent trial.
+    # EXIT CODE (P0 fix) — HONOR the wired GT_GATES_DELIVER_ALWAYS pin (previously the
+    # foundational-gate rc was captured but the proof ALWAYS `return 0`, so the STRICT pin
+    # deepswe_full.yml sets was a no-op and the LSP stamp-drop verdict was inert):
+    #
+    #   STRICT ("0", the deepswe_full.yml pin): fail-closed on the gate verdict — BUT keep
+    #   the deliberate name_match-dominance carve-out. Honoring the RAW gate rc here would
+    #   spuriously fail JS/TS/Go tasks, because foundational_gates.main returns rc=1 whenever
+    #   ANY gate is OFF and GATE 1 pred_B (det >= name_match) is EXPECTED-off on name_match-
+    #   heavy repos (CLAUDE.md Known Limitations #1) — that is the documented reason the old
+    #   code returned 0. So under STRICT we fail-close ONLY on the GENUINELY-broken signals
+    #   (_strict_broken_gate_signals: LSP stamp-drop / LSP-dark / dead embedder) and let a
+    #   pure-GATE-1 name_match rc through (carve-out, DELIVERABLE). Dead embedder + empty
+    #   brief + missing artifacts already fail-closed above; this arms the stamp-drop/LSP-dark
+    #   teeth the STRICT pin was meant to add.
+    #
+    #   LENIENT ("1"/unset, default): gate is INFORMATIONAL (recorded in
+    #   foundational_gate_report.json); a gate_rc=1 never blocks the paid agent trial.
+    if os.environ.get("GT_GATES_DELIVER_ALWAYS") == "0":
+        if rc == 0:
+            return 0
+        broken = _strict_broken_gate_signals(gate_report)
+        if broken is None:
+            print(f"[gt-run-proof] STRICT: gate report unreadable — cannot isolate the benign "
+                  f"name_match carve-out; honoring raw gate rc={rc} (conservative).", flush=True)
+            return rc
+        if broken:
+            return tracker.fail(
+                "gates", "FOUNDATIONAL_GATE_STRICT_FAIL",
+                "GT_GATES_DELIVER_ALWAYS=0 (STRICT) — genuinely-broken foundational "
+                "signal(s): " + "; ".join(broken),
+                gate_rc=rc,
+            )
+        print("[gt-run-proof] STRICT: gate rc!=0 attributable ONLY to the benign name_match-"
+              "dominance carve-out (GATE 1 pred_B) — substrate DELIVERABLE, agent runs.",
+              flush=True)
+        return 0
     return 0
 
 

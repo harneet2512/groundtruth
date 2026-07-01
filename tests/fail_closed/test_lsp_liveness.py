@@ -314,15 +314,22 @@ def test_gate_lsp_no_cert_witness_conversion_reconciles_to_pass(tmp_path, monkey
     assert fg.gate_lsp("no contract line", graph_lsp_witness=7) is True
 
 
-def test_gate_lsp_proof_mode_no_cert_witness_conversion_reconciles(tmp_path, monkeypatch):
-    # Under PROOF mode a missing cert hard-fails TODAY even when conversion really happened
-    # (the dark-lever false-RED). With an independent witness of conversion, reconcile to
-    # PASS; with no witness it still fails closed (existing test_*_under_proof_mode_fails).
+def test_gate_lsp_proof_mode_no_cert_witness_does_not_reconcile(tmp_path, monkeypatch):
+    # Fix #4 (P1 #10 / gt_gt §8): under PROOF mode the certificate is MANDATORY. A persisted
+    # lsp-stamp WITNESS is NOT liveness — it cannot prove the server warmed on THIS run or
+    # that the closure was rebuilt after the LSP (a stale-closure / degraded LSP can carry
+    # leftover stamps), so witness>0 must NOT bypass the cert check. Fail-closed either way.
+    # (Supersedes the prior test that reconciled-to-PASS in proof mode — that encoded the
+    # false-green this fix closes.)
     monkeypatch.setenv("GT_LSP_CERT", str(tmp_path / "nope.json"))
     monkeypatch.setenv("GT_PROOF_MODE", "1")
-    assert fg.gate_lsp("", graph_lsp_witness=4) is True
-    # witness zero under proof mode -> still fail-closed (no conversion proven anywhere).
+    assert fg.gate_lsp("", graph_lsp_witness=4) is False   # witness does NOT reconcile in proof mode
     assert fg.gate_lsp("", graph_lsp_witness=0) is False
+    # MUTATION-CHECK: the reconcile is only DISABLED in proof mode, not removed — outside
+    # proof mode the same witness still reconciles to PASS (additive, non-proof only).
+    monkeypatch.delenv("GT_PROOF_MODE", raising=False)
+    monkeypatch.delenv("GT_REQUIRE_LSP", raising=False)
+    assert fg.gate_lsp("", graph_lsp_witness=4) is True
 
 
 def test_gate_lsp_witness_default_is_byte_identical(tmp_path, monkeypatch):

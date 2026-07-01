@@ -350,12 +350,12 @@ func PromotePropertyEdges(db *store.DB) (int, error) {
 // the resolution indexes. Mirrors buildRelationshipIndexes (relationships.go).
 func buildPromoteIndexes(db *store.DB) (*promoteIndexes, error) {
 	idx := &promoteIndexes{
-		nameIndex:   make(map[string][]promoteNodeMeta),
-		fnl:         make(map[fnlKey]int64),
-		byID:        make(map[int64]promoteNodeMeta),
-		classFields: make(map[int64]map[string]bool),
-		fieldTypes:  make(map[int64]map[string]string),
-		classByName: make(map[string]int64),
+		nameIndex:      make(map[string][]promoteNodeMeta),
+		fnl:            make(map[fnlKey]int64),
+		byID:           make(map[int64]promoteNodeMeta),
+		classFields:    make(map[int64]map[string]bool),
+		fieldTypes:     make(map[int64]map[string]string),
+		classByName:    make(map[string]int64),
 		classNameCount: make(map[string]int),
 	}
 
@@ -574,10 +574,17 @@ func promoteSerde(db *store.DB, idx *promoteIndexes, add addEdgeFunc) error {
 		if tgt == 0 {
 			// Partner may live in another file — accept any file with that
 			// (name,line) pair, still EXACT on name+line (non-invention safe).
+			// DETERMINISTIC pick: >1 file can hold the same (name,line) pair and Go map
+			// iteration is randomized, so a `break`-on-first-hit was RUN-DEPENDENT. Choose
+			// the content-smallest (file, then id) partner instead (mirrors resolveByName's
+			// file,line,id order — determinism is mandatory).
+			bestFile := ""
 			for k, id := range idx.fnl {
 				if k.name == partnerName && k.line == partnerLine {
-					tgt = id
-					break
+					if tgt == 0 || k.file < bestFile || (k.file == bestFile && id < tgt) {
+						tgt = id
+						bestFile = k.file
+					}
 				}
 			}
 		}
@@ -800,7 +807,17 @@ func promoteRaises(db *store.DB, idx *promoteIndexes, add addEdgeFunc) error {
 			if tgt == 0 {
 				return // not an internal class -> stays property
 			}
-			add(nodeID, tgt, "RAISES", "promote_raises", 0.9, cc, "exception",
+			// AMBIGUITY GATE (mirrors dataFlowConfidence): a UNIQUELY-named internal
+			// exception class (cc==1) is a fact (0.9 CERTIFIED); when the raised name
+			// matches MULTIPLE project classes (cc>1) the resolveByName same-file-first
+			// pick is a GUESS, so the edge must NOT be a fact — degrade to CANDIDATE/
+			// SPECULATIVE, and SUPPRESS a >5-way name entirely (correct-or-quiet: a wrong
+			// RAISES is worse than a missing one).
+			conf := raisesConfidence(cc)
+			if conf == 0 {
+				return // too ambiguous to attribute -> stays property
+			}
+			add(nodeID, tgt, "RAISES", "promote_raises", conf, cc, "exception",
 				etype, src.FilePath, line, false)
 		})
 		if err != nil {
@@ -996,6 +1013,24 @@ func dataFlowConfidence(cc int) float64 {
 	}
 }
 
+// raisesConfidence gates a RAISES edge on the exception-name ambiguity (candidate_count),
+// mirroring dataFlowConfidence. A uniquely-named internal exception class is a FACT; a name
+// shared by several project classes is a GUESS (the resolveByName same-file-first pick can
+// be wrong), so it degrades below CERTIFIED and a >5-way name is suppressed (correct-or-
+// quiet: a wrong RAISES is worse than a missing one).
+func raisesConfidence(cc int) float64 {
+	switch {
+	case cc == 1:
+		return 0.9 // unique internal exception class -> fact (CERTIFIED)
+	case cc == 2:
+		return 0.6 // two candidates -> CANDIDATE
+	case cc <= 5:
+		return 0.4 // several candidates -> SPECULATIVE
+	default:
+		return 0.0 // >5 candidates -> suppress
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Class 7 — PRECEDES  (call_order: earlier -> later, distinct internal nodes)
 // ---------------------------------------------------------------------------
@@ -1009,11 +1044,13 @@ func dataFlowConfidence(cc int) float64 {
 // gate is therefore fail-closed on THREE conditions; an edge is minted only when ALL
 // hold, else the step ABSTAINS (no edge):
 //
-//  1. RECEIVER TYPE RESOLVES to a concrete class node — `self`/`this`/`super` (the
-//     Python/JS/Rust keyword receivers) AND a Go method's RECEIVER VARIABLE
-//     (`func (r *T) Run()` calling `r.open()` → token `r`) resolve to the caller
-//     method's enclosing class (src.ParentID, which linkGoReceiverMethods parented to
-//     the struct); a `self.<field>` or bare-field receiver resolves through the
+//  1. RECEIVER TYPE RESOLVES to a concrete class node — `self`/`this` (the Python/JS/
+//     Rust keyword receivers) AND a Go method's RECEIVER VARIABLE (`func (r *T) Run()`
+//     calling `r.open()` → token `r`) resolve to the caller method's enclosing class
+//     (src.ParentID, which linkGoReceiverMethods parented to the struct); `super`
+//     resolves to that enclosing class's PARENT (inheritanceMap; abstains when the
+//     superclass is unknown/ambiguous — never the subclass); a `self.<field>` or
+//     bare-field receiver resolves through the
 //     field-type index to its declared class. A local-variable receiver of unknown
 //     type does NOT resolve → abstain. The Go receiver-var path closes a live-witness
 //     gap: a go graph had ZERO PRECEDES because `r`/`c`/`conn` matched none of the
@@ -1075,11 +1112,13 @@ func promotePrecedes(db *store.DB, idx *promoteIndexes, add addEdgeFunc) error {
 }
 
 // resolveReceiverClass turns a call_order receiver token into the class node whose
-// methods the sequence is calling. `self`/`this`/`super` (and a Go method's own
-// receiver variable, `func (r *T) M()` → token `r`) → the caller method's enclosing
-// class (src.ParentID, which must be a Class). `self.<field>` or a bare `<field>`
-// known on the enclosing class → the field's declared class (via the field-type
-// index → classByName). Returns ok=false when no class can be proven.
+// methods the sequence is calling. `self`/`this` (and a Go method's own receiver
+// variable, `func (r *T) M()` → token `r`) → the caller method's enclosing class
+// (src.ParentID, which must be a Class). `super` → that enclosing class's PARENT (via
+// inheritanceMap; abstains if the superclass is unknown or ambiguous — NEVER the
+// subclass). `self.<field>` or a bare `<field>` known on the enclosing class → the
+// field's declared class (via the field-type index → classByName); `super.<field>` →
+// the field on the PARENT class. Returns ok=false when no class can be proven.
 func (idx *promoteIndexes) resolveReceiverClass(receiver string, src promoteNodeMeta) (int64, bool) {
 	r := strings.TrimSpace(receiver)
 	if r == "" {
@@ -1100,18 +1139,25 @@ func (idx *promoteIndexes) resolveReceiverClass(receiver string, src promoteNode
 	if recvVar := parser.GoReceiverName(src.Signature); recvVar != "" && r == recvVar {
 		return idx.enclosingClass(src)
 	}
-	// self.<field> / this.<field> -> resolve the field on the enclosing class.
+	// self.<field> / this.<field> / super.<field> -> resolve the field on the receiver's
+	// class. self/this = the enclosing (sub)class; super = its PARENT class.
 	field := ""
+	useSuper := false
 	switch {
-	case r == "self" || r == "this" || r == "super":
+	case r == "self" || r == "this":
 		// Receiver IS the enclosing object → its class is the caller's parent class.
 		return idx.enclosingClass(src)
+	case r == "super":
+		// super IS the SUPERCLASS of the enclosing class — NOT the enclosing (sub)class.
+		// Abstain (correct-or-quiet) when the superclass is unknown/ambiguous.
+		return idx.superClass(src)
 	case strings.HasPrefix(r, "self."):
 		field = r[len("self."):]
 	case strings.HasPrefix(r, "this."):
 		field = r[len("this."):]
 	case strings.HasPrefix(r, "super."):
 		field = r[len("super."):]
+		useSuper = true // resolve the field on the SUPERCLASS, not the enclosing class
 	default:
 		// Bare token: only treat it as a receiver if it is a KNOWN field of the
 		// enclosing class (else it is a local var of unknown type → abstain).
@@ -1120,11 +1166,18 @@ func (idx *promoteIndexes) resolveReceiverClass(receiver string, src promoteNode
 	if field == "" || strings.ContainsAny(field, ". ") {
 		return 0, false // chained/compound receiver — too ambiguous to type-prove
 	}
-	enclosingID, ok := idx.enclosingClass(src)
-	if !ok || enclosingID == 0 {
+	// The receiver's class: self/this/bare-field → the enclosing class; super. → its parent.
+	var baseClassID int64
+	var ok bool
+	if useSuper {
+		baseClassID, ok = idx.superClass(src)
+	} else {
+		baseClassID, ok = idx.enclosingClass(src)
+	}
+	if !ok || baseClassID == 0 {
 		return 0, false
 	}
-	typeName, ok := idx.fieldTypes[enclosingID][field]
+	typeName, ok := idx.fieldTypes[baseClassID][field]
 	if !ok || typeName == "" {
 		return 0, false // field type unknown → abstain
 	}
@@ -1147,6 +1200,25 @@ func (idx *promoteIndexes) enclosingClass(src promoteNodeMeta) (int64, bool) {
 		return 0, false
 	}
 	return src.ParentID, true
+}
+
+// superClass returns the SINGLE superclass of src's enclosing class, from the package
+// inheritance map (child class node ID -> parent class node IDs; populated in main.go
+// before promotion — same map the resolver's CHA rungs use). `super` refers to the PARENT
+// of the enclosing class, NOT the enclosing (sub)class itself. Fail-closed / correct-or-
+// quiet: returns ok=false when the enclosing class is unknown, has NO recorded parent, or
+// has MORE THAN ONE parent (ambiguous multiple inheritance / a nil map) — abstaining
+// rather than minting a wrong edge onto the subclass.
+func (idx *promoteIndexes) superClass(src promoteNodeMeta) (int64, bool) {
+	enclosingID, ok := idx.enclosingClass(src)
+	if !ok || enclosingID == 0 {
+		return 0, false
+	}
+	parents := inheritanceMap[enclosingID]
+	if len(parents) != 1 || parents[0] == 0 {
+		return 0, false // unknown or ambiguous superclass -> abstain
+	}
+	return parents[0], true
 }
 
 // resolveClassMethod resolves a method name to a node that is (a) same-file as the

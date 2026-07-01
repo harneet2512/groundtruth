@@ -71,13 +71,19 @@ def test_brief_cache_failsafe_regenerates_on_miss():
 
 
 def test_gate_persist_then_emit_reuses(tmp_path, monkeypatch):
-    """The real cross-process flow: gate3b persists, emit_brief reuses (no 2nd gen)."""
+    """The real cross-process flow: gate3b persists, emit_brief reuses (no 2nd gen).
+
+    RED->GREEN (Fix #3): the gate must persist with the SAME request_identity(issue, graph)
+    emit_brief keys on — persisting with identity="" (the old bug) ALWAYS missed, so the
+    brief regenerated every proof and the certified brief could diverge from the delivered one.
+    """
     fg = _load("fg_a1", "scripts/metrics/foundational_gates.py")
     gp = _load("gp_a1", "scripts/swebench/gt_run_proof.py")
 
     monkeypatch.setenv("GT_BRIEF_CACHE_DIR", str(tmp_path))
-    # gate3b generated this brief and persists it.
-    fg._persist_brief_for_emit(_FakeResult("THE GATE BRIEF"))
+    # gate3b generated this brief and persists it — keyed on the SAME (issue, graph) pair
+    # emit_brief will request below (this is exactly what _load_brief_metrics passes).
+    fg._persist_brief_for_emit(_FakeResult("THE GATE BRIEF"), "issue text", "g.db")
     assert (tmp_path / "brief_result.json").is_file()
 
     calls = {"n": 0}
@@ -91,6 +97,32 @@ def test_gate_persist_then_emit_reuses(tmp_path, monkeypatch):
     assert calls["n"] == 0, "emit_brief regenerated instead of reusing the gate brief"
     assert (tmp_path / "brief.txt").read_text(encoding="utf-8").strip() == "THE GATE BRIEF"
     assert "reused_gate_brief=True" in detail
+
+
+def test_gate_persist_identity_mismatch_forces_regeneration(tmp_path, monkeypatch):
+    """MUTATION-CHECK for Fix #3: the identity guard is REAL, not always-hit. When the gate
+    persisted a brief for a DIFFERENT issue, emit_brief for the actual issue MUST MISS and
+    regenerate (no cross-task contamination). A mutation that persisted a constant identity
+    (or ignored the issue) would wrongly REUSE the stale brief and fail this test."""
+    fg = _load("fg_a1_mm", "scripts/metrics/foundational_gates.py")
+    gp = _load("gp_a1_mm", "scripts/swebench/gt_run_proof.py")
+
+    monkeypatch.setenv("GT_BRIEF_CACHE_DIR", str(tmp_path))
+    # Persisted for a DIFFERENT task's issue.
+    fg._persist_brief_for_emit(_FakeResult("STALE OTHER-TASK BRIEF"), "OTHER issue", "g.db")
+    assert (tmp_path / "brief_result.json").is_file()
+
+    calls = {"n": 0}
+
+    def gen(issue_text, repo_root, graph_db, bug_id):
+        calls["n"] += 1
+        return _FakeResult(f"FRESH::{issue_text}")
+
+    ok, detail = gp.emit_brief(str(tmp_path), "issue text", "/work", "g.db", generator=gen)
+    assert ok, detail
+    assert calls["n"] == 1, "emit_brief served a stale different-issue brief (identity guard dead)"
+    assert (tmp_path / "brief.txt").read_text(encoding="utf-8").strip() == "FRESH::issue text"
+    assert "reused_gate_brief=False" in detail
 
 
 def test_emit_brief_generates_and_writes_when_no_cache(tmp_path):

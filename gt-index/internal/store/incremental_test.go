@@ -163,12 +163,19 @@ func TestResolveIncomingEdgesDoesNotRelaunderQualifiedUnresolved(t *testing.T) {
 	}
 }
 
-// #B6: an edge resolved by a deterministic method (here: the offline LSP pass)
-// must be PRESERVED across an incremental `-file` reindex — method, confidence,
-// evidence marker — with the tier re-derived from the one threshold table.
-// Before the fix the preserve condition was {same_file, import} only, so every
-// lsp/type_flow/inherited/verified_unique edge targeting a reindexed file was
-// stripped down to a 0.9 name_match guess.
+// #B6: an lsp edge must be PRESERVED across an incremental `-file` reindex — its
+// method ("lsp") and evidence marker ("lsp_definition") survive, never stripped
+// down to a name_match guess. Before the #B6 fix the preserve condition was
+// {same_file, import} only, so every lsp/type_flow/inherited/verified_unique edge
+// targeting a reindexed file was stripped to a name_match guess.
+// P0 refinement (this fixture sets NO qualified_name → qnameMatched=false): an LSP
+// go-to-definition proof is earned by a discriminator finer than name+file (which
+// same-named method the call binds to), and the -file/L6 path never re-runs the
+// LSP — so a bare name+file re-match cannot re-establish it. The tier is therefore
+// CAPPED at CANDIDATE (0.6); method + evidence marker are still preserved (not a
+// strip-to-guess). The companion TestResolveIncomingEdgesPreservesLSPEdgeOnQNameMatch
+// pins that an exact-qname re-match preserves the full 0.95/CERTIFIED tier — the cap
+// is targeted at identity-unproven restores, not a blanket lsp teardown.
 func TestResolveIncomingEdgesPreservesLSPEdge(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "graph.db")
 	db, err := sql.Open("sqlite3", dbPath)
@@ -223,11 +230,82 @@ func TestResolveIncomingEdgesPreservesLSPEdge(t *testing.T) {
 	if method != "lsp" {
 		t.Fatalf("method=%q; lsp edge must restore as lsp, not be stripped to a guess", method)
 	}
+	if confidence != 0.6 {
+		t.Fatalf("confidence=%v; an lsp restore without a qualified_name re-proof must cap at CANDIDATE 0.6 (the -file path never re-runs the LSP)", confidence)
+	}
+	if tier != "CANDIDATE" {
+		t.Fatalf("tier=%q; a capped-0.6 lsp restore re-derives to CANDIDATE", tier)
+	}
+	if evidenceType != "lsp_definition" {
+		t.Fatalf("evidence_type=%q; original evidence marker must be preserved", evidenceType)
+	}
+}
+
+// P0 refinement companion to TestResolveIncomingEdgesPreservesLSPEdge: WITH an exact
+// qualified_name re-match the lsp go-to-definition target identity IS re-proven, so
+// the qname-cap does NOT fire and the full 0.95/CERTIFIED tier is preserved. Pins
+// that the cap is targeted at identity-unproven restores (rename-and-replace defence)
+// only — not a blanket lsp teardown — mirroring the verified_unique demote/preserve pair.
+func TestResolveIncomingEdgesPreservesLSPEdgeOnQNameMatch(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "graph.db")
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := createSchema(db); err != nil {
+		t.Fatal(err)
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(
+		`INSERT INTO nodes (id, label, name, qualified_name, file_path, language) VALUES
+		 (1, 'Function', 'caller', 'src.caller.caller',     'src/caller.py', 'python'),
+		 (2, 'Method',   'save',   'src.models.Model.save', 'src/models.py', 'python')`,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	snap := []IncomingEdgeRef{{
+		SourceID:            1,
+		SourceLine:          12,
+		EdgeType:            "CALLS",
+		SourceFile:          "src/caller.py",
+		TargetName:          "save",
+		TargetQualifiedName: "src.models.Model.save",
+		ResolutionMethod:    "lsp",
+		Confidence:          0.95,
+		EvidenceType:        "lsp_definition",
+	}}
+	restored, unresolved, err := ResolveIncomingEdgesTx(tx, snap, "src/models.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored != 1 || unresolved != 0 {
+		t.Fatalf("restored=%d unresolved=%d", restored, unresolved)
+	}
+
+	var method, tier, evidenceType string
+	var confidence float64
+	if err := tx.QueryRow(
+		`SELECT resolution_method, trust_tier, evidence_type, confidence
+		   FROM edges WHERE source_id = 1 AND target_id = 2`,
+	).Scan(&method, &tier, &evidenceType, &confidence); err != nil {
+		t.Fatal(err)
+	}
+	if method != "lsp" {
+		t.Fatalf("method=%q; lsp edge must restore as lsp", method)
+	}
 	if confidence != 0.95 {
-		t.Fatalf("confidence=%v; original lsp confidence must be preserved", confidence)
+		t.Fatalf("confidence=%v; an exact-qname re-match re-proves identity and must preserve 0.95", confidence)
 	}
 	if tier != "CERTIFIED" {
-		t.Fatalf("tier=%q; tierFor(0.95) is CERTIFIED", tier)
+		t.Fatalf("tier=%q; tierFor(0.95) is CERTIFIED when identity is re-proven", tier)
 	}
 	if evidenceType != "lsp_definition" {
 		t.Fatalf("evidence_type=%q; original evidence marker must be preserved", evidenceType)
