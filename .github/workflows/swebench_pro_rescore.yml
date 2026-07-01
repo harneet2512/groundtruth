@@ -31,6 +31,15 @@ jobs:
         with:
           ref: gt-trial
 
+      - name: Download Pro tags manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p benchmarks/data
+          gh release download pipeline-assets-v1 -p swebench_pro_public_tags.jsonl -D benchmarks/data/ --clobber \
+            || echo "WARN: release download failed"
+          wc -l benchmarks/data/swebench_pro_public_tags.jsonl
+
       - name: Build task matrix from manifest
         id: build
         env:
