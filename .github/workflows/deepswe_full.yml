@@ -62,6 +62,10 @@ on:
         description: "Fail-closed if no pinned digest is set (1 = enforce the substrate-consume proof path; 0 = transitional warn-and-skip). Default 1 per the handoff hard rule."
         required: true
         default: "1"
+      proactive_topn:
+        description: "GT_PROACTIVE_TOPN — front-load compact contract/callers for the top-N [INFO]-dropped brief candidates. 1 = OFF (byte-identical default / A-B OFF arm); 4 = ON. Baked code path — takes effect ONLY on a substrate rebuilt with the change."
+        required: false
+        default: "1"
 
 permissions:
   contents: write   # live-log bridge force-pushes per-task logs to gha-live-logs/<task> branches
@@ -102,6 +106,11 @@ env:
   GT_RRF_FUSION: "on"   # brief fusion parity with Pro: RRF (bias-free) + exact-path floor (53/60)
   GT_LOC_FUSION_V2: "1"        # BAKED: independent-surface RRF localizer (generalizing: OSS-60 +2, held-out +1, 0 regression)
   GT_LOC_BEHAVIOR_LEAD: "0"    # BAKED: behavior-gate OFF (it suppressed the held-out lift)
+  # PROACTIVE top-N brief front-load (v1r_brief.render_brief). 1 = OFF (byte-identical
+  # baked default); >1 front-loads compact contract/callers for the top-N [INFO]-dropped
+  # candidates. BAKED code path — active only on a substrate rebuilt with the change; the
+  # A/B toggles OFF(1)/ON(4) via the proactive_topn dispatch input on ONE rebuilt image.
+  GT_PROACTIVE_TOPN: ${{ github.event.inputs.proactive_topn || '1' }}
   # Legitimacy: the per-task graph must be built FRESH from THIS task's repo — never a
   # cross-run / stale / out-of-repo prebuilt graph.db. In substrate-consume mode the graph
   # the substrate emits to /gt_artifacts FROM the mounted /work:ro IS that fresh per-task

@@ -1950,8 +1950,12 @@ def render_brief(
         # starting point. No tier prefix.
         files = files[:1]
         tiers = tiers[:1]
+        info_dropped: list[FileEntry] = []  # nothing anchored -> do not front-load weak facts
     else:
-        # Filter out [INFO] entries — research says filter hard upstream.
+        # Filter out [INFO] entries — research says filter hard upstream. Capture the
+        # dropped [INFO] candidates FIRST (rank order preserved) so the proactive
+        # top-N block below can front-load their deterministic cross-file facts.
+        info_dropped = [f for f, t in zip(files, tiers) if t == "[INFO]"]
         files_filtered = [f for f, t in zip(files, tiers) if t != "[INFO]"]
         tiers_filtered = [t for t in tiers if t != "[INFO]"]
         files = files_filtered
@@ -2033,6 +2037,40 @@ def render_brief(
                 lines.append(_cap(f"   Also changes: {', '.join(_cc)}"))
         if f.callees:
             lines.append(_cap(f"   Calls: {', '.join(f.callees)}"))
+    # PROACTIVE top-N (GT_PROACTIVE_TOPN, default 1 = OFF). The rich render above
+    # covers only the non-[INFO] candidates (usually #1); lower-ranked candidates are
+    # [INFO]-dropped as weakly issue-relevant (anti-flood, 1937-1958). But their
+    # CONTRACT + verified CALLERS are DETERMINISTIC graph facts, and the agent
+    # re-derives them by OPENING those files (measured re-search, 91% of tasks). When
+    # enabled, front-load a COMPACT contract/callers block for the next-ranked [INFO]
+    # candidates up to the cap — the cross-file facts, without the round-trip.
+    # Leakage-safe (no test names — contract/callers only). Bounded per AGENTS.md
+    # 2602.11988 (a broad early dump hurts strong agents). Env-gated so the A/B
+    # toggles it on ONE baked image; default 1 leaves every existing brief byte-identical.
+    try:
+        _proactive_topn = int(os.environ.get("GT_PROACTIVE_TOPN", "1") or "1")
+    except ValueError:
+        _proactive_topn = 1
+    if _proactive_topn > 1 and info_dropped:
+        _need = _proactive_topn - len(files)  # files == rendered non-[INFO] count here
+        if _need > 0:
+            _pro_lines: list[str] = []
+            for f in info_dropped[:_need]:
+                _facts = []
+                if f.contract_props:
+                    _facts.append(_cap(f"   Contract: {f.contract_props}"))
+                if f.contract:
+                    _facts.append(_cap(f"   Callers: {f.contract}"))
+                if not _facts:
+                    continue  # correct-or-quiet: no facts -> no line
+                _hdr = f.path + (f" ({', '.join(f.functions)})" if f.functions else "")
+                _pro_lines.append(_cap(_hdr))
+                _pro_lines.extend(_facts)
+            if _pro_lines:
+                lines.append(
+                    "Other candidates — cross-file facts (so you need not open each first):"
+                )
+                lines.extend(_pro_lines)
     # EXPECTED BEHAVIOR from issue text — the reporter's own spec for what the code
     # SHOULD do. Extracted from markdown sections like "### Expected Behavior",
     # "Expected:", "Should:", "The fix should". Leakage-safe (it's the issue text
