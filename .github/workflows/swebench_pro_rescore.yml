@@ -59,8 +59,8 @@ jobs:
             log="$td/trial_output.log"
             [ ! -f "$log" ] && continue
 
-            # Only re-score APPLY_FAIL tasks
-            grep -q "PATCH_APPLY_FAIL\|PRO_EVAL_INFRA" "$log" 2>/dev/null || continue
+            # Score ALL tasks that submitted a patch (not just APPLY_FAIL)
+            grep -q "COMPLETE_TASK_AND_SUBMIT" "$log" 2>/dev/null || continue
 
             instance_id=$(basename "$td" | sed 's/^pro-full-//')
 
@@ -231,16 +231,15 @@ jobs:
       - name: Final tally
         run: |
           if [ -f /tmp/results/resolved_ids.txt ]; then
-            TOTAL=$(wc -l < /tmp/results/resolved_ids.txt)
+            RESOLVED=$(sort -u /tmp/results/resolved_ids.txt | wc -l)
             echo "============================================"
-            echo "  SWE-Pro RE-SCORE FINAL"
+            echo "  SWE-Pro 731 — FINAL SCORE (RE-SCORED)"
             echo "============================================"
-            echo "  NEW RESOLVED (from APPLY_FAIL): $TOTAL"
-            echo "  + original 8 = $((TOTAL + 8)) total"
+            echo "  RESOLVED:    $RESOLVED / 731  ($(echo "scale=1; $RESOLVED * 100 / 731" | bc)%)"
             echo "============================================"
             echo ""
             echo "Resolved task IDs:"
-            cat /tmp/results/resolved_ids.txt
+            sort -u /tmp/results/resolved_ids.txt
           else
-            echo "No resolved tasks from re-scoring."
+            echo "RESOLVED: 0 / 731 (0%)"
           fi
