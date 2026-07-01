@@ -870,6 +870,12 @@ jobs:
                 --task "$(cat /gt_out/issue.txt 2>/dev/null || echo Fix the issue in the repository.)" \
                 --config /opt/gt/agent_config.yaml \
                 2>&1 || true
+
+              # CRITICAL: copy patch to bind-mount BEFORE container exits.
+              # /tmp/patch.txt is the agent raw diff — uncorrupted by terminal wrapping.
+              cp /tmp/patch.txt /gt_out/agent_patch.diff 2>/dev/null || true
+              cd "$(cat /tmp/gt_root.txt 2>/dev/null || echo /app)" 2>/dev/null
+              git diff HEAD > /gt_out/git_diff_head.diff 2>/dev/null || true
             ' 2>&1 | tee trial_output.log || true
           AGENT_RC=${PIPESTATUS[0]}
           set -e
@@ -907,22 +913,21 @@ jobs:
           RUN_SCRIPT="swebench-pro-os/run_scripts/${TASK_ID}/run_script.sh"
           mkdir -p trial_results
 
-          # Extract the agent's patch. Three sources, in priority order:
-          # 1. trial_output.log after COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT (direct container)
-          # 2. jobs/ dir patch.diff (pier path, legacy)
-          # 3. preds.json model_patch field
+          # Extract the agent's patch. Priority order:
+          # 1. /gt_out/agent_patch.diff (bind-mounted from container — RAW, uncorrupted)
+          # 2. /gt_out/git_diff_head.diff (git diff HEAD from container)
+          # 3. Log extraction fallback (terminal-wrapped, lossy)
+          HOST_GT_OUT="${HOST_GT_OUT:-/tmp/gt}"
           PATCH_FILE=""
-          # Source 1: extract from trial log (agent prints patch after COMPLETE_TASK marker)
-          if [ -f trial_output.log ]; then
+          if [ -s "${HOST_GT_OUT}/agent_patch.diff" ]; then
+            PATCH_FILE="${HOST_GT_OUT}/agent_patch.diff"
+            echo "patch source: bind-mount agent_patch.diff ($(wc -c < "$PATCH_FILE") bytes)"
+          elif [ -s "${HOST_GT_OUT}/git_diff_head.diff" ]; then
+            PATCH_FILE="${HOST_GT_OUT}/git_diff_head.diff"
+            echo "patch source: bind-mount git_diff_head.diff ($(wc -c < "$PATCH_FILE") bytes)"
+          elif [ -f trial_output.log ]; then
             python3 scripts/swebench/extract_patch_from_log.py trial_output.log /tmp/pro_patch.diff 2>/dev/null && PATCH_FILE=/tmp/pro_patch.diff || true
-          fi
-          # Source 2: pier jobs dir (legacy)
-          if [ -z "$PATCH_FILE" ]; then
-            PATCH_FILE=$(find jobs -name "patch.diff" -o -name "*.patch" 2>/dev/null | head -1 || true)
-          fi
-          # Source 3: preds.json (legacy pier path)
-          if [ -z "$PATCH_FILE" ]; then
-            python3 -c "import glob,json,sys;[sys.stdout.write(d.get('model_patch',''))or sys.exit(0)for f in glob.glob('jobs/**/*.json',recursive=True)for d in[json.load(open(f))]if(d.get('model_patch')or'').strip()]" > /tmp/pro_patch_preds.diff 2>/dev/null && [ -s /tmp/pro_patch_preds.diff ] && PATCH_FILE=/tmp/pro_patch_preds.diff || true
+            [ -n "$PATCH_FILE" ] && echo "patch source: log extraction fallback ($(wc -c < "$PATCH_FILE") bytes)"
           fi
 
           REWARD=0
@@ -1007,6 +1012,9 @@ jobs:
           mkdir -p trial_results trial_results/gt_artifacts
           cp trial_output.log trial_results/ 2>/dev/null || true
           cp /tmp/gt/graph.db trial_results/graph.db 2>/dev/null || true
+          # Raw patches from bind-mount (uncorrupted by terminal wrapping)
+          cp /tmp/gt/agent_patch.diff trial_results/ 2>/dev/null || true
+          cp /tmp/gt/git_diff_head.diff trial_results/ 2>/dev/null || true
           for a in runtime_context.json lsp_certificate.json graph_certificate.json \
                    embedder_certificate.json foundational_gate_report.json run_manifest.json \
                    brief.txt gt_issue_anchors.json gt_scope_files.txt gt_lsp_metrics.txt \

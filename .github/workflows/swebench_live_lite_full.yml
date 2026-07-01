@@ -905,6 +905,14 @@ jobs:
                 --task "$(cat /gt_out/issue.txt 2>/dev/null || echo Fix the issue in the repository.)" \
                 --config /opt/gt/agent_config.yaml \
                 2>&1 || true
+
+              # CRITICAL: copy patch to bind-mount BEFORE container exits.
+              # /tmp/patch.txt is the agent raw diff — uncorrupted by terminal wrapping.
+              # /gt_out/ is bind-mounted to the host so it survives container teardown.
+              cp /tmp/patch.txt /gt_out/agent_patch.diff 2>/dev/null || true
+              # Also create a fresh git diff from HEAD as backup
+              cd "$(cat /tmp/gt_root.txt 2>/dev/null || echo /app)" 2>/dev/null
+              git diff HEAD > /gt_out/git_diff_head.diff 2>/dev/null || true
             ' 2>&1 | tee trial_output.log || true
           AGENT_RC=${PIPESTATUS[0]}
           set -e
@@ -940,9 +948,18 @@ jobs:
           TASK_ID="${{ matrix.task }}"
           mkdir -p trial_results
 
+          # Patch source priority: bind-mount (raw) > log extraction (lossy)
+          HOST_GT_OUT="${HOST_GT_OUT:-/tmp/gt}"
           PATCH_FILE=""
-          if [ -f trial_output.log ]; then
+          if [ -s "${HOST_GT_OUT}/agent_patch.diff" ]; then
+            PATCH_FILE="${HOST_GT_OUT}/agent_patch.diff"
+            echo "patch source: bind-mount (raw, uncorrupted)"
+          elif [ -s "${HOST_GT_OUT}/git_diff_head.diff" ]; then
+            PATCH_FILE="${HOST_GT_OUT}/git_diff_head.diff"
+            echo "patch source: git diff HEAD (bind-mount)"
+          elif [ -f trial_output.log ]; then
             python3 scripts/swebench/extract_patch_from_log.py trial_output.log /tmp/agent_patch.diff 2>/dev/null && PATCH_FILE=/tmp/agent_patch.diff || true
+            echo "patch source: log extraction (fallback)"
           fi
 
           REWARD=0
@@ -986,6 +1003,8 @@ jobs:
           mkdir -p trial_results trial_results/gt_artifacts
           cp trial_output.log trial_results/ 2>/dev/null || true
           cp /tmp/gt/graph.db trial_results/graph.db 2>/dev/null || true
+          cp /tmp/gt/agent_patch.diff trial_results/ 2>/dev/null || true
+          cp /tmp/gt/git_diff_head.diff trial_results/ 2>/dev/null || true
           for a in runtime_context.json lsp_certificate.json graph_certificate.json \
                    embedder_certificate.json foundational_gate_report.json run_manifest.json \
                    brief.txt gt_issue_anchors.json gt_scope_files.txt gt_lsp_metrics.txt \
