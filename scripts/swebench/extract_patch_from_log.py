@@ -2,14 +2,14 @@
 """Extract the agent's patch from trial_output.log.
 
 The agent submits via: echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat /tmp/patch.txt
-Strategy:
+The patch appears after the last COMPLETE_TASK marker, inside the "Exit:" block
+of mini-swe-agent's output. Strategy:
 1. Find the last COMPLETE_TASK_AND_SUBMIT marker
-2. Find all text after "Exit:" (the actual command output)
-3. Extract diff content from that region
+2. Find "Exit:" after it — everything from there to the end is the patch content
+3. Write it as-is (git apply is lenient about trailing content)
 
 Usage: python extract_patch_from_log.py <log_file> <output_diff>
 """
-
 import sys
 
 if len(sys.argv) < 3:
@@ -25,81 +25,54 @@ if marker_pos < 0:
 
 region = log[marker_pos:]
 
-# The actual patch appears after "Exit:" in the mini-swe-agent output
-# Find the last "Exit:" after the marker
-exit_pos = region.rfind("\nExit:\n")
-if exit_pos >= 0:
-    patch_region = region[exit_pos + len("\nExit:\n"):]
-else:
-    # Fallback: use everything after marker
-    patch_region = region
+# Find "Exit:" after the marker — the patch starts there
+exit_markers = ["\nExit:\n", "\nExit:\r\n"]
+exit_pos = -1
+for em in exit_markers:
+    p = region.find(em)
+    if p >= 0:
+        exit_pos = p + len(em)
+        break
 
-# The patch_region contains the raw diff output, possibly with line wrapping.
-# Extract everything from the first "diff --git" to the end of diff content.
-# We need to be lenient because terminal wrapping can break lines.
-
-# Find first "diff --git" in the region
-diff_start = patch_region.find("diff --git")
-if diff_start < 0:
-    # Try in the full post-marker region
-    diff_start = region.find("diff --git")
-    if diff_start >= 0:
-        patch_region = region[diff_start:]
+if exit_pos < 0:
+    # No "Exit:" — try to find first "diff --git" after marker
+    dg = region.find("diff --git")
+    if dg >= 0:
+        exit_pos = dg
     else:
         sys.exit(1)
-else:
-    patch_region = patch_region[diff_start:]
 
-# Now collect all lines that are part of the diff.
-# Stop at lines that are clearly NOT diff content.
-lines = patch_region.split('\n')
-patch_lines = []
-in_diff = False
-for line in lines:
-    # Diff content lines
-    if (line.startswith('diff --git ') or
-        line.startswith('index ') or
-        line.startswith('--- ') or
-        line.startswith('+++ ') or
-        line.startswith('@@ ') or
-        line.startswith('+') or
-        line.startswith('-') or
-        line.startswith(' ') or
-        line.startswith('\\') or
-        # Handle wrapped "diff --git" lines (b/path on next line)
-        (patch_lines and patch_lines[-1].startswith('diff --git a/') and line.startswith('b/')) or
-        # Handle wrapped index lines
-        (patch_lines and patch_lines[-1].startswith('index ') and '..' in line) or
-        # Blank line within diff (between hunks or files)
-        line == ''):
+raw_patch = region[exit_pos:]
 
-        if line.startswith('diff --git '):
-            in_diff = True
+# Find the first "diff --git" in the raw content
+diff_start = raw_patch.find("diff --git")
+if diff_start < 0:
+    sys.exit(1)
 
-        if in_diff:
-            # Join wrapped diff --git header lines
-            if patch_lines and patch_lines[-1].startswith('diff --git a/') and line.startswith('b/'):
-                patch_lines[-1] = patch_lines[-1].rstrip() + ' ' + line
-            else:
-                patch_lines.append(line)
-    else:
-        # Non-diff line — if we've seen diff content, stop
-        if in_diff and patch_lines:
-            # Allow a few non-matching blank lines but stop at real content
-            if line.strip() == '':
-                continue
-            break
+raw_patch = raw_patch[diff_start:]
 
-# Remove trailing blank lines
-while patch_lines and patch_lines[-1].strip() == '':
-    patch_lines.pop()
+# Trim trailing non-patch content: stop at known terminal markers
+terminal_markers = [
+    "\nSubmit message:",
+    "\n=== Pro Trial",
+    "\nEVAL_DEFERRED:",
+    "\nPRO_EVAL_",
+    "\nGT_RUN_PROOF",
+    "\n[MEMLOG ",
+    "\n[GT_DEEP]",
+    "\n[RESMON]",
+    "\nbash: line",
+]
+for tm in terminal_markers:
+    pos = raw_patch.find(tm)
+    if pos > 0:
+        raw_patch = raw_patch[:pos]
 
-patch = '\n'.join(patch_lines)
+patch = raw_patch.strip()
 if len(patch) < 10:
     sys.exit(1)
 
-# Count files
-files = sum(1 for l in patch_lines if l.startswith('diff --git '))
+files = patch.count("diff --git")
 
 with open(sys.argv[2], "w") as f:
     f.write(patch + "\n")
