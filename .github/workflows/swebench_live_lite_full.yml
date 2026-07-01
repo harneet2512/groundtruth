@@ -123,6 +123,8 @@ jobs:
       bench_sha: ${{ steps.pro_bench_clone.outputs.bench_sha }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: gt-trial
 
       - uses: actions/setup-python@v5
         with:
@@ -437,6 +439,7 @@ jobs:
       - name: Checkout GroundTruth
         uses: actions/checkout@v4
         with:
+          ref: gt-trial
           lfs: false
 
       - uses: actions/setup-python@v5
@@ -1042,6 +1045,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: gt-trial
       - uses: actions/download-artifact@v4
         with:
           path: /tmp/all
