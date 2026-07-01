@@ -1,0 +1,246 @@
+name: "SWE-bench Pro: Re-score APPLY_FAIL tasks"
+
+# Re-evaluates tasks where the old patch extractor produced garbage.
+# Downloads the original trial_output.log artifacts, re-extracts patches
+# with the fixed extract_patch_from_log.py, and re-runs run_script.sh
+# inside the task image.
+
+on:
+  workflow_dispatch:
+    inputs:
+      shard1:
+        description: "Run ID of shard 1"
+        required: true
+      shard2:
+        description: "Run ID of shard 2"
+        required: true
+      shard3:
+        description: "Run ID of shard 3"
+        required: true
+      batch_size:
+        description: "Tasks per job (default 10)"
+        default: "10"
+      max_parallel:
+        description: "Max parallel jobs"
+        default: "20"
+
+permissions:
+  contents: read
+  packages: read
+  actions: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build.outputs.matrix }}
+      total: ${{ steps.build.outputs.total }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts from original shards
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p /tmp/orig_artifacts
+          for rid in ${{ inputs.shard1 }} ${{ inputs.shard2 }} ${{ inputs.shard3 }}; do
+            gh run download "$rid" -D /tmp/orig_artifacts || true
+          done
+          echo "Downloaded $(ls /tmp/orig_artifacts/ | wc -l) artifact dirs"
+
+      - name: Identify APPLY_FAIL tasks and re-extract patches
+        id: build
+        run: |
+          mkdir -p /tmp/rescore_tasks
+          TOTAL=0
+
+          for td in /tmp/orig_artifacts/pro-full-*; do
+            [ ! -d "$td" ] && continue
+            log="$td/trial_output.log"
+            [ ! -f "$log" ] && continue
+
+            # Only re-score APPLY_FAIL tasks
+            grep -q "PATCH_APPLY_FAIL\|PRO_EVAL_INFRA" "$log" 2>/dev/null || continue
+
+            instance_id=$(basename "$td" | sed 's/^pro-full-//')
+
+            # Re-extract with fixed script
+            patch_file="/tmp/rescore_tasks/${instance_id}.diff"
+            python3 scripts/swebench/extract_patch_from_log.py "$log" "$patch_file" 2>/dev/null || continue
+            [ ! -s "$patch_file" ] && continue
+
+            # Look up dockerhub_tag
+            tag=$(python3 -c "
+          import json
+          for line in open('benchmarks/data/swebench_pro_public_tags.jsonl'):
+              r=json.loads(line)
+              if r['instance_id']=='$instance_id':
+                  print(r['dockerhub_tag']); break
+          " 2>/dev/null)
+            [ -z "$tag" ] && continue
+
+            echo "${instance_id}|${tag}" >> /tmp/rescore_list.txt
+            TOTAL=$((TOTAL + 1))
+          done
+
+          echo "total=$TOTAL" >> "$GITHUB_OUTPUT"
+          echo "Tasks to re-score: $TOTAL"
+
+          # Split into batches
+          BATCH=${{ inputs.batch_size }}
+          split -l "$BATCH" -d -a 3 /tmp/rescore_list.txt /tmp/rescore_batch_
+
+          # Build matrix JSON
+          MATRIX="["
+          FIRST=true
+          for bf in /tmp/rescore_batch_*; do
+            idx=$(basename "$bf" | sed 's/rescore_batch_//')
+            if [ "$FIRST" = true ]; then FIRST=false; else MATRIX+=","; fi
+            MATRIX+="{\"batch\":\"$idx\"}"
+          done
+          MATRIX+="]"
+          echo "matrix={\"include\":$MATRIX}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload re-extracted patches + batch lists
+        uses: actions/upload-artifact@v4
+        with:
+          name: rescore-prep
+          path: |
+            /tmp/rescore_tasks/
+            /tmp/rescore_list.txt
+            /tmp/rescore_batch_*
+          retention-days: 7
+
+  rescore:
+    needs: prepare
+    if: needs.prepare.outputs.total > 0
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+      max-parallel: ${{ fromJSON(inputs.max_parallel) }}
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download prep artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: rescore-prep
+          path: /tmp/prep
+
+      - name: Clone SWE-bench Pro-OS (run_scripts)
+        run: git clone --depth 1 https://github.com/scaleapi/SWE-bench_Pro-os.git /tmp/pro-os
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Re-score batch ${{ matrix.batch }}
+        run: |
+          BATCH_FILE="/tmp/prep/tmp/rescore_batch_${{ matrix.batch }}"
+          [ ! -f "$BATCH_FILE" ] && echo "No batch file" && exit 0
+
+          RESOLVED=0
+          EVAL_FAIL=0
+          APPLY_FAIL=0
+          TOTAL=0
+
+          while IFS='|' read -r instance_id tag; do
+            [ -z "$instance_id" ] && continue
+            TOTAL=$((TOTAL + 1))
+
+            PATCH="/tmp/prep/tmp/rescore_tasks/${instance_id}.diff"
+            RUN_SCRIPT="/tmp/pro-os/run_scripts/${instance_id}/run_script.sh"
+            IMG="ghcr.io/hbali-stack/sweap-images:${tag}"
+
+            if [ ! -f "$PATCH" ] || [ ! -s "$PATCH" ]; then
+              echo "SKIP $instance_id: no patch"
+              continue
+            fi
+            if [ ! -f "$RUN_SCRIPT" ]; then
+              echo "SKIP $instance_id: no run_script"
+              continue
+            fi
+
+            echo "=== SCORING: $instance_id ==="
+            docker pull "$IMG" >/dev/null 2>&1 || { echo "PULL_FAIL $instance_id"; continue; }
+
+            result=$(timeout 300 docker run --rm \
+              -v "$(realpath "$PATCH"):/tmp/pro_patch.diff:ro" \
+              -v "$(realpath "$RUN_SCRIPT"):/tmp/run_test.sh:ro" \
+              --entrypoint "" \
+              "$IMG" \
+              bash -c '
+                REPO_DIR=""
+                for _d in /app /testbed /workspace; do
+                  if [ -d "$_d" ]; then REPO_DIR="$_d"; break; fi
+                done
+                [ -z "$REPO_DIR" ] && echo "NO_REPO" && exit 0
+                cd "$REPO_DIR"
+                if ! { git apply /tmp/pro_patch.diff 2>/dev/null || patch -p1 < /tmp/pro_patch.diff 2>/dev/null; }; then
+                  echo "APPLY_FAIL"
+                  exit 0
+                fi
+                rc=0
+                bash /tmp/run_test.sh >/dev/null 2>&1 || rc=$?
+                if [ "$rc" -eq 0 ]; then echo "RESOLVED"; else echo "EVAL_FAIL"; fi
+              ' 2>/dev/null || echo "TIMEOUT")
+
+            result=$(echo "$result" | tail -1)
+            echo "  -> $result"
+
+            case "$result" in
+              RESOLVED) RESOLVED=$((RESOLVED + 1))
+                echo "$instance_id" >> /tmp/resolved_ids.txt ;;
+              EVAL_FAIL) EVAL_FAIL=$((EVAL_FAIL + 1)) ;;
+              APPLY_FAIL) APPLY_FAIL=$((APPLY_FAIL + 1)) ;;
+            esac
+
+            docker rmi "$IMG" >/dev/null 2>&1 || true
+          done < "$BATCH_FILE"
+
+          echo "=== BATCH ${{ matrix.batch }} RESULTS ==="
+          echo "  RESOLVED:   $RESOLVED / $TOTAL"
+          echo "  EVAL_FAIL:  $EVAL_FAIL"
+          echo "  APPLY_FAIL: $APPLY_FAIL"
+
+      - name: Upload batch results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rescore-batch-${{ matrix.batch }}
+          path: /tmp/resolved_ids.txt
+          retention-days: 14
+          if-no-files-found: ignore
+
+  summarize:
+    needs: rescore
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all batch results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: rescore-batch-*
+          path: /tmp/results
+          merge-multiple: true
+
+      - name: Final tally
+        run: |
+          if [ -f /tmp/results/resolved_ids.txt ]; then
+            TOTAL=$(wc -l < /tmp/results/resolved_ids.txt)
+            echo "============================================"
+            echo "  SWE-Pro RE-SCORE FINAL"
+            echo "============================================"
+            echo "  NEW RESOLVED (from APPLY_FAIL): $TOTAL"
+            echo "  + original 8 = $((TOTAL + 8)) total"
+            echo "============================================"
+            echo ""
+            echo "Resolved task IDs:"
+            cat /tmp/results/resolved_ids.txt
+          else
+            echo "No resolved tasks from re-scoring."
+          fi
