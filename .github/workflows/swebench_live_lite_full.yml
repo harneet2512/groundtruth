@@ -808,6 +808,11 @@ jobs:
           #          → we extract patch + trajectory from the container
 
           # Issue text from Live Lite dataset's problem_statement field
+          # The dataset may be truncated in git — download from release if needed
+          DS=benchmarks/data/swebench_live_lite.jsonl
+          if [ "$(wc -l < "$DS" 2>/dev/null)" -lt 100 ]; then
+            GH_TOKEN="${{ secrets.GITHUB_TOKEN }}" gh release download pipeline-assets-v1 -p swebench_live_lite.jsonl -D benchmarks/data/ --clobber 2>/dev/null || true
+          fi
           ISSUE_TEXT=$(python3 -c "
           import json
           task='${{ matrix.task }}'
