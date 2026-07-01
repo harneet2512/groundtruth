@@ -645,12 +645,11 @@ jobs:
         continue-on-error: true
         env:
           GT_MATRIX_TASK: ${{ matrix.task }}
-          GT_MATRIX_DOCKERHUB_TAG: ${{ matrix.dockerhub_tag }}
           GT_MATRIX_LANGUAGE: ${{ matrix.language }}
           GT_INPUTS_ASSETS_REPO: ${{ inputs.assets_repo }}
           GT_GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
           GT_GITHUB_SHA: ${{ github.sha }}
-          GT_PROOF_HARNESS: pro
+          GT_PROOF_HARNESS: deepswe
         run: bash scripts/ci/substrate_proof.sh
         # ^^ Inline shell code was extracted to scripts/ci/substrate_proof.sh to stay
         # under GHA's 21,000-character expression limit. All ${{ }} values are passed
@@ -1010,7 +1009,7 @@ jobs:
           cp "/tmp/gt_deep_metrics_${{ matrix.task }}.md"   trial_results/ 2>/dev/null || true
 
           # Run provenance.
-          python3 -c "import json,os; json.dump({'schema':'gt.pro_run_provenance.v1','task':'${{ matrix.task }}','dockerhub_tag':'${{ matrix.dockerhub_tag }}','language':'${{ matrix.language }}','bench_sha':os.environ.get('GT_PRO_BENCH_SHA') or None,'gt_git_commit':os.environ.get('GITHUB_SHA') or None,'substrate_digest':os.environ.get('GT_SUBSTRATE_DIGEST') or None,'workflow_run_id':os.environ.get('GITHUB_RUN_ID') or None},open('trial_results/gt_artifacts/run_provenance.json','w'),indent=2)" \
+          python3 -c "import json,os; json.dump({'schema':'gt.live_lite_run_provenance.v1','task':'${{ matrix.task }}','language':'${{ matrix.language }}','gt_git_commit':os.environ.get('GITHUB_SHA') or None,'substrate_digest':os.environ.get('GT_SUBSTRATE_DIGEST') or None,'workflow_run_id':os.environ.get('GITHUB_RUN_ID') or None},open('trial_results/gt_artifacts/run_provenance.json','w'),indent=2)" \
             || echo "WARN: run_provenance.json write failed"
 
           # Outcome classification — reads jobs/<ts>/<task>__*/result.json (verifier_result)
