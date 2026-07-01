@@ -28,6 +28,8 @@ jobs:
       matrix: ${{ steps.build.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: gt-trial
 
       - name: Build task matrix from manifest
         id: build
@@ -46,30 +48,47 @@ jobs:
           TOTAL=$(wc -l < /tmp/task_artifacts.txt)
           echo "Task artifacts found: $TOTAL"
 
-          # Build matrix — one job per task
+          # Build batched matrix (GitHub 256-matrix cap; ~4 tasks per batch)
           python3 -c "
-          import json
+          import json, math, os
+
           tags = {}
           for line in open('benchmarks/data/swebench_pro_public_tags.jsonl'):
               r = json.loads(line)
               tags[r['instance_id']] = r['dockerhub_tag']
 
-          matrix = []
+          tasks = []
           for line in open('/tmp/task_artifacts.txt'):
               art = line.strip()
               iid = art.replace('pro-full-', '')
               tag = tags.get(iid, '')
               if not tag:
                   continue
-              matrix.append({'artifact': art, 'instance_id': iid, 'tag': tag})
+              tasks.append({'artifact': art, 'instance_id': iid, 'tag': tag})
 
-          print(f'Tasks with tags: {len(matrix)}')
-          out = json.dumps({'include': matrix})
+          BATCH_SIZE = max(1, math.ceil(len(tasks) / 200))
+          os.makedirs('/tmp/batches', exist_ok=True)
+          matrix = []
+          for i in range(0, len(tasks), BATCH_SIZE):
+              batch_id = i // BATCH_SIZE
+              batch = tasks[i:i+BATCH_SIZE]
+              with open(f'/tmp/batches/batch_{batch_id:03d}.json', 'w') as f:
+                  json.dump(batch, f)
+              matrix.append({'batch': f'{batch_id:03d}'})
+
+          print(f'Tasks: {len(tasks)}, Batches: {len(matrix)}, Per batch: {BATCH_SIZE}')
           with open('/tmp/matrix.json', 'w') as f:
-              f.write(out)
+              json.dump({'include': matrix}, f)
           "
 
           echo "matrix=$(cat /tmp/matrix.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload batch definitions
+        uses: actions/upload-artifact@v4
+        with:
+          name: rescore-batches
+          path: /tmp/batches/
+          retention-days: 3
 
   rescore:
     needs: prepare
@@ -80,16 +99,14 @@ jobs:
       fail-fast: false
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: gt-trial
 
-      - name: Download task artifact
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          mkdir -p /tmp/task
-          for rid in ${{ inputs.shard1 }} ${{ inputs.shard2 }} ${{ inputs.shard3 }}; do
-            gh run download "$rid" -n "${{ matrix.artifact }}" -D /tmp/task 2>/dev/null && break || true
-          done
-          ls -la /tmp/task/
+      - name: Download batch definition
+        uses: actions/download-artifact@v4
+        with:
+          name: rescore-batches
+          path: /tmp/batches
 
       - name: Clone SWE-bench Pro-OS (run_scripts)
         run: git clone --depth 1 https://github.com/scaleapi/SWE-bench_Pro-os.git /tmp/pro-os
@@ -101,88 +118,101 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Re-extract and score
-        id: score
+      - name: Score batch ${{ matrix.batch }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          LOG="/tmp/task/trial_output.log"
-          if [ ! -f "$LOG" ]; then
-            echo "result=NO_LOG" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          BATCH_FILE="/tmp/batches/batch_${{ matrix.batch }}.json"
+          [ ! -f "$BATCH_FILE" ] && echo "No batch file" && exit 0
 
-          # Check agent ran
-          if ! grep -q "COMPLETE_TASK_AND_SUBMIT" "$LOG" 2>/dev/null; then
-            echo "result=NO_SUBMIT" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          > /tmp/results_batch.txt
 
-          # Re-extract patch with fixed script
-          python3 scripts/swebench/extract_patch_from_log.py "$LOG" /tmp/patch.diff 2>/dev/null
-          if [ ! -s /tmp/patch.diff ]; then
-            echo "result=NO_PATCH" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          python3 -c "
+          import json
+          for t in json.load(open('$BATCH_FILE')):
+              print(f\"{t['artifact']}|{t['instance_id']}|{t['tag']}\")
+          " | while IFS='|' read -r artifact instance_id tag; do
+            echo "=== $instance_id ==="
 
-          echo "Patch extracted: $(wc -c < /tmp/patch.diff) bytes"
-
-          RUN_SCRIPT="/tmp/pro-os/run_scripts/${{ matrix.instance_id }}/run_script.sh"
-          if [ ! -f "$RUN_SCRIPT" ]; then
-            echo "result=NO_RUN_SCRIPT" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          IMG="ghcr.io/hbali-stack/sweap-images:${{ matrix.tag }}"
-          docker pull "$IMG" >/dev/null 2>&1 || { echo "result=PULL_FAIL" >> "$GITHUB_OUTPUT"; exit 0; }
-
-          result=$(timeout 600 docker run --rm \
-            -v "$(realpath /tmp/patch.diff):/tmp/pro_patch.diff:ro" \
-            -v "$(realpath "$RUN_SCRIPT"):/tmp/run_test.sh:ro" \
-            --entrypoint "" \
-            "$IMG" \
-            bash -c '
-              REPO_DIR=""
-              for _d in /app /testbed /workspace; do
-                if [ -d "$_d" ]; then REPO_DIR="$_d"; break; fi
-              done
-              [ -z "$REPO_DIR" ] && echo "NO_REPO" && exit 0
-              cd "$REPO_DIR"
-              if ! { git apply /tmp/pro_patch.diff 2>/dev/null || patch -p1 < /tmp/pro_patch.diff 2>/dev/null; }; then
-                echo "APPLY_FAIL"
-                exit 0
+            # Download this task's artifact
+            mkdir -p /tmp/task_dl
+            rm -rf /tmp/task_dl/*
+            downloaded=false
+            for rid in ${{ inputs.shard1 }} ${{ inputs.shard2 }} ${{ inputs.shard3 }}; do
+              if gh run download "$rid" -n "$artifact" -D /tmp/task_dl 2>/dev/null; then
+                downloaded=true; break
               fi
-              rc=0
-              bash /tmp/run_test.sh >/dev/null 2>&1 || rc=$?
-              if [ "$rc" -eq 0 ]; then echo "RESOLVED"; else echo "EVAL_FAIL"; fi
-            ' 2>/dev/null || echo "TIMEOUT")
+            done
+            if [ "$downloaded" != "true" ]; then
+              echo "${instance_id}|DL_FAIL" >> /tmp/results_batch.txt
+              continue
+            fi
 
-          result=$(echo "$result" | tail -1)
-          echo "=== ${{ matrix.instance_id }}: $result ==="
-          echo "result=$result" >> "$GITHUB_OUTPUT"
+            LOG="/tmp/task_dl/trial_output.log"
+            if [ ! -f "$LOG" ]; then
+              echo "${instance_id}|NO_LOG" >> /tmp/results_batch.txt
+              continue
+            fi
+            if ! grep -q "COMPLETE_TASK_AND_SUBMIT" "$LOG" 2>/dev/null; then
+              echo "${instance_id}|NO_SUBMIT" >> /tmp/results_batch.txt
+              continue
+            fi
 
-          if [ "$result" = "RESOLVED" ]; then
-            echo "${{ matrix.instance_id }}" > /tmp/resolved.txt
-          fi
+            # Re-extract patch
+            python3 scripts/swebench/extract_patch_from_log.py "$LOG" /tmp/patch.diff 2>/dev/null
+            if [ ! -s /tmp/patch.diff ]; then
+              echo "${instance_id}|NO_PATCH" >> /tmp/results_batch.txt
+              continue
+            fi
 
-      - name: Upload resolved marker
-        if: steps.score.outputs.result == 'RESOLVED'
+            RUN_SCRIPT="/tmp/pro-os/run_scripts/${instance_id}/run_script.sh"
+            if [ ! -f "$RUN_SCRIPT" ]; then
+              echo "${instance_id}|NO_RUN_SCRIPT" >> /tmp/results_batch.txt
+              continue
+            fi
+
+            IMG="ghcr.io/hbali-stack/sweap-images:${tag}"
+            docker pull "$IMG" >/dev/null 2>&1 || { echo "${instance_id}|PULL_FAIL" >> /tmp/results_batch.txt; continue; }
+
+            result=$(timeout 600 docker run --rm \
+              -v "$(realpath /tmp/patch.diff):/tmp/pro_patch.diff:ro" \
+              -v "$(realpath "$RUN_SCRIPT"):/tmp/run_test.sh:ro" \
+              --entrypoint "" \
+              "$IMG" \
+              bash -c '
+                REPO_DIR=""
+                for _d in /app /testbed /workspace; do
+                  if [ -d "$_d" ]; then REPO_DIR="$_d"; break; fi
+                done
+                [ -z "$REPO_DIR" ] && echo "NO_REPO" && exit 0
+                cd "$REPO_DIR"
+                if ! { git apply /tmp/pro_patch.diff 2>/dev/null || patch -p1 < /tmp/pro_patch.diff 2>/dev/null; }; then
+                  echo "APPLY_FAIL"
+                  exit 0
+                fi
+                rc=0
+                bash /tmp/run_test.sh >/dev/null 2>&1 || rc=$?
+                if [ "$rc" -eq 0 ]; then echo "RESOLVED"; else echo "EVAL_FAIL"; fi
+              ' 2>/dev/null || echo "TIMEOUT")
+
+            result=$(echo "$result" | tail -1)
+            echo "  -> $result"
+            echo "${instance_id}|${result}" >> /tmp/results_batch.txt
+
+            docker rmi "$IMG" >/dev/null 2>&1 || true
+          done
+
+          echo "=== BATCH ${{ matrix.batch }} DONE ==="
+          cat /tmp/results_batch.txt
+
+      - name: Upload batch results
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: resolved-${{ matrix.instance_id }}
-          path: /tmp/resolved.txt
+          name: rescore-result-${{ matrix.batch }}
+          path: /tmp/results_batch.txt
           retention-days: 14
-
-      - name: Upload result
-        if: always()
-        run: |
-          echo "${{ matrix.instance_id }}|${{ steps.score.outputs.result }}" > /tmp/result.txt
-
-      - name: Upload result marker
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: result-${{ matrix.instance_id }}
-          path: /tmp/result.txt
-          retention-days: 14
+          if-no-files-found: ignore
 
   summarize:
     needs: rescore
@@ -192,13 +222,13 @@ jobs:
       - name: Download all results
         uses: actions/download-artifact@v4
         with:
-          pattern: result-*
+          pattern: rescore-result-*
           path: /tmp/results
           merge-multiple: true
 
       - name: Final tally
         run: |
-          cat /tmp/results/*.txt 2>/dev/null | sort > /tmp/all_results.txt
+          cat /tmp/results/*.txt 2>/dev/null | sort -u > /tmp/all_results.txt
           TOTAL=$(wc -l < /tmp/all_results.txt)
           RESOLVED=$(grep '|RESOLVED' /tmp/all_results.txt | wc -l)
           EVAL_FAIL=$(grep '|EVAL_FAIL' /tmp/all_results.txt | wc -l)
