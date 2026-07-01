@@ -641,6 +641,22 @@ jobs:
           path: /tmp/gt-substrate.tar.gz
           key: ${{ steps.substrate_cache_key.outputs.key }}
 
+      - name: Construct Live Lite task image tag
+        run: |
+          TASK="${{ matrix.task }}"
+          REPO=$(echo "$TASK" | cut -d'_' -f1)
+          REST=$(echo "$TASK" | sed "s/^${REPO}__//")
+          BASENAME="sweb.eval.x86_64.${REPO}_1776_${REST}"
+          # Try GHCR first, fallback to dockerhub
+          GHCR_IMG="ghcr.io/${{ github.repository_owner }}/${BASENAME}:latest"
+          DH_IMG="docker.io/starryzhang/${BASENAME}:latest"
+          if docker manifest inspect "$GHCR_IMG" >/dev/null 2>&1; then
+            echo "LL_TASK_IMAGE=$GHCR_IMG" >> "$GITHUB_ENV"
+          else
+            echo "LL_TASK_IMAGE=$DH_IMG" >> "$GITHUB_ENV"
+          fi
+          echo "[GT_META] Live Lite image: ${LL_TASK_IMAGE:-$DH_IMG}"
+
       - name: GT substrate proof (handoff §B-AFTER/§D/§G) — pre-agent, pinned, read-only repo
         continue-on-error: true
         env:
@@ -650,6 +666,7 @@ jobs:
           GT_GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
           GT_GITHUB_SHA: ${{ github.sha }}
           GT_PROOF_HARNESS: deepswe
+          GT_MATRIX_IMAGE: ${{ env.LL_TASK_IMAGE }}
         run: bash scripts/ci/substrate_proof.sh
         # ^^ Inline shell code was extracted to scripts/ci/substrate_proof.sh to stay
         # under GHA's 21,000-character expression limit. All ${{ }} values are passed
