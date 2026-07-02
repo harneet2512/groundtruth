@@ -902,6 +902,101 @@ var strongBuiltinMethodNames = map[string]bool{
 	"loads": true, "dumps": true,
 }
 
+// Per-language builtin/stdlib method drop-sets. The two sets above are the
+// language-neutral (Python/stdlib-shaped) DEFAULT applied to every file (unchanged
+// behavior). These add the method names builtin to a SPECIFIC language so a
+// qualified-unresolved call to one is DROPPED rather than laundered into a
+// name_match edge to an arbitrary same-named user function (e.g. JS `promise.then()`
+// must not bind a user `then`). Keyed off the source file's language (derived from
+// its extension — the ONE-surface dispatch convention). Per-language DATA, never a
+// per-repo hardcode. Strictly ADDITIVE over the default sets: only ever drops MORE
+// speculative name_match garbage, never emits an edge the default set suppressed.
+// Correct-or-quiet: fire ONLY on qualifiedUnresolved calls (all receiver-typing
+// rungs already failed) — a resolved internal `this.map()` never reaches here.
+var (
+	builtinMethodNamesByLang = map[string]map[string]bool{
+		"javascript": jsBuiltinMethodNames,
+		"typescript": jsBuiltinMethodNames,
+		"rust":       rustBuiltinMethodNames,
+		"go":         goBuiltinMethodNames,
+	}
+
+	// jsBuiltinMethodNames: JS/TS Array/Promise/String/Object/Map/Set prototype
+	// methods NOT already in the neutral default set (join/split/replace/get/keys/
+	// values/add/clear are covered there).
+	jsBuiltinMethodNames = map[string]bool{
+		"then": true, "catch": true, "finally": true,
+		"map": true, "forEach": true, "filter": true, "reduce": true, "reduceRight": true,
+		"find": true, "findIndex": true, "some": true, "every": true,
+		"flat": true, "flatMap": true, "fill": true, "concat": true,
+		"push": true, "shift": true, "unshift": true, "splice": true, "slice": true,
+		"indexOf": true, "lastIndexOf": true, "includes": true,
+		"entries": true, "has": true, "set": true, "delete": true,
+		"bind": true, "call": true, "apply": true, "toString": true, "valueOf": true,
+		"hasOwnProperty": true, "trim": true, "trimStart": true, "trimEnd": true,
+		"padStart": true, "padEnd": true, "charAt": true, "charCodeAt": true,
+		"substring": true, "substr": true, "toLowerCase": true, "toUpperCase": true,
+		"match": true, "matchAll": true, "repeat": true,
+	}
+
+	// rustBuiltinMethodNames: ubiquitous Rust trait methods (Option/Result/Iterator/
+	// From/Into/Deref/AsRef).
+	rustBuiltinMethodNames = map[string]bool{
+		"unwrap": true, "expect": true, "clone": true, "into": true, "from": true,
+		"to_string": true, "to_owned": true, "as_str": true, "as_ref": true,
+		"as_mut": true, "as_slice": true, "borrow": true, "borrow_mut": true,
+		"iter": true, "iter_mut": true, "into_iter": true, "collect": true,
+		"unwrap_or": true, "unwrap_or_else": true, "unwrap_or_default": true,
+		"ok": true, "err": true, "is_some": true, "is_none": true,
+		"is_ok": true, "is_err": true, "is_empty": true, "len": true,
+		"contains": true, "get_mut": true, "next": true, "map_err": true,
+		"and_then": true, "or_else": true,
+	}
+
+	// goBuiltinMethodNames: Go single-method interface methods (Stringer/error). An
+	// unresolved receiver's String()/Error() is unresolvable garbage. Kept tiny — Go
+	// method resolution is Tier-1, over-dropping would blind the graph.
+	goBuiltinMethodNames = map[string]bool{
+		"String": true, "Error": true,
+	}
+)
+
+// isBuiltinMethodForLang reports whether calleeName is a builtin/stdlib method that
+// should be dropped for a qualified-unresolved call in the given source language.
+// The language-neutral default sets always apply (preserving the existing Python/
+// stdlib behavior for every file); the per-language set adds names builtin to that
+// specific language. lang is derived from the caller file extension.
+func isBuiltinMethodForLang(lang, calleeName string) bool {
+	if strongBuiltinMethodNames[calleeName] || builtinMethodNames[calleeName] {
+		return true
+	}
+	if set, ok := builtinMethodNamesByLang[lang]; ok {
+		return set[calleeName]
+	}
+	return false
+}
+
+// langFromFileExt maps a source file path to its language via extension — the same
+// ONE-surface, extension-based dispatch used elsewhere (LSP dispatch, BuildFileMap).
+// Returns "" for unknown extensions (the neutral default set still applies).
+// Language-agnostic DATA, no per-repo logic.
+func langFromFileExt(path string) string {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".py", ".pyi":
+		return "python"
+	case ".js", ".jsx", ".mjs", ".cjs":
+		return "javascript"
+	case ".ts", ".tsx", ".mts", ".cts":
+		return "typescript"
+	case ".go":
+		return "go"
+	case ".rs":
+		return "rust"
+	default:
+		return ""
+	}
+}
+
 // SetAssignmentIndex sets the global assignment index for Strategy 1.96.
 func SetAssignmentIndex(idx map[string]*AssignmentMap) {
 	assignmentIndex = idx
@@ -1691,8 +1786,16 @@ func Resolve(
 			}
 			if dotIdx175 > 0 {
 				qualifier := call.CalleeQualified[:dotIdx175]
-				if qualifier == "self" || qualifier == "this" || qualifier == "Self" {
-					callerMeta, hasMeta := nodeMeta[0][callerID]
+				callerMeta, hasMeta := nodeMeta[0][callerID]
+				// self/this/Self (Python/JS/TS/Java/Rust) OR the Go method's receiver
+				// VARIABLE name (`func (r *T) M(){ r.helper() }` — r is the Go analogue
+				// of self/this, supplied structurally in NodeMeta.ReceiverName by the
+				// signature parser). A call whose qualifier IS the caller's own receiver
+				// var resolves against the caller's type methods (Strategy 1.75) — a
+				// receiver self-call is an unambiguous FACT, not a name_match guess.
+				isReceiverSelf := qualifier == "self" || qualifier == "this" || qualifier == "Self" ||
+					(hasMeta && callerMeta.ReceiverName != "" && qualifier == callerMeta.ReceiverName)
+				if isReceiverSelf {
 					if hasMeta && callerMeta.ParentID != 0 {
 						memberName := call.CalleeQualified[dotIdx175+sep175:]
 						if targetID, found := lookupMethodWithInheritance(callerMeta.ParentID, memberName); found && targetID != callerID {
@@ -1740,7 +1843,7 @@ func Resolve(
 		// attempt; if one of them resolves the receiver to an internal class, the call
 		// IS internal and must not be dropped. The drop/demote moved to the last-chance
 		// block after 1.98 and still guards the receiver-UNPROVEN rungs (1.94/1.98).
-		builtinQualified := qualifiedUnresolved && (strongBuiltinMethodNames[calleeName] || builtinMethodNames[calleeName])
+		builtinQualified := qualifiedUnresolved && isBuiltinMethodForLang(langFromFileExt(call.File), calleeName)
 
 		// Strategy 1.9 fires here ONLY for UNQUALIFIED calls (the ACG/ECOOP 2022
 		// globally-unique-name property holds for bare names). Qualified calls go
@@ -3143,41 +3246,67 @@ func ChainReExports(
 		return 0
 	}
 
-	// Build reverse map: file path → all fileMap keys that point to it
-	fileToKeys := make(map[string][]string)
-	for key, files := range fm {
-		for _, fp := range files {
-			fileToKeys[fp] = append(fileToKeys[fp], key)
+	// Iterate to a FIXPOINT so transitive barrel chains resolve fully: A re-exports
+	// from B which re-exports from C. A single pass registers only each barrel's
+	// DIRECT source; the next pass lets a barrel's freshly-registered leaf files
+	// become visible to the barrels that import IT, and so on down the chain. HARD
+	// depth cap 16 — stop when a pass adds nothing (converged) OR the cap is hit
+	// (cycle / pathological chain). Deterministic: fm keys are collected and SORTED
+	// before the reverse-map build, so registration order never depends on Go map
+	// iteration order.
+	const maxReExportDepth = 16
+	totalChained := 0
+	for depth := 0; depth < maxReExportDepth; depth++ {
+		// Rebuild the reverse map (file path → fileMap keys pointing to it) from the
+		// CURRENT fm each pass — the previous pass mutated fm.
+		fileToKeys := make(map[string][]string)
+		keys := make([]string, 0, len(fm))
+		for key := range fm {
+			keys = append(keys, key)
 		}
-	}
-
-	chained := 0
-
-	for _, re := range reExports {
-
-		// Resolve the source module to file(s) via the shared 4-language resolver
-		// (resolveReExportTargets) — the SAME path ResolveReExports uses to emit
-		// RE_EXPORTS edges, so alias-chaining and edge-emission can never diverge.
-		sourceFiles := resolveReExportTargets(re, fm)
-		if len(sourceFiles) == 0 {
-			continue
-		}
-
-		// The re-exporting file's directory acts as the barrel.
-		// Register the source file under all keys that currently point to
-		// the barrel file, so imports through the barrel resolve to the source.
-		barrelFile := filepath.ToSlash(re.File)
-		barrelKeys := fileToKeys[barrelFile]
-
-		for _, sourceFile := range sourceFiles {
-			for _, key := range barrelKeys {
-				fm[key] = appendUnique(fm[key], sourceFile)
-				chained++
+		sort.Strings(keys)
+		for _, key := range keys {
+			for _, fp := range fm[key] {
+				fileToKeys[fp] = append(fileToKeys[fp], key)
 			}
 		}
+
+		passChained := 0
+		for _, re := range reExports {
+			// Resolve the source module to file(s) via the shared 4-language resolver
+			// (resolveReExportTargets) — the SAME path ResolveReExports uses to emit
+			// RE_EXPORTS edges, so alias-chaining and edge-emission can never diverge.
+			sourceFiles := resolveReExportTargets(re, fm)
+			if len(sourceFiles) == 0 {
+				continue
+			}
+
+			// The re-exporting file's directory acts as the barrel. Register each
+			// source file under all keys that currently point to the barrel file, so
+			// imports through the barrel resolve to the source.
+			barrelFile := filepath.ToSlash(re.File)
+			barrelKeys := fileToKeys[barrelFile]
+
+			for _, sourceFile := range sourceFiles {
+				for _, key := range barrelKeys {
+					before := len(fm[key])
+					fm[key] = appendUnique(fm[key], sourceFile)
+					// Count only ACTUAL additions (appendUnique dedups) so a pass that
+					// registers nothing new signals convergence and stops the loop.
+					if len(fm[key]) != before {
+						passChained++
+					}
+				}
+			}
+		}
+
+		totalChained += passChained
+		if passChained == 0 {
+			break // fixpoint reached — no new alias this pass
+		}
 	}
 
-	return chained
+	return totalChained
 }
 
 // resolveReExportTargets resolves a re-export's SourceModule to the indexed
@@ -3563,14 +3692,17 @@ func BuildFileMap(files []string, languages []string) map[string][]string {
 		case "rust":
 			// Rust: src/foo/bar.rs → "crate::foo::bar", "foo::bar", "bar"
 			slashPath := filepath.ToSlash(filePath)
-			// Strip multiple common prefixes for workspace crates
-			for _, pfx := range []string{"src/", "crates/", "core/engine/src/", "core/src/"} {
-				if strings.HasPrefix(slashPath, pfx) {
-					slashPath = strings.TrimPrefix(slashPath, pfx)
-					break
-				}
+			// Derive the crate source root GENERICALLY from the Cargo convention that
+			// every crate's modules live under its own `src/` dir — NO per-repo path
+			// literals. The "/src/" strip below removes any crate dir at ANY nesting
+			// depth (a member crate under a workspace, at any path), so only the ROOT
+			// crate's LEADING `src/` needs an explicit strip (it has no preceding
+			// "/src/" for the general pass to catch).
+			if strings.HasPrefix(slashPath, "src/") {
+				slashPath = strings.TrimPrefix(slashPath, "src/")
 			}
-			// Also strip any path up to and including "/src/"
+			// Strip any path up to and including the LAST "/src/" — the crate's src root
+			// at any depth. This subsumes the removed hardcoded workspace prefixes.
 			if idx := strings.LastIndex(slashPath, "/src/"); idx >= 0 {
 				slashPath = slashPath[idx+5:]
 			}
