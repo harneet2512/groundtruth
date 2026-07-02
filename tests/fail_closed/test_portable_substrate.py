@@ -167,6 +167,36 @@ def test_aggregate_without_require_records_but_passes():
     assert ok is True and failures == ["go=LSP_FAIL_NO_WARM"]
 
 
+def test_aggregate_incidental_language_missing_server_is_non_fatal():
+    # B-INFRA RED->GREEN: the live tutanota (TS repo) case — a few Java files make the
+    # detector see `java`, whose server (jdtls) this substrate does not ship, so java =
+    # LSP_INSTALL_MISSING. Its PRIMARY language (typescript) resolved fine, so the task
+    # must NOT INFRA-die: incidental java is RECORDED but non-fatal.
+    ok, failures = grp.aggregate_lsp_verdicts(
+        {"typescript": "LSP_ACTIVE_VALID", "java": "LSP_INSTALL_MISSING"},
+        require_lsp=True, any_success=True, primary_langs={"typescript"})
+    assert ok is True, "incidental (non-primary) missing server must not fail-close"
+    assert failures == ["java=LSP_INSTALL_MISSING"], "incidental failure still recorded"
+
+
+def test_aggregate_primary_language_missing_server_still_fatal():
+    # The other half: if the task's OWN (primary) language server is missing, the substrate
+    # genuinely can't serve it -> still fail-closed (no silent degrade of the real target).
+    ok, failures = grp.aggregate_lsp_verdicts(
+        {"typescript": "LSP_INSTALL_MISSING", "java": "LSP_INSTALL_MISSING"},
+        require_lsp=True, any_success=False, primary_langs={"typescript"})
+    assert ok is False and failures == ["typescript=LSP_INSTALL_MISSING"]
+
+
+def test_aggregate_no_primary_info_keeps_strict_backcompat():
+    # primary_langs=None -> original strict gate (every failure fatal); protects the
+    # existing pure unit tests / callers that don't pass primary_langs.
+    ok, failures = grp.aggregate_lsp_verdicts(
+        {"python": "LSP_ACTIVE_VALID", "java": "LSP_INSTALL_MISSING"},
+        require_lsp=True, any_success=True)
+    assert ok is False and failures == ["java=LSP_INSTALL_MISSING"]
+
+
 def test_per_language_certs_persisted_no_overwrite():
     # Source contract: each language's resolve pass writes lsp_certificate_<lang>.json
     # (no FAIL cert overwritten) and the dominant cert is copied to the canonical path.

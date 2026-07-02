@@ -713,7 +713,7 @@ def lsp_ready_budget_seconds(language: str, env=None) -> int:
     return 20
 
 
-def aggregate_lsp_verdicts(lang_verdicts: dict, *, require_lsp: bool, any_success: bool):
+def aggregate_lsp_verdicts(lang_verdicts: dict, *, require_lsp: bool, any_success: bool, primary_langs=None):
     """P1-e polyglot aggregation rule over per-language LSP verdicts -> (ok, failures).
 
     ``failures`` lists 'lang=verdict' for every language whose pass FAILED:
@@ -732,10 +732,22 @@ def aggregate_lsp_verdicts(lang_verdicts: dict, *, require_lsp: bool, any_succes
     NEVER-LAUNCHED server (LSP_FAIL_NO_WARM) or a missing binary (LSP_INSTALL_MISSING)
     is a hard fail.
 
-    Under ``require_lsp`` (GT_REQUIRE_LSP=1): ok=False if ANY known language failed —
-    a sibling language succeeding must NOT mask another language's gap — or if no
+    Under ``require_lsp`` (GT_REQUIRE_LSP=1): ok=False if a PRIMARY-language pass failed —
+    a sibling language succeeding must NOT mask the task's OWN language gap — or if no
     language resolved successfully at all. Without the flag, ok=True (verdicts are
-    still recorded for the certs/manifest). Pure + deterministic for the tests."""
+    still recorded for the certs/manifest). Pure + deterministic for the tests.
+
+    B-INFRA (2026-07-02): ``primary_langs`` scopes the fail-closed gate to the repo's
+    PRIMARY/dominant language(s). An INCIDENTAL language (a handful of files, not the
+    task's own language) whose server this substrate does not ship — e.g. a TS repo
+    (tutanota) carrying a few Java files when jdtls is not baked — must NOT fail-close
+    the whole task: its primary (TS) LSP resolved, the graph IS enriched, killing it
+    is a false INFRA death. So an incidental-language failure is RECORDED but non-fatal;
+    only a primary-language failure (the substrate genuinely can't serve the task's own
+    language) or NO language resolving at all is fatal. Correct-or-quiet, generalized to
+    ANY incidental unsupported language (c/cpp/ruby/...), not a java/jdtls special-case.
+    ``primary_langs=None`` keeps the original strict behavior (every failure fatal) so
+    the pure unit tests are unchanged."""
     failures = [
         f"{lg}={v}" for lg, v in lang_verdicts.items()
         if v in ("LSP_INSTALL_MISSING", "LSP_FAIL_NO_WARM")
@@ -743,11 +755,16 @@ def aggregate_lsp_verdicts(lang_verdicts: dict, *, require_lsp: bool, any_succes
     ]
     if not require_lsp:
         return True, failures
-    if failures:
-        return False, failures
+    if primary_langs:
+        _prim = {str(lg).lower() for lg in primary_langs}
+        fatal = [f for f in failures if f.split("=", 1)[0].lower() in _prim]
+    else:
+        fatal = failures  # back-compat: no primary info -> original strict gate
+    if fatal:
+        return False, fatal
     if not any_success:
         return False, ["<none>=NO_LANGUAGE_RESOLVED"]
-    return True, failures
+    return True, failures  # incidental-language failures recorded, non-fatal
 
 
 def emit_brief(out_dir: str, issue_text: str, work: str, graph: str, *, generator=None):
@@ -1281,10 +1298,24 @@ def main(argv=None) -> int:
     # resolve-error fails the proof under GT_REQUIRE_LSP=1 — a sibling language's success
     # must never mask another language's gap (audit defect #1), and a launched-but-
     # never-warm server is a failure, not a pass.
+    # B-INFRA: scope the fail-closed gate to the repo's PRIMARY/dominant language(s) so an
+    # incidental language whose server isn't baked (e.g. a few Java files in a TS repo, jdtls
+    # absent) does NOT falsely INFRA-kill a task whose own language resolved. Dominant lang from
+    # the graph + the declared task lang; both are already computed above the same way as `langs`.
+    _primary_langs = set()
+    try:
+        _dom = _detect_lang(graph)
+        if _dom:
+            _primary_langs.add(str(_dom).lower())
+    except Exception:
+        pass
+    if getattr(a, "lang", None):
+        _primary_langs.add(str(a.lang).lower())
     _agg_ok, _agg_failures = aggregate_lsp_verdicts(
         lang_verdicts,
         require_lsp=os.environ.get("GT_REQUIRE_LSP") == "1",
         any_success=lsp_ok,
+        primary_langs=_primary_langs or None,
     )
     if not _agg_ok:
         # FAIL-CLOSED (gt_gt §7 + the P1-e comment above): _agg_ok is only False when
