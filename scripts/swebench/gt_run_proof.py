@@ -20,6 +20,7 @@ and run_manifest.json. Exit code mirrors the foundational gate verdict (deliver-
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -56,7 +57,7 @@ PROOF_STAGES = (
 
 
 class _ProofTracker:
-    """Persist proof_progress.json + proof_failure.json (P0-02, P1-04/05)."""
+    """Persist proof_progress.json plus one canonical proof_verdict.json."""
 
     def __init__(self, out_dir: str) -> None:
         self.out_dir = out_dir
@@ -95,6 +96,19 @@ class _ProofTracker:
         self.stages.append(row)
         self._flush()
 
+    def verdict(self, state: str, stage: str, **extra) -> None:
+        payload = {
+            "schema": "gt.proof_verdict.v1",
+            "state": state,
+            "stage": stage,
+            "stages": self.stages,
+        }
+        payload.update(extra)
+        path = os.path.join(self.out_dir, "proof_verdict.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2)
+            fh.write("\n")
+
     def fail(self, stage: str, code: str, message: str, **extra) -> int:
         row = {"stage": stage, "status": "fail", "code": code, "message": message}
         row.update(self._memory_heartbeat())
@@ -113,6 +127,7 @@ class _ProofTracker:
         with open(fpath, "w", encoding="utf-8") as fh:
             json.dump(failure, fh, indent=2)
             fh.write("\n")
+        self.verdict("fail", stage, code=code, message=message, **extra)
         print(f"{code}: {message}", file=sys.stderr)
         return 2
 
@@ -283,13 +298,28 @@ def assert_commit_parity() -> tuple[bool, str]:
     st = commit_parity_status()
     if os.environ.get("GT_REQUIRE_COMMIT_PARITY") != "1":
         return True, f"commit_parity={st['status']} (gate off; record-only)"
-    if st["status"] == "mismatch":
+    if st["status"] != "match":
         return False, (
             f"GT_COMMIT_PARITY_MISMATCH: substrate built from {st['substrate_build_commit']} "
             f"but the run claims {st['run_commit']} — a stale substrate cannot run under "
             "GT_REQUIRE_COMMIT_PARITY=1; rebuild + repin the substrate at the run commit."
         )
     return True, f"commit_parity={st['status']}"
+
+
+def artifact_hashes(out_dir: str, names: list[str]) -> dict:
+    """SHA-256 bind proof artifacts into run_manifest; absent artifacts are omitted."""
+    out: dict[str, str] = {}
+    for name in names:
+        p = os.path.join(out_dir, name)
+        if not os.path.isfile(p):
+            continue
+        h = hashlib.sha256()
+        with open(p, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                h.update(chunk)
+        out[name] = h.hexdigest()
+    return out
 
 
 def build_run_manifest(*, graph_db: str, out_dir: str, languages: list, lsp_scope_files: int,
@@ -308,6 +338,8 @@ def build_run_manifest(*, graph_db: str, out_dir: str, languages: list, lsp_scop
         "lsp_ready_budgets": lsp_ready_budgets,
         "gate_rc": gate_rc,
         "artifacts_present": artifacts_present,
+        "artifact_sha256": artifact_hashes(out_dir, sorted(artifacts_present)),
+        "proof_verdict_schema": "gt.proof_verdict.v1",
         "source_root": source_root,
         "out": out_dir,
         # ── provenance: which code / substrate / task repo produced this run ──
@@ -447,15 +479,14 @@ def _detect_lang(graph_db: str) -> str:
 
 def _run(cmd: list[str], env: dict | None = None) -> int:
     print(f"[gt-run-proof] $ {' '.join(cmd)}", flush=True)
-    return subprocess.run(cmd, env=env or os.environ.copy()).returncode
+    return subprocess.run(cmd, env=env or clean_env_projection(os.environ)).returncode
 
 
 _EVAL_LEAK_ENV = ("FAIL_TO_PASS", "PASS_TO_PASS", "GOLD_PATCH", "GOLD_FILES", "TEST_PATCH",
                   "GT_GOLD", "SWE_GOLD", "SWE_TEST_PATCH")
-# GT-owned diagnostic env vars that legitimately CONTAIN a leak token but are NOT an
-# evaluator injection (GT sets these itself — e.g. emit_brief's GT_LOCALIZATION_GOLD_FILES
-# localization diagnostic). They must never trip EVAL_LEAKAGE_FORBIDDEN.
-_EVAL_LEAK_ENV_ALLOW = frozenset({"GT_LOCALIZATION_GOLD_FILES"})
+# GT-owned diagnostic env vars could be allowlisted here, but the proof path currently
+# treats every gold/test/evaluator-shaped env key as tainted, including GT-prefixed keys.
+_EVAL_LEAK_ENV_ALLOW = frozenset()
 _EVAL_LEAK_FILES = {"test_patch.diff", "gold_patch.diff", "test_patch", "gold_patch",
                     "fail_to_pass.json", "pass_to_pass.json", "eval.sh", "run_tests.sh",
                     "eval_spec.json", "run_instance.sh", "fail_to_pass", "pass_to_pass"}
@@ -463,10 +494,8 @@ _EVAL_LEAK_FILES = {"test_patch.diff", "gold_patch.diff", "test_patch", "gold_pa
 
 def _env_is_eval_leak(key: str) -> bool:
     """True iff an env key carries an evaluator-artifact token as a WHOLE underscore-
-    delimited word-run — NOT a mere substring. ``GOLD_FILES`` / ``SWE_GOLD_FILES`` leak;
-    GT's own ``GT_LOCALIZATION_GOLD_FILES`` diagnostic does NOT (word-boundary + allowlist).
-    Fixes the ``'GOLD_FILES' in 'GT_LOCALIZATION_GOLD_FILES'`` substring false-trip that
-    aborted the run before emit_brief's gold diagnostic could run."""
+    delimited word-run. ``GOLD_FILES`` / ``SWE_GOLD_FILES`` leak, and GT-prefixed
+    keys with the same token sequence are blocked too."""
     ku = key.upper()
     if ku in _EVAL_LEAK_ENV_ALLOW:
         return False
@@ -497,6 +526,22 @@ def eval_leakage(source_root: str) -> list:
     except Exception:
         pass
     return leaks
+
+
+def clean_env_projection(src: dict) -> dict:
+    """Environment passed to proof subprocesses: preserve runtime knobs, drop eval/gold taint."""
+    out: dict[str, str] = {}
+    allowed_prefixes = (
+        "GT_", "PYTHON", "PATH", "HOME", "LANG", "LC_", "TZ", "TMP", "TEMP",
+        "XDG_", "GOCACHE", "GOMODCACHE", "GOPATH", "GOTOOLCHAIN", "CARGO_",
+        "RUST", "NODE_", "NPM_", "YARN_", "HF_", "TRANSFORMERS_",
+    )
+    for k, v in src.items():
+        if _env_is_eval_leak(k):
+            continue
+        if k in {"PATH", "HOME", "USER", "USERNAME", "SHELL"} or any(k.startswith(p) for p in allowed_prefixes):
+            out[k] = v
+    return out
 
 
 _LSP_LANGS = {"python", "go", "javascript", "typescript", "rust", "java", "c", "cpp", "ruby", "php"}
@@ -731,8 +776,7 @@ def emit_brief(out_dir: str, issue_text: str, work: str, graph: str, *, generato
     try:
         from groundtruth.runtime.localization_diagnostic import validate_brief_payload
 
-        _gold_env = os.environ.get("GT_LOCALIZATION_GOLD_FILES", "")
-        _gold_files = [p.strip() for p in _gold_env.replace(";", ",").split(",") if p.strip()]
+        _gold_files: list[str] = []
         _full_potential = os.environ.get("GT_FULL_POTENTIAL", "0") == "1"
         _strict_diag = (
             _full_potential
@@ -897,10 +941,24 @@ def _strict_broken_gate_signals(gate_report_path: str):
     except Exception:
         return None
     broken: list[str] = []
+    verdict = (rep.get("verdict") or {})
+    # B-1: fail-close ONLY on the GENUINE catastrophic-under-resolution signal — pred_A
+    # (det% below the SAFETY floor: method calls never left name_match) — NOT on the benign
+    # name_match-DOMINANCE carve-out (pred_B: name_match > det), which CLAUDE.md documents as
+    # the EXPECTED state of large JS/TS/Go repos (Known Limitation #1) and which the
+    # deliver-always doctrine treats as deliverable. resolution_jarvis = pred_A AND pred_B, so
+    # keying on it here refused big repos at proof — the exact scale class GT targets (this
+    # function's own docstring says GATE-1-OFF must never be returned here). Read the granular
+    # pred_A from gate_resolution; fall back to the combined signal only when the detail is
+    # absent (older report → conservative STRICT posture).
+    gres = (rep.get("gate_resolution") or {})
+    if gres.get("pred_A_det_floor") is False:
+        broken.append("RESOLUTION_GRAPH_FAIL (GATE 1 pred_A: det% below SAFETY floor — catastrophic under-resolution)")
+    elif "pred_A_det_floor" not in gres and verdict.get("resolution_jarvis") is False:
+        broken.append("RESOLUTION_GRAPH_FAIL (GATE 1 resolution OFF; granular pred_A unavailable)")
     lp = (rep.get("gate_lsp") or {})
     if lp.get("stamp_mismatch"):
         broken.append(f"LSP_STAMP_DROPPED_AFTER_RESOLVE ({lp.get('stamp_mismatch')})")
-    verdict = (rep.get("verdict") or {})
     if verdict.get("lsp_enrichment") is False:
         broken.append("LSP_DARK (GATE 2 LSP-liveness OFF)")
     present = ((rep.get("gate_embedder") or {}).get("present") or {})
@@ -1044,7 +1102,7 @@ def main(argv=None) -> int:
     _gt_paths = os.pathsep.join([os.path.join(GT_HOME, "src"),
                                  os.path.join(GT_HOME, "scripts", "swebench"),
                                  os.path.join(GT_HOME, "benchmarks", "swebench"), GT_HOME])
-    base_env = os.environ.copy()
+    base_env = clean_env_projection(os.environ)
     base_env.update({"PYTHONPATH": _gt_paths + (os.pathsep + _pp if _pp else ""), "GT_HOME": GT_HOME,
                      "GT_MODELS_ROOT": os.environ.get("GT_MODELS_ROOT", os.path.join(GT_HOME, "models")),
                      "GT_SOURCE_ROOT": work, "GT_GRAPH_DB": graph,
@@ -1405,12 +1463,16 @@ def main(argv=None) -> int:
     #   foundational_gate_report.json); a gate_rc=1 never blocks the paid agent trial.
     if os.environ.get("GT_GATES_DELIVER_ALWAYS") == "0":
         if rc == 0:
+            tracker.verdict("ok", "artifact_contract", gate_rc=rc, artifacts_present=present)
             return 0
         broken = _strict_broken_gate_signals(gate_report)
         if broken is None:
-            print(f"[gt-run-proof] STRICT: gate report unreadable — cannot isolate the benign "
-                  f"name_match carve-out; honoring raw gate rc={rc} (conservative).", flush=True)
-            return rc
+            return tracker.fail(
+                "gates", "FOUNDATIONAL_GATE_STRICT_FAIL",
+                f"GT_GATES_DELIVER_ALWAYS=0 (STRICT) - gate report unreadable; "
+                f"honoring raw gate rc={rc} (conservative).",
+                gate_rc=rc,
+            )
         if broken:
             return tracker.fail(
                 "gates", "FOUNDATIONAL_GATE_STRICT_FAIL",
@@ -1418,10 +1480,18 @@ def main(argv=None) -> int:
                 "signal(s): " + "; ".join(broken),
                 gate_rc=rc,
             )
-        print("[gt-run-proof] STRICT: gate rc!=0 attributable ONLY to the benign name_match-"
-              "dominance carve-out (GATE 1 pred_B) — substrate DELIVERABLE, agent runs.",
-              flush=True)
+        # B-1: broken == [] with gate rc != 0 means the ONLY gate failures were the DELIVERABLE
+        # carve-outs — benign name_match-DOMINANCE (pred_B) and/or weak per-issue semantic
+        # (GATE 3b) — which _strict_broken_gate_signals intentionally excludes and the
+        # deliver-always doctrine + this path's docstring ("empty == deliverable") treat as
+        # non-refusals (the consumer fact-gates already suppress name_match). Every GENUINE
+        # signal (pred_A det-floor, LSP stamp-drop/dark, embedder-dead) is captured above and
+        # fails there, so an empty `broken` is a DELIVERABLE gate rc, not a refusal. Refusing
+        # here (the old behavior) killed large name_matchy repos at proof — the exact scale
+        # class GT targets, and the bug this path's own docstring warns against.
+        tracker.verdict("ok", "artifact_contract_name_match_carveout", gate_rc=rc, artifacts_present=present)
         return 0
+    tracker.verdict("ok", "artifact_contract", gate_rc=rc, artifacts_present=present)
     return 0
 
 

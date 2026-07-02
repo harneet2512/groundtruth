@@ -657,7 +657,7 @@ func promoteComposes(db *store.DB, idx *promoteIndexes, add addEdgeFunc) error {
 		exact := stripTypeGenerics(strings.TrimLeft(strings.TrimSpace(ftype), "*&"))
 		var targetID int64
 		var matched string
-		if exact != "" {
+		if exact != "" && idx.classNameCount[exact] == 1 {
 			if id, ok := idx.classByName[exact]; ok && id != nodeID {
 				targetID, matched = id, exact
 			}

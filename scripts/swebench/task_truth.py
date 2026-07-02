@@ -346,6 +346,7 @@ def build_task_truth(
     consumption_summary = _consumption_summary(deep)
     horizon_summary = _verification_horizon_summary(deep, verifier_semantics)
     runtime_ledger_summary = _runtime_ledger_summary(arts.runtime_ledger)
+    structured_adapter_witness = _load_json(arts.adapter_witness or "") or {}
 
     return {
         "schema": "gt.task_truth.v1",
@@ -390,6 +391,8 @@ def build_task_truth(
                 "gt_prebuilt_active": signal.get("gt_prebuilt_active"),
                 "hook_hash_match": signal.get("hook_hash_match"),
                 "gt_meta_present": signal.get("gt_meta_present"),
+                "structured_path": arts.adapter_witness,
+                "structured": structured_adapter_witness,
             },
         },
         "outcome": {

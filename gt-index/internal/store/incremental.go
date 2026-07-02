@@ -46,6 +46,10 @@ type IncomingEdgeRef struct {
 	// carried for parity with the full resolver index (it reads qualified_name)
 	// so the incremental path resolves against a non-lobotomized node view.
 	TargetQualifiedName string
+	// Metadata is the edge's metadata column (B6) — e.g. api_edges route info. It
+	// is source-side (call-site) data unchanged by re-parsing the TARGET file, so a
+	// -file reindex must RESTORE it verbatim rather than nulling it (info-loss).
+	Metadata string
 }
 
 // SnapshotIncomingEdgesTx captures cross-file edges whose target is a node
@@ -75,15 +79,20 @@ func SnapshotIncomingEdgesTx(tx *sql.Tx, filePath string, cap int) ([]IncomingEd
 	rows, err := tx.Query(
 		`SELECT e.source_id, e.source_line, e.type, COALESCE(e.source_file, ''), n.name,
 		        COALESCE(e.resolution_method, ''), COALESCE(e.confidence, 0.0),
-		        COALESCE(e.evidence_type, ''), COALESCE(n.qualified_name, '')
+		        COALESCE(e.evidence_type, ''), COALESCE(n.qualified_name, ''),
+		        COALESCE(e.metadata, '')
 		   FROM edges e
 		   JOIN nodes n ON e.target_id = n.id
 		  WHERE n.file_path = ?
 		    AND (e.source_file IS NULL OR e.source_file != ?)
 		    AND (e.resolution_method IS NULL OR e.resolution_method NOT LIKE 'promote_%')
+		  ORDER BY e.id
 		  LIMIT ?`,
 		filePath, filePath, cap,
 	)
+	// B-9: ORDER BY e.id makes the cap boundary DETERMINISTIC — when the LIMIT is hit
+	// (B7), *which* incoming edges survive is now id-ordered, not SQLite-scan-order
+	// dependent (parity with the determinism the resolver/closure already enforce).
 	if err != nil {
 		return nil, fmt.Errorf("snapshot incoming edges for %s: %w", filePath, err)
 	}
@@ -93,10 +102,21 @@ func SnapshotIncomingEdgesTx(tx *sql.Tx, filePath string, cap int) ([]IncomingEd
 	for rows.Next() {
 		var r IncomingEdgeRef
 		if err := rows.Scan(&r.SourceID, &r.SourceLine, &r.EdgeType, &r.SourceFile, &r.TargetName,
-			&r.ResolutionMethod, &r.Confidence, &r.EvidenceType, &r.TargetQualifiedName); err != nil {
+			&r.ResolutionMethod, &r.Confidence, &r.EvidenceType, &r.TargetQualifiedName, &r.Metadata); err != nil {
 			return nil, fmt.Errorf("scan incoming edge: %w", err)
 		}
 		out = append(out, r)
+	}
+	// B7: the LIMIT is a defensive bound, but a SILENT truncation would delete
+	// incoming edges (DeleteFileEdgesAndNodesTx) that this snapshot then fails to
+	// restore → permanent edge loss until the source files are themselves reindexed.
+	// Never silent (CLAUDE.md "no silent caps"): flag it loudly when the cap is hit so
+	// a hub over the bound is visible; a full reindex recovers. len(out)==cap is the
+	// only observable signal short of a separate COUNT(*).
+	if len(out) == cap {
+		fmt.Fprintf(os.Stderr, "WARNING: SnapshotIncomingEdgesTx hit the %d-row cap for %s — "+
+			"incoming cross-file edges beyond the cap will NOT be restored after this reindex; "+
+			"run a full index if edge loss is suspected\n", cap, filePath)
 	}
 	return out, rows.Err()
 }
@@ -186,7 +206,7 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string)
 	ins, err := tx.Prepare(
 		`INSERT INTO edges (source_id, target_id, type, source_line, source_file,
 		 resolution_method, confidence, metadata, trust_tier, candidate_count, evidence_type, verification_status)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, 'unverified')`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unverified')`,
 	)
 	if err != nil {
 		return 0, 0, fmt.Errorf("prepare incoming insert: %w", err)
@@ -326,8 +346,14 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string)
 		} else {
 			srcFile = r.SourceFile
 		}
+		// B6: restore metadata verbatim (NULL when the original was empty, matching
+		// prior behavior for metadata-less edges — so only real metadata is carried).
+		var edgeMeta interface{}
+		if r.Metadata != "" {
+			edgeMeta = r.Metadata
+		}
 		if _, err := ins.Exec(r.SourceID, targetID, r.EdgeType, r.SourceLine, srcFile,
-			method, conf, tier, len(ids), evType); err != nil {
+			method, conf, edgeMeta, tier, len(ids), evType); err != nil {
 			return restored, unresolved, fmt.Errorf("insert restored edge: %w", err)
 		}
 		restored++

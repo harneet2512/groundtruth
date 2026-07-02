@@ -490,7 +490,8 @@ func (d *DB) GetAllEdges(minConf float64) ([]*Edge, error) {
 		`SELECT id, source_id, target_id, type, source_line, COALESCE(source_file, ''),
 		        COALESCE(resolution_method, ''), COALESCE(confidence, 0.0)
 		   FROM edges
-		  WHERE COALESCE(confidence, 0.0) >= ?`,
+		  WHERE COALESCE(confidence, 0.0) >= ?
+		  ORDER BY id`,
 		minConf,
 	)
 	if err != nil {

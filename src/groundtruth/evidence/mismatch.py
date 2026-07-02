@@ -14,6 +14,8 @@ import re
 import sqlite3
 import sys
 
+from groundtruth.evidence.fact_gate import edge_fact_and
+
 MIN_EDGE_CONFIDENCE = 0.5
 
 # Names that are part of the language/stdlib surface, NOT agent-introduced
@@ -91,13 +93,7 @@ def detect_stale_references(
 
 
 def _confidence_clause(conn: sqlite3.Connection, alias: str = "e") -> str:
-    try:
-        cols = conn.execute("PRAGMA table_info(edges)").fetchall()
-    except sqlite3.Error:
-        return ""
-    if any(row[1] == "confidence" for row in cols):
-        return f" AND COALESCE({alias}.confidence, {MIN_EDGE_CONFIDENCE}) >= {MIN_EDGE_CONFIDENCE}"
-    return ""
+    return edge_fact_and(conn, alias=alias)
 
 
 def _extract_removed_identifiers(diff_text: str) -> list[str]:

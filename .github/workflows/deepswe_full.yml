@@ -66,6 +66,14 @@ on:
         description: "GT_PROACTIVE_TOPN — front-load compact contract/callers for the top-N [INFO]-dropped brief candidates. 1 = OFF (byte-identical default / A-B OFF arm); 4 = ON. Baked code path — takes effect ONLY on a substrate rebuilt with the change."
         required: false
         default: "1"
+      verify_structural_risk:
+        description: "GT_VERIFY_STRUCTURAL_RISK — at VERIFY, surface blast-radius caller-tests for a structural edit (Q3 consumption lever, gt_mini_patch). 0 = OFF (default; arm only after the per-method FP profile is known). 1 = ON."
+        required: false
+        default: "0"
+      gt_arm:
+        description: "Paired-run arm: gt enables GT; baseline sets GT_BASELINE=1 and does not require substrate proof."
+        required: false
+        default: "gt"
 
 permissions:
   contents: write   # live-log bridge force-pushes per-task logs to gha-live-logs/<task> branches
@@ -111,6 +119,10 @@ env:
   # candidates. BAKED code path — active only on a substrate rebuilt with the change; the
   # A/B toggles OFF(1)/ON(4) via the proactive_topn dispatch input on ONE rebuilt image.
   GT_PROACTIVE_TOPN: ${{ github.event.inputs.proactive_topn || '1' }}
+  # Q3 consumption lever (synced agent path; gt_mini_patch reads it). Default 0 = OFF
+  # (byte-identical current behavior). Forwarded to the agent container via --ae below.
+  GT_VERIFY_STRUCTURAL_RISK: ${{ github.event.inputs.verify_structural_risk || '0' }}
+  GT_BASELINE: ${{ inputs.gt_arm == 'baseline' && '1' || '0' }}
   # Legitimacy: the per-task graph must be built FRESH from THIS task's repo — never a
   # cross-run / stale / out-of-repo prebuilt graph.db. In substrate-consume mode the graph
   # the substrate emits to /gt_artifacts FROM the mounted /work:ro IS that fresh per-task
@@ -805,6 +817,7 @@ jobs:
           echo "[OOMFIX] daemon (job-start): storage-driver=$(docker info -f '{{.Driver}}' 2>/dev/null) | MemoryHigh=11G GOMEMLIMIT=10GiB vm.dirty_bytes=256M (reverted 4GiB clamp that broke container start)"
 
       - name: GT substrate proof (handoff §B-AFTER/§D/§G) — pre-agent, pinned, read-only repo
+        if: ${{ inputs.gt_arm != 'baseline' }}
         continue-on-error: true
         env:
           GT_MATRIX_TASK: ${{ matrix.task }}
@@ -884,7 +897,9 @@ jobs:
 
           PROOF_STATE=$(python3 - <<'PY'
           import json, pathlib
-          p = pathlib.Path("/tmp/gt/proof_status.json")
+          p = pathlib.Path("/tmp/gt/proof_verdict.json")
+          if not p.exists():
+              p = pathlib.Path("/tmp/gt/proof_status.json")
           if not p.exists():
               print("missing")
           else:
@@ -894,8 +909,8 @@ jobs:
                   print("invalid")
           PY
           )
-          if [ "$PROOF_STATE" != "ok" ]; then
-            echo "GT_RUN_PROOF_FAIL: refusing paid agent run because substrate proof_status state=${PROOF_STATE}" | tee -a trial_output.log
+          if [ "${GT_BASELINE:-0}" != "1" ] && [ "$PROOF_STATE" != "ok" ]; then
+            echo "GT_RUN_PROOF_FAIL: refusing paid agent run because substrate proof verdict state=${PROOF_STATE}" | tee -a trial_output.log
             exit 1
           fi
 
@@ -1056,6 +1071,8 @@ jobs:
             --ae GT_STEP_LIMIT="${GT_STEP_LIMIT:-}" \
             --ae GT_VERIFICATION_CYCLE_COST="${GT_VERIFICATION_CYCLE_COST:-}" \
             --ae GT_SELF_VERIFY_ATTEMPTS="${GT_SELF_VERIFY_ATTEMPTS:-}" \
+            --ae GT_BASELINE="${GT_BASELINE:-0}" \
+            --ae GT_VERIFY_STRUCTURAL_RISK="${GT_VERIFY_STRUCTURAL_RISK:-0}" \
             --ae GT_MOUNT_MODE="1" \
             "${GT_AE_ARGS[@]}" \
             --ae GT_ESC_ADV_TCOV="${GT_ESC_ADV_TCOV:-}" \
@@ -1120,7 +1137,7 @@ jobs:
 
       - name: Verify DeepSWE adapter witness (§E DEEPSWE_ADAPTER_FAIL / §H consumption proof)
         continue-on-error: true
-        if: ${{ !cancelled() && env.GT_PORTABLE_SUBSTRATE == '1' }}
+        if: ${{ !cancelled() && env.GT_PORTABLE_SUBSTRATE == '1' && inputs.gt_arm != 'baseline' }}
         run: |
           # AGENT-OBSERVATION truth: the adapter emitted a [GT_META] witness to stdout. Prove
           # (1) it consumed the substrate graph (gt_prebuilt_active=true) and (2) the consumed
@@ -1153,13 +1170,17 @@ jobs:
           cp trial_output.log trial_results/ 2>/dev/null || true
           cp /tmp/gt/proof_output.log trial_results/ 2>/dev/null || true
           cp /tmp/gt/graph.db trial_results/graph.db 2>/dev/null || true
+          if [ -s trial_results/graph.db ]; then
+            python3 scripts/swebench/resolution_method_audit.py --sample-limit 25 \
+              trial_results/graph.db > trial_results/gt_artifacts/resolution_method_audit.json 2>/dev/null || true
+          fi
           # §F.10 — upload the 8 GT artifacts the substrate emitted (the proof set, incl.
           # brief.txt + per-language LSP certs), even on task failure. graph.db is already
           # copied above; mirror the certs + manifests + brief.
           for a in runtime_context.json lsp_certificate.json graph_certificate.json \
                    embedder_certificate.json foundational_gate_report.json run_manifest.json \
-                   brief.txt gt_issue_anchors.json gt_scope_files.txt gt_lsp_metrics.txt \
-                   proof_progress.json proof_failure.json proof_status.json dep_store_manifest.json; do
+                   brief.txt brief_result.json gt_issue_anchors.json gt_scope_files.txt gt_lsp_metrics.txt \
+                   proof_progress.json proof_failure.json proof_verdict.json proof_status.json dep_store_manifest.json; do
             cp "/tmp/gt/$a" "trial_results/gt_artifacts/$a" 2>/dev/null || true
           done
           # P1-e: per-language LSP certificates (polyglot aggregation — no FAIL cert overwritten)
@@ -1179,6 +1200,8 @@ jobs:
           # wrongly stamps outcome_failure_class=GT, contradicting the (correct) outcome authority.
           # trial_output.log (tee'd by the agent step, carries the post-agent [GT_META]) is at CWD.
           GT_TRIAL_LOG=trial_output.log python3 scripts/swebench/task_truth.py jobs trial_results/task_truth.json 2>/dev/null || true
+          python3 scripts/swebench/industrial_sota_validation_gate.py trial_results \
+            > trial_results/industrial_sota_validation.json 2>/dev/null || true
           if [ -d jobs ]; then
             mkdir -p trial_results/jobs
             find jobs -type f \( -name 'result.json' -o -name 'patch.diff' -o -name '*.patch' -o -name '*.trajectory.json' -o -name '*.json' -o -name '*.log' \) -size -25M -print0 \

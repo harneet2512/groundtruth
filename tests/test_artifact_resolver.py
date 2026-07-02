@@ -34,7 +34,9 @@ def test_brief_provenance_match():
             task_truth=None,
             outcome_json=None,
             oracle_events=None,
+            runtime_ledger=None,
             delivered_instruction=delivered,
+            adapter_witness=None,
             brief_txt=brief,
         )
         prov = mod.brief_provenance(arts)
@@ -62,7 +64,9 @@ def test_brief_provenance_matches_wrapped_instruction():
             task_truth=None,
             outcome_json=None,
             oracle_events=None,
+            runtime_ledger=None,
             delivered_instruction=delivered,
+            adapter_witness=None,
             brief_txt=brief,
         )
         prov = mod.brief_provenance(arts)

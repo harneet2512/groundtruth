@@ -167,8 +167,9 @@ jobs:
               continue
             fi
 
-            # Re-extract patch
-            python3 scripts/swebench/extract_patch_from_log.py "$LOG" /tmp/patch.diff 2>/dev/null
+            # Re-extract patch AND repair terminal-wrapping (the fix for the 523
+            # APPLY_FAIL: split diff headers / wrapped code lines from the PTY).
+            python3 scripts/swebench/unwrap_patch.py --from-log "$LOG" /tmp/patch.diff 2>/dev/null
             if [ ! -s /tmp/patch.diff ]; then
               echo "${instance_id}|NO_PATCH" >> /tmp/results_batch.txt
               continue

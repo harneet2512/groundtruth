@@ -345,8 +345,9 @@ _ROOT_DETECT = (
     f"mkdir -p {_GT_DIR}; chmod 755 {_GT_DIR}; "
     'REPO_ROOT=""; '
     'for d in /home/user /testbed /workspace /app /repo; do '
-    '[ -d "$d/.git" ] && REPO_ROOT="$d" && break; done; '
-    '[ -z "$REPO_ROOT" ] && REPO_ROOT=$(find / -maxdepth 3 -name .git -type d '
+    '[ -e "$d/.git" ] && git -C "$d" rev-parse --show-toplevel >/tmp/gt_root_candidate 2>/dev/null '
+    '&& REPO_ROOT="$(cat /tmp/gt_root_candidate)" && break; done; '
+    '[ -z "$REPO_ROOT" ] && REPO_ROOT=$(find / -maxdepth 3 -name .git '
     '2>/dev/null | head -1 | sed "s|/.git||"); '
     '[ -z "$REPO_ROOT" ] && REPO_ROOT="/home/user"; '
     f'echo "$REPO_ROOT" > {_GT_DIR}/gt_root.txt; '
@@ -1010,11 +1011,13 @@ async def _write_brief_artifact(brief: str, environment: "BaseEnvironment") -> s
             'if [ -n "$EXCL" ]; then mkdir -p "$(dirname "$EXCL")"; '
             "grep -qxF '.groundtruth/' \"$EXCL\" 2>/dev/null "
             "|| echo '.groundtruth/' >> \"$EXCL\"; fi; "
-            f'mkdir -p "$ROOT/.groundtruth" && echo {b64} | base64 -d > "$ROOT/{rel}" && '
+            f'if [ -e "$ROOT/{rel}" ]; then echo GT_BRIEF_ARTIFACT_SKIPPED_EXISTS; exit 0; fi; '
+            f'TMP="$ROOT/{rel}.tmp.$$"; mkdir -p "$ROOT/.groundtruth" && '
+            f'echo {b64} | base64 -d > "$TMP" && mv -n "$TMP" "$ROOT/{rel}" && '
             # self-verify: inside a work tree but NOT ignored -> remove + fail-closed
             'if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then '
             f'if git check-ignore -q "{rel}" 2>/dev/null; then echo "GT_BRIEF_ARTIFACT_OK $ROOT"; '
-            f'else rm -f "$ROOT/{rel}"; echo GT_BRIEF_ARTIFACT_FAILED_NOT_IGNORED; fi; '
+            f'else rm -f "$ROOT/{rel}" "$TMP"; echo GT_BRIEF_ARTIFACT_FAILED_NOT_IGNORED; fi; '
             'else echo "GT_BRIEF_ARTIFACT_OK $ROOT"; fi'
         )
         res = await environment.exec(command=cmd, timeout_sec=30)
@@ -1614,6 +1617,7 @@ class GTMiniSweAgent(_BASE_AGENT):  # type: ignore[misc]
         # ADDITIVE: the turn-0 prepend above is unchanged (fail-closed delivery).
         # Patch-safe (.git/info/exclude) + fail-open; the pointer is appended ONLY
         # when the write is confirmed (correct-or-quiet — never point at a missing file).
+        _art = None
         try:
             if brief:
                 _art = await _write_brief_artifact(brief, environment)
@@ -1658,6 +1662,9 @@ class GTMiniSweAgent(_BASE_AGENT):  # type: ignore[misc]
                 "brief_match": bool(brief and brief in augmented),
                 "brief_match_semantics": "delivered_brief_block_or_containment",
                 "brief_chars": len(brief or ""),
+                "workspace_brief_artifact": _art,
+                "workspace_brief_pointer_delivered": bool(_art and _artifact_pointer(_art) in augmented),
+                "workspace_brief_reread_command_delivered": bool(_art and f"cat {_art}" in augmented),
             }
             with open("/tmp/gt/adapter_witness.json", "w", encoding="utf-8") as _wf:
                 _json.dump(witness, _wf, indent=2)

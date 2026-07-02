@@ -191,6 +191,7 @@ gt-index/gt-index*.exe
 /RUN_LEDGER*.md
 /DOC_OF_HONOR.md
 /BRIEFING.md
+/ALREADY_BUILT.md
 .tmp_gt_*/
 .tmp_*/
 

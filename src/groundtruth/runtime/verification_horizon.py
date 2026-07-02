@@ -29,6 +29,7 @@ def verify_horizon_band(
     test_coverage: float | None,
     has_edits: bool,
     last_test_failed: bool = False,
+    confidence_tier: str | None = None,
     thresholds: HorizonThresholds | None = None,
 ) -> str | None:
     if step_limit is None or step_limit <= 0 or not has_edits:
@@ -44,6 +45,13 @@ def verify_horizon_band(
         return "gate"
     if budget >= th.urgent_budget and tc < th.urgent_test_coverage:
         return "urgent"
+    tier = (confidence_tier or "").strip().lower()
+    # B-4: a LOW-confidence localization advises verification SOONER than the budget-gated
+    # regular advisory below (its purpose). But it must still require ec_pos — you cannot
+    # advise "verify your edit" before any creditable edit exists — else, once un-deadened,
+    # it would fire on nearly every early turn (noise / correct-or-quiet violation).
+    if tier == "low" and tc < th.urgent_test_coverage and ec_pos:
+        return "advisory"
     if budget >= th.advisory_budget and tc < th.advisory_test_coverage and ec_pos:
         return "advisory"
     return None

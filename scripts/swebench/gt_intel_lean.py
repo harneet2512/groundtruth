@@ -54,7 +54,7 @@ def check_staleness(db_path: str, source_file: str, root: str) -> str | None:
 
 # ── v15: Admissibility gate ────────────────────────────────────────────────
 # Edges with verified resolution pass (Go indexer is source of truth).
-VERIFIED_RESOLUTIONS = frozenset({"same_file", "import", "name_match"})
+VERIFIED_RESOLUTIONS = frozenset({"same_file", "import"})
 
 
 def _resolution_sql_in() -> tuple[str, tuple[str, ...]]:
@@ -105,7 +105,7 @@ def verify_admissibility_gate(conn: sqlite3.Connection) -> bool:
         if leaks > 0:
             print(f"WARNING: {leaks} same_file cross-file leaks — removing same_file from gate",
                   file=sys.stderr)
-            VERIFIED_RESOLUTIONS = frozenset({"import", "name_match"})
+            VERIFIED_RESOLUTIONS = frozenset({"import"})
             return False
     except Exception:
         pass

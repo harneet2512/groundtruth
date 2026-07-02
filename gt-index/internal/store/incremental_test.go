@@ -499,6 +499,80 @@ func TestSnapshotIncomingEdgesExcludesPromotedDepthEdges(t *testing.T) {
 	}
 }
 
+// B6 — an incoming edge's metadata (e.g. api_edges route info) must SURVIVE a -file
+// reindex: SnapshotIncomingEdgesTx must carry it and ResolveIncomingEdgesTx must write it
+// back verbatim. Before the fix the snapshot never selected metadata and the restore INSERT
+// hardcoded metadata=NULL → the column was erased on every incremental reindex.
+// Mutation: not selecting metadata (RED at snap check) / restoring NULL (RED at restore check).
+func TestResolveIncomingEdgesPreservesMetadata(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "graph.db")
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := createSchema(db); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(
+		`INSERT INTO nodes (id, label, name, file_path, language) VALUES
+		 (1, 'Function', 'caller', 'src/caller.py', 'python'),
+		 (4, 'Method',   'save',   'src/models.py', 'python')`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	const wantMeta = "route:GET /x|sig:save(self)"
+	if _, err := tx.Exec(
+		`INSERT INTO edges
+		   (source_id, target_id, type, source_line, source_file, resolution_method, confidence, metadata, trust_tier, candidate_count, evidence_type, verification_status)
+		 VALUES (1, 4, 'CALLS', 10, 'src/caller.py', 'import', 1.0, ?, 'CERTIFIED', 1, 'ast_call', 'unverified')`,
+		wantMeta,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	snap, err := SnapshotIncomingEdgesTx(tx, "src/models.py", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap) != 1 {
+		t.Fatalf("snapshot len=%d; expected 1", len(snap))
+	}
+	if snap[0].Metadata != wantMeta {
+		t.Fatalf("snapshot dropped metadata: got %q want %q", snap[0].Metadata, wantMeta)
+	}
+
+	// Simulate the reindex: delete the target node + its edges, re-insert `save`
+	// under a fresh id, then restore the snapshotted incoming edge.
+	if _, err := tx.Exec(`DELETE FROM edges WHERE target_id = 4`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`DELETE FROM nodes WHERE id = 4`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO nodes (id, label, name, file_path, language) VALUES (5, 'Method', 'save', 'src/models.py', 'python')`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ResolveIncomingEdgesTx(tx, snap, "src/models.py"); err != nil {
+		t.Fatal(err)
+	}
+	var gotMeta string
+	if err := tx.QueryRow(`SELECT COALESCE(metadata, '') FROM edges WHERE source_id = 1 AND target_id = 5`).Scan(&gotMeta); err != nil {
+		t.Fatal(err)
+	}
+	if gotMeta != wantMeta {
+		t.Fatalf("restored edge erased metadata: got %q want %q", gotMeta, wantMeta)
+	}
+}
+
 // TestResolveIncomingEdgesDemotesVerifiedUniqueOnRenameReplace is the BITING test for
 // the P0 incremental-restore laundering fix. A cross-file edge resolved as
 // `verified_unique` (conf 0.95, CERTIFIED) — a tier earned by GLOBAL UNIQUENESS of the

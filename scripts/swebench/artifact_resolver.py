@@ -21,6 +21,7 @@ class TrialArtifacts:
     oracle_events: str | None
     runtime_ledger: str | None
     delivered_instruction: str | None
+    adapter_witness: str | None
     brief_txt: str | None
 
     def as_dict(self) -> dict[str, str | None]:
@@ -35,6 +36,7 @@ class TrialArtifacts:
             "oracle_events": self.oracle_events,
             "runtime_ledger": self.runtime_ledger,
             "delivered_instruction": self.delivered_instruction,
+            "adapter_witness": self.adapter_witness,
             "brief_txt": self.brief_txt,
         }
 
@@ -149,6 +151,7 @@ def resolve_trial_artifacts(
                 break
 
     delivered = None
+    adapter_witness = None
     brief = None
     for base in (trial_dir, os.path.dirname(jobs_dir) if jobs_dir else None, "/tmp/gt"):
         if not base:
@@ -156,10 +159,13 @@ def resolve_trial_artifacts(
         d = os.path.join(base, "delivered_instruction.txt")
         if os.path.isfile(d):
             delivered = d
+        aw = os.path.join(base, "adapter_witness.json")
+        if os.path.isfile(aw):
+            adapter_witness = aw
         b = os.path.join(base, "gt_artifacts", "brief.txt")
         if os.path.isfile(b):
             brief = b
-        if delivered and brief:
+        if delivered and brief and adapter_witness:
             break
 
     return TrialArtifacts(
@@ -173,6 +179,7 @@ def resolve_trial_artifacts(
         oracle_events=oracle_events,
         runtime_ledger=runtime_ledger,
         delivered_instruction=delivered,
+        adapter_witness=adapter_witness,
         brief_txt=brief,
     )
 

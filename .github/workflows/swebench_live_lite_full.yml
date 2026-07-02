@@ -867,13 +867,19 @@ jobs:
               export GT_ROOT_FILE=/tmp/gt_root.txt
               echo "[GT] repo root: $REPO_ROOT"
 
-              # Install mini-swe-agent (not in task images — they are bare repos)
+              # Install mini-swe-agent (not in task images — they are bare repos).
+              # mini-swe-agent 2.4.3 requires Python >=3.10, but 155/300 Live Lite
+              # images ship Python 3.6/3.8/3.9 (audited via the registry config blob),
+              # where `pip install mini-swe-agent` FAILS. So the uv fallback MUST
+              # provision its own managed Python 3.11 (`--python 3.11`) — deterministic
+              # across every image regardless of the base Python in the container. The
+              # old `uv pip install --system` fallback installed into the <3.10 system
+              # Python and silently failed on those 155 images; it is removed.
               echo "[GT] installing mini-swe-agent..."
               pip install --quiet datacurve-pier 2>/dev/null || pip install --quiet mini-swe-agent 2>/dev/null || {
-                # Fallback: try uv
                 curl -LsSf https://astral.sh/uv/install.sh 2>/dev/null | sh 2>/dev/null
-                export PATH="$HOME/.local/bin:$PATH"
-                uv tool install mini-swe-agent 2>/dev/null || uv pip install --system mini-swe-agent 2>/dev/null
+                export PATH="$HOME/.local/bin:/root/.local/bin:$PATH"
+                uv tool install --python 3.11 mini-swe-agent 2>/dev/null || uv tool install mini-swe-agent 2>/dev/null
               }
               # Verify installation
               if ! command -v mini-swe-agent >/dev/null 2>&1; then
@@ -971,7 +977,6 @@ jobs:
             PATCH_FILES=$(grep -c '^diff --git' "$PATCH_FILE" 2>/dev/null || echo 0)
             echo "EVAL_DEFERRED: patch extracted (${PATCH_SIZE} bytes, ${PATCH_FILES} files) — scoring via Microsoft harness" | tee -a trial_output.log
             cp "$PATCH_FILE" trial_results/agent_patch.diff
-          fi
           fi
 
           # L2: the Pro grade was historically written ONLY to trial_results/reward.txt,
@@ -1149,3 +1154,42 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "Per-task detail: \`outcome.json\` + \`gt_deep_metrics_<task>.json\` + \`gt_artifacts/\` inside each \`ll-full-<task>\` artifact." >> "$GITHUB_STEP_SUMMARY"
           echo "Pull any task MID-RUN: \`gh run download <run_id> -n ll-full-<task> -R <owner>/groundtruth\`." >> "$GITHUB_STEP_SUMMARY"
+
+      # ── Bridge to the OFFICIAL evaluator ────────────────────────────────────
+      # The inference workflow emits one raw agent_patch.diff per task; the
+      # official grader (live_lite_eval.yml -> swebench.harness.run_evaluation,
+      # --dataset SWE-bench-Live/SWE-bench-Live --split lite --namespace
+      # starryzhang) needs ONE predictions.jsonl. Assemble it here and publish it
+      # as predictions-<run_id> — the exact artifact live_lite_eval.yml consumes.
+      # Without this bridge there is NO clean path to an official score (the gap
+      # that made SWE-Pro unscoreable). The denominator is pinned to the full
+      # dataset so empty/absent tasks count as unresolved, never silently dropped.
+      - name: Build predictions.jsonl for the official evaluator
+        run: |
+          DS=benchmarks/data/swebench_live_lite.jsonl
+          if [ "$(wc -l < "$DS" 2>/dev/null || echo 0)" -lt 100 ]; then
+            GH_TOKEN="${{ secrets.GITHUB_TOKEN }}" gh release download pipeline-assets-v1 \
+              -p swebench_live_lite.jsonl -D benchmarks/data/ --clobber 2>/dev/null || true
+          fi
+          # Fail closed on a narrowed denominator: the dataset MUST be the full set,
+          # never a truncated git copy (which would silently shrink resolved-rate's
+          # denominator and inflate the score). 250 = slack under the 300 canonical.
+          DS_LINES=$(wc -l < "$DS" 2>/dev/null || echo 0)
+          if [ "$DS_LINES" -lt 250 ]; then
+            echo "::error::DATASET_TRUNCATED: $DS has $DS_LINES lines (<250); refusing to build a narrowed-denominator predictions.jsonl"
+            exit 1
+          fi
+          mkdir -p /tmp/predictions
+          python3 scripts/swebench/build_ll_predictions.py \
+            /tmp/all /tmp/predictions/predictions.jsonl \
+            --expected "$DS" \
+            --model "GroundTruth + mini-swe-agent + ${{ inputs.model }}" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload predictions for the official evaluator
+        uses: actions/upload-artifact@v4
+        with:
+          name: predictions-${{ github.run_id }}
+          path: /tmp/predictions/predictions.jsonl
+          retention-days: 90
+          if-no-files-found: error

@@ -4566,7 +4566,8 @@ def _estimate_v() -> int:
 def verify_horizon_band(action_count: int, step_limit: int | None,
                         v: int, edit_coverage: float | None,
                         test_coverage: float | None, has_edits: bool,
-                        last_test_failed: bool = False) -> str | None:
+                        last_test_failed: bool = False,
+                        confidence_tier: str | None = None) -> str | None:
     """The band decision function - delivery-engine STAGE 4 (2026-06-11):
     band edges are functions of the BEHAVIORAL signals, not budget constants.
 
@@ -4595,6 +4596,7 @@ def verify_horizon_band(action_count: int, step_limit: int | None,
         test_coverage,
         has_edits,
         last_test_failed=last_test_failed,
+        confidence_tier=confidence_tier,
         thresholds=_ProductHorizonThresholds(
             advisory_test_coverage=_ESC_ADV_TCOV,
             advisory_budget=_ESC_ADV_B,
@@ -4618,6 +4620,33 @@ def _render_verify_emission(band: str, action_count: int, step_limit: int,
     return _product_render_verify_emission(
         band, action_count, step_limit, edited_rels, covering_tests,
         risk_note=risk_note)
+
+
+def _brief_confidence_tier() -> str | None:
+    """Read localization confidence tier from substrate proof artifacts."""
+    import json as _j
+    for base in (
+        os.environ.get("GT_CERT_DIR", ""),
+        os.environ.get("GT_ARTIFACTS_DIR", ""),
+        "/tmp/gt",
+    ):
+        if not base:
+            continue
+        path = os.path.join(base, "brief_result.json")
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = _j.load(f)
+            tier = (
+                data.get("confidence_tier")
+                or (data.get("structured") or {}).get("confidence_tier")
+                or (data.get("localization") or {}).get("confidence_tier")
+                or (data.get("metrics") or {}).get("confidence_tier")  # B-4: brief_cache persists it under metrics
+            )
+            if isinstance(tier, str) and tier.strip():
+                return tier.strip().lower()
+        except Exception:
+            continue
+    return None
 
 # Obligation SYMBOLS only (the edit_coverage_ratio numerator domain) — from
 # the per-task anchors artifact's obligations[], never the anchor superset
@@ -4784,6 +4813,7 @@ def _verification_horizon_candidate() -> tuple[float, str, str, bool] | None:
         # RECENCY: the MOST RECENT sensed test outcome (never "any fail
         # ever" — a recovered-then-passing agent must not get a false pivot).
         last_test_failed=_last_test_outcome_failed,
+        confidence_tier=_brief_confidence_tier(),
     )
 
     if band is None:

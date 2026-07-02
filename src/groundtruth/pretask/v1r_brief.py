@@ -153,12 +153,18 @@ def _edge_conf_clause(graph_db: str, alias: str = "e") -> str:
         # the categorical FACT cannot be asserted, so consumers must treat the
         # joined rows as unverified (correct-or-quiet at the render layer).
         return ""
-    try:
-        from groundtruth.hooks.post_edit import _edge_filter_for_db
-
-        return "AND " + _edge_filter_for_db(graph_db, alias=alias, min_conf=EDGE_CONFIDENCE_FLOOR)
-    except Exception:
-        return f"AND {alias}.confidence >= {EDGE_CONFIDENCE_FLOOR}"
+    if _has_resolution_method(graph_db):
+        # B-3: agree edge-for-edge with the Go closure's admission rule
+        # (closure.isVerifiedEdge: method ∈ set AND confidence >= MinEdgeConfidence=0.7).
+        # Method-only admitted ambiguity-demoted deterministic edges (import/same_file/lsp
+        # @0.6/CANDIDATE) as bare FACTS — the wrong-file "Calls:" lead — diverging from the
+        # closure. The AND conjunct keeps genuine facts (conf 1.0/0.9) and drops the 0.6
+        # ambiguous picks to the (unverified) render path. EDGE_CONFIDENCE_FLOOR == 0.7.
+        return (
+            f"AND LOWER(TRIM({alias}.resolution_method)) IN ({_DET_METHOD_INLIST}) "
+            f"AND {alias}.confidence >= {EDGE_CONFIDENCE_FLOOR}"
+        )
+    return f"AND {alias}.confidence >= {EDGE_CONFIDENCE_FLOOR}"
 
 
 def _file_is_namematch_only(graph_db: str, file_path: str) -> bool:
@@ -1505,6 +1511,24 @@ def _expand_via_test_coimport(
 # anchors_within_1_hop / 3), so >= 0.33 means >= 1 issue-anchor is a direct
 # call-graph neighbour — a real structural subject match, not float noise. Keeps
 # anchor-matched but witness-less gold out of the [INFO] drop (BUG-3).
+def _anchors_path(*, for_write: bool = False) -> str:
+    """Per-task gt_issue_anchors.json path (B10). Mirrors gt_mini_patch._anchors_path so
+    the brief's WRITE lands where the in-container consumers READ. Priority:
+    GT_ANCHORS_PATH -> $GT_CERT_DIR/gt_issue_anchors.json -> /tmp fallback. GT_CERT_DIR is
+    the per-task substrate mount, so keying on it stops two tasks on one host from sharing
+    a single mutable /tmp file (determinism / cross-task isolation). for_write=True skips
+    the isfile check (the file does not exist yet at write time)."""
+    p = os.environ.get("GT_ANCHORS_PATH")
+    if p:
+        return p
+    cert = os.environ.get("GT_CERT_DIR", "")
+    if cert:
+        cand = os.path.join(cert, "gt_issue_anchors.json")
+        if for_write or os.path.isfile(cand):
+            return cand
+    return "/tmp/gt_issue_anchors.json"
+
+
 _ANCHOR_PROX_WARN_FLOOR = 0.33
 
 
@@ -1805,7 +1829,7 @@ def _render_obligations_block(
         spec = None
         try:
             import json as _obl_json
-            with open("/tmp/gt_issue_anchors.json", encoding="utf-8") as _obl_f:
+            with open(_anchors_path(), encoding="utf-8") as _obl_f:
                 _obl_data = _obl_json.load(_obl_f)
             _persisted = _obl_data.get("obligations") or []
             if _persisted:
@@ -3192,9 +3216,7 @@ def _apply_evidence_rrf(
             continue
         _p = str(_rec.get("path", ""))
         _pn = _p.replace("\\", "/").lstrip("./").lstrip("/")
-        if not _rec.get("witness_verified", False) and (
-            _rec.get("_exact_issue_named") or wv.get(_p) or wv.get(_pn)
-        ):
+        if not _rec.get("witness_verified", False) and (wv.get(_p) or wv.get(_pn)):
             _rec["witness_verified"] = True
         if "_loc_rank" not in _rec:
             _r = lr.get(_p)
@@ -3602,20 +3624,30 @@ def generate_v1r_brief(
                 _obligations = _spec.to_serializable()
             except Exception:
                 _obligations = []
-            try:
-                with open("/tmp/gt_issue_anchors.json", "w", encoding="utf-8") as _af:
-                    _json_anch.dump({
-                        "symbols": sorted(_anchors_obj.symbols),
-                        "paths": sorted(_anchors_obj.paths),
-                        "test_names": sorted(_anchors_obj.test_names),
-                        "title_symbols": sorted(getattr(_anchors_obj, "title_symbols", set())),
-                        "code_symbols": sorted(getattr(_anchors_obj, "code_symbols", set())),
-                        "unresolved_code_symbols": sorted(
-                            getattr(_anchors_obj, "unresolved_code_symbols", set())),
-                        "obligations": _obligations,
-                    }, _af)
-            except OSError:
-                pass  # non-container / read-only /tmp (e.g. unit tests) — no consumer
+            _anch_payload = {
+                "symbols": sorted(_anchors_obj.symbols),
+                "paths": sorted(_anchors_obj.paths),
+                "test_names": sorted(_anchors_obj.test_names),
+                "title_symbols": sorted(getattr(_anchors_obj, "title_symbols", set())),
+                "code_symbols": sorted(getattr(_anchors_obj, "code_symbols", set())),
+                "unresolved_code_symbols": sorted(
+                    getattr(_anchors_obj, "unresolved_code_symbols", set())),
+                "obligations": _obligations,
+            }
+            # B10 hardening: write to the per-task path, but if that fails (e.g. a
+            # misconfigured/absent $GT_CERT_DIR pointing at a nonexistent dir) fall back to
+            # the always-writable /tmp so the anchors artifact is never SILENTLY lost.
+            # correct-or-quiet only when BOTH targets are unwritable (unit tests / RO fs).
+            _anch_targets = [_anchors_path(for_write=True)]
+            if "/tmp/gt_issue_anchors.json" not in _anch_targets:
+                _anch_targets.append("/tmp/gt_issue_anchors.json")
+            for _ap in _anch_targets:
+                try:
+                    with open(_ap, "w", encoding="utf-8") as _af:
+                        _json_anch.dump(_anch_payload, _af)
+                    break
+                except OSError:
+                    continue
             _loc = localize(issue_text, graph_db, top_k=8, issue_anchors=_anchors_obj,
                            repo_root=repo_root)
         except Exception:

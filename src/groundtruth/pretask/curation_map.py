@@ -132,6 +132,14 @@ _DETERMINISTIC_METHODS: frozenset[str] = DETERMINISTIC_RESOLUTION_METHODS
 # MIN_CONFIDENCE.
 _NAME_MATCH_FLOOR = 0.5
 
+# B-3: a deterministic-method edge is a FACT only at/above this confidence — matches the Go
+# closure's admission floor (closure.MinEdgeConfidence = 0.7, RF-4/#B7) so the Python consumer
+# FACT set agrees edge-for-edge with the transitive closure. Ambiguity-demoted deterministic
+# picks (import/same_file @0.6/CANDIDATE) fall BELOW it and are NOT facts (they stay visible as
+# unverified leads). conf <= 0.0 is the no-confidence sentinel (pre-v14 / no-conf-column graph,
+# curation_map:587 conf_f=0.0) → trust the method (back-compat, never a regression).
+_FACT_CONFIDENCE_FLOOR = 0.7
+
 # ---------------------------------------------------------------------------
 # DEPTH RELATIONSHIPS on the SCOPE/MAP surface (gt_new.md §6 + Appendix H
 # "trickle-down" — the OWED wiring). The Go promote pass (Pass 4f, promote.go)
@@ -339,7 +347,13 @@ class Edge:
         callee gate, which normalizes the same way; the deterministic methods are
         already lowercase, so normalization only widens, never narrows, the set.
         """
-        return (self.resolution_method or "").strip().lower() in _DETERMINISTIC_METHODS
+        if (self.resolution_method or "").strip().lower() not in _DETERMINISTIC_METHODS:
+            return False
+        # B-3: agree with the closure's AND-rule (method ∈ set AND conf >= 0.7). A real
+        # ambiguity-demoted deterministic pick (import/same_file @0.6/CANDIDATE) is NOT a
+        # fact — it stays visible as an unverified lead (Edge.visible clears the 0.5 floor).
+        # conf <= 0.0 is the no-confidence sentinel (no-conf-column graph) → trust the method.
+        return self.confidence >= _FACT_CONFIDENCE_FLOOR or self.confidence <= 0.0
 
     @property
     def visible(self) -> bool:

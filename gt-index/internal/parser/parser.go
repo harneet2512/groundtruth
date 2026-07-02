@@ -524,7 +524,12 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 			name = assignedFunctionExpressionName(node, sf, src)
 		}
 		if name != "" {
-			sig := extractDecoratorPrefix(node, src) + extractSignature(node, src, spec.BodyField)
+			// B9: the SIGNATURE is a fact/contract surface (typed param list + return, per
+			// D2) — it must NOT carry decorator prose. Decorators previously prepended here
+			// (`@decorator def bar(y):`) polluted the [CALLEE]/Contract render + the resolver's
+			// signature-fingerprint parsers. Decorators remain captured for security tagging
+			// (extractSecurityTags) and, for classes, as class_decorator properties.
+			sig := extractSignature(node, src, spec.BodyField)
 			retType := extractFieldText(node, spec.ReturnTypeField, src)
 
 			// Compute qualified name: Parent.Name for methods, just Name for top-level
@@ -1360,48 +1365,6 @@ func extractFirstIdentifier(node *sitter.Node, src []byte) string {
 	return ""
 }
 
-// extractDecoratorPrefix returns a function/method's decorators (Python
-// @classmethod/@staticmethod/@property, JS/TS @Component, ...) as a single
-// trailing-spaced prefix to prepend to the signature, so the [SIBLINGS] /
-// [CALLEE] renderers carry the modifier the bare `def`/header omits (the
-// @classmethod-vs-@staticmethod fix-shaping fact, 2026-06-23). Mirrors
-// extractClassDecorators' two strategies: a decorated_definition parent
-// (Python) and preceding `decorator` siblings (JS/TS). Language-uniform:
-// returns "" for any node with no adjacent decorator (Go/Rust/plain fns).
-func extractDecoratorPrefix(node *sitter.Node, src []byte) string {
-	clean := func(n *sitter.Node) string {
-		t := strings.TrimSpace(n.Content(src))
-		if i := strings.IndexByte(t, '\n'); i >= 0 {
-			t = strings.TrimSpace(t[:i])
-		}
-		if len(t) > 80 {
-			t = t[:77] + "..."
-		}
-		return t
-	}
-	var decs []string
-	if parent := node.Parent(); parent != nil && parent.Type() == "decorated_definition" {
-		for i := 0; i < int(parent.ChildCount()); i++ {
-			if c := parent.Child(i); c != nil && c.Type() == "decorator" {
-				if t := clean(c); t != "" {
-					decs = append(decs, t)
-				}
-			}
-		}
-	} else {
-		// preceding decorator siblings come closest-first; prepend to keep order
-		for prev := node.PrevSibling(); prev != nil && prev.Type() == "decorator"; prev = prev.PrevSibling() {
-			if t := clean(prev); t != "" {
-				decs = append([]string{t}, decs...)
-			}
-		}
-	}
-	if len(decs) == 0 {
-		return ""
-	}
-	return strings.Join(decs, " ") + " "
-}
-
 // extractSignature returns the FULL declaration header of a function node:
 // everything from the node start up to (not including) its body child — so
 // trait bounds, where-clauses, generic constraints, throws clauses, and
@@ -1853,13 +1816,28 @@ func extractJSImportClause(node *sitter.Node, modulePath, file string, src []byt
 		case "named_imports":
 			extractJSNamedImports(child, modulePath, file, src, line, result)
 		case "namespace_import":
-			// import * as X — wildcard
+			// import * as X from './m' — register the whole-module wildcard AND the
+			// namespace ALIAS X (B1-followup). The alias lets the resolver's package-alias
+			// branch resolve a qualified `X.foo()` to m.foo at import/1.0; without it the
+			// B1 receiver-blind guard (correctly) skips the bare-name lookup for the
+			// qualified call and it degrades to name_match. CJS `const X = require()`
+			// already emits its alias — this brings ES namespace imports to parity.
 			result.Imports = append(result.Imports, ImportRef{
 				ImportedName: "*",
 				ModulePath:   modulePath,
 				File:         file,
 				Line:         line,
 			})
+			for j := 0; j < int(child.ChildCount()); j++ {
+				if id := child.Child(j); id != nil && id.Type() == "identifier" {
+					result.Imports = append(result.Imports, ImportRef{
+						ImportedName: id.Content(src),
+						ModulePath:   modulePath,
+						File:         file,
+						Line:         line,
+					})
+				}
+			}
 		}
 	}
 }

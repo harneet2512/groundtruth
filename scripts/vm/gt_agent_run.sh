@@ -599,6 +599,29 @@ man = jload(os.path.join(rp, "run_manifest.json")) or {}
 got = str(man.get("substrate_digest") or "")
 if want and got and got != want:
     print(f"REUSE_REJECT: substrate_digest mismatch (proof={got} != pinned={want})", file=sys.stderr); sys.exit(1)
+# (4) strict proof verdict/status and gate rc must be clean
+verdict = jload(os.path.join(rp, "proof_verdict.json")) or {}
+if verdict and str(verdict.get("state") or "").lower() != "ok":
+    print(f"REUSE_REJECT: proof_verdict state={verdict.get('state')!r}", file=sys.stderr); sys.exit(1)
+status = jload(os.path.join(rp, "proof_status.json")) or {}
+if not verdict and status and str(status.get("state") or "").lower() != "ok":
+    print(f"REUSE_REJECT: proof_status state={status.get('state')!r}", file=sys.stderr); sys.exit(1)
+if man.get("gate_rc") not in (0, None):
+    print(f"REUSE_REJECT: run_manifest gate_rc={man.get('gate_rc')!r}", file=sys.stderr); sys.exit(1)
+# (5) required artifact hashes in run_manifest must match the bytes being reused
+hashes = man.get("artifact_sha256") or {}
+if hashes:
+    import hashlib
+    for name, expected in hashes.items():
+        path = os.path.join(rp, name)
+        if not os.path.isfile(path):
+            print(f"REUSE_REJECT: hashed artifact missing: {name}", file=sys.stderr); sys.exit(1)
+        h = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                h.update(chunk)
+        if h.hexdigest() != str(expected):
+            print(f"REUSE_REJECT: artifact hash mismatch: {name}", file=sys.stderr); sys.exit(1)
 sys.exit(0)
 PYV
       then
@@ -609,7 +632,7 @@ PYV
     if [ "$missing" -eq 0 ]; then
       for c in graph.db runtime_context.json lsp_certificate.json graph_certificate.json \
                embedder_certificate.json foundational_gate_report.json run_manifest.json \
-               brief.txt gt_issue_anchors.json gt_scope_files.txt gt_lsp_metrics.txt issue.txt; do
+               brief.txt brief_result.json proof_verdict.json gt_issue_anchors.json gt_scope_files.txt gt_lsp_metrics.txt issue.txt; do
         cp -f "$REUSE_PROOF_DIR/$id/$c" "$art_dir/$c" 2>/dev/null || true
       done
       # Per-language LSP certs (lsp_certificate_<lang>.json) — glob; absent on

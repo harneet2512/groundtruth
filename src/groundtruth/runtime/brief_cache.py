@@ -29,6 +29,10 @@ _METRIC_FIELDS = (
     "effective_w_sem", "semantic_signal_count",
     "rendered_candidate_count", "k_sem_top", "sem_components",
     "localization_proof",
+    # B-4: persist the localization confidence tier so the L5b verify-horizon reader
+    # (gt_mini_patch._brief_confidence_tier) can consume it. Previously omitted -> the
+    # tier never reached the agent -> the LOW-tier verify advisory shipped DEAD.
+    "confidence_tier",
 )
 
 

@@ -58,6 +58,13 @@ log = get_logger("mcp.server")
 TOKEN_BUDGET = 400
 
 
+def _append_metadata(text: str, metadata: dict[str, Any]) -> str:
+    """Append compact machine-readable MCP metadata without changing the main payload."""
+    if not text:
+        return text
+    return text + "\n<gt-metadata>\n" + json.dumps(metadata, sort_keys=True) + "\n</gt-metadata>"
+
+
 async def _safe_call(tool_name: str, coro: Any) -> dict[str, Any]:
     """Wrap a tool handler so unhandled exceptions return structured errors."""
     try:
@@ -545,7 +552,7 @@ def create_server(
                  params={"plan_path": plan_path, "full": full},
                  result_len=len(text),
                  latency_ms=_tool_elapsed)
-        return text
+        return _append_metadata(text, _mcp_metadata())
 
     # @app.tool()  # Deprecated: use groundtruth_check_v2 instead
     async def gt_patch_check(plan_path: str | None = None) -> str:
@@ -610,6 +617,7 @@ def create_server(
     @app.tool()
     async def gt_contract(file_or_symbol: str | None = None, plan_path: str | None = None) -> str:
         """Deterministic contract (signature + raises + guards + return shape) for a symbol."""
+        await _ensure_lsp_promotion()
         _tool_start = _time.monotonic()
 
         # When a symbol is given AND a graph.db is available, read the real
@@ -630,7 +638,7 @@ def create_server(
                                  "focus": len(focus)},
                          result_len=len(block),
                          latency_ms=_tool_elapsed)
-                return block
+                return _append_metadata(block, _mcp_metadata())
 
         from groundtruth.cli.commands import _load_plan_json
 
@@ -643,7 +651,7 @@ def create_server(
                  params={"file_or_symbol": file_or_symbol, "plan_path": plan_path},
                  result_len=len(result_text),
                  latency_ms=_tool_elapsed)
-        return result_text
+        return _append_metadata(result_text, _mcp_metadata())
 
     # @app.tool()  # Deprecated: use gt_plan instead
     async def gt_replan(plan_path: str | None = None) -> str:
@@ -741,6 +749,23 @@ def create_server(
     _session_calls = 0
     _session_findings = 0
     _session_fix_required = 0
+    _lsp_started = False
+
+    def _mcp_metadata() -> dict[str, Any]:
+        graph_backed = bool(is_graph_db(resolved_db))
+        return {
+            "schema": "gt.mcp_metadata.v1",
+            "graph_db": graph_backed,
+            "lsp_promotion_requested": bool(_lsp_started),
+            "freshness": {
+                "status": "not_checked",
+                "reason": "stdio_mcp_endpoint_has_no_file_freshness_checker",
+            },
+            "degraded": {
+                "status": "degraded" if not graph_backed else "ok",
+                "reason": None if graph_backed else "non_graph_symbol_store",
+            },
+        }
 
     @app.tool()
     async def groundtruth_investigate(
@@ -770,7 +795,7 @@ def create_server(
                  params={"symbol": symbol, "file_path": file_path},
                  result_len=len(text) if text else 0,
                  latency_ms=_tool_elapsed)
-        return text
+        return _append_metadata(text, _mcp_metadata())
 
     @app.tool()
     async def groundtruth_orient_v2(
@@ -778,6 +803,7 @@ def create_server(
         file_path: str | None = None,
     ) -> str:
         """What's relevant to this task or file — localization, hotspots, imports. High-confidence only."""
+        await _ensure_lsp_promotion()
         _tool_start = _time.monotonic()
         nonlocal _session_calls, _session_findings
         _session_calls += 1
@@ -799,7 +825,7 @@ def create_server(
                  params={"task": task, "file_path": file_path},
                  result_len=len(text) if text else 0,
                  latency_ms=_tool_elapsed)
-        return text
+        return _append_metadata(text, _mcp_metadata())
 
     @app.tool()
     async def groundtruth_check_v2(
@@ -807,6 +833,7 @@ def create_server(
         proposed_code: str | None = None,
     ) -> str:
         """Validate your edit — contradictions, obligations, structural issues. Silent when nothing to say."""
+        await _ensure_lsp_promotion()
         _tool_start = _time.monotonic()
         nonlocal _session_calls, _session_findings, _session_fix_required
         _session_calls += 1
@@ -829,7 +856,7 @@ def create_server(
                  params={"file_path": file_path, "proposed_code_len": len(proposed_code) if proposed_code else 0},
                  result_len=len(text) if text else 0,
                  latency_ms=_tool_elapsed)
-        return text
+        return _append_metadata(text, _mcp_metadata())
 
     @app.tool()
     async def groundtruth_status_v2() -> str:
@@ -851,12 +878,10 @@ def create_server(
                  params={},
                  result_len=len(text) if text else 0,
                  latency_ms=_tool_elapsed)
-        return text
+        return _append_metadata(text, _mcp_metadata())
 
     # Background LSP promotion — starts on first tool call.
     # Detects installed language servers, promotes name_match edges progressively.
-    _lsp_started = False
-
     async def _ensure_lsp_promotion() -> None:
         nonlocal _lsp_started
         if _lsp_started:

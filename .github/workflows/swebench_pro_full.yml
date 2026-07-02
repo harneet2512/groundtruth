@@ -832,13 +832,19 @@ jobs:
               export GT_ROOT_FILE=/tmp/gt_root.txt
               echo "[GT] repo root: $REPO_ROOT"
 
-              # Install mini-swe-agent (not in task images — they are bare repos)
+              # Install mini-swe-agent (not in task images — they are bare repos).
+              # mini-swe-agent 2.4.3 requires Python >=3.10, but many task images ship
+              # older Python (3.6/3.8/3.9) where `pip install mini-swe-agent` FAILS.
+              # So the uv fallback MUST provision its own managed Python 3.11
+              # (`--python 3.11`) — deterministic across every image regardless of the
+              # base Python in the container. The old `uv pip install --system` fallback
+              # installed into the <3.10 system Python and silently failed there;
+              # it is removed.
               echo "[GT] installing mini-swe-agent..."
               pip install --quiet datacurve-pier 2>/dev/null || pip install --quiet mini-swe-agent 2>/dev/null || {
-                # Fallback: try uv
                 curl -LsSf https://astral.sh/uv/install.sh 2>/dev/null | sh 2>/dev/null
-                export PATH="$HOME/.local/bin:$PATH"
-                uv tool install mini-swe-agent 2>/dev/null || uv pip install --system mini-swe-agent 2>/dev/null
+                export PATH="$HOME/.local/bin:/root/.local/bin:$PATH"
+                uv tool install --python 3.11 mini-swe-agent 2>/dev/null || uv tool install mini-swe-agent 2>/dev/null
               }
               # Verify installation
               if ! command -v mini-swe-agent >/dev/null 2>&1; then

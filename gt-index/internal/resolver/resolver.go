@@ -1353,12 +1353,35 @@ func Resolve(
 	var methodsByClass map[int64]map[string]int64
 	if len(nodeMeta) > 0 && nodeMeta[0] != nil {
 		methodsByClass = make(map[int64]map[string]int64)
-		for id, m := range nodeMeta[0] {
+		// B2: build in a DETERMINISTIC order. Go map iteration is randomized, so the old
+		// `for id, m := range nodeMeta[0]` last-writer-wins picked a run-dependent winner
+		// when a class had >=2 members of the same name (conditional defs, overloads, cfg
+		// twins) → the resolved CALLS target flipped between indexings (the ~0.5%
+		// textual/wasmi drift). Sort ids by (file,line,id) and keep the FIRST (min) →
+		// insertion-order-invariant, stable across runs.
+		ids := make([]int64, 0, len(nodeMeta[0]))
+		for id := range nodeMeta[0] {
+			ids = append(ids, id)
+		}
+		sort.Slice(ids, func(i, j int) bool {
+			a, b := nodeMeta[0][ids[i]], nodeMeta[0][ids[j]]
+			if a.File != b.File {
+				return a.File < b.File
+			}
+			if a.StartLine != b.StartLine {
+				return a.StartLine < b.StartLine
+			}
+			return ids[i] < ids[j]
+		})
+		for _, id := range ids {
+			m := nodeMeta[0][id]
 			if m.ParentID != 0 && (m.Label == "Method" || m.Label == "Function") {
 				if methodsByClass[m.ParentID] == nil {
 					methodsByClass[m.ParentID] = make(map[string]int64)
 				}
-				methodsByClass[m.ParentID][m.Name] = id
+				if _, exists := methodsByClass[m.ParentID][m.Name]; !exists {
+					methodsByClass[m.ParentID][m.Name] = id
+				}
 			}
 		}
 	}
@@ -1492,9 +1515,16 @@ func Resolve(
 		matchMethod := "name_match"
 		evidence := "name_match"
 
-		// Strategy 1: Same-file exact name match (only when unambiguous)
+		// Strategy 1: Same-file exact name match (only when unambiguous AND UNQUALIFIED).
+		// B-2: a QUALIFIED call obj.method() must never bind a bare same-file name at
+		// CERTIFIED 1.0 — the receiver-blind launder class B1 closed for imports (Strategy
+		// 1.5), here for same_file. Qualified calls fall through to the receiver-typing rungs
+		// (1.75 self/this via CHA lookupMethodWithInheritance, 2b field-type, 1.94a/1.95/1.96
+		// typed receiver) which resolve them precisely; the multi-def branch below already
+		// gates on isUnqualified for the same reason.
 		if fileNodes, ok := fileNodeIDs[call.File]; ok {
-			if targetIDs, ok := fileNodes[calleeName]; ok && len(targetIDs) == 1 && targetIDs[0] != callerID {
+			if targetIDs, ok := fileNodes[calleeName]; ok && len(targetIDs) == 1 && targetIDs[0] != callerID &&
+				(call.CalleeQualified == "" || call.CalleeQualified == calleeName) {
 				targetID := targetIDs[0]
 				putEdge(ResolvedCall{
 					SourceNodeID:   callerID,
@@ -1538,6 +1568,13 @@ func Resolve(
 			}
 		}
 
+		// B1: a QUALIFIED call obj.method() must never bind a BARE imported symbol
+		// (`from lib.http import get`; cache.get() != lib.http.get). Compute this BEFORE
+		// Strategy 1.5 so the receiver-blind bare-name lookups (Block A/C below) are
+		// skipped for qualified calls — only the whole-module "*" (unqualified) case and
+		// the package-alias branch are receiver-safe. Moved up from Strategy 1.9.
+		qualifiedUnresolved := call.CalleeQualified != "" && call.CalleeQualified != calleeName
+
 		// Strategy 1.5: Import-verified cross-file resolution
 		// H6 fix: collect all matching imported targets, pick best (prefer same dir)
 		if fileImports, ok := importIndex[call.File]; ok {
@@ -1547,7 +1584,14 @@ func Resolve(
 			// Specific match wins: destructured `const {error} = require('./args')`
 			// creates a specific entry for "error". Whole-module `const x = require('./args')`
 			// creates a "*" entry so ANY function in args.js is import-reachable.
-			for _, lookupName := range []string{calleeName, "*"} {
+			// B1: a qualified receiver call cannot bind a bare imported name; skip the
+			// bare-name lookups entirely and defer to the package-alias branch + the
+			// receiver-typing rungs (correct-or-quiet). Unqualified calls are unchanged.
+			bareNameLookups := []string{calleeName, "*"}
+			if qualifiedUnresolved {
+				bareNameLookups = nil
+			}
+			for _, lookupName := range bareNameLookups {
 				if candidateFiles, ok := fileImports[lookupName]; ok {
 					for _, targetFile := range candidateFiles {
 						if fileNodes, ok := fileNodeIDs[targetFile]; ok {
@@ -1588,8 +1632,9 @@ func Resolve(
 				}
 			}
 
-			// Check wildcard imports
-			if len(importCandidates) == 0 {
+			// Check wildcard imports (UNQUALIFIED only — a qualified receiver call must
+			// not bind a bare name via the whole-module wildcard; B1).
+			if len(importCandidates) == 0 && !qualifiedUnresolved {
 				if candidateFiles, ok := fileImports["*"]; ok {
 					for _, targetFile := range candidateFiles {
 						if fileNodes, ok := fileNodeIDs[targetFile]; ok {
@@ -1686,7 +1731,7 @@ func Resolve(
 		// (e.g. `os.walk`) and must never launder as verified_unique; its demote
 		// (name_match conf=0.2, evidence name_match_qualified_unresolved) now lives
 		// in the last-chance block after 1.98. [beancount-931 os.walk -> account.walk]
-		qualifiedUnresolved := call.CalleeQualified != "" && call.CalleeQualified != calleeName
+		// qualifiedUnresolved computed above (before Strategy 1.5) for the B1 receiver-blind guard.
 		// T2 (builtins): a qualified call obj.method() whose receiver never resolves to an
 		// internal class + builtin/stdlib method name = a builtin call (os.path.join,
 		// str.split, dict.get) — DROP rather than guess (application-centered — JARVIS
