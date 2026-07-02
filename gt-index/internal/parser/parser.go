@@ -126,6 +126,11 @@ type AssignmentRef struct {
 	// name, and the resolver bridges through that callee's declared return type
 	// (PyCG Rule 4 / JARVIS return-type chaining) rather than treating it as a class.
 	ViaReturn bool
+	// AliasOf marks a bare-variable alias `b = a` (RHS is an identifier, not a call):
+	// TypeName is empty and AliasOf holds the SOURCE var name. The resolver's alias
+	// fixpoint (BuildAssignmentIndex) propagates a's inferred type(s) onto b, so chains
+	// `a = C(); b = a; c = b; c.m()` resolve. PyCG assignment-graph alias transition.
+	AliasOf string
 }
 
 // ImportRef is a parsed import statement — maps an imported name to its source module.
@@ -1195,6 +1200,25 @@ func extractAssignments(node *sitter.Node, sf walker.SourceFile, src []byte, res
 						})
 					}
 				}
+			}
+		}
+
+		// PyCG assignment-graph alias rule: `b = a` where RHS is a BARE variable (not a call
+		// or attribute read). Record the source var; the resolver's alias fixpoint propagates
+		// a's inferred type onto b so `a = C(); b = a; c = b; c.m()` resolves. Restricted to
+		// simple identifier←identifier (attribute/subscript RHS excluded — correct-or-quiet,
+		// keeps the over-connection surface tight).
+		if lhsName != "" && left != nil && left.Type() == "identifier" &&
+			right != nil && right.Type() == "identifier" {
+			rhsName := right.Content(src)
+			if rhsName != "" && rhsName != lhsName {
+				result.Assignments = append(result.Assignments, AssignmentRef{
+					VarName: lhsName,
+					AliasOf: rhsName,
+					Scope:   scopeName,
+					File:    sf.Path,
+					Line:    int(node.StartPoint().Row) + 1,
+				})
 			}
 		}
 

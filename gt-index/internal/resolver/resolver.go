@@ -1400,10 +1400,31 @@ func BuildParamTypeIndex(props []parser.PropertyRef, nodeDBIDs []int64) map[int6
 
 // BuildAssignmentIndex builds a per-file variable→type map from parsed assignments.
 // PyCG ICSE 2021: assignment tracking for x = ClassName() resolution.
+// assignmentTypeKnown reports whether `existing` already holds this (TypeName, ViaReturn)
+// pair — the alias-fixpoint dedup so propagation converges instead of re-appending forever.
+func assignmentTypeKnown(existing []VarType, typeName string, viaReturn bool) bool {
+	for _, vt := range existing {
+		if vt.TypeName == typeName && vt.ViaReturn == viaReturn {
+			return true
+		}
+	}
+	return false
+}
+
 func BuildAssignmentIndex(assignments []parser.AssignmentRef) map[string]*AssignmentMap {
 	index := make(map[string]*AssignmentMap)
+	// `b = a` alias edges (TypeName empty, AliasOf set) — collected here, resolved by the
+	// fixpoint below. Keyed by file; each file is independent so the map-range is deterministic.
+	type aliasEdge struct{ VarName, AliasOf, Scope string }
+	aliasesByFile := make(map[string][]aliasEdge)
 	for _, a := range assignments {
-		if a.VarName == "" || a.TypeName == "" {
+		if a.VarName == "" {
+			continue
+		}
+		if a.TypeName == "" {
+			if a.AliasOf != "" {
+				aliasesByFile[a.File] = append(aliasesByFile[a.File], aliasEdge{a.VarName, a.AliasOf, a.Scope})
+			}
 			continue
 		}
 		m, ok := index[a.File]
@@ -1420,6 +1441,50 @@ func BuildAssignmentIndex(assignments []parser.AssignmentRef) map[string]*Assign
 			Confident: !a.ViaReturn, // direct constructor = confident; factory-return = tentative
 			ViaReturn: a.ViaReturn,
 		})
+	}
+
+	// PyCG assignment-graph alias fixpoint: propagate a's inferred type(s) onto b for every
+	// `b = a` edge, iterating to convergence (cap 10) so `a=C(); b=a; c=b; c.m()` resolves.
+	// Bounded + deterministic per file. Over-connection brakes: only propagates types that
+	// ALREADY exist (never invents), respects function scope, and marks propagated copies
+	// non-Confident so a direct constructor still wins last-write-wins downstream.
+	for file, aliases := range aliasesByFile {
+		m := index[file]
+		if m == nil {
+			continue // aliases but no direct types in this file → nothing to propagate onto
+		}
+		for iter := 0; iter < 10; iter++ {
+			changed := false
+			for _, e := range aliases {
+				srcTypes := m.VarTypes[e.AliasOf]
+				if len(srcTypes) == 0 {
+					continue
+				}
+				for _, st := range srcTypes {
+					// Local source-var write only aliases within the same function scope
+					// (module-level / empty scope always eligible).
+					if st.Scope != "" && e.Scope != "" && st.Scope != e.Scope {
+						continue
+					}
+					if assignmentTypeKnown(m.VarTypes[e.VarName], st.TypeName, st.ViaReturn) {
+						continue
+					}
+					m.VarTypes[e.VarName] = append(m.VarTypes[e.VarName], VarType{
+						VarName:   e.VarName,
+						TypeName:  st.TypeName,
+						TypeFile:  st.TypeFile,
+						Scope:     e.Scope,
+						Line:      st.Line,
+						Confident: false, // alias-propagated: one hop removed from the direct write
+						ViaReturn: st.ViaReturn,
+					})
+					changed = true
+				}
+			}
+			if !changed {
+				break
+			}
+		}
 	}
 	return index
 }
@@ -2188,7 +2253,27 @@ func Resolve(
 						}
 					}
 				}
-				if !isSelfLike && !qualifierIsClass {
+				// Receiver-type guard (B1-#6): if the receiver's type is KNOWN via the
+				// assignment index (`x = ClassName()`, or an alias chain b=a / c=b), do NOT
+				// emit a receiver-BLIND name-uniqueness guess here — defer to Strategy 1.96,
+				// which resolves the ACTUAL receiver class. 1.94's own contract is "no receiver
+				// proof (name-uniqueness only)"; when proof exists downstream, it must yield,
+				// else a 2-3-class method resolves to the wrong (first) class regardless of the
+				// receiver's real type. Narrow blast radius: only fires on ambiguous methods
+				// whose receiver is typed.
+				receiverTypeKnown := false
+				if assignmentIndex != nil {
+					if fa, ok := assignmentIndex[call.File]; ok {
+						callerScope194 := ""
+						if cm, ok := nodeMeta[0][callerID]; ok {
+							callerScope194 = cm.Name
+						}
+						if _, _, _, found := fa.ResolveQualifiedCall(qualifier194, methodName194, callerScope194); found {
+							receiverTypeKnown = true
+						}
+					}
+				}
+				if !isSelfLike && !qualifierIsClass && !receiverTypeKnown {
 					if classes194, ok := methodClassCount[methodName194]; ok && len(classes194) >= 1 && len(classes194) <= 3 {
 						numClasses := len(classes194)
 						// #5: impl_method resolves purely on GLOBAL METHOD-NAME UNIQUENESS
