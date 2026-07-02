@@ -535,6 +535,13 @@ def clean_env_projection(src: dict) -> dict:
         "GT_", "PYTHON", "PATH", "HOME", "LANG", "LC_", "TZ", "TMP", "TEMP",
         "XDG_", "GOCACHE", "GOMODCACHE", "GOPATH", "GOTOOLCHAIN", "CARGO_",
         "RUST", "NODE_", "NPM_", "YARN_", "HF_", "TRANSFORMERS_",
+        # P1-4 fix (Fable 2026-07-02): the workflow injects the OFFLINE seal (GOPROXY=off,
+        # GOFLAGS=-mod=mod, GOSUMDB=off, GONOSUMCHECK=1) into the proof container, but these were
+        # stripped here -> the resolve subprocess and the gopls it spawns ran UN-sealed -> per-task
+        # network reach (breaks the "no per-task download" proof guarantee) / proxy timeouts that
+        # burn gopls's 30s ready-budget -> LSP_WARN_NOT_READY / ZERO_CONVERSION on go. None are
+        # eval-tainted. probe_workspace_metadata already re-adds them, proving the intent.
+        "GOPROXY", "GOFLAGS", "GOSUMDB", "GONOSUMCHECK", "GOPRIVATE", "GOWORK", "GONOSUMDB",
     )
     for k, v in src.items():
         if _env_is_eval_leak(k):
@@ -713,19 +720,31 @@ def lsp_ready_budget_seconds(language: str, env=None) -> int:
     return 20
 
 
-def _derive_primary_langs(langs, dom_lang, a_lang):
-    """Fail-close scope = the LSP-filtered verdict-key dominant (langs[0]) UNION the graph
-    dominant + the declared task lang. Including langs[0] guarantees the scope covers the
-    language that actually produced the verdicts (BUG-D), so a warm-WARN primary is never
-    scoped out by an unfiltered `_detect_lang` divergence. Pure + deterministic for the tests."""
-    prim = set()
+def _derive_primary_langs(langs, dom_lang, declared_lang):
+    """Fail-close primary scope = the languages that MUST resolve for the proof to be valid.
+
+    The DECLARED task language (dep_store_manifest 'language', else --lang) is ground truth and,
+    when known, is the ONLY primary: a vendored/docs corpus in another language is not the task's
+    code and its LSP outcome is irrelevant (Fable P0-2 — a python task with 2378 vendored JS nodes
+    must not be scoped to javascript, which both FALSE-KILLS on a JS-server crash AND fails OPEN on a
+    real python resolve-error, protecting the wrong language). Fall back to the graph-dominant
+    langs[0] (+ dom) ONLY when the declared language is unavailable — this subsumes BUG-D
+    (`_detect_lang` can default python and drop the real go/rust primary) since the fallback keys off
+    the LSP-filtered verdict set. Scoping to the declared language additionally neutralizes the
+    omitted-server corner (a vendored java corpus with jdtls omitted is never the DECLARED language,
+    so it can never be a fatal INSTALL_MISSING). Pure + deterministic for the tests.
+
+    Fallback precedence when the declared language is unavailable: the LSP-FILTERED verdict-key
+    dominant `langs[0]` (reliable), THEN the unfiltered `_detect_lang` dom ONLY if no filtered
+    language exists. dom is deliberately NOT unioned with langs[0] — that would re-add the
+    unreliable default (`_detect_lang` returns "python" on any exception), the exact BUG-D miss."""
+    if declared_lang:
+        return {str(declared_lang).lower()}
     if langs:
-        prim.add(str(langs[0]).lower())
+        return {str(langs[0]).lower()}
     if dom_lang:
-        prim.add(str(dom_lang).lower())
-    if a_lang:
-        prim.add(str(a_lang).lower())
-    return prim
+        return {str(dom_lang).lower()}
+    return set()
 
 
 def aggregate_lsp_verdicts(lang_verdicts: dict, *, require_lsp: bool, any_success: bool, primary_langs=None):
@@ -1336,11 +1355,13 @@ def main(argv=None) -> int:
         _dom = _detect_lang(graph)
     except Exception:
         _dom = None
-    # BUG-D fix (LIPI 2026-07-02): include the LSP-filtered verdict-key dominant `langs[0]` in
-    # the fail-close scope. `_detect_lang` (singular, unfiltered) defaults to "python" on any
-    # exception and can pick a non-LSP language (markdown/bash) as the node-count max; without
-    # langs[0] a go/rust warm-WARN primary can fall outside the scope -> false NO_LANGUAGE_RESOLVED.
-    _primary_langs = _derive_primary_langs(langs, _dom, getattr(a, "lang", None))
+    # P0-2 fix (Fable 2026-07-02): feed the DECLARED task language (proof_language, from
+    # dep_store_manifest) as the fail-close primary. Production never passes --lang, and the
+    # graph-dominant heuristic (_detect_lang / langs[0]) is owned by whatever language has the most
+    # nodes — which on a vendored/docs-heavy repo is NOT the task's language (aiomonitor: a python
+    # task with 2378 vendored JS nodes scoped to javascript). langs[0]/_dom remain the FALLBACK when
+    # the declared language is unavailable (subsumes BUG-D). See _derive_primary_langs.
+    _primary_langs = _derive_primary_langs(langs, _dom, proof_language or getattr(a, "lang", None))
     _agg_ok, _agg_failures = aggregate_lsp_verdicts(
         lang_verdicts,
         require_lsp=os.environ.get("GT_REQUIRE_LSP") == "1",
@@ -1456,6 +1477,12 @@ def main(argv=None) -> int:
         if not _ok:
             return tracker.fail("gates", "EMBEDDER_USAGE_FAIL", str(_verdict))
     except Exception as e:
+        # P1-5 fix (Fable 2026-07-02): do NOT swallow a classification failure on a required run —
+        # a corrupt/unloadable embedder cert (the 4b presence probe is skipped when the file merely
+        # EXISTS) would otherwise skip the fail-closed 4c verdict and proceed green, contradicting
+        # this step's own "presence alone is not proof" contract. Fail-closed when required.
+        if os.environ.get("GT_REQUIRE_EMBEDDER") == "1":
+            return tracker.fail("gates", "EMBEDDER_USAGE_FAIL", f"classification error: {e}")
         print(f"WARN: embedder cert classification skipped: {e}", file=sys.stderr)
     tracker.complete("gates", gate_rc=rc)
 
@@ -1477,13 +1504,17 @@ def main(argv=None) -> int:
     try:
         from groundtruth.runtime.context import GTRuntimeContext
         ctx = GTRuntimeContext.from_env(source_root=work, graph_db=graph)
-        # BUG-F fix (LIPI 2026-07-02): stamp the SAME runtime_context_id the cert uses
-        # (graph_certificate.py:136-137) so the two binding tokens prove one identical runtime.
-        # base_env.get("GT_CONTEXT_ID","") was always "" (env never set) while the cert wrote the
-        # real _proof.context_id() -> the tokens disagreed (honesty/integrity gap).
+        # BUG-F fix (LIPI+Fable 2026-07-02): stamp the SAME runtime_context_id the cert uses.
+        # _proof.context_id() reads GT_SOURCE_ROOT/GT_GRAPH_DB from os.environ — but THIS parent
+        # process does not set them (they are injected only into the cert SUBPROCESS via base_env,
+        # graph_certificate.py:137). Calling context_id() in-process would stamp a DIFFERENT, wrong
+        # id (an honest "" turned into a confident-wrong token). Use the shared pure helper with the
+        # SAME paths base_env gave the cert subprocess (work, graph, os.environ GT_MODELS_ROOT) so
+        # the two binding tokens are byte-identical.
         try:
             from groundtruth.runtime import proof as _proof
-            _rcid = _proof.context_id()
+            _rcid = _proof.context_id_from(_proof.runtime_root(), work, graph,
+                                           os.environ.get("GT_MODELS_ROOT", ""))
         except Exception:
             _rcid = base_env.get("GT_CONTEXT_ID", "")
         with open(os.path.join(a.out, "runtime_context.json"), "w", encoding="utf-8") as f:

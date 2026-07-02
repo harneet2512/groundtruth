@@ -222,32 +222,55 @@ def test_aggregate_warm_warn_primary_reaches_agent():
     assert ok_mix is False, "a warm incidental server must not mask a dead PRIMARY server"
 
 
-def test_derive_primary_langs_includes_filtered_dominant():
-    # BUG-D red->green (LIPI 2026-07-02): the fail-close scope MUST include the LSP-filtered
-    # verdict-key dominant langs[0], even when _detect_lang (singular, unfiltered) diverges
-    # (defaults "python" on exception, or a non-LSP markdown/bash node-count max). Else a
-    # go/rust warm-WARN primary is scoped out -> false NO_LANGUAGE_RESOLVED.
+def test_derive_primary_langs_declared_wins_else_dominant():
+    # P0-2 (Fable 2026-07-02): the DECLARED task language is the ONLY primary when known — a
+    # vendored-language graph dominant must NOT be scoped (aiomonitor: a python task with 2378
+    # vendored JS nodes must scope to python, not javascript — else false-kill on a JS-server crash
+    # AND fail-open on a real python resolve-error).
+    assert grp._derive_primary_langs(["javascript"], "javascript", "python") == {"python"}
+    # vendored java (jdtls omitted) is never the DECLARED language -> never a fatal INSTALL_MISSING
+    assert grp._derive_primary_langs(["java"], "java", "python") == {"python"}
+    # BUG-D fallback: no declared language -> the LSP-filtered dominant langs[0] (not the unfiltered
+    # _detect_lang, which can default python) is the primary, so a warm-WARN go/rust primary is live.
     prim = grp._derive_primary_langs(["go"], "python", None)
-    assert "go" in prim
+    assert prim == {"go"}
     ok, _ = grp.aggregate_lsp_verdicts({"go": "LSP_WARN_ZERO_CONVERSION"},
                                        require_lsp=True, any_success=False, primary_langs=prim)
-    assert ok is True, "warm-WARN go primary must be live once langs[0] is in scope"
-    assert "rust" in grp._derive_primary_langs(["rust"], "markdown", None)
-    # MUTATION GUARD: the OLD scope (no langs[0]) drops go -> false fail (proves the fix matters)
+    assert ok is True, "warm-WARN go primary must be live once it is the scoped primary"
+    # MUTATION GUARD: the OLD scope (python, from unfiltered _detect_lang) drops go -> false fail
     ok_bad, _ = grp.aggregate_lsp_verdicts({"go": "LSP_WARN_ZERO_CONVERSION"},
                                            require_lsp=True, any_success=False, primary_langs={"python"})
     assert ok_bad is False
-    # empty langs -> falls back to dom/a_lang only, no crash
+    # empty langs + declared -> declared
     assert grp._derive_primary_langs([], None, "go") == {"go"}
 
 
-def test_runtime_context_id_uses_proof_context_id():
-    # BUG-F guard (LIPI 2026-07-02): runtime_context.json must stamp the SAME id the cert uses
-    # (_proof.context_id()), not the always-empty base_env GT_CONTEXT_ID, so the two binding
-    # tokens prove one identical runtime instead of disagreeing ("" vs f6838c14…).
-    src = _read(os.path.join(ROOT, "scripts", "swebench", "gt_run_proof.py"))
-    assert '"runtime_context_id": _rcid' in src, "runtime_context_id must be set from _rcid"
-    assert "_rcid = _proof.context_id()" in src, "_rcid must come from _proof.context_id() (cert parity)"
+def test_runtime_context_id_matches_cert_context_id():
+    # BUG-F red->green (Fable-caught 2026-07-02): the runtime_context.json id must byte-match the
+    # cert's context_id(). context_id() reads GT_SOURCE_ROOT/GT_GRAPH_DB from os.environ (set only
+    # in the cert SUBPROCESS); the writer computes the id in-process from (work, graph) via the
+    # SHARED pure helper. Prove they agree — and that the OLD env-less in-process call diverges.
+    import hashlib, os as _os
+    from groundtruth.runtime import proof as _proof
+    rr = _proof.runtime_root()
+    # pure helper == the documented sha256 formula
+    assert _proof.context_id_from(rr, "/w", "/g", "/m") == \
+        hashlib.sha256("|".join([rr, "/w", "/g", "/m"]).encode("utf-8")).hexdigest()[:16]
+    saved = {k: _os.environ.get(k) for k in ("GT_SOURCE_ROOT", "GT_GRAPH_DB", "GT_MODELS_ROOT")}
+    try:
+        _os.environ.update({"GT_SOURCE_ROOT": "/w", "GT_GRAPH_DB": "/g", "GT_MODELS_ROOT": "/m"})
+        # the cert (env-driven) and the writer (path-driven) produce one identical token
+        assert _proof.context_id() == _proof.context_id_from(rr, "/w", "/g", "/m")
+        # MUTATION GUARD: the OLD broken BUG-F path (env-less in-process context_id) DIVERGES
+        _os.environ.pop("GT_SOURCE_ROOT"); _os.environ.pop("GT_GRAPH_DB")
+        assert _proof.context_id() != _proof.context_id_from(rr, "/w", "/g", "/m"), \
+            "env-less context_id must differ — this is exactly the bug BUG-F closes"
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                _os.environ.pop(k, None)
+            else:
+                _os.environ[k] = v
 
 
 def test_per_language_certs_persisted_no_overwrite():
@@ -411,11 +434,14 @@ def test_detect_langs_graceful_and_lsp_only():
 
 # ── Fix #5: eval-leak env match is WORD-BOUNDARY, not substring ───────────────
 
-def test_env_leak_allowlists_gt_localization_gold_files():
-    # GT's own diagnostic var CONTAINS "GOLD_FILES" but is NOT an evaluator injection —
-    # the old `any(tok in ku ...)` substring match false-tripped it and aborted the run
-    # before emit_brief's gold diagnostic could run.
-    assert grp._env_is_eval_leak("GT_LOCALIZATION_GOLD_FILES") is False
+def test_gt_localization_gold_files_is_flagged_leak_safe():
+    # STALE-TEST REPAIR (Fable adjudication 2026-07-02): `GT_LOCALIZATION_GOLD_FILES` is now
+    # correctly FLAGGED as a leak. The allowlist (`_EVAL_LEAK_ENV_ALLOW`) was deliberately emptied
+    # to frozenset() and the old gold-diagnostic feature this var fed was removed (no setter/reader
+    # exists anywhere). Its VALUE is a gold-file list, so allowlisting would propagate gold paths
+    # into the proof subprocess env (the surface that composes agent-visible artifacts), and gate
+    # item 2 already treats its presence in trial_output.log as leakage. Leak-safe: flag it.
+    assert grp._env_is_eval_leak("GT_LOCALIZATION_GOLD_FILES") is True
 
 
 def test_env_leak_still_catches_real_leaks():
@@ -433,12 +459,14 @@ def test_env_leak_word_boundary_not_substring():
     assert grp._env_is_eval_leak("PYTHONPATH") is False
 
 
-def test_eval_leakage_gt_localization_var_not_flagged(monkeypatch, tmp_path):
+def test_eval_leakage_gt_localization_var_is_flagged(monkeypatch, tmp_path):
+    # STALE-TEST REPAIR (Fable adjudication 2026-07-02): the var's value is a gold-file list, so
+    # eval_leakage MUST flag it (leak-safe) — the empty allowlist is deliberate hardening.
     for v in ("FAIL_TO_PASS", "PASS_TO_PASS", "GOLD_PATCH", "TEST_PATCH", "GOLD_FILES"):
         monkeypatch.delenv(v, raising=False)
     monkeypatch.setenv("GT_LOCALIZATION_GOLD_FILES", "src/a.py,src/b.py")
-    assert "env:GT_LOCALIZATION_GOLD_FILES" not in grp.eval_leakage(str(tmp_path))
-    # and a real leak alongside it IS still caught
+    assert "env:GT_LOCALIZATION_GOLD_FILES" in grp.eval_leakage(str(tmp_path))
+    # and a bare real leak alongside it IS also caught
     monkeypatch.setenv("GOLD_FILES", "secret")
     assert any(x == "env:GOLD_FILES" for x in grp.eval_leakage(str(tmp_path)))
 
@@ -484,13 +512,21 @@ def test_go_probe_network_only_when_explicitly_allowed(monkeypatch, tmp_path):
 # ── Fix #1: STRICT (GT_GATES_DELIVER_ALWAYS=0) fails-closed on genuinely-broken
 #            signals ONLY — the name_match-dominance carve-out is preserved ─────
 
-def _write_report(tmp_path, *, g1=True, g2=True, embedder_present=True, stamp=""):
+def _write_report(tmp_path, *, g1=True, g2=True, embedder_present=True, stamp="", granular=True):
     rep = {
         "verdict": {"resolution_jarvis": g1, "lsp_enrichment": g2,
                     "embedder": True, "all_on": g1 and g2},
         "gate_lsp": {"stamp_mismatch": stamp},
         "gate_embedder": {"present": {"pass": embedder_present}},
     }
+    if granular:
+        # STALE-FIXTURE REPAIR (Fable adjudication 2026-07-02): the LIVE report carries the granular
+        # gate_resolution block (foundational_gates emits pred_A_det_floor on every readable graph).
+        # _strict_broken_gate_signals reads the granular pred_A, NOT the combined resolution_jarvis —
+        # benign name_match DOMINANCE = pred_A above the SAFETY floor (True) + pred_B non-dominance
+        # False. Omitting this block is the PRE-granularity shape, which the code deliberately
+        # fail-closes (that shape is also produced by graph.db-missing / 0-CALLS-edges).
+        rep["gate_resolution"] = {"pred_A_det_floor": True, "pred_B_nondominance": False}
     p = tmp_path / "foundational_gate_report.json"
     p.write_text(json.dumps(rep), encoding="utf-8")
     return str(p)
@@ -501,9 +537,18 @@ def test_strict_all_green_is_deliverable(tmp_path):
 
 
 def test_strict_name_match_dominance_g1_off_is_carved_out(tmp_path):
-    # MUTATION-CHECK: GATE 1 off (name_match-heavy JS/TS/Go map) is EXPECTED and must NOT be
-    # a broken signal. If the helper mistakenly included g1, this returns non-empty and fails.
+    # MUTATION-CHECK: GATE 1 off (name_match-heavy JS/TS/Go map) with the GRANULAR pred_A above the
+    # SAFETY floor is EXPECTED and must NOT be a broken signal (matches the live clack artifact:
+    # pred_A_det_floor True, pred_B_nondominance False -> deliverable carve-out).
     assert grp._strict_broken_gate_signals(_write_report(tmp_path, g1=False)) == []
+
+
+def test_strict_g1_off_without_granularity_is_conservative(tmp_path):
+    # Fable adjudication companion: the PRE-granularity shape (no gate_resolution) is also produced
+    # by the genuinely-catastrophic early returns (graph.db missing / 0 CALLS edges). With jarvis
+    # False and pred_A unavailable, STRICT must fail-close conservatively — never carve out a dead graph.
+    r = grp._strict_broken_gate_signals(_write_report(tmp_path, g1=False, granular=False))
+    assert r and any("pred_A unavailable" in s for s in r), f"expected conservative fail-close, got {r}"
 
 
 def test_strict_stamp_drop_is_broken(tmp_path):

@@ -151,17 +151,26 @@ def forbid_prebuilt_graph() -> None:
             f"GT_PREBUILT_GRAPH_DB set in proof mode: {prebuilt!r}")
 
 
+def context_id_from(rroot: str, source_root: str, graph_db: str, models_root: str) -> str:
+    """Pure context-id over the 4 runtime-defining paths. Shared by context_id() (env-driven)
+    and any caller that holds the paths directly (e.g. the runtime_context.json writer, which
+    runs in a process whose os.environ does NOT carry GT_SOURCE_ROOT/GT_GRAPH_DB — those are
+    injected only into the cert SUBPROCESS's env). Using this helper with the same paths the cert
+    subprocess received guarantees a byte-identical id instead of a silently-diverging one."""
+    parts = [rroot, source_root or "", graph_db or "", models_root or os.path.join(rroot, "models")]
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
 def context_id() -> str:
     """Stable id for the runtime that produced an artifact — sha256[:16] of the
     paths that DEFINE the runtime. Stamped into graph meta, brief result, gate
     result and the run contract so gates-only and live can be proven identical."""
-    parts = [
+    return context_id_from(
         runtime_root(),
         os.environ.get("GT_SOURCE_ROOT", ""),
         os.environ.get("GT_GRAPH_DB", ""),
-        os.environ.get("GT_MODELS_ROOT", "") or os.path.join(runtime_root(), "models"),
-    ]
-    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
+        os.environ.get("GT_MODELS_ROOT", ""),
+    )
 
 
 # ───────────────────────────── graph.db meta stamp/read ───────────────────────

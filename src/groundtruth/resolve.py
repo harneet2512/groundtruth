@@ -1599,6 +1599,11 @@ def resolve_main() -> None:
             _require_lsp = os.environ.get("GT_REQUIRE_LSP") == "1"
             _proof.stamp_meta(args.db, "lsp_warm", "0")
             _proof.stamp_meta(args.db, "lsp_language", args.lang)
+            # P1-6 fix (Fable 2026-07-02): no LSP ran on these no-server paths, so there is NO
+            # stale closure to rebuild. Leaving closure_rebuilt_after_lsp=False makes the graph cert
+            # hard-fail GRAPH_FAIL_STALE_CLOSURE the day GT_REQUIRE_GRAPH_VALID is armed and this
+            # (INSTALL_MISSING / UNSUPPORTED_EXPLICIT) cert is the dominant-language canonical. None = n/a.
+            cert["closure_rebuilt_after_lsp"] = None
             if _known:
                 # (b) baked-server language, binary missing -> install gap.
                 _cmd = _KNOWN_SERVERS.get(args.lang, "") or ""

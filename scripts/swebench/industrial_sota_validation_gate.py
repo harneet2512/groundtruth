@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -265,7 +266,13 @@ def main(argv: list[str] | None = None) -> int:
         contradicted = sorted(it["id"] for it in payload["items"] if it["status"] == "contradicted")
         required_unmet = sorted(i for i in REQUIRED_ITEMS if by_id.get(i, {}).get("status") != "evidence")
         if contradicted or required_unmet:
-            print(json.dumps({"strict_fail": {"rc": 1, "contradicted": contradicted, "required_unmet": required_unmet}}, indent=2))
+            # P0-3 fix (Fable 2026-07-02): stdout is redirected to industrial_sota_validation.json;
+            # a SECOND json.dumps here made the file two concatenated docs -> json.load raises
+            # "Extra data" -> paired_industrial_sota_summary._load swallows it -> the FAILED task
+            # contributes zero item statuses and vanishes from the summary. Keep stdout a single
+            # valid object (the payload); emit the strict-fail detail on stderr.
+            print(json.dumps({"strict_fail": {"rc": 1, "contradicted": contradicted, "required_unmet": required_unmet}}, indent=2),
+                  file=sys.stderr)
             return 1
     return 0
 
