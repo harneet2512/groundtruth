@@ -763,8 +763,23 @@ def aggregate_lsp_verdicts(lang_verdicts: dict, *, require_lsp: bool, any_succes
     if fatal:
         return False, fatal
     if not any_success:
-        return False, ["<none>=NO_LANGUAGE_RESOLVED"]
-    return True, failures  # incidental-language failures recorded, non-fatal
+        # FIX-A COMPLETION (2026-07-02, live go-only INFRA death `abs-module-cache-flags`):
+        # a PRIMARY language whose server is warm-but-unproductive (LSP_WARN_*: warmed +
+        # project_ready, but the tiny scoped residual had nothing convertible offline —
+        # gopls w/o module cache, rust-analyzer w/o cargo) is LIVE per FIX-A and MUST reach
+        # the agent with its tree-sitter graph. The resolve subprocess exits nonzero on that
+        # verdict, so any_success (= rc==0) is False; without this a single-primary go/rust
+        # repo fail-closes at lsp_pass despite a demonstrably warm server — the exact defeat
+        # of FIX-A's own intent (lines above). A warm WARN on a primary language counts live;
+        # a NEVER-warm/missing/error server is already in `fatal` and returned above.
+        _prim = {str(p).lower() for p in primary_langs} if primary_langs else None
+        _warm_primary = [
+            lg for lg, v in lang_verdicts.items()
+            if str(v).startswith("LSP_WARN_") and (_prim is None or str(lg).lower() in _prim)
+        ]
+        if not _warm_primary:
+            return False, ["<none>=NO_LANGUAGE_RESOLVED"]
+    return True, failures  # warm-primary WARN or a real success -> live; incidental recorded
 
 
 def emit_brief(out_dir: str, issue_text: str, work: str, graph: str, *, generator=None):

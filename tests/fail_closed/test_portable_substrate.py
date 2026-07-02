@@ -197,6 +197,31 @@ def test_aggregate_no_primary_info_keeps_strict_backcompat():
     assert ok is False and failures == ["java=LSP_INSTALL_MISSING"]
 
 
+def test_aggregate_warm_warn_primary_reaches_agent():
+    # FIX-A COMPLETION red->green (live INFRA death 2026-07-02, go-only `abs-module-cache-flags`):
+    # a go-ONLY repo whose sole primary server WARMS (project_ready, warm_probe_ok) but converts
+    # zero of a tiny residual (gopls has no module cache offline) emits LSP_WARN_ZERO_CONVERSION,
+    # and the resolve subprocess exits nonzero so any_success=False. Per FIX-A the warm server is
+    # LIVE and must reach the agent with its tree-sitter graph — it must NOT fail-close.
+    ok, failures = grp.aggregate_lsp_verdicts(
+        {"go": "LSP_WARN_ZERO_CONVERSION"},
+        require_lsp=True, any_success=False, primary_langs={"go"})
+    assert ok is True, "warm-but-unproductive PRIMARY server must reach the agent, not fail-close"
+    # same, primary_langs=None (the pure back-compat path) — a warm WARN is still live
+    ok_none, _ = grp.aggregate_lsp_verdicts(
+        {"go": "LSP_WARN_ZERO_CONVERSION"}, require_lsp=True, any_success=False)
+    assert ok_none is True
+    # MUTATION GUARD: a NEVER-warm primary server with the same any_success=False MUST still fail.
+    ok_bad, fbad = grp.aggregate_lsp_verdicts(
+        {"go": "LSP_FAIL_NO_WARM"}, require_lsp=True, any_success=False, primary_langs={"go"})
+    assert ok_bad is False and fbad == ["go=LSP_FAIL_NO_WARM"], "never-warm server is still a hard fail"
+    # and an INCIDENTAL warm WARN must not rescue a FAILED primary (fatal returns first)
+    ok_mix, _ = grp.aggregate_lsp_verdicts(
+        {"typescript": "LSP_FAIL_NO_WARM", "go": "LSP_WARN_ZERO_CONVERSION"},
+        require_lsp=True, any_success=False, primary_langs={"typescript"})
+    assert ok_mix is False, "a warm incidental server must not mask a dead PRIMARY server"
+
+
 def test_per_language_certs_persisted_no_overwrite():
     # Source contract: each language's resolve pass writes lsp_certificate_<lang>.json
     # (no FAIL cert overwritten) and the dominant cert is copied to the canonical path.
