@@ -686,6 +686,7 @@ jobs:
           mkdir -p "${HOST_GT_INJECT}"
           mkdir -p "${HOST_GT_INJECT}/groundtruth"
           cp artifact_deepswe/gt_mini_patch.py "${HOST_GT_INJECT}/"
+          cp artifact_deepswe/gt_pro_runner.py "${HOST_GT_INJECT}/" 2>/dev/null || true
           cp artifact_deepswe/gt_hook.py        "${HOST_GT_INJECT}/" 2>/dev/null || true
           cp artifact_deepswe/gt_oracle.py      "${HOST_GT_INJECT}/" 2>/dev/null || true
           cp artifact_deepswe/gt_oracle_sense.py "${HOST_GT_INJECT}/" 2>/dev/null || true
@@ -820,6 +821,8 @@ jobs:
             -e GT_ORACLE_EVENTS="/gt_out/gt_oracle_events.jsonl" \
             -e GT_RUNTIME_LEDGER="/gt_out/gt_runtime_ledger.jsonl" \
             -e GT_HOOK_FIRE_COUNTS="/gt_out/gt_hook_fire_counts.json" \
+            -e INPUT_MODEL="$INPUT_MODEL" \
+            -e GT_STEP_LIMIT="${GT_STEP_LIMIT:-300}" \
             $MODEL_ENV \
             --entrypoint "" \
             "$_GHCR_IMG" \
@@ -832,50 +835,39 @@ jobs:
               export GT_ROOT_FILE=/tmp/gt_root.txt
               echo "[GT] repo root: $REPO_ROOT"
 
-              # Install mini-swe-agent (not in task images — they are bare repos).
-              # mini-swe-agent 2.4.3 requires Python >=3.10, but many task images ship
-              # older Python (3.6/3.8/3.9) where `pip install mini-swe-agent` FAILS.
-              # So the uv fallback MUST provision its own managed Python 3.11
-              # (`--python 3.11`) — deterministic across every image regardless of the
-              # base Python in the container. The old `uv pip install --system` fallback
-              # installed into the <3.10 system Python and silently failed there;
-              # it is removed.
-              echo "[GT] installing mini-swe-agent..."
-              pip install --quiet datacurve-pier 2>/dev/null || pip install --quiet mini-swe-agent 2>/dev/null || {
-                curl -LsSf https://astral.sh/uv/install.sh 2>/dev/null | sh 2>/dev/null
-                export PATH="$HOME/.local/bin:/root/.local/bin:$PATH"
-                uv tool install --python 3.11 mini-swe-agent 2>/dev/null || uv tool install mini-swe-agent 2>/dev/null
-              }
-              # Verify installation
-              if ! command -v mini-swe-agent >/dev/null 2>&1; then
-                # Try finding it in common locations
-                export PATH="$HOME/.local/bin:/root/.local/bin:$PATH"
-                if ! command -v mini-swe-agent >/dev/null 2>&1; then
-                  echo "FATAL: mini-swe-agent not found after install"
-                  exit 1
-                fi
+              # Install mini-swe-agent under a MANAGED Python 3.11 venv. Task images ship
+              # Python 3.6-3.9 where mini-swe-agent 2.4.3 (needs >=3.10) cannot install;
+              # uv provisions its own 3.11 regardless of the container base Python.
+              echo "[GT] installing mini-swe-agent (uv py3.11 venv)..."
+              export PATH="$HOME/.local/bin:/root/.local/bin:$PATH"
+              command -v uv >/dev/null 2>&1 || { curl -LsSf https://astral.sh/uv/install.sh 2>/dev/null | sh 2>/dev/null; }
+              export PATH="$HOME/.local/bin:/root/.local/bin:$PATH"
+              MSWE_PY=""
+              if command -v uv >/dev/null 2>&1; then
+                uv venv --python 3.11 /tmp/mswe_env >/dev/null 2>&1 \
+                  && uv pip install --python /tmp/mswe_env/bin/python --quiet mini-swe-agent >/dev/null 2>&1 \
+                  && MSWE_PY=/tmp/mswe_env/bin/python
               fi
-              echo "[GT] mini-swe-agent installed: $(command -v mini-swe-agent)"
-
-              # Write mini-swe-agent config AND set env vars to skip interactive wizard
-              mkdir -p /root/.config/mini-swe-agent
-              printf "model='"$INPUT_MODEL"'\nDEEPSEEK_API_KEY=%s\nOPENROUTER_API_KEY=%s\n" "${DEEPSEEK_API_KEY:-}" "${OPENROUTER_API_KEY:-}" > /root/.config/mini-swe-agent/.env
-              # Also use mini-extra to set model non-interactively
-              mini-extra config set model "'"$INPUT_MODEL"'" 2>/dev/null || true
-              mini-extra config set DEEPSEEK_API_KEY "${DEEPSEEK_API_KEY:-}" 2>/dev/null || true
-              echo "[GT] mini-swe-agent config written"
-
-              # Apply GT patch (monkey-patches LocalEnvironment to append GT evidence)
-              if [ -f /opt/gt/gt_mini_patch.py ]; then
-                python /opt/gt/gt_mini_patch.py --install 2>&1 || echo "WARN: gt_mini_patch install failed"
+              # Fallback: system python only if it is ALREADY >=3.10 (rare for these images).
+              if [ -z "$MSWE_PY" ] && python -c 'import sys;sys.exit(0 if sys.version_info>=(3,10) else 1)' 2>/dev/null; then
+                pip install --quiet mini-swe-agent 2>/dev/null && MSWE_PY=python
               fi
+              if [ -z "$MSWE_PY" ]; then echo "FATAL: could not provision mini-swe-agent (py3.11)"; exit 1; fi
+              echo "[GT] mini-swe-agent env ready: $MSWE_PY ($($MSWE_PY --version 2>&1))"
 
-              # Run the agent — pipe yes to skip any remaining interactive prompts
-              yes "" 2>/dev/null | mini-swe-agent \
-                --model "'"$INPUT_MODEL"'" \
-                --task "$(cat /gt_out/issue.txt 2>/dev/null || echo Fix the issue in the repository.)" \
-                --config /opt/gt/agent_config.yaml \
-                2>&1 || true
+              # Keys for litellm (get_model reads them from env). No interactive wizard.
+              export DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY:-}" OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-}"
+
+              # HEADLESS run via the programmatic driver (DefaultAgent) — NOT the `mini` TUI,
+              # which maps to minisweagent.run.mini:app (prompt_toolkit) and dies in CI with no
+              # TTY (0 LLM calls). gt_pro_runner imports gt_mini_patch so LocalEnvironment is
+              # GT-augmented — the non-pier GT integration on the Pro path.
+              GT_PRO_MODEL="$INPUT_MODEL" \
+              GT_PRO_ISSUE="/gt_out/issue.txt" \
+              GT_PRO_REPO="$(cat /tmp/gt_root.txt 2>/dev/null || echo /app)" \
+              GT_STEP_LIMIT="${GT_STEP_LIMIT:-250}" \
+              PYTHONPATH="/opt/gt:/opt/gt/src" \
+                "$MSWE_PY" /opt/gt/gt_pro_runner.py 2>&1 || true
 
               # CRITICAL: copy patch to bind-mount BEFORE container exits.
               # /tmp/patch.txt is the agent raw diff — uncorrupted by terminal wrapping.
