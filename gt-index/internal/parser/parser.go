@@ -7,6 +7,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 
 	sitter "github.com/smacker/go-tree-sitter"
 
@@ -14,6 +15,32 @@ import (
 	"github.com/harneet2512/groundtruth/gt-index/internal/store"
 	"github.com/harneet2512/groundtruth/gt-index/internal/walker"
 )
+
+// zeroFieldWarned tracks which languages have already emitted the
+// zero-named-fields warning, so it prints once per language (deterministic:
+// stderr-only, never feeds output ordering).
+var zeroFieldWarned sync.Map
+
+// warnIfZeroFieldGrammar emits a one-time-per-language stderr warning when a
+// spec's tree-sitter grammar exposes zero named fields. Such grammars (e.g.
+// Kotlin) make every ChildByFieldName lookup return nil, so field-based name/
+// body/param extraction silently produces a half-graph. Surfacing it here makes
+// that failure class visible instead of silent.
+func warnIfZeroFieldGrammar(spec *specs.Spec) {
+	if spec == nil || spec.Language == nil {
+		return
+	}
+	// FieldName(1) is the first named field; "" means the grammar has none
+	// (ts_language_field_name_for_id returns NULL when field_count == 0).
+	if spec.Language.FieldName(1) != "" {
+		return
+	}
+	if _, loaded := zeroFieldWarned.LoadOrStore(spec.Name, struct{}{}); loaded {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[gt-index] WARNING: language %q grammar exposes zero named tree-sitter fields; "+
+		"field-based extraction falls back to node-type scanning (guarding against a silent half-graph)\n", spec.Name)
+}
 
 // ParseResult holds the extracted data from one file.
 type ParseResult struct {
@@ -115,6 +142,8 @@ func ParseFile(sf walker.SourceFile, isTest bool) (*ParseResult, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	warnIfZeroFieldGrammar(sf.Spec)
 
 	parser := sitter.NewParser()
 	parser.SetLanguage(sf.Spec.Language)
@@ -508,9 +537,10 @@ func functionNodeName(node *sitter.Node, sf walker.SourceFile, src []byte) strin
 	if name == "" {
 		name = extractFirstIdentifier(node, src)
 	}
-	// JS/TS: arrow functions assigned to variables have no name field — it lives on the
-	// parent variable_declarator (e.g. `const handler = async (req, res) => {}`).
-	if name == "" && nodeType == "arrow_function" {
+	// JS/TS: arrow functions AND function expressions assigned to variables have no name
+	// field — it lives on the parent variable_declarator (`const h = (req,res)=>{}`,
+	// `const f = function(){}`). (B2 FIX1 folded into the B1-#5 helper.)
+	if name == "" && (nodeType == "arrow_function" || nodeType == "function_expression") {
 		parent := node.Parent()
 		if parent != nil && parent.Type() == "variable_declarator" {
 			name = extractFieldText(parent, "name", src)
@@ -570,8 +600,10 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 			idx := len(result.Nodes)
 			result.Nodes = append(result.Nodes, n)
 
-			// Extract calls from this function's body
-			bodyNode := node.ChildByFieldName(spec.BodyField)
+			// Extract calls from this function's body.
+			// childByFieldOrType falls back to node-TYPE scanning for zero-field
+			// grammars (Kotlin), where ChildByFieldName(BodyField) is always nil.
+			bodyNode := childByFieldOrType(node, spec.BodyField)
 			if bodyNode != nil {
 				extractCalls(bodyNode, sf, src, result, idx)
 				// PyCG Rule 1: extract x = ClassName() assignments for type tracking
@@ -1385,10 +1417,36 @@ func extractFieldText(node *sitter.Node, fieldName string, src []byte) string {
 	return child.Content(src)
 }
 
+// childByFieldOrType returns node's child for the given tree-sitter field name.
+// If the grammar exposes zero named fields (e.g. Kotlin, FieldName(1)==""),
+// ChildByFieldName always returns nil, so it falls back to scanning child node
+// TYPES for one matching the field string (e.g. BodyField "function_body" is a
+// Kotlin node TYPE, not a named field). Correct-or-quiet: returns nil if neither
+// path matches.
+func childByFieldOrType(node *sitter.Node, field string) *sitter.Node {
+	if field == "" {
+		return nil
+	}
+	if c := node.ChildByFieldName(field); c != nil {
+		return c
+	}
+	for i := 0; i < int(node.ChildCount()); i++ {
+		c := node.Child(i)
+		if c.Type() == field {
+			return c
+		}
+	}
+	return nil
+}
+
 func extractFirstIdentifier(node *sitter.Node, src []byte) string {
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
-		if child.Type() == "identifier" || child.Type() == "type_identifier" {
+		// "simple_identifier" is Kotlin's (and Swift's) identifier node type.
+		// Grammars with zero named fields (e.g. Kotlin, FieldName(1)=="") never
+		// resolve NameField via ChildByFieldName, so this fallback is the only
+		// path that names their functions/classes.
+		if child.Type() == "identifier" || child.Type() == "type_identifier" || child.Type() == "simple_identifier" {
 			return child.Content(src)
 		}
 	}
@@ -1770,6 +1828,17 @@ func extractPythonImports(node *sitter.Node, file string, src []byte, line int, 
 //   - import_statement: "import { foo, bar } from './utils'" → ImportRef for each name
 //   - Also handles: import X from './utils', import * as X from './utils'
 func extractJSTSImports(node *sitter.Node, file string, src []byte, line int, result *ParseResult) {
+	// TS: `import x = require("mod");` — the string lives inside an
+	// import_require_clause child, not the "source" field. Handle it here so it
+	// is not dropped by the "from"-clause logic below.
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "import_require_clause" {
+			extractJSImportRequire(child, file, src, line, result)
+			return
+		}
+	}
+
 	// Get source path (the string literal after "from")
 	sourceNode := node.ChildByFieldName("source")
 	if sourceNode == nil {
@@ -1829,6 +1898,33 @@ func extractJSTSImports(node *sitter.Node, file string, src []byte, line int, re
 			Line:         line,
 		})
 	}
+}
+
+// extractJSImportRequire handles TS `import x = require("mod");`.
+// The import_require_clause node is: identifier "=" "require" "(" string ")".
+func extractJSImportRequire(node *sitter.Node, file string, src []byte, line int, result *ParseResult) {
+	importedName := ""
+	modulePath := ""
+	for i := 0; i < int(node.ChildCount()); i++ {
+		c := node.Child(i)
+		switch c.Type() {
+		case "identifier":
+			if importedName == "" {
+				importedName = c.Content(src)
+			}
+		case "string", "template_string":
+			modulePath = stripQuotes(c.Content(src))
+		}
+	}
+	if importedName == "" || modulePath == "" {
+		return
+	}
+	result.Imports = append(result.Imports, ImportRef{
+		ImportedName: importedName,
+		ModulePath:   modulePath,
+		File:         file,
+		Line:         line,
+	})
 }
 
 func extractJSImportClause(node *sitter.Node, modulePath, file string, src []byte, line int, result *ParseResult) {
@@ -2088,7 +2184,184 @@ func extractJavaImports(node *sitter.Node, file string, src []byte, line int, re
 //   - use_declaration: "use crate::foo::Bar;" → ImportRef{Name:"Bar", Module:"crate::foo"}
 //   - "use std::collections::{HashMap, HashSet};" → multiple ImportRefs
 //   - "pub use crate::foo::Bar;" → also emits ReExportRef (pub use = re-export)
+//
+// AST-walks the use-tree so grouped/nested imports — `use a::{b::{C, D}, e};` — emit one
+// ImportRef per LEAF name (C, D, e) instead of a garbled string split. Falls back to the
+// legacy string parser only if the AST walk emits nothing (unexpected grammar) — quiet.
 func extractRustImports(node *sitter.Node, file string, src []byte, line int, result *ParseResult) {
+	before := len(result.Imports)
+	// `pub use ...` (incl pub(crate)/pub(super)) is ALSO a re-export — every imported leaf
+	// must emit a ReExportRef so the resolver's re-export chain resolution sees it (parity
+	// with the JS/Python/fallback paths; the AST walk must not drop re-export tracking).
+	text := strings.TrimSpace(node.Content(src))
+	isPubUse := strings.HasPrefix(text, "pub use ") ||
+		strings.HasPrefix(text, "pub(crate) use ") ||
+		strings.HasPrefix(text, "pub(super) use ")
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "use", ";", "visibility_modifier", "attribute_item",
+			"line_comment", "block_comment":
+			continue
+		default:
+			walkRustUse(child, "", file, src, line, result, isPubUse)
+		}
+	}
+	if len(result.Imports) > before {
+		return
+	}
+	extractRustImportsFallback(node, file, src, line, result)
+}
+
+// joinRustPath joins a scope prefix and a segment with "::".
+func joinRustPath(prefix, seg string) string {
+	seg = strings.TrimSpace(seg)
+	if prefix == "" {
+		return seg
+	}
+	if seg == "" {
+		return prefix
+	}
+	return prefix + "::" + seg
+}
+
+// rustParent returns the module path of a full path (everything before the last "::").
+func rustParent(full string) string {
+	if idx := strings.LastIndex(full, "::"); idx >= 0 {
+		return full[:idx]
+	}
+	return ""
+}
+
+// emitRustLeaf records one import for a resolved leaf path (e.g. "a::b::C"). When the
+// enclosing use is a `pub use`, the same leaf is ALSO a re-export (ReExportRef) so the
+// resolver's ChainReExports sees the barrel — parity with the string-fallback path.
+func emitRustLeaf(full, file string, line int, result *ParseResult, isPubUse bool) {
+	if full == "" {
+		return
+	}
+	name := lastColonComponent(full)
+	mod := rustParent(full)
+	result.Imports = append(result.Imports, ImportRef{
+		ImportedName: name,
+		ModulePath:   mod,
+		File:         file,
+		Line:         line,
+	})
+	if isPubUse {
+		result.ReExports = append(result.ReExports, ReExportRef{
+			ExportedName: name,
+			SourceModule: mod,
+			File:         file,
+			Line:         line,
+		})
+	}
+}
+
+// walkRustUse recursively descends a Rust use-clause, accumulating the scope
+// prefix, emitting one ImportRef per imported leaf name.
+func walkRustUse(node *sitter.Node, prefix, file string, src []byte, line int, result *ParseResult, isPubUse bool) {
+	switch node.Type() {
+	case "scoped_use_list":
+		// [path] :: { list } — accumulate the path segment(s) into the prefix.
+		p := prefix
+		for i := 0; i < int(node.ChildCount()); i++ {
+			c := node.Child(i)
+			switch c.Type() {
+			case "use_list":
+				walkRustUse(c, p, file, src, line, result, isPubUse)
+			case "identifier", "scoped_identifier", "crate", "super", "self", "metavariable":
+				p = joinRustPath(p, c.Content(src))
+			}
+		}
+	case "use_list":
+		for i := 0; i < int(node.ChildCount()); i++ {
+			c := node.Child(i)
+			switch c.Type() {
+			case "{", "}", ",":
+				continue
+			default:
+				walkRustUse(c, prefix, file, src, line, result, isPubUse)
+			}
+		}
+	case "use_as_clause":
+		// path 'as' alias — the imported name is the alias.
+		var alias string
+		var pathText string
+		seenAs := false
+		for i := 0; i < int(node.ChildCount()); i++ {
+			c := node.Child(i)
+			if c.Type() == "as" {
+				seenAs = true
+				continue
+			}
+			if c.Type() == "identifier" || c.Type() == "scoped_identifier" ||
+				c.Type() == "crate" || c.Type() == "super" || c.Type() == "self" ||
+				c.Type() == "metavariable" {
+				if seenAs {
+					alias = c.Content(src)
+				} else {
+					pathText = c.Content(src)
+				}
+			}
+		}
+		if alias != "" {
+			mod := rustParent(joinRustPath(prefix, pathText))
+			result.Imports = append(result.Imports, ImportRef{
+				ImportedName: alias,
+				ModulePath:   mod,
+				File:         file,
+				Line:         line,
+			})
+			if isPubUse {
+				// aliased re-export: `pub use foo::Bar as Baz` re-exports the ALIAS.
+				result.ReExports = append(result.ReExports, ReExportRef{
+					ExportedName: alias,
+					SourceModule: mod,
+					File:         file,
+					Line:         line,
+				})
+			}
+		}
+	case "use_wildcard":
+		// [path] :: *
+		p := prefix
+		for i := 0; i < int(node.ChildCount()); i++ {
+			c := node.Child(i)
+			switch c.Type() {
+			case "identifier", "scoped_identifier", "crate", "super", "self", "metavariable":
+				p = joinRustPath(p, c.Content(src))
+			}
+		}
+		result.Imports = append(result.Imports, ImportRef{
+			ImportedName: "*",
+			ModulePath:   p,
+			File:         file,
+			Line:         line,
+		})
+		if isPubUse {
+			result.ReExports = append(result.ReExports, ReExportRef{
+				ExportedName: "*",
+				SourceModule: p,
+				File:         file,
+				Line:         line,
+			})
+		}
+	case "scoped_identifier":
+		emitRustLeaf(joinRustPath(prefix, node.Content(src)), file, line, result, isPubUse)
+	case "identifier", "type_identifier", "crate", "super", "metavariable":
+		emitRustLeaf(joinRustPath(prefix, node.Content(src)), file, line, result, isPubUse)
+	case "self":
+		// `use a::b::self;` imports the module `b` itself.
+		if prefix != "" {
+			emitRustLeaf(prefix, file, line, result, isPubUse)
+		}
+	}
+}
+
+// extractRustImportsFallback is the legacy string-based parser, used only when
+// the AST walk produced nothing (unexpected grammar shape).
+func extractRustImportsFallback(node *sitter.Node, file string, src []byte, line int, result *ParseResult) {
 	text := strings.TrimSpace(node.Content(src))
 
 	// Detect pub use → re-export. Strip the visibility modifier before parsing.
