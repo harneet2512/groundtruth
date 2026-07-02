@@ -402,8 +402,12 @@ def _classify_lsp(cert):
     if not cert.get("server_launched"):
         # Never launched — genuine substrate break (bad binary / crash on start).
         return ("LSP_FAIL_NO_WARM", False)
-    warm = (bool(cert.get("lsp_warm")) and bool(cert.get("warm_probe_ok"))
-            and float(cert.get("probe_latency_ms", 0.0) or 0.0) > 0.0)
+    # BUG-E fix (LIPI 2026-07-02): warmth must match resolve.py._compute_lsp_warm, which
+    # DELIBERATELY excludes wall-clock — an instant warm server rounds probe_latency_ms to 0.0.
+    # The old `probe_latency_ms > 0.0` conjunct downgraded a genuinely-active fast server to
+    # LSP_WARN_NOT_READY (fatal the moment any WARN is re-armed). A fake warm is already guarded
+    # by warm_probe_ok (a probe was actually answered), not by wall-clock latency.
+    warm = bool(cert.get("lsp_warm")) and bool(cert.get("warm_probe_ok"))
     if not warm:
         # FIX-A: server LAUNCHED but didn't warm in budget (rust-analyzer still
         # indexing, gopls workspace not loadable offline). The transport is alive;

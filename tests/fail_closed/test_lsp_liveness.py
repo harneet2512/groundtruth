@@ -81,6 +81,20 @@ def test_residual_zero_warm_noop_valid_passes():
     assert v == "LSP_NO_OP_VALID_WITH_WARM_SERVER" and ok
 
 
+def test_warm_instant_zero_latency_is_valid_not_warn():
+    # BUG-E red->green (LIPI 2026-07-02): an instant warm server rounds probe_latency_ms to 0.0.
+    # Warmth must match resolve.py._compute_lsp_warm (excludes wall-clock); latency=0.0 must NOT
+    # downgrade a genuinely-active server to LSP_WARN_NOT_READY. (Mutation guard: restoring the
+    # `probe_latency_ms > 0.0` conjunct makes both asserts fail.)
+    cert = _base_cert(residual=0, demand_edges=0, attempted_edges=0, no_op_valid=True,
+                      no_op_reason="zero in-scope edges", probe_latency_ms=0.0)
+    v, ok = fg._classify_lsp(cert)
+    assert v == "LSP_NO_OP_VALID_WITH_WARM_SERVER" and ok, f"instant-warm (0.0ms) must stay valid, got {v}"
+    cert2 = _base_cert(probe_latency_ms=0.0)  # residual=5 + verified work, instant warm
+    v2, ok2 = fg._classify_lsp(cert2)
+    assert v2 != "LSP_WARN_NOT_READY" and ok2, f"instant-warm with work must not WARN, got {v2}"
+
+
 def test_demand_present_no_attempts_warm_warns():
     cert = _base_cert(demand_edges=5, residual=5, attempted_edges=0)
     v, ok = fg._classify_lsp(cert)

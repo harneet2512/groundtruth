@@ -222,6 +222,34 @@ def test_aggregate_warm_warn_primary_reaches_agent():
     assert ok_mix is False, "a warm incidental server must not mask a dead PRIMARY server"
 
 
+def test_derive_primary_langs_includes_filtered_dominant():
+    # BUG-D red->green (LIPI 2026-07-02): the fail-close scope MUST include the LSP-filtered
+    # verdict-key dominant langs[0], even when _detect_lang (singular, unfiltered) diverges
+    # (defaults "python" on exception, or a non-LSP markdown/bash node-count max). Else a
+    # go/rust warm-WARN primary is scoped out -> false NO_LANGUAGE_RESOLVED.
+    prim = grp._derive_primary_langs(["go"], "python", None)
+    assert "go" in prim
+    ok, _ = grp.aggregate_lsp_verdicts({"go": "LSP_WARN_ZERO_CONVERSION"},
+                                       require_lsp=True, any_success=False, primary_langs=prim)
+    assert ok is True, "warm-WARN go primary must be live once langs[0] is in scope"
+    assert "rust" in grp._derive_primary_langs(["rust"], "markdown", None)
+    # MUTATION GUARD: the OLD scope (no langs[0]) drops go -> false fail (proves the fix matters)
+    ok_bad, _ = grp.aggregate_lsp_verdicts({"go": "LSP_WARN_ZERO_CONVERSION"},
+                                           require_lsp=True, any_success=False, primary_langs={"python"})
+    assert ok_bad is False
+    # empty langs -> falls back to dom/a_lang only, no crash
+    assert grp._derive_primary_langs([], None, "go") == {"go"}
+
+
+def test_runtime_context_id_uses_proof_context_id():
+    # BUG-F guard (LIPI 2026-07-02): runtime_context.json must stamp the SAME id the cert uses
+    # (_proof.context_id()), not the always-empty base_env GT_CONTEXT_ID, so the two binding
+    # tokens prove one identical runtime instead of disagreeing ("" vs f6838c14…).
+    src = _read(os.path.join(ROOT, "scripts", "swebench", "gt_run_proof.py"))
+    assert '"runtime_context_id": _rcid' in src, "runtime_context_id must be set from _rcid"
+    assert "_rcid = _proof.context_id()" in src, "_rcid must come from _proof.context_id() (cert parity)"
+
+
 def test_per_language_certs_persisted_no_overwrite():
     # Source contract: each language's resolve pass writes lsp_certificate_<lang>.json
     # (no FAIL cert overwritten) and the dominant cert is copied to the canonical path.

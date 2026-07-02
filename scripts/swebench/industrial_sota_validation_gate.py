@@ -67,13 +67,20 @@ def _negative_text_evidence(path: Path | None, needle: str, label: str) -> tuple
     return "evidence", [f"{label} lacks {needle}"], []
 
 
-def _artifact_hashes_ok(root: Path, manifest: dict[str, Any]) -> tuple[bool, list[str]]:
+def _artifact_hashes_ok(root: Path, manifest: dict[str, Any], fallback_root: Path | None = None) -> tuple[bool, list[str]]:
+    # BUG-B fix (LIPI 2026-07-02): a manifest-bound artifact may be collected one level up
+    # from the JSON bundle. graph.db lands in trial_results/ (task root) while the certs land
+    # in trial_results/gt_artifacts/ (the search_root). Search the task root as a fallback so
+    # a correctly-collected-but-differently-placed artifact is found and hash-verified rather
+    # than reported missing. The hash check still bites (wrong bytes -> :sha256_mismatch).
     hashes = manifest.get("artifact_sha256") or {}
     if not isinstance(hashes, dict) or not hashes:
         return False, ["run_manifest.artifact_sha256 missing"]
     errors: list[str] = []
     for name, expected in hashes.items():
         p = _find(root, str(name))
+        if not p and fallback_root is not None and fallback_root != root:
+            p = _find(fallback_root, str(name))
         if not p:
             errors.append(f"{name}:missing")
             continue
@@ -126,12 +133,19 @@ def validate(root: Path, *, probes_path: Path | None = None) -> dict[str, Any]:
     delivered = _find(root, "delivered_instruction.txt")
     has_trial_log = bool(trial_log and trial_log.is_file())
 
-    hash_ok, hash_notes = _artifact_hashes_ok(search_root, manifest)
+    hash_ok, hash_notes = _artifact_hashes_ok(search_root, manifest, fallback_root=root)
     proof_ok = verdict.get("state") == "ok"
     # B15: fail-CLOSED. A missing gate_rc is NOT clean — the old `in (0, None)` passed a
     # manifest that never recorded the rc (a "fail-closed" checkpoint that was fail-open).
-    # Require it present AND zero.
-    gate_ok = manifest.get("gate_rc") == 0
+    # Require it present AND zero — OR the proof's DELIVERABLE name_match carveout.
+    # BUG-A fix (LIPI 2026-07-02): on name_match-dominant repos (the majority — go/ts/js/rust)
+    # GATE-1 pred_B returns rc=1, which the proof legitimately blesses as state=ok with
+    # stage=…name_match_carveout (gt_run_proof.py:1510-1539). That stage is stamped ONLY after
+    # _strict_broken_gate_signals()==[], so a genuine break sets state!=ok -> proof_ok False ->
+    # item 1 still fails. B15 fail-open preserved: gate_rc None -> not clean.
+    gate_rc_val = manifest.get("gate_rc")
+    _carveout = str(verdict.get("stage") or "").endswith("name_match_carveout")
+    gate_ok = (gate_rc_val is not None) and (gate_rc_val == 0 or (proof_ok and _carveout))
     adapter_structured = (((task_truth.get("runtime_control") or {}).get("adapter_witness") or {}).get("structured") or {})
 
     items: list[dict[str, Any]] = []

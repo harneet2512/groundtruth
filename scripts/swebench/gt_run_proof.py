@@ -713,6 +713,21 @@ def lsp_ready_budget_seconds(language: str, env=None) -> int:
     return 20
 
 
+def _derive_primary_langs(langs, dom_lang, a_lang):
+    """Fail-close scope = the LSP-filtered verdict-key dominant (langs[0]) UNION the graph
+    dominant + the declared task lang. Including langs[0] guarantees the scope covers the
+    language that actually produced the verdicts (BUG-D), so a warm-WARN primary is never
+    scoped out by an unfiltered `_detect_lang` divergence. Pure + deterministic for the tests."""
+    prim = set()
+    if langs:
+        prim.add(str(langs[0]).lower())
+    if dom_lang:
+        prim.add(str(dom_lang).lower())
+    if a_lang:
+        prim.add(str(a_lang).lower())
+    return prim
+
+
 def aggregate_lsp_verdicts(lang_verdicts: dict, *, require_lsp: bool, any_success: bool, primary_langs=None):
     """P1-e polyglot aggregation rule over per-language LSP verdicts -> (ok, failures).
 
@@ -1317,15 +1332,15 @@ def main(argv=None) -> int:
     # incidental language whose server isn't baked (e.g. a few Java files in a TS repo, jdtls
     # absent) does NOT falsely INFRA-kill a task whose own language resolved. Dominant lang from
     # the graph + the declared task lang; both are already computed above the same way as `langs`.
-    _primary_langs = set()
     try:
         _dom = _detect_lang(graph)
-        if _dom:
-            _primary_langs.add(str(_dom).lower())
     except Exception:
-        pass
-    if getattr(a, "lang", None):
-        _primary_langs.add(str(a.lang).lower())
+        _dom = None
+    # BUG-D fix (LIPI 2026-07-02): include the LSP-filtered verdict-key dominant `langs[0]` in
+    # the fail-close scope. `_detect_lang` (singular, unfiltered) defaults to "python" on any
+    # exception and can pick a non-LSP language (markdown/bash) as the node-count max; without
+    # langs[0] a go/rust warm-WARN primary can fall outside the scope -> false NO_LANGUAGE_RESOLVED.
+    _primary_langs = _derive_primary_langs(langs, _dom, getattr(a, "lang", None))
     _agg_ok, _agg_failures = aggregate_lsp_verdicts(
         lang_verdicts,
         require_lsp=os.environ.get("GT_REQUIRE_LSP") == "1",
@@ -1462,12 +1477,21 @@ def main(argv=None) -> int:
     try:
         from groundtruth.runtime.context import GTRuntimeContext
         ctx = GTRuntimeContext.from_env(source_root=work, graph_db=graph)
+        # BUG-F fix (LIPI 2026-07-02): stamp the SAME runtime_context_id the cert uses
+        # (graph_certificate.py:136-137) so the two binding tokens prove one identical runtime.
+        # base_env.get("GT_CONTEXT_ID","") was always "" (env never set) while the cert wrote the
+        # real _proof.context_id() -> the tokens disagreed (honesty/integrity gap).
+        try:
+            from groundtruth.runtime import proof as _proof
+            _rcid = _proof.context_id()
+        except Exception:
+            _rcid = base_env.get("GT_CONTEXT_ID", "")
         with open(os.path.join(a.out, "runtime_context.json"), "w", encoding="utf-8") as f:
             json.dump({"runtime_root": ctx.runtime_root, "source_root": ctx.source_root,
                        "graph_db": ctx.graph_db, "models_root": ctx.models_root,
                        "inside_container": ctx.inside_container, "proof_mode": ctx.proof_mode,
                        "containerized": ctx.containerized,
-                       "runtime_context_id": base_env.get("GT_CONTEXT_ID", "")}, f, indent=2)
+                       "runtime_context_id": _rcid}, f, indent=2)
     except Exception as e:
         print(f"WARN: runtime_context.json: {e}", file=sys.stderr)
 

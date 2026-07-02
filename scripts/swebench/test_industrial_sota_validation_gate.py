@@ -19,17 +19,26 @@ import industrial_sota_validation_gate as gate  # noqa: E402  # type: ignore[imp
 _NOPROBES = Path("this_probes_file_does_not_exist.json")
 
 
-def _mkroot(tmp: str, *, gate_rc: object = ..., proof_ok=True, adapter=None, resolution=None) -> Path:
+def _mkroot(tmp: str, *, gate_rc: object = ..., proof_ok=True, adapter=None, resolution=None,
+            stage=None, graph_db_at=None) -> Path:
     root = Path(tmp)
     art = root / "gt_artifacts"
     art.mkdir(parents=True, exist_ok=True)
-    manifest = {"artifact_sha256": {}}
+    manifest: dict = {"artifact_sha256": {}}
     if gate_rc is not ...:
         manifest["gate_rc"] = gate_rc
+    # graph_db_at in {"root","gt_artifacts"}: write a real graph.db there + bind its hash so
+    # the artifact-hash items (3/14) can be exercised (BUG-B: root placement must still verify).
+    if graph_db_at is not None:
+        import hashlib
+        dest = (root if graph_db_at == "root" else art) / "graph.db"
+        dest.write_bytes(b"SQLite format 3\x00 fixture graph bytes")
+        manifest["artifact_sha256"] = {"graph.db": hashlib.sha256(dest.read_bytes()).hexdigest()}
     (art / "run_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-    (art / "proof_verdict.json").write_text(
-        json.dumps({"state": "ok" if proof_ok else "fail", "schema": "gt.proof_verdict.v1"}), encoding="utf-8"
-    )
+    verdict: dict = {"state": "ok" if proof_ok else "fail", "schema": "gt.proof_verdict.v1"}
+    if stage is not None:
+        verdict["stage"] = stage
+    (art / "proof_verdict.json").write_text(json.dumps(verdict), encoding="utf-8")
     if adapter is not None:
         (root / "adapter_witness.json").write_text(json.dumps(adapter), encoding="utf-8")
     if resolution is not None:
@@ -51,6 +60,48 @@ def test_item1_fail_open_fixed():
     with tempfile.TemporaryDirectory() as tmp:  # gate_rc=1 → NOT evidence
         p = gate.validate(_mkroot(tmp, gate_rc=1), probes_path=_NOPROBES)
         assert _item(p, 1)["status"] != "evidence", "item1 should fail with gate_rc=1"
+
+
+def test_item1_name_match_carveout():
+    # BUG-A red->green (LIPI 2026-07-02): the proof blesses a name_match-dominant repo as
+    # DELIVERABLE (state=ok, stage=…name_match_carveout) with gate_rc=1. Item 1 must accept it,
+    # else every TS/JS/Go/Rust name_match-heavy task fails the strict gate.
+    CARVE = "artifact_contract_name_match_carveout"
+    with tempfile.TemporaryDirectory() as tmp:
+        p = gate.validate(_mkroot(tmp, gate_rc=1, proof_ok=True, stage=CARVE), probes_path=_NOPROBES)
+        assert _item(p, 1)["status"] == "evidence", "item1 must honor the deliverable name_match carveout"
+    # mutation guards:
+    with tempfile.TemporaryDirectory() as tmp:  # gate_rc=1 + NON-carveout stage -> still fails
+        p = gate.validate(_mkroot(tmp, gate_rc=1, proof_ok=True, stage="artifact_contract"), probes_path=_NOPROBES)
+        assert _item(p, 1)["status"] != "evidence", "non-carveout gate_rc=1 must still fail item1"
+    with tempfile.TemporaryDirectory() as tmp:  # carveout stage but state=fail -> fails
+        p = gate.validate(_mkroot(tmp, gate_rc=1, proof_ok=False, stage=CARVE), probes_path=_NOPROBES)
+        assert _item(p, 1)["status"] != "evidence", "carveout with proof state=fail must fail item1"
+    with tempfile.TemporaryDirectory() as tmp:  # missing gate_rc + carveout -> B15 fail-open preserved
+        p = gate.validate(_mkroot(tmp, proof_ok=True, stage=CARVE), probes_path=_NOPROBES)
+        assert _item(p, 1)["status"] != "evidence", "missing gate_rc must stay unclean (B15 fail-open)"
+
+
+def test_graph_db_at_root_hash_verified():
+    # BUG-B red->green (LIPI 2026-07-02): graph.db is collected to the TASK ROOT (trial_results/)
+    # while the certs live in gt_artifacts/. The gate must still find + hash-verify it (items 3/14),
+    # not report graph.db:missing.
+    with tempfile.TemporaryDirectory() as tmp:
+        root = _mkroot(tmp, gate_rc=0, proof_ok=True, graph_db_at="root")
+        p = gate.validate(root, probes_path=_NOPROBES)
+        assert _item(p, 3)["status"] == "evidence", f"item3 must verify graph.db at task root: {_item(p,3)}"
+        assert _item(p, 14)["status"] == "evidence", f"item14 must verify graph.db at task root: {_item(p,14)}"
+    # sanity: also works when co-located in gt_artifacts/
+    with tempfile.TemporaryDirectory() as tmp:
+        root = _mkroot(tmp, gate_rc=0, proof_ok=True, graph_db_at="gt_artifacts")
+        p = gate.validate(root, probes_path=_NOPROBES)
+        assert _item(p, 14)["status"] == "evidence"
+    # MUTATION GUARD: wrong bytes at root -> hash check still bites (NOT a mere presence check)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = _mkroot(tmp, gate_rc=0, proof_ok=True, graph_db_at="root")
+        (root / "graph.db").write_bytes(b"tampered bytes not matching the bound hash")
+        p = gate.validate(root, probes_path=_NOPROBES)
+        assert _item(p, 14)["status"] != "evidence", "tampered graph.db must fail the hash check"
 
 
 def test_item27_structured_only():
