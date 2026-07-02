@@ -780,13 +780,31 @@ jobs:
           #          → we extract patch + trajectory from the container
 
           # Issue text for the agent
+          # Issue = problem_statement from the CANONICAL HF dataset (ScaleAI/SWE-bench_Pro).
+          # LEAKAGE GUARD (non-negotiable): fetch ONLY problem_statement. NEVER read
+          # swebench-pro-os run_scripts/<instance>/instance_info.txt — it contains
+          # FAIL_TO_PASS/PASS_TO_PASS and feeding it to the agent = benchmaxx/cheating.
+          # The Pro-os repo has NO instructions/ dir; the problem statement lives only on HF.
           PRO_ISSUE=""
-          for _ipath in "swebench-pro-os/instructions/${{ matrix.task }}/instruction.md" \
-                        "swebench-pro-os/instructions/${{ matrix.task }}.md" \
-                        "/tmp/issue.txt"; do
-            if [ -s "$_ipath" ]; then PRO_ISSUE="$_ipath"; break; fi
-          done
-          [ -z "$PRO_ISSUE" ] && echo "Fix the issue in the repository." > /tmp/pro_issue.txt && PRO_ISSUE=/tmp/pro_issue.txt
+          HF_ISSUE=/tmp/pro_issue_hf.txt
+          rm -f "$HF_ISSUE"
+          curl -s --max-time 60 -G "https://datasets-server.huggingface.co/filter" \
+            --data-urlencode "dataset=ScaleAI/SWE-bench_Pro" \
+            --data-urlencode "config=default" \
+            --data-urlencode "split=test" \
+            --data-urlencode "where=\"instance_id\"='${{ matrix.task }}'" \
+            --data-urlencode "length=1" 2>/dev/null | \
+            python3 -c "import json,sys; d=json.load(sys.stdin); r=(d.get('rows') or [{}])[0].get('row',{}); sys.stdout.write((r.get('problem_statement') or '').strip())" > "$HF_ISSUE" 2>/dev/null || true
+          if [ -s "$HF_ISSUE" ]; then
+            PRO_ISSUE="$HF_ISSUE"
+            echo "[GT_META] issue text from HF ScaleAI/SWE-bench_Pro (problem_statement only)"
+          elif [ -s "/tmp/issue.txt" ]; then
+            PRO_ISSUE=/tmp/issue.txt
+          fi
+          if [ -z "$PRO_ISSUE" ]; then
+            echo "GT_ISSUE_MISSING: HF problem_statement fetch failed for ${{ matrix.task }} — synthesized fallback" | tee -a trial_output.log
+            echo "Fix the issue in the repository." > /tmp/pro_issue.txt && PRO_ISSUE=/tmp/pro_issue.txt
+          fi
           ISSUE_TEXT=$(cat "$PRO_ISSUE")
           echo "[GT_META] issue text from: $PRO_ISSUE (${#ISSUE_TEXT} chars)"
 
@@ -823,6 +841,7 @@ jobs:
             -e GT_HOOK_FIRE_COUNTS="/gt_out/gt_hook_fire_counts.json" \
             -e INPUT_MODEL="$INPUT_MODEL" \
             -e GT_STEP_LIMIT="${GT_STEP_LIMIT:-300}" \
+            -e GT_PRO_INSTANCE_ID="${{ matrix.task }}" \
             $MODEL_ENV \
             --entrypoint "" \
             "$_GHCR_IMG" \
@@ -1025,6 +1044,10 @@ jobs:
           cp /tmp/gt/adapter_witness.json trial_results/adapter_witness.json 2>/dev/null || true
           cp /tmp/gt/run_provenance.json trial_results/gt_artifacts/run_provenance.json 2>/dev/null || true
           cp /tmp/pro_eval_output.txt trial_results/ 2>/dev/null || true
+          # gt_pro_runner trajectory ({iid}.traj.json) — the gt_math §4 audit input (rows 25/26).
+          cp /tmp/gt_out/*.traj.json trial_results/ 2>/dev/null || true
+          # The EXACT issue the agent received (for the Q1 / leakage check — must be problem_statement, never FAIL_TO_PASS).
+          cp /tmp/gt_out/issue.txt trial_results/gt_artifacts/agent_issue.txt 2>/dev/null || true
 
           GT_TRIAL_LOG=trial_output.log python3 scripts/swebench/task_truth.py jobs trial_results/task_truth.json 2>/dev/null || true
           if [ -d jobs ]; then

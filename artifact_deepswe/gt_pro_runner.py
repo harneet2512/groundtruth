@@ -28,6 +28,7 @@ import os
 import subprocess
 import sys
 import traceback
+from pathlib import Path
 
 # GT integration (non-pier path): importing gt_mini_patch runs its _install(),
 # which wraps LocalEnvironment.execute to append GT evidence. Best-effort — if it
@@ -54,12 +55,42 @@ def main() -> int:
     step_limit = int(os.environ.get("GT_STEP_LIMIT", "250") or "250")
     cost_limit = float(os.environ.get("GT_PRO_COST_LIMIT", "2.0") or "2.0")
 
+    instance_id = (os.environ.get("GT_PRO_INSTANCE_ID", "") or "task").strip()
+
     try:
         issue = open(issue_path, encoding="utf-8").read().strip()
     except Exception:  # noqa: BLE001
         issue = ""
     if not issue:
         issue = "Fix the issue described in the repository."
+
+    # Q1 PROACTIVE DELIVERY: prepend the GT brief (generated at index time) to the task so the
+    # agent sees the curated evidence BEFORE its first search. brief.txt is in the RO cert dir.
+    # This is the leakage-safe curated brief (localization + graph-map + contracts) — NOT test names.
+    brief = ""
+    _cert = os.environ.get("GT_CERT_DIR", "")
+    _brief_candidates = [
+        os.environ.get("GT_PRO_BRIEF", ""),
+        os.path.join(_cert, "brief.txt") if _cert else "",
+        os.path.join(_cert, "gt_artifacts", "brief.txt") if _cert else "",
+        "/gt_out/brief.txt",
+    ]
+    for _bp in _brief_candidates:
+        try:
+            if _bp and os.path.exists(_bp):
+                brief = open(_bp, encoding="utf-8").read().strip()
+                if brief:
+                    break
+        except Exception:  # noqa: BLE001
+            continue
+    if brief:
+        task = ("<gt-brief> GroundTruth evidence — reason over these candidate targets, callers, and "
+                "contracts BEFORE searching; confirm the exact edit target with grep.\n"
+                f"{brief}\n</gt-brief>\n\n{issue}")
+        print(f"[gt_pro_runner] proactive brief prepended ({len(brief)} bytes)")
+    else:
+        task = issue
+        print("[gt_pro_runner] WARN no brief.txt found — running with issue only (Q1 not delivered)")
 
     from minisweagent.agents.default import DefaultAgent
     from minisweagent.config import builtin_config_dir, get_config_from_spec
@@ -81,7 +112,7 @@ def main() -> int:
 
     exit_status = "unknown"
     try:
-        result = agent.run(issue)
+        result = agent.run(task)
         exit_status = (result or {}).get("exit_status", "completed") if isinstance(result, dict) else "completed"
         print(f"[gt_pro_runner] agent finished: exit_status={exit_status}")
     except Exception as e:  # noqa: BLE001 -- surface the REAL error (was silently swallowed before)
@@ -101,6 +132,20 @@ def main() -> int:
     except Exception:  # noqa: BLE001
         pass
     print(f"GT_PRO_RESULT exit_status={exit_status} steps={steps} llm_calls={llm_calls} cost={cost}")
+
+    # Save the trajectory for the gt_math §4 audit (rows 25/26 — Q1 time-of-delivery, Q3
+    # consumption). Same {iid}.traj.json shape gt_verified_agent writes, so the gt-math reader
+    # finds it on the no-pier Pro path.
+    try:
+        traj_dir = os.environ.get("GT_PRO_TRAJ_DIR", "/gt_out")
+        os.makedirs(traj_dir, exist_ok=True)
+        traj_path = Path(traj_dir) / f"{instance_id}.traj.json"
+        agent.save(traj_path, {"info": {"exit_status": exit_status, "instance_id": instance_id,
+                    "llm_calls": llm_calls, "cost": cost, "steps": steps,
+                    "brief_delivered": bool(brief)}})
+        print(f"[gt_pro_runner] saved trajectory: {traj_path}")
+    except Exception as e:  # noqa: BLE001
+        print(f"[gt_pro_runner] traj save failed: {type(e).__name__}: {e}")
 
     # Capture the patch (uncorrupted git diff) for the verifier.
     try:
