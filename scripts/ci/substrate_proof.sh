@@ -481,12 +481,28 @@ else
   PRO_RUN_SCRIPTS="swebench-pro-os/run_scripts"
   ISSUE_TEXT=""
 
-  # Try Pro-OS run_scripts dir first
+  # PRIMARY source: problem_statement from the CANONICAL HF dataset (ScaleAI/SWE-bench_Pro).
+  # LEAKAGE GUARD (non-negotiable): fetch ONLY problem_statement — NEVER read
+  # run_scripts/<instance>/instance_info.txt (it carries FAIL_TO_PASS/PASS_TO_PASS).
+  # The Pro-OS repo has no instructions/ or problem_statement.md — the issue lives only on HF.
+  HF_PS="$(curl -s --max-time 60 -G "https://datasets-server.huggingface.co/filter" \
+    --data-urlencode "dataset=ScaleAI/SWE-bench_Pro" \
+    --data-urlencode "config=default" \
+    --data-urlencode "split=test" \
+    --data-urlencode "where=\"instance_id\"='${TASK_ID}'" \
+    --data-urlencode "length=1" 2>/dev/null \
+    | python3 -c "import json,sys; d=json.load(sys.stdin); r=(d.get('rows') or [{}])[0].get('row',{}); sys.stdout.write((r.get('problem_statement') or '').strip())" 2>/dev/null || true)"
+  if [ -n "$HF_PS" ]; then
+    ISSUE_TEXT="$HF_PS"
+    echo "issue text from HF ScaleAI/SWE-bench_Pro (problem_statement only): ${#ISSUE_TEXT} chars"
+  fi
+
+  # Fallback A: Pro-OS run_scripts dir (only if HF failed)
   for candidate in \
       "${PRO_RUN_SCRIPTS}/${TASK_ID}/problem_statement.md" \
       "${PRO_RUN_SCRIPTS}/${TASK_ID}/README.md" \
       "${PRO_RUN_SCRIPTS}/${TASK_ID}/instruction.md"; do
-    if [ -s "$candidate" ]; then
+    if [ -z "$ISSUE_TEXT" ] && [ -s "$candidate" ]; then
       ISSUE_TEXT="$(cat "$candidate")"
       echo "issue text from ${candidate}: ${#ISSUE_TEXT} chars"
       break

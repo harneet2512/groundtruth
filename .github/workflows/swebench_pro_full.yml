@@ -868,7 +868,7 @@ jobs:
                   && MSWE_PY=/tmp/mswe_env/bin/python
               fi
               # Fallback: system python only if it is ALREADY >=3.10 (rare for these images).
-              if [ -z "$MSWE_PY" ] && python -c 'import sys;sys.exit(0 if sys.version_info>=(3,10) else 1)' 2>/dev/null; then
+              if [ -z "$MSWE_PY" ] && python -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)" 2>/dev/null; then
                 pip install --quiet mini-swe-agent 2>/dev/null && MSWE_PY=python
               fi
               if [ -z "$MSWE_PY" ]; then echo "FATAL: could not provision mini-swe-agent (py3.11)"; exit 1; fi
