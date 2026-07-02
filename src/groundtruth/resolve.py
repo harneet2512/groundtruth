@@ -288,7 +288,11 @@ def _count_residual_method_edges(
         "SELECT COUNT(*) FROM edges e "
         "JOIN nodes src ON e.source_id = src.id "
         "JOIN nodes tgt ON e.target_id = tgt.id "
-        "WHERE e.type = 'CALLS' AND e.resolution_method = 'name_match'"
+        # P3-11 fix (Fable 2026-07-02): count the whole name_match FAMILY, not just the exact
+        # literal — the P0 demote path stamps `name_match_qualified_unresolved` into
+        # resolution_method, so an exact match undercounts the residual and can declare a false
+        # no_op_valid ("LSP had nothing to do") on a graph that still has unresolved method edges.
+        "WHERE e.type = 'CALLS' AND e.resolution_method LIKE 'name_match%'"
     )
     params: list = []
     if language:
