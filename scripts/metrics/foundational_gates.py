@@ -364,7 +364,9 @@ def _classify_lsp(cert):
     """Return (verdict, ok) for an LSP-liveness certificate. ok=True only for the three
     valid verdicts; a residual==0 pass is INVALID without a warmed server; no cert => fail.
 
-    PASS: LSP_ACTIVE_VALID, LSP_NO_OP_VALID_WITH_WARM_SERVER, LSP_UNSUPPORTED_EXPLICIT.
+    PASS: LSP_ACTIVE_VALID, LSP_NO_OP_VALID_WITH_WARM_SERVER, LSP_UNSUPPORTED_EXPLICIT,
+          LSP_DEGRADED (B3-#7: transport-warm but readiness NOT proven — an honest
+          deliver-always downgrade of a would-be transport-only ACTIVE_VALID).
     FAIL: LSP_FAIL_NO_WARM, LSP_FAIL_STALE_CLOSURE, LSP_FAIL_NOT_RUN_BEFORE_SCORING,
           LSP_FAIL_MISSING_CERTIFICATE, LSP_FAIL_CERT_VERSION_SKEW.
 
@@ -444,6 +446,22 @@ def _classify_lsp(cert):
         # Warm server that converted nothing: dep-env limitation when
         # project_ready is true/unknown — transport OK, product not ready.
         return ("LSP_WARN_ZERO_CONVERSION", True)
+    # B3-#7 LSP WARM-GATE HONESTY: reaching here means transport-warm + effective_work>0,
+    # but transport-liveness (lsp_warm/warm_probe_ok = "the process REPLIED") is NOT
+    # readiness. The audit witnessed a server self-certify ACTIVE_VALID from transport alone
+    # while ~44% of definition lookups returned empty. ACTIVE_VALID now requires demonstrated
+    # readiness: the readiness probe ANSWERED (probe_answered_ok) AND the workspace LOADED
+    # (project_ready). A field RECORDED False means the server never reached that signal ->
+    # the honest verdict is LSP_DEGRADED (a deliver-always PASS: the tree-sitter graph still
+    # reaches the agent — correct-or-quiet, DEGRADED-but-honest beats certified-but-empty),
+    # NEVER a fake ACTIVE_VALID. `is False` (not `is not True`): resolve.py always writes both
+    # as bools in production, so this is strict there; a cert that never recorded a field
+    # (legacy fixture / demand=0 no-op) is judged on its other liveness fields, preserving
+    # genuinely-ready passes and existing green tests.
+    # MUTATION-CHECK: dropping this readiness gate (return ACTIVE_VALID unconditionally =
+    # transport-only) makes the warm-gate test fail.
+    if cert.get("probe_answered_ok") is False or cert.get("project_ready") is False:
+        return ("LSP_DEGRADED", True)
     return ("LSP_ACTIVE_VALID", True)
 
 
@@ -475,6 +493,14 @@ def gate_lsp(lsp_metrics_text: str, cert=None, graph_lsp_witness: int = -1) -> b
                         "LSP_UNSUPPORTED_EXPLICIT")
             or (verdict == "LSP_WARN_ZERO_CONVERSION" and ok)
         )
+        # B3-#7: count of definition lookups that ANSWERED but returned empty (the
+        # "~44% empty" signal). Prefer the dispatch-layer counter if the cert carried it,
+        # else fall back to resolve.py's per-edge failed_breakdown["empty"]. Made explicit
+        # in the axis so a transport-alive-but-unproductive server is measurable downstream.
+        _empty_lookups = cert.get("empty_definition_lookups")
+        if _empty_lookups is None:
+            _empty_lookups = (cert.get("failed_breakdown") or {}).get("empty", 0)
+        _empty_lookups = int(_empty_lookups or 0)
         print(f"[GATE 2 LSP ENRICHMENT] {verdict} {'PASS' if ok else 'FAIL'} "
               f"lsp_warm={cert.get('lsp_warm')} server_launched={cert.get('server_launched')} "
               f"warm_probe_ok={cert.get('warm_probe_ok')} probe_latency_ms={cert.get('probe_latency_ms')} "
@@ -490,6 +516,12 @@ def gate_lsp(lsp_metrics_text: str, cert=None, graph_lsp_witness: int = -1) -> b
             "lsp_product_ready": _product_ok,
             "server_launched": bool(cert.get("server_launched")),
             "warm_probe_ok": bool(cert.get("warm_probe_ok")),
+            # B3-#7 honest readiness fields (transport-liveness is NOT readiness): the
+            # readiness-probe answer + the empty-lookup counter, now consumed by the verdict
+            # and surfaced here so the "~44% empty" gap is measurable downstream.
+            "probe_answered_ok": cert.get("probe_answered_ok"),
+            "empty_definition_lookups": _f8(_empty_lookups),
+            "lsp_degraded": bool(verdict == "LSP_DEGRADED"),
             "probe_latency_ms": _f8(float(cert.get("probe_latency_ms", 0.0) or 0.0)),
             "language": cert.get("language"),
             "residual": _f8(int(cert.get("residual", 0))),
