@@ -2458,6 +2458,12 @@ def _query_scope(rel: str) -> list[str]:
         con = _connect_ro(db)
         if con is None:
             return []
+        # [PATH-FRAME FIX / A6] resolve the agent's view path to the GRAPH frame so the
+        # scope query is FOUND on monorepos (agent views `json-schema/x.ts`; graph stores
+        # `ark/json-schema/x.ts`) — same break `_evidence_body` fixes at :2663. Neighbours
+        # are emitted graph-frame; the agent resolves them from repo_root. Single-package
+        # repos: exact-hit early return -> identical behavior.
+        dbrel, _code_root = _resolve_frame(con, rel, _root())
         # 2026-06-10 cross-language disqualifier (boa [57] parity): scope is a
         # DELIVERED claim ("graph-connected") and must obey the same gate as the
         # witness/caller facts. Legacy graphs without nodes.language stay
@@ -2484,7 +2490,7 @@ def _query_scope(rel: str) -> list[str]:
             "ORDER BY conf DESC, n2.file_path ASC LIMIT 6"
         )
         try:
-            for fp, _l1, _l2, _conf in con.execute(q, (_norm_fp(rel),)):
+            for fp, _l1, _l2, _conf in con.execute(q, (dbrel,)):
                 # NEIGHBOR-path chokepoint (2026-06-17): vendored/minified/generated
                 # /test/demo neighbours are never delivered scope (the ONE predicate);
                 # nor cross-language "neighbours" (a call edge between language
@@ -2558,6 +2564,10 @@ def _consensus_block(rel: str, root: str) -> str:
         scope: list[str] = []
         con = _connect_ro(db) if os.path.isfile(db) else None
         if con is not None:
+            # [PATH-FRAME FIX / A6] resolve to the graph frame so first-view consensus
+            # scope is FOUND on monorepos (same break _evidence_body fixes at :2663).
+            # Single-package repos: exact-hit early return -> identical behavior.
+            dbrel, _code_root = _resolve_frame(con, rel, root)
             # 2026-06-10 cross-language disqualifier (boa [57] parity) — same
             # gate as _query_scope; legacy no-language graphs stay PERMISSIVE.
             _lang_sel = (", n1.language, n2.language" if _nodes_have_language(con)
@@ -2590,7 +2600,7 @@ def _consensus_block(rel: str, root: str) -> str:
                 "LIMIT 6"
             )
             try:
-                for fp, _l1, _l2, _conf in con.execute(q, (_norm_fp(rel),)):
+                for fp, _l1, _l2, _conf in con.execute(q, (dbrel,)):
                     # NEIGHBOR-path chokepoint (2026-06-17): vendored/minified/
                     # generated/test/demo neighbours are never delivered scope (the
                     # ONE predicate — the agent is told not to edit tests, and an
@@ -2752,7 +2762,13 @@ def _graph_contract_block(rel: str) -> str:
         con = _connect_ro(db)
         if con is None:
             return ""
-        nfp = _norm_fp(rel)
+        # [PATH-FRAME FIX / A6] Resolve the agent's view path to the GRAPH frame so the
+        # contract is FOUND on monorepos (agent views `json-schema/x.ts`; graph stores
+        # `ark/json-schema/x.ts`). Was an exact `_norm_fp(rel)` match -> 0 rows -> contract
+        # dark on every sub-dir frame (same break `_evidence_body` fixes at :2663). Only
+        # graph lookups here (the guard/return-shape query keys on node id), so code_root
+        # is unused. Single-package repos: exact-hit early return -> identical behavior.
+        nfp, _code_root = _resolve_frame(con, rel, root)
         rows: list = []
         preserve: list[str] = []
         try:
@@ -3250,6 +3266,7 @@ try:
 except ImportError:
     _TEST_RUNNER_RE = re.compile(
         r"(?:^|[|&;]\s*)(?:timeout\s+(?:-\S+\s+|\d+\S*\s+)+|time\s+|env\s+(?:\S+=\S+\s+)+"
+        r"|(?:npx|bunx?)\s+|(?:yarn|pnpm)\s+(?:dlx\s+)?"  # JS package-runner wrappers: `npx jest`, `yarn jest`, `pnpm dlx vitest`
         r"|python[\d.]*\s+(?=\S*\.py\b))*(?:"
         r"python[\d.]*\s+-m\s+(?:pytest|unittest|nose2?|tox)\b"
         r"|pytest\b|py\.test\b|tox\b|nose2?\b"
@@ -3257,6 +3274,7 @@ except ImportError:
         r"|(?:\S*/)?manage\.py\s+test\b"
         r"|go\s+test\b|cargo\s+test\b"
         r"|npm\s+(?:run\s+)?test\b|yarn\s+(?:run\s+)?test\b|pnpm\s+(?:run\s+)?test\b"
+        r"|bun\s+test\b|deno\s+test\b|node\s+--test\b"  # JS-native test runners
         r"|jest\b|mocha\b|vitest\b|rspec\b|rake\s+test\b|phpunit\b|ctest\b"
         r"|mvn\s+\S*\s*test\b|gradlew?\s+\S*\s*test\b|make\s+(?:check|test)\b"
         r")", re.I)

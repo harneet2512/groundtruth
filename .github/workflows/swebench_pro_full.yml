@@ -1091,6 +1091,21 @@ jobs:
             python3 scripts/verify/deepswe_outcome.py jobs || echo "WARN: outcome extract failed"
           find trial_results -type f 2>/dev/null | head -40 || true
 
+          # A7: industrial SOTA validation gate on Pro (parity with deepswe_full). Paid runs
+          # (GT_REQUIRE_FULL_STACK=1, unless GT_ADVISORY_GATE=1) run --strict; enforcement is a
+          # dedicated POST-UPLOAD step so an early exit here never drops artifacts.
+          _gate_args=""
+          if [ "${GT_REQUIRE_FULL_STACK:-0}" = "1" ] && [ "${GT_ADVISORY_GATE:-0}" != "1" ]; then
+            _gate_args="--strict"
+          fi
+          if python3 scripts/swebench/industrial_sota_validation_gate.py trial_results $_gate_args \
+               > trial_results/industrial_sota_validation.json; then
+            echo "industrial_sota_validation_gate: PASS (${_gate_args:-advisory})"
+          else
+            echo "::warning::industrial_sota_validation_gate FAILED (${_gate_args:-advisory}) — see industrial_sota_validation.json"
+            [ -n "$_gate_args" ] && touch trial_results/INDUSTRIAL_GATE_FAILED
+          fi
+
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4
@@ -1099,6 +1114,18 @@ jobs:
           path: trial_results/
           retention-days: 30
           if-no-files-found: warn
+
+      # A7: enforce the industrial SOTA gate AFTER upload so a strict failure reds the task job
+      # without losing artifacts. Only fires when Collect wrote the marker (paid --strict run).
+      - name: Enforce industrial SOTA gate (strict, post-upload)
+        if: always()
+        run: |
+          if [ -f trial_results/INDUSTRIAL_GATE_FAILED ]; then
+            echo "::error::Industrial SOTA validation gate failed under --strict — run is industrially INVALID"
+            head -60 trial_results/industrial_sota_validation.json 2>/dev/null || true
+            exit 1
+          fi
+          echo "industrial SOTA gate: OK (or advisory-only)"
 
       - name: Cleanup runner disk (post-upload, non-critical)
         if: always()

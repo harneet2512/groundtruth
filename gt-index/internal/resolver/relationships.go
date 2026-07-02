@@ -970,9 +970,23 @@ func resolveClassOrFuncNode(name, currentFile string, classIndex map[string][]cl
 	if id := resolveClassNode(name, currentFile, classIndex); id != 0 {
 		return id
 	}
-	// Search all files for a function with this name
-	for _, funcs := range funcFileIndex {
+	// DETERMINISM (B0) + correctness: prefer the CURRENT file, then search the remaining
+	// files in SORTED key order. The old `range funcFileIndex` returned the first same-
+	// named function from a RANDOMIZED map iteration, so the COMPOSES edge target flipped
+	// run-to-run when the name existed in >1 file (the P1-5 nondeterminism class; mirrors
+	// resolveByName content-order + the findEnclosingFunc same-scope preference below).
+	if funcs, ok := funcFileIndex[currentFile]; ok {
 		if id, ok := funcs[name]; ok {
+			return id
+		}
+	}
+	files := make([]string, 0, len(funcFileIndex))
+	for f := range funcFileIndex {
+		files = append(files, f)
+	}
+	sort.Strings(files)
+	for _, f := range files {
+		if id, ok := funcFileIndex[f][name]; ok {
 			return id
 		}
 	}

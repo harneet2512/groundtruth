@@ -322,6 +322,7 @@ def get_callers(conn: sqlite3.Connection, target_id: int, target_file: str) -> l
         FROM edges e
         JOIN nodes n ON n.id = e.source_id
         WHERE e.target_id = ? AND e.type = 'CALLS' AND e.source_file != ?
+          AND n.is_test = 0
           AND e.resolution_method IN ({ph}){conf_clause}
         LIMIT 10
     """, (target_id, target_file, *methods))
@@ -365,7 +366,11 @@ def get_siblings(conn: sqlite3.Connection, target_id: int) -> list[GraphNode]:
 def get_tests(conn: sqlite3.Connection, target_id: int) -> list[GraphNode]:
     """Get test functions that call the target."""
     cur = conn.cursor()
-    ph, methods = _resolution_sql_in()
+    # A4: name_match is a same-name guess, never a fact — a phantom covering test is
+    # maximally-harmful. Admit DETERMINISTIC-only edges (excludes name_match by construction).
+    ph, methods = _deterministic_sql_in()
+    if not methods:
+        return []
     conf_clause = _confidence_clause(_has_confidence_column(conn))
     cur.execute(f"""
         SELECT n.* FROM edges e
@@ -380,7 +385,11 @@ def get_tests(conn: sqlite3.Connection, target_id: int) -> list[GraphNode]:
 def get_all_callers_count(conn: sqlite3.Connection, target_id: int) -> tuple[int, int]:
     """Returns (total_callers, unique_files). Only counts admissible edges."""
     cur = conn.cursor()
-    ph, methods = _resolution_sql_in()
+    # A4: count only DETERMINISTIC callers — name_match callers are phantoms that inflate the
+    # IMPACT blast-radius with same-name guesses.
+    ph, methods = _deterministic_sql_in()
+    if not methods:
+        return (0, 0)
     conf_clause = _confidence_clause(_has_confidence_column(conn), alias="edges")
     cur.execute(f"""
         SELECT COUNT(*), COUNT(DISTINCT source_file)
@@ -1545,25 +1554,20 @@ def compute_evidence(conn: sqlite3.Connection, root: str, target: GraphNode) -> 
                         f"returns {common[0]} ({common[1]}/{len(ret_types)} typed siblings agree)"
                     )
 
-    # Family 3: TEST — test functions with assertions
-    if _allowed_families is None or "TEST" in _allowed_families:
+    # Family 3: TEST — covering-test EXISTENCE only (anonymized, swap-invariant).
+    # LEAKAGE GUARD (A1, non-negotiable): NEVER surface a test's name, file, or assertion
+    # text — that hands the agent the grader (identical harm to leaking FAIL_TO_PASS). Mirrors
+    # the live core's verification_horizon "a graph-linked covering test" anonymization. OFF by
+    # default (requires an explicit GT_EVIDENCE_FAMILIES=TEST ablation); even then it emits only
+    # a COUNT keyed to the TARGET, so its output is identical if the grader swaps its tests.
+    if _allowed_families is not None and "TEST" in _allowed_families:
         tests = get_tests(conn, target.id)
-        for test_node in tests:
-            assertions = extract_assertions(root, test_node)
-            if assertions:
-                code = "\n".join(assertions[:3])
-                candidates.append(EvidenceNode(
-                    family="TEST", score=2,
-                    name=test_node.name, file=test_node.file_path, line=test_node.start_line,
-                    source_code=code, summary=f"{len(assertions)} assertions",
-                ))
-            else:
-                # Even without extractable assertions, knowing the test file is valuable
-                candidates.append(EvidenceNode(
-                    family="TEST", score=1,
-                    name=test_node.name, file=test_node.file_path, line=test_node.start_line,
-                    source_code="", summary=f"test function references {target.name}",
-                ))
+        if tests:
+            candidates.append(EvidenceNode(
+                family="TEST", score=1,
+                name=target.name, file=target.file_path, line=target.start_line,
+                source_code="", summary=f"{len(tests)} covering test(s) exist — run the suite",
+            ))
 
     # Family 4: IMPACT — blast radius (lowered threshold from 5 to 2)
     if _allowed_families is None or "IMPACT" in _allowed_families:
@@ -1966,6 +1970,10 @@ def _score_to_tier(node: EvidenceNode) -> str:
     Uses edge_confidence if available (v14+ indexer), otherwise falls back
     to score-based tiers for backward compatibility.
     """
+    # A4: name_match is a same-name guess across files/classes — never a deterministic fact,
+    # so it may NEVER render as VERIFIED regardless of its (self-assigned) edge_confidence.
+    if getattr(node, "resolution_method", "") == "name_match":
+        return "WARNING" if node.score >= 1 else "INFO"
     edge_conf = getattr(node, "edge_confidence", None)
     if edge_conf is not None and isinstance(edge_conf, (int, float)):
         if edge_conf >= 0.9:

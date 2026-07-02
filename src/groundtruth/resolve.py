@@ -1430,11 +1430,18 @@ def resolve_main() -> None:
         action="store_true",
         help="Actually resolve edges via LSP (not just diagnose)",
     )
+    # Honor the same GT_LSP_MAX_EDGES operator override the runtime residual pass uses
+    # (gt_run_proof.compute_lsp_max_edges): a positive int wins, else the historical 500
+    # floor. (The full dynamic gap-based budget lives in the baked runtime helper — lifting
+    # it into a shared importable module changes a baked file, so it is deferred to Phase B;
+    # this only keeps the diagnostic CLI from silently capping below an explicit budget.)
+    _override = str(os.environ.get("GT_LSP_MAX_EDGES", "")).strip()
+    _default_max_edges = int(_override) if _override.isdigit() and int(_override) > 0 else 500
     parser.add_argument(
         "--max-edges",
         type=int,
-        default=500,
-        help="Maximum edges to resolve (default: 500)",
+        default=_default_max_edges,
+        help="Maximum edges to resolve (default: 500, or a positive GT_LSP_MAX_EDGES)",
     )
     # Demand-driven scoping (Heintze & Tardieu, "Demand-Driven Pointer Analysis,"
     # PLDI 2001): resolve only the issue-relevant subgraph, not the whole repo.

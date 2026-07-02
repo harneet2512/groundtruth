@@ -132,3 +132,44 @@ def test_existing_wrapper_forms_still_recognized(patch_mod):
     # and plain non-runner commands stay out
     assert r.search("timeout 60 python build.py") is None
     assert r.search("cargo build") is None
+
+
+# ===========================================================================
+# A5 — JS package-runner wrappers (npx/bunx/yarn/pnpm) + JS-native runners
+#       (bun/deno/node --test). Pre-fix the verify axis was DARK on `npx jest`
+#       (no `^`/`|&;`/wrapper before the runner token), so a PASSING JS test
+#       suite still read as [edited, untested].
+# ===========================================================================
+def test_js_package_runner_wrappers_recognized(patch_mod):
+    r = patch_mod._TEST_RUNNER_RE
+    assert r.search("npx jest") is not None
+    assert r.search("npx vitest run") is not None
+    assert r.search("npx mocha test/") is not None
+    assert r.search("yarn jest --coverage") is not None
+    assert r.search("pnpm dlx vitest run") is not None
+    assert r.search("bunx jest") is not None
+
+
+def test_js_native_runners_recognized(patch_mod):
+    r = patch_mod._TEST_RUNNER_RE
+    assert r.search("bun test") is not None
+    assert r.search("deno test") is not None
+    assert r.search("node --test") is not None
+    assert r.search("node --test test/unit") is not None
+
+
+def test_js_non_test_wrappers_not_recognized(patch_mod):
+    """A package-runner wrapper around a NON-test tool must NOT count as a runner."""
+    r = patch_mod._TEST_RUNNER_RE
+    assert r.search("npx prettier --write .") is None
+    assert r.search("npx eslint src/") is None
+    assert r.search("npx tsc --noEmit") is None
+    assert r.search("bun run build") is None
+
+
+def test_a5_held_out_langs_still_match(patch_mod):
+    """Held-out (>=3 langs): the JS fix must not regress non-JS runners."""
+    r = patch_mod._TEST_RUNNER_RE
+    assert r.search("go test ./...") is not None
+    assert r.search("cargo test") is not None
+    assert r.search("pytest tests/") is not None

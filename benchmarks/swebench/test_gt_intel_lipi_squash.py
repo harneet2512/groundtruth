@@ -298,3 +298,67 @@ def test_item27_briefing_test_link_deterministic(tmp_path):
     c.commit()
     out = gt_intel.generate_pretask_briefing(c, str(tmp_path), ["do_thing"], max_lines=8)
     assert "TEST:" not in out, f"phantom name_match test link leaked into briefing:\n{out}"
+
+
+# ── A1 leakage kill: TEST family off-by-default + anonymized; tests never surfaced ──
+
+def _leak_fixture(c, tmp_path):
+    """target do_thing() in app.py; a DETERMINISTIC (import) test caller carrying a
+    distinctive grader assertion marker in test_app.py."""
+    _node(c, id=1, label="Function", name="do_thing", qualified_name="do_thing",
+          file_path="app.py", start_line=1, end_line=3)
+    _node(c, id=2, label="Function", name="test_do_thing_secret", file_path="test_app.py",
+          start_line=1, end_line=4, is_test=1)
+    _edge(c, 2, 1, "import", src_file="test_app.py", line=2)
+    c.commit()
+    (tmp_path / "app.py").write_text("def do_thing():\n    return 42\n\n")
+    (tmp_path / "test_app.py").write_text(
+        "def test_do_thing_secret():\n    r = do_thing()\n"
+        "    assert r == 'SECRET_GRADER_MARKER_42'\n")
+
+
+def test_a1_no_grader_leak_by_default(tmp_path, monkeypatch):
+    """No GT_EVIDENCE_FAMILIES: neither the assertion text NOR the test name may reach the
+    brief. Pre-fix the TEST family fired on None and rendered both (and CALLER surfaced the
+    test as a dependent)."""
+    monkeypatch.delenv("GT_EVIDENCE_FAMILIES", raising=False)
+    c = _conn(); _leak_fixture(c, tmp_path)
+    target = gt_intel.get_target_node(c, "app.py", "do_thing")
+    ev = gt_intel.compute_evidence(c, str(tmp_path), target)
+    out = gt_intel.format_output(gt_intel.rank_and_select(ev), target, str(tmp_path))
+    assert "SECRET_GRADER_MARKER_42" not in out, "grader assertion leaked"
+    assert "test_do_thing_secret" not in out, "grader test name leaked"
+    assert not [e for e in ev if e.family == "TEST"], "TEST family fired by default"
+
+
+def test_a1_test_family_anonymized_when_enabled(tmp_path, monkeypatch):
+    """Explicitly enabled, TEST emits only a COUNT keyed to the TARGET — swap-invariant.
+    Pre-fix it rendered test_node.name + verbatim assertions."""
+    monkeypatch.setenv("GT_EVIDENCE_FAMILIES", "TEST")
+    c = _conn(); _leak_fixture(c, tmp_path)
+    target = gt_intel.get_target_node(c, "app.py", "do_thing")
+    ev = gt_intel.compute_evidence(c, str(tmp_path), target)
+    test_ev = [e for e in ev if e.family == "TEST"]
+    assert test_ev, "TEST family did not fire when explicitly enabled"
+    n = test_ev[0]
+    assert n.source_code == "", "assertion text present in TEST evidence"
+    assert n.name == "do_thing" and "test_app.py" not in n.file, "test identity leaked"
+    out = gt_intel.format_output(gt_intel.rank_and_select(ev), target, str(tmp_path))
+    assert "SECRET_GRADER_MARKER_42" not in out
+    assert "test_do_thing_secret" not in out
+
+
+# ── A4 tiering: name_match never renders VERIFIED ────────────────────────────
+
+def test_a4_name_match_never_verified():
+    """A name_match-resolved node must never map to VERIFIED, whatever its score.
+    Pre-fix the score>=2 fallback returned VERIFIED for a name_match caller."""
+    nm = gt_intel.EvidenceNode(
+        family="CALLER", score=3, name="x", file="a.py", line=1,
+        source_code="", summary="", resolution_method="name_match")
+    assert gt_intel._score_to_tier(nm) != "VERIFIED", "name_match laundered to VERIFIED"
+    # a deterministic node with score>=2 still tiers VERIFIED (no over-suppression)
+    det = gt_intel.EvidenceNode(
+        family="IMPORT", score=2, name="y", file="b.py", line=1,
+        source_code="", summary="", resolution_method="import")
+    assert gt_intel._score_to_tier(det) == "VERIFIED"

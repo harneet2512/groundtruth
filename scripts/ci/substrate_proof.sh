@@ -684,6 +684,16 @@ if [ "$PROOF_RC" -ne 0 ]; then
     echo "::error::gt-run-proof failed on ${_LC} (legitimacy/anti-cheat — results would be INVALID) — task FAILS" | tee -a trial_output.log
     # proof_status stays 'failed' (written above); HARD ABORT so no paid spend on an invalid substrate.
     exit 1
+  elif [ "${GT_REQUIRE_FULL_STACK:-0}" = "1" ] || [ "${GT_REQUIRE_GRAPH_VALID:-0}" = "1" ] \
+       || [ "${GT_REQUIRE_LSP:-0}" = "1" ] || [ "${GT_REQUIRE_EMBEDDER:-0}" = "1" ]; then
+    # A2: a REQUIRED-stack run explicitly demanded the full stack / a specific axis. A proof
+    # rc!=0 then means the substrate is NOT the required stack -> fail-closed, NEVER launder to
+    # ok. This closes the best-effort override the else-branch applied to EVERY rc!=0 and
+    # realizes the intent documented above (GT_REQUIRE_FULL_STACK/GRAPH_VALID must not be
+    # laundered), extended to the per-axis GT_REQUIRE_LSP/EMBEDDER flags. proof_status stays
+    # 'failed' (written above) so the agent gate (PROOF_STATE != ok) refuses the paid trial.
+    echo "::error::gt-run-proof exited $PROOF_RC on a REQUIRED-stack run (GT_REQUIRE_FULL_STACK=${GT_REQUIRE_FULL_STACK:-0} GRAPH_VALID=${GT_REQUIRE_GRAPH_VALID:-0} LSP=${GT_REQUIRE_LSP:-0} EMBEDDER=${GT_REQUIRE_EMBEDDER:-0}) — task FAILS (no laundering to ok)" | tee -a trial_output.log
+    exit 1
   else
     echo "::warning::gt-run-proof exited $PROOF_RC — trial proceeds BEST-EFFORT with degraded GT (correct-or-quiet; never refuse a task for quality)"
     write_proof_status ok PROOF_DEGRADED "gt-run-proof exited $PROOF_RC but agent trial proceeds best-effort"

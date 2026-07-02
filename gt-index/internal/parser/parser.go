@@ -496,33 +496,42 @@ func linkRustImplMethods(result *ParseResult) {
 	}
 }
 
+// functionNodeName returns the name walkNode would assign to a function-definition node
+// ("" = anonymous, so walkNode creates NO node for it). Centralized so extractCalls uses the
+// SAME predicate to decide the B1-#5 nested-function boundary: a nested function that WILL
+// get its own node is a boundary (its calls attribute to IT); an anonymous one is traversed
+// through so its calls still attribute to the enclosing named function (no lost edges).
+func functionNodeName(node *sitter.Node, sf walker.SourceFile, src []byte) string {
+	spec := sf.Spec
+	nodeType := node.Type()
+	name := extractFieldText(node, spec.NameField, src)
+	if name == "" {
+		name = extractFirstIdentifier(node, src)
+	}
+	// JS/TS: arrow functions assigned to variables have no name field — it lives on the
+	// parent variable_declarator (e.g. `const handler = async (req, res) => {}`).
+	if name == "" && nodeType == "arrow_function" {
+		parent := node.Parent()
+		if parent != nil && parent.Type() == "variable_declarator" {
+			name = extractFieldText(parent, "name", src)
+		}
+	}
+	// JS/TS: function expressions assigned to variables/properties/exports are executable
+	// module entry points even when not declarations (`const fn = function(){}`,
+	// `exports.fn = function(){}`, `module.exports = function(){}`). Name from the target.
+	if name == "" && (nodeType == "function_expression" || nodeType == "arrow_function") {
+		name = assignedFunctionExpressionName(node, sf, src)
+	}
+	return name
+}
+
 func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, result *ParseResult, parentNodeIdx int) {
 	spec := sf.Spec
 	nodeType := node.Type()
 
 	// Check for function definition
 	if spec.IsFunctionNode(nodeType) {
-		name := extractFieldText(node, spec.NameField, src)
-		if name == "" {
-			name = extractFirstIdentifier(node, src)
-		}
-		// JS/TS fix: arrow functions assigned to variables have no name field.
-		// The name lives on the parent variable_declarator node.
-		// e.g. const handler = async (req, res) => {}
-		if name == "" && nodeType == "arrow_function" {
-			parent := node.Parent()
-			if parent != nil && parent.Type() == "variable_declarator" {
-				name = extractFieldText(parent, "name", src)
-			}
-		}
-		// JS/TS fix: function expressions assigned to variables/properties/exports
-		// are executable module entry points even when they are not declarations:
-		// `const fn = function() {}`, `exports.fn = function() {}`,
-		// `module.exports = function() {}`. Name them from the assignment target so
-		// source files do not disappear from the substrate graph.
-		if name == "" && (nodeType == "function_expression" || nodeType == "arrow_function") {
-			name = assignedFunctionExpressionName(node, sf, src)
-		}
+		name := functionNodeName(node, sf, src)
 		if name != "" {
 			// B9: the SIGNATURE is a fact/contract surface (typed param list + return, per
 			// D2) — it must NOT carry decorator prose. Decorators previously prepended here
@@ -576,7 +585,20 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 			if isTest {
 				extractAssertionRefs(node, sf, src, result, idx)
 			}
-			return // don't recurse into children (we already extracted from body)
+			// B1-#5: recurse into the body to expose NESTED function definitions as nodes
+			// linked to THIS function (idx+1). extractCalls above stops at named-nested-
+			// function boundaries so a nested function's calls attribute to IT, not to this
+			// outer function. Without this, `module.exports = function(C){ C.getX =
+			// function(){ helper() } }` (the NodeBB/express namespace-augmentation pattern)
+			// left getX + the whole augmented API invisible to the graph. Anonymous nested
+			// functions create no node (functionNodeName == "") and are still traversed, so
+			// their calls remain attributed to the nearest named ancestor (no lost edges).
+			if bodyNode != nil {
+				for i := 0; i < int(bodyNode.ChildCount()); i++ {
+					walkNode(bodyNode.Child(i), sf, src, isTest, result, idx+1)
+				}
+			}
+			return
 		}
 	}
 
@@ -1026,7 +1048,15 @@ func extractCallsWithParent(node *sitter.Node, sf walker.SourceFile, src []byte,
 	}
 
 	for i := 0; i < int(node.ChildCount()); i++ {
-		extractCallsWithParent(node.Child(i), sf, src, result, callerIdx, nodeType)
+		child := node.Child(i)
+		// B1-#5 boundary: do NOT descend into a NAMED nested function definition — its calls
+		// belong to that function (walkNode gives it its own node + its own extractCalls),
+		// not to this enclosing caller. An ANONYMOUS nested function (functionNodeName == "",
+		// no node) is still traversed so its calls attribute to the nearest named ancestor.
+		if spec.IsFunctionNode(child.Type()) && functionNodeName(child, sf, src) != "" {
+			continue
+		}
+		extractCallsWithParent(child, sf, src, result, callerIdx, nodeType)
 	}
 }
 
@@ -3075,8 +3105,15 @@ func extractReturnShape(funcNode *sitter.Node, bodyNode *sitter.Node, sf walker.
 		shapeLine = int(funcNode.StartPoint().Row) + 1
 	}
 
-	// Summarize
+	// Summarize — DETERMINISM (B0): a Go `range` over a map is randomized, so emitting
+	// the return_shape properties in map order made graph.db non-byte-identical across
+	// indexings. Collect + sort the shape keys first (mirrors the receiverCalls sort).
+	shapeKeys := make([]string, 0, len(shapes))
 	for shape := range shapes {
+		shapeKeys = append(shapeKeys, shape)
+	}
+	sort.Strings(shapeKeys)
+	for _, shape := range shapeKeys {
 		result.Properties = append(result.Properties, PropertyRef{
 			NodeIdx:    nodeIdx,
 			Kind:       "return_shape",

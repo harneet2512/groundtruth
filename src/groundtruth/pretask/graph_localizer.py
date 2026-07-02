@@ -131,11 +131,13 @@ W_SUBJECT = 0.15
 # grep finds files with keywords, the graph finds files at the CENTER of
 # the keyword-relevant code cluster. Weight above W_DEGREE (it's a stronger
 # structural signal) but below W_WITNESS (direct edge > neighborhood count).
-# PPR: Personalized PageRank structural signal. The graph's depth advantage
-# over grep — PPR propagates mass through the call graph from seed nodes,
-# capturing multi-hop structural proximity. Weight above W_DEGREE (it's a
-# richer structural signal from the full graph) but below W_WITNESS (a
-# direct verified edge is stronger than diffused PPR mass).
+# NOTE (doc correction): Personalized PageRank is NOT implemented — there is no
+# W_PPR constant and no PPR computation in this module. Multi-hop structural
+# proximity is captured instead by the path-decay reach signal (`_path_decay_scores`,
+# Dijkstra over verified edges) fused via RRF (GT_LOC_FUSION_V2). This paragraph is
+# retained only to record that PPR was considered and deliberately NOT built (reach
+# already over-promotes hubs; the architecture subordinates structural reach on
+# purpose — adding diffused PPR mass would worsen the hub-bias, not help).
 
 # Witness strength by edge provenance (correct-or-quiet).
 # EDGE witnesses (CALLS/IMPORTS): structural evidence — the file is connected
@@ -211,15 +213,20 @@ def _degree_edge_filter(a: str) -> str:
 
 # Shared FTS5 DDL — single source of truth so schema changes don't diverge
 # across the Go indexer, Python fallback, and preflight script.
+# STANDALONE FTS5 (NOT content='nodes' external-content): the query-path fallback
+# builds nodes_fts in a PRIVATE in-memory db with graph.db ATTACHed read-only, so the
+# read-only query path NEVER writes graph.db (was: CREATE/INSERT INTO the source db ->
+# mutated a read-only artifact + changed its sha256 + could race a concurrent reader).
+# An external-content table binds to a `nodes` table in its OWN db; here `nodes` lives in
+# the attached `src`, so we store the column VALUES to keep the index self-contained.
 _FTS5_CREATE = """
-CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
-    name, qualified_name, signature, file_path,
-    content='nodes', content_rowid='id'
+CREATE VIRTUAL TABLE nodes_fts USING fts5(
+    name, qualified_name, signature, file_path
 )"""
 _FTS5_POPULATE = """
 INSERT INTO nodes_fts(rowid, name, qualified_name, signature, file_path)
 SELECT id, name, COALESCE(qualified_name, ''), COALESCE(signature, ''), file_path
-FROM nodes WHERE is_test = 0
+FROM src.nodes WHERE is_test = 0
 """
 
 # Composite rerank weights (Phase 1: FTS5 + path decay added).
@@ -401,21 +408,26 @@ def _fts5_candidates(
                 print("[GT L1] FTS5: no database path available, skipping", file=sys.stderr)
                 return []
             try:
-                print("[GT L1] FTS5: nodes_fts missing, attempting Python-side creation", file=sys.stderr)
-                # Intentional WRITE to graph.db: create FTS5 virtual table as a
-                # Python-side fallback when nodes_fts doesn't exist. This mutates
-                # the DB during what is otherwise a read-only query path. The
-                # sqlite3.Error catch below handles read-only filesystems gracefully
-                # (returns [] without crashing).
-                _fts_conn = sqlite3.connect(_db_path)
+                print("[GT L1] FTS5: nodes_fts missing, building read-only in-memory index", file=sys.stderr)
+                # READ-ONLY fallback: build the FTS index in a PRIVATE in-memory db with
+                # graph.db ATTACHed read-only (mode=ro), so this query path NEVER writes
+                # graph.db (was: sqlite3.connect(_db_path) + CREATE/INSERT INTO the source
+                # -> mutated a read-only artifact, changed its sha256, could race a reader).
+                # uri=True enables SQLITE_OPEN_URI so the ATTACH honors the mode=ro filename;
+                # resolve() guarantees the absolute path as_uri() requires.
+                import pathlib
+                _src_uri = pathlib.Path(_db_path).resolve().as_uri() + "?mode=ro"
+                _fts_conn = sqlite3.connect(":memory:", uri=True)
                 _fts_conn_owned = True
+                _fts_conn.execute("ATTACH DATABASE ? AS src", (_src_uri,))
                 _fts_conn.execute(_FTS5_CREATE)
                 _fts_conn.execute(_FTS5_POPULATE)
                 _fts_conn.commit()
                 _n_rows = _fts_conn.execute("SELECT COUNT(*) FROM nodes_fts").fetchone()[0]
-                print(f"[GT L1] FTS5: Python-side creation OK ({_n_rows} rows)", file=sys.stderr)
-            except sqlite3.Error as _fts_err:
-                print(f"[GT L1] FTS5: Python-side creation FAILED: {_fts_err}", file=sys.stderr)
+                print(f"[GT L1] FTS5: in-memory creation OK ({_n_rows} rows, graph.db untouched)",
+                      file=sys.stderr)
+            except (sqlite3.Error, ValueError, OSError) as _fts_err:
+                print(f"[GT L1] FTS5: in-memory creation FAILED: {_fts_err}", file=sys.stderr)
                 if _fts_conn_owned:
                     try:
                         _fts_conn.close()
@@ -573,6 +585,7 @@ def _path_decay_scores(
                         WHERE {match_col} = ?
                           AND e.type IN ({_REACH_EDGE_TYPES_SQL})
                           AND n.is_test = 0
+                        ORDER BY n.file_path, {join_col}
                         LIMIT 100""",
                     (nid,),
                 ).fetchall()

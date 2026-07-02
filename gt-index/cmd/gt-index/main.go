@@ -523,8 +523,18 @@ func main() {
 	}
 	// Containment edges: parent_id → CONTAINS for class-structure queries
 	// Use parentFixups since allNodePtrs had ParentID zeroed before batch insert.
+	// DETERMINISM (B0): iterate parentFixups in SORTED node-index order. A Go `range`
+	// over a map is randomized, so the CONTAINS edges were appended (and thus assigned
+	// rowids) in nondeterministic order — graph.db was not byte-identical across builds
+	// even though the edge CONTENT was identical (the double-index harness caught this).
 	var containsPtrs []*store.Edge
-	for nodeIdx, parentGlobalIdx := range parentFixups {
+	fixupNodeIdxs := make([]int, 0, len(parentFixups))
+	for nodeIdx := range parentFixups {
+		fixupNodeIdxs = append(fixupNodeIdxs, nodeIdx)
+	}
+	sort.Ints(fixupNodeIdxs)
+	for _, nodeIdx := range fixupNodeIdxs {
+		parentGlobalIdx := parentFixups[nodeIdx]
 		pidx := int(parentGlobalIdx) - 1
 		if pidx >= 0 && pidx < len(nodeDBIDs) && nodeIdx < len(nodeDBIDs) {
 			parentDBID := nodeDBIDs[pidx]

@@ -24,6 +24,8 @@ GT_PRO_RESULT summary (exit_status, steps, cost) the workflow greps for.
 """
 from __future__ import annotations
 
+import importlib
+import json
 import os
 import subprocess
 import sys
@@ -42,6 +44,97 @@ try:
     print("[gt_pro_runner] gt_mini_patch imported (GT evidence augmentation ON)")
 except Exception as e:  # noqa: BLE001
     print(f"[gt_pro_runner] WARN gt_mini_patch import failed (evidence OFF): {type(e).__name__}: {e}")
+
+
+def _verify_graph_witness() -> None:
+    """A3: close the Pro certify->consume chain (the deepswe path enforces this at
+    gt_agent.py:1163-1233; the Pro path had NO witness, so nothing verified the agent read
+    the graph the gates certified). Fingerprint the graph the agent will actually consume
+    (gt_mini_patch._db_path() == GT_HOST_GRAPH_DB, the untouched substrate mount) and compare
+    to the substrate's LSP-resolved authority hash (graph_hash_after_lsp in the lsp/graph
+    certificate). Under a REQUIRED-stack / proof run a divergent or unprovable consume
+    HARD-STOPS before any LLM spend. Best-effort (print-only) on unflagged iteration runs.
+    Emits the same [GT_META] graph_witness line format as gt_agent so task_truth reconciles it.
+    """
+    proof = (os.environ.get("GT_PROOF_MODE") == "1"
+             or os.environ.get("GT_REQUIRE_FULL_STACK") == "1")
+
+    def _stop(reason: str) -> None:
+        print(f"[gt_pro_runner] GRAPH_WITNESS_FAIL: {reason}", flush=True)
+        sys.exit(1)
+
+    # 1. Resolve the graph the agent consumes — reuse gt_mini_patch's own resolver so we
+    #    fingerprint EXACTLY what the per-turn pillars read (not a divergent path).
+    resolved_db = ""
+    try:
+        import gt_mini_patch as _gmp  # already imported at module load
+        resolved_db = _gmp._db_path() or ""
+    except Exception as e:  # noqa: BLE001
+        resolved_db = os.environ.get("GT_HOST_GRAPH_DB", "") or ""
+        if proof and not resolved_db:
+            _stop(f"cannot resolve consumed graph ({type(e).__name__}: {e})")
+    if not resolved_db or not os.path.isfile(resolved_db):
+        if proof:
+            _stop(f"consumed graph absent: {resolved_db!r}")
+        print(f"[gt_pro_runner] graph_witness: no graph to fingerprint ({resolved_db!r}) — skip",
+              flush=True)
+        return
+
+    # 2. Canonical READ-ONLY fingerprint of the consumed graph.
+    try:
+        from groundtruth.runtime import proof as _pf
+        hook_hash = _pf.graph_edges_hash(resolved_db) or ""
+    except Exception as e:  # noqa: BLE001
+        if proof:
+            _stop(f"graph_edges_hash unavailable ({type(e).__name__}: {e})")
+        print(f"[gt_pro_runner] graph_witness: hash unavailable ({e}) — skip", flush=True)
+        return
+    if not hook_hash and proof:
+        _stop(f"graph_edges_hash_empty for {resolved_db!r}")
+
+    # 3. Substrate authority hash from the certificate(s).
+    cert_dir = os.environ.get("GT_CERT_DIR", "") or ""
+    post_lsp_hash = ""
+    for _name in ("lsp_certificate.json", "graph_certificate.json"):
+        for _base in (cert_dir, "/gt_artifacts", "/tmp/gt"):
+            if not _base:
+                continue
+            _p = os.path.join(_base, _name)
+            if os.path.isfile(_p):
+                try:
+                    _c = json.load(open(_p, encoding="utf-8"))
+                    post_lsp_hash = _c.get("graph_hash_after_lsp") or _c.get("graph_hash") or ""
+                except Exception:  # noqa: BLE001
+                    post_lsp_hash = ""
+                if post_lsp_hash:
+                    break
+        if post_lsp_hash:
+            break
+    hash_match = bool(post_lsp_hash) and (hook_hash == post_lsp_hash)
+
+    # 4. Emit the canonical witness line (same format as gt_agent -> task_truth reconciles).
+    _fmt = None
+    try:
+        _fmt = getattr(importlib.import_module("graph_certificate"), "format_graph_witness", None)
+    except Exception:  # noqa: BLE001
+        _fmt = None
+    if _fmt is not None:
+        base = _fmt(host_resolved_graph_db=resolved_db, hook_graph_db=resolved_db,
+                    hook_graph_hash=hook_hash, prebuilt_active="true")
+    else:
+        base = (f"[GT_META] graph_witness host_resolved_graph_db={resolved_db} "
+                f"hook_graph_db={resolved_db} hook_graph_hash={hook_hash} _gt_prebuilt_active=true")
+    print(f"{base} | graph_hash_after_lsp={post_lsp_hash or '(absent)'} "
+          f"hook_graph_hash_matches_post_lsp={hash_match}", flush=True)
+
+    # 5. FAIL-CLOSED under proof/required-stack: a divergent or unprovable consume must
+    #    HARD-STOP before any paid LLM spend (mirrors gt_agent.py:1225-1244).
+    if proof and post_lsp_hash and not hash_match:
+        _stop(f"GRAPH_FAIL_HASH_MISMATCH hook={hook_hash} != post_lsp={post_lsp_hash} "
+              f"— consumed graph diverges from the substrate's certified graph")
+    if proof and not post_lsp_hash:
+        _stop(f"post_lsp_hash_absent cert_dir={cert_dir!r} — cannot prove the consumed graph "
+              f"== the substrate's LSP-resolved graph")
 
 
 def main() -> int:
@@ -91,6 +184,9 @@ def main() -> int:
     else:
         task = issue
         print("[gt_pro_runner] WARN no brief.txt found — running with issue only (Q1 not delivered)")
+
+    # A3: verify certify->consume BEFORE building the model / spending any LLM calls.
+    _verify_graph_witness()
 
     from minisweagent.agents.default import DefaultAgent
     from minisweagent.config import builtin_config_dir, get_config_from_spec

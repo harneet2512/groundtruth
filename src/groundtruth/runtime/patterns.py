@@ -25,6 +25,7 @@ import re
 # ---------------------------------------------------------------------------
 TEST_RUNNER_RE = re.compile(
     r"(?:^|[|&;]\s*)(?:timeout\s+(?:-\S+\s+|\d+\S*\s+)+|time\s+|env\s+(?:\S+=\S+\s+)+"
+    r"|(?:npx|bunx?)\s+|(?:yarn|pnpm)\s+(?:dlx\s+)?"  # JS package-runner wrappers: `npx jest`, `yarn jest`, `pnpm dlx vitest`
     r"|python[\d.]*\s+(?=\S*\.py\b))*(?:"
     r"python[\d.]*\s+-m\s+(?:pytest|unittest|nose2?|tox)\b"
     r"|pytest\b|py\.test\b|tox\b|nose2?\b"
@@ -32,6 +33,7 @@ TEST_RUNNER_RE = re.compile(
     r"|(?:\S*/)?manage\.py\s+test\b"
     r"|go\s+test\b|cargo\s+test\b"
     r"|npm\s+(?:run\s+)?test\b|yarn\s+(?:run\s+)?test\b|pnpm\s+(?:run\s+)?test\b"
+    r"|bun\s+test\b|deno\s+test\b|node\s+--test\b"  # JS-native test runners
     r"|jest\b|mocha\b|vitest\b|rspec\b|rake\s+test\b|phpunit\b|ctest\b"
     r"|mvn\s+\S*\s*test\b|gradlew?\s+\S*\s*test\b|make\s+(?:check|test)\b"
     r")", re.I)
