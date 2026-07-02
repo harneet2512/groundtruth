@@ -170,7 +170,7 @@ def test_genuinely_unknown_language_no_ops_exit_0(tmp_path):
 # still ships the tree-sitter graph + contract/sibling/cochange (items 1/2/4).
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def _fake_resolve_edges_never_launched(db_path, root, edges, language):
+async def _fake_resolve_edges_never_launched(db_path, root, edges, language, source_files=None):
     """A server that NEVER LAUNCHED (binary un-spawnable) — the hard FAIL_NO_WARM shape."""
     return {"verified": 0, "corrected": 0, "deleted": 0, "failed": len(edges), "skipped": 0,
             "server_launched": False, "warm_probe_ok": False,
@@ -178,7 +178,7 @@ async def _fake_resolve_edges_never_launched(db_path, root, edges, language):
             "failure_detail": "launch: server binary did not start"}
 
 
-async def _fake_resolve_edges_no_warm(db_path, root, edges, language):
+async def _fake_resolve_edges_no_warm(db_path, root, edges, language, source_files=None):
     """A server that LAUNCHED but never answered the warm probe (FIX-A: the WARN shape)."""
     return {"verified": 0, "corrected": 0, "deleted": 0, "failed": len(edges), "skipped": 0,
             "server_launched": True, "warm_probe_ok": False,
