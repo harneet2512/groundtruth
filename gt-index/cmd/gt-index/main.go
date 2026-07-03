@@ -336,6 +336,17 @@ func main() {
 	if err := db.PopulateFTS5(); err != nil {
 		log.Printf("WARNING: FTS5 population failed: %v", err)
 	}
+	// B1: build the CONTENT surface (symbol_content_fts) over per-symbol body content
+	// so the localizer's content-BM25 leg can RETRIEVE behavior-described (stratum-B)
+	// files the name-only surfaces (nodes_fts/embedder/anchor) structurally miss.
+	// Standalone + additive; FTS5-gated (no-op when FTS5 is absent). Non-fatal — a
+	// content-index failure never blocks the build (the leg degrades to 0).
+	if err := db.EnsureContentFTS(); err != nil {
+		log.Printf("WARNING: content FTS ensure failed: %v", err)
+	}
+	if err := db.PopulateContentFTS(*root); err != nil {
+		log.Printf("WARNING: content FTS population failed: %v", err)
+	}
 	// GT_REQUIRE_FTS5 preflight gate: on a paid benchmark we must NOT silently
 	// degrade to the Python name-match fallback. If FTS5 isn't a real, populated
 	// index, abort the index build so the run never starts. n<=0 means the binary
@@ -1289,6 +1300,28 @@ func runIncremental(root, relpath, dbPath string) error {
 	// stay current. Same call as the full-index path (idempotent).
 	if err := db.PopulateFTS5(); err != nil {
 		log.Printf("[WARN] FTS5 refresh after incremental reindex: %v", err)
+	}
+	// B1: refresh the content surface for the reindexed file only (delete + re-insert
+	// its symbols) so symbol_content_fts stays current after a -file reindex. No-op when
+	// the table is absent (a graph.db built before B1, or FTS5 off).
+	if err := db.RepopulateContentFTSForFile(root, relSlash); err != nil {
+		log.Printf("[WARN] content FTS refresh after incremental reindex: %v", err)
+	}
+	// R#6: verify the orphan-edge invariant (incremental.go:13,422) actually held.
+	// The full-index path FK-checks post-insert (main.go:821); the live -file path
+	// never did, so a delete/reinsert gap that stranded an edge on a missing node
+	// (source_id/target_id → a deleted row) would ship silently. It must be a WHOLE-DB
+	// check (a scoped one would miss INCOMING cross-file edges whose target was a just-
+	// deleted node — the more dangerous orphan). PRAGMA foreign_key_check is O(all edges),
+	// so it is GATED behind GT_VALIDATE_FK (LIPI BUG 4): OFF for casual local reindexes
+	// (zero per-turn cost), ON for the proof/substrate path (set GT_VALIDATE_FK=1 there),
+	// where a silent orphan would poison a paid run and the O(edges) scan is dominated by
+	// the reparse+resolve anyway. Logged LOUDLY, never fatal (the reindex tx already
+	// committed; the signal lets us fix the delete logic, the graph stays otherwise current).
+	if os.Getenv("GT_VALIDATE_FK") == "1" {
+		if err := db.ValidateForeignKeys(); err != nil {
+			log.Printf("[WARN] incremental reindex of %s breached the orphan-edge invariant: %v", relSlash, err)
+		}
 	}
 	// RC-04: fold WAL frames into the main DB file immediately so concurrent
 	// readers (gt_query/gt_search/gt_navigate/gt_validate) never see a partial

@@ -707,3 +707,68 @@ func TestResolveIncomingEdgesPreservesVerifiedUniqueOnQNameMatch(t *testing.T) {
 		t.Fatalf("qname-matched restore must preserve verified_unique/CERTIFIED/0.95, got method=%q tier=%q conf=%v", method, tier, confidence)
 	}
 }
+
+// TestResolveIncomingEdges_VerifiedUnique_MultiCandidateQName_CapsNotCertifies pins Fable
+// finding 1: even when the exact qualified_name RE-MATCHES (target identity re-proven), a
+// UNIQUENESS-derived tier (verified_unique/unique_method) must NOT stay CERTIFIED once the
+// reindexed file holds MORE THAN ONE same-named node — the uniqueness premise
+// (candidate_count==1) is observably falsified, so preserving 0.95 would ship a
+// self-contradictory fact (2 candidates yet verified_unique) onto the -file fact surface.
+// This is the multi-candidate twin the single-candidate preserve test above does not cover;
+// without uniquenessDerivedMethods it restores 0.95/CERTIFIED (the P0 launder Fable found).
+func TestResolveIncomingEdges_VerifiedUnique_MultiCandidateQName_CapsNotCertifies(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "graph.db")
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := createSchema(db); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+
+	// The reindexed file now holds TWO 'process' methods (a second class was added);
+	// the original target's qualified_name still uniquely identifies node id=2.
+	if _, err := tx.Exec(
+		`INSERT INTO nodes (id, label, name, qualified_name, file_path, language) VALUES
+		 (1, 'Function', 'caller',  'src.caller.caller',           'src/caller.py', 'python'),
+		 (2, 'Method',   'process', 'src.target.OldClass.process', 'src/target.py', 'python'),
+		 (3, 'Method',   'process', 'src.target.NewClass.process', 'src/target.py', 'python')`,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	snap := []IncomingEdgeRef{{
+		SourceID:            1,
+		SourceLine:          7,
+		EdgeType:            "CALLS",
+		SourceFile:          "src/caller.py",
+		TargetName:          "process",
+		ResolutionMethod:    "verified_unique",
+		Confidence:          0.95,
+		EvidenceType:        "verified_unique",
+		TargetQualifiedName: "src.target.OldClass.process",
+	}}
+
+	if _, _, err := ResolveIncomingEdgesTx(tx, snap, "src/target.py"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Identity is re-proven → the edge still targets the qname-matched node id=2 ...
+	var tier string
+	var confidence float64
+	if err := tx.QueryRow(
+		`SELECT trust_tier, confidence FROM edges WHERE source_id = 1 AND target_id = 2`,
+	).Scan(&tier, &confidence); err != nil {
+		t.Fatalf("edge to the qname-matched target id=2 is missing: %v", err)
+	}
+	// ... but the uniqueness-derived CERTIFIED tier MUST be capped (uniqueness broken).
+	if tier == "CERTIFIED" || confidence > 0.6 {
+		t.Fatalf("Fable finding 1 launder: verified_unique kept tier=%q conf=%v with a second same-named node in the file — must cap at CANDIDATE 0.6", tier, confidence)
+	}
+}

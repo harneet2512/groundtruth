@@ -12,9 +12,9 @@
 //   - Step 6: nodes deleted by file_path = ?.
 //   - The orphan-edge invariant (edges referencing missing nodes) MUST hold
 //     after this operation. Verified by:
-//       SELECT COUNT(*) FROM edges
-//        WHERE source_id NOT IN (SELECT id FROM nodes)
-//           OR target_id NOT IN (SELECT id FROM nodes);
+//     SELECT COUNT(*) FROM edges
+//     WHERE source_id NOT IN (SELECT id FROM nodes)
+//     OR target_id NOT IN (SELECT id FROM nodes);
 package store
 
 import (
@@ -85,10 +85,11 @@ func SnapshotIncomingEdgesTx(tx *sql.Tx, filePath string, cap int) ([]IncomingEd
 		   JOIN nodes n ON e.target_id = n.id
 		  WHERE n.file_path = ?
 		    AND (e.source_file IS NULL OR e.source_file != ?)
+		    AND e.source_id NOT IN (SELECT id FROM nodes WHERE file_path = ?)
 		    AND (e.resolution_method IS NULL OR e.resolution_method NOT LIKE 'promote_%')
 		  ORDER BY e.id
 		  LIMIT ?`,
-		filePath, filePath, cap,
+		filePath, filePath, filePath, cap,
 	)
 	// B-9: ORDER BY e.id makes the cap boundary DETERMINISTIC — when the LIMIT is hit
 	// (B7), *which* incoming edges survive is now id-ordered, not SQLite-scan-order
@@ -166,6 +167,20 @@ var typeOrUniquenessDerivedMethods = map[string]bool{
 	"lsp_verified":    true,
 }
 
+// uniquenessDerivedMethods are the subset whose tier premise is GLOBAL NAME-UNIQUENESS at
+// index time (verified_unique = only one function of this name; unique_method = only one
+// method of this name). An exact qualified_name re-match re-proves TARGET IDENTITY but NOT
+// uniqueness — so if the reindexed file now holds MORE THAN ONE same-named node (len(ids)>1),
+// the uniqueness premise is observably falsified and the CERTIFIED tier must not be preserved
+// (it would ship candidate_count>1 alongside verified_unique — a self-contradictory fact on
+// the fact surface). Type/LSP-derived tiers (type_flow/import_type/inherited/impl_method/
+// return_type/lsp/lsp_verified) are NOT here: the qname re-match re-proves their receiver-type
+// / go-to-definition identity even amid same-named siblings.
+var uniquenessDerivedMethods = map[string]bool{
+	"verified_unique": true,
+	"unique_method":   true,
+}
+
 // tierForConfidence mirrors resolver.tierFor (CLAUDE.md:222 — the ONE threshold
 // table) for the store package, which cannot import resolver (import cycle).
 // Keep the thresholds in lockstep with resolver.tierFor.
@@ -223,7 +238,14 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string)
 		// qnameMatchID is the candidate whose qualified_name EXACTLY equals the
 		// original edge's TargetQualifiedName — the node that re-proves target
 		// identity (not merely the simple name). 0 = no exact-qname candidate.
+		// qnameMatchCount counts how many candidates carry that qualified_name:
+		// identity is re-proven ONLY when it is UNIQUE (==1). Several nodes sharing
+		// a qualified_name (Python @overload stacks / platform-conditional defs —
+		// qualified_name is bare `name` for top-level funcs, so it is NOT unique in
+		// a file) do NOT re-prove WHICH node the edge meant; preserving a CERTIFIED
+		// tier onto the arbitrary first would launder it (Fable 2026-07-03).
 		var qnameMatchID int64
+		var qnameMatchCount int
 		for rows.Next() {
 			var id int64
 			var qname string
@@ -232,8 +254,11 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string)
 				return restored, unresolved, fmt.Errorf("scan target id: %w", err)
 			}
 			ids = append(ids, id)
-			if qnameMatchID == 0 && r.TargetQualifiedName != "" && qname == r.TargetQualifiedName {
-				qnameMatchID = id
+			if r.TargetQualifiedName != "" && qname == r.TargetQualifiedName {
+				qnameMatchCount++
+				if qnameMatchID == 0 {
+					qnameMatchID = id
+				}
 			}
 		}
 		rows.Close()
@@ -250,7 +275,7 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string)
 		// receiver-type / global-uniqueness fact, so that tier is capped at CANDIDATE.
 		targetID := ids[0]
 		qnameMatched := false
-		if qnameMatchID != 0 {
+		if qnameMatchID != 0 && qnameMatchCount == 1 {
 			targetID = qnameMatchID
 			qnameMatched = true
 		}
@@ -264,16 +289,24 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string)
 		// is treated as demoted too (correct-or-quiet — never re-promote a guess).
 		qualifiedUnresolved := r.EvidenceType == "name_match_qualified_unresolved"
 
-		// #B6: if unambiguous (1 candidate) and the original edge was resolved by
-		// ANY deterministic method, preserve method + confidence verbatim and
-		// re-derive the tier from the ONE threshold table. Only genuinely-
-		// unresolvable edges (ambiguous re-match, original name_match, or the
-		// qualified-unresolved stdlib-shadow demote) fall to a name_match guess.
+		// #B6/R1: preserve the original deterministic method + confidence verbatim
+		// (re-deriving the tier from the ONE threshold table) when identity is
+		// re-proven — EITHER a single surviving candidate (unambiguous) OR an exact
+		// qualified_name re-match among several same-named nodes (qnameMatched, which
+		// already pointed targetID at the RIGHT node above). Gating on len(ids)==1
+		// alone was STRICTER than the documented design (lines 248-250: qnameMatched is
+		// the type-tier gate) — it silently downgraded an lsp/type_flow/verified_unique
+		// edge to a 0.2-0.6 name_match guess the moment the reindexed file gained a
+		// SECOND same-named method, so a verified caller vanished from the contract
+		// pillar post-edit even though its exact target was re-found. The multi-candidate
+		// case WITHOUT an exact qname re-match still falls to the name_match guess (genuinely
+		// ambiguous), and the P0 demote guard below still caps type/uniqueness/LSP tiers
+		// whenever !qnameMatched — so a bare-name re-match never re-certifies a guess.
 		var conf float64
 		var method string
 		var tier string
 		var evType string
-		if !qualifiedUnresolved && len(ids) == 1 && deterministicRestoreMethods[r.ResolutionMethod] {
+		if !qualifiedUnresolved && (len(ids) == 1 || qnameMatched) && deterministicRestoreMethods[r.ResolutionMethod] {
 			conf = r.Confidence
 			// Item #4: floor ONLY the literal pre-v14 0.0/NULL sentinel to the
 			// method-appropriate verified value (same_file/import → 1.0, the
@@ -296,6 +329,15 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string)
 			// the tier re-derive to CANDIDATE. The signature-derived same_file/import
 			// methods are exempt: their proof survives a bare-name re-match.
 			if !qnameMatched && typeOrUniquenessDerivedMethods[method] && conf > 0.6 {
+				conf = 0.6
+			}
+			// Fable finding 1: even WITH an exact qname re-match, a UNIQUENESS-derived tier
+			// (verified_unique/unique_method) cannot be preserved when the reindexed file now
+			// holds >1 same-named node — the qname re-proves identity but the uniqueness premise
+			// is falsified (candidate_count>1). Preserving CERTIFIED here launders a
+			// self-contradictory fact onto the -file/L6 fact surface (the P0 class). Cap at
+			// CANDIDATE (0.6); type/LSP tiers are exempt (qname re-proves their identity).
+			if qnameMatched && len(ids) > 1 && uniquenessDerivedMethods[method] && conf > 0.6 {
 				conf = 0.6
 			}
 			tier = tierForConfidence(conf)
@@ -382,11 +424,18 @@ func DeleteFileEdgesAndNodesTx(tx *sql.Tx, filePath string) (int64, int64, error
 	// Step 5: delete edges sourced from this file OR targeting any node in this file.
 	// NOTE: must run before the node delete; the subquery resolves against the
 	// current nodes table.
+	// LIPI (reindex orphan-proofing): delete the source side SYMMETRICALLY — by the
+	// denormalized source_file string AND by source_id ∈ (nodes of this file). The
+	// string alone left an orphan when source_file was NULL/≠relSlash for an edge
+	// whose source node lives in this file (its node gets deleted below, the edge
+	// survives → source_id → dead id). Adding the source_id subquery makes the delete
+	// structurally orphan-proof; target_id already covered the incoming side.
 	resE, err := tx.Exec(
 		`DELETE FROM edges
 		   WHERE source_file = ?
+		      OR source_id IN (SELECT id FROM nodes WHERE file_path = ?)
 		      OR target_id IN (SELECT id FROM nodes WHERE file_path = ?)`,
-		filePath, filePath,
+		filePath, filePath, filePath,
 	)
 	if err != nil {
 		return 0, 0, fmt.Errorf("delete edges for %s: %w", filePath, err)

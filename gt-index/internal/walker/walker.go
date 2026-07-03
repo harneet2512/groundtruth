@@ -210,12 +210,22 @@ func IsTestFile(relPath string) bool {
 	if strings.HasPrefix(base, "test_") || strings.HasSuffix(stem, "_test") {
 		return true
 	}
+	// Python pytest/Django FILES the test_/_test rules miss (Fable 2026-07-03 leak: their
+	// bodies carry fixtures/assertions/graded-test names — indexing them bakes test text
+	// into graph.db + the content surface). conftest.py (fixtures), tests.py & test.py
+	// (Django app-level test modules), *_tests.py (plural). Root fix so is_test is right
+	// for EVERY consumer (content FTS, BFS neighbor, witness render), not per-consumer.
+	if ext == ".py" && (base == "conftest.py" || base == "tests.py" || base == "test.py" ||
+		strings.HasSuffix(stem, "_tests")) {
+		return true
+	}
 	// Go: *_test.go
 	if strings.HasSuffix(base, "_test.go") {
 		return true
 	}
-	// JS/TS: *.test.js, *.spec.js, *.test.ts, *.spec.ts
-	if strings.Contains(base, ".test.") || strings.Contains(base, ".spec.") {
+	// JS/TS: *.test.js, *.spec.js, *.test.ts, *.spec.ts (+ plural .tests./.specs.)
+	if strings.Contains(base, ".test.") || strings.Contains(base, ".spec.") ||
+		strings.Contains(base, ".tests.") || strings.Contains(base, ".specs.") {
 		return true
 	}
 	// JVM (Java/Kotlin/Scala/Groovy): *Test.java, *Tests.java, *Test.kt, etc.

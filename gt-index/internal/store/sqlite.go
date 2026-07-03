@@ -310,17 +310,34 @@ func (d *DB) PopulateFTS5() error {
 	// `docker cp`'d away from its -wal between containers, stranding the index. DELETE
 	// then fails. DROP the vtable and recreate it fresh from the current nodes table.
 	log.Printf("[WARN] nodes_fts clear/insert failed (%v) — DROP+recreate to self-heal the FTS5 index", delErr)
-	if _, err := d.db.Exec("DROP TABLE IF EXISTS nodes_fts"); err != nil {
+	// R#5: the DROP+recreate+populate must be ATOMIC. Run as three autocommit Execs,
+	// a failure AFTER the DROP (recreate or populate errors — disk full, malformed
+	// content row, interrupted reindex) leaves nodes_fts DROPPED/empty, so every later
+	// localizer query silently degrades to the name-match fallback with no error to the
+	// caller. Wrap it in ONE transaction: any failure rolls back to the pre-heal state
+	// (the original — still corrupt — index) and surfaces the error, rather than
+	// shipping a half-applied, empty FTS5 surface.
+	tx, err := d.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin nodes_fts self-heal tx: %w", err)
+	}
+	if _, err := tx.Exec("DROP TABLE IF EXISTS nodes_fts"); err != nil {
+		tx.Rollback()
 		return fmt.Errorf("drop corrupt nodes_fts: %w", err)
 	}
-	if _, err := d.db.Exec(`CREATE VIRTUAL TABLE nodes_fts USING fts5(
+	if _, err := tx.Exec(`CREATE VIRTUAL TABLE nodes_fts USING fts5(
 		name, qualified_name, signature, file_path,
 		content='nodes', content_rowid='id'
 	)`); err != nil {
+		tx.Rollback()
 		return fmt.Errorf("recreate nodes_fts: %w", err)
 	}
-	if _, err := d.db.Exec(insertSQL); err != nil {
+	if _, err := tx.Exec(insertSQL); err != nil {
+		tx.Rollback()
 		return fmt.Errorf("populate nodes_fts after recreate: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit nodes_fts self-heal: %w", err)
 	}
 	return nil
 }
@@ -368,9 +385,9 @@ func (d *DB) InsertEdge(e *Edge) error {
 
 // InsertFileHash records a file's content hash for incremental reindexing.
 //
-// RC-17 (F-004): the ``indexed_at`` column is wall-clock by default, which
-// makes ``graph.db`` non-byte-deterministic across two builds. When
-// ``GT_INDEX_FIXED_TS`` is set in the environment we use that literal
+// RC-17 (F-004): the `indexed_at` column is wall-clock by default, which
+// makes `graph.db` non-byte-deterministic across two builds. When
+// `GT_INDEX_FIXED_TS` is set in the environment we use that literal
 // value instead — enables the deterministic-build CI test (build twice,
 // assert byte equality on every column except whatever the test
 // explicitly excludes). Format expectation: RFC3339 UTC (caller's

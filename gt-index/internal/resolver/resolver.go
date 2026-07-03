@@ -2653,6 +2653,86 @@ func Resolve(
 					})
 					continue
 				}
+				// Multi-candidate qualified-unresolved: the receiver type was NOT
+				// proven by any typing rung AND N internal methods share this name —
+				// strictly MORE ambiguous than the single-candidate case above. Today
+				// it falls through to Strategy 2 and mints a PLAIN name_match onto an
+				// arbitrary same-named target, indistinguishable from a bare name match.
+				// Correct-or-quiet by REACHABILITY (structural, NOT a builtin name-list,
+				// so a genuine internal method is never blind-dropped): keep only the
+				// candidates reachable from the caller (same-file / imported / same-dir /
+				// star-import). NONE reachable → every target is an unrelated cross-repo
+				// guess. PREFER a reachable target; else keep best-of-all (no drop — Fable #4). Mint
+				// at a SPECULATIVE 0.2 floor (see the conf assignment below), with the honest
+				// EvidenceType name_match_qualified_unresolved (mirrors the single-
+				// candidate branch) so it never poses as a bare fact, the edge-truth
+				// metric can tell it apart, and the demand-driven LSP pass can still
+				// resolve it. Skipped when metaMap is absent (fall through, unchanged).
+				if len(candidates) > 1 && metaMap != nil {
+					callerDir := filepath.ToSlash(filepath.Dir(call.File))
+					var reachable []int64
+					for _, tid := range candidates {
+						tm := metaMap[tid]
+						if tm.File == "" {
+							continue
+						}
+						if tm.File == call.File ||
+							callerImportsFile(call.File, tm.File, importIndex) ||
+							filepath.ToSlash(filepath.Dir(tm.File)) == callerDir {
+							reachable = append(reachable, tid)
+							continue
+						}
+						if fileImps, ok := importIndex[call.File]; ok {
+							if starFiles, ok := fileImps["*"]; ok {
+								tgtDir := filepath.ToSlash(filepath.Dir(tm.File))
+								for _, sf := range starFiles {
+									if filepath.ToSlash(filepath.Dir(sf)) == tgtDir || sf == tm.File {
+										reachable = append(reachable, tid)
+										break
+									}
+								}
+							}
+						}
+					}
+					// Prefer a caller-reachable target for the pick; if NONE is reachable,
+					// keep the edge rather than DROP (Fable #4): Tier-2 languages have no
+					// import extractor → reachability collapses to same-file/same-dir, so a
+					// hard drop would thin graphs whose ONLY edges are name_match AND deny the
+					// demand-driven LSP pass a call site to resolve. Pre-E these were kept at
+					// 0.2-0.6; the bug was the false 0.6 CANDIDATE + plain label, already fixed
+					// by the 0.2 floor + honest label below — so keeping at 0.2 de-certifies
+					// the false CANDIDATE while preserving connectivity. 0.2 is under the 0.5
+					// fact gate AND the BFS min_edge_conf, so it never poses as a fact or
+					// misdirects path-decay either way.
+					pickFrom := reachable
+					if len(pickFrom) == 0 {
+						pickFrom = candidates
+					}
+					best := pickBestNameMatchTarget(pickFrom, callerID, call.File, metaMap)
+					if best == 0 {
+						continue
+					}
+					// SPECULATIVE floor (0.2), NOT computeConfidence (LIPI BUG 5): a
+					// multi-candidate untyped call is strictly MORE ambiguous than the
+					// single-candidate case above, which reaches 0.6 only on IMPORT proof and
+					// stays 0.2 on same-dir-only. computeConfidence gave a 2-candidate 0.5
+					// (P2-9 lowered cc==2 from 0.6→0.5) — still out-ranking that 1-candidate
+					// 0.2, an inversion. 0.2 keeps it below the 0.5 fact gate; the
+					// demand-driven LSP pass can still upgrade it.
+					conf := 0.2
+					putEdge(ResolvedCall{
+						SourceNodeID:   callerID,
+						TargetNodeID:   best,
+						SourceLine:     call.Line,
+						SourceFile:     call.File,
+						Method:         "name_match",
+						Confidence:     conf,
+						CandidateCount: len(candidates),
+						TrustTier:      tierFor(conf),
+						EvidenceType:   "name_match_qualified_unresolved",
+					})
+					continue
+				}
 			}
 		}
 

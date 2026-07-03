@@ -336,6 +336,10 @@ except Exception as _delivery_import_err:  # noqa: BLE001
 _GT_BASELINE = os.environ.get("GT_BASELINE") == "1"
 _ROOT_FILE = os.environ.get("GT_ROOT_FILE", "/opt/gt/gt_root.txt")
 _HOOK_TIMEOUT = int(os.environ.get("GT_HOOK_TIMEOUT", "30"))
+# post_search (M0) — answer the agent's OWN repo-wide grep with definition FACTS,
+# in-band on its own tool output. DEFAULT-OFF: byte-identical until measure_brief
+# proves per-stratum lift (the plan's default-off-flag discipline).
+_POST_SEARCH_ON = os.environ.get("GT_POST_SEARCH", "") not in ("", "0", "false", "no")
 
 # FACT gate (_DETERMINISTIC_METHODS) + stdlib-module set (_STDLIB_MODULES) are
 # imported from the Product single source at the top of this file (B1) — the
@@ -1600,6 +1604,14 @@ def _guard_handoff_db(db: str) -> None:
         return  # legacy/dev/preindex path — correct-or-quiet, never fail-closed here
     if not db:
         return  # ABSENT (no handoff path) — degraded mode, producers stay quiet
+    # The L6-FRESH work-copy is OURS (L6 rewrites it between turns) — exactly the
+    # "OURS + may rewrite → a transient empty window is not a handoff bug" case the
+    # legacy path is exempted for above; it is NOT the substrate handoff. Guarding it
+    # would probe it immutable=1 via _handoff_db_is_schemad AND cache False + hard-stop
+    # the WHOLE run (GTHandoffEmptyError) if a timeout-killed reindex left it transiently
+    # torn (Fable R2). _connect_ro already degrades correct-or-quiet on the work-copy.
+    if _l6_work_db and (db or "").replace("\\", "/") == (_l6_work_db or "").replace("\\", "/"):
+        return
     # A handoff path that names a NON-EXISTENT file is "absent" (the substrate genuinely
     # handed us nothing) -> quiet. Only a file that EXISTS but is empty/unschema'd is the
     # hard error this guard exists to catch.
@@ -1770,7 +1782,12 @@ def _norm_fp(file_path: str) -> str:
     repo-relative, forward slashes, no leading `./` or `/` (walker.go does
     filepath.Rel + ToSlash). Used for EXACT `file_path = ?` matches — never
     suffix-LIKE (bug #1: `%__init__.py` matched EVERY package's __init__)."""
-    return (file_path or "").replace("\\", "/").lstrip("./").lstrip("/")
+    # Strip the ``./`` PREFIX, not a char-SET (Fable finding 2): ``str.lstrip("./")`` would
+    # turn ``.github/x`` into ``github/x`` → sibling query matches nothing for dot-dir files.
+    p = (file_path or "").replace("\\", "/")
+    while p.startswith("./"):
+        p = p[2:]
+    return p.lstrip("/")
 
 
 def _resolve_frame(con, rel: str, repo_root: str) -> tuple[str, str]:
@@ -2033,7 +2050,13 @@ def _connect_ro(db: str):
     import sqlite3
     _guard_handoff_db(db)  # A2: hard-fail a present-but-empty substrate handoff
     dbu = (db or "").replace("\\", "/")
-    immutable = _substrate_active() or os.environ.get("GT_PROOF_MODE") == "1"
+    # immutable=1 skips WAL/locking — correct ONLY on a file nothing can modify (the
+    # truly read-only substrate/proof MOUNT). Under GT_L6_FRESH the read path is the
+    # WRITABLE work-copy that L6 rewrites between turns; immutable THERE ignores a
+    # post-commit -wal after a mid-reindex timeout-kill and reads a stale/torn graph
+    # (LIPI #2). So: immutable for the pristine mount, plain mode=ro for the work-copy.
+    _is_workcopy = bool(_l6_work_db) and dbu == (_l6_work_db or "").replace("\\", "/")
+    immutable = (_substrate_active() or os.environ.get("GT_PROOF_MODE") == "1") and not _is_workcopy
     uri = f"file:{dbu}?mode=ro" + ("&immutable=1" if immutable else "")
     con = None
     try:
@@ -2138,7 +2161,7 @@ def _resolved_witnesses_for_file(con, file_path: str, repo_root: str, max_each: 
             # line has drifted (post-edit, L6 OFF) and the row is no fact.
             if not _snippet_attests(code, target_name or ""):
                 continue
-            out.append({"direction": "caller", "file_path": caller_file,
+            out.append({"relation": "CALLS", "direction": "caller", "file_path": caller_file,
                         "line": int(line) if line else 0, "symbol": caller_name or "",
                         "target": target_name or "", "code": code})
             if sum(1 for w in out if w["direction"] == "caller") >= max_each:
@@ -2178,7 +2201,7 @@ def _resolved_witnesses_for_file(con, file_path: str, repo_root: str, max_each: 
             # still mention the callee's name, else the line drifted.
             if not _snippet_attests(def_code, callee_name or ""):
                 continue
-            out.append({"direction": "callee", "file_path": callee_file,
+            out.append({"relation": "CALLS", "direction": "callee", "file_path": callee_file,
                         "line": int(def_line) if def_line else 0, "symbol": callee_name or "",
                         "target": src_name or "",
                         "code": def_code})
@@ -2281,6 +2304,201 @@ def _caller_contract_for_file(con, file_path: str, repo_root: str, func_names: l
     return ""
 
 
+# ---------------------------------------------------------------------------
+# post_search (M0) — answer the agent's OWN repo-wide grep with definition FACTS.
+# The agent's first localization act is `grep -rn SYMBOL .`, which fires NO
+# classify event (a grep has no source-ext token) — GT is mute at the exact
+# moment localization is decided. This producer rides Lane-A: when the grep's
+# pattern resolves to a KNOWN graph symbol, it appends the def-site + verified
+# callers + test-ref COUNT into the agent's own tool output — facts the agent
+# confirms with the same grep. correct-or-quiet: abstains on any non-symbol
+# pattern, an ambiguous common name (>3 def files), or an empty resolve.
+# DEFAULT-OFF (`GT_POST_SEARCH`) — byte-identical until measure_brief proves lift.
+# _classify is deliberately NOT changed: a grep's TIDE state identity is its
+# OUTPUT (novel iff new bytes), not a (kind,target) — so post_search is a
+# separate detector, leaving _behavior_state_key / _evidence byte-identical.
+# ---------------------------------------------------------------------------
+_GREP_HEAD_RE = re.compile(r"(?:^|[|&;]\s*)(?:grep|egrep|fgrep|rg)\b")
+# A bare identifier, >=3 chars so trivial 1-2 char patterns (huge match sets)
+# never fire. No regex metachars, path separators, or dots survive this.
+_BARE_SYMBOL_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{2,}$")
+# LEAK GUARD (Fable/LIPI F1): a def-site render is the ONE post_search surface
+# not behind the path chokepoint, and the graph's is_test flag misses
+# tests.py/conftest.py/app-tests.py (Django) + JS/TS spec conventions. This
+# filename-ANCHORED regex ($ or /) drops a def row shaped like a test file so a
+# graded-test location can never be surfaced. Anchored so `latest_release.py` /
+# `contest.py` (substring 'test') do NOT match.
+_POST_SEARCH_TESTPATH = re.compile(
+    r"(?:^|/)tests?/"                       # a test/ or tests/ dir segment
+    r"|(?:^|/)(?:conftest|test|tests)\.py$"  # conftest.py / test.py / tests.py
+    r"|(?:^|/)test_[^/]*$"                    # test_*.py
+    r"|(?:^|/)[^/]*_test\.[^/]+$"             # *_test.go / *_test.py
+    r"|(?:^|/)[^/]*\.(?:test|spec)\.[^/]+$",  # *.test.ts / *.spec.js
+    re.IGNORECASE)
+# Definition-kind labels. The tree-sitter indexer normalizes to File/Function/
+# Method/Class/ImplBlock (struct/interface/enum/trait all become Class), so the
+# extra labels below are harmless supersets; 'File'/'ImplBlock' are never defs.
+_DEF_LABELS = ("Function", "Method", "Class", "Interface", "Struct", "Enum",
+               "Trait", "Constructor")
+# grep/rg flags that CONSUME the next token as a value — so the value is never
+# mistaken for the pattern operand (`grep -A 3 foo` -> foo not 3; `rg -t rust X`
+# -> X not rust; `grep --exclude-dir tests X` -> X not tests). Fable #3.
+_GREP_VALUE_FLAGS = frozenset({
+    "-e", "--regexp", "-f", "--file", "-m", "--max-count",
+    "-A", "-B", "-C", "--context", "--after-context", "--before-context", "-d",
+    "-t", "--type", "--type-not", "-g", "--glob", "--iglob",
+    "--include", "--exclude", "--exclude-dir", "--exclude-from",
+    "-M", "--max-columns", "-j", "--threads", "--encoding",
+})
+# NB: -E/-T are DELIBERATELY absent. In GNU grep -E=extended-regexp and -T=--initial-tab
+# are VALUELESS flags; treating them as value-taking would eat the pattern and promote the
+# path operand (`grep -E TimeoutError utils` -> answers 'utils'). rg's short -E (--encoding)
+# is vanishingly rare and only costs an abstain if missed (Fable 2026-07-03).
+# fire-once per symbol per run: a re-grep for the SAME symbol is not re-answered
+# (already delivered); a NEW symbol during recovery fires fresh.
+_search_seen: set[str] = set()
+
+
+def _search_pattern(cmd: str) -> str | None:
+    """Extract the search operand from a grep/rg command, ABSTAINING unless it is
+    a single bare symbol. None for a path/glob/regex/multi-token pattern
+    (correct-or-quiet: only answer what is unambiguously a symbol lookup)."""
+    head = (cmd or "").split("\n", 1)[0]
+    m = _GREP_HEAD_RE.search(head)
+    if not m:
+        return None
+    import shlex
+    try:
+        toks = shlex.split(head[m.end():])
+    except ValueError:
+        return None
+    pat: str | None = None
+    i = 0
+    while i < len(toks):
+        t = toks[i]
+        if t == "--":
+            # POSIX end-of-options: the NEXT token is the pattern, verbatim
+            # (a leading '-' then fails _BARE_SYMBOL_RE -> abstain, correct).
+            pat = toks[i + 1] if i + 1 < len(toks) else None
+            break
+        if t.startswith("-"):
+            if "=" in t:  # --flag=value : self-contained; only --regexp/-e carry the pattern
+                flag, _, val = t.partition("=")
+                if flag in ("-e", "--regexp"):
+                    pat = val
+                    break
+                i += 1
+                continue
+            if t in ("-e", "--regexp") and i + 1 < len(toks):
+                pat = toks[i + 1]
+                break
+            i += 2 if t in _GREP_VALUE_FLAGS else 1
+            continue
+        pat = t
+        break
+    if not pat:
+        return None
+    pat = pat.strip().strip("'\"")
+    return pat if _BARE_SYMBOL_RE.match(pat) else None
+
+
+def _resolve_symbol_defs(con, symbol: str, root: str) -> dict | None:
+    """def-sites + verified callers + test-ref COUNT for a symbol, from graph.db.
+    correct-or-quiet: None when the symbol resolves to no definition, or to defs
+    spanning >3 files (an ambiguous common / stdlib-shadow name is NOT a fact).
+    Reuses `_caller_contract_for_file` so the callers line inherits EVERY leak
+    guard (DETERMINISTIC-only, stdlib-shadow, cross-language, path-excluded)."""
+    labels_sql = ",".join("?" * len(_DEF_LABELS))
+    try:
+        rows = con.execute(
+            f"SELECT id, file_path, start_line FROM nodes "
+            f"WHERE name=? AND COALESCE(is_test,0)=0 AND start_line>0 "
+            f"AND label IN ({labels_sql}) ORDER BY file_path, start_line",
+            (symbol, *_DEF_LABELS)).fetchall()
+    except Exception:  # noqa: BLE001 — any DB error -> abstain (correct-or-quiet)
+        return None
+    if not rows:
+        return None
+    # LEAK GUARD (Fable/LIPI F1): the def render is the ONE surface not behind the
+    # path chokepoint. Drop any def row that is path-excluded (vendored/example/
+    # non-deliverable) OR test-path-shaped (is_test misses tests.py/conftest.py) so
+    # a graded-test location can never surface. Recompute ambiguity on the survivors.
+    rows = [r for r in rows
+            if not _caller_path_excluded(r[1] or "", root)
+            and not _POST_SEARCH_TESTPATH.search((r[1] or "").replace("\\", "/"))]
+    if not rows:
+        return None
+    if len({r[1] for r in rows}) > 3:
+        return None  # ambiguous — not a fact (kills join/get/append shadow noise)
+    def_ids = [r[0] for r in rows]
+    def_sites = [(r[1], r[2]) for r in rows]
+    # callers ONLY when there is a single def file — else `_caller_contract_for_file`
+    # (keyed on def_sites[0]) would attribute one def's callers to a symbol shown
+    # with 2-3 def sites (Fable #5). Single-def is the common, unambiguous case.
+    callers_render = ""
+    if len({fp for fp, _ in def_sites}) == 1:
+        try:
+            callers_render = _caller_contract_for_file(con, def_sites[0][0], root, [symbol])
+        except Exception:  # noqa: BLE001 — the callers line is best-effort
+            callers_render = ""
+    # test-ref COUNT over DETERMINISTIC edges ONLY (Fable #2): a name_match count is
+    # a guess, not a fact (the P0 stdlib-shadow launder — `test.walk` name_matched to
+    # `account.walk`). Missing method column -> query errors -> 0 (never garbage).
+    try:
+        det_sql = "','".join(sorted(_DETERMINISTIC_METHODS))
+        qmarks = ",".join("?" * len(def_ids))
+        test_ref_count = con.execute(
+            f"SELECT COUNT(DISTINCT e.source_id) FROM edges e "
+            f"JOIN nodes sn ON sn.id=e.source_id "
+            f"WHERE e.target_id IN ({qmarks}) AND e.type='CALLS' "
+            f"AND LOWER(TRIM(e.resolution_method)) IN ('{det_sql}') "
+            f"AND COALESCE(sn.is_test,0)=1", def_ids).fetchone()[0]
+    except Exception:  # noqa: BLE001 — count is best-effort -> 0
+        test_ref_count = 0
+    return {"def_sites": def_sites, "callers_render": callers_render,
+            "test_ref_count": int(test_ref_count or 0)}
+
+
+def _search_localize_block(cmd: str) -> str:
+    """Lane-A producer: def-site(s) + verified callers + test-ref COUNT for the
+    symbol the agent just grepped. Fires once per symbol; DEFAULT-OFF;
+    correct-or-quiet (abstain -> '' -> Lane A drops it). NEVER surfaces a test
+    name (counts only) — the leak invariant."""
+    if _GT_BASELINE or not _POST_SEARCH_ON:
+        return ""
+    sym = _search_pattern(cmd)
+    if not sym or sym in _search_seen:
+        return ""
+    db = _db_path()
+    if not db or not os.path.isfile(db):
+        return ""
+    con = _connect_ro(db)
+    if con is None:
+        return ""
+    root = _root()
+    try:
+        info = _resolve_symbol_defs(con, sym, root)
+    finally:
+        con.close()
+    if not info or not info["def_sites"]:
+        return ""
+    _search_seen.add(sym)  # latch: a re-grep of the same symbol stays silent
+    defs = info["def_sites"]
+    ndef = len(defs)
+    lines = [f'<gt-search-facts symbol="{sym}">']
+    for fp, ln in defs[:3]:
+        lines.append(f"def: {_to_repo_rel(fp, root)}:{ln}")
+    if ndef > 3:
+        lines.append(f"(+{ndef - 3} more def sites)")
+    if info["callers_render"]:
+        lines.append(f"callers: {info['callers_render']}")
+    if info["test_ref_count"]:
+        lines.append(f"test refs: {info['test_ref_count']}")
+    lines.append(f'(graph facts - verify with your own: grep -rn "{sym}" .)')
+    lines.append("</gt-search-facts>")
+    return "\n".join(lines)
+
+
 def _compact_sig(sig: str) -> str:
     """Compact a stored signature to the pattern shape for the [SIBLINGS] line:
     sanitize LSP markdown, strip a leading Python ``def``/``async def`` (other
@@ -2310,7 +2528,7 @@ def _sibling_context(con, file_path: str, func_names: list[str]) -> str:
         rows = con.execute(
             "SELECT DISTINCT n.name, n.signature FROM nodes n "
             "WHERE n.file_path = ? "
-            "AND n.label IN ('Function','Method') AND COALESCE(n.is_test,0)=0 "
+            "AND n.label IN ('Function','Method','Class','ImplBlock') AND n.is_test = 0 "
             "AND n.name NOT IN ({}) ORDER BY n.start_line LIMIT 8".format(
                 ",".join("?" * len(func_names))),
             (_norm_fp(file_path), *func_names),
@@ -3148,16 +3366,32 @@ def _invalidate_on_edit(rel: str, root: str) -> None:
         gt_index = os.environ.get("GT_INDEX_BIN", "/tmp/gt-index")
         db = _db_path()
         if os.path.isfile(gt_index) and os.path.isfile(db):
-            _rc = subprocess.run(
-                [gt_index, f"-root={root}", f"-file={rel}", f"-output={db}"],
-                capture_output=True, timeout=_HOOK_TIMEOUT,
-            )
+            _rc = None
+            try:
+                _rc = subprocess.run(
+                    [gt_index, f"-root={root}", f"-file={rel}", f"-output={db}"],
+                    capture_output=True, timeout=_HOOK_TIMEOUT,
+                )
+            except (OSError, subprocess.TimeoutExpired) as _oe:
+                # LIPI #3: an exec-format / wrong-arch binary raises OSError (NOT a
+                # nonzero rc), and a reindex that exceeds _HOOK_TIMEOUT raises
+                # TimeoutExpired — BOTH were swallowed by the outer `except: pass` into a
+                # silent green no-op, so the L6_REINDEX_FAILED path below (which needs a
+                # bound _rc) never fired. Surface ONCE; freshness is frozen this turn.
+                if not _l6_reindex_failed_warned:
+                    _l6_reindex_failed_warned = True
+                    print(
+                        f"[GT_META] L6_REINDEX_FAILED exc={type(_oe).__name__} "
+                        f"bin={gt_index} — post-edit graph freshness FROZEN (exec-format/"
+                        f"arch mismatch, or reindex exceeded {_HOOK_TIMEOUT}s)",
+                        file=sys.stderr, flush=True,
+                    )
             # G05b (L6-fresh review): a runner-built binary that can't EXEC in the task
             # container (glibc/musl mismatch) leaves the file present (isfile True) but
             # makes the reindex a NO-OP — the silent failure mode the review flagged. A
             # non-zero rc here is that case; surface it ONCE so post-edit freshness loss
             # is diagnosable, never a green silent no-op.
-            if _rc.returncode != 0 and not _l6_reindex_failed_warned:
+            if _rc is not None and _rc.returncode != 0 and not _l6_reindex_failed_warned:
                 _l6_reindex_failed_warned = True
                 _err = (_rc.stderr or b"")[:200]
                 print(
@@ -3726,6 +3960,8 @@ def _reset_oracle_state() -> None:
     _seen.clear()
     _contract_seen.clear()
     _consensus_scope.clear()
+    _search_seen.clear()  # F2: post_search fire-once latch must reset per attempt
+                          # (in-process pier retry) — else attempt-2 greps go mute.
     _obligation_tracker = None
     _obligation_tracker_anchors = None
     _last_budget_pending = []
@@ -5517,6 +5753,23 @@ def _augment_output(action, out) -> None:
                           file=sys.stderr, flush=True)
                     _csb = ""
                 lane_a.append(("consensus.scope_map", _csb))
+            # post_search (M0): answer the agent's OWN repo-wide grep with def
+            # FACTS, in-band. Independent of _kkind (a grep resolves to no file
+            # target, so it runs on the raw command). DEFAULT-OFF; correct-or-quiet
+            # (abstain / flag off -> '' -> Lane A drops it). NEVER leaks a test name.
+            try:
+                _la_search = _search_localize_block(cmd)
+            except Exception:  # noqa: BLE001 — Lane A producer isolated
+                print("[GT_META] producer_exception kind=post_search.localize",
+                      file=sys.stderr, flush=True)
+                _la_search = ""
+            # CONDITIONAL append (Fable #4): only enqueue a NON-empty block, so the
+            # flag-off run is truly inert — no `post_search.localize` key gets written
+            # to the fire-count artifact (`_record_hook_fire` fires before the empty-
+            # skip in _lane_a_deliver), and "fired" now means "a grep was answered",
+            # not "every command". Empty -> nothing enqueued -> byte-identical.
+            if _la_search:
+                lane_a.append(("post_search.localize", _la_search))
             # tested EVIDENCE tokens (plan §5.2 "tested?"): a real test-runner
             # invocation whose output carries an observed pass/fail result —
             # mirrors gt_oracle_sense.DerivedState.tested_tokens (tokens of the

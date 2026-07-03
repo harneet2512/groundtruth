@@ -494,6 +494,116 @@ def _fts5_candidates(
     return results
 
 
+def _split_camel_subtokens(s: str) -> list[str]:
+    """Split a PascalCase/camelCase run into word parts (parity with the Go indexer's
+    splitCamel in content_fts.go): boundary at a lower->Upper transition and at an
+    acronym-run->Upper+lower transition ("HTTPServer" -> HTTP, Server)."""
+    if not s:
+        return []
+    out: list[str] = []
+    start = 0
+    # ASCII range tests (NOT str.islower/isupper) to mirror Go splitCamel EXACTLY: the Go
+    # indexer uses 'a'<=c<='z' / 'A'<=c<='Z', so a Unicode-aware Python predicate would
+    # split non-ASCII identifiers at boundaries the stored content never split → query/
+    # index parity break on those idents. Empty nxt ("") fails 'a'<=""<="z" → no false split.
+    for i in range(1, len(s)):
+        prev, cur = s[i - 1], s[i]
+        nxt = s[i + 1] if i + 1 < len(s) else ""
+        lower_to_upper = ("a" <= prev <= "z") and ("A" <= cur <= "Z")
+        acronym_end = ("A" <= cur <= "Z") and ("a" <= nxt <= "z") and ("A" <= prev <= "Z")
+        if lower_to_upper or acronym_end:
+            out.append(s[start:i])
+            start = i
+    out.append(s[start:])
+    return out
+
+
+# Common English/boilerplate words skipped by BOTH L1 lexical legs (grep + content-BM25)
+# so an over-common token never dominates the OR-query and dilutes BM25 (Fable #10).
+_L1_STOPWORDS = frozenset({
+    "that", "this", "with", "from", "have", "been", "will",
+    "when", "what", "which", "were", "they", "their", "does",
+    "should", "would", "could", "about", "some", "other",
+    "into", "more", "than", "each", "also", "after", "before",
+})
+
+
+def _content_fts_candidates(
+    conn: sqlite3.Connection,
+    issue_tokens: set[str],
+    limit: int = 50,
+) -> list[tuple[int, str, str, float]]:
+    """BM25 retrieval over per-symbol BODY content (symbol_content_fts, the Go B1 index).
+
+    The content leg's retriever. Matches issue terms — AND their camelCase/snake_case
+    SUB-TOKENS, so a camelCase issue symbol matches the stored sub-tokens the Go indexer
+    split — against function BODY vocabulary (identifiers, string literals, comments) that
+    no name-only surface indexes. Returns (node_id, name, file_path, bm25_score) with test
+    symbols excluded (they are also excluded at index time — belt and suspenders against a
+    body-text leak). Graceful []: symbol_content_fts is absent on a graph.db built before
+    B1 or without FTS5, so an empty return simply leaves the lexical slot vacant.
+
+    Research: BLUiR (ASE 2013) structured lexical anchoring + sub-token splitting; the
+    body-content surface is the stratum-B (behavior-described) complement to nodes_fts.
+    """
+    import sys
+
+    if not issue_tokens:
+        return []
+    try:
+        tables = {
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+    except sqlite3.Error:
+        return []
+    if "symbol_content_fts" not in tables:
+        return []
+
+    # Expand each issue token with its camelCase/snake_case sub-tokens (the query MUST
+    # be split the same way the stored content was, or a camelCase symbol never matches).
+    _expanded: set[str] = set()
+    for t in issue_tokens:
+        _expanded.add(t)
+        for part in str(t).split("_"):
+            for sub in _split_camel_subtokens(part):
+                if len(sub) >= 2:
+                    _expanded.add(sub)
+
+    safe_tokens: list[str] = []
+    for t in sorted(_expanded, key=lambda x: (-len(x), x)):
+        cleaned = t.replace('"', "")
+        if (len(cleaned) >= 3 and cleaned.lower() not in _L1_STOPWORDS
+                and all(c.isalnum() or c == "_" for c in cleaned)):
+            safe_tokens.append(f'"{cleaned}"')
+        if len(safe_tokens) >= 30:
+            break
+    if not safe_tokens:
+        return []
+    match_expr = " OR ".join(safe_tokens)
+
+    try:
+        rows = conn.execute(
+            """SELECT c.rowid, n.name, n.file_path, bm25(symbol_content_fts) AS score
+                 FROM symbol_content_fts c JOIN nodes n ON n.id = c.rowid
+                WHERE symbol_content_fts MATCH ? AND COALESCE(n.is_test, 0) = 0
+                ORDER BY score, n.file_path, c.rowid
+                LIMIT ?""",
+            (match_expr, limit),
+        ).fetchall()
+    except sqlite3.Error as _q_err:
+        print(f"[GT L1] content-fts: query failed: {_q_err}", file=sys.stderr)
+        return []
+
+    out: list[tuple[int, str, str, float]] = []
+    for row in rows:
+        if row and row[0] is not None:
+            score = -float(row[3]) if row[3] is not None else 0.0
+            out.append((int(row[0]), str(row[1]), _normalize(str(row[2])), score))
+    return out
+
+
 def _path_decay_scores(
     conn: sqlite3.Connection,
     seed_node_ids: list[int],
@@ -759,6 +869,7 @@ class Candidate:
             "GREP_SEED": "grep match",
             "PATH_SEED": "path match",
             "FTS5_SEED": "fts5 match",
+            "CONTENT_SEED": "content match",
         }.get(w.edge_type, "seed match")
         return f"{_seed_label}: {w.src_symbol or w.anchor}"
 
@@ -787,6 +898,16 @@ class LocalizerResult:
     # CombMIN Fox & Shaw TREC-2 1994) — agreement across independent rankers is a
     # stronger relevance signal than any single ranker.
     agreement_by_file: dict[str, int] = field(default_factory=dict)
+    # LEG ATTRIBUTION (additive, default {}): per-file list of WHICH independent
+    # rankers placed the file in their own top-3 — a subset of
+    # ["grep","structural","semantic"], stable order. `agreement_by_file` is the
+    # COUNT; this is the NAMED legs behind it. The consensus-form header renders
+    # "3/3 (grep, structural, semantic)" from this so the model sees leg
+    # attribution (the grep vote pre-registers what its own grep will return),
+    # not just a bare number. Empty {} when no candidates ranked (byte-identical
+    # to today until consumed). Kept in lockstep with agreement_by_file:
+    # len(signals_by_file[f]) == agreement_by_file[f] for every f.
+    signals_by_file: dict[str, list[str]] = field(default_factory=dict)
     # R1 leaf-naming bridge (additive, default {}): per-file ranked per-SYMBOL semantic
     # scores — {file_norm: [(symbol_name, cosine), ...]} high→low — captured from the
     # SAME per-symbol MaxSim cosines that produce the file's semantic score (previously
@@ -1140,9 +1261,12 @@ def _grep_to_seeds(
 ) -> list[tuple[int, str, str]]:
     """Grep-recall seeding: subsume grep so GT can never have worse recall.
 
-    Runs ripgrep (or fallback grep) over the repo for issue tokens, maps hit
-    file:line pairs to the enclosing graph node (the function/method/class
-    containing that line), and returns those nodes as additional BFS seeds.
+    Runs ripgrep (`rg -l`, files-with-matches) — or a Python-walk fallback — over the
+    repo for issue tokens, and for each HIT FILE returns its first few non-test graph
+    nodes as additional BFS seeds. NOTE: this is FILE-granularity, not line-granularity —
+    `-l` yields no line numbers, so the seeds are the file's leading nodes, NOT the node
+    enclosing the matched line. File-level recall is the guarantee; ranking is left to the
+    downstream legs (grep_score_by_file, structural, semantic).
 
     This is mechanism B from the recall analysis: use grep for recall, graph
     for rank. GT seeds only on name-matched Function/Method/Class/Interface
@@ -1175,12 +1299,7 @@ def _grep_to_seeds(
 
     # Pick distinctive tokens (skip very short or very common words)
     tokens = _prio + [t for t in sorted(
-        (t for t in issue_tokens if len(t) >= 4 and t not in {
-            "that", "this", "with", "from", "have", "been", "will",
-            "when", "what", "which", "were", "they", "their", "does",
-            "should", "would", "could", "about", "some", "other",
-            "into", "more", "than", "each", "also", "after", "before",
-        }),
+        (t for t in issue_tokens if len(t) >= 4 and t not in _L1_STOPWORDS),
         key=lambda t: (-len(t), t),
     )[:10] if t.lower() not in _prio_low]
 
@@ -1208,7 +1327,15 @@ def _grep_to_seeds(
         for token in tokens:
             try:
                 result = subprocess.run(
-                    ["rg", "-n", "--no-heading", "-l", "-i", token, repo_root],
+                    # -F (fixed-strings): the token is a LITERAL, not a regex. Without it a
+                    # priority anchor with an UNBALANCED metachar (foo(, a::b[) is a regex
+                    # PARSE ERROR → rg exits non-zero → that token silently contributes ZERO
+                    # recall on exactly the most specific anchors; and a BALANCED one (x.y)
+                    # was a valid regex whose `.` matched any char, so `x_y` matched by
+                    # accident — -F kills that false positive too (precision, not just recall).
+                    # -F also matches the Python-walk fallback's literal `in` semantics
+                    # (coverage parity). `--` guards a token beginning with `-`.
+                    ["rg", "-n", "--no-heading", "-l", "-i", "-F", "--", token, repo_root],
                     capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
                 )
                 if result.returncode == 0:
@@ -1233,9 +1360,10 @@ def _grep_to_seeds(
     else:
         # Python fallback: walk once, check all tokens per file
         _source_exts = (
-            ".py", ".go", ".rs", ".ts", ".js", ".java", ".rb",
-            ".c", ".cpp", ".h", ".cs",
-        )
+            ".py", ".go", ".rs", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
+            ".java", ".kt", ".scala", ".rb", ".php", ".swift",
+            ".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".cs",
+        )  # Fable #9: match the rg leg's coverage on rg-less hosts (was missing tsx/jsx/kt/…)
         try:
             for dirpath, _, filenames in os.walk(repo_root):
                 for fname in filenames:
@@ -1907,9 +2035,66 @@ def _sem_pool_files(top_k: int) -> int:
     return default
 
 
+# B2 (stratum-B vocab): default-OFF query-time body enrichment. The passage form
+# is name+signature+behavioral-props (docstring/call_order/guards) — it lacks the
+# DOMAIN VOCABULARY ("Redis", "TLS", "handshake") that lives in the body's
+# identifiers/strings/comments, so behavior-described issues (stratum B) score 0.
+# When on AND a repo_root is available, each symbol's body slice is read from disk
+# and its identifier terms LEAD the passage body (props second) so the vocabulary
+# survives symbol_passage's char cap. correct-or-quiet: flag off / no repo_root /
+# unreadable file -> unchanged name+sig+props passage, BYTE-IDENTICAL to today.
+_SEM_BODY_ON = os.environ.get("GT_SEM_BODY", "") not in ("", "0", "false", "no")
+# Identifier-shaped tokens (>=3 chars). Run over the RAW slice, this uniformly
+# captures identifiers, words inside comments, and words inside string literals —
+# the domain vocabulary — with no per-language comment/string parsing.
+_BODY_TERM_RE = _re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")
+_BODY_TERM_CAP = 48  # bounded, order-preserving; keeps the passage inside the cap
+_BODY_SEG_CHAR_CAP = 200_000  # cap the scanned slice (minified one-line file guard)
+
+
+def _body_terms(lines_cache: dict, repo_root: str, fp: str, start, end) -> str:
+    """Deterministic, bounded domain-vocabulary string from a symbol's body slice.
+    Reads each file ONCE (cache) and slices per symbol. correct-or-quiet: '' on a
+    missing/unreadable file or a degenerate line range."""
+    try:
+        s = int(start) if start else 0
+        e = int(end) if end else 0
+    except (TypeError, ValueError):
+        return ""
+    if s <= 0 or e < s:
+        return ""
+    if fp not in lines_cache:
+        try:
+            with open(os.path.join(repo_root, fp), encoding="utf-8", errors="replace") as _fh:
+                lines_cache[fp] = _fh.read().splitlines()
+        except Exception:  # noqa: BLE001 — unreadable -> no enrichment
+            lines_cache[fp] = []
+    lines = lines_cache[fp]
+    if not lines:
+        return ""
+    # Bound the scanned text: a minified/generated file (W_GEN-demoted, NOT pool-
+    # excluded) can be one multi-MB line — cap the slice so the scan is finite even
+    # in that pathological case (this neighborhood produced the 29/113 exit-137
+    # SIGKILLs). finditer (below) is lazy, so on a normal file it stops at the cap.
+    seg = "\n".join(lines[s - 1:min(len(lines), e)])[:_BODY_SEG_CHAR_CAP]  # 1-indexed inclusive
+    if not seg:
+        return ""
+    seen: set[str] = set()
+    terms: list[str] = []
+    for _m in _BODY_TERM_RE.finditer(seg):  # lazy — never materializes all matches
+        tok = _m.group(0)
+        if tok not in seen:
+            seen.add(tok)
+            terms.append(tok)
+            if len(terms) >= _BODY_TERM_CAP:
+                break
+    return " ".join(terms)
+
+
 def _semantic_score_by_file(
     issue_text: str, graph_db: str, files: "Iterable[str]",
     *, symbol_scores_out: "dict[str, list[tuple[str, float]]] | None" = None,
+    repo_root: str = "",
 ) -> dict[str, float]:
     """Semantic similarity between the issue and each candidate file's CODE CONTENT.
 
@@ -2000,12 +2185,27 @@ def _semantic_score_by_file(
                         lst.append(str(val))
             except sqlite3.Error:
                 pass  # properties table absent -> name+signature passages only
-            for nid, fp, nm, sig in conn.execute(
-                "SELECT id, file_path, name, COALESCE(signature,'') FROM nodes WHERE is_test=0"):
+            # Read the flag at CALL time (Fable #10), not the import-time _SEM_BODY_ON —
+            # else a test/harness toggling GT_SEM_BODY after import silently no-ops
+            # (parity with GT_CONTENT_LEG's call-time os.getenv).
+            _body_on = (
+                os.environ.get("GT_SEM_BODY", "") not in ("", "0", "false", "no")
+            ) and bool(repo_root)
+            _lines_cache: dict[str, list[str]] = {}
+            for nid, fp, nm, sig, _sl, _el in conn.execute(
+                "SELECT id, file_path, name, COALESCE(signature,''), "
+                "start_line, end_line FROM nodes WHERE is_test=0"):
                 k = _normalize(fp)
                 if k not in want or len(file_passages.get(k, [])) >= 80:
                     continue
-                body = " ".join(node_body.get(int(nid), [])) if nid is not None else ""
+                _props = " ".join(node_body.get(int(nid), [])) if nid is not None else ""
+                if _body_on:
+                    # domain vocabulary LEADS the body (props second) so it survives
+                    # symbol_passage's char cap. correct-or-quiet: '' -> props only.
+                    _bt = _body_terms(_lines_cache, repo_root, fp, _sl, _el)
+                    body = (_bt + " " + _props).strip() if _bt else _props
+                else:
+                    body = _props
                 passage = symbol_passage(nm or "", sig or "", body)
                 if passage:  # correct-or-quiet: never embed a blank symbol
                     file_passages.setdefault(k, []).append(passage)
@@ -2164,8 +2364,12 @@ def localize(
     # the seed. Do NOT early-return when no issue token equals a node name — grep
     # recall (string match over file CONTENT, incl. data-access sites like
     # box.style['overflow']) is the seed/floor and runs below. Only bail when there
-    # is neither a symbol anchor NOR a repo to grep.
-    if not anchors and not repo_root:
+    # is neither a symbol anchor NOR a repo to grep NOR the content-BM25 leg: B1's
+    # symbol_content_fts lives INSIDE graph.db, so it seeds the repo-less path with no
+    # anchor (the exact stratum-B case it exists for). Without this the content block
+    # below is DEAD CODE behind this gate on precisely the path it was built to rescue.
+    # Default-off (GT_CONTENT_LEG unset) → the condition is unchanged → byte-identical.
+    if not anchors and not repo_root and os.getenv("GT_CONTENT_LEG") != "1":
         return LocalizerResult([], [], 0.0, False, "no_anchor_hit")
 
     # Phase 1/2: the set of files GREP recalled (string match over content). This is
@@ -2175,7 +2379,7 @@ def localize(
     # Per-file grep STRENGTH (distinct issue-token coverage). Drives the within-floor
     # rank fusion so a lexically-strong gold (grep #1) is not buried by structural
     # reranking — the go-cli regression. Empty when no repo_root.
-    grep_score_by_file: dict[str, int] = {}
+    grep_score_by_file: dict[str, float] = {}
 
     conn = _open_ro(graph_db)
     if conn is None:
@@ -2301,6 +2505,9 @@ def localize(
         # not a fixed cap; the rails (15..60) are an operational token budget only.
         _base_limit = max(15, min(60, int(_stats.get("node_count", 0) / 60)))
         _grep_limit = _base_limit if _seed_quality >= 0.5 else int(_base_limit * 1.6)
+        # B1: tracks whether the CONTENT-BM25 fallback (below) filled the lexical slot,
+        # so the agreement vote names the leg honestly ("content" vs "grep").
+        _content_leg_used = False
         if repo_root:
             try:
                 # GREENFIELD wiring (gt_gt §4, 2026-06-10): unresolved code
@@ -2342,6 +2549,40 @@ def localize(
                     f"[GT L1] grep-to-seed: FAILED: {_grep_err}",
                     file=sys.stderr,
                 )
+
+        # B1 CONTENT-BM25 FALLBACK LEG (Fable hybrid verdict; GT_CONTENT_LEG, default-off).
+        # When the live-grep leg recalled NOTHING — repo_root absent (the graph.db-only /
+        # MCP path), rg failed/timed out, or genuinely zero hits — the lexical slot is
+        # VACANT and a behavior-described (stratum-B) task loses its content signal and can
+        # bail with no floor. symbol_content_fts is a persistent BM25 index over per-symbol
+        # BODY vocabulary (Go-built, test symbols excluded at source) that lives INSIDE
+        # graph.db, so it serves content ranking with NO live checkout. It fires ONLY when
+        # grep_recalled is empty -> MUTUALLY EXCLUSIVE with the grep leg -> it can NEVER
+        # double-count the lexical signal in RRF / the agreement vote. It fills the SAME
+        # slot (grep_recalled + grep_score_by_file) under a DISTINCT leg label ("content")
+        # so the consensus stays honest. Default-off: the measured paid path (repo present
+        # -> grep succeeds) is byte-identical; this only lights the grep-dead lane.
+        if (not grep_recalled) and os.getenv("GT_CONTENT_LEG") == "1":
+            try:
+                _cfts = _content_fts_candidates(conn, terms, limit=_grep_limit)
+                if _cfts:
+                    _existing_ids_c = {s[0] for s in seeds}
+                    for _nid, _cname, _cfp, _cscore in _cfts:
+                        grep_recalled.add(_cfp)
+                        if _cscore > grep_score_by_file.get(_cfp, float("-inf")):
+                            grep_score_by_file[_cfp] = _cscore
+                        if _nid not in _existing_ids_c:
+                            seeds.append((_nid, _cname, _cfp))
+                            _existing_ids_c.add(_nid)
+                            _seed_provenance[_nid] = ("CONTENT_SEED", "")
+                    _content_leg_used = True
+                    print(
+                        f"[GT L1] content-fts leg: filled vacant lexical slot with "
+                        f"{len(_cfts)} BM25 body-content candidates",
+                        file=sys.stderr,
+                    )
+            except Exception as _cfts_err:
+                print(f"[GT L1] content-fts leg: FAILED: {_cfts_err}", file=sys.stderr)
 
         # FTS5-TO-SEED (mechanism C): BM25 retrieval over the nodes_fts
         # virtual table. Matches grep's recall by searching function names,
@@ -2967,13 +3208,21 @@ def localize(
     # strictly below the floor (default) or, under interleave_short_deterministic,
     # joins the floor iff it has a <=1-hop deterministic-edge witness.
     _have_floor = bool(grep_recalled)
+    # When the floor is sourced from the CONTENT leg (Fable #5), it is a LOSSY top-K
+    # BM25 retrieval, NOT recall-grade string-match-over-the-repo like grep. Grep earns
+    # absolute floor authority (near-exhaustive); content-BM25 does not. So in content-
+    # mode a structural hop-0 witness that missed the BM25 top-K must still JOIN the
+    # floor (compete on the composite rank) rather than sink below every content hit —
+    # else the flag would convert precise structural localization into body-BM25-first
+    # ranking. Only affects the GT_CONTENT_LEG/repo-less path; byte-identical otherwise.
+    _floor_is_content = _content_leg_used
 
     def _grep_floor(c: Candidate) -> int:
         if not _have_floor:
             return 0
         if _normalize(c.file_path) in grep_recalled:
             return 0
-        if INJECTION_PLACEMENT == "interleave_short_deterministic" and any(
+        if (INJECTION_PLACEMENT == "interleave_short_deterministic" or _floor_is_content) and any(
             w.verified and w.direction != "defines_anchor" and w.hop <= 1
             for w in c.witnesses
         ):
@@ -3077,7 +3326,7 @@ def localize(
     _symbol_semrank: dict[str, list[tuple[str, float]]] = {}
     _sem = _semantic_score_by_file(
         issue_text, graph_db, [c.file_path for c in _sem_pool],
-        symbol_scores_out=_symbol_semrank,
+        symbol_scores_out=_symbol_semrank, repo_root=repo_root,
     )
     # Rank ONLY scored candidates: a file with no semantic score (outside the pool,
     # over the encode budget, or no embeddable symbols) must fall to rank _BIG
@@ -3103,18 +3352,25 @@ def localize(
     # signal than any single ranker's score.
     _TOP_N_AGREE = 3
     _agreement_by_file: dict[str, int] = {}
+    _signals_by_file: dict[str, list[str]] = {}
     for c in candidates:
-        _agree = 0
+        _legs: list[str] = []
         if _grep_rank.get(id(c), _BIG) < _TOP_N_AGREE:
-            _agree += 1
+            # The lexical slot is the grep leg, OR (when grep recalled nothing) the B1
+            # content-BM25 fallback that filled it — name it honestly so the consensus
+            # ledger never claims "grep" agreed when no grep ran.
+            _legs.append("content" if _content_leg_used else "grep")
         if _struct_rank.get(id(c), _BIG) < _TOP_N_AGREE:
-            _agree += 1
+            _legs.append("structural")
         if _sem_rank and _sem_rank.get(id(c), _BIG) < _TOP_N_AGREE:
-            _agree += 1
+            _legs.append("semantic")
+        _agree = len(_legs)
         _fnorm = _normalize(c.file_path)
-        # A file may have multiple candidate rows; keep the MAX agreement seen.
+        # A file may have multiple candidate rows; keep the MAX agreement seen, and
+        # the NAMED legs from that same max row so signals stay in lockstep with count.
         if _agree > _agreement_by_file.get(_fnorm, -1):
             _agreement_by_file[_fnorm] = _agree
+            _signals_by_file[_fnorm] = _legs
 
     def _rrf3(c: Candidate) -> float:
         s = 1.0 / (60 + _grep_rank.get(id(c), _BIG)) + 1.0 / (60 + _struct_rank.get(id(c), _BIG))
@@ -3230,8 +3486,8 @@ def localize(
         return LocalizerResult(
             candidates, list(anchors), best.confidence, False, "top_unverified",
             scope_chains=_chains, graph_stats=_stats,
-            agreement_by_file=_agreement_by_file, n_components=_n_components,
-            symbol_semrank_by_file=_symbol_semrank,
+            agreement_by_file=_agreement_by_file, signals_by_file=_signals_by_file,
+            n_components=_n_components, symbol_semrank_by_file=_symbol_semrank,
         )
 
     verified = [c for c in candidates if c.has_verified_witness]
@@ -3310,6 +3566,6 @@ def localize(
     return LocalizerResult(
         candidates, list(anchors), best.confidence, confident, gate_reason,
         scope_chains=_chains, graph_stats=_stats,
-        agreement_by_file=_agreement_by_file, n_components=_n_components,
-        symbol_semrank_by_file=_symbol_semrank,
+        agreement_by_file=_agreement_by_file, signals_by_file=_signals_by_file,
+        n_components=_n_components, symbol_semrank_by_file=_symbol_semrank,
     )
