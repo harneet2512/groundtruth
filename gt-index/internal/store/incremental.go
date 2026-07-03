@@ -337,6 +337,11 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string)
 			// is falsified (candidate_count>1). Preserving CERTIFIED here launders a
 			// self-contradictory fact onto the -file/L6 fact surface (the P0 class). Cap at
 			// CANDIDATE (0.6); type/LSP tiers are exempt (qname re-proves their identity).
+			// NOTE: the tier here is capped by CONFIDENCE (0.6 → CANDIDATE) and the method is
+			// deliberately PRESERVED as provenance (TestResolveIncomingEdgesPreservesLSPEdge).
+			// The fact-gate that reads this MUST require conf ≥ EDGE_CONFIDENCE_FLOOR alongside
+			// the method whitelist — see v1r_brief `is_fact` (the conf conjunct closes the
+			// method-only launder for these capped-but-whitelisted restores).
 			if qnameMatched && len(ids) > 1 && uniquenessDerivedMethods[method] && conf > 0.6 {
 				conf = 0.6
 			}

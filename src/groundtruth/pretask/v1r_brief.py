@@ -797,7 +797,18 @@ def _caller_contract_for_file(
 
                 # Normalize provenance (strip/lower) so 'Import' / 'import ' from
                 # an inconsistent indexer still classify as the canonical method.
-                is_fact = (method or "").strip().lower() in _DETERMINISTIC_METHODS
+                # A whitelisted METHOD is necessary but NOT sufficient: a tier whose
+                # premise was not re-proven is capped to conf 0.6 (the -file/L6 restore
+                # demote in incremental.go) but KEEPS its method as provenance, and a
+                # genuinely-uncertain whitelisted edge (e.g. among-files import pick) is
+                # also minted at 0.6. Neither is a FACT — EDGE_CONFIDENCE_FLOOR (0.7)
+                # "keeps genuine facts (1.0/0.9) and drops the 0.6" (the SAME conjunct the
+                # caller-query helper applies). Gate on it here too, else a method-only
+                # is_fact launders the capped restore back to CERTIFIED. Old schema (no
+                # confidence column) stays permissive — there is no conf to judge.
+                is_fact = (method or "").strip().lower() in _DETERMINISTIC_METHODS and (
+                    not has_conf or conf_f >= EDGE_CONFIDENCE_FLOOR
+                )
                 if is_fact:
                     snippet = code if len(code) <= 80 else code[:77] + "..."
                     rendered = (

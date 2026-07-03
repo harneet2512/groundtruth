@@ -95,6 +95,28 @@ def test_caller_import_edge_is_a_fact(tmp_path: Path) -> None:
     assert "(unverified)" not in out
 
 
+def test_caller_capped_whitelisted_method_is_hint_not_fact(tmp_path: Path) -> None:
+    """A whitelisted METHOD (verified_unique) capped to conf 0.6 by the -file/L6 restore
+    demote (uniqueness/type premise not re-proven, method KEPT as provenance) must NOT
+    render as a confident caller fact: the fact-gate requires conf >= EDGE_CONFIDENCE_FLOOR
+    (0.7) alongside the whitelist. RED before the is_fact conf-conjunct (a method-only gate
+    laundered the capped restore back to `load() in ...`); GREEN after."""
+    db, repo = _walk_db(tmp_path, [(3, 1, "verified_unique", 0.6, 1)])
+    out = _caller_contract_for_file(db, "beancount/core/account.py", repo, ["walk"])
+    assert "load() in" not in out, f"capped verified_unique laundered as a caller fact: {out!r}"
+    assert out == "" or "(unverified)" in out
+
+
+def test_caller_genuine_verified_unique_is_a_fact(tmp_path: Path) -> None:
+    """Complement (over-suppression guard): a GENUINE verified_unique at full confidence
+    (0.95 >= floor) re-proved its premise and MUST still render as a confident fact — the
+    conf-conjunct must not suppress real deterministic callers."""
+    db, repo = _walk_db(tmp_path, [(3, 1, "verified_unique", 0.95, 1)])
+    out = _caller_contract_for_file(db, "beancount/core/account.py", repo, ["walk"])
+    assert "load() in beancount/loader.py:1" in out
+    assert "(unverified)" not in out
+
+
 def test_caller_namematch_below_floor_suppressed(tmp_path: Path) -> None:
     """name_match below _NAME_MATCH_FLOOR (0.5) is suppressed entirely."""
     db, repo = _walk_db(tmp_path, [(2, 1, "name_match", 0.3, 1)])

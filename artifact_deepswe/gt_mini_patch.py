@@ -2277,7 +2277,17 @@ def _caller_contract_for_file(con, file_path: str, repo_root: str, func_names: l
                 # function — a drifted line (post-edit, L6 OFF) is no fact.
                 if not _snippet_attests(code, fname):
                     continue
-                is_fact = (method or "").strip().lower() in _DETERMINISTIC_METHODS
+                # A whitelisted METHOD is necessary but NOT sufficient for a FACT: the
+                # -file/L6 restore demote (incremental.go) caps a tier whose premise was
+                # not re-proven to conf 0.6 while KEEPING its method as provenance, and a
+                # genuinely-uncertain whitelisted edge (among-files import pick) is also
+                # 0.6. Neither is a fact — gate on the EDGE_CONFIDENCE_FLOOR (0.7) fact
+                # floor alongside the whitelist (parity with v1r_brief `is_fact`), else a
+                # method-only gate launders the capped restore back to a CERTIFIED fact on
+                # the per-turn L6 render. Old schema (no confidence column) stays permissive.
+                is_fact = (method or "").strip().lower() in _DETERMINISTIC_METHODS and (
+                    not has_conf or conf_f >= 0.7
+                )
                 if is_fact:
                     snippet = code if len(code) <= 80 else code[:77] + "..."
                     rendered = (f"{caller_name}() in {caller_file}:{source_line} `{snippet}`"
