@@ -1,0 +1,8 @@
+{
+  "id": "find-002",
+  "language": "typescript",
+  "task": "add password hashing to user creation flow",
+  "entry_symbols": ["createUser", "hashPassword"],
+  "expected_files": ["src/users/queries.ts", "src/utils/crypto.ts"],
+  "should_not_include": ["src/utils/dates.ts"]
+}

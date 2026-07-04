@@ -1,0 +1,240 @@
+#!/usr/bin/env python3
+"""Behavioral preflight gate for the GT full-stack benchmark run.
+
+WHY THIS EXISTS
+---------------
+"Installed" is the weakest bar. The 30-task run (26909714974) shipped a binary
+that *could* compute FTS5/semantic/LSP but, at run time, silently fell back on
+all three (FTS5 rebuilt in Python / empty, semantic zeroed because onnxruntime+
+the model were absent, LSP emitting 0ms confidence-filter stamps). We paid for a
+grep+CALLS localizer and got confounded results. This gate refuses to let that
+happen again: it PROBES each signal for a real, non-zero result at its correct
+stage and ABORTS the run (exit 1) before the paid agent loop starts.
+
+It checks BEHAVIOR, not presence:
+  - FTS5    : nodes_fts exists AND a real MATCH query returns rows (index-time build,
+              not a runtime Python rebuild).
+  - SEMANTIC: the SAME embedder the brief uses (forced ONNX _OnnxEmbedderAdapter)
+              produces a finite, NON-ZERO cosine on a probe pair — not _ZeroEmbeddingModel.
+  - LSP     : the edge verifier WARMS (server available) so the first runtime verify
+              does not cold-start into the 0ms fallback.
+  - STRUCT  : graph.db carries >1 edge type (not CALLS-only) — a warning, not fatal.
+
+Required-ness is opt-in so this is safe to run anywhere:
+  GT_REQUIRE_FULL_STACK=1  -> every check below is required (any failure => exit 1)
+  GT_REQUIRE_FTS5=1 / GT_REQUIRE_EMBEDDER=1 / GT_REQUIRE_LSP=1 -> that check required.
+
+Usage:
+  python scripts/swebench/preflight_full_stack.py [--graph-db PATH] [--workspace PATH]
+  (FTS5/STRUCT need --graph-db; LSP real-warm needs --workspace; SEMANTIC needs neither.)
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import sqlite3
+import sys
+
+# Force the container-real semantic surface for the probe (BRIEFING.md §5):
+# block sentence_transformers, use the ONNX _OnnxEmbedderAdapter both halves use.
+os.environ.setdefault("GT_FORCE_ONNX_EMBEDDER", "1")
+
+
+def _required(flag: str) -> bool:
+    return os.environ.get("GT_REQUIRE_FULL_STACK") == "1" or os.environ.get(flag) == "1"
+
+
+def check_fts5(graph_db: str | None) -> tuple[bool, str]:
+    if not graph_db or not os.path.exists(graph_db):
+        return (False, "FTS5: no --graph-db given (cannot probe at this stage)")
+    try:
+        c = sqlite3.connect(graph_db)
+        has = c.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='nodes_fts'"
+        ).fetchone()[0]
+        if not has:
+            return (False, "FTS5: nodes_fts table ABSENT — built without -tags sqlite_fts5 (runtime fallback)")
+        rows = c.execute("SELECT COUNT(*) FROM nodes_fts").fetchone()[0]
+        if rows <= 0:
+            return (False, f"FTS5: nodes_fts present but EMPTY ({rows} rows) — population failed")
+        # real MATCH probe: pull a token from an actual node name and query it back.
+        sample = c.execute("SELECT name FROM nodes WHERE name!='' LIMIT 1").fetchone()
+        if sample:
+            tok = "".join(ch for ch in sample[0] if ch.isalnum())[:24] or sample[0]
+            hit = c.execute("SELECT COUNT(*) FROM nodes_fts WHERE nodes_fts MATCH ?", (tok,)).fetchone()[0]
+            if hit <= 0:
+                return (False, f"FTS5: MATCH '{tok}' returned 0 — index queryable-but-empty")
+        c.close()
+        return (True, f"FTS5: OK — nodes_fts populated ({rows} rows), MATCH probe non-empty")
+    except sqlite3.Error as e:
+        return (False, f"FTS5: query error {e!r}")
+
+
+def check_semantic() -> tuple[bool, str]:
+    os.environ["GT_FORCE_ONNX_EMBEDDER"] = "1"
+    try:
+        from groundtruth.pretask.graph_localizer import _get_embedder
+        m = _get_embedder()
+        if m is None:
+            return (False, "SEMANTIC: no embedder (onnxruntime + models/e5-small-v2 not loadable)")
+        import numpy as np
+        embs = m.encode(["fix the off-by-one in the parser", "def parse(self, tokens): ..."],
+                        normalize_embeddings=True)
+        a = np.asarray(embs[0], dtype=float)
+        b = np.asarray(embs[1], dtype=float)
+        if not np.isfinite(a).all() or float(np.linalg.norm(a)) == 0.0:
+            return (False, "SEMANTIC: embedder returned a ZERO/NaN vector (_ZeroEmbeddingModel path)")
+        cos = float(np.dot(a, b))
+        adapter = type(m).__name__
+        if "Zero" in adapter:
+            return (False, f"SEMANTIC: using {adapter} — semantic is OFF")
+        return (True, f"SEMANTIC: OK — {adapter}, probe cosine={cos:.3f}, non-zero vectors")
+    except Exception as e:
+        return (False, f"SEMANTIC: embedder probe failed {e!r}")
+
+
+def check_lsp(workspace: str | None, graph_db: str | None) -> tuple[bool, str]:
+    try:
+        from groundtruth.lsp.edge_verifier import LazyEdgeVerifier
+    except Exception as e:
+        return (False, f"LSP: edge_verifier import failed {e!r}")
+    if not workspace:
+        # presence-only (no workspace to launch a server) — explicitly NON-proving.
+        import shutil
+        has = bool(shutil.which("pyright-langserver")) or bool(shutil.which("pyright")) or _import_ok("pyright")
+        return (has,
+                "LSP: pyright present but UNPROVEN (no --workspace to launch+resolve)" if has
+                else "LSP: pyright-langserver NOT on PATH and not importable")
+    try:
+        import asyncio
+        loop = asyncio.new_event_loop()
+        v = LazyEdgeVerifier(workspace_root=workspace, graph_db=graph_db or "")
+        warm = loop.run_until_complete(v.start(warm=True))  # REAL server launch + handshake
+        if not warm:
+            return (False, "LSP: server did NOT launch (ensure_server Err — binary absent/init fail)")
+        if not graph_db or not os.path.exists(graph_db):
+            return (True, "LSP: server launched, but no --graph-db to run a real resolve probe")
+        edge = loop.run_until_complete(v.probe())  # REAL verify on a known same-file edge
+        if edge is None:
+            return (True, "LSP: server launched; no probeable same-file edge in graph.db (resolve unproven)")
+        # AIRTIGHT: the LSP path must have been taken, not the 0ms confidence fallback.
+        if edge.method == "lsp_references" and edge.latency_ms > 0:
+            return (True, f"LSP: OK — real resolve via {edge.method}, latency={edge.latency_ms}ms "
+                          f"(verified={edge.verified})")
+        return (False, f"LSP: FELL BACK to {edge.method} (latency={edge.latency_ms}ms) — "
+                       "server launched but is NOT actually resolving references")
+    except Exception as e:
+        return (False, f"LSP: probe failed {e!r}")
+
+
+def check_host_src(host_src: str | None) -> tuple[bool, str]:
+    """C1 (run 300_e51cc3f0 fix): the GT_REQUIRE_LSP warm gate runs on the HOST and
+    cannot read the in-container /workspace; it must warm against the host-readable
+    Point-A export (GT_HOST_SRC_ROOT). 8 tasks fail-closed because that export was
+    missing/scaffold-only and the gate had a DEAD fallback to the container path.
+    Assert the export exists AND holds real source BEFORE the run, so a Point-A miss
+    is a named setup failure — not 8 silent mid-run deaths mislabeled image-pull."""
+    host_src = (host_src or "").strip()
+    if not host_src:
+        # No host export configured: only an error when LSP is REQUIRED (paid run on
+        # the host-LSP path). Otherwise this stage is not applicable.
+        return (not _required("GT_REQUIRE_LSP"),
+                "HOST_SRC: GT_HOST_SRC_ROOT unset — host-LSP warm has no source to warm against"
+                if _required("GT_REQUIRE_LSP")
+                else "HOST_SRC: GT_HOST_SRC_ROOT unset (host-LSP path not in use)")
+    try:
+        from groundtruth.lsp.edge_verifier import host_src_has_lsp_source
+    except Exception as e:
+        return (False, f"HOST_SRC: import failed {e!r}")
+    if not os.path.isdir(host_src):
+        return (False, f"HOST_SRC: GT_HOST_SRC_ROOT={host_src!r} is not a directory (Point-A export missing)")
+    if not host_src_has_lsp_source(host_src):
+        return (False, f"HOST_SRC: {host_src!r} holds NO LSP-supported source file "
+                       "(scaffold-only/incomplete Point-A export)")
+    return (True, f"HOST_SRC: OK — host-readable source present at {host_src}")
+
+
+def check_structure(graph_db: str | None) -> tuple[bool, str]:
+    if not graph_db or not os.path.exists(graph_db):
+        return (False, "STRUCT: no --graph-db given")
+    try:
+        c = sqlite3.connect(graph_db)
+        types = dict(c.execute("SELECT type, COUNT(*) FROM edges GROUP BY type").fetchall())
+        c.close()
+        if len(types) <= 1:
+            return (False, f"STRUCT: only {list(types)} edge type(s) — CALLS-only (no EXTENDS/CONTAINS/…)")
+        return (True, f"STRUCT: OK — {len(types)} edge types {types}")
+    except sqlite3.Error as e:
+        return (False, f"STRUCT: query error {e!r}")
+
+
+def check_legitimacy() -> tuple[bool, str]:
+    """Index legitimacy: a real benchmark must build the graph FRESH per task, in the
+    task env, from the base-commit repo — never a prebuilt / cross-run graph.db. Fails
+    if GT_FORBID_PREBUILT_GRAPH=1 is contradicted by an armed GT_PREBUILT_GRAPH_DB."""
+    forbid = os.environ.get("GT_FORBID_PREBUILT_GRAPH") == "1"
+    prebuilt = os.environ.get("GT_PREBUILT_GRAPH_DB", "")
+    if forbid and prebuilt:
+        return (False, f"GT_FORBID_PREBUILT_GRAPH=1 but GT_PREBUILT_GRAPH_DB is armed "
+                       f"({prebuilt}) — a prebuilt graph would be used. Unset it.")
+    if forbid:
+        return (True, "legitimacy: prebuilt FORBIDDEN — fresh in-container index per task")
+    return (True, "legitimacy: GT_FORBID_PREBUILT_GRAPH not set (in-job index assumed)")
+
+
+def _import_ok(mod: str) -> bool:
+    try:
+        __import__(mod)
+        return True
+    except Exception:
+        return False
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--graph-db", default=os.environ.get("GT_GRAPH_DB"))
+    ap.add_argument("--workspace", default=os.environ.get("GT_WORKSPACE_ROOT"))
+    ap.add_argument("--host-src", default=os.environ.get("GT_HOST_SRC_ROOT"))
+    args = ap.parse_args()
+
+    # FTS5 and STRUCT are GRAPH-dependent: they need a per-task graph.db, which does
+    # NOT exist at the SETUP stage (the per-task graph is built later, in-container, by
+    # the wrapper). When no --graph-db is given, they are SKIPPED here and asserted
+    # per-task by preflight_pipeline.py / run_db_dimension_gate. Marking them REQUIRED-
+    # FAIL at setup (the old bug) made setup-eval abort every run with "no --graph-db
+    # given". SEMANTIC / LSP-warm / LEGIT are genuine setup-stage (env) checks.
+    have_graph = bool(args.graph_db and os.path.exists(args.graph_db))
+    checks = [
+        ("LEGIT", "GT_REQUIRE_FULL_STACK", check_legitimacy(), True),
+        ("FTS5", "GT_REQUIRE_FTS5", check_fts5(args.graph_db), have_graph),
+        ("SEMANTIC", "GT_REQUIRE_EMBEDDER", check_semantic(), True),
+        ("LSP", "GT_REQUIRE_LSP", check_lsp(args.workspace, args.graph_db), True),
+        ("HOST_SRC", "GT_REQUIRE_LSP", check_host_src(args.host_src), True),
+        ("STRUCT", "GT_REQUIRE_STRUCT", check_structure(args.graph_db), have_graph),
+    ]
+
+    hard_fail = False
+    print("=" * 72)
+    print("GT FULL-STACK PREFLIGHT (behavioral — probes real non-zero results)")
+    print("=" * 72)
+    for _name, flag, (ok, msg), applicable in checks:
+        if not applicable:
+            print(f"  [skip] {_name}: graph-dependent — asserted per-task (no graph at setup stage)")
+            continue
+        req = _required(flag)
+        status = "OK  " if ok else ("FAIL" if req else "warn")
+        print(f"  [{status}] {msg}" + ("" if (ok or not req) else "   <-- REQUIRED"))
+        if req and not ok:
+            hard_fail = True
+    print("=" * 72)
+    if hard_fail:
+        print("PREFLIGHT FAILED — refusing to start a degraded paid run. "
+              "Fix the failing stage(s) above (build with -tags sqlite_fts5, "
+              "install onnxruntime + bake models/e5-small-v2, install pyright).")
+        return 1
+    print("PREFLIGHT PASSED — full stack is live.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

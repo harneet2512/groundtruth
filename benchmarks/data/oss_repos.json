@@ -1,0 +1,10 @@
+{
+  "privacyidea": {"url": "https://github.com/privacyidea/privacyidea", "commit": "98a7201ee6ce5decb81df58151249516d397d484"},
+  "go-zero": {"url": "https://github.com/zeromicro/go-zero", "commit": "6078bf1a049acc7b95ca2cecef6944269509f88e"},
+  "express": {"url": "https://github.com/expressjs/express", "commit": "3ed5090ca91f6a387e66370d57ead94d886275e1"},
+  "core": {"url": "https://github.com/vuejs/core", "commit": "1b6bc2374d93e5f76d9266a0fcc5c10a8cafef5b"},
+  "bytes": {"url": "https://github.com/tokio-rs/bytes", "commit": "f514bd38dac85695e9053d990b251643e9e4ef92"},
+  "grpc-go": {"url": "https://github.com/grpc/grpc-go", "commit": "b88d2d74656f2b9833cc78c088ebf899d2189230"},
+  "clap": {"url": "https://github.com/clap-rs/clap", "commit": "5e3386bb40948bc6a608e6c951ce1b86a686e32b"},
+  "geopandas": {"url": "https://github.com/geopandas/geopandas", "commit": "cb89483750de606cd21310edab2c843717a51ef9"}
+}

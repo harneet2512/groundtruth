@@ -1,0 +1,1222 @@
+"""Bridge layer: reads Go indexer's nodes/edges schema, exposes SymbolStore interface.
+
+The Go indexer (gt-index) writes to a different SQLite schema:
+  - nodes(id, label, name, qualified_name, file_path, start_line, end_line,
+          signature, return_type, is_exported, is_test, language, parent_id)
+  - edges(id, source_id, target_id, type, source_line, source_file,
+          resolution_method, metadata)
+  - properties(id, node_id, kind, value, line, confidence)  [v16+]
+  - assertions(id, test_node_id, target_node_id, kind, expression, expected, line)  [v16+]
+
+This module maps that schema to SymbolRecord/RefRecord so the viz, RiskScorer,
+CLI, and MCP tools work unchanged.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+import time
+
+import os
+from typing import Any
+
+from groundtruth.index.store import (
+    BriefingLogRecord,
+    PackageRecord,
+    RefRecord,
+    SymbolRecord,
+    SymbolStore,
+)
+from groundtruth.utils.result import Err, GroundTruthError, Ok, Result
+
+
+# Go indexer label → SymbolStore kind
+_LABEL_TO_KIND: dict[str, str] = {
+    "Function": "function",
+    "Class": "class",
+    "Method": "method",
+    "Interface": "interface",
+    "Struct": "class",
+    "Enum": "enum",
+    "Type": "type",
+    "File": "variable",
+    "Variable": "variable",
+    "Constant": "variable",
+    "Property": "property",
+    "Field": "property",
+}
+
+# Go indexer edge type → refs reference_type
+_EDGE_TYPE_TO_REF: dict[str, str] = {
+    "CALLS": "call",
+    "IMPORTS": "import",
+    "IMPLEMENTS": "type_usage",
+    "EXTENDS": "type_usage",
+    "COMPOSES": "type_usage",
+    "RE_EXPORTS": "import",
+    "HANDLES_ROUTE": "call",
+    "API_CALL": "call",
+    "READS": "data_flow",
+    "WRITES": "data_flow",
+    "DATA_FLOW": "data_flow",
+    "RAISES": "exception_flow",
+    "PRECEDES": "control_flow",
+    "CO_SERIALIZES": "data_flow",
+    # Back-compat for old Python-index DBs and lexical witness tests. The current
+    # Go graph stores hierarchy as EXTENDS/IMPLEMENTS; DEFINES is not a graph base.
+    "DEFINES": "call",
+    "INHERITS": "type_usage",
+}
+
+
+def is_graph_db(db_path: str) -> bool:
+    """Detect whether a SQLite DB uses the Go indexer schema (nodes/edges).
+
+    Validates both table existence AND required columns to avoid false
+    positives from corrupted databases.
+    """
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('nodes', 'edges')"
+        )
+        tables = {row[0] for row in cursor.fetchall()}
+        if "nodes" not in tables or "edges" not in tables:
+            conn.close()
+            return False
+
+        # Validate required columns exist
+        node_cols = {r[1] for r in conn.execute("PRAGMA table_info(nodes)").fetchall()}
+        edge_cols = {r[1] for r in conn.execute("PRAGMA table_info(edges)").fetchall()}
+        conn.close()
+
+        required_node_cols = {"id", "name", "label", "file_path", "language"}
+        required_edge_cols = {"id", "source_id", "target_id", "type"}
+
+        return required_node_cols.issubset(node_cols) and required_edge_cols.issubset(edge_cols)
+    except (sqlite3.Error, OSError):
+        return False
+
+
+def _node_row_to_symbol(row: sqlite3.Row, usage_count: int = 0) -> SymbolRecord:
+    """Convert a Go indexer node row to a SymbolRecord."""
+    label = row["label"] or "Variable"
+    return SymbolRecord(
+        id=row["id"],
+        name=row["name"],
+        kind=_LABEL_TO_KIND.get(label, "variable"),
+        language=row["language"] or "unknown",
+        file_path=row["file_path"],
+        line_number=row["start_line"],
+        end_line=row["end_line"],
+        is_exported=bool(row["is_exported"]),
+        signature=row["signature"],
+        params=None,  # Go indexer doesn't store params separately
+        return_type=row["return_type"],
+        documentation=None,  # Go indexer doesn't store docs
+        usage_count=usage_count,
+        last_indexed_at=int(time.time()),
+    )
+
+
+def _edge_row_to_ref(row: sqlite3.Row) -> RefRecord:
+    """Convert a Go indexer edge row to a RefRecord."""
+    edge_type = row["type"] or "CALLS"
+    # Carry resolution_method through so callers can distinguish a verified
+    # edge (import/same_file/type_flow/...) from a name_match GUESS. The Go
+    # edges table always has this column; guard defensively for any partial row.
+    try:
+        _res_method = row["resolution_method"]
+    except (KeyError, IndexError):
+        _res_method = None
+    return RefRecord(
+        id=row["id"],
+        symbol_id=row["target_id"],
+        referenced_in_file=row["source_file"] or "",
+        referenced_at_line=row["source_line"],
+        reference_type=_EDGE_TYPE_TO_REF.get(edge_type, "call"),
+        resolution_method=_res_method,
+    )
+
+
+class GraphStore(SymbolStore):
+    """Reads Go indexer's nodes/edges DB through the SymbolStore interface.
+
+    Overrides only the read methods that the viz, RiskScorer, and CLI use.
+    Write methods (insert_symbol, etc.) are no-ops since the Go indexer owns writes.
+    """
+
+    def __init__(self, db_path: str) -> None:
+        super().__init__(db_path=db_path)
+        self._usage_cache: dict[int, int] | None = None
+
+    def initialize(self) -> Result[None, GroundTruthError]:
+        """Open connection to the Go indexer DB."""
+        try:
+            self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
+            self._conn.row_factory = sqlite3.Row
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            # Read-only performance pragmas. This bridge never writes through
+            # self._conn (all insert_*/update_*/delete_* methods return Err
+            # read-only and initialize() does not call the schema-creating
+            # parent), so query_only=1 is safe and prevents accidental writes.
+            # mmap + page-cache tuning gives >36% faster warm reads.
+            self._conn.execute("PRAGMA query_only=1")
+            self._conn.execute("PRAGMA mmap_size=268435456")
+            self._conn.execute("PRAGMA cache_size=-8000")
+            self._conn.execute("PRAGMA temp_store=MEMORY")
+            # Pre-compute usage counts (incoming edge count per node)
+            self._build_usage_cache()
+            return Ok(None)
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_init_failed",
+                    message=f"Failed to open graph database: {exc}",
+                )
+            )
+
+    def _has_confidence_column(self) -> bool:
+        """Check if edges table has a confidence column (v14+ schema)."""
+        if not hasattr(self, "_confidence_col_exists"):
+            try:
+                cols = {r[1] for r in self.connection.execute("PRAGMA table_info(edges)").fetchall()}
+                self._confidence_col_exists = "confidence" in cols
+            except sqlite3.Error:
+                self._confidence_col_exists = False
+        return self._confidence_col_exists
+
+    def _confidence_filter(self, min_confidence: float | None = None, *, alias: str = "") -> str:
+        """SQL fragment for confidence filtering. Returns empty string if N/A.
+
+        Uses optional table alias to avoid ambiguity in JOIN queries.
+        The value is always an internally-sourced float constant (0.5 or 0.7),
+        never user input, so f-string interpolation is safe here.
+        """
+        if min_confidence is None or not self._has_confidence_column():
+            return ""
+        col = f"{alias}.confidence" if alias else "confidence"
+        return f" AND {col} >= {float(min_confidence)}"
+
+    def _build_usage_cache(self) -> None:
+        """Compute usage_count for each node as COUNT(incoming edges) above confidence floor."""
+        self._usage_cache = {}
+        try:
+            cf = ""
+            if self._has_confidence_column():
+                cf = " WHERE confidence >= 0.5"
+            cursor = self.connection.execute(
+                f"SELECT target_id, COUNT(*) as cnt FROM edges{cf} GROUP BY target_id"
+            )
+            for row in cursor.fetchall():
+                self._usage_cache[row["target_id"]] = row["cnt"]
+        except sqlite3.Error:
+            self._usage_cache = {}
+
+    def _usage_for(self, node_id: int) -> int:
+        if self._usage_cache is None:
+            return 0
+        return self._usage_cache.get(node_id, 0)
+
+    # --- Symbol Operations (read-only) ---
+
+    def find_symbol_by_name(self, name: str) -> Result[list[SymbolRecord], GroundTruthError]:
+        try:
+            cursor = self.connection.execute("SELECT * FROM nodes WHERE name = ?", (name,))
+            return Ok(
+                [_node_row_to_symbol(row, self._usage_for(row["id"])) for row in cursor.fetchall()]
+            )
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(code="db_query_failed", message=f"Failed to find symbol: {exc}")
+            )
+
+    def get_symbols_in_file(self, file_path: str) -> Result[list[SymbolRecord], GroundTruthError]:
+        try:
+            # DOC_OF_HONOR §1.1: canonicalize the agent-supplied path before the
+            # exact-match query so a relative / prefixed / basename form still
+            # finds its stored node. None (unknown/ambiguous) -> Ok([]) (quiet).
+            matched = self._match_file_path(file_path)
+            if matched is None:
+                return Ok([])
+            cursor = self.connection.execute(
+                "SELECT * FROM nodes WHERE file_path = ?", (matched,)
+            )
+            return Ok(
+                [_node_row_to_symbol(row, self._usage_for(row["id"])) for row in cursor.fetchall()]
+            )
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_query_failed", message=f"Failed to get symbols in file: {exc}"
+                )
+            )
+
+    def get_symbol_by_id(self, symbol_id: int) -> Result[SymbolRecord | None, GroundTruthError]:
+        try:
+            cursor = self.connection.execute("SELECT * FROM nodes WHERE id = ?", (symbol_id,))
+            row = cursor.fetchone()
+            if row is None:
+                return Ok(None)
+            return Ok(_node_row_to_symbol(row, self._usage_for(row["id"])))
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_query_failed", message=f"Failed to get symbol by id: {exc}"
+                )
+            )
+
+    def get_refs_from_file(
+        self, file_path: str, reference_type: str | None = None
+    ) -> Result[list[RefRecord], GroundTruthError]:
+        """Get all edges originating from a file, mapped to RefRecords."""
+        try:
+            if reference_type is not None:
+                # Reverse-map our ref type back to Go edge types
+                go_types = [k for k, v in _EDGE_TYPE_TO_REF.items() if v == reference_type]
+                if not go_types:
+                    return Ok([])
+                placeholders = ",".join("?" for _ in go_types)
+                cursor = self.connection.execute(
+                    f"SELECT * FROM edges WHERE source_file = ? AND type IN ({placeholders})",
+                    (file_path, *go_types),
+                )
+            else:
+                cursor = self.connection.execute(
+                    "SELECT * FROM edges WHERE source_file = ?",
+                    (file_path,),
+                )
+            return Ok([_edge_row_to_ref(row) for row in cursor.fetchall()])
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_query_failed", message=f"Failed to get refs from file: {exc}"
+                )
+            )
+
+    def get_all_symbol_names(self) -> Result[list[str], GroundTruthError]:
+        try:
+            cursor = self.connection.execute("SELECT DISTINCT name FROM nodes")
+            return Ok([row["name"] for row in cursor.fetchall()])
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_query_failed", message=f"Failed to get symbol names: {exc}"
+                )
+            )
+
+    def get_all_files(self) -> Result[list[str], GroundTruthError]:
+        try:
+            cursor = self.connection.execute("SELECT DISTINCT file_path FROM nodes")
+            return Ok([row["file_path"] for row in cursor.fetchall()])
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(code="db_query_failed", message=f"Failed to get file paths: {exc}")
+            )
+
+    def get_stats(self) -> Result[dict[str, object], GroundTruthError]:
+        try:
+            stats: dict[str, object] = {}
+            cursor = self.connection.execute("SELECT COUNT(*) as cnt FROM nodes")
+            row = cursor.fetchone()
+            stats["symbols_count"] = row["cnt"] if row else 0
+
+            cursor = self.connection.execute("SELECT COUNT(DISTINCT file_path) as cnt FROM nodes")
+            row = cursor.fetchone()
+            stats["files_count"] = row["cnt"] if row else 0
+
+            cursor = self.connection.execute("SELECT COUNT(*) as cnt FROM edges")
+            row = cursor.fetchone()
+            stats["refs_count"] = row["cnt"] if row else 0
+
+            # No interventions table in Go DB
+            stats["total_interventions"] = 0
+            stats["hallucinations_caught"] = 0
+            stats["ai_calls"] = 0
+            stats["tokens_used"] = 0
+
+            return Ok(stats)
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(code="db_query_failed", message=f"Failed to get stats: {exc}")
+            )
+
+    def get_unused_packages(self) -> Result[list[PackageRecord], GroundTruthError]:
+        """Go indexer doesn't track packages — return empty list."""
+        return Ok([])
+
+    def get_file_dependencies(
+        self,
+        max_deps: int = 5000,
+    ) -> Result[list[tuple[str, str, str]], GroundTruthError]:
+        """Get cross-file dependencies from the edges table.
+
+        Limited to max_deps unique file pairs for performance on large repos.
+        """
+        try:
+            cursor = self.connection.execute(
+                """SELECT DISTINCT e.source_file,
+                                  n.file_path AS target_file,
+                                  e.type
+                   FROM edges e
+                   JOIN nodes n ON e.target_id = n.id
+                   WHERE e.source_file IS NOT NULL
+                   AND e.source_file != n.file_path
+                   LIMIT ?""",
+                (max_deps,),
+            )
+            return Ok(
+                [
+                    (
+                        row["source_file"],
+                        row["target_file"],
+                        _EDGE_TYPE_TO_REF.get(row["type"], "call"),
+                    )
+                    for row in cursor.fetchall()
+                ]
+            )
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_query_failed",
+                    message=f"Failed to get file dependencies: {exc}",
+                )
+            )
+
+    def get_all_packages(self) -> Result[list[PackageRecord], GroundTruthError]:
+        """Go indexer doesn't track packages — return empty list."""
+        return Ok([])
+
+    # --- Methods required by MCP tools.py ---
+
+    @staticmethod
+    def _normalize_path(path: str) -> str:
+        """Normalize file path for comparison: forward slashes, no leading ./."""
+        p = path.replace("\\", "/")
+        if p.startswith("./"):
+            p = p[2:]
+        return p
+
+    def _match_file_path(self, file_path: str) -> str | None:
+        """Resolve an agent-supplied path to the canonical stored ``nodes.file_path``.
+
+        DOC_OF_HONOR §1.1 — single canonical resolution contract, shared with the
+        universal ``path_resolver`` and the hook resolvers. Operates on the live
+        ``self.connection`` so it works for both on-disk and in-memory graph DBs.
+
+        Resolution order:
+          1. Exact match against the normalized path (O(log n) via index).
+          2. Boundary-anchored basename fallback (``LIKE '%/' || basename``,
+             metachars escaped) — but ONLY when exactly ONE stored path ends in
+             that basename. Two-or-more candidates are ambiguous.
+
+        Returns the exact stored path, or ``None`` when the path is unknown or
+        ambiguous. Correct-or-quiet: never echo the input back and never return a
+        suffix-trap false positive (e.g. ``foo.py`` must not match
+        ``pkg/barfoo.py``). Consumers stay silent on ``None``.
+        """
+        normalized = self._normalize_path(file_path)
+        if not normalized:
+            return None
+        try:
+            # 1) Exact match first.
+            row = self.connection.execute(
+                "SELECT file_path FROM nodes WHERE file_path = ? LIMIT 1",
+                (normalized,),
+            ).fetchone()
+            if row:
+                return row["file_path"]
+
+            # 2) Boundary-anchored, uniqueness-gated basename fallback.
+            basename = normalized.rsplit("/", 1)[-1]
+            if not basename:
+                return None
+            esc = basename.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            rows = self.connection.execute(
+                "SELECT DISTINCT file_path FROM nodes "
+                "WHERE file_path LIKE ? ESCAPE '\\' OR file_path = ? LIMIT 2",
+                (f"%/{esc}", basename),
+            ).fetchall()
+            if len(rows) == 1:
+                return rows[0]["file_path"]
+        except sqlite3.Error:
+            return None
+        return None  # unknown or ambiguous -> stay silent, never echo input
+
+    def get_refs_for_symbol(
+        self, symbol_id: int, *, min_confidence: float | None = None
+    ) -> Result[list[RefRecord], GroundTruthError]:
+        """Get all incoming edges for a symbol, with optional confidence gate."""
+        try:
+            cf = self._confidence_filter(min_confidence)
+            cursor = self.connection.execute(
+                f"SELECT * FROM edges WHERE target_id = ?{cf}",
+                (symbol_id,),
+            )
+            return Ok([_edge_row_to_ref(row) for row in cursor.fetchall()])
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_query_failed",
+                    message=f"Failed to get refs for symbol: {exc}",
+                )
+            )
+
+    def get_importers_of_file(
+        self, file_path: str, *, min_confidence: float | None = None
+    ) -> Result[list[str], GroundTruthError]:
+        """Get files that have edges pointing to nodes in this file."""
+        try:
+            cf = self._confidence_filter(min_confidence, alias="e")
+            cursor = self.connection.execute(
+                f"""SELECT DISTINCT e.source_file
+                   FROM edges e
+                   JOIN nodes n ON e.target_id = n.id
+                   WHERE n.file_path = ?
+                   AND e.source_file IS NOT NULL{cf}""",
+                (file_path,),
+            )
+            return Ok([row["source_file"] for row in cursor.fetchall()])
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(code="db_query_failed", message=f"Failed to get importers: {exc}")
+            )
+
+    def get_hotspots(
+        self, limit: int = 20, *, min_confidence: float | None = None
+    ) -> Result[list[SymbolRecord], GroundTruthError]:
+        """Get the most-referenced symbols (highest incoming edge count)."""
+        try:
+            cf = self._confidence_filter(min_confidence, alias="e")
+            cursor = self.connection.execute(
+                f"""SELECT n.*, COUNT(e.id) as usage
+                   FROM nodes n
+                   JOIN edges e ON e.target_id = n.id
+                   WHERE n.is_test = 0{cf}
+                   GROUP BY n.id
+                   ORDER BY usage DESC
+                   LIMIT ?""",
+                (limit,),
+            )
+            results = []
+            for row in cursor.fetchall():
+                sym = _node_row_to_symbol(row, row["usage"])
+                results.append(sym)
+            return Ok(results)
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(code="db_query_failed", message=f"Failed to get hotspots: {exc}")
+            )
+
+    def get_dead_code(
+        self, *, min_confidence: float | None = None
+    ) -> Result[list[SymbolRecord], GroundTruthError]:
+        """Get exported nodes with zero incoming edges at any confidence.
+
+        Dead code = truly unreferenced. Even speculative (low-confidence) edges
+        indicate the symbol MAY be called, so we don't filter by confidence here.
+        """
+        _ = min_confidence
+        try:
+            cursor = self.connection.execute(
+                """SELECT n.* FROM nodes n
+                   WHERE n.is_exported = 1
+                   AND NOT EXISTS (
+                       SELECT 1 FROM edges e WHERE e.target_id = n.id
+                   )
+                   ORDER BY n.file_path, n.name"""
+            )
+            return Ok([_node_row_to_symbol(row, 0) for row in cursor.fetchall()])
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(code="db_query_failed", message=f"Failed to get dead code: {exc}")
+            )
+
+    def get_high_confidence_edge_ratio(self) -> float:
+        """Percentage of edges with confidence >= 0.7. Returns 0.0 if no confidence column."""
+        if not self._has_confidence_column():
+            return 0.0
+        try:
+            total = self.connection.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
+            if total == 0:
+                return 0.0
+            high = self.connection.execute(
+                "SELECT COUNT(*) FROM edges WHERE confidence >= 0.7"
+            ).fetchone()[0]
+            return high / total
+        except sqlite3.Error:
+            return 0.0
+
+    def get_imports_for_file(self, file_path: str) -> Result[list[RefRecord], GroundTruthError]:
+        """Get edges originating from a file (what does this file call/import?)."""
+        matched = self._match_file_path(file_path)
+        try:
+            cursor = self.connection.execute(
+                "SELECT * FROM edges WHERE source_file = ?",
+                (matched,),
+            )
+            return Ok([_edge_row_to_ref(row) for row in cursor.fetchall()])
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_query_failed",
+                    message=f"Failed to get imports for file: {exc}",
+                )
+            )
+
+    def get_sibling_files(self, file_path: str) -> Result[list[str], GroundTruthError]:
+        """Get files in the same directory, excluding the input file."""
+        matched = self._match_file_path(file_path)
+        if matched is None:
+            # Unknown / ambiguous path -> stay silent (correct-or-quiet).
+            return Ok([])
+        directory = os.path.dirname(self._normalize_path(matched))
+        if not directory:
+            return Ok([])
+        try:
+            all_result = self.get_all_files()
+            if isinstance(all_result, Err):
+                return all_result
+            siblings = [
+                f
+                for f in all_result.value
+                if self._normalize_path(os.path.dirname(f)) == directory
+                and self._normalize_path(f) != self._normalize_path(matched)
+            ]
+            return Ok(siblings)
+        except Exception as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_query_failed",
+                    message=f"Failed to get sibling files: {exc}",
+                )
+            )
+
+    def get_entry_point_files(self, limit: int = 5) -> Result[list[str], GroundTruthError]:
+        """Get files with most incoming references (likely entry points)."""
+        try:
+            cursor = self.connection.execute(
+                """SELECT n.file_path, COUNT(e.id) as cnt
+                   FROM nodes n
+                   JOIN edges e ON e.target_id = n.id
+                   GROUP BY n.file_path
+                   ORDER BY cnt DESC
+                   LIMIT ?""",
+                (limit,),
+            )
+            return Ok([row["file_path"] for row in cursor.fetchall()])
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_query_failed",
+                    message=f"Failed to get entry point files: {exc}",
+                )
+            )
+
+    def get_top_directories(
+        self, limit: int = 10
+    ) -> Result[list[dict[str, Any]], GroundTruthError]:
+        """Get directories with the most symbols."""
+        try:
+            cursor = self.connection.execute("SELECT DISTINCT file_path FROM nodes")
+            dir_counts: dict[str, int] = {}
+            for row in cursor.fetchall():
+                d = os.path.dirname(self._normalize_path(row["file_path"]))
+                if d:
+                    dir_counts[d] = dir_counts.get(d, 0) + 1
+            sorted_dirs = sorted(dir_counts.items(), key=lambda x: x[1], reverse=True)[:limit]
+            return Ok([{"directory": d, "symbol_count": c, "ref_count": 0} for d, c in sorted_dirs])
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_query_failed",
+                    message=f"Failed to get top directories: {exc}",
+                )
+            )
+
+    def get_briefing_logs_for_file(
+        self, file_path: str
+    ) -> Result[list[BriefingLogRecord], GroundTruthError]:
+        """Go indexer DB has no briefing_logs table — return empty list."""
+        return Ok([])
+
+    def insert_briefing_log(  # type: ignore[override]
+        self,
+        timestamp: int = 0,
+        intent: str = "",
+        briefing_text: str = "",
+        briefing_symbols: list[str] | None = None,
+        target_file: str | None = None,
+    ) -> Result[int, GroundTruthError]:
+        """No-op for Go indexer DB — briefing logs not stored."""
+        return Ok(0)
+
+    def link_briefing_to_validation(
+        self, log_id: int, validation_id: int
+    ) -> Result[None, GroundTruthError]:
+        """No-op for Go indexer DB."""
+        return Ok(None)
+
+    # --- Property and Assertion queries (v16 schema) ---
+
+    def get_properties(self, node_id: int, kind: str | None = None) -> list[dict[str, Any]]:
+        """Get properties for a node. Optionally filter by kind."""
+        if not self.connection:
+            return []
+        try:
+            if kind:
+                cursor = self.connection.execute(
+                    "SELECT kind, value, line, confidence FROM properties WHERE node_id = ? AND kind = ?",
+                    (node_id, kind),
+                )
+            else:
+                cursor = self.connection.execute(
+                    "SELECT kind, value, line, confidence FROM properties WHERE node_id = ?",
+                    (node_id,),
+                )
+            return [
+                {"kind": row[0], "value": row[1], "line": row[2], "confidence": row[3]}
+                for row in cursor.fetchall()
+            ]
+        except sqlite3.OperationalError:
+            return []  # Table may not exist in older DBs
+
+    def get_assertions(self, test_node_id: int) -> list[dict[str, Any]]:
+        """Get assertions for a test function node."""
+        if not self.connection:
+            return []
+        try:
+            cursor = self.connection.execute(
+                "SELECT kind, expression, expected, line, target_node_id FROM assertions WHERE test_node_id = ?",
+                (test_node_id,),
+            )
+            return [
+                {"kind": row[0], "expression": row[1], "expected": row[2], "line": row[3], "target_node_id": row[4]}
+                for row in cursor.fetchall()
+            ]
+        except sqlite3.OperationalError:
+            return []
+
+    def get_assertions_for_target(self, target_name: str, target_node_id: int | None = None) -> list[dict[str, Any]]:
+        """Get assertions that test a specific function.
+
+        When target_node_id is provided, queries by the resolved foreign key for
+        precise results. Falls back to LIKE matching on expression text when
+        target_node_id is not available or yields no results.
+        """
+        if not self.connection:
+            return []
+        try:
+            # Prefer precise lookup by target_node_id when available
+            if target_node_id is not None and target_node_id > 0:
+                cursor = self.connection.execute(
+                    "SELECT a.kind, a.expression, a.expected, a.line, n.name as test_name, n.file_path "
+                    "FROM assertions a JOIN nodes n ON a.test_node_id = n.id "
+                    "WHERE a.target_node_id = ?",
+                    (target_node_id,),
+                )
+                rows = cursor.fetchall()
+                if rows:
+                    return [
+                        {
+                            "kind": row[0],
+                            "expression": row[1],
+                            "expected": row[2],
+                            "line": row[3],
+                            "test_name": row[4],
+                            "file_path": row[5],
+                        }
+                        for row in rows
+                    ]
+            # Fallback: LIKE match on expression text
+            cursor = self.connection.execute(
+                "SELECT a.kind, a.expression, a.expected, a.line, n.name as test_name, n.file_path "
+                "FROM assertions a JOIN nodes n ON a.test_node_id = n.id "
+                "WHERE a.expression LIKE ?",
+                (f"%{target_name}%",),
+            )
+            return [
+                {
+                    "kind": row[0],
+                    "expression": row[1],
+                    "expected": row[2],
+                    "line": row[3],
+                    "test_name": row[4],
+                    "file_path": row[5],
+                }
+                for row in cursor.fetchall()
+            ]
+        except sqlite3.OperationalError:
+            return []
+
+    def get_property_counts(self) -> dict[str, int]:
+        """Get count of properties by kind."""
+        if not self.connection:
+            return {}
+        try:
+            cursor = self.connection.execute("SELECT kind, COUNT(*) FROM properties GROUP BY kind")
+            return {row[0]: row[1] for row in cursor.fetchall()}
+        except sqlite3.OperationalError:
+            return {}
+
+    def get_assertion_count(self) -> int:
+        """Get total number of assertions."""
+        if not self.connection:
+            return 0
+        try:
+            cursor = self.connection.execute("SELECT COUNT(*) FROM assertions")
+            row = cursor.fetchone()
+            return row[0] if row else 0
+        except sqlite3.OperationalError:
+            return 0
+
+    # --- Structural queries for evidence parity (v16+) ---
+
+    def get_functions_in_file(self, file_path: str) -> list[dict[str, Any]]:
+        """Get all function/method nodes in a file with their properties."""
+        if not self.connection:
+            return []
+        try:
+            norm = self._normalize_path(file_path)
+            cursor = self.connection.execute(
+                "SELECT id, name, label, start_line, end_line, signature, return_type, is_test, language "
+                "FROM nodes WHERE file_path = ? AND label IN ('Function', 'Method') "
+                "ORDER BY start_line",
+                (norm,),
+            )
+            results = []
+            for row in cursor.fetchall():
+                results.append(
+                    {
+                        "id": row[0],
+                        "name": row[1],
+                        "label": row[2],
+                        "start_line": row[3],
+                        "end_line": row[4],
+                        "signature": row[5],
+                        "return_type": row[6],
+                        "is_test": bool(row[7]),
+                        "language": row[8],
+                    }
+                )
+            return results
+        except sqlite3.OperationalError:
+            return []
+
+    def get_sibling_functions(self, node_id: int) -> list[dict[str, Any]]:
+        """Get sibling functions (same file or same parent class) with properties.
+
+        Returns all function/method nodes that share the same parent_id or file_path,
+        excluding the node itself. Each result includes pre-fetched properties.
+        """
+        if not self.connection:
+            return []
+        try:
+            # Find the target node's file and parent
+            cursor = self.connection.execute(
+                "SELECT file_path, parent_id FROM nodes WHERE id = ?", (node_id,)
+            )
+            row = cursor.fetchone()
+            if not row:
+                return []
+            file_path, parent_id = row[0], row[1]
+
+            # Get siblings: same parent (if class) or same file (if top-level)
+            if parent_id and parent_id > 0:
+                cursor = self.connection.execute(
+                    "SELECT id, name, label, start_line, end_line, signature, return_type "
+                    "FROM nodes WHERE parent_id = ? AND id != ? AND label IN ('Function', 'Method') "
+                    "ORDER BY start_line",
+                    (parent_id, node_id),
+                )
+            else:
+                cursor = self.connection.execute(
+                    "SELECT id, name, label, start_line, end_line, signature, return_type "
+                    "FROM nodes WHERE file_path = ? AND id != ? AND label IN ('Function', 'Method') "
+                    "AND (parent_id IS NULL OR parent_id = 0) "
+                    "ORDER BY start_line",
+                    (file_path, node_id),
+                )
+
+            siblings = []
+            for r in cursor.fetchall():
+                sib = {
+                    "id": r[0],
+                    "name": r[1],
+                    "label": r[2],
+                    "start_line": r[3],
+                    "end_line": r[4],
+                    "signature": r[5],
+                    "return_type": r[6],
+                    "properties": self.get_properties(r[0]),
+                }
+                siblings.append(sib)
+            return siblings
+        except sqlite3.OperationalError:
+            return []
+
+    def get_override_chain(
+        self, method_name: str, class_node_id: int, max_depth: int = 5
+    ) -> list[dict[str, Any]]:
+        """Find all overrides of method_name up the inheritance chain via recursive CTE.
+
+        Traverses EXTENDS/IMPLEMENTS edges from class_node_id upward, collecting
+        methods with the same name at each ancestor level. Research: CodeQL class
+        hierarchy analysis — override chains are critical for understanding
+        polymorphic dispatch and ensuring behavioral consistency across
+        implementations.
+
+        Returns list of dicts with keys: id, name, file_path, start_line, signature, depth.
+        """
+        if not self.connection:
+            return []
+        try:
+            cursor = self.connection.execute(
+                """
+                WITH RECURSIVE ancestors AS (
+                    SELECT n.id, n.name, n.file_path, 0 as depth
+                    FROM nodes n WHERE n.id = ?
+                    UNION ALL
+                    SELECT n2.id, n2.name, n2.file_path, a.depth + 1
+                    FROM ancestors a
+                    JOIN edges e ON e.source_id = a.id AND e.type IN ('EXTENDS', 'IMPLEMENTS')
+                    JOIN nodes n2 ON n2.id = e.target_id
+                    WHERE a.depth < ?
+                )
+                SELECT m.id, m.name, m.file_path, m.start_line, m.signature, a.depth
+                FROM ancestors a
+                JOIN nodes m ON m.parent_id = a.id AND m.name = ?
+                ORDER BY a.depth
+                """,
+                (class_node_id, max_depth, method_name),
+            )
+            return [
+                {
+                    "id": row[0],
+                    "name": row[1],
+                    "file_path": row[2],
+                    "start_line": row[3],
+                    "signature": row[4],
+                    "depth": row[5],
+                }
+                for row in cursor.fetchall()
+            ]
+        except (sqlite3.Error, sqlite3.OperationalError):
+            return []
+
+    def get_assertions_in_file(self, file_path: str) -> list[dict[str, Any]]:
+        """Get all assertions from test functions in a file."""
+        if not self.connection:
+            return []
+        try:
+            norm = self._normalize_path(file_path)
+            cursor = self.connection.execute(
+                "SELECT a.kind, a.expression, a.expected, a.line, n.name as test_name "
+                "FROM assertions a JOIN nodes n ON a.test_node_id = n.id "
+                "WHERE n.file_path = ? ORDER BY a.line",
+                (norm,),
+            )
+            return [
+                {
+                    "kind": row[0],
+                    "expression": row[1],
+                    "expected": row[2],
+                    "line": row[3],
+                    "test_name": row[4],
+                }
+                for row in cursor.fetchall()
+            ]
+        except sqlite3.OperationalError:
+            return []
+
+    def get_function_at_line(self, file_path: str, line: int) -> dict[str, Any] | None:
+        """Find the function/method node containing a specific line."""
+        if not self.connection:
+            return None
+        try:
+            norm = self._normalize_path(file_path)
+            cursor = self.connection.execute(
+                "SELECT id, name, label, start_line, end_line, signature, return_type, language "
+                "FROM nodes WHERE file_path = ? AND start_line <= ? AND end_line >= ? "
+                "AND label IN ('Function', 'Method') "
+                "ORDER BY (end_line - start_line) ASC LIMIT 1",
+                (norm, line, line),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return {
+                "id": row[0],
+                "name": row[1],
+                "label": row[2],
+                "start_line": row[3],
+                "end_line": row[4],
+                "signature": row[5],
+                "return_type": row[6],
+                "language": row[7],
+            }
+        except sqlite3.OperationalError:
+            return None
+
+    # --- P2: Structured parameter parsing from properties table ---
+
+    def get_structured_params(self, symbol_id: int) -> list[dict[str, Any]] | None:
+        """Get structured parameters for a function from the properties table.
+
+        The Go indexer extracts ``param`` properties with values like
+        ``"name:type [required]"`` or ``"name:type opt=default"``.  This method
+        parses those rows into a structured list of dicts.
+
+        Research: RELREPAIR (ICSE 2024) -- structured parameter metadata enables
+        type-aware repair at call sites.  Pure SQL + string parsing, $0 AI.
+
+        Returns list of dicts with keys: name, type, required, default.
+        Returns None if no param properties exist or the table is absent.
+        """
+        if not self.connection:
+            return None
+        try:
+            rows = self.connection.execute(
+                "SELECT value FROM properties WHERE node_id = ? AND kind = 'param' ORDER BY line",
+                (symbol_id,),
+            ).fetchall()
+            if not rows:
+                return None
+            params: list[dict[str, Any]] = []
+            for row in rows:
+                val: str = row[0] if not hasattr(row, "keys") else row["value"]
+                param: dict[str, Any] = {
+                    "name": "",
+                    "type": None,
+                    "required": True,
+                    "default": None,
+                }
+                # Parse "name:type opt=default" or "name:type [required]"
+                if " opt=" in val:
+                    main, default = val.split(" opt=", 1)
+                    param["default"] = default
+                    param["required"] = False
+                elif " [required]" in val:
+                    main = val.replace(" [required]", "")
+                else:
+                    main = val
+                if ":" in main:
+                    param["name"], param["type"] = main.split(":", 1)
+                else:
+                    param["name"] = main
+                param["name"] = param["name"].strip()
+                if param["type"]:
+                    param["type"] = param["type"].strip()
+                if param["name"]:
+                    params.append(param)
+            return params if params else None
+        except (sqlite3.Error, sqlite3.OperationalError):
+            return None
+
+    # --- P11: Query-time arg-to-param mapping ---
+
+    @staticmethod
+    def _split_call_args(args_str: str) -> list[str]:
+        """Split a comma-separated argument string respecting nested parens/brackets."""
+        args: list[str] = []
+        depth = 0
+        current: list[str] = []
+        for ch in args_str:
+            if ch in "([{":
+                depth += 1
+                current.append(ch)
+            elif ch in ")]}":
+                depth -= 1
+                current.append(ch)
+            elif ch == "," and depth == 0:
+                args.append("".join(current).strip())
+                current = []
+            else:
+                current.append(ch)
+        if current:
+            args.append("".join(current).strip())
+        return [a for a in args if a]
+
+    def map_args_to_params(
+        self, caller_code: str, callee_id: int
+    ) -> list[dict[str, Any]] | None:
+        """Map positional arguments in caller code to callee parameters.
+
+        Prefers structured params from the properties table (P2) when available,
+        falling back to signature-string parsing for databases without param
+        properties.
+
+        Research: RELREPAIR -- function signatures + call-site code enable
+        type-aware repair.  Pure string parsing, no AST needed.
+
+        Returns list of dicts with keys: position, arg, param_name, param_type, required.
+        Returns None if extraction fails.
+        """
+        import re as _re_map
+
+        # Extract call arguments from caller code
+        call_match = _re_map.search(r"\w+\((.+)\)\s*$", caller_code)
+        if not call_match:
+            return None
+        args_str = call_match.group(1)
+        if not args_str.strip():
+            return None
+        args = self._split_call_args(args_str)
+        if not args:
+            return None
+
+        # Try structured params from properties table first (P2)
+        params = self.get_structured_params(callee_id)
+        if params:
+            mapping: list[dict[str, Any]] = []
+            for i, (arg, param) in enumerate(zip(args, params)):
+                mapping.append({
+                    "position": i,
+                    "arg": arg,
+                    "param_name": param["name"],
+                    "param_type": param.get("type"),
+                    "required": param.get("required", True),
+                })
+            return mapping if mapping else None
+
+        # Fallback: parse callee signature string
+        return self._map_args_from_signature(caller_code, callee_id)
+
+    def _map_args_from_signature(
+        self, caller_code: str, callee_id: int
+    ) -> list[dict[str, Any]] | None:
+        """Fallback arg-to-param mapping using the callee's signature string.
+
+        Used when the properties table has no ``param`` rows for the callee
+        (older graph.db versions or languages without param extraction).
+        """
+        import re as _re_map
+
+        # Retrieve the callee node's signature
+        try:
+            row = self.connection.execute(
+                "SELECT signature FROM nodes WHERE id = ?", (callee_id,)
+            ).fetchone()
+            if not row:
+                return None
+            callee_signature: str | None = row[0] if not hasattr(row, "keys") else row["signature"]
+            if not callee_signature:
+                return None
+        except (sqlite3.Error, sqlite3.OperationalError):
+            return None
+
+        # Extract call arguments
+        call_match = _re_map.search(r"\w+\((.+)\)\s*$", caller_code)
+        if not call_match:
+            return None
+        raw_args = call_match.group(1)
+        if not raw_args.strip():
+            return None
+        args = self._split_call_args(raw_args)
+        if not args:
+            return None
+
+        # Extract callee params from signature
+        sig_match = _re_map.search(r"\((.*)\)", callee_signature)
+        if not sig_match:
+            return None
+        raw_params = sig_match.group(1)
+        if not raw_params.strip():
+            return None
+        params = [
+            p.strip().split(":")[0].split("=")[0].strip()
+            for p in raw_params.split(",")
+            if p.strip()
+        ]
+        params = [p for p in params if p not in ("self", "cls")]
+
+        mapping: list[dict[str, Any]] = []
+        for i, (arg, param) in enumerate(zip(args, params)):
+            mapping.append({
+                "position": i,
+                "arg": arg,
+                "param_name": param,
+                "param_type": None,
+                "required": True,
+            })
+        return mapping if mapping else None
+
+    # --- Write operations are no-ops for the bridge ---
+
+    _READ_ONLY_ERR = GroundTruthError(
+        code="read_only", message="GraphStore is read-only (Go indexer owns writes)"
+    )
+
+    def insert_symbol(  # type: ignore[override]
+        self,
+        name: str = "",
+        kind: str = "",
+        language: str = "",
+        file_path: str = "",
+        line_number: int | None = None,
+        end_line: int | None = None,
+        is_exported: bool = False,
+        signature: str | None = None,
+        params: str | None = None,
+        return_type: str | None = None,
+        documentation: str | None = None,
+        last_indexed_at: int = 0,
+    ) -> Result[int, GroundTruthError]:
+        return Err(self._READ_ONLY_ERR)
+
+    def delete_symbols_in_file(self, file_path: str) -> Result[int, GroundTruthError]:
+        return Err(self._READ_ONLY_ERR)
+
+    def update_usage_count(self, symbol_id: int, count: int) -> Result[None, GroundTruthError]:
+        return Err(self._READ_ONLY_ERR)
+
+    def get_conventions(self) -> dict:
+        """Compute naming/docstring/pattern stats from graph.db."""
+        try:
+            result = {}
+            # Naming convention
+            funcs = self.connection.execute(
+                "SELECT name FROM nodes WHERE label IN ('Function','Method') AND is_test = 0 LIMIT 500"
+            ).fetchall()
+            snake = sum(1 for f in funcs if '_' in f["name"] and f["name"].islower())
+            camel = sum(1 for f in funcs if not '_' in f["name"] and any(c.isupper() for c in f["name"][1:]))
+            total = len(funcs)
+            if total > 0:
+                result["naming"] = "snake_case" if snake > camel else "camelCase"
+                result["naming_ratio"] = max(snake, camel) / total
+
+            # Docstring coverage
+            doc_count = self.connection.execute(
+                "SELECT COUNT(DISTINCT node_id) FROM properties WHERE kind = 'docstring'"
+            ).fetchone()[0]
+            func_count = self.connection.execute(
+                "SELECT COUNT(*) FROM nodes WHERE label IN ('Function','Method') AND is_test = 0"
+            ).fetchone()[0]
+            result["docstring_coverage"] = doc_count / max(func_count, 1)
+
+            # Average function length
+            avg_len = self.connection.execute(
+                "SELECT AVG(end_line - start_line) FROM nodes WHERE label IN ('Function','Method') AND start_line > 0 AND end_line > 0"
+            ).fetchone()[0]
+            result["avg_function_lines"] = round(avg_len or 0, 1)
+
+            return result
+        except Exception:
+            return {}
+
+    def get_cochanges(self, file_path: str, min_count: int = 3) -> list[tuple[str, int]]:
+        """Get files that historically change with this file (from cochanges table)."""
+        try:
+            cursor = self.connection.execute(
+                "SELECT file_b, count FROM cochanges WHERE file_a = ? AND count >= ? "
+                "UNION "
+                "SELECT file_a, count FROM cochanges WHERE file_b = ? AND count >= ? "
+                "ORDER BY count DESC LIMIT 10",
+                (file_path, min_count, file_path, min_count)
+            )
+            return [(row[0], row[1]) for row in cursor.fetchall()]
+        except Exception:
+            return []
+
+    def rebuild_fts(self) -> Result[None, GroundTruthError]:
+        return Ok(None)  # No FTS in Go schema

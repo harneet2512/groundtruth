@@ -1,0 +1,19 @@
+{
+  "id": "win-005",
+  "category": "wrong-import-name",
+  "subcategory": "close-match",
+  "description": "Typo: 'signTokn' instead of 'signToken' (distance 1)",
+  "input": {
+    "code": "import { signTokn } from './auth';\n\nconst jwt = signTokn({ userId: '1', email: 'a@b.com' });",
+    "filePath": "src/app.ts",
+    "intent": "sign a JWT token for a user"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "levenshtein",
+    "correctSymbol": "signToken",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

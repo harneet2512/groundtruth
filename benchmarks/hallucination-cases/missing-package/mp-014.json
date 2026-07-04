@@ -1,0 +1,17 @@
+{
+  "id": "mp-014",
+  "category": "missing-package",
+  "description": "Import yup (not in package.json)",
+  "input": {
+    "code": "import * as yup from 'yup';\n\nconst schema = yup.string().required();",
+    "filePath": "src/app.ts"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "package_not_installed",
+    "fixType": "none",
+    "correctSymbol": "yup",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": false
+  }
+}

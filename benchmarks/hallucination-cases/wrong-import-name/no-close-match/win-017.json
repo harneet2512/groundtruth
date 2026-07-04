@@ -1,0 +1,19 @@
+{
+  "id": "win-017",
+  "category": "wrong-import-name",
+  "subcategory": "no-close-match",
+  "description": "Hallucinated 'getUser' instead of 'getUserById'",
+  "input": {
+    "code": "import { getUser } from './users';\n\nconst user = await getUser(42);",
+    "filePath": "src/app.ts",
+    "intent": "look up a user by ID"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "ai_semantic",
+    "correctSymbol": "getUserById",
+    "shouldRequireAI": true,
+    "briefingWouldPrevent": true
+  }
+}

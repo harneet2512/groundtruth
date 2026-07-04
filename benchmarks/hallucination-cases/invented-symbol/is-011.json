@@ -1,0 +1,20 @@
+{
+  "id": "is-011",
+  "category": "invented-symbol",
+  "language": "go",
+  "description": "Invented 'EncryptPayload' — should be 'SignToken' from auth",
+  "input": {
+    "code": "package main\n\nimport \"myapp/auth\"\n\nfunc main() {\n\ttoken, err := auth.EncryptPayload(payload)\n}",
+    "filePath": "main.go",
+    "intent": "generate a JWT token for a user"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "ai_semantic",
+    "correctSymbol": "SignToken",
+    "correctImport": "auth/jwt",
+    "shouldRequireAI": true,
+    "briefingWouldPrevent": true
+  }
+}

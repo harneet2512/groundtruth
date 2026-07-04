@@ -1,0 +1,110 @@
+{
+  "privacyidea": {
+    "url": "https://github.com/privacyidea/privacyidea",
+    "commit": "98a7201ee6ce5decb81df58151249516d397d484"
+  },
+  "go-zero": {
+    "url": "https://github.com/zeromicro/go-zero",
+    "commit": "6078bf1a049acc7b95ca2cecef6944269509f88e"
+  },
+  "express": {
+    "url": "https://github.com/expressjs/express",
+    "commit": "3ed5090ca91f6a387e66370d57ead94d886275e1"
+  },
+  "core": {
+    "url": "https://github.com/vuejs/core",
+    "commit": "1b6bc2374d93e5f76d9266a0fcc5c10a8cafef5b"
+  },
+  "bytes": {
+    "url": "https://github.com/tokio-rs/bytes",
+    "commit": "f514bd38dac85695e9053d990b251643e9e4ef92"
+  },
+  "grpc-go": {
+    "url": "https://github.com/grpc/grpc-go",
+    "commit": "b88d2d74656f2b9833cc78c088ebf899d2189230"
+  },
+  "clap": {
+    "url": "https://github.com/clap-rs/clap",
+    "commit": "5e3386bb40948bc6a608e6c951ce1b86a686e32b"
+  },
+  "geopandas": {
+    "url": "https://github.com/geopandas/geopandas",
+    "commit": "cb89483750de606cd21310edab2c843717a51ef9"
+  },
+  "gin": {
+    "url": "https://github.com/gin-gonic/gin",
+    "commit": "da1e108614ecbbadfa5736b1b297b16121d23b9b"
+  },
+  "axios": {
+    "url": "https://github.com/axios/axios",
+    "commit": "1792eda11aff8fe0f8c8a6e5ae6ff305740a6460"
+  },
+  "hono": {
+    "url": "https://github.com/honojs/hono",
+    "commit": "fab3b13639339cbd5ba1166a5b23d9ac30c5f64f"
+  },
+  "serde": {
+    "url": "https://github.com/serde-rs/serde",
+    "commit": "babafa54d283fb087fa94f50a2cf82fa9e582a7c"
+  },
+  "requests": {
+    "url": "https://github.com/psf/requests",
+    "commit": "661970d171d9c3e12e4c789c4768db647d8c4da0"
+  },
+  "aiohttp": {
+    "url": "https://github.com/aio-libs/aiohttp",
+    "commit": "7987bd2ccfc6fc48adca7e97ab57abebbd67179e"
+  },
+  "scrapy": {
+    "url": "https://github.com/scrapy/scrapy",
+    "commit": "0a4a92e84334770a3aca3a3c44985cb08692535c"
+  },
+  "black": {
+    "url": "https://github.com/psf/black",
+    "commit": "67ffc34df80a57fce8c2fb56dec079d4acba2437"
+  },
+  "fzf": {
+    "url": "https://github.com/junegunn/fzf",
+    "commit": "b3b221854b231c2385bd2aadfc1eb5ec3153cf3e"
+  },
+  "cobra": {
+    "url": "https://github.com/spf13/cobra",
+    "commit": "6dec1ae26659a130bdb4c985768d1853b0e1bc06"
+  },
+  "client_golang": {
+    "url": "https://github.com/prometheus/client_golang",
+    "commit": "d61fb3f8aa4b436256dd20d703ca796ab1eeafa5"
+  },
+  "Chart.js": {
+    "url": "https://github.com/chartjs/Chart.js",
+    "commit": "a77a63b16bc99fb588ca5252bfa62a09f32db2a6"
+  },
+  "multer": {
+    "url": "https://github.com/expressjs/multer",
+    "commit": "7dd1e552fd1c58a0333f9e748f6d14b79b4423a5"
+  },
+  "got": {
+    "url": "https://github.com/sindresorhus/got",
+    "commit": "6c7ebab3674fbf8a21275cfe9e06f71740219c05"
+  },
+  "query": {
+    "url": "https://github.com/TanStack/query",
+    "commit": "4f11927ac5f3841984389a07587ee2ae1e0abfbb"
+  },
+  "trpc": {
+    "url": "https://github.com/trpc/trpc",
+    "commit": "6b2a5a606f3f049bee707f2a71c7938977bfdb1c"
+  },
+  "regex": {
+    "url": "https://github.com/rust-lang/regex",
+    "commit": "839d16bc65b60e2006d3599d20bfa6efc14049d8"
+  },
+  "anyhow": {
+    "url": "https://github.com/dtolnay/anyhow",
+    "commit": "2737bbeb59f50651ff54ca3d879a3f5d659a98ab"
+  },
+  "bat": {
+    "url": "https://github.com/sharkdp/bat",
+    "commit": "8f70e0cf00e1bca04df97669d5b50b9bf4608746"
+  }
+}

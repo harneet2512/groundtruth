@@ -1,0 +1,72 @@
+{
+  "cases": [
+    {
+      "id": "ho_rust_ripgrep_replace_panic",
+      "language": "rust",
+      "repo": "ripgrep",
+      "issue_text": "rg panics when using --replace together with --multiline and a particular pattern over search text containing certain sequences of repeated text and newlines. With these flags and inputs, ripgrep aborts with a panic instead of printing the replaced matches. The panic happens while building the replacement output, where an internal invariant assumed the match range would never exceed the bytes given, which is not always true.",
+      "gold_files": ["crates/printer/src/util.rs"]
+    },
+    {
+      "id": "ho_rust_alacritty_mouse_wheel",
+      "language": "rust",
+      "repo": "alacritty",
+      "issue_text": "Mouse wheel key bindings are not working while the terminal is in mouse mode. Scroll-wheel bindings configured by the user never trigger when an application has enabled mouse reporting: the scroll wheel was never blocked from mouse mode, so the binding logic that should fire for the wheel is never reached. Outside of mouse mode the same bindings work as expected.",
+      "gold_files": ["alacritty/src/input/mod.rs"]
+    },
+    {
+      "id": "ho_rust_helix_missing_cwd",
+      "language": "rust",
+      "repo": "helix",
+      "issue_text": "Helix panics if started in a non-existent directory. Reproduction: mkdir a; cd a; from another terminal rm -rf a; then run hx. Expected: no crash, a clear error. Actual: it panics with thread 'main' panicked at 'Couldn't determine current working directory: Os { code: 2, kind: NotFound, message: \"No such file or directory\" }'. When launched from a directory that no longer exists and no working-dir override is given, it should print an error and exit instead of aborting.",
+      "gold_files": ["helix-term/src/main.rs"]
+    },
+    {
+      "id": "ho_rust_starship_deno_nodejs",
+      "language": "rust",
+      "repo": "starship",
+      "issue_text": "fix(nodejs): hide the Node.js prompt module by default when Deno project files are detected. The default prompt currently shows both the Node.js and Deno modules in Deno projects because both runtimes use package.json to declare dependencies; in a Deno project that file does not actually indicate Node.js is used. The Node.js module should be suppressed when Deno-specific project files are present, matching the behavior already implemented for Bun.",
+      "gold_files": ["src/configs/nodejs.rs"]
+    },
+    {
+      "id": "ho_rust_fd_path_separator",
+      "language": "rust",
+      "repo": "fd",
+      "issue_text": "When a search pattern contains a path separator such as '/', fd should warn that the pattern looks like a path rather than silently treating it as a regular expression over file names. Currently the diagnostic only fires when the pattern names an existing directory, so a pattern that contains a separator but does not match a real directory is treated as a regex and matches nothing, with no hint to the user. The warning should fire for any pattern containing a separator, not just ones naming a directory.",
+      "gold_files": ["src/main.rs"]
+    },
+    {
+      "id": "ho_rust_axum_option_fromrequest",
+      "language": "rust",
+      "repo": "axum",
+      "issue_text": "FromRequest derive with an Option<T> field has unexpected semantics. When deriving FromRequest / FromRequestParts, Option<T> fields are handled with .ok() on the extracted result, which silently swallows every rejection. So a malformed or invalid JSON payload that should produce a JsonRejection is instead mapped to None rather than returning an error. Optional fields should use the optional-extraction path so genuine extraction errors are still surfaced.",
+      "gold_files": ["axum-macros/src/from_request/mod.rs", "axum-macros/src/lib.rs"]
+    }
+  ],
+  "repos": {
+    "ripgrep": {
+      "url": "https://github.com/BurntSushi/ripgrep",
+      "commit": "916415857f084e63efda03cf25a67fe7f6d24244"
+    },
+    "alacritty": {
+      "url": "https://github.com/alacritty/alacritty",
+      "commit": "83f64435375216466a87c853ed1eb0d9c58b4470"
+    },
+    "helix": {
+      "url": "https://github.com/helix-editor/helix",
+      "commit": "26a2d55dec9a52de1d6915bc2f4fd7e9e907ead7"
+    },
+    "starship": {
+      "url": "https://github.com/starship/starship",
+      "commit": "05ee20141e3ed92cbf05b166c54265237648d27d"
+    },
+    "fd": {
+      "url": "https://github.com/sharkdp/fd",
+      "commit": "0e74d5b75dfd65e756dcb934ff505682a6f18e83"
+    },
+    "axum": {
+      "url": "https://github.com/tokio-rs/axum",
+      "commit": "a480d71f6d55cef84f273e5a5e0563d5354ab328"
+    }
+  }
+}

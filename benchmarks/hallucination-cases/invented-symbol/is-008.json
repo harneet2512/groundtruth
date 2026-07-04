@@ -1,0 +1,20 @@
+{
+  "id": "is-008",
+  "category": "invented-symbol",
+  "language": "python",
+  "description": "Invented 'verify_credentials' — should be 'login' from auth.login",
+  "input": {
+    "code": "from auth.login import verify_credentials\n\nresult = verify_credentials(email, password)",
+    "filePath": "src/app.py",
+    "intent": "authenticate user with email and password"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "ai_semantic",
+    "correctSymbol": "login",
+    "correctImport": "src/auth/login",
+    "shouldRequireAI": true,
+    "briefingWouldPrevent": true
+  }
+}

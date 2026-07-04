@@ -1,0 +1,17 @@
+{
+  "id": "mp-004",
+  "category": "missing-package",
+  "description": "Import jsonwebtoken (not in package.json)",
+  "input": {
+    "code": "import jwt from 'jsonwebtoken';\n\nconst token = jwt.sign(payload, secret);",
+    "filePath": "src/app.ts"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "package_not_installed",
+    "fixType": "none",
+    "correctSymbol": "jsonwebtoken",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": false
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "id": "wmp-008",
+  "category": "wrong-module-path",
+  "subcategory": "symbol-exists-elsewhere",
+  "description": "comparePassword imported from './auth' instead of './utils/crypto'",
+  "input": {
+    "code": "import { comparePassword } from './auth';\n\nconst match = await comparePassword(plain, hashed);",
+    "filePath": "src/app.ts",
+    "intent": "compare passwords"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "cross_file_resolution",
+    "correctSymbol": "comparePassword",
+    "correctImport": "src/utils/crypto",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

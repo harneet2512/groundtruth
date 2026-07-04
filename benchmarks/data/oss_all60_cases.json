@@ -1,0 +1,542 @@
+[
+  {
+    "id": "ext2_go_gozero_rest_engine",
+    "language": "go",
+    "repo": "go-zero",
+    "issue_text": "REST engine route registration should attach middleware in the expected order and avoid duplicate handlers. The fix belongs in the REST engine.",
+    "gold_files": [
+      "rest/engine.go"
+    ]
+  },
+  {
+    "id": "ext2_go_gozero_zrpc_client",
+    "language": "go",
+    "repo": "go-zero",
+    "issue_text": "zrpc client creation should apply target endpoints and dial options consistently when using discovered services. The change belongs in zrpc client setup.",
+    "gold_files": [
+      "zrpc/client.go"
+    ]
+  },
+  {
+    "id": "ext2_go_grpc_balancer_picker",
+    "language": "go",
+    "repo": "grpc-go",
+    "issue_text": "Balancer pickers should report transient failures and ready sub connections without dropping done callbacks. The change belongs in balancer interfaces.",
+    "gold_files": [
+      "balancer/balancer.go"
+    ]
+  },
+  {
+    "id": "ext2_go_grpc_http2_client_transport",
+    "language": "go",
+    "repo": "grpc-go",
+    "issue_text": "HTTP2 client transport should handle keepalive pings and stream quota updates without leaking streams. The fix belongs in the HTTP2 client transport.",
+    "gold_files": [
+      "internal/transport/http2_client.go"
+    ]
+  },
+  {
+    "id": "ext2_go_grpc_resolver_builder",
+    "language": "go",
+    "repo": "grpc-go",
+    "issue_text": "Resolver builders should update target endpoints and service config consistently when resolver state changes. The fix belongs in resolver interfaces and state handling.",
+    "gold_files": [
+      "resolver/resolver.go"
+    ]
+  },
+  {
+    "id": "ext2_js_express_application_settings",
+    "language": "javascript",
+    "repo": "express",
+    "issue_text": "Application settings inheritance should preserve enabled and disabled values when mounting a sub application. The fix belongs in application setup logic.",
+    "gold_files": [
+      "lib/application.js"
+    ]
+  },
+  {
+    "id": "ext2_js_express_factory_exports",
+    "language": "javascript",
+    "repo": "express",
+    "issue_text": "The Express factory should expose Router, request, and response prototypes consistently without mutating shared exports. The fix belongs in the express module entrypoint.",
+    "gold_files": [
+      "lib/express.js"
+    ]
+  },
+  {
+    "id": "ext2_js_express_init_middleware",
+    "language": "javascript",
+    "repo": "express",
+    "issue_text": "Initialization middleware should attach request and response prototypes to each request without leaking state between apps. The fix belongs in init middleware.",
+    "gold_files": [
+      "lib/middleware/init.js"
+    ]
+  },
+  {
+    "id": "ext2_js_express_utils_etag",
+    "language": "javascript",
+    "repo": "express",
+    "issue_text": "ETag and freshness utilities should normalize weak and strong validators consistently. The change belongs in shared Express utilities, not request or response methods.",
+    "gold_files": [
+      "lib/utils.js"
+    ]
+  },
+  {
+    "id": "ext2_js_express_view_lookup",
+    "language": "javascript",
+    "repo": "express",
+    "issue_text": "View lookup should resolve template extensions and root directories correctly when multiple view paths are configured. The fix belongs in view resolution.",
+    "gold_files": [
+      "lib/view.js"
+    ]
+  },
+  {
+    "id": "ext2_py_geopandas_file_io_driver",
+    "language": "python",
+    "repo": "geopandas",
+    "issue_text": "Reading and writing geospatial files chooses the wrong driver options when a path-like object and layer name are supplied. The fix belongs in file IO handling.",
+    "gold_files": [
+      "geopandas/io/file.py"
+    ]
+  },
+  {
+    "id": "ext2_py_geopandas_geodataframe_overlay",
+    "language": "python",
+    "repo": "geopandas",
+    "issue_text": "GeoDataFrame overlay and geometry column handling produce incorrect output when attributes are preserved across spatial operations. The fix belongs in GeoDataFrame behavior, not plotting or file IO.",
+    "gold_files": [
+      "geopandas/geodataframe.py"
+    ]
+  },
+  {
+    "id": "ext2_py_geopandas_geoseries_crs",
+    "language": "python",
+    "repo": "geopandas",
+    "issue_text": "GeoSeries coordinate reference system transformations should preserve geometry metadata when applying unary operations. The change belongs in GeoSeries implementation.",
+    "gold_files": [
+      "geopandas/geoseries.py"
+    ]
+  },
+  {
+    "id": "ext2_py_privacyidea_hotp_counter",
+    "language": "python",
+    "repo": "privacyidea",
+    "issue_text": "HOTP token validation should update the counter correctly when look-ahead succeeds and avoid accepting reused counters. The fix belongs in the HOTP token implementation.",
+    "gold_files": [
+      "privacyidea/lib/tokens/hotptoken.py"
+    ]
+  },
+  {
+    "id": "ext2_py_privacyidea_policy_scope",
+    "language": "python",
+    "repo": "privacyidea",
+    "issue_text": "Policy matching applies the wrong scope when user resolver and realm restrictions are combined. The change belongs in policy evaluation logic.",
+    "gold_files": [
+      "privacyidea/lib/policy.py"
+    ]
+  },
+  {
+    "id": "ext2_rust_bytes_buf_chain",
+    "language": "rust",
+    "repo": "bytes",
+    "issue_text": "Chained buffers should advance across the first and second buffer correctly when one side is exhausted. The fix belongs in the Buf chain adapter.",
+    "gold_files": [
+      "src/buf/chain.rs"
+    ]
+  },
+  {
+    "id": "ext2_rust_bytes_buf_take",
+    "language": "rust",
+    "repo": "bytes",
+    "issue_text": "Taking a limited view of a buffer should clamp remaining bytes and prevent over-advance. The fix belongs in the take adapter.",
+    "gold_files": [
+      "src/buf/take.rs"
+    ]
+  },
+  {
+    "id": "ext2_rust_bytes_fmt_hex",
+    "language": "rust",
+    "repo": "bytes",
+    "issue_text": "Hex formatting should pad and group bytes correctly when rendering debug output for byte slices. The fix belongs in hex formatting.",
+    "gold_files": [
+      "src/fmt/hex.rs"
+    ]
+  },
+  {
+    "id": "ext2_rust_clap_arg_matches",
+    "language": "rust",
+    "repo": "clap",
+    "issue_text": "ArgMatches should report value sources and occurrence counts correctly after parsing grouped short flags. The fix belongs in parsed argument matches.",
+    "gold_files": [
+      "clap_builder/src/parser/matches/arg_matches.rs"
+    ]
+  },
+  {
+    "id": "ext2_rust_clap_command_builder",
+    "language": "rust",
+    "repo": "clap",
+    "issue_text": "Command builder configuration should preserve subcommand settings when aliases and visible aliases are combined. The fix belongs in command builder behavior.",
+    "gold_files": [
+      "clap_builder/src/builder/command.rs"
+    ]
+  },
+  {
+    "id": "ext2_ts_vue_compiler_transform",
+    "language": "typescript",
+    "repo": "core",
+    "issue_text": "Compiler transforms should preserve node source locations when replacing nested expressions. The fix belongs in compiler transform traversal.",
+    "gold_files": [
+      "packages/compiler-core/src/transform.ts"
+    ]
+  },
+  {
+    "id": "ext2_ts_vue_component_slots",
+    "language": "typescript",
+    "repo": "core",
+    "issue_text": "Component slots should normalize forwarded slot functions and preserve stable slot flags during updates. The change belongs in component slot handling.",
+    "gold_files": [
+      "packages/runtime-core/src/componentSlots.ts"
+    ]
+  },
+  {
+    "id": "ext2_ts_vue_dom_events",
+    "language": "typescript",
+    "repo": "core",
+    "issue_text": "DOM event patching should update cached invokers correctly when listener arrays and once modifiers change. The fix belongs in the runtime DOM events module.",
+    "gold_files": [
+      "packages/runtime-dom/src/modules/events.ts"
+    ]
+  },
+  {
+    "id": "ext2_ts_vue_reactivity_effect",
+    "language": "typescript",
+    "repo": "core",
+    "issue_text": "Reactive effects should stop tracking stale dependencies when nested effects are paused and resumed. The fix belongs in effect tracking logic.",
+    "gold_files": [
+      "packages/reactivity/src/effect.ts"
+    ]
+  },
+  {
+    "id": "ext2_ts_vue_renderer_patch",
+    "language": "typescript",
+    "repo": "core",
+    "issue_text": "Runtime renderer patching should preserve component subtree updates when keyed fragments move between containers. The fix belongs in runtime renderer logic.",
+    "gold_files": [
+      "packages/runtime-core/src/renderer.ts"
+    ]
+  },
+  {
+    "id": "held_go_gin_4702",
+    "language": "go",
+    "repo": "gin",
+    "issue_text": "fix(context): skip chmod on pre-existing dirs in SaveUploadedFile. ## Summary\n\nFixes #4622\n\nAfter upgrading to v1.12.0, `SaveUploadedFile` started failing when saving files into pre-existing system directories like `/tmp` with:\n```\nchmod /tmp: operation not permitted\n```\n\n## Root Cause\n\n`os.Chmod(dir, mode)` was called **unconditionally** after `os.MkdirAll`, even when the target directory already existed and was not owned by the process.\n\n## Fix\n\nStat the direct",
+    "gold_files": [
+      "context.go"
+    ]
+  },
+  {
+    "id": "held_go_gin_4698",
+    "language": "go",
+    "repo": "gin",
+    "issue_text": "fix(recovery): record recovered panics in c.Errors. ## Summary\r\n- Record recovered panics on the context error list in the default recovery handler.\r\n- Preserve the existing 500 response behavior for normal recovered panics.\r\n- Add a regression test showing upstream middleware can observe the recovered panic via `c.Errors`.\r\n\r\nFixes #2088\r\n\r\n## Root cause\r\n`RecoveryWithWriter` delegates non-broken-pipe panics to `defaultHandleRecovery`, but the def",
+    "gold_files": [
+      "recovery.go"
+    ]
+  },
+  {
+    "id": "held_go_gin_4695",
+    "language": "go",
+    "repo": "gin",
+    "issue_text": "fix(context): Copy() copies Errors and Accepted fields. `Copy()` now copies the `Errors` slice so goroutines receiving a copy can observe errors attached before the copy was made.\r\n`Copy()` now copies the `Accepted` slice so content-negotiation state set by middleware (via `SetAccepted`) is preserved in the copy.\r\nBoth fields use independent slices \u2014 mutations on the copy do not affect the original context.\r\n\r\n`Context.Copy()` was explicitly copying `K",
+    "gold_files": [
+      "context.go"
+    ]
+  },
+  {
+    "id": "held_javascript_axios_11021",
+    "language": "javascript",
+    "repo": "axios",
+    "issue_text": "fix: incorrect use of error. fix: incorrect use of error",
+    "gold_files": [
+      "lib/adapters/http.js"
+    ]
+  },
+  {
+    "id": "held_javascript_axios_11019",
+    "language": "javascript",
+    "repo": "axios",
+    "issue_text": "fix(AxiosURLSearchParams): use arrow function so encoder.call(this) receives the instance. ## Summary\n\n`AxiosURLSearchParams.prototype.toString` passes `undefined` as `this` to custom\nencoders instead of the `AxiosURLSearchParams` instance, defeating the\n`encoder.call(this, value, encode)` call that was always intended to forward\ncontext.\n\n## Root cause\n\nThe `_encode` helper was defined as a regular `function` expression:\n\n```js\nconst _encode = encoder\n  ? function (value) {\n      retur",
+    "gold_files": [
+      "lib/helpers/AxiosURLSearchParams.js"
+    ]
+  },
+  {
+    "id": "held_javascript_axios_11006",
+    "language": "javascript",
+    "repo": "axios",
+    "issue_text": "fix(formDataToJSON): only split keys on bracket and dot notation. Closes #5402.\n\n`formDataToJSON` / `formToJSON` split a field name like `user-name` into `{ user: { name: ... } }` instead of keeping the literal key. The same happened for spaces, `+`, `*`, `&`, etc.\n\nThe cause is the tokenizer in `parsePropPath`:\n\n```js\nconst pattern = /\\w+|\\[(\\w*)]/g;\n```\n\nIt matches runs of word characters and bracket groups, **silently dropping any non-word separator**. So `us",
+    "gold_files": [
+      "lib/helpers/formDataToJSON.js"
+    ]
+  },
+  {
+    "id": "held_typescript_hono_5036",
+    "language": "typescript",
+    "repo": "hono",
+    "issue_text": "fix(jsx): cast awaitedFallback through unknown to fix Deno type check. ### The author should do the following, if applicable\r\n\r\n- [ ] Add tests\r\n- [x] Run tests\r\n- [x] `bun run format:fix && bun run lint:fix` to format the code\r\n- [ ] Add [TSDoc](https://tsdoc.org/)/[JSDoc](https://jsdoc.app/about-getting-started) to document the code",
+    "gold_files": [
+      "src/jsx/components.ts"
+    ]
+  },
+  {
+    "id": "held_typescript_hono_5013",
+    "language": "typescript",
+    "repo": "hono",
+    "issue_text": "fix(lambda-edge): satisfy Deno lib types for Content-Length body encoding. ### The author should do the following, if applicable\r\n\r\n- [ ] Add tests\r\n- [ ] Run tests\r\n- [ ] `bun run format:fix && bun run lint:fix` to format the code\r\n- [ ] Add [TSDoc](https://tsdoc.org/)/[JSDoc](https://jsdoc.app/about-getting-started) to document the code",
+    "gold_files": [
+      "src/adapter/lambda-edge/handler.ts"
+    ]
+  },
+  {
+    "id": "held_typescript_hono_4998",
+    "language": "typescript",
+    "repo": "hono",
+    "issue_text": "fix(utils/ipaddr): render the unspecified address binary as \"::\". ## What this fixes\n\n`convertIPv6BinaryToString(0n)` returns a single `\":\"` instead of the canonical `\"::\"` for the IPv6 unspecified address (all-zero groups).\n\n```ts\nimport { convertIPv6BinaryToString, convertIPv6ToBinary } from './src/utils/ipaddr'\n\nconvertIPv6BinaryToString(0n) // => \":\"   (expected \"::\")\n```\n\nThe resulting string is not a valid IPv6 address (`net.isIP(':')` is `0`) and it does",
+    "gold_files": [
+      "src/utils/ipaddr.ts"
+    ]
+  },
+  {
+    "id": "held_rust_serde_2950",
+    "language": "rust",
+    "repo": "serde",
+    "issue_text": "Fix temporary value lifetime in `serialize_struct`. In the 2024 edition of Rust, `serde`'s macros for `serialize_with` can lead to a temporary lifetime error such as:\r\n\r\n```\r\nerror[E0716]: temporary value dropped while borrowed\r\n --> my-binary/src/main.rs:6:10\r\n  |\r\n6 | #[derive(MyDerive)]\r\n  |          ^^^^^^^-\r\n  |          |      |\r\n  |          |      temporary value is freed at the end of this statement\r\n  |          creates a temporary value",
+    "gold_files": [
+      "serde_derive/src/ser.rs"
+    ]
+  },
+  {
+    "id": "held_python_requests_7502",
+    "language": "python",
+    "repo": "requests",
+    "issue_text": "Fix `_encode_files` detection for `__getattr__`-based file wrappers.",
+    "gold_files": [
+      "src/requests/models.py"
+    ]
+  },
+  {
+    "id": "rnd_python_aiohttp_12997",
+    "language": "python",
+    "repo": "aiohttp",
+    "issue_text": "Fix parse_content_disposition rejecting headers with OWS around disposition type. ## What does this PR do?\n\nFixes **#12996** \u2014 `parse_content_disposition` was rejecting `Content-Disposition` headers that contain optional whitespace (OWS) around the disposition type, such as:\n\n```\nContent-Disposition: form-data ; name=\"field\"\n```\n\nThe disposition type `\"form-data \"` (trailing space) failed the `is_token()` check, causing the function to emit a `BadContentDispositionHeader` warni",
+    "gold_files": [
+      "aiohttp/multipart.py"
+    ]
+  },
+  {
+    "id": "rnd_python_aiohttp_12948",
+    "language": "python",
+    "repo": "aiohttp",
+    "issue_text": "Fix IndexError in parse_content_disposition when param value is empty. ## Bug\n\n`parse_content_disposition` raises an unhandled `IndexError: string index out of range` when a `Content-Disposition` header contains a parameter with an empty value, such as:\n\n```\nattachment; filename=\n```\n\nThe inner helper `is_quoted` indexes `string[0]` without first checking that the string is non-empty:\n\n```python\ndef is_quoted(string: str) -> bool:\n    return string[0] == string[-1] =",
+    "gold_files": [
+      "aiohttp/multipart.py"
+    ]
+  },
+  {
+    "id": "rnd_python_scrapy_7632",
+    "language": "python",
+    "repo": "scrapy",
+    "issue_text": "Fix rel_has_nofollow to be case-insensitive per HTML spec. ## Bug\n\nThe HTML specification states that link type keywords such as `nofollow`\nare [ASCII case-insensitive](https://html.spec.whatwg.org/multipage/links.html#link-type-nofollow).\nHowever, `rel_has_nofollow` performs a case-sensitive check, so a page\nwith `rel=\"NoFollow\"` or `rel=\"NOFOLLOW\"` is incorrectly treated as a\nfollow link and Scrapy will crawl it when it should not.\n\n## Fix\n\nAdd `.lower(",
+    "gold_files": [
+      "scrapy/utils/misc.py"
+    ]
+  },
+  {
+    "id": "rnd_python_scrapy_7675",
+    "language": "python",
+    "repo": "scrapy",
+    "issue_text": "Fix request_to_curl() corrupting dict cookies with bytes keys/values. `request_to_curl()` renders dict cookies whose keys/values are bytes as their literal repr (`b'k'=b'v'`) in the emitted curl command, producing a broken command.\n\nPR #7603 made the list-cookie branch bytes-safe but did not mirror the same handling to the dict branch. This applies the identical decoding there. Existing tests green (29 passed).",
+    "gold_files": [
+      "scrapy/utils/request.py"
+    ]
+  },
+  {
+    "id": "rnd_python_black_5165",
+    "language": "python",
+    "repo": "black",
+    "issue_text": "fix quadratic backtracking in debug f-string quote detection. the debug f-string check in make_naked runs re.search with a leading .*, so it rescans for a quote from every start position. while merging implicitly concatenated strings (string_processing / --unstable, and blackd) an expression with a quote but no = goes quadratic, e.g. a long literal like f\"{'aaa...'}\":\n\n    n= 8000   0.80s\n    n=16000   3.17s\n    n=32000  11.77s\n\nthe leading .* is redundant u",
+    "gold_files": [
+      "src/black/trans.py"
+    ]
+  },
+  {
+    "id": "rnd_go_fzf_4636",
+    "language": "go",
+    "repo": "fzf",
+    "issue_text": "Fix --accept-nth being ignored in filter mode. The `--accept-nth` option wasn't working with `--filter` mode. It would just ignore the field selection and print the whole line instead of the specified fields.\n\nI ran into this when trying to use filter mode in a script where I wanted to filter by one field but output another (like showing names but returning IDs). Turns out filter mode just wasn't applying the field transformer at all - it was",
+    "gold_files": [
+      "src/core.go"
+    ]
+  },
+  {
+    "id": "rnd_go_fzf_4734",
+    "language": "go",
+    "repo": "fzf",
+    "issue_text": "Fix nthTransformer parts slice preallocation. Use make([]NthParts, 0, len(indexes)) so the slice starts empty with reserved capacity. The previous length-len(indexes) allocation left leading zero NthParts entries before appended elements.\r\n\r\n## Contribution Policy\r\n\r\nWe do not accept pull requests generated primarily by AI without genuine understanding or real-world usage context.\r\n\r\nAll contributions are expected to demonstrate:\r\n- A clear u",
+    "gold_files": [
+      "src/options.go"
+    ]
+  },
+  {
+    "id": "rnd_go_cobra_2285",
+    "language": "go",
+    "repo": "cobra",
+    "issue_text": "fix: quote args in fish shell completion. The arguments used for dynamic completions in fish were missing quotes. This resulted in an error when one of the arguments had a `*` in it whose expansion matched no file. Once the completion got triggered, fish errored with the message `No matches for wildcard [...]`. Don't quote the first argument as that is the name of the binary.\r\n\r\nCloses #1933",
+    "gold_files": [
+      "fish_completions.go"
+    ]
+  },
+  {
+    "id": "rnd_go_cobra_2356",
+    "language": "go",
+    "repo": "cobra",
+    "issue_text": "fix: prevent completions from mutating os.Args via append side effect. ## Summary\n\n- Fixes a bug where `getCompletions()` accidentally mutates `os.Args` by writing `\"--\"` into the shared backing array via an `append` with spare capacity\n- Uses a three-index slice expression (`finalArgs[:len:len]`) to cap the slice capacity, forcing `append` to allocate a new array\n- Adds a regression test that confirms the args slice is not corrupted during shell completion\n\n## Detai",
+    "gold_files": [
+      "completions.go"
+    ]
+  },
+  {
+    "id": "rnd_go_client_golang_2010",
+    "language": "go",
+    "repo": "client_golang",
+    "issue_text": "fix(registry): prevent file descriptor leak in WriteToTextfile. In WriteToTextfile, if an error occurs before the explicit tmp.Close() (e.g., Gather fails or MetricFamilyToText fails), the temporary file descriptor is never closed. The deferred os.Remove(tmp.Name()) does not close the file.\r\n\r\nExplicitly close the file on all error paths that happen before the final close, ensuring the descriptor is always released.\r\n\r\nAdditionally, this fixes the issue on Win",
+    "gold_files": [
+      "prometheus/registry.go"
+    ]
+  },
+  {
+    "id": "rnd_javascript_Chart.js_11991",
+    "language": "javascript",
+    "repo": "Chart.js",
+    "issue_text": "Bugfix: TypeError in Interaction due to out-of-bounds index. I have introduced a bug in my previous pull request https://github.com/chartjs/Chart.js/pull/11986. This PR fixes it and adds 4 test cases to make sure it doesn't happen again.\r\n\r\nIf there is a line chart with the following dataset\r\n```js\r\ndata: [1, null, 2],\r\nspanGaps: true,\r\n```\r\n\r\nand user hovers close to `2`, then `binarySearch` wrapper returns `hi: 4` for nearest interaction, which is an inde",
+    "gold_files": [
+      "src/core/core.interaction.js"
+    ]
+  },
+  {
+    "id": "rnd_javascript_Chart.js_12070",
+    "language": "javascript",
+    "repo": "Chart.js",
+    "issue_text": "Fix: display stacked bar with multiple x-Axis. Hello everyone,\r\n\r\nWhen you try to use stackedBars with multiple axes, the bars all render at the center of each axis chunk, so they're hidden by whichever bar is rendered last.\r\n\r\nYou can see a live example [on codepen](https://codepen.io/xavierleune/pen/vEEroEw)\r\n\r\n![screenshot](https://github.com/user-attachments/assets/135b2f0f-5639-45d9-800c-bdf799b2c5a0)\r\n\r\nThis pull request fixes this behav",
+    "gold_files": [
+      "src/controllers/controller.bar.js"
+    ]
+  },
+  {
+    "id": "rnd_javascript_multer_1411",
+    "language": "javascript",
+    "repo": "multer",
+    "issue_text": "fix(v3): port CVE-2025-47944 / CVE-2025-47935. Backports the malformed-body DoS fix from 2.x (commit 2c8505f) to the v3 branch.\r\n\r\nThe v3 rewrite introduced a different failure shape than 2.x: when `@fastify/busboy` is fed a malformed multipart body, it emits no events at all (no `file`, no `finish`, no `error`), leaving the middleware awaiting `Promise.all([fields, files, guard])` indefinitely.",
+    "gold_files": [
+      "lib/read-body.js"
+    ]
+  },
+  {
+    "id": "rnd_javascript_multer_1177",
+    "language": "javascript",
+    "repo": "multer",
+    "issue_text": "Fix out-of-band error event from busboy. Fixes https://github.com/expressjs/multer/issues/1176",
+    "gold_files": [
+      "lib/make-middleware.js"
+    ]
+  },
+  {
+    "id": "rnd_typescript_got_2150",
+    "language": "typescript",
+    "repo": "got",
+    "issue_text": "fix: pass request body to cache handler. Fixes the 2nd half of https://github.com/sindresorhus/got/issues/2138, see [my comment](https://github.com/sindresorhus/got/issues/2138#issuecomment-1252054329)\r\n\r\n#### Checklist\r\n\r\n- [x] I have read the documentation.\r\n- [x] I have included a pull request description of my changes.\r\n- [x] I have included some tests.\r\n- [ ] If it's a new feature, I have included documentation updates in both the R",
+    "gold_files": [
+      "source/core/index.ts"
+    ]
+  },
+  {
+    "id": "rnd_typescript_got_2266",
+    "language": "typescript",
+    "repo": "got",
+    "issue_text": "fix: adjust `get-stream` import for commonjs. Fixes https://github.com/sindresorhus/got/issues/2265\r\n\r\n#### Checklist\r\n\r\n- [x] I have read the documentation.\r\n- [ ] I have included a pull request description of my changes.\r\n- [ ] I have included some tests.\r\n- [ ] If it's a new feature, I have included documentation updates in both the README and the types.",
+    "gold_files": [
+      "source/core/index.ts"
+    ]
+  },
+  {
+    "id": "rnd_typescript_query_10610",
+    "language": "typescript",
+    "repo": "query",
+    "issue_text": "fix(hydration): set dataUpdatedAt when pending query resolves before hydration. ## Problem\n\nWhen a query is dehydrated while still pending (streamed) but then resolves *before* hydration runs on the client, the hydration code transitions the query's status from `'pending'` to `'success'` \u2014 but it never updates `dataUpdatedAt`. It stays at `0`.\n\nThis was introduced in #10444, which removed the `query.fetch()` call that previously set `dataUpdatedAt` as a side effect of resolvi",
+    "gold_files": [
+      "packages/query-core/src/hydration.ts"
+    ]
+  },
+  {
+    "id": "rnd_typescript_query_560",
+    "language": "typescript",
+    "repo": "query",
+    "issue_text": "fix(types): ReactQueryConfigProvider error type. This fixes #542 by allowing the `<ReactQueryConfigProvider>` to get the generic error type.",
+    "gold_files": [
+      "types/index.d.ts"
+    ]
+  },
+  {
+    "id": "rnd_typescript_trpc_7244",
+    "language": "typescript",
+    "repo": "trpc",
+    "issue_text": "fix: publishing. Closes #\r\n\r\n## \ud83c\udfaf Changes\r\n\r\nWhat changes are made in this PR? Is it a feature or a bug fix?\r\n\r\n<!--\r\nNote: once you create a Pull request, we will automatically fix auto-fixable lint issues in your branch\r\n-->\r\n\r\n## \u2705 Checklist\r\n\r\n- [ ] I have followed the steps listed in the [Contributing guide](https://github.com/trpc/trpc/blob/main/CONTRIBUTING.md).\r\n- [ ] If necessary, I have added documentati",
+    "gold_files": [
+      "scripts/version.ts"
+    ]
+  },
+  {
+    "id": "rnd_rust_regex_1308",
+    "language": "rust",
+    "repo": "regex",
+    "issue_text": "perf: Avoid re-canonicalizing the entire IntervalSet on push. Canonicalize is taking up a significant amount due to a regex with a huge amount of character ranges (generated by [lalrpop](https://github.com/lalrpop/lalrpop)'s lexer expanding multiple `\\w` in a token). While this could perhaps be fixed in lalrpop I did notice the TODO in the code and after addressing this so we automatically union and compress on each push instead of re-canonicalizing on every",
+    "gold_files": [
+      "regex-syntax/src/hir/interval.rs"
+    ]
+  },
+  {
+    "id": "rnd_rust_regex_1203",
+    "language": "rust",
+    "repo": "regex",
+    "issue_text": "fix: escape invalid UTF-8 bytes in debug output for Match. # Description\r\n\r\n1. The `Debug` implementation for `Match` has been updated to use `DebugHaystack`. This provides a way to handle the formatting of `&[u8]` for debug output.\r\n\r\n - Valid UTF-8 characters are output as is.\r\n - Invalid UTF-8 bytes are output as hex escape sequences (`\\xHH`).\r\n - ASCII escape characters (e.g., `\\t`, `\\n`) are properly escaped.\r\n\r\n2. Additional test cases have been add",
+    "gold_files": [
+      "src/regex/bytes.rs"
+    ]
+  },
+  {
+    "id": "rnd_rust_anyhow_373",
+    "language": "rust",
+    "repo": "anyhow",
+    "issue_text": "Fix parse error with non-literal after minus sign. Fixes #372.",
+    "gold_files": [
+      "src/ensure.rs"
+    ]
+  },
+  {
+    "id": "rnd_rust_bat_3812",
+    "language": "rust",
+    "repo": "bat",
+    "issue_text": "fix: avoid usize underflow in --list-languages at narrow terminal width. Mirrors #3804 to its remaining sibling site.\n\n#3804 hardened `print_snip` with `saturating_sub` after #3803 reported a `capacity overflow` panic at `--terminal-width 1` (the `term_width - panel_count - title_count` subtraction underflowing `usize`). That fix covered the snip renderer. The `--list-languages` renderer has the identical `term_width - X - Y` shape and was left unhardened:\n\n`src/bin/ba",
+    "gold_files": [
+      "src/bin/bat/main.rs"
+    ]
+  },
+  {
+    "id": "rnd_rust_bat_3654",
+    "language": "rust",
+    "repo": "bat",
+    "issue_text": "fix: correct $LESSCLOSE exit-status warning. ## Summary\n\nFix inverted logic when reporting `$LESSCLOSE` cleanup failures: bat warned on successful exit and stayed silent when the command failed.\n\n## Test plan\n\n- [ ] `cargo test` (lessopen module tests cover env handling)",
+    "gold_files": [
+      "src/lessopen.rs"
+    ]
+  }
+]

@@ -1,0 +1,10 @@
+[project]
+name = "fixture-project-py"
+version = "0.1.0"
+description = "Python test fixture for GroundTruth"
+requires-python = ">=3.11"
+dependencies = [
+    "flask>=3.0.0",
+    "pydantic>=2.0.0",
+    "bcrypt>=4.0.0",
+]

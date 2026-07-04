@@ -1,0 +1,20 @@
+{
+  "id": "wlc-002",
+  "category": "wrong-language-convention",
+  "language": "typescript",
+  "description": "Used snake_case 'hash_password' in TS — should be 'hashPassword'",
+  "input": {
+    "code": "import { hash_password } from './utils/crypto';\n\nconst hashed = await hash_password(pw);",
+    "filePath": "src/auth/register.ts",
+    "intent": "hash a user password"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "levenshtein",
+    "correctSymbol": "hashPassword",
+    "correctImport": "src/utils/crypto",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

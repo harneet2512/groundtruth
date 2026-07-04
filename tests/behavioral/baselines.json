@@ -1,0 +1,43 @@
+{
+  "corpus": {
+    "run_ids": [
+      "governor_v8_2_agent_artifacts"
+    ],
+    "task_ids": [
+      "axum-3661",
+      "axum-3663",
+      "crossplane-7275",
+      "crossplane-7280",
+      "dagster-33645",
+      "dagster-33646",
+      "hono-4813",
+      "hono-4851",
+      "marimo-9381",
+      "marimo-9384"
+    ],
+    "generated_at": "2026-05-06T15:33:02.900511+00:00"
+  },
+  "l1": {
+    "per_task_random_baseline": {
+      "axum-3661": 0.0,
+      "axum-3663": 0.0,
+      "crossplane-7275": 0.0,
+      "crossplane-7280": 0.0,
+      "dagster-33645": 0.0,
+      "dagster-33646": 0.0,
+      "hono-4813": 0.0,
+      "hono-4851": 0.0,
+      "marimo-9381": 0.0,
+      "marimo-9384": 0.0
+    },
+    "mean_baseline": 0.0,
+    "threshold_multiplier": 2.0,
+    "effective_threshold": 0.01
+  },
+  "l3": {
+    "scrambled_baseline_mean": 0.0,
+    "scrambled_baseline_std": 0.0,
+    "threshold": 0.0,
+    "metric_status": "broken"
+  }
+}

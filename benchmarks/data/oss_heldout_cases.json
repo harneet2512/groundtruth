@@ -1,0 +1,101 @@
+[
+  {
+    "id": "held_go_gin_4702",
+    "language": "go",
+    "repo": "gin",
+    "issue_text": "fix(context): skip chmod on pre-existing dirs in SaveUploadedFile. ## Summary\n\nFixes #4622\n\nAfter upgrading to v1.12.0, `SaveUploadedFile` started failing when saving files into pre-existing system directories like `/tmp` with:\n```\nchmod /tmp: operation not permitted\n```\n\n## Root Cause\n\n`os.Chmod(dir, mode)` was called **unconditionally** after `os.MkdirAll`, even when the target directory already existed and was not owned by the process.\n\n## Fix\n\nStat the direct",
+    "gold_files": [
+      "context.go"
+    ]
+  },
+  {
+    "id": "held_go_gin_4698",
+    "language": "go",
+    "repo": "gin",
+    "issue_text": "fix(recovery): record recovered panics in c.Errors. ## Summary\r\n- Record recovered panics on the context error list in the default recovery handler.\r\n- Preserve the existing 500 response behavior for normal recovered panics.\r\n- Add a regression test showing upstream middleware can observe the recovered panic via `c.Errors`.\r\n\r\nFixes #2088\r\n\r\n## Root cause\r\n`RecoveryWithWriter` delegates non-broken-pipe panics to `defaultHandleRecovery`, but the def",
+    "gold_files": [
+      "recovery.go"
+    ]
+  },
+  {
+    "id": "held_go_gin_4695",
+    "language": "go",
+    "repo": "gin",
+    "issue_text": "fix(context): Copy() copies Errors and Accepted fields. `Copy()` now copies the `Errors` slice so goroutines receiving a copy can observe errors attached before the copy was made.\r\n`Copy()` now copies the `Accepted` slice so content-negotiation state set by middleware (via `SetAccepted`) is preserved in the copy.\r\nBoth fields use independent slices \u2014 mutations on the copy do not affect the original context.\r\n\r\n`Context.Copy()` was explicitly copying `K",
+    "gold_files": [
+      "context.go"
+    ]
+  },
+  {
+    "id": "held_javascript_axios_11021",
+    "language": "javascript",
+    "repo": "axios",
+    "issue_text": "fix: incorrect use of error. fix: incorrect use of error",
+    "gold_files": [
+      "lib/adapters/http.js"
+    ]
+  },
+  {
+    "id": "held_javascript_axios_11019",
+    "language": "javascript",
+    "repo": "axios",
+    "issue_text": "fix(AxiosURLSearchParams): use arrow function so encoder.call(this) receives the instance. ## Summary\n\n`AxiosURLSearchParams.prototype.toString` passes `undefined` as `this` to custom\nencoders instead of the `AxiosURLSearchParams` instance, defeating the\n`encoder.call(this, value, encode)` call that was always intended to forward\ncontext.\n\n## Root cause\n\nThe `_encode` helper was defined as a regular `function` expression:\n\n```js\nconst _encode = encoder\n  ? function (value) {\n      retur",
+    "gold_files": [
+      "lib/helpers/AxiosURLSearchParams.js"
+    ]
+  },
+  {
+    "id": "held_javascript_axios_11006",
+    "language": "javascript",
+    "repo": "axios",
+    "issue_text": "fix(formDataToJSON): only split keys on bracket and dot notation. Closes #5402.\n\n`formDataToJSON` / `formToJSON` split a field name like `user-name` into `{ user: { name: ... } }` instead of keeping the literal key. The same happened for spaces, `+`, `*`, `&`, etc.\n\nThe cause is the tokenizer in `parsePropPath`:\n\n```js\nconst pattern = /\\w+|\\[(\\w*)]/g;\n```\n\nIt matches runs of word characters and bracket groups, **silently dropping any non-word separator**. So `us",
+    "gold_files": [
+      "lib/helpers/formDataToJSON.js"
+    ]
+  },
+  {
+    "id": "held_typescript_hono_5036",
+    "language": "typescript",
+    "repo": "hono",
+    "issue_text": "fix(jsx): cast awaitedFallback through unknown to fix Deno type check. ### The author should do the following, if applicable\r\n\r\n- [ ] Add tests\r\n- [x] Run tests\r\n- [x] `bun run format:fix && bun run lint:fix` to format the code\r\n- [ ] Add [TSDoc](https://tsdoc.org/)/[JSDoc](https://jsdoc.app/about-getting-started) to document the code",
+    "gold_files": [
+      "src/jsx/components.ts"
+    ]
+  },
+  {
+    "id": "held_typescript_hono_5013",
+    "language": "typescript",
+    "repo": "hono",
+    "issue_text": "fix(lambda-edge): satisfy Deno lib types for Content-Length body encoding. ### The author should do the following, if applicable\r\n\r\n- [ ] Add tests\r\n- [ ] Run tests\r\n- [ ] `bun run format:fix && bun run lint:fix` to format the code\r\n- [ ] Add [TSDoc](https://tsdoc.org/)/[JSDoc](https://jsdoc.app/about-getting-started) to document the code",
+    "gold_files": [
+      "src/adapter/lambda-edge/handler.ts"
+    ]
+  },
+  {
+    "id": "held_typescript_hono_4998",
+    "language": "typescript",
+    "repo": "hono",
+    "issue_text": "fix(utils/ipaddr): render the unspecified address binary as \"::\". ## What this fixes\n\n`convertIPv6BinaryToString(0n)` returns a single `\":\"` instead of the canonical `\"::\"` for the IPv6 unspecified address (all-zero groups).\n\n```ts\nimport { convertIPv6BinaryToString, convertIPv6ToBinary } from './src/utils/ipaddr'\n\nconvertIPv6BinaryToString(0n) // => \":\"   (expected \"::\")\n```\n\nThe resulting string is not a valid IPv6 address (`net.isIP(':')` is `0`) and it does",
+    "gold_files": [
+      "src/utils/ipaddr.ts"
+    ]
+  },
+  {
+    "id": "held_rust_serde_2950",
+    "language": "rust",
+    "repo": "serde",
+    "issue_text": "Fix temporary value lifetime in `serialize_struct`. In the 2024 edition of Rust, `serde`'s macros for `serialize_with` can lead to a temporary lifetime error such as:\r\n\r\n```\r\nerror[E0716]: temporary value dropped while borrowed\r\n --> my-binary/src/main.rs:6:10\r\n  |\r\n6 | #[derive(MyDerive)]\r\n  |          ^^^^^^^-\r\n  |          |      |\r\n  |          |      temporary value is freed at the end of this statement\r\n  |          creates a temporary value",
+    "gold_files": [
+      "serde_derive/src/ser.rs"
+    ]
+  },
+  {
+    "id": "held_python_requests_7502",
+    "language": "python",
+    "repo": "requests",
+    "issue_text": "Fix `_encode_files` detection for `__getattr__`-based file wrappers.",
+    "gold_files": [
+      "src/requests/models.py"
+    ]
+  }
+]

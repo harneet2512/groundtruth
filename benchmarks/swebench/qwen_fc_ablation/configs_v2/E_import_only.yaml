@@ -1,0 +1,74 @@
+# Arm E: import only — GT installed (no index), evidence suppressed.
+agent:
+  type: default
+  templates:
+    system_template: |-
+      You are a helpful assistant that can interact with a computer shell to solve programming tasks.
+      When your fix is complete and validated, run the `submit` command.
+      Do NOT run `exit`. Do NOT echo "task completed".
+    instance_template: |-
+      <uploaded_files>
+      {{working_dir}}
+      </uploaded_files>
+      I've uploaded a python code repository in {{working_dir}}. Consider the following PR description:
+
+      <pr_description>
+      {{problem_statement}}
+      </pr_description>
+
+      <instructions>
+      Make the minimal changes to non-test files to fix the issue.
+      For each response:
+      1. Include a THOUGHT section explaining your reasoning
+      2. Use the available tools directly when an action is needed
+      Boundaries:
+      - MODIFY: Regular source code files in /testbed
+      - DO NOT MODIFY: Tests, configuration files (pyproject.toml, setup.cfg, etc.)
+      `submit` records `git diff` of /testbed. All edits MUST target /testbed paths.
+      After editing, verify with `git -C /testbed diff -- path/to/file.py`.
+      When done, issue `submit` as your next action.
+      </instructions>
+    next_step_template: |-
+      OBSERVATION:
+      {{observation}}
+      {% if gt_evidence %}
+      {{gt_evidence}}
+      {% endif %}
+    next_step_no_output_template: |-
+      Your command ran successfully and did not produce any output.
+      {% if gt_evidence %}
+      {{gt_evidence}}
+      {% endif %}
+  tools:
+    env_variables:
+      PAGER: cat
+      MANPAGER: cat
+      LESS: -R
+      PIP_PROGRESS_BAR: 'off'
+      TQDM_DISABLE: '1'
+      GIT_PAGER: cat
+      GT_EVIDENCE_FAMILIES: IMPORT
+      GT_ARM: E_import_only
+    bundles:
+      - path: tools/registry
+      - path: tools/edit_anthropic
+      - path: tools/review_on_submit_m
+      - path: tools/gt_ablation_v2
+    registry_variables:
+      USE_FILEMAP: 'true'
+    enable_bash_tool: true
+    parse_function:
+      type: function_calling
+  history_processors:
+    - type: cache_control
+      last_n_messages: 2
+  model:
+    name: openai/qwen3-coder-480b-a35b-instruct-maas
+    per_instance_cost_limit: 0
+    total_cost_limit: 0
+    per_instance_call_limit: 150
+    temperature: 0.2
+    top_p: 0.9
+    max_output_tokens: 8192
+    completion_kwargs:
+      drop_params: true

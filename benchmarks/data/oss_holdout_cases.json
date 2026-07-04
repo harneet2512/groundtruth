@@ -1,0 +1,274 @@
+[
+ {
+  "id": "ho_go_caddy_lastmod_etag",
+  "language": "go",
+  "repo": "caddy",
+  "issue_text": "Consider dropping ETag / Last-Modified generation for files where epoch <= mtime <= epoch+1\n\nNot letting clients do caching at all is a better failure mode than encouraging clients to cache things that aren't safely cacheable. When content doesn't have a meaningful mtime, generating an ETag off that mtime leads to absurd results (effectively leaving file size as the only cache-invalidation key). As a special case, an mtime of 0 or 1 (seconds since the UNIX epoch) is clearly not meaningful. A safeguard that skips ETag/Last-Modified generation for such unusable modification times would mean clients re-fetch rather than serve stale, out-of-date data.",
+  "gold_files": [
+   "modules/caddyhttp/fileserver/staticfiles.go"
+  ]
+ },
+ {
+  "id": "ho_go_traefik_endpointslice_changes",
+  "language": "go",
+  "repo": "traefik",
+  "issue_text": "Detect EndpointSlice condition changes\n\nAny EndpointSlice update (annotation ticks from co-resident controllers, or condition transitions with no address change) currently triggers a full O(Ingresses x paths) rebuild. A rebuild should only fire when fields actually consumed change: ports, endpoint addresses, and the Ready/Serving/Terminating tri-state. Updates that merely bump metadata/resourceVersion should be ignored. The condition comparison must treat nil/true/false as distinct, because Serving/Terminating drive server filtering and Fenced, and Ready drives TCP/UDP/Gateway, so dropping a condition-only transition would be a correctness bug.",
+  "gold_files": [
+   "pkg/provider/kubernetes/k8s/event_handler.go"
+  ]
+ },
+ {
+  "id": "ho_go_hugo_npm_stale_warning",
+  "language": "go",
+  "repo": "hugo",
+  "issue_text": "False warning regarding out of sync dependencies\n\nAfter running `hugo mod npm pack` followed by `npm install`, running `hugo` still emits:\n\n    WARN  npm dependencies are out of sync, please run \"hugo mod npm pack\" (you may also want to run \"npm install\" after that)\n\nPacking a second time and re-running hugo makes the warning disappear, but it should not appear in the first place when the dependencies are actually in sync. Tested with v0.162.0, but it has likely been there for a while.",
+  "gold_files": [
+   "modules/npm/package_builder.go"
+  ]
+ },
+ {
+  "id": "ho_go_prometheus_currentsamples_histograms",
+  "language": "go",
+  "repo": "prometheus",
+  "issue_text": "promql: incorrect currentSamples accounting for native histograms in matrixIterSlice\n\nThe currentSamples counter that backs the per-query sample limit is not adjusted correctly when native histograms drop out of the front of a matrix selection range. Native histograms count as more than one sample, so when matrixIterSlice trims points that have fallen outside the range it must decrement currentSamples by the histogram's size rather than by one. Otherwise the engine over-counts samples for ranged queries over native histograms and can spuriously hit the query sample limit.",
+  "gold_files": [
+   "promql/engine.go"
+  ]
+ },
+ {
+  "id": "ho_go_echo_proxy_nil_balancer_panic",
+  "language": "go",
+  "repo": "echo",
+  "issue_text": "Proxy middleware can panic when the balancer has no targets\n\nProxyWithConfig can panic when the balancer has no targets. The built-in balancers return nil when their target list is empty. The proxy middleware then passes that nil target to proxyHTTP / proxyRaw, which can panic. One way to hit this is to remove the last target with RemoveTarget at runtime. I expected the middleware to return a proxy error such as 502 Bad Gateway through the configured error handler, instead of panicking on the next request.",
+  "gold_files": [
+   "middleware/proxy.go"
+  ]
+ },
+ {
+  "id": "ho_go_gorm_serializer_nil_field_panic",
+  "language": "go",
+  "repo": "gorm",
+  "issue_text": "Panic saving a struct with nil value field and json serializer\n\nWhen I save a struct that has a json-serializer field with a nil value, gorm panics:\n\n    panic: runtime error: invalid memory address or nil pointer dereference\n    [signal SIGSEGV: segmentation violation code=0x1 addr=0x18]\n    gorm.io/gorm/schema.(*Field).setupValuerAndSetter.func17(...)\n            /gorm/schema/field.go:964\n    gorm.io/gorm/callbacks.ConvertToAssignments(...)\n            /gorm/callbacks/update.go:288\n\nWhen both the field value and the serializer are nil for an any-typed field, the code calls Serializer.Scan() on a nil serializer. It should set the field to its zero value instead.",
+  "gold_files": [
+   "schema/field.go"
+  ]
+ },
+ {
+  "id": "ho_js_fastify_dblslash",
+  "language": "javascript",
+  "repo": "fastify",
+  "issue_text": "Routes registered under nested plugins with a trailing slash on the parent prefix and no leading slash on the child prefix are mounted with a double slash. For example, registering an inner plugin with prefix 'inner' inside an outer plugin with prefix '/v1/' mounts the route at /v1//inner/route instead of /v1/inner/route. With the default ignoreDuplicateSlashes: false, GET /v1/inner/route then returns 404. Exactly one '/' should be kept between a parent and child prefix.",
+  "gold_files": [
+   "lib/plugin-override.js"
+  ]
+ },
+ {
+  "id": "ho_js_preact_domorder",
+  "language": "javascript",
+  "repo": "preact",
+  "issue_text": "Incorrect DOM result with certain 'key' and ContextProvider combination. When combining specific Preact key and ContextProvider usage, the rendered DOM order is unexpected compared to the VNodes generated. Steps: expand all rows, then collapse row 1 or 2 and observe the rows in the wrong order versus the expected DOM. The same setup in React does not reproduce the issue.",
+  "gold_files": [
+   "src/diff/children.js"
+  ]
+ },
+ {
+  "id": "ho_js_webpack_profiling",
+  "language": "javascript",
+  "repo": "webpack",
+  "issue_text": "ProfilingPlugin not rendering in Chrome. I'm getting an error when using the ProfilingPlugin: 'n.args.data.frames is not iterable' is reported when dropping the generated events.json into Chrome DevTools. The same trace file loads fine in Firefox's profiler.",
+  "gold_files": [
+   "lib/debug/ProfilingPlugin.js"
+  ]
+ },
+ {
+  "id": "ho_js_prettier_tsinstparen",
+  "language": "javascript",
+  "repo": "prettier",
+  "issue_text": "Prettier drops the parentheses required around a TSInstantiationExpression, producing invalid output. The parenthesized instantiation expression should be preserved so the formatted code still parses. (Originally found in Biome.)",
+  "gold_files": [
+   "src/language-js/parentheses/parent-needs-parentheses.js"
+  ]
+ },
+ {
+  "id": "ho_js_koa_attachment",
+  "language": "javascript",
+  "repo": "koa",
+  "issue_text": "ctx.attachment() / response.attachment overwrites an already-set Content-Type, which can lead to Content-Type sniffing and XSS when serving HTML or SVG files as attachments (security advisory GHSA-c5vw-j4hf-j526). An existing Content-Type should be preserved, while still being set when none was previously defined for backwards compatibility.",
+  "gold_files": [
+   "lib/response.js"
+  ]
+ },
+ {
+  "id": "ho_js_eslint_boolcast",
+  "language": "javascript",
+  "repo": "eslint",
+  "issue_text": "Bug: no-extra-boolean-cast fires on a shadowed Boolean, and --fix rewrites the code. When Boolean is a function parameter rather than the global, Boolean(input) is a call to the passed-in function, not a redundant cast, but the rule still reports it and the autofix removes the call, changing program behavior.",
+  "gold_files": [
+   "lib/rules/no-extra-boolean-cast.js"
+  ]
+ },
+ {
+  "id": "ho_python_httpx_3571",
+  "language": "python",
+  "repo": "httpx",
+  "issue_text": "Display proxy protocol scheme on error. The error message raised when a proxy connection fails does not show which proxy protocol was in use. It should evaluate and include the proxy URL scheme (`proxy.url.scheme`) in the error message so users can see which proxy protocol was being used when the failure occurred.",
+  "gold_files": [
+   "httpx/_transports/default.py"
+  ]
+ },
+ {
+  "id": "ho_python_rich_3678",
+  "language": "python",
+  "repo": "rich",
+  "issue_text": "Don't underline indentation in exception code highlights. When rendering exceptions and tracebacks, the syntax highlighter underlines the leading indentation of code lines. Previously indentation was underlined, which didn't look good. Code highlights shown in exceptions should not highlight (underline) the indentation.",
+  "gold_files": [
+   "rich/default_styles.py",
+   "rich/traceback.py"
+  ]
+ },
+ {
+  "id": "ho_python_click_2994",
+  "language": "python",
+  "repo": "click",
+  "issue_text": "`launch()` cannot locate files with spaces in the name on Windows. When a Windows program uses `click.launch(some_path, locate=True)` and `some_path` contains spaces, Windows Explorer opens showing the user's Documents folder instead of the specified file. Dispatching the call to `powershell` rather than `cmd` seems to fix the problem.",
+  "gold_files": [
+   "src/click/_termui_impl.py"
+  ]
+ },
+ {
+  "id": "ho_python_starlette_3298",
+  "language": "python",
+  "repo": "starlette",
+  "issue_text": "Adding `requires('scope')` to a function whose `request` parameter is not of type `Request` currently throws a bare `AssertionError` with no explanation. The `requires()` decorator asserts `isinstance(request, Request)` but gives no guidance when the parameter is mis-typed. It should raise a clear, descriptive error explaining that the decorated function's parameter must be a `Request`.",
+  "gold_files": [
+   "starlette/authentication.py"
+  ]
+ },
+ {
+  "id": "ho_python_sqlalchemy_12726",
+  "language": "python",
+  "repo": "sqlalchemy",
+  "issue_text": "Make `__aiter__` in `AsyncTupleResult` a sync function. According to PEP 525, `__aiter__` should be a synchronous function that returns an async iterator, but `AsyncTupleResult.__aiter__` is currently defined as an async function. This should be corrected so the async-tuple result object conforms to the async iterator protocol.",
+  "gold_files": [
+   "lib/sqlalchemy/ext/asyncio/result.py"
+  ]
+ },
+ {
+  "id": "ho_python_werkzeug_3089",
+  "language": "python",
+  "repo": "werkzeug",
+  "issue_text": "Multipart parsing breaks on the last newline with multiple parts and chunked data. The search for the last newline should happen after `data_start`; without this it may return a newline that occurs before `data_start` and break subsequent parsing (as seen for multipart bodies with multiple parts and chunked transfer).",
+  "gold_files": [
+   "src/werkzeug/sansio/multipart.py"
+  ]
+ },
+ {
+  "id": "ho_rust_ripgrep_replace_panic",
+  "language": "rust",
+  "repo": "ripgrep",
+  "issue_text": "rg panics when using --replace together with --multiline and a particular pattern over search text containing certain sequences of repeated text and newlines. With these flags and inputs, ripgrep aborts with a panic instead of printing the replaced matches. The panic happens while building the replacement output, where an internal invariant assumed the match range would never exceed the bytes given, which is not always true.",
+  "gold_files": [
+   "crates/printer/src/util.rs"
+  ]
+ },
+ {
+  "id": "ho_rust_alacritty_mouse_wheel",
+  "language": "rust",
+  "repo": "alacritty",
+  "issue_text": "Mouse wheel key bindings are not working while the terminal is in mouse mode. Scroll-wheel bindings configured by the user never trigger when an application has enabled mouse reporting: the scroll wheel was never blocked from mouse mode, so the binding logic that should fire for the wheel is never reached. Outside of mouse mode the same bindings work as expected.",
+  "gold_files": [
+   "alacritty/src/input/mod.rs"
+  ]
+ },
+ {
+  "id": "ho_rust_helix_missing_cwd",
+  "language": "rust",
+  "repo": "helix",
+  "issue_text": "Helix panics if started in a non-existent directory. Reproduction: mkdir a; cd a; from another terminal rm -rf a; then run hx. Expected: no crash, a clear error. Actual: it panics with thread 'main' panicked at 'Couldn't determine current working directory: Os { code: 2, kind: NotFound, message: \"No such file or directory\" }'. When launched from a directory that no longer exists and no working-dir override is given, it should print an error and exit instead of aborting.",
+  "gold_files": [
+   "helix-term/src/main.rs"
+  ]
+ },
+ {
+  "id": "ho_rust_starship_deno_nodejs",
+  "language": "rust",
+  "repo": "starship",
+  "issue_text": "fix(nodejs): hide the Node.js prompt module by default when Deno project files are detected. The default prompt currently shows both the Node.js and Deno modules in Deno projects because both runtimes use package.json to declare dependencies; in a Deno project that file does not actually indicate Node.js is used. The Node.js module should be suppressed when Deno-specific project files are present, matching the behavior already implemented for Bun.",
+  "gold_files": [
+   "src/configs/nodejs.rs"
+  ]
+ },
+ {
+  "id": "ho_rust_fd_path_separator",
+  "language": "rust",
+  "repo": "fd",
+  "issue_text": "When a search pattern contains a path separator such as '/', fd should warn that the pattern looks like a path rather than silently treating it as a regular expression over file names. Currently the diagnostic only fires when the pattern names an existing directory, so a pattern that contains a separator but does not match a real directory is treated as a regex and matches nothing, with no hint to the user. The warning should fire for any pattern containing a separator, not just ones naming a directory.",
+  "gold_files": [
+   "src/main.rs"
+  ]
+ },
+ {
+  "id": "ho_rust_axum_option_fromrequest",
+  "language": "rust",
+  "repo": "axum",
+  "issue_text": "FromRequest derive with an Option<T> field has unexpected semantics. When deriving FromRequest / FromRequestParts, Option<T> fields are handled with .ok() on the extracted result, which silently swallows every rejection. So a malformed or invalid JSON payload that should produce a JsonRejection is instead mapped to None rather than returning an error. Optional fields should use the optional-extraction path so genuine extraction errors are still surfaced.",
+  "gold_files": [
+   "axum-macros/src/from_request/mod.rs",
+   "axum-macros/src/lib.rs"
+  ]
+ },
+ {
+  "id": "ho_ts_typeorm_cacherunner",
+  "language": "typescript",
+  "repo": "typeorm",
+  "issue_text": "fix(cache): query runner not released on error in storeInCache. When storeInCache creates an internal master query runner (slave or undefined caller), a throwing execute() leaves the pooled connection unreleased and leaks a connection from the pool. The internally-created query runner must be released even when the cache write fails (wrap the execute block in try/finally so release always runs).",
+  "gold_files": [
+   "src/cache/DbQueryResultCache.ts"
+  ]
+ },
+ {
+  "id": "ho_ts_nest_gatewayguard",
+  "language": "typescript",
+  "repo": "nest",
+  "issue_text": "fix(websockets): type guard checks the key instead of the value. In GatewayMetadataExplorer.scanForServerHooks, the isFunction guard checks propertyKey (always a string coming from for...in) instead of instance[propertyKey] (the actual property value). The guard therefore never fires the way it should, and all enumerable properties, including non-method values, get scanned for GATEWAY_SERVER_METADATA metadata. The guard should test the property value, not its key.",
+  "gold_files": [
+   "packages/websockets/gateway-metadata-explorer.ts"
+  ]
+ },
+ {
+  "id": "ho_ts_vite_indexhtmluri",
+  "language": "typescript",
+  "repo": "vite",
+  "issue_text": "Dev server crashes on a malformed .html request. The fullBundle branch of indexHtmlMiddleware calls decodeURIComponent(url) without a guard. A request for a malformed .html URL such as /%c0.html therefore throws `URIError: URI malformed` and crashes the middleware instead of falling through to the next handler. The decode should be wrapped in try/catch and fall through (return next()) on failure, mirroring the existing guard in the memory-files middleware.",
+  "gold_files": [
+   "packages/vite/src/node/server/middlewares/indexHtml.ts"
+  ]
+ },
+ {
+  "id": "ho_ts_immer_arrayproxy",
+  "language": "typescript",
+  "repo": "immer",
+  "issue_text": "When enableArrayMethods() is enabled, immer does not always commit nested drafts, resulting in illegally accessing revoked proxies. This happens when copying an existing draft object and then adding it back to the array via mutation.\n\nRepro:\n  enableArrayMethods();\n  const oldState = [{ nestedArray: [] }];\n  const newState = produce(oldState, (state) => {\n    const newVal = { ...state[0] };\n    state.push(newVal);\n  });\n  newState[1].nestedArray.length; // throws: illegal operation attempted on a revoked proxy\n\nObserved: newState[1].nestedArray is a revoked proxy, indicating the draft was not committed. Expected: the nested draft is committed and reading it works.",
+  "gold_files": [
+   "src/plugins/arrayMethods.ts"
+  ]
+ },
+ {
+  "id": "ho_ts_xstate_wildcardfallback",
+  "language": "typescript",
+  "repo": "xstate",
+  "issue_text": "When a transition for an exact event descriptor has a guard that returns false, a matching wildcard descriptor is not used as a fallback and no transition is taken at all. For example, given handlers `'foo.bar': { guard: () => false, target: 'fail' }` and `'foo.*': 'pass'`, sending `{ type: 'foo.bar' }` does nothing instead of taking the `'foo.*'` transition to `pass`. Two wildcard descriptors already fall back correctly (`'foo.bar.*'` falls back to `'foo.*'`); only the exact-plus-wildcard combination is broken. Candidate selection short-circuits on the exact match, so the wildcard candidates are never even built when an exact descriptor exists.",
+  "gold_files": [
+   "packages/core/src/stateUtils.ts"
+  ]
+ },
+ {
+  "id": "ho_ts_slate_normalizehang",
+  "language": "typescript",
+  "repo": "slate",
+  "issue_text": "Calling Editor.normalize(editor, { force: true }) can hang indefinitely (the call never returns) when normalization processes adjacent text inside a custom non-selectable element. With an `editor.isSelectable` override that returns false for a particular element type, and adjacent text fragments seeded under that element, normalization enters an infinite loop and makes no progress. Because Editor.positions honors editor.isSelectable, traversal skips the non-selectable subtree, so combining the adjacent text fragments never advances and normalization spins forever.",
+  "gold_files": [
+   "packages/slate/src/transforms-node/merge-nodes.ts"
+  ]
+ }
+]

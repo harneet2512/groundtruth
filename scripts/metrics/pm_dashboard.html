@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>GroundTruth — PM Dashboard</title>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<style>
+  :root{--bg:#0d1117;--card:#161b22;--bd:#30363d;--fg:#e6edf3;--mut:#8b949e;--good:#3fb950;--bad:#f85149;--warn:#d29922;--accent:#58a6ff}
+  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif}
+  .wrap{max-width:1200px;margin:0 auto;padding:24px}
+  h1{font-size:20px;margin:0 0 4px} .sub{color:var(--mut);margin:0 0 20px;font-size:13px}
+  .grid{display:grid;gap:12px} .g4{grid-template-columns:repeat(4,1fr)} .g3{grid-template-columns:repeat(3,1fr)} .g2{grid-template-columns:repeat(2,1fr)}
+  .card{background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:14px}
+  .kpi .v{font-size:26px;font-weight:700} .kpi .l{color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+  .kpi .d{font-size:12px;margin-top:2px}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.05em;color:var(--accent);margin:24px 0 8px;border-bottom:1px solid var(--bd);padding-bottom:6px}
+  table{width:100%;border-collapse:collapse;font-size:12px} th,td{text-align:right;padding:6px 8px;border-bottom:1px solid var(--bd)} th{color:var(--mut);font-weight:600;position:sticky;top:0;background:var(--card)}
+  td.t,th.t{text-align:left;font-family:ui-monospace,monospace}
+  .bar{height:8px;background:#21262d;border-radius:4px;overflow:hidden;margin-top:4px} .bar>i{display:block;height:100%}
+  .pill{display:inline-block;padding:1px 7px;border-radius:10px;font-size:11px;font-weight:600}
+  .good{color:var(--good)} .bad{color:var(--bad)} .warn{color:var(--warn)} .mut{color:var(--mut)}
+  .err{background:#3d1418;border:1px solid var(--bad);padding:12px;border-radius:8px;color:#ffb4ac}
+  .phase{display:flex;height:18px;border-radius:4px;overflow:hidden} .phase>i{height:100%;font-size:9px;text-align:center;color:#000}
+</style>
+</head>
+<body><div id="root"></div>
+<script>
+const {useState,useEffect,createElement:h}=React;
+const f8=x=>(x==null?'—':(typeof x==='number'?x.toFixed(x>=1000?0:(Number.isInteger(x)?0:4)):x));
+const pct=x=>x==null?'—':(x*100).toFixed(1)+'%';
+function KPI({l,v,d,cls}){return h('div',{className:'card kpi'},h('div',{className:'l'},l),h('div',{className:'v '+(cls||'')},v),d&&h('div',{className:'d '+(cls||'mut')},d));}
+function Bar({v,max,color}){const w=max?Math.min(100,100*v/max):0;return h('div',{className:'bar'},h('i',{style:{width:w+'%',background:color||'#58a6ff'}}));}
+function Phases({r}){const tot=r.phase_explore+r.phase_understand+r.phase_edit+r.phase_verify||1;const segs=[['explore',r.phase_explore,'#d29922'],['understand',r.phase_understand,'#58a6ff'],['edit',r.phase_edit,'#3fb950'],['verify',r.phase_verify,'#a371f7']];
+  return h('div',{className:'phase'},segs.map(([n,v,c])=>v>0&&h('i',{key:n,title:n+' '+v,style:{width:(100*v/tot)+'%',background:c}},v>tot*0.08?v:'')));}
+function CmpRow({l,g,b,lowerBetter,fmt,note}){fmt=fmt||f8;const d=(g==null||b==null)?null:g-b;const better=d==null?null:(lowerBetter?d<0:(d>0));
+  return h('tr',null,h('td',{className:'t'},l),h('td',null,fmt(g)),h('td',{className:'mut'},b==null?'—':fmt(b)),
+    h('td',{className:better==null?'mut':(better?'good':'bad')},d==null?'—':((d>0?'+':'')+fmt(d))),
+    h('td',null,better==null?(note||''):(better?'✓ better':'✗ worse')));}
+function CMP({a,ba}){return h('div',{className:'card',style:{overflowX:'auto'}},h('table',null,
+  h('thead',null,h('tr',null,['Metric','GT-on','Baseline','Δ','Verdict'].map(c=>h('th',{key:c,className:c=='Metric'?'t':''},c)))),
+  h('tbody',null,
+    h(CmpRow,{l:'Resolve rate',g:a.resolve_rate,b:ba&&ba.resolve_rate,lowerBetter:false,fmt:pct}),
+    h(CmpRow,{l:'Turns → gold READ',g:a.mean_turns_to_gold_read,b:ba&&ba.mean_turns_to_gold_read,lowerBetter:true}),
+    h(CmpRow,{l:'Turns → gold EDIT',g:a.mean_turns_to_gold_edit,b:ba&&ba.mean_turns_to_gold_edit,lowerBetter:true}),
+    h(CmpRow,{l:'Mean actions / task',g:a.mean_actions,b:ba&&ba.mean_actions,lowerBetter:true}),
+    h(CmpRow,{l:'First-edit action',g:a.mean_first_edit_action,b:ba&&ba.mean_first_edit_action,lowerBetter:true}),
+    h(CmpRow,{l:'Gold-edited rate',g:a.gold_edited_rate,b:ba&&ba.gold_edited_rate,lowerBetter:false,fmt:pct}),
+    h(CmpRow,{l:'Cost / task ($)',g:a.cost_total_usd/a.n_tasks,b:ba?ba.cost_total_usd/ba.n_tasks:null,lowerBetter:true,fmt:x=>'$'+f8(x)}),
+    h(CmpRow,{l:'Context precision',g:a.mean_context_precision,b:null,note:'GT-on only'}),
+    h(CmpRow,{l:'Context recall',g:a.mean_context_recall,b:null,note:'GT-on only'}))));}
+
+function Dashboard({gton,base}){
+  const a=gton.aggregate, rows=gton.per_task;
+  const bmap={}; if(base) base.per_task.forEach(r=>bmap[r.task]=r);
+  const ba=base&&base.aggregate;
+  const delta=(g,b)=>(g==null||b==null)?null:g-b;
+  return h('div',{className:'wrap'},
+    h('h1',null,'GroundTruth — PM Dashboard'),
+    h('p',{className:'sub'},`GT-on: ${a.n_tasks} tasks · paired vs frozen baseline (87/300)`+(base?` · baseline arm loaded`:` · baseline arm not loaded`)),
+
+    h('h2',null,'C · Outcome & Attribution (north star)'),
+    h('div',{className:'grid g4'},
+      h(KPI,{l:'Resolve rate',v:pct(a.resolve_rate),cls:'good'}),
+      h(KPI,{l:'Flips',v:a.flips,d:`${a.regressions} regressions · net ${a.net_flips}`,cls:a.net_flips>0?'good':'mut'}),
+      h(KPI,{l:'gt_caused flips',v:a.gt_caused_flips,cls:'warn'}),
+      h(KPI,{l:'Cost / flip',v:a.cost_per_flip_usd!=null?'$'+f8(a.cost_per_flip_usd):'—'})),
+
+    h('h2',null,'⚠ Regressions — GT HARMED (baseline passed, GT-on failed) — the #1 control'),
+    (rows.some(r=>r.regression)
+      ? h('div',{className:'card',style:{borderColor:'var(--bad)'}},
+          h('table',null,
+            h('thead',null,h('tr',null,['task','root cause (GT mechanism)','first_gold_rank','ctx_prec','actions','baseline_actions'].map(c=>h('th',{key:c,className:(c=='task'||c.indexOf('root')>=0)?'t':''},c)))),
+            h('tbody',null,rows.filter(r=>r.regression).map(r=>h('tr',{key:r.task},
+              h('td',{className:'t bad'},r.task.replace(/^[^_]+__/,'')),
+              h('td',{className:'t '+(r.regression_root_cause?'warn':'mut')},r.regression_root_cause||'(diagnostic agent pending)'),
+              h('td',null,f8(r.first_gold_rank)),h('td',{className:r.context_precision<0.3?'bad':''},f8(r.context_precision)),
+              h('td',null,f8(r.actions)),h('td',{className:'mut'},f8(r.baseline_actions)))))))
+      : h('div',{className:'card good'},'✓ 0 regressions — GT did not break any baseline-passing task')),
+
+    h('h2',null,'A · Context quality (GT is a retrieval product — lead metric)'),
+    h('div',{className:'grid g4'},
+      h(KPI,{l:'Context precision',v:f8(a.mean_context_precision),d:'target >0.80',cls:a.mean_context_precision>=0.8?'good':'bad'}),
+      h(KPI,{l:'Context recall',v:f8(a.mean_context_recall),cls:a.mean_context_recall>=0.8?'good':'warn'}),
+      h(KPI,{l:'Hit@1 / Hit@3',v:pct(a.hit_at_1_rate)+' / '+pct(a.hit_at_3_rate)}),
+      h(KPI,{l:'Mean first_gold_rank',v:f8(a.mean_first_gold_rank),d:'lower=better'})),
+
+    h('h2',null,'B · Localization velocity · D · Efficiency'+(base?' (Δ vs baseline)':'')),
+    h('div',{className:'grid g4'},
+      h(KPI,{l:'Turns→gold read',v:f8(a.mean_turns_to_gold_read),d:base?'Δ '+f8(delta(a.mean_turns_to_gold_read,ba.mean_turns_to_gold_read)):'',cls:base&&delta(a.mean_turns_to_gold_read,ba.mean_turns_to_gold_read)<0?'good':'mut'}),
+      h(KPI,{l:'Turns→gold edit',v:f8(a.mean_turns_to_gold_edit),d:base?'Δ '+f8(delta(a.mean_turns_to_gold_edit,ba.mean_turns_to_gold_edit)):''}),
+      h(KPI,{l:'Mean actions',v:f8(a.mean_actions),d:base?'Δ '+f8(delta(a.mean_actions,ba.mean_actions)):'',cls:base&&delta(a.mean_actions,ba.mean_actions)<0?'good':'mut'}),
+      h(KPI,{l:'Gold edited rate',v:pct(a.gold_edited_rate)})),
+
+    h('h2',null,'E · Economics · F · Reliability'),
+    h('div',{className:'grid g4'},
+      h(KPI,{l:'Cost / task',v:'$'+f8(a.cost_total_usd/a.n_tasks)}),
+      h(KPI,{l:'Cost / resolved',v:a.cost_per_resolved_usd!=null?'$'+f8(a.cost_per_resolved_usd):'—'}),
+      h(KPI,{l:'Infra-failure rate',v:pct(a.infra_failure_rate),cls:a.infra_failure_rate==0?'good':'bad'}),
+      h(KPI,{l:'Semantic-on rate',v:pct(a.semantic_on_rate),cls:a.semantic_on_rate==1?'good':'bad'})),
+
+    h('h2',null,'GT-on vs Baseline — paired (the Cursor-mentality deltas)'),
+    h(CMP,{a,ba}),
+
+    h('h2',null,'Per-task detail'),
+    h('div',{className:'card',style:{overflowX:'auto',maxHeight:'520px',overflowY:'auto'}},
+      h('table',null,
+        h('thead',null,h('tr',null,['task','res','flip','ctx_prec','ctx_rec','gold_rank','t→gold_rd','t→gold_ed','actions','phases','cost$','gt_caused'].map(c=>h('th',{key:c,className:c=='task'?'t':''},c)))),
+        h('tbody',null,rows.map(r=>h('tr',{key:r.task},
+          h('td',{className:'t'},r.task.replace(/^[^_]+__/,'')),
+          h('td',{className:r.resolved?'good':'bad'},r.resolved?'✓':'✗'),
+          h('td',{className:r.flip?'good':'mut'},r.flip?'FLIP':(r.baseline_pass?'base':'—')),
+          h('td',{className:r.context_precision>=0.8?'good':(r.context_precision<0.3?'bad':'warn')},f8(r.context_precision)),
+          h('td',{className:r.context_recall>=0.8?'good':'warn'},f8(r.context_recall)),
+          h('td',null,f8(r.first_gold_rank)),
+          h('td',null,f8(r.turns_to_gold_read)),
+          h('td',null,f8(r.turns_to_gold_edit)),
+          h('td',null,f8(r.actions)),
+          h('td',{style:{minWidth:90}},h(Phases,{r})),
+          h('td',null,f8(r.llm_cost_usd)),
+          h('td',{className:r.gt_caused==1?'good':(r.gt_caused==0?'bad':'mut')},r.gt_caused==null?'—':(r.gt_caused?'✓':'✗')))))))
+  );
+}
+
+function App(){
+  const [d,setD]=useState(null),[b,setB]=useState(null),[err,setErr]=useState(null);
+  useEffect(()=>{fetch('dashboard_gton.json').then(r=>r.json()).then(setD).catch(e=>setErr('Load dashboard_gton.json: '+e));
+                 fetch('dashboard_baseline.json').then(r=>r.json()).then(setB).catch(()=>{});},[]);
+  if(err)return h('div',{className:'wrap'},h('div',{className:'err'},err,h('div',{className:'mut',style:{marginTop:8}},'Generate with: PYTHONPATH=src python scripts/metrics/pm_dashboard.py <run_dir> <baseline_json> <dataset_jsonl> dashboard_gton.json — then serve this folder.')));
+  if(!d)return h('div',{className:'wrap'},h('p',{className:'mut'},'Loading dashboard_gton.json…'));
+  return h(Dashboard,{gton:d,base:b});
+}
+ReactDOM.createRoot(document.getElementById('root')).render(h(App));
+</script>
+</body></html>

@@ -1,0 +1,20 @@
+{
+  "id": "wlc-007",
+  "category": "wrong-language-convention",
+  "language": "go",
+  "description": "Used JS-style camelCase 'getUserByID' in Go — should be 'GetUserByID'",
+  "input": {
+    "code": "package handlers\n\nimport \"myapp/users\"\n\nfunc Handler() {\n\tuser, err := users.getUserByID(42)\n}",
+    "filePath": "handlers/users.go",
+    "intent": "fetch a user by ID"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "levenshtein",
+    "correctSymbol": "GetUserByID",
+    "correctImport": "users/queries",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

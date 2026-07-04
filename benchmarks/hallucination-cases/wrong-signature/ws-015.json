@@ -1,0 +1,17 @@
+{
+  "id": "ws-015",
+  "category": "wrong-signature",
+  "description": "generateSalt() called with 2 args instead of 0-1",
+  "input": {
+    "code": "import { generateSalt } from './utils/crypto';\n\nconst salt = generateSalt(10, 'sha256');",
+    "filePath": "src/app.ts",
+    "intent": "generate a salt"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "signature_mismatch",
+    "correctSymbol": "generateSalt",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

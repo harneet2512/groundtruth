@@ -1,0 +1,19 @@
+{
+  "id": "win-015",
+  "category": "wrong-import-name",
+  "subcategory": "close-match",
+  "description": "Typo: 'getDbClent' instead of 'getDbClient' (distance 1)",
+  "input": {
+    "code": "import { getDbClent } from './db/client';\n\nconst db = getDbClent();",
+    "filePath": "src/app.ts",
+    "intent": "get a database client connection"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "levenshtein",
+    "correctSymbol": "getDbClient",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

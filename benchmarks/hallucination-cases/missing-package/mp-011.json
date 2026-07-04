@@ -1,0 +1,17 @@
+{
+  "id": "mp-011",
+  "category": "missing-package",
+  "description": "Import pg (not in package.json)",
+  "input": {
+    "code": "import { Pool } from 'pg';\n\nconst pool = new Pool({ connectionString });",
+    "filePath": "src/app.ts"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "package_not_installed",
+    "fixType": "none",
+    "correctSymbol": "pg",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": false
+  }
+}

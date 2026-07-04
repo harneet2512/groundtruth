@@ -1,0 +1,20 @@
+{
+  "id": "wmp-010",
+  "category": "wrong-module-path",
+  "subcategory": "symbol-exists-elsewhere",
+  "description": "errorHandler imported from './auth' instead of './middleware/errorHandler'",
+  "input": {
+    "code": "import { errorHandler } from './auth';\n\napp.use(errorHandler);",
+    "filePath": "src/app.ts",
+    "intent": "add error handling middleware"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "cross_file_resolution",
+    "correctSymbol": "errorHandler",
+    "correctImport": "src/middleware/errorHandler",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

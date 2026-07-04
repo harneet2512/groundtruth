@@ -1,0 +1,928 @@
+"""Universal async LSP client over stdio using JSON-RPC."""
+
+from __future__ import annotations
+
+import asyncio
+import datetime
+import glob
+import json
+import os
+import shutil
+from pathlib import Path
+from typing import Any, cast
+
+from groundtruth.lsp.protocol import (
+    Diagnostic,
+    DocumentSymbol,
+    Hover,
+    Location,
+    SignatureHelp,
+    SymbolInformation,
+    TextDocumentIdentifier,
+    TextDocumentItem,
+)
+from groundtruth.utils.logger import get_logger
+from groundtruth.utils.platform import resolve_command
+from groundtruth.utils.result import Err, GroundTruthError, Ok, Result
+
+logger = get_logger(__name__)
+
+DEFAULT_TIMEOUT = 30.0
+
+
+def _ensure_rust_toolchain_on_path(server_command: list[str] | str) -> None:
+    """rust-analyzer shells out to `cargo metadata` to build its crate graph; if `cargo`/`rustc` are
+    not on PATH it NEVER reaches project_ready and converts 0 edges (the §17.3 dark-LSP gap; witnessed
+    live: pest project_ready=False after 180s, effective_work=0). The eval container / harness normally
+    provides the toolchain, but make GT robust on ANY machine where a rust toolchain EXISTS but is not
+    yet on PATH: locate it via the STANDARD rustup layout and prepend the toolchain bin. Idempotent,
+    rust-analyzer-only, no-op when `cargo` already resolves. No hardcoded harness dir — uses the
+    standard env (RUSTUP_HOME/CARGO_HOME, harness-set or default), so it generalizes to any rust task."""
+    cmd0 = server_command[0] if isinstance(server_command, (list, tuple)) else str(server_command)
+    if "rust-analyzer" not in os.path.basename(str(cmd0)):
+        return
+    if shutil.which("cargo"):
+        return  # already resolvable -> nothing to do (the common container case)
+    rustup_home = os.environ.get("RUSTUP_HOME") or os.path.expanduser("~/.rustup")
+    cargo_home = os.environ.get("CARGO_HOME") or os.path.expanduser("~/.cargo")
+    # Prefer the rustup TOOLCHAIN bin (real cargo/rustc), then CARGO_HOME/bin shims as a last resort
+    # (an extracted CARGO_HOME may carry only the registry cache, no bin proxies — the memoried trap).
+    candidates = sorted(glob.glob(os.path.join(rustup_home, "toolchains", "*", "bin")))
+    candidates.append(os.path.join(cargo_home, "bin"))
+    for d in candidates:
+        if os.path.isfile(os.path.join(d, "cargo")):
+            os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
+            logger.info("rust toolchain located off-PATH; prepended %s for rust-analyzer", d)
+            return
+
+_TRACE_TRUNCATE_BYTES = 10 * 1024  # 10KB
+_TRACE_MAX_FILES = 3
+
+# Server-stderr forensics (language-agnostic, every server this client spawns):
+# retain the FIRST lines of the server's stderr — that is where a dying server
+# prints its die-reason (e.g. gopls's "flag provided but not defined" + usage).
+_STDERR_KEEP_LINES = 40  # lines retained for diagnostics
+_STDERR_EXCERPT_LINES = 10  # lines surfaced in error messages / certificates
+_STDERR_LINE_MAX_CHARS = 400  # per-line cap so one giant line can't bloat errors
+
+
+class LSPClient:
+    """Async JSON-RPC client for communicating with an LSP server over stdio."""
+
+    def __init__(
+        self,
+        server_command: list[str],
+        root_uri: str,
+        trace_path: Path | None = None,
+    ) -> None:
+        self._server_command = server_command
+        self._root_uri = root_uri
+        self._process: asyncio.subprocess.Process | None = None
+        self._closed = False
+        self._request_id = 0
+        self._request_lock = asyncio.Lock()
+        self._diagnostics: dict[str, list[Diagnostic]] = {}
+        self._diagnostic_events: dict[str, asyncio.Event] = {}
+        self._started = False
+        self._trace_path = trace_path
+        # Responses read during drain() so _request() can consume them (avoid dropping e.g. late documentSymbol)
+        self._pending_responses: dict[int | str, dict[str, Any]] = {}
+        self._progress_tokens: dict[str | int, bool] = {}  # token → completed
+        # First N server-stderr lines (die-reason forensics) + the drain task that
+        # keeps the stderr pipe from filling up (see _drain_stderr).
+        self._stderr_lines: list[str] = []
+        self._stderr_task: asyncio.Task[None] | None = None
+        # Readiness vs transport-liveness: set True by probe_ready when a NON-error
+        # answer to a known query arrives (readiness), independent of the bool return
+        # (which reports transport-liveness — the process replied at all).
+        self.probe_answered_ok = False
+        # Workspace readiness: the language server finished loading the workspace so
+        # definition queries can actually resolve (distinct from transport-liveness).
+        # None = not yet observed; set by the readiness barrier that drives resolution.
+        self.project_ready: bool | None = None
+        # B3-#7 (LSP warm-gate honesty): count of definition lookups that ANSWERED but
+        # returned EMPTY (no location). This is the "~44% of definition lookups return
+        # empty" signal made measurable at the dispatch layer — independent of
+        # transport-liveness — so a transport-alive-but-unproductive server is visible.
+        self.empty_definition_lookups = 0
+
+    @property
+    def is_running(self) -> bool:
+        """Whether the LSP server process is running."""
+        if not self._started or self._process is None:
+            return False
+        return self._process.returncode is None
+
+    async def start(self) -> Result[None, GroundTruthError]:
+        """Start the LSP server subprocess."""
+        try:
+            if self._trace_path is not None:
+                self._rotate_traces()
+            # rust-analyzer needs cargo/rustc on PATH (cargo metadata builds its crate graph) or it
+            # never reaches project_ready -> 0 conversions. Robustly locate an off-PATH toolchain.
+            _ensure_rust_toolchain_on_path(self._server_command)
+            resolved_cmd = resolve_command(self._server_command)
+            # Cap the LANGUAGE SERVER's heap. A huge monorepo (drizzle-orm/effect: tsserver
+            # loads the WHOLE project per tsconfig at `initialize`, 10-15GB) with no cap
+            # exhausts the runner's RAM+swap and the HOST OOM-killer SIGTERMs the job (exit
+            # 143, nothing uploads — the 6 TS/Go failures on run 27855582405). Scoping our
+            # QUERIES doesn't help: the server auto-loads the workspace from its project
+            # config, not from which files we open. NODE_OPTIONS caps the V8 heap for
+            # pyright/tsserver (inherited by the tsserver child that typescript-language-
+            # server spawns); GOMEMLIMIT makes gopls' GC aggressive at the ceiling. A server
+            # that hits the cap GCs harder / degrades / exits cleanly -> the proof falls back
+            # to the tree-sitter graph + brief (correct-or-quiet), instead of OOM-killing the
+            # whole run. rust-analyzer has no such knob (and Rust repos warmed fine), so it is
+            # left uncapped. Tunable via GT_LSP_SERVER_MAX_MB (default 8192).
+            _srv_env = dict(os.environ)
+            _cmd0 = os.path.basename(str(resolved_cmd[0])) if resolved_cmd else ""
+            try:
+                _cap_mb = int(os.environ.get("GT_LSP_SERVER_MAX_MB", "8192") or "8192")
+            except ValueError:
+                _cap_mb = 8192
+            if _cap_mb > 0:
+                if any(n in _cmd0 for n in ("typescript-language-server", "pyright", "node")):
+                    _node_opts = _srv_env.get("NODE_OPTIONS", "")
+                    if "max-old-space-size" not in _node_opts:
+                        _srv_env["NODE_OPTIONS"] = f"{_node_opts} --max-old-space-size={_cap_mb}".strip()
+                elif "gopls" in _cmd0:
+                    _srv_env.setdefault("GOMEMLIMIT", f"{_cap_mb}MiB")
+            self._process = await asyncio.create_subprocess_exec(
+                *resolved_cmd,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=_srv_env,
+            )
+            # Drain stderr from the start: stderr=PIPE that nobody reads both hides
+            # the server's die-reason AND can deadlock a chatty server once the OS
+            # pipe buffer fills. See _drain_stderr.
+            if self._process.stderr is not None:
+                self._stderr_task = asyncio.create_task(
+                    self._drain_stderr(self._process.stderr)
+                )
+            self._started = True
+            return Ok(None)
+        except (OSError, FileNotFoundError) as exc:
+            return Err(
+                GroundTruthError(
+                    code="lsp_start_failed",
+                    message=f"Failed to start LSP server: {exc}",
+                    details={"command": self._server_command},
+                )
+            )
+
+    async def _read_one_message(self, timeout: float = 30.0) -> dict[str, Any] | None:
+        """Read one Content-Length framed JSON-RPC message from stdout."""
+        assert self._process is not None
+        assert self._process.stdout is not None
+
+        try:
+            headers = b""
+            while True:
+                line = await asyncio.wait_for(self._process.stdout.readline(), timeout=timeout)
+                if not line:
+                    return None
+                headers += line
+                # Accept either CRLF or LF line endings (Windows LSP servers may send \n only)
+                if headers.endswith(b"\r\n\r\n") or headers.endswith(b"\n\n"):
+                    break
+
+            content_length = 0
+            # Split on either \r\n or \n for header lines
+            header_text = headers.decode("ascii")
+            for raw_line in header_text.replace("\r\n", "\n").split("\n"):
+                header = raw_line.strip()
+                if header.lower().startswith("content-length:"):
+                    content_length = int(header.split(":")[1].strip())
+                    break
+
+            if content_length == 0:
+                return None
+
+            body = await asyncio.wait_for(
+                self._process.stdout.readexactly(content_length),
+                timeout=timeout,
+            )
+            parsed = cast(dict[str, Any], json.loads(body))
+            self._trace_log("recv", parsed)
+            return parsed
+        except asyncio.TimeoutError:
+            return None
+        except (asyncio.IncompleteReadError, json.JSONDecodeError) as e:
+            logger.warning("LSP read error: %s", e)
+            return None
+
+    async def _drain_stderr(self, reader: asyncio.StreamReader) -> None:
+        """Continuously drain the server's stderr pipe.
+
+        Two jobs, language-agnostic for every server this client spawns:
+        1. FORENSICS — retain the FIRST ``_STDERR_KEEP_LINES`` lines (the die-reason:
+           e.g. gopls's "flag provided but not defined" + usage, a crash backtrace)
+           so launch/handshake failures are never blind again.
+        2. LIVENESS — keep consuming past the retained window so a chatty server can
+           never fill the OS pipe buffer and block writing to stderr (a stderr=PIPE
+           that nobody reads is a latent deadlock).
+        """
+        try:
+            while True:
+                line = await reader.readline()
+                if not line or not isinstance(line, (bytes, bytearray)):
+                    break
+                if len(self._stderr_lines) < _STDERR_KEEP_LINES:
+                    text = line.decode("utf-8", errors="replace").strip()
+                    if text:
+                        self._stderr_lines.append(text[:_STDERR_LINE_MAX_CHARS])
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return
+
+    def stderr_excerpt(self, max_lines: int = _STDERR_EXCERPT_LINES) -> str:
+        """The first captured server-stderr lines, newline-joined ('' when none)."""
+        return "\n".join(self._stderr_lines[:max_lines])
+
+    async def _collect_failure_detail(self) -> tuple[str, dict[str, Any]]:
+        """Liveness + stderr forensics for a failed request.
+
+        Disambiguates the two faces of a missing response: a server that is ALIVE but
+        slow (genuine timeout — no exit code) vs a server that DIED (exit code + its
+        own die-reason from stderr). Bounded: waits at most ~0.5s each for the process
+        reap and the stderr drain to finish; never blocks an error path indefinitely.
+        """
+        rc: int | None = None
+        proc = self._process
+        if proc is not None:
+            if proc.returncode is None:
+                # If the server just died, reap it so returncode is real; if it is
+                # alive (true timeout) this returns after the bounded wait.
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=0.5)
+                except Exception:
+                    pass
+            rc = proc.returncode if isinstance(proc.returncode, int) else None
+        task = self._stderr_task
+        if task is not None and not task.done():
+            # Give the drain a bounded window to consume the die-reason (stderr EOF
+            # arrives with process death). shield: a timeout here must NOT cancel
+            # the drain task itself.
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=0.5)
+            except Exception:
+                pass
+        lines = self._stderr_lines[:_STDERR_EXCERPT_LINES]
+        excerpt = "\n".join(lines)
+        suffix = ""
+        if rc is not None:
+            suffix += f"; server exited with code {rc}"
+        if lines:
+            suffix += f"; server stderr (first {len(lines)} lines): " + " | ".join(lines)
+        return suffix, {"server_returncode": rc, "server_stderr": excerpt}
+
+    def _trace_log(self, direction: str, message: dict[str, Any]) -> None:
+        """Write a trace entry to the JSONL trace file."""
+        if self._trace_path is None:
+            return
+        try:
+            serialized = json.dumps(message)
+            if len(serialized) > _TRACE_TRUNCATE_BYTES:
+                serialized = serialized[:_TRACE_TRUNCATE_BYTES] + "...(truncated)"
+            entry = json.dumps(
+                {
+                    "direction": direction,
+                    "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "message": json.loads(serialized)
+                    if len(serialized) <= _TRACE_TRUNCATE_BYTES
+                    else serialized,
+                }
+            )
+            with open(self._trace_path, "a", encoding="utf-8") as f:
+                f.write(entry + "\n")
+        except (OSError, TypeError, ValueError):
+            pass
+
+    def _rotate_traces(self) -> None:
+        """Keep only the last N trace files in the trace directory."""
+        if self._trace_path is None:
+            return
+        parent = self._trace_path.parent
+        if not parent.exists():
+            parent.mkdir(parents=True, exist_ok=True)
+            return
+        trace_files = sorted(parent.glob("lsp-trace-*.jsonl"), key=lambda p: p.stat().st_mtime)
+        while len(trace_files) >= _TRACE_MAX_FILES:
+            oldest = trace_files.pop(0)
+            try:
+                oldest.unlink()
+            except OSError:
+                pass
+
+    async def probe_ready(self, timeout: float = 5.0, interval: float = 1.0) -> bool:
+        """Probe LSP server readiness by sending workspace/symbol queries.
+
+        Distinguishes two facts the old code conflated:
+          * transport-liveness — the process REPLIED (Ok OR an lsp_error response).
+          * readiness          — a NON-error answer to a known query (Ok).
+
+        An ``lsp_error`` proves only that the process is alive; a server that REJECTS
+        ``workspace/symbol`` during its workspace pre-load (the gopls / rust-analyzer
+        "still indexing" case) would error here. The previous code returned True on
+        the FIRST lsp_error, so a not-yet-ready server passed as ready. Now an
+        ``lsp_error`` does NOT short-circuit: we keep probing until the deadline so a
+        server that is still warming gets the chance to converge to a real answer.
+
+        ``probe_answered_ok`` records whether any NON-error answer arrived (readiness),
+        separate from the boolean return (transport-liveness). Returns True if the
+        process ever replied (Ok or lsp_error) — a live transport, possibly not yet
+        ready; False only if it NEVER responded (dead / hung).
+        """
+        self.probe_answered_ok = False
+        transport_alive = False
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeout
+        while loop.time() < deadline:
+            result = await self.send_request(
+                "workspace/symbol", {"query": ""}, timeout=min(interval, deadline - loop.time())
+            )
+            if isinstance(result, Ok):
+                # A non-error answer == genuinely ready. Strongest signal; return now.
+                self.probe_answered_ok = True
+                return True
+            # An lsp_error means the process REPLIED (transport alive) but the query was
+            # rejected — NOT ready. Do NOT short-circuit: keep probing to the deadline so a
+            # still-warming server can converge to an Ok above.
+            if isinstance(result, Err) and result.error.code == "lsp_error":
+                transport_alive = True
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(interval, remaining))
+        # Deadline reached with no Ok. Report transport-liveness if the process ever
+        # replied (alive but not ready); False if it never responded at all. This is the
+        # raw TRANSPORT-level signal and MUST stay transport-only — the honest higher-level
+        # active/valid verdict is warm_verdict() below, layered on top of this.
+        return transport_alive
+
+    def warm_verdict(self) -> str:
+        """Honest higher-level warm verdict (B3-#7 LSP warm-gate honesty).
+
+        Transport-liveness — the process REPLIED (``probe_ready`` returning True) — is NOT
+        readiness. A server can be transport-alive yet answer no definition/readiness probe
+        (the witnessed "~44% of definition lookups return empty" case) and must NOT
+        self-certify as active/valid from transport alone. ``LSP_ACTIVE_VALID`` requires
+        BOTH readiness signals proven: the readiness probe ANSWERED (``probe_answered_ok``)
+        AND the workspace LOADED (``project_ready``). Otherwise the honest verdict is
+        ``LSP_DEGRADED`` — never a fake ACTIVE_VALID. ``probe_ready`` keeps returning raw
+        transport-liveness (unchanged); this verdict sits above it.
+
+        MUTATION-CHECK: reverting this to ``return "LSP_ACTIVE_VALID"`` (transport-only)
+        makes the warm-gate test fail — a transport-alive-but-not-ready stub would then
+        certify ACTIVE_VALID.
+        """
+        if self.probe_answered_ok is True and self.project_ready is True:
+            return "LSP_ACTIVE_VALID"
+        return "LSP_DEGRADED"
+
+    def readiness_fields(self) -> dict[str, Any]:
+        """Readiness snapshot for the LSP certificate / foundational gate: the two honest
+        readiness signals plus the empty-definition-lookup counter, so the "~44% empty"
+        rate is measurable downstream instead of being hidden behind transport-liveness."""
+        return {
+            "probe_answered_ok": bool(self.probe_answered_ok),
+            "project_ready": self.project_ready,
+            "empty_definition_lookups": int(self.empty_definition_lookups),
+            "warm_verdict": self.warm_verdict(),
+        }
+
+    async def _send_response(self, msg_id: int | str, result: object = None) -> None:
+        """Send a response to a server-initiated request."""
+        response = {"jsonrpc": "2.0", "id": msg_id, "result": result}
+        await self._write_message(response)
+
+    def _handle_progress(self, params: dict[str, Any]) -> None:
+        """Handle $/progress notification (track work done tokens)."""
+        token = params.get("token")
+        value = params.get("value", {})
+        kind = value.get("kind")
+        if token is not None:
+            if kind == "begin":
+                self._progress_tokens[token] = False
+            elif kind == "end":
+                self._progress_tokens[token] = True
+
+    async def wait_for_progress_complete(self, timeout: float = 60.0) -> bool:
+        """Wait until all $/progress tokens reach 'end', or timeout.
+
+        Returns True when all registered tokens are complete (or 5s with zero tokens).
+        Returns False on full timeout.
+        """
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeout
+        no_token_deadline = loop.time() + 5.0
+
+        async with self._request_lock:
+            while loop.time() < deadline:
+                # If we have tokens and all are complete, we're done
+                if self._progress_tokens and all(self._progress_tokens.values()):
+                    return True
+                # If no tokens registered and past the short deadline, proceed
+                if not self._progress_tokens and loop.time() >= no_token_deadline:
+                    return True
+
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    break
+
+                msg = await self._read_one_message(timeout=min(0.5, remaining))
+                if msg is None:
+                    continue
+
+                resp_method = msg.get("method")
+                resp_id = msg.get("id")
+
+                # Response — queue for _request()
+                if (
+                    resp_id is not None
+                    and resp_method is None
+                    and ("result" in msg or "error" in msg)
+                ):
+                    self._pending_responses[resp_id] = msg
+                    continue
+
+                # Server-initiated request
+                if resp_method is not None and resp_id is not None:
+                    # Handle workDoneProgress/create: register token
+                    if resp_method == "window/workDoneProgress/create":
+                        req_params = msg.get("params", {})
+                        token = req_params.get("token")
+                        if token is not None and token not in self._progress_tokens:
+                            self._progress_tokens[token] = False
+                    await self._send_response(resp_id)
+                    continue
+
+                # Notifications
+                if resp_method is not None and resp_id is None:
+                    if resp_method == "$/progress":
+                        self._handle_progress(msg.get("params") or {})
+                    elif resp_method == "textDocument/publishDiagnostics":
+                        self._handle_diagnostics(msg.get("params") or {})
+
+        return False
+
+    def _handle_diagnostics(self, params: dict[str, Any]) -> None:
+        """Handle textDocument/publishDiagnostics notification (cache + signal event)."""
+        if not params:
+            return
+        uri = params.get("uri", "")
+        raw_diags = params.get("diagnostics", [])
+        self._diagnostics[uri] = [Diagnostic.model_validate(d) for d in raw_diags]
+        event = self._diagnostic_events.get(uri)
+        if event is not None:
+            event.set()
+
+    async def _request(
+        self, method: str, params: dict[str, Any] | None, timeout: float = 30.0
+    ) -> dict[str, Any] | None:
+        """Send a request and wait for the matching response.
+
+        While waiting, handles notifications (skip / handle diagnostics) and
+        server-initiated requests (respond with null). No background read loop.
+        """
+        self._request_id += 1
+        request_id = self._request_id
+        msg: dict[str, Any] = {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": method,
+            "params": params if params is not None else {},
+        }
+        await self._write_message(msg)
+
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeout
+        while True:
+            # Consume any response that arrived during a previous drain (e.g. late documentSymbol)
+            response = self._pending_responses.pop(request_id, None)
+            if response is not None:
+                if "error" in response:
+                    logger.warning("LSP error for %s: %s", method, response["error"])
+                return response
+
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                logger.warning("Request timed out after %.1fs: %s", timeout, method)
+                return None
+
+            await asyncio.sleep(0)  # Yield so subprocess pipe can deliver (Windows)
+            response = await self._read_one_message(timeout=remaining)
+            if response is None:
+                return None
+
+            resp_id = response.get("id")
+            resp_method = response.get("method")
+
+            # Server-initiated request — respond immediately
+            if resp_method is not None and resp_id is not None:
+                # Handle workDoneProgress/create: register token
+                if resp_method == "window/workDoneProgress/create":
+                    req_params = response.get("params", {})
+                    token = req_params.get("token")
+                    if token is not None and token not in self._progress_tokens:
+                        self._progress_tokens[token] = False
+                await self._send_response(resp_id)
+                continue
+
+            # Notification — skip or handle diagnostics/progress
+            if resp_method is not None and resp_id is None:
+                if resp_method == "textDocument/publishDiagnostics":
+                    self._handle_diagnostics(response.get("params") or {})
+                elif resp_method == "$/progress":
+                    self._handle_progress(response.get("params") or {})
+                continue
+
+            # Response — check if it's ours
+            if resp_id is not None:
+                try:
+                    rid = int(resp_id) if isinstance(resp_id, (int, float)) else int(str(resp_id))
+                except (TypeError, ValueError):
+                    rid = -1
+                if rid == request_id:
+                    if "error" in response:
+                        logger.warning("LSP error for %s: %s", method, response["error"])
+                    return response
+
+            logger.warning("Unexpected response id=%s (waiting for %s)", resp_id, request_id)
+
+    async def _notify(self, method: str, params: dict[str, Any] | None = None) -> None:
+        """Send a notification (no response expected)."""
+        msg: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
+        if params is not None:
+            msg["params"] = params
+        await self._write_message(msg)
+
+    async def _write_message(self, body: dict[str, Any]) -> None:
+        """Write a JSON-RPC message with Content-Length header."""
+        assert self._process is not None
+        assert self._process.stdin is not None
+        self._trace_log("send", body)
+        content = json.dumps(body)
+        content_bytes = content.encode("utf-8")
+        header = f"Content-Length: {len(content_bytes)}\r\n\r\n"
+        data = header.encode("utf-8") + content_bytes
+        try:
+            self._process.stdin.write(data)
+            await self._process.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            # Windows raises ConnectionResetError (not BrokenPipeError) on a dead
+            # pipe; either way the read path surfaces the failure with stderr detail.
+            logger.warning("lsp_broken_pipe", msg="stdin write failed — server likely crashed")
+
+    async def drain(self, timeout: float = 2.0) -> None:
+        """Read and process messages for up to timeout seconds (e.g. after initialize or didOpen)."""
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeout
+        async with self._request_lock:
+            while loop.time() < deadline:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    break
+                msg = await self._read_one_message(timeout=min(0.5, remaining))
+                if msg is None:
+                    continue
+                resp_method = msg.get("method")
+                resp_id = msg.get("id")
+                # Response (id + result/error, no method): don't drop — queue for _request()
+                if (
+                    resp_id is not None
+                    and resp_method is None
+                    and ("result" in msg or "error" in msg)
+                ):
+                    self._pending_responses[resp_id] = msg
+                    continue
+                if resp_method is not None and resp_id is not None:
+                    # Handle workDoneProgress/create: register token
+                    if resp_method == "window/workDoneProgress/create":
+                        req_params = msg.get("params", {})
+                        token = req_params.get("token")
+                        if token is not None and token not in self._progress_tokens:
+                            self._progress_tokens[token] = False
+                    await self._send_response(resp_id)
+                elif resp_method == "textDocument/publishDiagnostics":
+                    self._handle_diagnostics(msg.get("params") or {})
+                elif resp_method == "$/progress":
+                    self._handle_progress(msg.get("params") or {})
+
+    async def send_request(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+        timeout: float = DEFAULT_TIMEOUT,
+    ) -> Result[Any, GroundTruthError]:
+        """Send a JSON-RPC request and wait for the response."""
+        if not self.is_running:
+            # The server may have died right after launch (e.g. an invalid CLI flag
+            # → usage on stderr + instant exit). Surface its exit code + stderr.
+            suffix, details = await self._collect_failure_detail()
+            return Err(
+                GroundTruthError(
+                    code="lsp_not_running",
+                    message=f"LSP server is not running{suffix}",
+                    details=details,
+                )
+            )
+
+        async with self._request_lock:
+            response = await self._request(method, params, timeout=timeout)
+
+        if response is None:
+            # None = timeout OR stdout EOF (server death). Attach exit code + the
+            # first stderr lines so the two cases are distinguishable downstream.
+            suffix, details = await self._collect_failure_detail()
+            return Err(
+                GroundTruthError(
+                    code="lsp_timeout",
+                    message=f"Request timed out or connection closed: {method}{suffix}",
+                    details=details,
+                )
+            )
+        if "error" in response:
+            err = response["error"]
+            code = err.get("code", -1)
+            message = err.get("message", "Unknown error")
+            return Err(
+                GroundTruthError(
+                    code="lsp_error",
+                    message=f"LSP error ({code}): {message}",
+                )
+            )
+        return Ok(response.get("result"))
+
+    async def send_notification(
+        self, method: str, params: dict[str, Any] | None = None
+    ) -> Result[None, GroundTruthError]:
+        """Send a JSON-RPC notification (no response expected)."""
+        if not self.is_running:
+            return Err(
+                GroundTruthError(code="lsp_not_running", message="LSP server is not running")
+            )
+        await self._notify(method, params)
+        return Ok(None)
+
+    # --- High-level LSP methods ---
+
+    async def document_symbol(
+        self, uri: str, timeout: float = DEFAULT_TIMEOUT
+    ) -> Result[list[DocumentSymbol], GroundTruthError]:
+        """Request document symbols for a file."""
+        result = await self.send_request(
+            "textDocument/documentSymbol", {"textDocument": {"uri": uri}}, timeout=timeout
+        )
+        if isinstance(result, Err):
+            return result
+        raw = result.value
+        if raw is None:
+            return Ok([])
+        symbols = [DocumentSymbol.model_validate(s) for s in raw]
+        return Ok(symbols)
+
+    async def workspace_symbol(
+        self, query: str = "", timeout: float = DEFAULT_TIMEOUT
+    ) -> Result[list[SymbolInformation], GroundTruthError]:
+        """Request workspace symbols matching a query."""
+        result = await self.send_request("workspace/symbol", {"query": query}, timeout=timeout)
+        if isinstance(result, Err):
+            return result
+        raw = result.value
+        if raw is None:
+            return Ok([])
+        symbols = [SymbolInformation.model_validate(s) for s in raw]
+        return Ok(symbols)
+
+    async def references(
+        self,
+        uri: str,
+        line: int,
+        character: int,
+        include_declaration: bool = True,
+        timeout: float = DEFAULT_TIMEOUT,
+    ) -> Result[list[Location], GroundTruthError]:
+        """Find all references to a symbol at the given position."""
+        params = {
+            "textDocument": {"uri": uri},
+            "position": {"line": line, "character": character},
+            "context": {"includeDeclaration": include_declaration},
+        }
+        result = await self.send_request("textDocument/references", params, timeout=timeout)
+        if isinstance(result, Err):
+            return result
+        raw = result.value
+        if raw is None:
+            return Ok([])
+        locations = [Location.model_validate(loc) for loc in raw]
+        return Ok(locations)
+
+    async def hover(
+        self, uri: str, line: int, character: int, timeout: float = DEFAULT_TIMEOUT
+    ) -> Result[Hover | None, GroundTruthError]:
+        """Get hover information for a symbol at the given position."""
+        params = {
+            "textDocument": {"uri": uri},
+            "position": {"line": line, "character": character},
+        }
+        result = await self.send_request("textDocument/hover", params, timeout=timeout)
+        if isinstance(result, Err):
+            return result
+        raw = result.value
+        if raw is None:
+            return Ok(None)
+        return Ok(Hover.model_validate(raw))
+
+    async def definition(
+        self, uri: str, line: int, character: int
+    ) -> Result[list[Location], GroundTruthError]:
+        """Go to definition for a symbol at the given position."""
+        params = {
+            "textDocument": {"uri": uri},
+            "position": {"line": line, "character": character},
+        }
+        result = await self.send_request("textDocument/definition", params)
+        if isinstance(result, Err):
+            # A transport/LSP error is NOT an empty answer (it never resolved); the
+            # empty-lookup counter tracks ANSWERED-but-empty, matching resolve.py's
+            # failed_empty. Errors are counted elsewhere (failed_lsp_error).
+            return result
+        raw = result.value
+        if raw is None:
+            # B3-#7: server answered with no definition — the "~44% empty" signal.
+            self.empty_definition_lookups += 1
+            return Ok([])
+        if isinstance(raw, dict):
+            return Ok([Location.model_validate(raw)])
+        locations = [Location.model_validate(loc) for loc in raw]
+        if not locations:
+            # B3-#7: answered with an empty location list — also an empty lookup.
+            self.empty_definition_lookups += 1
+        return Ok(locations)
+
+    async def did_open(
+        self, uri: str, language_id: str, version: int, text: str
+    ) -> Result[None, GroundTruthError]:
+        """Notify the server that a document was opened.
+
+        Returns the underlying send_notification Result (``Err`` when the server
+        is not running, so the document never loaded) instead of swallowing it.
+        Callers that ignore the return are unaffected; callers that need to know
+        whether the doc actually loaded (the resolve precision pass) can branch on
+        the ``Err`` and count a distinct "doc never loaded" bucket — separating
+        "didOpen failed" from "LSP found no definition".
+        """
+        item = TextDocumentItem(uri=uri, language_id=language_id, version=version, text=text)
+        return await self.send_notification(
+            "textDocument/didOpen",
+            {"textDocument": item.model_dump(by_alias=True)},
+        )
+
+    async def did_change(self, uri: str, version: int, text: str) -> None:
+        """Notify the server of a full document change."""
+        await self.send_notification(
+            "textDocument/didChange",
+            {
+                "textDocument": {"uri": uri, "version": version},
+                "contentChanges": [{"text": text}],
+            },
+        )
+
+    async def did_close(self, uri: str) -> None:
+        """Notify the server that a document was closed."""
+        doc = TextDocumentIdentifier(uri=uri)
+        await self.send_notification(
+            "textDocument/didClose",
+            {"textDocument": doc.model_dump(by_alias=True)},
+        )
+
+    async def get_diagnostics(self, uri: str, timeout: float = 5.0) -> list[Diagnostic]:
+        """Read messages until diagnostics for uri arrive or timeout. Returns cached on timeout."""
+        if uri not in self._diagnostic_events:
+            self._diagnostic_events[uri] = asyncio.Event()
+
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeout
+        async with self._request_lock:
+            while loop.time() < deadline:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    break
+                msg = await self._read_one_message(timeout=min(0.5, remaining))
+                if msg is None:
+                    break
+                resp_method = msg.get("method")
+                resp_id = msg.get("id")
+                if (
+                    resp_id is not None
+                    and resp_method is None
+                    and ("result" in msg or "error" in msg)
+                ):
+                    self._pending_responses[resp_id] = msg
+                    continue
+                if resp_method and resp_id is not None:
+                    if resp_method == "window/workDoneProgress/create":
+                        req_params = msg.get("params", {})
+                        token = req_params.get("token")
+                        if token is not None and token not in self._progress_tokens:
+                            self._progress_tokens[token] = False
+                    await self._send_response(resp_id)
+                    continue
+                if resp_method == "textDocument/publishDiagnostics":
+                    self._handle_diagnostics(msg.get("params") or {})
+                    params = msg.get("params") or {}
+                    if params.get("uri") == uri:
+                        return self._diagnostics.get(uri, [])
+                elif resp_method == "$/progress":
+                    self._handle_progress(msg.get("params") or {})
+
+        return self._diagnostics.get(uri, [])
+
+    async def open_and_get_diagnostics(
+        self, uri: str, language_id: str, text: str, timeout: float = 5.0
+    ) -> list[Diagnostic]:
+        """Open a document and wait for diagnostics."""
+        self._diagnostic_events[uri] = asyncio.Event()
+        self._diagnostics.pop(uri, None)
+        await self.did_open(uri, language_id, 1, text)
+        return await self.get_diagnostics(uri, timeout)
+
+    async def signature_help(
+        self, uri: str, line: int, character: int
+    ) -> Result[SignatureHelp | None, GroundTruthError]:
+        """Get signature help at the given position."""
+        params = {
+            "textDocument": {"uri": uri},
+            "position": {"line": line, "character": character},
+        }
+        result = await self.send_request("textDocument/signatureHelp", params)
+        if isinstance(result, Err):
+            return result
+        raw = result.value
+        if raw is None:
+            return Ok(None)
+        return Ok(SignatureHelp.model_validate(raw))
+
+    def clear_diagnostics(self, uri: str) -> None:
+        """Remove cached diagnostics and event for a URI."""
+        self._diagnostics.pop(uri, None)
+        self._diagnostic_events.pop(uri, None)
+
+    async def shutdown(self) -> None:
+        """Shut down the LSP server gracefully.
+
+        Bypasses _request_lock intentionally — this is a terminal operation
+        and the lock may be held by a hung request.
+        """
+        if self._closed:
+            return
+        self._closed = True
+
+        proc = self._process
+        self._process = None
+        self._started = False
+
+        # Stop the stderr drain (it normally finishes on its own at pipe EOF when
+        # the server exits; cancel covers the still-alive-server case).
+        stderr_task = self._stderr_task
+        self._stderr_task = None
+        if stderr_task is not None and not stderr_task.done():
+            stderr_task.cancel()
+            try:
+                await stderr_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+        if proc is None or proc.returncode is not None:
+            return
+
+        # Write raw shutdown/exit JSON-RPC directly to stdin (bypass _request_lock)
+        try:
+            if proc.stdin is not None:
+                shutdown_msg = json.dumps(
+                    {"jsonrpc": "2.0", "id": 999999, "method": "shutdown", "params": {}}
+                ).encode("utf-8")
+                header = f"Content-Length: {len(shutdown_msg)}\r\n\r\n".encode("utf-8")
+                proc.stdin.write(header + shutdown_msg)
+
+                exit_msg = json.dumps({"jsonrpc": "2.0", "method": "exit"}).encode("utf-8")
+                header2 = f"Content-Length: {len(exit_msg)}\r\n\r\n".encode("utf-8")
+                proc.stdin.write(header2 + exit_msg)
+                await proc.stdin.drain()
+        except (BrokenPipeError, OSError, ConnectionResetError):
+            pass
+
+        try:
+            proc.terminate()
+            await asyncio.wait_for(proc.wait(), timeout=3.0)
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except (OSError, ProcessLookupError):
+                pass
+        except (OSError, ProcessLookupError):
+            pass

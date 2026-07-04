@@ -1,0 +1,218 @@
+[
+  {
+    "id": "rnd_python_aiohttp_12997",
+    "language": "python",
+    "repo": "aiohttp",
+    "issue_text": "Fix parse_content_disposition rejecting headers with OWS around disposition type. ## What does this PR do?\n\nFixes **#12996** \u2014 `parse_content_disposition` was rejecting `Content-Disposition` headers that contain optional whitespace (OWS) around the disposition type, such as:\n\n```\nContent-Disposition: form-data ; name=\"field\"\n```\n\nThe disposition type `\"form-data \"` (trailing space) failed the `is_token()` check, causing the function to emit a `BadContentDispositionHeader` warni",
+    "gold_files": [
+      "aiohttp/multipart.py"
+    ]
+  },
+  {
+    "id": "rnd_python_aiohttp_12948",
+    "language": "python",
+    "repo": "aiohttp",
+    "issue_text": "Fix IndexError in parse_content_disposition when param value is empty. ## Bug\n\n`parse_content_disposition` raises an unhandled `IndexError: string index out of range` when a `Content-Disposition` header contains a parameter with an empty value, such as:\n\n```\nattachment; filename=\n```\n\nThe inner helper `is_quoted` indexes `string[0]` without first checking that the string is non-empty:\n\n```python\ndef is_quoted(string: str) -> bool:\n    return string[0] == string[-1] =",
+    "gold_files": [
+      "aiohttp/multipart.py"
+    ]
+  },
+  {
+    "id": "rnd_python_scrapy_7632",
+    "language": "python",
+    "repo": "scrapy",
+    "issue_text": "Fix rel_has_nofollow to be case-insensitive per HTML spec. ## Bug\n\nThe HTML specification states that link type keywords such as `nofollow`\nare [ASCII case-insensitive](https://html.spec.whatwg.org/multipage/links.html#link-type-nofollow).\nHowever, `rel_has_nofollow` performs a case-sensitive check, so a page\nwith `rel=\"NoFollow\"` or `rel=\"NOFOLLOW\"` is incorrectly treated as a\nfollow link and Scrapy will crawl it when it should not.\n\n## Fix\n\nAdd `.lower(",
+    "gold_files": [
+      "scrapy/utils/misc.py"
+    ]
+  },
+  {
+    "id": "rnd_python_scrapy_7675",
+    "language": "python",
+    "repo": "scrapy",
+    "issue_text": "Fix request_to_curl() corrupting dict cookies with bytes keys/values. `request_to_curl()` renders dict cookies whose keys/values are bytes as their literal repr (`b'k'=b'v'`) in the emitted curl command, producing a broken command.\n\nPR #7603 made the list-cookie branch bytes-safe but did not mirror the same handling to the dict branch. This applies the identical decoding there. Existing tests green (29 passed).",
+    "gold_files": [
+      "scrapy/utils/request.py"
+    ]
+  },
+  {
+    "id": "rnd_python_black_5165",
+    "language": "python",
+    "repo": "black",
+    "issue_text": "fix quadratic backtracking in debug f-string quote detection. the debug f-string check in make_naked runs re.search with a leading .*, so it rescans for a quote from every start position. while merging implicitly concatenated strings (string_processing / --unstable, and blackd) an expression with a quote but no = goes quadratic, e.g. a long literal like f\"{'aaa...'}\":\n\n    n= 8000   0.80s\n    n=16000   3.17s\n    n=32000  11.77s\n\nthe leading .* is redundant u",
+    "gold_files": [
+      "src/black/trans.py"
+    ]
+  },
+  {
+    "id": "rnd_go_fzf_4636",
+    "language": "go",
+    "repo": "fzf",
+    "issue_text": "Fix --accept-nth being ignored in filter mode. The `--accept-nth` option wasn't working with `--filter` mode. It would just ignore the field selection and print the whole line instead of the specified fields.\n\nI ran into this when trying to use filter mode in a script where I wanted to filter by one field but output another (like showing names but returning IDs). Turns out filter mode just wasn't applying the field transformer at all - it was",
+    "gold_files": [
+      "src/core.go"
+    ]
+  },
+  {
+    "id": "rnd_go_fzf_4734",
+    "language": "go",
+    "repo": "fzf",
+    "issue_text": "Fix nthTransformer parts slice preallocation. Use make([]NthParts, 0, len(indexes)) so the slice starts empty with reserved capacity. The previous length-len(indexes) allocation left leading zero NthParts entries before appended elements.\r\n\r\n## Contribution Policy\r\n\r\nWe do not accept pull requests generated primarily by AI without genuine understanding or real-world usage context.\r\n\r\nAll contributions are expected to demonstrate:\r\n- A clear u",
+    "gold_files": [
+      "src/options.go"
+    ]
+  },
+  {
+    "id": "rnd_go_cobra_2285",
+    "language": "go",
+    "repo": "cobra",
+    "issue_text": "fix: quote args in fish shell completion. The arguments used for dynamic completions in fish were missing quotes. This resulted in an error when one of the arguments had a `*` in it whose expansion matched no file. Once the completion got triggered, fish errored with the message `No matches for wildcard [...]`. Don't quote the first argument as that is the name of the binary.\r\n\r\nCloses #1933",
+    "gold_files": [
+      "fish_completions.go"
+    ]
+  },
+  {
+    "id": "rnd_go_cobra_2356",
+    "language": "go",
+    "repo": "cobra",
+    "issue_text": "fix: prevent completions from mutating os.Args via append side effect. ## Summary\n\n- Fixes a bug where `getCompletions()` accidentally mutates `os.Args` by writing `\"--\"` into the shared backing array via an `append` with spare capacity\n- Uses a three-index slice expression (`finalArgs[:len:len]`) to cap the slice capacity, forcing `append` to allocate a new array\n- Adds a regression test that confirms the args slice is not corrupted during shell completion\n\n## Detai",
+    "gold_files": [
+      "completions.go"
+    ]
+  },
+  {
+    "id": "rnd_go_client_golang_2010",
+    "language": "go",
+    "repo": "client_golang",
+    "issue_text": "fix(registry): prevent file descriptor leak in WriteToTextfile. In WriteToTextfile, if an error occurs before the explicit tmp.Close() (e.g., Gather fails or MetricFamilyToText fails), the temporary file descriptor is never closed. The deferred os.Remove(tmp.Name()) does not close the file.\r\n\r\nExplicitly close the file on all error paths that happen before the final close, ensuring the descriptor is always released.\r\n\r\nAdditionally, this fixes the issue on Win",
+    "gold_files": [
+      "prometheus/registry.go"
+    ]
+  },
+  {
+    "id": "rnd_javascript_Chart.js_11991",
+    "language": "javascript",
+    "repo": "Chart.js",
+    "issue_text": "Bugfix: TypeError in Interaction due to out-of-bounds index. I have introduced a bug in my previous pull request https://github.com/chartjs/Chart.js/pull/11986. This PR fixes it and adds 4 test cases to make sure it doesn't happen again.\r\n\r\nIf there is a line chart with the following dataset\r\n```js\r\ndata: [1, null, 2],\r\nspanGaps: true,\r\n```\r\n\r\nand user hovers close to `2`, then `binarySearch` wrapper returns `hi: 4` for nearest interaction, which is an inde",
+    "gold_files": [
+      "src/core/core.interaction.js"
+    ]
+  },
+  {
+    "id": "rnd_javascript_Chart.js_12070",
+    "language": "javascript",
+    "repo": "Chart.js",
+    "issue_text": "Fix: display stacked bar with multiple x-Axis. Hello everyone,\r\n\r\nWhen you try to use stackedBars with multiple axes, the bars all render at the center of each axis chunk, so they're hidden by whichever bar is rendered last.\r\n\r\nYou can see a live example [on codepen](https://codepen.io/xavierleune/pen/vEEroEw)\r\n\r\n![screenshot](https://github.com/user-attachments/assets/135b2f0f-5639-45d9-800c-bdf799b2c5a0)\r\n\r\nThis pull request fixes this behav",
+    "gold_files": [
+      "src/controllers/controller.bar.js"
+    ]
+  },
+  {
+    "id": "rnd_javascript_multer_1411",
+    "language": "javascript",
+    "repo": "multer",
+    "issue_text": "fix(v3): port CVE-2025-47944 / CVE-2025-47935. Backports the malformed-body DoS fix from 2.x (commit 2c8505f) to the v3 branch.\r\n\r\nThe v3 rewrite introduced a different failure shape than 2.x: when `@fastify/busboy` is fed a malformed multipart body, it emits no events at all (no `file`, no `finish`, no `error`), leaving the middleware awaiting `Promise.all([fields, files, guard])` indefinitely.",
+    "gold_files": [
+      "lib/read-body.js"
+    ]
+  },
+  {
+    "id": "rnd_javascript_multer_1177",
+    "language": "javascript",
+    "repo": "multer",
+    "issue_text": "Fix out-of-band error event from busboy. Fixes https://github.com/expressjs/multer/issues/1176",
+    "gold_files": [
+      "lib/make-middleware.js"
+    ]
+  },
+  {
+    "id": "rnd_typescript_got_2150",
+    "language": "typescript",
+    "repo": "got",
+    "issue_text": "fix: pass request body to cache handler. Fixes the 2nd half of https://github.com/sindresorhus/got/issues/2138, see [my comment](https://github.com/sindresorhus/got/issues/2138#issuecomment-1252054329)\r\n\r\n#### Checklist\r\n\r\n- [x] I have read the documentation.\r\n- [x] I have included a pull request description of my changes.\r\n- [x] I have included some tests.\r\n- [ ] If it's a new feature, I have included documentation updates in both the R",
+    "gold_files": [
+      "source/core/index.ts"
+    ]
+  },
+  {
+    "id": "rnd_typescript_got_2266",
+    "language": "typescript",
+    "repo": "got",
+    "issue_text": "fix: adjust `get-stream` import for commonjs. Fixes https://github.com/sindresorhus/got/issues/2265\r\n\r\n#### Checklist\r\n\r\n- [x] I have read the documentation.\r\n- [ ] I have included a pull request description of my changes.\r\n- [ ] I have included some tests.\r\n- [ ] If it's a new feature, I have included documentation updates in both the README and the types.",
+    "gold_files": [
+      "source/core/index.ts"
+    ]
+  },
+  {
+    "id": "rnd_typescript_query_10610",
+    "language": "typescript",
+    "repo": "query",
+    "issue_text": "fix(hydration): set dataUpdatedAt when pending query resolves before hydration. ## Problem\n\nWhen a query is dehydrated while still pending (streamed) but then resolves *before* hydration runs on the client, the hydration code transitions the query's status from `'pending'` to `'success'` \u2014 but it never updates `dataUpdatedAt`. It stays at `0`.\n\nThis was introduced in #10444, which removed the `query.fetch()` call that previously set `dataUpdatedAt` as a side effect of resolvi",
+    "gold_files": [
+      "packages/query-core/src/hydration.ts"
+    ]
+  },
+  {
+    "id": "rnd_typescript_query_560",
+    "language": "typescript",
+    "repo": "query",
+    "issue_text": "fix(types): ReactQueryConfigProvider error type. This fixes #542 by allowing the `<ReactQueryConfigProvider>` to get the generic error type.",
+    "gold_files": [
+      "types/index.d.ts"
+    ]
+  },
+  {
+    "id": "rnd_typescript_trpc_7244",
+    "language": "typescript",
+    "repo": "trpc",
+    "issue_text": "fix: publishing. Closes #\r\n\r\n## \ud83c\udfaf Changes\r\n\r\nWhat changes are made in this PR? Is it a feature or a bug fix?\r\n\r\n<!--\r\nNote: once you create a Pull request, we will automatically fix auto-fixable lint issues in your branch\r\n-->\r\n\r\n## \u2705 Checklist\r\n\r\n- [ ] I have followed the steps listed in the [Contributing guide](https://github.com/trpc/trpc/blob/main/CONTRIBUTING.md).\r\n- [ ] If necessary, I have added documentati",
+    "gold_files": [
+      "scripts/version.ts"
+    ]
+  },
+  {
+    "id": "rnd_rust_regex_1308",
+    "language": "rust",
+    "repo": "regex",
+    "issue_text": "perf: Avoid re-canonicalizing the entire IntervalSet on push. Canonicalize is taking up a significant amount due to a regex with a huge amount of character ranges (generated by [lalrpop](https://github.com/lalrpop/lalrpop)'s lexer expanding multiple `\\w` in a token). While this could perhaps be fixed in lalrpop I did notice the TODO in the code and after addressing this so we automatically union and compress on each push instead of re-canonicalizing on every",
+    "gold_files": [
+      "regex-syntax/src/hir/interval.rs"
+    ]
+  },
+  {
+    "id": "rnd_rust_regex_1203",
+    "language": "rust",
+    "repo": "regex",
+    "issue_text": "fix: escape invalid UTF-8 bytes in debug output for Match. # Description\r\n\r\n1. The `Debug` implementation for `Match` has been updated to use `DebugHaystack`. This provides a way to handle the formatting of `&[u8]` for debug output.\r\n\r\n - Valid UTF-8 characters are output as is.\r\n - Invalid UTF-8 bytes are output as hex escape sequences (`\\xHH`).\r\n - ASCII escape characters (e.g., `\\t`, `\\n`) are properly escaped.\r\n\r\n2. Additional test cases have been add",
+    "gold_files": [
+      "src/regex/bytes.rs"
+    ]
+  },
+  {
+    "id": "rnd_rust_anyhow_373",
+    "language": "rust",
+    "repo": "anyhow",
+    "issue_text": "Fix parse error with non-literal after minus sign. Fixes #372.",
+    "gold_files": [
+      "src/ensure.rs"
+    ]
+  },
+  {
+    "id": "rnd_rust_bat_3812",
+    "language": "rust",
+    "repo": "bat",
+    "issue_text": "fix: avoid usize underflow in --list-languages at narrow terminal width. Mirrors #3804 to its remaining sibling site.\n\n#3804 hardened `print_snip` with `saturating_sub` after #3803 reported a `capacity overflow` panic at `--terminal-width 1` (the `term_width - panel_count - title_count` subtraction underflowing `usize`). That fix covered the snip renderer. The `--list-languages` renderer has the identical `term_width - X - Y` shape and was left unhardened:\n\n`src/bin/ba",
+    "gold_files": [
+      "src/bin/bat/main.rs"
+    ]
+  },
+  {
+    "id": "rnd_rust_bat_3654",
+    "language": "rust",
+    "repo": "bat",
+    "issue_text": "fix: correct $LESSCLOSE exit-status warning. ## Summary\n\nFix inverted logic when reporting `$LESSCLOSE` cleanup failures: bat warned on successful exit and stayed silent when the command failed.\n\n## Test plan\n\n- [ ] `cargo test` (lessopen module tests cover env handling)",
+    "gold_files": [
+      "src/lessopen.rs"
+    ]
+  }
+]

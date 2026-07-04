@@ -1,0 +1,1318 @@
+"""Tests for V1R brief generator."""
+
+from __future__ import annotations
+
+import sqlite3
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+
+import pytest
+
+from groundtruth.pretask.v1r_brief import (
+    FileEntry,
+    _top_functions,
+    _caller_contract_for_file,
+    render_brief,
+    generate_v1r_brief,
+)
+
+
+# --- TTD: categorical correct-or-quiet caller gate (wire.md #2) -------------
+# Frozen artifact (beancount-931 canary): the v1r brief showed stdlib `os.walk`
+# (caller find_files) as a confident `Callers:` fact of beancount's
+# `account.walk`. The edge was a single-candidate name_match scored 0.9, which
+# the old `confidence >= 0.9` gate laundered as a verified caller. These tests
+# reproduce that artifact and assert name_match is NEVER rendered as a fact,
+# while a genuinely deterministic (import/same_file) edge still is.
+_WALK_SCHEMA = """
+    CREATE TABLE nodes (
+        id INTEGER PRIMARY KEY, label TEXT, name TEXT, qualified_name TEXT,
+        file_path TEXT, start_line INTEGER, end_line INTEGER, signature TEXT,
+        return_type TEXT, is_exported BOOLEAN DEFAULT 0, is_test BOOLEAN DEFAULT 0,
+        language TEXT DEFAULT 'python', parent_id INTEGER
+    );
+    CREATE TABLE edges (
+        id INTEGER PRIMARY KEY, source_id INTEGER, target_id INTEGER, type TEXT,
+        source_line INTEGER, source_file TEXT, resolution_method TEXT,
+        confidence REAL DEFAULT 0.5, metadata TEXT
+    );
+    INSERT INTO nodes (id, label, name, file_path, is_test) VALUES
+        (1, 'Function', 'walk', 'beancount/core/account.py', 0),
+        (2, 'Function', 'find_files', 'beancount/scripts/directories.py', 0),
+        (3, 'Function', 'load', 'beancount/loader.py', 0);
+"""
+
+
+def _walk_db(tmp_path: Path, edges: list[tuple[int, int, str, float, int]]) -> tuple[str, str]:
+    """Build the account.walk graph + on-disk repo. edges =
+    (source_id, target_id, resolution_method, confidence, source_line)."""
+    repo = tmp_path / "repo"
+    (repo / "beancount" / "core").mkdir(parents=True, exist_ok=True)
+    (repo / "beancount" / "scripts").mkdir(parents=True, exist_ok=True)
+    (repo / "beancount" / "core" / "account.py").write_text(
+        "def walk(root):\n    pass\n", encoding="utf-8"
+    )
+    (repo / "beancount" / "scripts" / "directories.py").write_text(
+        "    for r in os.walk(path):\n", encoding="utf-8"
+    )
+    (repo / "beancount" / "loader.py").write_text(
+        "    return account.walk(root)\n", encoding="utf-8"
+    )
+    db_path = str(tmp_path / "graph.db")
+    conn = sqlite3.connect(db_path)
+    conn.executescript(_WALK_SCHEMA)
+    for src, tgt, method, conf, line in edges:
+        conn.execute(
+            "INSERT INTO edges (source_id, target_id, type, source_line, "
+            "resolution_method, confidence) VALUES (?,?,'CALLS',?,?,?)",
+            (src, tgt, line, method, conf),
+        )
+    conn.commit()
+    conn.close()
+    return db_path, str(repo)
+
+
+def test_caller_namematch_never_laundered_as_fact(tmp_path: Path) -> None:
+    """name_match @ 0.9 must NOT render as `find_files() in ...` (the os.walk bug).
+
+    RED before the categorical-gate fix (old gate matched confidence>=0.9 and
+    rendered the function-name fact); GREEN after.
+    """
+    db, repo = _walk_db(tmp_path, [(2, 1, "name_match", 0.9, 1)])
+    out = _caller_contract_for_file(db, "beancount/core/account.py", repo, ["walk"])
+    assert "() in " not in out, f"name_match laundered as a caller fact: {out!r}"
+    assert "find_files()" not in out
+    # 0.9 >= floor -> shown only as an unverified location hint, no name claim.
+    assert out == "" or "(unverified)" in out
+
+
+def test_caller_import_edge_is_a_fact(tmp_path: Path) -> None:
+    """A deterministic (import) edge IS rendered as a confident caller fact —
+    regression guard that the fix did not over-suppress real callers."""
+    db, repo = _walk_db(tmp_path, [(3, 1, "import", 1.0, 1)])
+    out = _caller_contract_for_file(db, "beancount/core/account.py", repo, ["walk"])
+    assert "load() in beancount/loader.py:1" in out
+    assert "(unverified)" not in out
+
+
+def test_caller_capped_whitelisted_method_is_hint_not_fact(tmp_path: Path) -> None:
+    """A whitelisted METHOD (verified_unique) capped to conf 0.6 by the -file/L6 restore
+    demote (uniqueness/type premise not re-proven, method KEPT as provenance) must NOT
+    render as a confident caller fact: the fact-gate requires conf >= EDGE_CONFIDENCE_FLOOR
+    (0.7) alongside the whitelist. RED before the is_fact conf-conjunct (a method-only gate
+    laundered the capped restore back to `load() in ...`); GREEN after."""
+    db, repo = _walk_db(tmp_path, [(3, 1, "verified_unique", 0.6, 1)])
+    out = _caller_contract_for_file(db, "beancount/core/account.py", repo, ["walk"])
+    assert "load() in" not in out, f"capped verified_unique laundered as a caller fact: {out!r}"
+    assert out == "" or "(unverified)" in out
+
+
+def test_caller_genuine_verified_unique_is_a_fact(tmp_path: Path) -> None:
+    """Complement (over-suppression guard): a GENUINE verified_unique at full confidence
+    (0.95 >= floor) re-proved its premise and MUST still render as a confident fact — the
+    conf-conjunct must not suppress real deterministic callers."""
+    db, repo = _walk_db(tmp_path, [(3, 1, "verified_unique", 0.95, 1)])
+    out = _caller_contract_for_file(db, "beancount/core/account.py", repo, ["walk"])
+    assert "load() in beancount/loader.py:1" in out
+    assert "(unverified)" not in out
+
+
+def test_caller_namematch_below_floor_suppressed(tmp_path: Path) -> None:
+    """name_match below _NAME_MATCH_FLOOR (0.5) is suppressed entirely."""
+    db, repo = _walk_db(tmp_path, [(2, 1, "name_match", 0.3, 1)])
+    out = _caller_contract_for_file(db, "beancount/core/account.py", repo, ["walk"])
+    assert out == ""
+
+
+def test_caller_fact_wins_over_unverified(tmp_path: Path) -> None:
+    """With both a deterministic and a name_match caller present, only the fact
+    is shown — the unverified guess is never mixed in beside a verified caller."""
+    db, repo = _walk_db(
+        tmp_path,
+        [(2, 1, "name_match", 0.9, 1), (3, 1, "import", 1.0, 1)],
+    )
+    out = _caller_contract_for_file(db, "beancount/core/account.py", repo, ["walk"])
+    assert "load() in beancount/loader.py:1" in out
+    assert "find_files()" not in out
+    assert "(unverified)" not in out
+
+
+def test_caller_stdlib_shadow_dropped_even_when_tagged_deterministic(tmp_path: Path) -> None:
+    """RUN VERDICT (beancount-931 canary 26619606504): the os.walk callsite was
+    name-matched to project account.walk and the edge carried a DETERMINISTIC
+    resolution_method, so the provenance gate trusted it and rendered the laundered
+    fact. The stdlib-shadow guard must drop it regardless of provenance.
+
+    find_files (directories.py line 1 = `for r in os.walk(path):`) -> walk, tagged
+    'import' (deterministic). RED before the guard (renders find_files() fact),
+    GREEN after (dropped -> empty).
+    """
+    db, repo = _walk_db(tmp_path, [(2, 1, "import", 1.0, 1)])
+    out = _caller_contract_for_file(db, "beancount/core/account.py", repo, ["walk"])
+    assert out == "", f"stdlib os.walk shadow rendered as a caller: {out!r}"
+    assert "find_files()" not in out
+
+
+def test_caller_project_caller_not_dropped_by_stdlib_guard(tmp_path: Path) -> None:
+    """Regression guard: a REAL project caller (account.walk via import) whose code
+    is `return account.walk(root)` must NOT be dropped — 'account' is not stdlib."""
+    db, repo = _walk_db(tmp_path, [(3, 1, "import", 1.0, 1)])
+    out = _caller_contract_for_file(db, "beancount/core/account.py", repo, ["walk"])
+    assert "load() in beancount/loader.py:1" in out
+
+
+def test_caller_old_schema_renders_unverified_not_suppressed(tmp_path: Path) -> None:
+    """Old graph.db with NO confidence/resolution_method columns: cross-file callers
+    must render as `file:line (unverified)` hints, not be suppressed entirely.
+    Regression guard for the categorical-gate rewrite (review C2/C3/C4): the old
+    code had an explicit fallback that rendered file:line; the rewrite dropped it.
+    RED before the `not has_conf` fix, GREEN after."""
+    repo = tmp_path / "repo"
+    (repo / "beancount" / "core").mkdir(parents=True)
+    (repo / "tools").mkdir(parents=True)
+    (repo / "beancount" / "core" / "account.py").write_text(
+        "def compute(x):\n    pass\n", encoding="utf-8"
+    )
+    (repo / "tools" / "x.py").write_text("    z = compute(val)\n", encoding="utf-8")
+    db = str(tmp_path / "old.db")
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE nodes (id INTEGER PRIMARY KEY, label TEXT, name TEXT,
+                            file_path TEXT, is_test INTEGER DEFAULT 0);
+        CREATE TABLE edges (id INTEGER PRIMARY KEY, source_id INT, target_id INT,
+                            type TEXT, source_line INT);
+        INSERT INTO nodes (id, label, name, file_path, is_test) VALUES
+            (1, 'Function', 'compute', 'beancount/core/account.py', 0),
+            (2, 'Function', 'build_path', 'tools/x.py', 0);
+        INSERT INTO edges (id, source_id, target_id, type, source_line)
+            VALUES (1, 2, 1, 'CALLS', 1);
+        """
+    )
+    conn.commit()
+    conn.close()
+    out = _caller_contract_for_file(db, "beancount/core/account.py", str(repo), ["compute"])
+    assert "(unverified)" in out, f"old-schema caller suppressed instead of hinted: {out!r}"
+    assert "tools/x.py:1" in out
+
+
+# --- TTD: <gt-graph-map> wiring into the live brief (wire.md #1) -------------
+
+
+def test_render_brief_appends_graph_map(tmp_path: Path) -> None:
+    """render_brief(graph_db=...) appends a <gt-graph-map> sibling block.
+
+    RED before wiring (render_brief had no graph_db param -> TypeError);
+    GREEN after. The map carries the import-resolved caller as a fact.
+    """
+    db, _repo = _walk_db(tmp_path, [(3, 1, "import", 1.0, 1)])
+    files = [
+        FileEntry(
+            path="beancount/core/account.py",
+            score=0.9,
+            functions=["walk"],
+            function_names=["walk"],
+        )
+    ]
+    out = render_brief(files, graph_db=db)
+    assert "<gt-graph-map>" in out
+    assert "</gt-graph-map>" in out
+    assert "load" in out  # the import-resolved caller surfaced in the map
+
+
+def test_render_brief_no_graph_map_without_db() -> None:
+    """No graph_db -> no <gt-graph-map> (backward-compatible default)."""
+    files = [
+        FileEntry(
+            path="beancount/core/account.py",
+            score=0.9,
+            functions=["walk"],
+            function_names=["walk"],
+        )
+    ]
+    out = render_brief(files)
+    assert "<gt-graph-map>" not in out
+
+
+def test_render_brief_graph_map_quiet_when_no_confident_edge(tmp_path: Path) -> None:
+    """Correct-or-quiet: a name_match-only edge below floor yields no map block."""
+    db, _repo = _walk_db(tmp_path, [(2, 1, "name_match", 0.2, 1)])
+    files = [
+        FileEntry(
+            path="beancount/core/account.py",
+            score=0.9,
+            functions=["walk"],
+            function_names=["walk"],
+        )
+    ]
+    out = render_brief(files, graph_db=db)
+    assert "<gt-graph-map>" not in out
+
+
+@patch("groundtruth.pretask.v1r_brief.run_v74")
+def test_generate_v1r_brief_carries_graph_map_no_laundering(
+    mock_v74: MagicMock, tmp_path: Path
+) -> None:
+    """Full pipeline E2E: generate_v1r_brief threads graph_db into render_brief,
+    so the final brief_text carries <gt-graph-map> built from the SAME db, and a
+    name_match caller is never laundered as a fact anywhere in the brief.
+
+    The db has both a real import caller (load -> walk, fact) and the os.walk
+    name_match artifact (find_files -> walk, 0.9). The import caller must surface
+    as a fact; find_files() must never appear as a confident caller.
+    """
+    db, repo = _walk_db(
+        tmp_path,
+        [(3, 1, "import", 1.0, 1), (2, 1, "name_match", 0.9, 1)],
+    )
+    mock_v74.return_value = MagicMock(
+        ranked_full=[
+            {"path": "beancount/core/account.py", "score": 0.9, "components": {"path": 0.0}}
+        ]
+    )
+    result = generate_v1r_brief("fix account walk traversal", repo, db)
+    assert "<gt-graph-map>" in result.brief_text
+    assert "load" in result.brief_text  # real import caller surfaced
+    assert "find_files() in" not in result.brief_text  # name_match never laundered
+
+
+def test_medium_scope_distinct_files_gates_name_match(tmp_path: Path) -> None:
+    """BUG-6: the MEDIUM `Related files to inspect:` scope line is fed by
+    `_distinct_files`, which was built with NO resolution_method gate and NO conf
+    floor (the raw `ORDER BY e.confidence DESC LIMIT 10` pull) — so a caller file
+    reached only via a name_match edge rendered as a related file.
+
+    This pins the EXACT scope-row gate the fix applies in generate_v1r_brief
+    (DETERMINISTIC_RESOLUTION_METHODS + _NAME_MATCH_FLOOR): given the same scope
+    rows the production query produces, name_match caller files are dropped from
+    `_distinct_files` while import facts are kept. RED before the fix (the old
+    `_distinct_files = dict.fromkeys(r[0] for r in _scope_rows)` kept all rows)."""
+    from groundtruth.pretask.curation_map import (
+        DETERMINISTIC_RESOLUTION_METHODS,
+        _NAME_MATCH_FLOOR,
+    )
+
+    db = str(tmp_path / "g.db")
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """CREATE TABLE nodes (id INTEGER PRIMARY KEY, label TEXT, name TEXT,
+              file_path TEXT, is_test INTEGER DEFAULT 0);
+           CREATE TABLE edges (id INTEGER PRIMARY KEY, source_id INTEGER,
+              target_id INTEGER, type TEXT, resolution_method TEXT, confidence REAL);"""
+    )
+    conn.execute("INSERT INTO nodes (id,label,name,file_path) VALUES (1,'Function','target_fn','pkg/target.py')")
+    for nid, f in [(2, "pkg/factA.py"), (3, "pkg/factB.py"), (4, "pkg/guessA.py"), (5, "pkg/guessB.py")]:
+        conn.execute("INSERT INTO nodes (id,label,name,file_path) VALUES (?,'Function','c',?)", (nid, f))
+    conn.executemany(
+        "INSERT INTO edges (source_id,target_id,type,resolution_method,confidence) "
+        "VALUES (?,1,'CALLS',?,?)",
+        [(2, "import", 1.0), (3, "import", 1.0), (4, "name_match", 0.9), (5, "name_match", 0.9)],
+    )
+    conn.commit()
+
+    # The exact HIGH-conf scope query generate_v1r_brief runs (the raw pull).
+    _scope_rows = conn.execute(
+        """SELECT DISTINCT nsrc.file_path, e.resolution_method, e.confidence
+           FROM nodes nt
+           JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
+           JOIN nodes nsrc ON e.source_id = nsrc.id
+           WHERE nt.file_path = ? AND nsrc.file_path != ?
+           ORDER BY e.confidence DESC LIMIT 10""",
+        ("pkg/target.py", "pkg/target.py"),
+    ).fetchall()
+    conn.close()
+
+    # OLD (buggy) _distinct_files: no gate -> name_match leaks.
+    _old_distinct = list(dict.fromkeys(r[0] for r in _scope_rows))
+    assert "pkg/guessA.py" in _old_distinct  # proves the ungated pull DID leak
+
+    # NEW gate (the production fix, verbatim).
+    _det_lower = {m.lower() for m in DETERMINISTIC_RESOLUTION_METHODS}
+
+    def _scope_row_is_fact(r) -> bool:
+        _m = str(r[1] or "").strip().lower()
+        if _m not in _det_lower:
+            return False
+        try:
+            return float(r[2]) >= _NAME_MATCH_FLOOR
+        except (TypeError, ValueError):
+            return False
+
+    _distinct_files = list(dict.fromkeys(r[0] for r in _scope_rows if _scope_row_is_fact(r)))
+    assert _distinct_files == ["pkg/factA.py", "pkg/factB.py"], (
+        f"name_match scope files must be gated out of _distinct_files; got {_distinct_files}"
+    )
+    assert "pkg/guessA.py" not in _distinct_files
+    assert "pkg/guessB.py" not in _distinct_files
+
+
+@patch("groundtruth.pretask.v1r_brief.run_v74")
+def test_n_components_signal_is_consumed_not_dropped(
+    mock_v74: MagicMock, tmp_path: Path, capsys
+) -> None:
+    """Regression: n_components is computed in localize() and was a DEAD signal (zero
+    consumers). It is now wired to the GT_META/stderr telemetry (its stated 8-dp-logging
+    consumer). Assert a real generate_v1r_brief run EMITS the SCOPE_COMPONENTS line at
+    8-decimal precision. RED before the wire (no consumer -> no such line); GREEN after.
+    Diagnostic only — this asserts consumption, not any brief-content/ranking change."""
+    import re as _re
+
+    db, repo = _walk_db(tmp_path, [(3, 1, "import", 1.0, 1)])
+    mock_v74.return_value = MagicMock(
+        ranked_full=[
+            {"path": "beancount/core/account.py", "score": 0.9, "components": {"path": 0.0}}
+        ]
+    )
+    generate_v1r_brief("fix account walk traversal", repo, db)
+    err = capsys.readouterr().err
+    m = _re.search(
+        r"SCOPE_COMPONENTS n_components=(\d+\.\d{8}) rendered_chains=\d+\.\d{8} "
+        r"fragmented=\d+\.\d{8}",
+        err,
+    )
+    assert m is not None, f"n_components not consumed (no SCOPE_COMPONENTS line):\n{err}"
+
+
+@pytest.fixture
+def graph_db(tmp_path: Path) -> str:
+    db_path = str(tmp_path / "graph.db")
+    conn = sqlite3.connect(db_path)
+    conn.executescript("""
+        CREATE TABLE nodes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            label TEXT NOT NULL,
+            name TEXT NOT NULL,
+            qualified_name TEXT,
+            file_path TEXT NOT NULL,
+            start_line INTEGER,
+            end_line INTEGER,
+            signature TEXT,
+            return_type TEXT,
+            is_exported BOOLEAN DEFAULT 0,
+            is_test BOOLEAN DEFAULT 0,
+            language TEXT NOT NULL DEFAULT 'python',
+            parent_id INTEGER REFERENCES nodes(id)
+        );
+        CREATE TABLE edges (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_id INTEGER NOT NULL REFERENCES nodes(id),
+            target_id INTEGER NOT NULL REFERENCES nodes(id),
+            type TEXT NOT NULL,
+            source_line INTEGER,
+            source_file TEXT,
+            resolution_method TEXT,
+            confidence REAL DEFAULT 0.5,
+            metadata TEXT
+        );
+        INSERT INTO nodes (id, label, name, file_path, is_test) VALUES
+            (1, 'Function', 'login_user', 'src/auth/handler.py', 0),
+            (2, 'Function', 'verify_token', 'src/auth/handler.py', 0),
+            (3, 'Function', 'test_login', 'tests/test_auth.py', 1),
+            (4, 'Function', 'test_verify', 'tests/test_auth.py', 1),
+            (5, 'Function', 'require_auth', 'src/auth/middleware.py', 0);
+        INSERT INTO edges (source_id, target_id, type, confidence) VALUES
+            (3, 1, 'CALLS', 1.0),
+            (4, 2, 'CALLS', 1.0),
+            (5, 2, 'CALLS', 1.0);
+    """)
+    conn.close()
+    return db_path
+
+
+def test_top_functions(graph_db: str) -> None:
+    funcs = _top_functions(graph_db, "src/auth/handler.py")
+    assert "verify_token" in funcs
+    assert "login_user" in funcs
+    assert len(funcs) <= 3
+
+
+def test_top_functions_returns_by_ref_count(graph_db: str) -> None:
+    funcs = _top_functions(graph_db, "src/auth/handler.py")
+    assert funcs[0] == "verify_token"
+
+
+def test_top_functions_issue_anchor_survives_refcount_cap(tmp_path) -> None:
+    """BUG-3: a freshly-added gold function (0 callers, name not a generic hub)
+    must SURVIVE the ref-count cap when the issue names it. Without issue_terms a
+    pure ``ref_count DESC`` order drops it behind high-caller hubs; passing the
+    issue-anchor set floats it to the front (CASE ... THEN 0) so Contract/Spec/
+    (funcs) describe the RIGHT function, not the most-central one."""
+    import sqlite3 as _sql
+
+    db = str(tmp_path / "g.db")
+    conn = _sql.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE nodes (
+            id INTEGER PRIMARY KEY, label TEXT, name TEXT, qualified_name TEXT,
+            file_path TEXT, start_line INTEGER, end_line INTEGER, signature TEXT,
+            return_type TEXT, is_exported INTEGER, is_test INTEGER, language TEXT,
+            parent_id INTEGER
+        );
+        CREATE TABLE edges (
+            id INTEGER PRIMARY KEY, source_id INTEGER, target_id INTEGER, type TEXT,
+            source_line INTEGER, source_file TEXT, resolution_method TEXT,
+            confidence REAL, metadata TEXT
+        );
+        """
+    )
+    # gold = set_xy1 (0 callers); 30 hub functions each with 5 verified callers.
+    nodes = [(1, "Function", "set_xy1", "lines.py", 100, "def set_xy1(self, xy):")]
+    for i in range(2, 32):
+        nodes.append((i, "Function", f"hub{i}", "lines.py", 200 + i, f"def hub{i}(self):"))
+    conn.executemany(
+        "INSERT INTO nodes (id,label,name,file_path,start_line,signature,is_test) "
+        "VALUES (?,?,?,?,?,?,0)",
+        nodes,
+    )
+    conn.execute(
+        "INSERT INTO nodes (id,label,name,file_path,is_test) "
+        "VALUES (999,'Function','caller','x.py',0)"
+    )
+    eid = 1
+    for i in range(2, 32):
+        for _ in range(5):
+            conn.execute(
+                "INSERT INTO edges (id,source_id,target_id,type,resolution_method,confidence) "
+                "VALUES (?,999,?,'CALLS','import',1.0)",
+                (eid, i),
+            )
+            eid += 1
+    conn.commit()
+    conn.close()
+
+    # RED behavior: no issue_terms -> only hubs survive, set_xy1 is cut.
+    no_anchor = _top_functions(db, "lines.py")
+    assert not any("set_xy1" in s for s in no_anchor), (
+        "control: the zero-caller gold is cut by the cap without issue anchors"
+    )
+    # GREEN: passing the issue-anchor set keeps set_xy1.
+    with_anchor = _top_functions(db, "lines.py", issue_terms={"set_xy1"})
+    assert any("set_xy1" in s for s in with_anchor), (
+        f"the issue-named zero-caller gold must survive the cap; got {with_anchor}"
+    )
+
+
+def test_render_brief_no_prose() -> None:
+    # Tier-as-filter revert (commit 11aab174, v1r_brief.py:697-716): tiers are an
+    # internal filter, [INFO] entries are dropped. Both entries here carry graph
+    # evidence (test mapping -> [WARNING], or contract -> [VERIFIED]) so they
+    # survive the filter and both render.
+    files = [
+        FileEntry(
+            path="src/auth/handler.py",
+            score=0.9,
+            functions=["login_user", "verify_token"],
+            contract="login_user() in src/auth/middleware.py:1 `login_user()`",
+        ),
+        FileEntry(
+            path="src/auth/middleware.py",
+            score=0.7,
+            functions=["require_auth"],
+            contract="login_user() in src/auth/handler.py:1 `require_auth()`",
+        ),
+    ]
+    text = render_brief(files)
+    assert text.startswith("<gt-task-brief>")
+    assert text.endswith("</gt-task-brief>")
+    assert "login_user" in text
+    assert "require_auth" in text
+    assert "tests/test_auth.py" not in text
+    # No in-band tier labels and no prose directives in agent-facing output.
+    for forbidden in [
+        "[VERIFIED]",
+        "[WARNING]",
+        "[INFO]",
+        "justification",
+        "constraint",
+        "CONSTRAINT",
+        "mirror",
+        "scaffold",
+        "editing elsewhere",
+        "Edit existing",
+        "Do not",
+        "IMPLEMENTATION",
+        "PATTERN",
+        "CONTRACT",
+        "SIDE FILES",
+    ]:
+        assert forbidden not in text, f"Brief must not contain prose/tier label: '{forbidden}'"
+
+
+def test_render_brief_numbered() -> None:
+    # Tier-as-filter revert (commit 11aab174): only entries with graph evidence
+    # survive. Both entries get a test mapping ([WARNING] tier) so both render
+    # and the numbered "N. path" format is exercised.
+    files = [
+        FileEntry(path="a.py", score=1.0, functions=["foo"], contract="foo()"),
+        FileEntry(path="b.py", score=0.5, functions=["bar"], contract="bar()"),
+    ]
+    text = render_brief(files)
+    assert "1. a.py" in text
+    assert "2. b.py" in text
+
+
+@patch("groundtruth.pretask.v1r_brief.run_v74")
+def test_generate_v1r_brief_empty_on_no_signal(mock_v74: MagicMock) -> None:
+    mock_v74.return_value = MagicMock(ranked_full=[])
+    result = generate_v1r_brief("fix auth bug", "/repo", "/db.sqlite")
+    assert result.files == []
+    assert "<gt-task-brief>" in result.brief_text
+
+
+@patch("groundtruth.pretask.v1r_brief.run_v74")
+@patch("groundtruth.pretask.v1r_brief._top_functions", return_value=[])
+def test_generate_v1r_brief_does_not_deliver_blind_low_score_candidates(_mock_funcs, mock_v74: MagicMock) -> None:
+    mock_v74.return_value = MagicMock(ranked_full=[{"path": "a.py", "score": 0.1}])
+    result = generate_v1r_brief("fix auth bug", "/repo", "/db.sqlite")
+    assert result.files == []
+    assert "1. a.py" not in result.brief_text
+
+
+@patch("groundtruth.pretask.v1r_brief.run_v74")
+@patch("groundtruth.pretask.v1r_brief._top_functions", return_value=["foo"])
+def test_generate_v1r_brief_drops_hollow_candidates_when_supported_exists(_mock_funcs, mock_v74: MagicMock) -> None:
+    mock_v74.return_value = MagicMock(
+        ranked_full=[
+            {"path": "src/hollow.py", "score": 0.99, "components": {}},
+            {"path": "src/supported.py", "score": 0.10, "components": {"sem": 0.4, "lex": 0.2}},
+        ]
+    )
+    result = generate_v1r_brief("fix auth bug", "/repo", "/db.sqlite")
+    assert [f.path for f in result.files] == ["src/supported.py"]
+    assert result.localization_proof[0]["entered_via"] == "evidence:lexical+semantic"
+
+
+@patch("groundtruth.pretask.v1r_brief.run_v74")
+@patch("groundtruth.pretask.v1r_brief._top_functions", return_value=["foo"])
+def test_generate_v1r_brief_drops_declaration_test_candidates(_mock_funcs, mock_v74: MagicMock) -> None:
+    mock_v74.return_value = MagicMock(
+        ranked_full=[
+            {
+                "path": "packages-private/dts-test/component.test-d.ts",
+                "score": 0.99,
+                "components": {"sem": 0.8, "lex": 0.2},
+                "entered_via": "semantic_seed",
+            },
+            {
+                "path": "packages/runtime-core/src/component.ts",
+                "score": 0.10,
+                "components": {"sem": 0.3},
+                "entered_via": "semantic_seed",
+            },
+        ]
+    )
+    result = generate_v1r_brief("fix component behavior", "/repo", "/db.sqlite")
+    assert [f.path for f in result.files] == ["packages/runtime-core/src/component.ts"]
+
+
+@patch("groundtruth.pretask.v1r_brief.run_v74")
+@patch("groundtruth.pretask.v1r_brief._top_functions", return_value=["foo"])
+def test_generate_v1r_brief_respects_max_files(_mock_funcs, mock_v74) -> None:
+    mock_v74.return_value = MagicMock(
+        ranked_full=[{"path": f"file{i}.py", "score": 0.9 - i * 0.1} for i in range(10)]
+    )
+    result = generate_v1r_brief("fix bug", "/repo", "/db.sqlite", max_files=3)
+    assert len(result.files) <= 3
+
+
+@patch("groundtruth.pretask.v1r_brief.run_v74")
+@patch("groundtruth.pretask.v1r_brief._top_functions", return_value=["foo"])
+def test_generate_v1r_brief_token_cap(_mock_funcs, mock_v74) -> None:
+    mock_v74.return_value = MagicMock(
+        ranked_full=[{"path": f"very/long/path/to/file{i}.py", "score": 0.9} for i in range(10)]
+    )
+    result = generate_v1r_brief("fix bug", "/repo", "/db.sqlite", max_brief_tokens=100)
+    assert result.token_estimate <= 100
+
+
+@pytest.fixture
+def sparse_graph_db(tmp_path: Path) -> str:
+    """Graph DB with < 2 edges per file — triggers sparse mode."""
+    db_path = str(tmp_path / "sparse.db")
+    conn = sqlite3.connect(db_path)
+    conn.executescript("""
+        CREATE TABLE nodes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            label TEXT NOT NULL,
+            name TEXT NOT NULL,
+            qualified_name TEXT,
+            file_path TEXT NOT NULL,
+            start_line INTEGER,
+            end_line INTEGER,
+            signature TEXT,
+            return_type TEXT,
+            is_exported BOOLEAN DEFAULT 0,
+            is_test BOOLEAN DEFAULT 0,
+            language TEXT NOT NULL DEFAULT 'python',
+            parent_id INTEGER REFERENCES nodes(id)
+        );
+        CREATE TABLE edges (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_id INTEGER NOT NULL REFERENCES nodes(id),
+            target_id INTEGER NOT NULL REFERENCES nodes(id),
+            type TEXT NOT NULL,
+            source_line INTEGER,
+            source_file TEXT,
+            resolution_method TEXT,
+            confidence REAL DEFAULT 0.5,
+            metadata TEXT
+        );
+        INSERT INTO nodes (id, label, name, file_path, is_test) VALUES
+            (1, 'Function', 'parse_url', 'src/urls.py', 0),
+            (2, 'Function', 'validate', 'src/validator.py', 0),
+            (3, 'Function', 'render_page', 'src/render.py', 0),
+            (4, 'Function', 'test_parse', 'tests/test_urls.py', 1);
+        INSERT INTO edges (source_id, target_id, type, confidence) VALUES
+            (4, 1, 'CALLS', 1.0);
+    """)
+    conn.close()
+    return db_path
+
+
+@patch("groundtruth.pretask.v1r_brief.run_v74")
+@patch("groundtruth.pretask.v1r_brief._top_functions", return_value=[])
+def test_sparse_graph_no_suppression(
+    _mock_funcs, mock_v74, sparse_graph_db: str
+) -> None:
+    """On sparse graphs, modulus gate must NOT suppress the brief."""
+    mock_v74.return_value = MagicMock(
+        ranked_full=[
+            {"path": "src/urls.py", "score": 0.8, "components": {"lex": 0.4}},
+            {"path": "src/validator.py", "score": 0.7, "components": {"lex": 0.3}},
+            {"path": "src/render.py", "score": 0.6, "components": {"lex": 0.2}},
+        ]
+    )
+    result = generate_v1r_brief("fix url parsing bug", "/repo", sparse_graph_db)
+    assert result.brief_text != ""
+    assert len(result.files) > 0
+
+
+@patch("groundtruth.pretask.v1r_brief.run_v74")
+@patch("groundtruth.pretask.v1r_brief._top_functions", return_value=[])
+def test_path_match_preservation(_mock_funcs, mock_v74, tmp_path: Path) -> None:
+    """Files with strong path-name match must survive into top-5 even if BM25-outranked."""
+    db_path = str(tmp_path / "test.db")
+    conn = sqlite3.connect(db_path)
+    conn.executescript("""
+        CREATE TABLE nodes (
+            id INTEGER PRIMARY KEY, label TEXT, name TEXT,
+            qualified_name TEXT, file_path TEXT, start_line INTEGER,
+            end_line INTEGER, signature TEXT, return_type TEXT,
+            is_exported BOOLEAN DEFAULT 0, is_test BOOLEAN DEFAULT 0,
+            language TEXT DEFAULT 'python', parent_id INTEGER
+        );
+        CREATE TABLE edges (
+            id INTEGER PRIMARY KEY, source_id INTEGER, target_id INTEGER,
+            type TEXT, source_line INTEGER, source_file TEXT,
+            resolution_method TEXT, confidence REAL DEFAULT 0.5, metadata TEXT
+        );
+        INSERT INTO nodes (id, label, name, file_path, is_test) VALUES
+            (1, 'Function', 'foo', 'src/hub1.py', 0),
+            (2, 'Function', 'bar', 'src/hub2.py', 0),
+            (3, 'Function', 'baz', 'src/hub3.py', 0),
+            (4, 'Function', 'qux', 'src/hub4.py', 0),
+            (5, 'Function', 'quux', 'src/hub5.py', 0),
+            (6, 'Function', 'color_apply', 'src/colorama.py', 0);
+        INSERT INTO edges (source_id, target_id, type, confidence) VALUES
+            (1, 2, 'CALLS', 1.0),
+            (2, 3, 'CALLS', 1.0),
+            (3, 4, 'CALLS', 1.0);
+    """)
+    conn.close()
+
+    mock_v74.return_value = MagicMock(
+        ranked_full=[
+            {"path": "src/hub1.py", "score": 0.9, "components": {"path": 0.0}},
+            {"path": "src/hub2.py", "score": 0.85, "components": {"path": 0.0}},
+            {"path": "src/hub3.py", "score": 0.80, "components": {"path": 0.0}},
+            {"path": "src/hub4.py", "score": 0.75, "components": {"path": 0.0}},
+            {"path": "src/hub5.py", "score": 0.70, "components": {"path": 0.0}},
+            {"path": "src/colorama.py", "score": 0.30, "components": {"path": 0.7}},
+        ]
+    )
+    result = generate_v1r_brief("fix colorama color rendering issue", "/repo", db_path, max_files=5)
+    paths = [f.path for f in result.files]
+    assert "src/colorama.py" in paths, f"Path-matched file should survive into brief, got: {paths}"
+
+
+# ===========================================================================
+# SQUASH BATCH (GRANULAR_LIPI_REVIEW_20260607T2330Z) — v1r_brief items
+# ===========================================================================
+
+from groundtruth.pretask.v1r_brief import (  # noqa: E402
+    _localization_header,
+    _entry_confidence_tier,
+    _top_function_names,
+    _resolved_witnesses_for_file,
+    _gl_normalize,
+)
+from groundtruth.pretask.graph_localizer import (  # noqa: E402
+    Candidate,
+    Witness,
+    LocalizerResult,
+)
+
+
+def _cand(file_path: str, *, score: float, verified: bool = False,
+          anchor: str = "anchor_fn", dst: str = "callee_fn") -> Candidate:
+    """A localizer Candidate carrying one issue-anchored witness (verified or not)."""
+    w = Witness(
+        file_path=file_path, anchor=anchor, edge_type="CALLS",
+        direction="calls_anchor", verified=verified, confidence=1.0 if verified else 0.5,
+        hop=1, src_symbol="src_fn", dst_symbol=dst,
+    )
+    return Candidate(
+        file_path=file_path, score=score, witnesses=[w],
+        lex_hits=1, degree=1, confidence=(1.0 if verified else 0.5),
+    )
+
+
+def _loc_result(cands: list[Candidate], *, anchors: list[str], agree: dict[str, int]) -> LocalizerResult:
+    return LocalizerResult(
+        candidates=cands, anchor_symbols=anchors, confidence=cands[0].confidence if cands else 0.0,
+        confident=True, gate_reason="test", agreement_by_file=agree,
+    )
+
+
+# ---- L1 CROSS-WIRE: _localization_header now returns (header, primary) and the
+#      primary is the file the header NAMES as #1 (single source of truth). ------
+
+def test_localization_header_returns_tuple_empty_when_no_loc():
+    """No candidates -> ('', '') — nothing to align to (correct-or-quiet)."""
+    out = _localization_header(None, "", "issue")
+    assert out == ("", "")
+    out2 = _localization_header(_loc_result([], anchors=[], agree={}), "", "issue")
+    assert out2 == ("", "")
+
+
+def test_localization_header_primary_is_named_first_file(tmp_path: Path):
+    """The returned primary_path == the file the header lists as candidate #1.
+
+    Flat MEDIUM/LOW path: shown[0].file_path is named '1.' in the block AND is the
+    returned primary. RED before the tuple change (function returned a bare str so
+    the caller had no primary to align entries[0] to).
+    """
+    db = str(tmp_path / "g.db")
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """CREATE TABLE nodes (id INTEGER PRIMARY KEY, label TEXT, name TEXT,
+              file_path TEXT, start_line INTEGER, is_test INTEGER DEFAULT 0);
+           CREATE TABLE edges (id INTEGER PRIMARY KEY, source_id INTEGER,
+              target_id INTEGER, type TEXT, source_line INTEGER,
+              resolution_method TEXT, confidence REAL DEFAULT 0.5);"""
+    )
+    conn.commit(); conn.close()
+    cands = [_cand("src/gold.py", score=0.9), _cand("src/other.py", score=0.5)]
+    # >=1 ranker agrees on gold -> MEDIUM flat list naming gold #1.
+    loc = _loc_result(cands, anchors=["anchor_fn"], agree={_gl_normalize("src/gold.py"): 1})
+    header, primary = _localization_header(loc, db, "fix the gold bug")
+    assert isinstance(header, str) and isinstance(primary, str)
+    assert primary == "src/gold.py"
+    # the header text NAMES the same file as #1
+    assert "1. src/gold.py" in header
+
+
+def test_l1_alignment_moves_loc_primary_to_entries_front():
+    """The cross-wire fix: when the localizer named a primary that is NOT entries[0]
+    (a downstream reorder put another file first), the alignment moves it to
+    entries[0] so <gt-localization> and <gt-task-brief>/EDIT-TARGET/L1-SCOPE all
+    name the SAME #1 file. This exercises the exact insert(0, pop(i)) invariant.
+
+    RED before the fix: entries[0] stayed 'src/other.py' (Pipe B) while the header
+    named 'src/gold.py' (Pipe A) — two different #1 files reach the agent.
+    """
+    # entries with a DELIBERATE reorder: gold is at index 2, not 0 (a keyword/hub
+    # re-rank put other/hub ahead — the divergence the cross-wire produces).
+    entries = [
+        FileEntry(path="src/hub.py", score=0.95),
+        FileEntry(path="src/other.py", score=0.80),
+        FileEntry(path="src/gold.py", score=0.50),
+    ]
+    _loc_primary = "src/gold.py"
+    _loc_header = "<gt-localization confidence=\"medium\">\n  1. src/gold.py\n</gt-localization>"
+
+    # The exact alignment the consumer runs (generate_v1r_brief, pre-L1-SCOPE).
+    if _loc_header and _loc_primary and entries:
+        _lp_norm = _gl_normalize(_loc_primary)
+        for _i, _e in enumerate(entries):
+            if _gl_normalize(_e.path) == _lp_norm:
+                if _i != 0:
+                    entries.insert(0, entries.pop(_i))
+                break
+
+    assert entries[0].path == "src/gold.py"          # == _loc.candidates[0] (Pipe A)
+    # the other entries keep their relative order behind the pinned primary
+    assert [e.path for e in entries] == ["src/gold.py", "src/hub.py", "src/other.py"]
+
+
+def test_localization_tier_medium_when_agreed_candidate_below_top(tmp_path: Path):
+    """BUG-4: the tier governs how the SHOWN set renders, but it must be derived
+    from the agreement distribution over `shown`, NOT cands[0] alone. Here cands[0]
+    (lexical-only) has 0 ranker agreement while cands[1] — also in the shown set —
+    has agreement 2. The header must render confidence="medium" (a named candidate
+    set worth reasoning over), never "low"."""
+    db = str(tmp_path / "g.db")
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """CREATE TABLE nodes (id INTEGER PRIMARY KEY, label TEXT, name TEXT,
+              file_path TEXT, start_line INTEGER, is_test INTEGER DEFAULT 0);
+           CREATE TABLE edges (id INTEGER PRIMARY KEY, source_id INTEGER,
+              target_id INTEGER, type TEXT, source_line INTEGER,
+              resolution_method TEXT, confidence REAL DEFAULT 0.5);"""
+    )
+    conn.commit(); conn.close()
+    # cands[0] = lexical-only #1 (0 agreement); cands[1] = multi-ranker-agreed #2.
+    # Each carries ONE issue anchor so the HIGH path (needs >=2 distinct anchors)
+    # does NOT fire — isolating the MEDIUM-vs-LOW tier decision.
+    cands = [
+        _cand("src/lexwin.py", score=0.9, anchor="a1"),
+        _cand("src/agreed.py", score=0.5, anchor="a2"),
+    ]
+    agree = {
+        _gl_normalize("src/lexwin.py"): 0,  # cands[0]: no ranker agreement
+        _gl_normalize("src/agreed.py"): 2,  # cands[1] (in shown): 2 rankers agree
+    }
+    loc = _loc_result(cands, anchors=["a1", "a2"], agree=agree)
+    header, _primary = _localization_header(loc, db, "fix the bug in agreed")
+    assert 'confidence="medium"' in header, (
+        f"a multi-ranker-agreed candidate in `shown` must lift the tier off low; got:\n{header}"
+    )
+    assert 'confidence="low"' not in header
+
+
+def test_localization_tier_low_when_no_shown_candidate_agrees(tmp_path: Path):
+    """BUG-4 control: when NO shown candidate has any ranker agreement, the tier
+    is honestly "low" (correct-or-quiet — the agent confirms with grep)."""
+    db = str(tmp_path / "g.db")
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """CREATE TABLE nodes (id INTEGER PRIMARY KEY, label TEXT, name TEXT,
+              file_path TEXT, start_line INTEGER, is_test INTEGER DEFAULT 0);
+           CREATE TABLE edges (id INTEGER PRIMARY KEY, source_id INTEGER,
+              target_id INTEGER, type TEXT, source_line INTEGER,
+              resolution_method TEXT, confidence REAL DEFAULT 0.5);"""
+    )
+    conn.commit(); conn.close()
+    cands = [
+        _cand("a/one.py", score=0.9, anchor="a1"),
+        _cand("b/two.py", score=0.5, anchor="a2"),
+    ]
+    agree = {_gl_normalize("a/one.py"): 0, _gl_normalize("b/two.py"): 0}
+    loc = _loc_result(cands, anchors=["a1", "a2"], agree=agree)
+    header, _primary = _localization_header(loc, db, "no agreement anywhere")
+    assert 'confidence="low"' in header, f"no agreement anywhere -> low; got:\n{header}"
+    assert 'confidence="medium"' not in header
+
+
+def _semleaf_db(tmp_path: Path) -> str:
+    """nodes + nodes_fts so _semantic_leaf_names' lexical half returns a match."""
+    db = str(tmp_path / "sl.db")
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """CREATE TABLE nodes (id INTEGER PRIMARY KEY, label TEXT, name TEXT,
+              qualified_name TEXT, file_path TEXT, start_line INTEGER,
+              is_test INTEGER DEFAULT 0);
+           CREATE TABLE edges (id INTEGER PRIMARY KEY, source_id INTEGER,
+              target_id INTEGER, type TEXT, source_line INTEGER,
+              resolution_method TEXT, confidence REAL DEFAULT 0.5);
+           CREATE VIRTUAL TABLE nodes_fts USING fts5(name, qualified_name, signature, content='');"""
+    )
+    conn.execute("INSERT INTO nodes (id,label,name,file_path) VALUES (1,'Function','parse_header','f.py')")
+    conn.execute("INSERT INTO nodes (id,label,name,file_path) VALUES (2,'Function','unrelated','f.py')")
+    conn.execute("INSERT INTO nodes_fts (rowid,name,qualified_name,signature) VALUES (1,'parse_header','','')")
+    conn.execute("INSERT INTO nodes_fts (rowid,name,qualified_name,signature) VALUES (2,'unrelated','','')")
+    conn.commit(); conn.close()
+    return db
+
+
+def test_semantic_leaf_names_lexical_only_match_is_quiet(tmp_path: Path):
+    """BUG-5: a lone LEXICAL signal (one symbol matched a single >=3-char issue
+    token via FTS5, with NO semantic corroboration) must NOT be named — it is the
+    best-of-a-weak-field, a confident-wrong "edit this <func>" tail. Empty result
+    -> the caller renders the FILE with no function tail (correct-or-quiet)."""
+    from groundtruth.pretask.v1r_brief import _semantic_leaf_names
+    from groundtruth.pretask.graph_localizer import LocalizerResult
+
+    db = _semleaf_db(tmp_path)
+    loc = LocalizerResult(
+        candidates=[], anchor_symbols=[], confidence=0.0, confident=True,
+        gate_reason="t", symbol_semrank_by_file={},  # NO semantic signal
+    )
+    # 'parse' matches parse_header lexically and nothing else corroborates it.
+    assert _semantic_leaf_names(loc, db, "f.py", "fix the parse bug") == [], (
+        "a lexical-only single-token match must not be named (relevance floor)"
+    )
+
+
+def test_semantic_leaf_names_cross_signal_is_named(tmp_path: Path):
+    """BUG-5 positive control A: when BOTH the semantic and lexical ranks name the
+    symbol (>=2 agreeing signals), it IS emitted — the fix suppresses weak guesses,
+    never real corroborated signal."""
+    from groundtruth.pretask.v1r_brief import _semantic_leaf_names
+    from groundtruth.pretask.graph_localizer import LocalizerResult
+
+    db = _semleaf_db(tmp_path)
+    loc = LocalizerResult(
+        candidates=[], anchor_symbols=[], confidence=0.0, confident=True,
+        gate_reason="t",
+        symbol_semrank_by_file={"f.py": [("parse_header", 0.9), ("unrelated", 0.1)]},
+    )
+    out = _semantic_leaf_names(loc, db, "f.py", "fix the parse bug")
+    assert "parse_header" in out, f"cross-signal-agreed name must be emitted; got {out}"
+
+
+def test_semantic_leaf_names_top_semantic_alone_is_named(tmp_path: Path):
+    """BUG-5 positive control B: the #1 SEMANTIC match (a graded relevance score,
+    not a binary token presence) may stand alone with no lexical corroboration."""
+    from groundtruth.pretask.v1r_brief import _semantic_leaf_names
+    from groundtruth.pretask.graph_localizer import LocalizerResult
+
+    db = _semleaf_db(tmp_path)
+    loc = LocalizerResult(
+        candidates=[], anchor_symbols=[], confidence=0.0, confident=True,
+        gate_reason="t",
+        symbol_semrank_by_file={"f.py": [("parse_header", 0.9)]},
+    )
+    # No issue terms (>3 char) -> no lexical signal; only the top semantic name.
+    out = _semantic_leaf_names(loc, db, "f.py", "")
+    assert out == ["parse_header"], f"top semantic match may stand alone; got {out}"
+
+
+# ---- #37: _entry_confidence_tier path_match — generic 4-char stems must NOT
+#      promote to [WARNING]; specific compound/long stems still do. -------------
+
+def test_entry_tier_generic_stem_not_promoted():
+    """A generic file stem ('core'/'base'/'data') substring-present in the issue
+    must NOT promote the file to [WARNING] (the 'confident on weak signals'
+    inversion). RED before #37: 'core' (len 4 > 3) matched 'core' anywhere in the
+    issue via the bare `_stem in _it` substring test -> [WARNING].
+    """
+    e = FileEntry(path="src/core.py", score=0.1)  # no contract/witness/test/anchor
+    issue = "the application core logic mishandles the request"
+    assert _entry_confidence_tier(e, issue) == "[INFO]"
+
+
+def test_entry_tier_specific_stem_still_promoted():
+    """A SPECIFIC stem (len>=5 OR contains '_') that appears as a whole word in the
+    issue still earns [WARNING] — the real localization signal is preserved
+    (leafonly-plugin / import_files style)."""
+    e1 = FileEntry(path="src/leafonly.py", score=0.1)   # len 8 -> specific
+    assert _entry_confidence_tier(e1, "the leafonly plugin drops postings") == "[WARNING]"
+    e2 = FileEntry(path="src/import_files.py", score=0.1)  # contains '_'
+    assert _entry_confidence_tier(e2, "import_files mis-orders the tasks") == "[WARNING]"
+
+
+def test_entry_tier_specific_stem_substring_only_not_promoted():
+    """Specificity floor passes but NO whole-word boundary match -> not promoted.
+    'render' as a substring of 'prerendered' must not count (word-boundary gate)."""
+    e = FileEntry(path="src/render.py", score=0.1)
+    assert _entry_confidence_tier(e, "the prerendered output is stale") == "[INFO]"
+
+
+# ---- #60: _top_function_names — SQL and Python use ONE filtered term set; the
+#      SQL front-sort is honored, no contradictory Python re-partition. ----------
+
+def _funcname_db(tmp_path: Path) -> str:
+    db = str(tmp_path / "fn.db")
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """CREATE TABLE nodes (id INTEGER PRIMARY KEY, label TEXT, name TEXT,
+              qualified_name TEXT, file_path TEXT, start_line INTEGER, end_line INTEGER,
+              signature TEXT, return_type TEXT, is_exported INTEGER DEFAULT 0,
+              is_test INTEGER DEFAULT 0, language TEXT DEFAULT 'python', parent_id INTEGER);
+           CREATE TABLE edges (id INTEGER PRIMARY KEY, source_id INTEGER, target_id INTEGER,
+              type TEXT, source_line INTEGER, source_file TEXT, resolution_method TEXT,
+              confidence REAL DEFAULT 1.0, metadata TEXT);"""
+    )
+    # set_fields: issue function, LOW ref-count. hub: NOT issue-named, HIGH ref-count.
+    # fi: a 2-char-named function — exists so the short-term test can prove the OLD
+    # unfiltered Python re-partition would vault it to [0], while the fix does not.
+    conn.executemany(
+        "INSERT INTO nodes (id,label,name,file_path,is_test) VALUES (?,?,?,'src/m.py',0)",
+        [(1, "Function", "set_fields"), (2, "Function", "hub"),
+         (3, "Function", "helper"), (4, "Function", "fi")],
+    )
+    # hub has 3 incoming edges (high ref_count); set_fields/fi have 0.
+    conn.executemany(
+        "INSERT INTO edges (source_id,target_id,type,resolution_method,confidence) "
+        "VALUES (?,2,'CALLS','import',1.0)",
+        [(1,), (3,), (4,)],
+    )
+    conn.commit(); conn.close()
+    return db
+
+
+def test_top_function_names_issue_match_sorts_front(tmp_path: Path):
+    """The issue-named low-ref function sorts to the FRONT (SQL CASE), surviving the
+    LIMIT — and the result honors that order (no Python re-partition that could
+    disagree). 'set_fields' must precede the high-ref 'hub'."""
+    db = _funcname_db(tmp_path)
+    out = _top_function_names(db, "src/m.py", issue_terms={"set_fields"})
+    assert out[0] == "set_fields", f"issue fn must rank first, got {out}"
+
+
+def test_top_function_names_short_term_filtered_consistently(tmp_path: Path):
+    """A <=2-char issue term is filtered (len>2) and does NOT re-promote in Python —
+    SQL and Python agree on one filtered term set (#60). 'hub' (the high-ref fn)
+    leads on ref_count; the 2-char term 'fi' does not vault 'set_fields' via a
+    Python-only unfiltered re-partition.
+    """
+    db = _funcname_db(tmp_path)
+    # 'fi' is <=2 chars AND is a real function name here. Filtered out of the SQL CASE
+    # AND must not re-rank in Python. RED before #60: the OLD unfiltered Python
+    # re-partition (terms_lower = {'fi'}) vaulted the 'fi' function to out[0];
+    # GREEN after: SQL ref_count order is honored -> hub (3 refs) leads, 'fi' does not.
+    out = _top_function_names(db, "src/m.py", issue_terms={"fi"})
+    assert out[0] == "hub", f"short term must not re-promote; got {out}"
+    assert out[0] != "fi", f"<=2-char term re-promoted in Python (the #60 bug); got {out}"
+
+
+# ---- #36: callee witness `code` snippet must describe the callee DEFINITION
+#      (file_path:line it travels with), not the call-site line in another file. --
+
+def test_callee_witness_code_matches_definition_line(tmp_path: Path):
+    """The callee record's `code` must be the snippet at (callee_file, def_line) —
+    NOT the call-site line in the candidate file. RED before #36: code was
+    _code_at(candidate_file, call_site_line) while file_path/line pointed at the
+    callee def in another file -> snippet described a different (file,line).
+    """
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    # candidate file: the call site is on line 2.
+    (repo / "src" / "caller.py").write_text(
+        "def use():\n    return helper(1)\n", encoding="utf-8"
+    )
+    # callee file: helper is DEFINED on line 1.
+    (repo / "src" / "lib.py").write_text(
+        "def helper(x):\n    return x + 1\n", encoding="utf-8"
+    )
+    db = str(tmp_path / "g.db")
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """CREATE TABLE nodes (id INTEGER PRIMARY KEY, label TEXT, name TEXT,
+              qualified_name TEXT, file_path TEXT, start_line INTEGER, end_line INTEGER,
+              signature TEXT, return_type TEXT, is_exported INTEGER DEFAULT 0,
+              is_test INTEGER DEFAULT 0, language TEXT DEFAULT 'python', parent_id INTEGER);
+           CREATE TABLE edges (id INTEGER PRIMARY KEY, source_id INTEGER, target_id INTEGER,
+              type TEXT, source_line INTEGER, source_file TEXT, resolution_method TEXT,
+              confidence REAL DEFAULT 1.0, metadata TEXT);"""
+    )
+    conn.executemany(
+        "INSERT INTO nodes (id,label,name,file_path,start_line,is_test) VALUES (?,?,?,?,?,0)",
+        [(1, "Function", "use", "src/caller.py", 1),
+         (2, "Function", "helper", "src/lib.py", 1)],
+    )
+    # use (src/caller.py) CALLS helper (src/lib.py) at call-site line 2 (deterministic).
+    conn.execute(
+        "INSERT INTO edges (source_id,target_id,type,source_line,resolution_method,confidence) "
+        "VALUES (1,2,'CALLS',2,'import',1.0)"
+    )
+    conn.commit(); conn.close()
+
+    wits = _resolved_witnesses_for_file(db, "src/caller.py", str(repo), max_each=2)
+    callees = [w for w in wits if w["direction"] == "callee"]
+    assert callees, f"expected a callee witness, got {wits}"
+    w = callees[0]
+    assert w["file_path"] == "src/lib.py" and w["line"] == 1
+    # the snippet MUST be the callee DEFINITION line, not the call-site 'return helper(1)'
+    assert "def helper" in w["code"], f"code should be the def line, got {w['code']!r}"
+    assert "return helper(1)" not in w["code"]
+
+
+# --- CLUSTER D regression: compact, budget-enforced, graph-map-leading brief ---
+# The delivered brief was 10,880 chars / ~2720 tok (4x its 600-tok budget): a raw
+# FastAPI docstring signature wall as entry #1 (D2), a token-cap loop that only
+# dropped WHOLE files and never trimmed a body (D1), and the unique <gt-graph-map>
+# buried at 96% behind that wall (D3). These lock the fix. Deterministic — no
+# embedder, no live graph (render_brief on synthetic FileEntry).
+from groundtruth.pretask.v1r_brief import (  # noqa: E402
+    _clip_body_line,
+    _MAX_BODY_LINE_CHARS,
+    generate_v1r_brief as _gen_brief,
+)
+from groundtruth.pretask.contract_map import (  # noqa: E402
+    _sanitize_signature,
+    _MAX_RENDERED_SIG,
+)
+
+
+def test_d2_sanitize_strips_inline_docstring_prose_general():
+    """D2: a signature with embedded triple-quoted prose (FastAPI Doc / pydantic
+    Field(description=) / Javadoc / Rust doc-comment captured verbatim) collapses to
+    the typed shape, capped at _MAX_RENDERED_SIG — while a short normal signature
+    (any language) passes through BYTE-IDENTICAL."""
+    fastapi = ('def jsonable_encoder( obj: Annotated[ Any, Doc("""'
+               + "x" * 800 + '""") ] = None, exclude: int = 0)')
+    out = _sanitize_signature(fastapi)
+    assert '"""' not in out and "Doc(...)" in out
+    assert len(out) <= _MAX_RENDERED_SIG
+    # Generality (not FastAPI-keyed): a pydantic Field(description=...) prose dump.
+    pyd = 'def f(x: str = Field(description="""' + "y" * 400 + '"""))'
+    assert '"""' not in _sanitize_signature(pyd)
+    # A truncated/unterminated docstring (store caps signatures at 1000 chars).
+    trunc = 'def g( a: Annotated[str, Doc("""unterminated body cut at 1000'
+    assert '"""' not in _sanitize_signature(trunc)
+    # Short, normal signatures (3 languages) are unchanged.
+    for short in (
+        "def openapi(self) -> dict[str, Any]:",
+        "func (s *Store) Get(key string) (Entry, bool)",
+        "pub fn evict(&mut self, key: &str) -> Option<Entry>",
+    ):
+        assert _sanitize_signature(short) == short
+
+
+def test_d1_clip_body_line_caps_and_is_noop_when_short():
+    """D1: a single body DETAIL line is capped (a multi-thousand-char Chain/Contract
+    line can no longer blow the budget), and a short line is returned unchanged."""
+    short = "   Contract: returns Optional[User]"
+    assert _clip_body_line(short) == short
+    long = "   Chain: " + "a -> b; " * 600
+    clipped = _clip_body_line(long)
+    assert len(clipped) <= _MAX_BODY_LINE_CHARS
+    assert clipped.startswith("   Chain: ") and clipped.endswith("…")
+
+
+def test_d2_top_functions_line_has_no_docstring_wall():
+    """D2 end-to-end: render_brief's '(funcs)' line carries the SANITIZED signature,
+    so a stored FastAPI-style docstring signature never renders as a wall."""
+    fe = FileEntry(
+        path="fastapi/encoders.py",
+        score=1.0,
+        functions=[_sanitize_signature(
+            'def jsonable_encoder(obj: Annotated[Any, Doc("""' + "p" * 900 + '""")])'
+        )],
+    )
+    brief = render_brief([fe], issue_text="fix jsonable_encoder serialization")
+    fl = [ln for ln in brief.split("\n") if ln.startswith("1. ")]
+    assert fl, brief
+    assert '"""' not in fl[0]
+    assert max(len(ln) for ln in brief.split("\n")) <= 400
+
+
+def test_render_brief_replay_is_deterministic_without_graph_db():
+    entries = [
+        FileEntry(
+            path="pkg/a.py",
+            score=0.7,
+            functions=["def alpha():"],
+            callees=["pkg/b.py::beta()"],
+            co_changes=["pkg/neighbor.py"],
+            contract="returns bool",
+        ),
+        FileEntry(
+            path="pkg/b.py",
+            score=0.5,
+            functions=["def beta():"],
+            contract="raises ValueError",
+        ),
+    ]
+    first = render_brief(entries, issue_text="fix alpha beta interaction")
+    second = render_brief(entries, issue_text="fix alpha beta interaction")
+    assert second == first
+
+
+def test_d1_d3_budget_enforced_and_graph_map_leads(tmp_path):
+    """D1+D3 end-to-end on a real (synthetic) graph: the delivered brief stays under
+    the token budget (the cap loop trims body DETAIL, not the file LIST) AND the
+    <gt-graph-map> leads the <gt-task-brief> body instead of being buried last."""
+    db = str(tmp_path / "g.db")
+    repo = tmp_path / "repo"
+    (repo / "pkg").mkdir(parents=True)
+    src = repo / "pkg" / "svc.py"
+    # A function whose stored signature is a FastAPI-style docstring wall.
+    big_sig = 'def handle(obj: Annotated[Any, Doc("""' + "w" * 950 + '""")])'
+    src.write_text("def handle(obj):\n    return caller_fn(obj)\n", encoding="utf-8")
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """CREATE TABLE nodes (id INTEGER PRIMARY KEY, label TEXT, name TEXT,
+             qualified_name TEXT, file_path TEXT, start_line INTEGER, end_line INTEGER,
+             signature TEXT, return_type TEXT, is_exported INTEGER DEFAULT 0,
+             is_test INTEGER DEFAULT 0, language TEXT DEFAULT 'python', parent_id INTEGER);
+           CREATE TABLE edges (id INTEGER PRIMARY KEY, source_id INTEGER, target_id INTEGER,
+             type TEXT, source_line INTEGER, source_file TEXT, resolution_method TEXT,
+             confidence REAL DEFAULT 1.0, metadata TEXT);"""
+    )
+    conn.execute(
+        "INSERT INTO nodes (id,label,name,file_path,start_line,end_line,signature) "
+        "VALUES (1,'Function','handle','pkg/svc.py',1,2,?)",
+        (big_sig,),
+    )
+    conn.execute(
+        "INSERT INTO nodes (id,label,name,file_path,start_line,end_line,signature) "
+        "VALUES (2,'Function','caller_fn','pkg/other.py',1,1,'def caller_fn(obj):')"
+    )
+    # caller_fn CALLS handle (deterministic import edge) -> a real graph-map fact.
+    conn.execute(
+        "INSERT INTO edges (source_id,target_id,type,source_line,resolution_method,confidence) "
+        "VALUES (2,1,'CALLS',1,'import',1.0)"
+    )
+    conn.commit(); conn.close()
+
+    res = _gen_brief("fix the handle function serialization bug", str(repo), db, max_files=5)
+    bt = res.brief_text
+    # D1: under budget.
+    assert res.token_estimate <= 600, f"over budget: {res.token_estimate}\n{bt}"
+    # D2: no docstring wall survived into the rendered text.
+    assert '"""' not in bt
+    # D3: when a graph-map renders, it LEADS the brief body (before the file list).
+    if "<gt-graph-map>" in bt:
+        assert bt.find("<gt-graph-map>") < bt.find("\n1. ")
+
+
+# --- P0 #2: terminal evidence-RRF must not silently drop recall/neighbor/bridge
+#     records, and must let side-dict-verified gold out-rank multi-signal hubs.
+#     (GT_SUBSTRATE_LIPI_REVIEW_20260701 finding P0 #2.) --------------------------
+from groundtruth.pretask.v1r_brief import _apply_evidence_rrf
+
+
+def test_rrf_keeps_recall_neighbor_and_bridge_records() -> None:
+    """The strength>0 filter used to DROP every record whose evidence fell outside
+    the 8-key sum: the synthesized exact-issue-named recall-miss gold (no
+    ``components``), graph-neighbor (``{"path":0.0}``), and cochange/test_coimport
+    bridges. RED before the fix (only the real-evidence record survives); GREEN
+    after (all are kept, recall injections sort below real gold)."""
+    real = {"path": "src/real.py", "components": {"lex": 0.4, "sem": 0.5}}
+    exact = {"path": "src/exact.py", "_exact_issue_named": True, "score": 1.0}  # no components
+    neighbor = {"path": "src/neighbor.py", "components": {"path": 0.0}, "entered_via": "graph_neighbor"}
+    cochange = {"path": "src/co.py", "components": {"cochange": 3}, "entered_via": "cochange"}
+    tcoimp = {"path": "src/tc.py", "components": {"test_coimport": 2}, "entered_via": "test_coimport"}
+
+    out = _apply_evidence_rrf([real, neighbor, cochange, exact, tcoimp])
+    paths = [r["path"] for r in out]
+
+    # (a)/(b)/(c): NONE of the injected recall/neighbor/bridge records are dropped.
+    for p in ("src/real.py", "src/exact.py", "src/neighbor.py", "src/co.py", "src/tc.py"):
+        assert p in paths, f"{p} was silently dropped by the strength filter: {paths}"
+    # The exact-issue-named gold is treated as verified evidence, so it out-ranks
+    # the un-verified neighbor/bridge recall injections.
+    assert paths.index("src/exact.py") < paths.index("src/neighbor.py"), paths
+
+
+def test_rrf_side_dict_verified_gold_outranks_hub() -> None:
+    """The verified-witness flag lived ONLY in ``_witness_verified_by_file`` and was
+    never on the record, so a multi-signal hub (2 evidence classes) out-sorted a
+    single-signal but verified gold. Stamping ``witness_verified`` restores the
+    structural class + strength bonus so gold wins. RED before the fix (hub #1);
+    GREEN after (gold #1)."""
+    gold = {"path": "src/gold.py", "components": {"sem": 0.5}}
+    hub = {"path": "src/hub.py", "components": {"lex": 0.3, "path": 0.2}}
+
+    out = _apply_evidence_rrf(
+        [hub, gold],
+        witness_verified_by_file={"src/gold.py": True},
+        loc_rank_by_file={"src/gold.py": 0},
+    )
+    paths = [r["path"] for r in out]
+    assert paths[0] == "src/gold.py", f"hub out-sorted verified gold: {paths}"
+    # The stamp is written onto the record so downstream consumers see it.
+    assert out[0].get("witness_verified") is True
+    assert out[0].get("_loc_rank") == 0
+
+
+def test_rrf_genuinely_hollow_set_returns_empty() -> None:
+    """Correct-or-quiet invariant preserved: a set with NO real evidence AND no
+    recall/neighbor/bridge marker still returns [] (the empty-proof gate must be
+    able to halt, not deliver noise)."""
+    hollow = [{"path": "src/noise.py", "components": {"lex": 0.0, "sem": 0.0}}]
+    assert _apply_evidence_rrf(hollow) == []

@@ -1,0 +1,20 @@
+{
+  "id": "is-002",
+  "category": "invented-symbol",
+  "language": "typescript",
+  "description": "Invented 'fetchUser' — should be 'getUserById' from users/queries",
+  "input": {
+    "code": "import { fetchUser } from './users/queries';\n\nconst user = await fetchUser(42);",
+    "filePath": "src/routes/users.ts",
+    "intent": "fetch a user by their ID"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "ai_semantic",
+    "correctSymbol": "getUserById",
+    "correctImport": "src/users/queries",
+    "shouldRequireAI": true,
+    "briefingWouldPrevent": true
+  }
+}

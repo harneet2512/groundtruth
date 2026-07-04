@@ -1,0 +1,84 @@
+{
+  "cases": [
+    {
+      "id": "ho_go_caddy_lastmod_etag",
+      "language": "go",
+      "repo": "caddy",
+      "issue_text": "Consider dropping ETag / Last-Modified generation for files where epoch <= mtime <= epoch+1\n\nNot letting clients do caching at all is a better failure mode than encouraging clients to cache things that aren't safely cacheable. When content doesn't have a meaningful mtime, generating an ETag off that mtime leads to absurd results (effectively leaving file size as the only cache-invalidation key). As a special case, an mtime of 0 or 1 (seconds since the UNIX epoch) is clearly not meaningful. A safeguard that skips ETag/Last-Modified generation for such unusable modification times would mean clients re-fetch rather than serve stale, out-of-date data.",
+      "gold_files": [
+        "modules/caddyhttp/fileserver/staticfiles.go"
+      ]
+    },
+    {
+      "id": "ho_go_traefik_endpointslice_changes",
+      "language": "go",
+      "repo": "traefik",
+      "issue_text": "Detect EndpointSlice condition changes\n\nAny EndpointSlice update (annotation ticks from co-resident controllers, or condition transitions with no address change) currently triggers a full O(Ingresses x paths) rebuild. A rebuild should only fire when fields actually consumed change: ports, endpoint addresses, and the Ready/Serving/Terminating tri-state. Updates that merely bump metadata/resourceVersion should be ignored. The condition comparison must treat nil/true/false as distinct, because Serving/Terminating drive server filtering and Fenced, and Ready drives TCP/UDP/Gateway, so dropping a condition-only transition would be a correctness bug.",
+      "gold_files": [
+        "pkg/provider/kubernetes/k8s/event_handler.go"
+      ]
+    },
+    {
+      "id": "ho_go_hugo_npm_stale_warning",
+      "language": "go",
+      "repo": "hugo",
+      "issue_text": "False warning regarding out of sync dependencies\n\nAfter running `hugo mod npm pack` followed by `npm install`, running `hugo` still emits:\n\n    WARN  npm dependencies are out of sync, please run \"hugo mod npm pack\" (you may also want to run \"npm install\" after that)\n\nPacking a second time and re-running hugo makes the warning disappear, but it should not appear in the first place when the dependencies are actually in sync. Tested with v0.162.0, but it has likely been there for a while.",
+      "gold_files": [
+        "modules/npm/package_builder.go"
+      ]
+    },
+    {
+      "id": "ho_go_prometheus_currentsamples_histograms",
+      "language": "go",
+      "repo": "prometheus",
+      "issue_text": "promql: incorrect currentSamples accounting for native histograms in matrixIterSlice\n\nThe currentSamples counter that backs the per-query sample limit is not adjusted correctly when native histograms drop out of the front of a matrix selection range. Native histograms count as more than one sample, so when matrixIterSlice trims points that have fallen outside the range it must decrement currentSamples by the histogram's size rather than by one. Otherwise the engine over-counts samples for ranged queries over native histograms and can spuriously hit the query sample limit.",
+      "gold_files": [
+        "promql/engine.go"
+      ]
+    },
+    {
+      "id": "ho_go_echo_proxy_nil_balancer_panic",
+      "language": "go",
+      "repo": "echo",
+      "issue_text": "Proxy middleware can panic when the balancer has no targets\n\nProxyWithConfig can panic when the balancer has no targets. The built-in balancers return nil when their target list is empty. The proxy middleware then passes that nil target to proxyHTTP / proxyRaw, which can panic. One way to hit this is to remove the last target with RemoveTarget at runtime. I expected the middleware to return a proxy error such as 502 Bad Gateway through the configured error handler, instead of panicking on the next request.",
+      "gold_files": [
+        "middleware/proxy.go"
+      ]
+    },
+    {
+      "id": "ho_go_gorm_serializer_nil_field_panic",
+      "language": "go",
+      "repo": "gorm",
+      "issue_text": "Panic saving a struct with nil value field and json serializer\n\nWhen I save a struct that has a json-serializer field with a nil value, gorm panics:\n\n    panic: runtime error: invalid memory address or nil pointer dereference\n    [signal SIGSEGV: segmentation violation code=0x1 addr=0x18]\n    gorm.io/gorm/schema.(*Field).setupValuerAndSetter.func17(...)\n            /gorm/schema/field.go:964\n    gorm.io/gorm/callbacks.ConvertToAssignments(...)\n            /gorm/callbacks/update.go:288\n\nWhen both the field value and the serializer are nil for an any-typed field, the code calls Serializer.Scan() on a nil serializer. It should set the field to its zero value instead.",
+      "gold_files": [
+        "schema/field.go"
+      ]
+    }
+  ],
+  "repos": {
+    "caddy": {
+      "url": "https://github.com/caddyserver/caddy",
+      "commit": "704394d9d18e9fdcae2202117a617b4e50ef32f2"
+    },
+    "traefik": {
+      "url": "https://github.com/traefik/traefik",
+      "commit": "43cad79453e0e404c31adad46a33bee67768aada"
+    },
+    "hugo": {
+      "url": "https://github.com/gohugoio/hugo",
+      "commit": "21e9868fe28c3a00eb49a4a2d98bc0aa5d302b0b"
+    },
+    "prometheus": {
+      "url": "https://github.com/prometheus/prometheus",
+      "commit": "24582595efe2adad0f1c052c87b3fd4ad1339703"
+    },
+    "echo": {
+      "url": "https://github.com/labstack/echo",
+      "commit": "d17c907c24fad76621a644b3448a3e423de45afc"
+    },
+    "gorm": {
+      "url": "https://github.com/go-gorm/gorm",
+      "commit": "6e7eb0a07326fd20533a79022ea9a08237356d65"
+    }
+  }
+}

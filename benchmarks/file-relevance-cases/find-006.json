@@ -1,0 +1,8 @@
+{
+  "id": "find-006",
+  "language": "typescript",
+  "task": "improve error handling across the app by extending AppError",
+  "entry_symbols": ["AppError", "NotFoundError"],
+  "expected_files": ["src/utils/errors.ts"],
+  "should_not_include": ["src/utils/dates.ts"]
+}

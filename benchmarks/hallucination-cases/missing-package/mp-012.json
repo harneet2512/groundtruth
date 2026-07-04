@@ -1,0 +1,17 @@
+{
+  "id": "mp-012",
+  "category": "missing-package",
+  "description": "Import uuid (not in package.json)",
+  "input": {
+    "code": "import { v4 as uuidv4 } from 'uuid';\n\nconst id = uuidv4();",
+    "filePath": "src/app.ts"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "package_not_installed",
+    "fixType": "none",
+    "correctSymbol": "uuid",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": false
+  }
+}

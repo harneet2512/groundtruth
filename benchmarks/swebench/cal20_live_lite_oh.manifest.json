@@ -1,0 +1,31 @@
+{
+  "dataset": "SWE-bench-Live/SWE-bench-Live",
+  "split": "lite",
+  "seed": 42,
+  "n": 20,
+  "total_pool_size": 300,
+  "pool_hash": "af069e9f2ae0264a",
+  "selected": [
+    "aws-cloudformation__cfn-lint-3817",
+    "aws-cloudformation__cfn-lint-3821",
+    "aws-cloudformation__cfn-lint-3855",
+    "aws-cloudformation__cfn-lint-3856",
+    "conan-io__conan-17129",
+    "conan-io__conan-17266",
+    "conan-io__conan-17326",
+    "conan-io__conan-17517",
+    "cyclotruc__gitingest-134",
+    "flexget__flexget-4306",
+    "instructlab__instructlab-2526",
+    "instructlab__instructlab-2572",
+    "instructlab__instructlab-2927",
+    "ipython__ipython-14838",
+    "kedro-org__kedro-4580",
+    "pylint-dev__pylint-10240",
+    "pypsa__pypsa-1091",
+    "shapely__shapely-2224",
+    "streamlink__streamlink-6338",
+    "tox-dev__tox-3409"
+  ],
+  "generated_at": "2026-04-21T03:28:28.843694+00:00"
+}

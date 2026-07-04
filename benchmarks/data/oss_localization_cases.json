@@ -1,0 +1,227 @@
+[
+  {
+    "id": "ext2_go_gozero_rest_engine",
+    "language": "go",
+    "repo": "go-zero",
+    "issue_text": "REST engine route registration should attach middleware in the expected order and avoid duplicate handlers. The fix belongs in the REST engine.",
+    "gold_files": [
+      "rest/engine.go"
+    ]
+  },
+  {
+    "id": "ext2_go_gozero_zrpc_client",
+    "language": "go",
+    "repo": "go-zero",
+    "issue_text": "zrpc client creation should apply target endpoints and dial options consistently when using discovered services. The change belongs in zrpc client setup.",
+    "gold_files": [
+      "zrpc/client.go"
+    ]
+  },
+  {
+    "id": "ext2_go_grpc_balancer_picker",
+    "language": "go",
+    "repo": "grpc-go",
+    "issue_text": "Balancer pickers should report transient failures and ready sub connections without dropping done callbacks. The change belongs in balancer interfaces.",
+    "gold_files": [
+      "balancer/balancer.go"
+    ]
+  },
+  {
+    "id": "ext2_go_grpc_http2_client_transport",
+    "language": "go",
+    "repo": "grpc-go",
+    "issue_text": "HTTP2 client transport should handle keepalive pings and stream quota updates without leaking streams. The fix belongs in the HTTP2 client transport.",
+    "gold_files": [
+      "internal/transport/http2_client.go"
+    ]
+  },
+  {
+    "id": "ext2_go_grpc_resolver_builder",
+    "language": "go",
+    "repo": "grpc-go",
+    "issue_text": "Resolver builders should update target endpoints and service config consistently when resolver state changes. The fix belongs in resolver interfaces and state handling.",
+    "gold_files": [
+      "resolver/resolver.go"
+    ]
+  },
+  {
+    "id": "ext2_js_express_application_settings",
+    "language": "javascript",
+    "repo": "express",
+    "issue_text": "Application settings inheritance should preserve enabled and disabled values when mounting a sub application. The fix belongs in application setup logic.",
+    "gold_files": [
+      "lib/application.js"
+    ]
+  },
+  {
+    "id": "ext2_js_express_factory_exports",
+    "language": "javascript",
+    "repo": "express",
+    "issue_text": "The Express factory should expose Router, request, and response prototypes consistently without mutating shared exports. The fix belongs in the express module entrypoint.",
+    "gold_files": [
+      "lib/express.js"
+    ]
+  },
+  {
+    "id": "ext2_js_express_init_middleware",
+    "language": "javascript",
+    "repo": "express",
+    "issue_text": "Initialization middleware should attach request and response prototypes to each request without leaking state between apps. The fix belongs in init middleware.",
+    "gold_files": [
+      "lib/middleware/init.js"
+    ]
+  },
+  {
+    "id": "ext2_js_express_utils_etag",
+    "language": "javascript",
+    "repo": "express",
+    "issue_text": "ETag and freshness utilities should normalize weak and strong validators consistently. The change belongs in shared Express utilities, not request or response methods.",
+    "gold_files": [
+      "lib/utils.js"
+    ]
+  },
+  {
+    "id": "ext2_js_express_view_lookup",
+    "language": "javascript",
+    "repo": "express",
+    "issue_text": "View lookup should resolve template extensions and root directories correctly when multiple view paths are configured. The fix belongs in view resolution.",
+    "gold_files": [
+      "lib/view.js"
+    ]
+  },
+  {
+    "id": "ext2_py_geopandas_file_io_driver",
+    "language": "python",
+    "repo": "geopandas",
+    "issue_text": "Reading and writing geospatial files chooses the wrong driver options when a path-like object and layer name are supplied. The fix belongs in file IO handling.",
+    "gold_files": [
+      "geopandas/io/file.py"
+    ]
+  },
+  {
+    "id": "ext2_py_geopandas_geodataframe_overlay",
+    "language": "python",
+    "repo": "geopandas",
+    "issue_text": "GeoDataFrame overlay and geometry column handling produce incorrect output when attributes are preserved across spatial operations. The fix belongs in GeoDataFrame behavior, not plotting or file IO.",
+    "gold_files": [
+      "geopandas/geodataframe.py"
+    ]
+  },
+  {
+    "id": "ext2_py_geopandas_geoseries_crs",
+    "language": "python",
+    "repo": "geopandas",
+    "issue_text": "GeoSeries coordinate reference system transformations should preserve geometry metadata when applying unary operations. The change belongs in GeoSeries implementation.",
+    "gold_files": [
+      "geopandas/geoseries.py"
+    ]
+  },
+  {
+    "id": "ext2_py_privacyidea_hotp_counter",
+    "language": "python",
+    "repo": "privacyidea",
+    "issue_text": "HOTP token validation should update the counter correctly when look-ahead succeeds and avoid accepting reused counters. The fix belongs in the HOTP token implementation.",
+    "gold_files": [
+      "privacyidea/lib/tokens/hotptoken.py"
+    ]
+  },
+  {
+    "id": "ext2_py_privacyidea_policy_scope",
+    "language": "python",
+    "repo": "privacyidea",
+    "issue_text": "Policy matching applies the wrong scope when user resolver and realm restrictions are combined. The change belongs in policy evaluation logic.",
+    "gold_files": [
+      "privacyidea/lib/policy.py"
+    ]
+  },
+  {
+    "id": "ext2_rust_bytes_buf_chain",
+    "language": "rust",
+    "repo": "bytes",
+    "issue_text": "Chained buffers should advance across the first and second buffer correctly when one side is exhausted. The fix belongs in the Buf chain adapter.",
+    "gold_files": [
+      "src/buf/chain.rs"
+    ]
+  },
+  {
+    "id": "ext2_rust_bytes_buf_take",
+    "language": "rust",
+    "repo": "bytes",
+    "issue_text": "Taking a limited view of a buffer should clamp remaining bytes and prevent over-advance. The fix belongs in the take adapter.",
+    "gold_files": [
+      "src/buf/take.rs"
+    ]
+  },
+  {
+    "id": "ext2_rust_bytes_fmt_hex",
+    "language": "rust",
+    "repo": "bytes",
+    "issue_text": "Hex formatting should pad and group bytes correctly when rendering debug output for byte slices. The fix belongs in hex formatting.",
+    "gold_files": [
+      "src/fmt/hex.rs"
+    ]
+  },
+  {
+    "id": "ext2_rust_clap_arg_matches",
+    "language": "rust",
+    "repo": "clap",
+    "issue_text": "ArgMatches should report value sources and occurrence counts correctly after parsing grouped short flags. The fix belongs in parsed argument matches.",
+    "gold_files": [
+      "clap_builder/src/parser/matches/arg_matches.rs"
+    ]
+  },
+  {
+    "id": "ext2_rust_clap_command_builder",
+    "language": "rust",
+    "repo": "clap",
+    "issue_text": "Command builder configuration should preserve subcommand settings when aliases and visible aliases are combined. The fix belongs in command builder behavior.",
+    "gold_files": [
+      "clap_builder/src/builder/command.rs"
+    ]
+  },
+  {
+    "id": "ext2_ts_vue_compiler_transform",
+    "language": "typescript",
+    "repo": "core",
+    "issue_text": "Compiler transforms should preserve node source locations when replacing nested expressions. The fix belongs in compiler transform traversal.",
+    "gold_files": [
+      "packages/compiler-core/src/transform.ts"
+    ]
+  },
+  {
+    "id": "ext2_ts_vue_component_slots",
+    "language": "typescript",
+    "repo": "core",
+    "issue_text": "Component slots should normalize forwarded slot functions and preserve stable slot flags during updates. The change belongs in component slot handling.",
+    "gold_files": [
+      "packages/runtime-core/src/componentSlots.ts"
+    ]
+  },
+  {
+    "id": "ext2_ts_vue_dom_events",
+    "language": "typescript",
+    "repo": "core",
+    "issue_text": "DOM event patching should update cached invokers correctly when listener arrays and once modifiers change. The fix belongs in the runtime DOM events module.",
+    "gold_files": [
+      "packages/runtime-dom/src/modules/events.ts"
+    ]
+  },
+  {
+    "id": "ext2_ts_vue_reactivity_effect",
+    "language": "typescript",
+    "repo": "core",
+    "issue_text": "Reactive effects should stop tracking stale dependencies when nested effects are paused and resumed. The fix belongs in effect tracking logic.",
+    "gold_files": [
+      "packages/reactivity/src/effect.ts"
+    ]
+  },
+  {
+    "id": "ext2_ts_vue_renderer_patch",
+    "language": "typescript",
+    "repo": "core",
+    "issue_text": "Runtime renderer patching should preserve component subtree updates when keyed fragments move between containers. The fix belongs in runtime renderer logic.",
+    "gold_files": [
+      "packages/runtime-core/src/renderer.ts"
+    ]
+  }
+]

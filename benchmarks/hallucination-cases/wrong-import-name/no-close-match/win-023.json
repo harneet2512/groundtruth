@@ -1,0 +1,19 @@
+{
+  "id": "win-023",
+  "category": "wrong-import-name",
+  "subcategory": "no-close-match",
+  "description": "Hallucinated 'removeUser' instead of 'deleteUser'",
+  "input": {
+    "code": "import { removeUser } from './users';\n\nawait removeUser(42);",
+    "filePath": "src/app.ts",
+    "intent": "remove a user from the system"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "ai_semantic",
+    "correctSymbol": "deleteUser",
+    "shouldRequireAI": true,
+    "briefingWouldPrevent": true
+  }
+}

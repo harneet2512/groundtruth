@@ -1,0 +1,667 @@
+"""Module 1 — Issue-text anchor extraction.
+
+Extracts symbol names, file paths, and test names from an issue body using
+deterministic regex patterns. Symbols are then cross-checked against
+``nodes.name`` in graph.db so that natural-language false positives
+(e.g. ``broken``, ``implementation``) are dropped before they leak into the
+PPR seed set.
+
+Pure regex + sqlite. No LLM, no tree-sitter dependency at runtime — fenced
+code blocks are scanned with the same identifier regex as prose, which is
+sufficient for symbol surface forms (CamelCase, snake_case, dotted).
+"""
+
+from __future__ import annotations
+
+import re
+import sqlite3
+from dataclasses import dataclass, field
+
+from groundtruth.confidence import is_seed_pollutant
+
+# ----------------------------------------------------------------- regex set
+# Identifier surface forms we care about: CamelCase, snake_case, dotted (a.b.c).
+# Min length 3 to drop "is", "to", etc. Keeps leading underscore for dunder
+# attrs (``_fd``, ``__init__``).
+_IDENT_RE = re.compile(
+    r"\b([A-Za-z_][A-Za-z0-9_]{2,}(?:\.[A-Za-z_][A-Za-z0-9_]+)*)\b"
+)
+
+# Backtick-wrapped paths OR bare paths with known source extensions.
+_PATH_EXTS = (
+    r"py|pyi|js|jsx|ts|tsx|go|rs|java|kt|kts|c|h|cc|hh|cpp|hpp|"
+    r"rb|php|cs|swift|m|mm|scala|clj|ex|exs|lua|sh"
+)
+_PATH_RE = re.compile(
+    rf"(?:`([^`\n]+\.(?:{_PATH_EXTS}))`"
+    rf"|(?<![\w/])([\w./\\-]+\.(?:{_PATH_EXTS}))\b)"
+)
+
+# Forge blob/raw URLs. Issue bodies routinely link the file via a web URL
+# (``https://github.com/<owner>/<repo>/blob/<ref>/<repo-relative-path>``). The
+# bare-path branch of ``_PATH_RE`` captures the host-prefixed tail
+# (``//github.com/owner/repo/blob/main/arviz/plots/hdiplot.py``), which never
+# equals a graph ``nodes.file_path`` (stored repo-relative, e.g.
+# ``arviz/plots/hdiplot.py``) — so the path anchor silently dies. We strip the
+# host + ``<owner>/<repo>/<view>/<ref>/`` prefix and keep the repo-relative tail.
+#
+# General across forges (GitHub / GitLab / Bitbucket), not repo-specific:
+#   - GitHub/Bitbucket: ``…/blob|raw|blame|tree|src|HEAD/<ref>/<path>``
+#   - GitLab:           ``…/-/blob|raw|blame|tree|...//<ref>/<path>`` (``-/`` infix)
+# The leading ``^(?:https?:)?//[^/]+/`` anchor means this fires ONLY on real
+# URLs — a repo-relative path never starts with ``//host/`` — so legitimate
+# paths that merely contain a ``src/`` segment are untouched.
+_FORGE_BLOB_URL_RE = re.compile(
+    r"^(?:https?:)?//[^/]+/"                       # optional scheme + // + host
+    r".+?/"                                         # <owner>/<repo> (+ group nesting)
+    r"(?:-/)?(?:blob|raw|blame|tree|src|HEAD)/"     # vcs view segment (GitLab ``-/``)
+    r"[^/]+/"                                        # <ref> (branch / tag / sha)
+    r"(.+)$"                                         # repo-relative tail (captured)
+)
+# ``raw.githubusercontent.com`` has no view segment: ``/<owner>/<repo>/<ref>/<path>``.
+_RAW_GHUC_URL_RE = re.compile(
+    r"^(?:https?:)?//raw\.githubusercontent\.com/"
+    r"[^/]+/[^/]+/[^/]+/"                            # <owner>/<repo>/<ref>
+    r"(.+)$"                                         # repo-relative tail (captured)
+)
+
+
+def _normalize_forge_url(path: str) -> str:
+    """Reduce a forge blob/raw URL to its repo-relative tail; pass others through.
+
+    ``https://github.com/o/r/blob/main/pkg/mod.py#L42`` -> ``pkg/mod.py``. The
+    URL fragment (``#Lnn``) and query (``?ref=…``) are stripped from the tail so
+    it matches the graph ``file_path`` exactly. Non-URL strings are returned
+    unchanged (the anchor at the start of both patterns only matches ``//host/``).
+    """
+    for _rx in (_FORGE_BLOB_URL_RE, _RAW_GHUC_URL_RE):
+        m = _rx.match(path)
+        if m:
+            tail = m.group(1).split("#", 1)[0].split("?", 1)[0]
+            return tail or path
+    return path
+
+# Pytest-style test names (test_*, *_test).
+_TEST_NAME_RE = re.compile(r"\b(test_[A-Za-z0-9_]+|[A-Za-z0-9_]+_test)\b")
+
+# English closed-class FUNCTION words (articles, conjunctions, prepositions,
+# pronouns, auxiliaries). Language invariants that are never useful localization
+# anchors even when they collide with a node name — a cheap pre-filter before the
+# graph cross-check (and the ONLY filter on the no-DB unit path). DOMAIN words that
+# look like code (run/get/set/new/type/value/error/test/class/...) are deliberately
+# NOT here: whether they are anchors is decided by the graph cross-check + per-repo
+# symbol_specificity (see _drop_generic_hubs), not by a static blocklist. The old
+# 190-word _STOPWORDS dropped real short/domain symbols — the false-negative poison.
+_NL_FUNCTION_WORDS: frozenset[str] = frozenset({
+    "the", "and", "for", "nor", "but", "yet",
+    "this", "that", "these", "those", "there", "here",
+    "with", "without", "within", "from", "into", "onto", "over", "under",
+    "about", "after", "before", "between", "through", "during", "against",
+    "are", "was", "were", "been", "being", "has", "have", "had",
+    "will", "would", "shall", "should", "can", "could", "may", "might", "must",
+    "does", "did", "not", "yes",
+    "then", "than", "when", "where", "why", "how", "which", "what",
+    "who", "whom", "whose", "they", "them", "their", "its", "our", "your",
+    "very", "just", "only", "also", "too", "more", "most", "less",
+    "some", "any", "all", "each", "both", "few", "many", "such", "same",
+})
+
+
+# ---------------------------------------------------------------------------
+# LEXICAL-QUERY stopwords — RETAINED for query_preprocessor / query_augment,
+# where stripping English stopwords from a BM25/FTS *query* is standard, cited IR
+# practice (every IR engine ships a default stopword list). This is NOT used for
+# SYMBOL/anchor filtering any more: extract_issue_anchors uses _NL_FUNCTION_WORDS
+# + per-repo symbol_specificity (_drop_generic_hubs), because a broad list used
+# as a symbol blocklist dropped real short/domain symbols. Do NOT route anchor
+# extraction back through _STOPWORDS / _looks_like_natural_word.
+_STOPWORDS: frozenset[str] = frozenset(
+    {
+        # English filler
+        "the", "and", "for", "this", "that", "with", "from", "into", "have",
+        "has", "had", "was", "were", "will", "would", "should", "could",
+        "does", "did", "are", "but", "not", "can", "may", "might", "must",
+        "use", "used", "uses", "using", "see", "any", "all", "some", "one",
+        "two", "three", "four", "five", "ten", "now", "new", "old", "yes",
+        "off", "out", "via", "per", "non", "yet", "say", "set", "get",
+        "put", "let", "got", "make", "made", "want", "need", "give", "find",
+        "back", "down", "over", "such", "then", "than", "very", "much",
+        "more", "less", "well", "long", "high", "low", "left", "right",
+        "same", "different", "still", "even", "thus", "also", "again",
+        # issue/bug filler
+        "fix", "fixed", "fixing", "bug", "bugs", "issue", "issues",
+        "error", "errors", "fail", "fails", "failed", "failure", "failures",
+        "broken", "break", "breaks", "expected", "actual", "result",
+        "results", "value", "values", "implementation", "behavior",
+        "behaviour", "problem", "problems", "regression", "regressions",
+        "crash", "crashes", "wrong", "incorrect", "correct", "correctly",
+        "since", "before", "after", "while", "when", "where", "why", "how",
+        "what", "which", "whose", "whom",
+        # generic noun-ish
+        "test", "tests", "testing", "code", "codes", "file", "files",
+        "function", "functions", "class", "classes", "method", "methods",
+        "type", "types", "object", "objects", "exception", "exceptions",
+        "raise", "raises", "raised", "return", "returns", "returned",
+        "import", "imports", "imported", "module", "modules", "package",
+        "packages", "library", "libraries", "version", "versions",
+        # python keywords / builtins seen in prose
+        "true", "false", "none", "null", "self", "cls", "args", "kwargs",
+        "python", "java", "javascript", "typescript", "rust", "golang",
+        # boilerplate verbs
+        "called", "called", "calling", "called", "ran", "run", "running",
+        "found", "see", "look", "looking", "looked", "show", "shows",
+        "showed", "follow", "follows", "followed", "throw", "throws",
+        "thrown", "catch", "caught", "log", "logs", "logged", "print",
+        "prints", "printed",
+    }
+)
+
+
+def _looks_like_natural_word(token: str) -> bool:
+    """LEXICAL-QUERY heuristic (query_preprocessor only) — True if a token is
+    almost certainly an English word, not a symbol. NOT used for anchor extraction
+    (see _drop_generic_hubs). Heuristics: all-lower, no underscore, no digits,
+    length < 5.
+    """
+    if "_" in token:
+        return False
+    if any(c.isdigit() for c in token):
+        return False
+    if not token.islower():
+        return False
+    return len(token) < 5
+
+
+@dataclass
+class IssueAnchors:
+    """Concrete anchors extracted from an issue body.
+
+    Attributes:
+        symbols: Symbol names that ALSO exist as ``nodes.name`` in the
+            indexed graph. Natural-language false positives are dropped here.
+        paths: Repository-relative or backtick-wrapped paths mentioned
+            verbatim in the issue body. Returned as strings (not resolved
+            to graph file_paths) so the renderer can still surface a
+            user-mentioned path even if no symbol from it ranked.
+        test_names: Pytest-style test names referenced in the body
+            (e.g. ``test_storage_persists``).
+        symbols_raw: Pre-cross-check raw identifier candidates after the
+            stopword filter. Telemetry only — the orchestrator must use
+            ``symbols`` for downstream seeding.
+        symbols_pre_stopword: Identifier candidates BEFORE stopwording.
+            Telemetry only.
+    """
+
+    symbols: set[str] = field(default_factory=set)
+    paths: set[str] = field(default_factory=set)
+    test_names: set[str] = field(default_factory=set)
+    symbols_raw: set[str] = field(default_factory=set)
+    symbols_pre_stopword: set[str] = field(default_factory=set)
+    # PROVENANCE tier — the subset of ``symbols`` that appears in the issue
+    # TITLE / markdown headings (the report summary), NOT only in a fenced code
+    # block or traceback. Research: BugLocator (Zhou et al., ICSE 2012) weights
+    # the bug-report summary above the description; Schröter et al. (MSR 2010) +
+    # Moreno et al. (ICSME 2014) show the fix site is in the stack trace only
+    # ~60% of the time and rarely the top frame — so stack-frame symbols are a
+    # WEAK localization signal. Consumers rank ``title_symbols`` above the rest
+    # so a titled symbol (e.g. ``set_fields``) beats stack-frame noise
+    # (``main``/``import_asis`` from a pasted traceback).
+    title_symbols: set[str] = field(default_factory=set)
+    # CODE provenance — symbols found inside backtick-wrapped regions (inline
+    # ``code`` or fenced ``` blocks) in the issue body. The reporter explicitly
+    # marked these as code, so they are HIGH-confidence anchors. Symbols found
+    # ONLY in prose (never in backticks) that are short common words (≤5 chars,
+    # all-lowercase, no underscore) are likely English verbs coinciding with
+    # function names (``check``, ``set``, ``run``, ``add``, ``log``) — the flask-
+    # 5637 false-positive class where "check" the verb → ``check()`` in
+    # ``json/tag.py`` misdirected the ranker. Research: Reformulate, Retrieve,
+    # Localize (arXiv:2512.07022, 2025) distinguishes code mentions from prose;
+    # Query Reduction for Bug Localization (Mejia-Bernal et al., JSS 2025) shows
+    # raw keywords are noisy queries — reducing/reweighting improves precision.
+    code_symbols: set[str] = field(default_factory=set)
+    # GREENFIELD tier (2026-06-10, DeepSWE non-Python audit run 27290157847) —
+    # reporter-marked CODE tokens (backtick/fence provenance) that did NOT
+    # resolve against the graph. For feature/greenfield issues these are the
+    # MOST SPECIFIC anchors in the text (the API to BE BUILT, env vars), and
+    # the graph cross-check structurally deletes them: measured on
+    # abs-module-cache-flags, `require` / `ABS_MODULE_PATH` /
+    # `require_cache_info` / `reset_require_cache` were all raw-extracted with
+    # 0 graph nodes, so the anchor set collapsed to ["BeginRepl","clear"] and
+    # lexical rank latched onto install.go (wrong brief #1). These tokens are
+    # NEVER graph seeds (no node exists); they are the honest GREP/BM25
+    # lexical tier — `require` literally appears in evaluator/functions.go as
+    # the builtin-registration string, the exact grep the agent used to
+    # self-localize. Empty when no graph is provided (without a graph we
+    # cannot KNOW a token is unresolved — abstain).
+    unresolved_code_symbols: set[str] = field(default_factory=set)
+
+
+# Backtick-wrapped inline code: `symbol` or `module.symbol`
+_BACKTICK_CODE_RE = re.compile(r"`([^`\n]+)`")
+
+# `Type::method` qualified pairs (Rust / C++ path syntax). _IDENT_RE only spans
+# `.`-qualified forms, so a `::` pair decomposes into two bare tokens that die
+# independently (DeepSWE non-Python audit: boa's issue-named `Script::evaluate`
+# never reached _resolve_qualified_dotted; `Context` died as a homonym). The
+# pair is harvested here and confirmed through the SAME graph probes as dotted
+# pairs — correct-or-quiet, never minted from string shape alone.
+_QUALIFIED_COLON_RE = re.compile(
+    r"\b([A-Za-z_][A-Za-z0-9_]{2,})::([A-Za-z_][A-Za-z0-9_]{2,})\b"
+)
+
+# Cross-language type/keyword tokens that are never localization anchors even
+# with explicit code provenance (they appear inside backticked SIGNATURES —
+# `BeginRepl(args []string, version string)` — as parameter/type syntax, not
+# as symbols). Static by design: language syntax invariants, not domain words.
+_LANG_KEYWORD_TOKENS: frozenset[str] = frozenset({
+    "string", "str", "int", "int8", "int16", "int32", "int64", "uint",
+    "float", "float32", "float64", "double", "bool", "boolean", "void",
+    "char", "byte", "rune", "number", "object", "array", "vec", "map",
+    "list", "dict", "tuple", "option", "result", "nil", "null", "none",
+    "true", "false", "self", "cls", "this", "args", "kwargs", "argv",
+    "func", "function", "def", "let", "mut", "pub", "const", "var",
+    "class", "struct", "enum", "impl", "trait", "interface", "type",
+    "import", "from", "use", "mod", "package", "return", "yield",
+    "async", "await", "static", "public", "private", "protected",
+    "new", "make", "err", "error", "ctx", "context", "val", "key",
+})
+
+
+def _extract_code_region_identifiers(text: str) -> set[str]:
+    """Extract identifiers from backtick-wrapped and fenced-code regions only.
+
+    These are the symbols the reporter explicitly marked as code — highest-
+    confidence localization anchors. Prose words that happen to match function
+    names (``check``, ``set``) are NOT in this set unless backtick-wrapped.
+    """
+    out: set[str] = set()
+    # Inline backtick code: `request.trusted_hosts`, `check()`
+    for m in _BACKTICK_CODE_RE.finditer(text):
+        snippet = m.group(1).strip()
+        for ident_m in _IDENT_RE.finditer(snippet):
+            tok = ident_m.group(1)
+            out.add(tok)
+            if "." in tok:
+                for part in tok.split("."):
+                    if part and (len(part) >= 3 or part.startswith("_")):
+                        out.add(part)
+    # Fenced code blocks (``` ... ```)
+    for fence_m in _CODE_FENCE_RE.finditer(text):
+        block = fence_m.group(0)
+        for ident_m in _IDENT_RE.finditer(block):
+            tok = ident_m.group(1)
+            out.add(tok)
+            if "." in tok:
+                for part in tok.split("."):
+                    if part and (len(part) >= 3 or part.startswith("_")):
+                        out.add(part)
+    return out
+
+
+def _is_prose_only_common_word(sym: str, code_idents: set[str]) -> bool:
+    """True if a symbol is likely an English verb coinciding with a function name.
+
+    Gate: appears ONLY in prose (never in backtick/code), AND is short (≤5),
+    all-lowercase, no underscore. Catches: check, set, get, run, add, log, call,
+    send, load, dump, copy, move, find, sort, read, open, close, write, parse,
+    match, split, strip, join, start, stop, flush, clear, reset, apply, build.
+    """
+    if sym in code_idents:
+        return False  # explicitly marked as code — trust it
+    s = sym.lower()
+    if s != sym:
+        return False  # has uppercase — likely a real symbol (CamelCase)
+    if "_" in sym:
+        return False  # has underscore — likely a real symbol (snake_case)
+    if len(sym) > 5:
+        return False  # long enough to be distinctive
+    return True
+
+
+def _extract_raw_identifiers(text: str) -> set[str]:
+    """Pull every identifier-shaped token from the issue body.
+
+    For dotted paths (``module.Class.method``) the LAST component is added
+    in addition to the full dotted form, since the graph stores symbols by
+    their bare name.
+    """
+    out: set[str] = set()
+    for match in _IDENT_RE.finditer(text):
+        token = match.group(1)
+        out.add(token)
+        if "." in token:
+            # Add every dotted segment that on its own looks like an
+            # identifier (length >= 3 OR begins with underscore so dunder
+            # attrs like ``_fd`` survive).
+            for part in token.split("."):
+                if not part:
+                    continue
+                if len(part) >= 3 or part.startswith("_"):
+                    out.add(part)
+    return out
+
+
+# Fenced ``` code blocks (and ~~~). Stripped from the title region so a snippet
+# pasted right under the title can't leak stack frames into the high-signal tier.
+_CODE_FENCE_RE = re.compile(r"(```|~~~).*?(```|~~~)", re.DOTALL)
+
+
+def _extract_title_region(text: str) -> str:
+    """Return the high-signal TITLE / heading region of an issue.
+
+    The first non-empty line (the report summary/title) plus any markdown ATX
+    headings (``## Section``), with fenced code blocks removed. Generalised —
+    every issue has a first line, and titles/headings never contain stack
+    frames. Research: BugLocator ICSE 2012 (summary >> description), Schröter
+    MSR 2010 / Moreno ICSME 2014 (stack frames are weak fix-locators).
+    """
+    no_code = _CODE_FENCE_RE.sub(" ", text)
+    lines = no_code.splitlines()
+    region: list[str] = []
+    for ln in lines:
+        if ln.strip():
+            region.append(ln.strip().lstrip("#").strip())  # title = first non-empty line
+            break
+    for ln in lines:  # markdown ATX headings anywhere are section titles
+        s = ln.strip()
+        if s.startswith("#"):
+            region.append(s.lstrip("#").strip())
+    return "\n".join(region)
+
+
+def _extract_paths(text: str) -> set[str]:
+    """Pull file-path mentions from the issue body."""
+    out: set[str] = set()
+    for match in _PATH_RE.finditer(text):
+        path = match.group(1) or match.group(2)
+        if path:
+            # Normalize forge blob/raw URLs to the repo-relative tail so the
+            # path anchor matches a graph ``file_path`` (which is repo-relative).
+            out.add(_normalize_forge_url(path.strip()))
+    return out
+
+
+def _extract_test_names(text: str) -> set[str]:
+    """Pull pytest-style test function names from the issue body."""
+    return {m.group(1) for m in _TEST_NAME_RE.finditer(text)}
+
+
+def _cross_check_against_graph(
+    candidates: set[str],
+    db_path: str | None,
+) -> set[str]:
+    """Filter candidates to only those present in graph.db ``nodes.name``.
+
+    If ``db_path`` is None or unreadable, returns the input unchanged so
+    that the pipeline degrades gracefully on missing-DB tasks. Telemetry
+    will record ``graph_node_count = 0`` separately.
+    """
+    if not db_path or not candidates:
+        return set(candidates)
+    try:
+        conn = sqlite3.connect(db_path)
+        try:
+            placeholders = ",".join("?" for _ in candidates)
+            cursor = conn.execute(
+                f"SELECT DISTINCT name FROM nodes WHERE name IN ({placeholders})",
+                tuple(candidates),
+            )
+            return {row[0] for row in cursor.fetchall()}
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return set()
+
+
+def _resolve_qualified_dotted(
+    dotted_candidates: set[str],
+    db_path: str | None,
+) -> set[str]:
+    """Resolve DOTTED symbol candidates (``Class.method``, ``module.func``) that the
+    bare-name cross-check can never match — graph nodes store BARE names, so a dotted
+    token like ``Widget._refresh`` always died at ``_cross_check_against_graph`` even
+    when the issue named the defect site verbatim. Its components were then often
+    dropped independently (``_refresh`` as a homonym by ``_drop_generic_hubs``,
+    ``Widget`` likewise), so the MOST SPECIFIC anchor in the issue vanished entirely
+    (the §4 anchor-extraction defect: W_CODE_DEF never engaged).
+
+    A dotted token is KEPT iff the graph can confirm the QUALIFIED pair — i.e. the
+    qualification structurally disambiguates it (this is the opposite of a homonym:
+    ``A.b`` names exactly which ``b``). Three deterministic probes, first hit wins:
+
+      1. parent-child: a node named ``tail`` whose ``parent_id`` is a node named
+         ``qualifier`` (methods inside a class — any language the indexer parents).
+      2. qualified_name: a node whose ``qualified_name`` equals the dotted token or
+         ends with ``.qualifier.tail`` (module-qualified forms).
+      3. containment: ``qualifier`` is a Class/Interface definition and a node named
+         ``tail`` is defined in the SAME file (parsers that don't populate parent_id).
+
+    Correct-or-quiet: no DB / no hit -> the token stays dropped (never minted from
+    string shape alone). Language-agnostic: pure graph lookups, no per-language logic.
+    Research: SweRank (ICLR 2025) code-entity resolution; ORACLE-SWE 2026
+    definition-site as the strongest edit-location signal.
+    """
+    if not dotted_candidates or not db_path:
+        return set()
+    out: set[str] = set()
+    try:
+        conn = sqlite3.connect(db_path)
+    except sqlite3.Error:
+        return set()
+    try:
+        for tok in dotted_candidates:
+            parts = [p for p in tok.split(".") if p]
+            if len(parts) < 2:
+                continue
+            qualifier, tail = parts[-2], parts[-1]
+            try:
+                # 1. parent-child (method defined inside the named class/scope)
+                hit = conn.execute(
+                    "SELECT 1 FROM nodes c JOIN nodes p ON c.parent_id = p.id "
+                    "WHERE c.name = ? AND p.name = ? LIMIT 1",
+                    (tail, qualifier),
+                ).fetchone()
+                # 2. qualified_name exact / suffix match
+                if not hit:
+                    hit = conn.execute(
+                        "SELECT 1 FROM nodes WHERE qualified_name = ? "
+                        "OR qualified_name LIKE ? LIMIT 1",
+                        (tok, f"%.{qualifier}.{tail}"),
+                    ).fetchone()
+                # 3. same-file containment (qualifier class defined + tail in its file)
+                if not hit:
+                    hit = conn.execute(
+                        "SELECT 1 FROM nodes p JOIN nodes c ON c.file_path = p.file_path "
+                        "WHERE p.name = ? AND p.label IN ('Class','Interface') "
+                        "AND c.name = ? AND c.id != p.id LIMIT 1",
+                        (qualifier, tail),
+                    ).fetchone()
+                if hit:
+                    out.add(tok)
+            except sqlite3.Error:
+                continue
+    finally:
+        conn.close()
+    return out
+
+
+def _drop_generic_hubs(symbols: set[str], db_path: str | None) -> set[str]:
+    """Suppress graph-resolved anchors that would POLLUTE seeding — the dynamic +
+    confidence-gated replacement for the static symbol blocklist.
+
+    DROP a resolved symbol iff ``is_seed_pollutant`` (confidence.py): it is a HOMONYM
+    (defined in more files than the repo's P95 definition count) or a dunder. The
+    bound is the repo's OWN 95th percentile (data-derived, no magic threshold), so
+    each repo gets its own bar. We gate on DEFINITION-frequency (Aider's production
+    genericness signal), NOT in-degree: a uniquely-defined symbol is a precise seed
+    even when highly called (in-degree conflates importance with genericness — Step-2
+    finding #1) and is merely deprioritized by symbol_specificity in RANKING. Short /
+    domain-shaped names the old _STOPWORDS / _looks_like_natural_word wrongly dropped
+    are kept.
+
+    Correct-or-quiet: no DB / <=1 symbol -> keep unchanged; never let the gate empty
+    the anchor set (fall back to the full resolved set so downstream ranking can
+    re-weight rather than the agent being blinded).
+    """
+    if not db_path or len(symbols) <= 1:
+        return set(symbols)
+    try:
+        conn = sqlite3.connect(db_path)
+    except sqlite3.Error:
+        return set(symbols)
+    try:
+        kept = {s for s in symbols if not is_seed_pollutant(s, conn)}
+        return kept or set(symbols)
+    except sqlite3.Error:
+        return set(symbols)
+    finally:
+        conn.close()
+
+
+def extract_issue_anchors(
+    issue_text: str,
+    graph_db_path: str | None = None,
+) -> IssueAnchors:
+    """Extract symbols, file paths, and test names from issue text.
+
+    Args:
+        issue_text: Raw issue body (markdown / plaintext).
+        graph_db_path: Path to graph.db. If provided, symbols are
+            cross-checked against ``nodes.name`` and only matches survive.
+            If ``None``, no cross-check is performed (used in unit tests
+            that don't need a DB).
+
+    Returns:
+        IssueAnchors with both filtered (``symbols``) and pre-filter
+        (``symbols_raw``, ``symbols_pre_stopword``) views, for telemetry.
+    """
+    if not issue_text:
+        return IssueAnchors()
+
+    raw_idents = _extract_raw_identifiers(issue_text)
+
+    after_filter: set[str] = set()
+    for tok in raw_idents:
+        # Drop ONLY English closed-class function words (dotted-tail aware). Domain /
+        # short / code-shaped tokens pass through to the graph cross-check + per-repo
+        # specificity gate, which decide by data — not by a blocklist.
+        head = tok.split(".")[-1] if "." in tok else tok
+        if head.lower() in _NL_FUNCTION_WORDS:
+            continue
+        after_filter.add(tok)
+
+    resolved = _cross_check_against_graph(after_filter, graph_db_path)
+    resolved = _drop_generic_hubs(resolved, graph_db_path)
+
+    # QUALIFIED dotted anchors (fix 2026-06-10 — §4 anchor-extraction defect):
+    # a dotted token (``Class.method`` / ``module.func``) can never survive the
+    # bare-name cross-check (nodes store bare names) and its components are often
+    # independently dropped as homonyms — so the issue's MOST SPECIFIC anchor
+    # vanished and W_CODE_DEF (the strongest localization weight) never engaged.
+    # Resolve the QUALIFIED pair against the graph (parent-child / qualified_name /
+    # same-file containment); a confirmed pair is kept and is EXEMPT from the
+    # generic-hub gate — qualification structurally disambiguates (it is the
+    # opposite of a homonym). Correct-or-quiet: unconfirmed dotted tokens stay out.
+    _qualified_dotted = _resolve_qualified_dotted(
+        {t for t in after_filter if "." in t and t not in resolved},
+        graph_db_path,
+    )
+    resolved |= _qualified_dotted
+
+    # `Type::method` qualified pairs (2026-06-10, DeepSWE non-Python audit):
+    # Rust/C++ path syntax decomposes under _IDENT_RE into two bare tokens that
+    # die independently (boa: `Script::evaluate` never reached the qualified
+    # probes; `Context` died as a homonym). Harvest `A::b`, normalize to the
+    # dotted form, and confirm through the SAME graph probes — a confirmed pair
+    # is exempt from the generic-hub/prose gates exactly like a confirmed
+    # dotted pair (qualification disambiguates). Unconfirmed pairs stay out.
+    _colon_pairs = {
+        f"{m.group(1)}.{m.group(2)}"
+        for m in _QUALIFIED_COLON_RE.finditer(issue_text)
+    }
+    _colon_confirmed = _resolve_qualified_dotted(
+        {t for t in _colon_pairs if t not in resolved}, graph_db_path,
+    )
+    _qualified_dotted |= _colon_confirmed
+    resolved |= _colon_confirmed
+
+    # PROVENANCE tier (BugLocator ICSE 2012; Schröter MSR 2010): the resolved
+    # symbols that also occur in the TITLE / heading region are the high-signal
+    # localization anchors; everything else (body + pasted traceback) is the
+    # weak tier. Consumers rank title_symbols first so stack-frame pollution
+    # (main/import_asis/apply_choice…) no longer ties with the titled target.
+    _title_idents = _extract_raw_identifiers(_extract_title_region(issue_text))
+    title_symbols = {s for s in resolved if s in _title_idents}
+
+    # CODE provenance (Reformulate, Retrieve, Localize arXiv:2512.07022, 2025;
+    # Query Reduction for Bug Localization Mejia-Bernal et al. JSS 2025):
+    # symbols the reporter explicitly backtick-wrapped are code references.
+    # Symbols found ONLY in prose that are short common words (≤5, lowercase,
+    # no underscore) are likely English verbs — downweight them so a verb like
+    # "check" in "configure and check trusted_hosts" doesn't seed a false graph
+    # witness to json/tag.py::check() (the flask-5637 mislocalization).
+    _code_idents = _extract_code_region_identifiers(issue_text)
+    code_symbols = {s for s in resolved if s in _code_idents}
+    # Remove prose-only common words from the main anchor set. They stay in
+    # symbols_raw for telemetry but don't seed the graph localizer. This is
+    # STRONGER than downweighting — a false seed produces a false witness that
+    # the ranker amplifies. Correct-or-quiet: remove the seed, don't let it
+    # propagate. The code_symbols set preserves any backtick-wrapped short word
+    # (if the reporter wrote `check()` explicitly, it stays).
+    #
+    # EXCEPTION: a graph-confirmed symbol that is NOT a seed pollutant (uniquely
+    # defined, not a homonym) is exempt from the prose filter. The graph cross-
+    # check is stronger evidence than string shape. This keeps domain-specific
+    # short keywords (auth, sync, emit, flex, csrf, cors) that are real symbols
+    # with unique definitions, while still stripping ambiguous homonyms like
+    # "check" (20 definitions, generic verb). Research: BLUiR ASE 2013 —
+    # identifier specificity outweighs surface form.
+    _graph_confirmed_unique: set[str] = set()
+    if graph_db_path:
+        try:
+            _gc_conn = sqlite3.connect(graph_db_path)
+            try:
+                _graph_confirmed_unique = {
+                    s for s in resolved
+                    if not is_seed_pollutant(s, _gc_conn)
+                }
+            finally:
+                _gc_conn.close()
+        except sqlite3.Error:
+            pass
+    _prose_demoted: set[str] = set()
+    for s in list(resolved):
+        if s in _graph_confirmed_unique or s in _qualified_dotted:
+            # graph says it's uniquely defined / a confirmed qualified pair —
+            # trust the graph (qualification disambiguates; never shape-demote it)
+            continue
+        if _is_prose_only_common_word(s, _code_idents):
+            _prose_demoted.add(s)
+            resolved.discard(s)
+
+    # GREENFIELD tier (2026-06-10): reporter-marked code tokens that resolved
+    # to NOTHING in the graph. Only meaningful WITH a graph (without one we
+    # cannot know a token is unresolved — abstain, keep empty). Language
+    # type/keyword tokens (from backticked signatures) and closed-class words
+    # are excluded; dotted composites are skipped (their components are
+    # handled individually; confirmed pairs already live in `symbols`).
+    unresolved_code_symbols: set[str] = set()
+    if graph_db_path:
+        for tok in _code_idents:
+            if "." in tok or tok in resolved:
+                continue
+            low = tok.lower()
+            if low in _NL_FUNCTION_WORDS or low in _LANG_KEYWORD_TOKENS:
+                continue
+            unresolved_code_symbols.add(tok)
+
+    return IssueAnchors(
+        symbols=resolved,
+        paths=_extract_paths(issue_text),
+        test_names=_extract_test_names(issue_text),
+        symbols_raw=after_filter,
+        symbols_pre_stopword=raw_idents,
+        title_symbols=title_symbols,
+        code_symbols=code_symbols,
+        unresolved_code_symbols=unresolved_code_symbols,
+    )

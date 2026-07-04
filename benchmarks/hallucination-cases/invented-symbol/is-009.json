@@ -1,0 +1,20 @@
+{
+  "id": "is-009",
+  "category": "invented-symbol",
+  "language": "python",
+  "description": "Invented 'register_user' — should be 'create_user' from users.queries",
+  "input": {
+    "code": "from users.queries import register_user\n\nnew_user = register_user({\"name\": \"Alice\"})",
+    "filePath": "src/routes/users.py",
+    "intent": "register a new user account"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "ai_semantic",
+    "correctSymbol": "create_user",
+    "correctImport": "src/users/queries",
+    "shouldRequireAI": true,
+    "briefingWouldPrevent": true
+  }
+}

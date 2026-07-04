@@ -1,0 +1,19 @@
+{
+  "id": "win-002",
+  "category": "wrong-import-name",
+  "subcategory": "close-match",
+  "description": "Typo: 'lgout' instead of 'logout' (distance 1)",
+  "input": {
+    "code": "import { lgout } from './auth';\n\nawait lgout(token);",
+    "filePath": "src/app.ts",
+    "intent": "log out a user session"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "levenshtein",
+    "correctSymbol": "logout",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

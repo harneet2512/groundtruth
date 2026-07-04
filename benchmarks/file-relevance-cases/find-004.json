@@ -1,0 +1,8 @@
+{
+  "id": "find-004",
+  "language": "typescript",
+  "task": "refactor database client to use connection pooling",
+  "entry_symbols": ["db"],
+  "expected_files": ["src/db/client.ts"],
+  "should_not_include": ["src/utils/dates.ts"]
+}

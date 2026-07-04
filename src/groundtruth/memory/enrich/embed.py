@@ -1,0 +1,637 @@
+"""Configurable ONNX embedding pipeline (code-tuned default, e5 fallback).
+
+The PRETASK-LOCALIZATION embedder identity is single-sourced here: ``get_embedding_model``
+defaults to ``GT_EMBED_MODEL_NAME`` / ``GT_EMBED_DIM`` (and, when both are unset, to the
+code-tuned ``DEFAULT_EMBED_MODEL`` / ``DEFAULT_EMBED_DIM`` below). The sqlite-vec MEMORY
+store is a SEPARATE subsystem pinned to e5/384 via ``MemoryConfig`` — it always passes its
+own explicit ``model_name``/``dim`` to ``embed_query``/``embed_passage``/``insert_embedding``,
+so flipping the localization default here never migrates the memory vectors.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import os
+import time
+import threading
+from collections import OrderedDict
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+import numpy as np
+
+if TYPE_CHECKING:
+    import onnxruntime as ort
+    from tokenizers import Tokenizer
+
+# GT_MODELS_ROOT lets a baked image point the embedder at its pre-fetched models
+# (e.g. /opt/groundtruth/models) even when GT itself is pip-installed from a different
+# checkout — so a `container:` job doesn't re-download the model. Falls back to the
+# repo-relative models/ dir when unset.
+_MODELS_ROOT = (
+    Path(os.environ["GT_MODELS_ROOT"])
+    if os.environ.get("GT_MODELS_ROOT")
+    else Path(__file__).parent.parent.parent.parent.parent / "models"
+)
+
+# ---------------------------------------------------------------------------
+# Single-sourced PRETASK-LOCALIZATION embedder identity (CHANGE 2)
+# ---------------------------------------------------------------------------
+# The DeepSWE benchmark is polyglot (TS/Go/Rust/JS/Python; ~70% non-Python), so the
+# localization embedder is code-tuned + multilingual, NOT general-text e5. Default to
+# Alibaba-NLP/gte-modernbert-base (Apache-2.0, 149M, 768-dim, ONNX published incl int8;
+# ModernBERT => NO token_type_ids input, CLS pooling, symmetric / no query-passage prefix).
+# Both env vars override the default so an image can pin a different OPEN model with $0 / no
+# API. The sqlite-vec memory store does NOT read these — it stays on e5/384 (MemoryConfig).
+DEFAULT_EMBED_MODEL = "Alibaba-NLP/gte-modernbert-base"
+DEFAULT_EMBED_DIM = 768
+
+# e5 stays a first-class citizen as the runtime fallback (both baked during transition).
+E5_MODEL = "intfloat/e5-small-v2"
+E5_DIM = 384
+
+# Models whose tokenizer/ONNX use e5-style query:/passage: prefixes AND mean pooling.
+# Everything else (gte-modernbert, jina-code, ...) is symmetric: no prefix, CLS pooling.
+_E5_FAMILY = {"intfloat/e5-small-v2", "intfloat/e5-base-v2", "intfloat/e5-large-v2"}
+
+# Code-retrieval embedders that use MEAN pooling (not the gte/ModernBERT CLS default).
+# jina-embeddings-v2-base-code (BERT+ALiBi; Jina's sentence-transformers config pools by
+# mean over the attention mask, symmetric so no query/passage prefix). Registering it here
+# makes get_embedding_model pick mean pooling automatically when GT_EMBED_MODEL_NAME selects
+# it — the Track-2 code-embedder A/B lever (behavior->code recall + ranking).
+_MEAN_POOL_FAMILY = {
+    "jinaai/jina-embeddings-v2-base-code",
+    "jina-embeddings-v2-base-code",
+}
+
+# BUG-7 (2026-06-15): per-symbol passages are short (~80 tokens) and tokenize at
+# the 128-token window. But the ISSUE QUERY is long — it names the failing file,
+# symbols, and stack frames in its tail — and capping it at 128 discarded exactly
+# those discriminating hints (measured cosine-to-gold 0.866 -> 0.617). Decouple the
+# two windows: keep ~128 for symbol passages (bounds activation memory) and tokenize
+# the query at a model-appropriate larger window (e5 supports 512; gte/ModernBERT
+# supports 8192 — we use 1024 to bound the single-row query activation).
+_PASSAGE_TOKEN_WINDOW = 128
+_E5_QUERY_TOKEN_WINDOW = 512
+_GTE_QUERY_TOKEN_WINDOW = 1024
+
+# GT_PASSAGE_WIDE (default OFF): the per-SYMBOL passage window (_PASSAGE_TOKEN_WINDOW =
+# 128) is memory-conservative and was tuned for the RETIRED e5 encoder. The current
+# default embedder (gte-modernbert-base) supports 8192 and the QUERY side already uses
+# 1024. When this flag is ON, the passage window widens to 256 for the gte/ModernBERT
+# family ONLY (non-e5) so a per-symbol passage keeps more body vocabulary; e5 (512-max,
+# mean-pool) is left at its conservative 128 window. OFF -> byte-identical to today.
+# The activation-MEMORY budget (exit-137) and cos-to-gold lift are ENV-gated (ONNX embed
+# env) -> Phase-4; only the window selection + byte-identical-off are offline-provable.
+_PASSAGE_TOKEN_WINDOW_WIDE = 256
+
+
+def _passage_wide() -> bool:
+    """Read GT_PASSAGE_WIDE at CALL time (never import-time) so a test/harness toggling
+    it is honoured; default OFF (correct-or-quiet: any non-truthy value == today)."""
+    return os.environ.get("GT_PASSAGE_WIDE", "") not in ("", "0", "false", "no")
+
+
+def _encode_batch_size() -> int:
+    """Passages per ``session.run`` chunk (bounds peak activation memory, exit-137).
+
+    An explicit ``GT_EMBED_ENCODE_BATCH`` always wins (unchanged). Otherwise the default
+    is 32 — HALVED to 16 under GT_PASSAGE_WIDE, because a wide (256-token) passage batch
+    allocates ~2x the per-passage activation of the default (128-token) batch; halving
+    the batch keeps peak activation within the SAME budget the exit-137 guard bounds
+    (16*256 == 32*128). OFF -> 32, byte-identical to the pre-change literal. Read at CALL
+    time so a harness toggling the flag is honoured; a malformed override falls back to
+    the flag-aware default (correct-or-quiet)."""
+    raw = os.environ.get("GT_EMBED_ENCODE_BATCH")
+    if raw is not None:
+        try:
+            return max(1, int(raw))
+        except (TypeError, ValueError):
+            pass
+    return 16 if _passage_wide() else 32
+
+
+def _is_e5_model(model: "EmbeddingModel") -> bool:
+    return getattr(model, "model_name", None) in _E5_FAMILY
+
+
+def _passage_token_window(model: "EmbeddingModel") -> int:
+    """The truncation window for a per-SYMBOL passage (bounded, memory-safe).
+
+    Default 128. When GT_PASSAGE_WIDE is ON, the gte/ModernBERT family (non-e5) widens
+    to 256; e5 stays at 128 (its conservative memory window is preserved). Mirrors the
+    e5-vs-non-e5 split already used by ``_query_token_window``."""
+    if _passage_wide() and not _is_e5_model(model):
+        return _PASSAGE_TOKEN_WINDOW_WIDE
+    return _PASSAGE_TOKEN_WINDOW
+
+
+def _query_token_window(model: "EmbeddingModel") -> int:
+    """The truncation window for the ISSUE QUERY — strictly larger than the passage
+    window so the file/symbol hints in the issue tail survive tokenization. e5 caps
+    at 512 (its max positions); gte/ModernBERT uses 1024 (well within its 8192)."""
+    return _E5_QUERY_TOKEN_WINDOW if model.model_name in _E5_FAMILY else _GTE_QUERY_TOKEN_WINDOW
+
+
+def _default_embed_model() -> str:
+    return os.environ.get("GT_EMBED_MODEL_NAME") or DEFAULT_EMBED_MODEL
+
+
+def _default_embed_dim() -> int:
+    raw = os.environ.get("GT_EMBED_DIM")
+    if raw:
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            pass
+    # When only the name is overridden, keep dim consistent with the known model.
+    name = os.environ.get("GT_EMBED_MODEL_NAME")
+    if name == E5_MODEL:
+        return E5_DIM
+    return DEFAULT_EMBED_DIM
+
+
+class EmbeddingModel:
+    """Lazy-loading ONNX embedding model (model-aware prefix + pooling + ONNX inputs).
+
+    Two model families are supported by the SAME code path:
+      * e5 family (mean pooling, ``query:``/``passage:`` prefixes, token_type_ids declared)
+      * code-tuned / ModernBERT family (CLS pooling, NO prefix, NO token_type_ids input)
+    The pooling and prefix behaviour are selected from ``model_name``; the ONNX input names
+    are INTROSPECTED at load time so a model whose graph does not declare ``token_type_ids``
+    (ModernBERT) is never fed one (the load-bearing fix for CHANGE 2)."""
+
+    def __init__(
+        self,
+        model_name: str,
+        dim: int,
+        prefix_query: str | None = None,
+        prefix_passage: str | None = None,
+        pooling: str | None = None,
+    ) -> None:
+        self.model_name = model_name
+        self.dim = dim
+        _is_e5 = model_name in _E5_FAMILY
+        # Prefix: e5 needs query:/passage:; everything else is symmetric (no prefix).
+        self.prefix_query = prefix_query if prefix_query is not None else ("query: " if _is_e5 else "")
+        self.prefix_passage = prefix_passage if prefix_passage is not None else ("passage: " if _is_e5 else "")
+        # Pooling: e5 + jina-code = mean (over attention mask); gte/ModernBERT = CLS ([:,0]).
+        self.pooling = pooling if pooling is not None else (
+            "mean" if (_is_e5 or model_name in _MEAN_POOL_FAMILY) else "cls"
+        )
+        self._session: "ort.InferenceSession | None" = None
+        self._tokenizer: "Tokenizer | None" = None
+        # The exact input names the loaded ONNX graph declares (introspected once).
+        self._input_names: list[str] = []
+        self._last_used = 0.0
+        self._lock = threading.Lock()
+
+    @property
+    def model_dir(self) -> Path:
+        return _MODELS_ROOT / self.model_name.split("/")[-1]
+
+    def _resolve_onnx_path(self) -> Path:
+        """Pick the ONNX file: model.onnx, else a quantized/int8 variant if that is all
+        that was baked (setup_models writes model.onnx, but an int8-only image is valid)."""
+        d = self.model_dir
+        primary = d / "model.onnx"
+        if primary.exists():
+            return primary
+        for alt in ("model_int8.onnx", "model_quantized.onnx", "model_uint8.onnx"):
+            if (d / alt).exists():
+                return d / alt
+        return primary  # report the canonical name in the FileNotFoundError below
+
+    def _ensure_loaded(self) -> tuple["ort.InferenceSession", "Tokenizer"]:
+        with self._lock:
+            if self._session is not None and self._tokenizer is not None:
+                self._last_used = time.monotonic()
+                return self._session, self._tokenizer
+
+            import onnxruntime as ort_mod
+            from tokenizers import Tokenizer as Tok
+
+            onnx_path = self._resolve_onnx_path()
+            tok_path = self.model_dir / "tokenizer.json"
+            if not onnx_path.exists():
+                raise FileNotFoundError(f"ONNX model not found at {onnx_path}. Run: python scripts/setup_models.py")
+
+            tokenizer = Tok.from_file(str(tok_path))
+            # BUG (latent, pre-GT_PASSAGE_WIDE): these two lines HARDCODED 128, ignoring
+            # _passage_token_window(). Off that is a no-op (window==128) but it silently
+            # capped the initial padding/truncation at 128 even when the window widened.
+            # Drive BOTH off the window fn so padding stays == truncation (a rectangular
+            # passage batch; a longer sequence than the pad length would otherwise ragged
+            # np.array). OFF -> _pw == 128 -> byte-identical to the old literals. NOTE: this
+            # is only the INITIAL value — _embed_chunk re-asserts BOTH padding and
+            # truncation per encode (== that encode's window), so a flag flipped AFTER load
+            # can never desync padding from truncation. Reading the flag here is retained
+            # so a load with the flag already set starts consistent.
+            _pw = _passage_token_window(self)
+            tokenizer.enable_padding(length=_pw)
+            tokenizer.enable_truncation(max_length=_pw)
+
+            self._tokenizer = tokenizer
+            self._session = ort_mod.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+            # Introspect the declared inputs ONCE. ModernBERT's ONNX declares only
+            # input_ids + attention_mask (no token_type_ids); e5's declares all three.
+            # Feeding an input the graph does not declare raises in onnxruntime, so we
+            # build the feed dict from THIS set, never unconditionally.
+            self._input_names = [i.name for i in self._session.get_inputs()]
+            # BUG-10 (2026-06-15): self.dim is config METADATA that can disagree with
+            # the model's true output width (a name-only override leaves dim at the
+            # default; a wrong GT_EMBED_DIM lies). The cache-staleness check and the
+            # zero-fallback width key off self.dim, so a lie corrupts both. Re-derive
+            # dim from the ONNX graph's declared output width after load; warn (never
+            # crash) on a mismatch — the ONNX is the source of truth.
+            try:
+                _out_shape = self._session.get_outputs()[0].shape
+                _true_dim = _out_shape[-1] if _out_shape else None
+                if isinstance(_true_dim, int) and _true_dim > 0 and _true_dim != self.dim:
+                    import warnings as _warnings
+                    _warnings.warn(
+                        f"embedder dim mismatch for {self.model_name}: declared "
+                        f"{self.dim}, ONNX output width {_true_dim}; using {_true_dim}",
+                        RuntimeWarning, stacklevel=2,
+                    )
+                    self.dim = int(_true_dim)
+            except Exception:
+                pass  # introspection best-effort — never block a load on it
+            self._last_used = time.monotonic()
+            return self._session, self._tokenizer
+
+    def unload(self) -> None:
+        with self._lock:
+            self._session = None
+            self._tokenizer = None
+
+    def maybe_unload(self, idle_seconds: int = 600) -> None:
+        if self._session is not None and (time.monotonic() - self._last_used) > idle_seconds:
+            self.unload()
+
+    def _embed_prefixed(self, texts: list[str], *, is_query: bool = False) -> list[list[float]]:
+        # Chunked encode: ONE session.run over N=thousands of passages allocates
+        # N x seq x hidden x layers of activations (~1.8MB/passage measured) — a 4096-passage
+        # budget = ~7.3GB anon-rss, OOM-killed in capped containers (proven live,
+        # astropy-13236 repro 2026-06-10) and the killer of the 8-par VM sweep box.
+        # Passages pad/truncate to the passage window (128, or 256 under GT_PASSAGE_WIDE).
+        # The QUERY (is_query) uses the larger query window (BUG-7) and is always a SINGLE
+        # row, so its activation is bounded even at the wider window. The batch is HALVED
+        # under GT_PASSAGE_WIDE (_encode_batch_size) so a 256-token batch's ~2x activation
+        # stays within the same exit-137 budget as the default 128-token batch.
+        out: list[list[float]] = []
+        B = _encode_batch_size()
+        for i in range(0, len(texts), B):
+            out.extend(self._embed_chunk(texts[i:i + B], is_query=is_query))
+        return out
+
+    def _embed_chunk(self, texts: list[str], *, is_query: bool = False) -> list[list[float]]:
+        session, tokenizer = self._ensure_loaded()
+        # BUG-7 (2026-06-15): tokenize the QUERY at the larger query window and
+        # passages at the (smaller) passage window. enable_truncation is stateful on
+        # the shared tokenizer, so set it under the model lock around the encode so a
+        # concurrent passage encode cannot race the query's wider window onto a
+        # passage batch (or vice versa).
+        #
+        # DESYNC FIX: PADDING is set at CALL time here (== this encode's window), not
+        # ONCE at load. The load-time padding read GT_PASSAGE_WIDE at load; if a harness
+        # loaded the model with the flag OFF (padding fixed at 128) then flipped it ON,
+        # passages truncated to 256 but padded to 128 -> a batch with 256-token and
+        # 128-token rows -> a RAGGED np.array below. Driving padding off the SAME window
+        # as truncation, every encode, keeps the batch rectangular regardless of when the
+        # flag flipped. Padding tokens are attention-masked, so a wider pad never changes
+        # a vector (byte-identical); both are restored to the passage default afterwards.
+        _passage_window = _passage_token_window(self)
+        _window = _query_token_window(self) if is_query else _passage_window
+        with self._lock:
+            try:
+                tokenizer.enable_truncation(max_length=_window)
+                # PADDING is always the PASSAGE window, for BOTH roles. For a passage
+                # encode _window == _passage_window, so padding == truncation and the
+                # multi-row batch is rectangular (the G4 desync fix, unchanged). For a
+                # QUERY encode, padding to the (much larger) query window would
+                # (a) change flag-OFF behavior — the pre-change code kept padding fixed
+                # at the 128 passage window for queries, and pad-to-512/1024 multiplies
+                # a short query's ONNX compute ~4-8x while leaning on the export's
+                # masking for bit-exactness — and (b) buy nothing: a query is a SINGLE
+                # row, always rectangular. Pad-at-passage-window is byte-identical to
+                # the pre-change behavior on every flag-OFF path (F12).
+                tokenizer.enable_padding(length=_passage_window)
+            except Exception:
+                pass
+            encoded = tokenizer.encode_batch(texts)
+            try:
+                # restore the passage default so a later passage encode is unaffected.
+                tokenizer.enable_truncation(max_length=_passage_window)
+                tokenizer.enable_padding(length=_passage_window)
+            except Exception:
+                pass
+        input_ids = np.array([e.ids for e in encoded], dtype=np.int64)
+        attention_mask = np.array([e.attention_mask for e in encoded], dtype=np.int64)
+
+        # Feed ONLY the inputs the ONNX graph declares. ModernBERT (gte/jina-code) has no
+        # token_type_ids tensor — feeding one raises "Unexpected input"; e5 has all three.
+        feed: dict[str, np.ndarray] = {}
+        if "input_ids" in self._input_names:
+            feed["input_ids"] = input_ids
+        if "attention_mask" in self._input_names:
+            feed["attention_mask"] = attention_mask
+        if "token_type_ids" in self._input_names:
+            feed["token_type_ids"] = np.zeros_like(input_ids, dtype=np.int64)
+        # Some exports name it position_ids etc.; only token_type_ids is the known variant.
+
+        outputs = session.run(None, feed)
+        token_embeddings = outputs[0]  # (batch, seq, hidden)
+        if self.pooling == "cls":
+            # CLS pooling ([:, 0]) — the gte-modernbert / jina-code recipe.
+            pooled = token_embeddings[:, 0]
+        else:
+            # Mean pooling over the attention mask — the e5 recipe.
+            mask_expanded = np.expand_dims(attention_mask, axis=-1).astype(np.float32)
+            pooled = np.sum(token_embeddings * mask_expanded, axis=1) / np.clip(
+                mask_expanded.sum(axis=1), 1e-9, None
+            )
+        normalized = pooled / np.clip(np.linalg.norm(pooled, axis=1, keepdims=True), 1e-12, None)
+        return [vec.tolist() for vec in normalized]
+
+    def embed(self, text: str, is_query: bool = False) -> list[float]:
+        # BUG-8: the role comes from the explicit is_query flag — never inferred from
+        # batch size — and is threaded all the way to the tokenization window.
+        prefix = self.prefix_query if is_query else self.prefix_passage
+        return self._embed_prefixed([f"{prefix}{text}"], is_query=is_query)[0]
+
+    def embed_batch(self, texts: list[str], is_query: bool = False) -> list[list[float]]:
+        prefix = self.prefix_query if is_query else self.prefix_passage
+        return self._embed_prefixed(
+            [f"{prefix}{text}" for text in texts], is_query=is_query
+        )
+
+
+_models: dict[tuple[str, int], EmbeddingModel] = {}
+
+
+def get_embedding_model(model_name: str | None = None, dim: int | None = None) -> EmbeddingModel:
+    """Return the cached EmbeddingModel for (model_name, dim).
+
+    With NO args (the PRETASK-LOCALIZATION call sites: anchor_select, graph_localizer,
+    v7_4_brief, proof/context self-checks) this resolves to the CHANGE-2 code-tuned default
+    (``GT_EMBED_MODEL_NAME``/``GT_EMBED_DIM`` -> gte-modernbert-base / 768). The sqlite-vec
+    MEMORY store NEVER calls this no-arg — it passes its own e5/384 via embed_query/passage —
+    so the memory subsystem is unaffected by the localization default flip."""
+    if model_name is None:
+        model_name = _default_embed_model()
+    if dim is None:
+        dim = _default_embed_dim()
+    key = (model_name, dim)
+    if key not in _models:
+        _models[key] = EmbeddingModel(model_name=model_name, dim=dim)
+    return _models[key]
+
+
+def unload() -> None:
+    for model in _models.values():
+        model.unload()
+
+
+def maybe_unload(idle_seconds: int = 600) -> None:
+    for model in _models.values():
+        model.maybe_unload(idle_seconds)
+
+
+def embed_query(text: str, model_name: str = "intfloat/e5-small-v2", dim: int = 384) -> list[float]:
+    return get_embedding_model(model_name, dim).embed(text, is_query=True)
+
+
+def embed_passage(text: str, model_name: str = "intfloat/e5-small-v2", dim: int = 384) -> list[float]:
+    return get_embedding_model(model_name, dim).embed(text, is_query=False)
+
+
+def embed_batch(passages: list[str], model_name: str = "intfloat/e5-small-v2", dim: int = 384) -> list[list[float]]:
+    return get_embedding_model(model_name, dim).embed_batch(passages, is_query=False)
+
+
+# ---------------------------------------------------------------------------
+# Symbol-level semantic granularity (CHANGE 1)
+# ---------------------------------------------------------------------------
+#
+# A file embedded as ONE vector from a concatenated symbol-bag averages the gold
+# function into its 60 siblings, so sibling files in a licensed repo cluster at
+# cosine 0.80-0.84 (measured mad=0.0145) and the semantic ranker cannot separate
+# the file that actually contains the issue function. The fix is to embed each
+# symbol as its own short passage and score a file by the MAX cosine over its
+# symbols plus a small top-k mean. This is exactly the ColBERT MaxSim late-
+# interaction (Khattab & Zaharia, SIGIR 2020) + passage-level MaxP aggregation
+# (Dai & Callan, SIGIR 2019): a document is relevant if its single best passage
+# matches the query, not if its average passage does. Pure functions here so both
+# localization paths (anchor_select.semantic_top_k and
+# graph_localizer._semantic_score_by_file) share ONE implementation and ONE cache
+# key — no per-language or per-task logic.
+
+# Per-symbol passage token cap (~80 tokens). The model truncates at 128 tokens
+# (see _ensure_loaded), so 80 tokens of "name signature\n<body snippet>" stays
+# inside the window while leaving headroom for the "passage: " prefix.
+SYMBOL_PASSAGE_TOKEN_CAP = 80
+# A token is ~4 chars for code identifiers; cap the passage CHARACTERS so the
+# tokenizer rarely has to truncate. 80 tokens * ~5 chars/token ≈ 400 chars.
+_SYMBOL_PASSAGE_CHAR_CAP = SYMBOL_PASSAGE_TOKEN_CAP * 5
+
+
+def _symbol_passage_char_cap() -> int:
+    """The character cap for a per-symbol passage. Default 400 (≈80 tokens, the today
+    value). Under GT_PASSAGE_WIDE the wider 256-token window can carry ~2x the text, so
+    the char cap is raised proportionally (×2 == 800) — but ONLY for the window-widening
+    (non-e5) family, matching ``_passage_token_window`` (which widens the WINDOW for
+    non-e5 only). Gating the cap on the active localization embedder keeps e5 truly
+    byte-identical under the flag: e5's window stays 128, so its passage TEXT must not
+    grow to 800 chars (which would pull chars 400–640 — tokens ~80–128 — into e5's
+    128-token window and CHANGE its vector). symbol_passage has no model argument, so
+    the active model is read from ``_default_embed_model`` (the model these passages are
+    embedded by). OFF -> 400 (byte-identical)."""
+    if _passage_wide() and _default_embed_model() not in _E5_FAMILY:
+        return _SYMBOL_PASSAGE_CHAR_CAP * (_PASSAGE_TOKEN_WINDOW_WIDE // _PASSAGE_TOKEN_WINDOW)
+    return _SYMBOL_PASSAGE_CHAR_CAP
+
+
+def read_agg_params() -> tuple[float, int]:
+    """Read the (alpha, top_k) aggregation parameters from the environment.
+
+    ``GT_SEM_AGG_ALPHA`` (default 0.7) weights MAX vs top-k mean.
+    ``GT_SEM_TOPK`` (default 3) bounds the mean term.
+    Malformed values fall back to the defaults (correct-or-quiet: never crash a
+    brief on a typo'd env var)."""
+    alpha = 0.7
+    top_k = 3
+    raw_alpha = os.environ.get("GT_SEM_AGG_ALPHA")
+    if raw_alpha is not None:
+        try:
+            alpha = float(raw_alpha)
+        except (TypeError, ValueError):
+            alpha = 0.7
+    raw_k = os.environ.get("GT_SEM_TOPK")
+    if raw_k is not None:
+        try:
+            top_k = int(raw_k)
+        except (TypeError, ValueError):
+            top_k = 3
+    # Clamp to sane ranges. alpha in [0,1]; top_k >= 1.
+    alpha = min(1.0, max(0.0, alpha))
+    top_k = max(1, top_k)
+    return alpha, top_k
+
+
+def symbol_passage(name: str, signature: str, body_snippet: str = "") -> str:
+    """Build the per-symbol passage ``"{name} {signature}\\n{body_snippet}"``.
+
+    Returns ``""`` when name+signature+body are all blank (correct-or-quiet — a
+    blank symbol is NEVER embedded). The result is character-capped to stay
+    within the model's 128-token window after the e5 ``passage:`` prefix."""
+    head = f"{(name or '').strip()} {(signature or '').strip()}".strip()
+    body = (body_snippet or "").strip()
+    if not head and not body:
+        return ""
+    passage = f"{head}\n{body}".strip() if body else head
+    return passage[:_symbol_passage_char_cap()]
+
+
+def passage_hash(
+    passage: str, model_name: str, dim: int, version: str, *, is_query: bool = False
+) -> str:
+    """Content-addressed cache key for a single symbol vector.
+
+    Keyed on (version, model, dim, ROLE, passage_text) so a vector is reused across
+    runs/graphs whenever the same TEXT is embedded by the same model IN THE SAME ROLE
+    — and is automatically invalidated when any of those change.
+
+    BUG-8 (2026-06-15): the role (query vs passage) is folded into the key. On the e5
+    family the SAME text gets a different vector depending on whether it carried the
+    ``query:`` or ``passage:`` prefix, so without the role in the key a query-prefixed
+    vector (e.g. a single-row batch the old len==1 heuristic mis-prefixed) would
+    COLLIDE with — and poison — the passage entry in the shared LRU. The role tag
+    keeps the two roles in separate cache slots. Default ``is_query=False`` keeps
+    every existing passage call site byte-identical (same hash as before).
+
+    GT_PASSAGE_WIDE (2026-07-03): a wide-window (256) gte PASSAGE vector must never
+    collide with the default (128) entry for the same text in the shared LRU. Fold a
+    window SALT into the key that fires ONLY for a non-e5 PASSAGE under the flag — so
+    a query key, an e5 key, and (crucially) every key when the flag is OFF stay
+    BYTE-IDENTICAL to today, while a wide gte passage lands in its own slot."""
+    role = "q" if is_query else "p"
+    salt = _passage_cache_salt(model_name, is_query)
+    sig = f"{version}:{model_name}:{dim}:{role}:{salt}{passage}"
+    return hashlib.sha256(sig.encode("utf-8")).hexdigest()
+
+
+def _passage_cache_salt(model_name: str, is_query: bool) -> str:
+    """Window salt for the passage cache key. Empty (byte-identical to today) except for
+    a non-e5 PASSAGE under GT_PASSAGE_WIDE, whose window differs (256 vs 128). Queries
+    (window unchanged by the flag) and e5 (window stays 128) are never salted, so their
+    vectors keep sharing the existing cache entries."""
+    if not is_query and _passage_wide() and model_name not in _E5_FAMILY:
+        # NUL separator: a text passage can never contain \x00, so a salted ON key
+        # can never collide with an OFF passage that happens to start with this literal.
+        return f"w{_PASSAGE_TOKEN_WINDOW_WIDE}\x00"
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# Shared content-addressed passage-vector cache (encode-blowup fix 2026-06-09)
+# ---------------------------------------------------------------------------
+# Run 27249519544: 29/113 tasks SIGKILL (exit 137) during BRIEF generation because
+# graph_localizer._semantic_score_by_file re-encoded EVERY witnessed candidate
+# file's per-symbol passages — hundreds of files × ≤80 passages per task — with NO
+# cache. gt_gt §11.2 prescribes "cache by node-content hash"; this is that cache,
+# single-sourced HERE (per the module contract above: both semantic halves share
+# ONE implementation and ONE cache key) so a file scored by BOTH halves
+# (anchor_select.semantic_top_k and graph_localizer._semantic_score_by_file)
+# within one task is encoded exactly once.
+
+# The single version tag folded into every passage_hash. Bump when the passage
+# CONTENT shape changes (it started life as anchor_select._SUMMARY_VERSION, which
+# now aliases this constant so the two halves can never drift apart).
+PASSAGE_CACHE_VERSION = "sym2-fn"
+
+
+class _PassageVecCache(OrderedDict):
+    """Bounded LRU dict mapping ``passage_hash`` -> float32 vector.
+
+    Plain dict API (``in`` / ``[k]`` / ``.get`` / ``.clear``) so the existing
+    anchor_select call sites work unchanged; inserts and reads refresh recency,
+    and inserts evict the least-recently-used entries past ``maxsize`` — the
+    unbounded growth of the old per-module dict is what compounded the OOM kills
+    on big repos. ``maxsize <= 0`` disables eviction (explicit opt-out only)."""
+
+    def __init__(self, maxsize: int) -> None:
+        super().__init__()
+        self.maxsize = int(maxsize)
+
+    def __getitem__(self, key):
+        value = super().__getitem__(key)
+        self.move_to_end(key)
+        return value
+
+    def get(self, key, default=None):
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def __setitem__(self, key, value) -> None:
+        super().__setitem__(key, value)
+        self.move_to_end(key)
+        while self.maxsize > 0 and len(self) > self.maxsize:
+            self.popitem(last=False)
+
+
+def _passage_cache_max() -> int:
+    """``GT_SYMVEC_CACHE_MAX``: max cached passage vectors (default 100_000 ≈
+    300MB worst-case at 768-dim float32). Malformed values fall back to the
+    default (correct-or-quiet: never crash a brief on a typo'd env var)."""
+    raw = os.environ.get("GT_SYMVEC_CACHE_MAX")
+    if raw:
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            pass
+    return 100_000
+
+
+_PASSAGE_VEC_CACHE = _PassageVecCache(_passage_cache_max())
+
+
+def model_identity(model: object) -> tuple[str, int]:
+    """Best-effort (model_name, dim) for the passage cache key — shared by BOTH
+    semantic halves so identical passages hash identically everywhere. Defaults
+    to the CONFIGURED localization embedder identity when the adapter does not
+    expose them, so the content-addressed key flips with the model and stale
+    foreign-model vectors are never reused."""
+    name = getattr(model, "model_name", None)
+    if not name:
+        inner = getattr(model, "_m", None)
+        name = getattr(inner, "model_name", None)
+    dim = getattr(model, "dim", None)
+    if dim is None:
+        inner = getattr(model, "_m", None)
+        dim = getattr(inner, "dim", None)
+    return (str(name or _default_embed_model()), int(dim or _default_embed_dim()))
+
+
+def aggregate_symbol_cosines(cosines: list[float], *, alpha: float, top_k: int) -> float:
+    """Aggregate per-symbol cosines into ONE file score in [0, 1].
+
+    ``file_score = alpha * max_i(cos_i) + (1 - alpha) * mean(top_k cos_i)``,
+    with ``k = min(top_k, n)``. ColBERT MaxSim (max term) + MaxP top-k mean.
+
+    Inputs are cosines of UNIT vectors so each is in [-1, 1]; negative cosines
+    are floored at 0 (correct-or-quiet: a symbol that points AWAY from the issue
+    is no evidence, not negative evidence, and the score must stay commensurate
+    with W_LEX/reach which live in [0, 1]). Empty input -> 0.0."""
+    if not cosines:
+        return 0.0
+    clipped = [c if c > 0.0 else 0.0 for c in cosines]
+    mx = max(clipped)
+    k = min(top_k, len(clipped))
+    topk = sorted(clipped, reverse=True)[:k]
+    mean_topk = sum(topk) / len(topk) if topk else 0.0
+    score = alpha * mx + (1.0 - alpha) * mean_topk
+    # Numerically pin into [0,1] (rounding could nudge a max=1.0 cosine to 1+eps).
+    return min(1.0, max(0.0, score))

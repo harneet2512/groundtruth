@@ -1,0 +1,40 @@
+{
+  "trajectory": [
+    {
+      "action": "str_replace_editor create /testbed/src/groundtruth/auth/login.py --file_text 'def verify_password(token):\\n    return None\\n'",
+      "thought": "Initial scaffold.",
+      "state": {
+        "gt_evidence": "<gt-evidence file='src/groundtruth/auth/login.py'>\n[CALLER] verify_password is referenced from src/groundtruth/auth/middleware.py:42 inside check_credentials\n[TYPE] verify_password must return Optional[UserSession] — see src/groundtruth/auth/types.py:18\nTARGET: verify_password (src/groundtruth/auth/login.py:55)\nCALLED BY: check_credentials (src/groundtruth/auth/middleware.py:42)\n</gt-evidence>"
+      }
+    },
+    {
+      "action": "execute_bash",
+      "thought": "Inspecting verify_password call sites.",
+      "observation": "grep verify_password src/"
+    },
+    {
+      "action": "str_replace_editor str_replace /testbed/src/groundtruth/auth/middleware.py --old_str 'token = None' --new_str 'token = extract_bearer(headers)'",
+      "thought": "Rewire extract_bearer through middleware.",
+      "state": {
+        "gt_evidence": "<gt-evidence file='src/groundtruth/auth/middleware.py'>\n[CALLER] extract_bearer is referenced from src/groundtruth/handlers/api.py:201 inside route_request\n[SIBLING] strip_prefix and parse_jwt are sibling helpers in src/groundtruth/auth/jwt_utils.py\n[IMPACT] 4 callers across src/groundtruth/handlers/, src/groundtruth/auth/\nTARGET: extract_bearer (src/groundtruth/auth/middleware.py:88)\n</gt-evidence>"
+      }
+    },
+    {
+      "action": "execute_bash",
+      "thought": "Confirming extract_bearer is reachable.",
+      "observation": "python -c 'import src.groundtruth.auth.middleware'"
+    },
+    {
+      "action": "str_replace_editor insert /testbed/src/groundtruth/handlers/api.py --insert_line 200 --new_str 'route_request(request, dispatcher)'",
+      "thought": "Insert route_request dispatcher binding.",
+      "state": {
+        "gt_evidence": "<gt-evidence file='src/groundtruth/handlers/api.py'>\n[CALLER] route_request is referenced from src/groundtruth/server/main.py:55 inside serve_forever\n[SIBLING] dispatcher and middleware_chain are sibling helpers in src/groundtruth/handlers/dispatch.py\n[IMPACT] 9 callers across src/groundtruth/server/, src/groundtruth/handlers/\nTARGET: route_request (src/groundtruth/handlers/api.py:201)\nCALLED BY: serve_forever (src/groundtruth/server/main.py:55)\n</gt-evidence>"
+      }
+    },
+    {
+      "action": "execute_bash",
+      "thought": "Smoke test route_request dispatcher.",
+      "observation": "pytest tests/handlers/test_api.py::test_route_request -v"
+    }
+  ]
+}
