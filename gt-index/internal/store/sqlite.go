@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -240,6 +241,20 @@ func createSchema(db *sql.DB) error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_cochanges_a ON cochanges(file_a);
 	CREATE INDEX IF NOT EXISTS idx_cochanges_b ON cochanges(file_b);
+
+	-- DCC (Dynamic Concern Consensus) set-form co-change. SEPARATE from the legacy
+	-- pair table cochanges above (which stays bit-for-bit): stores, for each
+	-- base-ancestor commit touching <=50 files, the SET of member paths plus the
+	-- commit-hash witness. No scores / decay / caps -- pure set membership. The
+	-- Python DCC producer reads the git-provenance axis from here; absence (an old
+	-- graph) simply leaves that axis empty (correct-or-quiet).
+	CREATE TABLE IF NOT EXISTS cochange_sets (
+		commit_hash TEXT NOT NULL,
+		file_path TEXT NOT NULL,
+		PRIMARY KEY(commit_hash, file_path)
+	);
+	CREATE INDEX IF NOT EXISTS idx_cochange_sets_file ON cochange_sets(file_path);
+	CREATE INDEX IF NOT EXISTS idx_cochange_sets_commit ON cochange_sets(commit_hash);
 
 	-- C7 (RF-4): transitive-closure sidecar over VERIFIED edges only.
 	-- A row (source_id, target_id, depth, min_confidence) means source_id
@@ -723,6 +738,46 @@ func (d *DB) BatchInsertCochanges(pairs map[[2]string]int) error {
 		if _, err := stmt.Exec(pair[0], pair[1], count); err != nil {
 			tx.Rollback()
 			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// BatchInsertCochangeSets inserts set-form co-change membership in one transaction.
+// sets maps a commit hash to the member file paths that commit touched (set-form,
+// no scores). Rows are (commit_hash, file_path); INSERT OR IGNORE keeps the
+// (commit_hash, file_path) primary key unique. SEPARATE from BatchInsertCochanges
+// — the legacy pair table is never touched.
+func (d *DB) BatchInsertCochangeSets(sets map[string][]string) error {
+	if len(sets) == 0 {
+		return nil
+	}
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	stmt, err := tx.Prepare("INSERT OR IGNORE INTO cochange_sets (commit_hash, file_path) VALUES (?, ?)")
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	defer stmt.Close()
+	// DETERMINISM: iterate commits in SORTED order, never Go map-range order. SQLite
+	// assigns rowids in insertion order, so a randomized map range makes two indexings
+	// of the SAME repo produce byte-DIFFERENT graph.db files (invariant: graph.db is
+	// byte-identical across two indexings). Files within a commit keep their given
+	// order (git-log --name-only order, already deterministic per commit).
+	hashes := make([]string, 0, len(sets))
+	for h := range sets {
+		hashes = append(hashes, h)
+	}
+	sort.Strings(hashes)
+	for _, commit := range hashes {
+		for _, f := range sets[commit] {
+			if _, err := stmt.Exec(commit, f); err != nil {
+				tx.Rollback()
+				return err
+			}
 		}
 	}
 	return tx.Commit()

@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	sitter "github.com/smacker/go-tree-sitter"
 
@@ -608,6 +609,7 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 			// Extract calls from this function's body.
 			// childByFieldOrType falls back to node-TYPE scanning for zero-field
 			// grammars (Kotlin), where ChildByFieldName(BodyField) is always nil.
+			callsBefore := len(result.Calls)
 			bodyNode := childByFieldOrType(node, spec.BodyField)
 			if bodyNode != nil {
 				extractCalls(bodyNode, sf, src, result, idx)
@@ -617,6 +619,16 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 
 			// Extract properties (guard clauses, exception types, return shape)
 			extractProperties(node, sf, src, result, idx)
+
+			// C2a: mine the semantic-passage body channels (string_literals / body_terms /
+			// calls) — the domain vocabulary the name+signature passage lacks. Gated behind
+			// GT_SEM_BODY so graph.db is BYTE-IDENTICAL when off; is_test symbols are excluded
+			// at source (leak=0). result.Calls[callsBefore:] is exactly THIS node's direct
+			// calls (extractCalls does not descend into named nested funcs; nested walkNode
+			// runs after this line).
+			if !isTest && semBodyMiningEnabled() {
+				extractBodyChannels(node, sf, src, result, idx, result.Calls[callsBefore:len(result.Calls)])
+			}
 
 			// Extract assertions from test functions
 			if isTest {
@@ -2640,6 +2652,292 @@ func extractDataFlow(node *sitter.Node, bodyNode *sitter.Node, spec *specs.Spec,
 			Value:      p + " -> " + strings.Join(uses, " | "),
 			Line:       line,
 			Confidence: 0.8,
+		})
+	}
+}
+
+// ── C2a: semantic-passage body channels (GT_SEM_BODY-gated) ─────────────────
+//
+// The semantic passage (graph_localizer._semantic_score_by_file) is built from
+// name+signature+behavioral-props — it lacks the DOMAIN VOCABULARY ("Redis", "TLS",
+// "handshake") that lives in a symbol's body identifiers / strings / comments, so
+// behavior-described issues (stratum B) score ~0. These three additive property KINDS
+// carry that vocabulary INTO graph.db at index time (the right layer — no query-time
+// file I/O). Gated behind GT_SEM_BODY so graph.db stays byte-identical when off. The
+// stratum-B retrieval LIFT is ENV-gated (measure_brief.py + ONNX) => Phase-4; only the
+// CODE + byte-identical-off + channel-load-bearing are offline-provable.
+
+// Budget rails (bounded, order-preserving — NOT fact-gating thresholds).
+const (
+	bodyStringCap = 24  // max distinct string literals per symbol
+	bodyTermCap   = 48  // max distinct identifier/comment terms (mirrors the Py consumer cap)
+	bodyCallCap   = 24  // max distinct callee names per symbol
+	bodyValueLen  = 400 // per-string-value char cap (one huge literal is truncated)
+)
+
+// semBodyMiningEnabled reports whether GT_SEM_BODY is on. Read per-symbol (a cheap env
+// lookup; the value is process-constant in production) so a test toggling it is honoured.
+// Truthiness matches the Python consumer exactly: not in {"", "0", "false", "no"}.
+func semBodyMiningEnabled() bool {
+	v := os.Getenv("GT_SEM_BODY")
+	return v != "" && v != "0" && v != "false" && v != "no"
+}
+
+// isBodyStringNode reports whether a node type is a STRING literal (domain vocabulary).
+// Char/rune literals are excluded (single characters carry no vocabulary).
+func isBodyStringNode(t string) bool {
+	switch t {
+	case "string", "string_literal", "interpreted_string_literal", "raw_string_literal",
+		"concatenated_string", "template_string", "byte_string":
+		return true
+	}
+	return false
+}
+
+// isBodyCommentNode reports whether a node type is a comment (words are vocabulary).
+func isBodyCommentNode(t string) bool {
+	switch t {
+	case "comment", "line_comment", "block_comment":
+		return true
+	}
+	return false
+}
+
+// isBodyIdentifierNode reports whether a node type is an identifier (the base vocabulary).
+func isBodyIdentifierNode(t string) bool {
+	switch t {
+	case "identifier", "type_identifier", "field_identifier", "property_identifier",
+		"shorthand_property_identifier", "shorthand_property_identifier_pattern":
+		return true
+	}
+	return false
+}
+
+// signatureParamText returns the text inside a signature's FIRST balanced parenthesis
+// group (the parameter list) — or "" when there is none. Used to exclude a symbol's own
+// parameter identifiers from body_terms (they already live in the passage head) WITHOUT
+// tokenizing the whole signature string, which for Python can carry a folded-in leading
+// body comment (see the caller). Language-agnostic; no regexp.
+func signatureParamText(sig string) string {
+	i := strings.IndexByte(sig, '(')
+	if i < 0 {
+		return ""
+	}
+	depth := 0
+	for j := i; j < len(sig); j++ {
+		switch sig[j] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return sig[i+1 : j]
+			}
+		}
+	}
+	return sig[i+1:] // unbalanced -> the remainder (bounded by the signature cap)
+}
+
+// stripBodyQuotes removes surrounding quote characters from a raw string-literal slice.
+func stripBodyQuotes(s string) string {
+	s = strings.TrimSpace(s)
+	// Drop common string prefixes (Python r"", b"", f""; Rust b"") before the quote.
+	for len(s) > 0 && (s[0] == 'r' || s[0] == 'b' || s[0] == 'f' || s[0] == 'u') {
+		if len(s) > 1 && (s[1] == '"' || s[1] == '\'' || s[1] == '`') {
+			s = s[1:]
+		} else {
+			break
+		}
+	}
+	for len(s) >= 2 {
+		first, last := s[0], s[len(s)-1]
+		if (first == '"' || first == '\'' || first == '`') && first == last {
+			s = s[1 : len(s)-1]
+		} else {
+			break
+		}
+	}
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// tokenizeIdents extracts identifier-shaped tokens (>=3 chars, [A-Za-z_][A-Za-z0-9_]{2,})
+// from raw text — used for comment words and the Tier-2 raw-slice fallback. Hand-rolled
+// (no regexp import); language-agnostic.
+func tokenizeIdents(s string) []string {
+	var out []string
+	start := -1
+	isIdentStart := func(c byte) bool {
+		return c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+	}
+	isIdentCont := func(c byte) bool {
+		return isIdentStart(c) || (c >= '0' && c <= '9')
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if start < 0 {
+			if isIdentStart(c) {
+				start = i
+			}
+			continue
+		}
+		if !isIdentCont(c) {
+			if i-start >= 3 {
+				out = append(out, s[start:i])
+			}
+			start = -1
+		}
+	}
+	if start >= 0 && len(s)-start >= 3 {
+		out = append(out, s[start:])
+	}
+	return out
+}
+
+// extractBodyChannels mines string_literals, body_terms, and calls for ONE symbol.
+// Walks the whole function NODE (not just its body) so a leading comment attached to
+// the function_definition (Python attaches it there, a sibling of `block`) is captured
+// alongside body comments/identifiers/strings. Nested named function/class definitions
+// are PRUNED (their tokens belong to their own node, mirroring extractCalls' boundary).
+// Node-CLASS based (string/comment/identifier) so it generalizes to any grammar; a
+// hand-rolled identifier scan over the raw slice backs a Tier-2 grammar that exposes
+// none of those classes. Dedup + first-appearance order + capped → deterministic. The
+// `calls` channel REUSES the already-extracted call refs (no re-walk of the call AST).
+func extractBodyChannels(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, nodeIdx int, calls []CallRef) {
+	if node == nil {
+		return
+	}
+	spec := sf.Spec
+	var strs, terms []string
+	seenStr := map[string]bool{}
+	seenTerm := map[string]bool{}
+
+	// calls: dedup callee names in first-appearance order (REUSE the extracted refs).
+	// Built FIRST so the callee names can be cross-channel-deduped out of body_terms.
+	var callNames []string
+	seenCall := map[string]bool{}
+	for _, c := range calls {
+		nm := c.CalleeName
+		if nm == "" || seenCall[nm] || len(callNames) >= bodyCallCap {
+			continue
+		}
+		seenCall[nm] = true
+		callNames = append(callNames, nm)
+	}
+
+	// Cross-channel dedup (reclaim char-cap budget): a token already carried by another
+	// channel or by the passage HEAD is pure duplication in body_terms. Pre-seed the
+	// term-seen set so the walk's own `!seenTerm[w]` check silently drops:
+	//   - callee names (they are the `calls` channel), and
+	//   - the symbol's own name + every identifier in its signature (they are the passage
+	//     HEAD `{name} {signature}` the consumer prepends — so no signal is lost, only the
+	//     duplicate copy in body_terms).
+	// The `strs` channel (string VALUES, not identifiers) is untouched.
+	for _, nm := range callNames {
+		seenTerm[nm] = true
+	}
+	if nodeIdx >= 0 && nodeIdx < len(result.Nodes) {
+		self := result.Nodes[nodeIdx]
+		if self.Name != "" {
+			seenTerm[self.Name] = true
+		}
+		// Only the PARAM LIST (the first balanced parens), NOT the whole signature: for
+		// Python a leading body comment sits between `:` and the `block` node, so
+		// extractSignature's [start,body) slice can fold that comment INTO the signature
+		// string — tokenizing the whole thing would wrongly drop the comment's domain
+		// vocabulary (redis/tls/…). The parenthesized params come before any such comment.
+		for _, w := range tokenizeIdents(signatureParamText(self.Signature)) {
+			seenTerm[w] = true
+		}
+	}
+
+	var walk func(n *sitter.Node, isRoot bool)
+	walk = func(n *sitter.Node, isRoot bool) {
+		if n == nil {
+			return
+		}
+		t := n.Type()
+		// Prune nested named function/class definitions (their vocabulary is mined on
+		// their own node) — never prune the root symbol itself.
+		if !isRoot && spec != nil && (spec.IsFunctionNode(t) || spec.IsClassNode(t)) {
+			return
+		}
+		switch {
+		case isBodyStringNode(t):
+			if len(strs) < bodyStringCap {
+				v := stripBodyQuotes(n.Content(src))
+				if v != "" && !seenStr[v] {
+					if len(v) > bodyValueLen {
+						// Truncate on a RUNE boundary, never mid-sequence: a byte slice
+						// through a multibyte rune writes INVALID UTF-8 into the property
+						// value, and Python's sqlite3 (default text_factory=str) raises
+						// "Could not decode to UTF-8" on the WHOLE properties fetch —
+						// silently disabling every body channel for the repo because of
+						// one long non-ASCII literal. utf8.RuneStart walks back ≤3 bytes.
+						cut := bodyValueLen
+						for cut > 0 && !utf8.RuneStart(v[cut]) {
+							cut--
+						}
+						v = v[:cut]
+					}
+					seenStr[v] = true
+					strs = append(strs, v)
+				}
+			}
+			return // do not descend into string internals
+		case isBodyCommentNode(t):
+			for _, w := range tokenizeIdents(n.Content(src)) {
+				if len(terms) >= bodyTermCap {
+					break
+				}
+				if !seenTerm[w] {
+					seenTerm[w] = true
+					terms = append(terms, w)
+				}
+			}
+			return
+		case isBodyIdentifierNode(t):
+			w := n.Content(src)
+			if len(w) >= 3 && len(terms) < bodyTermCap && !seenTerm[w] {
+				seenTerm[w] = true
+				terms = append(terms, w)
+			}
+			return
+		}
+		for i := 0; i < int(n.ChildCount()); i++ {
+			walk(n.Child(i), false)
+		}
+	}
+	walk(node, true)
+
+	// Tier-2 fallback: a grammar exposing none of the classes yields nothing — hand-scan
+	// identifier-shaped tokens over the raw slice so the channel is never empty on a
+	// grammar we cannot introspect (correct-or-quiet: only when the walk found nothing).
+	if len(terms) == 0 && len(strs) == 0 {
+		for _, w := range tokenizeIdents(node.Content(src)) {
+			if len(terms) >= bodyTermCap {
+				break
+			}
+			if !seenTerm[w] {
+				seenTerm[w] = true
+				terms = append(terms, w)
+			}
+		}
+	}
+
+	line := int(node.StartPoint().Row) + 1
+	if len(strs) > 0 {
+		result.Properties = append(result.Properties, PropertyRef{
+			NodeIdx: nodeIdx, Kind: "string_literals", Value: strings.Join(strs, " | "), Line: line, Confidence: 1.0,
+		})
+	}
+	if len(terms) > 0 {
+		result.Properties = append(result.Properties, PropertyRef{
+			NodeIdx: nodeIdx, Kind: "body_terms", Value: strings.Join(terms, " "), Line: line, Confidence: 1.0,
+		})
+	}
+	if len(callNames) > 0 {
+		result.Properties = append(result.Properties, PropertyRef{
+			NodeIdx: nodeIdx, Kind: "calls", Value: strings.Join(callNames, " "), Line: line, Confidence: 1.0,
 		})
 	}
 }

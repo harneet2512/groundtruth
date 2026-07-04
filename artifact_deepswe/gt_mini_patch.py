@@ -84,6 +84,7 @@ except ImportError as _import_err:
         def reset(self): pass
     class _ProductLedger:
         def record(self, *a): pass
+        def to_jsonl(self): return ""
     class _ProductLedgerEntry:
         def __init__(self, **kw): pass
     class _ProductSignalOutcome:
@@ -340,6 +341,15 @@ _HOOK_TIMEOUT = int(os.environ.get("GT_HOOK_TIMEOUT", "30"))
 # in-band on its own tool output. DEFAULT-OFF: byte-identical until measure_brief
 # proves per-stratum lift (the plan's default-off-flag discipline).
 _POST_SEARCH_ON = os.environ.get("GT_POST_SEARCH", "") not in ("", "0", "false", "no")
+
+# DCC (Dynamic Concern Consensus) — when the agent's OWN action stream shows it is
+# DROWNING, append ONE set of concern-completion FACTS in-band: files that agree with
+# its confirmed footprint across >=2 INDEPENDENT provenance families (git co-change /
+# verified structure / runtime mentions), each strictly dominating every file the agent
+# ABANDONED (Wilde-Scully specificity), each carrying a verifiable witness, rendered as
+# a SET in lexicographic path order (NEVER a ranked list). DEFAULT-OFF, mirrors
+# GT_POST_SEARCH: strictly additive + byte-identical until the flag is set.
+_DCC_ON = os.environ.get("GT_DCC", "") not in ("", "0", "false", "no")
 
 # FACT gate (_DETERMINISTIC_METHODS) + stdlib-module set (_STDLIB_MODULES) are
 # imported from the Product single source at the top of this file (B1) — the
@@ -2364,15 +2374,136 @@ _GREP_VALUE_FLAGS = frozenset({
 # are VALUELESS flags; treating them as value-taking would eat the pattern and promote the
 # path operand (`grep -E TimeoutError utils` -> answers 'utils'). rg's short -E (--encoding)
 # is vanishingly rare and only costs an abstain if missed (Fable 2026-07-03).
-# fire-once per symbol per run: a re-grep for the SAME symbol is not re-answered
-# (already delivered); a NEW symbol during recovery fires fresh.
-_search_seen: set[str] = set()
+# ---------------------------------------------------------------------------
+# LISTEN LATTICE (M0+) — the post_search producer now reads the grep's RESULT
+# (empty? which paths?) as well as its COMMAND, and answers 4 classes of search
+# FAILURE with facts grep cannot produce: NAME-FOLD (morphology), BODY-ONLY
+# (vocabulary gap), NON-TARGET HITS (wrong copies), HONEST-NEGATIVE (true
+# absence). Fixed precedence, mutually exclusive. DEFAULT-OFF (GT_POST_SEARCH);
+# byte-identical when off; correct-or-quiet everywhere.
+#
+# LEDGER (replaces the old fire-once `_search_seen` set): a per-run dict keyed by
+# NORMALIZED STEM (case/camel/snake folded) so `getUser`, `get_user`, `getuser`
+# share one entry — this is how a "repeat of an already-failed stem OR a
+# fold-variant of it" (HONEST-NEGATIVE) is detected. `.clear()` (dict) is what
+# the per-attempt reset calls, same as the old set. Fields per stem:
+#   probed_forms : set[str]     — every raw operand seen for this stem
+#   probe_indices: list[int]    — the action index (_action_count) of each probe
+#   outcomes     : list[str]    — "zero"/"hit" per probe (parallel to indices)
+#   answered     : str|None     — content-hash of the LAST delivered block
+#                                 (idempotence latch — never deliver the same
+#                                 fact twice; avoids the "every obs unique -> loop"
+#                                 failure mode).
+_search_seen: dict[str, dict] = {}
+
+# RENDER-PATH budgets (Constants taxonomy): these bound HOW MUCH a BODY block
+# renders. They NEVER gate fire/no-fire (BODY fires iff its filtered match set is
+# non-empty — a set-membership predicate). Over-budget -> intersect-to-refine or
+# a count-only render; the surface still fires.
+_BODY_ENUM_CAP = 25          # max enclosing symbols to attempt to enumerate
+_BODY_RENDER_BUDGET = 1200   # max bytes of an enumerated BODY block
 
 
-def _search_pattern(cmd: str) -> str | None:
-    """Extract the search operand from a grep/rg command, ABSTAINING unless it is
-    a single bare symbol. None for a path/glob/regex/multi-token pattern
-    (correct-or-quiet: only answer what is unambiguously a symbol lookup)."""
+def _split_camel_subtokens(s: str) -> list[str]:
+    """Split a PascalCase/camelCase run into word parts. Ported verbatim from
+    graph_localizer._split_camel_subtokens (index parity with the Go indexer's
+    splitCamel in content_fts.go): boundary at a lower->Upper transition and at an
+    acronym-run->Upper+lower transition ("HTTPServer" -> HTTP, Server). ASCII range
+    tests (not str.islower/isupper) mirror the Go 'a'<=c<='z' predicate EXACTLY."""
+    if not s:
+        return []
+    out: list[str] = []
+    start = 0
+    for i in range(1, len(s)):
+        prev, cur = s[i - 1], s[i]
+        nxt = s[i + 1] if i + 1 < len(s) else ""
+        lower_to_upper = ("a" <= prev <= "z") and ("A" <= cur <= "Z")
+        acronym_end = ("A" <= cur <= "Z") and ("a" <= nxt <= "z") and ("A" <= prev <= "Z")
+        if lower_to_upper or acronym_end:
+            out.append(s[start:i])
+            start = i
+    out.append(s[start:])
+    return out
+
+
+def _stem_subtokens(sym: str) -> list[str]:
+    """Lowercased word parts of a symbol across BOTH snake_case and camelCase
+    boundaries: `get_user` / `getUser` / `GetUser` -> ['get','user']."""
+    parts: list[str] = []
+    for seg in (sym or "").split("_"):
+        for sub in _split_camel_subtokens(seg):
+            if sub:
+                parts.append(sub.lower())
+    return parts
+
+
+def _norm_stem(sym: str) -> str:
+    """Canonical fold key for the ledger: the concatenation of a symbol's
+    lowercased sub-tokens, so all case/camel/snake spellings of one identifier
+    map to ONE ledger entry (the basis of fold-variant repeat detection)."""
+    return "".join(_stem_subtokens(sym))
+
+
+def _fold_variants(sym: str) -> list[str]:
+    """Deterministic, de-duplicated morphology variants of a bare symbol used by
+    NAME-FOLD. GENERATE only — a variant asserts NOTHING until verified by exact
+    match against nodes.name (done by the caller). Includes the identity (a grep
+    can miss an indexed name via a path/filetype filter)."""
+    subs = _stem_subtokens(sym)
+    variants: list[str] = []
+
+    def add(v: str) -> None:
+        if v and v not in variants:
+            variants.append(v)
+
+    add(sym)                     # identity — grep may have missed it
+    add(sym.lower())
+    add(sym.upper())
+    if subs:
+        add("_".join(subs))                                        # snake_case
+        add("".join(subs))                                         # flatcase
+        add(subs[0] + "".join(w.capitalize() for w in subs[1:]))   # camelCase
+        add("".join(w.capitalize() for w in subs))                 # PascalCase
+        add("_".join(w.upper() for w in subs))                     # UPPER_SNAKE
+    return variants
+
+
+def _ledger_entry(stem: str) -> dict:
+    """Fetch-or-create the ledger entry for a normalized stem."""
+    e = _search_seen.get(stem)
+    if e is None:
+        e = {"probed_forms": set(), "probe_indices": [], "outcomes": [], "answered": None}
+        _search_seen[stem] = e
+    return e
+
+
+def _ledger_record(sym: str, idx: int, outcome: str) -> None:
+    """Record one probe (raw form, action index, outcome) against its stem."""
+    e = _ledger_entry(_norm_stem(sym))
+    e["probed_forms"].add(sym)
+    e["probe_indices"].append(int(idx))
+    e["outcomes"].append(outcome)
+
+
+def _ledger_already_answered(stem: str, block: str) -> bool:
+    """Idempotence: True iff this stem's LAST delivered block is byte-identical."""
+    e = _search_seen.get(stem)
+    return bool(e) and e.get("answered") == _block_hash(block)
+
+
+def _ledger_mark_answered(stem: str, block: str) -> None:
+    _ledger_entry(stem)["answered"] = _block_hash(block)
+
+
+def _block_hash(block: str) -> str:
+    """Deterministic content hash for the idempotence latch (no Date/random)."""
+    return hashlib.sha256((block or "").encode("utf-8")).hexdigest()[:16]
+
+
+def _search_operand_raw(cmd: str) -> str | None:
+    """Return the DEQUOTED pattern operand of a grep/rg command, or None. No
+    bare-symbol gate — this is the shared parse used by BOTH _search_pattern (which
+    adds the bare gate) and the ledger token accounting (_search_probe_tokens)."""
     head = (cmd or "").split("\n", 1)[0]
     m = _GREP_HEAD_RE.search(head)
     if not m:
@@ -2408,8 +2539,33 @@ def _search_pattern(cmd: str) -> str | None:
         break
     if not pat:
         return None
-    pat = pat.strip().strip("'\"")
+    return pat.strip().strip("'\"")
+
+
+def _search_pattern(cmd: str) -> str | None:
+    """Extract the search operand from a grep/rg command, ABSTAINING unless it is
+    a single bare symbol. None for a path/glob/regex/multi-token pattern
+    (correct-or-quiet: only answer what is unambiguously a symbol lookup)."""
+    pat = _search_operand_raw(cmd)
+    if pat is None:
+        return None
     return pat if _BARE_SYMBOL_RE.match(pat) else None
+
+
+def _search_probe_tokens(cmd: str) -> list[str]:
+    """Bare-symbol tokens in the operand, for LOSSLESS ledger accounting of
+    quoted multi-word (`"foo bar"` -> foo, bar) and simple `foo|bar` alternations
+    (each branch a probe). Never used to RENDER a fact — only so a later single
+    probe of one of these tokens can see a prior failure (HONEST-NEGATIVE)."""
+    op = _search_operand_raw(cmd)
+    if op is None:
+        return []
+    out: list[str] = []
+    for part in re.split(r"[|\s]+", op):
+        p = part.strip()
+        if p and _BARE_SYMBOL_RE.match(p) and p not in out:
+            out.append(p)
+    return out
 
 
 def _resolve_symbol_defs(con, symbol: str, root: str) -> dict | None:
@@ -2469,30 +2625,10 @@ def _resolve_symbol_defs(con, symbol: str, root: str) -> dict | None:
             "test_ref_count": int(test_ref_count or 0)}
 
 
-def _search_localize_block(cmd: str) -> str:
-    """Lane-A producer: def-site(s) + verified callers + test-ref COUNT for the
-    symbol the agent just grepped. Fires once per symbol; DEFAULT-OFF;
-    correct-or-quiet (abstain -> '' -> Lane A drops it). NEVER surfaces a test
-    name (counts only) — the leak invariant."""
-    if _GT_BASELINE or not _POST_SEARCH_ON:
-        return ""
-    sym = _search_pattern(cmd)
-    if not sym or sym in _search_seen:
-        return ""
-    db = _db_path()
-    if not db or not os.path.isfile(db):
-        return ""
-    con = _connect_ro(db)
-    if con is None:
-        return ""
-    root = _root()
-    try:
-        info = _resolve_symbol_defs(con, sym, root)
-    finally:
-        con.close()
-    if not info or not info["def_sites"]:
-        return ""
-    _search_seen.add(sym)  # latch: a re-grep of the same symbol stays silent
+def _fmt_def_facts(sym: str, info: dict, root: str) -> str:
+    """The classic def-facts render: def-site(s) + verified callers + test-ref
+    COUNT. Byte-identical to the pre-lattice block (the 32 pins assert this exact
+    shape). NEVER surfaces a test name (counts only) — the leak invariant."""
     defs = info["def_sites"]
     ndef = len(defs)
     lines = [f'<gt-search-facts symbol="{sym}">']
@@ -2507,6 +2643,341 @@ def _search_localize_block(cmd: str) -> str:
     lines.append(f'(graph facts - verify with your own: grep -rn "{sym}" .)')
     lines.append("</gt-search-facts>")
     return "\n".join(lines)
+
+
+def _direct_def_block(con, sym: str, root: str) -> str:
+    """out=None path (pins / no-output-info): the ORIGINAL DIRECT-DEF channel,
+    byte-identical to the pre-lattice producer. Fires once per stem via the
+    content-hash idempotence latch."""
+    info = _resolve_symbol_defs(con, sym, root)
+    if not info or not info["def_sites"]:
+        return ""
+    block = _fmt_def_facts(sym, info, root)
+    stem = _norm_stem(sym)
+    if _ledger_already_answered(stem, block):
+        return ""
+    _ledger_entry(stem)["probed_forms"].add(sym)
+    _ledger_mark_answered(stem, block)
+    return block
+
+
+# --- emptiness + hit-path parsing (deterministic; the RESULT half of the lattice) --
+_GREP_PIPE_SPLIT_RE = re.compile(r"(?<!\|)\|(?!\|)")  # a single '|' (not '||')
+_GREP_STAGE_HEAD_RE = re.compile(r"^\s*(?:grep|egrep|fgrep|rg)\b")
+_HIT_PATH_EXT_RE = re.compile(r"\.\w+$")
+
+
+def _grep_is_final_stage(head: str) -> bool:
+    """True iff grep/rg is the LAST stage of the pipeline (or standalone). A
+    `grep X | head` / `grep X | wc -l` transforms grep's output, so its emptiness
+    is NOT grep's zero-hit signal — we refuse to claim emptiness there."""
+    seg = _GREP_PIPE_SPLIT_RE.split(head)[-1]
+    return bool(_GREP_STAGE_HEAD_RE.match(seg))
+
+
+def _grep_is_count(seg: str) -> bool:
+    """True iff the final grep stage carries -c/--count (output is match COUNTS)."""
+    for t in seg.split():
+        if t == "--count":
+            return True
+        if t.startswith("-") and not t.startswith("--") and "c" in t[1:]:
+            return True  # short cluster (e.g. -rc); grep -c is valueless
+    return False
+
+
+def _grep_result_empty(cmd: str, out: str) -> bool:
+    """Deterministic zero-hit detection. Covers: exit-1/empty bytes; `grep -c`
+    printing all-zero counts. ONLY when grep is the final pipeline stage."""
+    head = (cmd or "").split("\n", 1)[0]
+    if not _grep_is_final_stage(head):
+        return False
+    s = (out or "").strip()
+    if s == "":
+        return True
+    seg = _GREP_PIPE_SPLIT_RE.split(head)[-1]
+    if _grep_is_count(seg):
+        return all(ln.strip() == "0" or ln.strip().endswith(":0")
+                   for ln in s.splitlines() if ln.strip())
+    return False
+
+
+def _grep_hit_paths(out: str, root: str) -> set[str]:
+    """Repo-relative, normalized paths parsed from grep output (the `file:...`
+    / `file:line:...` / `file` forms). Best-effort + conservative: a line whose
+    leading field is not path-shaped contributes nothing (never a false path)."""
+    paths: set[str] = set()
+    for ln in (out or "").splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        cand = ln.split(":", 1)[0].strip()
+        if cand.startswith("./"):
+            cand = cand[2:]
+        if not cand or " " in cand:
+            continue
+        if "/" in cand or _HIT_PATH_EXT_RE.search(cand):
+            paths.add(_norm_fp(_to_repo_rel(cand, root)))
+    return paths
+
+
+# --- the four failure classes (fixed precedence, mutually exclusive) --------------
+def _class_namefold(con, sym: str, root: str) -> str:
+    """CLASS 1 — NAME-FOLD. Zero grep hits + bare symbol: try morphology variants,
+    each VERIFIED by exact match against nodes.name (generate-and-verify). First
+    variant that resolves to a real def wins; all _resolve_symbol_defs leak guards
+    (test-path/vendored/ambiguity) apply."""
+    for variant in _fold_variants(sym):
+        try:
+            hit = con.execute(
+                "SELECT 1 FROM nodes WHERE name=? AND COALESCE(is_test,0)=0 LIMIT 1",
+                (variant,)).fetchone()
+        except Exception:  # noqa: BLE001 — DB error -> abstain
+            return ""
+        if not hit:
+            continue
+        info = _resolve_symbol_defs(con, variant, root)
+        if not info or not info["def_sites"]:
+            continue  # verified name but no deliverable (test-only/ambiguous) def
+        if variant == sym:
+            # identity: the grep MISSED an indexed name (path/filetype filter).
+            body = _fmt_def_facts(sym, info, root)
+            note = (f'(no grep hits for "{sym}", but it IS indexed above — '
+                    f'check your path/filetype filter)')
+        else:
+            body = _fmt_def_facts(variant, info, root)
+            note = (f'("{sym}" not found; indexed as "{variant}" - '
+                    f'verify: grep -rn "{variant}" .)')
+        # splice the honest note in before the closing tag / trailer
+        lines = body.split("\n")
+        lines.insert(1, note)
+        return "\n".join(lines)
+    return ""
+
+
+def _name_or_path_matches(con, sym: str) -> bool:
+    """True iff the symbol matches a NAME (any fold variant, exact) or a PATH
+    (substring of a file_path). Suppresses BODY + HONEST-NEGATIVE (those require a
+    genuine name+path miss)."""
+    try:
+        for variant in _fold_variants(sym):
+            if con.execute("SELECT 1 FROM nodes WHERE name=? LIMIT 1",
+                           (variant,)).fetchone():
+                return True
+        low = sym.lower()
+        if con.execute(
+                "SELECT 1 FROM nodes WHERE LOWER(file_path) LIKE '%'||?||'%' LIMIT 1",
+                (low,)).fetchone():
+            return True
+    except Exception:  # noqa: BLE001 — fail toward suppression (no false absence)
+        return True
+    return False
+
+
+def _has_content_fts(con) -> bool:
+    try:
+        return con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='symbol_content_fts' LIMIT 1").fetchone() is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _body_rows(con, sym: str, extra_toks: list[str], root: str):
+    """Enclosing (file_path, start_line, name, label) rows whose BODY matches sym
+    (AND every extra token = SET INTERSECTION, no BM25/ranking). Test-path/vendored
+    enclosers dropped. Bounded by _BODY_ENUM_CAP+1 so overflow is cheap to detect."""
+    phrases = " ".join('"' + t.replace('"', "") + '"' for t in [sym, *extra_toks])
+    try:
+        raw = con.execute(
+            "SELECT n.file_path, n.start_line, n.name, n.label "
+            "FROM symbol_content_fts f JOIN nodes n ON n.id=f.rowid "
+            "WHERE symbol_content_fts MATCH ? AND COALESCE(n.is_test,0)=0 "
+            "ORDER BY n.file_path, n.start_line LIMIT ?",
+            (phrases, _BODY_ENUM_CAP + 1)).fetchall()
+    except Exception:  # noqa: BLE001 — no FTS table / bad query -> no rows
+        return []
+    rows = []
+    for fp, ln, name, label in raw:
+        rel = _norm_fp(fp or "")
+        if _POST_SEARCH_TESTPATH.search(rel) or _caller_path_excluded(fp or "", root):
+            continue
+        rows.append((fp, ln, name, label))
+    return rows
+
+
+def _render_body(sym: str, rows: list, root: str, refined_by: list[str] | None,
+                 overflow: bool) -> str:
+    n = len(rows)
+    count_txt = f"{n}+" if overflow else str(n)
+    head = (f'<gt-search-facts symbol="{sym}" surface="body">')
+    if refined_by:
+        why = f'{count_txt} function bodies mention "{sym}" (refined by: {", ".join(refined_by)})'
+    else:
+        why = f'{count_txt} function bodies mention "{sym}" (no name or path match)'
+    lines = [head, why]
+    if not overflow:
+        for fp, ln, name, label in rows:
+            lines.append(f"in {str(label).lower()} {name} - {_to_repo_rel(fp, root)}:{ln}")
+    else:
+        lines.append("(too many enclosing symbols to list - refine your query)")
+    lines.append(f'(enclosing symbols from indexed bodies - verify: grep -rn "{sym}" .)')
+    lines.append("</gt-search-facts>")
+    return "\n".join(lines)
+
+
+def _class_bodyonly(con, sym: str, root: str) -> str:
+    """CLASS 2 — BODY-ONLY. Zero grep hits + no name/path match, but the concept
+    appears in function BODIES. Count-first; enumerate-iff-complete (fits the
+    render budget); intersect-to-refine (SET INTERSECTION with the accumulated
+    failed-token ledger) when too large; else count-only. Surfaces ENCLOSING
+    SYMBOLS + file:line only — never raw body text."""
+    if not _has_content_fts(con):
+        return ""
+    if _name_or_path_matches(con, sym):
+        return ""  # a name/path surface exists -> BODY is not the right class
+    rows = _body_rows(con, sym, [], root)
+    if not rows:
+        return ""  # empty filtered match set -> BODY does not fire
+    overflow = len(rows) > _BODY_ENUM_CAP
+    block = _render_body(sym, rows[:_BODY_ENUM_CAP], root, None, overflow)
+    if not overflow and len(block.encode("utf-8")) <= _BODY_RENDER_BUDGET:
+        return block
+    # too large -> intersect-to-refine with the agent's accumulated failed tokens
+    cur = _norm_stem(sym)
+    fail_toks = sorted({
+        next(iter(sorted(e["probed_forms"])))
+        for st, e in _search_seen.items()
+        if st != cur and e["probed_forms"] and "zero" in e["outcomes"]
+    })
+    if fail_toks:
+        refined = _body_rows(con, sym, fail_toks, root)
+        if refined:
+            rov = len(refined) > _BODY_ENUM_CAP
+            rblock = _render_body(sym, refined[:_BODY_ENUM_CAP], root, fail_toks, rov)
+            if not rov and len(rblock.encode("utf-8")) <= _BODY_RENDER_BUDGET:
+                return rblock
+    # still too large / no productive intersection -> count-only (always safe)
+    return _render_body(sym, rows[:_BODY_ENUM_CAP], root, None, True)
+
+
+def _class_nontarget(con, sym: str, out: str, root: str) -> str:
+    """CLASS 3 — NON-TARGET HITS. The grep SUCCEEDED but EVERY parsed hit path is
+    test-shaped or vendored/excluded. Answer with the non-test def-site(s) from the
+    graph NOT already among the observed hit paths (NOVELTY = set difference)."""
+    hit_paths = _grep_hit_paths(out, root)
+    if not hit_paths:
+        return ""  # can't PROVE all-hits-are-wrong-copies -> correct-or-quiet
+    for p in hit_paths:
+        if not _POST_SEARCH_TESTPATH.search(p) and not _caller_path_excluded(p, root):
+            return ""  # a real hit exists -> the agent found it -> stay quiet
+    info = _resolve_symbol_defs(con, sym, root)
+    if not info or not info["def_sites"]:
+        return ""
+    novel = [(fp, ln) for (fp, ln) in info["def_sites"]
+             if _norm_fp(fp) not in hit_paths]
+    if not novel:
+        return ""  # the only defs are ones the agent already saw -> quiet
+    ninfo = dict(info)
+    ninfo["def_sites"] = novel
+    block = _fmt_def_facts(sym, ninfo, root)
+    note = (f'(your hits for "{sym}" are all test/vendored copies; '
+            f'the definition is here)')
+    lines = block.split("\n")
+    lines.insert(1, note)
+    return "\n".join(lines)
+
+
+def _class_honest_negative(con, sym: str, idx: int, root: str) -> str:
+    """CLASS 4 — HONEST-NEGATIVE. name+path+body all miss. SILENT on the FIRST
+    occurrence of the stem (an intentional "does X exist yet?" probe). Emits ONLY
+    on a REPEAT of an already-failed stem (or a fold-variant, via the shared stem
+    key) with NO intervening EDIT between the prior failed probe and now."""
+    if _name_or_path_matches(con, sym):
+        return ""  # a name/path surface exists -> not a true absence
+    if _has_content_fts(con) and _body_rows(con, sym, [], root):
+        return ""  # a body surface exists -> not a true absence
+    stem = _norm_stem(sym)
+    e = _search_seen.get(stem)
+    if not e:
+        return ""
+    prior_zero = [i for i, o in zip(e["probe_indices"], e["outcomes"])
+                  if o == "zero" and i < idx]
+    if not prior_zero:
+        return ""  # first occurrence -> stay silent (protect the intentional probe)
+    prev = max(prior_zero)
+    # ORDERING predicate over the action stream: any EDIT between the last failed
+    # probe and now means the agent may have just created it -> stay silent.
+    if any(prev < es < idx for es in _edit_action_steps):
+        return ""
+    return "\n".join([
+        f'<gt-search-facts symbol="{sym}" surface="absent">',
+        (f'"{sym}" not in names, paths, or any indexed body '
+         f'(incl. case/camel/snake variants): 0 name, 0 path, 0 body matches.'),
+        "appears unimplemented - may need a new file/symbol.",
+        "</gt-search-facts>",
+    ])
+
+
+def _search_localize_block(cmd: str, out: str | None = None) -> str:
+    """LISTEN LATTICE producer. When ``out`` is None (no result info — the original
+    call shape) it runs ONLY the DIRECT-DEF channel, byte-identical to the
+    pre-lattice producer. When ``out`` is a string (production, threaded from
+    ``_orig_out``) it reads the grep's RESULT and evaluates the four failure
+    classes in fixed precedence. DEFAULT-OFF (GT_POST_SEARCH); correct-or-quiet
+    (abstain / flag off -> '' -> Lane A drops it). NEVER surfaces a test name."""
+    if _GT_BASELINE or not _POST_SEARCH_ON:
+        return ""
+    sym = _search_pattern(cmd)
+
+    # ---- out=None: original DIRECT-DEF path (pins + any no-output caller) --------
+    if out is None:
+        if not sym:
+            return ""
+        db = _db_path()
+        if not db or not os.path.isfile(db):
+            return ""
+        con = _connect_ro(db)
+        if con is None:
+            return ""
+        try:
+            return _direct_def_block(con, sym, _root())
+        finally:
+            con.close()
+
+    # ---- out=str: the LISTEN LATTICE (production) --------------------------------
+    empty = _grep_result_empty(cmd, out)
+    idx = _action_count  # the current action index (incremented before this call)
+    # ledger accounting FIRST (lossless multi-token/alternation): record every bare
+    # token so a later single probe of one of them can detect a prior failure.
+    for tok in _search_probe_tokens(cmd):
+        _ledger_record(tok, idx, "zero" if empty else "hit")
+
+    if not sym:
+        return ""  # multi-token / regex / path -> abstain the render (accounted above)
+
+    db = _db_path()
+    if not db or not os.path.isfile(db):
+        return ""
+    con = _connect_ro(db)
+    if con is None:
+        return ""
+    root = _root()
+    try:
+        if not empty:
+            block = _class_nontarget(con, sym, out, root)
+        else:
+            block = (_class_namefold(con, sym, root)
+                     or _class_bodyonly(con, sym, root)
+                     or _class_honest_negative(con, sym, idx, root))
+    finally:
+        con.close()
+    if not block:
+        return ""
+    stem = _norm_stem(sym)
+    if _ledger_already_answered(stem, block):
+        return ""  # idempotence: never deliver the same fact twice
+    _ledger_mark_answered(stem, block)
+    return block
 
 
 def _compact_sig(sig: str) -> str:
@@ -3006,6 +3477,8 @@ def _graph_contract_block(rel: str) -> str:
             # confident "N caller(s)" number. Legacy schema without resolution_method
             # -> ABSTAIN from the count entirely (no number rather than a fake one).
             has_conf, has_method = _has_columns(con)
+            det_sql = ""       # bound on every path (used only under `has_method`)
+            conf_gate = ""     # — explicit init clears the possibly-unbound false positive
             if has_method:
                 det_sql = "','".join(sorted(_DETERMINISTIC_METHODS))
                 conf_gate = ("AND COALESCE(e.confidence, 0) >= 0.7 " if has_conf else "")
@@ -3970,8 +4443,18 @@ def _reset_oracle_state() -> None:
     _seen.clear()
     _contract_seen.clear()
     _consensus_scope.clear()
-    _search_seen.clear()  # F2: post_search fire-once latch must reset per attempt
+    _search_seen.clear()  # F2: post_search Listen-Lattice LEDGER (fire-once latch +
+                          # per-stem probe/outcome history) must reset per attempt
                           # (in-process pier retry) — else attempt-2 greps go mute.
+    # DCC (Dynamic Concern Consensus) OWN registries — reset per attempt so a
+    # retry re-derives the footprint/latch fresh. No-op (empty) when GT_DCC is off,
+    # so this stays byte-identical to the pre-DCC reset on the flag-off path.
+    _dcc_probes.clear()
+    _dcc_probe_outcomes.clear()
+    _dcc_views.clear()
+    _dcc_view_step.clear()
+    _dcc_latch.clear()
+    _dcc_enqueued_files.clear()
     _obligation_tracker = None
     _obligation_tracker_anchors = None
     _last_budget_pending = []
@@ -4222,10 +4705,10 @@ if _pp_dir not in _sys.path:
 try:
     from phase_policy import (
         PHASE_POLICY as _PHASE_POLICY,
-        Event,
-        Phase,
-        phase_allows as _phase_allows_policy,
-        should_emit as _phase_should_emit,
+        Event,  # type: ignore[assignment]  # real type; enum fallback below is the stub
+        Phase,  # type: ignore[assignment]  # real type; enum fallback below is the stub
+        phase_allows as _phase_allows_policy,  # type: ignore[assignment]  # real fn; fallback below is the stub
+        should_emit as _phase_should_emit,  # type: ignore[assignment]  # real fn; fallback below is the stub
     )
 except ImportError:
     # Fallback: no phase filtering — all candidates pass (pre-CP013 behavior)
@@ -4265,7 +4748,7 @@ def _detect_phase() -> Phase:
         test_count=_oracle_test_count,
         test_evidence_seen=_oracle_test_evidence_seen,
     )
-    return _product_derive_phase(state)
+    return _product_derive_phase(state)  # type: ignore  # stub infers None; real impl returns Phase
 
 
 def _phase_allows(kind: str, phase: Phase) -> bool:
@@ -4282,7 +4765,7 @@ def _current_event_for_cmd(cmd: str) -> Event | None:
     return None
 
 
-def _current_event(kind: str, cmd: str = "") -> Event | None:
+def _current_event(kind: str | None, cmd: str = "") -> Event | None:
     # bug #4(a): a test-runner command is a TEST_RESULT event REGARDLESS of how
     # the bash classifier labelled it (a `pytest …` line carries no edited/viewed
     # file, so _classify often returns neither post_view nor post_edit).
@@ -5484,6 +5967,452 @@ def _scope_completeness_block() -> str:
         return ""
 
 
+# ===========================================================================
+# DCC — DYNAMIC CONCERN CONSENSUS (2026-07-03).  DEFAULT-OFF (GT_DCC).
+#
+# WHAT: when the agent's OWN action stream reveals it is DROWNING (repeat-probe-
+# without-edit / retreat-from-a-flood / footprint-divergence-at-first-edit), DCC
+# appends ONE set of concern-completion FACTS in-band, as the LAST Lane-A block:
+# files that AGREE with the agent's CONFIRMED footprint across >=2 INDEPENDENT
+# provenance families (git co-change  ⊥  verified-structure ⊥ runtime-mentions),
+# where "agree" is a DYNAMIC RELATIVE bar — a file must match the confirmed
+# footprint STRICTLY MORE than EVERY file the agent already ABANDONED (Wilde &
+# Scully specificity / strict Pareto dominance). Each fact carries a verifiable
+# witness (commit hash / FACT-edge / output line). It is a SET of individually-
+# true facts rendered in LEXICOGRAPHIC path order — NEVER a ranked list.
+#
+# PARAMETER-FREE: the only constants are {0, 1, exact-match, set-membership,
+# ordering}. No numeric cap / confidence gate / fire-rate limit / difficulty
+# threshold anywhere — the footprint-set latch + the |DCC|<=|footprint|
+# cardinality bound + the strict-dominance bar do ALL the governing.
+#
+# PURE PRODUCER: reads existing state READ-ONLY; the ONLY writes are DCC's own
+# module-level registries below. Own tag namespace (concern.consensus) — never
+# routed through _budget_trim / _PRODUCT_BUDGETER. Own try/except. CONDITIONAL
+# enqueue at the call site: an empty block is never appended, so _record_hook_fire
+# never stamps DCC on a silent turn and the flag-off run stays byte-identical.
+# ===========================================================================
+# DCC-OWNED registries (the ONLY state DCC mutates). Cleared on retry alongside
+# the oracle state (_reset_oracle_state) so a paid-run retry starts fresh.
+_dcc_probes: dict[str, list[int]] = {}          # folded stem -> action idx of each search
+_dcc_probe_outcomes: dict[str, list[str]] = {}  # folded stem -> "zero"/"hit" per probe
+_dcc_views: dict[str, int] = {}                 # repo-rel file -> post_view count
+_dcc_view_step: dict[str, int] = {}             # repo-rel file -> last view action idx
+_dcc_latch: set[frozenset] = set()              # confirmed-footprint frozensets delivered
+_dcc_enqueued_files: set[str] = set()           # files DCC has named this run (novelty)
+
+# path-shaped / dotted-module token extractors for the runtime-mentions axis and
+# the same-turn lane_a novelty subtraction (deterministic; no language keys).
+_DCC_PATHTOK_RE = re.compile(r"[A-Za-z0-9_./\-]+\.[A-Za-z0-9_]+")
+_DCC_DOTMOD_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+\b")
+
+
+def _dcc_observe_turn(kkind: str | None, rel: str, cmd: str, orig_out: str) -> None:
+    """Record THIS turn into DCC's OWN registries (the ONLY state DCC writes).
+    A search -> its folded stem + action index + zero/hit outcome; a post_view ->
+    a per-file view tally + step. Edits are READ from _oracle_edited_rels /
+    _edit_action_steps elsewhere, never written here. Called only when GT_DCC on."""
+    idx = _action_count
+    if _GREP_HEAD_RE.search(cmd or ""):
+        sym = _search_pattern(cmd or "")
+        if sym:
+            stem = _norm_stem(sym)
+            probes = _dcc_probes.setdefault(stem, [])
+            # idempotent per action index: re-observing the SAME turn (same
+            # _action_count) must not double-count a probe (action indices are
+            # strictly monotonic in production, so this only guards re-entry).
+            if not probes or probes[-1] != idx:
+                probes.append(idx)
+                _dcc_probe_outcomes.setdefault(stem, []).append(
+                    "zero" if _grep_result_empty(cmd or "", orig_out or "") else "hit")
+    if kkind == "post_view" and rel:
+        r = _norm_fp(rel)
+        if _dcc_view_step.get(r) != idx:   # count once per action index
+            _dcc_views[r] = _dcc_views.get(r, 0) + 1
+            _dcc_view_step[r] = idx
+
+
+def _dcc_footprint() -> tuple[set, set]:
+    """(confirmed, abandoned) repo-rel file sets from DCC views + edited rels.
+    CONFIRMED = files edited ∪ files viewed>once. ABANDONED = files viewed exactly
+    once, never edited (the agent looked, did not commit, moved on). Read-only."""
+    edited = {_norm_fp(r) for r in _oracle_edited_rels if r}
+    confirmed = set(edited)
+    abandoned: set = set()
+    for r, c in _dcc_views.items():
+        rn = _norm_fp(r)
+        if c > 1 or rn in edited:
+            confirmed.add(rn)
+        elif rn not in edited:
+            abandoned.add(rn)
+    return confirmed, abandoned
+
+
+def _dcc_repeat_probe_without_edit() -> bool:
+    """(a) a folded stem probed >=2x with NO edit between two consecutive probes.
+    HONEST SCOPE: this is a permissive gate-OPENER, not a precise drowning proof. It
+    fires on genuine repeated flailing AND on ordinary grep narrowing (successive
+    searches whose patterns fold to the SAME stem, with no edit in between). That
+    over-firing is intentional and bounded: opening the DCC gate delivers NOTHING by
+    itself — delivery is still gated downstream by >=2 INDEPENDENT families + strict
+    dominance over every abandoned file + the footprint-set latch + the leak guard
+    (correct-or-quiet). Ordering over the action stream; no scores."""
+    for idxs in _dcc_probes.values():
+        s = sorted(idxs)
+        for i in range(len(s) - 1):
+            lo, hi = s[i], s[i + 1]
+            if not any(lo < e < hi for e in _edit_action_steps):
+                return True
+    return False
+
+
+def _dcc_retreat_from_flood() -> bool:
+    """(b) a PRIOR 'hit' probe after which the agent opened NO file (no view, no
+    edit) before moving on — it saw hits (a flood) and retreated without reading
+    any. Set-membership over the view/edit steps; no hit-path bookkeeping needed."""
+    latest = _action_count
+    opened_steps = set(_dcc_view_step.values()) | set(_edit_action_steps)
+    for stem, outs in _dcc_probe_outcomes.items():
+        idxs = _dcc_probes.get(stem, [])
+        for o, at in zip(outs, idxs):
+            if o != "hit" or at >= latest:
+                continue
+            if not any(at < s <= latest for s in opened_steps):
+                return True
+    return False
+
+
+def _dcc_footprint_divergence(kkind: str | None, rel: str) -> bool:
+    """(c) the FIRST source edit lands on a file the agent had NOT converged on:
+    this turn IS that first edit, the edited file was viewed <=1x, and a DIFFERENT
+    file was viewed >1x (the agent's attention was demonstrably elsewhere)."""
+    if kkind != "post_edit" or not rel:
+        return False
+    if len(_oracle_edited_rels) != 1:
+        return False  # only judged at the very first edit
+    r = _norm_fp(rel)
+    focus_elsewhere = any(c > 1 and _norm_fp(f) != r for f, c in _dcc_views.items())
+    return focus_elsewhere and _dcc_views.get(r, 0) <= 1
+
+
+def _dcc_drowning(kkind: str | None, rel: str) -> bool:
+    """OR of the three parameter-free drowning signals, with the known-good gate:
+    NEVER fire when the last observed test PASSED (a succeeding agent is not
+    drowning; nagging it is noise). Before any test result, DCC is permitted — the
+    localization drowning DCC is built for precedes the first test."""
+    if _oracle_test_evidence_seen and not _last_test_outcome_failed:
+        return False
+    return (_dcc_repeat_probe_without_edit()
+            or _dcc_retreat_from_flood()
+            or _dcc_footprint_divergence(kkind, rel))
+
+
+def _dcc_footprint_symbols(con, footprint: set) -> set:
+    """Non-test symbol names DEFINED in the footprint files (bounded). Feeds the
+    content + exact-key legs of the static provenance family."""
+    syms: set = set()
+    fp = [f for f in footprint if f]
+    if not fp:
+        return syms
+    try:
+        qmarks = ",".join("?" * len(fp))
+        rows = con.execute(
+            f"SELECT DISTINCT name FROM nodes WHERE file_path IN ({qmarks}) "
+            f"AND COALESCE(is_test,0)=0 AND name IS NOT NULL "
+            f"AND label IN ('Function','Method','Class') LIMIT 64",
+            tuple(fp)).fetchall()
+        for (nm,) in rows:
+            if nm and len(nm) >= 3 and not _is_builtin_shadow_name(nm):
+                syms.add(nm)
+    except Exception:  # noqa: BLE001 — no symbols -> empty leg (correct-or-quiet)
+        return set()
+    return syms
+
+
+def _dcc_clean_exact_key(kind: str, value: str) -> str:
+    """A CLEAN exact key for the exact-key leg, or "" to drop. config_read keys are
+    kept only in their `env:`/`config:` prefixed form; any value carrying a `%s`
+    format placeholder is not a stable key. exception_type / serialization_pair are
+    kept verbatim when non-empty and placeholder-free."""
+    v = (value or "").strip()
+    if not v or "%s" in v:
+        return ""
+    if kind == "config_read":
+        if not (v.startswith("env:") or v.startswith("config:")):
+            return ""
+    return f"{kind}={v}"
+
+
+def _dcc_axis_git(con, footprint: set) -> dict:
+    """GIT co-change axis (independent provenance). Reads the NEW cochange_sets
+    table (Phase 1): partner files co-committed with a footprint file; witness =
+    the commit hash. Table absent (pre-Phase-1) -> {} (that axis simply empty)."""
+    try:
+        con.execute("SELECT 1 FROM cochange_sets LIMIT 1").fetchone()
+    except Exception:  # noqa: BLE001 — no set-form table -> empty axis
+        return {}
+    out: dict = {}
+    # DETERMINISM (F13): iterate the footprint SET in sorted order. First-wins
+    # witness attribution ("co-changed with <nf> ...") otherwise depends on set
+    # iteration order (PYTHONHASHSEED) when a partner co-changed with SEVERAL
+    # footprint files — the same run would emit a different witness string across
+    # processes. Sorted order pins the witness to the lexicographically-first
+    # footprint file.
+    for f in sorted(footprint):
+        nf = _norm_fp(f)
+        try:
+            rows = con.execute(
+                "SELECT DISTINCT s2.file_path, s1.commit_hash "
+                "FROM cochange_sets s1 JOIN cochange_sets s2 "
+                "ON s1.commit_hash = s2.commit_hash "
+                "WHERE s1.file_path = ? AND s2.file_path <> ? "
+                "ORDER BY s2.file_path, s1.commit_hash", (nf, nf)).fetchall()
+        except Exception:  # noqa: BLE001
+            continue
+        for partner, commit in rows:
+            p = _norm_fp(partner or "")
+            if p and p not in out:
+                out[p] = f"co-changed with {nf} in commit {str(commit or '')[:10]}"
+    return out
+
+
+def _dcc_axis_static(con, footprint: set, root: str) -> dict:
+    """STATIC provenance family = structure ∪ content ∪ exact-key (ONE family — the
+    three are NOT independent of each other). structure: 1 FACT-edge hop from a
+    footprint file (verified call graph); content: an indexed BODY mentions a
+    footprint symbol; exact-key: a shared clean config/exception/serialization key.
+    Each with its own witness."""
+    out: dict = {}
+    # structure — FACT-edge 1-hop neighbours (reuses the FACT-gated _query_scope).
+    # DETERMINISM (F13): sorted footprint iteration — first-wins witness attribution
+    # ("FACT-edge to <f> ...") must not depend on set iteration order (hash seed).
+    for f in sorted(footprint):
+        try:
+            for nb in _query_scope(f):
+                p = _norm_fp(nb)
+                if p and p not in out:
+                    out[p] = f"FACT-edge to {_norm_fp(f)} (verified call graph)"
+        except Exception:  # noqa: BLE001
+            continue
+    syms = _dcc_footprint_symbols(con, footprint)
+    # content — indexed bodies mentioning a footprint symbol (set-membership, no BM25).
+    if _has_content_fts(con):
+        for sym in sorted(syms):
+            try:
+                for fp2, _ln, _nm, _lbl in _body_rows(con, sym, [], root):
+                    p = _norm_fp(fp2)
+                    if p and p not in out:
+                        out[p] = f'indexed body mentions "{sym}"'
+            except Exception:  # noqa: BLE001
+                continue
+    # exact-key — files sharing a clean config/exception/serialization key.
+    try:
+        fp = [f for f in footprint if f]
+        if fp:
+            qmarks = ",".join("?" * len(fp))
+            key_rows = con.execute(
+                f"SELECT DISTINCT p.kind, p.value FROM properties p "
+                f"JOIN nodes n ON n.id=p.node_id WHERE n.file_path IN ({qmarks}) "
+                f"AND COALESCE(n.is_test,0)=0 "
+                f"AND p.kind IN ('config_read','exception_type','serialization_pair')",
+                tuple(fp)).fetchall()
+            for kind, value in key_rows:
+                key = _dcc_clean_exact_key(kind or "", value or "")
+                if not key:
+                    continue
+                k, v = key.split("=", 1)
+                for (fp2,) in con.execute(
+                        "SELECT DISTINCT n.file_path FROM properties p "
+                        "JOIN nodes n ON n.id=p.node_id "
+                        "WHERE p.kind=? AND p.value=? AND COALESCE(n.is_test,0)=0",
+                        (k, v)).fetchall():
+                    p = _norm_fp(fp2 or "")
+                    if p and p not in out:
+                        out[p] = f"shares exact key {key}"
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def _dcc_axis_runtime(con, orig_out: str, root: str) -> dict:
+    """RUNTIME-mentions axis (independent provenance). Repo file / dotted-module
+    names parsed out of the raw command OUTPUT, cross-checked against
+    nodes.file_path (gold-blind — only a name that IS an indexed file survives);
+    witness = the output line. Nothing that isn't in the graph is ever invented."""
+    out: dict = {}
+    if not orig_out:
+        return out
+    for line in orig_out.splitlines():
+        ls = line.strip()
+        if not ls:
+            continue
+        for tok in _DCC_PATHTOK_RE.findall(ls):
+            if "/" not in tok:
+                continue
+            rel = _norm_fp(_to_repo_rel(tok, root))
+            if not rel or rel in out:
+                continue
+            try:
+                hit = con.execute(
+                    "SELECT 1 FROM nodes WHERE file_path=? LIMIT 1", (rel,)).fetchone()
+            except Exception:  # noqa: BLE001
+                hit = None
+            if hit:
+                # LEAK GUARD (F14): witness the matched TOKEN, never the raw output
+                # line. The line the token sits on can carry test names / assertion
+                # text (a pytest `FAILED tests/…::test_x` summary naming a source
+                # file), and any emission must grep clean of those (leak=0). The
+                # token alone keeps the witness verifiable — it IS in the output.
+                out[rel] = f'named in command output: "{tok}"'
+        for tok in _DCC_DOTMOD_RE.findall(ls):
+            cand = tok.replace(".", "/")
+            try:
+                row = con.execute(
+                    "SELECT file_path FROM nodes WHERE file_path LIKE ? "
+                    "ORDER BY file_path LIMIT 1", ("%" + cand + ".%",)).fetchone()
+            except Exception:  # noqa: BLE001
+                row = None
+            if row:
+                rel = _norm_fp(row[0] or "")
+                if rel and rel not in out:
+                    out[rel] = f'named in command output: "{tok}"'  # F14: token, not line
+    return out
+
+
+def _dcc_candidate_families(con, footprint: set, orig_out: str, root: str) -> dict:
+    """file_rel -> (family_set, {family: witness}). The THREE INDEPENDENT
+    provenance families: git, static (= structure ∪ content ∪ exact-key), runtime."""
+    fam: dict = {}
+    for name, d in (("git", _dcc_axis_git(con, footprint)),
+                    ("static", _dcc_axis_static(con, footprint, root)),
+                    ("runtime", _dcc_axis_runtime(con, orig_out, root))):
+        for p, w in d.items():
+            fset, wits = fam.setdefault(p, (set(), {}))
+            fset.add(name)
+            wits.setdefault(name, w)
+    return fam
+
+
+def _dcc_files_in_lane_a(lane_a, root: str) -> set:
+    """Repo-rel file paths already NAMED in THIS turn's other lane_a blocks — the
+    same-turn half of the novelty subtraction (avoids re-naming a file the contract
+    / cochange / scope-map / post_search / evidence block already surfaced)."""
+    named: set = set()
+    for _kind, text in lane_a:
+        for tok in _DCC_PATHTOK_RE.findall(text or ""):
+            if "/" in tok or "." in tok:
+                named.add(_norm_fp(_to_repo_rel(tok, root)))
+    return named
+
+
+def _dcc_qualifies(fset: set, ab_fams: list) -> bool:
+    """The DYNAMIC BAR (parameter-free). A candidate qualifies iff it is reached by
+    >=2 INDEPENDENT provenance families AND its family set STRICTLY DOMINATES every
+    abandoned file's family set (Wilde-Scully specificity = strict Pareto dominance
+    over the {git,static,runtime} membership vector = proper-superset). No numeric
+    threshold: a hub reachable by many axes that does NOT properly contain an
+    abandoned file's agreement is rejected; a file with fewer than two independent
+    families is rejected. Vacuous over an empty abandoned set (the >=2 bar governs)."""
+    if len(fset) < 2:
+        return False
+    return all(af < fset for af in ab_fams)
+
+
+def _dcc_render(clean: dict) -> str:
+    """Render the qualifying files as a SET in LEXICOGRAPHIC PATH ORDER (never a
+    ranked list), each line carrying its independent-family witnesses. No test
+    names, no assertions, no FAIL_TO_PASS — the members are FILE PATHS only."""
+    lines = [
+        f'<gt-concern files="{len(clean)}">',
+        ("These files agree with your confirmed footprint across >=2 INDEPENDENT "
+         "evidence families (git history / verified call graph / runtime output). "
+         "This is a SET of individually-verifiable facts, NOT a ranking — confirm each:"),
+    ]
+    for p in sorted(clean):  # lexicographic path order — the ONLY ordering
+        _fset, wits = clean[p]
+        witness = "; ".join(wits[f] for f in sorted(wits))
+        lines.append(f"- {p} — {witness}")
+    lines.append("</gt-concern>")
+    return "\n" + "\n".join(lines) + "\n"
+
+
+def _dcc_block(kkind: str | None, kf: str, cmd: str, orig_out: str, lane_a) -> str:
+    """The DCC producer. DEFAULT-OFF + baseline-off -> "" (byte-identical). Observes
+    THIS turn, then — only when the action stream shows DROWNING — computes the
+    concern-completion SET behind the strict-dominance bar + cardinality bound +
+    footprint-set latch + novelty subtraction + leak guard. correct-or-quiet: any
+    gate empty -> "" (the call site conditionally enqueues, so an empty turn never
+    stamps the fire counter)."""
+    if _GT_BASELINE or not _DCC_ON:
+        return ""
+    try:
+        root = _root()
+        rel = _norm_fp(_to_repo_rel(kf, root)) if kf else ""
+        _dcc_observe_turn(kkind, rel, cmd or "", orig_out or "")
+        if not _dcc_drowning(kkind, rel):
+            return ""
+        confirmed, abandoned = _dcc_footprint()
+        if not confirmed:
+            return ""  # cardinality bound would be 0 -> nothing to deliver
+        fp_key = frozenset(confirmed)
+        if fp_key in _dcc_latch:
+            return ""  # FOOTPRINT-SET LATCH: one delivery per footprint, EVER
+        db = _db_path()
+        if not db or not os.path.isfile(db):
+            return ""
+        con = _connect_ro(db)
+        if con is None:
+            return ""
+        try:
+            fam = _dcc_candidate_families(con, confirmed, orig_out or "", root)
+        finally:
+            con.close()
+        # abandoned files' family sets — the reference the candidate must beat.
+        ab_fams = [fam[a][0] if a in fam else set() for a in abandoned]
+        # DYNAMIC BAR: >=2 INDEPENDENT families AND strict dominance over EVERY
+        # abandoned file (Wilde-Scully: the candidate's family set must PROPERLY
+        # contain each abandoned file's family set). No numeric threshold.
+        qualifying: dict = {}
+        for p, (fset, wits) in fam.items():
+            if p in confirmed or p in abandoned:
+                continue
+            if _dcc_qualifies(fset, ab_fams):
+                qualifying[p] = (fset, wits)
+        # NOVELTY: subtract footprint, abandoned, this-turn-named, DCC's own prior.
+        named_now = _dcc_files_in_lane_a(lane_a, root)
+        for p in list(qualifying):
+            if (p in confirmed or p in abandoned or p in named_now
+                    or p in _dcc_enqueued_files):
+                qualifying.pop(p, None)
+        # LEAK: every member must be deliverable + non-test before it renders.
+        clean: dict = {}
+        for p, v in qualifying.items():
+            if (_POST_SEARCH_TESTPATH.search(p) or _is_test_or_demo_path(p)
+                    or _caller_path_excluded(p, root)):
+                continue
+            clean[p] = v
+        if not clean:
+            return ""
+        # CARDINALITY: deliver only if |DCC set| <= |confirmed footprint|.
+        if len(clean) > len(confirmed):
+            return ""
+        block = _dcc_render(clean)
+        if not block.strip():
+            return ""
+        # production == delivery for this unique tag: latch the footprint + record
+        # the named files so a later distinct footprint never re-names them.
+        _dcc_latch.add(fp_key)
+        _dcc_enqueued_files.update(clean.keys())
+        return block
+    except Exception:  # noqa: BLE001 — the whole producer is isolated
+        try:
+            print("[GT_META] producer_exception kind=concern.consensus",
+                  file=sys.stderr, flush=True)
+        except Exception:  # noqa: BLE001
+            pass
+        return ""
+
+
 # ---------------------------------------------------------------------------
 # LANE-SPLIT (2026-06-13) — the data-plane / control-plane bulkhead.
 #
@@ -5763,12 +6692,15 @@ def _augment_output(action, out) -> None:
                           file=sys.stderr, flush=True)
                     _csb = ""
                 lane_a.append(("consensus.scope_map", _csb))
-            # post_search (M0): answer the agent's OWN repo-wide grep with def
-            # FACTS, in-band. Independent of _kkind (a grep resolves to no file
-            # target, so it runs on the raw command). DEFAULT-OFF; correct-or-quiet
-            # (abstain / flag off -> '' -> Lane A drops it). NEVER leaks a test name.
+            # post_search (M0+ / Listen Lattice): answer the agent's OWN repo-wide
+            # grep with def FACTS, in-band. Independent of _kkind (a grep resolves to
+            # no file target, so it runs on the raw command). The grep's OWN OUTPUT
+            # (`_orig_out`, already held here) is threaded in so the lattice can read
+            # the RESULT (empty? which paths?) and answer search FAILURE, not just the
+            # command. DEFAULT-OFF; correct-or-quiet (abstain / flag off -> '' -> Lane
+            # A drops it). NEVER leaks a test name.
             try:
-                _la_search = _search_localize_block(cmd)
+                _la_search = _search_localize_block(cmd, _orig_out)
             except Exception:  # noqa: BLE001 — Lane A producer isolated
                 print("[GT_META] producer_exception kind=post_search.localize",
                       file=sys.stderr, flush=True)
@@ -5836,6 +6768,23 @@ def _augment_output(action, out) -> None:
             # for Lane A — its gate is non-empty AND not-already-in-ledger; an
             # empty _ev_text is dropped by the correct-or-quiet check.)
             lane_a.append(("l3b.evidence", _ev_text))
+            # ── DCC (Dynamic Concern Consensus) — DEFAULT-OFF (GT_DCC) ─────────
+            # The LAST Lane-A block. When the agent's OWN action stream shows it
+            # DROWNING, append ONE set of concern-completion FACTS (files agreeing
+            # with its confirmed footprint across >=2 INDEPENDENT provenance
+            # families, each strictly dominating every ABANDONED file, each with a
+            # witness), rendered as a SET in lexicographic path order — never
+            # ranked. CONDITIONAL enqueue (only a NON-empty block), so a flag-off
+            # or quiet turn writes nothing to the fire counter and stays byte-
+            # identical. Own registries, own tag, own try/except (isolated).
+            try:
+                _dcc_txt = _dcc_block(_kkind, (_kf or ""), cmd or "", _orig_out, lane_a)
+            except Exception:  # noqa: BLE001 — DCC producer isolated
+                print("[GT_META] producer_exception kind=concern.consensus",
+                      file=sys.stderr, flush=True)
+                _dcc_txt = ""
+            if _dcc_txt:
+                lane_a.append(("concern.consensus", _dcc_txt))
             # ── DELIVER LANE A NOW — EARLY, isolated, BEFORE any Lane B logic ──
             # THE NON-NEGOTIABLE ORDERING (the entire point of the bulkhead):
             # the contract/evidence/cochange reach the agent here, each in its

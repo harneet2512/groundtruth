@@ -75,9 +75,54 @@ _PASSAGE_TOKEN_WINDOW = 128
 _E5_QUERY_TOKEN_WINDOW = 512
 _GTE_QUERY_TOKEN_WINDOW = 1024
 
+# GT_PASSAGE_WIDE (default OFF): the per-SYMBOL passage window (_PASSAGE_TOKEN_WINDOW =
+# 128) is memory-conservative and was tuned for the RETIRED e5 encoder. The current
+# default embedder (gte-modernbert-base) supports 8192 and the QUERY side already uses
+# 1024. When this flag is ON, the passage window widens to 256 for the gte/ModernBERT
+# family ONLY (non-e5) so a per-symbol passage keeps more body vocabulary; e5 (512-max,
+# mean-pool) is left at its conservative 128 window. OFF -> byte-identical to today.
+# The activation-MEMORY budget (exit-137) and cos-to-gold lift are ENV-gated (ONNX embed
+# env) -> Phase-4; only the window selection + byte-identical-off are offline-provable.
+_PASSAGE_TOKEN_WINDOW_WIDE = 256
+
+
+def _passage_wide() -> bool:
+    """Read GT_PASSAGE_WIDE at CALL time (never import-time) so a test/harness toggling
+    it is honoured; default OFF (correct-or-quiet: any non-truthy value == today)."""
+    return os.environ.get("GT_PASSAGE_WIDE", "") not in ("", "0", "false", "no")
+
+
+def _encode_batch_size() -> int:
+    """Passages per ``session.run`` chunk (bounds peak activation memory, exit-137).
+
+    An explicit ``GT_EMBED_ENCODE_BATCH`` always wins (unchanged). Otherwise the default
+    is 32 — HALVED to 16 under GT_PASSAGE_WIDE, because a wide (256-token) passage batch
+    allocates ~2x the per-passage activation of the default (128-token) batch; halving
+    the batch keeps peak activation within the SAME budget the exit-137 guard bounds
+    (16*256 == 32*128). OFF -> 32, byte-identical to the pre-change literal. Read at CALL
+    time so a harness toggling the flag is honoured; a malformed override falls back to
+    the flag-aware default (correct-or-quiet)."""
+    raw = os.environ.get("GT_EMBED_ENCODE_BATCH")
+    if raw is not None:
+        try:
+            return max(1, int(raw))
+        except (TypeError, ValueError):
+            pass
+    return 16 if _passage_wide() else 32
+
+
+def _is_e5_model(model: "EmbeddingModel") -> bool:
+    return getattr(model, "model_name", None) in _E5_FAMILY
+
 
 def _passage_token_window(model: "EmbeddingModel") -> int:
-    """The truncation window for a per-SYMBOL passage (bounded, memory-safe)."""
+    """The truncation window for a per-SYMBOL passage (bounded, memory-safe).
+
+    Default 128. When GT_PASSAGE_WIDE is ON, the gte/ModernBERT family (non-e5) widens
+    to 256; e5 stays at 128 (its conservative memory window is preserved). Mirrors the
+    e5-vs-non-e5 split already used by ``_query_token_window``."""
+    if _passage_wide() and not _is_e5_model(model):
+        return _PASSAGE_TOKEN_WINDOW_WIDE
     return _PASSAGE_TOKEN_WINDOW
 
 
@@ -172,8 +217,19 @@ class EmbeddingModel:
                 raise FileNotFoundError(f"ONNX model not found at {onnx_path}. Run: python scripts/setup_models.py")
 
             tokenizer = Tok.from_file(str(tok_path))
-            tokenizer.enable_padding(length=128)
-            tokenizer.enable_truncation(max_length=128)
+            # BUG (latent, pre-GT_PASSAGE_WIDE): these two lines HARDCODED 128, ignoring
+            # _passage_token_window(). Off that is a no-op (window==128) but it silently
+            # capped the initial padding/truncation at 128 even when the window widened.
+            # Drive BOTH off the window fn so padding stays == truncation (a rectangular
+            # passage batch; a longer sequence than the pad length would otherwise ragged
+            # np.array). OFF -> _pw == 128 -> byte-identical to the old literals. NOTE: this
+            # is only the INITIAL value — _embed_chunk re-asserts BOTH padding and
+            # truncation per encode (== that encode's window), so a flag flipped AFTER load
+            # can never desync padding from truncation. Reading the flag here is retained
+            # so a load with the flag already set starts consistent.
+            _pw = _passage_token_window(self)
+            tokenizer.enable_padding(length=_pw)
+            tokenizer.enable_truncation(max_length=_pw)
 
             self._tokenizer = tokenizer
             self._session = ort_mod.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
@@ -218,11 +274,13 @@ class EmbeddingModel:
         # N x seq x hidden x layers of activations (~1.8MB/passage measured) — a 4096-passage
         # budget = ~7.3GB anon-rss, OOM-killed in capped containers (proven live,
         # astropy-13236 repro 2026-06-10) and the killer of the 8-par VM sweep box.
-        # Passages pad/truncate to the passage window (128). The QUERY (is_query) uses
-        # the larger query window (BUG-7) and is always a SINGLE row, so its activation
-        # is bounded even at the wider window.
+        # Passages pad/truncate to the passage window (128, or 256 under GT_PASSAGE_WIDE).
+        # The QUERY (is_query) uses the larger query window (BUG-7) and is always a SINGLE
+        # row, so its activation is bounded even at the wider window. The batch is HALVED
+        # under GT_PASSAGE_WIDE (_encode_batch_size) so a 256-token batch's ~2x activation
+        # stays within the same exit-137 budget as the default 128-token batch.
         out: list[list[float]] = []
-        B = max(1, int(os.environ.get("GT_EMBED_ENCODE_BATCH", "32")))
+        B = _encode_batch_size()
         for i in range(0, len(texts), B):
             out.extend(self._embed_chunk(texts[i:i + B], is_query=is_query))
         return out
@@ -233,18 +291,39 @@ class EmbeddingModel:
         # passages at the (smaller) passage window. enable_truncation is stateful on
         # the shared tokenizer, so set it under the model lock around the encode so a
         # concurrent passage encode cannot race the query's wider window onto a
-        # passage batch (or vice versa). enable_padding stays FIXED at the passage
-        # window so passage batches are numerically identical to before.
-        _window = _query_token_window(self) if is_query else _passage_token_window(self)
+        # passage batch (or vice versa).
+        #
+        # DESYNC FIX: PADDING is set at CALL time here (== this encode's window), not
+        # ONCE at load. The load-time padding read GT_PASSAGE_WIDE at load; if a harness
+        # loaded the model with the flag OFF (padding fixed at 128) then flipped it ON,
+        # passages truncated to 256 but padded to 128 -> a batch with 256-token and
+        # 128-token rows -> a RAGGED np.array below. Driving padding off the SAME window
+        # as truncation, every encode, keeps the batch rectangular regardless of when the
+        # flag flipped. Padding tokens are attention-masked, so a wider pad never changes
+        # a vector (byte-identical); both are restored to the passage default afterwards.
+        _passage_window = _passage_token_window(self)
+        _window = _query_token_window(self) if is_query else _passage_window
         with self._lock:
             try:
                 tokenizer.enable_truncation(max_length=_window)
+                # PADDING is always the PASSAGE window, for BOTH roles. For a passage
+                # encode _window == _passage_window, so padding == truncation and the
+                # multi-row batch is rectangular (the G4 desync fix, unchanged). For a
+                # QUERY encode, padding to the (much larger) query window would
+                # (a) change flag-OFF behavior — the pre-change code kept padding fixed
+                # at the 128 passage window for queries, and pad-to-512/1024 multiplies
+                # a short query's ONNX compute ~4-8x while leaning on the export's
+                # masking for bit-exactness — and (b) buy nothing: a query is a SINGLE
+                # row, always rectangular. Pad-at-passage-window is byte-identical to
+                # the pre-change behavior on every flag-OFF path (F12).
+                tokenizer.enable_padding(length=_passage_window)
             except Exception:
                 pass
             encoded = tokenizer.encode_batch(texts)
             try:
                 # restore the passage default so a later passage encode is unaffected.
-                tokenizer.enable_truncation(max_length=_PASSAGE_TOKEN_WINDOW)
+                tokenizer.enable_truncation(max_length=_passage_window)
+                tokenizer.enable_padding(length=_passage_window)
             except Exception:
                 pass
         input_ids = np.array([e.ids for e in encoded], dtype=np.int64)
@@ -357,6 +436,22 @@ SYMBOL_PASSAGE_TOKEN_CAP = 80
 _SYMBOL_PASSAGE_CHAR_CAP = SYMBOL_PASSAGE_TOKEN_CAP * 5
 
 
+def _symbol_passage_char_cap() -> int:
+    """The character cap for a per-symbol passage. Default 400 (≈80 tokens, the today
+    value). Under GT_PASSAGE_WIDE the wider 256-token window can carry ~2x the text, so
+    the char cap is raised proportionally (×2 == 800) — but ONLY for the window-widening
+    (non-e5) family, matching ``_passage_token_window`` (which widens the WINDOW for
+    non-e5 only). Gating the cap on the active localization embedder keeps e5 truly
+    byte-identical under the flag: e5's window stays 128, so its passage TEXT must not
+    grow to 800 chars (which would pull chars 400–640 — tokens ~80–128 — into e5's
+    128-token window and CHANGE its vector). symbol_passage has no model argument, so
+    the active model is read from ``_default_embed_model`` (the model these passages are
+    embedded by). OFF -> 400 (byte-identical)."""
+    if _passage_wide() and _default_embed_model() not in _E5_FAMILY:
+        return _SYMBOL_PASSAGE_CHAR_CAP * (_PASSAGE_TOKEN_WINDOW_WIDE // _PASSAGE_TOKEN_WINDOW)
+    return _SYMBOL_PASSAGE_CHAR_CAP
+
+
 def read_agg_params() -> tuple[float, int]:
     """Read the (alpha, top_k) aggregation parameters from the environment.
 
@@ -395,7 +490,7 @@ def symbol_passage(name: str, signature: str, body_snippet: str = "") -> str:
     if not head and not body:
         return ""
     passage = f"{head}\n{body}".strip() if body else head
-    return passage[:_SYMBOL_PASSAGE_CHAR_CAP]
+    return passage[:_symbol_passage_char_cap()]
 
 
 def passage_hash(
@@ -413,10 +508,29 @@ def passage_hash(
     vector (e.g. a single-row batch the old len==1 heuristic mis-prefixed) would
     COLLIDE with — and poison — the passage entry in the shared LRU. The role tag
     keeps the two roles in separate cache slots. Default ``is_query=False`` keeps
-    every existing passage call site byte-identical (same hash as before)."""
+    every existing passage call site byte-identical (same hash as before).
+
+    GT_PASSAGE_WIDE (2026-07-03): a wide-window (256) gte PASSAGE vector must never
+    collide with the default (128) entry for the same text in the shared LRU. Fold a
+    window SALT into the key that fires ONLY for a non-e5 PASSAGE under the flag — so
+    a query key, an e5 key, and (crucially) every key when the flag is OFF stay
+    BYTE-IDENTICAL to today, while a wide gte passage lands in its own slot."""
     role = "q" if is_query else "p"
-    sig = f"{version}:{model_name}:{dim}:{role}:{passage}"
+    salt = _passage_cache_salt(model_name, is_query)
+    sig = f"{version}:{model_name}:{dim}:{role}:{salt}{passage}"
     return hashlib.sha256(sig.encode("utf-8")).hexdigest()
+
+
+def _passage_cache_salt(model_name: str, is_query: bool) -> str:
+    """Window salt for the passage cache key. Empty (byte-identical to today) except for
+    a non-e5 PASSAGE under GT_PASSAGE_WIDE, whose window differs (256 vs 128). Queries
+    (window unchanged by the flag) and e5 (window stays 128) are never salted, so their
+    vectors keep sharing the existing cache entries."""
+    if not is_query and _passage_wide() and model_name not in _E5_FAMILY:
+        # NUL separator: a text passage can never contain \x00, so a salted ON key
+        # can never collide with an OFF passage that happens to start with this literal.
+        return f"w{_PASSAGE_TOKEN_WINDOW_WIDE}\x00"
+    return ""
 
 
 # ---------------------------------------------------------------------------

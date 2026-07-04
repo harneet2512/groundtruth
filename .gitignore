@@ -203,3 +203,10 @@ GT_DASHBOARD.html
 gen_gt_dashboard.py
 LOCALIZATION_RANKING_FIX_*.md
 gt_wiring_map.md
+
+# end-game local working docs (never pushed)
+GT_ENDGAME_*
+*_RUN_LEDGER*
+
+# local design artifact (never push)
+GT_MCP_HOOKS_CONVERSION_DESIGN_*.md

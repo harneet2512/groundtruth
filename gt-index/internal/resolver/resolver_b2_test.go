@@ -203,9 +203,9 @@ func TestChainReExports_B2_TransitiveThreeLevelChain(t *testing.T) {
 func TestBuildFileMap_B2_RustRootsGenericNoHardcode(t *testing.T) {
 	fm := BuildFileMap(
 		[]string{
-			"myapp/backend/src/handlers.rs",  // arbitrary workspace member crate
-			"services/api/src/routes.rs",     // another non-core/engine crate
-			"core/engine/src/widget.rs",      // the formerly-hardcoded layout (must still work)
+			"myapp/backend/src/handlers.rs", // arbitrary workspace member crate
+			"services/api/src/routes.rs",    // another non-core/engine crate
+			"core/engine/src/widget.rs",     // the formerly-hardcoded layout (must still work)
 		},
 		[]string{"rust", "rust", "rust"},
 	)

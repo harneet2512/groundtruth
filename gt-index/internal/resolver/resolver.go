@@ -4,6 +4,7 @@ package resolver
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -377,6 +378,7 @@ func BuildNodeMeta(allNodes []store.Node, nodeDBIDs []int64) map[int64]NodeMeta 
 				ReturnType:   n.ReturnType,
 				ReceiverName: recvName,
 				StartLine:    n.StartLine,
+				IsExported:   n.IsExported,
 			}
 		}
 	}
@@ -802,6 +804,12 @@ type NodeMeta struct {
 	// order-invariant tiebreak in name_match candidate selection (node IDs are assigned
 	// non-deterministically by the parallel parse — see pickBestNameMatchTarget).
 	StartLine int
+	// IsExported mirrors the store node's is_exported flag (language-specific: Python =
+	// no leading underscore, Go = capitalized, JS/TS = conservatively true). Consumed
+	// ONLY by the B3 field-based candidate set (GT_FIELD_CANDIDATES): an unexported def
+	// is not a legal cross-file receiver-method target. Unused (and thus behavior-inert)
+	// on every path when GT_FIELD_CANDIDATES is unset.
+	IsExported bool
 }
 
 // Resolve takes all call refs and all defined nodes, and resolves calls to definitions.
@@ -1489,6 +1497,103 @@ func BuildAssignmentIndex(assignments []parser.AssignmentRef) map[string]*Assign
 	return index
 }
 
+// ---------------------------------------------------------------------------
+// B2 (GT_TYPEFLOW_FIXPOINT) + B3 (GT_FIELD_CANDIDATES) — DEPTH resolution rungs,
+// each behind its own default-off env flag. OFF ⇒ resolver output byte-identical
+// to today (both rungs' code paths are flag-gated). See the design headers at
+// their fire sites inside Resolve.
+// ---------------------------------------------------------------------------
+
+// typeflowFixpointMaxIters bounds the B2 worklist so a pathological/cyclic alias
+// chain can never loop forever (the worklist shrinks; each round resolves ≥1 new
+// receiver type or the loop stops). It is ALSO the mutation lever: setting it to 1
+// runs the propagation body ONCE (no re-propagation), which is exactly the neuter
+// the mutation companion asserts against — a depth≥1 chain then fails to resolve.
+// Production value 10 (mirrors the alias-fixpoint cap at BuildAssignmentIndex).
+var typeflowFixpointMaxIters = 10
+
+// fieldCandidatesReachabilityGate is the load-bearing import-reachability filter of
+// the B3 field-based candidate set. Default true = production. The mutation companion
+// flips it to false (neuters the filter) and asserts the set then wrongly admits an
+// UNREACHABLE candidate — proving the filter is load-bearing.
+var fieldCandidatesReachabilityGate = true
+
+// negEvidenceRequireImportBinding is the load-bearing half of the B1 negative-evidence
+// drop (F6): a bare call is dropped ONLY when its name is import-BOUND to a provably-
+// external module (present in externalBoundNames). Default true = production. The B1
+// mutation companion flips it to false, degrading the guard to "drop any name not resolved
+// via importIndex" — which wrongly drops a NOT-imported cross-file name_match, reddening
+// the mutation test and proving the import-binding requirement is load-bearing.
+var negEvidenceRequireImportBinding = true
+
+// scopeVarKey composes the per-file B2 fixpoint key. Function-local vars are scoped
+// to their enclosing function (the assignment's Scope = the function name), so the
+// same var name in two functions — or at module level — stays distinct.
+func scopeVarKey(scope, varName string) string {
+	return scope + "\x00" + varName
+}
+
+// splitReceiverMethod splits a qualified RHS/callee `recv.method` (or Rust `recv::method`)
+// into a BARE single-segment receiver and the method name. Returns ok=false for a
+// receiver that is itself qualified (`self.x`, `a.b`) or an empty half — the B2 fixpoint
+// only chains through simple local-var receivers (correct-or-quiet; a compound receiver
+// is left to the single-shot field/self rungs).
+func splitReceiverMethod(q string) (recv, method string, ok bool) {
+	dotIdx := strings.LastIndex(q, ".")
+	colonIdx := strings.LastIndex(q, "::")
+	var idx, sepLen int
+	switch {
+	case dotIdx > colonIdx:
+		idx, sepLen = dotIdx, 1
+	case colonIdx >= 0:
+		idx, sepLen = colonIdx, 2
+	default:
+		return "", "", false
+	}
+	if idx <= 0 || idx+sepLen >= len(q) {
+		return "", "", false
+	}
+	recv = q[:idx]
+	method = q[idx+sepLen:]
+	if recv == "" || method == "" || strings.ContainsAny(recv, ".:") {
+		return "", "", false
+	}
+	return recv, method, true
+}
+
+// fieldImportReachable reports whether targetFile is IMPORT-reachable from callerFile:
+// same file, a direct import (via the import index, which ChainReExports has already
+// folded barrel re-exports into), or a whole-module/star import reaching the target's
+// directory. Same-DIRECTORY (package) locality is deliberately NOT counted — B3's
+// contract is "import-reachable ... via the existing import index + ChainReExports"
+// (ACG field-based, Feldthaus/Sridharan/Tip ICSE 2013). When the gate var is neutered
+// (mutation companion) it returns true unconditionally, exposing the unreachable member.
+func fieldImportReachable(callerFile, targetFile string, importIndex map[string]map[string][]string) bool {
+	if !fieldCandidatesReachabilityGate {
+		return true // NEUTERED — mutation companion only; never in production (default true)
+	}
+	if targetFile == "" {
+		return false
+	}
+	if targetFile == callerFile {
+		return true
+	}
+	if callerImportsFile(callerFile, targetFile, importIndex) {
+		return true
+	}
+	if fileImps, ok := importIndex[callerFile]; ok {
+		if starFiles, ok := fileImps["*"]; ok {
+			tgtDir := filepath.ToSlash(filepath.Dir(targetFile))
+			for _, sf := range starFiles {
+				if filepath.ToSlash(filepath.Dir(sf)) == tgtDir || sf == targetFile {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 func Resolve(
 	allCalls []parser.CallRef,
 	nodeIDs map[string][]int64, // name → list of node IDs
@@ -1501,6 +1606,57 @@ func Resolve(
 	// Build import index: file → imported name → list of candidate target files
 	importIndex := buildImportIndex(allImports, fileMap)
 	nameAliasIndex := buildNameAliasIndex(nodeIDs)
+
+	// B1 negative evidence (GT_NEG_EVIDENCE, read ONCE at index time; default off).
+	// When on, build the per-file set of imported BARE names whose module resolves to
+	// NO indexed file (external packages). buildImportIndex records an (file,name) entry
+	// ONLY when the name resolved to >=1 indexed file, so a name that is imported but
+	// ABSENT from importIndex[file] is provably external-bound. "*"/"" (whole-module /
+	// wildcard) are module-scope, not a bare binding — excluded. Built only under the
+	// flag → nil + zero overhead when off (the Strategy-2 guard is also flag-gated), so
+	// resolver output is byte-identical to today when GT_NEG_EVIDENCE is unset.
+	negEvidence := os.Getenv("GT_NEG_EVIDENCE") == "1"
+	var externalBoundNames map[string]map[string]bool
+	if negEvidence {
+		externalBoundNames = make(map[string]map[string]bool)
+		// F9: project path segments (dirs/basenames/stems) — the workspace/monorepo
+		// soundness set for moduleProvablyExternal. Built once, flag-gated (zero cost off).
+		projectSegs := buildProjectPathSegments(fileMap)
+		for _, imp := range allImports {
+			if imp.ImportedName == "" || imp.ImportedName == "*" {
+				continue
+			}
+			// Resolved to an indexed file? Then NOT external-bound (correct-or-quiet:
+			// this is the "resolves to no indexed file" check the mutation companion
+			// neuters — neutering it marks INTERNALLY-resolved names external and would
+			// over-drop legitimate calls).
+			if fe, ok := importIndex[imp.File]; ok {
+				if _, resolved := fe[imp.ImportedName]; resolved {
+					continue
+				}
+			}
+			// F2 (B1 over-drop fix): an importIndex MISS is NOT proof the module is external —
+			// resolveModulePath is known-incomplete, so a genuinely-internal import whose path
+			// form we simply failed to map would otherwise be wrongly dropped. Require POSITIVE
+			// external evidence: the module must be PROVABLY external (no indexed project file
+			// could correspond to it). When externality is UNCERTAIN (relative import, or any
+			// path segment names an indexed file/dir) we do NOT mark it external → do NOT drop
+			// (correct-or-quiet). This keeps the genuine external-drop (lodash/extpkg) intact.
+			if !moduleProvablyExternal(imp.ModulePath, fileMap, projectSegs) {
+				continue
+			}
+			if externalBoundNames[imp.File] == nil {
+				externalBoundNames[imp.File] = make(map[string]bool)
+			}
+			externalBoundNames[imp.File][imp.ImportedName] = true
+		}
+	}
+
+	// B2/B3 flags, read ONCE at index time (default off). When unset, the fixpoint
+	// pre-pass never runs and both new fire sites are skipped → resolver output is
+	// byte-identical to today.
+	typeflowFixpoint := os.Getenv("GT_TYPEFLOW_FIXPOINT") == "1"
+	fieldCandidates := os.Getenv("GT_FIELD_CANDIDATES") == "1"
 
 	// metaMap: nodeID → NodeMeta, the single accessor for the optional variadic
 	// nodeMeta[0] (nil when absent). Used by the Strategy-1.5 same-dir tie-break (#40).
@@ -1636,6 +1792,265 @@ func Resolve(
 		if len(classes) == 1 {
 			for classID := range classes {
 				uniqueMethodClass[methodName] = classID
+			}
+		}
+	}
+
+	// ── B2: GT_TYPEFLOW_FIXPOINT worklist pre-pass ──────────────────────────────
+	// PROBLEM the single-shot ladder cannot solve: a CHAINED receiver flow
+	//   a = make(); b = a.foo(); b.bar()
+	// The parser records `b = a.foo()` as a ViaReturn assignment whose TypeName is the
+	// QUALIFIED RHS "a.foo" — not a function node — so Strategy 1.96's return-type bridge
+	// looks up nodeIDs["a.foo"] (nothing) and b's type is never inferred; b.bar() then
+	// falls to name_match. The type of b only becomes knowable AFTER a's type (A) is
+	// inferred and foo's return type (B) is resolved on class A — a second propagation
+	// round. This pre-pass iterates the SAME facts the ladder already reads
+	// (assignmentIndex + returnShapeIndex + methodsByClass/CHA) to a FIXPOINT, producing
+	// file → scopeVarKey → concrete internal class name for the chained vars. The result
+	// is consumed by a new rung after Strategy 1.96 (evidence "fixpoint", method
+	// "type_flow", conf 0.9 — the SAME categorical FACT boundary as 1.96, never a
+	// name_match promotion). Base-case var types (a) are SEEDED in round 1 and chained
+	// receivers are read only from the PRIOR round's snapshot, so a depth-d chain
+	// converges in d+1 rounds — which is why neutering re-propagation (cap=1) reverts a
+	// depth-1 chain (the mutation companion). OFF ⇒ never computed, rung skipped ⇒
+	// byte-identical. Termination: the resolved set only grows and is bounded by the var
+	// count; the loop stops when a round adds nothing, with a defensive cap + loud log.
+	var typeflowFixpointClass map[string]map[string]string
+	// typeflowFixpointDepth[file][scopeVarKey] = the CHAIN DEPTH (0-indexed fixpoint round)
+	// at which the var's concrete class was first inferred: 0 = a base seed (direct ctor /
+	// bare factory), 1 = a depth-1 chain (b = a.foo(), a is a seed), 2 = a depth-2 chain,
+	// etc. Carried to the consumer so a DEEPER chain's resolved call is demoted below the
+	// depth-1/CERTIFIED tier (F4, non-increasing with depth). Populated alongside …Class.
+	var typeflowFixpointDepth map[string]map[string]int
+	if typeflowFixpoint && assignmentIndex != nil && metaMap != nil && methodsByClass != nil {
+		isInternalClass := func(name string) bool {
+			for _, id := range nodeIDs[name] {
+				if m, ok := metaMap[id]; ok && (m.Label == "Class" || m.Label == "Struct" || m.Label == "Interface") {
+					return true
+				}
+			}
+			return false
+		}
+		// classReturnClass: the internal class NAME that `class.method` returns (declared
+		// return type, else the constructor-return-shape fact), resolved via CHA. "" when
+		// unknown or not an internal class. Deterministic (sortNodeIDsByContent picks).
+		classReturnClass := func(className, method string) string {
+			for _, classID := range sortNodeIDsByContent(nodeIDs[className], metaMap) {
+				cm, ok := metaMap[classID]
+				if !ok || (cm.Label != "Class" && cm.Label != "Struct" && cm.Label != "Interface") {
+					continue
+				}
+				targetID, found := lookupMethodWithInheritance(classID, method)
+				if !found {
+					continue
+				}
+				rt := stripTypeWrapper(metaMap[targetID].ReturnType)
+				if rt == "" && returnShapeIndex != nil {
+					rt = returnShapeIndex[targetID]
+				}
+				if rt != "" && isInternalClass(rt) {
+					return rt
+				}
+			}
+			return ""
+		}
+		// factoryReturnClass: the internal class a bare factory callee returns (declared
+		// return type, else constructor-return shape). Base case — no snapshot needed.
+		factoryReturnClass := func(callee string) string {
+			for _, funcID := range sortNodeIDsByContent(nodeIDs[callee], metaMap) {
+				fm, ok := metaMap[funcID]
+				if !ok || fm.Label == "Class" || fm.Label == "Struct" || fm.Label == "Interface" {
+					continue
+				}
+				rt := stripTypeWrapper(fm.ReturnType)
+				if rt == "" && returnShapeIndex != nil {
+					rt = returnShapeIndex[funcID]
+				}
+				if rt != "" && isInternalClass(rt) {
+					return rt
+				}
+			}
+			return ""
+		}
+		// pickVarType mirrors AssignmentMap.pick: latest binding, upgraded to the latest
+		// CONFIDENT one — so a direct constructor wins over a tentative factory return.
+		pickVarType := func(vts []VarType) (VarType, bool) {
+			if len(vts) == 0 {
+				return VarType{}, false
+			}
+			best := vts[len(vts)-1]
+			if !best.Confident {
+				for i := len(vts) - 1; i >= 0; i-- {
+					if vts[i].Confident {
+						best = vts[i]
+						break
+					}
+				}
+			}
+			return best, true
+		}
+		// resolveForScope computes the concrete internal class of (scope,varName) using the
+		// PRIOR round's snapshot. It scope-FILTERS am.VarTypes[varName] to `scope` FIRST
+		// (F1: mirrors ResolveQualifiedCall's per-scope filter at assignments.go:118-127) so
+		// the same var name reused in two functions resolves PER SCOPE — never one global
+		// last-write pick keyed to a single scope. The chained-receiver lookup reads the SAME
+		// scope's recv key, so a chain never crosses scopes.
+		resolveForScope := func(am *AssignmentMap, scope, varName string, snap map[string]string) (string, bool) {
+			var inScope []VarType
+			for _, t := range am.VarTypes[varName] {
+				if t.Scope == scope {
+					inScope = append(inScope, t)
+				}
+			}
+			vt, ok := pickVarType(inScope)
+			if !ok {
+				return "", false
+			}
+			if !vt.ViaReturn {
+				// Direct constructor binding: TypeName IS the class.
+				if c := stripTypeWrapper(vt.TypeName); c != "" && isInternalClass(c) {
+					return c, true
+				}
+				return "", false
+			}
+			if recv, method, isQual := splitReceiverMethod(vt.TypeName); isQual {
+				// Chained receiver: its type must come from the PRIOR round, SAME scope.
+				if rc, ok := snap[scopeVarKey(scope, recv)]; ok {
+					if c := classReturnClass(rc, method); c != "" {
+						return c, true
+					}
+				}
+				return "", false
+			}
+			// Bare factory callee: bridge its return type (base case).
+			if c := factoryReturnClass(vt.TypeName); c != "" {
+				return c, true
+			}
+			return "", false
+		}
+		typeflowFixpointClass = make(map[string]map[string]string)
+		typeflowFixpointDepth = make(map[string]map[string]int)
+		for file, am := range assignmentIndex {
+			if am == nil {
+				continue
+			}
+			// Enumerate the DISTINCT (scope,varName) pairs deterministically (map iteration is
+			// randomized): the fixpoint RESULT is order-independent, but a stable order keeps
+			// the loop reproducible. Each pair is resolved independently → F1 per-scope keys.
+			varNames := make([]string, 0, len(am.VarTypes))
+			for v := range am.VarTypes {
+				varNames = append(varNames, v)
+			}
+			sort.Strings(varNames)
+			// F8 (same-name-method scope collapse — correct-or-quiet ABSTAIN). The parser
+			// records ONLY the BARE enclosing-function name as an assignment's Scope
+			// (parser.go:122; extractAssignments receives walkNode's `name`), and the
+			// consumer keys its lookup by metaMap[callerID].Name — the same bare name.
+			// Two same-named defs in one file (Foo.run / Bar.run, two __init__, two
+			// handle) therefore COLLAPSE onto ONE scope key: a depth-1 chained receiver
+			// typed in ONE method could mint a wrong 0.9 CERTIFIED type_flow/fixpoint
+			// edge on the OTHER method's class (the F4 depth decay only reaches depth≥2).
+			// Nothing finer than the bare name exists in the parsed facts, so the only
+			// correct move is to ABSTAIN: skip every (scope,var) pair whose scope name
+			// has ≥2 function/method definitions in this file. Module scope ("") is
+			// structurally unique per file. Memoized per file; deterministic (a count
+			// over fileNodeIDs, no ordering dependence).
+			// See TestResolve_TypeflowFixpoint_SameNameScopeAbstains (red→green).
+			scopeAmbiguity := map[string]bool{}
+			scopeAmbiguous := func(scope string) bool {
+				if scope == "" {
+					return false
+				}
+				if amb, seen := scopeAmbiguity[scope]; seen {
+					return amb
+				}
+				defs := 0
+				for _, id := range fileNodeIDs[file][scope] {
+					if m, ok := metaMap[id]; ok &&
+						m.Label != "Class" && m.Label != "Struct" && m.Label != "Interface" {
+						defs++
+					}
+				}
+				amb := defs >= 2
+				scopeAmbiguity[scope] = amb
+				return amb
+			}
+			type scopeVar struct{ scope, name string }
+			var pairs []scopeVar
+			seenPair := map[string]bool{}
+			for _, varName := range varNames {
+				for _, t := range am.VarTypes[varName] {
+					if scopeAmbiguous(t.Scope) {
+						continue // F8: ambiguous scope name → abstain (never a guessed 0.9)
+					}
+					pk := scopeVarKey(t.Scope, varName)
+					if !seenPair[pk] {
+						seenPair[pk] = true
+						pairs = append(pairs, scopeVar{t.Scope, varName})
+					}
+				}
+			}
+			sort.Slice(pairs, func(i, j int) bool {
+				if pairs[i].scope != pairs[j].scope {
+					return pairs[i].scope < pairs[j].scope
+				}
+				return pairs[i].name < pairs[j].name
+			})
+			snapshot := map[string]string{} // prior round's resolved var → class
+			depth := map[string]int{}       // scopeVarKey → the round (0-indexed) it resolved
+			converged := false
+			for iter := 0; iter < typeflowFixpointMaxIters; iter++ {
+				next := make(map[string]string, len(snapshot))
+				for k, v := range snapshot {
+					next[k] = v
+				}
+				changed := false
+				for _, p := range pairs {
+					key := scopeVarKey(p.scope, p.name)
+					if _, done := snapshot[key]; done {
+						continue // stable from a prior round
+					}
+					if cls, ok := resolveForScope(am, p.scope, p.name, snapshot); ok {
+						if _, exists := next[key]; !exists {
+							next[key] = cls
+							depth[key] = iter
+							changed = true
+						}
+					}
+				}
+				snapshot = next
+				if !changed {
+					converged = true
+					break
+				}
+			}
+			// F7: warn ONLY when the fixpoint is GENUINELY still resolving at the cap — a
+			// further round WOULD infer a new receiver type. A chain whose depth equals the cap
+			// resolves its last var ON the final permitted round (changed=true) yet is already
+			// COMPLETE; the probe below proves nothing more would change, so no false "cyclic"
+			// warning fires on a legitimate exactly-at-cap convergence. (The set only grows and
+			// is bounded by the pair count, so a true cycle simply resolves nothing — it never
+			// spins; the honest diagnosis is "chain deeper than the cap", not "cyclic".)
+			if !converged {
+				stillResolvable := false
+				for _, p := range pairs {
+					key := scopeVarKey(p.scope, p.name)
+					if _, done := snapshot[key]; done {
+						continue
+					}
+					if _, ok := resolveForScope(am, p.scope, p.name, snapshot); ok {
+						stillResolvable = true
+						break
+					}
+				}
+				if stillResolvable {
+					fmt.Fprintf(os.Stderr, "  [GT_TYPEFLOW_FIXPOINT] iteration cap %d reached for %s "+
+						"(alias chain deeper than the cap) — stopping (partial result kept)\n", typeflowFixpointMaxIters, file)
+				}
+			}
+			if len(snapshot) > 0 {
+				typeflowFixpointClass[file] = snapshot
+				typeflowFixpointDepth[file] = depth
 			}
 		}
 	}
@@ -1909,6 +2324,40 @@ func Resolve(
 		// IS internal and must not be dropped. The drop/demote moved to the last-chance
 		// block after 1.98 and still guards the receiver-UNPROVEN rungs (1.94/1.98).
 		builtinQualified := qualifiedUnresolved && isBuiltinMethodForLang(langFromFileExt(call.File), calleeName)
+
+		// B1 NEGATIVE EVIDENCE (GT_NEG_EVIDENCE, default off): an UNQUALIFIED bare call
+		// whose name is lexically BOUND by an import in THIS file whose module resolves to
+		// NO indexed project file (`import {merge} from 'lodash'; merge(a,b)`,
+		// `from extpkg import y; y()`) is PROVABLY external — every remaining rung would
+		// mint a name_match onto a same-named PROJECT symbol (Strategy 1.9 unique-name
+		// demote OR Strategy 2 multi-candidate), a WRONG fact, not merely unproven. Drop it
+		// (correct-or-quiet) rather than launder. Same move as the stdlib-shadow fix
+		// (55ab30eb) extended from QUALIFIED to BARE names. Placed BEFORE Strategy 1.9 so it
+		// covers BOTH the unique (1.9) and multi-candidate (Strategy 2) name_match paths.
+		// Guards (never over-drop): unqualified only; the name must be external-BOUND in
+		// THIS file (imported + unresolved) so a plain cross-file name_match that is NOT
+		// imported is untouched; NEVER when the name also has a same-file LOCAL definition
+		// (Strategy 1 already resolved those, but the guard is explicit). OFF → skipped →
+		// byte-identical to today.
+		if negEvidence && !qualifiedUnresolved {
+			drop := false
+			if ext, hasFile := externalBoundNames[call.File]; hasFile && ext[calleeName] {
+				drop = true // import-BOUND to a provably-external module (production path)
+			} else if !negEvidenceRequireImportBinding {
+				// NEUTERED (F6 mutation companion ONLY; default true keeps this dead in
+				// production): degrade the guard to "drop any name not resolved via
+				// importIndex", dropping the load-bearing "must be import-bound" half. This
+				// wrongly drops a NOT-imported cross-file name_match, proving that half matters.
+				if fe, hasImports := importIndex[call.File]; !hasImports || len(fe[calleeName]) == 0 {
+					drop = true
+				}
+			}
+			if drop {
+				if localDefs := fileNodeIDs[call.File][calleeName]; len(localDefs) == 0 {
+					continue
+				}
+			}
+		}
 
 		// Strategy 1.9 fires here ONLY for UNQUALIFIED calls (the ACG/ECOOP 2022
 		// globally-unique-name property holds for bare names). Qualified calls go
@@ -2470,6 +2919,66 @@ func Resolve(
 			}
 		}
 
+		// Strategy 1.96-fixpoint (B2, GT_TYPEFLOW_FIXPOINT): consume the worklist result.
+		// Reached ONLY when every higher-priority rung (1.75/1.93/2b/1.94a/1.94/1.95/1.96)
+		// failed to resolve this qualified call, i.e. the chained residual. If the caller
+		// scope's receiver var has an inferred concrete class in typeflowFixpointClass,
+		// resolve the method on it via the SAME CHA primitive — emit a type_flow fact with
+		// evidence "fixpoint". A depth-1 chained hop carries conf 0.9/CERTIFIED (parity with
+		// single-hop 1.96); a deeper chain (receiver type inferred at round >=2) is demoted to
+		// CANDIDATE (F4). OFF ⇒ typeflowFixpointClass is nil ⇒ this whole block is skipped ⇒
+		// byte-identical.
+		if typeflowFixpoint && typeflowFixpointClass != nil && metaMap != nil && methodsByClass != nil &&
+			call.CalleeQualified != "" && call.CalleeQualified != calleeName {
+			if fileVars, ok := typeflowFixpointClass[call.File]; ok {
+				// F5: split the receiver on `.` OR `::` via the SAME primitive the pre-pass
+				// uses (splitReceiverMethod), so a Rust `::`-qualified chain the pre-pass
+				// populated is actually consumed here (the old `.`-only split silently
+				// dropped it). Rejects a compound receiver (`a.b`, `self.x`) — those are the
+				// single-shot rungs' domain — exactly as the prior guard did.
+				if qualifierFx, methodFx, okFx := splitReceiverMethod(call.CalleeQualified); okFx &&
+					qualifierFx != "self" && qualifierFx != "this" {
+					callerScopeFx := ""
+					if cm, ok := metaMap[callerID]; ok {
+						callerScopeFx = cm.Name
+					}
+					vkeyFx := scopeVarKey(callerScopeFx, qualifierFx)
+					if className := fileVars[vkeyFx]; className != "" {
+						// F4: chain-depth decay. A depth-1 chained hop keeps 0.9/CERTIFIED
+						// (parity with single-hop 1.96); a receiver whose type was inferred at
+						// a DEEPER round (>=2) is demoted to CANDIDATE (0.6) — strictly below
+						// CERTIFIED, non-increasing with depth (no tuned per-depth float).
+						fxConf := 0.9
+						if dm := typeflowFixpointDepth[call.File]; dm != nil {
+							if d, okD := dm[vkeyFx]; okD && d >= 2 {
+								fxConf = 0.6
+							}
+						}
+						for _, classID := range sortNodeIDsByContent(nodeIDs[className], metaMap) {
+							cm, hasMeta := metaMap[classID]
+							if !hasMeta || (cm.Label != "Class" && cm.Label != "Struct" && cm.Label != "Interface") {
+								continue
+							}
+							if targetID, found := lookupMethodWithInheritance(classID, methodFx); found && targetID != callerID {
+								putEdge(ResolvedCall{
+									SourceNodeID:   callerID,
+									TargetNodeID:   targetID,
+									SourceLine:     call.Line,
+									SourceFile:     call.File,
+									Method:         "type_flow",
+									Confidence:     fxConf,
+									CandidateCount: 1,
+									TrustTier:      tierFor(fxConf),
+									EvidenceType:   "fixpoint",
+								})
+								goto nextCall
+							}
+						}
+					}
+				}
+			}
+		}
+
 		// Strategy 1.97: Return-type bridging
 		// get_user().save() → look up get_user's return type → resolve save on that type.
 		if len(nodeMeta) > 0 && nodeMeta[0] != nil && methodsByClass != nil && call.CalleeQualified != "" {
@@ -2669,6 +3178,61 @@ func Resolve(
 				// metric can tell it apart, and the demand-driven LSP pass can still
 				// resolve it. Skipped when metaMap is absent (fall through, unchanged).
 				if len(candidates) > 1 && metaMap != nil {
+					// ── B3: field-based CANDIDATE SET (GT_FIELD_CANDIDATES) ──────────────
+					// The receiver type is UNPROVEN (every typing rung failed) and N internal
+					// methods share this name. Today the tail mints ONE arbitrary name_match.
+					// ACG field-based (Feldthaus/Sridharan/Tip, ICSE 2013): the honest answer
+					// is the CANDIDATE SET, not one guess. set = candidates ∩ import-reachable
+					// (via the import index + ChainReExports) ∩ is_exported. Emitted as a NEW
+					// categorical resolution_method "field_based" with candidate_count=K, tier
+					// capped at CANDIDATE (never a single-target CERTIFIED fact, never a
+					// name_match laundered as fact). Empty intersection → drop (correct-or-
+					// quiet). K==1 with the 1.9 provenance gate → promote ONE notch (0.5→0.6),
+					// still strictly below any compiler/type-verified tier. OFF ⇒ the whole
+					// block is skipped and the single-name_match path below runs unchanged
+					// (byte-identical). See TestResolve_FieldCandidates_*.
+					if fieldCandidates {
+						var set []int64
+						for _, tid := range candidates { // candidates already excludes callerID
+							tm := metaMap[tid]
+							if tm.File == "" || !tm.IsExported {
+								continue // non-exported def is not a legal cross-file receiver target
+							}
+							if fieldImportReachable(call.File, tm.File, importIndex) {
+								set = append(set, tid)
+							}
+						}
+						if len(set) == 0 {
+							continue // empty intersection → drop, never fall back to a name_match guess
+						}
+						set = sortNodeIDsByContent(set, metaMap) // deterministic emit order
+						conf := 0.5                              // CANDIDATE floor: reachable+exported but K-way ambiguous
+						evidence := "field_based"
+						if len(set) == 1 {
+							// Intersection collapsed to one reachable+exported candidate. The 1.9
+							// provenance gate (same-dir OR caller-imports-file) promotes ONE notch,
+							// still CANDIDATE (< the 0.9 CERTIFIED / compiler-verified tier).
+							tm := metaMap[set[0]]
+							if sameDirFile(call.File, tm.File) || callerImportsFile(call.File, tm.File, importIndex) {
+								conf = 0.6
+								evidence = "field_based_unique"
+							}
+						}
+						for _, tid := range set {
+							putEdge(ResolvedCall{
+								SourceNodeID:   callerID,
+								TargetNodeID:   tid,
+								SourceLine:     call.Line,
+								SourceFile:     call.File,
+								Method:         "field_based",
+								Confidence:     conf,
+								CandidateCount: len(set),
+								TrustTier:      tierFor(conf),
+								EvidenceType:   evidence,
+							})
+						}
+						continue
+					}
 					callerDir := filepath.ToSlash(filepath.Dir(call.File))
 					var reachable []int64
 					for _, tid := range candidates {
@@ -2787,6 +3351,85 @@ func Resolve(
 	}
 
 	return resolved
+}
+
+// moduleProvablyExternal reports whether a module path is PROVABLY external — i.e. no
+// indexed project file could correspond to it. Used ONLY by the B1 negative-evidence guard
+// (F2): a bare imported name is dropped as external-bound only on this POSITIVE evidence,
+// never on a mere importIndex miss (resolveModulePath is known-incomplete). Conservative /
+// correct-or-quiet — returns false (UNCERTAIN, do not drop) whenever a project file might be
+// the target:
+//   - empty module path (unknown provenance);
+//   - a RELATIVE import (`./x`, `../x`, `/x`) — always meant to point at a project file, so a
+//     resolve miss is a resolver gap, not externality;
+//   - ANY `.`/`/`/`::`-separated segment names an indexed file/dir (a fileMap key), or the
+//     whole path (or its slash form) is a fileMap key — a project module we merely failed to
+//     resolve at the name level.
+//
+// Only a non-relative module whose every segment is unknown to the project is "external".
+//
+// projectSegs (F9, monorepo/workspace soundness): the set of PATH SEGMENTS of every
+// indexed file (dirs + basenames + stems), built once per Resolve by
+// buildProjectPathSegments. fileMap KEYS alone under-represent workspace layouts —
+// a pnpm/yarn scoped package `@org/utils` maps to `packages/utils/…` whose "utils"
+// directory is a path segment but NOT a fileMap key (JS registration only keys
+// stems/index-dirs), so the old key-only check wrongly declared a genuinely-internal
+// workspace import "provably external" and dropped its calls. Any module segment
+// that names ANY path segment of ANY indexed file ⇒ UNCERTAIN ⇒ never dropped
+// (conservative: this can only reduce drops, back toward today's behavior).
+func moduleProvablyExternal(modulePath string, fileMap map[string][]string, projectSegs map[string]bool) bool {
+	if modulePath == "" {
+		return false
+	}
+	if strings.HasPrefix(modulePath, ".") || strings.HasPrefix(modulePath, "/") {
+		return false
+	}
+	if _, ok := fileMap[modulePath]; ok {
+		return false
+	}
+	if _, ok := fileMap[strings.ReplaceAll(modulePath, ".", "/")]; ok {
+		return false
+	}
+	segs := strings.FieldsFunc(modulePath, func(r rune) bool {
+		return r == '.' || r == '/' || r == ':'
+	})
+	for _, s := range segs {
+		if s == "" {
+			continue
+		}
+		if _, ok := fileMap[s]; ok {
+			return false
+		}
+		if projectSegs[s] {
+			return false // a project dir/file segment carries this name → uncertain
+		}
+	}
+	return true
+}
+
+// buildProjectPathSegments returns every path segment (directory names, file
+// basenames, and extension-stripped stems) of every indexed file in fileMap's
+// values. Consulted by moduleProvablyExternal (F9): a module path touching any of
+// these names is never "provably external". Built ONCE per Resolve (only under
+// GT_NEG_EVIDENCE) — set-membership only, no ordering dependence (deterministic).
+func buildProjectPathSegments(fileMap map[string][]string) map[string]bool {
+	segs := make(map[string]bool)
+	for _, files := range fileMap {
+		for _, f := range files {
+			for _, s := range strings.Split(filepath.ToSlash(f), "/") {
+				if s == "" {
+					continue
+				}
+				segs[s] = true
+				if ext := filepath.Ext(s); ext != "" {
+					if stem := strings.TrimSuffix(s, ext); stem != "" {
+						segs[stem] = true
+					}
+				}
+			}
+		}
+	}
+	return segs
 }
 
 // buildImportIndex creates: callerFile → importedName → []targetFiles

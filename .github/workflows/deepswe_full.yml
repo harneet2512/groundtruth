@@ -74,6 +74,10 @@ on:
         description: "Paired-run arm: gt enables GT; baseline sets GT_BASELINE=1 and does not require substrate proof."
         required: false
         default: "gt"
+      depth_flags:
+        description: "Depth+DCC master switch (2026-07 build). 0 = OFF (byte-identical: all six new flags off in code). 1 = ON = GT_NEG_EVIDENCE·GT_TYPEFLOW_FIXPOINT·GT_FIELD_CANDIDATES·GT_SEM_BODY·GT_PASSAGE_WIDE (index/brief, via substrate -e) + GT_DCC (agent, via --ae). REQUIRES a substrate baked on THIS run's commit (commit-parity)."
+        required: false
+        default: "0"
 
 permissions:
   contents: write   # live-log bridge force-pushes per-task logs to gha-live-logs/<task> branches
@@ -122,6 +126,18 @@ env:
   # Q3 consumption lever (synced agent path; gt_mini_patch reads it). Default 0 = OFF
   # (byte-identical current behavior). Forwarded to the agent container via --ae below.
   GT_VERIFY_STRUCTURAL_RISK: ${{ github.event.inputs.verify_structural_risk || '0' }}
+  # ── Depth+DCC mechanisms (2026-07 build) — master switch `depth_flags` (default 0 = OFF =
+  # byte-identical; all six read default-off in code). The 5 index/brief flags cross the substrate
+  # boundary via explicit `-e` in scripts/ci/substrate_proof.sh (each GT_* is projected into
+  # gt-index AND the brief-gen subprocess by clean_env_projection's GT_ allowlist); GT_DCC crosses
+  # to the agent via `--ae` below. All six are ALSO forwarded via --ae so the L6-fresh post-edit
+  # reindex + any agent-side localization match the substrate's resolver/parser/passage settings.
+  GT_NEG_EVIDENCE: ${{ inputs.depth_flags == '1' && '1' || '0' }}
+  GT_TYPEFLOW_FIXPOINT: ${{ inputs.depth_flags == '1' && '1' || '0' }}
+  GT_FIELD_CANDIDATES: ${{ inputs.depth_flags == '1' && '1' || '0' }}
+  GT_SEM_BODY: ${{ inputs.depth_flags == '1' && '1' || '0' }}
+  GT_PASSAGE_WIDE: ${{ inputs.depth_flags == '1' && '1' || '0' }}
+  GT_DCC: ${{ inputs.depth_flags == '1' && '1' || '0' }}
   GT_BASELINE: ${{ inputs.gt_arm == 'baseline' && '1' || '0' }}
   # Legitimacy: the per-task graph must be built FRESH from THIS task's repo — never a
   # cross-run / stale / out-of-repo prebuilt graph.db. In substrate-consume mode the graph
@@ -1073,6 +1089,12 @@ jobs:
             --ae GT_SELF_VERIFY_ATTEMPTS="${GT_SELF_VERIFY_ATTEMPTS:-}" \
             --ae GT_BASELINE="${GT_BASELINE:-0}" \
             --ae GT_VERIFY_STRUCTURAL_RISK="${GT_VERIFY_STRUCTURAL_RISK:-0}" \
+            --ae GT_DCC="${GT_DCC:-0}" \
+            --ae GT_NEG_EVIDENCE="${GT_NEG_EVIDENCE:-0}" \
+            --ae GT_TYPEFLOW_FIXPOINT="${GT_TYPEFLOW_FIXPOINT:-0}" \
+            --ae GT_FIELD_CANDIDATES="${GT_FIELD_CANDIDATES:-0}" \
+            --ae GT_SEM_BODY="${GT_SEM_BODY:-0}" \
+            --ae GT_PASSAGE_WIDE="${GT_PASSAGE_WIDE:-0}" \
             --ae GT_MOUNT_MODE="1" \
             "${GT_AE_ARGS[@]}" \
             --ae GT_ESC_ADV_TCOV="${GT_ESC_ADV_TCOV:-}" \

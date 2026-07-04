@@ -312,3 +312,49 @@ def test_filter_rejects_unique_name_match():
         if conn is not None:
             conn.close()
         os.unlink(path)
+
+
+def test_filter_rejects_field_based_candidate():
+    """F3 — field_based (B3 ACG candidate SET) is NEVER a post-edit fact.
+
+    field_based is NOT in DETERMINISTIC_RESOLUTION_METHODS, so the FIRST (strong-method)
+    disjunct never admits it. It is a K-way ambiguous candidate set capped at CANDIDATE, so
+    WITHOUT the explicit field_based exclusion its trust_tier CANDIDATE would slip through
+    the SECOND (trust_tier) disjunct and surface the K-1 wrong-candidate callers as facts —
+    while the brief / closure / curation gate on the method set and already drop it. This
+    locks brief<->post_edit parity.
+    """
+    path = _make_db(with_categorical_cols=True)
+    conn = None
+    try:
+        conn = sqlite3.connect(path)
+        # field_based_unique promoted to conf 0.6 => tier CANDIDATE (resolver B3).
+        conn.execute(
+            "INSERT INTO edges (source_id, target_id, type, resolution_method, "
+            "confidence, trust_tier, candidate_count) VALUES "
+            "(1, 2, 'CALLS', 'field_based_unique', 0.6, 'CANDIDATE', 1)"
+        )
+        # field_based candidate set at conf 0.5 => tier CANDIDATE, K-way.
+        conn.execute(
+            "INSERT INTO edges (source_id, target_id, type, resolution_method, "
+            "confidence, trust_tier, candidate_count) VALUES "
+            "(3, 4, 'CALLS', 'field_based', 0.5, 'CANDIDATE', 3)"
+        )
+        # A genuine deterministic fact in the same table must still be admitted.
+        conn.execute(
+            "INSERT INTO edges (source_id, target_id, type, resolution_method, "
+            "confidence, trust_tier, candidate_count) VALUES "
+            "(5, 6, 'CALLS', 'same_file', 1.0, 'CERTIFIED', 1)"
+        )
+        conn.commit()
+        clause = _categorical_edge_filter_clause()
+        # SELECT source_id so assertions key on the edge, not the autoincrement PK.
+        rows = conn.execute(f"SELECT source_id FROM edges e WHERE {clause}").fetchall()
+        srcs = {r[0] for r in rows}
+        assert 1 not in srcs, "field_based_unique must NOT be a post-edit fact"
+        assert 3 not in srcs, "field_based candidate set must NOT be a post-edit fact"
+        assert 5 in srcs, "a genuine deterministic edge must still be admitted"
+    finally:
+        if conn is not None:
+            conn.close()
+        os.unlink(path)

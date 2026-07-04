@@ -2035,66 +2035,175 @@ def _sem_pool_files(top_k: int) -> int:
     return default
 
 
-# B2 (stratum-B vocab): default-OFF query-time body enrichment. The passage form
-# is name+signature+behavioral-props (docstring/call_order/guards) — it lacks the
+# B2 (stratum-B vocab): default-OFF body enrichment, GT_SEM_BODY-gated. The passage
+# form is name+signature+behavioral-props (docstring/call_order/guards) — it lacks the
 # DOMAIN VOCABULARY ("Redis", "TLS", "handshake") that lives in the body's
-# identifiers/strings/comments, so behavior-described issues (stratum B) score 0.
-# When on AND a repo_root is available, each symbol's body slice is read from disk
-# and its identifier terms LEAD the passage body (props second) so the vocabulary
-# survives symbol_passage's char cap. correct-or-quiet: flag off / no repo_root /
-# unreadable file -> unchanged name+sig+props passage, BYTE-IDENTICAL to today.
-_SEM_BODY_ON = os.environ.get("GT_SEM_BODY", "") not in ("", "0", "false", "no")
-# Identifier-shaped tokens (>=3 chars). Run over the RAW slice, this uniformly
-# captures identifiers, words inside comments, and words inside string literals —
-# the domain vocabulary — with no per-language comment/string parsing.
-_BODY_TERM_RE = _re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")
-_BODY_TERM_CAP = 48  # bounded, order-preserving; keeps the passage inside the cap
-_BODY_SEG_CHAR_CAP = 200_000  # cap the scanned slice (minified one-line file guard)
+# identifiers/strings/comments, so behavior-described issues (stratum B) score 0. The
+# vocabulary is now mined INTO graph.db at INDEX time (parser.go extractBodyChannels)
+# as the string_literals/body_terms/calls property kinds; the query-time file reader
+# (_body_terms) is retired. Both semantic halves read those channels through the ONE
+# shared _symbol_body_map assembler below so a symbol's passage text/hash is identical
+# in both halves under the flag. OFF -> name+sig+props passage, BYTE-IDENTICAL to today.
 
 
-def _body_terms(lines_cache: dict, repo_root: str, fp: str, start, end) -> str:
-    """Deterministic, bounded domain-vocabulary string from a symbol's body slice.
-    Reads each file ONCE (cache) and slices per symbol. correct-or-quiet: '' on a
-    missing/unreadable file or a degenerate line range."""
+def _boilerplate_stoplist(node_terms: "dict[int, str]") -> "set[str]":
+    """Boilerplate stoplist derived from the repo's OWN document-frequency distribution.
+
+    C2b — parameter-free: a token is boilerplate iff its document frequency (# symbols
+    whose body_terms contain it) exceeds ``mean + 1*std`` of the DF distribution (a
+    z-score > 1). The coefficient is exactly 1 (an allowed constant); the reference
+    ``mean``/``std`` come from THIS repo's own symbols — never a hardcoded tuned number,
+    never a fixed "top X%" cut. Needs >= 2 distinct tokens to have a distribution; below
+    that, no stoplisting (correct-or-quiet). DF distributions of code identifiers are
+    heavy right-tailed (most tokens appear once), so mean+std sits well above the mass of
+    rare domain tokens and catches only the genuinely ubiquitous boilerplate."""
+    if not node_terms:
+        return set()
+    from collections import Counter
+    df: "Counter[str]" = Counter()
+    for tv in node_terms.values():
+        for t in set(tv.split()):
+            df[t] += 1
+    if len(df) < 2:
+        return set()
+    import math
+    vals = list(df.values())
+    mean = sum(vals) / len(vals)
+    std = math.sqrt(sum((v - mean) ** 2 for v in vals) / len(vals))
+    cut = mean + std  # z > 1: distribution-derived, coefficient == 1 (allowed)
+    return {t for t, c in df.items() if c > cut}
+
+
+def _symbol_body_map(conn: "sqlite3.Connection", body_on: bool) -> "dict[int, str]":
+    """node_id -> the ``body_snippet`` passed to ``symbol_passage`` — the SINGLE source
+    of per-symbol passage BODY, shared by BOTH semantic halves
+    (``graph_localizer._assemble_symbol_passages`` and
+    ``anchor_select._get_file_embeddings``). Routing both halves through this map is
+    what makes a given symbol produce IDENTICAL passage text — and therefore an
+    identical ``passage_hash`` -> exactly ONE shared-cache encode — under GT_SEM_BODY.
+
+    OFF (``body_on=False``): ``" ".join`` of up to 4 behavioral props
+    (docstring/call_order/guard_clause/conditional_return). This is BYTE-IDENTICAL to
+    the value both halves already produced OFF (each did its own
+    ``" ".join(node_body[nid])`` over the same query), so OFF stays byte-identical.
+
+    ON: the fixed-salience template ``string_literals -> body_terms(stoplisted) ->
+    docstring -> calls -> non-docstring props``. The domain-vocabulary channels
+    (string_literals/body_terms) LEAD so a verbose docstring/calls list can never push
+    the stratum-B signal past ``symbol_passage``'s char cap. A node with no channel
+    content degrades to its OFF props. Query errors (older graph / absent table) are
+    swallowed -> ON degrades to today's props (correct-or-quiet); the caller-facing
+    ``nodes`` read stays outside this helper so its ``sqlite3.Error`` still fail-closes."""
+    # OFF props — the byte-identical source for BOTH modes (ON uses it as the degrade
+    # fallback). A missing `properties` table degrades to name+sig-only passages.
+    node_body: dict[int, list[str]] = {}
     try:
-        s = int(start) if start else 0
-        e = int(end) if end else 0
-    except (TypeError, ValueError):
-        return ""
-    if s <= 0 or e < s:
-        return ""
-    if fp not in lines_cache:
-        try:
-            with open(os.path.join(repo_root, fp), encoding="utf-8", errors="replace") as _fh:
-                lines_cache[fp] = _fh.read().splitlines()
-        except Exception:  # noqa: BLE001 — unreadable -> no enrichment
-            lines_cache[fp] = []
-    lines = lines_cache[fp]
-    if not lines:
-        return ""
-    # Bound the scanned text: a minified/generated file (W_GEN-demoted, NOT pool-
-    # excluded) can be one multi-MB line — cap the slice so the scan is finite even
-    # in that pathological case (this neighborhood produced the 29/113 exit-137
-    # SIGKILLs). finditer (below) is lazy, so on a normal file it stops at the cap.
-    seg = "\n".join(lines[s - 1:min(len(lines), e)])[:_BODY_SEG_CHAR_CAP]  # 1-indexed inclusive
-    if not seg:
-        return ""
-    seen: set[str] = set()
-    terms: list[str] = []
-    for _m in _BODY_TERM_RE.finditer(seg):  # lazy — never materializes all matches
-        tok = _m.group(0)
-        if tok not in seen:
-            seen.add(tok)
-            terms.append(tok)
-            if len(terms) >= _BODY_TERM_CAP:
-                break
-    return " ".join(terms)
+        for nid, val in conn.execute(
+            "SELECT p.node_id, p.value FROM properties p JOIN nodes n ON n.id=p.node_id "
+            "WHERE n.is_test=0 AND p.kind IN "
+            "('docstring','call_order','guard_clause','conditional_return')"):
+            if nid is None:
+                continue
+            lst = node_body.setdefault(int(nid), [])
+            if len(lst) < 4:
+                lst.append(str(val))
+    except sqlite3.Error:
+        pass  # properties table absent -> name+signature passages only
+    if not body_on:
+        return {nid: " ".join(v) for nid, v in node_body.items()}
+
+    # ON: the body-channel vocabulary + template parts, all FROM graph.db (a SEPARATE
+    # query so the OFF path above is untouched).
+    node_strings: dict[int, str] = {}
+    node_calls_v: dict[int, str] = {}
+    node_terms: dict[int, str] = {}
+    node_docstring: dict[int, str] = {}
+    node_props2: dict[int, list[str]] = {}  # non-docstring behavioral props (trailing)
+    try:
+        for nid, kind, val in conn.execute(
+            "SELECT p.node_id, p.kind, p.value FROM properties p JOIN nodes n "
+            "ON n.id=p.node_id WHERE n.is_test=0 AND p.kind IN "
+            "('string_literals','body_terms','calls','docstring',"
+            "'call_order','guard_clause','conditional_return')"):
+            if nid is None:
+                continue
+            nid = int(nid)
+            v = str(val)
+            if kind == "string_literals":
+                node_strings[nid] = v
+            elif kind == "calls":
+                node_calls_v[nid] = v
+            elif kind == "body_terms":
+                node_terms[nid] = v
+            elif kind == "docstring":
+                node_docstring.setdefault(nid, v)
+            else:  # call_order / guard_clause / conditional_return
+                lst = node_props2.setdefault(nid, [])
+                if len(lst) < 4:
+                    lst.append(v)
+    except sqlite3.Error:
+        pass  # new kinds absent (older graph) -> ON degrades to today's props
+
+    stop = _boilerplate_stoplist(node_terms)
+    ids = (set(node_body) | set(node_strings) | set(node_calls_v)
+           | set(node_terms) | set(node_docstring) | set(node_props2))
+    out: dict[int, str] = {}
+    for nid in ids:
+        _terms = " ".join(t for t in node_terms.get(nid, "").split() if t not in stop)
+        # G5 fixed-salience template: the domain-vocabulary channels LEAD so a verbose
+        # docstring or calls list cannot truncate them out of symbol_passage's char cap.
+        body = " ".join(x for x in (
+            node_strings.get(nid, ""),
+            _terms,
+            node_docstring.get(nid, ""),
+            node_calls_v.get(nid, ""),
+            " ".join(node_props2.get(nid, [])),
+        ) if x).strip()
+        if not body:
+            body = " ".join(node_body.get(nid, []))  # degrade -> today's OFF props
+        out[nid] = body
+    return out
+
+
+def _assemble_symbol_passages(
+    graph_db: str, want: "set[str]", body_on: bool, want_sym: bool = False,
+) -> "tuple[dict[str, list[str]], dict[str, list[str]]]":
+    """Build per-file ordered per-symbol passages from graph.db (NO file I/O).
+
+    Per-symbol passage BODY comes from the shared ``_symbol_body_map`` (the SAME source
+    ``anchor_select._get_file_embeddings`` reads), so a given symbol's passage text/hash
+    is identical in both halves. OFF (``body_on=False``): each passage is
+    ``symbol_passage(name, sig, PROPS)`` (docstring/call_order/guard/conditional_return
+    join) — BYTE-IDENTICAL to the pre-C2b code. ON: the fixed-salience body-channel
+    template (see ``_symbol_body_map``). ``is_test`` symbols are excluded at source
+    (leak=0). ``sqlite3.Error`` on the ``nodes`` read propagates (proof-mode fail-close)."""
+    from groundtruth.memory.enrich.embed import symbol_passage
+
+    file_passages: dict[str, list[str]] = {}
+    file_symnames: dict[str, list[str]] = {}
+    conn = sqlite3.connect(graph_db)
+    try:
+        body_map = _symbol_body_map(conn, body_on)
+        for nid, fp, nm, sig, _sl, _el in conn.execute(
+            "SELECT id, file_path, name, COALESCE(signature,''), "
+            "start_line, end_line FROM nodes WHERE is_test=0"):
+            k = _normalize(fp)
+            if k not in want or len(file_passages.get(k, [])) >= 80:
+                continue
+            body = body_map.get(int(nid), "") if nid is not None else ""
+            passage = symbol_passage(nm or "", sig or "", body)
+            if passage:  # correct-or-quiet: never embed a blank symbol
+                file_passages.setdefault(k, []).append(passage)
+                if want_sym:
+                    file_symnames.setdefault(k, []).append(str(nm or ""))
+    finally:
+        conn.close()
+    return file_passages, file_symnames
 
 
 def _semantic_score_by_file(
     issue_text: str, graph_db: str, files: "Iterable[str]",
     *, symbol_scores_out: "dict[str, list[tuple[str, float]]] | None" = None,
-    repo_root: str = "",
 ) -> dict[str, float]:
     """Semantic similarity between the issue and each candidate file's CODE CONTENT.
 
@@ -2158,61 +2267,14 @@ def _semantic_score_by_file(
     if not files:
         return {}
     want = {_normalize(f) for f in files}
-    # Per-node behavioral body snippet (docstring/call_order/guards/conditional_return)
-    # so each symbol carries ITS OWN body, not the whole file's. Same source as before,
-    # regrouped per-symbol.
-    node_body: dict[int, list[str]] = {}
-    # Per-file ordered list of symbol passages (carry the existing 80/symbol cap).
-    file_passages: dict[str, list[str]] = {}
-    # R1 leaf-naming bridge: the symbol NAME parallel to each passage (same index),
-    # so the per-symbol cosine computed below can be attributed back to a name for
-    # symbol-stage ranking. Only assembled when symbol_scores_out is requested.
-    file_symnames: dict[str, list[str]] = {}
     _want_sym = symbol_scores_out is not None
+    # C2b: assemble per-symbol passages from graph.db. Read the flag at CALL time (Fable
+    # #10) so a test/harness toggling GT_SEM_BODY is honoured. OFF -> name+signature+PROPS
+    # passages, BYTE-IDENTICAL to the pre-C2b code; ON -> the graph.db body-channel template
+    # (no file I/O — the query-time disk read is retired, so repo_root is no longer needed).
+    _body_on = os.environ.get("GT_SEM_BODY", "") not in ("", "0", "false", "no")
     try:
-        conn = sqlite3.connect(graph_db)
-        try:
-            # Properties are ADDITIVE — isolate so a missing `properties` table (older
-            # graphs) degrades to name+signature passages, NOT a proof-mode fail-close.
-            try:
-                for nid, val in conn.execute(
-                    "SELECT p.node_id, p.value FROM properties p JOIN nodes n ON n.id=p.node_id "
-                    "WHERE n.is_test=0 AND p.kind IN ('docstring','call_order','guard_clause','conditional_return')"):
-                    if nid is None:
-                        continue
-                    lst = node_body.setdefault(int(nid), [])
-                    if len(lst) < 4:
-                        lst.append(str(val))
-            except sqlite3.Error:
-                pass  # properties table absent -> name+signature passages only
-            # Read the flag at CALL time (Fable #10), not the import-time _SEM_BODY_ON —
-            # else a test/harness toggling GT_SEM_BODY after import silently no-ops
-            # (parity with GT_CONTENT_LEG's call-time os.getenv).
-            _body_on = (
-                os.environ.get("GT_SEM_BODY", "") not in ("", "0", "false", "no")
-            ) and bool(repo_root)
-            _lines_cache: dict[str, list[str]] = {}
-            for nid, fp, nm, sig, _sl, _el in conn.execute(
-                "SELECT id, file_path, name, COALESCE(signature,''), "
-                "start_line, end_line FROM nodes WHERE is_test=0"):
-                k = _normalize(fp)
-                if k not in want or len(file_passages.get(k, [])) >= 80:
-                    continue
-                _props = " ".join(node_body.get(int(nid), [])) if nid is not None else ""
-                if _body_on:
-                    # domain vocabulary LEADS the body (props second) so it survives
-                    # symbol_passage's char cap. correct-or-quiet: '' -> props only.
-                    _bt = _body_terms(_lines_cache, repo_root, fp, _sl, _el)
-                    body = (_bt + " " + _props).strip() if _bt else _props
-                else:
-                    body = _props
-                passage = symbol_passage(nm or "", sig or "", body)
-                if passage:  # correct-or-quiet: never embed a blank symbol
-                    file_passages.setdefault(k, []).append(passage)
-                    if _want_sym:
-                        file_symnames.setdefault(k, []).append(str(nm or ""))
-        finally:
-            conn.close()
+        file_passages, file_symnames = _assemble_symbol_passages(graph_db, want, _body_on, _want_sym)
     except sqlite3.Error as _e:
         if _proof_on:
             _proof.require(False, "semantic_db_read", str(_e))
@@ -3326,7 +3388,7 @@ def localize(
     _symbol_semrank: dict[str, list[tuple[str, float]]] = {}
     _sem = _semantic_score_by_file(
         issue_text, graph_db, [c.file_path for c in _sem_pool],
-        symbol_scores_out=_symbol_semrank, repo_root=repo_root,
+        symbol_scores_out=_symbol_semrank,
     )
     # Rank ONLY scored candidates: a file with no semantic score (outside the pool,
     # over the encode budget, or no embeddable symbols) must fall to rank _BIG

@@ -376,23 +376,16 @@ def _get_file_embeddings(
     # by separator/prefix.
     file_paths = list(dict.fromkeys(_norm_path(row[0]) for row in c.fetchall() if row[0]))
 
-    # Collect this node's behavioral properties (docstring / call_order / guards /
-    # conditional_return) per node_id so each symbol's passage carries its own body
-    # snippet — NOT the whole file's. Source = the SAME properties the file-bag used,
-    # regrouped per-symbol. (No file reads: stays inside the demand-scope cost bound.)
-    node_body: dict[int, list[str]] = {}
-    try:
-        for _nid, _val in c.execute(
-            "SELECT p.node_id, p.value FROM properties p JOIN nodes n ON n.id=p.node_id "
-            "WHERE n.is_test=0 AND p.kind IN ('docstring','call_order','guard_clause','conditional_return')"
-        ):
-            if _nid is None:
-                continue
-            lst = node_body.setdefault(int(_nid), [])
-            if len(lst) < 4:  # a few snippets keep the passage inside the token cap
-                lst.append(str(_val))
-    except sqlite3.Error:
-        pass  # properties table absent on older graphs -> name+signature passage only
+    # Per-symbol passage BODY comes from the SHARED assembler (the SAME source the
+    # localizer half — graph_localizer._assemble_symbol_passages — reads), so a given
+    # symbol produces IDENTICAL passage text and passage_hash in BOTH halves under
+    # GT_SEM_BODY (one shared-cache encode, never two). OFF (default) it is the
+    # docstring/call_order/guard/conditional_return join — byte-identical to before.
+    # Imported at call time: no module-level import edge to graph_localizer, no cycle.
+    from groundtruth.pretask.graph_localizer import _symbol_body_map
+
+    _body_on = os.environ.get("GT_SEM_BODY", "") not in ("", "0", "false", "no")
+    body_map = _symbol_body_map(conn, _body_on)
 
     # Per-file ordered list of symbol passages (carry the existing 60/symbol cap).
     file_passages: dict[str, list[str]] = {fp: [] for fp in file_paths}
@@ -402,7 +395,7 @@ def _get_file_embeddings(
         _k = _norm_path(_fp)
         if not _k or _k not in file_passages or len(file_passages[_k]) >= 60:
             continue
-        body = " ".join(node_body.get(int(_id), [])) if _id is not None else ""
+        body = body_map.get(int(_id), "") if _id is not None else ""
         passage = symbol_passage(_nm or "", _sig or "", body)
         if passage:  # correct-or-quiet: never embed a blank symbol
             file_passages[_k].append(passage)

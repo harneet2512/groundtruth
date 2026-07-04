@@ -97,7 +97,7 @@ agent:
     - Your response MUST include AT LEAST ONE bash tool call
     - You can make MULTIPLE tool calls in a single response when commands are independent
     - Directory or environment variable changes are not persistent between commands
-    - Prefix commands with `cd $(cat /opt/gt/gt_root.txt) &&` if needed
+    - Prefix commands with `cd $(cat /tmp/gt_root.txt) &&` if needed
 
     ## Environment Details
 
@@ -105,14 +105,14 @@ agent:
     - Always use non-interactive flags (-y, -f) for commands
     - Avoid interactive tools like vi, nano
     - You can use bash commands or invoke any tool in the environment
-    - /opt/gt/gt_root.txt contains the repository root path
+    - /tmp/gt_root.txt contains the repository root path
 
     ## Submission
 
     When you've completed your work, submit your changes as a git diff patch.
 
     Step 1: Create the patch file
-    Run `cd $(cat /opt/gt/gt_root.txt) && git add -N -- <file1> <file2> && git diff -- <file1> <file2> > /tmp/patch.txt` listing every source file you modified OR created.
+    Run `cd $(cat /tmp/gt_root.txt) && git add -N -- <file1> <file2> && git diff -- <file1> <file2> > /tmp/patch.txt` listing every source file you modified OR created.
     The `git add -N` registers any newly-created files as intent-to-add so they appear in the diff — a plain `git diff` silently OMITS untracked new files, which would drop a fix that adds files. Do NOT commit your changes.
 
     <IMPORTANT>
@@ -133,7 +133,9 @@ agent:
     - You CANNOT continue working after submitting.
     </CRITICAL>
     </instructions>
-  step_limit: 300
+  step_limit: 150  # PAIRED-CONTROL: MUST equal the baseline (deepswe_gt_pier_baseline.yaml). The GT arm is
+                   # budget-AWARE (gt_mini_patch budget_b=action_count/step_limit) — a different denominator
+                   # changes the agent's budget signal, so both arms must run at ONE chosen budget.
   cost_limit: 3.0
 
 # mini-swe-agent runs INSIDE the pier-managed task container (pier's `--env docker`
@@ -154,9 +156,10 @@ environment:
   # exist in most task images -> every command failed to spawn with
   # `[Errno 2] No such file or directory: '/home/user'`. WORKDIR always exists and
   # is the repo root on SWE/DeepSWE images; the agent also prefixes
-  # `cd $(cat /opt/gt/gt_root.txt)` (the detected root) for navigation. Generalized:
+  # `cd $(cat /tmp/gt_root.txt)` (the detected root) for navigation. Generalized:
   # no per-task path baked in.
-  timeout: 120
+  timeout: 3600  # PAIRED-CONTROL: MUST equal the baseline (3600). 120s killed long test/build commands
+                 # on the GT arm ONLY — a between-arm capability difference beyond the GT surface.
   env:
     PAGER: cat
     MANPAGER: cat
@@ -205,11 +208,16 @@ model:
     # deepseek-v4-flash on BOTH benchmarks, thinking OFF (byte-parity with
     # verified_gt.yaml). V4 default is THINKING-ON which bloats tokens+cost and is
     # incompatible with the multi-turn harness — disable via extra_body. DeepSeek
-    # official-spec sampling: temp 1.0 / top_p 0.95 / max 8192 / penalties 0.
+    # official-spec sampling: temp 1.0 / top_p 1.0 / penalties 0 (top_p CORRECTED 0.95->1.0 for
+    # PAIRED-CONTROL parity with the baseline + the OH baseline of record). max_tokens
+    # raised 8192 -> 16384 (2x) as insurance against truncating a large
+    # single-turn write (big heredoc / new file); inert on normal small turns
+    # (billed on tokens GENERATED, not the cap). VERIFY the endpoint accepts
+    # >8192 before a paid run -- a hard-ceiling 400 would kill every call.
     drop_params: true
     temperature: 1.0
-    top_p: 0.95
-    max_tokens: 8192
+    top_p: 1.0
+    max_tokens: 16384
     presence_penalty: 0
     frequency_penalty: 0
     num_retries: 3

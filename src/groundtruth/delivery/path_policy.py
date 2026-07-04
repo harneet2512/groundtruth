@@ -121,14 +121,26 @@ def _path_segments(path: str) -> tuple[list[str], str]:
     return segs, (segs[-1] if segs else "")
 
 
+# Exact test-module basenames the pattern markers below MISS: pytest ``conftest.py``
+# (fixtures that call product symbols — near-universal in Python repos) and the
+# Django/convention ``tests.py`` / ``test.py`` test modules. is_test=0 on their nodes
+# (walker.go has no such basename rule), so without this a delivered CALLER line could
+# surface a graded-test function NAME + location (proven leak, Fable 2026-07-03). Exact
+# match (never substring), so ``latest.py`` / ``mytest.py`` / ``attestation.py`` stay clean.
+_TEST_FILE_BASENAMES = frozenset({"conftest.py", "tests.py", "test.py"})
+
+
 def is_test_path(path: str) -> bool:
     """True iff a TEST file — by DIRECTORY SEGMENT (a relative top-level ``test/x.js``
     is caught; ``contest/``/``latest/`` are NOT — substring is never enough) OR a
-    basename marker (``test_*`` / ``*_test.*`` / ``*.test.*`` / ``*.spec.*``)."""
+    basename marker (``test_*`` / ``*_test.*`` / ``*.test.*`` / ``*.spec.*`` / the exact
+    test modules ``conftest.py`` / ``tests.py`` / ``test.py``)."""
     segs, bn = _path_segments(path)
     if not segs:
         return False
     if any(s in _TEST_DIR_SEGMENTS for s in segs[:-1]):
+        return True
+    if bn in _TEST_FILE_BASENAMES:
         return True
     return (
         bn.startswith("test_") or "_test." in bn or ".test." in bn or ".spec." in bn

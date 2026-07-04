@@ -827,6 +827,10 @@ func main() {
 	fmt.Fprintf(os.Stderr, "Pass 5c: mining co-change from git history...\n")
 	cochangeCount := mineCochanges(db, *root)
 	fmt.Fprintf(os.Stderr, "  Stored %d co-change pairs\n", cochangeCount)
+	// DCC set-form co-change (NEW table, separate pass; legacy pair table above
+	// is untouched). Base-ancestor-pinned, leak-safe, shallow-skipped.
+	cochangeSetCount := mineCochangeSets(db, *root)
+	fmt.Fprintf(os.Stderr, "  Stored %d co-change sets\n", cochangeSetCount)
 
 	// Post-insert FK validation (non-fatal)
 	if err := db.ValidateForeignKeys(); err != nil {
@@ -2051,6 +2055,88 @@ func mineCochanges(db *store.DB, root string) int {
 		log.Printf("WARNING: co-change insert: %v", err)
 	}
 	return len(filtered)
+}
+
+// mineCochangeSets is a NEW, SEPARATE pass for DCC (Dynamic Concern Consensus). It
+// stores SET-FORM co-change membership with a commit-hash witness in the new
+// `cochange_sets` table, and NEVER touches the legacy pair miner (mineCochanges),
+// the shared cochangeMinCount floor, or the `cochanges` table.
+//
+// Base-pinned + leak-safe: mines ONLY commits that are ANCESTORS of the indexed
+// base (the checked-out HEAD) — `git log <base>` walks base and its ancestors, so
+// no future/sibling commit can leak. A shallow clone (no real ancestry) is skipped
+// (correct-or-quiet: an empty table, never a wrong witness). Set-form, no scores /
+// decay / caps; the SAME <=50-file mega-commit floor the legacy miner uses. Returns
+// the number of (commit, member-set) groups stored.
+func mineCochangeSets(db *store.DB, root string) int {
+	// Shallow repositories have truncated ancestry — a base-pinned ancestor walk
+	// would be a lie. Skip (empty table), never emit a partial/wrong witness.
+	if scmd := exec.Command("git", "rev-parse", "--is-shallow-repository"); true {
+		scmd.Dir = root
+		if sout, serr := scmd.Output(); serr == nil {
+			if strings.TrimSpace(string(sout)) == "true" {
+				fmt.Fprintf(os.Stderr, "  co-change sets: shallow repo — skipped (empty)\n")
+				return 0
+			}
+		}
+	}
+	// Resolve the indexed base commit explicitly so the ancestor walk is pinned.
+	base := "HEAD"
+	if bcmd := exec.Command("git", "rev-parse", "HEAD"); true {
+		bcmd.Dir = root
+		if bout, berr := bcmd.Output(); berr == nil {
+			if h := strings.TrimSpace(string(bout)); h != "" {
+				base = h
+			}
+		}
+	}
+	// Same git-toplevel re-base the pair miner uses (git-log paths are toplevel-
+	// relative; walker stores root-relative).
+	gitTop := ""
+	if tcmd := exec.Command("git", "rev-parse", "--show-toplevel"); true {
+		tcmd.Dir = root
+		if tout, terr := tcmd.Output(); terr == nil {
+			gitTop = strings.TrimSpace(string(tout))
+		}
+	}
+	// %H (the commit hash witness) + the RS record separator, then --name-only.
+	// The 500-commit window matches the legacy miner's proven cost profile; it is
+	// a mining window (bounded by base ancestry), not a data cap on any file.
+	cmd := exec.Command("git", "log", base, "--name-only", "--format=tformat:%x1e%H", "-n", "500")
+	cmd.Dir = root
+	out, err := cmd.Output()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "  co-change sets: git log failed (%v) — 0 sets stored\n", err)
+		return 0
+	}
+	sets := make(map[string][]string)
+	for _, rec := range strings.Split(string(out), "\x1e") {
+		lines := strings.Split(strings.TrimSpace(rec), "\n")
+		if len(lines) == 0 {
+			continue
+		}
+		hash := strings.TrimSpace(lines[0])
+		if hash == "" {
+			continue
+		}
+		files := []string{}
+		seen := make(map[string]bool)
+		for _, line := range lines[1:] {
+			f := normCochangePath(strings.TrimSpace(line), root, gitTop)
+			if f != "" && !seen[f] {
+				seen[f] = true
+				files = append(files, f)
+			}
+		}
+		if len(files) < 2 || len(files) > 50 {
+			continue // single-file commit has no co-change signal; skip mega-commits
+		}
+		sets[hash] = files
+	}
+	if err := db.BatchInsertCochangeSets(sets); err != nil {
+		log.Printf("WARNING: co-change set insert: %v", err)
+	}
+	return len(sets)
 }
 
 var pyClassInhRe = regexp.MustCompile(`^\s*class\s+(\w+)\s*\(([^)]+)\)\s*:`)

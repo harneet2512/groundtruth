@@ -14,9 +14,9 @@ import "testing"
 
 func TestSplitFirstWord(t *testing.T) {
 	cases := []struct {
-		name           string
-		wantFirst      string
-		wantRest       string
+		name      string
+		wantFirst string
+		wantRest  string
 	}{
 		{"create_user", "create", "user"}, // snake_case
 		{"createUser", "create", "user"},  // camelCase
@@ -24,9 +24,9 @@ func TestSplitFirstWord(t *testing.T) {
 		{"createuser", "createuser", ""},  // no boundary
 		{"get_value", "get", "value"},
 		{"OpenFile", "open", "file"},
-		{"created", "created", ""},        // single word, no boundary
+		{"created", "created", ""}, // single word, no boundary
 		{"getUserById", "get", "userbyid"},
-		{"_leading", "_leading", ""},      // underscore at idx 0 is not a boundary
+		{"_leading", "_leading", ""}, // underscore at idx 0 is not a boundary
 	}
 	for _, c := range cases {
 		gotFirst, gotRest := splitFirstWord(c.name)

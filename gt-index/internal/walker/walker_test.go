@@ -12,6 +12,17 @@ func TestIsTestFile(t *testing.T) {
 		{"python test_ prefix", "test_users.py", true},
 		{"python _test suffix", "users_test.py", true},
 		{"python normal", "users.py", false},
+		// Python pytest/Django FILES the prefix/suffix rules miss (Fable 2026-07-03 leak):
+		{"python conftest nested", "tests/conftest.py", true},
+		{"python conftest root", "conftest.py", true},
+		{"python django tests.py", "app/tests.py", true},
+		{"python bare test.py", "pkg/test.py", true},
+		{"python _tests plural", "app/foo_tests.py", true},
+		// must NOT over-mark: "contests" ends in "tests" but not "_tests"
+		{"python contests not a test", "contests.py", false},
+		// JS/TS plural .tests./.specs.
+		{"ts plural tests", "src/users.tests.ts", true},
+		{"js plural specs", "src/users.specs.js", true},
 
 		// Go
 		{"go test file", "pkg/users_test.go", true},

@@ -120,6 +120,8 @@ _SCOPE_PATTERN = re.compile(r"<gt-scope>(.*?)</gt-scope>", re.DOTALL | re.I)
 _L1_RANK_PATTERNS = [
     re.compile(r"^\s*(\d+)[.)]\s+([^\s]+\.(?:py|go|ts|js|java|rs|cpp|c|h|rb|php|swift|kt|cs))", re.M),
     re.compile(r"Edit target:\s*([^\s]+\.(?:py|go|ts|js|java|rs|cpp|c|h|rb|php|swift|kt|cs))", re.M | re.I),
+    # ledger HIGH head "<file> :: <func> — N/3 signals agree" (GT_CONSENSUS_LEDGER; Fable C5)
+    re.compile(r"^\s*([^\s]+\.(?:py|go|ts|js|java|rs|cpp|c|h|rb|php|swift|kt|cs))\s*::.*signals agree", re.M | re.I),
     re.compile(r"<gt-task-brief>.*?(?:files?|targets?).*?([^\s]+\.(?:py|go|ts|js|java|rs|cpp|c|h|rb|php|swift|kt|cs))", re.DOTALL | re.I),
 ]
 

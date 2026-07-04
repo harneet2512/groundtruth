@@ -63,6 +63,11 @@ on:
         description: "Shard spec i/n for large batches (e.g. 1/4 = first quarter). Use when mode=full to stay under the 256-job GHA matrix cap. Format: 1-based index / total (e.g. 1/4, 2/4). Ignored for smoke/pilot/pilot100 modes and when instance_ids is set."
         required: false
         default: ""
+      baseline:
+        description: "Baseline/control arm — mini-swe-agent with GroundTruth FULLY OFF (no gt_mini_patch install, GT-stripped config, GT_BASELINE=1). Produces the paired GT-off control. No GT substrate required."
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -73,15 +78,18 @@ env:
   PYTHONIOENCODING: "utf-8"
   LANG: "C.UTF-8"
   LC_ALL: "C.UTF-8"
-  # Full-stack enforcement — same gates as deepswe_full.yml.
-  GT_REQUIRE_FULL_STACK: "1"
-  GT_REQUIRE_FULL_POTENTIAL: "1"
-  GT_REQUIRE_FTS5: "1"
-  GT_FORCE_ONNX_EMBEDDER: "1"
-  GT_REQUIRE_EMBEDDER: "1"
-  GT_REQUIRE_LSP: "1"
+  # Full-stack enforcement — same gates as deepswe_full.yml. On the BASELINE
+  # (control) arm GroundTruth is fully off, so every GT enforcement gate is
+  # forced to '0': the baseline is pure mini-swe-agent and must never fail-closed
+  # on GT substrate / LSP / FTS5 / embedder proof it does not use.
+  GT_REQUIRE_FULL_STACK: ${{ inputs.baseline == true && '0' || '1' }}
+  GT_REQUIRE_FULL_POTENTIAL: ${{ inputs.baseline == true && '0' || '1' }}
+  GT_REQUIRE_FTS5: ${{ inputs.baseline == true && '0' || '1' }}
+  GT_FORCE_ONNX_EMBEDDER: ${{ inputs.baseline == true && '0' || '1' }}
+  GT_REQUIRE_EMBEDDER: ${{ inputs.baseline == true && '0' || '1' }}
+  GT_REQUIRE_LSP: ${{ inputs.baseline == true && '0' || '1' }}
   # Legitimacy: per-task graph built FRESH in-container from THIS task's repo.
-  GT_FORBID_PREBUILT_GRAPH: "1"
+  GT_FORBID_PREBUILT_GRAPH: ${{ inputs.baseline == true && '0' || '1' }}
   # Legitimacy: arm the commit-parity gate (parity with deepswe_full.yml) so a
   # stale-bake / wrong-commit proof FAILS CLOSED (consumed by substrate_proof.sh).
   # Commit parity OFF: substrate baked from ebf28d8e, workflow-only fixes since
@@ -92,11 +100,13 @@ env:
   TRANSFORMERS_OFFLINE: "1"
   HF_HUB_OFFLINE: "1"
   # Substrate-consume (same as deepswe_full.yml §A/§B-AFTER/§D/§G).
+  # Baseline forces pinned-substrate enforcement off (it consumes no substrate);
+  # the substrate pull/proof STEPS are additionally gated on `inputs.baseline != true`.
   GT_SUBSTRATE_DIGEST: ${{ inputs.gt_substrate_digest || vars.GT_SUBSTRATE_DIGEST }}
-  GT_REQUIRE_PINNED_SUBSTRATE: ${{ inputs.require_pinned_substrate }}
+  GT_REQUIRE_PINNED_SUBSTRATE: ${{ inputs.baseline == true && '0' || inputs.require_pinned_substrate }}
   # Gates policy: proof default strict; deliver-always is explicit opt-in.
   GT_GATES_DELIVER_ALWAYS: "0"
-  GT_PROOF_MODE: "1"
+  GT_PROOF_MODE: ${{ inputs.baseline == true && '0' || '1' }}
   GT_CONTAINERIZED: "1"
   GT_RUNTIME_STRATEGY: "unified_substrate"
   GT_LSP_READY_BUDGET_S_OVERRIDE: ${{ vars.GT_LSP_READY_BUDGET_S_OVERRIDE }}
@@ -219,6 +229,14 @@ jobs:
           python -m pip install --upgrade pip --quiet
           python -m pip install "datacurve-pier==0.2.0" --quiet
           python -m pip install -e . --quiet
+          # SWE-bench-Live official evaluator — baked in ONCE here (NON-editable: a `-e`
+          # link would dangle /tmp/sbl-src on task runners after the venv tar/restore).
+          # Every per-task eval then reuses this baked copy → zero per-task clone/install
+          # ("don't repeat work"). Cache-miss fallback is inline-install in the eval step.
+          git clone --depth 1 --branch python-only https://github.com/microsoft/SWE-bench-Live.git /tmp/sbl-src 2>/dev/null \
+            && python -m pip install /tmp/sbl-src --quiet \
+            && python -c "import swebench; print('[prepare] SWE-bench-Live harness baked into venv')" \
+            || echo "::warning::SWE-bench-Live harness bake failed — eval step will inline-install (cache-miss fallback)"
           deactivate
           tar -czf /tmp/gt-harness-venv.tar.gz -C /tmp gt-harness-venv/
           echo "harness venv archived: $(du -sh /tmp/gt-harness-venv.tar.gz | cut -f1)"
@@ -227,7 +245,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: /tmp/gt-harness-venv.tar.gz
-          key: gt-harness-venv-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}-pier020
+          key: gt-harness-venv-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}-pier020-sbl1
 
       # ── SPEED-OPT C: pull + save substrate image ONCE ────────────────────────
       - name: Pull + save substrate image for matrix job cache
@@ -490,7 +508,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: /tmp/gt-harness-venv.tar.gz
-          key: gt-harness-venv-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}-pier020
+          key: gt-harness-venv-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}-pier020-sbl1
 
       - name: Install host harness deps (pier + GT python deps for the adapter ONLY)
         run: |
@@ -525,6 +543,9 @@ jobs:
           echo "GT_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
 
       - name: Verify env armed (fail-closed — abort before any paid work)
+        # Baseline arm forces the GT enforcement gates to '0', so this GT-arming
+        # check does not apply — skip it (the baseline is pure mini-swe-agent).
+        if: ${{ inputs.baseline != true }}
         shell: bash
         run: |
           set -e
@@ -658,6 +679,8 @@ jobs:
           echo "[GT_META] Live Lite image: ${LL_TASK_IMAGE:-$DH_IMG}"
 
       - name: GT substrate proof (handoff §B-AFTER/§D/§G) — pre-agent, pinned, read-only repo
+        # Baseline arm consumes no substrate — skip the proof entirely.
+        if: ${{ inputs.baseline != true }}
         continue-on-error: true
         env:
           GT_MATRIX_TASK: ${{ matrix.task }}
@@ -690,7 +713,9 @@ jobs:
                   print("invalid")
           PY
           )
-          if [ "$PROOF_STATE" != "ok" ]; then
+          # Baseline arm has no substrate proof (skipped above) — the proof gate
+          # only applies to the GT arm. Baseline proceeds straight to the agent.
+          if [ "${{ inputs.baseline }}" != "true" ] && [ "$PROOF_STATE" != "ok" ]; then
             echo "GT_RUN_PROOF_FAIL: refusing paid agent run because substrate proof_status state=${PROOF_STATE}" | tee -a trial_output.log
             exit 1
           fi
@@ -824,8 +849,15 @@ jobs:
           ")
           echo "[GT_META] issue text from: $PRO_ISSUE (${#ISSUE_TEXT} chars)"
 
-          # Write the config + issue text to the writable gt_out mount (not ro /opt/gt)
-          cp artifact_deepswe/gt_integration/deepswe_gt_pier.yaml /tmp/gt_inject/opt/gt/agent_config.yaml
+          # Write the config + issue text to the writable gt_out mount (not ro /opt/gt).
+          # Baseline (control) arm gets the GT-stripped config (no <gt-evidence> prose);
+          # the GT arm gets the full config. The ONLY paired difference is the GT surface.
+          if [ "${{ inputs.baseline }}" = "true" ]; then
+            cp artifact_deepswe/gt_integration/deepswe_gt_pier_baseline.yaml /tmp/gt_inject/opt/gt/agent_config.yaml
+            echo "[GT] BASELINE config (GT-stripped) written"
+          else
+            cp artifact_deepswe/gt_integration/deepswe_gt_pier.yaml /tmp/gt_inject/opt/gt/agent_config.yaml
+          fi
           # Write issue text to a file the container can read
           echo "$ISSUE_TEXT" > "${HOST_GT_OUT}/issue.txt"
 
@@ -855,6 +887,7 @@ jobs:
             -e GT_ORACLE_EVENTS="/gt_out/gt_oracle_events.jsonl" \
             -e GT_RUNTIME_LEDGER="/gt_out/gt_runtime_ledger.jsonl" \
             -e GT_HOOK_FIRE_COUNTS="/gt_out/gt_hook_fire_counts.json" \
+            -e GT_BASELINE=${{ inputs.baseline == true && '1' || '0' }} \
             $MODEL_ENV \
             --entrypoint "" \
             "$_GHCR_IMG" \
@@ -900,16 +933,28 @@ jobs:
               mini-extra config set DEEPSEEK_API_KEY "${DEEPSEEK_API_KEY:-}" 2>/dev/null || true
               echo "[GT] mini-swe-agent config written"
 
-              # Apply GT patch (monkey-patches LocalEnvironment to append GT evidence)
-              if [ -f /opt/gt/gt_mini_patch.py ]; then
+              # Apply GT patch (monkey-patches LocalEnvironment to append GT evidence).
+              # BASELINE (control) arm: GT_BASELINE=1 -> skip entirely so NO <gt-evidence>
+              # is ever appended. This is the paired-control difference from the GT arm.
+              if [ "${GT_BASELINE:-0}" != "1" ] && [ -f /opt/gt/gt_mini_patch.py ]; then
                 python /opt/gt/gt_mini_patch.py --install 2>&1 || echo "WARN: gt_mini_patch install failed"
+              else
+                echo "[GT] BASELINE mode: gt_mini_patch NOT installed (pure mini-swe-agent control arm)"
               fi
 
               # Run the agent — pipe yes to skip any remaining interactive prompts
+              # -o saves the mini-swe-agent NATIVE trajectory (info.model_stats.api_calls =
+              # steps, instance_cost = cost, per-msg usage = tokens) to the /gt_out bind-mount
+              # so gt_deep_metrics.py (results_dir=/tmp/gt) parses tokens/cost/steps. Without it
+              # the traj goes to a throwaway last_mini_run.traj.json that is never collected, so
+              # action_count/tokens/cost all read 0. GUARD: this whole block is a single-quoted
+              # docker bash -c argument. NEVER put an apostrophe in any comment here: one
+              # apostrophe closes the quote and the agent silently never launches. Cost a smoke.
               yes "" 2>/dev/null | mini-swe-agent \
                 --model "'"$INPUT_MODEL"'" \
                 --task "$(cat /gt_out/issue.txt 2>/dev/null || echo Fix the issue in the repository.)" \
                 --config /opt/gt/agent_config.yaml \
+                -o /gt_out/mini-swe-agent.trajectory.json \
                 2>&1 || true
 
               # CRITICAL: copy patch to bind-mount BEFORE container exits.
@@ -944,63 +989,80 @@ jobs:
           fi
           echo "agent ran ($AGENT_STEPS steps, $GT_BLOCKS GT blocks delivered)"
 
-      - name: Run Pro eval (run_script.sh verifier) + emit reward outcome
+      - name: Run official SWE-bench-Live evaluator (this instance, warm image, offline dataset)
         if: always()
         run: |
-          # Live Lite: extract the agent's patch for offline scoring with Microsoft's harness.
-          # NO in-workflow eval — scoring is done separately via:
-          #   python -m swebench.harness.run_evaluation --dataset_name SWE-bench-Live/SWE-bench-Live \
-          #     --split lite --namespace starryzhang --predictions_path predictions.jsonl
+          # REAL per-task resolution via Microsoft's harness. REPLACES the old EVAL_DEFERRED
+          # stub that hardcoded REWARD=0 — every task read reward 0.0, a PLACEHOLDER not a verdict.
+          # OPTIMIZED / zero repeated work (per the "don't repeat, be smart" rule):
+          #   * dataset = the LOCAL tracked jsonl → load_swebench_dataset reads .jsonl offline (no HF)
+          #   * image   = docker-tag the agent's ALREADY-PULLED image to the harness key; the harness
+          #               does client.images.get() BEFORE pull → finds it locally → 0 re-pull
+          #   * harness = baked into the cached prepare venv (on PATH here) → no per-task install;
+          #               inline clone fires ONLY on a venv cache MISS.
           TASK_ID="${{ matrix.task }}"
           mkdir -p trial_results
 
-          # Patch source priority: bind-mount (raw) > log extraction (lossy)
+          # Patch source priority: bind-mount (raw) > git-diff HEAD > log extraction (lossy)
           HOST_GT_OUT="${HOST_GT_OUT:-/tmp/gt}"
           PATCH_FILE=""
-          if [ -s "${HOST_GT_OUT}/agent_patch.diff" ]; then
-            PATCH_FILE="${HOST_GT_OUT}/agent_patch.diff"
-            echo "patch source: bind-mount (raw, uncorrupted)"
-          elif [ -s "${HOST_GT_OUT}/git_diff_head.diff" ]; then
-            PATCH_FILE="${HOST_GT_OUT}/git_diff_head.diff"
-            echo "patch source: git diff HEAD (bind-mount)"
+          if [ -s "${HOST_GT_OUT}/agent_patch.diff" ]; then PATCH_FILE="${HOST_GT_OUT}/agent_patch.diff";
+          elif [ -s "${HOST_GT_OUT}/git_diff_head.diff" ]; then PATCH_FILE="${HOST_GT_OUT}/git_diff_head.diff";
           elif [ -f trial_output.log ]; then
             python3 scripts/swebench/extract_patch_from_log.py trial_output.log /tmp/agent_patch.diff 2>/dev/null && PATCH_FILE=/tmp/agent_patch.diff || true
-            echo "patch source: log extraction (fallback)"
           fi
 
           REWARD=0
-          PRO_INFRA=0
           if [ -z "$PATCH_FILE" ] || [ ! -s "$PATCH_FILE" ]; then
-            echo "EVAL_DEFERRED: no agent patch found — task did not produce output" | tee -a trial_output.log
+            echo "EVAL: no agent patch produced — unresolved (reward 0)" | tee -a trial_output.log
           else
-            PATCH_SIZE=$(wc -c < "$PATCH_FILE")
-            PATCH_FILES=$(grep -c '^diff --git' "$PATCH_FILE" 2>/dev/null || echo 0)
-            echo "EVAL_DEFERRED: patch extracted (${PATCH_SIZE} bytes, ${PATCH_FILES} files) — scoring via Microsoft harness" | tee -a trial_output.log
             cp "$PATCH_FILE" trial_results/agent_patch.diff
+            # harness present (baked venv on PATH)? else inline-install ONCE (cache-miss fallback only)
+            if ! python3 -c "import swebench" 2>/dev/null; then
+              echo "swebench absent (venv cache miss) — inline install"
+              git clone --depth 1 --branch python-only https://github.com/microsoft/SWE-bench-Live.git /tmp/sbl-src 2>/dev/null || true
+              python3 -m pip install -q /tmp/sbl-src 2>/dev/null || true
+            fi
+            # 1-line predictions.jsonl for this instance
+            MODEL_NAME="${{ inputs.baseline == true && format('mini-swe-agent + {0} (baseline)', inputs.model) || format('GroundTruth + mini-swe-agent + {0}', inputs.model) }}"
+            python3 -c "import json,sys; open('/tmp/pred.jsonl','w',encoding='utf-8').write(json.dumps({'instance_id':sys.argv[1],'model_patch':open(sys.argv[2],encoding='utf-8').read(),'model_name_or_path':sys.argv[3]}))" "$TASK_ID" "$PATCH_FILE" "$MODEL_NAME"
+            # WARM IMAGE: tag the agent's pulled image to the harness's expected key so get()-before-pull hits local
+            if [ -n "${LL_TASK_IMAGE:-}" ]; then
+              BN=$(basename "$LL_TASK_IMAGE"); BN="${BN%%:*}"
+              docker tag "$LL_TASK_IMAGE" "starryzhang/${BN}:latest" 2>/dev/null \
+                && echo "warm-image: $LL_TASK_IMAGE -> starryzhang/${BN}:latest (no re-pull)" \
+                || echo "warm-image: tag failed (harness will pull this one image)"
+            fi
+            docker container prune -f >/dev/null 2>&1 || true
+            # OFFICIAL eval — single instance, OFFLINE local dataset, warm image
+            python3 -m swebench.harness.run_evaluation \
+              --dataset_name benchmarks/data/swebench_live_lite.jsonl \
+              --predictions_path /tmp/pred.jsonl \
+              --instance_ids "$TASK_ID" \
+              --namespace starryzhang \
+              --run_id "ll_${TASK_ID}" \
+              --max_workers 1 --timeout 1800 --cache_level env 2>&1 | tee -a trial_output.log || true
+            # parse the harness report.json -> resolved
+            REPORT=$(find "logs/run_evaluation/ll_${TASK_ID}" -name report.json 2>/dev/null | head -1)
+            if [ -n "$REPORT" ]; then
+              REWARD=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1],encoding='utf-8')); v=(list(d.values())[0] if d else {}) or {}; print(1 if v.get('resolved') else 0)" "$REPORT")
+              cp "$REPORT" trial_results/report.json 2>/dev/null || true
+            else
+              echo "EVAL: no report.json produced (harness error) — reward 0" | tee -a trial_output.log
+            fi
+            echo "OFFICIAL_EVAL: ${TASK_ID} resolved=$([ "$REWARD" = "1" ] && echo YES || echo NO) (Reward: ${REWARD}.0)" | tee -a trial_output.log
           fi
 
-          # L2: the Pro grade was historically written ONLY to trial_results/reward.txt,
-          # which NO consumer reads (gt_deep_metrics.py reads jobs/<ts>/<task>__*/verifier/
-          # reward.json; deepswe_outcome.py reads jobs/<ts>/<task>__*/result.json). On a
-          # patch-apply INFRA outcome, record NO reward at all (excluded from denominator).
-          if [ "$PRO_INFRA" = "1" ]; then
-            echo "PRO_EVAL_INFRA: patch-apply infra — no reward recorded (excluded from resolved denominator)" | tee -a trial_output.log
-          else
-            # Keep reward.txt (human/back-compat) ...
-            echo "${REWARD}" > trial_results/reward.txt
-            echo "Pro verifier reward: ${REWARD}"
-            # ... AND bridge the grade into the pier verifier path the readers actually glob
-            # (jobs/*/*__*/verifier/reward.json), reusing an existing pier task dir if present
-            # else synthesizing one for this Pro task, so the grade is consumed downstream.
-            BRIDGE_DIR=$(python3 -c "import glob,os,sys,time; d=sorted(x for x in glob.glob(os.path.join('jobs','*','*__*')) if os.path.isdir(x)); print(d[-1] if d else os.path.join('jobs',str(int(time.time())),sys.argv[1]+'__pro'))" "$TASK_ID")
-            mkdir -p "$BRIDGE_DIR/verifier"
-            python3 -c "import json,sys; json.dump({'reward': float(sys.argv[1])}, open(sys.argv[2],'w',encoding='utf-8'))" "$REWARD" "$BRIDGE_DIR/verifier/reward.json"
-            echo "${REWARD}" > "$BRIDGE_DIR/verifier/reward.txt"
-            # Assert the bridged reward matches REWARD (fail-closed on a write/serialize bug).
-            BRIDGED=$(python3 -c "import json,sys; print(int(float((json.load(open(sys.argv[1],encoding='utf-8')) or {}).get('reward',-1))))" "$BRIDGE_DIR/verifier/reward.json")
-            [ "$BRIDGED" = "$REWARD" ] || { echo "::error::REWARD_BRIDGE_MISMATCH bridged=$BRIDGED reward=$REWARD"; exit 1; }
-            echo "[GT_META] reward bridged to $BRIDGE_DIR/verifier/reward.json (reward=$REWARD)"
-          fi
+          # Bridge REWARD to the reader paths (UNCHANGED consumer contract):
+          # reward.txt (back-compat) + jobs/*/*__*/verifier/reward.json (gt_deep_metrics + deepswe_outcome).
+          echo "${REWARD}" > trial_results/reward.txt
+          BRIDGE_DIR=$(python3 -c "import glob,os,sys,time; d=sorted(x for x in glob.glob(os.path.join('jobs','*','*__*')) if os.path.isdir(x)); print(d[-1] if d else os.path.join('jobs',str(int(time.time())),sys.argv[1]+'__ll'))" "$TASK_ID")
+          mkdir -p "$BRIDGE_DIR/verifier"
+          python3 -c "import json,sys; json.dump({'reward': float(sys.argv[1])}, open(sys.argv[2],'w',encoding='utf-8'))" "$REWARD" "$BRIDGE_DIR/verifier/reward.json"
+          echo "${REWARD}" > "$BRIDGE_DIR/verifier/reward.txt"
+          BRIDGED=$(python3 -c "import json,sys; print(int(float((json.load(open(sys.argv[1],encoding='utf-8')) or {}).get('reward',-1))))" "$BRIDGE_DIR/verifier/reward.json")
+          [ "$BRIDGED" = "$REWARD" ] || { echo "::error::REWARD_BRIDGE_MISMATCH bridged=$BRIDGED reward=$REWARD"; exit 1; }
+          echo "[GT_META] official-eval reward bridged to $BRIDGE_DIR/verifier/reward.json (reward=$REWARD)"
 
       - name: Collect results
         if: always()
@@ -1048,11 +1110,23 @@ jobs:
             echo "deep-telemetry: recovered ${_gt_telemetry_recovered}/3 sink(s) from /tmp/gt_out"
           fi
 
+          # The agent wrote its trajectory to the /gt_out bind-mount = host /tmp/gt_out, but the
+          # deep-metrics reader scans /tmp/gt AND task-scopes hits (rejects any path missing the
+          # task id — _find_miniswe_trajectory L483, pinned by test). So bridge it into a TASK-NAMED
+          # subdir /tmp/gt/<task>/ (path now carries the id → reader accepts) + the artifact.
+          mkdir -p "/tmp/gt/${{ matrix.task }}"
+          cp /tmp/gt_out/mini-swe-agent.trajectory.json "/tmp/gt/${{ matrix.task }}/" 2>/dev/null || true
+          cp /tmp/gt_out/mini-swe-agent.trajectory.json trial_results/ 2>/dev/null || true
+
           # Deep 8-dp metrics.
           cp /tmp/gt/gt_run_summary*.json "trial_results/" 2>/dev/null || true
           PYTHONPATH=${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:${{ github.workspace }}/scripts/metrics python3 scripts/swebench/gt_deep_metrics.py "${{ matrix.task }}" /tmp/gt --log trial_output.log 2>&1 | tail -2 || echo DEEP_METRICS_WARN
           cp "/tmp/gt_deep_metrics_${{ matrix.task }}.json" trial_results/ 2>/dev/null || true
           cp "/tmp/gt_deep_metrics_${{ matrix.task }}.md"   trial_results/ 2>/dev/null || true
+          # Per-task metrics laid out DIRECTLY as this task finishes (visible in the log + the
+          # artifact), computed from the just-written gt_deep_metrics json: resolved, steps,
+          # first-useful-edit, tokens, cost, trajectory source. One grep-able [METRICS task] line.
+          python3 -c "import json,sys,os; t=sys.argv[1]; p='/tmp/gt_deep_metrics_'+t+'.json'; d=(json.load(open(p,encoding='utf-8')) if os.path.exists(p) else {}); e=d.get('efficiency') or {}; a=d.get('agent') or {}; r=d.get('resolved'); rs=('YES' if r is True else ('NO' if r is False else '?')); print('[METRICS %s] resolved=%s steps=%s first_edit=%s tokens_total=%s cost_usd=%s traj=%s'%(t,rs,a.get('action_count'),a.get('first_edit_action'),e.get('llm_tokens_total'),(e.get('llm_cost_usd') or e.get('recorded_cost_usd')),d.get('trajectory_source')))" "${{ matrix.task }}" 2>/dev/null | tee -a trial_output.log || echo METRICS_LINE_WARN
 
           # Run provenance.
           python3 -c "import json,os; json.dump({'schema':'gt.live_lite_run_provenance.v1','task':'${{ matrix.task }}','language':'${{ matrix.language }}','gt_git_commit':os.environ.get('GITHUB_SHA') or None,'substrate_digest':os.environ.get('GT_SUBSTRATE_DIGEST') or None,'workflow_run_id':os.environ.get('GITHUB_RUN_ID') or None},open('trial_results/gt_artifacts/run_provenance.json','w'),indent=2)" \
@@ -1183,7 +1257,7 @@ jobs:
           python3 scripts/swebench/build_ll_predictions.py \
             /tmp/all /tmp/predictions/predictions.jsonl \
             --expected "$DS" \
-            --model "GroundTruth + mini-swe-agent + ${{ inputs.model }}" \
+            --model "${{ inputs.baseline == true && format('mini-swe-agent + {0} (baseline)', inputs.model) || format('GroundTruth + mini-swe-agent + {0}', inputs.model) }}" \
             | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Upload predictions for the official evaluator

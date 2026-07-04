@@ -518,8 +518,10 @@ def _parse_brief_localization(brief_text: str) -> Tuple[str, List[str]]:
     if numbered:
         files = [_normalise_path(f) for f in numbered]
     else:
-        # Single "Edit target: <filepath> ::" line
-        et_match = re.search(r'Edit target:\s+([^\s:]+)', body)
+        # Single "Edit target: <filepath> ::" line, OR the ledger HIGH head
+        # "<filepath> :: <func> — N/3 signals agree" (GT_CONSENSUS_LEDGER; Fable C5)
+        et_match = re.search(r'Edit target:\s+([^\s:]+)', body) or \
+            re.search(r'(?m)^\s*([\w.\-/]+\.\w+)\s*::.*signals agree', body)
         if et_match:
             files = [_normalise_path(et_match.group(1))]
     return confidence, files
@@ -1161,8 +1163,10 @@ def compute_task_metrics(task_id: str, task_dir: Path) -> Optional[TaskMetrics]:
             body = loc_m.group(2)
             # Check if HIGH confidence
             if overall_conf == "high":
-                # Single-target brief: "Edit target: <file> :: <symbol>"
-                et_match = re.search(r'Edit target:\s+([^\s:]+)', body)
+                # Single-target brief: "Edit target: <file> :: <symbol>" OR the ledger
+                # HIGH head "<file> :: <func> — N/3 signals agree" (GT_CONSENSUS_LEDGER)
+                et_match = re.search(r'Edit target:\s+([^\s:]+)', body) or \
+                    re.search(r'(?m)^\s*([\w.\-/]+\.\w+)\s*::.*signals agree', body)
                 if et_match:
                     pin_file = _normalise_path(et_match.group(1))
                     m.m11_high_confidence_pins = 1.0

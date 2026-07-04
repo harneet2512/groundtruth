@@ -174,6 +174,14 @@ def _categorical_edge_filter_clause(*, alias: str = "e") -> str:
     stdlib-shadow closure — os.walk -> account.walk must never launder). The SQL below
     has NO 'name_match cc<=1' admit clause; a prior docstring claimed one (the launder
     this fragment exists to prevent). Locked by test_categorical_filter_no_namematch_launder.
+
+    F3 — ``field_based`` (the B3 ACG candidate SET, resolution_method LIKE 'field_based%')
+    is likewise NEVER a post-edit fact. It is a K-way ambiguous candidate set (receiver type
+    UNPROVEN) capped at CANDIDATE, so its trust_tier CANDIDATE would otherwise pass the
+    second (trust_tier) disjunct here even though ``field_based`` is NOT in
+    DETERMINISTIC_RESOLUTION_METHODS. brief / closure / curation_map all gate on the method
+    set and so already exclude it; this restores brief<->post_edit parity so post_edit never
+    surfaces the K-1 WRONG-candidate callers of one ambiguous call as facts.
     """
     # sorted(): _STRONG_RESOLUTION_METHODS is now a frozenset (unified shared
     # constant); sort so the emitted SQL IN(...) list is byte-stable across runs.
@@ -184,7 +192,8 @@ def _categorical_edge_filter_clause(*, alias: str = "e") -> str:
         f"{alias}.resolution_method IN ({strong_methods}) "
         f"OR (COALESCE({alias}.trust_tier, 'SPECULATIVE') IN ({strong_tiers}) "
         f"AND LOWER(COALESCE({alias}.resolution_method, '')) NOT LIKE 'name_match%')"
-        f") AND COALESCE({alias}.trust_tier, 'SPECULATIVE') != '{_SUPPRESSED_TRUST_TIER}')"
+        f") AND COALESCE({alias}.trust_tier, 'SPECULATIVE') != '{_SUPPRESSED_TRUST_TIER}'"
+        f" AND LOWER(COALESCE({alias}.resolution_method, '')) NOT LIKE 'field_based%')"
     )
 
 
