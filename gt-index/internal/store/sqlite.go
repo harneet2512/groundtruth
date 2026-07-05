@@ -308,11 +308,21 @@ func (d *DB) PopulateFTS5() error {
 		log.Printf("[WARN] nodes_fts table not found (FTS5 unavailable); skipping FTS5 population")
 		return nil
 	}
+	// LEAK INVARIANT (Fable S1/L2, reproduced on the live artifact): nodes_fts is the
+	// localizer's stage-1 retrieval surface. Test symbols (Go `TestX`, Mocha `it: …`
+	// descriptions) indexed here become FTS5_SEEDs/BFS roots and render agent-visibly as
+	// `fts5 match: …` — surfacing test NAMES, the FAIL_TO_PASS surface. Exclude is_test at
+	// INSERT (parity with symbol_content_fts's PopulateContentFTS, which already filters).
 	insertSQL := `INSERT INTO nodes_fts(rowid, name, qualified_name, signature, file_path)
 		 SELECT id, name, COALESCE(qualified_name, ''), COALESCE(signature, ''), file_path
-		 FROM nodes`
-	// Clear any existing content (idempotent rebuild), then re-insert.
-	_, delErr := d.db.Exec("DELETE FROM nodes_fts")
+		 FROM nodes WHERE COALESCE(is_test, 0) = 0`
+	// Clear existing content (idempotent rebuild), then re-insert. Use the FTS5
+	// content-INDEPENDENT 'delete-all' command, NOT `DELETE FROM nodes_fts` (Fable S5):
+	// on this EXTERNAL-content table, a plain DELETE re-reads the (already-mutated by the
+	// reindex/LSP pass) `nodes` content to locate rows and raises "database disk image is
+	// malformed", forcing the O(all-nodes) DROP+recreate self-heal on EVERY -file reindex.
+	// 'delete-all' clears the index directly, so the primary path stays incremental.
+	_, delErr := d.db.Exec("INSERT INTO nodes_fts(nodes_fts) VALUES('delete-all')")
 	if delErr == nil {
 		if _, err := d.db.Exec(insertSQL); err == nil {
 			return nil
@@ -734,8 +744,22 @@ func (d *DB) BatchInsertCochanges(pairs map[[2]string]int) error {
 		return err
 	}
 	defer stmt.Close()
-	for pair, count := range pairs {
-		if _, err := stmt.Exec(pair[0], pair[1], count); err != nil {
+	// DETERMINISM (Fable S3): iterate pairs in SORTED order, never Go map-range order —
+	// SQLite assigns rowids in insertion order, so a randomized map range makes two
+	// indexings of the SAME repo produce byte-DIFFERENT graph.db files. This function
+	// violated the exact invariant its sibling BatchInsertCochangeSets documents+enforces.
+	keys := make([][2]string, 0, len(pairs))
+	for pair := range pairs {
+		keys = append(keys, pair)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i][0] != keys[j][0] {
+			return keys[i][0] < keys[j][0]
+		}
+		return keys[i][1] < keys[j][1]
+	})
+	for _, pair := range keys {
+		if _, err := stmt.Exec(pair[0], pair[1], pairs[pair]); err != nil {
 			tx.Rollback()
 			return err
 		}

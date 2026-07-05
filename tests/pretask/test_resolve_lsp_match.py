@@ -169,6 +169,66 @@ def test_external_definition_never_deletes(db):
     assert _edge_exists(conn), "an external-target edge must NEVER be deleted"
 
 
+def test_lsp1_group_edges_by_callsite_dedups_and_preserves_order():
+    """LSP1 (Fable) RED→GREEN: the demand unit is the CALL-SITE, not the edge. name_match wires
+    N same-named candidate edges for ONE call; the pre-fix loop queried the LSP once per EDGE
+    (77-82% redundant round-trips) and corrected all N to the same target (~20 identical certified
+    edges/line). Grouping by (source_file, source_line, target_name) collapses N edges to ONE
+    query per call-site, deterministically (insertion order preserved), representative first.
+
+    Mutation check: reverting to per-edge iteration makes the query count = len(edges)=5, not
+    len(groups)=3 → the dedup assertion goes RED.
+    """
+    from groundtruth.resolve import _group_edges_by_callsite
+
+    edges = [
+        {"id": 1, "source_file": "a.py", "source_line": 5, "target_name": "foo"},
+        {"id": 2, "source_file": "a.py", "source_line": 5, "target_name": "foo"},  # dup call-site
+        {"id": 3, "source_file": "a.py", "source_line": 5, "target_name": "foo"},  # dup call-site
+        {"id": 4, "source_file": "a.py", "source_line": 9, "target_name": "foo"},  # diff line
+        {"id": 5, "source_file": "b.py", "source_line": 5, "target_name": "foo"},  # diff file
+    ]
+    groups = _group_edges_by_callsite(edges)
+
+    # 5 edges → 3 distinct call-sites → 3 LSP queries instead of 5 (the demand-driven win).
+    assert len(groups) == 3, f"expected 3 call-sites, got {len(groups)}"
+    keys = list(groups.keys())
+    # determinism: insertion order preserved, not hash order.
+    assert keys == [("a.py", 5, "foo"), ("a.py", 9, "foo"), ("b.py", 5, "foo")]
+    # the 3 same-call-site edges group together; representative is the FIRST (id 1) → the
+    # siblings 2 and 3 are the redundant candidates the loop deletes on a positive resolution.
+    assert [e["id"] for e in groups[("a.py", 5, "foo")]] == [1, 2, 3]
+    reps = [g[0]["id"] for g in groups.values()]
+    assert reps == [1, 4, 5]
+
+
+def test_external_definition_stamped_lsp_external_conf_zero(db):
+    """LSP5 (Fable) RED→GREEN: the pre-fix code LEFT the external edge at its original 0.5-0.6
+    name_match confidence — so the proven-FALSE internal target stayed traversable AND was
+    counted in the name_match% residual, producing a false `degraded` verdict. It must now be
+    stamped `lsp_external` @ conf 0.0: kept for audit, below the 0.5 fact floor (excluded from
+    traversal), NOT name_match% (excluded from the residual), and bucketed as skipped_external.
+
+    Mutation check: dropping the UPDATE (leaving the edge at its 0.5-0.6 name_match) → RED.
+    """
+    conn = _conn(db)
+    stats = _fresh_stats()
+    out = _apply_lsp_resolution(
+        conn, edge=_edge(conn), target_rel="../../usr/lib/python3.11/posixpath.py",
+        target_line=120, target_name="join", stats=stats, has_trust_tier=False,
+    )
+    conn.commit()
+    assert out == "skipped"
+    assert stats["deleted"] == 0
+    assert stats.get("skipped_external", 0) == 1, "external resolution must bucket as skipped_external"
+    row = conn.execute("SELECT confidence, resolution_method FROM edges LIMIT 1").fetchone()
+    assert row is not None and float(row[0]) == 0.0 and row[1] == "lsp_external", (
+        f"LSP5: expected a conf-0.0 lsp_external stamp, got {tuple(row) if row else None}"
+    )
+    # residual counts only name_match%: the stamped external edge must NOT be residual anymore.
+    assert row[1] != "name_match" and not str(row[1]).startswith("name_match")
+
+
 def test_absolute_path_target_never_deletes(db):
     """An absolute target_path (relpath failed / not under root) is external too —
     must not delete."""
@@ -200,10 +260,18 @@ def test_not_indexed_file_window_miss_never_deletes(db):
     assert _edge_exists(conn), "not-indexed-file window miss must NEVER delete"
 
 
-def test_indexed_file_no_node_match_is_genuine_fp_delete(db):
-    """The ONLY delete-allowed case: the target file IS indexed (other.py has nodes)
-    yet NO node spans the call site (line 999). That is a genuine false positive →
-    delete. This proves the guard is not over-broad (real FPs are still removed)."""
+def test_indexed_file_no_node_match_is_tombstoned_not_destroyed(db):
+    """LSP6 (Fable) RED→GREEN: the target file IS indexed (other.py has nodes) yet NO node
+    spans the call site (line 999). The pre-fix code hard-DELETEd this as a "genuine FP" —
+    but an indexed-file window miss is INDISTINGUISHABLE from PARTIAL node coverage (an
+    arrow-const `const f = () =>`, a TS type alias, an interface member emits no spanning
+    node; tree-sitter↔LSP line drift on decorators also misses). A destructive delete erased
+    up to 62% of a real graph's edges. Correct-or-quiet: DEMOTE to a conf-0.0 `lsp_window_miss`
+    TOMBSTONE — the edge is KEPT (auditable) but below the 0.5 fact floor, so it is excluded
+    from traversal and the name_match% residual, and NEVER destroyed.
+
+    Mutation check: reverting to `DELETE FROM edges` makes `_edge_exists` False → RED.
+    """
     conn = _conn(db)
     stats = _fresh_stats()
     out = _apply_lsp_resolution(
@@ -211,9 +279,16 @@ def test_indexed_file_no_node_match_is_genuine_fp_delete(db):
         target_name="ghost", stats=stats, has_trust_tier=False,
     )
     conn.commit()
-    assert out == "deleted"
+    assert out == "deleted"          # label preserved (counts as effective LSP work)
     assert stats["deleted"] == 1
-    assert not _edge_exists(conn), "an indexed-file no-match edge IS a false positive"
+    # The edge MUST survive — a window miss under partial coverage is not proof of an FP.
+    assert _edge_exists(conn), "LSP6: an indexed-file window miss must be tombstoned, not destroyed"
+    row = conn.execute(
+        "SELECT confidence, resolution_method FROM edges LIMIT 1"
+    ).fetchone()
+    assert row is not None and float(row[0]) == 0.0 and row[1] == "lsp_window_miss", (
+        f"LSP6: expected a conf-0.0 lsp_window_miss tombstone, got {tuple(row) if row else None}"
+    )
 
 
 def test_null_end_line_node_still_matches_in_window(db):
@@ -230,6 +305,55 @@ def test_null_end_line_node_still_matches_in_window(db):
     assert out == "corrected"
     assert stats["deleted"] == 0 and _edge_exists(conn)
     assert conn.execute("SELECT target_id FROM edges WHERE id=100").fetchone()[0] == 4
+
+
+def test_cfinding5_window_miss_tracked_under_honest_counter(db):
+    """C-Finding5 (Fable LIPI): a window-miss is a non-destructive TOMBSTONE, not a real delete.
+    It still drives the liveness/effective_work chain via stats['deleted'] (unchanged), but is ALSO
+    counted under the honestly-named stats['window_miss'] so the cert can disclose that the
+    'deleted_edges' are tombstones. Since a window-miss is its ONLY source, window_miss == deleted.
+
+    Mutation check: removing the `stats['window_miss'] = ...` line leaves window_miss at 0 → RED.
+    """
+    conn = _conn(db)
+    stats = _fresh_stats()
+    out = _apply_lsp_resolution(
+        conn, edge=_edge(conn), target_rel="other.py", target_line=999,
+        target_name="ghost", stats=stats, has_trust_tier=False,
+    )
+    conn.commit()
+    assert out == "deleted"
+    assert stats["deleted"] == 1, "liveness chain unchanged — deleted still counts the tombstone"
+    assert stats.get("window_miss", 0) == 1, "C-Finding5: the tombstone must be counted honestly"
+
+
+def test_cfinding2_sibling_delete_gated_on_single_callsite_line():
+    """C-Finding2 (Fable LIPI): the LSP1 sibling-collapse must only delete when the source line has
+    ONE call-shaped occurrence of the name. Edges carry no column, so two same-named calls with
+    different receivers on one line (`a.foo() or b.foo()`) group together — deleting siblings would
+    destroy the second call's true edge. The discriminator is the count of `\\bname\\s*\\(` matches.
+
+    Mutation check: removing the `_n_callsites == 1` guard from _resolve_edges → the structural
+    assertion below goes RED.
+    """
+    import inspect
+    import re as _re
+
+    from groundtruth.resolve import _resolve_edges
+
+    # discriminator: one bare call → 1; two same-named diff-receiver calls on one line → 2.
+    pat = r"\b" + _re.escape("foo") + r"\s*\("
+    assert len(_re.findall(pat, "x = a.foo()")) == 1
+    assert len(_re.findall(pat, "x = a.foo() or b.foo()")) == 2
+    assert len(_re.findall(pat, "return foo(bar(foo(1)))")) == 2  # nested same-name → 2
+
+    # structural: the sibling-delete is gated on the single-call-site condition. Match the guard
+    # STATEMENT (`if ...:`) specifically — the surrounding comment also mentions the condition.
+    # C9 (2026-07-05) tightened it to ALSO require a single definition location, so match the
+    # single-call-site clause as a prefix of the (now conjoined) guard.
+    src = inspect.getsource(_resolve_edges)
+    assert "if _n_callsites == 1 and len(locations) == 1:" in src, \
+        "the sibling-delete must be gated on a single call-site AND a single definition location"
 
 
 # ─────────────────────────────── item #30 ───────────────────────────────

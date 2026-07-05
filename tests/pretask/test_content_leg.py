@@ -67,6 +67,52 @@ def test_content_fts_candidates_retrieves_by_body():
 
 
 @pytest.mark.skipif(not _fts5_available(), reason="Python sqlite3 built without FTS5")
+def test_content_fts_camelcase_query_from_lowercased_tokens():
+    """PRODUCTION-path regression (Fable #1): _issue_terms lowercases every token BEFORE
+    _content_fts_candidates sees it, erasing camelCase boundaries (getUserById ->
+    getuserbyid, unsplittable) — so camelCase langs (JS/TS/Go/Java) lose partial-match while
+    snake_case (Python/Rust) survives. The old unit test fed a CASED token directly and so
+    never exercised the real path. Fix = thread the RAW issue_text so the split is case-aware.
+    RED before the fix (issue_text kwarg absent -> TypeError); GREEN after."""
+    conn = _build([
+        # body carries the SUB-TOKENS, as the Go indexer splits getUserById -> get user by id
+        (1, "handler", "svc.go", 0, "get user by id lookup resolves the account row"),
+        (2, "other", "svc.go", 0, "paint widget unrelated layout"),
+    ])
+    lowered = {"getuserbyid"}  # exactly what _issue_terms(issue) yields in production
+    # control: a lowercased camelCase token cannot split -> body is missed
+    miss = _content_fts_candidates(conn, lowered)
+    assert 1 not in [r[0] for r in miss], f"control: lowercased token must not split: {miss}"
+    # fix: raw issue_text lets the leg split get/user/by/id case-aware -> body matched
+    hit = _content_fts_candidates(conn, lowered, issue_text="the getUserById lookup fails")
+    assert 1 in [r[0] for r in hit], f"camelCase not matched via issue_text split: {hit}"
+    assert 2 not in [r[0] for r in hit], f"unrelated body should not match: {hit}"
+
+
+@pytest.mark.skipif(not _fts5_available(), reason="Python sqlite3 built without FTS5")
+def test_content_fts_term_cap_keeps_rare_short_token(monkeypatch):
+    """Term-selection regression (Fable #4): the 30-token cap was longest-first, which
+    anti-selects SHORT distinctive domain tokens (tls/acl/ssl) in favour of long common
+    English words. Fix = order by ASCENDING document frequency (rarest = most discriminative)
+    before the cap. RED with longest-first (rare short 'tls' cut, gold missed); GREEN with
+    df-order (kept). Cap forced to 3 so the ordering, not the width, decides."""
+    monkeypatch.setattr("groundtruth.pretask.graph_localizer._CONTENT_FTS_TERM_CAP", 2, raising=False)
+    # gold (id 1) is the ONLY body with the rare short token 'tls' (df=1). The long common
+    # words appear across MANY bodies (df=4 each) — so df-ordering keeps 'tls', longest-first
+    # would drop it. cap=2 forces exactly one long word + 'tls' to survive iff df-ordered.
+    rows = [(1, "gold", "net.py", 0, "tls handshake secure channel established")]
+    for i in range(4):  # 4 distractor bodies each carrying all three long common words
+        rows.append((10 + i, f"d{i}", f"d{i}.py", 0,
+                     "configuration initialization authentication"))
+    conn = _build(rows)
+    # longest-first would pick the len-14 words and cut 'tls' (len 3) -> gold missed;
+    # df-first picks 'tls' (df=1) over the df=4 common words -> gold retrieved.
+    toks = {"tls", "configuration", "initialization", "authentication"}
+    got = _content_fts_candidates(conn, toks)
+    assert 1 in [r[0] for r in got], f"rare short token cut by cap -> gold missed: {got}"
+
+
+@pytest.mark.skipif(not _fts5_available(), reason="Python sqlite3 built without FTS5")
 def test_content_fts_candidates_excludes_test_symbols():
     # a TEST node whose body echoes the issue must never be returned (leak-safety;
     # the consumer join filters is_test even if a stale index row exists).

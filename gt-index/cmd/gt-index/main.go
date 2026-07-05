@@ -279,6 +279,19 @@ func main() {
 		for _, prop := range result.Properties {
 			p := prop
 			p.NodeIdx = fileNodeStartIdx + prop.NodeIdx
+			// P16 (Fable, defense-in-depth): NEVER store a test node's free-text body-channel
+			// property (string literals / body terms / call names) — they can carry
+			// assertion-adjacent text. These are already gated at extraction (extractBodyChannels
+			// runs only when !isTest), and consumers filter is_test, so there is no active leak;
+			// this is belt-and-suspenders so no future path can slip a test node's free text into
+			// the property surface. Resolver-input kinds (param / data_flow / return_shape /
+			// field_type / ...) are UNTOUCHED, so test-code resolution is unaffected.
+			if p.NodeIdx >= 0 && p.NodeIdx < len(allNodePtrs) && allNodePtrs[p.NodeIdx].IsTest {
+				switch p.Kind {
+				case "string_literals", "body_terms", "calls":
+					continue
+				}
+			}
 			allProps = append(allProps, p)
 		}
 		for _, a := range result.Assertions {
@@ -318,8 +331,18 @@ func main() {
 		log.Fatalf("batch insert nodes: %v", err)
 	}
 
-	// Fix up parent IDs: map global index → DB ID
-	for nodeIdx, parentGlobalIdx := range parentFixups {
+	// Fix up parent IDs: map global index → DB ID.
+	// DETERMINISM (Fable S4): apply the UPDATEs in SORTED key order, never Go map-range
+	// order. Each UPDATE resizes a NULL→int parent_id record; a randomized apply order
+	// makes SQLite's page defrag emit byte-DIFFERENT graph.db files on any repo with
+	// classes/methods (measured 6/6 distinct hashes), forfeiting the byte-identity invariant.
+	fixupIdxs := make([]int, 0, len(parentFixups))
+	for nodeIdx := range parentFixups {
+		fixupIdxs = append(fixupIdxs, nodeIdx)
+	}
+	sort.Ints(fixupIdxs)
+	for _, nodeIdx := range fixupIdxs {
+		parentGlobalIdx := parentFixups[nodeIdx]
 		pidx := int(parentGlobalIdx) - 1 // convert 1-based to 0-based
 		if pidx >= 0 && pidx < len(nodeDBIDs) {
 			parentDBID := nodeDBIDs[pidx]
@@ -423,6 +446,13 @@ func main() {
 			fmt.Fprintf(os.Stderr, "  Re-export chaining: %d aliases from %d re-exports\n", chainCount, len(allReExports))
 		}
 	}
+	// Full-index path: the whole-repo re-export set was parsed and (above) folded into
+	// fileMap, so F* is COMPLETE → B1b's DROP is sound here. Reset the incremental marker
+	// explicitly (default is already false; this makes it INVARIANT against any future
+	// same-process mode that runs a full index after a `-file` reindex — batch/server/
+	// watch — where the package var would otherwise still read true and silently downgrade
+	// B1b to demote on a full index). Matches Fable Finding-1 nit 4.
+	resolver.SetReExportGraphIncomplete(false)
 
 	// Build caller ID list
 	callerDBIDs := make([]int64, len(allCalls))
@@ -1066,6 +1096,20 @@ func runIncremental(root, relpath, dbPath string) error {
 		resolver.RegisterTSConfigPaths(fileMap, tsCfg)
 	}
 	resolver.RegisterJSPackagePaths(fileMap, root)
+	// B2 (Fable 2026-07-05): full≡incremental parity — the full index also registers Go
+	// module/package/vendor + Rust crate fileMap aliases (main.go ~411-428). Without them a
+	// `-file` reindex resolves Go/Rust cross-file imports as name_match instead of import@1.0
+	// (a LANGUAGE-KEYED inequivalence — JS/TS already had parity here, Go/Rust did not). All 4
+	// are computable from the whole-repo file list the incremental path already holds
+	// (allFiles/allLangs + root). The AST-derived Rust mod-tree + re-export chaining need the
+	// whole-repo parse (unavailable on -file) → degraded gracefully (SetReExportGraphIncomplete
+	// is already set true below), never mis-registered from a single file.
+	if goModPath := resolver.FindGoModulePath(root); goModPath != "" {
+		resolver.RegisterGoModulePaths(fileMap, goModPath)
+	}
+	resolver.RegisterGoPackageNames(fileMap, allFiles, allLangs)
+	resolver.RegisterGoVendorPaths(fileMap)
+	resolver.RegisterRustCratePaths(fileMap, root)
 
 	callerDBIDs := make([]int64, len(pr.Calls))
 	for i, call := range pr.Calls {
@@ -1088,6 +1132,17 @@ func runIncremental(root, relpath, dbPath string) error {
 	if len(pr.Assignments) > 0 {
 		resolver.SetAssignmentIndex(resolver.BuildAssignmentIndex(pr.Assignments))
 	}
+
+	// B1b soundness on `-file`: the full-index path folds re-export SOURCES into fileMap via
+	// ChainReExports (main.go:420-421) BEFORE Resolve; the incremental path does NOT re-parse
+	// the whole repo's re-exports, so fileMap here is a bare direct-module resolution. B1b's
+	// import-consistency DROP ("no candidate in the imported file-set F*") is only sound when
+	// F* is complete, so mark the re-export graph incomplete → B1b DEMOTES the shadowed
+	// candidates to sub-floor name_match (conf 0.2) instead of dropping a legitimately
+	// re-exported def whose source this path never folded into F* — and (critically) instead
+	// of abstaining, which would let the call re-mint at verified_unique 0.95 CERTIFIED
+	// (Fable Finding 1). Full-index path resets this to false (active DROP) before Resolve.
+	resolver.SetReExportGraphIncomplete(true)
 
 	// G09 -file degradation fix: the class inheritanceMap (consumed by
 	// lookupMethodWithInheritance for the CHA rungs 1.75 super/inherited,
@@ -1161,6 +1216,46 @@ func runIncremental(root, relpath, dbPath string) error {
 		return fmt.Errorf("insert new edges: %w", err)
 	}
 
+	// B1 (Fable 2026-07-05): full≡incremental parity — the full index emits parent→child
+	// CONTAINS edges (main.go ~565-606). The -file reindex DELETED this file's CONTAINS (via
+	// DeleteFileEdgesAndNodesTx) but never re-emitted them, so the containment graph THINNED on
+	// every L6 edit. Re-emit from parentLocal/newDBIDs inside the tx — iterated in node-index
+	// order (deterministic, matching the full path's sorted emission) with identical fields.
+	var containsPtrsIncr []*store.Edge
+	for i, plocal := range parentLocal {
+		if plocal <= 0 {
+			continue
+		}
+		pidx := int(plocal) - 1
+		if pidx < 0 || pidx >= len(newDBIDs) || i >= len(newDBIDs) {
+			continue
+		}
+		parentDBID, childDBID := newDBIDs[pidx], newDBIDs[i]
+		if parentDBID <= 0 || childDBID <= 0 {
+			continue
+		}
+		filePath := ""
+		if i < len(pr.Nodes) {
+			filePath = pr.Nodes[i].FilePath
+		}
+		containsPtrsIncr = append(containsPtrsIncr, &store.Edge{
+			SourceID:           parentDBID,
+			TargetID:           childDBID,
+			Type:               "CONTAINS",
+			SourceFile:         filePath,
+			ResolutionMethod:   "structural",
+			Confidence:         1.0,
+			TrustTier:          "CERTIFIED",
+			EvidenceType:       "parent_id",
+			VerificationStatus: "verified",
+		})
+	}
+	if len(containsPtrsIncr) > 0 {
+		if err := store.BatchInsertEdgesTx(tx, containsPtrsIncr); err != nil {
+			return fmt.Errorf("insert CONTAINS edges: %w", err)
+		}
+	}
+
 	// IMPORTS edges for the reparsed file. Stale IMPORTS edges (source_file=relSlash)
 	// were already deleted by DeleteFileEdgesAndNodesTx upstream, so re-emitting here
 	// converges. Resolves pr.Imports against the in-memory post-reindex snapshot
@@ -1173,6 +1268,17 @@ func runIncremental(root, relpath, dbPath string) error {
 	propPtrs := make([]*store.Property, 0, len(pr.Properties))
 	for _, p := range pr.Properties {
 		if p.NodeIdx >= 0 && p.NodeIdx < len(newDBIDs) {
+			// A-Finding2 (Fable LIPI): mirror the full-index-path P16 guard on the incremental
+			// (-file) path — never store a test node's free-text body-channel property
+			// (string_literals/body_terms/calls). The extraction gate (parser.go !isTest) already
+			// prevents these for test nodes, so this is defense-in-depth; the point is that the two
+			// write paths stay EQUIVALENT (the full path had the guard, the incremental path did not).
+			if p.NodeIdx < len(pr.Nodes) && pr.Nodes[p.NodeIdx].IsTest {
+				switch p.Kind {
+				case "string_literals", "body_terms", "calls":
+					continue
+				}
+			}
 			propPtrs = append(propPtrs, &store.Property{
 				NodeID:     newDBIDs[p.NodeIdx],
 				Kind:       p.Kind,

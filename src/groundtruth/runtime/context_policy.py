@@ -40,6 +40,11 @@ class PayloadKind(Enum):
     COCHANGE = "l3.cochange"
     OBLIGATION_STATUS = "spec.obligation"
     COHERENCE_RISK = "detect.coherence"
+    # F1 (Fable 2026-07-05): the post-edit guard/return-deletion steer. The producer
+    # appends it with the literal kind "semantic_drift"; without a PayloadKind entry it was
+    # absent from every PHASE_POLICY set → phase_allows() returned wrong_phase EVERY turn →
+    # the steer was dead-on-arrival. Value matches the producer's literal exactly.
+    SEMANTIC_DRIFT = "semantic_drift"
     LOOP_NUDGE = "detect.loop"
     STUCK_NUDGE = "l5.stuck"
     FAILURE_NUDGE = "l5.failure"
@@ -69,6 +74,7 @@ PHASE_POLICY: dict[Phase, frozenset[str]] = {
         PayloadKind.COCHANGE.value,
         PayloadKind.OBLIGATION_STATUS.value,
         PayloadKind.COHERENCE_RISK.value,
+        PayloadKind.SEMANTIC_DRIFT.value,  # F1: post-edit guard/return-deletion steer
         PayloadKind.LOOP_NUDGE.value,
     }),
     Phase.VERIFY: frozenset({
@@ -77,6 +83,14 @@ PHASE_POLICY: dict[Phase, frozenset[str]] = {
         PayloadKind.FAILURE_NUDGE.value,
         PayloadKind.NO_TEST_NUDGE.value,
         PayloadKind.LOOP_NUDGE.value,
+        PayloadKind.SEMANTIC_DRIFT.value,  # F1: a drift noticed at verify still delivers
+        # F4 (Fable 2026-07-05): the scope-completeness steer is PRODUCED on the review
+        # predicate (edits + non-edit streak>=3), which is exactly when _detect_phase reaches
+        # VERIFY. It was event-bound ONLY to REVIEW_TRANSITION, but _current_event returns
+        # POST_VIEW/POST_EDIT on those turns (they outrank the review event), so the produced
+        # candidate hit wrong_phase and was starved. Allowing it at VERIFY (the phase the streak
+        # reaches) delivers it via the phase gate regardless of the event classification.
+        PayloadKind.SCOPE_COMPLETENESS.value,
         PayloadKind.VERIFY_ADVISORY.value,
         PayloadKind.VERIFY_URGENT.value,
         PayloadKind.VERIFY_PIVOT.value,
@@ -101,6 +115,7 @@ EVENT_BOUND_PAYLOADS: dict[Event, frozenset[str]] = {
         PayloadKind.CONTRACT.value,
         PayloadKind.COCHANGE.value,
         PayloadKind.COHERENCE_RISK.value,
+        PayloadKind.SEMANTIC_DRIFT.value,  # F1: guard/return-deletion is a post-edit event
     }),
     Event.TEST_RESULT: frozenset({
         PayloadKind.FAILURE_NUDGE.value,

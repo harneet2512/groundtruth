@@ -281,10 +281,10 @@ func IsTestFile(relPath string) bool {
 		return true
 	}
 	// Any path that IsNonSourceFile classifies as non-source (e.g. fuzz/, fuzzing/,
-	// fuzz_targets/, corpus/, conformance/, compat/, integration_tests/, e2e_tests/,
-	// as well as demo/example/docs/vendor dirs already in hasTestDirSegment or
-	// nonSourceDirSegments) should also be flagged by IsTestFile so that the
-	// is_test bit is set regardless of which predicate is the entry point.
+	// fuzz_targets/, corpus/, integration_tests/, e2e_tests/, as well as demo/example/
+	// docs/vendor dirs already in hasTestDirSegment or nonSourceDirSegments) should also be
+	// flagged by IsTestFile so that the is_test bit is set regardless of which predicate is
+	// the entry point.
 	if IsNonSourceFile(relPath) {
 		return true
 	}
@@ -318,17 +318,19 @@ func hasTestDirSegment(dir string) bool {
 // you add a segment here, add it there too (DUPLICATION TRAP — the two copies
 // drifting is exactly the leak path_policy.py warns about).
 var nonSourceDirSegments = map[string]bool{
-	// test dirs (superset of hasTestDirSegment; "e2e"/"testing" are Python-side too)
+	// test dirs (superset of hasTestDirSegment; "e2e" is Python-side too)
 	"test": true, "tests": true, "spec": true, "specs": true,
-	"e2e": true, "testing": true,
+	"e2e": true,
 	// fuzz / mutation / property-based test dirs (universal across all languages)
 	// e.g. crates/fuzz/src/... (Rust), fuzz_targets/ (cargo-fuzz), corpus/ (AFL/libFuzzer),
-	// testcases/ (AFL), conformance/ (protocol/spec conformance suites),
-	// compat/ (compatibility test suites), integration_tests/ (Python pytest),
-	// e2e_tests/ (end-to-end test dirs distinct from "e2e")
+	// testcases/ (AFL), integration_tests/ (Python pytest),
+	// e2e_tests/ (end-to-end test dirs distinct from "e2e").
+	// P11: `compat`, `conformance`, and `testing` were REMOVED — they are production-ambiguous
+	// (pandas/compat, numpy/compat, protobuf conformance libs, Go `testing`-helper packages
+	// are real source), so forcing is_test on them dropped production code out of the fact
+	// surface. Only genuinely non-source dirs stay.
 	"fuzz": true, "fuzzing": true, "fuzz_targets": true,
 	"corpus": true, "testcases": true,
-	"conformance": true, "compat": true,
 	"integration_tests": true, "e2e_tests": true,
 	// demo / example
 	"example": true, "examples": true, "demo": true, "demos": true,

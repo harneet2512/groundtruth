@@ -1,5 +1,7 @@
 package resolver
 
+import "strings"
+
 // AssignmentTracker builds a per-file map of variable → type assignments.
 // Used by Strategy 1.96 to resolve x.method() when x = SomeClass().
 //
@@ -57,10 +59,21 @@ func (m *AssignmentMap) Add(vt VarType) {
 // the class, so JARVIS treats them as cross-method facts. Local assignments
 // (x = Foo()) are function-scoped: only valid in the function that wrote them.
 func (m *AssignmentMap) Lookup(varName string) ([]VarType, bool) {
+	// A2 (Fable 2026-07-05): an EXPLICIT self./this. receiver is an object FIELD — look up
+	// ONLY the field key and report isField=true (object-scoped across methods). NEVER fall
+	// back to a same-named function-local: stripping self.client to bare "client" let the
+	// bare lookup below match a fn-local shadow (`client = MockClient()`) and resolve
+	// self.client against the WRONG receiver.
+	if strings.HasPrefix(varName, "self.") || strings.HasPrefix(varName, "this.") {
+		if types := m.VarTypes[varName]; types != nil {
+			return types, true
+		}
+		return nil, false
+	}
 	if types := m.VarTypes[varName]; types != nil {
 		return types, false
 	}
-	// Try with "self." prefix (Python: self.x = Foo() → lookup "x" finds "self.x")
+	// Bare receiver: try the implicit-field fallback (Python: self.x = Foo() → lookup "x").
 	if types := m.VarTypes["self."+varName]; types != nil {
 		return types, true
 	}
@@ -83,10 +96,14 @@ func (m *AssignmentMap) Lookup(varName string) ([]VarType, bool) {
 // Example: x = HttpClient(); x.get() → ("HttpClient", "get", false, true)
 //          self.client = HttpClient() (in __init__); self.client.get() (elsewhere)
 //            → ("HttpClient", "get", false, true)
-func (m *AssignmentMap) ResolveQualifiedCall(qualifier, method, scope string) (string, string, bool, bool) {
+// The 5th return (scopeProven) is TRUE only when the receiver type is proven in the
+// caller's own scope — an object field (valid in any method) or a same-function local
+// write. It is FALSE for the cross-function/unknown-scope fallback (RS6): that type came
+// from a DIFFERENT function's assignment and must NOT be minted as a CERTIFIED fact.
+func (m *AssignmentMap) ResolveQualifiedCall(qualifier, method, scope string) (string, string, bool, bool, bool) {
 	types, isField := m.Lookup(qualifier)
 	if len(types) == 0 {
-		return "", "", false, false
+		return "", "", false, false, false
 	}
 
 	pick := func(eligible []VarType) (VarType, bool) {
@@ -110,9 +127,10 @@ func (m *AssignmentMap) ResolveQualifiedCall(qualifier, method, scope string) (s
 	// Object fields are object-scoped — all writes are eligible regardless of scope.
 	if isField {
 		if best, ok := pick(types); ok {
-			return best.TypeName, method, best.ViaReturn, true
+			// object fields are valid in ANY method → genuinely in scope.
+			return best.TypeName, method, best.ViaReturn, true, true
 		}
-		return "", "", false, false
+		return "", "", false, false, false
 	}
 
 	// Local var: prefer assignments written in the SAME function (flow scope).
@@ -123,12 +141,17 @@ func (m *AssignmentMap) ResolveQualifiedCall(qualifier, method, scope string) (s
 		}
 	}
 	if best, ok := pick(inScope); ok {
-		return best.TypeName, method, best.ViaReturn, true
+		// RS6: proven in the caller's OWN function scope → a fact.
+		return best.TypeName, method, best.ViaReturn, true, true
 	}
 	// Fallback: no scope match (or scope unknown) → file-global last-write-wins,
-	// preserving the prior behavior so no existing resolution regresses.
+	// preserving the prior behavior so no existing resolution regresses. RS6: this
+	// assignment was written in a DIFFERENT function (or the caller scope is unknown),
+	// so the receiver type is NOT proven in scope — scopeProven=false and the caller
+	// demotes it below the CERTIFIED fact floor rather than minting an arbitrary
+	// cross-function type as 0.9.
 	if best, ok := pick(types); ok {
-		return best.TypeName, method, best.ViaReturn, true
+		return best.TypeName, method, best.ViaReturn, true, false
 	}
-	return "", "", false, false
+	return "", "", false, false, false
 }

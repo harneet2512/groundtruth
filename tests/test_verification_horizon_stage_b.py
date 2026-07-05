@@ -123,11 +123,14 @@ class TestCoveringTestQuery:
         try:
             results = gmp._covering_tests_for_symbols({"capture_snapshot"})
             assert len(results) == 1
-            assert results[0]["name"] == "test_capture_snapshot"
             assert results[0]["file"] == "tests/test_monitor.py"
             assert results[0]["confidence"] >= 0.7
-            assert "pytest" in results[0]["run_cmd"]
-            assert "test_capture_snapshot" in results[0]["run_cmd"]
+            # E5 (Fable 2026-07-05): NO test identifier leaves the query layer — the payload
+            # carries file+confidence (the existence/count signal the renderers consume) only,
+            # never the test NAME or run_cmd. The per-language run-command dispatch is covered
+            # DIRECTLY in Test 2 below (_test_run_command), so no coverage is lost.
+            assert "name" not in results[0]
+            assert "run_cmd" not in results[0]
         finally:
             gmp._db_path = orig_db
 
@@ -142,7 +145,8 @@ class TestCoveringTestQuery:
             results = gmp._covering_tests_for_symbols({"capture_snapshot"})
             # Should find only the import-resolved test, not the name_match one
             assert len(results) == 1
-            assert results[0]["name"] == "test_capture_snapshot"
+            # E5: assert on the file (the name is stripped at the query layer).
+            assert results[0]["file"] == "tests/test_monitor.py"
         finally:
             gmp._db_path = orig_db
 
@@ -154,8 +158,11 @@ class TestCoveringTestQuery:
         try:
             results = gmp._covering_tests_for_symbols({"initialize"})
             assert len(results) == 1
-            assert results[0]["name"] == "test_initialize"
-            assert "jest" in results[0]["run_cmd"]
+            # E5: the covering payload no longer carries name/run_cmd (leak defense). It found the
+            # TS covering test — assert via its file. The `npx jest -t` dispatch itself is covered
+            # directly in Test 2 (_test_run_command on a .test.ts path).
+            assert results[0]["file"] == "tests/container.test.ts"
+            assert "name" not in results[0] and "run_cmd" not in results[0]
         finally:
             gmp._db_path = orig_db
 

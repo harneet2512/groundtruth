@@ -238,6 +238,62 @@ def _is_known_lsp_language(lang: str) -> bool:
     return (key in _LANG_TO_EXT) or (key.lstrip(".") in _LANG_TO_EXT) or (key in _KNOWN_SERVERS)
 
 
+def _strip_rel_prefix(p: str) -> str:
+    """C8 (Fable 2026-07-05): normalize a scope path by stripping the './' relative-marker
+    PREFIX only. `.lstrip("./")` stripped the char-SET {'.','/'} → `.github/x.js` became
+    `github/x.js` and never matched edges.source_file, silently dropping every
+    dot-directory file from scope + residual. Prefix-only strip preserves dot-dirs."""
+    p = p.replace("\\", "/")
+    while p.startswith("./"):
+        p = p[2:]
+    return p
+
+
+def _effective_work(stats: dict) -> int:
+    """C1 (Fable 2026-07-05): the count of edges the LSP pass actually ADJUDICATED —
+    verified + corrected + deleted (window-miss tombstones) + skipped_external. An external
+    resolution is real work (the LSP PROVED a name_match internal edge false and removed it
+    from the residual); excluding it made an all-external warm pass read 0 → a false
+    `degraded` → exit 2 under GT_REQUIRE_LSP=1 (fail-closed for being correct)."""
+    return (
+        int(stats.get("verified", 0))
+        + int(stats.get("corrected", 0))
+        + int(stats.get("deleted", 0))
+        + int(stats.get("skipped_external", 0))
+    )
+
+
+def _canonical_db_language(conn: sqlite3.Connection, lang: str | None) -> str | None:
+    """C2 (Fable 2026-07-05): map a user --lang spelling ('py', 'python', 'js', ...) to the
+    value actually stored in ``nodes.language`` so the residual/scope/edge filters match.
+
+    The residual + ambiguous-edge queries filter ``src.language = ?`` and the edge list
+    filters ``e["language"] == lang``; both compare against the STORED language name
+    ('python', 'javascript', ...). A short alias ('py') matched ZERO rows → a false
+    ``LSP_NO_OP_VALID`` (residual read 0 on a graph full of unresolved python edges).
+    Resolve the alias to whatever the graph stores by ext-equivalence via ``_LANG_TO_EXT``
+    — no assumption about the canonical spelling. Returns the input unchanged when the
+    graph has no ext-equivalent language (correct-or-quiet: never invent a match). The
+    server-lookup path keeps the raw spelling (it already accepts aliases)."""
+    if not lang:
+        return lang
+    want_ext = _LANG_TO_EXT.get(lang) or _LANG_TO_EXT.get(lang.lstrip("."))
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT language FROM nodes WHERE language IS NOT NULL"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return lang
+    stored_names = [r[0] for r in rows if r and r[0]]
+    if lang in stored_names:  # already the stored spelling
+        return lang
+    if want_ext:
+        for name in stored_names:
+            if _LANG_TO_EXT.get(name) == want_ext:
+                return name
+    return lang
+
+
 def _count_residual_method_edges(
     conn: sqlite3.Connection,
     language: str | None = None,
@@ -361,7 +417,11 @@ def _get_ambiguous_edges(
         query += f" AND e.source_file IN ({placeholders})"
         params.extend(source_files)
 
-    query += " ORDER BY e.confidence ASC LIMIT ?"
+    # DETERMINISM (Fable LSP7): a bare `confidence ASC` leaves the attempted subset under a
+    # binding cap following rowid order, which varies across parallel index builds — so two
+    # runs of the same substrate CERTIFY a different edge set. Stable, rebuild-invariant
+    # tiebreak on (source_file, source_line, id).
+    query += " ORDER BY e.confidence ASC, e.source_file, e.source_line, e.id LIMIT ?"
     params.append(int(limit))
 
     return [dict(row) for row in conn.execute(query, params).fetchall()]
@@ -509,6 +569,18 @@ def _apply_lsp_resolution(
         or os.path.isabs(target_rel)
     )
     if _is_external:
+        # LSP5 (Fable): the LSP resolved this call to an EXTERNAL/stdlib symbol OUTSIDE the repo
+        # (the common join/get/append/loads case). The pre-resolution name_match had wired it to
+        # an ARBITRARY internal same-named node — a PROVEN-FALSE internal edge. Stamp it
+        # `lsp_external` @ conf 0.0: KEPT for audit but below the 0.5 fact floor, so it is excluded
+        # from traversal AND from the name_match% residual (previously it stayed a 0.5-0.6
+        # name_match and inflated the residual → a false `degraded` verdict).
+        _ext_clause = ", trust_tier = 'SPECULATIVE'" if has_trust_tier else ""
+        conn.execute(
+            f"UPDATE edges SET confidence = 0.0, resolution_method = 'lsp_external'{_ext_clause} WHERE id = ?",
+            (edge["id"],),
+        )
+        stats["skipped_external"] = stats.get("skipped_external", 0) + 1
         stats["skipped"] += 1
         return "skipped"
 
@@ -517,13 +589,44 @@ def _apply_lsp_resolution(
         (target_rel,),
     ).fetchone()
     if _file_indexed:
-        # Indexed file, no node spans the call site → genuine FP.
-        conn.execute("DELETE FROM edges WHERE id = ?", (edge["id"],))
+        # LSP6 (Fable): the file HAS nodes but none spans the call site. This is NOT proof of a
+        # false positive — the indexer has PARTIAL node coverage (an arrow-const `const f = () =>`,
+        # a TS type alias, an interface member emits no spanning node), and tree-sitter↔LSP line
+        # drift on decorators/comments also misses the window. A hard DELETE here destroyed up to
+        # 62% of a real graph's edges. Demote to a conf-0.0 TOMBSTONE (`lsp_window_miss`): kept +
+        # auditable, excluded from traversal and the name_match% residual, but never destroyed —
+        # correct-or-quiet, because a window miss under partial coverage is not proof of an FP.
+        _miss_clause = ", trust_tier = 'SPECULATIVE'" if has_trust_tier else ""
+        conn.execute(
+            f"UPDATE edges SET confidence = 0.0, resolution_method = 'lsp_window_miss'{_miss_clause} WHERE id = ?",
+            (edge["id"],),
+        )
+        # C-Finding5 (Fable LIPI): a window-miss is a non-destructive TOMBSTONE (edge KEPT at
+        # conf=0.0), NOT a real deletion. `stats["deleted"]` continues to drive the liveness /
+        # effective_work / verdict_hint chain UNCHANGED (this tombstone IS work the LSP did), but we
+        # ALSO count it under the honestly-named `window_miss` so the cert can disclose that the
+        # "deleted_edges" are tombstones, not destroyed edges. Since a window-miss is the ONLY thing
+        # that reaches this branch, window_miss_edges == deleted_edges — which makes the tombstone
+        # nature self-evident to any reader, without redefining the liveness metric.
         stats["deleted"] += 1
+        stats["window_miss"] = stats.get("window_miss", 0) + 1
         return "deleted"
     # File not in the graph → no ground truth → never delete.
     stats["skipped"] += 1
     return "skipped"
+
+
+def _group_edges_by_callsite(edges: list[dict]) -> dict:
+    """LSP1 (demand-driven — Heintze & Tardieu, PLDI 2001): group ambiguous edges by their
+    CALL-SITE (source_file, source_line, target_name) — the demand unit for ONE LSP definition
+    query. name_match wires N same-named candidate edges for one call; this collapses them to one
+    query. Order-preserving (dict insertion order) so the pass stays deterministic; the FIRST edge
+    of each group is the representative whose LSP answer all siblings share."""
+    groups: dict[tuple, list[dict]] = {}
+    for e in edges:
+        key = (e.get("source_file", ""), e.get("source_line", 0) or 0, e.get("target_name", ""))
+        groups.setdefault(key, []).append(e)
+    return groups
 
 
 def _graph_edges_hash(db_path: str) -> str:
@@ -696,6 +799,50 @@ async def _await_project_ready(
         backoff = min(backoff * 2.0, 4.0)
 
 
+def _write_pyright_shim_config(abs_root: str, config):
+    """LSP8 (Fable): write a minimal pyrightconfig.json ONLY when the server is pyright and the
+    repo has none, so pyright evaluates modern `str | None` union syntax for go-to-definition.
+
+    Returns a CLEANUP CALLABLE that removes exactly the file GT created; the caller registers it
+    (atexit) so the shim NEVER persists in the agent's working repo. Returns None when nothing was
+    written (not pyright / a config already exists / [tool.pyright] in pyproject / write failed) —
+    in which case there is nothing to clean up. Correct-or-quiet: never raises.
+    """
+    if not (config and "pyright" in (getattr(config, "command", [""])[0] or "").lower()):
+        return None
+    pyright_cfg = os.path.join(abs_root, "pyrightconfig.json")
+    if os.path.exists(pyright_cfg):
+        return None  # the repo owns its config — never touch it
+    pyproject_toml = os.path.join(abs_root, "pyproject.toml")
+    try:
+        if os.path.exists(pyproject_toml):
+            with open(pyproject_toml, encoding="utf-8", errors="replace") as _pf:
+                if "[tool.pyright]" in _pf.read():
+                    return None  # config lives in pyproject — don't shadow it
+    except Exception:
+        pass
+    try:
+        import json as _json
+        with open(pyright_cfg, "w", encoding="utf-8") as _wf:
+            _wf.write(_json.dumps({
+                "pythonVersion": "3.11",
+                "typeCheckingMode": "off",
+                "reportMissingImports": "none",
+            }))
+    except Exception as _e:
+        print(f"  pyrightconfig.json write failed: {_e}", file=sys.stderr)
+        return None
+
+    def _cleanup(_p: str = pyright_cfg) -> None:
+        try:
+            if os.path.exists(_p):
+                os.remove(_p)
+        except OSError:
+            pass
+
+    return _cleanup
+
+
 async def _resolve_edges(
     db_path: str,
     root: str,
@@ -734,7 +881,7 @@ async def _resolve_edges(
         )
         return {"error": 1}
 
-    stats: dict = {"verified": 0, "corrected": 0, "deleted": 0, "failed": 0, "skipped": 0,
+    stats: dict = {"verified": 0, "corrected": 0, "deleted": 0, "window_miss": 0, "failed": 0, "skipped": 0,
                    "server_launched": False, "warm_probe_ok": False,
                    "probe_method": "workspace/symbol", "probe_latency_ms": 0.0,
                    # How many real LSP requests the warm probe issued (client request-id
@@ -784,32 +931,17 @@ async def _resolve_edges(
     abs_root = os.path.abspath(root)
     root_uri = _path_to_uri(abs_root)
 
-    # δ: when the server is pyright and the project has no pyrightconfig,
-    # drop a minimal one so pyright doesn't assume python<3.10 and refuse
-    # to evaluate `str | None` union annotations. typeCheckingMode=off
-    # because textDocument/definition doesn't need full type checking.
-    if language == "python" and "pyright" in (config.command[0] or "").lower():
-        _pyright_cfg = os.path.join(abs_root, "pyrightconfig.json")
-        _pyproject_toml = os.path.join(abs_root, "pyproject.toml")
-        if not os.path.exists(_pyright_cfg):
-            _has_pyright_in_pyproject = False
-            try:
-                if os.path.exists(_pyproject_toml):
-                    with open(_pyproject_toml, encoding="utf-8", errors="replace") as _pf:
-                        _has_pyright_in_pyproject = "[tool.pyright]" in _pf.read()
-            except Exception:
-                pass
-            if not _has_pyright_in_pyproject:
-                try:
-                    import json as _json
-                    with open(_pyright_cfg, "w", encoding="utf-8") as _wf:
-                        _wf.write(_json.dumps({
-                            "pythonVersion": "3.11",
-                            "typeCheckingMode": "off",
-                            "reportMissingImports": "none",
-                        }))
-                except Exception as _e:
-                    print(f"  pyrightconfig.json write failed: {_e}", file=sys.stderr)
+    # δ: when the server is pyright and the project has no pyrightconfig, drop a minimal one so
+    # pyright doesn't assume python<3.10 and refuse to evaluate `str | None` union annotations.
+    # LSP8 (Fable): this shim is GT's, NOT part of the task — register its removal at process exit
+    # so it never persists in the agent's working repo (was: written and never cleaned →
+    # agent-visible + could leak into a `git add -A` patch). resolve.py is a short-lived CLI, so
+    # atexit fires after the whole LSP pass completes, before the agent touches the repo.
+    if language == "python":
+        _pyright_cleanup = _write_pyright_shim_config(abs_root, config)
+        if _pyright_cleanup is not None:
+            import atexit
+            atexit.register(_pyright_cleanup)
 
     print(f"  Starting {config.command[0]} for {language}...")
     client = LSPClient(config.command, root_uri)
@@ -944,10 +1076,18 @@ async def _resolve_edges(
     # first didOpen — the moment a lazily-loading server starts its project load).
     _barrier_pending = True
 
-    for i, edge in enumerate(edges):
-        source_file = edge.get("source_file", "")
-        source_line = edge.get("source_line", 0) or 0
-        target_name = edge.get("target_name", "")
+    # LSP1 (demand-driven — Heintze & Tardieu, PLDI 2001: "just enough computation per query").
+    # The DEMAND UNIT is the CALL-SITE (source_file, source_line, target_name), NOT the edge.
+    # name_match wires N same-named candidate edges for ONE call; the pre-fix loop queried the LSP
+    # once PER EDGE (77-82% redundant round-trips on real repos) and then CORRECTED all N to the
+    # same definition → up to ~20 IDENTICAL certified edges per line (inflating corrected /
+    # det-dominance). Resolve ONCE per call-site, apply to the representative, and DELETE the N-1
+    # redundant siblings. Deterministic: dict preserves edge insertion order (edges are pre-sorted).
+    _callsite_groups = _group_edges_by_callsite(edges)
+
+    for i, (_cs_key, _group_edges) in enumerate(_callsite_groups.items()):
+        edge = _group_edges[0]  # representative — all siblings share this call-site's LSP answer
+        source_file, source_line, target_name = _cs_key
 
         if not source_file or not target_name:
             stats["skipped"] += 1
@@ -994,6 +1134,15 @@ async def _resolve_edges(
                 continue
             line_text = lines[source_line - 1]  # 1-indexed
             col, _found_call = _find_call_column(line_text, target_name)
+            # C-Finding2 (Fable LIPI): count the call-shaped occurrences of target_name on this
+            # line. The call-site group key is (source_file, source_line, target_name) — but an edge
+            # carries NO column, so when a single line has TWO distinct same-named calls with
+            # different receivers (`a.foo() or b.foo()`), name_match wires candidates for BOTH into
+            # the SAME group. The LSP resolves only the FIRST occurrence (col); if we then delete all
+            # siblings we destroy the second call's true edge too. So the sibling-collapse below is
+            # gated on _n_callsites == 1 (unambiguous single call). ≥2 → resolve the representative
+            # but keep siblings (correct-or-quiet: we did not prove the other call's candidates false).
+            _n_callsites = len(re.findall(r"\b" + re.escape(target_name) + r"\s*\(", line_text))
             if not _found_call:
                 stats["skipped"] += 1
                 stats["skipped_no_call_site"] += 1
@@ -1059,7 +1208,7 @@ async def _resolve_edges(
             # The match + destructive-delete guard live in _apply_lsp_resolution so
             # the production path and the unit test exercise the SAME logic (items
             # #28 destructive-delete guard, #29 location-primary match).
-            _apply_lsp_resolution(
+            _outcome = _apply_lsp_resolution(
                 conn,
                 edge=edge,
                 target_rel=target_rel,
@@ -1068,15 +1217,40 @@ async def _resolve_edges(
                 stats=stats,
                 has_trust_tier=_has_trust_tier,
             )
+            # LSP1 sibling collapse: when the call-site resolved to a KNOWN true target
+            # (verify/correct), the OTHER name_match candidates for the SAME call are false
+            # duplicates → DELETE them so the call-site keeps ONE authoritative edge (kills the
+            # ~20-identical-certified-edges-per-line inflation). Only on a positive resolution —
+            # external / window-miss / failed leave siblings intact (correct-or-quiet: we did not
+            # prove those candidates false). C-Finding2: also require _n_callsites == 1 — with ≥2
+            # same-named calls on the line the group conflates distinct receivers, so a delete would
+            # nuke the other call's true edge (the LSP only resolved this occurrence's column).
+            if _outcome in ("verified", "corrected") and len(_group_edges) > 1:
+                # C9 (Fable 2026-07-05): collapse siblings only when the resolution is
+                # UNAMBIGUOUS — a single call-site (_n_callsites==1) AND a single definition
+                # location. When the LSP returns MULTIPLE locations (TS declaration-merging,
+                # @overload, TYPE_CHECKING guards, Rust #[cfg] twins) a sibling may legitimately
+                # point to one of the OTHER locations, so a blanket delete of _group_edges[1:]
+                # would destroy a true edge. Keep siblings; record the skip (correct-or-quiet).
+                if _n_callsites == 1 and len(locations) == 1:
+                    for _sib in _group_edges[1:]:
+                        conn.execute("DELETE FROM edges WHERE id = ?", (_sib["id"],))
+                        stats["deduped_siblings"] = stats.get("deduped_siblings", 0) + 1
+                else:
+                    # Ambiguous (multi-call line OR multi-definition symbol) — keep siblings,
+                    # record the skip for visibility.
+                    stats["sibling_delete_skipped_multicall"] = (
+                        stats.get("sibling_delete_skipped_multicall", 0) + len(_group_edges) - 1
+                    )
 
         except Exception:
             stats["failed"] += 1
             stats["failed_exception"] += 1
             continue
 
-        # Progress every 100 edges
+        # Progress every 100 call-sites (LSP1: the loop now iterates call-sites, not edges)
         if (i + 1) % 100 == 0:
-            print(f"  ... {i + 1}/{len(edges)} edges processed", file=sys.stderr)
+            print(f"  ... {i + 1}/{len(_callsite_groups)} call-sites processed", file=sys.stderr)
 
     conn.commit()
 
@@ -1364,8 +1538,12 @@ async def _resolve_edges(
     return stats
 
 
-def _rebuild_closure(db_path: str) -> None:
+def _rebuild_closure(db_path: str) -> bool:
     """Recompute the transitive-closure sidecar after the LSP pass mutated edges.
+
+    Returns True iff the closure was ACTUALLY rebuilt (binary present, rc==0) — so the
+    caller stamps ``closure_rebuilt_after_lsp`` honestly (C3, Fable 2026-07-05) instead
+    of unconditionally True on a warn-and-continue no-op.
 
     gt-index owns closure writes (the Go builder applies the RF-4 verified-only
     rules), so we invoke its authoritative ``-rebuild-closure`` mode rather than
@@ -1387,7 +1565,7 @@ def _rebuild_closure(db_path: str) -> None:
         _proof.require(False, "closure_binary_present",
                        "gt-index binary not found (set GT_INDEX_BIN) — closure NOT rebuilt; "
                        "it remains pre-LSP stale")
-        return
+        return False
     try:
         r = subprocess.run(
             [bin_path, "-rebuild-closure", "-output", db_path],
@@ -1407,11 +1585,13 @@ def _rebuild_closure(db_path: str) -> None:
             # proof (impact/trace), NOT a brief ranking signal (BRIEFING §4).
             _proof.stamp_closure(db_path)
             print(f"[closure] {line.strip() or 'rebuilt over LSP-corrected edges'}")
-        else:
-            _proof.require(False, "closure_rebuild_ok",
-                           f"rc={r.returncode}: {(r.stderr or '')[:200]}")
+            return True
+        _proof.require(False, "closure_rebuild_ok",
+                       f"rc={r.returncode}: {(r.stderr or '')[:200]}")
+        return False
     except Exception as exc:  # non-fatal outside proof; fail-closed inside
         _proof.require(False, "closure_rebuild_ok", f"{type(exc).__name__}: {exc}")
+        return False
 
 
 def resolve_main() -> None:
@@ -1501,16 +1681,21 @@ def resolve_main() -> None:
                         p = os.path.relpath(p, _root)
                     except ValueError:
                         pass
-                return p.replace("\\", "/").lstrip("./")
+                return _strip_rel_prefix(p)  # C8: prefix-only strip, preserves dot-dirs
 
             source_files = [_rel_to_root(p) for p in source_files]
 
     conn = sqlite3.connect(args.db)
+    # C2 (Fable 2026-07-05): resolve the --lang alias ('py') to the stored nodes.language
+    # ('python') so the language-filtered queries below don't match ZERO rows and stamp a
+    # false LSP_NO_OP_VALID. Used only for the STORED-name comparisons; args.lang keeps the
+    # raw spelling for the server lookup + stamps.
+    _db_lang = _canonical_db_language(conn, args.lang)
     # Pass --max-edges as the query limit (was hardcoded LIMIT 500). A full resolve
     # now reaches ALL ambiguous edges, so the graph can be fully LSP-cleaned instead
     # of staying name_match-dominated. source_files scopes to the issue subgraph.
     edges = _get_ambiguous_edges(
-        conn, args.min_confidence, args.lang, source_files=source_files, limit=args.max_edges
+        conn, args.min_confidence, _db_lang, source_files=source_files, limit=args.max_edges
     )
     # Residual = the resolution-fraction DENOMINATOR: count of name_match method-call
     # edges in scope (issue subgraph if --source-files, else whole graph), captured
@@ -1523,7 +1708,7 @@ def resolve_main() -> None:
     # coin-flip against the cap. When demand-scope shrinks residual below the cap, this
     # is a no-op and the fraction is the true in-scope resolution rate.
     residual_method_edges = _count_residual_method_edges(
-        conn, args.lang, source_files=source_files, cap=args.max_edges
+        conn, _db_lang, source_files=source_files, cap=args.max_edges
     )
     conn.close()
 
@@ -1652,7 +1837,7 @@ def resolve_main() -> None:
             )
             return
 
-        lang_edges = [e for e in edges if e.get("language") == args.lang][: args.max_edges]
+        lang_edges = [e for e in edges if e.get("language") == _db_lang][: args.max_edges]
 
         # ALWAYS launch + warm-probe the server (EVEN with zero demand edges) so a
         # residual==0 no-op is PROVABLE — a no-op pass is only valid with a warmed server.
@@ -1678,8 +1863,23 @@ def resolve_main() -> None:
         cert["verified_edges"] = int(stats.get("verified", 0))
         cert["corrected_edges"] = int(stats.get("corrected", 0))
         cert["deleted_edges"] = int(stats.get("deleted", 0))
+        # C-Finding5: honest disclosure — the "deleted" edges are non-destructive window-miss
+        # tombstones (conf=0.0, kept + auditable), not destroyed edges. window_miss_edges ==
+        # deleted_edges here because a window-miss is their only source.
+        cert["window_miss_edges"] = int(stats.get("window_miss", 0))
         cert["failed_edges"] = int(stats.get("failed", 0))
         cert["skipped_edges"] = int(stats.get("skipped", 0))
+        # C4 (Fable 2026-07-05): disclose the real work the pass did that was previously
+        # invisible in the cert — the true sibling DELETEs (deduped_siblings), the external
+        # adjudications (skipped_external, now counted in effective_work per C1), and the
+        # honest skip reasons — so an auditor can see what the pass adjudicated.
+        cert["deduped_sibling_edges"] = int(stats.get("deduped_siblings", 0))
+        cert["skipped_external_edges"] = int(stats.get("skipped_external", 0))
+        cert["skipped_no_call_site_edges"] = int(stats.get("skipped_no_call_site", 0))
+        cert["failed_didopen_edges"] = int(stats.get("failed_didopen", 0))
+        cert["sibling_delete_skipped_multicall_edges"] = int(
+            stats.get("sibling_delete_skipped_multicall", 0)
+        )
         cert["project_ready"] = stats.get("project_ready", None)
         cert["project_ready_wait_ms"] = float(stats.get("project_ready_wait_ms", 0.0) or 0.0)
         cert["project_ready_attempts"] = int(stats.get("project_ready_attempts", 0) or 0)
@@ -1693,8 +1893,11 @@ def resolve_main() -> None:
               f"warm_probe_ok={cert['warm_probe_ok']} probe_latency_ms={cert['probe_latency_ms']:.1f}")
         if cert["failure_detail"]:
             print(f"  failure_detail: {cert['failure_detail']}", file=sys.stderr)
+        # C-Finding5: label the count honestly — these are non-destructive window-miss TOMBSTONES
+        # (conf=0.0, kept), not destroyed edges. (No log-scraper parses this token; the cert carries
+        # both deleted_edges and window_miss_edges for machines.)
         print(f"  Verified: {stats.get('verified',0)}  Corrected: {stats.get('corrected',0)}  "
-              f"Deleted: {stats.get('deleted',0)}  Failed: {stats.get('failed',0)}  "
+              f"Tombstoned(window-miss): {stats.get('deleted',0)}  Failed: {stats.get('failed',0)}  "
               f"Skipped: {stats.get('skipped',0)}")
         if stats.get("project_ready") is not None:
             print(f"  project_ready={stats['project_ready']} "
@@ -1717,11 +1920,14 @@ def resolve_main() -> None:
         # Closure rebuild AFTER LSP (stale otherwise). Fatal in proof mode if it fails/stale.
         _changed = (stats.get("corrected", 0) + stats.get("deleted", 0) + stats.get("verified", 0))
         if _changed:
-            _rebuild_closure(args.db)
+            _closure_ok = _rebuild_closure(args.db)
         else:
             _proof.stamp_closure(args.db)
+            _closure_ok = True  # no edges changed → closure already reflects post-LSP state
         _proof.assert_closure_after_lsp(args.db)
-        cert["closure_rebuilt_after_lsp"] = True
+        # C3 (Fable 2026-07-05): stamp from the ACTUAL rebuild outcome, not unconditionally
+        # True — a warn-and-continue no-op (binary absent, non-proof) leaves the closure stale.
+        cert["closure_rebuilt_after_lsp"] = bool(_closure_ok)
         try:
             cert["closure_rebuilt_at"] = _proof.read_ts(args.db, _proof.K_CLOSURE_TS)
         except Exception:
@@ -1737,11 +1943,7 @@ def resolve_main() -> None:
             cert["no_op_reason"] = ("zero in-scope name_match method-call edges to resolve"
                                     if cert["lsp_warm"] else "")
 
-        effective_work = (
-            int(stats.get("verified", 0))
-            + int(stats.get("corrected", 0))
-            + int(stats.get("deleted", 0))
-        )
+        effective_work = _effective_work(stats)  # C1: +skipped_external (external IS adjudication)
         cert["effective_work"] = int(effective_work)
         # DEGRADED: a warm server that left REAL residual work UNCONVERTED (see
         # _compute_degraded). Distinguishes an incomplete-env zero-conversion from a real
@@ -1812,6 +2014,14 @@ def resolve_main() -> None:
         # Deliver-always doctrine is preserved for the NON-required path: with GT_REQUIRE_LSP
         # unset this stays a WARN that passes, so the tree-sitter graph + brief still ship.
         if cert.get("degraded") and os.environ.get("GT_REQUIRE_LSP") == "1":
+            # C5 (Fable 2026-07-05): make the on-disk cert AGREE with exit 2. The cert was
+            # written above with a WARN-class verdict_hint; on this fail-closed path re-stamp
+            # it LSP_DEGRADED_FAIL and re-write, so a downstream reader of the cert never sees
+            # a PASS-class verdict on a run that exited non-zero. (Only the GT_REQUIRE_LSP=1
+            # path exits — the deliver-always WARN path keeps its WARN verdict, so FIX-A's
+            # warm-WARN=LIVE aggregation is unchanged.)
+            cert["verdict_hint"] = "LSP_DEGRADED_FAIL"
+            _write_lsp_certificate(cert)
             print(
                 "LSP_DEGRADED_FAIL: GT_REQUIRE_LSP=1 but the warm LSP server for language "
                 f"'{args.lang}' converted ZERO of {residual_method_edges} residual edges "

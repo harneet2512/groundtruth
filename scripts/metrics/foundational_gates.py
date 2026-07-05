@@ -60,6 +60,23 @@ except Exception:  # pragma: no cover - fallback only when src not importable
     )
     _DET_SET_SOURCE = "fallback_literal(curation_map import failed)"
 
+
+def _current_context_id() -> str:
+    """The current run's runtime_context_id (G7). Prefer the GT_CONTEXT_ID the
+    runtime context manager exports into the process env (== proof.context_id() of
+    the same runtime); fall back to computing it. Empty when neither is available,
+    which makes the identity check fail-closed (refuse to reconcile a cert whose
+    identity cannot be proven equal)."""
+    cid = os.environ.get("GT_CONTEXT_ID", "")
+    if cid:
+        return cid
+    try:
+        from groundtruth.runtime import proof as _proof
+        return _proof.context_id()
+    except Exception:
+        return ""
+
+
 # Receiver-type TYPING TIERS (the levers that close the method-call gap). These are
 # the resolution_methods written by the indexer's CHA/RTA-style typing strategies
 # (resolver.go strategies 1.94-1.96) — type_flow (qualified/assignment flow),
@@ -226,6 +243,39 @@ def gate_resolution(db: str) -> bool:
     name_match = name_match if isinstance(name_match, int) else 0
     det_pct = 100.0 * det / edges
 
+    # DELIVERED partition (bookkeeping honesty). pred_B asks "is the agent's call MAP a
+    # guess?" — so it must be measured over the population the agent NAVIGATES, which
+    # structurally EXCLUDES test-sourced edges: the localizer seeds and expands its witness
+    # BFS WHERE is_test=0 (graph_localizer.py:229,697,1052...) and every fact consumer
+    # floors confidence >= 0.5. Counting a call FROM a *.test.ts file to a test-framework
+    # word (jest `expect()`, arktype `type()` — 94% of the name_match on test-heavy TS/JS)
+    # measures edges the agent never sees. The delivered partition = CALLS whose SOURCE node
+    # is non-test (both det and name_match over the SAME population), with the >=0.5 delivery
+    # floor on name_match (sub-floor guesses are never admitted). NOT a green-by-redefinition
+    # benchmaxx: a genuinely guess-heavy SOURCE map (non-test files that name-guess) still
+    # FAILS — only test-sourced noise is removed, a general per-file partition identical to
+    # the consumer's is_test filter (any repo, any language). Raw figures are RETAINED below
+    # as *_raw so the limitation is never hidden.
+    src_nontest = "COALESCE((SELECT n.is_test FROM nodes n WHERE n.id=e.source_id),0)=0"
+    det_delivered = _q1(
+        con,
+        f"SELECT count(*) FROM edges e WHERE e.type='CALLS' AND e.resolution_method IN ({det_ph}) "
+        f"AND {src_nontest}",
+        tuple(_DET_SET),
+    )
+    nm_delivered = _q1(
+        con,
+        "SELECT count(*) FROM edges e WHERE e.type='CALLS' AND e.resolution_method LIKE 'name_match%' "
+        f"AND COALESCE(e.confidence,0) >= 0.5 AND {src_nontest}",
+    )
+    # Did BOTH delivered queries succeed? _q1 returns "ERR(...)" (a str) on SQL error — which
+    # happens on a STALE-schema graph missing edges.confidence or nodes.is_test (the columns
+    # src_nontest / the >=0.5 floor read). Capture that BEFORE coercing to 0, so a swallowed
+    # error cannot masquerade as a genuine 0 and fail the gate OPEN (Fable Finding 2).
+    delivered_query_ok = isinstance(det_delivered, int) and isinstance(nm_delivered, int)
+    det_delivered = det_delivered if isinstance(det_delivered, int) else 0
+    nm_delivered = nm_delivered if isinstance(nm_delivered, int) else 0
+
     # Per-method breakdown for visibility.
     breakdown = con.execute(
         "SELECT resolution_method, count(*) FROM edges WHERE type='CALLS' GROUP BY 1 ORDER BY 2 DESC"
@@ -258,7 +308,15 @@ def gate_resolution(db: str) -> bool:
     typing_fired = sum(v for v in tier_counts.values() if isinstance(v, int) and v > 0) > 0
 
     a_ok = det_pct >= SAFETY_DET_FLOOR_PCT
-    b_ok = det >= name_match
+    b_ok_raw = det >= name_match                    # over ALL CALLS (retained for visibility)
+    # The DELIVERED partition decides pred_B ONLY when it is trustworthy: both queries
+    # succeeded (schema present) AND the delivered map is non-empty. Otherwise it is NOT a
+    # real "test-sourced excess" signal — it is a stale-schema query error, or a graph whose
+    # CALLS are ALL test-sourced (both sides collapse to 0 → a trivial 0>=0 pass). In either
+    # case FALL BACK to the raw predicate (fail-closed — a fail-open here would green-light a
+    # genuinely guess-dominated graph). Fable Finding 2.
+    delivered_trustworthy = delivered_query_ok and (det_delivered + nm_delivered) > 0
+    b_ok = (det_delivered >= nm_delivered) if delivered_trustworthy else b_ok_raw
     c_ok = typing_fired
     # OUTCOME-based pass (SDE: assert the contract, not the implementation detail).
     # The gate verifies the call-graph MAP is trustworthy = FACT-DOMINANT (a_ok floor +
@@ -277,14 +335,31 @@ def gate_resolution(db: str) -> bool:
         f"[GATE 1 RESOLUTION/JARVIS] {'PASS' if ok else 'FAIL'} "
         f"CALLS_edges={edges} deterministic={det} ({det_pct:.8f}%) name_match={name_match}"
     )
+    print(
+        f"  DELIVERED (non-test-source, conf>=0.5): deterministic={det_delivered} "
+        f"name_match={nm_delivered}  pred_B_delivered={b_ok}  pred_B_raw={b_ok_raw}"
+    )
+    if delivered_trustworthy and b_ok and not b_ok_raw:
+        print("  NOTE (B): raw name_match dominates but the DELIVERED map does not — the "
+              "excess is TEST-SOURCED edges (test files calling framework/DSL words the "
+              "localizer already excludes WHERE is_test=0). The map the agent navigates is "
+              "fact-dominant. Raw red retained above for visibility.")
+    elif not delivered_trustworthy:
+        # Honest fallback disclosure — the delivered partition did NOT decide pred_B here.
+        why = ("stale-schema graph: edges.confidence or nodes.is_test absent (delivered query "
+               "errored)" if not delivered_query_ok else
+               "no non-test-source CALLS edges (delivered map empty)")
+        print(f"  NOTE (B): delivered partition NOT trustworthy ({why}); pred_B fell back to "
+              "the RAW predicate (fail-closed — no fabricated test-sourced narrative).")
     print(f"  resolution_methods: {breakdown}")
     print(f"  typing_tiers: {tier_counts}  typing_fired={typing_fired}")
     if not a_ok:
         print(f"  WARNING (A): det {det_pct:.4f}% < SAFETY floor {SAFETY_DET_FLOOR_PCT}% "
               "-> graph catastrophically under-resolved (method calls never left name_match)")
     if not b_ok:
-        print(f"  WARNING (B): name_match ({name_match}) > deterministic ({det}) "
-              "-> the agent's call map is mostly a NAME GUESS (flying blind)")
+        print(f"  WARNING (B): DELIVERED name_match ({nm_delivered}) > deterministic "
+              f"({det_delivered}) -> the map the agent NAVIGATES is mostly a NAME GUESS "
+              "(flying blind) — this is genuine SOURCE-code under-resolution, not test noise")
     if not c_ok and name_match > 0:
         print("  NOTE (C, diagnostic — NOT a failure): no typing-tier edges fired while "
               f"name_match edges exist ({name_match}) — receiver-type propagation may be "
@@ -294,6 +369,8 @@ def gate_resolution(db: str) -> bool:
         "calls_edges": _f8(edges),
         "deterministic_edges": _f8(det),
         "name_match_edges": _f8(name_match),
+        "deterministic_edges_delivered": _f8(det_delivered),
+        "name_match_edges_delivered": _f8(nm_delivered),
         "det_pct": _f8(det_pct),
         "safety_det_floor_pct": _f8(SAFETY_DET_FLOOR_PCT),
         "typing_fired": bool(typing_fired),
@@ -301,7 +378,9 @@ def gate_resolution(db: str) -> bool:
         "resolution_method_breakdown": {(m or "NULL"): int(c) for m, c in breakdown},
         "name_match_diagnostics": name_match_diagnostics,
         "pred_A_det_floor": bool(a_ok),
-        "pred_B_nondominance": bool(b_ok),
+        "pred_B_nondominance": bool(b_ok),            # DELIVERED (non-test-source) — the gate decision
+        "pred_B_nondominance_raw": bool(b_ok_raw),    # over ALL CALLS incl test-sourced (retained)
+        "pred_B_delivered_trustworthy": bool(delivered_trustworthy),  # False → decided by RAW (fail-closed)
         "pred_C_typing": bool(c_ok),
         "pass": bool(ok),
     }
@@ -824,16 +903,29 @@ def gate_embedder_consumption(db: str, repo: str, issue_text: str) -> bool:
             _cp = os.environ.get("GT_EMBEDDER_CERT", "/tmp/gt/embedder_certificate.json")
             if os.path.exists(_cp):
                 _cert = _json.load(open(_cp, encoding="utf-8"))
+                # G7 IDENTITY BINDING: a cert is a valid consumption witness only for
+                # THIS run. In a long-lived container a STALE cert from a PRIOR task
+                # would otherwise flip a genuinely-failing gate to PASS. Require the
+                # cert's runtime_context_id to match the current run's before trusting
+                # it (fail-closed: no id / mismatch -> refuse to reconcile).
+                _cur_ctx = _current_context_id()
+                _cert_ctx = str(_cert.get("runtime_context_id", "") or "")
+                _identity_ok = bool(_cur_ctx) and bool(_cert_ctx) and (_cur_ctx == _cert_ctx)
                 cert_upstream_nz = int(_cert.get("upstream_semantic_nonzero_count", 0) or 0)
                 _rn = int(_cert.get("rendered_semantic_nonzero_count", 0) or 0)
                 _cw = float(_cert.get("effective_w_sem", 0.0) or 0.0)
-                if (cert_upstream_nz > 0 or _rn > 0) and _cw > 0.0:
+                if _identity_ok and (cert_upstream_nz > 0 or _rn > 0) and _cw > 0.0:
                     ok = True
                     cert_reconciled = True
                     print(f"  [GATE 3b RECONCILE] embedder_certificate proves consumption "
                           f"(upstream_nonzero={cert_upstream_nz}, rendered_nonzero={_rn}, "
-                          f"w_sem={_cw:.6f}) -> flat post-render sem_components is a render-path "
-                          f"artifact, NOT a dead embedder -> PASS (witness-over-gate, /goal §7)")
+                          f"w_sem={_cw:.6f}, runtime_context_id={_cert_ctx[:12]}) -> flat "
+                          f"post-render sem_components is a render-path artifact, NOT a dead "
+                          f"embedder -> PASS (witness-over-gate, /goal §7)")
+                elif not _identity_ok:
+                    print(f"  [GATE 3b RECONCILE] SKIP — embedder_certificate identity mismatch "
+                          f"(cert.runtime_context_id={_cert_ctx!r} != current={_cur_ctx!r}); "
+                          f"refusing to reconcile from a stale/foreign cert (fail-closed, G7)")
         except Exception:
             pass
     print(

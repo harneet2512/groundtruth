@@ -55,6 +55,30 @@ func TestResolve_B6_DirectReceiverTypeBeatsBlindGuess(t *testing.T) {
 	}
 }
 
+// Fable RS6 (RED→GREEN): the assignment-flow fallback (assignments.go ResolveQualifiedCall)
+// resolves a local var from a file-global last-write-wins when NO same-scope write exists —
+// i.e. it borrows a type written in a DIFFERENT function. Pre-fix it minted that as 0.9
+// CERTIFIED "assignment_tracked", identical to an in-scope proof. The scopeProven flag now
+// demotes the cross-function fallback to 0.6 CANDIDATE "assignment_tracked_crossscope". The
+// in-scope case (TestResolve_B6_DirectReceiverTypeBeatsBlindGuess, scope=="use") still mints 0.9.
+func TestResolve_RS6_CrossScopeAssignmentDemotedNotCertified(t *testing.T) {
+	// `a = Beta()` is written in function `other`; `a.run()` is called from `use`.
+	got := resolveRunReceiver(t,
+		[]parser.AssignmentRef{{VarName: "a", TypeName: "Beta", Scope: "other", File: "m.py"}},
+		"a.run")
+	if got == nil {
+		t.Fatalf("a.run() did not resolve via the cross-scope fallback")
+	}
+	if got.Confidence >= 0.9 || got.TrustTier == "CERTIFIED" {
+		t.Errorf("RS6: a cross-scope assignment minted a CERTIFIED fact (conf=%.2f tier=%q ev=%q) — "+
+			"a type from a DIFFERENT function's write is not proven at this call site",
+			got.Confidence, got.TrustTier, got.EvidenceType)
+	}
+	if got.EvidenceType != "assignment_tracked_crossscope" {
+		t.Errorf("RS6: evidence=%q; want assignment_tracked_crossscope (the demoted cross-scope label)", got.EvidenceType)
+	}
+}
+
 func TestResolve_B6_AliasChainPropagatesReceiverType(t *testing.T) {
 	// a = Beta(); b = a; c = b; c.run()  →  Beta.run (id 2) via the alias fixpoint.
 	got := resolveRunReceiver(t,

@@ -17,6 +17,7 @@ Library import:
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import sys
@@ -26,12 +27,19 @@ from typing import Any
 # Helpers
 # ---------------------------------------------------------------------------
 
-def d8(x) -> float:
-    """Round to 8 decimal places. NaN/None -> 0.0."""
+def d8(x):
+    """Round to 8 decimal places. Missing data (None / NaN / inf / unparseable)
+    -> None (JSON null), NEVER 0.0 — a fabricated measured zero is precision
+    theater on the 8-dp mandate (G14). A real number still rounds to 8 dp."""
+    if x is None:
+        return None
     try:
-        return round(float(x), 8)
+        f = float(x)
     except (TypeError, ValueError):
-        return 0.0
+        return None
+    if math.isnan(f) or math.isinf(f):
+        return None
+    return round(f, 8)
 
 
 def _safe_load_json(path: str) -> Any:
@@ -362,6 +370,35 @@ def _parse_l1_ranking(brief_txt: str) -> list[str]:
     return ranked
 
 
+# Metrics whose value is computed against the gold-file set. Under a
+# submission-proxy "gold" (the agent's OWN diff) every one is CIRCULAR — it
+# measures agreement with whatever the agent did, even on a FAILED task — so they
+# are emitted as null (G1), never a fabricated 0/1 that reads as a real score.
+_GOLD_DERIVED_FIELDS: dict[str, tuple[str, ...]] = {
+    "localization": (
+        "gold_in_L1_top_k", "gold_rank", "gold_never_reached", "first_gold_view_step",
+        "files_to_gold_view", "steps_to_gold_view", "files_to_gold_edit",
+        "steps_to_gold_edit", "localization_precision", "localization_recall",
+        "false_file_rate", "gold_view_precision", "wasted_views", "navigation_directness",
+    ),
+    "scope_completeness": (
+        "scope_coverage", "scope_excess", "multi_file_discovery", "scope_gap_files",
+    ),
+    "token_efficiency": ("tokens_per_gold_edit", "wasted_token_rate"),
+}
+
+
+def _null_gold_derived(out: dict) -> None:
+    """Set every gold-derived metric to null (G1) — used when the "gold" is only a
+    submission proxy, so no circular metric masquerades as a measured value."""
+    for section, fields in _GOLD_DERIVED_FIELDS.items():
+        sec = out.get(section)
+        if isinstance(sec, dict):
+            for k in fields:
+                if k in sec:
+                    sec[k] = None
+
+
 def _parse_gold_from_diff(submission: str) -> list[str]:
     """Parse gold files from a git diff submission."""
     files = []
@@ -524,9 +561,17 @@ def _compute_localization(timeline: list[dict], gold_files: list[str],
     unique_viewed = list(dict.fromkeys(viewed_order))
     unique_edited = list(dict.fromkeys(edited_order))
 
-    # files/steps to first gold view
-    files_to_gold_view = 0
-    steps_to_gold_view = 0
+    # G2: suffix-tolerant gold match — the same tolerance the L1-rank match below
+    # uses, so a viewed path spelled differently than the normalized gold (repo-
+    # relative vs absolute) is not silently counted as "never reached".
+    def _is_gold(f: str) -> bool:
+        return bool(f) and any(_path_match(f, g) for g in gold_set)
+
+    # files/steps to first gold view. Initialised None (not 0): a run that NEVER
+    # views gold must be distinguishable from one that hits gold at step 1 — 0
+    # would read as "perfect". Set only inside the found-gold branch.
+    files_to_gold_view = None
+    steps_to_gold_view = None
     first_gold_view_step = None
     unique_before_gold_view = set()
     for ev in timeline:
@@ -534,7 +579,7 @@ def _compute_localization(timeline: list[dict], gold_files: list[str],
             continue
         if ev.get("viewed_file"):
             f = ev["viewed_file"]
-            if f in gold_set:
+            if _is_gold(f):
                 if first_gold_view_step is None:
                     first_gold_view_step = ev["step"]
                     files_to_gold_view = len(unique_before_gold_view)
@@ -542,9 +587,9 @@ def _compute_localization(timeline: list[dict], gold_files: list[str],
                 break
             unique_before_gold_view.add(f)
 
-    # files/steps to first gold edit
-    files_to_gold_edit = 0
-    steps_to_gold_edit = 0
+    # files/steps to first gold edit (same fail-open fix: None until gold edited).
+    files_to_gold_edit = None
+    steps_to_gold_edit = None
     first_gold_edit_step = None
     unique_before_gold_edit = set()
     for ev in timeline:
@@ -552,13 +597,15 @@ def _compute_localization(timeline: list[dict], gold_files: list[str],
             continue
         if ev.get("edited_file"):
             f = ev["edited_file"]
-            if f in gold_set:
+            if _is_gold(f):
                 if first_gold_edit_step is None:
                     first_gold_edit_step = ev["step"]
                     files_to_gold_edit = len(unique_before_gold_edit)
                     steps_to_gold_edit = ev["step"] - 1
                 break
             unique_before_gold_edit.add(f)
+
+    gold_never_reached = first_gold_view_step is None
 
     edited_set = set(unique_edited)
     gold_edited_set = edited_set & gold_set
@@ -611,6 +658,8 @@ def _compute_localization(timeline: list[dict], gold_files: list[str],
     return {
         "gold_in_L1_top_k": gold_in_l1_top_k,
         "gold_rank": gold_rank,
+        "gold_never_reached": gold_never_reached,
+        "first_gold_view_step": first_gold_view_step,
         "files_to_gold_view": files_to_gold_view,
         "steps_to_gold_view": steps_to_gold_view,
         "files_to_gold_edit": files_to_gold_edit,
@@ -746,9 +795,11 @@ def _compute_interface_preservation(timeline: list[dict]) -> dict:
         if edits_to_f > 1:
             signature_changes_warned += 1
 
+    # G8: 0 warnings delivered == "not applicable", NOT a perfect score. A layer
+    # that never fired must NOT score 1.0 on a MANDATORY metric — emit null.
     contract_compliance_rate = d8(
         (n_warnings - signature_changes_warned) / n_warnings
-    ) if n_warnings else 1.0
+    ) if n_warnings else None
 
     return {
         "contract_compliance_rate": contract_compliance_rate,
@@ -928,9 +979,10 @@ def _compute_verify_before_submit(timeline: list[dict]) -> dict:
         1 for ev in timeline
         if ev["role"] == "observation" and "obligations" in ev.get("gt_tags", [])
     )
-    # If obligations were delivered and tests ran, approximate rate
+    # If obligations were delivered and tests ran, approximate rate. G8: nothing
+    # delivered -> null ("not applicable"), never a fabricated 0.0.
     obligation_test_rate = d8(min(test_runs_total, obligations_delivered) / obligations_delivered) \
-        if obligations_delivered else 0.0
+        if obligations_delivered else None
 
     return {
         "test_before_submit": test_before_submit,
@@ -1025,7 +1077,8 @@ def _compute_gt_attribution(timeline: list[dict], brief_txt: str) -> dict:
                 if timeline[j].get("is_edit") or timeline[j].get("is_test"):
                     nudge_correct_actions += 1
                 break
-    nudge_action_rate = d8(nudge_correct_actions / nudges_delivered) if nudges_delivered else 0.0
+    # G8: no nudges delivered -> null ("not applicable"), never a fabricated 0.0.
+    nudge_action_rate = d8(nudge_correct_actions / nudges_delivered) if nudges_delivered else None
 
     # scope_chain_followed: did agent open files listed in gt-scope?
     all_scope_files: list[str] = []
@@ -1171,16 +1224,26 @@ def compute_performance_metrics(
         info = trajectory.get("info", {}) or {}
         submission = str(info.get("submission") or "")
 
-        # Resolve gold files
-        if gold_files is None:
+        # Resolve gold files + record PROVENANCE (G1). "true_gold" = caller-provided
+        # or a gold_files.txt on disk; "submission_proxy" = derived from the agent's
+        # OWN submission diff (CIRCULAR — measures agreement with what the agent did,
+        # even on a FAILED task); "none" = no gold available at all.
+        if gold_files is not None:
+            gold_source = "true_gold" if gold_files else "none"
+        else:
             gold_files = []
+            gold_source = "none"
             # Try gold_files.txt in artifacts_dir
             gf_path = os.path.join(artifacts_dir or "", "gold_files.txt") if artifacts_dir else ""
             if gf_path and os.path.exists(gf_path):
                 gold_files = _parse_gold_from_file(gf_path)
-            # Fall back to submission diff
+                if gold_files:
+                    gold_source = "true_gold"
+            # Fall back to submission diff — this is a PROXY, not true gold.
             if not gold_files and submission:
                 gold_files = _parse_gold_from_diff(submission)
+                if gold_files:
+                    gold_source = "submission_proxy"
 
         # Load brief.txt
         brief_txt = ""
@@ -1217,11 +1280,19 @@ def compute_performance_metrics(
             "gt_attribution": s8,
             "token_efficiency": s9,
             "gold_files_used": gold_files,
+            "gold_source": gold_source,
+            "gold_is_proxy": gold_source == "submission_proxy",
             "n_messages": len(messages),
             "n_gold_files": len(gold_files),
             "brief_found": bool(brief_txt),
             "submission_found": bool(submission),
         })
+
+        # G1: under a submission-proxy "gold" every gold-derived metric is circular
+        # (it measures agreement with the agent's OWN patch, even on a failed task).
+        # Emit them as null so no fabricated score is read as real.
+        if gold_source == "submission_proxy":
+            _null_gold_derived(out)
     except Exception as exc:  # noqa: BLE001 — never crash the caller
         out["error"] = f"{type(exc).__name__}: {str(exc)[:400]}"
         import traceback
@@ -1279,13 +1350,17 @@ def main() -> int:
     s4 = result.get("scope_completeness", {})
     s6 = result.get("verify_before_submit", {})
     s8 = result.get("gt_attribution", {})
+
+    def _f4(v):  # None-tolerant: a null metric prints as "null", never crashes / fakes 0
+        return f"{v:.4f}" if isinstance(v, (int, float)) and not isinstance(v, bool) else "null"
+
     print(
         f"[GT_PERF] gold_rank={loc.get('gold_rank')} "
         f"steps_to_gold_view={loc.get('steps_to_gold_view')} "
-        f"localization_precision={loc.get('localization_precision'):.4f} "
-        f"scope_coverage={s4.get('scope_coverage'):.4f} "
+        f"localization_precision={_f4(loc.get('localization_precision'))} "
+        f"scope_coverage={_f4(s4.get('scope_coverage'))} "
         f"test_before_submit={s6.get('test_before_submit')} "
-        f"L1_followed_rate={s8.get('L1_followed_rate'):.4f}"
+        f"L1_followed_rate={_f4(s8.get('L1_followed_rate'))}"
     )
     if result.get("error"):
         print(f"[GT_PERF] ERROR: {result['error']}", file=sys.stderr)

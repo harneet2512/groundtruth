@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import glob
 import json
+import math
 import os
 import re
 import sqlite3
@@ -23,12 +24,19 @@ import subprocess
 import sys
 
 
-def d8(x) -> float:
-    """Round to 8 decimal places — full precision, never 2-dp. NaN/None -> 0.0."""
+def d8(x):
+    """Round to 8 decimal places — full precision, never 2-dp. Missing data
+    (None / NaN / inf / unparseable) -> None (JSON null), NEVER 0.0: a missing
+    measurement must be null, not an indistinguishable measured zero (G14)."""
+    if x is None:
+        return None
     try:
-        return round(float(x), 8)
+        f = float(x)
     except (TypeError, ValueError):
-        return 0.0
+        return None
+    if math.isnan(f) or math.isinf(f):
+        return None
+    return round(f, 8)
 
 
 # ---------------------------------------------------------------------------
@@ -83,7 +91,9 @@ def _find_output_jsonl(task: str, results_dir: str) -> str | None:
     for base in (results_dir, f"/tmp/results_{task}", f"/tmp/gt/{task}"):
         if not base:
             continue
-        hits = glob.glob(os.path.join(base, "**", "output.jsonl"), recursive=True)
+        # DETERMINISM (Fable G16): glob returns OS-order; two machines with retry attempts
+        # present could meter DIFFERENT trajectories. Sort so the pick is stable.
+        hits = sorted(glob.glob(os.path.join(base, "**", "output.jsonl"), recursive=True))
         if hits:
             return hits[0]
     return None
@@ -472,6 +482,8 @@ def _find_miniswe_trajectory(task: str, results_dir: str) -> str | None:
                     os.path.join("jobs", "**", "agent", "*.trajectory.json"),
                     "*.traj.json"):  # no-pier path (gt_verified_agent): <iid>.traj.json
             hits.extend(glob.glob(os.path.join(base, "**", pat), recursive=True))
+        hits.sort()  # DETERMINISM (Fable G16): both scoped[0] and hits[0] below pick from
+        #              this list; glob's OS-order otherwise meters different trajectories.
         if not hits:
             continue
         if task:
@@ -785,8 +797,9 @@ def _from_graph_db(db_path: str) -> dict:
         "enriched_bases": {},
         "assertion_count": 0,
         "linked_assertion_count": 0,
-        "lsp_return_type_signature_count": 0,
-        "lsp_enriched_edge_count": 0,
+        "return_type_signature_count": 0,
+        "deterministic_edge_count": 0,
+        "lsp_stamped_edge_count": 0,
     }
     if not db_path or not os.path.exists(db_path):
         return out
@@ -843,17 +856,25 @@ def _from_graph_db(db_path: str) -> dict:
                 "SELECT COUNT(*) FROM assertions WHERE target_node_id IS NOT NULL "
                 "AND target_node_id != 0",
             )
-        # LSP enrichment proxies: nodes carrying a populated return_type/signature
-        # are the LSP-enriched contracts; import/same_file edges are verified.
-        out["lsp_return_type_signature_count"] = _scalar(
+        # G3: these are NOT LSP work. return_type is indexer-written; import/same_file
+        # edges are tree-sitter DETERMINISTIC resolution, not LSP-stamped. Labelling
+        # them lsp_* 113x-inflated the LSP lever (measured 1934 vs 17 real lsp edges).
+        # Report them under honest names; the REAL LSP work is lsp_stamped_edge_count.
+        out["return_type_signature_count"] = _scalar(
             con,
             "SELECT COUNT(*) FROM nodes WHERE return_type IS NOT NULL "
             "AND TRIM(return_type) != ''",
         )
-        out["lsp_enriched_edge_count"] = _scalar(
+        out["deterministic_edge_count"] = _scalar(
             con,
             "SELECT COUNT(*) FROM edges WHERE resolution_method IN "
             "('import','same_file') ",
+        )
+        # REAL LSP-stamped edges: only edges the LSP precision pass resolved/verified.
+        out["lsp_stamped_edge_count"] = _scalar(
+            con,
+            "SELECT COUNT(*) FROM edges WHERE resolution_method IN "
+            "('lsp','lsp_verified')",
         )
     finally:
         con.close()
@@ -1227,7 +1248,10 @@ def _from_graph_cert(cert_dir: str) -> dict:
                 int(c.get("fts5_row_count", 0) or 0) if c.get("fts5_match_probe_ok") else 0),
             "assertion_count": int(c.get("assertions_count", 0) or 0),
             "data_flow_row_count": int(c.get("data_flow_count", 0) or 0),
-            "lsp_enriched_edge_count": int(rmd.get("lsp", 0) or 0),
+            # G3: rmd['lsp'] IS the real LSP-stamped count (correctly labelled here);
+            # det is the deterministic (import/same_file) count. Keep them distinct.
+            "deterministic_edge_count": det,
+            "lsp_stamped_edge_count": int(rmd.get("lsp", 0) or 0),
             "graph_substrate_source": "graph_certificate.json",
         }
     return {}
@@ -1463,8 +1487,12 @@ def build(task: str, results_dir: str, log_path: str = "",
         "lsp_corrected_edges": d8(lsp.get("lsp_corrected_edges", 0)),
         "lsp_deleted_edges": d8(lsp.get("lsp_deleted_edges", 0)),
         "lsp_effective_work": d8(lsp.get("lsp_effective_work", 0)),
-        "lsp_enriched_edge_count": d8(graph["lsp_enriched_edge_count"]),
-        "lsp_return_type_signature_count": d8(graph["lsp_return_type_signature_count"]),
+        # G3: honest names. deterministic_edge_count = import/same_file (tree-sitter),
+        # return_type_signature_count = indexer-written contracts, lsp_stamped_edge_count
+        # = the REAL LSP precision-pass work (NOT the 113x-inflated old lsp_enriched count).
+        "deterministic_edge_count": d8(graph.get("deterministic_edge_count", 0)),
+        "return_type_signature_count": d8(graph.get("return_type_signature_count", 0)),
+        "lsp_stamped_edge_count": d8(graph.get("lsp_stamped_edge_count", 0)),
         # --- embedder / semantic (TASK 2) ---
         "embedder_path": embedder["embedder_path"],
         "embedder_vector_dim": d8(embedder["embedder_vector_dim"]),
@@ -1558,7 +1586,12 @@ def pair(gt: dict, base: dict) -> dict:
     """GT-on vs baseline deltas at 8-dp (negative delta on action_count = GT is better)."""
     g, b = gt.get("agent", {}), base.get("agent", {})
     def dlt(k):
-        return d8(d8(g.get(k, 0)) - d8(b.get(k, 0)))
+        # G14: d8 now returns None for missing/NaN. A delta over a missing arm
+        # is itself unknown -> None, never a fabricated 0.0.
+        gv, bv = d8(g.get(k, 0)), d8(b.get(k, 0))
+        if gv is None or bv is None:
+            return None
+        return d8(gv - bv)
     return {
         "task_id": gt.get("task_id"),
         "schema": "gt_metrics_delta.v1",
@@ -1620,7 +1653,7 @@ def _write_markdown(deep: dict, md_path: str) -> None:
 ## Stack live (graph / LSP / semantic)
 | metric | value |
 |---|---|
-{rows([("graph nodes", f(deep.get('graph_nodes'))), ("graph edges", f(deep.get('graph_edges'))), ("verified edge ratio", f(deep.get('verified_edge_ratio'))), ("LSP-enriched edges", f(deep.get('lsp_enriched_edge_count'))), ("LSP server", f"{deep.get('lsp_server_name')} ({deep.get('lsp_launch_status')})"), ("FTS5 rows / hits", f"{f(deep.get('fts5_row_count'))} / {f(deep.get('fts5_real_query_result_count'))}"), ("semantic (embedder)", f"{deep.get('semantic_enabled')} dim={f(deep.get('embedder_vector_dim'))}"), ("assertions / linked", f"{f(deep.get('assertion_count'))} / {f(deep.get('linked_assertion_count'))}")])}
+{rows([("graph nodes", f(deep.get('graph_nodes'))), ("graph edges", f(deep.get('graph_edges'))), ("verified edge ratio", f(deep.get('verified_edge_ratio'))), ("deterministic edges (import/same_file)", f(deep.get('deterministic_edge_count'))), ("LSP-stamped edges", f(deep.get('lsp_stamped_edge_count'))), ("LSP server", f"{deep.get('lsp_server_name')} ({deep.get('lsp_launch_status')})"), ("FTS5 rows / hits", f"{f(deep.get('fts5_row_count'))} / {f(deep.get('fts5_real_query_result_count'))}"), ("semantic (embedder)", f"{deep.get('semantic_enabled')} dim={f(deep.get('embedder_vector_dim'))}"), ("assertions / linked", f"{f(deep.get('assertion_count'))} / {f(deep.get('linked_assertion_count'))}")])}
 
 _inputs present: {deep.get('inputs_present')}_
 """
