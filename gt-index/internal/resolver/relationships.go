@@ -178,7 +178,11 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 						if idx := strings.Index(base, "["); idx > 0 {
 							base = base[:idx]
 						}
-						baseID := resolveClassNode(base, sf.Path, classIndex)
+						// RS9: abstain on a cross-file AMBIGUOUS base name (>1 same-named class in
+						// other files) rather than wiring inheritance to an arbitrary global
+						// first-match — a wrong parent contaminates CHA (lookupMethodWithInheritance)
+						// for every method call on the subclass.
+						baseID := resolveClassNodeSameFileOrUnique(base, sf.Path, classIndex)
 						if baseID != 0 && childID != 0 {
 							addEdge(childID, baseID, "EXTENDS", sf.Path, lineNum, "inheritance", 1.0)
 						}
@@ -220,7 +224,8 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 					childName := m[1]
 					baseName := m[2]
 					childID := resolveClassNode(childName, sf.Path, classIndex)
-					baseID := resolveClassNode(baseName, sf.Path, classIndex)
+					// RS9: abstain on a cross-file ambiguous base (see Python EXTENDS above).
+					baseID := resolveClassNodeSameFileOrUnique(baseName, sf.Path, classIndex)
 					if childID != 0 && baseID != 0 {
 						addEdge(childID, baseID, "EXTENDS", sf.Path, lineNum, "inheritance", 1.0)
 					}
@@ -283,7 +288,8 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 					childName := m[1]
 					baseName := m[2]
 					childID := resolveClassNode(childName, sf.Path, classIndex)
-					baseID := resolveClassNode(baseName, sf.Path, classIndex)
+					// RS9: abstain on a cross-file ambiguous base (see Python EXTENDS above).
+					baseID := resolveClassNodeSameFileOrUnique(baseName, sf.Path, classIndex)
 					if childID != 0 && baseID != 0 {
 						addEdge(childID, baseID, "EXTENDS", sf.Path, lineNum, "inheritance", 1.0)
 					}
@@ -943,7 +949,9 @@ func resolveClassNodeSameFileOrUnique(name, currentFile string, classIndex map[s
 	return 0 // cross-file AND ambiguous — abstain (fail closed)
 }
 
-// resolveInterfaceNode finds an Interface node by name.
+// resolveInterfaceNode finds an Interface node by name, SAME-FILE-FIRST and abstaining
+// on a cross-file AMBIGUOUS name (RS9: an IMPLEMENTS/impl-trait edge to an arbitrary
+// same-named interface in another file contaminates CHA the same way a wrong base does).
 func resolveInterfaceNode(name, currentFile string, interfaceIndex map[string][]classNodeEntry) int64 {
 	entries := interfaceIndex[name]
 	if len(entries) == 0 {
@@ -951,18 +959,23 @@ func resolveInterfaceNode(name, currentFile string, interfaceIndex map[string][]
 	}
 	for _, e := range entries {
 		if e.FilePath == currentFile {
-			return e.ID
+			return e.ID // same-file is unambiguous by construction
 		}
 	}
-	return entries[0].ID
+	if len(entries) == 1 {
+		return entries[0].ID // cross-file but globally unique — safe
+	}
+	return 0 // cross-file AND ambiguous — abstain (fail closed)
 }
 
-// resolveInterfaceOrClassNode tries interface first, then class.
+// resolveInterfaceOrClassNode tries interface first, then class. Both legs abstain on a
+// cross-file ambiguous name (RS9): an IMPLEMENTS/impl-trait target is inheritance provenance
+// and must never be an arbitrary global first-match.
 func resolveInterfaceOrClassNode(name, currentFile string, interfaceIndex, classIndex map[string][]classNodeEntry) int64 {
 	if id := resolveInterfaceNode(name, currentFile, interfaceIndex); id != 0 {
 		return id
 	}
-	return resolveClassNode(name, currentFile, classIndex)
+	return resolveClassNodeSameFileOrUnique(name, currentFile, classIndex)
 }
 
 // resolveClassOrFuncNode tries class index first, then function.

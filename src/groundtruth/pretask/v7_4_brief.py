@@ -932,10 +932,15 @@ def _rrf_fuse(
         w = 1.0 if weights is None else float(weights.get(sig, 1.0))
         if w == 0.0:
             continue
+        # DETERMINISM (Fable B5-3): break value ties by file PATH, not by `files`
+        # iteration order. Python's sort is stable, so with a bare value key two files
+        # with equal component scores keep their input order — and `files` derives from a
+        # set, so that order is PYTHONHASHSEED-dependent (unpinned on the live GT_RRF_FUSION
+        # config). Tied files then get different ranks → different fused scores → the
+        # max_files cut flips membership run-to-run. Negate the value + add the path key.
         ranked = sorted(
             (fp for fp in files if components_map.get(fp, {}).get(sig, 0.0) > 0.0),
-            key=lambda fp: components_map[fp].get(sig, 0.0),
-            reverse=True,
+            key=lambda fp: (-components_map[fp].get(sig, 0.0), fp),
         )
         for rank, fp in enumerate(ranked, start=1):
             agg[fp] += w / (k + rank)
@@ -1434,7 +1439,10 @@ def run_v74(
             if resolved_norm not in _existing_norm:
                 candidate_set.add(resolved_norm)
 
-    all_files = list(candidate_set)
+    # DETERMINISM (Fable B5-3): sort the candidate set — `list(set)` is PYTHONHASHSEED-
+    # dependent, and `all_files` seeds both the RRF fusion and every downstream stable-sort
+    # tiebreak; an unpinned order silently reshuffles equal-scored files across runs.
+    all_files = sorted(candidate_set)
 
     # Lexical scores: normalized BM25 kept as a separate component (W_LEX weight).
     # Separating BM25 from dense cosine (W_SEM) prevents a BM25-rank-1 file from

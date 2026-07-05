@@ -4,6 +4,8 @@ import sqlite3
 from groundtruth.delivery.path_policy import (
     is_delivery_excluded,
     is_generated,
+    is_test_or_demo,
+    is_test_path,
     is_test_tooling,
     is_vendored_path,
     test_tooling_roots as tooling_roots,
@@ -24,6 +26,22 @@ def test_generated_markers():
 def test_tailwind_asset_excluded():
     assert is_delivery_excluded("static/tailwind.min.js")
     assert is_delivery_excluded("assets/tailwind.config.js")
+
+
+def test_p11_production_ambiguous_dirs_are_not_test_or_demo():
+    """Fable P11 (mirrors walker.go nonSourceDirSegments): `testing` / `compat` /
+    `conformance` are PRODUCTION-ambiguous (Django/Go `testing` utilities, pandas/numpy
+    `compat` shims, protobuf `conformance`) and must NOT be classified test/nonsource —
+    else real source gold is demoted/excluded. Genuine test dirs still classify.
+
+    Mutation check: re-adding any of the three to the segment sets → RED.
+    """
+    assert not is_test_path("pkg/testing/helpers.py"), "`testing/` is production-ambiguous"
+    assert not is_test_or_demo("pandas/compat/numpy_.py"), "`compat/` is a production shim dir"
+    assert not is_test_or_demo("proto/conformance/runner.py"), "`conformance/` is real source"
+    # genuine test/demo dirs still classify (no over-removal)
+    assert is_test_path("pkg/tests/test_foo.py")
+    assert is_test_or_demo("examples/quickstart.py")
 
 
 def test_test_imports_do_not_make_generic_source_root_tooling(tmp_path):

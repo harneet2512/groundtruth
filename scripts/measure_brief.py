@@ -381,6 +381,37 @@ def _first_gold_rank(gold_norm: list[str], cands: list[str]) -> int | None:
     return None
 
 
+_TEST_NAME_RE = _re.compile(r"\b(test_[A-Za-z0-9_]+|[A-Za-z0-9_]+_test)\b")
+
+
+def _brief_leaks(brief_text: str, test_files: list[str]) -> list[str]:
+    """Leak scan over the ENTIRE rendered brief (G12), basename-tolerant.
+
+    A leak is ANY of:
+      * a verifier test FILE — full path OR basename — appearing anywhere in the text
+        (not just in the parsed candidate list the old exact-match check saw);
+      * ANY test-function-name-shaped token (``test_*`` / ``*_test``) — the leak
+        invariant forbids GT surfacing test names at all.
+
+    Errs toward flagging (a leak metric is a SAFETY check: over-flagging is safe,
+    the old under-flagging was the danger)."""
+    text = brief_text or ""
+    if not text:
+        return []
+    found: set[str] = set()
+    for t in test_files:
+        if not t:
+            continue
+        base = os.path.basename(t)
+        for variant in (t, base):
+            if variant and _re.search(r"(?<![\w/])" + _re.escape(variant) + r"\b", text):
+                found.add(t)
+                break
+    for m in _TEST_NAME_RE.finditer(text):
+        found.add(m.group(1))
+    return sorted(found)
+
+
 def _parse_localization_block(brief_text: str) -> list[str]:
     """Ordered candidate paths from the delivered ``<gt-localization>`` block.
 
@@ -604,8 +635,11 @@ def measure_tape_offline(tape_dir: str) -> dict:
     # equivalent to the tape's persisted gt_issue_anchors.json).
     strat = classify_stratum(issue_text, graph_db if os.path.isfile(graph_db) else None)
 
-    # LEAK: no delivered localization path may be a verifier test file.
-    leak = sorted(set(delivered) & set(test_files))
+    # LEAK: GT must surface ZERO verifier test paths OR test function names ANYWHERE
+    # in the rendered brief (G12) — not merely inside the parsed candidate list. A
+    # test path can appear in the graph-map / evidence section (outside the numbered
+    # candidates), which the old `set(delivered) & set(test_files)` check could not see.
+    leak = _brief_leaks(brief_text, test_files)
 
     # Agent's own localization from the trajectory.
     agent = _agent_first_hits(_canonical_trajectory(tape_dir), gold)

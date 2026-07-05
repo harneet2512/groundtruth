@@ -91,6 +91,9 @@ func TestIsTestFile(t *testing.T) {
 		// Negative guards: underscore-trim must not over-match
 		{"contests not test", "src/contests/foo.js", false},
 		{"attestations not test", "lib/attestations/sign.js", false},
+		// P11: a file under compat/ is PRODUCTION (is_test=0); a file under tests/ is is_test=1.
+		{"compat dir is not test", "pkg/compat/api.py", false},
+		{"tests dir is test", "pkg/tests/api.py", true},
 	}
 
 	for _, tc := range tests {
@@ -154,10 +157,15 @@ func TestIsNonSourceFile(t *testing.T) {
 		{"fuzz_targets dir", "fuzz_targets/fuzz_parse.rs", true},
 		{"corpus dir", "corpus/seed.bin.go", true},
 		{"testcases dir", "testcases/case001.go", true},
-		{"conformance dir", "conformance/spec_test.go", true},
-		{"compat dir", "compat/old_api.py", true},
 		{"integration_tests dir", "integration_tests/flow_test.py", true},
 		{"e2e_tests dir", "e2e_tests/login.ts", true},
+		// P11: production-ambiguous segments must NOT force non-source. pandas/compat,
+		// numpy/compat, protobuf conformance libs, and Go `testing`-helper packages are
+		// real source — the directory name alone cannot classify them as test.
+		{"compat is production", "pandas/compat/pickle_compat.py", false},
+		{"numpy compat is production", "numpy/compat/py3k.py", false},
+		{"conformance is production", "proto/conformance/conformance.go", false},
+		{"testing helper is production", "internal/testing/harness.go", false},
 		// Underscore-wrapped variants
 		{"__tests__ dir", "src/__tests__/foo.js", true},
 		// Negative guards: whole-segment, never substring

@@ -342,6 +342,82 @@ _HOOK_TIMEOUT = int(os.environ.get("GT_HOOK_TIMEOUT", "30"))
 # proves per-stratum lift (the plan's default-off-flag discipline).
 _POST_SEARCH_ON = os.environ.get("GT_POST_SEARCH", "") not in ("", "0", "false", "no")
 
+# ---------------------------------------------------------------------------
+# R10 — PROOF-MODE FAIL-CLOSED SENTINEL (2026-07-04).
+# In proof/benchmark mode a run MUST fail-closed when GT is not genuinely active.
+# The PRIMARY load channel is a site-packages `.pth` line executed by site.py at
+# interpreter startup; site.py (`site.addpackage`) CATCHES any exception raised
+# while executing that line and CONTINUES the interpreter. So a fail-closed
+# `raise` at gt_mini_patch import time (e.g. the GT_ORACLE_ROUTE proof guard
+# below) is SILENTLY SWALLOWED -> the module never loads -> GT is OFF -> yet the
+# agent run proceeds and is graded as GT-on = paired-comparison contamination (a
+# GT-off trajectory scored as GT-on).
+#
+# FIX: do NOT depend on the swallowable raise. Use a POSITIVE on-disk sentinel,
+# written ONLY after this module fully initializes AND `_install()` completes
+# (the last statements in the file, past every import-time guard). If the load is
+# swallowed the write never runs -> the marker is ABSENT and the harness
+# (gt_agent selftest) fails the run. Generalized: an on-disk file is process- and
+# launch-channel-independent — any checker (host or container) can assert it,
+# regardless of how the interpreter was started.
+_PROOF_MARKER_PATH = os.environ.get("GT_PROOF_MARKER") or "/tmp/gt_proof_active"
+
+
+def _proof_marker_required() -> bool:
+    """The sentinel is required (and asserted by the harness) ONLY on a GT-ON
+    proof run: proof mode active AND not the baseline arm. The baseline arm
+    (GT_BASELINE=1) intentionally runs GT-off, so no marker is expected there."""
+    return os.environ.get("GT_PROOF_MODE") == "1" and not _GT_BASELINE
+
+
+def _clear_proof_marker(path: str | None = None) -> None:
+    """Remove a stale marker at startup so its presence reflects THIS
+    interpreter's load (a fresh container already has a clean /tmp; this is
+    belt-and-suspenders). No-op outside proof mode. Best-effort."""
+    if os.environ.get("GT_PROOF_MODE") != "1":
+        return
+    try:
+        os.remove(path or _PROOF_MARKER_PATH)
+    except OSError:
+        pass
+
+
+def _write_proof_marker(path: str | None = None) -> None:
+    """Write the fail-closed proof sentinel. No-op unless this is a GT-ON proof
+    run. Called as the LAST statement of the module so it is reached only when
+    every import-time guard passed and `_install()` ran.
+
+    P0-B (2026-07-05): attest hook ATTACHMENT, not merely module load. If
+    `_install()` patched ZERO env classes, GT is effectively OFF in this process,
+    so write NOTHING — combined with the in-process `_clear_proof_marker()` at
+    import, the marker is then ABSENT and every reader (`_SELFTEST_PY`, the R-C1
+    bootstrap, `_assert_proof_marker`) fails closed rather than grading a GT-off
+    trajectory as GT-on. The content records the patched set so a reader can
+    additionally assert `patched>=1`."""
+    if not _proof_marker_required():
+        return
+    if not _PATCHED_CLASSES:  # no hook attached → do NOT attest a GT-off process as GT-on
+        return
+    p = path or _PROOF_MARKER_PATH
+    try:
+        d = os.path.dirname(p)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        with open(p, "w", encoding="utf-8") as _fh:
+            _fh.write("gt_proof_active pid=%d patched=%d:%s\n" % (
+                os.getpid(), len(_PATCHED_CLASSES), ",".join(_PATCHED_CLASSES)))
+    except OSError:
+        pass
+
+
+# F2 (Fable 2026-07-05): the per-interpreter import-time `_clear_proof_marker()` call is REMOVED.
+# It ran in EVERY interpreter that imported this module via the .pth, so a SIGKILL'd scratch
+# `timeout python3` (import → clear → die before the module-end write) deleted the marker the
+# MAIN agent process had already written — false-failing a genuine GT-on run. P0-B's
+# write-only-when-attached guard sharpened it (a non-attaching scratch import clears but never
+# rewrites). Staleness defense now lives at the SINGLE host boundary: gt_agent clears the
+# container-local marker once before each agent run. The write below stays the last statement.
+
 # DCC (Dynamic Concern Consensus) — when the agent's OWN action stream shows it is
 # DROWNING, append ONE set of concern-completion FACTS in-band: files that agree with
 # its confirmed footprint across >=2 INDEPENDENT provenance families (git co-change /
@@ -591,7 +667,19 @@ def _subprocess_write_targets(root: str) -> list[str]:
         if _mtime_baseline.get(ap) != sig:
             changed.append(ap)
     _mtime_baseline = now
-    return changed
+    # DETERMINISM (Fable R7): `now` is built by os.walk (FS-order), so `changed` — and the
+    # consumer's changed[0] pick — was OS-order-dependent. Sort for a stable file pick.
+    return sorted(changed)
+
+
+# Fable R7: file-REVERTING git ops bump mtimes without being an agent edit — the mtime
+# catch-all must NOT fabricate a phantom post_edit from `git checkout`/`stash`/`reset`/
+# `restore`/`clean`/`revert` or a reverse `git apply`. A forward `git apply <patch>` IS a
+# real edit and is caught by the patch-application family (never reaches the mtime fallback).
+_GIT_REVERT_RE = re.compile(
+    r"\bgit\s+(?:checkout|stash|reset|restore|clean|revert)\b"
+    r"|\bgit\s+apply\s+(?:-R\b|--reverse\b)"
+)
 
 
 # Python/Node in-place file WRITE (the agent's DOMINANT JS edit shape: a python heredoc
@@ -3358,6 +3446,13 @@ def _evidence_body(kind: str, rel: str, root: str) -> str:
     # evidence at all (correct-or-quiet — its edges are not facts).
     if _is_delivery_excluded(rel, root):
         return ""
+    # R4 policy fix: a TEST/demo file is not a subject whose interface must be
+    # preserved — emitting "preserve this interface"/caller-contract evidence for
+    # test code (e.g. interval/tests.rs) is wrong-target noise. Gate on the single
+    # canonical path predicate (delivery.path_policy.is_test_or_demo), not an inline
+    # test-dir list. Correct-or-quiet: a test-file view/edit yields no <gt-evidence>.
+    if _is_test_or_demo_path(rel):
+        return ""
     db = _db_path()
     if not os.path.isfile(db):
         return ""
@@ -3426,7 +3521,11 @@ def _evidence(cmd: str) -> str:
     key = (kind, rel)
     if key in _seen:
         return ""
-    _seen.add(key)
+    # R6 fix: do NOT consume the fire-once latch before we know the evidence is
+    # non-empty. Previously `_seen.add(key)` ran here, so a transient EMPTY
+    # evidence (graph.db not yet ready / no facts this view) permanently silenced
+    # the file for the rest of the run — a later, non-empty evidence for the SAME
+    # file could never fire. Latch ONLY once something is actually delivered.
     ev = _evidence_body(kind, rel, root)
     if not ev:
         return ""
@@ -3434,6 +3533,7 @@ def _evidence(cmd: str) -> str:
     ev = _budget_trim(ev)
     if not ev:
         return ""
+    _seen.add(key)
     return f"\n<gt-evidence kind=\"{kind}\" file=\"{rel}\">\n{ev}\n</gt-evidence>"
 
 
@@ -3453,7 +3553,14 @@ def _graph_contract_block(rel: str) -> str:
     # 2026-06-10 fact-filter: no contract for a vendored/minified/generated file.
     if _is_delivery_excluded(rel, root):
         return ""
-    _contract_seen.add(rel)
+    # C3 (2026-07-04): READ the fire-once latch (the `rel in _contract_seen` guard
+    # above) but do NOT set it here. The old code latched at PRODUCTION, BEFORE the
+    # os.path.isfile(db)/empty-rows early-returns below — so a transient empty-graph
+    # frame (db momentarily absent) or a cross-lane dedup collision burned the latch
+    # with NO delivery, permanently silencing this file's contract (the re-arm loop
+    # only restores on a gate LOSS, never on a Lane-A empty/dedup skip). The latch is
+    # now consumed ONLY on a real DELIVERED outcome in _lane_a_deliver — the exact
+    # law the l3.cochange producer already follows (bug #5).
     try:
         db = _db_path()
         if not os.path.isfile(db):
@@ -3771,14 +3878,20 @@ def _covering_tests_for_symbols(symbol_names: set[str]) -> list[dict]:
                 return (-float(tconf or 0.0), -overlap, -conv, tname or "")
 
             test_rows = sorted(test_rows, key=_hrank)[:2]
+            # E5 (Fable 2026-07-05): the exact test NAME + run_cmd are computed for internal
+            # RANKING only (the _hrank above); they are STRIPPED here so NO test identifier ever
+            # leaves the query layer. Every consumer/renderer uses existence/count/confidence only
+            # (_render_verify_emission + render_obligation_status_block never emit a name — the
+            # former's own comment says covering is "not rendered"), so this is byte-identical on
+            # the agent-visible surface AND closes the leak vector at the source: a future renderer
+            # literally cannot emit a test name that is no longer in the payload (defense-in-depth).
             results = []
-            for tname, tfile, tconf in test_rows:
-                run_cmd = _test_run_command(tname, tfile or "")
+            for _tname, tfile, tconf in test_rows:
                 results.append({
-                    "name": tname,
+                    # a test-file PATH (not a NAME/assertion), kept only for the count/existence
+                    # signal the renderers consume; never rendered verbatim.
                     "file": tfile or "",
                     "confidence": float(tconf),
-                    "run_cmd": run_cmd,
                 })
             return results
         finally:
@@ -4289,12 +4402,19 @@ def _l5_failure_nudge(cmd: str, out_text: str) -> str:
 # Semantic-drift candidate (2026-06-23): wires the previously-DEAD
 # src/groundtruth/hooks/semantic_check (guard/return diff before/after an edit)
 # into the live DeepSWE turn loop. A source edit that silently DELETES a guard
-# clause (`if <cond>:` -> return/raise/throw) or a return path the file had on
-# its prior snapshot is the classic invisible regression. Self-contained (the
-# hooks package is not importable in-container); pure-text on the guard idiom,
-# language-uniform. Correct-or-quiet: first sight is baseline (never fires);
-# unreadable file is not drift; only a LOST guard/return steers.
-_SEM_GUARD_RE = re.compile(r"\bif\s+(.+?):", re.M)
+# clause (`if <cond>:` / `if (<cond>) {` -> return/raise/throw/panic) or a return
+# path the file had on its prior snapshot is the classic invisible regression.
+# Self-contained (the hooks package is not importable in-container); pure-text on
+# the guard idiom, language-uniform. Correct-or-quiet: first sight is baseline
+# (never fires); unreadable file is not drift; only a LOST guard/return steers.
+#
+# R9 generalization fix (2026-07-04): the old regex `\bif\s+(.+?):` matched ONLY
+# Python's colon-terminated conditional, so the guard was dead on Go/Rust/JS/TS/
+# Java/C (~70% of DeepSWE) — silently. The terminator is now `[:{]`, so a
+# brace-language `if (cond) {` / `if cond {` is captured structurally the same as
+# a Python `if cond:`. `.` does not cross newlines, so the non-greedy capture ends
+# at the first `:`/`{` on the line (never spanning statements).
+_SEM_GUARD_RE = re.compile(r"\bif\b\s*(.+?)\s*[:{]", re.M)
 _sem_cache: dict[str, tuple[frozenset, frozenset]] = {}
 
 
@@ -4302,8 +4422,13 @@ def _sem_extract(text: str) -> tuple[frozenset, frozenset]:
     guards: set[str] = set()
     for m in _SEM_GUARD_RE.finditer(text or ""):
         region = text[m.end():m.end() + 200]
-        if any(kw in region for kw in ("return", "raise", "throw")):
-            guards.add(m.group(1).strip()[:120])
+        # exit idioms across languages: return (all), raise (py), throw (js/ts/
+        # java), panic (go/rust). A guarded early-exit is what makes this an
+        # invariant worth watching for silent deletion.
+        if any(kw in region for kw in ("return", "raise", "throw", "panic")):
+            cond = m.group(1).strip()[:120]
+            if cond:
+                guards.add(cond)
     returns = {ln.strip()[:120] for ln in (text or "").splitlines()
                if ln.strip().startswith("return ") or ln.strip() == "return"}
     return frozenset(guards), frozenset(returns)
@@ -4385,6 +4510,15 @@ _oracle_test_evidence_seen = False
 _oracle_obligation_fired = False           # last-production marker (telemetry/tests)
 _oblig_status_emitted: set[str] = set()    # delivered status-vector hashes
 _oblig_status_last_hash: str | None = None  # released on a gate loss (deferred)
+# R3 (2026-07-04, FLOOD fix): the end-of-budget "final shot" must fire ONCE, not
+# every turn past 80%. The old re-arm discarded the vector hash each turn past the
+# threshold, and the status VECTOR itself rotates (~every 30 actions of behavior
+# state), so BOTH the re-arm and the normal dedup leaked -> the ~5.1KB checklist
+# re-fired every turn to maxiter. This one-shot latch caps the past-budget checklist
+# at a single emission; _OBLIG_MAX_LISTED caps how many obligations each emission
+# renders (passed to render_obligation_status_block, which already supports it).
+_oblig_final_shot_fired = False
+_OBLIG_MAX_LISTED = 6
 _oracle_edited_tokens: set[str] = set()
 _oracle_tested_tokens: set[str] = set()
 # per-file edit-evidence tokens (Stage-1 signal: test_coverage_ratio input).
@@ -4406,7 +4540,16 @@ _gt_oracle_tried = False
 
 
 def _reset_oracle_state() -> None:
-    """Clear ALL oracle/delivery state — call between retry attempts (D2 fix)."""
+    """Clear ALL oracle/delivery module-state to a fresh slate.
+
+    F3 (Fable 2026-07-05): this is a TEST-ISOLATION helper — 7+ suites call it between cases so a
+    fire-once latch from one case can't suppress the steer under test in the next — and it also
+    covers the in-process pier retry path. It is NOT called between PRODUCTION retry attempts:
+    each super().run() spawns a NEW mini-swe-agent process (gt_agent D2 note), so production state
+    is per-process-fresh and a host-side reset would touch a different module instance. The prior
+    "call between retry attempts" docstring was wrong on both counts. Because tests DEPEND on this
+    for isolation, it must clear EVERY producer/latch global — a missed one leaks stale "already
+    fired" state and silently reddens/greens the next case (a measurement-integrity bug)."""
     global _action_count, _oracle_nonedit_streak, _oracle_obligation_fired
     global _consensus_fired, _cochange_fired, _l5_fired, _oblig_resurface_fired
     global _obligation_tracker, _obligation_tracker_anchors
@@ -4415,6 +4558,11 @@ def _reset_oracle_state() -> None:
     global _last_delivered_kind, _last_gate_winner_kind
     global _horizon_advisory_fired
     global _oracle_test_count, _oracle_test_evidence_seen
+    # F3 (Fable 2026-07-05): previously-MISSED producer/latch globals. A test that fired any of
+    # these leaks "already fired" into the next case, suppressing the very steer under test.
+    global _source_edit_count, _oracle_review_fired, _oblig_final_shot_fired
+    global _l5_finish_fired, _l5_failure_fired, _l5_notest_fired, _marker_sent
+    global _horizon_urgent_fired, _horizon_pivot_fired, _horizon_gate_fire_count
     _action_count = 0
     _oracle_nonedit_streak = 0
     _oracle_obligation_fired = False
@@ -4466,6 +4614,18 @@ def _reset_oracle_state() -> None:
     _reset_pending_delivery()  # bug #6: clear the deferred-judgment list on retry
     _horizon_advisory_fired = False
     _oblig_resurface_fired = False  # 2026-06-23 re-surface latch resets per task
+    # F3 (Fable 2026-07-05): the previously-MISSED producer/latch globals (see the global decl
+    # above) — clearing them is why this reset is a correct test-isolation slate.
+    _source_edit_count = 0
+    _oracle_review_fired = False
+    _oblig_final_shot_fired = False
+    _l5_finish_fired = False
+    _l5_failure_fired = False
+    _l5_notest_fired = False
+    _marker_sent = False
+    _horizon_urgent_fired = False
+    _horizon_pivot_fired = False
+    _horizon_gate_fire_count = 0
     try:
         _sem_cache.clear()  # 2026-06-23 semantic-drift snapshot resets per task
     except Exception:
@@ -4536,7 +4696,11 @@ def _obligation_resurface_candidate() -> tuple[float, str] | None:
     (obligations already extracted), correct-or-quiet (no obligations -> None),
     fires ONCE. NOT coverage-gated: passing local tests does not prove an obligation
     met, so this fires regardless of edited/tested status."""
-    global _oblig_resurface_fired
+    # C6 (2026-07-04): READ the fire-once latch (guard below) but never SET it here.
+    # The old code latched at PRODUCTION (before _lane_a_deliver); a cross-lane dedup
+    # skip then burned the latch with NO delivery and it was NOT in the re-arm set,
+    # permanently silencing a later DISTINCT resurface. The latch is consumed ONLY on
+    # a real DELIVERED outcome in _lane_a_deliver (same law as l3.cochange, bug #5).
     if _oblig_resurface_fired or _GT_BASELINE:
         return None
     lines: list[str] = []
@@ -4576,7 +4740,8 @@ def _obligation_resurface_candidate() -> tuple[float, str] | None:
                 break
     if not lines:
         return None
-    _oblig_resurface_fired = True
+    # NOTE: latch intentionally NOT set here (see C6 note above) — it is consumed on
+    # the DELIVERED outcome inside _lane_a_deliver.
     return (_SEV_OBLIGATION,
             "\n<gt-nudge reason=\"obligation_resurface\">\nGT: before you submit, the "
             "issue requires the following -- re-read it against your patch and confirm "
@@ -4604,7 +4769,7 @@ def _obligation_nudge_block() -> tuple[float, str] | None:
     edited-untested / vector already delivered -> None.
 
     Returns (severity, payload) or None."""
-    global _oracle_obligation_fired, _oblig_status_last_hash
+    global _oracle_obligation_fired, _oblig_status_last_hash, _oblig_final_shot_fired
     om = _load_gt_oracle()
     if om is None:
         return None
@@ -4628,18 +4793,25 @@ def _obligation_nudge_block() -> tuple[float, str] | None:
         if not any(s == om.OBL_EDITED_UNTESTED for _v, s, _t, _c in unmet):
             return None
         h = om.status_vector_hash(statuses)
-        # Near budget end (>80% steps spent), clear the dedup so the obligation
-        # gets one final shot even if the status vector hasn't changed — the
-        # agent may never have tested, so the hash is the same as the early fire.
+        # Near budget end (>80% steps spent), give the obligation ONE final shot
+        # even if the status vector hasn't changed (the agent may never have
+        # tested, so the hash is the same as the early fire). R3 FLOOD fix: this
+        # end-of-budget shot fires exactly ONCE per run. Without the one-shot latch
+        # the discard re-armed every turn past 80% AND the rotating status vector
+        # produced fresh hashes -> the ~5.1KB checklist re-fired every turn.
         budget_b_now = (_action_count / _GT_STEP_LIMIT) if _GT_STEP_LIMIT else 0.0
-        if budget_b_now > 0.80 and h in _oblig_status_emitted:
-            _oblig_status_emitted.discard(h)
+        _final_shot = budget_b_now > 0.80
+        if _final_shot:
+            if _oblig_final_shot_fired:
+                return None  # one-shot: the end-of-budget checklist already fired
+            _oblig_status_emitted.discard(h)  # re-arm this single vector for the shot
         if h in _oblig_status_emitted:
             return None
         # ── COVERING-TEST per untested obligation (Stage B query, FACT-tier
-        # CALLS edges only). Render all unmet rows; attach commands only when
-        # the real graph query returns a covering test and _test_run_command
-        # formats it. No fabricated fallback command text.
+        # CALLS edges only). Render all unmet rows; attach the EXISTENCE of a
+        # graph-linked covering test when the query returns one. E5 (2026-07-05):
+        # the payload carries NO test name/run_cmd, so the renderer emits a
+        # generic "run your targeted tests" line, never a test identifier.
         covering: dict[int, dict] = {}
         for v, s, touched, _conf in unmet:
             if s != om.OBL_EDITED_UNTESTED:
@@ -4650,7 +4822,10 @@ def _obligation_nudge_block() -> tuple[float, str] | None:
                     covering[v.idx] = hits[0]
             except Exception:  # noqa: BLE001 -- enrichment is best-effort
                 pass
-        payload = om.render_obligation_status_block(statuses, covering)
+        # R3 FLOOD fix: cap the number of obligations rendered per emission
+        # (render_obligation_status_block truncates + appends a "(+N more)" line).
+        payload = om.render_obligation_status_block(
+            statuses, covering, max_listed=_OBLIG_MAX_LISTED)
         if not payload:
             return None
         # production-time latch: delivered-vector set; a gate LOSS releases it
@@ -4658,6 +4833,10 @@ def _obligation_nudge_block() -> tuple[float, str] | None:
         _oblig_status_emitted.add(h)
         _oblig_status_last_hash = h
         _oracle_obligation_fired = True
+        # R3: burn the one-shot end-of-budget latch on the actual fire so the
+        # past-80% checklist can never re-arm/re-fire on a later turn.
+        if _final_shot:
+            _oblig_final_shot_fired = True
         budget_b_sev = (_action_count / _GT_STEP_LIMIT) if _GT_STEP_LIMIT else 0.0
         unmet_ratio = len(unmet) / max(len(statuses), 1)
         sev = om.composite_severity(_SEV_OBLIGATION, budget_b_sev, unmet_ratio)
@@ -5812,13 +5991,23 @@ def _consensus_collect(rel: str) -> None:
     global _consensus_fired
     if _consensus_fired:
         return
-    _consensus_fired = True
+    # C3 (2026-07-04): consume the first-view latch ONLY on a PRODUCTIVE collect
+    # (>=1 graph-connected neighbour recorded), never at the top before querying.
+    # The old code set _consensus_fired BEFORE _query_scope, so a transient empty
+    # graph frame at first view froze the scope to {rel} for the whole task and
+    # silenced consensus permanently (there is no re-arm path for the collect
+    # latch). Mirrors the cochange law — burn the one-shot only on a real outcome;
+    # an isolated file (no neighbours) likewise leaves the latch armed to re-collect.
     try:
-        _consensus_scope.add(_norm_rel(rel))
-        for s in _query_scope(rel):
-            _consensus_scope.add(_norm_rel(s))
+        neighbours = [s for s in _query_scope(rel) if _norm_rel(s) != _norm_rel(rel)]
     except Exception:  # noqa: BLE001
-        pass
+        return
+    if not neighbours:
+        return
+    _consensus_scope.add(_norm_rel(rel))
+    for s in neighbours:
+        _consensus_scope.add(_norm_rel(s))
+    _consensus_fired = True
 
 
 def _consensus_scope_block(rel: str) -> str:
@@ -6489,13 +6678,22 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
             out["output"] = (out.get("output") or "") + text
             _oracle_delivered_hashes.add(h)
             _oracle_delivered_hashes.add(hc)
-            # bug #5: consume the l3.cochange fire-once latch ONLY on a real
-            # DELIVERED outcome (here), never at production — so a dedup collision
-            # (the `continue` above) leaves the latch armed and the signal can
-            # still deliver on a later, distinct co-change block.
+            # bug #5 / C3 / C6: consume the producer fire-once latches ONLY on a
+            # real DELIVERED outcome (here), never at production — so a transient
+            # empty-graph frame or a cross-lane dedup collision (the `continue`
+            # above) leaves the latch armed and the signal can still deliver on a
+            # later, distinct block for the same key. l3.cochange was already fixed
+            # (bug #5); l3.contract (C3) and obligation.resurface (C6) join it here.
             if kind == "l3.cochange":
                 global _cochange_fired
                 _cochange_fired = True
+            elif kind == "l3.contract" and krel:
+                # latch under the SAME key _graph_contract_block's guard checks
+                # (rel == _krel == this krel on the post_edit path).
+                _contract_seen.add(krel)
+            elif kind == "obligation.resurface":
+                global _oblig_resurface_fired
+                _oblig_resurface_fired = True
             _ledger_note_delivery(kind, cmd)
             _runtime_ledger_record(
                 kind=kind,
@@ -6574,14 +6772,22 @@ def _augment_output(action, out) -> None:
             # path. Only on a fast-path miss -> no double-fire. Correct-or-quiet:
             # a non-write command changes nothing -> empty -> no fallback edit.
             if _kkind != "post_edit":
+                # R7 (Fable): still CALL the diff (re-seeds the mtime baseline so the next
+                # command diffs against post-git state — no stale-baseline refire), but a
+                # file-reverting git op must NOT fabricate a phantom post_edit from the
+                # mtime bump it causes. Suppress the fabrication for those commands only.
+                _git_revert = bool(_GIT_REVERT_RE.search(cmd or ""))
                 try:
                     _chg = _subprocess_write_targets(_root())
                 except Exception:  # noqa: BLE001 — fallback isolated
                     _chg = []
-                if _chg:
+                if _chg and not _git_revert:
                     _kkind, _kf = "post_edit", _chg[0]
                     print("[GT_META] subprocess_write_fallback n=%d f=%s"
                           % (len(_chg), _kf), file=sys.stderr, flush=True)
+                elif _chg and _git_revert:
+                    print("[GT_META] subprocess_write_fallback SUPPRESSED (git revert) n=%d"
+                          % len(_chg), file=sys.stderr, flush=True)
             else:
                 # fast path already credited this edit; keep the baseline in
                 # lock-step so the NEXT command diffs against post-edit state
@@ -6939,12 +7145,19 @@ def _augment_output(action, out) -> None:
                                   file=sys.stderr, flush=True)
                             _obr = None
                         if _obr is not None:
-                            # DIRECT delivery (bypass the steer gate): the once-per-task
-                            # requirement reminder is always-needed context (a Lane A
-                            # fact), NOT a competing steer. The gate's <=1-steer/turn
-                            # rule suppressed it live (cattrs10: latch fired=True, 0
-                            # delivered). The latch guarantees one delivery.
-                            out["output"] = (out.get("output") or "") + _obr[1]
+                            # Deliver via the LANE-A path (a once-per-task requirement
+                            # reminder is a Lane-A fact, NOT a competing steer — it does
+                            # not go through the <=1-steer/turn gate that suppressed it
+                            # live on cattrs10). R5 accounting fix: route through
+                            # _lane_a_deliver so the resurface is subject to the SAME
+                            # fire-counter + content-dedup + runtime ledger as every other
+                            # delivery, instead of an unaccounted direct append. Lane A has
+                            # no steer budget, so the guaranteed once-per-task delivery is
+                            # preserved while the ledger/dedup now see it.
+                            _lane_a_deliver(
+                                out, cmd, [("obligation.resurface", _obr[1])],
+                                krel=(_krel or _kf or ""),
+                                event=_current_event(_kkind, cmd or ""))
                 # VERIFICATION HORIZON (Stage C H2): budget-aware self-verify candidate
                 try:
                     _vh = _verification_horizon_candidate()
@@ -7057,6 +7270,11 @@ def _augment_output(action, out) -> None:
                 _gc = _graph_contract_block(_krel)  # cross-language [SIGNATURE]/[CALLERS]
                 if _gc:
                     out["output"] = (out.get("output") or "") + _gc
+                    # C3: on the legacy route (no _lane_a_deliver) latch on the
+                    # DELIVERED contract so it stays once-per-file — the production
+                    # latch that used to live in _graph_contract_block now fires on
+                    # delivery only (mirrors cochange's DELIVERED-only latch).
+                    _contract_seen.add(_krel)
                 _cc = _cochange_block(_krel)  # COMPLETENESS / co-change
                 if _cc:
                     out["output"] = (out.get("output") or "") + _cc
@@ -7117,6 +7335,13 @@ _ENV_CLASSES = [
 ]
 
 
+# P0-B (2026-07-05): the classes _install() actually patched THIS process. The proof
+# marker attests HOOK ATTACHMENT, not module load — so it is written iff this list is
+# non-empty. Populated only on the success (or already-patched) path, never in the
+# swallow-all except, so a run where no env class was patchable records patched=0.
+_PATCHED_CLASSES: list[str] = []
+
+
 def _install() -> None:
     if _GT_BASELINE:
         return
@@ -7128,12 +7353,20 @@ def _install() -> None:
         except Exception:  # noqa: BLE001 -- env class not in this install
             continue
         if getattr(cls, "_gt_patched", False):
+            _PATCHED_CLASSES.append(f"{modname}.{clsname}")  # attached (this or a prior import)
             continue
         try:
             cls.execute = _wrap_execute(cls.execute)
             cls._gt_patched = True
+            _PATCHED_CLASSES.append(f"{modname}.{clsname}")
         except Exception:  # noqa: BLE001
             pass
 
 
 _install()
+# R10: fail-closed proof sentinel — the LAST statement, reached only after the
+# module fully loaded and installed (past every import-time guard incl. the
+# GT_ORACLE_ROUTE proof check). If a `.pth` site-load swallowed an earlier raise,
+# this never runs, the marker stays ABSENT, and the harness fails the run instead
+# of silently grading a GT-off trajectory as GT-on.
+_write_proof_marker()

@@ -180,8 +180,46 @@ func TestResolve_FieldCandidates_SetCompleteness(t *testing.T) {
 			if first.Confidence >= 0.9 {
 				t.Errorf("ON: field_based must be strictly below CERTIFIED (0.9); got conf=%v", first.Confidence)
 			}
+			// Fable RS1 gradient, low end: K==2 stays at the 0.5 CANDIDATE floor.
+			if first.Confidence != 0.5 {
+				t.Errorf("ON: K==2 field_based must be conf 0.5 (ambiguity-gradient floor); got %v", first.Confidence)
+			}
 			if first.EvidenceType != "field_based" {
 				t.Errorf("ON: K>=2 evidence must be field_based; got %q", first.EvidenceType)
+			}
+		})
+	}
+}
+
+// Fable RS1 (ambiguity gradient, RED→GREEN): field_based minted a FLAT 0.5 for ANY K, so a
+// K=3 fan-out entered the closure/fact floor (0.5) identically to a K=2 one. With the
+// gradient K≤5→0.4 (below the 0.5 traversal floor), the wide-but-not-huge guess is still
+// STORED for the LSP residual but no longer poses as reachable fact. Importing {a,b,c} makes
+// all three exported defs {2,3,4} reachable → K=3 → conf 0.4. RED before the gradient
+// (flat 0.5); GREEN after.
+func TestResolve_FieldCandidates_AmbiguityGradient_K3IsBelowFloor(t *testing.T) {
+	for _, lang := range []string{"javascript", "python"} {
+		t.Run(lang, func(t *testing.T) {
+			clearNonMetaGlobals()
+			calls, nodeIDs, fileNodeIDs, callerIDs, imports, fm, meta := fieldCandFixture(lang, []string{"a", "b", "c"})
+			os.Setenv("GT_FIELD_CANDIDATES", "1")
+			defer os.Unsetenv("GT_FIELD_CANDIDATES")
+			on := Resolve(calls, nodeIDs, fileNodeIDs, callerIDs, imports, fm, meta)
+			tg, first := fieldBasedTargets(on)
+			if len(tg) != 3 {
+				t.Fatalf("K==3: reachable ∩ exported must be {2,3,4}; got %v", tg)
+			}
+			if first.CandidateCount != 3 {
+				t.Errorf("K==3: candidate_count must be 3; got %d", first.CandidateCount)
+			}
+			if first.Confidence != 0.4 {
+				t.Errorf("K==3 (3<=K<=5): ambiguity gradient must decay to conf 0.4 (below the 0.5 "+
+					"fact/traversal floor), not the old flat 0.5; got %v", first.Confidence)
+			}
+			// conf 0.4 < 0.5 → SPECULATIVE: the edge is STORED (LSP residual can resolve it)
+			// but below the fact/closure floor, so it can no longer pose as reachable fact.
+			if first.TrustTier != "SPECULATIVE" {
+				t.Errorf("K==3 at conf 0.4 must be SPECULATIVE (below the 0.5 fact floor); got %q", first.TrustTier)
 			}
 		})
 	}

@@ -136,8 +136,16 @@ def classify_stratum(
     has_tb, n_frames = _has_traceback(issue_text, repo_root)
     verb_hit = _feature_verb_hit(issue_text)
 
-    # D is STRUCTURAL: unresolved code tokens dominate the resolving ones.
-    d_dominant = graph_resolved and n_unres > 0 and (n_sym == 0 or n_unres >= n_sym)
+    # D is STRUCTURAL: unresolved code tokens dominate the resolving ones. G5:
+    # when RESOLVED anchors exist (n_sym>0) the issue's gold is very likely an
+    # EXISTING graph-contained file, so D requires POSITIVE new-file evidence (a
+    # feature-add verb in the title) on top of unresolved dominance — otherwise a
+    # few prose/error tokens that slipped past the anchor filter would mislabel an
+    # existing-file bug as new-file. With no resolved anchors, unresolved dominance
+    # alone still routes to D (the pure greenfield case).
+    d_dominant = graph_resolved and n_unres > 0 and (
+        n_sym == 0 or (n_unres >= n_sym and verb_hit)
+    )
     a_anchored = graph_resolved and n_sym > 0
 
     if has_tb:

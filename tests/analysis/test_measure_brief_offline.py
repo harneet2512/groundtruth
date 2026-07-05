@@ -45,6 +45,49 @@ def test_parse_medium_numbered_list() -> None:
     assert mb._parse_localization_block(brief) == ["repl/repl.go", "main.go"]
 
 
+# ---- G12: leak scan over the ENTIRE brief, not just the candidate list --------
+def test_g12_test_basename_outside_candidates_is_a_leak() -> None:
+    """A verifier test basename in the evidence/graph-map section (OUTSIDE the
+    numbered candidate list) is a leak. The old set(delivered)&set(test_files)
+    check saw only the parsed candidates and MISSED it."""
+    test_files = ["tests/unit/test_widget.py"]
+    brief = (
+        '<gt-localization confidence="medium">\n'
+        "  1. src/widget.py — render\n"
+        "</gt-localization>\n"
+        "<gt-evidence>\n"
+        "[INFO] related: tests/unit/test_widget.py exercises render()\n"
+        "</gt-evidence>\n"
+    )
+    # the old exact-candidate check would MISS it (no test path among candidates)
+    delivered = mb._parse_localization_block(brief)
+    assert not (set(delivered) & set(test_files))
+    # the G12 full-text scan CATCHES it
+    leaks = mb._brief_leaks(brief, test_files)
+    assert "tests/unit/test_widget.py" in leaks
+
+
+def test_g12_test_function_name_anywhere_is_a_leak() -> None:
+    brief = (
+        '<gt-localization confidence="high">\n'
+        "Edit target: src/auth.py :: login\n"
+        "</gt-localization>\n"
+        "reproduce with test_login_rejects_expired_token\n"
+    )
+    leaks = mb._brief_leaks(brief, [])
+    assert "test_login_rejects_expired_token" in leaks
+
+
+def test_g12_clean_brief_has_no_leak() -> None:
+    brief = (
+        '<gt-localization confidence="medium">\n'
+        "  1. src/widget.py — render\n"
+        "  2. src/model.py — build\n"
+        "</gt-localization>\n"
+    )
+    assert mb._brief_leaks(brief, ["tests/unit/test_widget.py"]) == []
+
+
 def test_parse_low_region_list() -> None:
     brief = (
         '<gt-localization confidence="low">\n'

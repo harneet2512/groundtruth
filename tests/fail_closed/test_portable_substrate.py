@@ -278,7 +278,7 @@ def test_per_language_certs_persisted_no_overwrite():
     # (no FAIL cert overwritten) and the dominant cert is copied to the canonical path.
     src = _read(os.path.join(ROOT, "scripts", "swebench", "gt_run_proof.py"))
     assert 'lsp_certificate_{lg}.json' in src
-    assert "shutil.copyfile(_dom_cert, cert_lsp)" in src
+    assert "shutil.copyfile(_canon_src, cert_lsp)" in src
 
 
 def test_print_contract(capsys):
@@ -355,6 +355,48 @@ def test_proof_sweep_workflow_does_not_reencode_per_language_lsp_budget_policy()
     assert 'GT_LSP_READY_BUDGET_S="$LSP_BUDGET"' not in t
     assert 'case "$TASK_LANG"' not in t
     assert "LSP readiness budget owner: gt-run-proof" in t
+
+
+def test_proof_lsp_ready_budget_matches_resolve_single_source_of_truth():
+    """LSP4 (Fable) RED→GREEN: the proof runtime's per-language readiness budget MUST equal what
+    ``groundtruth.resolve`` would independently pick from its per-server table — ONE table, not
+    two contradictory ones. The old hardcoded go=30 / rust=45 / else=20 was EXPORTED as
+    ``GT_LSP_READY_BUDGET_S``, which OVERRIDES resolve's rust-analyzer=180 / jdtls=180 / gopls=60
+    / typescript-language-server=150 → rust/java/ts were under-provisioned to 45/20/20s and
+    converted 0 edges (the exact failure resolve's table was tuned to prevent).
+
+    Mutation: reverting lsp_ready_budget_seconds to a divergent hardcoded table (e.g. rust→45)
+    makes rust proof=45 ≠ resolve=180 → RED.
+    """
+    import importlib.util
+
+    from groundtruth.resolve import (
+        _KNOWN_SERVERS,
+        _READY_BUDGET_S_BY_SERVER,
+        _READY_BUDGET_S_DEFAULT,
+    )
+
+    spec = importlib.util.spec_from_file_location(
+        "gt_run_proof_lsp4", os.path.join(ROOT, "scripts", "swebench", "gt_run_proof.py")
+    )
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+
+    for lang in ("go", "rust", "java", "typescript", "javascript", "python"):
+        proof = m.lsp_ready_budget_seconds(lang, {})
+        server_bin = os.path.basename(_KNOWN_SERVERS.get(lang, "") or "")
+        resolve_would = int(
+            round(float(_READY_BUDGET_S_BY_SERVER.get(server_bin, _READY_BUDGET_S_DEFAULT)))
+        )
+        assert proof == resolve_would, (
+            f"{lang}: proof budget {proof}s contradicts resolve.py {resolve_would}s "
+            f"(server={server_bin!r}) — two tables, not one"
+        )
+    # the slow indexers must get the long budget resolve.py tuned (value regression guard)
+    assert m.lsp_ready_budget_seconds("rust", {}) == 180
+    assert m.lsp_ready_budget_seconds("java", {}) == 180
+    # override precedence preserved
+    assert m.lsp_ready_budget_seconds("rust", {"GT_LSP_READY_BUDGET_S_OVERRIDE": "7"}) == 7
 
 
 # ── OH wrapper consumes the artifacts (does not rebuild a divergent graph) ────

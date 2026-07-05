@@ -708,13 +708,55 @@ def compute_lsp_max_edges(graph_db: str, *, scoped: bool, env=None) -> int:
     return min(LSP_MAX_EDGES_CEILING, max(floor, dynamic))
 
 
-def lsp_ready_budget_seconds(language: str, env=None) -> int:
-    """Default per-language LSP readiness budget owned by the proof runtime.
+def _canonical_cert_source(out_dir: str, declared_lang, dominant_lang) -> tuple[str, str]:
+    """(source_cert_path, chosen_lang) for the canonical LSP cert copy (G4).
 
-    This is substrate policy, not workflow policy. The workflow may pass only an
-    optional global override via ``GT_LSP_READY_BUDGET_S_OVERRIDE``. The per-run
-    env ``GT_LSP_READY_BUDGET_S`` remains the concrete value consumed by
-    ``groundtruth.resolve``.
+    Prefer the DECLARED task language's per-language cert when it exists on disk;
+    fall back to the graph-DOMINANT language only when the declared language has no
+    cert. The old code always copied ``langs[0]`` (graph-dominant), so on a python
+    task whose graph is vendored-JS-dominant the canonical cert became the JS no-op
+    — masking a real python LSP failure or under-reporting real python work. Pure +
+    deterministic for the tests."""
+    declared = (str(declared_lang or "")).strip().lower()
+    dom = (str(dominant_lang or "")).strip().lower()
+    if declared:
+        dc = os.path.join(out_dir, f"lsp_certificate_{declared}.json")
+        if os.path.exists(dc):
+            return dc, declared
+    return os.path.join(out_dir, f"lsp_certificate_{dom}.json"), dom
+
+
+def _count_lsp_stamped_edges(graph_db: str) -> int:
+    """COUNT of edges the resolver stamped as LSP-resolved. For the G4 inverse
+    stamp check only (graph has lsp edges but the canonical cert reports no-op)."""
+    try:
+        import sqlite3
+        c = sqlite3.connect(f"file:{graph_db}?mode=ro", uri=True)
+        n = c.execute(
+            "SELECT count(*) FROM edges WHERE resolution_method IN ('lsp','lsp_verified')"
+        ).fetchone()[0]
+        c.close()
+        return int(n or 0)
+    except Exception:
+        return 0
+
+
+def lsp_ready_budget_seconds(language: str, env=None) -> int:
+    """Per-language LSP readiness budget — SOURCED FROM resolve._READY_BUDGET_S_BY_SERVER
+    (the single source of truth), NOT a second, contradictory table.
+
+    LSP4 (Fable): this used to hardcode go=30 / rust=45 / else=20 and then EXPORT it as
+    ``GT_LSP_READY_BUDGET_S``, which OVERRIDES resolve.py's per-server budgets (rust-analyzer=180,
+    jdtls=180, gopls=60, typescript-language-server=150). rust/java/ts were thereby
+    under-provisioned to 45/20/20s — the servers never finished indexing → 0 edges converted,
+    the exact 0-conversion failure resolve.py's per-server table was tuned (with live witnesses:
+    boa-*, drizzle-orm) to PREVENT. There must be ONE table: map language → server binary
+    (resolve._KNOWN_SERVERS) → resolve._READY_BUDGET_S_BY_SERVER. Raising a budget never slows a
+    warm server (the readiness barrier early-exits on the first real answer); it only lets a slow
+    indexer finish.
+
+    Precedence unchanged: ``GT_LSP_READY_BUDGET_S_OVERRIDE`` still wins if set. The per-run env
+    ``GT_LSP_READY_BUDGET_S`` remains the concrete value consumed by ``groundtruth.resolve``.
     """
     env = os.environ if env is None else env
     override = str(env.get("GT_LSP_READY_BUDGET_S_OVERRIDE", "") or "").strip()
@@ -726,11 +768,29 @@ def lsp_ready_budget_seconds(language: str, env=None) -> int:
         except ValueError:
             pass
     lang = (language or "").strip().lower()
-    if lang == "go":
-        return 30
-    if lang == "rust":
-        return 45
-    return 20
+    # Single source of truth: resolve.py owns the per-server readiness budgets. Map the language
+    # to its server binary, then read that table — so the value we export as
+    # GT_LSP_READY_BUDGET_S is EXACTLY what resolve.py would pick on its own, never a shorter
+    # contradiction.
+    try:
+        from groundtruth.resolve import (
+            _KNOWN_SERVERS,
+            _READY_BUDGET_S_BY_SERVER,
+            _READY_BUDGET_S_DEFAULT,
+        )
+
+        server_bin = os.path.basename(_KNOWN_SERVERS.get(lang, "") or "")
+        budget = _READY_BUDGET_S_BY_SERVER.get(server_bin, _READY_BUDGET_S_DEFAULT)
+        return int(round(float(budget)))
+    except Exception:
+        # resolve.py not importable (proof running without the package on PYTHONPATH): fall back
+        # to a floor that still EXCEEDS the old under-provisioned values for the slow indexers, so
+        # a fallback can never RE-introduce the 0-conversion bug it is meant to fix.
+        return {
+            "rust": 180, "java": 180, "kotlin": 180,
+            "typescript": 150, "javascript": 150, "ts": 150, "js": 150, "tsx": 150, "jsx": 150,
+            "go": 60,
+        }.get(lang, 20)
 
 
 def _derive_primary_langs(langs, dom_lang, declared_lang):
@@ -1347,14 +1407,36 @@ def main(argv=None) -> int:
         lang_verdicts[lg] = verdict or "LSP_RESOLVE_ERROR(no_verdict)"
         if rr.returncode == 0:
             lsp_ok = True
-    # Canonical cert = the DOMINANT language's (langs[0], node-count desc); per-language
-    # certs persist alongside so a FAIL verdict is never lost to an overwrite.
-    _dom_cert = os.path.join(a.out, f"lsp_certificate_{langs[0]}.json")
-    if os.path.exists(_dom_cert):
+    # Canonical cert (G4) = the DECLARED task language's cert when present, else the
+    # graph-DOMINANT language's (langs[0], node-count desc). Per-language certs persist
+    # alongside so a FAIL verdict is never lost to an overwrite. proof_language is the
+    # dep_store_manifest 'language' (declared, ground truth); the graph-dominant fallback
+    # covers --lang-absent / cert-missing.
+    _canon_src, _canon_lang = _canonical_cert_source(
+        a.out, (proof_language or "").strip().lower(), langs[0])
+    if os.path.exists(_canon_src):
         try:
-            shutil.copyfile(_dom_cert, cert_lsp)
+            shutil.copyfile(_canon_src, cert_lsp)
+            print(f"[gt-run-proof] canonical LSP cert <- {_canon_lang} "
+                  f"(declared={(proof_language or 'n/a')}, dominant={langs[0]})", flush=True)
         except OSError as _ce:
-            print(f"WARN: could not copy dominant LSP cert to canonical path: {_ce}", file=sys.stderr)
+            print(f"WARN: could not copy {_canon_lang} LSP cert to canonical path: {_ce}", file=sys.stderr)
+    # G4 inverse stamp check: the GRAPH carries lsp-stamped edges but the canonical cert
+    # reports zero effective LSP work -> the cert under-reports real work (wrong-language
+    # or stale cert masking the task language). Diagnostic flag, generalized (no task keys).
+    _lsp_stamped = _count_lsp_stamped_edges(graph)
+    if _lsp_stamped > 0 and os.path.exists(cert_lsp):
+        try:
+            _cc = json.load(open(cert_lsp, encoding="utf-8"))
+            _work = (int(_cc.get("verified_edges", 0) or 0)
+                     + int(_cc.get("corrected_edges", 0) or 0)
+                     + int(_cc.get("deleted_edges", 0) or 0))
+            if _work == 0:
+                print(f"[gt-run-proof] WARN LSP STAMP MISMATCH: graph has {_lsp_stamped} "
+                      f"lsp-stamped edge(s) but canonical cert (lang={_cc.get('language')!r}) "
+                      f"reports 0 effective work — possible wrong-language/stale cert", flush=True)
+        except (OSError, ValueError):
+            pass
     print(f"[gt-run-proof] per-language LSP verdicts: {lang_verdicts}", flush=True)
     # P1-e fail-closed aggregation: ANY known language INSTALL_MISSING / FAIL_NO_WARM /
     # resolve-error fails the proof under GT_REQUIRE_LSP=1 — a sibling language's success

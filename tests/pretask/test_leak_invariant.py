@@ -272,6 +272,80 @@ def test_b2_flag_on_off_byte_identical(tmp_path):
     _assert_leak_free(on, spec)
 
 
+def _fts5_available() -> bool:
+    try:
+        c = sqlite3.connect(":memory:")
+        c.execute("CREATE VIRTUAL TABLE t USING fts5(x)")
+        c.close()
+        return True
+    except sqlite3.OperationalError:
+        return False
+
+
+@pytest.mark.skipif(not _fts5_available(), reason="Python sqlite3 built without FTS5")
+def test_fts5_name_leg_excludes_test_rows_from_stale_index(tmp_path):
+    """Vector 1b (Fable S1/L2, reproduced live): a graph.db whose Go-built EXTERNAL-content
+    nodes_fts was populated BEFORE the is_test-at-INSERT fix (store/sqlite.go) still carries
+    test rows. The Python name leg (``_fts5_candidates``, direct-graph.db path) MUST exclude
+    them via the defense-in-depth is_test JOIN, so a test symbol (Go ``TestX``, Mocha
+    ``it: …``) can never become an FTS5 seed / BFS root / ``fts5 match: …`` render.
+    RED before the join (the test node is returned); GREEN after."""
+    db = str(tmp_path / "g.db")
+    con = sqlite3.connect(db)
+    con.executescript(
+        """CREATE TABLE nodes(id INTEGER PRIMARY KEY, label TEXT, name TEXT,
+             qualified_name TEXT, file_path TEXT, start_line INTEGER, end_line INTEGER,
+             signature TEXT, return_type TEXT, is_exported INTEGER, is_test INTEGER,
+             language TEXT, parent_id INTEGER);
+           CREATE VIRTUAL TABLE nodes_fts USING fts5(
+             name, qualified_name, signature, file_path,
+             content='nodes', content_rowid='id');"""
+    )
+    # id=1 production, id=2 TEST — both carry the standalone token 'redis'.
+    con.execute("INSERT INTO nodes(id,label,name,qualified_name,file_path,signature,is_test,language)"
+                " VALUES(1,'Function','handle_redis','','svc/net.py','handle_redis()',0,'python')")
+    con.execute("INSERT INTO nodes(id,label,name,qualified_name,file_path,signature,is_test,language)"
+                " VALUES(2,'Function','test_redis','','tests/test_net.py','test_redis()',1,'python')")
+    # Populate nodes_fts the OLD (pre-fix) way: ALL rows, NO is_test filter = the stale index
+    # a graph.db baked before the store/sqlite.go fix would carry.
+    con.execute("INSERT INTO nodes_fts(rowid,name,qualified_name,signature,file_path)"
+                " SELECT id,name,COALESCE(qualified_name,''),COALESCE(signature,''),file_path FROM nodes")
+    con.commit()
+    try:
+        got = GL._fts5_candidates(con, {"redis"})
+    finally:
+        con.close()
+    ids = [r[0] for r in got]
+    assert 2 not in ids, f"LEAK: test node surfaced from a stale nodes_fts index: {got}"
+    assert 1 in ids, f"regression: production node must still be retrieved: {got}"
+
+
+def test_render_witness_drops_test_block_anchor(tmp_path):
+    """Fable L8 (defense-in-depth): the hop-2 render prints ``w.anchor`` verbatim
+    (``{anchor} -> ... -> {far}``), but the old edge-witness filter guarded only
+    src/dst_symbol — NEVER the anchor. A witness whose ANCHOR is a test-block name
+    (Mocha ``it: …``) but whose endpoints are product symbols would leak the test
+    description. The guard now drops any witness whose anchor OR endpoint is a
+    test-block name. RED before the anchor check; GREEN after."""
+    from types import SimpleNamespace
+
+    from groundtruth.pretask.graph_localizer import Candidate, Witness
+
+    # hop-2 witness: ANCHOR is a Mocha test description, endpoints are product symbols.
+    w_bad = Witness(file_path="svc/net.py", anchor="it: should reject bad input",
+                    edge_type="CALLS", direction="calls_anchor", verified=True,
+                    confidence=1.0, hop=2, src_symbol="handler", dst_symbol="validate")
+    out = Candidate.render_witness(SimpleNamespace(witnesses=[w_bad]))
+    assert "it:" not in out and out == "", f"L8 LEAK: test anchor rendered: {out!r}"
+
+    # control: a product-symbol anchor still renders its structural fact.
+    w_ok = Witness(file_path="svc/net.py", anchor="validate", edge_type="CALLS",
+                   direction="calls_anchor", verified=True, confidence=1.0, hop=2,
+                   src_symbol="handler", dst_symbol="validate")
+    out2 = Candidate.render_witness(SimpleNamespace(witnesses=[w_ok]))
+    assert "validate" in out2, f"control: product witness must still render: {out2!r}"
+
+
 # ============================ MUTATION (red) ==================================
 @pytest.mark.parametrize("lang", ["python", "go"])
 def test_mutation_flip_test_exclusion_reddens_leak(tmp_path, lang):

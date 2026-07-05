@@ -333,11 +333,19 @@ def test_issue_relevant_neighbors_drop_cross_language(py_xlang_repo):
 
 
 def test_static_callees_legacy_schema_permissive(tmp_path):
+    # Legacy schema (no nodes.language) stays permissive re: the cross-LANGUAGE judgment — a
+    # legitimate same-language callee (app/util.py) is NOT over-dropped. But E1 (Fable
+    # 2026-07-05) routes the Calls: surface through the Class-A path chokepoint (is_deliverable),
+    # which is language-INDEPENDENT: a vendored path (assets/tailwind.js) is dropped even when
+    # the graph cannot judge language. The path-class leak is now closed on legacy graphs too.
     db = tmp_path / "graph.db"
     _create_graph_db(db, _PY_NODES, _PY_EDGES, with_language=False)
     out = _static_callees(str(db), _PY_MAIN, limit=3)
-    assert _JS_TAILWIND in out, (
-        "legacy schema (no nodes.language) must stay permissive: " + repr(out))
+    assert _PY_UTIL in out, (
+        "legacy schema must not over-drop a legitimate same-language callee: " + repr(out))
+    assert _JS_TAILWIND not in out, (
+        "E1: the Class-A path chokepoint drops a vendored path even on a legacy "
+        "(no-language) schema: " + repr(out))
 
 
 def test_curation_map_neighbors_drop_cross_language(py_xlang_repo):

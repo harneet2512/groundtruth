@@ -212,3 +212,36 @@ def test_l2_fix_here_disambiguates_by_resolved_target_id():
     assert "core.handle()" in out, "resolved target must be surfaced as FIX HERE"
     # And its real caller surfaces as a deterministic fact.
     assert "CALLERS: router" in out
+
+
+# ── B5-2: covering-test bullet must be anonymized (leak invariant) ────────────
+
+def test_pretask_briefing_test_bullet_is_anonymized_no_leak():
+    """B5-2 (Fable, reproduced live): generate_pretask_briefing rendered
+    ``TEST: <file>::<name>`` — surfacing the covering test's NAME + FILE, which IS the
+    FAIL_TO_PASS grader surface. It must emit ONLY an anonymized COUNT keyed to the target
+    (swap-invariant). RED before the fix (test name/file in the briefing); GREEN after.
+
+    Deterministic edge (import) so the test link passes the #27 fact gate — the pre-fix
+    code would then render the identity.
+    """
+    nodes = [
+        _node(1, "parse_config", "src/config.py", sline=10),           # target (production)
+        _node(2, "test_parse_config", "tests/test_config.py",          # covering test
+              sline=5, is_test=1),
+    ]
+    edges = [
+        # test -> target, deterministic (import) => passes det_methods gate.
+        (2, 1, "CALLS", 6, "tests/test_config.py", "import", 1.0, None),
+    ]
+    conn = _conn(nodes, edges)
+    out = gt.generate_pretask_briefing(conn, root="/nonexistent", identifiers=["parse_config"])
+    conn.close()
+
+    assert "test_parse_config" not in out, f"LEAK: covering test NAME in briefing:\n{out}"
+    assert "tests/test_config.py" not in out, f"LEAK: covering test FILE in briefing:\n{out}"
+    assert "::" not in out.split("TEST:")[-1].splitlines()[0] if "TEST:" in out else True, (
+        f"LEAK: file::name shape survived in the TEST bullet:\n{out}"
+    )
+    # the anonymized existence signal still fires (a covering test DOES exist).
+    assert "covering test" in out, f"anonymized TEST existence signal missing:\n{out}"

@@ -80,7 +80,12 @@ def is_generated(fp: str) -> bool:
 # test pins). gt_mini_patch imports this with a local fallback (in-container the
 # groundtruth import may fail — same pattern as the fact set).
 _TEST_DIR_SEGMENTS: frozenset[str] = frozenset({
-    "test", "tests", "__tests__", "__test__", "spec", "specs", "e2e", "testing",
+    # Fable LSP11: `__tests` (no trailing __) is csstree's real layout `lib/__tests/`;
+    # a segment-exact entry, so it never false-positives on `contest`/`latest`.
+    # Fable P11: `testing` REMOVED — it is production-ambiguous (Django `django/test`-style
+    # shipped test UTILITIES, Go `testing` helpers) and wrongly demoted/excluded real source.
+    # Mirrors walker.go nonSourceDirSegments (kept in sync).
+    "test", "tests", "__tests__", "__test__", "__tests", "spec", "specs", "e2e",
 })
 _DEMO_NONSOURCE_DIR_SEGMENTS: frozenset[str] = frozenset({
     "examples", "example", "demo", "demos", "sample", "samples", "fixtures",
@@ -90,7 +95,9 @@ _DEMO_NONSOURCE_DIR_SEGMENTS: frozenset[str] = frozenset({
     # fuzz / property-based / mutation test dirs (mirrors walker.go nonSourceDirSegments —
     # DUPLICATION TRAP: keep these two sets in sync; the wasmi leak was fuzz/ missing here)
     "fuzz", "fuzzing", "fuzz_targets", "corpus", "testcases",
-    "conformance", "compat", "integration_tests", "e2e_tests",
+    # Fable P11: `conformance` + `compat` REMOVED — production-ambiguous (pandas/numpy
+    # `compat` shims, protobuf `conformance` are real source). Mirrors walker.go.
+    "integration_tests", "e2e_tests",
 })
 _TEST_TOOLING_ROOT_SEGMENTS: frozenset[str] = frozenset(
     set(_TEST_DIR_SEGMENTS)
@@ -123,10 +130,14 @@ def _path_segments(path: str) -> tuple[list[str], str]:
 
 # Exact test-module basenames the pattern markers below MISS: pytest ``conftest.py``
 # (fixtures that call product symbols — near-universal in Python repos) and the
-# Django/convention ``tests.py`` / ``test.py`` test modules. is_test=0 on their nodes
-# (walker.go has no such basename rule), so without this a delivered CALLER line could
-# surface a graded-test function NAME + location (proven leak, Fable 2026-07-03). Exact
-# match (never substring), so ``latest.py`` / ``mytest.py`` / ``attestation.py`` stay clean.
+# Django/convention ``tests.py`` / ``test.py`` test modules. RATIONALE (corrected
+# 2026-07-05, Fable spec-review reconciliation): walker.go DOES now flag these at index
+# time (``walker.go:218`` sets is_test=1 on conftest.py/tests.py/test.py/*_tests.py,
+# Fable 2026-07-03), so a FRESHLY-BUILT graph is already correct. This Python guard is
+# defense-in-depth for FROZEN / pre-existing graphs indexed by an OLDER binary that
+# predates that rule (is_test=0 on their nodes) — without it a delivered CALLER line
+# could surface a graded-test function NAME + location (proven leak). Exact match (never
+# substring), so ``latest.py`` / ``mytest.py`` / ``attestation.py`` stay clean.
 _TEST_FILE_BASENAMES = frozenset({"conftest.py", "tests.py", "test.py"})
 
 

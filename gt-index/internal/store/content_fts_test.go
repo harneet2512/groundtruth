@@ -27,6 +27,38 @@ func TestContentTokens_SubTokenSplitting(t *testing.T) {
 	}
 }
 
+// S8 (Fable) RED→GREEN: the content tokenizer must be Unicode-aware (non-Latin
+// identifiers/words are ubiquitous in worldwide repos) and must split at letter↔digit
+// boundaries.
+//
+// Mutation: reverting _identRe to `[A-Za-z_][A-Za-z0-9_]*` truncates "cafétable" at the first
+// non-ASCII rune ("caf"); reverting splitCamel's letterDigit boundary leaves "sha256sum" fused.
+// Either revert reddens this test.
+func TestContentTokens_S8_UnicodeAndDigitSplit(t *testing.T) {
+	toks := func(s string) map[string]bool {
+		m := map[string]bool{}
+		for _, tk := range strings.Fields(contentTokens(s)) {
+			m[tk] = true
+		}
+		return m
+	}
+	// A Unicode identifier survives whole (the ASCII regex truncated it at 'é').
+	if u := toks("cafétable"); !u["cafétable"] {
+		t.Errorf("Unicode identifier dropped/truncated; got %v", u)
+	}
+	// camelCase across a Unicode lower→Upper boundary.
+	if c := toks("caféServer"); !c["café"] || !c["server"] {
+		t.Errorf("Unicode camelCase split failed; got %v", c)
+	}
+	// digit split: sha256sum -> sha, 256, sum (a query for "sha"/"sum" now matches).
+	d := toks("sha256sum")
+	for _, w := range []string{"sha", "256", "sum"} {
+		if !d[w] {
+			t.Errorf("digit split missing %q; got %v", w, d)
+		}
+	}
+}
+
 // B1 end-to-end: a BODY-ONLY domain term (present in the function body, ABSENT from
 // the node name/signature) must retrieve that symbol from symbol_content_fts — the
 // stratum-B point the name-only surfaces (nodes_fts, embedder, anchor) structurally miss.

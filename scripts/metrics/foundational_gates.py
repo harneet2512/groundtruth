@@ -60,6 +60,23 @@ except Exception:  # pragma: no cover - fallback only when src not importable
     )
     _DET_SET_SOURCE = "fallback_literal(curation_map import failed)"
 
+
+def _current_context_id() -> str:
+    """The current run's runtime_context_id (G7). Prefer the GT_CONTEXT_ID the
+    runtime context manager exports into the process env (== proof.context_id() of
+    the same runtime); fall back to computing it. Empty when neither is available,
+    which makes the identity check fail-closed (refuse to reconcile a cert whose
+    identity cannot be proven equal)."""
+    cid = os.environ.get("GT_CONTEXT_ID", "")
+    if cid:
+        return cid
+    try:
+        from groundtruth.runtime import proof as _proof
+        return _proof.context_id()
+    except Exception:
+        return ""
+
+
 # Receiver-type TYPING TIERS (the levers that close the method-call gap). These are
 # the resolution_methods written by the indexer's CHA/RTA-style typing strategies
 # (resolver.go strategies 1.94-1.96) — type_flow (qualified/assignment flow),
@@ -886,16 +903,29 @@ def gate_embedder_consumption(db: str, repo: str, issue_text: str) -> bool:
             _cp = os.environ.get("GT_EMBEDDER_CERT", "/tmp/gt/embedder_certificate.json")
             if os.path.exists(_cp):
                 _cert = _json.load(open(_cp, encoding="utf-8"))
+                # G7 IDENTITY BINDING: a cert is a valid consumption witness only for
+                # THIS run. In a long-lived container a STALE cert from a PRIOR task
+                # would otherwise flip a genuinely-failing gate to PASS. Require the
+                # cert's runtime_context_id to match the current run's before trusting
+                # it (fail-closed: no id / mismatch -> refuse to reconcile).
+                _cur_ctx = _current_context_id()
+                _cert_ctx = str(_cert.get("runtime_context_id", "") or "")
+                _identity_ok = bool(_cur_ctx) and bool(_cert_ctx) and (_cur_ctx == _cert_ctx)
                 cert_upstream_nz = int(_cert.get("upstream_semantic_nonzero_count", 0) or 0)
                 _rn = int(_cert.get("rendered_semantic_nonzero_count", 0) or 0)
                 _cw = float(_cert.get("effective_w_sem", 0.0) or 0.0)
-                if (cert_upstream_nz > 0 or _rn > 0) and _cw > 0.0:
+                if _identity_ok and (cert_upstream_nz > 0 or _rn > 0) and _cw > 0.0:
                     ok = True
                     cert_reconciled = True
                     print(f"  [GATE 3b RECONCILE] embedder_certificate proves consumption "
                           f"(upstream_nonzero={cert_upstream_nz}, rendered_nonzero={_rn}, "
-                          f"w_sem={_cw:.6f}) -> flat post-render sem_components is a render-path "
-                          f"artifact, NOT a dead embedder -> PASS (witness-over-gate, /goal §7)")
+                          f"w_sem={_cw:.6f}, runtime_context_id={_cert_ctx[:12]}) -> flat "
+                          f"post-render sem_components is a render-path artifact, NOT a dead "
+                          f"embedder -> PASS (witness-over-gate, /goal §7)")
+                elif not _identity_ok:
+                    print(f"  [GATE 3b RECONCILE] SKIP — embedder_certificate identity mismatch "
+                          f"(cert.runtime_context_id={_cert_ctx!r} != current={_cur_ctx!r}); "
+                          f"refusing to reconcile from a stale/foreign cert (fail-closed, G7)")
         except Exception:
             pass
     print(

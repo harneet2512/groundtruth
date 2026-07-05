@@ -318,6 +318,45 @@ def _is_prose_only_common_word(sym: str, code_idents: set[str]) -> bool:
     return True
 
 
+def _is_identifier_shaped_unresolved(tok: str, issue_text: str) -> bool:
+    """True iff an unresolved code-fence token is IDENTIFIER-shaped (G5), not a
+    prose / error-output / shell-transcript noun that merely sat inside a fenced
+    block. Admit a token only when it carries an explicit CODE affordance:
+
+      * snake_case / SCREAMING_SNAKE / dunder  (contains ``_``)
+      * camelCase / PascalCase                 (an internal case transition)
+      * a CALL form ``tok(`` in the issue text  (``require()``)
+      * a ``::`` qualification (``Type::tok`` / ``tok::method``) — the greenfield
+        method tail of a Rust/C++ path is a bare lowercase name whose only signal
+        is the ``::`` the reporter wrote (``Context::reanchor``).
+
+    Plus length >= 4 and NOT a closed-class / issue-filler word. A bare lowercase
+    English word with none of these affordances (``cannot``, ``mismatch``,
+    ``character`` in error prose) is rejected — that is the over-admission the
+    stratum-D classifier keyed on. Provenance (attached to code punctuation), not a
+    dictionary, is the discriminator, so it generalises across repos/languages.
+    """
+    if len(tok) < 4:
+        return False
+    low = tok.lower()
+    if low in _NL_FUNCTION_WORDS or low in _STOPWORDS:
+        return False
+    if "_" in tok:
+        return True
+    if tok != tok.lower() and tok != tok.upper():  # internal case (camel/Pascal)
+        return True
+    esc = re.escape(tok)
+    text = issue_text or ""
+    # CALL form: token attached directly to '(' (no space -> excludes prose
+    # parentheticals like "the widget (deprecated)").
+    if re.search(esc + r"\(", text):
+        return True
+    # '::' qualification on either side (Rust/C++ path syntax; never in prose).
+    if re.search(r"::\s*" + esc + r"\b", text) or re.search(r"\b" + esc + r"\s*::", text):
+        return True
+    return False
+
+
 def _extract_raw_identifiers(text: str) -> set[str]:
     """Pull every identifier-shaped token from the issue body.
 
@@ -652,6 +691,12 @@ def extract_issue_anchors(
                 continue
             low = tok.lower()
             if low in _NL_FUNCTION_WORDS or low in _LANG_KEYWORD_TOKENS:
+                continue
+            # G5: admit only IDENTIFIER-shaped tokens. A fenced block often holds
+            # error text / shell transcripts / fixture prose whose bare nouns
+            # ("cannot", "mismatch", "character") are NOT the API-to-be-built and
+            # were wrongly routing existing-file issues into stratum D.
+            if not _is_identifier_shaped_unresolved(tok, issue_text):
                 continue
             unresolved_code_symbols.add(tok)
 

@@ -585,6 +585,12 @@ def _issue_relevant_neighbors(
     for neighbor, src_lang, tgt_lang in rows:
         if _is_cross_language_pair(src_lang, tgt_lang):
             continue
+        # E1 (Fable 2026-07-05): route the Calls: neighbor through the Class-A path chokepoint.
+        # is_test=0 (SQL) alone can leak a vendored/demo path (same-language) or a frozen-graph
+        # test node whose is_test flag was never set. is_deliverable = the ONE predicate every
+        # other delivery surface uses (no surface re-implements "is this non-source").
+        if not _is_deliverable(neighbor):
+            continue
         if neighbor in seen_neighbors:
             continue
         seen_neighbors.add(neighbor)
@@ -630,6 +636,10 @@ def _static_callees(graph_db: str, file_path: str, limit: int = 3) -> list[str]:
         for fpath, src_lang, tgt_lang in rows:
             if _is_cross_language_pair(src_lang, tgt_lang):
                 continue
+            # E1 (Fable 2026-07-05): Class-A path chokepoint — is_test=0 (SQL) misses a
+            # same-language vendored/demo path or a frozen-graph test node.
+            if not _is_deliverable(fpath):
+                continue
             if fpath not in out:
                 out.append(fpath)
         return out[:limit]
@@ -664,6 +674,7 @@ from groundtruth.delivery.path_policy import (  # noqa: E402
     is_minified_file as _is_minified_file,
     is_test_or_demo as _is_test_or_demo,
     is_test_tooling as _is_test_tooling,
+    is_deliverable as _is_deliverable,
     test_tooling_roots as _test_tooling_roots,
 )
 from groundtruth.delivery.name_policy import (  # noqa: E402
@@ -3174,7 +3185,7 @@ def _exact_issue_named_files(
         for name, files in _name_files.items():
             if len(files) > _MAX_FILES_PER_NAME:                # generic name -> not a specific anchor
                 continue
-            for fp in files:
+            for fp in sorted(files):                            # DETERMINISM (B5-4): `files` is a set
                 out.setdefault(fp, [])
                 if name not in out[fp]:
                     out[fp].append(name)
@@ -4169,7 +4180,7 @@ def generate_v1r_brief(
 
         _front: list[dict] = []   # corroborated -> keep front-promotion
         _back: list[dict] = []    # coincidence -> append below native top, capped
-        for _fp in _ein_n:
+        for _fp in sorted(_ein_n):                               # DETERMINISM (B5-4): dict-from-set order
             if _fp in _in_top:
                 continue
             _r = _bp.get(_fp) or {"path": _fp, "score": _topsc + 0.01,
@@ -4178,8 +4189,10 @@ def generate_v1r_brief(
                 _front.append(_r)
             else:
                 _back.append(_r)
-        _front.sort(key=lambda r: -float(r.get("score", 0.0)))   # highest-scored issue-named first
-        _back.sort(key=lambda r: -float(r.get("score", 0.0)))
+        # DETERMINISM (B5-4): break score ties by path so the _back[:2] cap picks the same
+        # two files run-to-run (stable sort otherwise preserves hashseed-dependent order).
+        _front.sort(key=lambda r: (-float(r.get("score", 0.0)), r.get("path", "")))
+        _back.sort(key=lambda r: (-float(r.get("score", 0.0)), r.get("path", "")))
         # Front-promote ONLY corroborated injections. Coincidence injections go AFTER the native
         # top candidates (preserve the gold's slot), capped to 2 so they don't flood the brief.
         _MAX_COINCIDENCE_INJ = 2

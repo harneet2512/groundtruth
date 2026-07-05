@@ -890,6 +890,56 @@ def _mcnemar_test(b: int, c: int) -> Dict[str, Any]:
     }
 
 
+def _flips_mcnemar(flip_count: int, regression_count: int, n_eligible: int) -> Dict[str, Any]:
+    """Significance of the flip/regression asymmetry via McNemar on the DISCORDANT
+    pairs (G9). The old test was ``binomtest(flip_count, n_flip_eligible, p=0.5)`` —
+    a nonsense null: it asks whether HALF of all baseline-unresolved tasks flip,
+    which no realistic system approaches, so it can essentially never fire. The
+    correct paired test compares flips (oracle resolved, baseline not) against
+    regressions (baseline resolved, oracle not) — exactly the discordant cells
+    McNemar operates on, the same test the file already uses for M11/M22/M25."""
+    out = {
+        **_mcnemar_test(regression_count, flip_count),  # b=regressions, c=flips
+        "flips_observed": flip_count,
+        "regressions_observed": regression_count,
+        "n_eligible": n_eligible,
+        "direction": "oracle_higher",
+        "test": "mcnemar_discordant_pairs",
+    }
+    return out
+
+
+def _apply_holm(tests: Dict[str, Dict], alpha: float = 0.05) -> None:
+    """Holm–Bonferroni step-down FWER control over the per-metric significance
+    battery (G9), IN PLACE. Each test independently set ``significant_p05`` from its
+    own raw p<0.05; with ~15 one-sided tests the family-wise error rate is ~54%.
+    Holm controls it at ``alpha`` without assuming independence. The raw decision is
+    preserved under ``significant_p05_raw`` and ``significant_p05`` is OVERWRITTEN
+    with the corrected decision so every downstream reader is corrected by default.
+    Tests with no numeric p_value (e.g. all-NaN Wilcoxon, empty flip pool) are left
+    untouched — their ``significant_p05`` is already False."""
+    entries = []
+    for name, t in tests.items():
+        if not isinstance(t, dict):
+            continue
+        p = t.get("p_value")
+        if isinstance(p, bool) or not isinstance(p, (int, float)):
+            continue
+        entries.append((name, float(p)))
+    entries.sort(key=lambda kv: kv[1])
+    m = len(entries)
+    still_rejecting = True
+    for i, (name, p) in enumerate(entries):
+        tests[name]["significant_p05_raw"] = bool(tests[name].get("significant_p05", False))
+        thresh = alpha / (m - i)  # Holm: alpha/(m), alpha/(m-1), ... alpha/1
+        reject = still_rejecting and (p <= thresh)
+        if not reject:
+            still_rejecting = False
+        tests[name]["significant_p05"] = bool(reject)
+        tests[name]["holm_threshold"] = round(thresh, 10)
+    tests["_holm"] = {"n_tests": m, "alpha": alpha, "method": "holm_bonferroni_step_down"}
+
+
 # ---------------------------------------------------------------------------
 # Task loader
 # ---------------------------------------------------------------------------
@@ -1932,26 +1982,17 @@ def compute_paired_report(
         if baseline_run[tid].resolved and not oracle_run[tid].resolved
     )
 
-    # Binomial test on flips
+    # Flip significance (G9): McNemar on the discordant flip/regression pairs, NOT a
+    # binomial vs a p=0.5 null over all eligible tasks (that null can never fire).
     n_flip_eligible = sum(1 for tid in shared_ids if not baseline_run[tid].resolved)
-    if n_flip_eligible > 0:
-        flip_binom = stats.binomtest(flip_count, n_flip_eligible, p=0.5, alternative="greater")
-        flips_binomial = {
-            "flips_observed": flip_count,
-            "regressions_observed": regression_count,
-            "n_eligible": n_flip_eligible,
-            "p_value": _fmt(float(flip_binom.pvalue)),
-            "significant_p05": bool(float(flip_binom.pvalue) < 0.05),
-        }
-    else:
-        flips_binomial = {
-            "flips_observed": flip_count,
-            "regressions_observed": regression_count,
-            "n_eligible": n_flip_eligible,
-            "p_value": None,
-            "significant_p05": False,
-        }
-    statistical_tests["flips_binomial"] = flips_binomial
+    statistical_tests["flips_mcnemar"] = _fmt(
+        _flips_mcnemar(flip_count, regression_count, n_flip_eligible)
+    )
+
+    # G9: Holm–Bonferroni correction over the WHOLE per-metric battery (all wilcoxon +
+    # mcnemar entries, incl. flips) BEFORE any significant_p05 is trusted true. Applied
+    # here, after the battery is complete and before _metric_aggregate reads it.
+    _apply_holm(statistical_tests)
 
     # ----- Regression guards -----
     # Compare oracle vs baseline means
@@ -2599,7 +2640,7 @@ def generate_markdown_report(report: Dict) -> str:
         ("m13_wilcoxon", "M13 Steps-to-Gold-Edit (H1: oracle<baseline)"),
         ("m04_precision_wilcoxon", "M04 Brief P@3 (H1: oracle>baseline)"),
         ("m11_mcnemar", "M11 Inverted Confidence (McNemar)"),
-        ("flips_binomial", "Resolution Flips (binomial)"),
+        ("flips_mcnemar", "Resolution Flips (McNemar, Holm-corrected)"),
     ]:
         t = st.get(key, {})
         w_val = t.get("W", t.get("b", t.get("flips_observed", "—")))

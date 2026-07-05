@@ -1228,20 +1228,20 @@ def generate_pretask_briefing(
             if caller:
                 bullets.append(f"CALLERS: {caller[0]}() expects return value")
 
-            # Test — DETERMINISTIC-ONLY (#27): the adjacent top-caller query above is
-            # gated on det_methods; "test X references the target" is rendered as a fact
-            # (TEST: file::name), so it uses the SAME gate. A name_match test edge is a
-            # same-name guess (a phantom test link), never a real reference. One gate for
-            # both sub-queries; no name_match-IN asymmetry.
-            test = cur.execute(f"""
-                SELECT n.name, n.file_path
+            # Test — DETERMINISTIC-ONLY (#27) + LEAKAGE GUARD (A1/B5-2, non-negotiable):
+            # a covering test's NAME + FILE is the FAIL_TO_PASS surface — rendering it
+            # (`TEST: file::name`) hands the agent the grader (identical harm to leaking
+            # FAIL_TO_PASS). Emit ONLY an anonymized COUNT keyed to the target, so the
+            # bullet is byte-identical if the grader swaps its tests (swap-invariant).
+            # Gated on det_methods (a name_match test edge is a same-name phantom link).
+            test_count = cur.execute(f"""
+                SELECT COUNT(*)
                 FROM edges e JOIN nodes n ON e.source_id = n.id
                 WHERE e.target_id = ? AND e.type = 'CALLS' AND n.is_test = 1
                   AND e.resolution_method IN ({det_methods})
-                LIMIT 1
             """, (node_id,)).fetchone()
-            if test:
-                bullets.append(f"TEST: {test[1]}::{test[0]}")
+            if test_count and test_count[0] > 0:
+                bullets.append(f"TEST: {test_count[0]} covering test(s) exist — run the suite")
 
     # v17 fallback: use file paths from tracebacks to find functions in those files
     if not found_symbols:

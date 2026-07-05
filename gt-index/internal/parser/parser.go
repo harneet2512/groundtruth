@@ -194,14 +194,14 @@ func ParseFile(sf walker.SourceFile, isTest bool) (*ParseResult, error) {
 	// contains a module-linking construct (export/import/from/require/use/mod) —
 	// not TS-specific, no per-repo logic. Skips genuinely empty/comment-only files
 	// so the graph isn't polluted with content-free anchors.
-	maybeAddFileAnchorNode(sf, src, result)
+	maybeAddFileAnchorNode(sf, src, isTest, result)
 
 	return result, nil
 }
 
 // maybeAddFileAnchorNode appends a synthetic File node when a file yields zero
 // symbol nodes yet carries module-linking structure. See ParseFile caller for why.
-func maybeAddFileAnchorNode(sf walker.SourceFile, src []byte, result *ParseResult) {
+func maybeAddFileAnchorNode(sf walker.SourceFile, src []byte, isTest bool, result *ParseResult) {
 	if len(result.Nodes) > 0 {
 		return
 	}
@@ -262,6 +262,11 @@ func maybeAddFileAnchorNode(sf walker.SourceFile, src []byte, result *ParseResul
 		EndLine:       endLine,
 		Language:      sf.Language,
 		IsExported:    true,
+		// E3 (Fable 2026-07-05): stamp is_test on the synthetic anchor too. A tests/ barrel
+		// (re-export __init__.py / index.ts) yields zero symbol nodes, so only this anchor is
+		// emitted for it — without the flag it entered the graph as PRODUCTION and became an
+		// FTS-seedable test PATH (the walker's file-level isTest already knows the truth).
+		IsTest: isTest,
 	})
 }
 
@@ -561,9 +566,185 @@ func functionNodeName(node *sitter.Node, sf walker.SourceFile, src []byte) strin
 	return name
 }
 
+// _testAnnotationNodeTypes: cross-language attribute/annotation/decorator node types that
+// can carry a test marker (Rust attribute_item; Java/Kotlin (marker_)annotation; C#
+// attribute/attribute_list; Python/TS decorator). Node-level test detection over these is
+// language-agnostic — ONE marker vocabulary across every typed language's annotation
+// surface, no per-repo or per-language special-casing.
+var _testAnnotationNodeTypes = map[string]bool{
+	"attribute_item":    true, // Rust  #[test] / #[cfg(test)] / #[bench] / #[tokio::test]
+	"attribute":         true, // Rust inner attr; C#  [Fact] / [Test]
+	"attribute_list":    true, // C#  [TestMethod]
+	"annotation":        true, // Java  @Test (some grammars)
+	"marker_annotation": true, // Java/Kotlin  @Test
+	"decorator":         true, // Python / TS  @pytest.mark.* (rare)
+}
+
+// _testAnnotationWrapperTypes: nodes that hold annotations one level down (Java `modifiers`,
+// C# `attribute_list`) so the direct-child scan still finds an annotated method's marker.
+var _testAnnotationWrapperTypes = map[string]bool{
+	"modifiers":      true,
+	"attribute_list": true,
+}
+
+// _testMarkerTokens: the CURATED, EXACT vocabulary of test-framework marker tokens across
+// every typed language's annotation surface. EXACT match only — broad prefix/suffix "test"
+// matching over-marked PRODUCTION code (P8): `@app.route("/api/test")` (token "test" from a
+// URL string), `@pytest.fixture` ("pytest" ends with "test"), and `contest`/`attestation`
+// all falsely flipped is_test=1. A marker is always an identifier from this set, never a
+// substring of an unrelated token or a fragment of a string-literal argument.
+var _testMarkerTokens = map[string]bool{
+	"test":              true, // Rust #[test]/#[tokio::test]/#[cfg(test)]; Java/Kotlin @Test
+	"bench":             true, // Rust #[bench]
+	"fact":              true, // C# xUnit [Fact]
+	"theory":            true, // C# xUnit [Theory]
+	"testmethod":        true, // C# MSTest [TestMethod]
+	"testcase":          true, // C# NUnit [TestCase]
+	"parameterizedtest": true, // JUnit5 @ParameterizedTest
+}
+
+// stripStringLiterals removes the CONTENTS of quoted string/char literals so a value like
+// @app.route("/api/test") does not surface a bogus `test` token from its URL argument. A
+// test-framework marker is always an identifier (@Test, #[test], [Fact]), never inside a
+// quoted argument. Operates byte-wise on ASCII quote/backslash bytes; multi-byte UTF-8 runes
+// (high bit set) are copied through verbatim outside a string, so the result stays valid.
+func stripStringLiterals(s string) string {
+	var b strings.Builder
+	inStr := false
+	var quote byte
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if inStr {
+			if c == '\\' { // skip an escaped char inside the string
+				i++
+				continue
+			}
+			if c == quote {
+				inStr = false
+			}
+			continue
+		}
+		if c == '"' || c == '\'' {
+			inStr = true
+			quote = c
+			continue
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
+}
+
+// annotationMarksTest reports whether an attribute/annotation TEXT names a test-framework
+// construct. Token-bounded AND exact-set (see _testMarkerTokens): a marker must be a whole
+// identifier from the curated vocabulary, after string-literal arguments are stripped. This
+// is correct-or-quiet — an unrecognized attribute stays production (its symbols keep their
+// place in the content index) rather than over-marking on a coincidental "test" substring.
+func annotationMarksTest(txt string) bool {
+	for _, tok := range strings.FieldsFunc(strings.ToLower(stripStringLiterals(txt)), func(r rune) bool {
+		return !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_')
+	}) {
+		if _testMarkerTokens[tok] {
+			return true
+		}
+	}
+	return false
+}
+
+// nodeMarkedTest reports whether a definition node carries a test-marker attribute/
+// annotation/decorator — as a CHILD (Rust function_item/mod_item; Java via `modifiers`;
+// C# via `attribute_list`) OR as an immediately-PRECEDING SIBLING (grammars that place
+// outer attributes beside the item, not under it). Language-agnostic; callers gate it to
+// definition nodes so it stays cheap.
+func nodeMarkedTest(node *sitter.Node, src []byte) bool {
+	// (a) attributes attached as CHILDREN (or one wrapper level down).
+	for i := 0; i < int(node.ChildCount()); i++ {
+		c := node.Child(i)
+		ct := c.Type()
+		if _testAnnotationNodeTypes[ct] {
+			if annotationMarksTest(c.Content(src)) {
+				return true
+			}
+			continue
+		}
+		if _testAnnotationWrapperTypes[ct] {
+			for j := 0; j < int(c.ChildCount()); j++ {
+				gc := c.Child(j)
+				if _testAnnotationNodeTypes[gc.Type()] && annotationMarksTest(gc.Content(src)) {
+					return true
+				}
+			}
+		}
+	}
+	// (b) attributes as immediately-PRECEDING SIBLINGS — walk back over a stack of
+	// attributes/comments, stop at the first real sibling.
+	for sib := node.PrevSibling(); sib != nil; sib = sib.PrevSibling() {
+		st := sib.Type()
+		if _testAnnotationNodeTypes[st] {
+			if annotationMarksTest(sib.Content(src)) {
+				return true
+			}
+			continue
+		}
+		if st == "line_comment" || st == "block_comment" {
+			continue
+		}
+		break
+	}
+	return false
+}
+
+// javaNodeExported reports whether a Java method/constructor/class node is part of the
+// exported API surface, read from its ACCESS MODIFIER — never from name casing (P13). Java
+// visibility is `public`/`protected`/`private`/(none = package-private); public and protected
+// members are reachable outside their package (protected via subclasses), package-private and
+// private are not. The old name-casing heuristic wrongly marked a package-private member
+// exported (uppercase name) and a lowercase public method unexported.
+func javaNodeExported(node *sitter.Node, src []byte) bool {
+	if node == nil {
+		return false
+	}
+	mod := node.ChildByFieldName("modifiers")
+	if mod == nil {
+		for i := 0; i < int(node.ChildCount()); i++ {
+			if c := node.Child(i); c != nil && c.Type() == "modifiers" {
+				mod = c
+				break
+			}
+		}
+	}
+	if mod == nil {
+		return false // no access modifier ⇒ package-private ⇒ not exported
+	}
+	modText := strings.ToLower(mod.Content(src))
+	return containsKeywordAtBoundary(modText, "public") || containsKeywordAtBoundary(modText, "protected")
+}
+
+// nodeExported computes a definition's exported/public bit. Most languages use the spec's
+// name-based rule (Go casing, Python `_` prefix); Java visibility is a structural access
+// modifier, not a naming convention, so it is read from the AST (see javaNodeExported / P13).
+func nodeExported(spec *specs.Spec, node *sitter.Node, src []byte, name, language string) bool {
+	if language == "java" {
+		return javaNodeExported(node, src)
+	}
+	return spec.IsExported != nil && spec.IsExported(name)
+}
+
 func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, result *ParseResult, parentNodeIdx int) {
 	spec := sf.Spec
 	nodeType := node.Type()
+
+	// Node-level test detection (Fable #2/#3): file-level isTest MISSES inline tests — Rust
+	// `#[cfg(test)] mod` / `#[test] fn`, Java/Kotlin `@Test`, C# `[Fact]`/`[Theory]` — so
+	// their bodies were indexed with is_test=0, polluting the content-BM25 IDF and exposing
+	// test names via CONTENT_SEED witnesses. Flip isTest for the whole subtree when a
+	// definition node carries a test-marker annotation. One vocabulary over every annotation
+	// surface (generalized, not per-language); byte-identical on code with no such marker.
+	if !isTest &&
+		(spec.IsFunctionNode(nodeType) || spec.IsClassNode(nodeType) ||
+			nodeType == "mod_item" || nodeType == "module") &&
+		nodeMarkedTest(node, src) {
+		isTest = true
+	}
 
 	// Check for function definition
 	if spec.IsFunctionNode(nodeType) {
@@ -592,7 +773,7 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 				EndLine:       int(node.EndPoint().Row) + 1,
 				Signature:     sig,
 				ReturnType:    retType,
-				IsExported:    spec.IsExported != nil && spec.IsExported(name),
+				IsExported:    nodeExported(spec, node, src, name, sf.Language),
 				IsTest:        isTest,
 				Language:      sf.Language,
 			}
@@ -728,7 +909,7 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 				FilePath:      sf.Path,
 				StartLine:     int(node.StartPoint().Row) + 1,
 				EndLine:       int(node.EndPoint().Row) + 1,
-				IsExported:    spec.IsExported != nil && spec.IsExported(name),
+				IsExported:    nodeExported(spec, node, src, name, sf.Language),
 				IsTest:        isTest,
 				Language:      sf.Language,
 			}
@@ -1078,7 +1259,7 @@ func extractCallsWithParent(node *sitter.Node, sf walker.SourceFile, src []byte,
 						callerLine = callerLine[:nlIdx]
 					}
 					if len(callerLine) > 120 {
-						callerLine = callerLine[:120]
+						callerLine = truncateRune(callerLine, 120)
 					}
 				}
 				val := usage + ":" + simple
@@ -1278,12 +1459,16 @@ func classifyCallContext(parentType string, callNode *sitter.Node, src []byte) s
 	case "assignment", "short_var_declaration", "variable_declaration",
 		"variable_declarator", "assignment_expression", "augmented_assignment",
 		"local_variable_declaration", "let_declaration":
-		lineText := ""
-		if callNode.Parent() != nil {
-			lineText = callNode.Parent().Content(src)
-		}
-		if strings.Contains(lineText, ",") && (strings.Contains(lineText, "=") || strings.Contains(lineText, ":=") || strings.Contains(lineText, "let")) {
-			return "destructure_tuple"
+		// A destructure is a MULTI-TARGET LHS pattern (`a, b = f()` / `(a, b) := f()` /
+		// `[a, b] = f()`). The comma must live in the LHS pattern, NOT the RHS argument list —
+		// P3: the old whole-line comma scan flagged `x = f(a, b)` (comma only in the call's
+		// args) as a destructure, a 93% false-positive rate on a real repo. Read the LHS node
+		// from the assignment's own field and require the comma THERE; abstain (correct-or-quiet)
+		// when the grammar exposes no LHS field rather than guess from the RHS.
+		if lhs := assignmentLHS(callNode.Parent()); lhs != nil {
+			if strings.Contains(lhs.Content(src), ",") {
+				return "destructure_tuple"
+			}
 		}
 		return ""
 
@@ -1312,6 +1497,22 @@ func classifyCallContext(parentType string, callNode *sitter.Node, src []byte) s
 	return ""
 }
 
+// assignmentLHS returns the left-hand-side (target/pattern) node of an assignment or
+// declaration node, across grammars: "left" (Python/Go/JS assignment_expression),
+// "name" (JS variable_declarator), "pattern" (Rust let_declaration). Returns nil when the
+// grammar exposes no such field so the caller can abstain rather than misread the RHS.
+func assignmentLHS(n *sitter.Node) *sitter.Node {
+	if n == nil {
+		return nil
+	}
+	for _, f := range []string{"left", "name", "pattern"} {
+		if c := n.ChildByFieldName(f); c != nil {
+			return c
+		}
+	}
+	return nil
+}
+
 // extractCalleeInfo returns (simpleName, qualifiedName) for a call expression.
 // simpleName is the last identifier (e.g. "baz" from "foo.bar.baz()").
 // qualifiedName is the full dotted path (e.g. "foo.bar.baz").
@@ -1319,7 +1520,22 @@ func extractCalleeInfo(callNode *sitter.Node, src []byte) (string, string) {
 	if callNode.ChildCount() == 0 {
 		return "", ""
 	}
-	funcNode := callNode.Child(0)
+	// P1/P14: the callee EXPRESSION is a field-named child, NOT necessarily Child(0). For a
+	// Java/C#/Kotlin method_invocation `helper.process()` Child(0) is the receiver `helper`;
+	// for a JSX `<Foo/>` Child(0) is the `<` token. Prefer the grammar's own field for the
+	// callable — "function" (Python/JS/Go/Rust/C#), "name" (Java method_invocation, JSX
+	// elements), "method" (Ruby call) — and only fall back to Child(0) for grammars where the
+	// first child already IS the function expression (the historical, correct path).
+	var funcNode *sitter.Node
+	for _, field := range []string{"function", "name", "method"} {
+		if fn := callNode.ChildByFieldName(field); fn != nil {
+			funcNode = fn
+			break
+		}
+	}
+	if funcNode == nil {
+		funcNode = callNode.Child(0)
+	}
 	if funcNode == nil {
 		return "", ""
 	}
@@ -1534,13 +1750,13 @@ func normalizeSignature(text string) string {
 			continue
 		}
 		if len(ln) > 200 {
-			ln = strings.TrimSpace(ln[:200])
+			ln = strings.TrimSpace(truncateRune(ln, 200))
 		}
 		parts = append(parts, ln)
 	}
 	out := strings.Join(parts, " ")
 	if len(out) > 1000 {
-		out = strings.TrimSpace(out[:1000])
+		out = strings.TrimSpace(truncateRune(out, 1000))
 	}
 	return out
 }
@@ -1730,9 +1946,17 @@ func extractPythonImports(node *sitter.Node, file string, src []byte, line int, 
 		if mn := node.ChildByFieldName("module_name"); mn != nil {
 			modulePath = mn.Content(src)
 		} else {
-			// Fallback: find dotted_name child
+			// Fallback: the module path is the dotted_name BEFORE the `import` keyword.
+			// A-Finding4 (Fable LIPI): stop at the `import` keyword — otherwise, for a purely
+			// relative `from . import x` (no module_name field), this would pick the IMPORTED
+			// symbol `x` (the first dotted_name, which follows `import`) as the module path, and
+			// since P6 dropped the old `name != modulePath` guard, `x` would be recorded as a bogus
+			// ImportRef{ImportedName:"x", ModulePath:"x"}. Position-gating the fallback prevents it.
 			for i := 0; i < int(node.ChildCount()); i++ {
 				c := node.Child(i)
+				if c.Type() == "import" {
+					break // anything after `import` is an imported symbol, not the module path
+				}
 				if c.Type() == "dotted_name" {
 					modulePath = c.Content(src)
 					break
@@ -1748,15 +1972,24 @@ func extractPythonImports(node *sitter.Node, file string, src []byte, line int, 
 		// Re-exports: __init__.py + relative import (from .submodule import X)
 		isReExport := isInitPy && isRelativeImport && modulePath != ""
 
-		// Extract imported names
+		// Extract imported names. P6 (Fable): disambiguate the module-path dotted_name (BEFORE
+		// the `import` keyword) from imported-symbol dotted_names (AFTER it) by NODE POSITION,
+		// not by string equality — the old `name != modulePath` guard silently discarded
+		// `from datetime import datetime` (the imported symbol legitimately shares the module's
+		// name), leaving the resolver unable to bind that call.
+		afterImport := false
 		for i := 0; i < int(node.ChildCount()); i++ {
 			child := node.Child(i)
+			if child.Type() == "import" {
+				afterImport = true
+				continue
+			}
 			switch child.Type() {
 			case "dotted_name":
-				// After "import" keyword — this is an imported name
+				// Only dotted_names AFTER the `import` keyword are imported symbols; the one
+				// before it is the module path (already captured in modulePath above).
 				name := child.Content(src)
-				// Skip if this is the module path (before "import" keyword)
-				if name != modulePath && modulePath != "" {
+				if afterImport && modulePath != "" {
 					importedName := lastDotComponent(name)
 					result.Imports = append(result.Imports, ImportRef{
 						ImportedName: importedName,
@@ -1848,8 +2081,19 @@ func extractPythonImports(node *sitter.Node, file string, src []byte, line int, 
 			} else if child.Type() == "aliased_import" {
 				if nameNode := child.ChildByFieldName("name"); nameNode != nil {
 					fullPath := nameNode.Content(src)
+					// P5 (Fable): `import numpy as np` / `import os.path as op` binds the LOCAL
+					// name to the ALIAS (np / op), which SHADOWS the module name — a call
+					// `np.array()` / `op.join()` uses the alias, so ImportedName must be the alias,
+					// not the module's last component. ModulePath stays the real module so the
+					// import still resolves to the right file. (Rust already records the alias.)
+					localName := lastDotComponent(fullPath)
+					if aliasNode := child.ChildByFieldName("alias"); aliasNode != nil {
+						if a := aliasNode.Content(src); a != "" {
+							localName = a
+						}
+					}
 					result.Imports = append(result.Imports, ImportRef{
-						ImportedName: lastDotComponent(fullPath),
+						ImportedName: localName,
 						ModulePath:   fullPath,
 						File:         file,
 						Line:         line,
@@ -2588,7 +2832,7 @@ func classifyFlow(idNode *sitter.Node, name string, src []byte) string {
 		return "" // bare self-reference / the parameter declaration itself
 	}
 	if len(txt) > 50 {
-		txt = txt[:50]
+		txt = truncateRune(txt, 50)
 	}
 	return txt
 }
@@ -2942,6 +3186,42 @@ func extractBodyChannels(node *sitter.Node, sf walker.SourceFile, src []byte, re
 	}
 }
 
+// truncateRune returns s truncated to at most n BYTES, cut back to the nearest rune
+// boundary so the result is ALWAYS valid UTF-8 (P2). Byte-slicing a Go string at a fixed
+// offset (s[:n]) can split a multi-byte rune; the invalid UTF-8 that produces makes Python's
+// sqlite3 reader (default text_factory=str) raise "Could not decode to UTF-8" on the WHOLE
+// properties fetch for the repo — silently disabling every downstream channel over one
+// non-ASCII literal. For ASCII input this is byte-identical to s[:n].
+func truncateRune(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	if n >= len(s) {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
+
+// countNodesOfType returns how many nodes of the given AST type appear in the subtree
+// rooted at node (inclusive). Used to count facts structurally instead of scanning bytes,
+// so tokens inside string/char literals or comments never inflate the count.
+func countNodesOfType(node *sitter.Node, typ string) int {
+	if node == nil {
+		return 0
+	}
+	n := 0
+	if node.Type() == typ {
+		n++
+	}
+	for i := 0; i < int(node.ChildCount()); i++ {
+		n += countNodesOfType(node.Child(i), typ)
+	}
+	return n
+}
+
 // extractProperties extracts structural facts from a function AST node.
 // Works across all languages by walking tree-sitter nodes generically.
 func extractProperties(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, nodeIdx int) {
@@ -2985,9 +3265,12 @@ func extractProperties(node *sitter.Node, sf walker.SourceFile, src []byte, resu
 	// and Result<T,E>/Option<T> return types as properties
 	if sf.Language == "rust" {
 		bodyText := bodyNode.Content(src)
-		// ? operator = implicit guard clause for Result/Option
-		if strings.Contains(bodyText, "?") {
-			qCount := strings.Count(bodyText, "?")
+		// ? operator = implicit guard clause for Result/Option. Count try_expression AST
+		// nodes, NOT `?` bytes (P9): a `?` inside a string/char literal — println!("what?"),
+		// a regex, a doc string — is NOT an early return. Byte-counting fabricated ~75% of
+		// these guards on a real Rust repo. The parser materializes each real `expr?` as a
+		// `try_expression` node, so counting those is exact.
+		if qCount := countNodesOfType(bodyNode, "try_expression"); qCount > 0 {
 			result.Properties = append(result.Properties, PropertyRef{
 				NodeIdx:    nodeIdx,
 				Kind:       "guard_clause",
@@ -3109,7 +3392,7 @@ func extractDocstring(funcNode, bodyNode *sitter.Node, sf walker.SourceFile, src
 		text := _cleanComment(prevSibling.Content(src))
 		if len(text) >= 5 {
 			if len(text) > 200 {
-				text = text[:200]
+				text = truncateRune(text, 200)
 			}
 			result.Properties = append(result.Properties, PropertyRef{
 				NodeIdx:    nodeIdx,
@@ -3131,7 +3414,7 @@ func extractDocstring(funcNode, bodyNode *sitter.Node, sf walker.SourceFile, src
 				text := _cleanComment(parentPrev.Content(src))
 				if len(text) >= 5 {
 					if len(text) > 200 {
-						text = text[:200]
+						text = truncateRune(text, 200)
 					}
 					result.Properties = append(result.Properties, PropertyRef{
 						NodeIdx:    nodeIdx,
@@ -3151,7 +3434,7 @@ func extractDocstring(funcNode, bodyNode *sitter.Node, sf walker.SourceFile, src
 		text := _cleanComment(prevSibling.Content(src))
 		if len(text) >= 5 {
 			if len(text) > 200 {
-				text = text[:200]
+				text = truncateRune(text, 200)
 			}
 			result.Properties = append(result.Properties, PropertyRef{
 				NodeIdx:    nodeIdx,
@@ -3181,7 +3464,7 @@ func extractDocstring(funcNode, bodyNode *sitter.Node, sf walker.SourceFile, src
 			text = strings.Trim(text, `"'`)
 			text = strings.Trim(text, "`")
 			if len(text) > 200 {
-				text = text[:200]
+				text = truncateRune(text, 200)
 			}
 			if text != "" {
 				result.Properties = append(result.Properties, PropertyRef{
@@ -3200,7 +3483,7 @@ func extractDocstring(funcNode, bodyNode *sitter.Node, sf walker.SourceFile, src
 	if childType == "comment" {
 		text := _cleanComment(firstChild.Content(src))
 		if len(text) > 200 {
-			text = text[:200]
+			text = truncateRune(text, 200)
 		}
 		if text != "" {
 			result.Properties = append(result.Properties, PropertyRef{
@@ -3664,7 +3947,7 @@ func extractExceptionFromNode(node *sitter.Node, sf walker.SourceFile, src []byt
 		}
 		excType = strings.TrimSpace(excType)
 		if len(excType) > 80 {
-			excType = excType[:80]
+			excType = truncateRune(excType, 80)
 		}
 		if excType != "" {
 			result.Properties = append(result.Properties, PropertyRef{
@@ -3729,7 +4012,7 @@ func countReturns(node *sitter.Node, src []byte, shapes map[string]bool) {
 
 		expr := text
 		if len(expr) > 80 {
-			expr = expr[:80]
+			expr = truncateRune(expr, 80)
 		}
 		switch {
 		case text == "" || text == "return" || text == "None" || text == "nil" || text == "null" || text == "undefined":
@@ -3764,7 +4047,7 @@ func rustTailExpr(bodyNode *sitter.Node, src []byte) string {
 		}
 		txt := strings.TrimSpace(c.Content(src))
 		if len(txt) > 80 {
-			txt = txt[:80]
+			txt = truncateRune(txt, 80)
 		}
 		return txt
 	}
@@ -3863,7 +4146,7 @@ func _findReturnsInBlock(block *sitter.Node, ifNode *sitter.Node, src []byte, re
 				value = fmt.Sprintf("if %s: return %s", condText, retText)
 			}
 			if len(value) > 200 {
-				value = value[:197] + "..."
+				value = truncateRune(value, 197) + "..."
 			}
 
 			result.Properties = append(result.Properties, PropertyRef{
@@ -3897,10 +4180,13 @@ func _walkSideEffects(node *sitter.Node, src []byte, result *ParseResult, nodeId
 	nodeType := node.Type()
 
 	// Go uses "assignment_statement" (and "short_var_declaration" for :=); the
-	// self/this languages use "assignment"/"assignment_expression". Include all so
-	// named-receiver mutations (c.field = ...) are seen, not just self/this ones.
+	// self/this languages use "assignment"/"assignment_expression". Only ACTUAL assignment
+	// AST nodes count (P10): an "expression_statement" is not itself an assignment — including
+	// it made the text `=` scan fire on keyword-argument calls like `self.log(msg=x)`,
+	// emitting a phantom `mutates: self.log(msg` side_effect at confidence 1.0. A real
+	// mutation (`self.x = 1`) is still reached via the assignment node this recurses into.
 	if nodeType == "assignment" || nodeType == "augmented_assignment" ||
-		nodeType == "assignment_expression" || nodeType == "expression_statement" ||
+		nodeType == "assignment_expression" ||
 		nodeType == "assignment_statement" {
 		if _tryExtractSideEffect(node, src, result, nodeIdx, recvName) {
 			return
@@ -3955,7 +4241,7 @@ func _tryExtractSideEffect(node *sitter.Node, src []byte, result *ParseResult, n
 			if eqIdx >= 0 && eqIdx+1 < len(text) {
 				rhs = strings.TrimSpace(text[eqIdx+1:])
 				if len(rhs) > 60 {
-					rhs = rhs[:60]
+					rhs = truncateRune(rhs, 60)
 				}
 			}
 			value := "mutates: " + recvName + "." + field
@@ -3963,7 +4249,7 @@ func _tryExtractSideEffect(node *sitter.Node, src []byte, result *ParseResult, n
 				value += " = " + rhs
 			}
 			if len(value) > 200 {
-				value = value[:197] + "..."
+				value = truncateRune(value, 197) + "..."
 			}
 			result.Properties = append(result.Properties, PropertyRef{
 				NodeIdx:    nodeIdx,
@@ -3991,7 +4277,7 @@ func _tryExtractSideEffect(node *sitter.Node, src []byte, result *ParseResult, n
 			if eqIdx >= 0 && eqIdx+1 < len(text) {
 				rhs = strings.TrimSpace(text[eqIdx+1:])
 				if len(rhs) > 60 {
-					rhs = rhs[:60]
+					rhs = truncateRune(rhs, 60)
 				}
 			}
 			value := "mutates: self." + field
@@ -3999,7 +4285,7 @@ func _tryExtractSideEffect(node *sitter.Node, src []byte, result *ParseResult, n
 				value += " = " + rhs
 			}
 			if len(value) > 200 {
-				value = value[:197] + "..."
+				value = truncateRune(value, 197) + "..."
 			}
 			result.Properties = append(result.Properties, PropertyRef{
 				NodeIdx:    nodeIdx,
@@ -4026,7 +4312,7 @@ func _tryExtractSideEffect(node *sitter.Node, src []byte, result *ParseResult, n
 		if field != "" {
 			value := "mutates: this." + field
 			if len(value) > 200 {
-				value = value[:197] + "..."
+				value = truncateRune(value, 197) + "..."
 			}
 			result.Properties = append(result.Properties, PropertyRef{
 				NodeIdx:    nodeIdx,
@@ -4193,7 +4479,7 @@ func extractStructuredParams(node *sitter.Node, spec *specs.Spec, src []byte, re
 			}
 		}
 		if len(value) > 200 {
-			value = value[:197] + "..."
+			value = truncateRune(value, 197) + "..."
 		}
 
 		result.Properties = append(result.Properties, PropertyRef{
@@ -4342,7 +4628,7 @@ func _walkExceptionFlow(node *sitter.Node, src []byte, result *ParseResult, node
 			condText = "?"
 		}
 		if len(condText) > 80 {
-			condText = condText[:80]
+			condText = truncateRune(condText, 80)
 		}
 
 		// Check consequence/body for raise/throw
@@ -4373,7 +4659,7 @@ func _findRaisesInBlock(block *sitter.Node, condText string, src []byte, result 
 		if ct == "raise_statement" || ct == "throw_statement" || ct == "throw_expression" {
 			raiseText := strings.TrimSpace(child.Content(src))
 			if len(raiseText) > 100 {
-				raiseText = raiseText[:100]
+				raiseText = truncateRune(raiseText, 100)
 			}
 			// Collect preceding siblings (cleanup/logging before raise)
 			preamble := ""
@@ -4385,7 +4671,7 @@ func _findRaisesInBlock(block *sitter.Node, condText string, src []byte, result 
 						line = line[:nlIdx]
 					}
 					if len(line) > 60 {
-						line = line[:60]
+						line = truncateRune(line, 60)
 					}
 					if preamble != "" {
 						preamble += "; "
@@ -4398,7 +4684,7 @@ func _findRaisesInBlock(block *sitter.Node, condText string, src []byte, result 
 				value += " [after: " + preamble + "]"
 			}
 			if len(value) > 200 {
-				value = value[:197] + "..."
+				value = truncateRune(value, 197) + "..."
 			}
 			result.Properties = append(result.Properties, PropertyRef{
 				NodeIdx:    nodeIdx,
@@ -4414,11 +4700,11 @@ func _findRaisesInBlock(block *sitter.Node, condText string, src []byte, result 
 			if strings.Contains(text, "panic(") {
 				raiseText := strings.TrimSpace(text)
 				if len(raiseText) > 100 {
-					raiseText = raiseText[:100]
+					raiseText = truncateRune(raiseText, 100)
 				}
 				value := fmt.Sprintf("WHEN %s: %s", condText, raiseText)
 				if len(value) > 200 {
-					value = value[:197] + "..."
+					value = truncateRune(value, 197) + "..."
 				}
 				result.Properties = append(result.Properties, PropertyRef{
 					NodeIdx:    nodeIdx,
@@ -4450,7 +4736,7 @@ func _findRaisesInBlock(block *sitter.Node, condText string, src []byte, result 
 			if etype != "" {
 				value := fmt.Sprintf("WHEN %s: raise %s", condText, etype)
 				if len(value) > 200 {
-					value = value[:197] + "..."
+					value = truncateRune(value, 197) + "..."
 				}
 				result.Properties = append(result.Properties, PropertyRef{
 					NodeIdx:    nodeIdx,
@@ -4488,7 +4774,7 @@ func _walkExceptionHandlers(node *sitter.Node, src []byte, result *ParseResult, 
 		text = strings.TrimSuffix(text, "{")
 		text = strings.TrimSpace(text)
 		if len(text) > 200 {
-			text = text[:197] + "..."
+			text = truncateRune(text, 197) + "..."
 		}
 		if text != "" {
 			// Classify handler action from body children
@@ -4504,7 +4790,7 @@ func _walkExceptionHandlers(node *sitter.Node, src []byte, result *ParseResult, 
 				} else if ct == "return_statement" {
 					retText := strings.TrimSpace(child.Content(src))
 					if len(retText) > 40 {
-						retText = retText[:40]
+						retText = truncateRune(retText, 40)
 					}
 					action = "returns: " + retText
 				} else if ct == "block" {
@@ -4521,7 +4807,7 @@ func _walkExceptionHandlers(node *sitter.Node, src []byte, result *ParseResult, 
 						if bct == "return_statement" {
 							retText := strings.TrimSpace(bc.Content(src))
 							if len(retText) > 40 {
-								retText = retText[:40]
+								retText = truncateRune(retText, 40)
 							}
 							action = "returns: " + retText
 							break
@@ -4537,7 +4823,7 @@ func _walkExceptionHandlers(node *sitter.Node, src []byte, result *ParseResult, 
 			}
 			handlerValue := text + " -> " + action
 			if len(handlerValue) > 200 {
-				handlerValue = handlerValue[:197] + "..."
+				handlerValue = truncateRune(handlerValue, 197) + "..."
 			}
 			result.Properties = append(result.Properties, PropertyRef{
 				NodeIdx:    nodeIdx,
@@ -4578,7 +4864,7 @@ func extractFunctionFingerprint(funcNode *sitter.Node, bodyNode *sitter.Node, sr
 
 	callList := strings.Join(callNames, ",")
 	if len(callList) > 150 {
-		callList = callList[:147] + "..."
+		callList = truncateRune(callList, 147) + "..."
 	}
 
 	// Extract return type annotation from function node
@@ -4587,7 +4873,7 @@ func extractFunctionFingerprint(funcNode *sitter.Node, bodyNode *sitter.Node, sr
 	if rtNode != nil {
 		retType = strings.TrimSpace(rtNode.Content(src))
 		if len(retType) > 60 {
-			retType = retType[:60]
+			retType = truncateRune(retType, 60)
 		}
 	}
 
@@ -4596,7 +4882,7 @@ func extractFunctionFingerprint(funcNode *sitter.Node, bodyNode *sitter.Node, sr
 		value += "|returns:" + retType
 	}
 	if len(value) > 200 {
-		value = value[:197] + "..."
+		value = truncateRune(value, 197) + "..."
 	}
 
 	result.Properties = append(result.Properties, PropertyRef{
@@ -4771,7 +5057,7 @@ func _walkFieldReads(node *sitter.Node, src []byte, result *ParseResult, nodeIdx
 					value += " [" + ctx + "]"
 				}
 				if len(value) > 200 {
-					value = value[:197] + "..."
+					value = truncateRune(value, 197) + "..."
 				}
 				result.Properties = append(result.Properties, PropertyRef{
 					NodeIdx:    nodeIdx,
@@ -4811,7 +5097,7 @@ func _walkBoundaryConditions(node *sitter.Node, src []byte, result *ParseResult,
 		nodeType == "comparison_expression" {
 		text := strings.TrimSpace(node.Content(src))
 		if len(text) > 150 {
-			text = text[:150]
+			text = truncateRune(text, 150)
 		}
 
 		category := ""
@@ -4853,7 +5139,7 @@ func _walkBoundaryConditions(node *sitter.Node, src []byte, result *ParseResult,
 								consequence = consequence[:nlIdx]
 							}
 							if len(consequence) > 60 {
-								consequence = consequence[:60]
+								consequence = truncateRune(consequence, 60)
 							}
 						}
 					}
@@ -4866,7 +5152,7 @@ func _walkBoundaryConditions(node *sitter.Node, src []byte, result *ParseResult,
 				value += " => " + consequence
 			}
 			if len(value) > 200 {
-				value = value[:197] + "..."
+				value = truncateRune(value, 197) + "..."
 			}
 			result.Properties = append(result.Properties, PropertyRef{
 				NodeIdx:    nodeIdx,
@@ -4941,7 +5227,7 @@ func extractClassFields(classBodyNode *sitter.Node, src []byte, result *ParseRes
 				if it == "assignment" || it == "augmented_assignment" {
 					text := strings.TrimSpace(inner.Content(src))
 					if len(text) > 200 {
-						text = text[:197] + "..."
+						text = truncateRune(text, 197) + "..."
 					}
 					if text != "" {
 						result.Properties = append(result.Properties, PropertyRef{
@@ -4961,7 +5247,7 @@ func extractClassFields(classBodyNode *sitter.Node, src []byte, result *ParseRes
 		if ct == "type" {
 			text := strings.TrimSpace(child.Content(src))
 			if len(text) > 200 {
-				text = text[:197] + "..."
+				text = truncateRune(text, 197) + "..."
 			}
 			if text != "" {
 				result.Properties = append(result.Properties, PropertyRef{
@@ -4980,7 +5266,7 @@ func extractClassFields(classBodyNode *sitter.Node, src []byte, result *ParseRes
 			ct == "field_definition" {
 			text := strings.TrimSpace(child.Content(src))
 			if len(text) > 200 {
-				text = text[:197] + "..."
+				text = truncateRune(text, 197) + "..."
 			}
 			if text != "" {
 				result.Properties = append(result.Properties, PropertyRef{
@@ -5011,7 +5297,7 @@ func extractClassDecorators(classNode *sitter.Node, src []byte, result *ParseRes
 			if child.Type() == "decorator" {
 				text := strings.TrimSpace(child.Content(src))
 				if len(text) > 200 {
-					text = text[:197] + "..."
+					text = truncateRune(text, 197) + "..."
 				}
 				if text != "" {
 					result.Properties = append(result.Properties, PropertyRef{
@@ -5032,7 +5318,7 @@ func extractClassDecorators(classNode *sitter.Node, src []byte, result *ParseRes
 	for prev != nil && prev.Type() == "decorator" {
 		text := strings.TrimSpace(prev.Content(src))
 		if len(text) > 200 {
-			text = text[:197] + "..."
+			text = truncateRune(text, 197) + "..."
 		}
 		if text != "" {
 			result.Properties = append(result.Properties, PropertyRef{
@@ -5053,7 +5339,7 @@ func extractClassDecorators(classNode *sitter.Node, src []byte, result *ParseRes
 		if pt == "marker_annotation" || pt == "annotation" {
 			text := strings.TrimSpace(prev.Content(src))
 			if len(text) > 200 {
-				text = text[:197] + "..."
+				text = truncateRune(text, 197) + "..."
 			}
 			if text != "" {
 				result.Properties = append(result.Properties, PropertyRef{
@@ -5100,7 +5386,7 @@ func findAssertions(node *sitter.Node, sf walker.SourceFile, src []byte, result 
 		if isAssertion {
 			text := strings.TrimSpace(node.Content(src))
 			if len(text) > 200 {
-				text = text[:200]
+				text = truncateRune(text, 200)
 			}
 
 			// Try to extract expected value from arguments
@@ -5124,7 +5410,7 @@ func findAssertions(node *sitter.Node, sf walker.SourceFile, src []byte, result 
 					if argCount == 2 {
 						expected = strings.TrimSpace(child.Content(src))
 						if len(expected) > 80 {
-							expected = expected[:80]
+							expected = truncateRune(expected, 80)
 						}
 						break
 					}
@@ -5146,7 +5432,7 @@ func findAssertions(node *sitter.Node, sf walker.SourceFile, src []byte, result 
 	if nodeType == "assert_statement" || nodeType == "assert" {
 		text := strings.TrimSpace(node.Content(src))
 		if len(text) > 200 {
-			text = text[:200]
+			text = truncateRune(text, 200)
 		}
 		result.Assertions = append(result.Assertions, AssertionRef{
 			TestNodeIdx: testNodeIdx,
@@ -5163,7 +5449,7 @@ func findAssertions(node *sitter.Node, sf walker.SourceFile, src []byte, result 
 		if strings.HasPrefix(text, "assert") {
 			trimmed := strings.TrimSpace(text)
 			if len(trimmed) > 200 {
-				trimmed = trimmed[:200]
+				trimmed = truncateRune(trimmed, 200)
 			}
 			kind := "assert"
 			if strings.HasPrefix(trimmed, "assert_eq!") {
@@ -5745,11 +6031,11 @@ func extractConcurrencyPatterns(bodyNode *sitter.Node, src []byte, result *Parse
 			}
 			lockLine := strings.TrimSpace(bodyText[lineStart : idx+lineEnd])
 			if len(lockLine) > 120 {
-				lockLine = lockLine[:120]
+				lockLine = truncateRune(lockLine, 120)
 			}
 			value := "lock: " + lockLine
 			if len(value) > 200 {
-				value = value[:197] + "..."
+				value = truncateRune(value, 197) + "..."
 			}
 			result.Properties = append(result.Properties, PropertyRef{
 				NodeIdx:    nodeIdx,
@@ -5767,7 +6053,7 @@ func extractConcurrencyPatterns(bodyNode *sitter.Node, src []byte, result *Parse
 			seen["shared_state:"+kw] = true
 			value := "shared_state: " + kw
 			if len(value) > 200 {
-				value = value[:197] + "..."
+				value = truncateRune(value, 197) + "..."
 			}
 			result.Properties = append(result.Properties, PropertyRef{
 				NodeIdx:    nodeIdx,
@@ -5816,7 +6102,7 @@ func extractConfigReads(bodyNode *sitter.Node, src []byte, result *ParseResult, 
 		}
 		key := rest[qIdx+1 : qIdx+1+endQ]
 		if len(key) > 80 {
-			key = key[:80]
+			key = truncateRune(key, 80)
 		}
 		return key
 	}
@@ -5879,7 +6165,7 @@ func extractConfigReads(bodyNode *sitter.Node, src []byte, result *ParseResult, 
 						if endIdx > 0 {
 							dflt = strings.TrimSpace(dfltPart[:endIdx])
 							if len(dflt) > 40 {
-								dflt = dflt[:40]
+								dflt = truncateRune(dflt, 40)
 							}
 						}
 					}
@@ -5889,7 +6175,7 @@ func extractConfigReads(bodyNode *sitter.Node, src []byte, result *ParseResult, 
 					value += " (default=" + dflt + ")"
 				}
 				if len(value) > 200 {
-					value = value[:197] + "..."
+					value = truncateRune(value, 197) + "..."
 				}
 				result.Properties = append(result.Properties, PropertyRef{
 					NodeIdx:    nodeIdx,
@@ -5921,7 +6207,7 @@ func extractConfigReads(bodyNode *sitter.Node, src []byte, result *ParseResult, 
 			seen["env:"+key] = true
 			value := "env: " + key
 			if len(value) > 200 {
-				value = value[:197] + "..."
+				value = truncateRune(value, 197) + "..."
 			}
 			result.Properties = append(result.Properties, PropertyRef{
 				NodeIdx:    nodeIdx,
@@ -5951,7 +6237,7 @@ func extractConfigReads(bodyNode *sitter.Node, src []byte, result *ParseResult, 
 			seen["config:"+key] = true
 			value := "config: " + key
 			if len(value) > 200 {
-				value = value[:197] + "..."
+				value = truncateRune(value, 197) + "..."
 			}
 			result.Properties = append(result.Properties, PropertyRef{
 				NodeIdx:    nodeIdx,
@@ -6024,7 +6310,7 @@ func extractCallOrdering(bodyNode *sitter.Node, src []byte, result *ParseResult,
 			value += " [" + ctx + "]"
 		}
 		if len(value) > 200 {
-			value = value[:197] + "..."
+			value = truncateRune(value, 197) + "..."
 		}
 		line := int(bodyNode.StartPoint().Row) + 1
 		if l, ok := receiverLine[receiver]; ok && l > 0 {
@@ -6171,7 +6457,7 @@ func _walkResourcePatterns(node *sitter.Node, src []byte, result *ParseResult, n
 			resText = text
 		}
 		if len(resText) > 150 {
-			resText = resText[:150]
+			resText = truncateRune(resText, 150)
 		}
 		// Try to find the "as" alias (Python: with expr as name)
 		asName := ""
@@ -6196,7 +6482,7 @@ func _walkResourcePatterns(node *sitter.Node, src []byte, result *ParseResult, n
 			value += " as " + asName
 		}
 		if len(value) > 200 {
-			value = value[:197] + "..."
+			value = truncateRune(value, 197) + "..."
 		}
 		result.Properties = append(result.Properties, PropertyRef{
 			NodeIdx:    nodeIdx,
@@ -6219,11 +6505,11 @@ func _walkResourcePatterns(node *sitter.Node, src []byte, result *ParseResult, n
 		text := strings.TrimSpace(node.Content(src))
 		text = strings.TrimPrefix(text, "defer ")
 		if len(text) > 150 {
-			text = text[:150]
+			text = truncateRune(text, 150)
 		}
 		value := "defer: " + text
 		if len(value) > 200 {
-			value = value[:197] + "..."
+			value = truncateRune(value, 197) + "..."
 		}
 		result.Properties = append(result.Properties, PropertyRef{
 			NodeIdx:    nodeIdx,
@@ -6258,11 +6544,11 @@ func _walkResourcePatterns(node *sitter.Node, src []byte, result *ParseResult, n
 			resText = text
 		}
 		if len(resText) > 150 {
-			resText = resText[:150]
+			resText = truncateRune(resText, 150)
 		}
 		value := "using: " + resText
 		if len(value) > 200 {
-			value = value[:197] + "..."
+			value = truncateRune(value, 197) + "..."
 		}
 		result.Properties = append(result.Properties, PropertyRef{
 			NodeIdx:    nodeIdx,
@@ -6288,11 +6574,11 @@ func _walkResourcePatterns(node *sitter.Node, src []byte, result *ParseResult, n
 			resText = text
 		}
 		if len(resText) > 150 {
-			resText = resText[:150]
+			resText = truncateRune(resText, 150)
 		}
 		value := "context_manager: " + resText
 		if len(value) > 200 {
-			value = value[:197] + "..."
+			value = truncateRune(value, 197) + "..."
 		}
 		result.Properties = append(result.Properties, PropertyRef{
 			NodeIdx:    nodeIdx,

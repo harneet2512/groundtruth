@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // content_fts.go — B1: the CONTENT surface for behavior-described (stratum-B)
@@ -27,12 +29,24 @@ import (
 
 // _identRe matches identifier-like runs (also captures the identifier words inside
 // string literals and comments, which is what we want for a content surface).
-var _identRe = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*`)
+// S8 (Fable): Unicode-aware — the old ASCII class `[A-Za-z_][A-Za-z0-9_]*` silently DROPPED
+// every non-Latin identifier/word (Cyrillic, Greek, accented Latin — café/naïve/Björn, CJK),
+// so the content surface was blind to the domain vocabulary of non-English repos worldwide.
+// `\p{L}` = any Unicode letter, `\p{N}` = any Unicode number. First char is a letter/underscore
+// (leading digits excluded, matching the original identifier intent); the rest may include
+// Unicode digits.
+var _identRe = regexp.MustCompile(`[\p{L}_][\p{L}\p{N}_]*`)
 
 // _contentBodyCharCap bounds the body slice tokenized per symbol so a pathological
 // huge function can never blow up index time / db size. Generous — real function
 // bodies are far smaller.
 const _contentBodyCharCap = 20000
+
+// _contentFTSTokenizer is the ONE source of truth for the symbol_content_fts tokenizer spec.
+// EnsureContentFTS creates with it + self-heals on mismatch; RepopulateContentFTSForFile warns
+// loudly when an existing table's tokenizer is stale (A-Finding1). Kept in one place so the two
+// call sites can never drift.
+const _contentFTSTokenizer = `tokenize="unicode61 tokenchars '_'"`
 
 // splitCamel splits a PascalCase/camelCase run into its word parts, inserting a
 // boundary at a lower→Upper transition and at an Upper-run→Upper+lower transition
@@ -50,10 +64,17 @@ func splitCamel(s string) []string {
 		if i+1 < len(runes) {
 			next = runes[i+1]
 		}
-		lowerToUpper := prev >= 'a' && prev <= 'z' && cur >= 'A' && cur <= 'Z'
-		acronymEnd := cur >= 'A' && cur <= 'Z' && next >= 'a' && next <= 'z' &&
-			prev >= 'A' && prev <= 'Z'
-		if lowerToUpper || acronymEnd {
+		// S8 (Fable): Unicode-aware case boundaries (was ASCII 'a'..'z'/'A'..'Z' — blind to
+		// accented/Cyrillic/Greek camelCase identifiers). unicode.IsLower/IsUpper handle any
+		// script; IsLower(0)/IsUpper(0) are false so the last-char `next==0` case is safe.
+		lowerToUpper := unicode.IsLower(prev) && unicode.IsUpper(cur)
+		acronymEnd := unicode.IsUpper(prev) && unicode.IsUpper(cur) && unicode.IsLower(next)
+		// S8 digit split: break at a letter↔digit transition so "sha256sum" → sha,256,sum and
+		// "utf8Encoder" → utf,8,encoder — a query for "sha"/"encoder" then matches a sub-token a
+		// fused "sha256sum"/"utf8encoder" token would miss. Language-agnostic, Unicode-safe.
+		letterDigit := (unicode.IsLetter(prev) && unicode.IsDigit(cur)) ||
+			(unicode.IsDigit(prev) && unicode.IsLetter(cur))
+		if lowerToUpper || acronymEnd || letterDigit {
 			out = append(out, string(runes[start:i]))
 			start = i
 		}
@@ -69,7 +90,14 @@ func splitCamel(s string) []string {
 // length 1 are dropped (noise). Language-agnostic: operates on raw text, no AST.
 func contentTokens(body string) string {
 	if len(body) > _contentBodyCharCap {
-		body = body[:_contentBodyCharCap]
+		// A-Finding5 (Fable LIPI): walk the byte cap back to a UTF-8 rune boundary so a multibyte
+		// (CJK / accented-Latin) identifier straddling _contentBodyCharCap is not sliced mid-rune
+		// (which _identRe would drop as a non-match — losing the boundary token). ≤3 bytes back.
+		cut := _contentBodyCharCap
+		for cut > 0 && !utf8.RuneStart(body[cut]) {
+			cut--
+		}
+		body = body[:cut]
 	}
 	var toks []string
 	for _, ident := range _identRe.FindAllString(body, -1) {
@@ -92,7 +120,7 @@ func contentTokens(body string) string {
 // and we log + return nil (the localizer's content leg then finds no table and scores
 // 0 — graceful degradation, same contract as nodes_fts).
 func (d *DB) EnsureContentFTS() error {
-	const wantTokenizer = `tokenize="unicode61 tokenchars '_'"`
+	const wantTokenizer = _contentFTSTokenizer
 	var storedSQL string
 	if err := d.db.QueryRow(
 		"SELECT sql FROM sqlite_master WHERE type='table' AND name='symbol_content_fts'",
@@ -266,6 +294,20 @@ func (d *DB) RepopulateContentFTSForFile(root, relpath string) error {
 		"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='symbol_content_fts'",
 	).Scan(&n); err != nil || n == 0 {
 		return nil
+	}
+	// A-Finding1 (Fable LIPI): the incremental (-file) path does NOT run EnsureContentFTS, so its
+	// stale-tokenizer self-heal is skipped. We must NOT call EnsureContentFTS here (it DROPs on a
+	// mismatch → the whole repo's content rows vanish, since we only re-populate THIS file). A
+	// tokenizer change (e.g. the S8 Unicode upgrade) cannot be applied to one file without
+	// re-tokenizing the whole corpus (BM25 IDF consistency), so the correct-or-quiet response is a
+	// LOUD warning that a full rebuild is needed — never a silent mixed-tokenizer corpus.
+	var storedSQL string
+	if err := d.db.QueryRow(
+		"SELECT sql FROM sqlite_master WHERE type='table' AND name='symbol_content_fts'",
+	).Scan(&storedSQL); err == nil && !strings.Contains(storedSQL, _contentFTSTokenizer) {
+		log.Printf("[WARN] symbol_content_fts tokenizer is STALE on the incremental (-file) path "+
+			"(want %q) — this file is refreshed under the OLD tokenizer for corpus consistency; run "+
+			"a FULL gt-index rebuild to apply the current tokenizer everywhere", _contentFTSTokenizer)
 	}
 	rel := filepath.ToSlash(relpath)
 	rows, err := d.db.Query(

@@ -89,6 +89,32 @@ def _proof_mode() -> bool:
     return os.environ.get("GT_PROOF_MODE") == "1"
 
 
+# ---------------------------------------------------------------------------
+# R10 — PROOF-MODE FAIL-CLOSED SENTINEL (harness side, 2026-07-04).
+# gt_mini_patch loads IN-CONTAINER via a site-packages `.pth`. site.py SWALLOWS
+# any import-time raise from that `.pth`, so an in-container fail-closed `raise`
+# silently fails OPEN (GT off, run graded as GT-on). We therefore do NOT trust
+# the swallowable raise: gt_mini_patch writes a POSITIVE on-disk marker only when
+# it fully loads+installs on a GT-ON proof run, and the harness ASSERTS that
+# marker (see `_SELFTEST_PY`, which runs in-container and gates the build). If the
+# marker is absent when proof-mode is required, the run is failed — never silently
+# accepted as GT-on. This constant/verdict mirror gt_mini_patch's sentinel exactly.
+_PROOF_MARKER_PATH = os.environ.get("GT_PROOF_MARKER") or "/tmp/gt_proof_active"
+
+
+def _proof_marker_verdict(proof_required: bool, marker_present: bool) -> tuple[bool, str]:
+    """Fail-closed verdict for the proof sentinel. Returns (ok, reason).
+
+    ``ok`` is False ONLY when a GT-ON proof run (``proof_required``) is missing the
+    marker — i.e. gt_mini_patch did not fully load (its `.pth` import raised and
+    site.py swallowed it). A baseline / non-proof run needs no marker (ok=True)."""
+    if proof_required and not marker_present:
+        return (False, "GT_PROOF_MARKER_ABSENT: gt_mini_patch did not fully load "
+                       "in proof mode (a swallowed .pth raise) — refusing to grade "
+                       "a GT-off trajectory as GT-on")
+    return (True, "ok")
+
+
 def _substrate_active() -> bool:
     """True when the pinned portable substrate already produced the authoritative
     graph + certs and the harness handed them to the adapter READ-ONLY via the
@@ -403,6 +429,22 @@ _BOOTSTRAP_SNIPPET = (
     f'    import sys as _gts; _gts.path.insert(0, "{_GT_DIR}"); import gt_mini_patch  # GroundTruth\n'
     "except Exception:\n"
     "    pass\n"
+    # R-C1 (2026-07-04) IN-CONTAINER RUNTIME fail-closed assertion. This runs in the
+    # AGENT's OWN process (so it sees the EXACT --ae runtime env — not the build env),
+    # at agent-module import (the start of the in-container run), and INDEPENDENTLY of
+    # whether the import above succeeded. It is a real module import (NOT a site.py
+    # .pth), so a raise here PROPAGATES and crashes the agent process rather than being
+    # swallowed. Logic mirrors _proof_marker_verdict exactly: a GT-ON proof run
+    # (GT_PROOF_MODE=1 and not GT_BASELINE) with NO container-local marker means
+    # gt_mini_patch did not fully load (a swallowed .pth/import raise) -> fail closed so
+    # a GT-off trajectory is never graded GT-on. Baseline / non-proof needs no marker.
+    "import os as _gto\n"
+    "if _gto.environ.get('GT_PROOF_MODE') == '1' and _gto.environ.get('GT_BASELINE') != '1':\n"
+    "    _gtm = _gto.environ.get('GT_PROOF_MARKER') or '/tmp/gt_proof_active'\n"
+    "    if not _gto.path.exists(_gtm):\n"
+    "        raise RuntimeError('GT_PROOF_MARKER_ABSENT: gt_mini_patch did not fully "
+    "load in proof mode (a swallowed .pth/import raise) -- refusing to run a GT-off "
+    "trajectory graded as GT-on: ' + _gtm)\n"
 )
 _BOOTSTRAP_B64 = base64.b64encode(_BOOTSTRAP_SNIPPET.encode("utf-8")).decode("ascii")
 
@@ -460,6 +502,15 @@ _SELFTEST_PY = (
     # authoritative graph at GT_HOST_GRAPH_DB=/gt_artifacts/graph.db, NOT /tmp/graph.db),
     # so db=True reflects the real graph instead of lying db=False on a correct run.
     "os.path.exists(os.environ.get('GT_HOST_GRAPH_DB') or '/tmp/graph.db')))\n"
+    # R10 fail-closed proof sentinel: on a GT-ON proof run gt_mini_patch writes a
+    # marker at module end. site.py swallows any import-time raise from the .pth,
+    # so we assert the POSITIVE marker instead of trusting the swallowed raise: if
+    # proof-mode is required and the marker is ABSENT, gt_mini_patch did not fully
+    # load -> fail the run rather than silently grade GT-off as GT-on.
+    "_pm = os.environ.get('GT_PROOF_MARKER') or '/tmp/gt_proof_active'\n"
+    "_proof_req = os.environ.get('GT_PROOF_MODE') == '1' and os.environ.get('GT_BASELINE') != '1'\n"
+    "if _proof_req and not os.path.exists(_pm):\n"
+    "    print('GT_SELFTEST_PROOF_MARKER_ABSENT path=%s' % _pm); sys.exit(8)\n"
     "sys.exit(0 if ok else 7)\n"
 )
 _SELFTEST_B64 = base64.b64encode(_SELFTEST_PY.encode("utf-8")).decode("ascii")
@@ -488,12 +539,12 @@ _GT_PREAMBLE = textwrap.dedent("""\
     ## GroundTruth codebase intelligence (automatic)
 
     As you read and edit files, GroundTruth automatically appends evidence to the
-    command output inside <gt-evidence> tags: who calls a function and how, the
-    tests that cover it, behavioral contracts (signature/return), and sibling
+    command output inside <gt-evidence> tags: who calls a function and how, how many
+    tests cover it, behavioral contracts (signature/return), and sibling
     patterns you must match. Read those tags -- they are cross-file facts you
     cannot get from the file alone. They appear on their own; you do not call
     anything. When GT shows callers, do not break them; when it shows a contract,
-    preserve it; when it names a test, run it to verify.
+    preserve it; and run your own targeted tests to verify each change before you finish.
 """)
 
 # Fallback preamble for when observation interception is not available
@@ -1576,6 +1627,37 @@ class GTMiniSweAgent(_BASE_AGENT):  # type: ignore[misc]
                 + "\n\n" + instruction
             )
 
+    async def _assert_proof_marker(self, environment: BaseEnvironment) -> None:
+        """R-C1 defense-in-depth: verify the agent wrote the proof marker in-container.
+
+        Runs AFTER the agent process executed under its exact runtime env, so the
+        marker reflects whether gt_mini_patch actually loaded (GT-ON) during the run.
+        Reads the CONTAINER-LOCAL marker via ``environment.exec`` (never the host fs)
+        and applies the fail-closed :func:`_proof_marker_verdict`. No-op on the
+        baseline arm / outside proof mode (those need no marker). An exec/teardown
+        error is NOT treated as proof of a GT-off run (the in-process bootstrap check
+        already fails closed); this host-side leg HARD-STOPS only on a CONFIRMED
+        absent marker so it can never fabricate an infra failure or false-fail
+        baseline."""
+        if _GT_BASELINE or not _proof_mode():
+            return
+        marker = _PROOF_MARKER_PATH
+        try:
+            # P0-B (2026-07-05): require the marker to attest hook ATTACHMENT, not mere
+            # presence. The writer (gt_mini_patch._write_proof_marker) records
+            # `patched=<n>:<classes>` and writes NOTHING when n==0, so `patched=[1-9]`
+            # is present-AND-attached in one probe; a bare/`patched=0` marker fails.
+            res = await environment.exec(
+                command=f"grep -qE 'patched=[1-9]' {marker} && echo GT_MARKER_PRESENT"
+            )
+            present = "GT_MARKER_PRESENT" in ((res.stdout or "") + (res.stderr or ""))
+        except Exception as e:  # noqa: BLE001 — unverifiable != GT-off; do not crash.
+            print(f"[GT_META] proof_marker_check_unverifiable err={e!r}", flush=True)
+            return
+        ok, reason = _proof_marker_verdict(proof_required=True, marker_present=present)
+        if not ok:
+            _adapter_fail("PROOF_MARKER_ABSENT_RUNTIME", f"DEEPSWE_ADAPTER_FAIL: {reason}")
+
     async def run(
         self, instruction: str, environment: BaseEnvironment, context: AgentContext
     ) -> None:
@@ -1648,7 +1730,9 @@ class GTMiniSweAgent(_BASE_AGENT):  # type: ignore[misc]
             _brief_hash = hashlib.sha256((brief or "").encode("utf-8")).hexdigest()
             witness = {
                 "schema": "gt.adapter_witness.v1",
-                "gt_prebuilt_active": _os.environ.get("GT_GRAPH_DB") is not None,
+                # F9 (Fable 2026-07-05): an empty GT_GRAPH_DB is NOT an active prebuilt graph;
+                # `is not None` counted "" as active and fed a false positive into the §4 audit.
+                "gt_prebuilt_active": bool(_os.environ.get("GT_GRAPH_DB")),
                 "proof_mode": _proof_mode(),
                 "baseline_arm": _GT_BASELINE,
                 "self_verifier_retry": _retry_count() > 0,
@@ -1671,4 +1755,24 @@ class GTMiniSweAgent(_BASE_AGENT):  # type: ignore[misc]
         except Exception:
             pass
 
+        # F2 (Fable 2026-07-05): clear the proof marker at the SINGLE host boundary BEFORE the
+        # agent runs, replacing the per-interpreter clear at gt_mini_patch import. That import
+        # clear ran in EVERY interpreter, so a SIGKILL'd scratch `timeout python3` (which imports
+        # the module via the .pth, clears, then dies before the module-end write) deleted the
+        # marker the main process had already written — false-failing a genuine GT-on run. P0-B's
+        # write-only-when-attached guard sharpened the hazard (a non-attaching scratch import
+        # clears but never rewrites). Container-local + symmetric with _assert_proof_marker below.
+        if not _GT_BASELINE and _proof_mode():
+            try:
+                await environment.exec(command=f"rm -f {_PROOF_MARKER_PATH} 2>/dev/null; true")
+            except Exception:  # noqa: BLE001 — a clear failure must not break the run
+                pass
+
         await self._run_with_test_retry(augmented, environment, context)
+
+        # R-C1 (2026-07-04) defense-in-depth: after the agent process ran IN-CONTAINER
+        # (under its exact runtime env), assert it wrote the proof marker on a GT-ON
+        # load. Reads the CONTAINER-LOCAL marker via environment.exec (never the host
+        # fs) and applies the fail-closed _proof_marker_verdict. Hard-stops a GT-off
+        # trajectory from being graded GT-on. No-op outside proof mode / on baseline.
+        await self._assert_proof_marker(environment)

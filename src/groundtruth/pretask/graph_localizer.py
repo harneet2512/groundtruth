@@ -314,10 +314,17 @@ def _is_test_block_name(sym: str) -> bool:
     already filters is_test=0 on neighbors, but this catches any that slip
     through (e.g. from seed-minting or cross-hop provenance)."""
     s = (sym or "").strip()
-    return (s.startswith("it:") or s.startswith("it ") or
+    if (s.startswith("it:") or s.startswith("it ") or
             s.startswith("describe:") or s.startswith("describe ") or
             s.startswith("test(") or s.startswith("test ") or
-            " should " in s)
+            " should " in s):
+        return True
+    # E2 (Fable 2026-07-05): also catch pytest/unittest test SYMBOL names — test_foo (^test_),
+    # foo_test (_test$), TestClass (^Test[A-Z]) — that a stale graph (is_test flag unset) can
+    # slip into a witness field. Correct-or-quiet: suppressing a witness never invents one.
+    if s.startswith("test_") or s.endswith("_test"):
+        return True
+    return s.startswith("Test") and len(s) > 4 and s[4].isupper()
 
 
 def _is_generic_symbol(sym: str) -> bool:
@@ -335,27 +342,14 @@ def _is_generic_symbol(sym: str) -> bool:
 
 
 from groundtruth.delivery.path_policy import is_generated as _is_generated
+from groundtruth.delivery.path_policy import is_test_path as _is_test_path_pp
 
 
-# Test file detection — language-agnostic patterns covering all 5+ Tier-1
-# languages. Test files are observation/verification artifacts, never the edit
-# target for a bug fix. They often DEFINE issue-named symbols (test functions
-# for the broken feature) so they score high on DEFINES witnesses, but they
-# are structurally wrong targets — applying the same heavy demote as generated
-# files (score -= penalty, not hard drop) keeps them in the candidate list for
-# reference while preventing them from ranking #1.
-_TEST_PATTERNS: tuple[str, ...] = (
-    "test_", "_test.", ".test.", ".spec.", "_spec.",
-    "/tests/", "/test/", "/__tests__/",
-    "testing/", "testutil", "test_helper",
-)
-
-
-def _is_test_file(fp: str) -> bool:
-    """True for test/spec files across all supported languages."""
-    f = os.path.basename((fp or "").lower())
-    p = (fp or "").replace("\\", "/").lower()
-    return any(m in f or m in p for m in _TEST_PATTERNS)
+# Test-file detection is delegated to the CANONICAL segment-based predicate
+# (delivery.path_policy.is_test_path, imported above as _is_test_path_pp) so the localizer's
+# non-source demote and the brief-render test filter agree. A local substring predicate lived here
+# and drifted from path_policy (it matched "testing/" as a substring, which P11 removed as
+# production-ambiguous) — B-Finding2 (Fable LIPI) removed it to end the re-divergence.
 
 
 def _fts5_candidates(
@@ -462,16 +456,30 @@ def _fts5_candidates(
 
     match_expr = " OR ".join(safe_tokens)
 
-    try:
-        rows = _fts_conn.execute(
-            """SELECT rowid, name, file_path,
+    # LEAK INVARIANT (Fable S1/L2, reproduced live): the Go-built external-content nodes_fts
+    # is now is_test-filtered at INSERT (store/sqlite.go), but a STALE or externally-built
+    # graph.db could still carry test rows — and a test symbol seeded here becomes an
+    # FTS5_SEED/BFS root that renders as `fts5 match: …`, leaking the FAIL_TO_PASS surface.
+    # Defense-in-depth: on the direct-graph.db path (not owned) JOIN nodes and exclude
+    # is_test. The in-memory fallback (owned) is already population-filtered (_FTS5_POPULATE
+    # WHERE is_test = 0) and has no local `nodes` to join — so keep its plain query.
+    if _fts_conn_owned:
+        _fts_query = """SELECT rowid, name, file_path,
                       bm25(nodes_fts, 1.0, 2.0, 0.5, 0.5) as score
                FROM nodes_fts
                WHERE nodes_fts MATCH ?
                ORDER BY score
-               LIMIT ?""",
-            (match_expr, limit),
-        ).fetchall()
+               LIMIT ?"""
+    else:
+        _fts_query = """SELECT nodes_fts.rowid, nodes_fts.name, nodes_fts.file_path,
+                      bm25(nodes_fts, 1.0, 2.0, 0.5, 0.5) as score
+               FROM nodes_fts
+               JOIN nodes n ON n.id = nodes_fts.rowid
+               WHERE nodes_fts MATCH ? AND COALESCE(n.is_test, 0) = 0
+               ORDER BY score
+               LIMIT ?"""
+    try:
+        rows = _fts_conn.execute(_fts_query, (match_expr, limit)).fetchall()
     except sqlite3.Error as _q_err:
         print(f"[GT L1] FTS5: query failed: {_q_err}", file=sys.stderr)
         return []
@@ -527,11 +535,16 @@ _L1_STOPWORDS = frozenset({
     "into", "more", "than", "each", "also", "after", "before",
 })
 
+# Max query terms fed to the content-BM25 MATCH (kept the rarest = most discriminative,
+# per DF ordering below). Module-level so tests can shrink it to exercise the ordering.
+_CONTENT_FTS_TERM_CAP = 30
+
 
 def _content_fts_candidates(
     conn: sqlite3.Connection,
     issue_tokens: set[str],
     limit: int = 50,
+    issue_text: str = "",
 ) -> list[tuple[int, str, str, float]]:
     """BM25 retrieval over per-symbol BODY content (symbol_content_fts, the Go B1 index).
 
@@ -571,14 +584,46 @@ def _content_fts_candidates(
                 if len(sub) >= 2:
                     _expanded.add(sub)
 
-    safe_tokens: list[str] = []
-    for t in sorted(_expanded, key=lambda x: (-len(x), x)):
+    # Case-aware expansion from the RAW issue text: _issue_terms lowercases every token
+    # BEFORE it reaches here (getUserById -> getuserbyid), erasing the camelCase boundary so
+    # the loop above finds nothing — partial-match then works only for snake_case langs
+    # (Python/Rust) and is DEAD for camelCase (JS/TS/Go/Java, 4 of 6 Tier-1). Splitting the
+    # ORIGINAL-case issue words restores it (sub-tokens lowercased to match the case-folded
+    # unicode61 FTS content). issue_text="" => byte-identical to the pre-fix behaviour.
+    if issue_text:
+        for w in _re.findall(r"[A-Za-z_]\w{2,}", issue_text):
+            for part in w.split("_"):
+                for sub in _split_camel_subtokens(part):
+                    if len(sub) >= 2:
+                        _expanded.add(sub.lower())
+
+    # Well-formed, non-stopword candidates (len>=3, alnum/_).
+    _cands: list[str] = []
+    for t in _expanded:
         cleaned = t.replace('"', "")
         if (len(cleaned) >= 3 and cleaned.lower() not in _L1_STOPWORDS
                 and all(c.isalnum() or c == "_" for c in cleaned)):
-            safe_tokens.append(f'"{cleaned}"')
-        if len(safe_tokens) >= 30:
-            break
+            _cands.append(cleaned)
+    # SOTA term selection (Fable #4): order by ASCENDING document frequency in
+    # symbol_content_fts — rarest = most discriminative (IDF-like) — instead of longest-first,
+    # which anti-selects short distinctive domain tokens (tls/acl/ssl) under a common word cap.
+    # Data-driven + repo-local + deterministic (tie-break -len, token). df==0 tokens retrieve
+    # nothing, so they sort LAST (harmless, but never displace a df>=1 term). To bound the FTS
+    # COUNT probes on a huge issue, only the 120 longest candidates are scored (the rest are
+    # the least likely to be distinctive multi-word compounds anyway).
+    _probe = sorted(set(_cands), key=lambda x: (-len(x), x))[:120]
+
+    def _df(tok: str) -> int:
+        try:
+            return conn.execute(
+                "SELECT count(*) FROM symbol_content_fts WHERE symbol_content_fts MATCH ?",
+                (f'"{tok}"',),
+            ).fetchone()[0]
+        except sqlite3.Error:
+            return 1 << 30
+    _dfmap = {t: _df(t) for t in _probe}
+    _ranked = sorted(_probe, key=lambda x: (_dfmap[x] == 0, _dfmap[x], -len(x), x))
+    safe_tokens = [f'"{t}"' for t in _ranked[:_CONTENT_FTS_TERM_CAP]]
     if not safe_tokens:
         return []
     match_expr = " OR ".join(safe_tokens)
@@ -816,11 +861,28 @@ class Candidate:
         """
         if not self.witnesses:
             return ""
-        edge_wits = [
-            w for w in self.witnesses if w.direction != "defines_anchor"
-            and w.src_symbol != w.dst_symbol
+        # LEAK GUARD (Fable L8, defense-in-depth): EVERY render branch below prints
+        # w.anchor / w.src_symbol / w.dst_symbol verbatim (hop-2 "{anchor} -> ... -> {far}",
+        # "defines {anchor}", "{seed}: {src or anchor}"). The nodes_fts is_test fix keeps
+        # test nodes out of the BFS, but a test NAME could still reach a witness field via a
+        # stale index or cross-hop provenance — and the old filter guarded only the
+        # edge-witness src/dst, NEVER the anchor. Drop any witness whose anchor OR either
+        # endpoint is a test-block name up front, so all three branches inherit the guard.
+        _safe = [
+            w for w in self.witnesses
+            # E2 (Fable 2026-07-05): admission defense — drop a witness whose FILE is a test
+            # path (mirrors §19.1 caller-line closure). The name guards below miss a real code
+            # symbol that merely LIVES in tests/ on a stale graph (is_test flag unset).
+            if not _is_test_path_pp(w.file_path)
+            and not _is_test_block_name(w.anchor)
             and not _is_test_block_name(w.src_symbol)
             and not _is_test_block_name(w.dst_symbol)
+        ]
+        if not _safe:
+            return ""
+        edge_wits = [
+            w for w in _safe if w.direction != "defines_anchor"
+            and w.src_symbol != w.dst_symbol
         ]
         if edge_wits:
             # Prefer a MEANINGFUL edge (neither endpoint a generic constructor/
@@ -858,7 +920,7 @@ class Candidate:
                 else f"{w.dst_symbol} called by {w.src_symbol}"
             )
             return f"{body} [{w.edge_type}]{tag}"
-        w = max(self.witnesses, key=lambda x: x.strength())
+        w = max(_safe, key=lambda x: x.strength())
         # SEED-TYPED witnesses (fix 2026-06-09): only the exact-name seeder mints
         # the "defines {name} (issue symbol)" DEFINES fact. A grep/path/FTS5 seed
         # is a retrieval ENTRY POINT — render it as what it is, never as a
@@ -2184,9 +2246,15 @@ def _assemble_symbol_passages(
     conn = sqlite3.connect(graph_db)
     try:
         body_map = _symbol_body_map(conn, body_on)
+        # B-Finding1b (Fable LIPI): ORDER BY id so the per-file 80-passage cap picks a
+        # DETERMINISTIC set of symbols. Without it the cap took whichever 80 SQLite's query plan
+        # returned (de-facto rowid order today, but not guaranteed across indexes / SQLite
+        # versions) — a reproducibility hazard for measure_brief. Parity with incremental.go's
+        # capped queries. (The relevance-first ordering of the cap — so a gold symbol past #80 is
+        # not invisible — is the separately-measured L4(b), deferred to the Phase-4 ranking pass.)
         for nid, fp, nm, sig, _sl, _el in conn.execute(
             "SELECT id, file_path, name, COALESCE(signature,''), "
-            "start_line, end_line FROM nodes WHERE is_test=0"):
+            "start_line, end_line FROM nodes WHERE is_test=0 ORDER BY id"):
             k = _normalize(fp)
             if k not in want or len(file_passages.get(k, [])) >= 80:
                 continue
@@ -2426,12 +2494,18 @@ def localize(
     # the seed. Do NOT early-return when no issue token equals a node name — grep
     # recall (string match over file CONTENT, incl. data-access sites like
     # box.style['overflow']) is the seed/floor and runs below. Only bail when there
-    # is neither a symbol anchor NOR a repo to grep NOR the content-BM25 leg: B1's
-    # symbol_content_fts lives INSIDE graph.db, so it seeds the repo-less path with no
-    # anchor (the exact stratum-B case it exists for). Without this the content block
-    # below is DEAD CODE behind this gate on precisely the path it was built to rescue.
-    # Default-off (GT_CONTENT_LEG unset) → the condition is unchanged → byte-identical.
-    if not anchors and not repo_root and os.getenv("GT_CONTENT_LEG") != "1":
+    # is neither a symbol anchor NOR a repo to grep NOR the content-BM25 leg NOR any issue
+    # text for the FTS5 leg. B1's symbol_content_fts lives INSIDE graph.db, so it seeds the
+    # repo-less path with no anchor (the exact stratum-B case it exists for).
+    # L5 (Fable): the FTS5 leg (_fts5_candidates below) ALSO lives inside graph.db and builds
+    # an in-memory index when the persisted nodes_fts is absent — so it can seed the repo-less /
+    # no-anchor path with ZERO external deps. Coupling this bail to `not repo_root` alone made
+    # FTS5 DEAD on that path (the carve-out named only the content leg). If the graph has nodes
+    # and the issue has tokens, let FTS5 try; the `if not seeds` net below still returns
+    # no_anchor_hit when it and every other leg come up empty, so nothing is over-claimed. The
+    # measured/paid path (repo_root present) never hit this bail → byte-identical there.
+    _fts_seedable = bool(issue_text and issue_text.strip())
+    if not anchors and not repo_root and os.getenv("GT_CONTENT_LEG") != "1" and not _fts_seedable:
         return LocalizerResult([], [], 0.0, False, "no_anchor_hit")
 
     # Phase 1/2: the set of files GREP recalled (string match over content). This is
@@ -2626,7 +2700,7 @@ def localize(
         # -> grep succeeds) is byte-identical; this only lights the grep-dead lane.
         if (not grep_recalled) and os.getenv("GT_CONTENT_LEG") == "1":
             try:
-                _cfts = _content_fts_candidates(conn, terms, limit=_grep_limit)
+                _cfts = _content_fts_candidates(conn, terms, limit=_grep_limit, issue_text=issue_text)
                 if _cfts:
                     _existing_ids_c = {s[0] for s in seeds}
                     for _nid, _cname, _cfp, _cscore in _cfts:
@@ -2872,7 +2946,12 @@ def localize(
                         f"n.name, n.file_path, e.type, {conf_sel}, {method_sel}, {tier_sel} "
                         f"FROM edges e JOIN nodes n ON {join_col} = n.id "
                         f"WHERE {match_col} IN ({ph}) "
-                        f"AND e.type IN ('CALLS','IMPORTS') AND n.is_test = 0"
+                        f"AND e.type IN ('CALLS','IMPORTS') AND n.is_test = 0 "
+                        # DETERMINISM (Fable L9): the sibling decay walk has an ORDER BY;
+                        # this BFS did not, so anchor_of_id (first-row-wins for a neighbor
+                        # reachable from >1 frontier node) and render_witness's tie order
+                        # were query-plan-dependent. Fix insertion order deterministically.
+                        f"ORDER BY n.file_path, {join_col}, {match_col}, e.type"
                     )
                     try:
                         rows = conn.execute(sql, chunk).fetchall()
@@ -3226,11 +3305,13 @@ def localize(
             score = _rrf_score_by_file.get(fp, 0.0)
         else:
             score = _raw_score / _weight_sum if _weight_sum > 0 else _raw_score
-        if _is_generated(fp):
-            score -= 0.5
+        # L3/L7 (Fable): the test/generated/tooling demote is applied as an ORDERING stratum
+        # in the FINAL SORT (see _nonsource_stratum below), NOT as a score subtraction. Under
+        # V2 fusion the sort keys on rank fusion — never c.score — so a `score -= 0.4/0.5` was
+        # DEAD (a .pb.go / vendored testify re-entered top-k) AND it polluted the confidence
+        # gate's flatness MAD with negative demote outliers (L7). Keeping c.score clean fixes
+        # both; GT_TEST_TOOLING_DEMOTE still gates the tooling stratum.
         _tt_on = os.environ.get("GT_TEST_TOOLING_DEMOTE", "1") != "0"  # default ON; "0"=A/B baseline
-        if _is_test_file(fp) or (_tt_on and _is_tt(fp, _tt_roots)):
-            score -= 0.4
         candidates.append(
             Candidate(
                 file_path=fp,
@@ -3478,11 +3559,33 @@ def localize(
             return 0.0
         return -round(_sem.get(_normalize(c.file_path), 0.0), 4)
 
+    def _nonsource_stratum(c: "Candidate") -> int:
+        # L3 (Fable): test / generated / vendored-tooling files sink BELOW real source in the
+        # final order — restoring the demote that the dead `score -= 0.4/0.5` no longer
+        # delivered under V2 fusion. Placed AFTER the grep-recall floor + depth authority (a
+        # grep-recalled file is NEVER pushed below a non-recalled one — the Phase-2 invariant)
+        # but ABOVE rank fusion, so a high-RRF .pb.go / vendored testify cannot outrank real
+        # source. 2 = generated (the old strongest -0.5), 1 = test/tooling (-0.4), 0 = source.
+        # Same toggle: GT_TEST_TOOLING_DEMOTE=0 keeps the tooling stratum off (A/B baseline).
+        fp = c.file_path
+        if _is_generated(fp):
+            return 2
+        # B-Finding2 (Fable LIPI): use the CANONICAL segment-based test predicate
+        # (path_policy.is_test_path) — the same one the brief-render filter uses — NOT a local
+        # substring predicate. The old local `_is_test_file` still matched "testing/" as a
+        # SUBSTRING, which P11 deliberately removed from path_policy as production-ambiguous
+        # (Django `django/test`, Go `testing` helpers), so the demote sank real source that the
+        # render kept. Routing through is_test_path makes the demote and the render agree.
+        if _is_test_path_pp(fp) or (_tt_on and _is_tt(fp, _tt_roots)):
+            return 1
+        return 0
+
     candidates.sort(
         key=lambda c: (
             _sem_led_key(c),         # GT_LOC_SEM_LED: semantic magnitude LEADS (else 0.0 no-op)
             _grep_floor(c),          # Phase 2: grep recall floor (PRIMARY when sem not led)
             _depth_authority(c),     # Phase 3: string-world non-recalled sinks
+            _nonsource_stratum(c),   # L3: non-source (test/generated/tooling) sinks below source
             -_rrf3(c),               # lexical + structural + SEMANTIC rank fusion
             *_final_relevance_key(c, _cand_subject_pos),  # relevance before the path string
         )
