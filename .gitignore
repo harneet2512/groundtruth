@@ -180,6 +180,8 @@ gt-index/gt-index*.exe
 
 # GITHUB REPO IS CODE-ONLY (CLAUDE.md line 1) — docs/reports are LOCAL working artifacts
 /gt_math.md
+/GT_MATH_*.md
+/TIER_*.md
 /gt_gt.md
 /gt_new.md
 /gt_trial.md
