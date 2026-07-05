@@ -1594,6 +1594,25 @@ def _rebuild_closure(db_path: str) -> bool:
         return False
 
 
+def _closure_action(defer: bool, changed: int) -> str:
+    """Decide what a single LSP pass does with the transitive-closure sidecar (pure + testable).
+
+    Returns one of:
+      - ``"defer"``   — the multi-language orchestrator owns ONE post-loop rebuild over the FINAL
+                        edge set (this pass skips its rebuild). Set via ``GT_DEFER_CLOSURE_REBUILD``.
+                        The closure sidecar is a whole-graph property; rebuilding it once per language
+                        is wasted work (only the last survives) and it is NOT part of the edges hash.
+      - ``"rebuild"`` — this pass mutated edges (``changed > 0``) → recompute the closure over them.
+      - ``"stamp"``   — no edges changed → the closure already reflects the edges; just refresh the
+                        freshness timestamp so ``assert_closure_after_lsp`` (clo_ts >= lsp_ts) holds.
+
+    ``defer=False`` reproduces the historical per-pass behaviour EXACTLY (rebuild iff changed, else
+    stamp) — so every single-language / standalone caller is byte-identical."""
+    if defer:
+        return "defer"
+    return "rebuild" if changed > 0 else "stamp"
+
+
 def resolve_main() -> None:
     """CLI entry point for gt-resolve."""
     parser = argparse.ArgumentParser(
@@ -1918,13 +1937,24 @@ def resolve_main() -> None:
         _proof.stamp_meta(args.db, "lsp_language", args.lang)
 
         # Closure rebuild AFTER LSP (stale otherwise). Fatal in proof mode if it fails/stale.
+        # TIER-2 (multi-language build perf): when the multi-language orchestrator drives this pass
+        # (GT_DEFER_CLOSURE_REBUILD=1) the whole-graph closure rebuild is DEFERRED to ONE post-loop
+        # rebuild the orchestrator owns — rebuilding the sidecar once per language is wasted work
+        # (only the last survives; the closure table is NOT part of graph_edges_hash). The EDGES are
+        # still mutated + snapshotted below. Default-off → single-language / standalone callers are
+        # byte-identical (rebuild inline + assert here, exactly as before). See _closure_action.
         _changed = (stats.get("corrected", 0) + stats.get("deleted", 0) + stats.get("verified", 0))
-        if _changed:
+        _clo_action = _closure_action(
+            os.environ.get("GT_DEFER_CLOSURE_REBUILD") == "1", _changed)
+        if _clo_action == "rebuild":
             _closure_ok = _rebuild_closure(args.db)
-        else:
+        elif _clo_action == "stamp":
             _proof.stamp_closure(args.db)
             _closure_ok = True  # no edges changed → closure already reflects post-LSP state
-        _proof.assert_closure_after_lsp(args.db)
+        else:  # "defer" → the orchestrator rebuilds the whole-graph closure once, after all langs
+            _closure_ok = False
+        if _clo_action != "defer":
+            _proof.assert_closure_after_lsp(args.db)
         # C3 (Fable 2026-07-05): stamp from the ACTUAL rebuild outcome, not unconditionally
         # True — a warn-and-continue no-op (binary absent, non-proof) leaves the closure stale.
         cert["closure_rebuilt_after_lsp"] = bool(_closure_ok)

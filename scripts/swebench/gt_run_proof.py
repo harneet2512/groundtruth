@@ -726,6 +726,58 @@ def _canonical_cert_source(out_dir: str, declared_lang, dominant_lang) -> tuple[
     return os.path.join(out_dir, f"lsp_certificate_{dom}.json"), dom
 
 
+def _finalize_after_lsp_hash(graph_db: str, cert_lsp: str):
+    """WHOLE-GRAPH FINALIZE — refresh ``graph_hash_after_lsp`` in the canonical LSP cert to
+    the hash of the FINAL graph, after ALL per-language LSP passes.
+
+    ``graph_hash_after_lsp`` is a whole-graph invariant (the graph AFTER every language's LSP
+    pass). But ``resolve.py`` snapshots it PER LANGUAGE (right after that one language's closure
+    rebuild), and ``_canonical_cert_source`` keys the canonical cert on the DECLARED language —
+    which need NOT be the LAST language to mutate the shared ``graph.db``. When a non-declared
+    language resolves AFTER the declared one (measured: katex declared=js [corrected 0, deleted 1]
+    then typescript [verified 26, corrected 12] rebuilt closure 2555->2852), the canonical cert
+    froze a STALE mid-pipeline hash. The runtime hook (``gt_agent._emit_gt_meta_witness``) and
+    ``graph_certificate`` then compare that stale authority against the FINAL graph and FALSE-FAIL
+    ``GRAPH_FAIL_HASH_MISMATCH`` — charged failure_class=GT — on a perfectly good (more-complete)
+    graph. Re-snapshotting the authority ONCE over the final ``graph.db`` fixes it.
+
+    Uses the SAME edge hash the witness + graph_certificate use, so all three agree by
+    construction. GENERALIZED (any language count/order, zero task/lang keys). DETERMINISTIC (the
+    final edge set is order-independent — languages resolve disjoint, extension-partitioned files;
+    only the snapshot moment differed). STRICT NO-OP (cert left byte-identical) for single-language
+    repos or when the declared language WAS the last to mutate. Still lets the witness catch REAL
+    handoff divergence (the hook consuming a different/corrupt db than the final certified one).
+
+    Returns ``(stale_hash, final_hash)`` when a refresh was written, else ``None`` (no-op).
+    """
+    try:
+        from groundtruth.runtime import proof as _proof_fin
+        final = _proof_fin.graph_edges_hash(graph_db)
+    except Exception:
+        return None
+    if not final or not os.path.exists(cert_lsp):
+        return None
+    try:
+        with open(cert_lsp, encoding="utf-8") as fh:
+            cc = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(cc, dict):
+        return None
+    stale = cc.get("graph_hash_after_lsp")
+    if stale == final:
+        return None  # already the final graph -> byte-identical no-op (determinism preserved)
+    cc["graph_hash_after_lsp"] = final
+    cc["closure_hash_after_rebuild"] = final
+    cc["graph_hash_after_lsp_refreshed_from"] = stale  # honesty trail
+    try:
+        with open(cert_lsp, "w", encoding="utf-8") as fh:
+            json.dump(cc, fh, indent=2)
+    except OSError:
+        return None
+    return (stale, final)
+
+
 def _count_lsp_stamped_edges(graph_db: str) -> int:
     """COUNT of edges the resolver stamped as LSP-resolved. For the G4 inverse
     stamp check only (graph has lsp edges but the canonical cert reports no-op)."""
@@ -1374,6 +1426,13 @@ def main(argv=None) -> int:
     lsp_ok = False
     lsp_ready_budgets: dict[str, int] = {}
     lang_verdicts: dict = {}  # per-language verdict (aggregated, none overwritten)
+    # TIER-2 (multi-language build perf): defer each per-language closure rebuild to ONE
+    # orchestrator-owned rebuild after the loop. The transitive-closure sidecar is a whole-graph
+    # property over the FINAL edge set — rebuilding it once per language wastes K-1 rebuilds (only
+    # the last survives; it is NOT part of graph_edges_hash). Single-language repos do NOT defer
+    # (no env var → resolve.py rebuilds inline + asserts, byte-identical to before).
+    _multi_lang_closure_defer = len(langs) >= 2
+    _total_effective_lsp = 0  # Σ verified+corrected+deleted across langs → drives the one rebuild
     for lg in reversed(langs):  # least-common first, dominant last
         # Per-language certificate path: NO overwrite — every language's cert persists.
         cert_lsp_lang = os.path.join(a.out, f"lsp_certificate_{lg}.json")
@@ -1384,6 +1443,8 @@ def main(argv=None) -> int:
             GT_LSP_CERT=cert_lsp_lang,
             GT_LSP_READY_BUDGET_S=str(budget_s),
         )
+        if _multi_lang_closure_defer:
+            lang_env["GT_DEFER_CLOSURE_REBUILD"] = "1"
         cmd = [sys.executable, "-m", "groundtruth.resolve", "--db", graph, "--root", work,
                "--resolve", "--lang", lg, "--max-edges", max_edges]
         if scope_path:
@@ -1407,6 +1468,17 @@ def main(argv=None) -> int:
         lang_verdicts[lg] = verdict or "LSP_RESOLVE_ERROR(no_verdict)"
         if rr.returncode == 0:
             lsp_ok = True
+        # TIER-2: tally this language's edge mutations (from its own cert) so the single
+        # post-loop rebuild fires iff ANY language changed edges — mirroring resolve.py's
+        # per-pass "rebuild iff changed, else stamp" exactly, once instead of K times.
+        if _multi_lang_closure_defer and os.path.exists(cert_lsp_lang):
+            try:
+                _lc_l = json.load(open(cert_lsp_lang, encoding="utf-8"))
+                _total_effective_lsp += (int(_lc_l.get("verified_edges", 0) or 0)
+                                         + int(_lc_l.get("corrected_edges", 0) or 0)
+                                         + int(_lc_l.get("deleted_edges", 0) or 0))
+            except (OSError, ValueError):
+                pass
     # Canonical cert (G4) = the DECLARED task language's cert when present, else the
     # graph-DOMINANT language's (langs[0], node-count desc). Per-language certs persist
     # alongside so a FAIL verdict is never lost to an overwrite. proof_language is the
@@ -1421,6 +1493,44 @@ def main(argv=None) -> int:
                   f"(declared={(proof_language or 'n/a')}, dominant={langs[0]})", flush=True)
         except OSError as _ce:
             print(f"WARN: could not copy {_canon_lang} LSP cert to canonical path: {_ce}", file=sys.stderr)
+    # TIER-2: ONE orchestrator-owned closure rebuild over the FINAL edge set (the per-language
+    # passes deferred it via GT_DEFER_CLOSURE_REBUILD). Mirrors resolve.py's per-pass contract
+    # EXACTLY — rebuild iff any language mutated edges, else stamp — reusing _closure_action, and
+    # runs the SAME proof-mode freshness assertion (clo_ts >= lsp_ts), moved from per-language to
+    # once-after-loop. In proof mode a missing binary / rc!=0 fail-closes inside _rebuild_closure,
+    # preserving the closure-legitimacy gate. Then stamps the canonical cert honestly. The final
+    # closure table is IDENTICAL to the baseline's last per-language rebuild (same final edges);
+    # only K-1 redundant rebuilds are removed. No-op unless we deferred (single-language untouched).
+    if _multi_lang_closure_defer:
+        from groundtruth.resolve import _closure_action as _clo_act
+        from groundtruth.resolve import _rebuild_closure as _rebuild_closure_once
+        from groundtruth.runtime import proof as _proof_clo
+        if _clo_act(False, _total_effective_lsp) == "rebuild":
+            _final_closure_ok = _rebuild_closure_once(graph)
+        else:  # no language changed edges → closure already valid; refresh freshness ts only
+            _proof_clo.stamp_closure(graph)
+            _final_closure_ok = True
+        _proof_clo.assert_closure_after_lsp(graph)  # SAME fail-close, once (proof mode)
+        print(f"[gt-run-proof] closure rebuilt ONCE over final graph "
+              f"(Σeffective={_total_effective_lsp}, ok={_final_closure_ok}) — "
+              f"{len(langs)} langs, K-1 redundant rebuilds skipped (tier-2)", flush=True)
+        if os.path.exists(cert_lsp):
+            try:
+                _cc_clo = json.load(open(cert_lsp, encoding="utf-8"))
+                _cc_clo["closure_rebuilt_after_lsp"] = bool(_final_closure_ok)
+                with open(cert_lsp, "w", encoding="utf-8") as _fh_clo:
+                    json.dump(_cc_clo, _fh_clo, indent=2)
+            except (OSError, ValueError):
+                pass
+    # WHOLE-GRAPH FINALIZE (multi-language correctness): re-snapshot graph_hash_after_lsp
+    # ONCE over the FINAL graph.db and stamp it into the canonical cert — the per-language
+    # snapshot picked by DECLARED language can be stale when a non-declared language mutated
+    # the shared graph AFTER it. See _finalize_after_lsp_hash. No-op for single-language repos.
+    _fin = _finalize_after_lsp_hash(graph, cert_lsp)
+    if _fin:
+        print(f"[gt-run-proof] graph_hash_after_lsp refreshed to FINAL graph "
+              f"({(_fin[0] or '(absent)')[:12]} -> {_fin[1][:12]}) — canonical lang={_canon_lang!r} "
+              f"was not the last to mutate the shared graph.db (whole-graph finalize)", flush=True)
     # G4 inverse stamp check: the GRAPH carries lsp-stamped edges but the canonical cert
     # reports zero effective LSP work -> the cert under-reports real work (wrong-language
     # or stale cert masking the task language). Diagnostic flag, generalized (no task keys).
