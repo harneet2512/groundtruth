@@ -84,11 +84,14 @@ def _edited_files(workspace: str) -> list[str]:
 
 
 def _is_test_file(path: str) -> bool:
-    p = "/" + path.lower().replace("\\", "/")
-    if any(seg in p for seg in ("/tests/", "/test/", "/__tests__/", "/spec/")):
-        return True
-    base = os.path.basename(p)
-    return base.startswith("test_") or base.endswith("_test.py")
+    """Delegate to the canonical test predicate (``path_policy.is_test_path``, full
+    ``walker.IsTestFile`` parity). The prior thin copy caught only ``test_``/``_test.py``
+    + a few dirs, so on a non-Python repo the row-27 gate leg treated ``*_test.go`` /
+    ``FooTest.java`` / ``*.test.ts`` / ``*_spec.rb`` / ``conftest.py`` / ``tests.rs`` as
+    source (parity gap flagged in GT_MINI_OH_PORT_GUIDE §IV.6)."""
+    from groundtruth.delivery.path_policy import is_test_path
+
+    return is_test_path(path)
 
 
 def _checked_files(instance_id: str) -> set[str]:

@@ -46,6 +46,17 @@ type IncomingEdgeRef struct {
 	// carried for parity with the full resolver index (it reads qualified_name)
 	// so the incremental path resolves against a non-lobotomized node view.
 	TargetQualifiedName string
+	// TargetSignature is the target node's signature — the R#2 identity witness.
+	// When qualified_name does NOT uniquely re-prove identity (idiomatic Go
+	// cross-file-receiver methods — `types.go` declares the type, `methods.go`
+	// defines the method — carry the BARE name as qualified_name, so ≥2 same-named
+	// such methods collide on qname), a UNIQUE signature match among the same-named
+	// candidates re-proves WHICH node the edge meant. The signature embeds the
+	// receiver for Go (`func (b *Beta) Reset()`) and the full parameter list for
+	// every language, so same-named twins are distinguishable by it — the restore
+	// preserves the type-aware tier onto the RIGHT target instead of stripping to
+	// name_match@ids[0] (LIPI #1 residual: L6 making the map WORSE post-edit).
+	TargetSignature string
 	// Metadata is the edge's metadata column (B6) — e.g. api_edges route info. It
 	// is source-side (call-site) data unchanged by re-parsing the TARGET file, so a
 	// -file reindex must RESTORE it verbatim rather than nulling it (info-loss).
@@ -80,7 +91,7 @@ func SnapshotIncomingEdgesTx(tx *sql.Tx, filePath string, cap int) ([]IncomingEd
 		`SELECT e.source_id, e.source_line, e.type, COALESCE(e.source_file, ''), n.name,
 		        COALESCE(e.resolution_method, ''), COALESCE(e.confidence, 0.0),
 		        COALESCE(e.evidence_type, ''), COALESCE(n.qualified_name, ''),
-		        COALESCE(e.metadata, '')
+		        COALESCE(e.metadata, ''), COALESCE(n.signature, '')
 		   FROM edges e
 		   JOIN nodes n ON e.target_id = n.id
 		  WHERE n.file_path = ?
@@ -103,7 +114,8 @@ func SnapshotIncomingEdgesTx(tx *sql.Tx, filePath string, cap int) ([]IncomingEd
 	for rows.Next() {
 		var r IncomingEdgeRef
 		if err := rows.Scan(&r.SourceID, &r.SourceLine, &r.EdgeType, &r.SourceFile, &r.TargetName,
-			&r.ResolutionMethod, &r.Confidence, &r.EvidenceType, &r.TargetQualifiedName, &r.Metadata); err != nil {
+			&r.ResolutionMethod, &r.Confidence, &r.EvidenceType, &r.TargetQualifiedName, &r.Metadata,
+			&r.TargetSignature); err != nil {
 			return nil, fmt.Errorf("scan incoming edge: %w", err)
 		}
 		out = append(out, r)
@@ -213,7 +225,7 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string)
 	// qualified_name so the restore can re-prove TARGET IDENTITY against the original
 	// edge's TargetQualifiedName (P0: a bare-name re-match must not launder a verified
 	// tier onto a different node that happens to share the simple name).
-	lookup, err := tx.Prepare(`SELECT id, COALESCE(qualified_name, '') FROM nodes WHERE name = ? AND file_path = ? ORDER BY id`)
+	lookup, err := tx.Prepare(`SELECT id, COALESCE(qualified_name, ''), COALESCE(signature, '') FROM nodes WHERE name = ? AND file_path = ? ORDER BY id`)
 	if err != nil {
 		return 0, 0, fmt.Errorf("prepare incoming lookup: %w", err)
 	}
@@ -244,12 +256,12 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string)
 		// qualified_name is bare `name` for top-level funcs, so it is NOT unique in
 		// a file) do NOT re-prove WHICH node the edge meant; preserving a CERTIFIED
 		// tier onto the arbitrary first would launder it (Fable 2026-07-03).
-		var qnameMatchID int64
-		var qnameMatchCount int
+		var qnameMatchID, sigMatchID int64
+		var qnameMatchCount, sigMatchCount int
 		for rows.Next() {
 			var id int64
-			var qname string
-			if err := rows.Scan(&id, &qname); err != nil {
+			var qname, sig string
+			if err := rows.Scan(&id, &qname, &sig); err != nil {
 				rows.Close()
 				return restored, unresolved, fmt.Errorf("scan target id: %w", err)
 			}
@@ -258,6 +270,16 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string)
 				qnameMatchCount++
 				if qnameMatchID == 0 {
 					qnameMatchID = id
+				}
+			}
+			// R#2 signature witness: a UNIQUE non-empty signature match re-proves
+			// identity when qualified_name cannot (bare-name collision). sigMatchCount>1
+			// (identical signatures — a genuine @overload) is ambiguous → not a witness;
+			// the edge falls through to the name_match guess (correct-or-quiet).
+			if r.TargetSignature != "" && sig == r.TargetSignature {
+				sigMatchCount++
+				if sigMatchID == 0 {
+					sigMatchID = id
 				}
 			}
 		}
@@ -269,16 +291,34 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string)
 		}
 
 		// Target node for the restored edge: the exact-qualified-name match when one
-		// exists (identity re-proven), else the deterministic first candidate (id ASC).
-		// qnameMatched gates whether a type/uniqueness-derived tier may be PRESERVED:
-		// without an exact-qname re-match the bare name does not re-prove the original
-		// receiver-type / global-uniqueness fact, so that tier is capped at CANDIDATE.
+		// exists (identity re-proven), else a UNIQUE signature match (R#2), else the
+		// deterministic first candidate (id ASC). identityReproven gates whether a
+		// type/uniqueness-derived tier may be PRESERVED: without a re-match on qname OR
+		// signature the bare name does not re-prove the original receiver-type /
+		// global-uniqueness fact, so that tier is capped at CANDIDATE.
 		targetID := ids[0]
 		qnameMatched := false
 		if qnameMatchID != 0 && qnameMatchCount == 1 {
 			targetID = qnameMatchID
 			qnameMatched = true
 		}
+		// R#2 signature witness — the LIPI #1 residual fix. When qualified_name did
+		// NOT uniquely re-prove identity (idiomatic Go cross-file-receiver twins share
+		// the BARE `name` as qualified_name, so qnameMatchCount>1), a UNIQUE non-empty
+		// signature match disambiguates WHICH same-named node the edge meant: the
+		// signature embeds the receiver (`func (b *Beta) Reset()`) and the full param
+		// list, so twins are distinguishable by it for every language. An @overload /
+		// platform-conditional stack whose signatures are IDENTICAL stays ambiguous
+		// (sigMatchCount>1) → falls through to name_match (correct-or-quiet). Without
+		// this, editing a file with two same-named cross-file-receiver methods strips
+		// an incoming type_flow/impl_method/inherited/lsp edge to name_match@ids[0] —
+		// L6 making the map WORSE post-edit (the verified caller vanishes).
+		sigMatched := false
+		if !qnameMatched && r.TargetSignature != "" && sigMatchID != 0 && sigMatchCount == 1 {
+			targetID = sigMatchID
+			sigMatched = true
+		}
+		identityReproven := qnameMatched || sigMatched
 
 		// PARITY with the full-index resolver's qualifiedUnresolved gate
 		// (resolver.go:721,743-747): if the ORIGINAL edge was a qualified
@@ -299,14 +339,15 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string)
 		// edge to a 0.2-0.6 name_match guess the moment the reindexed file gained a
 		// SECOND same-named method, so a verified caller vanished from the contract
 		// pillar post-edit even though its exact target was re-found. The multi-candidate
-		// case WITHOUT an exact qname re-match still falls to the name_match guess (genuinely
-		// ambiguous), and the P0 demote guard below still caps type/uniqueness/LSP tiers
-		// whenever !qnameMatched — so a bare-name re-match never re-certifies a guess.
+		// case WITHOUT a qname OR signature re-match still falls to the name_match guess
+		// (genuinely ambiguous), and the P0 demote guard below still caps type/uniqueness/
+		// LSP tiers whenever !identityReproven — so a bare-name re-match never re-certifies
+		// a guess (R#2 adds the signature witness to the identity re-proof — see below).
 		var conf float64
 		var method string
 		var tier string
 		var evType string
-		if !qualifiedUnresolved && (len(ids) == 1 || qnameMatched) && deterministicRestoreMethods[r.ResolutionMethod] {
+		if !qualifiedUnresolved && (len(ids) == 1 || identityReproven) && deterministicRestoreMethods[r.ResolutionMethod] {
 			conf = r.Confidence
 			// Item #4: floor ONLY the literal pre-v14 0.0/NULL sentinel to the
 			// method-appropriate verified value (same_file/import → 1.0, the
@@ -328,7 +369,7 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string)
 			// would launder it onto the wrong target. Cap at CANDIDATE (0.6) and let
 			// the tier re-derive to CANDIDATE. The signature-derived same_file/import
 			// methods are exempt: their proof survives a bare-name re-match.
-			if !qnameMatched && typeOrUniquenessDerivedMethods[method] && conf > 0.6 {
+			if !identityReproven && typeOrUniquenessDerivedMethods[method] && conf > 0.6 {
 				conf = 0.6
 			}
 			// Fable finding 1: even WITH an exact qname re-match, a UNIQUENESS-derived tier
@@ -342,7 +383,7 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string)
 			// The fact-gate that reads this MUST require conf ≥ EDGE_CONFIDENCE_FLOOR alongside
 			// the method whitelist — see v1r_brief `is_fact` (the conf conjunct closes the
 			// method-only launder for these capped-but-whitelisted restores).
-			if qnameMatched && len(ids) > 1 && uniquenessDerivedMethods[method] && conf > 0.6 {
+			if identityReproven && len(ids) > 1 && uniquenessDerivedMethods[method] && conf > 0.6 {
 				conf = 0.6
 			}
 			tier = tierForConfidence(conf)
