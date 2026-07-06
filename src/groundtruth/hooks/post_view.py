@@ -473,11 +473,16 @@ def _read_file(root: str, relpath: str) -> str:
 
 
 def _is_test_file(filepath: str) -> bool:
-    fp = "/" + filepath.lower().replace("\\", "/")
-    base = os.path.basename(fp)
-    if base.startswith("test_"):
-        return True
-    return any(p in fp for p in ["/tests/", "/test/", "/testing/", "/fixtures/"])
+    """Delegate to the SINGLE canonical test predicate (``path_policy.is_test_path`` —
+    the de-dup seam all consumers delegate to). Full ``walker.IsTestFile`` parity across
+    languages: Go ``*_test.go``, JVM ``FooTest.java``, Ruby ``*_spec.rb``, C#/PHP/Swift,
+    ``conftest.py``/``tests.py``, and every test dir segment — while keeping
+    ``latest.py``/``attestation.py`` clean. A thinner local copy leaked a test PATH into
+    the ``<gt-context>`` "Imported by:" render (run 28772993900: test_language_extensions.py,
+    xarray/tests/test_coordinate_transform.py) and missed non-Python test conventions."""
+    from groundtruth.delivery.path_policy import is_test_path
+
+    return is_test_path(filepath)
 
 
 def _classify_role(method_name: str, method_node: ast.FunctionDef) -> str:
@@ -1097,11 +1102,20 @@ def graph_navigation(
                     JOIN nodes nsrc ON e.source_id = nsrc.id
                     WHERE nt.file_path = ?
                       AND nsrc.file_path != ?
+                      AND nsrc.is_test = 0
                     LIMIT ?
                     """,
                     (_resolved_imp, _resolved_imp, limit),
                 )
-                importers = [fp for (fp,) in cur.fetchall() if fp not in visited_files]
+                # LEAK GUARD: never surface a test file in "Imported by:" — a test
+                # path is a test artifact (the strict zero-leak bar). The column
+                # filter above is defense-in-depth; the path guard is primary
+                # because a test file's module-level import edge is not is_test-flagged.
+                importers = [
+                    fp
+                    for (fp,) in cur.fetchall()
+                    if fp not in visited_files and not _is_test_file(fp)
+                ]
                 if importers:
                     out.append(f"Imported by: {', '.join(importers)}")
                     # Structured capture: importers

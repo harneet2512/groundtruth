@@ -343,3 +343,90 @@ def test_graph_navigation_subblock_failure_does_not_zero_all_evidence(monkeypatc
         )
     finally:
         os.unlink(path)
+
+
+def _make_db_source_and_test_importers() -> str:
+    """graph.db where src/target.py::work is imported by a SOURCE file (importer.py)
+    AND by a TEST file (tests/test_target.py) whose importing node is NOT is_test-
+    flagged — the real leak shape from run 28772993900, where <gt-context> rendered
+    ``Imported by: xarray/tests/test_coordinate_transform.py`` (a module-level import
+    edge in a test file is not attached to a test_ function, so the is_test column
+    misses it; only the path guard catches it)."""
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE nodes (id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT, name TEXT, "
+        "file_path TEXT, start_line INTEGER DEFAULT 0, signature TEXT, return_type TEXT, "
+        "is_test INTEGER DEFAULT 0, language TEXT DEFAULT 'python')"
+    )
+    conn.execute(
+        "CREATE TABLE edges (id INTEGER PRIMARY KEY AUTOINCREMENT, source_id INTEGER, "
+        "target_id INTEGER, type TEXT, source_line INTEGER DEFAULT 0, confidence REAL DEFAULT 0.0, "
+        "resolution_method TEXT, trust_tier TEXT, candidate_count INTEGER DEFAULT 1)"
+    )
+    conn.executescript(
+        """
+        INSERT INTO nodes (id,label,name,file_path,start_line,signature,return_type)
+            VALUES (1,'Function','work','src/target.py',10,'def work(x)','int');
+        INSERT INTO nodes (id,label,name,file_path,start_line,signature)
+            VALUES (2,'Function','importer_fn','src/importer.py',5,'def importer_fn()');
+        -- module-level import node in a TEST file, is_test=0 (the column MISSES it)
+        INSERT INTO nodes (id,label,name,file_path,start_line,signature,is_test)
+            VALUES (3,'Module','test_target','tests/test_target.py',1,NULL,0);
+        INSERT INTO edges (source_id,target_id,type,source_line,confidence,resolution_method,trust_tier,candidate_count)
+            VALUES (2,1,'IMPORTS',1,1.0,'import','CERTIFIED',1);
+        INSERT INTO edges (source_id,target_id,type,source_line,confidence,resolution_method,trust_tier,candidate_count)
+            VALUES (3,1,'IMPORTS',1,1.0,'import','CERTIFIED',1);
+        """
+    )
+    conn.commit()
+    conn.close()
+    return path
+
+
+def test_imported_by_never_surfaces_a_test_path():
+    """LEAK GUARD (run 28772993900 — cfn-lint + xarray): the post-view contract
+    pillar's ``Imported by:`` line surfaced test paths
+    (test_language_extensions.py, xarray/tests/test_coordinate_transform.py).
+    A test path IS a test artifact — the strict zero-leak bar. The importers
+    render must include the SOURCE importer and NEVER a test file, even when the
+    graph's is_test column misses the module-level import node."""
+    path = _make_db_source_and_test_importers()
+    try:
+        out, _ = graph_navigation("src/target.py", path)
+        imp = " ".join(l for l in out if "Imported by:" in l)
+        assert imp, f"importers block absent; out={out}"
+        assert "src/importer.py" in imp, f"source importer wrongly dropped; {imp!r}"
+        assert "test_target.py" not in imp, f"TEST PATH LEAKED: {imp!r}"
+        assert "tests/" not in imp, f"test dir leaked: {imp!r}"
+    finally:
+        os.unlink(path)
+
+
+def test_is_test_file_multilanguage_conventions():
+    """The leak backstop must recognize test files across languages (the graph's
+    per-node is_test flag misses module-level importers). Positives must be caught;
+    legit source (incl. near-miss names) must NOT be over-filtered."""
+    from groundtruth.hooks.post_view import _is_test_file
+
+    for p in [
+        "tests/test_x.py", "test/unit/test_x.py",
+        "xarray/tests/test_coordinate_transform.py",
+        "test/unit/module/template/transforms/test_language_extensions.py",
+        "pkg/foo_test.go", "src/bar_test.py", "conftest.py", "app/tests.py",
+        "web/foo.test.ts", "web/foo.spec.js", "a/__tests__/x.js",
+        # non-Python conventions the thin private copies (incl. the prior inline
+        # post_view one) MISSED — now caught via the canonical path_policy predicate:
+        "app/FooTest.java", "lib/user_spec.rb", "crate/src/tests.rs",
+        "svc/handler_test.go", "web/Widget.spec.ts",
+    ]:
+        assert _is_test_file(p), f"missed test file: {p}"
+
+    for p in [
+        "src/target.py", "xarray/core/indexes.py",
+        "haystack/components/preprocessors/document_splitter.py",
+        "src/cfnlint/template/transforms/_language_extensions.py",
+        "src/contest.py", "src/latest.py", "src/attestation.py",
+    ]:
+        assert not _is_test_file(p), f"over-filtered legit source: {p}"

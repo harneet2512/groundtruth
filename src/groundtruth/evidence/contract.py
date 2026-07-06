@@ -53,30 +53,14 @@ def _read_file(root: str, relpath: str) -> str:
 
 
 def _is_test_file(filepath: str) -> bool:
-    """Language-agnostic test file detection."""
-    fp = "/" + filepath.replace("\\", "/")
-    fp_lower = fp.lower()
-    if any(p in fp_lower for p in ["/tests/", "/test/", "/testing/", "/spec/", "/__tests__/"]):
-        return True
-    basename = os.path.basename(fp)
-    stem, ext = os.path.splitext(basename)
-    stem_lower = stem.lower()
-    # Python
-    if basename.lower().startswith("test_") or stem_lower.endswith("_test"):
-        return True
-    # Go
-    if basename.endswith("_test.go"):
-        return True
-    # JS/TS
-    if ".test." in basename or ".spec." in basename:
-        return True
-    # JVM/C#/PHP/Swift (case-sensitive: UserTest, UserTests, UserSpec)
-    if stem.endswith("Test") or stem.endswith("Tests") or stem.endswith("Spec"):
-        return True
-    # Ruby RSpec
-    if stem_lower.endswith("_spec"):
-        return True
-    return False
+    """Delegate to the SINGLE canonical test predicate (``path_policy.is_test_path`` —
+    full ``walker.IsTestFile`` parity, the de-dup seam all consumers delegate to). The
+    prior local copy over-filtered ``/testing/`` (public API — ``xarray.testing``) and
+    missed ``conftest.py``/``tests.py``/``tests.rs``, so the contract pillar could render
+    a stale-``is_test`` test file as a caller (leak)."""
+    from groundtruth.delivery.path_policy import is_test_path
+
+    return is_test_path(filepath)
 
 
 class CallerUsageMiner:
