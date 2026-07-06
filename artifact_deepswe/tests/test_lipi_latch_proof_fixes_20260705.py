@@ -168,14 +168,18 @@ def test_c3_consensus_isolated_first_view_leaves_latch_armed(monkeypatch):
     latch — a later connected file must still register in scope."""
     monkeypatch.setattr(g, "_GT_BASELINE", False)
     monkeypatch.setattr(g, "_consensus_fired", False)
+    monkeypatch.setattr(g, "_consensus_collected", set())  # B3: per-file collect latch
     monkeypatch.setattr(g, "_consensus_scope", set())
     monkeypatch.setattr(g, "_seen", set())
     scopes = {"iso.py": [], "hub.py": ["dep.py"]}
     monkeypatch.setattr(g, "_query_scope", lambda rel: scopes.get(rel.split("/")[-1], []))
-    g._consensus_collect("pkg/iso.py")     # isolated -> no latch
-    assert g._consensus_fired is False
-    g._consensus_collect("pkg/hub.py")     # connected -> latches
-    assert g._consensus_fired is True
+    # B3 (2026-07-05): the collect latch is now PER-FILE (_consensus_collected), not the
+    # global _consensus_fired one-shot — scope ACCUMULATES across files. Same INTENT:
+    # an isolated file leaves its own latch un-burned; a connected file registers.
+    g._consensus_collect("pkg/iso.py")     # isolated -> not collected (latch un-burned)
+    assert g._norm_rel("pkg/iso.py") not in g._consensus_collected
+    g._consensus_collect("pkg/hub.py")     # connected -> collected (per-file latch burned)
+    assert g._norm_rel("pkg/hub.py") in g._consensus_collected
     assert g._norm_rel("pkg/hub.py") in g._consensus_scope
 
 

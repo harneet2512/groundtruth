@@ -390,7 +390,12 @@ def _get_file_embeddings(
     # Per-file ordered list of symbol passages (carry the existing 60/symbol cap).
     file_passages: dict[str, list[str]] = {fp: [] for fp in file_paths}
     for _id, _fp, _nm, _sig in c.execute(
-        "SELECT id, file_path, name, COALESCE(signature,'') FROM nodes WHERE is_test = 0"
+        # C2 (Fable 2026-07-05): ORDER BY id — the 60/symbol cap keeps WHICHEVER rows
+        # arrive first, so an unordered scan makes the kept passage set (and thus the
+        # embedding) nondeterministic across indexings. Parity with the localizer half
+        # (graph_localizer._assemble_symbol_passages), which orders by id.
+        "SELECT id, file_path, name, COALESCE(signature,'') FROM nodes WHERE is_test = 0 "
+        "ORDER BY id"
     ):
         _k = _norm_path(_fp)
         if not _k or _k not in file_passages or len(file_passages[_k]) >= 60:

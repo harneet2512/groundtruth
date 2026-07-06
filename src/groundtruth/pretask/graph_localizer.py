@@ -2136,6 +2136,9 @@ def _boilerplate_stoplist(node_terms: "dict[int, str]") -> "set[str]":
     return {t for t, c in df.items() if c > cut}
 
 
+_sem_body_noop_warned = False  # C1: one-shot latch for the body-less-graph warning
+
+
 def _symbol_body_map(conn: "sqlite3.Connection", body_on: bool) -> "dict[int, str]":
     """node_id -> the ``body_snippet`` passed to ``symbol_passage`` — the SINGLE source
     of per-symbol passage BODY, shared by BOTH semantic halves
@@ -2205,6 +2208,28 @@ def _symbol_body_map(conn: "sqlite3.Connection", body_on: bool) -> "dict[int, st
                     lst.append(v)
     except sqlite3.Error:
         pass  # new kinds absent (older graph) -> ON degrades to today's props
+
+    # C1 (Fable 2026-07-05): GT_SEM_BODY is ON but the graph carries ZERO body-channel
+    # rows (body_terms + string_literals absent) — the substrate was NOT baked with the
+    # index-time body channels, so ON silently degrades to the OFF props and the flag is a
+    # NO-OP that still attests "body enrichment". Warn LOUDLY (once, stderr = harness log);
+    # under proof mode fail-CLOSED so a paid GT_SEM_BODY run cannot grade a body-less graph
+    # as body-enriched. (Non-proof: warn + degrade, correct-or-quiet.)
+    if not node_terms and not node_strings:
+        global _sem_body_noop_warned
+        import os as _os, sys as _sys
+        if not _sem_body_noop_warned:
+            _sem_body_noop_warned = True
+            _sys.stderr.write(
+                "[GT_WARN] GT_SEM_BODY=1 but graph has 0 body-channel rows "
+                "(body_terms/string_literals absent) — semantic body enrichment is a "
+                "NO-OP; rebuild the substrate with the body channels.\n")
+            _sys.stderr.flush()
+        if _os.environ.get("GT_PROOF_MODE") == "1" and _os.environ.get("GT_BASELINE") != "1":
+            raise RuntimeError(
+                "GT_SEM_BODY=1 under proof mode but graph has 0 body-channel rows "
+                "(substrate not baked with body channels) — refusing to grade a body-less "
+                "graph as body-enriched.")
 
     stop = _boilerplate_stoplist(node_terms)
     ids = (set(node_body) | set(node_strings) | set(node_calls_v)

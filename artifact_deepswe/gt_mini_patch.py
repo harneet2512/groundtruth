@@ -44,6 +44,59 @@ import re
 import subprocess
 import sys
 
+
+def _ledger_line_direct(entry: dict) -> None:
+    """Append ONE JSON line to the HARVESTED runtime ledger, bypassing both the
+    (possibly-stubbed) ``_RUNTIME_LEDGER`` object and the old truncate-rewrite
+    flush. DURABLE by construction — each record hits disk immediately, so
+    neither a single missing ``groundtruth.runtime`` module (which stubs
+    ``Ledger.to_jsonl`` -> '' and would blank a full-rewrite flush) nor a mid-run
+    SIGKILL between truncate and write can erase the whole run's ledger. The line
+    is schema-identical to ``Ledger.to_jsonl()`` (one ``json.dumps(to_dict())``
+    per line: layer/event_type/file_path/outcome/reason/chars_delivered/
+    timestamp_ms/iteration). Best-effort: telemetry must NEVER break the agent
+    loop. Defined EARLY so the runtime-import fallback below can also use it."""
+    try:
+        path = os.environ.get("GT_RUNTIME_LEDGER", "/tmp/gt_runtime_ledger.jsonl")
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        if "timestamp_ms" not in entry:
+            try:
+                import time as _t
+                entry["timestamp_ms"] = int(_t.time() * 1000)
+            except Exception:  # noqa: BLE001
+                entry["timestamp_ms"] = 0
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry) + "\n")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _crash_emit(kind: str, exc: "BaseException | None" = None) -> None:
+    """A2: a producer / lane / turn CRASH must end in a DURABLE terminal state, not a
+    dropped stderr line. Mirror ``_l6_emit`` — stderr (harness log) + the HARVESTED
+    ledger FILE (via ``_ledger_line_direct``, so it survives the runtime-import stub)
+    with ``outcome=provider_failed`` — so the exact silent-freeze class the L6 fix closed
+    (a crash that leaves ZERO artifact evidence: no ledger row, only absence-of-fires)
+    cannot recur at the other 20 catch sites. Best-effort: telemetry must NEVER break the
+    (already-failing) except path."""
+    reason = f"{type(exc).__name__}:{exc}" if exc is not None else "producer_exception"
+    try:
+        print(f"[GT_META] producer_exception kind={kind} {reason}".rstrip(),
+              file=sys.stderr, flush=True)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        _ledger_line_direct({
+            "layer": kind, "event_type": "", "file_path": "",
+            "outcome": "provider_failed", "reason": reason,
+            "chars_delivered": 0, "iteration": globals().get("_action_count", 0),
+        })
+    except Exception:  # noqa: BLE001
+        pass
+
+
 # Graceful import of groundtruth.runtime.* — these modules live in the substrate's
 # baked src/ tree. If the import path isn't available (container bootstrap timing,
 # missing substrate, dev environment), fall back to inline stubs so the core
@@ -53,25 +106,48 @@ _GT_SRC = os.path.join(os.environ.get("GT_HOME", "/opt/gt"), "src")
 if os.path.isdir(_GT_SRC) and _GT_SRC not in sys.path:
     sys.path.insert(0, _GT_SRC)
 
-_RUNTIME_AVAILABLE = False
+# A1b (2026-07-05): PER-MODULE import BULKHEADS. Previously ONE try imported all 10
+# symbols from 5 modules, so a SINGLE missing/corrupt module stubbed ALL of them
+# (verify.horizon + obligation.resurface + the ledger OBJECT itself) — a §15.2
+# fault-isolation violation that blinded the WHOLE control plane on one injection miss
+# while the proof marker still attested GT-on. Each module now degrades INDEPENDENTLY;
+# the durable provider_failed line (which survives the very stub it reports) NAMES the
+# module that fell back, so a partial-injection miss is observable next run — not
+# inferred from an absence-of-fires. `except Exception` (not ImportError) also catches a
+# SyntaxError / import-time crash in a staged module (the G10 pattern, generalized).
+_RUNTIME_AVAILABLE = True
+
+
+def _runtime_import_failed(_mod: str, _err) -> None:
+    global _RUNTIME_AVAILABLE
+    _RUNTIME_AVAILABLE = False
+    try:
+        print(f"[GT_META] runtime_import_fallback=true module={_mod} reason={_err}",
+              file=sys.stderr, flush=True)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        _ledger_line_direct({
+            "layer": "runtime", "event_type": "", "file_path": "",
+            "outcome": "provider_failed",
+            "reason": f"runtime_import_fallback[{_mod}]: {_err}",
+            "chars_delivered": 0, "iteration": 0,
+        })
+    except Exception:  # noqa: BLE001
+        pass
+
+
 try:
     from groundtruth.runtime.action_translation import translate_to_action as _product_translate_to_action
-    from groundtruth.runtime.context_budget import ContextBudgeter as _ProductContextBudgeter
-    from groundtruth.runtime.ledger import Ledger as _ProductLedger
-    from groundtruth.runtime.ledger import LedgerEntry as _ProductLedgerEntry
-    from groundtruth.runtime.ledger import SignalOutcome as _ProductSignalOutcome
-    from groundtruth.runtime.trajectory_state import TrajectoryState as _ProductTrajectoryState
-    from groundtruth.runtime.trajectory_state import derive_phase as _product_derive_phase
-    from groundtruth.runtime.verification_horizon import HorizonThresholds as _ProductHorizonThresholds
-    from groundtruth.runtime.verification_horizon import composite_severity as _product_composite_severity
-    from groundtruth.runtime.verification_horizon import render_verify_emission as _product_render_verify_emission
-    from groundtruth.runtime.verification_horizon import verify_horizon_band as _product_verify_horizon_band
-    _RUNTIME_AVAILABLE = True
-except ImportError as _import_err:
-    # Fallback stubs — pre-CP011 behavior
-    print(f"[GT_META] runtime_import_fallback=true reason={_import_err}", file=sys.stderr, flush=True)
+except Exception as _e:  # noqa: BLE001
+    _runtime_import_failed("action_translation", _e)
     def _product_translate_to_action(block, phase=None):
         return block
+
+try:
+    from groundtruth.runtime.context_budget import ContextBudgeter as _ProductContextBudgeter
+except Exception as _e:  # noqa: BLE001
+    _runtime_import_failed("context_budget", _e)
     class _ProductContextBudgeter:
         def __init__(self, *a, **kw): pass
         def trim(self, payload, max_tokens=500):
@@ -82,6 +158,15 @@ except ImportError as _import_err:
             return _R()
         def commit_delivered(self, lines): pass
         def reset(self): pass
+
+try:
+    from groundtruth.runtime.ledger import (
+        Ledger as _ProductLedger,
+        LedgerEntry as _ProductLedgerEntry,
+        SignalOutcome as _ProductSignalOutcome,
+    )
+except Exception as _e:  # noqa: BLE001
+    _runtime_import_failed("ledger", _e)
     class _ProductLedger:
         def record(self, *a): pass
         def to_jsonl(self): return ""
@@ -90,14 +175,30 @@ except ImportError as _import_err:
     class _ProductSignalOutcome:
         DELIVERED = "delivered"
         SUPPRESSED_WRONG_PHASE = "suppressed_wrong_phase"
-        # LANE-SPLIT 2026-06-13: Lane A cross-lane content-hash dedup records a
-        # suppressed re-send under this outcome (parity with the real enum's
-        # SignalOutcome.SUPPRESSED_DUPLICATE — must exist on the stub too so the
-        # in-container fallback path never AttributeErrors).
+        # parity with the real enum so the stub path never AttributeErrors.
         SUPPRESSED_DUPLICATE = "suppressed_duplicate"
+        PROVIDER_FAILED = "provider_failed"
+
+try:
+    from groundtruth.runtime.trajectory_state import (
+        TrajectoryState as _ProductTrajectoryState,
+        derive_phase as _product_derive_phase,
+    )
+except Exception as _e:  # noqa: BLE001
+    _runtime_import_failed("trajectory_state", _e)
     class _ProductTrajectoryState:
         def __init__(self, **kw): pass
     def _product_derive_phase(state): return None
+
+try:
+    from groundtruth.runtime.verification_horizon import (
+        HorizonThresholds as _ProductHorizonThresholds,
+        composite_severity as _product_composite_severity,
+        render_verify_emission as _product_render_verify_emission,
+        verify_horizon_band as _product_verify_horizon_band,
+    )
+except Exception as _e:  # noqa: BLE001
+    _runtime_import_failed("verification_horizon", _e)
     class _ProductHorizonThresholds:
         def __init__(self, **kwargs):
             for _k, _v in kwargs.items():
@@ -528,6 +629,13 @@ _consensus_fired = False
 # scope set so subsequent in-scope views get "also in scope" reinforcement, and if the
 # agent wanders off-scope for a while, re-anchor consensus on where it actually is.
 _consensus_scope: set[str] = set()
+# B3 (2026-07-05): PER-FILE collect latch for _consensus_collect. The old code shared the
+# GLOBAL _consensus_fired one-shot, so ONLY the first-viewed file ever contributed its
+# 1-hop neighbours — the scope froze to one file and never accumulated the K-of-N
+# multi-file consensus (and if the legacy _consensus_block fired first it froze
+# _consensus_collect out entirely). A per-file set lets scope grow as the agent views more
+# files while still collecting each file exactly once (no per-view re-query spam).
+_consensus_collected: set[str] = set()
 _offscope_views = 0
 # L5 (trajectory governor, minimal port): track actions/edits/loops so a stuck
 # trajectory gets ONE nudge instead of burning to maxiter unguarded (the OH governor's
@@ -592,11 +700,38 @@ _VIEW_RE = re.compile(
 )
 
 
+_ROOT_FALLBACK_ACTIVE = False  # A9: True when gt_root.txt is missing/empty ("/" sentinel)
+_ROOT_MISS_REPORTED = False
+
+
 def _root() -> str:
+    global _ROOT_FALLBACK_ACTIVE, _ROOT_MISS_REPORTED
     try:
-        return (open(_ROOT_FILE).read().strip()) or "/"
+        _r = open(_ROOT_FILE).read().strip()
+        if _r:
+            _ROOT_FALLBACK_ACTIVE = False
+            return _r
     except Exception:  # noqa: BLE001
-        return "/"
+        pass
+    # A9 (2026-07-05): no gt_root.txt / empty -> the repo root is UNKNOWN, so "/" is a
+    # SENTINEL not a real root. _code_at() then reads from the FS root => empty snippets
+    # => snippet attestation is STRUCTURALLY impossible. Flag it (so _snippet_attests
+    # drops a row rather than pass-through the drift gate on empty code) + a one-shot
+    # durable marker so this silent mis-attestation surface is observable next run.
+    _ROOT_FALLBACK_ACTIVE = True
+    if not _ROOT_MISS_REPORTED:
+        _ROOT_MISS_REPORTED = True
+        try:
+            print("[GT_META] GT_ROOT_MISSING file=%s" % _ROOT_FILE, file=sys.stderr, flush=True)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            _ledger_line_direct({"layer": "root", "event_type": "", "file_path": _ROOT_FILE,
+                "outcome": "provider_failed", "reason": "gt_root_missing",
+                "chars_delivered": 0, "iteration": globals().get("_action_count", 0)})
+        except Exception:  # noqa: BLE001
+            pass
+    return "/"
 
 
 # SUBPROCESS-WRITE CATCH-ALL (mtime baseline). _edit_target is a STRING parser:
@@ -1730,6 +1865,64 @@ def _guard_handoff_db(db: str) -> None:
 
 
 _l6_work_db: "str | None" = None
+_l6_probe_emitted = False
+
+
+def _l6_emit(event: str, **fields) -> None:
+    """L6 telemetry to a HARVESTED channel (the runtime ledger, copied out of the
+    container by deepswe_full.yml), NOT only in-container ``sys.stderr`` — which the
+    pier harness DROPS. Before this, every L6 outcome (staged / reindexed / failed /
+    no-binary) printed solely to stderr, so a genuinely-FROZEN L6 read as a silent
+    green no-op. PROVEN on run 28754452453: the agent-created file never entered the
+    graph (13 post-create views, 0 <gt-evidence> on it, vs 14 on pre-existing files),
+    yet NOT ONE failure line survived — because it was all stderr. Sink = the HARVESTED
+    ledger FILE (via _runtime_ledger_record -> _ledger_line_direct, durable even if the
+    runtime-import stub blanks the Ledger object). Mirror to STDERR — NOT stdout: a
+    plain stdout print has leaked into the agent's context on PATH B (2026-06-10 note,
+    :~590) and `[GT_META]` is a leak-scan token; stderr is the harness log, never
+    agent-visible. Correct-or-quiet: telemetry must NEVER break the agent loop."""
+    _detail = " ".join(f"{k}={v}" for k, v in fields.items())
+    try:
+        print(f"[GT_META] L6_{event} {_detail}".rstrip(), file=sys.stderr, flush=True)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        _runtime_ledger_record(kind="L6", outcome=event, reason=_detail,
+                               file_path=str(fields.get("file", "")))
+    except Exception:  # noqa: BLE001 — ledger not ready / any failure: stderr already emitted
+        pass
+
+
+def _l6_count_nodes(db: str, rel: str) -> int:
+    """Best-effort node count for one file_path — the POSITIVE freshness proof
+    (before<after on a new-file add). Never raises into the hook."""
+    try:
+        import sqlite3
+        con = sqlite3.connect(f"file:{(db or '').replace(chr(92), '/')}?mode=ro",
+                              uri=True, timeout=5)
+        try:
+            n = con.execute("SELECT COUNT(*) FROM nodes WHERE file_path=?",
+                            (rel,)).fetchone()
+            return int(n[0]) if n else -1
+        finally:
+            con.close()
+    except Exception:  # noqa: BLE001
+        return -1
+
+
+def _file_sha256(path: str) -> str:
+    """SHA-256 (first 16 hex) of a file, chunked; '' on any error. The HONEST read-path
+    fingerprint (D1): names the ACTUAL graph the per-turn pillars read from the staged
+    work-copy, vs the host witness which fingerprints the (pre-edit) mount."""
+    try:
+        import hashlib
+        h = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()[:16]
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def _ensure_l6_work_copy() -> str:
@@ -1750,18 +1943,32 @@ def _ensure_l6_work_copy() -> str:
     if not src or not os.path.isfile(src):
         _l6_work_db = ""
         return ""
+    # D2 (2026-07-05): guard the MOUNT (the authoritative handoff) for present-but-EMPTY
+    # BEFORE copying from it. L6_FRESH previously staged a torn/schemaless mount straight
+    # into the work-copy, BYPASSING the A2 present-but-empty fail-close — and the work-copy
+    # is itself EXEMPT from the guard (it's ours, may be transiently torn), so nothing ever
+    # re-checked it and the pillars read an empty graph as a silent green no-op. Guard here,
+    # OUTSIDE the copy try below, so a GTHandoffEmptyError PROPAGATES (fail-closed) instead
+    # of being swallowed into the correct-or-quiet RO-mount fallback. src != _l6_work_db, so
+    # the work-copy exemption inside _guard_handoff_db is unaffected.
+    _guard_handoff_db(src)
     try:
         import shutil
         work = "/tmp/gt_work.db"
         shutil.copy(src, work)
         _l6_work_db = work
+        _wch = _file_sha256(work)  # D1: honest read-path fingerprint (staged copy)
         print(
             f"[GT_META] L6_FRESH staged in-container work-graph={work} "
-            f"(mount {src} untouched; witness parity preserved)",
+            f"work_copy_hash={_wch or '(unhashable)'} (mount {src} untouched)",
             file=sys.stderr, flush=True,
         )
+        _l6_emit("STAGED_OK", work=work, src=src, work_copy_hash=_wch)
         return work
-    except Exception:  # noqa: BLE001 — fall back to the read-only mount
+    except Exception as _se:  # noqa: BLE001 — fall back to the read-only mount
+        # Was a SILENT swallow (the exact silent-freeze the run exhibited). Surface it:
+        # a failed stage -> _db_path returns the RO mount -> frozen freshness this run.
+        _l6_emit("STAGED_FAIL", src=src, exc=f"{type(_se).__name__}:{_se}")
         _l6_work_db = ""
         return ""
 
@@ -1855,9 +2062,17 @@ def _has_columns(con) -> tuple[bool, bool]:
 # ---------------------------------------------------------------------------
 def _snippet_attests(code: str, symbol: str) -> bool:
     """True when the live source line plausibly mentions ``symbol`` (the
-    graph's line-keyed claim still holds). Empty code/symbol -> True."""
-    if not code or not symbol:
+    graph's line-keyed claim still holds). Empty code/symbol -> True.
+
+    A9 (2026-07-05): EXCEPT when the repo root is UNKNOWN (``_ROOT_FALLBACK_ACTIVE``) —
+    then _code_at() returns '' not because the specific file is fine but because we can
+    read NO file, so an empty snippet is 'unattestable', not 'no drift'. Return False so
+    the caller drops the unverifiable row (correct-or-quiet) rather than laundering it.
+    The normal path (real root) is byte-identical: empty code -> True as before."""
+    if not symbol:
         return True
+    if not code:
+        return not _ROOT_FALLBACK_ACTIVE
     return symbol in code
 
 
@@ -2215,13 +2430,19 @@ def _resolved_witnesses_for_file(con, file_path: str, repo_root: str, max_each: 
     A witness is emitted ONLY when its edge resolution_method is in
     ``_DETERMINISTIC_METHODS``; name_match is NEVER a witness. The same
     stdlib-shadow guard the brief applies is applied here. Correct-or-quiet."""
-    _, has_method = _has_columns(con)
+    has_conf, has_method = _has_columns(con)
     if not has_method:
         return []  # cannot judge provenance -> emit nothing (never launder)
     has_lang = _nodes_have_language(con)
     lang_caller_sel = ", nsrc.language, nt.language" if has_lang else ", '', ''"
     lang_callee_sel = ", nt.language, nsrc.language" if has_lang else ", '', ''"
     det_sql = "','".join(sorted(_DETERMINISTIC_METHODS))
+    # E3 (2026-07-05): whitelisted METHOD is necessary but not sufficient — a -file/L6
+    # restore-demoted or among-files import-pick edge keeps its method but is capped to
+    # conf 0.6 and is NOT a fact. Gate on the 0.7 floor (parity with the is_fact conjunct
+    # above + v1r_brief) so a demoted edge cannot launder back into a [WITNESS]. Old
+    # schema (no confidence col) stays permissive.
+    conf_clause = "AND e.confidence >= 0.7" if has_conf else ""
     nfp = _norm_fp(file_path)
     out: list[dict] = []
     try:
@@ -2234,6 +2455,7 @@ def _resolved_witnesses_for_file(con, file_path: str, repo_root: str, max_each: 
             WHERE nt.file_path = ? AND nsrc.file_path != nt.file_path
               AND COALESCE(nsrc.is_test,0) = 0 AND e.source_line > 0
               AND LOWER(TRIM(e.resolution_method)) IN ('{det_sql}')
+              {conf_clause}
             ORDER BY e.source_line LIMIT ?
             """,
             (nfp, max_each * 4),
@@ -2274,6 +2496,7 @@ def _resolved_witnesses_for_file(con, file_path: str, repo_root: str, max_each: 
             WHERE nsrc.file_path = ? AND nt.file_path != nsrc.file_path
               AND COALESCE(nt.is_test,0) = 0
               AND LOWER(TRIM(e.resolution_method)) IN ('{det_sql}')
+              {conf_clause}
             ORDER BY e.source_line LIMIT ?
             """,
             (nfp, max_each * 4),
@@ -2440,9 +2663,37 @@ _POST_SEARCH_TESTPATH = re.compile(
     r"(?:^|/)tests?/"                       # a test/ or tests/ dir segment
     r"|(?:^|/)(?:conftest|test|tests)\.py$"  # conftest.py / test.py / tests.py
     r"|(?:^|/)test_[^/]*$"                    # test_*.py
-    r"|(?:^|/)[^/]*_test\.[^/]+$"             # *_test.go / *_test.py
-    r"|(?:^|/)[^/]*\.(?:test|spec)\.[^/]+$",  # *.test.ts / *.spec.js
+    r"|(?:^|/)[^/]*_tests?\.[^/]+$"           # *_test.* / *_tests.* (singular + plural)
+    r"|(?:^|/)[^/]*\.(?:test|spec|tests|specs)\.[^/]+$"  # *.test/spec/tests/specs.*
+    r"|(?:^|/)[^/]*_spec\.rb$"                # *_spec.rb (RSpec)
+    r"|(?:^|/)tests?\.rs$",                   # tests.rs / test.rs (Rust module file)
     re.IGNORECASE)
+# CamelCase test-CLASS stems (JVM/C#/PHP/Swift) — CASE-SENSITIVE, ext-gated. Kept OUT
+# of the IGNORECASE regex above because under IGNORECASE `latest.java` would false-match
+# a `test` suffix. Exact walker.IsTestFile parity (walker.go:232-249). E2 (2026-07-05).
+_CAMEL_TEST_EXTS = {
+    ".java": ("Test", "Tests", "Spec"), ".kt": ("Test", "Tests", "Spec"),
+    ".kts": ("Test", "Tests", "Spec"), ".scala": ("Test", "Tests", "Spec"),
+    ".groovy": ("Test", "Tests", "Spec"), ".cs": ("Test", "Tests"),
+    ".php": ("Test",), ".swift": ("Test", "Tests"),
+}
+
+
+def _is_post_search_testpath(p: str) -> bool:
+    """LEAK GUARD (single chokepoint): True iff a def-site path is test-shaped — the
+    IGNORECASE regex (dir + Python/JS/Rust/Ruby conventions) OR a CASE-SENSITIVE
+    CamelCase test-class stem (JVM/C#/PHP/Swift). Full walker.IsTestFile parity so a
+    graded-test location is never surfaced from a stale-is_test graph. Anchored /
+    ext-gated so latest.java / contest.py / attestation.py never match."""
+    pp = (p or "").replace("\\", "/")
+    if _POST_SEARCH_TESTPATH.search(pp):
+        return True
+    ob = pp.rstrip("/").rsplit("/", 1)[-1]
+    dot = ob.rfind(".")
+    if dot <= 0:
+        return False
+    sufs = _CAMEL_TEST_EXTS.get(ob[dot:].lower())
+    return bool(sufs and ob[:dot].endswith(sufs))
 # Definition-kind labels. The tree-sitter indexer normalizes to File/Function/
 # Method/Class/ImplBlock (struct/interface/enum/trait all become Class), so the
 # extra labels below are harmless supersets; 'File'/'ImplBlock' are never defs.
@@ -2650,7 +2901,12 @@ def _search_probe_tokens(cmd: str) -> list[str]:
         return []
     out: list[str] = []
     for part in re.split(r"[|\s]+", op):
-        p = part.strip()
+        # B7 (Fable 2026-07-05): a BRE alternation `foo\|bar` splits at `|` into
+        # ["foo\\", "bar"] — the LEFT branch keeps the escape backslash and fails the
+        # bare-symbol match, so its probe (`foo`) was silently dropped. Strip stray escape
+        # backslashes from each branch end; an internal-backslash token still fails the
+        # match (no false token minted).
+        p = part.strip().strip("\\")
         if p and _BARE_SYMBOL_RE.match(p) and p not in out:
             out.append(p)
     return out
@@ -2679,7 +2935,7 @@ def _resolve_symbol_defs(con, symbol: str, root: str) -> dict | None:
     # a graded-test location can never surface. Recompute ambiguity on the survivors.
     rows = [r for r in rows
             if not _caller_path_excluded(r[1] or "", root)
-            and not _POST_SEARCH_TESTPATH.search((r[1] or "").replace("\\", "/"))]
+            and not _is_post_search_testpath((r[1] or "").replace("\\", "/"))]
     if not rows:
         return None
     if len({r[1] for r in rows}) > 3:
@@ -2887,7 +3143,7 @@ def _body_rows(con, sym: str, extra_toks: list[str], root: str):
     rows = []
     for fp, ln, name, label in raw:
         rel = _norm_fp(fp or "")
-        if _POST_SEARCH_TESTPATH.search(rel) or _caller_path_excluded(fp or "", root):
+        if _is_post_search_testpath(rel) or _caller_path_excluded(fp or "", root):
             continue
         rows.append((fp, ln, name, label))
     return rows
@@ -2956,7 +3212,7 @@ def _class_nontarget(con, sym: str, out: str, root: str) -> str:
     if not hit_paths:
         return ""  # can't PROVE all-hits-are-wrong-copies -> correct-or-quiet
     for p in hit_paths:
-        if not _POST_SEARCH_TESTPATH.search(p) and not _caller_path_excluded(p, root):
+        if not _is_post_search_testpath(p) and not _caller_path_excluded(p, root):
             return ""  # a real hit exists -> the agent found it -> stay quiet
     info = _resolve_symbol_defs(con, sym, root)
     if not info or not info["def_sites"]:
@@ -3053,6 +3309,17 @@ def _search_localize_block(cmd: str, out: str | None = None) -> str:
     try:
         if not empty:
             block = _class_nontarget(con, sym, out, root)
+            if not block:
+                # BUG-B1 (2026-07-05): a bare-symbol grep WITH hits used to return ""
+                # here — the def/callers/test-ref partition was reachable ONLY on the
+                # out=None shape, which production never passes — so M0 was structurally
+                # MUTE at the exact moment localization is decided (the agent's own grep).
+                # Fall through to the DIRECT-DEF block so the agent's OWN grep observation
+                # is answered with the def-site + verified callers it can't compute.
+                # _direct_def_block is safe on this path: it abstains when there is no
+                # def-site, drops test-path def-sites (leak guard), counts (never names)
+                # test refs, and fires-once per stem via the content-hash latch.
+                block = _direct_def_block(con, sym, root)
         else:
             block = (_class_namefold(con, sym, root)
                      or _class_bodyonly(con, sym, root)
@@ -3131,7 +3398,7 @@ def _edit_target_callee_contracts(con, file_path: str, func_names: list[str],
     "include everything". Cross-language: pure SQL over edges/nodes + signatures."""
     if not func_names:
         return []
-    _, has_method = _has_columns(con)
+    has_conf, has_method = _has_columns(con)
     if not has_method:
         # Legacy schema: cannot judge provenance -> emit nothing (never launder).
         return []
@@ -3139,7 +3406,11 @@ def _edit_target_callee_contracts(con, file_path: str, func_names: list[str],
     lang_sel = ", nt.language, nsrc.language" if has_lang else ", '', ''"
     nfp = _norm_fp(file_path)
     det_sql = "','".join(sorted(_DETERMINISTIC_METHODS))
-    method_clause = f"AND LOWER(TRIM(e.resolution_method)) IN ('{det_sql}')"
+    # E3: gate the callee-contract fact on the 0.7 conf floor too (a restore-demoted
+    # deterministic edge keeps its method but is not a fact). The per-row re-check
+    # below can't see confidence (not selected), so gate it here in SQL.
+    method_clause = (f"AND LOWER(TRIM(e.resolution_method)) IN ('{det_sql}')"
+                     + (" AND e.confidence >= 0.7" if has_conf else ""))
     out: list[str] = []
     seen: set[tuple[str, str, str]] = set()
     try:
@@ -3219,10 +3490,15 @@ def _scope_fact_clause(con) -> str:
     judge provenance, so we fail closed: raise the confidence floor from the
     permissive 0.5 to a verified-only 0.9 (CERTIFIED only) — a 0.6 name_match's
     confidence can no longer launder it into scope."""
-    _, has_method = _has_columns(con)
+    has_conf, has_method = _has_columns(con)
     if has_method:
         _det = "','".join(sorted(_DETERMINISTIC_METHODS))
-        return f"AND LOWER(TRIM(e.resolution_method)) IN ('{_det}')"
+        # E3: whitelisted method + the 0.7 conf floor (a restore-demoted deterministic
+        # edge keeps its method but conf 0.6 — not a fact, must not enter scope). Every
+        # consumer already aliases edges as `e` (uses e.resolution_method), so e.confidence
+        # is safe. Old schema (no conf col) stays on the fail-closed 0.9 branch below.
+        _cc = " AND e.confidence >= 0.7" if has_conf else ""
+        return f"AND LOWER(TRIM(e.resolution_method)) IN ('{_det}'){_cc}"
     # no provenance column -> verified-only confidence floor (fail closed).
     return "AND COALESCE(e.confidence, 0) >= 0.9"
 
@@ -3430,7 +3706,39 @@ def _consensus_block(rel: str, root: str) -> str:
         return ""
 
 
-def _evidence_body(kind: str, rel: str, root: str) -> str:
+def _funcs_enclosing_edited(con, file_path: str, cmd: str) -> list[str]:
+    """Function/Method names whose ``[start_line, end_line]`` span encloses a line the
+    command EDITED (from ``_edited_line_ranges``), in start-line order.
+
+    B4 (2026-07-05): front the ACTUALLY-edited function ahead of the file's rc-DESC hub
+    functions so the post_edit contract pillar keys off the EDIT SITE, not the file's
+    busiest symbol (the beets-5495 hub-keying class — generic top-of-file funcs surfaced
+    instead of the one the agent just changed). Correct-or-quiet: no derivable range /
+    unreadable graph -> [] (post_edit falls back to the rc-DESC list, prior behavior)."""
+    ranges = _edited_line_ranges(cmd)
+    if not ranges:
+        return []
+    try:
+        rows = con.execute(
+            "SELECT n.name, n.start_line, COALESCE(n.end_line, n.start_line) FROM nodes n "
+            "WHERE n.file_path = ? AND n.label IN ('Function','Method') "
+            "AND COALESCE(n.is_test,0)=0 AND n.start_line IS NOT NULL "
+            "ORDER BY n.start_line",
+            (_norm_fp(file_path),),
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        return []
+    out: list[str] = []
+    for (name, s, e) in rows:
+        if not name or _is_builtin_shadow_name(name):
+            continue
+        # node span [s,e] overlaps an edited range [lo,hi]
+        if any(not (e < lo or s > hi) for (lo, hi) in ranges) and name not in out:
+            out.append(name)
+    return out
+
+
+def _evidence_body(kind: str, rel: str, root: str, cmd: str = "") -> str:
     """Build the <gt-evidence> body from graph.db (pure SQL, cross-language).
 
     post_view : resolved-witness facts + caller-contract for the viewed file.
@@ -3469,6 +3777,11 @@ def _evidence_body(kind: str, rel: str, root: str) -> str:
     try:
         func_names = _top_func_names(con, dbrel, limit=3)
         if kind == "post_edit":
+            # B4: front the EDITED function(s) before the rc-DESC hub fill so the callee
+            # contracts key off the edit site, not the file's busiest symbol (hub-keying).
+            _edited = _funcs_enclosing_edited(con, dbrel, cmd)
+            if _edited:
+                func_names = _edited + [f for f in func_names if f not in _edited]
             # What the edited functions CALL, and how to call it correctly.
             for cl in _edit_target_callee_contracts(con, dbrel, func_names,
                                                     repo_root=code_root):
@@ -3526,7 +3839,7 @@ def _evidence(cmd: str) -> str:
     # evidence (graph.db not yet ready / no facts this view) permanently silenced
     # the file for the rest of the run — a later, non-empty evidence for the SAME
     # file could never fire. Latch ONLY once something is actually delivered.
-    ev = _evidence_body(kind, rel, root)
+    ev = _evidence_body(kind, rel, root, cmd)
     if not ev:
         return ""
     ev = _translate_to_action(ev, _detect_phase())
@@ -3727,14 +4040,18 @@ def _cochange_block(rel: str) -> str:
                 (nfp, nfp),
             ).fetchone()
             if not hit:
-                # exact miss — resolve via nodes table suffix-match
-                suffix = nfp.rsplit("/", 1)[-1] if "/" in nfp else nfp
-                row = con.execute(
-                    "SELECT file_path FROM nodes WHERE file_path LIKE ? LIMIT 1",
-                    ("%/" + suffix if "/" not in suffix else "%" + suffix,),
-                ).fetchone()
-                if row:
-                    nfp = _norm_fp(row[0])
+                # exact miss — resolve via nodes table with a FULL-SUFFIX + UNIQUENESS gate
+                # (B5, Fable 2026-07-05). The old basename-only LIKE ('%/Lexer.js') matched
+                # EVERY same-named file and LIMIT 1 picked an arbitrary one -> another file's
+                # co-change history was attributed to this edit. Use the FULL relpath suffix
+                # ('%/lib/lexer/Lexer.js') and require a UNIQUE match (LIMIT 2 -> exactly one),
+                # parity with _resolve_frame; an ambiguous suffix ABSTAINS (no cross-attribution).
+                cand = con.execute(
+                    "SELECT DISTINCT file_path FROM nodes WHERE file_path LIKE ? LIMIT 2",
+                    ("%/" + nfp,),
+                ).fetchall()
+                if len(cand) == 1:
+                    nfp = _norm_fp(cand[0][0])
         except Exception:  # noqa: BLE001
             pass
         rows: list[tuple[str, int]] = []
@@ -3946,7 +4263,7 @@ def _invalidate_on_edit(rel: str, root: str) -> None:
     per-task graph COPY — was rejected: it reintroduces a divergent graph the witness
     would fail to match, strictly worse for the proof.) L6 stays ENABLED only on the
     non-substrate (preindex/trial) path where the in-container /tmp/graph.db is ours."""
-    global _l6_no_binary_warned, _l6_reindex_failed_warned
+    global _l6_no_binary_warned, _l6_reindex_failed_warned, _l6_probe_emitted
     if _substrate_active() and os.environ.get("GT_L6_FRESH") != "1":
         return  # substrate graph is authoritative + read-only; never mutate/rebuild it.
     # GT_L6_FRESH: _db_path() returns the writable work-copy (NOT the mount), so the
@@ -3961,7 +4278,32 @@ def _invalidate_on_edit(rel: str, root: str) -> None:
     try:
         gt_index = os.environ.get("GT_INDEX_BIN", "/tmp/gt-index")
         db = _db_path()
+        # ONE-TIME env PROBE to the HARVESTED channel (the runtime ledger) — so the NEXT
+        # run pinpoints WHICH precondition failed (bin absent? db path? /tmp RO? staging
+        # fell back?) instead of leaving the freeze to un-harvested-stderr inference.
+        if not _l6_probe_emitted:
+            _l6_probe_emitted = True
+            try:
+                _tmp_ok = os.path.isdir("/tmp") and os.access("/tmp", os.W_OK)
+            except Exception:  # noqa: BLE001
+                _tmp_ok = False
+            _l6_emit("PROBE", bin=gt_index, bin_isfile=os.path.isfile(gt_index),
+                     db=db, db_isfile=os.path.isfile(db), root=root,
+                     workcopy=(_l6_work_db or "(none)"), tmp_writable=_tmp_ok,
+                     host_graph=os.environ.get("GT_HOST_GRAPH_DB", "(unset)"),
+                     l6_fresh=os.environ.get("GT_L6_FRESH", "0"))
+        # STAGING-FELLBACK GUARD: under GT_L6_FRESH the reindex MUST target the work-copy.
+        # If staging failed, _db_path() returned the authoritative RO mount — reindexing
+        # THAT would fail (RO) or fork a divergent graph that breaks the consumption
+        # witness. Refuse loudly rather than mutate the mount (correctness, not just
+        # observability). Non-substrate path (db == /tmp/graph.db) is ours — no guard.
+        if (os.environ.get("GT_L6_FRESH") == "1" and _substrate_active()
+                and db and db == os.environ.get("GT_HOST_GRAPH_DB")):
+            _l6_emit("STAGING_FELLBACK", db=db, file=rel,
+                     note="work-copy_absent__refusing_to_reindex_authoritative_mount")
+            return
         if os.path.isfile(gt_index) and os.path.isfile(db):
+            _n_before = _l6_count_nodes(db, rel)
             _rc = None
             try:
                 _rc = subprocess.run(
@@ -3982,20 +4324,32 @@ def _invalidate_on_edit(rel: str, root: str) -> None:
                         f"arch mismatch, or reindex exceeded {_HOOK_TIMEOUT}s)",
                         file=sys.stderr, flush=True,
                     )
+                _l6_emit("REINDEX_FAILED", file=rel, exc=type(_oe).__name__,
+                         bin=gt_index, timeout_s=_HOOK_TIMEOUT)
             # G05b (L6-fresh review): a runner-built binary that can't EXEC in the task
             # container (glibc/musl mismatch) leaves the file present (isfile True) but
             # makes the reindex a NO-OP — the silent failure mode the review flagged. A
             # non-zero rc here is that case; surface it ONCE so post-edit freshness loss
             # is diagnosable, never a green silent no-op.
-            if _rc is not None and _rc.returncode != 0 and not _l6_reindex_failed_warned:
-                _l6_reindex_failed_warned = True
-                _err = (_rc.stderr or b"")[:200]
-                print(
-                    f"[GT_META] L6_REINDEX_FAILED rc={_rc.returncode} bin={gt_index} "
-                    f"— post-edit graph freshness FROZEN (likely glibc/musl exec "
-                    f"mismatch or schema error); stderr={_err!r}",
-                    file=sys.stderr, flush=True,
-                )
+            if _rc is not None and _rc.returncode != 0:
+                if not _l6_reindex_failed_warned:
+                    _l6_reindex_failed_warned = True
+                    _err = (_rc.stderr or b"")[:200]
+                    print(
+                        f"[GT_META] L6_REINDEX_FAILED rc={_rc.returncode} bin={gt_index} "
+                        f"— post-edit graph freshness FROZEN (likely glibc/musl exec "
+                        f"mismatch or schema error); stderr={_err!r}",
+                        file=sys.stderr, flush=True,
+                    )
+                _l6_emit("REINDEX_FAILED", file=rel, rc=_rc.returncode, bin=gt_index,
+                         stderr=repr((_rc.stderr or b"")[:160]))
+            elif _rc is not None:
+                # SUCCESS — the POSITIVE freshness proof this channel never had. The
+                # node-count delta (before<after on a new-file add) is the observable
+                # that turns "L6 fired?" from inference into fact.
+                _n_after = _l6_count_nodes(db, rel)
+                _l6_emit("REINDEX_OK", file=rel, nodes_before=_n_before,
+                         nodes_after=_n_after, db=db)
         elif not os.path.isfile(gt_index):
             # G05 (fail loud, not silent): the reindex binary is absent. On the
             # host-graph-injection path gt_agent ships the graph but NOT the ~49MB
@@ -4014,8 +4368,9 @@ def _invalidate_on_edit(rel: str, root: str) -> None:
                     f"path; the ~49MB gt-index binary exceeds the 16MB bake cap)",
                     file=sys.stderr, flush=True,
                 )
-    except Exception:  # noqa: BLE001 -- best-effort, never break the loop
-        pass
+            _l6_emit("NO_BINARY", gt_index=gt_index, isfile=False)
+    except Exception as _l6e:  # noqa: BLE001 -- best-effort, never break the loop
+        _l6_emit("HOOK_EXC", file=rel, exc=f"{type(_l6e).__name__}:{_l6e}")
 
 
 def _l5_nudge(cmd: str, out_text: str = "",
@@ -4434,6 +4789,23 @@ def _sem_extract(text: str) -> tuple[frozenset, frozenset]:
     return frozenset(guards), frozenset(returns)
 
 
+def _sem_seed(rel: str) -> None:
+    """B6 (Fable 2026-07-05): seed the semantic-drift baseline for ``rel`` from its CURRENT
+    (pre-edit) content on a VIEW, IF not already cached. The drift detector's baseline is
+    'first sight' — if first sight is the post_EDIT state, the pre-edit -> post-edit guard/
+    return DELETION is invisible (the baseline already reflects the deletion). Seeding on
+    view captures the true pre-edit invariant set. Additive: view-then-edit now detects the
+    drift; a blind edit (never viewed) is unchanged. Correct-or-quiet: unreadable -> no seed."""
+    if not rel or rel in _sem_cache:
+        return
+    try:
+        path = rel if os.path.isabs(rel) else os.path.join(_root(), rel)
+        text = open(path, encoding="utf-8", errors="replace").read()
+    except Exception:  # noqa: BLE001 — unreadable file is not a baseline
+        return
+    _sem_cache[rel] = _sem_extract(text)
+
+
 def _semantic_drift_candidate(rel: str) -> tuple[float, str] | None:
     if not rel:
         return None
@@ -4537,6 +4909,7 @@ _oracle_edited_lines_by_file: dict[str, list] = {}
 _edit_churn: dict[str, int] = {}
 _gt_oracle_mod = None
 _gt_oracle_tried = False
+_gt_oracle_load_reported = False  # A5: one-shot latch for the load-failure marker
 
 
 def _reset_oracle_state() -> None:
@@ -4563,6 +4936,11 @@ def _reset_oracle_state() -> None:
     global _source_edit_count, _oracle_review_fired, _oblig_final_shot_fired
     global _l5_finish_fired, _l5_failure_fired, _l5_notest_fired, _marker_sent
     global _horizon_urgent_fired, _horizon_pivot_fired, _horizon_gate_fire_count
+    # A6 (2026-07-05): latches ADDED this session. _ROOT_FALLBACK_ACTIVE is behaviour-
+    # affecting (gates _snippet_attests) — a leak from a root-missing case would drop rows
+    # in the next; the other three are telemetry one-shots reset for a clean slate.
+    global _ROOT_FALLBACK_ACTIVE, _ROOT_MISS_REPORTED, _gt_oracle_load_reported
+    global _l6_probe_emitted
     _action_count = 0
     _oracle_nonedit_streak = 0
     _oracle_obligation_fired = False
@@ -4570,6 +4948,7 @@ def _reset_oracle_state() -> None:
     _oracle_test_evidence_seen = False
     _reset_phase_dropped_losers()    # bug #4(c): clear per-turn phase-drop staging
     _consensus_fired = False
+    _consensus_collected.clear()  # B3: reset the per-file collect latch on retry
     _cochange_fired = False
     _l5_fired = False
     _oracle_edited_rels.clear()
@@ -4626,6 +5005,10 @@ def _reset_oracle_state() -> None:
     _horizon_urgent_fired = False
     _horizon_pivot_fired = False
     _horizon_gate_fire_count = 0
+    _ROOT_FALLBACK_ACTIVE = False   # A9/A6: root-unknown flag (gates _snippet_attests)
+    _ROOT_MISS_REPORTED = False     # A9/A6: root-missing telemetry one-shot
+    _gt_oracle_load_reported = False  # A5/A6: oracle-load-failure telemetry one-shot
+    _l6_probe_emitted = False       # A6: L6 probe telemetry one-shot
     try:
         _sem_cache.clear()  # 2026-06-23 semantic-drift snapshot resets per task
     except Exception:
@@ -4676,7 +5059,14 @@ def _load_gt_oracle():
             sys.modules["gt_oracle_live"] = mod
             spec.loader.exec_module(mod)
             _gt_oracle_mod = mod
-    except Exception:  # noqa: BLE001 -- correct-or-quiet, never break the loop
+    except Exception as _oe:  # noqa: BLE001 -- correct-or-quiet, never break the loop
+        # A5 (2026-07-05): DURABLE telemetry — spec.obligation (gt §15.4 "the #1 lever")
+        # would otherwise vanish for the WHOLE run with ZERO marker on any channel (the
+        # bare swallow). Fire once (module latch) to the harvested ledger + stderr.
+        global _gt_oracle_load_reported
+        if not _gt_oracle_load_reported:
+            _gt_oracle_load_reported = True
+            _crash_emit("spec.obligation", _oe)
         _gt_oracle_mod = None
     return _gt_oracle_mod
 
@@ -5113,18 +5503,36 @@ def _runtime_ledger_record(
     event=None,
 ) -> None:
     ev = event.value if event is not None else ""
-    _RUNTIME_LEDGER.record(
-        _ProductLedgerEntry(
-            layer=kind,
-            event_type=ev,
-            file_path=file_path,
-            outcome=outcome,
-            reason=reason,
-            chars_delivered=chars,
-            iteration=_action_count,
+    # In-process object (used for the in-process summary / retry state); may be the
+    # no-op stub when a runtime module is missing — never the durable sink.
+    try:
+        _RUNTIME_LEDGER.record(
+            _ProductLedgerEntry(
+                layer=kind,
+                event_type=ev,
+                file_path=file_path,
+                outcome=outcome,
+                reason=reason,
+                chars_delivered=chars,
+                iteration=_action_count,
+            )
         )
-    )
-    _runtime_ledger_flush()
+    except Exception:  # noqa: BLE001
+        pass
+    # DURABLE sink (A1 + A7): append ONE line to the harvested ledger FILE directly,
+    # built from the raw params (NOT read back from _ProductLedgerEntry, which is a
+    # fieldless no-op under the stub). Replaces the old truncate-then-rewrite flush,
+    # so a stubbed Ledger.to_jsonl()->'' or a mid-run SIGKILL can no longer blank the
+    # whole run's ledger. Final clean-run file is byte-line-identical to the old flush.
+    _ledger_line_direct({
+        "layer": kind,
+        "event_type": ev,
+        "file_path": file_path,
+        "outcome": getattr(outcome, "value", outcome),
+        "reason": reason,
+        "chars_delivered": chars,
+        "iteration": _action_count,
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -5200,7 +5608,15 @@ def _reset_phase_dropped_losers() -> None:
     _phase_dropped_losers = set()
 
 
-def _filter_candidates_by_phase(cands, phase: Phase, event, *, file_path: str = ""):
+def _filter_candidates_by_phase(cands, phase: "Phase | None", event, *, file_path: str = ""):
+    # A4 (Fable 2026-07-05): a None phase (the trajectory_state stub's derive_phase -> None,
+    # or an unresolvable phase) means we CANNOT judge phase-fitness. The policy lookup would
+    # then classify EVERY kind as wrong_phase and MASS-SUPPRESS the whole turn — GT goes
+    # dark exactly when the control plane is already degraded. An unknown phase is NOT
+    # evidence of a WRONG phase: pass the already-markered non-empty candidates through
+    # (correct-or-quiet) rather than nuking them.
+    if phase is None:
+        return [(sev, kind, text, eb) for (sev, kind, text, eb) in cands if text]
     kept = []
     for sev, kind, text, event_bound in cands:
         if not text:
@@ -5988,26 +6404,27 @@ def _consensus_collect(rel: str) -> None:
     """Stage-4 consensus producer: build the scope MEMBERSHIP on first view
     (same `_query_scope` facts) WITHOUT emitting — the per-view scope dump is
     retired; delivery happens at the review transition."""
-    global _consensus_fired
-    if _consensus_fired:
+    n = _norm_rel(rel)
+    # B3 (2026-07-05): PER-FILE latch (was the global _consensus_fired one-shot). Each
+    # DISTINCT file contributes its scope ONCE; the scope ACCUMULATES across the files the
+    # agent views (K-of-N), instead of freezing to the first file. Decoupled from
+    # _consensus_fired so the legacy _consensus_block route can no longer freeze this out.
+    if n in _consensus_collected:
         return
-    # C3 (2026-07-04): consume the first-view latch ONLY on a PRODUCTIVE collect
-    # (>=1 graph-connected neighbour recorded), never at the top before querying.
-    # The old code set _consensus_fired BEFORE _query_scope, so a transient empty
-    # graph frame at first view froze the scope to {rel} for the whole task and
-    # silenced consensus permanently (there is no re-arm path for the collect
-    # latch). Mirrors the cochange law — burn the one-shot only on a real outcome;
-    # an isolated file (no neighbours) likewise leaves the latch armed to re-collect.
+    # C3 (2026-07-04): burn the per-file latch ONLY on a PRODUCTIVE collect (>=1
+    # graph-connected neighbour), never before querying — so a transient empty graph frame
+    # for this file leaves it UNcollected and a later view re-collects it. Mirrors the
+    # cochange law: an isolated file (no neighbours) stays armed to re-collect.
     try:
-        neighbours = [s for s in _query_scope(rel) if _norm_rel(s) != _norm_rel(rel)]
+        neighbours = [s for s in _query_scope(rel) if _norm_rel(s) != n]
     except Exception:  # noqa: BLE001
         return
     if not neighbours:
         return
-    _consensus_scope.add(_norm_rel(rel))
+    _consensus_scope.add(n)
     for s in neighbours:
         _consensus_scope.add(_norm_rel(s))
-    _consensus_fired = True
+    _consensus_collected.add(n)
 
 
 def _consensus_scope_block(rel: str) -> str:
@@ -6576,7 +6993,7 @@ def _dcc_block(kkind: str | None, kf: str, cmd: str, orig_out: str, lane_a) -> s
         # LEAK: every member must be deliverable + non-test before it renders.
         clean: dict = {}
         for p, v in qualifying.items():
-            if (_POST_SEARCH_TESTPATH.search(p) or _is_test_or_demo_path(p)
+            if (_is_post_search_testpath(p) or _is_test_or_demo_path(p)
                     or _caller_path_excluded(p, root)):
                 continue
             clean[p] = v
@@ -6595,8 +7012,7 @@ def _dcc_block(kkind: str | None, kf: str, cmd: str, orig_out: str, lane_a) -> s
         return block
     except Exception:  # noqa: BLE001 — the whole producer is isolated
         try:
-            print("[GT_META] producer_exception kind=concern.consensus",
-                  file=sys.stderr, flush=True)
+            _crash_emit("concern.consensus")
         except Exception:  # noqa: BLE001
             pass
         return ""
@@ -6719,6 +7135,10 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
             try:
                 print(f"[GT_META] lane_a_exception kind={kind}",
                       file=sys.stderr, flush=True)
+                _ledger_line_direct({  # A2: durable terminal state, not stderr-only
+                    "layer": f"lane_a.{kind}", "event_type": "", "file_path": "",
+                    "outcome": "provider_failed", "reason": "lane_a_exception",
+                    "chars_delivered": 0, "iteration": globals().get("_action_count", 0)})
             except Exception:  # noqa: BLE001
                 pass
 
@@ -6853,14 +7273,12 @@ def _augment_output(action, out) -> None:
                 try:
                     _la_contract = _graph_contract_block(_krel)
                 except Exception:  # noqa: BLE001 — Lane A producer isolated
-                    print("[GT_META] producer_exception kind=l3.contract",
-                          file=sys.stderr, flush=True)
+                    _crash_emit("l3.contract")
                     _la_contract = ""
                 try:
                     _la_cochange = _cochange_block(_krel)
                 except Exception:  # noqa: BLE001 — Lane A producer isolated
-                    print("[GT_META] producer_exception kind=l3.cochange",
-                          file=sys.stderr, flush=True)
+                    _crash_emit("l3.cochange")
                     _la_cochange = ""
                 lane_a.append(("l3.contract", _la_contract))
                 lane_a.append(("l3.cochange", _la_cochange))
@@ -6873,8 +7291,7 @@ def _augment_output(action, out) -> None:
                 try:
                     _csb_e = _consensus_scope_block(_krel)
                 except Exception:  # noqa: BLE001 — Lane A producer isolated
-                    print("[GT_META] producer_exception kind=consensus.scope_map",
-                          file=sys.stderr, flush=True)
+                    _crash_emit("consensus.scope_map")
                     _csb_e = ""
                 lane_a.append(("consensus.scope_map", _csb_e))
             else:
@@ -6885,6 +7302,9 @@ def _augment_output(action, out) -> None:
                 _crel = _to_repo_rel(_kf, _croot)
                 # consensus: collect scope membership QUIETLY (re-routed).
                 _consensus_collect(_crel)
+                # B6: seed the semantic-drift baseline from the PRE-EDIT (viewed) content
+                # so a later edit's guard/return deletion is measured against it.
+                _sem_seed(_crel)
                 # consensus DELIVERY (2026-06-24): the in-scope graph map reaches the
                 # agent the moment it VIEWS a file that is part of the GT scope — a
                 # Lane-A fact (always-on, isolated, content-hash deduped), latched
@@ -6894,8 +7314,7 @@ def _augment_output(action, out) -> None:
                 try:
                     _csb = _consensus_scope_block(_crel)
                 except Exception:  # noqa: BLE001 — Lane A producer isolated
-                    print("[GT_META] producer_exception kind=consensus.scope_map",
-                          file=sys.stderr, flush=True)
+                    _crash_emit("consensus.scope_map")
                     _csb = ""
                 lane_a.append(("consensus.scope_map", _csb))
             # post_search (M0+ / Listen Lattice): answer the agent's OWN repo-wide
@@ -6908,8 +7327,7 @@ def _augment_output(action, out) -> None:
             try:
                 _la_search = _search_localize_block(cmd, _orig_out)
             except Exception:  # noqa: BLE001 — Lane A producer isolated
-                print("[GT_META] producer_exception kind=post_search.localize",
-                      file=sys.stderr, flush=True)
+                _crash_emit("post_search.localize")
                 _la_search = ""
             # CONDITIONAL append (Fable #4): only enqueue a NON-empty block, so the
             # flag-off run is truly inert — no `post_search.localize` key gets written
@@ -6963,8 +7381,7 @@ def _augment_output(action, out) -> None:
             try:
                 _ev_text = _evidence(cmd)
             except Exception:  # noqa: BLE001 — one producer must not kill the gate
-                print("[GT_META] producer_exception kind=l3b.evidence",
-                      file=sys.stderr, flush=True)
+                _crash_emit("l3b.evidence")
                 _ev_text = ""
             _ev_event_bound = bool(
                 _kkind in ("post_view", "post_edit") and _kf and _ev_text)
@@ -6986,8 +7403,7 @@ def _augment_output(action, out) -> None:
             try:
                 _dcc_txt = _dcc_block(_kkind, (_kf or ""), cmd or "", _orig_out, lane_a)
             except Exception:  # noqa: BLE001 — DCC producer isolated
-                print("[GT_META] producer_exception kind=concern.consensus",
-                      file=sys.stderr, flush=True)
+                _crash_emit("concern.consensus")
                 _dcc_txt = ""
             if _dcc_txt:
                 lane_a.append(("concern.consensus", _dcc_txt))
@@ -7019,8 +7435,7 @@ def _augment_output(action, out) -> None:
                     try:
                         _scb = _scope_completeness_block()
                     except Exception:  # noqa: BLE001 — one producer must not kill the gate
-                        print("[GT_META] producer_exception kind=consensus.scope",
-                              file=sys.stderr, flush=True)
+                        _crash_emit("consensus.scope")
                         _scb = None
                     if _scb:
                         _oracle_review_fired = True
@@ -7041,8 +7456,7 @@ def _augment_output(action, out) -> None:
                     try:
                         _ob = _obligation_nudge_block()
                     except Exception:  # noqa: BLE001 — one producer must not kill the gate
-                        print("[GT_META] producer_exception kind=spec.obligation",
-                              file=sys.stderr, flush=True)
+                        _crash_emit("spec.obligation")
                         _ob = None
                     if _ob is not None:
                         cands.append((_ob[0], "spec.obligation", _ob[1], True))
@@ -7056,22 +7470,19 @@ def _augment_output(action, out) -> None:
                     _l5s = _l5_nudge(cmd, _orig_out, loop_arm=False,
                                      scaffold_arm=False)
                 except Exception:  # noqa: BLE001 — one producer must not kill the gate
-                    print("[GT_META] producer_exception kind=l5.stuck",
-                          file=sys.stderr, flush=True)
+                    _crash_emit("l5.stuck")
                     _l5s = ""
                 cands.append((_SEV_STUCK, "l5.stuck", _l5s, True))
                 try:
                     _l5f = _l5_failure_nudge(cmd, _orig_out)
                 except Exception:  # noqa: BLE001 — one producer must not kill the gate
-                    print("[GT_META] producer_exception kind=l5.failure",
-                          file=sys.stderr, flush=True)
+                    _crash_emit("l5.failure")
                     _l5f = ""
                 cands.append((_SEV_STUCK, "l5.failure", _l5f, True))
                 try:
                     _l5nt = _l5_no_test_evidence_nudge(cmd, _orig_out)
                 except Exception:  # noqa: BLE001 — one producer must not kill the gate
-                    print("[GT_META] producer_exception kind=l5.no_test",
-                          file=sys.stderr, flush=True)
+                    _crash_emit("l5.no_test")
                     _l5nt = ""
                 cands.append((_SEV_NUDGE_VERIFY, "l5.no_test", _l5nt, True))
                 # (Obligation RE-SURFACE lives in the post_edit block below as a
@@ -7083,8 +7494,7 @@ def _augment_output(action, out) -> None:
                 try:
                     _dl = _degenerate_loop_candidate(cmd, _orig_out)
                 except Exception:  # noqa: BLE001 — one producer must not kill the gate
-                    print("[GT_META] producer_exception kind=detect.loop",
-                          file=sys.stderr, flush=True)
+                    _crash_emit("detect.loop")
                     _dl = None
                 if _dl is not None:
                     cands.append((_dl[0], "detect.loop", _dl[1], True))
@@ -7092,8 +7502,7 @@ def _augment_output(action, out) -> None:
                     try:
                         _cc = _coherence_collapse_candidate(_krel)
                     except Exception:  # noqa: BLE001 — one producer must not kill the gate
-                        print("[GT_META] producer_exception kind=detect.coherence",
-                              file=sys.stderr, flush=True)
+                        _crash_emit("detect.coherence")
                         _cc = None
                     if _cc is not None:
                         cands.append((_cc[0], "detect.coherence", _cc[1], True))
@@ -7102,8 +7511,7 @@ def _augment_output(action, out) -> None:
                     try:
                         _sd = _semantic_drift_candidate(_krel)
                     except Exception:  # noqa: BLE001 — one producer must not kill the gate
-                        print("[GT_META] producer_exception kind=semantic_drift",
-                              file=sys.stderr, flush=True)
+                        _crash_emit("semantic_drift")
                         _sd = None
                     if _sd is not None:
                         cands.append((_sd[0], "semantic_drift", _sd[1], True))
@@ -7141,8 +7549,7 @@ def _augment_output(action, out) -> None:
                         try:
                             _obr = _obligation_resurface_candidate()
                         except Exception:  # noqa: BLE001 — one producer must not kill the gate
-                            print("[GT_META] producer_exception kind=obligation.resurface",
-                                  file=sys.stderr, flush=True)
+                            _crash_emit("obligation.resurface")
                             _obr = None
                         if _obr is not None:
                             # Deliver via the LANE-A path (a once-per-task requirement
@@ -7162,8 +7569,7 @@ def _augment_output(action, out) -> None:
                 try:
                     _vh = _verification_horizon_candidate()
                 except Exception:  # noqa: BLE001 — one producer must not kill the gate
-                    print("[GT_META] producer_exception kind=verify.horizon",
-                          file=sys.stderr, flush=True)
+                    _crash_emit("verify.horizon")
                     _vh = None
                 if _vh is not None:
                     cands.append(_vh)
@@ -7251,8 +7657,14 @@ def _augment_output(action, out) -> None:
                 # never Lane A's data plane (already delivered above).
                 try:
                     import traceback as _tb_b
-                    print("[GT_META] lane_b_exception=true\n" + _tb_b.format_exc(),
+                    _exc_b = _tb_b.format_exc()
+                    print("[GT_META] lane_b_exception=true\n" + _exc_b,
                           file=sys.stderr, flush=True)
+                    _ledger_line_direct({  # A2: durable terminal state, not stderr-only
+                        "layer": "lane_b", "event_type": "", "file_path": "",
+                        "outcome": "provider_failed", "chars_delivered": 0,
+                        "reason": ("lane_b_exception: " + (_exc_b.strip().splitlines() or [""])[-1])[:300],
+                        "iteration": globals().get("_action_count", 0)})
                 except Exception:  # noqa: BLE001
                     pass
             return
@@ -7310,8 +7722,14 @@ def _augment_output(action, out) -> None:
         # diagnosable, while NEVER re-raising (the agent loop must not break).
         try:
             import sys as _sys, traceback as _tb
-            print("[GT_META] augment_output_exception=true\n" + _tb.format_exc(),
+            _exc_a = _tb.format_exc()
+            print("[GT_META] augment_output_exception=true\n" + _exc_a,
                   file=_sys.stderr, flush=True)
+            _ledger_line_direct({  # A2: durable terminal state, not stderr-only
+                "layer": "augment_output", "event_type": "", "file_path": "",
+                "outcome": "provider_failed", "chars_delivered": 0,
+                "reason": ("augment_output_exception: " + (_exc_a.strip().splitlines() or [""])[-1])[:300],
+                "iteration": globals().get("_action_count", 0)})
         except Exception:
             pass
 

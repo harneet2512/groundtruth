@@ -94,6 +94,12 @@ PHASE_POLICY: dict[Phase, frozenset[str]] = {
         PayloadKind.VERIFY_ADVISORY.value,
         PayloadKind.VERIFY_URGENT.value,
         PayloadKind.VERIFY_PIVOT.value,
+        # A3 (Fable 2026-07-05): the verify-before-submit GATE is calibrated to fire at
+        # ~7.48 action-cycles, but _detect_phase only reaches SUBMIT at >90% budget — so
+        # the gate was phase-starved until it was almost too late to act on. VERIFY is the
+        # phase the agent is actually verifying in; allow the gate there (kept in SUBMIT
+        # too) so it delivers at its calibrated moment instead of the budget tail.
+        PayloadKind.VERIFY_GATE.value,
     }),
     Phase.SUBMIT: frozenset({
         PayloadKind.OBLIGATION_STATUS.value,
