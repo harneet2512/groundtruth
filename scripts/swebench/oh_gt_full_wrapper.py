@@ -6782,6 +6782,173 @@ def _b64_chunks(payload: bytes, chunk_size: int = 8000) -> list[str]:
     return [encoded[i : i + chunk_size] for i in range(0, len(encoded), chunk_size)]
 
 
+def _emit_graph_handoff_witness(config: Any) -> None:
+    """GRAPH-HANDOFF WITNESS (Stage 2 / gt_gt §12) — OH parity with the DeepSWE adapter.
+
+    Emit the canonical ``[GT_META] graph_witness`` line so the pipeline can PROVE the
+    agent's in-loop hooks read the SAME resolved graph the substrate gates measured.
+    graph_certificate.json is written PRE-AGENT (inside gt-run-proof, where
+    GT_HOST_GRAPH_DB is unset — graph_certificate.py:123/219) and stamps
+    GRAPH_FAIL_MISSING_HANDOFF by design; THIS witness is what
+    scripts/swebench/reconcile.py:reconcile_graph_handoff uses to override that verdict
+    to ``witness_overrides``. The parser (deepswe_outcome._gt_meta_witness) reads the
+    ``gt_prebuilt_active=`` and ``hook_graph_hash_matches_post_lsp=`` k=v fields, so the
+    suffix (mirroring gt_agent.py:1279-1296) is REQUIRED, not cosmetic — the bare
+    ``_gt_prebuilt_active=True`` prefix alone parses to key ``_gt_prebuilt_active`` and
+    never satisfies the witness (the run-28768411100 gap).
+
+    FAIL-CLOSED (mirror gt_agent.py:1232-1320): when the prebuilt substrate graph WAS
+    consumed (``config._gt_prebuilt_active``) and its fingerprint cannot be computed,
+    diverges from the substrate's post-LSP hash, or (proof mode) cannot be compared,
+    print the classified ``error=DEEPSWE_ADAPTER_FAIL`` line and RAISE under proof
+    (GT_PROOF_MODE=1) or substrate (GT_PORTABLE_SUBSTRATE/GT_HOST_GRAPH_DB/GT_CERT_DIR)
+    mode — never warn-and-continue. UNARMED handoff (prebuilt inactive) keeps the
+    byte-identical legacy bare line + OH's DESIGNED in-container-rebuild fallback
+    (_upload_promoted_db schema-mismatch -> rebuild); reconcile then keeps the cert
+    FAIL (witness-absent = unproven consume) — fail-closed at the attestation level
+    without killing the fallback (the deliberate delta from mini, which forbids any
+    rebuild)."""
+    proof_mode = os.environ.get("GT_PROOF_MODE") == "1"
+    substrate = bool(
+        os.environ.get("GT_PORTABLE_SUBSTRATE") == "1"
+        or os.environ.get("GT_HOST_GRAPH_DB")
+        or os.environ.get("GT_CERT_DIR")
+    )
+    cert_dir = os.environ.get("GT_CERT_DIR", "")
+    host_db = os.environ.get("GT_HOST_GRAPH_DB", "")
+    if not cert_dir and host_db:
+        cert_dir = os.path.dirname(host_db)
+    prebuilt = bool(getattr(config, "_gt_prebuilt_active", False))
+
+    def _fail(detail: str, *, prebuilt_s: str) -> None:
+        # Mirror gt_agent._fail (gt_agent.py:1152-1159): print the classified
+        # DEEPSWE_ADAPTER_FAIL line, then RAISE in proof/substrate mode (fail-closed).
+        print(f"[GT_META] gt_artifacts={cert_dir}; gt_prebuilt_active={prebuilt_s}; "
+              f"error=DEEPSWE_ADAPTER_FAIL detail={detail}", flush=True)
+        if proof_mode or substrate:
+            raise RuntimeError(f"DEEPSWE_ADAPTER_FAIL: {detail}")
+
+    try:
+        hook_hash = ""
+        if prebuilt and host_db and os.path.exists(host_db):
+            from groundtruth.runtime import proof as _gw_proof
+            hook_hash = _gw_proof.graph_edges_hash(host_db)
+
+        if not prebuilt:
+            # Legacy/unarmed path — byte-identical to the pre-parity inline emit. No
+            # substrate graph was uploaded into the container as config.graph_db; the
+            # witness carries no parseable consumption proof and reconcile keeps the
+            # pre-agent cert verdict (correctly: the substrate graph was NOT consumed).
+            print(f"[GT_META] graph_witness host_resolved_graph_db={host_db} "
+                  f"hook_graph_db={getattr(config, 'graph_db', '')} hook_graph_hash={hook_hash} "
+                  f"_gt_prebuilt_active={prebuilt}", flush=True)
+            return
+
+        # READ-ONLY canonical fingerprint of the consumed graph (never writes).
+        if not hook_hash:
+            _fail(f"graph_edges_hash_empty for {host_db!r}", prebuilt_s="true")
+            return
+
+        # The substrate's authority hash (mirror gt_agent.py:1238-1260): the LSP cert's
+        # post-LSP hash, else the graph certificate's.
+        post_lsp = ""
+        lsp_cert_path = (os.environ.get("GT_LSP_CERT", "")
+                         or (os.path.join(cert_dir, "lsp_certificate.json") if cert_dir else ""))
+        if lsp_cert_path and os.path.isfile(lsp_cert_path):
+            try:
+                with open(lsp_cert_path, encoding="utf-8") as fh:
+                    _lc = json.load(fh)
+                post_lsp = (_lc.get("graph_hash_after_lsp")
+                            or _lc.get("graph_hash") or "")
+            except (OSError, ValueError):
+                post_lsp = ""
+        if not post_lsp and cert_dir:
+            _gc_path = os.path.join(cert_dir, "graph_certificate.json")
+            if os.path.isfile(_gc_path):
+                try:
+                    with open(_gc_path, encoding="utf-8") as fh:
+                        _gc = json.load(fh)
+                    post_lsp = (_gc.get("graph_hash_after_lsp")
+                                or _gc.get("graph_hash") or "")
+                except (OSError, ValueError):
+                    post_lsp = ""
+
+        hash_match = bool(post_lsp) and (hook_hash == post_lsp)
+
+        # Canonical witness formatter (layer-1 GT code, scripts/metrics/
+        # graph_certificate.py) — the same import shape gt_agent.py:1173-1184 uses;
+        # inline fallback so the witness is never blocked on it.
+        _fmt = None
+        try:
+            import importlib as _il
+            _md = str(Path(__file__).resolve().parent.parent / "metrics")
+            if os.path.isdir(_md) and _md not in sys.path:
+                sys.path.insert(0, _md)
+            _fmt = getattr(
+                _il.import_module("graph_certificate"), "format_graph_witness", None)
+        except Exception:  # noqa: BLE001 -- inline fallback below
+            _fmt = None
+        if _fmt is not None:
+            base = _fmt(host_resolved_graph_db=host_db,
+                        hook_graph_db=getattr(config, "graph_db", ""),
+                        hook_graph_hash=hook_hash,
+                        prebuilt_active=prebuilt)
+        else:
+            base = (f"[GT_META] graph_witness host_resolved_graph_db={host_db} "
+                    f"hook_graph_db={getattr(config, 'graph_db', '')} "
+                    f"hook_graph_hash={hook_hash} _gt_prebuilt_active={prebuilt}")
+
+        def _cert(name: str) -> str:
+            return os.path.join(cert_dir, name) if cert_dir else ""
+
+        digest = os.environ.get("GT_SUBSTRATE_DIGEST", "")
+        print(
+            f"{base} | gt_artifacts={cert_dir}; graph_db={host_db}; "
+            f"graph_hash={hook_hash}; graph_hash_after_lsp={post_lsp or '(absent)'}; "
+            f"hook_graph_hash_matches_post_lsp={hash_match}; "
+            f"lsp_certificate={_cert('lsp_certificate.json')}; "
+            f"graph_certificate={_cert('graph_certificate.json')}; "
+            f"embedder_certificate={_cert('embedder_certificate.json')}; "
+            f"foundational_gate_report={_cert('foundational_gate_report.json')}; "
+            f"gt_prebuilt_active=true; "
+            f"runtime_strategy={os.environ.get('GT_RUNTIME_STRATEGY', 'unified_substrate')}; "
+            f"l6_fresh={'1' if os.environ.get('GT_L6_FRESH') == '1' else '0'}; "
+            f"substrate_digest={digest or '(unset)'}",
+            flush=True,
+        )
+        # FAIL-CLOSED: a divergent consumed graph must HARD-STOP under proof/substrate
+        # mode, NOT warn (graph_certificate.classify_graph treats hook!=post-LSP as
+        # GRAPH_FAIL_HASH_MISMATCH; this is the in-wrapper enforcement of that).
+        if post_lsp and not hash_match:
+            _fail(
+                f"GRAPH_FAIL_HASH_MISMATCH hook_graph_hash={hook_hash} != "
+                f"graph_hash_after_lsp={post_lsp} — the consumed graph diverges "
+                f"from the substrate's LSP-resolved graph",
+                prebuilt_s="true",
+            )
+            return
+        # In proof mode the substrate's authority hash MUST be present + matched — an
+        # absent post-LSP hash means the consume cannot be PROVEN correct, which is
+        # itself fail-closed (no unprovable consume).
+        if proof_mode and not post_lsp:
+            _fail(
+                f"post_lsp_hash_absent cert_dir={cert_dir or '(unset)'} — cannot prove "
+                f"the consumed graph == the substrate's LSP-resolved graph "
+                f"(GRAPH_FAIL_MISSING_HANDOFF analogue)",
+                prebuilt_s="true",
+            )
+            return
+    except RuntimeError:
+        # _fail already printed the classified line; propagate the hard stop.
+        raise
+    except Exception as _gw_e:  # noqa: BLE001 -- surface, never swallow (§E)
+        print(f"[GT_META] graph_witness error={_gw_e}", flush=True)
+        if prebuilt and (proof_mode or substrate):
+            # An armed handoff whose witness cannot be computed is an UNPROVABLE
+            # consume — fail-closed, mirroring gt_agent.py:1324-1325.
+            raise RuntimeError(f"DEEPSWE_ADAPTER_FAIL: witness_exception:{_gw_e}") from _gw_e
+
+
 def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> None:
     if _ORIG_INITIALIZE_RUNTIME is not None:
         try:
@@ -6952,23 +7119,16 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
 
     l4_ok = install_graph_and_hook(runtime, config)
 
-    # GRAPH-HANDOFF WITNESS (Stage 2): emit a [GT_META] line so a run/test can PROVE the
-    # agent's in-loop hooks read the SAME resolved graph the gates measured. When the
-    # host-resolved graph was uploaded into the container as config.graph_db
-    # (_gt_prebuilt_active), its CONTENT equals GT_HOST_GRAPH_DB (host-readable) -> hash that
-    # as the hook-graph fingerprint; it must equal the LSP cert's graph_hash_after_lsp.
-    try:
-        _gw_host = os.environ.get("GT_HOST_GRAPH_DB", "")
-        _gw_prebuilt = bool(getattr(config, "_gt_prebuilt_active", False))
-        _gw_hook_hash = ""
-        if _gw_prebuilt and _gw_host and os.path.exists(_gw_host):
-            from groundtruth.runtime import proof as _gw_proof
-            _gw_hook_hash = _gw_proof.graph_edges_hash(_gw_host)
-        print(f"[GT_META] graph_witness host_resolved_graph_db={_gw_host} "
-              f"hook_graph_db={getattr(config, 'graph_db', '')} hook_graph_hash={_gw_hook_hash} "
-              f"_gt_prebuilt_active={_gw_prebuilt}", flush=True)
-    except Exception as _gw_e:
-        print(f"[GT_META] graph_witness error={_gw_e}", flush=True)
+    # GRAPH-HANDOFF WITNESS (Stage 2 / gt_gt §12): emit the [GT_META] graph_witness so
+    # the pipeline can PROVE the agent's in-loop hooks read the SAME resolved graph the
+    # gates measured, and reconcile_graph_handoff can override the PRE-AGENT
+    # GRAPH_FAIL_MISSING_HANDOFF cert to witness_overrides. When the host-resolved graph
+    # was uploaded into the container as config.graph_db (_gt_prebuilt_active), its
+    # CONTENT equals GT_HOST_GRAPH_DB (host-readable) -> hash that as the hook-graph
+    # fingerprint; it must equal the LSP cert's graph_hash_after_lsp. Factored to a
+    # top-level function (mini parity: gt_agent._emit_gt_meta_witness) so tests can
+    # extract it; fail-closed under proof/substrate on a divergent/unprovable consume.
+    _emit_graph_handoff_witness(config)
 
     # B-7: graph.db access mode.
     # "proxy" (default): one query to get node count for L5 threshold (~1 sec)

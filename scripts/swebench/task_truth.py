@@ -269,8 +269,19 @@ def build_task_truth(
     trial_log: str = "",
     cert_dir: str | None = None,
     patch_hygiene: dict | None = None,
+    grade_outcome: bool = True,
 ) -> dict:
-    """Assemble reconciled per-task truth record."""
+    """Assemble reconciled per-task truth record.
+
+    grade_outcome=False is the OH / non-DeepSWE path: grade ONLY the substrate
+    (graph handoff via the runtime witness) and DEFER outcome to eval_result.json.
+    The DeepSWE outcome classifier (detect_infra_subtype / _detect_eval_no_report)
+    globs the pier layout jobs/*/*__*/agent/*.trajectory.json, which is absent on an
+    OpenHands results dir (output.jsonl / test_result.git_patch); left on, it fails
+    closed to INFRA_MISSING_ARTIFACT and mislabels a real agent run as infra. The
+    substrate reconcile is unaffected — reconcile_graph_handoff reads only the
+    witness fields, populated regardless of grade_outcome.
+    """
     do = _load_deepswe_outcome()
 
     artifacts = _find_trial_artifacts(jobs_dir, instance_id=instance_id)
@@ -299,8 +310,15 @@ def build_task_truth(
         if not cert_dir or not os.path.isdir(cert_dir):
             cert_dir = "/tmp/gt" if os.path.isdir("/tmp/gt") else None
 
-    eval_no_report = do._detect_eval_no_report(jobs_dir)  # noqa: SLF001
-    infra_subtype = do.detect_infra_subtype(jobs_dir, trial_log)
+    if grade_outcome:
+        eval_no_report = do._detect_eval_no_report(jobs_dir)  # noqa: SLF001
+        infra_subtype = do.detect_infra_subtype(jobs_dir, trial_log)
+    else:
+        # OH path: never run the DeepSWE-shaped outcome classifier (it would
+        # fail closed to INFRA_MISSING_ARTIFACT on an OH results dir). Outcome
+        # is deferred to eval_result.json; only the substrate is graded here.
+        eval_no_report = False
+        infra_subtype = None
 
     signal = do.build_signal_record(
         instance_id=iid,
@@ -339,7 +357,12 @@ def build_task_truth(
     obligation_status = _load_json(obl_path) if obl_path else None
 
     if patch_hygiene is None:
-        patch_hygiene = _patch_hygiene_from_artifacts(artifacts)
+        patch_hygiene = _patch_hygiene_from_artifacts(artifacts) if grade_outcome else {
+            "classification": "deferred_to_eval",
+            "files": [],
+            "summary": {"source_fix": 0, "lockfile": 0, "generated": 0, "noise": 0},
+            "note": "patch graded by eval_result.json (OH/non-DeepSWE path)",
+        }
 
     trajectory_summary = _trajectory_state_summary(artifacts)
     obligation_summary = _obligation_lifecycle_summary(obligation_status)
@@ -347,6 +370,27 @@ def build_task_truth(
     horizon_summary = _verification_horizon_summary(deep, verifier_semantics)
     runtime_ledger_summary = _runtime_ledger_summary(arts.runtime_ledger)
     structured_adapter_witness = _load_json(arts.adapter_witness or "") or {}
+
+    if grade_outcome:
+        outcome_block = {
+            "reward": signal.get("reward"),
+            "resolved": signal.get("failure_class") == "RESOLVED",
+            "failure_class": signal.get("failure_class"),
+            "infra_subtype": signal.get("infra_subtype"),
+            "in_resolved_denominator": signal.get("in_resolved_denominator"),
+        }
+    else:
+        outcome_block = {
+            "reward": None,
+            "resolved": None,
+            "failure_class": None,
+            "infra_subtype": None,
+            "in_resolved_denominator": None,
+            "note": (
+                "outcome authority = eval_result.json (OH/non-DeepSWE path); "
+                "DeepSWE outcome classifier not run"
+            ),
+        }
 
     return {
         "schema": "gt.task_truth.v1",
@@ -395,13 +439,7 @@ def build_task_truth(
                 "structured": structured_adapter_witness,
             },
         },
-        "outcome": {
-            "reward": signal.get("reward"),
-            "resolved": signal.get("failure_class") == "RESOLVED",
-            "failure_class": signal.get("failure_class"),
-            "infra_subtype": signal.get("infra_subtype"),
-            "in_resolved_denominator": signal.get("in_resolved_denominator"),
-        },
+        "outcome": outcome_block,
         "trajectory_integrity": traj_int,
         "patch_hygiene": patch_hygiene or {},
         "reconciled": reconciled,
