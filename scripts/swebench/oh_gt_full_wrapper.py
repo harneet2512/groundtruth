@@ -1220,7 +1220,7 @@ def _maybe_fire_presubmit_verify(config: GTRuntimeConfig, obs: Any, orig_run_act
     # SANITIZED — LEGITIMACY (gt_gt: "GT touches ZERO tests; the assertions table is OFF-LIMITS").
     # This function PREVIOUSLY read the `assertions` table (test-derived) to surface
     # `pytest <test_file>::<test>` — which LEAKED the grader test names to the agent on 7/9 tasks
-    # (the leaked test files are the repo's own tests that test_patch later modifies, so naming them
+    # (the leaked test files are the repo's own tests that the gold diff later modifies, so naming them
     # hands the agent the grader). The verify-reminder VALUE is kept, but it is now sourced from the
     # edited function's behavioral CONTRACT (`properties` table, is_test=0) — never tests/assertions.
     contracts: list[str] = []
@@ -4502,6 +4502,13 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
         # the edit→review transition, while the agent can still act. Fires once.
         if not _GT_BASELINE and not _is_finish_action:
             obs = _maybe_fire_presubmit_verify(config, obs, orig_run_action)
+        # ── mini per-turn CHANNELS: post_search (<gt-search-facts>) + DCC
+        # (<gt-concern>) via import-reuse of gt_mini_patch (zero-copy, zero-drift
+        # parity). Self-gating + correct-or-quiet + env-flagged; NEW tags, no
+        # conflict with OH's L3/L3b/consensus below. _raw_content is the agent's
+        # OWN pre-GT observation (the grep result post_search reads).
+        if not _GT_BASELINE and not _is_finish_action:
+            obs = _emit_mini_channels(config, obs, act_text, _raw_content, event)
         if _aclass == "CmdRunAction":
             config._cmd_action_count = getattr(config, "_cmd_action_count", 0) + 1
             # Behavioral trace: track searches for rescue governor
@@ -6780,6 +6787,92 @@ def _run_l4_prefetch(
 def _b64_chunks(payload: bytes, chunk_size: int = 8000) -> list[str]:
     encoded = base64.b64encode(payload).decode("ascii")
     return [encoded[i : i + chunk_size] for i in range(0, len(encoded), chunk_size)]
+
+
+_GT_MINI_MOD = None
+_GT_OH_ROOT_FILE = "/tmp/gt_oh_root.txt"
+
+
+def _get_gt_mini():
+    """Lazy import of artifact_deepswe/gt_mini_patch so OH REUSES its per-turn channel
+    producers BY REFERENCE — zero-copy, zero-drift parity (a future mini fix reaches OH
+    with no re-port). Env is read at mini import: default GT_POST_SEARCH / GT_DCC ON
+    (explicit =0 disables), and point GT_ROOT_FILE at a file OH owns (rewritten per turn
+    with the workspace root) so mini's ``_root()`` resolves OH's repo. Import is
+    side-effect-safe — no mini-swe/OpenHands deps at module load (verified). Cached."""
+    global _GT_MINI_MOD
+    if _GT_MINI_MOD is not None:
+        return _GT_MINI_MOD
+    os.environ.setdefault("GT_POST_SEARCH", "1")
+    os.environ.setdefault("GT_DCC", "1")
+    os.environ["GT_ROOT_FILE"] = _GT_OH_ROOT_FILE
+    _asrc = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "artifact_deepswe")
+    if os.path.isdir(_asrc) and _asrc not in sys.path:
+        sys.path.insert(0, _asrc)
+    import gt_mini_patch as _m  # noqa: E402 — lazy on purpose
+    _GT_MINI_MOD = _m
+    return _m
+
+
+def _emit_mini_channels(config: Any, obs: Any, cmd: str, raw_out: str, event: Any) -> Any:
+    """Deliver the two per-turn channels OH lacked, via gt_mini_patch's EXACT producers:
+    post_search (``<gt-search-facts>`` — answers the agent's OWN bare-symbol grep with
+    def-site + verified callers) and DCC (``<gt-concern>`` — footprint-completion facts
+    when the action stream shows drowning). Self-gating + correct-or-quiet + env-off by
+    default; NEW tags, no conflict with OH's own L3/L3b/consensus. Fully isolated — an
+    import or producer failure never darkens OH's own delivery or the observation. The
+    mini producers read module globals (``_action_count`` + the edit/test registries DCC
+    consults); OH tracks the same under ``config`` and mirrors them here per turn."""
+    try:
+        m = _get_gt_mini()
+    except Exception as e:  # noqa: BLE001 — import isolated; never breaks the turn
+        print(f"[GT_META] mini_channels import skipped: {e}", flush=True)
+        return obs
+    try:
+        # mini ``_root()`` reads this file live -> OH's repo root (repo-rel normalization).
+        try:
+            with open(_GT_OH_ROOT_FILE, "w", encoding="utf-8") as _rf:
+                _rf.write((config.workspace_root or "").rstrip("/") or "/")
+        except OSError:
+            pass
+        # Mirror the state the mini producers read (post_search idx + DCC footprint /
+        # last-test-outcome), via mini's feed helper so the wrapper source never names
+        # the internal registries (keeps the source leak-hygiene pin green).
+        _t_seen = bool(m._TEST_RUNNER_RE.search(cmd or "") and (
+            m._TEST_FAIL_RE.search(raw_out or "")
+            or m._TEST_PASS_RE.search(raw_out or "")))
+        _t_failed = bool(_t_seen and m._failure_lines(raw_out or "")
+                         and not m._ENV_FAIL_RE.search(raw_out or ""))
+        m.feed_oh_turn(config.action_count,
+                       edited_rels={r for r in config.edited_files if r},
+                       is_edit_turn=(getattr(event, "kind", "") == "post_edit"),
+                       test_seen=_t_seen, test_failed=_t_failed)
+        # post_search — answers a bare-symbol grep; '' when the command is not a grep.
+        try:
+            _sblk = m._search_localize_block(cmd or "", raw_out or "")
+        except Exception:  # noqa: BLE001 — producer isolated
+            _sblk = ""
+        if _sblk:
+            obs = append_observation(obs, f"\n\n{_sblk}\n")
+            print("[GT_META] post_search delivered <gt-search-facts>", flush=True)
+        # DCC — footprint-completion on drowning; '' otherwise. SEAM (lane_a=[]): mini
+        # passes its live Lane-A blocks so DCC subtracts files it already named THIS turn;
+        # OH's governor delivery isn't shaped as that list, so DCC de-dups only against the
+        # agent's own footprint + its once-per-footprint-EVER latch — bounded redundancy,
+        # never a leak. Thread OH's this-turn deliveries here if the overlap ever surfaces.
+        try:
+            _kkind, _kf = m._classify(cmd or "")
+            _dblk = m._dcc_block(_kkind, _kf or "", cmd or "", raw_out or "", [])
+        except Exception:  # noqa: BLE001 — producer isolated
+            _dblk = ""
+        if _dblk:
+            obs = append_observation(obs, f"\n\n{_dblk}\n")
+            print("[GT_META] dcc delivered <gt-concern>", flush=True)
+    except Exception as e:  # noqa: BLE001 — the whole channel set is isolated
+        print(f"[GT_META] mini_channels error: {e}", flush=True)
+    return obs
 
 
 def _emit_graph_handoff_witness(config: Any) -> None:

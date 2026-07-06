@@ -1090,6 +1090,7 @@ jobs:
             --ae GT_BASELINE="${GT_BASELINE:-0}" \
             --ae GT_VERIFY_STRUCTURAL_RISK="${GT_VERIFY_STRUCTURAL_RISK:-0}" \
             --ae GT_DCC="${GT_DCC:-0}" \
+            --ae GT_POST_SEARCH="${GT_POST_SEARCH:-0}" \
             --ae GT_NEG_EVIDENCE="${GT_NEG_EVIDENCE:-0}" \
             --ae GT_TYPEFLOW_FIXPOINT="${GT_TYPEFLOW_FIXPOINT:-0}" \
             --ae GT_FIELD_CANDIDATES="${GT_FIELD_CANDIDATES:-0}" \

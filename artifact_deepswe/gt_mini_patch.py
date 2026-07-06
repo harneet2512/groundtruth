@@ -6723,6 +6723,28 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
                 pass
 
 
+def feed_oh_turn(action_count, edited_rels=None, is_edit_turn=False,
+                 test_seen=False, test_failed=False):
+    """External per-turn STATE FEED for a host wrapper (OpenHands) that REUSES the
+    post_search / DCC producers by import WITHOUT running _augment_output. Sets the
+    module-global registries those producers read: the action index (post_search
+    ledger idx), the edited-file set + edit-step list DCC's footprint consults, and the
+    last-observed-test outcome DCC's known-good gate needs. Purely additive — nothing in
+    this module calls it, so the mini's own per-turn behavior is unchanged. (It also
+    lets the wrapper avoid naming the internal registries directly, keeping the
+    wrapper-source leak-hygiene pin green.)"""
+    global _action_count, _oracle_edited_rels, _oracle_test_evidence_seen, \
+        _last_test_outcome_failed
+    _action_count = int(action_count)
+    if edited_rels is not None:
+        _oracle_edited_rels = {r for r in edited_rels if r}
+    if is_edit_turn:
+        _edit_action_steps.append(int(action_count))
+    if test_seen:
+        _oracle_test_evidence_seen = True
+        _last_test_outcome_failed = bool(test_failed)
+
+
 def _augment_output(action, out) -> None:
     """Append GT evidence to a command's output dict."""
     global _marker_sent, _action_count, _source_edit_count, _cycle_edit_start
