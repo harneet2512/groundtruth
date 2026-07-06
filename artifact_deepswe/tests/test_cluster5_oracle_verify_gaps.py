@@ -241,7 +241,10 @@ def test_g10_edit_risk_import_is_isolated_from_runtime_block():
     the source physically separates the two blocks (the bulkhead)."""
     import inspect
     src = inspect.getsource(g)
-    shared_close = src.index("    _RUNTIME_AVAILABLE = True")
+    # A1b (2026-07-05): the shared runtime block is now PER-MODULE bulkheads; the marker
+    # is the module-level `_RUNTIME_AVAILABLE = True` init that opens that section (0-indent
+    # now, not the old 4-space in-try assignment). edit_risk is still its OWN bulkhead after.
+    shared_close = src.index("\n_RUNTIME_AVAILABLE = True")
     edit_import = src.index("from groundtruth.runtime.edit_risk import structural_edit_risk")
     # the edit_risk import must come AFTER the shared block closes (its own bulkhead),
     # not be a line INSIDE the shared try (which would couple their failure).

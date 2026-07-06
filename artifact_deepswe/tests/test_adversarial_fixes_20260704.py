@@ -385,7 +385,7 @@ def test_r6_empty_evidence_does_not_silence_file(monkeypatch):
 
     calls = {"n": 0}
 
-    def _body(kind, rel, root):
+    def _body(kind, rel, root, cmd=""):  # B4: _evidence_body now takes cmd
         calls["n"] += 1
         return "" if calls["n"] == 1 else "[WITNESS] real fact"
 

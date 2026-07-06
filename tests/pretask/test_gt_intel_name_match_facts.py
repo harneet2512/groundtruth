@@ -245,3 +245,42 @@ def test_pretask_briefing_test_bullet_is_anonymized_no_leak():
     )
     # the anonymized existence signal still fires (a covering test DOES exist).
     assert "covering test" in out, f"anonymized TEST existence signal missing:\n{out}"
+
+
+# ── E1: CALLERS test-path exclusion is LOAD-BEARING (leak-invariant mutation) ──
+
+def test_e1_callers_excludes_test_path_caller_and_mutation_reddens(monkeypatch):
+    """E1 defense-in-depth: on a FROZEN graph a caller's ``is_test`` flag can be STALE
+    (=0) even though its file lives under a test path — the SQL ``n.is_test = 0`` gate
+    then admits it, and only the ``_is_test_path`` path-check keeps the caller's NAME out
+    of the CALLERS bullet (the FAIL_TO_PASS grader surface).
+
+    Leak-invariant MUTATION (plan GATE): flip the exclusion (``_is_test_path`` -> always
+    False) and the SAME briefing MUST leak the test caller. If it does not redden, the
+    guard is dead weight — this test proves it is load-bearing.
+    """
+    nodes = [
+        _node(1, "parse_config", "src/config.py", sline=10),                 # target
+        # caller lives under a TEST path but its is_test flag is STALE (=0) — the exact
+        # frozen-graph case: the SQL is_test=0 gate lets it through; only E1 blocks it.
+        _node(2, "helper_in_test", "tests/test_config.py", sline=5, is_test=0),
+    ]
+    edges = [
+        (2, 1, "CALLS", 6, "tests/test_config.py", "import", 1.0, None),     # det edge
+    ]
+
+    # (1) GUARD ON (production): the test-path caller is dropped -> no leak.
+    conn = _conn(nodes, edges)
+    out = gt.generate_pretask_briefing(conn, root="/nonexistent", identifiers=["parse_config"])
+    conn.close()
+    assert "helper_in_test" not in out, f"LEAK: test-path caller NAME in CALLERS:\n{out}"
+    assert "tests/test_config.py" not in out, f"LEAK: test-path caller FILE in briefing:\n{out}"
+
+    # (2) MUTATION: disable the path exclusion -> the stale is_test=0 now leaks the caller.
+    monkeypatch.setattr(gt, "_is_test_path", lambda _p: False)
+    conn2 = _conn(nodes, edges)
+    out_mut = gt.generate_pretask_briefing(conn2, root="/nonexistent", identifiers=["parse_config"])
+    conn2.close()
+    assert "helper_in_test" in out_mut, (
+        "MUTATION did not redden — the E1 _is_test_path exclusion is NOT load-bearing:\n" + out_mut
+    )

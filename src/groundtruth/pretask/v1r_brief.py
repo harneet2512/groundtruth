@@ -894,10 +894,18 @@ def _resolved_witnesses_for_file(
     conn = None
     try:
         conn = sqlite3.connect(graph_db)
-        _, has_method = _has_columns(conn)
+        has_conf, has_method = _has_columns(conn)
         if not has_method:
             return []  # cannot judge provenance -> emit nothing (never launder)
         _det_sql = "','".join(sorted(DETERMINISTIC_RESOLUTION_METHODS))
+        # E3 (2026-07-05): a whitelisted METHOD is necessary but NOT sufficient — the
+        # -file/L6 restore demote (incremental.go) caps an unre-proven deterministic edge
+        # to conf 0.6 while KEEPING its method as provenance, and an among-files import
+        # pick is minted at 0.6. Neither is a FACT. Gate on EDGE_CONFIDENCE_FLOOR (0.7),
+        # the SAME conjunct is_fact()/_resolution_fact_clause apply, so a demoted edge
+        # cannot launder back into a [WITNESS]. Old schema (no confidence col) stays
+        # permissive — there is no conf to judge.
+        _conf_clause = f"AND e.confidence >= {EDGE_CONFIDENCE_FLOOR}" if has_conf else ""
         _norm_fp = file_path.replace("\\", "/").lstrip("./").lstrip("/")
         # Cross-language disqualifier (mini-delivery port): endpoint languages,
         # permissive on legacy graphs without nodes.language ('' -> no judgement).
@@ -934,6 +942,7 @@ def _resolved_witnesses_for_file(
               AND nsrc.is_test = 0
               AND e.source_line > 0
               AND LOWER(TRIM(e.resolution_method)) IN ('{_det_sql}')
+              {_conf_clause}
             ORDER BY e.source_line
             LIMIT ?
             """
@@ -991,6 +1000,7 @@ def _resolved_witnesses_for_file(
               AND nt.file_path != nsrc.file_path
               AND nt.is_test = 0
               AND LOWER(TRIM(e.resolution_method)) IN ('{_det_sql}')
+              {_conf_clause}
             ORDER BY e.source_line
             LIMIT ?
             """
@@ -2437,6 +2447,43 @@ def _common_region(paths: list[str]) -> str:
     return "/".join(common)
 
 
+def _defines_func_in_file(graph_db: str, file_path: str, func: str) -> bool:
+    """True iff ``func`` is DEFINED (Function/Method/Class/ImplBlock) in ``file_path`` —
+    the SAME exact-then-suffix node query ``_edit_target_guard`` uses.
+
+    B2 (2026-07-05): the HIGH ``Edit target: <file> :: <func>`` head asserts ``func`` is
+    the EDITABLE target IN that file, but ``func = w.anchor`` can be a CALLER symbol only
+    REFERENCED there while defined elsewhere (the sh-744 caller-file/callee-symbol
+    conflation) — a confident-WRONG steer, the single worst failure mode. Gate the HIGH
+    head on a real def-site; a miss falls through to the MEDIUM candidate list (byte-
+    identical to the weak-anchor downgrade). Unreadable graph -> True (permissive: never
+    suppress HIGH on an I/O error — prior behavior)."""
+    if not graph_db or not func or not file_path:
+        return True
+    try:
+        conn = sqlite3.connect(graph_db)
+        try:
+            rel = _gl_normalize(file_path)
+            row = conn.execute(
+                "SELECT 1 FROM nodes WHERE (file_path = ? OR file_path = ?) "
+                "AND name = ? AND is_test = 0 "
+                "AND label IN ('Function','Method','Class','ImplBlock') LIMIT 1",
+                (file_path, rel, func),
+            ).fetchone()
+            if not row:
+                row = conn.execute(
+                    "SELECT 1 FROM nodes WHERE file_path LIKE ? "
+                    "AND name = ? AND is_test = 0 "
+                    "AND label IN ('Function','Method','Class','ImplBlock') LIMIT 1",
+                    ("%/" + rel, func),
+                ).fetchone()
+            return bool(row)
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001
+        return True  # never suppress HIGH on a read failure (prior behavior)
+
+
 def _edit_target_guard(graph_db: str, file_path: str, func: str) -> tuple[str, int | None]:
     """The exact guard/conditional/return line of the edit-target function, from the
     `properties` table (GT's stored content). This is the editable spec the agent
@@ -3003,7 +3050,8 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
         # a confident-wrong steer is the single worst failure mode). Unreadable
         # graph -> (inf, ->0) -> permissive (prior behavior).
         _sym_hub_thr, _fanin_of = _symbol_fanin_fn(graph_db)
-        if (_high_func_support(tgt.witnesses, func) >= 2
+        if (_defines_func_in_file(graph_db, tgt.file_path, func)
+                and _high_func_support(tgt.witnesses, func) >= 2
                 and _fanin_of(func) <= _sym_hub_thr):
             line_txt, line_no = _edit_target_guard(graph_db, tgt.file_path, func)
             # FORM-only (GT_CONSENSUS_LEDGER): the imperative "Edit target:" verdict

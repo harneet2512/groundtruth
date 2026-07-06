@@ -511,6 +511,25 @@ _SELFTEST_PY = (
     "_proof_req = os.environ.get('GT_PROOF_MODE') == '1' and os.environ.get('GT_BASELINE') != '1'\n"
     "if _proof_req and not os.path.exists(_pm):\n"
     "    print('GT_SELFTEST_PROOF_MARKER_ABSENT path=%s' % _pm); sys.exit(8)\n"
+    # A1b (2026-07-05): INDEPENDENT runtime-import gate. The per-module bulkhead means
+    # gt_mini_patch now loads (and sets _gt_patched=True) EVEN IF a runtime control-plane
+    # module is missing — it stubs verify.horizon / obligations / the ledger and sets
+    # _RUNTIME_AVAILABLE=False. So _gt_patched no longer PROVES the control plane is live.
+    # Probe the load-bearing modules directly and, under proof, FAIL-CLOSED (exit 9)
+    # rather than grade a silently control-plane-amputated run as GT-on. runtime=<0/1> is
+    # printed for observability on every run.
+    "_rt_ok = True\n"
+    "try:\n"
+    "    _gs = os.path.join(os.environ.get('GT_HOME','/opt/gt'),'src')\n"
+    "    if os.path.isdir(_gs) and _gs not in sys.path: sys.path.insert(0, _gs)\n"
+    "    import groundtruth.runtime.verification_horizon  # noqa: F401\n"
+    "    import groundtruth.runtime.ledger  # noqa: F401\n"
+    "    import groundtruth.runtime.trajectory_state  # noqa: F401\n"
+    "except Exception as _re:\n"
+    "    _rt_ok = False; print('GT_SELFTEST runtime_import_error=%r' % (_re,))\n"
+    "print('GT_SELFTEST runtime=%d' % (1 if _rt_ok else 0))\n"
+    "if _proof_req and not _rt_ok:\n"
+    "    print('GT_SELFTEST_RUNTIME_IMPORT_FAILED'); sys.exit(9)\n"
     "sys.exit(0 if ok else 7)\n"
 )
 _SELFTEST_B64 = base64.b64encode(_SELFTEST_PY.encode("utf-8")).decode("ascii")
@@ -1267,6 +1286,12 @@ def _emit_gt_meta_witness() -> None:
             f"foundational_gate_report={_cert('foundational_gate_report.json')}; "
             f"gt_prebuilt_active=true; "
             f"runtime_strategy={os.environ.get('GT_RUNTIME_STRATEGY', 'unified_substrate')}; "
+            # D1 (2026-07-05): the per-turn pillars read an L6-staged WRITABLE work-copy of
+            # THIS mount; after an edit+reindex that read path DIVERGES from graph_hash
+            # above. Disclose l6_fresh so a reader knows the attested hash is the turn-0 /
+            # pre-edit graph, not necessarily every per-turn read (the in-container
+            # STAGED_OK ledger row carries the actual work_copy_hash it read).
+            f"l6_fresh={'1' if os.environ.get('GT_L6_FRESH') == '1' else '0'}; "
             f"substrate_digest={digest or '(unset)'}",
             flush=True,
         )

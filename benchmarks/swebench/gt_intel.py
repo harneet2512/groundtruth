@@ -35,6 +35,42 @@ import time
 from collections import Counter
 from dataclasses import dataclass
 
+
+# LEAK GUARD (Fable E1, 2026-07-05): the graph's is_test flag is STALE on frozen /
+# pre-2026-07-03 graphs (conftest.py / tests.py / *_tests.py / FooTest.java etc. carry
+# is_test=0), so the SQL `n.is_test=0` filter alone lets a TEST-file caller surface a
+# graded-test function NAME + call-line SOURCE under [VERIFIED] (the live OH-brief leak).
+# Guard every delivered CALLER's source_file with the canonical path predicate. Prefer
+# the single-source `delivery.path_policy.is_test_path`; degrade to a walker-parity local
+# copy so a packaging gap never silently re-opens the leak.
+def _fallback_is_test_path(path: str) -> bool:
+    p = (path or "").replace("\\", "/")
+    if any(s.strip("_") in ("test", "tests", "spec", "specs") for s in p.split("/")[:-1]):
+        return True
+    bn = p.rsplit("/", 1)[-1]
+    low = bn.lower()
+    if (low.startswith("test_") or "_test." in low or "_tests." in low or ".test." in low
+            or ".spec." in low or ".tests." in low or ".specs." in low
+            or low in ("conftest.py", "tests.py", "test.py")
+            or low.endswith("_spec.rb") or low in ("tests.rs", "test.rs")):
+        return True
+    dot = bn.rfind(".")
+    if dot > 0:
+        camel = {".java": ("Test", "Tests", "Spec"), ".kt": ("Test", "Tests", "Spec"),
+                 ".kts": ("Test", "Tests", "Spec"), ".scala": ("Test", "Tests", "Spec"),
+                 ".groovy": ("Test", "Tests", "Spec"), ".cs": ("Test", "Tests"),
+                 ".php": ("Test",), ".swift": ("Test", "Tests")}.get(bn[dot:].lower())
+        if camel and bn[:dot].endswith(camel):
+            return True
+    return False
+
+
+try:
+    from groundtruth.delivery.path_policy import is_test_path as _is_test_path
+except Exception:  # noqa: BLE001
+    _is_test_path = _fallback_is_test_path
+
+
 # ── v17: Staleness detection ───────────────────────────────────────────────
 
 def check_staleness(db_path: str, source_file: str, root: str) -> str | None:
@@ -333,6 +369,11 @@ def get_callers(conn: sqlite3.Connection, target_id: int, target_file: str) -> l
         call_line = row[-3] or 0
         source_file = row[-2] or ""
         resolution_method = row[-1] or ""
+        # E1 LEAK GUARD: the SQL n.is_test=0 filter is stale on frozen graphs; drop any
+        # caller whose FILE is test-shaped so a graded-test fn name + call-line source is
+        # never delivered as a [VERIFIED] caller. Belt-and-suspenders to the graph flag.
+        if _is_test_path(source_file):
+            continue
         results.append((node, call_line, source_file, resolution_method))
     return results
 
@@ -1225,7 +1266,9 @@ def generate_pretask_briefing(
                   AND n.is_test = 0
                 LIMIT 1
             """, (node_id,)).fetchone()
-            if caller:
+            # E1 LEAK GUARD: n.is_test=0 is stale on frozen graphs — path-check the
+            # caller's file so a test-file caller NAME is never rendered as CALLERS.
+            if caller and not _is_test_path(caller[1] or ""):
                 bullets.append(f"CALLERS: {caller[0]}() expects return value")
 
             # Test — DETERMINISTIC-ONLY (#27) + LEAKAGE GUARD (A1/B5-2, non-negotiable):
