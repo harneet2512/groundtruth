@@ -1127,7 +1127,7 @@ jobs:
             --ae GT_ORACLE_EVENTS="${GT_C_OUT}/gt_oracle_events.jsonl" \
             --ae GT_RUNTIME_LEDGER="${GT_C_OUT}/gt_runtime_ledger.jsonl" \
             --ae GT_HOOK_FIRE_COUNTS="${GT_C_OUT}/gt_hook_fire_counts.json" \
-            --ak config_file=artifact_deepswe/gt_integration/deepswe_gt_pier.yaml \
+            --ak config_file=artifact_deepswe/gt_integration/deepswe_official_probe.yaml \
             > trial_output.log 2>&1 &
           _PIER_PID=$!
           _STARTED=0
