@@ -1094,6 +1094,85 @@ async def _write_brief_artifact(brief: str, environment: "BaseEnvironment") -> s
         return None
 
 
+def _write_brief_artifact_sync(brief: str) -> str | None:
+    """No-pier / in-container SYNC twin of ``_write_brief_artifact``. Used by the stock
+    mini-swe-agent / Pro path where there is no pier ``environment.exec`` — the caller
+    (``mini_preagent``) ALREADY runs inside the task container, so a subprocess bash runs
+    on the AGENT's filesystem (the correct tree). Identical command string, semantics,
+    and fail-open discipline (never breaks a run). G1-1 §13.2 parity."""
+    if not brief:
+        return None
+    try:
+        import base64 as _b64
+        import subprocess
+
+        b64 = _b64.b64encode(brief.encode("utf-8")).decode("ascii")
+        rel = _GT_ARTIFACT_REL
+        cmd = (
+            'ROOT="$(cat /opt/gt/gt_root.txt 2>/dev/null || '
+            'git rev-parse --show-toplevel 2>/dev/null || pwd)"; '
+            'cd "$ROOT" 2>/dev/null || true; '
+            'EXCL="$(git rev-parse --git-path info/exclude 2>/dev/null)"; '
+            'if [ -n "$EXCL" ]; then mkdir -p "$(dirname "$EXCL")"; '
+            "grep -qxF '.groundtruth/' \"$EXCL\" 2>/dev/null "
+            "|| echo '.groundtruth/' >> \"$EXCL\"; fi; "
+            f'if [ -e "$ROOT/{rel}" ]; then echo GT_BRIEF_ARTIFACT_SKIPPED_EXISTS; exit 0; fi; '
+            f'TMP="$ROOT/{rel}.tmp.$$"; mkdir -p "$ROOT/.groundtruth" && '
+            f'echo {b64} | base64 -d > "$TMP" && mv -n "$TMP" "$ROOT/{rel}" && '
+            'if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then '
+            f'if git check-ignore -q "{rel}" 2>/dev/null; then echo "GT_BRIEF_ARTIFACT_OK $ROOT"; '
+            f'else rm -f "$ROOT/{rel}" "$TMP"; echo GT_BRIEF_ARTIFACT_FAILED_NOT_IGNORED; fi; '
+            'else echo "GT_BRIEF_ARTIFACT_OK $ROOT"; fi'
+        )
+        res = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, timeout=30)
+        return rel if "GT_BRIEF_ARTIFACT_OK" in (res.stdout or "") else None
+    except Exception:  # noqa: BLE001 -- survival channel must never break the run
+        return None
+
+
+def mini_preagent(issue_path: str, out_task_path: str) -> None:
+    """No-pier HOST-SIDE pre-agent sequence for the stock mini-swe-agent / Pro path.
+
+    ``GTMiniSweAgent.run()`` (:1661-1745) is only instantiated on the pier path, so a
+    framework that launches the stock agent (e.g. the Live-Lite ``docker run`` path) gets
+    NONE of run()'s pre-loop host-side work. This function REPLAYS that sequence, in the
+    same order, calling the SAME reference helpers (no reinvention drift, spec §11.1/§12),
+    and writes the assembled turn-0 instruction to ``out_task_path`` (the agent's --task).
+
+    Order == run(): baseline -> issue-only (byte-identical §10.2); else
+    handoff-assert (§14.4) -> consumption-witness (§14.4, fail-closed on hash mismatch) ->
+    fail-closed brief consume (§14.4) -> single ``<gt-task-brief>`` prepend (G2) ->
+    persist ``.groundtruth/BRIEF.md`` (§13.2, fail-open). FAIL-CLOSED in proof mode: each
+    helper raises ``DeepSweAdapterError`` and this propagates (the workflow must abort the
+    paid run rather than ship a witness-less / brief-less trajectory).
+
+    NO ``_GT_PREAMBLE`` is appended here: the mini config (``deepswe_gt_pier.yaml``) carries
+    the GT usage prose in its ``instance_template``, so a preamble would duplicate it. The
+    committed DeepSWE run removes the template prose and adds the preamble instead
+    (``deepswe_official_probe.yaml``, spec §13.n) — the two are prose-parity-equivalent;
+    the mini path takes the template-prose branch, so it must NOT also add the preamble.
+    """
+    with open(issue_path, encoding="utf-8", errors="replace") as fh:
+        issue = fh.read()
+    if _GT_BASELINE:
+        with open(out_task_path, "w", encoding="utf-8") as fh:
+            fh.write(issue)
+        print("[GT_META] mini_preagent baseline issue-only", flush=True)
+        return
+    _assert_substrate_handoff()
+    _emit_gt_meta_witness()
+    brief = _generate_brief(issue)
+    augmented = _prepend_brief(brief, issue)
+    with open(out_task_path, "w", encoding="utf-8") as fh:
+        fh.write(augmented)
+    _write_brief_artifact_sync(brief)
+    print(
+        f"[GT_META] mini_preagent ok brief_chars={len(brief)} "
+        f"task_chars={len(augmented)} artifact={_GT_ARTIFACT_REL}",
+        flush=True,
+    )
+
+
 def _emit_gt_meta_witness() -> None:
     """Handoff §H — the DeepSWE adapter CONSUMPTION WITNESS.
 

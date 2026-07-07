@@ -765,6 +765,7 @@ jobs:
           mkdir -p "${HOST_GT_INJECT}"
           mkdir -p "${HOST_GT_INJECT}/groundtruth"
           cp artifact_deepswe/gt_mini_patch.py "${HOST_GT_INJECT}/"
+          cp artifact_deepswe/gt_agent.py       "${HOST_GT_INJECT}/" 2>/dev/null || true   # §13 parity: host-side pre-agent (mini_preagent)
           cp artifact_deepswe/gt_hook.py        "${HOST_GT_INJECT}/" 2>/dev/null || true
           cp artifact_deepswe/gt_oracle.py      "${HOST_GT_INJECT}/" 2>/dev/null || true
           cp artifact_deepswe/gt_oracle_sense.py "${HOST_GT_INJECT}/" 2>/dev/null || true
@@ -1044,18 +1045,27 @@ jobs:
               # action_count/tokens/cost all read 0. GUARD: this whole block is a single-quoted
               # docker bash -c argument. NEVER put an apostrophe in any comment here: one
               # apostrophe closes the quote and the agent silently never launches. Cost a smoke.
-              # STEP-0 PROACTIVE BRIEF (rows 9/25/31): prepend the substrate brief so the
-              # hedged <gt-task-brief>/<gt-localization> is PHYSICALLY in msg0/1 BEFORE the
-              # first agent action (RECEIVED@0). Mirrors gt_agent._prepend_brief (pier path):
-              # brief.txt already starts with <gt-task-brief>, so prepend as-is + blank line
-              # + issue. Baseline arm = issue only (byte-identical control). No apostrophes.
+              # STEP-0 host-side pre-agent — PARITY with GTMiniSweAgent.run() pre-loop
+              # (spec §13.10/§13.2/§14.4). Reuse the SAME gt_agent helpers (no reinvention
+              # drift, §11.1/§12): handoff-assert + consumption-witness ([GT_META]
+              # graph_witness, fail-closed on hook != post-LSP hash) + fail-closed brief
+              # consume + single <gt-task-brief> prepend + persist .groundtruth/BRIEF.md.
+              # Assembled turn-0 instruction -> gt_task.txt. FAIL-CLOSED in proof mode: a
+              # nonzero exit ABORTS the paid run (never a witness-less/brief-less trajectory).
+              # No apostrophes; python string args use escaped double quotes.
               GT_TASK_FILE=/gt_out/gt_task.txt
-              if [ "${GT_BASELINE:-0}" != "1" ] && [ -s /gt_artifacts/brief.txt ]; then
-                { cat /gt_artifacts/brief.txt; printf "\n\n"; cat /gt_out/issue.txt 2>/dev/null || echo "Fix the issue in the repository."; } > "$GT_TASK_FILE"
-                echo "[GT] step-0 brief prepended to task: $(wc -c < /gt_artifacts/brief.txt) brief bytes + issue"
-              else
+              if [ "${GT_BASELINE:-0}" = "1" ]; then
                 cat /gt_out/issue.txt > "$GT_TASK_FILE" 2>/dev/null || echo "Fix the issue in the repository." > "$GT_TASK_FILE"
-                echo "[GT] task = issue only (baseline or no substrate brief)"
+                echo "[GT] baseline: task = issue only (byte-identical control)"
+              else
+                PYAG="${AGENT_PY:-$(command -v python3 || command -v python)}"
+                if PYTHONPATH=/opt/gt "$PYAG" -c "import gt_agent; gt_agent.mini_preagent(\"/gt_out/issue.txt\", \"/gt_out/gt_task.txt\")"; then
+                  echo "[GT] mini_preagent ok: handoff+witness+brief prepended -> $GT_TASK_FILE"
+                else
+                  echo "GT_PREAGENT_FAIL: host-side pre-agent (witness/brief) failed" | tee -a /gt_out/preagent_fail.txt
+                  if [ "${GT_PROOF_MODE:-1}" = "1" ]; then echo "GT_PROOF_ABORT: fail-closed on pre-agent failure"; exit 44; fi
+                  cat /gt_out/issue.txt > "$GT_TASK_FILE" 2>/dev/null || echo "Fix the issue in the repository." > "$GT_TASK_FILE"
+                fi
               fi
               yes "" 2>/dev/null | mini-swe-agent \
                 --model "'"$INPUT_MODEL"'" \
@@ -1089,10 +1099,16 @@ jobs:
               echo "GT_DELIVERY_FAIL: agent hook did NOT attach (.pth inactive) — per-turn GT delivered nothing" | tee -a trial_output.log
               GATE_OK=0
             fi
-            if grep -q "step-0 brief prepended" trial_output.log 2>/dev/null; then
-              echo "[GT] delivery-gate: STEP-0 brief prepended to task" | tee -a trial_output.log
+            if grep -q "mini_preagent ok" trial_output.log 2>/dev/null; then
+              echo "[GT] delivery-gate: STEP-0 brief prepended (mini_preagent)" | tee -a trial_output.log
             else
-              echo "GT_DELIVERY_FAIL: STEP-0 brief NOT prepended — RECEIVED@0 will be NO" | tee -a trial_output.log
+              echo "GT_DELIVERY_FAIL: STEP-0 pre-agent did NOT run — RECEIVED@0 will be NO" | tee -a trial_output.log
+              GATE_OK=0
+            fi
+            if grep -q "hook_graph_hash_matches_post_lsp=True" trial_output.log 2>/dev/null; then
+              echo "[GT] delivery-gate: consumption WITNESS ok (hook == post-LSP graph, §14.4)" | tee -a trial_output.log
+            else
+              echo "GT_DELIVERY_FAIL: consumption witness missing/mismatch (§14.4)" | tee -a trial_output.log
               GATE_OK=0
             fi
             echo "GT_DELIVERY_GATE=${GATE_OK}" | tee -a trial_output.log
