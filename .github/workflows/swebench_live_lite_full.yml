@@ -68,6 +68,10 @@ on:
         required: false
         type: boolean
         default: false
+      depth_flags:
+        description: "Depth-channel master switch (DeepSWE-parity, adapted to the mini DIRECT docker-run path — NOT pier --ae). 0 = OFF (byte-identical; all channels off in code). 1 = ON: GT_NEG_EVIDENCE·GT_TYPEFLOW_FIXPOINT·GT_FIELD_CANDIDATES·GT_SEM_BODY·GT_PASSAGE_WIDE (index/brief-time, read by scripts/ci/substrate_proof.sh -> gt-run-proof) + GT_DCC·GT_POST_SEARCH (agent-time, via docker run -e). REQUIRES the substrate baked on THIS run's pinned checkout commit (commit-parity — the index channels run in the baked gt-run-proof). baseline arm forces all OFF."
+        required: false
+        default: "0"
 
 permissions:
   contents: read
@@ -90,6 +94,21 @@ env:
   GT_REQUIRE_LSP: ${{ inputs.baseline == true && '0' || '1' }}
   # Legitimacy: per-task graph built FRESH in-container from THIS task's repo.
   GT_FORBID_PREBUILT_GRAPH: ${{ inputs.baseline == true && '0' || '1' }}
+  # ── Depth channels (master switch: inputs.depth_flags; baseline forces OFF) ───
+  # Index/brief-time flags are read by scripts/ci/substrate_proof.sh -> gt-run-proof
+  # (already forwarded there, :594-598 / :629-633) because GHA workflow-level env is
+  # exported into that step's shell. Agent-time flags (GT_DCC, GT_POST_SEARCH) are
+  # ALSO placed on the `docker run -e` block below — the mini path is a DIRECT docker
+  # run, NOT pier --ae, so the DeepSWE --ae splice does not apply. All default 0 =
+  # byte-identical. depth_flags=1 needs a substrate baked on the pinned checkout
+  # commit (the index channels run inside the baked gt-run-proof).
+  GT_NEG_EVIDENCE:      ${{ inputs.baseline != true && inputs.depth_flags == '1' && '1' || '0' }}
+  GT_TYPEFLOW_FIXPOINT: ${{ inputs.baseline != true && inputs.depth_flags == '1' && '1' || '0' }}
+  GT_FIELD_CANDIDATES:  ${{ inputs.baseline != true && inputs.depth_flags == '1' && '1' || '0' }}
+  GT_SEM_BODY:          ${{ inputs.baseline != true && inputs.depth_flags == '1' && '1' || '0' }}
+  GT_PASSAGE_WIDE:      ${{ inputs.baseline != true && inputs.depth_flags == '1' && '1' || '0' }}
+  GT_DCC:               ${{ inputs.baseline != true && inputs.depth_flags == '1' && '1' || '0' }}
+  GT_POST_SEARCH:       ${{ inputs.baseline != true && inputs.depth_flags == '1' && '1' || '0' }}
   # Legitimacy: arm the commit-parity gate (parity with deepswe_full.yml) so a
   # stale-bake / wrong-commit proof FAILS CLOSED (consumed by substrate_proof.sh).
   # Commit parity OFF: substrate baked from ebf28d8e, workflow-only fixes since
@@ -888,6 +907,13 @@ jobs:
             -e GT_RUNTIME_LEDGER="/gt_out/gt_runtime_ledger.jsonl" \
             -e GT_HOOK_FIRE_COUNTS="/gt_out/gt_hook_fire_counts.json" \
             -e GT_BASELINE=${{ inputs.baseline == true && '1' || '0' }} \
+            -e GT_DCC="${GT_DCC:-0}" \
+            -e GT_POST_SEARCH="${GT_POST_SEARCH:-0}" \
+            -e GT_NEG_EVIDENCE="${GT_NEG_EVIDENCE:-0}" \
+            -e GT_TYPEFLOW_FIXPOINT="${GT_TYPEFLOW_FIXPOINT:-0}" \
+            -e GT_FIELD_CANDIDATES="${GT_FIELD_CANDIDATES:-0}" \
+            -e GT_SEM_BODY="${GT_SEM_BODY:-0}" \
+            -e GT_PASSAGE_WIDE="${GT_PASSAGE_WIDE:-0}" \
             $MODEL_ENV \
             --entrypoint "" \
             "$_GHCR_IMG" \
