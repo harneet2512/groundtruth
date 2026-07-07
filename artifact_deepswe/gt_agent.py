@@ -1560,6 +1560,59 @@ def _format_test_feedback(attempt: int, display_cmd: str, rc: int,
     )
 
 
+def _classify_retry_result(rc: int, output: str) -> str:
+    """Sync twin of GTMiniSweAgent._retry_verifier_check's classification
+    (:1636-1642), for the no-pier mini/Pro retry loop where there is no async
+    environment.exec. Correct-or-quiet: only a REAL test failure returns 'fail'
+    (the only status that triggers a re-launch); everything else is 'pass' or
+    'unverifiable' (never injected as feedback)."""
+    if rc == 0:
+        return "pass"
+    if rc in (_RC_NO_ROOT, _RC_NO_RUNNER):
+        return "unverifiable"
+    if _ENV_UNVERIFIABLE_RE.search(output or ""):
+        return "unverifiable"
+    return "fail"
+
+
+def mini_retry_step(
+    rc: int, test_output_path: str, attempt: int,
+    orig_task_path: str, next_task_path: str,
+) -> str:
+    """No-pier retry step for the stock mini-swe-agent / Pro path — the classify +
+    feedback half of GTMiniSweAgent._run_with_test_retry (:1660-1707), reusing the
+    SAME reference helpers (no reinvention drift). Given a finished verifier run
+    (return code + captured output), classify it; on a REAL 'fail' write the NEXT
+    attempt's task file (arm-neutral <test-feedback> + the GT-on-only pre_submit
+    gate_note + the ORIGINAL task, no accumulation) so the shell loop re-launches.
+    Returns the status; the caller re-launches IFF it is 'fail'.
+
+    The test command is the repository's OWN visible suite (never the hidden
+    test.patch, :1395-1400) so this NEVER leaks FAIL_TO_PASS. The feedback tag is
+    <test-feedback> (NOT <gt-*>): harness execution feedback, identical on both arms."""
+    with open(test_output_path, encoding="utf-8", errors="replace") as fh:
+        output = fh.read()
+    status = _classify_retry_result(int(rc), output)
+    if status != "fail":
+        return status
+    with open(orig_task_path, encoding="utf-8", errors="replace") as fh:
+        orig = fh.read()
+    _cmd, display = _retry_test_command()
+    gate_note = "" if _GT_BASELINE else (
+        "GT pre_submit_intervention (not a hard block): your patch is still in the "
+        "repo. Run targeted tests for every edited requirement before you finish -- "
+        "unverified obligations are the top hidden verifier failure mode.\n\n"
+    )
+    nxt = (
+        gate_note
+        + _format_test_feedback(int(attempt) + 1, display, int(rc), output)
+        + "\n\n" + orig
+    )
+    with open(next_task_path, "w", encoding="utf-8") as fh:
+        fh.write(nxt)
+    return status
+
+
 _BASE_AGENT = MiniSweAgent if MiniSweAgent is not None else object
 
 
