@@ -745,6 +745,10 @@ class GTRuntimeConfig:
     _consensus_scope: list[str] = field(default_factory=list)
     _consensus_confirmed: set[str] = field(default_factory=set)
     _consensus_scope_edited: set[str] = field(default_factory=set)
+    # mini scope-completeness parity (<gt-scope reason="completeness">): once-per-run
+    # latch. When set, the rescue 'Scope:' line self-suppresses so the richer mini
+    # completeness render is the single source (no double completeness signal).
+    _gt_scope_completeness_fired: bool = False
     # Behavioral metrics for selective rescue governor
     _last_gt_action: int = 0
     _source_edit_actions: list[int] = field(default_factory=list)
@@ -1910,9 +1914,11 @@ def _build_rescue_payload(config: GTRuntimeConfig, rescue_level: int = 0) -> str
     if config.evidence_cache:
         top_evidence = config.evidence_cache.get(top_cand, "")
 
-    # Scope files not yet edited
+    # Scope files not yet edited. Suppressed once the richer mini scope-completeness
+    # render (<gt-scope reason="completeness">) has fired this run, so the agent never
+    # sees two completeness signals about the same un-edited scope (strict-parity de-dup).
     unedited = []
-    if config._consensus_scope:
+    if config._consensus_scope and not config._gt_scope_completeness_fired:
         unedited = [
             os.path.basename(sf) for sf in config._consensus_scope
             if sf not in config._consensus_scope_edited
@@ -4503,10 +4509,10 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
         if not _GT_BASELINE and not _is_finish_action:
             obs = _maybe_fire_presubmit_verify(config, obs, orig_run_action)
         # ── mini per-turn CHANNELS: post_search (<gt-search-facts>) + DCC
-        # (<gt-concern>) via import-reuse of gt_mini_patch (zero-copy, zero-drift
-        # parity). Self-gating + correct-or-quiet + env-flagged; NEW tags, no
-        # conflict with OH's L3/L3b/consensus below. _raw_content is the agent's
-        # OWN pre-GT observation (the grep result post_search reads).
+        # (<gt-concern>) + cochange (<gt-cochange>) via import-reuse of gt_mini_patch
+        # (zero-copy, zero-drift parity). Self-gating + correct-or-quiet + env-flagged;
+        # NEW tags, no conflict with OH's L3/L3b/consensus below. _raw_content is the
+        # agent's OWN pre-GT observation (the grep result post_search reads).
         if not _GT_BASELINE and not _is_finish_action:
             obs = _emit_mini_channels(config, obs, act_text, _raw_content, event)
         if _aclass == "CmdRunAction":
@@ -6817,11 +6823,13 @@ def _get_gt_mini():
 
 
 def _emit_mini_channels(config: Any, obs: Any, cmd: str, raw_out: str, event: Any) -> Any:
-    """Deliver the two per-turn channels OH lacked, via gt_mini_patch's EXACT producers:
+    """Deliver the per-turn channels OH lacked, via gt_mini_patch's EXACT producers:
     post_search (``<gt-search-facts>`` — answers the agent's OWN bare-symbol grep with
-    def-site + verified callers) and DCC (``<gt-concern>`` — footprint-completion facts
-    when the action stream shows drowning). Self-gating + correct-or-quiet + env-off by
-    default; NEW tags, no conflict with OH's own L3/L3b/consensus. Fully isolated — an
+    def-site + verified callers), DCC (``<gt-concern>`` — footprint-completion facts
+    when the action stream shows drowning), and cochange (``<gt-cochange>`` — files that
+    historically change WITH the just-edited file, on a post_edit turn). Self-gating +
+    correct-or-quiet + env-off by default; NEW tags, no conflict with OH's own
+    L3/L3b/consensus. Fully isolated — an
     import or producer failure never darkens OH's own delivery or the observation. The
     mini producers read module globals (``_action_count`` + the edit/test registries DCC
     consults); OH tracks the same under ``config`` and mirrors them here per turn."""
@@ -6870,6 +6878,63 @@ def _emit_mini_channels(config: Any, obs: Any, cmd: str, raw_out: str, event: An
         if _dblk:
             obs = append_observation(obs, f"\n\n{_dblk}\n")
             print("[GT_META] dcc delivered <gt-concern>", flush=True)
+        # cochange (<gt-cochange>) — mini Lane-A COMPLETENESS on a SOURCE edit
+        # (parity with _augment_output's post_edit lane, gt_mini_patch.py:7301).
+        # OH lacked this producer entirely: the cochanges table is git-mined and
+        # POPULATED at index time (996+ rows measured) yet 0 blocks ever reached the
+        # agent — the 'edited the primary file, missed its co-changing siblings' gap.
+        # Fires ONLY on a post_edit turn, keyed to the file edited THIS turn. The mini
+        # producer is correct-or-quiet + count>=2 gated + drops test/vendored/minified
+        # partners (_caller_path_excluded) so it can never leak a test path. Mini sets
+        # the fire-once latch inside _lane_a_deliver (which OH does not run) — set it
+        # here on a REAL delivery to preserve mini's once-per-run semantics.
+        try:
+            if getattr(event, "kind", "") == "post_edit":
+                _crel = _normalize_rel_path(getattr(event, "path", "") or "", config) \
+                    or getattr(event, "path", "")
+                _cochg = m._cochange_block(_crel) if _crel else ""
+            else:
+                _cochg = ""
+        except Exception:  # noqa: BLE001 — producer isolated
+            _cochg = ""
+        if _cochg:
+            obs = append_observation(obs, f"\n\n{_cochg}\n")
+            m._cochange_fired = True
+            print("[GT_META] cochange delivered <gt-cochange>", flush=True)
+        # scope-completeness (<gt-scope reason="completeness">) — mini Lane-B K-of-N
+        # review-transition check (parity with _augment_output:7458). Two-part wire:
+        #   (i) POPULATE the denominator: on a post_view turn, drive mini's OWN
+        #       _consensus_collect (1-hop _query_scope over the graph — the SAME call
+        #       _augment_output makes at 7326) so _consensus_scope accumulates. Without
+        #       this the block reads an empty scope and is silently dead.
+        #   (ii) FIRE once at the review transition: the agent has made >=1 source edit
+        #        and is now reviewing (>=3 turns since its last edit — OH's proxy for
+        #        mini's non-edit-streak>=3 review gate). The producer reads _consensus_scope
+        #        (fed here) + edited rels + focus (edited stems + optional anchors) and is
+        #        correct-or-quiet (strict subset, issue-focus-anchored members only).
+        #        Latched once-per-run on config; the rescue 'Scope:' line self-suppresses
+        #        once this fires (config._gt_scope_completeness_fired) — no double signal.
+        try:
+            if getattr(event, "kind", "") == "post_view" and getattr(event, "path", ""):
+                _vrel = _normalize_rel_path(event.path, config) or event.path
+                if _vrel:
+                    m._consensus_collect(_vrel)
+        except Exception:  # noqa: BLE001 — collector isolated
+            pass
+        try:
+            _tse = (config.action_count - config._source_edit_actions[-1]) \
+                if config._source_edit_actions else 0
+            if (not config._gt_scope_completeness_fired
+                    and config._source_edit_actions and _tse >= 3
+                    and getattr(event, "kind", "") != "post_edit"):
+                _scblk = m._scope_completeness_block()
+                if _scblk:
+                    obs = append_observation(obs, f"\n\n{_scblk}\n")
+                    config._gt_scope_completeness_fired = True
+                    print("[GT_META] scope_completeness delivered <gt-scope completeness>",
+                          flush=True)
+        except Exception:  # noqa: BLE001 — producer isolated
+            pass
     except Exception as e:  # noqa: BLE001 — the whole channel set is isolated
         print(f"[GT_META] mini_channels error: {e}", flush=True)
     return obs
