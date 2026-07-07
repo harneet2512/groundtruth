@@ -110,6 +110,11 @@ env:
   # cfn-lint-3779 false-fail: image fine, GATE 3b sem-consumption OFF). Skip-paying-weak-tasks
   # (fatal gates) is a separate, explicit decision for the eventual full PAID run, not the default.
   GT_GATES_DELIVER_ALWAYS: "1"
+  # SPEC §13.12/§16 TRAP-1 (as-run parity): the OH wrapper runs host-side and reads this from the
+  # runner env, so the write→test→fix retry (_maybe_run_presubmit_tests) fires — parity with
+  # deepswe_full.yml:189. The test EXECUTION runs in-container via orig_run_action; only the flag is
+  # host-read. Default off in code (byte-identical); set here to WITNESS the retry on the OH path.
+  GT_SELF_VERIFY_ATTEMPTS: "2"
   # HF fully offline on the paid run: the dataset is materialized to a local JSONL in
   # `prepare` and consumed via GT_LOCAL_DATASET; the embedder uses the baked ONNX e5
   # model. Any HF network read on a paid run is a degraded-stack signal -> fail-closed.

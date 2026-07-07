@@ -673,9 +673,20 @@ SCAFFOLDING_PREFIXES = (
 # (backup copies, editor swap files, OH metadata). These pollute the git diff
 # and can cause eval failure (weasyprint-2300: flex.py.bak in patch).
 _JUNK_EXTENSIONS = (".bak", ".orig", ".swp", ".tmp", ".backup", ".pyc", ".pyo")
-_JUNK_DIRS = (".openhands/", "__pycache__/", ".git/")
+_JUNK_DIRS = (".openhands/", "__pycache__/", ".git/", ".groundtruth/")
+# LEAK GUARD (2026-07-07): this is the SOLE test-path predicate on the host _detect_scope
+# path (:1714) + every view/edit suppression gate. The old form matched only tests?/spec
+# dirs + test_*/*_test.* basenames — it MISSED the dot-form .test.ts/.spec.js (the awilix
+# scope-leak incident), conftest.py, and CamelCase FooTest.java/BarTests.cs. Widened to
+# mini's _is_post_search_testpath coverage. Battery-verified: catches those 5 with 0 false
+# positives on latest.py/contest.py/RequestHandler.java/etc. Leak=0 is a hard invariant.
 TEST_PATH_RE = re.compile(
-    r"(^|/)(tests?|__tests__|spec|specs)/|(^|/)test_[^/]*$|(^|/)[^/]*_test\.[^/]*$"
+    r"(^|/)(tests?|__tests__|specs?)/"
+    r"|(^|/)test_[^/]*$"
+    r"|(^|/)[^/]*_test\.[^/]*$"
+    r"|(^|/)[^/]*\.(test|spec)\.[^/]*$"
+    r"|(^|/)conftest\.py$"
+    r"|(^|/)[A-Za-z0-9_]*Test(s|Case)?\.[A-Za-z0-9]+$"
 )
 
 _GT_VALIDATE_ARG_RE = re.compile(r"\bgt_validate\s+([^\s&|;<>]+)")
@@ -749,6 +760,19 @@ class GTRuntimeConfig:
     # latch. When set, the rescue 'Scope:' line self-suppresses so the richer mini
     # completeness render is the single source (no double completeness signal).
     _gt_scope_completeness_fired: bool = False
+    # SPEC §14.1 / §11.3 — the ≤1-Lane-B-steer-per-turn budget. Lane-A facts (post_search,
+    # DCC, cochange, contract, evidence, scope-map) are always-on; the Lane-B STEERS
+    # (semantic-drift, scope-completeness, L5 nudges) share ONE emission per turn so the
+    # host cannot flood the agent with >1 course-correction at once (parity with mini's
+    # _oracle_gate_blocks ≤1-winner). Reset per turn; the first Lane-B steer to fire spends
+    # it and the rest defer (their latches are NOT burned, so they re-fire when next eligible).
+    _lane_b_steer_spent: bool = False
+    # SPEC §13.2 — brief-survival channel. The turn-0 brief scrolls out of the agent's
+    # context window on a long OH run; DeepSWE persists it to a git-ignored .groundtruth/
+    # BRIEF.md so the agent can `cat` it after decay. OH runs host-side, so the write is
+    # deferred to the first dispatch turn (where orig_run_action reaches the container).
+    _gt_brief_survival_text: str = ""
+    _gt_brief_survival_written: bool = False
     # Behavioral metrics for selective rescue governor
     _last_gt_action: int = 0
     _source_edit_actions: list[int] = field(default_factory=list)
@@ -778,6 +802,11 @@ class GTRuntimeConfig:
     _presubmit_edited_files: set[str] = field(default_factory=set)  # source files edited this task
     _presubmit_last_edit_action: int = 0  # action_count at last source edit
     _presubmit_fired: bool = False
+    # SPEC §13.12/§14.5 — write→test→fix retry state. One verify per NEW edit at the review
+    # transition, capped at gt_agent._RETRY_MAX real verifications (OH's pre-finish analogue of
+    # DeepSWE's post-submit retry loop, forced by OH's terminal state=FINISHED).
+    _retry_attempts_used: int = 0
+    _retry_last_verified_edit: int = -1  # _source_edit_actions[-1] at the last verify (re-arm key)
     _l5_governor: Any = None
     _edge_verifier: Any = None
     _host_graph_db: str = field(default_factory=lambda: os.environ.get("GT_PREBUILT_GRAPH_DB", ""))
@@ -1286,6 +1315,86 @@ def _maybe_fire_presubmit_verify(config: GTRuntimeConfig, obs: Any, orig_run_act
     return obs
 
 
+def _maybe_run_presubmit_tests(config: Any, obs: Any, orig_run_action: Any) -> Any:
+    """SPEC §13.12/§14.5 — the write→test→fix retry, ported to OH's terminal-finish topology.
+
+    DeepSWE OWNS the loop (gt_agent._run_with_test_retry): agent submits → run the repo-native
+    suite → on a REAL failure re-enter with <test-feedback>. OH does NOT own the loop and sets
+    state=FINISHED before the wrapper sees the finish (post-finish append = dead write, see the
+    §48-LIPI note ~line 6550), so the ONLY window to feed a failure back WHILE THE AGENT CAN
+    STILL ACT is the edit→review transition (same trigger as _maybe_fire_presubmit_verify). GT
+    runs the agent's own visible suite and, on a REAL failure, appends the SAME arm-neutral
+    <test-feedback> the agent would see had it run the tests itself.
+
+    Reuses the DeepSWE helpers BY IMPORT (zero-drift): the repo-native runner (_retry_test_command
+    → go test / cargo test / npm test / pytest -x -q — NEVER a FAIL_TO_PASS-targeted command), the
+    env-unverifiable classifier, and the feedback formatter. LEAK POSTURE: <test-feedback> is a
+    NON-<gt-*> tag = arm-neutral harness execution feedback (it runs in BOTH GT_BASELINE states; the
+    agent could run pytest itself), NOT a GT intelligence delivery → the leak invariant on the
+    <gt-*> channels is untouched. Only the GT `gate_note` reminder is GT-differential (not baseline).
+
+    Correct-or-quiet: flag off (_retry_count()<=0 = the DEFAULT → byte-identical) / not a review
+    transition / no NEW edit since the last verify / attempts exhausted / rc==0 (pass) / rc<0 or
+    unverifiable (missing root/runner, env failure, timeout, exec error, lost sentinel) → NOTHING
+    appended. COVERAGE LIMIT (OH topology): an edit→immediate-finish trajectory (no ≥3-action review
+    pause) is NOT covered — OH's finish is terminal and no post-finish hook exists."""
+    try:
+        ga = _get_gt_agent()
+    except Exception as e:  # noqa: BLE001 — import isolated; never breaks the turn
+        print(f"[GT_META] retry import skipped: {e}", flush=True)
+        return obs
+    try:
+        if ga._retry_count() <= 0:              # flag off = byte-identical DEFAULT
+            return obs
+        if not config._source_edit_actions:     # nothing edited yet → nothing to verify
+            return obs
+        last_edit = config._source_edit_actions[-1]
+        if (config.action_count - last_edit) < 3:            # not yet a review transition
+            return obs
+        if last_edit == config._retry_last_verified_edit:    # already verified this edit
+            return obs
+        if config._retry_attempts_used >= ga._RETRY_MAX:     # bounded attempts
+            return obs
+        config._retry_last_verified_edit = last_edit  # mark BEFORE running (never re-run same edit)
+        config._retry_attempts_used += 1
+        cmd, display_cmd = ga._retry_test_command()
+        try:
+            _tmo = int(os.environ.get("GT_RETRY_TEST_TIMEOUT_SEC", "").strip()
+                       or ga._RETRY_TIMEOUT_DEFAULT)
+        except (TypeError, ValueError):
+            _tmo = ga._RETRY_TIMEOUT_DEFAULT
+        # rc capture: the autodetect runner uses `exit N` for no-root/no-runner, which would kill
+        # an appended echo — run it in a SUBSHELL so `exit` leaves the subshell and $? survives.
+        _wrapped_cmd = f"( {cmd} )\n__gt_rc=$?; echo \"__GT_TEST_RC__=$__gt_rc\""
+        raw = _run_internal(orig_run_action, _wrapped_cmd, _tmo) or ""
+        rc = -1
+        _mrc = re.search(r"__GT_TEST_RC__=(-?\d+)", raw)
+        if _mrc:
+            rc = int(_mrc.group(1))
+            raw = raw[:_mrc.start()].rstrip()   # strip the sentinel from the dose the agent sees
+        if rc == 0:
+            print(f"[GT_RETRY] presubmit tests PASS (attempt={config._retry_attempts_used})", flush=True)
+            return obs
+        if (rc < 0 or rc in (ga._RC_NO_ROOT, ga._RC_NO_RUNNER)
+                or ga._ENV_UNVERIFIABLE_RE.search(raw)):
+            print(f"[GT_RETRY] presubmit tests unverifiable rc={rc} → quiet", flush=True)
+            return obs
+        # REAL failure → feed it back (arm-neutral) while the agent can still act.
+        gate_note = ""
+        if not _GT_BASELINE:
+            gate_note = (
+                "GT pre_submit_intervention (not a hard block): your edits are still in the repo. "
+                "Run targeted tests for every edited requirement before you finish — unverified "
+                "obligations are the top hidden verifier failure mode.\n\n")
+        feedback = ga._format_test_feedback(config._retry_attempts_used, display_cmd, rc, raw)
+        obs = append_observation(obs, "\n\n" + gate_note + feedback + "\n")
+        print(f"[GT_RETRY] presubmit tests FAIL rc={rc} → <test-feedback> delivered "
+              f"(attempt={config._retry_attempts_used}/{ga._RETRY_MAX})", flush=True)
+    except Exception as e:  # noqa: BLE001 — the whole verifier is isolated
+        print(f"[GT_META] presubmit_tests error: {e}", flush=True)
+    return obs
+
+
 def _is_internal_gt_command(text: str) -> bool:
     blob = f" {text}"
     return any(marker in blob for marker in INTERNAL_GT_MARKERS)
@@ -1367,6 +1476,8 @@ def classify_tool_event(
         path = _normalize_path(_path_attr(action))
         if not path:
             return HookEvent("skip", reason="no_path")
+        if _is_test_path(path):  # LEGITIMACY: GT stays silent on test edits — parity with the
+            return HookEvent("skip", path=path, reason="test_path")  # CmdRun (:1386) + bash (:1397) branches
         if not _is_source_path(path, source_exts):
             return HookEvent("skip", path=path, reason="non_source_ext")
         return HookEvent("post_edit", path=path)
@@ -1511,6 +1622,35 @@ def _extract_diff_and_old_content(obs: Any) -> tuple[str, str]:
     return diff, old_content
 
 
+def _semantic_drift_from_diff(diff_text: str, rel: str, sem_extract: Callable) -> str:
+    """OH-TOPOLOGY-CORRECT semantic-drift. mini's _semantic_drift_candidate opens the live
+    source file, but that tree is CONTAINER-only while this wrapper runs HOST-side (only
+    graph.db is copy_from'd out) — so a file read is inert here. Detect the deleted invariant
+    from the DIFF instead (OH holds it host-side): a guard/return present in a removed ('-')
+    hunk line but NOT an added ('+') line is a silent deletion. Reuses mini's _sem_extract
+    (passed in) so the guard/return grammar stays single-sourced. Test files are gated (leak
+    invariant). Correct-or-quiet: no diff / no loss / test path -> ''."""
+    if not diff_text or not rel or _is_test_path(rel):
+        return ""
+    removed = "\n".join(_l[1:] for _l in diff_text.splitlines()
+                        if _l.startswith("-") and not _l.startswith("---"))
+    added = "\n".join(_l[1:] for _l in diff_text.splitlines()
+                      if _l.startswith("+") and not _l.startswith("+++"))
+    _og, _orr = sem_extract(removed)
+    _ng, _nrr = sem_extract(added)
+    lost_g, lost_r = (_og - _ng), (_orr - _nrr)
+    if not (lost_g or lost_r):
+        return ""
+    bits = []
+    if lost_g:
+        bits.append("guard `%s`" % sorted(lost_g)[0][:60])
+    if lost_r:
+        bits.append("return path `%s`" % sorted(lost_r)[0][:60])
+    return ('\n<gt-nudge reason="semantic_drift">\nGT: your edit to %s removed a %s that was '
+            'present before -- confirm that deletion is intended, not an accidental '
+            'regression of existing behavior.\n</gt-nudge>' % (rel, " and a ".join(bits)))
+
+
 def _write_text_to_container(
     orig_run_action: Callable[[Any], Any], content: str, target_path: str
 ) -> bool:
@@ -1544,6 +1684,59 @@ def _write_text_to_container(
         30,
     )
     return True
+
+
+_GT_BRIEF_SURVIVAL_PATH = ".groundtruth/BRIEF.md"
+
+
+def _brief_survival_enabled() -> bool:
+    # PARITY: DeepSWE (gt_agent.py:1783) writes .groundtruth/BRIEF.md UNCONDITIONALLY (no flag),
+    # so OH must too — ON by default. The env is only a kill-switch OH exposes (GT_BRIEF_SURVIVAL=0);
+    # the DEFAULT matches DeepSWE, which is what parity requires (same as-run behavior).
+    return os.environ.get("GT_BRIEF_SURVIVAL", "1") != "0"
+
+
+def _maybe_write_brief_survival(config: Any, obs: Any, orig_run_action: Any) -> Any:
+    """SPEC §13.2 — persist the turn-0 brief to a git-ignored .groundtruth/BRIEF.md so the agent
+    can re-read it (`cat .groundtruth/BRIEF.md`) after the brief scrolls out of context. DeepSWE
+    writes it inline in run() (it runs where the workspace is); OH runs host-side, so the write
+    is deferred to the first dispatch turn where orig_run_action reaches the container.
+
+    PARITY with DeepSWE _write_brief_artifact (gt_agent.py:1030-1090), three properties:
+      (1) fires whenever a brief exists (unconditional by default — no flag divergence);
+      (2) adds '.groundtruth/' to .git/info/exclude so the file is invisible to the agent's own
+          `git status`/`git diff` and never reaches the model patch (belt-and-suspenders with the
+          _JUNK_DIRS scaffold-strip);
+      (3) appends the re-read pointer ONLY after a CONFIRMED write (correct-or-quiet — DeepSWE's
+          `if _art:`; never point the agent at a file that was not written).
+    Fires ONCE per run; a write failure is fail-open (never breaks a turn)."""
+    if (config._gt_brief_survival_written
+            or not config._gt_brief_survival_text
+            or not orig_run_action
+            or not _brief_survival_enabled()):
+        return obs
+    config._gt_brief_survival_written = True  # latch BEFORE the write (never retry a partial)
+    try:
+        # PARITY (DeepSWE): patch-exclude via .git/info/exclude so the survival file never shows
+        # in the agent's `git status`/`git diff` nor the extracted patch.
+        _run_internal(
+            orig_run_action,
+            "R=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\"; "
+            "mkdir -p \"$R/.git/info\" 2>/dev/null; E=\"$R/.git/info/exclude\"; "
+            "grep -qxF '.groundtruth/' \"$E\" 2>/dev/null || echo '.groundtruth/' >> \"$E\"",
+            15)
+        ok = _write_text_to_container(
+            orig_run_action, config._gt_brief_survival_text, _GT_BRIEF_SURVIVAL_PATH)
+        if ok:
+            print(f"[GT_META] brief_survival written -> {_GT_BRIEF_SURVIVAL_PATH}", flush=True)
+            # DeepSWE parity (`if _art:`): the re-read pointer appears ONLY on a confirmed write.
+            obs = append_observation(
+                obs,
+                f"\n<gt-note>The task brief is saved to `{_GT_BRIEF_SURVIVAL_PATH}` — run "
+                f"`cat {_GT_BRIEF_SURVIVAL_PATH}` to re-read it if it scrolls out of context.</gt-note>\n")
+    except Exception as _bs_exc:  # noqa: BLE001 — the survival write never breaks a turn
+        print(f"[GT_META] brief_survival_error: {_bs_exc}", flush=True)
+    return obs
 
 
 def render_l4_tool_footer(installed_tools: list[str] | None = None) -> str:
@@ -1651,12 +1844,19 @@ def _detect_scope(
                 # _SCOPE_REASON_LABELS. A hardcoded "calls functions here" launders a
                 # 1-candidate name_match as a verified call (correct-or-quiet: relabel
                 # the guess "(unverified)", never present it as a fact).
+                # LEAK GUARD (2026-07-07): filter TEST callers at the source. The host-DB
+                # path drops test files via _is_test_path (:1714); this fallback previously
+                # did NOT, so a test file calling the edited function was named in <gt-scope>
+                # (the awilix __tests__ scope leak DeepSWE guards at gt_mini_patch.py:581-588).
+                # is_test on the SOURCE node (the caller) is the primary filter; the loop below
+                # adds a path-based belt-and-suspenders. Leak=0 is a hard invariant.
                 _scope_sql = (
                     f"SELECT DISTINCT nsrc.file_path, e.resolution_method FROM edges e "
                     f"JOIN nodes nt ON e.target_id = nt.id "
                     f"JOIN nodes nsrc ON e.source_id = nsrc.id "
                     f"WHERE nt.file_path LIKE '%{_scope_escaped}' ESCAPE '\\' "
                     f"AND e.type = 'CALLS' AND COALESCE(e.confidence, 0.5) >= 0.7 "
+                    f"AND COALESCE(nsrc.is_test, 0) = 0 "
                     f"AND nsrc.file_path != nt.file_path LIMIT 10"
                 )
                 _scope_raw = _container_query(orig_run_action, config.graph_db, _scope_sql)
@@ -1674,7 +1874,10 @@ def _detect_scope(
                             _sf = str(_row)
                             _rmeth = None
                         _sf_norm = _sf.replace("\\", "/").lstrip("./").lstrip("/")
-                        if _sf_norm not in seen:
+                        # path-based test guard (parity with the host path :1714) — a
+                        # belt-and-suspenders over the SQL is_test filter so a test caller
+                        # the graph's is_test flag missed still never reaches <gt-scope>.
+                        if _sf_norm not in seen and not _is_test_path(_sf_norm):
                             seen.add(_sf_norm)
                             _reason = _SCOPE_REASON_LABELS.get(_rmeth, "graph-connected") if _rmeth else "graph-connected"
                             scope.append({"file": _sf_norm, "reason": _reason, "callers": "1+"})
@@ -3087,10 +3290,16 @@ def _strip_scaffold_files(
 ) -> None:
     """Delete scaffold files created by the agent. Idempotent via config.scaffold_stripped.
 
-    Only removes untracked files whose basename starts with a SCAFFOLDING_PREFIX
-    (reproduce_*, debug_*, temp_*, etc.).  Files the agent may have created as
-    part of a legitimate fix (new source modules, changelog entries, test data)
-    are preserved — 19.3% of SWE-bench-Live Lite gold patches add new files.
+    Removes untracked files the agent created that pollute the git diff: scaffold
+    basenames (reproduce_*, debug_*, temp_*, …), junk extensions (.bak/.orig/.pyc —
+    the weasyprint-2300 flex.py.bak eval-failure class), files under a _JUNK_DIR
+    (.openhands/, __pycache__/, .git/ — the cfn-lint-3749/loguru-1297 .openhands/TASKS.md
+    class), and double-extension backups (file.py.bak). Uses _is_scaffolding_path, the
+    purpose-built junk classifier — NOT the basename-only _is_scaffold_name, which let
+    .openhands/TASKS.md through into the final patch. Files the agent may have created as
+    part of a legitimate fix (new source modules, changelog entries, test data) are
+    preserved — 19.3% of SWE-bench-Live Lite gold patches add new files, and none of the
+    four junk classes overlaps a plausible legitimate new source path.
     """
     if config.scaffold_stripped:
         return
@@ -3107,8 +3316,8 @@ def _strip_scaffold_files(
     base_files = {f.strip() for f in ls_base.splitlines() if f.strip()}
     ls_new = _run_internal(orig_run_action, "git ls-files --others --exclude-standard", 30)
     new_files = [f.strip() for f in ls_new.splitlines() if f.strip()]
-    to_strip = [f for f in new_files if f not in base_files and _is_scaffold_name(f)]
-    kept = [f for f in new_files if f not in base_files and not _is_scaffold_name(f)]
+    to_strip = [f for f in new_files if f not in base_files and _is_scaffolding_path(f)]
+    kept = [f for f in new_files if f not in base_files and not _is_scaffolding_path(f)]
     if to_strip:
         print(f"GT_ENFORCE: Stripping {len(to_strip)} scaffold files.", flush=True)
         for f in sorted(to_strip):
@@ -4505,14 +4714,26 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
 
         _aclass = _action_class(action)
         config.action_count += 1
+        config._lane_b_steer_spent = False  # SPEC §14.1: fresh ≤1-Lane-B-steer budget per turn
         # Consensus curation narrowing: shrink the candidate set per band and emit
         # the [GT_CURATION] proof line on every action (not _GT_BASELINE).
         if not _GT_BASELINE:
             _emit_curation_log(config)
+        # SPEC §13.2 — persist the turn-0 brief to .groundtruth/BRIEF.md container-side on the
+        # first turn where orig_run_action is live (once-latched; the re-read pointer is appended
+        # to obs ONLY on a confirmed write — DeepSWE parity). Default-ON, gated only by baseline.
+        if not _GT_BASELINE and not _is_finish_action:
+            obs = _maybe_write_brief_survival(config, obs, orig_run_action)
         # L6 pre-submit (Option 2): verifiable diff-wide test consolidation at
         # the edit→review transition, while the agent can still act. Fires once.
         if not _GT_BASELINE and not _is_finish_action:
             obs = _maybe_fire_presubmit_verify(config, obs, orig_run_action)
+        # SPEC §13.12/§14.5 — write→test→fix retry. ARM-NEUTRAL harness mechanics: runs in BOTH
+        # GT_BASELINE states (only the gate_note inside is GT-differential), so it is NOT under the
+        # `not _GT_BASELINE` gate. Flag-gated (_retry_count()<=0 = default → byte-identical no-op).
+        # Pre-finish window only (OH's state=FINISHED is terminal — no post-finish hook).
+        if not _is_finish_action:
+            obs = _maybe_run_presubmit_tests(config, obs, orig_run_action)
         # ── mini per-turn CHANNELS: post_search (<gt-search-facts>) + DCC
         # (<gt-concern>) + cochange (<gt-cochange>) via import-reuse of gt_mini_patch
         # (zero-copy, zero-drift parity). Self-gating + correct-or-quiet + env-flagged;
@@ -4564,7 +4785,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                             evidence_items=_l5d.evidence_items,
                             verification_kind=_l5d.verification_kind,
                         )
-                        if _l5d.message:
+                        if _l5d.message and not config._lane_b_steer_spent:  # SPEC §14.1
                             _l5b_eid = _emit_structured_event(
                                 config, "L5b", f"intervention_{_l5d.hook_name}",
                                 parent_event_id=_l5_eid,
@@ -4574,6 +4795,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                 next_action_test=_l5d.next_action_test,
                             )
                             obs = append_observation(obs, f"\n\n{_l5d.message}\n")
+                            config._lane_b_steer_spent = True
                             _log_gt_interaction(
                                 config, "L5", "governor_cmd", "advisory", _l5d.message,
                                 agent_action_before=act_text[:300],
@@ -4584,6 +4806,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                 next_action_test=_l5d.next_action_test or "",
                             )
                             _register_pending_next_action(config, _l5b_eid or "", _l5d.next_action_type or "", _l5d.next_action_file or "")
+                        elif _l5d.message:  # SPEC §14.1: a higher-priority Lane-B steer already fired this turn
+                            print("[GT_META] L5 governor steer deferred (Lane-B budget spent this turn)", flush=True)
                         elif _l5d.suppressed:
                             _l5b_blk = _emit_structured_event(
                                 config, "L5b", "blocked_by_safety",
@@ -4609,7 +4833,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                             suppressed=_goku_d.suppressed,
                             suppression_reason=_goku_d.suppression_reason,
                         )
-                        if _goku_d.message and not _goku_d.suppressed:
+                        if (_goku_d.message and not _goku_d.suppressed
+                                and not config._lane_b_steer_spent):  # SPEC §14.1
                             _goku_l5b_eid = _emit_structured_event(
                                 config, "L5b", f"intervention_{_goku_d.hook_name}",
                                 parent_event_id=_goku_eid,
@@ -4618,6 +4843,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                 next_action_file=_goku_d.next_action_file,
                             )
                             obs = append_observation(obs, f"\n\n{_goku_d.message}\n")
+                            config._lane_b_steer_spent = True
                             _log_gt_interaction(
                                 config, "L5", "goku_cmd", "advisory", _goku_d.message,
                                 agent_action_before=act_text[:300],
@@ -6827,6 +7053,28 @@ def _get_gt_mini():
     return _m
 
 
+_GT_AGENT_MOD = None
+
+
+def _get_gt_agent():
+    """Lazy, isolated import of DeepSWE gt_agent so OH REUSES its write→test→fix retry helpers
+    BY IMPORT (zero-drift): _retry_count / _retry_test_command (repo-native runner) /
+    _format_test_feedback / _classify_verifier_failure / _ENV_UNVERIFIABLE_RE / _RC_* / _RETRY_MAX.
+    gt_agent degrades gracefully without mini-swe-agent (MiniSweAgent -> None), so a host-side
+    import is safe. Cached; artifact_deepswe is put on sys.path the same way _get_gt_mini does."""
+    global _GT_AGENT_MOD
+    if _GT_AGENT_MOD is not None:
+        return _GT_AGENT_MOD
+    _asrc = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "artifact_deepswe")
+    if os.path.isdir(_asrc) and _asrc not in sys.path:
+        sys.path.insert(0, _asrc)
+    import gt_agent as _ga  # noqa: E402 — lazy on purpose
+    _GT_AGENT_MOD = _ga
+    return _ga
+
+
 def _emit_mini_channels(config: Any, obs: Any, cmd: str, raw_out: str, event: Any) -> Any:
     """Deliver the per-turn channels OH lacked, via gt_mini_patch's EXACT producers:
     post_search (``<gt-search-facts>`` — answers the agent's OWN bare-symbol grep with
@@ -6906,6 +7154,28 @@ def _emit_mini_channels(config: Any, obs: Any, cmd: str, raw_out: str, event: An
             obs = append_observation(obs, f"\n\n{_cochg}\n")
             m._cochange_fired = True
             print("[GT_META] cochange delivered <gt-cochange>", flush=True)
+        # semantic-drift (<gt-nudge reason="semantic_drift">) — OH-TOPOLOGY-CORRECT.
+        # mini's _semantic_drift_candidate does open(_root()+rel) to read LIVE source, but
+        # _root() is the CONTAINER workspace while this wrapper runs HOST-side (only graph.db
+        # is copy_from'd out; the source tree is not) -> a host file read is inert (verified).
+        # Instead detect a deleted guard/return from the DIFF, which OH DOES hold host-side
+        # (_extract_diff_and_old_content), reusing mini's _sem_extract on the removed-vs-added
+        # hunk lines: a guard/return in a '-' line but not a '+' line = a silent deletion.
+        # Test files gated (leak parity with the view/edit suppression + the :1366 classify
+        # hole). Correct-or-quiet: no diff / no loss / test path -> nothing.
+        try:
+            _erel = _normalize_rel_path(getattr(event, "path", "") or "", config) \
+                or getattr(event, "path", "")
+            if (getattr(event, "kind", "") == "post_edit" and _erel
+                    and not config._lane_b_steer_spent):  # SPEC §14.1 Lane-B budget
+                _dtext, _ = _extract_diff_and_old_content(obs)
+                _drift_txt = _semantic_drift_from_diff(_dtext, _erel, m._sem_extract)
+                if _drift_txt:
+                    obs = append_observation(obs, f"\n\n{_drift_txt}\n")
+                    config._lane_b_steer_spent = True
+                    print("[GT_META] semantic_drift delivered <gt-nudge>", flush=True)
+        except Exception:  # noqa: BLE001 — producer isolated
+            pass
         # scope-completeness (<gt-scope reason="completeness">) — mini Lane-B K-of-N
         # review-transition check (parity with _augment_output:7458). Two-part wire:
         #   (i) POPULATE the denominator: on a post_view turn, drive mini's OWN
@@ -6930,12 +7200,14 @@ def _emit_mini_channels(config: Any, obs: Any, cmd: str, raw_out: str, event: An
             _tse = (config.action_count - config._source_edit_actions[-1]) \
                 if config._source_edit_actions else 0
             if (not config._gt_scope_completeness_fired
+                    and not config._lane_b_steer_spent  # SPEC §14.1 Lane-B budget
                     and config._source_edit_actions and _tse >= 3
                     and getattr(event, "kind", "") != "post_edit"):
                 _scblk = m._scope_completeness_block()
                 if _scblk:
                     obs = append_observation(obs, f"\n\n{_scblk}\n")
                     config._gt_scope_completeness_fired = True
+                    config._lane_b_steer_spent = True
                     print("[GT_META] scope_completeness delivered <gt-scope completeness>",
                           flush=True)
         except Exception:  # noqa: BLE001 — producer isolated
@@ -8196,6 +8468,12 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
         config = getattr(runtime, "_gt_full_config", None) if runtime else None
         if config:
             print(f"[GT_META] L1 brief injected ({len(brief_full_for_log)} chars)", flush=True)
+            # SPEC §13.2 — stash the rendered brief so the first dispatch turn can persist it
+            # to .groundtruth/BRIEF.md container-side (this instruction-build path has no
+            # orig_run_action). Parity with DeepSWE gt_agent.py:1783 `if brief:` — store the
+            # exact brief the agent saw; the deferred write gates on the flag + not-baseline.
+            if _wrapped:
+                config._gt_brief_survival_text = _wrapped
 
             # Structured L1 event (emit first to get event_id)
             # Parse L1 candidates from rendered brief text (container-safe — no file boundary)

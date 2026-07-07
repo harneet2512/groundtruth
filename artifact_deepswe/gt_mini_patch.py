@@ -3306,6 +3306,7 @@ def _search_localize_block(cmd: str, out: str | None = None) -> str:
     if con is None:
         return ""
     root = _root()
+    _direct_def_latched = False  # True iff the block came from _direct_def_block (self-latches)
     try:
         if not empty:
             block = _class_nontarget(con, sym, out, root)
@@ -3320,6 +3321,7 @@ def _search_localize_block(cmd: str, out: str | None = None) -> str:
                 # def-site, drops test-path def-sites (leak guard), counts (never names)
                 # test refs, and fires-once per stem via the content-hash latch.
                 block = _direct_def_block(con, sym, root)
+                _direct_def_latched = True
         else:
             block = (_class_namefold(con, sym, root)
                      or _class_bodyonly(con, sym, root)
@@ -3328,6 +3330,14 @@ def _search_localize_block(cmd: str, out: str | None = None) -> str:
         con.close()
     if not block:
         return ""
+    if _direct_def_latched:
+        # BUG-B1b (2026-07-07): _direct_def_block ALREADY checked + marked the content-hash
+        # latch (L3001/L3004 — fires-once per stem). Re-running the outer latch below would
+        # re-detect that SELF-mark and return "" on the FIRST delivery — the exact structural
+        # mute the BUG-B1 fall-through was meant to cure (measured: `grep -rn aware_now` on the
+        # gold symbol emitted nothing in the run). Return it raw, parity with the out=None path
+        # at L3287. Idempotence on a REPEAT grep is preserved by _direct_def_block's own latch.
+        return block
     stem = _norm_stem(sym)
     if _ledger_already_answered(stem, block):
         return ""  # idempotence: never deliver the same fact twice
@@ -6888,9 +6898,20 @@ def _dcc_axis_runtime(con, orig_out: str, root: str) -> dict:
 def _dcc_candidate_families(con, footprint: set, orig_out: str, root: str) -> dict:
     """file_rel -> (family_set, {family: witness}). The THREE INDEPENDENT
     provenance families: git, static (= structure ∪ content ∪ exact-key), runtime."""
+    # LEAK GUARD (2026-07-07): the git/static axes NAME a footprint file in their witness
+    # ("co-changed with <nf>", "FACT-edge to <f>"). A test file in the footprint (an edited
+    # test the classifier admitted, or a viewed-twice test) would leak its path into
+    # <gt-concern> — the terminal filter (:7006) drops a test MEMBER key but NOT the witness
+    # string. Filter test paths from the footprint the footprint-naming axes see, so no
+    # witness can name a test path. The runtime axis is unaffected (it witnesses the member
+    # token, already terminal-filtered); the caller's `confirmed` (cardinality, :7013) is
+    # unchanged. Correctness bonus: DCC keys on the SOURCE concern, not the agent's test edits.
+    fp_clean = {f for f in footprint
+                if not (_is_test_or_demo_path(_norm_fp(f))
+                        or _is_post_search_testpath(_norm_fp(f)))}
     fam: dict = {}
-    for name, d in (("git", _dcc_axis_git(con, footprint)),
-                    ("static", _dcc_axis_static(con, footprint, root)),
+    for name, d in (("git", _dcc_axis_git(con, fp_clean)),
+                    ("static", _dcc_axis_static(con, fp_clean, root)),
                     ("runtime", _dcc_axis_runtime(con, orig_out, root))):
         for p, w in d.items():
             fset, wits = fam.setdefault(p, (set(), {}))

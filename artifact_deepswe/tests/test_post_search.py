@@ -159,6 +159,31 @@ def test_determinism_byte_identical(_on):
     assert a == b and a != ""
 
 
+# ---- BUG-B1b: the out=str PRODUCTION path must emit (every pin above uses out=None) ----
+def test_out_str_production_path_emits(_on):
+    """The production caller passes out=str (the agent's OWN grep result), which routes
+    through the LISTEN-LATTICE + BUG-B1 fall-through to _direct_def_block. That block
+    SELF-marks the content-hash latch; the outer idempotence re-check must NOT re-detect
+    the self-mark and suppress the FIRST delivery. Regression for the measured structural
+    mute: `grep -rn aware_now` on the gold symbol emitted nothing in the live run while the
+    out=None path emitted the def-site. Reverting the _direct_def_latched early-return reddens this."""
+    out = ("beets/importer.py:1642:def set_fields(self, fields):\n"
+           "beets/ui/commands.py:90:        obj.set_fields(f)")
+    block = g._search_localize_block("grep -rn set_fields .", out)
+    assert block, "post_search is MUTE on the out=str production path (BUG-B1b)"
+    assert 'symbol="set_fields"' in block
+    assert "def: beets/importer.py:1642" in block
+
+
+def test_out_str_idempotence_preserved(_on):
+    """out=str: first delivery emits; a REPEAT grep of the same symbol is latched to ''
+    (idempotence carried by _direct_def_block's own content-hash latch, not the outer one)."""
+    out = "beets/importer.py:1642:def set_fields(self, fields):"
+    first = g._search_localize_block("grep -rn set_fields .", out)
+    assert first
+    assert g._search_localize_block("grep -rn set_fields .", out) == ""
+
+
 # ---- Fable #1: a def in a test path must NEVER be rendered (leak invariant) ----
 def _mk_defs_graph(tmp_path, defs):
     """defs = list of (file_path, is_test). Symbol name is always 'helper_fn'."""

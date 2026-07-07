@@ -186,6 +186,8 @@ gt-index/gt-index*.exe
 /jedi_WORK.md
 /*_AUDIT*.md
 /*_REPORT*.md
+/*_PARITY*.md
+/*_VERIFICATION*.md
 /GO_NO_GO*.md
 /SESSION_SUMMARY*.md
 /RUN_LEDGER*.md
