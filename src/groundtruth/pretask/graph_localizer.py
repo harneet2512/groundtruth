@@ -2137,6 +2137,7 @@ def _boilerplate_stoplist(node_terms: "dict[int, str]") -> "set[str]":
 
 
 _sem_body_noop_warned = False  # C1: one-shot latch for the body-less-graph warning
+_sem_body_present_emitted = False  # C2 (row 41): one-shot latch for the positive body-channel witness
 
 
 def _symbol_body_map(conn: "sqlite3.Connection", body_on: bool) -> "dict[int, str]":
@@ -2230,6 +2231,19 @@ def _symbol_body_map(conn: "sqlite3.Connection", body_on: bool) -> "dict[int, st
                 "GT_SEM_BODY=1 under proof mode but graph has 0 body-channel rows "
                 "(substrate not baked with body channels) — refusing to grade a body-less "
                 "graph as body-enriched.")
+    else:
+        # C2 (gt_math row 41): the substrate DID bake the index-time body channels — emit a
+        # POSITIVE, greppable witness (once) so the auditor can read a MEASURED count instead
+        # of a `—`. Symmetric to the negative no-op warn above: silence was ambiguous; a count
+        # proves the channels are present AND the semantic leg read them at query time.
+        global _sem_body_present_emitted
+        if not _sem_body_present_emitted:
+            _sem_body_present_emitted = True
+            import sys as _sys2
+            _sys2.stderr.write(
+                f"[GT_META] sem_body body_terms_rows={len(node_terms)} "
+                f"string_lit_rows={len(node_strings)} calls_rows={len(node_calls_v)}\n")
+            _sys2.stderr.flush()
 
     stop = _boilerplate_stoplist(node_terms)
     ids = (set(node_body) | set(node_strings) | set(node_calls_v)

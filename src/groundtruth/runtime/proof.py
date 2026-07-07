@@ -480,6 +480,11 @@ def build_embedder_certificate(**kw) -> dict:
         "effective_w_sem": float(kw.get("effective_w_sem", 0.0) or 0.0),
         "all_zero_semantic_reason": kw.get("all_zero_semantic_reason", "") or "",
         "model_download_attempted": bool(kw.get("model_download_attempted", False)),
+        # C1 (gt_math row 40) cross-check: the GT_PASSAGE_WIDE flag state at cert time.
+        # The AUTHORITATIVE "window actually used" witness is the [GT_META] passage_window
+        # line emitted at the first passage encode; this flag lets a reader corroborate it.
+        "passage_wide_flag": os.environ.get("GT_PASSAGE_WIDE", "") or "",
+        "passage_token_window": int(kw.get("passage_token_window", 0) or 0),
     }
 
 
