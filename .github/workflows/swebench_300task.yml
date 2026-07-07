@@ -47,6 +47,10 @@ on:
         description: 'Pin the GT substrate image digest for THIS run only (blank = the GT_SUBSTRATE_DIGEST repo var, currently 7ada105e). Use to pin a specific VERIFIED-GREEN bake without mutating the global default or the mini pipeline. Verify a new bake green before pinning it.'
         required: false
         default: ''
+      depth_flags:
+        description: "Depth index/brief flags master switch (parity with deepswe_full). 0 = OFF (byte-identical: all five flags off in code). 1 = ON = GT_NEG_EVIDENCE·GT_TYPEFLOW_FIXPOINT·GT_FIELD_CANDIDATES·GT_SEM_BODY·GT_PASSAGE_WIDE, delivered to the index (substrate -e, both boundaries) + host brief (env). REQUIRES a substrate baked on THIS run's commit (commit-parity): the pinned 7ada105e predates the flag code, so the INDEX halves no-op and GT_SEM_BODY's host-query half fail-CLOSES on a body-less graph. Bake fresh from HEAD, pin its digest, THEN set depth_flags=1. DCC + post_search are already on via the wrapper."
+        required: false
+        default: "0"
 
 permissions:
   contents: read
@@ -74,6 +78,18 @@ env:
   # Lets ONE run pin a specific verified-green bake WITHOUT mutating the global default or the mini
   # pipeline; the substrate step reads this env value first and falls back to the repo var when blank.
   GT_SUBSTRATE_DIGEST: ${{ inputs.gt_substrate_digest || vars.GT_SUBSTRATE_DIGEST }}
+  # Depth index/brief flags (master switch: inputs.depth_flags; default 0 = byte-identical, every
+  # flag off in code). depth_flags=1 turns on the five index/brief mechanisms — passed to the
+  # substrate via -e on BOTH index boundaries + inherited by the host brief. INDEX halves only
+  # fire if the pinned substrate binary carries the (env-gated) flag code (a bake on THIS commit);
+  # GT_SEM_BODY's host-query half fail-CLOSES on a body-less graph, so keep depth_flags=0 until a
+  # fresh commit-parity bake is pinned. NB: GT_PASSAGE_WIDE is a deliberate no-op on the OH host
+  # brief (e5 pinned above); it bites only the gte substrate brief.
+  GT_NEG_EVIDENCE: ${{ inputs.depth_flags == '1' && '1' || '0' }}
+  GT_TYPEFLOW_FIXPOINT: ${{ inputs.depth_flags == '1' && '1' || '0' }}
+  GT_FIELD_CANDIDATES: ${{ inputs.depth_flags == '1' && '1' || '0' }}
+  GT_SEM_BODY: ${{ inputs.depth_flags == '1' && '1' || '0' }}
+  GT_PASSAGE_WIDE: ${{ inputs.depth_flags == '1' && '1' || '0' }}
   # Preflight HOST_SRC gate: the per-task step sets this to /tmp/gt/src (the
   # in-container export), but the global preflight runs BEFORE any task and
   # needs a valid source dir to pass the HOST_SRC check. Point it at the
@@ -830,6 +846,9 @@ jobs:
             -e GT_REQUIRE_FTS5=1 -e GT_REQUIRE_EMBEDDER=1 -e GT_FORCE_ONNX_EMBEDDER=1 \
             -e GT_REQUIRE_LSP=1 -e GT_REQUIRE_FULL_STACK=1 -e GT_FORBID_PREBUILT_GRAPH=1 \
             -e GT_GATES_DELIVER_ALWAYS="${GT_GATES_DELIVER_ALWAYS:-1}" \
+            -e GT_NEG_EVIDENCE="${GT_NEG_EVIDENCE:-0}" -e GT_TYPEFLOW_FIXPOINT="${GT_TYPEFLOW_FIXPOINT:-0}" \
+            -e GT_FIELD_CANDIDATES="${GT_FIELD_CANDIDATES:-0}" -e GT_SEM_BODY="${GT_SEM_BODY:-0}" \
+            -e GT_PASSAGE_WIDE="${GT_PASSAGE_WIDE:-0}" \
             gtsrc bash /tmp/gt-substrate-run.sh "$ROOT" /tmp/issue.txt /tmp/gt 2>&1 | tee /tmp/gt_substrate.log
           GATE_RC=${PIPESTATUS[0]}
           set -e
@@ -967,6 +986,9 @@ jobs:
               -e GT_REQUIRE_FTS5=1 -e GT_REQUIRE_EMBEDDER=1 -e GT_FORCE_ONNX_EMBEDDER=1 \
               -e GT_REQUIRE_LSP=1 -e GT_REQUIRE_FULL_STACK=1 -e GT_ISSUE_FILE=/work_issue.txt \
               -e GT_GATES_DELIVER_ALWAYS="${GT_GATES_DELIVER_ALWAYS:-1}" \
+              -e GT_NEG_EVIDENCE="${GT_NEG_EVIDENCE:-0}" -e GT_TYPEFLOW_FIXPOINT="${GT_TYPEFLOW_FIXPOINT:-0}" \
+              -e GT_FIELD_CANDIDATES="${GT_FIELD_CANDIDATES:-0}" -e GT_SEM_BODY="${GT_SEM_BODY:-0}" \
+              -e GT_PASSAGE_WIDE="${GT_PASSAGE_WIDE:-0}" \
               "$GT_SUBSTRATE_DIGEST" gt-run-proof --source-root /work --out /gt_artifacts
             # Step 5: the portable path is PRIMARY in proof — consume /gt_artifacts and SKIP the
             # in-task LSP/gates (a second, divergent runtime). Fail-closed if any cert is missing.

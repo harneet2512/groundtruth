@@ -951,8 +951,13 @@ def _env_prefix(config: GTRuntimeConfig) -> str:
     # which is the honest outcome. The AST-based post_edit/post_view hooks never load an
     # embedder, so the flag is a harmless no-op for them.
     _fwd = ""
+    # + the depth index flags (master switch: workflow inputs.depth_flags -> env). Forwarded so the
+    # L6 post-edit `-file` reindex mints the changed subgraph with the SAME flag behavior the bulk
+    # graph was built under (boundary A). "0" (default) forwards an explicit off = byte-identical.
     for _k in ("GT_REQUIRE_EMBEDDER", "GT_FORCE_ONNX_EMBEDDER",
-               "GT_REQUIRE_LSP", "GT_REQUIRE_FULL_STACK", "GT_REQUIRE_FTS5"):
+               "GT_REQUIRE_LSP", "GT_REQUIRE_FULL_STACK", "GT_REQUIRE_FTS5",
+               "GT_NEG_EVIDENCE", "GT_TYPEFLOW_FIXPOINT", "GT_FIELD_CANDIDATES",
+               "GT_SEM_BODY", "GT_PASSAGE_WIDE"):
         _v = os.environ.get(_k)
         if _v:
             _fwd += f"export {_k}={_sh_single_quote(_v)}; "
