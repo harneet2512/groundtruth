@@ -770,6 +770,9 @@ jobs:
           cp artifact_deepswe/gt_oracle.py      "${HOST_GT_INJECT}/" 2>/dev/null || true
           cp artifact_deepswe/gt_oracle_sense.py "${HOST_GT_INJECT}/" 2>/dev/null || true
           cp artifact_deepswe/phase_policy.py   "${HOST_GT_INJECT}/" 2>/dev/null || true
+          cp artifact_deepswe/gt_container_preagent.sh "${HOST_GT_INJECT}/" 2>/dev/null || true   # §13 parity: container pre-agent (.pth + mini_preagent)
+          # Strip any CR so the staged .sh runs cleanly in the Linux task container.
+          for sh in "${HOST_GT_INJECT}"/*.sh; do [ -f "$sh" ] && sed -i 's/\r$//' "$sh"; done
           for pkg in runtime delivery pretask; do
             if [ -d "src/groundtruth/${pkg}" ]; then
               mkdir -p "${HOST_GT_INJECT}/groundtruth/${pkg}"
@@ -1004,69 +1007,26 @@ jobs:
               mini-extra config set DEEPSEEK_API_KEY "${DEEPSEEK_API_KEY:-}" 2>/dev/null || true
               echo "[GT] mini-swe-agent config written"
 
-              # Apply GT patch (monkey-patches LocalEnvironment to append GT evidence).
-              # BASELINE (control) arm: GT_BASELINE=1 -> skip entirely so NO <gt-evidence>
-              # is ever appended. This is the paired-control difference from the GT arm.
-              # DELIVERY FIX (gt_math run 28844447328): `gt_mini_patch.py --install`
-              # only monkeypatches the EPHEMERAL install process. The agent runs as a
-              # SEPARATE mini-swe-agent process (often a uv-tool Python 3.11), so it
-              # stayed GT-OFF and delivered NOTHING (brief + per-turn appends absent in
-              # every trajectory). The documented load channel is a site-packages .pth
-              # run at interpreter startup. Resolve the interpreter that actually runs
-              # the agent and drop the .pth into ITS site-packages so gt_mini_patch
-              # loads and patches LocalEnvironment.execute in the process that runs.
-              if [ "${GT_BASELINE:-0}" != "1" ] && [ -f /opt/gt/gt_mini_patch.py ]; then
-                AGENT_BIN=$(command -v mini-swe-agent || true)
-                AGENT_PY=$(command -v python3 || command -v python)
-                if [ -n "$AGENT_BIN" ]; then
-                  SB=$(sed -n "1s/^#!//p" "$AGENT_BIN"); FIRST=${SB%% *}
-                  case "$FIRST" in *env) REST=${SB#* }; CAND=${REST%% *} ;; *) CAND=$FIRST ;; esac
-                  if [ -x "$CAND" ]; then AGENT_PY=$CAND; else RES=$(command -v "$CAND" 2>/dev/null || true); [ -n "$RES" ] && AGENT_PY=$RES; fi
-                fi
-                SITE_DIR=$("$AGENT_PY" -c "import sysconfig;print(sysconfig.get_paths().get(\"purelib\") or \"\")" 2>/dev/null)
-                if [ -n "$SITE_DIR" ] && [ -d "$SITE_DIR" ]; then
-                  printf "%s\n" "import sys; sys.path.insert(0, \"/opt/gt\"); import gt_mini_patch" > "$SITE_DIR/zzz_gt_mini_patch.pth"
-                  echo "[GT] gt_mini_patch .pth installed: $SITE_DIR (agent_py=$AGENT_PY)"
-                  "$AGENT_PY" -c "import sys;sys.path.insert(0,\"/opt/gt\");import gt_mini_patch as g;print(\"[GT] hook_attached:\", getattr(g,\"_PATCHED_CLASSES\",[]) or \"NONE\")" 2>&1 | tail -1 || echo "[GT] WARN: gt_mini_patch import raised in agent_py"
-                else
-                  echo "[GT] WARN: agent site-packages unresolved (agent_py=$AGENT_PY) -- DELIVERY NOT INSTALLED"
-                fi
-                # Legacy in-proc call kept for host-side setup + proof marker (harmless).
-                python /opt/gt/gt_mini_patch.py --install >/dev/null 2>&1 || true
-              else
-                echo "[GT] BASELINE mode: gt_mini_patch NOT installed (pure mini-swe-agent control arm)"
-              fi
-
-              # Run the agent — pipe yes to skip any remaining interactive prompts
-              # -o saves the mini-swe-agent NATIVE trajectory (info.model_stats.api_calls =
-              # steps, instance_cost = cost, per-msg usage = tokens) to the /gt_out bind-mount
-              # so gt_deep_metrics.py (results_dir=/tmp/gt) parses tokens/cost/steps. Without it
-              # the traj goes to a throwaway last_mini_run.traj.json that is never collected, so
-              # action_count/tokens/cost all read 0. GUARD: this whole block is a single-quoted
-              # docker bash -c argument. NEVER put an apostrophe in any comment here: one
-              # apostrophe closes the quote and the agent silently never launches. Cost a smoke.
-              # STEP-0 host-side pre-agent — PARITY with GTMiniSweAgent.run() pre-loop
-              # (spec §13.10/§13.2/§14.4). Reuse the SAME gt_agent helpers (no reinvention
-              # drift, §11.1/§12): handoff-assert + consumption-witness ([GT_META]
-              # graph_witness, fail-closed on hook != post-LSP hash) + fail-closed brief
-              # consume + single <gt-task-brief> prepend + persist .groundtruth/BRIEF.md.
-              # Assembled turn-0 instruction -> gt_task.txt. FAIL-CLOSED in proof mode: a
-              # nonzero exit ABORTS the paid run (never a witness-less/brief-less trajectory).
-              # No apostrophes; python string args use escaped double quotes.
+              # GT container-side pre-agent (.pth install + mini_preagent), EXTRACTED to a
+              # staged script (gt_container_preagent.sh) to stay under GHA run-block limits
+              # (same reason as substrate_proof.sh). It installs the gt_mini_patch .pth into
+              # the AGENT interpreter, then runs gt_agent.mini_preagent (handoff-assert +
+              # consumption-witness + fail-closed brief + single <gt-task-brief> prepend +
+              # persist .groundtruth/BRIEF.md), writing the turn-0 instruction to gt_task.txt.
+              # exit 44 = proof-mode fail-closed (missing brief/witness): abort BEFORE the
+              # paid agent launch (no model spend on a witness-less trajectory). The BASELINE
+              # arm is handled inside the script (issue-only, byte-identical control).
+              bash /opt/gt/gt_container_preagent.sh; PRC=$?
+              if [ "$PRC" = "44" ]; then echo "GT_PROOF_ABORT: pre-agent fail-closed"; exit 44; fi
               GT_TASK_FILE=/gt_out/gt_task.txt
-              if [ "${GT_BASELINE:-0}" = "1" ]; then
-                cat /gt_out/issue.txt > "$GT_TASK_FILE" 2>/dev/null || echo "Fix the issue in the repository." > "$GT_TASK_FILE"
-                echo "[GT] baseline: task = issue only (byte-identical control)"
-              else
-                PYAG="${AGENT_PY:-$(command -v python3 || command -v python)}"
-                if PYTHONPATH=/opt/gt "$PYAG" -c "import gt_agent; gt_agent.mini_preagent(\"/gt_out/issue.txt\", \"/gt_out/gt_task.txt\")"; then
-                  echo "[GT] mini_preagent ok: handoff+witness+brief prepended -> $GT_TASK_FILE"
-                else
-                  echo "GT_PREAGENT_FAIL: host-side pre-agent (witness/brief) failed" | tee -a /gt_out/preagent_fail.txt
-                  if [ "${GT_PROOF_MODE:-1}" = "1" ]; then echo "GT_PROOF_ABORT: fail-closed on pre-agent failure"; exit 44; fi
-                  cat /gt_out/issue.txt > "$GT_TASK_FILE" 2>/dev/null || echo "Fix the issue in the repository." > "$GT_TASK_FILE"
-                fi
-              fi
+
+              # Run the agent -- pipe yes to skip interactive prompts. -o saves the
+              # mini-swe-agent NATIVE trajectory to the /gt_out bind-mount so gt_deep_metrics.py
+              # (results_dir=/tmp/gt) parses tokens/cost/steps. The pre-agent above already
+              # assembled gt_task.txt (brief + witness) and installed the .pth. GUARD: this
+              # whole block is a single-quoted docker bash -c argument -- NEVER put an
+              # apostrophe in any comment here (one apostrophe closes the quote and the agent
+              # silently never launches; costs a smoke).
               yes "" 2>/dev/null | mini-swe-agent \
                 --model "'"$INPUT_MODEL"'" \
                 --task "$(cat "$GT_TASK_FILE")" \
@@ -1085,34 +1045,12 @@ jobs:
           AGENT_RC=${PIPESTATUS[0]}
           set -e
           echo "=== Pro Trial complete (agent rc=$AGENT_RC) ===" | tee -a trial_output.log
-          # ROW-27 DELIVERY GATE — kill the silent false-green. A GT-on run whose hook
-          # never attached in the AGENT interpreter delivered NOTHING (the .pth bug that
-          # was invisible on run 28844447328). Attest from the log the .pth fix emits:
-          # "[GT] hook_attached: [<env classes>]" (per-turn) + "[GT] step-0 brief prepended"
-          # (STEP-0). Missing on a GT arm = GT_DELIVERY_FAIL (loud), so the audit can never
-          # mis-read a GT-off trajectory as green. Baseline arm is exempt (GT is meant off).
-          if [ "${GT_BASELINE:-0}" != "1" ]; then
-            GATE_OK=1
-            if grep -q "hook_attached: \[.*LocalEnvironment" trial_output.log 2>/dev/null; then
-              echo "[GT] delivery-gate: agent hook ATTACHED (.pth active)" | tee -a trial_output.log
-            else
-              echo "GT_DELIVERY_FAIL: agent hook did NOT attach (.pth inactive) — per-turn GT delivered nothing" | tee -a trial_output.log
-              GATE_OK=0
-            fi
-            if grep -q "mini_preagent ok" trial_output.log 2>/dev/null; then
-              echo "[GT] delivery-gate: STEP-0 brief prepended (mini_preagent)" | tee -a trial_output.log
-            else
-              echo "GT_DELIVERY_FAIL: STEP-0 pre-agent did NOT run — RECEIVED@0 will be NO" | tee -a trial_output.log
-              GATE_OK=0
-            fi
-            if grep -q "hook_graph_hash_matches_post_lsp=True" trial_output.log 2>/dev/null; then
-              echo "[GT] delivery-gate: consumption WITNESS ok (hook == post-LSP graph, §14.4)" | tee -a trial_output.log
-            else
-              echo "GT_DELIVERY_FAIL: consumption witness missing/mismatch (§14.4)" | tee -a trial_output.log
-              GATE_OK=0
-            fi
-            echo "GT_DELIVERY_GATE=${GATE_OK}" | tee -a trial_output.log
-          fi
+          # ROW-27 DELIVERY GATE (extracted to scripts/ci/gt_delivery_gate.sh to stay under
+          # GHA run-block limits): attests the GT delivery markers from trial_output.log --
+          # agent hook attached (.pth), mini_preagent ok (STEP-0 brief), and consumption
+          # witness (hook == post-LSP graph) -- so a GT-off trajectory can never be mis-read
+          # as green (the silent false-green from run 28844447328). Baseline arm exempt.
+          bash scripts/ci/gt_delivery_gate.sh trial_output.log || true
 
           if [ "$AGENT_RC" -eq 137 ] || grep -qE "OOMKilled|exit code 137" trial_output.log; then
             echo "GT_AGENT_OOM: agent container hit the memory cap (rc/exit=137)" | tee -a trial_output.log
