@@ -1075,6 +1075,28 @@ jobs:
           AGENT_RC=${PIPESTATUS[0]}
           set -e
           echo "=== Pro Trial complete (agent rc=$AGENT_RC) ===" | tee -a trial_output.log
+          # ROW-27 DELIVERY GATE — kill the silent false-green. A GT-on run whose hook
+          # never attached in the AGENT interpreter delivered NOTHING (the .pth bug that
+          # was invisible on run 28844447328). Attest from the log the .pth fix emits:
+          # "[GT] hook_attached: [<env classes>]" (per-turn) + "[GT] step-0 brief prepended"
+          # (STEP-0). Missing on a GT arm = GT_DELIVERY_FAIL (loud), so the audit can never
+          # mis-read a GT-off trajectory as green. Baseline arm is exempt (GT is meant off).
+          if [ "${GT_BASELINE:-0}" != "1" ]; then
+            GATE_OK=1
+            if grep -q "hook_attached: \[.*LocalEnvironment" trial_output.log 2>/dev/null; then
+              echo "[GT] delivery-gate: agent hook ATTACHED (.pth active)" | tee -a trial_output.log
+            else
+              echo "GT_DELIVERY_FAIL: agent hook did NOT attach (.pth inactive) — per-turn GT delivered nothing" | tee -a trial_output.log
+              GATE_OK=0
+            fi
+            if grep -q "step-0 brief prepended" trial_output.log 2>/dev/null; then
+              echo "[GT] delivery-gate: STEP-0 brief prepended to task" | tee -a trial_output.log
+            else
+              echo "GT_DELIVERY_FAIL: STEP-0 brief NOT prepended — RECEIVED@0 will be NO" | tee -a trial_output.log
+              GATE_OK=0
+            fi
+            echo "GT_DELIVERY_GATE=${GATE_OK}" | tee -a trial_output.log
+          fi
 
           if [ "$AGENT_RC" -eq 137 ] || grep -qE "OOMKilled|exit code 137" trial_output.log; then
             echo "GT_AGENT_OOM: agent container hit the memory cap (rc/exit=137)" | tee -a trial_output.log
