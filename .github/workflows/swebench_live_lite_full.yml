@@ -160,7 +160,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 3a0968474340b5fb8bc6e5a6d5d4153ceee12bd8
+          ref: launch-cs-20260705
 
       - uses: actions/setup-python@v5
         with:
@@ -483,7 +483,7 @@ jobs:
       - name: Checkout GroundTruth
         uses: actions/checkout@v4
         with:
-          ref: 3a0968474340b5fb8bc6e5a6d5d4153ceee12bd8
+          ref: launch-cs-20260705
           lfs: false
 
       - uses: actions/setup-python@v5
@@ -1235,7 +1235,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 3a0968474340b5fb8bc6e5a6d5d4153ceee12bd8
+          ref: launch-cs-20260705
       - uses: actions/download-artifact@v4
         with:
           path: /tmp/all
