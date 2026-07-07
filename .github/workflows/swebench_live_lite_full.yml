@@ -109,6 +109,13 @@ env:
   GT_PASSAGE_WIDE:      ${{ inputs.baseline != true && inputs.depth_flags == '1' && '1' || '0' }}
   GT_DCC:               ${{ inputs.baseline != true && inputs.depth_flags == '1' && '1' || '0' }}
   GT_POST_SEARCH:       ${{ inputs.baseline != true && inputs.depth_flags == '1' && '1' || '0' }}
+  # Also-under-depth_flags (row 21 verify-axis, row 31 consensus-ledger, row 34 content-BM25).
+  # 21 is agent-time (docker -e); 31+34 are brief/index-time (also added to substrate_proof.sh).
+  # GT_L6_FRESH (row 32) is set DYNAMICALLY in the trial step — only when the gt-index binary
+  # is actually staged — so a build-miss falls to L6-off (silent-OK/green), never frozen-FAIL.
+  GT_VERIFY_STRUCTURAL_RISK: ${{ inputs.baseline != true && inputs.depth_flags == '1' && '1' || '0' }}
+  GT_CONSENSUS_LEDGER:       ${{ inputs.baseline != true && inputs.depth_flags == '1' && '1' || '0' }}
+  GT_CONTENT_LEG:            ${{ inputs.baseline != true && inputs.depth_flags == '1' && '1' || '0' }}
   # Legitimacy: arm the commit-parity gate (parity with deepswe_full.yml) so a
   # stale-bake / wrong-commit proof FAILS CLOSED (consumed by substrate_proof.sh).
   # Commit parity OFF: substrate baked from ebf28d8e, workflow-only fixes since
@@ -483,6 +490,13 @@ jobs:
         with:
           python-version: "3.12"
 
+      # L6-FRESH (row 32): Go toolchain to build the static gt-index staged into /opt/gt
+      # for the in-container post-edit reindex. Correct-or-quiet — if this is absent the
+      # build is skipped and L6 stays off (silent-OK), never frozen-FAIL.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
       - name: Preflight checks (fail-fast on infra, warn on quality)
         env:
           TOKENROUTER_API_KEY: ${{ secrets.TOKENROUTER_API_KEY }}
@@ -765,6 +779,31 @@ jobs:
           touch "${HOST_GT_INJECT}/groundtruth/__init__.py"
           echo "GT inject staged: $(find "${HOST_GT_INJECT}" -name '*.py' | wc -l) Python files"
 
+          # ── L6-FRESH (row 32): stage the static gt-index binary into /opt/gt ──────────
+          # Mirrors deepswe_full.yml:953-962. Only build when depth_flags=1 (GT arm).
+          # CORRECT-OR-QUIET: if musl-gcc/go/source are unavailable the build is skipped;
+          # GT_L6_FRESH is then left 0 so the L6 reindex is correctly silent (silent-OK),
+          # NEVER frozen-FAIL. GT_L6_FRESH is exported ONLY when the binary is actually present.
+          if [ "${{ inputs.baseline }}" != "true" ] && [ "${{ inputs.depth_flags }}" = "1" ]; then
+            command -v musl-gcc >/dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y musl-tools; } >/dev/null 2>&1 || true
+            if command -v musl-gcc >/dev/null 2>&1 && command -v go >/dev/null 2>&1 && [ -d gt-index ]; then
+              (cd gt-index && CGO_ENABLED=1 CC=musl-gcc go build -tags 'netgo,osusergo,sqlite_fts5' \
+                 -ldflags='-s -w -extldflags "-static"' -o "${HOST_GT_INJECT}/gt-index" ./cmd/gt-index/) \
+                && chmod +x "${HOST_GT_INJECT}/gt-index" \
+                && echo "L6 gt-index built static/musl+FTS5: $(file "${HOST_GT_INJECT}/gt-index" 2>/dev/null)" \
+                || echo "WARN: gt-index musl build failed — L6-fresh falls back (correct-or-quiet)"
+            else
+              echo "WARN: musl-gcc/go/gt-index absent — L6-fresh falls back (correct-or-quiet)"
+            fi
+          fi
+          if [ -x "${HOST_GT_INJECT}/gt-index" ]; then
+            export GT_L6_FRESH=1
+            echo "[GT_META] L6-fresh ENABLED (gt-index staged at /opt/gt/gt-index)"
+          else
+            export GT_L6_FRESH=0
+            echo "[GT_META] L6-fresh OFF (no gt-index binary) — correctly silent (row 32 = green)"
+          fi
+
           # Writable /gt_out mount for in-container deep-telemetry sinks.
           # SPEED-OPT E: THIRD mount — /tmp/gt_inject/opt/gt -> /opt/gt:ro (pre-staged GT files).
           HOST_GT_OUT=/tmp/gt_out
@@ -914,6 +953,11 @@ jobs:
             -e GT_FIELD_CANDIDATES="${GT_FIELD_CANDIDATES:-0}" \
             -e GT_SEM_BODY="${GT_SEM_BODY:-0}" \
             -e GT_PASSAGE_WIDE="${GT_PASSAGE_WIDE:-0}" \
+            -e GT_VERIFY_STRUCTURAL_RISK="${GT_VERIFY_STRUCTURAL_RISK:-0}" \
+            -e GT_CONSENSUS_LEDGER="${GT_CONSENSUS_LEDGER:-0}" \
+            -e GT_CONTENT_LEG="${GT_CONTENT_LEG:-0}" \
+            -e GT_L6_FRESH="${GT_L6_FRESH:-0}" \
+            -e GT_INDEX_BIN="/opt/gt/gt-index" \
             $MODEL_ENV \
             --entrypoint "" \
             "$_GHCR_IMG" \
