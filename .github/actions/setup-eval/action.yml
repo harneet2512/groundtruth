@@ -1,0 +1,241 @@
+name: 'Setup Eval Environment'
+description: 'Cache and install OpenHands 0.54.0, gt-index, GroundTruth, and datasets'
+
+inputs:
+  python-version:
+    description: 'Python version to use'
+    required: false
+    default: '3.12'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Trust the workspace for git (CI checkout uid mismatch)
+      shell: bash
+      run: |
+        # The checkout is owned by a different uid than the runner process inside
+        # GHA, so git refuses: "fatal: detected dubious ownership in repository".
+        # gt-index's build uses `git rev-parse` (ldflags) and git lfs needs git too.
+        git config --global --add safe.directory '*' || true
+        git config --global --add safe.directory "$GITHUB_WORKSPACE" || true
+
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Cache Python packages + OpenHands + SWE-bench
+      id: pip-cache
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/pip
+          /tmp/OpenHands
+          /tmp/SWE-bench-Live
+          /opt/hostedtoolcache/Python/3.12.*/x64/lib/python3.12/site-packages
+          /opt/hostedtoolcache/Python/3.12.*/x64/bin
+        # FINAL_ARCH_V2 Track-A B-1: include Go source hash in the cache key.
+        # If anything under gt-index/**.go changes, invalidate the Python
+        # cache so any installed groundtruth import paths that reference the
+        # new schema are not served from a stale wheel.
+        # M5: also hash patches/oh054/** + src/groundtruth/**. The GT-tools
+        # registration patch (apply_gt_tools.py) runs ONLY in the cache-MISS
+        # install branch below; on a cache HIT it never re-applies, so a change
+        # to the patch or to the GT tools it registers would silently never land.
+        # Hashing them busts the cache (→ reinstall → re-patch) when they change.
+        key: eval-env-oh054v2-pip-${{ hashFiles('pyproject.toml', 'gt-index/**/*.go', 'patches/oh054/**', 'src/groundtruth/**') }}
+
+    - name: Install Python packages (skip if cached)
+      shell: bash
+      run: |
+        # The hosted-runner tool-cache pip BINARY shim is sometimes broken
+        # ("pip: cannot execute: required file not found"). Use `python -m pip`
+        # everywhere (module, not shim) and repair the module if needed.
+        python -m pip --version 2>/dev/null || python -m ensurepip --upgrade 2>/dev/null || true
+        if python -c "import openhands; import groundtruth; import datasets; import swebench" 2>/dev/null; then
+          echo "All Python packages importable — cache hit, skipping install"
+        else
+          echo "Python cache miss — installing..."
+          if [ ! -d /tmp/OpenHands/.git ]; then
+            git clone --depth 1 --branch 0.54.0 https://github.com/All-Hands-AI/OpenHands.git /tmp/OpenHands
+          fi
+          cd /tmp/OpenHands && python -m pip install -e .
+          python -m pip install datasets
+          cd $GITHUB_WORKSPACE && python -m pip install -e .
+          # Patch OH to register GT tools as native function-calling tools
+          python $GITHUB_WORKSPACE/patches/oh054/apply_gt_tools.py
+          if ! python -c "import swebench" 2>/dev/null; then
+            git clone --depth 1 --branch python-only --recursive \
+              https://github.com/microsoft/SWE-bench-Live.git /tmp/SWE-bench-Live
+            cd /tmp/SWE-bench-Live && python -m pip install -e .
+          fi
+        fi
+
+    # Pyright must be deterministically available for the C6 offline LSP
+    # promotion pass (groundtruth.resolve --resolve). It used to live inside the
+    # pip-cache-MISS else-branch above, so a cache HIT left it uninstalled. This
+    # always-run step guarantees it. Warn-don't-fail: a pyright miss must never
+    # break the job (resolve degrades to its name_match fallback). RF-2 zero-
+    # infra-failure mandate.
+    - name: Provision GT full stack — embeddings + LSP (no silent fallback)
+      shell: bash
+      run: |
+        set -e
+        # SEMANTIC: onnxruntime + the e5-small-v2 model baked in. graph_localizer +
+        # run_v74 use the container ONNX _OnnxEmbedderAdapter; without onnxruntime the
+        # embedder zeroes W_SEM silently (the 30-task-run failure). tokenizers is its dep.
+        python -m pip install onnxruntime tokenizers || python -m pip install onnxruntime tokenizers
+        # The e5 model is delivered to matrix jobs via a GHA ARTIFACT (uploaded ONCE in
+        # `prepare`), because per-job `git lfs pull` (300 jobs × 133MB) blew the Git LFS
+        # bandwidth cap. ONLY LFS-pull here if the model isn't already present (a direct
+        # caller, e.g. canary, that didn't pre-place it) — never on the big matrices.
+        _M="$GITHUB_WORKSPACE/models/e5-small-v2/model.onnx"
+        # M7 size floor: a 1MB floor let a TRUNCATED/partial download (or an LFS
+        # pointer ~130B) pass as "present". A complete e5-small-v2 ONNX is ~133MB
+        # (fp32) or ~33MB (int8 quantized fallback — setup_models.py also accepts
+        # onnx/model_quantized.onnx). Floor at 20MB rejects pointers, empty files,
+        # and gross truncation WITHOUT false-rejecting the legitimate quantized
+        # variant. The AUTHORITATIVE completeness check is the load+embed PROBE
+        # below (onnxruntime rejects a truncated/corrupt protobuf); this size gate
+        # is only a fast pre-filter.
+        _E5_MIN_BYTES=$((20 * 1024 * 1024))
+        if [ ! -s "$_M" ] || [ "$(wc -c < "$_M" 2>/dev/null || echo 0)" -lt "$_E5_MIN_BYTES" ]; then
+          echo "  e5 model absent/pointer — downloading from HuggingFace (setup_models.py, NO Git LFS — the"
+          echo "  LFS budget is exhausted on this repo; HF is the same e5-small-v2 ONNX as the codespace)."
+          # The repo ships model.onnx as an LFS POINTER (~130B). setup_models.py skips when the file
+          # merely EXISTS, so remove the pointer dir first -> HF actually downloads the real model.
+          rm -rf "$GITHUB_WORKSPACE/models/e5-small-v2"
+          python -m pip install -q huggingface_hub tokenizers onnxruntime 2>/dev/null || true
+          GT_MODELS_ROOT="$GITHUB_WORKSPACE/models" python "$GITHUB_WORKSPACE/scripts/setup_models.py" || {
+            echo "  HF download failed (e.g. HTTP 429) — last-resort git lfs pull (models ONLY)"
+            command -v git-lfs >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq git-lfs) || true
+            # SCOPE STRICTLY to models/** and NEVER fall through to a bare `git lfs pull`.
+            # A bare pull fans out to EVERY LFS pointer in the repo (e.g. the SWE-bench-Pro
+            # `benchmarks/data/swebench_pro_public_tags.jsonl` + `swebench_live_lite.jsonl`),
+            # whose LFS objects are NOT on this repo's (budget-exhausted) LFS store -> the
+            # pull 404s -> exit 2 -> `set -e` kills the whole prepare job. That is exactly
+            # what broke run 27103814204 after the Pro data commit landed. The data .jsonl
+            # files are irrelevant to model provisioning and must never gate this step.
+            # Non-fatal by design (RF-2 zero-infra-failure): if both HF and LFS are
+            # unavailable the embedder degrades to the deterministic 2-signal fallback;
+            # the ONLY place a missing model may abort is the GT_REQUIRE_EMBEDDER /
+            # GT_REQUIRE_FULL_STACK hard-gate below.
+            ( cd "$GITHUB_WORKSPACE" && git lfs install && git lfs pull --include="models/**" ) \
+              || echo "  WARN: models/** LFS pull failed (LFS budget exhausted / object absent) — embedder will degrade to 2-signal fallback unless GT_REQUIRE_* aborts below"
+          } || true
+        else
+          echo "  e5 model already present (GHA artifact) — skipping git lfs pull (saves LFS bandwidth)"
+        fi
+        echo "GT_MODELS_ROOT=$GITHUB_WORKSPACE/models" >> "$GITHUB_ENV"
+        export GT_MODELS_ROOT="$GITHUB_WORKSPACE/models"
+        # M7: ALWAYS probe the embedder (BEST-EFFORT surfacing). Load the model and embed
+        # a real vector, then RECORD `[GT_EMBEDDER] loaded=<bool> dim=<n>` to the log, the
+        # eval env (GITHUB_ENV), and the job summary — so a semantic-zero (degraded) run is
+        # VISIBLE, never silent, even when the caller did NOT arm GT_REQUIRE_*. The probe
+        # (onnxruntime load + non-zero finite vector) is the AUTHORITATIVE completeness
+        # check: it catches a truncated/corrupt model the size floor cannot, and it does
+        # NOT false-reject a working int8 quantized model. `$(...) && rc=0 || rc=$?` keeps
+        # `set -e` from killing an unarmed degraded run when the probe exits non-zero.
+        _E5_SZ=$(wc -c < "$_M" 2>/dev/null || echo 0)
+        _EMBED_OUT=$(GT_FORCE_ONNX_EMBEDDER=1 python -c "import math; from groundtruth.memory.enrich.embed import get_embedding_model as g; m=g(); m._ensure_loaded(); v=m.embed('def f(): return 1'); ok=bool(v) and any(abs(x)>1e-9 for x in v) and all(math.isfinite(x) for x in v); print('[GT_EMBEDDER] loaded=%s dim=%d'%(('true' if ok else 'false'), (len(v) if v else 0))); import sys; sys.exit(0 if ok else 1)" 2>/dev/null) && _EMBED_RC=0 || _EMBED_RC=$?
+        _EMBED_LINE=$(printf '%s\n' "$_EMBED_OUT" | grep -m1 '\[GT_EMBEDDER\]' || true)
+        [ -n "$_EMBED_LINE" ] || _EMBED_LINE="[GT_EMBEDDER] loaded=false dim=0"
+        echo "$_EMBED_LINE size_bytes=$_E5_SZ"
+        echo "GT_EMBEDDER_PROBE=$_EMBED_LINE" >> "$GITHUB_ENV"
+        printf '%s size_bytes=%s\n' "$_EMBED_LINE" "$_E5_SZ" >> "${GITHUB_STEP_SUMMARY:-/dev/null}" 2>/dev/null || true
+        # NO SILENT FAILURE only when ARMED: under GT_REQUIRE_EMBEDDER/FULL_STACK the model
+        # MUST clear the size floor AND the probe MUST pass — "we don't go without it" —
+        # else ABORT. The probe (not the size heuristic) is the real gate, so a working
+        # quantized model is not false-rejected and a truncated fp32 that fails to load IS
+        # caught. UNARMED: SURFACE the degraded state and PROCEED best-effort (no refusal).
+        if [ "${GT_REQUIRE_EMBEDDER:-0}" = "1" ] || [ "${GT_REQUIRE_FULL_STACK:-0}" = "1" ]; then
+          { [ -s "$_M" ] && [ "$_E5_SZ" -ge "$_E5_MIN_BYTES" ]; } || \
+            { echo "FATAL: e5-small-v2 model missing/truncated under GT_REQUIRE_EMBEDDER (size_bytes=$_E5_SZ < $_E5_MIN_BYTES; expected ~133MB fp32 / ~33MB int8)"; exit 1; }
+          [ "$_EMBED_RC" -eq 0 ] || \
+            { echo "FATAL: embedder did not load+embed a real vector under GT_REQUIRE_EMBEDDER ($_EMBED_LINE; onnxruntime/model broken)"; exit 1; }
+          echo "  embedder PROBE OK (armed): $_EMBED_LINE"
+        else
+          if [ "$_EMBED_RC" -eq 0 ]; then
+            echo "  embedder live (best-effort): $_EMBED_LINE"
+          else
+            echo "  WARN: embedder degraded / semantic-zero (GT_REQUIRE_EMBEDDER not armed) — SURFACED, proceeding best-effort: $_EMBED_LINE size_bytes=$_E5_SZ"
+          fi
+        fi
+        # LSP: pyright. Under GT_REQUIRE_LSP it MUST be runnable — install + hard-verify.
+        if ! (python -c "import pyright" 2>/dev/null || command -v pyright >/dev/null 2>&1); then
+          python -m pip install pyright || python -m pip install pyright
+        fi
+        if [ "${GT_REQUIRE_LSP:-0}" = "1" ] || [ "${GT_REQUIRE_FULL_STACK:-0}" = "1" ]; then
+          (pyright --version 2>/dev/null || python -m pyright --version 2>/dev/null) || \
+            { echo "FATAL: pyright not runnable under GT_REQUIRE_LSP"; exit 1; }
+        else
+          pyright --version 2>/dev/null || python -m pyright --version 2>/dev/null || echo "WARN: pyright not runnable"
+        fi
+
+    - name: Preflight — assert full stack is LIVE (abort before paid run)
+      if: ${{ env.GT_REQUIRE_FULL_STACK == '1' }}
+      shell: bash
+      run: |
+        # Behavioral gate: probes a real non-zero semantic vector + LSP warm. FTS5/struct
+        # are asserted per-task by the Go GT_REQUIRE_FTS5 gate (needs a built graph.db).
+        GT_FORCE_ONNX_EMBEDDER=1 GT_REQUIRE_EMBEDDER=1 GT_REQUIRE_LSP=1 \
+          python "$GITHUB_WORKSPACE/scripts/swebench/preflight_full_stack.py"
+
+    # In the baked eval image Go 1.23 + gt-index are prebaked and the calling workflow
+    # rebuilds gt-index itself — skip the Go re-download + this build to save ~1 min/job.
+    - uses: actions/setup-go@v5
+      if: ${{ env.GT_EVAL_IMAGE != '1' }}
+      with:
+        go-version: "1.22"
+
+    - name: Build gt-index from source (always rebuilds on Go changes)
+      if: ${{ env.GT_EVAL_IMAGE != '1' }}
+      shell: bash
+      run: |
+        # DIAGNOSTIC: three apt/symlink attempts failed ("no C++ compiler"); observe the
+        # actual runner state instead of guessing.
+        echo "=== C++ toolchain diagnostic ==="
+        grep -E '^(PRETTY_NAME|VERSION)=' /etc/os-release 2>/dev/null
+        echo "PATH=$PATH"
+        echo "ls /usr/bin g++/c++/gcc/clang:"; ls -la /usr/bin/ 2>/dev/null | grep -iE 'g\+\+|c\+\+|gcc|clang|cc[-0-9]' || echo "  (none in /usr/bin)"
+        echo "which: gcc=$(command -v gcc) cc=$(command -v cc) g++=$(command -v g++) clang++=$(command -v clang++)"
+        echo "dpkg g++: $(dpkg -l 2>/dev/null | grep -E '^ii.*g\+\+' | awk '{print $2}' | tr '\n' ' ')"
+        echo "================================"
+        # go-tree-sitter's ocaml/yaml grammars compile C++ via CGO -> need g++. Find any
+        # installed C++ compiler and symlink it; clang++ works for CGO too (set CXX).
+        if ! command -v g++ >/dev/null 2>&1; then
+          GXX=$(command -v g++-14 || command -v g++-13 || command -v g++-12 || command -v g++-11 \
+                || ls /usr/bin/g++-* 2>/dev/null | sort -V | tail -1 \
+                || command -v c++ || command -v clang++ \
+                || ls /usr/bin/clang++* 2>/dev/null | sort -V | tail -1 || true)
+          if [ -n "$GXX" ] && [ -x "$GXX" ]; then
+            sudo ln -sf "$GXX" /usr/local/bin/g++ 2>/dev/null || ln -sf "$GXX" "$HOME/.local/bin/g++" 2>/dev/null || true
+            echo "CXX=$GXX" >> "$GITHUB_ENV"
+            echo "symlinked g++ -> $GXX (no apt needed)"
+          else
+            echo "no C++ compiler found — trying apt (retry)"
+            for t in 1 2 3; do sudo apt-get update -qq && sudo apt-get install -y -qq g++ build-essential && break; sleep 6; done
+          fi
+        fi
+        command -v g++ >/dev/null 2>&1 || { echo "FATAL: no C++ compiler (g++) available for gt-index CGO build"; exit 1; }
+        echo "g++: $(command -v g++)"
+        # `-fts5` recipe marker busts the cached binary once: the hash is over .go
+        # files only, so adding the build tag would otherwise reuse a tagless binary.
+        GT_SRC_HASH=$(find $GITHUB_WORKSPACE/gt-index -name '*.go' -exec sha256sum {} + | sort | sha256sum | cut -c1-12)-fts5
+        EXISTING_HASH=""
+        [ -f /tmp/gt-index.sha ] && EXISTING_HASH=$(cat /tmp/gt-index.sha)
+        if [ "$GT_SRC_HASH" = "$EXISTING_HASH" ] && [ -f /tmp/gt-index ]; then
+          echo "gt-index binary up-to-date (hash=$GT_SRC_HASH)"
+        else
+          echo "Building gt-index (src_hash=$GT_SRC_HASH, old=$EXISTING_HASH)..."
+          cd $GITHUB_WORKSPACE/gt-index
+          # -tags sqlite_fts5: compile FTS5 into the go-sqlite3 driver so gt-index
+          # can build the nodes_fts index (localizer pipeline STAGE 1). Without it,
+          # CREATE VIRTUAL TABLE … fts5 is silently rejected and every run falls back
+          # to a runtime Python rebuild (the 30-task-run failure).
+          CGO_ENABLED=1 go build -tags sqlite_fts5 -ldflags "-X main.version=$(git rev-parse --short HEAD)" -o /tmp/gt-index ./cmd/gt-index/
+          chmod +x /tmp/gt-index
+          echo "$GT_SRC_HASH" > /tmp/gt-index.sha
+          echo "gt-index built successfully"
+        fi
+        /tmp/gt-index --version 2>/dev/null || echo "gt-index built (no --version flag)"
+        echo "GT_INDEX_BINARY=/tmp/gt-index" >> $GITHUB_ENV
