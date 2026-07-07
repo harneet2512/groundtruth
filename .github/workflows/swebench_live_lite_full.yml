@@ -959,7 +959,7 @@ jobs:
             -e GT_RUNTIME_LEDGER="/gt_out/gt_runtime_ledger.jsonl" \
             -e GT_HOOK_FIRE_COUNTS="/gt_out/gt_hook_fire_counts.json" \
             -e GT_BASELINE=${{ inputs.baseline == true && '1' || '0' }} \
-            -e GT_SELF_VERIFY_ATTEMPTS="${{ inputs.self_verify_attempts || '0' }}" \
+            -e GT_SELF_VERIFY_ATTEMPTS="${{ inputs.self_verify_attempts || env.GT_SELF_VERIFY_ATTEMPTS }}" \
             -e GT_RETRY_TEST_TIMEOUT_SEC="${{ inputs.retry_test_timeout_sec || '600' }}" \
             -e GT_DCC="${GT_DCC:-0}" \
             -e GT_POST_SEARCH="${GT_POST_SEARCH:-0}" \
