@@ -2884,6 +2884,26 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
     _ledger = os.environ.get("GT_CONSENSUS_LEDGER", "") == "1"
     _signals_map = getattr(loc, "signals_by_file", None) or {}
 
+    # Consensus overconfidence gate (Blocker B, run-28886910434 audit): a file whose N/3
+    # agreement is ALL from the three vocabulary-family rankers (grep/content, structural,
+    # semantic) but has NO verified issue-anchored witness (no resolved caller/callee/defines
+    # to an issue entity) is LEXICAL-ONLY — the RRF independence assumption (Cormack SIGIR
+    # 2009) is violated because all three are name-driven on a name+signature passage, so a
+    # bare "N/3 agree" over-claims and a lexically-matching non-gold can read as strong as the
+    # gold. Mark the CORROBORATED files (a verified structural link to an issue symbol) so the
+    # receipt flags the rest as lexical. FORM-only: candidate set / sort order / primary_path
+    # are untouched; leak-safe (fixed literal, no test/path token); this is the confidence-gate
+    # lever (BRIEFING.md §3/§4), NOT a ranking change. Default-off with the ledger (byte-identical).
+    def _impl_role_corroborated(c) -> bool:
+        return any(
+            getattr(w, "verified", False)
+            and (getattr(w, "anchor", "") or "").lower() in anchors
+            for w in (getattr(c, "witnesses", []) or [])
+        )
+    _corroborated_norm = {
+        _gl_normalize(c.file_path) for c in cands if _impl_role_corroborated(c)
+    }
+
     def _sig_receipt(fp: str) -> str:
         # Which of the 3 independent rankers voted this file into its own top-3 —
         # the RECEIPTS behind the agreement COUNT. Leg names only ({grep,structural,
@@ -2902,7 +2922,14 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
         legs = [l for l in _signals_map.get(_gl_normalize(fp), [])
                 if l in ("grep", "content", "structural", "semantic")]
         if legs:
-            return f"{len(legs)}/3 signals agree ({', '.join(legs)})"
+            # Demote MULTI-signal lexical-only agreement (>=2 legs): that is the overconfidence
+            # case — "2/3 / 3/3 agree" reads as strong, but if NO verified issue-anchored witness
+            # backs the file the agreeing legs are all vocabulary-correlated (not independent), so
+            # a name-match non-gold looks edge-corroborated. A lone 1/3 is already visibly weak and
+            # is left unqualified (no added noise). Fixed literal -> zero leak surface.
+            _lexical_only = (len(legs) >= 2) and (_gl_normalize(fp) not in _corroborated_norm)
+            _q = " — lexical (no verified issue link)" if _lexical_only else ""
+            return f"{len(legs)}/3 signals agree ({', '.join(legs)}){_q}"
         return "0/3 signals agree"
 
     def _issue_edges(c):
