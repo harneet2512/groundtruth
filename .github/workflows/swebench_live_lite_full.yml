@@ -1044,9 +1044,22 @@ jobs:
               # action_count/tokens/cost all read 0. GUARD: this whole block is a single-quoted
               # docker bash -c argument. NEVER put an apostrophe in any comment here: one
               # apostrophe closes the quote and the agent silently never launches. Cost a smoke.
+              # STEP-0 PROACTIVE BRIEF (rows 9/25/31): prepend the substrate brief so the
+              # hedged <gt-task-brief>/<gt-localization> is PHYSICALLY in msg0/1 BEFORE the
+              # first agent action (RECEIVED@0). Mirrors gt_agent._prepend_brief (pier path):
+              # brief.txt already starts with <gt-task-brief>, so prepend as-is + blank line
+              # + issue. Baseline arm = issue only (byte-identical control). No apostrophes.
+              GT_TASK_FILE=/gt_out/gt_task.txt
+              if [ "${GT_BASELINE:-0}" != "1" ] && [ -s /gt_artifacts/brief.txt ]; then
+                { cat /gt_artifacts/brief.txt; printf "\n\n"; cat /gt_out/issue.txt 2>/dev/null || echo "Fix the issue in the repository."; } > "$GT_TASK_FILE"
+                echo "[GT] step-0 brief prepended to task: $(wc -c < /gt_artifacts/brief.txt) brief bytes + issue"
+              else
+                cat /gt_out/issue.txt > "$GT_TASK_FILE" 2>/dev/null || echo "Fix the issue in the repository." > "$GT_TASK_FILE"
+                echo "[GT] task = issue only (baseline or no substrate brief)"
+              fi
               yes "" 2>/dev/null | mini-swe-agent \
                 --model "'"$INPUT_MODEL"'" \
-                --task "$(cat /gt_out/issue.txt 2>/dev/null || echo Fix the issue in the repository.)" \
+                --task "$(cat "$GT_TASK_FILE")" \
                 --config /opt/gt/agent_config.yaml \
                 -o /gt_out/mini-swe-agent.trajectory.json \
                 2>&1 || true
