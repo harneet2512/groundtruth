@@ -144,8 +144,14 @@ _TEST_FILE_BASENAMES = frozenset({"conftest.py", "tests.py", "test.py"})
 def is_test_path(path: str) -> bool:
     """True iff a TEST file — by DIRECTORY SEGMENT (a relative top-level ``test/x.js``
     is caught; ``contest/``/``latest/`` are NOT — substring is never enough) OR a
-    basename marker (``test_*`` / ``*_test.*`` / ``*.test.*`` / ``*.spec.*`` / the exact
-    test modules ``conftest.py`` / ``tests.py`` / ``test.py``)."""
+    basename marker. FULL PARITY with the Go indexer's ``walker.IsTestFile``
+    (``gt-index/internal/walker/walker.go:210-271``) so this defense-in-depth guard
+    for FROZEN / stale-``is_test`` graphs catches EVERY test convention the walker
+    flags at index time — not just the Python/JS subset (Fable E2: the under-covering
+    set leaked ``*_tests.py`` / ``*.tests.ts`` / ``*_spec.rb`` / ``tests.rs`` /
+    ``FooTest.java`` bodies through witness/caller renders). Stem+ext rules are
+    EXT-GATED and CASE-SENSITIVE for the CamelCase forms, so ``latest.py`` /
+    ``attestation.py`` / ``mytest.py`` stay clean."""
     segs, bn = _path_segments(path)
     if not segs:
         return False
@@ -153,9 +159,35 @@ def is_test_path(path: str) -> bool:
         return True
     if bn in _TEST_FILE_BASENAMES:
         return True
-    return (
-        bn.startswith("test_") or "_test." in bn or ".test." in bn or ".spec." in bn
-    )
+    # boundary-delimited basename markers (incl. the JS/TS plural .tests./.specs.)
+    if (bn.startswith("test_") or "_test." in bn or ".test." in bn or ".spec." in bn
+            or ".tests." in bn or ".specs." in bn):
+        return True
+    # walker.IsTestFile stem/ext parity (defense-in-depth on stale-is_test graphs).
+    # Use the ORIGINAL-CASE basename: bn is lowercased by _path_segments, which would
+    # break the CASE-sensitive CamelCase forms (FooTest.java) AND make lowercase
+    # "latest"/"attestation" ambiguous with a "test" suffix. ext is matched lowercased.
+    _ob = path.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+    dot = _ob.rfind(".")
+    ext = (_ob[dot:] if dot > 0 else "").lower()
+    stem = _ob[:dot] if dot > 0 else _ob
+    if ext == ".py" and stem.endswith("_tests"):                    # pytest plural module
+        return True
+    if ext in (".java", ".kt", ".kts", ".scala", ".groovy") and (  # JVM (CASE-sensitive)
+            stem.endswith("Test") or stem.endswith("Tests") or stem.endswith("Spec")):
+        return True
+    if ext == ".cs" and (stem.endswith("Test") or stem.endswith("Tests")):  # C#
+        return True
+    if ext == ".php" and stem.endswith("Test"):                    # PHPUnit
+        return True
+    if ext == ".swift" and (stem.endswith("Tests") or stem.endswith("Test")):
+        return True
+    if ext == ".rb" and stem.endswith("_spec"):                    # RSpec
+        return True
+    if ext == ".rs" and (                                          # Rust module test files
+            bn in ("tests.rs", "test.rs") or stem.endswith("_tests")):
+        return True
+    return False
 
 
 def is_test_or_demo(path: str) -> bool:
