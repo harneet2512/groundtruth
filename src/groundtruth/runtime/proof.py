@@ -238,20 +238,35 @@ def graph_edges_hash(db) -> str:
     compare; a drift test guards that. Returns '' if the db is unreadable."""
     import hashlib
     import sqlite3 as _sql
-    h = hashlib.sha256()
-    try:
-        c = _sql.connect(f"file:{db}?mode=ro", uri=True)
+    import time as _time
+    # Lock-hardened read (fixes the conan witness fail): a transient lock while the LSP
+    # promotion is still checkpoint-writing GT_HOST_GRAPH_DB previously raised OperationalError,
+    # got swallowed to "" -> the fail-closed witness raise -> the agent never ran on the LARGEST
+    # graphs (longest write window). timeout=/busy_timeout wait the writer out; the bounded retry
+    # is belt-and-suspenders. The SELECT/ORDER BY/encoding MUST stay byte-identical to
+    # resolve._graph_edges_hash (the cross-stage drift-parity hash) — only the connection hardens.
+    for _attempt in range(3):
+        h = hashlib.sha256()
         try:
-            for row in c.execute(
-                "SELECT source_id, target_id, type, resolution_method, confidence "
-                "FROM edges ORDER BY id"
-            ):
-                h.update(repr(tuple(row)).encode("utf-8"))
-        finally:
-            c.close()
-    except Exception:
-        return ""
-    return h.hexdigest()
+            c = _sql.connect(f"file:{db}?mode=ro", uri=True, timeout=30)
+            try:
+                c.execute("PRAGMA busy_timeout=30000")
+                for row in c.execute(
+                    "SELECT source_id, target_id, type, resolution_method, confidence "
+                    "FROM edges ORDER BY id"
+                ):
+                    h.update(repr(tuple(row)).encode("utf-8"))
+            finally:
+                c.close()
+            return h.hexdigest()
+        except _sql.OperationalError as _e:
+            if "locked" in str(_e).lower() and _attempt < 2:
+                _time.sleep(0.5 * (_attempt + 1))
+                continue
+            return ""
+        except Exception:
+            return ""
+    return ""
 
 
 # ───────────────────────────── FTS5 (Stage 2) ────────────────────────────────
