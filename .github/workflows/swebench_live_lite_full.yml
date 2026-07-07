@@ -1006,8 +1006,32 @@ jobs:
               # Apply GT patch (monkey-patches LocalEnvironment to append GT evidence).
               # BASELINE (control) arm: GT_BASELINE=1 -> skip entirely so NO <gt-evidence>
               # is ever appended. This is the paired-control difference from the GT arm.
+              # DELIVERY FIX (gt_math run 28844447328): `gt_mini_patch.py --install`
+              # only monkeypatches the EPHEMERAL install process. The agent runs as a
+              # SEPARATE mini-swe-agent process (often a uv-tool Python 3.11), so it
+              # stayed GT-OFF and delivered NOTHING (brief + per-turn appends absent in
+              # every trajectory). The documented load channel is a site-packages .pth
+              # run at interpreter startup. Resolve the interpreter that actually runs
+              # the agent and drop the .pth into ITS site-packages so gt_mini_patch
+              # loads and patches LocalEnvironment.execute in the process that runs.
               if [ "${GT_BASELINE:-0}" != "1" ] && [ -f /opt/gt/gt_mini_patch.py ]; then
-                python /opt/gt/gt_mini_patch.py --install 2>&1 || echo "WARN: gt_mini_patch install failed"
+                AGENT_BIN=$(command -v mini-swe-agent || true)
+                AGENT_PY=$(command -v python3 || command -v python)
+                if [ -n "$AGENT_BIN" ]; then
+                  SB=$(sed -n "1s/^#!//p" "$AGENT_BIN"); FIRST=${SB%% *}
+                  case "$FIRST" in *env) REST=${SB#* }; CAND=${REST%% *} ;; *) CAND=$FIRST ;; esac
+                  if [ -x "$CAND" ]; then AGENT_PY=$CAND; else RES=$(command -v "$CAND" 2>/dev/null || true); [ -n "$RES" ] && AGENT_PY=$RES; fi
+                fi
+                SITE_DIR=$("$AGENT_PY" -c "import sysconfig;print(sysconfig.get_paths().get(\"purelib\") or \"\")" 2>/dev/null)
+                if [ -n "$SITE_DIR" ] && [ -d "$SITE_DIR" ]; then
+                  printf "%s\n" "import sys; sys.path.insert(0, \"/opt/gt\"); import gt_mini_patch" > "$SITE_DIR/zzz_gt_mini_patch.pth"
+                  echo "[GT] gt_mini_patch .pth installed: $SITE_DIR (agent_py=$AGENT_PY)"
+                  "$AGENT_PY" -c "import sys;sys.path.insert(0,\"/opt/gt\");import gt_mini_patch as g;print(\"[GT] hook_attached:\", getattr(g,\"_PATCHED_CLASSES\",[]) or \"NONE\")" 2>&1 | tail -1 || echo "[GT] WARN: gt_mini_patch import raised in agent_py"
+                else
+                  echo "[GT] WARN: agent site-packages unresolved (agent_py=$AGENT_PY) -- DELIVERY NOT INSTALLED"
+                fi
+                # Legacy in-proc call kept for host-side setup + proof marker (harmless).
+                python /opt/gt/gt_mini_patch.py --install >/dev/null 2>&1 || true
               else
                 echo "[GT] BASELINE mode: gt_mini_patch NOT installed (pure mini-swe-agent control arm)"
               fi
