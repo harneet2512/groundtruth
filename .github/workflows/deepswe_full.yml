@@ -285,7 +285,7 @@ jobs:
         id: bench_clone
         run: |
           if [ ! -d "deepswe-bench" ]; then
-            git clone --depth 1 https://github.com/datacurve-ai/deep-swe.git deepswe-bench
+            git clone --depth 1 --branch v1.0.0 https://github.com/datacurve-ai/deep-swe.git deepswe-bench
           fi
           # Run provenance: record WHICH deepswe-bench commit defined this run's task set
           # (a --depth 1 clone of the default branch can drift between runs). Surfaced in
@@ -293,6 +293,13 @@ jobs:
           BENCH_SHA=$(git -C deepswe-bench rev-parse HEAD 2>/dev/null || true)
           echo "bench_sha=${BENCH_SHA}" >> "$GITHUB_OUTPUT"
           echo "deepswe-bench clone SHA: ${BENCH_SHA:-<unknown>}"
+          # PARITY: hard-verify the checkout is EXACTLY tag v1.0.0 (COMMIT c33fa70e;
+          # 79a508a9 is the annotated tag OBJECT). Abort before any task otherwise.
+          DESC=$(git -C deepswe-bench describe --tags --exact-match 2>/dev/null || true)
+          [ "$DESC" = "v1.0.0" ] || { echo "FATAL: deepswe-bench not tag v1.0.0 (describe='$DESC' sha=$BENCH_SHA)"; exit 1; }
+          case "$BENCH_SHA" in c33fa70e*) : ;; *) echo "FATAL: deepswe-bench HEAD $BENCH_SHA != v1.0.0 commit c33fa70e..."; exit 1 ;; esac
+          ! grep -Rqs "Since v1.1" deepswe-bench/README.md 2>/dev/null || { echo "FATAL: deepswe-bench README says Since v1.1 (v1.1 grader)"; exit 1; }
+          echo "deepswe-bench v1.0.0 grading path VERIFIED"
 
       # ── SPEED-OPT A: cache deepswe-bench across runs (keyed on commit SHA) ──
       # The bench repo is cloned in every matrix job (113×) for task validation and
@@ -780,7 +787,7 @@ jobs:
           fi
           if [ ! -d "deepswe-bench" ]; then
             echo "bench cache MISS — cloning deepswe-bench from GitHub"
-            git clone --depth 1 https://github.com/datacurve-ai/deep-swe.git deepswe-bench
+            git clone --depth 1 --branch v1.0.0 https://github.com/datacurve-ai/deep-swe.git deepswe-bench
           fi
           # Run provenance: record what SHA this task actually ran from. On a cache hit
           # this equals prepare's bench_sha (same tarball); on a cache miss it is the
@@ -1090,8 +1097,6 @@ jobs:
             --agent-import-path artifact_deepswe.gt_agent:GTMiniSweAgent \
             --model "$INPUT_MODEL" \
             --env docker \
-            --override-memory-mb "${GT_EVAL_CONTAINER_MEM_MB:-9000}" \
-            --override-cpus "${GT_EVAL_CONTAINER_CPUS:-2}" \
             -y \
             --mounts-json "${MOUNTS_JSON}" \
             --ae GT_HOST_GRAPH_DB="${GT_C_ARTIFACTS}/graph.db" \
@@ -1127,7 +1132,8 @@ jobs:
             --ae GT_ORACLE_EVENTS="${GT_C_OUT}/gt_oracle_events.jsonl" \
             --ae GT_RUNTIME_LEDGER="${GT_C_OUT}/gt_runtime_ledger.jsonl" \
             --ae GT_HOOK_FIRE_COUNTS="${GT_C_OUT}/gt_hook_fire_counts.json" \
-            --ak config_file=artifact_deepswe/gt_integration/deepswe_official_probe.yaml \
+            --ak version=2.2.8 \
+            --ak config_file=artifact_deepswe/gt_integration/deepswe_v1_parity_mimo.yaml \
             > trial_output.log 2>&1 &
           _PIER_PID=$!
           _STARTED=0

@@ -97,7 +97,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 MANIFEST="${MANIFEST:-}"
 GT_SUBSTRATE_DIGEST="${GT_SUBSTRATE_DIGEST:-}"
 MODEL="${MODEL:-deepseek/deepseek-v4-flash}"
-PIER_CONFIG="${PIER_CONFIG:-$REPO_ROOT/artifact_deepswe/gt_integration/deepswe_gt_pier.yaml}"
+PIER_CONFIG="${PIER_CONFIG:-$REPO_ROOT/artifact_deepswe/gt_integration/deepswe_v1_parity_mimo.yaml}"
 BENCH_DIR="${BENCH_DIR:-$REPO_ROOT/deepswe-bench}"
 OUT_DIR="${OUT_DIR:-$PWD/agent_sweep_out}"
 REUSE_PROOF_DIR="${REUSE_PROOF_DIR:-}"
@@ -285,10 +285,16 @@ fi
 # ── deepswe-bench clone (the task dirs pier consumes) ────────────────────────
 if [ ! -d "$BENCH_DIR/tasks" ]; then
   echo "deepswe-bench absent at $BENCH_DIR — shallow-cloning"
-  git clone --depth 1 https://github.com/datacurve-ai/deep-swe.git "$BENCH_DIR" \
+  git clone --depth 1 --branch "${GT_DEEPSWE_TAG:-v1.0.0}" https://github.com/datacurve-ai/deep-swe.git "$BENCH_DIR" \
     || { echo "FATAL: deepswe-bench clone failed"; exit 1; }
 fi
+GT_DEEPSWE_TAG="${GT_DEEPSWE_TAG:-v1.0.0}"
+GT_DEEPSWE_TAG_SHA_PREFIX="${GT_DEEPSWE_TAG_SHA_PREFIX:-c33fa70e}"  # v1.0.0 COMMIT (rev-parse HEAD); 79a508a9 is the annotated TAG OBJECT
 GT_DEEPSWE_BENCH_SHA="$(git -C "$BENCH_DIR" rev-parse HEAD 2>/dev/null || true)"
+GT_DEEPSWE_DESCRIBE="$(git -C "$BENCH_DIR" describe --tags --exact-match 2>/dev/null || true)"
+if [ "$GT_DEEPSWE_DESCRIBE" != "$GT_DEEPSWE_TAG" ]; then echo "FATAL: deep-swe not tag $GT_DEEPSWE_TAG (describe=$GT_DEEPSWE_DESCRIBE sha=$GT_DEEPSWE_BENCH_SHA); rm $BENCH_DIR and re-run." >&2; exit 1; fi
+case "${GT_DEEPSWE_BENCH_SHA:-}" in "$GT_DEEPSWE_TAG_SHA_PREFIX"*) : ;; *) echo "FATAL: deep-swe HEAD ${GT_DEEPSWE_BENCH_SHA:-none} != v1.0.0 commit ${GT_DEEPSWE_TAG_SHA_PREFIX}..." >&2; exit 1 ;; esac
+if grep -Rqs "Since v1.1" "$BENCH_DIR/README.md" 2>/dev/null; then echo "FATAL: deep-swe README says Since v1.1 (wrong grader)." >&2; exit 1; fi
 echo "deepswe-bench: $BENCH_DIR (sha ${GT_DEEPSWE_BENCH_SHA:-<unknown>})"
 
 # ── task list from the manifest (fail-closed field check; sweep-identical) ───
@@ -823,6 +829,20 @@ PYEOF
         --ae GT_PROOF_MODE="${GT_PROOF_MODE:-1}" \
         --ae GT_CONTAINERIZED="1" \
         --ae GT_RUNTIME_STRATEGY="${GT_RUNTIME_STRATEGY:-unified_substrate}" \
+        --ae GT_STEP_LIMIT="${GT_STEP_LIMIT:-300}" \
+        --ae GT_VERIFICATION_CYCLE_COST="${GT_VERIFICATION_CYCLE_COST:-25}" \
+        --ae GT_SELF_VERIFY_ATTEMPTS="${GT_SELF_VERIFY_ATTEMPTS:-2}" \
+        --ae GT_BASELINE="${GT_BASELINE:-0}" \
+        --ae GT_VERIFY_STRUCTURAL_RISK="${GT_VERIFY_STRUCTURAL_RISK:-0}" \
+        --ae GT_DCC="${GT_DCC:-0}" \
+        --ae GT_NEG_EVIDENCE="${GT_NEG_EVIDENCE:-0}" \
+        --ae GT_TYPEFLOW_FIXPOINT="${GT_TYPEFLOW_FIXPOINT:-0}" \
+        --ae GT_FIELD_CANDIDATES="${GT_FIELD_CANDIDATES:-0}" \
+        --ae GT_SEM_BODY="${GT_SEM_BODY:-0}" \
+        --ae GT_PASSAGE_WIDE="${GT_PASSAGE_WIDE:-0}" \
+        --ae GT_CONTENT_LEG="${GT_CONTENT_LEG:-1}" \
+        --ae GT_POST_SEARCH="${GT_POST_SEARCH:-0}" \
+        --ae GT_CONSENSUS_LEDGER="${GT_CONSENSUS_LEDGER:-0}" \
         ${AE_EXTRA[@]+"${AE_EXTRA[@]}"} \
         --ak version=2.2.8 \
         --ak config_file="$PIER_CONFIG" \

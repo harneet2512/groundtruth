@@ -1,0 +1,48 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# CANONICAL PARITY CONFIG — DeepSWE v1.0.0 + mimo-v2.5-pro + GroundTruth ON only
+# ═══════════════════════════════════════════════════════════════════════════
+# THE single committed config BOTH surfaces (Upcloud box + GitHub Actions) import.
+# The only allowed cross-surface difference is which task IDs each surface runs.
+#
+# INTENTIONALLY EMPTY OF OVERRIDES ( `{}` below ).
+#
+# WHY: pier v0.2.0 builds the mini-swe-agent command as (mini_swe_agent.py:764
+# `_build_config_flags`):
+#     mini-swe-agent … -c mini.yaml -c agent.cost_limit=0 [-c THIS_FILE] …
+# THIS_FILE is layered AFTER mini.yaml. By setting NO keys, the official base
+# stands verbatim — every parity property is INHERITED, none is re-declared:
+#
+#   • instance_template / system_template : mini.yaml STOCK, unmodified
+#         (SWE-agent/mini-swe-agent config/mini.yaml — sha256 b539a896…)
+#         → "Please solve this issue: {{task}}" + the full 6-step workflow
+#           (incl. "Create a script to reproduce" + "Test edge cases" +
+#            the <example_response> block). NOT rewritten. NOT SWE-bench-style.
+#   • step_limit : 0  (UNLIMITED — mini.yaml; agents/default.py:130 `0` disables)
+#   • cost_limit : 0  (UNLIMITED — pier passes `-c agent.cost_limit=0`)
+#   • model_kwargs.drop_params : true  (mini.yaml — PRESERVED, not re-set here)
+#   • sampling (temperature / top_p / max_tokens / seed) : MODEL DEFAULTS.
+#         NONE pinned. The official DeepSWE v1 leaderboard pinned none
+#         (mimo avg 268-step / $26-cost class runs are impossible under caps).
+#   • resource env : per-task task.toml — cpus 2, memory_mb 8192,
+#         allow_internet false (uniform across all 113 v1.0.0 tasks).
+#
+# pier v0.2.0 mini_swe_agent.py:714 does `yaml.safe_load(THIS_FILE) or {}`, so an
+# empty mapping is a guaranteed no-op overlay (verified against v0.2.0 source).
+#
+# The model route (openrouter/xiaomi/mimo-v2.5-pro) is supplied by pier's
+# `--model` flag; pier derives model_class=openrouter from it (mini_swe_agent.py:744).
+# It is NOT declared here — surfaces pass identical `--model`.
+#
+# GroundTruth is delivered as a SEPARATE runtime overlay ONLY:
+#   gt_mini_patch (loaded via a site .pth at interpreter startup) appends
+#   `<gt-evidence>` / `<gt-*>` blocks INTO tool observations at runtime.
+#   GT is NEVER merged into instance_template / system_template / this file.
+#   GT env (GT_BASELINE=0 = ON, plus feature flags) is passed via `--ae` flags,
+#   byte-identical on both surfaces — NOT via this config.
+#
+# CAVEAT (recorded, not a blocker): mini-swe-agent version is pinned by
+# `--ak version=<V>` (we pin a fixed V for cross-surface determinism); the
+# leaderboard installed mini-swe-agent unpinned-latest at v1.0.0 time. Both
+# surfaces MUST pin the SAME V. See PARITY_FIXES_APPLIED.md.
+# ═══════════════════════════════════════════════════════════════════════════
+{}

@@ -2884,7 +2884,7 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
     _ledger = os.environ.get("GT_CONSENSUS_LEDGER", "") == "1"
     _signals_map = getattr(loc, "signals_by_file", None) or {}
 
-    def _sig_receipt(fp: str) -> str:
+    def _sig_receipt(fp: str, c=None) -> str:
         # Which of the 3 independent rankers voted this file into its own top-3 —
         # the RECEIPTS behind the agreement COUNT. Leg names only ({grep,structural,
         # semantic}), never a test name / path / assertion, so this adds ZERO leak
@@ -2901,9 +2901,31 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
         # agreement the receipt denies. Rendered from the SAME filtered basis the gate uses.
         legs = [l for l in _signals_map.get(_gl_normalize(fp), [])
                 if l in ("grep", "content", "structural", "semantic")]
-        if legs:
-            return f"{len(legs)}/3 signals agree ({', '.join(legs)})"
-        return "0/3 signals agree"
+        if not legs:
+            return "0/3 signals agree"
+        n = len(legs)
+        # IMPLEMENTATION-ROLE GATE (stratum-B confident-wrong fix). Multi-ranker
+        # agreement (>=2 legs) reads as "signals agree" — a strong, near-directive
+        # cue at the FIRST block the agent sees. But grep (lexical) + semantic
+        # (name+signature vocab) + structural (ranker top-3 = graph-centrality
+        # membership, NOT an edge from the failing behaviour) can ALL fire on a file
+        # that merely matches the issue VOCABULARY (c3749: scripts/update_schemas_
+        # manually.py earned 3/3 while the ForEach transform lived in
+        # _language_extensions.py). "N/3 signals agree" is only honest when the graph
+        # PROVES this file owns or participates in the issue behaviour — a def-site of
+        # an issue anchor, or a verified issue-anchored structural edge (`c` carries the
+        # witnesses). Absent that, the agreement is VOCABULARY overlap, so it renders as
+        # a hedged CANDIDATE, never a proven edit target — the agent still sees the file
+        # + its legs, but is not steered to it. A single leg (n<=1) is already visibly
+        # weak; left byte-identical. Legs are the SAME whitelisted literals (zero new
+        # leak surface); `c is None` (caller passed no candidate) also falls through to
+        # the prior string (byte-identical). ANCHOR-LESS issue (true stratum B, no file
+        # has anchor evidence) => nobody is impl-role backed => every multi-leg file
+        # hedges, which is exactly right: none is a proven target.
+        if n >= 2 and c is not None and not _impl_role_backed(c):
+            return (f"{n}/3 {'/'.join(legs)} agreement — implementation-role evidence "
+                    f"weak; treat as candidate, not edit target")
+        return f"{n}/3 signals agree ({', '.join(legs)})"
 
     def _issue_edges(c):
         # verified, non-DEFINES (structural edge) witnesses descended from an issue anchor
@@ -2979,6 +3001,17 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
             if getattr(w, "direction", "") == "defines_anchor" and a and a not in fs:
                 fs.append(a)
         return fs
+
+    def _impl_role_backed(c) -> bool:
+        """Implementation-role evidence for candidate `c`: the graph PROVES it owns or
+        participates in the issue behaviour, not merely matches its vocabulary. True iff
+        `c` DEFINES an issue-anchor symbol (def-site / owner of the named behaviour) OR
+        carries a verified issue-anchored structural edge (call path from the anchor).
+        Reads ONLY the witnesses already on the candidate — deterministic, no DB query,
+        no leak surface. This is the discriminator between a lexical/semantic vocabulary
+        match (no anchor def, no anchor edge) and a file the graph ties to the failing
+        behaviour; it gates the "N/3 signals agree" confidence phrasing in `_sig_receipt`."""
+        return bool(_defines_funcs(c) or _issue_edges(c))
 
     # ---- MULTI-SIGNAL AGREEMENT (the grep-floor build) ----
     # The tier now means "how many of the 3 independent rankers (grep / semantic /
@@ -3059,7 +3092,7 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
             # the guard line reads as a receipt, not a directive. Flag off => the EXACT
             # prior two strings (byte-identical). SAME target, SAME `primary_path`.
             if _ledger:
-                _high_head = f"{tgt.file_path} :: {func} — {_sig_receipt(tgt.file_path)}"
+                _high_head = f"{tgt.file_path} :: {func} — {_sig_receipt(tgt.file_path, tgt)}"
                 _guard_label = "guard/return"
             else:
                 _high_head = f"Edit target: {tgt.file_path} :: {func}"
@@ -3111,7 +3144,7 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
         for i, c in enumerate(shown, 1):
             # FORM-only (GT_CONSENSUS_LEDGER): append the per-file N/3 receipt. Flag
             # off => "" => byte-identical to today. SAME lines, SAME order.
-            _rc = f"  — {_sig_receipt(c.file_path)}" if _ledger else ""
+            _rc = f"  — {_sig_receipt(c.file_path, c)}" if _ledger else ""
             out.append(f"  {i}. {c.file_path}{_rc}")
             _wt = _resolved_witness_tail(graph_db, c.file_path)
             if _wt:
@@ -3140,7 +3173,7 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
         tail = f" — {', '.join(fs[:3])}" if fs else ""
         # FORM-only (GT_CONSENSUS_LEDGER): lead the line with the per-file N/3 receipt,
         # then the candidate funcs. Flag off => "" => byte-identical to today.
-        _rc = f" — {_sig_receipt(c.file_path)}" if _ledger else ""
+        _rc = f" — {_sig_receipt(c.file_path, c)}" if _ledger else ""
         out.append(f"  {i}. {c.file_path}{_rc}{tail}")
         # Surface the RESOLVED call-edge fact (already on disk) next to the
         # candidate so a confirming edge reaches the iter-0 header — the audited
