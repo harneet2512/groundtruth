@@ -1141,9 +1141,21 @@ jobs:
             if [ -n "$REPORT" ]; then
               REWARD=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1],encoding='utf-8')); v=(list(d.values())[0] if d else {}) or {}; print(1 if v.get('resolved') else 0)" "$REPORT")
               cp "$REPORT" trial_results/report.json 2>/dev/null || true
+              # SUBMISSION-COMPLETE (SWE-bench-Live logs/{instance_id}/): the official harness writes
+              # eval.sh · patch.diff · report.json · run_instance.log · test_output.txt next to report.json;
+              # copy the whole set into the exact submissions/lite/.../logs/{id}/ layout so each task
+              # artifact is directly packageable. Additive + best-effort (|| true) — no existing path changes.
+              EVAL_DIR=$(dirname "$REPORT")
+              mkdir -p "trial_results/logs/${TASK_ID}"
+              for _lf in eval.sh patch.diff report.json run_instance.log test_output.txt; do
+                cp "$EVAL_DIR/$_lf" "trial_results/logs/${TASK_ID}/$_lf" 2>/dev/null || true
+              done
+              echo "SUBMISSION_LOGS ${TASK_ID}: $(ls trial_results/logs/${TASK_ID} 2>/dev/null | tr '\n' ' ')" | tee -a trial_output.log
             else
               echo "EVAL: no report.json produced (harness error) — reward 0" | tee -a trial_output.log
             fi
+            # SUBMISSION preds source: keep this instance's 1-line prediction for preds.json aggregation.
+            cp /tmp/pred.jsonl "trial_results/pred_${TASK_ID}.jsonl" 2>/dev/null || true
             echo "OFFICIAL_EVAL: ${TASK_ID} resolved=$([ "$REWARD" = "1" ] && echo YES || echo NO) (Reward: ${REWARD}.0)" | tee -a trial_output.log
           fi
 
@@ -1211,6 +1223,11 @@ jobs:
           mkdir -p "/tmp/gt/${{ matrix.task }}"
           cp /tmp/gt_out/mini-swe-agent.trajectory.json "/tmp/gt/${{ matrix.task }}/" 2>/dev/null || true
           cp /tmp/gt_out/mini-swe-agent.trajectory.json trial_results/ 2>/dev/null || true
+          # SUBMISSION-COMPLETE (SWE-bench-Live trajs/{instance_id}/trajectory.json): lay the trajectory
+          # out in the official submission path too, so packaging is a straight copy. Format is flexible
+          # per the spec; this single-rollout single-attempt traj needs no rollout-selection annotation.
+          mkdir -p "trial_results/trajs/${{ matrix.task }}"
+          cp /tmp/gt_out/mini-swe-agent.trajectory.json "trial_results/trajs/${{ matrix.task }}/trajectory.json" 2>/dev/null || true
 
           # Deep 8-dp metrics.
           cp /tmp/gt/gt_run_summary*.json "trial_results/" 2>/dev/null || true

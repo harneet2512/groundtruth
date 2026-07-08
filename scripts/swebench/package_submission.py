@@ -121,6 +121,54 @@ def per_instance(art_dir):
             reward=(r.get("verifier_result", {}) or {}).get("rewards", {}).get("reward"),
             obs_text=read_text(*(traj[:1] + di[:1])),
         ))
+    # Live-Lite mini-swe-agent (swebench_live_lite_full.yml): each per-task dir carries the exact
+    # 1-line prediction pred_<iid>.jsonl (model_patch + instance_id), the official per-instance
+    # report.json (resolved), mini-swe-agent.trajectory.json, and the pre-laid official
+    # logs/<iid>/ + trajs/<iid>/ dirs. Read that shape so a submission builds from OUR runs, not
+    # only OH/DeepSWE. pred_*.jsonl is authoritative for the patch (it is exactly what was evaluated).
+    for f in glob.glob(os.path.join(art_dir, "**", "pred_*.jsonl"), recursive=True):
+        try:
+            first = next((ln for ln in open(f, encoding="utf-8", errors="replace") if ln.strip()), "")
+            o = json.loads(first) if first else {}
+        except Exception:
+            continue
+        iid = o.get("instance_id")
+        if not iid:
+            continue
+        d = os.path.dirname(f)
+        reward = None
+        rep = os.path.join(d, "report.json")
+        if os.path.isfile(rep):
+            try:
+                rd = json.load(open(rep, encoding="utf-8"))
+                v = (rd.get(iid) or (list(rd.values())[0] if rd else {})) or {}
+                reward = 1.0 if v.get("resolved") else 0.0
+            except Exception:
+                pass
+        if reward is None:
+            try:
+                reward = float((open(os.path.join(d, "reward.txt"), encoding="utf-8").read().strip() or "0"))
+            except Exception:
+                reward = None
+        traj = glob.glob(os.path.join(d, "**", "mini-swe-agent.trajectory.json"), recursive=True)
+        n_in = n_out = n_cache = steps = None
+        dm = glob.glob(os.path.join(d, "gt_deep_metrics_*.json"))
+        if dm:
+            try:
+                md = json.load(open(dm[0], encoding="utf-8"))
+                e, a = md.get("efficiency") or {}, md.get("agent") or {}
+                n_in, n_out = e.get("llm_tokens_prompt"), e.get("llm_tokens_completion")
+                steps = a.get("action_count")
+            except Exception:
+                pass
+        recs.setdefault(iid, {})
+        recs[iid].update(dict(
+            instance_id=iid, harness="mini-swe-agent",
+            patch=o.get("model_patch", ""), traj_file=traj[0] if traj else "",
+            n_in=n_in, n_out=n_out, n_cache=n_cache, steps=steps, reward=reward,
+            logs_dir=os.path.join(d, "logs", iid), trajs_dir=os.path.join(d, "trajs", iid),
+            obs_text=read_text(*traj[:1]),
+        ))
     return recs
 
 
@@ -168,8 +216,18 @@ def main():
     for iid, r in sorted(recs.items()):
         # EXACT schema from a real accepted submission: model_name_or_path + instance_id + model_patch
         preds[iid] = {"model_name_or_path": args.model, "instance_id": iid, "model_patch": r.get("patch", "")}
-        if r.get("traj_file") and os.path.isfile(r["traj_file"]):
+        _has_traj_dir = bool(r.get("trajs_dir") and os.path.isdir(r["trajs_dir"]))
+        if r.get("traj_file") and os.path.isfile(r["traj_file"]) and not _has_traj_dir:
+            # OH/DeepSWE: no official trajs/<id>/ dir — fall back to the flat trajs/<id>.<ext>.
             shutil.copy(r["traj_file"], os.path.join(out, "trajs", iid + os.path.splitext(r["traj_file"])[1]))
+        # Live-Lite mini: copy the pre-laid OFFICIAL logs/<iid>/ (eval.sh·patch.diff·report.json·
+        # run_instance.log·test_output.txt) + trajs/<iid>/trajectory.json verbatim into the submission.
+        for _srckey, _dstsub in (("logs_dir", "logs"), ("trajs_dir", "trajs")):
+            _src = r.get(_srckey)
+            if _src and os.path.isdir(_src):
+                _dst = os.path.join(out, _dstsub, iid)
+                shutil.rmtree(_dst, ignore_errors=True)
+                shutil.copytree(_src, _dst)
         cost = compute_cost(r.get("n_in"), r.get("n_cache"), r.get("n_out"), rate)
         # resolved: prefer official report; else reward>0
         res = iid in resolved_ids if resolved_ids else (float(r.get("reward") or 0) > 0)
@@ -189,6 +247,27 @@ def main():
         tot["resolved"] += int(bool(res)); tot["flips"] += int(bool(flip))
 
     json.dump(preds, open(os.path.join(out, "preds.json"), "w", encoding="utf-8"), indent=1)
+
+    # results.json — if no batch eval report was passed, synthesize the OFFICIAL SWE-bench-Live schema
+    # from the per-task official-eval outcomes (each task ran swebench.harness.run_evaluation; resolved
+    # comes from its own report.json). This is the official eval, aggregated — not a custom scorer.
+    if not (args.eval_report and os.path.isfile(args.eval_report)):
+        all_ids = sorted(recs.keys())
+        res_ids = sorted(i for i in all_ids if float(recs[i].get("reward") or 0) > 0)
+        res_set = set(res_ids)
+        empty_ids = sorted(i for i in all_ids if not (recs[i].get("patch") or "").strip())
+        empty_set = set(empty_ids)
+        unres_ids = sorted(i for i in all_ids if i not in res_set and i not in empty_set)
+        results = {
+            "total_instances": len(all_ids), "submitted_instances": len(all_ids),
+            "completed_instances": len(all_ids), "resolved_instances": len(res_ids),
+            "unresolved_instances": len(unres_ids), "empty_patch_instances": len(empty_ids),
+            "error_instances": 0, "completed_ids": all_ids, "incomplete_ids": [],
+            "empty_patch_ids": empty_ids, "submitted_ids": all_ids,
+            "resolved_ids": res_ids, "unresolved_ids": unres_ids, "error_ids": [],
+            "schema_version": 2,
+        }
+        json.dump(results, open(os.path.join(out, "results.json"), "w", encoding="utf-8"), indent=1)
     agg = dict(model=args.model, agent=args.agent, subset=args.subset, instances=len(recs),
                resolved=tot["resolved"], flips_vs_baseline=tot["flips"] if base_resolved else None,
                total_input_tokens=_f(tot["n_in"]), total_output_tokens=_f(tot["n_out"]),
