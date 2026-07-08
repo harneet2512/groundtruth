@@ -205,6 +205,159 @@ class ObligationTracker:
         ]
 
 
+# ═══════════════════════════ GT_OBLIGATIONS_V2 ══════════════════════════════
+# Exercised-clause primitives (plan §5). Discipline deliberately STRICTER than
+# v1 `obligation_tested` (whose ANY-token overlap is a false-pass channel: one
+# common token like `Response` in any test output marks a whole clause tested):
+#   - credit pool is the TEST-EVIDENCE tokens only (test-runner command +
+#     result-bearing output). Views/edits never credit exercise.
+#   - a COMPOUND subject symbol (snake/dotted/digit/CamelCase-internal) credits
+#     on exact token or case-insensitive substring containment
+#     (`filterMap` inside `test_filterMap` credits);
+#   - a NON-compound symbol credits ONLY on case-sensitive exact token match
+#     (`maybe` is not credited by "Maybe" in output);
+#   - CamelCase SPLITTING never credits (`filter`+`map` != `filterMap`).
+# "Unexercised clause" is the requirements-coverage analogue of a surviving
+# mutant: no executed test distinguishes the clause's implementation from its
+# absence.
+
+CLAUSE_EXERCISED = "exercised"
+CLAUSE_EDITED_UNEXERCISED = "edited_unexercised"
+CLAUSE_UNADDRESSED = "unaddressed"
+CLAUSE_UNVERIFIABLE = "unverifiable"
+
+
+def _credit_eligible_symbols(view) -> set[str]:
+    """Subject symbols a deterministic exercise check can be RIGHT about."""
+    subj = set(getattr(view, "subject_symbols", set()) or set())
+    if not subj:
+        return set()
+    return {s for s in subj if len(s) >= 3}
+
+
+def clause_exercised(view, tested_tokens: set[str]) -> bool:
+    """True iff test evidence names one of the clause's subject symbols,
+    under the strict credit discipline above."""
+    tested = set(tested_tokens or ())
+    if not tested:
+        return False
+    lowered = [t.lower() for t in tested]
+    for sym in _credit_eligible_symbols(view):
+        if _is_compound_symbol(sym):
+            sl = sym.lower()
+            if any(sl == t or sl in t for t in lowered):
+                return True
+        else:
+            if sym in tested:  # case-sensitive exact token only
+                return True
+    return False
+
+
+def exercise_statuses(views, edited_tokens, tested_tokens):
+    """[(view, status)] with the v2 tiers; `unverifiable` = zero
+    credit-eligible subject symbols (reported honestly, never guessed)."""
+    edited = set(edited_tokens or ())
+    tested = set(tested_tokens or ())
+    out = []
+    for v in views:
+        if not _credit_eligible_symbols(v):
+            out.append((v, CLAUSE_UNVERIFIABLE))
+            continue
+        if clause_exercised(v, tested):
+            out.append((v, CLAUSE_EXERCISED))
+            continue
+        touched, _conf = overlap(v, edited)
+        out.append((v, CLAUSE_EDITED_UNEXERCISED if touched else CLAUSE_UNADDRESSED))
+    return out
+
+
+def coverage_summary(statuses) -> dict:
+    counts = {
+        CLAUSE_EXERCISED: 0,
+        CLAUSE_EDITED_UNEXERCISED: 0,
+        CLAUSE_UNADDRESSED: 0,
+        CLAUSE_UNVERIFIABLE: 0,
+    }
+    for _v, s in statuses:
+        counts[s] = counts.get(s, 0) + 1
+    checkable = sum(
+        counts[k]
+        for k in (CLAUSE_EXERCISED, CLAUSE_EDITED_UNEXERCISED, CLAUSE_UNADDRESSED)
+    )
+    return {
+        "coverage_version": 2,
+        "n_clauses": len(list(statuses)),
+        "n_exercised": counts[CLAUSE_EXERCISED],
+        "n_edited_unexercised": counts[CLAUSE_EDITED_UNEXERCISED],
+        "n_unaddressed": counts[CLAUSE_UNADDRESSED],
+        "n_unverifiable": counts[CLAUSE_UNVERIFIABLE],
+        "coverage_exercised": (
+            counts[CLAUSE_EXERCISED] / checkable if checkable else 1.0
+        ),
+    }
+
+
+def render_unexercised_block(
+    statuses,
+    max_listed: int = 6,
+    artifact_rel: str = ".groundtruth/obligations.md",
+    leak_screen=None,
+) -> str:
+    """Violations-only submit-time block. SILENT ("") when every checkable
+    clause is exercised and nothing is unverifiable — correct-or-quiet.
+
+    ``leak_screen(text) -> bool`` (True = leaky) is applied per row; a leaky
+    row drops WHOLE (fail closed). All-dropped -> silent.
+    """
+    violations = [
+        (v, s) for v, s in statuses
+        if s in (CLAUSE_EDITED_UNEXERCISED, CLAUSE_UNADDRESSED)
+    ]
+    n_unverifiable = sum(1 for _v, s in statuses if s == CLAUSE_UNVERIFIABLE)
+    if not violations and not n_unverifiable:
+        return ""
+    lines: list[str] = []
+    shown = 0
+    for v, s in violations:
+        if shown >= max_listed:
+            break
+        quote = (v.verbatim or "")[:160]
+        syms = sorted(_credit_eligible_symbols(v))[:2]
+        symtxt = "/".join(f"`{x}`" for x in syms) or "its subject"
+        if s == CLAUSE_EDITED_UNEXERCISED:
+            mark = f"[edited, never exercised — no test/run output has mentioned {symtxt}]"
+        else:
+            mark = "[not addressed — no edit or execution evidence]"
+        row = f'{mark} "{quote}"'
+        if leak_screen is not None and leak_screen(row):
+            continue  # fail closed: leaky row drops whole
+        lines.append(row)
+        shown += 1
+    hidden = len(violations) - shown
+    if hidden > 0 and lines:
+        lines.append(f"(+{hidden} more unexercised requirement(s))")
+    if n_unverifiable:
+        lines.append(
+            f"{n_unverifiable} requirement(s) could not be auto-checked "
+            f"(no code identifier) — re-read {artifact_rel} and verify each."
+        )
+    if not lines:
+        return ""
+    header = (
+        "GT: requirements from the issue with NO execution evidence — "
+        "each was never exercised by any test/command you ran:"
+    )
+    footer = (
+        "Run one targeted test per requirement before submitting; an "
+        "unexercised requirement is indistinguishable from an unimplemented one."
+    )
+    return (
+        '\n<gt-nudge reason="unexercised_clauses">\n'
+        + "\n".join([header, *lines, footer])
+        + "\n</gt-nudge>"
+    )
+
+
 def render_obligation_status_block(statuses, covering=None, max_listed: int | None = None) -> str:
     unmet = order_unmet(statuses)
     if not unmet:
