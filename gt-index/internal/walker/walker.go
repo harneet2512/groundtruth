@@ -291,6 +291,29 @@ func IsTestFile(relPath string) bool {
 	return false
 }
 
+// IsTestByStructure reports whether a path is test-classified by a RELIABLE STRUCTURAL
+// signal — a test-directory segment (tests/, spec/, __tests__/), a JVM src/test/ tree, or
+// a non-source directory (fuzz/, corpus/, examples/). Unlike the filename-convention
+// predicates in IsTestFile (test_*, *_test, *Test, *_spec), these have NO production
+// false-positive class: a file living under tests/ is test-associated regardless of its
+// content. The parser corroborates NAME-only is_test flags against file content (a file
+// must actually contain a collectable test unit) but trusts these structural flags as-is,
+// so production test-infrastructure named like a test (base_test.py, AbstractFooTest) is
+// not wrongly excluded from localization. See parser.ParseFile.
+func IsTestByStructure(relPath string) bool {
+	dir := filepath.ToSlash(filepath.Dir(relPath))
+	if hasTestDirSegment(dir) {
+		return true
+	}
+	if strings.Contains(dir, "src/test/") {
+		return true
+	}
+	if IsNonSourceFile(relPath) {
+		return true
+	}
+	return false
+}
+
 // hasTestDirSegment reports whether any path segment, after stripping wrapping
 // underscores, names a test directory. This generalizes the common conventions
 // — "tests/", "test/", "spec/", "specs/", Jest "__tests__/", and underscore-

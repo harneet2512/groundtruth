@@ -163,6 +163,23 @@ func ParseFile(sf walker.SourceFile, isTest bool) (*ParseResult, error) {
 	result := &ParseResult{}
 	root := tree.RootNode()
 
+	// Content-corroborate a NAME-only is_test flag. Test-runner collection semantics = a
+	// filename gate AND a unit gate: a file is a test iff it is named like one AND actually
+	// contains a collectable test (a test_*/TestXxx function or an @Test-marked def). The
+	// walker's IsTestFile applies only the filename gate, so production test-infrastructure
+	// (base_test.py's BaseTestClass, AbstractFooTest, *_test.go helper bases) whose names end
+	// in _test but define no tests were flagged is_test=1 and DELETED from the localizer's
+	// search space (every recall/score query filters is_test=0). Restore the unit gate: for
+	// corroboratable languages, downgrade a NAME-flagged file (never a test-DIRECTORY one)
+	// that has zero collectable tests. Runs before walkNode so body-channel mining and node
+	// flags see the corrected bit. Byte-identical for dir-flagged files, real tests, and
+	// call-based languages (corroborateIsTest=false) — the false-positive set is the only delta.
+	if isTest && corroborateIsTest(sf.Language) &&
+		!walker.IsTestByStructure(sf.Path) &&
+		!fileHasCollectableTest(root, sf, src) {
+		isTest = false
+	}
+
 	// Walk the AST to extract definitions and calls
 	walkNode(root, sf, src, isTest, result, 0)
 
@@ -691,6 +708,90 @@ func nodeMarkedTest(node *sitter.Node, src []byte) bool {
 		break
 	}
 	return false
+}
+
+// corroborateIsTest reports whether a NAME-flagged is_test can be safely corroborated by
+// file CONTENT for this language — i.e. the language's tests are detectable by function
+// name (Go TestXxx, pytest/unittest test*, PHPUnit/XCTest/JUnit3 test*) or by annotation
+// (@Test, #[test], [Fact], captured by nodeMarkedTest). Call/macro-based frameworks
+// (JS/TS it()/describe(), Ruby RSpec, C/C++ gtest TEST()) are NOT corroborated here — their
+// collectable unit is a call the name/annotation pre-scan does not detect, so downgrading
+// them could hide a real test (leak). For those the (already stricter) filename pattern stands.
+func corroborateIsTest(language string) bool {
+	switch language {
+	case "python", "go", "rust", "java", "kotlin", "scala", "groovy", "csharp", "php", "swift":
+		return true
+	}
+	return false
+}
+
+// isTestUnitName reports whether a function/method name is a collectable test unit under the
+// language's test-runner naming convention — the "unit gate" every runner applies on top of
+// the filename gate. base_test.py's methods (setup_class, setup_test, teardown_test) do NOT
+// start with "test", so a BaseTestClass with no test_* methods yields false.
+func isTestUnitName(language, name string) bool {
+	if name == "" {
+		return false
+	}
+	switch language {
+	case "go":
+		// go test collects TestXxx / BenchmarkXxx / ExampleXxx / FuzzXxx where the char after
+		// the prefix is not lowercase ("Testable" is NOT a test — Go's own collection rule).
+		for _, p := range []string{"Test", "Benchmark", "Example", "Fuzz"} {
+			if strings.HasPrefix(name, p) {
+				rest := name[len(p):]
+				if rest == "" {
+					return true
+				}
+				if c := rest[0]; c == '_' || (c >= 'A' && c <= 'Z') {
+					return true
+				}
+			}
+		}
+		return false
+	case "python", "php", "swift", "java", "kotlin", "scala", "groovy":
+		// pytest test_*, unittest testFoo, PHPUnit test*, XCTest test*, JUnit3/TestNG testX.
+		return strings.HasPrefix(name, "test") || strings.HasPrefix(name, "Test")
+	}
+	return false
+}
+
+// fileHasCollectableTest reports whether the file contains at least one unit the language's
+// test runner would collect: an annotation-marked def (@Test / #[test] / [Fact]) or a
+// function/method whose name matches the runner's convention (isTestUnitName). This is the
+// CONTENT half of the runner's own collection rule (filename gate ∧ unit gate). Early-returns
+// on the first hit; a full walk only happens for a name-flagged file that has zero tests.
+func fileHasCollectableTest(root *sitter.Node, sf walker.SourceFile, src []byte) bool {
+	spec := sf.Spec
+	if spec == nil || root == nil {
+		return false
+	}
+	found := false
+	var visit func(n *sitter.Node)
+	visit = func(n *sitter.Node) {
+		if found || n == nil {
+			return
+		}
+		nt := n.Type()
+		if spec.IsFunctionNode(nt) || spec.IsClassNode(nt) || nt == "mod_item" || nt == "module" {
+			if nodeMarkedTest(n, src) {
+				found = true
+				return
+			}
+		}
+		if spec.IsFunctionNode(nt) && isTestUnitName(sf.Language, functionNodeName(n, sf, src)) {
+			found = true
+			return
+		}
+		for i := 0; i < int(n.ChildCount()); i++ {
+			visit(n.Child(i))
+			if found {
+				return
+			}
+		}
+	}
+	visit(root)
+	return found
 }
 
 // javaNodeExported reports whether a Java method/constructor/class node is part of the
