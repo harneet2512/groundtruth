@@ -763,6 +763,7 @@ PYEOF
         -e GT_FIELD_CANDIDATES="${GT_FIELD_CANDIDATES:-0}" \
         -e GT_CONTENT_LEG="${GT_CONTENT_LEG:-1}" \
         -e GT_CONSENSUS_LEDGER="${GT_CONSENSUS_LEDGER:-0}" \
+        -e GT_OBLIGATIONS_V2="${GT_OBLIGATIONS_V2:-0}" \
         "$GT_SUBSTRATE_DIGEST" gt-run-proof --source-root /work --out /gt_artifacts \
         > "$task_dir/proof_run.log" 2>&1
     RC=$?

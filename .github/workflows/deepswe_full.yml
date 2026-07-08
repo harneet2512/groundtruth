@@ -82,6 +82,10 @@ on:
         description: "Stratum-B content-BM25 leg (GT_CONTENT_LEG), independent of depth_flags. 1 = ON (default): the localizer's BM25-over-symbol-BODY-content surface (symbol_content_fts) fills the lexical slot ONLY when live-grep recalled nothing (behavior-described / stratum-B / graph-only tasks). Mutually exclusive with grep -> byte-identical on symbol-anchored (stratum-A) tasks = non-regressive by construction; test symbols excluded at source (leak=0). No rebake needed (symbol_content_fts is already baked; the flag is query-time). 0 = OFF."
         required: false
         default: "1"
+      obligations_v2:
+        description: "GT_OBLIGATIONS_V2 — obligation coverage + exercised-clause checklist (EARS/RFC-2119 extractor, dynamic budget, T2 workspace checklist, T3 submit-time unexercised detector). 0 = OFF (default; byte-identical). 1 = ON. REQUIRES a substrate baked on THIS run's commit (the extractor runs inside gt-run-proof)."
+        required: false
+        default: "0"
       cooperative_flags:
         description: "Cooperative-localization channels, independent of depth_flags. 1 = ON = GT_POST_SEARCH (agent answers its OWN repo-wide grep of a bare symbol with def-site + verified-caller facts, in-band, via --ae) + GT_CONSENSUS_LEDGER (the <gt-localization> HIGH head renders 'N/3 signals agree' + receipts instead of the imperative 'Edit target:', via substrate -e + --ae; ranking-invariant, form-only). Both correct-or-quiet + leak-0 by construction. 0 = OFF (default; byte-identical)."
         required: false
@@ -156,6 +160,10 @@ env:
   # via --ae for the agent-side L6-fresh brief regen. Both default-off in code; ON only when set here.
   GT_POST_SEARCH: ${{ inputs.cooperative_flags == '1' && '1' || '0' }}
   GT_CONSENSUS_LEDGER: ${{ inputs.cooperative_flags == '1' && '1' || '0' }}
+  # GT_OBLIGATIONS_V2 (2026-07-08 build): brief-side extractor flag — projected
+  # into gt-run-proof via substrate_proof.sh -e; runtime T3 is ARTIFACT-WINS
+  # (activates on gt_obligations_v2.json presence, no env needed in-container).
+  GT_OBLIGATIONS_V2: ${{ inputs.obligations_v2 == '1' && '1' || '0' }}
   GT_BASELINE: ${{ inputs.gt_arm == 'baseline' && '1' || '0' }}
   # Legitimacy: the per-task graph must be built FRESH from THIS task's repo — never a
   # cross-run / stale / out-of-repo prebuilt graph.db. In substrate-consume mode the graph
