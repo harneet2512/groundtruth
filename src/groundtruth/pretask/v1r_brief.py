@@ -1838,6 +1838,76 @@ def _edit_target_contracts_block(graph_db: str, top: FileEntry) -> list[str]:
 # the grader's test names — gt_trial §6 leakage rule).
 _OBLIGATION_BUDGET = 4  # at most N obligation lines (compact, high-precision)
 _OBLIGATION_LINE_CHARS = 200  # per-obligation verbatim cap
+
+
+def _obligations_v2_on() -> bool:
+    """GT_OBLIGATIONS_V2 master switch — default OFF, byte-identical when off."""
+    import os as _os
+    return (_os.environ.get("GT_OBLIGATIONS_V2") or "").strip().lower() not in (
+        "", "0", "false", "no",
+    )
+
+
+def _dynamic_obligation_budget(n_clauses: int) -> int:
+    """T1 budget scaling with spec density: K = clamp(ceil(n/3), 4, 10).
+    n<=12 keeps today's dose (4); a 25-clause spec renders 9; ceiling 10 bounds
+    the block at <=10x200 chars inside the existing brief token rail."""
+    import math as _math
+    return max(_OBLIGATION_BUDGET, min(10, _math.ceil(max(0, n_clauses) / 3)))
+
+
+_V2_KIND_PRIORITY = {"error": 0, "signature": 1, "behavior": 2, "compat": 3, "repro": 4}
+
+
+def _v2_order_key(row: dict) -> tuple:
+    """Deterministic total order: modality strength desc, symbol specificity
+    desc (compound-symbol count, then max symbol length), kind priority,
+    document order asc."""
+    subj = row.get("subject_symbols") or []
+    compound = sum(1 for s in subj if ("_" in s or "." in s or any(c.isupper() for c in s[1:])))
+    maxlen = max((len(s) for s in subj), default=0)
+    return (
+        -int(row.get("modality_strength") or 0),
+        -compound,
+        -maxlen,
+        _V2_KIND_PRIORITY.get(row.get("kind") or "", 9),
+        int(row.get("_doc_index") or 0),
+    )
+
+
+def _write_obligations_v2_artifact(rows: list[dict], gold_path_tokens: set[str]) -> None:
+    """T2: persist the FULL leak-screened clause list next to the anchors file —
+    gt_obligations_v2.json (machine, incl. render_path_tokens so the in-container
+    T3 screen applies the IDENTICAL leak rule) + gt_obligations.md (the agent's
+    checklist; issue-verbatim rows only — adds structure, zero new information).
+    Fail-open: the artifact must never break the brief."""
+    try:
+        import json as _j
+        import os as _os
+        target_dir = _os.path.dirname(_anchors_path(for_write=True)) or "/tmp"
+        clean = [{k: v for k, v in o.items() if not k.startswith("_")} for o in rows]
+        payload = {
+            "obligations_version": 2,
+            "render_path_tokens": sorted(gold_path_tokens),
+            "clauses": clean,
+        }
+        with open(_os.path.join(target_dir, "gt_obligations_v2.json"), "w",
+                  encoding="utf-8") as f:
+            _j.dump(payload, f)
+        md = ["# GT obligations checklist — every requirement extracted from the issue",
+              "# Verify each before submitting; tick what you have EXERCISED with a test.",
+              ""]
+        for o in clean:
+            verb = " ".join((o.get("verbatim_text") or "").split())
+            md.append(
+                f"- [ ] ({o.get('clause_id','')}, {o.get('kind','')}, "
+                f"{o.get('modality','')}) \"{verb}\""
+            )
+        with open(_os.path.join(target_dir, "gt_obligations.md"), "w",
+                  encoding="utf-8") as f:
+            f.write("\n".join(md) + "\n")
+    except Exception:
+        pass
 _F2P_TOKEN_RE = _re.compile(r"\b(?:FAIL_TO_PASS|PASS_TO_PASS|fail_to_pass|pass_to_pass)\b")
 _OBLIG_TEST_NAME_RE = _re.compile(r"\b(?:test_[A-Za-z0-9_]+|[A-Za-z0-9_]+_test)\b")
 
@@ -1905,16 +1975,38 @@ def _render_obligations_block(
             _persisted = _obl_data.get("obligations") or []
             if _persisted:
                 from groundtruth.pretask.spec import Obligation, IssueSpec
-                _obls = [Obligation(
-                    verbatim_text=o.get("verbatim_text", ""),
-                    kind=o.get("kind", "behavior"),
-                ) for o in _persisted if isinstance(o, dict) and o.get("verbatim_text")]
+                if _obligations_v2_on():
+                    # v2 bridge: carry ALL fields (the v1 two-field reconstruction
+                    # silently dropped symbols/keywords — weakening the symbol leg
+                    # of the leak check). Flag-gated so flag-off bytes are stable.
+                    _obls = [Obligation(
+                        verbatim_text=o.get("verbatim_text", ""),
+                        kind=o.get("kind", "behavior"),
+                        symbols=frozenset(o.get("symbols") or ()),
+                        keywords=frozenset(o.get("keywords") or ()),
+                        checkable_forms=frozenset(o.get("checkable_forms") or ()),
+                        clause_id=o.get("clause_id", ""),
+                        modality=o.get("modality", ""),
+                        modality_strength=int(o.get("modality_strength") or 0),
+                        subject_symbols=frozenset(o.get("subject_symbols") or ()),
+                        parent_id=o.get("parent_id", ""),
+                        part_index=int(o.get("part_index") or 0),
+                    ) for o in _persisted if isinstance(o, dict) and o.get("verbatim_text")]
+                else:
+                    _obls = [Obligation(
+                        verbatim_text=o.get("verbatim_text", ""),
+                        kind=o.get("kind", "behavior"),
+                    ) for o in _persisted if isinstance(o, dict) and o.get("verbatim_text")]
                 if _obls:
                     spec = IssueSpec(obligations=_obls)
         except Exception:
             pass
         if spec is None:
-            spec = _extract_spec(issue_text)
+            if _obligations_v2_on():
+                from groundtruth.pretask.spec import extract_spec_v2 as _extract_spec_v2
+                spec = _extract_spec_v2(issue_text)
+            else:
+                spec = _extract_spec(issue_text)
     except Exception:
         return []
     if not spec.obligations:
@@ -1955,6 +2047,48 @@ def _render_obligations_block(
         fn_tokens |= _id_tokens(str(s))
     if not fn_tokens:
         return []  # no anchor to gate against — stay quiet
+
+    if _obligations_v2_on():
+        # ── GT_OBLIGATIONS_V2 T1 render ──────────────────────────────────────
+        # leak screen FIRST (drop whole), then T2 artifact (FULL clean list —
+        # relevance gate deliberately NOT applied to the artifact: every row is
+        # issue-verbatim text the agent already possesses; the anti-launder rule
+        # protects the brief's DOSE, not secrecy), then gate + order + dynamic K.
+        rows: list[dict] = []
+        for _di, o in enumerate(spec.to_serializable(version=2)):
+            _verb = (o.get("verbatim_text") or "").strip() if isinstance(o, dict) else ""
+            if not _verb:
+                continue
+            if _obligation_is_leaky(_verb, o.get("symbols", []), gold_path_tokens):
+                continue
+            o["_doc_index"] = _di
+            rows.append(o)
+        _write_obligations_v2_artifact(rows, gold_path_tokens)
+        gated = [
+            o for o in rows
+            if _rel_gate((o.get("verbatim_text") or ""), None, fn_tokens)
+        ]
+        gated.sort(key=_v2_order_key)
+        k = _dynamic_obligation_budget(len(rows))
+        rendered_v2: list[str] = []
+        seen_v2: set[str] = set()
+        for o in gated:
+            if len(rendered_v2) >= k:
+                break
+            full = " ".join((o.get("verbatim_text") or "").split())
+            compact = full[:_OBLIGATION_LINE_CHARS].strip()
+            if len(full) > _OBLIGATION_LINE_CHARS:
+                compact += "…"
+            key = compact.lower()
+            if not compact or key in seen_v2:
+                continue
+            seen_v2.add(key)
+            kind = o.get("kind", "")
+            tag = f"[{kind}] " if kind else ""
+            rendered_v2.append(cap(f"  - {tag}{compact}"))
+        if not rendered_v2:
+            return []
+        return ["", "<gt-obligations>"] + rendered_v2 + ["</gt-obligations>"]
 
     rendered: list[str] = []
     seen: set[str] = set()
@@ -2884,7 +3018,7 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
     _ledger = os.environ.get("GT_CONSENSUS_LEDGER", "") == "1"
     _signals_map = getattr(loc, "signals_by_file", None) or {}
 
-    def _sig_receipt(fp: str, c=None) -> str:
+    def _sig_receipt(fp: str) -> str:
         # Which of the 3 independent rankers voted this file into its own top-3 —
         # the RECEIPTS behind the agreement COUNT. Leg names only ({grep,structural,
         # semantic}), never a test name / path / assertion, so this adds ZERO leak
@@ -2901,31 +3035,9 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
         # agreement the receipt denies. Rendered from the SAME filtered basis the gate uses.
         legs = [l for l in _signals_map.get(_gl_normalize(fp), [])
                 if l in ("grep", "content", "structural", "semantic")]
-        if not legs:
-            return "0/3 signals agree"
-        n = len(legs)
-        # IMPLEMENTATION-ROLE GATE (stratum-B confident-wrong fix). Multi-ranker
-        # agreement (>=2 legs) reads as "signals agree" — a strong, near-directive
-        # cue at the FIRST block the agent sees. But grep (lexical) + semantic
-        # (name+signature vocab) + structural (ranker top-3 = graph-centrality
-        # membership, NOT an edge from the failing behaviour) can ALL fire on a file
-        # that merely matches the issue VOCABULARY (c3749: scripts/update_schemas_
-        # manually.py earned 3/3 while the ForEach transform lived in
-        # _language_extensions.py). "N/3 signals agree" is only honest when the graph
-        # PROVES this file owns or participates in the issue behaviour — a def-site of
-        # an issue anchor, or a verified issue-anchored structural edge (`c` carries the
-        # witnesses). Absent that, the agreement is VOCABULARY overlap, so it renders as
-        # a hedged CANDIDATE, never a proven edit target — the agent still sees the file
-        # + its legs, but is not steered to it. A single leg (n<=1) is already visibly
-        # weak; left byte-identical. Legs are the SAME whitelisted literals (zero new
-        # leak surface); `c is None` (caller passed no candidate) also falls through to
-        # the prior string (byte-identical). ANCHOR-LESS issue (true stratum B, no file
-        # has anchor evidence) => nobody is impl-role backed => every multi-leg file
-        # hedges, which is exactly right: none is a proven target.
-        if n >= 2 and c is not None and not _impl_role_backed(c):
-            return (f"{n}/3 {'/'.join(legs)} agreement — implementation-role evidence "
-                    f"weak; treat as candidate, not edit target")
-        return f"{n}/3 signals agree ({', '.join(legs)})"
+        if legs:
+            return f"{len(legs)}/3 signals agree ({', '.join(legs)})"
+        return "0/3 signals agree"
 
     def _issue_edges(c):
         # verified, non-DEFINES (structural edge) witnesses descended from an issue anchor
@@ -3001,17 +3113,6 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
             if getattr(w, "direction", "") == "defines_anchor" and a and a not in fs:
                 fs.append(a)
         return fs
-
-    def _impl_role_backed(c) -> bool:
-        """Implementation-role evidence for candidate `c`: the graph PROVES it owns or
-        participates in the issue behaviour, not merely matches its vocabulary. True iff
-        `c` DEFINES an issue-anchor symbol (def-site / owner of the named behaviour) OR
-        carries a verified issue-anchored structural edge (call path from the anchor).
-        Reads ONLY the witnesses already on the candidate — deterministic, no DB query,
-        no leak surface. This is the discriminator between a lexical/semantic vocabulary
-        match (no anchor def, no anchor edge) and a file the graph ties to the failing
-        behaviour; it gates the "N/3 signals agree" confidence phrasing in `_sig_receipt`."""
-        return bool(_defines_funcs(c) or _issue_edges(c))
 
     # ---- MULTI-SIGNAL AGREEMENT (the grep-floor build) ----
     # The tier now means "how many of the 3 independent rankers (grep / semantic /
@@ -3092,7 +3193,7 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
             # the guard line reads as a receipt, not a directive. Flag off => the EXACT
             # prior two strings (byte-identical). SAME target, SAME `primary_path`.
             if _ledger:
-                _high_head = f"{tgt.file_path} :: {func} — {_sig_receipt(tgt.file_path, tgt)}"
+                _high_head = f"{tgt.file_path} :: {func} — {_sig_receipt(tgt.file_path)}"
                 _guard_label = "guard/return"
             else:
                 _high_head = f"Edit target: {tgt.file_path} :: {func}"
@@ -3144,7 +3245,7 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
         for i, c in enumerate(shown, 1):
             # FORM-only (GT_CONSENSUS_LEDGER): append the per-file N/3 receipt. Flag
             # off => "" => byte-identical to today. SAME lines, SAME order.
-            _rc = f"  — {_sig_receipt(c.file_path, c)}" if _ledger else ""
+            _rc = f"  — {_sig_receipt(c.file_path)}" if _ledger else ""
             out.append(f"  {i}. {c.file_path}{_rc}")
             _wt = _resolved_witness_tail(graph_db, c.file_path)
             if _wt:
@@ -3173,7 +3274,7 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
         tail = f" — {', '.join(fs[:3])}" if fs else ""
         # FORM-only (GT_CONSENSUS_LEDGER): lead the line with the per-file N/3 receipt,
         # then the candidate funcs. Flag off => "" => byte-identical to today.
-        _rc = f" — {_sig_receipt(c.file_path, c)}" if _ledger else ""
+        _rc = f" — {_sig_receipt(c.file_path)}" if _ledger else ""
         out.append(f"  {i}. {c.file_path}{_rc}{tail}")
         # Surface the RESOLVED call-edge fact (already on disk) next to the
         # candidate so a confirming edge reaches the iter-0 header — the audited
@@ -3810,9 +3911,14 @@ def generate_v1r_brief(
             # KEEPS async/await/returns the anchor extractor drops). Deterministic,
             # no graph dependency, correct-or-quiet (empty list on empty issue).
             try:
-                from groundtruth.pretask.spec import extract_spec as _extract_spec
-                _spec = _extract_spec(issue_text)
-                _obligations = _spec.to_serializable()
+                if _obligations_v2_on():
+                    from groundtruth.pretask.spec import extract_spec_v2 as _extract_spec
+                    _spec = _extract_spec(issue_text)
+                    _obligations = _spec.to_serializable(version=2)
+                else:
+                    from groundtruth.pretask.spec import extract_spec as _extract_spec
+                    _spec = _extract_spec(issue_text)
+                    _obligations = _spec.to_serializable()
             except Exception:
                 _obligations = []
             _anch_payload = {
@@ -3825,6 +3931,10 @@ def generate_v1r_brief(
                     getattr(_anchors_obj, "unresolved_code_symbols", set())),
                 "obligations": _obligations,
             }
+            if _obligations_v2_on():
+                # artifact-wins split-brain rule: consumers trust THIS stamp over
+                # their own env, so host and container can never disagree.
+                _anch_payload["obligations_version"] = 2
             # B10 hardening: write to the per-task path, but if that fails (e.g. a
             # misconfigured/absent $GT_CERT_DIR pointing at a nonexistent dir) fall back to
             # the always-writable /tmp so the anchors artifact is never SILENTLY lost.
