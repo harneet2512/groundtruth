@@ -868,6 +868,51 @@ PYEOF
     # shellcheck source=../../artifact_deepswe/gt_integration/gt_ae_block.sh
     source "$REPO_ROOT/artifact_deepswe/gt_integration/gt_ae_block.sh"
 
+    # PARITY (2026-07-08): OFFICIAL containers carry NO GT surfaces — measured firing
+    # delta (baseline agent explored /gt_artifacts + /gt_out "for test hints",
+    # run 28914558732 mobly msg34). Baseline arm ⇒ ZERO GT mounts + ONLY the switch.
+    local -a BOX_AE_ARM=()
+    if [ "${GT_BASELINE:-0}" = "1" ]; then
+      MOUNTS_JSON="[]"
+      BOX_AE_ARM+=(--ae GT_BASELINE="1")
+    else
+      BOX_AE_ARM+=(
+        --ae GT_HOST_GRAPH_DB="${GT_C_ARTIFACTS}/graph.db"
+        --ae GT_CERT_DIR="${GT_C_ARTIFACTS}"
+        --ae GT_HOST_SRC_ROOT="${GT_C_ARTIFACTS}/src"
+        --ae GT_PORTABLE_SUBSTRATE="1"
+        --ae GT_FORBID_PREBUILT_GRAPH="1"
+        --ae GT_PROOF_MODE="${GT_PROOF_MODE:-1}"
+        --ae GT_CONTAINERIZED="1"
+        --ae GT_RUNTIME_STRATEGY="${GT_RUNTIME_STRATEGY:-unified_substrate}"
+        --ae GT_STEP_LIMIT="${GT_STEP_LIMIT:-300}"
+        --ae GT_VERIFICATION_CYCLE_COST="${GT_VERIFICATION_CYCLE_COST:-25}"
+        --ae GT_SELF_VERIFY_ATTEMPTS="${GT_SELF_VERIFY_ATTEMPTS:-0}"
+        --ae GT_BASELINE="${GT_BASELINE:-0}"
+        --ae GT_VERIFY_STRUCTURAL_RISK="${GT_VERIFY_STRUCTURAL_RISK:-0}"
+        --ae GT_DCC="${GT_DCC:-0}"
+        --ae GT_NEG_EVIDENCE="${GT_NEG_EVIDENCE:-0}"
+        --ae GT_TYPEFLOW_FIXPOINT="${GT_TYPEFLOW_FIXPOINT:-0}"
+        --ae GT_FIELD_CANDIDATES="${GT_FIELD_CANDIDATES:-0}"
+        --ae GT_SEM_BODY="${GT_SEM_BODY:-0}"
+        --ae GT_PASSAGE_WIDE="${GT_PASSAGE_WIDE:-0}"
+        --ae GT_CONTENT_LEG="${GT_CONTENT_LEG:-1}"
+        --ae GT_POST_SEARCH="${GT_POST_SEARCH:-0}"
+        --ae GT_CONSENSUS_LEDGER="${GT_CONSENSUS_LEDGER:-0}"
+        --ae GT_MOUNT_MODE="1"
+      )
+      BOX_AE_ARM+=("${GT_AE_ARGS[@]}")
+      BOX_AE_ARM+=(
+        --ae GT_ESC_ADV_TCOV="${GT_ESC_ADV_TCOV:-}"
+        --ae GT_ESC_ADV_B="${GT_ESC_ADV_B:-}"
+        --ae GT_ESC_URG_TCOV="${GT_ESC_URG_TCOV:-}"
+        --ae GT_ESC_URG_B="${GT_ESC_URG_B:-}"
+        --ae GT_ESC_GATE_TCOV="${GT_ESC_GATE_TCOV:-}"
+        --ae GT_ESC_GATE_KV="${GT_ESC_GATE_KV:-}"
+        --ae GT_INDEX_BIN=/opt/gt/gt-index --ae GT_L6_FRESH=1
+      )
+    fi
+
     echo "=== DeepSWE GT agent: $id (model $MODEL, config $(basename "$PIER_CONFIG")) ===" | tee -a "$trial_log"
     echo "HOST  GT_CERT_DIR=$GT_CERT_DIR  GT_HOST_GRAPH_DB=$GT_HOST_GRAPH_DB" | tee -a "$trial_log"
     echo "CONTAINER mount: ${art_dir} -> ${GT_C_ARTIFACTS} (ro)" | tee -a "$trial_log"
@@ -886,37 +931,7 @@ PYEOF
         --env docker \
         -y \
         --mounts-json "${MOUNTS_JSON}" \
-        --ae GT_HOST_GRAPH_DB="${GT_C_ARTIFACTS}/graph.db" \
-        --ae GT_CERT_DIR="${GT_C_ARTIFACTS}" \
-        --ae GT_HOST_SRC_ROOT="${GT_C_ARTIFACTS}/src" \
-        --ae GT_PORTABLE_SUBSTRATE="1" \
-        --ae GT_FORBID_PREBUILT_GRAPH="1" \
-        --ae GT_PROOF_MODE="${GT_PROOF_MODE:-1}" \
-        --ae GT_CONTAINERIZED="1" \
-        --ae GT_RUNTIME_STRATEGY="${GT_RUNTIME_STRATEGY:-unified_substrate}" \
-        --ae GT_STEP_LIMIT="${GT_STEP_LIMIT:-300}" \
-        --ae GT_VERIFICATION_CYCLE_COST="${GT_VERIFICATION_CYCLE_COST:-25}" \
-        --ae GT_SELF_VERIFY_ATTEMPTS="${GT_SELF_VERIFY_ATTEMPTS:-0}" \
-        --ae GT_BASELINE="${GT_BASELINE:-0}" \
-        --ae GT_VERIFY_STRUCTURAL_RISK="${GT_VERIFY_STRUCTURAL_RISK:-0}" \
-        --ae GT_DCC="${GT_DCC:-0}" \
-        --ae GT_NEG_EVIDENCE="${GT_NEG_EVIDENCE:-0}" \
-        --ae GT_TYPEFLOW_FIXPOINT="${GT_TYPEFLOW_FIXPOINT:-0}" \
-        --ae GT_FIELD_CANDIDATES="${GT_FIELD_CANDIDATES:-0}" \
-        --ae GT_SEM_BODY="${GT_SEM_BODY:-0}" \
-        --ae GT_PASSAGE_WIDE="${GT_PASSAGE_WIDE:-0}" \
-        --ae GT_CONTENT_LEG="${GT_CONTENT_LEG:-1}" \
-        --ae GT_POST_SEARCH="${GT_POST_SEARCH:-0}" \
-        --ae GT_CONSENSUS_LEDGER="${GT_CONSENSUS_LEDGER:-0}" \
-        --ae GT_MOUNT_MODE="1" \
-        "${GT_AE_ARGS[@]}" \
-        --ae GT_ESC_ADV_TCOV="${GT_ESC_ADV_TCOV:-}" \
-        --ae GT_ESC_ADV_B="${GT_ESC_ADV_B:-}" \
-        --ae GT_ESC_URG_TCOV="${GT_ESC_URG_TCOV:-}" \
-        --ae GT_ESC_URG_B="${GT_ESC_URG_B:-}" \
-        --ae GT_ESC_GATE_TCOV="${GT_ESC_GATE_TCOV:-}" \
-        --ae GT_ESC_GATE_KV="${GT_ESC_GATE_KV:-}" \
-        --ae GT_INDEX_BIN=/opt/gt/gt-index --ae GT_L6_FRESH=1 \
+        "${BOX_AE_ARM[@]}" \
         ${AE_EXTRA[@]+"${AE_EXTRA[@]}"} \
         --ak version=2.2.8 \
         --ak config_file="$PIER_CONFIG" \

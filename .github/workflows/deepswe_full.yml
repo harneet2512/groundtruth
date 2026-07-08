@@ -1006,6 +1006,54 @@ jobs:
           # L6-FRESH activation: point the in-container reindex at the staged binary and
           GT_AE_ARGS+=(--ae "GT_INDEX_BIN=/opt/gt/gt-index" --ae "GT_L6_FRESH=1")
 
+          # PARITY (2026-07-08): the OFFICIAL container carries NO GT surfaces. Measured
+          # firing delta, not cosmetic: the baseline agent explored /gt_artifacts + /gt_out
+          # "for test hints" (run 28914558732, mobly msg34). Baseline arm ⇒ ZERO GT mounts,
+          # ONLY the GT_BASELINE switch; gt arm ⇒ the full list, byte-identical to before.
+          GT_AE_ARM=()
+          if [ "${GT_BASELINE:-0}" = "1" ]; then
+            MOUNTS_JSON="[]"
+            GT_AE_ARM+=(--ae GT_BASELINE="1")
+          else
+            GT_AE_ARM+=(
+              --ae GT_HOST_GRAPH_DB="${GT_C_ARTIFACTS}/graph.db"
+              --ae GT_CERT_DIR="${GT_C_ARTIFACTS}"
+              --ae GT_HOST_SRC_ROOT="${GT_C_ARTIFACTS}/src"
+              --ae GT_PORTABLE_SUBSTRATE="1"
+              --ae GT_FORBID_PREBUILT_GRAPH="1"
+              --ae GT_PROOF_MODE="${GT_PROOF_MODE:-1}"
+              --ae GT_CONTAINERIZED="1"
+              --ae GT_RUNTIME_STRATEGY="${GT_RUNTIME_STRATEGY:-unified_substrate}"
+              --ae GT_STEP_LIMIT="${GT_STEP_LIMIT:-}"
+              --ae GT_VERIFICATION_CYCLE_COST="${GT_VERIFICATION_CYCLE_COST:-}"
+              --ae GT_SELF_VERIFY_ATTEMPTS="${GT_SELF_VERIFY_ATTEMPTS:-}"
+              --ae GT_BASELINE="${GT_BASELINE:-0}"
+              --ae GT_VERIFY_STRUCTURAL_RISK="${GT_VERIFY_STRUCTURAL_RISK:-0}"
+              --ae GT_DCC="${GT_DCC:-0}"
+              --ae GT_NEG_EVIDENCE="${GT_NEG_EVIDENCE:-0}"
+              --ae GT_TYPEFLOW_FIXPOINT="${GT_TYPEFLOW_FIXPOINT:-0}"
+              --ae GT_FIELD_CANDIDATES="${GT_FIELD_CANDIDATES:-0}"
+              --ae GT_SEM_BODY="${GT_SEM_BODY:-0}"
+              --ae GT_PASSAGE_WIDE="${GT_PASSAGE_WIDE:-0}"
+              --ae GT_CONTENT_LEG="${GT_CONTENT_LEG:-1}"
+              --ae GT_POST_SEARCH="${GT_POST_SEARCH:-0}"
+              --ae GT_CONSENSUS_LEDGER="${GT_CONSENSUS_LEDGER:-0}"
+              --ae GT_MOUNT_MODE="1"
+            )
+            GT_AE_ARM+=("${GT_AE_ARGS[@]}")
+            GT_AE_ARM+=(
+              --ae GT_ESC_ADV_TCOV="${GT_ESC_ADV_TCOV:-}"
+              --ae GT_ESC_ADV_B="${GT_ESC_ADV_B:-}"
+              --ae GT_ESC_URG_TCOV="${GT_ESC_URG_TCOV:-}"
+              --ae GT_ESC_URG_B="${GT_ESC_URG_B:-}"
+              --ae GT_ESC_GATE_TCOV="${GT_ESC_GATE_TCOV:-}"
+              --ae GT_ESC_GATE_KV="${GT_ESC_GATE_KV:-}"
+              --ae GT_ORACLE_EVENTS="${GT_C_OUT}/gt_oracle_events.jsonl"
+              --ae GT_RUNTIME_LEDGER="${GT_C_OUT}/gt_runtime_ledger.jsonl"
+              --ae GT_HOOK_FIRE_COUNTS="${GT_C_OUT}/gt_hook_fire_counts.json"
+            )
+          fi
+
           # Forward the SUBSTRATE-CONSUME env into the container, pointing at /gt_artifacts.
           set +e
           set -o pipefail
@@ -1102,39 +1150,7 @@ jobs:
             --env docker \
             -y \
             --mounts-json "${MOUNTS_JSON}" \
-            --ae GT_HOST_GRAPH_DB="${GT_C_ARTIFACTS}/graph.db" \
-            --ae GT_CERT_DIR="${GT_C_ARTIFACTS}" \
-            --ae GT_HOST_SRC_ROOT="${GT_C_ARTIFACTS}/src" \
-            --ae GT_PORTABLE_SUBSTRATE="1" \
-            --ae GT_FORBID_PREBUILT_GRAPH="1" \
-            --ae GT_PROOF_MODE="${GT_PROOF_MODE:-1}" \
-            --ae GT_CONTAINERIZED="1" \
-            --ae GT_RUNTIME_STRATEGY="${GT_RUNTIME_STRATEGY:-unified_substrate}" \
-            --ae GT_STEP_LIMIT="${GT_STEP_LIMIT:-}" \
-            --ae GT_VERIFICATION_CYCLE_COST="${GT_VERIFICATION_CYCLE_COST:-}" \
-            --ae GT_SELF_VERIFY_ATTEMPTS="${GT_SELF_VERIFY_ATTEMPTS:-}" \
-            --ae GT_BASELINE="${GT_BASELINE:-0}" \
-            --ae GT_VERIFY_STRUCTURAL_RISK="${GT_VERIFY_STRUCTURAL_RISK:-0}" \
-            --ae GT_DCC="${GT_DCC:-0}" \
-            --ae GT_NEG_EVIDENCE="${GT_NEG_EVIDENCE:-0}" \
-            --ae GT_TYPEFLOW_FIXPOINT="${GT_TYPEFLOW_FIXPOINT:-0}" \
-            --ae GT_FIELD_CANDIDATES="${GT_FIELD_CANDIDATES:-0}" \
-            --ae GT_SEM_BODY="${GT_SEM_BODY:-0}" \
-            --ae GT_PASSAGE_WIDE="${GT_PASSAGE_WIDE:-0}" \
-            --ae GT_CONTENT_LEG="${GT_CONTENT_LEG:-1}" \
-            --ae GT_POST_SEARCH="${GT_POST_SEARCH:-0}" \
-            --ae GT_CONSENSUS_LEDGER="${GT_CONSENSUS_LEDGER:-0}" \
-            --ae GT_MOUNT_MODE="1" \
-            "${GT_AE_ARGS[@]}" \
-            --ae GT_ESC_ADV_TCOV="${GT_ESC_ADV_TCOV:-}" \
-            --ae GT_ESC_ADV_B="${GT_ESC_ADV_B:-}" \
-            --ae GT_ESC_URG_TCOV="${GT_ESC_URG_TCOV:-}" \
-            --ae GT_ESC_URG_B="${GT_ESC_URG_B:-}" \
-            --ae GT_ESC_GATE_TCOV="${GT_ESC_GATE_TCOV:-}" \
-            --ae GT_ESC_GATE_KV="${GT_ESC_GATE_KV:-}" \
-            --ae GT_ORACLE_EVENTS="${GT_C_OUT}/gt_oracle_events.jsonl" \
-            --ae GT_RUNTIME_LEDGER="${GT_C_OUT}/gt_runtime_ledger.jsonl" \
-            --ae GT_HOOK_FIRE_COUNTS="${GT_C_OUT}/gt_hook_fire_counts.json" \
+            "${GT_AE_ARM[@]}" \
             --ak version=2.2.8 \
             --ak config_file=artifact_deepswe/gt_integration/deepswe_v1_parity_mimo.yaml \
             > trial_output.log 2>&1 &
