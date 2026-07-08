@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import sys
 import time
 import threading
 from collections import OrderedDict
@@ -92,30 +91,11 @@ def _passage_wide() -> bool:
     it is honoured; default OFF (correct-or-quiet: any non-truthy value == today)."""
     return os.environ.get("GT_PASSAGE_WIDE", "") not in ("", "0", "false", "no")
 
-
-# C1 auditability (gt_math row 40): the passage window is chosen at ENCODE time (query-time
-# semantic leg), so a single [GT_META] line at the first PASSAGE encode PROVES which window
-# was actually used — not merely "the flag was on". Emitted once per process (stderr ->
-# trial_output.log), greppable by the auditor. Off -> window=128 (byte-identical telemetry).
-_passage_window_emitted = False
-
-
-def _emit_passage_window_once(model: "EmbeddingModel", window: int) -> None:
-    global _passage_window_emitted
-    if _passage_window_emitted:
-        return
-    _passage_window_emitted = True
-    try:
-        wide = 1 if (window == _PASSAGE_TOKEN_WINDOW_WIDE) else 0
-        e5 = 1 if _is_e5_model(model) else 0
-        sys.stderr.write(
-            f"[GT_META] passage_window window={window} wide={wide} "
-            f"flag={1 if _passage_wide() else 0} e5={e5} "
-            f"model={getattr(model, 'model_name', '?')}\n"
-        )
-        sys.stderr.flush()
-    except Exception:
-        pass
+# C1 (gt_math row 40) auditability NOTE: the passage-window [GT_META] witness is emitted from
+# graph_localizer._semantic_score_by_file (the SYNCED pretask module), NOT here — embed.py lives
+# in memory/enrich, which the Live-Lite workflow does NOT copy into the container (only
+# runtime/delivery/pretask are synced), so an emit here would run the baked copy and never fire.
+# The window fns below stay the single source of truth; the synced side reads them.
 
 
 def _encode_batch_size() -> int:
@@ -328,8 +308,6 @@ class EmbeddingModel:
         # flag flipped. Padding tokens are attention-masked, so a wider pad never changes
         # a vector (byte-identical); both are restored to the passage default afterwards.
         _passage_window = _passage_token_window(self)
-        if not is_query:
-            _emit_passage_window_once(self, _passage_window)  # C1 row-40 witness
         _window = _query_token_window(self) if is_query else _passage_window
         with self._lock:
             try:

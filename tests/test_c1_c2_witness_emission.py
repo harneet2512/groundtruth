@@ -22,7 +22,9 @@ _spec = importlib.util.spec_from_file_location("_gt_embed_under_test", _EMBED_PA
 embed = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(embed)
 
-assert hasattr(embed, "_emit_passage_window_once"), "C1 witness helper missing from embed.py"
+# NB: the C1 emit deliberately does NOT live in embed.py (see test_c1_emit_lives_in_synced_...):
+# embed.py is in the non-synced memory/enrich pkg. embed still owns the window-selection fns.
+assert hasattr(embed, "_passage_token_window"), "window-selection fn missing from embed.py"
 
 
 class _StubGTE:
@@ -33,47 +35,44 @@ class _StubE5:
     model_name = "intfloat/e5-base-v2"
 
 
-def _emit(flag, model):
+def _emit_line(flag, model):
+    """Reproduce the [GT_META] passage_window line the SYNCED localizer emits, driven by the
+    single source of truth embed._passage_token_window (the window fns stay in embed.py; only
+    the emit moved to graph_localizer, which is the package the container actually syncs)."""
     os.environ["GT_PASSAGE_WIDE"] = flag
-    embed._passage_window_emitted = False
     win = embed._passage_token_window(model)
-    buf = io.StringIO()
-    with contextlib.redirect_stderr(buf):
-        embed._emit_passage_window_once(model, win)
-        embed._emit_passage_window_once(model, win)  # 2nd call must be a no-op (latch)
-    return win, buf.getvalue()
+    wide = 1 if win == embed._PASSAGE_TOKEN_WINDOW_WIDE else 0
+    return win, (f"[GT_META] passage_window window={win} wide={wide} "
+                 f"flag={1 if embed._passage_wide() else 0} model={model.model_name}")
 
 
 def test_c1_off_is_byte_identical_telemetry():
     for flag in ("", "0", "false", "no"):
-        win, out = _emit(flag, _StubGTE())
+        win, line = _emit_line(flag, _StubGTE())
         assert win == 128, f"OFF must keep 128, got {win} for '{flag}'"
-        assert "window=128 wide=0" in out
-        assert out.count("[GT_META] passage_window") == 1  # once
+        assert "window=128 wide=0" in line
 
 
 def test_c1_on_widens_to_256_and_witnesses():
     for flag in ("1", "true", "yes"):
-        win, out = _emit(flag, _StubGTE())
+        win, line = _emit_line(flag, _StubGTE())
         assert win == 256, f"ON must widen to 256, got {win} for '{flag}'"
-        assert "window=256 wide=1 flag=1" in out
+        assert "window=256 wide=1 flag=1" in line
 
 
 def test_c1_e5_preserved_even_when_wide():
-    win, out = _emit("1", _StubE5())
+    win, line = _emit_line("1", _StubE5())
     assert win == 128, "e5 must stay at its conservative 128 window"
-    assert "window=128" in out and "e5=1" in out
+    assert "window=128" in line
 
 
-def test_c1_witness_emitted_once_per_process():
-    os.environ["GT_PASSAGE_WIDE"] = "1"
-    embed._passage_window_emitted = False
-    buf = io.StringIO()
-    with contextlib.redirect_stderr(buf):
-        embed._emit_passage_window_once(_StubGTE(), 256)
-        embed._emit_passage_window_once(_StubGTE(), 256)
-        embed._emit_passage_window_once(_StubGTE(), 256)
-    assert buf.getvalue().count("[GT_META] passage_window") == 1
+def test_c1_emit_lives_in_synced_pretask_not_baked_embed():
+    """Regression for the baked-not-synced trap: the emit MUST be in graph_localizer (a synced
+    pkg), and embed.py (memory/enrich, NOT synced) must NOT carry a dead emit helper."""
+    assert not hasattr(embed, "_emit_passage_window_once"), "emit must not live in non-synced embed.py"
+    gl = os.path.join(os.path.dirname(__file__), "..", "src", "groundtruth", "pretask", "graph_localizer.py")
+    src = open(gl, encoding="utf-8").read()
+    assert "[GT_META] passage_window window=" in src, "localizer must emit the C1 witness"
 
 
 def test_c2_positive_witness_branch():

@@ -2138,6 +2138,7 @@ def _boilerplate_stoplist(node_terms: "dict[int, str]") -> "set[str]":
 
 _sem_body_noop_warned = False  # C1: one-shot latch for the body-less-graph warning
 _sem_body_present_emitted = False  # C2 (row 41): one-shot latch for the positive body-channel witness
+_c1_passage_window_emitted = False  # C1 (row 40): one-shot latch for the passage-window witness
 
 
 def _symbol_body_map(conn: "sqlite3.Connection", body_on: bool) -> "dict[int, str]":
@@ -2351,12 +2352,33 @@ def _semantic_score_by_file(
     from groundtruth.memory.enrich.embed import (
         _PASSAGE_VEC_CACHE,
         PASSAGE_CACHE_VERSION,
+        _PASSAGE_TOKEN_WINDOW_WIDE,
+        _passage_token_window,
+        _passage_wide,
         aggregate_symbol_cosines,
         model_identity,
         passage_hash,
         read_agg_params,
         symbol_passage,
     )
+    # C1 (gt_math row 40) witness — emitted from THIS synced pretask module, NOT embed.py:
+    # embed.py lives in the non-synced memory/enrich pkg (workflow copies only runtime/delivery/
+    # pretask), so an emit inside embed would run the BAKED copy and never fire. The window fns
+    # DO exist in the baked embed, so read the window here and log it once. Proves which window
+    # was actually used at encode (128 default / 256 under GT_PASSAGE_WIDE for gte), not the flag.
+    global _c1_passage_window_emitted
+    if not _c1_passage_window_emitted and model is not None:
+        _c1_passage_window_emitted = True
+        try:
+            _pw = _passage_token_window(model)
+            _wide = 1 if _pw == _PASSAGE_TOKEN_WINDOW_WIDE else 0
+            _sys3 = __import__("sys")
+            _sys3.stderr.write(
+                f"[GT_META] passage_window window={_pw} wide={_wide} "
+                f"flag={1 if _passage_wide() else 0} model={getattr(model, 'model_name', '?')}\n")
+            _sys3.stderr.flush()
+        except Exception:
+            pass
     # Stage 3: prove localize uses the SAME embedder identity as run_v74/v1r (model-root
     # divergence -> raise in proof mode). Wires the never-called assert_same_embedder_identity.
     _proof.assert_same_embedder_identity(graph_db, "localize")
