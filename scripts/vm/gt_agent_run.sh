@@ -18,7 +18,7 @@
 #   (c) `pier run` with the EXACT --agent-import-path / --ak config_file / --ae env
 #       list / --mounts-json from deepswe_full.yml (byte-mirrored; config file
 #       selectable via PIER_CONFIG so the gemini/deepseek variants swap cleanly).
-#   (d) `timeout 5400` per task (the workflow's 90-min bound; TASK_TIMEOUT_S env).
+#   (d) `timeout 21000` per task (== the workflow's 350-min job bound; TASK_TIMEOUT_S env).
 #   (e) the workflow's witness-verify greps (DeepSweAdapterError / PIER rc /
 #       error=DEEPSWE_ADAPTER_FAIL / gt_prebuilt_active=true /
 #       hook_graph_hash_matches_post_lsp=False) — classified, never silent.
@@ -71,7 +71,7 @@
 #   GHCR_OWNER           default: harneet2512 (deepswe_full.yml's assets_repo owner)
 #   MAX_TASKS            optional truncation ('' = all)
 #   RETRY_FAILED         1 = re-run tasks whose existing row.json is a classified failure
-#   TASK_TIMEOUT_S       default 5400 — per-task pier-run bound (workflow: 90 min job)
+#   TASK_TIMEOUT_S       default 21000 — per-task pier-run bound (== workflow 350-min job)
 #   DISK_MIN_GB          default 25; DISK_WAIT_MAX_S default 1800 (same disk guard)
 #   GT_GIT_COMMIT        optional provenance sha (default: git rev-parse HEAD)
 #   SKIP_HOST_PREFLIGHT  1 = skip pier/GT-import install checks (DRY-RUN TESTING ONLY)
@@ -104,7 +104,21 @@ REUSE_PROOF_DIR="${REUSE_PROOF_DIR:-}"
 GHCR_OWNER="${GHCR_OWNER:-harneet2512}"
 MAX_TASKS="${MAX_TASKS:-}"
 RETRY_FAILED="${RETRY_FAILED:-0}"
-TASK_TIMEOUT_S="${TASK_TIMEOUT_S:-5400}"
+# PARITY R3 (2026-07-08): master switches — byte-mirror of deepswe_full.yml:143-158.
+# One export on the box == one dispatch input on GHA; the individual GT_* vars below
+# feed BOTH the gt-run-proof stage (brief content) and the pier --ae list (runtime).
+if [ "${DEPTH_FLAGS:-0}" = "1" ]; then
+  export GT_NEG_EVIDENCE=1 GT_TYPEFLOW_FIXPOINT=1 GT_FIELD_CANDIDATES=1 \
+         GT_SEM_BODY=1 GT_PASSAGE_WIDE=1 GT_DCC=1
+fi
+if [ "${COOPERATIVE_FLAGS:-0}" = "1" ]; then
+  export GT_POST_SEARCH=1 GT_CONSENSUS_LEDGER=1
+fi
+# PARITY R2 (2026-07-08): 21000s (350 min) == deepswe_full.yml's trial job timeout-minutes.
+# The old 5400 (90 min) bound the box while GHA allowed 350 min — with the uncapped parity
+# config (~268-step avg runs) the box killed runs GHA would finish, making the task
+# partition a treatment variable. Time is a runaway backstop, never the agent budget.
+TASK_TIMEOUT_S="${TASK_TIMEOUT_S:-21000}"
 DISK_MIN_GB="${DISK_MIN_GB:-25}"
 DISK_WAIT_MAX_S="${DISK_WAIT_MAX_S:-1800}"
 PARALLEL="${PARALLEL:-8}"
@@ -736,10 +750,18 @@ PYEOF
         -e GT_PROOF_MODE=1 -e GT_CONTAINERIZED=1 -e GT_RUNTIME_STRATEGY=unified_substrate \
         -e GT_REQUIRE_FTS5=1 -e GT_REQUIRE_EMBEDDER=1 -e GT_FORCE_ONNX_EMBEDDER=1 \
         -e GT_REQUIRE_LSP=1 -e GT_REQUIRE_FULL_STACK=1 -e GT_ISSUE_FILE=/work_issue.txt \
+        -e HF_DATASETS_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 -e HF_HUB_OFFLINE=1 \
         -e GT_GATES_DELIVER_ALWAYS="${GT_GATES_DELIVER_ALWAYS:-0}" \
         -e GT_GIT_COMMIT="$GT_GIT_COMMIT" \
         -e GT_SUBSTRATE_DIGEST="$GT_SUBSTRATE_DIGEST" \
         -e GT_TASK_REPO_COMMIT="$TASK_REPO_COMMIT" \
+        -e GT_SEM_BODY="${GT_SEM_BODY:-0}" \
+        -e GT_PASSAGE_WIDE="${GT_PASSAGE_WIDE:-0}" \
+        -e GT_NEG_EVIDENCE="${GT_NEG_EVIDENCE:-0}" \
+        -e GT_TYPEFLOW_FIXPOINT="${GT_TYPEFLOW_FIXPOINT:-0}" \
+        -e GT_FIELD_CANDIDATES="${GT_FIELD_CANDIDATES:-0}" \
+        -e GT_CONTENT_LEG="${GT_CONTENT_LEG:-1}" \
+        -e GT_CONSENSUS_LEDGER="${GT_CONSENSUS_LEDGER:-0}" \
         "$GT_SUBSTRATE_DIGEST" gt-run-proof --source-root /work --out /gt_artifacts \
         > "$task_dir/proof_run.log" 2>&1
     RC=$?
@@ -782,7 +804,42 @@ PYEOF
     # CONTAINER mount + env: the substrate dir -> /gt_artifacts READ-ONLY (the ONE
     # graph; ro => no divergent reindex). JSON is the pier --mounts-json contract.
     local GT_C_ARTIFACTS=/gt_artifacts
-    local MOUNTS_JSON="[{\"type\":\"bind\",\"source\":\"${art_dir}\",\"target\":\"${GT_C_ARTIFACTS}\",\"read_only\":true}"
+
+    # PARITY R4/R12 (2026-07-08): byte-mirror deepswe_full.yml:958-995 — /opt/gt mount-mode
+    # staging (replaces the slow b64 inject), /gt_out writable telemetry mount, and the
+    # L6-fresh gt-index binary. Same file set, same mount targets, same fallback semantics.
+    local HOST_GT_INJECT=/tmp/gt_inject/opt/gt
+    mkdir -p "$HOST_GT_INJECT/groundtruth"
+    cp -f "$REPO_ROOT/artifact_deepswe/gt_mini_patch.py" "$HOST_GT_INJECT/"
+    local _gtf
+    for _gtf in gt_hook.py gt_oracle.py gt_oracle_sense.py phase_policy.py; do
+      cp -f "$REPO_ROOT/artifact_deepswe/$_gtf" "$HOST_GT_INJECT/" 2>/dev/null || true
+    done
+    local _pkg
+    for _pkg in runtime delivery pretask; do
+      if [ -d "$REPO_ROOT/src/groundtruth/$_pkg" ]; then
+        mkdir -p "$HOST_GT_INJECT/groundtruth/$_pkg"
+        cp -f "$REPO_ROOT/src/groundtruth/$_pkg"/*.py "$HOST_GT_INJECT/groundtruth/$_pkg/" 2>/dev/null || true
+        touch "$HOST_GT_INJECT/groundtruth/$_pkg/__init__.py"
+      fi
+    done
+    touch "$HOST_GT_INJECT/groundtruth/__init__.py"
+    # L6-fresh binary: build once (static musl + FTS5, the deepswe_full.yml recipe); on a
+    # box without go/musl the WARN fallback keeps L6 correct-or-quiet — same as GHA.
+    if [ ! -x "$HOST_GT_INJECT/gt-index" ]; then
+      if command -v musl-gcc >/dev/null 2>&1 && command -v go >/dev/null 2>&1 && [ -d "$REPO_ROOT/gt-index" ]; then
+        (cd "$REPO_ROOT/gt-index" && CGO_ENABLED=1 CC=musl-gcc go build -tags 'netgo,osusergo,sqlite_fts5' \
+           -ldflags='-s -w -extldflags "-static"' -o "$HOST_GT_INJECT/gt-index" ./cmd/gt-index/) \
+          && chmod +x "$HOST_GT_INJECT/gt-index" \
+          || echo "WARN: gt-index musl build failed — L6-fresh reindex falls back (correct-or-quiet)" | tee -a "$trial_log"
+      else
+        echo "WARN: musl-gcc/go/gt-index absent — L6-fresh reindex falls back (correct-or-quiet)" | tee -a "$trial_log"
+      fi
+    fi
+    local HOST_GT_OUT="$task_dir/gt_out"
+    mkdir -p "$HOST_GT_OUT" && chmod 777 "$HOST_GT_OUT"
+
+    local MOUNTS_JSON="[{\"type\":\"bind\",\"source\":\"${art_dir}\",\"target\":\"${GT_C_ARTIFACTS}\",\"read_only\":true},{\"type\":\"bind\",\"source\":\"${HOST_GT_OUT}\",\"target\":\"/gt_out\",\"read_only\":false},{\"type\":\"bind\",\"source\":\"${HOST_GT_INJECT}\",\"target\":\"/opt/gt\",\"read_only\":true}"
     # Vertex auth = forwarded metadata token (NO ADC / metadata / SA-key). Bind-mount
     # the host token DIRECTORY $GT_AUTH_DIR -> /gt_auth READ-ONLY (directory, not file,
     # so the host refresher's atomic token rewrites are visible live in-container), and
@@ -802,6 +859,13 @@ PYEOF
         ;;
     esac
     MOUNTS_JSON+="]"
+
+    # PARITY R4 (2026-07-08): source the SAME canonical --ae block GHA sources
+    # (deepswe_full.yml:999) — oracle two-lane route, structural-risk axis defaults,
+    # /gt_out telemetry sinks. Single source, zero hand-copied drift.
+    export GT_C_OUT=/gt_out
+    # shellcheck source=../../artifact_deepswe/gt_integration/gt_ae_block.sh
+    source "$REPO_ROOT/artifact_deepswe/gt_integration/gt_ae_block.sh"
 
     echo "=== DeepSWE GT agent: $id (model $MODEL, config $(basename "$PIER_CONFIG")) ===" | tee -a "$trial_log"
     echo "HOST  GT_CERT_DIR=$GT_CERT_DIR  GT_HOST_GRAPH_DB=$GT_HOST_GRAPH_DB" | tee -a "$trial_log"
@@ -831,7 +895,7 @@ PYEOF
         --ae GT_RUNTIME_STRATEGY="${GT_RUNTIME_STRATEGY:-unified_substrate}" \
         --ae GT_STEP_LIMIT="${GT_STEP_LIMIT:-300}" \
         --ae GT_VERIFICATION_CYCLE_COST="${GT_VERIFICATION_CYCLE_COST:-25}" \
-        --ae GT_SELF_VERIFY_ATTEMPTS="${GT_SELF_VERIFY_ATTEMPTS:-2}" \
+        --ae GT_SELF_VERIFY_ATTEMPTS="${GT_SELF_VERIFY_ATTEMPTS:-0}" \
         --ae GT_BASELINE="${GT_BASELINE:-0}" \
         --ae GT_VERIFY_STRUCTURAL_RISK="${GT_VERIFY_STRUCTURAL_RISK:-0}" \
         --ae GT_DCC="${GT_DCC:-0}" \
@@ -843,6 +907,15 @@ PYEOF
         --ae GT_CONTENT_LEG="${GT_CONTENT_LEG:-1}" \
         --ae GT_POST_SEARCH="${GT_POST_SEARCH:-0}" \
         --ae GT_CONSENSUS_LEDGER="${GT_CONSENSUS_LEDGER:-0}" \
+        --ae GT_MOUNT_MODE="1" \
+        "${GT_AE_ARGS[@]}" \
+        --ae GT_ESC_ADV_TCOV="${GT_ESC_ADV_TCOV:-}" \
+        --ae GT_ESC_ADV_B="${GT_ESC_ADV_B:-}" \
+        --ae GT_ESC_URG_TCOV="${GT_ESC_URG_TCOV:-}" \
+        --ae GT_ESC_URG_B="${GT_ESC_URG_B:-}" \
+        --ae GT_ESC_GATE_TCOV="${GT_ESC_GATE_TCOV:-}" \
+        --ae GT_ESC_GATE_KV="${GT_ESC_GATE_KV:-}" \
+        --ae GT_INDEX_BIN=/opt/gt/gt-index --ae GT_L6_FRESH=1 \
         ${AE_EXTRA[@]+"${AE_EXTRA[@]}"} \
         --ak version=2.2.8 \
         --ak config_file="$PIER_CONFIG" \

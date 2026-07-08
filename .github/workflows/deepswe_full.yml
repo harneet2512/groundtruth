@@ -204,7 +204,10 @@ env:
   GT_STEP_LIMIT: ${{ inputs.step_limit || '300' }}
   GT_EVAL_CONTAINER_CPUS: ${{ inputs.eval_cpus || '2' }}
   GT_EVAL_CONTAINER_LIVECAP_MB: ${{ inputs.eval_livecap_mb || '' }}
-  GT_SELF_VERIFY_ATTEMPTS: "2"
+  # PARITY R0 (2026-07-08): 0 = official single-attempt semantics (leaderboard = stock
+  # mini-swe-agent, ONE run, no verifier-feedback loop). The 3-attempt retry ring is a GT
+  # harness feature — enable (>0) ONLY in experiments never compared to the leaderboard.
+  GT_SELF_VERIFY_ATTEMPTS: "0"
   GT_VERIFICATION_CYCLE_COST: "25"
   # Model API keys are set ONLY inside the per-model routing branch (Run GT trial
   # step), never at top-level — a top-level key pollutes every model path and causes
