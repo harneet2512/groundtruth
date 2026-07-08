@@ -1044,7 +1044,50 @@ def _artifact_pointer(art_path: str) -> str:
     )
 
 
+def _obligations_v2_artifact_dir() -> str:
+    """Host-side GT_CERT_DIR (where the brief stage persisted the v2 artifacts)."""
+    return os.environ.get("GT_CERT_DIR", "") or "/tmp"
+
+
+def _read_obligations_md() -> str:
+    """GT_OBLIGATIONS_V2 T2: the full checklist rendered at brief time.
+    Artifact-wins activation: non-empty ONLY when the v2 json exists (version 2).
+    Fail-open ('' = feature silently absent)."""
+    try:
+        import json as _j
+        d = _obligations_v2_artifact_dir()
+        with open(os.path.join(d, "gt_obligations_v2.json"), encoding="utf-8") as fh:
+            if _j.load(fh).get("obligations_version") != 2:
+                return ""
+        with open(os.path.join(d, "gt_obligations.md"), encoding="utf-8") as fh:
+            return fh.read()
+    except Exception:  # noqa: BLE001 — survival channel, never breaks a run
+        return ""
+
+
+async def _write_workspace_artifact(
+    rel: str, content: str, environment: "BaseEnvironment",
+    marker: str = "GT_BRIEF_ARTIFACT",
+) -> str | None:
+    """Generalized G1-1 writer: persist ``content`` at ``rel`` (MUST live under
+    ``.groundtruth/`` — the patch-exclude rule keys on that directory) inside the
+    agent's repo working tree. Same base64 / info-exclude / check-ignore
+    fail-closed dance as the original brief artifact. Returns the absolute
+    path on success, else None."""
+    if not content or not rel.startswith(".groundtruth/"):
+        return None
+    return await _write_workspace_artifact_impl(rel, content, environment, marker)
+
+
 async def _write_brief_artifact(brief: str, environment: "BaseEnvironment") -> str | None:
+    """Back-compat wrapper — the brief artifact at ``_GT_ARTIFACT_REL``."""
+    return await _write_workspace_artifact(_GT_ARTIFACT_REL, brief, environment,
+                                           marker="GT_BRIEF_ARTIFACT")
+
+
+async def _write_workspace_artifact_impl(
+    rel: str, brief: str, environment: "BaseEnvironment", marker: str,
+) -> str | None:
     """G1-1: persist the curated brief into the repo working tree at
     ``.groundtruth/BRIEF.md`` so the agent can RE-READ it after context decay — the
     harness-agnostic survival channel (filesystem). Returns the ABSOLUTE artifact path
@@ -1071,7 +1114,6 @@ async def _write_brief_artifact(brief: str, environment: "BaseEnvironment") -> s
         import base64 as _b64
 
         b64 = _b64.b64encode(brief.encode("utf-8")).decode("ascii")
-        rel = _GT_ARTIFACT_REL
         cmd = (
             'ROOT="$(cat /opt/gt/gt_root.txt 2>/dev/null || '
             'git rev-parse --show-toplevel 2>/dev/null || pwd)"; '
@@ -1081,21 +1123,21 @@ async def _write_brief_artifact(brief: str, environment: "BaseEnvironment") -> s
             'if [ -n "$EXCL" ]; then mkdir -p "$(dirname "$EXCL")"; '
             "grep -qxF '.groundtruth/' \"$EXCL\" 2>/dev/null "
             "|| echo '.groundtruth/' >> \"$EXCL\"; fi; "
-            f'if [ -e "$ROOT/{rel}" ]; then echo GT_BRIEF_ARTIFACT_SKIPPED_EXISTS; exit 0; fi; '
+            f'if [ -e "$ROOT/{rel}" ]; then echo {marker}_SKIPPED_EXISTS; exit 0; fi; '
             f'TMP="$ROOT/{rel}.tmp.$$"; mkdir -p "$ROOT/.groundtruth" && '
             f'echo {b64} | base64 -d > "$TMP" && mv -n "$TMP" "$ROOT/{rel}" && '
             # self-verify: inside a work tree but NOT ignored -> remove + fail-closed
             'if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then '
-            f'if git check-ignore -q "{rel}" 2>/dev/null; then echo "GT_BRIEF_ARTIFACT_OK $ROOT"; '
-            f'else rm -f "$ROOT/{rel}" "$TMP"; echo GT_BRIEF_ARTIFACT_FAILED_NOT_IGNORED; fi; '
-            'else echo "GT_BRIEF_ARTIFACT_OK $ROOT"; fi'
+            f'if git check-ignore -q "{rel}" 2>/dev/null; then echo "{marker}_OK $ROOT"; '
+            f'else rm -f "$ROOT/{rel}" "$TMP"; echo {marker}_FAILED_NOT_IGNORED; fi; '
+            f'else echo "{marker}_OK $ROOT"; fi'
         )
         res = await environment.exec(command=cmd, timeout_sec=30)
         out = (getattr(res, "stdout", "") or "")
-        if "GT_BRIEF_ARTIFACT_OK" in out:
+        if f"{marker}_OK" in out:
             root = ""
             for line in out.splitlines():
-                if line.startswith("GT_BRIEF_ARTIFACT_OK"):
+                if line.startswith(f"{marker}_OK"):
                     _p = line.split(None, 1)
                     root = _p[1].strip() if len(_p) > 1 else ""
             art = (root.rstrip("/\\") + "/" + rel) if root else rel
@@ -1730,6 +1772,27 @@ class GTMiniSweAgent(_BASE_AGENT):  # type: ignore[misc]
                 _art = await _write_brief_artifact(brief, environment)
                 if _art:
                     augmented = augmented.rstrip() + "\n" + _artifact_pointer(_art)
+        except Exception:  # noqa: BLE001 -- survival channel must never break run()
+            pass
+
+        # GT_OBLIGATIONS_V2 T2: ship the FULL requirements checklist alongside
+        # the brief (artifact-wins activation — fires only when the brief stage
+        # produced gt_obligations_v2.json). Pointer appended ONLY on a confirmed,
+        # patch-excluded write (correct-or-quiet).
+        try:
+            _obl_md = _read_obligations_md()
+            if _obl_md:
+                _oart = await _write_workspace_artifact(
+                    ".groundtruth/obligations.md", _obl_md, environment,
+                    marker="GT_OBL_ARTIFACT",
+                )
+                if _oart:
+                    augmented = augmented.rstrip() + "\n" + (
+                        f"[GT] Every requirement extracted from the issue is "
+                        f"checklisted at {_oart} (git-ignored). Verify each "
+                        f"against your patch — run one targeted test per "
+                        f"requirement — before you submit. Re-read with:  cat {_oart}"
+                    )
         except Exception:  # noqa: BLE001 -- survival channel must never break run()
             pass
 
