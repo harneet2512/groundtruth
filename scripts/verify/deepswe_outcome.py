@@ -117,7 +117,16 @@ def detect_infra_subtype(jobs: str, trial_log: str = "") -> str | None:
         os.path.join(jobs, "*", "*__*", "agent", "trajectory.json")
     ))
 
-    if not trials and not mini_trajs and not canon_trajs:
+    # Live-Lite (swebench_live_lite_full.yml) writes NO result.json / agent-traj under jobs/; it bridges
+    # the OFFICIAL-eval reward to jobs/*/*__*/verifier/reward.json (the trajectory + eval report live
+    # under trial_results/, not jobs/). A bridged reward == the harness RAN and SCORED the task, so it is
+    # NOT a missing-artifact infra failure — without this, every Live-Lite task mislabels INFRA_MISSING_
+    # ARTIFACT. Real infra (ENOSPC / image-pull / container-swerex crash) is still caught by INFRA_ENOSPC
+    # above + find_infra_markers (log-marker path); this touches neither. DeepSWE has result.json so it
+    # never reaches this guard — unaffected.
+    ll_rewards = sorted(glob.glob(os.path.join(jobs, "*", "*__*", "verifier", "reward.json")))
+
+    if not trials and not mini_trajs and not canon_trajs and not ll_rewards:
         return "INFRA_MISSING_ARTIFACT"
 
     for p in canon_trajs:
