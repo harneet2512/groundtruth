@@ -941,6 +941,28 @@ def aggregate_lsp_verdicts(lang_verdicts: dict, *, require_lsp: bool, any_succes
     return True, failures  # warm-primary WARN or a real success -> live; incidental recorded
 
 
+# Sidecar artifacts the brief-gen step writes to its cwd (/tmp fallback) that must be
+# MIRRORED into out_dir so they cross the cert-dir handoff to the agent. Enumerated so a
+# new sidecar can't be silently forgotten (the 2026-07-08 GT_OBLIGATIONS_V2 witness gap:
+# the T2 files were written but never mirrored, so T2/T3 never reached the agent).
+_CERT_SIDECARS = ("gt_issue_anchors.json", "gt_obligations_v2.json", "gt_obligations.md")
+
+
+def _mirror_cert_sidecars(out_dir: str, src_dir: str = "/tmp") -> list[str]:
+    """Copy each present sidecar from ``src_dir`` into ``out_dir``. Missing source =
+    skip (flag-off / absent = no-op). Returns the basenames actually mirrored."""
+    mirrored: list[str] = []
+    for name in _CERT_SIDECARS:
+        src = os.path.join(src_dir, name)
+        if os.path.exists(src):
+            try:
+                shutil.copy(src, os.path.join(out_dir, name))
+                mirrored.append(name)
+            except OSError:
+                pass
+    return mirrored
+
+
 def emit_brief(out_dir: str, issue_text: str, work: str, graph: str, *, generator=None):
     """Emit the curated brief to <out>/brief.txt — proof artifact #8 (P0.1-c).
 
@@ -1013,11 +1035,7 @@ def emit_brief(out_dir: str, issue_text: str, work: str, graph: str, *, generato
             bf.write(bt)
     except OSError as e:
         return False, f"brief.txt write failed: {e}"
-    if os.path.exists("/tmp/gt_issue_anchors.json"):
-        try:
-            shutil.copy("/tmp/gt_issue_anchors.json", os.path.join(out_dir, "gt_issue_anchors.json"))
-        except OSError:
-            pass
+    _mirror_cert_sidecars(out_dir)
     _sha = result.get("brief_sha256", "")
     _reused = not result.get("generated", True)
     return True, f"{len(bt)} chars sha256={_sha[:12]} reused_gate_brief={_reused}"

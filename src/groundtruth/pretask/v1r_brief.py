@@ -1891,9 +1891,6 @@ def _write_obligations_v2_artifact(rows: list[dict], gold_path_tokens: set[str])
             "render_path_tokens": sorted(gold_path_tokens),
             "clauses": clean,
         }
-        with open(_os.path.join(target_dir, "gt_obligations_v2.json"), "w",
-                  encoding="utf-8") as f:
-            _j.dump(payload, f)
         md = ["# GT obligations checklist — every requirement extracted from the issue",
               "# Verify each before submitting; tick what you have EXERCISED with a test.",
               ""]
@@ -1903,9 +1900,26 @@ def _write_obligations_v2_artifact(rows: list[dict], gold_path_tokens: set[str])
                 f"- [ ] ({o.get('clause_id','')}, {o.get('kind','')}, "
                 f"{o.get('modality','')}) \"{verb}\""
             )
-        with open(_os.path.join(target_dir, "gt_obligations.md"), "w",
-                  encoding="utf-8") as f:
-            f.write("\n".join(md) + "\n")
+        md_text = "\n".join(md) + "\n"
+        # Dual-write target_dir AND /tmp — mirrors the gt_issue_anchors.json persist
+        # resilience (this fn's sibling). The proof harness (gt_run_proof.emit_brief)
+        # mirrors /tmp/gt_obligations_v2.json -> out_dir into the cert-dir handoff, so
+        # writing /tmp is what lets these files reach the AGENT (T2 checklist + T3
+        # activation). Without it they die in the brief-gen subprocess's cwd — the
+        # 2026-07-08 witness gap (run 28975223607: T1 shipped, T2/T3 never activated).
+        _dirs = [target_dir]
+        if "/tmp" not in _dirs:
+            _dirs.append("/tmp")
+        for _d in _dirs:
+            try:
+                with open(_os.path.join(_d, "gt_obligations_v2.json"), "w",
+                          encoding="utf-8") as f:
+                    _j.dump(payload, f)
+                with open(_os.path.join(_d, "gt_obligations.md"), "w",
+                          encoding="utf-8") as f:
+                    f.write(md_text)
+            except OSError:
+                continue
     except Exception:
         pass
 _F2P_TOKEN_RE = _re.compile(r"\b(?:FAIL_TO_PASS|PASS_TO_PASS|fail_to_pass|pass_to_pass)\b")
