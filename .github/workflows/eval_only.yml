@@ -15,7 +15,7 @@ permissions:
 jobs:
   eval:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
 
@@ -48,7 +48,7 @@ jobs:
             --split lite \
             --namespace starryzhang \
             --predictions_path ${{ inputs.predictions_path }} \
-            --max_workers 1 \
+            --max_workers 4 \
             --run_id eval_only \
             2>&1 | tee /tmp/eval.log
 
