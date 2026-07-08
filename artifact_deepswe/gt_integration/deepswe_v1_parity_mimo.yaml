@@ -55,12 +55,13 @@
 # closest public reconstruction of the official serving: first-party weights
 # (served id mimo-v2.5-pro-20260422), native thinking defaults, no fallbacks.
 # Applied to BOTH arms identically (same-experiment-surroundings rule).
-# Mechanism verified: mini-swe-agent 2.2.8 spreads model_kwargs into the
-# completion call (openrouter_model.py:73) -> litellm extra_body passthrough.
+# MECHANISM (corrected 2026-07-08 after run 28921434067 proved extra_body inert):
+# msa 2.2.8 OpenRouterModel is RAW requests.post — model_kwargs spread as TOP-LEVEL
+# JSON body keys (openrouter_model.py:73), NO litellm, NO extra_body concept. So the
+# pin must be `provider` directly. Shape live-verified 3/3 provider=Xiaomi via curl.
 # ═══════════════════════════════════════════════════════════════════════════
 model:
   model_kwargs:
-    extra_body:
-      provider:
-        order: ["Xiaomi"]
-        allow_fallbacks: false
+    provider:
+      order: ["Xiaomi"]
+      allow_fallbacks: false
