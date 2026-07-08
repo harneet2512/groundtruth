@@ -1132,7 +1132,10 @@ jobs:
             fi
             # 1-line predictions.jsonl for this instance
             MODEL_NAME="${{ inputs.baseline == true && format('mini-swe-agent + {0} (baseline)', inputs.model) || format('GroundTruth + mini-swe-agent + {0}', inputs.model) }}"
-            python3 -c "import json,sys; open('/tmp/pred.jsonl','w',encoding='utf-8').write(json.dumps({'instance_id':sys.argv[1],'model_patch':open(sys.argv[2],encoding='utf-8').read(),'model_name_or_path':sys.argv[3]}))" "$TASK_ID" "$PATCH_FILE" "$MODEL_NAME"
+            # build_pred.py DEWRAPS any terminal-wrapped patch (rejoins in-hunk lines that lost
+            # their +/-/space prefix) before writing the pred — the safety net when the clean
+            # git-diff capture above did not win and a wrapped fallback (/tmp/patch.txt / log) was used.
+            python3 scripts/swebench/build_pred.py "$TASK_ID" "$PATCH_FILE" "$MODEL_NAME" /tmp/pred.jsonl
             # WARM IMAGE: tag the agent's pulled image to the harness's expected key so get()-before-pull hits local
             if [ -n "${LL_TASK_IMAGE:-}" ]; then
               BN=$(basename "$LL_TASK_IMAGE"); BN="${BN%%:*}"
