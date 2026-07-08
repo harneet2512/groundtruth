@@ -220,6 +220,13 @@ model:
     max_tokens: 16384
     presence_penalty: 0
     frequency_penalty: 0
+    # LLM REQUEST TIMEOUT (anti-infinite-hang — matches the baseline config). A stalled/dead
+    # connection (bytes stop, no exception) would hang forever; `timeout` bounds each
+    # litellm.completion so a stall raises litellm.Timeout (classified INFRA_MODEL_TIMEOUT,
+    # excluded from the resolved denominator). NOT a retry / NOT a re-roll — fail-fast transport
+    # guard, the ONLY hang protection with num_retries removed. 900s = measured floor (a full
+    # max_tokens turn is <=~820s), so it fires only on a dead stall, never clipping a legit turn.
+    timeout: 900
     extra_body:
       thinking:
         type: disabled
