@@ -104,6 +104,7 @@ REUSE_PROOF_DIR="${REUSE_PROOF_DIR:-}"
 GHCR_OWNER="${GHCR_OWNER:-harneet2512}"
 MAX_TASKS="${MAX_TASKS:-}"
 RETRY_FAILED="${RETRY_FAILED:-0}"
+GT_PIER_VENV="${GT_PIER_VENV:-}"   # set -u guard: optional operator venv, empty = system python
 # PARITY R3 (2026-07-08): master switches — byte-mirror of deepswe_full.yml:143-158.
 # One export on the box == one dispatch input on GHA; the individual GT_* vars below
 # feed BOTH the gt-run-proof stage (brief content) and the pier --ae list (runtime).
