@@ -38,6 +38,7 @@ jobs:
 
       - name: Run eval
         run: |
+          set -o pipefail
           echo "=== Predictions ==="
           cat ${{ inputs.predictions_path }}
           echo ""
