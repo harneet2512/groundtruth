@@ -205,19 +205,21 @@ model:
     You made an invalid tool call. Please retry with the correct tool call format.
   cost_tracking: "ignore_errors"
   model_kwargs:
-    # PARITY REFERENCE = mini-swe-agent's OWN SWE-bench config, NOT the OH baseline
-    # (config/benchmarks/swebench.yaml @ v2.2.8 = `drop_params: true` + `temperature: 0.0`
-    # + `parallel_tool_calls: true`, and NOTHING else — no top_p / max_tokens / penalties,
-    # so those ride the model/API defaults). We mirror that exactly. temperature 0.0 =
-    # deterministic best@1 (was 1.0, which was the OH convention — corrected per the
-    # mini-swe-agent standard). The ONLY deepseek-v4-flash-specific addition is
-    # extra_body.thinking:disabled — V4 defaults thinking-ON, which breaks the multi-turn
-    # harness (claude, mini-swe-agent's default model, has no such issue). drop_params drops
-    # any kwarg deepseek rejects. num_retries is litellm API-error resilience (rate-limit/5xx),
-    # NOT an agent re-attempt — output-neutral, keeps best@1, and reduces transient infra failures.
+    # PARITY REFERENCE = OUR mini-swe baseline RUN (the config that produced the 32/300 mini
+    # baseline, deepswe_gt_pier_baseline.yaml). GT-on is the paired control: it must match the
+    # baseline EXACTLY so the ONLY difference between the arms is the GT surface. Baseline
+    # model_kwargs = temp 1.0 / top_p 1.0 / max_tokens 16384 / penalties 0 / thinking disabled /
+    # drop_params (temp 1.0 = the DeepSeek-V4-Flash card sampling; max_tokens 16384 is PROVEN-good
+    # — the baseline completed 32/300 at it, so no endpoint-ceiling risk). The SOLE deviation is
+    # num_retries: REMOVED per the no-retry rule. NB the "cheating" retry is the write->test->fix
+    # ring (GT_SELF_VERIFY_ATTEMPTS — a workflow/env knob, default 0 = OFF), NOT a model_kwarg;
+    # num_retries was only litellm API-error resend. thinking:disabled is the deepseek-v4 necessity.
     drop_params: true
-    temperature: 0.0
-    parallel_tool_calls: true
+    temperature: 1.0
+    top_p: 1.0
+    max_tokens: 16384
+    presence_penalty: 0
+    frequency_penalty: 0
     extra_body:
       thinking:
         type: disabled
