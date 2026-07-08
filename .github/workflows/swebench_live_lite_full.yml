@@ -723,6 +723,18 @@ jobs:
           fi
           echo "[GT_META] Live Lite image: ${LL_TASK_IMAGE:-$DH_IMG}"
 
+      - name: Ensure full Live Lite dataset before substrate proof (checkout is lfs:false)
+        # substrate_proof.sh (Fix A, 2026-07-08) reads problem_statement from this dataset to feed GT the
+        # REAL issue. The checkout is lfs:false so the committed jsonl is a ~130B LFS pointer; without this
+        # fetch, Fix A finds no instance_id match and falls back to the placeholder (the blind-run bug).
+        if: ${{ inputs.baseline != true }}
+        run: |
+          DS=benchmarks/data/swebench_live_lite.jsonl
+          if [ "$(wc -l < "$DS" 2>/dev/null || echo 0)" -lt 100 ]; then
+            GH_TOKEN="${{ secrets.GITHUB_TOKEN }}" gh release download pipeline-assets-v1 -p swebench_live_lite.jsonl -D benchmarks/data/ --clobber 2>/dev/null || true
+          fi
+          echo "[GT_META] Live Lite dataset lines before substrate: $(wc -l < "$DS" 2>/dev/null || echo 0)"
+
       - name: GT substrate proof (handoff §B-AFTER/§D/§G) — pre-agent, pinned, read-only repo
         # Baseline arm consumes no substrate — skip the proof entirely.
         if: ${{ inputs.baseline != true }}

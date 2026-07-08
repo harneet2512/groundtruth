@@ -423,7 +423,7 @@ if [ "$HARNESS" = "deepswe" ]; then
   # (GT_ISSUE_MISSING, classified INFRA) if the issue text ends up empty — never run
   # the substrate with an empty issue.
   python3 - "$TASK_DIR" <<'PYEOF' || { echo "::warning::GT_ISSUE_MISSING: no issue text — proceeding with empty issue (agent has its own instruction)" | tee -a trial_output.log; }
-import os, sys
+import os, sys, json, hashlib
 try:
     import tomllib
 except ModuleNotFoundError:
@@ -431,11 +431,14 @@ except ModuleNotFoundError:
 task_dir = sys.argv[1]
 out_path = os.environ.get("GT_ISSUE_OUT", "/tmp/issue.txt")
 issue, source = "", ""
+# 1) DeepSWE-native: the sibling instruction.md (pier reads it as Task.instruction).
 inst = os.path.join(task_dir, "instruction.md")
 if os.path.exists(inst):
     with open(inst, encoding="utf-8", errors="replace") as f:
         issue = f.read().strip()
-    source = "instruction.md"
+    if issue:
+        source = "instruction.md"
+# 2) DeepSWE task.toml fields.
 if not issue:
     try:
         with open(os.path.join(task_dir, "task.toml"), "rb") as f:
@@ -443,29 +446,66 @@ if not issue:
         issue = ((t.get("metadata", {}) or {}).get("issue", "")
                  or (t.get("task", {}) or {}).get("prompt", "")
                  or (t.get("task", {}) or {}).get("instruction", "") or "").strip()
-        source = "task.toml"
+        if issue:
+            source = "task.toml"
     except Exception:
-        issue = ""
+        pass
+# 3) ROOT-CAUSE FIX (2026-07-08): Live-Lite / dataset problem_statement, keyed by
+#    instance_id (== GT_MATRIX_TASK). This is the SAME source the agent step reads,
+#    so the substrate builds its pretask artifacts (anchors/localizer/brief) on the
+#    IDENTICAL real issue the agent sees — not a placeholder. The deepswe branch
+#    never fetched it, so 295/299 Live-Lite tasks ran GT BLIND on the synthesized
+#    fallback (empty anchors -> hub-fallback -> identical ranking on every task).
+if not issue:
+    task_id = (os.environ.get("GT_MATRIX_TASK") or "").strip()
+    ds_path = os.environ.get("GT_ISSUE_DATASET", "benchmarks/data/swebench_live_lite.jsonl")
+    if task_id and os.path.exists(ds_path):
+        try:
+            with open(ds_path, encoding="utf-8") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    r = json.loads(line)
+                    if r.get("instance_id") == task_id:
+                        issue = (r.get("problem_statement") or "").strip()
+                        if issue:
+                            source = "live_lite_dataset"
+                        break
+        except Exception as e:
+            print(f"GT_ISSUE_DATASET read error ({ds_path}): {e}", file=sys.stderr)
+# 4) genuinely-missing issue -> synthesized fallback (made FAIL-CLOSED downstream).
 if not issue:
     issue = "Fix the issue described in the repository."
     source = "synthesized_fallback"
-    print("GT_ISSUE_MISSING: no instruction.md and no task.toml issue/prompt/instruction "
-          "— using synthesized fallback (agent has its own instruction)", file=sys.stderr)
+    print("GT_ISSUE_MISSING: no instruction.md / task.toml / dataset problem_statement "
+          f"for task={os.environ.get('GT_MATRIX_TASK','?')} — synthesized fallback", file=sys.stderr)
 with open(out_path, "w", encoding="utf-8") as f:
     f.write(issue)
-try:
-    with open("/tmp/gt/issue_source.txt", "w", encoding="utf-8") as sf:
-        sf.write(source)
-except Exception:
-    pass
-print(f"issue text: {len(issue)} chars from {source} -> {out_path}")
+digest = hashlib.sha256(issue.encode("utf-8")).hexdigest()
+for path, val in (("/tmp/gt/issue_source.txt", source), ("/tmp/gt/issue_sha256.txt", digest)):
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as sf:
+            sf.write(val)
+    except Exception:
+        pass
+print(f"issue text: {len(issue)} chars from {source} (sha256={digest[:12]}) -> {out_path}")
 PYEOF
-  # M2 fix: surface the synthesized-fallback marker to trial_output.log (the INFRA classifier
-  # deepswe_outcome.py scans it). DeepSWE previously printed GT_ISSUE_MISSING only to stderr, so a
-  # malformed task ran paid on a generic issue and was miscounted as a normal GT-on trial. Best-effort:
-  # SURFACE it (classified INFRA-diagnostic, excluded from the resolved denominator) — never refuse.
-  if [ "$(cat /tmp/gt/issue_source.txt 2>/dev/null)" = "synthesized_fallback" ]; then
-    echo "GT_ISSUE_MISSING: no instruction.md/task.toml issue — synthesized fallback (DeepSWE); INFRA-diagnostic, excluded from resolved denominator" | tee -a trial_output.log
+  # FAIL-CLOSED (2026-07-08): if the issue collapsed to the synthesized placeholder, REFUSE to build
+  # GT pretask artifacts on it — this is the blind-run bug (empty anchors -> hub fallback -> identical
+  # ranking on every task). Surface the marker (deepswe_outcome.py classifies it INFRA), drop a
+  # sentinel, and ABORT the task at the substrate stage, BEFORE the paid agent runs. The old behavior
+  # (warn + run blind) is restorable with GT_ISSUE_FAIL_CLOSED=0.
+  ISSUE_SOURCE="$(cat /tmp/gt/issue_source.txt 2>/dev/null || echo unknown)"
+  if [ "$ISSUE_SOURCE" = "synthesized_fallback" ]; then
+    echo "GT_ISSUE_MISSING: no instruction.md/task.toml/dataset problem_statement for ${GT_MATRIX_TASK:-?} — synthesized fallback; INFRA-diagnostic, excluded from resolved denominator" | tee -a trial_output.log
+    if [ "${GT_ISSUE_FAIL_CLOSED:-1}" != "0" ]; then
+      mkdir -p /tmp/gt 2>/dev/null || true
+      echo "$ISSUE_SOURCE" > /tmp/gt/ISSUE_FAIL_CLOSED
+      echo "GT_ISSUE_MISSING_FATAL: refusing to run GT on a placeholder issue (set GT_ISSUE_FAIL_CLOSED=0 to override). Task aborted at substrate stage — no paid agent, excluded from resolved denominator." | tee -a trial_output.log
+      exit 3
+    fi
+    echo "::warning::GT_ISSUE_FAIL_CLOSED=0 — proceeding on synthesized fallback (BLIND GT run)" | tee -a trial_output.log
   fi
   python3 scripts/swebench/issue_manifest.py /tmp/issue.txt /tmp/gt/issue_manifest.json --source instruction || echo "::warning::issue_manifest.py failed — non-fatal, continuing"
   # P0 (2026-06-23): write the verbatim issue into the substrate (/tmp/gt -> mounted
