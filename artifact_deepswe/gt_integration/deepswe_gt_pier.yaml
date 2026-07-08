@@ -218,7 +218,6 @@ model:
     drop_params: true
     temperature: 0.0
     parallel_tool_calls: true
-    num_retries: 3
     extra_body:
       thinking:
         type: disabled
