@@ -146,7 +146,11 @@ env:
   GT_LSP_READY_BUDGET_S_OVERRIDE: ${{ vars.GT_LSP_READY_BUDGET_S_OVERRIDE }}
   # Verification horizon (step budget — same as DeepSWE).
   GT_STEP_LIMIT: "300"
-  GT_SELF_VERIFY_ATTEMPTS: "2"
+  # Retry ring: DRIVEN BY THE DISPATCH INPUT (was hardcoded "2" = dead input → every run silently
+  # did the 3-attempt write→test→fix ring, which is NOT leaderboard-legit; the board is 1 attempt).
+  # Default 0 = single attempt = official parity (both arms). Set self_verify_attempts=1|2 explicitly
+  # only for an internal paired delta (arm-neutral, but non-submittable).
+  GT_SELF_VERIFY_ATTEMPTS: "${{ inputs.self_verify_attempts || '0' }}"
   GT_VERIFICATION_CYCLE_COST: "25"
   # Model routing — per-model API keys are set in the trial step's model-aware
   # routing block (DeepSeek/OpenRouter/TokenRouter). No top-level key needed.
@@ -959,7 +963,7 @@ jobs:
             -e GT_RUNTIME_LEDGER="/gt_out/gt_runtime_ledger.jsonl" \
             -e GT_HOOK_FIRE_COUNTS="/gt_out/gt_hook_fire_counts.json" \
             -e GT_BASELINE=${{ inputs.baseline == true && '1' || '0' }} \
-            -e GT_SELF_VERIFY_ATTEMPTS="${GT_SELF_VERIFY_ATTEMPTS:-2}" \
+            -e GT_SELF_VERIFY_ATTEMPTS="${GT_SELF_VERIFY_ATTEMPTS:-0}" \
             -e GT_RETRY_TEST_TIMEOUT_SEC="${{ inputs.retry_test_timeout_sec || '600' }}" \
             -e GT_DCC="${GT_DCC:-0}" \
             -e GT_POST_SEARCH="${GT_POST_SEARCH:-0}" \
