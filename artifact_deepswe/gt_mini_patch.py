@@ -4952,6 +4952,10 @@ def _reset_oracle_state() -> None:
     _cochange_fired = False
     _l5_fired = False
     _oracle_edited_rels.clear()
+    # GT_OBLIGATIONS_V2 (F3 reset law: every latch clears here)
+    _unexercised_emitted.clear()
+    global _obligations_v2_cache
+    _obligations_v2_cache = None
     _oracle_tested_tokens.clear()
     _oracle_edited_tokens.clear()
     _oracle_edited_tokens_by_file.clear()
@@ -5072,6 +5076,112 @@ def _load_gt_oracle():
 
 
 _oblig_resurface_fired = False
+
+# ═══════════════════════════ GT_OBLIGATIONS_V2 (T3) ══════════════════════════
+# Exercised-clause detector. ACTIVATION IS ARTIFACT-WINS: T3 runs iff the T2
+# artifact gt_obligations_v2.json exists with obligations_version==2 in
+# $GT_CERT_DIR — never from this process's env, so host and container can never
+# disagree (split-brain rule). When active it OWNS the VERIFY/SUBMIT obligation
+# site: violations-only, SILENT when every checkable clause is exercised
+# (correct-or-quiet — silence is the earned outcome, the v1 resurface does NOT
+# fall through). Dose: at most 2 emissions per run, deduped by status-vector
+# hash. Leak screen identical to the brief side (test-name/F2P regexes +
+# persisted render_path_tokens); a leaky row drops whole (fail closed).
+
+_unexercised_emitted: set[str] = set()
+_obligations_v2_cache: dict | None = None
+_V2_LEAK_TEST_RE = re.compile(r"\b(?:test_[A-Za-z0-9_]+|[A-Za-z0-9_]+_test)\b")
+_V2_LEAK_F2P_RE = re.compile(
+    r"\b(?:FAIL_TO_PASS|PASS_TO_PASS|fail_to_pass|pass_to_pass)\b"
+)
+
+
+def _load_obligations_v2() -> dict | None:
+    """The T2 artifact, cached. None = v2 inactive (v1 resurface owns the site)."""
+    global _obligations_v2_cache
+    if _obligations_v2_cache is not None:
+        return _obligations_v2_cache or None
+    data: dict = {}
+    try:
+        cert = os.environ.get("GT_CERT_DIR", "") or "/tmp"
+        with open(os.path.join(cert, "gt_obligations_v2.json"),
+                  encoding="utf-8") as fh:
+            loaded = json.load(fh)
+        if isinstance(loaded, dict) and loaded.get("obligations_version") == 2:
+            data = loaded
+    except Exception:  # noqa: BLE001 — absent artifact = v2 inactive, never an error
+        data = {}
+    _obligations_v2_cache = data
+    return data or None
+
+
+class _V2ClauseView:
+    __slots__ = ("idx", "verbatim", "subject_symbols", "sym_parts")
+
+    def __init__(self, idx: int, clause: dict):
+        self.idx = idx
+        self.verbatim = str(clause.get("verbatim_text") or "")
+        self.subject_symbols = frozenset(
+            s for s in (clause.get("subject_symbols") or ()) if isinstance(s, str)
+        )
+        parts: set[str] = set()
+        for s in (clause.get("symbols") or ()):
+            if isinstance(s, str):
+                parts.add(s)
+                parts.update(p for p in s.split(".") if len(p) >= 3)
+        self.sym_parts = frozenset(parts)
+
+
+def _v2_exercise_statuses():
+    """[(view, status)] over the artifact clauses, or None when v2 inactive.
+    Shared by the T3 candidate and the status persist (one source of truth)."""
+    data = _load_obligations_v2()
+    if not data:
+        return None
+    clauses = [c for c in (data.get("clauses") or []) if isinstance(c, dict)]
+    if not clauses:
+        return None
+    try:
+        from groundtruth.runtime.obligations import exercise_statuses
+    except Exception:  # noqa: BLE001 — product pkg absent -> quiet
+        return None
+    views = [_V2ClauseView(i, c) for i, c in enumerate(clauses)]
+    return exercise_statuses(views, _oracle_edited_tokens, _oracle_tested_tokens)
+
+
+def _unexercised_clause_candidate() -> tuple[float, str] | None:
+    """T3 candidate for the VERIFY/SUBMIT site (see block comment above)."""
+    if _GT_BASELINE or len(_unexercised_emitted) >= 2:
+        return None
+    statuses = _v2_exercise_statuses()
+    if statuses is None:
+        return None
+    try:
+        from groundtruth.runtime.obligations import render_unexercised_block
+    except Exception:  # noqa: BLE001
+        return None
+    data = _load_obligations_v2() or {}
+    path_tokens = [
+        t.lower() for t in (data.get("render_path_tokens") or ())
+        if isinstance(t, str) and len(t) >= 3
+    ]
+
+    def _leaky(row: str) -> bool:
+        if _V2_LEAK_TEST_RE.search(row) or _V2_LEAK_F2P_RE.search(row):
+            return True
+        low = row.lower()
+        return any(t in low for t in path_tokens)
+
+    block = render_unexercised_block(statuses, max_listed=6, leak_screen=_leaky)
+    if not block:
+        return None
+    vec = hashlib.sha256(
+        "|".join(f"{v.idx}:{s}" for v, s in statuses).encode("utf-8")
+    ).hexdigest()[:8]
+    if vec in _unexercised_emitted:
+        return None
+    _unexercised_emitted.add(vec)
+    return (0.9, block)
 
 
 def _obligation_resurface_candidate() -> tuple[float, str] | None:
@@ -5380,6 +5490,15 @@ def _persist_obligation_status(tracker, *, turn: int | None = None) -> None:
             "coverage_ratio": float(f"{tracker.coverage_ratio():.8f}"),
             "obligations": tracker.snapshot(),
         }
+        # GT_OBLIGATIONS_V2: attach the exercised-clause coverage summary when
+        # the T2 artifact is active — the §4 audit's coverage_exercised source.
+        try:
+            _st = _v2_exercise_statuses()
+            if _st is not None:
+                from groundtruth.runtime.obligations import coverage_summary
+                snap["coverage_v2"] = coverage_summary(_st)
+        except Exception:  # noqa: BLE001 — telemetry must never break the loop
+            pass
         path = os.environ.get("GT_OBLIGATION_STATUS", "/tmp/gt/obligation_status.json")
         parent = os.path.dirname(path)
         if parent:
@@ -7546,11 +7665,25 @@ def _augment_output(action, out) -> None:
                         except Exception:  # noqa: BLE001 — diagnostic best-effort
                             pass
                     if _ph in (Phase.VERIFY, Phase.SUBMIT):
-                        try:
-                            _obr = _obligation_resurface_candidate()
-                        except Exception:  # noqa: BLE001 — one producer must not kill the gate
-                            _crash_emit("obligation.resurface")
-                            _obr = None
+                        # GT_OBLIGATIONS_V2: when the T2 artifact is present the
+                        # exercised-clause detector OWNS this site (violations-only,
+                        # silent when clean — the v1 resurface does NOT fall through
+                        # to re-dump bullets over an earned silence). Artifact absent
+                        # -> byte-identical v1 path.
+                        _obl_reason = "obligation.resurface"
+                        if _load_obligations_v2() is not None:
+                            _obl_reason = "obligation.unexercised"
+                            try:
+                                _obr = _unexercised_clause_candidate()
+                            except Exception:  # noqa: BLE001 — one producer must not kill the gate
+                                _crash_emit("obligation.unexercised")
+                                _obr = None
+                        else:
+                            try:
+                                _obr = _obligation_resurface_candidate()
+                            except Exception:  # noqa: BLE001 — one producer must not kill the gate
+                                _crash_emit("obligation.resurface")
+                                _obr = None
                         if _obr is not None:
                             # Deliver via the LANE-A path (a once-per-task requirement
                             # reminder is a Lane-A fact, NOT a competing steer — it does
@@ -7562,7 +7695,7 @@ def _augment_output(action, out) -> None:
                             # no steer budget, so the guaranteed once-per-task delivery is
                             # preserved while the ledger/dedup now see it.
                             _lane_a_deliver(
-                                out, cmd, [("obligation.resurface", _obr[1])],
+                                out, cmd, [(_obl_reason, _obr[1])],
                                 krel=(_krel or _kf or ""),
                                 event=_current_event(_kkind, cmd or ""))
                 # VERIFICATION HORIZON (Stage C H2): budget-aware self-verify candidate

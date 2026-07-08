@@ -478,6 +478,9 @@ class _ObligationView:
     sym_parts: frozenset[str]
     keywords: frozenset[str]
     checkable: frozenset[str]
+    # GT_OBLIGATIONS_V2: high-specificity exercise keys (defaulted — v1 rows
+    # without the field keep constructing identically).
+    subject_symbols: frozenset[str] = frozenset()
 
 
 def _obligation_views(obligations) -> list[_ObligationView]:
@@ -499,6 +502,10 @@ def _obligation_views(obligations) -> list[_ObligationView]:
                                if isinstance(kw, str)),
             checkable=frozenset(cf for cf in (o.get("checkable_forms") or [])
                                 if isinstance(cf, str)),
+            subject_symbols=frozenset(
+                s for s in (o.get("subject_symbols") or o.get("symbols") or [])
+                if isinstance(s, str)
+            ),
         ))
     return views
 
