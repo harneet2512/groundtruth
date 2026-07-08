@@ -297,7 +297,10 @@ def main():
         f"- Model: `{args.model}` (thinking disabled)\n"
         f"- Scaffold: GroundTruth full pipeline (host-LSP graph brief + per-view/edit hooks "
         f"+ consensus + L5/L6 + co-change), {args.agent}.\n"
-        f"- Rollouts: 1 per task. Iterations: OH max_iterations=100 / mini-swe step_limit=300.\n"
+        f"- Evaluation: **best@1 / pass@1** — ONE rollout per task, ONE attempt, NO write->test->fix "
+        f"retry (GT_SELF_VERIFY_ATTEMPTS=0), no best@k selection. The reported patch is the single "
+        f"submitted solution.\n"
+        f"- Iterations: OH max_iterations=100 / mini-swe step_limit=300.\n"
         f"- Cost computed from token counts (litellm/openrouter return null for {args.model}); "
         f"see deep_metrics.json + benchmarks/pricing/deepseek_pricing.json.\n"
         f"- GT delivery verified from AGENT OBSERVATION (see SUMMARY.md gt_delivery columns).\n")
