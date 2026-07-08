@@ -1049,14 +1049,14 @@ jobs:
               # with an arm-neutral <test-feedback> block. Model via the close-reopen quote.
               bash /opt/gt/gt_agent_retry_loop.sh "'"$INPUT_MODEL"'" "/gt_out/gt_task.txt" "/opt/gt/agent_config.yaml" "/gt_out/mini-swe-agent.trajectory.json"
 
-              # CRITICAL: capture the patch to the bind-mount BEFORE the container exits.
-              # ROOT-CAUSE FIX (2026-07-08): the agent submission (`cat /tmp/patch.txt`) is captured
-              # through mini-swe-agent's PTY (~80 cols) so long diff lines WRAP — the continuation
-              # loses its +/-/space prefix -> `git apply` rejects the patch (malformed) -> the OFFICIAL
-              # SWE-bench-Live eval produces NO report -> default reward 0. The log-extraction fallback
-              # inherits the SAME wrapped text. So build the PRIMARY patch from a clean DIRECT
-              # `git diff HEAD` redirect (raw bytes, NO PTY = unwrappable) and stage new files as
-              # intent-to-add so a file-adding fix is not silently dropped. /gt_out/ is bind-mounted.
+              # PATCH CAPTURE (fixed 2026-07-08): build the pred patch from a clean DIRECT git diff
+              # redirect, NOT the agent cat submission. mini-swe-agent captures cat output through an
+              # ~80-col PTY that WRAPS long diff lines, so the continuation loses its +/-/space prefix
+              # and git apply rejects the patch (malformed) and the official SWE-bench-Live eval writes
+              # no report and defaults reward 0. A file redirect writes raw bytes (no PTY) so it cannot
+              # wrap; git add -A -N stages new files so a file-adding fix is not dropped. CAUTION: this
+              # whole block is a single-quoted docker bash -c argument, so it must contain NO apostrophe
+              # and NO backtick (one apostrophe closes the quote and the agent silently never launches).
               GT_ROOT="$(cat /tmp/gt_root.txt 2>/dev/null)"
               [ -z "$GT_ROOT" ] && GT_ROOT="$(git -C /app rev-parse --show-toplevel 2>/dev/null || echo /app)"
               cd "$GT_ROOT" 2>/dev/null || true
