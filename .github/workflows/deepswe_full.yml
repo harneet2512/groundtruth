@@ -1353,7 +1353,9 @@ jobs:
       # job (industrially-invalid run must not pass silently) without ever losing artifacts.
       # Only fires when Collect wrote the marker (paid --strict run + gate contradicted).
       - name: Enforce industrial SOTA gate (strict, post-upload)
-        if: always()
+        # Baseline-aware (2026-07-08): the gate demands GT proof artifacts the baseline arm
+        # legitimately lacks — it failed every baseline job cosmetically (run 28914558732).
+        if: ${{ always() && inputs.gt_arm != 'baseline' }}
         run: |
           if [ -f trial_results/INDUSTRIAL_GATE_FAILED ]; then
             echo "::error::Industrial SOTA validation gate failed under --strict — run is industrially INVALID"

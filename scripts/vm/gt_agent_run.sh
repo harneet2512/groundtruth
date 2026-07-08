@@ -974,7 +974,9 @@ PYEOF
     elif grep -q "error=DEEPSWE_ADAPTER_FAIL" "$trial_log"; then
       FAIL_CLASS="DEEPSWE_ADAPTER_FAIL"
       grep "DEEPSWE_ADAPTER_FAIL" "$trial_log" | head -5
-    elif ! grep -q "gt_prebuilt_active=true" "$trial_log"; then
+    elif [ "${GT_BASELINE:-0}" != "1" ] && ! grep -q "gt_prebuilt_active=true" "$trial_log"; then
+      # Baseline-aware (2026-07-08): the baseline arm consumes NO GT artifacts by design —
+      # this check misclassified clean baseline rows as GT_ARTIFACT_NOT_CONSUMED.
       FAIL_CLASS="GT_ARTIFACT_NOT_CONSUMED"
       echo "GT_ARTIFACT_NOT_CONSUMED: no [GT_META] witness with gt_prebuilt_active=true (delivery, not telemetry)" | tee -a "$trial_log"
       grep "\[GT_META\]" "$trial_log" | head -5 || echo "(no [GT_META] line at all)"
