@@ -3,37 +3,37 @@
 deterministic DEWRAP repair of terminal-wrapped patches.
 
 WHY: the agent patch can reach us wrapped — mini-swe-agent captures command output through an
-~80-col PTY, so a long diff line gets split and the continuation LOSES its +/-/space prefix
-(e.g. `+   # ... __str__ -> ` / `stdout -> wait()`). git apply then rejects the whole patch as
-malformed and the official evaluator produces no report. In a unified diff EVERY in-hunk line
-MUST start with '+', '-', ' ' (or '\\' for the no-newline marker); a line that does not — and is
-not a diff/hunk header — is PROVABLY a wrapped continuation, so we rejoin it (concatenate, no
-separator: the wrap preserves the trailing content) to the previous +/- line. Safe by construction.
+~80-col PTY, so a long line gets split and the continuation LOSES its leading token. git apply
+then rejects the patch and the official evaluator produces no report. This bites BOTH kinds of line:
+  - a hunk BODY line   (`+   # ... __str__ -> ` / `stdout -> wait()`), and
+  - a file HEADER line (`--- a/very/long/path/…/b` / `atch_computeenvironment.json`) — a long path
+    wraps so `git apply` reports "can't find file to patch" and skips every hunk for that file.
+Every line of a valid unified diff starts with a KNOWN token: a header keyword (`diff `, `index `,
+`--- `, `+++ `, `@@`, `old mode`, `new file`, `rename `, `Binary `, …) or a body prefix (`+`, `-`,
+` `, `\\`). A non-empty line that starts with NONE of these is PROVABLY a wrapped continuation, so
+we rejoin it (concatenate, no separator — the wrap preserves the trailing content) onto the previous
+line, whatever kind it is. One rule repairs header wraps and body wraps alike. Safe by construction:
+a well-formed diff has no such lines, so it passes through byte-identical.
 
 Usage: build_pred.py <instance_id> <patch_file> <model_name> [out=/tmp/pred.jsonl]
 """
 import json
 import sys
 
-_HEADERS = ("diff ", "index ", "--- ", "+++ ", "new file", "deleted", "rename",
-            "similarity", "Binary ", "@@ ", "@@")
+# every valid unified-diff line begins with one of these tokens
+_VALID_STARTS = (
+    "diff ", "index ", "--- ", "+++ ", "@@", "+", "-", " ", "\\",
+    "old mode", "new mode", "new file", "deleted ", "similarity ",
+    "rename ", "copy ", "dissimilarity ", "Binary ", "GIT binary",
+)
 
 
 def dewrap(patch: str) -> str:
     out = []
-    in_hunk = False
     for ln in patch.split("\n"):
-        if ln.startswith("@@"):
-            in_hunk = True
+        if ln == "" or ln.startswith(_VALID_STARTS):
             out.append(ln)
-            continue
-        if ln.startswith(_HEADERS):
-            in_hunk = ln.startswith("@@")
-            out.append(ln)
-            continue
-        # inside a hunk, a line with no +/-/space/\ prefix is a wrapped continuation
-        if (in_hunk and ln and ln[0] not in "+- \\"
-                and out and out[-1] and out[-1][0] in "+- \\"):
+        elif out and out[-1]:            # unprefixed, non-empty -> a wrapped continuation
             out[-1] = out[-1] + ln
         else:
             out.append(ln)

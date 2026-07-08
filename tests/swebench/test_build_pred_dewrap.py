@@ -69,3 +69,28 @@ def test_blank_context_line_preserved():
 def test_no_newline_marker_preserved():
     p = "@@ -1 +1 @@\n-a\n+b\n\\ No newline at end of file\n"
     assert dewrap(p) == p
+
+
+# a long FILE PATH in the header wraps -> git apply "can't find file to patch" (cfn-lint-3789)
+HEADER_WRAPPED = (
+    "diff --git a/src/cfnlint/data/schemas/patches/extensions/all/aws_batch_computeenvironment/b\n"
+    "atch_computeenvironment.json b/src/cfnlint/data/schemas/patches/extensions/all/x.json\n"
+    "--- a/src/cfnlint/data/schemas/patches/extensions/all/aws_batch_computeenvironment/b\n"
+    "atch_computeenvironment.json\n"
+    "+++ b/src/cfnlint/data/schemas/patches/extensions/all/aws_batch_computeenvironment/b\n"
+    "atch_computeenvironment.json\n"
+    "@@ -1,3 +1,3 @@\n"
+    " {\n"
+    '-  "old": 1\n'
+    '+  "new": 1\n'
+    " }\n"
+)
+
+
+def test_header_path_wrap_repaired():
+    fixed = dewrap(HEADER_WRAPPED)
+    # the wrapped path tail must be rejoined onto its header line, on ONE physical line each
+    assert "--- a/src/cfnlint/data/schemas/patches/extensions/all/aws_batch_computeenvironment/batch_computeenvironment.json" in fixed
+    assert "+++ b/src/cfnlint/data/schemas/patches/extensions/all/aws_batch_computeenvironment/batch_computeenvironment.json" in fixed
+    # no orphan continuation line survives
+    assert "\natch_computeenvironment.json" not in fixed
