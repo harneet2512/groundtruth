@@ -205,21 +205,19 @@ model:
     You made an invalid tool call. Please retry with the correct tool call format.
   cost_tracking: "ignore_errors"
   model_kwargs:
-    # deepseek-v4-flash on BOTH benchmarks, thinking OFF (byte-parity with
-    # verified_gt.yaml). V4 default is THINKING-ON which bloats tokens+cost and is
-    # incompatible with the multi-turn harness — disable via extra_body. DeepSeek
-    # official-spec sampling: temp 1.0 / top_p 1.0 / penalties 0 (top_p CORRECTED 0.95->1.0 for
-    # PAIRED-CONTROL parity with the baseline + the OH baseline of record). max_tokens
-    # raised 8192 -> 16384 (2x) as insurance against truncating a large
-    # single-turn write (big heredoc / new file); inert on normal small turns
-    # (billed on tokens GENERATED, not the cap). VERIFY the endpoint accepts
-    # >8192 before a paid run -- a hard-ceiling 400 would kill every call.
+    # PARITY REFERENCE = mini-swe-agent's OWN SWE-bench config, NOT the OH baseline
+    # (config/benchmarks/swebench.yaml @ v2.2.8 = `drop_params: true` + `temperature: 0.0`
+    # + `parallel_tool_calls: true`, and NOTHING else — no top_p / max_tokens / penalties,
+    # so those ride the model/API defaults). We mirror that exactly. temperature 0.0 =
+    # deterministic best@1 (was 1.0, which was the OH convention — corrected per the
+    # mini-swe-agent standard). The ONLY deepseek-v4-flash-specific addition is
+    # extra_body.thinking:disabled — V4 defaults thinking-ON, which breaks the multi-turn
+    # harness (claude, mini-swe-agent's default model, has no such issue). drop_params drops
+    # any kwarg deepseek rejects. num_retries is litellm API-error resilience (rate-limit/5xx),
+    # NOT an agent re-attempt — output-neutral, keeps best@1, and reduces transient infra failures.
     drop_params: true
-    temperature: 1.0
-    top_p: 1.0
-    max_tokens: 16384
-    presence_penalty: 0
-    frequency_penalty: 0
+    temperature: 0.0
+    parallel_tool_calls: true
     num_retries: 3
     extra_body:
       thinking:
