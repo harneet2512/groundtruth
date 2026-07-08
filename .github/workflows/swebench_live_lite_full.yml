@@ -1049,13 +1049,22 @@ jobs:
               # with an arm-neutral <test-feedback> block. Model via the close-reopen quote.
               bash /opt/gt/gt_agent_retry_loop.sh "'"$INPUT_MODEL"'" "/gt_out/gt_task.txt" "/opt/gt/agent_config.yaml" "/gt_out/mini-swe-agent.trajectory.json"
 
-              # CRITICAL: copy patch to bind-mount BEFORE container exits.
-              # /tmp/patch.txt is the agent raw diff — uncorrupted by terminal wrapping.
-              # /gt_out/ is bind-mounted to the host so it survives container teardown.
-              cp /tmp/patch.txt /gt_out/agent_patch.diff 2>/dev/null || true
-              # Also create a fresh git diff from HEAD as backup
-              cd "$(cat /tmp/gt_root.txt 2>/dev/null || echo /app)" 2>/dev/null
+              # CRITICAL: capture the patch to the bind-mount BEFORE the container exits.
+              # ROOT-CAUSE FIX (2026-07-08): the agent submission (`cat /tmp/patch.txt`) is captured
+              # through mini-swe-agent's PTY (~80 cols) so long diff lines WRAP — the continuation
+              # loses its +/-/space prefix -> `git apply` rejects the patch (malformed) -> the OFFICIAL
+              # SWE-bench-Live eval produces NO report -> default reward 0. The log-extraction fallback
+              # inherits the SAME wrapped text. So build the PRIMARY patch from a clean DIRECT
+              # `git diff HEAD` redirect (raw bytes, NO PTY = unwrappable) and stage new files as
+              # intent-to-add so a file-adding fix is not silently dropped. /gt_out/ is bind-mounted.
+              GT_ROOT="$(cat /tmp/gt_root.txt 2>/dev/null)"
+              [ -z "$GT_ROOT" ] && GT_ROOT="$(git -C /app rev-parse --show-toplevel 2>/dev/null || echo /app)"
+              cd "$GT_ROOT" 2>/dev/null || true
+              git add -A -N 2>/dev/null || true
+              git diff HEAD > /gt_out/agent_patch.diff 2>/dev/null || true
               git diff HEAD > /gt_out/git_diff_head.diff 2>/dev/null || true
+              # last-resort backup only if the clean git diff produced nothing (no tracked changes):
+              [ -s /gt_out/agent_patch.diff ] || cp /tmp/patch.txt /gt_out/agent_patch.diff 2>/dev/null || true
             ' 2>&1 | tee trial_output.log || true
           AGENT_RC=${PIPESTATUS[0]}
           set -e
