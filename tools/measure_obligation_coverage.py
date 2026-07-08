@@ -90,7 +90,9 @@ def main() -> int:
     print(f"issues: {n}")
     print(f"clauses total: v1={v1_tot} v2={v2_tot} (x{v2_tot / max(1, v1_tot):.2f})")
     print(f">=1-obligation yield: v1={v1_yield}/{n} v2={v2_yield}/{n}")
-    print(f"v2<v1 regressions: {len(regressions)} {regressions[:5]}")
+    print(f"v2<v1 RAW-count deltas: {len(regressions)} {regressions[:5]} "
+          "(raw counts include v1 junk classes — headings/fence code; the "
+          "COVERED-semantics invariant is pinned by test_spec_v2_holdout_gate)")
     print(f"determinism failures: {det_fail}")
     print(f"kinds: {dict(kinds)}")
     print(f"modalities: {dict(modalities)}")

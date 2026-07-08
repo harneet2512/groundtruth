@@ -525,7 +525,12 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
                 continue
             decision = piece
             lm = _V2_LABEL_REST_RE.match(piece)
-            if lm and len(lm.group(1).split()) <= 6:
+            # label-strip GUARD: an imperative/conditional head is the clause
+            # itself, never a label ("use hyper directly: works, but…" — the
+            # gate caught the stripper eating the imperative head).
+            if (lm and len(lm.group(1).split()) <= 6
+                    and not _V2_IMPERATIVE_RE.match(lm.group(1))
+                    and not _V2_COND_RE.match(lm.group(1))):
                 decision = lm.group(2)
             decision = re.sub(r"^(?:otherwise|then|else)[\s,]+", "", decision, flags=re.I)
             cls = _v2_classify(decision)
@@ -605,6 +610,31 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
             continue
         prose.append(line.strip())
     _flush_prose()
+
+    # ── v1-parity sweep: v2 is a strict SUPERSET of real v1 recall by
+    # construction. Any sentence the v1 classifier accepts — outside fenced
+    # code and headings (v2's deliberate junk filters) — that no v2 clause
+    # already covers (containment either way) is emitted at declarative
+    # strength, so it sinks to the bottom of the T1 ordering but is never LOST
+    # from the checklist. This is what makes the held-out gate hold on every
+    # issue shape without per-corpus carve-outs.
+    stripped = _FENCE_RE.sub(" ", issue_text)
+    stripped = "\n".join(
+        ln for ln in stripped.split("\n") if not _V2_HEADING_RE.match(ln)
+    )
+    covered = [" ".join(o.verbatim_text.split()).lower() for o in spec.obligations]
+    for sent in _SENT_SPLIT_RE.split(stripped):
+        sent = sent.strip()
+        if not sent or len(sent) < 8:
+            continue
+        kind = _classify_kind(sent)
+        if not kind:
+            continue
+        key = " ".join(sent.rstrip(".").split()).lower()
+        if any((key in c) or (c in key) for c in covered):
+            continue
+        _emit(sent, kind, "declarative", 1, _v2_clause_id(sent, 0), 0)
+        covered.append(key)
 
     return spec
 
