@@ -1015,6 +1015,14 @@ jobs:
                 export PATH="$HOME/.local/bin:/root/.local/bin:$PATH"
                 uv tool install --python 3.11 mini-swe-agent 2>/dev/null || uv tool install mini-swe-agent 2>/dev/null
               }
+              # BASELINE-PARITY (2026-07-09): force mini-swe-agent==2.4.4 — the EXACT version the
+              # GT-off baseline ran (299/299 tasks; the unpinned install above drifts to 2.4.5+ on
+              # later dates). Pin 2.4.4 so the scaffold version is IDENTICAL to the baseline; the ONLY
+              # intended arm difference is GroundTruth. Graceful (warn, never fail) so a pin miss on an
+              # odd image cannot add an infra loss the baseline did not have.
+              pip install --quiet mini-swe-agent==2.4.4 2>/dev/null \
+                || uv tool install --python 3.11 mini-swe-agent==2.4.4 2>/dev/null \
+                || echo "[GT] WARN: mini-swe-agent==2.4.4 pin failed — using installed version (see trajectory.info mini_version)"
               # Verify installation
               if ! command -v mini-swe-agent >/dev/null 2>&1; then
                 # Try finding it in common locations
