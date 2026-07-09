@@ -1044,27 +1044,6 @@ def _artifact_pointer(art_path: str) -> str:
     )
 
 
-def _obligations_v2_artifact_dir() -> str:
-    """Host-side GT_CERT_DIR (where the brief stage persisted the v2 artifacts)."""
-    return os.environ.get("GT_CERT_DIR", "") or "/tmp"
-
-
-def _read_obligations_md() -> str:
-    """GT_OBLIGATIONS_V2 T2: the full checklist rendered at brief time.
-    Artifact-wins activation: non-empty ONLY when the v2 json exists (version 2).
-    Fail-open ('' = feature silently absent)."""
-    try:
-        import json as _j
-        d = _obligations_v2_artifact_dir()
-        with open(os.path.join(d, "gt_obligations_v2.json"), encoding="utf-8") as fh:
-            if _j.load(fh).get("obligations_version") != 2:
-                return ""
-        with open(os.path.join(d, "gt_obligations.md"), encoding="utf-8") as fh:
-            return fh.read()
-    except Exception:  # noqa: BLE001 — survival channel, never breaks a run
-        return ""
-
-
 async def _write_workspace_artifact(
     rel: str, content: str, environment: "BaseEnvironment",
     marker: str = "GT_BRIEF_ARTIFACT",
@@ -1775,26 +1754,19 @@ class GTMiniSweAgent(_BASE_AGENT):  # type: ignore[misc]
         except Exception:  # noqa: BLE001 -- survival channel must never break run()
             pass
 
-        # GT_OBLIGATIONS_V2 T2: ship the FULL requirements checklist alongside
-        # the brief (artifact-wins activation — fires only when the brief stage
-        # produced gt_obligations_v2.json). Pointer appended ONLY on a confirmed,
-        # patch-excluded write (correct-or-quiet).
-        try:
-            _obl_md = _read_obligations_md()
-            if _obl_md:
-                _oart = await _write_workspace_artifact(
-                    ".groundtruth/obligations.md", _obl_md, environment,
-                    marker="GT_OBL_ARTIFACT",
-                )
-                if _oart:
-                    augmented = augmented.rstrip() + "\n" + (
-                        f"[GT] Every requirement extracted from the issue is "
-                        f"checklisted at {_oart} (git-ignored). Verify each "
-                        f"against your patch — run one targeted test per "
-                        f"requirement — before you submit. Re-read with:  cat {_oart}"
-                    )
-        except Exception:  # noqa: BLE001 -- survival channel must never break run()
-            pass
+        # GT_OBLIGATIONS_V2 T2: the upfront requirements CHECKLIST ship is
+        # RETIRED (2026-07-08, witness-diagnosed regression). Shipping
+        # .groundtruth/obligations.md + "verify each requirement, then submit"
+        # handed the agent a COMPLETION criterion easier than the grader: on
+        # true-myth (deepseek 4/4 task) the agent ticked every clause, wrote a
+        # per-requirement test that FAILED, DELETED it, and submitted over 7
+        # unresolved type-check errors — 1.0 -> 0.0 on BOTH surfaces, single
+        # agent-visible-line delta. Product rule: GT must never give the agent a
+        # finish line closer than the real test/build. Requirements-as-context
+        # stays in the T1 brief block (present in the PASSING prior run, harmless);
+        # the submit-time role is now the ground-truth _observed_failure guard in
+        # gt_mini_patch (fires on the agent's OWN unresolved build/test/type-check
+        # failure), never a checklist. See project_obligations_v2_t2_regression.
 
         # Phase 3 preamble: tell the agent about automatic evidence injection.
         # If the patch is available, use the automatic preamble; otherwise

@@ -1,11 +1,10 @@
 """GT_OBLIGATIONS_V2 — T2 workspace-artifact channel (plan §8, t11 artifact leg).
 
-Pins: the generalized writer keeps the brief marker contract, refuses paths
-outside .groundtruth/ (the patch-exclude rule keys on that dir), and
-_read_obligations_md is artifact-wins (empty unless version==2 json exists)."""
+Pins: the generalized writer keeps the brief marker contract and refuses paths
+outside .groundtruth/ (the patch-exclude rule keys on that dir). The T2 upfront
+CHECKLIST ship is RETIRED (2026-07-08) — see test_t2_checklist_ship_retired."""
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -55,14 +54,12 @@ async def test_brief_wrapper_contract_unchanged():
     assert "GT_BRIEF_ARTIFACT_OK" in env.commands[0]
 
 
-def test_read_obligations_md_artifact_wins(monkeypatch, tmp_path):
-    monkeypatch.setenv("GT_CERT_DIR", str(tmp_path))
-    assert gt_agent._read_obligations_md() == ""  # no artifact -> inactive
-    (tmp_path / "gt_obligations.md").write_text("- [ ] x", encoding="utf-8")
-    assert gt_agent._read_obligations_md() == ""  # md alone insufficient
-    (tmp_path / "gt_obligations_v2.json").write_text(
-        json.dumps({"obligations_version": 2}), encoding="utf-8")
-    assert gt_agent._read_obligations_md() == "- [ ] x"
-    (tmp_path / "gt_obligations_v2.json").write_text(
-        json.dumps({"obligations_version": 1}), encoding="utf-8")
-    assert gt_agent._read_obligations_md() == ""  # version gate
+def test_t2_checklist_ship_retired():
+    """Move-1 (2026-07-08, witness-diagnosed regression): the T2 upfront
+    obligations CHECKLIST ship is retired — it handed the agent a completion
+    criterion easier than the grader (true-myth 1.0 -> 0.0 on both surfaces).
+    The reader that gated the ship (_read_obligations_md) is the load-bearing
+    removal: re-introducing the ship would have to re-introduce it. Its
+    ground-truth replacement is the build guard in gt_mini_patch, not a checklist."""
+    assert not hasattr(gt_agent, "_read_obligations_md")
+    assert not hasattr(gt_agent, "_obligations_v2_artifact_dir")

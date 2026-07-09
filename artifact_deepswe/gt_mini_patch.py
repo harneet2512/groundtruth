@@ -650,6 +650,14 @@ _l5_fired = False
 # OH's hook_same_failure_persisted / hypothesis-falsified).
 _l5_finish_fired = False
 _l5_failure_fired = False
+# GT_OBLIGATIONS_V2 Move-2 (2026-07-08): the unresolved-build submit guard. The
+# T2 upfront checklist was RETIRED (it handed the agent a completion criterion
+# easier than the grader — witness-diagnosed on true-myth). Its ground-truth
+# replacement: at VERIFY/SUBMIT, if the agent's OWN last build/test run shows an
+# UNRESOLVED compile/type-check failure (the class every other verify nudge
+# SUPPRESSES as 'actionable feedback' — the exact un-nudged hole where 7 tsc
+# errors reached submit with zero pushback), fire once. General across languages.
+_l5_build_fail_fired = False
 _test_fail_history: list[str] = []
 # no_test_evidence governor state (2026-06-10, boa [243]-[333]): blind test
 # runs counted; any observed pass/fail result latches _test_evidence_seen.
@@ -4490,6 +4498,19 @@ except ImportError:
         r"|cannot find (?:value|function|type|module|symbol)"
         r"|undefined:\s|\bTS\d{4,}:|compilation error)")
 
+# Build / type-check command shapes (Move-2 unresolved-build guard). A test-
+# runner already matches _TEST_RUNNER_RE (compile errors surface inside e.g.
+# `vitest`/`jest` output when the runner type-checks); this covers the agent
+# invoking the compiler/type-checker DIRECTLY. Language-uniform, no per-task
+# tokens: tsc, cargo build/check, go build/vet, javac, mvn/gradle compile,
+# node/tsx type-check, and `npm|yarn|pnpm run build|typecheck|tsc|lint`.
+_BUILD_RE = re.compile(
+    r"(?:^|[|&;]\s*)(?:timeout\s+\S+\s+|env\s+(?:\S+=\S+\s+)+|(?:npx|bunx?)\s+)*"
+    r"(?:tsc\b|(?:cargo|go)\s+(?:build|check|vet)\b|javac\b"
+    r"|(?:mvn|gradlew?)\s+\S*\s*(?:compile|build)\b|make\s+build\b"
+    r"|(?:npm|yarn|pnpm)\s+(?:run\s+)?(?:build|typecheck|type-check|tsc|compile)\b"
+    r"|(?:tsc|tsx)\s+--?\S)", re.I)
+
 # ---------------------------------------------------------------------------
 # DELIVERY-ENGINE STAGE 5 (2026-06-11) — failure_persisted FP closure.
 # Run 27321848581 measured failure_persisted 3/3 FALSE POSITIVE.  LIPI root
@@ -4754,6 +4775,58 @@ def _l5_failure_nudge(cmd: str, out_text: str) -> str:
     return ""
 
 
+def _l5_unresolved_build_guard(cmd: str, out_text: str, phase) -> str:
+    """GT_OBLIGATIONS_V2 Move-2 (2026-07-08) — the ground-truth submit guard that
+    REPLACES the retired T2 completion checklist.
+
+    The verify axis deliberately suppresses the compile/type-check class:
+    _l5_no_test_evidence_nudge bails on _COMPILE_FAIL_RE (line ~4595, "actionable
+    feedback, not blindness") and failure_persisted keys on _failure_lines (TEST
+    markers only). Correct WHILE EDITING — a compile error mid-iteration is normal
+    feedback, not a steer. But at the SUBMIT boundary an UNRESOLVED one is a graded
+    build break the agent is about to ship over: on true-myth the agent read 7 tsc
+    errors, called them "only strict-mode noise", and submitted (1.0 -> 0.0) with
+    NO tripwire on this class. This closes that hole.
+
+    Fires iff ALL hold (correct-or-quiet; each gate only ever SUPPRESSES):
+      1. phase is VERIFY or SUBMIT (the wrap-up boundary — never mid-EDIT);
+      2. >=1 source edit this run (a pristine-checkout compile error is the repo's
+         own state, not the agent's regression);
+      3. the command is a REAL build/type-check or test-runner invocation
+         (a scratch `node -e` compile gripe cannot gate a submit);
+      4. NO env/tooling failure marker (an env failure is not the agent's build);
+      5. an explicit compile/type-check FAILURE marker is present (_COMPILE_FAIL_RE).
+    Fires ONCE per run (dose latch). LEAK-SAFE BY CONSTRUCTION: reports only a COUNT
+    and the category word — it never quotes source lines, symbols, or test names,
+    so no graded identifier can cross. Pushes MORE work; never signals 'done'."""
+    global _l5_build_fail_fired
+    if _l5_build_fail_fired or _GT_BASELINE or not out_text:
+        return ""
+    # Activation: artifact-wins, the SAME gate as the (retired) T2 checklist —
+    # the obligations_v2 json is written only when GT_OBLIGATIONS_V2=1 at brief
+    # time. Flag OFF -> no artifact -> guard silent -> byte-identical to prior GT.
+    if _load_obligations_v2() is None:
+        return ""
+    if phase not in (Phase.VERIFY, Phase.SUBMIT):
+        return ""
+    if _source_edit_count == 0:
+        return ""
+    if not (_BUILD_RE.search(cmd or "") or _TEST_RUNNER_RE.search(cmd or "")):
+        return ""
+    if _ENV_FAIL_RE.search(out_text):
+        return ""
+    hits = _COMPILE_FAIL_RE.findall(out_text)
+    if not hits:
+        return ""
+    _l5_build_fail_fired = True
+    _n = len(hits)
+    return ('\n<gt-nudge reason="unresolved_build_failure">\nGT: your last build/type-check '
+            "run reported %d unresolved compile/type-check error(s). The grader builds your "
+            "patch — a passing subset of runtime tests does NOT clear a broken build. Resolve "
+            "them before you submit; do not skip, silence, or delete the failing check."
+            "\n</gt-nudge>" % _n)
+
+
 # Semantic-drift candidate (2026-06-23): wires the previously-DEAD
 # src/groundtruth/hooks/semantic_check (guard/return diff before/after an edit)
 # into the live DeepSWE turn loop. A source edit that silently DELETES a guard
@@ -4935,6 +5008,7 @@ def _reset_oracle_state() -> None:
     # these leaks "already fired" into the next case, suppressing the very steer under test.
     global _source_edit_count, _oracle_review_fired, _oblig_final_shot_fired
     global _l5_finish_fired, _l5_failure_fired, _l5_notest_fired, _marker_sent
+    global _l5_build_fail_fired
     global _horizon_urgent_fired, _horizon_pivot_fired, _horizon_gate_fire_count
     # A6 (2026-07-05): latches ADDED this session. _ROOT_FALLBACK_ACTIVE is behaviour-
     # affecting (gates _snippet_attests) — a leak from a root-missing case would drop rows
@@ -5004,6 +5078,7 @@ def _reset_oracle_state() -> None:
     _oblig_final_shot_fired = False
     _l5_finish_fired = False
     _l5_failure_fired = False
+    _l5_build_fail_fired = False
     _l5_notest_fired = False
     _marker_sent = False
     _horizon_urgent_fired = False
@@ -7598,6 +7673,15 @@ def _augment_output(action, out) -> None:
                     _crash_emit("l5.failure")
                     _l5f = ""
                 cands.append((_SEV_STUCK, "l5.failure", _l5f, True))
+                # Move-2 (2026-07-08): ground-truth submit guard — the retired T2
+                # checklist's replacement. Fires only at VERIFY/SUBMIT on an
+                # UNRESOLVED compile/type-check failure (the un-nudged class).
+                try:
+                    _l5b = _l5_unresolved_build_guard(cmd, _orig_out, _detect_phase())
+                except Exception:  # noqa: BLE001 — one producer must not kill the gate
+                    _crash_emit("l5.build_fail")
+                    _l5b = ""
+                cands.append((_SEV_NUDGE_VERIFY, "l5.build_fail", _l5b, True))
                 try:
                     _l5nt = _l5_no_test_evidence_nudge(cmd, _orig_out)
                 except Exception:  # noqa: BLE001 — one producer must not kill the gate
@@ -7843,6 +7927,9 @@ def _augment_output(action, out) -> None:
             _fn = _l5_failure_nudge(cmd, _orig_out)
             if _fn:
                 out["output"] = (out.get("output") or "") + _fn
+            _fb = _l5_unresolved_build_guard(cmd, _orig_out, _detect_phase())
+            if _fb:
+                out["output"] = (out.get("output") or "") + _fb
             _nt = _l5_no_test_evidence_nudge(cmd, _orig_out)
             if _nt:
                 out["output"] = (out.get("output") or "") + _nt
