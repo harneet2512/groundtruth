@@ -241,7 +241,32 @@ def gate_resolution(db: str) -> bool:
     )
     det = det if isinstance(det, int) else 0
     name_match = name_match if isinstance(name_match, int) else 0
-    det_pct = 100.0 * det / edges
+    # pred_A denominator = the DELIVERABLE population (conf>=0.5) — the SAME >=0.5 delivery floor
+    # every fact consumer applies (see the DELIVERED note below) and the population pred_B measures.
+    # The raw CALLS count includes the field_based candidate overlay (GT_FIELD_CANDIDATES K-fanout,
+    # conf 0.2) that is FILTERED at delivery, so counting it in the denominator dilutes det% and
+    # FALSE-fails field-heavy repos (Go/Rust structs: boa 8.04% raw -> 37.44% deliverable; prometheus
+    # 11.58% -> 58.11%) even though the DELIVERED map is fact-dominant. Monotonic vs the raw
+    # denominator (det% can only rise) -> no previously-passing graph regresses; pred_B still
+    # fail-closes a genuinely guess-dominated DELIVERED map. Fail-closed fallback to the raw
+    # population on a stale/degenerate schema (edges.confidence absent -> no conf>=0.5 rows).
+    deliverable = _q1(
+        con, "SELECT count(*) FROM edges WHERE type='CALLS' AND COALESCE(confidence,0) >= 0.5"
+    )
+    det_deliverable = _q1(
+        con,
+        f"SELECT count(*) FROM edges WHERE type='CALLS' AND resolution_method IN ({det_ph}) "
+        "AND COALESCE(confidence,0) >= 0.5",
+        tuple(_DET_SET),
+    )
+    if isinstance(deliverable, int) and deliverable > 0 and isinstance(det_deliverable, int):
+        det_pct = 100.0 * det_deliverable / deliverable
+        det_pct_basis = "deliverable_conf_ge_0.5"
+    else:
+        deliverable = edges
+        det_deliverable = det
+        det_pct = 100.0 * det / edges if edges else 0.0
+        det_pct_basis = "raw_all_calls_stale_schema_fallback"
 
     # DELIVERED partition (bookkeeping honesty). pred_B asks "is the agent's call MAP a
     # guess?" — so it must be measured over the population the agent NAVIGATES, which
@@ -333,7 +358,8 @@ def gate_resolution(db: str) -> bool:
 
     print(
         f"[GATE 1 RESOLUTION/JARVIS] {'PASS' if ok else 'FAIL'} "
-        f"CALLS_edges={edges} deterministic={det} ({det_pct:.8f}%) name_match={name_match}"
+        f"CALLS_edges={edges} deterministic={det} deliverable={deliverable} "
+        f"det%={det_pct:.8f} (basis={det_pct_basis}) name_match={name_match}"
     )
     print(
         f"  DELIVERED (non-test-source, conf>=0.5): deterministic={det_delivered} "
@@ -372,6 +398,9 @@ def gate_resolution(db: str) -> bool:
         "deterministic_edges_delivered": _f8(det_delivered),
         "name_match_edges_delivered": _f8(nm_delivered),
         "det_pct": _f8(det_pct),
+        "det_pct_basis": det_pct_basis,
+        "deliverable_edges": _f8(deliverable),
+        "deterministic_edges_deliverable": _f8(det_deliverable),
         "safety_det_floor_pct": _f8(SAFETY_DET_FLOOR_PCT),
         "typing_fired": bool(typing_fired),
         "typing_tier_counts": {k: int(v) for k, v in tier_counts.items()},
