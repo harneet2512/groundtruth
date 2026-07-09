@@ -220,13 +220,14 @@ model:
     max_tokens: 16384
     presence_penalty: 0
     frequency_penalty: 0
-    # LLM REQUEST TIMEOUT (anti-infinite-hang — matches the baseline config). A stalled/dead
-    # connection (bytes stop, no exception) would hang forever; `timeout` bounds each
-    # litellm.completion so a stall raises litellm.Timeout (classified INFRA_MODEL_TIMEOUT,
-    # excluded from the resolved denominator). NOT a retry / NOT a re-roll — fail-fast transport
-    # guard, the ONLY hang protection with num_retries removed. 900s = measured floor (a full
-    # max_tokens turn is <=~820s), so it fires only on a dead stall, never clipping a legit turn.
-    timeout: 900
+    # BASELINE-MATCH (2026-07-09): the GT-off baseline ran num_retries=3 + NO LLM timeout. Removing
+    # num_retries + adding timeout:900 was a MISCONFIGURATION that handicapped GT-on (fragile to
+    # transient API 5xx/429/timeout vs the baseline's resilience). num_retries is a legitimate litellm
+    # TRANSPORT retry (resends a FAILED call — no answer, no re-roll, does NOT touch pass@1), NOT the
+    # write->test->fix answer-ring (GT_SELF_VERIFY_ATTEMPTS, still 0). Restore parity with the baseline:
+    num_retries: 3
+    # timeout: REMOVED for baseline parity (baseline had no model timeout; num_retries handles transient
+    # failures; env timeout 3600s + step_limit still bound the run — baseline ran this with 0 infra).
     extra_body:
       thinking:
         type: disabled
