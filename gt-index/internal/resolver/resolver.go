@@ -413,6 +413,16 @@ type ResolvedCall struct {
 	CandidateCount int     // number of resolution candidates (1=unambiguous)
 	TrustTier      string  // CERTIFIED, CANDIDATE, SPECULATIVE
 	EvidenceType   string  // ast_call, ast_import, name_match
+	// ReceiverType is CALL-SITE PROVENANCE for a receiver-PROVEN method-call edge: the
+	// class name the resolver proved the receiver to be when it resolved obj.method()
+	// structurally (self/this/Self CHA, import_type, field_type, param_type, assignment
+	// type_flow, return_type). Empty on every receiver-BLIND or name_match edge and on
+	// the UNPROVEN cross-scope/unproven-qualifier fallbacks — a guess never carries a
+	// fact-shaped receiver tag (correct-or-quiet). Serialized additively onto
+	// edges.metadata as a `receiver_type=<T>` tag (cmd/gt-index/main.go), the same
+	// `;`-separated key=value convention the promote pass uses for `dataflow=`. Purely
+	// additive: zero-value "" leaves the edge's metadata byte-identical to before.
+	ReceiverType string
 }
 
 // edgeKey is used for deduplication.
@@ -2563,6 +2573,9 @@ func Resolve(
 								conf = 0.95
 								evidence = "inheritance_chain"
 							}
+							// Provenance: the receiver's static type is the caller's ENCLOSING
+							// class (self/this/Self, or the Go named receiver). For an inherited
+							// method the target lives on a parent, but the receiver IS the child.
 							putEdge(ResolvedCall{
 								SourceNodeID:   callerID,
 								TargetNodeID:   targetID,
@@ -2573,6 +2586,7 @@ func Resolve(
 								CandidateCount: 1,
 								TrustTier:      tierFor(conf),
 								EvidenceType:   evidence,
+								ReceiverType:   nodeMeta[0][callerMeta.ParentID].Name,
 							})
 							continue
 						}
@@ -2831,6 +2845,7 @@ func Resolve(
 														CandidateCount: 1,
 														TrustTier:      tierFor(0.95),
 														EvidenceType:   "import_scoped_type",
+														ReceiverType:   cm.Name,
 													})
 													goto nextCall
 												}
@@ -2961,6 +2976,7 @@ func Resolve(
 												CandidateCount: 1,
 												TrustTier:      tierFor(0.9),
 												EvidenceType:   "field_type",
+												ReceiverType:   className2b,
 											})
 											goto nextCall
 										}
@@ -3019,6 +3035,7 @@ func Resolve(
 												CandidateCount: 1,
 												TrustTier:      tierFor(0.9),
 												EvidenceType:   "param_type",
+												ReceiverType:   className194a,
 											})
 											goto nextCall
 										}
@@ -3190,6 +3207,13 @@ func Resolve(
 										conf195 = 0.6
 										evid195 = "type_qualified_unproven"
 									}
+									// Provenance ONLY on the receiver-PROVEN branch (same-file/imported,
+									// 0.9). The unproven `.`-qualified match (0.6) is a name-shared guess,
+									// not a proven receiver → no receiver tag (correct-or-quiet).
+									recvType195 := ""
+									if evid195 == "type_qualified" {
+										recvType195 = cm.Name
+									}
 									putEdge(ResolvedCall{
 										SourceNodeID:   callerID,
 										TargetNodeID:   targetID,
@@ -3200,6 +3224,7 @@ func Resolve(
 										CandidateCount: 1,
 										TrustTier:      tierFor(conf195),
 										EvidenceType:   evid195,
+										ReceiverType:   recvType195,
 									})
 									goto nextCall
 								}
@@ -3299,6 +3324,13 @@ func Resolve(
 												conf196 = 0.6
 												evid196 = "assignment_tracked_crossscope"
 											}
+											// Provenance ONLY when the receiver type is proven in the
+											// caller's OWN scope. A type borrowed from a DIFFERENT function's
+											// write (crossscope, 0.6) is not proven here → no receiver tag.
+											recvType196 := ""
+											if scopeProven {
+												recvType196 = className
+											}
 											putEdge(ResolvedCall{
 												SourceNodeID:   callerID,
 												TargetNodeID:   targetID,
@@ -3309,6 +3341,7 @@ func Resolve(
 												CandidateCount: 1,
 												TrustTier:      tierFor(conf196),
 												EvidenceType:   evid196,
+												ReceiverType:   recvType196,
 											})
 											goto nextCall
 										}
@@ -3356,6 +3389,13 @@ func Resolve(
 								fxConf = 0.6
 							}
 						}
+						// Provenance ONLY on the depth-1 chained hop (0.9, parity with single-hop
+						// 1.96). A receiver whose type was inferred at a DEEPER round (0.6) is not
+						// proven at this call site → no receiver tag (correct-or-quiet).
+						recvTypeFx := ""
+						if fxConf == 0.9 {
+							recvTypeFx = className
+						}
 						for _, classID := range a3SingleClass(className, call.File, nodeIDs, metaMap, fileNodeIDs, importIndex) {
 							cm, hasMeta := metaMap[classID]
 							if !hasMeta || (cm.Label != "Class" && cm.Label != "Struct" && cm.Label != "Interface") {
@@ -3372,6 +3412,7 @@ func Resolve(
 									CandidateCount: 1,
 									TrustTier:      tierFor(fxConf),
 									EvidenceType:   "fixpoint",
+									ReceiverType:   recvTypeFx,
 								})
 								goto nextCall
 							}
@@ -3439,6 +3480,7 @@ func Resolve(
 												CandidateCount: 1,
 												TrustTier:      tierFor(0.85),
 												EvidenceType:   "return_type_flow",
+												ReceiverType:   cm.Name,
 											})
 											goto nextCall
 										}

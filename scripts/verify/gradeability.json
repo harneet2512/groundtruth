@@ -1,0 +1,24 @@
+{
+  "_schema": "gt.gradeability.v1",
+  "_purpose": "Single source of truth for whether the LOCAL harness can grade a DeepSWE task. Read by scripts/verify/deepswe_outcome.py (ungradeable_reason_for). A task in known_ungradeable is classified UNGRADEABLE (excluded from the resolved denominator, never a regression) UNLESS a cached verified_gradeable gold->1 entry clears it. Fail-OPEN: a task absent from BOTH maps is assumed gradeable (this file lists exceptions + proofs only, not all 113 tasks).",
+  "_rules": [
+    "known_ungradeable: the GOLD solution itself scores reward 0 on the local harness (grader broken here, not the agent). Requires evidence: a gold-patch grading run producing reward 0 with n_err 0.",
+    "verified_gradeable: a cached gold->1 proof (the gold patch scored reward 1 locally). Clears a known_ungradeable entry and lets the task's real outcomes count.",
+    "Never guess. An entry without evidence is not admissible. 'Assumed gradeable' is the DEFAULT (absence), not a claim."
+  ],
+  "known_ungradeable": {
+    "eicrud-keyset-pagination-cursor": "Real DB-server task: /app/test.sh starts `mongod --bind_ip 127.0.0.1 --dbpath /data/db` then runs 24 jest suites x2, each doing a full NestJS app-boot + mongo-seed in beforeAll. On the box the heavy suites exceed jest's 30s hook timeout -> suites fail -> reward 0 EVEN ON THE GOLD SOLUTION (GT-off, no agent: New tests exit 0, Baseline exit 1 = 36 hook timeouts, FINAL_REWARD 0). tmpfs (mongo on RAM) is the only lever (36->7 timeouts) and the residual is irreducible single-thread mongo/app-boot speed vs datacurve's Modal. Box-env-blocked; datacurve Modal grades it 4/4. Evidence: parity session 2026-07-07 gold-grade run."
+  },
+  "verified_gradeable": {
+    "true-myth-iterable-collection-combinators": {
+      "gold_reward": 1,
+      "empty_reward": 0,
+      "method": "P0 gate (gold->1 AND empty->0) on the local box, pier 0.2.0 / v1.0.0 test.sh grading",
+      "evidence": "parity session 2026-07-07: gold applied -> reward 1; GT-off agent run also mean 1.0",
+      "date": "2026-07-07"
+    }
+  },
+  "_pending_verification": [
+    "kysely (exact instance_id UNCONFIRMED): observed gold->reward 1 with 0 timeouts in the 2026-07-07 parity session, but the precise task slug was not recorded. Add to verified_gradeable ONLY after confirming the id against the manifest — an entry keyed by a guessed id is inert (never matches) and violates the never-guess rule."
+  ]
+}

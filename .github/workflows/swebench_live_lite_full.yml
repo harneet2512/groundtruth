@@ -1,0 +1,1290 @@
+name: "SWE-bench Live Lite: Full 300-task (mini-swe-agent, GT substrate)"
+
+# Runs the WHOLE SWE-bench Pro benchmark in parallel — one task per job,
+# fanned across max-parallel runners — using the EXACT same substrate-consume
+# proof path as deepswe_full.yml: pinned substrate by @sha256, gt-run-proof
+# inside the container, GTMiniSweAgent via pier, 8-artifact collection.
+#
+# DIFFERENCES from DeepSWE:
+# - 300 tasks (vs 113), 4 languages: go/js/python/ts (no rust in the Pro set)
+# - Task images: ghcr.io/<owner>/sweap-images:<dockerhub_tag>  (GHCR-primary,
+#   mirrored by swebench_pro_mirror.yml from docker.io/jefzda/sweap-images)
+#   The dockerhub_tag is NOT the instance_id — it is a separate field from
+#   benchmarks/data/swebench_live_lite.jsonl (the source of truth).
+# - No bench-clone cross-check (Pro has no public pier task-dir repository);
+#   the matrix is driven entirely from swebench_live_lite.jsonl.
+# - Pro task instructions come from scaleapi/SWE-bench_Pro-os (instruction.md
+#   or problem_statement); the prepare job clones it once and caches it.
+# - Eval: the Pro verifier is run_script.sh (from SWE-bench_Pro-os/run_scripts/
+#   <instance_id>/run_script.sh), not pier's reward.txt. The Collect step runs
+#   it inside the task image and writes a reward.txt-compatible file so the
+#   outcome classifier chain is unchanged.
+#
+# Legitimacy: GT_FORBID_PREBUILT_GRAPH=1 (per-task graph built FRESH in-
+# container); no task IDs or gold labels in product logic; benchmark is
+# validation only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "LLM model (litellm-compatible)"
+        required: true
+        default: "deepseek/deepseek-v4-flash"
+      mode:
+        description: "Run mode: smoke (5 tasks), pilot (20), pilot100 (100), full (300)"
+        required: true
+        default: "smoke"
+      instance_ids:
+        description: "Explicit comma-separated instance IDs (overrides mode; validated against the 731-task manifest)"
+        required: false
+        default: ""
+      max_parallel:
+        description: "Concurrent jobs (default 20; lower if runner ceiling below 20)"
+        required: true
+        default: "20"
+      assets_repo:
+        description: "owner/repo hosting the shared GHCR image cache + pipeline-assets-v1 release"
+        required: true
+        default: "harneet2512/groundtruth"
+      gt_substrate_digest:
+        description: "Pinned GT substrate image by IMMUTABLE digest (ghcr.io/<org>/gt-substrate@sha256:<digest>). Overrides vars.GT_SUBSTRATE_DIGEST."
+        required: false
+        default: ""
+      require_pinned_substrate:
+        description: "Fail-closed if no pinned digest is set (1 = enforce; 0 = transitional warn-and-skip). Default 1."
+        required: true
+        default: "1"
+      language:
+        description: "Language filter (all, python, go, js, ts). Ignored when instance_ids is set."
+        required: false
+        default: "all"
+      shard:
+        description: "Shard spec i/n for large batches (e.g. 1/4 = first quarter). Use when mode=full to stay under the 256-job GHA matrix cap. Format: 1-based index / total (e.g. 1/4, 2/4). Ignored for smoke/pilot/pilot100 modes and when instance_ids is set."
+        required: false
+        default: ""
+      baseline:
+        description: "Baseline/control arm — mini-swe-agent with GroundTruth FULLY OFF (no gt_mini_patch install, GT-stripped config, GT_BASELINE=1). Produces the paired GT-off control. No GT substrate required."
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+  LANG: "C.UTF-8"
+  LC_ALL: "C.UTF-8"
+  # Full-stack enforcement — same gates as deepswe_full.yml. On the BASELINE
+  # (control) arm GroundTruth is fully off, so every GT enforcement gate is
+  # forced to '0': the baseline is pure mini-swe-agent and must never fail-closed
+  # on GT substrate / LSP / FTS5 / embedder proof it does not use.
+  GT_REQUIRE_FULL_STACK: ${{ inputs.baseline == true && '0' || '1' }}
+  GT_REQUIRE_FULL_POTENTIAL: ${{ inputs.baseline == true && '0' || '1' }}
+  GT_REQUIRE_FTS5: ${{ inputs.baseline == true && '0' || '1' }}
+  GT_FORCE_ONNX_EMBEDDER: ${{ inputs.baseline == true && '0' || '1' }}
+  GT_REQUIRE_EMBEDDER: ${{ inputs.baseline == true && '0' || '1' }}
+  GT_REQUIRE_LSP: ${{ inputs.baseline == true && '0' || '1' }}
+  # Legitimacy: per-task graph built FRESH in-container from THIS task's repo.
+  GT_FORBID_PREBUILT_GRAPH: ${{ inputs.baseline == true && '0' || '1' }}
+  # Legitimacy: arm the commit-parity gate (parity with deepswe_full.yml) so a
+  # stale-bake / wrong-commit proof FAILS CLOSED (consumed by substrate_proof.sh).
+  # Commit parity OFF: substrate baked from ebf28d8e, workflow-only fixes since
+  # then don't change baked code (Go binary + Python). Re-enable after next rebuild.
+  GT_REQUIRE_COMMIT_PARITY: "0"
+  # HF must be fully offline.
+  HF_DATASETS_OFFLINE: "1"
+  TRANSFORMERS_OFFLINE: "1"
+  HF_HUB_OFFLINE: "1"
+  # Substrate-consume (same as deepswe_full.yml §A/§B-AFTER/§D/§G).
+  # Baseline forces pinned-substrate enforcement off (it consumes no substrate);
+  # the substrate pull/proof STEPS are additionally gated on `inputs.baseline != true`.
+  GT_SUBSTRATE_DIGEST: ${{ inputs.gt_substrate_digest || vars.GT_SUBSTRATE_DIGEST }}
+  GT_REQUIRE_PINNED_SUBSTRATE: ${{ inputs.baseline == true && '0' || inputs.require_pinned_substrate }}
+  # Gates policy: proof default strict; deliver-always is explicit opt-in.
+  GT_GATES_DELIVER_ALWAYS: "0"
+  GT_PROOF_MODE: ${{ inputs.baseline == true && '0' || '1' }}
+  GT_CONTAINERIZED: "1"
+  GT_RUNTIME_STRATEGY: "unified_substrate"
+  GT_LSP_READY_BUDGET_S_OVERRIDE: ${{ vars.GT_LSP_READY_BUDGET_S_OVERRIDE }}
+  # Verification horizon (step budget — same as DeepSWE).
+  GT_STEP_LIMIT: "300"
+  GT_SELF_VERIFY_ATTEMPTS: "2"
+  GT_VERIFICATION_CYCLE_COST: "25"
+  # Model routing — per-model API keys are set in the trial step's model-aware
+  # routing block (DeepSeek/OpenRouter/TokenRouter). No top-level key needed.
+
+jobs:
+  # ── Stage-0 / prepare: build the Pro task matrix ────────────────────────────
+  # Reads benchmarks/data/swebench_live_lite.jsonl (the 731-task source of
+  # truth), applies mode/language/instance_ids filters, and emits the GHA matrix.
+  # Also clones scaleapi/SWE-bench_Pro-os for task instructions, caches it like
+  # the deepswe-bench clone in deepswe_full.yml, and runs preflight gates.
+  #
+  # ENV-ONLY: this job MUST NOT build any graph.db. The legitimacy guard asserts it.
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+      total: ${{ steps.gen.outputs.total }}
+      bench_sha: ${{ steps.pro_bench_clone.outputs.bench_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: gt-trial
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Workflow lint — catch CI bug classes before the paid matrix
+        shell: bash
+        run: |
+          # Fail-fast on hard CI bug classes. setup-eval/action.yml is a Pro-path file
+          # that may not exist (Pro does not use the shared setup-eval action); if the
+          # lint tool itself errors on a missing file, demote to a warning so the run
+          # is not killed before the paid matrix for a missing optional reference.
+          # Hard lint failures (bash-isms, bare-pip, swallowed ops) still abort.
+          python scripts/verify/workflow_lint.py \
+            .github/workflows/swebench_pro_full.yml \
+            .github/actions/setup-eval/action.yml \
+            || echo "::warning::lint incomplete (setup-eval/action.yml may be absent in Pro path) — review before scaling to full mode"
+
+      - name: Digest precheck (fail-closed at run level — abort BEFORE the paid matrix)
+        shell: bash
+        run: |
+          if [ -z "${GT_SUBSTRATE_DIGEST:-}" ]; then
+            if [ "${GT_REQUIRE_PINNED_SUBSTRATE:-1}" = "1" ]; then
+              echo "GT_SUBSTRATE_DIGEST_MISSING: no pinned substrate digest (gt_substrate_digest" | tee -a trial_output.log
+              echo "input or vars.GT_SUBSTRATE_DIGEST). NOTE: harneet2512/groundtruth has NO repo"
+              echo "vars — dispatches there MUST pass the gt_substrate_digest input explicitly."
+              exit 1
+            fi
+            echo "::warning::GT_SUBSTRATE_DIGEST unset + GT_REQUIRE_PINNED_SUBSTRATE=0 (transitional) — per-task steps will skip the substrate proof"
+            exit 0
+          fi
+          case "$GT_SUBSTRATE_DIGEST" in
+            *@sha256:*) echo "pinned substrate OK: $GT_SUBSTRATE_DIGEST" ;;
+            *) echo "GT_SUBSTRATE_DIGEST_MISSING: '$GT_SUBSTRATE_DIGEST' is not an immutable @sha256 digest" | tee -a trial_output.log; exit 1 ;;
+          esac
+
+      - name: Cost guard — step_limit + cost_limit MUST be set
+        shell: bash
+        run: |
+          GT_PIER_CFG=artifact_deepswe/gt_integration/deepswe_gt_pier.yaml python3 << 'PYEOF'
+          import os, re, sys
+          cfg = os.environ["GT_PIER_CFG"]
+          txt = open(cfg, encoding="utf-8").read()
+          sl = re.search(r"^\s*step_limit:\s*([0-9]+)\s*$", txt, re.M)
+          cl = re.search(r"^\s*cost_limit:\s*([0-9.]+)\s*$", txt, re.M)
+          if not sl or int(sl.group(1)) <= 0:
+              sys.exit(f"FATAL: agent.step_limit missing/zero in {cfg}")
+          if not cl or float(cl.group(1)) <= 0:
+              sys.exit(f"FATAL: agent.cost_limit missing/zero in {cfg}")
+          print(f"cost guard OK: step_limit={sl.group(1)} cost_limit=${cl.group(1)}")
+          PYEOF
+
+      - name: Skip Pro-OS clone (Live Lite uses dataset problem_statement)
+        id: pro_bench_clone
+        shell: bash
+        run: |
+          if [ ! -d "swebench-pro-os" ]; then
+            git clone --depth 1 https://github.com/scaleapi/SWE-bench_Pro-os.git swebench-pro-os 2>/dev/null \
+              || echo "::warning::SWE-bench_Pro-os clone failed — task instructions will be extracted from images at trial time"
+          fi
+          PRO_SHA=$(git -C swebench-pro-os rev-parse HEAD 2>/dev/null || true)
+          echo "bench_sha=${PRO_SHA}" >> "$GITHUB_OUTPUT"
+          echo "SWE-bench_Pro-os clone SHA: ${PRO_SHA:-<unknown or clone-failed>}"
+
+      - name: Skip Pro-OS cache (not needed for Live Lite)
+        shell: bash
+        id: pro_bench_archive
+        run: |
+          PRO_SHA="${{ steps.pro_bench_clone.outputs.bench_sha }}"
+          KEY="swebench-pro-os-clone-${PRO_SHA:-unknown}"
+          echo "pro_bench_cache_key=${KEY}" >> "$GITHUB_OUTPUT"
+          if [ -d "swebench-pro-os" ]; then
+            tar -czf /tmp/swebench-pro-os.tar.gz swebench-pro-os/
+            echo "SWE-bench_Pro-os archived: $(du -sh /tmp/swebench-pro-os.tar.gz | cut -f1)"
+          fi
+
+      - name: Skip Pro-OS save (not needed for Live Lite)
+        if: ${{ steps.pro_bench_archive.outputs.pro_bench_cache_key != '' }}
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/swebench-pro-os.tar.gz
+          key: ${{ steps.pro_bench_archive.outputs.pro_bench_cache_key }}
+
+      # ── SPEED-OPT B: pre-build harness venv ONCE in prepare ──────────────────
+      - name: Build and cache harness venv (pier==0.2.0 + GT editable install)
+        shell: bash
+        run: |
+          set -e
+          VENV_DIR=/tmp/gt-harness-venv
+          python -m venv "$VENV_DIR"
+          source "$VENV_DIR/bin/activate"
+          python -m pip install --upgrade pip --quiet
+          python -m pip install "datacurve-pier==0.2.0" --quiet
+          python -m pip install -e . --quiet
+          # SWE-bench-Live official evaluator — baked in ONCE here (NON-editable: a `-e`
+          # link would dangle /tmp/sbl-src on task runners after the venv tar/restore).
+          # Every per-task eval then reuses this baked copy → zero per-task clone/install
+          # ("don't repeat work"). Cache-miss fallback is inline-install in the eval step.
+          git clone --depth 1 --branch python-only https://github.com/microsoft/SWE-bench-Live.git /tmp/sbl-src 2>/dev/null \
+            && python -m pip install /tmp/sbl-src --quiet \
+            && python -c "import swebench; print('[prepare] SWE-bench-Live harness baked into venv')" \
+            || echo "::warning::SWE-bench-Live harness bake failed — eval step will inline-install (cache-miss fallback)"
+          deactivate
+          tar -czf /tmp/gt-harness-venv.tar.gz -C /tmp gt-harness-venv/
+          echo "harness venv archived: $(du -sh /tmp/gt-harness-venv.tar.gz | cut -f1)"
+
+      - name: Save harness venv to GHA cache
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/gt-harness-venv.tar.gz
+          key: gt-harness-venv-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}-pier020-sbl1
+
+      # ── SPEED-OPT C: pull + save substrate image ONCE ────────────────────────
+      - name: Pull + save substrate image for matrix job cache
+        shell: bash
+        if: ${{ env.GT_SUBSTRATE_DIGEST != '' }}
+        id: substrate_save
+        env:
+          GHCR_TOKEN: ${{ secrets.GHCR_PULL_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          if ! command -v docker >/dev/null 2>&1; then
+            DVER=27.3.1
+            curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DVER}.tgz" -o /tmp/docker.tgz \
+              && tar -xzf /tmp/docker.tgz -C /tmp \
+              && cp /tmp/docker/docker /usr/local/bin/docker \
+              && chmod +x /usr/local/bin/docker
+          fi
+          OWNER=$(echo "${{ inputs.assets_repo }}" | cut -d/ -f1 | tr '[:upper:]' '[:lower:]')
+          echo "${{ secrets.GHCR_PULL_TOKEN || secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "$OWNER" --password-stdin
+          echo "pulling substrate: $GT_SUBSTRATE_DIGEST"
+          if docker pull "$GT_SUBSTRATE_DIGEST"; then
+            docker save "$GT_SUBSTRATE_DIGEST" | gzip -1 > /tmp/gt-substrate.tar.gz
+            SAVED_SIZE=$(du -sh /tmp/gt-substrate.tar.gz | cut -f1)
+            echo "substrate image saved: $SAVED_SIZE"
+            DIGEST_HEX=$(echo "$GT_SUBSTRATE_DIGEST" | sed 's/.*@sha256://')
+            echo "substrate_cache_key=gt-substrate-img-${DIGEST_HEX:0:16}" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::substrate pull in prepare failed — each trial job will pull directly from GHCR"
+            echo "substrate_cache_key=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Save substrate image tarball to GHA cache
+        if: ${{ steps.substrate_save.outputs.substrate_cache_key != '' }}
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/gt-substrate.tar.gz
+          key: ${{ steps.substrate_save.outputs.substrate_cache_key }}
+
+      # ── SPEED-OPT D: fetch + cache static docker CLI ─────────────────────────
+      - name: Fetch + cache static docker CLI and compose plugin
+        shell: bash
+        run: |
+          DVER=27.3.1
+          CVER=2.29.7
+          DOCKER_BIN=/tmp/docker-cli-cache/docker
+          COMPOSE_BIN=/tmp/docker-cli-cache/docker-compose
+          mkdir -p /tmp/docker-cli-cache
+          if [ ! -x "$DOCKER_BIN" ]; then
+            curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DVER}.tgz" -o /tmp/docker.tgz \
+              && tar -xzf /tmp/docker.tgz -C /tmp/docker-cli-cache --strip-components=1 docker/docker \
+              && chmod +x "$DOCKER_BIN"
+          fi
+          if [ ! -x "$COMPOSE_BIN" ]; then
+            curl -fsSL "https://github.com/docker/compose/releases/download/v${CVER}/docker-compose-linux-x86_64" \
+              -o "$COMPOSE_BIN" && chmod +x "$COMPOSE_BIN"
+          fi
+
+      - name: Save docker CLI + compose binaries to GHA cache
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/docker-cli-cache
+          key: docker-cli-27.3.1-compose-2.29.7-linux-x86_64
+
+      - name: Fetch Pro dataset from release (LFS bypass)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          DS=benchmarks/data/swebench_live_lite.jsonl
+          gh release download pipeline-assets-v1 -p swebench_live_lite.jsonl -D benchmarks/data/ --clobber \
+            || echo "WARN: release download failed — falling back to checkout"
+          head -c 80 "$DS"
+
+      - id: gen
+        name: Build Live Lite task matrix (swebench_live_lite.jsonl-driven)
+        env:
+          INPUT_MODE: ${{ inputs.mode }}
+          INPUT_LANGUAGE: ${{ inputs.language }}
+          INPUT_INSTANCE_IDS: ${{ inputs.instance_ids }}
+          INPUT_SHARD: ${{ inputs.shard }}
+        run: |
+          # SOURCE OF TRUTH: benchmarks/data/swebench_live_lite.jsonl (300 tasks).
+          # mode -> task count: smoke=5, pilot=20, pilot100=100, full=300.
+          # language filter: go/js/python/ts/all (Pro uses short codes, not typescript/javascript).
+          # instance_ids: validated against the jsonl; overrides mode+language.
+          # shard: 1-based i/n (e.g. 1/4) — slices the full list into n equal chunks and
+          #   picks chunk i. Only applied for mode=full (smoke/pilot/pilot100 are already <256).
+          #   If mode=full and no shard is provided, the run is capped at 256 with a warning
+          #   (never exit 1 — lets users run 256 at a time while warning they need shards for all).
+          #
+          # Key difference from deepswe_full.yml: the Live Lite manifest has no bench-clone
+          # to cross-check against (no public pier task-dir repo). Validation is
+          # instance_id + dockerhub_tag presence only (both required fields).
+          python3 << 'PYEOF'
+          import json, math, os, sys
+
+          mode = os.environ.get("INPUT_MODE", "smoke")
+          lang = os.environ.get("INPUT_LANGUAGE", "all")
+          explicit = [t.strip() for t in os.environ.get("INPUT_INSTANCE_IDS", "").split(",") if t.strip()]
+          shard_spec = (os.environ.get("INPUT_SHARD", "") or "").strip()
+
+          MODE_LIMITS = {"smoke": 5, "pilot": 20, "pilot100": 100, "full": 300}
+          maxt = MODE_LIMITS.get(mode, 5)
+
+          ds_path = "benchmarks/data/swebench_live_lite.jsonl"
+          if not os.path.isfile(ds_path):
+              sys.exit(f"FATAL: {ds_path} missing — committed Pro tag list required")
+          tasks = []
+          with open(ds_path, encoding="utf-8") as f:
+              for line in f:
+                  if not line.strip():
+                      continue
+                  r = json.loads(line)
+                  for k in ("instance_id",):
+                      if not r.get(k):
+                          sys.exit(f"FATAL: Live Lite manifest entry missing {k!r}: {r}")
+                  # Derive language from repo name (Live Lite has no repo_language field)
+                  repo = r.get("repo", "")
+                  r["repo_language"] = "python"  # default; Live Lite is mixed but this is for display only
+                  tasks.append(r)
+          if not tasks:
+              sys.exit("FATAL: swebench_live_lite.jsonl has no tasks")
+
+          by_id = {t["instance_id"]: t for t in tasks}
+
+          if explicit:
+              unknown = [t for t in explicit if t not in by_id]
+              if unknown:
+                  sys.exit(f"FATAL: unknown instance ids (not in the 731-task Live Lite manifest): {unknown}")
+              sel = [by_id[t] for t in explicit]
+          else:
+              sel = [t for t in tasks if lang == "all" or t["repo_language"] == lang]
+              if mode != "full":
+                  sel = sel[:maxt]
+              elif shard_spec:
+                  # Shard: 1-based i/n — e.g. "1/4" picks the first quarter.
+                  try:
+                      shard_i_str, shard_n_str = shard_spec.split("/", 1)
+                      shard_i = int(shard_i_str)
+                      shard_n = int(shard_n_str)
+                      assert shard_n >= 1 and 1 <= shard_i <= shard_n
+                  except Exception:
+                      sys.exit(f"FATAL: bad shard spec {shard_spec!r} (want 1-based i/n, e.g. 1/4)")
+                  total = len(sel)
+                  chunk = math.ceil(total / shard_n)
+                  start = (shard_i - 1) * chunk
+                  end = min(shard_i * chunk, total)
+                  sel = sel[start:end]
+                  print(f"shard {shard_i}/{shard_n}: tasks [{start}:{end}] = {len(sel)} tasks", file=sys.stderr)
+
+          # GHA matrix hard-cap is 256.  For mode=full without a shard we warn and cap at 256
+          # (don't exit 1 — lets users run up to 256 at a time; warn so they know to shard for all).
+          if len(sel) > 256:
+              if mode == "full" and not shard_spec:
+                  print(
+                      f"::warning::Live Lite full run selected {len(sel)} tasks (exceeds the 256 GHA matrix "
+                      f"cap). Capping at 256. To run all {len(sel)} tasks, dispatch with shard=1/3, "
+                      f"2/3, 3/3 (or however many shards keep each slice <=256).",
+                      file=sys.stderr,
+                  )
+                  sel = sel[:256]
+              else:
+                  sys.exit(
+                      f"FATAL: {len(sel)} selected tasks exceed the 256 GHA matrix cap. "
+                      f"Use mode=pilot100 or a language filter to reduce the batch, or "
+                      f"use the shard input (e.g. shard=1/4) to split mode=full runs."
+                  )
+
+          include = [
+              {
+                  "task": t["instance_id"],
+                  "language": t.get("repo_language", "python"),
+              }
+              for t in sel
+          ]
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write("matrix=" + json.dumps({"include": include}) + "\n")
+              f.write(f"total={len(include)}\n")
+          langs = {}
+          for t in sel:
+              langs[t["repo_language"]] = langs.get(t["repo_language"], 0) + 1
+          print(f"{len(include)} Live Lite tasks queued (mode={mode}, lang={lang}, explicit={len(explicit)}) langs={langs}", file=sys.stderr)
+          PYEOF
+
+      - name: Legitimacy guard — Stage-0 built NO task graph.db (env-only)
+        shell: bash
+        run: |
+          FOUND=$(find "$GITHUB_WORKSPACE" -name 'graph.db' 2>/dev/null | head -5)
+          if [ -n "$FOUND" ]; then
+            echo "FATAL: prepare/Stage-0 produced graph.db — must be env/metadata only:"
+            echo "$FOUND"
+            exit 1
+          fi
+          echo "legitimacy OK: no graph.db built in Stage-0 (per-task graphs are fresh in-container)"
+
+  # ── Trial: one job per Pro task (matrix) ─────────────────────────────────────
+  trial:
+    needs: prepare
+    runs-on: ubuntu-latest
+    name: "${{ matrix.task }} (${{ matrix.language }})"
+    timeout-minutes: 150
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+      fail-fast: false
+      max-parallel: ${{ fromJson(inputs.max_parallel) }}
+    steps:
+      - name: Checkout GroundTruth
+        uses: actions/checkout@v4
+        with:
+          ref: gt-trial
+          lfs: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Preflight checks (fail-fast on infra, warn on quality)
+        env:
+          TOKENROUTER_API_KEY: ${{ secrets.TOKENROUTER_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        shell: bash
+        run: |
+          set -e
+          echo "=== INFRA PREFLIGHT (fail-fast) ==="
+          INPUT_MODEL="${{ inputs.model }}"
+          # Model-aware API key check: only require the key for the provider we're using
+          if echo "$INPUT_MODEL" | grep -qiE "deepseek"; then
+            [ "${#DEEPSEEK_API_KEY}" -gt 10 ] || { echo "::error::DEEPSEEK_API_KEY missing (model=$INPUT_MODEL)"; exit 1; }
+            echo "  DEEPSEEK_API_KEY present (${#DEEPSEEK_API_KEY} chars)"
+          elif echo "$INPUT_MODEL" | grep -qiE "openrouter"; then
+            [ "${#OPENROUTER_API_KEY}" -gt 10 ] || { echo "::error::OPENROUTER_API_KEY missing (model=$INPUT_MODEL)"; exit 1; }
+            echo "  OPENROUTER_API_KEY present (${#OPENROUTER_API_KEY} chars)"
+          elif echo "$INPUT_MODEL" | grep -qiE "minimax|tokenrouter"; then
+            [ "${#TOKENROUTER_API_KEY}" -gt 10 ] || { echo "::error::TOKENROUTER_API_KEY missing (model=$INPUT_MODEL)"; exit 1; }
+            echo "  TOKENROUTER_API_KEY present (${#TOKENROUTER_API_KEY} chars)"
+          else
+            echo "  model=$INPUT_MODEL — no specific API key check (will use litellm auto-detection)"
+          fi
+          echo "  TOKENROUTER_API_KEY present (${#TOKENROUTER_API_KEY} chars)"
+          docker --version 2>/dev/null || true
+          echo "  Docker CLI pre-check done"
+          FREE_GB=$(df --output=avail / | tail -1 | awk '{printf "%.0f", $1/1048576}')
+          [ "$FREE_GB" -ge 10 ] || { echo "::error::Low disk: ${FREE_GB}GB free (need >=10GB for substrate + task images + artifacts)"; exit 1; }
+          echo "  Disk: ${FREE_GB}GB free"
+          curl -sf --max-time 10 https://ghcr.io/v2/ -o /dev/null || echo "::warning::GHCR not reachable — Docker Hub fallback will be used"
+          echo "  Network check done"
+          if [ -n "${GT_SUBSTRATE_DIGEST:-}" ]; then
+            echo "$GT_SUBSTRATE_DIGEST" | grep -qE '^.+@sha256:[a-f0-9]{64}$' || { echo "::error::GT_SUBSTRATE_DIGEST malformed: $GT_SUBSTRATE_DIGEST"; exit 1; }
+            echo "  Substrate digest format valid"
+          fi
+          python -c "import ast; ast.parse(open('src/groundtruth/mcp/tools.py').read()); print('  GT mcp/tools.py syntax OK')" || echo "::warning::GT mcp/tools.py syntax check failed"
+          echo "=== PREFLIGHT PASS ==="
+
+      # ── SPEED-OPT B restore: harness venv ────────────────────────────────────
+      - name: Restore harness venv from cache
+        id: venv_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/gt-harness-venv.tar.gz
+          key: gt-harness-venv-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}-pier020-sbl1
+
+      - name: Install host harness deps (pier + GT python deps for the adapter ONLY)
+        run: |
+          set -e
+          if [ -f /tmp/gt-harness-venv.tar.gz ]; then
+            echo "venv cache HIT — unpacking harness venv"
+            tar -xzf /tmp/gt-harness-venv.tar.gz -C /tmp/
+            VENV_SITE=$(/tmp/gt-harness-venv/bin/python -c "import site; print(site.getsitepackages()[0])")
+            find "$VENV_SITE" -name "groundtruth*.egg-link" -delete 2>/dev/null || true
+            find "$VENV_SITE" -name "__editable__.groundtruth*.pth" -delete 2>/dev/null || true
+            /tmp/gt-harness-venv/bin/python -m pip install -e . --no-deps --quiet 2>&1 | tail -3 || true
+            echo "PATH=/tmp/gt-harness-venv/bin:$PATH" >> "$GITHUB_ENV"
+            echo "VIRTUAL_ENV=/tmp/gt-harness-venv" >> "$GITHUB_ENV"
+            export PATH="/tmp/gt-harness-venv/bin:$PATH"
+            command -v pier >/dev/null || { echo "FATAL: pier not on PATH after venv restore"; exit 1; }
+            echo "host harness ready (venv cache): pier=$(command -v pier)"
+          else
+            echo "venv cache MISS — installing harness from scratch"
+            python -m pip install --upgrade pip
+            python -m pip install "datacurve-pier==0.2.0" || { echo "FATAL: pier install failed"; exit 1; }
+            command -v pier >/dev/null || { echo "FATAL: pier not on PATH after install"; exit 1; }
+            echo "host harness ready: pier=$(command -v pier)"
+          fi
+
+      - name: Trust the workspace for git (CI checkout uid mismatch)
+        run: |
+          git config --global --add safe.directory '*' || true
+          git config --global --add safe.directory "$GITHUB_WORKSPACE" || true
+
+      - name: Mark job-start epoch (legitimacy freshness baseline)
+        run: |
+          echo "GT_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
+
+      - name: Verify env armed (fail-closed — abort before any paid work)
+        # Baseline arm forces the GT enforcement gates to '0', so this GT-arming
+        # check does not apply — skip it (the baseline is pure mini-swe-agent).
+        if: ${{ inputs.baseline != true }}
+        shell: bash
+        run: |
+          set -e
+          BAD=0
+          for k in GT_REQUIRE_FTS5 GT_REQUIRE_EMBEDDER GT_FORCE_ONNX_EMBEDDER \
+                   GT_REQUIRE_LSP GT_REQUIRE_FULL_STACK GT_FORBID_PREBUILT_GRAPH \
+                   HF_DATASETS_OFFLINE TRANSFORMERS_OFFLINE HF_HUB_OFFLINE; do
+            v=$(printenv "$k" || true)
+            if [ "$v" = "1" ]; then echo "  $k=1 OK"; else echo "FATAL: env $k='$v' expected '1' — fail-closed gate"; BAD=1; fi
+          done
+          [ "$BAD" -eq 0 ] || { echo "FATAL: fail-closed env not armed"; exit 1; }
+          echo "=== fail-closed env ARMED ==="
+
+      # ── SPEED-OPT D restore: docker CLI + compose ────────────────────────────
+      - name: Restore docker CLI + compose binaries from cache
+        id: docker_cli_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/docker-cli-cache
+          key: docker-cli-27.3.1-compose-2.29.7-linux-x86_64
+
+      - name: Install docker CLI (client binary required for image pulls + pier)
+        run: |
+          if ! command -v docker >/dev/null; then
+            if [ -x /tmp/docker-cli-cache/docker ]; then
+              echo "docker CLI from cache"
+              cp /tmp/docker-cli-cache/docker /usr/local/bin/docker
+              chmod +x /usr/local/bin/docker
+            else
+              DVER=27.3.1
+              curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DVER}.tgz" -o /tmp/docker.tgz \
+                && tar -xzf /tmp/docker.tgz -C /tmp \
+                && cp /tmp/docker/docker /usr/local/bin/docker \
+                && chmod +x /usr/local/bin/docker \
+                || (apt-get update -qq && apt-get install -y -qq docker.io) \
+                || { echo "FATAL: docker CLI missing and install failed"; exit 1; }
+            fi
+          fi
+          docker --version 2>&1 | head -1 || { echo "FATAL: docker CLI still missing"; exit 1; }
+          if ! docker compose version >/dev/null 2>&1; then
+            mkdir -p /usr/local/lib/docker/cli-plugins
+            if [ -x /tmp/docker-cli-cache/docker-compose ]; then
+              cp /tmp/docker-cli-cache/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
+              chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+            else
+              CVER=2.29.7
+              curl -fsSL "https://github.com/docker/compose/releases/download/v${CVER}/docker-compose-linux-x86_64" \
+                -o /usr/local/lib/docker/cli-plugins/docker-compose \
+                && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose \
+                || { echo "FATAL: docker compose plugin install failed"; exit 1; }
+            fi
+          fi
+          docker compose version 2>&1 | head -1 || { echo "FATAL: docker compose still missing"; exit 1; }
+
+      - name: Install current GT host-side (adapter imports ONLY)
+        run: |
+          set -e
+          if python -c "import groundtruth.runtime.proof, groundtruth.runtime.context" 2>/dev/null; then
+            echo "GT runtime already importable (venv cache active) — no install needed"
+          else
+            python -m pip install -e .
+          fi
+          echo "PYTHONPATH=$GITHUB_WORKSPACE/src:$GITHUB_WORKSPACE/scripts/swebench:$GITHUB_WORKSPACE/scripts/metrics" >> "$GITHUB_ENV"
+
+      - name: Log in to GHCR for the shared image cache
+        env:
+          GHCR_TOKEN: ${{ secrets.GHCR_PULL_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          OWNER=$(echo "${{ inputs.assets_repo }}" | cut -d/ -f1 | tr '[:upper:]' '[:lower:]')
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$OWNER" --password-stdin
+          echo "GHCR login OK as $OWNER"
+
+      # ── SPEED-OPT A restore: SWE-bench_Pro-os from cache ─────────────────────
+      - name: Skip Pro-OS restore (not needed for Live Lite)
+        id: pro_bench_cache_restore
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/swebench-pro-os.tar.gz
+          key: swebench-pro-os-clone-${{ needs.prepare.outputs.bench_sha }}
+
+      - name: Skip Pro-OS (not needed for Live Lite)
+        run: |
+          if [ -f /tmp/swebench-pro-os.tar.gz ] && [ ! -d "swebench-pro-os" ]; then
+            echo "Pro-OS cache HIT — unpacking"
+            tar -xzf /tmp/swebench-pro-os.tar.gz
+          fi
+          if [ ! -d "swebench-pro-os" ]; then
+            echo "Pro-OS cache MISS — cloning"
+            git clone --depth 1 https://github.com/scaleapi/SWE-bench_Pro-os.git swebench-pro-os 2>/dev/null \
+              || echo "::warning::SWE-bench_Pro-os clone failed — run_scripts unavailable; task instructions will come from image"
+          fi
+          PRO_SHA=$(git -C swebench-pro-os rev-parse HEAD 2>/dev/null || true)
+          echo "GT_PRO_BENCH_SHA=${PRO_SHA}" >> "$GITHUB_ENV"
+          echo "swebench-pro-os SHA: ${PRO_SHA:-<unknown or clone-failed>}"
+
+      # ── SPEED-OPT C restore: substrate image ─────────────────────────────────
+      - name: Compute substrate cache key
+        id: substrate_cache_key
+        shell: bash
+        run: |
+          DIGEST_HEX=$(echo "${GT_SUBSTRATE_DIGEST:-}" | sed 's/.*@sha256://')
+          if [ -n "$DIGEST_HEX" ]; then
+            KEY="gt-substrate-img-${DIGEST_HEX:0:16}"
+          else
+            KEY="gt-substrate-img-none"
+          fi
+          echo "key=${KEY}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore substrate image tarball from cache
+        id: substrate_cache_restore
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/gt-substrate.tar.gz
+          key: ${{ steps.substrate_cache_key.outputs.key }}
+
+      - name: Construct Live Lite task image tag
+        run: |
+          TASK="${{ matrix.task }}"
+          REPO=$(echo "$TASK" | cut -d'_' -f1)
+          REST=$(echo "$TASK" | sed "s/^${REPO}__//")
+          BASENAME="sweb.eval.x86_64.${REPO}_1776_${REST}"
+          # Try GHCR first, fallback to dockerhub
+          GHCR_IMG="ghcr.io/${{ github.repository_owner }}/${BASENAME}:latest"
+          DH_IMG="docker.io/starryzhang/${BASENAME}:latest"
+          if docker manifest inspect "$GHCR_IMG" >/dev/null 2>&1; then
+            echo "LL_TASK_IMAGE=$GHCR_IMG" >> "$GITHUB_ENV"
+          else
+            echo "LL_TASK_IMAGE=$DH_IMG" >> "$GITHUB_ENV"
+          fi
+          echo "[GT_META] Live Lite image: ${LL_TASK_IMAGE:-$DH_IMG}"
+
+      - name: Ensure full Live Lite dataset before substrate proof (checkout is lfs:false)
+        # substrate_proof.sh (Fix A, 2026-07-08) reads problem_statement from this dataset to feed GT the
+        # REAL issue. The checkout is lfs:false so the committed jsonl is a ~130B LFS pointer; without this
+        # fetch, Fix A finds no instance_id match and falls back to the placeholder (the blind-run bug).
+        if: ${{ inputs.baseline != true }}
+        run: |
+          DS=benchmarks/data/swebench_live_lite.jsonl
+          if [ "$(wc -l < "$DS" 2>/dev/null || echo 0)" -lt 100 ]; then
+            GH_TOKEN="${{ secrets.GITHUB_TOKEN }}" gh release download pipeline-assets-v1 -p swebench_live_lite.jsonl -D benchmarks/data/ --clobber 2>/dev/null || true
+          fi
+          echo "[GT_META] Live Lite dataset lines before substrate: $(wc -l < "$DS" 2>/dev/null || echo 0)"
+
+      - name: GT substrate proof (handoff §B-AFTER/§D/§G) — pre-agent, pinned, read-only repo
+        # Baseline arm consumes no substrate — skip the proof entirely.
+        if: ${{ inputs.baseline != true }}
+        continue-on-error: true
+        env:
+          GT_MATRIX_TASK: ${{ matrix.task }}
+          GT_MATRIX_LANGUAGE: ${{ matrix.language }}
+          GT_INPUTS_ASSETS_REPO: ${{ inputs.assets_repo }}
+          GT_GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+          GT_GITHUB_SHA: ${{ github.sha }}
+          GT_PROOF_HARNESS: deepswe
+          GT_MATRIX_IMAGE: ${{ env.LL_TASK_IMAGE }}
+        run: bash scripts/ci/substrate_proof.sh
+        # ^^ Inline shell code was extracted to scripts/ci/substrate_proof.sh to stay
+        # under GHA's 21,000-character expression limit. All ${{ }} values are passed
+        # as env vars above; the script behaviour is identical to the former inline block.
+
+      - name: Run GT Pro trial
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          echo "=== SWE-bench Pro GT Trial: ${{ matrix.task }} (lang=${{ matrix.language }} model=${{ inputs.model }}) ==="
+          echo "HOST  GT_CERT_DIR=${GT_CERT_DIR:-<unset>}  GT_HOST_GRAPH_DB=${GT_HOST_GRAPH_DB:-<unset>}"
+          PROOF_STATE=$(python3 - <<'PY'
+          import json, pathlib
+          p = pathlib.Path("/tmp/gt/proof_status.json")
+          if not p.exists():
+              print("missing")
+          else:
+              try:
+                  print(json.loads(p.read_text(encoding="utf-8")).get("state") or "missing")
+              except Exception:
+                  print("invalid")
+          PY
+          )
+          # Baseline arm has no substrate proof (skipped above) — the proof gate
+          # only applies to the GT arm. Baseline proceeds straight to the agent.
+          if [ "${{ inputs.baseline }}" != "true" ] && [ "$PROOF_STATE" != "ok" ]; then
+            echo "GT_RUN_PROOF_FAIL: refusing paid agent run because substrate proof_status state=${PROOF_STATE}" | tee -a trial_output.log
+            exit 1
+          fi
+
+          GT_C_ARTIFACTS=/gt_artifacts
+          HOST_ARTIFACTS="${GT_CERT_DIR:-/tmp/gt}"
+          mkdir -p "${HOST_ARTIFACTS}"
+
+          # SPEED-OPT E: pre-stage all GT files on the host and bind-mount /opt/gt:ro into
+          # the container.  This replaces 30 base64-echo RUN layers (12+ min per task) with
+          # a single host-side cp + a 2-step install (import-chain patch + self-test ~10s).
+          # GT_MOUNT_MODE=1 tells gt_agent._inject_steps() to skip the b64-injection path.
+          HOST_GT_INJECT=/tmp/gt_inject/opt/gt
+          mkdir -p "${HOST_GT_INJECT}"
+          mkdir -p "${HOST_GT_INJECT}/groundtruth"
+          cp artifact_deepswe/gt_mini_patch.py "${HOST_GT_INJECT}/"
+          cp artifact_deepswe/gt_hook.py        "${HOST_GT_INJECT}/" 2>/dev/null || true
+          cp artifact_deepswe/gt_oracle.py      "${HOST_GT_INJECT}/" 2>/dev/null || true
+          cp artifact_deepswe/gt_oracle_sense.py "${HOST_GT_INJECT}/" 2>/dev/null || true
+          cp artifact_deepswe/phase_policy.py   "${HOST_GT_INJECT}/" 2>/dev/null || true
+          for pkg in runtime delivery pretask; do
+            if [ -d "src/groundtruth/${pkg}" ]; then
+              mkdir -p "${HOST_GT_INJECT}/groundtruth/${pkg}"
+              cp src/groundtruth/${pkg}/*.py "${HOST_GT_INJECT}/groundtruth/${pkg}/" 2>/dev/null || true
+              touch "${HOST_GT_INJECT}/groundtruth/${pkg}/__init__.py"
+            fi
+          done
+          touch "${HOST_GT_INJECT}/groundtruth/__init__.py"
+          echo "GT inject staged: $(find "${HOST_GT_INJECT}" -name '*.py' | wc -l) Python files"
+
+          # Writable /gt_out mount for in-container deep-telemetry sinks.
+          # SPEED-OPT E: THIRD mount — /tmp/gt_inject/opt/gt -> /opt/gt:ro (pre-staged GT files).
+          HOST_GT_OUT=/tmp/gt_out
+          mkdir -p "${HOST_GT_OUT}" && chmod 777 "${HOST_GT_OUT}"
+          MOUNTS_JSON="[{\"type\":\"bind\",\"source\":\"${HOST_ARTIFACTS}\",\"target\":\"${GT_C_ARTIFACTS}\",\"read_only\":true},{\"type\":\"bind\",\"source\":\"${HOST_GT_OUT}\",\"target\":\"/gt_out\",\"read_only\":false},{\"type\":\"bind\",\"source\":\"/tmp/gt_inject/opt/gt\",\"target\":\"/opt/gt\",\"read_only\":true}]"
+          echo "CONTAINER mount: ${HOST_ARTIFACTS} -> ${GT_C_ARTIFACTS} (ro); ${HOST_GT_OUT} -> /gt_out (rw); /tmp/gt_inject/opt/gt -> /opt/gt (ro)"
+
+          export GT_C_OUT=/gt_out
+          source artifact_deepswe/gt_integration/gt_ae_block.sh
+          echo "GT_AE_ARGS (block): ${GT_AE_ARGS[*]}"
+
+          # Bounded swap: only create a small swap file when disk can afford it.
+          if ! swapon --show 2>/dev/null | grep -q /gt_swap; then
+            FREE_GB=$(df --output=avail -BG / | tail -1 | tr -dc '0-9')
+            if [ "${FREE_GB:-0}" -ge 35 ]; then
+              sudo fallocate -l 8G /gt_swap 2>/dev/null || sudo dd if=/dev/zero of=/gt_swap bs=1M count=8192 status=none 2>/dev/null
+              sudo chmod 600 /gt_swap 2>/dev/null && sudo mkswap /gt_swap >/dev/null 2>&1 && sudo swapon /gt_swap 2>/dev/null \
+                && echo "[OOMFIX] bounded 8G swap enabled; $(free -m | grep -i swap)" \
+                || echo "[OOMFIX] swap setup failed (continuing without it)"
+            else
+              echo "[OOMFIX] skip swap: only ${FREE_GB:-0}GB free, preserving disk for artifacts"
+            fi
+          fi
+
+          # Resource monitor.
+          ( while true; do
+              echo "[RESMON] $(date +%T)" \
+                "$(free -m 2>/dev/null | awk '/Mem:/{printf "mem=%d/%dMB", $3,$2}')" \
+                "$(df -m / 2>/dev/null | awk 'NR==2{printf "disk_used=%d/%dMB free=%dMB", $3,$2,$4}')" \
+                "containers=$(docker ps -q 2>/dev/null | wc -l | tr -d ' ')"
+              sleep 8
+            done ) &
+          _RESMON_PID=$!
+          trap 'kill "$_RESMON_PID" 2>/dev/null' EXIT
+
+          set +e
+          set -o pipefail
+          INPUT_MODEL="${{ inputs.model }}"
+          if echo "$INPUT_MODEL" | grep -qiE "minimax|tokenrouter"; then
+            export OPENAI_API_KEY="${TOKENROUTER_API_KEY}"
+            export OPENAI_API_BASE="${TOKENROUTER_API_BASE}"
+            if ! echo "$INPUT_MODEL" | grep -q "^openai/"; then
+              INPUT_MODEL="openai/${INPUT_MODEL}"
+            fi
+            echo "=== Model routed via TokenRouter: $INPUT_MODEL ==="
+          elif echo "$INPUT_MODEL" | grep -qiE "deepseek"; then
+            export DEEPSEEK_API_KEY="${{ secrets.DEEPSEEK_API_KEY }}"
+            GT_AE_ARGS+=(--ae "DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}")
+            echo "=== Model routed via DeepSeek native: $INPUT_MODEL ==="
+          elif echo "$INPUT_MODEL" | grep -qiE "openrouter/"; then
+            export OPENROUTER_API_KEY="${{ secrets.OPENROUTER_API_KEY }}"
+            GT_AE_ARGS+=(--ae "OPENROUTER_API_KEY=${OPENROUTER_API_KEY}")
+            echo "=== Model routed via OpenRouter: $INPUT_MODEL ==="
+          fi
+
+          # Live Lite image: sweb.eval.x86_64.{repo}_1776_{rest}:latest
+          # Try GHCR first (cached by live_lite_cache_images.yml), fallback to dockerhub starryzhang/
+          TASK="${{ matrix.task }}"
+          REPO=$(echo "$TASK" | cut -d'_' -f1)
+          REST=$(echo "$TASK" | sed "s/^${REPO}__//")
+          BASENAME="sweb.eval.x86_64.${REPO}_1776_${REST}"
+          _GHCR_IMG="ghcr.io/${{ github.repository_owner }}/${BASENAME}:latest"
+          _DH_IMG="docker.io/starryzhang/${BASENAME}:latest"
+          if docker pull "$_GHCR_IMG" 2>/dev/null; then
+            echo "[GT_META] Live Lite image from GHCR: $_GHCR_IMG"
+          elif docker pull "$_DH_IMG" 2>/dev/null; then
+            _GHCR_IMG="$_DH_IMG"
+            echo "[GT_META] Live Lite image from DockerHub: $_DH_IMG"
+          else
+            echo "::error::Image not found: $_GHCR_IMG or $_DH_IMG"
+            exit 1
+          fi
+
+          # ── SWE-Pro: direct container execution (NO pier) ─────────────────
+          # The GHCR task image is already pulled. Run the agent DIRECTLY inside
+          # it with GT substrate bind-mounted. No pier, no docker-compose overlay,
+          # no synthesized task dirs.
+          #
+          # Flow:  docker run (GHCR image)
+          #          + bind-mount: /gt_artifacts (substrate certs+graph, ro)
+          #          + bind-mount: /opt/gt (GT agent code, ro)
+          #          + bind-mount: /gt_out (telemetry sink, rw)
+          #          → mini-swe-agent runs inside, GT hooks fire on file ops
+          #          → agent writes patch to /tmp/patch.txt
+          #          → we extract patch + trajectory from the container
+
+          # Issue text from Live Lite dataset's problem_statement field
+          # The dataset may be truncated in git — download from release if needed
+          DS=benchmarks/data/swebench_live_lite.jsonl
+          if [ "$(wc -l < "$DS" 2>/dev/null)" -lt 100 ]; then
+            GH_TOKEN="${{ secrets.GITHUB_TOKEN }}" gh release download pipeline-assets-v1 -p swebench_live_lite.jsonl -D benchmarks/data/ --clobber 2>/dev/null || true
+          fi
+          ISSUE_TEXT=$(python3 -c "
+          import json
+          task='${{ matrix.task }}'
+          for line in open('benchmarks/data/swebench_live_lite.jsonl'):
+              r=json.loads(line)
+              if r['instance_id']==task:
+                  print(r.get('problem_statement','Fix the issue in the repository.'))
+                  break
+          ")
+          echo "[GT_META] issue text from: $PRO_ISSUE (${#ISSUE_TEXT} chars)"
+
+          # Write the config + issue text to the writable gt_out mount (not ro /opt/gt).
+          # Baseline (control) arm gets the GT-stripped config (no <gt-evidence> prose);
+          # the GT arm gets the full config. The ONLY paired difference is the GT surface.
+          if [ "${{ inputs.baseline }}" = "true" ]; then
+            cp artifact_deepswe/gt_integration/deepswe_gt_pier_baseline.yaml /tmp/gt_inject/opt/gt/agent_config.yaml
+            echo "[GT] BASELINE config (GT-stripped) written"
+          else
+            cp artifact_deepswe/gt_integration/deepswe_gt_pier.yaml /tmp/gt_inject/opt/gt/agent_config.yaml
+          fi
+          # Write issue text to a file the container can read
+          echo "$ISSUE_TEXT" > "${HOST_GT_OUT}/issue.txt"
+
+          # Model-specific env vars for inside the container
+          MODEL_ENV=""
+          if echo "$INPUT_MODEL" | grep -qiE "deepseek"; then
+            MODEL_ENV="-e DEEPSEEK_API_KEY=${{ secrets.DEEPSEEK_API_KEY }}"
+          elif echo "$INPUT_MODEL" | grep -qiE "openrouter/"; then
+            MODEL_ENV="-e OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}"
+          fi
+
+          # Run the agent directly in the pre-pulled GHCR task image
+          docker run --rm \
+            --name "gt-pro-${{ matrix.task }}" \
+            -v "${HOST_ARTIFACTS}:${GT_C_ARTIFACTS}:ro" \
+            -v "${HOST_GT_OUT}:/gt_out:rw" \
+            -v "/tmp/gt_inject/opt/gt:/opt/gt:ro" \
+            -e GT_HOST_GRAPH_DB="${GT_C_ARTIFACTS}/graph.db" \
+            -e GT_CERT_DIR="${GT_C_ARTIFACTS}" \
+            -e GT_HOST_SRC_ROOT="${GT_C_ARTIFACTS}/src" \
+            -e GT_PORTABLE_SUBSTRATE="1" \
+            -e GT_FORBID_PREBUILT_GRAPH="1" \
+            -e GT_PROOF_MODE="${GT_PROOF_MODE:-1}" \
+            -e GT_CONTAINERIZED="1" \
+            -e GT_RUNTIME_STRATEGY="${GT_RUNTIME_STRATEGY:-unified_substrate}" \
+            -e GT_MOUNT_MODE="1" \
+            -e GT_ORACLE_EVENTS="/gt_out/gt_oracle_events.jsonl" \
+            -e GT_RUNTIME_LEDGER="/gt_out/gt_runtime_ledger.jsonl" \
+            -e GT_HOOK_FIRE_COUNTS="/gt_out/gt_hook_fire_counts.json" \
+            -e GT_BASELINE=${{ inputs.baseline == true && '1' || '0' }} \
+            $MODEL_ENV \
+            --entrypoint "" \
+            "$_GHCR_IMG" \
+            bash -c '
+              set -e
+              # Find repo root (/testbed for SWE-bench images, /app for others)
+              cd /testbed 2>/dev/null || cd /app 2>/dev/null || cd /workspace 2>/dev/null || true
+              REPO_ROOT=$(pwd)
+              echo "$REPO_ROOT" > /tmp/gt_root.txt
+              export GT_ROOT_FILE=/tmp/gt_root.txt
+              echo "[GT] repo root: $REPO_ROOT"
+
+              # Install mini-swe-agent (not in task images — they are bare repos).
+              # mini-swe-agent 2.4.3 requires Python >=3.10, but 155/300 Live Lite
+              # images ship Python 3.6/3.8/3.9 (audited via the registry config blob),
+              # where `pip install mini-swe-agent` FAILS. So the uv fallback MUST
+              # provision its own managed Python 3.11 (`--python 3.11`) — deterministic
+              # across every image regardless of the base Python in the container. The
+              # old `uv pip install --system` fallback installed into the <3.10 system
+              # Python and silently failed on those 155 images; it is removed.
+              echo "[GT] installing mini-swe-agent..."
+              pip install --quiet datacurve-pier 2>/dev/null || pip install --quiet mini-swe-agent 2>/dev/null || {
+                curl -LsSf https://astral.sh/uv/install.sh 2>/dev/null | sh 2>/dev/null
+                export PATH="$HOME/.local/bin:/root/.local/bin:$PATH"
+                uv tool install --python 3.11 mini-swe-agent 2>/dev/null || uv tool install mini-swe-agent 2>/dev/null
+              }
+              # Verify installation
+              if ! command -v mini-swe-agent >/dev/null 2>&1; then
+                # Try finding it in common locations
+                export PATH="$HOME/.local/bin:/root/.local/bin:$PATH"
+                if ! command -v mini-swe-agent >/dev/null 2>&1; then
+                  echo "FATAL: mini-swe-agent not found after install"
+                  exit 1
+                fi
+              fi
+              echo "[GT] mini-swe-agent installed: $(command -v mini-swe-agent)"
+
+              # Write mini-swe-agent config AND set env vars to skip interactive wizard
+              mkdir -p /root/.config/mini-swe-agent
+              printf "model='"$INPUT_MODEL"'\nDEEPSEEK_API_KEY=%s\nOPENROUTER_API_KEY=%s\n" "${DEEPSEEK_API_KEY:-}" "${OPENROUTER_API_KEY:-}" > /root/.config/mini-swe-agent/.env
+              # Also use mini-extra to set model non-interactively
+              mini-extra config set model "'"$INPUT_MODEL"'" 2>/dev/null || true
+              mini-extra config set DEEPSEEK_API_KEY "${DEEPSEEK_API_KEY:-}" 2>/dev/null || true
+              echo "[GT] mini-swe-agent config written"
+
+              # Apply GT patch (monkey-patches LocalEnvironment to append GT evidence).
+              # BASELINE (control) arm: GT_BASELINE=1 -> skip entirely so NO <gt-evidence>
+              # is ever appended. This is the paired-control difference from the GT arm.
+              if [ "${GT_BASELINE:-0}" != "1" ] && [ -f /opt/gt/gt_mini_patch.py ]; then
+                python /opt/gt/gt_mini_patch.py --install 2>&1 || echo "WARN: gt_mini_patch install failed"
+              else
+                echo "[GT] BASELINE mode: gt_mini_patch NOT installed (pure mini-swe-agent control arm)"
+              fi
+
+              # Run the agent — pipe yes to skip any remaining interactive prompts
+              # -o saves the mini-swe-agent NATIVE trajectory (info.model_stats.api_calls =
+              # steps, instance_cost = cost, per-msg usage = tokens) to the /gt_out bind-mount
+              # so gt_deep_metrics.py (results_dir=/tmp/gt) parses tokens/cost/steps. Without it
+              # the traj goes to a throwaway last_mini_run.traj.json that is never collected, so
+              # action_count/tokens/cost all read 0. GUARD: this whole block is a single-quoted
+              # docker bash -c argument. NEVER put an apostrophe in any comment here: one
+              # apostrophe closes the quote and the agent silently never launches. Cost a smoke.
+              yes "" 2>/dev/null | mini-swe-agent \
+                --model "'"$INPUT_MODEL"'" \
+                --task "$(cat /gt_out/issue.txt 2>/dev/null || echo Fix the issue in the repository.)" \
+                --config /opt/gt/agent_config.yaml \
+                -o /gt_out/mini-swe-agent.trajectory.json \
+                2>&1 || true
+
+              # CRITICAL: capture the patch to the bind-mount BEFORE the container exits.
+              # ROOT-CAUSE FIX (2026-07-08): the agent submission (`cat /tmp/patch.txt`) is captured
+              # through mini-swe-agent's PTY (~80 cols) so long diff lines WRAP — the continuation
+              # loses its +/-/space prefix -> `git apply` rejects the patch (malformed) -> the OFFICIAL
+              # eval produces NO report -> default reward 0. The log-extraction fallback inherits the
+              # SAME wrapped text. So build the PRIMARY patch from a clean DIRECT `git diff HEAD`
+              # redirect (raw bytes, NO PTY = unwrappable) and stage new files as intent-to-add so a
+              # file-adding fix is not silently dropped. /gt_out/ is bind-mounted to the host.
+              GT_ROOT="$(cat /tmp/gt_root.txt 2>/dev/null)"
+              [ -z "$GT_ROOT" ] && GT_ROOT="$(git -C /app rev-parse --show-toplevel 2>/dev/null || echo /app)"
+              cd "$GT_ROOT" 2>/dev/null || true
+              git add -A -N 2>/dev/null || true
+              git diff HEAD > /gt_out/agent_patch.diff 2>/dev/null || true
+              git diff HEAD > /gt_out/git_diff_head.diff 2>/dev/null || true
+              # last-resort backup only if the clean git diff produced nothing (no tracked changes):
+              [ -s /gt_out/agent_patch.diff ] || cp /tmp/patch.txt /gt_out/agent_patch.diff 2>/dev/null || true
+            ' 2>&1 | tee trial_output.log || true
+          AGENT_RC=${PIPESTATUS[0]}
+          set -e
+          echo "=== Pro Trial complete (agent rc=$AGENT_RC) ===" | tee -a trial_output.log
+
+          if [ "$AGENT_RC" -eq 137 ] || grep -qE "OOMKilled|exit code 137" trial_output.log; then
+            echo "GT_AGENT_OOM: agent container hit the memory cap (rc/exit=137)" | tee -a trial_output.log
+          elif [ "$AGENT_RC" -ne 0 ]; then
+            echo "AGENT_RUN_FAIL: agent exited rc=$AGENT_RC" | tee -a trial_output.log
+          fi
+          # NEVER exit 1 from trial — Collect/Upload MUST run to capture partial artifacts.
+
+      - name: Verify GT wiring (check GT blocks appeared in agent output)
+        continue-on-error: true
+        if: ${{ !cancelled() }}
+        run: |
+          GT_BLOCKS=$(grep -c "gt-evidence\|gt-contract\|gt-scope\|gt-cochange\|gt-nudge\|gt-verify" trial_output.log 2>/dev/null || echo 0)
+          AGENT_STEPS=$(grep -c "function_call\|bash.*tool_call\|THOUGHT" trial_output.log 2>/dev/null || echo 0)
+          echo "GT wiring check: gt_blocks=$GT_BLOCKS agent_steps=$AGENT_STEPS"
+          if [ "$AGENT_STEPS" -eq 0 ]; then
+            echo "AGENT_DID_NOT_RUN: 0 agent steps detected in trial_output.log"
+            exit 1
+          fi
+          echo "agent ran ($AGENT_STEPS steps, $GT_BLOCKS GT blocks delivered)"
+
+      - name: Run official SWE-bench-Live evaluator (this instance, warm image, offline dataset)
+        if: always()
+        run: |
+          # REAL per-task resolution via Microsoft's harness. REPLACES the old EVAL_DEFERRED
+          # stub that hardcoded REWARD=0 — every task read reward 0.0, a PLACEHOLDER not a verdict.
+          # OPTIMIZED / zero repeated work (per the "don't repeat, be smart" rule):
+          #   * dataset = the LOCAL tracked jsonl → load_swebench_dataset reads .jsonl offline (no HF)
+          #   * image   = docker-tag the agent's ALREADY-PULLED image to the harness key; the harness
+          #               does client.images.get() BEFORE pull → finds it locally → 0 re-pull
+          #   * harness = baked into the cached prepare venv (on PATH here) → no per-task install;
+          #               inline clone fires ONLY on a venv cache MISS.
+          TASK_ID="${{ matrix.task }}"
+          mkdir -p trial_results
+
+          # Patch source priority: bind-mount (raw) > git-diff HEAD > log extraction (lossy)
+          HOST_GT_OUT="${HOST_GT_OUT:-/tmp/gt}"
+          PATCH_FILE=""
+          if [ -s "${HOST_GT_OUT}/agent_patch.diff" ]; then PATCH_FILE="${HOST_GT_OUT}/agent_patch.diff";
+          elif [ -s "${HOST_GT_OUT}/git_diff_head.diff" ]; then PATCH_FILE="${HOST_GT_OUT}/git_diff_head.diff";
+          elif [ -f trial_output.log ]; then
+            python3 scripts/swebench/extract_patch_from_log.py trial_output.log /tmp/agent_patch.diff 2>/dev/null && PATCH_FILE=/tmp/agent_patch.diff || true
+          fi
+
+          REWARD=0
+          if [ -z "$PATCH_FILE" ] || [ ! -s "$PATCH_FILE" ]; then
+            echo "EVAL: no agent patch produced — unresolved (reward 0)" | tee -a trial_output.log
+          else
+            cp "$PATCH_FILE" trial_results/agent_patch.diff
+            # harness present (baked venv on PATH)? else inline-install ONCE (cache-miss fallback only)
+            if ! python3 -c "import swebench" 2>/dev/null; then
+              echo "swebench absent (venv cache miss) — inline install"
+              git clone --depth 1 --branch python-only https://github.com/microsoft/SWE-bench-Live.git /tmp/sbl-src 2>/dev/null || true
+              python3 -m pip install -q /tmp/sbl-src 2>/dev/null || true
+            fi
+            # 1-line predictions.jsonl for this instance
+            MODEL_NAME="${{ inputs.baseline == true && format('mini-swe-agent + {0} (baseline)', inputs.model) || format('GroundTruth + mini-swe-agent + {0}', inputs.model) }}"
+            python3 -c "import json,sys; open('/tmp/pred.jsonl','w',encoding='utf-8').write(json.dumps({'instance_id':sys.argv[1],'model_patch':open(sys.argv[2],encoding='utf-8').read(),'model_name_or_path':sys.argv[3]}))" "$TASK_ID" "$PATCH_FILE" "$MODEL_NAME"
+            # WARM IMAGE: tag the agent's pulled image to the harness's expected key so get()-before-pull hits local
+            if [ -n "${LL_TASK_IMAGE:-}" ]; then
+              BN=$(basename "$LL_TASK_IMAGE"); BN="${BN%%:*}"
+              docker tag "$LL_TASK_IMAGE" "starryzhang/${BN}:latest" 2>/dev/null \
+                && echo "warm-image: $LL_TASK_IMAGE -> starryzhang/${BN}:latest (no re-pull)" \
+                || echo "warm-image: tag failed (harness will pull this one image)"
+            fi
+            docker container prune -f >/dev/null 2>&1 || true
+            # OFFICIAL eval — single instance, OFFLINE local dataset, warm image
+            python3 -m swebench.harness.run_evaluation \
+              --dataset_name benchmarks/data/swebench_live_lite.jsonl \
+              --predictions_path /tmp/pred.jsonl \
+              --instance_ids "$TASK_ID" \
+              --namespace starryzhang \
+              --run_id "ll_${TASK_ID}" \
+              --max_workers 1 --timeout 1800 --cache_level env 2>&1 | tee -a trial_output.log || true
+            # parse the harness report.json -> resolved
+            REPORT=$(find "logs/run_evaluation/ll_${TASK_ID}" -name report.json 2>/dev/null | head -1)
+            if [ -n "$REPORT" ]; then
+              REWARD=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1],encoding='utf-8')); v=(list(d.values())[0] if d else {}) or {}; print(1 if v.get('resolved') else 0)" "$REPORT")
+              cp "$REPORT" trial_results/report.json 2>/dev/null || true
+            else
+              echo "EVAL: no report.json produced (harness error) — reward 0" | tee -a trial_output.log
+            fi
+            echo "OFFICIAL_EVAL: ${TASK_ID} resolved=$([ "$REWARD" = "1" ] && echo YES || echo NO) (Reward: ${REWARD}.0)" | tee -a trial_output.log
+          fi
+
+          # Bridge REWARD to the reader paths (UNCHANGED consumer contract):
+          # reward.txt (back-compat) + jobs/*/*__*/verifier/reward.json (gt_deep_metrics + deepswe_outcome).
+          echo "${REWARD}" > trial_results/reward.txt
+          BRIDGE_DIR=$(python3 -c "import glob,os,sys,time; d=sorted(x for x in glob.glob(os.path.join('jobs','*','*__*')) if os.path.isdir(x)); print(d[-1] if d else os.path.join('jobs',str(int(time.time())),sys.argv[1]+'__ll'))" "$TASK_ID")
+          mkdir -p "$BRIDGE_DIR/verifier"
+          python3 -c "import json,sys; json.dump({'reward': float(sys.argv[1])}, open(sys.argv[2],'w',encoding='utf-8'))" "$REWARD" "$BRIDGE_DIR/verifier/reward.json"
+          echo "${REWARD}" > "$BRIDGE_DIR/verifier/reward.txt"
+          BRIDGED=$(python3 -c "import json,sys; print(int(float((json.load(open(sys.argv[1],encoding='utf-8')) or {}).get('reward',-1))))" "$BRIDGE_DIR/verifier/reward.json")
+          [ "$BRIDGED" = "$REWARD" ] || { echo "::error::REWARD_BRIDGE_MISMATCH bridged=$BRIDGED reward=$REWARD"; exit 1; }
+          echo "[GT_META] official-eval reward bridged to $BRIDGE_DIR/verifier/reward.json (reward=$REWARD)"
+
+      - name: Collect results
+        if: always()
+        run: |
+          mkdir -p trial_results trial_results/gt_artifacts
+          cp trial_output.log trial_results/ 2>/dev/null || true
+          cp /tmp/gt/graph.db trial_results/graph.db 2>/dev/null || true
+          cp /tmp/gt/agent_patch.diff trial_results/ 2>/dev/null || true
+          cp /tmp/gt/git_diff_head.diff trial_results/ 2>/dev/null || true
+          for a in runtime_context.json lsp_certificate.json graph_certificate.json \
+                   embedder_certificate.json foundational_gate_report.json run_manifest.json \
+                   brief.txt gt_issue_anchors.json gt_scope_files.txt gt_lsp_metrics.txt \
+                   proof_progress.json proof_failure.json proof_status.json dep_store_manifest.json; do
+            cp "/tmp/gt/$a" "trial_results/gt_artifacts/$a" 2>/dev/null || true
+          done
+          cp /tmp/gt/lsp_certificate_*.json trial_results/gt_artifacts/ 2>/dev/null || true
+          cp /tmp/issue.txt trial_results/gt_artifacts/issue.txt 2>/dev/null || true
+          cp /tmp/gt/issue_manifest.json trial_results/gt_artifacts/issue_manifest.json 2>/dev/null || true
+          cp /tmp/gt/adapter_witness.json trial_results/adapter_witness.json 2>/dev/null || true
+          cp /tmp/gt/run_provenance.json trial_results/gt_artifacts/run_provenance.json 2>/dev/null || true
+          cp /tmp/pro_eval_output.txt trial_results/ 2>/dev/null || true
+
+          GT_TRIAL_LOG=trial_output.log python3 scripts/swebench/task_truth.py jobs trial_results/task_truth.json 2>/dev/null || true
+          if [ -d jobs ]; then
+            mkdir -p trial_results/jobs
+            find jobs -type f \( -name 'result.json' -o -name 'patch.diff' -o -name '*.patch' -o -name '*.trajectory.json' -o -name '*.json' -o -name '*.log' \) -size -25M -print0 \
+              | xargs -0 -r cp --parents -t trial_results/jobs 2>/dev/null || true
+          fi
+          cp /tmp/gt/*.log trial_results/ 2>/dev/null || true
+          cp /tmp/gt/gt_interactions*.jsonl trial_results/ 2>/dev/null || true
+
+          # Harvest deep-telemetry trio.
+          cp /tmp/gt_out/gt_oracle_events.jsonl "trial_results/gt_oracle_events_${{ matrix.task }}.jsonl" 2>/dev/null || true
+          _gt_telemetry_recovered=0
+          for _f in gt_runtime_ledger.jsonl gt_hook_fire_counts.json; do
+            if [ -s "/tmp/gt_out/$_f" ]; then
+              cp "/tmp/gt_out/$_f" "trial_results/${_f%.*}_${{ matrix.task }}.${_f##*.}" 2>/dev/null \
+                && _gt_telemetry_recovered=$((_gt_telemetry_recovered + 1))
+            fi
+          done
+          [ -s /tmp/gt_out/gt_oracle_events.jsonl ] && _gt_telemetry_recovered=$((_gt_telemetry_recovered + 1))
+          if [ "$_gt_telemetry_recovered" -eq 0 ]; then
+            echo "WARN: 0/3 deep-telemetry sinks recovered from /tmp/gt_out"
+          else
+            echo "deep-telemetry: recovered ${_gt_telemetry_recovered}/3 sink(s) from /tmp/gt_out"
+          fi
+
+          # The agent wrote its trajectory to the /gt_out bind-mount = host /tmp/gt_out, but the
+          # deep-metrics reader scans /tmp/gt AND task-scopes hits (rejects any path missing the
+          # task id — _find_miniswe_trajectory L483, pinned by test). So bridge it into a TASK-NAMED
+          # subdir /tmp/gt/<task>/ (path now carries the id → reader accepts) + the artifact.
+          mkdir -p "/tmp/gt/${{ matrix.task }}"
+          cp /tmp/gt_out/mini-swe-agent.trajectory.json "/tmp/gt/${{ matrix.task }}/" 2>/dev/null || true
+          cp /tmp/gt_out/mini-swe-agent.trajectory.json trial_results/ 2>/dev/null || true
+
+          # Deep 8-dp metrics.
+          cp /tmp/gt/gt_run_summary*.json "trial_results/" 2>/dev/null || true
+          PYTHONPATH=${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:${{ github.workspace }}/scripts/metrics python3 scripts/swebench/gt_deep_metrics.py "${{ matrix.task }}" /tmp/gt --log trial_output.log 2>&1 | tail -2 || echo DEEP_METRICS_WARN
+          cp "/tmp/gt_deep_metrics_${{ matrix.task }}.json" trial_results/ 2>/dev/null || true
+          cp "/tmp/gt_deep_metrics_${{ matrix.task }}.md"   trial_results/ 2>/dev/null || true
+          # Per-task metrics laid out DIRECTLY as this task finishes (visible in the log + the
+          # artifact), computed from the just-written gt_deep_metrics json: resolved, steps,
+          # first-useful-edit, tokens, cost, trajectory source. One grep-able [METRICS task] line.
+          python3 -c "import json,sys,os; t=sys.argv[1]; p='/tmp/gt_deep_metrics_'+t+'.json'; d=(json.load(open(p,encoding='utf-8')) if os.path.exists(p) else {}); e=d.get('efficiency') or {}; a=d.get('agent') or {}; r=d.get('resolved'); rs=('YES' if r is True else ('NO' if r is False else '?')); print('[METRICS %s] resolved=%s steps=%s first_edit=%s tokens_total=%s cost_usd=%s traj=%s'%(t,rs,a.get('action_count'),a.get('first_edit_action'),e.get('llm_tokens_total'),(e.get('llm_cost_usd') or e.get('recorded_cost_usd')),d.get('trajectory_source')))" "${{ matrix.task }}" 2>/dev/null | tee -a trial_output.log || echo METRICS_LINE_WARN
+
+          # Run provenance.
+          python3 -c "import json,os; json.dump({'schema':'gt.live_lite_run_provenance.v1','task':'${{ matrix.task }}','language':'${{ matrix.language }}','gt_git_commit':os.environ.get('GITHUB_SHA') or None,'substrate_digest':os.environ.get('GT_SUBSTRATE_DIGEST') or None,'workflow_run_id':os.environ.get('GITHUB_RUN_ID') or None},open('trial_results/gt_artifacts/run_provenance.json','w'),indent=2)" \
+            || echo "WARN: run_provenance.json write failed"
+
+          # Outcome classification — reads jobs/<ts>/<task>__*/result.json (verifier_result)
+          # + the bridged verifier/reward.json + trial_output.log markers (NOT reward.txt).
+          GT_TRIAL_LOG=trial_output.log GT_CERT_DIR=/tmp/gt \
+            GT_DEEPSWE_OUTCOME_JSON=trial_results/outcome.json \
+            python3 scripts/verify/deepswe_outcome.py jobs || echo "WARN: outcome extract failed"
+          find trial_results -type f 2>/dev/null | head -40 || true
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ll-full-${{ matrix.task }}
+          path: trial_results/
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Cleanup runner disk (post-upload, non-critical)
+        if: always()
+        continue-on-error: true
+        run: |
+          docker rm -f gtsrc 2>/dev/null || true
+          docker system prune -af --volumes 2>/dev/null || true
+          sudo swapoff /gt_swap 2>/dev/null; sudo rm -f /gt_swap 2>/dev/null
+          rm -f /tmp/gt-substrate.tar.gz /tmp/docker.tgz /tmp/swebench-pro-os.tar.gz 2>/dev/null || true
+
+  # ── Summarize ────────────────────────────────────────────────────────────────
+  summarize:
+    needs: [prepare, trial]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: gt-trial
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/all
+          pattern: ll-full-*
+
+      - name: Aggregate SWE-bench Pro results
+        run: |
+          echo "## SWE-bench Pro full benchmark — ${{ needs.prepare.outputs.total }} tasks" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Provenance** — GT commit: \`${{ github.sha }}\` | Pro-OS clone SHA: \`${{ needs.prepare.outputs.bench_sha }}\` | substrate digest: \`${GT_SUBSTRATE_DIGEST:-<unset>}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          RAN=0; TOTAL=0; LAUNCH_FAIL=0
+          for d in /tmp/all/ll-full-*; do
+            [ -d "$d" ] || continue
+            TOTAL=$((TOTAL+1))
+            STEPS=$(grep -rhoE "AGENT_RAN_STEPS=[0-9]+" "$d" 2>/dev/null | head -1 | grep -oE "[0-9]+$" || true)
+            if [ -z "$STEPS" ]; then
+              STEPS=$(grep -rhoE '"n_agent_steps"[[:space:]]*:[[:space:]]*[0-9]+' "$d" 2>/dev/null | head -1 | grep -oE "[0-9]+$" || true)
+            fi
+            if [ -n "$STEPS" ] && [ "$STEPS" -gt 0 ]; then
+              RAN=$((RAN+1))
+            else
+              LAUNCH_FAIL=$((LAUNCH_FAIL+1))
+              echo "launch-fail (n_agent_steps=${STEPS:-absent}): $(basename "$d")"
+            fi
+          done
+          echo "Artifacts collected: $TOTAL  |  agent-ran (n_agent_steps>0 PARSED): $RAN  |  launch-fail: $LAUNCH_FAIL" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+      - name: Classification tally (INFRA > GT > RESOLVED > AGENT, infra-excluded denominator)
+        run: |
+          python3 << 'PYEOF' >> "$GITHUB_STEP_SUMMARY"
+          import glob, json, sys
+          sys.path.insert(0, "scripts/verify")
+          from deepswe_outcome import tally_classes
+          recs, missing = [], []
+          for d in sorted(glob.glob("/tmp/all/ll-full-*")):
+              task = d.split("ll-full-", 1)[-1]
+              try:
+                  with open(f"{d}/outcome.json", encoding="utf-8") as f:
+                      recs.extend(json.load(f).get("tasks") or [])
+              except (OSError, ValueError):
+                  missing.append(task)
+          t = tally_classes(recs)
+          print("### Outcome classification (per-task `outcome.json`)")
+          print()
+          print("| class | count |")
+          print("|---|---:|")
+          for k in ("RESOLVED", "AGENT", "GT", "INFRA", "UNKNOWN"):
+              print(f"| {k} | {t['counts'].get(k, 0)} |")
+          print()
+          print(f"**resolved_rate = {t['resolved_rate']}** over denominator "
+                f"{t['denominator_excluding_infra']} (INFRA/UNKNOWN excluded: "
+                f"{t['excluded_from_denominator']})")
+          if missing:
+              print()
+              print(f"outcome.json MISSING for {len(missing)} task(s): "
+                    + ", ".join(missing[:10]) + (" ..." if len(missing) > 10 else ""))
+          PYEOF
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Per-task detail: \`outcome.json\` + \`gt_deep_metrics_<task>.json\` + \`gt_artifacts/\` inside each \`ll-full-<task>\` artifact." >> "$GITHUB_STEP_SUMMARY"
+          echo "Pull any task MID-RUN: \`gh run download <run_id> -n ll-full-<task> -R <owner>/groundtruth\`." >> "$GITHUB_STEP_SUMMARY"
+
+      # ── Bridge to the OFFICIAL evaluator ────────────────────────────────────
+      # The inference workflow emits one raw agent_patch.diff per task; the
+      # official grader (live_lite_eval.yml -> swebench.harness.run_evaluation,
+      # --dataset SWE-bench-Live/SWE-bench-Live --split lite --namespace
+      # starryzhang) needs ONE predictions.jsonl. Assemble it here and publish it
+      # as predictions-<run_id> — the exact artifact live_lite_eval.yml consumes.
+      # Without this bridge there is NO clean path to an official score (the gap
+      # that made SWE-Pro unscoreable). The denominator is pinned to the full
+      # dataset so empty/absent tasks count as unresolved, never silently dropped.
+      - name: Build predictions.jsonl for the official evaluator
+        run: |
+          DS=benchmarks/data/swebench_live_lite.jsonl
+          if [ "$(wc -l < "$DS" 2>/dev/null || echo 0)" -lt 100 ]; then
+            GH_TOKEN="${{ secrets.GITHUB_TOKEN }}" gh release download pipeline-assets-v1 \
+              -p swebench_live_lite.jsonl -D benchmarks/data/ --clobber 2>/dev/null || true
+          fi
+          # Fail closed on a narrowed denominator: the dataset MUST be the full set,
+          # never a truncated git copy (which would silently shrink resolved-rate's
+          # denominator and inflate the score). 250 = slack under the 300 canonical.
+          DS_LINES=$(wc -l < "$DS" 2>/dev/null || echo 0)
+          if [ "$DS_LINES" -lt 250 ]; then
+            echo "::error::DATASET_TRUNCATED: $DS has $DS_LINES lines (<250); refusing to build a narrowed-denominator predictions.jsonl"
+            exit 1
+          fi
+          mkdir -p /tmp/predictions
+          python3 scripts/swebench/build_ll_predictions.py \
+            /tmp/all /tmp/predictions/predictions.jsonl \
+            --expected "$DS" \
+            --model "${{ inputs.baseline == true && format('mini-swe-agent + {0} (baseline)', inputs.model) || format('GroundTruth + mini-swe-agent + {0}', inputs.model) }}" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload predictions for the official evaluator
+        uses: actions/upload-artifact@v4
+        with:
+          name: predictions-${{ github.run_id }}
+          path: /tmp/predictions/predictions.jsonl
+          retention-days: 90
+          if-no-files-found: error

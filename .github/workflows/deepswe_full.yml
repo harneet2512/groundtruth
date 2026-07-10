@@ -70,6 +70,18 @@ on:
         description: "GT_VERIFY_STRUCTURAL_RISK — at VERIFY, surface blast-radius caller-tests for a structural edit (Q3 consumption lever, gt_mini_patch). 0 = OFF (default; arm only after the per-method FP profile is known). 1 = ON."
         required: false
         default: "0"
+      edit_check:
+        description: "GT_EDIT_CHECK — E: at-edit SYNTAX validation. Run the repo's OWN parse-only toolchain on a just-edited source file; deliver the compiler's native diagnostic on a parse break (SWE-agent linter-guard parity). 0 = OFF (default; byte-identical). 1 = ON."
+        required: false
+        default: "0"
+      post_search_native:
+        description: "GT_POST_SEARCH_NATIVE — FORMAT A/B B-arm: render post_search def-facts as native ripgrep-style output (no <gt-*> tag) instead of the tagged block. Same content, different format. 0 = OFF (default; tagged, byte-identical). 1 = ON (native)."
+        required: false
+        default: "0"
+      gateway:
+        description: "GT_GATEWAY — W2 single-surface completer: ONE gateway.augment() call per tool observation, arbitrated to <=1 deterministic FACT, appended byte-preserving into the same observation (TITO). 0 = OFF (default; byte-identical). 1 = ON."
+        required: false
+        default: "0"
       gt_arm:
         description: "Paired-run arm: gt enables GT; baseline sets GT_BASELINE=1 and does not require substrate proof."
         required: false
@@ -138,6 +150,20 @@ env:
   # Q3 consumption lever (synced agent path; gt_mini_patch reads it). Default 0 = OFF
   # (byte-identical current behavior). Forwarded to the agent container via --ae below.
   GT_VERIFY_STRUCTURAL_RISK: ${{ github.event.inputs.verify_structural_risk || '0' }}
+  # E — at-edit syntax validation (synced agent path; gt_mini_patch reads it). Default
+  # 0 = OFF (byte-identical). Forwarded to the agent container via --ae below.
+  GT_EDIT_CHECK: ${{ github.event.inputs.edit_check || '0' }}
+  # FORMAT A/B B-arm (synced agent path; gt_mini_patch reads it). Default 0 = OFF
+  # (tagged post_search, byte-identical). Forwarded to the agent container via --ae below.
+  GT_POST_SEARCH_NATIVE: ${{ github.event.inputs.post_search_native || '0' }}
+  # W2 master flag (synced agent path; gt_mini_patch reads it). Default 0 = OFF
+  # (byte-identical). Forwarded to the agent container via --ae below.
+  # NOTE (CONFIRMED-1): GT_GATEWAY and GT_POST_SEARCH (below) are forwarded
+  # INDEPENDENTLY; when BOTH are 1 the in-code dose-law guard makes SEARCH turns
+  # post_search-WINS — the Gateway is skipped for search events (the lattice owns the
+  # single dose + the single shared probe record). The Gateway stays live for
+  # edit/test turns. See gt_mini_patch._gateway_search_excluded.
+  GT_GATEWAY: ${{ github.event.inputs.gateway || '0' }}
   # ── Depth+DCC mechanisms (2026-07 build) — master switch `depth_flags` (default 0 = OFF =
   # byte-identical; all six read default-off in code). The 5 index/brief flags cross the substrate
   # boundary via explicit `-e` in scripts/ci/substrate_proof.sh (each GT_* is projected into
@@ -1037,6 +1063,10 @@ jobs:
               --ae GT_SELF_VERIFY_ATTEMPTS="${GT_SELF_VERIFY_ATTEMPTS:-}"
               --ae GT_BASELINE="${GT_BASELINE:-0}"
               --ae GT_VERIFY_STRUCTURAL_RISK="${GT_VERIFY_STRUCTURAL_RISK:-0}"
+              --ae GT_VERIFY_EXECUTE="${GT_VERIFY_EXECUTE:-0}"
+              --ae GT_EDIT_CHECK="${GT_EDIT_CHECK:-0}"
+              --ae GT_POST_SEARCH_NATIVE="${GT_POST_SEARCH_NATIVE:-0}"
+              --ae GT_GATEWAY="${GT_GATEWAY:-0}"
               --ae GT_DCC="${GT_DCC:-0}"
               --ae GT_NEG_EVIDENCE="${GT_NEG_EVIDENCE:-0}"
               --ae GT_TYPEFLOW_FIXPOINT="${GT_TYPEFLOW_FIXPOINT:-0}"

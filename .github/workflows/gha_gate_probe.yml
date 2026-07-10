@@ -1,0 +1,39 @@
+name: gha-gate-probe
+
+# Minimal live-visibility probe. NOT a smoke, NOT an agent run. It checks whether the GHA runner
+# env has the 3 foundational-gate dependencies (embedder onnxruntime+tokenizers, LSP pyright),
+# uploads the result IMMEDIATELY, then holds ~2 min so the artifact can be pulled MID-RUN — proving
+# we can get live visibility from inside a GHA run without a 20-minute smoke.
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe GHA env GT-foundation + write marker
+        run: |
+          {
+            echo "=== GHA ENV GT-FOUNDATION PROBE ==="
+            echo "marker_time_utc=$(date -u +%H:%M:%S)"
+            echo "host=$(uname -srm)"
+            echo "python=$(python3 --version 2>&1)"
+            echo "--- GATE 3 EMBEDDER deps ---"
+            python3 -c "import onnxruntime; print('onnxruntime PRESENT', onnxruntime.__version__)" 2>&1 || echo "onnxruntime ABSENT (embedder would be ZERO)"
+            python3 -c "import tokenizers; print('tokenizers PRESENT', tokenizers.__version__)" 2>&1 || echo "tokenizers ABSENT"
+            echo "--- GATE 2 LSP ---"
+            (command -v pyright || command -v pyright-langserver) 2>/dev/null && echo "pyright PRESENT" || echo "pyright ABSENT (LSP enrichment OFF)"
+            echo "--- done ---"
+          } | tee /tmp/probe.txt
+
+      - name: Upload probe artifact (immediate — readable mid-run)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gha-probe
+          path: /tmp/probe.txt
+          retention-days: 1
+
+      - name: Hold so the artifact is pullable while the run is still in_progress
+        run: sleep 150

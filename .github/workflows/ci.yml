@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master, "release/**"]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:  # manual: validate C7 Go build + closure preflight on any branch before a paid canary
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e ".[dev]"
+      - run: ruff check src/groundtruth/ tests/
+      - run: ruff format --check src/groundtruth/ tests/
+
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install -e ".[dev]"
+      - run: pytest tests/ -x -v --ignore=tests/integration/test_real_lsp.py --ignore=tests/integration/test_depth_parity.py --ignore=tests/test_graphstore_contract.py --timeout=60 --cov=src/groundtruth --cov-report=term-missing
+
+  go-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5
+        with:
+          go-version: "1.22"
+      - name: Build gt-index
+        working-directory: gt-index
+        run: CGO_ENABLED=1 go build -tags sqlite_fts5 -o gt-index ./cmd/gt-index/
+      - name: Go resolver unit tests
+        # Provenance probe (TestResolve_QualifiedStdlibCall_NotDeterministic): a
+        # stdlib qualified call (os.walk) must never be tagged with a deterministic
+        # resolution_method. Scoped to the resolver package for a clean signal.
+        working-directory: gt-index
+        run: CGO_ENABLED=1 go test ./internal/resolver/ -v -run TestResolve
+      - name: Go parser data-flow base test (5-language)
+        # Proves the data_flow base (per-parameter forward slice / def-use) is
+        # extracted on all 5 Tier-1 languages — the value-provenance dimension the
+        # call graph lacks. Language-agnostic identifier-match + enclosing-expr text.
+        working-directory: gt-index
+        run: CGO_ENABLED=1 go test ./internal/parser/ -v -run TestExtractDataFlow
+      - name: Test indexing
+        working-directory: gt-index
+        run: |
+          mkdir -p /tmp/test-repo
+          cat > /tmp/test-repo/main.py << 'PYEOF'
+          def hello():
+              return "world"
+          def greet(name):
+              return hello() + " " + name
+          PYEOF
+          cat > /tmp/test-repo/app.py << 'PYEOF'
+          from main import hello
+          result = hello()
+          PYEOF
+          ./gt-index -root /tmp/test-repo -output /tmp/test-repo/graph.db
+          python3 -c "
+          import sqlite3
+          conn = sqlite3.connect('/tmp/test-repo/graph.db')
+          nodes = conn.execute('SELECT COUNT(*) FROM nodes').fetchone()[0]
+          edges = conn.execute('SELECT COUNT(*) FROM edges').fetchone()[0]
+          assert nodes > 0, f'Expected nodes > 0, got {nodes}'
+          assert edges > 0, f'Expected edges > 0, got {edges}'
+          conn.execute('SELECT confidence FROM edges LIMIT 0')
+          # data_flow base end-to-end (parse -> store -> DB): greet(name) flows
+          # 'name' into 'hello() + \" \" + name'. Proves the store persists the new
+          # kind (no whitelist) and the consumer SELECT WHERE kind='data_flow' hits.
+          df = conn.execute(\"SELECT value FROM properties WHERE kind='data_flow'\").fetchall()
+          assert len(df) > 0, f'Expected data_flow properties persisted, got {len(df)}'
+          assert any(v[0].startswith('name ->') for v in df), f'data_flow missing name slice: {df}'
+          print(f'OK: {nodes} nodes, {edges} edges, {len(df)} data_flow rows: {df}')
+          "
+      - name: C7 closure-sidecar preflight (fast-fail)
+        # FAST gate: this builds gt-index from source (incl. the C7 closure pass)
+        # and indexes a repo WITH calls (greet->hello), so the closure must
+        # populate. Catches a C7 Go regression / non-populating closure in ~2 min
+        # instead of a 90-min eval. See RUNTIME_FUCKUPS.md (RF-4).
+        run: python3 scripts/verify/preflight_delivery_layer.py /tmp/test-repo/graph.db --schema --closure --closure-populated
+
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e ".[dev]"
+      - run: python benchmarks/runner.py --fixture python

@@ -237,8 +237,13 @@ _SENSE_CONTENT = _load([_SENSE_PATH])
 #
 # Maps package-relative subdir -> the module filenames to inject under
 # /opt/gt/groundtruth/<subdir>/. The injection creates each subdir's __init__.py
-# (empty, like runtime) so the submodules import directly; the modules below import
-# only stdlib so no transitive groundtruth.* import is needed. `runtime` historically
+# (empty, like runtime) so the submodules import directly. Most modules import only
+# stdlib, but the B1 verification-execution engines have an INTERNAL groundtruth.*
+# import graph (covering_runner -> test_runner -> repo_adapters; patch_auditor ->
+# repo_adapters), so the allow-list MUST be import-CLOSED: every module-scope
+# `from groundtruth.* import` inside a shipped module must itself be shipped, or
+# `import groundtruth.runtime.covering_runner` fails in-container and the whole B1
+# path goes dark (the exact failure this list prevents). `runtime` historically
 # carried CP011-015 control-plane modules; `delivery`+`pretask` carry the B1 single-
 # source fact-filter policy (path_policy/name_policy/curation_map).
 _PRODUCT_PACKAGE_MODULES: dict[str, tuple[str, ...]] = {
@@ -252,6 +257,41 @@ _PRODUCT_PACKAGE_MODULES: dict[str, tuple[str, ...]] = {
         "ledger.py",
         "patterns.py",
         "edit_risk.py",
+        # B1 verification-execution engines (GT_VERIFY_EXECUTE). gt_mini_patch.py
+        # imports these at module scope; without them the seam's try/except swallows
+        # the ImportError and B1 no-ops silently in-container. Shipped WITH their
+        # transitive module-scope deps (test_runner, repo_adapters) so the set is
+        # import-closed. `telemetry` is deliberately NOT shipped: its only importers
+        # here reference it function-scope behind `if log_dir is not None`, and the
+        # live patch calls every engine WITHOUT log_dir -> unreachable (correct-or-
+        # quiet: ship exactly what the live path imports, no more).
+        "covering_runner.py",
+        "native_render.py",
+        "submit_gate.py",
+        "patch_auditor.py",
+        "test_runner.py",
+        "repo_adapters.py",
+        # E — at-edit syntax validation (GT_EDIT_CHECK). gt_mini_patch.py imports it
+        # at the producer scope; its module-scope deps (curation_map[pretask],
+        # covering_runner, test_runner — all shipped above/below) keep the set
+        # import-closed. Off-flag it is never imported (byte-identical).
+        "edit_check.py",
+        # W2 GT_GATEWAY: the single-surface completer + its ONE canonical state +
+        # payload contract. gt_mini_patch.py imports gateway/adapter behind GT_GATEWAY;
+        # they must ship or the seam runs DARK. Import-closed: episode_state -> ledger;
+        # evidence_envelope -> path_policy; gateway -> covering_runner/native_render/
+        # episode_state/evidence_envelope/curation_map/path_policy (traces/change_surface/
+        # patch_delta are OPTIONAL try-wrapped in gateway, so NOT required here). Off-flag
+        # never imported (byte-identical).
+        "episode_state.py",
+        "evidence_envelope.py",
+        "gateway.py",
+    ),
+    # W2 seam adapter (groundtruth.runtime.adapters.miniswe) — the mini-swe-agent
+    # one-call wiring. Nested package dir; its module-scope deps (gateway,
+    # evidence_envelope, above) keep the set import-closed.
+    "runtime/adapters": (
+        "miniswe.py",
     ),
     # B1 delivery fact-filter — the single source for path-class + name-class
     # exclusion. Shipping these makes gt_mini_patch.py's `from groundtruth.delivery
@@ -283,7 +323,7 @@ _PRODUCT_RUNTIME_FILES = _PRODUCT_PACKAGE_FILES["runtime"]
 # (groundtruth.<subdir>.<module>) — the canonical allow-list the import-coverage
 # guard checks gt_mini_patch.py's module-scope imports against.
 _INJECTED_GT_MODULES: frozenset[str] = frozenset(
-    f"groundtruth.{subdir}.{name[:-3]}"
+    f"groundtruth.{subdir.replace('/', '.')}.{name[:-3]}"
     for subdir, names in _PRODUCT_PACKAGE_MODULES.items()
     for name in names
 )
@@ -525,6 +565,13 @@ _SELFTEST_PY = (
     "    import groundtruth.runtime.verification_horizon  # noqa: F401\n"
     "    import groundtruth.runtime.ledger  # noqa: F401\n"
     "    import groundtruth.runtime.trajectory_state  # noqa: F401\n"
+    # W2 GT_GATEWAY seam (episode_state/evidence_envelope/gateway/adapter): probed so a
+    # proof run FAILS-CLOSED (exit 9) if the single-surface completer was not shipped,
+    # rather than grade a GT_GATEWAY-dark trajectory as GT-on.
+    "    import groundtruth.runtime.episode_state  # noqa: F401\n"
+    "    import groundtruth.runtime.evidence_envelope  # noqa: F401\n"
+    "    import groundtruth.runtime.gateway  # noqa: F401\n"
+    "    import groundtruth.runtime.adapters.miniswe  # noqa: F401\n"
     "except Exception as _re:\n"
     "    _rt_ok = False; print('GT_SELFTEST runtime_import_error=%r' % (_re,))\n"
     "print('GT_SELFTEST runtime=%d' % (1 if _rt_ok else 0))\n"
@@ -746,8 +793,10 @@ def _inject_steps_b64() -> list[InstallStep]:
             if not chunks:
                 continue
             # Prefix the temp b64 name with the package so two packages can carry
-            # the same filename without clobbering each other.
-            b64name = f"{subdir}__{fname.replace('.py', '.b64')}"
+            # the same filename without clobbering each other. Flatten any nested
+            # subdir separator (`runtime/adapters` -> `runtime_adapters`) so the temp
+            # file lands directly in _GT_DIR (a `/` would target a nonexistent dir).
+            b64name = f"{subdir.replace('/', '_')}__{fname.replace('.py', '.b64')}"
             for i, chunk in enumerate(chunks):
                 op = ">" if i == 0 else ">>"
                 steps.append(

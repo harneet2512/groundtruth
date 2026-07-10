@@ -82,7 +82,14 @@ func main() {
 	// existing graph.db. Does not rebuild from scratch; expects -output to exist.
 	if *file != "" {
 		if err := runIncremental(*root, *file, *output); err != nil {
-			log.Fatalf("incremental: %v", err)
+			// Executor contract (requirement a): every failure class — missing
+			// source file, absent/unwritable db, parse-fatal, unsupported
+			// extension — exits NONZERO with a CLEAR one-line stderr and NO
+			// stdout summary. Flatten any embedded newline so the overlay always
+			// reads a single diagnostic line (not log.Fatalf's timestamped form).
+			msg := strings.ReplaceAll(err.Error(), "\n", " ")
+			fmt.Fprintf(os.Stderr, "gt-index -file: %s\n", msg)
+			os.Exit(1)
 		}
 		return
 	}
@@ -553,6 +560,7 @@ func main() {
 			SourceFile:         rc.SourceFile,
 			ResolutionMethod:   rc.Method,
 			Confidence:         rc.Confidence,
+			Metadata:           receiverEdgeMetadata(rc),
 			TrustTier:          rc.TrustTier,
 			CandidateCount:     rc.CandidateCount,
 			EvidenceType:       rc.EvidenceType,
@@ -956,15 +964,38 @@ func runIncremental(root, relpath, dbPath string) error {
 	sum := sha256.Sum256(contents)
 	newHash := hex.EncodeToString(sum[:])
 
-	// Step 3 — short-circuit if hash matches stored value.
+	// Step 3 — short-circuit if hash matches stored value. HONEST short-circuit:
+	// exit 0, changed=false, and post_revision computed over the UNCHANGED db so
+	// the overlay still learns the exact graph state it is running against
+	// (identical to what a re-run after the last real reindex would report).
 	storedHash := db.GetFileHash(relSlash)
 	if storedHash == newHash {
+		postRev, revErr := db.ComputeRevision()
+		if revErr != nil {
+			return fmt.Errorf("compute post_revision (short-circuit): %w", revErr)
+		}
+		// Stamp the revision so the meta table always reflects the summary the
+		// overlay just parsed (idempotent: the db content is unchanged, so the
+		// value re-computes identically).
+		if err := db.SetMeta("post_revision", postRev); err != nil {
+			return fmt.Errorf("stamp post_revision (short-circuit): %w", err)
+		}
+		db.CheckpointWAL()
 		dur := time.Since(startWall)
 		fmt.Printf(
-			`{"file":%q,"nodes_replaced":0,"edges_replaced":0,"incoming_restored":0,"incoming_unresolved":0,"duration_ms":%d,"short_circuited":true}`+"\n",
-			relSlash, dur.Milliseconds(),
+			`{"file":%q,"changed":false,"nodes_replaced":0,"edges_replaced":0,"incoming_restored":0,"incoming_unresolved":0,"duration_ms":%d,"short_circuited":true,"post_revision":%q}`+"\n",
+			relSlash, dur.Milliseconds(), postRev,
 		)
 		return nil
+	}
+
+	// Overlay-revision baseline: the logical-content hash BEFORE this reindex
+	// mutates anything. `changed` in the summary is the honest pre!=post
+	// comparison (a comment-only edit that re-parses to the identical graph
+	// reports changed=false even though the reindex ran).
+	preRev, err := db.ComputeRevision()
+	if err != nil {
+		return fmt.Errorf("compute pre-reindex revision: %w", err)
 	}
 
 	// Step 7 (early) — re-parse the single file BEFORE opening the write tx,
@@ -1206,6 +1237,7 @@ func runIncremental(root, relpath, dbPath string) error {
 			SourceFile:         rc.SourceFile,
 			ResolutionMethod:   rc.Method,
 			Confidence:         rc.Confidence,
+			Metadata:           receiverEdgeMetadata(rc),
 			TrustTier:          rc.TrustTier,
 			CandidateCount:     rc.CandidateCount,
 			EvidenceType:       rc.EvidenceType,
@@ -1406,6 +1438,22 @@ func runIncremental(root, relpath, dbPath string) error {
 	db.SetMeta("build_time_utc", buildTimeUTC)
 	db.SetMeta("go_toolchain", goToolchain)
 
+	// Overlay-revision stamp: post_revision = the deterministic logical-content
+	// hash of graph.db AFTER every mutation this run performs (the tx commit AND
+	// the post-commit promote pass, which re-emits promote_% edges — edges are
+	// hashed, so it must run first). FTS/closure sidecars are excluded from the
+	// hash (see store/revision.go), so their refresh order below is irrelevant.
+	// Fail-closed: the executor contract REQUIRES post_revision in the summary;
+	// if it cannot be computed or stamped, this run exits nonzero and the overlay
+	// treats the reindex as failed (a retry short-circuits and re-computes).
+	postRev, revErr := db.ComputeRevision()
+	if revErr != nil {
+		return fmt.Errorf("compute post_revision: %w", revErr)
+	}
+	if err := db.SetMeta("post_revision", postRev); err != nil {
+		return fmt.Errorf("stamp post_revision: %w", err)
+	}
+
 	// Refresh FTS5 index after incremental node changes so BM25 queries
 	// stay current. Same call as the full-index path (idempotent).
 	if err := db.PopulateFTS5(); err != nil {
@@ -1439,19 +1487,49 @@ func runIncremental(root, relpath, dbPath string) error {
 	// the only writer that overlaps with reader processes in practice.
 	db.CheckpointWAL()
 
-	// Step 11 — JSON line on stdout. nodes_replaced = inserted count;
-	// edges_replaced = max(deleted, inserted) edges so callers see the size of
-	// the change, not just the new ones.
+	// Step 11 — JSON line on stdout (the machine-readable executor summary the
+	// Python overlay parses; never scrape stderr logs). nodes_replaced = inserted
+	// count; edges_replaced = max(deleted, inserted) edges so callers see the
+	// size of the change, not just the new ones. changed = pre!=post revision
+	// (honest: a reindex whose re-parsed graph is logically identical — e.g. a
+	// comment-only edit — reports changed=false). post_revision = the stamped
+	// deterministic content hash (identical runs match; a real change differs).
 	replacedEdges := int64(len(edgePtrs))
 	if edgesDeleted > replacedEdges {
 		replacedEdges = edgesDeleted
 	}
+	changed := postRev != preRev
 	dur := time.Since(startWall)
 	fmt.Printf(
-		`{"file":%q,"nodes_replaced":%d,"edges_replaced":%d,"incoming_restored":%d,"incoming_unresolved":%d,"duration_ms":%d,"short_circuited":false}`+"\n",
-		relSlash, len(newDBIDs), replacedEdges, incomingRest, incomingUnres, dur.Milliseconds(),
+		`{"file":%q,"changed":%v,"nodes_replaced":%d,"edges_replaced":%d,"incoming_restored":%d,"incoming_unresolved":%d,"duration_ms":%d,"short_circuited":false,"post_revision":%q}`+"\n",
+		relSlash, changed, len(newDBIDs), replacedEdges, incomingRest, incomingUnres, dur.Milliseconds(), postRev,
 	)
 	return nil
+}
+
+// receiverEdgeMetadata renders the resolver's CALL-SITE receiver-type provenance as the
+// additive `receiver_type=<T>` tag on edges.metadata — the SAME `;`-separated key=value
+// convention the promote pass uses for `dataflow=` (promoteDataFlowAnnotations), so a
+// later promote append yields `receiver_type=Foo;dataflow=bar` and every existing metadata
+// reader (curation_map `metadata LIKE '%dataflow=%'`, the promote idempotency `instr`
+// guard) is unaffected. Empty on every receiver-blind / name_match / unproven edge
+// (rc.ReceiverType == ""), leaving those edges' metadata byte-identical to before.
+//
+// ENCODING GUARD (deterministic, correct-or-quiet): a receiver type containing `;`,
+// `=`, or whitespace cannot be encoded as one `;`-separated key=value segment — a
+// `;`/`=` would fabricate a fake key (e.g. a spoofed `dataflow=`) for every LIKE/
+// instr reader. Class names never legitimately contain these (the resolver's
+// receiverTypeName already normalizes generics/unions/pointers), so an exotic
+// tree-sitter capture that does is untrusted input → drop the provenance entirely
+// rather than write a malformed or spoofable tag.
+func receiverEdgeMetadata(rc resolver.ResolvedCall) string {
+	if rc.ReceiverType == "" {
+		return ""
+	}
+	if strings.ContainsAny(rc.ReceiverType, ";= \t\n\r") {
+		return ""
+	}
+	return "receiver_type=" + rc.ReceiverType
 }
 
 // computeMedianConfidence returns the P50 of confidences across all resolved

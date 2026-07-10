@@ -266,7 +266,37 @@ def test_g10_runtime_available_independent_of_edit_risk():
 # --------------------------------------------------------------------------- #
 # G15 — Lane-B suppressions counted into the unified GT_HOOK_FIRE_COUNTS sink.
 # --------------------------------------------------------------------------- #
-def test_g15_lane_b_suppression_counted_in_unified_sink(monkeypatch, tmp_path):
+@pytest.fixture
+def _isolated_focus(monkeypatch, tmp_path):
+    """Focus-surface isolation for the G15 gate tests (2026-07-09).
+
+    These tests assert the gate's RANKING (the high-severity candidate wins; the
+    low-severity loser is counted '<kind>.suppressed'). That ranking is
+    focus-SENSITIVE: `_oracle_gate_blocks` -> `_oracle_focus()` reads the
+    machine-global anchors fallback `_anchors_path()` (GT_ANCHORS_PATH ->
+    $GT_CERT_DIR/gt_issue_anchors.json -> /tmp/gt_issue_anchors.json, which on
+    Windows resolves to <drive>:\\tmp). A REAL task's anchors artifact left there
+    by a parallel brief/measure run (proven live: a Streamlink artifact whose
+    'text' token matched ONE candidate's block text) makes per-candidate conf
+    diverge -> the distribution floor suppresses the HIGH-severity candidate as
+    below_floor -> the wrong kind wins and the asserted suppressed-count never
+    appears (g15 RED from machine state, not code).
+
+    Isolate the WHOLE focus surface so the gate is deterministic with any
+    machine state: anchors path -> a nonexistent tmp file (bypasses env, cert
+    dir AND the /tmp fallback); focus cache -> None (re-derives to empty from
+    the absent file); edited-rel stems -> empty (the second focus feeder).
+    Empty focus + edit_bound=True -> conf 1.0 for EVERY candidate -> pure
+    severity ranking, which is exactly the contract under test. monkeypatch
+    restores every attribute (including the cache) after the test."""
+    monkeypatch.setattr(g, "_anchors_path",
+                        lambda: str(tmp_path / "absent_anchors.json"))
+    monkeypatch.setattr(g, "_oracle_focus_cache", None)
+    monkeypatch.setattr(g, "_oracle_edited_rels", set())
+
+
+def test_g15_lane_b_suppression_counted_in_unified_sink(monkeypatch, tmp_path,
+                                                        _isolated_focus):
     """A multi-candidate gate emits ONE winner and suppresses (outranks) the rest;
     each suppression is recorded under '<kind>.suppressed' in the same JSON sink
     _record_hook_fire writes — so eligible/emitted/suppressed is one-file answerable.
@@ -288,7 +318,8 @@ def test_g15_lane_b_suppression_counted_in_unified_sink(monkeypatch, tmp_path):
     assert saved.get("spec.obligation.suppressed") == 1
 
 
-def test_g15_detect_and_verify_kinds_recorded(monkeypatch, tmp_path):
+def test_g15_detect_and_verify_kinds_recorded(monkeypatch, tmp_path,
+                                              _isolated_focus):
     """The suppress counter is kind-agnostic: verify.horizon.* / spec.obligation /
     detect.* all flow into the same sink (the G15 requirement)."""
     fc = tmp_path / "fc.json"

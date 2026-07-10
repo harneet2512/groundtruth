@@ -152,26 +152,70 @@ def test_nontarget_all_hits_test_shaped(on):
     assert "test_widget" not in block          # leak invariant
 
 
-def test_nontarget_real_hit_stays_quiet(on):
-    """A genuine non-test hit means the agent found it -> GT adds nothing."""
-    assert _fresh("grep -rn parse_widget .",
-                  "app/widget.py:5:def parse_widget():\n") == ""
+# ---- BUG-B1 fall-through (FLIPPED 2026-07-10): a bare-symbol grep WITH real hits
+# now DELIVERS the graph def partition (def-site + verified callers + test-ref count
+# the agent can't compute from grep). Pre-fix these three asserted "" — the
+# def/callers partition was structurally MUTE on the out=str path since 2026-07-05
+# (the fall-through self-stamped the fire-once latch, then the outer re-check on the
+# SAME content hash suppressed the block). Mark-free fall-through + outer-latch
+# idempotence flips them to deliver. Justification: BUG-B1.
+def test_hits_real_hit_delivers_def_partition(on):
+    """BUG-B1 (was stays-quiet): a genuine non-test hit -> _class_nontarget abstains
+    -> the fall-through answers the agent's OWN grep with the graph def-site."""
+    block = _fresh("grep -rn parse_widget .", "app/widget.py:5:def parse_widget():\n")
+    assert 'symbol="parse_widget"' in block
+    assert "def: app/widget.py:5" in block
 
 
-def test_nontarget_real_hit_elsewhere_stays_quiet(on):
-    """A real NON-TEST hit in a DIFFERENT file than the def still means the agent
-    found a legit occurrence -> quiet. Isolates the real-hit-quiet guard (novelty
-    alone would NOT suppress this, since the hit path != the def path)."""
-    assert _fresh("grep -rn parse_widget .",
-                  "app/caller.py:88:    parse_widget()\n") == ""
+def test_hits_real_hit_elsewhere_delivers_def_partition(on):
+    """BUG-B1 (was stays-quiet): a real NON-TEST hit in a DIFFERENT file than the def
+    -> _class_nontarget abstains -> the fall-through delivers the def-site."""
+    block = _fresh("grep -rn parse_widget .", "app/caller.py:88:    parse_widget()\n")
+    assert "def: app/widget.py:5" in block
 
 
-def test_nontarget_novelty_excludes_observed_def(on):
-    """If the (only) def path is already among the observed hits -> quiet (novelty)."""
-    # hit is app/widget.py itself, but shaped as if only a test dir matched elsewhere:
-    # here the observed hit IS the def path -> novel set empty -> quiet.
-    assert _fresh("grep -rn parse_widget .",
-                  "app/widget.py:5:def parse_widget(): ...\n") == ""
+def test_hits_observed_def_still_delivers_partition(on):
+    """BUG-B1 (was stays-quiet): even when the observed hit IS the def path
+    (novelty-empty for _class_nontarget), the fall-through delivers the graph def
+    partition — the verified-caller / test-ref facts ride the same block the agent
+    cannot compute from one grep."""
+    block = _fresh("grep -rn parse_widget .", "app/widget.py:5:def parse_widget(): ...\n")
+    assert "def: app/widget.py:5" in block
+
+
+def test_hits_path_fires_once_then_latched(on):
+    """BUG-B1 idempotence now lives in the OUTER latch (not _direct_def_block's
+    self-stamp): the hits-path fall-through fires ONCE per stem, then the repeat is
+    suppressed. Reverting the mark=False fall-through (re-stamping here) self-
+    suppresses the FIRST delivery -> the first assert reddens."""
+    first = _fresh("grep -rn parse_widget .", "app/widget.py:5:def parse_widget():\n")
+    assert first
+    second = g._search_localize_block("grep -rn parse_widget .",
+                                      "app/widget.py:5:def parse_widget():\n")
+    assert second == ""
+
+
+# ---- COMPOUND GATE (F6/F7): grep is not the ENTIRE command -> refuse ----------
+@pytest.mark.parametrize("cmd,out", [
+    # ; compound: the pytest traceback is NOT grep's zero/hit signal (F6)
+    ("grep -rn get_user_id . ; pytest -x",
+     "Traceback (most recent call last):\n  File \"app/models.py\", line 12\n"),
+    # && / || compounds: another command's output interleaves (F7)
+    ("grep -rn get_user_id . && echo done", "app/models.py:10:def get_user_id():\n"),
+    ("grep -rn get_user_id . || true", "app/models.py:10:def get_user_id():\n"),
+    # pipe-FED grep: grep searches pytest's output, not the repo (F6 junk stem)
+    ("pytest -x 2>&1 | grep -n Error", "app/models.py:99: raise Error\n"),
+    # output transform: tee/head is another stage (F7)
+    ("grep -rn get_user_id . | tee /tmp/x", "app/models.py:10:def get_user_id():\n"),
+])
+def test_compound_command_refused_no_answer_no_probe(on, cmd, out):
+    """When grep/rg is not the WHOLE command (compound / pipe-fed / transformed) the
+    lattice answers '' AND records NO probe (the operand never mints a ledger stem).
+    Reverting the _search_command_isolated gate reddens this — a compound would then
+    record a wrong 'hit' outcome (F6) and, on the pipe-fed case, a junk stem."""
+    g._search_seen.clear()
+    assert g._search_localize_block(cmd, out) == ""
+    assert not g._search_seen, dict(g._search_seen)
 
 
 # ---- CLASS 4: HONEST-NEGATIVE ------------------------------------------------
@@ -215,6 +259,45 @@ def test_honest_negative_fold_variant_counts_as_repeat(on):
     assert 'surface="absent"' in block
 
 
+# ---- RESET INDEX-COHERENCE (F3 reset law, ENDGAME-3 bounce 2026-07-10) --------
+def test_reset_clears_edit_action_steps_index_coherence(on):
+    """_reset_oracle_state resets the index BASIS (_action_count -> 0, :5153) — any
+    retained action-index list is incoherent by construction. Pre-fix,
+    _edit_action_steps survived the reset, so a STALE edit index from the PRIOR
+    attempt silenced the honest-negative ordering predicate (:3370,
+    `prev < es < idx`) on the NEW attempt's ZERO-repeat: the agent looks stuck, GT
+    stays mute because of an edit that happened LAST attempt. Behavioral half: seed
+    a stale edit step, reset, and assert the ZERO-repeat FIRES (clear-then-check-
+    cleared alone is a weak pin). Also pins the FIX-3 four siblings at their init
+    defaults post-reset."""
+    # ---- attempt 1: a zero probe, then a source edit recorded at action 2 ----
+    g._search_seen.clear()
+    g._edit_action_steps.clear()
+    g._action_count = 1
+    assert g._search_localize_block("grep -rn wholly_absent_thing .", "") == ""
+    g._edit_action_steps.append(2)          # the agent edited at action 2 (attempt 1)
+    # seed the FIX-3 siblings so this pin proves their reset too
+    g._last_test_outcome_failed = True
+    g._last_test_step = 7
+    g._test_cycle_spans.append(5)
+    g._cycle_edit_start = 4
+    # ---- in-process retry: the reset clears the basis AND every index list ----
+    g._reset_oracle_state()
+    assert g._edit_action_steps == []        # ENDGAME-3 bounce: the 5th sibling clears
+    assert g._last_test_outcome_failed is False   # FIX-3 siblings at init defaults
+    assert g._last_test_step is None
+    assert g._test_cycle_spans == []
+    assert g._cycle_edit_start is None
+    # ---- attempt 2 (indices from 0): zero at 1, repeat at 3 -> MUST fire ----
+    g._action_count = 1
+    assert g._search_localize_block("grep -rn wholly_absent_thing .", "") == ""
+    g._action_count = 3
+    block = g._search_localize_block("grep -rn wholly_absent_thing .", "")
+    # pre-fix RED: the stale es=2 from attempt 1 satisfied 1 < 2 < 3 -> silenced.
+    assert 'surface="absent"' in block, (
+        "stale pre-reset edit index silenced the honest-negative repeat")
+
+
 # ---- IDEMPOTENCE -------------------------------------------------------------
 def test_idempotence_never_delivers_same_fact_twice(on):
     """A third identical probe (post-fire) must be silent (content-hash latch)."""
@@ -233,6 +316,45 @@ def test_namefold_fires_once_then_latched(on):
     a = _fresh("grep -rn getUserId .", "")
     assert a
     assert g._search_localize_block("grep -rn getUserId .", "") == ""
+
+
+# ---- BUG-B1 hits path: LEAK invariant (same _resolve_symbol_defs guards) -----
+def test_hits_path_drops_test_def_and_counts_test_ref(tmp_path, monkeypatch):
+    """On the hits-path fall-through the delivered def partition inherits every leak
+    guard of _resolve_symbol_defs/_fmt_def_facts: a def in a TEST path is DROPPED
+    (never surfaces), a TEST caller is a COUNT (never a name). Reverting the leak
+    guard on the fall-through path reddens this — the new hits channel is leak-safe by
+    inheritance, but this pin proves it on the exact out=str shape BUG-B1 opened."""
+    db = str(tmp_path / "graph.db")
+    con = sqlite3.connect(db)
+    con.executescript(
+        "CREATE TABLE nodes(id INTEGER PRIMARY KEY, label TEXT, name TEXT,"
+        " file_path TEXT, start_line INTEGER, end_line INTEGER, is_test INTEGER, language TEXT);"
+        "CREATE TABLE edges(id INTEGER PRIMARY KEY, source_id INTEGER, target_id INTEGER,"
+        " type TEXT, source_line INTEGER, resolution_method TEXT, confidence REAL);")
+    con.execute("INSERT INTO nodes(id,label,name,file_path,start_line,end_line,is_test,language)"
+                " VALUES(1,'Function','render_page','app/views.py',40,60,0,'python')")
+    # a same-named def in a TEST path (is_test NOT set — the walker misses tests/)
+    con.execute("INSERT INTO nodes(id,label,name,file_path,start_line,end_line,is_test,language)"
+                " VALUES(2,'Function','render_page','tests/test_views.py',5,9,0,'python')")
+    # a TEST caller over a DETERMINISTIC edge -> its COUNT may surface, its NAME never
+    con.execute("INSERT INTO nodes(id,label,name,file_path,start_line,end_line,is_test,language)"
+                " VALUES(3,'Function','test_render_page','tests/test_views.py',12,20,1,'python')")
+    con.execute("INSERT INTO edges(id,source_id,target_id,type,source_line,resolution_method,"
+                "confidence) VALUES(1,3,1,'CALLS',14,'import',1.0)")
+    con.commit()
+    con.close()
+    monkeypatch.setattr(g, "_POST_SEARCH_ON", True)
+    monkeypatch.setattr(g, "_db_path", lambda: db)
+    monkeypatch.setattr(g, "_root", lambda: str(tmp_path))
+    g._search_seen.clear()
+    # a real non-test hit -> _class_nontarget abstains -> fall-through delivers
+    block = g._search_localize_block("grep -rn render_page .",
+                                     "app/views.py:40:def render_page():\n")
+    assert "def: app/views.py:40" in block              # the real def surfaces
+    assert "tests/test_views.py" not in block            # the test-path def is DROPPED
+    assert "test_render_page" not in block               # the test caller NAME never leaks
+    assert "test refs: 1" in block                       # ...only its COUNT
 
 
 # ---- ABSTAIN (unchanged) -----------------------------------------------------

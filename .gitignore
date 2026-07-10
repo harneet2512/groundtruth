@@ -181,8 +181,11 @@ gt-index/gt-index*.exe
 # GITHUB REPO IS CODE-ONLY (CLAUDE.md line 1) — docs/reports are LOCAL working artifacts
 /gt_math.md
 /GT_MATH_*.md
+/GT_EVENT_ABI*.md
+/GT_ACQUISITION_*.md
 /TIER_*.md
 /gt_gt.md
+/gt_layers.md
 /gt_new.md
 /gt_trial.md
 /jedi_WORK.md
@@ -212,3 +215,110 @@ GT_ENDGAME_*
 
 # local design artifact (never push)
 GT_MCP_HOOKS_CONVERSION_DESIGN_*.md
+
+# DeepSWE v1.0.0 parity proof artifacts (LOCAL working artifacts, never push)
+PARITY_*.md
+PARITY_*.json
+PARITY_*.txt
+*_PROOF.md
+GO_NOGO*.md
+DEEPSWE_PARITY_*.md
+GT_ACQUISITION_ANALYSIS_PROMPT_*.md
+
+# ===== WORKTREE FENCE (2026-07-10) — local-only artifacts: fenced, NEVER deleted, never shipped =====
+# root-level docs & data blobs (docs are LOCAL working artifacts; code-only repo law)
+/*.md
+!/README.md
+/*.json
+/*.jsonl
+/*.yml
+/*.yaml
+/*.txt
+/*.log
+/*.tar.gz
+# run/scratch debris classes
+/tmp*
+/.tmp*
+/smoke_*
+/prereq_*
+/proof_*
+/monitor_cache_*
+/substrate_digest_*
+/gt_substrate_digest_*
+/pregen*
+/prelaunch_*
+/holdout_*
+/regrade_*
+/predictions_*
+/task_src_*
+/zz_wt_*
+# local dirs (artifacts, clones, scratch, caches)
+/run_a_artifacts/
+/run_b_artifacts/
+/runs/
+/results/
+/reports/
+/logs/
+/jobs/
+/patches/
+/models/
+/legacy/
+/research/
+/opensource/
+/localization_docs/
+/runtime_audit/
+/gt_surface_bug_repository/
+/phase0_access_report/
+/test_scenarios/
+/maybe_this/
+/world_research_output/
+/web/
+/tools/
+/specs/
+/sympy/
+/SWE-bench-Live/
+/microsoft-SWE-bench-Live/
+/swebench-pro-os/
+/swebench-pro-os-inspect/
+/railway/
+/.agents/
+/.claude/
+/.codex/
+/.csout/
+/.embed_cache/
+# docs inside code dirs never ship (test fixtures under tests/ DO ship)
+.github/*.md
+benchmarks/**/*.md
+scripts/**/*.md
+gt-index/*.md
+artifact_deepswe/*.md
+**/*.bak*
+# fence round 2 (2026-07-10): remaining local entries
+/.kill_switch/
+/.monitor_cache/
+/.railwayignore
+/BugsInPy/
+/Groundtruth.tmp_*/
+/adapters/
+/analysis_*/
+/artifact_multilingual/
+/artifact_verified/
+/artifacts/
+/autopsy_*/
+/config.toml
+/config/
+/deepswe-bench/
+/deepswe-pier/
+/deepswe_*
+/demo-home-assistant-core/
+/depth_research_output/
+/django/
+/docker/README.md
+/docs/
+/experiment/
+/gen_lab/
+/*.bin
+/*.png
+/.github/workflows/diag_stage1.yml
+tests/fixtures/trajectory/*.md
+tests/kernel/fixtures/*.md

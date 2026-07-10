@@ -1,0 +1,25 @@
+FROM python:3.12-slim
+
+RUN apt-get update -qq && \
+    apt-get install -y -qq git docker.io golang-go gcc curl > /dev/null 2>&1 && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /gt
+
+# Install Python deps
+RUN pip install --no-cache-dir inspect-ai "inspect-evals[swe_bench]" datasets openai
+
+# Copy GT source
+COPY . /gt/
+
+# Install GT
+RUN pip install --no-cache-dir -e .
+
+# Build gt-index
+RUN cd gt-index && CGO_ENABLED=1 go build -o /usr/local/bin/gt-index ./cmd/gt-index/ && \
+    chmod +x /usr/local/bin/gt-index
+
+ENV GT_INDEX_BINARY=/usr/local/bin/gt-index
+ENV PYTHONPATH=/gt
+
+CMD ["bash"]

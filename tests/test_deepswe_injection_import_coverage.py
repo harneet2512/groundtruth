@@ -32,6 +32,7 @@ Deterministic: no Go toolchain, no network, no Docker, no task IDs.
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import sys
 from pathlib import Path
@@ -120,6 +121,9 @@ def test_inject_steps_create_packages_and_decode_modules(agent_mod):
     # runtime still shipped (no regression).
     assert "mkdir -p /opt/gt/groundtruth/runtime" in runs
     assert "touch /opt/gt/groundtruth/runtime/__init__.py" in runs
+    # W2 nested adapters package (runtime/adapters): dir + __init__.py created.
+    assert "mkdir -p /opt/gt/groundtruth/runtime/adapters" in runs
+    assert "touch /opt/gt/groundtruth/runtime/adapters/__init__.py" in runs
 
     # Each module is base64-decoded to its package path.
     for tail in (
@@ -127,8 +131,15 @@ def test_inject_steps_create_packages_and_decode_modules(agent_mod):
         "> /opt/gt/groundtruth/delivery/name_policy.py",
         "> /opt/gt/groundtruth/pretask/curation_map.py",
         "> /opt/gt/groundtruth/runtime/context_policy.py",
+        # W2: the nested adapters module decodes to its package path.
+        "> /opt/gt/groundtruth/runtime/adapters/miniswe.py",
     ):
         assert tail in runs, f"missing decode step ending in {tail!r}"
+
+    # W2 FLATTEN: the nested subdir's temp b64 name is slash-free (a `/` in the
+    # temp name would target a nonexistent dir under /opt/gt).
+    assert "runtime_adapters__miniswe.b64" in runs
+    assert "/opt/gt/runtime/adapters__" not in runs
 
 
 # ---------------------------------------------------------------------------
@@ -174,3 +185,97 @@ def test_shipped_path_policy_carries_static_and_assets(agent_mod):
     assert is_vendored_path("web/static/app.js") is True
     assert is_vendored_path("frontend/assets/logo.png") is True
     assert is_vendored_path("src/core/handler.py") is False
+
+
+# ---------------------------------------------------------------------------
+# 6. Import-closure: the shipped set must be self-contained. This is the real
+#    defect class the naive coverage test (#1) misses — it only checks
+#    gt_mini_patch.py's own imports. A shipped module can itself import another
+#    groundtruth.* module at MODULE SCOPE (e.g. covering_runner ->
+#    groundtruth.runtime.test_runner -> groundtruth.runtime.repo_adapters). If
+#    that transitive dep is NOT shipped, `import groundtruth.runtime.covering_runner`
+#    raises ModuleNotFoundError in-container -> the B1 seam's try/except swallows it
+#    -> B1 goes dark even though the naive test is green.
+#
+#    Only MODULE-SCOPE imports (top-level ast nodes) are import-time and can crash
+#    container startup. Function-scope `from groundtruth... import` (e.g. `telemetry`
+#    behind `if log_dir is not None`) is lazy and does NOT crash the import, so it is
+#    correctly excluded here (and deliberately not shipped). Relative imports
+#    (`from . import context_policy`, `from .patterns import X`) are resolved to their
+#    absolute dotted name so a future relative hole is also caught.
+# ---------------------------------------------------------------------------
+def _module_scope_gt_deps(dotted: str, src: str) -> set[str]:
+    """The set of ``groundtruth.*`` modules imported at MODULE SCOPE by the source
+    of ``dotted`` (its fully-qualified name, used to resolve relative imports).
+    Excludes function/class-nested (lazy) imports by walking only ``tree.body``."""
+    package = dotted.rsplit(".", 1)[0]  # e.g. groundtruth.runtime
+    pkg_parts = package.split(".")
+    deps: set[str] = set()
+    for node in ast.parse(src, filename=dotted).body:  # top-level only
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.split(".")[0] == "groundtruth":
+                    deps.add(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level == 0:
+                if node.module and node.module.split(".")[0] == "groundtruth":
+                    deps.add(node.module)
+            else:
+                # relative: anchor = package with (level-1) trailing parts removed
+                anchor = ".".join(pkg_parts[: len(pkg_parts) - (node.level - 1)])
+                if not anchor:
+                    continue
+                if node.module:  # from .sub import name -> anchor.sub is the module
+                    deps.add(f"{anchor}.{node.module}")
+                else:            # from . import mod1, mod2 -> anchor.mod1, anchor.mod2
+                    for alias in node.names:
+                        deps.add(f"{anchor}.{alias.name}")
+    return deps
+
+
+def test_shipped_module_set_is_import_closed(agent_mod):
+    """Every MODULE-SCOPE groundtruth.* import inside a shipped module is itself
+    shipped. Closes the transitive-dep hole (covering_runner needs test_runner;
+    test_runner + patch_auditor need repo_adapters)."""
+    shipped = set(agent_mod._INJECTED_GT_MODULES)
+    files = agent_mod._PRODUCT_PACKAGE_FILES
+    holes: dict[str, list[str]] = {}
+    for subdir, name_to_src in files.items():
+        for name, src in name_to_src.items():
+            if src is None:  # absent source is skipped at injection time too
+                continue
+            # P4 (bounce 2026-07-10): a NESTED subdir ("runtime/adapters") must
+            # build a DOTTED module name — `/` would corrupt both the dep-anchor
+            # (relative-import resolution) and the shipped-set membership check.
+            dotted = f"groundtruth.{subdir.replace('/', '.')}.{name[:-3]}"
+            uncovered = _module_scope_gt_deps(dotted, src) - shipped
+            if uncovered:
+                holes[dotted] = sorted(uncovered)
+    assert holes == {}, (
+        "shipped modules import groundtruth.* modules at MODULE SCOPE that are NOT "
+        f"shipped (import-closure hole -> in-container ModuleNotFoundError): {holes}. "
+        "Add each to _PRODUCT_PACKAGE_MODULES in gt_agent.py."
+    )
+    # W2: the nested adapters module is in the shipped set under its DOTTED name,
+    # and its module-scope deps (gateway, evidence_envelope) are shipped too.
+    assert "groundtruth.runtime.adapters.miniswe" in shipped
+    for dep in ("groundtruth.runtime.gateway",
+                "groundtruth.runtime.evidence_envelope",
+                "groundtruth.runtime.episode_state"):
+        assert dep in shipped, f"{dep} must ship for the W2 gateway seam"
+
+
+def test_b1_engines_and_transitive_deps_are_shipped(agent_mod):
+    """The four B1 verification-execution engines gt_mini_patch.py imports AND their
+    module-scope transitive deps are all in the shipped allow-list (regression pin
+    for the 0/8 B1-dark defect)."""
+    shipped = set(agent_mod._INJECTED_GT_MODULES)
+    for dotted in (
+        "groundtruth.runtime.covering_runner",
+        "groundtruth.runtime.native_render",
+        "groundtruth.runtime.submit_gate",
+        "groundtruth.runtime.patch_auditor",
+        "groundtruth.runtime.test_runner",   # transitive: covering_runner, test_runner
+        "groundtruth.runtime.repo_adapters", # transitive: patch_auditor, test_runner
+    ):
+        assert dotted in shipped, f"{dotted} must be shipped for B1 to load in-container"

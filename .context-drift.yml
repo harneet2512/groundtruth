@@ -1,0 +1,4 @@
+# context-drift configuration
+# Drift-check anchor for the DeepSWE pier substrate audit.
+files:
+  - gt_full.md

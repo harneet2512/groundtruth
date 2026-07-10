@@ -1,0 +1,250 @@
+name: "OSS localization proof (full pipeline, 5 langs, parallel)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      gt_substrate_digest:
+        description: "Pinned GT substrate digest"
+        required: true
+        default: ""
+      cases_file:
+        description: "Cases manifest (relative to benchmarks/data/)"
+        required: false
+        default: "oss_all60_cases.json"
+      repos_file:
+        description: "Repos manifest (relative to benchmarks/data/)"
+        required: false
+        default: "oss_all60_repos.json"
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [python, go, javascript, typescript, rust]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+      - name: GHCR login
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" --password-stdin
+      - name: Pull substrate
+        run: |
+          DIGEST="${{ inputs.gt_substrate_digest }}"
+          [ -n "$DIGEST" ] || { echo "::error::no substrate digest"; exit 1; }
+          docker pull "$DIGEST"
+          echo "DIGEST=$DIGEST" >> "$GITHUB_ENV"
+      - name: Clone this language's repos
+        env:
+          CASES_FILE: ${{ inputs.cases_file }}
+          REPOS_FILE: ${{ inputs.repos_file }}
+          LANG: ${{ matrix.language }}
+        run: |
+          mkdir -p /tmp/repos
+          python3 -c "
+          import json, subprocess, os, sys
+          repos = json.load(open('benchmarks/data/' + os.environ['REPOS_FILE']))
+          cases = json.load(open('benchmarks/data/' + os.environ['CASES_FILE']))
+          lang = os.environ['LANG'].lower()
+          needed = {c['repo'] for c in cases if c.get('language','').lower()==lang}
+          import shutil
+          failures = []
+          for name in sorted(needed):
+              meta = repos[name]; dst = f'/tmp/repos/{name}'
+              # Fast path: shallow init + fetch the exact commit by SHA.
+              subprocess.run(['git','init','--quiet',dst], check=False)
+              subprocess.run(['git','-C',dst,'remote','add','origin',meta['url']], check=False)
+              f = subprocess.run(['git','-C',dst,'fetch','--quiet','--depth','1','origin', meta['commit']], capture_output=True)
+              ok = (f.returncode == 0) and (subprocess.run(['git','-C',dst,'checkout','--quiet','FETCH_HEAD'], capture_output=True).returncode == 0)
+              if not ok:  # fallback: full clone + checkout
+                  shutil.rmtree(dst, ignore_errors=True)
+                  subprocess.run(['git','clone','--quiet','--no-checkout', meta['url'], dst], check=False)
+                  subprocess.run(['git','-C',dst,'checkout','--quiet', meta['commit']], check=False)
+              # H4: LEGITIMACY — assert the working tree is AT the pinned commit. A
+              # wrong-commit checkout is stale/illegitimate code -> the proof would
+              # measure the wrong source. Fail the step on ANY miss (hard-fail: legitimacy).
+              head = subprocess.run(['git','-C',dst,'rev-parse','HEAD'], capture_output=True, text=True)
+              got = (head.stdout or '').strip(); want = str(meta['commit']).strip()
+              at_commit = (head.returncode == 0) and bool(got) and (got == want or got.startswith(want) or want.startswith(got))
+              if not at_commit:
+                  failures.append(f'{name}: HEAD={got[:12] or \"<none>\"} != pinned {want[:12]}')
+              print(f'cloned {name} @ {want[:10]} ({\"shallow\" if ok else \"full\"}) at_commit={at_commit}', flush=True)
+          if failures:
+              print('::error::repos NOT at pinned commit (legitimacy breach): ' + '; '.join(failures), flush=True)
+              sys.exit(1)
+          "
+      - name: Run falsifier (RRF reach-drop A/B/C) for this language
+        env:
+          CASES_FILE: ${{ inputs.cases_file }}
+          LANG: ${{ matrix.language }}
+        run: |
+          mkdir -p /tmp/gt_idx_cache
+          # wRRF reach-drop falsifier. BRIEFING §4: reach over-promotes hubs; the RRF
+          # gave it a full equal vote (the bug). Proven lever (toy + OSS misses): drop
+          # reach's vote so content (sem/lex/path) decides. ONE variable at a time:
+          #   control        = current baked fusion (unweighted RRF, reach votes) -> 53/60 ref
+          #   reachdrop      = wRRF with GT_RRF_W_REACH=0 (the isolated lever)
+          #   reachdrop_sem2 = + GT_RRF_W_SEM=2.0 (does sem-boost add anything on top)
+          # Graphs are indexed ONCE (arm 1) then reused from /idx_cache (re-rank only),
+          # so 3 arms ~= 1 index cost. No dedup anywhere.
+          run_arm () {
+            local arm="$1" mode="$2"; shift 2
+            local out="/tmp/proof_out/$arm"; mkdir -p "$out"
+            echo "::group::ARM=$arm LANG=$LANG (GT_RRF_FUSION='$mode' $*)"
+            docker run --rm \
+              -v "$GITHUB_WORKSPACE/benchmarks/data/$CASES_FILE:/cases.json:ro" \
+              -v "$GITHUB_WORKSPACE/scripts/oss_full_pipeline_proof.py:/proof.py:ro" \
+              -v "$GITHUB_WORKSPACE/src/groundtruth:/opt/gt/src/groundtruth:ro" \
+              -v "/tmp/repos:/repos:ro" \
+              -v "/tmp/gt_idx_cache:/idx_cache" \
+              -v "$out:/out" \
+              -e GT_FORCE_ONNX_EMBEDDER=1 -e GT_REQUIRE_EMBEDDER=1 \
+              -e GT_REQUIRE_LSP=1 -e GT_REQUIRE_FTS5=1 \
+              -e GT_INDEX_BIN=gt-index -e GT_SRC=/opt/gt/src \
+              -e GT_INDEX_CACHE=/idx_cache \
+              -e GT_PROOF_LANG="$LANG" \
+              -e GT_CHECKOUT_SHA="$GITHUB_SHA" \
+              -e GT_SUBSTRATE_DIGEST="$DIGEST" \
+              -e GT_RRF_FUSION="$mode" \
+              "$@" \
+              "$DIGEST" \
+              python /proof.py /cases.json /repos /out || echo "::warning::arm $arm ($LANG) failed"
+            echo "::endgroup::"
+          }
+          # Comprehensive cheap-lever falsifier, ONE variable per arm, all correctly
+          # wired to the DELIVERED brief (harness deliv_rank = gold_rank over the
+          # delivered localization_proof, so each lever's effect is measured):
+          #   control     = baseline (current 53/60 ref)
+          #   wpathdecay  = C: localize W_PATH_DECAY 0.30->0.15 (the @1 lever; BRIEFING §3 #2)
+          #   recallfilter= R1: drop vendored/minified bundles at the delivered seam (tutanota)
+          #   bm25depth   = R2: BM25 recall admit 10->50 (recall depth; ~free)
+          #   combined    = C+R1+R2 together
+          # (run_v74 reach-drop / wRRF is the candidate-window lever, measured in the
+          #  prior run 28351851187 — weak for @1 per the integration audit, so not re-run here.)
+          # Track-2 EMBEDDER A/B (needs the jina-baked substrate digest). control = gte
+          # (current default); jina = swap to the code embedder; jina_deepK = + deepen the
+          # dense seed (so a better embedder isn't wasted behind top-10); jina_r1 = + bundle
+          # filter (recall hygiene). The embedder changes the SEED (recall) + cosine (ranking)
+          # — the only lever expected to GENERALIZE (cheap C/R1/R2 were net-zero @1).
+          # Embedder × FUSION matrix. The @1 gap is a FUSION problem (RRF discards the
+          # embedder's cosine MAGNITUDE — measured: golds lose by 1e-4..5e-3, express lost
+          # with perfect lex+path). So we must test jina under BOTH fusions:
+          #   *_rrf  = GT_RRF_FUSION=on  (rank fusion — magnitude discarded)
+          #   *_lin  = GT_RRF_FUSION=off (linear _total_score — magnitude PRESERVED; v7.4
+          #            adapts W_SEM up on nl_gap so the embedder margin actually counts)
+          # Diagnosis test: if jina lifts @1 under LIN but not RRF -> the bottleneck is the
+          # FUSION ALGORITHM, not the embedder. control = current default (gte + RRF).
+          # INDEPENDENT-SURFACE localizer (ultracode wqbc0c5v9, CLAUDE.md §6): the anchor/FTS5/
+          # embedder are duplicate nodes.name surfaces; add content-IDF + path-IDF as INDEPENDENT
+          # surfaces and RRF-fuse, with name-lists demoted ONLY on behavior(nl_gap) issues. No model,
+          # no embedder dominance (runs on gte default). Arms:
+          #   control     = current default (magnitude composite) — must reproduce baseline (no-regression proof)
+          #   fuse_full   = GT_LOC_FUSION_V2 + BEHAVIOR_LEAD (the proposal)
+          #   fuse_nolead = FUSION_V2 without the behavior gate (isolates the gate)
+          #   fuse_ablate = FUSION_V2 RRF of EXISTING surfaces only (isolates magnitude-fix vs independent-surface win)
+          # STEP 3 — reach A/B: does feeding the new depth edges (RE_EXPORTS/COMPOSES/
+          # EXTENDS/IMPLEMENTS) into the @1 path-decay reach help ranking? fuse_nolead is
+          # now the BAKED default, so control already = independent-surface fusion; this
+          # only toggles GT_LOC_REACH_DEPTH. Prior SKEPTICAL (BRIEFING #3: reach
+          # over-promotes hubs; barrels/composition targets are hubs) — bake only on a
+          # held-out lift with 0 per-lang regression.
+          run_arm control    on
+          run_arm reachdepth on -e GT_LOC_REACH_DEPTH=1
+          # L4/H5: a TOTAL (or partial) proof failure must RED this step, never report
+          # green. After BOTH arms, the CONTROL SUMMARY.json MUST exist, MUST NOT be a
+          # partial (a partial = the shard was killed mid-run = LOST data), and MUST have
+          # attempted the expected number of cases for this language. Any miss -> exit 1.
+          python3 -c "
+          import json, os, sys
+          lang = os.environ['LANG'].lower()
+          cases = json.load(open('benchmarks/data/' + os.environ['CASES_FILE']))
+          expected = sum(1 for c in cases if c.get('language','').lower()==lang)
+          p = '/tmp/proof_out/control/SUMMARY.json'
+          if not os.path.exists(p):
+              print(f'::error::control SUMMARY.json MISSING for {lang} (proof produced no measurement)'); sys.exit(1)
+          d = json.load(open(p))
+          if d.get('partial'):
+              print(f'::error::control SUMMARY.json is PARTIAL for {lang} (shard killed mid-run): {d.get(\"total_cases\")}/{expected}'); sys.exit(1)
+          got = int(d.get('total_cases', 0))
+          if expected and got != expected:
+              print(f'::error::control attempted {got} != expected {expected} cases for {lang} (incomplete measurement)'); sys.exit(1)
+          print(f'control OK: {lang} attempted={got}/{expected} scored={d.get(\"scored_cases\")} infra={d.get(\"infra_failures\")} @1={d.get(\"gold_at_1\")} embedder_loaded={d.get(\"embedder_loaded\")}')
+          "
+      - name: Show this language's result
+        if: always()
+        run: |
+          python3 -c "
+          import json, os, sys
+          missing = []
+          for a in ['control','reachdepth']:
+              p=f'/tmp/proof_out/{a}/SUMMARY.json'
+              if not os.path.exists(p):
+                  print(a,'MISSING')
+                  if a == 'control': missing.append(a)
+                  continue
+              d=json.load(open(p)); n=d['total_cases']
+              tag=' [PARTIAL]' if d.get('partial') else ''
+              print(f'{a}{tag}: @1={d[\"gold_at_1\"]}/{n} in8={d[\"gold_in_8\"]}/{n} scored={d.get(\"scored_cases\")} infra={d.get(\"infra_failures\")} diag_clean={d.get(\"diagnostic_clean\")}/{n} viol={d.get(\"violation_counts\",{})}')
+              for k,v in sorted(d.get('by_regime',{}).items()):
+                  print(f'    {k}: @1={v[\"at_1\"]}/{v[\"n\"]} in8={v[\"in_8\"]}/{v[\"n\"]} miss={v[\"miss\"]}')
+          if missing:
+              print('::error::control SUMMARY.json absent — proof produced no measurement'); sys.exit(1)
+          "
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oss-proof-${{ matrix.language }}
+          path: /tmp/proof_out/
+          # L4: an empty artifact = the proof produced nothing (LOST data). Fail the
+          # upload loudly instead of shipping a green run with no results.
+          if-no-files-found: error
+
+  # L4(d): FINAL cross-language PROOF GATE. The per-leg steps can only see one language;
+  # this job (runs after all legs, always) reds the workflow if ANY language is missing /
+  # partial, or if the aggregate CONTROL @1 regresses below the 53/60 reference. This is a
+  # PROOF/measurement gate (regression-gating is correct here) — NOT a task refusal, and
+  # NOT a GT-quality refusal (per-case quality failures are surfaced upstream as
+  # infra_failures and excluded from the @1 denominator).
+  gate:
+    needs: proof
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all language artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/all_proof
+      - name: Final proof gate (all langs present + no regression vs reference)
+        env:
+          GT_PROOF_AT1_REFERENCE: "53"
+        run: |
+          python3 -c "
+          import json, os, sys
+          langs = ['python','go','javascript','typescript','rust']
+          ref = int(os.environ.get('GT_PROOF_AT1_REFERENCE','53'))
+          missing, partial, total_at1, total_n = [], [], 0, 0
+          for lang in langs:
+              p = f'/tmp/all_proof/oss-proof-{lang}/control/SUMMARY.json'
+              if not os.path.exists(p):
+                  missing.append(lang); continue
+              d = json.load(open(p))
+              if d.get('partial'): partial.append(lang)
+              total_at1 += int(d.get('gold_at_1',0)); total_n += int(d.get('total_cases',0))
+              print(f'{lang}: @1={d.get(\"gold_at_1\")}/{d.get(\"total_cases\")} scored={d.get(\"scored_cases\")} infra={d.get(\"infra_failures\")} sha={str(d.get(\"checkout_sha\",\"\"))[:10]} digest={str(d.get(\"substrate_digest\",\"\"))[:24]} embedder={d.get(\"embedder_loaded\")}')
+          errs = []
+          if missing: errs.append(f'LANGS MISSING: {missing}')
+          if partial: errs.append(f'LANGS PARTIAL (killed mid-run): {partial}')
+          if total_at1 < ref: errs.append(f'REGRESSION: control @1 total {total_at1} < reference {ref}')
+          print(f'TOTAL control @1 = {total_at1}/{total_n} (reference {ref})')
+          if errs:
+              for e in errs: print('::error::' + e)
+              sys.exit(1)
+          print('PROOF GATE GREEN: all 5 langs present, no regression vs reference')
+          "

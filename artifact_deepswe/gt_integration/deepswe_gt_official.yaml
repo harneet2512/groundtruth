@@ -1,0 +1,218 @@
+# GT-ON arm on the OFFICIAL-ALIGNED harness — the valid treatment for the paired A/B.
+#
+# = deepswe_official_probe.yaml (the harness-fixed BASELINE) + the GroundTruth delivery surface.
+# The ONLY difference vs the baseline is the GT surface (the <gt-evidence>/<gt-*> injections and the
+# prose that tells the agent how to read them). EVERYTHING else — the official reproduce+edge-case
+# workflow, step_limit 250, BASH_ENV, repo-root cwd, and the model_kwargs — is BYTE-IDENTICAL to the
+# baseline probe, so any delta is attributable to GT, not to a harness difference.
+#
+# Fixes carried over from the probe (vs the OLD deepswe_gt_pier.yaml, which starved the agent):
+#   - step_limit 250 (was 150)
+#   - BASH_ENV /root/.bashrc so `bash -c` sources the task env (services/conda active)
+#   - official "reproduce + test edge cases" discipline (was "run existing tests")
+#   - no /tmp/gt_root.txt cd-prefix — pier starts every command in the repo root (cwd)
+#   - model_kwargs: top_p 0.95 + NO extra_body.thinking (byte-identical to the baseline; MiMo forces
+#     temp 1.0/top_p 0.95 in thinking mode and ignores thinking:disabled anyway)
+# GT stays ON: run WITHOUT GT_BASELINE, gt_agent.GTMiniSweAgent installed, pinned substrate proven.
+# environment_class stays `local` (pier already provisions the container; `docker` = docker-in-docker crash).
+
+agent:
+  system_template: |
+    You are a helpful assistant that can interact with a computer shell to solve programming tasks.
+  instance_template: |
+    <pr_description>
+    Consider the following task description:
+    {{task}}
+    </pr_description>
+
+    <instructions>
+    # Task Instructions
+
+    ## Overview
+
+    You're a software engineer interacting continuously with a computer by submitting commands.
+    You'll be helping implement the changes described in the task description above.
+    Your task is specifically to make changes to non-test source files in the current repository, in a
+    way that is general and consistent with the codebase.
+    <IMPORTANT>This is an interactive process where you will think and issue AT LEAST ONE command, see the result, then think and issue your next command(s).</important>
+
+    For each response:
+
+    1. Include a THOUGHT section explaining your reasoning and what you're trying to accomplish
+    2. Provide one or more bash tool calls to execute
+
+    ## Codebase Intelligence Tool
+
+    GroundTruth automatically appends evidence to command output inside
+    <gt-evidence> tags when you read or edit source files. This evidence is
+    built from the codebase call graph (any language -- Go, Rust, TS, JS,
+    Python, ...) and includes:
+    - Cross-file callers of the functions in the file you opened, and how they
+      use the result (so you do not break them).
+    - Behavioral contracts: the typed signatures of the functions your edit
+      target CALLS (so you call them correctly).
+    - Sibling functions at the same scope (the patterns you must match).
+
+    Read those <gt-evidence> tags. Lines such as [WITNESS] and [CALLEE] are
+    deterministically resolved cross-file facts you cannot get from the file
+    alone; [CALLERS] location hints and scope neighbors may be unverified --
+    those are labeled "(unverified)", so treat them as leads to confirm with
+    grep, not facts. The tags appear automatically; you do not call anything.
+
+    GroundTruth may also append these blocks when relevant:
+    - <gt-contract>: signatures and verified caller counts for functions in a file you edited -- preserve those interfaces.
+    - <gt-scope>: graph-connected files around the file you are viewing -- candidate scope; confirm the edit target with grep.
+    - <gt-cochange>: files that historically changed together with the file you edited -- check whether your fix needs them too.
+    - <gt-nudge>: a one-time course-correction when your trajectory looks stuck.
+
+    ## Important Boundaries
+
+    - MODIFY: Regular source code files in the current repository. Every command already starts in the
+      repository root (the container's working directory), so use relative paths.
+    - DO NOT MODIFY: Tests, configuration files, build scripts (unless directly part of the task).
+
+    ## Recommended Workflow
+
+    1. Analyze the codebase by finding and reading the files relevant to the task. As you read and edit,
+       GroundTruth appends <gt-evidence> tags with the cross-file callers, callee contracts, and sibling
+       patterns — read them; they narrow where the change belongs and what it must not break.
+    2. Create a script (or a focused, self-authored test) that reproduces the exact behavior the task
+       requires — including its edge cases: precise error codes/statuses, boundary conditions, and the
+       exact output shapes/strings the description specifies. The grading tests are hidden, so this
+       reproduction is your only signal that your implementation matches the spec.
+    3. Edit the source code to implement the change. Cross-check against the callers and contracts in the
+       <gt-evidence> / <gt-contract> tags so you do not break an interface a caller depends on.
+    4. Verify your fix by running your reproduction script/test again.
+    5. Test edge cases explicitly (every "must"/"return 400 when"/"omit on the final page"-style clause in
+       the task) to ensure your fix is robust and matches the spec precisely, not just the happy path.
+    6. Run the existing test suite to confirm you did not break anything. If a required service
+       (database, etc.) is not running, start it first, then run the tests.
+
+    ## Command Execution Rules
+
+    You are operating in an environment where:
+
+    1. You issue at least one command
+    2. The system executes the command(s) in a subshell
+    3. You see the result(s)
+    4. You write your next command(s)
+
+    Each response should include:
+
+    1. **Reasoning text** where you explain your analysis and plan
+    2. At least one tool call with your command
+
+    **CRITICAL REQUIREMENTS:**
+
+    - Your response SHOULD include reasoning text explaining what you're doing
+    - Your response MUST include AT LEAST ONE bash tool call
+    - You can make MULTIPLE tool calls in a single response when commands are independent
+    - Directory or environment variable changes are NOT persistent between commands. Every command runs
+      in a new subshell that starts in the repository root. To change dir for one command, prefix it:
+      `cd sub/dir && ...`.
+
+    ## Environment Details
+
+    - Full Linux shell environment; the repository root is your working directory on every command.
+    - Always use non-interactive flags (-y, -f) for commands
+    - Avoid interactive tools like vi, nano
+    - You can use bash commands or invoke any tool in the environment; if a tool isn't available, install it.
+
+    ## Submission
+
+    When you've completed your work, submit your changes as a git diff patch.
+
+    Step 1: Create the patch file
+    Run `git add -N -- <file1> <file2> && git diff -- <file1> <file2> > /tmp/patch.txt` listing every source file you modified OR created.
+    The `git add -N` registers any newly-created files as intent-to-add so they appear in the diff — a plain `git diff` silently OMITS untracked new files, which would drop a fix that adds files. Do NOT commit your changes.
+
+    <IMPORTANT>
+    The patch must contain ALL source files you modified OR created (new files included — a feature that adds files is incomplete without them).
+    Do not include test files, helper scripts, build configs, or binary files.
+    </IMPORTANT>
+
+    Step 2: Verify your patch
+    Inspect /tmp/patch.txt to confirm it only contains your intended changes.
+
+    Step 3: Submit (EXACT command required)
+    ```bash
+    echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat /tmp/patch.txt
+    ```
+
+    <CRITICAL>
+    - Creating the patch and submitting MUST be separate commands.
+    - You CANNOT continue working after submitting.
+    </CRITICAL>
+    </instructions>
+  step_limit: 250   # OFFICIAL — byte-identical to the baseline probe (was 150 in the old GT config).
+  cost_limit: 3.0
+
+environment:
+  timeout: 3600
+  env:
+    PAGER: cat
+    MANPAGER: cat
+    LESS: -R
+    PIP_PROGRESS_BAR: "off"
+    TQDM_DISABLE: "1"
+    # OFFICIAL: bash -c is non-login and won't source ~/.bashrc; point BASH_ENV at it so the image's
+    # env activation (conda activate testbed / service setup / PATH) runs. Byte-identical to the baseline.
+    BASH_ENV: /root/.bashrc
+  environment_class: local
+
+model:
+  observation_template: |
+    {% if output.exception_info -%}
+    <exception>{{output.exception_info}}</exception>
+    {% endif -%}
+    <returncode>{{output.returncode}}</returncode>
+    {% if output.output | length < 10000 -%}
+    <output>
+    {{ output.output -}}
+    </output>
+    {%- else -%}
+    <warning>
+    The output of your last command was too long.
+    Please try a different command that produces less output.
+    Use head, tail, or sed to view smaller sections of files.
+    Use more selective grep/find patterns.
+    Redirect output to a file and search within it.
+    </warning>
+    {%- set elided_chars = output.output | length - 10000 -%}
+    <output_head>
+    {{ output.output[:5000] }}
+    </output_head>
+    <elided_chars>
+    {{ elided_chars }} characters elided
+    </elided_chars>
+    <output_tail>
+    {{ output.output[-5000:] }}
+    </output_tail>
+    {%- endif -%}
+  format_error_template: |
+    Tool call error:
+
+    {{error}}
+
+    You made an invalid tool call. Please retry with the correct tool call format.
+  cost_tracking: "ignore_errors"
+  model_kwargs:
+    # BYTE-IDENTICAL to the baseline probe. MiMo v2.5-pro forces temp 1.0 / top_p 0.95 in thinking mode
+    # regardless of what we pass (Xiaomi hyperparameter doc); thinking stays ON (no extra_body needed —
+    # thinking:disabled is a no-op for MiMo). Same knobs both arms => any delta is GT, not sampling.
+    drop_params: true
+    temperature: 1.0
+    top_p: 0.95
+    max_tokens: 16384
+    presence_penalty: 0
+    frequency_penalty: 0
+    num_retries: 3
+    # LLM REQUEST TIMEOUT (fail-closed vs the infinite-hang class). num_retries only fires on
+    # EXCEPTIONS; a stalled/dead connection (bytes stop, no error) never raises -> hangs forever
+    # (the offunzu freeze). `timeout` bounds each litellm.completion attempt so a stall raises
+    # litellm.Timeout (retryable); repeated timeout is classified INFRA_MODEL_TIMEOUT by
+    # scripts/verify/deepswe_outcome.py -> excluded from the resolved denominator, never a 0.0.
+    # 900s = MEASURED floor (40 real mimo rollouts @ max_tokens=16384): real turns run <=~80s/step
+    # and a FULL max_tokens turn is <=~820s even at slow throughput, so 900s fires ONLY on a
+    # dead stall, never clipping a legit turn -> the retry is transport recovery, not a re-roll.
+    timeout: 900

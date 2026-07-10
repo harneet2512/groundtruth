@@ -1,0 +1,235 @@
+name: "DeepSWE: Single GT trial"
+
+# Run a single DeepSWE task with GT-augmented mini-swe-agent via Pier.
+# Injects gt_hook.py into the container for on-demand codebase intelligence.
+
+on:
+  workflow_dispatch:
+    inputs:
+      task_id:
+        description: "DeepSWE task ID (e.g., dateutil-rfc5545-timezone-interop)"
+        required: true
+        default: "dateutil-rfc5545-timezone-interop"
+      model:
+        description: "LLM model"
+        required: true
+        default: "deepseek/deepseek-v4-flash"
+
+env:
+  # Defensive UTF-8 (infra): GHA Linux is utf-8 by default, but hard-pin it so a stray
+  # locale can't reintroduce the cp1252 git/rg-subprocess decode crash (the code fix in
+  # src/groundtruth already guards it). PYTHONUTF8 also covers pier's braille-spinner encode.
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+  LANG: "C.UTF-8"
+  LC_ALL: "C.UTF-8"
+  # Full-stack enforcement on the DeepSWE path. DeepSWE uses preflight_pipeline.py
+  # (FTS5 / semantic / lsp-edges) — now made HARD (not advisory) in the preflight step.
+  # GT_REQUIRE_FTS5 aborts gt-index if FTS5 absent; GT_FORCE_ONNX_EMBEDDER +
+  # GT_REQUIRE_EMBEDDER keep the brief's semantic on the container ONNX path.
+  # NB GT_REQUIRE_LSP is OH-wrapper-only; DeepSWE's LSP is the offline graph
+  # enrichment, asserted by preflight check_lsp_edges under GT_REQUIRE_FULL_POTENTIAL.
+  GT_REQUIRE_FULL_POTENTIAL: "1"
+  GT_REQUIRE_FTS5: "1"
+  GT_FORCE_ONNX_EMBEDDER: "1"
+  GT_REQUIRE_EMBEDDER: "1"
+  # LEGITIMACY: index FRESH per task from the task's base-commit source (the trial
+  # already builds graph.db in-container at line ~118 and runs the shipped resolve
+  # pass — NOT a deepswe_preindex artifact). This flag forbids any prebuilt-db reuse.
+  GT_FORBID_PREBUILT_GRAPH: "1"
+
+jobs:
+  trial:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+
+    steps:
+      - name: Checkout GroundTruth
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Cache ONNX embedder model (kill the per-run HF fetch flake)
+        uses: actions/cache@v4
+        with:
+          # G12: cache the CONFIGURED gte-modernbert-base/768 — codespace_deepswe_run.sh
+          # declares it the PRIMARY embedder and setup_models.py bakes it. Caching e5/384
+          # here meant either a permanent cache MISS (re-fetch gte every run) or, worse,
+          # e5 landing while the config expects gte -> the dim-guard abstains semantic and
+          # the host brief silently degrades to lexical-only. Cache what the pipeline reads.
+          path: models/gte-modernbert-base
+          key: gt-embed-gte-modernbert-base-onnx-v1
+
+      - name: Install pier, groundtruth, embedder + ALL LSP servers, build gt-index
+        run: |
+          # PINNED to the source-verified pier contract version (matches deepswe_full.yml).
+          pip install "datacurve-pier==0.2.0"
+          pip install -e .
+          # Full-potential GT on the runner (host-side brief runs here): ONNX embedder
+          # (no torch) + ALL 4 LSP servers so non-Python tasks (go/ts/js/rust) get the
+          # precision pass too. Runner has internet; per-run install (speed-optimized to
+          # the baked image later).
+          pip install onnxruntime tokenizers huggingface_hub pyright || echo "WARN: py deps"
+          python scripts/setup_models.py || echo "WARN: embedder model fetch failed"
+          go install golang.org/x/tools/gopls@latest && sudo cp "$(go env GOPATH)/bin/gopls" /usr/local/bin/ || echo "WARN: gopls"
+          npm install -g typescript typescript-language-server || echo "WARN: ts-language-server"
+          curl -fsSL https://github.com/rust-lang/rust-analyzer/releases/latest/download/rust-analyzer-x86_64-unknown-linux-gnu.gz | gunzip -c | sudo tee /usr/local/bin/rust-analyzer >/dev/null && sudo chmod +x /usr/local/bin/rust-analyzer || echo "WARN: rust-analyzer"
+          # ripgrep: GT grep-to-seed uses `rg`; without it GT falls back to slow Python os.walk
+          # (seen on the GCP run: "[GT L1] grep-to-seed: rg not in PATH, using Python walk").
+          sudo apt-get install -y ripgrep >/dev/null 2>&1 && echo "  rg OK" || echo "WARN: ripgrep"
+          # gt-index linux binary (preindex builds it the same way)
+          (cd gt-index && CGO_ENABLED=1 go build -tags sqlite_fts5 -o gt-index-linux ./cmd/gt-index/ && chmod +x gt-index-linux) || echo "WARN: gt-index build"
+          echo "=== installed LSP servers ==="
+          for s in pyright-langserver gopls rust-analyzer typescript-language-server; do command -v $s && echo "  $s OK" || echo "  $s MISSING"; done
+
+      - name: Clone deepswe-bench (if not present)
+        run: |
+          if [ ! -d "deepswe-bench" ]; then
+            git clone --depth 1 https://github.com/datacurve-ai/deep-swe.git deepswe-bench
+          fi
+
+      - name: Validate task exists
+        run: |
+          TASK_DIR="deepswe-bench/tasks/${{ inputs.task_id }}"
+          if [ ! -d "$TASK_DIR" ]; then
+            echo "::error::Task directory not found: $TASK_DIR"
+            echo "Available tasks:"
+            ls deepswe-bench/tasks/ | head -20
+            exit 1
+          fi
+          echo "Task directory: $TASK_DIR"
+          ls -la "$TASK_DIR"
+
+      - name: Build graph.db + extract source, wire the brief (Point A)
+        run: |
+          set -e
+          TASK_DIR="deepswe-bench/tasks/${{ inputs.task_id }}"
+          IMG=$(python3 -c "import tomllib;t=tomllib.load(open('$TASK_DIR/task.toml','rb'));print(t.get('environment',{}).get('docker_image',''))")
+          [ -z "$IMG" ] && { echo "::warning::no docker_image in task.toml — brief stays off"; exit 0; }
+          echo "task image: $IMG"
+          for i in 1 2 3 4; do docker pull "$IMG" && break || { echo "pull attempt $i failed, retrying..."; sleep 15; }; done
+          docker image inspect "$IMG" >/dev/null 2>&1 || { echo "::warning::image pull failed after 4 tries — brief stays off"; exit 0; }
+          docker rm -f gtsrc 2>/dev/null || true
+          docker run -d --name gtsrc "$IMG" sleep 1800 >/dev/null
+          ROOT=$(docker exec gtsrc bash -c 'for d in /home/user /testbed /workspace /app /repo; do [ -d "$d/.git" ] && echo "$d" && break; done')
+          ROOT=${ROOT:-/testbed}
+          echo "repo root: $ROOT"
+          # gt-index linux binary (build once if missing)
+          if [ ! -x gt-index/gt-index-linux ]; then
+            (cd gt-index && CGO_ENABLED=1 go build -tags sqlite_fts5 -o gt-index-linux ./cmd/gt-index/) || echo "WARN: gt-index build"
+          fi
+          mkdir -p /tmp/gt
+          docker cp gt-index/gt-index-linux gtsrc:/tmp/gt-index && docker exec gtsrc chmod +x /tmp/gt-index
+          docker exec gtsrc /tmp/gt-index -root="$ROOT" -output=/tmp/graph.db 2>&1 | tail -3 || echo "WARN: gt-index run"
+          docker cp gtsrc:/tmp/graph.db /tmp/gt/graph.db 2>/dev/null || echo "WARN: no graph.db"
+          # extract repo source to the runner — the host-side brief's grep/semantic read files
+          mkdir -p /tmp/gt/src && docker cp "gtsrc:$ROOT/." /tmp/gt/src 2>/dev/null || echo "WARN: no source"
+          docker rm -f gtsrc 2>/dev/null || true
+          # offline LSP precision pass — use the TASK's language (go/ts/js/rust/python)
+          if [ -f /tmp/gt/graph.db ]; then
+            TASK_LANG=$(python3 -c "import tomllib;t=tomllib.load(open('$TASK_DIR/task.toml','rb'));print(t.get('metadata',{}).get('language','python'))")
+            echo "task language: $TASK_LANG -> LSP pass"
+            python -m groundtruth.resolve --db /tmp/gt/graph.db --root /tmp/gt/src --resolve --lang "$TASK_LANG" 2>&1 | tail -3 || echo "WARN: lsp"
+            echo "lsp edges written: $(sqlite3 /tmp/gt/graph.db "SELECT COUNT(*) FROM edges WHERE resolution_method='lsp'" 2>/dev/null || echo '?')"
+            echo "GT_GRAPH_DB=/tmp/gt/graph.db" >> "$GITHUB_ENV"
+            echo "GT_REPO_ROOT=/tmp/gt/src" >> "$GITHUB_ENV"
+            echo "GT brief WIRED: graph.db $(stat -c%s /tmp/gt/graph.db) bytes, src $(ls /tmp/gt/src | wc -l) entries"
+          else
+            echo "::warning::graph.db missing — Point A brief will skip (DeepSWE runs hook-only)"
+          fi
+
+      - name: Preflight — full stack check before the paid run (diagnostic, warn on degradation)
+        # RESILIENCE: continue-on-error=true so a preflight failure is a DIAGNOSTIC WARNING, not a
+        # job-killer. The trial step uses if: ${{ !cancelled() }} and runs regardless.
+        # Reference pattern: deepswe_full.yml "GT substrate proof" step.
+        if: ${{ env.GT_GRAPH_DB != '' }}
+        continue-on-error: true
+        run: |
+          # Preflight: emit ::warning:: on degraded stack but do NOT kill the trial.
+          # preflight_pipeline.py exits non-zero under GT_REQUIRE_FULL_POTENTIAL when
+          # FTS5 / semantic / lsp-edges / assertions degrade — captured as a warning.
+          python scripts/verify/preflight_pipeline.py \
+            --db /tmp/gt/graph.db --root /tmp/gt/src \
+            || echo "::warning::preflight_pipeline.py exited non-zero — stack may be degraded but trial will proceed (continue-on-error pipeline)"
+
+      - name: Run GT trial
+        # RESILIENCE: run even if the preflight step above failed — preflight is DIAGNOSTIC.
+        # Only skip if the job was explicitly cancelled. Reference: deepswe_full.yml.
+        if: ${{ !cancelled() }}
+        run: |
+          echo "=== DeepSWE GT Trial ==="
+          echo "Task:  ${{ inputs.task_id }}"
+          echo "Model: ${{ inputs.model }}"
+          echo "GT_GRAPH_DB: ${GT_GRAPH_DB:-<unset -> brief off>}"
+          echo ""
+
+          pier run \
+            -p deepswe-bench/tasks/${{ inputs.task_id }} \
+            --agent-import-path artifact_deepswe.gt_agent:GTMiniSweAgent \
+            --model ${{ inputs.model }} \
+            --env docker \
+            -y \
+            --ak config_file=artifact_deepswe/gt_integration/deepswe_gt_pier.yaml \
+            2>&1 | tee trial_output.log
+
+          echo ""
+          echo "=== Trial complete ==="
+
+      - name: Collect results
+        if: always()
+        run: |
+          mkdir -p trial_results
+          cp trial_output.log trial_results/ 2>/dev/null || true
+          cp /tmp/gt/graph.db trial_results/graph.db 2>/dev/null || true
+          # The EXACT instruction handed to the agent (gt_agent writes this) — the ground
+          # truth for brief-reached-agent. NOT a repo filename match.
+          cp /tmp/gt/delivered_instruction.txt trial_results/ 2>/dev/null || true
+
+          # FULL agent trajectory — pier writes every per-turn message (incl. the agent's
+          # gt_hook understand/verify calls + their outputs) to jobs/<ts>/result.json.
+          # Without this only the summary table survives and the trajectory is lost when
+          # the runner is destroyed. The brief is ONE GT surface; the WHOLE architecture
+          # (hooks: understand/verify, post-edit contracts, post-view) fires across the
+          # run — capture all of it, not just the brief.
+          cp -r jobs trial_results/jobs 2>/dev/null || true
+          # GT hook + interaction logs (host-side records of every hook firing)
+          cp /tmp/gt/*.log              trial_results/ 2>/dev/null || true
+          cp /tmp/gt/gt_interactions*.jsonl trial_results/ 2>/dev/null || true
+          cp /tmp/gt/gt_hooks*.log      trial_results/ 2>/dev/null || true
+
+          # REAL outcome: did the AGENT actually run (n_agent_steps>0), submit, what reward,
+          # which tests failed, and GT hook firings from the real per-turn trajectory.
+          # (result.json step_results is empty; brief-written != agent-ran — both lessons
+          # from the GCP validation run.)
+          python3 scripts/verify/deepswe_outcome.py jobs || echo "WARN: outcome extract failed"
+
+          echo "Collected artifacts:"
+          find trial_results -type f | head -40
+          # NOTE: brief written to disk is DELIVERY only — NOT proof the agent executed.
+          # AGENT_RAN_STEPS above is the execution proof.
+          if [ -f /tmp/gt/delivered_instruction.txt ] && grep -qE "<gt-task-brief>" /tmp/gt/delivered_instruction.txt; then
+            echo "BRIEF_WRITTEN: YES ($(wc -c < /tmp/gt/delivered_instruction.txt) chars) — delivery only; see AGENT_RAN_STEPS for execution"
+          else
+            echo "BRIEF_WRITTEN: NO/UNCONFIRMED"
+          fi
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deepswe-gt-trial-${{ inputs.task_id }}
+          path: trial_results/
+          retention-days: 30
+          if-no-files-found: warn

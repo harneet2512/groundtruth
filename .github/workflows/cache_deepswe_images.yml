@@ -1,0 +1,134 @@
+name: "Cache DeepSWE images to GHCR"
+
+# One-time mirror of the 113 DeepSWE task images (public.ecr.aws/.../swe-bench-202605:<tag>)
+# into GHCR, so deepswe_full pulls them GHCR-first instead of cold from ECR Public on
+# every job (the cold-pull latency + ECR rate-limit bottleneck). Run this once; refresh
+# only when the task set changes. Images are pruned after each push to bound runner disk.
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance_ids:
+        description: "Comma/space-separated instance_ids to mirror (empty = all). Prove the 6 before scaling."
+        required: false
+        default: ""
+      max_images:
+        description: "Max images to cache (0 = all 113)"
+        required: true
+        default: "0"
+      batch_size:
+        description: "Images per job"
+        required: true
+        default: "15"
+  # This workflow has never been on the default branch, so GitHub never registered it
+  # for workflow_dispatch (HTTP 404 on dispatch). A push trigger scoped to THIS file
+  # registers it on the first push (and runs the full mirror once), after which manual
+  # workflow_dispatch works. Path-scoped so unrelated pushes never trigger the 113-image
+  # mirror. Push has no dispatch inputs, so the prepare step falls back to all-images /
+  # batch=15 (the `or` defaults below) on the push-triggered run.
+  push:
+    branches: [gt-consensus-curation]
+    paths:
+      - .github/workflows/cache_deepswe_images.yml
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+      total: ${{ steps.gen.outputs.total }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - id: gen
+        env:
+          INPUT_MAX: ${{ inputs.max_images }}
+          INPUT_BATCH: ${{ inputs.batch_size }}
+          INPUT_INSTANCE_IDS: ${{ inputs.instance_ids }}
+        run: |
+          python3 << 'PYEOF'
+          import json, os
+          m = json.load(open("artifact_deepswe/repo_manifest.json"))
+          tasks = m["tasks"]
+          # Mirror ONLY specific tasks when instance_ids given (prove the 6 giants before the 113).
+          ids_in = (os.environ.get("INPUT_INSTANCE_IDS") or "").strip()
+          if ids_in:
+              want = {x.strip() for x in ids_in.replace(",", " ").split() if x.strip()}
+              tasks = [t for t in tasks if t.get("instance_id") in want]
+              print(f"filtered to {len(tasks)} tasks by instance_ids: {sorted(t.get('instance_id') for t in tasks)}")
+          imgs = sorted({t["docker_image"] for t in tasks if t.get("docker_image")})
+          # On a PUSH event there are no workflow_dispatch inputs, so INPUT_MAX/INPUT_BATCH
+          # are empty strings (dispatch defaults do NOT apply to push) — `... or "0"` falls
+          # back to the default instead of int("") -> ValueError.
+          mx = int(os.environ.get("INPUT_MAX") or "0")
+          if mx > 0:
+              imgs = imgs[:mx]
+          bs = max(1, int(os.environ.get("INPUT_BATCH") or "15"))
+          batches = ["\n".join(imgs[i:i + bs]) for i in range(0, len(imgs), bs)]
+          matrix = {"include": [{"idx": i, "images": b} for i, b in enumerate(batches)]}
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"matrix={json.dumps(matrix)}\n")
+              f.write(f"total={len(imgs)}\n")
+          print(f"{len(imgs)} images in {len(batches)} batches")
+          PYEOF
+
+  cache:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+      fail-fast: false
+      max-parallel: 5   # crane streams registry->registry (no local disk), so we can raise
+                        # concurrency vs the old docker-pull path; stay under ECR Public's ~8
+                        # "toomanyrequests" ceiling, and the 6x backoff retry absorbs throttles
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Mirror batch to GHCR via crane (registry-to-registry, no local pull/disk)
+        run: |
+          # crane copies image blobs DIRECTLY registry->registry (streaming, blob-mount where the
+          # target already has a layer) — NO `docker pull` extraction, NO local disk, NO tag/push/prune.
+          # Far faster than pull+tag+push and disk-free, which is why concurrency can rise. crane reads
+          # ECR Public anonymously and authenticates to GHCR via ~/.docker/config.json (the login step).
+          curl -fsSL "https://github.com/google/go-containerregistry/releases/download/v0.20.2/go-containerregistry_Linux_x86_64.tar.gz" \
+            | sudo tar xz -C /usr/local/bin crane
+          crane version
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          ok=0; fail=0; skip=0
+          while IFS= read -r IMG; do
+            [ -z "$IMG" ] && continue
+            TAG="${IMG##*:}"                 # the per-task tag is the unique part
+            BASE="${IMG##*/}"; BASE="${BASE%%:*}"   # = swe-bench-202605
+            GHCR="ghcr.io/${OWNER}/${BASE}:${TAG}"
+            echo "=== $IMG -> $GHCR ==="
+            # IDEMPOTENT: skip if already mirrored (lets a re-run finish only the missing images).
+            if crane manifest "$GHCR" >/dev/null 2>&1; then
+              echo "  already in GHCR — skip"; skip=$((skip+1)); continue
+            fi
+            # ECR Public throttles ("toomanyrequests") — retry with exponential backoff.
+            copied=0
+            for a in 1 2 3 4 5 6; do
+              if crane copy "$IMG" "$GHCR" >/dev/null 2>&1; then copied=1; break; fi
+              echo "  copy attempt $a failed (ECR throttle?) — backoff $((a*15))s"; sleep $((a*15))
+            done
+            if [ "$copied" = 1 ]; then ok=$((ok+1)); else fail=$((fail+1)); echo "::warning::copy FAILED after retries: $IMG"; fi
+          done <<< "${{ matrix.images }}"
+          echo "batch ${{ matrix.idx }}: cached=$ok skipped=$skip failed=$fail"
+
+  summarize:
+    needs: cache
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "DeepSWE image cache pass complete — ${{ needs.prepare.outputs.total }} images attempted. deepswe_full now pulls ghcr.io/${{ github.repository_owner }}/swe-bench-202605:<tag> first." >> $GITHUB_STEP_SUMMARY

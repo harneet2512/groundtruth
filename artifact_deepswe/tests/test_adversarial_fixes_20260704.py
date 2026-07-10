@@ -110,6 +110,14 @@ def _run_pth_load(oracle_route: str, marker: str) -> bool:
     env["GT_ORACLE_ROUTE"] = oracle_route
     env["GT_PROOF_MARKER"] = marker
     env.pop("PYTHONPATH", None)
+    # HOST-LOCALE ROBUSTNESS (2026-07-09): the .pth import loads minisweagent, whose
+    # __init__ prints a 👋 emoji. On a cp1252 host (Windows console, piped stdout) that
+    # raise UnicodeEncodeError -> minisweagent import fails -> _install patches ZERO env
+    # classes -> _write_proof_marker no-ops (its _PATCHED_CLASSES guard) -> the clean-load
+    # control writes no marker and the test false-FAILs. Pin utf-8 so the subprocess
+    # reproduces the CI (utf-8) load deterministically; no-op where the locale is already
+    # utf-8. This tests GT's fail-closed marker, not the host console encoding.
+    env["PYTHONIOENCODING"] = "utf-8"
     out = subprocess.run([sys.executable, "-c", driver], capture_output=True,
                          text=True, env=env)
     return "MARKER=1" in out.stdout
@@ -168,6 +176,7 @@ _HOST_LOCAL_EXEMPT = frozenset({
     "GT_ANCHORS_PATH",                       # derived anchors path (from GT_CERT_DIR)
     "GT_ARTIFACTS_DIR",                      # host artifacts dir (defaulted "")
     "GT_C1_CONFIDENCE_FLOOR_MAD_MULTIPLIER", # tuning knob, safe default
+    "GT_GATEWAY_MAX_DELTA",                  # W2 tuning knob, safe default "4000"
     "GT_GRAPH_DB",                           # legacy pre-substrate graph (GT_HOST_GRAPH_DB is forwarded)
     "GT_HORIZON_CALIBRATION",                # calibration JSON path, shipped default in-repo
     "GT_HOME",                               # container install prefix, default /opt/gt
@@ -349,6 +358,14 @@ def test_r5_resurface_routes_through_ledger(monkeypatch, tmp_path):
     monkeypatch.setattr(g, "_GT_BASELINE", False)
     monkeypatch.setattr(g, "_ORACLE_ROUTE", True)
     monkeypatch.setattr(g, "_oracle_delivered_hashes", set())
+    # HERMETIC (2026-07-09): this pins the V1 resurface path the docstring documents
+    # ("Artifact absent -> byte-identical v1 path"). Without this, a stale
+    # $GT_CERT_DIR/gt_obligations_v2.json (default /tmp, written by any prior
+    # obligations_v2 run this session) makes _load_obligations_v2() non-None -> the
+    # code takes the V2 branch (_unexercised_clause_candidate) and IGNORES the
+    # monkeypatched v1 candidate -> RESURFACE_BODY never delivered. Same stale-artifact
+    # fragility class as the E4 gt_issue_anchors.json poisoning.
+    monkeypatch.setattr(g, "_load_obligations_v2", lambda: None)
     monkeypatch.setattr(g, "_HOOK_FIRE_COUNTS", {})
     monkeypatch.setattr(g, "_seen", set())
     monkeypatch.setattr(g, "_action_count", 0)

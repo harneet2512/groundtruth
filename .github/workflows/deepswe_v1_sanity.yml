@@ -1,0 +1,79 @@
+name: DeepSWE v1.0.0 sanity (LLM-free oracle grade)
+
+# Confirms the GHA surface actually executes the v1.0.0 grader without harness
+# failure: clone v1.0.0 -> preflight -> `pier run -a oracle` (applies the task's
+# own gold solution, NO LLM) -> assert reward==1 -> upload the resolved snapshot.
+# No model key. No paid tokens. This is the GHA half of the 2-surface gate #13.
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "Task id to gold-grade"
+        default: "abs-module-cache-flags"
+  # Path-scoped push trigger on the default branch: registers workflow_dispatch AND
+  # runs the sanity grade once on landing (repo's established pattern). Scoped to THIS
+  # file so unrelated pushes never trigger it. On push, inputs.* is empty -> the TASK
+  # env falls back to abs-module-cache-flags.
+  push:
+    branches: [launch-cs-20260705]
+    paths:
+      - .github/workflows/deepswe_v1_sanity.yml
+
+env:
+  TASK: ${{ github.event.inputs.task || 'abs-module-cache-flags' }}
+
+jobs:
+  sanity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pier 0.2.0
+        run: python -m pip install "datacurve-pier==0.2.0"
+
+      - name: Clone + hard-verify deep-swe v1.0.0
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch v1.0.0 https://github.com/datacurve-ai/deep-swe.git deepswe-bench
+          DESC=$(git -C deepswe-bench describe --tags --exact-match 2>/dev/null || true)
+          [ "$DESC" = "v1.0.0" ] || { echo "FATAL: not tag v1.0.0 (describe=$DESC)"; exit 1; }
+          SHA=$(git -C deepswe-bench rev-parse HEAD)
+          case "$SHA" in c33fa70e*) : ;; *) echo "FATAL: HEAD $SHA != v1.0.0 commit c33fa70e"; exit 1 ;; esac
+          echo "deep-swe @ v1.0.0 ($SHA) VERIFIED"
+
+      - name: Preflight (fail-closed parity gate)
+        run: |
+          bash scripts/vm/deepswe_v1_preflight.sh \
+            --surface github-actions \
+            --bench-dir deepswe-bench \
+            --config artifact_deepswe/gt_integration/deepswe_v1_parity_mimo.yaml \
+            --out .
+
+      - name: Oracle gold grade (LLM-free, NO resource overrides)
+        run: |
+          set -euo pipefail
+          echo "grading task: $TASK"
+          pier run -p "deepswe-bench/tasks/$TASK" -a oracle -e docker -o sanity_jobs -q
+
+      - name: Assert reward == 1
+        run: |
+          set -euo pipefail
+          R=$(find sanity_jobs -name reward.txt -exec cat {} \; | head -1 | tr -d '[:space:]')
+          echo "reward=$R"
+          [ "$R" = "1" ] || { echo "FATAL: reward=$R (expected 1) — GHA v1.0.0 grader sanity FAILED"; exit 1; }
+          echo "GHA v1.0.0 grader sanity PASS (reward=1)"
+
+      - name: Upload resolved snapshot + reward
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-snapshot-gha-resolved
+          path: |
+            PARITY_SNAPSHOT_github-actions.resolved.json
+            sanity_jobs/**/reward.txt
+          if-no-files-found: warn

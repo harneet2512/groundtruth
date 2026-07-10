@@ -1,0 +1,67 @@
+name: "Eval Only (existing predictions)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      predictions_path:
+        description: 'Path to predictions.jsonl in repo (relative)'
+        required: true
+        default: '.tmp_predictions.jsonl'
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install eval harness
+        run: |
+          git clone --depth 1 --branch python-only --recursive \
+            https://github.com/microsoft/SWE-bench-Live.git /tmp/SWE-bench-Live
+          cd /tmp/SWE-bench-Live && pip install -e .
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run eval
+        run: |
+          echo "=== Predictions ==="
+          cat ${{ inputs.predictions_path }}
+          echo ""
+          echo "=== Running SWE-bench-Live eval harness ==="
+
+          python -m swebench.harness.run_evaluation \
+            --dataset_name SWE-bench-Live/SWE-bench-Live \
+            --split lite \
+            --namespace starryzhang \
+            --predictions_path ${{ inputs.predictions_path }} \
+            --max_workers 1 \
+            --run_id eval_only \
+            2>&1 | tee /tmp/eval.log
+
+          echo ""
+          echo "=== EVAL RESULT ==="
+          cat logs/run_evaluation/eval_only/report.json 2>/dev/null || echo "No report.json"
+
+      - name: Upload eval results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-results
+          path: |
+            logs/
+            /tmp/eval.log
+          retention-days: 7

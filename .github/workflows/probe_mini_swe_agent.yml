@@ -1,0 +1,109 @@
+name: "Probe: mini-swe-agent install+launch in Live Lite images ($0, no model)"
+
+# Answers ONE question with ZERO model cost: does mini-swe-agent (requires
+# Python >=3.10) actually install AND launch inside each Live Lite task image?
+# 155/300 images ship Python <3.10 (3.6/3.8/3.9) — on those, `pip install
+# mini-swe-agent` FAILS and the run depends entirely on the uv fallback
+# provisioning its own Python. This probe runs the EXACT install block from
+# swebench_live_lite_full.yml inside each image, then verifies the binary
+# launches (`--help`). NO --task, NO API key, NO model call → $0.
+#
+# Default matrix = one representative image per Python bucket (3.6/3.8/3.9/3.10/
+# 3.11). Override `tasks` to probe more. Reports per image:
+#   PYVER | INSTALL_PATH (pip|uv_tool|uv_system|NONE) | LAUNCH_OK|LAUNCH_FAIL
+
+on:
+  workflow_dispatch:
+    inputs:
+      tasks:
+        description: "comma-separated instance_ids (default: one per Python bucket)"
+        required: false
+        default: "conan-io__conan-17092,amoffat__sh-744,aiogram__aiogram-1594,aws-cloudformation__cfn-lint-3767,arviz-devs__arviz-2413"
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+    steps:
+      - id: gen
+        run: |
+          python3 - "${{ inputs.tasks }}" <<'PYEOF' >> "$GITHUB_OUTPUT"
+          import json, sys
+          tasks = [t.strip() for t in sys.argv[1].split(",") if t.strip()]
+          print("matrix=" + json.dumps({"include": [{"task": t} for t in tasks]}))
+          PYEOF
+
+  probe:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    steps:
+      - name: Probe ${{ matrix.task }}
+        run: |
+          set -o pipefail
+          TASK="${{ matrix.task }}"
+          REPO_PART="${TASK%%__*}"
+          REST="${TASK#*__}"
+          SLUG="${REPO_PART}_1776_${REST}"
+          IMG="docker.io/starryzhang/sweb.eval.x86_64.${SLUG}:latest"
+          echo "task=$TASK"
+          echo "image=$IMG"
+
+          docker pull "$IMG" >/dev/null 2>&1 || { echo "RESULT|$TASK|PULL_FAIL|-|-"; exit 0; }
+
+          # Container's native Python (the version gate for `pip install mini-swe-agent`).
+          PYVER=$(docker run --rm --entrypoint "" "$IMG" python3 --version 2>&1 | awk '{print $2}')
+          echo "container python: $PYVER"
+
+          # ── Check A: the CURRENT install block from swebench_live_lite_full.yml ──
+          # (pip-first, uv fallback). $0 launch check — mini-swe-agent --help, no model.
+          OUT_A=$(docker run --rm --entrypoint "" "$IMG" bash -c '
+            INSTALL_PATH=NONE
+            if pip install --quiet datacurve-pier 2>/dev/null && command -v mini-swe-agent >/dev/null 2>&1; then
+              INSTALL_PATH=pier
+            elif pip install --quiet mini-swe-agent 2>/dev/null && command -v mini-swe-agent >/dev/null 2>&1; then
+              INSTALL_PATH=pip
+            else
+              curl -LsSf https://astral.sh/uv/install.sh 2>/dev/null | sh 2>/dev/null
+              export PATH="$HOME/.local/bin:/root/.local/bin:$PATH"
+              if uv tool install mini-swe-agent 2>/dev/null && command -v mini-swe-agent >/dev/null 2>&1; then
+                INSTALL_PATH=uv_tool
+              elif uv pip install --system mini-swe-agent 2>/dev/null && command -v mini-swe-agent >/dev/null 2>&1; then
+                INSTALL_PATH=uv_system
+              fi
+            fi
+            export PATH="$HOME/.local/bin:/root/.local/bin:$PATH"
+            echo "INSTALL_PATH=$INSTALL_PATH"
+            if command -v mini-swe-agent >/dev/null 2>&1 && mini-swe-agent --help >/dev/null 2>&1; then echo "LAUNCH=OK"; else echo "LAUNCH=FAIL"; fi
+          ' 2>&1) || true
+          IPATH_A=$(echo "$OUT_A" | grep -oE "INSTALL_PATH=[a-z_]+" | tail -1 | cut -d= -f2)
+          LAUNCH_A=$(echo "$OUT_A" | grep -oE "LAUNCH=(OK|FAIL)" | tail -1 | cut -d= -f2)
+
+          # ── Check B: HARDENED — force uv to provision a managed Python 3.11 ──
+          # Deterministic regardless of the container's base Python. Candidate fix.
+          OUT_B=$(docker run --rm --entrypoint "" "$IMG" bash -c '
+            curl -LsSf https://astral.sh/uv/install.sh 2>/dev/null | sh 2>/dev/null
+            export PATH="$HOME/.local/bin:/root/.local/bin:$PATH"
+            uv tool install --python 3.11 mini-swe-agent 2>/dev/null
+            export PATH="$HOME/.local/bin:/root/.local/bin:$PATH"
+            if command -v mini-swe-agent >/dev/null 2>&1 && mini-swe-agent --help >/dev/null 2>&1; then echo "LAUNCH=OK"; else echo "LAUNCH=FAIL"; fi
+          ' 2>&1) || true
+          LAUNCH_B=$(echo "$OUT_B" | grep -oE "LAUNCH=(OK|FAIL)" | tail -1 | cut -d= -f2)
+
+          echo "RESULT|$TASK|py${PYVER}|current:${IPATH_A:-NONE}=${LAUNCH_A:-FAIL}|hardened=${LAUNCH_B:-FAIL}"
+          {
+            echo "| \`$TASK\` | $PYVER | ${IPATH_A:-NONE} / ${LAUNCH_A:-FAIL} | ${LAUNCH_B:-FAIL} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Fail the cell only if BOTH strategies fail to launch (image truly unusable).
+          if [ "${LAUNCH_A:-FAIL}" != "OK" ] && [ "${LAUNCH_B:-FAIL}" != "OK" ]; then
+            echo "::error::mini-swe-agent did NOT launch in $TASK (py$PYVER) under EITHER strategy"; exit 1
+          fi
+          [ "${LAUNCH_A:-FAIL}" = "OK" ] || echo "::warning::current block FAILED in $TASK (py$PYVER); hardened=${LAUNCH_B}"

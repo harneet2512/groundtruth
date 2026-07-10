@@ -190,6 +190,28 @@ except Exception as _e:  # noqa: BLE001
         def __init__(self, **kw): pass
     def _product_derive_phase(state): return None
 
+# W1b (2026-07-10, strangler): the ONE canonical per-run runtime state. The mini's
+# probe-stem ledger (`_search_seen`) and the delivered-dedup chain
+# (`_oracle_delivered_hashes`) are ADOPTED as delegating aliases of this instance's
+# `probe_ledger` / `delivered_dedup` (below) so there is exactly ONE owner shared
+# with `gateway.GatewayState(episode=_EPISODE)` — the seam and the Gateway consult
+# the SAME dedup chain / probe history. Own import bulkhead (a stub keeps the two
+# containers + reset semantics live so aliasing never AttributeErrors in-container).
+try:
+    from groundtruth.runtime.episode_state import EpisodeState as _ProductEpisodeState
+except Exception as _e:  # noqa: BLE001
+    _runtime_import_failed("episode_state", _e)
+    class _ProductEpisodeState:  # minimal stub: the two owned containers + reset
+        def __init__(self, *a, **kw):
+            self.episode_id = ""
+            self.probe_ledger: dict = {}
+            self.delivered_dedup: set = set()
+            self.obligations = None
+        def reset_attempt(self) -> None:
+            self.probe_ledger.clear()
+            self.delivered_dedup.clear()
+            self.obligations = None
+
 try:
     from groundtruth.runtime.verification_horizon import (
         HorizonThresholds as _ProductHorizonThresholds,
@@ -2741,7 +2763,23 @@ _GREP_VALUE_FLAGS = frozenset({
 #                                 (idempotence latch — never deliver the same
 #                                 fact twice; avoids the "every obs unique -> loop"
 #                                 failure mode).
-_search_seen: dict[str, dict] = {}
+# W1b (2026-07-10): `_search_seen` and `_oracle_delivered_hashes` (:below) are now
+# DELEGATING ALIASES of the ONE canonical `_EPISODE` (EpisodeState) — the single
+# owner shared with `gateway.GatewayState(episode=_EPISODE)`. Both are only ever
+# mutated in place (`.get`/`[k]=`/`.add`/`.clear`), never reassigned, so the alias
+# holds; `_reset_oracle_state` clears them through `_EPISODE.reset_attempt()`. The
+# episode_id is set once at first-use (per task/attempt) — the TITO chain scopes to it.
+_EPISODE = _ProductEpisodeState()
+_search_seen: dict[str, dict] = _EPISODE.probe_ledger
+
+# W2 (2026-07-10): GT_GATEWAY delivery state (per-episode; reset in
+# `_reset_oracle_state`). `_gt_gateway_chain_head` is the TITO observation-prefix
+# hash-chain head threaded over THIS episode's delivery sequence (genesis == "");
+# `_gt_gateway_deliveries` holds the SEALED envelope copies (rendered_bytes_hash +
+# receipt_state) — the delivery ledger the receipt ladder (levels 1-3) writes onto.
+# Both are only populated on the GT_GATEWAY path -> byte-identical when off.
+_gt_gateway_chain_head: str = ""
+_gt_gateway_deliveries: list = []
 
 # RENDER-PATH budgets (Constants taxonomy): these bound HOW MUCH a BODY block
 # renders. They NEVER gate fire/no-fire (BODY fires iff its filtered match set is
@@ -2977,10 +3015,36 @@ def _resolve_symbol_defs(con, symbol: str, root: str) -> dict | None:
             "test_ref_count": int(test_ref_count or 0)}
 
 
+def _fmt_def_facts_native(sym: str, info: dict, root: str) -> str:
+    """FORMAT A/B B-arm (``GT_POST_SEARCH_NATIVE``): the SAME def-facts as
+    ``_fmt_def_facts``, rendered as native ripgrep-style output — NO ``<gt-*>`` tag,
+    NO GT-voice trailer — so the answer rides the agent's OWN grep channel
+    in-distribution (charter ⑤ / §0). The FORMAT A/B holds CONTENT constant: identical
+    def-sites, callers, and test-ref count; only the wrapper differs. Leak-safe by
+    inheritance — the rows were test-path-dropped upstream (``_resolve_symbol_defs``
+    :2944) and test refs are a COUNT, never a name."""
+    defs = info["def_sites"]
+    ndef = len(defs)
+    lines = [f"{_to_repo_rel(fp, root)}:{ln}:{sym}" for fp, ln in defs[:3]]
+    if ndef > 3:
+        lines.append(f"({ndef - 3} more matches)")
+    if info["callers_render"]:
+        lines.append(f"callers: {info['callers_render']}")
+    if info["test_ref_count"]:
+        lines.append(f"test refs: {info['test_ref_count']}")
+    return "\n".join(lines)
+
+
 def _fmt_def_facts(sym: str, info: dict, root: str) -> str:
     """The classic def-facts render: def-site(s) + verified callers + test-ref
     COUNT. Byte-identical to the pre-lattice block (the 32 pins assert this exact
-    shape). NEVER surfaces a test name (counts only) — the leak invariant."""
+    shape). NEVER surfaces a test name (counts only) — the leak invariant.
+
+    FORMAT A/B (Fable 2026-07-09): under ``GT_POST_SEARCH_NATIVE=1`` the SAME facts
+    render tag-free/native (``_fmt_def_facts_native``); default off keeps this exact
+    tagged shape (byte-identical — the 32 pins hold)."""
+    if os.environ.get("GT_POST_SEARCH_NATIVE") == "1":
+        return _fmt_def_facts_native(sym, info, root)
     defs = info["def_sites"]
     ndef = len(defs)
     lines = [f'<gt-search-facts symbol="{sym}">']
@@ -2997,10 +3061,20 @@ def _fmt_def_facts(sym: str, info: dict, root: str) -> str:
     return "\n".join(lines)
 
 
-def _direct_def_block(con, sym: str, root: str) -> str:
+def _direct_def_block(con, sym: str, root: str, *, mark: bool = True) -> str:
     """out=None path (pins / no-output-info): the ORIGINAL DIRECT-DEF channel,
     byte-identical to the pre-lattice producer. Fires once per stem via the
-    content-hash idempotence latch."""
+    content-hash idempotence latch.
+
+    ``mark`` (default True) OWNS the fire-once latch on the out=None channel — that
+    channel returns straight from here (the outer latch never runs), so it must both
+    check AND stamp ``answered``. The out=str hits-path FALL-THROUGH
+    (``_search_localize_block``) passes ``mark=False``: it lets the OUTER latch own
+    the stamp. BUG-B1 (2026-07-05): a self-stamp HERE plus the outer re-check on the
+    SAME content hash made every hits-path delivery self-suppress — the def/callers/
+    test-ref partition was structurally MUTE on the production (out=str) path since
+    it landed. ``probed_forms`` is still recorded either way (the mark-free path also
+    records the raw spelling)."""
     info = _resolve_symbol_defs(con, sym, root)
     if not info or not info["def_sites"]:
         return ""
@@ -3009,7 +3083,8 @@ def _direct_def_block(con, sym: str, root: str) -> str:
     if _ledger_already_answered(stem, block):
         return ""
     _ledger_entry(stem)["probed_forms"].add(sym)
-    _ledger_mark_answered(stem, block)
+    if mark:
+        _ledger_mark_answered(stem, block)
     return block
 
 
@@ -3025,6 +3100,39 @@ def _grep_is_final_stage(head: str) -> bool:
     is NOT grep's zero-hit signal — we refuse to claim emptiness there."""
     seg = _GREP_PIPE_SPLIT_RE.split(head)[-1]
     return bool(_GREP_STAGE_HEAD_RE.match(seg))
+
+
+# shell operators that concatenate INDEPENDENT commands. A single `|` pipe is NOT
+# one (handled by the first/final-stage checks below), and a bare `&` is excluded on
+# purpose: it would false-match the `&` of a `2>&1` redirect and over-refuse a legit
+# `grep X 2>&1` (a pipe-fed grep is already caught by the first-stage check).
+_COMPOUND_SEP_RE = re.compile(r"&&|\|\||;")
+
+
+def _search_command_isolated(cmd: str) -> bool:
+    """True iff the command is a SINGLE grep/rg repo search whose output is the
+    WHOLE observation — grep/rg is BOTH the FIRST pipeline stage AND the FINAL one,
+    with NO compound operator (&&/||/;/&) and NO second-line command.
+
+    When grep is NOT the entire command its zero/hit signal cannot be isolated from
+    the other command's output (F6/F7, 2026-07-10): `grep X ; pytest` reads the
+    pytest traceback as grep 'hits' (a wrong-outcome ledger record); `pytest | grep
+    Err` mints a junk stem off pytest's output; `grep X && pytest` / `grep X | tee`
+    interleave planes. This EXTENDS the `_grep_is_final_stage` refuse-to-claim
+    principle from the pipe boundary to the whole-command boundary: outside this
+    shape the lattice answers NOTHING and records NO probe. Correct-or-quiet. Gates
+    only the out=str production path — the out=None pin channel is untouched."""
+    raw = cmd or ""
+    if "\n" in raw.strip():
+        return False  # a second-line command's output pollutes the observation
+    head = raw.split("\n", 1)[0]
+    if _COMPOUND_SEP_RE.search(head):
+        return False  # &&/||/;/& glue independent commands -> outputs interleave
+    # grep/rg must be the FIRST stage (not pipe-FED: `pytest | grep X`) ...
+    if not _GREP_STAGE_HEAD_RE.match(_GREP_PIPE_SPLIT_RE.split(head)[0]):
+        return False
+    # ... AND the FINAL stage (not transformed: `grep X | head`).
+    return _grep_is_final_stage(head)
 
 
 def _grep_is_count(seg: str) -> bool:
@@ -3297,6 +3405,14 @@ def _search_localize_block(cmd: str, out: str | None = None) -> str:
             con.close()
 
     # ---- out=str: the LISTEN LATTICE (production) --------------------------------
+    # COMPOUND GATE (F6/F7, 2026-07-10): only a SINGLE isolated grep/rg repo search
+    # whose output IS the whole observation is answerable. A compound (`grep X ;
+    # pytest`), a pipe-fed grep (`pytest | grep Err`), or an output transform (`grep
+    # X | head`) cannot isolate grep's OWN zero/hit signal from the rest of the
+    # observation -> the lattice answers NOTHING and records NO probe (else it mints a
+    # wrong-outcome / junk-stem ledger record that poisons later probe reasoning).
+    if not _search_command_isolated(cmd):
+        return ""
     empty = _grep_result_empty(cmd, out)
     idx = _action_count  # the current action index (incremented before this call)
     # ledger accounting FIRST (lossless multi-token/alternation): record every bare
@@ -3326,8 +3442,12 @@ def _search_localize_block(cmd: str, out: str | None = None) -> str:
                 # is answered with the def-site + verified callers it can't compute.
                 # _direct_def_block is safe on this path: it abstains when there is no
                 # def-site, drops test-path def-sites (leak guard), counts (never names)
-                # test refs, and fires-once per stem via the content-hash latch.
-                block = _direct_def_block(con, sym, root)
+                # test refs. mark=False (BUG-B1 fix, 2026-07-10): compute the block WITHOUT
+                # stamping the fire-once latch here; the OUTER latch below (:_ledger_
+                # already_answered / _ledger_mark_answered) owns idempotence — a self-stamp
+                # here + the outer re-check on the SAME content hash self-suppressed EVERY
+                # hits-path delivery (mute since 2026-07-05).
+                block = _direct_def_block(con, sym, root, mark=False)
         else:
             block = (_class_namefold(con, sym, root)
                      or _class_bodyonly(con, sym, root)
@@ -4926,7 +5046,7 @@ if os.environ.get("GT_PROOF_MODE") == "1" and os.environ.get("GT_ORACLE_ROUTE") 
         "GT_ORACLE_ROUTE=0 forbidden in GT_PROOF_MODE=1 (legacy unconditional appends)"
     )
 _oracle_focus_cache: set[str] | None = None
-_oracle_delivered_hashes: set[str] = set()
+_oracle_delivered_hashes: set[str] = _EPISODE.delivered_dedup  # W1b alias (one owner)
 _oracle_edited_rels: set[str] = set()
 _oracle_nonedit_streak = 0
 _oracle_review_fired = False
@@ -5015,6 +5135,21 @@ def _reset_oracle_state() -> None:
     # in the next; the other three are telemetry one-shots reset for a clean slate.
     global _ROOT_FALLBACK_ACTIVE, _ROOT_MISS_REPORTED, _gt_oracle_load_reported
     global _l6_probe_emitted
+    # W1b (2026-07-10): route the per-attempt reset through the ONE canonical episode.
+    # reset_attempt() clears the OWNED accumulators — INCLUDING probe_ledger and
+    # delivered_dedup, i.e. the very objects `_search_seen` / `_oracle_delivered_hashes`
+    # alias — so the explicit `.clear()` calls below are now redundant (kept for a
+    # belt-and-braces byte-identical reset). It PERSISTS episode_id + the durable
+    # delivery_ledger (F4: its in-memory entries survive an attempt by design).
+    # Obligations parity (W1a-review F3): the mini clears `_obligation_tracker` per
+    # attempt but EpisodeState.reset_attempt PERSISTS `obligations`, so clear it here.
+    _EPISODE.reset_attempt()
+    _EPISODE.obligations = None
+    # W2: reset the GT_GATEWAY per-episode TITO chain + delivery ledger (the chain is
+    # per-episode by design — a fresh attempt re-sees facts at genesis).
+    global _gt_gateway_chain_head, _gt_gateway_deliveries
+    _gt_gateway_chain_head = ""
+    _gt_gateway_deliveries = []
     _action_count = 0
     _oracle_nonedit_streak = 0
     _oracle_obligation_fired = False
@@ -5036,6 +5171,45 @@ def _reset_oracle_state() -> None:
     _oracle_edit_content_tokens.clear()
     _oracle_edited_lines_by_file.clear()
     _edit_churn.clear()
+    # detect.loop / detect.coherence trajectory-stream bookkeeping (F3 reset law:
+    # EVERY producer/latch global clears per attempt). _degenerate_loop_candidate
+    # accumulates these on EVERY oracle-route turn; a missed reset leaks the loop-ratio
+    # history + per-signature repeat counts across an in-process retry (and across
+    # in-process test cases), silently mis-firing / suppressing the degenerate_loop
+    # nudge — a measurement-integrity bug. Byte-identical in production (fresh
+    # process/attempt). These are the same attempt-scoped globals the delivery-stage
+    # suites reset by hand.
+    global _detect_loop_fired, _coherence_last_rel
+    global _last_test_outcome_failed, _last_test_step, _cycle_edit_start
+    _traj_state_keys.clear()
+    _traj_loop_sigs.clear()
+    _lr_history.clear()
+    _nsr_history.clear()
+    _coherence_fired_files.clear()
+    _detect_loop_fired = False
+    _coherence_last_rel = None
+    # F3 reset law (Fable 2026-07-10): the detect.loop/coherence cluster's SIBLINGS —
+    # the EDIT->TEST cycle + last-observed-test-outcome recency bookkeeping — are the
+    # SAME attempt-scoped class and were previously MISSED. A stale
+    # `_last_test_outcome_failed=True` leaked from a prior attempt makes
+    # `_coherence_collapse_candidate` (its `or _last_test_outcome_failed` anchor) and
+    # `_dcc_drowning` read a phantom failing-test recency; stale `_test_cycle_spans` /
+    # `_cycle_edit_start` skew `_estimate_v`'s observed EDIT->TEST pace; a stale
+    # `_last_test_step` mis-reads "already tested this turn". Clear to their init
+    # defaults (byte-identical in production: fresh process per attempt).
+    _last_test_outcome_failed = False
+    _last_test_step = None
+    _cycle_edit_start = None
+    _test_cycle_spans.clear()
+    # INDEX-COHERENCE (ENDGAME-3 bounce, 2026-07-10): `_action_count` — the BASIS of
+    # every recorded action index — resets to 0 below, so ANY retained action-index
+    # list is incoherent by construction. `_edit_action_steps` (appended per source
+    # edit) previously survived: a stale index from the prior attempt (a) silenced the
+    # honest-negative ordering predicate (`prev < es < idx`) on the new attempt's
+    # ZERO-repeat, (b) spanned `_estimate_v`'s EDIT->EDIT pace across attempts, and
+    # (c) fed phantom edit steps to the DCC ordering checks. Same one-line F3 class
+    # as the four siblings above (byte-identical in production: fresh process).
+    _edit_action_steps.clear()
     _oblig_status_emitted.clear()
     _oracle_delivered_hashes.clear()
     _HOOK_FIRE_COUNTS.clear()
@@ -5096,6 +5270,19 @@ def _reset_oracle_state() -> None:
         _oracle_last_losers.clear()
     except Exception:
         pass
+    # FIX 3 (Fable 2026-07-09): clear the published live-env bridge so a fake env
+    # from one test case cannot leak into the next (test-isolation slate). No-op on
+    # the flag-off path (never populated) -> byte-identical to the pre-fix reset.
+    global _GT_LIVE_ENV, _GT_LIVE_ORIG_EXECUTE
+    _GT_LIVE_ENV = None
+    _GT_LIVE_ORIG_EXECUTE = None
+    # G-2 submit-gate (Fable 2026-07-09): reset the per-run bounce counter + the last
+    # executed covering result so a fresh task/attempt starts un-bounced with no stale
+    # verdict. Both are only ever written on the GT_VERIFY_EXECUTE path -> byte-
+    # identical to the pre-gate reset when the flag is off.
+    global _gt_submit_bounce_count, _last_covering_result
+    _gt_submit_bounce_count = 0
+    _last_covering_result = None
 
 
 def _anchors_path() -> str:
@@ -5815,6 +6002,23 @@ def _filter_candidates_by_phase(cands, phase: "Phase | None", event, *, file_pat
     for sev, kind, text, event_bound in cands:
         if not text:
             continue
+        # P1 (gt_math §393, Fable 2026-07-09): an EXECUTED covering-test RED is a
+        # verified WORLD-FACT (the repo's own covering test ran and failed on the
+        # agent's edit), NOT an advisory steer — it is valid in ANY phase. It is
+        # produced on POST_EDIT/EDIT turns, where the phase policy has NO
+        # verify.horizon.* entry, so should_emit() returns wrong_phase and the RED
+        # was silently phase-dropped (and its shared latch burned — see the re-arm
+        # block). Exempt ONLY this one reason string; every ADVISORY verify.horizon.*
+        # still obeys the phase gate. Byte-identical when GT_VERIFY_EXECUTE is off:
+        # the executed kind can only be produced under that flag, so this branch is
+        # never taken and the fall-through path is unchanged.
+        # E (edit.syntax) is the SAME class: an EXECUTED parse of the agent's own
+        # edit by the repo's own toolchain — a verified world-fact, valid in any
+        # phase, produced only under GT_EDIT_CHECK (byte-identical off, so this
+        # branch is never taken when the flag is off).
+        if kind in ("verify.horizon.executed", "edit.syntax"):
+            kept.append((sev, kind, text, event_bound))
+            continue
         decision = _phase_should_emit(
             kind, phase, event=event, event_bound=bool(event_bound)
         )
@@ -6072,6 +6276,11 @@ _last_test_step: int | None = None
 # — _test_fail_history is append-only/never cleared on a later PASS, so it must
 # never drive the pivot. This flag tracks the LAST observed test outcome only.
 _last_test_outcome_failed: bool = False
+# B1 submit-gate (G-2, Fable 2026-07-09): the LAST executed covering-runner result
+# this run (pass/fail/unavailable). Captured by _executed_covering_emission so the
+# submit gate can reuse it instead of re-running the covering tests at submit time.
+# None until the covering runner has actually run once. Reset per task/attempt.
+_last_covering_result: "dict | None" = None
 
 
 def _estimate_v() -> int:
@@ -6280,6 +6489,118 @@ def _structural_risk_note() -> tuple[str, bool]:
     return (note, er.score >= _RISK_TRIGGER)
 
 
+def _executed_covering_emission(covering: list[dict],
+                                edited_rels: "set[str] | list[str]",
+                                edited_syms: "set[str] | list[str]") -> str | None:
+    """B1 verification-execution on the mini-swe-agent seam (Fable decision
+    2026-07-09). The advisory verify-horizon only ADVISES; here we RUN the
+    graph-selected covering test(s) in the agent's own env (subprocess vs _root(),
+    the same mechanism the L6 reindex already uses) and, on an ATTRIBUTED failure,
+    return the Format-D anonymized native failure block — the reward-correlated
+    signal an RL-trained coder actually fixes on, with ZERO test identity.
+
+    Fail-closed + byte-identical when GT_VERIFY_EXECUTE is off (returns None before
+    any work). Feeds `_last_test_outcome_failed` from the EXECUTED verdict (V-3),
+    not a lexical parse of the agent's own output. Suppressed if the agent already
+    ran a test this turn (Fable §6.2 — redundant, and risks a second identity
+    surface). Correct-or-quiet on any error."""
+    global _last_test_outcome_failed, _last_covering_result
+    if os.environ.get("GT_VERIFY_EXECUTE") != "1" or _GT_BASELINE:
+        return None
+    if _last_test_step == _action_count:  # agent already ran a test this turn
+        return None
+    try:
+        from groundtruth.runtime.covering_runner import (
+            is_red_attributable, run_covering_tests)
+        from groundtruth.runtime.native_render import render_covering_failure_native
+        root = _root()
+        files = [c["file"] for c in (covering or [])
+                 if c.get("file") and os.path.exists(os.path.join(root, c["file"]))]
+        if not files:
+            return None
+        # FIX 3 (executor threading): route the covering run through the live env's
+        # execute when the covering runner accepts an `executor` param — so a remote
+        # Docker/Singularity env runs the tests IN the container, not on the host.
+        # Feature-detected via inspect.signature so this lands safely BEFORE or AFTER
+        # the parallel engine adds the param: absent -> today's sync-subprocess path.
+        _run_kwargs: dict = {}
+        try:
+            import inspect as _inspect
+            if "executor" in _inspect.signature(run_covering_tests).parameters:
+                _ex = _build_env_executor()
+                if _ex is not None:
+                    _run_kwargs["executor"] = _ex
+        except (TypeError, ValueError):  # unintrospectable signature -> default path
+            pass
+        cres = run_covering_tests(root, files, per_file_timeout=20,
+                                  total_budget_seconds=35, **_run_kwargs)
+        # Capture the executed verdict for the submit gate (G-2): the last covering
+        # result this run — pass/fail/unavailable — so the submit gate reuses it
+        # instead of re-running the tests at submit time. Flag-gated (this whole
+        # function early-returns None when GT_VERIFY_EXECUTE is off), so byte-
+        # identical on the off path.
+        _last_covering_result = cres
+        if cres.get("verdict") != "fail":
+            return None
+        ran_tf = cres.get("ran") or files
+        # Attribution gate (Wave-2 differential, Fable 2026-07-09): deliver ONLY a
+        # red the edit plausibly caused. `is_red_attributable` does frames FIRST
+        # (a CRASH carries an agent-source frame — pure, free), then the
+        # green->base->red DIFFERENTIAL (current-RED + base-GREEN on the SAME
+        # covering files) which is what makes B1 speak on ASSERTION (value)
+        # failures that leave no agent frame. No git / no base tree -> differential
+        # unavailable -> frames-only -> correct-or-quiet (identical to the old
+        # frames-only seam on a non-git repo). Same small in-loop caps as the run.
+        if not is_red_attributable(
+                cres, edited_rels or [], test_files=ran_tf,
+                repo_root=root, covering_files=files,
+                executor=_run_kwargs.get("executor"),
+                per_file_timeout=20, total_budget_seconds=35):
+            return None
+        _last_test_outcome_failed = True  # V-3: executed verdict drives the verify axis
+        sym = next(iter(sorted(edited_syms)), None) if edited_syms else None
+        block = render_covering_failure_native(cres, edited_symbol=sym, test_files=ran_tf)
+        return block or None
+    except Exception:  # noqa: BLE001 -- correct-or-quiet; never destabilize the loop
+        return None
+
+
+def _edit_syntax_candidate(rel: str) -> "tuple[float, str, str, bool] | None":
+    """E — at-edit SYNTAX validation (SWE-agent linter-guard parity, +3.0pp NeurIPS
+    2024; ~51.7% of edits carry a catchable error). Run the repo's OWN parse-only
+    toolchain (``check_edit_syntax``) on the source file the agent just edited; on
+    POSITIVE syntax-error evidence, deliver the toolchain's native diagnostic (the
+    compiler/parser's own text — §0 native voice, zero ``<gt-*>``). An EXECUTED,
+    verified world-fact about the agent's edit — the same class as
+    ``verify.horizon.executed`` (phase-exempt in ``_filter_candidates_by_phase``).
+
+    Flag-gated ``GT_EDIT_CHECK``: byte-identical AND zero work when off. Correct-or-
+    quiet: an ``ok``/``unavailable`` verdict never speaks; any checker fault is silent.
+    LEAK-LAW: skip test files — E validates a SOURCE edit; a test path in the
+    diagnostic would trip the model-facing identity invariant. ``rel`` is the agent's
+    OWN just-edited file (never a hidden grader target), so naming it is not a leak."""
+    if os.environ.get("GT_EDIT_CHECK") != "1" or _GT_BASELINE:
+        return None
+    if not rel or _is_post_search_testpath((rel or "").replace("\\", "/")):
+        return None
+    try:
+        from groundtruth.runtime.edit_check import check_edit_syntax
+        from groundtruth.runtime.native_render import render_syntax_error_native
+    except Exception:  # noqa: BLE001 -- engine absent in-container -> E no-ops
+        return None
+    try:
+        _ex = _build_env_executor()  # None -> host subprocess / in-process ast.parse
+        res = check_edit_syntax(rel, _root(), executor=_ex)
+    except Exception:  # noqa: BLE001 -- the checker must never break the loop
+        return None
+    if res.get("verdict") != "syntax_error":
+        return None
+    block = render_syntax_error_native(res)
+    if not block:
+        return None
+    return (float(_SEV_NUDGE_VERIFY), "edit.syntax", block, True)
+
+
 def _verification_horizon_candidate() -> tuple[float, str, str, bool] | None:
     """Produce the Verification Horizon candidate for this turn — delivery-
     engine STAGE 4: bands from the Stage-1 behavioral signals; V from the
@@ -6315,6 +6636,15 @@ def _verification_horizon_candidate() -> tuple[float, str, str, bool] | None:
     if _risk_trigger and not _horizon_advisory_fired and _oracle_edited_rels:
         _horizon_advisory_fired = True
         _rk_cov = _covering_tests_for_symbols(_oracle_edited_tokens)
+        # B1 (Fable 2026-07-09): an EXECUTED, attributed covering RED beats an
+        # advisory — run the covering test and deliver the Format-D native failure
+        # if the edit broke it. Flag-gated: off -> None -> the advisory below runs
+        # unchanged (byte-identical). This is the verify-execution upgrade of this
+        # exact fire point (V-1/V-3 on the mini seam).
+        _rk_exec = _executed_covering_emission(
+            _rk_cov, _oracle_edited_rels, _oracle_edited_tokens)
+        if _rk_exec:
+            return (float(_SEV_NUDGE_VERIFY), "verify.horizon.executed", _rk_exec, True)
         _rk_block = _render_verify_emission(
             "advisory", _action_count, max(int(_GT_STEP_LIMIT or 0), _action_count, 1),
             _oracle_edited_rels, _rk_cov, risk_note=_risk_note)
@@ -7337,6 +7667,194 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
                 pass
 
 
+# ---------------------------------------------------------------------------
+# GT_GATEWAY (W2) — the ONE gateway.augment() call wired onto the mini seam.
+# Default-OFF (GT_GATEWAY unset/0) => `_gt_gateway_deliver` returns immediately =>
+# byte-identical to the pre-wave seam. When on, it completes the observation with
+# at most ONE deterministic FACT (adapter dose), appended BYTE-PRESERVING to the
+# SAME out['output'] the model reads (TITO laws 1/2), and threads the per-episode
+# TITO hash-chain + receipt ledger. The heavy decision logic lives in the pure
+# adapter (groundtruth.runtime.adapters.miniswe); this is the harness splice.
+# ---------------------------------------------------------------------------
+_GT_GATEWAY_MAX_DELTA = int(os.environ.get("GT_GATEWAY_MAX_DELTA", "4000") or "4000")
+
+
+def _gt_gateway_on() -> bool:
+    if _GT_BASELINE:
+        return False
+    return os.environ.get("GT_GATEWAY", "").strip().lower() not in (
+        "", "0", "false", "no", "off")
+
+
+def _gt_gateway_append(out: dict, delta: str) -> None:
+    """BYTE-PRESERVING splice (TITO laws 1/2): the original observation verbatim +
+    ``delta`` appended in the SAME observation. The prior prefix is NEVER rewritten
+    — this is a pure suffix onto ``out['output']``. Isolated as ONE function so the
+    byte-preservation is a single auditable/mutation-testable seam."""
+    out["output"] = (out.get("output") or "") + delta
+
+
+def _gateway_def_render(env) -> str:
+    """Injected NATIVE/def-facts renderer for the adapter: REUSE the mini's own
+    ``_fmt_def_facts`` (which dispatches to ``_fmt_def_facts_native`` under
+    ``GT_POST_SEARCH_NATIVE``), so a gateway def/search fact renders byte-identically
+    to the pre-wired post_search path — never a re-implementation. Re-resolves the
+    symbol to reconstruct the exact ``info`` the formatter needs (callers_render +
+    test-ref count the flattened envelope payload does not carry). Correct-or-quiet:
+    any miss -> '' so the adapter uses its generic render."""
+    try:
+        sym = getattr(env, "fact_id", "") or ""
+        db = _db_path()
+        if not sym or not db or not os.path.isfile(db):
+            return ""
+        con = _connect_ro(db)
+        if con is None:
+            return ""
+        try:
+            info = _resolve_symbol_defs(con, sym, _root())
+        finally:
+            con.close()
+        if not info or not info.get("def_sites"):
+            return ""
+        return _fmt_def_facts(sym, info, _root())
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _gateway_search_excluded(ev) -> bool:
+    """Dose-law MUTUAL EXCLUSION (CONFIRMED-1): the post_search lattice OWNS a search
+    turn whenever its flag is on. When this returns True the Gateway must NOT process the
+    event — no classify_outcome, no probe-ledger record, no producers, no delivery, no
+    chain-head advance, no dedup stamp, no episode-id set — so the ONE shared
+    ``_EPISODE.probe_ledger`` record + the ONE def-fact dose come from the lattice alone
+    (gateway consumers reading probe history lose nothing). The ONLY state touch that
+    legitimately precedes this guard is the bookkeeping promotion of PAST deliveries'
+    receipts (FIX-2, 2026-07-10) — it delivers nothing and records no probe, so the SKIP
+    of the current search event is still TOTAL. It is BY FLAG for ALL
+    search events, independent of whether the lattice actually delivered: the lattice's
+    abstention is itself a correct-or-quiet decision, and deterministic dose accounting
+    beats opportunistic backfill. ``_GT_BASELINE`` is already excluded upstream by
+    ``_gt_gateway_on()``. Kept as a pure module-level predicate so the guard is
+    single-sourced (NO-DUP) and mutation-testable; the search kind is read from the
+    frozen ``gateway.KIND_SEARCH`` ABI constant (no re-implemented command parsing)."""
+    if not _POST_SEARCH_ON:
+        return False
+    try:
+        from groundtruth.runtime.gateway import KIND_SEARCH as _ks
+    except Exception:  # noqa: BLE001 — gateway absent -> nothing to exclude (fail-open)
+        return False
+    return getattr(ev, "kind", "") == _ks
+
+
+def _gt_gateway_deliver(action, out, cmd, orig_out) -> None:
+    """THE ONE CALL: complete THIS observation with one gateway.augment() dose.
+
+    Pipeline (all pure/adapter except the splice): normalize_event -> augment (the
+    ONE call, over the shared `_EPISODE`) -> arbitrate (<=1 dose) -> render_native
+    (def facts reuse the mini formatter; else generic tagged/native) -> leak-guard ->
+    LAW-8 budget -> BYTE-PRESERVING append -> seal (TITO chain + rendered-bytes hash)
+    -> record delivery copy (receipt level 1). Isolated + correct-or-quiet: any fault
+    is swallowed and can NEVER undo the Lane-A/B delivery that already ran."""
+    if not _gt_gateway_on() or not isinstance(out, dict):
+        return
+    global _gt_gateway_chain_head
+    try:
+        # dotted `from groundtruth.<pkg>.<mod> import` form so the injection
+        # import-coverage guard REQUIRES these to ship (mandate f); shipped in
+        # gt_agent._PRODUCT_PACKAGE_MODULES. Absent in-container -> quiet no-op.
+        from groundtruth.runtime.gateway import GatewayState as _GatewayState
+        from groundtruth.runtime.gateway import augment as _gw_augment
+        from groundtruth.runtime.adapters.miniswe import (
+            arbitrate as _ad_arbitrate,
+            fits_budget as _ad_fits_budget,
+            normalize_event as _ad_normalize,
+            render_envelope as _ad_render,
+            seal_delivery as _ad_seal,
+            update_receipts as _ad_update_receipts,
+        )
+        from groundtruth.runtime.native_render import (
+            contains_gt_tag, contains_test_identity)
+    except Exception:  # noqa: BLE001 — gateway/adapter absent in-container
+        return
+    try:
+        # normalize FIRST (PURE — a ``classify_command`` wrapper with no side effects).
+        rc = out.get("returncode")
+        ev = _ad_normalize(cmd or "", orig_out or "", rc, _action_count)
+        # RECEIPTS (law 7, levels 2-3): promotion is BOOKKEEPING of PAST deliveries — it
+        # reads THIS turn's observation text + command and promotes a prior delivery's
+        # receipt_state (delivered->referenced->acted). It DELIVERS nothing and records
+        # NO probe, so it is NOT a dose; it runs BEFORE the exclusion return (FIX-2,
+        # 2026-07-10) so an excluded SEARCH turn promotes receipts EXACTLY as gateway-
+        # alone would. Otherwise a prior delivery whose target the agent then greps stays
+        # 'delivered' forever under both flags -> a paired GT-on/gateway-alone receipt
+        # comparison is arm-asymmetric. This is the ONE bookkeeping exception to the
+        # guard's totality; every NEW dose / probe-record / episode-id / augment state
+        # touch still sits AFTER the exclusion return.
+        if _gt_gateway_deliveries:
+            try:
+                _gt_gateway_deliveries[:] = _ad_update_receipts(
+                    _gt_gateway_deliveries, observed_text=orig_out or "",
+                    next_action_cmd=cmd or "")
+            except Exception:  # noqa: BLE001
+                pass
+        # SEAM DOSE-LAW GUARD (CONFIRMED-1, 2026-07-10) — MUTUAL EXCLUSION, post_search
+        # WINS on search turns. The post_search lattice and this Gateway are two delivery
+        # planes over the ONE shared ``_EPISODE.probe_ledger``; on a SEARCH turn with the
+        # lattice enabled the lattice already records the ONE probe + delivers the def
+        # fact. Running the Gateway on that SAME turn double-doses the observation AND
+        # double-records the shared ledger (outcomes=['zero','zero'] -> a 1-probe false
+        # "stuck" once hypothesis_ledger wires on len(outcomes)>=2). The guard returns
+        # BEFORE any NEW dose / probe-record / episode-id set / augment (the receipt
+        # promotion of PAST deliveries above is bookkeeping, not this event's processing),
+        # so the SKIP of this search event is TOTAL. The Gateway stays live for this
+        # episode's non-search (edit/test) turns.
+        if _gateway_search_excluded(ev):  # MUTATION[guard_search_exclusion]: force -> False
+            return
+        if not getattr(_EPISODE, "episode_id", ""):
+            try:
+                _EPISODE.episode_id = _root() or "episode"  # host-side chain scope id
+            except Exception:  # noqa: BLE001
+                pass
+        st = _GatewayState(
+            graph_db=_db_path(), repo_root=_root(),
+            issue_text="", episode=_EPISODE)  # change_surface issue-text wiring deferred
+        winner = _ad_arbitrate(_gw_augment(ev, st))
+        if winner is None:
+            return
+        native = os.environ.get("GT_POST_SEARCH_NATIVE") == "1"
+        delta = _ad_render(winner, native=native,
+                           def_facts_renderer=_gateway_def_render)
+        # leak-law (ABI §5): native must be tag-free; NEVER a test identity anywhere.
+        if (not delta or (native and contains_gt_tag(delta))
+                or contains_test_identity(delta)):
+            return
+        # TITO law 8: an over-budget delta is dropped WHOLE (never a partial splice).
+        if not _ad_fits_budget(delta, max_delta_chars=_GT_GATEWAY_MAX_DELTA):
+            return
+        # BYTE-PRESERVING append: the original output verbatim + delta, same obs.
+        _gt_gateway_append(out, delta)
+        rendered = delta.encode("utf-8", "surrogatepass")  # bytes ACTUALLY appended
+        # F1 (bounce 2026-07-10): the SEAL is the delivery commit — it stamps the
+        # winner's dedup key into the episode chain (dedup_chain). augment() only
+        # READS the chain, so an arbitration loser / leak-guard / law-8 drop above
+        # was never stamped and stays re-offerable (deferred, not destroyed).
+        sealed, _gt_gateway_chain_head = _ad_seal(
+            winner, episode_id=getattr(_EPISODE, "episode_id", ""),
+            event_id=str(_action_count), parent_hash=_gt_gateway_chain_head,
+            rendered_bytes=rendered, renderer_id=("native" if native else "tagged"),
+            dedup_chain=_EPISODE.delivered_dedup)
+        _gt_gateway_deliveries.append(sealed)
+        try:
+            _runtime_ledger_record(
+                kind="gateway." + (winner.evidence_type or "fact"),
+                outcome=_ProductSignalOutcome.DELIVERED,
+                chars=len(delta), file_path=winner.target or "")
+        except Exception:  # noqa: BLE001
+            pass
+    except Exception:  # noqa: BLE001 — isolated; must never break the agent loop
+        _crash_emit("gateway.augment")
+
+
 def _augment_output(action, out) -> None:
     """Append GT evidence to a command's output dict."""
     global _marker_sent, _action_count, _source_edit_count, _cycle_edit_start
@@ -7790,6 +8308,17 @@ def _augment_output(action, out) -> None:
                     _vh = None
                 if _vh is not None:
                     cands.append(_vh)
+                # E — at-edit SYNTAX validation (GT_EDIT_CHECK). Scoped to the file the
+                # current action edited (_krel/_kf on a post_edit turn); a parse break in
+                # the agent's own just-written source earns a native compiler diagnostic.
+                if _kkind == "post_edit" and (_krel or _kf):
+                    try:
+                        _es = _edit_syntax_candidate(_krel or _kf or "")
+                    except Exception:  # noqa: BLE001 — one producer must not kill the gate
+                        _crash_emit("edit.syntax")
+                        _es = None
+                    if _es is not None:
+                        cands.append(_es)
                 _phase = _detect_phase()
                 # Event-bound candidates bypass phase filter — the trigger IS the
                 # event (post_view / post_edit / review transition); phase policy
@@ -7850,6 +8379,21 @@ def _augment_output(action, out) -> None:
                     # (deferred, not destroyed — same law as every class above).
                     if "verify.horizon.advisory" in _lost:
                         _horizon_advisory_fired = False
+                    # B1 executed-RED (Fable 2026-07-09): the EXECUTED covering
+                    # emission is produced at the SAME risk-trigger fire point and
+                    # consumes the SHARED _horizon_advisory_fired latch (set True at
+                    # ~6360 BEFORE _executed_covering_emission runs). If the executed
+                    # RED loses the single Lane-B slot (gate) OR is phase-dropped,
+                    # that shared latch is burned and the risk-trigger block —
+                    # `if _risk_trigger and not _horizon_advisory_fired` — never
+                    # re-enters, so the RED never re-fires. Re-arm the SAME latch its
+                    # advisory sibling re-arms (deferred, not destroyed). The sensed
+                    # _last_test_outcome_failed is a WORLD-FACT (the covering test
+                    # really failed), NOT a dose latch, so it is intentionally left
+                    # untouched — mirrors the siblings, which re-arm only fire-once
+                    # flags, never the observed verify-axis outcome.
+                    if "verify.horizon.executed" in _lost:
+                        _horizon_advisory_fired = False
                     if "verify.horizon.urgent" in _lost:
                         _horizon_urgent_fired = False
                     if "verify.horizon.pivot" in _lost:
@@ -7884,6 +8428,10 @@ def _augment_output(action, out) -> None:
                         "iteration": globals().get("_action_count", 0)})
                 except Exception:  # noqa: BLE001
                     pass
+            # ── GT_GATEWAY (W2): the ONE gateway.augment() call on the ORACLE route
+            #    (the production path). Runs LAST, on the CLEAN command output
+            #    (`_orig_out`), appended after the lanes. Default-OFF => byte-identical.
+            _gt_gateway_deliver(action, out, cmd, _orig_out)
             return
 
         # ---- LEGACY PATH (GT_ORACLE_ROUTE=0): unconditional appends ----
@@ -7936,6 +8484,10 @@ def _augment_output(action, out) -> None:
         ev = _evidence(cmd)
         if ev:
             out["output"] = (out.get("output") or "") + ev
+        # ── GT_GATEWAY (W2): the ONE gateway.augment() call — the LAST step, so it
+        #    classifies on the CLEAN command output (`_orig_out`) and appends its
+        #    dose after the existing lanes. Default-OFF => byte-identical (guarded).
+        _gt_gateway_deliver(action, out, cmd, _orig_out)
     except Exception:  # noqa: BLE001 -- never break the agent loop
         # LOUD-but-safe: surface the swallowed augment exception to stderr (the
         # [gt-patch:loaded] discipline) so a silently-dying gate/producer is
@@ -7954,9 +8506,278 @@ def _augment_output(action, out) -> None:
             pass
 
 
+# ---------------------------------------------------------------------------
+# FIX 3 (executor threading, Fable 2026-07-09): the B1 seam runs the repo's
+# covering tests in the AGENT'S env. `_executed_covering_emission` currently lets
+# the covering runner default to a host `subprocess` — correct on Local/box, WRONG
+# when the env class is a remote Docker/Singularity container (host subprocess runs
+# on the wrong machine). The env wrapper below is the ONLY place that holds the live
+# environment instance AND its ORIGINAL (pre-monkeypatch) execute, so it publishes
+# them here; the seam builds a small adapter over the original execute with a FROZEN
+# contract and threads it into the covering runner IFF the runner accepts it.
+#
+# Contract (frozen — a parallel engine builds to the same signature):
+#     executor(cmd: list[str], cwd: str, timeout: int) -> (exit_code, stdout, stderr)
+# Marker-based exit-code capture is the ENGINE's job, not the adapter's. Populated
+# ONLY under GT_VERIFY_EXECUTE -> byte-identical when the flag is off (never set,
+# never read).
+_GT_LIVE_ENV = None            # the live environment instance (self in the wrapper)
+_GT_LIVE_ORIG_EXECUTE = None   # the ORIGINAL unbound execute (pre-monkeypatch)
+
+
+def _gt_publish_live_env(env, orig_execute) -> None:
+    """Publish the live env + its original (pre-patch) execute for the B1 executor
+    bridge. Called from the env wrapper under GT_VERIFY_EXECUTE only."""
+    global _GT_LIVE_ENV, _GT_LIVE_ORIG_EXECUTE
+    _GT_LIVE_ENV = env
+    _GT_LIVE_ORIG_EXECUTE = orig_execute
+
+
+def _build_env_executor():
+    """Build an executor adapter bound to the live env's ORIGINAL execute, honoring
+    the frozen contract executor(cmd, cwd, timeout) -> (exit_code, stdout, stderr).
+    Returns None when no live env/orig-execute is reachable (the seam then keeps its
+    sync-subprocess default — behaviour unchanged).
+
+    The mini-swe env.execute takes a {"command": <str>} action + positional cwd +
+    keyword timeout and returns {"output": <merged stdout+stderr>, "returncode": int}.
+    stderr is "" here because those envs merge it into stdout; the DOCUMENTED fallback
+    exit code is 1 whenever the env returns no usable returncode (correct-or-quiet:
+    an ambiguous run degrades the covering verdict to unavailable, never a false RED)."""
+    env = _GT_LIVE_ENV
+    orig = _GT_LIVE_ORIG_EXECUTE
+    if env is None or orig is None:
+        return None
+    import shlex as _shlex
+
+    def _executor(cmd, cwd, timeout):
+        try:
+            if isinstance(cmd, (list, tuple)):
+                cmd_str = _shlex.join([str(c) for c in cmd])
+            else:
+                cmd_str = str(cmd)
+            action = {"command": cmd_str}
+            try:
+                res = orig(env, action, cwd or "", timeout=int(timeout))
+            except TypeError:
+                # Env execute signature variance (no keyword timeout) — positional only.
+                res = orig(env, action, cwd or "")
+            if isinstance(res, dict):
+                code = res.get("returncode")
+                return (int(code) if code is not None else 1,
+                        res.get("output") or "", "")
+            # Unknown return shape -> documented fallback (exit 1, passthrough str).
+            return (1, str(res or ""), "")
+        except Exception as _e:  # noqa: BLE001 — the seam must never be destabilized
+            return (1, "", f"gt_executor_unavailable: {type(_e).__name__}")
+
+    return _executor
+
+
+# ---------------------------------------------------------------------------
+# G-2 — SUBMIT-GATE (the enforcement seam, Fable 2026-07-09).
+#
+# THE CHOKEPOINT (documented, LIPI Integration): in the LIVE mini-swe-agent
+# harness the completion signal is raised INSIDE env.execute — the environment
+# runs the submit command, then `_check_finished(output)` raises `Submitted` when
+# the first output line is `COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT` and rc==0
+# (minisweagent/environments/{local,docker,singularity}.py). Those are exactly the
+# classes `_install()` wraps, so the submit action DOES flow through `_wrap_execute`
+# — `orig(self, action, ...)` RAISES `Submitted` before `_augment_output` runs. This
+# env-level wrapper is therefore the TRUE submit chokepoint AND is agent-class-
+# agnostic (DefaultAgent / InteractiveAgent / pier's MiniSweAgent all call
+# self.env.execute). (The `_l5_no_test_evidence` comment ~4570 describes a DIFFERENT,
+# older DeepSWE flavor where the agent intercepted a submit-action STRING before
+# env.execute; that flavor is not the installed harness — this wrapper is where the
+# live Submitted is raised, so we gate it here rather than at an agent class.)
+#
+# FAIL-OPEN LAW (submit_gate §3): BLOCK only on POSITIVE evidence (a covering RED or
+# a hygiene BLOCK); UNAVAILABLE never blocks; after `_GT_SUBMIT_MAX_BOUNCES` refusals
+# the kernel fails OPEN (gate_overridden) so a gate can never deadlock a run at reward
+# 0; any gate crash returns None (submission proceeds). Everything below is flag-gated
+# by GT_VERIFY_EXECUTE=1 & not _GT_BASELINE and wrapped so it can NEVER brick a run.
+# ---------------------------------------------------------------------------
+_GT_SUBMIT_MAX_BOUNCES = 1     # refusals allowed before failing open (module const so
+                              #  a mutation test can disable the cap)
+_gt_submit_bounce_count = 0    # refusals issued THIS run (reset per task/attempt)
+
+
+def _is_submitted_exc(e) -> bool:
+    """True iff ``e`` is mini-swe-agent's ``Submitted`` completion signal. Name-based
+    first so we never trigger a fresh (Windows-banner-crashing) ``minisweagent``
+    import; also honors the real class if it is already in sys.modules."""
+    if type(e).__name__ == "Submitted":
+        return True
+    mod = sys.modules.get("minisweagent.exceptions")
+    cls = getattr(mod, "Submitted", None) if mod is not None else None
+    try:
+        return bool(cls is not None and isinstance(e, cls))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _gt_submit_hygiene(root: str) -> "dict | None":
+    """``diff_hygiene`` over the repo's current ``git diff --numstat HEAD`` — via the
+    live env bridge (so a container repo is read IN the container) when present, else a
+    local subprocess. Correct-or-quiet: any failure -> None (non-blocking hygiene)."""
+    try:
+        from groundtruth.runtime.patch_auditor import diff_hygiene, git_diff_hygiene
+    except Exception:  # noqa: BLE001
+        return None
+    ex = _build_env_executor()
+    if ex is not None:
+        try:
+            _rc, out, _err = ex(["git", "diff", "--numstat", "HEAD"], root, 20)
+            return diff_hygiene(numstat=out or "")
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        return git_diff_hygiene(root)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _gt_submit_covering(root: str) -> "tuple[dict | None, list[str]]":
+    """``(covering_result, covering_files)`` for the submit gate.
+
+    STALENESS FIX (2026-07-09): ``_last_covering_result`` is cached ONCE per task
+    (the once-per-task ``_horizon_advisory_fired`` latch), so a RED cached at the
+    first risky edit would block a submit MANY turns later even after the agent
+    FIXED the file — a false block (invariant ②). A cached NON-fail (green /
+    unavailable) can never cause a false block, so it is a safe fast-path; a cached
+    FAIL is STALE at the submit decision point and is RE-RUN fresh. Returns the
+    covering FILES too so the caller can attribution-gate a fail. Correct-or-quiet:
+    empty selection / unavailable / any error -> ``(None, files)`` (non-blocking)."""
+    try:
+        from groundtruth.runtime.covering_runner import run_covering_tests
+        cov = _covering_tests_for_symbols(_oracle_edited_tokens)
+        files = [c["file"] for c in (cov or [])
+                 if c.get("file") and os.path.exists(os.path.join(root, c["file"]))]
+        # Fast-path: a cached non-fail can never FALSE-block -> reuse without re-run.
+        if (_last_covering_result is not None
+                and _last_covering_result.get("verdict") != "fail"):
+            return _last_covering_result, files
+        if not files:
+            return None, files
+        _run_kwargs: dict = {}
+        try:
+            import inspect as _inspect
+            if "executor" in _inspect.signature(run_covering_tests).parameters:
+                _ex = _build_env_executor()
+                if _ex is not None:
+                    _run_kwargs["executor"] = _ex
+        except (TypeError, ValueError):
+            pass
+        cres = run_covering_tests(root, files, per_file_timeout=20,
+                                  total_budget_seconds=35, **_run_kwargs)
+        return cres, files
+    except Exception:  # noqa: BLE001
+        return None, []
+
+
+def _gt_submit_record(verdict, *, blocked: bool) -> None:
+    """HOST-ONLY telemetry for a submit-gate decision (stderr + runtime ledger). NEVER
+    model-facing. Records block / gate_overridden / gate_crash / clean alike."""
+    try:
+        reason = getattr(verdict, "reason", "") or ""
+        outcome = "submit_blocked" if blocked else ("submit_" + (reason or "allow"))
+        print(f"[GT_META] submit_gate decision={outcome} reason={reason} "
+              f"bounce={_gt_submit_bounce_count}", file=sys.stderr, flush=True)
+        _runtime_ledger_record(kind="submit_gate", outcome=outcome, reason=reason)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _gt_gate_submit_exception(env, action, exc) -> "dict | None":
+    """Gate a submit detected as a ``Submitted`` raised from env.execute.
+
+    Returns a NATIVE-rejection observation dict to BLOCK (the caller swallows the
+    ``Submitted`` and returns this dict, so the agent sees a failed action and
+    continues), or None to ALLOW (the caller re-raises ``Submitted`` unchanged — the
+    submission proceeds exactly as today). NEVER raises: a gate crash returns None
+    (fail-open). Byte-identical off-path is guaranteed by the caller (this is only
+    invoked on the GT_VERIFY_EXECUTE=1 & not-baseline branch)."""
+    global _gt_submit_bounce_count
+    try:
+        if os.environ.get("GT_VERIFY_EXECUTE") != "1" or _GT_BASELINE:
+            return None
+        if not _is_submitted_exc(exc):
+            return None  # not a submit — a real error must propagate unchanged
+        from groundtruth.runtime.native_render import (
+            contains_gt_tag, render_submit_rejection)
+        from groundtruth.runtime.submit_gate import safe_gate_verdict
+        root = _root()
+        hygiene = _gt_submit_hygiene(root)
+        covering, _cov_files = _gt_submit_covering(root)
+        # ATTRIBUTION GATE (parity with the post_edit path, 2026-07-09): a submit-time
+        # covering FAIL blocks ONLY if the edit is PROVEN to have caused it. A pre-
+        # existing / unrelated red, or an UNPROVABLE one (no covering files, attribution
+        # crash), must NOT false-block the submit (invariant ②, FP=0 — same "deliver only
+        # on proven attribution" law the post_edit path uses). Unproven -> drop the
+        # covering axis to non-blocking (correct-or-quiet).
+        if covering is not None and covering.get("verdict") == "fail":
+            _attributed = False
+            if _cov_files:
+                try:
+                    from groundtruth.runtime.covering_runner import is_red_attributable
+                    _attributed = bool(is_red_attributable(
+                        covering, list(_oracle_edited_rels),
+                        test_files=covering.get("ran") or _cov_files,
+                        repo_root=root, covering_files=_cov_files,
+                        executor=_build_env_executor(),
+                        per_file_timeout=20, total_budget_seconds=35))
+                except Exception:  # noqa: BLE001 — attribution unavailable -> do NOT block
+                    _attributed = False
+            if not _attributed:
+                covering = None
+        verdict = safe_gate_verdict(
+            covering=covering, hygiene=hygiene,
+            bounce_count=_gt_submit_bounce_count, max_bounces=_GT_SUBMIT_MAX_BOUNCES)
+        if verdict.allow:
+            # clean / gate_overridden / gate_crash -> submission proceeds (host record).
+            _gt_submit_record(verdict, blocked=False)
+            return None
+        # BLOCK: render the refusal as a pre-commit / CI failure — native, in-
+        # distribution, ZERO <gt-*> tags, ZERO test identity (submit_gate.detail is
+        # generic by construction). Correct-or-quiet on an empty / tag-leaking render.
+        rejection = render_submit_rejection(verdict.reason, verdict.detail)
+        if not rejection or contains_gt_tag(rejection):
+            return None
+        # DEDUP/no-dup law (:4929/:6590 pattern): an identical refusal must never re-
+        # emit. If we already delivered this exact refusal, do not re-block -> allow.
+        hc = "c:" + hashlib.sha256(rejection.encode("utf-8")).hexdigest()[:8]
+        if hc in _oracle_delivered_hashes:
+            return None
+        _oracle_delivered_hashes.add(hc)          # stamp (the dedup ledger)
+        _gt_submit_bounce_count += 1
+        _gt_submit_record(verdict, blocked=True)
+        return {"output": rejection, "returncode": 1}
+    except Exception:  # noqa: BLE001 — a gate crash must NEVER brick a run (fail-open)
+        return None
+
+
 def _wrap_execute(orig):
     def execute(self, action, *args, **kwargs):
-        out = orig(self, action, *args, **kwargs)
+        # FIX 3 / G-2: the GT_VERIFY_EXECUTE branch (a) exposes the live env + its
+        # ORIGINAL execute to the B1 covering-runner bridge, and (b) gates the SUBMIT
+        # action — env.execute raises `Submitted` for a submit, which we catch here
+        # (the true, agent-class-agnostic submit chokepoint). No-op / byte-identical
+        # when the flag is off: the `else` branch is the exact legacy path (no
+        # try/except, no gate code runs).
+        if not _GT_BASELINE and os.environ.get("GT_VERIFY_EXECUTE") == "1":
+            try:
+                _gt_publish_live_env(self, orig)
+            except Exception:  # noqa: BLE001 — publication must never break execute
+                pass
+            try:
+                out = orig(self, action, *args, **kwargs)
+            except BaseException as _e:  # noqa: BLE001 — submit chokepoint
+                _blocked = _gt_gate_submit_exception(self, action, _e)
+                if _blocked is not None:
+                    return _blocked            # BLOCK: swallow Submitted, agent continues
+                raise                          # ALLOW / not-a-submit: propagate unchanged
+        else:
+            out = orig(self, action, *args, **kwargs)  # legacy path — byte-identical
         _augment_output(action, out)
         return out
 

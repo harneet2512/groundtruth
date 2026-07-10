@@ -1,0 +1,306 @@
+name: "SWE-bench Pro: GT-on mini-swe-agent (731 tasks, no pier)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance_ids:
+        description: "Comma-separated instance IDs (overrides max_tasks/shard)"
+        required: false
+        default: ""
+      max_tasks:
+        description: "Max tasks (0 = all in shard)"
+        required: true
+        default: "10"
+      shard:
+        description: "Shard i/n (e.g. 0/4)"
+        required: true
+        default: "0/1"
+      model:
+        description: "LLM model"
+        required: true
+        default: "deepseek/deepseek-v4-flash"
+      max_parallel:
+        description: "Concurrent jobs"
+        required: true
+        default: "20"
+      gt_substrate_digest:
+        description: "Pinned GT substrate digest"
+        required: false
+        default: ""
+      baseline:
+        description: "GT-off baseline arm"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # live-log bridge force-pushes per-task progress to gha-live-logs/<task>
+  packages: read
+
+env:
+  GT_REQUIRE_FULL_STACK: "1"
+  GT_REQUIRE_FULL_POTENTIAL: "1"     # GT-MAX parity (was missing): LSP-edge gate strictness
+  GT_REQUIRE_FTS5: "1"
+  GT_FORCE_ONNX_EMBEDDER: "1"
+  GT_REQUIRE_EMBEDDER: "1"
+  GT_REQUIRE_LSP: "1"
+  GT_REQUIRE_GRAPH_VALID: "0"      # PRODUCT RULE: never refuse a task for GT-quality; thin graph -> best-effort, cert RECORDED (telemetry), not a gate
+  GT_REQUIRE_COMMIT_PARITY: "1"    # Blocker 2: baked build-commit != run commit -> abort (stale-bake guard)
+  # H8 DISARMED (best-effort): GT_REQUIRE_PARSE_RATE aborts gt-index on low parse -> throws away the
+  # partial graph -> refuses GT help. Keep whatever parses; 0-parse detection + logging stay (main.go).
+  GT_FORBID_PREBUILT_GRAPH: "1"
+  GT_PROOF_MODE: "1"
+  GT_CONTAINERIZED: "1"
+  GT_RUNTIME_STRATEGY: "unified_substrate"
+  GT_RRF_FUSION: "on"                 # banked localizer = RRF (bias-free) + exact-path floor (53/60 proven)
+  GT_LOC_FUSION_V2: "1"               # BAKED: independent-surface RRF localizer (generalizing: OSS-60 +2, held-out +1, 0 regression)
+  GT_LOC_BEHAVIOR_LEAD: "0"           # BAKED: behavior-gate OFF (suppressed held-out lift)
+  # GT-MAX per-turn layers (no pier: the agent + gt_mini_patch run in THIS host
+  # process and read these os.environ vars directly — no --ae forwarding needed).
+  GT_VERIFY_STRUCTURAL_RISK: "1"     # row 21 structural-risk half (was dark)
+  GT_VERIFY_RISK_TRIGGER: "0.5"
+  GT_VERIFICATION_CYCLE_COST: "25"
+  GT_ORACLE_ROUTE: "1"               # row 20 oracle two-lane route
+  GT_STEP_LIMIT: "250"               # rows 14/20 verify-horizon ladder; matches verified_gt.yaml step_limit
+  # H6 (LIPI): RESERVED, currently INERT on Pro. The Pro path runs stock DefaultAgent with a single
+  # agent.run(task) (artifact_verified/gt_verified_agent.py:262-263) — there is NO outer retry loop
+  # reading this var (the prior "consumed by the runner loop" comment was false). The retry ring is
+  # pier-only (gt_agent.py GTMiniSweAgent.run). Implementing it here for parity is a deliberate
+  # cost decision (up to 2x LLM per retried task on a 731-run) + needs the pier's retry-TRIGGER
+  # semantics (retry on verification-fail, not a blind 2x); left as a tracked parity item, not wired.
+  GT_SELF_VERIFY_ATTEMPTS: "2"
+  # deep 8-dp telemetry sinks -> uploaded dir so gt_math can audit per-layer firing
+  GT_ORACLE_EVENTS: "/tmp/gt/gt_oracle_events.jsonl"
+  GT_RUNTIME_LEDGER: "/tmp/gt/gt_runtime_ledger.jsonl"
+  GT_HOOK_FIRE_COUNTS: "/tmp/gt/gt_hook_fire_counts.json"
+  GT_SUBSTRATE_DIGEST: ${{ inputs.gt_substrate_digest || vars.GT_SUBSTRATE_DIGEST }}
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+      total: ${{ steps.gen.outputs.total }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Fetch Pro dataset (LFS bypass)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download pipeline-assets-v1 -p swebench_pro_public_tags.jsonl -D benchmarks/data/ --clobber || true
+          head -c 80 benchmarks/data/swebench_pro_public_tags.jsonl
+      - id: gen
+        name: Build matrix (731 Pro tasks)
+        env:
+          INPUT_INSTANCE_IDS: ${{ inputs.instance_ids }}
+          INPUT_MAX_TASKS: ${{ inputs.max_tasks }}
+          INPUT_SHARD: ${{ inputs.shard }}
+        shell: python
+        run: |
+          import json, os, sys
+          ds = "benchmarks/data/swebench_pro_public_tags.jsonl"
+          tasks = []
+          for line in open(ds, encoding="utf-8"):
+              line = line.strip()
+              if not line:
+                  continue
+              r = json.loads(line)
+              tasks.append({"task": r["instance_id"], "language": r["repo_language"], "dockerhub_tag": r["dockerhub_tag"]})
+          explicit = [t.strip() for t in os.environ.get("INPUT_INSTANCE_IDS", "").split(",") if t.strip()]
+          if explicit:
+              by_id = {t["task"]: t for t in tasks}
+              unknown = [e for e in explicit if e not in by_id]
+              if unknown:
+                  sys.exit(f"FATAL: unknown instance ids: {unknown[:5]}")
+              sel = [by_id[e] for e in explicit]
+          else:
+              shard = os.environ.get("INPUT_SHARD", "0/1").strip() or "0/1"
+              i, n = (int(x) for x in shard.split("/", 1))
+              sel = tasks[i::n]
+              maxt = int(os.environ.get("INPUT_MAX_TASKS", "10") or "0")
+              if maxt > 0:
+                  sel = sel[:maxt]
+          if len(sel) > 256:
+              sys.exit(f"FATAL: {len(sel)} > 256 GHA matrix cap - use shards")
+          matrix = {"include": sel}
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"matrix={json.dumps(matrix)}\n")
+              f.write(f"total={len(sel)}\n")
+          print(f"{len(sel)} tasks queued", file=sys.stderr)
+
+  trial:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+      fail-fast: false
+      max-parallel: ${{ fromJson(inputs.max_parallel) }}
+    env:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install host deps
+        run: |
+          pip install --upgrade pip
+          # mini-swe-agent ships its own 'pier' package that conflicts with datacurve-pier.
+          # Install mini-swe-agent FIRST, then GT editable (which may need datacurve-pier
+          # for the DeepSWE path but the Pro path doesn't use it).
+          pip install "mini-swe-agent==2.2.8" "swebench==4.1.0" datasets
+          pip install -e . --no-deps
+          # Clear any stale bytecode so the try/except pier import in gt_agent.py is fresh.
+          find artifact_deepswe -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+          echo "PYTHONPATH=$GITHUB_WORKSPACE/src:$GITHUB_WORKSPACE/artifact_deepswe:$GITHUB_WORKSPACE/scripts/swebench:$GITHUB_WORKSPACE/scripts/metrics" >> "$GITHUB_ENV"
+          python -c "
+          try:
+              from pier.models.trial.paths import EnvironmentPaths
+              print('pier.models.trial available (datacurve-pier)')
+          except (ImportError, ModuleNotFoundError):
+              print('pier.models.trial NOT available (mini-swe-agent pier) — gt_agent try/except will handle this')
+          "
+      - name: GHCR login
+        run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "$OWNER" --password-stdin
+      - name: Pull task image
+        run: |
+          IMG="ghcr.io/hbali-stack/sweap-images:${{ matrix.dockerhub_tag }}"
+          docker pull "$IMG" || { echo "::error::GHCR MISS $IMG"; exit 1; }
+          echo "TASK_IMAGE=$IMG" >> "$GITHUB_ENV"
+      - name: Get issue text (BEFORE substrate proof — brief needs it)
+        run: |
+          python3 -c "
+          import json
+          iid = '${{ matrix.task }}'
+          try:
+              from datasets import load_dataset
+              ds = load_dataset('ScaleAI/SWE-bench_Pro', split='test')
+              for row in ds:
+                  if row.get('instance_id') == iid:
+                      txt = row.get('problem_statement', 'Fix the issue.')
+                      open('/tmp/issue.txt', 'w').write(txt)
+                      print(f'issue: {len(txt)} chars from HF')
+                      break
+              else:
+                  open('/tmp/issue.txt', 'w').write('Fix the issue in the repository.')
+                  print('issue: fallback (not found)')
+          except Exception as e:
+              open('/tmp/issue.txt', 'w').write('Fix the issue in the repository.')
+              print(f'issue: fallback ({e})')
+          "
+      - name: Pull substrate + run proof
+        run: |
+          DIGEST="${GT_SUBSTRATE_DIGEST}"
+          [ -n "$DIGEST" ] || { echo "::error::no substrate digest"; exit 1; }
+          # Blocker 4: a paid run MUST pin an IMMUTABLE @sha256 digest, never a mutable tag
+          # (a mutable :latest can drift to a different image between pull and the next run).
+          case "$DIGEST" in
+            *@sha256:*) : ;;
+            *) echo "::error::GT_SUBSTRATE_DIGEST must be an immutable @sha256 pin (mutable tag forbidden on a paid run), got: $DIGEST"; exit 1 ;;
+          esac
+          docker pull "$DIGEST"
+          CID=$(docker create "$TASK_IMAGE")
+          TESTBED=/tmp/testbed_src
+          mkdir -p "$TESTBED"
+          docker cp "$CID:/testbed/." "$TESTBED/" 2>/dev/null || docker cp "$CID:/app/." "$TESTBED/" 2>/dev/null || true
+          docker rm "$CID"
+          GT_CERT_DIR=/tmp/gt
+          mkdir -p "$GT_CERT_DIR"
+          # Pass the issue text to the substrate so the brief has real anchors
+          ISSUE_FILE=/tmp/issue.txt
+          # Mount the checkout's Python code + scripts into the substrate so
+          # fixes to graph_localizer/v1r_brief/gt_mini_patch take effect without
+          # a substrate rebuild. The baked gt-index binary + ONNX model stay as-is.
+          docker run --rm \
+            -v "$TESTBED:/work:ro" \
+            -v "$GT_CERT_DIR:/gt_artifacts" \
+            -v "$ISSUE_FILE:/issue.txt:ro" \
+            -v "$GITHUB_WORKSPACE/src/groundtruth:/opt/gt/src/groundtruth:ro" \
+            -v "$GITHUB_WORKSPACE/scripts/swebench:/opt/gt/scripts/swebench:ro" \
+            -e GT_PROOF_MODE=1 -e GT_CONTAINERIZED=1 \
+            -e GT_REQUIRE_FULL_STACK=1 -e GT_REQUIRE_FULL_POTENTIAL=1 -e GT_REQUIRE_FTS5=1 \
+            -e GT_FORCE_ONNX_EMBEDDER=1 -e GT_REQUIRE_EMBEDDER=1 \
+            -e GT_REQUIRE_LSP=1 -e GT_FORBID_PREBUILT_GRAPH=1 \
+            -e GT_RRF_FUSION=on \
+            -e GT_LOC_FUSION_V2=1 -e GT_LOC_BEHAVIOR_LEAD=0 \
+            -e GT_RUNTIME_STRATEGY=unified_substrate \
+            -e GT_HOST_GRAPH_DB=/gt_artifacts/graph.db \
+            -e GT_HOST_SRC_ROOT=/work \
+            -e GT_ISSUE_FILE=/issue.txt \
+            -e GT_REQUIRE_GRAPH_VALID="${GT_REQUIRE_GRAPH_VALID:-0}" \
+            -e GT_REQUIRE_COMMIT_PARITY="${GT_REQUIRE_COMMIT_PARITY:-1}" \
+            -e GT_GIT_COMMIT="$GITHUB_SHA" \
+            -e GT_SUBSTRATE_DIGEST="$DIGEST" \
+            "$DIGEST" \
+            gt-run-proof --source-root /work --out /gt_artifacts; PROOF_RC=$?
+          # PRODUCT RULE: never refuse a task for GT-quality. A degraded/thin proof -> agent runs
+          # BEST-EFFORT (GT correct-or-quiet, cert recorded). The ONLY hard abort is a LEGITIMACY
+          # breach (commit-parity mismatch = ran STALE code -> results would be mis-attributed).
+          if [ "$PROOF_RC" -ne 0 ]; then
+            if grep -q "COMMIT_PARITY" "$GT_CERT_DIR/proof_failure.json" 2>/dev/null; then
+              echo "::error::substrate proof failed on COMMIT_PARITY (stale code, legitimacy) — abort"; exit 1
+            fi
+            echo "::warning::gt-run-proof rc=$PROOF_RC — agent proceeds BEST-EFFORT with degraded GT (never refuse a task for quality)"
+          fi
+          echo "GT_CERT_DIR=$GT_CERT_DIR" >> "$GITHUB_ENV"
+          echo "GT_HOST_GRAPH_DB=$GT_CERT_DIR/graph.db" >> "$GITHUB_ENV"
+          echo "GT_HOST_SRC_ROOT=$TESTBED" >> "$GITHUB_ENV"
+      - name: Run GT-injected mini-swe-agent (+ live-log bridge)
+        if: ${{ !inputs.baseline }}
+        env:
+          GH_LIVE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p /tmp/gt
+          # LIVE observability (no flying blind): background daemon force-pushes per-task
+          # progress to gha-live-logs/<task> every 20s — read mid-run with scripts/ci/read_live.sh.
+          touch /tmp/trial_output.log
+          bash scripts/ci/live_log_push.sh "${{ matrix.task }}" /tmp/trial_output.log /tmp/trial_output.log 20 &
+          _LIVE_PID=$!
+          python artifact_verified/gt_verified_agent.py \
+            --instance-id "${{ matrix.task }}" \
+            --subset "ScaleAI/SWE-bench_Pro" \
+            --model "${{ inputs.model }}" \
+            --image "$TASK_IMAGE" \
+            --config artifact_verified/verified_gt.yaml \
+            --output /tmp/pro_output \
+            --issue-file /tmp/issue.txt \
+            2>&1 | tee /tmp/trial_output.log || true
+          kill "$_LIVE_PID" 2>/dev/null || true
+      - name: Deep metrics (gt_math 21-row inputs)
+        if: ${{ always() && !inputs.baseline }}
+        env:
+          GT_CERT_DIR: /tmp/gt
+        run: |
+          # Per-task deep metrics so the gt_math 21-row gate can audit this run.
+          # --pipeline deepswe-miniswe routes to the mini-swe-agent trajectory reader
+          # (handles the no-pier {iid}.traj.json + both message shapes).
+          python scripts/swebench/gt_deep_metrics.py "${{ matrix.task }}" /tmp/pro_output \
+            --pipeline deepswe-miniswe \
+            --out /tmp/gt/gt_deep_metrics_${{ matrix.task }}.json \
+            || echo "::warning::deep_metrics failed for ${{ matrix.task }}"
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pro-${{ matrix.task }}
+          path: |
+            /tmp/trial_output.log
+            /tmp/pro_output/
+            /tmp/gt/
+
+  summarize:
+    needs: [prepare, trial]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Pro run complete. ${{ needs.prepare.outputs.total }} tasks."

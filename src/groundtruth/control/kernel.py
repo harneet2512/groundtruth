@@ -492,6 +492,13 @@ def validate_against_graph(diff: Diff, graph: GraphHandle) -> ValidationResult:
 
     No test execution. Per ADR 0002 (locked decision 3, SWE-Bench Pro
     spec/interface augmentation evidence).
+
+    DEPRECATED (E capability, 2026-07-09): this regex-only (``_DEF_LINE_RE``)
+    validator has no live callers. The at-edit SYNTAX check moved to the real
+    parse-based ENGINE ``groundtruth.runtime.edit_check`` — ``check_edit_syntax``
+    (repo-toolchain parse via the frozen executor contract, positive-evidence /
+    correct-or-quiet) and the ``caller_diff_advisory`` FACT-tier caller half.
+    Kept here until the seam migration lands; do not extend this function.
     """
     from groundtruth.control.types import Evidence
 

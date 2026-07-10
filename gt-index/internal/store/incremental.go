@@ -21,6 +21,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -193,6 +194,33 @@ var uniquenessDerivedMethods = map[string]bool{
 	"unique_method":   true,
 }
 
+// stripReceiverTypeTag removes ONLY the `receiver_type=<...>` segment(s) from a
+// `;`-separated metadata string, preserving every other key (dataflow=, api_edges
+// route info, …) verbatim — one segment is removed, never the field.
+//
+// W-B invariant (producer cleanliness): `receiver_type=<T>` on edges.metadata is
+// CALL-SITE PROVENANCE minted by the resolver's receiver-PROVEN rungs — non-empty
+// IFF the receiver type was structurally proven. When an incremental restore
+// CANNOT re-prove target identity (!identityReproven), the receiver-type proof is
+// exactly what the bare-name re-match failed to re-prove: the restored edge demotes
+// (0.6 cap / name_match fallback) and MUST NOT keep a fact-shaped receiver tag.
+// The identity-REPROVEN path restores provenance verbatim, exactly like every
+// other metadata key (the B6 contract).
+func stripReceiverTypeTag(meta string) string {
+	if meta == "" || !strings.Contains(meta, "receiver_type=") {
+		return meta
+	}
+	parts := strings.Split(meta, ";")
+	kept := parts[:0]
+	for _, p := range parts {
+		if strings.HasPrefix(p, "receiver_type=") {
+			continue
+		}
+		kept = append(kept, p)
+	}
+	return strings.Join(kept, ";")
+}
+
 // tierForConfidence mirrors resolver.tierFor (CLAUDE.md:222 — the ONE threshold
 // table) for the store package, which cannot import resolver (import cycle).
 // Keep the thresholds in lockstep with resolver.tierFor.
@@ -347,6 +375,13 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string)
 		var method string
 		var tier string
 		var evType string
+		// W-B provenance strip: TRUE on every restore branch whose demote means the
+		// receiver-type proof did NOT survive the reindex (the !identityReproven cap
+		// and the whole name_match/qualifiedUnresolved fallback). The restored
+		// metadata then loses ONLY its `receiver_type=` segment — a demoted/guess
+		// edge must not carry a fact-shaped receiver tag (invariant: non-empty IFF
+		// receiver-PROVEN). All other keys restore verbatim (B6).
+		stripProvenance := false
 		if !qualifiedUnresolved && (len(ids) == 1 || identityReproven) && deterministicRestoreMethods[r.ResolutionMethod] {
 			conf = r.Confidence
 			// Item #4: floor ONLY the literal pre-v14 0.0/NULL sentinel to the
@@ -369,8 +404,13 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string)
 			// would launder it onto the wrong target. Cap at CANDIDATE (0.6) and let
 			// the tier re-derive to CANDIDATE. The signature-derived same_file/import
 			// methods are exempt: their proof survives a bare-name re-match.
-			if !identityReproven && typeOrUniquenessDerivedMethods[method] && conf > 0.6 {
-				conf = 0.6
+			if !identityReproven && typeOrUniquenessDerivedMethods[method] {
+				if conf > 0.6 {
+					conf = 0.6
+				}
+				// The receiver-type / uniqueness / LSP proof was NOT re-proven by the
+				// bare-name re-match — the capped edge must not keep receiver provenance.
+				stripProvenance = true
 			}
 			// Fable finding 1: even WITH an exact qname re-match, a UNIQUENESS-derived tier
 			// (verified_unique/unique_method) cannot be preserved when the reindexed file now
@@ -400,6 +440,9 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string)
 		} else {
 			method = "name_match"
 			evType = "name_match"
+			// A name_match restore is a GUESS — it must never carry a fact-shaped
+			// receiver tag, whatever the original edge earned (correct-or-quiet).
+			stripProvenance = true
 			switch {
 			case qualifiedUnresolved:
 				// Parity with the resolver demote (resolver.go: conf 0.2,
@@ -436,9 +479,15 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string)
 		}
 		// B6: restore metadata verbatim (NULL when the original was empty, matching
 		// prior behavior for metadata-less edges — so only real metadata is carried).
+		// W-B: on a demoted/not-reproven restore, the `receiver_type=` provenance
+		// segment is stripped first (other keys untouched — see stripReceiverTypeTag).
+		restoredMeta := r.Metadata
+		if stripProvenance {
+			restoredMeta = stripReceiverTypeTag(restoredMeta)
+		}
 		var edgeMeta interface{}
-		if r.Metadata != "" {
-			edgeMeta = r.Metadata
+		if restoredMeta != "" {
+			edgeMeta = restoredMeta
 		}
 		if _, err := ins.Exec(r.SourceID, targetID, r.EdgeType, r.SourceLine, srcFile,
 			method, conf, edgeMeta, tier, len(ids), evType); err != nil {

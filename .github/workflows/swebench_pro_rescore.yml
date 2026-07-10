@@ -1,0 +1,264 @@
+name: "SWE-bench Pro: Re-score patched tasks"
+
+on:
+  workflow_dispatch:
+    inputs:
+      shard1:
+        description: "Run ID of shard 1"
+        required: true
+      shard2:
+        description: "Run ID of shard 2"
+        required: true
+      shard3:
+        description: "Run ID of shard 3"
+        required: true
+      max_parallel:
+        description: "Max parallel jobs"
+        default: "20"
+
+permissions:
+  contents: read
+  packages: read
+  actions: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: gt-trial
+
+      - name: Download Pro tags manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p benchmarks/data
+          gh release download pipeline-assets-v1 -p swebench_pro_public_tags.jsonl -D benchmarks/data/ --clobber \
+            || echo "WARN: release download failed"
+          wc -l benchmarks/data/swebench_pro_public_tags.jsonl
+
+      - name: Build task matrix from manifest
+        id: build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # List all artifact names from the 3 shards (just names, no download)
+          > /tmp/all_artifacts.txt
+          for rid in ${{ inputs.shard1 }} ${{ inputs.shard2 }} ${{ inputs.shard3 }}; do
+            gh api --paginate "repos/${{ github.repository }}/actions/runs/${rid}/artifacts" \
+              --jq '.artifacts[].name' >> /tmp/all_artifacts.txt 2>/dev/null || true
+          done
+
+          # Filter to pro-full-instance_* artifacts
+          grep '^pro-full-instance_' /tmp/all_artifacts.txt | sort -u > /tmp/task_artifacts.txt
+          TOTAL=$(wc -l < /tmp/task_artifacts.txt)
+          echo "Task artifacts found: $TOTAL"
+
+          # Build batched matrix (GitHub 256-matrix cap; ~4 tasks per batch)
+          python3 -c "
+          import json, math, os
+
+          tags = {}
+          for line in open('benchmarks/data/swebench_pro_public_tags.jsonl'):
+              r = json.loads(line)
+              tags[r['instance_id']] = r['dockerhub_tag']
+
+          tasks = []
+          for line in open('/tmp/task_artifacts.txt'):
+              art = line.strip()
+              iid = art.replace('pro-full-', '')
+              tag = tags.get(iid, '')
+              if not tag:
+                  continue
+              tasks.append({'artifact': art, 'instance_id': iid, 'tag': tag})
+
+          BATCH_SIZE = max(1, math.ceil(len(tasks) / 200))
+          os.makedirs('/tmp/batches', exist_ok=True)
+          matrix = []
+          for i in range(0, len(tasks), BATCH_SIZE):
+              batch_id = i // BATCH_SIZE
+              batch = tasks[i:i+BATCH_SIZE]
+              with open(f'/tmp/batches/batch_{batch_id:03d}.json', 'w') as f:
+                  json.dump(batch, f)
+              matrix.append({'batch': f'{batch_id:03d}'})
+
+          print(f'Tasks: {len(tasks)}, Batches: {len(matrix)}, Per batch: {BATCH_SIZE}')
+          with open('/tmp/matrix.json', 'w') as f:
+              json.dump({'include': matrix}, f)
+          "
+
+          echo "matrix=$(cat /tmp/matrix.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload batch definitions
+        uses: actions/upload-artifact@v4
+        with:
+          name: rescore-batches
+          path: /tmp/batches/
+          retention-days: 3
+
+  rescore:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+      max-parallel: ${{ fromJSON(inputs.max_parallel) }}
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: gt-trial
+
+      - name: Download batch definition
+        uses: actions/download-artifact@v4
+        with:
+          name: rescore-batches
+          path: /tmp/batches
+
+      - name: Clone SWE-bench Pro-OS (run_scripts)
+        run: git clone --depth 1 https://github.com/scaleapi/SWE-bench_Pro-os.git /tmp/pro-os
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Score batch ${{ matrix.batch }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BATCH_FILE="/tmp/batches/batch_${{ matrix.batch }}.json"
+          [ ! -f "$BATCH_FILE" ] && echo "No batch file" && exit 0
+
+          > /tmp/results_batch.txt
+
+          python3 -c "
+          import json
+          for t in json.load(open('$BATCH_FILE')):
+              print(f\"{t['artifact']}|{t['instance_id']}|{t['tag']}\")
+          " | while IFS='|' read -r artifact instance_id tag; do
+            echo "=== $instance_id ==="
+
+            # Download this task's artifact
+            mkdir -p /tmp/task_dl
+            rm -rf /tmp/task_dl/*
+            downloaded=false
+            for rid in ${{ inputs.shard1 }} ${{ inputs.shard2 }} ${{ inputs.shard3 }}; do
+              if gh run download "$rid" -n "$artifact" -D /tmp/task_dl 2>/dev/null; then
+                downloaded=true; break
+              fi
+            done
+            if [ "$downloaded" != "true" ]; then
+              echo "${instance_id}|DL_FAIL" >> /tmp/results_batch.txt
+              continue
+            fi
+
+            LOG="/tmp/task_dl/trial_output.log"
+            if [ ! -f "$LOG" ]; then
+              echo "${instance_id}|NO_LOG" >> /tmp/results_batch.txt
+              continue
+            fi
+            if ! grep -q "COMPLETE_TASK_AND_SUBMIT" "$LOG" 2>/dev/null; then
+              echo "${instance_id}|NO_SUBMIT" >> /tmp/results_batch.txt
+              continue
+            fi
+
+            # Re-extract patch AND repair terminal-wrapping (the fix for the 523
+            # APPLY_FAIL: split diff headers / wrapped code lines from the PTY).
+            python3 scripts/swebench/unwrap_patch.py --from-log "$LOG" /tmp/patch.diff 2>/dev/null
+            if [ ! -s /tmp/patch.diff ]; then
+              echo "${instance_id}|NO_PATCH" >> /tmp/results_batch.txt
+              continue
+            fi
+
+            RUN_SCRIPT="/tmp/pro-os/run_scripts/${instance_id}/run_script.sh"
+            if [ ! -f "$RUN_SCRIPT" ]; then
+              echo "${instance_id}|NO_RUN_SCRIPT" >> /tmp/results_batch.txt
+              continue
+            fi
+
+            IMG="ghcr.io/hbali-stack/sweap-images:${tag}"
+            docker pull "$IMG" >/dev/null 2>&1 || { echo "${instance_id}|PULL_FAIL" >> /tmp/results_batch.txt; continue; }
+
+            result=$(timeout 600 docker run --rm \
+              -v "$(realpath /tmp/patch.diff):/tmp/pro_patch.diff:ro" \
+              -v "$(realpath "$RUN_SCRIPT"):/tmp/run_test.sh:ro" \
+              --entrypoint "" \
+              "$IMG" \
+              bash -c '
+                REPO_DIR=""
+                for _d in /app /testbed /workspace; do
+                  if [ -d "$_d" ]; then REPO_DIR="$_d"; break; fi
+                done
+                [ -z "$REPO_DIR" ] && echo "NO_REPO" && exit 0
+                cd "$REPO_DIR"
+                if ! { git apply /tmp/pro_patch.diff 2>/dev/null || patch -p1 < /tmp/pro_patch.diff 2>/dev/null; }; then
+                  echo "APPLY_FAIL"
+                  exit 0
+                fi
+                rc=0
+                bash /tmp/run_test.sh >/dev/null 2>&1 || rc=$?
+                if [ "$rc" -eq 0 ]; then echo "RESOLVED"; else echo "EVAL_FAIL"; fi
+              ' 2>/dev/null || echo "TIMEOUT")
+
+            result=$(echo "$result" | tail -1)
+            echo "  -> $result"
+            echo "${instance_id}|${result}" >> /tmp/results_batch.txt
+
+            docker rmi "$IMG" >/dev/null 2>&1 || true
+          done
+
+          echo "=== BATCH ${{ matrix.batch }} DONE ==="
+          cat /tmp/results_batch.txt
+
+      - name: Upload batch results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rescore-result-${{ matrix.batch }}
+          path: /tmp/results_batch.txt
+          retention-days: 14
+          if-no-files-found: ignore
+
+  summarize:
+    needs: rescore
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: rescore-result-*
+          path: /tmp/results
+          merge-multiple: true
+
+      - name: Final tally
+        run: |
+          cat /tmp/results/*.txt 2>/dev/null | sort -u > /tmp/all_results.txt
+          TOTAL=$(wc -l < /tmp/all_results.txt)
+          RESOLVED=$(grep '|RESOLVED' /tmp/all_results.txt | wc -l)
+          EVAL_FAIL=$(grep '|EVAL_FAIL' /tmp/all_results.txt | wc -l)
+          APPLY_FAIL=$(grep '|APPLY_FAIL' /tmp/all_results.txt | wc -l)
+          NO_SUBMIT=$(grep '|NO_SUBMIT' /tmp/all_results.txt | wc -l)
+          NO_LOG=$(grep '|NO_LOG' /tmp/all_results.txt | wc -l)
+          OTHER=$((TOTAL - RESOLVED - EVAL_FAIL - APPLY_FAIL - NO_SUBMIT - NO_LOG))
+          PCT=$(echo "scale=1; $RESOLVED * 100 / 731" | bc)
+
+          echo "============================================"
+          echo "  SWE-Pro 731 — FINAL SCORE"
+          echo "============================================"
+          echo "  RESOLVED:    $RESOLVED / 731  ($PCT%)"
+          echo "  EVAL_FAIL:   $EVAL_FAIL"
+          echo "  APPLY_FAIL:  $APPLY_FAIL"
+          echo "  NO_SUBMIT:   $NO_SUBMIT"
+          echo "  NO_LOG:      $NO_LOG"
+          echo "  OTHER:       $OTHER"
+          echo "  SCORED:      $TOTAL"
+          echo "============================================"
+          echo ""
+          echo "Resolved tasks:"
+          grep '|RESOLVED' /tmp/all_results.txt | cut -d'|' -f1

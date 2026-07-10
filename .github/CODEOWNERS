@@ -1,0 +1,2 @@
+# Require review for CI/CD and security-sensitive files
+/.github/ @harneet2512

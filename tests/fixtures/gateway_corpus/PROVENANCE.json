@@ -1,0 +1,39 @@
+{
+  "meta": {
+    "schema": "gateway_corpus.v1",
+    "provenance": "REAL mini-swe-agent trajectories under D:/gt_runs (parity_gton_20260709 [SWE-Live-Lite, mostly python], mimo_smoke5 + mimo_regressions [DeepSWE, mixed go/js/python]).",
+    "extraction": "assistant tool_calls[].function.arguments.command paired with the next role=tool observation (extra.raw_output/returncode).",
+    "scrub": "secret-shaped tokens (sk-/ghp_/AKIA/JWT/authorization|api_key|token|secret|password=) redacted.",
+    "note": "records are real; provenance run+task fields identify origin. No synthetic rows."
+  },
+  "runs": {
+    "mimo_regressions": [
+      "abs-stepped-slices__CKLjg3n"
+    ],
+    "mimo_smoke5": [
+      "abs-module-cache-flags__SEp6J3t",
+      "actionlint-action-pinning-lint__inwRgiD"
+    ],
+    "parity_gton_20260709": [
+      "ll-full-aiogram__aiogram-1594",
+      "ll-full-amoffat__sh-744",
+      "ll-full-aws-cloudformation__cfn-lint-3749",
+      "ll-full-aws-cloudformation__cfn-lint-3764",
+      "ll-full-beeware__briefcase-2214"
+    ]
+  },
+  "record_counts": {
+    "edit/failure": 4,
+    "edit/success": 6,
+    "other/nonzero": 2,
+    "other/ok": 4,
+    "search/empty": 6,
+    "search/ok": 8,
+    "submit/submitted": 1,
+    "test/fail": 6,
+    "test/pass": 6,
+    "view/error": 2,
+    "view/ok": 8
+  },
+  "total": 53
+}

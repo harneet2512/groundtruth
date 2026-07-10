@@ -573,6 +573,202 @@ func TestResolveIncomingEdgesPreservesMetadata(t *testing.T) {
 	}
 }
 
+// W-B — call-site RECEIVER-TYPE PROVENANCE (`receiver_type=<T>` on edges.metadata, minted by
+// the receiver-aware resolver rungs) must SURVIVE a -file reindex on the INCOMING side: a
+// cross-file type_flow edge whose receiver the resolver proved (receiver_type=Foo) is
+// snapshotted and restored verbatim so the provenance is not erased when a downstream file
+// is edited. Mirrors TestResolveIncomingEdgesPreservesMetadata for the specific tag shape the
+// receiver-provenance feature writes. (The OUTGOING side is re-minted by re-running the
+// resolver — covered end-to-end by the binary's -file path, not this store-level restore.)
+func TestResolveIncomingEdgesPreservesReceiverTypeProvenance(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "graph.db")
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := createSchema(db); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(
+		`INSERT INTO nodes (id, label, name, file_path, language, qualified_name) VALUES
+		 (1, 'Method', 'Run', 'src/user.py', 'python', 'User.Run'),
+		 (4, 'Method', 'Bar', 'src/foo.py', 'python', 'Foo.Bar')`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	// A receiver-proven type_flow edge: user.py Run() -> foo.py Bar(), receiver proven Foo.
+	const wantMeta = "receiver_type=Foo"
+	if _, err := tx.Exec(
+		`INSERT INTO edges
+		   (source_id, target_id, type, source_line, source_file, resolution_method, confidence, metadata, trust_tier, candidate_count, evidence_type, verification_status)
+		 VALUES (1, 4, 'CALLS', 5, 'src/user.py', 'type_flow', 0.9, ?, 'CERTIFIED', 1, 'field_type', 'unverified')`,
+		wantMeta,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	snap, err := SnapshotIncomingEdgesTx(tx, "src/foo.py", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap) != 1 {
+		t.Fatalf("snapshot len=%d; expected 1", len(snap))
+	}
+	if snap[0].Metadata != wantMeta {
+		t.Fatalf("snapshot dropped receiver_type provenance: got %q want %q", snap[0].Metadata, wantMeta)
+	}
+
+	// Reindex foo.py: delete Bar + its edges, re-insert Bar under a fresh id with the SAME
+	// qualified_name (identity re-provable), then restore the incoming edge.
+	if _, err := tx.Exec(`DELETE FROM edges WHERE target_id = 4`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`DELETE FROM nodes WHERE id = 4`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO nodes (id, label, name, file_path, language, qualified_name) VALUES (5, 'Method', 'Bar', 'src/foo.py', 'python', 'Foo.Bar')`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ResolveIncomingEdgesTx(tx, snap, "src/foo.py"); err != nil {
+		t.Fatal(err)
+	}
+	var gotMeta string
+	if err := tx.QueryRow(`SELECT COALESCE(metadata, '') FROM edges WHERE source_id = 1 AND target_id = 5`).Scan(&gotMeta); err != nil {
+		t.Fatal(err)
+	}
+	if gotMeta != wantMeta {
+		t.Fatalf("incremental restore erased receiver_type provenance: got %q want %q", gotMeta, wantMeta)
+	}
+}
+
+// W-B BOUNCE (producer cleanliness) — the INVERSE of the preservation test above: when a
+// -file reindex CANNOT re-prove target identity (no qualified_name match, no unique
+// signature witness), the restored edge's confidence demotes (0.6 cap on the deterministic
+// branch; name_match on the fallback branch) — and the `receiver_type=<T>` provenance tag
+// must be STRIPPED from the restored metadata: the receiver-type proof is exactly what the
+// bare-name re-match failed to re-prove, so a demoted/guess edge must not keep a
+// fact-shaped receiver tag (invariant: receiver_type non-empty IFF receiver-PROVEN).
+// Every OTHER metadata key (dataflow=…) must survive verbatim — the strip removes one
+// `;`-separated segment, never the field (no regression of the B6 verbatim-restore
+// behavior for non-provenance metadata).
+// Mutation (proven in-session): making the strip UNCONDITIONAL (also on the reproven path)
+// turns TestResolveIncomingEdgesPreservesReceiverTypeProvenance RED.
+func TestResolveIncomingEdgesStripsReceiverTypeWhenIdentityNotReproven(t *testing.T) {
+	setup := func(t *testing.T) (*sql.DB, *sql.Tx, []IncomingEdgeRef) {
+		t.Helper()
+		dbPath := filepath.Join(t.TempDir(), "graph.db")
+		db, err := sql.Open("sqlite3", dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := createSchema(db); err != nil {
+			t.Fatal(err)
+		}
+		tx, err := db.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(
+			`INSERT INTO nodes (id, label, name, file_path, language, qualified_name, signature) VALUES
+			 (1, 'Method', 'Run', 'src/user.py', 'python', 'User.Run', 'def run(self)'),
+			 (4, 'Method', 'Bar', 'src/foo.py', 'python', 'Foo.Bar', 'def bar(self, x)')`,
+		); err != nil {
+			t.Fatal(err)
+		}
+		// A receiver-proven type_flow edge carrying BOTH the provenance tag and an
+		// unrelated promote annotation — the strip must remove only the former.
+		if _, err := tx.Exec(
+			`INSERT INTO edges
+			   (source_id, target_id, type, source_line, source_file, resolution_method, confidence, metadata, trust_tier, candidate_count, evidence_type, verification_status)
+			 VALUES (1, 4, 'CALLS', 5, 'src/user.py', 'type_flow', 0.9, 'receiver_type=Foo;dataflow=helper', 'CERTIFIED', 1, 'field_type', 'unverified')`,
+		); err != nil {
+			t.Fatal(err)
+		}
+		snap, err := SnapshotIncomingEdgesTx(tx, "src/foo.py", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(snap) != 1 {
+			t.Fatalf("snapshot len=%d; expected 1", len(snap))
+		}
+		// Reindex src/foo.py: the original Bar (Foo.Bar) is GONE.
+		if _, err := tx.Exec(`DELETE FROM edges WHERE target_id = 4`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(`DELETE FROM nodes WHERE id = 4`); err != nil {
+			t.Fatal(err)
+		}
+		return db, tx, snap
+	}
+	check := func(t *testing.T, tx *sql.Tx, wantMethod string, wantConf float64) {
+		t.Helper()
+		var gotMethod, gotMeta string
+		var gotConf float64
+		if err := tx.QueryRow(
+			`SELECT resolution_method, confidence, COALESCE(metadata, '') FROM edges WHERE source_id = 1`,
+		).Scan(&gotMethod, &gotConf, &gotMeta); err != nil {
+			t.Fatal(err)
+		}
+		if gotMethod != wantMethod || gotConf != wantConf {
+			t.Fatalf("demote regressed: got method=%q conf=%v, want %q conf=%v", gotMethod, gotConf, wantMethod, wantConf)
+		}
+		if strings.Contains(gotMeta, "receiver_type=") {
+			t.Errorf("not-reproven restore kept a fact-shaped receiver tag: metadata=%q on a %s@%v edge (receiver proof was NOT re-proven)",
+				gotMeta, gotMethod, gotConf)
+		}
+		if !strings.Contains(gotMeta, "dataflow=helper") {
+			t.Errorf("strip removed an unrelated metadata key: metadata=%q, want dataflow=helper preserved verbatim", gotMeta)
+		}
+	}
+
+	// Branch 1 — the conf-cap (P0 demote): a SINGLE surviving same-named node whose
+	// qualified_name AND signature both differ (rename-and-replace). Deterministic
+	// branch fires (len(ids)==1, type_flow), identityReproven=false → conf caps 0.6.
+	t.Run("conf_cap_branch", func(t *testing.T) {
+		db, tx, snap := setup(t)
+		defer db.Close()
+		defer tx.Rollback()
+		if _, err := tx.Exec(
+			`INSERT INTO nodes (id, label, name, file_path, language, qualified_name, signature)
+			 VALUES (5, 'Method', 'Bar', 'src/foo.py', 'python', 'Baz.Bar', 'def bar(self, other)')`,
+		); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := ResolveIncomingEdgesTx(tx, snap, "src/foo.py"); err != nil {
+			t.Fatal(err)
+		}
+		check(t, tx, "type_flow", 0.6)
+	})
+
+	// Branch 2 — the name_match fallback: TWO surviving same-named nodes, neither
+	// qname- nor signature-matching → genuinely ambiguous → method=name_match.
+	t.Run("name_match_fallback_branch", func(t *testing.T) {
+		db, tx, snap := setup(t)
+		defer db.Close()
+		defer tx.Rollback()
+		if _, err := tx.Exec(
+			`INSERT INTO nodes (id, label, name, file_path, language, qualified_name, signature) VALUES
+			 (5, 'Method', 'Bar', 'src/foo.py', 'python', 'Baz.Bar', 'def bar(self, other)'),
+			 (6, 'Method', 'Bar', 'src/foo.py', 'python', 'Qux.Bar', 'def bar(self, third)')`,
+		); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := ResolveIncomingEdgesTx(tx, snap, "src/foo.py"); err != nil {
+			t.Fatal(err)
+		}
+		check(t, tx, "name_match", 0.6)
+	})
+}
+
 // TestResolveIncomingEdgesDemotesVerifiedUniqueOnRenameReplace is the BITING test for
 // the P0 incremental-restore laundering fix. A cross-file edge resolved as
 // `verified_unique` (conf 0.95, CERTIFIED) — a tier earned by GLOBAL UNIQUENESS of the
