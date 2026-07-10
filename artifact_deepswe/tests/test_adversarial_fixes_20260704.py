@@ -177,6 +177,7 @@ _HOST_LOCAL_EXEMPT = frozenset({
     "GT_ARTIFACTS_DIR",                      # host artifacts dir (defaulted "")
     "GT_C1_CONFIDENCE_FLOOR_MAD_MULTIPLIER", # tuning knob, safe default
     "GT_GATEWAY_MAX_DELTA",                  # W2 tuning knob, safe default "4000"
+    "GT_LANE_MAX_DELTA",                     # RL-1 lane budget knob, safe default "16000"
     "GT_GRAPH_DB",                           # legacy pre-substrate graph (GT_HOST_GRAPH_DB is forwarded)
     "GT_HORIZON_CALIBRATION",                # calibration JSON path, shipped default in-repo
     "GT_HOME",                               # container install prefix, default /opt/gt
@@ -379,7 +380,7 @@ def test_r5_resurface_routes_through_ledger(monkeypatch, tmp_path):
     g._augment_output({"command": "sed -i s/a/b/ src/foo.py"}, out)
 
     assert "RESURFACE_BODY" in (out.get("output") or "")   # delivered
-    hc = "c:" + hashlib.sha256(resurf.encode("utf-8")).hexdigest()[:8]
+    hc = "c:" + hashlib.sha256(resurf.encode("utf-8")).hexdigest()[:16]  # D-2: 16 hex
     assert hc in g._oracle_delivered_hashes, "resurface not recorded in the delivery ledger"
     assert g._HOOK_FIRE_COUNTS.get("obligation.resurface") == 1, "resurface fire not counted"
 

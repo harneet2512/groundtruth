@@ -184,14 +184,18 @@ def test_hits_observed_def_still_delivers_partition(on):
 
 
 def test_hits_path_fires_once_then_latched(on):
-    """BUG-B1 idempotence now lives in the OUTER latch (not _direct_def_block's
-    self-stamp): the hits-path fall-through fires ONCE per stem, then the repeat is
-    suppressed. Reverting the mark=False fall-through (re-stamping here) self-
-    suppresses the FIRST delivery -> the first assert reddens."""
-    first = _fresh("grep -rn parse_widget .", "app/widget.py:5:def parse_widget():\n")
+    """BUG-B1 idempotence now lives in the OUTER latch. D-4 (2026-07-10): the latch is
+    STAMPED at DELIVERY (_lane_a_deliver's post_search.localize branch), not at
+    production — so a producer call no longer self-latches; we mirror the delivery
+    stamp here. Re-adding the fall-through mark (the lattice_hits_fallthrough_mark
+    mutation) still self-suppresses the FIRST delivery (test_hits_real_hit_delivers_
+    def_partition reddens)."""
+    cmd = "grep -rn parse_widget ."
+    first = _fresh(cmd, "app/widget.py:5:def parse_widget():\n")
     assert first
-    second = g._search_localize_block("grep -rn parse_widget .",
-                                      "app/widget.py:5:def parse_widget():\n")
+    # simulate the D-4 delivery-time latch (what _lane_a_deliver stamps on delivery)
+    g._ledger_mark_answered(g._norm_stem(g._search_pattern(cmd)), first)
+    second = g._search_localize_block(cmd, "app/widget.py:5:def parse_widget():\n")
     assert second == ""
 
 
@@ -300,22 +304,28 @@ def test_reset_clears_edit_action_steps_index_coherence(on):
 
 # ---- IDEMPOTENCE -------------------------------------------------------------
 def test_idempotence_never_delivers_same_fact_twice(on):
-    """A third identical probe (post-fire) must be silent (content-hash latch)."""
+    """A third identical probe (post-DELIVERY) must be silent (content-hash latch).
+    D-4: the latch is stamped at delivery (mirrored here via _ledger_mark_answered, as
+    _lane_a_deliver does), not at production."""
+    cmd = "grep -rn wholly_absent_thing ."
     g._search_seen.clear()
     g._edit_action_steps.clear()
     g._action_count = 1
-    g._search_localize_block("grep -rn wholly_absent_thing .", "")   # silent
+    g._search_localize_block(cmd, "")   # silent (first zero-probe)
     g._action_count = 2
-    first = g._search_localize_block("grep -rn wholly_absent_thing .", "")   # fires
+    first = g._search_localize_block(cmd, "")   # fires (honest-negative)
     assert first
+    g._ledger_mark_answered(g._norm_stem(g._search_pattern(cmd)), first)  # D-4 delivery
     g._action_count = 3
-    assert g._search_localize_block("grep -rn wholly_absent_thing .", "") == ""
+    assert g._search_localize_block(cmd, "") == ""
 
 
 def test_namefold_fires_once_then_latched(on):
-    a = _fresh("grep -rn getUserId .", "")
+    cmd = "grep -rn getUserId ."
+    a = _fresh(cmd, "")
     assert a
-    assert g._search_localize_block("grep -rn getUserId .", "") == ""
+    g._ledger_mark_answered(g._norm_stem(g._search_pattern(cmd)), a)  # D-4 delivery
+    assert g._search_localize_block(cmd, "") == ""
 
 
 # ---- BUG-B1 hits path: LEAK invariant (same _resolve_symbol_defs guards) -----

@@ -166,10 +166,16 @@ def test_reset_attempt_persists_identity_and_ledger_handle():
     e = _populated()
     ledger_before = e.delivery_ledger
     e.reset_attempt()
-    # persists across attempts: episode identity, step budget, durable ledger handle
-    assert e.episode_id == "task-42"
+    # persists across attempts: the BASE run identity + step budget + durable ledger.
+    # D-11: reset_attempt advances the attempt counter and SUFFIXES the id so two
+    # attempts get distinct chain-scoped identities; the base "task-42" is preserved.
+    assert e.episode_id == "task-42#a1"
+    assert e.attempt == 1
     assert e.step_limit == 150
     assert e.delivery_ledger is ledger_before   # durable handle survives the attempt
+    # a second reset advances to #a2 (the prior suffix is stripped, never stacked)
+    e.reset_attempt()
+    assert e.episode_id == "task-42#a2" and e.attempt == 2
 
 
 # ---- M2 MUTATION target: break reset -> leave the delivered chain uncleared ----

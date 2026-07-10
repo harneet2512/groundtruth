@@ -122,7 +122,7 @@ def test_c3_contract_dedup_skip_does_not_latch(monkeypatch):
     _noop_ledger(monkeypatch)
     monkeypatch.setattr(g, "_contract_seen", set())
     text = "\n<gt-contract>SIG</gt-contract>"
-    hc = "c:" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:8]
+    hc = "c:" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]  # D-2: 16 hex
     monkeypatch.setattr(g, "_oracle_delivered_hashes", {hc})  # pre-seed -> dedup
     out = {"output": ""}
     g._lane_a_deliver(out, "edit", [("l3.contract", text)],

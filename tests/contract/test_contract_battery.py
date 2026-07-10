@@ -357,7 +357,8 @@ def test_episode_reset_clears_accumulators_persists_identity():
     e.reset_attempt()
     assert e.action_index == 0 and not e.edited_files and not e.delivered_dedup
     assert e.test_count == 0
-    assert e.episode_id == "ep1" and e.step_limit == 150   # identity + budget persist
+    # D-11: reset_attempt preserves the BASE identity + budget, adds the attempt suffix
+    assert e.episode_id == "ep1#a1" and e.step_limit == 150
 
 
 def test_episode_round_trip_law():

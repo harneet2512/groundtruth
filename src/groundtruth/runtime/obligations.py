@@ -32,6 +32,7 @@ class ObligationRecord:
     evidence: list[str] = field(default_factory=list)
     last_turn: int = 0
     certainty: str = "missing"
+    last_tested_turn: int = 0  # O-2: turn this obligation last reached TESTED (freshness)
 
 
 def _is_compound_symbol(part: str) -> bool:
@@ -73,7 +74,10 @@ def obligation_statuses(views, edited_tokens, tested_tokens):
 
 def status_vector_hash(statuses) -> str:
     body = "|".join(f"{v.idx}:{s}" for v, s, _t, _c in statuses)
-    return hashlib.sha256(body.encode("utf-8")).hexdigest()[:8]
+    # O-3 (2026-07-10, D-2 family): 16 hex — the resurface change-latch keys on this
+    # hash, so an 8-hex collision was a MISSED resurface. Widen to match the other
+    # correctness-bearing dedup hashes (block/lane/gate all [:16]).
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
 
 
 def order_unmet(statuses):
@@ -136,6 +140,39 @@ class ObligationTracker:
                     ob.evidence.append(f"turn{turn}:edited={','.join(sorted(touched)[:3])}")
                 if status == OBL_TESTED:
                     ob.evidence.append(f"turn{turn}:tested")
+            # O-2: record the turn each obligation is TESTED (even when the status did
+            # not otherwise change) so apply_edit_freshness can tell a later edit apart
+            # from a pre-test one.
+            if status == OBL_TESTED:
+                ob.last_tested_turn = turn
+        return transitions
+
+    def apply_edit_freshness(self, edited_symbols_this_turn, turn: int):
+        """O-2 (2026-07-10) — FRESHNESS LAW (doctrine: a stale PASS -> UNKNOWN). A
+        TESTED obligation whose symbol is edited AGAIN, at a turn STRICTLY LATER than it
+        was last tested, is no longer verified: the prior green result predates the new
+        edit. Demote TESTED -> EDITED (needs re-testing), returning the transitions.
+
+        ``edited_symbols_this_turn`` MUST be the symbols edited ON THIS TURN (a per-turn
+        delta), never the cumulative episode set — a cumulative set would demote on the
+        pre-test edit too. SATISFIED (explicit human/evidence satisfaction) is NOT
+        demoted here; only the observed-test TESTED status is freshness-bound. Pure /
+        deterministic; caller-gated (default-off in the live seam)."""
+        syms = {str(s).strip().lower() for s in (edited_symbols_this_turn or ()) if str(s).strip()}
+        if not syms:
+            return []
+        transitions = []
+        for ob in self.obligations:
+            if ob.status != ObligationLifecycle.TESTED.value:
+                continue
+            if turn <= ob.last_tested_turn:
+                continue  # the edit is not strictly newer than the test -> still fresh
+            if {s.lower() for s in ob.symbols} & syms:
+                transitions.append((ob.id, ob.status, ObligationLifecycle.EDITED.value))
+                ob.status = ObligationLifecycle.EDITED.value
+                ob.certainty = certainty_for_status(ObligationLifecycle.EDITED.value)
+                ob.last_turn = turn
+                ob.evidence.append(f"turn{turn}:stale_edit_after_test")
         return transitions
 
     def mark_satisfied(self, obligation_id: int, evidence: str, turn: int) -> bool:

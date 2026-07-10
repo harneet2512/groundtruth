@@ -51,8 +51,11 @@ except Exception:  # pragma: no cover
         }
     )
 
-# The fact floor consumers already use: a CALLS edge below this is a name_match
-# guess, not a verified dependent, so it must NOT count as blast radius.
+# E-5 (2026-07-10): this 0.5 is the CALLS-edge name_match cutoff for the fallback
+# (confidence-only) provenance path — NOT the charter FACT FLOOR (0.7). Here it is
+# secondary: the primary gate is method-based (DETERMINISTIC_RESOLUTION_METHODS ∪
+# promote_%), so a 0.5-0.7 name_match edge is already excluded by resolution_method
+# on any graph that carries the column; this floor only bites the old no-method graph.
 _MIN_CONFIDENCE = 0.5
 # The "notable dependents" quantile that defines the risky tail, computed per-repo
 # (dynamic — not a caller-count magic number). A symbol at this fan-in scores ~0.5;
@@ -145,25 +148,45 @@ def _normalize_edited_ranges(edited_ranges) -> dict[str, list[tuple[int, int]]]:
     return out
 
 
-def _line_in_edited_ranges(file_path: str, start_line, ranges_by_file: dict) -> bool:
-    """True iff ``start_line`` (a node's definition line) falls inside an edited hunk
-    of the file ``file_path`` matches. The node's ``file_path`` is matched against the
-    edited-file keys SUFFIX-tolerantly (repo-root vs git a//b/ prefixes), mirroring the
-    file-scope match. A node with no usable ``start_line`` fails closed (excluded) when
-    ranges are enforced — an unlocatable definition is not provably the agent's edit."""
+def _line_in_edited_ranges(file_path: str, start_line, ranges_by_file: dict,
+                           end_line=None) -> bool:
+    """True iff the node's DEFINITION SPAN ``[start_line, end_line]`` INTERSECTS an
+    edited hunk of the file ``file_path``. The node's ``file_path`` is matched against
+    the edited-file keys SUFFIX-tolerantly (repo-root vs git a//b/ prefixes), mirroring
+    the file-scope match.
+
+    E-1 (2026-07-10): span containment (hunk ∩ [start,end]) — a BODY-ONLY edit at a
+    line INSIDE the span (whose ``start_line`` is NOT in the hunk) now counts, so a hub
+    function edited only in its body is no longer scored 0. It STILL kills the R3 hub
+    false-positive: a call-site line inside function F intersects only F's span (the
+    callee hub is DEFINED elsewhere — its span is disjoint from F's hunk). When
+    ``end_line`` is None/invalid (old graph without the column), falls back to POINT
+    containment on ``start_line`` (the pre-span R3 behaviour). A node with no usable
+    ``start_line`` fails closed (excluded)."""
     try:
         sl = int(start_line)
     except (TypeError, ValueError):
         return False
     if sl <= 0:
         return False
+    try:
+        el = int(end_line)
+        if el < sl:
+            el = sl
+    except (TypeError, ValueError):
+        el = sl  # no end_line -> point containment on start_line
     npath = _normalize_path(file_path)
     for key, ranges in ranges_by_file.items():
         # suffix-tolerant file identity: the node path and the edited key name the
-        # same file when either is a path-suffix of the other.
+        # same file when either is a path-suffix of the other. (E-3's stricter >=2-
+        # segment guard was reverted: _normalize_path already reduces to basename by
+        # stripping leading a//b/ — a real top-level dir is indistinguishable from a
+        # git diff prefix — so a segment count here rejects legitimate matches. The
+        # LOW same-basename collision risk is preferable to breaking real matching.)
         if npath == key or npath.endswith("/" + key) or key.endswith("/" + npath):
             for lo, hi in ranges:
-                if lo <= sl <= hi:
+                # span [sl, el] overlaps hunk [lo, hi]
+                if not (el < lo or sl > hi):
                     return True
     return False
 
@@ -180,7 +203,8 @@ def _percentile(sorted_vals: list, q: float) -> float:
     return float(sorted_vals[min(k, len(sorted_vals)) - 1])
 
 
-def _repo_fanin_reference(conn, conf_clause: str, method_clause: str, conf_params) -> float:
+def _repo_fanin_reference(conn, conf_clause: str, method_clause: str, conf_params,
+                          method_params=()) -> float:
     """75th-percentile of NON-ZERO verified dependency fan-in across the repo — the
     'notable dependents' baseline that defines the risky tail (dynamic, per-repo)."""
     types_in = ",".join("?" for _ in _DEPENDENCY_EDGE_TYPES)
@@ -191,7 +215,7 @@ def _repo_fanin_reference(conn, conf_clause: str, method_clause: str, conf_param
                  WHERE e.type IN ({types_in}) {conf_clause} {method_clause}
                  GROUP BY e.target_id
                 HAVING c > 0""",
-            (*_DEPENDENCY_EDGE_TYPES, *conf_params),
+            (*_DEPENDENCY_EDGE_TYPES, *conf_params, *method_params),
         ).fetchall()
     except sqlite3.Error:
         return 0.0
@@ -201,16 +225,18 @@ def _repo_fanin_reference(conn, conf_clause: str, method_clause: str, conf_param
 
 def _ranged_dependents(
     conn, nm, types_in, conf_clause, method_clause, file_clause,
-    conf_params, file_params, ranges_by_file,
+    conf_params, file_params, ranges_by_file, has_end_line=False, method_params=(),
 ) -> int:
     """Distinct verified incoming-dependency sources of the nodes named ``nm`` whose
-    DEFINITION line is inside an edited hunk (R3). Two passes: (1) the candidate target
-    nodes (name + file-scope), filtered to those whose ``start_line`` is in their file's
-    edited ranges; (2) the distinct verified dependency fan-in over only those survivors.
-    Returns 0 when no node's definition falls in an edited range (correct-or-quiet)."""
+    DEFINITION SPAN intersects an edited hunk (E-1/R3). Two passes: (1) the candidate
+    target nodes (name + file-scope), filtered to those whose ``[start_line, end_line]``
+    span overlaps their file's edited ranges; (2) the distinct verified dependency
+    fan-in over only those survivors. Returns 0 when no node's span overlaps an edited
+    range (correct-or-quiet). ``has_end_line`` selects the span column when present."""
+    end_col = "COALESCE(nt.end_line, nt.start_line)" if has_end_line else "nt.start_line"
     try:
         cand = conn.execute(
-            f"""SELECT nt.id, nt.file_path, nt.start_line
+            f"""SELECT nt.id, nt.file_path, nt.start_line, {end_col}
                   FROM nodes nt
                  WHERE LOWER(nt.name) = LOWER(?) {file_clause}""",
             (nm, *file_params),
@@ -219,7 +245,8 @@ def _ranged_dependents(
         return 0
     target_ids = [
         int(r[0]) for r in cand
-        if r and _line_in_edited_ranges(r[1], r[2], ranges_by_file)
+        if r and _line_in_edited_ranges(
+            r[1], r[2], ranges_by_file, end_line=(r[3] if len(r) > 3 else None))
     ]
     if not target_ids:
         return 0
@@ -231,7 +258,7 @@ def _ranged_dependents(
                  WHERE e.type IN ({types_in})
                    AND e.target_id IN ({ids_in})
                    {conf_clause} {method_clause}""",
-            (*_DEPENDENCY_EDGE_TYPES, *target_ids, *conf_params),
+            (*_DEPENDENCY_EDGE_TYPES, *target_ids, *conf_params, *method_params),
         ).fetchone()
     except sqlite3.Error:
         return 0
@@ -294,12 +321,18 @@ def structural_edit_risk(
         # does (generalized, not a per-repo patch); the per-symbol count AND the repo
         # reference distribution use this same clause, so the baseline stays consistent.
         has_method = _column_exists(conn, "edges", "resolution_method")
+        # E-4 (2026-07-10): the deterministic-method set is bound with ``?`` placeholders
+        # (method_params), not string-interpolated — the all-parameterized-statements
+        # standard, even though the values are compile-time-constant identifiers.
+        method_params: tuple = ()
         if has_method:
-            _det_in = ",".join(f"'{m}'" for m in sorted(_DETERMINISTIC_METHODS))
+            _det_sorted = sorted(_DETERMINISTIC_METHODS)
+            _det_in = ",".join("?" for _ in _det_sorted)
             method_clause = (
                 f"AND (LOWER(TRIM(e.resolution_method)) IN ({_det_in}) "
                 f"OR LOWER(COALESCE(e.resolution_method,'')) LIKE 'promote_%')"
             )
+            method_params = tuple(_det_sorted)
         elif has_conf:
             # No provenance column -> cannot prove a dependent is verified. Fail closed to
             # a CERTIFIED-grade floor so a 0.6 name_match/impl_method guess cannot launder
@@ -325,17 +358,27 @@ def structural_edit_risk(
         # carries start_line. Absence of either -> degrade to file-scope (back-compat).
         ranges_by_file = _normalize_edited_ranges(edited_ranges)
         has_start_line = _column_exists(conn, "nodes", "start_line")
+        has_end_line = _column_exists(conn, "nodes", "end_line")
         enforce_ranges = bool(ranges_by_file) and has_start_line
-        cache_key = (str(graph_db), float(min_confidence))
+        # E-2 (2026-07-10): key the fan-in reference cache on the graph's mtime too, so
+        # a mid-episode incremental reindex (the fan-in distribution CHANGES) invalidates
+        # the stale reference instead of serving it for the rest of the run.
+        try:
+            _mtime = os.path.getmtime(str(graph_db))
+        except OSError:
+            _mtime = 0.0
+        cache_key = (str(graph_db), float(min_confidence), _mtime)
         ref = _REF_CACHE.get(cache_key)
         if ref is None:
-            ref = _repo_fanin_reference(conn, conf_clause, method_clause, conf_params)
+            ref = _repo_fanin_reference(conn, conf_clause, method_clause, conf_params,
+                                        method_params)
             _REF_CACHE[cache_key] = ref
         for nm in names:
             if enforce_ranges:
                 dependents = _ranged_dependents(
                     conn, nm, types_in, conf_clause, method_clause, file_clause,
-                    conf_params, file_params, ranges_by_file,
+                    conf_params, file_params, ranges_by_file, has_end_line,
+                    method_params,
                 )
             else:
                 try:
@@ -346,7 +389,8 @@ def structural_edit_risk(
                              WHERE e.type IN ({types_in})
                                AND LOWER(nt.name) = LOWER(?)
                                {conf_clause} {method_clause} {file_clause}""",
-                        (*_DEPENDENCY_EDGE_TYPES, nm, *conf_params, *file_params),
+                        (*_DEPENDENCY_EDGE_TYPES, nm, *conf_params, *method_params,
+                         *file_params),
                     ).fetchone()
                 except sqlite3.Error:
                     continue

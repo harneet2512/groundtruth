@@ -69,6 +69,28 @@ GT_AE_ARGS=(
   # ── Oracle two-lane route (steer lane on; legacy unconditional appends off) ──
   --ae "GT_ORACLE_ROUTE=${GT_ORACLE_ROUTE:-1}"
 
+  # ── FORM native-render arms (D-8 gateway / RL-3 steer): render facts + steers in
+  #    the native environment voice (tag-free) instead of the <gt-*> tagged block.
+  #    Same content, different FORM. Behavioral flags, default OFF in-code (byte-
+  #    identical); forwarded so they are enableable in prod. ──
+  --ae "GT_GATEWAY_NATIVE=${GT_GATEWAY_NATIVE:-0}"
+  --ae "GT_STEER_NATIVE=${GT_STEER_NATIVE:-0}"
+
+  # ── RL-1 envelope unification (Lane-A/Lane-B -> the ONE EvidenceEnvelope
+  #    contract: shared chain + dedup stamp-at-seal + receipts). Behavioral flag,
+  #    default OFF in-code (byte-identical); forwarded so it is enableable in prod. ──
+  --ae "GT_LANE_ENVELOPE=${GT_LANE_ENVELOPE:-0}"
+
+  # ── O-2 obligation freshness (stale-PASS -> EDITED demotion on a post-test edit).
+  #    Default OFF (byte-identical): the obligation path has early-fire fragility, so
+  #    this ships behind a flag until measured. ──
+  --ae "GT_OBLIGATION_FRESHNESS=${GT_OBLIGATION_FRESHNESS:-0}"
+
+  # ── S-1 D7 relatedness gate (an edit/test credits a delivered kind as consumed only
+  #    when it TOUCHES that block's target). Default OFF (byte-identical): the D7 counts
+  #    drive live severity-boost + skip, so ships behind a flag until measured. ──
+  --ae "GT_D7_RELATEDNESS=${GT_D7_RELATEDNESS:-0}"
+
   # ── Deep 8-dp telemetry sinks (CLAUDE.md mandate) -> host-mounted /gt_out ─────
   # Without these the in-container producers default to /tmp/* and DIE with the
   # container (gap G11). Point them into the writable mount so they survive.

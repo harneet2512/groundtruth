@@ -123,14 +123,17 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --de
 #     eval/DeepSWE container has allow_internet=false, so NOTHING is downloaded at run).
 #     PRIMARY = code-tuned multilingual gte-modernbert-base, INT8 ONNX (~150MB) so the
 #     loader DEFAULT (embed.DEFAULT_EMBED_MODEL = "Alibaba-NLP/gte-modernbert-base") loads
-#     with no download. e5-small-v2 (384-dim) stays baked as the runtime fallback. The
-#     dest dirnames are the HF basenames ("gte-modernbert-base", "e5-small-v2"), exactly
-#     how EmbeddingModel.model_dir + proof.embedder_model_path resolve the baked files
-#     (model_name.split('/')[-1]); the ONNX is saved as the canonical "model.onnx" so the
-#     loader finds it by primary name. The gte fetch uses huggingface_hub at build time
-#     (the SAME candidate list as scripts/setup_models.py::_GTE_MODERNBERT — int8 first,
-#     then quantized/uint8/fp32) so we never depend on an unverified release mirror.
-#     e5 keeps the proven curl-from-release pattern (its assets already exist there).
+#     with no download. B-0 (2026-07-10, DOC-vs-BUILD correction): the ONLY two models
+#     baked here are gte-modernbert-base (primary, below) and jinaai/jina-embeddings-v2-
+#     base-code (Track-2 A/B lever, §4b, non-fatal). There is NO e5-small-v2 stage — the
+#     e5 fallback was REMOVED 2026-06-20 (see §173 note); this comment previously still
+#     claimed "e5 stays baked as the runtime fallback", which was stale. The dest dirname
+#     is the HF basename ("gte-modernbert-base"), exactly how EmbeddingModel.model_dir +
+#     proof.embedder_model_path resolve the baked files (model_name.split('/')[-1]); the
+#     ONNX is saved as the canonical "model.onnx" so the loader finds it by primary name.
+#     The gte fetch uses huggingface_hub at build time (the SAME candidate list as
+#     scripts/setup_models.py::_GTE_MODERNBERT — int8 first, then quantized/uint8/fp32) so
+#     we never depend on an unverified release mirror.
 ARG E5_BASE=https://github.com/harneet2512/groundtruth/releases/download/pipeline-assets-v1
 ARG HF_CDN=https://huggingface.co/Alibaba-NLP/gte-modernbert-base/resolve/main
 RUN mkdir -p /opt/gt/models/gte-modernbert-base \

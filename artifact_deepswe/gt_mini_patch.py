@@ -177,6 +177,8 @@ except Exception as _e:  # noqa: BLE001
         SUPPRESSED_WRONG_PHASE = "suppressed_wrong_phase"
         # parity with the real enum so the stub path never AttributeErrors.
         SUPPRESSED_DUPLICATE = "suppressed_duplicate"
+        SUPPRESSED_BUDGET = "suppressed_budget"
+        SUPPRESSED_HIDDEN_ONLY = "suppressed_hidden_only"  # D-10: gateway leak-guard drop
         PROVIDER_FAILED = "provider_failed"
 
 try:
@@ -1097,12 +1099,37 @@ def _edit_body(cmd: str) -> str:
     return cmd
 
 
+# Command-verb / shell-token noise that pollutes the bash-path edit token set: the
+# VERB the agent invoked (sed/awk/...) is not code it authored, and its presence in
+# the edited-token set minted a false 'sed'/'awk' edited-symbol (L-6 / D-6 sub-finding).
+_EDIT_CMD_NOISE = frozenset({
+    "sed", "awk", "gawk", "grep", "egrep", "fgrep", "rg", "cat", "tee", "dd",
+    "echo", "printf", "python", "python2", "python3", "node", "perl", "ruby",
+    "php", "bash", "sh", "patch", "tmp", "bin", "usr", "dev", "null",
+})
+
+
+def _strip_cmd_noise(tokens: "set[str]", cmd: str) -> "set[str]":
+    """Drop the shell command VERB + known shell-token noise from a bash-path edit
+    token set (D-6): excludes the first bare identifier of the command (the invoked
+    program) plus the curated ``_EDIT_CMD_NOISE`` set. Conservative — never removes a
+    code identifier the agent authored beyond these."""
+    noise = set(_EDIT_CMD_NOISE)
+    head = (cmd or "").split("\n", 1)[0].strip()
+    m = re.match(r"[A-Za-z_][A-Za-z0-9_]*", head)
+    if m:
+        noise.add(m.group(0))
+    return {t for t in tokens if t not in noise}
+
+
 def _edit_body_tokens(cmd: str) -> set[str]:
     """Identifier tokens (>=3 chars) of the edit CONTENT body (Signal 1).
     Broadened from the old command-verb tokenization so a symbol introduced in
-    the patch/heredoc/write body is captured even when the command line lacks it."""
+    the patch/heredoc/write body is captured even when the command line lacks it.
+    D-6: the invoked command verb + shell-token noise are stripped (bash path)."""
     body = _edit_body(cmd)
-    return {t for t in _BLOCK_TOKEN_RE.findall(body) if len(t) >= 3}
+    toks = {t for t in _BLOCK_TOKEN_RE.findall(body) if len(t) >= 3}
+    return _strip_cmd_noise(toks, cmd)
 
 
 def _edited_line_ranges(cmd: str) -> list:
@@ -3145,6 +3172,28 @@ def _grep_is_count(seg: str) -> bool:
     return False
 
 
+def _grep_is_ignorecase(cmd: str) -> bool:
+    """True iff the grep/rg command carries -i / --ignore-case (D-6: per-token
+    presence is then compared case-insensitively)."""
+    head = (cmd or "").split("\n", 1)[0]
+    for t in head.split():
+        if t == "--ignore-case":
+            return True
+        if t.startswith("-") and not t.startswith("--") and "i" in t[1:]:
+            return True  # short cluster (e.g. -rin)
+    return False
+
+
+def _token_present_in_output(tok: str, out: str, ci: bool) -> bool:
+    """True iff ``tok`` appears as a substring anywhere in the grep OUTPUT — grep's
+    own default substring semantics (D-6 per-token truth). Case-insensitive when
+    ``ci``. Empty token -> False (conservative)."""
+    if not tok:
+        return False
+    hay = out or ""
+    return (tok.lower() in hay.lower()) if ci else (tok in hay)
+
+
 def _grep_result_empty(cmd: str, out: str) -> bool:
     """Deterministic zero-hit detection. Covers: exit-1/empty bytes; `grep -c`
     printing all-zero counts. ONLY when grep is the final pipeline stage."""
@@ -3181,6 +3230,28 @@ def _grep_hit_paths(out: str, root: str) -> set[str]:
 
 
 # --- the four failure classes (fixed precedence, mutually exclusive) --------------
+def _splice_search_note(block: str, note: str) -> str:
+    """N-1: splice a fold / non-target annotation into a def-facts block WITHOUT
+    corrupting the native ripgrep rows.
+
+    TAGGED arm (``_fmt_def_facts`` default): line 0 is the ``<gt-search-facts …>``
+    open tag, so ``insert(1, note)`` places the parenthetical right after it — the
+    historical behaviour, byte-identical.
+
+    NATIVE arm (``GT_POST_SEARCH_NATIVE=1``, ``_fmt_def_facts_native``): the block has
+    NO opening tag — line 0 is already a ``path:line:sym`` def row — so inserting the
+    GT-voice parenthetical at index 1 would (a) split the ripgrep rows and (b) inject
+    GT-voice INTO the agent's own grep channel, breaking the native arm's no-GT-voice
+    law (``_fmt_def_facts_native`` docstring, :3044). Append it as a trailing tag-free
+    ``# …`` comment line instead: terminal, native-shaped, rows left pristine."""
+    lines = block.split("\n")
+    if os.environ.get("GT_POST_SEARCH_NATIVE") == "1":
+        lines.append("# " + note.strip().lstrip("(").rstrip(")"))
+    else:
+        lines.insert(1, note)
+    return "\n".join(lines)
+
+
 def _class_namefold(con, sym: str, root: str) -> str:
     """CLASS 1 — NAME-FOLD. Zero grep hits + bare symbol: try morphology variants,
     each VERIFIED by exact match against nodes.name (generate-and-verify). First
@@ -3207,10 +3278,9 @@ def _class_namefold(con, sym: str, root: str) -> str:
             body = _fmt_def_facts(variant, info, root)
             note = (f'("{sym}" not found; indexed as "{variant}" - '
                     f'verify: grep -rn "{variant}" .)')
-        # splice the honest note in before the closing tag / trailer
-        lines = body.split("\n")
-        lines.insert(1, note)
-        return "\n".join(lines)
+        # splice the honest note in — after the open tag (tagged) or as a trailing
+        # native comment (N-1: never mid-render on the native arm).
+        return _splice_search_note(body, note)
     return ""
 
 
@@ -3342,9 +3412,7 @@ def _class_nontarget(con, sym: str, out: str, root: str) -> str:
     block = _fmt_def_facts(sym, ninfo, root)
     note = (f'(your hits for "{sym}" are all test/vendored copies; '
             f'the definition is here)')
-    lines = block.split("\n")
-    lines.insert(1, note)
-    return "\n".join(lines)
+    return _splice_search_note(block, note)
 
 
 def _class_honest_negative(con, sym: str, idx: int, root: str) -> str:
@@ -3417,8 +3485,25 @@ def _search_localize_block(cmd: str, out: str | None = None) -> str:
     idx = _action_count  # the current action index (incremented before this call)
     # ledger accounting FIRST (lossless multi-token/alternation): record every bare
     # token so a later single probe of one of them can detect a prior failure.
-    for tok in _search_probe_tokens(cmd):
-        _ledger_record(tok, idx, "zero" if empty else "hit")
+    # D-6 per-token truth: on a MULTI-token pattern with NON-empty output, a token is
+    # 'hit' ONLY if it actually appears in the output lines (grep's substring
+    # semantics; case-insensitive on -i) — a branch that did NOT match records the TRUE
+    # 'zero', not the compound's outcome (which used to stamp a false 'hit' on every
+    # branch, poisoning honest-negative / absence reasoning). A SINGLE-token grep keeps
+    # the `empty`-only verdict: grep matched it iff the output is non-empty (the output
+    # FORM may be -l/-c and not contain the literal token, so a presence check would
+    # false-'zero' a genuine single-token hit).
+    _probe_toks = _search_probe_tokens(cmd)
+    _ci = _grep_is_ignorecase(cmd)
+    _multi = len(_probe_toks) > 1
+    for tok in _probe_toks:
+        if empty:
+            _outcome = "zero"
+        elif _multi:
+            _outcome = "hit" if _token_present_in_output(tok, out, _ci) else "zero"
+        else:
+            _outcome = "hit"
+        _ledger_record(tok, idx, _outcome)
 
     if not sym:
         return ""  # multi-token / regex / path -> abstain the render (accounted above)
@@ -3459,7 +3544,11 @@ def _search_localize_block(cmd: str, out: str | None = None) -> str:
     stem = _norm_stem(sym)
     if _ledger_already_answered(stem, block):
         return ""  # idempotence: never deliver the same fact twice
-    _ledger_mark_answered(stem, block)
+    # D-4 (stamp-at-DELIVERY): do NOT mark answered here at PRODUCTION. The mark is
+    # consumed in _lane_a_deliver's DELIVERED branch (kind == "post_search.localize"),
+    # so a block Lane-A suppresses (cross-lane / content-hash dedup) never leaves a
+    # phantom 'answered' stamp for bytes the agent never saw. The out=None PIN path is
+    # unchanged — it keeps its own mark via _direct_def_block(...).
     return block
 
 
@@ -3864,6 +3953,110 @@ def _funcs_enclosing_edited(con, file_path: str, cmd: str) -> list[str]:
         if any(not (e < lo or s > hi) for (lo, hi) in ranges) and name not in out:
             out.append(name)
     return out
+
+
+# ---------------------------------------------------------------------------
+# SPAN-BASED EDITED-SYMBOL IDENTITY (L-6 / E-1 / V-2 / O-1 family, 2026-07-10).
+#
+# "Which SYMBOLS did the agent edit" was answered by NOISY TOKEN SETS
+# (_oracle_edited_tokens: bash-command / diff-line tokens — the command VERB
+# 'sed', comment words, value literals — and MISSING the function NAME on a
+# body-only edit, whose changed LINES never contain it). Four live deciders
+# consumed that guess: covering-test selection (submit gate + horizon),
+# structural edit-risk, the horizon test-coverage ratio, and obligation
+# edit-credit. The TRUE edited-symbol set is computable from the SPANS the graph
+# already stores: a graph node whose [start_line, end_line] ENCLOSES a line the
+# agent edited (accumulated in _oracle_edited_lines_by_file) IS an edited symbol,
+# by NAME, even when the changed lines never spell it. Tokens stay as the FALLBACK
+# for graph-absent files / edits with no derivable line range (correct-or-quiet).
+# ---------------------------------------------------------------------------
+def _edited_symbol_spans_by_file() -> "dict[str, set[str]]":
+    """{repo_rel_file: {enclosing edited-symbol NAMES}} — for every graph node whose
+    ``[start_line, end_line]`` span CONTAINS a line the agent edited this episode
+    (``_oracle_edited_lines_by_file``). Non-test nodes only; builtin-shadow names
+    dropped. Suffix-tolerant file identity (repo-root vs git a//b/). Correct-or-quiet:
+    no accumulated ranges / no graph / no span hit / an old graph without ``end_line``
+    -> ``{}`` (the caller falls back to tokens)."""
+    if not _oracle_edited_lines_by_file:
+        return {}
+    db = _db_path()
+    if not db or not os.path.isfile(db):
+        return {}
+    con = _connect_ro(db)
+    if con is None:
+        return {}
+    out: "dict[str, set[str]]" = {}
+    try:
+        for rel, ranges in _oracle_edited_lines_by_file.items():
+            clean: "list[tuple[int, int]]" = []
+            for r in (ranges or []):
+                try:
+                    a, b = int(r[0]), int(r[1])
+                except (TypeError, ValueError, IndexError):
+                    continue
+                lo, hi = (a, b) if a <= b else (b, a)
+                if lo > 0:
+                    clean.append((lo, hi))
+            if not clean:
+                continue
+            nrel = _norm_fp(rel)
+            try:
+                rows = con.execute(
+                    "SELECT name, start_line, COALESCE(end_line, start_line) "
+                    "FROM nodes WHERE (file_path = ? OR file_path LIKE ?) "
+                    "AND COALESCE(is_test,0)=0 AND start_line IS NOT NULL "
+                    "AND start_line > 0",
+                    (nrel, "%/" + nrel),
+                ).fetchall()
+            except Exception:  # noqa: BLE001 — old graph (no end_line) etc -> skip file
+                continue
+            names: "set[str]" = set()
+            for (name, s, e) in rows:
+                if not name or _is_builtin_shadow_name(name):
+                    continue
+                try:
+                    s_i, e_i = int(s), int(e)
+                except (TypeError, ValueError):
+                    continue
+                if e_i < s_i:
+                    e_i = s_i
+                # node span [s_i, e_i] overlaps an edited hunk [lo, hi]
+                if any(not (e_i < lo or s_i > hi) for (lo, hi) in clean):
+                    names.add(name)
+            if names:
+                out[nrel] = names
+    finally:
+        con.close()
+    return out
+
+
+def _edited_symbol_spans() -> "set[str]":
+    """Flat union of :func:`_edited_symbol_spans_by_file` — the TRUE edited-symbol
+    NAMES across every edited file this episode. Empty -> caller falls back to tokens."""
+    out: "set[str]" = set()
+    for names in _edited_symbol_spans_by_file().values():
+        out |= names
+    return out
+
+
+def _edited_symbols_for_selection() -> "set[str]":
+    """The edited-symbol NAME set for covering-test / edit-risk SELECTION: the span-
+    derived symbols when the graph yields any, else the noisy edited-token set as the
+    FALLBACK (graph-absent files / no derivable line range). The L-6/E-1 fix at the
+    selection surface — a body-only edit is now selectable by its enclosing symbol; a
+    token-only edit (command names the symbol, no line data) still resolves via the
+    fallback (byte-identical to today when spans are empty)."""
+    spans = _edited_symbol_spans()
+    return spans if spans else set(_oracle_edited_tokens)
+
+
+def _edited_symbols_for_obligations() -> "set[str]":
+    """The edited-token set AUGMENTED with the span-derived enclosing-symbol names for
+    obligation edit-credit (O-1/P1(d)): a span symbol is genuinely edited, so the UNION
+    only ADDS true positives — a body-only edit's enclosing symbol now credits its
+    obligation as EDITED. Byte-identical to the raw token set when spans are empty
+    (correct-or-quiet)."""
+    return set(_oracle_edited_tokens) | _edited_symbol_spans()
 
 
 def _evidence_body(kind: str, rel: str, root: str, cmd: str = "") -> str:
@@ -5016,6 +5209,16 @@ def _semantic_drift_candidate(rel: str) -> tuple[float, str] | None:
     lost_r = prev[1] - returns
     if not lost_g and not lost_r:
         return None
+    # SD-1 (2026-07-10): suppress during an active REPAIR cycle. When the last observed
+    # test outcome was a FAILURE the agent is fixing something, so removing a guard /
+    # return path is plausibly the INTENDED fix, not a silent regression — and the agent
+    # will re-run the (still-red) test anyway, which is the real check. The dangerous
+    # case this nudge exists for is a deletion made when tests were GREEN (an unnoticed
+    # regression); we keep firing there. The baseline cache was already updated above, so
+    # suppressing delivery never corrupts future drift detection. Correct-or-quiet: a
+    # true-but-awkward-timing nudge (live-caught, run 3 T6) is worse than silence here.
+    if _last_test_outcome_failed:
+        return None
     bits = []
     if lost_g:
         bits.append("guard `%s`" % sorted(lost_g)[0][:60])
@@ -5236,6 +5439,7 @@ def _reset_oracle_state() -> None:
     _dcc_enqueued_files.clear()
     _obligation_tracker = None
     _obligation_tracker_anchors = None
+    _prev_obl_edited.clear()  # O-2: per-turn edit delta baseline
     _last_budget_pending = []
     _PRODUCT_BUDGETER.reset()
     _ledger_consumed_kinds = set()
@@ -5408,7 +5612,8 @@ def _v2_exercise_statuses():
     except Exception:  # noqa: BLE001 — product pkg absent -> quiet
         return None
     views = [_V2ClauseView(i, c) for i, c in enumerate(clauses)]
-    return exercise_statuses(views, _oracle_edited_tokens, _oracle_tested_tokens)
+    return exercise_statuses(
+        views, _edited_symbols_for_obligations(), _oracle_tested_tokens)
 
 
 def _unexercised_clause_candidate() -> tuple[float, str] | None:
@@ -5540,11 +5745,27 @@ def _obligation_nudge_block() -> tuple[float, str] | None:
         if not obls:
             return None
         tracker = _get_obligation_tracker(om)
+        _obl_edited = _edited_symbols_for_obligations()  # P1(d): span-augmented
         tracker.update(
-            _oracle_edited_tokens, _oracle_tested_tokens, _action_count)
+            _obl_edited, _oracle_tested_tokens, _action_count)
+        # O-2 (flag GT_OBLIGATION_FRESHNESS, default-off byte-identical): demote a
+        # TESTED obligation whose symbol is edited AFTER its test — the per-turn NEW
+        # edits (cumulative delta) are the freshness signal; the cumulative set alone
+        # would demote on the pre-test edit too. (Residual: a re-edit of an ALREADY-
+        # edited symbol does not enter the delta — that needs a retained per-turn
+        # per-symbol edit signal the seam does not yet keep; documented gap.)
+        if _obligation_freshness_on():
+            global _prev_obl_edited
+            _new_edits = set(_obl_edited) - _prev_obl_edited
+            if _new_edits:
+                try:
+                    tracker.apply_edit_freshness(_new_edits, _action_count)
+                except Exception:  # noqa: BLE001 — freshness never breaks the path
+                    pass
+            _prev_obl_edited = set(_obl_edited)
         _persist_obligation_status(tracker)
         statuses = tracker.statuses_tuple(
-            _oracle_edited_tokens, _oracle_tested_tokens)
+            _obl_edited, _oracle_tested_tokens)
         unmet = om.order_unmet(statuses)
         if not unmet:
             return None
@@ -5729,6 +5950,20 @@ def _current_event(kind: str | None, cmd: str = "") -> Event | None:
 # ---------------------------------------------------------------------------
 _obligation_tracker = None
 _obligation_tracker_anchors: str | None = None
+# O-2: cumulative edited-symbol set as of the PREVIOUS obligation update — the per-turn
+# NEW edits (delta) feed the freshness demotion (a symbol edited AFTER its test).
+_prev_obl_edited: set = set()
+
+
+def _obligation_freshness_on() -> bool:
+    """O-2 freshness demotion arm (flag GT_OBLIGATION_FRESHNESS). Default-OFF (byte-
+    identical live: the obligation path has documented early-fire fragility, so the
+    stale-PASS->EDITED demotion — which can re-arm the resurface nudge — ships behind a
+    flag until measured). Never active on the baseline arm."""
+    if _GT_BASELINE:
+        return False
+    return os.environ.get("GT_OBLIGATION_FRESHNESS", "").strip().lower() not in (
+        "", "0", "false", "no", "off")
 
 
 def _get_obligation_tracker(om):
@@ -5784,7 +6019,8 @@ def _maybe_persist_obligation_status() -> None:
         if not obls:
             return
         tracker = _get_obligation_tracker(om)
-        tracker.update(_oracle_edited_tokens, _oracle_tested_tokens, _action_count)
+        tracker.update(_edited_symbols_for_obligations(),  # P1(d): span-augmented
+                       _oracle_tested_tokens, _action_count)
         _persist_obligation_status(tracker)
     except Exception:  # noqa: BLE001
         pass
@@ -6049,12 +6285,17 @@ _ledger_consumed_kinds: set[str] = set()
 _ledger_ignore_counts: dict[str, int] = {}
 _last_delivered_kind: str = ""
 _last_gate_winner_kind: str = ""
+# D-5 (stamp-at-DELIVERY): the winning Lane-B block's content+state dedup hash, set by
+# the gate but STAMPED into _oracle_delivered_hashes only at the real append — so an
+# exception in the gate-to-append window (re-arm / telemetry) can never leave a phantom
+# 'delivered' stamp for a steer the agent never saw.
+_last_gate_winner_hash: str = ""
 # bug #6: a LIST of (kind, turn) awaiting next-turn judgment — a multi-block turn
 # (e.g. l3.contract + l3b.evidence + a Lane-B steer) delivers several kinds; a
 # single overwritten tuple judged only the LAST one, mis-attributing consumption
 # (and wrongly muting an earlier kind at ignore>=3). Every kind delivered this
 # turn is judged against the NEXT command.
-_pending_delivery: list[tuple[str, int]] = []
+_pending_delivery: list[tuple[str, int, str]] = []  # (kind, turn, target) — S-1
 
 
 def _reset_pending_delivery() -> None:
@@ -6076,19 +6317,61 @@ def _ledger_cmd_acted(cmd: str) -> bool:
     return bool(re.search(r"(?<!\d)>>?\s*[^\s/&]", c))
 
 
+def _d7_relatedness_on() -> bool:
+    """S-1 relatedness gate (flag GT_D7_RELATEDNESS). Default-OFF (byte-identical): the
+    D7 consumed/ignore counts drive live severity-boost + skip, so tightening the judge
+    ships behind a flag until measured. Never active on the baseline arm."""
+    if _GT_BASELINE:
+        return False
+    return os.environ.get("GT_D7_RELATEDNESS", "").strip().lower() not in (
+        "", "0", "false", "no", "off")
+
+
+def _cmd_touches_target(cmd: str, target: str) -> bool:
+    """S-1: does THIS turn's command act on the delivered block's TARGET? Generous by
+    design (a false NEGATIVE would under-credit a real consumption): True when the
+    target's basename OR full repo-rel path appears in the command. An UNKNOWN target
+    ('') returns True — we cannot disprove relatedness, so we do not withhold credit."""
+    t = (target or "").strip().replace("\\", "/")
+    if not t:
+        return True
+    c = cmd or ""
+    if t in c:
+        return True
+    base = t.rsplit("/", 1)[-1]
+    return bool(base) and base in c
+
+
 def _ledger_judge_pending(cmd: str) -> None:
     """D7: judge the PREVIOUS turn's deliveries from THIS turn's command (one-turn
     defer). bug #6: judge EVERY kind delivered last turn (a multi-block turn
-    delivers several), not just the last-noted one."""
+    delivers several), not just the last-noted one.
+
+    S-1 (flag GT_D7_RELATEDNESS): when on, an edit/test only credits a delivered kind
+    as CONSUMED if the action TOUCHES that block's target (else the kind is neither
+    credited nor blamed this turn — a coincidental unrelated edit no longer launders a
+    consumed signal). Default-off keeps the relatedness-blind acted() judgment."""
     global _pending_delivery
     if not _pending_delivery:
         return
     pending = _pending_delivery
     _pending_delivery = []
     acted = _ledger_cmd_acted(cmd)
-    # de-dup kinds (a kind delivered twice in one turn is judged once).
-    for kind in {k for k, _turn in pending if k}:
-        if acted:
+    related_on = _d7_relatedness_on()
+    # per-kind: the set of targets it was delivered against last turn (S-1 relatedness).
+    targets_by_kind: dict[str, set] = {}
+    for k, _turn, tgt in pending:
+        if k:
+            targets_by_kind.setdefault(k, set()).add(tgt or "")
+    for kind, tgts in targets_by_kind.items():
+        if related_on and acted:
+            # consumed only if the action touches ANY target this kind was sent for.
+            kind_acted = any(_cmd_touches_target(cmd, t) for t in tgts)
+            if not kind_acted:
+                continue  # unrelated action: neither consumed nor an ignore this turn
+        else:
+            kind_acted = acted
+        if kind_acted:
             _ledger_consumed_kinds.add(kind)
             # Consumed → decay ignore count by 1 (the ONLY decay path)
             if kind in _ledger_ignore_counts:
@@ -6097,14 +6380,15 @@ def _ledger_judge_pending(cmd: str) -> None:
             _ledger_ignore_counts[kind] = _ledger_ignore_counts.get(kind, 0) + 1
 
 
-def _ledger_note_delivery(kind: str, cmd: str) -> None:
+def _ledger_note_delivery(kind: str, cmd: str, target: str = "") -> None:
     """Record that kind was delivered; judgment deferred to next turn. bug #6:
-    APPEND (don't overwrite) so every block delivered this turn is judged."""
+    APPEND (don't overwrite) so every block delivered this turn is judged. ``target``
+    (S-1): the block's file target, used by the relatedness gate in _ledger_judge_pending."""
     global _last_delivered_kind
     if not kind:
         return
     _last_delivered_kind = kind
-    _pending_delivery.append((kind, _action_count))
+    _pending_delivery.append((kind, _action_count, target))
 
 
 def _ledger_boost_severity(kind: str, sev: float) -> float:
@@ -6453,7 +6737,10 @@ def _structural_risk_note() -> tuple[str, bool]:
     # the agent has TOUCHED (edited) and NOT yet exercised (untested); intersect
     # with the obligation set for relevance so an incidental edit token can't
     # raise an off-issue advisory. Empty set -> structural_edit_risk is quiet.
-    _risky_syms = (_oracle_edited_tokens - _oracle_tested_tokens)
+    # E-1/L-6: the edited-symbol domain is the SPAN-derived enclosing symbols (a
+    # body-only edit is now named), falling back to the noisy token set only when the
+    # graph/spans yield nothing (correct-or-quiet, byte-identical when spans empty).
+    _risky_syms = (_edited_symbols_for_selection() - _oracle_tested_tokens)
     _obl = _obligation_symbol_set()
     if _obl:
         _risky_syms = _risky_syms & _obl
@@ -6617,8 +6904,13 @@ def _verification_horizon_candidate() -> tuple[float, str, str, bool] | None:
         return None
 
     # Stage-1 signals, live mirrors of DerivedState (sensed, never assumed).
-    tc = test_coverage_ratio(_oracle_edited_tokens_by_file,
-                             _oracle_tested_tokens)
+    # V-2/P1(c): the tested<->edited linkage runs over SPAN-derived edited-symbol
+    # NAMES per file (a body edit is now linked to the test that names its symbol),
+    # falling back to the noisy per-file edit tokens when the graph/spans yield nothing
+    # (byte-identical when spans empty — correct-or-quiet).
+    tc = test_coverage_ratio(
+        _edited_symbol_spans_by_file() or _oracle_edited_tokens_by_file,
+        _oracle_tested_tokens)
     ec = edit_coverage_ratio(_obligation_symbol_set(), _oracle_edited_tokens)
 
     # STRUCTURAL EDIT-RISK (flag-gated, budget-free): a high-blast-radius edited-but-
@@ -6635,14 +6927,14 @@ def _verification_horizon_candidate() -> tuple[float, str, str, bool] | None:
     # SUBSTITUTES for the symbol-level trigger.
     if _risk_trigger and not _horizon_advisory_fired and _oracle_edited_rels:
         _horizon_advisory_fired = True
-        _rk_cov = _covering_tests_for_symbols(_oracle_edited_tokens)
+        _rk_cov = _covering_tests_for_symbols(_edited_symbols_for_selection())
         # B1 (Fable 2026-07-09): an EXECUTED, attributed covering RED beats an
         # advisory — run the covering test and deliver the Format-D native failure
         # if the edit broke it. Flag-gated: off -> None -> the advisory below runs
         # unchanged (byte-identical). This is the verify-execution upgrade of this
         # exact fire point (V-1/V-3 on the mini seam).
         _rk_exec = _executed_covering_emission(
-            _rk_cov, _oracle_edited_rels, _oracle_edited_tokens)
+            _rk_cov, _oracle_edited_rels, _edited_symbols_for_selection())
         if _rk_exec:
             return (float(_SEV_NUDGE_VERIFY), "verify.horizon.executed", _rk_exec, True)
         _rk_block = _render_verify_emission(
@@ -6660,7 +6952,7 @@ def _verification_horizon_candidate() -> tuple[float, str, str, bool] | None:
                 or tc is None or tc >= _ESC_ADV_TCOV):
             return None
         _horizon_advisory_fired = True
-        covering = _covering_tests_for_symbols(_oracle_edited_tokens)
+        covering = _covering_tests_for_symbols(_edited_symbols_for_selection())
         block = _render_verify_emission(
             "advisory", _action_count, max(_action_count, 1),
             _oracle_edited_rels, covering, risk_note=_risk_note)
@@ -6686,25 +6978,21 @@ def _verification_horizon_candidate() -> tuple[float, str, str, bool] | None:
         return None
 
     # Dose caps — once per band; the LADDER escalates, the band never repeats.
-    if band == "advisory":
-        if _horizon_advisory_fired:
-            return None
-        _horizon_advisory_fired = True
-    elif band == "urgent":
-        if _horizon_urgent_fired:
-            return None
-        _horizon_urgent_fired = True
-    elif band == "pivot":
-        if _horizon_pivot_fired:
-            return None
-        _horizon_pivot_fired = True
-    elif band == "gate":
-        if _horizon_gate_fire_count >= _HORIZON_GATE_CAP:
-            return None
-        _horizon_gate_fire_count += 1
+    # S-2 (stamp-at-DELIVERY): CHECK the latch here, but CONSUME it only AFTER the
+    # render is proven non-empty (below). An empty render must leave the band ARMED —
+    # the gate-loss re-arm only fires on a produced-then-lost candidate, so a band spent
+    # on an empty render would be permanently lost.
+    if band == "advisory" and _horizon_advisory_fired:
+        return None
+    if band == "urgent" and _horizon_urgent_fired:
+        return None
+    if band == "pivot" and _horizon_pivot_fired:
+        return None
+    if band == "gate" and _horizon_gate_fire_count >= _HORIZON_GATE_CAP:
+        return None
 
     # H1: covering-test query for targeting
-    covering = _covering_tests_for_symbols(_oracle_edited_tokens)
+    covering = _covering_tests_for_symbols(_edited_symbols_for_selection())
 
     # Severity: COMPUTED composite over (base, budget position, unmet mass).
     if band == "gate":
@@ -6722,7 +7010,17 @@ def _verification_horizon_candidate() -> tuple[float, str, str, bool] | None:
         risk_note=_risk_note)
 
     if not block:
-        return None
+        return None  # S-2: band latch NOT consumed on an empty render — stays armed
+
+    # S-2: consume the band latch ONLY now, on a proven NON-EMPTY render.
+    if band == "advisory":
+        _horizon_advisory_fired = True
+    elif band == "urgent":
+        _horizon_urgent_fired = True
+    elif band == "pivot":
+        _horizon_pivot_fired = True
+    elif band == "gate":
+        _horizon_gate_fire_count += 1
 
     return (sev, f"verify.horizon.{band}", block, True)
 
@@ -6821,10 +7119,12 @@ def _oracle_bstate() -> str:
 
 
 def _oracle_content_hash(text: str) -> str:
-    """The 8-char content+state hash both lanes register into
-    _oracle_delivered_hashes.  Parity with the gate's :3690 computation."""
+    """The content+state hash both lanes register into _oracle_delivered_hashes.
+    Parity with the gate's computation. D-2 (2026-07-10): 16 hex (was 8) — a
+    correctness-bearing dedup must not permanently suppress a fact on a 32-bit
+    collision; _block_hash already uses 16."""
     import hashlib as _hl
-    return _hl.sha256((text + _oracle_bstate()).encode("utf-8")).hexdigest()[:8]
+    return _hl.sha256((text + _oracle_bstate()).encode("utf-8")).hexdigest()[:16]
 
 
 def _oracle_gate_blocks(cands) -> str:
@@ -6846,8 +7146,9 @@ def _oracle_gate_blocks(cands) -> str:
     but be suppressed in replay.  Now parity: identical median+MAD floor."""
     import hashlib as _hl
     import statistics as _ostats
-    global _oracle_last_losers, _last_gate_winner_kind
+    global _oracle_last_losers, _last_gate_winner_kind, _last_gate_winner_hash
     _oracle_last_losers = set()
+    _last_gate_winner_hash = ""  # D-5: reset; set on a winner, stamped at the append
     focus = _oracle_focus()
     passing: list[tuple[float, float, str, str, str]] = []
     suppressed: list[tuple[str, str, float]] = []
@@ -6863,7 +7164,7 @@ def _oracle_gate_blocks(cands) -> str:
         if not text or _ledger_should_skip_kind(kind):
             continue
         sev = _ledger_boost_severity(kind, sev)
-        h = _hl.sha256((text + _bstate).encode("utf-8")).hexdigest()[:8]
+        h = _hl.sha256((text + _bstate).encode("utf-8")).hexdigest()[:16]  # D-2: 16 hex
         if h in _oracle_delivered_hashes:
             suppressed.append((kind, "delivered", 0.0))
             continue
@@ -6873,6 +7174,14 @@ def _oracle_gate_blocks(cands) -> str:
             suppressed.append((kind, "irrelevant", 0.0))
             _oracle_last_losers.add(kind)
             continue
+        # D-9 (2026-07-10) — METRIC SEMANTICS: this conf is FOCUS-COVERAGE (the fraction
+        # of THIS TURN's accumulated focus set that the block's tokens hit), NOT an
+        # absolute block relevance. The denominator `len(focus)` is the SAME for every
+        # candidate this turn, so conf is a valid WITHIN-TURN ranking + MAD-floor signal
+        # (its only two consumers here). It is NOT comparable ACROSS turns: focus grows
+        # over the episode, so every turn's confs shrink on a moving denominator — any
+        # cross-turn analytics on these values must renormalize (or use the raw
+        # matched/focus counts), never compare the ratios directly.
         conf = (len(matched) / len(focus)) if focus else (
             1.0 if edit_bound else 0.0)
         passing.append((sev, conf, h, kind, text))
@@ -6906,7 +7215,10 @@ def _oracle_gate_blocks(cands) -> str:
         for p in passing[1:]:
             suppressed.append((p[3], "outranked", p[1]))
             _oracle_last_losers.add(p[3])
-        _oracle_delivered_hashes.add(winner[2])
+        # D-5: DO NOT stamp the delivered-hash here at the gate — record it for the
+        # caller to stamp atomically WITH the real append (a crash in the gate-to-append
+        # re-arm/telemetry window would otherwise suppress a never-delivered steer).
+        _last_gate_winner_hash = winner[2]
         _last_gate_winner_kind = winner[3]
     # G15 (2026-06-14): mirror every Lane-B suppression into the unified
     # GT_HOOK_FIRE_COUNTS sink so eligible/emitted/suppressed for the verify
@@ -7604,7 +7916,7 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
             # re-sends at a new state are now caught. (Lane-B steers keep content+state via
             # the gate -> they still rearm_on_change; this governs only Lane-A facts.)
             import hashlib as _hl5
-            hc = "c:" + _hl5.sha256(text.encode("utf-8")).hexdigest()[:8]
+            hc = "c:" + _hl5.sha256(text.encode("utf-8")).hexdigest()[:16]  # D-2: 16 hex
             if h in _oracle_delivered_hashes or hc in _oracle_delivered_hashes:
                 # cross-lane / re-send dedup: this fact already reached the agent.
                 _runtime_ledger_record(
@@ -7615,7 +7927,22 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
                     event=event,
                 )
                 continue
-            out["output"] = (out.get("output") or "") + text
+            # D-7 (RL-1, flag GT_LANE_ENVELOPE): law-8 drop-whole — an over-budget lane
+            # fact is dropped ENTIRELY, never clipped. Default-off: no budget gate
+            # (byte-identical). The cap is generous; today's lane blocks all fit.
+            if _lane_envelope_on() and not _lane_fits_budget(text):
+                _runtime_ledger_record(
+                    kind=kind,
+                    outcome=_ProductSignalOutcome.SUPPRESSED_BUDGET,
+                    reason="lane_budget",
+                    file_path=krel or "",
+                    event=event,
+                )
+                continue
+            # L-1a/D-3 "per lane": one-`\n`-boundary join so a no-leading-newline block
+            # cannot jam onto the previous observation. Byte-identical for `\n`-opening
+            # Lane-A blocks (the tagged contract/evidence/scope all open with `\n`).
+            out["output"] = _join_lane_output(out.get("output") or "", text)
             _oracle_delivered_hashes.add(h)
             _oracle_delivered_hashes.add(hc)
             # bug #5 / C3 / C6: consume the producer fire-once latches ONLY on a
@@ -7634,7 +7961,15 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
             elif kind == "obligation.resurface":
                 global _oblig_resurface_fired
                 _oblig_resurface_fired = True
-            _ledger_note_delivery(kind, cmd)
+            elif kind == "post_search.localize":
+                # D-4 (stamp-at-DELIVERY): mark the lattice fire-once latch HERE, on the
+                # real delivered outcome — never at production in _search_localize_block.
+                # A block Lane-A suppressed (the `continue` above) leaves the stem
+                # un-answered so a later distinct block can still deliver.
+                _psy = _search_pattern(cmd)
+                if _psy:
+                    _ledger_mark_answered(_norm_stem(_psy), text)
+            _ledger_note_delivery(kind, cmd, krel or "")  # S-1: carry the target
             _runtime_ledger_record(
                 kind=kind,
                 outcome=_ProductSignalOutcome.DELIVERED,
@@ -7642,6 +7977,10 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
                 file_path=krel or "",
                 event=event,
             )
+            # RL-1 (flag GT_LANE_ENVELOPE): seal an envelope over the SAME delivered
+            # bytes — advance the shared chain, stamp the dedup_key, record a receipt-
+            # tracked delivery. Pure bookkeeping; no-op + byte-identical when off.
+            _seal_lane_delivery(kind, text, krel or "")
             # D1 budget-commit re-wire (risk note #5): l3b.evidence's text was
             # budget-trimmed by _budget_trim, which staged the trimmed lines in
             # _last_budget_pending.  In the old monolith the commit fired only on
@@ -7692,6 +8031,131 @@ def _gt_gateway_append(out: dict, delta: str) -> None:
     — this is a pure suffix onto ``out['output']``. Isolated as ONE function so the
     byte-preservation is a single auditable/mutation-testable seam."""
     out["output"] = (out.get("output") or "") + delta
+
+
+# ---------------------------------------------------------------------------
+# RL-1 ENVELOPE UNIFICATION (D-7 lane budget) — flag GT_LANE_ENVELOPE, 2026-07-10.
+#
+# The Gateway path already obeys the ONE EvidenceEnvelope contract (build -> validate
+# -> seal: TITO hash-chain, delivered-dedup stamp-at-seal, receipt levels 1-3). RL-1
+# extends that contract to the STRONGER-consuming surfaces — the Lane-A facts (incl.
+# the lattice) and the Lane-B steers — so ALL live GT bytes carry law-5 provenance and
+# live receipts, not only the gateway's. This is BOOKKEEPING ONLY: the delivered BYTES
+# are appended by the existing lane logic and are NEVER changed here; the envelope is
+# built from the SAME bytes and sealed for the shared chain / dedup / receipt ledger.
+#
+# DUAL-STAMP: the legacy content-hash stamps (_oracle_delivered_hashes, aliased to
+# _EPISODE.delivered_dedup) stay in place; the envelope's derived dedup_key is ADDED to
+# the same set at the seal (a distinct key format that never collides with the content
+# hashes). D-7: a lane block that would exceed GT_LANE_MAX_DELTA is dropped WHOLE
+# (law-8, never a partial splice).
+#
+# DEFAULT-OFF byte-identical: with GT_LANE_ENVELOPE unset, NO lane sealing and NO lane
+# budget check run — the chain head, _gt_gateway_deliveries, and delivered bytes are all
+# bitwise-unchanged from the pre-RL-1 seam. Correct-or-quiet: any bookkeeping fault is
+# swallowed and can NEVER undo a delivery the lane already made.
+# ---------------------------------------------------------------------------
+_GT_LANE_MAX_DELTA = int(os.environ.get("GT_LANE_MAX_DELTA", "16000") or "16000")
+
+
+def _lane_envelope_on() -> bool:
+    """True iff RL-1 lane envelope unification is enabled (GT_LANE_ENVELOPE) and this
+    is not the baseline arm. Read at call time so a test/env flip takes effect."""
+    if _GT_BASELINE:
+        return False
+    return os.environ.get("GT_LANE_ENVELOPE", "").strip().lower() not in (
+        "", "0", "false", "no", "off")
+
+
+def _steer_native_on() -> bool:
+    """True iff the RL-3 Lane-B steer native arm is enabled (GT_STEER_NATIVE) and this
+    is not the baseline arm. Read at call time so a test/env flip takes effect."""
+    if _GT_BASELINE:
+        return False
+    return os.environ.get("GT_STEER_NATIVE", "").strip().lower() not in (
+        "", "0", "false", "no", "off")
+
+
+def _steer_native(text: str) -> str:
+    """RL-3 (flag GT_STEER_NATIVE): render a Lane-B steer in the NATIVE environment
+    voice — strip the ``<gt-nudge>``/``<gt-verify>`` wrapper tags and any leading
+    ``GT:`` imperative marker, leaving the plain body (the SHORT·ACTIVE·AT-DECISION
+    recipe, minus the OOD tags/voice). An ALREADY-native block (no ``<gt-*`` tag:
+    the covering RED / edit_check syntax transcript) passes through UNCHANGED so its
+    line structure is never mangled. Default-off byte-identical (caller-gated)."""
+    if not text or "<gt-" not in text:
+        return text  # already native (covering RED / edit_check) -> untouched
+    kept: list[str] = []
+    for ln in text.splitlines():
+        s = ln.rstrip()
+        st = s.strip()
+        if st.startswith("<gt-") or st.startswith("</gt-"):
+            continue  # drop the wrapper tags (OOD for RL-trained models)
+        stripped = s.lstrip()
+        if stripped.startswith("GT:"):  # strip the leading imperative marker
+            lead = s[:len(s) - len(stripped)]
+            s = lead + stripped[3:].lstrip()
+        if s.strip():
+            kept.append(s)
+    body = "\n".join(kept).strip()
+    return ("\n" + body + "\n") if body else ""
+
+
+def _join_lane_output(prev: str, block: str) -> str:
+    """L-1a: concatenate a lane block onto the running observation with EXACTLY ONE
+    ``\\n`` boundary. A block with no leading newline — the edit.syntax native
+    diagnostic (``render_syntax_error_native`` ends in ``.strip()``) — would otherwise
+    jam onto the previous observation line (``…</obs>File "x.py", line 1``, live-caught
+    T4). Insert the separator ONLY when NEITHER side already has one, so every steer
+    that opens with ``\\n`` is byte-identical (no double newline, no behaviour change)."""
+    if block and prev and not prev.endswith("\n") and not block.startswith("\n"):
+        return prev + "\n" + block
+    return prev + block
+
+
+def _lane_fits_budget(text: str) -> bool:
+    """D-7 law-8 for the lanes: a lane block fits iff it is non-empty and within the
+    GT_LANE_MAX_DELTA cap — otherwise it is dropped WHOLE (never clipped). Delegates to
+    the adapter's fits_budget so the lane and gateway share ONE budget law; correct-or-
+    quiet fallback (adapter absent) admits the block (pre-RL-1 behaviour)."""
+    try:
+        from groundtruth.runtime.adapters.miniswe import fits_budget as _fb
+        return _fb(text, max_delta_chars=_GT_LANE_MAX_DELTA)
+    except Exception:  # noqa: BLE001 — adapter absent -> do not gate (byte-identical)
+        return True
+
+
+def _seal_lane_delivery(kind: str, text: str, target: str) -> None:
+    """RL-1: route an ALREADY-DELIVERED lane block through EvidenceEnvelope build ->
+    validate -> seal — advancing the SHARED gateway hash-chain, stamping the envelope
+    dedup_key into _EPISODE.delivered_dedup (dual-stamp; the legacy content-hash stamp
+    stays), and appending a receipt-tracked delivery copy (level 1) to
+    _gt_gateway_deliveries. Pure bookkeeping over the SAME bytes the lane appended —
+    never changes them. No-op when the flag is off; correct-or-quiet on any fault."""
+    if not _lane_envelope_on() or not text:
+        return
+    global _gt_gateway_chain_head
+    try:
+        from groundtruth.runtime.evidence_envelope import EvidenceEnvelope, validate
+        from groundtruth.runtime.adapters.miniswe import seal_delivery as _seal
+    except Exception:  # noqa: BLE001 — engines absent in-container -> no bookkeeping
+        return
+    try:
+        env = EvidenceEnvelope.build(
+            producer=kind or "lane", fact_id="", target=target or "",
+            evidence_type=kind or "lane", payload=(text,))
+        if validate(env):  # a law violation -> skip bookkeeping (bytes already shipped)
+            return
+        rendered = text.encode("utf-8", "surrogatepass")  # the bytes the lane appended
+        sealed, _gt_gateway_chain_head = _seal(
+            env,
+            episode_id=(getattr(_EPISODE, "episode_id", "") or (_root() or "episode")),
+            event_id=str(_action_count), parent_hash=_gt_gateway_chain_head,
+            rendered_bytes=rendered, renderer_id="lane",
+            dedup_chain=_EPISODE.delivered_dedup)
+        _gt_gateway_deliveries.append(sealed)
+    except Exception:  # noqa: BLE001 — bookkeeping must NEVER break the delivery
+        pass
 
 
 def _gateway_def_render(env) -> str:
@@ -7821,15 +8285,36 @@ def _gt_gateway_deliver(action, out, cmd, orig_out) -> None:
         winner = _ad_arbitrate(_gw_augment(ev, st))
         if winner is None:
             return
-        native = os.environ.get("GT_POST_SEARCH_NATIVE") == "1"
+        # D-8 (2026-07-10): the Gateway's own render mode is keyed to GT_GATEWAY_NATIVE,
+        # DECOUPLED from GT_POST_SEARCH_NATIVE (the post_search FORMAT arm) — so a FORM
+        # A/B on one surface no longer contaminates the other. Default OFF = tagged
+        # (byte-identical). RL-2 native renderers for the gateway's generic kinds
+        # (name_fold / wrong_surface / trace_frame / body_concept) ride THIS flag; the
+        # shared def-facts renderer keeps its own GT_POST_SEARCH_NATIVE dispatch.
+        native = os.environ.get("GT_GATEWAY_NATIVE") == "1"
         delta = _ad_render(winner, native=native,
                            def_facts_renderer=_gateway_def_render)
         # leak-law (ABI §5): native must be tag-free; NEVER a test identity anywhere.
         if (not delta or (native and contains_gt_tag(delta))
                 or contains_test_identity(delta)):
+            # D-10 (2026-07-10): a LEAK-guard drop (native tag / test identity) was
+            # silent — invisible to fired/delivered reconciliation (inverse of D-1). An
+            # empty delta is correct-or-quiet (no record); a NON-empty delta dropped for
+            # safety records SUPPRESSED_HIDDEN_ONLY so the drop is auditable.
+            if delta:
+                _runtime_ledger_record(
+                    kind="gateway." + (winner.evidence_type or "fact"),
+                    outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
+                    reason="leak_guard", file_path=winner.target or "")
             return
         # TITO law 8: an over-budget delta is dropped WHOLE (never a partial splice).
         if not _ad_fits_budget(delta, max_delta_chars=_GT_GATEWAY_MAX_DELTA):
+            # D-10: the budget drop was silent too — record it (parity with the lanes'
+            # SUPPRESSED_BUDGET, which D-7/RL-1 already emit).
+            _runtime_ledger_record(
+                kind="gateway." + (winner.evidence_type or "fact"),
+                outcome=_ProductSignalOutcome.SUPPRESSED_BUDGET,
+                reason="gateway_budget", file_path=winner.target or "")
             return
         # BYTE-PRESERVING append: the original output verbatim + delta, same obs.
         _gt_gateway_append(out, delta)
@@ -7941,8 +8426,12 @@ def _augment_output(action, out) -> None:
                 # "edited" ONLY for a real repo-source edit (not /tmp/ staging).
                 # The source_edit_count / oracle_edited_rels above already counted
                 # the edit ACTION (sensor/governor parity); this gates only CREDIT.
-                _edit_toks = {t for t in _BLOCK_TOKEN_RE.findall(cmd or "")
-                              if len(t) >= 3}
+                # D-6: strip the invoked command verb + shell-token noise so a
+                # false 'sed'/'awk' never enters _oracle_edited_tokens (the
+                # span-identity fallback + obligation-overlap set).
+                _edit_toks = _strip_cmd_noise(
+                    {t for t in _BLOCK_TOKEN_RE.findall(cmd or "") if len(t) >= 3},
+                    cmd or "")
                 # RC5 hybrid edit-credit evidence: Signal 1 (CONTENT body tokens,
                 # broadened beyond the command verb) + Signal 3 (touched line
                 # ranges from diff hunks / sed addresses). Gated by the SAME
@@ -7992,8 +8481,17 @@ def _augment_output(action, out) -> None:
                 except Exception:  # noqa: BLE001 — Lane A producer isolated
                     _crash_emit("l3.cochange")
                     _la_cochange = ""
-                lane_a.append(("l3.contract", _la_contract))
-                lane_a.append(("l3.cochange", _la_cochange))
+                # D-1 (2026-07-10): CONDITIONAL enqueue — generalized from post_search
+                # (Fable #4) to its three Lane-A siblings. An EMPTY block enqueued here
+                # still trips _record_hook_fire (which fires before the empty-skip in
+                # _lane_a_deliver), inflating the fired-count for these kinds on every
+                # edit/view turn ("fired" != "produced"). Guarding the append makes the
+                # count mean "a block was produced". Delivery is byte-identical (an empty
+                # block delivers nothing either way).
+                if _la_contract:
+                    lane_a.append(("l3.contract", _la_contract))
+                if _la_cochange:
+                    lane_a.append(("l3.cochange", _la_cochange))
                 # consensus DELIVERY on EDIT (2026-06-24): when the agent edits a file
                 # that is part of the established GT scope, deliver the in-scope graph
                 # map alongside the edit-bound contract — the actionable moment for the
@@ -8005,7 +8503,8 @@ def _augment_output(action, out) -> None:
                 except Exception:  # noqa: BLE001 — Lane A producer isolated
                     _crash_emit("consensus.scope_map")
                     _csb_e = ""
-                lane_a.append(("consensus.scope_map", _csb_e))
+                if _csb_e:  # D-1: conditional enqueue (see l3.contract note above)
+                    lane_a.append(("consensus.scope_map", _csb_e))
             else:
                 if _oracle_edited_rels:
                     _oracle_nonedit_streak += 1
@@ -8028,7 +8527,8 @@ def _augment_output(action, out) -> None:
                 except Exception:  # noqa: BLE001 — Lane A producer isolated
                     _crash_emit("consensus.scope_map")
                     _csb = ""
-                lane_a.append(("consensus.scope_map", _csb))
+                if _csb:  # D-1: conditional enqueue (see l3.contract note above)
+                    lane_a.append(("consensus.scope_map", _csb))
             # post_search (M0+ / Listen Lattice): answer the agent's OWN repo-wide
             # grep with def FACTS, in-band. Independent of _kkind (a grep resolves to
             # no file target, so it runs on the raw command). The grep's OWN OUTPUT
@@ -8401,18 +8901,55 @@ def _augment_output(action, out) -> None:
                     if "verify.horizon.gate" in _lost:
                         _horizon_gate_fire_count = max(
                             0, _horizon_gate_fire_count - 1)
-                if _win:
-                    out["output"] = (out.get("output") or "") + _win
-                    _ledger_note_delivery(_last_gate_winner_kind, cmd)
-                    # Fire-count parity: Lane B winners count too (was Lane-A-only).
-                    _record_hook_fire(_last_gate_winner_kind)
+                if _win and _lane_envelope_on() and not _lane_fits_budget(_win):
+                    # D-7 (RL-1, flag GT_LANE_ENVELOPE): law-8 drop-whole for an
+                    # over-budget steer (never clipped). Default-off: this branch is
+                    # unreachable -> byte-identical. The hash is NOT stamped, so the
+                    # steer can re-compete on a later turn (deferred, not destroyed).
                     _runtime_ledger_record(
                         kind=_last_gate_winner_kind,
-                        outcome=_ProductSignalOutcome.DELIVERED,
-                        chars=len(_win),
+                        outcome=_ProductSignalOutcome.SUPPRESSED_BUDGET,
+                        reason="lane_budget",
                         file_path=_krel or _kf or "",
                         event=_event,
                     )
+                elif _win:
+                    # RL-3 (flag GT_STEER_NATIVE): render the steer in the native voice
+                    # (tag-free, no "GT:") BEFORE the append + seal so the delivered
+                    # bytes and the sealed rendered_bytes are one and the same. The D-5
+                    # dedup hash is the GATE text's hash (_last_gate_winner_hash, fixed at
+                    # gate time) — unaffected by the presentation transform, so a native
+                    # and a tagged render of the same winner dedup identically. Default-
+                    # off: _steer_native_on() is False -> _win is untouched (byte-ident).
+                    if _steer_native_on():
+                        _win = _steer_native(_win)
+                    if _win:  # native render can collapse an all-tag block to "" — then
+                        # deliver nothing (never stamp/append a no-op steer).
+                        # L-1a: normalize the separator so a block with NO leading
+                        # newline (the edit.syntax native diagnostic) cannot jam onto
+                        # the previous observation line. Byte-identical for steers that
+                        # already open with `\n` (every default nudge/verify does).
+                        out["output"] = _join_lane_output(out.get("output") or "", _win)
+                        # D-5: stamp the delivered-hash ATOMICALLY with the append (moved
+                        # from the gate) — a phantom stamp for an undelivered steer is now
+                        # impossible (the gate-to-append window can no longer suppress it).
+                        if _last_gate_winner_hash:
+                            _oracle_delivered_hashes.add(_last_gate_winner_hash)
+                        _ledger_note_delivery(
+                            _last_gate_winner_kind, cmd, _krel or _kf or "")  # S-1 target
+                        # Fire-count parity: Lane B winners count too (was Lane-A-only).
+                        _record_hook_fire(_last_gate_winner_kind)
+                        _runtime_ledger_record(
+                            kind=_last_gate_winner_kind,
+                            outcome=_ProductSignalOutcome.DELIVERED,
+                            chars=len(_win),
+                            file_path=_krel or _kf or "",
+                            event=_event,
+                        )
+                        # RL-1 (flag GT_LANE_ENVELOPE): seal the steer over the SAME bytes
+                        # — shared chain + dedup + receipt. No-op + byte-ident when off.
+                        _seal_lane_delivery(
+                            _last_gate_winner_kind, _win, _krel or _kf or "")
             except Exception:  # noqa: BLE001 — Lane B (control plane) is fully
                 # isolated: a steer/gate/filter crash here loses ONLY the steer,
                 # never Lane A's data plane (already delivered above).
@@ -8650,7 +9187,7 @@ def _gt_submit_covering(root: str) -> "tuple[dict | None, list[str]]":
     empty selection / unavailable / any error -> ``(None, files)`` (non-blocking)."""
     try:
         from groundtruth.runtime.covering_runner import run_covering_tests
-        cov = _covering_tests_for_symbols(_oracle_edited_tokens)
+        cov = _covering_tests_for_symbols(_edited_symbols_for_selection())
         files = [c["file"] for c in (cov or [])
                  if c.get("file") and os.path.exists(os.path.join(root, c["file"]))]
         # Fast-path: a cached non-fail can never FALSE-block -> reuse without re-run.
@@ -8745,7 +9282,7 @@ def _gt_gate_submit_exception(env, action, exc) -> "dict | None":
             return None
         # DEDUP/no-dup law (:4929/:6590 pattern): an identical refusal must never re-
         # emit. If we already delivered this exact refusal, do not re-block -> allow.
-        hc = "c:" + hashlib.sha256(rejection.encode("utf-8")).hexdigest()[:8]
+        hc = "c:" + hashlib.sha256(rejection.encode("utf-8")).hexdigest()[:16]  # D-2: 16 hex
         if hc in _oracle_delivered_hashes:
             return None
         _oracle_delivered_hashes.add(hc)          # stamp (the dedup ledger)

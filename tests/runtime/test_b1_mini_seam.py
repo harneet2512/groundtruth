@@ -284,7 +284,7 @@ def test_submit_gate_dedup_suppresses_identical_refusal(monkeypatch):
     _submit_env(monkeypatch, _BINARY_HYGIENE, None)  # SAME hygiene each call
     r1 = gmp._gt_gate_submit_exception(object(), {"command": "x"}, _Submitted())
     txt = _assert_native_refusal(r1)
-    hc = "c:" + __import__("hashlib").sha256(txt.encode("utf-8")).hexdigest()[:8]
+    hc = "c:" + __import__("hashlib").sha256(txt.encode("utf-8")).hexdigest()[:16]  # D-2
     assert hc in gmp._oracle_delivered_hashes, "refusal must stamp the dedup ledger"
     # reset the cap guard so DEDUP alone decides the second identical attempt.
     gmp._gt_submit_bounce_count = 0

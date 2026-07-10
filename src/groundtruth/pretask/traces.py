@@ -44,6 +44,22 @@ _REGISTRY: tuple[tuple[str, re.Pattern[str], tuple[int, int, int]], ...] = (
         re.compile(r'File "([^"]+)", line (\d+), in ([A-Za-z_][A-Za-z0-9_]*)'),
         (1, 2, 3),
     ),
+    # L-2 (2026-07-10) — Python SyntaxError / compile-error frame: ``File "path",
+    # line N`` with NO ``, in func`` clause (a parse failure has no call frame /
+    # function name; the traceback shows the source line + a ``^`` caret instead).
+    # The negative lookahead ``(?!, in )`` prevents this from also matching a normal
+    # ``…, in func`` frame (that one is captured above with its func name), so the
+    # dedup never sees a func / no-func twin of the same frame. func_group=0 (absent).
+    # Without this the gateway trace_frame producer was MUTE exactly when the suite
+    # died of a syntax break — the one time the offending line is unambiguous.
+    (
+        "python",
+        # (?!\d) forces the FULL line number (no backtracking to a shorter prefix that
+        # would sneak past the (?!, in ) guard — e.g. "line 142, in activate" must not
+        # match as line=14); (?!, in ) then excludes any normal call frame.
+        re.compile(r'File "([^"]+)", line (\d+)(?!\d)(?!, in )'),
+        (1, 2, 0),
+    ),
     # JavaScript / TypeScript V8 format: ``at fn (path:line:col)``
     (
         "javascript",

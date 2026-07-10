@@ -44,6 +44,7 @@ PERSISTS the run identity (``episode_id``), the ``step_limit`` budget, and the d
 """
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
@@ -52,6 +53,15 @@ from groundtruth.runtime.ledger import Ledger
 
 __all__ = ["EpisodeState"]
 
+# D-11: an attempt-suffix `#a<n>` at the very end of an episode id (stripped before a
+# fresh suffix is appended, so repeated resets never stack `#a1#a2`).
+_ATTEMPT_SUFFIX_RE = re.compile(r"#a\d+$")
+
+
+def _base_episode_id(episode_id: str) -> str:
+    """The run identity WITHOUT any trailing ``#a<n>`` attempt suffix (D-11)."""
+    return _ATTEMPT_SUFFIX_RE.sub("", str(episode_id or ""))
+
 
 @dataclass
 class EpisodeState:
@@ -59,6 +69,7 @@ class EpisodeState:
 
     # --- run identity + budget (persist across an attempt reset) ---
     episode_id: str = ""
+    attempt: int = 0  # D-11: per-attempt counter; reset_attempt increments + suffixes id
     action_index: int = 0
     step_limit: int | None = None
 
@@ -132,7 +143,15 @@ class EpisodeState:
         self.horizon_latches.clear()
         self.submit_bounce_count = 0
         self.hypothesis_slots.clear()
-        # PERSIST: episode_id, step_limit, delivery_ledger (durable), obligations.
+        # D-11 (RL data identity): advance the attempt counter and suffix the run id so
+        # two attempts of the SAME run get DISTINCT episode identities in the training
+        # data (the hash-chain / event ids reset per attempt and would otherwise be
+        # indistinguishable). The BASE identity is preserved (any prior `#a<n>` suffix is
+        # stripped first), so run provenance survives — only the attempt index is added.
+        self.attempt += 1
+        if self.episode_id:
+            self.episode_id = _base_episode_id(self.episode_id) + f"#a{self.attempt}"
+        # PERSIST: episode_id (base + attempt suffix), step_limit, delivery_ledger, obligations.
 
     # ------------------------------------------------------------------ #
     # per-turn accumulation helpers (normalizing ingress)
@@ -161,6 +180,7 @@ class EpisodeState:
         fresh handle. ``to_dict(from_dict(to_dict(e))) == to_dict(e)`` exactly."""
         return {
             "episode_id": self.episode_id,
+            "attempt": self.attempt,
             "action_index": self.action_index,
             "step_limit": self.step_limit,
             "phase": self.phase,
@@ -210,6 +230,7 @@ class EpisodeState:
         because JSON is untyped — coercion is the boundary's job."""
         e = cls(
             episode_id=str(d.get("episode_id", "")),
+            attempt=int(d.get("attempt", 0)),
             action_index=int(d.get("action_index", 0)),
             step_limit=(None if d.get("step_limit") is None else int(d["step_limit"])),
             phase=str(d.get("phase", "")),

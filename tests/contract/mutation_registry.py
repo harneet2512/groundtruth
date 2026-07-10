@@ -853,6 +853,456 @@ MUTATIONS: list[dict[str, Any]] = [
             "test_hits_path_fires_once_then_latched (first delivery ''); restored."
         ),
     },
+    # ======================================================================= #
+    # P1 SPAN-IDENTITY FOUNDATION (L-6 / E-1 / V-2 / O-1 / D-6, 2026-07-10).
+    # The TRUE edited-symbol set from graph node SPANS replaces token-guessing at
+    # the covering / risk / horizon / obligation consumers.
+    # ======================================================================= #
+    {
+        "id": "span_selection_body_edit",
+        "module": "artifact_deepswe/gt_mini_patch.py",
+        "import_path": None,  # module outside src/ — file-existence check only
+        "handle_description": (
+            "SPAN-BASED edited-symbol selection (_edited_symbols_for_selection / "
+            "_edited_symbol_spans_by_file): a graph node whose [start_line,end_line] "
+            "span ENCLOSES an edited line (_oracle_edited_lines_by_file) is the edited "
+            "symbol BY NAME — a body-only edit is selectable for its covering test even "
+            "though the changed lines never spell the name; tokens are the FALLBACK."
+        ),
+        "how_to_apply": (
+            "Make _edited_symbols_for_selection return set(_oracle_edited_tokens) "
+            "unconditionally (drop the span leg). A body-only edit (no symbol token) "
+            "then selects NO covering test -> the submit-while-RED bounce is unreachable "
+            "for the majority body-edit shape (the L-6 regression)."
+        ),
+        "biting_tests": [
+            "artifact_deepswe/tests/test_p1_span_identity_20260710.py",
+        ],
+        "last_verified": _LAST,
+        "run_status": (
+            "mechanically re-verified biting 2026-07-10 (P1): reverting "
+            "_edited_symbols_for_selection to token-only REDs "
+            "test_body_edit_selects_covering_test (empty covering selection)."
+        ),
+    },
+    {
+        "id": "edit_risk_span_containment",
+        "module": "src/groundtruth/runtime/edit_risk.py",
+        "import_path": "groundtruth.runtime.edit_risk",
+        "handle_description": (
+            "E-1 span containment (_line_in_edited_ranges / _ranged_dependents): a node "
+            "counts when its DEFINITION SPAN [start_line,end_line] INTERSECTS an edited "
+            "hunk (hunk ∩ [start,end]), not only when start_line ∈ hunk — a body-only "
+            "edit inside a fn's span now scores its blast radius, while the R3 hub "
+            "false-positive stays killed (a call-site line intersects only the edited "
+            "fn's span; the callee hub is DEFINED elsewhere)."
+        ),
+        "how_to_apply": (
+            "In _line_in_edited_ranges revert to point containment on start_line only "
+            "(`if lo <= sl <= hi: return True`, ignoring end_line). A hub function "
+            "edited only in its BODY (def-line outside the hunk) scores 0 dependents -> "
+            "no verification risk -> the mid-episode covering trigger never sees it."
+        ),
+        "biting_tests": [
+            "artifact_deepswe/tests/test_p1_span_identity_20260710.py",
+            "tests/runtime/test_edit_risk.py",
+        ],
+        "last_verified": _LAST,
+        "run_status": (
+            "biting asserted by test_edit_risk_span_containment_counts_body_edit "
+            "(a line-3 body edit to get_user, def-line 1 outside the hunk, scores 2 "
+            "dependents under span containment; would be 0 under start_line-only)."
+        ),
+    },
+    # ======================================================================= #
+    # P2 STAMP-AT-DELIVERY (D-4 / D-5 / S-2, 2026-07-10). A fire-once latch /
+    # delivered-hash is consumed only on a REAL delivered outcome, never at
+    # production — a producer suppressed downstream never leaves a phantom stamp.
+    # ======================================================================= #
+    {
+        "id": "lanea_stamp_at_delivery",
+        "module": "artifact_deepswe/gt_mini_patch.py",
+        "import_path": None,  # module outside src/ — file-existence check only
+        "handle_description": (
+            "D-4/D-5 stamp-at-DELIVERY: the lattice 'answered' latch is stamped in "
+            "_lane_a_deliver's post_search.localize DELIVERED branch (not in "
+            "_search_localize_block at production), and the Lane-B winner's delivered- "
+            "hash is stamped at the real append (_last_gate_winner_hash, not inside "
+            "_oracle_gate_blocks). A block suppressed downstream leaves NO phantom stamp."
+        ),
+        "how_to_apply": (
+            "Re-add `_ledger_mark_answered(stem, block)` at the end of "
+            "_search_localize_block (production self-stamp), OR re-add "
+            "`_oracle_delivered_hashes.add(winner[2])` inside _oracle_gate_blocks. A "
+            "produced-but-suppressed lattice block / a gate-to-append crash then leaves "
+            "a delivered stamp for bytes the agent never saw."
+        ),
+        "biting_tests": [
+            "artifact_deepswe/tests/test_p2_stamp_at_delivery_20260710.py",
+            "artifact_deepswe/tests/test_listen_lattice.py",
+        ],
+        "last_verified": _LAST,
+        "run_status": (
+            "biting: test_d4_producer_does_not_self_mark REDs if the production "
+            "self-stamp returns; test_d5_gate_records_hash_but_does_not_stamp REDs if "
+            "the gate stamps winner[2]."
+        ),
+    },
+    {
+        "id": "horizon_band_armed_on_empty_render",
+        "module": "artifact_deepswe/gt_mini_patch.py",
+        "import_path": None,
+        "handle_description": (
+            "S-2 band latch consumed only after a NON-EMPTY render "
+            "(_verification_horizon_candidate): the advisory/urgent/pivot/gate dose "
+            "latch is set AFTER `if not block: return None`, so an empty render (leak- "
+            "dropped / targeting-unavailable) leaves the band ARMED to fire later — the "
+            "gate-loss re-arm only fires on a produced-then-lost candidate, not an "
+            "empty render."
+        ),
+        "how_to_apply": (
+            "Move the band-latch assignment (_horizon_advisory_fired = True, etc.) BACK "
+            "above the `block = _render_verify_emission(...)` / `if not block` guard. An "
+            "empty render then spends the band permanently — the band is lost for the "
+            "whole episode with no re-arm."
+        ),
+        "biting_tests": [
+            "artifact_deepswe/tests/test_p2_stamp_at_delivery_20260710.py",
+        ],
+        "last_verified": _LAST,
+        "run_status": (
+            "biting: test_s2_band_latch_armed_on_empty_render REDs (the latch flips "
+            "True) if the band is consumed before the render guard."
+        ),
+    },
+    # ======================================================================= #
+    # P3 ENVELOPE UNIFICATION (RL-1 / D-7 / D-2 / D-11, 2026-07-10). Lane-A/Lane-B
+    # deliveries route through the ONE EvidenceEnvelope contract (flag
+    # GT_LANE_ENVELOPE, default-off byte-identical); the delivered-hash dedup widens
+    # to 16 hex; the episode id gains an attempt suffix.
+    # ======================================================================= #
+    {
+        "id": "lane_envelope_budget_and_seal",
+        "module": "artifact_deepswe/gt_mini_patch.py",
+        "import_path": None,  # module outside src/ — file-existence check only
+        "handle_description": (
+            "RL-1 lane sealing + D-7 lane budget (_seal_lane_delivery / _lane_fits_"
+            "budget, flag GT_LANE_ENVELOPE): when on, a Lane-A/Lane-B delivered block is "
+            "sealed through EvidenceEnvelope (shared chain + dedup stamp-at-seal + "
+            "receipt level 1) and an over-budget block is dropped WHOLE. Default-off is "
+            "byte-identical (no seal, no budget gate). The delivered BYTES never change."
+        ),
+        "how_to_apply": (
+            "Make _lane_fits_budget return True unconditionally (drop the D-7 law-8 "
+            "drop-whole) — an over-budget lane block is then appended/clipped. OR make "
+            "_seal_lane_delivery skip appending to _gt_gateway_deliveries — a lane "
+            "delivery then carries no chain/receipt provenance (the RL-1 gap returns)."
+        ),
+        "biting_tests": [
+            "artifact_deepswe/tests/test_p3_envelope_unification_20260710.py",
+        ],
+        "last_verified": _LAST,
+        "run_status": (
+            "biting: test_d7_over_budget_lane_block_dropped_whole REDs if fits_budget "
+            "always True; test_rl1_on_seals_lane_delivery REDs if the seal is skipped."
+        ),
+    },
+    {
+        "id": "lane_hash_width_16",
+        "module": "artifact_deepswe/gt_mini_patch.py",
+        "import_path": None,
+        "handle_description": (
+            "D-2: the correctness-bearing lane delivered-hash dedup (_oracle_content_"
+            "hash + the Lane-B gate hash + the Lane-A content-only hash + the submit "
+            "rejection hash) is 16 hex, not 8 — a 32-bit collision must not permanently "
+            "suppress a distinct fact/steer as 'delivered'."
+        ),
+        "how_to_apply": (
+            "Revert _oracle_content_hash (and the paired gate/lane/submit hashes) to "
+            "hexdigest()[:8]. The dedup set narrows to 32 bits -> a collision suppresses "
+            "a legitimate delivery. (test_d2_content_hash_is_16_hex asserts the width.)"
+        ),
+        "biting_tests": [
+            "artifact_deepswe/tests/test_p3_envelope_unification_20260710.py",
+        ],
+        "last_verified": _LAST,
+        "run_status": (
+            "biting: test_d2_content_hash_is_16_hex asserts len==16; reverting to [:8] "
+            "REDs it."
+        ),
+    },
+    {
+        "id": "episode_attempt_suffix",
+        "module": "src/groundtruth/runtime/episode_state.py",
+        "import_path": "groundtruth.runtime.episode_state",
+        "handle_description": (
+            "D-11 attempt identity: reset_attempt increments EpisodeState.attempt and "
+            "SUFFIXES episode_id with `#a<n>` (the base id preserved, prior suffix "
+            "stripped so it never stacks) — two attempts of one run get DISTINCT "
+            "chain-scoped identities in the training data."
+        ),
+        "how_to_apply": (
+            "In reset_attempt, stop advancing self.attempt / stop appending the `#a<n>` "
+            "suffix (leave episode_id unchanged across attempts). Attempt-2's chain then "
+            "shares attempt-1's episode identity — indistinguishable in the RL data."
+        ),
+        "biting_tests": [
+            "tests/runtime/test_episode_state.py",
+        ],
+        "last_verified": _LAST,
+        "run_status": (
+            "biting: test_reset_attempt_persists_identity_and_ledger_handle asserts "
+            "episode_id == 'task-42#a1' and attempt == 1; dropping the suffix REDs it."
+        ),
+    },
+    {
+        "id": "steer_native_strips_tags_keeps_body",
+        "module": "artifact_deepswe/gt_mini_patch.py",
+        "import_path": None,
+        "handle_description": (
+            "RL-3 FORM (_steer_native, flag GT_STEER_NATIVE): a Lane-B steer is rendered "
+            "in the native environment voice — the <gt-nudge>/<gt-verify> wrapper tags "
+            "and the leading `GT:` imperative marker are STRIPPED while every content "
+            "word survives; an already-native block (no `<gt-` tag: the covering RED / "
+            "edit_check transcript) passes through UNCHANGED so its line structure is "
+            "never mangled. Default-off byte-identical (caller-gated by _steer_native_on)."
+        ),
+        "how_to_apply": (
+            "In _steer_native, stop dropping the tag lines (keep `st.startswith('<gt-')` "
+            "lines) OR stop stripping the `GT:` prefix. The native arm then leaks the OOD "
+            "`<gt-*>` tags / `GT:` marker the FORM change exists to remove — RED on the "
+            "strip/body-preserved assertions."
+        ),
+        "biting_tests": [
+            "artifact_deepswe/tests/test_p4_form_native_20260710.py",
+        ],
+        "last_verified": _LAST,
+        "run_status": (
+            "biting: test_rl3_strips_wrapper_tags / test_rl3_strips_leading_gt_marker / "
+            "test_rl3_body_preserved_verbatim assert tag-free + GT:-free + every body "
+            "phrase present; keeping a tag or the marker REDs them. "
+            "test_rl3_already_native_passthrough_unchanged pins the covering-RED "
+            "pass-through (mangling its lines REDs it)."
+        ),
+    },
+    {
+        "id": "search_note_splice_arm_aware",
+        "module": "artifact_deepswe/gt_mini_patch.py",
+        "import_path": None,
+        "handle_description": (
+            "N-1 FORM (_splice_search_note): the fold / non-target annotation is spliced "
+            "arm-aware — TAGGED arm inserts it after the <gt-search-facts> open tag "
+            "(index 1); NATIVE arm (GT_POST_SEARCH_NATIVE=1) APPENDS it as a trailing "
+            "tag-free `# ` comment so the ripgrep def rows are never split and no GT-"
+            "voice lands inside the agent's own grep channel."
+        ),
+        "how_to_apply": (
+            "Revert _splice_search_note to the unconditional `lines.insert(1, note)`. On "
+            "the native arm the GT-voice parenthetical then lands at index 1 — BETWEEN "
+            "the def rows — breaking the row structure and the no-GT-voice law."
+        ),
+        "biting_tests": [
+            "artifact_deepswe/tests/test_p4_form_native_20260710.py",
+        ],
+        "last_verified": _LAST,
+        "run_status": (
+            "biting: test_n1_native_arm_appends_trailing_comment_rows_pristine + "
+            "test_n1_native_note_never_splits_def_rows assert row[1] is the second def "
+            "row (not the note); unconditional insert(1) REDs them."
+        ),
+    },
+    {
+        "id": "gateway_render_mode_own_flag",
+        "module": "artifact_deepswe/gt_mini_patch.py",
+        "import_path": None,
+        "handle_description": (
+            "D-8 FLAGS: the Gateway's render mode keys off its OWN GT_GATEWAY_NATIVE "
+            "flag, decoupled from GT_POST_SEARCH_NATIVE (the post_search FORMAT arm) — a "
+            "FORM A/B on one surface no longer contaminates the other (the flag-overload "
+            "confound). The shared def-facts renderer keeps its own post_search dispatch."
+        ),
+        "how_to_apply": (
+            "Re-key the gateway `native = …` line to "
+            "os.environ.get('GT_POST_SEARCH_NATIVE'). The two surfaces re-couple: a "
+            "post_search A/B flips the gateway render mode too."
+        ),
+        "biting_tests": ["artifact_deepswe/tests/test_p4_form_native_20260710.py"],
+        "last_verified": _LAST,
+        "run_status": (
+            "biting: test_d8_gateway_dispatch_reads_its_own_flag asserts the `native =` "
+            "assignment reads GT_GATEWAY_NATIVE and is never assigned from "
+            "GT_POST_SEARCH_NATIVE; re-keying REDs it."
+        ),
+    },
+    {
+        "id": "lane_output_separator_normalization",
+        "module": "artifact_deepswe/gt_mini_patch.py",
+        "import_path": None,
+        "handle_description": (
+            "L-1a FORM (_join_lane_output): a Lane-B block with no leading newline (the "
+            "edit.syntax native diagnostic, which ends in .strip()) is joined to the "
+            "running observation with EXACTLY ONE `\\n` boundary — insert only when "
+            "neither side already has one, so newline-opening steers stay byte-identical."
+        ),
+        "how_to_apply": (
+            "Replace `_join_lane_output(prev, block)` with `prev + block`. A syntax-error "
+            "diagnostic then jams onto the previous line (`…</obs>File \"x.py\"`)."
+        ),
+        "biting_tests": ["artifact_deepswe/tests/test_p4_form_native_20260710.py"],
+        "last_verified": _LAST,
+        "run_status": (
+            "biting: test_l1a_no_leading_newline_block_gets_separator asserts one \\n "
+            "inserted and 'newlineFile' absent; plain concatenation REDs it."
+        ),
+    },
+    {
+        "id": "edit_check_repo_relative_diag_path",
+        "module": "src/groundtruth/runtime/edit_check.py",
+        "import_path": "groundtruth.runtime.edit_check",
+        "handle_description": (
+            "L-1b CONTENT: check_edit_syntax stamps the REPO-RELATIVE path into the "
+            "ast.parse filename (=> the diagnostic's `File \"a/x.py\"`), not the bare "
+            "basename — the model reads back the path it edited without guessing."
+        ),
+        "how_to_apply": (
+            "In check_edit_syntax / _check_py_in_process, pass "
+            "filename=os.path.basename(abs_path) again. The diagnostic collapses to "
+            "`File \"x.py\"` and the repo-relative assertion REDs."
+        ),
+        "biting_tests": ["artifact_deepswe/tests/test_p4_form_native_20260710.py"],
+        "last_verified": _LAST,
+        "run_status": (
+            "biting: test_l1b_diagnostic_uses_repo_relative_path asserts "
+            "'File \"a/x.py\"' present and 'File \"x.py\"' absent; basename REDs it."
+        ),
+    },
+    {
+        "id": "verify_advisory_verb_number_agreement",
+        "module": "src/groundtruth/runtime/verification_horizon.py",
+        "import_path": "groundtruth.runtime.verification_horizon",
+        "handle_description": (
+            "V-1 FORM: render_verify_emission's advisory pairs the verb with the "
+            "subject NUMBER — 'a … test COVERS them' (singular, has_covering) vs 'the "
+            "relevant tests COVER them' (plural) — killing the live 'tests covers them' "
+            "garble."
+        ),
+        "how_to_apply": (
+            "Hardcode the verb back to 'covers' (drop test_verb). The plural branch then "
+            "renders 'the relevant tests covers them' and the agreement assertion REDs."
+        ),
+        "biting_tests": ["artifact_deepswe/tests/test_p4_form_native_20260710.py"],
+        "last_verified": _LAST,
+        "run_status": (
+            "biting: test_v1_plural_subject_plural_verb asserts 'the relevant tests "
+            "cover them' present and 'tests covers them' absent; fixed 'covers' REDs it."
+        ),
+    },
+    {
+        "id": "context_budget_preserves_producer_order",
+        "module": "src/groundtruth/runtime/context_budget.py",
+        "import_path": "groundtruth.runtime.context_budget",
+        "handle_description": (
+            "C-1: ContextBudgeter.trim SELECTS under budget by priority (imperative > "
+            "facts > other) but EMITS the survivors in the PRODUCER's original order — "
+            "the delivered block's line order no longer diverges from what the producer "
+            "rendered (a FORM bug that scrambled narrative even with no clip)."
+        ),
+        "how_to_apply": (
+            "Restore the old emit `for line in imperative + facts + other:` (bucket "
+            "order). test_c1_trim_preserves_producer_order then sees the imperative "
+            "hoisted above the fact and REDs."
+        ),
+        "biting_tests": ["tests/runtime/test_p5_remainder_20260710.py"],
+        "last_verified": _LAST,
+    },
+    {
+        "id": "context_budget_fact_id_discriminates_remainder",
+        "module": "src/groundtruth/runtime/context_budget.py",
+        "import_path": "groundtruth.runtime.context_budget",
+        "handle_description": (
+            "C-3: stable_fact_id folds a whitespace-normalized hash of the FULL "
+            "remainder into TAG:symbol, so two DISTINCT facts sharing tag+symbol "
+            "(get_user calls->A vs get_user called-by->B) get DISTINCT ids and neither "
+            "wrongly suppresses the other; an identical re-render still collides."
+        ),
+        "how_to_apply": (
+            "Revert to `return f'{tag}:{sym.lower()}'` (drop the digest). The two "
+            "distinct WITNESS facts collide again and test_c3_second_distinct_fact_not_"
+            "suppressed REDs (out2.text == '')."
+        ),
+        "biting_tests": ["tests/runtime/test_p5_remainder_20260710.py"],
+        "last_verified": _LAST,
+    },
+    {
+        "id": "traces_syntaxerror_frame_pattern",
+        "module": "src/groundtruth/pretask/traces.py",
+        "import_path": "groundtruth.pretask.traces",
+        "handle_description": (
+            "L-2: the Python frame registry has a SECOND pattern for a SyntaxError / "
+            "compile-error frame (`File \"p\", line N` with NO `, in func`), guarded by "
+            "(?!\\d)(?!, in ) so it never backtracks to a short line number nor double-"
+            "matches a normal call frame. Without it the gateway trace_frame is mute "
+            "exactly when the suite dies of a syntax break."
+        ),
+        "how_to_apply": (
+            "Delete the second python registry entry. test_l2_syntaxerror_frame_is_"
+            "extracted (a no-`in` frame) then finds 0 python frames and REDs."
+        ),
+        "biting_tests": ["tests/runtime/test_p5_remainder_20260710.py"],
+        "last_verified": _LAST,
+    },
+    {
+        "id": "obligation_freshness_demotes_stale_pass",
+        "module": "src/groundtruth/runtime/obligations.py",
+        "import_path": "groundtruth.runtime.obligations",
+        "handle_description": (
+            "O-2: ObligationTracker.apply_edit_freshness demotes a TESTED obligation "
+            "whose symbol is edited at a turn STRICTLY LATER than its last test (a stale "
+            "PASS -> EDITED, the freshness law). SATISFIED is exempt; same-turn edits "
+            "(pre-test) do not demote."
+        ),
+        "how_to_apply": (
+            "Make apply_edit_freshness a no-op (return []) or drop the `turn > "
+            "last_tested_turn` guard. test_o2_stale_edit_after_test_demotes REDs."
+        ),
+        "biting_tests": ["tests/runtime/test_p5_remainder_20260710.py"],
+        "last_verified": _LAST,
+    },
+    {
+        "id": "d7_judge_relatedness_gate",
+        "module": "artifact_deepswe/gt_mini_patch.py",
+        "import_path": None,
+        "handle_description": (
+            "S-1 (flag GT_D7_RELATEDNESS): the D7 consumption judge credits a delivered "
+            "kind as CONSUMED only when this turn's edit/test TOUCHES that block's target "
+            "(_cmd_touches_target). An unrelated action no longer launders a consumed "
+            "signal (nor blames an ignore). Default-off = relatedness-blind (historical)."
+        ),
+        "how_to_apply": (
+            "Force _cmd_touches_target -> True always (or make _d7_relatedness_on read a "
+            "non-flag). With the flag on, test_s1_flag_on_unrelated_edit_does_not_credit "
+            "then credits the unrelated edit and REDs."
+        ),
+        "biting_tests": ["tests/runtime/test_p5_remainder_20260710.py"],
+        "last_verified": _LAST,
+    },
+    {
+        "id": "semantic_drift_repair_cycle_suppression",
+        "module": "artifact_deepswe/gt_mini_patch.py",
+        "import_path": None,
+        "handle_description": (
+            "SD-1: _semantic_drift_candidate suppresses the guard/return-removed nudge "
+            "when the last observed test outcome was a FAILURE (an active repair cycle — "
+            "the deletion is plausibly the fix, and the agent will re-test). It still "
+            "fires when tests were GREEN (the real silent-regression case)."
+        ),
+        "how_to_apply": (
+            "Delete the `if _last_test_outcome_failed: return None` guard. "
+            "test_sd1_suppressed_when_last_test_failed then gets a nudge and REDs."
+        ),
+        "biting_tests": ["tests/runtime/test_p5_remainder_20260710.py"],
+        "last_verified": _LAST,
+    },
     {
         "id": "lattice_compound_gate",
         "module": "artifact_deepswe/gt_mini_patch.py",

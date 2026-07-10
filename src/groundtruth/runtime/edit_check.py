@@ -125,12 +125,23 @@ def check_edit_syntax(
     norm = file_path.replace("\\", "/")
     ext = os.path.splitext(norm)[1].lower()
     abs_path = file_path if os.path.isabs(file_path) else os.path.join(repo_root or "", file_path)
+    # L-1b: name the file REPO-RELATIVE in any diagnostic (not by basename) so the
+    # model does not have to guess the path back. If file_path arrived relative, that
+    # IS the repo-relative name; if absolute, derive it against repo_root (fall back to
+    # the basename only when relpath is impossible — different drive / no root).
+    rel_name = norm
+    if os.path.isabs(file_path):
+        try:
+            rel_name = os.path.relpath(abs_path, repo_root or ".").replace("\\", "/") \
+                if repo_root else os.path.basename(norm)
+        except ValueError:  # e.g. different Windows drive -> no relative path exists
+            rel_name = os.path.basename(norm)
 
     # Python fast path: parse IN-PROCESS (no spawn, no bytecode cache) when no
     # executor is injected. With an executor, use the subprocess ast.parse form so
     # the check runs inside the task's own interpreter/container.
     if ext == ".py" and executor is None:
-        return _check_py_in_process(abs_path, ext)
+        return _check_py_in_process(abs_path, ext, rel_name)
 
     cmd = _build_check_command(ext, abs_path)
     if cmd is None:
@@ -167,20 +178,24 @@ def _build_check_command(ext: str, path: str) -> list[str] | None:
     return None
 
 
-def _check_py_in_process(abs_path: str, ext: str) -> dict[str, Any]:
+def _check_py_in_process(abs_path: str, ext: str, rel_name: str | None = None) -> dict[str, Any]:
     """Parse ``abs_path`` with ``ast.parse`` in-process. No subprocess, no bytecode.
 
     Encoding-safe read (utf-8 / replace). A SyntaxError (incl. IndentationError) is
     POSITIVE evidence -> ``syntax_error`` with the native Python error text. A file
     we cannot read, or a non-SyntaxError parse fault (e.g. null bytes -> ValueError),
-    is ambiguous -> ``unavailable`` (correct-or-quiet)."""
+    is ambiguous -> ``unavailable`` (correct-or-quiet).
+
+    ``rel_name`` (L-1b): the REPO-RELATIVE display name stamped into the diagnostic's
+    ``File "…"`` line so the model reads the same path it edited (default: basename,
+    the pre-L-1b behaviour, for direct callers that pass none)."""
     try:
         with open(abs_path, encoding="utf-8", errors="replace") as fh:
             src = fh.read()
     except OSError:
         return _verdict("unavailable", reason="unreadable_file", ext=ext, checker=["ast.parse"])
     try:
-        ast.parse(src, filename=os.path.basename(abs_path))
+        ast.parse(src, filename=rel_name or os.path.basename(abs_path))
     except SyntaxError as exc:
         diag = "".join(traceback.format_exception_only(type(exc), exc)).strip()
         return _verdict("syntax_error", reason="parse_error", ext=ext,
