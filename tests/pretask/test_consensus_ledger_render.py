@@ -130,14 +130,14 @@ _MED_ISSUE = "handle request routing regression"
 # byte-identity + mutation pins: a broken/absent render reddens them.
 _MED_OFF = (
     '<gt-localization confidence="medium">\n'
-    "Candidate edit targets (reason over these):\n"
+    "Candidate edit targets (reason over these — confirm the edit target with grep):\n"
     "  1. pkg/handler.py\n"
     "  2. svc/router.py\n"
     "</gt-localization>"
 )
 _MED_ON = (
     '<gt-localization confidence="medium">\n'
-    "Candidate edit targets (reason over these):\n"
+    "Candidate edit targets (reason over these — confirm the edit target with grep):\n"
     "  1. pkg/handler.py — 1/3 signals agree (grep)\n"
     "  2. svc/router.py — 1/3 signals agree (grep)\n"
     "</gt-localization>"

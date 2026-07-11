@@ -71,17 +71,17 @@ on:
         required: false
         default: "0"
       edit_check:
-        description: "GT_EDIT_CHECK — E: at-edit SYNTAX validation. Run the repo's OWN parse-only toolchain on a just-edited source file; deliver the compiler's native diagnostic on a parse break (SWE-agent linter-guard parity). 0 = OFF (default; byte-identical). 1 = ON."
+        description: "GT_EDIT_CHECK — E: at-edit SYNTAX validation. Run the repo's OWN parse-only toolchain on a just-edited source file; deliver the compiler's native diagnostic on a parse break (SWE-agent linter-guard parity). '' = unset (default; profile-controllable — GT_RL_PROFILE can activate it; downstream ${:-0} = OFF, byte-identical). '0' = explicit per-flag OFF (overrides the profile). 1 = ON."
         required: false
-        default: "0"
+        default: ""
       post_search_native:
         description: "GT_POST_SEARCH_NATIVE — FORMAT A/B B-arm: render post_search def-facts as native ripgrep-style output (no <gt-*> tag) instead of the tagged block. Same content, different format. 0 = OFF (default; tagged, byte-identical). 1 = ON (native)."
         required: false
         default: "0"
       gateway:
-        description: "GT_GATEWAY — W2 single-surface completer: ONE gateway.augment() call per tool observation, arbitrated to <=1 deterministic FACT, appended byte-preserving into the same observation (TITO). 0 = OFF (default; byte-identical). 1 = ON."
+        description: "GT_GATEWAY — W2 single-surface completer: ONE gateway.augment() call per tool observation, arbitrated to <=1 deterministic FACT, appended byte-preserving into the same observation (TITO). '' = unset (default; profile-controllable — GT_RL_PROFILE can activate it; downstream ${:-0} = OFF, byte-identical). '0' = explicit per-flag OFF (overrides the profile). 1 = ON."
         required: false
-        default: "0"
+        default: ""
       gt_arm:
         description: "Paired-run arm: gt enables GT; baseline sets GT_BASELINE=1 and does not require substrate proof."
         required: false
@@ -102,6 +102,10 @@ on:
         description: "Cooperative-localization channels, independent of depth_flags. 1 = ON = GT_POST_SEARCH (agent answers its OWN repo-wide grep of a bare symbol with def-site + verified-caller facts, in-band, via --ae) + GT_CONSENSUS_LEDGER (the <gt-localization> HIGH head renders 'N/3 signals agree' + receipts instead of the imperative 'Edit target:', via substrate -e + --ae; ranking-invariant, form-only). Both correct-or-quiet + leak-0 by construction. 0 = OFF (default; byte-identical)."
         required: false
         default: "0"
+      rl_profile:
+        description: "GT_RL_PROFILE — ONE versioned toggle for the coherent RL-adherence stack (B-16/B-17). 1 = ON activates GT_GATEWAY·GT_GATEWAY_NATIVE·GT_STEER_NATIVE·GT_LANE_ENVELOPE·GT_EDIT_CHECK·GT_VERIFY_EXECUTE·GT_D7_RELATEDNESS·GT_OBLIGATION_FRESHNESS (fanned out in gt_ae_block.sh via rl_profile.py). An EXPLICITLY-set member input still overrides the profile (per-flag control). Harness ABORTS before model spend if a requested member capability is unavailable (fail-closed). '' = OFF (default; byte-identical — no member flag changed). Measurement-only authority stays advisory."
+        required: false
+        default: ""
 
 permissions:
   contents: write   # live-log bridge force-pushes per-task logs to gha-live-logs/<task> branches
@@ -150,9 +154,20 @@ env:
   # Q3 consumption lever (synced agent path; gt_mini_patch reads it). Default 0 = OFF
   # (byte-identical current behavior). Forwarded to the agent container via --ae below.
   GT_VERIFY_STRUCTURAL_RISK: ${{ github.event.inputs.verify_structural_risk || '0' }}
-  # E — at-edit syntax validation (synced agent path; gt_mini_patch reads it). Default
-  # 0 = OFF (byte-identical). Forwarded to the agent container via --ae below.
-  GT_EDIT_CHECK: ${{ github.event.inputs.edit_check || '0' }}
+  # ── B-16/B-17 official RL profile — ONE versioned toggle. When set (e.g. '1') the
+  # gt_ae_block.sh fan-out (rl_profile.py) activates the coherent member set below
+  # UNLESS a member is EXPLICITLY set (per-flag control still wins); it also ABORTS
+  # before model spend if a requested member capability is unavailable (fail-closed).
+  # '' = OFF (default): the fan-out is a strict no-op → byte-identical to today.
+  GT_RL_PROFILE: ${{ github.event.inputs.rl_profile || '' }}
+  # E — at-edit syntax validation (synced agent path; gt_mini_patch reads it). RL-profile
+  # member: input default is '' (unset), passed RAW — NOT `|| ''` (Brief-F5): the input's
+  # own default of '0' is a NON-empty (truthy) string, so `|| ''` forwarded '0' on a UI
+  # dispatch → the resolver read it as an explicit OFF override and the profile could
+  # NEVER activate edit_check from the UI. Raw passthrough keeps ''=unset (profile
+  # activates) and '0'=explicit per-flag OFF distinguishable. Downstream ${GT_EDIT_CHECK:-0}
+  # yields '0' when empty → byte-identical off. Forwarded to the agent container via --ae.
+  GT_EDIT_CHECK: ${{ github.event.inputs.edit_check }}
   # FORMAT A/B B-arm (synced agent path; gt_mini_patch reads it). Default 0 = OFF
   # (tagged post_search, byte-identical). Forwarded to the agent container via --ae below.
   GT_POST_SEARCH_NATIVE: ${{ github.event.inputs.post_search_native || '0' }}
@@ -163,7 +178,13 @@ env:
   # post_search-WINS — the Gateway is skipped for search events (the lattice owns the
   # single dose + the single shared probe record). The Gateway stays live for
   # edit/test turns. See gt_mini_patch._gateway_search_excluded.
-  GT_GATEWAY: ${{ github.event.inputs.gateway || '0' }}
+  # RL-profile member: input default is '' (unset), passed RAW — NOT `|| ''` (Brief-F5,
+  # same ABI fix as GT_EDIT_CHECK above): the input's own '0' default is a truthy string
+  # so `|| ''` forwarded '0' → explicit-OFF override → the profile could never activate
+  # gateway from a UI dispatch. Raw passthrough keeps ''=unset (profile activates) vs
+  # '0'=explicit per-flag OFF distinguishable. Downstream ${GT_GATEWAY:-0} yields '0' when
+  # empty → byte-identical off (only functional refs: this def + the --ae ${GT_GATEWAY:-0}).
+  GT_GATEWAY: ${{ github.event.inputs.gateway }}
   # ── Depth+DCC mechanisms (2026-07 build) — master switch `depth_flags` (default 0 = OFF =
   # byte-identical; all six read default-off in code). The 5 index/brief flags cross the substrate
   # boundary via explicit `-e` in scripts/ci/substrate_proof.sh (each GT_* is projected into
@@ -1082,6 +1103,9 @@ jobs:
               --ae GT_POST_SEARCH="${GT_POST_SEARCH:-0}"
               --ae GT_CONSENSUS_LEDGER="${GT_CONSENSUS_LEDGER:-0}"
               --ae GT_MOUNT_MODE="1"
+              # Provenance only: the members above already carry the RL-profile-resolved
+              # values (gt_ae_block.sh fan-out exported them before this array was built).
+              --ae GT_RL_PROFILE="${GT_RL_PROFILE:-}"
             )
             GT_AE_ARM+=("${GT_AE_ARGS[@]}")
             GT_AE_ARM+=(

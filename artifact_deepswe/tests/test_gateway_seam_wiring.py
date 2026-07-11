@@ -178,7 +178,13 @@ def test_flag_on_parity_vs_adapter_pipeline(seam, monkeypatch, tmp_path):
     winner = ad.arbitrate(gw.augment(ev, st))
     direct = ad.render_envelope(winner, native=False, def_facts_renderer=g._gateway_def_render)
 
-    assert seam_delta == direct and direct != ""
+    # Seam-F6 (bounce 2026-07-10): the seam now inserts the L-1a one-newline boundary so a
+    # delta that does not open with `\n` (the tagged `<gt-fact`/`<gt-search-facts` and the
+    # native body forms) cannot JAM onto a non-newline-terminated observation. The CORRECT
+    # ladder is the boundary-JOINED adapter render (byte-identical to `direct` whenever the
+    # observation already ends in `\n`, i.e. the production command-output case). Pre-F6 this
+    # pin asserted a raw suffix `seam_delta == direct`, which jammed on this fixture.
+    assert seam_delta == g._join_lane_output(off, direct)[len(off):] and direct != ""
 
 
 def test_d0_corpus_seam_mirrors_adapter(seam, monkeypatch):
@@ -227,7 +233,11 @@ def test_native_flag_is_tagfree_reuses_fmt_def_facts_native(seam, monkeypatch):
         info = g._resolve_symbol_defs(con, "run", g._root())
     finally:
         con.close()
-    assert delta == g._fmt_def_facts_native("run", info, g._root())
+    # Seam-F6: the CORRECT ladder is the boundary-joined native render (grep_out has no
+    # trailing `\n` here, so the seam prepends exactly one `\n` boundary). Content + voice
+    # are unchanged — still the mini's OWN native formatter, tag-free (asserted above).
+    expected = g._fmt_def_facts_native("run", info, g._root())
+    assert delta == g._join_lane_output(grep_out, expected)[len(grep_out):]
 
 
 # --------------------------------------------------------------------------- #
@@ -264,14 +274,34 @@ def test_receipt_levels_through_seam(seam, monkeypatch):
     _run_output("grep -rn run .", grep_out)             # level 1 DELIVERED (target a/x.py)
     assert g._gt_gateway_deliveries[-1].receipt_state == RECEIPT_DELIVERED
 
-    # level 2 REFERENCED — a later OBSERVATION names the delivered file (the command
-    # itself does NOT target it, so it is a reference, not an action).
+    # B-13: a later ENV OUTPUT naming the delivered file is NOT a reference — environment
+    # text is not the agent referencing the fact (the `git status` command does not target
+    # a/x.py; only its output mentions it). The receipt STAYS DELIVERED. REFERENCED (a
+    # policy MESSAGE naming the fact) is not observable at the seam and is computed offline
+    # by the grader; the seam must never falsely promote from environment output.
     _run_output("git status", "  modified:   a/x.py")
-    assert g._gt_gateway_deliveries[-1].receipt_state == RECEIPT_REFERENCED
+    assert g._gt_gateway_deliveries[-1].receipt_state == RECEIPT_DELIVERED
 
-    # level 3 ACTED — the next action TARGETS the delivered file
+    # level 3 ACTED — the next ACTION (a policy-produced command) TARGETS the delivered file
     _run_output("sed -i 's/a/b/' a/x.py", "")
     assert g._gt_gateway_deliveries[-1].receipt_state == RECEIPT_ACTED
+
+
+def test_b33_seal_fault_leaves_zero_bytes(seam, monkeypatch):
+    # B-33: the SEAL is the delivery commit and now runs BEFORE the append. If it faults,
+    # NO model-facing bytes are appended and NO orphan delivery is recorded (bytes must
+    # never ship with no dedup/receipt/chain record). Pre-reorder (append-before-seal) a
+    # seal fault left the delta appended with no receipt — this pin bites that ordering.
+    monkeypatch.setenv("GT_GATEWAY", "1")
+
+    def _boom(*a, **k):
+        raise RuntimeError("forced seal fault")
+
+    monkeypatch.setattr(ad, "seal_delivery", _boom)
+    grep_out = "a/x.py:10: run\nb/y.py:20: run"
+    obs = _run_output("grep -rn run .", grep_out)
+    assert obs == grep_out, "seal fault must leave the observation byte-identical (0 GT bytes)"
+    assert g._gt_gateway_deliveries == [], "no orphan delivery recorded on a seal fault"
 
 
 # --------------------------------------------------------------------------- #

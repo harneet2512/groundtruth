@@ -3,16 +3,21 @@
 # gt_ae_block.sh — canonical `--ae` block for the GT runtime env.
 #
 # SCOPE / WIRED-STATUS (read before trusting this as de-drift):
-#   This block is CURRENTLY sourced by ONE caller — railway/codespace_deepswe_run.sh
-#   (the codespace witness path). It is NOT yet sourced by the GHA workflows:
-#     • .github/workflows/deepswe_trial.yml — its `pier run` passes NO --ae / --mounts-json.
-#     • .github/workflows/deepswe_full.yml  — forwards only a PARTIAL inline --ae set
-#       (GT_ORACLE_ROUTE + GT_ORACLE_EVENTS), not the full trio below.
-#   So on the two GHA paths the structural edit-risk axis (G03/G04) and the G11 deep-
-#   telemetry trio (GT_RUNTIME_LEDGER / GT_HOOK_FIRE_COUNTS / full GT_ORACLE_EVENTS sink)
-#   remain DARK. Making this a TRUE single source is OWED: source this file from those
-#   run-steps and splice "${GT_AE_ARGS[@]}" + a writable --mounts-json. Until then this is
-#   the codespace path's helper — do NOT read it as proof that trial/full are de-drifted.
+#   This block is sourced by TWO callers today (Brief-F10 — the prior "ONE caller /
+#   full.yml does not source it" claim was STALE):
+#     • railway/codespace_deepswe_run.sh — sources it (~L280) + splices "${GT_AE_ARGS[@]}"
+#       (~L291). This is the ONLY forwarding on the codespace witness path, so EVERY
+#       member below MUST live in the array (that is why the Brief-F4 trio was added).
+#     • .github/workflows/deepswe_full.yml — sources it (~L1052) + splices "${GT_AE_ARGS[@]}"
+#       into GT_AE_ARM (~L1104), AND additionally passes its OWN explicit --ae set
+#       (GT_VERIFY_EXECUTE / GT_EDIT_CHECK / GT_GATEWAY at ~L1081-1084, telemetry sinks,
+#       etc.) — so full.yml forwards the members even where the array historically did not.
+#   Still NOT sourcing it: .github/workflows/deepswe_trial.yml — its `pier run` passes NO
+#   --ae / --mounts-json, so on the trial path the structural edit-risk axis (G03/G04) and
+#   the G11 deep-telemetry trio (GT_RUNTIME_LEDGER / GT_HOOK_FIRE_COUNTS / full
+#   GT_ORACLE_EVENTS sink) remain DARK. Making trial a TRUE single source is still OWED:
+#   source this file from that run-step and splice "${GT_AE_ARGS[@]}" + a writable
+#   --mounts-json.
 #
 # WHY THIS FILE EXISTS (catalog gaps G03 + G04, HIGH):
 #   pier does NOT blanket-forward the host's os.environ into the task container.
@@ -26,12 +31,11 @@
 #   (structural edit-risk axis, oracle two-lane route, the 8-dp deep telemetry
 #   sinks) runs with EMPTY GT env unless we pass `--ae` explicitly.
 #
-#   deepswe_full.yml carries a partial `--ae` set inline; the TRIAL paths
-#   (deepswe_trial.yml + codespace_deepswe_run.sh) historically passed NO `--ae`
-#   at all -> the entire structural risk axis + oracle telemetry was dark on the
-#   witness path. This block is the canonical definition that ELIMINATES that drift
-#   ON ANY CALLER THAT SOURCES IT — today that is codespace_deepswe_run.sh only (see
-#   SCOPE above). It does not retroactively de-drift a path that does not source it.
+#   The TRIAL path (deepswe_trial.yml) historically passed NO `--ae` at all -> the
+#   entire structural risk axis + oracle telemetry is dark there. This block is the
+#   canonical definition that ELIMINATES that drift ON ANY CALLER THAT SOURCES IT —
+#   today that is codespace_deepswe_run.sh AND deepswe_full.yml (see SCOPE above). It
+#   does not retroactively de-drift a path that does not source it (deepswe_trial.yml).
 #
 # CONTRACT for callers:
 #   1. Define GT_C_OUT before sourcing — the IN-CONTAINER directory the deep 8-dp
@@ -53,6 +57,33 @@
 
 # In-container writable telemetry dir (host-mounted). Caller may override.
 GT_C_OUT="${GT_C_OUT:-/gt_out}"
+
+# ── B-16/B-17: official RL profile fan-out (src/groundtruth/runtime/rl_profile.py) ──
+# GT_RL_PROFILE is ONE versioned toggle for the coherent RL-adherence stack
+# (GT_GATEWAY·GT_GATEWAY_NATIVE·GT_STEER_NATIVE·GT_LANE_ENVELOPE·GT_EDIT_CHECK·
+# GT_VERIFY_EXECUTE·GT_D7_RELATEDNESS·GT_OBLIGATION_FRESHNESS). When it is set we
+# EXPORT its member flags here — BEFORE the GT_AE_ARGS array below and before the
+# caller's own `--ae GT_X="${GT_X:-0}"` sites — so both pick up the resolved values.
+# An EXPLICITLY-set member wins (per-flag control). If a requested member capability
+# is unavailable the resolver exits non-zero and we ABORT the run before any model
+# spend (fail-closed). When GT_RL_PROFILE is UNSET/"0" this block is a strict no-op
+# (no member flag changed, no python invoked) → byte-identical to the legacy path.
+if [ -n "${GT_RL_PROFILE:-}" ] && [ "${GT_RL_PROFILE}" != "0" ]; then
+  _GT_RL_PY="${GT_RL_PROFILE_PY:-python}"
+  command -v "${_GT_RL_PY}" >/dev/null 2>&1 || _GT_RL_PY=python3
+  # Resolver reads GT_RL_PROFILE + explicit members + optional GT_RL_PROFILE_AVAILABLE
+  # from the environment; prints `export GT_X=...` on success, or GT_RL_PREFLIGHT_ABORT
+  # to stderr and a non-zero exit when the profile is partially unavailable.
+  if _GT_RL_EXPORTS="$("${_GT_RL_PY}" -m groundtruth.runtime.rl_profile --emit-exports)"; then
+    eval "${_GT_RL_EXPORTS}"
+    echo "GT_RL_PROFILE=${GT_RL_PROFILE} fan-out: ${_GT_RL_EXPORTS//$'\n'/ }"
+  else
+    echo "FATAL(GT_RL_PROFILE=${GT_RL_PROFILE}): RL-profile resolver aborted (fail-closed)" \
+         "— a requested member capability is unavailable; refusing to spend model budget." >&2
+    exit 1
+  fi
+  unset _GT_RL_PY _GT_RL_EXPORTS
+fi
 
 # Build the canonical `--ae` array. Each entry honors a host-side override but
 # defaults to the architecture-of-record value.
@@ -90,6 +121,27 @@ GT_AE_ARGS=(
   #    when it TOUCHES that block's target). Default OFF (byte-identical): the D7 counts
   #    drive live severity-boost + skip, so ships behind a flag until measured. ──
   --ae "GT_D7_RELATEDNESS=${GT_D7_RELATEDNESS:-0}"
+
+  # ── B-19/B-20 contract enrichment + B-3 gateway edit bridges. Behavioral flags,
+  #    default OFF in-code (byte-identical); forwarded so they are enableable in prod.
+  #    B-19 mode-conditions the [CALLERS] 'preserve' narration (suppress on ADD, emit a
+  #    signature-delta on an intentional change); B-20 adds the bilateral [CONSUMED]
+  #    caller-consumption line; B-3 reconstructs changed_files + edit_before_after so the
+  #    Gateway's patch_delta producer becomes reachable on an edit turn. ──
+  --ae "GT_CONTRACT_MODE=${GT_CONTRACT_MODE:-0}"
+  --ae "GT_CONTRACT_BILATERAL=${GT_CONTRACT_BILATERAL:-0}"
+  --ae "GT_GATEWAY_EDIT_BRIDGES=${GT_GATEWAY_EDIT_BRIDGES:-0}"
+
+  # ── B-16/B-17 RL-profile trio that had NO --ae entry (Brief-F4). The resolver above
+  #    EXPORTS these host-side, but pier DROPS host env — only GT_AE_ARGS crosses into
+  #    the container. Without them, a GT_RL_PROFILE run activated only 8/11 members on
+  #    any caller that splices ONLY GT_AE_ARGS (the codespace witness path), shipping an
+  #    INCOHERENT pair (GT_GATEWAY_NATIVE=1 with GT_GATEWAY dark). Forward them here so
+  #    THIS block is the single source (don't rely on callers). Default 0 → byte-identical
+  #    when GT_RL_PROFILE is unset; the in-container reads treat 0/'' as OFF. ──
+  --ae "GT_GATEWAY=${GT_GATEWAY:-0}"
+  --ae "GT_EDIT_CHECK=${GT_EDIT_CHECK:-0}"
+  --ae "GT_VERIFY_EXECUTE=${GT_VERIFY_EXECUTE:-0}"
 
   # ── Deep 8-dp telemetry sinks (CLAUDE.md mandate) -> host-mounted /gt_out ─────
   # Without these the in-container producers default to /tmp/* and DIE with the

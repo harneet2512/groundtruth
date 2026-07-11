@@ -44,7 +44,23 @@ _TEST_BASENAME_RE = re.compile(
     r"|(^.*Test\.java$)|(.*_spec\.rb$)|(^conftest\.py$)",
     re.IGNORECASE,
 )
-_TEST_DIR_RE = re.compile(r"(^|/)(tests?|spec|__tests__|testing)(/|$)", re.IGNORECASE)
+# Seam-F7 (bounce 2026-07-10): SINGLE-SOURCE the test-DIR segment set from the delivery
+# path policy so this leak predicate and the delivery excluder can NOT diverge. path_policy
+# deliberately REMOVED `testing` (Fable P11: production-ambiguous — numpy/testing, Django
+# shipped test UTILITIES, Go `testing` helpers are real SOURCE), so a legit `numpy/testing/
+# utils.py` fact is no longer whole-dropped at the chokepoint. The local fallback MIRRORS
+# path_policy exactly (no `testing`) for the in-container import-absent case. Leak=0 is
+# preserved: the basename markers below still catch `testing/test_x.py`, and the `tests`/
+# `spec`/etc. segments are unchanged.
+try:
+    from groundtruth.delivery.path_policy import _TEST_DIR_SEGMENTS as _PP_TEST_DIR_SEGMENTS
+except Exception:  # noqa: BLE001 — path_policy absent: local mirror (Fable P11: no `testing`)
+    _PP_TEST_DIR_SEGMENTS = frozenset({
+        "test", "tests", "__tests__", "__test__", "__tests", "spec", "specs", "e2e"})
+_TEST_DIR_RE = re.compile(
+    r"(^|/)(" + "|".join(re.escape(s) for s in sorted(_PP_TEST_DIR_SEGMENTS)) + r")(/|$)",
+    re.IGNORECASE,
+)
 
 # --- firewall line patterns --------------------------------------------------
 _RE_CMD_ECHO = re.compile(r"^\s*\$\s")
@@ -79,6 +95,69 @@ _RE_CARGO_THREAD = re.compile(r"thread\s+'[^']*'")
 _RE_RUST_TESTPATH = re.compile(r"\b[\w]+::tests?::[\w:]+")
 _RE_ANY_NODEID = re.compile(r"([\w./\\+\-]+\.(?:py|go|rs|js|jsx|ts|tsx|rb|java))::[\w:.\[\]\-]+")
 
+# --- CANONICAL PROSE leak predicate (single-source; Fable-LIPI round-2, 2026-07-11) --------
+# `contains_test_identity` above is a runner-TRANSCRIPT belt-check (nodeid / test-file path /
+# `def test_` echo) — correct there, because `_strip_case_tokens`/`_final_scrub` already scrub
+# bare names. But ISSUE PROSE is not a scrubbed transcript: a SWE-bench issue names a failing
+# test or assertion by BARE token, in ANY language convention. BOTH model-facing prose surfaces —
+# the seam (`gt_mini_patch._prose_leaks_test_identity`, obligation-resurface) AND the brief
+# (`v1r_brief._obligation_is_leaky`) — import THESE so the two screens cannot DRIFT (round-1 tuned
+# each to its own examples and each missed a different half; this is the fixpoint). Confirmed
+# leaks now caught: `Test_Reconnect`/`TEST_LOGIN` (case+underscore), `assert_eq!` (rust macro),
+# `assertEqual` (seam had no assert leg), `utils.test.ts` (JS/TS file), `crate::tests::fn`,
+# `#[test]`. Word boundaries keep production near-misses (`contest_handler`, `latest_value`,
+# `std::collections`, `shouldRetry`, `Testing*`/`testing*`). Deliberately NOT caught (over-match
+# cost > leak severity, would drop the near-misses): JUnit `shouldX`, mocha `it(`.
+PROSE_TEST_NAME_RE = re.compile(
+    r"(?i:\btest_\w+\b)"                                            # snake, any case: test_x / TEST_X / Test_X
+    r"|(?i:\b\w+_test\b)"                                           # suffix, any case: widget_test / FOO_TEST
+    r"|\bTest[A-Z]\w*\b"                                            # PascalCase (excl. Testing): TestReconnect
+    r"|\btest[A-Z]\w*\b"                                            # camelCase (excl. testing): testShouldReconnect
+    r"|\b\w[\w.\-]*\.(?:test|spec)\.(?:ts|tsx|js|jsx|mjs|cjs)\b"    # JS/TS test file: utils.test.ts
+    r"|[\w/\\+\-]+\.[A-Za-z0-9_]+::[\w.\[\]\-]+"                    # pytest/go nodeid: a/b.py::TestX
+    r"|\b\w+::tests?::\w"                                           # rust test path: crate::tests::fn
+    r"|\btests?[\\/]"                                               # test path segment: tests/ or test/
+    r"|\#\[\s*tests?\b"                                             # rust attribute: #[test]
+    r"|\b(?:it|describe|context)\(\s*['\"]"                         # JS/mocha BDD decl: it('...')
+)
+# Deliberately NOT a leg: bare JUnit-style `shouldReturnX` (camelCase `should\w+`). It collides
+# with legitimate production booleans on the near-miss keep-list (`shouldRetry`/`shouldClose`) and
+# with spaced behavioral prose an obligation SHOULD carry — catching it over-drops real obligations.
+# A discriminator (should + >=3 camel segments) is heuristic; gate that on real DeepSWE issue data,
+# not a guess. Residual documented in the LIPI report.
+# assertion CALL/macro: unittest `assertEqual`, rust `assert_eq!`/`assert_ne!`/`assert!`, a bare
+# `assert(` call. Fable-LIPI round-2 brief Finding-2 (2026-07-11): the tail is now MANDATORY (the
+# `?` is gone) so the bare RFC-2119/EARS verb "assert" — the exact requirement grammar the
+# obligations extractor TARGETS ("the code must assert that …") — is RELEASED, not whole-dropped,
+# while every real assertion form is still caught: `_\w+`→assert_eq!, `[A-Z]\w*`→assertEqual,
+# `!`→assert!, `\s*\(`→assert(. `asserts`/`assertion` never match (a word char follows `assert`,
+# so none of the four legs fire). Leak-safe: a bare verb carries ZERO test identity.
+PROSE_ASSERT_RE = re.compile(r"\bassert(?:_\w+|[A-Z]\w*|!|\s*\()")
+
+
+def prose_leaks_test_identity(text: str) -> bool:
+    r"""True iff PROSE ``text`` carries a test NAME (5 language conventions), a nodeid, a rust test
+    path/attribute, an assertion call/macro, OR a test-DIR file path in ANY convention. For
+    model-facing PROSE surfaces (issue text / obligations) — NOT runner transcripts (use
+    ``contains_test_identity`` there). Fail-closed by construction: the two canonical regexes PLUS
+    the path belt are the ONE source both the seam and the brief screen with, so neither surface
+    can leak a class the other catches.
+
+    Fable-LIPI round-2 seam Finding-1 (2026-07-11): the regex dir leg is only ``\btests?[\\/]`` — it
+    MISSED ``spec/`` ``specs/`` ``__tests__/`` ``e2e/`` etc., so the brief leaked those file paths
+    at step 0 while the seam (which screens with ``_payload_leaks_test_identity``) dropped them —
+    the two prose screens DRIFTED. ``contains_test_identity`` routes each path token through
+    ``_is_test_path`` -> ``_TEST_DIR_RE`` built from path_policy's FULL ``_TEST_DIR_SEGMENTS``, so
+    folding it in single-sources the dir belt with path_policy (the authority) and auto-tracks
+    future segment additions. It fires only on tokens carrying a source extension, so bare
+    production prose (``std::collections``, ``manifest.json``) is untouched."""
+    t = text or ""
+    return bool(
+        PROSE_TEST_NAME_RE.search(t)
+        or PROSE_ASSERT_RE.search(t)
+        or contains_test_identity(t)
+    )
+
 
 def _strip_case_tokens(msg: str) -> str:
     """Replace test-function-name tokens with <test> so a value/error MESSAGE that
@@ -87,13 +166,32 @@ def _strip_case_tokens(msg: str) -> str:
     return _RE_CASE_TOKEN.sub("<test>", msg)
 
 
-def _final_scrub(line: str) -> str:
-    """Fail-closed belt applied to EVERY kept line: no cargo thread-quote, no rust
-    ``::tests::`` path, no ``file::nodeid``, no test-name token survives. Guarantees
-    contains_test_identity(output) is False regardless of runner quirks."""
+# a `path[:line[:col]]` location token (any of the source exts) — used to scrub an EMBEDDED
+# test-file path from a kept value/message line (Fable-LIPI round-2 Invariant-1, 2026-07-11).
+_RE_PATH_LOC = re.compile(
+    r"([\w./\\+\-]+\.(?:py|go|rs|js|jsx|ts|tsx|rb|java))(?::\d+){0,2}")
+
+
+def _scrub_test_path_tokens(line: str, test_files: set[str]) -> str:
+    """Replace any embedded ``path[:line[:col]]`` token whose FILE is a test file — by the ran-set
+    ``test_files`` OR by convention (``_is_test_path`` -> path_policy segments) — with ``<test>``.
+    Closes the mid-line leak the whole-line ``_is_test_path`` guard misses: a kept value/panic line
+    (``right: 3', tests/x.rs:88:5``) keeps its delta but loses the covering test's path. Honors the
+    ran-set so a covering test in a NON-conventional dir (``qa/``) is caught too; a NON-test source
+    frame (``src/pool.rs`` — the where-to-fix) is left untouched."""
+    return _RE_PATH_LOC.sub(
+        lambda m: "<test>" if _is_test_path(m.group(1), test_files) else m.group(0), line)
+
+
+def _final_scrub(line: str, test_files: set[str] | None = None) -> str:
+    """Fail-closed belt applied to EVERY kept line: no cargo thread-quote, no rust ``::tests::``
+    path, no ``file::nodeid``, no embedded test-DIR/ran-set path, no test-name token survives.
+    Guarantees contains_test_identity(output, test_files) is False regardless of runner quirks —
+    including a test path sitting MID-LINE in a kept value comparison (Invariant-1 fix)."""
     line = _RE_CARGO_THREAD.sub("thread", line)
     line = _RE_RUST_TESTPATH.sub("<test>", line)
     line = _RE_ANY_NODEID.sub(r"\1", line)
+    line = _scrub_test_path_tokens(line, test_files or set())
     return _strip_case_tokens(line)
 
 
@@ -176,7 +274,7 @@ def render_covering_failure_native(
     # final fail-closed identity scrub on EVERY line, then de-dupe + cap.
     out: list[str] = []
     for ln in kept:
-        ln = _final_scrub(ln)
+        ln = _final_scrub(ln, tf)
         if ln.strip() and (not out or out[-1] != ln):
             out.append(ln)
     out = out[:_MAX_KEEP_LINES]
@@ -277,7 +375,14 @@ def contains_test_identity(text: str, test_files: list[str] | set[str] | None = 
     """Stage-1 leak guard: True if any test-file path, ``::nodeid``, or ``def test_``
     echo survived onto the model-facing surface. Format D must always be False."""
     t = text or ""
-    if "::" in t and re.search(r"\.\w+::", t):
+    # Seam-F7 (bounce 2026-07-10): the `::` test is NARROWED to a real source-file nodeid
+    # (`file.py::node`, `_RE_ANY_NODEID`) plus a rust module test-path (`crate::tests::fn`,
+    # `_RE_RUST_TESTPATH`). The prior broad `\.\w+::` flagged ANY dotted `::` — false-
+    # positive on production dotted paths (Rust `std.io.Stdout::lock`) that carry 0 test
+    # identity, so a legit fact was whole-dropped at the chokepoint. This is stricter on
+    # false-positives AND catches MORE real leaks (adds the rust `::tests::` form the old
+    # `\.\w+::` missed) — net leak coverage improves, not regresses.
+    if _RE_ANY_NODEID.search(t) or _RE_RUST_TESTPATH.search(t):
         return True
     if _RE_DEF_TEST_ECHO.search(t):
         return True

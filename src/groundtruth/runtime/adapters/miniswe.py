@@ -229,17 +229,33 @@ def seal_delivery(
     parent_hash: str,
     rendered_bytes: bytes,
     renderer_id: str,
+    tool_output_bytes: bytes = b"",
+    boundary: bytes = b"",
     dedup_chain: "set[str] | None" = None,
 ) -> "tuple[EvidenceEnvelope, str]":
     """Stamp a DELIVERED copy of ``env`` and return ``(sealed_copy, new_chain_head)``.
 
     ``rendered_bytes`` are the bytes ACTUALLY appended into the observation:
     ``rendered_bytes_hash`` = their sha256 (law 6, the replay check) and the chain
-    advances via ``chain_hash(parent_hash, rendered_bytes)`` (law 5). The copy is a
-    ``dataclasses.replace`` — fact identity (producer/type/target/fact_id/payload/
-    provenance and thus ``dedup_key``) is UNTOUCHED, so the sealed copy still passes
-    ``evidence_envelope.validate``. ``receipt_state`` starts at ``delivered`` (law 7,
-    level 1) with the delivery-evidence hash validate requires.
+    advances via ``chain_hash(parent_hash, rendered_bytes, tool_output_bytes=...,
+    boundary=...)`` (law 5). The copy is a ``dataclasses.replace`` — fact identity
+    (producer/type/target/fact_id/payload/provenance and thus ``dedup_key``) is
+    UNTOUCHED, so the sealed copy still passes ``evidence_envelope.validate``.
+    ``receipt_state`` starts at ``delivered`` (law 7, level 1) with the
+    delivery-evidence hash validate requires.
+
+    FULL-OBSERVATION CHAIN (B-32, this fix): the chain now commits the base
+    observation, not just the GT delta. ``tool_output_bytes`` are the EXACT base
+    tool-output bytes of the observation this delta is spliced into, and ``boundary``
+    is the message-boundary metadata; both are folded into ``chain_hash`` so two
+    DIFFERENT observations carrying identical GT deltas produce DIFFERENT chain heads
+    (observation-prefix / TITO-replay integrity). They default to ``b""`` — the
+    DOCUMENTED "seam not yet wired" state: until the seam supplies the base
+    observation the chain degrades EXPLICITLY to the GT-delta-only commitment. This is
+    NOT a model-facing byte change (the chain head is audit metadata, never appended).
+    THE SEAM WIRING (Fable) must pass ``tool_output_bytes`` = the exact base tool
+    output the delta is appended into, and ``boundary`` = the message-boundary
+    descriptor for that splice.
 
     THE DELIVERY COMMIT (F1, bounce 2026-07-10): when ``dedup_chain`` (the episode's
     ``delivered_dedup`` set) is passed, the fact's ``dedup_key`` is stamped HERE — at
@@ -247,7 +263,10 @@ def seal_delivery(
     READS the chain, so a produced-but-dropped fact (arbitration loss, leak-guard
     drop, law-8 budget drop) is deferred and re-offered, never destroyed."""
     rbh = hashlib.sha256(rendered_bytes).hexdigest()
-    new_head = chain_hash(parent_hash, rendered_bytes)
+    new_head = chain_hash(
+        parent_hash, rendered_bytes,
+        tool_output_bytes=tool_output_bytes, boundary=boundary,
+    )
     if dedup_chain is not None:
         dedup_chain.add(env.dedup_key)
     sealed = dataclasses.replace(
@@ -352,14 +371,33 @@ def _entity_matches(kind: str, entity: str, text: str) -> bool:
 def update_receipts(
     deliveries: "list[EvidenceEnvelope]",
     *,
-    observed_text: str = "",
+    policy_text: str = "",
     next_action_cmd: str = "",
+    env_output: str = "",
+    observed_text: str = "",
 ) -> "list[EvidenceEnvelope]":
     """Promote each recorded delivery's ``receipt_state`` from THIS turn's evidence
     (law 7, levels 1-3):
 
-      * level 2 REFERENCED — a later message NAMES a delivered entity (``observed_text``).
-      * level 3 ACTED — the next tool action TARGETS a delivered entity (``next_action_cmd``).
+      * level 2 REFERENCED — the POLICY's own message NAMES a delivered entity
+        (``policy_text`` — the agent's assistant/reasoning turn).
+      * level 3 ACTED — the POLICY's next tool CALL TARGETS a delivered entity
+        (``next_action_cmd`` — the command the agent chose to run).
+
+    B-13 (this fix): a receipt may be earned ONLY from POLICY-PRODUCED evidence — the
+    agent's own message (``policy_text``) or its own tool call (``next_action_cmd``) —
+    NEVER from environment/tool OUTPUT. Previously the seam fed tool output into the
+    referencing channel, so an unrelated ``ls``/``grep`` result that merely NAMES a
+    delivered path false-promoted the receipt to REFERENCED without the policy ever
+    referencing or acting on the evidence — a spurious reward signal. ``env_output``
+    is accepted so the seam can pass the environment's tool output EXPLICITLY, but it
+    is structurally NEVER consulted for promotion. ``observed_text`` is the DEPRECATED
+    alias the pre-fix seam used to pass tool output; it is likewise treated as
+    environment output and NEVER promotes, so an un-migrated seam degrades EXPLICITLY
+    to the correct (no-false-promotion) behavior rather than crashing. THE SEAM WIRING
+    (Fable) must migrate ``observed_text=<tool output>`` to ``env_output=<tool
+    output>`` and pass ``policy_text=<the agent's own assistant message>`` for the
+    REFERENCED signal.
 
     ACTED dominates REFERENCED. Monotone (never downgrades). Cheap and deterministic
     — no graph, no time — but NEVER raw substring (F2, bounce 2026-07-10): symbols
@@ -368,14 +406,19 @@ def update_receipts(
     ``get``⊂``target``, ``run``⊂``running``, and a same-basename file in a different
     directory can no longer inflate a receipt. Returns a NEW list of copies
     (``dataclasses.replace``); the input is not mutated."""
-    otext = observed_text or ""
+    ptext = policy_text or ""
     cmd = next_action_cmd or ""
+    # B-13: environment/tool OUTPUT is NEVER a promotion source. env_output and the
+    # deprecated observed_text alias are accepted (so the seam can pass tool output
+    # explicitly / an un-migrated seam does not crash) but are intentionally NOT read
+    # for promotion — only ptext (policy message) and cmd (policy action) are.
+    _ = (env_output, observed_text)
     out: list[EvidenceEnvelope] = []
     for env in deliveries:
         cur = _RECEIPT_ORDER.get(env.receipt_state, 0)
         ents = _delivered_entities(env)
         acted = any(_entity_matches(k, e, cmd) for k, e in ents)
-        referenced = any(_entity_matches(k, e, otext) for k, e in ents)
+        referenced = any(_entity_matches(k, e, ptext) for k, e in ents)
         new_state = env.receipt_state
         if acted and cur < _RECEIPT_ORDER[RECEIPT_ACTED]:
             new_state = RECEIPT_ACTED

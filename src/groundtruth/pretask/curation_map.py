@@ -36,6 +36,7 @@ LLM-free, $0, pure SQL over a read-only graph.db.
 """
 from __future__ import annotations
 
+import json
 import os
 import re as _re
 import sqlite3
@@ -240,6 +241,86 @@ def _nodes_have_language(conn: sqlite3.Connection) -> bool:
     except sqlite3.Error:
         return False
     return "language" in cols
+
+
+# ---------------------------------------------------------------------------
+# B-24: edges.metadata is POLYMORPHIC — a JSON object on API_CALL edges
+# (``{"route":"/x","method":"GET"}``) OR a ``;``-separated ``key=value`` string on
+# promoted CALLS (``receiver_type=UserRepo;dataflow=fetch;usage=return``). The Go
+# indexer normalizes both into the derived ``edge_metadata(edge_id,key,value,
+# schema_version)`` sub-table via ONE canonical parser (gt-index/internal/store/
+# edge_metadata.go::ParseEdgeMetadata). Consumers query that table instead of
+# regex/``LIKE`` on the raw string; on an OLD graph.db (table absent/empty) they fall
+# back to :func:`parse_edge_metadata` — the byte-faithful Python twin of the Go parser.
+# ---------------------------------------------------------------------------
+def _json_scalar_str(v: object) -> str:
+    """Render a decoded JSON scalar as a stable string (twin of Go jsonScalarString).
+    ``bool`` BEFORE ``int`` (``isinstance(True, int)`` is True in Python); an integer
+    float renders without a trailing ``.0``; non-scalars are re-marshalled, never dropped."""
+    if isinstance(v, str):
+        return v
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, int):
+        return str(v)
+    if isinstance(v, float):
+        return str(int(v)) if v.is_integer() else repr(v)
+    if v is None:
+        return ""
+    try:
+        return json.dumps(v)
+    except (TypeError, ValueError):
+        return str(v)
+
+
+def parse_edge_metadata(raw: str) -> dict[str, str]:
+    """Parse a raw ``edges.metadata`` value into a normalized ``key -> value`` map.
+
+    The Python twin of the Go ``ParseEdgeMetadata`` (B-24): total + deterministic — an
+    empty / malformed input yields ``{}`` (correct-or-quiet), NEVER raises. A leading
+    ``{`` selects JSON-object parsing (scalar values stringified); otherwise the value is
+    split on ``;`` into ``key=value`` segments (an empty key or a segment with no ``=`` is
+    skipped, never fabricated). Used as the fallback when the derived ``edge_metadata``
+    table is absent/empty on an old graph.db."""
+    out: dict[str, str] = {}
+    s = (raw or "").strip()
+    if not s:
+        return out
+    if s.startswith("{"):
+        try:
+            obj = json.loads(s)
+        except (ValueError, TypeError):
+            obj = None
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                key = str(k).strip()
+                if not key:
+                    continue
+                out[key] = _json_scalar_str(v)
+            return out
+        # Malformed JSON -> fall through to key=value parsing (parity with Go).
+    for seg in s.split(";"):
+        seg = seg.strip()
+        if not seg:
+            continue
+        eq = seg.find("=")
+        if eq <= 0:
+            continue  # no key, or empty key — skip, never fabricate a field
+        key = seg[:eq].strip()
+        if not key:
+            continue
+        out[key] = seg[eq + 1:]
+    return out
+
+
+def _edge_metadata_ready(conn: sqlite3.Connection) -> bool:
+    """True iff the normalized ``edge_metadata`` sub-table exists AND is populated (B-24).
+    Absent OR empty (old graph.db, or a db indexed before the sub-table was populated) ->
+    consumers fall back to parsing the raw ``edges.metadata`` string (correct-or-quiet)."""
+    try:
+        return conn.execute("SELECT 1 FROM edge_metadata LIMIT 1").fetchone() is not None
+    except sqlite3.Error:
+        return False
 
 # 1-hop neighbor cap per direction. RepoGraph: tight 1-hop beats wide dumps.
 # Kept as the legacy flat cap so _neighbors() and explicit max_neighbors callers
@@ -457,11 +538,18 @@ def _node_ids(conn: sqlite3.Connection, file_path: str, name: str) -> list[int]:
     if not norm_fp:
         return []
     try:
+        # Graph-F7 (2026-07-10): the bare ``LIKE '%'||norm_fp`` had no path boundary, so
+        # focus ``app/db.py`` also unioned ``webapp/db.py`` (a foreign file whose name
+        # merely ENDS with the focus key), blending another file's nodes into the map.
+        # Keep the witness-twin suffix tolerance (a genuine nested ``src/app/db.py`` is a
+        # real path-boundary suffix and must still match) but require the boundary: an
+        # EXACT match OR a ``/``-delimited suffix. Structural; no task/file-specific logic.
         rows = conn.execute(
             "SELECT id FROM nodes "
-            "WHERE REPLACE(file_path, '\\', '/') LIKE ? AND name = ? "
+            "WHERE (REPLACE(file_path, '\\', '/') = ? "
+            "       OR REPLACE(file_path, '\\', '/') LIKE ?) AND name = ? "
             "AND label IN ('Function','Method')",
-            (f"%{norm_fp}", name),
+            (norm_fp, f"%/{norm_fp}", name),
         ).fetchall()
     except sqlite3.Error:
         return []
@@ -735,16 +823,32 @@ def _focus_depth_rels(
     # residual. The CALLS edge is itself a FACT (it has the dataflow tag only
     # because the promote pass resolved both endpoints), so it joins the
     # DATA_FLOW kind. Metadata-annotation read; no rank effect.
-    try:
-        ann_rows = conn.execute(
+    #
+    # B-24: detect the dataflow annotation via the normalized ``edge_metadata`` sub-table
+    # (``em.key = 'dataflow'``) instead of a raw ``metadata LIKE '%dataflow=%'`` — the
+    # LIKE also matched a stray ``…dataflow=`` substring inside another key's value and
+    # could not tell ``dataflow=x`` from ``no_dataflow=x``. Fall back to the raw-string
+    # LIKE when the table is absent/empty (old graph.db) — byte-identical to before.
+    if _edge_metadata_ready(conn):
+        ann_sql = (
+            f"SELECT 'DATA_FLOW', nt.name, nt.file_path, {conf_sel} "
+            f"FROM edges e JOIN nodes nt ON e.target_id = nt.id "
+            f"JOIN edge_metadata em ON em.edge_id = e.id AND em.key = 'dataflow' "
+            f"WHERE e.source_id IN ({placeholders}) AND e.type = 'CALLS' "
+            f"AND LOWER(TRIM(e.resolution_method)) IN ({_det_in}) "
+            f"AND nt.is_test = 0 AND nt.name IS NOT NULL"
+        )
+    else:
+        ann_sql = (
             f"SELECT 'DATA_FLOW', nt.name, nt.file_path, {conf_sel} "
             f"FROM edges e JOIN nodes nt ON e.target_id = nt.id "
             f"WHERE e.source_id IN ({placeholders}) AND e.type = 'CALLS' "
             f"AND e.metadata LIKE '%dataflow=%' "
             f"AND LOWER(TRIM(e.resolution_method)) IN ({_det_in}) "
-            f"AND nt.is_test = 0 AND nt.name IS NOT NULL",
-            node_ids,
-        ).fetchall()
+            f"AND nt.is_test = 0 AND nt.name IS NOT NULL"
+        )
+    try:
+        ann_rows = conn.execute(ann_sql, node_ids).fetchall()
         rows.extend(ann_rows)
     except sqlite3.Error:
         pass
@@ -752,6 +856,14 @@ def _focus_depth_rels(
     cands: list[DepthRel] = []
     for kind, tgt_name, tgt_file, conf in rows:
         if not tgt_name:
+            continue
+        # Graph-F4 (LEAK FAMILY, 2026-07-10): the SQL gate is only ``nt.is_test = 0``,
+        # but a TEST/DEMO file (``tests/helper.py``) or a VENDORED file
+        # (``node_modules/…``) can carry is_test=0 (a stale/frozen graph, or a helper
+        # module the indexer never flagged). The sibling ``_neighbors`` already drops
+        # those file-classes before render; do the SAME here so a depth-rel never
+        # steers the agent to edit a test/vendored file. Parity with curation_map:665.
+        if _is_test_or_demo(tgt_file or "") or _is_vendored_path(tgt_file or ""):
             continue
         try:
             conf_f = float(conf) if conf is not None else 0.0

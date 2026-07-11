@@ -57,7 +57,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from groundtruth.delivery.path_policy import is_deliverable
-from groundtruth.pretask.curation_map import DETERMINISTIC_RESOLUTION_METHODS
+from groundtruth.pretask.curation_map import (
+    DETERMINISTIC_RESOLUTION_METHODS,
+    parse_edge_metadata,
+)
 from groundtruth.runtime.covering_runner import _connect_ro, _edge_columns
 from groundtruth.runtime.episode_state import EpisodeState
 from groundtruth.runtime.evidence_envelope import (
@@ -70,6 +73,7 @@ from groundtruth.runtime.evidence_envelope import (
     EvidenceEnvelope,
 )
 from groundtruth.runtime.evidence_envelope import validate as _validate_envelope
+from groundtruth.runtime.fact_registry import renderable as _renderable
 from groundtruth.runtime.native_render import render_covering_failure_native
 
 # Producer engines (traces / change_surface / patch_delta) are OPTIONAL module-scope
@@ -103,6 +107,10 @@ __all__ = [
     "classify_command",
     "normalize_search",
     "search_pattern",
+    # B-12 timing/freshness routing + B-21 revision-scoped latch key
+    "route_delivery",
+    "delivery_latch_key",
+    "ROUTE_DELIVER", "ROUTE_DEFER", "ROUTE_EXPIRED_LATE", "ROUTE_STALE",
     # kinds
     "KIND_SEARCH", "KIND_VIEW", "KIND_EDIT", "KIND_TEST", "KIND_SUBMIT", "KIND_OTHER",
     # outcome states
@@ -648,13 +656,19 @@ def _ledger_record(state: GatewayState, sym: str, idx: int, outcome: str) -> Non
 
 
 # Cache keyed on (path, mtime_ns, size) so a graph rebuilt/updated mid-run gets a
-# fresh revision hash instead of a stale cached one.
+# fresh revision hash instead of a stale cached one. Used ONLY for the legacy file-hash
+# FALLBACK (an old graph.db without project_meta.post_revision) — the current-binary path
+# reads the LOGICAL revision from project_meta live (B-11), never this byte-hash.
 _GRAPH_REV_CACHE: dict[tuple[str, int, int], str] = {}
 
 
-def _graph_revision(state: GatewayState) -> str:
-    if state.graph_revision:
-        return state.graph_revision
+def _graph_revision_filehash(state: GatewayState) -> str:
+    """LEGACY FALLBACK ONLY (an old graph.db with no ``project_meta.post_revision``): the
+    truncated sha256 of the graph.db file bytes, cached on the file stat. WAL-BLIND by
+    construction — a WAL-committed reindex that leaves the main file bytes unchanged is
+    invisible here (B-11). The current binary stamps ``project_meta.post_revision`` and
+    :func:`_read_meta_revisions` reads it LIVE, so this path is reached only on a
+    pre-B-29 db."""
     db = state.graph_db or ""
     if not db:
         return ""
@@ -675,6 +689,122 @@ def _graph_revision(state: GatewayState) -> str:
         rev = ""
     _GRAPH_REV_CACHE[key] = rev
     return rev
+
+
+def _read_meta_revisions(state: GatewayState) -> tuple[str, dict[str, str]]:
+    """B-11/B-29: read the LIVE logical revision from ``project_meta`` (WAL-visible), never
+    a byte-hash of the graph.db file. Returns ``(post_revision, {surface: subrev})``:
+
+    * ``post_revision`` — the COMPOSITE content revision over ALL fact-producing surfaces
+      (nodes · edges · properties · assertions · closure · cochanges · content_fts · …),
+      so a same-span body / property / docstring edit that leaves nodes+edges byte-
+      identical STILL moves it (B-29). ``""`` when the db/table is absent (old graph.db).
+    * ``{surface: subrev}`` — the per-surface sub-revisions (``subrev_<surface>`` keys),
+      so a consumer keys per-fact-class freshness on ONLY the surfaces a fact depends on.
+
+    A LIVE query on a fresh read-only connection (NOT the stat-keyed file cache), so a
+    WAL-committed reindex is seen the moment it commits. Never raises."""
+    db = state.graph_db or ""
+    if not db or not os.path.isfile(db):
+        return "", {}
+    con = _connect_ro(db)
+    if con is None:
+        return "", {}
+    try:
+        rows = con.execute(
+            "SELECT key, value FROM project_meta "
+            "WHERE key = 'post_revision' OR key LIKE 'subrev_%'"
+        ).fetchall()
+    except sqlite3.Error:
+        return "", {}
+    finally:
+        con.close()
+    post = ""
+    subs: dict[str, str] = {}
+    for k, v in rows:
+        ks = str(k or "")
+        if ks == "post_revision":
+            post = str(v or "")
+        elif ks.startswith("subrev_"):
+            subs[ks[len("subrev_"):]] = str(v or "")
+    return post, subs
+
+
+# Per-FACT-CLASS (evidence_type) -> the graph SURFACES whose sub-revision (subrev_<surface>)
+# a fact of that CLASS depends on (B-29, keyed to the fact_registry freshness_deps translated
+# to the DB's surface names). Graph-F3 (bounce 2026-07-10): keyed by the shipped
+# ``evidence_type``, NOT the PRODUCER — a producer emits SEVERAL classes with DIFFERENT deps
+# (``patch_delta`` emits ``signature_mismatch``/``companion_surface`` = nodes+edges AND
+# ``cochange_partner`` = nodes+edges+COCHANGES), so keying per-producer shipped a stale
+# cochange fact as fresh. A fact's ``valid_until`` is a composite over ONLY these sub-revs,
+# so a cochange-surface change invalidates a cochange fact WITHOUT churning a def-partition
+# fact that depends only on nodes+edges. A dynamic ``missing_role:<role>`` is normalized to
+# its base. A class NOT listed (``""`` public shim) falls back to the whole-graph token.
+_FACTCLASS_FRESHNESS_SURFACES: dict[str, tuple[str, ...]] = {
+    "def_ref_partition": ("nodes", "edges"),
+    "name_fold": ("nodes", "edges"),
+    "wrong_surface": ("nodes", "edges"),
+    "trace_frame": ("nodes", "edges"),
+    "signature_mismatch": ("nodes", "edges"),
+    "companion_surface": ("nodes", "edges"),
+    "cochange_partner": ("nodes", "edges", "cochanges"),
+    "body_concept": ("nodes", "edges", "content_fts"),
+    "new_file_destination": ("nodes", "edges", "closure"),
+    "missing_role": ("nodes", "edges", "closure"),
+}
+
+# Graph-F3: PATCH-bound fact classes — freshness is the working-tree PATCH, not any GRAPH
+# surface (fact_registry dep = patch_rev). The Gateway has no patch-revision surface and
+# these facts are produced AND delivered on the SAME event (re-run by the seam each time),
+# so their ``valid_until`` is EMPTY: never falsely graph-staled (a graph change must not
+# discard a verdict computed against the patch). ``covering_verdict`` is the covering RED.
+_PATCH_BOUND_FACTCLASSES: frozenset[str] = frozenset({"covering_verdict"})
+
+
+def _revisions_for(state: GatewayState, fact_class: str) -> tuple[str, str]:
+    """``(graph_revision, valid_until)`` for a fact of ``fact_class`` (B-11/B-29/Graph-F3).
+
+    ``graph_revision`` = the live ``project_meta.post_revision`` (composite), or the legacy
+    file hash on an old graph.db. ``valid_until`` = a deterministic composite over ONLY the
+    ``subrev_<surface>`` keys this FACT CLASS depends on (per
+    :data:`_FACTCLASS_FRESHNESS_SURFACES`), so freshness is PER-FACT-CLASS: a change to a
+    depended sub-rev moves it; a change to an unrelated surface does not.
+
+    Graph-F3: keyed by the shipped ``evidence_type`` (a ``missing_role:<role>`` normalized
+    to its base), NOT the producer, so two classes of the same producer with different deps
+    are keyed independently. A PATCH-bound class (:data:`_PATCH_BOUND_FACTCLASSES`) gets an
+    EMPTY ``valid_until`` (patch-bound, never graph-staled). Falls back to ``graph_revision``
+    when the db has no sub-revisions (old graph.db) or the class has no surface mapping —
+    preserving the legacy invariant ``valid_until == graph_revision``. An explicit
+    ``state.graph_revision`` override wins (used by tests / a caller that pins the revision)."""
+    if state.graph_revision:
+        return state.graph_revision, state.graph_revision
+    post, subs = _read_meta_revisions(state)
+    graph_rev = post or _graph_revision_filehash(state)
+    fc = (fact_class or "").strip().split(":", 1)[0]  # normalize missing_role:<role>
+    if fc in _PATCH_BOUND_FACTCLASSES:
+        return graph_rev, ""  # patch-bound: never graph-staled
+    surfaces = _FACTCLASS_FRESHNESS_SURFACES.get(fc)
+    if not surfaces or not subs:
+        return graph_rev, graph_rev
+    parts: list[str] = []
+    have = False
+    for s in surfaces:
+        sv = subs.get(s, "")
+        if sv:
+            have = True
+        parts.append(s + "=" + sv)
+    if not have:
+        return graph_rev, graph_rev
+    vu = hashlib.sha256("\x00".join(parts).encode("utf-8")).hexdigest()[:16]
+    return graph_rev, vu
+
+
+def _graph_revision(state: GatewayState) -> str:
+    """The live composite graph revision (B-11) — WAL-visible ``project_meta.post_revision``
+    or the legacy file hash. Back-compat public shim; the per-fact freshness token is
+    :func:`_revisions_for`."""
+    return _revisions_for(state, "")[0]
 
 
 # --------------------------------------------------------------------------- #
@@ -727,29 +857,56 @@ def _det_in_sql() -> str:
     return "','".join(sorted(DETERMINISTIC_RESOLUTION_METHODS))
 
 
-_RECEIVER_RE = re.compile(r"(?:^|;)\s*receiver_type=([A-Za-z_][A-Za-z0-9_.]*)")
+def _edge_metadata_ready(con) -> bool:
+    """True iff the normalized ``edge_metadata`` sub-table exists AND is populated (B-24).
+    Absent/empty (old graph.db) -> receiver_type falls back to parsing edges.metadata."""
+    try:
+        return con.execute("SELECT 1 FROM edge_metadata LIMIT 1").fetchone() is not None
+    except sqlite3.Error:
+        return False
 
 
 def _fact_callers(con, def_ids: list[int]) -> tuple[list[dict], list[str]]:
     """FACT-tier (deterministic method AND conf>=0.7), NON-test callers of the def ids,
-    with receiver_type provenance parsed from edges.metadata when present (W-B). Leak-safe:
-    is_test=0 on both ends; caller file leak-filtered by the consumer."""
+    with receiver_type provenance (W-B).
+
+    B-24: receiver_type is read from the NORMALIZED ``edge_metadata`` sub-table
+    (``SELECT value FROM edge_metadata WHERE edge_id=? AND key='receiver_type'``, joined)
+    rather than a regex on the polymorphic ``edges.metadata`` string; on an old graph.db
+    (table absent/empty) it falls back to :func:`parse_edge_metadata` on the raw string —
+    byte-identical to the prior behaviour. Leak-safe: is_test=0 on both ends; caller file
+    leak-filtered by the consumer."""
     cols = _edge_columns(con)
     if not {"resolution_method"}.issubset(cols):
         return [], []
     has_conf = "confidence" in cols
     has_meta = "metadata" in cols
     conf_gate = f"AND COALESCE(e.confidence,0) >= {_FACT_CONF_FLOOR} " if has_conf else ""
-    meta_sel = "e.metadata" if has_meta else "NULL"
     qmarks = ",".join("?" * len(def_ids))
-    try:
-        rows = con.execute(
+    use_em = _edge_metadata_ready(con)
+    if use_em:
+        # receiver_type straight from the normalized sub-table. LEFT JOIN so a caller
+        # edge with no receiver_type still returns its caller row exactly once — the
+        # (edge_id,key) PK guarantees at most one receiver_type row per edge.
+        sql = (
+            f"SELECT ns.name, ns.file_path, e.source_line, em.value "
+            f"FROM edges e JOIN nodes ns ON ns.id=e.source_id "
+            f"LEFT JOIN edge_metadata em ON em.edge_id=e.id AND em.key='receiver_type' "
+            f"WHERE e.target_id IN ({qmarks}) AND e.type='CALLS' "
+            f"AND COALESCE(ns.is_test,0)=0 "
+            f"AND LOWER(TRIM(e.resolution_method)) IN ('{_det_in_sql()}') {conf_gate}"
+        )
+    else:
+        meta_sel = "e.metadata" if has_meta else "NULL"
+        sql = (
             f"SELECT ns.name, ns.file_path, e.source_line, {meta_sel} "
             f"FROM edges e JOIN nodes ns ON ns.id=e.source_id "
             f"WHERE e.target_id IN ({qmarks}) AND e.type='CALLS' "
             f"AND COALESCE(ns.is_test,0)=0 "
-            f"AND LOWER(TRIM(e.resolution_method)) IN ('{_det_in_sql()}') {conf_gate}",
-            def_ids).fetchall()
+            f"AND LOWER(TRIM(e.resolution_method)) IN ('{_det_in_sql()}') {conf_gate}"
+        )
+    try:
+        rows = con.execute(sql, def_ids).fetchall()
     except sqlite3.Error:
         return [], []
     callers: list[dict] = []
@@ -757,9 +914,12 @@ def _fact_callers(con, def_ids: list[int]) -> tuple[list[dict], list[str]]:
     for name, fp, line, meta in rows:
         callers.append({"name": name or "", "file": fp or "", "line": int(line or 0)})
         if meta:
-            m = _RECEIVER_RE.search(str(meta))
-            if m:
-                receivers.add(m.group(1))
+            if use_em:
+                receivers.add(str(meta))  # em.value IS the normalized receiver_type
+            else:
+                rt = parse_edge_metadata(str(meta)).get("receiver_type")
+                if rt:
+                    receivers.add(rt)
     callers.sort(key=lambda c: (c["file"], c["line"], c["name"]))
     return callers, sorted(receivers)
 
@@ -802,22 +962,60 @@ def _has_content_fts(con) -> bool:
         return False
 
 
+def _content_passages_ready(con) -> bool:
+    """True iff BOTH ``content_passages`` and its FTS twin ``content_passages_fts`` exist
+    (B-23). On an old graph.db without them a body-concept match cites the node
+    ``start_line`` (correct-or-quiet)."""
+    try:
+        row = con.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
+            "AND name IN ('content_passages','content_passages_fts')").fetchone()
+    except sqlite3.Error:
+        return False
+    return bool(row) and int(row[0] or 0) == 2
+
+
+def _passage_line(con, node_id: int, sym: str) -> int:
+    """B-23: the ``start_line`` of the EXACT body passage (line) in ``node_id`` that
+    matches ``sym``, so a body-concept hit cites the matching line, not the node
+    ``start_line``. Returns 0 (caller falls back to the node start_line) on any
+    miss/error/absent passage surface."""
+    try:
+        row = con.execute(
+            'SELECT p.start_line, p.end_line, p.content, p.content_hash '
+            'FROM content_passages_fts f JOIN content_passages p ON p.passage_id=f.rowid '
+            'WHERE p.node_id=? AND f.content MATCH ? ORDER BY f.rank LIMIT 1',
+            (node_id, '"' + sym.replace('"', "") + '"')).fetchone()
+    except sqlite3.Error:
+        return 0
+    return int(row[0]) if row and row[0] else 0
+
+
 def _body_rows(con, sym: str, root: str) -> list[tuple]:
     try:
         raw = con.execute(
-            'SELECT n.file_path, n.start_line, n.name, n.label '
+            'SELECT n.id, n.file_path, n.start_line, n.name, n.label '
             'FROM symbol_content_fts f JOIN nodes n ON n.id=f.rowid '
             'WHERE symbol_content_fts MATCH ? AND COALESCE(n.is_test,0)=0 '
             'ORDER BY n.file_path, n.start_line LIMIT 26',
             ('"' + sym.replace('"', "") + '"',)).fetchall()
     except sqlite3.Error:
         return []
+    # B-23: after the symbol_content_fts hit, cite the EXACT matching passage line from
+    # content_passages_fts (fall back to the node start_line when the passage surface is
+    # absent = old db). Probe existence once, not per row.
+    passages_ready = _content_passages_ready(con)
     out = []
-    for fp, ln, name, label in raw:
+    for node_id, fp, ln, name, label in raw:
         rel = _to_repo_rel(fp or "", root)
         if _is_leaky(rel):
             continue
-        out.append((rel, int(ln or 0), name or "", (label or "").lower()))
+        cite = int(ln or 0)
+        if passages_ready:
+            pl = _passage_line(con, int(node_id), sym)
+            if pl:
+                cite = pl
+        out.append((rel, cite, name or "", (label or "").lower()))
     return out
 
 
@@ -945,6 +1143,11 @@ def _mk_add(state: GatewayState, event: ToolEvent, *, fact_kind: str, target: st
     body = [ln for ln in body_lines if not _body_line_leaky(ln)]
     ev = [(f, ln) for (f, ln) in evidence if not _is_leaky(f)]
     conf = _TIER_DEFAULT_CONF.get(tier, 0.5) if confidence is None else float(confidence)
+    # B-11/B-29/Graph-F3: the live composite revision + the PER-FACT-CLASS freshness token (a
+    # composite over ONLY the sub-revs this FACT CLASS — the shipped ``fact_kind`` — depends
+    # on). Keyed by evidence_type, NOT producer, so two classes of one producer stale
+    # independently. valid_until == graph_rev on an old graph.db (no sub-revs).
+    graph_rev, valid_until = _revisions_for(state, fact_kind)
     return EvidenceEnvelope.build(
         producer=producer,
         fact_id=symbol,
@@ -954,7 +1157,8 @@ def _mk_add(state: GatewayState, event: ToolEvent, *, fact_kind: str, target: st
         provenance=tuple(ev),
         confidence=conf,
         tier=tier,
-        graph_revision=_graph_revision(state),
+        graph_revision=graph_rev,
+        valid_until=valid_until,
         preferred_event=_event_pref(event),
         blocking_eligibility=ADVISORY,
         estimated_cost_tokens=(len("\n".join(body)) + 3) // 4,
@@ -965,7 +1169,11 @@ def _mk_add(state: GatewayState, event: ToolEvent, *, fact_kind: str, target: st
 def _def_partition_body(info: dict) -> list[str]:
     lines = [f"def: {fp}:{ln}" for fp, ln in info["def_sites"][:3]]
     if info["callers"]:
-        lines.append(f"fact-tier callers: {len(info['callers'])}")
+        # Graph-F8 (2026-07-10): count DISTINCT callers (name,file), not call-site
+        # EDGES — one caller with two call sites is ONE caller. Parity with
+        # _test_ref_count's COUNT(DISTINCT source_id); _fact_callers has no DISTINCT.
+        n_callers = len({(c.get("name", ""), c.get("file", "")) for c in info["callers"]})
+        lines.append(f"fact-tier callers: {n_callers}")
     if info["receiver_types"]:
         lines.append("resolved callers via receiver type(s): " + ", ".join(info["receiver_types"]))
     if info["test_ref_count"]:
@@ -1206,6 +1414,75 @@ def _produce_covering(event: ToolEvent, state: GatewayState) -> list[EvidenceEnv
 
 
 # --------------------------------------------------------------------------- #
+# DELIVERY ROUTING (B-12 timing + freshness) + the B-21 revision-scoped latch key.
+# --------------------------------------------------------------------------- #
+ROUTE_DELIVER = "deliver"            # on-time, fresh, right decision point -> ship bytes
+ROUTE_DEFER = "defer"                # event < available_at -> too early; re-offer later
+ROUTE_EXPIRED_LATE = "expired_late"  # event > deliver_by -> too late; explicit non-delivery
+ROUTE_STALE = "stale"                # a depended sub-rev changed -> discard/recompute
+
+# The decision-lifecycle order of the coarse observation boundaries. A fact ABOUT an
+# action is useful only AT its own boundary (available_at == deliver_by == preferred_event
+# — fact_registry: earliest_event == deliver_by for every class), so a wrong decision point
+# is strictly BEFORE (defer) or AFTER (expire) that single boundary. ``other`` / unknown
+# maps to step0 so a producer firing on a non-core event still routes deterministically.
+_ROUTE_EVENT_ORDER: dict[str, int] = {
+    EVENT_STEP0: 0, "search": 1, "view": 2, "edit": 3, "test": 4, "submit": 5,
+}
+
+
+def _event_ordinal(name: str) -> int:
+    return _ROUTE_EVENT_ORDER.get((name or "").strip().lower(), 0)
+
+
+def route_delivery(env: EvidenceEnvelope, event: ToolEvent, state: GatewayState) -> str:
+    """B-12: enforce the envelope's timing + freshness as REAL routing. Returns one of
+    :data:`ROUTE_DELIVER` / :data:`ROUTE_DEFER` / :data:`ROUTE_EXPIRED_LATE` /
+    :data:`ROUTE_STALE`; ONLY ``ROUTE_DELIVER`` ships bytes.
+
+    * FRESHNESS (B-29/B-12): the fact's ``valid_until`` is recomputed LIVE from the
+      surfaces its producer depends on; if a depended sub-rev changed since the fact was
+      built (recomputed != stored) it is ``ROUTE_STALE`` — discard/recompute, never deliver
+      a fact computed against a superseded graph.
+    * DEFER: the current event is BEFORE the fact's boundary (available_at) -> too early;
+      the fact is re-offered at a later event (never destroyed).
+    * EXPIRED_LATE: the current event is AFTER the fact's boundary (deliver_by) -> too late
+      to influence the decision -> an EXPLICIT non-delivery (NOT a success), never a late
+      append.
+
+    On the happy path (a fact BUILT and delivered in the SAME ``augment`` call on its own
+    event) available_at == deliver_by == the current event and the live valid_until equals
+    the stored one, so the verdict is ``ROUTE_DELIVER`` — byte-identical to pre-B-12."""
+    # Graph-F3: recompute the live freshness token keyed on the fact CLASS (evidence_type),
+    # matching the build-time key in _mk_add — so a fact stales on ITS OWN depended surfaces.
+    _gr, live_vu = _revisions_for(state, env.evidence_type)
+    if env.valid_until and live_vu and env.valid_until != live_vu:
+        return ROUTE_STALE
+    want = _event_ordinal(env.preferred_event)   # available_at == deliver_by
+    cur = _event_ordinal(event.kind)
+    if cur < want:
+        return ROUTE_DEFER
+    if cur > want:
+        return ROUTE_EXPIRED_LATE
+    return ROUTE_DELIVER
+
+
+def delivery_latch_key(kind: str, file: str, graph_revision: str) -> str:
+    """B-21: the per-``(kind, file, graph_revision)`` delivery-latch key. A per-(kind,file)
+    latch keyed by THIS string RE-PERMITS a refreshed contract for a file when the graph
+    revision changes (a later edit + reindex bumps the revision), so a file's changed
+    contract is no longer PERMANENTLY suppressed by a content-blind boolean latch.
+    Deterministic; the file component is path-normalized so ``./a/b.py`` and ``a/b.py`` key
+    identically. (The Gateway's own cross-event dedup — ``state.delivered_keys`` — is
+    already CONTENT-scoped, so a changed contract re-fires there without noise; this key is
+    the seam's per-(kind,file) contract latch adopts for revision-scoped re-permit.)"""
+    k = (kind or "").strip().lower()
+    f = _norm_fp(file or "")
+    r = (graph_revision or "").strip()
+    return f"{k}\x00{f}\x00{r}"
+
+
+# --------------------------------------------------------------------------- #
 # ENTRY POINT
 # --------------------------------------------------------------------------- #
 def augment(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
@@ -1268,9 +1545,22 @@ def augment(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
     out: list[EvidenceEnvelope] = []
     seen_this_call: set[str] = set()
     for a in additions:
+        # Graph-F2 (bounce 2026-07-10): the fact-registry render invariant, now REAL. An
+        # evidence_type with no registration (directly, via _EVIDENCE_TYPE_ALIASES, or a
+        # base:suffix form) has no declared decision/deliver-by/dose, so it must never
+        # render (correct-or-quiet). Every evidence_type the producers above emit is
+        # registered/aliased, so this is a no-op for real facts and blocks only a
+        # truly-unregistered class (tests pin the full emitted set as renderable).
+        if not _renderable(a.evidence_type):
+            continue
         if _is_leaky(a.target):
             continue
         if _validate_envelope(a):
+            continue
+        # B-12: enforce the envelope's timing + freshness. defer (too early) / expire (too
+        # late) / stale (a depended sub-rev changed) are NOT delivered — only ROUTE_DELIVER
+        # ships. No-op on the happy path (a fact built + delivered on its own event, fresh).
+        if route_delivery(a, event, state) != ROUTE_DELIVER:
             continue
         if a.dedup_key in state.delivered_keys or a.dedup_key in seen_this_call:
             continue

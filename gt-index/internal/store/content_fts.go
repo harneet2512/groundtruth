@@ -2,6 +2,9 @@ package store
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"os"
@@ -11,6 +14,55 @@ import (
 	"unicode"
 	"unicode/utf8"
 )
+
+// passageRec is one addressable body-line span (B-23): the exact line a body-concept match
+// can cite, its tokenized content (for the FTS surface), and a hash of the RAW line (a
+// stable per-span identity that moves when the line's bytes change).
+type passageRec struct {
+	startLine, endLine int
+	content            string // tokenized line (what content_passages_fts indexes)
+	contentHash        string // hex sha256 of the raw source line
+}
+
+// bodyPassages splits a symbol body [startLine,endLine] (1-based, inclusive) into per-line
+// passages that carry content tokens. A line with no content tokens (blank / punctuation-
+// only) is skipped so no empty passage is stored (parity with the symbol_content_fts empty
+// skip). Correct-or-quiet on out-of-range input. Language-agnostic: raw text, no AST.
+func bodyPassages(lines []string, startLine, endLine int) []passageRec {
+	if startLine <= 0 || endLine < startLine || startLine > len(lines) {
+		return nil
+	}
+	if endLine > len(lines) {
+		endLine = len(lines)
+	}
+	var out []passageRec
+	for i := startLine - 1; i < endLine; i++ {
+		raw := lines[i]
+		toks := contentTokens(raw)
+		if toks == "" {
+			continue
+		}
+		sum := sha256.Sum256([]byte(raw))
+		out = append(out, passageRec{
+			startLine:   i + 1,
+			endLine:     i + 1,
+			content:     toks,
+			contentHash: hex.EncodeToString(sum[:]),
+		})
+	}
+	return out
+}
+
+// passagesFTSAvailable reports whether content_passages_fts exists (FTS5 compiled in).
+func (d *DB) passagesFTSAvailable() bool {
+	var n int
+	if err := d.db.QueryRow(
+		"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='content_passages_fts'",
+	).Scan(&n); err != nil {
+		return false
+	}
+	return n > 0
+}
 
 // content_fts.go — B1: the CONTENT surface for behavior-described (stratum-B)
 // localization. Every other localizer surface (the anchor cross-check, nodes_fts,
@@ -217,6 +269,17 @@ func (d *DB) PopulateContentFTS(root string) error {
 	if _, err := d.db.Exec("DELETE FROM symbol_content_fts"); err != nil {
 		return fmt.Errorf("clear symbol_content_fts: %w", err)
 	}
+	// B-23: rebuild the passage surface from scratch too (idempotent). content_passages is a
+	// regular table (always present); content_passages_fts is FTS5-gated.
+	passagesFTS := d.passagesFTSAvailable()
+	if _, err := d.db.Exec("DELETE FROM content_passages"); err != nil {
+		return fmt.Errorf("clear content_passages: %w", err)
+	}
+	if passagesFTS {
+		if _, err := d.db.Exec("DELETE FROM content_passages_fts"); err != nil {
+			return fmt.Errorf("clear content_passages_fts: %w", err)
+		}
+	}
 	// file_path ordered so all of a file's symbols are contiguous (one open per file);
 	// id as the secondary key keeps the insert order deterministic.
 	// is_test = 0: NEVER index test bodies. Test assertion text + FAIL_TO_PASS names
@@ -260,6 +323,29 @@ func (d *DB) PopulateContentFTS(root string) error {
 		tx.Rollback()
 		return fmt.Errorf("prepare content-fts insert: %w", err)
 	}
+	// B-23: passage-identity + passage-FTS inserts share this tx.
+	pStmt, err := tx.Prepare("INSERT INTO content_passages(node_id, start_line, end_line, content, content_hash) VALUES (?, ?, ?, ?, ?)")
+	if err != nil {
+		stmt.Close()
+		tx.Rollback()
+		return fmt.Errorf("prepare content_passages insert: %w", err)
+	}
+	var pftsStmt *sql.Stmt
+	if passagesFTS {
+		if pftsStmt, err = tx.Prepare("INSERT INTO content_passages_fts(rowid, content) VALUES (?, ?)"); err != nil {
+			stmt.Close()
+			pStmt.Close()
+			tx.Rollback()
+			return fmt.Errorf("prepare content_passages_fts insert: %w", err)
+		}
+	}
+	closeStmts := func() {
+		stmt.Close()
+		pStmt.Close()
+		if pftsStmt != nil {
+			pftsStmt.Close()
+		}
+	}
 	curFile := ""
 	var curLines []string
 	for _, r := range pending {
@@ -268,16 +354,32 @@ func (d *DB) PopulateContentFTS(root string) error {
 			curLines = readFileLines(filepath.Join(root, filepath.FromSlash(r.file)))
 		}
 		content := contentTokens(sliceLines(curLines, r.startLine, r.endLine))
-		if content == "" {
-			continue // no body content — leave this symbol out (never an empty row)
+		if content != "" {
+			if _, err := stmt.Exec(r.id, content); err != nil {
+				closeStmts()
+				tx.Rollback()
+				return fmt.Errorf("insert content-fts row for node %d: %w", r.id, err)
+			}
 		}
-		if _, err := stmt.Exec(r.id, content); err != nil {
-			stmt.Close()
-			tx.Rollback()
-			return fmt.Errorf("insert content-fts row for node %d: %w", r.id, err)
+		// B-23: one addressable passage per non-blank body line.
+		for _, ps := range bodyPassages(curLines, r.startLine, r.endLine) {
+			res, err := pStmt.Exec(r.id, ps.startLine, ps.endLine, ps.content, ps.contentHash)
+			if err != nil {
+				closeStmts()
+				tx.Rollback()
+				return fmt.Errorf("insert content_passages row for node %d: %w", r.id, err)
+			}
+			if pftsStmt != nil {
+				pid, _ := res.LastInsertId()
+				if _, err := pftsStmt.Exec(pid, ps.content); err != nil {
+					closeStmts()
+					tx.Rollback()
+					return fmt.Errorf("insert content_passages_fts row for node %d: %w", r.id, err)
+				}
+			}
 		}
 	}
-	stmt.Close()
+	closeStmts()
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit content-fts populate: %w", err)
 	}
@@ -357,16 +459,51 @@ func (d *DB) RepopulateContentFTSForFile(root, relpath string) error {
 		tx.Rollback()
 		return fmt.Errorf("sweep orphan content rows: %w", err)
 	}
+	// B-23: same orphan sweep for the passage surface. Delete the FTS rows FIRST (by the
+	// orphaned passage_ids) so no content_passages_fts row is left dangling, then the
+	// identity rows. Handles this file's stale passages (their node ids were just deleted +
+	// re-inserted fresh) plus any left by a prior reindex — corpus == live nodes.
+	passagesFTS := d.passagesFTSAvailable()
+	if passagesFTS {
+		if _, err := tx.Exec(
+			`DELETE FROM content_passages_fts WHERE rowid IN
+			   (SELECT passage_id FROM content_passages WHERE node_id NOT IN (SELECT id FROM nodes))`,
+		); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("sweep orphan passage-fts rows: %w", err)
+		}
+	}
+	if _, err := tx.Exec(
+		`DELETE FROM content_passages WHERE node_id NOT IN (SELECT id FROM nodes)`,
+	); err != nil {
+		tx.Rollback()
+		return fmt.Errorf("sweep orphan passage rows: %w", err)
+	}
 	abs := filepath.Join(root, filepath.FromSlash(rel))
 	lines := readFileLines(abs) // ONE open for the file's whole symbol set (LIPI BUG 3)
 	for _, r := range pending {
 		content := contentTokens(sliceLines(lines, r.startLine, r.endLine))
-		if content == "" {
-			continue
+		if content != "" {
+			if _, err := tx.Exec("INSERT INTO symbol_content_fts(rowid, content) VALUES (?, ?)", r.id, content); err != nil {
+				tx.Rollback()
+				return fmt.Errorf("insert content row for node %d: %w", r.id, err)
+			}
 		}
-		if _, err := tx.Exec("INSERT INTO symbol_content_fts(rowid, content) VALUES (?, ?)", r.id, content); err != nil {
-			tx.Rollback()
-			return fmt.Errorf("insert content row for node %d: %w", r.id, err)
+		for _, ps := range bodyPassages(lines, r.startLine, r.endLine) {
+			res, err := tx.Exec(
+				"INSERT INTO content_passages(node_id, start_line, end_line, content, content_hash) VALUES (?, ?, ?, ?, ?)",
+				r.id, ps.startLine, ps.endLine, ps.content, ps.contentHash)
+			if err != nil {
+				tx.Rollback()
+				return fmt.Errorf("insert passage row for node %d: %w", r.id, err)
+			}
+			if passagesFTS {
+				pid, _ := res.LastInsertId()
+				if _, err := tx.Exec("INSERT INTO content_passages_fts(rowid, content) VALUES (?, ?)", pid, ps.content); err != nil {
+					tx.Rollback()
+					return fmt.Errorf("insert passage-fts row for node %d: %w", r.id, err)
+				}
+			}
 		}
 	}
 	if err := tx.Commit(); err != nil {

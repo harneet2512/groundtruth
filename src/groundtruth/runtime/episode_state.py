@@ -1,10 +1,22 @@
-"""EpisodeState — the ONE canonical per-run runtime state (W1a, strangler wave).
+"""EpisodeState — the TARGET canonical per-run runtime state (W1a, strangler wave IN PROGRESS).
 
 GT's runtime state was fragmented across ~10 stores: action count tracked in 6
 places, edited-files in 6, the delivered-hash dedup chain in 4, ledgers in 3, the
 probe-stem ledger in 2. This module is the single owner those stores collapse into,
 migrated one at a time via the STRANGLER pattern — each superseded store proven
-byte-identical before it delegates here, no two live owners ever.
+byte-identical before it delegates here.
+
+MIGRATION STATUS (Fable-LIPI round-2 seam Finding-2, 2026-07-11 — do NOT trust an
+un-migrated field as live). Only TWO stores are DELEGATED so far, aliased to the live
+seam owner (``_search_seen is probe_ledger`` and ``_oracle_delivered_hashes is
+delivered_dedup`` in gt_mini_patch): ``probe_ledger`` and ``delivered_dedup``. Every
+OTHER value field below (``action_index`` / ``edited_files`` / ``edited_tokens`` /
+``tested_tokens`` / ``test_count`` / ``nonedit_streak`` / …) is DECLARED for the union
+but is NOT YET the live owner — the seam still counts on ``_action_count`` /
+``_oracle_edited_rels``, and the EpisodeState copy stays 0/empty (a read-view slot for
+W1b/W2, not a source of truth). Wiring a consumer to those BEFORE the writer is migrated
+reads a dead 0. "no two live owners" holds today only because the un-migrated copies are
+inert, not because they were consolidated.
 
 PURE · DETERMINISTIC · LLM-FREE · stdlib-only (+ ``groundtruth.runtime.ledger`` for
 the canonical delivery-ledger handle). No time, no randomness, no network — a

@@ -198,6 +198,42 @@ def test_blast_fact_reader_count_is_field_exact(tmp_path):
     assert "2 verified readers" not in line
 
 
+def test_blast_fact_null_confidence_reader_not_counted(tmp_path):
+    """Graph-F6 (B-26 fail-CLOSED): a READS edge whose ``confidence`` value is NULL is
+    UNVERIFIABLE and must NOT increment the verified-reader count. Pre-fix
+    ``COALESCE(e.confidence,1.0) >= 0.7`` floated a NULL reader to 1.0 and counted it as
+    a verified reader (false authority); ``COALESCE(e.confidence,0.0)`` (parity with the
+    gateway) fails it closed. One real verified reader (0.9) + one NULL-conf reader must
+    render exactly '1 verified reader', never '2'."""
+    db = str(tmp_path / "nullreader.db")
+    conn = sqlite3.connect(db)
+    conn.executescript(_SCHEMA)
+    nodes = [
+        (10, "Class", "Counter", "", "counter.py", 1, 40, "class Counter:", "", 0, 0, "python", None),
+        (1, "Method", "increment", "", "counter.py", 5, 9, "def increment(self):", "", 0, 0, "python", 10),
+        (2, "Method", "value", "", "counter.py", 11, 13, "def value(self) -> int:", "int", 0, 0, "python", 10),
+        (3, "Method", "total", "", "counter.py", 15, 17, "def total(self) -> int:", "int", 0, 0, "python", 10),
+    ]
+    conn.executemany("INSERT INTO nodes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", nodes)
+    conn.execute(
+        "INSERT INTO properties (node_id,kind,value,line,confidence) VALUES (1,'guard_clause','raise: x',6,1.0)"
+    )
+    conn.executemany(
+        "INSERT INTO edges (source_id,target_id,type,resolution_method,confidence,metadata) "
+        "VALUES (?,?,?,?,?,?)",
+        [
+            (1, 10, "WRITES", "promote_write", 0.9, "_count"),       # increment writes _count
+            (2, 10, "READS", "promote_field_read", 0.9, "_count"),    # value reads _count  -> COUNTED
+            (3, 10, "READS", "promote_field_read", None, "_count"),   # NULL conf reader -> NOT counted
+        ],
+    )
+    conn.commit()
+    conn.close()
+    line = contract_line(db, "counter.py", ["increment"])
+    assert "scope writes to _count; 1 verified reader" in line
+    assert "2 verified readers" not in line
+
+
 # ── 2. I2 — DEPTH NEVER ENTERS RANK ─────────────────────────────────────────
 
 
@@ -219,8 +255,8 @@ def test_depth_edges_do_not_change_hub_degree(tmp_path):
     db_without = str(tmp_path / "without.db")
     _make_db(db_with, with_depth=True)
     _make_db(db_without, with_depth=False)
-    _p80_w, deg_with = _hub_degree_fn(db_with)
-    _p80_wo, deg_without = _hub_degree_fn(db_without)
+    _, deg_with = _hub_degree_fn(db_with)
+    _, deg_without = _hub_degree_fn(db_without)
     assert deg_with("counter.py") == deg_without("counter.py")
     # No CALLS edges at all in either graph -> degree is 0 with OR without depth.
     assert deg_with("counter.py") == 0

@@ -2,11 +2,14 @@
 package store
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"os"
 	"sort"
+	"strconv"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -70,6 +73,12 @@ type Closure struct {
 }
 
 // Property represents a structural fact about a code node (guard clause, return shape, etc.)
+//
+// B-22 provenance fields (PropertyID … SourceRevision) carry per-fact identity, span, and
+// authority so a property fact can be receipted/invalidated downstream exactly like an edge.
+// They are DEFAULTED deterministically by fillProvenance() at write time when a caller
+// leaves them zero, so the parser/main path can keep populating only the original five
+// fields (NodeID, Kind, Value, Line, Confidence) and still get full provenance.
 type Property struct {
 	ID         int64
 	NodeID     int64
@@ -77,6 +86,56 @@ type Property struct {
 	Value      string
 	Line       int
 	Confidence float64
+	// B-22 provenance (defaulted at write time when unset):
+	PropertyID         string // stable content-hash fact id (hex sha256 of node_id|kind|value|line)
+	StartLine          int    // span start (defaults to Line)
+	EndLine            int    // span end (defaults to Line)
+	Extractor          string // which extractor produced it (default "treesitter")
+	EvidenceMethod     string // how it was derived (default "ast")
+	TrustTier          string // CERTIFIED/CANDIDATE/SPECULATIVE (default tierForConfidence(Confidence))
+	VerificationStatus string // default "unverified"
+	SourceRevision     string // composite graph revision the fact was mined under (back-filled post-hash)
+}
+
+// propertyFactID is the stable, id-INDEPENDENT-of-AUTOINCREMENT content id of a property
+// fact: hex SHA-256 of the length-framed (node_id, kind, value, line) tuple. Deterministic,
+// collision-safe framing (revEncodeRecord). Distinct facts get distinct ids; the same fact
+// re-extracted gets the same id, so a consumer can dedup/receipt it.
+func propertyFactID(nodeID int64, kind, value string, line int) string {
+	sum := sha256.Sum256(revEncodeRecord(
+		strconv.FormatInt(nodeID, 10), kind, value, strconv.Itoa(line),
+	))
+	return hex.EncodeToString(sum[:])
+}
+
+// fillProvenance defaults any unset B-22 provenance field deterministically. Idempotent:
+// a caller that already set a field keeps it. Trust tier mirrors edges' tierFor thresholds
+// (tierForConfidence) so a property carries the same correct-or-quiet authority as an edge.
+func (p *Property) fillProvenance() {
+	if p.StartLine == 0 {
+		p.StartLine = p.Line
+	}
+	if p.EndLine == 0 {
+		p.EndLine = p.Line
+	}
+	if p.EndLine < p.StartLine {
+		p.EndLine = p.StartLine
+	}
+	if p.Extractor == "" {
+		p.Extractor = "treesitter"
+	}
+	if p.EvidenceMethod == "" {
+		p.EvidenceMethod = "ast"
+	}
+	if p.TrustTier == "" {
+		p.TrustTier = tierForConfidence(p.Confidence)
+	}
+	if p.VerificationStatus == "" {
+		p.VerificationStatus = "unverified"
+	}
+	if p.PropertyID == "" {
+		p.PropertyID = propertyFactID(p.NodeID, p.Kind, p.Value, p.Line)
+	}
 }
 
 // Assertion represents an assertion extracted from a test function.
@@ -213,7 +272,16 @@ func createSchema(db *sql.DB) error {
 		kind TEXT NOT NULL,
 		value TEXT NOT NULL,
 		line INTEGER,
-		confidence REAL DEFAULT 1.0
+		confidence REAL DEFAULT 1.0,
+		-- B-22 per-fact provenance (added to fresh dbs here; migrateSchema ALTERs old dbs):
+		property_id TEXT,
+		start_line INTEGER,
+		end_line INTEGER,
+		extractor TEXT,
+		evidence_method TEXT,
+		trust_tier TEXT,
+		verification_status TEXT DEFAULT 'unverified',
+		source_revision TEXT
 	);
 
 	CREATE TABLE IF NOT EXISTS assertions (
@@ -273,10 +341,47 @@ func createSchema(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_closure_source ON closure(source_id);
 	CREATE INDEX IF NOT EXISTS idx_closure_target ON closure(target_id);
 
+	CREATE INDEX IF NOT EXISTS idx_properties_property_id ON properties(property_id);
+
+	-- B-24: normalized, schema-versioned edge metadata. edges.metadata is a polymorphic
+	-- string (route JSON on API edges vs semicolon-separated key=value on promoted CALLS),
+	-- so consumers regex/LIKE it. This DERIVED sub-table (populated by PopulateEdgeMetadata
+	-- via the ONE canonical ParseEdgeMetadata parser) exposes each field as an individually
+	-- queryable row: SELECT value FROM edge_metadata WHERE edge_id=? AND key='receiver_type'.
+	-- edges.metadata stays byte-identical (the receiver-provenance + incremental-restore
+	-- invariants are untouched); this is an additive index over it. Absent on an old graph.db
+	-- -> consumers fall back to parsing the string (correct-or-quiet).
+	CREATE TABLE IF NOT EXISTS edge_metadata (
+		edge_id INTEGER NOT NULL,
+		key TEXT NOT NULL,
+		value TEXT NOT NULL,
+		schema_version INTEGER NOT NULL DEFAULT 1,
+		PRIMARY KEY(edge_id, key)
+	);
+	CREATE INDEX IF NOT EXISTS idx_edge_metadata_key ON edge_metadata(key);
+
+	-- B-23: passage-level content identity. symbol_content_fts keys a whole body by node
+	-- rowid, so a body-concept match can only cite the node start_line. content_passages
+	-- stores each non-blank body line as an addressable span (node_id, start_line, end_line,
+	-- content, content_hash); content_passages_fts (created in the FTS block, FTS5-gated)
+	-- indexes it so a match resolves to the EXACT matching line, not the node start_line.
+	CREATE TABLE IF NOT EXISTS content_passages (
+		passage_id INTEGER PRIMARY KEY AUTOINCREMENT,
+		node_id INTEGER NOT NULL,
+		start_line INTEGER NOT NULL,
+		end_line INTEGER NOT NULL,
+		content TEXT NOT NULL,
+		content_hash TEXT NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_content_passages_node ON content_passages(node_id);
+
 	`
 	_, err := db.Exec(schema)
 	if err != nil {
 		return err
+	}
+	if err := migrateSchema(db); err != nil {
+		return fmt.Errorf("migrate schema: %w", err)
 	}
 
 	// FTS5 virtual table: SEPARATE from main schema because some SQLite builds
@@ -290,6 +395,74 @@ func createSchema(db *sql.DB) error {
 	`)
 	if ftsErr != nil {
 		log.Printf("[WARN] FTS5 not available (non-fatal): %v", ftsErr)
+	}
+	// B-23: FTS5 over per-body-line passages. rowid == content_passages.passage_id so a
+	// body-concept MATCH resolves to the exact matching line's span. Same tokenizer as
+	// symbol_content_fts (unicode61 tokenchars '_') so BM25 semantics are consistent across
+	// the two content surfaces. Regular (self-content) fts5 — DELETE+reinsert rebuild, the
+	// proven symbol_content_fts pattern. FTS5-gated + non-fatal, exactly like nodes_fts:
+	// absent when the binary lacks the sqlite_fts5 tag (passage citation then degrades to
+	// the node start_line — correct-or-quiet).
+	_, pftsErr := db.Exec(
+		`CREATE VIRTUAL TABLE IF NOT EXISTS content_passages_fts USING fts5(content, tokenize="unicode61 tokenchars '_'")`,
+	)
+	if pftsErr != nil {
+		log.Printf("[WARN] content_passages_fts not available (non-fatal): %v", pftsErr)
+	}
+	return nil
+}
+
+// migrateSchema brings an existing (older) graph.db up to the current column set WITHOUT a
+// destructive rebuild: `CREATE TABLE IF NOT EXISTS` is a no-op on a table that already
+// exists, so new columns on a pre-existing table must be added by ALTER. Idempotent —
+// addColumnIfMissing checks PRAGMA table_info first, so re-running on a current db does
+// nothing. Back-compat: an old reader never sees these columns; a new reader COALESCEs them.
+func migrateSchema(db *sql.DB) error {
+	// B-22: property provenance columns on a properties table created by an old binary.
+	propCols := []struct{ name, ddl string }{
+		{"property_id", "TEXT"},
+		{"start_line", "INTEGER"},
+		{"end_line", "INTEGER"},
+		{"extractor", "TEXT"},
+		{"evidence_method", "TEXT"},
+		{"trust_tier", "TEXT"},
+		{"verification_status", "TEXT DEFAULT 'unverified'"},
+		{"source_revision", "TEXT"},
+	}
+	for _, c := range propCols {
+		if err := addColumnIfMissing(db, "properties", c.name, c.ddl); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// addColumnIfMissing ALTERs `table` to add `col` (with `ddl` type/default) only when it is
+// absent. Deterministic and safe to call on every Open.
+func addColumnIfMissing(db *sql.DB, table, col, ddl string) error {
+	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return fmt.Errorf("table_info(%s): %w", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			cid, notnull, pk int
+			name, ctype      string
+			dfltValue        sql.NullString
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dfltValue, &pk); err != nil {
+			return fmt.Errorf("scan table_info(%s): %w", table, err)
+		}
+		if name == col {
+			return nil // already present
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if _, err := db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, col, ddl)); err != nil {
+		return fmt.Errorf("add column %s.%s: %w", table, col, err)
 	}
 	return nil
 }
@@ -651,11 +824,18 @@ func (d *DB) AssertionCount() int {
 	return count
 }
 
-// InsertProperty inserts a property for a node.
+// InsertProperty inserts a property for a node. Provenance columns (B-22) are defaulted
+// deterministically by fillProvenance() when the caller leaves them zero.
 func (d *DB) InsertProperty(p *Property) error {
+	p.fillProvenance()
 	_, err := d.db.Exec(
-		`INSERT INTO properties (node_id, kind, value, line, confidence) VALUES (?, ?, ?, ?, ?)`,
+		`INSERT INTO properties (node_id, kind, value, line, confidence,
+		   property_id, start_line, end_line, extractor, evidence_method,
+		   trust_tier, verification_status, source_revision)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		p.NodeID, p.Kind, p.Value, p.Line, p.Confidence,
+		p.PropertyID, p.StartLine, p.EndLine, p.Extractor, p.EvidenceMethod,
+		p.TrustTier, p.VerificationStatus, p.SourceRevision,
 	)
 	return err
 }
@@ -682,7 +862,10 @@ func (d *DB) BatchInsertProperties(props []*Property) error {
 		return fmt.Errorf("begin tx: %w", err)
 	}
 	stmt, err := tx.Prepare(
-		`INSERT INTO properties (node_id, kind, value, line, confidence) VALUES (?, ?, ?, ?, ?)`,
+		`INSERT INTO properties (node_id, kind, value, line, confidence,
+		   property_id, start_line, end_line, extractor, evidence_method,
+		   trust_tier, verification_status, source_revision)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	)
 	if err != nil {
 		tx.Rollback()
@@ -691,7 +874,10 @@ func (d *DB) BatchInsertProperties(props []*Property) error {
 	defer stmt.Close()
 
 	for i, p := range props {
-		_, err := stmt.Exec(p.NodeID, p.Kind, p.Value, p.Line, p.Confidence)
+		p.fillProvenance()
+		_, err := stmt.Exec(p.NodeID, p.Kind, p.Value, p.Line, p.Confidence,
+			p.PropertyID, p.StartLine, p.EndLine, p.Extractor, p.EvidenceMethod,
+			p.TrustTier, p.VerificationStatus, p.SourceRevision)
 		if err != nil {
 			tx.Rollback()
 			return fmt.Errorf("insert property %d: %w", i, err)

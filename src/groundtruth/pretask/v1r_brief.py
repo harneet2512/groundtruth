@@ -305,6 +305,25 @@ class V1RBriefResult:
     # Observability only: lets Stage-1 audits explain why each delivered file ranked
     # where it did without changing the brief text or ranking behavior.
     localization_proof: list[dict[str, object]] = field(default_factory=list)
+    # B-30: labels of the brief blocks the DOSE-rail enforcer suppressed to keep the
+    # brief within ``max_brief_tokens`` (e.g. "graph-map", "scope-chain", "truncated").
+    # Empty on the common under-budget path; observability only, no ranking effect.
+    budget_suppressed: list[str] = field(default_factory=list)
+    # B-6: per-brief-block delivery receipts — a sidecar map giving each fact-bearing
+    # block (localization / obligations / contract / scope / companion) a STABLE,
+    # DISTINCT identity so the consumption grader can attribute which BLOCK the agent
+    # consumed. Each entry: ``{block_id, fact_class, label, char_span:[start,end],
+    # content_hash}``. HOST-SIDE METADATA — NEVER rendered into ``brief_text`` (the
+    # brief bytes are byte-identical whether this is populated or not). Empty unless
+    # ``GT_BLOCK_RECEIPTS`` is set (default off, additive). No ranking effect.
+    block_receipts: list[dict] = field(default_factory=list)
+    # B-31 (Brief-F9): which token counter produced ``token_estimate`` /governed the
+    # DOSE rail — ``"gte-modernbert-bpe"`` (the baked HF BPE vocabulary) or
+    # ``"char4-estimate"`` (the char/4 fallback when no tokenizer.json is configured).
+    # Observability only (no ranking / brief-byte effect). NOTE: even the "real"
+    # counter is gte-modernbert's BPE — a PROXY for the sampled model's tokenizer, not
+    # the model's own; treat the count as consistent-and-honest, not exact-per-model.
+    tokenizer_used: str = ""
 
 
 def _provenance_order_clause(
@@ -1313,7 +1332,406 @@ def _co_change_from_table(graph_db: str, file_path: str, limit: int = 3) -> list
 
 
 def _estimate_tokens(text: str) -> int:
+    """Char/4 token ESTIMATE (B-31 fallback). This is an APPROXIMATION, not a
+    real token count — used only when the baked BPE tokenizer is unavailable.
+    Prefer ``_count_tokens`` (which uses the real tokenizer when present)."""
     return len(text) // 4 + 1
+
+
+# B-31: real BPE token count via the baked HF ``tokenizers`` vocabulary. The DOSE
+# rail and the reported token count must reflect the MODEL's tokens, not a
+# char/4 heuristic (which under/over-counts materially on code, punctuation, and
+# Unicode). Deterministic + offline: the tokenizer.json is loaded ONCE from disk
+# (no network, no download). Falls back to the char/4 ESTIMATE only when the lib
+# or the baked file is unavailable — and that path is honestly an estimate.
+_TOKENIZER_CACHE: dict[str, object] = {}
+
+
+def _resolve_tokenizer_path() -> str:
+    """Baked gte tokenizer.json path, or "" when none is configured. Consults ONLY
+    explicit env config (``GT_TOKENIZER_JSON`` override, then
+    ``GT_MODELS_ROOT/gte-modernbert-base/tokenizer.json``) so behavior is
+    deterministic and never depends on an ambient install."""
+    p = os.environ.get("GT_TOKENIZER_JSON")
+    if p:
+        return p
+    mr = os.environ.get("GT_MODELS_ROOT")
+    if mr:
+        return os.path.join(mr, "gte-modernbert-base", "tokenizer.json")
+    return ""
+
+
+def _get_tokenizer():
+    """Load (and path-cache) the baked ``tokenizers.Tokenizer``, or None. Keyed by
+    the RESOLVED path so a test/process that changes the env is never served a
+    stale tokenizer from a different path (hermetic across env changes)."""
+    path = _resolve_tokenizer_path()
+    if not path or not os.path.isfile(path):
+        return None
+    if path in _TOKENIZER_CACHE:
+        return _TOKENIZER_CACHE[path]
+    tok = None
+    try:
+        from tokenizers import Tokenizer  # baked HF lib
+        tok = Tokenizer.from_file(path)
+    except Exception:
+        tok = None
+    _TOKENIZER_CACHE[path] = tok
+    return tok
+
+
+def _count_tokens(text: str) -> int:
+    """Real BPE token count when the baked tokenizer is available; otherwise the
+    char/4 ESTIMATE. Deterministic + LLM-free + offline.
+
+    B-31/Brief-F9 caveat: the "real" tokenizer is gte-modernbert's BPE — a PROXY for
+    the sampled model's own tokenizer, not the model's exact vocabulary. Use
+    :func:`_tokenizer_kind` to record which counter actually ran (``tokenizer_used``
+    on the result); the char/4 fallback is honest but coarser."""
+    tok = _get_tokenizer()
+    if tok is not None:
+        try:
+            return len(tok.encode(text).ids)
+        except Exception:
+            pass
+    return _estimate_tokens(text)
+
+
+def _tokenizer_kind() -> str:
+    """Marker for WHICH token counter :func:`_count_tokens` uses right now, so a
+    caller (and the deep-metrics audit) can tell the real-BPE path from the silent
+    char/4 fallback. ``"gte-modernbert-bpe"`` when the baked HF tokenizer.json is
+    configured + loadable (a PROXY for the sampled model's tokenizer), else
+    ``"char4-estimate"``. Pure + deterministic; mirrors _count_tokens's own branch."""
+    return "gte-modernbert-bpe" if _get_tokenizer() is not None else "char4-estimate"
+
+
+def _is_brief_boundary(line: str) -> bool:
+    """True if ``line`` starts a structural brief block or a scaffold tag. A scan
+    that consumes a 'section until the next blank line' must STOP here so it never
+    swallows the following block or the ``</gt-task-brief>`` close tag — blocks are
+    not always blank-separated (a trailing steer note abuts the close tag)."""
+    s = line.strip()
+    if s in ("<gt-task-brief>", "</gt-task-brief>", "<gt-obligations>",
+             "</gt-obligations>", "<gt-graph-map>", "</gt-graph-map>"):
+        return True
+    if s.startswith("<gt-localization") or s.startswith("</gt-localization"):
+        return True
+    if _re.match(r"^\d+\.\s", line):
+        return True
+    return any(line.startswith(p) for p in (
+        "Expected behavior:", "EDIT-TARGET CONTRACTS", "Other candidates",
+        "Related files to inspect", "Likely multi-file scope", "Scope chain",
+        "Highest-confidence candidate", "Note: GT could not anchor",
+    ))
+
+
+def _segment_brief_blocks(text: str) -> list[dict]:
+    """Segment a rendered brief into priority-tagged blocks for the B-30 rail's
+    priority-ordered rebuild. Each block is ``{priority, label, text, order}``;
+    ``priority < 0`` is protected scaffold (always kept). Lower priority number =
+    higher value = kept first. Deterministic; pure text segmentation."""
+    lines = text.split("\n")
+    n = len(lines)
+    blocks: list[dict] = []
+
+    def _add(pri: int, label: str, seg: list[str]) -> None:
+        blocks.append({"priority": pri, "label": label, "text": "\n".join(seg), "order": len(blocks)})
+
+    def _until_close(start: int, close_tag: str) -> int:
+        j = start + 1
+        while j < n and lines[j].strip() != close_tag:
+            j += 1
+        return min(j, n - 1)
+
+    def _until_unindented(start: int) -> int:
+        j = start + 1
+        while j < n and (lines[j].startswith(" ") or lines[j].startswith("\t")):
+            j += 1
+        return j
+
+    def _until_blank(start: int) -> int:
+        j = start + 1
+        while j < n and lines[j].strip() != "" and not _is_brief_boundary(lines[j]):
+            j += 1
+        return j
+
+    _file_seen = 0
+    i = 0
+    while i < n:
+        ln = lines[i]
+        s = ln.strip()
+        if s.startswith("<gt-localization"):
+            # the localization steer is a first-class structural fact (which file to
+            # edit) — kept high (contract tier), but BELOW the active obligation so a
+            # tight budget preserves the behavioral spec over the confidence header.
+            e = _until_close(i, "</gt-localization>")
+            _add(2, "localization-header", lines[i : e + 1]); i = e + 1; continue
+        if s in ("<gt-task-brief>", "</gt-task-brief>"):
+            _add(-1, "scaffold", [ln]); i += 1; continue
+        if s == "<gt-graph-map>":
+            e = _until_close(i, "</gt-graph-map>")
+            _add(6, "graph-map", lines[i : e + 1]); i = e + 1; continue
+        if s == "<gt-obligations>":
+            e = _until_close(i, "</gt-obligations>")
+            _add(1, "obligations", lines[i : e + 1]); i = e + 1; continue
+        if ln.startswith("Expected behavior:"):
+            # softer issue-spec echo — kept in the contract/spec tier, strictly
+            # BELOW the parsed <gt-obligations> block (the active obligation).
+            _add(2, "expected-behavior", [ln]); i += 1; continue
+        if ln.startswith("EDIT-TARGET CONTRACTS"):
+            e = _until_unindented(i)
+            _add(2, "edit-target-contracts", lines[i:e]); i = e; continue
+        if _re.match(r"^\d+\.\s", ln):
+            # All file entries share one priority band and are kept as a RANK-ORDERED
+            # PREFIX by the enforcer (never file #2 without file #1) — document order
+            # == localizer rank, so processing by order preserves the ranking.
+            e = _until_unindented(i)
+            _file_seen += 1
+            _add(3, f"file-entry-{_file_seen}", lines[i:e]); i = e; continue
+        if (ln.startswith("Other candidates") or ln.startswith("Related files")
+                or ln.startswith("Likely multi-file") or ln.startswith("Scope chain")):
+            e = _until_blank(i)
+            _add(5, "companion", lines[i:e]); i = e; continue
+        if ln.startswith("Highest-confidence candidate") or ln.startswith("Note: GT could not anchor"):
+            _add(6, "orientation-note", [ln]); i += 1; continue
+        # blank / unknown line — cheap filler kept with its neighbors.
+        _add(5, "misc", [ln]); i += 1; continue
+    return blocks
+
+
+# B-6: fact-class of each segmented block label. A block whose label is absent here
+# (``scaffold`` = the <gt-task-brief> tags; ``misc`` = blank/unknown filler) is NOT a
+# fact-bearing block and gets no receipt (correct-or-quiet: a receipt is a claim a
+# FACT was delivered, never a claim about structural scaffold). File entries carry
+# the per-file localization evidence (contract/callers/context, incl. any "Also
+# changes:" cochange line), so they map to ``localization``.
+_BLOCK_FACT_CLASS: dict[str, str] = {
+    "localization-header": "localization",
+    "obligations": "obligations",
+    "expected-behavior": "obligations",
+    "edit-target-contracts": "contract",
+    "companion": "scope",
+    "graph-map": "graph-map",
+    "orientation-note": "orientation",
+    # "file-entry-<N>" is matched by prefix below (each N is a distinct label).
+}
+
+
+def _block_receipts_on() -> bool:
+    """GT_BLOCK_RECEIPTS master switch — default OFF, additive (never touches the
+    brief bytes either way). When OFF, ``block_receipts`` stays empty."""
+    import os as _os
+    return (_os.environ.get("GT_BLOCK_RECEIPTS") or "").strip().lower() not in (
+        "", "0", "false", "no",
+    )
+
+
+def _fact_class_for_label(label: str) -> str | None:
+    """The fact-class of a segmented block label, or ``None`` for non-fact scaffold/
+    filler. File entries (``file-entry-1``, ``file-entry-2``, …) map to localization."""
+    if label.startswith("file-entry"):
+        return "localization"
+    return _BLOCK_FACT_CLASS.get(label)
+
+
+def _brief_block_receipts(brief_text: str) -> list[dict]:
+    """B-6: assign each fact-bearing brief block a STABLE, DISTINCT delivery receipt.
+
+    Reuses the deterministic :func:`_segment_brief_blocks` segmentation (the SAME
+    block boundaries the B-30 dose-rail rebuilds by) and, for each fact-bearing
+    block, emits ``{block_id, fact_class, label, char_span:[start,end],
+    content_hash}``:
+
+      * ``block_id`` — a stable, DISTINCT handle: the bare label when it occurs once
+        in this brief, else ``"<label>#<k>"`` (k = 0-based occurrence). File entries
+        are already distinct (``file-entry-1``, ``file-entry-2``, …).
+      * ``char_span`` — ``[start, end)`` byte offsets into ``brief_text`` such that
+        ``brief_text[start:end] == block_text`` exactly (the segmentation partitions
+        the lines contiguously; blocks rejoin with the newline separator).
+      * ``content_hash`` — ``sha256`` hex of the block's UTF-8 bytes.
+
+    METADATA ONLY — this is a PURE READ of ``brief_text``; it NEVER mutates it, so a
+    caller populating ``block_receipts`` leaves the delivered brief byte-identical.
+    Deterministic, LLM-free, no I/O. Scaffold (the <gt-task-brief> tags) and blank/
+    unknown filler are not fact-bearing and get no receipt."""
+    import hashlib as _hashlib
+    if not brief_text:
+        return []
+    blocks = _segment_brief_blocks(brief_text)
+    # Two-pass distinctness: count fact-bearing labels so a label seen once keeps its
+    # bare name and a repeated label (e.g. two "companion" blocks) is disambiguated.
+    fact_labels = [
+        b["label"] for b in blocks if _fact_class_for_label(b["label"]) is not None
+    ]
+    _label_total: dict[str, int] = {}
+    for _lab in fact_labels:
+        _label_total[_lab] = _label_total.get(_lab, 0) + 1
+
+    receipts: list[dict] = []
+    offset = 0
+    _seen: dict[str, int] = {}
+    for b in blocks:
+        seg = b["text"]
+        start = offset
+        end = offset + len(seg)
+        offset = end + 1  # the "\n" that _segment_brief_blocks joins blocks on
+        fact_class = _fact_class_for_label(b["label"])
+        if fact_class is None:
+            continue  # scaffold / filler — not a fact
+        label = b["label"]
+        k = _seen.get(label, 0)
+        _seen[label] = k + 1
+        block_id = label if _label_total.get(label, 0) <= 1 else f"{label}#{k}"
+        receipts.append({
+            "block_id": block_id,
+            "fact_class": fact_class,
+            "label": label,
+            "char_span": [start, end],
+            "content_hash": _hashlib.sha256(seg.encode("utf-8")).hexdigest(),
+        })
+    return receipts
+
+
+# B-30: HARD dose-rail enforcement. The budget loops in ``generate_v1r_brief``
+# trim breadth (candidate entries) then detail (per-body-line cap) but can bottom
+# out — a single entry + the body cap at its floor + fixed header/block overhead —
+# STILL over budget (measured: caps 100/20/1 produced 244/242/242 tokens; the rail
+# was never enforced). This enforcer guarantees ``_count_tokens(result) <= budget``
+# by dropping whole rendered brief blocks LOWEST-priority first (recording each
+# suppression), then — only if the protected core still exceeds the cap —
+# truncating the residue. The localizer / ``.files`` are untouched: this trims the
+# rendered DOSE, never which files the agent is told to consider (BRIEFING.md §3).
+#
+# Keep-priority (highest survives): active obligation > violated contract >
+# causal edge (Witness/Callers) > repo law (Context/Spec) > companion surface
+# (co-change/Calls/scope/related) > orientation (graph-map, steer notes). The
+# <gt-localization> header, the <gt-task-brief> tags, the <gt-obligations> block,
+# "Expected behavior", "EDIT-TARGET CONTRACTS", the file-list headers, and each
+# file's Witness/Contract are PROTECTED by the passes; only the final hard
+# truncate can trim them, and only when even that core exceeds the cap.
+def _enforce_token_rail(text: str, budget: int) -> tuple[str, list[str]]:
+    """Trim ``text`` to at most ``budget`` tokens, returning ``(text, suppressed)``.
+
+    Brief-F8 contract: ``budget <= 0`` means the rail is DISABLED — the text is
+    returned UNCHANGED with an empty ``suppressed`` list (there is no positive
+    ceiling to enforce, and clamping to a hard-truncate would gut the brief to
+    ~empty, which no caller wants). Every real caller passes a positive
+    ``max_brief_tokens`` (default ``MAX_BRIEF_TOKENS``); a non-positive budget is the
+    documented "no ceiling" escape hatch, not a request to erase the brief."""
+    suppressed: list[str] = []
+    if budget <= 0 or _count_tokens(text) <= budget:
+        return text, suppressed
+    lines = text.split("\n")
+
+    def _tok() -> int:
+        return _count_tokens("\n".join(lines))
+
+    def _drop_tagged(open_tag: str, close_tag: str) -> bool:
+        s = next((i for i, ln in enumerate(lines) if ln.strip() == open_tag), None)
+        if s is None:
+            return False
+        e = next((j for j in range(s, len(lines)) if lines[j].strip() == close_tag), None)
+        if e is None:
+            return False
+        del lines[s : e + 1]
+        return True
+
+    def _drop_until_blank(pred) -> bool:
+        s = next((i for i, ln in enumerate(lines) if pred(ln)), None)
+        if s is None:
+            return False
+        e = s + 1
+        while e < len(lines) and lines[e].strip() != "" and not _is_brief_boundary(lines[e]):
+            e += 1
+        del lines[s:e]
+        return True
+
+    def _drop_lines(pred) -> bool:
+        keep = [ln for ln in lines if not pred(ln)]
+        if len(keep) == len(lines):
+            return False
+        lines[:] = keep
+        return True
+
+    # Lowest priority FIRST. Each op removes ONE unit; loop while still over.
+    _passes = [
+        ("graph-map", lambda: _drop_tagged("<gt-graph-map>", "</gt-graph-map>")),
+        ("orientation-note", lambda: _drop_until_blank(
+            lambda ln: ln.startswith("Highest-confidence candidate")
+            or ln.startswith("Note: GT could not anchor"))),
+        ("scope-chain", lambda: _drop_until_blank(
+            lambda ln: ln.startswith("Scope chain"))),
+        ("related-files", lambda: _drop_until_blank(
+            lambda ln: ln.startswith("Related files to inspect")
+            or ln.startswith("Likely multi-file scope"))),
+        ("companion-candidates", lambda: _drop_until_blank(
+            lambda ln: ln.startswith("Other candidates"))),
+        ("calls", lambda: _drop_lines(
+            lambda ln: ln.lstrip().startswith("Calls:")
+            or ln.lstrip().startswith("Also changes:"))),
+        ("context", lambda: _drop_lines(
+            lambda ln: ln.lstrip().startswith("Context:")
+            or ln.lstrip().startswith("Spec:"))),
+        ("callers", lambda: _drop_lines(
+            lambda ln: ln.lstrip().startswith("Callers:"))),
+    ]
+    for label, op in _passes:
+        while _tok() > budget and op():
+            if label not in suppressed:
+                suppressed.append(label)
+        if _tok() <= budget:
+            break
+
+    text2 = "\n".join(lines)
+    if _count_tokens(text2) <= budget:
+        return text2, suppressed
+
+    # Phase 2: the passes were insufficient (a single entry's protected core still
+    # exceeds the cap). Rebuild keeping HIGHEST-priority blocks first, then re-emit
+    # them in original order. This is what lets the top-priority active OBLIGATION
+    # survive even though it renders near the END of the brief — a naive prefix
+    # truncation would keep the file list and cut the obligation, inverting the
+    # doctrine's fact order. Scaffold (localization header + <gt-task-brief> tags)
+    # is always kept; blocks that don't fit are recorded as suppressed.
+    blocks = _segment_brief_blocks(text2)
+    kept = [b for b in blocks if b["priority"] < 0]  # scaffold, always
+    _dropped_file = False
+    for b in sorted(blocks, key=lambda b: (b["priority"], b["order"])):
+        if b["priority"] < 0:
+            continue
+        _is_file = b["label"].startswith("file-entry")
+        # File entries are a rank-ordered prefix: once a higher-ranked entry is
+        # dropped, never keep a lower-ranked one (no localization rank inversion).
+        if _is_file and _dropped_file:
+            if b["label"] not in suppressed:
+                suppressed.append(b["label"])
+            continue
+        trial = sorted(kept + [b], key=lambda x: x["order"])
+        if _count_tokens("\n".join(x["text"] for x in trial)) <= budget:
+            kept.append(b)
+        else:
+            if _is_file:
+                _dropped_file = True
+            if b["label"] not in suppressed:
+                suppressed.append(b["label"])
+    result = "\n".join(x["text"] for x in sorted(kept, key=lambda x: x["order"]))
+    if _count_tokens(result) <= budget:
+        return result, suppressed
+
+    # HARD last resort: even the scaffold exceeds the cap (pathologically tiny
+    # budget). Char-length binary search (fewer chars => fewer-or-equal tokens for
+    # these tokenizers) so the returned text NEVER exceeds the cap.
+    if "truncated" not in suppressed:
+        suppressed.append("truncated")
+    lo, hi = 0, len(result)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if _count_tokens(result[:mid]) <= budget:
+            lo = mid
+        else:
+            hi = mid - 1
+    return result[:lo].rstrip(), suppressed
 
 
 def _file_has_graph_edge(graph_db: str, file_path: str) -> bool:
@@ -1692,6 +2110,22 @@ def _entry_confidence_tier(entry: FileEntry, issue_text: str = "") -> str:
     return "[INFO]"
 
 
+def _graph_map_demand_on() -> bool:
+    """B-27: the ``<gt-graph-map>`` is DEMAND-PAGED, not a step-0 narration dose.
+
+    Default OFF — a step-0 brief carries NO graph-map (anti-narration doctrine:
+    an unmeasured who-calls-whom dose the agent did not ask for is narration, not
+    a decision-point fact). The map is emitted ONLY when an explicit demand signal
+    (this flag / a future demand hook) requests it; when ON, the emitted block is
+    byte-identical to the historical step-0 emission. Byte-identical when off
+    (``_with_graph_map`` returns the brief unchanged). Robust truthy parse, parity
+    with ``_obligations_v2_on``."""
+    import os as _os
+    return (_os.environ.get("GT_GRAPH_MAP_DEMAND") or "").strip().lower() not in (
+        "", "0", "false", "no",
+    )
+
+
 def _with_graph_map(
     brief: str,
     files: list[FileEntry],
@@ -1701,20 +2135,28 @@ def _with_graph_map(
     """Surface the deterministic 1-hop curation map as a LEADING <gt-graph-map>
     block — callers/callees of the top shown files' focus functions.
 
-    Returns ``brief`` unchanged when graph_db is unset, when no shown file has a
-    focus function, or when no connection clears the correct-or-quiet bar
+    B-27 (demand-gate): DISABLED at step-0 by default. Returns ``brief`` unchanged
+    unless ``_graph_map_demand_on()`` (an explicit demand signal) requests the map.
+    A step-0 brief is by definition not demand-triggered, so the default path emits
+    no graph-map — reconciling gt_layers.md §2.3 (retired at step-0) with the code.
+
+    Also returns ``brief`` unchanged when graph_db is unset, when no shown file has
+    a focus function, or when no connection clears the correct-or-quiet bar
     (render_map returns '' — honest abstention, never a guess). The map obeys the
     SAME categorical rule as the caller gate: a deterministic edge renders as a
     fact; a name_match edge renders only ever as ``(unverified)``.
 
     D3 (CLAUDE.md "the brief's value is the graph map, not the file ranking";
     Lost-in-the-Middle TACL 2024 — primacy beats burial): this who-calls-whom map
-    is the UNIQUE value the agent's own grep loop cannot cheaply rebuild, so it is
-    placed FIRST (immediately after the <gt-task-brief> open tag), not appended at
-    ~96% position behind the evidence wall. The map's own body lines are capped the
-    same way the evidence bodies are (the "called by:" fan-in line can run long).
-    Falls back to a trailing append only when the open tag is absent.
+    is the UNIQUE value the agent's own grep loop cannot cheaply rebuild, so — WHEN
+    demand-paged — it is placed FIRST (immediately after the <gt-task-brief> open
+    tag), not appended at ~96% position behind the evidence wall. The map's own
+    body lines are capped the same way the evidence bodies are (the "called by:"
+    fan-in line can run long). Falls back to a trailing append only when the open
+    tag is absent.
     """
+    if not _graph_map_demand_on():
+        return brief
     if not graph_db or not files:
         return brief
     try:
@@ -1923,27 +2365,80 @@ def _write_obligations_v2_artifact(rows: list[dict], gold_path_tokens: set[str])
     except Exception:
         pass
 _F2P_TOKEN_RE = _re.compile(r"\b(?:FAIL_TO_PASS|PASS_TO_PASS|fail_to_pass|pass_to_pass)\b")
-_OBLIG_TEST_NAME_RE = _re.compile(r"\b(?:test_[A-Za-z0-9_]+|[A-Za-z0-9_]+_test)\b")
+# LEAK LAW — the test-identifier + assertion + test-path screens are SINGLE-SOURCED with the seam
+# (Fable-LIPI round-2, 2026-07-11). Round-1 tuned the brief's screen and the seam's prose screen
+# (`gt_mini_patch._prose_leaks_test_identity`) SEPARATELY, and each missed a different half (the
+# brief missed `assert_eq!` / `.test.ts` / `crate::tests::`; the seam missed the assertion keyword
+# entirely; BOTH missed `Test_`/`TEST_` case+underscore variants; AND the brief regex dir leg was
+# only `tests?/`, leaking `spec/`/`__tests__/`/`e2e/` file paths — seam round-2 Finding-1). To make
+# the invariant STRUCTURAL rather than disciplinary, the brief now screens with the ONE canonical
+# PREDICATE `native_render.prose_leaks_test_identity` (name + assertion + the path_policy dir belt),
+# the same function the seam calls — they cannot drift. See that module for the language coverage +
+# the production near-miss guards (`contest_handler`/`latest_value`/`std::collections`/`Testing*`).
+from groundtruth.runtime.native_render import (  # noqa: E402
+    prose_leaks_test_identity as _prose_leaks_test_identity,
+)
 
 
 def _obligation_is_leaky(verbatim: str, symbols, gold_path_tokens: set[str]) -> bool:
     """Fail-closed: True if the obligation must NOT be rendered.
 
     Drops the obligation WHOLE if its verbatim text (or any named symbol) carries a
-    pytest test name, a FAIL_TO_PASS / PASS_TO_PASS marker, or a token that equals a
-    rendered gold-file path component. These are grader-coupled surfaces — GT must
-    surface ZERO test references so its output is identical if the grader swaps.
+    test name (ANY language convention — pytest ``test_*``/``*_test``, Go
+    ``TestX``, camelCase ``testX``, a ``path.ext::node`` nodeid, or a ``tests/``
+    path segment), a pytest ASSERTION keyword, or a FAIL_TO_PASS / PASS_TO_PASS
+    marker — or a token equal to a rendered gold-file path component. These are
+    grader-coupled surfaces — GT must surface ZERO test references so its output is
+    identical if the grader swaps. ONE canonical screen: the assertion + test-name
+    legs run HERE so every caller (the ``<gt-obligations>`` block AND the B-1
+    Expected-Behavior spec) obeys the SAME leak law (Brief-F2 asymmetry closed).
     """
     low = (verbatim or "")
-    if _F2P_TOKEN_RE.search(low) or _OBLIG_TEST_NAME_RE.search(low):
+    if _F2P_TOKEN_RE.search(low) or _prose_leaks_test_identity(low):
         return True
     for s in (symbols or set()):
         sl = str(s)
-        if _OBLIG_TEST_NAME_RE.search(sl) or _F2P_TOKEN_RE.search(sl):
+        if _prose_leaks_test_identity(sl) or _F2P_TOKEN_RE.search(sl):
             return True
         if sl.lower() in gold_path_tokens:
             return True
     return False
+
+
+_EB_PATTERNS = (
+    _re.compile(
+        r"(?:^|\n)#{1,3}\s*Expected\s*(?:Behavior|Output|Result)s?\s*\n(.*?)(?=\n#{1,3}\s|\Z)",
+        _re.DOTALL | _re.IGNORECASE,
+    ),
+    _re.compile(
+        r"(?:^|\n)\*\*Expected\s*(?:behavior|output|result)s?\*\*[:\s]*(.*?)(?=\n\*\*|\n#{1,3}|\Z)",
+        _re.DOTALL | _re.IGNORECASE,
+    ),
+)
+
+
+def _expected_behavior_spec(issue_text: str):
+    """The issue's Expected-Behavior spec line, leak-screened (B-1).
+
+    Returns the one-line spec (<=200 chars), or None (correct-or-quiet) when absent
+    or carrying a test name / FAIL_TO_PASS marker / assertion. Routes through the
+    canonical `_obligation_is_leaky` screen so this surface obeys the SAME leak law
+    as the obligations block."""
+    if not issue_text:
+        return None
+    for _pat in _EB_PATTERNS:
+        _m = _pat.search(issue_text)
+        if _m:
+            _txt = (_m.group(1) or "").strip()
+            if _txt and len(_txt) > 10:
+                _short = _txt[:200].strip()
+                # ONE canonical screen: _obligation_is_leaky now covers the assertion
+                # keyword AND every test-name convention (Brief-F1/F2), so this surface
+                # obeys the IDENTICAL leak law as the <gt-obligations> block.
+                if _short and not _obligation_is_leaky(_short, set(), set()):
+                    return _short
+            return None
+    return None
 
 
 def _render_obligations_block(
@@ -1951,11 +2446,20 @@ def _render_obligations_block(
     files: list[FileEntry],
     cap,
     anchor_symbols: set[str] | None = None,
+    require_anchor: bool = True,
 ) -> list[str]:
     """Render the ``<gt-obligations>`` behavioral-spec block, or ``[]`` when quiet.
 
     ``cap`` is the body-line clip closure from ``render_brief``. Returns a list of
     rendered lines (block tags included) or an empty list (correct-or-quiet).
+
+    ``require_anchor`` (default True — byte-identical for every existing caller)
+    gates the block on FOCUS/anchor overlap so the spec is never coupled to a
+    WRONG located file. On the B-2 no-match path (``generate_v1r_brief`` has NO
+    ranked existing file) there IS no located file to be wrong about, so the
+    caller passes ``require_anchor=False``: the leak screen (``_obligation_is_leaky``)
+    still runs, but the relevance gate is bypassed so the issue's own behavioral
+    obligations still reach the agent at step 0.
 
     ``anchor_symbols`` are the issue's own curated code identifiers
     (``IssueAnchors.symbols`` ∪ ``code_symbols`` ∪ ``unresolved_code_symbols`` —
@@ -2059,7 +2563,7 @@ def _render_obligations_block(
     # symbol that coincides with a gold-path segment is still caught there).
     for s in (anchor_symbols or set()):
         fn_tokens |= _id_tokens(str(s))
-    if not fn_tokens:
+    if not fn_tokens and require_anchor:
         return []  # no anchor to gate against — stay quiet
 
     if _obligations_v2_on():
@@ -2078,7 +2582,7 @@ def _render_obligations_block(
             o["_doc_index"] = _di
             rows.append(o)
         _write_obligations_v2_artifact(rows, gold_path_tokens)
-        gated = [
+        gated = rows if not require_anchor else [
             o for o in rows
             if _rel_gate((o.get("verbatim_text") or ""), None, fn_tokens)
         ]
@@ -2123,7 +2627,9 @@ def _render_obligations_block(
         # Relevance gate: render only when the obligation overlaps the FOCUS anchor
         # (the rendered edit-target functions). No focus overlap → drop this
         # obligation. (issue_terms intentionally empty — focus is the discriminator.)
-        if not _rel_gate(verbatim, None, fn_tokens):
+        # Bypassed on the B-2 no-match path (require_anchor=False): with no located
+        # file, there is no wrong file to couple to — the leak screen above still runs.
+        if require_anchor and not _rel_gate(verbatim, None, fn_tokens):
             continue
         # Collapse whitespace + cap so a long requirement sentence stays one line.
         compact = " ".join(verbatim.split())[:_OBLIGATION_LINE_CHARS].strip()
@@ -2318,22 +2824,10 @@ def render_brief(
     # SHOULD do. Extracted from markdown sections like "### Expected Behavior",
     # "Expected:", "Should:", "The fix should". Leakage-safe (it's the issue text
     # the agent already has, curated into a concise spec).
-    if issue_text:
-        import re as _re_eb
-        _eb_patterns = [
-            _re_eb.compile(r"(?:^|\n)#{1,3}\s*Expected\s*(?:Behavior|Output|Result)s?\s*\n(.*?)(?=\n#{1,3}\s|\Z)", _re_eb.DOTALL | _re_eb.IGNORECASE),
-            _re_eb.compile(r"(?:^|\n)\*\*Expected\s*(?:behavior|output|result)s?\*\*[:\s]*(.*?)(?=\n\*\*|\n#{1,3}|\Z)", _re_eb.DOTALL | _re_eb.IGNORECASE),
-        ]
-        for _pat in _eb_patterns:
-            _eb_match = _pat.search(issue_text)
-            if _eb_match:
-                _eb_text = _eb_match.group(1).strip()
-                if _eb_text and len(_eb_text) > 10:
-                    _eb_short = _eb_text[:200].strip()
-                    if _eb_short:
-                        lines.append("")
-                        lines.append(f"Expected behavior: {_eb_short}")
-                break
+    _eb_spec = _expected_behavior_spec(issue_text)
+    if _eb_spec:
+        lines.append("")
+        lines.append(f"Expected behavior: {_eb_spec}")
 
     # INTENDED-BEHAVIOR SPEC (research-backed lever): surface the ASSERTION BODIES
     # from tests that target ALL rendered files' functions. The assertion tells
@@ -3273,8 +3767,12 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
     # 0 signals agree -> "low" (this is the LOW rendering when the region above was
     # uninformative). Keeps the tier == "X signals agree" contract end-to-end. ----
     _tier_label = "low" if _low_tier else "medium"
+    # B-9: the grep-confirmation hedge is MANDATORY on this header — it is the branch
+    # nearly every real issue hits (all 4 measured live shapes render MEDIUM here), and
+    # at 0.67 top-1 precision the agent must re-confirm the target, not treat it as fact
+    # (ALREADY_BUILT.md; the LOW-region branch above already carries the same hedge).
     out = [f'<gt-localization confidence="{_tier_label}">',
-           "Candidate edit targets (reason over these):"]
+           "Candidate edit targets (reason over these — confirm the edit target with grep):"]
     for i, c in enumerate(shown, 1):
         fs = _defines_funcs(c)
         # R1 leaf-naming bridge: defines_anchor named NOTHING (behavior-described
@@ -3707,17 +4205,54 @@ def generate_v1r_brief(
     )
 
     if not v74.ranked_full:
-        # No candidates ranked — but the embedder WEIGHT is still known. Surface it
-        # so the precheck can tell "embedder on, no candidates" from "embedder off".
+        # No candidates ranked (new-file / behavioral no-match). B-2: the OLD path
+        # returned an EMPTY <gt-task-brief> — the issue's parsed behavioral spec was
+        # LOST at step 0, exactly when a no-match/new-file task most needs it. Render
+        # the issue's OWN obligations (leak-screened) plus an honest-uncertainty note
+        # so the agent still gets its behavioral contract + a truthful "localize with
+        # grep" steer. No located file exists, so the focus-anchor relevance gate is
+        # bypassed (require_anchor=False); the leak screen (_obligation_is_leaky) still
+        # runs, so zero test-name / FAIL_TO_PASS / gold-path tokens can leak. The
+        # embedder WEIGHT is still surfaced (unchanged) so the precheck can tell
+        # "embedder on, no candidates" from "embedder off".
+        def _nomatch_cap(_l: str) -> str:
+            return _clip_body_line(_l, _MAX_BODY_LINE_CHARS)
+
+        _nm_oblig = _render_obligations_block(
+            issue_text, [], _nomatch_cap, anchor_symbols=None, require_anchor=False
+        )
+        _nm_lines = [
+            "<gt-task-brief>",
+            "Note: GT found no indexed file ranked for this issue (new-file or "
+            "behavioral change). Localize with grep/code-search on the issue's terms.",
+        ]
+        _nm_lines.extend(_nm_oblig)
+        _nm_lines.append("</gt-task-brief>")
+        _nm_brief = "\n".join(_nm_lines)
+        # Brief-F3: the no-match brief must obey the SAME hard token rail (B-30) as the
+        # matched path — the early return previously bypassed _enforce_token_rail, so a
+        # small max_brief_tokens (or GT_OBLIGATIONS_V2 dynamic-K growth) shipped an
+        # over-cap brief. Idempotent: a brief already within budget is byte-identical
+        # and _nm_suppressed stays empty.
+        _nm_suppressed: list[str] = []
+        if _count_tokens(_nm_brief) > max_brief_tokens:
+            _nm_brief, _nm_suppressed = _enforce_token_rail(_nm_brief, max_brief_tokens)
+        # Brief-F7: B-6 per-block receipts also cover the fact-bearing no-match brief
+        # (its <gt-obligations> block). Same PURE read as the matched path; brief bytes
+        # unchanged. Empty unless GT_BLOCK_RECEIPTS is set.
+        _nm_receipts = _brief_block_receipts(_nm_brief) if _block_receipts_on() else []
         return V1RBriefResult(
             files=[],
-            brief_text="<gt-task-brief>\n</gt-task-brief>",
-            token_estimate=4,
+            brief_text=_nm_brief,
+            token_estimate=_count_tokens(_nm_brief),
             v74_result=v74,
             effective_w_sem=float(getattr(v74, "effective_w_sem", 0.0) or 0.0),
             rendered_candidate_count=0,
             k_sem_top=int(getattr(v74, "k_sem_top_effective", 0) or 0),
             sem_components=[],
+            budget_suppressed=_nm_suppressed,
+            block_receipts=_nm_receipts,
+            tokenizer_used=_tokenizer_kind(),
         )
 
     # Adaptive K: include candidates while score gap is small.
@@ -4710,7 +5245,7 @@ def generate_v1r_brief(
 
     _body_cap = _MAX_BODY_LINE_CHARS
     brief_text = _render(_body_cap)
-    tok = _estimate_tokens((_loc_header + "\n" + brief_text) if _loc_header else brief_text)
+    tok = _count_tokens((_loc_header + "\n" + brief_text) if _loc_header else brief_text)
 
     # Decouple localization BREADTH from the evidence token budget. The delivered
     # candidate list (.files) keeps the full rank-ordered localization set; only the
@@ -4726,7 +5261,7 @@ def generate_v1r_brief(
         entries = entries[:-1]
         _scores = _scores[: len(entries)]
         brief_text = _render(_body_cap)
-        tok = _estimate_tokens((_loc_header + "\n" + brief_text) if _loc_header else brief_text)
+        tok = _count_tokens((_loc_header + "\n" + brief_text) if _loc_header else brief_text)
 
     # D1 — ENFORCE the budget by trimming DETAIL, not the file LIST. The loop above
     # can bottom out at len(entries)==1 while still over budget when a single
@@ -4744,10 +5279,24 @@ def generate_v1r_brief(
     while tok > max_brief_tokens and _body_cap > _BODY_CAP_FLOOR:
         _body_cap = max(_BODY_CAP_FLOOR, _body_cap - 60)
         brief_text = _render(_body_cap)
-        tok = _estimate_tokens((_loc_header + "\n" + brief_text) if _loc_header else brief_text)
+        tok = _count_tokens((_loc_header + "\n" + brief_text) if _loc_header else brief_text)
 
     if _loc_header:
         brief_text = _loc_header + "\n" + brief_text
+
+    # B-30: HARD rail. The two loops above trim breadth (entries) then detail
+    # (body cap) but can bottom out — one entry + body cap at floor + fixed
+    # header/block overhead — STILL over budget (measured: caps 100/20/1 ->
+    # 244/242/242 tokens; the declared cap was never enforced). Enforce it as an
+    # inviolable ceiling: drop whole rendered brief blocks lowest-priority first,
+    # record what was suppressed, and truncate the residue only as a last resort.
+    # Rank/localizer untouched (.files == _loc_files, captured before the loops);
+    # this trims DOSE, never which files the agent is told to consider. Idempotent:
+    # a brief already within budget is unchanged (byte-identical) and _budget_suppressed
+    # stays empty.
+    _budget_suppressed: list[str] = []
+    if _count_tokens(brief_text) > max_brief_tokens:
+        brief_text, _budget_suppressed = _enforce_token_rail(brief_text, max_brief_tokens)
 
     # --- L1 signal-provenance counts (observability; no ranking effect) ---
     # Count over the DELIVERED candidate set (.files == _loc_files[:max_files]).
@@ -4869,10 +5418,16 @@ def generate_v1r_brief(
         except Exception:
             pass  # audit snapshot must never affect the brief
 
+    # B-6: per-block delivery receipts (sidecar metadata; default OFF, additive).
+    # Computed from the FINAL brief_text so spans/hashes match exactly what the agent
+    # sees. A PURE READ — brief_text is NOT modified, so the delivered brief bytes are
+    # byte-identical whether or not receipts are populated.
+    _block_receipts = _brief_block_receipts(brief_text) if _block_receipts_on() else []
+
     result = V1RBriefResult(
         files=_delivered,
         brief_text=brief_text,
-        token_estimate=_estimate_tokens(brief_text),
+        token_estimate=_count_tokens(brief_text),
         v74_result=v74,
         graph_edge_count=_ge,
         semantic_signal_count=_sem_c,
@@ -4884,6 +5439,9 @@ def generate_v1r_brief(
         k_sem_top=_k_sem_top,
         sem_components=_sem_components,
         localization_proof=_localization_proof,
+        budget_suppressed=_budget_suppressed,
+        block_receipts=_block_receipts,
+        tokenizer_used=_tokenizer_kind(),  # Brief-F9: which token counter ran
     )
 
     # Structured telemetry: emit L1 candidates as JSON for wrapper to parse

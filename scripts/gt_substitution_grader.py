@@ -26,11 +26,17 @@ Metrics per run (8-decimal JSON):
   * re_acquisition_events / re_acquired_fact_count / non_re_acquisition_rate
   * turns_to_first_edit, turns_to_first_gold_read (needs --gold), turns_to_first_test_run
   * wrong_branch_reads (reads of files never edited nor named by any delivered fact)
-  * receipt ladder levels 1-4 per fact class (W4; see RECEIPT_LADDER_NOTE)
+  * receipt ladder levels 1-4 per fact class (W4; see RECEIPT_LADDER_NOTE). Every
+    single-arm number is labeled ``arms=single`` + ``causal=UNAVAILABLE(single-arm)``:
+    level-5 CAUSAL is PAIRED-ONLY (B-7 / gate item 12) and is emitted ONLY by
+    ``compute_causal(on_report, off_report)`` over a matched GT-on/GT-off pair; a single
+    arm is REFUSED (``SingleArmCausalError``) through ``assert_paired_for_causal``.
 
 Usage:
   gt_substitution_grader.py <run_dir> [--gold a.py --gold b.py] [--out FILE]
   gt_substitution_grader.py --glob "D:/gt_runs/**" --out-dir D:/gt_runs/instrument_.../
+  gt_substitution_grader.py --pair-on ON_DIR --pair-off OFF_DIR [--gold ...] [--out FILE]
+                       # B-7: paired-only CAUSAL (level 5) over a matched GT-on/GT-off pair
   gt_substitution_grader.py --receipt-table --corpus name=ROOT [--corpus ...] \
       --out-dir DIR    # F9: the reproducible consumption-table driver (provenance
                        # recorded in AGG_COMBINED.json + PROVENANCE.json)
@@ -110,6 +116,47 @@ RECEIPT_LADDER_NOTE = (
     "acted/resolved_state are not deterministically attributable to prose (stay quiet). "
     "CLASS localization-file: reported RAW and DEDUPED (suffix-identity variant groups; "
     "group receipt = max over variants); ADMIT/CUT decisions cite the DEDUPED column.")
+
+# ---------------------------------------------------------------------------
+# ARMS + the CAUSAL (level-5) REFUSAL (B-7 / verifyandobserve.md §0 gate item 12).
+# The receipt ladder has FIVE levels; a SINGLE arm (one run's trajectory) may substantiate
+# AT MOST level 4 RESOLVED_STATE. Level 5 CAUSAL is a PAIRED / fixed-history counterfactual
+# claim ("CAUSAL only from a paired / fixed-history counterfactual") and MUST NEVER be
+# emitted from one arm: a one-arm action heuristic / receipt promotion is CORRELATION, not
+# the doctrine's paired non-reacquisition / causal criterion. These are the enforcement
+# primitives — the grader labels every single-arm number ``arms=single`` + ``causal=
+# UNAVAILABLE(single-arm)`` so no consumer can read a single-arm RESOLVED_STATE rate as
+# effectiveness, and routes every would-be causal emission through the chokepoint below.
+# ---------------------------------------------------------------------------
+ARMS_SINGLE = "single"
+ARMS_PAIRED = "paired"
+CAUSAL_UNAVAILABLE_SINGLE_ARM = "UNAVAILABLE(single-arm)"
+
+
+class SingleArmCausalError(RuntimeError):
+    """Raised when a CAUSAL (level-5) verdict is requested from anything that is not a
+    matched GT-on/GT-off pair. Fail-loud on purpose: a causal claim built from one
+    trajectory is a correlation masquerading as a counterfactual, and shipping it silently
+    is exactly the B-7 defect (one-turn receipt heuristics read as effectiveness)."""
+
+
+def assert_paired_for_causal(arms: str) -> None:
+    """THE CHOKEPOINT — every code path that would emit a CAUSAL verdict MUST pass through
+    here first. Raises :class:`SingleArmCausalError` unless ``arms`` is exactly
+    :data:`ARMS_PAIRED`. There is no override: CAUSAL is paired-only (gate item 12)."""
+    if arms != ARMS_PAIRED:
+        raise SingleArmCausalError(
+            "CAUSAL (receipt level 5) is paired-only (verifyandobserve.md §0 gate item "
+            f"12): refusing to emit a causal verdict from arms={arms!r}. Supply a matched "
+            "GT-on/GT-off pair (same task, same history prefix) via compute_causal().")
+
+
+def cap_single_arm_level(level_num: int) -> int:
+    """Cap a per-fact receipt level to at most RESOLVED_STATE (4) for single-arm grading —
+    the explicit, testable enforcement of the level-5 refusal at the per-fact granularity:
+    whatever a detector computes, a single trajectory can never report CAUSAL (5)."""
+    return min(int(level_num), _RECEIPT_NUM[RECEIPT_RESOLVED_STATE])
+
 
 # ---------------------------------------------------------------------------
 # LOGIC (LIPI) — token-matching false-positive control.
@@ -201,6 +248,19 @@ FACT_CLASSES = ("localization-file", "symbol-definition", "caller-fact",
 # LEGACY class name for byte-stability (baseline-diff law); receipt output uses the
 # honest name. Documented in every report via fact_class_legacy_aliases.
 _LEGACY_CLASS_ALIAS = {VERIFY_NUDGE_CLS: "covering-test"}
+
+# B-7: grader MEASUREMENT class -> the paired counterfactual metric that grades its causal
+# contribution (mirrors src/groundtruth/runtime/fact_registry.py FactRegistration.causal_eval;
+# this instrument keeps its OWN measurement-class names, so the map is the honest cross-walk,
+# NOT an import dependency — the grader stays decoupled + runnable standalone). Referenced
+# ONLY inside compute_causal (the paired path); single-arm grading never touches it.
+_CAUSAL_EVAL_METHOD = {
+    "localization-file": "paired_steps_to_first_correct_edit",
+    "symbol-definition": "paired_wrong_branch_reads_delta",
+    "caller-fact": "paired_contract_break_rate",
+    VERIFY_NUDGE_CLS: "paired_repair_targeting_delta",
+    "obligation": "paired_plan_coverage_delta",
+}
 
 
 def _legacy_class_map(per_class: dict) -> dict:
@@ -876,7 +936,8 @@ def _dedup_localization_groups(loc_facts: list[dict]) -> dict:
 def compute_receipts(delivered_facts: list[dict], events: list[dict],
                      agent_messages: list[dict],
                      use_substring_reference: bool = False,
-                     enforce_no_further_search: bool = True) -> dict:
+                     enforce_no_further_search: bool = True,
+                     arms: str = ARMS_SINGLE) -> dict:
     """Per-fact consumption receipt ladder (levels 1-4) over ONE run's trajectory.
 
     For each DISTINCT delivered fact, decide the highest receipt level it reached:
@@ -1010,7 +1071,11 @@ def compute_receipts(delivered_facts: list[dict], events: list[dict],
                 if not further:
                     lv[RECEIPT_RESOLVED_STATE] = True
 
-        highest = max((_RECEIPT_NUM[n] for n, v in lv.items() if v), default=1)
+        # B-7: this is a SINGLE-arm detector — cap at RESOLVED_STATE (4) so no fact can
+        # ever carry CAUSAL (5) out of one trajectory. cap is a no-op today (the ladder
+        # numbers 1-4) but makes the level-5 refusal explicit + mutation-testable.
+        highest = cap_single_arm_level(
+            max((_RECEIPT_NUM[n] for n, v in lv.items() if v), default=1))
         per_fact.append({
             "cls": cls, "kind": kind, "token": tok,
             "highest_level": _RECEIPT_ORDER[highest - 1],
@@ -1040,6 +1105,9 @@ def compute_receipts(delivered_facts: list[dict], events: list[dict],
                 for name in _RECEIPT_ORDER}
         blk = {
             "delivered_distinct": n,
+            # B-7: arms label on EVERY per-class block so a single-arm RESOLVED_STATE rate
+            # can never be misread as causal/effectiveness.
+            "arms": arms,
             "highest_level_distribution": dict(dist),
             "at_least": {name: at_least[name] for name in _RECEIPT_ORDER},
             "rate": rate,
@@ -1074,12 +1142,115 @@ def compute_receipts(delivered_facts: list[dict], events: list[dict],
     admit_cut = {cls: by_class[cls]["highest_level_distribution"] for cls in FACT_CLASSES}
     return {
         "receipt_levels": list(_RECEIPT_ORDER),
+        # B-7: the ARMS label + the explicit CAUSAL refusal. A single arm reports levels
+        # 1-4 only; CAUSAL (receipt_causal_level, kept for documentation of the level NAME)
+        # is NEVER a computed verdict here — receipt_causal is the honest verdict field and
+        # is UNAVAILABLE(single-arm) for any single trajectory (gate item 12). Only
+        # compute_causal() over a matched pair may produce a real causal verdict.
+        "receipt_arms": arms,
+        "receipt_causal": (CAUSAL_UNAVAILABLE_SINGLE_ARM if arms == ARMS_SINGLE else None),
         "receipt_causal_level": RECEIPT_CAUSAL,
         "receipt_ladder_note": RECEIPT_LADDER_NOTE,
         "receipt_by_class": by_class,
         "receipt_admit_cut": admit_cut,
         "receipt_per_fact": sorted(
             per_fact, key=lambda p: (p["cls"], p["kind"], str(p["token"]))),
+    }
+
+
+def _detect_arms(on_report: dict, off_report: dict) -> str:
+    """B-7 structural single-arm detector behind the chokepoint. Returns :data:`ARMS_SINGLE`
+    iff the two 'arms' are the SAME graded trajectory (identical object, or same run_dir +
+    trajectory_path — one arm passed twice); :data:`ARMS_PAIRED` otherwise. Deterministic."""
+    if on_report is off_report:
+        return ARMS_SINGLE
+    same_dir = on_report.get("run_dir") == off_report.get("run_dir")
+    same_traj = on_report.get("trajectory_path") == off_report.get("trajectory_path")
+    return ARMS_SINGLE if (same_dir and same_traj) else ARMS_PAIRED
+
+
+def compute_causal(on_report: dict, off_report: dict) -> dict:
+    """Level-5 CAUSAL — computable ONLY from a matched GT-on/GT-off pair (§0 gate item 12).
+
+    ``on_report`` / ``off_report`` are single-arm :func:`grade_run` outputs for the SAME
+    task (GT-on vs GT-off, same history prefix — the matched-pair contract the CALLER owns,
+    since a task identity is not recoverable from a run dir alone). What this function
+    ENFORCES is the single-arm refusal: two identical arms (or one report passed twice), or
+    an ungraded arm, route through :func:`assert_paired_for_causal` and RAISE
+    :class:`SingleArmCausalError` — a causal verdict can never come from one trajectory.
+
+    Returns the paired counterfactual table (``arms='paired'``): run-level BEHAVIORAL deltas
+    (off - on; positive = GT reduced the acquisition cost) + a per-fact-class RESOLVED_STATE
+    -rate delta, keyed by fact_class, at 8-dp. Deterministic, LLM-free, no I/O.
+    """
+    for tag, rep in (("on", on_report), ("off", off_report)):
+        if not isinstance(rep, dict) or rep.get("trajectory_source") in (None, "none"):
+            raise SingleArmCausalError(
+                f"CAUSAL needs two graded arms; the {tag!r} arm is ungraded/empty "
+                "(no counterfactual can be grounded on a missing trajectory)")
+    arms = _detect_arms(on_report, off_report)
+    assert_paired_for_causal(arms)   # <-- THE CHOKEPOINT: single arm => SingleArmCausalError
+
+    def _delta(key: str):
+        """off - on, 8-dp; None unless both arms carry a real (non-bool) number."""
+        a, b = off_report.get(key), on_report.get(key)
+        if (isinstance(a, (int, float)) and not isinstance(a, bool)
+                and isinstance(b, (int, float)) and not isinstance(b, bool)):
+            return round(float(a) - float(b), 8)
+        return None
+
+    behavioral = {
+        "turns_to_first_edit_delta": _delta("turns_to_first_edit"),
+        "turns_to_first_gold_read_delta": _delta("turns_to_first_gold_read"),
+        "turns_to_first_test_run_delta": _delta("turns_to_first_test_run"),
+        "wrong_branch_reads_delta": _delta("wrong_branch_reads"),
+        "action_count_delta": _delta("action_count"),
+        "search_count_delta": _delta("search_count"),
+        # non_re_acquisition is on - off (higher on = GT substituted more acquisition).
+        "non_re_acquisition_rate_delta": (
+            round(float(on_report["non_re_acquisition_rate"])
+                  - float(off_report["non_re_acquisition_rate"]), 8)
+            if isinstance(on_report.get("non_re_acquisition_rate"), (int, float))
+            and isinstance(off_report.get("non_re_acquisition_rate"), (int, float))
+            else None),
+    }
+
+    on_bc = on_report.get("receipt_by_class") or {}
+    off_bc = off_report.get("receipt_by_class") or {}
+
+    def _rs_rate(blk: dict):
+        return (blk.get("rate") or {}).get(RECEIPT_RESOLVED_STATE)
+
+    by_class: dict[str, dict] = {}
+    for cls in FACT_CLASSES:
+        on_r = _rs_rate(on_bc.get(cls) or {})
+        off_r = _rs_rate(off_bc.get(cls) or {})
+        delta = (round(float(on_r) - float(off_r), 8)
+                 if isinstance(on_r, (int, float)) and isinstance(off_r, (int, float))
+                 else None)
+        by_class[cls] = {
+            "arms": arms,
+            "on_resolved_state_rate": on_r,
+            "off_resolved_state_rate": off_r,
+            "resolved_state_rate_delta": delta,
+            "causal_eval_method": _CAUSAL_EVAL_METHOD.get(cls),
+        }
+
+    return {
+        "receipt_arms": arms,
+        "receipt_causal_level": RECEIPT_CAUSAL,
+        "causal_available": True,
+        "on_run_dir": _np(on_report.get("run_dir") or ""),
+        "off_run_dir": _np(off_report.get("run_dir") or ""),
+        "causal_behavioral_delta": behavioral,
+        "causal_by_class": by_class,
+        "causal_note": (
+            "CAUSAL = paired GT-on vs GT-off counterfactual (verifyandobserve.md §0 gate "
+            "item 12). Behavioral deltas are off - on (positive = GT reduced the "
+            "acquisition cost); the per-class column is the RESOLVED_STATE-rate delta "
+            "(on - off). Matched-task + same-history-prefix is the caller's contract; the "
+            "single-arm refusal (identical/ungraded arm => SingleArmCausalError) is "
+            "enforced structurally here."),
     }
 
 
@@ -1246,6 +1417,9 @@ def aggregate(reports: list[dict]) -> dict:
         at_least, rate = _cume(dist, n)
         entry = dict(dist)
         entry["delivered_distinct"] = n
+        # B-7: every grade_run() is single-arm, so the aggregate ADMIT/CUT table is a
+        # single-arm rollup — label it so its RESOLVED_STATE rate is never read as causal.
+        entry["arms"] = ARMS_SINGLE
         entry["at_least"] = at_least
         entry["receipt_rate"] = rate
         entry["resolved_state_weak_any_green"] = None
@@ -1285,6 +1459,9 @@ def aggregate(reports: list[dict]) -> dict:
             }
         table[cls] = entry
     agg["receipt_admit_cut_table"] = table
+    # B-7: the aggregate is a single-arm rollup; CAUSAL is unavailable at this granularity.
+    agg["receipt_arms"] = ARMS_SINGLE
+    agg["receipt_causal"] = CAUSAL_UNAVAILABLE_SINGLE_ARM
     agg["receipt_ladder_note"] = RECEIPT_LADDER_NOTE
     return agg
 
@@ -1375,6 +1552,8 @@ def main() -> None:
     ap.add_argument("--glob", help="glob root; grade every run dir found beneath it")
     ap.add_argument("--out", help="write the single-run report JSON here")
     ap.add_argument("--out-dir", help="write per-run + AGGREGATE JSON here (glob mode)")
+    ap.add_argument("--pair-on", help="GT-on run dir; with --pair-off => paired CAUSAL (B-7)")
+    ap.add_argument("--pair-off", help="GT-off run dir (the matched pair for --pair-on)")
     ap.add_argument("--receipt-table", action="store_true",
                     help="F9 driver: grade --corpus roots, write AGG_* + PROVENANCE")
     ap.add_argument("--corpus", action="append", default=[], metavar="NAME=ROOT",
@@ -1395,6 +1574,21 @@ def main() -> None:
                           "n_graded": combined["n_graded"],
                           "out_dir": _np(args.out_dir)},
                          indent=2, sort_keys=True))
+        return
+
+    if args.pair_on or args.pair_off:
+        # B-7: the ONLY path that emits a CAUSAL (level-5) verdict — a matched pair. A
+        # single arm passed here (same dir for both, or one side omitted) is refused.
+        if not (args.pair_on and args.pair_off):
+            ap.error("--pair-on and --pair-off must be given together (a matched pair)")
+        on_rep = grade_run(args.pair_on, args.gold or None)
+        off_rep = grade_run(args.pair_off, args.gold or None)
+        causal = compute_causal(on_rep, off_rep)   # raises SingleArmCausalError on 1 arm
+        print(json.dumps(causal, indent=2, sort_keys=True, default=str))
+        if args.out:
+            with open(args.out, "w", encoding="utf-8") as fh:
+                json.dump(causal, fh, indent=2, sort_keys=True, default=str)
+            print(f"\n[WROTE] {args.out}", file=sys.stderr)
         return
 
     if args.glob:

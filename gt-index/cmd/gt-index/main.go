@@ -126,6 +126,23 @@ func main() {
 		if err := db.PopulateFTS5(); err != nil {
 			log.Printf("[WARN] rebuild-closure: FTS5 re-population failed: %v", err)
 		}
+		// Graph-F1 (bounce 2026-07-10): rebuild-closure runs AFTER the LSP resolve pass
+		// (groundtruth.resolve UPDATE/DELETEs edges + UPDATEs nodes), so the edge_metadata
+		// sub-table and the composite post_revision + subrev_<surface> stamped by the
+		// earlier full index now fingerprint the PRE-LSP graph. Refresh both here — LAST,
+		// after the closure + FTS refresh — so the LIVE-read B-11 revision + every
+		// envelope's graph_revision/valid_until + the B-21 latch re-permit + the
+		// incremental "did the graph change" contract key the CURRENT (post-LSP) graph.
+		// Mirror the -file path's fail-closed contract: PopulateEdgeMetadata is a derived
+		// index (non-fatal — the raw metadata stands; consumers fall back to
+		// ParseEdgeMetadata), StampCompositeRevision is the fingerprint contract (fatal —
+		// a stale/unstampable revision must abort, not ship silently).
+		if err := db.PopulateEdgeMetadata(); err != nil {
+			log.Printf("WARNING: rebuild-closure: populate edge_metadata: %v", err)
+		}
+		if _, err := db.StampCompositeRevision(); err != nil {
+			log.Fatalf("rebuild-closure: stamp composite revision: %v", err)
+		}
 		db.CheckpointWAL()
 		return
 	}
@@ -870,6 +887,21 @@ func main() {
 	cochangeSetCount := mineCochangeSets(db, *root)
 	fmt.Fprintf(os.Stderr, "  Stored %d co-change sets\n", cochangeSetCount)
 
+	// B-24: normalize edges.metadata into the queryable edge_metadata sub-table. Runs AFTER
+	// all edges + their metadata are final (Pass 4f promote wrote dataflow/usage; receiver_type
+	// was stamped at edge construction). Non-fatal — a derived index; the raw metadata stands.
+	if err := db.PopulateEdgeMetadata(); err != nil {
+		log.Printf("WARNING: populate edge_metadata: %v", err)
+	}
+	// B-29: stamp the COMPOSITE post_revision + per-surface sub-revisions and back-fill
+	// property source_revision. Runs LAST, after every fact surface (nodes/edges/properties/
+	// assertions/closure/cochange/content_fts/file_hashes) is populated, so the composite is
+	// over the final graph state. Non-fatal on the full-index path (an expensive rebuild must
+	// not abort over a revision-stamp hiccup; the incremental executor contract is fail-closed).
+	if _, err := db.StampCompositeRevision(); err != nil {
+		log.Printf("WARNING: stamp composite revision: %v", err)
+	}
+
 	// Post-insert FK validation (non-fatal)
 	if err := db.ValidateForeignKeys(); err != nil {
 		log.Fatalf("foreign-key validation failed: %v", err)
@@ -970,15 +1002,12 @@ func runIncremental(root, relpath, dbPath string) error {
 	// (identical to what a re-run after the last real reindex would report).
 	storedHash := db.GetFileHash(relSlash)
 	if storedHash == newHash {
-		postRev, revErr := db.ComputeRevision()
+		// Stamp the COMPOSITE revision (post_revision + subrev_<surface> + property
+		// source_revision) so the meta table always reflects the summary the overlay just
+		// parsed (idempotent: the db content is unchanged, so it re-computes identically).
+		postRev, revErr := db.StampCompositeRevision()
 		if revErr != nil {
-			return fmt.Errorf("compute post_revision (short-circuit): %w", revErr)
-		}
-		// Stamp the revision so the meta table always reflects the summary the
-		// overlay just parsed (idempotent: the db content is unchanged, so the
-		// value re-computes identically).
-		if err := db.SetMeta("post_revision", postRev); err != nil {
-			return fmt.Errorf("stamp post_revision (short-circuit): %w", err)
+			return fmt.Errorf("compute/stamp post_revision (short-circuit): %w", revErr)
 		}
 		db.CheckpointWAL()
 		dur := time.Since(startWall)
@@ -1425,6 +1454,11 @@ func runIncremental(root, relpath, dbPath string) error {
 	if _, promErr := resolver.PromotePropertyEdges(db); promErr != nil {
 		log.Printf("WARNING: incremental property->edge promotion: %v", promErr)
 	}
+	// B-24: refresh the normalized edge_metadata sub-table after the promote pass finalized
+	// the dataflow/usage annotations. Non-fatal (a derived index over edges.metadata).
+	if err := db.PopulateEdgeMetadata(); err != nil {
+		log.Printf("WARNING: incremental populate edge_metadata: %v", err)
+	}
 
 	// Stamp schema_version + indexer provenance on every incremental run.
 	// The full-index path (Pass 5) writes these in project_meta, but an older
@@ -1438,21 +1472,9 @@ func runIncremental(root, relpath, dbPath string) error {
 	db.SetMeta("build_time_utc", buildTimeUTC)
 	db.SetMeta("go_toolchain", goToolchain)
 
-	// Overlay-revision stamp: post_revision = the deterministic logical-content
-	// hash of graph.db AFTER every mutation this run performs (the tx commit AND
-	// the post-commit promote pass, which re-emits promote_% edges — edges are
-	// hashed, so it must run first). FTS/closure sidecars are excluded from the
-	// hash (see store/revision.go), so their refresh order below is irrelevant.
-	// Fail-closed: the executor contract REQUIRES post_revision in the summary;
-	// if it cannot be computed or stamped, this run exits nonzero and the overlay
-	// treats the reindex as failed (a retry short-circuits and re-computes).
-	postRev, revErr := db.ComputeRevision()
-	if revErr != nil {
-		return fmt.Errorf("compute post_revision: %w", revErr)
-	}
-	if err := db.SetMeta("post_revision", postRev); err != nil {
-		return fmt.Errorf("stamp post_revision: %w", err)
-	}
+	// NOTE (B-29): post_revision is now stamped AFTER the FTS/content refresh below (not
+	// here), because the COMPOSITE revision hashes the content_fts surface — it must see the
+	// refreshed body content so a same-span body edit moves post_revision.
 
 	// Refresh FTS5 index after incremental node changes so BM25 queries
 	// stay current. Same call as the full-index path (idempotent).
@@ -1465,6 +1487,19 @@ func runIncremental(root, relpath, dbPath string) error {
 	if err := db.RepopulateContentFTSForFile(root, relSlash); err != nil {
 		log.Printf("[WARN] content FTS refresh after incremental reindex: %v", err)
 	}
+
+	// B-29: stamp the COMPOSITE post_revision + per-surface sub-revisions + property
+	// source_revision LAST — AFTER the FTS/content refresh above, because the composite
+	// hashes the content_fts surface (a same-span body edit changes body content but not the
+	// node/edge columns, so the old nodes+edges-only revision missed it). Fail-closed: the
+	// executor contract REQUIRES post_revision in the summary; if it cannot be computed or
+	// stamped, this run exits nonzero and the overlay treats the reindex as failed (a retry
+	// short-circuits and re-computes).
+	postRev, revErr := db.StampCompositeRevision()
+	if revErr != nil {
+		return fmt.Errorf("compute/stamp post_revision: %w", revErr)
+	}
+
 	// R#6: verify the orphan-edge invariant (incremental.go:13,422) actually held.
 	// The full-index path FK-checks post-insert (main.go:821); the live -file path
 	// never did, so a delete/reinsert gap that stranded an edge on a missing node

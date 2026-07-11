@@ -556,6 +556,27 @@ def test_bug7_brief_empty_raise_prints_line(agent_mod, monkeypatch, tmp_path, ca
     assert "error=DEEPSWE_ADAPTER_FAIL" in capsys.readouterr().out
 
 
+def test_b18_delivers_exact_artifact_bytes(agent_mod, monkeypatch, tmp_path):
+    # B-18: the delivered brief MUST equal the baked brief.txt bytes — trailing
+    # newline + boundary whitespace preserved (no .strip(), no errors="replace").
+    content = "<gt-task-brief>\nEdit target: a/x.py\n</gt-task-brief>\n"
+    (tmp_path / "brief.txt").write_bytes(content.encode("utf-8"))
+    monkeypatch.setenv("GT_CERT_DIR", str(tmp_path))
+    monkeypatch.delenv("GT_PROOF_MODE", raising=False)
+    monkeypatch.delenv("GT_PORTABLE_SUBSTRATE", raising=False)
+    assert agent_mod._substrate_brief() == content
+
+
+def test_b18_whitespace_only_still_fails_closed(agent_mod, monkeypatch, tmp_path):
+    # emptiness is still judged on a stripped view -> proof mode fails closed
+    (tmp_path / "brief.txt").write_text("  \n ", encoding="utf-8")
+    monkeypatch.setenv("GT_PROOF_MODE", "1")
+    monkeypatch.setenv("GT_PORTABLE_SUBSTRATE", "1")
+    monkeypatch.setenv("GT_CERT_DIR", str(tmp_path))
+    with pytest.raises(agent_mod.DeepSweAdapterError):
+        agent_mod._substrate_brief()
+
+
 def _make_edge_graph(db_path: Path) -> None:
     conn = sqlite3.connect(str(db_path))
     conn.execute(

@@ -58,8 +58,15 @@ def _connect_ro(db_path: str):
     try:
         return sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
     except Exception:  # noqa: BLE001
+        # Graph-F9 (bounce 2026-07-10): the ro-URI open failed, so this fallback uses a
+        # PLAIN connect — which is READ-WRITE and would create a missing file / permit a
+        # mutation through a helper named _connect_ro. Enforce PRAGMA query_only=1 so the
+        # authoritative graph is never written via the "ro" helper (parity with
+        # curation_map._open_ro). Fail-safe: any error -> None (correct-or-quiet).
         try:
-            return sqlite3.connect(db_path, timeout=5)
+            con = sqlite3.connect(db_path, timeout=5)
+            con.execute("PRAGMA query_only = 1")
+            return con
         except Exception:  # noqa: BLE001
             return None
 

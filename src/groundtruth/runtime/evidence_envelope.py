@@ -47,16 +47,22 @@ are enforceable:
        NEVER rewrites bytes the policy already sampled (:func:`render_bytes` is a pure
        read; the frozen dataclass makes mutation impossible).
     5. OBSERVATION-PREFIX HASH-CHAIN — each delivery extends a per-episode chain
-       ``h_i = sha256(raw32(h_{i-1}) + commitment_i)`` (:func:`chain_hash`): the parent
-       link is EXACTLY 64 lowercase hex decoded to its raw 32 bytes (empty => 32 zero
-       bytes genesis) — fixed width makes the parent/rendered boundary unambiguous
-       with no separator; a malformed parent RAISES (corrupt chains fail loudly).
-       ``commitment_i`` is :func:`render_bytes`'s canonical INJECTIVE serialization of
-       the structured content. GIVEN both (fixed-width parent + injective commitment),
-       what the suite pins holds: reorder, omission, boundary shift, newline-split, and
-       payload/provenance fungibility all change the terminal hash. The claim is
-       exactly that — commitment-chain integrity — not general tamper-proofing of
-       anything outside the committed content.
+       ``h_i = sha256(raw32(h_{i-1}) + framed(tool_output_i) + framed(gt_delta_i)
+       + framed(boundary_i))`` (:func:`chain_hash`): the parent link is EXACTLY 64
+       lowercase hex decoded to its raw 32 bytes (empty => 32 zero bytes genesis) —
+       fixed width makes the parent/rest boundary unambiguous with no separator; a
+       malformed parent RAISES (corrupt chains fail loudly). B-32: the chain commits
+       the FULL observation — the base tool output the GT delta is spliced into, the
+       delta itself, and the message-boundary metadata — not just the delta, so two
+       DIFFERENT observations carrying identical deltas produce DIFFERENT heads. Each
+       field is length-prefixed (``framed``), so no bytes can shift across a field
+       boundary; ``tool_output``/``boundary`` default to ``b""`` (the documented "seam
+       not yet wired" degrade to a delta-only commitment). GIVEN the fixed-width parent
+       + per-field framing + the injective :func:`render_bytes` delta commitment, what
+       the suite pins holds: reorder, omission, boundary shift, newline-split,
+       payload/provenance fungibility, and a differing base observation all change the
+       terminal hash. The claim is exactly that — commitment-chain integrity — not
+       general tamper-proofing of anything outside the committed content.
     9. LEAK LAW — no test identity / FAIL_TO_PASS / assertion ever enters the rendered
        bytes; host-side metadata (delivery_reason, renderer_id, receipt_state, …) is
        NEVER rendered — :func:`render_bytes` commits ONLY payload + provenance.
@@ -618,35 +624,85 @@ def render_bytes(env: EvidenceEnvelope) -> bytes:
     return _commitment_bytes(env.payload, env.provenance)
 
 
-def chain_hash(parent_hash: str, rendered: bytes) -> str:
-    """One step of the observation-prefix hash-chain (TITO LAW 5):
-    ``sha256(parent_raw_32 + rendered)``, where ``parent_raw_32`` is the parent link
-    decoded from EXACTLY 64 lowercase hex to its raw 32 bytes, or 32 zero bytes for
-    the chain's genesis (``parent_hash == ""``). The FIXED-WIDTH parent is the F1 fix
-    (adversarial review 2026-07-10): the old ``sha256(parent_hex.encode() + rendered)``
-    had no domain separation, so ``("ab", b"cdef")`` collided with ``("a", b"bcdef")``
-    — with a raw 32-byte parent the parent/rendered boundary is unambiguous with no
-    separator. A non-empty parent that is not exactly 64 lowercase hex RAISES
-    ``ValueError``: a corrupt chain must fail loudly, never silently hash.
+# Fixed-width length prefix (unsigned 64-bit big-endian) that FRAMES each
+# variable-length byte field folded into the chain commitment. Framing makes the
+# concatenation INJECTIVE on the field tuple, so no bytes can migrate across a field
+# boundary (B-32: the base tool output, the GT delta, and the message-boundary
+# metadata commit as three distinct fields, never one fungible blob).
+_CHAIN_LEN_PREFIX_BYTES = 8
 
-    Deterministic (no time / randomness), so replaying a trajectory reproduces the
-    identical chain. Because each link folds in its parent and ``rendered`` comes from
-    the INJECTIVE :func:`render_bytes` commitment, reorder / omission / boundary shift
-    all change the terminal hash. The parent is load-bearing: dropping it collapses
-    the chain to a per-link content hash that no longer detects reorder/omission
-    (mutation M1); dropping the width gate re-opens the boundary shift (mutation M3).
-    NOTE: genesis (32 zero bytes) equals a literal all-zeros parent by construction —
-    the zero hash IS the genesis encoding (standard hash-chain convention).
 
-    W3 (bounce #2): the parent must BE a ``str`` — ``None`` (previously coerced to
-    genesis silently by ``parent_hash or ""``) and ``bytes`` raise ``ValueError``,
-    for consistency with the malformed-hex case: every corrupt chain input fails
-    loudly."""
+def _framed(b: bytes) -> bytes:
+    """Length-prefix ``b`` (8-byte big-endian length, then the raw bytes) so a
+    concatenation of framed fields is injective on the field tuple: two different
+    ``(tool_output, gt, boundary)`` splits of the same underlying byte stream commit
+    to DIFFERENT bytes. This generalizes the single-field boundary defense (the
+    fixed-32-byte parent) to the multi-field observation commitment."""
+    return len(b).to_bytes(_CHAIN_LEN_PREFIX_BYTES, "big") + bytes(b)
+
+
+def chain_hash(
+    parent_hash: str,
+    gt_bytes: bytes,
+    *,
+    tool_output_bytes: bytes = b"",
+    boundary: bytes = b"",
+) -> str:
+    """One step of the observation-prefix hash-chain (TITO LAW 5), committing the
+    FULL observation — not merely the appended GT delta (B-32 fix):
+
+        ``sha256(parent_raw_32 + framed(tool_output_bytes) + framed(gt_bytes)
+                 + framed(boundary))``
+
+    * ``parent_raw_32`` is the parent link decoded from EXACTLY 64 lowercase hex to
+      its raw 32 bytes, or 32 zero bytes for the chain's genesis (``parent_hash ==
+      ""``). The FIXED-WIDTH parent (F1, adversarial review 2026-07-10) makes the
+      parent/rest boundary unambiguous with no separator; a non-empty parent that is
+      not exactly 64 lowercase hex RAISES ``ValueError`` (a corrupt chain fails
+      loudly, never silently hashes). ``None``/``bytes`` parents also RAISE (W3).
+    * ``gt_bytes`` are the EXACT appended GT delta bytes; ``tool_output_bytes`` are
+      the EXACT base tool-output bytes of the observation the delta is spliced into;
+      ``boundary`` is the message-boundary metadata (e.g. a canonical encoding of the
+      splice offset / message framing). Each is length-prefixed by :func:`_framed`,
+      so the three fields cannot collide by shifting bytes across their boundaries
+      (mutation M4 — dropping the framing — re-opens that shift).
+
+    B-32 (this fix): the old step committed ONLY the GT delta
+    (``sha256(parent_raw + rendered)``), so two DIFFERENT agent observations that
+    receive identical GT deltas produced the SAME chain — it could not establish
+    observation-prefix integrity / exact TITO replay. Folding the base tool output
+    and the message boundary into the commitment fixes that: a different base
+    observation now yields a different chain head even under an identical delta
+    (mutation M5 — dropping ``tool_output_bytes`` — makes those heads EQUAL again).
+
+    ``tool_output_bytes`` / ``boundary`` default to ``b""`` — the DOCUMENTED "seam
+    not yet wired" state: the caller (the mini seam, via :func:`seal_delivery`) has
+    not yet supplied the base observation, so the step degrades EXPLICITLY to the
+    GT-delta-only commitment. The chain head is audit metadata that is NEVER appended
+    to an observation, so this change is not a model-facing byte change; a 2-argument
+    caller (relational chain tests, dedup identity) keeps its exact relationships.
+
+    Deterministic (no time / randomness): replaying a trajectory (base outputs +
+    deltas + boundaries) reproduces the identical chain. The parent is load-bearing
+    (dropping it collapses the chain to a per-link content hash that no longer detects
+    reorder/omission — mutation M1); the width gate closes the parent boundary shift
+    (mutation M3). NOTE: genesis (32 zero bytes) equals a literal all-zeros parent by
+    construction — the zero hash IS the genesis encoding (standard hash-chain
+    convention)."""
     if not isinstance(parent_hash, str):
         raise ValueError(
             f"chain_hash: parent must be a str (empty or {_HASH_HEX_LEN} lowercase "
             f"hex), got {type(parent_hash).__name__}"
         )
+    for _name, _val in (
+        ("gt_bytes", gt_bytes),
+        ("tool_output_bytes", tool_output_bytes),
+        ("boundary", boundary),
+    ):
+        if not isinstance(_val, (bytes, bytearray)):
+            raise ValueError(
+                f"chain_hash: {_name} must be bytes, got {type(_val).__name__}"
+            )
     if not parent_hash:
         parent_raw = b"\x00" * 32  # genesis: the zero hash
     elif (len(parent_hash) == _HASH_HEX_LEN
@@ -657,7 +713,12 @@ def chain_hash(parent_hash: str, rendered: bytes) -> str:
             f"chain_hash: parent must be empty or exactly {_HASH_HEX_LEN} lowercase "
             f"hex, got {parent_hash!r}"
         )
-    return hashlib.sha256(parent_raw + rendered).hexdigest()
+    return hashlib.sha256(
+        parent_raw
+        + _framed(tool_output_bytes)
+        + _framed(gt_bytes)
+        + _framed(boundary)
+    ).hexdigest()
 
 
 # --------------------------------------------------------------------------- #

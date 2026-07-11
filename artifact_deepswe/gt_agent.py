@@ -280,11 +280,15 @@ _PRODUCT_PACKAGE_MODULES: dict[str, tuple[str, ...]] = {
         # payload contract. gt_mini_patch.py imports gateway/adapter behind GT_GATEWAY;
         # they must ship or the seam runs DARK. Import-closed: episode_state -> ledger;
         # evidence_envelope -> path_policy; gateway -> covering_runner/native_render/
-        # episode_state/evidence_envelope/curation_map/path_policy (traces/change_surface/
-        # patch_delta are OPTIONAL try-wrapped in gateway, so NOT required here). Off-flag
-        # never imported (byte-identical).
+        # episode_state/evidence_envelope/curation_map/path_policy/fact_registry
+        # (traces/change_surface/patch_delta are OPTIONAL try-wrapped in gateway, so NOT
+        # required here). Off-flag never imported (byte-identical).
+        # fact_registry (graph-LIPI F2, 2026-07-10): gateway now imports it at MODULE
+        # scope for the renderable() fact-class gate; stdlib-only (import-time _self_check),
+        # so it ships standalone and closes the gateway->fact_registry import hole.
         "episode_state.py",
         "evidence_envelope.py",
+        "fact_registry.py",
         "gateway.py",
     ),
     # W2 seam adapter (groundtruth.runtime.adapters.miniswe) — the mini-swe-agent
@@ -975,9 +979,13 @@ def _substrate_brief() -> str:
             )
         return ""
     try:
-        with open(brief_path, encoding="utf-8", errors="replace") as fh:
-            txt = (fh.read() or "").strip()
-    except OSError as e:
+        # B-18: byte-provenance — the delivered brief MUST equal the baked artifact
+        # bytes. Read raw + decode strictly (no errors="replace" silently rewriting
+        # invalid UTF-8) and DO NOT strip (boundary whitespace is part of the artifact).
+        # Emptiness is judged on a stripped VIEW below, not by mutating the payload.
+        with open(brief_path, "rb") as fh:
+            txt = fh.read().decode("utf-8")
+    except (OSError, UnicodeDecodeError) as e:
         if proof or substrate:
             _adapter_fail(
                 "BRIEF_UNREADABLE",
@@ -987,17 +995,21 @@ def _substrate_brief() -> str:
             )
         logger.warning("GT: substrate brief unreadable (%s) -- skipping", e)
         return ""
-    if not txt and (proof or substrate):
-        _adapter_fail(
-            "BRIEF_EMPTY",
-            f"DEEPSWE_ADAPTER_FAIL: substrate brief at {brief_path!r} is EMPTY in "
-            f"substrate-consume mode (proof_mode={proof} substrate={substrate}). "
-            "Failing closed — a paid proof run must not ship a brief-less trajectory "
-            "(no host fallback).",
-        )
-    if txt:
-        logger.info("GT: consumed substrate brief %s (%d chars, READ-ONLY)",
-                    brief_path, len(txt))
+    if not txt.strip():
+        # B-18: a whitespace-only brief is empty. Proof/substrate mode fails closed;
+        # otherwise return '' (host may generate). Emptiness is judged on the stripped
+        # VIEW so real content is delivered EXACTLY (byte-identical to the artifact).
+        if proof or substrate:
+            _adapter_fail(
+                "BRIEF_EMPTY",
+                f"DEEPSWE_ADAPTER_FAIL: substrate brief at {brief_path!r} is EMPTY in "
+                f"substrate-consume mode (proof_mode={proof} substrate={substrate}). "
+                "Failing closed — a paid proof run must not ship a brief-less trajectory "
+                "(no host fallback).",
+            )
+        return ""
+    logger.info("GT: consumed substrate brief %s (%d chars, READ-ONLY)",
+                brief_path, len(txt))
     return txt
 
 

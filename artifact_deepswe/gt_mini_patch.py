@@ -4174,7 +4174,267 @@ def _evidence(cmd: str) -> str:
 _contract_seen: set[str] = set()
 
 
-def _graph_contract_block(rel: str) -> str:
+# ---------------------------------------------------------------------------
+# B-19 / B-20 (2026-07-10): MODE-CONDITIONED + BILATERAL contract enrichment.
+#
+# B-19: the per-edit contract always narrated "[CALLERS] N ... — preserve this
+# interface" on any caller count, with NO change-mode. On an ADD/new-file edit there is
+# no pre-existing interface to preserve; on an intentional signature CHANGE, "preserve"
+# is actively wrong (the callers MUST change). Derive the mode from the edit action and
+# condition the narration; underivable -> fail-safe to the current PRESERVE.
+#
+# B-20: graph.db mines a `caller_usage` property (how each caller CONSUMES the callee:
+# boolean_check / iterated / destructure_tuple / exception_guard) but the mini contract
+# never read it. Compose the bilateral half (how callers consume the result) into the
+# capsule as ONE compact [CONSUMED] line, dose-bounded.
+#
+# Both default-OFF (GT_CONTRACT_MODE / GT_CONTRACT_BILATERAL) -> byte-identical to the
+# pre-enrichment contract. Deterministic, LLM-free, read-only SQL, correct-or-quiet.
+# ---------------------------------------------------------------------------
+def _contract_mode_on() -> bool:
+    """True iff B-19 mode-conditioned preserve (GT_CONTRACT_MODE) is enabled."""
+    if _GT_BASELINE:
+        return False
+    return os.environ.get("GT_CONTRACT_MODE", "").strip().lower() not in (
+        "", "0", "false", "no", "off")
+
+
+def _contract_bilateral_on() -> bool:
+    """True iff B-20 bilateral caller-consumption (GT_CONTRACT_BILATERAL) is enabled."""
+    if _GT_BASELINE:
+        return False
+    return os.environ.get("GT_CONTRACT_BILATERAL", "").strip().lower() not in (
+        "", "0", "false", "no", "off")
+
+
+def _paren_params(sig: str) -> "str | None":
+    """The content of the FIRST balanced ``(...)`` in a signature string, or None
+    (no parens / unbalanced). Language-agnostic (a signature is ``name(params)`` in
+    every Tier-1 language)."""
+    if not sig or "(" not in sig:
+        return None
+    start = sig.index("(")
+    depth = 0
+    for i in range(start, len(sig)):
+        c = sig[i]
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return sig[start + 1:i]
+    return None
+
+
+_PARAM_NAME_RE = re.compile(r"[*&\s]*([A-Za-z_]\w*)")
+
+
+def _param_names(params: "str | None") -> "list[str]":
+    """The leading identifier of each TOP-LEVEL comma-separated parameter — annotations,
+    defaults, and ``*``/``&``/whitespace decorations stripped. Bracket-aware split so a
+    default ``x=(1,2)`` or a generic ``List[int, str]`` never splits mid-parameter. This
+    is the comparison unit for B-19: identifiers added/removed/renamed = a signature
+    change; an annotation/default/whitespace-only edit leaves the name list unchanged."""
+    if not params:
+        return []
+    names: list[str] = []
+    depth = 0
+    cur: list[str] = []
+
+    def _flush() -> None:
+        seg = "".join(cur).strip()
+        if seg:
+            m = _PARAM_NAME_RE.match(seg)
+            if m:
+                names.append(m.group(1))
+
+    for ch in params:
+        if ch in "([{":
+            depth += 1
+            cur.append(ch)
+        elif ch in ")]}":
+            depth = max(0, depth - 1)
+            cur.append(ch)
+        elif ch == "," and depth == 0:
+            _flush()
+            cur = []
+        else:
+            cur.append(ch)
+    _flush()
+    return names
+
+
+_DEF_KW_RE = re.compile(r"\b(?:def|func|fn|function|fun|sub)\b")
+
+
+def _extract_balanced_after(text: str, open_idx: int) -> "str | None":
+    """Content between the ``(`` at ``open_idx`` and its matching ``)`` (may span
+    newlines), or None if unbalanced within the text."""
+    depth = 0
+    for i in range(open_idx, len(text)):
+        c = text[i]
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return text[open_idx + 1:i]
+    return None
+
+
+def _def_params_in_edit(name: str, text: str) -> "str | None":
+    """The parameter list of a DEFINITION of ``name`` in the edit's new content, or None.
+    A ``name(`` occurrence counts only when its line carries a definition keyword
+    (def/func/fn/function/fun/sub) — so a CALL of ``name`` is never mistaken for a def.
+    Covers Go receiver methods too (``func (r *T) Name(...)`` — the ``func`` keyword sits
+    on the same line). Returns the FIRST such definition's balanced params."""
+    if not name or not text:
+        return None
+    esc = re.escape(name)
+    for m in re.finditer(r"(?<![\w.])" + esc + r"\s*\(", text):
+        ls = text.rfind("\n", 0, m.start()) + 1
+        le = text.find("\n", m.start())
+        if le < 0:
+            le = len(text)
+        if not _DEF_KW_RE.search(text[ls:le]):
+            continue
+        params = _extract_balanced_after(text, m.end() - 1)
+        if params is not None:
+            return params
+    return None
+
+
+def _edit_new_content(action, cmd: str) -> str:
+    """The ADDED/new-side content of an edit — the structured new body when present
+    (str_replace new_str / create file_text, EXCLUDING old_str), else the raw command
+    (a bash sed/heredoc carries its new content inline). Never includes the removed side
+    for a structured edit, so a str_replace's OLD signature is not scanned as 'new'."""
+    try:
+        body = _struct_content_body(action) if action is not None else ""
+    except Exception:  # noqa: BLE001
+        body = ""
+    return body or (cmd or "")
+
+
+def _sig_params_after_name(name: str, sig: str) -> "str | None":
+    """Seam-F5 (bounce 2026-07-10): the params of the paren that immediately follows the
+    function NAME token in a STORED signature — name-anchored (mirrors
+    ``_def_params_in_edit``'s anchoring on the NEW content) so a Go receiver method's
+    leading receiver paren (``func (r *Recv) Bar(a int)``) is NOT mistaken for the
+    parameter list. Returns None when the name is not a call/def token in the signature,
+    so the caller falls back to the first-paren extraction (a bare ``(a, b)`` signature
+    that carries no name). Byte-identical to ``_paren_params`` for every non-receiver
+    language, where the name-anchored paren IS the first paren."""
+    if not name or not sig:
+        return None
+    esc = re.escape(name)
+    for m in re.finditer(r"(?<![\w.])" + esc + r"\s*\(", sig):
+        params = _extract_balanced_after(sig, m.end() - 1)
+        if params is not None:
+            return params
+    return None
+
+
+def _edit_signature_changes(action, cmd: str, rows) -> "dict[str, tuple[list[str], list[str]]]":
+    """B-19: ``{func_name: (old_param_names, new_param_names)}`` for the contract rows
+    whose signature the edit CHANGED. Compares the graph's stored signature (the
+    pre-index baseline) against a definition of the same function in the edit's NEW
+    content. CONSERVATIVE (correct-or-quiet): a change is declared ONLY when both param
+    lists parse AND the identifier sequence differs — annotation/default/whitespace-only
+    edits, or an unparseable/absent new def, fall through to PRESERVE (fail-safe)."""
+    changes: dict[str, tuple[list[str], list[str]]] = {}
+    new_text = _edit_new_content(action, cmd)
+    if not new_text:
+        return changes
+    for row in rows:
+        name, sig = row[1], row[2]
+        # Seam-F5: anchor the OLD-param parse to the paren following the function NAME
+        # (symmetric with _def_params_in_edit on the NEW content). Fall back to the
+        # first paren only when the stored signature carries no name token (a bare
+        # `(a, b)` form — never a Go receiver method, which always spells `func (recv)
+        # Name(...)`). Without this the Go receiver paren `(r *Recv)` parses as the
+        # old params -> a phantom `signature changing (r -> a)` on an unchanged method.
+        old_params = _sig_params_after_name(name, sig or "")
+        if old_params is None:
+            old_params = _paren_params(sig or "")
+        new_params = _def_params_in_edit(name, new_text)
+        if old_params is None or new_params is None:
+            continue
+        on, nn = _param_names(old_params), _param_names(new_params)
+        if on != nn:
+            changes[name] = (on, nn)
+    return changes
+
+
+def _edit_is_create(action, cmd: str) -> bool:
+    """B-19: True iff the edit is a whole-file CREATE (a structured ``create`` verb) — an
+    ADD, not a modify-in-place, so there is no pre-existing interface to 'preserve'.
+    Only the unambiguous structured verb qualifies; anything else -> False (fail-safe to
+    PRESERVE). A brand-new FILE has no graph rows and never reaches the renderer anyway;
+    this catches a create/overwrite of a path that DID exist in the pre-index graph."""
+    if isinstance(action, dict):
+        v = action.get("command")
+        if isinstance(v, str) and v.strip().lower() == "create":
+            return True
+    return False
+
+
+_BILATERAL_PHRASE = {
+    "boolean_check": "None/boolean-checked",
+    "iterated": "iterated (expects an iterable)",
+    "destructure_tuple": "unpacked into multiple vars (expects a tuple)",
+    "exception_guard": "wrapped in try/except (callers depend on the raise behavior)",
+}
+
+
+def _bilateral_consumption(con, target_id, target_name: str,
+                           det_sql: str, conf_gate: str) -> str:
+    """B-20: ONE compact ``[CONSUMED]`` line describing how the target's deterministic
+    CALLERS consume its result — read from the ``caller_usage`` property graph.db already
+    mines (value = ``<usage>:<callee>|<call_site>`` on the CALLER node). Joined through
+    the CALLS edges to the specific target id so the usage is genuinely of THIS symbol.
+    Dose-bounded (top-3 usage kinds). Correct-or-quiet: no deterministic callers / no
+    caller_usage rows / legacy schema -> ''."""
+    if not det_sql:
+        return ""
+    try:
+        crows = con.execute(
+            "SELECT DISTINCT e.source_id FROM edges e "
+            "JOIN nodes ns ON ns.id = e.source_id "
+            "WHERE e.target_id = ? AND e.type='CALLS' AND COALESCE(ns.is_test,0)=0 "
+            f"AND LOWER(TRIM(e.resolution_method)) IN ('{det_sql}') {conf_gate} LIMIT 40",
+            (target_id,)).fetchall()
+    except Exception:  # noqa: BLE001
+        return ""
+    caller_ids = [r[0] for r in crows if r and r[0] is not None]
+    if not caller_ids:
+        return ""
+    ph = ",".join("?" * len(caller_ids))
+    try:
+        prows = con.execute(
+            f"SELECT value FROM properties WHERE node_id IN ({ph}) "
+            "AND kind='caller_usage' LIMIT 200", caller_ids).fetchall()
+    except Exception:  # noqa: BLE001 — properties table / caller_usage absent
+        return ""
+    tally: dict[str, int] = {}
+    for row in prows:
+        val = row[0] if row else ""
+        if not val or ":" not in val:
+            continue
+        usage, rest = val.split(":", 1)
+        callee = rest.split("|", 1)[0].strip()
+        if callee != target_name:
+            continue
+        tally[usage] = tally.get(usage, 0) + 1
+    if not tally:
+        return ""
+    parts = [f"{_BILATERAL_PHRASE.get(u, u)} x{c}"
+             for u, c in sorted(tally.items(), key=lambda kv: (-kv[1], kv[0]))[:3]]
+    return (f"[CONSUMED] callers of {target_name}(): " + "; ".join(parts)
+            + " — preserve these consumption contracts")
+
+
+def _graph_contract_block(rel: str, *, action=None, cmd: str = "") -> str:
     """CROSS-LANGUAGE per-edit contract (parity with OH post_edit [SIGNATURE]/[CALLERS]).
     gt_hook.verify is Python-AST-only — it no-ops on every Go/Rust/TS/JS edit
     (_get_modified_files filters to .py). But the graph (tree-sitter, ALL languages) has
@@ -4211,6 +4471,7 @@ def _graph_contract_block(rel: str) -> str:
         nfp, _code_root = _resolve_frame(con, rel, root)
         rows: list = []
         preserve: list[str] = []
+        bilateral: str = ""  # B-20: bilateral caller-consumption line (default-OFF -> '')
         try:
             # Caller COUNT discipline (bug #2 — curation_map._verified_neighbor_count
             # parity): count ONLY deterministic-method edges, confidence >= 0.7,
@@ -4312,18 +4573,46 @@ def _graph_contract_block(rel: str) -> str:
                     tag = {"guard_clause": "PRESERVE", "conditional_return": "PRESERVE",
                            "exception_flow": "[RAISES]", "return_shape": "[RETURNS]"}.get(kind, "PRESERVE")
                     preserve.append(f"{tag} {val}")
+            # B-20: bilateral caller-consumption for the TOP (most-called) function.
+            # Read INSIDE the con block (needs the live connection); default-OFF -> ''.
+            if rows and has_method and _contract_bilateral_on():
+                bilateral = _bilateral_consumption(
+                    con, rows[0][0], rows[0][1], det_sql, conf_gate)
         finally:
             con.close()
         if not rows:
             return ""
+        # B-19: derive the edit change-mode from the action so 'preserve' is only
+        # narrated for a modify-in-place edit. Default-OFF -> current PRESERVE (fail-safe).
+        _mode_on = _contract_mode_on()
+        _sig_changes = _edit_signature_changes(action, cmd, rows) if _mode_on else {}
+        _is_create = _edit_is_create(action, cmd) if _mode_on else False
         out = [f'<gt-contract file="{os.path.basename(rel)}">']
         for _id, name, sig, ncallers, nfiles in rows:
             out.append(f"[SIGNATURE] {sig}")
             if ncallers and int(ncallers) > 0:
-                out.append(f"[CALLERS] {name}: {int(ncallers)} verified caller(s) in "
-                           f"{int(nfiles)} file(s) — preserve this interface")
+                if _mode_on and name in _sig_changes:
+                    _on, _nn = _sig_changes[name]
+                    out.append(
+                        f"[CALLERS] {name}: {int(ncallers)} caller(s) in "
+                        f"{int(nfiles)} file(s) — signature changing "
+                        f"({', '.join(_on)} -> {', '.join(_nn)}); update the call sites")
+                elif _mode_on and _is_create:
+                    # ADD / new-file: no pre-existing interface to 'preserve'.
+                    out.append(f"[CALLERS] {name}: {int(ncallers)} caller(s) in "
+                               f"{int(nfiles)} file(s)")
+                else:
+                    out.append(f"[CALLERS] {name}: {int(ncallers)} verified caller(s) in "
+                               f"{int(nfiles)} file(s) — preserve this interface")
         for p in preserve:
             out.append(p)
+        # Seam-F5 (secondary): B-20's bilateral "[CONSUMED] ... preserve these consumption
+        # contracts" line CONTRADICTS B-19's "signature changing ...; update the call
+        # sites" when the TOP function's signature is actually changing. Suppress the
+        # bilateral preserve-line in that case (correct-or-quiet: "update the call sites"
+        # is the message). Byte-identical when GT_CONTRACT_MODE off (_sig_changes is {}).
+        if bilateral and (not rows or rows[0][1] not in _sig_changes):
+            out.append(bilateral)
         out.append("</gt-contract>")
         return "\n" + "\n".join(out)
     except Exception:  # noqa: BLE001 -- correct-or-quiet
@@ -5353,6 +5642,11 @@ def _reset_oracle_state() -> None:
     global _gt_gateway_chain_head, _gt_gateway_deliveries
     _gt_gateway_chain_head = ""
     _gt_gateway_deliveries = []
+    # B-4 (2026-07-10): the cached issue text is per-TASK; clear it so an in-process
+    # retry re-reads the (same) artifact and, critically, so a test that set
+    # GT_ISSUE_FILE cannot leak its issue text into the next case (test isolation).
+    global _ISSUE_TEXT_CACHE
+    _ISSUE_TEXT_CACHE = None
     _action_count = 0
     _oracle_nonedit_streak = 0
     _oracle_obligation_fired = False
@@ -5651,6 +5945,56 @@ def _unexercised_clause_candidate() -> tuple[float, str] | None:
     return (0.9, block)
 
 
+def _payload_leaks_test_identity(text: str) -> bool:
+    """Shared leak predicate for the model-facing delivery paths (Seam-F1/F2, bounce
+    2026-07-10): True iff ``text`` carries a test path / ``::nodeid`` / ``def test_``
+    echo — the seam-owned ABI §5 predicate ``native_render.contains_test_identity``.
+    Fail-open (engine import-absent -> False), identical to the ``_gt_deliver_append``
+    chokepoint, so a leak-free payload is byte-identical and the in-container path (GT
+    code synced) always screens."""
+    try:
+        from groundtruth.runtime.native_render import contains_test_identity
+        return bool(contains_test_identity(text))
+    except Exception:  # noqa: BLE001 — engine absent in-container: preserve behavior
+        return False
+
+
+# Seam-F2b + Fable-LIPI round-2 (2026-07-11): the PROSE leak screen is SINGLE-SOURCED with the
+# brief via `native_render.PROSE_TEST_NAME_RE`/`PROSE_ASSERT_RE` (the canonical pair) so the two
+# model-facing prose surfaces cannot drift — round-1 tuned each separately and each missed a
+# different half (case+underscore Test_/TEST_, rust assert_eq!/crate::tests::/#[test], JS/TS
+# .test.ts, and the seam had NO assert leg at all). The local mirrors below are ONLY the
+# fail-open fallback for a broken in-container import (native_render is ship-listed, so normally
+# unused); `test_prose_screen_parity_with_native_render` pins them equal to the canonical.
+_PROSE_TEST_NAME_RE = re.compile(
+    r"(?i:\btest_\w+\b)|(?i:\b\w+_test\b)|\bTest[A-Z]\w*\b|\btest[A-Z]\w*\b"
+    r"|\b\w[\w.\-]*\.(?:test|spec)\.(?:ts|tsx|js|jsx|mjs|cjs)\b"
+    r"|[\w/\\+\-]+\.[A-Za-z0-9_]+::[\w.\[\]\-]+|\b\w+::tests?::\w|\btests?[\\/]|\#\[\s*tests?\b"
+    r"|\b(?:it|describe|context)\(\s*['\"]")
+_PROSE_ASSERT_RE = re.compile(r"\bassert(?:_\w+|[A-Z]\w*|!|\s*\()")
+
+
+def _prose_leaks_test_identity(text: str) -> bool:
+    """PROSE-payload leak screen. ``contains_test_identity`` (via ``_payload_leaks_test_identity``)
+    is a runner-TRANSCRIPT belt-check (nodeid / test-file path / ``def test_`` echo, correct there
+    because ``_strip_case_tokens``/``_final_scrub`` scrub bare names). ISSUE PROSE is NOT a scrubbed
+    transcript, so a SWE-bench issue naming a failing test / assertion by its BARE token sails onto
+    the model-facing surface at the submit decision point. This adds the language-complete bare-name
+    + assertion screen, SINGLE-SOURCED with the brief through ``native_render.prose_leaks_test_identity``
+    so neither surface leaks a class the other catches. SCOPE: prose-bearing producers only
+    (obligation-resurface) — NEVER structured Lane-A facts, whose legitimate ``test``/``Test``
+    substrings would over-drop; those stay on ``_payload_leaks_test_identity``. Fail-open on
+    import-absent -> the pinned local mirror still screens."""
+    if _payload_leaks_test_identity(text):
+        return True
+    try:
+        from groundtruth.runtime.native_render import prose_leaks_test_identity
+        return bool(prose_leaks_test_identity(text))
+    except Exception:  # noqa: BLE001 — engine absent in-container: local mirror still screens
+        t = text or ""
+        return bool(_PROSE_TEST_NAME_RE.search(t) or _PROSE_ASSERT_RE.search(t))
+
+
 def _obligation_resurface_candidate() -> tuple[float, str] | None:
     """PRE-SUBMIT obligation re-surfacing (Cursor-principled INSIGHT, 2026-06-23).
     The issue's requirements were delivered once in the brief; by the near-submit
@@ -5678,7 +6022,13 @@ def _obligation_resurface_candidate() -> tuple[float, str] | None:
         try:
             for o in (om.load_obligations(_anchors_path()) or []):
                 t = str(o.get("verbatim_text") or "").strip().replace("\n", " ")
-                if t and t not in seen:
+                # Seam-F2 (LEAK LAW): the obligation's verbatim_text quotes issue
+                # sentences, which routinely NAME the failing grader test. Screen each
+                # line through the PROSE screen (Seam-F2b: catches BARE names, not just
+                # transcript nodeids) — drop a leaky obligation (defense-in-depth; F1 also
+                # drop-wholes the payload on the transcript class, but correct-or-quiet at
+                # the producer keeps the clean obligations deliverable).
+                if t and t not in seen and not _prose_leaks_test_identity(t):
                     seen.add(t)
                     lines.append("  - %s" % (t[:160]))
                 if len(lines) >= 6:
@@ -5702,7 +6052,11 @@ def _obligation_resurface_candidate() -> tuple[float, str] | None:
             if not txt:
                 continue
             para = txt.split("\n\n")[0].strip().replace("\n", " ")
-            if len(para) >= 20:
+            # Seam-F2 (LEAK LAW): issue.txt is baked into $GT_CERT_DIR and SWE-bench
+            # issues routinely name the failing test — screen the fallback paragraph through
+            # the PROSE screen (Seam-F2b: BARE names too). A leaky paragraph drops WHOLE
+            # (correct-or-quiet: no resurface this task).
+            if len(para) >= 20 and not _prose_leaks_test_identity(para):
                 lines = ["  - %s" % para[:400]]
                 break
     if not lines:
@@ -7906,6 +8260,25 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
         try:
             if not text:
                 continue  # correct-or-quiet: empty producer stays silent
+            # Seam-F1 (LEAK LAW, bounce 2026-07-10): the Lane-A append below writes
+            # model-facing bytes DIRECTLY (via _join_lane_output, not _gt_deliver_append),
+            # so the ONE leak chokepoint MUST run here too — the oracle route
+            # (GT_ORACLE_ROUTE default-on) ships the MAJORITY of GT bytes
+            # (contract/cochange/consensus/evidence/post_search/DCC/obligation-resurface)
+            # through this path. Drop-WHOLE on a test-identity hit (never clip); the
+            # `continue` precedes the fire-once latch consumption below, so a dropped
+            # class stays armed and re-competes (deferred, not destroyed). Byte-identical
+            # for every leak-free fact (contains_test_identity is False), which is every
+            # real case. Fail-open on import-absent — identical to _gt_deliver_append.
+            if _payload_leaks_test_identity(text):
+                _runtime_ledger_record(
+                    kind=kind,
+                    outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
+                    reason="leak_guard",
+                    file_path=krel or "",
+                    event=event,
+                )
+                continue
             h = _oracle_content_hash(text)
             # B5 (token bloat, fastapi witness): a Lane-A block is a state-INDEPENDENT
             # FACT (brief / contract / evidence / scope / cochange). The content+state
@@ -7942,7 +8315,8 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
             # L-1a/D-3 "per lane": one-`\n`-boundary join so a no-leading-newline block
             # cannot jam onto the previous observation. Byte-identical for `\n`-opening
             # Lane-A blocks (the tagged contract/evidence/scope all open with `\n`).
-            out["output"] = _join_lane_output(out.get("output") or "", text)
+            _base_out = out.get("output") or ""  # B-32: base observation before the append
+            out["output"] = _join_lane_output(_base_out, text)
             _oracle_delivered_hashes.add(h)
             _oracle_delivered_hashes.add(hc)
             # bug #5 / C3 / C6: consume the producer fire-once latches ONLY on a
@@ -7980,7 +8354,7 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
             # RL-1 (flag GT_LANE_ENVELOPE): seal an envelope over the SAME delivered
             # bytes — advance the shared chain, stamp the dedup_key, record a receipt-
             # tracked delivery. Pure bookkeeping; no-op + byte-identical when off.
-            _seal_lane_delivery(kind, text, krel or "")
+            _seal_lane_delivery(kind, text, krel or "", base_output=_base_out)
             # D1 budget-commit re-wire (risk note #5): l3b.evidence's text was
             # budget-trimmed by _budget_trim, which staged the trimmed lines in
             # _last_budget_pending.  In the old monolith the commit fired only on
@@ -8033,6 +8407,120 @@ def _gt_gateway_append(out: dict, delta: str) -> None:
     out["output"] = (out.get("output") or "") + delta
 
 
+def _gt_deliver_append(out: dict, text: str, *, join: bool = False) -> bool:
+    """B-15: the ONE model-facing delivery chokepoint for the direct-append lanes
+    (legacy GT_ORACLE_ROUTE=0 blocks AND the oracle-route steer). Every GT byte
+    appended here is LEAK-VALIDATED first, so the leak law governs ALL delivery — not
+    only the paths whose envelope seal validates AFTER the bytes ship. Correct-or-quiet:
+    a payload carrying a test identity is DROPPED (0 model bytes), never appended.
+    ``join`` uses the L-1a one-newline boundary (steer/nudge blocks) vs a raw suffix.
+    Returns True iff the bytes were appended. Byte-identical to the prior append on any
+    leak-free payload (the graph-derived contract/cochange/consensus/nudge/evidence/
+    steer blocks), which is every real case."""
+    if not text:
+        return False
+    try:
+        from groundtruth.runtime.native_render import contains_test_identity
+        if contains_test_identity(text):
+            return False  # leak law (ABI §5): never ship a test identity to the model
+    except Exception:  # noqa: BLE001 — engine absent in-container: preserve behavior
+        pass
+    prev = out.get("output") or ""
+    out["output"] = _join_lane_output(prev, text) if join else prev + text
+    return True
+
+
+# ---------------------------------------------------------------------------
+# B-14 (2026-07-10): DURABLE RECEIPT PERSISTENCE.
+#
+# Sealed deliveries + receipt-state promotions live ONLY in the module-memory list
+# `_gt_gateway_deliveries`, which dies with the process — a post-run auditor cannot
+# recover the TITO reward-attribution ladder (law 7) after the agent container exits.
+# Persist every sealed envelope (level 1 = delivered) and every receipt-state
+# transition (level 2 referenced / level 3 acted) to a JSONL sidecar the moment it
+# happens, so the ladder survives process exit and is re-readable via
+# evidence_envelope.from_dict. Schema-stable line = the envelope's own to_dict()
+# (which from_dict round-trips exactly) plus {schema,kind,transition,action_index,ts_ms}.
+#
+# GRACEFUL: no-op when GT_CERT_DIR is unset (host/dev/replay has no cert mount).
+# CORRECT-OR-QUIET: any serialization / I/O fault is swallowed — persistence must
+# NEVER break the delivery it is only recording. It writes a NEW sidecar file and
+# touches neither the sealed list nor the model-facing bytes (byte-identical splice).
+# ---------------------------------------------------------------------------
+def _receipts_sidecar_path() -> str:
+    """The durable receipt-ledger path ``$GT_CERT_DIR/gt_receipts.jsonl`` — or ``""``
+    when GT_CERT_DIR is unset (graceful no-op: no cert dir, nothing to persist)."""
+    cert = os.environ.get("GT_CERT_DIR", "")
+    if not cert:
+        return ""
+    return os.path.join(cert, "gt_receipts.jsonl")
+
+
+def _persist_receipt(env, *, kind: str, transition: str) -> None:
+    """B-14: append ONE sealed envelope / receipt-state transition to the durable
+    JSONL sidecar. ``kind`` = the seal site (``lane``/``gateway``); ``transition`` =
+    the receipt_state being recorded (``delivered``/``referenced``/``acted``). No-op
+    when GT_CERT_DIR is unset; correct-or-quiet on any fault (telemetry never breaks
+    delivery). The line is the envelope's own to_dict() so a post-run auditor rebuilds
+    it byte-exactly with evidence_envelope.from_dict."""
+    path = _receipts_sidecar_path()
+    if not path or env is None:
+        return
+    try:
+        from groundtruth.runtime.evidence_envelope import to_dict as _env_to_dict
+    except Exception:  # noqa: BLE001 — engine absent in-container -> no sidecar
+        return
+    try:
+        rec = {
+            "schema": "gt_receipt.v1",
+            "kind": kind,
+            "transition": transition,
+            "action_index": globals().get("_action_count", 0),
+            "envelope": _env_to_dict(env),
+        }
+        try:
+            import time as _t
+            rec["ts_ms"] = int(_t.time() * 1000)
+        except Exception:  # noqa: BLE001
+            rec["ts_ms"] = 0
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec) + "\n")
+    except Exception:  # noqa: BLE001 — persistence must NEVER break delivery
+        pass
+
+
+_ISSUE_TEXT_CACHE: "str | None" = None
+
+
+def _issue_text() -> str:
+    """B-4: the task's REAL issue / problem statement — the input the Gateway's
+    change_surface producer consumes (``state.issue_text``) to detect new-file
+    destinations + missing-role integration points. Baked into the substrate
+    container as ``$GT_ISSUE_FILE`` or ``$GT_CERT_DIR/issue.txt`` (the SAME artifact
+    the obligation-resurface fallback already reads at :5694). Read once, bounded,
+    cached (one process per task in the live run). Correct-or-quiet: unavailable ->
+    ``""`` (change_surface abstains — exactly today's behaviour, byte-identical)."""
+    global _ISSUE_TEXT_CACHE
+    if _ISSUE_TEXT_CACHE is not None:
+        return _ISSUE_TEXT_CACHE
+    _ISSUE_TEXT_CACHE = ""
+    for cand in (os.environ.get("GT_ISSUE_FILE", ""),
+                 os.path.join(os.environ.get("GT_CERT_DIR", "/gt_artifacts"), "issue.txt")):
+        if not cand or not os.path.isfile(cand):
+            continue
+        try:
+            txt = open(cand, encoding="utf-8", errors="replace").read().strip()
+        except Exception:  # noqa: BLE001 — unreadable is not a signal
+            continue
+        if txt:
+            _ISSUE_TEXT_CACHE = txt[:20000]  # dose-bounded read
+            break
+    return _ISSUE_TEXT_CACHE
+
+
 # ---------------------------------------------------------------------------
 # RL-1 ENVELOPE UNIFICATION (D-7 lane budget) — flag GT_LANE_ENVELOPE, 2026-07-10.
 #
@@ -8046,9 +8534,13 @@ def _gt_gateway_append(out: dict, delta: str) -> None:
 #
 # DUAL-STAMP: the legacy content-hash stamps (_oracle_delivered_hashes, aliased to
 # _EPISODE.delivered_dedup) stay in place; the envelope's derived dedup_key is ADDED to
-# the same set at the seal (a distinct key format that never collides with the content
-# hashes). D-7: a lane block that would exceed GT_LANE_MAX_DELTA is dropped WHOLE
-# (law-8, never a partial splice).
+# the same set at the seal. Seam-F8(e) CORRECTION (bounce 2026-07-10): both keys are a
+# BARE 16-hex string in the SAME aliased set — derive_dedup_key returns sha256(...)[:16]
+# and the content hash is sha256(text+bstate)[:16] — so they share the namespace and are
+# NOT format-distinct. A cross-format collision is a 2^-64 accident that would at worst
+# suppress ONE re-delivery (correct-or-quiet); the earlier "distinct key format that never
+# collides" claim was factually wrong. D-7: a lane block that would exceed GT_LANE_MAX_DELTA
+# is dropped WHOLE (law-8, never a partial splice).
 #
 # DEFAULT-OFF byte-identical: with GT_LANE_ENVELOPE unset, NO lane sealing and NO lane
 # budget check run — the chain head, _gt_gateway_deliveries, and delivered bytes are all
@@ -8125,7 +8617,7 @@ def _lane_fits_budget(text: str) -> bool:
         return True
 
 
-def _seal_lane_delivery(kind: str, text: str, target: str) -> None:
+def _seal_lane_delivery(kind: str, text: str, target: str, *, base_output: str = "") -> None:
     """RL-1: route an ALREADY-DELIVERED lane block through EvidenceEnvelope build ->
     validate -> seal — advancing the SHARED gateway hash-chain, stamping the envelope
     dedup_key into _EPISODE.delivered_dedup (dual-stamp; the legacy content-hash stamp
@@ -8146,14 +8638,30 @@ def _seal_lane_delivery(kind: str, text: str, target: str) -> None:
             evidence_type=kind or "lane", payload=(text,))
         if validate(env):  # a law violation -> skip bookkeeping (bytes already shipped)
             return
-        rendered = text.encode("utf-8", "surrogatepass")  # the bytes the lane appended
+        # Seam-F1 (Fable-LIPI round-2, 2026-07-11): seal what ACTUALLY ships — the boundary-joined
+        # DELTA, matching the gateway seal (Seam-F6). The lane delivers via `_join_lane_output`
+        # (which inserts ONE `\n` boundary when the base observation is not `\n`-terminated); the
+        # prior `text.encode()` sealed `text` WITHOUT that boundary, so `rendered_bytes_hash` != the
+        # real shipped delta by exactly the `\n` — corrupting the TITO law-6 replay check and the
+        # law-5 chain commitment (an auditor reconstructing from the log hashes bytes the live
+        # observation never contained). Tagged Lane-A blocks open with `\n` (no boundary inserted,
+        # so this was byte-identical for them); native steers (GT_STEER_NATIVE) do not — and
+        # GT_RL_PROFILE=1 co-activates STEER_NATIVE + LANE_ENVELOPE, so this rode the paid path.
+        _shipped = _join_lane_output(base_output, text)[len(base_output):]
+        rendered = _shipped.encode("utf-8", "surrogatepass")  # the bytes the lane ACTUALLY appended
+        # B-32: commit the exact BASE observation bytes + a message boundary into the
+        # chain, not just the GT delta — TITO replay / observation-prefix integrity.
         sealed, _gt_gateway_chain_head = _seal(
             env,
             episode_id=(getattr(_EPISODE, "episode_id", "") or (_root() or "episode")),
             event_id=str(_action_count), parent_hash=_gt_gateway_chain_head,
             rendered_bytes=rendered, renderer_id="lane",
+            tool_output_bytes=base_output.encode("utf-8", "surrogatepass"),
+            boundary=(str(len(base_output)) + ":" + (kind or "lane")).encode("utf-8"),
             dedup_chain=_EPISODE.delivered_dedup)
         _gt_gateway_deliveries.append(sealed)
+        # B-14: persist the sealed lane envelope (level-1 delivered) durably.
+        _persist_receipt(sealed, kind="lane", transition="delivered")
     except Exception:  # noqa: BLE001 — bookkeeping must NEVER break the delivery
         pass
 
@@ -8210,6 +8718,81 @@ def _gateway_search_excluded(ev) -> bool:
     return getattr(ev, "kind", "") == _ks
 
 
+def _gateway_edit_bridges_on() -> bool:
+    """True iff the B-3 edit-bridge wiring (GT_GATEWAY_EDIT_BRIDGES) is enabled and this
+    is not the baseline arm. Default-OFF so an existing GT_GATEWAY-on edit turn stays
+    byte-identical (the seam passes the 4-arg event exactly as before); ON reconstructs
+    the changed_files + edit_before_after bridges the patch_delta producer needs."""
+    if _GT_BASELINE:
+        return False
+    return os.environ.get("GT_GATEWAY_EDIT_BRIDGES", "").strip().lower() not in (
+        "", "0", "false", "no", "off")
+
+
+def _gateway_edit_bridges(action, cmd) -> "tuple[tuple[str, ...], dict | None]":
+    """B-3 (2026-07-10): reconstruct the Gateway edit BRIDGES from the agent's edit
+    action so the previously-UNREACHABLE edit-turn producers can fire.
+
+    Returns ``(changed_files, edit_before_after)``:
+      * ``changed_files`` = the repo-relative path(s) the edit touched — feeds the
+        Gateway's ZERO_ABSENT honest-negative ordering predicate (a later grep for a
+        stem the agent already edited is not a "truly absent" probe).
+      * ``edit_before_after`` = ``{rel: (before|None, after)}`` — whole-file BEFORE/AFTER
+        content the patch_delta producer diffs to find caller signature breaks +
+        companion-registration gaps. ``before`` is None for a create (new file); for a
+        structured str_replace it is REVERSE-APPLIED from the on-disk after (new_str ->
+        old_str), so the diff is over REAL file content, not a fabricated stub.
+
+    Default-OFF (GT_GATEWAY_EDIT_BRIDGES) -> ``((), None)`` == the pre-B-3 4-arg event.
+    Correct-or-quiet: a non-edit action / unresolvable path / unreadable-or-huge file /
+    unreconstructable before -> the safe partial (``changed`` with no snapshot, or
+    ``((), None)``). NEVER raises into the delivery path."""
+    if not _gateway_edit_bridges_on():
+        return (), None
+    try:
+        kind, path = _classify_action(action)
+    except Exception:  # noqa: BLE001
+        return (), None
+    if kind != "post_edit" or not path:
+        return (), None
+    root = _root()
+    rel = _to_repo_rel(path, root)
+    if not rel:
+        return (), None
+    changed: "tuple[str, ...]" = (rel,)
+    # AFTER = the file's CURRENT on-disk content (the edit is already applied at this
+    # point in the turn). Bounded read; unreadable/huge -> no snapshot (still emit changed).
+    after: "str | None" = None
+    try:
+        fp = path if os.path.isabs(path) else os.path.join(root, rel)
+        if os.path.isfile(fp) and os.path.getsize(fp) <= 1_000_000:
+            after = open(fp, encoding="utf-8", errors="replace").read()
+    except Exception:  # noqa: BLE001
+        after = None
+    if after is None:
+        return changed, None
+    verb = ""
+    old_str = new_str = None
+    if isinstance(action, dict):
+        _v = action.get("command")
+        verb = _v.strip().lower() if isinstance(_v, str) else ""
+        old_str = _struct_field(action, ("old_str", "old_string"))
+        new_str = _struct_field(action, ("new_str", "new_string"))
+    if verb == "create":
+        before: "str | None" = None
+    elif old_str is not None and new_str and after.count(new_str) == 1:
+        # Seam-F9 (correct-or-quiet): reverse-apply the single str_replace to recover the
+        # pre-edit whole file. Only old_str is UNIQUE by the editor contract; new_str need
+        # not be, so reverse-applying at the FIRST occurrence when new_str appears MORE
+        # THAN ONCE fabricates a WRONG before. Require new_str to be unique in the after-
+        # content; otherwise abstain (before -> None, changed_files only).
+        before = after.replace(new_str, old_str, 1)
+    else:
+        # cannot reconstruct a trustworthy before -> emit changed_files only
+        return changed, None
+    return changed, {rel: (before, after)}
+
+
 def _gt_gateway_deliver(action, out, cmd, orig_out) -> None:
     """THE ONE CALL: complete THIS observation with one gateway.augment() dose.
 
@@ -8242,8 +8825,16 @@ def _gt_gateway_deliver(action, out, cmd, orig_out) -> None:
         return
     try:
         # normalize FIRST (PURE — a ``classify_command`` wrapper with no side effects).
+        # B-3 (2026-07-10): thread the edit BRIDGES the Gateway's edit-turn producers
+        # need — `changed_files` (the ZERO_ABSENT ordering predicate) + `edit_before_after`
+        # (the patch_delta signature-mismatch/companion producers, previously UNREACHABLE
+        # because the seam passed only 4 args). Reconstructed from the structured/bash edit
+        # action; correct-or-quiet -> ((), None) leaves the event identical to the 4-arg call.
         rc = out.get("returncode")
-        ev = _ad_normalize(cmd or "", orig_out or "", rc, _action_count)
+        _changed_files, _edit_before_after = _gateway_edit_bridges(action, cmd)
+        ev = _ad_normalize(cmd or "", orig_out or "", rc, _action_count,
+                           changed_files=_changed_files,
+                           edit_before_after=_edit_before_after)
         # RECEIPTS (law 7, levels 2-3): promotion is BOOKKEEPING of PAST deliveries — it
         # reads THIS turn's observation text + command and promotes a prior delivery's
         # receipt_state (delivered->referenced->acted). It DELIVERS nothing and records
@@ -8256,9 +8847,38 @@ def _gt_gateway_deliver(action, out, cmd, orig_out) -> None:
         # touch still sits AFTER the exclusion return.
         if _gt_gateway_deliveries:
             try:
+                # Seam-F8(a) (per-flag asymmetry, DELIBERATE): receipt promotion lives on
+                # the GATEWAY turn (this function, gated by _gt_gateway_on()). A config of
+                # GT_LANE_ENVELOPE=1 with GT_GATEWAY=0 therefore leaves lane-sealed receipts
+                # frozen at 'delivered' (level 1). This is ACCEPTABLE and not fixed here:
+                # the official RL profile (rl_profile PROFILE_MEMBERS["1"]) CO-ACTIVATES
+                # GT_GATEWAY with GT_LANE_ENVELOPE, so promotion always runs in production;
+                # off-profile the ladder degrades to the honest delivered-only state (no
+                # promotion signal is fabricated), and receipts are host-side AUDIT metadata
+                # with ZERO model-facing impact. Re-wiring promotion outside the gateway turn
+                # is a larger change than this seam-surgical scope warrants.
+                # B-13: environment output is the NON-promoting source (never REFERENCED).
+                # Pass it as env_output explicitly. Seam-F8(b): policy_text (the agent's own
+                # assistant message) is NOT observable at this env-facing seam, so it is
+                # passed EMPTY — REFERENCED (level 2) is intentionally unreachable here and
+                # is computed offline by the grader; the seam advances delivered->ACTED
+                # (level 3) only, from the agent's next COMMAND. This is by-design, not a gap.
+                # Seam-F8(c): snapshot the OLD list BY POSITION (update_receipts preserves
+                # order + count, returning replace() copies), not a dedup_key-keyed dict —
+                # a dict collapses two deliveries that share a dedup_key and mis-attributes
+                # their promotions. B-14: persist ONLY the deliveries whose state advanced.
+                _prev_deliveries = list(_gt_gateway_deliveries)
                 _gt_gateway_deliveries[:] = _ad_update_receipts(
-                    _gt_gateway_deliveries, observed_text=orig_out or "",
-                    next_action_cmd=cmd or "")
+                    _gt_gateway_deliveries, policy_text="",
+                    env_output=orig_out or "", next_action_cmd=cmd or "")
+                for _old, _new in zip(_prev_deliveries, _gt_gateway_deliveries):
+                    _ns = getattr(_new, "receipt_state", "")
+                    if getattr(_old, "receipt_state", "") != _ns:
+                        # Seam-F8(d): label the persisted promotion by the sealed envelope's
+                        # OWN renderer_id — a lane-sealed delivery (_seal_lane_delivery sets
+                        # renderer_id='lane') is audited as 'lane', not mislabeled 'gateway'.
+                        _pk = "lane" if getattr(_new, "renderer_id", "") == "lane" else "gateway"
+                        _persist_receipt(_new, kind=_pk, transition=_ns)
             except Exception:  # noqa: BLE001
                 pass
         # SEAM DOSE-LAW GUARD (CONFIRMED-1, 2026-07-10) — MUTUAL EXCLUSION, post_search
@@ -8281,7 +8901,10 @@ def _gt_gateway_deliver(action, out, cmd, orig_out) -> None:
                 pass
         st = _GatewayState(
             graph_db=_db_path(), repo_root=_root(),
-            issue_text="", episode=_EPISODE)  # change_surface issue-text wiring deferred
+            # B-4 (2026-07-10): thread the REAL issue text (baked issue.txt) so the
+            # change_surface producer can fire on a truly-absent probe; '' when the
+            # artifact is unavailable -> change_surface abstains (byte-identical).
+            issue_text=_issue_text(), episode=_EPISODE)
         winner = _ad_arbitrate(_gw_augment(ev, st))
         if winner is None:
             return
@@ -8316,19 +8939,42 @@ def _gt_gateway_deliver(action, out, cmd, orig_out) -> None:
                 outcome=_ProductSignalOutcome.SUPPRESSED_BUDGET,
                 reason="gateway_budget", file_path=winner.target or "")
             return
-        # BYTE-PRESERVING append: the original output verbatim + delta, same obs.
-        _gt_gateway_append(out, delta)
-        rendered = delta.encode("utf-8", "surrogatepass")  # bytes ACTUALLY appended
-        # F1 (bounce 2026-07-10): the SEAL is the delivery commit — it stamps the
-        # winner's dedup key into the episode chain (dedup_chain). augment() only
-        # READS the chain, so an arbitration loser / leak-guard / law-8 drop above
-        # was never stamped and stays re-offerable (deferred, not destroyed).
+        # Seam-F6 (L-1a boundary, bounce 2026-07-10): render_envelope's tagged form opens
+        # `<gt-fact` and the native form opens with body text — NEITHER opens with `\n`. A
+        # raw suffix onto an observation NOT ending in `\n` JAMS the delta onto the runner's
+        # last output line (the T4/L-1a class the lane path already guards). Insert exactly
+        # ONE `\n` boundary ONLY when needed — byte-identical when the observation already
+        # ends in `\n` (production command output) or the delta already opens with `\n`.
+        _prev = out.get("output") or ""  # the ACTUAL bytes the delta rides on
+        _shipped = _join_lane_output(_prev, delta)[len(_prev):]  # delta, maybe with a leading \n
+        rendered = _shipped.encode("utf-8", "surrogatepass")  # F6: seal what ACTUALLY ships
+        # B-33: SEAL BEFORE APPEND. The seal is the delivery commit — it advances the
+        # chain, stamps the winner's dedup key, and records the receipt. Compute it FIRST;
+        # append the model-facing bytes ONLY after it succeeds, so a seal fault leaves ZERO
+        # model bytes (no orphan delivery whose bytes shipped with no dedup/receipt/chain
+        # record — the seal fault is caught by the outer handler, skipping the append).
+        # F1: augment() only READS the chain, so an arbitration loser / leak-guard / law-8
+        # drop above was never stamped and stays re-offerable (deferred, not destroyed).
+        # B-32/Seam-F3: commit the ACTUAL base observation (out['output'] at append time,
+        # which already holds any Lane-A/Lane-B deltas) — NOT just the clean command output
+        # `orig_out`. The boundary length is BYTE-len (matching the byte-encoded tool output).
+        _tob = _prev.encode("utf-8", "surrogatepass")
         sealed, _gt_gateway_chain_head = _ad_seal(
             winner, episode_id=getattr(_EPISODE, "episode_id", ""),
             event_id=str(_action_count), parent_hash=_gt_gateway_chain_head,
             rendered_bytes=rendered, renderer_id=("native" if native else "tagged"),
+            tool_output_bytes=_tob,
+            boundary=(str(len(_tob)) + ":" + (winner.evidence_type or "gw")).encode("utf-8"),
             dedup_chain=_EPISODE.delivered_dedup)
         _gt_gateway_deliveries.append(sealed)
+        # B-14: persist the sealed envelope (level-1 delivered) durably, so the ladder
+        # survives process exit. After the seal commit, before the byte splice.
+        _persist_receipt(sealed, kind="gateway", transition="delivered")
+        # BYTE-PRESERVING append (AFTER the seal commit): observation verbatim + the
+        # boundary-joined delta (Seam-F6). Still a pure suffix (TITO law 1) — `_gt_gateway_
+        # append` is preserved as the append primitive so the M1 byte-preservation mutation
+        # still bites — and the sealed rendered_bytes == exactly these appended bytes.
+        _gt_gateway_append(out, _shipped)
         try:
             _runtime_ledger_record(
                 kind="gateway." + (winner.evidence_type or "fact"),
@@ -8338,6 +8984,62 @@ def _gt_gateway_deliver(action, out, cmd, orig_out) -> None:
             pass
     except Exception:  # noqa: BLE001 — isolated; must never break the agent loop
         _crash_emit("gateway.augment")
+
+
+def _rearm_latches(lost, *, kkind, kf, krel) -> None:
+    """Seam-F4 (bounce 2026-07-10): release the PRODUCTION-time fire-once latch of every
+    kind in ``lost`` so the class re-competes on a later turn (deferred, not destroyed).
+
+    Extracted verbatim from the inline gate-loser re-arm so the SAME per-kind mapping is
+    the ONE source of truth for BOTH the gate-LOSER path AND the post-gate 0-byte-drop
+    sites. A gate WINNER dropped for budget / B-15 leak refusal / native-render-empty is
+    in NEITHER loser set, so its latch would otherwise stay burned forever (the fix). Pure
+    re-arm — it NEVER delivers, so the caller must invoke it ONLY on a 0-byte outcome; a
+    call on a real delivery would re-open the latch and double-deliver."""
+    if not lost:
+        return
+    global _cochange_fired, _l5_fired, _l5_failure_fired, _l5_notest_fired
+    global _horizon_advisory_fired, _horizon_urgent_fired, _horizon_pivot_fired
+    global _horizon_gate_fire_count, _detect_loop_fired
+    global _oracle_review_fired, _oracle_obligation_fired
+    if "l3.contract" in lost and kkind == "post_edit" and kf:
+        _contract_seen.discard(krel)
+    if "l3.cochange" in lost:
+        _cochange_fired = False
+    if "l3b.evidence" in lost and kkind and kf:
+        _seen.discard((kkind, _to_repo_rel(kf, _root())))
+    if "consensus.scope" in lost:
+        _oracle_review_fired = False
+    if "spec.obligation" in lost:
+        # release THIS vector so the same status re-competes at a later review turn.
+        _oracle_obligation_fired = False
+        if _oblig_status_last_hash:
+            _oblig_status_emitted.discard(_oblig_status_last_hash)
+    if "l5.stuck" in lost:
+        _l5_fired = False
+    if "l5.failure" in lost:
+        _l5_failure_fired = False
+    if "l5.no_test" in lost:
+        _l5_notest_fired = False
+    # Stage-3 detector latches: deferred, never destroyed.
+    if "detect.loop" in lost:
+        _detect_loop_fired = False
+    if "detect.coherence" in lost and _coherence_last_rel:
+        _coherence_fired_files.discard(_coherence_last_rel)
+    # Horizon latches consumed at PRODUCTION re-arm on a gate loss (same law).
+    # B1 executed-RED shares the _horizon_advisory_fired latch with its advisory sibling
+    # (set True at the risk-trigger fire BEFORE _executed_covering_emission); re-arm the
+    # SAME latch. _last_test_outcome_failed is a WORLD-FACT, not a dose latch -> untouched.
+    if "verify.horizon.advisory" in lost:
+        _horizon_advisory_fired = False
+    if "verify.horizon.executed" in lost:
+        _horizon_advisory_fired = False
+    if "verify.horizon.urgent" in lost:
+        _horizon_urgent_fired = False
+    if "verify.horizon.pivot" in lost:
+        _horizon_pivot_fired = False
+    if "verify.horizon.gate" in lost:
+        _horizon_gate_fire_count = max(0, _horizon_gate_fire_count - 1)
 
 
 def _augment_output(action, out) -> None:
@@ -8472,7 +9174,7 @@ def _augment_output(action, out) -> None:
                 # so a producer crash can't kill the data plane.  They deliver
                 # EARLY (below), NOT through the oracle gate.
                 try:
-                    _la_contract = _graph_contract_block(_krel)
+                    _la_contract = _graph_contract_block(_krel, action=action, cmd=cmd)
                 except Exception:  # noqa: BLE001 — Lane A producer isolated
                     _crash_emit("l3.contract")
                     _la_contract = ""
@@ -8602,7 +9304,13 @@ def _augment_output(action, out) -> None:
             # the data plane, NOT the steer gate.  (event_bound is irrelevant
             # for Lane A — its gate is non-empty AND not-already-in-ledger; an
             # empty _ev_text is dropped by the correct-or-quiet check.)
-            lane_a.append(("l3b.evidence", _ev_text))
+            # Seam-F10 / D-1: CONDITIONAL enqueue (parity with its Lane-A siblings) — an
+            # EMPTY block enqueued here still trips _record_hook_fire (which fires before
+            # the empty-skip in _lane_a_deliver), inflating l3b.evidence's fired-count on
+            # every turn ("fired" != "produced"). Guarding the append makes the count mean
+            # "a block was produced"; delivery is byte-identical (empty delivers nothing).
+            if _ev_text:
+                lane_a.append(("l3b.evidence", _ev_text))
             # ── DCC (Dynamic Concern Consensus) — DEFAULT-OFF (GT_DCC) ─────────
             # The LAST Lane-A block. When the agent's OWN action stream shows it
             # DROWNING, append ONE set of concern-completion FACTS (files agreeing
@@ -8845,62 +9553,11 @@ def _augment_output(action, out) -> None:
                 # globals here — a fresh local union (no augmented-assignment binding
                 # of a module global inside this function).
                 _lost = set(_oracle_last_losers) | _phase_dropped_losers
-                if _lost:
-                    global _cochange_fired, _l5_fired, _l5_failure_fired, \
-                        _l5_notest_fired, _horizon_advisory_fired, \
-                        _horizon_urgent_fired, _horizon_pivot_fired, \
-                        _horizon_gate_fire_count, _detect_loop_fired
-                    if "l3.contract" in _lost and _kkind == "post_edit" and _kf:
-                        _contract_seen.discard(_krel)
-                    if "l3.cochange" in _lost:
-                        _cochange_fired = False
-                    if "l3b.evidence" in _lost and _kkind and _kf:
-                        _seen.discard((_kkind, _to_repo_rel(_kf, _root())))
-                    if "consensus.scope" in _lost:
-                        _oracle_review_fired = False
-                    if "spec.obligation" in _lost:
-                        # release THIS vector so the same status re-competes at a
-                        # later review turn (deferred, not destroyed).
-                        _oracle_obligation_fired = False
-                        if _oblig_status_last_hash:
-                            _oblig_status_emitted.discard(_oblig_status_last_hash)
-                    if "l5.stuck" in _lost:
-                        _l5_fired = False
-                    if "l5.failure" in _lost:
-                        _l5_failure_fired = False
-                    if "l5.no_test" in _lost:
-                        _l5_notest_fired = False
-                    # Stage-3 detector latches: deferred, never destroyed.
-                    if "detect.loop" in _lost:
-                        _detect_loop_fired = False
-                    if "detect.coherence" in _lost and _coherence_last_rel:
-                        _coherence_fired_files.discard(_coherence_last_rel)
-                    # Horizon latches consumed at PRODUCTION re-arm on a gate loss
-                    # (deferred, not destroyed — same law as every class above).
-                    if "verify.horizon.advisory" in _lost:
-                        _horizon_advisory_fired = False
-                    # B1 executed-RED (Fable 2026-07-09): the EXECUTED covering
-                    # emission is produced at the SAME risk-trigger fire point and
-                    # consumes the SHARED _horizon_advisory_fired latch (set True at
-                    # ~6360 BEFORE _executed_covering_emission runs). If the executed
-                    # RED loses the single Lane-B slot (gate) OR is phase-dropped,
-                    # that shared latch is burned and the risk-trigger block —
-                    # `if _risk_trigger and not _horizon_advisory_fired` — never
-                    # re-enters, so the RED never re-fires. Re-arm the SAME latch its
-                    # advisory sibling re-arms (deferred, not destroyed). The sensed
-                    # _last_test_outcome_failed is a WORLD-FACT (the covering test
-                    # really failed), NOT a dose latch, so it is intentionally left
-                    # untouched — mirrors the siblings, which re-arm only fire-once
-                    # flags, never the observed verify-axis outcome.
-                    if "verify.horizon.executed" in _lost:
-                        _horizon_advisory_fired = False
-                    if "verify.horizon.urgent" in _lost:
-                        _horizon_urgent_fired = False
-                    if "verify.horizon.pivot" in _lost:
-                        _horizon_pivot_fired = False
-                    if "verify.horizon.gate" in _lost:
-                        _horizon_gate_fire_count = max(
-                            0, _horizon_gate_fire_count - 1)
+                # Seam-F4: the per-kind fire-once re-arm is single-sourced in
+                # _rearm_latches so the SAME mapping restores BOTH the gate LOSERS (here)
+                # and a gate WINNER dropped 0-byte post-gate (the drop sites below —
+                # budget/leak/native-empty; a dropped winner is in neither loser set).
+                _rearm_latches(_lost, kkind=_kkind, kf=_kf, krel=_krel)
                 if _win and _lane_envelope_on() and not _lane_fits_budget(_win):
                     # D-7 (RL-1, flag GT_LANE_ENVELOPE): law-8 drop-whole for an
                     # over-budget steer (never clipped). Default-off: this branch is
@@ -8913,6 +9570,11 @@ def _augment_output(action, out) -> None:
                         file_path=_krel or _kf or "",
                         event=_event,
                     )
+                    # Seam-F4: a gate-WINNING steer dropped for budget consumed its
+                    # fire-once latch at PRODUCTION but delivered 0 bytes; re-arm it so
+                    # the class re-competes (the content-hash is un-stamped AND the latch
+                    # is now released — both re-competition gates open).
+                    _rearm_latches({_last_gate_winner_kind}, kkind=_kkind, kf=_kf, krel=_krel)
                 elif _win:
                     # RL-3 (flag GT_STEER_NATIVE): render the steer in the native voice
                     # (tag-free, no "GT:") BEFORE the append + seal so the delivered
@@ -8923,13 +9585,17 @@ def _augment_output(action, out) -> None:
                     # off: _steer_native_on() is False -> _win is untouched (byte-ident).
                     if _steer_native_on():
                         _win = _steer_native(_win)
-                    if _win:  # native render can collapse an all-tag block to "" — then
-                        # deliver nothing (never stamp/append a no-op steer).
-                        # L-1a: normalize the separator so a block with NO leading
-                        # newline (the edit.syntax native diagnostic) cannot jam onto
-                        # the previous observation line. Byte-identical for steers that
-                        # already open with `\n` (every default nudge/verify does).
-                        out["output"] = _join_lane_output(out.get("output") or "", _win)
+                    # Seam-F3/B-32: capture the pre-append observation so the steer seal
+                    # commits the REAL base bytes (not b"") into the TITO chain — two
+                    # different observations carrying the same steer now produce distinct
+                    # chain entries.  _gt_deliver_append mutates out['output'], so read it
+                    # HERE, before the append.
+                    _steer_base = out.get("output") or ""
+                    # B-15: the oracle steer append also routes through the leak-validating
+                    # chokepoint (join-mode: the L-1a one-newline boundary is inside it) — a
+                    # leaky steer ships 0 bytes and is NOT stamped/ledgered/sealed. (native
+                    # render can also collapse an all-tag block to "" -> deliver nothing.)
+                    if _win and _gt_deliver_append(out, _win, join=True):
                         # D-5: stamp the delivered-hash ATOMICALLY with the append (moved
                         # from the gate) — a phantom stamp for an undelivered steer is now
                         # impossible (the gate-to-append window can no longer suppress it).
@@ -8948,8 +9614,19 @@ def _augment_output(action, out) -> None:
                         )
                         # RL-1 (flag GT_LANE_ENVELOPE): seal the steer over the SAME bytes
                         # — shared chain + dedup + receipt. No-op + byte-ident when off.
+                        # Seam-F3: pass the pre-append observation as base_output.
                         _seal_lane_delivery(
-                            _last_gate_winner_kind, _win, _krel or _kf or "")
+                            _last_gate_winner_kind, _win, _krel or _kf or "",
+                            base_output=_steer_base)
+                    else:
+                        # Seam-F4: the steer WON the gate but delivered 0 bytes — a native-
+                        # render collapse (_win == "" after _steer_native) OR a B-15 leak
+                        # refusal (_gt_deliver_append -> False). Its fire-once latch was
+                        # consumed at PRODUCTION and it is in NEITHER loser set, so re-arm it
+                        # HERE (deferred, not destroyed). NEVER on the delivered branch above
+                        # — that would double-deliver. Realistic trigger: the leak drop
+                        # killing l5.no_test (the ONE proven-consumed nudge class).
+                        _rearm_latches({_last_gate_winner_kind}, kkind=_kkind, kf=_kf, krel=_krel)
             except Exception:  # noqa: BLE001 — Lane B (control plane) is fully
                 # isolated: a steer/gate/filter crash here loses ONLY the steer,
                 # never Lane A's data plane (already delivered above).
@@ -8981,17 +9658,14 @@ def _augment_output(action, out) -> None:
                 _kroot = _root()
                 _krel = _to_repo_rel(_kf, _kroot)
                 _invalidate_on_edit(_krel, _kroot)  # L6
-                _gc = _graph_contract_block(_krel)  # cross-language [SIGNATURE]/[CALLERS]
-                if _gc:
-                    out["output"] = (out.get("output") or "") + _gc
-                    # C3: on the legacy route (no _lane_a_deliver) latch on the
-                    # DELIVERED contract so it stays once-per-file — the production
-                    # latch that used to live in _graph_contract_block now fires on
-                    # delivery only (mirrors cochange's DELIVERED-only latch).
+                _gc = _graph_contract_block(_krel, action=action, cmd=cmd)  # cross-language [SIGNATURE]/[CALLERS]
+                # B-15: route through the leak-validating chokepoint; C3 latch fires
+                # only on a real DELIVERED outcome (mirrors the oracle route's law).
+                if _gc and _gt_deliver_append(out, _gc):
                     _contract_seen.add(_krel)
                 _cc = _cochange_block(_krel)  # COMPLETENESS / co-change
                 if _cc:
-                    out["output"] = (out.get("output") or "") + _cc
+                    _gt_deliver_append(out, _cc)  # B-15: leak-validated append
         # CONSENSUS (Layer-A first-view + Layer-B progressive/override): same role as
         # the OH wrapper's <gt-scope> — first view builds scope; later views reinforce
         # in-scope or re-anchor on divergence.
@@ -9003,24 +9677,24 @@ def _augment_output(action, out) -> None:
                 _cons = _consensus_block(_crel, _croot) if not _consensus_fired \
                     else _consensus_progressive(_crel)
                 if _cons:
-                    out["output"] = (out.get("output") or "") + _cons
+                    _gt_deliver_append(out, _cons)  # B-15: leak-validated append
         # L5 stuck-detection: scaffold/loop (once) + hypothesis-falsified (once).
         if not _GT_BASELINE:
             _nudge = _l5_nudge(cmd, _orig_out)
             if _nudge:
-                out["output"] = (out.get("output") or "") + _nudge
+                _gt_deliver_append(out, _nudge)  # B-15: leak-validated append
             _fn = _l5_failure_nudge(cmd, _orig_out)
             if _fn:
-                out["output"] = (out.get("output") or "") + _fn
+                _gt_deliver_append(out, _fn)  # B-15
             _fb = _l5_unresolved_build_guard(cmd, _orig_out, _detect_phase())
             if _fb:
-                out["output"] = (out.get("output") or "") + _fb
+                _gt_deliver_append(out, _fb)  # B-15
             _nt = _l5_no_test_evidence_nudge(cmd, _orig_out)
             if _nt:
-                out["output"] = (out.get("output") or "") + _nt
+                _gt_deliver_append(out, _nt)  # B-15
         ev = _evidence(cmd)
         if ev:
-            out["output"] = (out.get("output") or "") + ev
+            _gt_deliver_append(out, ev)  # B-15: leak-validated append
         # ── GT_GATEWAY (W2): the ONE gateway.augment() call — the LAST step, so it
         #    classifies on the CLEAN command output (`_orig_out`) and appends its
         #    dose after the existing lanes. Default-OFF => byte-identical (guarded).

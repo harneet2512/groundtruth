@@ -722,14 +722,20 @@ func BatchInsertPropertiesTx(tx *sql.Tx, props []*Property) error {
 		return nil
 	}
 	stmt, err := tx.Prepare(
-		`INSERT INTO properties (node_id, kind, value, line, confidence) VALUES (?, ?, ?, ?, ?)`,
+		`INSERT INTO properties (node_id, kind, value, line, confidence,
+		   property_id, start_line, end_line, extractor, evidence_method,
+		   trust_tier, verification_status, source_revision)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	)
 	if err != nil {
 		return fmt.Errorf("prepare insert properties: %w", err)
 	}
 	defer stmt.Close()
 	for i, p := range props {
-		if _, err := stmt.Exec(p.NodeID, p.Kind, p.Value, p.Line, p.Confidence); err != nil {
+		p.fillProvenance()
+		if _, err := stmt.Exec(p.NodeID, p.Kind, p.Value, p.Line, p.Confidence,
+			p.PropertyID, p.StartLine, p.EndLine, p.Extractor, p.EvidenceMethod,
+			p.TrustTier, p.VerificationStatus, p.SourceRevision); err != nil {
 			return fmt.Errorf("insert property %d: %w", i, err)
 		}
 	}

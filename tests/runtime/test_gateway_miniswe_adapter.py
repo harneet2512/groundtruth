@@ -195,7 +195,7 @@ def test_receipt_levels_1_2_3():
     assert s.receipt_state == RECEIPT_DELIVERED           # level 1 on append
 
     # level 2: a later message NAMES the delivered entity
-    ref = ad.update_receipts([s], observed_text="opening pkg/users.py to read")
+    ref = ad.update_receipts([s], policy_text="opening pkg/users.py to read")
     assert ref[0].receipt_state == RECEIPT_REFERENCED
 
     # level 3: the next action TARGETS it (dominates referenced)
@@ -203,7 +203,7 @@ def test_receipt_levels_1_2_3():
     assert act[0].receipt_state == RECEIPT_ACTED
 
     # monotone: neutral turn never downgrades
-    still = ad.update_receipts(act, observed_text="unrelated", next_action_cmd="ls")
+    still = ad.update_receipts(act, policy_text="unrelated", next_action_cmd="ls")
     assert still[0].receipt_state == RECEIPT_ACTED
 
 
@@ -211,7 +211,7 @@ def test_receipt_no_promotion_without_reference():
     e = _env(target="pkg/users.py", fact_id="get_user")
     s, _ = ad.seal_delivery(e, episode_id="t", event_id="1", parent_hash="",
                             rendered_bytes=b"x", renderer_id="native")
-    out = ad.update_receipts([s], observed_text="nothing relevant", next_action_cmd="cat foo")
+    out = ad.update_receipts([s], policy_text="nothing relevant", next_action_cmd="cat foo")
     assert out[0].receipt_state == RECEIPT_DELIVERED      # stays level 1
 
 
@@ -244,7 +244,7 @@ def test_f2_no_basename_collision_acted():
 def test_f2_no_partial_word_referenced():
     """'run' inside 'running' must NOT promote to REFERENCED (word boundary)."""
     s = _sealed("run", "src/core.py")
-    out = ad.update_receipts([s], observed_text="running 3 tests...")
+    out = ad.update_receipts([s], policy_text="running 3 tests...")
     assert out[0].receipt_state == RECEIPT_DELIVERED
 
 
@@ -253,12 +253,12 @@ def test_f2_r1_unicode_boundary_no_inflation():
     inside the LONGER identifier 'écafé' (and a CJK symbol inside a longer CJK run)
     must NOT promote; an exact unicode-identifier token still does."""
     s = _sealed("café", "src/main.py")
-    out = ad.update_receipts([s], observed_text="the écafé helper")
+    out = ad.update_receipts([s], policy_text="the écafé helper")
     assert out[0].receipt_state == RECEIPT_DELIVERED      # no unicode inflation
-    out = ad.update_receipts([s], observed_text="the café helper")
+    out = ad.update_receipts([s], policy_text="the café helper")
     assert out[0].receipt_state == RECEIPT_REFERENCED     # exact token still promotes
     s2 = _sealed("变量", "src/main.py")
-    out2 = ad.update_receipts([s2], observed_text="新变量 = 1")
+    out2 = ad.update_receipts([s2], policy_text="新变量 = 1")
     assert out2[0].receipt_state == RECEIPT_DELIVERED     # CJK prefix rejected
 
 
@@ -279,14 +279,14 @@ def test_f2_true_positives_still_promote():
     -> ACTED; a basename-ONLY target may match by basename."""
     # full relpath referenced
     s = _sealed("get_user", "pkg/users.py")
-    out = ad.update_receipts([s], observed_text="modified: pkg/users.py")
+    out = ad.update_receipts([s], policy_text="modified: pkg/users.py")
     assert out[0].receipt_state == RECEIPT_REFERENCED
     # container-prefixed path acted
     out = ad.update_receipts(out, next_action_cmd="sed -i 's/a/b/' /testbed/pkg/users.py")
     assert out[0].receipt_state == RECEIPT_ACTED
     # standalone symbol token referenced
     s2 = _sealed("run", "src/core.py")
-    out2 = ad.update_receipts([s2], observed_text="the run helper fails")
+    out2 = ad.update_receipts([s2], policy_text="the run helper fails")
     assert out2[0].receipt_state == RECEIPT_REFERENCED
     # basename-only delivered target matches by basename
     s3 = _sealed("helper", "util.py")
