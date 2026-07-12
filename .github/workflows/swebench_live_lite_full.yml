@@ -714,8 +714,18 @@ jobs:
       - name: Run GT Pro trial
         if: ${{ !cancelled() }}
         continue-on-error: true
+        env:
+          MTASK: ${{ matrix.task }}
+          MLANG: ${{ matrix.language }}
+          INPUT_MODEL: ${{ inputs.model }}
+          INPUT_BASELINE: ${{ inputs.baseline }}
+          GT_BASELINE_FLAG: ${{ inputs.baseline == true && '1' || '0' }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          GH_TOKEN_SECRET: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "=== SWE-bench Pro GT Trial: ${{ matrix.task }} (lang=${{ matrix.language }} model=${{ inputs.model }}) ==="
+          echo "=== SWE-bench Pro GT Trial: $MTASK (lang=$MLANG model=$INPUT_MODEL) ==="
           echo "HOST  GT_CERT_DIR=${GT_CERT_DIR:-<unset>}  GT_HOST_GRAPH_DB=${GT_HOST_GRAPH_DB:-<unset>}"
           PROOF_STATE=$(python3 - <<'PY'
           import json, pathlib
@@ -731,7 +741,7 @@ jobs:
           )
           # Baseline arm has no substrate proof (skipped above) — the proof gate
           # only applies to the GT arm. Baseline proceeds straight to the agent.
-          if [ "${{ inputs.baseline }}" != "true" ] && [ "$PROOF_STATE" != "ok" ]; then
+          if [ "$INPUT_BASELINE" != "true" ] && [ "$PROOF_STATE" != "ok" ]; then
             echo "GT_RUN_PROOF_FAIL: refusing paid agent run because substrate proof_status state=${PROOF_STATE}" | tee -a trial_output.log
             exit 1
           fi
@@ -842,7 +852,7 @@ jobs:
 
           set +e
           set -o pipefail
-          INPUT_MODEL="${{ inputs.model }}"
+          INPUT_MODEL="$INPUT_MODEL"
           if echo "$INPUT_MODEL" | grep -qiE "minimax|tokenrouter"; then
             export OPENAI_API_KEY="${TOKENROUTER_API_KEY}"
             export OPENAI_API_BASE="${TOKENROUTER_API_BASE}"
@@ -851,22 +861,22 @@ jobs:
             fi
             echo "=== Model routed via TokenRouter: $INPUT_MODEL ==="
           elif echo "$INPUT_MODEL" | grep -qiE "deepseek"; then
-            export DEEPSEEK_API_KEY="${{ secrets.DEEPSEEK_API_KEY }}"
+            export DEEPSEEK_API_KEY="$DEEPSEEK_API_KEY"
             GT_AE_ARGS+=(--ae "DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}")
             echo "=== Model routed via DeepSeek native: $INPUT_MODEL ==="
           elif echo "$INPUT_MODEL" | grep -qiE "openrouter/"; then
-            export OPENROUTER_API_KEY="${{ secrets.OPENROUTER_API_KEY }}"
+            export OPENROUTER_API_KEY="$OPENROUTER_API_KEY"
             GT_AE_ARGS+=(--ae "OPENROUTER_API_KEY=${OPENROUTER_API_KEY}")
             echo "=== Model routed via OpenRouter: $INPUT_MODEL ==="
           fi
 
           # Live Lite image: sweb.eval.x86_64.{repo}_1776_{rest}:latest
           # Try GHCR first (cached by live_lite_cache_images.yml), fallback to dockerhub starryzhang/
-          TASK="${{ matrix.task }}"
+          TASK="$MTASK"
           REPO=$(echo "$TASK" | cut -d'_' -f1)
           REST=$(echo "$TASK" | sed "s/^${REPO}__//")
           BASENAME="sweb.eval.x86_64.${REPO}_1776_${REST}"
-          _GHCR_IMG="ghcr.io/${{ github.repository_owner }}/${BASENAME}:latest"
+          _GHCR_IMG="ghcr.io/$REPO_OWNER/${BASENAME}:latest"
           _DH_IMG="docker.io/starryzhang/${BASENAME}:latest"
           if docker pull "$_GHCR_IMG" 2>/dev/null; then
             echo "[GT_META] Live Lite image from GHCR: $_GHCR_IMG"
@@ -895,11 +905,11 @@ jobs:
           # The dataset may be truncated in git — download from release if needed
           DS=benchmarks/data/swebench_live_lite.jsonl
           if [ "$(wc -l < "$DS" 2>/dev/null)" -lt 100 ]; then
-            GH_TOKEN="${{ secrets.GITHUB_TOKEN }}" gh release download pipeline-assets-v1 -p swebench_live_lite.jsonl -D benchmarks/data/ --clobber 2>/dev/null || true
+            GH_TOKEN="$GH_TOKEN_SECRET" gh release download pipeline-assets-v1 -p swebench_live_lite.jsonl -D benchmarks/data/ --clobber 2>/dev/null || true
           fi
           ISSUE_TEXT=$(python3 -c "
           import json
-          task='${{ matrix.task }}'
+          task="$MTASK"
           for line in open('benchmarks/data/swebench_live_lite.jsonl'):
               r=json.loads(line)
               if r['instance_id']==task:
@@ -911,7 +921,7 @@ jobs:
           # Write the config + issue text to the writable gt_out mount (not ro /opt/gt).
           # Baseline (control) arm gets the GT-stripped config (no <gt-evidence> prose);
           # the GT arm gets the full config. The ONLY paired difference is the GT surface.
-          if [ "${{ inputs.baseline }}" = "true" ]; then
+          if [ "$INPUT_BASELINE" = "true" ]; then
             cp artifact_deepswe/gt_integration/deepswe_gt_pier_baseline.yaml /tmp/gt_inject/opt/gt/agent_config.yaml
             echo "[GT] BASELINE config (GT-stripped) written"
           else
@@ -923,14 +933,14 @@ jobs:
           # Model-specific env vars for inside the container
           MODEL_ENV=""
           if echo "$INPUT_MODEL" | grep -qiE "deepseek"; then
-            MODEL_ENV="-e DEEPSEEK_API_KEY=${{ secrets.DEEPSEEK_API_KEY }}"
+            MODEL_ENV="-e DEEPSEEK_API_KEY=$DEEPSEEK_API_KEY"
           elif echo "$INPUT_MODEL" | grep -qiE "openrouter/"; then
-            MODEL_ENV="-e OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}"
+            MODEL_ENV="-e OPENROUTER_API_KEY=$OPENROUTER_API_KEY"
           fi
 
           # Run the agent directly in the pre-pulled GHCR task image
           docker run --rm \
-            --name "gt-pro-${{ matrix.task }}" \
+            --name "gt-pro-$MTASK" \
             -v "${HOST_ARTIFACTS}:${GT_C_ARTIFACTS}:ro" \
             -v "${HOST_GT_OUT}:/gt_out:rw" \
             -v "${HOST_GT_XSESSION}:/opt/gt_xsession:rw" \
@@ -951,7 +961,7 @@ jobs:
             -e GT_RUNTIME_LEDGER="/gt_out/gt_runtime_ledger.jsonl" \
             -e GT_HOOK_FIRE_COUNTS="/gt_out/gt_hook_fire_counts.json" \
             -e GT_XSESSION_DIR="/opt/gt_xsession" \
-            -e GT_BASELINE=${{ inputs.baseline == true && '1' || '0' }} \
+            -e GT_BASELINE=$GT_BASELINE_FLAG \
             $MODEL_ENV \
             --entrypoint "" \
             "$_GHCR_IMG" \
