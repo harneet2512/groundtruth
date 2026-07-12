@@ -1063,7 +1063,15 @@ jobs:
               # action_count/tokens/cost all read 0. GUARD: this whole block is a single-quoted
               # docker bash -c argument. NEVER put an apostrophe in any comment here: one
               # apostrophe closes the quote and the agent silently never launches. Cost a smoke.
-              yes "" 2>/dev/null | mini-swe-agent \
+              # B5 fix (run 29211807809 = 0 agent steps on every task): mini-swe-agent 2.4.5 defaults
+              # to the INTERACTIVE agent (run/mini.py:101 default_type=interactive) — without -y it opens
+              # the Textual TUI and waits for input, so `yes ""` cannot drive it and the process is Killed
+              # at 0 steps/0 tokens. -y => agent.mode=yolo (headless, no per-step confirmation);
+              # --exit-immediately => no end-of-run prompt. MSWEA_CONFIGURED=true skips the first-run
+              # API-key wizard (config.py:62 gate) since the model key is already in the container env.
+              # GT-on(75) avoided this by running via pier (programmatic), never the bare CLI.
+              export MSWEA_CONFIGURED=true
+              yes "" 2>/dev/null | mini-swe-agent -y --exit-immediately \
                 --model "'"$INPUT_MODEL"'" \
                 --task "$(cat /gt_out/issue.txt 2>/dev/null || echo Fix the issue in the repository.)" \
                 --config /opt/gt/agent_config.yaml \
