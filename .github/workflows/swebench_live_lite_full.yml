@@ -1040,7 +1040,7 @@ jobs:
 
               # CRITICAL: capture the patch to the bind-mount BEFORE the container exits.
               # ROOT-CAUSE FIX (2026-07-08): the agent submission (`cat /tmp/patch.txt`) is captured
-              # through mini-swe-agent's PTY (~80 cols) so long diff lines WRAP — the continuation
+              # through the mini-swe-agent PTY (~80 cols) so long diff lines WRAP — the continuation
               # loses its +/-/space prefix -> `git apply` rejects the patch (malformed) -> the OFFICIAL
               # eval produces NO report -> default reward 0. The log-extraction fallback inherits the
               # SAME wrapped text. So build the PRIMARY patch from a clean DIRECT `git diff HEAD`
