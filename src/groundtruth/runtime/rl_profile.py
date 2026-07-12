@@ -30,7 +30,7 @@ import os
 import shlex
 import sys
 from dataclasses import dataclass, field
-from typing import Iterable, Mapping, MutableMapping, Optional, Sequence
+from typing import Callable, Iterable, Mapping, MutableMapping, Optional, Sequence
 
 # ── The versioned profile registry ───────────────────────────────────────────
 # ``GT_RL_PROFILE=<version>`` -> the coherent member set that version activates.
@@ -69,8 +69,13 @@ _PROFILE_1_MEMBERS: frozenset[str] = frozenset(
 # it carries model-facing value (the episode-overlay stale-drop). Each flag is a real wired
 # call site in gt_mini_patch (submit-gate certificate / per-turn hypothesis classification /
 # progressive verification ladder / transactional edit overlay + episode-overlay freshness).
-# Every flag has a concrete backing module (_MEMBER_CAPABILITY_MODULE below) so the Profile-2
-# preflight fails CLOSED if a stale substrate lacks the engine.
+# Each flag's capability is proven at preflight (typed manifest, 2026-07-12): a runtime-module member
+# fails CLOSED via find_spec; a SUBSTRATE-PROPERTY member (GT_CONTENT_LEG/GT_SEM_BODY/GT_BRIEF_MINIMAL/
+# GT_L6_FRESH) fails CLOSED against a required RECEIPT (_MEMBER_CAPABILITY_RECEIPT below) so a stale
+# substrate that ships the code but lacks the baked SURFACE ABORTS before spend — NOT self-attested.
+# The 3 mini-seam-spread flags (GT_D7_RELATEDNESS/GT_CONTRACT_MODE/GT_CONTRACT_BILATERAL) have no single
+# importable module and no baked surface; they are synced-seam code (present iff the seam synced,
+# byte-identical-off) and are available-by-convention (documented, never a substrate-absence risk).
 _SUPER_MODE_MEMBERS: frozenset[str] = frozenset(
     {
         "GT_REGISTRY_ENFORCE",    # SM-0 — executable-registry enforcement in the Gateway
@@ -414,7 +419,53 @@ _MEMBER_CAPABILITY_MODULE: dict[str, str] = {
     # SM-9c rank-up: the winner-promotion boost (ladder_boost) lives in the SAME engine, so it
     # maps to the same backing module — fail-closed on a substrate lacking it.
     "GT_XSESSION_RANKUP": "groundtruth.runtime.xsession_memory",
+    # 2026-07-12 typed-manifest: the cleanly-importable native-FORM members (renderer/gateway code
+    # properties). Mapped so preflight fails CLOSED on a substrate whose synced seam lacks the renderer
+    # module — no longer self-attested. (GT_D7_RELATEDNESS/GT_CONTRACT_MODE/GT_CONTRACT_BILATERAL stay
+    # unmapped BY CONVENTION: mini-seam-spread code, no single module + no baked surface.)
+    "GT_POST_SEARCH_NATIVE": "groundtruth.runtime.native_render",
+    "GT_SCOPE_NATIVE": "groundtruth.runtime.native_render",
+    "GT_CERT_DELIVERY": "groundtruth.runtime.native_render",
+    "GT_LOC_RESLOT": "groundtruth.runtime.gateway",
 }
+
+
+# 2026-07-12 typed capability manifest (readiness spec §2) — SUBSTRATE-PROPERTY members whose capability
+# is a BAKED SURFACE, NOT importable code: an indexed table / per-symbol body embeddings / a minimized
+# baked brief / a staged binary. find_spec CANNOT prove these (the code can ship while the surface is
+# absent), so each maps to a RECEIPT PREDICATE over a capability-receipt bundle (env GT_CAPABILITY_RECEIPT,
+# inline JSON the run's preflight produces from the REAL substrate). A requested member whose receipt is
+# absent/false is UNAVAILABLE => fail-closed abort. This is the anti-self-attestation core: no substrate
+# property is ever assumed available.
+_MEMBER_CAPABILITY_RECEIPT: dict[str, Callable[[Mapping[str, object]], bool]] = {
+    "GT_CONTENT_LEG": lambda r: _as_int(r.get("symbol_content_fts_rows")) > 0,
+    "GT_SEM_BODY": lambda r: _as_int(r.get("sem_body_rows")) > 0,
+    "GT_BRIEF_MINIMAL": lambda r: r.get("brief_minimal") is True,
+    "GT_L6_FRESH": lambda r: bool(str(r.get("gt_index_bin") or "").strip()),
+}
+
+
+def _as_int(v: object) -> int:
+    """Best-effort int for a receipt count; non-numeric/absent => 0 (=> the member fails closed)."""
+    try:
+        return int(v)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+
+
+def _capability_receipt(env: Mapping[str, str]) -> Mapping[str, object]:
+    """The capability-receipt bundle from ``GT_CAPABILITY_RECEIPT`` (inline JSON). Absent/empty/malformed
+    => ``{}`` (=> every receipt-gated member fails closed). Pure w.r.t. env; no file I/O."""
+    raw = (env.get("GT_CAPABILITY_RECEIPT") or "").strip()
+    if not raw:
+        return {}
+    try:
+        import json
+
+        obj = json.loads(raw)
+        return obj if isinstance(obj, dict) else {}
+    except Exception:  # noqa: BLE001 — a malformed receipt fails closed, never crashes preflight
+        return {}
 
 
 def _module_findable(module: str) -> bool:
@@ -437,20 +488,30 @@ def _available_from_env(env: Mapping[str, str]) -> set[str]:
     Precedence:
       1. ``GT_RL_PROFILE_AVAILABLE`` (comma-separated) — an explicit operator/CI stamp
          wins outright (e.g. narrowed from a baked-substrate manifest).
-      2. else PROBE: a member is available iff its backing module
-         (``_MEMBER_CAPABILITY_MODULE``) is importable-by-path in THIS interpreter;
-         a member with no mapped module is assumed available. This makes the preflight
-         ABORT reachable on a stale/partial substrate (Brief-F6: the prior default
-         returned ALL members unconditionally, so ``preflight()`` was always ``[]`` for a
-         known version — the fail-closed abort was structurally dead / self-attesting).
+      2. else PROBE (typed manifest, 2026-07-12):
+         * a RECEIPT-gated member (``_MEMBER_CAPABILITY_RECEIPT`` — a baked substrate surface) is
+           available IFF its receipt predicate holds over ``GT_CAPABILITY_RECEIPT``; absent => fail closed.
+         * a MODULE-backed member (``_MEMBER_CAPABILITY_MODULE``) is available iff its module is
+           importable-by-path in THIS interpreter.
+         * a member with neither mapping (the 3 mini-seam-spread flags) is available by convention —
+           synced-seam code, present iff the seam synced, never a substrate-absence risk.
+         Brief-F6: the pre-2026-07-12 default returned ALL 11 unmapped members unconditionally (the
+         fail-closed abort was structurally dead for them); now only 3 documented seam flags self-attest.
 
     Pure w.r.t. ``env``; the probe is side-effect-free (never executes member code).
     """
     raw = env.get("GT_RL_PROFILE_AVAILABLE")
     if raw is not None and raw.strip() != "":
         return {x.strip() for x in raw.split(",") if x.strip()}
+    receipt = _capability_receipt(env)
     out: set[str] = set()
     for member in profile_members(_profile_token(env)):
+        predicate = _MEMBER_CAPABILITY_RECEIPT.get(member)
+        if predicate is not None:
+            # SUBSTRATE-PROPERTY member: available IFF its baked-surface receipt proves it (fail-closed).
+            if predicate(receipt):
+                out.add(member)
+            continue
         module = _MEMBER_CAPABILITY_MODULE.get(member)
         if module is None or _module_findable(module):
             out.add(member)

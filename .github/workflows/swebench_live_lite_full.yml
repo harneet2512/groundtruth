@@ -973,11 +973,20 @@ jobs:
               # old `uv pip install --system` fallback installed into the <3.10 system
               # Python and silently failed on those 155 images; it is removed.
               echo "[GT] installing mini-swe-agent..."
-              pip install --quiet datacurve-pier 2>/dev/null || pip install --quiet mini-swe-agent 2>/dev/null || {
+              # BUG (smoke2 29207454580): the model call died on ModuleNotFoundError No module named
+              # fastapi from the litellm pre-call path (litellm_pre_call_utils). litellm arrives
+              # TRANSITIVELY via mini-swe-agent/datacurve-pier and one of its code paths imports fastapi,
+              # but the substrate bakes no litellm and nothing installed fastapi. Install it into the SAME
+              # env as litellm on EVERY branch (system pip + uv tool venv), else every task rewards 0 first.
+              # NOTE: this whole block is single-quoted -> NEVER put an apostrophe/single-quote here.
+              pip install --quiet datacurve-pier fastapi 2>/dev/null || pip install --quiet mini-swe-agent fastapi 2>/dev/null || {
                 curl -LsSf https://astral.sh/uv/install.sh 2>/dev/null | sh 2>/dev/null
                 export PATH="$HOME/.local/bin:/root/.local/bin:$PATH"
-                uv tool install --python 3.11 mini-swe-agent 2>/dev/null || uv tool install mini-swe-agent 2>/dev/null
+                uv tool install --python 3.11 --with fastapi mini-swe-agent 2>/dev/null || uv tool install --with fastapi mini-swe-agent 2>/dev/null
               }
+              # Belt: guarantee fastapi is importable in the interpreter that runs litellm (covers the case
+              # where mini-swe-agent was already present so the install line above short-circuited).
+              python -c "import fastapi" 2>/dev/null || pip install --quiet fastapi 2>/dev/null || true
               # Verify installation
               if ! command -v mini-swe-agent >/dev/null 2>&1; then
                 # Try finding it in common locations
@@ -1005,6 +1014,16 @@ jobs:
               # FAIL-CLOSED: on a partial substrate the preflight emits NO exports and the profile
               # stays off (byte-identical to pre-fix). Skipped in BASELINE (control arm stays pure).
               if [ "${GT_BASELINE:-0}" != "1" ]; then
+                # #72: capability RECEIPT — emit the baked-SURFACE facts BEFORE the profile preflight
+                # so the manifest can ADMIT the substrate-property members (GT_CONTENT_LEG/GT_SEM_BODY/
+                # GT_L6_FRESH) instead of failing them all closed (Fix B, rl_profile._MEMBER_CAPABILITY_
+                # RECEIPT). Reads the BASE substrate graph (GT_HOST_GRAPH_DB) + staged gt-index binary +
+                # baked brief. Absent/empty surface => empty receipt => those members correctly abort
+                # (fail-closed, never self-attested). MUST precede the rl_profile call below so its
+                # subprocess inherits GT_CAPABILITY_RECEIPT. GUARD: single-quoted docker block — the
+                # fallback uses double-quoted echo "{}", NEVER an apostrophe (one closes the whole block).
+                export GT_CAPABILITY_RECEIPT="$(PYTHONPATH=/opt/gt python -m groundtruth.runtime.capability_receipt --emit-json 2>/tmp/gt_receipt_err.txt || echo "{}")"
+                echo "[GT] capability receipt: ${GT_CAPABILITY_RECEIPT}"
                 _GT_PROFILE_EXPORTS="$(PYTHONPATH=/opt/gt python -m groundtruth.runtime.rl_profile --emit-exports 2>/tmp/gt_profile_err.txt || true)"
                 if [ -n "${_GT_PROFILE_EXPORTS}" ]; then
                   eval "${_GT_PROFILE_EXPORTS}"
