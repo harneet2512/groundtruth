@@ -66,6 +66,7 @@ type fileParseResult struct {
 
 func main() {
 	root := flag.String("root", ".", "Project root directory")
+	roots := flag.String("roots", "", "SM-9a MULTI-REPO: comma-separated ADDITIONAL repository roots to index into ONE graph.db alongside -root (repo_id-partitioned, cross-repo import edges). Empty (default) = single-root behavior, byte-identical to before.")
 	output := flag.String("output", "graph.db", "Output SQLite database path")
 	maxFiles := flag.Int("max-files", 10000, "Maximum files to index")
 	workers := flag.Int("workers", 0, "Parallel parse workers (0 = NumCPU)")
@@ -144,6 +145,18 @@ func main() {
 			log.Fatalf("rebuild-closure: stamp composite revision: %v", err)
 		}
 		db.CheckpointWAL()
+		return
+	}
+
+	// SM-9a MULTI-REPO: when >1 root is requested (via -roots), take the dedicated
+	// multi-repository ingest path (repo_id partitioning + coordinate-verified
+	// cross-repo import edges). The single-root path below is LEFT BYTE-IDENTICAL —
+	// it only runs when -roots is empty, so a single-repo index is unchanged.
+	if rootList := buildRootList(*root, *roots); len(rootList) > 1 {
+		if err := runMultiRepo(rootList, *output, *maxFiles, *workers); err != nil {
+			fmt.Fprintf(os.Stderr, "gt-index -roots: %s\n", strings.ReplaceAll(err.Error(), "\n", " "))
+			os.Exit(1)
+		}
 		return
 	}
 

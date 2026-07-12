@@ -68,6 +68,10 @@ on:
         required: false
         type: boolean
         default: false
+      gt_ref:
+        description: "Git ref (branch/tag/SHA) to CHECK OUT for the GT code seam. The SYNCED seam — gt_mini_patch.py + src/groundtruth/{runtime,delivery,pretask} + gt_ae_block.sh — is staged from THIS ref at runtime (SPEED-OPT E), so pointing it at an RL-adherence commit evaluates that code WITHOUT a substrate rebake. NOTE: the step-0 brief is BAKED into the substrate (brief.txt), so brief-CONTENT changes still need a rebake; only the seam follows this ref. Default gt-trial (prior behaviour)."
+        required: false
+        default: "gt-trial"
 
 permissions:
   contents: read
@@ -134,7 +138,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: gt-trial
+          ref: ${{ inputs.gt_ref || 'gt-trial' }}
 
       - uses: actions/setup-python@v5
         with:
@@ -457,7 +461,7 @@ jobs:
       - name: Checkout GroundTruth
         uses: actions/checkout@v4
         with:
-          ref: gt-trial
+          ref: ${{ inputs.gt_ref || 'gt-trial' }}
           lfs: false
 
       - uses: actions/setup-python@v5
@@ -751,17 +755,60 @@ jobs:
           for pkg in runtime delivery pretask; do
             if [ -d "src/groundtruth/${pkg}" ]; then
               mkdir -p "${HOST_GT_INJECT}/groundtruth/${pkg}"
-              cp src/groundtruth/${pkg}/*.py "${HOST_GT_INJECT}/groundtruth/${pkg}/" 2>/dev/null || true
-              touch "${HOST_GT_INJECT}/groundtruth/${pkg}/__init__.py"
+              # #46 fix (2026-07-11): STRUCTURE-PRESERVING copy. The old `cp .../${pkg}/*.py`
+              # glob was NON-recursive, so runtime/adapters/miniswe.py (the ONE Gateway delivery
+              # adapter) was never staged; in-container `import groundtruth.runtime.adapters.miniswe`
+              # failed -> _gt_gateway_deliver hit `except: return` -> the whole Gateway/Super-Mode
+              # stack went DARK regardless of the flags. cp -r stages the subpackage tree.
+              cp -r "src/groundtruth/${pkg}/." "${HOST_GT_INJECT}/groundtruth/${pkg}/" 2>/dev/null || true
             fi
           done
+          # #46 fix: trajectory/ (HypothesisLedger classifier dep) is a SIBLING of runtime, not
+          # under it, so the pkg loop never reached it -> GT_HYPOTHESIS died on import in-container.
+          if [ -d "src/groundtruth/trajectory" ]; then
+            mkdir -p "${HOST_GT_INJECT}/groundtruth/trajectory"
+            cp -r "src/groundtruth/trajectory/." "${HOST_GT_INJECT}/groundtruth/trajectory/" 2>/dev/null || true
+          fi
+          # drop copied bytecode caches, then guarantee every staged dir is an importable package
+          find "${HOST_GT_INJECT}/groundtruth" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
           touch "${HOST_GT_INJECT}/groundtruth/__init__.py"
+          find "${HOST_GT_INJECT}/groundtruth" -type d -exec touch {}/__init__.py \; 2>/dev/null || true
           echo "GT inject staged: $(find "${HOST_GT_INJECT}" -name '*.py' | wc -l) Python files"
+
+          # L6-FRESH (#48): stage the gt-index binary into HOST_GT_INJECT so the in-container
+          # post-edit reindex (gt_mini_patch._invalidate_on_edit, reads GT_INDEX_BIN) has a
+          # runnable binary. HOST_GT_INJECT already bind-mounts to /opt/gt:ro (see the docker
+          # run -v below), so a binary written here lands at /opt/gt/gt-index in the task
+          # container — the exact path forwarded via GT_INDEX_BIN. Build static+musl so it
+          # execs in ANY task image (glibc/musl-agnostic); sqlite_fts5 is MANDATORY (without
+          # the tag FTS5 is compiled out and any reindex degrades). Correct-or-quiet: a build
+          # miss leaves no binary → the runtime probes + falls back to the pristine graph.
+          command -v musl-gcc >/dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y musl-tools; } >/dev/null 2>&1 || true
+          if command -v musl-gcc >/dev/null 2>&1 && command -v go >/dev/null 2>&1 && [ -d gt-index ]; then
+            (cd gt-index && CGO_ENABLED=1 CC=musl-gcc go build -tags 'netgo,osusergo,sqlite_fts5' \
+               -ldflags='-s -w -extldflags "-static"' -o "${HOST_GT_INJECT}/gt-index" ./cmd/gt-index/) \
+              && chmod +x "${HOST_GT_INJECT}/gt-index" \
+              && echo "L6 gt-index built static/musl+FTS5: $(file "${HOST_GT_INJECT}/gt-index" 2>/dev/null)" \
+              || echo "WARN: gt-index musl build failed — L6-fresh reindex falls back (correct-or-quiet)"
+          else
+            echo "WARN: musl-gcc/go/gt-index absent — L6-fresh reindex falls back (correct-or-quiet)"
+          fi
 
           # Writable /gt_out mount for in-container deep-telemetry sinks.
           # SPEED-OPT E: THIRD mount — /tmp/gt_inject/opt/gt -> /opt/gt:ro (pre-staged GT files).
           HOST_GT_OUT=/tmp/gt_out
           mkdir -p "${HOST_GT_OUT}" && chmod 777 "${HOST_GT_OUT}"
+          # SM-9c cross-session store (BUG-2 fix): a SEPARATE writable bind-mount so the
+          # durable per-repo causal-consumption ledger (xsession_memory) has a WRITE target
+          # in-container. Without $GT_XSESSION_DIR pointing at a writable dir the seam
+          # (gt_mini_patch._xsession_ensure_loaded/_xsession_flush) silently no-ops, so the
+          # suppress-already-inert + rank-up-consumed policy never fires on a paid run. Kept
+          # OFF the /opt/gt:ro inject mount (the store needs WRITE) and off the /gt_out
+          # telemetry sink (distinct lifecycle). WITHIN-RUN persistence: tasks on THIS
+          # runner/job share the store; CROSS-RUN persistence (upload/download this dir as a
+          # workflow artifact between runs) is the remaining OWED follow-up (option b).
+          HOST_GT_XSESSION=/tmp/gt_xsession
+          mkdir -p "${HOST_GT_XSESSION}" && chmod 777 "${HOST_GT_XSESSION}"
           MOUNTS_JSON="[{\"type\":\"bind\",\"source\":\"${HOST_ARTIFACTS}\",\"target\":\"${GT_C_ARTIFACTS}\",\"read_only\":true},{\"type\":\"bind\",\"source\":\"${HOST_GT_OUT}\",\"target\":\"/gt_out\",\"read_only\":false},{\"type\":\"bind\",\"source\":\"/tmp/gt_inject/opt/gt\",\"target\":\"/opt/gt\",\"read_only\":true}]"
           echo "CONTAINER mount: ${HOST_ARTIFACTS} -> ${GT_C_ARTIFACTS} (ro); ${HOST_GT_OUT} -> /gt_out (rw); /tmp/gt_inject/opt/gt -> /opt/gt (ro)"
 
@@ -886,6 +933,7 @@ jobs:
             --name "gt-pro-${{ matrix.task }}" \
             -v "${HOST_ARTIFACTS}:${GT_C_ARTIFACTS}:ro" \
             -v "${HOST_GT_OUT}:/gt_out:rw" \
+            -v "${HOST_GT_XSESSION}:/opt/gt_xsession:rw" \
             -v "/tmp/gt_inject/opt/gt:/opt/gt:ro" \
             -e GT_HOST_GRAPH_DB="${GT_C_ARTIFACTS}/graph.db" \
             -e GT_CERT_DIR="${GT_C_ARTIFACTS}" \
@@ -896,9 +944,13 @@ jobs:
             -e GT_CONTAINERIZED="1" \
             -e GT_RUNTIME_STRATEGY="${GT_RUNTIME_STRATEGY:-unified_substrate}" \
             -e GT_MOUNT_MODE="1" \
+            -e GT_INDEX_BIN="/opt/gt/gt-index" \
+            -e GT_L6_FRESH="1" \
+            -e GT_RL_PROFILE="${GT_RL_PROFILE:-2}" \
             -e GT_ORACLE_EVENTS="/gt_out/gt_oracle_events.jsonl" \
             -e GT_RUNTIME_LEDGER="/gt_out/gt_runtime_ledger.jsonl" \
             -e GT_HOOK_FIRE_COUNTS="/gt_out/gt_hook_fire_counts.json" \
+            -e GT_XSESSION_DIR="/opt/gt_xsession" \
             -e GT_BASELINE=${{ inputs.baseline == true && '1' || '0' }} \
             $MODEL_ENV \
             --entrypoint "" \
@@ -944,6 +996,23 @@ jobs:
               mini-extra config set model "'"$INPUT_MODEL"'" 2>/dev/null || true
               mini-extra config set DEEPSEEK_API_KEY "${DEEPSEEK_API_KEY:-}" 2>/dev/null || true
               echo "[GT] mini-swe-agent config written"
+
+              # ── #46 fix: ACTIVATE the GT Super-Mode RL profile INSIDE the container ──────
+              # The host-side gt_ae_block.sh fan-out set the members in the HOST shell, but the
+              # docker run -e list never forwarded them, so in-container every GT_* member read
+              # empty -> Gateway + all SM engines were DARK though the code is fully wired. Resolve
+              # the profile in-container from the STAGED rl_profile module (single source of truth).
+              # FAIL-CLOSED: on a partial substrate the preflight emits NO exports and the profile
+              # stays off (byte-identical to pre-fix). Skipped in BASELINE (control arm stays pure).
+              if [ "${GT_BASELINE:-0}" != "1" ]; then
+                _GT_PROFILE_EXPORTS="$(PYTHONPATH=/opt/gt python -m groundtruth.runtime.rl_profile --emit-exports 2>/tmp/gt_profile_err.txt || true)"
+                if [ -n "${_GT_PROFILE_EXPORTS}" ]; then
+                  eval "${_GT_PROFILE_EXPORTS}"
+                  echo "[GT] RL profile ${GT_RL_PROFILE:-2} activated in-container ($(printf %s "${_GT_PROFILE_EXPORTS}" | grep -c export) members): $(printf %s "${_GT_PROFILE_EXPORTS}" | tr "\n" " ")"
+                else
+                  echo "[GT] RL profile NOT activated (off or preflight abort): $(cat /tmp/gt_profile_err.txt 2>/dev/null)"
+                fi
+              fi
 
               # Apply GT patch (monkey-patches LocalEnvironment to append GT evidence).
               # BASELINE (control) arm: GT_BASELINE=1 -> skip entirely so NO <gt-evidence>
@@ -1186,7 +1255,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: gt-trial
+          ref: ${{ inputs.gt_ref || 'gt-trial' }}
       - uses: actions/download-artifact@v4
         with:
           path: /tmp/all

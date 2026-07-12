@@ -79,11 +79,18 @@ def _mk_graph(path: str) -> None:
 # FIX 1 — executed-RED gate loss re-arms the SHARED _horizon_advisory_fired latch
 # ============================================================================ #
 def test_f1_executed_gate_loss_rearms_shared_advisory_latch(monkeypatch, tmp_path):
-    """Drives the REAL _augment_output. The executed RED is produced this turn and
-    LOSES the single Lane-B slot (the gate records it as a loser, delivers ''). The
-    re-arm block MUST release the shared _horizon_advisory_fired latch it consumed
-    at production. RED pre-fix: no `verify.horizon.executed` case -> latch stays
-    burned -> the risk-trigger never re-enters."""
+    """Drives the REAL _augment_output. The executed RED is produced this turn by the
+    RISK path and LOSES the single Lane-B slot (the gate records it as a loser, delivers
+    ''). The re-arm block MUST release the shared _horizon_advisory_fired latch the risk
+    path consumed at production. RED pre-fix: no `verify.horizon.executed` case -> latch
+    stays burned -> the risk-trigger never re-enters.
+
+    SM-10 C-1 (2026-07-12) refinement: `verify.horizon.executed` is now emitted by TWO
+    producers with DIFFERENT latch consumption, so the re-arm is source-aware via the
+    per-turn `_covering_exec_pending` record. This test simulates the RISK-path source, so
+    the fake candidate sets ``advisory=True`` exactly as the real risk block does — the
+    advisory-latch re-arm then fires. (The INDEPENDENT producer's source — advisory=False,
+    NO advisory-latch re-arm — is pinned in test_sm10_covering_decouple_20260712.py.)"""
     anchors = tmp_path / "anchors.json"
     anchors.write_text('{"symbols": ["frob"]}', encoding="utf-8")
     db = tmp_path / "graph.db"
@@ -98,11 +105,15 @@ def test_f1_executed_gate_loss_rearms_shared_advisory_latch(monkeypatch, tmp_pat
     monkeypatch.setattr(g, "_oblig_syms_cache", None, raising=False)
     g._reset_oracle_state()
 
-    # The executed candidate is produced this turn ...
-    monkeypatch.setattr(
-        g, "_verification_horizon_candidate",
-        lambda: (4.0, "verify.horizon.executed", "\n$ pytest\nTypeError\n[exit 1]\n", True),
-    )
+    # The executed candidate is produced this turn by the RISK path. SM-10 C-1: the risk
+    # block records itself as the advisory-consuming source in `_covering_exec_pending`; the
+    # fake mirrors that so the source-aware re-arm re-opens the advisory dose (as the real
+    # risk block does).
+    def _fake_risk_executed():
+        g._covering_exec_pending["syms"].add("frob")
+        g._covering_exec_pending["advisory"] = True
+        return (4.0, "verify.horizon.executed", "\n$ pytest\nTypeError\n[exit 1]\n", True)
+    monkeypatch.setattr(g, "_verification_horizon_candidate", _fake_risk_executed)
 
     # ... and it LOSES the single Lane-B slot: the gate records it as a loser
     # (exactly as _oracle_gate_blocks does on a real outrank/floor loss) + '' win.

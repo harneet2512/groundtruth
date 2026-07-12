@@ -218,7 +218,14 @@ func createSchema(db *sql.DB) error {
 		is_exported BOOLEAN DEFAULT 0,
 		is_test BOOLEAN DEFAULT 0,
 		language TEXT NOT NULL,
-		parent_id INTEGER REFERENCES nodes(id)
+		parent_id INTEGER REFERENCES nodes(id),
+		-- SM-9a MULTI-REPO: nullable repo partition key. NULL on single-root indexes
+		-- (byte-identical to pre-multi-repo binaries — the column is added at the END,
+		-- existing INSERTs omit it, so it stays NULL and no pre-existing query is
+		-- perturbed). Populated only on the multi-root path (repos.id). file_path alone
+		-- is NOT a global locator once >1 repo is indexed (two repos' identical relative
+		-- paths collide); (repo_id, file_path) is.
+		repo_id INTEGER REFERENCES repos(id)
 	);
 
 	CREATE TABLE IF NOT EXISTS edges (
@@ -234,7 +241,22 @@ func createSchema(db *sql.DB) error {
 		trust_tier TEXT DEFAULT 'SPECULATIVE',
 		candidate_count INTEGER DEFAULT 1,
 		evidence_type TEXT,
-		verification_status TEXT DEFAULT 'unverified'
+		verification_status TEXT DEFAULT 'unverified',
+		-- SM-9a MULTI-REPO: nullable repo of the edge's SOURCE (the calling/importing
+		-- repo). A cross-repo edge is one whose source repo != target's repo; carry the
+		-- source repo here and the target's provenance in metadata. NULL on single-root.
+		repo_id INTEGER REFERENCES repos(id)
+	);
+
+	-- SM-9a MULTI-REPO: one row per indexed repository root. id is the partition key
+	-- stamped onto nodes/edges/properties/assertions/closure/content_passages.repo_id.
+	-- root = the repo's on-disk root; "commit" = its VCS HEAD (best-effort, "" when
+	-- unavailable). Empty on a single-root index (that path never writes a repos row),
+	-- so existing single-repo consumers see an empty table and are unaffected.
+	CREATE TABLE IF NOT EXISTS repos (
+		id INTEGER PRIMARY KEY,
+		root TEXT,
+		"commit" TEXT
 	);
 
 	CREATE TABLE IF NOT EXISTS file_hashes (
@@ -281,7 +303,9 @@ func createSchema(db *sql.DB) error {
 		evidence_method TEXT,
 		trust_tier TEXT,
 		verification_status TEXT DEFAULT 'unverified',
-		source_revision TEXT
+		source_revision TEXT,
+		-- SM-9a MULTI-REPO: nullable repo of the owning node (back-filled from node_id).
+		repo_id INTEGER REFERENCES repos(id)
 	);
 
 	CREATE TABLE IF NOT EXISTS assertions (
@@ -292,7 +316,9 @@ func createSchema(db *sql.DB) error {
 		kind TEXT NOT NULL,
 		expression TEXT NOT NULL,
 		expected TEXT,
-		line INTEGER
+		line INTEGER,
+		-- SM-9a MULTI-REPO: nullable repo of the test node (back-filled from test_node_id).
+		repo_id INTEGER REFERENCES repos(id)
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_properties_node ON properties(node_id);
@@ -336,6 +362,8 @@ func createSchema(db *sql.DB) error {
 		target_id INTEGER,
 		depth INTEGER,
 		min_confidence REAL,
+		-- SM-9a MULTI-REPO: nullable repo of the closure SOURCE (back-filled from source_id).
+		repo_id INTEGER REFERENCES repos(id),
 		PRIMARY KEY(source_id, target_id, depth)
 	);
 	CREATE INDEX IF NOT EXISTS idx_closure_source ON closure(source_id);
@@ -371,7 +399,9 @@ func createSchema(db *sql.DB) error {
 		start_line INTEGER NOT NULL,
 		end_line INTEGER NOT NULL,
 		content TEXT NOT NULL,
-		content_hash TEXT NOT NULL
+		content_hash TEXT NOT NULL,
+		-- SM-9a MULTI-REPO: nullable repo of the owning node (back-filled from node_id).
+		repo_id INTEGER REFERENCES repos(id)
 	);
 	CREATE INDEX IF NOT EXISTS idx_content_passages_node ON content_passages(node_id);
 
@@ -431,6 +461,16 @@ func migrateSchema(db *sql.DB) error {
 	}
 	for _, c := range propCols {
 		if err := addColumnIfMissing(db, "properties", c.name, c.ddl); err != nil {
+			return err
+		}
+	}
+	// SM-9a MULTI-REPO: add the nullable repo_id partition key to a fact table created by
+	// an older binary. Additive + idempotent (addColumnIfMissing checks PRAGMA table_info
+	// first): a single-root db written by an old binary reopens with repo_id present-and-NULL,
+	// so every existing query that omits repo_id is unchanged. The repos table itself is
+	// created by createSchema's `CREATE TABLE IF NOT EXISTS repos` above (a no-op when present).
+	for _, t := range []string{"nodes", "edges", "properties", "assertions", "closure", "content_passages"} {
+		if err := addColumnIfMissing(db, t, "repo_id", "INTEGER"); err != nil {
 			return err
 		}
 	}
@@ -991,4 +1031,123 @@ func (d *DB) BatchInsertCochangeSets(sets map[string][]string) error {
 		}
 	}
 	return tx.Commit()
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// SM-9a MULTI-REPO helpers. All of these operate on the multi-root ingest path
+// ONLY — the single-root path never calls them, so a single-repo index leaves
+// every repo_id NULL and the repos table empty (byte-identical to the pre-multi-
+// repo binary on every pre-existing column). Additive by construction.
+// ────────────────────────────────────────────────────────────────────────────
+
+// CrossRepoNodeRow is the minimal node projection the cross-repo import resolver
+// needs: identity (id), the repo it lives in, its name, its repo-relative file
+// path, and whether it is exported (only exported symbols are legal cross-repo
+// import targets). Label lets the caller drop File anchors.
+type CrossRepoNodeRow struct {
+	ID         int64
+	RepoID     int64
+	Name       string
+	FilePath   string
+	Label      string
+	IsExported bool
+}
+
+// UpsertRepo writes (or replaces) one row in the repos partition table. Called
+// once per indexed root on the multi-repo path with id = the repo's partition key.
+func (d *DB) UpsertRepo(id int64, root, commit string) error {
+	_, err := d.db.Exec(
+		`INSERT OR REPLACE INTO repos (id, root, "commit") VALUES (?, ?, ?)`,
+		id, root, commit,
+	)
+	return err
+}
+
+// RepoCount returns the number of rows in the repos table (0 on a single-root index).
+func (d *DB) RepoCount() int {
+	var n int
+	d.db.QueryRow(`SELECT COUNT(*) FROM repos`).Scan(&n)
+	return n
+}
+
+// StampNodeRepoIDs sets nodes.repo_id = repoID for the given node ids in ONE
+// transaction. Called once per repo on the multi-repo path with the exact id list
+// BatchInsertNodes returned for that repo, so no file_path-collision ambiguity can
+// arise (the stamp is keyed on the global surrogate id, never the colliding path).
+func (d *DB) StampNodeRepoIDs(ids []int64, repoID int64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	tx, err := d.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin stamp-node-repo tx: %w", err)
+	}
+	stmt, err := tx.Prepare(`UPDATE nodes SET repo_id = ? WHERE id = ?`)
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("prepare stamp-node-repo: %w", err)
+	}
+	defer stmt.Close()
+	for _, id := range ids {
+		if _, err := stmt.Exec(repoID, id); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("stamp node %d repo_id: %w", id, err)
+		}
+	}
+	return tx.Commit()
+}
+
+// StampDerivedRepoIDs back-fills repo_id on every fact surface that references a
+// node, deriving it from that node's already-stamped repo_id. Node ids are GLOBAL
+// (never collide across repos), so these joins are unambiguous even where two repos
+// share a relative file_path:
+//   - edges       ← source_id (the calling/importing repo; a cross-repo edge is one
+//     whose source repo != its target's repo)
+//   - properties  ← node_id
+//   - assertions  ← test_node_id
+//   - closure     ← source_id
+//   - content_passages ← node_id
+//
+// Run AFTER StampNodeRepoIDs for every repo and AFTER all edges (intra- and
+// cross-repo) are inserted. Deterministic (set-based UPDATEs, no ordering).
+func (d *DB) StampDerivedRepoIDs() error {
+	stmts := []string{
+		`UPDATE edges SET repo_id = (SELECT n.repo_id FROM nodes n WHERE n.id = edges.source_id)`,
+		`UPDATE properties SET repo_id = (SELECT n.repo_id FROM nodes n WHERE n.id = properties.node_id)`,
+		`UPDATE assertions SET repo_id = (SELECT n.repo_id FROM nodes n WHERE n.id = assertions.test_node_id)`,
+		`UPDATE closure SET repo_id = (SELECT n.repo_id FROM nodes n WHERE n.id = closure.source_id)`,
+		`UPDATE content_passages SET repo_id = (SELECT n.repo_id FROM nodes n WHERE n.id = content_passages.node_id)`,
+	}
+	for _, s := range stmts {
+		if _, err := d.db.Exec(s); err != nil {
+			return fmt.Errorf("stamp derived repo_id (%q): %w", s, err)
+		}
+	}
+	return nil
+}
+
+// CrossRepoNodeRows returns the repo-stamped node projection the cross-repo import
+// resolver consumes. File-label anchors and test nodes are excluded (an import
+// never binds to a file anchor or a test symbol). Ordered by (repo_id, id) for
+// deterministic downstream iteration.
+func (d *DB) CrossRepoNodeRows() ([]CrossRepoNodeRow, error) {
+	rows, err := d.db.Query(
+		`SELECT id, COALESCE(repo_id, -1), name, file_path, label, COALESCE(is_exported, 0)
+		   FROM nodes
+		  WHERE label != 'File' AND COALESCE(is_test, 0) = 0
+		  ORDER BY COALESCE(repo_id, -1), id`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query cross-repo nodes: %w", err)
+	}
+	defer rows.Close()
+	var out []CrossRepoNodeRow
+	for rows.Next() {
+		var r CrossRepoNodeRow
+		if err := rows.Scan(&r.ID, &r.RepoID, &r.Name, &r.FilePath, &r.Label, &r.IsExported); err != nil {
+			return nil, fmt.Errorf("scan cross-repo node: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }

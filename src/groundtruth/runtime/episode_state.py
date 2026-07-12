@@ -117,6 +117,27 @@ class EpisodeState:
     # --- opaque handles (referenced, not value-owned; excluded from __eq__/to_dict) ---
     delivery_ledger: Ledger = field(default_factory=Ledger, compare=False, repr=False)
     obligations: Any = field(default=None, compare=False, repr=False)
+    # SM-9c (2026-07-11): the CROSS-SESSION learned-delivery policy loaded ONCE at
+    # task-start — this repo's durable causal-consumption ledger ``class_stats``
+    # (canonical fact-class -> (delivered, consumed)). It is a per-RUN INPUT (a DECLARED,
+    # versioned store snapshot), NOT a per-attempt accumulator: like ``episode_id`` /
+    # ``delivery_ledger`` it PERSISTS across :meth:`reset_attempt` (attempt-2 still sees
+    # the same prior-session learning). ``compare=False`` + absent from ``to_dict`` ⇒ it
+    # is EXCLUDED from value identity, so serialization/replay bytes are unchanged (empty
+    # by default ⇒ byte-identical to pre-SM-9c). The Gateway READS it via
+    # ``gateway._apply_xsession_policy``; nothing here mutates it.
+    xsession_policy: dict = field(default_factory=dict, compare=False, repr=False)
+    # SM-10 Item D2 (2026-07-12): the per-attempt READ-SET — normalized targets (file rels /
+    # symbol stems, PATHS/SYMBOLS ONLY, so leak-safe) the agent has already ACQUIRED through
+    # its OWN actions (viewed / greped / edited). The mini seam seeds the global arbiter's
+    # ``acquired`` set from it so a localization fact pointing at a file the agent already
+    # OPENED/greped is SUPPRESSED (non-re-acquisition — the charter's consumption definition).
+    # A per-attempt RUNTIME accumulator, NOT a serialized value: ``compare=False`` + absent
+    # from ``to_dict``/``from_dict`` keeps the EXACT round-trip identity unchanged (empty by
+    # default ⇒ byte-identical to pre-D2), and :meth:`reset_attempt` CLEARS it (a fresh
+    # attempt must re-acquire). Distinct from ``xsession_policy`` (a persisted per-RUN INPUT):
+    # this IS a per-attempt accumulator, so unlike xsession_policy it is in the clear list.
+    read_targets: set[str] = field(default_factory=set, compare=False, repr=False)
 
     # ------------------------------------------------------------------ #
     # reset semantics
@@ -136,7 +157,12 @@ class EpisodeState:
         :attr:`probe_ledger`, ``_gt_submit_bounce_count`` -> :attr:`submit_bounce_count`,
         and the ``_horizon_*_fired`` one-shots -> :attr:`horizon_latches`. The
         ``delivery_ledger`` handle is NOT cleared (its file sink is durable, matching
-        the ledger FILE surviving an attempt in ``_ledger_line_direct``)."""
+        the ledger FILE surviving an attempt in ``_ledger_line_direct``).
+
+        SM-9c: :attr:`xsession_policy` is likewise PRESERVED (it is a per-RUN store INPUT,
+        not a per-attempt accumulator — attempt-2 must still see the same prior-session
+        learning). It is intentionally NOT in the clear list below; a future edit must not
+        add it there."""
         self.action_index = 0
         self.phase = ""
         self.band = ""
@@ -155,6 +181,7 @@ class EpisodeState:
         self.horizon_latches.clear()
         self.submit_bounce_count = 0
         self.hypothesis_slots.clear()
+        self.read_targets.clear()  # SM-10 Item D2: per-attempt read-set re-acquires fresh
         # D-11 (RL data identity): advance the attempt counter and suffix the run id so
         # two attempts of the SAME run get DISTINCT episode identities in the training
         # data (the hash-chain / event ids reset per attempt and would otherwise be

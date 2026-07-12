@@ -52,7 +52,15 @@ from groundtruth.pretask.curation_map import (
     _has_columns,
     _open_ro,
 )
+from groundtruth.index.repo_scope import RepoScope, for_read
 from groundtruth.confidence import dynamic_cutoff, is_seed_pollutant
+
+
+def _repo_frag(scope: "RepoScope | None", alias: str = "") -> tuple[str, tuple]:
+    """SM-9a: (SQL fragment, params) scoping a ``nodes`` read to the active repo, or
+    ("", ()) when there is no scope (single-repo / legacy / no scope passed). Central
+    so every seed producer scopes identically and single-repo stays byte-identical."""
+    return scope.node_filter(alias) if scope is not None else ("", ())
 
 # _STDLIB_HEADS deleted (Step 2): it was DEAD — the code's own comment noted the
 # `nbr_name in _STDLIB_HEADS` guard never fired (the shadow token is the attribute,
@@ -356,6 +364,7 @@ def _fts5_candidates(
     conn: sqlite3.Connection,
     issue_tokens: set[str],
     limit: int = 50,
+    scope: "RepoScope | None" = None,
 ) -> list[tuple[int, str, str, float]]:
     """BM25 retrieval over function names/signatures/paths via FTS5.
 
@@ -415,7 +424,11 @@ def _fts5_candidates(
                 _fts_conn_owned = True
                 _fts_conn.execute("ATTACH DATABASE ? AS src", (_src_uri,))
                 _fts_conn.execute(_FTS5_CREATE)
-                _fts_conn.execute(_FTS5_POPULATE)
+                # SM-9a: scope the in-memory index population to the active repo so the
+                # rebuilt nodes_fts never carries another repo's symbols. src.nodes has
+                # repo_id; _FTS5_POPULATE ends with `WHERE is_test = 0`. No-op single-repo.
+                _src_frag, _src_params = _repo_frag(scope)
+                _fts_conn.execute(_FTS5_POPULATE + _src_frag, _src_params)
                 _fts_conn.commit()
                 _n_rows = _fts_conn.execute("SELECT COUNT(*) FROM nodes_fts").fetchone()[0]
                 print(f"[GT L1] FTS5: in-memory creation OK ({_n_rows} rows, graph.db untouched)",
@@ -470,16 +483,21 @@ def _fts5_candidates(
                WHERE nodes_fts MATCH ?
                ORDER BY score
                LIMIT ?"""
+        _fts_params: tuple = (match_expr, limit)
     else:
+        # SM-9a: the direct path JOINs the real nodes (which carry repo_id) -> scope
+        # the MATCH to the active repo. Frag param sits between MATCH and LIMIT.
+        _f_n, _p_n = _repo_frag(scope, "n")
         _fts_query = """SELECT nodes_fts.rowid, nodes_fts.name, nodes_fts.file_path,
                       bm25(nodes_fts, 1.0, 2.0, 0.5, 0.5) as score
                FROM nodes_fts
                JOIN nodes n ON n.id = nodes_fts.rowid
-               WHERE nodes_fts MATCH ? AND COALESCE(n.is_test, 0) = 0
+               WHERE nodes_fts MATCH ? AND COALESCE(n.is_test, 0) = 0""" + _f_n + """
                ORDER BY score
                LIMIT ?"""
+        _fts_params = (match_expr, *_p_n, limit)
     try:
-        rows = _fts_conn.execute(_fts_query, (match_expr, limit)).fetchall()
+        rows = _fts_conn.execute(_fts_query, _fts_params).fetchall()
     except sqlite3.Error as _q_err:
         print(f"[GT L1] FTS5: query failed: {_q_err}", file=sys.stderr)
         return []
@@ -545,6 +563,7 @@ def _content_fts_candidates(
     issue_tokens: set[str],
     limit: int = 50,
     issue_text: str = "",
+    scope: "RepoScope | None" = None,
 ) -> list[tuple[int, str, str, float]]:
     """BM25 retrieval over per-symbol BODY content (symbol_content_fts, the Go B1 index).
 
@@ -628,14 +647,15 @@ def _content_fts_candidates(
         return []
     match_expr = " OR ".join(safe_tokens)
 
+    _f_n, _p_n = _repo_frag(scope, "n")  # SM-9a: scope the body-content JOIN to active repo
     try:
         rows = conn.execute(
             """SELECT c.rowid, n.name, n.file_path, bm25(symbol_content_fts) AS score
                  FROM symbol_content_fts c JOIN nodes n ON n.id = c.rowid
-                WHERE symbol_content_fts MATCH ? AND COALESCE(n.is_test, 0) = 0
+                WHERE symbol_content_fts MATCH ? AND COALESCE(n.is_test, 0) = 0""" + _f_n + """
                 ORDER BY score, n.file_path, c.rowid
                 LIMIT ?""",
-            (match_expr, limit),
+            (match_expr, *_p_n, limit),
         ).fetchall()
     except sqlite3.Error as _q_err:
         print(f"[GT L1] content-fts: query failed: {_q_err}", file=sys.stderr)
@@ -647,6 +667,47 @@ def _content_fts_candidates(
             score = -float(row[3]) if row[3] is not None else 0.0
             out.append((int(row[0]), str(row[1]), _normalize(str(row[2])), score))
     return out
+
+
+def _content_margin_threshold() -> "float | None":
+    """The measurement-derived RELATIVE margin the content-BM25 FUSION leg must clear to
+    contribute to the composite (``GT_CONTENT_MARGIN``, a fraction in [0, 1)). Returns
+    ``None`` — the UNCALIBRATED / correct-or-quiet state — when the env is unset, empty,
+    unparseable, or out of range. When ``None`` the fusion leg ABSTAINS entirely (it never
+    adds an RRF term), so the pipeline is byte-identical to the leg-off path. The VALUE is
+    NOT hardcoded here (house rule: no arbitrary thresholds): it comes from the measured
+    top-hit-margin distribution via ``scripts/measure_brief.py`` — OWED until that measures
+    it, and until then the leg is deliberately silent on the grep-non-empty (fusion) path."""
+    raw = os.getenv("GT_CONTENT_MARGIN")
+    if raw is None or not raw.strip():
+        return None
+    try:
+        v = float(raw.strip())
+    except ValueError:
+        return None
+    return v if 0.0 <= v < 1.0 else None
+
+
+def _content_leg_margin_ok(cfts: "list[tuple[int, str, str, float]]", threshold: float) -> bool:
+    """The MARGIN-GATE: does the content-BM25 leg have a CLEARLY-SEPARATED top hit?
+
+    ``cfts`` rows carry ``-bm25`` (higher = better). The gate passes iff the relative
+    separation of the best hit over the runner-up, ``(top1 - top2) / top1``, is at least
+    ``threshold`` — i.e. the leg found ONE body that dominates, not a flat field of weak
+    near-ties. A single hit is maximally separated (passes); an empty/degenerate field or a
+    non-positive top score fails. Deterministic (BM25 is deterministic), pure, comparative
+    (relative, not an absolute score cutoff), so it generalizes across repos/score scales.
+
+    This is the correct-or-quiet core: a WEAK margin -> the leg contributes ≈0 (abstains),
+    so it never converts a confident lexical/structural localization into body-BM25-first
+    noise; only a confident content hit shifts the composite rank."""
+    scores = sorted((float(c[3]) for c in cfts), reverse=True)
+    if not scores or scores[0] <= 0.0:
+        return False
+    if len(scores) == 1:
+        return True
+    top1, top2 = scores[0], scores[1]
+    return ((top1 - top2) / top1) >= float(threshold)
 
 
 def _path_decay_scores(
@@ -1096,12 +1157,18 @@ def _lex_hit(term: str, symset: set[str]) -> bool:
 
 
 def _seed_node_rows(
-    conn: sqlite3.Connection, anchors: set[str]
+    conn: sqlite3.Connection, anchors: set[str], scope: "RepoScope | None" = None
 ) -> list[tuple[int, str, str]]:
     """(node_id, name, file_path) for every Function/Method/Class node whose name
-    is an issue anchor. These are the BFS seeds (KGCompass entity seeding)."""
+    is an issue anchor. These are the BFS seeds (KGCompass entity seeding).
+
+    ``scope`` (SM-9a): when the graph indexes >1 repository, scope the name-match to
+    the active repo so a same-named symbol from another repo is not seeded. None /
+    single-repo -> byte-identical."""
     if not anchors:
         return []
+    _f_bare, _p_bare = _repo_frag(scope)
+    _f_c, _p_c = _repo_frag(scope, "c")
     out: list[tuple[int, str, str]] = []
     anchors_l = list(anchors)
     # Chunk to stay under SQLite's variable limit on huge anchor sets.
@@ -1112,8 +1179,8 @@ def _seed_node_rows(
             rows = conn.execute(
                 f"SELECT id, name, file_path FROM nodes "
                 f"WHERE name IN ({ph}) AND is_test = 0 "
-                f"AND label IN ('Function','Method','Class','Interface')",
-                tuple(chunk),
+                f"AND label IN ('Function','Method','Class','Interface')" + _f_bare,
+                tuple(chunk) + _p_bare,
             ).fetchall()
         except sqlite3.Error:
             continue
@@ -1140,15 +1207,15 @@ def _seed_node_rows(
             qrows = conn.execute(
                 "SELECT c.id, c.name, c.file_path FROM nodes c "
                 "JOIN nodes p ON c.parent_id = p.id "
-                "WHERE c.name = ? AND p.name = ? AND c.is_test = 0",
-                (tail, qualifier),
+                "WHERE c.name = ? AND p.name = ? AND c.is_test = 0" + _f_c,
+                (tail, qualifier) + _p_c,
             ).fetchall()
             if not qrows:
                 qrows = conn.execute(
                     "SELECT id, name, file_path FROM nodes "
                     "WHERE (qualified_name = ? OR qualified_name LIKE ?) "
-                    "AND is_test = 0",
-                    (anc, f"%.{qualifier}.{tail}"),
+                    "AND is_test = 0" + _f_bare,
+                    (anc, f"%.{qualifier}.{tail}") + _p_bare,
                 ).fetchall()
         except sqlite3.Error:
             continue
@@ -1164,6 +1231,7 @@ def _path_to_seeds(
     issue_tokens: set[str],
     existing_seed_files: set[str],
     limit: int = 10,
+    scope: "RepoScope | None" = None,
 ) -> list[tuple[int, str, str]]:
     """Seed from files whose PATH contains an issue token.
 
@@ -1204,6 +1272,7 @@ def _path_to_seeds(
     if not path_tokens:
         return []
 
+    _f_bare, _p_bare = _repo_frag(scope)  # SM-9a active-repo scope (no-op single-repo)
     out: list[tuple[int, str, str]] = []
     seen_ids: set[int] = set()
     seen_files: set[str] = set(existing_seed_files)  # dedup by file, not just node ID
@@ -1225,9 +1294,9 @@ def _path_to_seeds(
                 rows = conn.execute(
                     "SELECT id, name, file_path FROM nodes "
                     "WHERE file_path LIKE ? AND is_test = 0 "
-                    "AND label IN ('Function','Method','Class') "
+                    "AND label IN ('Function','Method','Class')" + _f_bare + " "
                     "LIMIT 5",
-                    (pat,),
+                    (pat,) + _p_bare,
                 ).fetchall()
                 if rows:
                     _found_any = True
@@ -1255,7 +1324,8 @@ def _path_to_seeds(
         try:
             all_files = [
                 r[0] for r in conn.execute(
-                    "SELECT DISTINCT file_path FROM nodes WHERE is_test = 0"
+                    "SELECT DISTINCT file_path FROM nodes WHERE is_test = 0" + _f_bare,
+                    _p_bare,
                 ).fetchall() if r[0]
             ]
             compound_hits: list[tuple[str, int]] = []
@@ -1272,8 +1342,8 @@ def _path_to_seeds(
                     continue
                 rows = conn.execute(
                     "SELECT id, name FROM nodes WHERE file_path = ? "
-                    "AND is_test = 0 AND label IN ('Function','Method','Class') "
-                    "LIMIT 1", (fp,)
+                    "AND is_test = 0 AND label IN ('Function','Method','Class')" + _f_bare + " "
+                    "LIMIT 1", (fp,) + _p_bare
                 ).fetchall()
                 if rows and rows[0][0] is not None:
                     nid = int(rows[0][0])
@@ -2550,6 +2620,19 @@ def localize(
             return LocalizerResult([], [], 0.0, False, "graph_open_failed")
 
     try:
+        # SM-9a MULTI-REPO consumer: resolve the active-repo read scope ONCE. On a
+        # single-repo / legacy graph this is a no-op (byte-identical). On a multi-repo
+        # graph where repo_root cannot be resolved to a stored repo, FAIL CLOSED —
+        # return empty (correct-or-quiet) rather than seeding/ranking candidates from
+        # the WRONG repository. When resolved, the seed producers below are scoped to
+        # the active repo's partition.
+        _repo_scope = for_read(conn, repo_root)
+        if _repo_scope.is_multi_repo and not _repo_scope.resolved:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+            return LocalizerResult([], list(anchors), 0.0, False, "multi_repo_unresolved")
         has_conf, has_method = _has_columns(conn)
         # trust_tier column (schema v15.2+): when present, a SUPPRESSED edge is
         # HARD-EXCLUDED at admission per the categorical filter (CLAUDE.md edge
@@ -2567,7 +2650,7 @@ def localize(
         _dyn_hop = min(max_hop, _dynamic_max_hop(_stats))
         _dyn_conf = _dynamic_conf_floor(_stats)
 
-        seeds = _seed_node_rows(conn, anchors)
+        seeds = _seed_node_rows(conn, anchors, scope=_repo_scope)
 
         # SEED PROVENANCE (fix 2026-06-09): ONLY these exact-name seeds — the
         # issue literally names a symbol defined in the file — may mint the
@@ -2589,7 +2672,7 @@ def localize(
         terms = _issue_terms(issue_text)
         _existing_seed_files = {s[2] for s in seeds}  # normalized file paths already seeded
         try:
-            _path_seeds = _path_to_seeds(conn, terms, _existing_seed_files, limit=10)
+            _path_seeds = _path_to_seeds(conn, terms, _existing_seed_files, limit=10, scope=_repo_scope)
             if _path_seeds:
                 existing_ids = {s[0] for s in seeds}
                 for ps in _path_seeds:
@@ -2669,6 +2752,12 @@ def localize(
         # B1: tracks whether the CONTENT-BM25 fallback (below) filled the lexical slot,
         # so the agreement vote names the leg honestly ("content" vs "grep").
         _content_leg_used = False
+        # SM-10 FUSION (redirect 2026-07-12): the content-BM25 leg as an ALWAYS-CONSIDERED,
+        # provenance-SEPARATED, MARGIN-GATED fusion leg on the grep-NON-empty path (distinct
+        # from the grep-empty fallback above, so it can never double-count the grep signal).
+        # Empty unless GT_CONTENT_LEG is on AND a measured GT_CONTENT_MARGIN clears the gate ->
+        # byte-identical off / uncalibrated. Its per-file score seeds a distinct RRF leg below.
+        _content_fusion_score: dict[str, float] = {}
         if repo_root:
             try:
                 # GREENFIELD wiring (gt_gt §4, 2026-06-10): unresolved code
@@ -2723,27 +2812,54 @@ def localize(
         # slot (grep_recalled + grep_score_by_file) under a DISTINCT leg label ("content")
         # so the consensus stays honest. Default-off: the measured paid path (repo present
         # -> grep succeeds) is byte-identical; this only lights the grep-dead lane.
-        if (not grep_recalled) and os.getenv("GT_CONTENT_LEG") == "1":
+        if os.getenv("GT_CONTENT_LEG") == "1":
             try:
-                _cfts = _content_fts_candidates(conn, terms, limit=_grep_limit, issue_text=issue_text)
-                if _cfts:
+                _cfts = _content_fts_candidates(conn, terms, limit=_grep_limit, issue_text=issue_text, scope=_repo_scope)
+            except Exception as _cfts_err:
+                print(f"[GT L1] content-fts leg: FAILED: {_cfts_err}", file=sys.stderr)
+                _cfts = []
+            if _cfts and not grep_recalled:
+                # GREP-EMPTY FALLBACK (UNCHANGED): the lexical slot is VACANT, so a lossy top-K
+                # BM25 hit beats no floor at all — fill the grep slot exactly as before. The
+                # margin-gate does NOT apply here (there is no grep signal to protect against).
+                _existing_ids_c = {s[0] for s in seeds}
+                for _nid, _cname, _cfp, _cscore in _cfts:
+                    grep_recalled.add(_cfp)
+                    if _cscore > grep_score_by_file.get(_cfp, float("-inf")):
+                        grep_score_by_file[_cfp] = _cscore
+                    if _nid not in _existing_ids_c:
+                        seeds.append((_nid, _cname, _cfp))
+                        _existing_ids_c.add(_nid)
+                        _seed_provenance[_nid] = ("CONTENT_SEED", "")
+                _content_leg_used = True
+                print(
+                    f"[GT L1] content-fts leg: filled vacant lexical slot with "
+                    f"{len(_cfts)} BM25 body-content candidates",
+                    file=sys.stderr,
+                )
+            elif _cfts:
+                # GREP-NON-EMPTY FUSION (SM-10 redirect 2026-07-12): the content-BM25 leg is
+                # ALWAYS considered — a DISTINCT, provenance-separated fusion leg alongside the
+                # live grep leg (double-count is prevented by the separate "content" leg, NOT by
+                # a grep-empty exclusion). MARGIN-GATED: it contributes a distinct RRF leg ONLY
+                # when a MEASURED GT_CONTENT_MARGIN clears (a clearly-separated top body hit);
+                # a weak margin OR an uncalibrated (unset) threshold -> ABSTAIN -> byte-identical
+                # to the grep-only pipeline (correct-or-quiet — never body-BM25-first noise).
+                _mthr = _content_margin_threshold()
+                if _mthr is not None and _content_leg_margin_ok(_cfts, _mthr):
                     _existing_ids_c = {s[0] for s in seeds}
                     for _nid, _cname, _cfp, _cscore in _cfts:
-                        grep_recalled.add(_cfp)
-                        if _cscore > grep_score_by_file.get(_cfp, float("-inf")):
-                            grep_score_by_file[_cfp] = _cscore
+                        if _cscore > _content_fusion_score.get(_cfp, float("-inf")):
+                            _content_fusion_score[_cfp] = _cscore
                         if _nid not in _existing_ids_c:
                             seeds.append((_nid, _cname, _cfp))
                             _existing_ids_c.add(_nid)
                             _seed_provenance[_nid] = ("CONTENT_SEED", "")
-                    _content_leg_used = True
                     print(
-                        f"[GT L1] content-fts leg: filled vacant lexical slot with "
-                        f"{len(_cfts)} BM25 body-content candidates",
+                        f"[GT L1] content-fts FUSION leg: margin>={_mthr:.4f} cleared, "
+                        f"{len(_content_fusion_score)} distinct body-content files fused",
                         file=sys.stderr,
                     )
-            except Exception as _cfts_err:
-                print(f"[GT L1] content-fts leg: FAILED: {_cfts_err}", file=sys.stderr)
 
         # FTS5-TO-SEED (mechanism C): BM25 retrieval over the nodes_fts
         # virtual table. Matches grep's recall by searching function names,
@@ -2756,7 +2872,7 @@ def localize(
         _fts5_score_by_file: dict[str, float] = {}
         _fts5_seed_used = False
         try:
-            fts5_hits = _fts5_candidates(conn, terms, limit=50)
+            fts5_hits = _fts5_candidates(conn, terms, limit=50, scope=_repo_scope)
             if fts5_hits:
                 existing_ids = {s[0] for s in seeds}
                 for nid, name, fp, bm25_score in fts5_hits:
@@ -3390,6 +3506,13 @@ def localize(
             return 0
         if _normalize(c.file_path) in grep_recalled:
             return 0
+        # SM-10 FUSION (redirect 2026-07-12): a MARGIN-CLEARED content-BM25 hit earns FLOOR
+        # authority alongside grep, so a confident behaviour-described (stratum-B) body match
+        # can COMPETE on the composite rank instead of sinking below every grep file. Gated by
+        # the margin (only a clearly-separated top hit enters `_content_fusion_score`), so a
+        # weak match never displaces grep — and empty on the off/uncalibrated path (no-op).
+        if _content_fusion_score and _normalize(c.file_path) in _content_fusion_score:
+            return 0
         if (INJECTION_PLACEMENT == "interleave_short_deterministic" or _floor_is_content) and any(
             w.verified and w.direction != "defines_anchor" and w.hop <= 1
             for w in c.witnesses
@@ -3406,6 +3529,11 @@ def localize(
     # recall). No-op for grep-recalled files (authority comes from recall, not depth).
     def _depth_authority(c: Candidate) -> int:
         if not _have_floor or _normalize(c.file_path) in grep_recalled:
+            return 0
+        # SM-10 FUSION: a margin-cleared content hit is a real body match (not a string-world
+        # coincidence), so it carries authority like an edge-reached file — else it would be
+        # authority-demoted below the floor it just earned. Margin-gated + empty off (no-op).
+        if _content_fusion_score and _normalize(c.file_path) in _content_fusion_score:
             return 0
         has_edge_reach = any(
             w.verified and w.direction != "defines_anchor" for w in c.witnesses
@@ -3505,6 +3633,19 @@ def localize(
     ) if _sem else []
     _sem_rank = {id(c): i for i, c in enumerate(_sem_order)}
 
+    # ---- CONTENT-BM25 FUSION LEG (SM-10 redirect, margin-gated) ----
+    # A DISTINCT, provenance-separated ranker over the body-BM25 score (grep-non-empty path).
+    # Populated ONLY when GT_CONTENT_LEG is on AND the measured GT_CONTENT_MARGIN gate cleared
+    # (see the content-leg block above), so `_content_fusion_score` is empty — and this rank
+    # dict is empty — on every off / uncalibrated / weak-margin path => `_rrf3` and the
+    # agreement vote below are byte-identical. It never fills the grep slot, so it can never
+    # double-count the lexical signal; it is its OWN leg in the fusion + agreement vote.
+    _content_order = sorted(
+        (c for c in candidates if _normalize(c.file_path) in _content_fusion_score),
+        key=lambda c: -_content_fusion_score.get(_normalize(c.file_path), 0.0),
+    ) if _content_fusion_score else []
+    _content_rank = {id(c): i for i, c in enumerate(_content_order)}
+
     # ---- MULTI-SIGNAL AGREEMENT COUNT (the grep-floor build) ----
     # For each candidate, count how many of the THREE independent rankers
     # (grep / structural / semantic) place it in their OWN top-3. This is a
@@ -3532,6 +3673,11 @@ def localize(
             _legs.append("structural")
         if _sem_rank and _sem_rank.get(id(c), _BIG) < _TOP_N_AGREE:
             _legs.append("semantic")
+        # SM-10: the margin-gated body-content leg is a DISTINCT agreement signal (a file the
+        # grep, structural AND content legs all surface is stronger still). Empty rank dict on
+        # the off/uncalibrated/weak-margin path => this never adds a leg (byte-identical).
+        if _content_rank and _content_rank.get(id(c), _BIG) < _TOP_N_AGREE:
+            _legs.append("content")
         _agree = len(_legs)
         _fnorm = _normalize(c.file_path)
         # A file may have multiple candidate rows; keep the MAX agreement seen, and
@@ -3544,6 +3690,10 @@ def localize(
         s = 1.0 / (60 + _grep_rank.get(id(c), _BIG)) + 1.0 / (60 + _struct_rank.get(id(c), _BIG))
         if _sem_rank:
             s += 1.0 / (60 + _sem_rank.get(id(c), _BIG))
+        # SM-10: the margin-gated content leg adds a DISTINCT RRF term (only when it cleared
+        # the gate -> _content_rank non-empty; otherwise a no-op, so byte-identical off).
+        if _content_rank:
+            s += 1.0 / (60 + _content_rank.get(id(c), _BIG))
         return s
 
     # BUG-2 (2026-06-15): the final sort tie-broke `-_rrf3` ties on `c.file_path` ASC

@@ -52,11 +52,22 @@ __all__ = [
     "FactRegistration",
     "REGISTRY",
     "registration",
+    "registration_for",
+    "required_event",
+    "earliest_event_for",
+    "required_renderer",
+    "is_reactive",
+    "freshness_surfaces",
+    "registry_graph_surfaces",
+    "is_patch_bound",
     "is_registered",
     "renderable",
     "assert_registered",
     "all_fact_classes",
     "UnregisteredFactError",
+    # executable-registry structures (SM-0 Super Mode spine)
+    "FRESHNESS_SURFACES",
+    "PATCH_BOUND_FACTCLASSES",
     # controlled vocabularies (the only legal values for the enum-ish fields)
     "EVENTS",
     "SURFACES",
@@ -222,8 +233,17 @@ _REGISTRATIONS: tuple[FactRegistration, ...] = (
         "localization",
         producer="v1r_brief",
         target_decision="which file to open",
-        earliest_event=EVENT_TASK_START,
-        deliver_by=EVENT_TASK_START,          # §1: task_start
+        # T0->T2 re-slot (2026-07-12, design C1): the localization DECISION ("which file to
+        # open") is made at D2/post-search, so the HONEST declared boundary is search_result,
+        # NOT the T0 task_start self-cert. This unblocks the reactive ranked-localization
+        # producer (gateway._produce_ranked_localization): under GT_REGISTRY_ENFORCE a
+        # search-fired localization envelope now routes DELIVER (cur=search==want) instead of
+        # EXPIRED_LATE (cur=search > task_start). trace_frame (aliased to this class) is
+        # UNAFFECTED — its own _EVIDENCE_TYPE_DELIVER_BY=failure_obs override + reactive status
+        # win. The T0 baked brief tag is NOT registry-routed (gt_agent._substrate_brief reads
+        # brief.txt directly), so this data change does not disturb the baked-brief delivery.
+        earliest_event=EVENT_SEARCH_RESULT,
+        deliver_by=EVENT_SEARCH_RESULT,       # §1 re-slot: task_start -> search_result (D2)
         surface="brief",
         native_renderer="ranked-list",
         max_dose="small",                     # §1: small
@@ -382,6 +402,14 @@ _EVIDENCE_TYPE_ALIASES: dict[str, str] = {
     # patch_delta signature/registration facts answer "must callers/registrations change"
     "signature_mismatch": "signature_delta",
     "companion_surface": "signature_delta",
+    # SM-2b (2026-07-11): the CROSS-LANGUAGE gateway caller-contract break. It answers the
+    # caller_contract DECISION ("how to modify a fn": preserve/update the call sites) so it
+    # aliases to ``caller_contract`` — but it is produced by the graph-based gateway producer
+    # on the EDIT event (not contract_map's PRE-EDIT file_view), so its boundary is overridden
+    # to ``edit_result`` in ``_EVIDENCE_TYPE_DELIVER_BY`` (the trace_frame pattern: alias by
+    # DECISION, override by TIMING). This is the honest §26.4 replacement for the legacy
+    # l3.contract/l3b.evidence caller-break that patch_delta (ast-only) cannot produce.
+    "caller_break": "caller_contract",
     # companion-file + new-file/integration facts
     "cochange_partner": "cochange_prior",
     "new_file_destination": "newfile_precedent",
@@ -524,3 +552,251 @@ def all_fact_classes() -> tuple[str, ...]:
     — no set-iteration order leaks in). The canonical enumeration of the model-facing fact
     universe."""
     return tuple(sorted(REGISTRY))
+
+
+# --------------------------------------------------------------------------- #
+# EXECUTABLE REGISTRY — SM-0 Super-Mode spine (2026-07-11).
+#
+# BEFORE this block the registry was DESCRIPTIVE: the delivery kernel read only
+# :func:`renderable` (a membership boolean); every registration's ``deliver_by`` /
+# ``native_renderer`` / ``freshness_deps`` was STORED and never consumed, and the Gateway
+# duplicated freshness in a parallel hardcoded table that could silently diverge. These
+# accessors make the registration EXECUTABLE so the kernel can enforce, per fact class:
+#   * the DECLARED delivery boundary (``required_event`` — the firing event must match it),
+#   * the DECLARED native renderer (``required_renderer`` — a renderer-less class is dropped),
+#   * the SINGLE-SOURCE freshness surfaces (``freshness_surfaces`` — one owner, not a copy).
+# All gated in the Gateway behind ``GT_REGISTRY_ENFORCE``; this module is a pure declaration.
+# --------------------------------------------------------------------------- #
+
+# A few FINER evidence_types deliver at a boundary DIFFERENT from their coarse §1 canonical
+# class, because :data:`_EVIDENCE_TYPE_ALIASES` maps by DECISION, not by TIMING. ``trace_frame``
+# answers the localization DECISION ("which file to open") so it aliases to ``localization`` —
+# but a stack-frame localizer is delivered REACTIVELY at a failure/error OBSERVATION, NOT at
+# the ``task_start`` brief boundary of the v1r ``localization`` class. Recording the real
+# boundary here (fix the DECLARATION, not the producer) is what lets enforcement keep the
+# genuinely-correct ``trace_frame`` producer green while still catching a truly wrong-event
+# fact. Keyed by evidence_type (or its ``base:suffix`` base); overrides BOTH earliest+deliver_by.
+_EVIDENCE_TYPE_DELIVER_BY: dict[str, str] = {
+    "trace_frame": EVENT_FAILURE_OBS,
+    # SM-2b: the gateway ``caller_break`` aliases to ``caller_contract`` (deliver_by file_view,
+    # PRE-EDIT — contract_map's boundary) but is produced by the graph-based gateway producer
+    # ON the edit (post-signature-change), so its real last-useful boundary is ``edit_result``
+    # (the callers must be updated in response to THIS edit). Overriding it here keeps
+    # GT_REGISTRY_ENFORCE from EXPIRING a genuinely on-time edit-boundary caller-break while
+    # still catching a truly wrong-event fact — exactly the trace_frame precedent above.
+    "caller_break": EVENT_EDIT_RESULT,
+}
+
+# Observation-REACTIVE evidence types: produced FROM the current observation's OWN content (a
+# stack trace in the output) and delivered AT that observation. They have no single fixed
+# lifecycle boundary — the trace may ride a test, a command (`other`), an edit, or a view
+# observation — so the firing event is on-time BY CONSTRUCTION and the DEFER/EXPIRED_LATE
+# boundary check does NOT apply (only freshness still gates). This is precisely why
+# ``trace_frame`` must NOT be pinned to its canonical ``localization`` task_start boundary:
+# it is a reactive failure-observation localizer, not a step-0 brief.
+_REACTIVE_EVIDENCE_TYPES: frozenset[str] = frozenset({"trace_frame"})
+
+
+def registration_for(evidence_type: str) -> "FactRegistration | None":
+    """The :class:`FactRegistration` for a SHIPPED ``evidence_type`` — resolving it directly,
+    via :data:`_EVIDENCE_TYPE_ALIASES`, or via a dynamic ``base:suffix`` form (the SAME
+    resolution :func:`renderable` uses), or ``None`` when it resolves to no registered class.
+    The executable counterpart of :func:`registration` (which is STRICT — literal §1 keys only)."""
+    canon = _canonical_fact_class(evidence_type)
+    return REGISTRY.get(canon) if canon is not None else None
+
+
+def required_event(evidence_type: str) -> str | None:
+    """The LAST-useful delivery boundary (``deliver_by``, a fine :data:`EVENTS` name) for a
+    shipped ``evidence_type``, or ``None`` when unregistered. Honors the per-evidence-type
+    boundary override (:data:`_EVIDENCE_TYPE_DELIVER_BY`) so a finer type whose real boundary
+    differs from its canonical class reports its OWN boundary."""
+    reg = registration_for(evidence_type)
+    if reg is None:
+        return None
+    et = (evidence_type or "").strip()
+    return (
+        _EVIDENCE_TYPE_DELIVER_BY.get(et)
+        or _EVIDENCE_TYPE_DELIVER_BY.get(_base_fact_class(et))
+        or reg.deliver_by
+    )
+
+
+def earliest_event_for(evidence_type: str) -> str | None:
+    """The EARLIEST boundary a shipped ``evidence_type`` may deliver at (``earliest_event``),
+    or ``None`` unregistered. Honors the same per-type override as :func:`required_event`
+    (earliest == deliver_by for every §1 class and for the overrides)."""
+    reg = registration_for(evidence_type)
+    if reg is None:
+        return None
+    et = (evidence_type or "").strip()
+    return (
+        _EVIDENCE_TYPE_DELIVER_BY.get(et)
+        or _EVIDENCE_TYPE_DELIVER_BY.get(_base_fact_class(et))
+        or reg.earliest_event
+    )
+
+
+def is_reactive(evidence_type: str) -> bool:
+    """True iff ``evidence_type`` is observation-REACTIVE (produced from and delivered at the
+    current observation, with no fixed lifecycle boundary — e.g. ``trace_frame``). Enforcement
+    treats such a fact as on-time at its firing event (boundary check inapplicable; freshness
+    still applies)."""
+    et = (evidence_type or "").strip()
+    return et in _REACTIVE_EVIDENCE_TYPES or _base_fact_class(et) in _REACTIVE_EVIDENCE_TYPES
+
+
+def required_renderer(evidence_type: str) -> str | None:
+    """The DECLARED native renderer (a :data:`RENDERERS` name) for a shipped ``evidence_type``,
+    or ``None`` when it resolves to no registered class. A registered class ALWAYS has a
+    renderer (import-time :func:`_self_check` enforces ``native_renderer`` ∈ RENDERERS), so a
+    ``None`` here means truly-unregistered — the enforcement drops it correct-or-quiet."""
+    reg = registration_for(evidence_type)
+    return reg.native_renderer if reg is not None else None
+
+
+# --------------------------------------------------------------------------- #
+# FRESHNESS — the SINGLE SOURCE OF TRUTH for per-evidence-type graph-surface dependencies.
+#
+# Freshness is genuinely PER-EVIDENCE-TYPE (finer than the 11 canonical classes): four
+# gateway evidence_types share the canonical class ``def_partition`` yet ``body_concept``
+# additionally depends on the body-FTS surface while its siblings do not, so collapsing to
+# the canonical class would LOSE that distinction. This table (formerly the Gateway's private
+# ``_FACTCLASS_FRESHNESS_SURFACES``, relocated here so there is ONE owner) is the operational
+# truth; :func:`_self_check_executable` ties it back to the coarse §1 ``freshness_deps`` so it
+# can no longer SILENTLY diverge. Tuple ORDER is load-bearing (the Gateway hashes the surfaces
+# in order) — do not reorder.
+FRESHNESS_SURFACES: dict[str, tuple[str, ...]] = {
+    "def_ref_partition": ("nodes", "edges"),
+    "name_fold": ("nodes", "edges"),
+    "wrong_surface": ("nodes", "edges"),
+    "trace_frame": ("nodes", "edges"),
+    "signature_mismatch": ("nodes", "edges"),
+    "companion_surface": ("nodes", "edges"),
+    "cochange_partner": ("nodes", "edges", "cochanges"),
+    # SM-2b: the caller-break reads ONLY the CALLS graph (function/method nodes + CALLS edges)
+    # to count FACT-tier cross-file callers of the edited symbol — it does NOT read the
+    # per-symbol ``properties`` surface (a documented narrowing of caller_contract's canonical
+    # deps below), so a properties-only reindex must not stale it.
+    "caller_break": ("nodes", "edges"),
+    "body_concept": ("nodes", "edges", "content_fts"),
+    "new_file_destination": ("nodes", "edges", "closure"),
+    "missing_role": ("nodes", "edges", "closure"),
+}
+
+# PATCH-bound classes: freshness is the working-tree PATCH, not any GRAPH surface (the
+# registry ``freshness_deps`` name is ``patch_rev``). Produced AND delivered on the same
+# event, so a graph change must never falsely stale them -> empty ``valid_until``.
+PATCH_BOUND_FACTCLASSES: frozenset[str] = frozenset({"covering_verdict"})
+
+# The physical DB sub-revision surfaces (``subrev_<surface>``) a freshness token may key on.
+_KNOWN_DB_SURFACES: frozenset[str] = frozenset(
+    {"nodes", "edges", "content_fts", "closure", "cochanges", "properties"}
+)
+
+# Translation: a registry ``freshness_deps`` dep-name -> the DB ``subrev_<surface>`` name it
+# corresponds to (``None`` = a NON-graph dep: the patch/edit/episode/issue/graph composite,
+# which has no per-surface sub-revision). Kept NEXT TO the registry so the coarse §1 deps and
+# the operational surfaces cannot drift apart unnoticed (:func:`_self_check_executable`).
+_DEP_TO_DB_SURFACE: dict[str, str | None] = {
+    "nodes": "nodes",
+    "edges": "edges",
+    "edges_rev": "edges",
+    "content_rev": "content_fts",
+    "props_rev": "properties",
+    "cochange_rev": "cochanges",
+    "closure_rev": "closure",
+    "patch_rev": None,
+    "graph_rev": None,
+    "edit_rev": None,
+    "episode_state": None,
+    "issue": None,
+}
+
+# Documented NARROWINGS: a finer evidence_type may legitimately DROP a canonical graph dep.
+# ``trace_frame`` resolves ``file:line`` from nodes/edges only — it does no body search, so
+# ``content_fts`` (a dep of its canonical ``localization`` class) is NOT a trace dep. Any
+# UNdocumented drop of a canonical graph dep by an operational surface trips the cross-check.
+_SURFACE_NARROWINGS: dict[str, frozenset[str]] = {
+    "trace_frame": frozenset({"content_fts"}),
+    # SM-2b: the gateway caller-break derives its "N callers in M files" purely from the CALLS
+    # graph (nodes + edges); it never reads the per-symbol ``properties`` surface that its
+    # canonical ``caller_contract`` class (contract_map, which DOES render property facts)
+    # depends on. Documenting the drop keeps the cross-check honest instead of tripping it.
+    "caller_break": frozenset({"properties"}),
+}
+
+
+def registry_graph_surfaces(evidence_type: str) -> tuple[str, ...]:
+    """The DB graph surfaces DERIVED from the canonical class's registry ``freshness_deps``
+    (translated via :data:`_DEP_TO_DB_SURFACE`, dropping the non-graph deps). The COARSE §1
+    view of a fact's freshness — used by the cross-check to keep the operational
+    :data:`FRESHNESS_SURFACES` honest, not by the live freshness computation."""
+    reg = registration_for(evidence_type)
+    if reg is None:
+        return ()
+    out: list[str] = []
+    for dep in reg.freshness_deps:
+        surf = _DEP_TO_DB_SURFACE.get(dep, dep)  # unknown dep -> itself (surfaces loudly)
+        if surf and surf not in out:
+            out.append(surf)
+    return tuple(out)
+
+
+def is_patch_bound(evidence_type: str) -> bool:
+    """True iff ``evidence_type`` (or its ``base:suffix`` base) is a PATCH-bound class whose
+    freshness is the working-tree patch, not any graph surface."""
+    et = (evidence_type or "").strip()
+    return et in PATCH_BOUND_FACTCLASSES or _base_fact_class(et) in PATCH_BOUND_FACTCLASSES
+
+
+def freshness_surfaces(evidence_type: str) -> tuple[str, ...] | None:
+    """The SINGLE-SOURCE per-evidence-type DB graph surfaces whose ``subrev_<surface>`` a fact
+    of this type depends on, or ``None`` when the type is unmapped (the caller then fails SAFE
+    to the whole-graph composite — over-conservative, never stale). A ``base:suffix`` form
+    (``missing_role:handler``) resolves to its base. Patch-bound classes return ``None`` here
+    (the caller checks :func:`is_patch_bound` first and never reaches this)."""
+    et = (evidence_type or "").strip()
+    if not et:
+        return None
+    return FRESHNESS_SURFACES.get(et) or FRESHNESS_SURFACES.get(_base_fact_class(et))
+
+
+# --------------------------------------------------------------------------- #
+# import-time cross-check for the executable structures — ties the operational tables back
+# to the registry so a future edit that makes them DIVERGE fails LOUD at import.
+# --------------------------------------------------------------------------- #
+def _self_check_executable() -> None:
+    # every per-type freshness key must resolve to a registered class, list only KNOWN DB
+    # surfaces, be non-empty, and NOT also be patch-bound.
+    for et, surfaces in FRESHNESS_SURFACES.items():
+        if registration_for(et) is None:
+            raise ValueError(f"fact_registry: FRESHNESS_SURFACES key {et!r} resolves to no class")
+        if is_patch_bound(et):
+            raise ValueError(f"fact_registry: {et!r} is both patch-bound and graph-freshness-mapped")
+        if not surfaces or not all(s in _KNOWN_DB_SURFACES for s in surfaces):
+            raise ValueError(f"fact_registry: FRESHNESS_SURFACES[{et!r}] has an unknown/empty surface")
+        # the operational surfaces MUST cover the canonical class's graph deps, minus any
+        # DOCUMENTED narrowing — a silent DROP of a canonical dep (drift) fails here.
+        canonical = set(registry_graph_surfaces(et)) - _SURFACE_NARROWINGS.get(et, frozenset())
+        missing = canonical - set(surfaces)
+        if missing:
+            raise ValueError(
+                f"fact_registry: FRESHNESS_SURFACES[{et!r}]={surfaces} silently drops "
+                f"canonical graph dep(s) {sorted(missing)} (document a narrowing or fix the table)"
+            )
+    # every patch-bound class must DECLARE patch freshness in the registry (ties the Gateway's
+    # patch-boundness to the §1 ``freshness_deps`` — not a free-floating literal).
+    for pb in PATCH_BOUND_FACTCLASSES:
+        reg = registration_for(pb)
+        if reg is None or "patch_rev" not in reg.freshness_deps:
+            raise ValueError(f"fact_registry: patch-bound {pb!r} lacks a patch_rev registry dep")
+    # every per-type boundary override must name a real event and resolve to a real class.
+    for et, ev in _EVIDENCE_TYPE_DELIVER_BY.items():
+        if ev not in EVENTS:
+            raise ValueError(f"fact_registry: boundary override {et!r} -> {ev!r} not in EVENTS")
+        if registration_for(et) is None:
+            raise ValueError(f"fact_registry: boundary override key {et!r} resolves to no class")
+
+
+_self_check_executable()

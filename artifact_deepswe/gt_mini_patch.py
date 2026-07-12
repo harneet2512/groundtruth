@@ -209,10 +209,16 @@ except Exception as _e:  # noqa: BLE001
             self.probe_ledger: dict = {}
             self.delivered_dedup: set = set()
             self.obligations = None
+            # SM-9c: the cross-session learned-policy snapshot (PRESERVED across reset).
+            self.xsession_policy: dict = {}
+            # SM-10 Item D2: the per-attempt read-set (viewed/greped/edited targets).
+            self.read_targets: set = set()
         def reset_attempt(self) -> None:
             self.probe_ledger.clear()
             self.delivered_dedup.clear()
             self.obligations = None
+            self.read_targets.clear()  # SM-10 Item D2: per-attempt read-set re-acquires
+            # SM-9c: xsession_policy is a per-run INPUT, NOT cleared per attempt.
 
 try:
     from groundtruth.runtime.verification_horizon import (
@@ -2160,6 +2166,51 @@ def _norm_fp(file_path: str) -> str:
     return p.lstrip("/")
 
 
+# SM-10 Item D2 (2026-07-12): a path-shaped command token — a `/`-containing token carrying a
+# dotted file suffix (``src/x.py``, ``pkg/mod.go``). NOT a bare dir (``src/``) or a bare word.
+_RE_CMD_PATH_TOKEN = re.compile(r"[\w][\w./\\+\-]*[/\\][\w./\\+\-]*\.[A-Za-z0-9_]+")
+
+
+def _command_path_targets(cmd: str) -> "set[str]":
+    """The repo-relative FILE paths the agent EXPLICITLY named in a command (``grep pat
+    src/x.py``, ``cat pkg/mod.py``) — the "greped/opened a specific file" read-set signal a
+    bare repo-wide grep (no file arg) does NOT trip. Path-shaped tokens only, normalized to the
+    graph frame via :func:`_norm_fp`. Leak-safe by construction (PATHS only, from the agent's
+    OWN command — never a hidden grader target). Bounded to the command string; empty for a
+    command with no file arg (correct-or-quiet), so a repo-wide grep never over-suppresses a
+    localization fact. SM-10 Item D2 read-set seed."""
+    out: "set[str]" = set()
+    for tok in _RE_CMD_PATH_TOKEN.findall(cmd or ""):
+        n = _norm_fp(tok)
+        if n:
+            out.add(n)
+    return out
+
+
+def _seed_read_targets(read_targets: "set[str] | None", kkind: "str | None",
+                       kf: "str | None", cmd: str, root: str) -> None:
+    """Seed the per-attempt READ-SET (files the agent ACQUIRED this turn) — SM-10 Item D2.
+
+    On a VIEW / EDIT kind the acquired file is the classifier's file target ``kf``. The
+    command-body path parse (:func:`_command_path_targets`) then adds explicitly-named file
+    args (``grep pat src/x.py``, ``cat a.py b.py``) — the read-set signal a repo-wide grep
+    doesn't trip.
+
+    D2 LIPI RESIDUAL (2026-07-12): the body parse runs over the WHOLE command string, so on an
+    EDIT command it also matches path-shaped tokens inside the heredoc / str_replace PAYLOAD —
+    a file merely MENTIONED in the written code (never opened) would seed the read-set and
+    SUPPRESS a localization fact for a file that was only referenced. On an edit kind the real
+    acquisition IS ``kf`` (seeded above), so the body parse is skipped for ``post_edit``; it
+    runs only on non-edit kinds (view / search / grep name the file they open). Leak-safe
+    (PATHS only, from the agent's OWN command). Correct-or-quiet: no read-set -> no-op."""
+    if read_targets is None:
+        return
+    if kkind in ("post_view", "post_edit") and kf:
+        read_targets.add(_norm_fp(_to_repo_rel(kf, root)))
+    if kkind != "post_edit":
+        read_targets.update(_command_path_targets(cmd or ""))
+
+
 def _resolve_frame(con, rel: str, repo_root: str) -> tuple[str, str]:
     """Map the agent's view path to the GRAPH'S stored frame when they differ.
 
@@ -3506,7 +3557,15 @@ def _search_localize_block(cmd: str, out: str | None = None) -> str:
         _ledger_record(tok, idx, _outcome)
 
     if not sym:
-        return ""  # multi-token / regex / path -> abstain the render (accounted above)
+        # T0->T2 localization RE-SLOT (GO-LIVE, GT_LOC_RESLOT default-OFF). This IS the
+        # post_search ABSTAIN branch: a BROAD / behavior / multi-token / regex grep (exactly
+        # stratum-B — where _search_pattern returns None and the cooperative def-partition
+        # delivers 0 doses). Deliver GT's RANKED localization answer HERE as the lattice's OWN
+        # single dose. The isolation gate (_search_command_isolated) + the probe-token ledger
+        # accounting above ALREADY ran; _loc_reslot_block adds NO _ledger_record (single record)
+        # and no _search_pattern-keyed answered-stamp (sym is None -> the D-4 delivery stamp
+        # skips). Off / spent / no-rows / any fault -> "" == today's abstain (byte-identical).
+        return _loc_reslot_block()  # multi-token/regex/path: RE-SLOT dose or "" (accounted above)
 
     db = _db_path()
     if not db or not os.path.isfile(db):
@@ -3549,6 +3608,68 @@ def _search_localize_block(cmd: str, out: str | None = None) -> str:
     # so a block Lane-A suppresses (cross-lane / content-hash dedup) never leaves a
     # phantom 'answered' stamp for bytes the agent never saw. The out=None PIN path is
     # unchanged — it keeps its own mark via _direct_def_block(...).
+    return block
+
+
+# --------------------------------------------------------------------------- #
+# T0->T2 localization RE-SLOT — the GO-LIVE half (GT_LOC_RESLOT, default-OFF).
+#
+# The OFFLINE ranked-localization producer (gateway._produce_ranked_localization, wired into
+# gateway.augment on KIND_SEARCH) is EXCLUDED on the LIVE mini-seam: _gateway_search_excluded()
+# returns True for EVERY search turn whenever the post_search lattice is on (dose-law mutual
+# exclusion — the lattice owns the ONE shared probe-ledger record), so the Gateway never fires
+# that producer live. This re-homes GT's RANKED localization ANSWER onto the lattice's OWN
+# ABSTAIN branch: a broad/behavior/multi-token/regex grep (stratum-B, where the def-partition
+# delivers nothing) gets the top-N ranked ``path:line:sym`` rows as the lattice's single dose.
+# The cooperative def-partition still owns every targeted bare-symbol grep (zero displacement).
+# --------------------------------------------------------------------------- #
+_loc_reslot_delivered = False  # once-per-attempt latch (F3 reset law: clears in _reset_*)
+
+
+def _loc_reslot_on() -> bool:
+    """GT_LOC_RESLOT flag — SINGLE-SOURCED from ``gateway._loc_reslot_on`` (do NOT re-invent the
+    env contract). Import try-wrapped; the gateway is import-absent only when the whole product
+    package failed to ship in-container, in which case mirror its EXACT semantics
+    (unset/0/false/no/off -> off). ``_GT_BASELINE`` is checked by the caller."""
+    try:
+        from groundtruth.runtime.gateway import _loc_reslot_on as _g
+        return _g()
+    except Exception:  # noqa: BLE001 — gateway absent -> mirror the exact env contract
+        return os.environ.get("GT_LOC_RESLOT", "").strip().lower() not in (
+            "", "0", "false", "no", "off")
+
+
+def _loc_reslot_block() -> str:
+    """GT's RANKED localization ANSWER as the post_search lattice's single dose (T0->T2 GO-LIVE).
+    Called ONLY from ``_search_localize_block``'s ABSTAIN branch (a non-bare-symbol grep). Builds
+    a minimal ``GatewayState`` over the SAME ``_EPISODE`` the (live-excluded) Gateway path uses,
+    so ``_ranked_localization_rows`` — episode-MEMOIZED — runs ``localize()`` ONCE per attempt and
+    the two planes share the one answer. Renders the rows via ``render_ranked_list_native`` (grep
+    ``path:line:sym`` grammar, hedge-free, test-row firewall). Once-per-attempt latch: the answer
+    is issue-fixed, so it delivers ONCE (non-re-acquisition — after delivery the agent HAS the
+    list); a 2nd broad grep in the same attempt -> "".
+
+    Correct-or-quiet: baseline / flag off / latch spent / package absent / no rows / any fault ->
+    "" (byte-identical abstain). The latch is SPENT only on a non-empty delivered block."""
+    global _loc_reslot_delivered
+    if _GT_BASELINE or _loc_reslot_delivered or not _loc_reslot_on():
+        return ""
+    try:
+        from groundtruth.runtime.gateway import GatewayState as _GatewayState
+        from groundtruth.runtime.gateway import _ranked_localization_rows as _rlr
+        from groundtruth.runtime.native_render import render_ranked_list_native as _rrl
+    except Exception:  # noqa: BLE001 — product package absent in-container -> quiet
+        return ""
+    try:
+        st = _GatewayState(graph_db=_db_path(), repo_root=_root(),
+                           issue_text=_issue_text(), episode=_EPISODE)
+        rows = _rlr(st)  # episode-memoized; SHARED with the (live-excluded) Gateway path
+        block = _rrl(rows) if rows else ""
+    except Exception:  # noqa: BLE001 — a localizer / render fault degrades to no delivery
+        return ""
+    if not block or not block.strip():
+        return ""  # correct-or-quiet: no signal-bearing row -> byte-identical abstain
+    _loc_reslot_delivered = True  # SPEND the once-per-attempt latch at production
     return block
 
 
@@ -4168,6 +4289,10 @@ def _evidence(cmd: str) -> str:
     if not ev:
         return ""
     _seen.add(key)
+    # SM-5 F (#50): under the global arbiter, attach the rollback that un-burns THIS exact
+    # (kind, rel) latch so a pool LOSER (0 bytes) defers instead of destroying the fact.
+    # Guarded -> byte-identical no-op when GT_GLOBAL_ARBITER is off.
+    _arm_lane_a_rearm("l3b.evidence", lambda k=key: _seen.discard(k))
     return f"\n<gt-evidence kind=\"{kind}\" file=\"{rel}\">\n{ev}\n</gt-evidence>"
 
 
@@ -5627,6 +5752,10 @@ def _reset_oracle_state() -> None:
     # in the next; the other three are telemetry one-shots reset for a clean slate.
     global _ROOT_FALLBACK_ACTIVE, _ROOT_MISS_REPORTED, _gt_oracle_load_reported
     global _l6_probe_emitted
+    # T0->T2 localization RE-SLOT (2026-07-12): the once-per-attempt localization dose latch.
+    # F3 reset law — every producer/latch global clears here so a delivered answer re-arms on an
+    # in-process retry (and a test never leaks a spent latch into the next case).
+    global _loc_reslot_delivered
     # W1b (2026-07-10): route the per-attempt reset through the ONE canonical episode.
     # reset_attempt() clears the OWNED accumulators — INCLUDING probe_ledger and
     # delivered_dedup, i.e. the very objects `_search_seen` / `_oracle_delivered_hashes`
@@ -5642,6 +5771,14 @@ def _reset_oracle_state() -> None:
     global _gt_gateway_chain_head, _gt_gateway_deliveries
     _gt_gateway_chain_head = ""
     _gt_gateway_deliveries = []
+    # SM-4: the episode overlay is per-attempt edit state — clear it so a retry starts on a
+    # fresh slate (a file edited in attempt-1 is not treated as stale in attempt-2).
+    _gt_episode_overlay.clear()
+    # SM-9c: the cross-session store (`_gt_xsession_base` / `_gt_xsession_loaded` /
+    # `_EPISODE.xsession_policy`) is a per-RUN INPUT loaded once at task-start — it is
+    # DELIBERATELY NOT reset here (parity with reset_attempt preserving it): an attempt-2
+    # must still see the same prior-session learning. `_gt_gateway_deliveries` IS cleared
+    # above, so the next attempt's flush re-derives session stats from the frozen base.
     # B-4 (2026-07-10): the cached issue text is per-TASK; clear it so an in-process
     # retry re-reads the (same) artifact and, critically, so a test that set
     # GT_ISSUE_FILE cannot leak its issue text into the next case (test isolation).
@@ -5719,6 +5856,9 @@ def _reset_oracle_state() -> None:
     _seen.clear()
     _contract_seen.clear()
     _consensus_scope.clear()
+    _lane_a_rearm_pending.clear()  # SM-5 F (#50): per-attempt Lane-A rollback registry
+                                   # (F3 reset law: every producer/latch global clears here;
+                                   # empty when GT_GLOBAL_ARBITER is off -> byte-identical)
     _search_seen.clear()  # F2: post_search Listen-Lattice LEDGER (fire-once latch +
                           # per-stem probe/outcome history) must reset per attempt
                           # (in-process pier retry) — else attempt-2 greps go mute.
@@ -5756,6 +5896,20 @@ def _reset_oracle_state() -> None:
     _horizon_urgent_fired = False
     _horizon_pivot_fired = False
     _horizon_gate_fire_count = 0
+    _covering_exec_fired_syms.clear()  # SM-10 Item C: per-symbol covering-exec latch resets
+                                       # per attempt (empty when GT_VERIFY_EXECUTE off ->
+                                       # byte-identical). F3 reset law: every latch clears here.
+    _covering_exec_pending["syms"].clear()  # SM-10 C-1: per-turn re-arm record resets per attempt
+    _covering_exec_pending["advisory"] = False
+    _loc_reslot_delivered = False  # T0->T2 re-slot: once-per-attempt localization dose latch
+                                   # re-arms (F3 reset law). Byte-identical when GT_LOC_RESLOT off
+                                   # (never spent). Also drop the episode-MEMOIZED ranked-loc rows
+                                   # so an in-process retry (and cross-case test reuse of _EPISODE)
+                                   # recomputes over the CURRENT graph, never a stale answer.
+    try:
+        _EPISODE._gt_ranked_loc_rows = None
+    except Exception:  # noqa: BLE001 — a slotted episode can't cache; recompute is correct
+        pass
     _ROOT_FALLBACK_ACTIVE = False   # A9/A6: root-unknown flag (gates _snippet_attests)
     _ROOT_MISS_REPORTED = False     # A9/A6: root-missing telemetry one-shot
     _gt_oracle_load_reported = False  # A5/A6: oracle-load-failure telemetry one-shot
@@ -5942,6 +6096,10 @@ def _unexercised_clause_candidate() -> tuple[float, str] | None:
     if vec in _unexercised_emitted:
         return None
     _unexercised_emitted.add(vec)
+    # SM-5 F (#50): under the global arbiter, attach the rollback that un-burns THIS
+    # status-vector emission so a pool LOSER (0 bytes) defers instead of destroying the
+    # unexercised-clause block. Guarded -> byte-identical no-op when the arbiter is off.
+    _arm_lane_a_rearm("obligation.unexercised", lambda v=vec: _unexercised_emitted.discard(v))
     return (0.9, block)
 
 
@@ -6210,6 +6368,10 @@ _SEV_CONTRACT = 3
 _SEV_STUCK = 2
 _SEV_SCOPE = 2
 _SEV_CODEMAP = 1
+# SM-10 (2026-07-12): the typed recovery nudge is the LADDER FLOOR — it defers to every
+# higher-signal producer (contract/obligation/verify/stuck/loop) and only wins the <=1
+# dose when it is the sole candidate (or nothing higher fired). "Rank 10": lowest tier.
+_SEV_RECOVERY = 1
 
 
 # ---------------------------------------------------------------------------
@@ -6897,6 +7059,30 @@ _horizon_urgent_fired = False
 _horizon_pivot_fired = False
 _horizon_gate_fire_count = 0
 _HORIZON_GATE_CAP = 3  # max fires in GATE band (persistent_until_met cap)
+# SM-10 Item C (2026-07-12): the EXECUTED covering-RED is DECOUPLED from the once-per-task
+# risk-advisory latch (`_horizon_advisory_fired`). It is now driven by an INDEPENDENT
+# producer (`_executed_covering_candidate`) that runs the repo's OWN covering test for each
+# DISTINCT edited symbol whose covering FILE exists, so a RED on a LOW-fan-in edit or on a
+# 2nd distinct-symbol edit (after the advisory latch is spent) still reaches its decision
+# point. This PER-SYMBOL latch is the re-arm axis: a symbol is covering-executed at most once
+# until it is RE-EDITED (the post_edit handler `difference_update`s the freshly-edited
+# tokens, so a 2nd edit to the SAME symbol re-arms). Cost-bounded: at most one covering run
+# per distinct-edit-generation, reusing the existing per-file/total budgets. Empty (never
+# touched) when GT_VERIFY_EXECUTE is off -> byte-identical.
+_covering_exec_fired_syms: "set[str]" = set()
+# SM-10 C-1 (2026-07-12): a PER-TURN record of what THIS turn's executed covering-RED candidate
+# consumed, so the gate-loss re-arm (`_rearm_latches`) restores EXACTLY the right latch. The
+# `verify.horizon.executed` kind is emitted by TWO producers with DIFFERENT latch consumption —
+# the risk/advisory path (also burns the once-per-task `_horizon_advisory_fired` dose) and the
+# INDEPENDENT `_executed_covering_candidate` (burns only `_covering_exec_fired_syms`). Keyed on
+# the kind alone `_rearm_latches` could not tell them apart: it re-armed the advisory latch for a
+# producer that never consumed it (re-opening a spent dose + a redundant covering re-execution)
+# AND left the real per-symbol latch burned (destroying the flagship RED). This record makes the
+# re-arm EXACT: ``syms`` is difference_updated back OUT of `_covering_exec_fired_syms`
+# (deferred-not-destroyed, the SM-5-F law); ``advisory`` re-arms `_horizon_advisory_fired` ONLY
+# when the RISK path was the source. A DICT (mutated in place) so no global decl is needed at a
+# write site. Reset per turn; empty/False when GT_VERIFY_EXECUTE is off -> byte-identical.
+_covering_exec_pending: dict = {"syms": set(), "advisory": False}
 # Observed EDIT->TEST cycle spans (for dynamic V estimation — Stage 4: V is
 # the agent's OWN observed pace, "25 is the DEFAULT, not the RULE"). A cycle
 # opens at the first source edit after the last observed test result and
@@ -7206,6 +7392,154 @@ def _executed_covering_emission(covering: list[dict],
         return None
 
 
+def _executed_covering_candidate() -> "tuple[float, str, str, bool] | None":
+    """SM-10 Item C (2026-07-12): the EXECUTED covering-RED, DECOUPLED from the once-per-task
+    risk-advisory latch. The flagship execution-fact — the repo's OWN covering test run in the
+    agent's env, delivered as the Format-D native RED (ladder class ``executed_world_fact``,
+    rank 70) — was previously reachable ONLY inside ``_verification_horizon_candidate``'s risk
+    block, gated by ``_risk_trigger`` (a high-fan-in >=0.5 edited-but-untested obligation
+    symbol) AND the unspent once-per-task ``_horizon_advisory_fired`` latch. So a covering test
+    that REDs on a LOW-fan-in edit, or on a SECOND distinct-symbol edit after the latch was
+    spent, NEVER ran — the execution-fact missed its own decision point (T4/T5).
+
+    This INDEPENDENT producer runs the covering test for each DISTINCT edited symbol that has a
+    covering FILE and has not been covering-executed since its last edit (the per-symbol
+    ``_covering_exec_fired_syms`` latch, re-armed on re-edit), regardless of fan-in or the
+    advisory latch. It returns the SAME ``verify.horizon.executed`` candidate the risk path
+    returns, so it rides the identical <=1-dose ladder arbitration + leak-scrub (covering-RED is
+    rank 70, wins when present). The risk path marks the SAME per-symbol latch first, so a risk
+    turn never double-executes.
+
+    Flag-gated ``GT_VERIFY_EXECUTE``: byte-identical AND zero work when off (early return before
+    any state touch). Correct-or-quiet: no edited symbol / no covering file / the agent already
+    ran a test this turn / no attributed fail -> None. Cost-bounded: it runs at most once per
+    distinct-edit-generation of a symbol, reusing the existing per-file/total budgets inside
+    ``_executed_covering_emission``."""
+    global _covering_exec_fired_syms
+    if os.environ.get("GT_VERIFY_EXECUTE") != "1" or _GT_BASELINE:
+        return None
+    if not _oracle_edited_rels:
+        return None
+    if _last_test_step == _action_count:  # agent already ran a test this turn (redundant)
+        return None
+    fresh = {s for s in _edited_symbols_for_selection()
+             if s and s not in _covering_exec_fired_syms}
+    if not fresh:
+        return None
+    covering = _covering_tests_for_symbols(fresh)
+    # Latch the freshly-considered symbols regardless of the outcome so a symbol with no
+    # covering file (or a green run) is not re-queried/re-run every subsequent turn; a
+    # re-edit re-arms via the post_edit `difference_update`.
+    _covering_exec_fired_syms |= fresh
+    if not covering:
+        return None
+    # ITEM-2 (verification-plan divergence, 2026-07-12): when GT_VERIFICATION_PLAN is on the
+    # RISK path (`_verification_horizon_candidate`) already routes this exact execution through
+    # the PROGRESSIVE plan (syntax -> unit -> …) instead of the single covering lever; this
+    # INDEPENDENT producer must use the SAME plan machinery so both verify producers agree.
+    # The plan's unit rung IS the covering run (no double execution), scoped to the `fresh`
+    # symbols. Off -> the exact single-lever path below (byte-identical).
+    if os.environ.get("GT_VERIFICATION_PLAN") == "1":
+        block = _verification_plan_emission(_oracle_edited_rels, fresh)
+    else:
+        block = _executed_covering_emission(covering, _oracle_edited_rels, fresh)
+    if not block:
+        return None
+    # SM-10 C-1: record the symbols THIS candidate burned so a gate LOSS re-arms EXACTLY them
+    # out of `_covering_exec_fired_syms` (deferred-not-destroyed). ``advisory`` stays False — the
+    # independent producer NEVER consumes the once-per-task `_horizon_advisory_fired` dose, so its
+    # loss must NOT re-open that latch (the C-1 defect).
+    _covering_exec_pending["syms"].update(fresh)
+    return (float(_SEV_NUDGE_VERIFY), "verify.horizon.executed", block, True)
+
+
+def _first_syntax_error(unit_or_syntax_detail: dict) -> "dict | None":
+    """The first per-file ``check_edit_syntax`` result carrying a ``syntax_error`` verdict
+    inside a VerificationPlan syntax rung's ``detail`` (``{"per_file": [...]}``), or None."""
+    if not isinstance(unit_or_syntax_detail, dict):
+        return None
+    for r in unit_or_syntax_detail.get("per_file") or ():
+        if isinstance(r, dict) and r.get("verdict") == "syntax_error":
+            return r
+    return None
+
+
+def _verification_plan_emission(edited_rels: "set[str] | list[str]",
+                                edited_syms: "set[str] | list[str]") -> str | None:
+    """SM-3 VerificationPlan (GT_VERIFICATION_PLAN, default OFF byte-identical): the
+    PROGRESSIVE verification ladder — syntax -> focused covering (unit) -> integration —
+    REPLACING the single covering lever at this verify boundary. Each rung runs through its
+    OWN runner in the agent's env (the SAME ``_build_env_executor()`` covering already
+    threads), ``green()`` classifies each rung, and the FIRST attributed-RED rung's NATIVE
+    failure is delivered (syntax -> the compiler diagnostic; unit -> the covering
+    transcript) — leak-scrubbed, ZERO ``<gt-*>``. build/type/integration REDs are HOST-side
+    only this wave (no leak-safe generic renderer). Feeds ``_last_covering_result`` /
+    ``_last_test_outcome_failed`` from the EXECUTED unit verdict (submit-gate parity).
+
+    Fail-closed + byte-identical when the flag is off (early return). Suppressed if the
+    agent already ran a test this turn (mirror of ``_executed_covering_emission``).
+    Correct-or-quiet on any error; an unattributed RED never false-delivers (invariant ②)."""
+    global _last_test_outcome_failed, _last_covering_result
+    if os.environ.get("GT_VERIFICATION_PLAN") != "1" or _GT_BASELINE:
+        return None
+    if _last_test_step == _action_count:  # agent already ran a test this turn
+        return None
+    try:
+        from groundtruth.runtime.native_render import (
+            contains_gt_tag, contains_test_identity, render_covering_failure_native,
+            render_syntax_error_native)
+        from groundtruth.runtime.verification_plan import (
+            build_verification_plan, green, run_plan)
+        syms = sorted(edited_syms) if edited_syms else []
+        if not syms:
+            return None
+        root = _root()
+        plan = build_verification_plan(
+            _db_path(), root, syms, obligations=sorted(_obligation_symbol_set()))
+        # F4 (SM-3 LIPI): execute ONLY the DELIVERABLE rungs this wave — syntax + unit.
+        # The integration rung's RED is host-only/discarded, and its execute_test_command
+        # does NOT honor run_plan's budget (its own default is 120s), so running it is pure
+        # discarded compute (≤120s/turn) that CONFOUNDS a paired efficacy run vs the
+        # covering-only path. Drop the non-deliverable rungs before execution; SM-5 decides
+        # whether the whole-suite rung ever gets a model-facing plane.
+        from dataclasses import replace as _dc_replace
+        plan = _dc_replace(
+            plan, checks=tuple(c for c in plan.checks if c.kind in ("syntax", "unit")))
+        results = run_plan(plan, executor=_build_env_executor(), repo_root=root,
+                           per_file_timeout=20, total_budget_seconds=35)
+        # Capture the unit rung verdict for the submit gate (parity with the covering path).
+        for res in results:
+            if res.kind == "unit":
+                _last_covering_result = (dict(res.detail)
+                                         if isinstance(res.detail, dict) else {})
+                _last_covering_result.setdefault("verdict", res.verdict)
+                break
+        # PROGRESSIVE delivery: the FIRST attributed RED in plan order (syntax, unit, …).
+        for res in results:
+            if green(res, plan).status != "red":
+                continue
+            block = None
+            if res.kind == "syntax":
+                serr = _first_syntax_error(res.detail)
+                if serr is not None:
+                    block = render_syntax_error_native(serr)
+            elif res.kind == "unit":
+                if not res.attribution_satisfied:
+                    continue  # unattributed red must NOT false-deliver (invariant ②)
+                cres = res.detail if isinstance(res.detail, dict) else {"verdict": "fail"}
+                _last_test_outcome_failed = True  # executed verdict drives the verify axis
+                block = render_covering_failure_native(
+                    cres, edited_symbol=syms[0],
+                    test_files=cres.get("ran") or list(res.covered_entities))
+            else:
+                continue  # build/type/integration RED -> HOST-side only this wave
+            if block and not contains_gt_tag(block) and not contains_test_identity(block):
+                return block
+        return None
+    except Exception:  # noqa: BLE001 -- correct-or-quiet; never destabilize the loop
+        return None
+
+
 def _edit_syntax_candidate(rel: str) -> "tuple[float, str, str, bool] | None":
     """E — at-edit SYNTAX validation (SWE-agent linter-guard parity, +3.0pp NeurIPS
     2024; ~51.7% of edits carry a catchable error). Run the repo's OWN parse-only
@@ -7240,6 +7574,150 @@ def _edit_syntax_candidate(rel: str) -> "tuple[float, str, str, bool] | None":
     if not block:
         return None
     return (float(_SEV_NUDGE_VERIFY), "edit.syntax", block, True)
+
+
+# =====================================================================
+# SM-3 HypothesisLedger activation (GT_HYPOTHESIS, default-OFF byte-identical).
+# The typed recovery layer (`classify_all`) reads the shared `_EPISODE` + a per-turn
+# `LedgerEvent` and NAMES the recovery situation (env-failure / hypothesis-falsified /
+# same-failure-unchanged / no-discriminating-evidence / …). It emits NO narration of its
+# own: only the winning DISPOSITION -> a SHORT leak-free imperative reaches the model, and
+# only when a Lane-B PIVOT fires (the proven-consumed SHORT·ACTIVE·at-the-decision-point
+# recipe). Off / no classification -> the generic pivot text, byte-identical.
+# =====================================================================
+_gt_hypothesis_recovery: "tuple[str, str] | None" = None  # (disposition, imperative)|None
+_HYPOTHESIS_IMPERATIVE_CACHE: "dict[str, str] | None" = None
+
+
+def _hypothesis_imperative_map() -> "dict[str, str]":
+    """disposition (recovery-candidate CLASS) -> a SHORT ACTIVE imperative. Built once from
+    the engine's OWN disposition constants (a rename there is caught by the SM-3 test).
+    Correct-or-quiet: engine absent -> empty map -> no recovery framing ever."""
+    global _HYPOTHESIS_IMPERATIVE_CACHE
+    if _HYPOTHESIS_IMPERATIVE_CACHE is None:
+        try:
+            from groundtruth.runtime.hypothesis_ledger import (
+                D_ALTERNATE_SURFACE_CANDIDATE, D_HYPOTHESIS_FALSIFIED,
+                D_REFRESH_BEFORE_ADVICE, D_REPAIR_NOT_SOURCE,
+                D_REQUEST_NEW_HYPOTHESIS)
+            _HYPOTHESIS_IMPERATIVE_CACHE = {
+                D_REPAIR_NOT_SOURCE:
+                    "Repair the environment (a missing tool or dependency) before "
+                    "editing source again.",
+                D_HYPOTHESIS_FALSIFIED:
+                    "The last edit did not change the failing result — form a new "
+                    "hypothesis before editing again.",
+                D_REQUEST_NEW_HYPOTHESIS:
+                    "The same failure repeated with no code change — change the "
+                    "approach, do not just re-run.",
+                D_ALTERNATE_SURFACE_CANDIDATE:
+                    "Repeated probes returned the same result — try a different "
+                    "surface to gather new evidence.",
+                D_REFRESH_BEFORE_ADVICE:
+                    "The graph facts are stale — refresh them before acting on "
+                    "earlier guidance.",
+                # D_NOT_A_LOOP is deliberately absent (progress -> no recovery).
+            }
+        except Exception:  # noqa: BLE001 -- engine absent -> no recovery framing
+            _HYPOTHESIS_IMPERATIVE_CACHE = {}
+    return _HYPOTHESIS_IMPERATIVE_CACHE
+
+
+def _hypothesis_failure_fingerprint(observation: str) -> str:
+    """A deterministic, path/number-scrubbed signature of a FAILING observation (or ""
+    when it shows no failure). HOST-ONLY: used purely as the REPEAT key in `_EPISODE`'s
+    failure memory so the repeat-detection classifiers become live across turns — it is
+    NEVER emitted to the model (a hash, and the model surface is the generic imperative)."""
+    obs = observation or ""
+    _MARK = ("error", "failed", "failure", "exception", "traceback", "assert",
+             "fatal", "not found", "cannot", "no such", "panic")
+    low = obs.lower()
+    if not any(s in low for s in _MARK):
+        return ""
+    import re as _re
+    sig_lines = [ln.strip() for ln in obs.splitlines()
+                 if any(s in ln.lower() for s in _MARK)]
+    if not sig_lines:
+        return ""
+    sig = "\n".join(sig_lines[-8:])
+    sig = _re.sub(r"0x[0-9a-fA-F]+|\d+", "", sig)             # numbers/hex are volatile
+    sig = _re.sub(r"[\w.]*[/\\][\w./\\-]+", "", sig)          # path-ish tokens are volatile
+    sig = " ".join(sig.split())
+    if not sig:
+        return ""
+    return hashlib.sha256(sig.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def _gt_hypothesis_classify_turn(cmd: str, observation: str) -> None:
+    """Run the HypothesisLedger over the shared `_EPISODE` + this turn and SELECT the
+    recovery disposition the Lane-B pivot will frame its steer around. Flag `GT_HYPOTHESIS`
+    (default OFF -> early return, no state touched, byte-identical). Correct-or-quiet: any
+    fault clears the selection. Feeds the shared failure memory AFTER classify so a repeat
+    is detected on the NEXT turn (never the same turn)."""
+    global _gt_hypothesis_recovery
+    _gt_hypothesis_recovery = None
+    if os.environ.get("GT_HYPOTHESIS") != "1" or _GT_BASELINE:
+        return
+    try:
+        from groundtruth.runtime.hypothesis_ledger import LedgerEvent, classify_all
+        fp = _hypothesis_failure_fingerprint(observation)
+        event = LedgerEvent(
+            action_index=_action_count, command=cmd or "",
+            observation=observation or "", probe_stem="",
+            failure_fingerprint=fp, graph_revision="")
+        advisories = classify_all(_EPISODE, event)  # sees PRIOR failure memory
+        if fp:  # feed AFTER classify: this turn's failure is prior-memory next turn.
+            _EPISODE.failure_fingerprints.add(fp)
+            _EPISODE.last_failure_record = {
+                "failure_fingerprint": fp, "action_index": _action_count}
+        imap = _hypothesis_imperative_map()
+        for adv in advisories:  # TRANSITIONS order = fixed priority; first-mapped wins.
+            imp = imap.get(adv.disposition)
+            if imp:
+                _gt_hypothesis_recovery = (adv.disposition, imp)
+                break
+        if advisories:  # HOST-only telemetry (never model-facing); dispositions only.
+            print("[GT_META] hypothesis dispositions=%s recovery=%s"
+                  % (",".join(a.disposition for a in advisories),
+                     _gt_hypothesis_recovery[0] if _gt_hypothesis_recovery else "-"),
+                  file=sys.stderr, flush=True)
+    except Exception:  # noqa: BLE001 -- classification must never break the loop
+        _gt_hypothesis_recovery = None
+
+
+def _recovery_candidate() -> "tuple[float, str, str, bool] | None":
+    """SM-10 recovery-timing DECOUPLE (2026-07-12): an INDEPENDENT recovery-nudge
+    candidate that fires on THIS turn's named recovery disposition — the failure-
+    observation event — NOT only when a Verification-Horizon PIVOT band happens to fire.
+
+    The pivot-passenger path (``_render_verify_emission`` :~7598) reframes its steer FROM
+    ``_gt_hypothesis_recovery`` ONLY when a pivot fires; an agent that is stuck EARLY never
+    reaches the pivot budget zone, so that path computes the disposition and DISCARDS it.
+    This producer delivers the SAME leak-free SHORT imperative (``render_recovery_native``,
+    the proven-consumed SHORT·ACTIVE·at-the-decision-point recipe) at the failure decision
+    point via the SAME <=1-dose gate. Severity is the ladder FLOOR (``_SEV_RECOVERY``), so
+    it defers to every higher producer and only wins when nothing higher fires — the pivot
+    reframe (severity _SEV_OBLIGATION) still wins when a pivot IS present, so the pivot-path
+    behaviour is unchanged.
+
+    Flag GT_HYPOTHESIS (default OFF -> classify never selects a disposition, so
+    ``_gt_hypothesis_recovery`` is None -> None -> byte-identical). ``edit_bound=True``: the
+    trigger IS the failure observation (bound to POST_VIEW/POST_EDIT/TEST_RESULT in the
+    context policy), so it waives the empty-focus relevance suppression like every other
+    event-bound producer. Correct-or-quiet: any fault -> None."""
+    if _GT_BASELINE or os.environ.get("GT_HYPOTHESIS") != "1":
+        return None
+    if not _gt_hypothesis_recovery:
+        return None
+    try:
+        from groundtruth.runtime.native_render import render_recovery_native
+        text = render_recovery_native(
+            _gt_hypothesis_recovery[0], _gt_hypothesis_recovery[1])
+    except Exception:  # noqa: BLE001 -- recovery framing must never break the gate
+        return None
+    if not text:
+        return None
+    return (float(_SEV_RECOVERY), "recovery", text, True)
 
 
 def _verification_horizon_candidate() -> tuple[float, str, str, bool] | None:
@@ -7282,13 +7760,33 @@ def _verification_horizon_candidate() -> tuple[float, str, str, bool] | None:
     if _risk_trigger and not _horizon_advisory_fired and _oracle_edited_rels:
         _horizon_advisory_fired = True
         _rk_cov = _covering_tests_for_symbols(_edited_symbols_for_selection())
+        # SM-10 Item C (2026-07-12): this risk block EXECUTES covering for ALL edited symbols
+        # (via _executed_covering_emission / the VerificationPlan unit rung below). Mark them in
+        # the per-symbol latch so the INDEPENDENT _executed_covering_candidate does NOT re-run
+        # the SAME symbols this turn — one covering execution per symbol per edit-generation.
+        # Guarded by GT_VERIFY_EXECUTE -> the set is untouched when off (byte-identical).
+        if os.environ.get("GT_VERIFY_EXECUTE") == "1" and not _GT_BASELINE:
+            _covering_exec_fired_syms.update(_edited_symbols_for_selection())
+            # SM-10 C-1: record that the RISK path is the source of this turn's executed/advisory
+            # candidate — it burned BOTH the once-per-task `_horizon_advisory_fired` dose AND the
+            # per-symbol latch, so a gate LOSS must re-arm both. The independent producer (below)
+            # leaves ``advisory`` False, so the loss re-arm re-opens the advisory dose ONLY here.
+            _covering_exec_pending["syms"].update(_edited_symbols_for_selection())
+            _covering_exec_pending["advisory"] = True
         # B1 (Fable 2026-07-09): an EXECUTED, attributed covering RED beats an
         # advisory — run the covering test and deliver the Format-D native failure
         # if the edit broke it. Flag-gated: off -> None -> the advisory below runs
         # unchanged (byte-identical). This is the verify-execution upgrade of this
         # exact fire point (V-1/V-3 on the mini seam).
-        _rk_exec = _executed_covering_emission(
-            _rk_cov, _oracle_edited_rels, _edited_symbols_for_selection())
+        # SM-3 VerificationPlan (GT_VERIFICATION_PLAN): the progressive ladder REPLACES the
+        # single covering lever here — the plan's unit rung IS the covering run (no double
+        # execution). Off -> the exact single-lever path below (byte-identical).
+        if os.environ.get("GT_VERIFICATION_PLAN") == "1":
+            _rk_exec = _verification_plan_emission(
+                _oracle_edited_rels, _edited_symbols_for_selection())
+        else:
+            _rk_exec = _executed_covering_emission(
+                _rk_cov, _oracle_edited_rels, _edited_symbols_for_selection())
         if _rk_exec:
             return (float(_SEV_NUDGE_VERIFY), "verify.horizon.executed", _rk_exec, True)
         _rk_block = _render_verify_emission(
@@ -7362,6 +7860,24 @@ def _verification_horizon_candidate() -> tuple[float, str, str, bool] | None:
     block = _render_verify_emission(
         band, _action_count, _GT_STEP_LIMIT, _oracle_edited_rels, covering,
         risk_note=_risk_note)
+
+    # SM-3 HypothesisLedger -> RECOVERY SELECTION (GT_HYPOTHESIS, default OFF byte-
+    # identical): when a PIVOT fires AND this turn's classification named a recovery
+    # disposition, the Lane-B steer FRAMES its pivot as the classification's SHORT
+    # imperative (leak-free via render_recovery_native — the proven-consumed
+    # SHORT·ACTIVE·at-the-decision-point recipe). The ledger emits NO narration of its own;
+    # only the disposition -> imperative reaches the model. Off / no classification ->
+    # the generic pivot text above is kept unchanged (byte-identical).
+    if (band == "pivot" and os.environ.get("GT_HYPOTHESIS") == "1"
+            and _gt_hypothesis_recovery):
+        try:
+            from groundtruth.runtime.native_render import render_recovery_native
+            _rec = render_recovery_native(
+                _gt_hypothesis_recovery[0], _gt_hypothesis_recovery[1])
+            if _rec:
+                block = _rec  # steer's pivot chosen FROM the classification
+        except Exception:  # noqa: BLE001 -- recovery framing must never break the pivot
+            pass
 
     if not block:
         return None  # S-2: band latch NOT consumed on an empty render — stays armed
@@ -7662,6 +8178,31 @@ def _consensus_scope_block(rel: str) -> str:
     # Latch only on a REAL non-empty production (an empty block never consumes the
     # one-shot, mirroring the gate's "consume the one-shot only on a real emit").
     _seen.add(key)
+    # SM-5 F (#50): under the global arbiter, attach the rollback that un-burns THIS exact
+    # ("consensus_scope", n) latch so a pool LOSER (0 bytes) defers instead of destroying
+    # the scope map. Guarded -> byte-identical no-op when GT_GLOBAL_ARBITER is off.
+    _arm_lane_a_rearm("consensus.scope_map", lambda k=key: _seen.discard(k))
+
+    # FORM A/B (scope surface, 2026-07-12 — Task #63): under GT_SCOPE_NATIVE=1 the SAME scope
+    # facts (this file + its graph-connected neighbours — SAME trigger, SAME `_seen` latch,
+    # SAME neighbour set) render as the model's NATIVE compiler `note:` constraint grammar via
+    # the BUILT-but-formerly-dark native_render.render_scope_constraint_native (WIRED, NOT
+    # rebuilt) instead of the GT-voice <gt-scope> tag — mirroring the post_search tag->native
+    # FORM arm (GT_POST_SEARCH_NATIVE / _fmt_def_facts_native). The flag is read HERE, AFTER
+    # every firing guard + the latch burn + the rollback arm, so ONLY the delivered FORM
+    # changes: the firing occasions, the once-per-file latch, and the loser-rearm are all
+    # byte-identical to the tag arm. DECOUPLED per surface (D-8 law: a scope FORM flip must
+    # never contaminate the post_search / gateway FORM arms). Default OFF = the EXACT legacy
+    # tag below (byte-identical-off). The native form ADDITIONALLY firewalls a test-path
+    # neighbour through the renderer's own _is_test_path/_final_scrub belts; an all-test-path
+    # scope -> "" -> Lane A drops it (correct-or-quiet). NAMED SEAM (flag reachability): to
+    # take effect inside the eval CONTAINER on a live run, GT_SCOPE_NATIVE must join
+    # rl_profile._PROFILE_1_MEMBERS (the FORM-arm family: GT_POST_SEARCH_NATIVE /
+    # GT_GATEWAY_NATIVE / GT_STEER_NATIVE) AND be forwarded in gt_integration/gt_ae_block.sh
+    # (both owned by a concurrent coder this session — NOT edited here). In-process/local it is
+    # a plain env read, so the FORM A/B is fully testable now without that container wiring.
+    if os.environ.get("GT_SCOPE_NATIVE") == "1":
+        return _consensus_scope_native(neigh)
 
     def _short(p: str) -> str:
         r = (p or "").replace("\\", "/")
@@ -7676,6 +8217,38 @@ def _consensus_scope_block(rel: str) -> str:
         + "\nThese files are graph-connected in scope; GT has not confirmed a single "
         "primary target — confirm the edit target with grep.\n</gt-scope>"
     )
+
+
+def _consensus_scope_native(neigh: list[str]) -> str:
+    """FORM A/B B-arm (``GT_SCOPE_NATIVE``): the SAME graph-connected scope neighbours the
+    <gt-scope> tag lists, rendered as the model's NATIVE compiler ``note:`` constraint grammar
+    — one ``<file>: note: your change must also update this file`` line per neighbour, NO
+    ``<gt-*>`` tag and NO GT-voice hedge trailer — so the scope map rides the compiler-note
+    continuation channel the RL policy already reads, in-distribution (the post_search
+    tag->native pattern applied to the scope surface).
+
+    Reuses the BUILT-but-formerly-dark ``native_render.render_scope_constraint_native`` (WIRED,
+    NOT rebuilt): the renderer firewalls a test-path target (``_is_test_path``) and scrubs any
+    residual identity (``_final_scrub``), so a test-path neighbour renders "" and is dropped
+    from the join — the native form is STRICTLY leak-safer than the tag (which had no per-line
+    test firewall). The SELF file is the anchor the agent is ALREADY editing (not a
+    must-ALSO-touch), so it is deliberately NOT rendered — only the graph-connected neighbours
+    are the actionable constraint. Same neighbour ORDER + ``[:4]`` cap as the tag (same facts,
+    native form). Correct-or-quiet: every neighbour firewalled/blank -> "" (Lane A drops the
+    empty block via its ``if not text: continue`` skip).
+
+    Import-isolated: ``native_render`` absent in-container -> "" (no native form). This path is
+    only reached with the flag explicitly on, so the default (tag) arm never imports it."""
+    try:
+        from groundtruth.runtime.native_render import render_scope_constraint_native
+    except Exception:  # noqa: BLE001 — native_render absent -> no native form (correct-or-quiet)
+        return ""
+    lines: list[str] = []
+    for fp in neigh[:4]:
+        note = render_scope_constraint_native(fp)
+        if note:
+            lines.append(note)
+    return "\n".join(lines)
 
 
 def _verified_scope_component(edited: set[str]) -> set[str]:
@@ -8199,6 +8772,12 @@ def _dcc_block(kkind: str | None, kf: str, cmd: str, orig_out: str, lane_a) -> s
         # the named files so a later distinct footprint never re-names them.
         _dcc_latch.add(fp_key)
         _dcc_enqueued_files.update(clean.keys())
+        # SM-5 F (#50): under the global arbiter, attach the rollback that un-burns THIS
+        # footprint latch + drops the files enqueued this turn, so a pool LOSER (0 bytes)
+        # defers instead of destroying the concern set. Guarded -> byte-identical no-op off.
+        _arm_lane_a_rearm(
+            "concern.consensus",
+            lambda fp=fp_key, enq=frozenset(clean.keys()): _dcc_latch_rollback(fp, enq))
         return block
     except Exception:  # noqa: BLE001 — the whole producer is isolated
         try:
@@ -8397,6 +8976,131 @@ def _gt_gateway_on() -> bool:
         return False
     return os.environ.get("GT_GATEWAY", "").strip().lower() not in (
         "", "0", "false", "no", "off")
+
+
+# ---------------------------------------------------------------------------
+# Wave-2 (2026-07-11, LIPI-bounce-corrected): PER-CLASS Lane-A retirement under the
+# Gateway profile, gated on a PROVEN LIVE REPLACEMENT — REPLACES the Wave-1 BLANKET
+# `and not _gt_gateway_on()` guard, which retired three tagged classes by ASSUMPTION
+# (a DELETION, not a migration; §26.4 ADMIT/CUT forbids retiring a class before its
+# equivalence is PROVEN).
+#
+# A legacy tagged Lane-A class is retired when GT_GATEWAY is ON *only* when it is EITHER
+# migrated to a canonical Gateway producer that DELIVERS in the shipped profile, OR
+# genuinely INTERNAL (a ranking prior with NO native form). A class with no live
+# replacement is KEEP-legacy — it keeps delivering under BOTH flags.
+#
+#   l3.cochange  -> RETIRE (INTERNAL). Co-change has NO external native form (SM-1
+#     native_render.render_cochange_native -> ""); it is a ranking prior, never a
+#     delivered fact — and the Gateway no longer ships it either (gateway.
+#     _produce_patch_delta drops the cochange_partner delivery). Doctrine-correct.
+#
+# SM-2b (2026-07-11): l3.contract + l3b.evidence -> RETIRE, but ONLY behind a per-turn
+# REPLACEMENT-DELIVERS tripwire (`replacement_ready`). The blocker the SM-2 LIPI named — no
+# cross-language Gateway caller_contract producer — is now BUILT:
+#   * gateway._produce_caller_contract reads the tree-sitter CALLS graph (nodes + CALLS
+#     edges), so it delivers the "N caller(s) in M file(s); update the call sites" break on a
+#     Go/Rust/TS/JS edit — the EXACT case patch_delta.analyze_patch_delta (ast-only,
+#     _SCAN_EXTS={.py,.pyi}) CANNOT (the SM-2 LIPI's proof);
+#   * it emits `caller_break`, which aliases to the registered `caller_contract` class and is
+#     delivered at the `edit_result` boundary (fact_registry override), gated on GT_GATEWAY —
+#     so the replacement is LIVE exactly when the retirement fires;
+#   * the retirement is gated PER-EDIT on _gt_gateway_caller_contract_ready(): the legacy
+#     retires ONLY on a turn where the producer PROVABLY delivers an equivalent caller-break.
+#     On a language/case it cannot (no sig-change, no cross-file caller, bridges off), the
+#     producer is silent -> the tripwire is False -> the LEGACY KEEPS DELIVERING. This is the
+#     honest §26.4 migration (equivalence-before-retirement), structurally enforced — never
+#     the Wave-1 blanket deletion.
+# consensus.scope is KEEP-legacy (hedged scope-orientation, no registered `scope` class).
+# INTERNAL retirees — a ranking prior with NO model-facing native form (the Gateway delivers
+# NOTHING for them). Retired under GT_GATEWAY unconditionally (there is nothing to replace).
+_GATEWAY_RETIRED_INTERNAL: frozenset = frozenset({"l3.cochange"})
+# REPLACEMENT-GATED retirees — a live cross-language caller-break whose Gateway replacement
+# (the SM-2b graph-based ``caller_contract`` producer, gateway._produce_caller_contract) is
+# now BUILT. Retired under GT_GATEWAY *only on a turn where the replacement PROVABLY DELIVERS*
+# an equivalent caller-break for THIS edit (the ``replacement_ready`` tripwire). On a
+# language/case where the Gateway produces nothing, the legacy KEEPS delivering — §26.4
+# equivalence-before-retirement, structurally enforced (never a blind deletion).
+_GATEWAY_RETIRED_WITH_REPLACEMENT: frozenset = frozenset({"l3.contract", "l3b.evidence"})
+# The union (the full set of classes that MAY retire under the Gateway) — single-sourced so a
+# membership/mutation test reads one name. ``consensus.scope_map`` is deliberately NOT here
+# (no registered ``scope`` class; hedged orientation stays KEEP-legacy).
+_GATEWAY_RETIRED_LANE_A: frozenset = (
+    _GATEWAY_RETIRED_INTERNAL | _GATEWAY_RETIRED_WITH_REPLACEMENT)
+
+
+def _lane_a_retired_under_gateway(kind: str, *, replacement_ready: bool = False) -> bool:
+    """True iff tagged Lane-A class ``kind`` is retired on THIS turn because the Gateway
+    delivers an EQUIVALENT (or the class is genuinely INTERNAL).
+
+    GT_GATEWAY OFF (or baseline) -> always False -> Lane-A delivers EXACTLY as the pre-Wave-1
+    tree (byte-identical). ON:
+      * an INTERNAL class (``l3.cochange`` — no native form) is ALWAYS retired (nothing to
+        replace; the Gateway ships nothing for it);
+      * a REPLACEMENT-GATED class (``l3.contract`` / ``l3b.evidence``) is retired ONLY when
+        ``replacement_ready`` (the SM-2b caller_contract producer provably delivers an
+        equivalent caller-break for THIS edit — computed once per turn by
+        :func:`_gt_gateway_caller_contract_ready`). Producer silent -> KEEP legacy;
+      * everything else (``consensus.scope_map`` …) is NEVER retired.
+
+    Pure predicate (single-sourced sets, mutation-testable): the ``replacement_ready`` gate is
+    the STRUCTURAL enforcement of §26.4 — a live cross-language caller-break can never be
+    deleted on a case where its Gateway replacement produces nothing."""
+    if not _gt_gateway_on():
+        return False
+    if kind in _GATEWAY_RETIRED_INTERNAL:
+        return True
+    if kind in _GATEWAY_RETIRED_WITH_REPLACEMENT:
+        return bool(replacement_ready)
+    return False
+
+
+def _gt_gateway_caller_contract_ready(action, cmd) -> bool:
+    """SM-2b replacement-delivers TRIPWIRE (§26.4 equivalence-before-retirement). True iff the
+    Gateway's CROSS-LANGUAGE ``caller_contract`` producer WOULD DELIVER a caller-break for THIS
+    edit — the ONLY condition under which the legacy ``l3.contract`` / ``l3b.evidence``
+    caller-break may retire. Runs the producer directly (deterministic) and requires the
+    envelope be non-empty, leak-clean, and ON-TIME (``route_delivery == ROUTE_DELIVER``); a
+    dedup-suppressed fact counts as ready (it already reached the agent, so suppressing the
+    legacy is not a deletion).
+
+    GT_GATEWAY off / edit-bridges off / non-edit turn / no detectable signature change / no
+    FACT-tier cross-file caller -> False -> the legacy KEEPS delivering (byte-identical; never
+    a §26.4 deletion). Correct-or-quiet: any fault -> False (fail toward KEEP-legacy)."""
+    if not _gt_gateway_on():
+        return False
+    try:
+        from groundtruth.runtime.gateway import (
+            GatewayState as _GS,
+            ROUTE_DELIVER as _RD,
+            ToolEvent as _TE,
+            _produce_caller_contract as _pcc,
+            route_delivery as _rd,
+        )
+        from groundtruth.runtime.native_render import contains_test_identity as _cti
+    except Exception:  # noqa: BLE001 — gateway/native_render absent in-container
+        return False
+    try:
+        _changed, _eba = _gateway_edit_bridges(action, cmd)
+        if not _eba:
+            return False
+        ev = _TE(kind="edit", command=cmd or "", output="",
+                 changed_files=tuple(_changed or ()), action_index=_action_count,
+                 edit_before_after=_eba)
+        st = _GS(graph_db=_db_path(), repo_root=_root(),
+                 issue_text=_issue_text(), episode=_EPISODE,
+                 episode_overlay=_gt_episode_overlay)
+        for env in _pcc(ev, st):
+            if not env:
+                continue
+            # leak law: a caller-break carrying a test identity can never authorize retirement.
+            if _cti("\n".join(env.payload)):
+                continue
+            if _rd(env, ev, st) == _RD:
+                return True
+    except Exception:  # noqa: BLE001 — the tripwire must never break the delivery path
+        return False
+    return False
 
 
 def _gt_gateway_append(out: dict, delta: str) -> None:
@@ -8793,7 +9497,266 @@ def _gateway_edit_bridges(action, cmd) -> "tuple[tuple[str, ...], dict | None]":
     return changed, {rel: (before, after)}
 
 
-def _gt_gateway_deliver(action, out, cmd, orig_out) -> None:
+# =====================================================================
+# SM-3 EditOverlay activation (GT_EDIT_OVERLAY, default-OFF byte-identical).
+# The transactional edit primitive (snapshot -> apply -> reindex -> diagnostics_delta ->
+# commit/rollback) + PURE stale-envelope invalidation. SM-3 wires the TRANSACTIONAL APPLY
+# + STALE-MARKING only; the overlay's reindex is deliberately forced UNAVAILABLE (bogus
+# gt_index_bin) so graph.db is NEVER rebuilt here — the live-graph-view freshness
+# composition is SM-4. Host-side signal only (the model-facing NEW-syntax-error signal is
+# GT_EDIT_CHECK's; the overlay's diagnostic-delta is host telemetry to avoid a double
+# surface). When the pre-edit content is reconstructable (a structured str_replace/create)
+# the file is briefly reverted so the diagnostic-delta is a REAL differential, then the
+# transaction re-applies + commits the edit; a bulletproof finally GUARANTEES the agent's
+# edit is never lost. Off / non-structured / unreconstructable -> safe no-op.
+# =====================================================================
+_SM3_NO_REINDEX_BIN = "\x00gt-index-sm3-no-reindex"  # never resolvable -> reindex GRAPH_STALE
+_gt_overlay_last: "dict | None" = None  # HOST record of the last OverlayResult + stale count
+# SM-4 (2026-07-11): the persistent per-run EPISODE OVERLAY — ``{norm_file_path: entry}``
+# built per structured edit (edit_overlay.build_episode_overlay_entry). ``entry['changed']``
+# marks that the certified base graph.db's recorded structure for the file no longer matches
+# the agent's CURRENT content, so the Gateway drops a base-read fact about it. Persists across
+# turns (lives here beside _EPISODE, NOT on the per-turn GatewayState) and is passed IN to the
+# GatewayState each turn. Cleared per attempt in _reset_oracle_state. Empty -> byte-identical.
+_gt_episode_overlay: dict = {}
+
+# ---------------------------------------------------------------------------
+# SM-9c (2026-07-11): CROSS-SESSION MEMORY — the durable per-repo causal-consumption
+# ledger wired into the mini fact pipeline. READ once at task-start into an EXPLICIT,
+# VERSIONED input (`_EPISODE.xsession_policy`); WRITE the receipt ladder (per fact-class
+# delivered/consumed) back into the store at each gateway turn. The Gateway LEARNS the
+# delivery policy from it (suppress a never-consumed class, rank-up a consumed one).
+#
+# DETERMINISM-GIVEN-INPUTS: `_gt_xsession_base` is the FROZEN task-start snapshot — the
+# merge base for every write, so repeated flushes from the SAME base + delivery set are
+# idempotent (never double-count) and the store FILE is a deterministic function of the
+# delivered-fact set. `_EPISODE.xsession_policy` (the READ input) is the base's class_stats
+# and is NEVER mutated mid-run, so delivery output is a deterministic function of it.
+# PRESERVED across an attempt reset (a per-run input, not a per-attempt accumulator).
+# GRACEFUL: no-op unless GT_XSESSION_MEMORY is on AND $GT_XSESSION_DIR is set -> flag-off is
+# byte-identical (nothing loaded, nothing threaded, nothing written).
+# ---------------------------------------------------------------------------
+_gt_xsession_base: "object | None" = None   # frozen XSessionStore loaded at task-start
+_gt_xsession_loaded: bool = False           # one-shot load latch (PRESERVED across reset)
+
+
+def _xsession_mem_on() -> bool:
+    """SM-9c master flag GT_XSESSION_MEMORY (default OFF -> byte-identical)."""
+    return os.environ.get("GT_XSESSION_MEMORY", "").strip().lower() not in (
+        "", "0", "false", "no", "off"
+    )
+
+
+def _xsession_ensure_loaded() -> None:
+    """READ (task-start): load this repo's durable causal-consumption store ONCE into
+    `_gt_xsession_base` (the frozen merge base) and thread its `class_stats` onto
+    `_EPISODE.xsession_policy` (the EXPLICIT, DECLARED delivery-policy input the Gateway
+    reads). Keyed by repo identity (`project_memory._repo_identity` — the one source of
+    truth). Idempotent (one-shot latch); correct-or-quiet on any fault. No-op when the flag
+    is off or `$GT_XSESSION_DIR` is unset -> `_EPISODE.xsession_policy` stays empty ->
+    byte-identical delivery."""
+    global _gt_xsession_base, _gt_xsession_loaded
+    if _gt_xsession_loaded:
+        return
+    _gt_xsession_loaded = True
+    if not _xsession_mem_on():
+        return
+    base_dir = os.environ.get("GT_XSESSION_DIR", "")
+    if not base_dir:
+        return
+    try:
+        # dotted `from groundtruth.<pkg>.<mod> import` form so the injection import-coverage
+        # guard REQUIRES both modules to ship (shipped in gt_agent._PRODUCT_PACKAGE_MODULES).
+        from pathlib import Path as _Path
+        from groundtruth.runtime.xsession_memory import (
+            load as _xm_load,
+            repo_key as _xm_repo_key,
+            store_path_for_key as _xm_store_path_for_key,
+        )
+        from groundtruth.runtime.project_memory import _repo_identity
+        ident = _repo_identity(_Path(_root()))
+        key = _xm_repo_key(ident)
+        store = _xm_load(_xm_store_path_for_key(key, base_dir), repo_key=key)
+        _gt_xsession_base = store
+        # The READ input: a plain snapshot dict the Gateway policy consults. Frozen for the
+        # run (never mutated mid-run), so delivery output is deterministic given it.
+        _EPISODE.xsession_policy = {c: (int(p[0]), int(p[1]))
+                                    for c, p in dict(store.class_stats).items()}
+    except Exception:  # noqa: BLE001 — engine/store absent: preserve behaviour
+        pass
+
+
+def _xsession_flush() -> None:
+    """WRITE (run-end / per-gateway-turn): promote the receipt ladder into the durable
+    store. Derive THIS session's per-class (delivered, consumed) from the sealed deliveries
+    (`_gt_gateway_deliveries`; consumed == receipt_state advanced past 'delivered'), MERGE
+    with the frozen task-start base, and write the file deterministically.
+
+    IDEMPOTENT + DETERMINISTIC: recomputes session stats from the FULL delivery snapshot and
+    merges from the FROZEN base every call, so calling it every turn converges to the run-end
+    state without double-counting. Correct-or-quiet; no-op when the flag/dir is unset."""
+    if not _xsession_mem_on():
+        return
+    base_dir = os.environ.get("GT_XSESSION_DIR", "")
+    if not base_dir:
+        return
+    try:
+        # dotted `from groundtruth.<pkg>.<mod> import` form so the injection import-coverage
+        # guard REQUIRES the module to ship (shipped in gt_agent._PRODUCT_PACKAGE_MODULES).
+        from pathlib import Path as _Path
+        from groundtruth.runtime.xsession_memory import (
+            CONSUMED_STATES as _XM_CONSUMED_STATES,
+            XSessionStore as _XMStore,
+            canonical_class as _xm_canonical_class,
+            dump as _xm_dump,
+            merge as _xm_merge,
+            repo_key as _xm_repo_key,
+            sanitize_class as _xm_sanitize_class,
+            store_path_for_key as _xm_store_path_for_key,
+        )
+        base = _gt_xsession_base
+        session_stats: dict = {}
+        for env in list(_gt_gateway_deliveries):
+            canon = _xm_sanitize_class(
+                _xm_canonical_class(getattr(env, "evidence_type", "") or "") or "")
+            if canon is None:
+                continue
+            consumed = 1 if getattr(env, "receipt_state", "") in _XM_CONSUMED_STATES else 0
+            d, c = session_stats.get(canon, (0, 0))
+            session_stats[canon] = (d + 1, c + consumed)
+        key = getattr(base, "repo_key", "") if base is not None else ""
+        if not key:
+            from groundtruth.runtime.project_memory import _repo_identity
+            key = _xm_repo_key(_repo_identity(_Path(_root())))
+        if not key:
+            return
+        base = base if base is not None else _XMStore(repo_key=key)
+        merged = _xm_merge(base, session_stats)
+        _xm_dump(merged, _xm_store_path_for_key(key, base_dir))
+    except Exception:  # noqa: BLE001 — persistence must NEVER break delivery
+        pass
+
+
+def _edit_overlay_before_after(action) -> "tuple[str, str | None, str] | None":
+    """``(rel, before, after)`` for the agent's just-applied edit — ``after`` is the file's
+    CURRENT on-disk content; ``before`` is the reconstructed pre-edit content (None for a
+    create, or when a str_replace cannot be trustworthily reversed). None when the action is
+    not a source post_edit / path unresolvable / file unreadable-or-huge. Mirrors the
+    reconstruction the gateway edit bridge uses, but independent of GT_GATEWAY_EDIT_BRIDGES."""
+    try:
+        kind, path = _classify_action(action)
+    except Exception:  # noqa: BLE001
+        return None
+    if kind != "post_edit" or not path:
+        return None
+    root = _root()
+    rel = _to_repo_rel(path, root)
+    if not rel:
+        return None
+    abs_p = path if os.path.isabs(path) else os.path.join(root, rel)
+    try:
+        if not (os.path.isfile(abs_p) and os.path.getsize(abs_p) <= 1_000_000):
+            return None
+        after = open(abs_p, encoding="utf-8", errors="replace").read()
+    except Exception:  # noqa: BLE001
+        return None
+    before: "str | None" = None
+    if isinstance(action, dict):
+        _v = action.get("command")
+        verb = _v.strip().lower() if isinstance(_v, str) else ""
+        old_str = _struct_field(action, ("old_str", "old_string"))
+        new_str = _struct_field(action, ("new_str", "new_string"))
+        if verb == "create":
+            before = None
+        elif old_str is not None and new_str and after.count(new_str) == 1:
+            before = after.replace(new_str, old_str, 1)
+    return (rel, before, after)
+
+
+def _gt_edit_overlay_transaction(action) -> None:
+    """SM-3 EditOverlay: run the transactional apply over the agent's just-applied edit +
+    mark stale gateway envelopes. Flag GT_EDIT_OVERLAY (default OFF -> byte-identical no-op).
+    NO graph rebuild (reindex forced unavailable). Correct-or-quiet; never raises; the
+    agent's edit is NEVER lost (bulletproof finally)."""
+    global _gt_overlay_last
+    if os.environ.get("GT_EDIT_OVERLAY") != "1" or _GT_BASELINE:
+        return
+    info = _edit_overlay_before_after(action)
+    if info is None:
+        return
+    rel, before, after = info
+    abs_p = os.path.join(_root(), rel)
+    # SM-3 F5: capture the agent's BYTE-EXACT content for the write + finally-restore. `after`
+    # (str, read text-mode with errors="replace") is kept for before-reconstruction / signature
+    # analysis, but writing IT back through apply/restore collapses CRLF->LF and maps every
+    # non-UTF-8 byte to U+FFFD -> the committed file diverges from what the agent wrote
+    # (strictly worse than GT-off). Read raw bytes and write/restore those verbatim.
+    try:
+        with open(abs_p, "rb") as _fh:
+            after_bytes = _fh.read()
+    except Exception:  # noqa: BLE001
+        after_bytes = after.encode("utf-8", errors="replace")
+    reverted = False
+    try:
+        from groundtruth.runtime.edit_overlay import (
+            apply_edit_transaction, build_episode_overlay_entry,
+            compose_episode_revision, mark_stale_envelopes)
+        if before is not None and before != after:
+            # ARM THE FINALLY FIRST (SM-3 LIPI F1): set `reverted` BEFORE the write, so a
+            # truncate-then-fault (disk-full/EIO mid-write) still triggers the finally's
+            # restore — otherwise the file is left truncated/EMPTY and GT would corrupt the
+            # agent's edit (strictly worse than GT-off). The finally restores `after`.
+            reverted = True
+            with open(abs_p, "w", encoding="utf-8") as _fh:
+                _fh.write(before)  # brief pre-revert -> a REAL differential baseline
+        result = apply_edit_transaction(
+            _root(), _db_path(), {rel: after_bytes}, executor=None,
+            gt_index_bin=_SM3_NO_REINDEX_BIN)  # no graph.db rebuild (base is ro/immutable)
+        marked = mark_stale_envelopes(_gt_gateway_deliveries, result.post_revision)
+        _stale_n = sum(1 for e in marked if e.get("stale"))
+        # SM-4: build the LIGHTWEIGHT episode overlay for the edited file — re-derive whether
+        # the certified base graph.db's recorded structure for `rel` still matches the agent's
+        # CURRENT content (`after`). O(file), read-only, NO graph rebuild, the ro-mounted base
+        # is never touched. A structurally-changed file is marked `changed` (the
+        # mark_stale_envelopes verdict); on later turns the Gateway's route_delivery drops a
+        # base-read fact about it. Fail-quiet: unknown/db-fault -> not stale. Compose the ONE
+        # current episode revision (base composite + each overlaid file's rev) for provenance.
+        _ov_changed = False
+        _ov_episode_rev = ""
+        try:
+            _ov_entry = build_episode_overlay_entry(_db_path(), rel, after)
+            _gt_episode_overlay[_ov_entry["file"]] = _ov_entry
+            _ov_changed = bool(_ov_entry.get("changed"))
+            _ov_episode_rev = compose_episode_revision(
+                result.post_revision, _gt_episode_overlay)
+        except Exception:  # noqa: BLE001 -- overlay build must never break the turn
+            pass
+        _gt_overlay_last = {"result": result.to_dict(), "stale_marked": _stale_n,
+                            "overlay_changed": _ov_changed, "episode_rev": _ov_episode_rev,
+                            "overlay_files": len(_gt_episode_overlay)}
+        print("[GT_META] edit_overlay committed=%s new_syntax_errors=%d graph=%s "
+              "stale_marked=%d overlay_changed=%s overlay_files=%d"
+              % (result.committed, len(result.diagnostics_delta),
+                 result.capability_states.get("graph", "?"), _stale_n, _ov_changed,
+                 len(_gt_episode_overlay)),
+              file=sys.stderr, flush=True)
+    except Exception:  # noqa: BLE001 -- overlay must never break the loop
+        pass
+    finally:
+        # BULLETPROOF: the agent's edit is NEVER lost -> restore `after` if the on-disk
+        # content is not already it (a rollback / mid-transaction fault).
+        if reverted:
+            try:
+                with open(abs_p, "rb") as _fh:
+                    _cur_bytes = _fh.read()
+                if _cur_bytes != after_bytes:      # SM-3 F5: byte-exact compare + restore
+                    with open(abs_p, "wb") as _fh:
+                        _fh.write(after_bytes)
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _gt_gateway_deliver(action, out, cmd, orig_out, *, pool=None) -> None:
     """THE ONE CALL: complete THIS observation with one gateway.augment() dose.
 
     Pipeline (all pure/adapter except the splice): normalize_event -> augment (the
@@ -8801,10 +9764,21 @@ def _gt_gateway_deliver(action, out, cmd, orig_out) -> None:
     (def facts reuse the mini formatter; else generic tagged/native) -> leak-guard ->
     LAW-8 budget -> BYTE-PRESERVING append -> seal (TITO chain + rendered-bytes hash)
     -> record delivery copy (receipt level 1). Isolated + correct-or-quiet: any fault
-    is swallowed and can NEVER undo the Lane-A/B delivery that already ran."""
+    is swallowed and can NEVER undo the Lane-A/B delivery that already ran.
+
+    SM-5 (2026-07-11): when ``pool`` is a list (``GT_GLOBAL_ARBITER`` on), the gateway
+    still runs its full produce path (receipt promotion, exclusion, augment, its OWN
+    <=1 arbitration, render, leak, budget) but instead of APPENDING it stashes
+    ``(candidate, commit_thunk)`` into ``pool`` — so the ONE global ranked competition
+    (:func:`_global_pool_flush`) decides whether the gateway's fact or a Lane-A/steer
+    fact is the single dose. ``pool is None`` (default / flag off) => the commit runs
+    inline exactly as before (byte-identical)."""
     if not _gt_gateway_on() or not isinstance(out, dict):
         return
     global _gt_gateway_chain_head
+    # SM-9c: READ the cross-session store ONCE (task-start) into _EPISODE.xsession_policy
+    # before the gateway consults it. No-op when GT_XSESSION_MEMORY/$GT_XSESSION_DIR unset.
+    _xsession_ensure_loaded()
     try:
         # dotted `from groundtruth.<pkg>.<mod> import` form so the injection
         # import-coverage guard REQUIRES these to ship (mandate f); shipped in
@@ -8832,6 +9806,11 @@ def _gt_gateway_deliver(action, out, cmd, orig_out) -> None:
         # action; correct-or-quiet -> ((), None) leaves the event identical to the 4-arg call.
         rc = out.get("returncode")
         _changed_files, _edit_before_after = _gateway_edit_bridges(action, cmd)
+        # SM-3 NOTE (2026-07-11): the gateway's `_produce_covering` bridge is LEFT DARK
+        # INTENTIONALLY — covering-RED already ships LIVE via the Lane-B
+        # `_executed_covering_emission` / `_verification_plan_emission` path, so passing a
+        # `covering=` fact into the gateway here would DOUBLE-deliver. Covering stays a
+        # Lane-B fact; SM-5 decides the plane. Do NOT thread covering into normalize_event.
         ev = _ad_normalize(cmd or "", orig_out or "", rc, _action_count,
                            changed_files=_changed_files,
                            edit_before_after=_edit_before_after)
@@ -8881,6 +9860,9 @@ def _gt_gateway_deliver(action, out, cmd, orig_out) -> None:
                         _persist_receipt(_new, kind=_pk, transition=_ns)
             except Exception:  # noqa: BLE001
                 pass
+            # SM-9c WRITE: fold the promoted receipt ladder (per fact-class delivered/
+            # consumed) into the durable per-repo store. Idempotent from the frozen base.
+            _xsession_flush()
         # SEAM DOSE-LAW GUARD (CONFIRMED-1, 2026-07-10) — MUTUAL EXCLUSION, post_search
         # WINS on search turns. The post_search lattice and this Gateway are two delivery
         # planes over the ONE shared ``_EPISODE.probe_ledger``; on a SEARCH turn with the
@@ -8904,7 +9886,12 @@ def _gt_gateway_deliver(action, out, cmd, orig_out) -> None:
             # B-4 (2026-07-10): thread the REAL issue text (baked issue.txt) so the
             # change_surface producer can fire on a truly-absent probe; '' when the
             # artifact is unavailable -> change_surface abstains (byte-identical).
-            issue_text=_issue_text(), episode=_EPISODE)
+            issue_text=_issue_text(), episode=_EPISODE,
+            # SM-4 (2026-07-11): thread the persistent EPISODE OVERLAY so route_delivery can
+            # drop a base-read fact about a file the agent structurally edited (freshness made
+            # REAL). Empty until GT_EDIT_OVERLAY populates it via _gt_edit_overlay_transaction
+            # -> byte-identical when the flag is off (the overlay stays {}).
+            episode_overlay=_gt_episode_overlay)
         winner = _ad_arbitrate(_gw_augment(ev, st))
         if winner is None:
             return
@@ -8945,43 +9932,54 @@ def _gt_gateway_deliver(action, out, cmd, orig_out) -> None:
         # last output line (the T4/L-1a class the lane path already guards). Insert exactly
         # ONE `\n` boundary ONLY when needed — byte-identical when the observation already
         # ends in `\n` (production command output) or the delta already opens with `\n`.
-        _prev = out.get("output") or ""  # the ACTUAL bytes the delta rides on
-        _shipped = _join_lane_output(_prev, delta)[len(_prev):]  # delta, maybe with a leading \n
-        rendered = _shipped.encode("utf-8", "surrogatepass")  # F6: seal what ACTUALLY ships
-        # B-33: SEAL BEFORE APPEND. The seal is the delivery commit — it advances the
-        # chain, stamps the winner's dedup key, and records the receipt. Compute it FIRST;
-        # append the model-facing bytes ONLY after it succeeds, so a seal fault leaves ZERO
-        # model bytes (no orphan delivery whose bytes shipped with no dedup/receipt/chain
-        # record — the seal fault is caught by the outer handler, skipping the append).
-        # F1: augment() only READS the chain, so an arbitration loser / leak-guard / law-8
-        # drop above was never stamped and stays re-offerable (deferred, not destroyed).
-        # B-32/Seam-F3: commit the ACTUAL base observation (out['output'] at append time,
-        # which already holds any Lane-A/Lane-B deltas) — NOT just the clean command output
-        # `orig_out`. The boundary length is BYTE-len (matching the byte-encoded tool output).
-        _tob = _prev.encode("utf-8", "surrogatepass")
-        sealed, _gt_gateway_chain_head = _ad_seal(
-            winner, episode_id=getattr(_EPISODE, "episode_id", ""),
-            event_id=str(_action_count), parent_hash=_gt_gateway_chain_head,
-            rendered_bytes=rendered, renderer_id=("native" if native else "tagged"),
-            tool_output_bytes=_tob,
-            boundary=(str(len(_tob)) + ":" + (winner.evidence_type or "gw")).encode("utf-8"),
-            dedup_chain=_EPISODE.delivered_dedup)
-        _gt_gateway_deliveries.append(sealed)
-        # B-14: persist the sealed envelope (level-1 delivered) durably, so the ladder
-        # survives process exit. After the seal commit, before the byte splice.
-        _persist_receipt(sealed, kind="gateway", transition="delivered")
-        # BYTE-PRESERVING append (AFTER the seal commit): observation verbatim + the
-        # boundary-joined delta (Seam-F6). Still a pure suffix (TITO law 1) — `_gt_gateway_
-        # append` is preserved as the append primitive so the M1 byte-preservation mutation
-        # still bites — and the sealed rendered_bytes == exactly these appended bytes.
-        _gt_gateway_append(out, _shipped)
-        try:
-            _runtime_ledger_record(
-                kind="gateway." + (winner.evidence_type or "fact"),
-                outcome=_ProductSignalOutcome.DELIVERED,
-                chars=len(delta), file_path=winner.target or "")
-        except Exception:  # noqa: BLE001
-            pass
+        def _commit_gateway() -> None:
+            # THE DELIVERY COMMIT (seal -> append -> ledger). Isolated as a closure so SM-5
+            # can DEFER it (stash into the global pool) or run it inline — byte-identical.
+            global _gt_gateway_chain_head
+            _prev = out.get("output") or ""  # the ACTUAL bytes the delta rides on
+            _shipped = _join_lane_output(_prev, delta)[len(_prev):]  # delta, maybe leading \n
+            rendered = _shipped.encode("utf-8", "surrogatepass")  # F6: seal what ACTUALLY ships
+            # B-33: SEAL BEFORE APPEND. The seal is the delivery commit — it advances the
+            # chain, stamps the winner's dedup key, and records the receipt. Compute it FIRST;
+            # append the model-facing bytes ONLY after it succeeds, so a seal fault leaves ZERO
+            # model bytes. F1: augment() only READS the chain, so an arbitration loser /
+            # leak-guard / law-8 drop was never stamped and stays re-offerable. B-32/Seam-F3:
+            # commit the ACTUAL base observation, boundary length = BYTE-len.
+            _tob = _prev.encode("utf-8", "surrogatepass")
+            sealed, _gt_gateway_chain_head = _ad_seal(
+                winner, episode_id=getattr(_EPISODE, "episode_id", ""),
+                event_id=str(_action_count), parent_hash=_gt_gateway_chain_head,
+                rendered_bytes=rendered, renderer_id=("native" if native else "tagged"),
+                tool_output_bytes=_tob,
+                boundary=(str(len(_tob)) + ":" + (winner.evidence_type or "gw")).encode("utf-8"),
+                dedup_chain=_EPISODE.delivered_dedup)
+            _gt_gateway_deliveries.append(sealed)
+            # B-14: persist the sealed envelope (level-1 delivered) durably.
+            _persist_receipt(sealed, kind="gateway", transition="delivered")
+            # SM-9c WRITE: record this fresh delivery (level-1) in the durable per-repo
+            # store so a class delivered on the final turn is captured at least as delivered.
+            _xsession_flush()
+            # BYTE-PRESERVING append (AFTER the seal commit): observation verbatim + the
+            # boundary-joined delta. Still a pure suffix (TITO law 1).
+            _gt_gateway_append(out, _shipped)
+            try:
+                _runtime_ledger_record(
+                    kind="gateway." + (winner.evidence_type or "fact"),
+                    outcome=_ProductSignalOutcome.DELIVERED,
+                    chars=len(delta), file_path=winner.target or "")
+            except Exception:  # noqa: BLE001
+                pass
+        # SM-5: under the global arbiter, STASH the produced gateway candidate + its commit
+        # thunk into the shared pool instead of delivering — the ONE ranked competition
+        # decides. pool None (flag off) -> deliver inline (byte-identical).
+        if pool is not None:
+            # SM-5 2b: thread the REAL event kind (ev.kind = search/view/edit/test/submit)
+            # so the candidate's correct-time repair_support is judged against THIS turn,
+            # not a hardcoded post_edit. `ev` is the normalize_event result in scope here.
+            _global_pool_add_gateway(pool, winner, native, _commit_gateway,
+                                     ev_kind=getattr(ev, "kind", ""))
+            return
+        _commit_gateway()
     except Exception:  # noqa: BLE001 — isolated; must never break the agent loop
         _crash_emit("gateway.augment")
 
@@ -9027,19 +10025,467 @@ def _rearm_latches(lost, *, kkind, kf, krel) -> None:
     if "detect.coherence" in lost and _coherence_last_rel:
         _coherence_fired_files.discard(_coherence_last_rel)
     # Horizon latches consumed at PRODUCTION re-arm on a gate loss (same law).
-    # B1 executed-RED shares the _horizon_advisory_fired latch with its advisory sibling
-    # (set True at the risk-trigger fire BEFORE _executed_covering_emission); re-arm the
-    # SAME latch. _last_test_outcome_failed is a WORLD-FACT, not a dose latch -> untouched.
+    # SM-10 C-1 (2026-07-12): the executed covering-RED is DECOUPLED from the advisory dose
+    # (Item C). `verify.horizon.executed` is now emitted by TWO producers with DIFFERENT latch
+    # consumption — the RISK path (burns `_horizon_advisory_fired` AND `_covering_exec_fired_syms`)
+    # and the INDEPENDENT `_executed_covering_candidate` (burns ONLY `_covering_exec_fired_syms`).
+    # Re-arm EXACTLY what the lost candidate consumed, read from the per-turn `_covering_exec_pending`
+    # record: the advisory dose ONLY when the RISK path was the source; ALWAYS the per-symbol latch
+    # (deferred-not-destroyed — the flagship RED re-competes on the next generation, never destroyed
+    # while paying its ~35-70s execution). `_last_test_outcome_failed` is a WORLD-FACT, not a dose
+    # latch -> untouched.
     if "verify.horizon.advisory" in lost:
+        # the advisory dose is consumed by EVERY advisory producer (risk block / H0 / budget band),
+        # so its re-arm stays UNCONDITIONAL.
         _horizon_advisory_fired = False
+        # SM-10 C-1b (2026-07-12): restore the per-symbol latch ONLY when the RISK block is the
+        # source (advisory=True). The `_covering_exec_pending` record is per-TURN, not per-producer:
+        # on a NON-risk turn a BAND advisory and the INDEPENDENT executed producer can BOTH fire, and
+        # ``syms`` then holds the INDEPENDENT producer's symbols (advisory=False). If the band advisory
+        # LOSES while the executed RED WINS+delivers, an ungated difference_update here would DESTROY
+        # the delivered winner's latch -> a redundant ~35-70s covering re-execution + a duplicate dose
+        # next turn (the C-1b defect). When advisory=False those syms belong to the executed producer,
+        # which manages its OWN re-arm in the executed branch below (and the both-lose case is covered
+        # there unconditionally), so the advisory branch must NOT touch them.
+        if _covering_exec_pending["advisory"]:
+            _covering_exec_fired_syms.difference_update(_covering_exec_pending["syms"])
     if "verify.horizon.executed" in lost:
-        _horizon_advisory_fired = False
+        if _covering_exec_pending["advisory"]:      # RISK-path RED consumed the once-per-task dose
+            _horizon_advisory_fired = False
+        _covering_exec_fired_syms.difference_update(_covering_exec_pending["syms"])
     if "verify.horizon.urgent" in lost:
         _horizon_urgent_fired = False
     if "verify.horizon.pivot" in lost:
         _horizon_pivot_fired = False
     if "verify.horizon.gate" in lost:
         _horizon_gate_fire_count = max(0, _horizon_gate_fire_count - 1)
+
+
+# ---------------------------------------------------------------------------
+# SM-5 (2026-07-11) — the ONE global ranked competition over all delivery planes.
+#
+# Before SM-5 the oracle route shipped GT bytes through THREE independent planes per
+# observation: the always-on Lane-A data plane (uncapped, no arbitration), the Lane-B
+# steer gate (<=1 steer), and the GT_GATEWAY fact plane (<=1 fact). They could each
+# append to the SAME observation on the SAME turn (up to N+1+1 doses) and deduped on
+# THREE different key derivations. SM-5 collapses them into ONE ranked competition:
+# under GT_GLOBAL_ARBITER every plane STASHES its would-be delivery (candidate + a commit
+# THUNK that runs that plane's exact existing delivery) into a per-turn pool, and ONE
+# flush runs global_arbiter.arbitrate -> delivers AT MOST ONE global dose -> logs every
+# loser with its reason. Default-OFF => each plane delivers inline exactly as before
+# (byte-identical). The thunk is the plane's OWN delivery code, so a delivered winner is
+# byte-identical to how that plane would have delivered it standalone.
+# ---------------------------------------------------------------------------
+def _global_arbiter_on() -> bool:
+    """True iff SM-5's single global dose is enabled (GT_GLOBAL_ARBITER) and this is not
+    the baseline arm. A NEW gate (not GT_GATEWAY): the cross-plane collapse changes
+    delivery SEMANTICS (<=1 GLOBAL dose, deferred-not-inline), so it is independently
+    toggleable + default-off, never riding the gateway plane's own on/off. Read at call
+    time so a test/env flip takes effect."""
+    if _GT_BASELINE:
+        return False
+    return os.environ.get("GT_GLOBAL_ARBITER", "").strip().lower() not in (
+        "", "0", "false", "no", "off")
+
+
+# ladder class -> the coarse decision-boundary ordinal (correct-time labeling); the
+# firing event's ordinal is compared to it (current > boundary => REPAIR SUPPORT).
+_GA_CLASS_BOUNDARY: dict = {
+    "executed_world_fact": 4,   # a test/verify observation
+    "edit_violation": 3,        # the edit that broke the file
+    "obligation_violation": 5,  # verify/submit
+    "caller_contract": 3,       # the signature-changing edit
+    "causal_chain": 3,          # the edit
+    "localization": 1,          # a search
+    "recovery": 5,              # verify/submit
+}
+_GA_KKIND_ORDINAL: dict = {"post_search": 1, "post_view": 2, "post_edit": 3}
+# SM-5 finding 2b (2026-07-12): the Gateway classifies its event with the RICHER gateway
+# KIND vocabulary (gateway.classify_command -> search/view/edit/test/submit/other), a
+# SUPERSET of the mini's post_* classify. Project each onto the SAME decision-boundary
+# ordinal scale as _GA_CLASS_BOUNDARY so a gateway fact's correct-time repair_support is
+# judged against the RIGHT turn. THE BUG this fixes: _global_pool_add_gateway hardcoded
+# kkind="post_edit" (=3), so a localization-class gateway fact (def_ref_partition /
+# trace_frame; boundary=1) delivered on a SEARCH or TEST turn was mislabeled
+# repair_support=True (3>1) on EVERY such turn — Fable end-to-end-verified the mislabel on
+# a real grep turn. test=4 / submit=5 exceed edit=3 so an executed/obligation fact
+# delivered on a later turn is HONESTLY repair support; search=1 == the localization
+# boundary so a fresh search answer is preventive (repair_support False), not repair.
+_GA_GATEWAY_KIND_ORDINAL: dict = {
+    "search": 1, "view": 2, "edit": 3, "test": 4, "submit": 5, "other": 0}
+
+# SM-10 (2026-07-12) — the PREVENTIVE ladder classes. A PREVENTIVE fact's VALUE is to STEER a
+# decision the agent is ABOUT to make: localization before it commits a search branch; a caller /
+# companion contract AT the edit so the callers/companions are updated in the SAME change. Once
+# that decision boundary is past, the fact missed its prevention window -> delivering it as if
+# preventive is noise, not guidance (correct-or-quiet). The REACTIVE classes — executed_world_fact
+# (a covering RED), edit_violation (a syntax error in JUST-written code), obligation_violation (a
+# submit-time gate), recovery (a stuck/loop nudge) — are SUPPOSED to arrive post-event; being
+# "late" is their nature, so they are NEVER suppressed for it. Distinguished by CLASS (the ladder),
+# not an ordinal magic number: repair_support is the WHEN, this set is the WHICH-CLASSES-CARE.
+_GA_PREVENTIVE_CLASSES = frozenset({"caller_contract", "causal_chain", "localization"})
+# telemetry reason for a preventive winner demoted for missing its decision boundary.
+_GA_REASON_REPAIR_LATE = "repair_support_late"
+
+
+def _ga_is_preventive(kind: str) -> bool:
+    """True iff ``kind`` projects onto a PREVENTIVE ladder class (guidance meant to arrive BEFORE
+    the decision it steers). Reactive/post-event classes -> False. Correct-or-quiet: the engine
+    absent or an unmapped (internal) kind -> False, so a fact GT cannot classify is NEVER
+    suppressed for lateness."""
+    try:
+        from groundtruth.runtime.global_arbiter import class_of_kind
+    except Exception:  # noqa: BLE001
+        return False
+    return class_of_kind(kind) in _GA_PREVENTIVE_CLASSES
+
+
+def _ga_candidate_on_time(c) -> bool:
+    """SM-10 Item D1 (2026-07-12): True iff candidate ``c`` is NOT a too-late PREVENTIVE fact
+    — either its prevention window is still open (``current_ordinal <= boundary_ordinal``) OR
+    it is a REACTIVE class for which post-event delivery is natural. This mirrors, at the
+    CANDIDATE level, the winner-demotion rule ``res.repair_support and _ga_is_preventive`` the
+    flush applies to the top winner, so the on-time re-selection never re-picks a fact that
+    would itself be demoted for lateness. Correct-or-quiet: an unmapped/internal kind ->
+    _ga_is_preventive False -> on-time True (never suppressed for lateness)."""
+    late = getattr(c, "current_ordinal", 0) > getattr(c, "boundary_ordinal", 0)
+    return not (late and _ga_is_preventive(getattr(c, "kind", "")))
+
+
+def _ga_unified_dedup_key(producer: str, evidence_type: str, target: str,
+                          fact_id: str, payload_lines) -> str:
+    """The UNIFIED envelope dedup key (SM-5): the SAME derivation the Gateway uses
+    (evidence_envelope.derive_dedup_key over producer/type/target/fact_id/content-sig),
+    computed for EVERY plane so the ONE delivered-dedup chain is keyed identically across
+    Lane-A / steer / gateway (fixing the lane-vs-gateway key mismatch). Correct-or-quiet:
+    if the engine is absent, a stable local sha over the same identity tuple (still unified
+    within the run)."""
+    try:
+        from groundtruth.runtime.evidence_envelope import (
+            content_signature as _cs, derive_dedup_key as _ddk)
+        sig = _cs(tuple(payload_lines or ()), ())
+        return _ddk(producer or "", evidence_type or "", target or "", fact_id or "", sig)
+    except Exception:  # noqa: BLE001 — engine absent -> local fallback (still unified)
+        import hashlib as _hl
+        raw = "\x00".join([producer or "", evidence_type or "", target or "",
+                           fact_id or "", "\n".join(payload_lines or ())])
+        return _hl.sha256(raw.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+
+
+def _ga_make_candidate(plane: str, kind: str, *, dedup_key: str, target: str = "",
+                       tier: str = "INFO", confidence: float = 0.0,
+                       kkind: str = "", seq: int = 0, suppressible: bool = False,
+                       current_ordinal: "int | None" = None):
+    """Build a global_arbiter.Candidate projected onto the ladder. Returns None when the
+    engine is unavailable (the flush then delivers nothing — correct-or-quiet).
+
+    ``current_ordinal`` (SM-5 2b): when provided, it is the firing-event ordinal directly
+    (the gateway threads its REAL ``ev.kind`` ordinal here); when None, it falls back to the
+    mini's post_* ``kkind`` lookup (the Lane-A / steer planes, unchanged). This drives ONLY
+    ``repair_support`` (a correct-time label) — never the arbitration sort — so it is
+    byte-identical for delivered bytes."""
+    try:
+        # dotted `from groundtruth.runtime.global_arbiter import` form so the injection
+        # import-coverage guard REQUIRES the module to ship (in _PRODUCT_PACKAGE_MODULES).
+        from groundtruth.runtime.global_arbiter import Candidate, class_of_kind
+    except Exception:  # noqa: BLE001
+        return None
+    cls = class_of_kind(kind)
+    cur = (int(current_ordinal) if current_ordinal is not None
+           else _GA_KKIND_ORDINAL.get(kkind or "", 0))
+    boundary = _GA_CLASS_BOUNDARY.get(cls, cur)
+    return Candidate(
+        plane=plane, kind=kind, dedup_key=dedup_key or "",
+        symbol=(_norm_fp(target) if (suppressible and target) else ""),
+        tier=tier or "INFO", confidence=float(confidence or 0.0),
+        boundary_ordinal=boundary, current_ordinal=cur,
+        suppressible_if_acquired=bool(suppressible), seq=int(seq))
+
+
+# SM-5 F (2026-07-12, cardinal #50) — GENERALIZED Lane-A latch rollback.
+#
+# THE BUG: several Lane-A producers burn a FIRE-ONCE latch at PRODUCTION (while `lane_a`
+# is being built), BEFORE the global arbiter runs — l3b.evidence (`_seen`),
+# consensus.scope_map (`_seen`), concern.consensus (`_dcc_latch`/`_dcc_enqueued_files`),
+# obligation.unexercised (`_unexercised_emitted`). Under GT_GLOBAL_ARBITER a Lane-A
+# candidate that LOSES the ranked competition ships 0 bytes (its delivery thunk never
+# runs) yet its production latch STAYS burned -> the producer returns "" for that key
+# forever -> the fact is PERMANENTLY DESTROYED, never reaching the model. The pre-fix
+# flush re-armed ONLY PLANE_STEER losers.
+#
+# THE FIX (Fable-sanctioned: "attach explicit rollback/re-arm callbacks to EVERY
+# candidate", NOT plane-specific re-arm): each producer, immediately after burning its
+# latch, attaches an OPAQUE zero-arg ROLLBACK closure that un-burns EXACTLY that latch.
+# `_global_pool_flush` invokes that closure for every LOSER via one generic lookup keyed by
+# `c.kind` — the flush holds ZERO per-kind/per-plane latch knowledge; each producer owns
+# the undo of what it burned. The WINNER is never in the loser set, so its latch stays
+# committed (no double-deliver next turn). Capturing the exact key AT THE PRODUCTION SITE
+# (as a closure) is what makes this airtight — reconstructing the key in the flush would
+# silently mismatch the post_view consensus rel, the subprocess-fallback kkind, and DCC's
+# graph-computed footprint. Each Lane-A production-latched kind fires at most once per
+# turn, so the kind is a unique key for its candidate in the pool. A DELIVERY-latched
+# Lane-A kind (l3.contract / l3.cochange / post_search.localize / obligation.resurface —
+# their latch sits inside `_lane_a_deliver`, so a loser whose thunk never ran never
+# latched) registers NO rollback and is correctly a no-op.
+#
+# BYTE-IDENTICAL when GT_GLOBAL_ARBITER is off: `_arm_lane_a_rearm` is guarded by the
+# arbiter flag (no registration), and the flush only runs under the arbiter — so the
+# producers latch-at-production UNCHANGED on every non-arbiter path (production==delivery
+# there, so no rollback is ever needed).
+_lane_a_rearm_pending: dict = {}
+
+
+def _arm_lane_a_rearm(kind: str, rollback) -> None:
+    """Attach a Lane-A producer's opaque zero-arg ROLLBACK (the undo of the fire-once latch
+    it JUST burned), keyed by its lane_a `kind`. `_global_pool_flush` invokes it IFF that
+    candidate LOSES the global competition (0 bytes -> deferred, not destroyed). Guarded by
+    the arbiter flag -> a no-op (byte-identical) when GT_GLOBAL_ARBITER is off."""
+    if _global_arbiter_on():
+        _lane_a_rearm_pending[kind] = rollback
+
+
+def _dcc_latch_rollback(fp_key, enqueued) -> None:
+    """concern.consensus rollback: un-burn the footprint-set latch + drop the files DCC
+    enqueued THIS turn (novelty-subtracted at production, so every one was newly added)."""
+    _dcc_latch.discard(fp_key)
+    _dcc_enqueued_files.difference_update(enqueued)
+
+
+def _global_pool_add_lane_a(pool, out, cmd, lane_a, *, krel, event, kkind) -> None:
+    """SM-5: stash each Lane-A block as (candidate, thunk) instead of delivering. The
+    thunk delivers exactly that ONE block via the existing `_lane_a_deliver` (reused
+    whole — no re-implementation). Lane-A candidates are NOT acquisition-suppressible
+    (conservative: a Lane-A contract/scope/post_search fact is never wrongly dropped)."""
+    for kind, text in lane_a:
+        if not text:
+            continue
+        key = _ga_unified_dedup_key(kind, kind, krel or "", "", [text])
+        cand = _ga_make_candidate(_GA_PLANE_LANE_A, kind, dedup_key=key,
+                                  target=krel or "", kkind=kkind, seq=len(pool))
+        if cand is None:
+            # engine absent -> deliver inline (degrade to the pre-SM-5 plane behavior,
+            # never a silent drop). Consistent with the steer/gateway add-helpers.
+            _lane_a_deliver(out, cmd, [(kind, text)], krel=(krel or ""), event=event)
+            continue
+        pool.append((cand, (lambda k=kind, t=text: _lane_a_deliver(
+            out, cmd, [(k, t)], krel=(krel or ""), event=event))))
+
+
+def _global_pool_add_steer(pool, out, cmd, win_text, *, kkind, kf, krel, event,
+                           steer_base) -> None:
+    """SM-5: stash the Lane-B gate winner as (candidate, thunk). The thunk is the exact
+    existing steer delivery (`_deliver_gate_winner`); its dedup identity is the unified
+    envelope key over the gate text (the plane's own `_last_gate_winner_hash` legacy dedup
+    still runs inside the thunk as a backstop)."""
+    kind = _last_gate_winner_kind or "steer"
+    key = _ga_unified_dedup_key(kind, kind, krel or kf or "", "", [win_text])
+    cand = _ga_make_candidate(_GA_PLANE_STEER, kind, dedup_key=key,
+                              target=krel or kf or "", kkind=kkind, seq=len(pool))
+    if cand is None:
+        # engine absent -> deliver inline (bulkhead: never silently drop the steer).
+        _deliver_gate_winner(out, cmd, win_text, kkind=kkind, kf=kf, krel=krel,
+                             event=event, steer_base=steer_base)
+        return
+    pool.append((cand, (lambda t=win_text: _deliver_gate_winner(
+        out, cmd, t, kkind=kkind, kf=kf, krel=krel, event=event,
+        steer_base=steer_base))))
+
+
+def _global_pool_add_gateway(pool, winner, native, commit_thunk, *, ev_kind: str = "") -> None:
+    """SM-5: stash the produced Gateway fact (its envelope already carries the UNIFIED
+    dedup_key) + its commit thunk. Gateway localization facts ARE acquisition-suppressible
+    (this generalizes the gateway's own EXACT_HIT/ZERO_ABSENT acquisition gates to the
+    whole pool). Correct-or-quiet: engine absent -> commit inline (never drop the fact).
+
+    SM-5 2b (2026-07-12): ``ev_kind`` is the gateway's REAL event kind (`ev.kind` from
+    ``normalize_event`` -> search/view/edit/test/submit/other) threaded from the call site.
+    It sets the candidate's ``current_ordinal`` (via ``_GA_GATEWAY_KIND_ORDINAL``) for the
+    correct-time ``repair_support`` label, REPLACING the pre-fix hardcoded
+    ``kkind="post_edit"`` (=3) that mislabeled every localization fact delivered on a
+    search/test turn as repair support. Host-ledger label only — never the arbitration
+    sort — so delivered bytes are byte-identical."""
+    et = getattr(winner, "evidence_type", "") or "fact"
+    try:
+        from groundtruth.runtime.global_arbiter import class_of_kind
+        suppressible = class_of_kind(et) == "localization"
+    except Exception:  # noqa: BLE001
+        suppressible = False
+    cand = _ga_make_candidate(
+        _GA_PLANE_GATEWAY, et, dedup_key=getattr(winner, "dedup_key", "") or "",
+        target=getattr(winner, "target", "") or "",
+        tier=getattr(winner, "tier", "INFO") or "INFO",
+        confidence=float(getattr(winner, "confidence", 0.0) or 0.0),
+        current_ordinal=_GA_GATEWAY_KIND_ORDINAL.get(ev_kind or "", 0),
+        seq=len(pool), suppressible=suppressible)
+    if cand is None:
+        commit_thunk()
+        return
+    pool.append((cand, commit_thunk))
+
+
+def _global_pool_flush(pool, *, kkind, kf, krel) -> None:
+    """SM-5: run the ONE ranked competition over the whole pool, deliver AT MOST ONE
+    global dose (its plane's own commit thunk), and LOG every loser with its reason
+    (the generalized loser log). Every LOSER re-arms whatever fire-once latch its producer
+    committed (deferred, not destroyed): a Lane-B steer via `_rearm_latches`, and a Lane-A
+    producer via the OPAQUE per-candidate rollback it attached at pool-add (SM-5 F, #50 —
+    l3b.evidence / consensus.scope_map / concern.consensus / obligation.unexercised latch at
+    PRODUCTION, so a loser that shipped 0 bytes MUST un-burn or the fact is destroyed; a
+    DELIVERY-latched Lane-A kind attaches no rollback and is a no-op). The WINNER keeps its
+    latch committed (never in the loser set) so it does not re-fire next turn. The winner's
+    unified dedup_key is stamped so the NEXT turn dedups it cross-plane. Wrapped in
+    try/except: a flush fault delivers nothing (correct-or-quiet) but can never double-dose.
+    Empty pool -> silence."""
+    if not pool:
+        return
+    try:
+        from groundtruth.runtime.global_arbiter import (
+            PLANE_STEER, REASON_DEDUP, REASON_OUTRANKED, arbitrate)
+    except Exception:  # noqa: BLE001 — engine absent: nothing to arbitrate (flag off in prod)
+        return
+    try:
+        acquired = {_norm_fp(r) for r in _oracle_edited_rels}
+        # SM-10 Item D2 (2026-07-12): UNION the per-attempt READ-SET (viewed / greped file
+        # targets) into ``acquired`` so a localization fact pointing at a file the agent already
+        # OPENED/greped is suppressed (non-re-acquisition — the charter's consumption
+        # definition), not just an edited file. Paths only (leak-safe); re-normalized defensively
+        # (idempotent). Empty when the read-set was never seeded -> byte-identical to edited-only.
+        try:
+            acquired |= {_norm_fp(r)
+                         for r in (getattr(_EPISODE, "read_targets", None) or ())}
+        except Exception:  # noqa: BLE001 — read-set union must never break the flush
+            pass
+        cands = [c for c, _t in pool]
+        res = arbitrate(cands, acquired=acquired,
+                        delivered=_EPISODE.delivered_dedup)
+        winner = res.winner
+        # SM-10 (2026-07-12): CONSUME repair_support at the seam. A PREVENTIVE-class winner
+        # delivered AFTER its decision boundary (res.repair_support) missed its prevention
+        # window -> DEMOTE it to a suppressed loser so it ships 0 bytes AND inherits the loser
+        # re-arm/rollback below (deferred, not destroyed: its production latch un-burns / its
+        # dedup key is not stamped, so it re-competes ON-TIME on a later turn). Reactive classes
+        # (covering-RED / syntax / recovery / obligation) stay winners — post-event is their
+        # nature, not "too-late". Correct-or-quiet: a preventive fact past its decision point is
+        # noise, not guidance. Byte-identical when GT_GLOBAL_ARBITER is off (the whole flush runs
+        # only under the flag). This REPLACES the host-only repair_support telemetry label with a
+        # real delivery consequence (SM-5 left it "owed to SM-7").
+        if winner is not None and res.repair_support and _ga_is_preventive(winner.kind):
+            res.losers.append((winner, _GA_REASON_REPAIR_LATE))
+            winner = None
+            # SM-10 Item D1 (2026-07-12): ON-TIME RE-SELECTION. The top winner missed its
+            # decision boundary and was demoted; rather than SILENCE a turn that still holds a
+            # deliverable, re-pick the highest-ranked ON-TIME eligible fact as the SINGLE dose.
+            # ``arbitrate`` appends the eligible non-winners (REASON_OUTRANKED) to ``res.losers``
+            # in DESCENDING ladder order, so the FIRST on-time OUTRANKED loser is the best on-time
+            # candidate. This STAYS <=1 dose: it re-picks the one winner (the delivery loop below
+            # still fires exactly one thunk) — it never adds a second. The re-selected winner is
+            # REMOVED from the loser set so it is not re-armed/rolled-back (it is delivering, not
+            # deferred), and ``repair_support`` is recomputed for it (on-time -> False) so the
+            # correct-time telemetry is honest. Byte-identical when GT_GLOBAL_ARBITER is off (the
+            # whole flush runs only under the flag).
+            for _i, (_lc, _lreason) in enumerate(res.losers):
+                if _lreason == REASON_OUTRANKED and _ga_candidate_on_time(_lc):
+                    winner = _lc
+                    res.losers.pop(_i)
+                    res.repair_support = (
+                        winner.current_ordinal > winner.boundary_ordinal)
+                    break
+        for c, reason in res.losers:
+            try:
+                _record_hook_suppress(c.kind, reason="ga_" + reason)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                _oc = (_ProductSignalOutcome.SUPPRESSED_DUPLICATE
+                       if reason == REASON_DEDUP
+                       else _ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY)
+                _runtime_ledger_record(kind="ga." + c.kind, outcome=_oc,
+                                       reason="global_arbiter:" + reason,
+                                       file_path=c.symbol or "")
+            except Exception:  # noqa: BLE001
+                pass
+            # a Lane-B steer LOSER consumed its fire-once latch at production but shipped
+            # 0 bytes -> re-arm so it re-competes on a later turn (deferred, not destroyed).
+            if c.plane == PLANE_STEER:
+                try:
+                    _rearm_latches({c.kind}, kkind=kkind, kf=kf, krel=krel)
+                except Exception:  # noqa: BLE001
+                    pass
+            # SM-5 F (#50): GENERIC per-candidate rollback — invoke the OPAQUE zero-arg
+            # closure the LOSING producer attached at pool-add (keyed by kind). Un-burns the
+            # EXACT production-time fire-once latch it committed (l3b.evidence /
+            # consensus.scope_map / concern.consensus / obligation.unexercised) so the fact
+            # re-competes on a later turn. Plane-AGNOSTIC: the flush knows nothing about which
+            # kind latches how. A candidate that attached no rollback (a steer, a gateway, or
+            # a DELIVERY-latched Lane-A kind) -> `.get` is None -> no-op. Winners are never in
+            # `res.losers`, so a delivered winner's latch is never rolled back (no re-fire).
+            _rb = _lane_a_rearm_pending.get(c.kind)
+            if _rb is not None:
+                try:
+                    _rb()
+                except Exception:  # noqa: BLE001
+                    pass
+        if winner is None:
+            return
+        for c, thunk in pool:
+            if c is winner:
+                thunk()  # the plane's own delivery (byte-identical to standalone)
+                try:
+                    if c.dedup_key:
+                        _EPISODE.delivered_dedup.add(c.dedup_key)  # unified cross-plane dedup
+                except Exception:  # noqa: BLE001
+                    pass
+                # correct-time telemetry: any winner reaching HERE with repair_support is a
+                # REACTIVE class (a preventive late winner was already demoted+suppressed above,
+                # SM-10) — post-event is its nature, so it legitimately delivers; the label just
+                # records that it arrived after its boundary. Host-side telemetry only.
+                if res.repair_support:
+                    try:
+                        _runtime_ledger_record(
+                            kind="ga." + c.kind,
+                            outcome=_ProductSignalOutcome.DELIVERED,
+                            reason="repair_support", file_path=c.symbol or "")
+                    except Exception:  # noqa: BLE001
+                        pass
+                break
+    except Exception:  # noqa: BLE001 — arbitration must never break the loop / double-dose
+        _crash_emit("global_arbiter.flush")
+
+
+def _deliver_gate_winner(out, cmd, win_text, *, kkind, kf, krel, event, steer_base) -> None:
+    """The Lane-B gate-winner delivery, FACTORED from the inline oracle-route steer path
+    (RL-3 native transform -> B-15 leak-checked append -> D-5 hash stamp -> ledger note ->
+    hook fire -> runtime ledger -> RL-1 seal; else Seam-F4 latch re-arm on a 0-byte drop).
+    Behaviour-identical to the prior inline block (the existing seam suite is the
+    byte-identical proof); factored so SM-5 can DEFER it as a pool thunk."""
+    # RL-3 (GT_STEER_NATIVE): native voice BEFORE the append + seal so delivered bytes ==
+    # sealed rendered_bytes. Default-off: byte-identical.
+    if _steer_native_on():
+        win_text = _steer_native(win_text)
+    # B-15: leak-validating chokepoint (join-mode). A leaky/empty steer ships 0 bytes.
+    if win_text and _gt_deliver_append(out, win_text, join=True):
+        # D-5: stamp the delivered-hash ATOMICALLY with the append.
+        if _last_gate_winner_hash:
+            _oracle_delivered_hashes.add(_last_gate_winner_hash)
+        _ledger_note_delivery(_last_gate_winner_kind, cmd, krel or kf or "")  # S-1 target
+        _record_hook_fire(_last_gate_winner_kind)  # Lane-B winners count too
+        _runtime_ledger_record(
+            kind=_last_gate_winner_kind,
+            outcome=_ProductSignalOutcome.DELIVERED,
+            chars=len(win_text), file_path=krel or kf or "", event=event)
+        # RL-1 (GT_LANE_ENVELOPE): seal over the SAME bytes; base_output = pre-append obs.
+        _seal_lane_delivery(_last_gate_winner_kind, win_text, krel or kf or "",
+                            base_output=steer_base)
+    else:
+        # Seam-F4: won the gate but 0 bytes (native-render collapse / B-15 leak refusal) —
+        # re-arm the fire-once latch consumed at production (deferred, not destroyed).
+        _rearm_latches({_last_gate_winner_kind}, kkind=kkind, kf=kf, krel=krel)
+
+
+# plane constants mirrored locally so the hot delivery path needs no import to name them.
+_GA_PLANE_LANE_A = "lane_a"
+_GA_PLANE_STEER = "steer"
+_GA_PLANE_GATEWAY = "gateway"
 
 
 def _augment_output(action, out) -> None:
@@ -9071,6 +10517,11 @@ def _augment_output(action, out) -> None:
             # bug #4(c): clear the per-turn phase-drop staging set at the top of
             # the turn (it is merged into _oracle_last_losers after the gate).
             _reset_phase_dropped_losers()
+            # SM-10 C-1: clear the per-turn executed-covering-RED re-arm record so a stale
+            # record from a prior turn can never mis-target the gate-loss re-arm (mutated in
+            # place -> no global decl). No-op / empty when GT_VERIFY_EXECUTE is off.
+            _covering_exec_pending["syms"].clear()
+            _covering_exec_pending["advisory"] = False
             # D7: judge the PREVIOUS delivery from THIS turn's command.
             _ledger_judge_pending(cmd or "")
             # severities are COMPUTED floats (composite_severity) — int-base
@@ -9081,8 +10532,25 @@ def _augment_output(action, out) -> None:
             # EARLY (pre-gate, pre any Lane B logic that could raise).  Lane B's
             # `cands` stays the steer pool that goes through the oracle gate.
             lane_a: list[tuple[str, str]] = []
+            # SM-5: when the global arbiter is on, the three planes STASH into this ONE
+            # per-turn pool instead of delivering inline; a single flush arbitrates <=1
+            # global dose. None (flag off) -> every plane delivers inline (byte-identical).
+            _ga_on = _global_arbiter_on()
+            _ga_pool: "list | None" = [] if _ga_on else None
+            if _ga_on:
+                # SM-5 F (#50): fresh per-turn Lane-A rollback registry — the producers
+                # (which run later this turn) re-populate it; the flush reads it. Cleared
+                # here so a prior-turn WINNER's un-consumed rollback can never mis-fire.
+                _lane_a_rearm_pending.clear()
             _krel = ""  # bound on post_edit; hardening for the guarded uses below
             _kkind, _kf = _classify(cmd)
+            # SM-2b (2026-07-11) replacement-delivers TRIPWIRE — computed ONCE per turn: does
+            # the Gateway's cross-language caller_contract producer provably deliver an
+            # equivalent caller-break for THIS edit? It is the ONLY condition that retires the
+            # legacy l3.contract / l3b.evidence (equivalence-before-retirement, §26.4). False on
+            # a non-edit turn / bridges-off / no sig-change / no cross-file caller / GT_GATEWAY
+            # off -> the legacy KEEPS delivering (never a deletion). Deterministic + isolated.
+            _cc_ready = _gt_gateway_caller_contract_ready(action, cmd)
             # SUBPROCESS-WRITE CATCH-ALL: _classify/_edit_target is a STRING
             # parser blind to a write done INSIDE a subprocess (`python3 x.py`
             # writing Lexer.js). When the fast path found NO edit target,
@@ -9162,6 +10630,13 @@ def _augment_output(action, out) -> None:
                 # proxy that keeps V dynamic for the never-test agent.
                 _edit_action_steps.append(_action_count)
                 _invalidate_on_edit(_krel, _kroot)  # L6 (freshness, not delivery)
+                # SM-3 EditOverlay (GT_EDIT_OVERLAY): transactional apply over THIS edit +
+                # stale-envelope marking. Host-side only; no graph rebuild (SM-4). Off ->
+                # byte-identical no-op. Isolated so it can never break the delivery path.
+                try:
+                    _gt_edit_overlay_transaction(action)
+                except Exception:  # noqa: BLE001 — overlay must not kill the turn
+                    pass
                 # L3: EDIT-BOUND contract candidates (rearm_on_change via hash).
                 # LIVE/REPLAY PARITY FIX (2026-06-11): rearm_on_change — a
                 # subsequent edit to the SAME file clears the production latch so
@@ -9169,6 +10644,14 @@ def _augment_output(action, out) -> None:
                 # still suppresses an IDENTICAL contract; a CHANGED contract
                 # (new file state) has a new hash and re-arms naturally.
                 _contract_seen.discard(_krel)
+                # SM-10 Item C (2026-07-12): RE-ARM the per-symbol covering-exec latch for the
+                # symbols THIS edit touched — a 2nd edit to a symbol whose covering was already
+                # executed re-opens it, so a fresh edit that REDs the covering test fires again
+                # (parity with the _contract_seen re-arm above). Guarded by GT_VERIFY_EXECUTE ->
+                # the set is untouched when off (byte-identical). Bounded: at most one covering
+                # run per edit-generation of the symbol.
+                if os.environ.get("GT_VERIFY_EXECUTE") == "1" and not _GT_BASELINE:
+                    _covering_exec_fired_syms.difference_update(_edit_toks | _body_toks)
                 # LANE A: the edit-bound contract + co-change blocks.  Computed
                 # in their OWN try/except inside _lane_a_deliver-adjacent guards
                 # so a producer crash can't kill the data plane.  They deliver
@@ -9188,11 +10671,18 @@ def _augment_output(action, out) -> None:
                 # still trips _record_hook_fire (which fires before the empty-skip in
                 # _lane_a_deliver), inflating the fired-count for these kinds on every
                 # edit/view turn ("fired" != "produced"). Guarding the append makes the
-                # count mean "a block was produced". Delivery is byte-identical (an empty
-                # block delivers nothing either way).
-                if _la_contract:
+                # count mean "a block was produced". Under the Gateway profile these
+                # tagged duplicates retire; the Gateway owns their native delivery.
+                # l3.contract RETIRES under the Gateway ONLY when the SM-2b caller_contract
+                # producer provably delivers an equivalent caller-break for THIS edit
+                # (`_cc_ready`); otherwise (the producer is silent on this language/case) it
+                # KEEPS delivering (§26.4). GT_GATEWAY off -> `_lane_a_retired_under_gateway`
+                # returns False -> delivers exactly as pre-Wave-1 (byte-identical).
+                if _la_contract and not _lane_a_retired_under_gateway(
+                        "l3.contract", replacement_ready=_cc_ready):
                     lane_a.append(("l3.contract", _la_contract))
-                if _la_cochange:
+                # l3.cochange is retired-to-INTERNAL under the Gateway (no native form).
+                if _la_cochange and not _lane_a_retired_under_gateway("l3.cochange"):
                     lane_a.append(("l3.cochange", _la_cochange))
                 # consensus DELIVERY on EDIT (2026-06-24): when the agent edits a file
                 # that is part of the established GT scope, deliver the in-scope graph
@@ -9231,6 +10721,19 @@ def _augment_output(action, out) -> None:
                     _csb = ""
                 if _csb:  # D-1: conditional enqueue (see l3.contract note above)
                     lane_a.append(("consensus.scope_map", _csb))
+            # SM-10 Item D2 (2026-07-12): seed the per-attempt READ-SET (the file targets the
+            # agent VIEWED / EDITED / greped this turn) so the global arbiter suppresses a
+            # localization fact pointing at a file the agent ALREADY ACQUIRED (non-re-acquisition
+            # — the charter's consumption definition), not just an edited file. Leak-safe (PATHS
+            # only). Guarded by the arbiter flag -> the read-set is never touched when off
+            # (byte-identical); it is consumed ONLY by _global_pool_flush, which also runs only
+            # under the flag. Isolated: a seeding fault never breaks the turn.
+            if _ga_on:
+                try:
+                    _seed_read_targets(
+                        getattr(_EPISODE, "read_targets", None), _kkind, _kf, cmd or "", _root())
+                except Exception:  # noqa: BLE001 — read-set seeding must never break the turn
+                    pass
             # post_search (M0+ / Listen Lattice): answer the agent's OWN repo-wide
             # grep with def FACTS, in-band. Independent of _kkind (a grep resolves to
             # no file target, so it runs on the raw command). The grep's OWN OUTPUT
@@ -9300,16 +10803,24 @@ def _augment_output(action, out) -> None:
             _ev_event_bound = bool(
                 _kkind in ("post_view", "post_edit") and _kf and _ev_text)
             # LANE A: l3b.evidence (the resolved-witness / caller-contract /
-            # sibling code-map) is always-needed consistency context.  It joins
-            # the data plane, NOT the steer gate.  (event_bound is irrelevant
+            # sibling code-map) is legacy consistency context. It joins the data
+            # plane only without the Gateway; the Gateway owns native delivery when on.
+            # (event_bound is irrelevant
             # for Lane A — its gate is non-empty AND not-already-in-ledger; an
             # empty _ev_text is dropped by the correct-or-quiet check.)
             # Seam-F10 / D-1: CONDITIONAL enqueue (parity with its Lane-A siblings) — an
             # EMPTY block enqueued here still trips _record_hook_fire (which fires before
             # the empty-skip in _lane_a_deliver), inflating l3b.evidence's fired-count on
             # every turn ("fired" != "produced"). Guarding the append makes the count mean
-            # "a block was produced"; delivery is byte-identical (empty delivers nothing).
-            if _ev_text:
+            # "a block was produced"; Gateway-on retires this tagged duplicate.
+            # l3b.evidence RETIRES under the Gateway ONLY when the SM-2b caller_contract
+            # producer provably delivers an equivalent caller-break for THIS edit (`_cc_ready`)
+            # — the [WITNESS]/[CALLERS]/[SIBLINGS] resolved-witness caller-contract is the same
+            # caller-break family the Gateway now replaces cross-language. Producer silent
+            # (a view turn, a non-sig-change edit, a no-caller edit) -> KEEP-legacy delivers.
+            # GT_GATEWAY off -> never retired (byte-identical).
+            if _ev_text and not _lane_a_retired_under_gateway(
+                    "l3b.evidence", replacement_ready=_cc_ready):
                 lane_a.append(("l3b.evidence", _ev_text))
             # ── DCC (Dynamic Concern Consensus) — DEFAULT-OFF (GT_DCC) ─────────
             # The LAST Lane-A block. When the agent's OWN action stream shows it
@@ -9335,8 +10846,15 @@ def _augment_output(action, out) -> None:
             # So a later Lane B / gate crash loses ONLY the steer — never the
             # data-plane context (reproduces+fixes the 0/8 stub-crash).
             _event = _current_event(_kkind, cmd or "")
-            _lane_a_deliver(out, cmd, lane_a, krel=(_krel or _kf or ""),
-                            event=_event)
+            if _ga_on:
+                # SM-5: stash Lane-A blocks; the flush delivers <=1 of them (or a steer /
+                # gateway fact) after the global ranked competition.
+                _global_pool_add_lane_a(_ga_pool, out, cmd, lane_a,
+                                        krel=(_krel or _kf or ""), event=_event,
+                                        kkind=_kkind)
+            else:
+                _lane_a_deliver(out, cmd, lane_a, krel=(_krel or _kf or ""),
+                                event=_event)
             # ── LANE B (control plane, SITUATIONAL) — the steer pool ──────
             # THE ROBUSTNESS GUARANTEE: this whole section (steer producers +
             # phase filter + oracle gate + latch re-arm + winner append) is
@@ -9504,10 +11022,27 @@ def _augment_output(action, out) -> None:
                             # delivery, instead of an unaccounted direct append. Lane A has
                             # no steer budget, so the guaranteed once-per-task delivery is
                             # preserved while the ledger/dedup now see it.
-                            _lane_a_deliver(
-                                out, cmd, [(_obl_reason, _obr[1])],
-                                krel=(_krel or _kf or ""),
-                                event=_current_event(_kkind, cmd or ""))
+                            if _ga_on:
+                                # SM-5: the once-per-task obligation reminder joins the ONE
+                                # pool (an obligation_violation-class candidate), never a
+                                # second uncapped Lane-A append.
+                                _global_pool_add_lane_a(
+                                    _ga_pool, out, cmd, [(_obl_reason, _obr[1])],
+                                    krel=(_krel or _kf or ""),
+                                    event=_current_event(_kkind, cmd or ""),
+                                    kkind=_kkind)
+                            else:
+                                _lane_a_deliver(
+                                    out, cmd, [(_obl_reason, _obr[1])],
+                                    krel=(_krel or _kf or ""),
+                                    event=_current_event(_kkind, cmd or ""))
+                # SM-3 HypothesisLedger (GT_HYPOTHESIS): classify THIS turn over the shared
+                # _EPISODE + observation BEFORE the verify-horizon candidate, so a pivot can
+                # frame its steer from the classification. Host-side only unless a pivot fires.
+                try:
+                    _gt_hypothesis_classify_turn(cmd or "", _orig_out or "")
+                except Exception:  # noqa: BLE001 — classification must not kill the gate
+                    pass
                 # VERIFICATION HORIZON (Stage C H2): budget-aware self-verify candidate
                 try:
                     _vh = _verification_horizon_candidate()
@@ -9516,6 +11051,34 @@ def _augment_output(action, out) -> None:
                     _vh = None
                 if _vh is not None:
                     cands.append(_vh)
+                # SM-10 Item C (2026-07-12): the EXECUTED covering-RED, DECOUPLED from the
+                # once-per-task risk-advisory latch. Runs the repo's OWN covering test for each
+                # DISTINCT edited symbol whose covering FILE exists (per-symbol latch, re-armed
+                # on re-edit), so a RED on a LOW-fan-in edit or a 2nd distinct-symbol edit reaches
+                # its decision point. Same verify.horizon.executed kind (ladder rank 70) -> same
+                # <=1-dose arbitration + leak-scrub. Flag GT_VERIFY_EXECUTE off -> None (byte-
+                # identical); the risk path marks the SAME latch first, so no double-execution.
+                try:
+                    _ec = _executed_covering_candidate()
+                except Exception:  # noqa: BLE001 — one producer must not kill the gate
+                    _crash_emit("verify.horizon.executed")
+                    _ec = None
+                if _ec is not None:
+                    cands.append(_ec)
+                # SM-10 (2026-07-12): recovery-timing DECOUPLE. The classification above
+                # named a recovery disposition on THIS failure observation; deliver it as
+                # its OWN ladder-floor candidate so an EARLY-stuck agent (never reaches the
+                # pivot budget zone) gets the nudge at the failure decision point, instead of
+                # the disposition being computed then discarded by the pivot-passenger path.
+                # Flag GT_HYPOTHESIS off -> None -> byte-identical. Ladder floor -> only wins
+                # when nothing higher fires (the pivot reframe still wins when a pivot fires).
+                try:
+                    _rc = _recovery_candidate()
+                except Exception:  # noqa: BLE001 — one producer must not kill the gate
+                    _crash_emit("recovery")
+                    _rc = None
+                if _rc is not None:
+                    cands.append(_rc)
                 # E — at-edit SYNTAX validation (GT_EDIT_CHECK). Scoped to the file the
                 # current action edited (_krel/_kf on a post_edit turn); a parse break in
                 # the agent's own just-written source earns a native compiler diagnostic.
@@ -9576,57 +11139,26 @@ def _augment_output(action, out) -> None:
                     # is now released — both re-competition gates open).
                     _rearm_latches({_last_gate_winner_kind}, kkind=_kkind, kf=_kf, krel=_krel)
                 elif _win:
-                    # RL-3 (flag GT_STEER_NATIVE): render the steer in the native voice
-                    # (tag-free, no "GT:") BEFORE the append + seal so the delivered
-                    # bytes and the sealed rendered_bytes are one and the same. The D-5
-                    # dedup hash is the GATE text's hash (_last_gate_winner_hash, fixed at
-                    # gate time) — unaffected by the presentation transform, so a native
-                    # and a tagged render of the same winner dedup identically. Default-
-                    # off: _steer_native_on() is False -> _win is untouched (byte-ident).
-                    if _steer_native_on():
-                        _win = _steer_native(_win)
                     # Seam-F3/B-32: capture the pre-append observation so the steer seal
-                    # commits the REAL base bytes (not b"") into the TITO chain — two
-                    # different observations carrying the same steer now produce distinct
-                    # chain entries.  _gt_deliver_append mutates out['output'], so read it
-                    # HERE, before the append.
+                    # commits the REAL base bytes into the TITO chain. _gt_deliver_append
+                    # (inside _deliver_gate_winner) mutates out['output'], so read it HERE,
+                    # before the append. The RL-3 native transform is inside the helper (it
+                    # does not touch out['output'], so capturing base here is equivalent).
                     _steer_base = out.get("output") or ""
-                    # B-15: the oracle steer append also routes through the leak-validating
-                    # chokepoint (join-mode: the L-1a one-newline boundary is inside it) — a
-                    # leaky steer ships 0 bytes and is NOT stamped/ledgered/sealed. (native
-                    # render can also collapse an all-tag block to "" -> deliver nothing.)
-                    if _win and _gt_deliver_append(out, _win, join=True):
-                        # D-5: stamp the delivered-hash ATOMICALLY with the append (moved
-                        # from the gate) — a phantom stamp for an undelivered steer is now
-                        # impossible (the gate-to-append window can no longer suppress it).
-                        if _last_gate_winner_hash:
-                            _oracle_delivered_hashes.add(_last_gate_winner_hash)
-                        _ledger_note_delivery(
-                            _last_gate_winner_kind, cmd, _krel or _kf or "")  # S-1 target
-                        # Fire-count parity: Lane B winners count too (was Lane-A-only).
-                        _record_hook_fire(_last_gate_winner_kind)
-                        _runtime_ledger_record(
-                            kind=_last_gate_winner_kind,
-                            outcome=_ProductSignalOutcome.DELIVERED,
-                            chars=len(_win),
-                            file_path=_krel or _kf or "",
-                            event=_event,
-                        )
-                        # RL-1 (flag GT_LANE_ENVELOPE): seal the steer over the SAME bytes
-                        # — shared chain + dedup + receipt. No-op + byte-ident when off.
-                        # Seam-F3: pass the pre-append observation as base_output.
-                        _seal_lane_delivery(
-                            _last_gate_winner_kind, _win, _krel or _kf or "",
-                            base_output=_steer_base)
+                    if _ga_on:
+                        # SM-5: stash the gate winner; the global flush decides whether it or
+                        # a Lane-A / gateway fact is the single dose. A steer that LOSES the
+                        # global competition re-arms its latch in the flush (deferred).
+                        _global_pool_add_steer(
+                            _ga_pool, out, cmd, _win, kkind=_kkind, kf=_kf,
+                            krel=_krel, event=_event, steer_base=_steer_base)
                     else:
-                        # Seam-F4: the steer WON the gate but delivered 0 bytes — a native-
-                        # render collapse (_win == "" after _steer_native) OR a B-15 leak
-                        # refusal (_gt_deliver_append -> False). Its fire-once latch was
-                        # consumed at PRODUCTION and it is in NEITHER loser set, so re-arm it
-                        # HERE (deferred, not destroyed). NEVER on the delivered branch above
-                        # — that would double-deliver. Realistic trigger: the leak drop
-                        # killing l5.no_test (the ONE proven-consumed nudge class).
-                        _rearm_latches({_last_gate_winner_kind}, kkind=_kkind, kf=_kf, krel=_krel)
+                        # RL-3 native voice -> B-15 leak-checked append -> D-5 hash stamp ->
+                        # ledger -> hook fire -> RL-1 seal; else Seam-F4 latch re-arm on a
+                        # 0-byte drop. Factored verbatim into _deliver_gate_winner.
+                        _deliver_gate_winner(
+                            out, cmd, _win, kkind=_kkind, kf=_kf, krel=_krel,
+                            event=_event, steer_base=_steer_base)
             except Exception:  # noqa: BLE001 — Lane B (control plane) is fully
                 # isolated: a steer/gate/filter crash here loses ONLY the steer,
                 # never Lane A's data plane (already delivered above).
@@ -9645,7 +11177,14 @@ def _augment_output(action, out) -> None:
             # ── GT_GATEWAY (W2): the ONE gateway.augment() call on the ORACLE route
             #    (the production path). Runs LAST, on the CLEAN command output
             #    (`_orig_out`), appended after the lanes. Default-OFF => byte-identical.
-            _gt_gateway_deliver(action, out, cmd, _orig_out)
+            if _ga_on:
+                # SM-5: the gateway PRODUCES its fact into the same pool (its own <=1
+                # arbiter runs first), then ONE flush runs the global ranked competition
+                # over {Lane-A blocks, steer, gateway fact} and delivers AT MOST ONE dose.
+                _gt_gateway_deliver(action, out, cmd, _orig_out, pool=_ga_pool)
+                _global_pool_flush(_ga_pool, kkind=_kkind, kf=_kf, krel=_krel)
+            else:
+                _gt_gateway_deliver(action, out, cmd, _orig_out)
             return
 
         # ---- LEGACY PATH (GT_ORACLE_ROUTE=0): unconditional appends ----
@@ -9899,6 +11438,46 @@ def _gt_submit_record(verdict, *, blocked: bool) -> None:
         pass
 
 
+def _gt_completion_cert_record(cert) -> None:
+    """HOST-ONLY telemetry for the W5 CompletionCertificate (stderr + runtime ledger).
+
+    NEVER model-facing. Emits the head-derived decision + the per-field rollups using
+    only the SDLC FIELD NAMES (scope_compliance / syntax_status / selected_test_status
+    / …) and integer counts — never a raw runner detail, never a test identity (leak=0).
+    The certificate carries names in ``head_record`` for host use, but this line deliberately
+    does not surface them."""
+    try:
+        _unres = ",".join(getattr(cert, "unresolved_failures", ()) or ()) or "-"
+        print(f"[GT_META] completion_cert decision={cert.decision} "
+              f"head_reason={cert.head_reason} unresolved={_unres} "
+              f"unknowns={len(cert.unknowns)} stale={len(cert.stale_evidence)} "
+              f"encouragement={'1' if cert.allow_encouragement else '0'}",
+              file=sys.stderr, flush=True)
+        _runtime_ledger_record(kind="completion_cert", outcome=str(cert.decision),
+                               reason=str(cert.head_reason))
+    except Exception:  # noqa: BLE001 -- telemetry must never break the gate
+        pass
+
+
+def _completion_cert_block(cert, verdict) -> str:
+    """MODEL-FACING render of a NOT-CLEAN CompletionCertificate at the submit turn (D7).
+
+    Maps the cert's FAILING heads to a native pre-commit-hook failure block
+    (``native_render.render_completion_cert_native`` — one ``<hook>....Failed`` line per
+    failing head, world-fact not instruction, ZERO ``<gt-*>``). The failing heads are the
+    cert's SDLC ``unresolved_failures`` (the covering head reports its VERDICT, never a
+    test name) PLUS the head's own hygiene block (``head_reason == "hygiene"``), whose
+    world-fact reason (``verdict.detail``) is passed through the renderer's identity scrub.
+    A CLEAN cert (no failing head) -> "" (correct-or-quiet; no praise line). Never raises
+    (the caller wraps it too); leak-safe by the renderer's ``_final_scrub`` belt."""
+    from groundtruth.runtime.native_render import render_completion_cert_native
+    failing = list(getattr(cert, "unresolved_failures", ()) or ())
+    hyg_blocked = getattr(cert, "head_reason", "") == "hygiene"
+    hyg_detail = str(getattr(verdict, "detail", "") or "") if hyg_blocked else ""
+    return render_completion_cert_native(
+        failing, hygiene_blocked=hyg_blocked, hygiene_detail=hyg_detail)
+
+
 def _gt_gate_submit_exception(env, action, exc) -> "dict | None":
     """Gate a submit detected as a ``Submitted`` raised from env.execute.
 
@@ -9944,14 +11523,59 @@ def _gt_gate_submit_exception(env, action, exc) -> "dict | None":
         verdict = safe_gate_verdict(
             covering=covering, hygiene=hygiene,
             bounce_count=_gt_submit_bounce_count, max_bounces=_GT_SUBMIT_MAX_BOUNCES)
-        if verdict.allow:
+        # W5 CompletionCertificate (GT_COMPLETION_CERT, default-OFF byte-identical) — PURE
+        # TELEMETRY (SM-3 LIPI F3): wrap the FROZEN Gate-Kernel head with the per-field
+        # termination account and record it to [GT_META] host-side. ``cert.decision`` is a
+        # PURE function of the head (submit_gate:_derive_decision — the single-decision-path
+        # law), so ``_allow`` is ALWAYS == ``verdict.allow``: the certificate CANNOT change
+        # any submit outcome (a blocking cert would violate fail-open). It NEVER opens a
+        # second decision path, an UNKNOWN never blocks, ``obligations`` stay ADVISORY
+        # (passed None — excluded from every block path, T2 law). The `_allow = cert.decision
+        # == "allow"` line is the head decision re-expressed through the cert for provenance;
+        # it is NOT a new gate. Correct-or-quiet: any cert fault (safe_build_certificate
+        # cannot raise; the flag block is belt-and-braces) degrades to the head — byte-
+        # identical to the off path.
+        #
+        # SM-3 D7 DELIVERY (GT_CERT_DELIVERY, 2026-07-12): the cert is ALSO built when the
+        # model-facing delivery flag is on, so a BLOCK renders the per-head native pre-commit
+        # block below. GT_CERT_DELIVERY is INDEPENDENT of GT_COMPLETION_CERT (either builds +
+        # host-records the cert); both UNSET -> no cert (byte-identical to the pre-SM-3 path).
+        _allow = verdict.allow
+        _deliver_cert = os.environ.get("GT_CERT_DELIVERY") == "1"
+        cert = None
+        if os.environ.get("GT_COMPLETION_CERT") == "1" or _deliver_cert:
+            try:
+                from groundtruth.runtime.submit_gate import safe_build_certificate
+                cert = safe_build_certificate(
+                    head=verdict, covering=covering, hygiene=hygiene,
+                    bounce_count=_gt_submit_bounce_count,
+                    max_bounces=_GT_SUBMIT_MAX_BOUNCES,
+                    obligations=None)  # ADVISORY-only; never a block input (T2 law)
+                _allow = (cert.decision == "allow")  # head-derived -> ALWAYS == verdict.allow
+                _gt_completion_cert_record(cert)     # HOST-only telemetry (no leak)
+            except Exception:  # noqa: BLE001 -- a cert fault must NEVER brick a submit
+                _allow = verdict.allow
+                cert = None
+        if _allow:
             # clean / gate_overridden / gate_crash -> submission proceeds (host record).
+            # A CLEAN cert on an allow delivers NOTHING (correct-or-quiet) — the block below
+            # is SUBORDINATE to the head block decision, so the cert never turns allow -> block.
             _gt_submit_record(verdict, blocked=False)
             return None
         # BLOCK: render the refusal as a pre-commit / CI failure — native, in-
         # distribution, ZERO <gt-*> tags, ZERO test identity (submit_gate.detail is
         # generic by construction). Correct-or-quiet on an empty / tag-leaking render.
-        rejection = render_submit_rejection(verdict.reason, verdict.detail)
+        # GT_CERT_DELIVERY=1 UPGRADES this refusal to the per-head CompletionCertificate
+        # pre-commit block (the D7 headline) — it INTEGRATES with (replaces) this existing
+        # appender's bytes, never a second dose (the dedup + bounce below are unchanged).
+        rejection = ""
+        if _deliver_cert and cert is not None:
+            try:
+                rejection = _completion_cert_block(cert, verdict)
+            except Exception:  # noqa: BLE001 -- a cert-render fault falls back to the plain refusal
+                rejection = ""
+        if not rejection:
+            rejection = render_submit_rejection(verdict.reason, verdict.detail)
         if not rejection or contains_gt_tag(rejection):
             return None
         # DEDUP/no-dup law (:4929/:6590 pattern): an identical refusal must never re-

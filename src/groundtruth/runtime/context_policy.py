@@ -49,6 +49,12 @@ class PayloadKind(Enum):
     STUCK_NUDGE = "l5.stuck"
     FAILURE_NUDGE = "l5.failure"
     NO_TEST_NUDGE = "l5.no_test"
+    # SM-10 (2026-07-12): the typed HypothesisLedger recovery nudge. The producer appends it
+    # with the literal kind "recovery" (gt_mini_patch `_recovery_candidate`). It fires on a
+    # FAILURE OBSERVATION (a repeated/falsified/env failure), so it is bound to the
+    # failure-observation events + allowed in the working phases an agent can be stuck in —
+    # NOT ORIENT (no failure history yet) / SUBMIT (a stuck agent is not submitting).
+    RECOVERY = "recovery"
     VERIFY_ADVISORY = "verify.horizon.advisory"
     VERIFY_URGENT = "verify.horizon.urgent"
     VERIFY_GATE = "verify.horizon.gate"
@@ -67,6 +73,9 @@ PHASE_POLICY: dict[Phase, frozenset[str]] = {
         # command + identical output, no edits). The loop detector must fire in
         # VIEW, not only VERIFY (it was silent ~75 steps on the fd shape).
         PayloadKind.LOOP_NUDGE.value,
+        # SM-10: an EARLY-stuck agent (no edits yet) is in VIEW/ORIENT; the recovery
+        # nudge must reach it there (it is otherwise event-bound to TEST_RESULT).
+        PayloadKind.RECOVERY.value,
     }),
     Phase.EDIT: frozenset({
         PayloadKind.LOCAL_EVIDENCE.value,
@@ -76,6 +85,7 @@ PHASE_POLICY: dict[Phase, frozenset[str]] = {
         PayloadKind.COHERENCE_RISK.value,
         PayloadKind.SEMANTIC_DRIFT.value,  # F1: post-edit guard/return-deletion steer
         PayloadKind.LOOP_NUDGE.value,
+        PayloadKind.RECOVERY.value,  # SM-10: stuck after an edit
     }),
     Phase.VERIFY: frozenset({
         PayloadKind.OBLIGATION_STATUS.value,
@@ -83,6 +93,7 @@ PHASE_POLICY: dict[Phase, frozenset[str]] = {
         PayloadKind.FAILURE_NUDGE.value,
         PayloadKind.NO_TEST_NUDGE.value,
         PayloadKind.LOOP_NUDGE.value,
+        PayloadKind.RECOVERY.value,  # SM-10: stuck during verification
         PayloadKind.SEMANTIC_DRIFT.value,  # F1: a drift noticed at verify still delivers
         # F4 (Fable 2026-07-05): the scope-completeness steer is PRODUCED on the review
         # predicate (edits + non-edit streak>=3), which is exactly when _detect_phase reaches
@@ -115,6 +126,7 @@ EVENT_BOUND_PAYLOADS: dict[Event, frozenset[str]] = {
     }),
     Event.POST_VIEW: frozenset({
         PayloadKind.LOCAL_EVIDENCE.value,
+        PayloadKind.RECOVERY.value,  # SM-10: a repeated failing view/probe -> recovery
     }),
     Event.POST_EDIT: frozenset({
         PayloadKind.LOCAL_EVIDENCE.value,
@@ -122,11 +134,13 @@ EVENT_BOUND_PAYLOADS: dict[Event, frozenset[str]] = {
         PayloadKind.COCHANGE.value,
         PayloadKind.COHERENCE_RISK.value,
         PayloadKind.SEMANTIC_DRIFT.value,  # F1: guard/return-deletion is a post-edit event
+        PayloadKind.RECOVERY.value,  # SM-10: a failure recurring after an edit -> recovery
     }),
     Event.TEST_RESULT: frozenset({
         PayloadKind.FAILURE_NUDGE.value,
         PayloadKind.NO_TEST_NUDGE.value,
         PayloadKind.VERIFY_PIVOT.value,
+        PayloadKind.RECOVERY.value,  # SM-10: a repeated/falsified test failure -> recovery
     }),
     Event.REVIEW_TRANSITION: frozenset({
         PayloadKind.SCOPE_COMPLETENESS.value,

@@ -109,15 +109,21 @@ def test_arbitrate_ties_break_deterministically():
 # render_envelope — generic + injected def renderer
 # --------------------------------------------------------------------------- #
 def test_render_generic_tagged_vs_native():
-    e = _env(evidence_type="trace_frame", target="a/x.py",
-             payload=("deepest in-repo frame: a/x.py:7 in f",),
+    """TAGGED trace_frame is UNCHANGED (the <gt-fact> wrapper over the payload). NATIVE now
+    dispatches to the SM-1 CPython traceback FRAME (SM-2b Finding-2 wiring) — a real
+    interpreter grammar — instead of the tag-free `deepest in-repo frame: …` narration."""
+    e = _env(evidence_type="trace_frame", target="a/x.py", fact_id="transform",
+             payload=("deepest in-repo frame: a/x.py:7 in transform",),
              provenance=(("a/x.py", 7),))
     tagged = ad.render_envelope(e, native=False)
     assert tagged.startswith('<gt-fact kind="trace_frame">') and tagged.endswith("\n")
     assert "</gt-fact>" in tagged
+    assert "deepest in-repo frame" in tagged      # tagged form: the payload narration, unchanged
     native = ad.render_envelope(e, native=True)
-    assert "<gt-" not in native  # world-fact voice: tag-free
-    assert "deepest in-repo frame" in native
+    assert "<gt-" not in native                   # world-fact voice: tag-free
+    # SM-2b: the SM-1 native trace grammar (a CPython frame), NOT the GT narration.
+    assert native == '  File "a/x.py", line 7, in transform\n'
+    assert "deepest in-repo frame" not in native
 
 
 def test_render_reuses_injected_def_renderer():

@@ -153,7 +153,13 @@ def test_b12_on_time_delivers(tmp_path):
                              gw.ToolEvent(kind="search"), st) == gw.ROUTE_DELIVER
 
 
-def test_b12_too_early_defers(tmp_path):
+def test_b12_too_early_defers(tmp_path, monkeypatch):
+    # OFF-mode contract: the self-stamped ``preferred_event`` drives the boundary. Under
+    # GT_REGISTRY_ENFORCE (SM-0) the boundary instead comes from the class's DECLARED registry
+    # deliver_by (def_ref_partition -> search_result), so a def-partition on a search event is
+    # ON-TIME regardless of a hand-set preferred_event — the enforcement-mode timing is pinned
+    # separately in test_registry_enforce_20260711.py. Pin the flag OFF for this env-driven pin.
+    monkeypatch.delenv("GT_REGISTRY_ENFORCE", raising=False)
     st = gw.GatewayState(graph_db=_mk_db(tmp_path))
     # fact's boundary is 'test'; the current event is a 'search' (earlier) -> defer
     assert gw.route_delivery(_env(preferred_event="test"),

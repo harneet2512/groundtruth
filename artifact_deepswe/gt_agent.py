@@ -290,6 +290,45 @@ _PRODUCT_PACKAGE_MODULES: dict[str, tuple[str, ...]] = {
         "evidence_envelope.py",
         "fact_registry.py",
         "gateway.py",
+        # SM-3 "Super Mode" engine activation (2026-07-11): four BUILT-but-DARK
+        # engines wired into gt_mini_patch behind default-OFF flags. gt_mini_patch
+        # imports them at MODULE scope (regex-caught regardless of flag branch), so
+        # they MUST ship or the in-container import fails and the seam runs dark.
+        # Import-closure (verified by test_shipped_module_set_is_import_closed):
+        #   edit_overlay      -> edit_check(above) + patch_delta(below)
+        #   verification_plan -> curation_map[pretask] + covering_runner/edit_check/
+        #                        repo_adapters/test_runner (all above)
+        #   hypothesis_ledger -> episode_state/evidence_envelope(above) +
+        #                        trajectory.classifier(new package below)
+        #   patch_delta       -> path_policy[delivery] + curation_map/cochange[pretask]
+        #                        + covering_runner(above)
+        # submit_gate.build_certificate/safe_build_certificate already ships (the
+        # module is above); SM-3 only activates its DARK half at the submit gate.
+        "edit_overlay.py",
+        "verification_plan.py",
+        "hypothesis_ledger.py",
+        "patch_delta.py",
+        # SM-5 "Super Mode" — the ONE global ranked competition over all delivery planes.
+        # gt_mini_patch imports it function-scope (behind GT_GLOBAL_ARBITER) but it must
+        # ship or the in-container flag-on path runs dark. Import-closed: stdlib-only, no
+        # groundtruth.* import (verified by test_shipped_module_set_is_import_closed).
+        "global_arbiter.py",
+        # SM-9c "Super Mode" — the CROSS-SESSION learned-delivery policy. gt_mini_patch
+        # imports xsession_memory (the causal-consumption ledger) + project_memory
+        # (_repo_identity, the repo-key source of truth) behind GT_XSESSION_MEMORY; both
+        # must ship or the flag-on path runs dark. Import-closed:
+        #   xsession_memory -> fact_registry + evidence_envelope (both shipped above)
+        #   project_memory  -> stdlib only at module scope (telemetry import is
+        #                      function-scope behind `if log_dir is not None`, unreached)
+        "xsession_memory.py",
+        "project_memory.py",
+    ),
+    # SM-3: trajectory.classifier — hypothesis_ledger's FailureKind/is_env_failure
+    # dep. Stdlib-only (enum/os/re/dataclasses), no groundtruth.* import -> closes
+    # the hypothesis_ledger import hole. New top-level package dir (like runtime),
+    # created generically by _inject_steps_b64's per-subdir mkdir/__init__ loop.
+    "trajectory": (
+        "classifier.py",
     ),
     # W2 seam adapter (groundtruth.runtime.adapters.miniswe) — the mini-swe-agent
     # one-call wiring. Nested package dir; its module-scope deps (gateway,
@@ -310,6 +349,10 @@ _PRODUCT_PACKAGE_MODULES: dict[str, tuple[str, ...]] = {
     # only stdlib (os/re/sqlite3/dataclasses) so it ships standalone.
     "pretask": (
         "curation_map.py",
+        # SM-3: cochange — patch_delta's module-scope dep (co-change clustering for
+        # the diagnostic-delta blast radius). Ships to close patch_delta's import
+        # closure. Verified stdlib+shipped-only by the import-closure test.
+        "cochange.py",
     ),
 }
 

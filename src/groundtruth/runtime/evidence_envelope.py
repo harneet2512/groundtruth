@@ -112,7 +112,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
 from groundtruth.delivery.path_policy import is_deliverable
@@ -367,6 +367,19 @@ class EvidenceEnvelope:
     delivery_reason: str = ""  # why delivered (mutually exclusive with suppression)
     suppression_reason: str = ""  # why suppressed (mutually exclusive with delivery)
 
+    # --- SM-10 (2026-07-12) NATIVE-RENDER SIDE-CAR — structured args, NOT identity, NOT
+    # serialized. A producer attaches the numeric/structured fields a per-class native
+    # renderer (``native_render.render_*_native``) needs to emit its real tool-channel
+    # DIAGNOSTIC (mypy/gopls arity error, linter registration warning) instead of the
+    # tag-free prose ``_render_generic`` falls back to. It is DELIBERATELY absent from
+    # FIELD_ORDER / to_dict / from_dict / derive_dedup_key / content_signature (dedup +
+    # byte-chain identity are UNCHANGED), and ``compare=False`` keeps it OUT of __eq__ /
+    # __hash__ (two envelopes differing only in native_args are still ==, same hash), so
+    # every existing envelope is byte/hash/eq-identical (default None). It travels with the
+    # LIVE object via ``dataclasses.replace`` (the seal) — the delivery path renders the
+    # object BEFORE any JSON round-trip — never through serialization.
+    native_args: "dict | None" = field(default=None, compare=False)
+
     # explicit field order — the source of deterministic (de)serialization order.
     # ClassVar so it is NOT a dataclass field (never in __init__/__eq__/to_dict).
     FIELD_ORDER: ClassVar[tuple[str, ...]] = (
@@ -424,6 +437,7 @@ class EvidenceEnvelope:
         receipt_state: str = RECEIPT_NONE,
         delivery_reason: str = "",
         suppression_reason: str = "",
+        native_args: "dict | None" = None,
     ) -> EvidenceEnvelope:
         """Construct an envelope with the dedup key DERIVED (never hand-set) and the
         freshness token defaulted to ``graph_revision`` (a fact is valid until the graph
@@ -476,6 +490,7 @@ class EvidenceEnvelope:
             receipt_state=receipt_state,
             delivery_reason=delivery_reason,
             suppression_reason=suppression_reason,
+            native_args=native_args,
         )
 
 

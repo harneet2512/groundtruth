@@ -109,12 +109,14 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import sqlite3
 import struct
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from groundtruth.runtime.covering_runner import _connect_ro
 from groundtruth.runtime.edit_check import _build_check_command, check_edit_syntax
 from groundtruth.runtime.patch_delta import PatchDeltaResult, analyze_patch_delta
 
@@ -271,6 +273,180 @@ def mark_stale_envelopes(
         d["stale"] = bool(token) and bool(pr) and token != pr
         out.append(d)
     return out
+
+
+# ---------------------------------------------------------------------------
+# SM-4 — the LIGHTWEIGHT episode overlay (freshness against the CURRENT edit state).
+#
+# The certified base ``graph.db`` is a SNAPSHOT of the pre-edit world and is ro-mounted
+# (immutable) in the real run. After the agent edits a file, a fact READ from that base
+# about the file describes structure that may no longer exist — but the base's revision
+# never moves, so the class-level freshness token (``valid_until``) can't stale it. This
+# overlay closes that window WITHOUT rebuilding the base: it re-derives, per edited file,
+# whether the base's recorded def structure still matches the file's CURRENT content
+# (a read-only query of ONLY that file's nodes + a scan of the current bytes — O(changed
+# file), NEVER O(repo)). A structurally-changed file is marked ``changed`` — the SAME
+# :func:`mark_stale_envelopes` verdict, so a base-read fact about it is dropped downstream
+# (Gateway ``route_delivery``). A fact about an UNEDITED file is untouched; an UNPROVABLE
+# case (no base nodes / db fault) fails QUIET (``changed=False`` — never a fabricated stale).
+# ---------------------------------------------------------------------------
+# The graph node labels that carry a definition SIGNATURE (mirror of
+# ``gateway._DEF_LABELS`` — the classes whose recorded shape a fact can be ABOUT).
+_OVERLAY_DEF_LABELS = (
+    "Function", "Method", "Class", "Interface", "Struct", "Enum", "Trait", "Constructor",
+)
+
+
+def _overlay_norm_path(path: str) -> str:
+    """Overlay key normalization: repo-relative, ``\\`` -> ``/``, no leading ``./`` or
+    ``/`` (parity with ``gateway._norm_fp`` so a key the seam STORES and the Gateway's
+    ``env.target`` LOOKUP agree for the same file)."""
+    return _norm(path).lstrip("/")
+
+
+def _collapse_ws(s: str) -> str:
+    """Collapse every run of whitespace to a single space + strip. A signature's PRESENCE
+    in the current file becomes insensitive to reindent/reformat, while a genuine token
+    change (an added/removed/renamed parameter, a changed return type) still fails the
+    substring match — so a body-only or comment-only edit stays FRESH but a signature
+    change stales."""
+    return " ".join((s or "").split())
+
+
+def _graph_def_signatures(graph_db: str, rel_file: str) -> tuple[str, ...]:
+    """The definition SIGNATURES (fallback: the def NAME) the certified base ``graph.db``
+    recorded for ``rel_file`` — NON-test def nodes only. Read-only (``_connect_ro`` — the
+    ro-mounted base is NEVER written), bounded to ONE file's nodes; correct-or-quiet -> ()
+    on any db/schema fault or no matching node.
+
+    O(changed file), NEVER O(repo): the predicate is an INDEXED EQUALITY on ``file_path``
+    (``AND file_path = ?``), so the SQLite planner uses the base graph.db's own baked index
+    (``idx_nodes_file``, present on every gt-index db) to return ONLY the target file's rows —
+    it never materializes the whole ``nodes`` table into Python. The equality is exact because
+    gt-index stores ``file_path`` in ONE deterministic form — repo-relative, forward-slashed
+    (``walker.go``: ``filepath.Rel(root, path)`` -> ``filepath.ToSlash``) — the SAME form the
+    seam's ``_to_repo_rel``/``_overlay_norm_path`` produce (the indexer itself queries the
+    identical ``WHERE file_path = ?``, resolver/api_edges.go). A stored form that ever differs
+    simply returns () -> the overlay is UNKNOWN for that file -> fail-quiet (never a false stale
+    drop; degrades to pre-SM-4). The per-row normalized-equality check is retained as an exactness
+    backstop over the already-narrow result set."""
+    db = graph_db or ""
+    if not db or not os.path.isfile(db):
+        return ()
+    target = _overlay_norm_path(rel_file)
+    if not target:
+        return ()
+    con = _connect_ro(db)
+    if con is None:
+        return ()
+    labels_sql = ",".join("?" * len(_OVERLAY_DEF_LABELS))
+    try:
+        # INDEXED EQUALITY on file_path (idx_nodes_file) — bounds the scan to this ONE file's
+        # nodes, not the whole table. `target` is the exact repo-relative forward-slashed form
+        # gt-index stores (walker.go). label/is_test further narrow within the file.
+        rows = con.execute(
+            f"SELECT file_path, name, signature FROM nodes "
+            f"WHERE file_path = ? AND COALESCE(is_test,0)=0 AND label IN ({labels_sql})",
+            (target, *_OVERLAY_DEF_LABELS),
+        ).fetchall()
+    except sqlite3.Error:
+        return ()
+    finally:
+        con.close()
+    out: list[str] = []
+    for fp, name, sig in rows:
+        # backstop: every returned row already has file_path == target (indexed equality); the
+        # re-normalized equality guards against any stored-form surprise (defensive, cheap on a
+        # handful of rows — never a full scan).
+        if _overlay_norm_path(str(fp or "")) != target:
+            continue
+        text = _collapse_ws(str(sig or "")) or _collapse_ws(str(name or ""))
+        if text:
+            out.append(text)
+    return tuple(sorted(set(out)))
+
+
+def build_episode_overlay_entry(
+    graph_db: str, rel_file: str, current_content: str,
+) -> dict[str, Any]:
+    """SM-4 deliverable 1 — the per-file episode overlay entry for ONE edited file.
+
+    Re-derives whether the base ``graph.db``'s recorded structure for ``rel_file`` still
+    matches the file's CURRENT content, WITHOUT rebuilding the base (a read-only query of
+    ONLY this file's def nodes + a scan of ``current_content``; O(changed file), never a
+    write). Returns::
+
+        {"file", "state", "graph_sig", "current_sig", "changed", "overlay_rev", "n_defs"}
+
+    ``changed`` (deliverable 2) IS the :func:`mark_stale_envelopes` verdict: a synthetic
+    envelope stamped with the BASE structural signature (``graph_sig``) is marked stale
+    against the CURRENT structural signature (``current_sig``) — they differ iff a recorded
+    def signature no longer appears in the current file. ``state`` is ``"available"`` when
+    the base held ≥1 signature for the file (a real comparison happened) or ``"unknown"``
+    (no db / no nodes / unreadable) — in the UNKNOWN case ``changed`` is False (deliverable
+    4: fail QUIET, keep current behavior, never drop on an unprovable staleness). NEVER
+    raises."""
+    file_key = _overlay_norm_path(rel_file)
+    content = current_content if isinstance(current_content, str) else ""
+    overlay_rev = hashlib.sha256(content.encode("utf-8", "replace")).hexdigest()[:16]
+    try:
+        graph_defs = _graph_def_signatures(graph_db, rel_file)
+    except Exception:  # noqa: BLE001 -- correct-or-quiet
+        graph_defs = ()
+    if not graph_defs:
+        return {
+            "file": file_key, "state": "unknown", "graph_sig": "", "current_sig": "",
+            "changed": False, "overlay_rev": overlay_rev, "n_defs": 0,
+        }
+    norm_content = _collapse_ws(content)
+    present = tuple(sorted(g for g in graph_defs if g and g in norm_content))
+    graph_sig = hashlib.sha256("\x00".join(graph_defs).encode("utf-8")).hexdigest()[:16]
+    current_sig = hashlib.sha256("\x00".join(present).encode("utf-8")).hexdigest()[:16]
+    # deliverable-2 wiring: mark_stale_envelopes IS the verdict. A base-stamped synthetic
+    # envelope is stale iff the current structural signature differs from the base's.
+    verdict = mark_stale_envelopes([{"valid_until": graph_sig}], current_sig)
+    changed = bool(verdict and verdict[0].get("stale"))
+    return {
+        "file": file_key, "state": "available", "graph_sig": graph_sig,
+        "current_sig": current_sig, "changed": changed, "overlay_rev": overlay_rev,
+        "n_defs": len(graph_defs),
+    }
+
+
+def compose_episode_revision(
+    base_revision: str, overlay: "Mapping[str, Any] | None",
+) -> str:
+    """SM-4 deliverable 1 — ONE current episode revision = the certified base composite
+    revision folded with each overlaid file's per-file revision (``overlay_rev``), in
+    sorted-path order. Empty overlay -> the base revision UNCHANGED (byte-identical to the
+    no-overlay world). Deterministic; the base is never mutated; no I/O."""
+    base = str(base_revision or "")
+    if not overlay:
+        return base
+    h = hashlib.sha256()
+    h.update(base.encode("utf-8"))
+    for path in sorted(overlay):
+        entry = overlay[path]
+        rev = str(entry.get("overlay_rev", "")) if isinstance(entry, Mapping) else ""
+        h.update(b"\x00")
+        h.update(path.encode("utf-8"))
+        h.update(b"\x00")
+        h.update(rev.encode("utf-8"))
+    return h.hexdigest()[:16]
+
+
+def overlay_target_stale(
+    overlay: "Mapping[str, Any] | None", target_file: str,
+) -> bool:
+    """True iff a fact whose target is ``target_file`` is STALE against the episode overlay
+    — the file was edited this episode AND its recorded structure changed (``entry['changed']``,
+    the mark_stale_envelopes verdict). False when the file is not overlaid (UNEDITED ->
+    unaffected) or its entry is UNKNOWN (fail quiet). Pure — the Gateway's drop decision reads
+    exactly this predicate's per-file verdict."""
+    if not overlay or not target_file:
+        return False
+    entry = overlay.get(_overlay_norm_path(target_file))
+    return bool(isinstance(entry, Mapping) and entry.get("changed"))
 
 
 # ---------------------------------------------------------------------------

@@ -1417,6 +1417,27 @@ func extractAssignments(node *sitter.Node, sf walker.SourceFile, src []byte, res
 			right = node.ChildByFieldName("value") // JS variable_declarator
 		}
 
+		// Go (and any grammar that wraps assignment sides in `expression_list`): unwrap the
+		// SINGLE-variable case so `m := makeMaker()` / `t := m.build()` records an
+		// AssignmentRef exactly like the identifier-LHS grammars (Python/JS/Rust). tree-sitter
+		// -go wraps BOTH sides of `:=`/`=` in `expression_list`, so `left.Type()=="identifier"`
+		// was false and Go produced ZERO assignments — receiver-type resolution via assignment
+		// tracking (Strategy 1.96 + the B2 typeflow fixpoint) was entirely DEAD on a Tier-1
+		// language. Restricted to exactly ONE named child on EACH side: multi-element lists
+		// (`a, b := f()` tuple unpacking) are ABSTAINED because the RHS values do not map 1:1 to
+		// the LHS names, and a guessed type is worse than none (correct-or-quiet). Augmented
+		// assignments (`x += f()`) are skipped: x already has a type and the RHS is not it. The
+		// unwrap only fires when a side IS an `expression_list` with one named child, so the
+		// identifier/attribute/name grammars are byte-identical (their sides are never wrapped).
+		if !isAugmentedAssignment(node) {
+			if left != nil && left.Type() == "expression_list" && left.NamedChildCount() == 1 {
+				left = left.NamedChild(0)
+			}
+			if right != nil && right.Type() == "expression_list" && right.NamedChildCount() == 1 {
+				right = right.NamedChild(0)
+			}
+		}
+
 		if left != nil {
 			lhsText := left.Content(src)
 			// Simple variable: x = ...
@@ -1596,6 +1617,26 @@ func classifyCallContext(parentType string, callNode *sitter.Node, src []byte) s
 		return ""
 	}
 	return ""
+}
+
+// isAugmentedAssignment reports whether an assignment node uses a COMPOUND operator
+// (`+=`, `-=`, `*=`, `&^=`, …) rather than a plain `=`/`:=`. For those the LHS variable
+// already holds a value of some type and the RHS is NOT that type, so no constructor /
+// return-type / alias fact may be recorded from it (correct-or-quiet). tree-sitter emits
+// the operator as a token child whose Type() IS the literal operator string. A plain `=`
+// or a Go `:=` short_var_declaration never matches, so extraction is unaffected for them.
+func isAugmentedAssignment(n *sitter.Node) bool {
+	if n == nil {
+		return false
+	}
+	for i := 0; i < int(n.ChildCount()); i++ {
+		switch n.Child(i).Type() {
+		case "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", "&^=",
+			"&&=", "||=", "**=", "??=", ">>>=":
+			return true
+		}
+	}
+	return false
 }
 
 // assignmentLHS returns the left-hand-side (target/pattern) node of an assignment or

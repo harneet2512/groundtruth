@@ -189,7 +189,26 @@ _HOST_LOCAL_EXEMPT = frozenset({
     "GT_PROOF_MARKER",                       # R10 sentinel path, host-local default
     "GT_RESURF_DEBUG",                       # debug-only opt-in
     "GT_ROOT_FILE",                          # container path default /opt/gt/gt_root.txt
+    # GT_XSESSION_DIR GRADUATED off this exempt set (BUG-2, 2026-07-12): it is now
+    # --ae-forwarded in gt_ae_block.sh into ${GT_C_OUT}/gt_xsession (a writable, host-mounted
+    # dir on every pier caller), so it is covered by FORWARDING — not host-local. Removing
+    # that forward re-trips this invariant (the same fail-closed guarantee GT_POST_SEARCH has).
+    # The direct-docker mini path forwards it via `docker run -e` (see
+    # tests/test_live_lite_xsession_dir_pin_20260712.py).
 })
+
+
+# NAMED SEAM — the pending-forward register for a NEW behavioral flag whose --ae forward +
+# profile membership are OWNED by a CONCURRENT coder in the SAME session, so it cannot yet be
+# wired from this surface. UNLIKE _HOST_LOCAL_EXEMPT, such a flag is NOT host-local: it MUST be
+# forwarded to be enableable in the container. A flag lives here ONLY until its forward lands in
+# gt_ae_block.sh (at which point _ae_forwarded() covers it via the preferred forwarding path —
+# the same way GT_POST_SEARCH_NATIVE is covered), then it is REMOVED. The mechanism is retained
+# (the r1 parity invariant below subtracts this set) so the next cross-coder seam has a home.
+#   CURRENTLY EMPTY: GT_SCOPE_NATIVE (Task #63 — the scope-surface FORM A/B) was forwarded in
+#   gt_ae_block.sh AND added to rl_profile._PROFILE_1_MEMBERS this session (2026-07-12), so it
+#   graduated off the seam onto the preferred forwarding path.
+_PENDING_AE_FORWARD_SEAM: frozenset[str] = frozenset()
 
 
 def test_r1_post_search_is_forwarded():
@@ -198,15 +217,16 @@ def test_r1_post_search_is_forwarded():
 
 
 def test_r1_ae_parity_invariant_failclosed():
-    """Structural invariant: every GT_* var the code READS (minus documented
-    host-local exemptions) MUST be forwarded via --ae. A read with no --ae entry
-    and no exemption fails the run. RED before the GT_POST_SEARCH --ae line."""
+    """Structural invariant: every GT_* var the code READS (minus documented host-local
+    exemptions and the NAMED-SEAM pending-forward set) MUST be forwarded via --ae. A read with
+    no --ae entry, no exemption, and no seam fails the run. RED before the GT_POST_SEARCH --ae
+    line."""
     reads = _gt_reads()
     forwarded = _ae_forwarded()
-    uncovered = sorted(reads - forwarded - _HOST_LOCAL_EXEMPT)
+    uncovered = sorted(reads - forwarded - _HOST_LOCAL_EXEMPT - _PENDING_AE_FORWARD_SEAM)
     assert uncovered == [], (
-        "GT_* env var(s) read by gt_mini_patch.py but neither forwarded via --ae "
-        f"nor documented host-local: {uncovered}")
+        "GT_* env var(s) read by gt_mini_patch.py but neither forwarded via --ae, documented "
+        f"host-local, nor a pending-forward NAMED SEAM: {uncovered}")
     # fail-closed demonstration: GT_POST_SEARCH is covered by FORWARDING, not by
     # exemption, so removing it from --ae would re-trip the invariant.
     assert "GT_POST_SEARCH" in reads

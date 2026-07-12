@@ -27,6 +27,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -51,6 +52,9 @@ MEMBERS = {
     "GT_CONTRACT_MODE",
     "GT_CONTRACT_BILATERAL",
     "GT_GATEWAY_EDIT_BRIDGES",
+    "GT_POST_SEARCH_NATIVE",
+    # Task #63 (2026-07-12) — the scope-surface FORM arm, same FORM-arm family.
+    "GT_SCOPE_NATIVE",
 }
 
 
@@ -58,6 +62,17 @@ MEMBERS = {
 def test_profile_v1_is_exactly_the_members():
     # Dropping (or adding) a member in PROFILE_MEMBERS["1"] makes THIS bite.
     assert PROFILE_MEMBERS["1"] == MEMBERS
+
+
+def test_profile_members_cross_the_miniswe_ae_boundary():
+    block = (
+        Path(__file__).parents[2]
+        / "artifact_deepswe"
+        / "gt_integration"
+        / "gt_ae_block.sh"
+    ).read_text(encoding="utf-8")
+    for member in MEMBERS:
+        assert f'--ae "{member}=${{{member}:-0}}"' in block, member
 
 
 # ── (a) profile=1 sets all 8 members ─────────────────────────────────────────

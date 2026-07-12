@@ -132,9 +132,9 @@ GT_AE_ARGS=(
   --ae "GT_CONTRACT_BILATERAL=${GT_CONTRACT_BILATERAL:-0}"
   --ae "GT_GATEWAY_EDIT_BRIDGES=${GT_GATEWAY_EDIT_BRIDGES:-0}"
 
-  # ── B-16/B-17 RL-profile trio that had NO --ae entry (Brief-F4). The resolver above
+  # ── B-16/B-17 RL-profile members that had NO --ae entry (Brief-F4). The resolver above
   #    EXPORTS these host-side, but pier DROPS host env — only GT_AE_ARGS crosses into
-  #    the container. Without them, a GT_RL_PROFILE run activated only 8/11 members on
+  #    the container. Without them, a GT_RL_PROFILE run activates only part of the profile on
   #    any caller that splices ONLY GT_AE_ARGS (the codespace witness path), shipping an
   #    INCOHERENT pair (GT_GATEWAY_NATIVE=1 with GT_GATEWAY dark). Forward them here so
   #    THIS block is the single source (don't rely on callers). Default 0 → byte-identical
@@ -142,6 +142,82 @@ GT_AE_ARGS=(
   --ae "GT_GATEWAY=${GT_GATEWAY:-0}"
   --ae "GT_EDIT_CHECK=${GT_EDIT_CHECK:-0}"
   --ae "GT_VERIFY_EXECUTE=${GT_VERIFY_EXECUTE:-0}"
+  --ae "GT_POST_SEARCH_NATIVE=${GT_POST_SEARCH_NATIVE:-0}"
+  # ── Task #63 (2026-07-12): the SCOPE-surface FORM arm (<gt-scope> tag -> native compiler
+  #    `note:` constraint via render_scope_constraint_native). Mirrors GT_POST_SEARCH_NATIVE;
+  #    read in-container by gt_mini_patch._consensus_scope_block. pier DROPS host env, so forward
+  #    it here or the FORM flip stays DARK in-container. Default 0 → byte-identical when unset;
+  #    Profile-1/2 fan it to 1 via resolve_profile (rl_profile._PROFILE_1_MEMBERS). ──
+  --ae "GT_SCOPE_NATIVE=${GT_SCOPE_NATIVE:-0}"
+  # ── T0->T2 localization RE-SLOT GO-LIVE (2026-07-12). GT_LOC_RESLOT is read by
+  #    gt_mini_patch (the post_search ABSTAIN branch delivers GT's ranked localization answer
+  #    on a broad/behavior grep) AND by gateway._loc_reslot_on; pier drops host env, so forward
+  #    it here or the live seam stays DARK. Default 0 → byte-identical when unset; Profile-2
+  #    activates it (rl_profile PROFILE_MEMBERS). ──
+  --ae "GT_LOC_RESLOT=${GT_LOC_RESLOT:-0}"
+  # ── SM-3 "Super Mode" engine-activation flags (2026-07-11). Read by gt_mini_patch;
+  #    forwarded so they are enable-able in-container (else the engines stay DARK — the
+  #    exact defect SM-3 closes). Default 0 → byte-identical when unset; Profile-2 fans
+  #    them to 1 via resolve_profile. ──
+  --ae "GT_COMPLETION_CERT=${GT_COMPLETION_CERT:-0}"
+  --ae "GT_HYPOTHESIS=${GT_HYPOTHESIS:-0}"
+  --ae "GT_VERIFICATION_PLAN=${GT_VERIFICATION_PLAN:-0}"
+  --ae "GT_EDIT_OVERLAY=${GT_EDIT_OVERLAY:-0}"
+  # ── SM-3 D7 delivery (2026-07-12): the CompletionCertificate rendered MODEL-FACING at the
+  #    submit turn (native pre-commit-hook failure block). Companion to GT_COMPLETION_CERT
+  #    (which only builds/host-records the cert). Read by gt_mini_patch; forwarded so it is
+  #    enable-able in-container (else D7 delivery stays DARK). Default 0 → byte-identical when
+  #    unset; Profile-2 fans it to 1 via resolve_profile. ──
+  --ae "GT_CERT_DELIVERY=${GT_CERT_DELIVERY:-0}"
+  # ── SM-5 "Super Mode" — the ONE global ranked competition over all delivery planes
+  #    (2026-07-11). GT_GLOBAL_ARBITER is read by gt_mini_patch (the collapse); the two
+  #    Gateway-producer flags gate change_surface (W-A) / patch_delta (W-C) IN-CONTAINER,
+  #    so the arbiter's pool is COMPLETE. Default 0 → byte-identical when unset; Profile-2
+  #    fans all three to 1 via resolve_profile. ──
+  --ae "GT_GLOBAL_ARBITER=${GT_GLOBAL_ARBITER:-0}"
+  --ae "GT_CHANGE_SURFACE=${GT_CHANGE_SURFACE:-0}"
+  --ae "GT_PATCH_DELTA=${GT_PATCH_DELTA:-0}"
+  # ── SM-9c "Super Mode" — the cross-session learned-delivery policy (2026-07-11). Read by
+  #    gt_mini_patch; forwarded so it is enable-able in-container. Default 0 → byte-identical
+  #    when unset; Profile-2 fans it to 1 via resolve_profile. The durable per-repo store dir
+  #    GT_XSESSION_DIR is WIRED (BUG-2, 2026-07-12) — forwarded below into ${GT_C_OUT}/gt_xsession
+  #    (a writable, host-mounted dir on every pier caller: /gt_out is bind-mounted rw), so the
+  #    suppress/rank-up policy actually WRITES a store within the run. CROSS-RUN persistence
+  #    (upload/download that dir between runs) is the remaining OWED follow-up (option b). ──
+  --ae "GT_XSESSION_MEMORY=${GT_XSESSION_MEMORY:-0}"
+  # ── Task #62 AE-forward completeness (2026-07-12): Profile-2 members that were read
+  #    in-container (or at brief-gen) but had NO --ae entry here, so under an active
+  #    GT_RL_PROFILE=2 they went DARK on any caller that splices ONLY GT_AE_ARGS (the
+  #    codespace witness path). pier DROPS host env — only GT_AE_ARGS crosses in — so the
+  #    profile fan-out's `export` alone is not enough; the flag must ALSO be forwarded here.
+  #    The pin tests/runtime/test_ae_forward_profile2_completeness_20260712.py enforces
+  #    PROFILE_MEMBERS["2"] ⊆ this forward list so the hole cannot recur. Default 0 →
+  #    byte-identical when GT_RL_PROFILE is unset; Profile-2 fans each to 1. ──
+  #    SM-0 registry enforcement (gateway.py:300, _registry_enforce, in-container gateway).
+  --ae "GT_REGISTRY_ENFORCE=${GT_REGISTRY_ENFORCE:-0}"
+  #    SM-9c rank-up / winner-promotion (gateway.py:406, _xsession_rankup_on) — the KNOWN
+  #    hole: read by the SYNCED gateway module, so invisible to the gt_mini_patch-scoped R1
+  #    parity invariant and to the Profile-1-only ae-boundary test. Dark in-container until now.
+  --ae "GT_XSESSION_RANKUP=${GT_XSESSION_RANKUP:-0}"
+  #    SM-6 step-0 baked-brief reduction (v1r_brief.py:1550, read at brief-generation). Read at
+  #    BAKE time not in-container, so forwarding is inert on the run itself — carried for pool
+  #    + pin completeness (the single-source invariant covers every member, bake-time or not).
+  --ae "GT_BRIEF_MINIMAL=${GT_BRIEF_MINIMAL:-0}"
+  #    SM-10 body-content legs (graph_localizer.localize). GT_SEM_BODY default 0 matches
+  #    deepswe_full.yml's own :-0 forward — byte-identical there and here.
+  --ae "GT_SEM_BODY=${GT_SEM_BODY:-0}"
+  #    GT_CONTENT_LEG is the ONE deviation from the :-0 convention: deepswe_full.yml already
+  #    forwards it `GT_CONTENT_LEG=${GT_CONTENT_LEG:-1}` (default ON — the leg is landed +
+  #    witness-pending) and splices GT_AE_ARGS AFTER its own block, so pier/docker last-wins
+  #    would let a :-0 here OVERRIDE that intended 1→0 (a regression on the primary paid path).
+  #    :-1 preserves full.yml exactly and aligns the codespace witness path to the same landed
+  #    default (the de-drift this block exists for). Profile-2 fans it to 1 regardless.
+  --ae "GT_CONTENT_LEG=${GT_CONTENT_LEG:-1}"
+  #    #48 per-turn in-container L6 reindex (gt_mini_patch._db_path, `GT_L6_FRESH == "1"`).
+  #    Default 0 here is byte-identical: on deepswe_full.yml the caller appends its own
+  #    `--ae "GT_L6_FRESH=1"` to GT_AE_ARGS AFTER this entry (last-wins → 1 preserved); the
+  #    codespace path appends no L6 flag, so it stays OFF exactly as before.
+  --ae "GT_L6_FRESH=${GT_L6_FRESH:-0}"
 
   # ── Deep 8-dp telemetry sinks (CLAUDE.md mandate) -> host-mounted /gt_out ─────
   # Without these the in-container producers default to /tmp/* and DIE with the
@@ -149,4 +225,12 @@ GT_AE_ARGS=(
   --ae "GT_ORACLE_EVENTS=${GT_ORACLE_EVENTS:-${GT_C_OUT}/gt_oracle_events.jsonl}"
   --ae "GT_RUNTIME_LEDGER=${GT_RUNTIME_LEDGER:-${GT_C_OUT}/gt_runtime_ledger.jsonl}"
   --ae "GT_HOOK_FIRE_COUNTS=${GT_HOOK_FIRE_COUNTS:-${GT_C_OUT}/gt_hook_fire_counts.json}"
+
+  # ── SM-9c cross-session store DIR (BUG-2, 2026-07-12) -> host-mounted /gt_out ──
+  # The durable per-repo causal-consumption ledger (xsession_memory) needs a WRITABLE
+  # dir or the seam no-ops. Same path-valued-writable-env pattern as the sinks above:
+  # default into ${GT_C_OUT} (=/gt_out, bind-mounted rw on deepswe_full.yml AND the
+  # codespace path) so the store survives the container without a NEW mount. A host-side
+  # GT_XSESSION_DIR override wins. Within-run durable; cross-RUN upload is OWED (option b).
+  --ae "GT_XSESSION_DIR=${GT_XSESSION_DIR:-${GT_C_OUT}/gt_xsession}"
 )

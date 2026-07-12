@@ -11,9 +11,20 @@ importing it — importing gt_mini_patch executes runtime monkeypatches. The sea
 parse here is proven byte-equivalent to that module's ``_search_pattern`` by the golden
 corpus in ``tests/runtime/test_gateway.py`` (re-derived from ``test_post_search.py``).
 
-Governing laws (all pre-existing; none new):
+Governing laws (mostly pre-existing; the sub-flag kill-switches below are new, 2026-07-12 —
+they make this line's long-standing claim true rather than aspirational):
   * Master flag ``GT_GATEWAY`` — unset/0 => :func:`augment` returns ``[]`` immediately.
-  * Producer sub-flags honored (``GT_CHANGE_SURFACE`` for W-A, ``GT_PATCH_DELTA`` for W-C).
+  * Producer sub-flags are KILL-SWITCHES at their :func:`augment` call site — default-ON,
+    ``GT_CHANGE_SURFACE`` for W-A / ``GT_PATCH_DELTA`` for W-C: unset => the producer fires
+    exactly as if the flag did not exist (byte-identical); the literal string ``"0"`` => that
+    call site is skipped, the OTHER producer unaffected. This is a DIFFERENT polarity from the
+    ``_xxx_on()`` ENABLEMENT flags below (``GT_GATEWAY``, ``GT_REGISTRY_ENFORCE``, ``GT_LOC_RESLOT``,
+    ...), which default OFF and require an explicit ``"1"`` to arm a capability. The SAME two env
+    var NAMES are also read, with THAT (default-OFF, enablement) polarity, one layer further down
+    by the producers' own DOWNSTREAM engines (``change_surface._flag_enabled``,
+    ``patch_delta._flag_on``) — those are separate, pre-existing ``rl_profile`` Profile-2/SM-5
+    members gating the ENGINES themselves; this call-site kill-switch is additional and needs no
+    new ``rl_profile``/``gt_ae_block.sh`` wiring (the var already reaches the engine unchanged).
   * Correct-or-quiet: wrong evidence is worse than none; every ambiguity abstains.
   * ONE PAYLOAD CONTRACT: every produced fact is an
     ``evidence_envelope.EvidenceEnvelope`` (the canonical contract; the former
@@ -54,7 +65,7 @@ import re
 import shlex
 import sqlite3
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from groundtruth.delivery.path_policy import is_deliverable
 from groundtruth.pretask.curation_map import (
@@ -73,7 +84,36 @@ from groundtruth.runtime.evidence_envelope import (
     EvidenceEnvelope,
 )
 from groundtruth.runtime.evidence_envelope import validate as _validate_envelope
-from groundtruth.runtime.fact_registry import renderable as _renderable
+from groundtruth.runtime.fact_registry import (
+    EVENTS as fr_EVENTS,
+)
+from groundtruth.runtime.fact_registry import (
+    FRESHNESS_SURFACES as fr_FRESHNESS_SURFACES,
+)
+from groundtruth.runtime.fact_registry import (
+    PATCH_BOUND_FACTCLASSES as fr_PATCH_BOUND_FACTCLASSES,
+)
+from groundtruth.runtime.fact_registry import (
+    freshness_surfaces as _fr_freshness_surfaces,
+)
+from groundtruth.runtime.fact_registry import (
+    is_patch_bound as _fr_is_patch_bound,
+)
+from groundtruth.runtime.fact_registry import (
+    is_reactive as _fr_is_reactive,
+)
+from groundtruth.runtime.fact_registry import (
+    registration_for as _fr_registration_for,
+)
+from groundtruth.runtime.fact_registry import (
+    renderable as _renderable,
+)
+from groundtruth.runtime.fact_registry import (
+    required_event as _fr_required_event,
+)
+from groundtruth.runtime.fact_registry import (
+    required_renderer as _fr_required_renderer,
+)
 from groundtruth.runtime.native_render import render_covering_failure_native
 
 # Producer engines (traces / change_surface / patch_delta) are OPTIONAL module-scope
@@ -96,6 +136,15 @@ try:
     from groundtruth.runtime.patch_delta import analyze_patch_delta
 except Exception:  # noqa: BLE001
     analyze_patch_delta = None  # type: ignore[assignment]
+# T0->T2 localization re-slot (2026-07-12): localize() is the OFFLINE source of GT's
+# ranked localization answer, re-homed from the T0 baked brief to the D2/post-search
+# reactive producer (_produce_ranked_localization). Heavy pretask leg -> try-wrapped
+# exactly like detect_change_surface: unavailable -> None -> the producer degrades
+# correct-or-quiet ([]). Kept a real module attribute so tests can monkeypatch it.
+try:
+    from groundtruth.pretask.graph_localizer import localize as _localize
+except Exception:  # noqa: BLE001
+    _localize = None  # type: ignore[assignment]
 
 __all__ = [
     "ToolEvent",
@@ -204,6 +253,14 @@ class GatewayState:
     issue_text: str = ""
     graph_revision: str = ""
     episode: EpisodeState = field(default_factory=EpisodeState)
+    # SM-4 (2026-07-11): the per-run LIGHTWEIGHT episode overlay — ``{norm_file_path:
+    # overlay_entry}`` built per structured edit (edit_overlay.build_episode_overlay_entry),
+    # where ``overlay_entry['changed']`` is the mark_stale_envelopes verdict that the file's
+    # base graph.db structure no longer matches its CURRENT content. Passed IN by the seam
+    # each turn (the persistent store lives on the seam beside the episode); read by
+    # :func:`route_delivery` under ``GT_EDIT_OVERLAY`` to drop a base-read fact about an
+    # edited file. Empty (default) -> byte-identical, the overlay is a no-op.
+    episode_overlay: dict = field(default_factory=dict)
 
     @property
     def ledger(self) -> dict[str, dict[str, object]]:
@@ -243,6 +300,193 @@ class GatewayState:
 # --------------------------------------------------------------------------- #
 def _gateway_on() -> bool:
     return os.environ.get("GT_GATEWAY", "").strip().lower() not in ("", "0", "false", "no", "off")
+
+
+def _change_surface_producer_on() -> bool:
+    """KILL-SWITCH for the W-A ``_produce_change_surface`` call site (gateway.py:16). DEFAULT
+    ON: unset => ``True`` => the producer fires exactly as it did before this gate existed
+    (byte-identical). Only the literal string ``"0"`` disables it — ``"1"``/garbage/anything
+    else still fires. NOT an enablement flag like :func:`_gateway_on`/:func:`_loc_reslot_on`
+    (those default OFF): this is a plain kill-switch layered on top of the SAME env var name's
+    PRE-EXISTING, differently-polarized (default-OFF) reading one call further down, inside
+    ``change_surface.detect_change_surface`` itself (``change_surface._flag_enabled``) — that
+    downstream flag + its ``rl_profile`` Profile-2/SM-5 membership + its ``gt_ae_block.sh``
+    forward are untouched by this gate and MUST NOT be duplicated/re-added here; a kill-switch
+    is not a new capability to enable."""
+    return os.environ.get("GT_CHANGE_SURFACE", "1").strip() != "0"
+
+
+def _patch_delta_producer_on() -> bool:
+    """KILL-SWITCH for the W-C ``_produce_patch_delta`` call site — the ``GT_PATCH_DELTA``
+    sibling of :func:`_change_surface_producer_on` (same default-ON / literal-``"0"``-disables
+    contract; same independence from ``patch_delta``'s own downstream ``_flag_on`` enablement
+    flag and its existing ``rl_profile``/``gt_ae_block.sh`` wiring — see that function's
+    docstring for the full rationale)."""
+    return os.environ.get("GT_PATCH_DELTA", "1").strip() != "0"
+
+
+def _registry_enforce() -> bool:
+    """SM-0 Super-Mode master flag. When ON, the fact-registry becomes EXECUTABLE: the
+    firing event is checked against each class's DECLARED ``deliver_by`` (via the registry,
+    not the producer's self-stamp) and a renderer-less class is dropped. Default OFF ⇒ the
+    Gateway is byte-identical to pre-SM-0 (only ``renderable`` membership + the self-stamped
+    ``preferred_event`` timing)."""
+    return os.environ.get("GT_REGISTRY_ENFORCE", "").strip().lower() not in (
+        "", "0", "false", "no", "off"
+    )
+
+
+def _episode_overlay_on() -> bool:
+    """SM-4 flag (2026-07-11). The episode-overlay freshness DROP rides ``GT_EDIT_OVERLAY``
+    — the same flag that arms the transactional edit overlay in the seam; SM-4 gives it its
+    model-facing value: a base-read fact that is STALE against the CURRENT edit state is
+    dropped, not shipped. Default OFF ⇒ ``route_delivery`` is byte-identical (the overlay is
+    never consulted)."""
+    return os.environ.get("GT_EDIT_OVERLAY", "").strip().lower() in (
+        "1", "true", "yes", "on"
+    )
+
+
+def _loc_reslot_on() -> bool:
+    """T0->T2 localization re-slot flag (2026-07-12). Arms the reactive
+    :func:`_produce_ranked_localization` producer at the D2/post-search boundary, so GT's
+    RANKED localization answer (from ``localize()``, memoized per episode) rides the agent's
+    OWN grep channel as ``path:line:sym`` rows instead of only the T0 baked ``<gt-localization>``
+    brief tag. Default OFF ⇒ the producer is never dispatched from :func:`augment` ⇒
+    byte-identical (no ``localization`` envelope is ever produced by the Gateway)."""
+    return os.environ.get("GT_LOC_RESLOT", "").strip().lower() not in (
+        "", "0", "false", "no", "off"
+    )
+
+
+def _xsession_on() -> bool:
+    """SM-9c flag (2026-07-11). Arms the CROSS-SESSION learned-delivery policy: the Gateway
+    consults this repo's durable causal-consumption ledger (loaded once at task-start and
+    threaded onto ``state.episode.xsession_policy``) to SUPPRESS a fact-class this repo
+    NEVER once consumed and RANK-UP a class it historically acted on. Default OFF (and an
+    empty policy) ⇒ :func:`_apply_xsession_policy` is a byte-identical no-op."""
+    return os.environ.get("GT_XSESSION_MEMORY", "").strip().lower() not in (
+        "", "0", "false", "no", "off"
+    )
+
+
+# SM-9c FIRST SLICE — the learned policy acts on exactly ONE fact class. Bounding the
+# effect to ``caller_contract`` keeps the first cross-session slice small + auditable; the
+# remaining classes are OWED (they pass through untouched, in their original order).
+_XSESSION_POLICY_CLASSES: frozenset[str] = frozenset({"caller_contract"})
+
+
+def _apply_xsession_policy(
+    out: list[EvidenceEnvelope], state: GatewayState
+) -> list[EvidenceEnvelope]:
+    """Adapt the produced candidate list from this repo's LEARNED cross-session policy.
+
+    THE LEARNED BEHAVIOUR (SM-9c, ONE class = ``caller_contract`` for the first slice):
+      * SUPPRESS — drop a candidate whose canonical class this repo delivered
+        ``>= MIN_SAMPLES`` times and NEVER once consumed (``is_inert``). Correct-or-quiet,
+        learned from the repo's own causal history — this is the winner-CHANGING lever
+        (removing the candidate lets a different class win the per-turn dose, or nothing).
+      * RANK-UP — stable-reorder so a historically-CONSUMED policy class sorts ahead of a
+        same-tier non-consumed one (observable candidate ranking). This SORT alone cannot
+        promote a WINNER (the adapter's arbiter picks by a total order, not list position);
+        the end-to-end winner promotion is delivered by :func:`_apply_xsession_rankup` (behind
+        ``GT_XSESSION_RANKUP``), which stamps a ladder-derived arbitration boost the adapter
+        adds to the class's severity rank — closing the "OWED to the adapter" gap.
+
+    DETERMINISM-GIVEN-INPUTS: the ONLY state read is ``state.episode.xsession_policy`` (the
+    DECLARED, loaded-once store snapshot) — never os.environ, time, or a module global. So
+    the SAME ``(candidates, policy)`` -> the SAME result, and a DIFFERENT policy -> a
+    deterministic change. FLAG-OFF / EMPTY-POLICY: returns the input list UNTOUCHED (the
+    SAME object), so :func:`augment` is byte-identical when the feature is off."""
+    if not out or not _xsession_on():
+        return out
+    policy = getattr(getattr(state, "episode", None), "xsession_policy", None)
+    if not policy:
+        return out
+    try:
+        from groundtruth.runtime.xsession_memory import (
+            canonical_class as _xm_canonical,
+            is_inert as _xm_inert,
+            policy_rank as _xm_rank,
+        )
+    except Exception:  # noqa: BLE001 — engine absent in-container: preserve behaviour
+        return out
+    kept: list[EvidenceEnvelope] = []
+    for a in out:
+        canon = _xm_canonical(a.evidence_type)
+        if canon in _XSESSION_POLICY_CLASSES and _xm_inert(policy, canon):
+            continue  # LEARNED SUPPRESS: delivered here before, never once consumed
+        kept.append(a)
+    # LEARNED RANK-UP: stable sort (Python sort is stable) by descending policy rank; a
+    # non-policy / non-consumed class has rank 0 and keeps its original relative order.
+    kept.sort(
+        key=lambda a: -_xm_rank(
+            policy,
+            _xm_canonical(a.evidence_type)
+            if _xm_canonical(a.evidence_type) in _XSESSION_POLICY_CLASSES
+            else None,
+        )
+    )
+    return kept
+
+
+def _xsession_rankup_on() -> bool:
+    """SM-9c rank-up flag ``GT_XSESSION_RANKUP`` (2026-07-12). Arms the cross-session WINNER
+    PROMOTION: a historically-CONSUMED policy class earns a ladder-derived arbitration boost
+    (stamped onto the envelope's non-identity ``native_args`` side-car) so it can WIN the
+    adapter's ``<= 1``-dose arbitration — the piece the SM-9c rank-up SORT could not deliver
+    (the order-independent arbiter ignores list order). Default OFF (and an empty policy) ⇒
+    :func:`_apply_xsession_rankup` is a byte-identical no-op (nothing stamped)."""
+    return os.environ.get("GT_XSESSION_RANKUP", "").strip().lower() not in (
+        "", "0", "false", "no", "off"
+    )
+
+
+def _apply_xsession_rankup(
+    out: list[EvidenceEnvelope], state: GatewayState
+) -> list[EvidenceEnvelope]:
+    """Stamp the LEARNED rank-up BOOST onto each already-eligible candidate whose canonical
+    class this repo historically CONSUMED (``ladder_boost`` > 0). The boost rides the envelope's
+    ``native_args`` side-car (identity-/serialization-neutral, ``compare=False``) under the
+    reserved key ``_xsession_boost``; the adapter's arbiter ADDS it to the class's severity rank
+    so a memory-consumed fact can WIN the per-turn ``<= 1`` dose — the winner promotion the SM-9c
+    candidate SORT alone cannot deliver (``arbitrate`` picks by a total order, not list position).
+
+    A RE-RANK ONLY, never a BYPASS: ``augment`` calls this LAST — after the render-gate /
+    registry-enforce / leak / timing-freshness / dedup filters — so every candidate it touches is
+    ALREADY on-time + fresh + non-acquired. The boost changes WHICH single dose wins; it never
+    resurrects a dropped fact, never adds a dose, and (being ``>= 0``) never demotes one. Bounded
+    to ``_XSESSION_POLICY_CLASSES`` (the SAME first slice the suppress path uses).
+
+    DETERMINISM-GIVEN-INPUTS + BYTE-IDENTICAL-OFF: reads ONLY ``state.episode.xsession_policy``
+    (never os.environ beyond the flag, time, or a module global). When ``GT_XSESSION_RANKUP`` is
+    off, the policy is empty, or NO candidate earns a boost, it returns the input list UNCHANGED
+    (the SAME object), so ``augment`` is byte-identical when the feature is off."""
+    if not out or not _xsession_rankup_on():
+        return out
+    policy = getattr(getattr(state, "episode", None), "xsession_policy", None)
+    if not policy:
+        return out
+    try:
+        from groundtruth.runtime.xsession_memory import (
+            canonical_class as _xm_canonical,
+            ladder_boost as _xm_boost,
+        )
+    except Exception:  # noqa: BLE001 — engine absent in-container: preserve behaviour
+        return out
+    changed = False
+    stamped: list[EvidenceEnvelope] = []
+    for a in out:
+        canon = _xm_canonical(a.evidence_type)
+        boost = _xm_boost(policy, canon) if canon in _XSESSION_POLICY_CLASSES else 0
+        if boost > 0:
+            na = dict(a.native_args or {})
+            na["_xsession_boost"] = int(boost)  # reserved arbitration side-car key
+            stamped.append(replace(a, native_args=na))
+            changed = True
+        else:
+            stamped.append(a)
+    return stamped if changed else out  # SAME object when nothing stamped (byte-identical)
 
 
 # --------------------------------------------------------------------------- #
@@ -731,34 +975,13 @@ def _read_meta_revisions(state: GatewayState) -> tuple[str, dict[str, str]]:
 
 
 # Per-FACT-CLASS (evidence_type) -> the graph SURFACES whose sub-revision (subrev_<surface>)
-# a fact of that CLASS depends on (B-29, keyed to the fact_registry freshness_deps translated
-# to the DB's surface names). Graph-F3 (bounce 2026-07-10): keyed by the shipped
-# ``evidence_type``, NOT the PRODUCER — a producer emits SEVERAL classes with DIFFERENT deps
-# (``patch_delta`` emits ``signature_mismatch``/``companion_surface`` = nodes+edges AND
-# ``cochange_partner`` = nodes+edges+COCHANGES), so keying per-producer shipped a stale
-# cochange fact as fresh. A fact's ``valid_until`` is a composite over ONLY these sub-revs,
-# so a cochange-surface change invalidates a cochange fact WITHOUT churning a def-partition
-# fact that depends only on nodes+edges. A dynamic ``missing_role:<role>`` is normalized to
-# its base. A class NOT listed (``""`` public shim) falls back to the whole-graph token.
-_FACTCLASS_FRESHNESS_SURFACES: dict[str, tuple[str, ...]] = {
-    "def_ref_partition": ("nodes", "edges"),
-    "name_fold": ("nodes", "edges"),
-    "wrong_surface": ("nodes", "edges"),
-    "trace_frame": ("nodes", "edges"),
-    "signature_mismatch": ("nodes", "edges"),
-    "companion_surface": ("nodes", "edges"),
-    "cochange_partner": ("nodes", "edges", "cochanges"),
-    "body_concept": ("nodes", "edges", "content_fts"),
-    "new_file_destination": ("nodes", "edges", "closure"),
-    "missing_role": ("nodes", "edges", "closure"),
-}
-
-# Graph-F3: PATCH-bound fact classes — freshness is the working-tree PATCH, not any GRAPH
-# surface (fact_registry dep = patch_rev). The Gateway has no patch-revision surface and
-# these facts are produced AND delivered on the SAME event (re-run by the seam each time),
-# so their ``valid_until`` is EMPTY: never falsely graph-staled (a graph change must not
-# discard a verdict computed against the patch). ``covering_verdict`` is the covering RED.
-_PATCH_BOUND_FACTCLASSES: frozenset[str] = frozenset({"covering_verdict"})
+# a fact of that CLASS depends on (B-29). SINGLE SOURCE OF TRUTH (SM-0, 2026-07-11): the map
+# + the patch-bound set now LIVE in ``fact_registry`` (co-located with the §1 ``freshness_deps``
+# and cross-checked against them at import, so they can no longer SILENTLY diverge). These
+# module aliases preserve the prior names/imports; :func:`_revisions_for` reads them through
+# the registry accessors, NOT a private divergent copy.
+_FACTCLASS_FRESHNESS_SURFACES: dict[str, tuple[str, ...]] = dict(fr_FRESHNESS_SURFACES)
+_PATCH_BOUND_FACTCLASSES: frozenset[str] = fr_PATCH_BOUND_FACTCLASSES
 
 
 def _revisions_for(state: GatewayState, fact_class: str) -> tuple[str, str]:
@@ -766,25 +989,24 @@ def _revisions_for(state: GatewayState, fact_class: str) -> tuple[str, str]:
 
     ``graph_revision`` = the live ``project_meta.post_revision`` (composite), or the legacy
     file hash on an old graph.db. ``valid_until`` = a deterministic composite over ONLY the
-    ``subrev_<surface>`` keys this FACT CLASS depends on (per
-    :data:`_FACTCLASS_FRESHNESS_SURFACES`), so freshness is PER-FACT-CLASS: a change to a
-    depended sub-rev moves it; a change to an unrelated surface does not.
+    ``subrev_<surface>`` keys this FACT CLASS depends on — the surfaces are now the SINGLE
+    SOURCE ``fact_registry.freshness_surfaces`` (SM-0), so freshness is PER-FACT-CLASS: a
+    change to a depended sub-rev moves it; a change to an unrelated surface does not.
 
-    Graph-F3: keyed by the shipped ``evidence_type`` (a ``missing_role:<role>`` normalized
-    to its base), NOT the producer, so two classes of the same producer with different deps
-    are keyed independently. A PATCH-bound class (:data:`_PATCH_BOUND_FACTCLASSES`) gets an
-    EMPTY ``valid_until`` (patch-bound, never graph-staled). Falls back to ``graph_revision``
-    when the db has no sub-revisions (old graph.db) or the class has no surface mapping —
-    preserving the legacy invariant ``valid_until == graph_revision``. An explicit
-    ``state.graph_revision`` override wins (used by tests / a caller that pins the revision)."""
+    Keyed by the shipped ``evidence_type`` (a ``missing_role:<role>`` normalized to its base
+    inside the accessor), NOT the producer, so two classes of the same producer with different
+    deps are keyed independently. A PATCH-bound class (``fact_registry.is_patch_bound``) gets
+    an EMPTY ``valid_until`` (never graph-staled). Falls back to ``graph_revision`` when the db
+    has no sub-revisions (old graph.db) or the class is unmapped — preserving the legacy
+    invariant ``valid_until == graph_revision``. An explicit ``state.graph_revision`` override
+    wins (used by tests / a caller that pins the revision)."""
     if state.graph_revision:
         return state.graph_revision, state.graph_revision
     post, subs = _read_meta_revisions(state)
     graph_rev = post or _graph_revision_filehash(state)
-    fc = (fact_class or "").strip().split(":", 1)[0]  # normalize missing_role:<role>
-    if fc in _PATCH_BOUND_FACTCLASSES:
+    if _fr_is_patch_bound(fact_class):
         return graph_rev, ""  # patch-bound: never graph-staled
-    surfaces = _FACTCLASS_FRESHNESS_SURFACES.get(fc)
+    surfaces = _fr_freshness_surfaces(fact_class)  # single source (registry), base-normalized
     if not surfaces or not subs:
         return graph_rev, graph_rev
     parts: list[str] = []
@@ -1136,10 +1358,16 @@ def _event_pref(event: ToolEvent) -> str:
 def _mk_add(state: GatewayState, event: ToolEvent, *, fact_kind: str, target: str,
             body_lines: list[str], evidence: list[tuple[str, int]], tier: str,
             producer: str, symbol: str = "",
-            confidence: float | None = None) -> EvidenceEnvelope:
+            confidence: float | None = None,
+            native_args: "dict | None" = None) -> EvidenceEnvelope:
     """Build the CANONICAL EvidenceEnvelope for one fact. Leak filtering happens
     HERE, before the build, so the derived dedup key hashes exactly the shipped
-    payload+provenance (the F1 content discipline). The symbol rides ``fact_id``."""
+    payload+provenance (the F1 content discipline). The symbol rides ``fact_id``.
+
+    ``native_args`` (SM-10, defaulted None so every existing caller is byte-identical)
+    is the structured-arg SIDE-CAR a producer attaches so the class's SM-1 native
+    renderer can emit a real tool-channel DIAGNOSTIC (not prose); it is identity- and
+    serialization-neutral (see :class:`EvidenceEnvelope.native_args`)."""
     body = [ln for ln in body_lines if not _body_line_leaky(ln)]
     ev = [(f, ln) for (f, ln) in evidence if not _is_leaky(f)]
     conf = _TIER_DEFAULT_CONF.get(tier, 0.5) if confidence is None else float(confidence)
@@ -1163,6 +1391,7 @@ def _mk_add(state: GatewayState, event: ToolEvent, *, fact_kind: str, target: st
         blocking_eligibility=ADVISORY,
         estimated_cost_tokens=(len("\n".join(body)) + 3) // 4,
         measured=False,
+        native_args=native_args,
     )
 
 
@@ -1197,6 +1426,119 @@ def _produce_def_ref_partition(event: ToolEvent, state: GatewayState, *, note: s
     return [_mk_add(state, event, fact_kind="def_ref_partition", target=target,
                     body_lines=body, evidence=info["def_sites"], tier=VERIFIED,
                     producer="def_ref_partition", symbol=sym)]
+
+
+# --------------------------------------------------------------------------- #
+# T0->T2 RANKED-LOCALIZATION producer (2026-07-12) — GT's ranked localization ANSWER,
+# re-homed from the T0 baked <gt-localization> brief tag to the D2/post-search boundary.
+# The ranking legs (FTS5 / semantic / graph RRF) are UNTOUCHED — they keep running inside
+# localize(); this producer only DELIVERS their ranked candidate files reactively, as the
+# agent's own grep channel (path:line:sym rows), where the agent can act on them.
+# --------------------------------------------------------------------------- #
+# Bounded dose ("small", matching the registry ``localization.max_dose``). A design
+# starting point, NOT a fixture-tuned constant.
+_LOC_RESLOT_TOPN = 5
+
+
+def _pick_candidate_symbol(con, file_path: str, anchors: set[str]) -> "tuple[str, int] | None":
+    """The representative ``(symbol, start_line)`` for a ranked candidate FILE: a non-test
+    def whose name is an issue ANCHOR (the file's reason for ranking) when present, else the
+    file's FIRST non-test def. ``None`` when the file has no non-test def node. ``file_path``
+    is the RAW graph value (``Candidate.file_path`` == ``nodes.file_path``), so the exact
+    match mirrors :func:`_resolve_symbol_defs`. Correct-or-quiet: any SQL fault -> None."""
+    labels_sql = ",".join("?" * len(_DEF_LABELS))
+    try:
+        rows = con.execute(
+            f"SELECT name, start_line FROM nodes "
+            f"WHERE file_path=? AND COALESCE(is_test,0)=0 AND COALESCE(start_line,0)>0 "
+            f"AND label IN ({labels_sql}) ORDER BY start_line",
+            (file_path, *_DEF_LABELS)).fetchall()
+    except sqlite3.Error:
+        return None
+    if not rows:
+        return None
+    for name, ln in rows:  # prefer an anchor-named def (the file's issue reason)
+        if name and (name or "").lower() in anchors:
+            return (name, int(ln or 0))
+    name, ln = rows[0]                                     # else the first def
+    return (name, int(ln or 0)) if name else None
+
+
+def _compute_ranked_localization_rows(state: GatewayState) -> "list[tuple[str, int, str]]":
+    """Run localize() over the episode's graph.db + issue text and resolve the top-N ranked
+    candidate FILES to leak-clean ``(repo_rel_path, line, symbol)`` rows. Pure/deterministic
+    over a fixed graph (no rebake needed). Correct-or-quiet: no localize / no issue / no graph
+    / no candidates / all-leaky -> []."""
+    if _localize is None or not (state.issue_text or "").strip():
+        return []
+    db = state.graph_db
+    if not db or not os.path.isfile(db):
+        return []
+    try:
+        res = _localize(state.issue_text, db, repo_root=state.repo_root)
+    except Exception:  # noqa: BLE001 — a localizer fault degrades to no delivery
+        return []
+    cands = list(getattr(res, "candidates", None) or [])
+    if not cands:
+        return []
+    anchors = {(a or "").lower() for a in (getattr(res, "anchor_symbols", None) or [])}
+    con = _open(state)
+    if con is None:
+        return []
+    rows: list[tuple[str, int, str]] = []
+    try:
+        for c in cands[:_LOC_RESLOT_TOPN]:
+            raw_fp = getattr(c, "file_path", "") or ""
+            if not raw_fp:
+                continue
+            rel = _to_repo_rel(raw_fp, state.repo_root)
+            if _is_leaky(rel):        # firewall #1 (producer): a test/vendored candidate is
+                continue              # never a row (the localizer already demotes tests).
+            picked = _pick_candidate_symbol(con, raw_fp, anchors)
+            if picked is None:
+                continue
+            sym, line = picked
+            rows.append((rel, int(line), sym))
+    finally:
+        con.close()
+    return rows
+
+
+def _ranked_localization_rows(state: GatewayState) -> "list[tuple[str, int, str]]":
+    """The episode-MEMOIZED ranked-localization rows: localize() runs ONCE per run (the answer
+    is issue-fixed), reused on every subsequent search turn. Stored on ``state.episode`` (a
+    non-serialized private attribute); a slotted episode that rejects the setattr just
+    recomputes (correct-or-quiet, never a crash)."""
+    ep = state.episode
+    cached = getattr(ep, "_gt_ranked_loc_rows", None)
+    if cached is not None:
+        return cached
+    rows = _compute_ranked_localization_rows(state)
+    try:
+        setattr(ep, "_gt_ranked_loc_rows", rows)
+    except Exception:  # noqa: BLE001 — a slotted episode can't cache; recompute is correct
+        pass
+    return rows
+
+
+def _produce_ranked_localization(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
+    """ONE ``localization``-class envelope carrying GT's top-N ranked candidate files as
+    ``path:line:sym`` provenance rows (issue-keyed — fires even when the agent's grep operand
+    is a behavior PHRASE, the stratum-B blind spot ``search_pattern`` returns None for). The
+    rows also ride ``env.native_args['rows']`` so the adapter's ``ranked-list`` renderer emits
+    the grep-native block DIRECTLY (no prose re-parse). Fire-ONCE-per-episode is handled by the
+    delivery dedup chain (the answer is issue-fixed -> stable ``dedup_key`` -> re-offered but
+    dropped after the first delivery). Correct-or-quiet: no ranked rows -> []."""
+    rows = _ranked_localization_rows(state)
+    if not rows:
+        return []
+    top_file, _top_line, top_sym = rows[0]
+    body = [f"{p}:{ln}:{s}" for p, ln, s in rows]      # tag-free grep rows (hedge-free)
+    evidence = [(p, ln) for p, ln, _s in rows]
+    return [_mk_add(state, event, fact_kind="localization", target=top_file,
+                    body_lines=body, evidence=evidence, tier=HYPOTHESIS,
+                    producer="ranked_localization", symbol=top_sym,
+                    native_args={"rows": rows})]
 
 
 def _produce_wrong_surface(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
@@ -1257,9 +1599,17 @@ def _produce_body(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelop
     body = [f'{len(rows)} function bodies mention "{sym}" (no name or path match)']
     body += [f"in {label} {name} - {fp}:{ln}" for fp, ln, name, label in rows[:8]]
     evidence = [(fp, ln) for fp, ln, _n, _l in rows[:8]]
+    # SM (2026-07-12): the concept-hit function bodies as (path,line,sym) rows so the adapter's
+    # body_concept renderer emits the grep-native ROW block DIRECTLY (no re-parse of GT's prose).
+    # The SYMBOL is the concept-bearing function NAME. Side-car only (compare=False, unserialized)
+    # — identity / dedup / byte-chain UNCHANGED; native-render-only, so the tagged path is unmoved.
+    # Leak is enforced at RENDER time (render_body_concept_native drops test-file rows), matching
+    # the localization precedent — native_args is not leak-filtered by _mk_add.
+    native_rows = [(fp, ln, name) for fp, ln, name, _l in rows[:8]]
     return [_mk_add(state, event, fact_kind="body_concept", target=rows[0][0],
                     body_lines=body, evidence=evidence, tier=INFO,
-                    producer="body_concept", symbol=sym)]
+                    producer="body_concept", symbol=sym,
+                    native_args={"rows": native_rows})]
 
 
 def _edit_related_to_stem(edit_blob: str, sym: str) -> bool:
@@ -1367,25 +1717,225 @@ def _produce_patch_delta(event: ToolEvent, state: GatewayState) -> list[Evidence
         body = [f"{sm.caller}() call passes {sm.positional_args} positional arg(s); "
                 f"{sm.symbol}() now takes {sm.new_min_params}-{sm.new_max_params}",
                 sm.call_site_text]
+        # SM-10: attach the STRUCTURED arity fields so the adapter can render the SM-1
+        # mypy/gopls arity diagnostic natively (native_render.render_signature_delta_native)
+        # instead of _render_generic prose. Side-car only — identity/dedup UNCHANGED.
         out.append(_mk_add(state, event, fact_kind="signature_mismatch", target=sm.caller_file,
                            body_lines=body, evidence=[(sm.caller_file, sm.caller_line)],
                            tier=WARNING, producer="patch_delta", symbol=sm.symbol,
-                           confidence=max(0.0, min(1.0, sm.confidence))))
+                           confidence=max(0.0, min(1.0, sm.confidence)),
+                           native_args={
+                               "caller_file": sm.caller_file,
+                               "caller_line": sm.caller_line,
+                               "symbol": sm.symbol,
+                               "positional_args": sm.positional_args,
+                               "new_min_params": sm.new_min_params,
+                               "new_max_params": sm.new_max_params,
+                           }))
     for cs in res.companion_surfaces:
         if _is_leaky(cs.file):
             continue
         body = [f"registers siblings {', '.join(cs.siblings)} but not '{cs.symbol}'"]
         # referencing_lines are (line_no, text) — the FILE is cs.file itself
         ev_rows = [(cs.file, int(ln)) for ln, _txt in cs.referencing_lines]
+        # SM-10: the companion producer OWNS the structured siblings LIST (cs.siblings) —
+        # so it supplies render_registration_native's args directly via native_args (no
+        # re-parsing of GT's own prose). ``line`` = the first referencing line (the surface
+        # location); absent -> the renderer abstains ("") -> generic fallback.
         out.append(_mk_add(state, event, fact_kind="companion_surface", target=cs.file,
                            body_lines=body, evidence=ev_rows,
-                           tier=WARNING, producer="patch_delta", symbol=cs.symbol))
-    for cp in res.cochange_partners:
-        if _is_leaky(cp.file):
+                           tier=WARNING, producer="patch_delta", symbol=cs.symbol,
+                           native_args={
+                               "file": cs.file,
+                               "line": (ev_rows[0][1] if ev_rows else None),
+                               "symbol": cs.symbol,
+                               "siblings": list(cs.siblings),
+                           }))
+    # cochange is an INTERNAL RANKING SIGNAL ONLY — it has NO model-facing native form
+    # (SM-1 ``native_render.render_cochange_native`` returns "" by construction; the
+    # doctrine pins co-change as a ranking prior, never a delivered fact). Wave-2
+    # delivery-equivalence ruling (l3.cochange -> RETIRE narration-cut/internal): the
+    # Gateway MUST NOT ship ``cochange_partner`` as a delivered narration envelope — that
+    # would merely re-home the "co-changed with the edit in N commits" narration from
+    # Lane-A onto the Gateway plane. ``res.cochange_partners`` still biases the
+    # pretask/localizer ranking; the Gateway simply does not DELIVER it. The registry
+    # ``cochange_prior`` class + ``FRESHNESS_SURFACES['cochange_partner']`` mapping +
+    # arbitration rank remain as dormant, documented infrastructure for the internal-only
+    # pin (a future INTERNAL consumer may read cochange without a delivered byte).
+    _ = res.cochange_partners  # consumed as a ranking prior elsewhere; never a delivered fact
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# SM-2b (2026-07-11): the CROSS-LANGUAGE caller_contract producer.
+#
+# The §26.4 replacement the SM-2 LIPI proved the gateway lacked: on a signature-CHANGING
+# edit, name the FACT-tier CROSS-FILE callers the change breaks, so the legacy Lane-A
+# caller-break (l3.contract / l3b.evidence) can retire under an EQUIVALENT gateway delivery.
+# It reads graph.db's CALLS edges (tree-sitter, ALL languages) — so it delivers on a Go /
+# Rust / TS / JS edit, the exact case ``patch_delta.analyze_patch_delta`` cannot (ast-only,
+# _SCAN_EXTS = {.py,.pyi}). PURE text signature-change detection (no ast): the parameter-
+# IDENTITY list of a keyword-headed definition (``def``/``func``/``fn``/``function`` …),
+# extracted the SAME way from BEFORE and AFTER, so the comparison is source-symmetric.
+# --------------------------------------------------------------------------- #
+# A keyword-headed definition head: an optional def keyword, an optional Go receiver
+# ``(r *T) ``, then ``name(``. Cross-language by the union of def keywords (a TS/JS class
+# METHOD with no keyword is intentionally out of scope -> correct-or-quiet, not a false break).
+_DEF_HEAD_RE = re.compile(
+    r"(?:^|[^.\w])"
+    r"(?:def|func|fn|function|fun|proc|sub)\s+"
+    r"(?:\([^()]*\)\s*)?"                      # optional Go receiver `(r *T) `
+    r"(?P<name>[A-Za-z_]\w*)\s*\("
+)
+_PARAM_LEAD_IDENT_RE = re.compile(r"[*&\s]*([A-Za-z_]\w*)")
+
+
+def _balanced_parens(s: str, open_idx: int) -> str | None:
+    """The content of the balanced ``(...)`` whose ``(`` is at ``s[open_idx]``, or None."""
+    depth = 0
+    for i in range(open_idx, len(s)):
+        c = s[i]
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return s[open_idx + 1:i]
+    return None
+
+
+def _param_idents(params: str | None) -> list[str] | None:
+    """The leading identifier of each TOP-LEVEL comma-separated parameter (annotations,
+    defaults, ``*``/``&`` decorations stripped) — the cross-language comparison unit:
+    ``a int`` (Go) / ``a: i32`` (Rust) / ``a=1`` (Py) / ``a: number`` (TS) all reduce to
+    ``a``. Bracket-aware split so a default ``x=(1,2)`` / generic ``List[int,str]`` never
+    splits mid-parameter. None only when ``params`` is None (no parens found)."""
+    if params is None:
+        return None
+    names: list[str] = []
+    depth = 0
+    cur: list[str] = []
+
+    def _flush() -> None:
+        seg = "".join(cur).strip()
+        if seg:
+            m = _PARAM_LEAD_IDENT_RE.match(seg)
+            if m:
+                names.append(m.group(1))
+
+    for ch in params:
+        if ch in "([{":
+            depth += 1
+            cur.append(ch)
+        elif ch in ")]}":
+            depth = max(0, depth - 1)
+            cur.append(ch)
+        elif ch == "," and depth == 0:
+            _flush()
+            cur = []
+        else:
+            cur.append(ch)
+    _flush()
+    return names
+
+
+def _defs_params(content: str) -> dict[str, list[str]]:
+    """``{name: [param_idents]}`` for every keyword-headed definition in ``content`` (first
+    definition of a given name wins — a shadowing redefinition is rare and non-signal)."""
+    out: dict[str, list[str]] = {}
+    for m in _DEF_HEAD_RE.finditer(content or ""):
+        name = m.group("name")
+        if name in out:
             continue
-        out.append(_mk_add(state, event, fact_kind="cochange_partner", target=cp.file,
-                           body_lines=[f"co-changed with the edit in {cp.count} commits"],
-                           evidence=[], tier=INFO, producer="patch_delta", symbol=cp.file))
+        idents = _param_idents(_balanced_parens(content, m.end() - 1))
+        if idents is not None:
+            out[name] = idents
+    return out
+
+
+def _sig_changed_symbols(before: str, after: str) -> list[str]:
+    """The symbols whose parameter-IDENTITY list DIFFERS between ``before`` and ``after``
+    (both must DEFINE the symbol — a pure add/remove of a def is not a caller-break of an
+    existing contract). Sorted, deterministic. Empty when either side is absent (a NEW file
+    has no ``before`` contract to break)."""
+    if not before or not after:
+        return []
+    b = _defs_params(before)
+    a = _defs_params(after)
+    return sorted(n for n in a if n in b and a[n] != b[n])
+
+
+def _fact_callers_of_symbol_in_file(con, sym: str, rel: str, root: str) -> list[tuple[str, int]]:
+    """FACT-tier (deterministic resolution_method AND conf>=0.7), NON-test, CROSS-FILE callers
+    of ``sym`` DEFINED in ``rel`` (graph frame) — the callers a signature change breaks that the
+    agent is NOT looking at. Returns ``[(caller_rel, line)]`` deduped to ONE row per distinct
+    (caller_name, caller_file), leak-filtered (a test/vendored caller file is dropped). Reuses
+    :func:`_fact_callers` so the FACT gate is byte-identical to def_partition's."""
+    labels_sql = ",".join("?" * len(_DEF_LABELS))
+    try:
+        drows = con.execute(
+            f"SELECT id FROM nodes WHERE name=? AND file_path=? "
+            f"AND COALESCE(is_test,0)=0 AND COALESCE(start_line,0)>0 "
+            f"AND label IN ({labels_sql})",
+            (sym, rel, *_DEF_LABELS)).fetchall()
+    except sqlite3.Error:
+        return []
+    def_ids = [r[0] for r in drows]
+    if not def_ids:
+        return []
+    callers, _receivers = _fact_callers(con, def_ids)
+    nrel = _norm_fp(rel)
+    seen: set[tuple[str, str]] = set()
+    out: list[tuple[str, int]] = []
+    for c in callers:
+        cf = _norm_fp(_to_repo_rel(c.get("file") or "", root))
+        if not cf or cf == nrel:            # cross-file only
+            continue
+        if _is_leaky(cf):                   # leak law: never a test/vendored caller
+            continue
+        key = (c.get("name") or "", cf)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((cf, int(c.get("line") or 0)))
+    out.sort()
+    return out
+
+
+def _produce_caller_contract(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
+    """The CROSS-LANGUAGE caller-contract break on a signature-changing edit. For each edited
+    file whose function/method changed its parameter list (pure-text before/after diff), if
+    the changed symbol has >=1 FACT-tier cross-file caller in graph.db, emit a ``caller_break``
+    envelope (aliases to the registered ``caller_contract`` class; delivered at ``edit_result``
+    per the registry boundary override). Correct-or-quiet: no before/after, no graph, no
+    detectable signature change, or no cross-file caller -> []. Works on Go/Rust/TS/JS/Python
+    because it reads the tree-sitter CALLS graph, NOT a Python ast."""
+    eba = event.edit_before_after
+    if not eba:
+        return []
+    con = _open(state)
+    if con is None:
+        return []
+    out: list[EvidenceEnvelope] = []
+    try:
+        for cf, ba in sorted(eba.items()):
+            before, after = ba if isinstance(ba, tuple) else (None, ba)
+            rel = _norm_fp(_to_repo_rel(cf, state.repo_root))
+            if not rel or _is_leaky(rel):
+                continue
+            for sym in _sig_changed_symbols(before or "", after or ""):
+                sites = _fact_callers_of_symbol_in_file(con, sym, rel, state.repo_root)
+                if not sites:
+                    continue
+                n_callers = len(sites)
+                n_files = len({f for f, _ in sites})
+                body = [f"{sym}() signature changed — {n_callers} caller(s) in "
+                        f"{n_files} file(s); update the call sites"]
+                out.append(_mk_add(state, event, fact_kind="caller_break", target=rel,
+                                   body_lines=body, evidence=sites, tier=WARNING,
+                                   producer="caller_contract", symbol=sym))
+    finally:
+        con.close()
     return out
 
 
@@ -1435,6 +1985,60 @@ def _event_ordinal(name: str) -> int:
     return _ROUTE_EVENT_ORDER.get((name or "").strip().lower(), 0)
 
 
+# SM-0: the registry's FINE §1 delivery boundary (fact_registry.EVENTS) -> the COARSE
+# lifecycle ordinal above. This is how the DECLARED ``deliver_by`` of a class is compared to
+# the firing ``event.kind`` under ``GT_REGISTRY_ENFORCE`` — replacing the self-stamped
+# ``preferred_event`` (which always equalled the current event, making DEFER/EXPIRED_LATE
+# structurally dead). ``failed_search`` is a search; ``failure_obs`` is realized in a test/
+# command observation; ``first_view_edit`` is realized by the patch_delta producer on the
+# EDIT event (view precedes edit, so binding it to edit is the producer's true realization).
+_FINE_EVENT_TO_COARSE_ORDINAL: dict[str, int] = {
+    "task_start": 0,        # EVENT_TASK_START  -> step0
+    "search_result": 1,     # EVENT_SEARCH_RESULT
+    "failed_search": 1,     # EVENT_FAILED_SEARCH (an empty search is still a search)
+    "file_view": 2,         # EVENT_FILE_VIEW
+    "first_view_edit": 3,   # EVENT_FIRST_VIEW_EDIT (realized on the edit event)
+    "edit_result": 3,       # EVENT_EDIT_RESULT
+    "test_result": 4,       # EVENT_TEST_RESULT
+    "failure_obs": 4,       # EVENT_FAILURE_OBS (a trace/error rides a test/command obs)
+    "submit": 5,            # EVENT_SUBMIT
+}
+
+
+# SM-0 hardening tripwire (LIPI recommendation, 2026-07-11): the FINE §1 event vocabulary
+# (``fact_registry.EVENTS``) and this coarse-ordinal map MUST stay in lockstep.
+# ``_registry_want_ordinal`` below reads ``_FINE_EVENT_TO_COARSE_ORDINAL.get(ev, 0)``, so a
+# NEW ``fact_registry`` EVENT with no entry here would SILENTLY map to ordinal 0 (step0) —
+# a genuinely-wrong-event class would then never DEFER/EXPIRE under GT_REGISTRY_ENFORCE
+# (the boundary check would pass by accident at step0). Fail LOUD at import (mirroring
+# ``fact_registry._self_check_executable``) so a future EVENT can never silently route to
+# step-0 unnoticed.
+def _self_check_event_map() -> None:
+    fine = set(_FINE_EVENT_TO_COARSE_ORDINAL)
+    events = set(fr_EVENTS)
+    if fine != events:
+        raise ValueError(
+            "gateway._FINE_EVENT_TO_COARSE_ORDINAL is out of sync with "
+            f"fact_registry.EVENTS (missing {sorted(events - fine)}, "
+            f"extra {sorted(fine - events)}) — a fact_registry EVENT with no coarse-"
+            "ordinal mapping silently routes to step0; add it to "
+            "_FINE_EVENT_TO_COARSE_ORDINAL"
+        )
+
+
+_self_check_event_map()
+
+
+def _registry_want_ordinal(evidence_type: str) -> int | None:
+    """The coarse lifecycle ordinal of a class's DECLARED delivery boundary (registry
+    ``deliver_by``, honoring the per-evidence-type override), or ``None`` when the type is
+    unregistered (caller falls back to the self-stamped ``preferred_event``)."""
+    ev = _fr_required_event(evidence_type)
+    if ev is None:
+        return None
+    return _FINE_EVENT_TO_COARSE_ORDINAL.get(ev, 0)
+
+
 def route_delivery(env: EvidenceEnvelope, event: ToolEvent, state: GatewayState) -> str:
     """B-12: enforce the envelope's timing + freshness as REAL routing. Returns one of
     :data:`ROUTE_DELIVER` / :data:`ROUTE_DEFER` / :data:`ROUTE_EXPIRED_LATE` /
@@ -1450,16 +2054,47 @@ def route_delivery(env: EvidenceEnvelope, event: ToolEvent, state: GatewayState)
       to influence the decision -> an EXPLICIT non-delivery (NOT a success), never a late
       append.
 
-    On the happy path (a fact BUILT and delivered in the SAME ``augment`` call on its own
-    event) available_at == deliver_by == the current event and the live valid_until equals
-    the stored one, so the verdict is ``ROUTE_DELIVER`` — byte-identical to pre-B-12."""
+    TIMING SOURCE (SM-0): under ``GT_REGISTRY_ENFORCE`` the boundary ``want`` derives from
+    the class's DECLARED ``deliver_by`` in the fact-registry (``_registry_want_ordinal``),
+    NOT from the producer's self-stamped ``env.preferred_event`` — so the firing-event vs
+    declared-boundary comparison is REAL and DEFER/EXPIRED_LATE are reachable for a genuinely
+    wrong-event fact. With the flag OFF, ``want`` is the self-stamped ``preferred_event`` —
+    byte-identical to pre-SM-0 (a fact built + delivered on its own event routes DELIVER)."""
     # Graph-F3: recompute the live freshness token keyed on the fact CLASS (evidence_type),
     # matching the build-time key in _mk_add — so a fact stales on ITS OWN depended surfaces.
     _gr, live_vu = _revisions_for(state, env.evidence_type)
     if env.valid_until and live_vu and env.valid_until != live_vu:
         return ROUTE_STALE
-    want = _event_ordinal(env.preferred_event)   # available_at == deliver_by
+    # SM-4 (2026-07-11): EPISODE-OVERLAY freshness. The certified base graph.db is a frozen
+    # snapshot (ro-mounted), so the class-level token above can NEVER stale a fact after an
+    # edit — the base's revision does not move. A fact READ from that base about a file the
+    # agent EDITED in a prior turn describes the file's OLD structure. The episode overlay
+    # (built per structured edit; ``entry['changed']`` IS the mark_stale_envelopes verdict
+    # that the base structure no longer matches the current file) marks such a file; drop the
+    # fact STALE. SCOPED to the fact's TARGET file — a fact about an UNEDITED file (not in the
+    # overlay) is UNAFFECTED. EXEMPT the file edited in THIS observation (``changed_files``):
+    # its own edit-derived fact (patch_delta) is fresh, not a stale base read. Gated by
+    # GT_EDIT_OVERLAY + a non-empty overlay ⇒ byte-identical when off/empty.
+    if _episode_overlay_on():
+        overlay = getattr(state, "episode_overlay", None)
+        if overlay:
+            tf = _norm_fp(env.target or "")
+            entry = overlay.get(tf) if tf else None
+            if isinstance(entry, dict) and entry.get("changed"):
+                edited_now = {_norm_fp(f) for f in (event.changed_files or ())}
+                if tf not in edited_now:
+                    return ROUTE_STALE
     cur = _event_ordinal(event.kind)
+    want: int | None = None
+    if _registry_enforce():
+        # An observation-REACTIVE fact (trace_frame) is produced from and delivered at the
+        # current observation — on-time by construction, so its boundary is the firing event
+        # itself (only freshness above gates it). A fixed-lifecycle fact derives ``want`` from
+        # its DECLARED registry ``deliver_by`` (not the self-stamp), so a genuinely wrong-event
+        # fact DEFERs/EXPIREs.
+        want = cur if _fr_is_reactive(env.evidence_type) else _registry_want_ordinal(env.evidence_type)
+    if want is None:
+        want = _event_ordinal(env.preferred_event)  # OFF / unregistered -> byte-identical
     if cur < want:
         return ROUTE_DEFER
     if cur > want:
@@ -1510,15 +2145,30 @@ def augment(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
     additions: list[EvidenceEnvelope] = []
     # kind-dispatched producers (independent of the search-outcome lattice)
     if event.kind == KIND_EDIT:
-        additions += _produce_patch_delta(event, state)
+        if _patch_delta_producer_on():  # kill-switch; see _patch_delta_producer_on docstring
+            additions += _produce_patch_delta(event, state)
+        # SM-2b: the CROSS-LANGUAGE caller-contract break — the graph-based replacement for
+        # the legacy l3.contract/l3b.evidence caller-break patch_delta (ast-only) cannot
+        # produce on a non-Python edit. Both are caller-break families; arbitration keeps the
+        # per-turn dose at <=1 (signature_mismatch out-ranks caller_break on a Python edit).
+        additions += _produce_caller_contract(event, state)
     elif event.kind == KIND_TEST:
         additions += _produce_covering(event, state)
+    elif event.kind == KIND_SEARCH and _loc_reslot_on():
+        # T0->T2 re-slot (2026-07-12, GT_LOC_RESLOT, default OFF -> byte-identical): GT's
+        # ranked localization ANSWER, delivered reactively at the D2/post-search boundary
+        # (issue-keyed, INDEPENDENT of the search-outcome lattice below — fires even on a
+        # behavior-PHRASE grep where the outcome producers abstain). Competes for the single
+        # per-turn dose via arbitration (rank 37 > def_ref_partition 35); fire-once via the
+        # delivery dedup chain (the issue-fixed answer re-offers with a stable dedup_key).
+        additions += _produce_ranked_localization(event, state)
 
     # outcome-dispatched producers
     if outcome == TRACE_HIT:
         additions += _produce_trace(event, state)
     elif outcome == ZERO_ABSENT:
-        additions += _produce_change_surface(event, state)
+        if _change_surface_producer_on():  # kill-switch; see _change_surface_producer_on docstring
+            additions += _produce_change_surface(event, state)
     elif outcome == ZERO_NAME:
         additions += _produce_name_fold(event, state)
     elif outcome == ZERO_BEHAVIOR:
@@ -1553,6 +2203,18 @@ def augment(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
         # truly-unregistered class (tests pin the full emitted set as renderable).
         if not _renderable(a.evidence_type):
             continue
+        # SM-0 registry ENFORCEMENT (GT_REGISTRY_ENFORCE): bind producer -> the DECLARED
+        # native renderer. A class with no available renderer has no native FORM to ride the
+        # channel the model reads, so it is dropped correct-or-quiet. (The firing-event vs
+        # DECLARED-boundary check is enforced by route_delivery below, which under the same
+        # flag derives ``want`` from the registry ``deliver_by`` instead of the self-stamp.)
+        # OFF ⇒ skipped ⇒ byte-identical. A registered class always has a renderer, so this
+        # never rejects a real fact — it guards a future renderer-less / mis-declared class.
+        if _registry_enforce() and (
+            _fr_registration_for(a.evidence_type) is None
+            or not _fr_required_renderer(a.evidence_type)
+        ):
+            continue
         if _is_leaky(a.target):
             continue
         if _validate_envelope(a):
@@ -1566,4 +2228,11 @@ def augment(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
             continue
         seen_this_call.add(a.dedup_key)
         out.append(a)
-    return out
+    # SM-9c: adapt the candidate list from this repo's LEARNED cross-session policy
+    # (suppress a never-consumed class, rank-up a historically-consumed one). No-op /
+    # same-object return when the flag is off or the policy is empty -> byte-identical.
+    #   * _apply_xsession_policy — SUPPRESS (GT_XSESSION_MEMORY): drop an inert class.
+    #   * _apply_xsession_rankup — WINNER PROMOTION (GT_XSESSION_RANKUP): stamp a ladder
+    #     boost onto a consumed class so it can WIN the adapter's <=1 dose. Runs LAST, on the
+    #     already-eligible list, so it re-ranks (never bypasses timing/freshness/leak/dedup).
+    return _apply_xsession_rankup(_apply_xsession_policy(out, state), state)

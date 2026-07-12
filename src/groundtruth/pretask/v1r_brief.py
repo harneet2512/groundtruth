@@ -1527,6 +1527,138 @@ def _block_receipts_on() -> bool:
     )
 
 
+# --------------------------------------------------------------------------- #
+# SM-6 (B, 2026-07-11): the step-0 baked brief reduction — GT_BRIEF_MINIMAL.
+#
+# DEFAULT-OFF, byte-identical when off, and BAKED (the brief is generated at substrate-
+# build time and consumed read-only in-container — gt_agent._substrate_brief), so this
+# reduction has ZERO effect on any run until the flag is set at the SM-8 REBAKE. It gates
+# the RETIREMENT of the three heavy step-0 narration surfaces the plan named
+# (<gt-graph-map> / <gt-localization> / contract narration), keeping ONLY obligations +
+# a minimal 'which file' orientation. Localization is NOT lost: it rides the REACTIVE
+# def_partition/post_search channel (a Profile-2 enabled fact class, rl_profile
+# PROFILE_MANIFESTS['2'].enabled_fact_classes), which answers the agent's OWN grep with
+# definition facts at the moment localization is decided — the efficacy channel the
+# measured-null proactive brief localization never was.
+# --------------------------------------------------------------------------- #
+def _brief_minimal_on() -> bool:
+    """GT_BRIEF_MINIMAL master switch — default OFF, byte-identical. When OFF the brief is
+    generated exactly as before (the reducer is never invoked). When ON (set only at the
+    SM-8 substrate rebake) the step-0 brief is reduced to obligations + minimal
+    orientation; the graph-map / localization / contract-narration surfaces are retired."""
+    import os as _os
+    return (_os.environ.get("GT_BRIEF_MINIMAL") or "").strip().lower() not in (
+        "", "0", "false", "no", "off",
+    )
+
+
+# The segmented-block labels the minimal reduction DROPS whole. ``localization-header``
+# (<gt-localization>) and ``graph-map`` (<gt-graph-map>) are the two named tagged blocks;
+# ``edit-target-contracts`` + ``companion`` (Other candidates cross-file facts / Related
+# files / Scope chain) are the contract/scope NARRATION; ``expected-behavior`` is the
+# issue-spec echo. A ``file-entry`` block is REDUCED to its header line (the minimal
+# 'which file' orientation), never dropped — handled specially in the reducer. The
+# scaffold (<gt-task-brief> tags), ``obligations``, and ``orientation-note`` are KEPT.
+_BRIEF_MINIMAL_DROP_LABELS: frozenset = frozenset(
+    {"localization-header", "graph-map", "edit-target-contracts",
+     "companion", "expected-behavior"}
+)
+
+
+def _reduce_brief_to_minimal(text: str) -> str:
+    """Reduce an assembled brief to obligations + minimal orientation ONLY (SM-6 B).
+
+    Reuses the B-30 rail's :func:`_segment_brief_blocks` — the ONE tested brief taxonomy —
+    so the reduction tracks the exact block boundaries the token enforcer already trusts.
+    KEEPS: the ``<gt-task-brief>`` scaffold, the ``<gt-obligations>`` block, the
+    orientation-note, and each file-entry's HEADER line (the 'which file' orientation).
+    DROPS whole: ``<gt-graph-map>``, ``<gt-localization>``, ``EDIT-TARGET CONTRACTS``, the
+    per-file contract/caller/call evidence bodies, the cross-file 'Other candidates'/scope
+    hints, and the 'Expected behavior' echo. PURE + deterministic; NEVER called when
+    GT_BRIEF_MINIMAL is off (byte-identical). Idempotent: re-reducing a minimal brief
+    returns it unchanged (its blocks are already only kept labels + header-only entries)."""
+    blocks = _segment_brief_blocks(text)
+    kept: list[str] = []
+    for b in blocks:
+        label = b["label"]
+        if label in _BRIEF_MINIMAL_DROP_LABELS:
+            continue
+        if label.startswith("file-entry"):
+            head = b["text"].split("\n", 1)[0]
+            if head.strip():
+                kept.append(head)  # minimal orientation: the header, not the contract body
+            continue
+        kept.append(b["text"])
+    # Collapse the blank-line runs the dropped blocks leave behind (the ``misc`` filler that
+    # abutted a retired block) to at most one, and strip leading/trailing blanks — a clean
+    # minimal brief, never a hollow one. Cosmetic only: no kept fact is touched.
+    out_lines: list[str] = []
+    for ln in "\n".join(kept).split("\n"):
+        if ln.strip() == "" and (not out_lines or out_lines[-1].strip() == ""):
+            continue
+        out_lines.append(ln)
+    while out_lines and out_lines[-1].strip() == "":
+        out_lines.pop()
+    return "\n".join(out_lines)
+
+
+# The retired step-0 narration markers a minimal (SM-6 B) brief MUST NOT contain, and the
+# obligation marker it MUST retain. Kept in lockstep with :data:`_BRIEF_MINIMAL_DROP_LABELS`
+# + :func:`_reduce_brief_to_minimal` (the SM-7 gate reddens on a drift). These are the
+# byte-level shadows of the dropped BLOCK labels: ``localization-header`` -> ``<gt-localization``,
+# ``graph-map`` -> ``<gt-graph-map>``, ``edit-target-contracts``/``companion`` -> the contract/
+# caller/scope narration lines, ``expected-behavior`` -> the issue-spec echo.
+_BRIEF_MINIMAL_RETIRED_MARKERS: tuple[str, ...] = (
+    "<gt-graph-map>",
+    "<gt-localization",
+    "EDIT-TARGET CONTRACTS",
+    "Callers:",
+    "Calls:",
+    "Context:",
+    "Other candidates",
+    "Related files",
+    "Scope chain",
+    "Expected behavior",
+)
+
+
+def brief_minimal_certificate(brief_text: str) -> dict:
+    """Certify that a generated brief was ACTUALLY minimalized (SM-6 B / SM-8 arm-integrity).
+
+    ``GT_BRIEF_MINIMAL`` is an UNMAPPED Profile-2 member (no importable backing module), so
+    the ``rl_profile`` preflight passes WITHOUT proving the baked brief was minimalized — at
+    the SM-8 rebake the GT-on arm could ship the FULL step-0 brief while claiming minimal,
+    which silently invalidates the paired GT-on vs GT-off comparison. This function is that
+    missing certificate: SM-8 generates the baked brief with ``GT_BRIEF_MINIMAL=1`` and calls
+    ``brief_minimal_certificate(brief.brief_text)`` to REFUSE shipping an arm whose brief still
+    carries a retired step-0 narration surface.
+
+    PURE read of ``brief_text`` — no I/O, no env, no mutation. NOTHING in the live brief
+    pipeline calls it (:func:`generate_v1r_brief` never references it), so adding it is
+    byte-identical to the running product — it is an SM-8 rebake / SM-7 gate check only.
+
+    Returns ``{minimal, retired_present, obligations_present, orientation_present}``:
+      * ``retired_present`` — the retired markers still present (MUST be empty for minimal);
+      * ``obligations_present`` — the ``<gt-obligations>`` behavioral contract is retained;
+      * ``orientation_present`` — a 'which file' orientation survives (a numbered file-entry
+        header OR the no-match ``Localize with grep`` note);
+      * ``minimal`` — True iff NO retired marker is present (the necessary certificate; a full
+        arm-integrity pass additionally asserts ``obligations_present``).
+    """
+    text = brief_text or ""
+    retired = [m for m in _BRIEF_MINIMAL_RETIRED_MARKERS if m in text]
+    obligations_present = "<gt-obligations>" in text
+    orientation_present = bool(
+        _re.search(r"(?m)^\s*\d+\.\s+\S", text)
+    ) or "Localize with grep" in text
+    return {
+        "minimal": not retired,
+        "retired_present": retired,
+        "obligations_present": obligations_present,
+        "orientation_present": orientation_present,
+    }
+
+
 def _fact_class_for_label(label: str) -> str | None:
     """The fact-class of a segmented block label, or ``None`` for non-fact scaffold/
     filler. File entries (``file-entry-1``, ``file-entry-2``, …) map to localization."""
@@ -2155,7 +2287,12 @@ def _with_graph_map(
     fan-in line can run long). Falls back to a trailing append only when the open
     tag is absent.
     """
-    if not _graph_map_demand_on():
+    import os as _os
+
+    gateway_on = (_os.environ.get("GT_GATEWAY") or "").strip().lower() not in (
+        "", "0", "false", "no", "off",
+    )
+    if gateway_on or not _graph_map_demand_on():
         return brief
     if not graph_db or not files:
         return brief
@@ -4237,6 +4374,12 @@ def generate_v1r_brief(
         _nm_suppressed: list[str] = []
         if _count_tokens(_nm_brief) > max_brief_tokens:
             _nm_brief, _nm_suppressed = _enforce_token_rail(_nm_brief, max_brief_tokens)
+        # SM-6 (B): apply the SAME minimal reduction so GT_BRIEF_MINIMAL yields a minimal
+        # brief on EVERY path. The no-match brief is already scaffold + grep-orientation
+        # note + obligations, so the reducer is a no-op here (nothing to drop); applied for
+        # uniformity. DEFAULT-OFF -> byte-identical.
+        if _brief_minimal_on():
+            _nm_brief = _reduce_brief_to_minimal(_nm_brief)
         # Brief-F7: B-6 per-block receipts also cover the fact-bearing no-match brief
         # (its <gt-obligations> block). Same PURE read as the matched path; brief bytes
         # unchanged. Empty unless GT_BLOCK_RECEIPTS is set.
@@ -5297,6 +5440,14 @@ def generate_v1r_brief(
     _budget_suppressed: list[str] = []
     if _count_tokens(brief_text) > max_brief_tokens:
         brief_text, _budget_suppressed = _enforce_token_rail(brief_text, max_brief_tokens)
+
+    # SM-6 (B): step-0 brief reduction — GT_BRIEF_MINIMAL (DEFAULT-OFF, byte-identical).
+    # Applied AFTER the token rail so the reduced text drives token_estimate + block
+    # receipts below. Retires <gt-graph-map>/<gt-localization>/contract narration, keeps
+    # obligations + minimal 'which file' orientation (localization rides reactive
+    # def_partition). BAKED: dormant until the SM-8 rebake sets the flag at generation.
+    if _brief_minimal_on():
+        brief_text = _reduce_brief_to_minimal(brief_text)
 
     # --- L1 signal-provenance counts (observability; no ranking effect) ---
     # Count over the DELIVERED candidate set (.files == _loc_files[:max_files]).

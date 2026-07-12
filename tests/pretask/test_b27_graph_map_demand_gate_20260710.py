@@ -123,6 +123,20 @@ def test_with_graph_map_suppressed_by_default(tmp_path, monkeypatch):
     assert off == _BRIEF, "OFF path must return the brief unchanged (byte-identical)"
 
 
+def test_gateway_profile_retires_graph_map_even_when_demanded(tmp_path, monkeypatch):
+    """The RL gateway profile owns orientation; its step-0 brief must not regain
+    the tagged graph-map through the legacy demand escape hatch."""
+    db = str(tmp_path / "g.db")
+    _build_graph(db)
+    monkeypatch.setenv("GT_GRAPH_MAP_DEMAND", "1")
+    monkeypatch.setenv("GT_GATEWAY", "1")
+
+    out = _with_graph_map(_BRIEF, _FILES, db)
+
+    assert out == _BRIEF
+    assert "<gt-graph-map>" not in out
+
+
 # --------------------------------------------------------------------------- #
 # end-to-end — generate_v1r_brief (embedder OFF for determinism)
 # --------------------------------------------------------------------------- #

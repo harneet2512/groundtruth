@@ -82,6 +82,33 @@ _RE_VALUE_LINE = re.compile(
     r"|(assertion\s+`?.*`?\s+failed)|(thread\s+'.*panicked)",
     re.IGNORECASE,
 )
+# SM-10 Item C (2026-07-12): a RUNNER-AGNOSTIC failure/error marker. The specific
+# grammars above (pytest E lines, path:line frames, got/want value deltas) cover the
+# common runners; a covering RED emitted by a NON-standard runner (a bespoke test
+# harness, a Makefile check, a language whose failure text matches none of them) would
+# fall through to the default STRIP on EVERY line -> kept empty -> "" -> the flagship
+# EXECUTED world-fact is SWALLOWED (audit finding: native_render default-STRIP at the
+# fail-closed tail). This marker rescues those lines in a SECOND, permissive pass that
+# runs ONLY when the specific pass kept nothing (so every recognized grammar is
+# byte-identical). Leak stays CLOSED: a rescued line is still routed through
+# ``_is_test_path`` here and ``_final_scrub`` below (identity-scrub belt).
+_RE_GENERIC_FAIL = re.compile(
+    r"\b(?:error|errored|fail|failed|failure|failing|assert|assertion|exception"
+    r"|panic|panicked|traceback|expected|unexpected|actual|mismatch|not\s+ok"
+    r"|fatal|abort|aborted|did\s+not|does\s+not|doesn't|wasn't|isn't)\b"
+    r"|!=|<>|≠",
+    re.IGNORECASE,
+)
+# A bare runner COUNT-SUMMARY line ("1 failed", "3 passed, 1 failed in 0.34s", "= 2 errors =")
+# — it carries a generic-fail WORD but ZERO fix-signal (no error class, no value, no frame),
+# so the permissive pass must STILL skip it (parity with _RE_SUMMARY on the ``FAILED node``
+# form). Anchored on a leading integer + status word so a real detail line ("assertion failed",
+# "Check FAILED: produced 5") — which starts with a word, not a digit — is NOT skipped.
+_RE_COUNT_SUMMARY = re.compile(
+    r"^\s*=*\s*(?:\d+\s+(?:passed|failed|error|errors|skipped|deselected|warning|warnings"
+    r"|xfailed|xpassed)\b[\s,]*)+(?:in\s+[\d.]+\s*s.*)?=*\s*$",
+    re.IGNORECASE,
+)
 
 
 _RE_CASE_TOKEN = re.compile(r"\b(test_\w+|Test\w+|\w+_test|it_\w+)\b")
@@ -183,11 +210,24 @@ def _scrub_test_path_tokens(line: str, test_files: set[str]) -> str:
         lambda m: "<test>" if _is_test_path(m.group(1), test_files) else m.group(0), line)
 
 
+# Strips BOTH an opening (``<gt-x ...>``) AND a closing (``</gt-x>``) GT tag. The module-level
+# ``_RE_GT_TAG`` (used by the byte-frozen ``render_syntax_error_native``) matches only the opening
+# form; this catches both so a field-injected ``<gt-fact>…</gt-fact>`` can never survive
+# ``_final_scrub`` onto a model-facing surface (SM-1 LIPI close-vector 2, 2026-07-11).
+_RE_GT_TAG_ANY = re.compile(r"</?gt-[^>]*>", re.IGNORECASE)
+
+
 def _final_scrub(line: str, test_files: set[str] | None = None) -> str:
-    """Fail-closed belt applied to EVERY kept line: no cargo thread-quote, no rust ``::tests::``
-    path, no ``file::nodeid``, no embedded test-DIR/ran-set path, no test-name token survives.
-    Guarantees contains_test_identity(output, test_files) is False regardless of runner quirks —
-    including a test path sitting MID-LINE in a kept value comparison (Invariant-1 fix)."""
+    """Fail-closed belt applied to EVERY kept line: no ``<gt-*>`` tag, no cargo thread-quote, no
+    rust ``::tests::`` path, no ``file::nodeid``, no embedded test-DIR/ran-set path, no test-name
+    token survives. Guarantees BOTH contains_test_identity(output, test_files) is False AND
+    contains_gt_tag(output) is False regardless of runner quirks OR a field-injected tag —
+    including a test path sitting MID-LINE in a kept value comparison (Invariant-1 fix).
+
+    Byte-identity note (SM-1 LIPI close-vector 2): the ``_RE_GT_TAG_ANY`` strip is a NO-OP on the
+    frozen ``render_covering_failure_native`` path — anonymized runner tokens never contain
+    ``<gt-`` — so the covering byte pins are unmoved (proven, not assumed)."""
+    line = _RE_GT_TAG_ANY.sub("", line)
     line = _RE_CARGO_THREAD.sub("thread", line)
     line = _RE_RUST_TESTPATH.sub("<test>", line)
     line = _RE_ANY_NODEID.sub(r"\1", line)
@@ -269,6 +309,25 @@ def render_covering_failure_native(
                 kept.append(s.strip())
             continue
         # default: STRIP (fail closed — only explicit signal tokens pass)
+    # SM-10 Item C (2026-07-12): SECOND, permissive pass — runs ONLY when the specific
+    # recognizers above kept nothing, so every recognized grammar is byte-identical (a
+    # covering RED that already produced a block is untouched). It rescues a real RED whose
+    # runner grammar matched none of the specific patterns (bespoke harness / uncommon
+    # language) instead of fail-closing to "". Leak stays CLOSED: the same ceremony strip,
+    # the `_is_test_path` whole-line guard, and the `_final_scrub` belt below apply.
+    if not kept:
+        for line in raw.splitlines():
+            s = line.rstrip()
+            if not s.strip():
+                continue
+            if (_RE_CMD_ECHO.match(s) or _RE_PYTEST_BANNER.match(s)
+                    or _RE_DEF_TEST_ECHO.match(s) or _RE_SUMMARY.match(s)
+                    or _RE_PYTEST_NOISE.match(s) or _RE_GO_FAIL_HDR.match(s)
+                    or _RE_COUNT_SUMMARY.match(s)):
+                continue
+            if _RE_GENERIC_FAIL.search(s) and not _is_test_path(s, tf):
+                kept.append(s.strip())
+        kept = kept[:_MAX_KEEP_LINES]  # bound the permissive pass (a noisy log can't blow up)
     if not kept:
         return ""
     # final fail-closed identity scrub on EVERY line, then de-dupe + cap.
@@ -391,3 +450,396 @@ def contains_test_identity(text: str, test_files: list[str] | set[str] | None = 
             if _is_test_path(tok, {_norm(x) for x in (test_files or [])}):
                 return True
     return False
+
+
+# ===========================================================================
+# SUPER MODE — per-fact-class NATIVE renderers (SM-1, 2026-07-11)
+# ===========================================================================
+# "Tag-free" is NOT "native". Stripping `<gt-fact>` off "co-changed with the edit
+# in 3 commits" leaves GT NARRATION the RL policy was never trained to consume.
+# Only output shaped like a REAL tool channel is native. Each renderer below names
+# the tool channel it imitates, is PURE / deterministic / LLM-free, is
+# correct-or-quiet ("" on unclear input — NEVER narration), and is identity-
+# firewalled so ``contains_test_identity(out) is False`` and no ``<gt-`` tag
+# survives. These are ADDITIVE — the three existing renderers above
+# (render_covering_failure_native / render_syntax_error_native /
+# render_submit_rejection) are byte-unchanged.
+# ---------------------------------------------------------------------------
+
+
+def _int_or_none(v: Any) -> int | None:
+    """``int(v)`` or ``None`` — never raises (correct-or-quiet gate for a line/count)."""
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+# Per-field length cap applied BEFORE a field reaches ``_final_scrub`` (SM-1 LIPI close-vector 3,
+# 2026-07-11). ``_RE_PATH_LOC`` / ``_RE_ANY_NODEID`` backtrack O(n²) on a long DOTLESS token
+# (~2s at 16k, hangs at 100k), so an un-bounded structured field would turn the renderers'
+# correct-or-quiet contract into a hang. A real path/symbol/func is far under the cap; a
+# pathological-length field is bounded (returns quiet-shaped), never a hang.
+_FIELD_CAP = 512
+
+
+def _cap(s: Any) -> str:
+    """Coerce to ``str`` and bound to ``_FIELD_CAP`` chars — the ReDoS guard for a structured
+    field. ``None``/non-str -> ``""`` (correct-or-quiet)."""
+    if s is None:
+        return ""
+    return str(s)[:_FIELD_CAP]
+
+
+def render_trace_frame_native(
+    path: str,
+    line: Any,
+    func: str | None = None,
+    *,
+    test_files: list[str] | set[str] | None = None,
+) -> str:
+    r"""fact-class ``trace`` (``trace_frame``) — a native TRACEBACK FRAME line, the
+    interpreter/runtime's OWN crash grammar the model was RL-trained to read:
+      * Python:    ``  File "<path>", line N, in <fn>``  (CPython traceback frame)
+      * go/rust/…: ``<path>:N``                          (compiler/panic location)
+    The FORM is chosen by the source extension (``.py``/``.pyi`` -> CPython frame;
+    else the ``path:line`` location token). This is the deepest IN-REPO frame — the
+    where-to-fix — NOT the GT narration ``deepest in-repo frame: …`` (which is prose
+    the policy never consumed).
+
+    Identity-firewalled: a TEST-file frame is quiet ("") — GT never points the model
+    at the grader target — and every kept line is run through :func:`_final_scrub`, so
+    ``contains_test_identity(out) is False`` holds. Correct-or-quiet: a missing path or
+    an unparseable line -> "".
+    """
+    n = _norm(_cap(path))
+    if not n:
+        return ""
+    ln = _int_or_none(line)
+    if ln is None:
+        return ""
+    tf = {_norm(t) for t in (test_files or [])}
+    if _is_test_path(n, tf):
+        return ""  # never a test frame (identity firewall)
+    if n.endswith(".py") or n.endswith(".pyi"):
+        fn = _cap(func).strip()
+        out = f'  File "{n}", line {ln}, in {fn}' if fn else f'  File "{n}", line {ln}'
+    else:
+        out = f"{n}:{ln}"
+    return _final_scrub(out, tf)
+
+
+def render_signature_delta_native(
+    caller_file: str,
+    caller_line: Any,
+    symbol: str,
+    *,
+    expected_min: Any,
+    expected_max: Any,
+    given: Any,
+    test_files: list[str] | set[str] | None = None,
+) -> str:
+    r"""fact-class ``signature_delta`` — a TYPE-CHECKER / COMPILER DIAGNOSTIC, the
+    exact grammar mypy / gopls / tsc / gcc emit for an arity mismatch:
+      ``<caller_file>:<L>: error: <fn>() takes N positional argument(s) but M given``
+    (universal ``path:line: error: <msg>`` diagnostic prefix). This is the channel
+    the policy was RL-trained to FIX ON — NOT the prose "the signature changed to …"
+    / "call passes M positional arg(s)" narration.
+
+    ``N`` collapses to a single count when ``expected_min == expected_max``, else a
+    ``min-max`` range. Identity-firewalled (a test-file caller is quiet) + scrubbed;
+    correct-or-quiet on a missing symbol/file or an unparseable line/count.
+    """
+    cf = _norm(_cap(caller_file))
+    sym = _cap(symbol).strip()
+    if not cf or not sym:
+        return ""
+    cl = _int_or_none(caller_line)
+    lo = _int_or_none(expected_min)
+    hi = _int_or_none(expected_max)
+    m = _int_or_none(given)
+    if cl is None or lo is None or hi is None or m is None:
+        return ""
+    tf = {_norm(t) for t in (test_files or [])}
+    if _is_test_path(cf, tf):
+        return ""
+    n = str(lo) if lo == hi else f"{lo}-{hi}"
+    out = f"{cf}:{cl}: error: {sym}() takes {n} positional argument(s) but {m} given"
+    return _final_scrub(out, tf)
+
+
+def render_caller_contract_native(
+    symbol: str,
+    n_callers: Any,
+    n_files: Any,
+    *,
+    def_file: str | None = None,
+    test_files: list[str] | set[str] | None = None,
+) -> str:
+    r"""fact-class ``caller_contract`` (gateway ``caller_break``) — a COMPILER / TYPE-CHECKER
+    CONTRACT DIAGNOSTIC, the ``path: error: <msg>`` grammar gcc / gopls / tsc / mypy emit when
+    an edit breaks a symbol's public contract:
+      ``<def_file>: error: <symbol>() signature changed; N caller(s) in M file(s) must update the call sites``
+    (the universal ``path: error: <msg>`` diagnostic prefix; ``: error:`` because a
+    signature change that breaks callers is a contract VIOLATION, not a hint). This is the
+    channel the policy was RL-trained to FIX ON — NOT the tagged ``[CALLERS] N verified
+    caller(s) ... — preserve this interface`` narration the legacy Lane-A block shipped.
+
+    This is the CROSS-LANGUAGE caller-break the graph-based gateway producer delivers on a
+    signature-changing edit (Go/Rust/TS/JS as well as Python) — the honest §26.4 replacement
+    for the retired l3.contract/l3b.evidence that patch_delta (ast-only) cannot produce.
+
+    ``N``/``M`` collapse to their integers; ``def_file`` is the edited symbol's own file (the
+    where-the-change-is). Identity-firewalled: a TEST-file ``def_file`` is quiet ("") — GT
+    never points the model at a grader target — and the line is run through
+    :func:`_final_scrub`, so ``contains_test_identity(out) is False`` holds. Correct-or-quiet:
+    a missing symbol, a non-positive caller/file count, or an unparseable count -> "".
+    """
+    sym = _cap(symbol).strip()
+    nc = _int_or_none(n_callers)
+    nf = _int_or_none(n_files)
+    if not sym or nc is None or nf is None or nc <= 0 or nf <= 0:
+        return ""
+    tf = {_norm(t) for t in (test_files or [])}
+    df = _norm(_cap(def_file))
+    if df and _is_test_path(df, tf):
+        return ""  # never name a test file as the edit site (identity firewall)
+    msg = (f"{sym}() signature changed; {nc} caller(s) in {nf} file(s) "
+           f"must update the call sites")
+    out = f"{df}: error: {msg}" if df else f"error: {msg}"
+    return _final_scrub(out, tf)
+
+
+def render_registration_native(
+    file: str,
+    line: Any,
+    symbol: str,
+    siblings: list[str] | tuple[str, ...] | None,
+    *,
+    test_files: list[str] | set[str] | None = None,
+) -> str:
+    r"""fact-classes ``registration`` / ``companion_surface`` — a LINTER DIAGNOSTIC in
+    the ruff / eslint / golangci-lint voice:
+      ``<file>:<L>: warning: registers <X, Y> but not '<symbol>'``
+    (the universal ``path:line: warning: <msg>`` linter prefix). A registration/
+    companion surface that lists its siblings but omits the just-added symbol is a
+    lint finding, not the bare-prose "registers siblings X, Y but not 'Z'".
+
+    Identity-firewalled + scrubbed; correct-or-quiet on a missing symbol, an empty
+    sibling set, or an unparseable line.
+    """
+    fp = _norm(_cap(file))
+    sym = _cap(symbol).strip()
+    sibs = [_cap(s).strip() for s in (siblings or []) if s and str(s).strip()]
+    if not fp or not sym or not sibs:
+        return ""
+    ln = _int_or_none(line)
+    if ln is None:
+        return ""
+    tf = {_norm(t) for t in (test_files or [])}
+    if _is_test_path(fp, tf):
+        return ""
+    out = f"{fp}:{ln}: warning: registers {', '.join(sibs)} but not '{sym}'"
+    return _final_scrub(out, tf)
+
+
+def render_def_rows_native(
+    rows: Any,
+    *,
+    test_files: list[str] | set[str] | None = None,
+) -> str:
+    r"""fact-class ``def_partition`` — a RIPGREP ROW block: one ``<path>:<line>:<sym>``
+    per definition site (ripgrep's own ``path:line:match`` grammar), so the answer
+    rides the agent's OWN grep channel in-distribution. A shared primitive next to the
+    seam's ``gt_mini_patch._fmt_def_facts_native`` (same row grammar) for the gateway's
+    ``def_partition`` path.
+
+    ``rows`` is an iterable of ``(path, line, sym)``. A TEST-file row is dropped
+    (identity firewall) and every emitted row is scrubbed. Correct-or-quiet: no
+    signal-bearing row -> "".
+    """
+    tf = {_norm(t) for t in (test_files or [])}
+    out: list[str] = []
+    try:
+        it = list(rows or [])
+    except TypeError:
+        return ""
+    for row in it:
+        try:
+            path, line, sym = row
+        except (TypeError, ValueError):
+            continue
+        n = _norm(_cap(path))
+        s = _cap(sym).strip()
+        ln = _int_or_none(line)
+        if not n or not s or ln is None:
+            continue
+        if _is_test_path(n, tf):
+            continue  # ripgrep would show it, but GT never surfaces a test row
+        row_s = _final_scrub(f"{n}:{ln}:{s}", tf)
+        if row_s.strip():
+            out.append(row_s)
+    return "\n".join(out)
+
+
+def render_ranked_list_native(
+    rows: Any,
+    *,
+    test_files: list[str] | set[str] | None = None,
+) -> str:
+    r"""fact-class ``localization`` (T0->T2 re-slot, 2026-07-12) — GT's RANKED localization
+    ANSWER as a RIPGREP ROW block: one ``<path>:<line>:<sym>`` per ranked candidate FILE
+    (ripgrep's own ``path:line:match`` grammar), so the answer rides the agent's OWN grep
+    channel in-distribution at the POST-SEARCH boundary. This is the registry-DECLARED
+    ``ranked-list`` renderer (fact_registry ``localization.native_renderer``) that did not
+    previously exist.
+
+    HEDGE-FREE by construction: the native voice is the environment LISTING candidate files
+    — there is NO "confirm the edit target with grep" prose (that hedge is correct at the T0
+    brief, but the T2 rows ARE the grep channel, so re-confirmation prose is out of voice).
+
+    ``rows`` is an iterable of ``(path, line, sym)``. The identity firewall is INHERITED
+    VERBATIM from :func:`render_def_rows_native` (per-row ``_is_test_path`` DROP +
+    ``_final_scrub``), not re-implemented — a test-file candidate is never a row and no
+    ``<gt-*>`` tag / ``::nodeid`` survives, so ``contains_test_identity(out) is False`` holds.
+    Correct-or-quiet: no signal-bearing row -> "".
+    """
+    return render_def_rows_native(rows, test_files=test_files)
+
+
+def render_body_concept_native(
+    rows: Any,
+    *,
+    test_files: list[str] | set[str] | None = None,
+) -> str:
+    r"""fact-class ``body_concept`` (a post_search ``def_partition`` variant, 2026-07-12) — the
+    concept-hit function BODIES as a RIPGREP ROW block: one ``<path>:<line>:<sym>`` per function
+    whose BODY mentions the queried concept but whose NAME/PATH did not match (ripgrep's own
+    ``path:line:match`` grammar), so a vocabulary-gap answer rides the agent's OWN grep channel
+    in-distribution instead of the prose ``N function bodies mention "x" …`` narration.
+
+    ``body_concept`` aliases to the registered ``def_partition`` class whose declared renderer is
+    ``grep-native`` (fact_registry), and its hits ARE def sites of concept-bearing bodies, so the
+    identity firewall + row grammar are INHERITED VERBATIM from :func:`render_def_rows_native`
+    (per-row ``_is_test_path`` DROP + ``_final_scrub``) — not re-implemented. A test-file row is
+    never surfaced and no ``<gt-*>`` / ``::nodeid`` survives, so ``contains_test_identity(out) is
+    False`` holds. ``rows`` is an iterable of ``(path, line, sym)`` (the symbol = the
+    concept-bearing function). Correct-or-quiet: no signal-bearing row -> "".
+    """
+    return render_def_rows_native(rows, test_files=test_files)
+
+
+def render_recovery_native(reason: str, imperative: str) -> str:
+    """fact-class ``recovery`` — the proven-consumed SHORT IMPERATIVE (the boa
+    ``no_test_evidence`` nudge: SHORT · ACTIVE · at the decision point). Native form =
+    ONE imperative line, no ``<gt-`` tag, no GT-voice wrapper. ``reason`` is the
+    fire-class identity (host-side telemetry); it is NOT emitted onto the model surface.
+
+    Correct-or-quiet: an empty imperative -> "". Any ``<gt-*>`` tag is stripped and the
+    text is collapsed to a single line (defense: the native channel is a one-liner, not
+    a nudge block). Symmetry with the other 5 renderers (SM-1 LIPI close-vector 1): the
+    collapsed text is routed through :func:`_final_scrub` so a test identity embedded in
+    the imperative (a nodeid / ``crate::tests::fn`` / ``def test_`` / ``spec/x.js``) can
+    NOT leak — ``contains_test_identity(out) is False`` holds here too.
+    """
+    text = _RE_GT_TAG_ANY.sub("", (imperative or "")).strip()
+    if not text:
+        return ""
+    text = " ".join(text.split())     # collapse to a single imperative line
+    text = text[:_MAX_BODY]           # bound BEFORE the O(n²) scrub (ReDoS guard)
+    return _final_scrub(text, set())  # symmetry: no test identity survives an imperative
+
+
+def render_scope_constraint_native(
+    must_touch_file: str | None,
+    *,
+    test_files: list[str] | set[str] | None = None,
+) -> str:
+    r"""fact-class ``scope`` — INTERNAL unless it names a CONCRETE edit decision. When
+    the scope fact carries a specific file the edit must ALSO touch, render it as a
+    compiler ``note:`` constraint the agent can act on:
+      ``<file>: note: your change must also update this file``
+    (gcc/clang ``note:`` continuation grammar). When scope names NO decision (no file),
+    it is a ranking/internal signal with NO model-facing form -> "" (never the prose
+    "scope is broad …").
+
+    Identity-firewalled: never names a test file. Correct-or-quiet.
+    """
+    n = _norm(_cap(must_touch_file))
+    if not n:
+        return ""  # scope with no named decision = INTERNAL only (no narration)
+    tf = {_norm(t) for t in (test_files or [])}
+    if _is_test_path(n, tf):
+        return ""
+    return _final_scrub(f"{n}: note: your change must also update this file", tf)
+
+
+def render_cochange_native(*_args: Any, **_kwargs: Any) -> str:
+    """fact-class ``cochange`` (``cochange_prior``) — INTERNAL RANKING ONLY. Co-change
+    priors bias localization/companion RANKING; they are NOT a delivered model-facing
+    fact. There is NO native form for cochange: this function ALWAYS returns "" and
+    MUST NEVER emit the "co-changed with the edit in N commits" narration. It exists to
+    make the internal-only decision executable + pinned (correct-or-quiet, always
+    quiet), so a future wiring that reaches for a cochange renderer stays silent.
+    """
+    return ""
+
+
+# The static, LEAK-FREE hook label for each certificate SDLC head (a CompletionCertificate
+# ``unresolved_failures`` field name). The covering head reports only its VERDICT (Failed) —
+# NEVER a failing-test name (the names ride ``head_record`` for host telemetry, never here).
+_CERT_HOOK_LABEL: dict[str, str] = {
+    "selected_test_status": "run covering tests",
+    "syntax_status": "check syntax",
+    "type_status": "type-check",
+    "build_status": "build",
+    "scope_compliance": "scope guard",
+    "reproduction_status": "reproduce issue",
+}
+_CERT_HYGIENE_LABEL = "diff hygiene"   # the head's hygiene block (not an SDLC field)
+_CERT_LEADER_WIDTH = 56                # pre-commit dotted-leader column
+
+
+def render_completion_cert_native(
+    failing_heads: Any,
+    *,
+    hygiene_blocked: bool = False,
+    hygiene_detail: str = "",
+    test_files: list[str] | set[str] | None = None,
+) -> str:
+    r"""fact-class ``submit_refusal`` — the D7 CompletionCertificate rendered as a native
+    PRE-COMMIT HOOK FAILURE block, the pre-commit framework's OWN ``<hook id>....Failed``
+    grammar the RL policy reads when a commit is refused. ONE line per FAILING certificate
+    head — a WORLD-FACT (this check failed), NOT the prose "the certificate reports N
+    unresolved failures" and NOT an instruction ("re-run the tests …").
+
+    ``failing_heads``   the certificate's ``unresolved_failures`` (SDLC field names). The
+                        covering head reports its VERDICT (Failed), NEVER a test name.
+    ``hygiene_blocked`` the head blocked on diff hygiene (not an SDLC field) -> its own line.
+    ``hygiene_detail``  the WORLD-FACT reason for a hygiene block (e.g. "vendored file
+                        changed"), scrubbed + bounded; "" to omit.
+
+    Identity-firewalled: EVERY emitted line is routed through :func:`_final_scrub`, so a test
+    identity that rode a detail string is scrubbed — ``contains_test_identity(out) is False``
+    and no ``<gt-*>`` tag survives. Correct-or-quiet: a CLEAN certificate (no failing head)
+    renders NOTHING (no praise line) -> "".
+    """
+    tf = {_norm(t) for t in (test_files or [])}
+    labels: list[str] = []
+    if hygiene_blocked:
+        labels.append(_CERT_HYGIENE_LABEL)
+    for name in (failing_heads or []):
+        lbl = _CERT_HOOK_LABEL.get(str(name))
+        if lbl and lbl not in labels:
+            labels.append(lbl)
+    if not labels:
+        return ""  # clean cert -> deliver nothing (correct-or-quiet)
+    lines = ["pre-commit hook failed:"]
+    for lbl in labels:
+        dots = "." * max(3, _CERT_LEADER_WIDTH - len(lbl))
+        lines.append(_final_scrub(f"{lbl}{dots}Failed", tf))
+    det = _cap(hygiene_detail).strip()
+    if det:
+        lines.append(_final_scrub(det, tf))  # a world-fact reason, identity-scrubbed
+    lines.append("commit aborted (exit 1)")
+    return _tail("\n".join(lines))
