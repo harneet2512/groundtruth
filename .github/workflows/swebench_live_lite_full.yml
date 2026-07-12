@@ -709,6 +709,16 @@ jobs:
           GT_GITHUB_SHA: ${{ github.sha }}
           GT_PROOF_HARNESS: deepswe
           GT_MATRIX_IMAGE: ${{ env.LL_TASK_IMAGE }}
+          # Super Mode (Profile-2): mine the semantic body channels (body_terms/string_literals)
+          # at INDEX time so the base graph the receipt reads carries them. substrate_proof.sh:637
+          # forwards ${GT_SEM_BODY:-0} to gt-run-proof, which writes /tmp/gt/graph.db (== the agent
+          # container's read-only GT_HOST_GRAPH_DB). Without this the channel defaults OFF, the
+          # graph is byte-identical (0 body rows), the receipt reports sem_body_rows=0, and the
+          # Profile-2 GT_SEM_BODY member fails closed on every substrate (rebake cannot fix it —
+          # the graph is built here at runtime, not baked). Receipt->profile->eval then propagates
+          # GT_SEM_BODY=1 into the agent container ONLY once sem_body_rows>0 (fail-closed preserved).
+          # Baseline arm is unaffected: this whole step is skipped when inputs.baseline == true.
+          GT_SEM_BODY: '1'
         run: bash scripts/ci/substrate_proof.sh
         # ^^ Inline shell code was extracted to scripts/ci/substrate_proof.sh to stay
         # under GHA's 21,000-character expression limit. All ${{ }} values are passed
@@ -1063,17 +1073,28 @@ jobs:
               # action_count/tokens/cost all read 0. GUARD: this whole block is a single-quoted
               # docker bash -c argument. NEVER put an apostrophe in any comment here: one
               # apostrophe closes the quote and the agent silently never launches. Cost a smoke.
-              # B5 fix (run 29211807809 = 0 agent steps on every task): mini-swe-agent 2.4.5 defaults
-              # to the INTERACTIVE agent (run/mini.py:101 default_type=interactive) — without -y it opens
-              # the Textual TUI and waits for input, so `yes ""` cannot drive it and the process is Killed
-              # at 0 steps/0 tokens. -y => agent.mode=yolo (headless, no per-step confirmation);
-              # --exit-immediately => no end-of-run prompt. MSWEA_CONFIGURED=true skips the first-run
-              # API-key wizard (config.py:62 gate) since the model key is already in the container env.
-              # GT-on(75) avoided this by running via pier (programmatic), never the bare CLI.
+              # B5 fix v2 (run 29211807809 + micro-verify 29212976448 = 0 agent steps every task):
+              # mini-swe-agent 2.4.5 hardcodes default_type=interactive (run/mini.py:101), so the bare
+              # CLI builds the InteractiveAgent, which prompts the user for every step via a prompt_toolkit
+              # TUI (agents/interactive.py:60) and, when no task is given, first asks what to do next
+              # (run/mini.py:94). With no TTY in the container both prompts block and the process is Killed
+              # at 0 steps/0 tokens; -y only sets the yolo MODE on that same interactive agent, not the class.
+              # FIX: --agent-class default selects the non-interactive DefaultAgent (agents/default.py:85, a
+              # pure while-True step loop with no prompt) -- what the working GT-on(75) pier path ran
+              # (GTMiniSweAgent subclasses DefaultAgent). GT hooks are preserved: _install() wraps
+              # Environment.execute (gt_mini_patch.py:11623-11624), which DefaultAgent calls, so the hook is
+              # agent-class-agnostic and NOT a GT-off run. Also guard the task: mini.py:94 prompts when
+              # --task is empty; the host /gt_out issue file can exist-but-be-empty (cat exits 0, so a
+              # `|| cat` chain never falls through), so test emptiness with -z and fall back
+              # /gt_out -> /tmp -> a literal, never an empty --task. MSWEA_CONFIGURED=true skips the
+              # first-run key wizard (config.py:62); the model key is already in the container env.
               export MSWEA_CONFIGURED=true
-              yes "" 2>/dev/null | mini-swe-agent -y --exit-immediately \
+              GT_TASK_TEXT="$(cat /gt_out/issue.txt 2>/dev/null)"
+              if [ -z "$GT_TASK_TEXT" ]; then GT_TASK_TEXT="$(cat /tmp/issue.txt 2>/dev/null)"; fi
+              if [ -z "$GT_TASK_TEXT" ]; then GT_TASK_TEXT="Fix the issue in the repository."; fi
+              mini-swe-agent --agent-class default \
                 --model "'"$INPUT_MODEL"'" \
-                --task "$(cat /gt_out/issue.txt 2>/dev/null || echo Fix the issue in the repository.)" \
+                --task "$GT_TASK_TEXT" \
                 --config /opt/gt/agent_config.yaml \
                 -o /gt_out/mini-swe-agent.trajectory.json \
                 2>&1 || true
