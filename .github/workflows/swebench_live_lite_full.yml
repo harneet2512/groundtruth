@@ -1010,20 +1010,19 @@ jobs:
               # old `uv pip install --system` fallback installed into the <3.10 system
               # Python and silently failed on those 155 images; it is removed.
               echo "[GT] installing mini-swe-agent..."
-              # BUG (smoke2 29207454580): the model call died on ModuleNotFoundError No module named
-              # fastapi from the litellm pre-call path (litellm_pre_call_utils). litellm arrives
-              # TRANSITIVELY via mini-swe-agent/datacurve-pier and one of its code paths imports fastapi,
-              # but the substrate bakes no litellm and nothing installed fastapi. Install it into the SAME
-              # env as litellm on EVERY branch (system pip + uv tool venv), else every task rewards 0 first.
-              # NOTE: this whole block is single-quoted -> NEVER put an apostrophe/single-quote here.
-              pip install --quiet datacurve-pier fastapi 2>/dev/null || pip install --quiet mini-swe-agent fastapi 2>/dev/null || {
+              # BUG (smoke2 29207454580 + smoke30 29217166750): the model call dies on
+              # ModuleNotFoundError from the litellm pre-call path (litellm_pre_call_utils) — first
+              # fastapi, then orjson. litellm arrives TRANSITIVELY via mini-swe-agent/datacurve-pier
+              # and its code paths import these optional deps, but the substrate bakes no litellm and
+              # nothing installed them. Install them into the SAME env as litellm on EVERY branch
+              # (system pip + uv tool venv), else every task rewards 0 at step 1. The GT_PY-targeted
+              # belt AFTER interpreter resolution (below) is the load-bearing guarantee; these --with/
+              # pip additions cover the happy path. GUARD: single-quoted docker block — NO apostrophe.
+              pip install --quiet datacurve-pier fastapi orjson 2>/dev/null || pip install --quiet mini-swe-agent fastapi orjson 2>/dev/null || {
                 curl -LsSf https://astral.sh/uv/install.sh 2>/dev/null | sh 2>/dev/null
                 export PATH="$HOME/.local/bin:/root/.local/bin:$PATH"
-                uv tool install --python 3.11 --with fastapi mini-swe-agent 2>/dev/null || uv tool install --with fastapi mini-swe-agent 2>/dev/null
+                uv tool install --python 3.11 --with fastapi --with orjson mini-swe-agent 2>/dev/null || uv tool install --with fastapi --with orjson mini-swe-agent 2>/dev/null
               }
-              # Belt: guarantee fastapi is importable in the interpreter that runs litellm (covers the case
-              # where mini-swe-agent was already present so the install line above short-circuited).
-              python -c "import fastapi" 2>/dev/null || pip install --quiet fastapi 2>/dev/null || true
               # Verify installation
               if ! command -v mini-swe-agent >/dev/null 2>&1; then
                 # Try finding it in common locations
@@ -1065,6 +1064,25 @@ jobs:
               export GT_PY
               echo "[GT] headless interpreter GT_PY=$GT_PY exe=$("$GT_PY" -c "import sys;print(sys.executable)" 2>/dev/null)"
               echo "[GT] minisweagent module: $("$GT_PY" -c "import minisweagent;print(minisweagent.__file__)" 2>/dev/null || echo NOT-IMPORTABLE)"
+
+              # ── litellm optional-dep belt, TARGETED at GT_PY (load-bearing) ────────────────
+              # The model call runs litellm IN GT_PY (the interpreter that has minisweagent). The
+              # old fastapi belt used bare `python` = the WRONG interpreter on a uv-tool image, so
+              # litellm still died at step 1 (smoke30 29217166750: No module named orjson, BOTH the
+              # uv-venv and system-python images). Ensure each observed litellm pre-call dep is
+              # importable BY GT_PY; install into GT_PY if missing (pip in-venv, else uv pip
+              # --python, else system pip). Single-line probe (YAML-block-scalar safe). Non-fatal;
+              # if a NEW dep surfaces downstream, add it here. GUARD: no apostrophe in this block.
+              for _dep in orjson fastapi; do
+                if ! "$GT_PY" -c "import $_dep" >/dev/null 2>&1; then
+                  "$GT_PY" -m pip install --quiet "$_dep" >/dev/null 2>&1 \
+                    || uv pip install --python "$GT_PY" "$_dep" >/dev/null 2>&1 \
+                    || pip install --quiet "$_dep" >/dev/null 2>&1 || true
+                fi
+                "$GT_PY" -c "import $_dep" >/dev/null 2>&1 \
+                  && echo "[GT] litellm dep OK in GT_PY: $_dep" \
+                  || echo "[GT] WARN litellm dep MISSING in GT_PY: $_dep"
+              done
 
               # Write mini-swe-agent config AND set env vars to skip interactive wizard
               mkdir -p /root/.config/mini-swe-agent
