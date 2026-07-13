@@ -19,23 +19,23 @@ as SS-0/SS-1 land.
 THE SS FEATURE CONTRACT (the flag names + ledger reasons this gate enforces — SS-0/SS-1 MUST
 implement to these; each is an INDEPENDENT ``GT_SS_*`` env flag, default-OFF byte-identical):
 
-  S1  GT_SS_STEP_BEHIND    a factual delivery whose ENTIRE entity set ⊆ {files the agent already
+  S1  GT_SS_NOVELTY    a factual delivery whose ENTIRE entity set ⊆ {files the agent already
                            viewed + symbols it grepped} is SUPPRESSED (ledger reason
                            ``ss_step_behind``); a delivery carrying a NOVEL cross-file entity survives.
-  S2  GT_SS_SEMANTIC_DEDUP two same-class deliveries with byte-DISTINCT payloads but equal/subset
+  S2  GT_SS_DEDUP2 two same-class deliveries with byte-DISTINCT payloads but equal/subset
                            entity sets -> the second is suppressed (reason ``ss_semantic_dup``).
-  S3  GT_SS_COHERENCE      a run-coherence signal fires ONLY on >=3 consecutive successful writes to
+  S3  GT_SS_COHERENCE_V2      a run-coherence signal fires ONLY on >=3 consecutive successful writes to
                            one file with NO intervening passing test; a passing test / a failed write
                            / <=2 writes does NOT fire. When it fires its bytes carry the EXACT count.
-  S4  GT_SS_RECOVERY       the SAME failing test observed twice with no intervening edit delivers a
+  S4  GT_SS_RECOVERY_V2       the SAME failing test observed twice with no intervening edit delivers a
                            recovery imperative on the SECOND repeat (not later); two different-output
                            commands do NOT; a passing-test repeat does NOT.
   S5  GT_SS_PROVENANCE     a fact whose provenance is only low-quality paths (``tmp/``, ``htmlcov/``,
                            scratch/coverage) is suppressed (reason ``ss_provenance``); no L6 reindex
                            is triggered for those paths.
-  S6  GT_SS_LATE           an obligation whose requirement is already covered by an EARLIER passing
+  S6  GT_SS_LATE_DROP           an obligation whose requirement is already covered by an EARLIER passing
                            test is suppressed (reason ``ss_late``).
-  S7  GT_SS_ACK            a delivery whose entity a later agent action references gains ledger
+  S7  GT_SS_ACK_METRICS            a delivery whose entity a later agent action references gains ledger
                            ``ack=true``; an unreferenced delivery is ``ack=false``.
   S8  GT_SS_ARBITER_V2     a producer that yields ZERO bytes yields NO ``delivered`` ledger row
                            (structural empty-payload guarantee). SKIP-with-reason if the flag has no
@@ -98,8 +98,8 @@ _TEST_TOKENS = ("tests/test_pkg.py", "test_run", "test_pkg")
 _PROVENANCE_PATHS = ("tmp/scratch.py", "htmlcov/x.js")
 
 # The canonical SUPER-SAIYAN feature flags (the S1-S8 overlay). All default-OFF.
-_SS_FLAGS = ("GT_SS_STEP_BEHIND", "GT_SS_SEMANTIC_DEDUP", "GT_SS_COHERENCE", "GT_SS_RECOVERY",
-             "GT_SS_PROVENANCE", "GT_SS_LATE", "GT_SS_ACK", "GT_SS_ARBITER_V2")
+_SS_FLAGS = ("GT_SS_NOVELTY", "GT_SS_DEDUP2", "GT_SS_COHERENCE_V2", "GT_SS_RECOVERY_V2",
+             "GT_SS_PROVENANCE", "GT_SS_LATE_DROP", "GT_SS_ACK_METRICS", "GT_SS_ARBITER_V2")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -246,7 +246,13 @@ class RealSeamDriver:
         core["GT_RL_PROFILE"] = "2"
         core["GT_GATEWAY"] = "1"
         core["GT_GLOBAL_ARBITER"] = "1"   # the <=1-dose enforcer, explicit
-        self._core = core
+        # SUPER-SAIYAN is an INDEPENDENT overlay controlled ONLY by each scenario arm's
+        # ss_env — so the ONLY thing that differs between a scenario's arms is the GT_SS_*
+        # flags (this comment's contract). Profile-2 now REGISTERS the GT_SS_* members
+        # (=1), which would contaminate the SS-OFF baseline (the S10 'unset' arm would
+        # inherit SS-on from the profile and never equal explicit-0). Strip them from core
+        # so the baseline is truly SS-off and every SS delta is arm-attributable.
+        self._core = {k: v for k, v in core.items() if not k.startswith("GT_SS_")}
         spec_path = _FIXTURES / "graph_spec.json"
         self.spec = json.loads(spec_path.read_text(encoding="utf-8"))
         self.repo_src = _FIXTURES / "repo"
@@ -444,7 +450,7 @@ def _gizmo_hits() -> str:
 # S1 — STEP-BEHIND
 # ══════════════════════════════════════════════════════════════════════════════
 def scenario_s1(driver) -> ScenarioResult:
-    flag = "GT_SS_STEP_BEHIND"
+    flag = "GT_SS_NOVELTY"
     # suppressed episode: BOTH def files of `run` viewed before grepping it -> the def/ref
     # partition's entity set ⊆ {viewed files + grepped symbol} -> must be suppressed.
     supp_events = [
@@ -483,7 +489,7 @@ def scenario_s1(driver) -> ScenarioResult:
 # S2 — SEMANTIC DEDUP
 # ══════════════════════════════════════════════════════════════════════════════
 def scenario_s2(driver) -> ScenarioResult:
-    flag = "GT_SS_SEMANTIC_DEDUP"
+    flag = "GT_SS_DEDUP2"
     # two greps for fold-variant symbols that resolve to the SAME def files (same entity set)
     # but yield byte-DISTINCT partition payloads -> content-hash dedup does NOT fire, so the
     # semantic (entity-set) dedup must suppress the second.
@@ -509,7 +515,7 @@ def _write(path: str, old: str, new: str, rc: int = 0) -> Event:
 
 
 def scenario_s3(driver) -> ScenarioResult:
-    flag = "GT_SS_COHERENCE"
+    flag = "GT_SS_COHERENCE_V2"
     # NON-FIRE: 2 successful writes + 1 failed write + 2 cat views + 1 passing test between.
     nonfire = [
         _write(_MOD_A, "return 'a'", "return 'a1'"),
@@ -555,7 +561,7 @@ def _test_evt(cmd: str, output: str, rc: int) -> Event:
 
 
 def scenario_s4(driver) -> ScenarioResult:
-    flag = "GT_SS_RECOVERY"
+    flag = "GT_SS_RECOVERY_V2"
     fail_out = "E   assert run() == 'x'\n1 failed"
     # (a) SAME failing test twice, no intervening edit -> recovery on the SECOND repeat.
     same_fail = [_test_evt("pytest -q", fail_out, 1), _test_evt("pytest -q", fail_out, 1)]
@@ -628,7 +634,7 @@ def scenario_s5(driver) -> ScenarioResult:
 # S6 — LATE-DROP
 # ══════════════════════════════════════════════════════════════════════════════
 def scenario_s6(driver) -> ScenarioResult:
-    flag = "GT_SS_LATE"
+    flag = "GT_SS_LATE_DROP"
     # a passing test that covers sig_target EARLIER; then a turn that would resurface the
     # sig_target obligation -> it must be dropped late (reason ss_late).
     events = [
@@ -647,7 +653,7 @@ def scenario_s6(driver) -> ScenarioResult:
 # S7 — ACK TELEMETRY
 # ══════════════════════════════════════════════════════════════════════════════
 def scenario_s7(driver) -> ScenarioResult:
-    flag = "GT_SS_ACK"
+    flag = "GT_SS_ACK_METRICS"
     # deliver a `run` partition (cites mod_a/mod_b), then a later action that REFERENCES a
     # delivered entity (edits mod_b) -> that delivery's ledger row gains ack=true.
     events = [

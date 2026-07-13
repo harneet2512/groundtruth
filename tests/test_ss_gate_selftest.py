@@ -58,7 +58,7 @@ def _fake_seam(mutations=frozenset()):
                 if len(deffiles) >= 2:  # ambiguous -> a partition would deliver
                     entity = set(deffiles) | {sym}
                     step_behind = entity <= (viewed | {sym})
-                    ss_on = ss_env.get("GT_SS_STEP_BEHIND") == "1"
+                    ss_on = ss_env.get("GT_SS_NOVELTY") == "1"
                     # reference: suppress IFF the whole entity set was already seen.
                     # invert_suppression: suppress the NOVEL case instead (wrong) — still an
                     # EFFECT (so the gate detects "built") but violates the standard.
@@ -84,7 +84,7 @@ def _fake_seam(mutations=frozenset()):
                                                chars_delivered=len(block), iteration=it))
             # fire_when_zero: emit a model byte when the flag is explicitly "0" (a broken
             # flag-gate that is NOT byte-identical vs the unset arm) -> S10 must bite it.
-            if "fire_when_zero" in mut and ss_env.get("GT_SS_STEP_BEHIND") == "0":
+            if "fire_when_zero" in mut and ss_env.get("GT_SS_NOVELTY") == "0":
                 after = after + "\nZZ"
             obs.append(G.Obs(before=before, after=after))
         return G.SeamResult(observations=obs, ledger=ledger)
@@ -140,7 +140,7 @@ def test_mutation_fire_when_zero_bites_s10():
 #    honest "feature not landed" verdict (the current real-seam state for S1-S8).
 # --------------------------------------------------------------------------- #
 def test_no_effect_flag_is_skip_not_pass():
-    # a fake that ignores GT_SS_STEP_BEHIND entirely -> on-arm == off-arm -> SKIP.
+    # a fake that ignores GT_SS_NOVELTY entirely -> on-arm == off-arm -> SKIP.
     def inert(events, ss_env):
         return G.SeamResult(observations=[G.Obs(ev.output or "", ev.output or "") for ev in events],
                             ledger=[])
