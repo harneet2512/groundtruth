@@ -17,7 +17,11 @@ as SS-0/SS-1 land.
 
 ────────────────────────────────────────────────────────────────────────────────────────────
 THE SS FEATURE CONTRACT (the flag names + ledger reasons this gate enforces — SS-0/SS-1 MUST
-implement to these; each is an INDEPENDENT ``GT_SS_*`` env flag, default-OFF byte-identical):
+implement to these; each is an INDEPENDENT ``GT_SS_*`` env flag, default-OFF byte-identical).
+CURRENT SCENARIO SET = 12: S0 CHANNEL-CANARY (SS-6b hermeticity pre-flight — a dead fixture
+channel is a loud exit-1, never a SKIP) + S1..S10 below + S11 SUBMIT-RED (SS-2: ONE native
+refusal when the last test touching an edited surface was observed FAILING and unresolved;
+silent on green; never fires twice):
 
   S1  GT_SS_NOVELTY    a factual delivery whose ENTIRE entity set ⊆ {files the agent already
                            viewed + symbols it grepped} is SUPPRESSED (ledger reason
