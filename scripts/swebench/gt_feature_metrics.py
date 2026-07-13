@@ -158,6 +158,7 @@ _INFRA_MEMBER_MEDIATES: dict[str, tuple[str, ...]] = {
     "GT_SS_PROVENANCE": (),                               # provenance/seal on every delivery
     "GT_SS_LATE_DROP": (),                                # late-fact drop timing, all classes
     "GT_SS_ACK_METRICS": (),                              # host-side ack telemetry only
+    "GT_SS_ACK_FORM": (),                                 # SS-5 FORM: preamble reframes reading of ALL classes + obligations checklist
 }
 
 # Backing-module → producer agreement drift-guard: these members' _MEMBER_CAPABILITY_MODULE

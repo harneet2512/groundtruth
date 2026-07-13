@@ -248,6 +248,11 @@ GT_AE_ARGS=(
   --ae "GT_SS_LATE_DROP=${GT_SS_LATE_DROP:-0}"
   --ae "GT_SS_ACK_METRICS=${GT_SS_ACK_METRICS:-0}"
   --ae "GT_SS_ARBITER_V2=${GT_SS_ARBITER_V2:-0}"
+  #    SS-5 (2026-07-13) acknowledgment FORM: non-tool-framing m1 preamble (gt_agent.py, read
+  #    HOST-side at text-build) + imperative-only GT_BRIEF_NATIVE obligations checklist (v1r_brief,
+  #    read at brief-gen). Forwarded for pool + AE-forward-completeness-pin coverage (the host
+  #    export already reaches the host-side consumers; the --ae is the single-source invariant).
+  --ae "GT_SS_ACK_FORM=${GT_SS_ACK_FORM:-0}"
 
   # ── Deep 8-dp telemetry sinks (CLAUDE.md mandate) -> host-mounted /gt_out ─────
   # Without these the in-container producers default to /tmp/* and DIE with the

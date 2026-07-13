@@ -215,6 +215,17 @@ _SUPER_MODE_MEMBERS: frozenset[str] = frozenset(
         "GT_SS_PROVENANCE",       # SS — provenance stamp on every model-visible delivery (seal completeness)
         "GT_SS_LATE_DROP",        # SS — late-fact drop timing (defer-refire vs destroy on a passed boundary)
         "GT_SS_ACK_METRICS",      # SS — ack-ladder telemetry (fact_registry.ack_expected; host-side only)
+        # SS-5 (2026-07-13): the acknowledgment-FORM arm. Rewrites the m1 preamble (gt_agent.py) off
+        # the tool-framing + retired-<gt-*>-tag text that TRAINED the discount policy (296-delivery
+        # audit: ~3% ack, half of them GT-tool dismissals) onto native environment-diagnostic
+        # guidance, AND applies the requirement-extractor discipline to the GT_BRIEF_NATIVE step-0
+        # obligations checklist (imperative items only; repro/pleas dropped). Default-OFF byte-
+        # identical seam/brief code property (NOT a new tag/pull-tool). NO _MEMBER_CAPABILITY_MODULE
+        # entry — baked-text (preamble) + brief-gen code property with no single find_spec-able
+        # surface, unmapped-BY-CONVENTION exactly like the other SS members (never a FALSE abort;
+        # flag-off is byte-identical). Forwarded in gt_ae_block.sh; pinned in the AE-forward
+        # completeness pin + tests/pretask/test_ss5_*.
+        "GT_SS_ACK_FORM",         # SS-5 — acknowledgment FORM: non-tool-framing preamble + imperative checklist
         # GT_SS_ARBITER_V2: the arbiter defer-and-refire + repair_support relaxation + empty-payload
         # guard (global_arbiter.arbitrate / gateway.augment). Fixes: scope_map blanket-retire (29/29),
         # consensus.scope repair_support_late (18x suppressed — the ONLY proven-consumed class), and

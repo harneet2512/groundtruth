@@ -647,6 +647,17 @@ _SELFTEST_STEP = (
 # ---------------------------------------------------------------------------
 # GT preamble injected into the agent's instruction
 # ---------------------------------------------------------------------------
+def _ss_ack_form_on() -> bool:
+    """GT_SS_ACK_FORM — the SS-5 acknowledgment-FORM arm. Default OFF -> the injected
+    m1 preamble text is byte-identical to the legacy ``_GT_PREAMBLE``. When ON the
+    ACK-FORM preamble is delivered instead (see ``_GT_PREAMBLE_ACK_FORM``). Read at
+    text-BUILD time (the use site in ``run()``), so an unset/`0` flag never changes a
+    byte of the delivered instruction. Strict ``== "1"``-family parse like every GT
+    flag (an empty/`0`/`off` value is OFF)."""
+    return (os.environ.get("GT_SS_ACK_FORM") or "").strip().lower() not in (
+        "", "0", "false", "no", "off")
+
+
 _GT_PREAMBLE = textwrap.dedent("""\
 
     ## GroundTruth codebase intelligence (automatic)
@@ -659,6 +670,44 @@ _GT_PREAMBLE = textwrap.dedent("""\
     anything. When GT shows callers, do not break them; when it shows a contract,
     preserve it; and run your own targeted tests to verify each change before you finish.
 """)
+
+# SS-5 (2026-07-13): the ACK-FORM m1 preamble. The legacy _GT_PREAMBLE above FRAMES the
+# injected evidence as a named tool's output ("GroundTruth automatically appends ...
+# inside <gt-evidence> tags ... Read those tags"), which the 296-delivery audit showed is
+# actively harmful: (a) it TRAINS the learned discount policy — half of the ~3% that were
+# acknowledged named GT as a tool and dismissed it ("just the ground truth tool
+# automatically checking"); and (b) it documents a <gt-*> tag grammar that no longer exists
+# (payloads are tagless native since W10). This arm removes the tool-framing AND the
+# retired-tag documentation and folds the expectation into ordinary engineering guidance:
+# the environment surfaces compiler/test/reference diagnostics inline with command output,
+# to be read as PART of that output — which is exactly what they are (GT rides the
+# observation channel the model already reads). No self-identification, no "a tool appends",
+# no "look for markers". The substantive guidance (preserve callers, preserve contracts,
+# resolve a failing check on your own edit, verify with your own tests) is carried over
+# verbatim in meaning. Boundaries / submit instructions live elsewhere and are untouched.
+# Research: authority/confidence framing does NOT raise uptake (memo C1); only removing the
+# discount-training cue can (native-channel mimicry, memo F1.3/F1.6).
+_GT_PREAMBLE_ACK_FORM = textwrap.dedent("""\
+
+    ## Environment diagnostics
+
+    This environment surfaces codebase diagnostics inline with your command output:
+    compiler and type-checker errors, covering-test failures, and cross-file references
+    (callers, contracts) appear alongside the output of the commands you run, as part of
+    that output. Read them as you would any build or test result -- they carry cross-file
+    facts you cannot see from a single file. When a diagnostic shows callers of a function,
+    do not break them; when it shows a behavioral contract (signature/return), preserve it;
+    when it reports a failing check on an edit you just made, resolve it before moving on.
+    Run your own targeted tests to verify each change before you finish.
+""")
+
+
+def _automatic_preamble() -> str:
+    """The automatic-injection preamble to deliver (read at text-BUILD time). SS-5: the
+    ACK-FORM text when ``GT_SS_ACK_FORM`` is on, else the byte-identical legacy
+    ``_GT_PREAMBLE``. Pure w.r.t. env — the single decision point the use site + tests share."""
+    return _GT_PREAMBLE_ACK_FORM if _ss_ack_form_on() else _GT_PREAMBLE
+
 
 # Fallback preamble for when observation interception is not available
 # (baseline mode or patch injection failed)
@@ -1872,11 +1921,17 @@ class GTMiniSweAgent(_BASE_AGENT):  # type: ignore[misc]
         # gt_mini_patch (fires on the agent's OWN unresolved build/test/type-check
         # failure), never a checklist. See project_obligations_v2_t2_regression.
 
-        # Phase 3 preamble: tell the agent about automatic evidence injection.
-        # If the patch is available, use the automatic preamble; otherwise
+        # Phase 3 preamble: set the agent's expectation about the inline evidence.
+        # If the patch is available, use the automatic-injection preamble; otherwise
         # fall back to the manual gt_hook.py usage instructions.
+        # SS-5: GT_SS_ACK_FORM (read HERE, at text-build time) swaps ONLY the automatic
+        # preamble for the ACK-FORM (non-tool-framing, tag-free) text. Flag OFF -> the
+        # legacy _GT_PREAMBLE bytes are unchanged. The MANUAL preamble is left as-is: on
+        # that path there is NO automatic injection — the agent genuinely invokes the
+        # gt_hook.py pull-tool — so describing it as "environment diagnostics" would be
+        # deception; the ACK-FORM only applies where the framing was actually WRONG.
         if _PATCH_CONTENT:
-            augmented = augmented.rstrip() + "\n" + _GT_PREAMBLE
+            augmented = augmented.rstrip() + "\n" + _automatic_preamble()
         else:
             augmented = augmented.rstrip() + "\n" + _GT_MANUAL_PREAMBLE
 

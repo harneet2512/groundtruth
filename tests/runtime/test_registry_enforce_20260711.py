@@ -343,6 +343,10 @@ def test_profile_2_is_profile_1_plus_super_mode_members():
         "GT_SS_LATE_DROP",
         "GT_SS_ACK_METRICS",
         "GT_SS_ARBITER_V2",
+        # SS-5 (2026-07-13): acknowledgment FORM arm (non-tool-framing m1 preamble +
+        # imperative-only GT_BRIEF_NATIVE obligations checklist); default-OFF seam/brief
+        # code property, unmapped-by-convention. Dropping/adding it here makes this bite.
+        "GT_SS_ACK_FORM",
     }
     # SM-4: GT_EDIT_OVERLAY is now profile-activated (model-facing stale-drop) -> PRESENT.
     assert "GT_EDIT_OVERLAY" in rp.PROFILE_MEMBERS["2"]

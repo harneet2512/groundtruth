@@ -1423,6 +1423,18 @@ def _brief_native_on() -> bool:
         "", "0", "false", "no", "off")
 
 
+def _ss_ack_form_on() -> bool:
+    """GT_SS_ACK_FORM — the SS-5 acknowledgment-FORM arm. Default OFF -> byte-identical. When ON
+    (AND ``_brief_native_on()``), the plain checklist additionally applies the requirement-extractor
+    discipline: only IMPERATIVE requirement items survive (repro fragments / pleas are dropped) and
+    the ``[kind]`` classifier prefix is stripped, so the step-0 obligations read as a native
+    requirements checklist. Layering it ON TOP of GT_BRIEF_NATIVE keeps GT_BRIEF_NATIVE-alone
+    byte-identical to today's plain-checklist arm. Strict ``== "1"``-family parse."""
+    import os as _os
+    return (_os.environ.get("GT_SS_ACK_FORM") or "").strip().lower() not in (
+        "", "0", "false", "no", "off")
+
+
 def _is_brief_boundary(line: str) -> bool:
     """True if ``line`` starts a structural brief block or a scaffold tag. A scan
     that consumes a 'section until the next blank line' must STOP here so it never
@@ -2607,13 +2619,69 @@ def _expected_behavior_spec(issue_text: str):
     return None
 
 
-def _obligation_checklist_row(row: str) -> str:
-    """ITEM-5: transform a rendered ``  - {tag}{compact}`` obligation row into a plain checklist
-    item ``- [ ] {tag}{compact}``. Only the bullet changes; the obligation CONTENT (kind tag +
-    verbatim text) is preserved verbatim."""
+# SS-5 (2026-07-13): the requirement-extractor discipline for the GT_SS_ACK_FORM checklist.
+# A rendered obligation row is ``  - [<kind>] <verbatim>`` (kind tag) or ``  - <verbatim>``. The
+# ``[<kind>]`` classifier is one of the extractor's fixed grammar classes (error/signature/behavior/
+# compat/repro); ``repro`` is a REPRODUCTION FRAGMENT ("when I run X I get Y"), not an imperative
+# requirement, so it is dropped. A leading plea/opinion opener or a trailing ``?`` marks a
+# non-requirement sentence (a plea/question) — also dropped. Everything else is a requirement/
+# directive the extractor already validated as requirement grammar, and is KEPT.
+_OBLIGATION_ROW_KIND_RE = _re.compile(r"^\[(?P<kind>[a-z][a-z_]*)\]\s+(?P<text>.*)$")
+_REPRO_KINDS = frozenset({"repro"})
+_OBLIGATION_PLEA_RE = _re.compile(
+    r"^(?:please\b|could\s+you\b|can\s+(?:you|we|someone|somebody)\b"
+    r"|would\s+(?:you|it\s+be)\b|i\s+(?:wish|hope|think|believe|feel|would\s+like|'?d\s+like)\b"
+    r"|it\s+would\s+be\b|any\s+chance\b|is\s+there\s+(?:a|any|some)\b|thank(?:s|\s+you)\b)",
+    _re.IGNORECASE,
+)
+
+
+def _parse_obligation_row(row: str) -> tuple[str, str]:
+    """Split a rendered obligation row into ``(kind, text)``. ``kind`` is ``""`` when the row
+    carries no ``[<kind>]`` classifier prefix. Pure; the inverse of the ``  - {tag}{compact}``
+    render at the two build loops."""
     s = row.lstrip()
     if s.startswith("- "):
         s = s[2:]
+    m = _OBLIGATION_ROW_KIND_RE.match(s)
+    if m:
+        return m.group("kind"), (m.group("text") or "").strip()
+    return "", s.strip()
+
+
+def _obligation_is_imperative(kind: str, text: str) -> bool:
+    """SS-5 requirement-extractor discipline: True iff the obligation row is an IMPERATIVE
+    requirement item (keep), False for a repro fragment or a plea/question (drop). Pure +
+    deterministic — SELECTS requirement sentences, never paraphrases (LLM-free; a rewrite could
+    change meaning). Contract mirrors what an SS-2 runtime extractor would expose, so a future
+    shared helper can substitute without changing callers."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if (kind or "").strip().lower() in _REPRO_KINDS:
+        return False
+    if t.rstrip().endswith("?"):
+        return False
+    if _OBLIGATION_PLEA_RE.match(t):
+        return False
+    return True
+
+
+def _obligation_checklist_row(row: str, strip_kind: bool = False) -> str:
+    """ITEM-5: transform a rendered ``  - {tag}{compact}`` obligation row into a plain checklist
+    item ``- [ ] {tag}{compact}``. Only the bullet changes; the obligation CONTENT (kind tag +
+    verbatim text) is preserved verbatim.
+
+    SS-5 ``strip_kind`` (GT_SS_ACK_FORM): drop the leading ``[<kind>]`` classifier so the item is a
+    plain requirement line ``- [ ] <verbatim>`` (a native requirements checklist, no GT-metadata
+    tag). Default ``strip_kind=False`` is byte-identical to the ITEM-5 GT_BRIEF_NATIVE arm."""
+    s = row.lstrip()
+    if s.startswith("- "):
+        s = s[2:]
+    if strip_kind:
+        m = _OBLIGATION_ROW_KIND_RE.match(s)
+        if m:
+            s = m.group("text")
     return "- [ ] " + s
 
 
@@ -2624,8 +2692,22 @@ def _obligations_section(rendered: list[str]) -> list[str]:
     requirements checklist (``- [ ] <obligation>``) under a one-line plain header, NO ``<gt-*>`` tag,
     so the obligations ride the model's native requirements-list channel in-distribution. Leak-safe:
     every row already passed ``_obligation_is_leaky`` upstream; the native form only swaps the frame
-    + bullet (no test identity can enter here)."""
+    + bullet (no test identity can enter here).
+
+    SS-5 GT_SS_ACK_FORM (layered ON TOP of GT_BRIEF_NATIVE): additionally apply the requirement-
+    extractor discipline — keep only IMPERATIVE requirement items (drop repro fragments / pleas via
+    ``_obligation_is_imperative``) and strip the ``[<kind>]`` classifier. GT_BRIEF_NATIVE-alone (ACK
+    OFF) is byte-identical to today's plain-checklist arm. Correct-or-quiet: when no imperative
+    requirement survives, the block is dropped entirely (``[]``) rather than shipping an empty
+    header."""
     if _brief_native_on():
+        if _ss_ack_form_on():
+            kept = [r for r in rendered
+                    if _obligation_is_imperative(*_parse_obligation_row(r))]
+            if not kept:
+                return []
+            return ["", _OBLIGATION_NATIVE_HEADER] + [
+                _obligation_checklist_row(r, strip_kind=True) for r in kept]
         return ["", _OBLIGATION_NATIVE_HEADER] + [_obligation_checklist_row(r) for r in rendered]
     return ["", "<gt-obligations>"] + rendered + ["</gt-obligations>"]
 
