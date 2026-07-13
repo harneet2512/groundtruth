@@ -38,6 +38,38 @@ def _capture(monkeypatch):
 # --------------------------------------------------------------------------- #
 # flag-off / rate-0 byte-identity: the helper never withholds and never records
 # --------------------------------------------------------------------------- #
+def test_lane_a_withheld_arm_spends_content_hash_exactly_one_shadow_row(monkeypatch, tmp_path):
+    """ORCHESTRATOR LIPI PIN (chokepoint-level, not helper-level): the Lane-A withheld arm must
+    spend the SAME content hashes as the deliver arm, so a withheld fact (a) never re-competes on
+    a later turn even across a behavioral-state change, and (b) yields exactly ONE shadow row per
+    distinct content — the analyzer pairs one withheld instance against one delivered instance;
+    a duplicate draw double-counts the holdout arm and skews every per-class E10 contrast.
+    MUTATION[drop the _oracle_delivered_hashes.add(h)/.add(hc) spend at the Lane-A shadow
+    chokepoint] -> the second send re-reaches the consult -> a second shadow row -> RED."""
+    _base(monkeypatch, tmp_path)
+    monkeypatch.setenv("GT_SS_SHADOW", "1")
+    monkeypatch.setenv("GT_SS_SHADOW_RATE", "1")
+    monkeypatch.setattr(g, "_oracle_delivered_hashes", set())
+    monkeypatch.setattr(g, "_record_hook_fire", lambda *a, **k: None)
+    monkeypatch.setattr(g, "_ledger_note_delivery", lambda *a, **k: None, raising=False)
+    recs = _capture(monkeypatch)
+    block = ("l3.contract", "<gt-contract>def f(x: int) -> int</gt-contract>")
+
+    monkeypatch.setattr(g, "_oracle_bstate", lambda: "turn=1|edits=1")
+    o1: dict = {}
+    g._lane_a_deliver(o1, "cmd", [block], krel="f.py", event=None)
+    assert (o1.get("output") or "") == ""  # withheld: zero model bytes
+
+    # state changed — the withheld fact must NOT re-compete (content-only hash was spent)
+    monkeypatch.setattr(g, "_oracle_bstate", lambda: "turn=9|edits=9")
+    o2: dict = {}
+    g._lane_a_deliver(o2, "cmd", [block], krel="f.py", event=None)
+    assert (o2.get("output") or "") == ""  # still zero model bytes
+
+    shadow = [r for r in recs if r.get("outcome") == "shadow_holdout"]
+    assert len(shadow) == 1, f"expected exactly ONE shadow row, got {len(shadow)}"
+
+
 def test_flag_off_never_withholds(monkeypatch, tmp_path):
     _base(monkeypatch, tmp_path)
     recs = _capture(monkeypatch)
