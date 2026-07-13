@@ -1,0 +1,26 @@
+{
+  "__doc__": "Deterministic synthetic graph.db spec for the SS gate. Generic, no benchmark repo, no task id. Consumed by scripts/swebench/ss_gate.py, which builds a fresh graph.db from it per run. Node ids are stable; symbol 'run' is DELIBERATELY ambiguous (pkg/mod_a.py + pkg/mod_b.py) so the gateway emits a def/ref partition (the delivery the step-behind / semantic-dedup scenarios probe). Symbol 'gizmo' resolves only to non-source provenance paths (tmp/scratch.py + htmlcov/x.js) for the provenance scenario. test_run lives in a test file for the leak invariant.",
+  "nodes": [
+    {"id": 1, "name": "alpha", "file_path": "pkg/mod_a.py", "label": "Function", "start_line": 4, "end_line": 5, "signature": "alpha()", "is_test": 0, "language": "python"},
+    {"id": 2, "name": "run", "file_path": "pkg/mod_a.py", "label": "Function", "start_line": 8, "end_line": 9, "signature": "run()", "is_test": 0, "language": "python"},
+    {"id": 3, "name": "shared_helper", "file_path": "pkg/mod_a.py", "label": "Function", "start_line": 12, "end_line": 13, "signature": "shared_helper()", "is_test": 0, "language": "python"},
+    {"id": 4, "name": "beta", "file_path": "pkg/mod_b.py", "label": "Function", "start_line": 5, "end_line": 6, "signature": "beta()", "is_test": 0, "language": "python"},
+    {"id": 5, "name": "run", "file_path": "pkg/mod_b.py", "label": "Function", "start_line": 9, "end_line": 10, "signature": "run()", "is_test": 0, "language": "python"},
+    {"id": 6, "name": "consumer", "file_path": "pkg/mod_b.py", "label": "Function", "start_line": 13, "end_line": 16, "signature": "consumer()", "is_test": 0, "language": "python"},
+    {"id": 7, "name": "sig_target", "file_path": "pkg/util.py", "label": "Function", "start_line": 4, "end_line": 5, "signature": "sig_target(x)", "is_test": 0, "language": "python"},
+    {"id": 8, "name": "handler", "file_path": "pkg/mod_b.py", "label": "Function", "start_line": 19, "end_line": 21, "signature": "handler()", "is_test": 0, "language": "python"},
+    {"id": 9, "name": "gizmo", "file_path": "tmp/scratch.py", "label": "Function", "start_line": 5, "end_line": 6, "signature": "gizmo()", "is_test": 0, "language": "python"},
+    {"id": 10, "name": "gizmo", "file_path": "htmlcov/x.js", "label": "Function", "start_line": 4, "end_line": 4, "signature": "gizmo()", "is_test": 0, "language": "javascript"},
+    {"id": 11, "name": "test_run", "file_path": "tests/test_pkg.py", "label": "Function", "start_line": 6, "end_line": 7, "signature": "test_run()", "is_test": 1, "language": "python"}
+  ],
+  "edges": [
+    {"source_id": 6, "target_id": 1, "type": "CALLS", "resolution_method": "import", "confidence": 1.0},
+    {"source_id": 6, "target_id": 5, "type": "CALLS", "resolution_method": "same_file", "confidence": 1.0},
+    {"source_id": 8, "target_id": 7, "type": "CALLS", "resolution_method": "import", "confidence": 1.0},
+    {"source_id": 11, "target_id": 2, "type": "CALLS", "resolution_method": "import", "confidence": 1.0}
+  ],
+  "properties": [
+    {"node_id": 6, "kind": "caller_usage", "value": "boolean_check:alpha|if alpha():", "line": 14, "confidence": 0.9},
+    {"node_id": 8, "kind": "caller_usage", "value": "returned:sig_target|return sig_target(1)", "line": 20, "confidence": 0.9}
+  ]
+}
