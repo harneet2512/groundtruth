@@ -135,6 +135,16 @@ _INFRA_MEMBER_MEDIATES: dict[str, tuple[str, ...]] = {
     "GT_CONTRACT_BILATERAL": ("caller_contract",),        # bilateral contract shaping
     "GT_D7_RELATEDNESS": ("cochange_prior",),             # relatedness → companion/cochange
     "GT_OBLIGATION_FRESHNESS": ("obligations",),          # obligation freshness
+    # W10 RL-native FORM sweep (2026-07-13) — the same native-render family as
+    # GT_STEER_NATIVE/GT_POST_SEARCH_NATIVE/GT_SCOPE_NATIVE: FORM of an existing class,
+    # never a new fact producer. Caught by the 2-task smoke (run 29232070057): the
+    # import-time crosscheck fail-louded on these 5 as UNCLASSIFIED — correct behavior,
+    # classified here as mediators.
+    "GT_CONTRACT_NATIVE": ("caller_contract",),           # native contract diagnostic form
+    "GT_EVIDENCE_NATIVE": ("caller_contract",),           # native evidence rg-row form
+    "GT_NUDGE_NATIVE": ("recovery",),                     # nudge frame drop (imperative body)
+    "GT_BRIEF_NATIVE": ("obligations",),                  # brief obligations checklist form
+    "GT_INSEAM_METRICS": (),                              # host-side instrumentation only
 }
 
 # Backing-module → producer agreement drift-guard: these members' _MEMBER_CAPABILITY_MODULE
