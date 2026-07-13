@@ -360,11 +360,14 @@ def test_invariant_3b_flush_delivers_at_most_one(monkeypatch):
 # INVARIANT 4 — default-off byte-identity (profile no-op + seam parity).
 # --------------------------------------------------------------------------- #
 def test_invariant_4a_profile_unset_is_strict_noop():
-    """GT_RL_PROFILE unset / 0 / unknown -> NO member flipped, NO preflight abort."""
+    """resolve_profile stays a strict no-op on unset/0/unknown (the resolver law is unchanged).
+    SM-7 gate fix (2026-07-13): preflight on an UNSET env now routes the W8 production default
+    and FAIL-CLOSES; only an explicit off token skips it."""
     assert rp.resolve_profile({}) == {}
     assert rp.resolve_profile({"GT_RL_PROFILE": "0"}) == {}
     assert rp.resolve_profile({"GT_RL_PROFILE": "99"}) == {}   # unknown version -> no fan-out
-    assert rp.preflight({}, []) == []
+    assert rp.preflight({"GT_RL_PROFILE": "0"}, []) == []      # explicit off -> no abort
+    assert rp.preflight({}, []) != []                          # unset -> production default -> fail-closed
 
 
 @pytest.fixture
