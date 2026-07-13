@@ -580,6 +580,61 @@ def _run_quiet(cmd: list[str]) -> int:
         return 1
 
 
+# ── SS-R3: EXCLUSIVE RUN LOCK ─────────────────────────────────────────────────
+# The container-path mirrors (\testbed, \gt_artifacts, \opt\gt, \tmp state) are DRIVE-GLOBAL
+# singletons — two concurrent oracle instances swap junctions under each other's children and
+# cross-contaminate ledgers (observed live: one run's graph staged into another's task, its
+# guard fail-closing five tasks to boundary=-1, and the sibling run dying mid-flight). The
+# parent takes an exclusive pid-stamped lock; a second instance FAILS FAST with a message
+# naming the holder instead of silently poisoning both runs.
+_LOCK_PATH = Path("/tmp/ssr_replay_oracle.lock")
+
+
+def _pid_alive(pid: int) -> bool:
+    import subprocess
+    try:
+        r = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                           capture_output=True, text=True, timeout=15)
+        return str(pid) in (r.stdout or "")
+    except Exception:  # noqa: BLE001 — unknown -> assume alive (fail safe: don't steal)
+        return True
+
+
+def acquire_run_lock() -> bool:
+    """True when THIS process holds the mirror lock; False when a live sibling does."""
+    _LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    for _ in range(2):
+        try:
+            fd = os.open(str(_LOCK_PATH), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, f"{os.getpid()}".encode())
+            os.close(fd)
+            return True
+        except FileExistsError:
+            try:
+                holder = int(_LOCK_PATH.read_text(encoding="utf-8").strip() or "0")
+            except Exception:  # noqa: BLE001
+                holder = 0
+            if holder and _pid_alive(holder) and holder != os.getpid():
+                sys.stderr.write(
+                    f"[ssr] mirror lock held by live pid {holder} ({_LOCK_PATH}) — the "
+                    f"container-path mirrors are drive-global; concurrent runs cross-"
+                    f"contaminate. Wait for it or stop it, then retry.\n")
+                return False
+            try:
+                _LOCK_PATH.unlink()   # stale (holder dead) -> steal
+            except OSError:
+                return False
+    return False
+
+
+def release_run_lock() -> None:
+    try:
+        if _LOCK_PATH.is_file() and _LOCK_PATH.read_text(encoding="utf-8").strip() == str(os.getpid()):
+            _LOCK_PATH.unlink()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _make_junction(link: Path, target: Path) -> bool:
     """Create a Windows directory junction (no admin needed). Removes a stale link first."""
     import subprocess
@@ -619,9 +674,13 @@ class TaskMirrors:
             shutil.rmtree(_MIRROR_ARTIFACTS, ignore_errors=True)
         _MIRROR_ARTIFACTS.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(self.recorded / "graph.db", _MIRROR_ARTIFACTS / "graph.db")
-        # FAIL-LOUD graph-identity guard (the conan-17092 bleed staged ANOTHER task's graph
-        # after a lock race): the mirrored mount must hash-match THIS task's recorded graph.
+        # FAIL-LOUD copy-integrity guard (the conan-17092 bleed staged ANOTHER task's graph
+        # after a lock race): the mirror COPY must be byte-equal to THIS task's RECORDED
+        # graph.db (source-vs-copy integrity — nothing else). One retry covers a transient
+        # writer still flushing; a persisting mismatch means another process holds the
+        # drive-global mirror (the run-lock exists to prevent exactly that).
         import hashlib
+        import time
         def _h16(p: Path) -> str:
             h = hashlib.sha256()
             with open(p, "rb") as fh:
@@ -631,9 +690,14 @@ class TaskMirrors:
         want = _h16(self.recorded / "graph.db")
         got = _h16(_MIRROR_ARTIFACTS / "graph.db")
         if got != want:
+            time.sleep(2.0)
+            shutil.copyfile(self.recorded / "graph.db", _MIRROR_ARTIFACTS / "graph.db")
+            got = _h16(_MIRROR_ARTIFACTS / "graph.db")
+        if got != want:
             raise SeamReplayBlocked(
-                f"{self.task}: mirrored graph.db hash {got} != recorded {want} "
-                f"(locked/stale {_MIRROR_ARTIFACTS} — another process is holding the mirror)")
+                f"{self.task}: mirror copy integrity FAILED — copied graph.db hashes {got} "
+                f"but the recorded source is {want} (another process is mutating the "
+                f"drive-global mirror {_MIRROR_ARTIFACTS}; check the run lock)")
         art_src = self.recorded / "gt_artifacts"
         if art_src.is_dir():
             for f in art_src.iterdir():
@@ -948,8 +1012,11 @@ def spawn_replay(task: str, recorded_root: Path, snapshot_root: Path, arm_ss_env
         cmd = [sys.executable, str(Path(__file__).resolve()), "--replay-one", task,
                "--recorded-root", str(recorded_root), "--child-out", str(out_json),
                "--apply-edits" if apply_edits else "--no-apply-edits"]
+        # SS-R3 cwd PARITY: the recorded container ran with cwd=/testbed, and producer-side
+        # RELATIVE path checks (os.path.isfile(rel)) resolve against the cwd — a repo cwd
+        # left every such check False host-side (the keras/absolute-path dark-head class).
         r = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=1800,
-                           cwd=str(_REPO))
+                           cwd=str(_MIRROR_TESTBED))
         if r.returncode != 0 or not out_json.is_file():
             return {"rows": [], "applied": [],
                     "error": f"child rc={r.returncode}: {(r.stderr or r.stdout)[-400:]}"}
@@ -1676,6 +1743,12 @@ def main(argv=None) -> int:
         return replay_child_main(args.replay_one, Path(args.recorded_root),
                                  Path(args.child_out), args.apply_edits)
 
+    # SS-R3: the mirrors are drive-global — one parent at a time, or both runs poison.
+    if not acquire_run_lock():
+        return 2
+
+    import atexit
+    atexit.register(release_run_lock)
     import tempfile
     ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     cases = json.loads(Path(args.cases).read_text(encoding="utf-8"))
@@ -1714,22 +1787,42 @@ def main(argv=None) -> int:
     ss_on = {**{k: "1" for k in _SS_FLAGS_ALL}, **kill}
     ss_off = {**{k: "0" for k in _SS_FLAGS_ALL}, **kill}   # EXPLICIT zeros: unset would be fan-out-resolved ON
     for t in sorted(recon):
-        off = spawn_replay(t, recorded_root, snapshots_root, ss_off, args.apply_edits,
-                           work_dir, arm="off")
-        fx = diff_ledgers(t, recorded_rows.get(t, []), off["rows"], error=off["error"] or "")
-        fidelity[t] = fx
-        applied_log[t] = {"off_applied": sum(1 for a in off["applied"] if "cmd" in a),
-                          "off_error": off["error"]}
+        # SS-R3 crash containment: one task's failure (child crash, mirror fault, OOM) is a
+        # per-task ERROR entry — the run ALWAYS continues to the report. A partial-silent
+        # death that loses the report is the one unacceptable outcome.
+        try:
+            off = spawn_replay(t, recorded_root, snapshots_root, ss_off, args.apply_edits,
+                               work_dir, arm="off")
+            fx = diff_ledgers(t, recorded_rows.get(t, []), off["rows"], error=off["error"] or "")
+            fidelity[t] = fx
+            applied_log[t] = {"off_applied": sum(1 for a in off["applied"] if "cmd" in a),
+                              "off_error": off["error"]}
+        except BaseException as exc:  # noqa: BLE001 — incl. KeyboardInterrupt-adjacent faults
+            if isinstance(exc, KeyboardInterrupt):
+                raise
+            fidelity[t] = FixpointResult(t, False, False, False, -1.0,
+                                         len(recorded_rows.get(t, [])), 0,
+                                         error=f"task-level fault: {type(exc).__name__}: {exc}")
+            applied_log[t] = {"off_error": str(exc)[:200]}
+            print(f"  [fixpoint] {t}: ERROR {type(exc).__name__}: {str(exc)[:120]}",
+                  file=sys.stderr)
+            continue
         print(f"  [fixpoint] {t}: strict={fx.strict} channel={fx.channel} "
               f"boundary={fx.boundary_iter:g} rows {fx.n_recorded}->{fx.n_replayed} "
               f"diffs={len(fx.diffs)}", file=sys.stderr)
         # ── STEP 2: ON-arm replay (all SS flags) for the case verdicts ───────
         if fx.replayed:
-            on = spawn_replay(t, recorded_root, snapshots_root, ss_on, args.apply_edits,
-                              work_dir, arm="on")
-            replayed_on[t] = on["rows"]
-            applied_log[t]["on_applied"] = sum(1 for a in on["applied"] if "cmd" in a)
-            applied_log[t]["on_error"] = on["error"]
+            try:
+                on = spawn_replay(t, recorded_root, snapshots_root, ss_on, args.apply_edits,
+                                  work_dir, arm="on")
+                replayed_on[t] = on["rows"]
+                applied_log[t]["on_applied"] = sum(1 for a in on["applied"] if "cmd" in a)
+                applied_log[t]["on_error"] = on["error"]
+            except BaseException as exc:  # noqa: BLE001
+                if isinstance(exc, KeyboardInterrupt):
+                    raise
+                replayed_on[t] = []
+                applied_log[t]["on_error"] = f"task-level fault: {type(exc).__name__}: {exc}"
 
     trusted = sorted(t for t, fx in fidelity.items() if fx.faithful)
     prefix_only = sorted(t for t, fx in fidelity.items()
@@ -1806,7 +1899,33 @@ def main(argv=None) -> int:
     else:
         exit_code = 0
 
-    # ── report ───────────────────────────────────────────────────────────────
+    # ── report (SS-R3: WRITE the JSON FIRST — a print/format fault must never lose it) ──
+    report = {
+        "gate": "ss_replay_oracle", "schema": "ss.replay_oracle_report.v2", "generated_utc": ts,
+        "recorded_root": str(recorded_root), "snapshots_root": str(snapshots_root),
+        "apply_edits": bool(args.apply_edits), "ss_built": ss_built,
+        "tasks_reconstructed": sorted(recon), "reconstruction_errors": recon_errors,
+        "residual_seal_leaks": residuals, "manifest_findings": manifest_findings,
+        "fixpoint": {t: {"strict": fx.strict, "channel": fx.channel, "replayed": fx.replayed,
+                         "boundary_iter": fx.boundary_iter if fx.boundary_iter != float("inf") else None,
+                         "rows_recorded": fx.n_recorded, "rows_replayed": fx.n_replayed,
+                         "error": fx.error, "diffs": fx.diffs[:80]}
+                     for t, fx in fidelity.items()},
+        "trusted_subset": {"full": trusted, "prefix": prefix_only, "not_replayed": untrusted},
+        "applied_edits": applied_log,
+        "cardinal_p5_kills": [f"{v.task}:{v.label}" for v in cardinal_kills],
+        "cardinal_p5_unfaithful": [f"{v.task}:{v.label} — {v.reason}" for v in cardinal_unf],
+        "cases": [{"section": v.section, "task": v.task, "delivery": v.label, "verdict": v.verdict,
+                   "reason": v.reason, "cardinal": v.cardinal} for v in verdicts],
+        "invariants": [{"name": i.name, "verdict": i.verdict, "detail": i.detail} for i in invariants],
+        "counts": {"pass": n_pass, "fail": n_fail, "skip": n_skip, "replay_unfaithful": n_unf},
+        "exit_code": exit_code,
+    }
+    try:
+        Path(args.out).write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001
+        print(f"  WARN: could not write report: {exc}", file=sys.stderr)
+
     print(f"\n# SS-R2 SUPER-SAIYAN replay-oracle (fixpoint-first) — {ts}")
     print(f"  recorded-root : {recorded_root}")
     print(f"  snapshots     : {snapshots_root}  apply-edits={args.apply_edits}")
@@ -1850,33 +1969,8 @@ def main(argv=None) -> int:
     print(f"  cases: PASS={n_pass} FAIL={n_fail} SKIP={n_skip} {REPLAY_UNFAITHFUL}={n_unf}"
           f" | cardinal kills={len(cardinal_kills)} | cardinal unfaithful={len(cardinal_unf)}")
     print(f"  EXIT {exit_code} ({'GREEN' if exit_code == 0 else 'INCONCLUSIVE-CARDINALS' if exit_code == 3 else 'RED'})")
-
-    report = {
-        "gate": "ss_replay_oracle", "schema": "ss.replay_oracle_report.v2", "generated_utc": ts,
-        "recorded_root": str(recorded_root), "snapshots_root": str(snapshots_root),
-        "apply_edits": bool(args.apply_edits), "ss_built": ss_built,
-        "tasks_reconstructed": sorted(recon), "reconstruction_errors": recon_errors,
-        "residual_seal_leaks": residuals, "manifest_findings": manifest_findings,
-        "fixpoint": {t: {"strict": fx.strict, "channel": fx.channel, "replayed": fx.replayed,
-                         "boundary_iter": fx.boundary_iter if fx.boundary_iter != float("inf") else None,
-                         "rows_recorded": fx.n_recorded, "rows_replayed": fx.n_replayed,
-                         "error": fx.error, "diffs": fx.diffs[:80]}
-                     for t, fx in fidelity.items()},
-        "trusted_subset": {"full": trusted, "prefix": prefix_only, "not_replayed": untrusted},
-        "applied_edits": applied_log,
-        "cardinal_p5_kills": [f"{v.task}:{v.label}" for v in cardinal_kills],
-        "cardinal_p5_unfaithful": [f"{v.task}:{v.label} — {v.reason}" for v in cardinal_unf],
-        "cases": [{"section": v.section, "task": v.task, "delivery": v.label, "verdict": v.verdict,
-                   "reason": v.reason, "cardinal": v.cardinal} for v in verdicts],
-        "invariants": [{"name": i.name, "verdict": i.verdict, "detail": i.detail} for i in invariants],
-        "counts": {"pass": n_pass, "fail": n_fail, "skip": n_skip, "replay_unfaithful": n_unf},
-        "exit_code": exit_code,
-    }
-    try:
-        Path(args.out).write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-        print(f"  report -> {args.out}")
-    except Exception as exc:  # noqa: BLE001
-        print(f"  WARN: could not write report: {exc}")
+    print(f"  report -> {args.out}")
+    release_run_lock()
     return exit_code
 
 
