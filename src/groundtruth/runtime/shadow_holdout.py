@@ -197,16 +197,22 @@ _SEP = "\x1f"
 
 def canonical_class(raw: str) -> "str | None":
     """Resolve ``raw`` (a canonical class, a finer evidence_type, a seam ``kind``, a ladder
-    class, a ``base:suffix`` dynamic form, or a global-arbiter ``ga.<kind>`` telemetry label)
-    to its canonical fact_registry class, or ``None`` when it resolves to no known class.
+    class, a ``base:suffix`` dynamic form, or a plane-prefixed ``ga.<kind>`` /
+    ``gateway.<kind>`` label) to its canonical fact_registry class, or ``None`` when it
+    resolves to no known class.
 
-    Resolution order: strip a leading ``ga.`` telemetry prefix -> exact match -> the part
-    before the first ``:`` (dynamic ``missing_role:handler`` forms). Total: never raises."""
+    Resolution order: strip a leading plane prefix (``ga.`` arbiter telemetry, ``gateway.``
+    gateway-plane rows — arm-4 carried gateway.trace_frame/gateway.def_ref_partition as its 8
+    'unknown' deliveries) -> exact match -> the part before the first ``:`` (dynamic
+    ``missing_role:handler`` forms). Prefix-stripping is allowlist-safe: a stripped kind that
+    resolves to a safety class still never participates. Total: never raises."""
     k = (raw or "").strip()
     if not k:
         return None
-    if k.startswith("ga."):  # global-arbiter telemetry row label (ga.l3.contract, ...)
-        k = k[3:]
+    for _pref in ("ga.", "gateway."):  # plane prefixes carried by ledger row labels
+        if k.startswith(_pref):
+            k = k[len(_pref):]
+            break
     hit = _CLASS_RESOLUTION.get(k)
     if hit is not None:
         return hit
@@ -228,7 +234,9 @@ def parse_rate(rate: object) -> float:
     if rate is None:
         return 0.0
     try:
-        r = float(rate)  # float() strips surrounding whitespace and accepts int/float/str
+        # float() strips surrounding whitespace and accepts int/float/str; a non-convertible
+        # object lands in the except arm (the fail-safe) — the ignore is truthful.
+        r = float(rate)  # type: ignore[arg-type]  # pyright: ignore[reportArgumentType]
     except (TypeError, ValueError):
         return 0.0
     if r != r:  # NaN

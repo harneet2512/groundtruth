@@ -138,6 +138,14 @@ def test_canonical_class_resolution():
     assert sh.canonical_class("spec.obligation") == "obligations"
     # global-arbiter telemetry prefix
     assert sh.canonical_class("ga.l3.contract") == "caller_contract"
+    # gateway-plane prefix (arm-4 truth: gateway.trace_frame x6 + gateway.def_ref_partition x2
+    # were the 8 'unknown' rows in the shadow analyzer — the bare kinds ARE in the table).
+    # MUTATION[drop the 'gateway.' strip] -> these resolve to None again -> RED.
+    assert sh.canonical_class("gateway.trace_frame") == "localization"
+    assert sh.canonical_class("gateway.def_ref_partition") == "def_partition"
+    # a gateway-prefixed SAFETY kind stays safety (allowlist semantics preserved under strip)
+    assert sh.canonical_class("gateway.edit.syntax") == "syntax_result"
+    assert not sh.is_participating("gateway.edit.syntax")
     # dynamic base:suffix
     assert sh.canonical_class("missing_role:handler") == "newfile_precedent"
     # unresolvable
@@ -198,8 +206,8 @@ def _load_shadow_report():
     root = Path(__file__).resolve().parents[2]
     path = root / "scripts" / "swebench" / "shadow_report.py"
     spec = importlib.util.spec_from_file_location("shadow_report_under_test", path)
-    mod = importlib.util.module_from_spec(spec)
     assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
 
