@@ -78,8 +78,44 @@ def _edge_columns(con: sqlite3.Connection) -> set[str]:
         return set()
 
 
+def _covering_file_on_disk(repo_root: str, rel_file: str) -> bool:
+    """True iff the selected covering test FILE exists under ``repo_root`` — the SAME
+    runner-eligibility gate the executed seam applies (``os.path.exists(join(root, file))``)
+    BEFORE it runs a covering test.
+
+    SS-2 (2026-07-13, causal audit of run 29236533134): the FACT-edge selection is fine —
+    the graph carries abundant deterministic (import/type_flow/…, conf>=0.7) test->impl
+    CALLS edges. The false-assurance class is a graph test NODE whose FILE is NOT in the
+    agent's working tree (a stale/renamed/other-baked-tree index artifact): selecting it
+    yields a covering CLAIM the runner can NEVER execute (fonttools-3682/cfn-lint-3749 —
+    "a graph-linked covering test covers them" with no runnable test in the tree). Dropping
+    the phantom AT the selection surface gives the advisory and the executed path ONE
+    eligibility definition. Correct-or-quiet: any error -> False (drop the unprovable file).
+    """
+    try:
+        return bool(rel_file) and os.path.exists(os.path.join(repo_root, rel_file))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def runner_eligible_files(
+    files: "list[str] | tuple[str, ...] | None", repo_root: str | None
+) -> list[str]:
+    """Filter covering test FILE paths to those present under ``repo_root`` (the
+    runner-eligible set). ``repo_root`` falsy -> the list unchanged (byte-identical).
+    The ONE helper the seam reuses so 'graph-linked covering test' is claimed only for a
+    file the runner could actually run (SS-2 false-assurance close)."""
+    if not repo_root:
+        return list(files or [])
+    return [f for f in (files or []) if _covering_file_on_disk(repo_root, f)]
+
+
 def select_covering_tests(
-    db_path: str, symbol_names: set[str] | list[str], *, limit: int = 2
+    db_path: str,
+    symbol_names: set[str] | list[str],
+    *,
+    limit: int = 2,
+    repo_root: str | None = None,
 ) -> list[dict[str, Any]]:
     """Graph-select the repo's OWN test FILES that reach the edited symbols.
 
@@ -91,6 +127,12 @@ def select_covering_tests(
     NAME is never selected (we GROUP BY file_path), so no internal identifier can
     reach a renderer. Shared by the OH (post_edit) and mini (gt_mini_patch) seams
     so there is ONE covering-selection surface (plan §6 invariant ①).
+
+    ``repo_root`` (SS-2, 2026-07-13): when provided, a selected test whose FILE is
+    ABSENT from the working tree is dropped — a runner-eligibility filter at the
+    selection surface, so a phantom graph test node never produces a covering claim
+    the runner cannot execute. ``None`` (default) -> no disk check -> BYTE-IDENTICAL
+    to the pre-SS-2 selection (every existing caller unchanged).
 
     Correct-or-quiet: no db / no schema / no fact edges -> [].
     """
@@ -132,9 +174,18 @@ def select_covering_tests(
             tids,
         ).fetchall()
         out: list[dict[str, Any]] = []
-        for fpath, mc in rows[:limit]:
-            if fpath:
-                out.append({"file": fpath, "confidence": float(mc if mc is not None else 1.0)})
+        # repo_root None -> the exact legacy path (rows[:limit], no disk check) => byte-identical.
+        # repo_root given -> scan ALL ranked rows, drop any covering FILE not on disk, keep the
+        # top `limit` runner-eligible ones (a phantom in the top-N no longer starves a real one).
+        source_rows = rows if repo_root else rows[:limit]
+        for fpath, mc in source_rows:
+            if not fpath:
+                continue
+            if repo_root and not _covering_file_on_disk(repo_root, fpath):
+                continue
+            out.append({"file": fpath, "confidence": float(mc if mc is not None else 1.0)})
+            if len(out) >= limit:
+                break
         return out
     except Exception:  # noqa: BLE001 -- correct-or-quiet
         return []

@@ -134,6 +134,9 @@ class Obs:
 class SeamResult:
     observations: list[Obs] = field(default_factory=list)
     ledger: list[dict] = field(default_factory=list)
+    # SS-2 (S11): the pre-submit refusal string returned by each submit attempt made
+    # AFTER the event stream (empty when the flag is off / no unresolved RED / dose spent).
+    submit_refusals: list[str] = field(default_factory=list)
 
     # -- views over the durable ledger --------------------------------------
     def delivered_rows(self) -> list[dict]:
@@ -257,7 +260,7 @@ class RealSeamDriver:
         self.spec = json.loads(spec_path.read_text(encoding="utf-8"))
         self.repo_src = _FIXTURES / "repo"
 
-    def run(self, events: list[Event], ss_env: dict) -> SeamResult:
+    def run(self, events: list[Event], ss_env: dict, submit_attempts: int = 0) -> SeamResult:
         g = self.g
         env_snapshot = dict(os.environ)
         saved_db = g._db_path
@@ -306,6 +309,18 @@ class RealSeamDriver:
                     pass
                 obs.append(Obs(before=before, after=out.get("output") or ""))
 
+            # SS-2 (S11): AFTER the stream, exercise the submit boundary N times (while the
+            # arm's env is still set) so the ss_submit_red single-dose is observable. The events
+            # above build `_ss_last_failing_test` via the seam's own `_ss_record_test`; each
+            # attempt calls the public `_ss_submit_red_refusal` (the same helper the real submit
+            # chokepoint uses). Empty when the flag is off / no unresolved RED / dose spent.
+            refusals: list[str] = []
+            for _ in range(max(0, int(submit_attempts))):
+                try:
+                    refusals.append(str(g._ss_submit_red_refusal() or ""))
+                except Exception:  # noqa: BLE001 — a submit-gate fault is a refusal-of-nothing here
+                    refusals.append("")
+
             rows: list[dict] = []
             if ledger.is_file():
                 for line in ledger.read_text(encoding="utf-8").splitlines():
@@ -317,7 +332,7 @@ class RealSeamDriver:
                     except Exception:  # noqa: BLE001
                         pass
             rows = _scrub_paths(rows, tmp)
-            return SeamResult(observations=obs, ledger=rows)
+            return SeamResult(observations=obs, ledger=rows, submit_refusals=refusals)
         finally:
             g._db_path = saved_db
             g._root = saved_root
@@ -336,10 +351,18 @@ class FakeSeamDriver:
 
     name = "fake"
 
-    def __init__(self, behavior: Callable[[list[Event], dict], SeamResult]) -> None:
+    def __init__(self, behavior: Callable[..., SeamResult]) -> None:
         self._behavior = behavior
 
-    def run(self, events: list[Event], ss_env: dict) -> SeamResult:
+    def run(self, events: list[Event], ss_env: dict, submit_attempts: int = 0) -> SeamResult:
+        # A 3-arg behavior (S11-aware) receives submit_attempts; a legacy 2-arg one does not.
+        import inspect
+        try:
+            n_params = len(inspect.signature(self._behavior).parameters)
+        except (TypeError, ValueError):
+            n_params = 2
+        if n_params >= 3:
+            return self._behavior(list(events), dict(ss_env or {}), submit_attempts)
         return self._behavior(list(events), dict(ss_env or {}))
 
 
@@ -756,11 +779,55 @@ def scenario_s10(driver) -> ScenarioResult:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# S11 — SUBMIT-RED (needs GT_SS_SUBMIT_RED)
+# ══════════════════════════════════════════════════════════════════════════════
+def scenario_s11(driver) -> ScenarioResult:
+    flag = "GT_SS_SUBMIT_RED"
+    # UNRESOLVED: edit mod_a, then a test FAILS citing mod_a and never goes green -> the submit
+    # boundary refuses ONCE (single dose); the 2nd submit passes silent (an allow ledger row).
+    fail_out = f"{_MOD_A}:8: in run\nE   assert run() == 'x'\n1 failed"
+    unresolved = [_write(_MOD_A, "return 'a'", "return 'a1'"),
+                  _test_evt("pytest -q", fail_out, 1)]
+    # GREEN: same edit, the test PASSES citing mod_a -> the last touching event is green -> the
+    # submit boundary stays SILENT (nothing to refuse).
+    pass_out = f"{_MOD_A} .\n1 passed"
+    green = [_write(_MOD_A, "return 'a'", "return 'a1'"),
+             _test_evt("pytest -q", pass_out, 0)]
+
+    on_u = driver.run(unresolved, {flag: "1"}, submit_attempts=2)
+    on_u2 = driver.run(unresolved, {flag: "1"}, submit_attempts=2)
+    off_u = driver.run(unresolved, {flag: "0"}, submit_attempts=2)
+    base_u = driver.run(unresolved, {}, submit_attempts=2)
+    on_g = driver.run(green, {flag: "1"}, submit_attempts=2)
+
+    subs = [
+        ("determinism (unresolved x2)", PASS if _signature(on_u) == _signature(on_u2) else FAIL),
+        ("byte-identity off==baseline",
+         PASS if (off_u.obs_stream() == base_u.obs_stream()
+                  and off_u.submit_refusals == base_u.submit_refusals) else FAIL),
+    ]
+    built = (on_u.submit_refusals != off_u.submit_refusals)
+
+    fired = [r for r in on_u.submit_refusals if r]
+    fired_once = len(fired) == 1
+    red_row = bool(on_u.rows_with_reason("ss_submit_red"))
+    allow_row = any(str(r.get("reason")) == "ss_submit_red" and "allow" in str(r.get("outcome"))
+                    for r in on_u.ledger)
+    green_silent = not any(r for r in on_g.submit_refusals if r)
+    off_silent = not any(r for r in off_u.submit_refusals if r)
+    core_ok = fired_once and red_row and allow_row and green_silent and off_silent
+    detail = (f"unresolved_refusals={len(fired)}(want 1); ss_submit_red_row={red_row}; "
+              f"allow_on_2nd={allow_row}; green_silent={green_silent}; off_silent={off_silent}")
+    return _gate("S11", "SUBMIT-RED", flag, subs, core_ok, detail, built)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # runner
 # ══════════════════════════════════════════════════════════════════════════════
 _SCENARIOS: list[Callable] = [
     scenario_s1, scenario_s2, scenario_s3, scenario_s4, scenario_s5,
     scenario_s6, scenario_s7, scenario_s8, scenario_s9, scenario_s10,
+    scenario_s11,
 ]
 
 

@@ -232,6 +232,19 @@ _SUPER_MODE_MEMBERS: frozenset[str] = frozenset(
         # the hydra-3005 chars=0 empty-payload delivered row. Backed by global_arbiter, but left
         # UNMAPPED-by-convention with its SS siblings (per task directive; flag-off is byte-identical).
         "GT_SS_ARBITER_V2",       # SS — arbiter v2: defer-refire + repair_support relax + empty-payload guard
+        # SS-2 (2026-07-13, run 29236533134 causal audit) — the EXECUTED-truth pair. Both are
+        # DEFAULT-OFF byte-identical-when-unset seam/covering-runner code properties (NOT a new
+        # tag). GT_SS_EXEC_TRUTH: covering SELECTION drops a phantom graph test node absent from
+        # the working tree, so the "a graph-linked covering test covers them" advisory/obligation
+        # claim is made ONLY when the runner could actually run it (kills the fonttools-3682/
+        # cfn-lint-3749 false assurance; one eligibility for advisory + executed). GT_SS_SUBMIT_RED:
+        # the submit boundary consumes the agent's OWN unresolved observed test RED (the conan-17092
+        # "observed a fail, rationalized it away" class) — ONE native pre-commit refusal, single
+        # dose. UNMAPPED-by-convention with the SS siblings (seam/covering-runner-spread code, no
+        # single baked SURFACE to find_spec) -> never a FALSE abort; forwarded in gt_ae_block.sh;
+        # pinned in test_ae_forward_profile2_completeness + the SS-2 member pin.
+        "GT_SS_EXEC_TRUTH",       # SS-2 — covering selection = runner-eligible (no phantom claim)
+        "GT_SS_SUBMIT_RED",       # SS-2 — submit gate consumes the agent's own unresolved observed RED
     }
 )
 

@@ -39,17 +39,32 @@ _GRAPH = {
 def _fake_seam(mutations=frozenset()):
     mut = set(mutations)
 
-    def behavior(events, ss_env):
+    def behavior(events, ss_env, submit_attempts=0):
         viewed: set[str] = set()
         obs: list = []
         ledger: list[dict] = []
+        edited: set[str] = set()          # S11: files the agent edited this episode
+        last_failing: dict | None = None  # S11: last test touching an edit that FAILED (unresolved)
         it = 0
         for ev in events:
             it += 1
             cmd = (ev.action.get("command") or "")
             before = ev.output or ""
             after = before
+            out = ev.output or ""
             toks = cmd.split()
+            if cmd == "str_replace":                         # S11: an edit event
+                p = ev.action.get("path")
+                if p and ev.rc == 0:
+                    edited.add(str(p))
+            elif ("passed" in out) or ("failed" in out):     # S11: a test event
+                failed = ("failed" in out) or (ev.rc != 0)
+                passed = ("passed" in out) and not failed
+                import os as _os
+                hay = cmd + "\n" + out
+                touches = any(e and (e in hay or _os.path.basename(e) in hay) for e in edited)
+                if touches and (failed or passed):
+                    last_failing = {"cmd": cmd} if failed else None
             if toks[:1] == ["cat"] and len(toks) >= 2:
                 viewed.add(toks[1].strip())
             elif toks[:1] == ["grep"]:
@@ -87,7 +102,33 @@ def _fake_seam(mutations=frozenset()):
             if "fire_when_zero" in mut and ss_env.get("GT_SS_NOVELTY") == "0":
                 after = after + "\nZZ"
             obs.append(G.Obs(before=before, after=after))
-        return G.SeamResult(observations=obs, ledger=ledger)
+
+        # S11 SUBMIT-RED: exercise the submit boundary `submit_attempts` times AFTER the stream.
+        # Reference: fire ONCE on an unresolved RED, silent afterwards; the flag gates it.
+        # `refusal_loops` fires on EVERY attempt (violates single-dose); `fires_on_green` fires
+        # even when the last touching test went green (violates the green-silent rule).
+        refusals: list[str] = []
+        ss_on = ss_env.get("GT_SS_SUBMIT_RED") == "1"
+        fired = False
+        for _ in range(max(0, int(submit_attempts))):
+            should = ss_on and (last_failing is not None or "fires_on_green" in mut)
+            if should and (not fired or "refusal_loops" in mut):
+                cmdname = (last_failing or {}).get("cmd", "pytest")
+                line = ("pre-commit hook failed:\npre-submit check: `%s` was last observed "
+                        "FAILING and never re-run green\ncommit aborted (exit 1)" % cmdname)
+                refusals.append(line)
+                if not fired:
+                    ledger.append(dict(layer="submit_gate", event_type="", file_path="",
+                                       outcome="submit_blocked", reason="ss_submit_red",
+                                       chars_delivered=len(line), iteration=999))
+                fired = True
+            else:
+                if ss_on and fired and last_failing is not None:
+                    ledger.append(dict(layer="submit_gate", event_type="", file_path="",
+                                       outcome="submit_allow", reason="ss_submit_red",
+                                       chars_delivered=0, iteration=999))
+                refusals.append("")
+        return G.SeamResult(observations=obs, ledger=ledger, submit_refusals=refusals)
 
     return behavior
 
@@ -105,6 +146,7 @@ def test_reference_seam_passes_enforced_scenarios():
     assert G.scenario_s1(d).verdict == G.PASS, G.scenario_s1(d).detail
     assert G.scenario_s9(d).verdict == G.PASS, G.scenario_s9(d).detail
     assert G.scenario_s10(d).verdict == G.PASS, G.scenario_s10(d).detail
+    assert G.scenario_s11(d).verdict == G.PASS, G.scenario_s11(d).detail   # SS-2 SUBMIT-RED
 
 
 # --------------------------------------------------------------------------- #
@@ -133,6 +175,20 @@ def test_mutation_fire_when_zero_bites_s10():
     """A feature not byte-identical between explicit-0 and unset must FAIL S10."""
     r = G.scenario_s10(_driver({"fire_when_zero"}))
     assert r.verdict == G.FAIL, f"gate FAILED to bite a fire-when-zero regression: {r.verdict} {r.detail}"
+
+
+def test_mutation_refusal_loops_bites_s11():
+    """A submit refusal that fires on EVERY attempt (no single-dose latch) would loop a run
+    to reward 0 — S11 must FAIL it (want exactly ONE refusal)."""
+    r = G.scenario_s11(_driver({"refusal_loops"}))
+    assert r.verdict == G.FAIL, f"gate FAILED to bite a looping submit refusal: {r.verdict} {r.detail}"
+
+
+def test_mutation_fires_on_green_bites_s11():
+    """A submit refusal that fires even after the last touching test went GREEN is a false
+    block — S11 must FAIL it (green must stay silent)."""
+    r = G.scenario_s11(_driver({"fires_on_green"}))
+    assert r.verdict == G.FAIL, f"gate FAILED to bite a fire-on-green submit refusal: {r.verdict} {r.detail}"
 
 
 # --------------------------------------------------------------------------- #

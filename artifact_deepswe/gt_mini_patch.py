@@ -5227,6 +5227,22 @@ def _covering_tests_for_symbols(symbol_names: set[str]) -> list[dict]:
                     "file": tfile or "",
                     "confidence": float(tconf),
                 })
+            # SS-2 (GT_SS_EXEC_TRUTH, 2026-07-13, run 29236533134 causal audit): a graph test
+            # NODE whose FILE is absent from the agent's working tree is a PHANTOM. Selecting it
+            # yields a covering CLAIM the runner can NEVER execute — the "a graph-linked covering
+            # test covers them" FALSE ASSURANCE shipped on fonttools-3682/cfn-lint-3749 with no
+            # runnable covering test in the tree. Drop the phantom at the SELECTION surface so the
+            # verify.horizon advisory (feature 2), the executed covering, AND the spec.obligation
+            # covering line all share ONE runner-eligibility definition
+            # (covering_runner.runner_eligible_files == the executed path's os.path.exists gate).
+            # Off -> byte-identical (no disk check; every consumer sees the graph result unchanged).
+            if _ss_exec_truth_on() and results:
+                try:
+                    from groundtruth.runtime.covering_runner import runner_eligible_files
+                    _ok = set(runner_eligible_files([r["file"] for r in results], _root()))
+                    results = [r for r in results if r["file"] in _ok]
+                except Exception:  # noqa: BLE001 — eligibility filter must never break selection
+                    pass
             return results
         finally:
             con.close()
@@ -11354,6 +11370,14 @@ _ss_test_fail_counts: "dict[str, int]" = {}  # normalized test cmd -> consecutiv
 _ss_delivered_entsets: "dict[str, list[frozenset]]" = {}  # fact class -> delivered entity sets
 _ss_pending_acks: "list[dict]" = []          # deliveries awaiting a model acknowledgment
 _ss_obl_open_cache: "tuple[int, bool]" = (-1, False)  # (action_count, value) per-turn memo
+# SS-2 (2026-07-13, GT_SS_SUBMIT_RED) — the agent's OWN unresolved observed test RED.
+# `_ss_last_failing_test`: the most recent test event the agent ran that FAILED while
+# TOUCHING an edited surface and has NOT since gone green (a later passing run of the SAME
+# command, or a green run touching the same edit, clears it). `_ss_submit_red_fired`: the
+# per-episode single-dose latch so the submit refusal fires at most ONCE (a 2nd submit
+# passes with the gate silent). Both host-side; consumed only under GT_SS_SUBMIT_RED.
+_ss_last_failing_test: "dict | None" = None
+_ss_submit_red_fired: bool = False
 
 _SS_ACK_WINDOW = 6  # turns to wait for a model ack before recording ack:false
 
@@ -11362,7 +11386,7 @@ def _ss_reset() -> None:
     """F3 reset law — clear every SS ledger per attempt so an in-process retry (and
     cross-case test reuse) starts on a fresh slate. Byte-identical in production
     (fresh process per attempt); these are host-side only (never model bytes)."""
-    global _ss_obl_open_cache
+    global _ss_obl_open_cache, _ss_last_failing_test, _ss_submit_red_fired
     _ss_acquired_files.clear()
     _ss_acquired_symbols.clear()
     _ss_edit_events.clear()
@@ -11372,6 +11396,8 @@ def _ss_reset() -> None:
     _ss_delivered_entsets.clear()
     _ss_pending_acks.clear()
     _ss_obl_open_cache = (-1, False)
+    _ss_last_failing_test = None
+    _ss_submit_red_fired = False
 
 
 # --- flag readers (each default-OFF -> byte-identical) ----------------------
@@ -11388,6 +11414,8 @@ def _ss_recovery_v2_on() -> bool:  return _ss_enabled("GT_SS_RECOVERY_V2")
 def _ss_provenance_on() -> bool:   return _ss_enabled("GT_SS_PROVENANCE")
 def _ss_late_drop_on() -> bool:    return _ss_enabled("GT_SS_LATE_DROP")
 def _ss_ack_metrics_on() -> bool:  return _ss_enabled("GT_SS_ACK_METRICS")
+def _ss_exec_truth_on() -> bool:   return _ss_enabled("GT_SS_EXEC_TRUTH")   # SS-2 feature 1/2
+def _ss_submit_red_on() -> bool:   return _ss_enabled("GT_SS_SUBMIT_RED")   # SS-2 feature 3
 
 
 # --- fact-class scopes ------------------------------------------------------
@@ -11867,10 +11895,40 @@ def _ss_record_edit(rel: str, cmd: str, orig_out: str) -> None:
         pass
 
 
+def _ss_test_touches_edit(cmd: str, orig_out: str) -> bool:
+    """SS-2 (GT_SS_SUBMIT_RED): True iff an observed test event TOUCHES an edited surface —
+    an edited REL path (or its basename) appears in the agent's OWN command or observed
+    output. A failing test's traceback prints the edited source frame, and a covering run's
+    command usually names the edited file's stem, so this is a robust, leak-safe relatedness
+    signal (it reads only the agent's own strings). Correct-or-quiet: no edits yet -> False (a
+    pre-existing failure on an unedited tree is not the agent's unresolved RED)."""
+    rels = _oracle_edited_rels
+    if not rels:
+        return False
+    hay = (cmd or "") + "\n" + (orig_out or "")
+    if not hay.strip():
+        return False
+    for rel in rels:
+        r = _norm_fp(rel)
+        if r and r in hay:
+            return True
+        b = os.path.basename(r) if r else ""
+        if b and len(b) >= 4 and b in hay:
+            return True
+    return False
+
+
 def _ss_record_test(cmd: str, orig_out: str, failed: bool, passed: bool) -> None:
     """Record an observed test event: (step, passed) for coherence-V2's interval check,
     the passing-token set for late-drop, and the per-command fail streak for
-    recovery-V2 (fail -> +1; pass -> clear that command's streak)."""
+    recovery-V2 (fail -> +1; pass -> clear that command's streak).
+
+    SS-2 (GT_SS_SUBMIT_RED): ALSO track the agent's OWN unresolved RED — the LAST test event
+    TOUCHING an edited surface decides. A FAILING such event sets `_ss_last_failing_test`
+    (the agent's own command + step); a PASSING such event clears it (the last touching event
+    went green). A test that touches no edit does not change it. Consumed only at the submit
+    boundary under the flag; populated unconditionally (host-side, zero observation bytes)."""
+    global _ss_last_failing_test
     try:
         _ss_test_events.append((_action_count, passed))
         if passed:
@@ -11884,8 +11942,57 @@ def _ss_record_test(cmd: str, orig_out: str, failed: bool, passed: bool) -> None
                 _ss_test_fail_counts[norm] = _ss_test_fail_counts.get(norm, 0) + 1
             elif passed:
                 _ss_test_fail_counts.pop(norm, None)
+        # SS-2 submit-RED: the LAST test event touching an edited surface sets/clears the latch.
+        if norm and (failed or passed) and _ss_test_touches_edit(cmd, orig_out):
+            _ss_last_failing_test = {"cmd": norm, "step": _action_count} if failed else None
     except Exception:  # noqa: BLE001
         pass
+
+
+def _ss_submit_red_refusal() -> str:
+    """SS-2 (GT_SS_SUBMIT_RED): at the submit boundary, consume the agent's OWN unresolved
+    observed test RED — the conan-17092 class (the agent observed a gold-relevant test FAIL
+    at m106, rationalized it away, and stamped submit_clean). Covering SELECTION was empty on
+    28/29 tasks (leaf helper / unindexed file / phantom node — see the SS-2 diagnosis), so the
+    graph-covering submit gate had nothing to block on; this uses the agent's OWN observed
+    failure instead, so it fires exactly where graph coverage is dark.
+
+    SINGLE DOSE: the FIRST submit with an unresolved RED (the last test event touching an
+    edited surface was FAILING and never went green) returns ONE native pre-commit refusal
+    quoting the agent's own command and LATCHES; a SECOND submit passes with the gate SILENT
+    (never loops a run to reward 0). Ledger rows BOTH times (delivered, then allow) so the
+    single-dose is auditable. "" when the flag is off / no unresolved RED / already fired
+    (byte-identical off). Leak-safe: only the agent's own command reaches the renderer."""
+    global _ss_submit_red_fired
+    if not _ss_submit_red_on() or _GT_BASELINE:
+        return ""
+    rec = _ss_last_failing_test
+    if _ss_submit_red_fired:
+        # single-dose spent: a 2nd submit passes silent — record the allow (auditable both times).
+        if rec is not None:
+            try:
+                _runtime_ledger_record(kind="submit_gate", outcome="submit_allow",
+                                       reason="ss_submit_red", chars=0)
+            except Exception:  # noqa: BLE001
+                pass
+        return ""
+    if rec is None:
+        return ""
+    try:
+        from groundtruth.runtime.native_render import (
+            contains_gt_tag, render_ss_submit_red)
+        line = render_ss_submit_red(str(rec.get("cmd") or ""))
+    except Exception:  # noqa: BLE001 — a render fault must never brick the submit
+        return ""
+    if not line or contains_gt_tag(line):
+        return ""
+    _ss_submit_red_fired = True
+    try:
+        _runtime_ledger_record(kind="submit_gate", outcome="submit_blocked",
+                               reason="ss_submit_red", chars=len(line))
+    except Exception:  # noqa: BLE001
+        pass
+    return line
 
 
 def _augment_output(action, out) -> None:
@@ -12990,6 +13097,18 @@ def _gt_gate_submit_exception(env, action, exc) -> "dict | None":
                 _allow = verdict.allow
                 cert = None
         if _allow:
+            # SS-2 (GT_SS_SUBMIT_RED, 2026-07-13): the graph-covering head ALLOWS (covering
+            # selection was empty / green / unattributed — the 28/29 case where the graph gate
+            # is dark), but did the agent leave its OWN observed test RED unresolved on an edited
+            # surface (the conan-17092 "observed a fail, rationalized it away" class)? Fire ONE
+            # native pre-commit refusal quoting the agent's OWN command; a 2nd submit passes
+            # silent (single dose, ledger rows both times). Off / no unresolved RED -> "" ->
+            # byte-identical to the pre-SS-2 allow path. Additive: only reached on _allow, so it
+            # never double-blocks a head that already blocked (covering fail keeps its own path).
+            _ss_red = _ss_submit_red_refusal()
+            if _ss_red:
+                _gt_submit_bounce_count += 1
+                return {"output": _ss_red, "returncode": 1}
             # clean / gate_overridden / gate_crash -> submission proceeds (host record).
             # A CLEAN cert on an allow delivers NOTHING (correct-or-quiet) — the block below
             # is SUBORDINATE to the head block decision, so the cert never turns allow -> block.

@@ -425,6 +425,28 @@ def render_submit_rejection(reason: str, detail: str = "") -> str:
     return "\n".join(lines)
 
 
+def render_ss_submit_red(test_command: str) -> str:
+    """SS-2 (GT_SS_SUBMIT_RED, 2026-07-13): a pre-submit refusal that consumes the agent's
+    OWN unresolved test RED — the conan-17092 class (the agent observed a gold-relevant test
+    FAIL, rationalized it away, and submitted a clean run). Native pre-commit/CI shape, ZERO
+    ``<gt-*>`` tag.
+
+    LEAK-SAFE BY CONTRACT: the caller passes ONLY the agent's own observed test COMMAND (the
+    string the agent itself typed and already saw fail) — NEVER a graph/gold test name. This
+    renderer echoes that command inside a hook-failure block; it mints no identity of its own.
+    Correct-or-quiet: no command -> "" (the gate then stays silent)."""
+    cmd = (test_command or "").strip()
+    if not cmd:
+        return ""
+    cmd = _tail(cmd, 200)
+    return (
+        "pre-commit hook failed:\n"
+        f"pre-submit check: `{cmd}` was last observed FAILING and never re-run green\n"
+        "resolve the failing test (or state why it is unrelated) before submitting\n"
+        "commit aborted (exit 1)"
+    )
+
+
 def contains_gt_tag(text: str) -> bool:
     """Stage-1 guard: True if a GT-voice tag leaked onto a model-facing surface."""
     return "<gt-" in (text or "").lower()
