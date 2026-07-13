@@ -256,19 +256,34 @@ def _extract_edited_file(tool_calls_json: str, full_cmd: str) -> str | None:
         if m:
             return _norm_path(m.group(1))
 
-    # Shell patterns
-    m = re.search(r"sed\s+-i\s+[^\s]+\s+([^\s|;&]+)", full_cmd, re.I)
-    if m:
-        return _norm_path(m.group(1))
-    m = re.search(r"tee\s+([^\s|;&<]+)\s*<<", full_cmd, re.I)
-    if m:
-        return _norm_path(m.group(1))
-    m = re.search(r"cat\s*>\s*([^\s|;&<\"']+)", full_cmd, re.I)
-    if m:
-        return _norm_path(m.group(1))
-    m = re.search(r"patch\s+(?:-[^\s]+\s+)*([^\s|;&]+\.(?:py|go|ts|js|java|rs|cpp|c|h|rb))", full_cmd, re.I)
-    if m:
-        return _norm_path(m.group(1))
+    # Shell patterns. Run them on the DECODED bash command first (clean, unescaped),
+    # then on full_cmd. On full_cmd the mini-swe tool_calls JSON double-escapes the
+    # command, so a path capture there can trail JSON junk (`src/x.py\"}`) — hence the
+    # file-token classes below all exclude quotes/backslash, and the decoded command is
+    # preferred. sed -i [flags] 'SCRIPT' FILE: the SCRIPT is usually QUOTED and can
+    # contain spaces (e.g. 's/from typing import Any/.../'), so the FILE is the bare
+    # token AFTER the closing quote — NOT the first whitespace token inside the script
+    # (the pre-fix regex captured e.g. "typing" and corrupted steps_to_gold_edit).
+    bash_cmd = str(args.get("command") or "") if args else ""
+    _F = r"[^\s|;&><\"'\\]+"  # a bare file token: no whitespace, redirects, quotes, backslash
+    for text in (bash_cmd, full_cmd):
+        if not text:
+            continue
+        m = re.search(r"sed\s+-i\S*\s+(?:-e\s+)*(['\"]).*?\1\s+(" + _F + r")", text, re.I | re.S)
+        if m:
+            return _norm_path(m.group(2))
+        m = re.search(r"sed\s+-i\S*\s+[^\s'\"]+\s+(" + _F + r")", text, re.I)  # unquoted script
+        if m:
+            return _norm_path(m.group(1))
+        m = re.search(r"tee\s+(?:-a\s+)?(" + _F + r")\s*<<", text, re.I)
+        if m:
+            return _norm_path(m.group(1))
+        m = re.search(r"cat\s*>\s*(" + _F + r")", text, re.I)
+        if m:
+            return _norm_path(m.group(1))
+        m = re.search(r"patch\s+(?:-\S+\s+)*(" + _F + r"\.(?:py|go|ts|js|java|rs|cpp|c|h|rb))", text, re.I)
+        if m:
+            return _norm_path(m.group(1))
     return None
 
 
@@ -422,6 +437,61 @@ def _parse_gold_from_file(path: str) -> list[str]:
                     files.append(line)
     except OSError:
         pass
+    return files
+
+
+def _is_test_file(path: str) -> bool:
+    """Is this path a TEST file? Mirrors the graph indexer's is_test classification
+    (gt_intel_lean.is_critical_path exclusion, gt-index/store.go is_test) plus the
+    curation-smoke test-path hints, so the gold set excludes tests EXACTLY the way
+    the rest of GT does — no bespoke rule that could drift from the product.
+    """
+    p = _norm_path(path).lower()
+    base = p.rsplit("/", 1)[-1]
+    if (base.startswith("test_") or base.startswith("conftest")
+            or "_test." in base or ".test." in base or ".spec." in base):
+        return True
+    if ("/test/" in p or "/tests/" in p or p.startswith("tests/") or p.startswith("test/")
+            or "/__tests__/" in p or "/spec/" in p):
+        return True
+    return False
+
+
+def gold_files_from_dataset(instance_id: str, jsonl_path: str) -> list[str]:
+    """TRUE gold SOURCE files for one task, from the SWE-bench dataset jsonl.
+
+    Parses the record's gold ``patch`` (the human fix — NOT ``test_patch``) diff
+    headers into repo-relative b-paths and DROPS test files (``_is_test_file``),
+    so the result is the source-file gold set. Order-preserving, de-duplicated.
+
+    OFFLINE-ONLY (HARD LAW): the return value is a metric-side artifact. It is fed
+    to the localization reader as ``gold_source="dataset_gold"`` and must never be
+    surfaced to the model. Returns ``[]`` on any miss (absent file, unknown id,
+    unparseable line) — never raises, never fabricates.
+    """
+    if not instance_id or not jsonl_path or not os.path.exists(jsonl_path):
+        return []
+    files: list[str] = []
+    try:
+        with open(jsonl_path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                # cheap pre-filter; the exact id equality below guards prefix collisions
+                if instance_id not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(rec, dict) or rec.get("instance_id") != instance_id:
+                    continue
+                patch = rec.get("patch") or ""
+                for _a, b in re.findall(r"^diff --git a/(\S+) b/(\S+)", patch, re.M):
+                    fp = _norm_path(b)
+                    if fp and not _is_test_file(fp) and fp not in files:
+                        files.append(fp)
+                break
+    except OSError:
+        return []
     return files
 
 
@@ -1198,14 +1268,22 @@ def compute_performance_metrics(
     trajectory_path: str,
     artifacts_dir: str,
     gold_files: list[str] | None = None,
+    instance_id: str | None = None,
+    gold_jsonl: str | None = None,
 ) -> dict:
     """Compute all performance metrics from sections 1-6, 8-9.
 
     Args:
         trajectory_path: Path to mini-swe-agent.trajectory.json
         artifacts_dir:   Directory containing brief.txt, graph.db, etc.
-        gold_files:      List of gold file paths. If None, derived from submission diff
-                         or a gold_files.txt in artifacts_dir.
+        gold_files:      Explicit gold file paths (operator override). If None, gold is
+                         resolved by preference: DATASET gold (see instance_id) ->
+                         gold_files.txt on disk -> submission-diff PROXY -> none.
+        instance_id:     Task/instance id. With a dataset jsonl (gold_jsonl or the
+                         GT_GOLD_JSONL env), resolves TRUE gold from the SWE-bench
+                         ``patch`` -> gold_source="dataset_gold" (gold_is_proxy=False).
+                         OFFLINE-ONLY: gold lands only in the returned metric record.
+        gold_jsonl:      Path to the SWE-bench dataset jsonl; falls back to GT_GOLD_JSONL.
 
     Returns:
         Dict with all metrics at 8-decimal precision. Never raises.
@@ -1233,13 +1311,24 @@ def compute_performance_metrics(
         else:
             gold_files = []
             gold_source = "none"
-            # Try gold_files.txt in artifacts_dir
-            gf_path = os.path.join(artifacts_dir or "", "gold_files.txt") if artifacts_dir else ""
-            if gf_path and os.path.exists(gf_path):
-                gold_files = _parse_gold_from_file(gf_path)
-                if gold_files:
-                    gold_source = "true_gold"
-            # Fall back to submission diff — this is a PROXY, not true gold.
+            # PREFERRED: TRUE dataset gold (the SWE-bench `patch`, keyed by instance_id).
+            # gold_source="dataset_gold" / gold_is_proxy=False so the timing fields
+            # COMPUTE against real gold and can never be confused with the circular
+            # submission proxy (HARD LAW — gold is OFFLINE-ONLY, lands only here).
+            _jsonl = gold_jsonl or os.environ.get("GT_GOLD_JSONL", "")
+            if instance_id and _jsonl:
+                dataset_gold = gold_files_from_dataset(instance_id, _jsonl)
+                if dataset_gold:
+                    gold_files = dataset_gold
+                    gold_source = "dataset_gold"
+            # Next: gold_files.txt in artifacts_dir (operator-provided true gold)
+            if not gold_files:
+                gf_path = os.path.join(artifacts_dir or "", "gold_files.txt") if artifacts_dir else ""
+                if gf_path and os.path.exists(gf_path):
+                    gold_files = _parse_gold_from_file(gf_path)
+                    if gold_files:
+                        gold_source = "true_gold"
+            # Last: submission diff — this is a PROXY, not true gold (nulled below).
             if not gold_files and submission:
                 gold_files = _parse_gold_from_diff(submission)
                 if gold_files:
@@ -1325,6 +1414,8 @@ def main() -> int:
     trajectory_path = positionals[0]
     artifacts_dir = positionals[1]
     gold_flag = _opt("--gold")
+    instance_id = _opt("--instance-id") or None
+    gold_jsonl = _opt("--gold-jsonl") or None
     out_path = _opt("--out") or os.path.join(
         artifacts_dir, "gt_performance_metrics.json"
     )
@@ -1335,7 +1426,9 @@ def main() -> int:
         if not gold_files:
             print(f"[WARN] --gold {gold_flag!r} produced no files", file=sys.stderr)
 
-    result = compute_performance_metrics(trajectory_path, artifacts_dir, gold_files)
+    result = compute_performance_metrics(
+        trajectory_path, artifacts_dir, gold_files,
+        instance_id=instance_id, gold_jsonl=gold_jsonl)
 
     try:
         with open(out_path, "w", encoding="utf-8") as f:

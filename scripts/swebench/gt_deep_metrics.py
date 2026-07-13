@@ -1662,7 +1662,11 @@ def build(task: str, results_dir: str, log_path: str = "",
         compute_performance_metrics = _pm_mod.compute_performance_metrics
     tj_path = _find_miniswe_trajectory(task, results_dir)
     if tj_path:
-        deep["performance"] = compute_performance_metrics(tj_path, results_dir)
+        # instance_id=task lets the perf reader resolve TRUE dataset gold from the
+        # SWE-bench `patch` (GT_GOLD_JSONL / --gold-jsonl) -> gold_source="dataset_gold"
+        # so steps_to_gold_* COMPUTE instead of nulling on the submission proxy.
+        # OFFLINE-ONLY: the gold set lands only inside deep["performance"].
+        deep["performance"] = compute_performance_metrics(tj_path, results_dir, instance_id=task)
     else:
         deep["performance"] = {"status": "UNMEASURED", "reason": "no_miniswe_trajectory"}
     return deep
