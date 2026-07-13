@@ -3045,16 +3045,55 @@ def _block_hash(block: str) -> str:
 # ---------------------------------------------------------------------------
 _CD_PREFIX_RE = re.compile(r"^\s*cd\s+[A-Za-z0-9_./~-]+\s*&&\s*")
 
+# SS-4 (2026-07-13, flag GT_SS_ELIGIBILITY) — the COMMAND-SUBSTITUTION widening.
+# MEASURED (29-task audit of run 29236533134): 16/29 tasks reached the seam with the
+# arm-4 harness prefix `cd $(cat /tmp/gt_root.txt) && <cmd>` (a SECOND harness cd
+# convention beside `cd /testbed &&`); the W13 bare-token `_CD_PREFIX_RE` above does NOT
+# recognise it, so the isolation gate rejected ~all real searches on those 16 tasks and
+# post_search/def_partition/loc_reslot/content_leg/sem_body were STRUCTURALLY mute. This
+# widened regex ALSO strips a pure `cd $(...)` / `cd "$(...)"` / cd `...` / `cd $VAR`
+# command-substitution cd — each is a pure single-target cd, a no-op for the grep's OWN
+# zero/hit signal exactly like the bare-token cd (this is a STRUCTURAL recognition, NOT
+# a confidence drop). STRICT still: the segment MUST be glued by `&&` (a `;`/`||`/single
+# `&` separator or a non-cd prefix is never stripped), and a nested-paren `$(...(...))`
+# is left intact (its inner `)` breaks the `&&` glue -> correct-or-quiet reject). The
+# bare-token branch is preserved verbatim, so a `cd /testbed` decision is byte-identical
+# whether the flag is on or off. Measured widening: +27 bare-symbol def_partition + 35
+# broad loc_reslot triggers unblocked, 0 divergence on any non-widened command.
+_CD_PREFIX_WIDE_RE = re.compile(
+    r"^\s*cd\s+(?:"
+    r'"\$\([^()]*\)"'                 # cd "$(...)"
+    r"|'\$\([^()]*\)'"                # cd '$(...)'
+    r"|\$\([^()]*\)"                  # cd $(...)
+    r"|`[^`]*`"                       # cd `...`
+    r"|\$[A-Za-z_][A-Za-z0-9_]*"      # cd $VAR
+    r"|[A-Za-z0-9_./~-]+"             # cd bare-token (W13, preserved verbatim)
+    r")\s*&&\s*"
+)
+
+
+def _ss_eligibility_on() -> bool:
+    """SS-4 eligibility widening (flag GT_SS_ELIGIBILITY). Default-OFF (byte-identical):
+    when off the cd-strip uses the W13 bare-token regex ONLY, so every current decision
+    is unchanged. Never active on the baseline arm (mirrors _loc_reslot_on/_d7_*)."""
+    if _GT_BASELINE:
+        return False
+    return os.environ.get("GT_SS_ELIGIBILITY", "").strip().lower() not in (
+        "", "0", "false", "no", "off")
+
 
 def _strip_leading_cd_prefix(cmd: str) -> str:
-    """Strip one or more leading pure ``cd <single-token-path> &&`` segments so a
-    harness-prefixed ``cd /testbed && grep ...`` is classified as the isolated grep
-    it semantically is. STRICT: only a bare-path ``cd`` segment glued by ``&&`` is
-    removed; every other prefix / separator is left intact so the isolation reject
-    holds. Returns the input unchanged when no such prefix exists (byte-identical)."""
+    """Strip one or more leading pure ``cd <path> &&`` segments so a harness-prefixed
+    ``cd /testbed && grep ...`` (or, under GT_SS_ELIGIBILITY, ``cd $(cat …) && grep …``)
+    is classified as the isolated grep it semantically is. STRICT: only a pure ``cd``
+    segment glued by ``&&`` is removed; every other prefix / separator is left intact so
+    the isolation reject holds. Returns the input unchanged when no such prefix exists
+    (byte-identical). Flag OFF -> the W13 bare-token regex ONLY (byte-identical to today);
+    flag ON -> ALSO the ``cd $(...)``/quoted/backtick/``$VAR`` command-substitution cd."""
+    rx = _CD_PREFIX_WIDE_RE if _ss_eligibility_on() else _CD_PREFIX_RE
     s = cmd or ""
     while True:
-        m = _CD_PREFIX_RE.match(s)
+        m = rx.match(s)
         if not m:
             return s
         s = s[m.end():]

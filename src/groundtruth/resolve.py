@@ -128,6 +128,55 @@ def _compute_lsp_warm(server_launched: bool, warm_probe_ok: bool) -> bool:
     return bool(server_launched and warm_probe_ok)
 
 
+# ── SS-4 (2026-07-13) — HONEST js/ts secondary-leg classification (GT_SS_ELIGIBILITY) ──
+# MEASURED from run 29236533134 proof logs: python-babel__babel-1179's js leg fails
+# ``initialize`` with -32603 "Could not find a valid TypeScript installation …" because
+# a Python repo with 1 stray JS file has no workspace ``typescript`` dep. Today that
+# lands as a generic warm-probe failure. This classifier lets the resolve pass label the
+# ALREADY-OBSERVED failure honestly (an install/substrate gap, with a specific reason in
+# the cert) so a language-partial cert is EXPLICIT. It is SAFE — it only relabels a leg
+# that already failed to init; it NEVER pre-skips a leg a bundled TypeScript could serve.
+# The jupyter-ai "No Project" errors are a DIFFERENT signature (workspace/symbol on a
+# WORKING leg, LSP_ACTIVE_VALID) and are deliberately NOT matched here.
+_NO_TS_INSTALL_RE = re.compile(
+    r"(?:could not find a valid typescript|valid typescript installation|"
+    r"typescript.{0,40}dependency is installed in the workspace|tsserver\.path)",
+    re.IGNORECASE,
+)
+
+
+def _ss_eligibility_on_resolve() -> bool:
+    """SS-4 flag (GT_SS_ELIGIBILITY) as read by the resolve pass. Default-OFF
+    byte-identical: when off, an init failure keeps today's generic ``initialize:
+    <msg>`` failure_detail and no install_missing_reason is synthesized."""
+    return os.environ.get("GT_SS_ELIGIBILITY", "").strip().lower() not in (
+        "", "0", "false", "no", "off")
+
+
+def _is_no_typescript_install_error(message: str) -> bool:
+    """True iff an LSP ``initialize`` error is the typescript-language-server
+    'no workspace TypeScript dependency' failure (-32603). The "No Project"
+    workspace/symbol error (a WORKING leg) is deliberately NOT matched."""
+    return bool(_NO_TS_INSTALL_RE.search(message or ""))
+
+
+def _classify_ts_install_failure(stats: dict, message: str, language: str) -> None:
+    """When GT_SS_ELIGIBILITY is on AND ``message`` is the no-workspace-TypeScript
+    ``initialize`` failure, relabel the js/ts leg HONESTLY as an install/substrate gap:
+    record a specific ``install_missing_reason`` and mark ``failure_detail`` as a skip.
+    Byte-identical no-op when the flag is off or the error is any other init failure
+    (the leg's resolution outcome is UNCHANGED — this only enriches the cert's WHY)."""
+    if not _ss_eligibility_on_resolve() or not _is_no_typescript_install_error(message):
+        return
+    reason = (
+        f"js/ts LSP leg for '{language}': no workspace TypeScript install "
+        "(node_modules/typescript) and no tsserver.path — the language server cannot "
+        "initialize; the canonical cert falls back to the dominant language"
+    )
+    stats["install_missing_reason"] = reason
+    stats["failure_detail"] = "skip: " + reason
+
+
 def _compute_degraded(lsp_warm: bool, residual: int, effective_work: int) -> bool:
     """A DEGRADED pass: a warm server left REAL residual work UNCONVERTED.
 
@@ -997,6 +1046,10 @@ async def _resolve_edges(
             # (LSPClient._collect_failure_detail) — e.g. gopls's own die-reason.
             print(f"  LSP initialize failed: {init_result.error.message}", file=sys.stderr)
             stats["failure_detail"] = f"initialize: {init_result.error.message}"
+            # SS-4 (GT_SS_ELIGIBILITY): if this is the js/ts 'no workspace TypeScript'
+            # init failure (babel-1179 class), relabel it HONESTLY as an install gap so
+            # the cert says WHY. Byte-identical no-op when off / any other init error.
+            _classify_ts_install_failure(stats, init_result.error.message, language)
             stats["failed"] = len(edges)
             try:
                 await client.shutdown()
@@ -1878,6 +1931,10 @@ def resolve_main() -> None:
         # probe_latency_ms > 0.0 (see _compute_lsp_warm — instant warm server rounds to 0.0ms).
         cert["lsp_warm"] = _compute_lsp_warm(cert["server_launched"], cert["warm_probe_ok"])
         cert["failure_detail"] = str(stats.get("failure_detail", "") or "")
+        # SS-4: surface the honest js/ts install-gap reason in the cert (only when the
+        # resolve pass synthesized one — byte-identical when absent).
+        if stats.get("install_missing_reason"):
+            cert["install_missing_reason"] = str(stats["install_missing_reason"])
         cert["attempted_edges"] = len(lang_edges)
         cert["verified_edges"] = int(stats.get("verified", 0))
         cert["corrected_edges"] = int(stats.get("corrected", 0))

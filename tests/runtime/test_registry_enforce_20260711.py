@@ -347,6 +347,16 @@ def test_profile_2_is_profile_1_plus_super_mode_members():
         # imperative-only GT_BRIEF_NATIVE obligations checklist); default-OFF seam/brief
         # code property, unmapped-by-convention. Dropping/adding it here makes this bite.
         "GT_SS_ACK_FORM",
+        # SS-2 (2026-07-13): the EXECUTED-truth pair (covering-selection runner-eligibility +
+        # submit-gate observed-RED consumption); default-OFF seam/covering-runner code, unmapped-
+        # by-convention. Added here to keep this enumeration pin consistent with _SUPER_MODE_MEMBERS.
+        "GT_SS_EXEC_TRUTH",
+        "GT_SS_SUBMIT_RED",
+        # SS-4 (2026-07-13): the starved-producer ELIGIBILITY widening — the seam's cd-strip also
+        # recognises the arm-4 `cd $(cat …) && …` command-substitution prefix (16/29 tasks),
+        # unblocking post_search/def_partition + loc_reslot. Default-OFF seam code property,
+        # unmapped-by-convention. Dropping/adding it here makes this bite.
+        "GT_SS_ELIGIBILITY",
     }
     # SM-4: GT_EDIT_OVERLAY is now profile-activated (model-facing stale-drop) -> PRESENT.
     assert "GT_EDIT_OVERLAY" in rp.PROFILE_MEMBERS["2"]

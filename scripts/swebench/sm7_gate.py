@@ -293,6 +293,30 @@ MEMBER_EVIDENCE: dict[str, list[str]] = {
         R + "runtime/test_ss1_members.py::test_all_ss_members_are_profile2",
         R + "runtime/test_ss1_fact_registry_ack.py::test_ack_expected_metadata_present",
     ],
+    # ---- SS-2 (2026-07-13) EXECUTED-truth pair + SS-5 ack-FORM: default-OFF seam/covering-runner
+    # code properties. Their MEMBERSHIP+FORWARD contract is proven by the DYNAMIC completeness pins
+    # (both iterate _SUPER_MODE_MEMBERS, so they cover every SS member); the behavioral covering
+    # tests are owned by the implementing seam agents (repointed at reconciliation). ----
+    "GT_SS_EXEC_TRUTH": [
+        R + "runtime/test_registry_enforce_20260711.py::test_profile_2_is_profile_1_plus_super_mode_members",
+        R + "runtime/test_ae_forward_profile2_completeness_20260712.py::test_super_mode_members_all_ae_forwarded",
+    ],
+    "GT_SS_SUBMIT_RED": [
+        R + "runtime/test_registry_enforce_20260711.py::test_profile_2_is_profile_1_plus_super_mode_members",
+        R + "runtime/test_ae_forward_profile2_completeness_20260712.py::test_super_mode_members_all_ae_forwarded",
+    ],
+    "GT_SS_ACK_FORM": [
+        R + "runtime/test_registry_enforce_20260711.py::test_profile_2_is_profile_1_plus_super_mode_members",
+        R + "runtime/test_ae_forward_profile2_completeness_20260712.py::test_super_mode_members_all_ae_forwarded",
+    ],
+    # ---- SS-4 (2026-07-13) starved-producer ELIGIBILITY widening (cd-$() prefix). The BEHAVIORAL
+    # covering tests are the SS-4 owner suite: the flag-on def_partition/loc_reslot unblocking, the
+    # byte-identical-off proof, and the LSP honest-skip classification. ----
+    "GT_SS_ELIGIBILITY": [
+        R + "runtime/test_ss4_eligibility.py::test_cd_dollar_isolated_and_pattern_when_flag_on",
+        R + "runtime/test_ss4_eligibility.py::test_cd_dollar_not_isolated_when_flag_off",
+        R + "runtime/test_ss4_lsp_ts_skip.py::test_enrich_records_honest_reason_when_flag_on",
+    ],
 }
 
 # CHECK 6 (<=1 dose + latch) node-ids — the arbiter single-dose law + Lane-A latch defer/commit.

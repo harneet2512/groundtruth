@@ -245,6 +245,21 @@ _SUPER_MODE_MEMBERS: frozenset[str] = frozenset(
         # pinned in test_ae_forward_profile2_completeness + the SS-2 member pin.
         "GT_SS_EXEC_TRUTH",       # SS-2 — covering selection = runner-eligible (no phantom claim)
         "GT_SS_SUBMIT_RED",       # SS-2 — submit gate consumes the agent's own unresolved observed RED
+        # SS-4 (2026-07-13, run 29236533134 causal audit) — the starved-producer ELIGIBILITY
+        # widening. MEASURED: 16/29 tasks reached the seam with the arm-4 harness prefix
+        # `cd $(cat /tmp/gt_root.txt) && <cmd>` (a command-substitution cd the W13 bare-token
+        # cd-strip does NOT recognise), so the post_search isolation gate rejected ~all real
+        # searches and post_search/def_partition/loc_reslot/content_leg/sem_body were structurally
+        # mute on those tasks. When on, gt_mini_patch._strip_leading_cd_prefix ALSO strips a pure
+        # `cd $(...)`/`cd "$(...)"`/cd `...`/`cd $VAR` command-substitution cd (a no-op for the
+        # grep's OWN zero/hit signal, exactly like the bare-token cd) — a STRUCTURAL recognition,
+        # NOT a confidence drop. Measured widening over the 29 recorded trajectories: +27 bare-symbol
+        # def_partition triggers + 35 broad loc_reslot triggers, 0 divergence on any non-widened
+        # command. DEFAULT-OFF byte-identical (flag off -> the W13 bare-token strip only). UNMAPPED-
+        # by-convention with the SS siblings (seam code property, no single baked SURFACE to
+        # find_spec) -> never a FALSE abort; forwarded in gt_ae_block.sh; pinned in
+        # test_ae_forward_profile2_completeness + the SS-4 member pin.
+        "GT_SS_ELIGIBILITY",      # SS-4 — cd-$() prefix widening (post_search/loc_reslot eligibility)
     }
 )
 

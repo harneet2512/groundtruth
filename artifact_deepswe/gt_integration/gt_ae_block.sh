@@ -263,6 +263,14 @@ GT_AE_ARGS=(
   #    read at brief-gen). Forwarded for pool + AE-forward-completeness-pin coverage (the host
   #    export already reaches the host-side consumers; the --ae is the single-source invariant).
   --ae "GT_SS_ACK_FORM=${GT_SS_ACK_FORM:-0}"
+  #    SS-4 (2026-07-13) starved-producer ELIGIBILITY widening. GT_SS_ELIGIBILITY: the seam's
+  #    cd-strip ALSO recognises the arm-4 `cd $(cat /tmp/gt_root.txt) && …` command-substitution
+  #    prefix (16/29 tasks), unblocking post_search/def_partition + loc_reslot (read in-container by
+  #    gt_mini_patch._strip_leading_cd_prefix) AND the resolve.py js/ts LSP honest-skip (read
+  #    host-side + in-container by groundtruth.resolve). pier DROPS host env so forward here or the
+  #    profile fan-out's `export` stays DARK. Default 0 -> byte-identical when unset; Profile-2 fans
+  #    it to 1 via resolve_profile. Pinned in test_ae_forward_profile2_completeness_20260712. ──
+  --ae "GT_SS_ELIGIBILITY=${GT_SS_ELIGIBILITY:-0}"
 
   # ── Deep 8-dp telemetry sinks (CLAUDE.md mandate) -> host-mounted /gt_out ─────
   # Without these the in-container producers default to /tmp/* and DIE with the
