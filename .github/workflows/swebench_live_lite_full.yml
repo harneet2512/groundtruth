@@ -710,19 +710,105 @@ jobs:
           GT_PROOF_HARNESS: deepswe
           GT_MATRIX_IMAGE: ${{ env.LL_TASK_IMAGE }}
           # Super Mode (Profile-2): mine the semantic body channels (body_terms/string_literals)
-          # at INDEX time so the base graph the receipt reads carries them. substrate_proof.sh:637
-          # forwards ${GT_SEM_BODY:-0} to gt-run-proof, which writes /tmp/gt/graph.db (== the agent
-          # container's read-only GT_HOST_GRAPH_DB). Without this the channel defaults OFF, the
-          # graph is byte-identical (0 body rows), the receipt reports sem_body_rows=0, and the
-          # Profile-2 GT_SEM_BODY member fails closed on every substrate (rebake cannot fix it —
-          # the graph is built here at runtime, not baked). Receipt->profile->eval then propagates
-          # GT_SEM_BODY=1 into the agent container ONLY once sem_body_rows>0 (fail-closed preserved).
-          # Baseline arm is unaffected: this whole step is skipped when inputs.baseline == true.
+          # at INDEX time so the base graph the receipt reads carries them. substrate_proof.sh:637/:675
+          # forward ${GT_SEM_BODY:-1} to gt-run-proof (default hardened ON 2026-07-13, S4), which
+          # writes /tmp/gt/graph.db (== the agent container's read-only GT_HOST_GRAPH_DB). If the
+          # channel were OFF the graph would be byte-identical (0 body rows), the receipt would report
+          # sem_body_rows=0, and the Profile-2 GT_SEM_BODY member would fail closed on every substrate
+          # (rebake cannot fix it — the graph is built here at runtime, not baked). We still set the
+          # value EXPLICITLY here (belt-and-suspenders over the script default) plus GT_CONTENT_LEG=1
+          # so the content leg is unambiguously on at brief generation. Receipt->profile->eval then
+          # propagates GT_SEM_BODY=1 into the agent container ONLY once sem_body_rows>0 (fail-closed
+          # preserved). Baseline arm is unaffected: this whole step is skipped when inputs.baseline == true.
           GT_SEM_BODY: '1'
+          GT_CONTENT_LEG: '1'
         run: bash scripts/ci/substrate_proof.sh
         # ^^ Inline shell code was extracted to scripts/ci/substrate_proof.sh to stay
         # under GHA's 21,000-character expression limit. All ${{ }} values are passed
         # as env vars above; the script behaviour is identical to the former inline block.
+
+      - name: Run-identity gate (gt_math R01-R04 — resolved identity + fail-closed digest parity before spend)
+        # Runs AFTER the substrate proof (which loads/pulls the pinned image) and BEFORE the paid
+        # agent step. continue-on-error + !cancelled() mirror the sibling proof/trial steps: the
+        # spend-prevention is the proof_status=failed belt below (the paid step's existing
+        # PROOF_STATE!=ok gate then refuses), so job-status semantics stay identical to today.
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        env:
+          GT_ID_GT_REF_REQUESTED: ${{ inputs.gt_ref }}
+          GT_ID_GT_REF_RESOLVED: ${{ github.sha }}
+          GT_ID_WORKFLOW_RUN_ID: ${{ github.run_id }}
+          GT_ID_BASELINE: ${{ inputs.baseline == true && '1' || '0' }}
+        run: |
+          # gt_math R01-R04: emit ONE resolved run-identity artifact + FAIL CLOSED before any model
+          # spend if the substrate actually present on THIS runner does not match the pinned digest the
+          # workflow asked for. Known trap (memory: "latest tag != latest good"): a stale cached tarball
+          # or a :latest fallback silently loads the WRONG substrate -> GT_REQUIRE_LSP fail-closed 5/5.
+          # Applies to BOTH arms (both WRITE the identity artifact); the baseline arm has no expected
+          # digest / consumes no substrate, so the digest gate is a no-op there (record only). Commit
+          # parity is RECORDED, NOT gated: the baked substrate_build_commit and the synced run commit
+          # differ BY DESIGN (run_manifest.commit_parity == "mismatch" is EXPECTED), so gating on it
+          # would fail every legitimate baked-vs-synced run. Gate ONLY on the substrate digest.
+          mkdir -p /tmp/gt_out /tmp/gt
+          EXPECTED_DIGEST="${GT_SUBSTRATE_DIGEST:-}"
+          ACTUAL_DIGEST=""
+          DIGEST_PRESENT=0
+          if [ -n "$EXPECTED_DIGEST" ] && command -v docker >/dev/null 2>&1; then
+            if docker image inspect "$EXPECTED_DIGEST" >/dev/null 2>&1; then
+              DIGEST_PRESENT=1
+              ACTUAL_DIGEST="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$EXPECTED_DIGEST" 2>/dev/null | grep -F '@sha256:' | head -1 || true)"
+              [ -n "$ACTUAL_DIGEST" ] || ACTUAL_DIGEST="$EXPECTED_DIGEST"
+            fi
+          fi
+          # seam/runner identity = the sha256 of the files that are cp'd into /opt/gt (identical bytes,
+          # so the checkout copy hashes to the staged copy). sha256sum, cut the leading hex field.
+          SEAM_SHA="$(sha256sum artifact_deepswe/gt_mini_patch.py 2>/dev/null | cut -d' ' -f1 || true)"
+          RUNNER_SHA="$(sha256sum artifact_deepswe/gt_headless_runner.py 2>/dev/null | cut -d' ' -f1 || true)"
+          # RESOLVED-IDENTITY ARTIFACT (always written, both arms). commit_parity is read from the
+          # substrate run_manifest.json and RECORDED here (never gated — see the header note).
+          GT_ID_EXPECTED="$EXPECTED_DIGEST" GT_ID_ACTUAL="$ACTUAL_DIGEST" \
+          GT_ID_SEAM="$SEAM_SHA" GT_ID_RUNNER="$RUNNER_SHA" \
+          python3 << 'PY' || echo "WARN: gt_run_identity.json write failed"
+          import json, os
+          os.makedirs('/tmp/gt_out', exist_ok=True)
+          mani = {}
+          try:
+              with open('/tmp/gt/run_manifest.json', encoding='utf-8') as f:
+                  mani = json.load(f) or {}
+          except Exception:
+              mani = {}
+          if not isinstance(mani, dict):
+              mani = {}
+          doc = {
+              'schema': 'gt.run_identity.v1',
+              'substrate_digest_expected': os.environ.get('GT_ID_EXPECTED') or '',
+              'substrate_digest_actual': os.environ.get('GT_ID_ACTUAL') or '',
+              'gt_ref_requested': os.environ.get('GT_ID_GT_REF_REQUESTED') or '',
+              'gt_ref_resolved': os.environ.get('GT_ID_GT_REF_RESOLVED') or '',
+              'seam_sha256': os.environ.get('GT_ID_SEAM') or '',
+              'runner_sha256': os.environ.get('GT_ID_RUNNER') or '',
+              'workflow_run_id': os.environ.get('GT_ID_WORKFLOW_RUN_ID') or '',
+              'baseline': os.environ.get('GT_ID_BASELINE') == '1',
+              'commit_parity_recorded': mani.get('commit_parity'),
+              'substrate_build_commit': mani.get('substrate_build_commit'),
+          }
+          open('/tmp/gt_out/gt_run_identity.json', 'w', encoding='utf-8').write(json.dumps(doc, indent=2))
+          print('[GT] run-identity: ' + json.dumps(doc))
+          PY
+          # FAIL-CLOSED PARITY (digest ONLY). Baseline / unpinned -> nothing to compare -> proceed.
+          # A missing pinned image before spend => write proof_status=failed (the paid step's existing
+          # PROOF_STATE!=ok gate then refuses, so NO model spend) + emit the marker + exit 1.
+          if [ "${GT_ID_BASELINE:-0}" != "1" ] && [ -n "$EXPECTED_DIGEST" ]; then
+            if [ "$DIGEST_PRESENT" = "1" ]; then
+              echo "[GT] run-identity OK: pinned substrate present locally before spend (expected == actual: $EXPECTED_DIGEST)"
+            else
+              python3 -c "import json,os,time; os.makedirs('/tmp/gt',exist_ok=True); json.dump({'schema':'gt.proof_status.v1','state':'failed','code':'IDENTITY_DIGEST_MISMATCH','detail':'pinned substrate not present locally before paid run','ts':time.time()}, open('/tmp/gt/proof_status.json','w'))" 2>/dev/null || true
+              echo "GT_IDENTITY_MISMATCH: pinned substrate ${EXPECTED_DIGEST} not resolvable as a local image before the paid agent run (expected != actual: wrong/stale/unloaded substrate) -- refusing to spend" | tee -a trial_output.log
+              exit 1
+            fi
+          else
+            echo "[GT] run-identity: no expected substrate digest / baseline arm -- digest gate skipped (identity recorded only)"
+          fi
 
       - name: Run GT Pro trial
         if: ${{ !cancelled() }}
@@ -1117,6 +1203,16 @@ jobs:
                 if [ -n "${_GT_PROFILE_EXPORTS}" ]; then
                   eval "${_GT_PROFILE_EXPORTS}"
                   echo "[GT] RL profile ${GT_RL_PROFILE:-2} activated in-container ($(printf %s "${_GT_PROFILE_EXPORTS}" | grep -c export) members): $(printf %s "${_GT_PROFILE_EXPORTS}" | tr "\n" " ")"
+                  # PERSIST the activation as a DURABLE artifact so the section-4 auditor can PROVE
+                  # Profile-2 was live: the stdout log line above is NOT collected, and a GT-on task
+                  # with no gt_profile_activation.json is treated as INFRA by the liveness step below.
+                  # Built by GT_PY into the /gt_out bind-mount (the Collect step gathers it into the
+                  # task artifact). GUARD (single-quoted docker block): the python uses DOUBLE quotes
+                  # only, NO apostrophe; the capability receipt (always compact valid JSON from
+                  # capability_receipt --emit-json) is embedded as a parsed object, and a non-object
+                  # receipt is omitted so the file is still written. Members are read from the SAME
+                  # _GT_PROFILE_EXPORTS just eval-ed, so the record matches what was activated.
+                  GTPA_PROFILE="${GT_RL_PROFILE:-2}" GTPA_EXPORTS="${_GT_PROFILE_EXPORTS}" GTPA_RECEIPT="${GT_CAPABILITY_RECEIPT:-}" PYTHONPATH=/opt/gt "$GT_PY" -c "import json,os; ex=os.environ.get(\"GTPA_EXPORTS\") or \"\"; members=[l.split(\"=\",1)[0].split()[1] for l in ex.splitlines() if l.strip().startswith(\"export \") and \"=\" in l]; rr=(os.environ.get(\"GTPA_RECEIPT\") or \"\").strip(); doc={\"schema\": \"gt.profile_activation.v1\", \"profile\": os.environ.get(\"GTPA_PROFILE\") or \"\", \"members\": members}; doc.update({\"capability_receipt\": json.loads(rr)} if rr.startswith(\"{\") else {}); open(\"/gt_out/gt_profile_activation.json\", \"w\", encoding=\"utf-8\").write(json.dumps(doc, indent=2))" 2>/tmp/gt_profile_act_err.txt && echo "[GT] wrote gt_profile_activation.json ($(printf %s "${_GT_PROFILE_EXPORTS}" | grep -c export) members)" || echo "[GT] WARN gt_profile_activation.json write failed: $(cat /tmp/gt_profile_act_err.txt 2>/dev/null)"
                 else
                   echo "[GT] RL profile NOT activated (off or preflight abort): $(cat /tmp/gt_profile_err.txt 2>/dev/null)"
                 fi
@@ -1202,6 +1298,11 @@ jobs:
       - name: Verify GT wiring (trajectory-based liveness + delivery check)
         continue-on-error: true
         if: ${{ !cancelled() }}
+        env:
+          # Arm selector for the GT-on-only profile-proof gate below (same expression as the trial
+          # step's GT_BASELINE_FLAG). Step env does not carry over from the trial step, so it is
+          # re-declared here rather than inherited.
+          GT_BASELINE_FLAG: ${{ inputs.baseline == true && '1' || '0' }}
         run: |
           # D2 FIX (2026-07-12): the old grep patterns (THOUGHT / function_call) were the
           # INTERACTIVE-CLI stdout format. The headless runner prints neither model thoughts nor
@@ -1223,6 +1324,16 @@ jobs:
           echo "GT wiring check (trajectory-based): gt_blocks=$GT_BLOCKS agent_steps=$AGENT_STEPS"
           if [ "$AGENT_STEPS" -eq 0 ]; then
             echo "AGENT_DID_NOT_RUN: 0 agent steps (no trajectory api_calls, no runner finish line)"
+            exit 1
+          fi
+          # PROFILE-PROOF (GT-on arm only): a GT-on task with no durable gt_profile_activation.json in
+          # the agent-output dir (/tmp/gt_out = $HOST_GT_OUT) has NO proof the RL profile was live
+          # in-container, so it must NEVER be citable as a GT-on result. Absent proof => fail closed
+          # with GT_PROFILE_UNPROVEN + exit 1, the SAME mechanism as AGENT_DID_NOT_RUN above. The
+          # baseline (control) arm activates no profile, so it neither writes nor requires the file
+          # (GT_BASELINE_FLAG=1 skips the check -> control arm stays byte-identical).
+          if [ "${GT_BASELINE_FLAG:-0}" != "1" ] && [ ! -f /tmp/gt_out/gt_profile_activation.json ]; then
+            echo "GT_PROFILE_UNPROVEN: no gt_profile_activation.json in the agent-output dir (RL profile activation unproven; treated as INFRA like AGENT_DID_NOT_RUN)"
             exit 1
           fi
           echo "agent ran ($AGENT_STEPS steps, $GT_BLOCKS GT blocks delivered)"
@@ -1308,6 +1419,11 @@ jobs:
 
       - name: Collect results
         if: always()
+        env:
+          # Arm selector for the METRICS-COMPLETE gate at the END of this step (same expression as the
+          # trial + liveness steps' GT_BASELINE_FLAG). Step env does not carry over between steps, so
+          # it is re-declared here rather than inherited.
+          GT_BASELINE_FLAG: ${{ inputs.baseline == true && '1' || '0' }}
         run: |
           mkdir -p trial_results trial_results/gt_artifacts
           cp trial_output.log trial_results/ 2>/dev/null || true
@@ -1324,7 +1440,22 @@ jobs:
           done
           cp /tmp/gt/lsp_certificate_*.json trial_results/gt_artifacts/ 2>/dev/null || true
           cp /tmp/gt_out/issue.txt trial_results/gt_artifacts/issue.txt 2>/dev/null || true
-          cp /tmp/gt/issue_manifest.json trial_results/gt_artifacts/issue_manifest.json 2>/dev/null || true
+          # Durable profile-activation proof (written in-container to /gt_out): the section-4 auditor
+          # reads it to PROVE Profile-2 was live -- its absence is what mis-graded the run as
+          # profile-dark. Baseline arm never writes it, so this cp is a harmless no-op there.
+          cp /tmp/gt_out/gt_profile_activation.json trial_results/gt_artifacts/gt_profile_activation.json 2>/dev/null || true
+          # Durable run-identity proof (gt_math R01-R04, written by the run-identity gate to /gt_out
+          # BEFORE the paid step): the auditor reads it for the resolved run identity (substrate digest
+          # expected/actual, gt_ref requested/resolved, seam/runner sha256, run id). Both arms write it;
+          # this cp lands it in the cherry-picked artifact next to run_provenance.json.
+          cp /tmp/gt_out/gt_run_identity.json trial_results/gt_artifacts/gt_run_identity.json 2>/dev/null || true
+          # In-SEAM profile receipt (W2, written by gt_mini_patch._install() into dirname of
+          # GT_RUNTIME_LEDGER = /gt_out): the STRONGER activation proof (agent-process env +
+          # patched classes). Collected but deliberately NOT part of the fail-closed liveness
+          # gate -- the receipt is best-effort in the seam (an OSError there must never mark a
+          # healthy run INFRA); the gate rides gt_profile_activation.json above.
+          cp /tmp/gt_out/gt_profile_receipt.json trial_results/gt_artifacts/gt_profile_receipt.json 2>/dev/null || true
+                    cp /tmp/gt/issue_manifest.json trial_results/gt_artifacts/issue_manifest.json 2>/dev/null || true
           cp /tmp/gt/adapter_witness.json trial_results/adapter_witness.json 2>/dev/null || true
           cp /tmp/gt/run_provenance.json trial_results/gt_artifacts/run_provenance.json 2>/dev/null || true
           cp /tmp/pro_eval_output.txt trial_results/ 2>/dev/null || true
@@ -1367,6 +1498,22 @@ jobs:
           PYTHONPATH=${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:${{ github.workspace }}/scripts/metrics python3 scripts/swebench/gt_deep_metrics.py "${{ matrix.task }}" /tmp/gt --log trial_output.log 2>&1 | tail -2 || echo DEEP_METRICS_WARN
           cp "/tmp/gt_deep_metrics_${{ matrix.task }}.json" trial_results/ 2>/dev/null || true
           cp "/tmp/gt_deep_metrics_${{ matrix.task }}.md"   trial_results/ 2>/dev/null || true
+
+          # Per-feature v3 behavioural-contract metrics (MANDATORY_METRICS.md §12, gt.feature_metrics.v1).
+          # gt_feature_metrics reads a run_dir of per-task subdirs holding a mini trajectory + runtime
+          # ledger + oracle events; it writes gt_feature_metrics_<task>.json into that task subdir. The
+          # trajectory is already bridged into /tmp/gt/<task>/ above — co-locate the ledger + oracle
+          # there too so the grader reads the whole task from one dir. Same PYTHONPATH pattern as the
+          # gt_deep_metrics line. Its nonzero (per-task aggregate refusal) is swallowed like
+          # DEEP_METRICS_WARN — the METRICS-COMPLETE gate below is the fail-closed artifact check.
+          cp /tmp/gt_out/gt_runtime_ledger.jsonl "/tmp/gt/${{ matrix.task }}/gt_runtime_ledger_${{ matrix.task }}.jsonl" 2>/dev/null || true
+          cp /tmp/gt_out/gt_oracle_events.jsonl  "/tmp/gt/${{ matrix.task }}/gt_oracle_events_${{ matrix.task }}.jsonl"  2>/dev/null || true
+          PYTHONPATH=${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:${{ github.workspace }}/scripts/metrics python3 scripts/swebench/gt_feature_metrics.py /tmp/gt --profile 2 --run-id "${{ matrix.task }}" 2>&1 | tail -3 || echo FEATURE_METRICS_WARN
+          cp "/tmp/gt/${{ matrix.task }}/gt_feature_metrics_${{ matrix.task }}.json" trial_results/ 2>/dev/null || true
+          cp "/tmp/gt/${{ matrix.task }}/gt_feature_metrics_${{ matrix.task }}.md"   trial_results/ 2>/dev/null || true
+          cp "/tmp/gt/gt_run_metrics_${{ matrix.task }}.json"     trial_results/gt_artifacts/ 2>/dev/null || true
+          cp "/tmp/gt/gt_feature_effects_${{ matrix.task }}.json" trial_results/gt_artifacts/ 2>/dev/null || true
+          cp "/tmp/gt/gt_metric_integrity_${{ matrix.task }}.json" trial_results/gt_artifacts/ 2>/dev/null || true
           # Per-task metrics laid out DIRECTLY as this task finishes (visible in the log + the
           # artifact), computed from the just-written gt_deep_metrics json: resolved, steps,
           # first-useful-edit, tokens, cost, trajectory source. One grep-able [METRICS task] line.
@@ -1382,6 +1529,30 @@ jobs:
             GT_DEEPSWE_OUTCOME_JSON=trial_results/outcome.json \
             python3 scripts/verify/deepswe_outcome.py jobs || echo "WARN: outcome extract failed"
           find trial_results -type f 2>/dev/null | head -40 || true
+
+          # ── METRICS-COMPLETE gate (P1; MANDATORY_METRICS.md line 1: "A run without its metrics is
+          # NOT done"). Placed at the END of Collect — NOT in the liveness step — BECAUSE the per-task
+          # metric artifacts are PRODUCED in THIS step (gt_deep_metrics + gt_feature_metrics ran above);
+          # the liveness step runs earlier (before the evaluator + before Collect) and cannot gate on
+          # files that do not yet exist. Collect is `if: always()` so it still runs on partial failures,
+          # and this `exit 1` fails the job (fail-closed) while the later Upload (`if: always()`) still
+          # captures every collected artifact — the same "run captured but not citable" semantics as the
+          # liveness step's GT_PROFILE_UNPROVEN. Check the UPLOADED copies in trial_results/ (what the
+          # section-4 auditor actually reads), not the /tmp sources.
+          _MM_MISSING=""
+          # deep-metrics is required on BOTH arms (baseline has no GT artifacts, but always has this).
+          [ -s "trial_results/gt_deep_metrics_${{ matrix.task }}.json" ] || _MM_MISSING="$_MM_MISSING gt_deep_metrics_${{ matrix.task }}.json"
+          if [ "${GT_BASELINE_FLAG:-0}" != "1" ]; then
+            # GT-on arm ONLY: the full v3 per-task set (feature metrics + the two already-gated proofs).
+            [ -s "trial_results/gt_feature_metrics_${{ matrix.task }}.json" ] || _MM_MISSING="$_MM_MISSING gt_feature_metrics_${{ matrix.task }}.json"
+            [ -s "trial_results/gt_artifacts/gt_profile_activation.json" ]    || _MM_MISSING="$_MM_MISSING gt_profile_activation.json"
+            [ -s "trial_results/gt_artifacts/gt_run_identity.json" ]          || _MM_MISSING="$_MM_MISSING gt_run_identity.json"
+          fi
+          if [ -n "$_MM_MISSING" ]; then
+            echo "GT_METRICS_INCOMPLETE:${_MM_MISSING} - a run without its metrics is NOT done (MANDATORY_METRICS.md line 1); this task is not citable" | tee -a trial_output.log
+            exit 1
+          fi
+          echo "GT_METRICS_COMPLETE: mandatory per-task metric artifacts all present"
 
       - name: Upload results
         if: always()

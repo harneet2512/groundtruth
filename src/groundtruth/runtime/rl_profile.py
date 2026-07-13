@@ -61,6 +61,23 @@ _PROFILE_1_MEMBERS: frozenset[str] = frozenset(
         # (import-isolated native render, unmapped-by-convention like GT_POST_SEARCH_NATIVE
         # — never a FALSE abort).
         "GT_SCOPE_NATIVE",
+        # ITEM 1-6 (2026-07-13) — the RL-native FORM sweep over the remaining tagged model-facing
+        # surfaces. SAME FORM-arm family as GT_POST_SEARCH_NATIVE / GT_SCOPE_NATIVE / GT_STEER_NATIVE
+        # (a per-surface tag->native FORM flip): <gt-contract> -> native compiler diagnostics + rg
+        # caller rows (GT_CONTRACT_NATIVE); <gt-evidence> -> bare path:line:code rows
+        # (GT_EVIDENCE_NATIVE); <gt-nudge>x7 -> body-only imperative (GT_NUDGE_NATIVE); the brief
+        # obligations block -> a plain `- [ ]` checklist (GT_BRIEF_NATIVE, read at brief-gen). Plus
+        # GT_INSEAM_METRICS — host-side in-seam instrumentation (per-fact-class eligible counter +
+        # tier/conf authority stamps; NEVER model-visible, zero observation bytes). All default-OFF
+        # byte-identical in-code; read in gt_mini_patch / v1r_brief. No _MEMBER_CAPABILITY_MODULE
+        # entry (import-isolated native render / seam code property, unmapped-by-convention like
+        # GT_SCOPE_NATIVE — never a FALSE abort). Forwarded in gt_ae_block.sh; pinned in
+        # tests/runtime/test_rl_profile.py::MEMBERS + the AE-forward completeness pin.
+        "GT_CONTRACT_NATIVE",
+        "GT_EVIDENCE_NATIVE",
+        "GT_NUDGE_NATIVE",
+        "GT_BRIEF_NATIVE",
+        "GT_INSEAM_METRICS",
     }
 )
 
@@ -198,6 +215,21 @@ PROFILE_MEMBERS: dict[str, frozenset[str]] = {
 # Values (case-insensitive, stripped) that count as "OFF" for a member.
 _OFF_VALUES = {"", "0", "false", "no", "off"}
 
+# ── W8 PRODUCTION-DEFAULT INVERSION (2026-07-13) ──────────────────────────────
+# The seam now resolves its OWN profile IN-PROCESS at install time (gt_mini_patch
+# _resolve_production_profile) instead of depending on the workflow's external
+# GT_RL_PROFILE=2 fan-out. When GT_RL_PROFILE is UNSET the seam resolves THIS default
+# (Profile-2, "Super Mode") — so a launcher that forgets the fan-out no longer silently
+# degrades GT to the legacy stack. An EXPLICIT "0"/"off"/"none" is the legacy/control
+# posture (resolve nothing, byte-identical to the pre-W8 unset path). ``resolve_profile``
+# (the workflow verb) is UNCHANGED — the fan-out keeps working, merely redundant.
+_PRODUCTION_DEFAULT_PROFILE = "2"
+
+# Explicit tokens (case/space-insensitive) that mean "resolve NOTHING — legacy/control".
+# Deliberately a SUBSET of _OFF_VALUES: an unset/empty GT_RL_PROFILE resolves the
+# production default, but a user who TYPED "0"/"off"/"none" chose the legacy posture.
+_EXPLICIT_LEGACY_TOKENS = {"0", "off", "none"}
+
 
 # ── The per-profile MANIFEST (SM-0) ──────────────────────────────────────────
 # A profile's members say WHICH flags flip on; the manifest declares WHAT the running
@@ -315,6 +347,57 @@ def resolve_profile(env: Mapping[str, str]) -> dict[str, str]:
     return out
 
 
+def resolve_default_token(env: Mapping[str, str]) -> Optional[str]:
+    """The profile token the W8 in-process seam inversion resolves (production default).
+
+    UNLIKE ``resolve_profile`` (whose UNSET case is a no-op), the inversion treats an
+    UNSET/empty ``GT_RL_PROFILE`` as the PRODUCTION DEFAULT and an EXPLICIT off-token as
+    the legacy/control posture:
+
+      * ``GT_RL_PROFILE`` unset / "" / whitespace-only  -> ``_PRODUCTION_DEFAULT_PROFILE``.
+      * explicit "0"/"off"/"none" (case/space-insensitive) -> ``None`` (resolve NOTHING;
+        byte-identical to the pre-W8 unset posture — the control/legacy arm).
+      * any other value -> that token verbatim (an unknown version resolves no members,
+        see ``resolve_profile_defaults`` — fail-safe, never a crash).
+
+    PURE: reads only ``env``; no I/O.
+    """
+    raw = env.get("GT_RL_PROFILE")
+    if raw is None or raw.strip() == "":
+        return _PRODUCTION_DEFAULT_PROFILE
+    token = raw.strip()
+    if token.lower() in _EXPLICIT_LEGACY_TOKENS:
+        return None
+    return token
+
+
+def resolve_profile_defaults(env: Mapping[str, str]) -> dict[str, str]:
+    """The member-default map the W8 in-process seam inversion applies via ``setdefault``.
+
+    Returns ``{member: "1"}`` for EVERY member of the resolved profile (deterministic,
+    insertion-ordered by sorted member name). The seam applies each with
+    ``os.environ.setdefault(member, "1")``, so an explicit env value for a member (incl
+    "0") is a KILL-SWITCH that survives — that per-member override lives at the seam's
+    ``setdefault`` call site, NOT here. This helper therefore returns the FULL member set
+    (kill-switched members included) so the seam's ``setdefault`` remains the single
+    load-bearing kill-switch (a direct-assignment regression is caught by the seam's
+    kill-switch test, not masked by this helper pre-filtering).
+
+    Resolution honours ``resolve_default_token``:
+      * profile-level explicit-off / unknown version -> ``{}`` (nothing to set).
+      * else -> the resolved profile's ``PROFILE_MEMBERS``, each defaulted to "1".
+
+    PURE: reads only ``env``; no I/O.
+    """
+    token = resolve_default_token(env)
+    if token is None:
+        return {}
+    members = PROFILE_MEMBERS.get(token)
+    if not members:
+        return {}
+    return {member: "1" for member in sorted(members)}
+
+
 def _registry_renderer(fact_class: str) -> Optional[str]:
     """The DECLARED native renderer for ``fact_class`` from ``fact_registry`` (lazy import so
     a partial substrate that lacks the module ABORTS via a ``None`` here rather than crashing
@@ -374,16 +457,30 @@ def preflight(env: Mapping[str, str], available: Iterable[str]) -> list[str]:
     turned OFF by an explicit override does NOT require its capability. Profile OFF returns
     ``[]``; an unknown version fails closed with an ``GT_RL_PROFILE=<v>`` sentinel.
     """
-    token = _profile_token(env)
+    # SM-7 GATE FIX (2026-07-13, orchestrator): route the effective token through the W8
+    # production default. Pre-fix, an UNSET GT_RL_PROFILE returned [] (treated as OFF) while
+    # the seam's in-process inversion resolves the SAME unset env to Profile-2 — so the
+    # fail-closed capability preflight was BYPASSED on the exact path W8 made the production
+    # default (a stale substrate on a default launcher would not abort before spend).
+    # resolve_default_token: unset/"" -> "2"; explicit 0/off/none -> None (true control arm).
+    default_token = resolve_default_token(env)
+    if default_token is None:
+        return []  # explicit legacy/control posture — genuinely OFF
+    token = _profile_token(env) or default_token
     if _profile_is_off(token):
         return []
     if token not in PROFILE_MEMBERS:
         return [f"GT_RL_PROFILE={token}"]  # unknown version -> fail closed
     available_set = set(available)
-    resolved = resolve_profile(env)
+    # Resolve members from the EFFECTIVE token (the W8 default included): resolve_profile
+    # reads the raw env token, which is empty on the unset production path — synthesize the
+    # effective token so the member-capability loop is never vacuous where the seam inverts.
+    _env_eff = dict(env)
+    _env_eff.setdefault("GT_RL_PROFILE", token)
+    resolved = resolve_profile(_env_eff)
     requested_on = {m for m, v in resolved.items() if _is_on(v)}
     missing = sorted(requested_on - available_set)
-    return missing + _manifest_preflight(env, token)
+    return missing + _manifest_preflight(_env_eff, token)
 
 
 # Brief-F6: each RL-profile member's capability is BACKED by a concrete module in the

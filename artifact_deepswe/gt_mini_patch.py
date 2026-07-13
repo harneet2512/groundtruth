@@ -97,6 +97,42 @@ def _crash_emit(kind: str, exc: "BaseException | None" = None) -> None:
         pass
 
 
+# ── ITEM-6 in-seam instrumentation (GT_INSEAM_METRICS) ──────────────────────
+# Host-side ledger enrichment: a per-fact-class ELIGIBLE counter at each producer
+# decision boundary, and truth/authority (tier/conf) stamps on a produced fact.
+# NEVER model-visible (ledger rows only) — ZERO observation-byte change. Gated by
+# GT_INSEAM_METRICS (default OFF -> byte-identical, no extra ledger rows). Best-effort:
+# telemetry must NEVER break the agent loop.
+def _inseam_metrics_on() -> bool:
+    if globals().get("_GT_BASELINE", False):
+        return False
+    return os.environ.get("GT_INSEAM_METRICS", "").strip().lower() not in (
+        "", "0", "false", "no", "off")
+
+
+def _inseam_eligible(kind: str, file_path: str = "") -> None:
+    """ITEM-6 (a): one host-side ``outcome="eligible" chars_delivered=0`` ledger row at a
+    producer's decision boundary (the producer COULD fire this turn). Never model-visible."""
+    if not _inseam_metrics_on():
+        return
+    _ledger_line_direct({
+        "layer": kind, "event_type": kind, "file_path": file_path or "",
+        "outcome": "eligible", "reason": "producer_boundary", "chars_delivered": 0,
+        "iteration": globals().get("_action_count", 0)})
+
+
+def _inseam_stamp(kind: str, file_path: str, *, tier: str, conf: float) -> None:
+    """ITEM-6 (b): a host-side authority-stamped row for a PRODUCED fact carrying a truth
+    tier + confidence. ``tier`` / ``conf`` are extra row fields only — zero observation bytes."""
+    if not _inseam_metrics_on():
+        return
+    _ledger_line_direct({
+        "layer": kind, "event_type": kind, "file_path": file_path or "",
+        "outcome": "produced", "reason": "authority_stamp", "chars_delivered": 0,
+        "tier": tier, "conf": round(float(conf), 8),
+        "iteration": globals().get("_action_count", 0)})
+
+
 # Graceful import of groundtruth.runtime.* — these modules live in the substrate's
 # baked src/ tree. If the import path isn't available (container bootstrap timing,
 # missing substrate, dev environment), fall back to inline stubs so the core
@@ -659,6 +695,18 @@ _consensus_fired = False
 # scope set so subsequent in-scope views get "also in scope" reinforcement, and if the
 # agent wanders off-scope for a while, re-anchor consensus on where it actually is.
 _consensus_scope: set[str] = set()
+# W7 OPTION-B (2026-07-13): once-per-EPISODE latch for the consensus.scope_map RETIREMENT note.
+# Under GT_GLOBAL_ARBITER the scope_map producer is a permanent 0-deliver cost (see
+# _consensus_scope_retire_note) and is retired there; this latch makes the retirement note fire
+# EXACTLY ONCE per episode (at first-eligibility), not per turn. Reset in _reset_oracle_state
+# (F3 reset law). Never read/written when the arbiter is off -> byte-identical off.
+_scope_retire_noted: bool = False
+# ITEM-4 (2026-07-13): the once-per-episode concern.consensus (DCC) retirement-note latch.
+# Under GT_GLOBAL_ARBITER the DCC producer is a permanent 0-deliver cost (localization-class,
+# born past the search boundary — see _concern_retire_note) and is retired there, mirroring the
+# W7 scope_map retirement. Reset in _reset_oracle_state (F3 reset law). Never read/written unless
+# the arbiter is on AND GT_DCC is set -> byte-identical off (DCC is default-OFF anyway).
+_concern_retire_noted: bool = False
 # B3 (2026-07-05): PER-FILE collect latch for _consensus_collect. The old code shared the
 # GLOBAL _consensus_fired one-shot, so ONLY the first-viewed file ever contributed its
 # 1-hop neighbours — the scope froze to one file and never accumulated the K-of-N
@@ -2963,11 +3011,50 @@ def _block_hash(block: str) -> str:
     return hashlib.sha256((block or "").encode("utf-8")).hexdigest()[:16]
 
 
+# ---------------------------------------------------------------------------
+# LEADING `cd <path> &&` NORMALIZER (W13 — 2026-07-13). The mini-swe harness
+# prefixes EVERY agent command with `cd /testbed && ` (one trajectory: 369
+# occurrences), so the universal search shape reaching the seam is
+# `cd /testbed && grep ...`, NOT a bare `grep ...`. That leading `cd X &&` is
+# semantically a no-op for the grep's OWN zero/hit signal — `cd X && grep Y` IS
+# an isolated grep in X — yet `_search_command_isolated` rejects it on the `&&`
+# compound separator, so post_search is mute on ~all real searches (census:
+# ~140 search actions across 6 trajectories -> 3 deliveries). This normalizer
+# STRIPS one or more leading PURE `cd <single-token-path> &&` segments (chained
+# cd allowed) before isolation + pattern extraction, so the seam sees the
+# isolated grep the command semantically is.
+#
+# STRICT (correct-or-quiet): ONLY a `cd <path>` segment whose path is a single
+# bare token [A-Za-z0-9_./~-]+ glued by `&&` is stripped. Anything else keeps
+# the reject verbatim — a non-`cd` command (`make && grep`), a `;`/`||`/single-`&`
+# separator (`cd x; grep`, `cd x || y`, `cd x & y`), or a non-single-token path
+# (`cd $(pwd)`, a quoted path with a space). The `&&`-only rule preserves every
+# existing multi-stage-pipe / grep-not-final / compound reject unchanged. No-op
+# (returns the input) on any command without this exact prefix -> byte-identical
+# when the harness does not cd-prefix.
+# ---------------------------------------------------------------------------
+_CD_PREFIX_RE = re.compile(r"^\s*cd\s+[A-Za-z0-9_./~-]+\s*&&\s*")
+
+
+def _strip_leading_cd_prefix(cmd: str) -> str:
+    """Strip one or more leading pure ``cd <single-token-path> &&`` segments so a
+    harness-prefixed ``cd /testbed && grep ...`` is classified as the isolated grep
+    it semantically is. STRICT: only a bare-path ``cd`` segment glued by ``&&`` is
+    removed; every other prefix / separator is left intact so the isolation reject
+    holds. Returns the input unchanged when no such prefix exists (byte-identical)."""
+    s = cmd or ""
+    while True:
+        m = _CD_PREFIX_RE.match(s)
+        if not m:
+            return s
+        s = s[m.end():]
+
+
 def _search_operand_raw(cmd: str) -> str | None:
     """Return the DEQUOTED pattern operand of a grep/rg command, or None. No
     bare-symbol gate — this is the shared parse used by BOTH _search_pattern (which
     adds the bare gate) and the ledger token accounting (_search_probe_tokens)."""
-    head = (cmd or "").split("\n", 1)[0]
+    head = _strip_leading_cd_prefix((cmd or "").split("\n", 1)[0])
     m = _GREP_HEAD_RE.search(head)
     if not m:
         return None
@@ -3203,7 +3290,12 @@ def _search_command_isolated(cmd: str) -> bool:
     raw = cmd or ""
     if "\n" in raw.strip():
         return False  # a second-line command's output pollutes the observation
-    head = raw.split("\n", 1)[0]
+    # W13 (2026-07-13): strip a LEADING pure `cd <path> &&` prefix (the mini-swe
+    # harness's universal `cd /testbed && <cmd>` wrapper) first — `cd X && grep Y`
+    # is semantically an isolated grep in X. STRICT `&&`-cd-only (see
+    # _strip_leading_cd_prefix): a non-cd prefix / `;`/`||`/`&` separator / non-bare
+    # path is NOT stripped, so every compound reject below holds verbatim.
+    head = _strip_leading_cd_prefix(raw.split("\n", 1)[0])
     if _COMPOUND_SEP_RE.search(head):
         return False  # &&/||/;/& glue independent commands -> outputs interleave
     # grep/rg must be the FIRST stage (not pipe-FED: `pytest | grep X`) ...
@@ -3226,7 +3318,7 @@ def _grep_is_count(seg: str) -> bool:
 def _grep_is_ignorecase(cmd: str) -> bool:
     """True iff the grep/rg command carries -i / --ignore-case (D-6: per-token
     presence is then compared case-insensitively)."""
-    head = (cmd or "").split("\n", 1)[0]
+    head = _strip_leading_cd_prefix((cmd or "").split("\n", 1)[0])
     for t in head.split():
         if t == "--ignore-case":
             return True
@@ -3248,7 +3340,7 @@ def _token_present_in_output(tok: str, out: str, ci: bool) -> bool:
 def _grep_result_empty(cmd: str, out: str) -> bool:
     """Deterministic zero-hit detection. Covers: exit-1/empty bytes; `grep -c`
     printing all-zero counts. ONLY when grep is the final pipeline stage."""
-    head = (cmd or "").split("\n", 1)[0]
+    head = _strip_leading_cd_prefix((cmd or "").split("\n", 1)[0])
     if not _grep_is_final_stage(head):
         return False
     s = (out or "").strip()
@@ -4265,6 +4357,62 @@ def _evidence_body(kind: str, rel: str, root: str, cmd: str = "") -> str:
     return "\n".join(lines[:6]).strip()
 
 
+def _evidence_native_on() -> bool:
+    """True iff the <gt-evidence> FORM arm (GT_EVIDENCE_NATIVE) is enabled and this is not
+    baseline. Read at call time (a test/env flip takes effect). Mirrors the GT_SCOPE_NATIVE /
+    GT_POST_SEARCH_NATIVE per-surface FORM-flag family."""
+    if _GT_BASELINE:
+        return False
+    return os.environ.get("GT_EVIDENCE_NATIVE", "").strip().lower() not in (
+        "", "0", "false", "no", "off")
+
+
+# A single caller/witness UNIT inside a prose evidence line: an optional ``name() in`` caller
+# prefix, a ``path:line`` location, an optional ``(unverified)`` honesty marker, and an optional
+# backtick code snippet. The evidence prose is DETERMINISTICALLY built by _evidence_body, so this
+# parses the exact shapes it emits ([WITNESS] ``sym arrow -> file:line `code```; [CALLERS]
+# ``name() in file:line `code```; the callee-contract ``… file:line`` lines).
+_EV_UNIT_RE = re.compile(
+    r"(?:(?P<name>[A-Za-z_]\w*)\(\)\s+in\s+)?"
+    r"(?P<path>[\w./\\+\-]+):(?P<line>\d+)"
+    r"(?P<unver>\s*\(unverified\))?"
+    r"(?:\s*`(?P<code>[^`]*)`)?")
+_EV_TAG_RE = re.compile(r"^\s*\[[A-Z][A-Z0-9_]*\]\s*")
+_EV_LEAD_RE = re.compile(r"\s*([A-Za-z_]\w*)")
+
+
+def _evidence_native(lines: "list[str]") -> str:
+    r"""FORM A/B B-arm (GT_EVIDENCE_NATIVE): the SAME resolved-witness / caller facts the
+    <gt-evidence> body carries, rendered as bare ripgrep-style ``path:line:code`` rows via
+    native_render.render_def_rows_native — NO ``<gt-*>`` tag, NO ``[WITNESS]``/``[CALLERS]``
+    prose prefix — so the evidence rides the agent's OWN grep channel in-distribution
+    (mirrors _fmt_def_facts_native for the post_search surface).
+
+    Per ITEM-2: [WITNESS]/[CALLERS] units -> ``path:line:code`` rows (the backtick snippet is the
+    match text, else the caller name, else the line's subject symbol); a floor-clearing
+    ``(unverified)`` hint is NOT a fact row (dropped); a [SIBLINGS] line (no ``path:line``) yields
+    no unit -> dropped. Leak-safe by inheritance: render_def_rows_native drops test-path rows and
+    _final_scrubs every row, so ``contains_test_identity(out) is False`` and no ``<gt-*>`` survives.
+    Import-isolated (native_render absent -> "")."""
+    try:
+        from groundtruth.runtime.native_render import render_def_rows_native
+    except Exception:  # noqa: BLE001 — native_render absent -> no native form (correct-or-quiet)
+        return ""
+    rows: list = []
+    for ln in lines:
+        body = _EV_TAG_RE.sub("", ln)
+        _lead = _EV_LEAD_RE.match(body)
+        subj = _lead.group(1) if _lead else ""
+        for m in _EV_UNIT_RE.finditer(body):
+            if m.group("unver"):
+                continue  # an unverified location hint is not a deterministic fact row
+            code = (m.group("code") or "").strip()
+            match_text = code or (m.group("name") or "") or subj
+            if match_text:
+                rows.append((m.group("path"), m.group("line"), match_text))
+    return render_def_rows_native(rows, test_files=None)
+
+
 def _evidence(cmd: str) -> str:
     if _GT_BASELINE:
         return ""
@@ -4284,15 +4432,30 @@ def _evidence(cmd: str) -> str:
     ev = _evidence_body(kind, rel, root, cmd)
     if not ev:
         return ""
-    ev = _translate_to_action(ev, _detect_phase())
+    # ITEM-6 (a) per-fact-class ELIGIBLE counter (GT_INSEAM_METRICS): the producer reached its
+    # produce-decision with non-empty facts. Host-side ledger row, zero observation bytes.
+    _inseam_eligible("l3b.evidence", rel)
+    # FORM A/B (evidence surface, GT_EVIDENCE_NATIVE): the SAME facts rendered as bare ripgrep
+    # rows (native) instead of the <gt-evidence> tag. Read AFTER the non-empty gate so ONLY the
+    # delivered FORM changes; the latch + rollback below are byte-identical to the tag arm.
+    native = _evidence_native_on()
+    if native:
+        ev = _evidence_native(ev.splitlines())
+    else:
+        ev = _translate_to_action(ev, _detect_phase())
     ev = _budget_trim(ev)
     if not ev:
         return ""
     _seen.add(key)
+    # ITEM-6 (b) truth/authority stamp (GT_INSEAM_METRICS): a resolved witness is a
+    # DETERMINISTIC fact (>=0.7 floor) — stamp the produced row's tier/conf host-side.
+    _inseam_stamp("l3b.evidence", rel, tier="VERIFIED", conf=0.7)
     # SM-5 F (#50): under the global arbiter, attach the rollback that un-burns THIS exact
     # (kind, rel) latch so a pool LOSER (0 bytes) defers instead of destroying the fact.
     # Guarded -> byte-identical no-op when GT_GLOBAL_ARBITER is off.
     _arm_lane_a_rearm("l3b.evidence", lambda k=key: _seen.discard(k))
+    if native:
+        return "\n" + ev  # bare native rows, no <gt-evidence> frame
     return f"\n<gt-evidence kind=\"{kind}\" file=\"{rel}\">\n{ev}\n</gt-evidence>"
 
 
@@ -4330,6 +4493,48 @@ def _contract_bilateral_on() -> bool:
         return False
     return os.environ.get("GT_CONTRACT_BILATERAL", "").strip().lower() not in (
         "", "0", "false", "no", "off")
+
+
+def _contract_native_on() -> bool:
+    """True iff the <gt-contract> FORM arm (GT_CONTRACT_NATIVE) is enabled and this is not
+    baseline. Read at call time. Mirrors the GT_SCOPE_NATIVE / GT_POST_SEARCH_NATIVE per-surface
+    FORM-flag family: the SAME contract facts render as native compiler diagnostics + bare
+    ripgrep caller rows instead of the <gt-contract> [SIGNATURE]/[CALLERS] tagged block."""
+    if _GT_BASELINE:
+        return False
+    return os.environ.get("GT_CONTRACT_NATIVE", "").strip().lower() not in (
+        "", "0", "false", "no", "off")
+
+
+def _contract_caller_rows_native(con, target_id, det_sql: str, conf_gate: str,
+                                 root: str, code_root: str, limit: int = 5) -> "list[tuple]":
+    """Deterministic cross-file caller (path, line, code) rows for ONE target function node —
+    the SAME fact discipline as _resolved_witnesses_for_file (deterministic method, >=0.7 floor
+    via ``conf_gate``, non-test callers, vendored/minified/demo caller files excluded), scoped to
+    ``target_id``. Feeds the GT_CONTRACT_NATIVE preserved arm's bare rg-style caller rows
+    (render_def_rows_native) instead of the ``[CALLERS] N verified caller(s) … preserve this
+    interface`` prose. Correct-or-quiet: legacy schema (no det_sql) / DB error -> []."""
+    if not det_sql:
+        return []
+    try:
+        rows = con.execute(
+            "SELECT DISTINCT ns.file_path, e.source_line, ns.name FROM edges e "
+            "JOIN nodes ns ON ns.id = e.source_id "
+            "WHERE e.target_id = ? AND e.type='CALLS' AND COALESCE(ns.is_test,0)=0 "
+            "AND e.source_line > 0 "
+            f"AND LOWER(TRIM(e.resolution_method)) IN ('{det_sql}') {conf_gate} "
+            "ORDER BY e.source_line LIMIT ?", (target_id, limit * 3)).fetchall()
+    except Exception:  # noqa: BLE001 — correct-or-quiet
+        return []
+    out: list = []
+    for cf, line, cname in rows:
+        if not cf or _caller_path_excluded(cf or "", root):
+            continue
+        code = _code_at(code_root, cf, line)
+        out.append((cf, line, (code or cname or "").strip()))
+        if len(out) >= limit:
+            break
+    return out
 
 
 def _paren_params(sig: str) -> "str | None":
@@ -4703,6 +4908,17 @@ def _graph_contract_block(rel: str, *, action=None, cmd: str = "") -> str:
             if rows and has_method and _contract_bilateral_on():
                 bilateral = _bilateral_consumption(
                     con, rows[0][0], rows[0][1], det_sql, conf_gate)
+            # FORM A/B (GT_CONTRACT_NATIVE): the preserved arm renders bare rg-style caller ROWS
+            # (path:line:code) instead of the "[CALLERS] N verified caller(s) … preserve this
+            # interface" prose. Collect them INSIDE the con block (needs the live connection);
+            # default-OFF -> {} (never queried). ≤5 per function (dose bound).
+            _native = _contract_native_on()
+            _native_caller_rows: dict = {}
+            if _native and has_method:
+                for _rid, _name, _sig, _nc, _nf in rows:
+                    if _nc and int(_nc) > 0:
+                        _native_caller_rows[_name] = _contract_caller_rows_native(
+                            con, _rid, det_sql, conf_gate, root, _code_root, limit=5)
         finally:
             con.close()
         if not rows:
@@ -4710,8 +4926,18 @@ def _graph_contract_block(rel: str, *, action=None, cmd: str = "") -> str:
         # B-19: derive the edit change-mode from the action so 'preserve' is only
         # narrated for a modify-in-place edit. Default-OFF -> current PRESERVE (fail-safe).
         _mode_on = _contract_mode_on()
-        _sig_changes = _edit_signature_changes(action, cmd, rows) if _mode_on else {}
-        _is_create = _edit_is_create(action, cmd) if _mode_on else False
+        # A verified signature-change is needed for BOTH the B-19 tag arm (when _mode_on) AND the
+        # GT_CONTRACT_NATIVE diagnostic arm (regardless of GT_CONTRACT_MODE) — the native form's
+        # diagnostic-vs-caller-rows decision hinges on it. Compute it once when EITHER is active.
+        _sig_changes = (_edit_signature_changes(action, cmd, rows)
+                        if (_mode_on or _native) else {})
+        _is_create = _edit_is_create(action, cmd) if (_mode_on or _native) else False
+        # ITEM-6 (a) ELIGIBLE + (b) authority stamp (GT_INSEAM_METRICS): the contract producer
+        # reached its produce-decision with >=1 fact row (deterministic >=0.7 callers = CERTIFIED).
+        _inseam_eligible("l3.contract", rel)
+        _inseam_stamp("l3.contract", rel, tier="CERTIFIED", conf=0.7)
+        if _native:
+            return _graph_contract_native(rel, rows, _sig_changes, _native_caller_rows)
         out = [f'<gt-contract file="{os.path.basename(rel)}">']
         for _id, name, sig, ncallers, nfiles in rows:
             out.append(f"[SIGNATURE] {sig}")
@@ -4742,6 +4968,52 @@ def _graph_contract_block(rel: str, *, action=None, cmd: str = "") -> str:
         return "\n" + "\n".join(out)
     except Exception:  # noqa: BLE001 -- correct-or-quiet
         return ""
+
+
+def _graph_contract_native(rel: str, rows: list, sig_changes: dict,
+                           native_caller_rows: dict) -> str:
+    r"""FORM A/B B-arm (GT_CONTRACT_NATIVE): the per-edit contract as native compiler diagnostics
+    + bare ripgrep caller rows, NO ``<gt-*>`` tag.
+      (a) a VERIFIED signature-change function (``name in sig_changes``, has callers) -> ONE
+          ``render_caller_contract_native`` diagnostic carrying the ``old→new`` param delta;
+      (b) a preserved / pre-edit / create function -> its deterministic caller sites as bare
+          ``path:line:code`` rows (``render_def_rows_native``), ≤5 total.
+    DROPS the ``[SIGNATURE]`` echo + the line-less PRESERVE/[RAISES]/[RETURNS] props + the
+    ``[CONSUMED]`` bilateral prose (no ``path:line`` -> no native row). Leak-safe: both renderers
+    firewall a test path + ``_final_scrub`` every line, so ``contains_test_identity(out) is False``
+    and no ``<gt-*>`` survives. Import-isolated (native_render absent -> ""). Budget ≤~400B."""
+    try:
+        from groundtruth.runtime.native_render import (
+            render_caller_contract_native, render_def_rows_native)
+    except Exception:  # noqa: BLE001 — native_render absent -> no native form (correct-or-quiet)
+        return ""
+    diag_lines: list[str] = []
+    row_tuples: list = []
+    for _id, name, sig, ncallers, nfiles in rows:
+        if not (ncallers and int(ncallers) > 0):
+            continue
+        if name in sig_changes:
+            _on, _nn = sig_changes[name]
+            delta = f"{', '.join(_on)}→{', '.join(_nn)}"
+            d = render_caller_contract_native(name, int(ncallers), int(nfiles),
+                                              def_file=rel, sig_delta=delta)
+            if d:
+                diag_lines.append(d)
+        else:
+            row_tuples.extend(native_caller_rows.get(name, []))
+    # de-dup caller rows across functions (a shared caller must not double-deliver), order-preserving.
+    _seen_rows: set = set()
+    _uniq: list = []
+    for t in row_tuples:
+        if t not in _seen_rows:
+            _seen_rows.add(t)
+            _uniq.append(t)
+    rows_block = render_def_rows_native(_uniq[:5], test_files=None)
+    pieces = [d for d in diag_lines if d]
+    if rows_block:
+        pieces.append(rows_block)
+    body = "\n".join(pieces).strip()
+    return ("\n" + body) if body else ""
 
 
 def _cochange_block(rel: str) -> str:
@@ -5146,14 +5418,16 @@ def _l5_nudge(cmd: str, out_text: str = "",
             del _cmd_history[0]
         if loop_arm and _cmd_history.count(sig) >= 4:
             _l5_fired = True
-            return ('\n<gt-nudge reason="loop">\nGT: you have repeated the same command 4+ '
-                    "times with no progress. Stop, re-read the last error, and change approach "
-                    "(open a different file or test a new hypothesis).\n</gt-nudge>")
+            return _nudge_native(
+                '\n<gt-nudge reason="loop">\nGT: you have repeated the same command 4+ '
+                "times with no progress. Stop, re-read the last error, and change approach "
+                "(open a different file or test a new hypothesis).\n</gt-nudge>")
     if scaffold_arm and _action_count >= 25 and _source_edit_count == 0:
         _l5_fired = True
-        return ('\n<gt-nudge reason="scaffold_trap">\nGT: 25+ actions and no source-file edit '
-                "yet — you are likely stuck exploring/scaffolding. Use the brief's gt-scope to "
-                "localize and make a concrete edit to a SOURCE file now.\n</gt-nudge>")
+        return _nudge_native(
+            '\n<gt-nudge reason="scaffold_trap">\nGT: 25+ actions and no source-file edit '
+            "yet — you are likely stuck exploring/scaffolding. Use the brief's gt-scope to "
+            "localize and make a concrete edit to a SOURCE file now.\n</gt-nudge>")
     return ""
 
 
@@ -5330,11 +5604,12 @@ def _l5_no_test_evidence_nudge(cmd: str, out_text: str) -> str:
     if (_blind_test_runs >= 2 and not _test_evidence_seen
             and _source_edit_count >= 1):
         _l5_notest_fired = True
-        return ('\n<gt-nudge reason="no_test_evidence">\nGT: your test commands have produced '
-                "no visible test results (likely killed/timed out before any test ran). You have "
-                "NOT observed a single test execute — do not conclude tests pass, and do not "
-                "submit yet. Run a narrower target (one test name / one module) or raise the "
-                "timeout until you see real pass/fail output.\n</gt-nudge>")
+        return _nudge_native(
+            '\n<gt-nudge reason="no_test_evidence">\nGT: your test commands have produced '
+            "no visible test results (likely killed/timed out before any test ran). You have "
+            "NOT observed a single test execute — do not conclude tests pass, and do not "
+            "submit yet. Run a narrower target (one test name / one module) or raise the "
+            "timeout until you see real pass/fail output.\n</gt-nudge>")
     return ""
 
 
@@ -5414,7 +5689,7 @@ def _degenerate_loop_candidate(cmd: str, raw_obs: str) -> tuple[float, str] | No
         "different hypothesis, or a narrower test)."
     )
     return (float(_SEV_DETECT),
-            f'\n<gt-nudge reason="degenerate_loop">\n{body}\n</gt-nudge>')
+            _nudge_native(f'\n<gt-nudge reason="degenerate_loop">\n{body}\n</gt-nudge>'))
 
 
 def _coherence_collapse_candidate(rel: str) -> tuple[float, str] | None:
@@ -5452,7 +5727,7 @@ def _coherence_collapse_candidate(rel: str) -> tuple[float, str] | None:
         f"failing, then make one targeted edit.{hint}"
     )
     return (float(_SEV_DETECT),
-            f'\n<gt-nudge reason="coherence_collapse">\n{body}\n</gt-nudge>')
+            _nudge_native(f'\n<gt-nudge reason="coherence_collapse">\n{body}\n</gt-nudge>'))
 
 
 def _l5_failure_nudge(cmd: str, out_text: str) -> str:
@@ -5496,9 +5771,10 @@ def _l5_failure_nudge(cmd: str, out_text: str) -> str:
     _test_fail_history.append(sig)
     if _test_fail_history.count(sig) >= 2 and _source_edit_count >= 1:
         _l5_failure_fired = True
-        return ('\n<gt-nudge reason="failure_persisted">\nGT: the same test failure has '
-                "persisted across your edit(s) — your current hypothesis is likely wrong. "
-                "Re-read the failing assertion and reconsider the root cause / target file.\n</gt-nudge>")
+        return _nudge_native(
+            '\n<gt-nudge reason="failure_persisted">\nGT: the same test failure has '
+            "persisted across your edit(s) — your current hypothesis is likely wrong. "
+            "Re-read the failing assertion and reconsider the root cause / target file.\n</gt-nudge>")
     return ""
 
 
@@ -5547,11 +5823,12 @@ def _l5_unresolved_build_guard(cmd: str, out_text: str, phase) -> str:
         return ""
     _l5_build_fail_fired = True
     _n = len(hits)
-    return ('\n<gt-nudge reason="unresolved_build_failure">\nGT: your last build/type-check '
-            "run reported %d unresolved compile/type-check error(s). The grader builds your "
-            "patch — a passing subset of runtime tests does NOT clear a broken build. Resolve "
-            "them before you submit; do not skip, silence, or delete the failing check."
-            "\n</gt-nudge>" % _n)
+    return _nudge_native(
+        '\n<gt-nudge reason="unresolved_build_failure">\nGT: your last build/type-check '
+        "run reported %d unresolved compile/type-check error(s). The grader builds your "
+        "patch — a passing subset of runtime tests does NOT clear a broken build. Resolve "
+        "them before you submit; do not skip, silence, or delete the failing check."
+        "\n</gt-nudge>" % _n)
 
 
 # Semantic-drift candidate (2026-06-23): wires the previously-DEAD
@@ -5756,6 +6033,15 @@ def _reset_oracle_state() -> None:
     # F3 reset law — every producer/latch global clears here so a delivered answer re-arms on an
     # in-process retry (and a test never leaks a spent latch into the next case).
     global _loc_reslot_delivered
+    # W7 OPTION-B (2026-07-13): the once-per-episode consensus.scope_map retirement-note latch.
+    # F3 reset law — cleared per attempt so the retirement note re-fires once on an in-process
+    # retry (and a test never leaks a spent latch). Byte-identical when the arbiter is off (never
+    # set — the note only fires under the arbiter).
+    global _scope_retire_noted
+    # ITEM-4 (2026-07-13): the once-per-episode concern.consensus (DCC) retirement-note latch.
+    # F3 reset law — cleared per attempt so the retirement note re-fires once on an in-process
+    # retry. Byte-identical when the arbiter is off or GT_DCC unset (never set otherwise).
+    global _concern_retire_noted
     # W1b (2026-07-10): route the per-attempt reset through the ONE canonical episode.
     # reset_attempt() clears the OWNED accumulators — INCLUDING probe_ledger and
     # delivered_dedup, i.e. the very objects `_search_seen` / `_oracle_delivered_hashes`
@@ -5791,6 +6077,8 @@ def _reset_oracle_state() -> None:
     _oracle_test_evidence_seen = False
     _reset_phase_dropped_losers()    # bug #4(c): clear per-turn phase-drop staging
     _consensus_fired = False
+    _scope_retire_noted = False  # W7 OPTION-B: per-episode scope_map retirement-note latch
+    _concern_retire_noted = False  # ITEM-4: per-episode concern.consensus retirement-note latch
     _consensus_collected.clear()  # B3: reset the per-file collect latch on retry
     _cochange_fired = False
     _l5_fired = False
@@ -5815,6 +6103,12 @@ def _reset_oracle_state() -> None:
     # suites reset by hand.
     global _detect_loop_fired, _coherence_last_rel
     global _last_test_outcome_failed, _last_test_step, _cycle_edit_start
+    global _recovery_repeat_fp
+    # W6 FIX 1b: the per-turn recovery REPETITION flag (set fresh at the top of every
+    # `_gt_hypothesis_classify_turn`, consumed same-turn by `_recovery_stall_active`). Clear it
+    # per attempt too (F3 reset law) so a prior attempt's repeat state can never leak into a fresh
+    # attempt's first classify (byte-identical in production: fresh process per attempt).
+    _recovery_repeat_fp = False
     _traj_state_keys.clear()
     _traj_loop_sigs.clear()
     _lr_history.clear()
@@ -6634,6 +6928,7 @@ def _runtime_ledger_record(
     chars: int = 0,
     file_path: str = "",
     event=None,
+    content: "str | None" = None,
 ) -> None:
     ev = event.value if event is not None else ""
     # In-process object (used for the in-process summary / retry state); may be the
@@ -6657,7 +6952,7 @@ def _runtime_ledger_record(
     # fieldless no-op under the stub). Replaces the old truncate-then-rewrite flush,
     # so a stubbed Ledger.to_jsonl()->'' or a mid-run SIGKILL can no longer blank the
     # whole run's ledger. Final clean-run file is byte-line-identical to the old flush.
-    _ledger_line_direct({
+    _row = {
         "layer": kind,
         "event_type": ev,
         "file_path": file_path,
@@ -6665,7 +6960,20 @@ def _runtime_ledger_record(
         "reason": reason,
         "chars_delivered": chars,
         "iteration": _action_count,
-    })
+    }
+    # DELIVERY SEAL (W2, 2026-07-12): when a delivery site threads the EXACT block bytes it
+    # appended to the observation via ``content=``, stamp a truncated sha256 over THOSE bytes
+    # (the block — NEVER the whole observation) so a post-run §4 audit can verify what the model
+    # actually saw. Host-side OBSERVABILITY only: this touches the durable ledger row, NOT the
+    # model-facing append (byte-identical). Rows WITHOUT content (suppressions, L6 lifecycle,
+    # telemetry-only DELIVERED with chars=0) carry NO seal key at all — indistinguishable from
+    # pre-feature rows. ``seal_scope`` records the sealed unit: "block" (the delivered block).
+    # ``surrogatepass`` matches the seal encoding used by the envelope path (Seam-F6).
+    if content is not None:
+        _row["content_sha256_16"] = hashlib.sha256(
+            content.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+        _row["seal_scope"] = "block"
+    _ledger_line_direct(_row)
 
 
 # ---------------------------------------------------------------------------
@@ -7586,6 +7894,12 @@ def _edit_syntax_candidate(rel: str) -> "tuple[float, str, str, bool] | None":
 # recipe). Off / no classification -> the generic pivot text, byte-identical.
 # =====================================================================
 _gt_hypothesis_recovery: "tuple[str, str] | None" = None  # (disposition, imperative)|None
+# W6 FIX 1b (2026-07-12) — the REPETITION half of the recovery STALL GATE. Set once per turn by
+# `_gt_hypothesis_classify_turn` to True iff THIS turn's failure fingerprint had ALREADY been seen
+# on a PRIOR turn (a genuine recurrence), captured BEFORE this turn feeds its fp into the failure
+# memory. A per-turn signal (reset at the top of classify + per attempt); read by
+# `_recovery_stall_active`. Default False -> byte-identical when the recovery layer is off.
+_recovery_repeat_fp: bool = False
 _HYPOTHESIS_IMPERATIVE_CACHE: "dict[str, str] | None" = None
 
 
@@ -7654,13 +7968,19 @@ def _gt_hypothesis_classify_turn(cmd: str, observation: str) -> None:
     (default OFF -> early return, no state touched, byte-identical). Correct-or-quiet: any
     fault clears the selection. Feeds the shared failure memory AFTER classify so a repeat
     is detected on the NEXT turn (never the same turn)."""
-    global _gt_hypothesis_recovery
+    global _gt_hypothesis_recovery, _recovery_repeat_fp
     _gt_hypothesis_recovery = None
+    _recovery_repeat_fp = False
     if os.environ.get("GT_HYPOTHESIS") != "1" or _GT_BASELINE:
         return
     try:
         from groundtruth.runtime.hypothesis_ledger import LedgerEvent, classify_all
         fp = _hypothesis_failure_fingerprint(observation)
+        # W6 FIX 1b: capture the REPETITION signal BEFORE feeding this turn's fp into memory —
+        # True iff this exact failure fingerprint was ALREADY recorded on a PRIOR turn (a genuine
+        # recurrence). This is the SAME prior-memory the classifiers key on; reading it here (pre-
+        # add) is what makes "the same failure repeated" a deterministic stall indicator.
+        _recovery_repeat_fp = bool(fp) and fp in _EPISODE.failure_fingerprints
         event = LedgerEvent(
             action_index=_action_count, command=cmd or "",
             observation=observation or "", probe_stem="",
@@ -7685,6 +8005,43 @@ def _gt_hypothesis_classify_turn(cmd: str, observation: str) -> None:
         _gt_hypothesis_recovery = None
 
 
+def _recovery_stall_active() -> bool:
+    """W6 FIX 1b (2026-07-12) — the deterministic STALL GATE for the recovery candidate.
+
+    FORENSICS (run 29217805592, orchestrator + trajectory deep-dives). The upstream typed
+    classifier OVER-FIRES: it selected a recovery disposition on turns where the agent was
+    confidently PROGRESSING ("All tests pass. Now let me verify the final state…" -> a
+    disposition fired anyway). ROOT CAUSE: `_hypothesis_failure_fingerprint` SCRUBS numbers, so
+    a benign, byte-stable "… 0 failed …" summary recurs with an IDENTICAL fingerprint on every
+    passing test run -> `fp in failure_fingerprints` -> `classify_same_failure_unchanged_patch`
+    (D_REQUEST_NEW_HYPOTHESIS) treats a PASSING agent as a repeating FAILURE. 42 of the 57
+    suppressed pool-recovery turns had NOTHING else deliver, so admitting the candidate blind
+    (FIX 1a alone) would ship a "change your approach" nudge to a progressing agent = NOISE,
+    the exact opposite of correct-or-quiet.
+
+    THE GATE (deterministic, in-process state ONLY — no LLM, no prose token-matching). The
+    candidate is eligible ONLY when a GENUINE stall holds, from state the seam already tracks:
+      * ``_detect_loop_fired`` — a HARD degenerate loop THIS attempt (TIDE: >=3x identical
+        command+output with below-own-norm new-state production, ``_degenerate_loop_candidate``,
+        which ran EARLIER this turn). A genuine stall by itself, independent of tests, so it
+        admits alone; OR
+      * ``_last_test_outcome_failed`` AND ``_recovery_repeat_fp`` — a GENUINE failing state RIGHT
+        NOW (the ZERO-COUNT-SAFE recency sensor `verify_horizon_band` already keys its pivot on:
+        the most-recent sensed test outcome had non-env `_failure_lines` and was NOT a "0 failed"
+        pass; CLEARED on an observed pass + per attempt), TOGETHER WITH genuine REPETITION (this
+        turn's failure fingerprint RECURRED). BOTH halves are required so a benign "0 failed"
+        summary (`_last_test_outcome_failed` False) and a single FRESH failure
+        (`_recovery_repeat_fp` False) are each ineligible.
+
+    Conservative by construction: a PASSING agent (`_last_test_outcome_failed` False — EVERY
+    "0 failed" / "All tests pass" turn) is eligible ONLY via a hard degenerate loop, which is
+    never "linear progress"; and a first-touch failure never nudges. Pure reads of module state;
+    no `global` needed (read-only)."""
+    if _detect_loop_fired:
+        return True
+    return bool(_last_test_outcome_failed and _recovery_repeat_fp)
+
+
 def _recovery_candidate() -> "tuple[float, str, str, bool] | None":
     """SM-10 recovery-timing DECOUPLE (2026-07-12): an INDEPENDENT recovery-nudge
     candidate that fires on THIS turn's named recovery disposition — the failure-
@@ -7704,10 +8061,33 @@ def _recovery_candidate() -> "tuple[float, str, str, bool] | None":
     ``_gt_hypothesis_recovery`` is None -> None -> byte-identical). ``edit_bound=True``: the
     trigger IS the failure observation (bound to POST_VIEW/POST_EDIT/TEST_RESULT in the
     context policy), so it waives the empty-focus relevance suppression like every other
-    event-bound producer. Correct-or-quiet: any fault -> None."""
+    event-bound producer. Correct-or-quiet: any fault -> None.
+
+    W6 FIX 1b (2026-07-12): under GT_GLOBAL_ARBITER (the config where FIX 1a resurrects this
+    candidate onto the ladder) the candidate is additionally gated by :func:`_recovery_stall_active`
+    — it is eligible ONLY when a GENUINE stall holds, so FIX 1a cannot start nudging a PROGRESSING
+    agent (the over-fire the forensics found). A gate suppression is LOGGED (``recovery_stall_gate``)
+    and returns None BEFORE the candidate is built, so no recovery candidate enters the pool. The
+    gate is scoped to the arbiter flag so the arbiter-OFF path (incl. the legacy inline steer
+    delivery) is BYTE-IDENTICAL to before this fix."""
     if _GT_BASELINE or os.environ.get("GT_HYPOTHESIS") != "1":
         return None
     if not _gt_hypothesis_recovery:
+        return None
+    # W6 FIX 1b — the STALL GATE (arbiter-scoped, so arbiter-off is byte-identical). FIX 1a makes
+    # this candidate DELIVERABLE via the pool; without the gate, the classifier's over-fire (a
+    # benign recurring "0 failed" summary reading as a repeated failure) would ship nudges to a
+    # progressing agent. Suppress unless a genuine repetition/stall is sensed; log the drop so the
+    # suppression is auditable (never a silent drop).
+    if _global_arbiter_on() and not _recovery_stall_active():
+        try:
+            _record_hook_suppress("recovery", reason="recovery_stall_gate")
+            _runtime_ledger_record(
+                kind="recovery",
+                outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
+                reason="recovery_stall_gate")
+        except Exception:  # noqa: BLE001 — auditability must never break the gate
+            pass
         return None
     try:
         from groundtruth.runtime.native_render import render_recovery_native
@@ -8251,6 +8631,87 @@ def _consensus_scope_native(neigh: list[str]) -> str:
     return "\n".join(lines)
 
 
+# --------------------------------------------------------------------------- #
+# W7 OPTION-B (2026-07-13) — RETIRE consensus.scope_map under the global arbiter.
+# --------------------------------------------------------------------------- #
+def _scope_map_retired(ga_on: bool) -> bool:
+    """True iff the ``consensus.scope_map`` producer is RETIRED this turn — i.e. the global
+    arbiter is on. Isolated as a ONE-LINE predicate so the retirement decision is a single
+    mutation-testable seam (a mutation that forces it False un-retires the producer).
+
+    WHY RETIRE UNDER THE ARBITER (structural, not just the run-29217805592 forensic
+    859-produced / 0-delivered): ``consensus.scope_map`` projects onto the ``localization``
+    ladder class (``global_arbiter.class_of_kind``), whose decision boundary is ordinal 1 (a
+    SEARCH turn — ``_GA_CLASS_BOUNDARY``). But the producer only ever fires on a post_view
+    (ordinal 2) or post_edit (ordinal 3) turn — ALWAYS past that boundary — and localization is
+    a PREVENTIVE class that is NOT registry-reactive (``fact_registry.is_reactive`` is True only
+    for ``trace_frame``). So in :func:`_global_pool_flush` a scope_map candidate that reaches the
+    top is demoted ``repair_support_late`` (winner=None, never re-picked on-time —
+    :func:`_ga_candidate_on_time` is False for it); otherwise it is outranked. Either way 0 bytes,
+    EVERY turn. Its content — bare 1-hop graph-neighbour PATHS of a file the agent ALREADY
+    acquired, plus the killed "confirm the edit target with grep" hedge — adds nothing over the
+    ON-TIME search-boundary localization already delivered there (``gateway.
+    _produce_ranked_localization``: issue-keyed top-N ``path:line:sym``; ``_produce_def_ref_
+    partition``: def/ref/callers). Re-homing it to the search boundary would have to anchor on the
+    ranked top file, DUPLICATING that producer as a second localization dose (the <=1-dose law
+    forbids it). So: correct-or-quiet -> stop producing it there. Arbiter OFF -> False -> the exact
+    legacy production path (byte-identical)."""
+    return bool(ga_on)
+
+
+def _consensus_scope_retire_note(rel: str) -> None:
+    """Log ONE durable retirement note per EPISODE for the retired ``consensus.scope_map``
+    producer, at FIRST-ELIGIBILITY — the first turn the touched file is in the collected
+    ``_consensus_scope`` (i.e. the first turn the producer WOULD have emitted a real block).
+
+    Zero production: this NEVER calls :func:`_consensus_scope_block` / :func:`_query_scope` and
+    NEVER burns the ``_seen`` latch — the eligibility check is a cheap in-memory set membership.
+    Correct-or-quiet: already noted (per-episode latch), or the file is not (yet) in scope (the
+    producer would have returned ``""`` here anyway) -> no-op. Reached ONLY under the arbiter (the
+    caller gates on :func:`_scope_map_retired`), so it is byte-identical when the arbiter is off —
+    and byte-identical for DELIVERED observations even when on (scope_map was already 0-delivered);
+    it replaces the ~859 per-turn ``repair_support_late``/``outranked`` suppression telemetry rows
+    with ONE retirement row."""
+    global _scope_retire_noted
+    if _scope_retire_noted:
+        return
+    if _norm_rel(rel) not in _consensus_scope:
+        return  # not yet eligible — the producer would have delivered "" here anyway
+    _scope_retire_noted = True
+    _ledger_line_direct({
+        "layer": "consensus", "event_type": "consensus.scope_map",
+        "file_path": "", "outcome": "retired",
+        "reason": ("retired_under_global_arbiter:localization_boundary_ordinal_1_but_produced_"
+                   "on_view_or_edit_ordinal_2_3_repair_support_late;redundant_with_"
+                   "ranked_localization+def_ref_partition_at_search_boundary"),
+        "chars_delivered": 0, "iteration": globals().get("_action_count", 0)})
+
+
+def _consensus_scope_lane_a_append(lane_a: list, rel: str, ga_on: bool) -> None:
+    """W7 OPTION-B dispatch for the ``consensus.scope_map`` Lane-A block — the SINGLE call site
+    for both the post_edit and post_view consensus deliveries.
+
+    Arbiter ON (retired): ZERO production — the producer (``_consensus_scope_block`` /
+    ``_query_scope`` / the ``_seen`` latch burn) is NOT run; instead ONE per-episode retirement
+    note is logged at first-eligibility (:func:`_consensus_scope_retire_note`). Delivered
+    observations are byte-identical to the pre-W7 arbiter path (which already suppressed every
+    scope_map candidate ``repair_support_late``/``outranked`` -> 0 bytes).
+
+    Arbiter OFF: the EXACT legacy production path — try/except-isolated ``_consensus_scope_block``,
+    ``_crash_emit`` on fault, D-1 conditional (non-empty) enqueue — so it is byte-identical to the
+    pre-W7 tree when GT_GLOBAL_ARBITER is off."""
+    if _scope_map_retired(ga_on):
+        _consensus_scope_retire_note(rel)
+        return
+    try:
+        block = _consensus_scope_block(rel)
+    except Exception:  # noqa: BLE001 — Lane A producer isolated
+        _crash_emit("consensus.scope_map")
+        block = ""
+    if block:  # D-1: conditional enqueue (see the l3.contract note at the caller)
+        lane_a.append(("consensus.scope_map", block))
+
+
 def _verified_scope_component(edited: set[str]) -> set[str]:
     """The issue-anchored connected component reachable from the EDITED files via
     VERIFIED (FACTS-ONLY) edges — the correct denominator for a K-of-N
@@ -8787,6 +9248,84 @@ def _dcc_block(kkind: str | None, kf: str, cmd: str, orig_out: str, lane_a) -> s
         return ""
 
 
+# --------------------------------------------------------------------------- #
+# ITEM-4 (2026-07-13) — RETIRE concern.consensus (DCC) under the global arbiter.
+#
+# DECISION: RETIRE-with-note (mirror W7's scope_map), NOT fold-into-native. Code evidence:
+#   * concern.consensus is classed ``localization`` (global_arbiter._KIND_TO_CLASS:138 — the
+#     SAME class as consensus.scope_map:136 and the on-time producers post_search.localize /
+#     def_ref_partition), whose decision boundary is ordinal 1 (a SEARCH turn). But DCC only
+#     ever fires on DROWNING — deep in the trajectory, on a post_view/post_edit turn, ALWAYS
+#     past that boundary — and localization is PREVENTIVE (``is_reactive`` True only for
+#     trace_frame). So under the arbiter a DCC candidate is demoted ``repair_support_late`` or
+#     outranked -> 0 bytes, EVERY turn (the exact 859/0 shape W7 measured for scope_map).
+#   * CONTENT-redundancy: DCC delivers bare FILE PATHS (``- <path> — <witness>``) with NO
+#     line and NO symbol — STRICTLY WEAKER than the on-time search-boundary localization
+#     already delivered there (gateway._produce_ranked_localization: issue-keyed top-N
+#     ``path:line:sym``; _produce_def_ref_partition: def/ref/callers). So a native FOLD cannot
+#     even faithfully produce the ``path:line:code`` rg grammar (no line/sym exists to fill it)
+#     — it would DEGRADE, not translate. Re-homing to the search boundary would anchor on the
+#     ranked top file, DUPLICATING that producer as a SECOND localization dose — the <=1-dose
+#     law forbids it. And DCC is DEFAULT-OFF (GT_DCC), never a profile member, so it has ZERO
+#     live delivery today; folding it in would INTRODUCE a redundant second dose that did not
+#     exist. Therefore: under the arbiter, STOP producing it + log ONE per-episode retirement
+#     note. Delivered observations are byte-identical (DCC was already 0-delivered under the
+#     arbiter); arbiter OFF (or GT_DCC off) runs the exact legacy path (byte-identical).
+# --------------------------------------------------------------------------- #
+def _concern_retired(ga_on: bool) -> bool:
+    """True iff the ``concern.consensus`` (DCC) producer is RETIRED this turn — i.e. the global
+    arbiter is on. Isolated as a ONE-LINE predicate so the retirement decision is a single
+    mutation-testable seam (a mutation that forces it False un-retires the producer). Mirrors
+    :func:`_scope_map_retired`. Arbiter OFF -> False -> the exact legacy DCC path (byte-identical)."""
+    return bool(ga_on)
+
+
+def _concern_retire_note(kkind: "str | None", kf: str) -> None:
+    """Log ONE durable retirement note per EPISODE for the retired ``concern.consensus`` producer,
+    at first eligibility. Reached ONLY when the arbiter is on AND GT_DCC is set (the caller gates on
+    ``_concern_retired`` + ``_DCC_ON``), so it is byte-identical when the arbiter is off OR when DCC
+    is default-OFF — and byte-identical for DELIVERED observations even when on (DCC was already
+    0-delivered under the arbiter). Zero production: NEVER calls :func:`_dcc_block` and NEVER burns
+    the DCC footprint latch — it replaces the per-turn ``repair_support_late``/``outranked``
+    suppression telemetry with ONE retirement row. Correct-or-quiet: already noted (per-episode
+    latch) -> no-op."""
+    global _concern_retire_noted
+    if _concern_retire_noted:
+        return
+    _concern_retire_noted = True
+    _ledger_line_direct({
+        "layer": "concern", "event_type": "concern.consensus",
+        "file_path": "", "outcome": "retired",
+        "reason": ("retired_under_global_arbiter:localization_boundary_ordinal_1_but_produced_on_"
+                   "drowning_view_or_edit_repair_support_late;redundant_with_ranked_localization+"
+                   "def_ref_partition_at_search_boundary;bare_paths_no_line_sym_cannot_fold_native"),
+        "chars_delivered": 0, "iteration": globals().get("_action_count", 0)})
+
+
+def _concern_lane_a_append(lane_a: list, kkind: "str | None", kf: str, cmd: str,
+                           orig_out: str, ga_on: bool) -> None:
+    """ITEM-4 dispatch for the ``concern.consensus`` Lane-A block — the SINGLE call site.
+
+    Arbiter ON + GT_DCC on: ZERO production — the DCC producer (``_dcc_block`` / its footprint
+    latch) is NOT run; instead ONE per-episode retirement note is logged
+    (:func:`_concern_retire_note`). Delivered observations are byte-identical to the pre-ITEM-4
+    arbiter path (which already suppressed every DCC candidate -> 0 bytes).
+
+    Otherwise (arbiter OFF, or GT_DCC off, or baseline): the EXACT legacy path — try/except-isolated
+    ``_dcc_block``, ``_crash_emit`` on fault, conditional (non-empty) enqueue — byte-identical to the
+    pre-ITEM-4 tree."""
+    if _concern_retired(ga_on) and _DCC_ON and not _GT_BASELINE:
+        _concern_retire_note(kkind, kf or "")
+        return
+    try:
+        txt = _dcc_block(kkind, kf or "", cmd or "", orig_out, lane_a)
+    except Exception:  # noqa: BLE001 — DCC producer isolated
+        _crash_emit("concern.consensus")
+        txt = ""
+    if txt:
+        lane_a.append(("concern.consensus", txt))
+
+
 # ---------------------------------------------------------------------------
 # LANE-SPLIT (2026-06-13) — the data-plane / control-plane bulkhead.
 #
@@ -8929,6 +9468,7 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
                 chars=len(text),
                 file_path=krel or "",
                 event=event,
+                content=text,  # W2 seal: the delivered lane block (never the whole observation)
             )
             # RL-1 (flag GT_LANE_ENVELOPE): seal an envelope over the SAME delivered
             # bytes — advance the shared chain, stamp the dedup_key, record a receipt-
@@ -9295,6 +9835,32 @@ def _steer_native(text: str) -> str:
             kept.append(s)
     body = "\n".join(kept).strip()
     return ("\n" + body + "\n") if body else ""
+
+
+def _nudge_native_on() -> bool:
+    """True iff the <gt-nudge> FORM arm (GT_NUDGE_NATIVE) is enabled and this is not baseline.
+    Read at call time. Mirrors the GT_SCOPE_NATIVE / GT_STEER_NATIVE per-surface FORM-flag family:
+    a nudge is delivered body-only (native imperative) rather than in the <gt-nudge reason=…>
+    frame."""
+    if _GT_BASELINE:
+        return False
+    return os.environ.get("GT_NUDGE_NATIVE", "").strip().lower() not in (
+        "", "0", "false", "no", "off")
+
+
+def _nudge_native(block: str) -> str:
+    """FORM A/B B-arm (GT_NUDGE_NATIVE): render a ``<gt-nudge reason=…>`` block BODY-ONLY, dropping
+    the frame. REUSES :func:`_steer_native` (W6's stall-gated steer transform) VERBATIM — a SINGLE
+    source — so the producer-level native form is IDENTICAL to the delivery-time GT_STEER_NATIVE
+    transform these same nudges already flow through (``_deliver_gate_winner``): drop the
+    ``<gt-nudge>``/``<gt-verify>`` frame lines + the leading ``GT:`` voice marker, keep the
+    imperative body unchanged. Applying it at the producer makes the nudge body-only REGARDLESS of
+    the downstream delivery path (gate / arbiter) — and it composes cleanly with GT_STEER_NATIVE
+    (the frame-free result carries no ``<gt-`` tag, so the delivery-time pass no-ops). Default-OFF
+    byte-identical: returns ``block`` unchanged."""
+    if not _nudge_native_on():
+        return block
+    return _steer_native(block)
 
 
 def _join_lane_output(prev: str, block: str) -> str:
@@ -9966,7 +10532,8 @@ def _gt_gateway_deliver(action, out, cmd, orig_out, *, pool=None) -> None:
                 _runtime_ledger_record(
                     kind="gateway." + (winner.evidence_type or "fact"),
                     outcome=_ProductSignalOutcome.DELIVERED,
-                    chars=len(delta), file_path=winner.target or "")
+                    chars=len(delta), file_path=winner.target or "",
+                    content=delta)  # W2 seal: the delivered gateway block (seal_scope=block, uniform w/ lanes)
             except Exception:  # noqa: BLE001
                 pass
         # SM-5: under the global arbiter, STASH the produced gateway candidate + its commit
@@ -10132,7 +10699,30 @@ def _ga_is_preventive(kind: str) -> bool:
     """True iff ``kind`` projects onto a PREVENTIVE ladder class (guidance meant to arrive BEFORE
     the decision it steers). Reactive/post-event classes -> False. Correct-or-quiet: the engine
     absent or an unmapped (internal) kind -> False, so a fact GT cannot classify is NEVER
-    suppressed for lateness."""
+    suppressed for lateness.
+
+    W6 FIX 2 (2026-07-12) — HONOR THE REGISTRY'S REACTIVE DECLARATION. Some evidence types alias
+    to a PREVENTIVE ladder CLASS for arbitration PRIORITY but are REACTIVE by construction — a
+    ``trace_frame`` is a reactive failure-observation localizer (``fact_registry.
+    _REACTIVE_EVIDENCE_TYPES``: on-time BY CONSTRUCTION, no fixed lifecycle boundary) yet its
+    ladder class is ``localization`` (a preventive class). Pre-fix, ``_ga_is_preventive
+    ("trace_frame")`` was True -> the SM-10 repair_support demotion killed it as
+    ``repair_support_late`` (measured: 8 demotions on run 29217805592, 5 -> silence, 3 -> a
+    lower-value fact). A reactive evidence type must NEVER be demoted for lateness. So gate the
+    preventive verdict on ``fact_registry.is_reactive`` FIRST: a registry-reactive kind -> False.
+    This does NOT change trace_frame's LADDER class (localization rank is the correct arbitration
+    priority) — only its lateness demotion. Correct-or-quiet: the registry / helper absent -> the
+    lazy import fails -> fall through to the class-only test (current behavior), so a kind GT
+    cannot classify via the registry is judged exactly as before."""
+    try:
+        # dotted-import form (mirrors the class_of_kind import below) so the injection
+        # import-coverage guard REQUIRES fact_registry to ship. A registry-declared REACTIVE
+        # evidence type is on-time by construction -> never a preventive lateness demotion.
+        from groundtruth.runtime.fact_registry import is_reactive as _fr_is_reactive
+        if _fr_is_reactive(kind):
+            return False
+    except Exception:  # noqa: BLE001 — registry/helper absent -> fall back to the class test
+        pass
     try:
         from groundtruth.runtime.global_arbiter import class_of_kind
     except Exception:  # noqa: BLE001
@@ -10472,7 +11062,8 @@ def _deliver_gate_winner(out, cmd, win_text, *, kkind, kf, krel, event, steer_ba
         _runtime_ledger_record(
             kind=_last_gate_winner_kind,
             outcome=_ProductSignalOutcome.DELIVERED,
-            chars=len(win_text), file_path=krel or kf or "", event=event)
+            chars=len(win_text), file_path=krel or kf or "", event=event,
+            content=win_text)  # W2 seal: the delivered steer block (whole-obs boundary not cheaply here)
         # RL-1 (GT_LANE_ENVELOPE): seal over the SAME bytes; base_output = pre-append obs.
         _seal_lane_delivery(_last_gate_winner_kind, win_text, krel or kf or "",
                             base_output=steer_base)
@@ -10690,13 +11281,13 @@ def _augment_output(action, out) -> None:
                 # "what else does this fix touch" orientation. Same Lane-A fact: isolated,
                 # content-hash deduped, latched once-per-file (no spam). Correct-or-quiet:
                 # off-scope / isolated / latched / file never collected -> '' -> dropped.
-                try:
-                    _csb_e = _consensus_scope_block(_krel)
-                except Exception:  # noqa: BLE001 — Lane A producer isolated
-                    _crash_emit("consensus.scope_map")
-                    _csb_e = ""
-                if _csb_e:  # D-1: conditional enqueue (see l3.contract note above)
-                    lane_a.append(("consensus.scope_map", _csb_e))
+                # W7 OPTION-B (2026-07-13): under the global arbiter this producer is a permanent
+                # 0-deliver cost (localization-class fact born late — ordinal 2/3 — on every
+                # view/edit turn, redundant with the on-time ranked-localization + def_ref_partition
+                # search dose) -> RETIRE it there (zero production, one per-episode note). Arbiter
+                # off -> the exact legacy production path (byte-identical). See
+                # _consensus_scope_lane_a_append.
+                _consensus_scope_lane_a_append(lane_a, _krel, _ga_on)
             else:
                 if _oracle_edited_rels:
                     _oracle_nonedit_streak += 1
@@ -10714,13 +11305,9 @@ def _augment_output(action, out) -> None:
                 # once-per-file (no per-view spam). Restores the OH orientation role
                 # the dead legacy `_consensus_block` used to play. Correct-or-quiet:
                 # off-scope / isolated / latched -> '' -> Lane A drops it.
-                try:
-                    _csb = _consensus_scope_block(_crel)
-                except Exception:  # noqa: BLE001 — Lane A producer isolated
-                    _crash_emit("consensus.scope_map")
-                    _csb = ""
-                if _csb:  # D-1: conditional enqueue (see l3.contract note above)
-                    lane_a.append(("consensus.scope_map", _csb))
+                # W7 OPTION-B (2026-07-13): retired under the global arbiter — see the post_edit
+                # site above. Arbiter off -> exact legacy production (byte-identical).
+                _consensus_scope_lane_a_append(lane_a, _crel, _ga_on)
             # SM-10 Item D2 (2026-07-12): seed the per-attempt READ-SET (the file targets the
             # agent VIEWED / EDITED / greped this turn) so the global arbiter suppresses a
             # localization fact pointing at a file the agent ALREADY ACQUIRED (non-re-acquisition
@@ -10831,13 +11418,10 @@ def _augment_output(action, out) -> None:
             # ranked. CONDITIONAL enqueue (only a NON-empty block), so a flag-off
             # or quiet turn writes nothing to the fire counter and stays byte-
             # identical. Own registries, own tag, own try/except (isolated).
-            try:
-                _dcc_txt = _dcc_block(_kkind, (_kf or ""), cmd or "", _orig_out, lane_a)
-            except Exception:  # noqa: BLE001 — DCC producer isolated
-                _crash_emit("concern.consensus")
-                _dcc_txt = ""
-            if _dcc_txt:
-                lane_a.append(("concern.consensus", _dcc_txt))
+            # ITEM-4 (2026-07-13): retire concern.consensus under the global arbiter (mirror W7).
+            # Arbiter ON + GT_DCC on -> ZERO production + ONE per-episode retirement note; else the
+            # EXACT legacy _dcc_block path (byte-identical off / arbiter-off / DCC-off).
+            _concern_lane_a_append(lane_a, _kkind, _kf, cmd, _orig_out, _ga_on)
             # ── DELIVER LANE A NOW — EARLY, isolated, BEFORE any Lane B logic ──
             # THE NON-NEGOTIABLE ORDERING (the entire point of the bulkhead):
             # the contract/evidence/cochange reach the agent here, each in its
@@ -11636,9 +12220,146 @@ _ENV_CLASSES = [
 _PATCHED_CLASSES: list[str] = []
 
 
+# W8 PRODUCTION-DEFAULT INVERSION (2026-07-13). Per-member provenance of the in-process
+# profile resolution: {member: "resolved"} = defaulted-ON by _resolve_production_profile();
+# {member: "inherited"} = already carried an explicit env value at install time (incl a "0"
+# kill-switch). Populated by _resolve_production_profile() BEFORE _write_profile_receipt()
+# so the receipt records the resolved state. Empty {} when the inversion did not run (an
+# explicit legacy/control posture, the baseline arm, or a test process that drives the
+# resolver explicitly).
+_GT_PROFILE_MEMBER_SOURCE: dict = {}
+
+
+def _should_auto_invert() -> bool:
+    """Whether ``_install()`` AUTO-applies the production-default inversion at import time.
+
+    The inversion mutates PROCESS-GLOBAL ``os.environ`` (its whole job: hand the resolved
+    Profile-2 defaults to the downstream flag readers in THIS process). In production the
+    seam loads once into a FRESH per-task process (pier spawns one per task — see the
+    tests/ conftest note), so an import-time global mutation is exactly right. Under a
+    SHARED, long-lived TEST interpreter the same mutation would contaminate unrelated tests
+    (every default-OFF byte-identity assertion — and the seam is re-imported mid-suite while
+    proof-mode tests transiently hold GT_PROOF_MODE=1), so we DO NOT auto-apply there. The
+    W8 suite drives ``_resolve_production_profile`` EXPLICITLY and covers the true
+    import-time path via a fresh subprocess (where ``pytest`` is genuinely absent).
+
+    Signal: a resident ``pytest`` module means a shared test interpreter -> do NOT auto-
+    invert; ANY other launcher (fresh production process, or a subprocess a test spawns —
+    both without ``pytest`` resident) -> invert by default. Deliberately NOT gated on
+    GT_PROOF_MODE: proof-mode tests set it transiently under pytest, so gating on it would
+    fire the inversion INSIDE the test process (measured: leaks 27 members, breaks 35 tests).
+    Correct-or-quiet: never raises."""
+    try:
+        return "pytest" not in sys.modules
+    except Exception:  # noqa: BLE001 — a probe fault must never break _install
+        return True
+
+
+def _resolve_production_profile() -> None:
+    """PRODUCTION-DEFAULT INVERSION (W8): resolve the RL profile IN-PROCESS at install time.
+
+    Today every Profile-2 member is an opt-in env read defaulting OFF, and production-on
+    depends on an EXTERNAL exporter (the workflow fans GT_RL_PROFILE=2 -> 29 member exports).
+    A launcher that forgets to fan out silently degrades GT to the legacy stack. This inverts
+    ownership: the seam resolves its own profile and DEFAULTS the members ON, so flags become
+    KILL-SWITCHES and explicit env always wins.
+
+    Semantics (delegated to rl_profile.resolve_default_token / resolve_profile_defaults):
+      * GT_RL_PROFILE unset/empty  -> Profile-2 (THE PRODUCTION DEFAULT): every member setdefault-ed "1".
+      * explicit "0"/"off"/"none"  -> resolve NOTHING (explicit legacy/control; byte-identical to pre-W8 unset).
+      * any other value            -> that profile's members (unknown version -> no members, fail-safe).
+
+    ``os.environ.setdefault(member, "1")`` is the LOAD-BEARING semantic: it NEVER overrides an
+    explicit env value, so ``GT_X=0`` in the env is a kill-switch that survives. GT_RL_PROFILE
+    itself is setdefault-ed to the resolved token so downstream readers (receipt, gateway) agree.
+
+    Correct-or-quiet: rl_profile is imported LAZILY with the seam's guarded pattern (mirrors
+    the groundtruth.runtime.* imports elsewhere); ANY fault (import or resolution) leaves the
+    env UNTOUCHED — the legacy stack — and NEVER raises, so the import-time _install() (and
+    thus the fail-closed proof marker) can never be bricked by this."""
+    global _GT_PROFILE_MEMBER_SOURCE
+    try:
+        # Lazy, guarded import (mirrors global_arbiter/xsession_memory lazy imports): a
+        # partial/absent substrate must degrade to the legacy stack, never crash the seam.
+        from groundtruth.runtime import rl_profile as _rlp
+    except Exception:  # noqa: BLE001 — rl_profile absent -> no inversion (legacy stack)
+        return
+    try:
+        token = _rlp.resolve_default_token(os.environ)
+        defaults = _rlp.resolve_profile_defaults(os.environ)
+        source: dict = {}
+        for member in sorted(defaults):
+            # provenance BEFORE the setdefault: present => inherited (incl a "0" kill-switch),
+            # absent => resolved-ON by this inversion.
+            source[member] = "inherited" if member in os.environ else "resolved"
+            os.environ.setdefault(member, defaults[member])
+        if token is not None:
+            # so the receipt + gateway see the resolved profile even when GT_RL_PROFILE was unset.
+            os.environ.setdefault("GT_RL_PROFILE", token)
+        _GT_PROFILE_MEMBER_SOURCE = source
+    except Exception:  # noqa: BLE001 — any resolution fault -> legacy stack, never crash
+        return
+
+
+def _write_profile_receipt() -> None:
+    """PROFILE RECEIPT (W2, 2026-07-12): a DURABLE per-process record of profile activation,
+    written once at ``_install()`` time next to the runtime ledger (dirname of GT_RUNTIME_LEDGER).
+
+    Rationale: on run 29217805592 the Profile-2 activation existed ONLY as a stderr log line, so
+    the §4 auditor mis-graded the run as profile-dark — no artifact recorded it. This receipt makes
+    activation durable per task: which GT_RL_PROFILE, which GT_ flags were ON, which env classes the
+    seam patched, and the pid. Host-side observability only — it writes a NEW sidecar file and
+    touches NO model-facing byte. Best-effort: any OSError (unwritable dir) is swallowed; a broad
+    guard also holds so a receipt fault can NEVER crash the seam / the import-time _install() (which
+    would blank the fail-closed proof marker). NOT reached on the baseline arm: GT_BASELINE=1
+    processes never import this module (gt_headless_runner.py:82-92), and _install() early-returns on
+    _GT_BASELINE before this call anyway — so a control run writes no receipt (no contamination)."""
+    try:
+        ledger_path = os.environ.get("GT_RUNTIME_LEDGER", "/tmp/gt_runtime_ledger.jsonl")
+        out_dir = os.path.dirname(ledger_path) or "."
+        os.makedirs(out_dir, exist_ok=True)
+        try:
+            import time as _t
+            _ts = int(_t.time() * 1000)
+        except Exception:  # noqa: BLE001
+            _ts = 0
+        receipt = {
+            "schema": "gt.profile_receipt.v1",
+            "gt_rl_profile": os.environ.get("GT_RL_PROFILE", ""),
+            "members_on": sorted(
+                # LIPI fix (2026-07-12): normalize BEFORE comparing — rl_profile._is_on is
+                # `value.strip().lower() not in _OFF_VALUES` (rl_profile.py:281-282), so "OFF",
+                # "False", "0 " are OFF to the runtime and must not be reported as ON here
+                # (the receipt exists to PREVENT audit mis-grading, never to over-claim).
+                k for k, v in os.environ.items()
+                if k.startswith("GT_")
+                and (v or "").strip().lower() not in ("", "0", "false", "no", "off")
+            ),
+            # W8 (2026-07-13): per-member provenance of the in-process production-default
+            # inversion — "resolved" (defaulted-ON here) vs "inherited" (already in env at
+            # install, incl a "0" kill-switch). Additive key; schema stays gt.profile_receipt.v1.
+            "member_source": dict(_GT_PROFILE_MEMBER_SOURCE),
+            "patched_classes": _PATCHED_CLASSES,
+            "pid": os.getpid(),
+            "timestamp_ms": _ts,
+        }
+        with open(os.path.join(out_dir, "gt_profile_receipt.json"), "w", encoding="utf-8") as fh:
+            json.dump(receipt, fh, sort_keys=True)
+    except OSError:  # unwritable ledger dir — telemetry must never crash the seam
+        pass
+    except Exception:  # noqa: BLE001 — belt-and-suspenders: any fault stays silent
+        pass
+
+
 def _install() -> None:
     if _GT_BASELINE:
         return
+    # W8 PRODUCTION-DEFAULT INVERSION: resolve the RL profile IN-PROCESS, BEFORE the receipt
+    # (so the receipt records the resolved GT_RL_PROFILE + member_source). Self-guarded (never
+    # raises). Auto-applied only outside a shared test interpreter (see _should_auto_invert);
+    # the W8 suite drives _resolve_production_profile explicitly + via a fresh subprocess.
+    if _should_auto_invert():
+        _resolve_production_profile()
     import importlib
 
     for modname, clsname in _ENV_CLASSES:
@@ -11655,6 +12376,9 @@ def _install() -> None:
             _PATCHED_CLASSES.append(f"{modname}.{clsname}")
         except Exception:  # noqa: BLE001
             pass
+    # PROFILE RECEIPT: durable per-process activation record, AFTER the patch loop so
+    # patched_classes reflects the real attached set. Fully self-guarded (never raises).
+    _write_profile_receipt()
 
 
 _install()

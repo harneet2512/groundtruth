@@ -262,6 +262,46 @@ def _truth_authority_map() -> dict[str, str]:
     }
 
 
+def _augment_artifacts_root(jobs_dir: str, artifacts: dict[str, str | None]) -> dict[str, str | None]:
+    """Mini-path fallback for the INFRA-stub defect (healthy run mislabelled INFRA).
+
+    ``resolve_trial_artifacts`` globs the pier layout ``jobs/*/*__*/agent/`` for the
+    trajectory + patch. On the mini-swe-agent path those sit at the TASK-DIR ROOT (a
+    sibling of the ``jobs`` dir passed on the CLI as ``task_truth.py jobs ...``), so the
+    glob misses and the truth artifact fails closed to INFRA_MISSING_ARTIFACT even though a
+    full-run trajectory (+ patch + reward) is right there. When the resolver missed the mini
+    trajectory, look for it at the task root and fill it in so trajectory_integrity /
+    trajectory_state / patch_hygiene read the REAL run instead of an all-null stub."""
+    if artifacts.get("mini_trajectory"):
+        return artifacts
+    roots: list[str] = []
+    for r in (jobs_dir, os.path.dirname(os.path.abspath(jobs_dir)), os.getcwd()):
+        if r and r not in roots:
+            roots.append(r)
+    for root in roots:
+        cand = os.path.join(root, "mini-swe-agent.trajectory.json")
+        if os.path.isfile(cand):
+            artifacts["mini_trajectory"] = cand
+            if not artifacts.get("trial_dir"):
+                artifacts["trial_dir"] = root
+            break
+    return artifacts
+
+
+def _root_reward_fallback(jobs_dir: str) -> float | None:
+    """The task-root ``reward.txt`` (mini path), parsed as a float. None when absent/blank
+    (missing-data law) — used only when the pier ``result.json`` carried no reward."""
+    for r in (jobs_dir, os.path.dirname(os.path.abspath(jobs_dir)), os.getcwd()):
+        cand = os.path.join(r, "reward.txt") if r else ""
+        if cand and os.path.isfile(cand):
+            try:
+                txt = open(cand, encoding="utf-8").read().strip()
+                return float(txt) if txt else None
+            except (OSError, ValueError):
+                return None
+    return None
+
+
 def build_task_truth(
     jobs_dir: str,
     *,
@@ -285,6 +325,8 @@ def build_task_truth(
     do = _load_deepswe_outcome()
 
     artifacts = _find_trial_artifacts(jobs_dir, instance_id=instance_id)
+    # Mini-path fallback: fill in the task-root mini trajectory when the pier glob missed it.
+    artifacts = _augment_artifacts_root(jobs_dir, artifacts)
     reward: float | None = None
     n_agent_steps: int | None = None
     exit_status: str | None = None
@@ -299,6 +341,17 @@ def build_task_truth(
         exit_status = info.get("exit_status")
         if not iid:
             iid = do.extract_instance_id(d, info, trial_dir=artifacts.get("trial_dir"))
+    # Mini path: no pier result.json → read reward/exit_status/instance_id from the mini
+    # trajectory itself so the truth artifact grades the REAL run, not an INFRA stub.
+    if artifacts.get("mini_trajectory"):
+        md = _load_json(artifacts["mini_trajectory"]) or {}
+        minfo = md.get("info") or {}
+        if reward is None:
+            reward = _root_reward_fallback(jobs_dir)
+        if exit_status is None:
+            exit_status = minfo.get("exit_status")
+        if not iid:
+            iid = minfo.get("instance_id") or iid
 
     if not trial_log:
         log_path = os.environ.get("GT_TRIAL_LOG")
@@ -310,9 +363,27 @@ def build_task_truth(
         if not cert_dir or not os.path.isdir(cert_dir):
             cert_dir = "/tmp/gt" if os.path.isdir("/tmp/gt") else None
 
+    _mini_turns = _turns_from_mini_trajectory(artifacts.get("mini_trajectory"))
+    truth_reconciliation: dict[str, Any] | None = None
     if grade_outcome:
         eval_no_report = do._detect_eval_no_report(jobs_dir)  # noqa: SLF001
         infra_subtype = do.detect_infra_subtype(jobs_dir, trial_log)
+        # CONTRADICTION GUARD: the outcome classifier globs the pier layout and, on the mini
+        # path, calls a healthy run INFRA_MISSING_ARTIFACT even though a full-run trajectory
+        # is present at the task root. A MISSING-artifact verdict is DIRECTLY disproven by
+        # the artifact being present — report truthfully (downgrade the subtype) and record
+        # the reconciliation so the override is auditable rather than silent.
+        if infra_subtype and "MISSING" in str(infra_subtype).upper() and len(_mini_turns) > 0:
+            truth_reconciliation = {
+                "reconciled": True,
+                "original_infra_subtype": infra_subtype,
+                "reason": (
+                    "infra_missing_artifact contradicted by a present mini trajectory "
+                    f"({len(_mini_turns)} turns) at the task root"
+                ),
+                "mini_trajectory": artifacts.get("mini_trajectory"),
+            }
+            infra_subtype = None
     else:
         # OH path: never run the DeepSWE-shaped outcome classifier (it would
         # fail closed to INFRA_MISSING_ARTIFACT on an OH results dir). Outcome
@@ -440,6 +511,7 @@ def build_task_truth(
             },
         },
         "outcome": outcome_block,
+        "truth_reconciliation": truth_reconciliation,
         "trajectory_integrity": traj_int,
         "patch_hygiene": patch_hygiene or {},
         "reconciled": reconciled,

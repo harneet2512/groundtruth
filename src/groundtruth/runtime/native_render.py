@@ -574,6 +574,7 @@ def render_caller_contract_native(
     n_files: Any,
     *,
     def_file: str | None = None,
+    sig_delta: str = "",
     test_files: list[str] | set[str] | None = None,
 ) -> str:
     r"""fact-class ``caller_contract`` (gateway ``caller_break``) — a COMPILER / TYPE-CHECKER
@@ -590,10 +591,16 @@ def render_caller_contract_native(
     for the retired l3.contract/l3b.evidence that patch_delta (ast-only) cannot produce.
 
     ``N``/``M`` collapse to their integers; ``def_file`` is the edited symbol's own file (the
-    where-the-change-is). Identity-firewalled: a TEST-file ``def_file`` is quiet ("") — GT
-    never points the model at a grader target — and the line is run through
-    :func:`_final_scrub`, so ``contains_test_identity(out) is False`` holds. Correct-or-quiet:
-    a missing symbol, a non-positive caller/file count, or an unparseable count -> "".
+    where-the-change-is). ``sig_delta`` (optional, default "" -> byte-identical to the prior
+    two-arg call) is the ``old→new`` parameter-name delta the W-B19 verified-signature-change
+    gate derives; when non-empty it is inlined as ``signature changed (<sig_delta>)`` so the
+    diagnostic carries WHICH params changed (the seam GT_CONTRACT_NATIVE arm passes it). It is
+    ``_cap``-bounded before scrubbing (ReDoS guard) and firewalled by :func:`_final_scrub` like
+    every other field, so a test identity smuggled into a delta still cannot cross.
+    Identity-firewalled: a TEST-file ``def_file`` is quiet ("") — GT never points the model at a
+    grader target — and the line is run through :func:`_final_scrub`, so
+    ``contains_test_identity(out) is False`` holds. Correct-or-quiet: a missing symbol, a
+    non-positive caller/file count, or an unparseable count -> "".
     """
     sym = _cap(symbol).strip()
     nc = _int_or_none(n_callers)
@@ -604,7 +611,9 @@ def render_caller_contract_native(
     df = _norm(_cap(def_file))
     if df and _is_test_path(df, tf):
         return ""  # never name a test file as the edit site (identity firewall)
-    msg = (f"{sym}() signature changed; {nc} caller(s) in {nf} file(s) "
+    delta = _cap(sig_delta).strip()
+    changed = f"signature changed ({delta})" if delta else "signature changed"
+    msg = (f"{sym}() {changed}; {nc} caller(s) in {nf} file(s) "
            f"must update the call sites")
     out = f"{df}: error: {msg}" if df else f"error: {msg}"
     return _final_scrub(out, tf)

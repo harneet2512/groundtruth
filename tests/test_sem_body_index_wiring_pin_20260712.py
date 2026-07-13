@@ -13,8 +13,8 @@ Two-sided seam pin:
   * the swebench_live_lite_full.yml "GT substrate proof" step env MUST set GT_SEM_BODY=1 (a revert
     to unset/0 reddens this) -- so gt-run-proof mines the channels into the base graph;
   * substrate_proof.sh MUST forward that host value to the proof container (a rename/removal of the
-    `-e GT_SEM_BODY="${GT_SEM_BODY:-0}"` line reddens this) -- so the step env actually reaches the
-    indexer.
+    `-e GT_SEM_BODY="${GT_SEM_BODY:-1}"` line reddens this) -- so the step env actually reaches the
+    indexer. (Default hardened :-0 -> :-1 on 2026-07-13, S4; see test_sem_body_brief_gen_pin_20260713.)
 
 Once sem_body_rows>0, the existing receipt -> rl_profile --emit-exports -> eval cascade propagates
 GT_SEM_BODY=1 into the agent container ONLY when the receipt admits it (fail-closed preserved).
@@ -57,8 +57,11 @@ def test_substrate_proof_step_runs_the_indexer_script() -> None:
 
 
 def test_substrate_proof_forwards_sem_body_to_the_proof_container() -> None:
+    # 2026-07-13 (S4): the default was hardened from :-0 to :-1 so the body-semantic leg is ON by
+    # default at brief generation regardless of caller. The forward line must still exist so the
+    # step env reaches the indexer; the default value is now 1 (see test_sem_body_brief_gen_pin_20260713).
     sh = _SP.read_text(encoding="utf-8")
-    assert 'GT_SEM_BODY="${GT_SEM_BODY:-0}"' in sh, (
-        "substrate_proof.sh must forward -e GT_SEM_BODY=\"${GT_SEM_BODY:-0}\" to gt-run-proof; "
+    assert 'GT_SEM_BODY="${GT_SEM_BODY:-1}"' in sh, (
+        "substrate_proof.sh must forward -e GT_SEM_BODY=\"${GT_SEM_BODY:-1}\" to gt-run-proof; "
         "without this line the step env never reaches the indexer"
     )

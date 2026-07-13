@@ -149,6 +149,20 @@ GT_AE_ARGS=(
   #    it here or the FORM flip stays DARK in-container. Default 0 → byte-identical when unset;
   #    Profile-1/2 fan it to 1 via resolve_profile (rl_profile._PROFILE_1_MEMBERS). ──
   --ae "GT_SCOPE_NATIVE=${GT_SCOPE_NATIVE:-0}"
+  # ── ITEM 1-6 (2026-07-13): the RL-native FORM sweep over the remaining tagged model-facing
+  #    surfaces + in-seam metrics. SAME FORM-arm family as GT_POST_SEARCH_NATIVE/GT_SCOPE_NATIVE.
+  #    <gt-contract> -> native compiler diagnostics + rg caller rows (GT_CONTRACT_NATIVE);
+  #    <gt-evidence> -> bare path:line:code rows (GT_EVIDENCE_NATIVE); <gt-nudge>x7 -> body-only
+  #    imperative (GT_NUDGE_NATIVE); the brief obligations block -> a plain `- [ ]` checklist
+  #    (GT_BRIEF_NATIVE, read at brief-gen). GT_INSEAM_METRICS = host-side ledger instrumentation
+  #    (never model-visible, zero observation bytes). Read in-container by gt_mini_patch / v1r_brief;
+  #    pier DROPS host env so forward here or the flips stay DARK. Default 0 -> byte-identical when
+  #    unset; Profile-1/2 fan them to 1 via resolve_profile (rl_profile._PROFILE_1_MEMBERS). ──
+  --ae "GT_CONTRACT_NATIVE=${GT_CONTRACT_NATIVE:-0}"
+  --ae "GT_EVIDENCE_NATIVE=${GT_EVIDENCE_NATIVE:-0}"
+  --ae "GT_NUDGE_NATIVE=${GT_NUDGE_NATIVE:-0}"
+  --ae "GT_BRIEF_NATIVE=${GT_BRIEF_NATIVE:-0}"
+  --ae "GT_INSEAM_METRICS=${GT_INSEAM_METRICS:-0}"
   # ── T0->T2 localization RE-SLOT GO-LIVE (2026-07-12). GT_LOC_RESLOT is read by
   #    gt_mini_patch (the post_search ABSTAIN branch delivers GT's ranked localization answer
   #    on a broad/behavior grep) AND by gateway._loc_reslot_on; pier drops host env, so forward

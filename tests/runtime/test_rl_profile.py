@@ -55,6 +55,14 @@ MEMBERS = {
     "GT_POST_SEARCH_NATIVE",
     # Task #63 (2026-07-12) — the scope-surface FORM arm, same FORM-arm family.
     "GT_SCOPE_NATIVE",
+    # ITEM 1-6 (2026-07-13) — the RL-native FORM sweep over the remaining tagged surfaces
+    # (contract / evidence / nudge / brief-obligations) + the in-seam metrics flag. Same
+    # per-surface tag->native FORM-arm family as GT_POST_SEARCH_NATIVE / GT_SCOPE_NATIVE.
+    "GT_CONTRACT_NATIVE",
+    "GT_EVIDENCE_NATIVE",
+    "GT_NUDGE_NATIVE",
+    "GT_BRIEF_NATIVE",
+    "GT_INSEAM_METRICS",
 }
 
 
@@ -150,8 +158,12 @@ def test_preflight_missing_members_sorted():
 
 
 def test_preflight_off_never_aborts():
-    assert preflight({}, set()) == []
+    # SM-7 gate fix (2026-07-13): UNSET is no longer OFF -- it resolves the W8 production
+    # default (Profile-2) and MUST fail closed when capabilities are absent. Only an
+    # EXPLICIT off token is genuinely off.
+    assert len(preflight({}, set())) > 0  # unset -> production default -> fail-closed abort
     assert preflight({"GT_RL_PROFILE": "0"}, set()) == []
+    assert preflight({"GT_RL_PROFILE": "off"}, set()) == []
 
 
 def test_preflight_ignores_capability_of_a_disabled_member():
@@ -188,7 +200,7 @@ def test_main_emit_exports_success():
 
 def test_main_off_emits_nothing():
     out, err = _Buf(), _Buf()
-    rc = rl_profile.main(["--emit-exports"], env={}, out=out, err=err)
+    rc = rl_profile.main(["--emit-exports"], env={"GT_RL_PROFILE": "0"}, out=out, err=err)
     assert rc == 0
     assert out.s == ""
 
@@ -242,9 +254,15 @@ def test_cli_subprocess_emits_exports_and_aborts():
     assert "export GT_GATEWAY=1" in ok.stdout
     assert "export GT_VERIFY_EXECUTE=1" in ok.stdout
 
-    off = _subproc({})
+    # SM-7 gate fix (2026-07-13): only an EXPLICIT off token is off. An UNSET env now
+    # resolves the W8 production default (Profile-2) and fail-closes when capabilities
+    # are absent (this subprocess has no PYTHONPATH -> substrate genuinely unavailable).
+    off = _subproc({"GT_RL_PROFILE": "off"})
     assert off.returncode == 0
     assert off.stdout.strip() == ""
+    unset = _subproc({})
+    assert unset.returncode == 3, "unset env must fail closed (production default, no capabilities)"
+    assert "GT_RL_PREFLIGHT_ABORT" in unset.stderr
 
     abort = _subproc({"GT_RL_PROFILE": "1", "GT_RL_PROFILE_AVAILABLE": "GT_GATEWAY"})
     assert abort.returncode == 3

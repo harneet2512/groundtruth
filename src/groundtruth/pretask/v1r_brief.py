@@ -1406,6 +1406,23 @@ def _tokenizer_kind() -> str:
     return "gte-modernbert-bpe" if _get_tokenizer() is not None else "char4-estimate"
 
 
+# ITEM-5 (2026-07-13): the plain-checklist header the GT_BRIEF_NATIVE obligations FORM arm emits
+# in place of the <gt-obligations> tag. SINGLE source so _is_brief_boundary / _segment_brief_blocks
+# / brief_minimal_certificate recognize the native block (keep it obligations-priority + minimal-safe).
+_OBLIGATION_NATIVE_HEADER = "Requirements to satisfy (from the issue):"
+
+
+def _brief_native_on() -> bool:
+    """GT_BRIEF_NATIVE — the obligations-section FORM arm. Default OFF -> byte-identical (the
+    ``<gt-obligations>`` tag block). When ON the SAME obligation rows render as a plain requirements
+    checklist (``- [ ] <obligation>`` under a one-line plain header, NO ``<gt-*>`` tag). REBAKE-
+    RELEVANT: read at brief-GENERATION, dormant + byte-identical on a pre-baked / off run. Retires
+    ONLY the obligations FRAME; the localization/graph-map surfaces retire via GT_BRIEF_MINIMAL."""
+    import os as _os
+    return (_os.environ.get("GT_BRIEF_NATIVE") or "").strip().lower() not in (
+        "", "0", "false", "no", "off")
+
+
 def _is_brief_boundary(line: str) -> bool:
     """True if ``line`` starts a structural brief block or a scaffold tag. A scan
     that consumes a 'section until the next blank line' must STOP here so it never
@@ -1414,6 +1431,8 @@ def _is_brief_boundary(line: str) -> bool:
     s = line.strip()
     if s in ("<gt-task-brief>", "</gt-task-brief>", "<gt-obligations>",
              "</gt-obligations>", "<gt-graph-map>", "</gt-graph-map>"):
+        return True
+    if s == _OBLIGATION_NATIVE_HEADER:  # ITEM-5: the GT_BRIEF_NATIVE obligations header is a boundary
         return True
     if s.startswith("<gt-localization") or s.startswith("</gt-localization"):
         return True
@@ -1475,6 +1494,13 @@ def _segment_brief_blocks(text: str) -> list[dict]:
         if s == "<gt-obligations>":
             e = _until_close(i, "</gt-obligations>")
             _add(1, "obligations", lines[i : e + 1]); i = e + 1; continue
+        if s == _OBLIGATION_NATIVE_HEADER:
+            # ITEM-5: the GT_BRIEF_NATIVE obligations block (plain header + `- [ ] …` rows, no tag).
+            # Label it ``obligations`` (priority 1) so the token rail protects it EXACTLY like the
+            # tagged block and the minimal reducer keeps it — the header + its checklist rows run to
+            # the next blank / boundary.
+            e = _until_blank(i)
+            _add(1, "obligations", lines[i:e]); i = e; continue
         if ln.startswith("Expected behavior:"):
             # softer issue-spec echo — kept in the contract/spec tier, strictly
             # BELOW the parsed <gt-obligations> block (the active obligation).
@@ -1647,7 +1673,10 @@ def brief_minimal_certificate(brief_text: str) -> dict:
     """
     text = brief_text or ""
     retired = [m for m in _BRIEF_MINIMAL_RETIRED_MARKERS if m in text]
-    obligations_present = "<gt-obligations>" in text
+    # ITEM-5: the obligations contract is retained under EITHER frame — the ``<gt-obligations>`` tag
+    # (default) OR the GT_BRIEF_NATIVE plain checklist header — so a combined MINIMAL+NATIVE rebake
+    # still certifies obligations_present (the native form has no tag to match).
+    obligations_present = "<gt-obligations>" in text or _OBLIGATION_NATIVE_HEADER in text
     orientation_present = bool(
         _re.search(r"(?m)^\s*\d+\.\s+\S", text)
     ) or "Localize with grep" in text
@@ -2578,6 +2607,29 @@ def _expected_behavior_spec(issue_text: str):
     return None
 
 
+def _obligation_checklist_row(row: str) -> str:
+    """ITEM-5: transform a rendered ``  - {tag}{compact}`` obligation row into a plain checklist
+    item ``- [ ] {tag}{compact}``. Only the bullet changes; the obligation CONTENT (kind tag +
+    verbatim text) is preserved verbatim."""
+    s = row.lstrip()
+    if s.startswith("- "):
+        s = s[2:]
+    return "- [ ] " + s
+
+
+def _obligations_section(rendered: list[str]) -> list[str]:
+    """Wrap the rendered obligation rows in the delivered FRAME.
+
+    Default (tag) arm: the ``<gt-obligations>`` block — byte-identical. GT_BRIEF_NATIVE arm: a plain
+    requirements checklist (``- [ ] <obligation>``) under a one-line plain header, NO ``<gt-*>`` tag,
+    so the obligations ride the model's native requirements-list channel in-distribution. Leak-safe:
+    every row already passed ``_obligation_is_leaky`` upstream; the native form only swaps the frame
+    + bullet (no test identity can enter here)."""
+    if _brief_native_on():
+        return ["", _OBLIGATION_NATIVE_HEADER] + [_obligation_checklist_row(r) for r in rendered]
+    return ["", "<gt-obligations>"] + rendered + ["</gt-obligations>"]
+
+
 def _render_obligations_block(
     issue_text: str,
     files: list[FileEntry],
@@ -2743,7 +2795,7 @@ def _render_obligations_block(
             rendered_v2.append(cap(f"  - {tag}{compact}"))
         if not rendered_v2:
             return []
-        return ["", "<gt-obligations>"] + rendered_v2 + ["</gt-obligations>"]
+        return _obligations_section(rendered_v2)
 
     rendered: list[str] = []
     seen: set[str] = set()
@@ -2779,7 +2831,7 @@ def _render_obligations_block(
 
     if not rendered:
         return []
-    return ["", "<gt-obligations>"] + rendered + ["</gt-obligations>"]
+    return _obligations_section(rendered)
 
 
 def render_brief(

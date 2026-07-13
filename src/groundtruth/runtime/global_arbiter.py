@@ -145,6 +145,19 @@ _KIND_TO_CLASS: dict[str, str] = {
     "verify.horizon.urgent": "recovery",
     "verify.horizon.pivot": "recovery",
     "verify.horizon.gate": "recovery",
+    # W6 FIX 1a (2026-07-12) — DEFENSIVE SELF-MAP for the seam's OWN recovery candidate.
+    # ``gt_mini_patch._recovery_candidate`` enters the global pool with the LITERAL kind
+    # "recovery" (the Lane-B gate stamps ``_last_gate_winner_kind = "recovery"``, threaded
+    # into ``_global_pool_add_steer``). BEFORE this self-map, "recovery" was NOT a key here
+    # (only the PRODUCER kinds that map TO the "recovery" CLASS were: l5.stuck / detect.loop /
+    # verify.horizon.*), so ``class_of_kind("recovery")`` -> "" -> ``rank_of`` None ->
+    # :func:`arbitrate` dropped it ``REASON_INTERNAL``. Measured on run 29217805592: 57/57
+    # pool-recovery suppressions ``global_arbiter:internal`` across 22/30 tasks, 0 recovery
+    # deliveries anywhere — the ONE historically proven-consumed GT form (short · active ·
+    # at-the-decision) was STRUCTURALLY unable to reach the ladder. The class value already
+    # existed ("recovery" at rank 10); this only makes the class its own key so the class
+    # NAME (not just a producer kind) resolves.
+    "recovery": "recovery",
 }
 
 # Tier string -> a stable secondary rank (VERIFIED beats a HYPOTHESIS at the same

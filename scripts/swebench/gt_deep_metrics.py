@@ -342,7 +342,9 @@ def _from_trajectory(task: str, results_dir: str) -> dict:
         "trajectory_source": "none",
         "action_count": 0,
         "edits": 0,
-        "first_edit_action": 0,
+        # None = NOT DETECTED (missing-data law) — never 0 (which reads as "edited at
+        # step 0" and poisons cross-arm first-edit deltas). Set only when an edit is seen.
+        "first_edit_action": None,
         "flows_delivered": 0,
         "contracts_delivered": 0,
         "consensus_delivered": 0,
@@ -391,7 +393,7 @@ def _from_trajectory(task: str, results_dir: str) -> dict:
             a = e.get("args", {})
             if _is_mutating_editor_command(str(e.get("action") or ""), a):
                 out["edits"] += 1
-                if not out["first_edit_action"]:
+                if out["first_edit_action"] is None:
                     out["first_edit_action"] = n
         c = e.get("content") or ""
         if c:
@@ -425,6 +427,12 @@ DEEPSEEK_PRICING = {
 _EDIT_VERBS = {"create", "str_replace", "insert", "write", "append", "edit", "modify", "overwrite"}
 _NON_EDIT_VERBS = {"view", "open", "read", "undo_edit", "undo", "show"}
 
+# A CLOSED <gt-*>...</gt-*> block (same shape as consumption_ledger._BLOCK_RE). Non-greedy
+# with a backreferenced close tag: an outer <gt-task-brief>...</gt-task-brief> matches as ONE
+# block (inner blocks are inside the match, never double-counted); an UNCLOSED legend tag
+# matches nothing.
+_GT_CLOSED_BLOCK_RE = re.compile(r"<(gt-[a-z0-9_-]+)\b[^>]*>.*?</\1>", re.S | re.I)
+
 
 def _is_mutating_editor_command(tool_or_action: str, args_or_text) -> bool:
     """True only for source-changing editor commands, not view/read calls."""
@@ -432,9 +440,13 @@ def _is_mutating_editor_command(tool_or_action: str, args_or_text) -> bool:
     if isinstance(args_or_text, dict):
         cmd = str(args_or_text.get("command") or args_or_text.get("cmd") or "").strip().lower()
         path = str(args_or_text.get("path") or args_or_text.get("file_path") or "").strip()
-        if cmd in _NON_EDIT_VERBS:
+        # Decide on the VERB (first token): OH histories carry the target INLINE
+        # ("str_replace x y"), which the old exact whole-string match silently missed
+        # (pre-existing edits=0 undercount, pinned by the miniswe_source suite).
+        verb = cmd.split(None, 1)[0] if cmd else ""
+        if verb in _NON_EDIT_VERBS:
             return False
-        if cmd in _EDIT_VERBS and path:
+        if verb in _EDIT_VERBS and (path or len(cmd.split()) > 1):
             return True
         if tool in {"edit", "write", "create"} and path:
             return True
@@ -444,6 +456,21 @@ def _is_mutating_editor_command(tool_or_action: str, args_or_text) -> bool:
         m = re.search(r"(?:str_replace_editor|file_editor)\s+([a-z_]+)", text)
         if m:
             return m.group(1) in _EDIT_VERBS
+    # Editor-tool JSON (chat tool_calls dumps, plain or json.dumps-escaped): decide by
+    # the "command" verb so a "str_replace …" edit counts and a "view …" never does.
+    m = re.search(r'\\?"command\\?"\s*:\s*\\?"([a-z_]+)', text)
+    if m:
+        verb = m.group(1)
+        if verb in _NON_EDIT_VERBS:
+            return False
+        if verb in _EDIT_VERBS:
+            return True
+    # Bare editor-verb command string ("str_replace src/a.ts old new").
+    first = text.split(None, 1)[0] if text.strip() else ""
+    if first in _NON_EDIT_VERBS:
+        return False
+    if first in _EDIT_VERBS and len(text.split()) > 1:
+        return True
     return any(tok in text for tok in ("sed -i", "apply_patch", "tee ", "cat >"))
 
 
@@ -512,7 +539,8 @@ def _from_miniswe_trajectory(task: str, results_dir: str) -> dict:
     and the GT content that actually reached the agent's OBSERVATIONS (showcase counts)."""
     out = {
         "found": False, "trajectory_path": "", "model": "", "exit_status": "",
-        "action_count": 0, "assistant_steps": 0, "edits": 0, "first_edit_action": 0,
+        # first_edit_action None = NOT DETECTED (never 0 → poisons first-edit deltas).
+        "action_count": 0, "assistant_steps": 0, "edits": 0, "first_edit_action": None,
         "has_patch": False, "resolved": None,
         "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
         "cache_hit_tokens": 0, "cache_miss_tokens": 0, "cost_usd": 0.0,
@@ -626,7 +654,7 @@ def _from_miniswe_trajectory(task: str, results_dir: str) -> dict:
                 out["gt_verify_calls"] += cmd.count("gt_hook.py verify")
                 if _is_mutating_editor_command("", cmd):
                     out["edits"] += 1
-                    if not out["first_edit_action"]:
+                    if out["first_edit_action"] is None:
                         out["first_edit_action"] = step
             continue
 
@@ -637,6 +665,13 @@ def _from_miniswe_trajectory(task: str, results_dir: str) -> dict:
         if role in ("user", "system"):
             out["gt_brief_delivered"] += content.count("<gt-task-brief")
             out["gt_graph_map_delivered"] += content.count("<gt-graph-map")
+            # chars-total contract (§7 gt_tokens_injected = chars in <gt-*> blocks): the
+            # brief's CLOSED <gt-*> blocks are model-visible GT content and must count
+            # (pre-existing undercount: a run whose ONLY GT content is the step-0 brief
+            # reported chars_total=0). Closed-block matching keeps the unclosed-tag
+            # LEGEND (documentation examples) out — same discipline as the tag counts.
+            for _bm in _GT_CLOSED_BLOCK_RE.finditer(content):
+                out["gt_observation_chars_total"] += len(_bm.group(0))
             continue
 
         # ---------------- OBSERVATION (per-turn delivery, rows 11-21) ----------------
@@ -1433,7 +1468,19 @@ def build(task: str, results_dir: str, log_path: str = "",
             spec = importlib.util.spec_from_file_location("consumption_ledger_gdm", cl_path)
             cl_mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(cl_mod)
-            consumption = cl_mod.ledger_from_trajectory_path(mini_traj)
+            # v2 join: pair delivered runtime-ledger rows to the model-visible
+            # trajectory blocks. Glob a sibling gt_runtime_ledger*.jsonl; the
+            # reader also auto-globs when this is None (kept explicit here).
+            import glob as _glob
+
+            _rl = sorted(
+                _glob.glob(
+                    os.path.join(os.path.dirname(mini_traj), "gt_runtime_ledger*.jsonl")
+                )
+            )
+            consumption = cl_mod.ledger_from_trajectory_path(
+                mini_traj, runtime_ledger_path=(_rl[0] if _rl else None)
+            )
             ledger_path = os.path.join(
                 os.path.dirname(mini_traj), "..", "gt_consumption_ledger.json"
             )
@@ -1445,6 +1492,20 @@ def build(task: str, results_dir: str, log_path: str = "",
                 ledger_path = ""
         except Exception:
             pass
+
+    # Defect-3: on the mini shape the step-0 brief is a bundle of <gt-*> blocks inside the
+    # m1 USER message (NOT a <gt-task-brief> tag), so the legacy tag counter reported
+    # brief_delivered=0 on a DELIVERED brief. Source the count from W1's v2 consumption
+    # ledger brief channel (distinct brief-channel messages) instead of re-deriving. On the
+    # old shape (v1 ledger / <gt-task-brief>) this is 0 and we fall back to the legacy count,
+    # so no old-shape run regresses.
+    brief_delivered_v2 = len({
+        e.get("msg_index")
+        for e in (consumption.get("entries") or [])
+        if e.get("source") == "trajectory"
+        and e.get("delivery_channel") == "brief"
+        and e.get("msg_index") is not None
+    })
 
     deep = {
         "task_id": task,
@@ -1527,7 +1588,7 @@ def build(task: str, results_dir: str, log_path: str = "",
         "efficiency": efficiency,
         # --- GT-reached-agent SHOWCASE (fired AND delivered, from agent observation) ---
         "gt_delivery": {
-            "brief_delivered": d8(traj.get("gt_brief_delivered", 0)),
+            "brief_delivered": d8(brief_delivered_v2 or traj.get("gt_brief_delivered", 0)),
             "evidence_delivered": d8(traj.get("gt_evidence_delivered", 0)),
             "graph_map_delivered": d8(traj.get("gt_graph_map_delivered", 0)),
             "scope_delivered": d8(traj.get("gt_scope_delivered", 0)),
@@ -1571,14 +1632,39 @@ def build(task: str, results_dir: str, log_path: str = "",
             "cost_log": bool(cost["llm_calls"]),
         },
     }
-    # Performance metrics (sections 1-6, 8-9 of MANDATORY_METRICS.md)
+    # Performance metrics (sections 1-6, 8-9 of MANDATORY_METRICS.md). A MISSING module is
+    # a COLLECTION FAILURE, not performance={} — fail LOUD on ImportError so a run launched
+    # without scripts/swebench on PYTHONPATH cannot silently ship no performance section.
+    # (compute_performance_metrics never raises — it catches internally — so the compute
+    # call needs no broad guard.) A genuinely-absent trajectory is an explicit UNMEASURED
+    # marker, never a silent empty dict (defect #1 / #6 / #7).
     try:
         from gt_performance_metrics import compute_performance_metrics
-        tj_path = _find_miniswe_trajectory(task, results_dir)
-        perf = compute_performance_metrics(tj_path, results_dir) if tj_path else {}
-        deep["performance"] = perf
-    except Exception:
-        deep["performance"] = {}
+    except ImportError as exc:
+        # Path-independent fallback: the module is a SIBLING of this file by construction,
+        # so load it by path (the same pattern as the consumption-ledger load above) before
+        # failing. Only a TRULY absent/broken module raises — fail-loud, never perf={}.
+        _pm_path = os.path.join(os.path.dirname(__file__), "gt_performance_metrics.py")
+        if not os.path.isfile(_pm_path):
+            raise ImportError(
+                "gt_deep_metrics: gt_performance_metrics is REQUIRED for the mandatory "
+                "performance metrics (sections 1-6,8-9). A missing module is a COLLECTION "
+                "FAILURE, not performance={}. Expected at: " + _pm_path
+            ) from exc
+        import importlib.util as _ilu
+        _pm_spec = _ilu.spec_from_file_location("gt_performance_metrics_gdm", _pm_path)
+        if _pm_spec is None or _pm_spec.loader is None:
+            raise ImportError(
+                "gt_deep_metrics: cannot load gt_performance_metrics from " + _pm_path
+            ) from exc
+        _pm_mod = _ilu.module_from_spec(_pm_spec)
+        _pm_spec.loader.exec_module(_pm_mod)  # a broken module raises here — fail loud
+        compute_performance_metrics = _pm_mod.compute_performance_metrics
+    tj_path = _find_miniswe_trajectory(task, results_dir)
+    if tj_path:
+        deep["performance"] = compute_performance_metrics(tj_path, results_dir)
+    else:
+        deep["performance"] = {"status": "UNMEASURED", "reason": "no_miniswe_trajectory"}
     return deep
 
 
