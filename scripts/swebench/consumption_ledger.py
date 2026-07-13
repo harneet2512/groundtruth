@@ -33,7 +33,7 @@ import hashlib
 import json
 import os
 import re
-from typing import Any
+from typing import Any, Iterable
 
 # --------------------------------------------------------------------------- #
 # Shared constants
@@ -74,6 +74,73 @@ _JOIN_TOL = 16
 def _content_hash16(text: str) -> str:
     """sha256 hex[:16] of the exact bytes (v2 entries carry this)."""
     return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:16]
+
+
+# --------------------------------------------------------------------------- #
+# Test-identity leak scanner (SS-3 defect-4)
+#
+# GT surfaces must NEVER carry a FAIL_TO_PASS/PASS_TO_PASS spec or a test
+# identifier — that is answer leakage and disqualifies any consumption claim.
+# The prior scanners substring-matched short test-name tokens, so generic prose
+# ("no passing test between edits", "/testbed/…", "apply the patch") tripped a
+# false LEAK on the words "test"/"patch"/"testbed". A leak requires a STRUCTURAL
+# test identifier, matched with a minimum-length guard:
+#   * a ``::``-qualified node id whose leaf is ``test_…``   (path::…::test_name)
+#   * a bare pytest function name ``\btest_\w{3,}\b``        (≥3 chars after test_)
+#   * a literal FAIL_TO_PASS / PASS_TO_PASS spec marker
+# "test", "tests", "testbed", "patch" carry no ``test_``-prefixed word and never
+# flag; a real F2P id ("tests/x.py::test_foo") always does.
+# --------------------------------------------------------------------------- #
+_F2P_MARKER_RE = re.compile(r"\b(?:FAIL_TO_PASS|PASS_TO_PASS)\b")
+#: a ``::``-qualified id whose final segment is a pytest test (path/class::…::test_x)
+_QUALIFIED_TEST_RE = re.compile(r"\S+::(?:[A-Za-z_]\w*::)*test_\w+")
+#: a bare pytest function name — word boundary + ``test_`` + >=3 word chars. The
+#: length guard is what keeps "test"/"testbed" (no ``test_`` word) out.
+_BARE_TEST_RE = re.compile(r"(?<![\w.])test_\w{3,}\b")
+
+
+def _test_id_leaf(test_id: str) -> str | None:
+    """The pytest function-name leaf of a ``::``-qualified id, if it is a real
+    ``test_…`` name meeting the min-length guard; else None."""
+    leaf = test_id.rsplit("::", 1)[-1].strip()
+    # drop a parametrize suffix: test_foo[case-1] -> test_foo
+    leaf = re.sub(r"\[.*$", "", leaf)
+    return leaf if re.fullmatch(r"test_\w{3,}", leaf) else None
+
+
+def scan_test_identity_leaks(
+    text: str, known_test_ids: Iterable[str] | None = None
+) -> list[str]:
+    """Return structural test-identity leaks found in ``text`` (empty = clean).
+
+    Matches only full ``::``-qualified ids, bare ``test_\\w{3,}`` function names on a
+    word boundary, and literal FAIL_TO_PASS/PASS_TO_PASS markers — NEVER a naked
+    substring of a short token. When ``known_test_ids`` is supplied (the task's
+    FAIL_TO_PASS/PASS_TO_PASS set), each is matched by its FULL identifier and by its
+    ``test_…`` leaf on a word boundary — again, never a bare substring.
+    """
+    if not text:
+        return []
+    hits: set[str] = set()
+    for m in _F2P_MARKER_RE.finditer(text):
+        hits.add(m.group(0))
+    for m in _QUALIFIED_TEST_RE.finditer(text):
+        hits.add(m.group(0))
+    for m in _BARE_TEST_RE.finditer(text):
+        hits.add(m.group(0))
+    for tid in known_test_ids or ():
+        tid = (tid or "").strip()
+        if not tid:
+            continue
+        # full-identifier match (the id is specific — this is not a naked token).
+        if "::" in tid and tid in text:
+            hits.add(tid)
+        leaf = _test_id_leaf(tid) if "::" in tid else (
+            tid if re.fullmatch(r"test_\w{3,}", tid) else None
+        )
+        if leaf and re.search(r"(?<![\w.])" + re.escape(leaf) + r"\b", text):
+            hits.add(leaf)
+    return sorted(hits)
 
 
 # --------------------------------------------------------------------------- #
@@ -213,6 +280,7 @@ def _build_v2(
 
     # 1) Extract every model-visible GT block as a delivery.
     entries: list[dict[str, Any]] = []
+    leak_hits: set[str] = set()  # SS-3 defect-4: structural test-identity leaks in GT bytes
     for i, m in enumerate(messages):
         role = m.get("role")
         if role not in ("user", "tool"):
@@ -222,6 +290,7 @@ def _build_v2(
             continue
         channel = "brief" if role == "user" else "runtime"
         for mm in _BLOCK_RE.finditer(content):
+            leak_hits.update(scan_test_identity_leaks(mm.group(0)))
             block = mm.group(0)
             tag = mm.group(1).lower()
             kind = _TAG_KIND.get(tag, tag)
@@ -397,6 +466,9 @@ def _build_v2(
         "ledger_rows_delivered": ledger_rows_delivered,
         "ledger_rows_joined": ledger_rows_joined,
         "runtime_ledger_path": runtime_ledger_path,
+        # SS-3 defect-4: structural test-identity leaks in the delivered GT bytes.
+        # MUST be [] — any hit disqualifies a consumption claim (answer leakage).
+        "test_identity_leak_hits": sorted(leak_hits),
         "entries": entries,
     }
 

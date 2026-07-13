@@ -1290,6 +1290,12 @@ jobs:
               git add -A -N 2>/dev/null || true
               git diff HEAD > /gt_out/agent_patch.diff 2>/dev/null || true
               git diff HEAD > /gt_out/git_diff_head.diff 2>/dev/null || true
+              # SS-3 defect-3: preserve the agent's CURATED patch as a candidate so the
+              # host-side capture can prefer it over `git diff HEAD` (which sweeps in any
+              # repro-generated binaries — model.keras/*.h5 — as un-applyable "Binary files
+              # differ" blocks). Binary exclusion itself is done host-side by
+              # patch_capture_filter.py (keys on git's own binary marker, extension-general).
+              cp /tmp/patch.txt /gt_out/agent_curated.patch 2>/dev/null || true
               # last-resort backup only if the clean git diff produced nothing (no tracked changes):
               [ -s /gt_out/agent_patch.diff ] || cp /tmp/patch.txt /gt_out/agent_patch.diff 2>/dev/null || true
             ' 2>&1 | tee trial_output.log || true
@@ -1396,6 +1402,22 @@ jobs:
             python3 scripts/swebench/extract_patch_from_log.py trial_output.log /tmp/agent_patch.diff 2>/dev/null && PATCH_FILE=/tmp/agent_patch.diff || true
           fi
 
+          # SS-3 defect-3 — exclude binary/untracked-artifact contamination before eval.
+          # `git diff HEAD` (after `git add -A -N`) sweeps agent repro-generated binaries
+          # (model.keras, model.weights.h5, …) into the diff as un-applyable "Binary files
+          # … differ" blocks → `git apply` rejects the WHOLE patch → no report.json →
+          # keras-20396 false-failed. patch_capture_filter.py PREFERS the agent's curated
+          # patch when applyable, else emits the binary-filtered git diff. File-type
+          # general (keys on git's own binary marker — no extension hardcoding).
+          if [ -n "$PATCH_FILE" ] && [ -s "$PATCH_FILE" ]; then
+            if python3 scripts/swebench/patch_capture_filter.py --choose /tmp/agent_patch.clean.diff \
+                 "${HOST_GT_OUT}/agent_curated.patch" "$PATCH_FILE" 2>>trial_output.log \
+               && [ -s /tmp/agent_patch.clean.diff ]; then
+              PATCH_FILE=/tmp/agent_patch.clean.diff
+              echo "PATCH_CAPTURE: binary-filtered patch staged (defect-3)" | tee -a trial_output.log
+            fi
+          fi
+
           REWARD=0
           if [ -z "$PATCH_FILE" ] || [ ! -s "$PATCH_FILE" ]; then
             echo "EVAL: no agent patch produced — unresolved (reward 0)" | tee -a trial_output.log
@@ -1491,7 +1513,11 @@ jobs:
           cp /tmp/gt/run_provenance.json trial_results/gt_artifacts/run_provenance.json 2>/dev/null || true
           cp /tmp/pro_eval_output.txt trial_results/ 2>/dev/null || true
 
-          GT_TRIAL_LOG=trial_output.log python3 scripts/swebench/task_truth.py jobs trial_results/task_truth.json 2>/dev/null || true
+          # GT_INSTANCE_ID binds the pairing key on the mini path (no pier result.json → the
+          # reconciler otherwise reads instance_id=null and false-stamps INFRA); report.json +
+          # reward.txt at trial_results/ are the report-authoritative grading sources.
+          GT_INSTANCE_ID="${{ matrix.task }}" GT_MATRIX_TASK="${{ matrix.task }}" \
+            GT_TRIAL_LOG=trial_output.log python3 scripts/swebench/task_truth.py jobs trial_results/task_truth.json 2>/dev/null || true
           if [ -d jobs ]; then
             mkdir -p trial_results/jobs
             find jobs -type f \( -name 'result.json' -o -name 'patch.diff' -o -name '*.patch' -o -name '*.trajectory.json' -o -name '*.json' -o -name '*.log' \) -size -25M -print0 \
@@ -1556,7 +1582,8 @@ jobs:
 
           # Outcome classification — reads jobs/<ts>/<task>__*/result.json (verifier_result)
           # + the bridged verifier/reward.json + trial_output.log markers (NOT reward.txt).
-          GT_TRIAL_LOG=trial_output.log GT_CERT_DIR=/tmp/gt \
+          GT_INSTANCE_ID="${{ matrix.task }}" GT_MATRIX_TASK="${{ matrix.task }}" \
+            GT_TRIAL_LOG=trial_output.log GT_CERT_DIR=/tmp/gt \
             GT_DEEPSWE_OUTCOME_JSON=trial_results/outcome.json \
             python3 scripts/verify/deepswe_outcome.py jobs || echo "WARN: outcome extract failed"
           find trial_results -type f 2>/dev/null | head -40 || true

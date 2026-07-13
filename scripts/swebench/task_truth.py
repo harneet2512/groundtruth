@@ -346,12 +346,42 @@ def build_task_truth(
     if artifacts.get("mini_trajectory"):
         md = _load_json(artifacts["mini_trajectory"]) or {}
         minfo = md.get("info") or {}
-        if reward is None:
-            reward = _root_reward_fallback(jobs_dir)
         if exit_status is None:
             exit_status = minfo.get("exit_status")
         if not iid:
             iid = minfo.get("instance_id") or iid
+        # The mini path carries the agent step count as info.model_stats.api_calls (never
+        # a pier n_agent_steps). Map it so a report-graded reward=0 run classifies as a
+        # genuine AGENT/GT non-resolve (IN the denominator), not UNKNOWN-excluded.
+        if n_agent_steps is None:
+            api_calls = (minfo.get("model_stats") or {}).get("api_calls")
+            if isinstance(api_calls, int) and api_calls > 0:
+                n_agent_steps = api_calls
+            else:
+                _msgs = md.get("messages") or []
+                _assist = sum(
+                    1 for m in _msgs if isinstance(m, dict)
+                    and (m.get("role") == "assistant"
+                         or (m.get("role") is None and isinstance(m.get("output"), list)))
+                )
+                if _assist > 0:
+                    n_agent_steps = _assist
+
+    # ── Harness-truth binding (run 29236533134 defect-1) ────────────────────
+    # The pier result.json/instance_id is absent on the mini path → instance_id
+    # came through null on 29/29 tasks and every task was auto-stamped INFRA even
+    # though a report.json + reward + trajectory sat at the task root. Recover the
+    # identity from the report key / matrix env / task dir name, and take the
+    # reward from the task-root reward.txt or the report's resolved verdict.
+    report_path, report = do.find_task_root_report(jobs_dir)
+    iid = do.bind_instance_identity(jobs_dir, current=iid, report=report)
+    if reward is None:
+        reward = _root_reward_fallback(jobs_dir)
+    if reward is None:
+        reward = do.root_reward(jobs_dir)
+    report_resolved = do.report_resolved(report, iid)
+    if reward is None and report_resolved is not None:
+        reward = 1.0 if report_resolved else 0.0
 
     if not trial_log:
         log_path = os.environ.get("GT_TRIAL_LOG")
@@ -368,19 +398,28 @@ def build_task_truth(
     if grade_outcome:
         eval_no_report = do._detect_eval_no_report(jobs_dir)  # noqa: SLF001
         infra_subtype = do.detect_infra_subtype(jobs_dir, trial_log)
-        # CONTRADICTION GUARD: the outcome classifier globs the pier layout and, on the mini
-        # path, calls a healthy run INFRA_MISSING_ARTIFACT even though a full-run trajectory
-        # is present at the task root. A MISSING-artifact verdict is DIRECTLY disproven by
-        # the artifact being present — report truthfully (downgrade the subtype) and record
-        # the reconciliation so the override is auditable rather than silent.
-        if infra_subtype and "MISSING" in str(infra_subtype).upper() and len(_mini_turns) > 0:
+        # CONTRADICTION GUARD (defect-1): the outcome classifier globs the pier layout and, on
+        # the mini path, calls a HEALTHY run INFRA_MISSING_ARTIFACT even though a report.json
+        # (the eval VERDICT) sits at the task root. The eval report is the grading authority:
+        # when it is present, grade from report.json/reward — never INFRA. A genuine resolve
+        # (reward>=1) also disproves INFRA. But a task with NO report AND reward<1 (the eval
+        # produced no verdict, e.g. checkov-6893) stays true INFRA — trajectory presence alone
+        # does NOT manufacture an eval verdict. The reconciliation is recorded, not silent.
+        _traj_present = len(_mini_turns) > 0 or bool(artifacts.get("mini_trajectory"))
+        _report_present = report is not None
+        _genuine_resolve = reward is not None and float(reward) >= 1.0
+        if (infra_subtype and "MISSING" in str(infra_subtype).upper()
+                and (_report_present or _genuine_resolve)):
+            _reason = (
+                f"infra_missing_artifact contradicted by the eval verdict — report.json "
+                f"present={_report_present} (resolved={report_resolved}), reward={reward}, "
+                f"trajectory_present={_traj_present}"
+            )
             truth_reconciliation = {
                 "reconciled": True,
                 "original_infra_subtype": infra_subtype,
-                "reason": (
-                    "infra_missing_artifact contradicted by a present mini trajectory "
-                    f"({len(_mini_turns)} turns) at the task root"
-                ),
+                "reason": _reason,
+                "report_json": report_path,
                 "mini_trajectory": artifacts.get("mini_trajectory"),
             }
             infra_subtype = None

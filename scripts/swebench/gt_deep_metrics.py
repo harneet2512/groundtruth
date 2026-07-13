@@ -15,6 +15,7 @@ Sources (best-effort, all optional — absence is recorded, never fatal):
 from __future__ import annotations
 
 import glob
+import hashlib
 import json
 import math
 import os
@@ -1292,6 +1293,161 @@ def _from_graph_cert(cert_dir: str) -> dict:
     return {}
 
 
+# ---------------------------------------------------------------------------
+# Delivery metrics from the RUNTIME LEDGER (K15). In the tagless native era the
+# agent-visible deliveries carry NO <gt-*> tags, so the trajectory tag-scan
+# (gt_delivery.*_delivered) reports all-zeros while the seam's runtime ledger
+# holds the real sealed deliveries (outcome="delivered" + content_sha256_16 +
+# chars_delivered). The authoritative delivery signal is those ledger rows —
+# NEVER a <gt-*> tag scan. An optional byte-join verifies each sealed hash
+# actually appears in the model-visible trajectory (sliding-window sha256 over
+# tool-message content at length chars_delivered), capped per task.
+# ---------------------------------------------------------------------------
+def _resolve_runtime_ledger(task: str, results_dir: str) -> str:
+    """Find this task's gt_runtime_ledger_*.jsonl. Task-scoped bases only (a bare
+    glob could attach a sibling task's ledger). Prefers the trajectory's own dir."""
+    env = os.environ.get("GT_RUNTIME_LEDGER")
+    if env and os.path.exists(env):
+        return env
+    mini = _find_miniswe_trajectory(task, results_dir)
+    bases = []
+    if mini:
+        bases.append(os.path.dirname(mini))
+    bases += [results_dir, f"/tmp/results_{task}", f"/tmp/gt/{task}", f"/tmp/gt_out"]
+    seen: set[str] = set()
+    for base in bases:
+        if not base or base in seen:
+            continue
+        seen.add(base)
+        for pat in (f"gt_runtime_ledger_{task}.jsonl", "gt_runtime_ledger*.jsonl"):
+            direct = os.path.join(base, pat)
+            if "*" not in pat and os.path.exists(direct):
+                return direct
+            hits = sorted(glob.glob(os.path.join(base, "**", pat), recursive=True))
+            # scope to this task when the id is embedded, else accept a lone sibling-free hit
+            scoped = [h for h in hits if task in os.path.basename(h)] or (
+                hits if len(hits) == 1 else [])
+            if scoped:
+                return scoped[0]
+    return ""
+
+
+def _tool_message_texts(mini_traj_path: str, max_msgs: int = 4000) -> list[str]:
+    """Model-visible observation/tool texts from a mini-swe trajectory, for the byte
+    join. Reads the SAME channels the agent saw (tool / function_call_output / user
+    brief). Best-effort; empty list on any read error."""
+    d = _load_json(mini_traj_path) if mini_traj_path else None
+    if not isinstance(d, dict):
+        return []
+    out: list[str] = []
+    for m in (d.get("messages") or [])[:max_msgs]:
+        if not isinstance(m, dict):
+            continue
+        role, mtype = m.get("role"), m.get("type")
+        if not (mtype == "function_call_output" or role in ("tool", "exit", "user", "system")):
+            continue
+        c = m.get("content")
+        if isinstance(c, list):
+            c = json.dumps(c)
+        if isinstance(c, str) and c:
+            out.append(c)
+        o = m.get("output")
+        if isinstance(o, str) and o:
+            out.append(o)
+    return out
+
+
+def _byte_join_verified(rows: list[dict], texts: list[str], *, op_budget: int = 400_000) -> int:
+    """Count delivered ledger rows whose sealed content_sha256_16 is found VERBATIM in
+    the model-visible trajectory: slide a window of length chars_delivered over each
+    tool-message text and compare sha256(window)[:16]. Capped by a global op budget so a
+    huge trajectory can never blow up the metric step; rows unproven within budget are
+    simply not counted (verification is a lower bound, never an over-count)."""
+    verified = 0
+    ops = 0
+    for row in rows:
+        seal = row.get("content_sha256_16")
+        length = int(row.get("chars_delivered") or 0)
+        if not seal or length <= 0:
+            continue
+        hit = False
+        for text in texts:
+            if len(text) < length:
+                continue
+            # only worth scanning where a window could match; step 1 (exact byte offset)
+            for start in range(0, len(text) - length + 1):
+                ops += 1
+                if ops > op_budget:
+                    return verified  # budget exhausted — return the proven lower bound
+                if hashlib.sha256(
+                    text[start:start + length].encode("utf-8", errors="replace")
+                ).hexdigest()[:16] == seal:
+                    hit = True
+                    break
+            if hit:
+                break
+        if hit:
+            verified += 1
+    return verified
+
+
+def _delivery_from_runtime_ledger(
+    ledger_path: str, *, trajectory_texts: list[str] | None = None
+) -> dict:
+    """Delivered counts/chars from the sealed runtime-ledger rows (K15). A delivery is a
+    row with outcome=="delivered" AND a content_sha256_16 seal. Returns per-layer/
+    per-event breakdowns + an optional byte-join verification count. NEVER counts from
+    <gt-*> tag scans."""
+    out = {
+        "present": False,
+        "runtime_ledger_path": ledger_path or None,
+        "delivered_count": 0,
+        "delivered_chars": 0,
+        "sealed_count": 0,
+        "byte_join_verified_count": None,
+        "per_layer": {},
+        "per_event_type": {},
+    }
+    if not ledger_path or not os.path.exists(ledger_path):
+        return out
+    rows: list[dict] = []
+    try:
+        with open(ledger_path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(r, dict):
+                    rows.append(r)
+    except OSError:
+        return out
+    delivered = [
+        r for r in rows
+        if r.get("outcome") == "delivered" and r.get("content_sha256_16")
+    ]
+    out["present"] = True
+    out["delivered_count"] = len(delivered)
+    out["sealed_count"] = sum(1 for r in rows if r.get("content_sha256_16"))
+    out["delivered_chars"] = sum(int(r.get("chars_delivered") or 0) for r in delivered)
+    per_layer: dict[str, int] = {}
+    per_event: dict[str, int] = {}
+    for r in delivered:
+        lay = str(r.get("layer") or "unknown")
+        ev = str(r.get("event_type") or "")
+        per_layer[lay] = per_layer.get(lay, 0) + 1
+        if ev:
+            per_event[ev] = per_event.get(ev, 0) + 1
+    out["per_layer"] = per_layer
+    out["per_event_type"] = per_event
+    if trajectory_texts is not None:
+        out["byte_join_verified_count"] = _byte_join_verified(delivered, trajectory_texts)
+    return out
+
+
 def build(task: str, results_dir: str, log_path: str = "",
           db_path: str = "", pipeline_arg: str = "") -> dict:
     summ = _load_json(f"/tmp/gt_run_summary_{task}.json") or {}
@@ -1507,6 +1663,31 @@ def build(task: str, results_dir: str, log_path: str = "",
         and e.get("msg_index") is not None
     })
 
+    # K15 — delivery from the sealed RUNTIME LEDGER (tagless native era). The tag-scan
+    # gt_delivery.*_delivered fields are all-zero when the deliveries carry no <gt-*>
+    # tags; the ledger's outcome="delivered" + content_sha256_16 rows are the real
+    # signal. Byte-join each seal against the model-visible trajectory (capped).
+    rl_delivery_path = _resolve_runtime_ledger(task, results_dir)
+    _rl_texts = _tool_message_texts(mini_traj) if (mini_traj and rl_delivery_path) else None
+    rl_delivery = _delivery_from_runtime_ledger(
+        rl_delivery_path, trajectory_texts=_rl_texts
+    )
+    # When the trajectory tag-scan saw NO GT bytes (tagless run) but the ledger sealed
+    # real deliveries, the ledger chars ARE the model-visible GT injection — fill the
+    # otherwise-false-zero token/char totals (never overwrite a non-zero tag-scan count,
+    # so old-shape/OH runs are byte-identical).
+    if rl_delivery["present"] and rl_delivery["delivered_chars"] > 0:
+        if not traj.get("gt_observation_chars_total"):
+            traj["gt_observation_chars_total"] = rl_delivery["delivered_chars"]
+        if not inj_tokens_total:
+            inj_tokens_total = float(rl_delivery["delivered_chars"])
+            token_accounting_source = "runtime_ledger_sealed_chars"
+            efficiency["gt_injected_tokens_total"] = d8(inj_tokens_total)
+            efficiency["gt_injected_tokens_source"] = token_accounting_source
+            if cost["llm_tokens_in"]:
+                efficiency["gt_injection_overhead_pct"] = d8(
+                    100.0 * inj_tokens_total / cost["llm_tokens_in"])
+
     deep = {
         "task_id": task,
         "schema": "gt_deep_metrics.v2",
@@ -1599,6 +1780,20 @@ def build(task: str, results_dir: str, log_path: str = "",
             "understand_calls": d8(traj.get("gt_understand_calls", 0)),
             "verify_calls": d8(traj.get("gt_verify_calls", 0)),
             "gt_observation_chars_total": d8(traj.get("gt_observation_chars_total", 0)),
+            # K15 — authoritative delivery from the sealed runtime ledger (NOT tag scans).
+            "runtime_ledger": {
+                "present": rl_delivery["present"],
+                "runtime_ledger_path": rl_delivery["runtime_ledger_path"],
+                "delivered_count": d8(rl_delivery["delivered_count"]),
+                "delivered_chars": d8(rl_delivery["delivered_chars"]),
+                "sealed_count": d8(rl_delivery["sealed_count"]),
+                "byte_join_verified_count": (
+                    d8(rl_delivery["byte_join_verified_count"])
+                    if rl_delivery["byte_join_verified_count"] is not None else None
+                ),
+                "per_layer": rl_delivery["per_layer"],
+                "per_event_type": rl_delivery["per_event_type"],
+            },
         },
         "behavioral_impact": {
             "total_deliveries": behavioral_impact.get("total_deliveries", 0),

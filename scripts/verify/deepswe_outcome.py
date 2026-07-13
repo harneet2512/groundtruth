@@ -529,6 +529,166 @@ def extract_instance_id(d: dict, info: dict, trial_dir: str | None = None) -> st
     return None
 
 
+# ===========================================================================
+# Harness-truth binding (run 29236533134 defect-1): on the mini-swe-agent path
+# the pier result.json/instance_id is ABSENT, so instance_id came through null on
+# 29/29 tasks and every task auto-labelled INFRA_MISSING_ARTIFACT even though a
+# report.json + reward + trajectory were present at the TASK-ROOT. These pure
+# helpers recover the instance identity from the three durable sources the run
+# ALWAYS carries — the run matrix env, the eval report.json key, the task dir
+# name — and answer the report-authoritative resolved verdict. Shared with
+# task_truth.build_task_truth (one-directional import: task_truth -> here).
+# ===========================================================================
+
+#: Report/reward file names probed at each task-root candidate (mini + CI shapes).
+_REPORT_NAMES: tuple[str, ...] = ("report.json", os.path.join("trial_results", "report.json"))
+_REWARD_NAMES: tuple[str, ...] = ("reward.txt", os.path.join("trial_results", "reward.txt"))
+
+
+def _root_candidates(jobs: str) -> list[str]:
+    """Task-root dirs to probe for report.json/reward.txt: the jobs dir, its parent
+    (the mini task root — ``task_truth.py jobs`` runs from the task dir), the cwd, and
+    an explicit GT_TASK_DIR override. Deduped, order-preserving."""
+    roots: list[str] = []
+    for r in (
+        jobs,
+        os.path.dirname(os.path.abspath(jobs)) if jobs else "",
+        os.getcwd(),
+        os.environ.get("GT_TASK_DIR", ""),
+    ):
+        if r and r not in roots:
+            roots.append(r)
+    return roots
+
+
+def instance_id_from_env() -> str | None:
+    """The run matrix supplies the instance id in env (the workflow reconcile step
+    exports GT_INSTANCE_ID / GT_MATRIX_TASK). First non-blank wins."""
+    for key in ("GT_INSTANCE_ID", "GT_MATRIX_TASK", "GT_TASK_ID"):
+        v = os.environ.get(key)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return None
+
+
+def find_task_root_report(jobs: str) -> tuple[str | None, dict | None]:
+    """Locate the eval report.json at a task-root candidate. Returns (path, dict) or
+    (None, None). The report is the SWE-bench harness output — a dict keyed by
+    instance_id -> {resolved, tests_status, ...}."""
+    for root in _root_candidates(jobs):
+        for name in _REPORT_NAMES:
+            cand = os.path.join(root, name)
+            if os.path.isfile(cand):
+                try:
+                    with open(cand, encoding="utf-8") as fh:
+                        data = json.load(fh)
+                except (OSError, ValueError):
+                    continue
+                if isinstance(data, dict) and data:
+                    return cand, data
+    return None, None
+
+
+def instance_id_from_report(report: dict | None, hint: str | None = None) -> str | None:
+    """The report is keyed by instance_id. Prefer a key matching the hint; else the
+    sole key (unambiguous per-task report)."""
+    if not isinstance(report, dict) or not report:
+        return None
+    keys = [k for k in report if isinstance(k, str) and k]
+    if hint and hint in keys:
+        return hint
+    if len(keys) == 1:
+        return keys[0]
+    return None
+
+
+def task_dir_instance_id(jobs: str) -> str | None:
+    """The task-root directory name IS the instance id in the captured/CI layout
+    (e.g. .../conan-io__conan-17123/jobs). Never returns a bare 'jobs'/'.' stem."""
+    for root in _root_candidates(jobs):
+        base = os.path.basename(os.path.abspath(root).rstrip("/\\"))
+        if base and base not in ("jobs", "trial_results", ".", ""):
+            return base
+    return None
+
+
+def report_resolved(report: dict | None, iid: str | None) -> bool | None:
+    """The report's resolved verdict for this instance (True/False), or None when the
+    report is absent / carries no resolved field (missing-data law — never a false 0)."""
+    if not isinstance(report, dict) or not report:
+        return None
+    entry = None
+    if iid and iid in report:
+        entry = report[iid]
+    elif len(report) == 1:
+        entry = next(iter(report.values()))
+    if isinstance(entry, dict) and "resolved" in entry:
+        return bool(entry.get("resolved"))
+    return None
+
+
+def root_reward(jobs: str) -> float | None:
+    """The task-root reward.txt (mini path / CI bridge), parsed as float. None when
+    absent/blank (missing-data law)."""
+    for root in _root_candidates(jobs):
+        for name in _REWARD_NAMES:
+            cand = os.path.join(root, name)
+            if os.path.isfile(cand):
+                try:
+                    txt = open(cand, encoding="utf-8").read().strip()
+                    return float(txt) if txt else None
+                except (OSError, ValueError):
+                    return None
+    return None
+
+
+def root_agent_steps(jobs: str) -> int | None:
+    """Agent step count from the task-root mini trajectory (info.model_stats.api_calls,
+    else the assistant-turn count). The mini path carries NO pier n_agent_steps, so
+    without this a report-graded reward=0 run classifies UNKNOWN (denominator-excluded)
+    instead of AGENT/GT. None when no trajectory is found (missing-data law)."""
+    for root in _root_candidates(jobs):
+        cand = os.path.join(root, "mini-swe-agent.trajectory.json")
+        if not os.path.isfile(cand):
+            continue
+        try:
+            with open(cand, encoding="utf-8") as fh:
+                d = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(d, dict):
+            continue
+        api = ((d.get("info") or {}).get("model_stats") or {}).get("api_calls")
+        if isinstance(api, int) and api > 0:
+            return api
+        msgs = d.get("messages") or []
+        assist = sum(
+            1 for m in msgs if isinstance(m, dict)
+            and (m.get("role") == "assistant"
+                 or (m.get("role") is None and isinstance(m.get("output"), list)))
+        )
+        return assist or None
+    return None
+
+
+def bind_instance_identity(
+    jobs: str, *, current: str | None, report: dict | None = None
+) -> str | None:
+    """Resolve the pairing key from every durable source, most-specific first:
+    already-resolved -> report.json key -> matrix env -> task dir name. Pure; never
+    fabricates. (result.json/trajectory-info ids are resolved by the caller BEFORE
+    this and passed as ``current``.)"""
+    if current:
+        return current
+    from_report = instance_id_from_report(report, current)
+    if from_report:
+        return from_report
+    from_env = instance_id_from_env()
+    if from_env:
+        return from_env
+    return task_dir_instance_id(jobs)
+
+
 def build_signal_record(
     *,
     instance_id: str | None,
@@ -689,6 +849,33 @@ def main(argv: list[str]) -> int:
     # occasionally cross pier's start timeout — a flaky infra event, never a GT/agent fault.
     if not infra_subtype and exc_type and "environmentstart" in exc_type.replace("_", "").lower():
         infra_subtype = "INFRA_ENV_START_TIMEOUT"
+
+    # ── Harness-truth binding (defect-1) ───────────────────────────────────
+    # On the mini path there is no pier result.json, so instance_id/reward came
+    # through null and the pier-layout globs above stamped INFRA_MISSING_ARTIFACT.
+    # Recover identity from the report.json key / matrix env / task dir name, take
+    # the reward from report.json/reward.txt, and DROP a MISSING-artifact verdict
+    # whenever a report OR a trajectory is present (INFRA requires BOTH absent).
+    report_path, report = find_task_root_report(jobs)
+    instance_id = bind_instance_identity(jobs, current=instance_id, report=report)
+    if reward is None:
+        reward = root_reward(jobs)
+    _rep_resolved = report_resolved(report, instance_id)
+    if reward is None and _rep_resolved is not None:
+        reward = 1.0 if _rep_resolved else 0.0
+    if n_agent_steps is None:
+        n_agent_steps = root_agent_steps(jobs)
+    # The eval report.json is the grading authority: when present (or a genuine resolve),
+    # grade from it — never INFRA_MISSING. A task with NO report AND reward<1 (no eval
+    # verdict, e.g. checkov-6893) stays true INFRA; trajectory presence alone does not
+    # manufacture a verdict.
+    _genuine_resolve = reward is not None and float(reward) >= 1.0
+    if (infra_subtype and "MISSING" in str(infra_subtype).upper()
+            and (report is not None or _genuine_resolve)):
+        print(f"INFRA_MISSING_ARTIFACT downgraded — graded from the eval report "
+              f"(report_present={report is not None}, instance_id={instance_id}, "
+              f"reward={reward}, n_agent_steps={n_agent_steps})")
+        infra_subtype = None
 
     rec = build_signal_record(
         instance_id=instance_id,
