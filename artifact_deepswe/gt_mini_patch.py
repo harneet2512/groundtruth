@@ -174,14 +174,14 @@ def _runtime_import_failed(_mod: str, _err) -> None:
 
 
 try:
-    from groundtruth.runtime.action_translation import translate_to_action as _product_translate_to_action
+    from groundtruth.runtime.action_translation import translate_to_action as _product_translate_to_action  # pyright: ignore[reportAssignmentType]  # conditional-import stub<->real fallback (graceful in-container degradation)
 except Exception as _e:  # noqa: BLE001
     _runtime_import_failed("action_translation", _e)
     def _product_translate_to_action(block, phase=None):
         return block
 
 try:
-    from groundtruth.runtime.context_budget import ContextBudgeter as _ProductContextBudgeter
+    from groundtruth.runtime.context_budget import ContextBudgeter as _ProductContextBudgeter  # pyright: ignore[reportAssignmentType]  # conditional-import stub<->real fallback (graceful in-container degradation)
 except Exception as _e:  # noqa: BLE001
     _runtime_import_failed("context_budget", _e)
     class _ProductContextBudgeter:
@@ -197,9 +197,9 @@ except Exception as _e:  # noqa: BLE001
 
 try:
     from groundtruth.runtime.ledger import (
-        Ledger as _ProductLedger,
-        LedgerEntry as _ProductLedgerEntry,
-        SignalOutcome as _ProductSignalOutcome,
+        Ledger as _ProductLedger,  # pyright: ignore[reportAssignmentType]  # conditional-import stub<->real fallback (graceful in-container degradation)
+        LedgerEntry as _ProductLedgerEntry,  # pyright: ignore[reportAssignmentType]  # conditional-import stub<->real fallback (graceful in-container degradation)
+        SignalOutcome as _ProductSignalOutcome,  # pyright: ignore[reportAssignmentType]  # conditional-import stub<->real fallback (graceful in-container degradation)
     )
 except Exception as _e:  # noqa: BLE001
     _runtime_import_failed("ledger", _e)
@@ -219,8 +219,8 @@ except Exception as _e:  # noqa: BLE001
 
 try:
     from groundtruth.runtime.trajectory_state import (
-        TrajectoryState as _ProductTrajectoryState,
-        derive_phase as _product_derive_phase,
+        TrajectoryState as _ProductTrajectoryState,  # pyright: ignore[reportAssignmentType]  # conditional-import stub<->real fallback (graceful in-container degradation)
+        derive_phase as _product_derive_phase,  # pyright: ignore[reportAssignmentType]  # conditional-import stub<->real fallback (graceful in-container degradation)
     )
 except Exception as _e:  # noqa: BLE001
     _runtime_import_failed("trajectory_state", _e)
@@ -236,7 +236,7 @@ except Exception as _e:  # noqa: BLE001
 # the SAME dedup chain / probe history. Own import bulkhead (a stub keeps the two
 # containers + reset semantics live so aliasing never AttributeErrors in-container).
 try:
-    from groundtruth.runtime.episode_state import EpisodeState as _ProductEpisodeState
+    from groundtruth.runtime.episode_state import EpisodeState as _ProductEpisodeState  # pyright: ignore[reportAssignmentType]  # conditional-import stub<->real fallback (graceful in-container degradation)
 except Exception as _e:  # noqa: BLE001
     _runtime_import_failed("episode_state", _e)
     class _ProductEpisodeState:  # minimal stub: the two owned containers + reset
@@ -249,16 +249,26 @@ except Exception as _e:  # noqa: BLE001
             self.xsession_policy: dict = {}
             # SM-10 Item D2: the per-attempt read-set (viewed/greped/edited targets).
             self.read_targets: set = set()
+            # W6/T0 parity: the hypothesis-ledger failure memory + the memoized ranked-loc
+            # rows are accessed on _EPISODE by the recovery / localization paths — mirror
+            # them on the stub so the import-fallback never AttributeErrors (and the type
+            # checker sees the real EpisodeState's surface). Real class governs at runtime.
+            self.failure_fingerprints: set = set()
+            self.last_failure_record: dict = {}
+            self._gt_ranked_loc_rows = None
         def reset_attempt(self) -> None:
             self.probe_ledger.clear()
             self.delivered_dedup.clear()
             self.obligations = None
             self.read_targets.clear()  # SM-10 Item D2: per-attempt read-set re-acquires
+            self.failure_fingerprints.clear()
+            self.last_failure_record = {}
+            self._gt_ranked_loc_rows = None
             # SM-9c: xsession_policy is a per-run INPUT, NOT cleared per attempt.
 
 try:
     from groundtruth.runtime.verification_horizon import (
-        HorizonThresholds as _ProductHorizonThresholds,
+        HorizonThresholds as _ProductHorizonThresholds,  # pyright: ignore[reportAssignmentType]  # conditional-import stub<->real fallback (graceful in-container degradation)
         composite_severity as _product_composite_severity,
         render_verify_emission as _product_render_verify_emission,
         verify_horizon_band as _product_verify_horizon_band,
@@ -269,11 +279,11 @@ except Exception as _e:  # noqa: BLE001
         def __init__(self, **kwargs):
             for _k, _v in kwargs.items():
                 setattr(self, _k, _v)
-    def _product_composite_severity(base, budget, ratio):
-        return float(base) + 2.0 * float(budget) + float(ratio)
-    def _product_render_verify_emission(*a, **kw):
+    def _product_composite_severity(base, budget_fraction, unmet_ratio):
+        return float(base) + 2.0 * float(budget_fraction) + float(unmet_ratio)
+    def _product_render_verify_emission(*a, **kw) -> str:
         return ""
-    def _product_verify_horizon_band(*a, **kw):
+    def _product_verify_horizon_band(*a, **kw) -> "str | None":
         return None
 
 # G10 (2026-06-14): structural_edit_risk gets its OWN import bulkhead, separate
@@ -331,7 +341,7 @@ try:
         DETERMINISTIC_RESOLUTION_METHODS as _DETERMINISTIC_METHODS,
         _lang_family as _lang_family,
         _is_cross_language_pair as _is_cross_language_pair,
-        _nodes_have_language as _nodes_have_language,
+        _nodes_have_language as _nodes_have_language,  # pyright: ignore[reportAssignmentType]  # conditional-import stub<->real fallback (graceful in-container degradation)
     )
     _DELIVERY_POLICY_AVAILABLE = True
 except Exception as _delivery_import_err:  # noqa: BLE001
@@ -3754,7 +3764,7 @@ def _loc_reslot_block() -> str:
         return ""
     try:
         st = _GatewayState(graph_db=_db_path(), repo_root=_root(),
-                           issue_text=_issue_text(), episode=_EPISODE)
+                           issue_text=_issue_text(), episode=_EPISODE)  # pyright: ignore[reportArgumentType]  # conditional-import stub<->real fallback (graceful in-container degradation)
         rows = _rlr(st)  # episode-memoized; SHARED with the (live-excluded) Gateway path
         block = _rrl(rows) if rows else ""
     except Exception:  # noqa: BLE001 — a localizer / render fault degrades to no delivery
@@ -5271,6 +5281,12 @@ def _invalidate_on_edit(rel: str, root: str) -> None:
     would fail to match, strictly worse for the proof.) L6 stays ENABLED only on the
     non-substrate (preindex/trial) path where the in-container /tmp/graph.db is ours."""
     global _l6_no_binary_warned, _l6_reindex_failed_warned, _l6_probe_emitted
+    # GT_SS_PROVENANCE (feature 5): a scratch / generated-artifact / outside-root write
+    # must NEVER enter the graph — reindexing tmp/patch_fix.py or htmlcov/*.js pollutes
+    # the context graph with agent scratch. Skip the reindex trigger for those path
+    # classes. Off -> byte-identical (the guard is never consulted).
+    if _ss_provenance_on() and _ss_provenance_bad_path(rel, root):
+        return
     if _substrate_active() and os.environ.get("GT_L6_FRESH") != "1":
         return  # substrate graph is authoritative + read-only; never mutate/rebuild it.
     # GT_L6_FRESH: _db_path() returns the writable work-copy (NOT the mount), so the
@@ -5697,9 +5713,20 @@ def _coherence_collapse_candidate(rel: str) -> tuple[float, str] | None:
     global _coherence_last_rel
     if rel in _coherence_fired_files:
         return None
-    churn = _edit_churn.get(rel, 0)
-    if churn < 3:
-        return None
+    # GT_SS_COHERENCE_V2 (feature 3): the "rewritten N times with no passing test
+    # between edits" claim is recomputed from the EDIT-EVENT ledger — successful
+    # writes to THIS EXACT path only (never reindex/hook fires, view reads, or a
+    # basename collision), with the no-passing-test-between clause actually asserted.
+    # <=2 writes or an intervening pass -> None (correct-or-quiet). Off -> the legacy
+    # churn counter (byte-identical).
+    if _ss_coherence_v2_on():
+        churn = _ss_coherence_churn(rel)
+        if churn is None:
+            return None
+    else:
+        churn = _edit_churn.get(rel, 0)
+        if churn < 3:
+            return None
     anch = _oracle_focus()
     stem = os.path.splitext(os.path.basename(rel))[0]
     ftoks = _oracle_edited_tokens_by_file.get(rel, set())
@@ -5726,6 +5753,22 @@ def _coherence_collapse_candidate(rel: str) -> tuple[float, str] | None:
         "blind. Run targeted verification FIRST to see what is actually "
         f"failing, then make one targeted edit.{hint}"
     )
+    # GT_SS_COHERENCE_V2 measurement (ZERO model bytes): stamp a host-side ledger row
+    # recording that the V2 gate (successful-writes-only, no-passing-test-between) is the
+    # one that fired, carrying the EXACT churn count. Provenance/measurement only (per the
+    # runtime-ledger mandate) — the delivered nudge bytes are unchanged. Emitted ONLY under
+    # the flag, so the flag-off ledger is byte-identical.
+    if _ss_coherence_v2_on():
+        try:
+            # reason == exactly "ss_coherence" (the durable-ledger marker the offline reader
+            # and the acceptance gate key on); the EXACT churn count rides the delivered nudge
+            # bytes ("rewritten {churn} times"), and file_path names the churned file.
+            _runtime_ledger_record(
+                kind="detect.coherence",
+                outcome=_ProductSignalOutcome.DELIVERED,
+                reason="ss_coherence", file_path=rel, chars=0)
+        except Exception:  # noqa: BLE001 — measurement must never break the producer
+            pass
     return (float(_SEV_DETECT),
             _nudge_native(f'\n<gt-nudge reason="coherence_collapse">\n{body}\n</gt-nudge>'))
 
@@ -6232,6 +6275,9 @@ def _reset_oracle_state() -> None:
     global _gt_submit_bounce_count, _last_covering_result
     _gt_submit_bounce_count = 0
     _last_covering_result = None
+    # SS (2026-07-13): clear every step-behind-suppression ledger per attempt (F3 reset
+    # law). Host-side only -> byte-identical in production (fresh process per attempt).
+    _ss_reset()
 
 
 def _anchors_path() -> str:
@@ -7891,7 +7937,7 @@ def _verification_plan_emission(edited_rels: "set[str] | list[str]",
                 _last_test_outcome_failed = True  # executed verdict drives the verify axis
                 block = render_covering_failure_native(
                     cres, edited_symbol=syms[0],
-                    test_files=cres.get("ran") or list(res.covered_entities))
+                    test_files=cres.get("ran") or list(res.covered_entities))  # pyright: ignore[reportArgumentType]  # conditional-import stub<->real fallback (graceful in-container degradation)
             else:
                 continue  # build/type/integration RED -> HOST-side only this wave
             if block and not contains_gt_tag(block) and not contains_test_identity(block):
@@ -8045,7 +8091,7 @@ def _gt_hypothesis_classify_turn(cmd: str, observation: str) -> None:
             action_index=_action_count, command=cmd or "",
             observation=observation or "", probe_stem="",
             failure_fingerprint=fp, graph_revision="")
-        advisories = classify_all(_EPISODE, event)  # sees PRIOR failure memory
+        advisories = classify_all(_EPISODE, event)  # sees PRIOR failure memory  # pyright: ignore[reportArgumentType]  # conditional-import stub<->real fallback (graceful in-container degradation)
         if fp:  # feed AFTER classify: this turn's failure is prior-memory next turn.
             _EPISODE.failure_fingerprints.add(fp)
             _EPISODE.last_failure_record = {
@@ -8139,7 +8185,25 @@ def _recovery_candidate() -> "tuple[float, str, str, bool] | None":
     # benign recurring "0 failed" summary reading as a repeated failure) would ship nudges to a
     # progressing agent. Suppress unless a genuine repetition/stall is sensed; log the drop so the
     # suppression is auditable (never a silent drop).
-    if _global_arbiter_on() and not _recovery_stall_active():
+    # GT_SS_RECOVERY_V2 (feature 4): REPLACE the fingerprint-based stall sensor with a
+    # deterministic repeat gate — the SAME test-classified command observed FAILING >=2x
+    # with NO intervening edit. Eligibility flips True at the 2nd qualifying repeat, so a
+    # genuine stall delivers at repeat-2 (killing the dynaconf "suppressed 11x then too
+    # late" death) while a passing / one-off / differing-output turn stays ineligible
+    # (killing the two privacyidea misfires). Off -> the legacy arbiter-scoped stall gate
+    # (byte-identical).
+    if _ss_recovery_v2_on():
+        if not _ss_recovery_eligible():
+            try:
+                _record_hook_suppress("recovery", reason="ss_recovery_gate")
+                _runtime_ledger_record(
+                    kind="recovery",
+                    outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
+                    reason="ss_recovery_gate")
+            except Exception:  # noqa: BLE001 — auditability must never break the gate
+                pass
+            return None
+    elif _global_arbiter_on() and not _recovery_stall_active():
         try:
             _record_hook_suppress("recovery", reason="recovery_stall_gate")
             _runtime_ledger_record(
@@ -8157,6 +8221,19 @@ def _recovery_candidate() -> "tuple[float, str, str, bool] | None":
         return None
     if not text:
         return None
+    # GT_SS_RECOVERY_V2 measurement (ZERO model bytes): stamp a host-side ledger row
+    # recording that the V2 deterministic repeat-gate (same test-classified command failing
+    # >=2x with no intervening edit) RELEASED recovery at this qualifying repeat. Provenance/
+    # measurement only — the delivered imperative bytes are unchanged. Emitted ONLY under the
+    # flag, so the flag-off ledger is byte-identical.
+    if _ss_recovery_v2_on():
+        try:
+            _runtime_ledger_record(
+                kind="recovery",
+                outcome=_ProductSignalOutcome.DELIVERED,
+                reason="ss_recovery", chars=0)
+        except Exception:  # noqa: BLE001 — measurement must never break the producer
+            pass
     return (float(_SEV_RECOVERY), "recovery", text, True)
 
 
@@ -9375,7 +9452,7 @@ def _concern_retire_note(kkind: "str | None", kf: str) -> None:
         "chars_delivered": 0, "iteration": globals().get("_action_count", 0)})
 
 
-def _concern_lane_a_append(lane_a: list, kkind: "str | None", kf: str, cmd: str,
+def _concern_lane_a_append(lane_a: list, kkind: "str | None", kf: "str | None", cmd: str,
                            orig_out: str, ga_on: bool) -> None:
     """ITEM-4 dispatch for the ``concern.consensus`` Lane-A block — the SINGLE call site.
 
@@ -9446,6 +9523,10 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
     waived their relevance anyway; moving them out of the gate only removes their
     rank-competition against higher-severity steers (they no longer LOSE the
     turn to a steer)."""
+    # SS delivery gates (features 1/2/5/6) need the repo root only when a gate flag is
+    # on -> compute once, byte-identical when all off (never queried).
+    _ss_root = _root() if (_ss_provenance_on() or _ss_novelty_on()
+                           or _ss_dedup2_on()) else ""
     for kind, text in lane_a:
         _record_hook_fire(kind)  # count the FIRE before any correct-or-quiet skip
         try:
@@ -9469,6 +9550,39 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
                     file_path=krel or "",
                     event=event,
                 )
+                continue
+            # ── SS delivery gates (features 5/1/6/2) — each behind its OWN flag,
+            # each precedes the fire-once latch consumption below so a suppressed
+            # class stays ARMED and re-competes (deferred, not destroyed). Default-off
+            # -> every branch short-circuits -> byte-identical. ────────────────────
+            # (5) PROVENANCE — drop lines citing scratch/generated/outside-root paths;
+            # if that empties the payload, suppress the whole delivery.
+            if _ss_provenance_on():
+                _ptext = _ss_provenance_filter(text, _ss_root)
+                if _ptext != text:
+                    if not _ss_payload_has_content(_ptext):
+                        _runtime_ledger_record(
+                            kind=kind, outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
+                            reason="ss_provenance", file_path=krel or "", event=event)
+                        continue
+                    text = _ptext
+            # (1) NOVELTY / step-behind — every entity already acquired by the agent.
+            if _ss_novelty_on() and _ss_novelty_suppresses(kind, text, _ss_root):
+                _runtime_ledger_record(
+                    kind=kind, outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
+                    reason="ss_step_behind", file_path=krel or "", event=event)
+                continue
+            # (6) LATE-DROP — an obligation whose symbols were already GREEN-tested.
+            if _ss_late_drop_on() and _ss_late_drop_suppresses(kind, text):
+                _runtime_ledger_record(
+                    kind=kind, outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
+                    reason="ss_late", file_path=krel or "", event=event)
+                continue
+            # (2) ENTITY-SET dedup — this fact's entities ⊆ a prior same-class delivery.
+            if _ss_dedup2_on() and _ss_dedup2_suppresses(kind, text, _ss_root):
+                _runtime_ledger_record(
+                    kind=kind, outcome=_ProductSignalOutcome.SUPPRESSED_DUPLICATE,
+                    reason="ss_semantic_dup", file_path=krel or "", event=event)
                 continue
             h = _oracle_content_hash(text)
             # B5 (token bloat, fastapi witness): a Lane-A block is a state-INDEPENDENT
@@ -9543,6 +9657,8 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
                 event=event,
                 content=text,  # W2 seal: the delivered lane block (never the whole observation)
             )
+            # SS (features 2/7): record the delivered entity set + queue the ack watch.
+            _ss_record_delivered(kind, text, _ss_root)
             # RL-1 (flag GT_LANE_ENVELOPE): seal an envelope over the SAME delivered
             # bytes — advance the shared chain, stamp the dedup_key, record a receipt-
             # tracked delivery. Pure bookkeeping; no-op + byte-identical when off.
@@ -9701,7 +9817,7 @@ def _gt_gateway_caller_contract_ready(action, cmd) -> bool:
                  changed_files=tuple(_changed or ()), action_index=_action_count,
                  edit_before_after=_eba)
         st = _GS(graph_db=_db_path(), repo_root=_root(),
-                 issue_text=_issue_text(), episode=_EPISODE,
+                 issue_text=_issue_text(), episode=_EPISODE,  # pyright: ignore[reportArgumentType]  # conditional-import stub<->real fallback (graceful in-container degradation)
                  episode_overlay=_gt_episode_overlay)
         for env in _pcc(ev, st):
             if not env:
@@ -10270,7 +10386,7 @@ def _xsession_flush() -> None:
         if not key:
             return
         base = base if base is not None else _XMStore(repo_key=key)
-        merged = _xm_merge(base, session_stats)
+        merged = _xm_merge(base, session_stats)  # pyright: ignore[reportArgumentType]  # conditional-import stub<->real fallback (graceful in-container degradation)
         _xm_dump(merged, _xm_store_path_for_key(key, base_dir))
     except Exception:  # noqa: BLE001 — persistence must NEVER break delivery
         pass
@@ -10525,7 +10641,7 @@ def _gt_gateway_deliver(action, out, cmd, orig_out, *, pool=None) -> None:
             # B-4 (2026-07-10): thread the REAL issue text (baked issue.txt) so the
             # change_surface producer can fire on a truly-absent probe; '' when the
             # artifact is unavailable -> change_surface abstains (byte-identical).
-            issue_text=_issue_text(), episode=_EPISODE,
+            issue_text=_issue_text(), episode=_EPISODE,  # pyright: ignore[reportArgumentType]  # conditional-import stub<->real fallback (graceful in-container degradation)
             # SM-4 (2026-07-11): thread the persistent EPISODE OVERLAY so route_delivery can
             # drop a base-read fact about a file the agent structurally edited (freshness made
             # REAL). Empty until GT_EDIT_OVERLAY populates it via _gt_edit_overlay_transaction
@@ -10617,7 +10733,8 @@ def _gt_gateway_deliver(action, out, cmd, orig_out, *, pool=None) -> None:
             # so the candidate's correct-time repair_support is judged against THIS turn,
             # not a hardcoded post_edit. `ev` is the normalize_event result in scope here.
             _global_pool_add_gateway(pool, winner, native, _commit_gateway,
-                                     ev_kind=getattr(ev, "kind", ""))
+                                     ev_kind=getattr(ev, "kind", ""),
+                                     rendered_text=delta)
             return
         _commit_gateway()
     except Exception:  # noqa: BLE001 — isolated; must never break the agent loop
@@ -10838,7 +10955,8 @@ def _ga_unified_dedup_key(producer: str, evidence_type: str, target: str,
 def _ga_make_candidate(plane: str, kind: str, *, dedup_key: str, target: str = "",
                        tier: str = "INFO", confidence: float = 0.0,
                        kkind: str = "", seq: int = 0, suppressible: bool = False,
-                       current_ordinal: "int | None" = None):
+                       current_ordinal: "int | None" = None,
+                       rendered_chars: int = -1):
     """Build a global_arbiter.Candidate projected onto the ladder. Returns None when the
     engine is unavailable (the flush then delivers nothing — correct-or-quiet).
 
@@ -10846,7 +10964,17 @@ def _ga_make_candidate(plane: str, kind: str, *, dedup_key: str, target: str = "
     (the gateway threads its REAL ``ev.kind`` ordinal here); when None, it falls back to the
     mini's post_* ``kkind`` lookup (the Lane-A / steer planes, unchanged). This drives ONLY
     ``repair_support`` (a correct-time label) — never the arbitration sort — so it is
-    byte-identical for delivered bytes."""
+    byte-identical for delivered bytes.
+
+    ADDENDUM 2 (SS-1, GT_SS_ARBITER_V2): populate the three arbiter signals where the seam
+    HOLDS them — ``rendered_chars`` (the plane's byte length, threaded from the call site; 0
+    -> the arbiter rejects an empty payload with ss_empty_payload; -1 unknown -> skipped),
+    ``obligations_open`` (a PREVENTIVE fact whose pre-submit-completeness point is still live
+    -> not late-suppressed), and ``redundant_with_delivered`` (a localization fact whose
+    def_ref_partition already shipped this episode -> the one sanctioned localization retire).
+    The two derived signals are computed ONLY under GT_SS_ARBITER_V2 (else inert False), and
+    every one of these is read by the engine ONLY under that flag — so a candidate built here
+    is byte-identical when GT_SS_ARBITER_V2 is off."""
     try:
         # dotted `from groundtruth.runtime.global_arbiter import` form so the injection
         # import-coverage guard REQUIRES the module to ship (in _PRODUCT_PACKAGE_MODULES).
@@ -10857,12 +10985,17 @@ def _ga_make_candidate(plane: str, kind: str, *, dedup_key: str, target: str = "
     cur = (int(current_ordinal) if current_ordinal is not None
            else _GA_KKIND_ORDINAL.get(kkind or "", 0))
     boundary = _GA_CLASS_BOUNDARY.get(cls, cur)
+    _v2 = _ss_enabled("GT_SS_ARBITER_V2")
+    _obl_open = bool(_v2 and cls in _GA_PREVENTIVE_CLASSES and _ss_obligations_open())
+    _redundant = bool(_v2 and suppressible and target and _ss_def_ref_delivered(target))
     return Candidate(
         plane=plane, kind=kind, dedup_key=dedup_key or "",
         symbol=(_norm_fp(target) if (suppressible and target) else ""),
         tier=tier or "INFO", confidence=float(confidence or 0.0),
         boundary_ordinal=boundary, current_ordinal=cur,
-        suppressible_if_acquired=bool(suppressible), seq=int(seq))
+        suppressible_if_acquired=bool(suppressible), seq=int(seq),
+        rendered_chars=int(rendered_chars),
+        obligations_open=_obl_open, redundant_with_delivered=_redundant)
 
 
 # SM-5 F (2026-07-12, cardinal #50) — GENERALIZED Lane-A latch rollback.
@@ -10954,7 +11087,8 @@ def _global_pool_add_steer(pool, out, cmd, win_text, *, kkind, kf, krel, event,
         steer_base=steer_base))))
 
 
-def _global_pool_add_gateway(pool, winner, native, commit_thunk, *, ev_kind: str = "") -> None:
+def _global_pool_add_gateway(pool, winner, native, commit_thunk, *, ev_kind: str = "",
+                             rendered_text: str = "") -> None:
     """SM-5: stash the produced Gateway fact (its envelope already carries the UNIFIED
     dedup_key) + its commit thunk. Gateway localization facts ARE acquisition-suppressible
     (this generalizes the gateway's own EXACT_HIT/ZERO_ABSENT acquisition gates to the
@@ -10973,17 +11107,54 @@ def _global_pool_add_gateway(pool, winner, native, commit_thunk, *, ev_kind: str
         suppressible = class_of_kind(et) == "localization"
     except Exception:  # noqa: BLE001
         suppressible = False
+    # SS-0 (features 1/2/5/6): the gateway DEF/REF partition (+ its localization siblings)
+    # BYPASSES _lane_a_deliver — it commits via its own thunk — so the SS content gates are
+    # applied HERE, before the fact competes. A suppressed fact is not pooled (records the
+    # ss_* reason so the drop is auditable); a surviving fact's commit thunk is WRAPPED to
+    # record its delivered entity set (feature 2) + queue the ack watch (feature 7) after it
+    # actually delivers. Default-off byte-identical: _ss_any_content_gate_on() is False ->
+    # neither the screen nor the wrap runs (the original commit_thunk is pooled unchanged).
+    # The ACTUAL model-facing payload is the rendered ``delta`` threaded from the deliver
+    # site (``rendered_text``), NOT the boolean ``native`` render-mode flag — screening the
+    # flag never cited a path (it stringified to "True"/"") so novelty/dedup2/provenance
+    # were structurally inert on the gateway plane. ``delta`` carries the def/ref file+symbol
+    # citations the SS gates read.
+    _payload = str(rendered_text or "")
+    _arb_suppressible = suppressible
+    _thunk = commit_thunk
+    if _ss_any_content_gate_on():
+        _ss_root = _root()
+        _supp, _reason = _ss_screen_delivery(et, _payload, _ss_root, is_loc=suppressible)
+        if _supp:
+            _runtime_ledger_record(
+                kind="ga." + et, outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
+                reason=_reason, file_path=getattr(winner, "target", "") or "")
+            return
+        # This localization candidate SURVIVED the SS content screen. When GT_SS_NOVELTY is
+        # the active acquisition authority, its ENTITY-SET verdict SUPERSEDES the arbiter's
+        # coarser target-file ``already_acquired`` (global_arbiter REASON_ACQUIRED keys on the
+        # target file alone). A def/ref partition whose TARGET file was viewed but whose
+        # payload carries a NOVEL cross-file def (e.g. run() also lives in an unopened mod_b)
+        # was already judged novel HERE, so the coarse gate must not re-kill it. Drop the
+        # candidate's ``suppressible_if_acquired`` for the arbiter only — the true is_loc is
+        # still threaded into the record wrap below. Byte-identical when novelty is off.
+        if suppressible and _ss_novelty_on():
+            _arb_suppressible = False
+        def _thunk(_o=commit_thunk, _k=et, _t=_payload, _r=_ss_root, _loc=suppressible):  # noqa: E731
+            _o()
+            _ss_record_delivered(_k, _t, _r, is_loc=_loc)
     cand = _ga_make_candidate(
         _GA_PLANE_GATEWAY, et, dedup_key=getattr(winner, "dedup_key", "") or "",
         target=getattr(winner, "target", "") or "",
         tier=getattr(winner, "tier", "INFO") or "INFO",
         confidence=float(getattr(winner, "confidence", 0.0) or 0.0),
         current_ordinal=_GA_GATEWAY_KIND_ORDINAL.get(ev_kind or "", 0),
-        seq=len(pool), suppressible=suppressible)
+        seq=len(pool), suppressible=_arb_suppressible,
+        rendered_chars=(len(_payload) if _payload else -1))
     if cand is None:
-        commit_thunk()
+        _thunk()
         return
-    pool.append((cand, commit_thunk))
+    pool.append((cand, _thunk))
 
 
 def _global_pool_flush(pool, *, kkind, kf, krel) -> None:
@@ -11137,6 +11308,8 @@ def _deliver_gate_winner(out, cmd, win_text, *, kkind, kf, krel, event, steer_ba
             outcome=_ProductSignalOutcome.DELIVERED,
             chars=len(win_text), file_path=krel or kf or "", event=event,
             content=win_text)  # W2 seal: the delivered steer block (whole-obs boundary not cheaply here)
+        # SS (features 2/7): record the delivered steer's entity set + queue the ack watch.
+        _ss_record_delivered(_last_gate_winner_kind, win_text)
         # RL-1 (GT_LANE_ENVELOPE): seal over the SAME bytes; base_output = pre-append obs.
         _seal_lane_delivery(_last_gate_winner_kind, win_text, krel or kf or "",
                             base_output=steer_base)
@@ -11150,6 +11323,569 @@ def _deliver_gate_winner(out, cmd, win_text, *, kkind, kf, krel, event, steer_ba
 _GA_PLANE_LANE_A = "lane_a"
 _GA_PLANE_STEER = "steer"
 _GA_PLANE_GATEWAY = "gateway"
+
+
+# ===========================================================================
+# SS — STEP-BEHIND SUPPRESSION (2026-07-13, causal audit of run 29236533134).
+#
+# The audit byte-verified that ~210 of 296 GT deliveries were STEP-BEHIND (the
+# agent had already viewed/derived the cited entity), that detect.coherence's
+# "rewritten N times" was factually wrong on ~16/20 fires, that recovery misfired
+# on non-stuck states + expired once, that payloads cited agent scratch/generated
+# files, that the SAME caller-fact cluster shipped 3x as byte-distinct variants,
+# and that obligations fired "untested" after covering evidence was GREEN.
+#
+# Each fix rides an EXISTING seam mechanism, is behind its OWN env flag, is
+# DEFAULT-OFF + byte-identical when off (all gates short-circuit; the host-side
+# ledgers below are populated unconditionally but only ever READ under a flag, so
+# they change ZERO observation bytes), is PARAMETER-FREE (membership / containment
+# / repeat-count — no similarity thresholds), and is TASK-AGNOSTIC (no repo names,
+# task ids, or gold paths). The leak invariant is untouched (SS never emits bytes;
+# it only SUPPRESSES / FILTERS already-leak-screened blocks).
+# ===========================================================================
+
+# --- per-episode SS ledgers (host-side; reset in _reset_oracle_state) -------
+_ss_acquired_files: "set[str]" = set()      # rels the agent itself viewed/edited/greped
+_ss_acquired_symbols: "set[str]" = set()    # symbols the agent itself greped/edited
+_ss_edit_events: "list[tuple[str, int, bool]]" = []   # (exact_rel, step, write_ok)
+_ss_test_events: "list[tuple[int, bool]]" = []         # (step, passed)
+_ss_pass_tokens: "set[str]" = set()         # tokens observed in PASSING test events
+_ss_test_fail_counts: "dict[str, int]" = {}  # normalized test cmd -> consecutive fails, edit-cleared
+_ss_delivered_entsets: "dict[str, list[frozenset]]" = {}  # fact class -> delivered entity sets
+_ss_pending_acks: "list[dict]" = []          # deliveries awaiting a model acknowledgment
+_ss_obl_open_cache: "tuple[int, bool]" = (-1, False)  # (action_count, value) per-turn memo
+
+_SS_ACK_WINDOW = 6  # turns to wait for a model ack before recording ack:false
+
+
+def _ss_reset() -> None:
+    """F3 reset law — clear every SS ledger per attempt so an in-process retry (and
+    cross-case test reuse) starts on a fresh slate. Byte-identical in production
+    (fresh process per attempt); these are host-side only (never model bytes)."""
+    global _ss_obl_open_cache
+    _ss_acquired_files.clear()
+    _ss_acquired_symbols.clear()
+    _ss_edit_events.clear()
+    _ss_test_events.clear()
+    _ss_pass_tokens.clear()
+    _ss_test_fail_counts.clear()
+    _ss_delivered_entsets.clear()
+    _ss_pending_acks.clear()
+    _ss_obl_open_cache = (-1, False)
+
+
+# --- flag readers (each default-OFF -> byte-identical) ----------------------
+def _ss_enabled(var: str) -> bool:
+    if _GT_BASELINE:
+        return False
+    return os.environ.get(var, "").strip().lower() not in ("", "0", "false", "no", "off")
+
+
+def _ss_novelty_on() -> bool:      return _ss_enabled("GT_SS_NOVELTY")
+def _ss_dedup2_on() -> bool:       return _ss_enabled("GT_SS_DEDUP2")
+def _ss_coherence_v2_on() -> bool: return _ss_enabled("GT_SS_COHERENCE_V2")
+def _ss_recovery_v2_on() -> bool:  return _ss_enabled("GT_SS_RECOVERY_V2")
+def _ss_provenance_on() -> bool:   return _ss_enabled("GT_SS_PROVENANCE")
+def _ss_late_drop_on() -> bool:    return _ss_enabled("GT_SS_LATE_DROP")
+def _ss_ack_metrics_on() -> bool:  return _ss_enabled("GT_SS_ACK_METRICS")
+
+
+# --- fact-class scopes ------------------------------------------------------
+# FACTUAL classes gated by novelty / entity-dedup. Nudge classes whose value is
+# timing/salience (recovery / edit.syntax / detect.* / l5.* / verify.*) are NOT
+# here -> exempt by construction (never gated).
+_SS_NOVELTY_GATED: frozenset = frozenset({
+    "l3.contract", "l3b.evidence", "consensus.scope", "consensus.scope_map",
+    "obligation.resurface", "obligation.unexercised", "spec.obligation",
+})
+_SS_OBLIGATION_KINDS: frozenset = frozenset({
+    "obligation.resurface", "obligation.unexercised", "spec.obligation",
+})
+# Feature-2 FACT GROUPS (spec refinement 2026-07-13): entity-set containment dedup
+# operates within a GROUP, not an exact class — the proven arm-4 duplicate cluster
+# (conan-17092) CROSSED classes (m13 l3b.evidence citing migrations.py:48 caller lines;
+# m49 l3.contract re-delivering a SUBSET of that same set). Per-class keys would miss it.
+# ``caller_facts`` = the caller-contract / resolved-witness family + its Gateway aliases.
+# Nudge / recovery / obligation classes are DELIBERATELY absent (their value is timing/
+# salience, never containment). No group -> dedup2 never touches the class.
+_SS_DEDUP_GROUP: "dict[str, str]" = {
+    "l3.contract": "caller_facts",
+    "l3b.evidence": "caller_facts",
+    "caller_contract": "caller_facts",   # Gateway alias
+    "caller_break": "caller_facts",       # Gateway alias (aliases to caller_contract)
+}
+
+
+def _ss_dedup_group(kind: str) -> "str | None":
+    """The feature-2 dedup GROUP for ``kind`` (containment is episode-scoped within the
+    group), or None when the class is outside every group (never dedup2-suppressed)."""
+    return _SS_DEDUP_GROUP.get(kind)
+
+
+# --- path / entity extraction ----------------------------------------------
+# A path-shaped token: an optional leading '/', a word start, then '/'- or '.'-
+# joined segments ending in a dotted suffix (src/x.py, /tmp/z.py, migrations.py).
+_SS_PATH_TOKEN_RE = re.compile(r"/?[\w][\w.+\-]*(?:[/\\][\w.+\-]*)*\.[A-Za-z0-9_]+")
+# Call-shaped and dotted-qualified symbols — high signal, low prose noise.
+_SS_CALL_SYM_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]{2,})\s*\(")
+_SS_QUAL_SYM_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]{2,}(?:\.[A-Za-z_][A-Za-z0-9_]*)+)\b")
+_SS_DOC_EXTS = (".txt", ".md", ".rst", ".cfg", ".ini", ".toml", ".json", ".yaml",
+                ".yml", ".xml", ".po")
+# Generated-artifact DIRECTORY segments (feature 5). ``coverage*`` handled separately.
+_SS_GEN_DIR_SEGMENTS: frozenset = frozenset({
+    "htmlcov", ".git", "node_modules", "dist", "build", "__pycache__",
+})
+
+
+def _ss_path_tokens(text: str) -> "list[str]":
+    """Path-shaped tokens in ``text`` that are a real repo path (contains a slash)
+    or carry a source/doc extension — a bare dotted attribute (``self.method``) is
+    NOT a path (correct-or-quiet: never mint a false path entity)."""
+    out: "list[str]" = []
+    for tok in _SS_PATH_TOKEN_RE.findall(text or ""):
+        low = tok.lower()
+        if ("/" in tok or "\\" in tok
+                or low.endswith(_SOURCE_EXTS) or low.endswith(_SS_DOC_EXTS)):
+            out.append(tok)
+    return out
+
+
+def _ss_extract_paths(text: str, root: str = "") -> "set[str]":
+    """Normalized repo-relative file paths cited in a payload (leak-safe: PATHS)."""
+    out: "set[str]" = set()
+    for tok in _ss_path_tokens(text):
+        n = _norm_fp(_to_repo_rel(tok, root))
+        if n:
+            out.add(n)
+    return out
+
+
+def _ss_extract_symbols(text: str) -> "set[str]":
+    """Code symbols cited in a payload — call-shaped (``foo(``) + dotted-qualified
+    (``a.b.c``). Prose words (no ``(``, no internal dot) are excluded, so the entity
+    set discriminates FACTS without collapsing on English narration."""
+    out: "set[str]" = set()
+    t = text or ""
+    out.update(_SS_CALL_SYM_RE.findall(t))
+    for m in _SS_QUAL_SYM_RE.findall(t):
+        out.add(m)
+        out.update(p for p in m.split(".") if len(p) >= 3)
+    return out
+
+
+def _ss_code_idents(text: str) -> "set[str]":
+    """Requirement/subject symbols in an obligation block: snake_case / CamelCase
+    identifiers (len>=4) plus call/dotted symbols. Lowercase prose words carry no
+    ``_`` and no internal caps, so they are excluded (correct-or-quiet)."""
+    out: "set[str]" = set()
+    for tok in _BLOCK_TOKEN_RE.findall(text or ""):
+        if len(tok) < 4:
+            continue
+        if "_" in tok or (any(c.isupper() for c in tok[1:]) and any(c.islower() for c in tok)):
+            out.add(tok)
+    out |= _ss_extract_symbols(text)
+    return out
+
+
+def _ss_entity_set(text: str, root: str = "") -> frozenset:
+    """The (leak-safe) entity set of a payload: cited file paths + code symbols.
+    Feature-2 dedup key #2 is (fact class, this set)."""
+    return frozenset(_ss_extract_paths(text, root) | _ss_extract_symbols(text))
+
+
+def _ss_provenance_bad_path(path: str, root: str = "") -> bool:
+    """True iff ``path`` is (a) under tmp/, (b) a generated-artifact dir
+    (htmlcov/ coverage* .git/ node_modules/ dist/ build/ __pycache__), or (c)
+    outside the repo root (absolute + not under root/container-root, or a ``../``
+    escape). Parameter-free segment/prefix membership."""
+    p = (path or "").replace("\\", "/").strip()
+    if not p:
+        return False
+    # (c) parent-escape
+    if p.startswith("../") or "/../" in p:
+        return True
+    # (c) absolute path not under the repo/container root
+    if p.startswith("/"):
+        nroot = (root or "").replace("\\", "/").rstrip("/")
+        under = bool(nroot) and (p == nroot or p.startswith(nroot + "/"))
+        if not under:
+            for cr in globals().get("_CONTAINER_ROOTS", ()):
+                if p.startswith(cr):
+                    under = True
+                    break
+        if not under:
+            return True  # (covers absolute /tmp/... too)
+    segs = p.lstrip("/").split("/")
+    parents = [s.lower() for s in segs[:-1]]
+    base = segs[-1].lower() if segs else ""
+    # (a) tmp anywhere in the path
+    if any(s in ("tmp", "temp", ".tmp") for s in parents):
+        return True
+    # (b) generated-artifact directory segment
+    for s in parents:
+        if s in _SS_GEN_DIR_SEGMENTS or s.startswith("coverage"):
+            return True
+    # (b) generated-artifact basename (.coverage / coverage.xml)
+    if base == ".coverage" or base.startswith("coverage."):
+        return True
+    return False
+
+
+def _ss_line_has_bad_path(line: str, root: str) -> bool:
+    return any(_ss_provenance_bad_path(tok, root) for tok in _ss_path_tokens(line))
+
+
+def _ss_payload_has_content(text: str) -> bool:
+    """True iff ``text`` has a NON-tag, non-blank content line (a tag-only husk is
+    treated as empty for the provenance drop-whole decision)."""
+    for ln in (text or "").split("\n"):
+        s = ln.strip()
+        if s and not s.startswith("<gt-") and not s.startswith("</gt-"):
+            return True
+    return False
+
+
+def _ss_provenance_filter(text: str, root: str = "") -> str:
+    """Drop each payload LINE citing a scratch/generated/outside-root path. Returns
+    the filtered text (byte-identical when nothing is dropped)."""
+    if not text:
+        return text
+    kept: "list[str]" = []
+    dropped = False
+    for ln in text.split("\n"):
+        if _ss_line_has_bad_path(ln, root):
+            dropped = True
+            continue
+        kept.append(ln)
+    return "\n".join(kept) if dropped else text
+
+
+def _ss_novelty_suppresses(kind: str, text: str, root: str = "", *, is_loc: bool = False) -> bool:
+    """Feature 1 STEP-BEHIND gate: True iff every entity the FACTUAL payload cites is
+    already in the acquisition ledger (the agent demonstrably has it). Path-driven:
+    a block whose cited files were ALL opened/edited by the agent is step-behind (the
+    agent already holds those files' symbols); a path-less block requires every cited
+    symbol greped/edited. ``is_loc`` (a localization-class gateway fact — the def/ref
+    partition) is gated too. Non-factual (nudge) kinds are never gated. Correct-or-quiet:
+    any un-acquired entity -> deliver."""
+    if kind not in _SS_NOVELTY_GATED and not is_loc:
+        return False
+    paths = _ss_extract_paths(text, root)
+    syms = _ss_extract_symbols(text)
+    if not paths and not syms:
+        return False
+    if paths:
+        return all(p in _ss_acquired_files for p in paths)
+    return all(s in _ss_acquired_symbols for s in syms)
+
+
+def _ss_dedup2_suppresses(kind: str, text: str, root: str = "", *, is_loc: bool = False) -> bool:
+    """Feature 2 ENTITY-SET dedup: True iff this fact's entity set is EQUAL TO or a
+    SUBSET OF an already-delivered fact in the SAME dedup GROUP (episode-scoped
+    containment — kills the byte-distinct semantic repeat that byte-dedup passes, incl.
+    the CROSS-class conan-17092 migrations cluster). Parameter-free (subset test); NO
+    fuzzy similarity threshold (a threshold risks suppressing a novel fact and breaks
+    correct-or-quiet — the sanctioned fix for a true paraphrase-dup is a canonical-key
+    exact match, never a threshold)."""
+    grp = _ss_dedup_group(kind) or ("localization" if is_loc else None)
+    if grp is None:
+        return False
+    ents = _ss_entity_set(text, root)
+    if not ents:
+        return False
+    for prior in _ss_delivered_entsets.get(grp, ()):  # equal or subset of a prior in-group fact
+        if ents <= prior:
+            return True
+    return False
+
+
+def _ss_late_drop_suppresses(kind: str, text: str, *, is_loc: bool = False) -> bool:
+    """Feature 6: True iff this obligation/resurface item (or a localization fact,
+    ``is_loc``) names code symbols that were ALL already covered by an observed PASSING
+    test event (the "fired untested after GREEN" class). Uses the seam's OWN passing-test
+    token record — no new parsing surface. Correct-or-quiet: no named symbol, or any
+    symbol not passing-tested -> deliver."""
+    if kind not in _SS_OBLIGATION_KINDS and not is_loc:
+        return False
+    syms = _ss_code_idents(text)
+    if not syms:
+        return False
+    return all(s in _ss_pass_tokens for s in syms)
+
+
+def _ss_any_content_gate_on() -> bool:
+    """True iff ANY SS content gate (provenance/novelty/late-drop/dedup2) or the ack
+    watch is active — the guard that keeps the gateway/pool screen path byte-identical
+    when every SS flag is off (no screen, no thunk wrap)."""
+    return (_ss_provenance_on() or _ss_novelty_on() or _ss_late_drop_on()
+            or _ss_dedup2_on() or _ss_ack_metrics_on())
+
+
+def _ss_screen_delivery(kind: str, text: str, root: str = "", *,
+                        is_loc: bool = False) -> "tuple[bool, str]":
+    """Run the SS-0 content gates over a would-be delivery (provenance -> novelty ->
+    late-drop -> dedup2). Returns (suppress, reason). This is the ONE screen shared by
+    the gateway/steer pool-add paths (which BYPASS ``_lane_a_deliver``) so the SS gates
+    reach the DEF/REF partition + steer facts under the production Super-Mode arbiter,
+    not only the Lane-A blocks. Each branch is flag-gated -> (False, '') when all off."""
+    # provenance: suppress WHOLE only when filtering leaves no content (the gateway text
+    # is already rendered — a partial bad line stays, correct-or-quiet).
+    if _ss_provenance_on():
+        filt = _ss_provenance_filter(text, root)
+        if filt != text and not _ss_payload_has_content(filt):
+            return True, "ss_provenance"
+    if _ss_novelty_on() and _ss_novelty_suppresses(kind, text, root, is_loc=is_loc):
+        return True, "ss_step_behind"
+    if _ss_late_drop_on() and _ss_late_drop_suppresses(kind, text, is_loc=is_loc):
+        return True, "ss_late"
+    if _ss_dedup2_on() and _ss_dedup2_suppresses(kind, text, root, is_loc=is_loc):
+        return True, "ss_semantic_dup"
+    return False, ""
+
+
+def _ss_record_delivered(kind: str, text: str, root: str = "", *, is_loc: bool = False) -> None:
+    """On a REAL delivered outcome: record the entity set (feature 2) + queue an ack
+    watch (feature 7). Both gated -> no-op + zero extra state when the flags are off."""
+    try:
+        if _ss_dedup2_on() and text:
+            grp = _ss_dedup_group(kind) or ("localization" if is_loc else None)
+            if grp is not None:
+                ents = _ss_entity_set(text, root)
+                if ents:
+                    _ss_delivered_entsets.setdefault(grp, []).append(ents)
+        _ss_note_delivery_for_ack(kind, text)
+    except Exception:  # noqa: BLE001 — bookkeeping must never break delivery
+        pass
+
+
+# --- coherence V2 (feature 3) ----------------------------------------------
+def _ss_coherence_churn(rel: str) -> "int | None":
+    """Validated churn for ``rel``: count ONLY successful writes to THIS EXACT path
+    (edit-event records — never reindex/hook fires, view reads, or basename
+    collisions), and require NO passing test between the first and last counted write.
+    Returns the churn (>=3) or None (<=2 writes, or a passing test intervened)."""
+    writes = [step for (r, step, ok) in _ss_edit_events if r == rel and ok]
+    if len(writes) <= 2:
+        return None
+    lo, hi = writes[0], writes[-1]
+    for (step, passed) in _ss_test_events:
+        if passed and lo < step < hi:
+            return None  # a passing test between edits -> not "overwriting blind"
+    return len(writes)
+
+
+# --- recovery V2 (feature 4) -----------------------------------------------
+def _ss_recovery_eligible() -> bool:
+    """Recovery eligibility: the SAME test-classified command observed with FAILING
+    output at least TWICE with NO intervening edit event (an edit clears the counter;
+    a pass clears that command's streak). Releasing on the SECOND qualifying repeat is
+    inherent — eligibility flips True at the 2nd fail, so a genuine stall delivers at
+    repeat-2 (never held 11x) while a passing/one-off/differing-output turn stays
+    ineligible."""
+    return any(c >= 2 for c in _ss_test_fail_counts.values())
+
+
+# --- SS-1 arbiter signals (ADDENDUM 2, GT_SS_ARBITER_V2) --------------------
+# The seam populates the three global_arbiter.Candidate fields where it HOLDS the signal.
+# All are read by arbitrate() / _repair_support ONLY under GT_SS_ARBITER_V2, so populating
+# them is byte-identical when that flag is off (and _ga_make_candidate runs only under the
+# global arbiter). rendered_chars comes from the plane text at the call site; the two below
+# are the derived signals.
+def _ss_obligations_open() -> bool:
+    """True while the pre-submit-COMPLETENESS point is still live — an unresolved obligation
+    (an obligation symbol not yet in the observed tested tokens) OR a GT-scope file not yet
+    edited. This is what keeps a PREVENTIVE scope/caller fact from being late-suppressed at a
+    review/test boundary (SS-1 _repair_support relaxation). Memoized per turn (the scope BFS
+    is bounded, not free). Correct-or-quiet: any fault -> False (inert default)."""
+    global _ss_obl_open_cache
+    if _ss_obl_open_cache[0] == _action_count:
+        return _ss_obl_open_cache[1]
+    val = False
+    try:
+        obl = _obligation_symbol_set()
+        if obl and not (obl <= _oracle_tested_tokens):
+            val = True
+    except Exception:  # noqa: BLE001 — absent artifact -> not "open"
+        pass
+    if not val:
+        try:
+            edited = {_norm_rel(r) for r in _oracle_edited_rels}
+            scope = _verified_scope_component(edited)
+            if scope and (scope - edited):   # an in-scope file remains unedited
+                val = True
+        except Exception:  # noqa: BLE001
+            pass
+    _ss_obl_open_cache = (_action_count, val)
+    return val
+
+
+def _ss_def_ref_delivered(target: str) -> bool:
+    """True iff a def_ref_partition (the post_search Listen-Lattice answer) for this SYMBOL
+    target was ALREADY delivered this episode — the ONLY sanctioned localization retire
+    (SS-1 REASON_REDUNDANT). Reuses the existing ``_search_seen`` 'answered' ledger — no new
+    tracking surface. A file-path target (no symbol stem) -> False (the acquired / novelty
+    gates cover 'the agent already has the file')."""
+    if not target or "/" in target or "\\" in target:
+        return False
+    try:
+        e = _search_seen.get(_norm_stem(target))
+        return bool(e and e.get("answered"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+# --- acquisition observe (feature 1) ---------------------------------------
+def _ss_observe_turn(kkind: "str | None", kf: "str | None", cmd: str,
+                     orig_out: str, root: str) -> None:
+    """Record what the agent ITSELF acquired this turn, per the GT_SS_NOVELTY entity model
+    ``{files VIEWED/EDITED + symbols GREPED}``: files it opened (post_view/post_edit) or
+    named in the command (``cat X``/``open X``), and the SYMBOL it greped. Leak-safe (paths
+    + the agent's own probe tokens). Best-effort; populated unconditionally (host-side, zero
+    observation bytes) and read only under the SS flags.
+
+    A grep's HIT PATHS are deliberately NOT counted as acquired FILES: seeing ``run`` matched
+    in a grep line is not the same as having VIEWED that file's contents, and the def/ref
+    partition's whole job is to report those def sites with ref/caller structure the raw grep
+    line lacks. A greped symbol goes to ``_ss_acquired_symbols``; the file becomes acquired
+    only when the agent actually opens/edits it. (This is the semantics the ss_gate S1 survive
+    case enforces — mod_b greped-but-not-viewed stays NOVEL.)"""
+    try:
+        if kkind in ("post_view", "post_edit") and kf:
+            _ss_acquired_files.add(_norm_fp(_to_repo_rel(kf, root)))
+        _ss_acquired_files.update(_command_path_targets(cmd or ""))
+        if _search_pattern(cmd or ""):
+            _ss_acquired_symbols.update(_search_probe_tokens(cmd or ""))
+    except Exception:  # noqa: BLE001 — observation must never break the turn
+        pass
+
+
+# --- ack metrics (feature 7) -----------------------------------------------
+def _ss_model_text(action, cmd: str) -> str:
+    """The MODEL-authored text for this turn: the command plus any reasoning field the
+    action carries. Cross-harness best-effort (mini-swe carries ``command``)."""
+    parts = [cmd or ""]
+    if isinstance(action, dict):
+        for k in ("thought", "thinking", "reasoning", "content", "message", "text"):
+            v = action.get(k)
+            if isinstance(v, str) and v:
+                parts.append(v)
+    return "\n".join(parts)
+
+
+def _ss_ack_snippet(text: str) -> str:
+    """A distinctive constraint substring for the "quotes the constraint" ack check."""
+    for ln in (text or "").split("\n"):
+        s = ln.strip()
+        if s and not s.startswith("<gt-") and not s.startswith("</gt-"):
+            s2 = s.lstrip("-* ").strip()
+            if len(s2) >= 16:
+                return s2[:40]
+    return ""
+
+
+def _ss_note_delivery_for_ack(kind: str, text: str) -> None:
+    """Queue a delivered block for the acknowledgment watch (host-side only)."""
+    if not _ss_ack_metrics_on() or not text:
+        return
+    try:
+        _ss_pending_acks.append({
+            "kind": kind,
+            "ents": _ss_entity_set(text),
+            "snip": _ss_ack_snippet(text).lower(),
+            "step": _action_count,
+            "sha": hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()[:16],
+        })
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _ss_emit_ack_row(rec: dict, acked: bool) -> None:
+    """Feature 7 instrument: one host-side ledger row (ZERO observation bytes) joining
+    a delivery (by content_sha256_16) to whether a later model message referenced it.
+
+    The row carries ``outcome='delivered'`` so the ack rides the SAME durable-ledger view
+    the delivery it annotates lives on (the offline consumption reader groups a delivery and
+    its ack by ``content_sha256_16``). It stays UNAMBIGUOUS as an ack — not a real payload —
+    via ``event_type='ack'`` + ``reason='ss_ack'`` + ``chars_delivered=0``, so every
+    delivered-payload / dose / leak view (which requires ``chars_delivered>0``) excludes it.
+    Emitted ONLY under GT_SS_ACK_METRICS (see the gated callers), so it never appears in the
+    flag-off ledger (byte-identical off)."""
+    _ledger_line_direct({
+        "layer": rec.get("kind", ""), "event_type": "ack", "file_path": "",
+        "outcome": "delivered", "reason": "ss_ack", "ack": bool(acked),
+        "ack_m": _action_count - int(rec.get("step", _action_count)),
+        "content_sha256_16": rec.get("sha", ""), "seal_scope": "block",
+        "chars_delivered": 0, "iteration": _action_count})
+
+
+def _ss_scan_acks(model_text: str) -> None:
+    """Feature 7: for each pending delivery from a PRIOR turn, check whether THIS turn's
+    model-authored text references a delivered entity or quotes the constraint; stamp
+    ack:true (+ ack_m offset) or, past the window, ack:false. Host-side only."""
+    if not _ss_ack_metrics_on() or not _ss_pending_acks:
+        return
+    mt = (model_text or "").lower()
+    still: "list[dict]" = []
+    for rec in _ss_pending_acks:
+        if int(rec.get("step", 0)) >= _action_count:
+            still.append(rec)  # delivered this very turn -> not "subsequent" yet
+            continue
+        acked = any(len(e) >= 4 and e.lower() in mt for e in rec.get("ents", ()))
+        if not acked and rec.get("snip") and rec["snip"] in mt:
+            acked = True
+        if acked:
+            _ss_emit_ack_row(rec, True)
+        elif _action_count - int(rec.get("step", 0)) > _SS_ACK_WINDOW:
+            _ss_emit_ack_row(rec, False)
+        else:
+            still.append(rec)
+    _ss_pending_acks[:] = still
+
+
+# --- edit / test observation (features 3, 4, 6) ----------------------------
+_SS_WRITE_FAIL_RE = re.compile(
+    r"\bno such file\b|\bcannot (?:open|find|stat|create)\b|\bpatch (?:failed|does not apply)\b"
+    r"|hunk failed|malformed patch|\bcommand not found\b|\bpermission denied\b"
+    r"|no replacement was performed|did not appear (?:verbatim|in)|multiple occurrences"
+    r"|\bfatal:|unexpected eof", re.IGNORECASE)
+
+
+def _ss_write_ok(orig_out: str) -> bool:
+    """A write is counted as SUCCESSFUL unless its observation carries a clear edit-
+    failure marker (conservative: correct-or-quiet)."""
+    return not bool(_SS_WRITE_FAIL_RE.search(orig_out or ""))
+
+
+def _ss_record_edit(rel: str, cmd: str, orig_out: str) -> None:
+    """Record a genuine per-turn source-edit event for coherence-V2 + recovery-V2:
+    (exact rel, step, ok). An edit clears the recovery fail-repeat counters (an
+    intervening edit resets the 'same failing command' streak)."""
+    try:
+        _ss_edit_events.append((rel or "", _action_count, _ss_write_ok(orig_out)))
+        _ss_test_fail_counts.clear()  # no-intervening-edit rule for recovery-V2
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _ss_record_test(cmd: str, orig_out: str, failed: bool, passed: bool) -> None:
+    """Record an observed test event: (step, passed) for coherence-V2's interval check,
+    the passing-token set for late-drop, and the per-command fail streak for
+    recovery-V2 (fail -> +1; pass -> clear that command's streak)."""
+    try:
+        _ss_test_events.append((_action_count, passed))
+        if passed:
+            _ss_pass_tokens.update(
+                t for t in _BLOCK_TOKEN_RE.findall(orig_out or "") if len(t) >= 3)
+            _ss_pass_tokens.update(
+                t for t in _BLOCK_TOKEN_RE.findall(cmd or "") if len(t) >= 3)
+        norm = (cmd or "").strip()
+        if norm:
+            if failed:
+                _ss_test_fail_counts[norm] = _ss_test_fail_counts.get(norm, 0) + 1
+            elif passed:
+                _ss_test_fail_counts.pop(norm, None)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _augment_output(action, out) -> None:
@@ -11188,6 +11924,10 @@ def _augment_output(action, out) -> None:
             _covering_exec_pending["advisory"] = False
             # D7: judge the PREVIOUS delivery from THIS turn's command.
             _ledger_judge_pending(cmd or "")
+            # SS feature 7 (GT_SS_ACK_METRICS): scan THIS turn's model-authored text
+            # for an acknowledgment of a PRIOR delivery (host-side ledger only, zero
+            # observation bytes; no-op when the flag is off).
+            _ss_scan_acks(_ss_model_text(action, cmd or ""))
             # severities are COMPUTED floats (composite_severity) — int-base
             # constants coexist; the gate sorts numerically either way.
             cands: list[tuple[float, str, str, bool]] = []
@@ -11286,6 +12026,14 @@ def _augment_output(action, out) -> None:
                         _oracle_edited_lines_by_file.setdefault(
                             _krel, []).extend(_line_ranges)
                 _edit_churn[_krel] = _edit_churn.get(_krel, 0) + 1
+                # SS features 3/4: record a genuine per-turn edit event (exact rel,
+                # step, write-ok) for coherence-V2's exact-path churn + the no-passing-
+                # test-between check, and clear the recovery-V2 fail-repeat streak (an
+                # intervening edit resets "same failing command"). Host-side; consumed
+                # only under the SS flags (byte-identical off). Also mark the edited
+                # tokens as agent-acquired symbols for the novelty gate.
+                _ss_record_edit(_krel, cmd or "", _orig_out)
+                _ss_acquired_symbols.update(_edit_toks)
                 # H0 (Stage 4): open an edit->test cycle at the FIRST source
                 # edit after the last observed test result.
                 if _cycle_edit_start is None:
@@ -11451,6 +12199,13 @@ def _augment_output(action, out) -> None:
                 # are a new cycle, not thrash.
                 if _TEST_PASS_RE.search(_orig_out):
                     _edit_churn.clear()
+                # SS features 3/4/6: record the observed test event — (step, passed)
+                # for coherence-V2's interval check, the passing-token set for
+                # late-drop, and the per-command fail streak for recovery-V2. Reuses
+                # the tokens/regexes the seam already computed (no new parsing surface);
+                # host-side, consumed only under the SS flags (byte-identical off).
+                _ss_passed = bool(_TEST_PASS_RE.search(_orig_out)) and not _last_test_outcome_failed
+                _ss_record_test(cmd or "", _orig_out, _last_test_outcome_failed, _ss_passed)
             # L3b: evidence candidate (view/edit keyed) — RELEVANCE-gated, but
             # the view/edit event bounds relevance (§15.3 VIEW policy): when the
             # trigger IS a resolved post_view/post_edit, waive the empty-focus
@@ -11495,6 +12250,12 @@ def _augment_output(action, out) -> None:
             # Arbiter ON + GT_DCC on -> ZERO production + ONE per-episode retirement note; else the
             # EXACT legacy _dcc_block path (byte-identical off / arbiter-off / DCC-off).
             _concern_lane_a_append(lane_a, _kkind, _kf, cmd, _orig_out, _ga_on)
+            # SS feature 1 (GT_SS_NOVELTY): record what the agent ITSELF acquired this
+            # turn (files viewed/edited/named, grep hit paths, greped symbols) BEFORE
+            # gating this turn's deliveries — a fact about a file the agent just opened
+            # is step-behind. Host-side (paths + the agent's own probes); populated
+            # unconditionally (zero observation bytes), read only under the SS flags.
+            _ss_observe_turn(_kkind, _kf, cmd or "", _orig_out, _root())
             # ── DELIVER LANE A NOW — EARLY, isolated, BEFORE any Lane B logic ──
             # THE NON-NEGOTIABLE ORDERING (the entire point of the bulkhead):
             # the contract/evidence/cochange reach the agent here, each in its
@@ -11554,7 +12315,22 @@ def _augment_output(action, out) -> None:
                         _crash_emit("spec.obligation")
                         _ob = None
                     if _ob is not None:
-                        cands.append((_ob[0], "spec.obligation", _ob[1], True))
+                        # SS features 6/1: an obligation checklist whose symbols were
+                        # already GREEN-tested (ss_late) or whose entities the agent
+                        # already holds (ss_step_behind) is suppressed BEFORE it enters
+                        # the steer pool. Off -> the candidate is appended exactly as
+                        # before (byte-identical).
+                        _ob_late = _ss_late_drop_on() and _ss_late_drop_suppresses(
+                            "spec.obligation", _ob[1])
+                        _ob_behind = (not _ob_late) and _ss_novelty_on() and \
+                            _ss_novelty_suppresses("spec.obligation", _ob[1], _root())
+                        if _ob_late or _ob_behind:
+                            _runtime_ledger_record(
+                                kind="spec.obligation",
+                                outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
+                                reason=("ss_late" if _ob_late else "ss_step_behind"))
+                        else:
+                            cands.append((_ob[0], "spec.obligation", _ob[1], True))
                 # L5 nudges: premise-sensed event candidates (latches unchanged).
                 # Stage 3: loop_arm=False — detect.loop owns loops on this route.
                 # FIX 1 (2026-06-11): scaffold_arm=False — scaffold_trap RETIRED on
