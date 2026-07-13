@@ -263,6 +263,18 @@ _SUPER_MODE_MEMBERS: frozenset[str] = frozenset(
         # find_spec) -> never a FALSE abort; forwarded in gt_ae_block.sh; pinned in
         # test_ae_forward_profile2_completeness + the SS-4 member pin.
         "GT_SS_ELIGIBILITY",      # SS-4 — cd-$() prefix widening (post_search/loc_reslot eligibility)
+        # SS-8 (2026-07-13): the SHADOW-HOLDOUT causal instrument (gt-math E10). Per eligible
+        # advisory delivery a deterministic seed decides DELIVER vs HOLDOUT, so ONE benchmark run
+        # yields a delivered-vs-withheld contrast per fact class. UNLIKE the other SS members this
+        # one IS backed by a single importable module (groundtruth.runtime.shadow_holdout) -> it is
+        # MAPPED in _MEMBER_CAPABILITY_MODULE below (fail-closed on a stale substrate lacking the
+        # engine, like GT_VERIFY_EXECUTE -> covering_runner). Default-OFF byte-identical; the
+        # separate rate knob GT_SS_SHADOW_RATE defaults "0" (never withhold even when the flag is
+        # on), so an active Profile-2 activates the instrument INERT — no bytes are ever withheld
+        # until an E10 eval explicitly sets the rate. Read in-container by gt_mini_patch's two
+        # delivery chokepoints; forwarded in gt_ae_block.sh (with the rate knob); pinned in
+        # test_ss8_* + the AE-forward completeness pin.
+        "GT_SS_SHADOW",           # SS-8 — shadow-holdout causal instrument (E10)
     }
 )
 
@@ -593,6 +605,10 @@ _MEMBER_CAPABILITY_MODULE: dict[str, str] = {
     "GT_SCOPE_NATIVE": "groundtruth.runtime.native_render",
     "GT_CERT_DELIVERY": "groundtruth.runtime.native_render",
     "GT_LOC_RESLOT": "groundtruth.runtime.gateway",
+    # SS-8: the shadow-holdout instrument IS a single importable engine (pure/stdlib-only), so
+    # unlike the seam-property SS flags it maps to its backing module -> the Profile-2 preflight
+    # fails CLOSED on a stale substrate whose synced source lacks shadow_holdout.
+    "GT_SS_SHADOW": "groundtruth.runtime.shadow_holdout",
 }
 
 

@@ -162,6 +162,7 @@ _INFRA_MEMBER_MEDIATES: dict[str, tuple[str, ...]] = {
     "GT_SS_EXEC_TRUTH": ("covering_red",),                # SS-2 mediator: runner-eligible covering selection; kills unexecuted assurances
     "GT_SS_SUBMIT_RED": ("submit_refusal",),              # SS-2 mediator: submit gate consumes observed RED (reached only under GT_VERIFY_EXECUTE=1)
     "GT_SS_ELIGIBILITY": (),                              # SS-4 mediator: cd-$() prefix widening for search isolation (post_search/loc legs)
+    "GT_SS_SHADOW": (),                                   # SS-8 mediator: shadow-holdout deliver/withhold across ALL participating advisory classes (E10 causal instrument; inert at rate 0)
 }
 
 # Backing-module → producer agreement drift-guard: these members' _MEMBER_CAPABILITY_MODULE

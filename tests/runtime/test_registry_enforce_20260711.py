@@ -357,6 +357,12 @@ def test_profile_2_is_profile_1_plus_super_mode_members():
         # unblocking post_search/def_partition + loc_reslot. Default-OFF seam code property,
         # unmapped-by-convention. Dropping/adding it here makes this bite.
         "GT_SS_ELIGIBILITY",
+        # SS-8 (2026-07-13): the SHADOW-HOLDOUT causal instrument (gt-math E10) — per eligible
+        # advisory delivery a deterministic seed decides DELIVER vs HOLDOUT. Backed by an
+        # importable engine (groundtruth.runtime.shadow_holdout), so UNLIKE the other SS members
+        # it IS mapped in _MEMBER_CAPABILITY_MODULE (fail-closed). Default-OFF; the rate knob
+        # GT_SS_SHADOW_RATE defaults 0 so Profile-2 arms it INERT. Dropping/adding it here bites.
+        "GT_SS_SHADOW",
     }
     # SM-4: GT_EDIT_OVERLAY is now profile-activated (model-facing stale-drop) -> PRESENT.
     assert "GT_EDIT_OVERLAY" in rp.PROFILE_MEMBERS["2"]

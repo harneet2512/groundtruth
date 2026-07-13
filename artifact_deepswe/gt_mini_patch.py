@@ -7036,6 +7036,7 @@ def _runtime_ledger_record(
     file_path: str = "",
     event=None,
     content: "str | None" = None,
+    extra: "dict | None" = None,
 ) -> None:
     ev = event.value if event is not None else ""
     # In-process object (used for the in-process summary / retry state); may be the
@@ -7080,6 +7081,13 @@ def _runtime_ledger_record(
         _row["content_sha256_16"] = hashlib.sha256(
             content.encode("utf-8", "surrogatepass")).hexdigest()[:16]
         _row["seal_scope"] = "block"
+    # SS-8 (2026-07-13): an optional side-car of additional row keys (the shadow-holdout
+    # envelope metadata: fact_class / dedup_key / chars_would / shadow_rate). ``setdefault`` so
+    # a side-car key can NEVER clobber a canonical schema field. Byte-identical when ``extra`` is
+    # None/empty (the guard skips entirely) — every pre-SS-8 caller is unchanged.
+    if extra:
+        for _ek, _ev in extra.items():
+            _row.setdefault(_ek, _ev)
     _ledger_line_direct(_row)
 
 
@@ -9672,6 +9680,17 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
                     event=event,
                 )
                 continue
+            # SS-8 SHADOW-HOLDOUT (flag GT_SS_SHADOW, rate GT_SS_SHADOW_RATE, both default
+            # inert): this Lane-A fact passed every SS screen + cross-lane dedup + budget -> it
+            # WOULD deliver. A deterministic per-(task, class, content-key) seed may WITHHOLD it:
+            # zero model bytes, a shadow_holdout ledger row (the withheld render's sha only ->
+            # leak-safe). Spend the SAME content hashes as the deliver arm so the withheld fact
+            # dedups identically (one shadow row per distinct content, mirroring one DELIVERED
+            # row) and does not re-compete. Byte-identical when the flag is off or the rate is 0.
+            if _ss_shadow_withheld(kind, hc, text, file_path=krel or "", event=event):
+                _oracle_delivered_hashes.add(h)
+                _oracle_delivered_hashes.add(hc)
+                continue
             # L-1a/D-3 "per lane": one-`\n`-boundary join so a no-leading-newline block
             # cannot jam onto the previous observation. Byte-identical for `\n`-opening
             # Lane-A blocks (the tagged contract/evidence/scope all open with `\n`).
@@ -11351,6 +11370,15 @@ def _deliver_gate_winner(out, cmd, win_text, *, kkind, kf, krel, event, steer_ba
     # sealed rendered_bytes. Default-off: byte-identical.
     if _steer_native_on():
         win_text = _steer_native(win_text)
+    # SS-8 SHADOW-HOLDOUT: this gate-winning steer WOULD deliver; a deterministic seed may
+    # WITHHOLD it (zero model bytes + a shadow_holdout row carrying the withheld render's sha).
+    # Spend the winner hash so it dedups exactly like the deliver arm (the steer won its dose
+    # and does not re-fire — no re-arm). Default-OFF byte-identical (flag off / rate 0).
+    if win_text and _ss_shadow_withheld(_last_gate_winner_kind, _last_gate_winner_hash or "",
+                                        win_text, file_path=krel or kf or "", event=event):
+        if _last_gate_winner_hash:
+            _oracle_delivered_hashes.add(_last_gate_winner_hash)
+        return
     # B-15: leak-validating chokepoint (join-mode). A leaky/empty steer ships 0 bytes.
     if win_text and _gt_deliver_append(out, win_text, join=True):
         # D-5: stamp the delivered-hash ATOMICALLY with the append.
@@ -11455,6 +11483,74 @@ def _ss_late_drop_on() -> bool:    return _ss_enabled("GT_SS_LATE_DROP")
 def _ss_ack_metrics_on() -> bool:  return _ss_enabled("GT_SS_ACK_METRICS")
 def _ss_exec_truth_on() -> bool:   return _ss_enabled("GT_SS_EXEC_TRUTH")   # SS-2 feature 1/2
 def _ss_submit_red_on() -> bool:   return _ss_enabled("GT_SS_SUBMIT_RED")   # SS-2 feature 3
+
+
+# ── SS-8 SHADOW-HOLDOUT (flag GT_SS_SHADOW, rate GT_SS_SHADOW_RATE) — the E10 causal
+# instrument. Per eligible delivery a deterministic seed decides DELIVER vs HOLDOUT, so ONE
+# benchmark run yields a delivered-vs-withheld contrast per fact class (the affordable causal
+# proof). Default-OFF byte-identical; the rate defaults to "0" (never withhold even when the
+# flag is on — production-safe). See groundtruth.runtime.shadow_holdout. ──────────────────────
+def _ss_shadow_on() -> bool:       return _ss_enabled("GT_SS_SHADOW")
+
+
+def _ss_shadow_rate() -> str:
+    """The holdout fraction knob (raw string; parsed/clamped by shadow_holdout.parse_rate).
+    Default "0" = never withhold — the shadow instrument is inert even when the flag is on."""
+    return os.environ.get("GT_SS_SHADOW_RATE", "0")
+
+
+def _ss_shadow_task_id() -> str:
+    """A stable per-task seed for the deterministic holdout draw: the frozen eval seed
+    (GT_SS_SHADOW_SEED, default "") joined with the task id derived from the runtime-ledger
+    basename (``gt_runtime_ledger_<task>.jsonl``). Pure w.r.t. env; emits no model bytes."""
+    seed = os.environ.get("GT_SS_SHADOW_SEED", "")
+    base = os.path.basename(_runtime_ledger_path() or "")
+    if base.endswith(".jsonl"):
+        base = base[:-6]
+    _pref = "gt_runtime_ledger_"
+    if base.startswith(_pref):
+        base = base[len(_pref):]
+    return seed + "|" + base
+
+
+def _ss_shadow_withheld(kind: str, dedup_key: str, text: str, *,
+                        file_path: str = "", event=None) -> bool:
+    """SS-8 chokepoint consult. Called AFTER a fact won arbitration and passed EVERY SS screen
+    (it WOULD deliver): decide DELIVER vs HOLDOUT via the deterministic shadow-holdout kernel.
+
+    On HOLDOUT: write a ``shadow_holdout`` runtime-ledger row carrying the withheld render's
+    metadata — canonical fact_class, dedup_key, chars_would, and ``content_sha256_16`` of the
+    render (HASH ONLY; the withheld bytes NEVER reach any model-visible surface — leak-safe by
+    construction) — and return True so the caller delivers ZERO model bytes. Return False
+    (deliver normally) when the flag is off, the rate is 0, the class is a cardinal safety
+    class, or the bucket lands on DELIVER. FAIL-OPEN: any fault -> False (never accidentally
+    withhold or crash the delivery path)."""
+    if not text or not _ss_shadow_on():
+        return False
+    try:
+        from groundtruth.runtime.shadow_holdout import (
+            HOLDOUT as _SH_HOLDOUT, assign as _sh_assign, canonical_class as _sh_canon)
+        if _sh_assign(_ss_shadow_task_id(), kind, dedup_key or "",
+                      _ss_shadow_rate()) != _SH_HOLDOUT:
+            return False
+        _runtime_ledger_record(
+            kind=kind,
+            outcome="shadow_holdout",
+            reason="ss_shadow_holdout",
+            chars=0,               # ZERO model bytes were delivered on the holdout arm
+            file_path=file_path or "",
+            event=event,
+            content=text,          # -> content_sha256_16 seal of the WITHHELD render (leak-safe)
+            extra={
+                "chars_would": len(text),
+                "dedup_key": dedup_key or "",
+                "fact_class": _sh_canon(kind) or "",
+                "shadow_rate": _ss_shadow_rate(),
+            },
+        )
+        return True
+    except Exception:  # noqa: BLE001 — the instrument must NEVER withhold-on-error or crash delivery
+        return False
 
 
 # --- fact-class scopes ------------------------------------------------------

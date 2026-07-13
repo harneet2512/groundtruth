@@ -317,6 +317,16 @@ MEMBER_EVIDENCE: dict[str, list[str]] = {
         R + "runtime/test_ss4_eligibility.py::test_cd_dollar_not_isolated_when_flag_off",
         R + "runtime/test_ss4_lsp_ts_skip.py::test_enrich_records_honest_reason_when_flag_on",
     ],
+    # ---- SS-8 (2026-07-13) the SHADOW-HOLDOUT causal instrument (gt-math E10). Covering tests:
+    # the kernel safety allowlist + rate floor + stratification, and the seam chokepoint's
+    # withhold-with-metadata + leak-free durable row. ----
+    "GT_SS_SHADOW": [
+        R + "runtime/test_ss8_shadow_holdout.py::test_safety_classes_never_held_out_at_any_rate",
+        R + "runtime/test_ss8_shadow_holdout.py::test_rate_one_holds_out_all_participating",
+        R + "runtime/test_ss8_shadow_holdout.py::test_class_is_folded_into_the_bucket",
+        A + "test_ss8_seam_shadow_20260713.py::test_participating_class_rate1_withheld_with_metadata",
+        A + "test_ss8_seam_shadow_20260713.py::test_durable_shadow_row_is_leak_free_and_sealed",
+    ],
 }
 
 # CHECK 6 (<=1 dose + latch) node-ids — the arbiter single-dose law + Lane-A latch defer/commit.

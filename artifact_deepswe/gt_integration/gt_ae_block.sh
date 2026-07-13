@@ -271,6 +271,19 @@ GT_AE_ARGS=(
   #    profile fan-out's `export` stays DARK. Default 0 -> byte-identical when unset; Profile-2 fans
   #    it to 1 via resolve_profile. Pinned in test_ae_forward_profile2_completeness_20260712. ──
   --ae "GT_SS_ELIGIBILITY=${GT_SS_ELIGIBILITY:-0}"
+  #    SS-8 (2026-07-13) the SHADOW-HOLDOUT causal instrument (gt-math E10). GT_SS_SHADOW arms the
+  #    two seam delivery chokepoints (gt_mini_patch._ss_shadow_withheld) to consult the deterministic
+  #    holdout kernel (groundtruth.runtime.shadow_holdout); GT_SS_SHADOW_RATE is the per-class holdout
+  #    fraction (default "0" = never withhold, so Profile-2 arms the instrument INERT — byte-identical
+  #    until an E10 eval sets the rate). pier DROPS host env so forward here or the profile fan-out's
+  #    `export` stays DARK. GT_SS_SHADOW is a Profile-2 member (fanned to 1 via resolve_profile), pinned
+  #    in test_ae_forward_profile2_completeness_20260712; GT_SS_SHADOW_RATE is a knob (not a member). ──
+  --ae "GT_SS_SHADOW=${GT_SS_SHADOW:-0}"
+  --ae "GT_SS_SHADOW_RATE=${GT_SS_SHADOW_RATE:-0}"
+  #    GT_SS_SHADOW_SEED: the frozen eval seed folded into the per-task holdout draw (default ""
+  #    -> the task id alone seeds it; deterministic either way). Forwarded so an E10 eval can pin
+  #    a seed in-container (read by gt_mini_patch._ss_shadow_task_id); R1 AE-parity fail-closed. ──
+  --ae "GT_SS_SHADOW_SEED=${GT_SS_SHADOW_SEED:-}"
 
   # ── Deep 8-dp telemetry sinks (CLAUDE.md mandate) -> host-mounted /gt_out ─────
   # Without these the in-container producers default to /tmp/* and DIE with the
