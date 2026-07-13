@@ -991,6 +991,24 @@ def replay_child_main(task: str, recorded_root: Path, out_path: Path,
     return 0
 
 
+def _join_payloads(child_payload: dict) -> list[dict]:
+    """Attach the model-facing DELTA bytes (captured per pair by the child) to the delivered
+    ledger rows, keyed by iteration (pair k -> iteration k+1). Without this the oracle's
+    byte-sensitive checks (coherence exact-count, preserve diagnostics) read empty payloads
+    — the 'saw []' false-FAIL class."""
+    rows = child_payload.get("rows", [])
+    deltas: dict[int, str] = {}
+    for a in child_payload.get("applied", []):
+        if "delta" in a and isinstance(a.get("pair"), int):
+            deltas[a["pair"] + 1] = a["delta"]
+    for r in rows:
+        if _is_delivered(r) and "payload" not in r:
+            d = deltas.get(int(r.get("iteration") or -1))
+            if d is not None:
+                r["payload"] = d
+    return rows
+
+
 def spawn_replay(task: str, recorded_root: Path, snapshot_root: Path, arm_ss_env: dict[str, str],
                  apply_edits: bool, work_dir: Path, arm: str = "arm") -> dict:
     """Parent-side: set up mirrors, spawn the child replay, collect its ledger, tear down.
@@ -1002,7 +1020,7 @@ def spawn_replay(task: str, recorded_root: Path, snapshot_root: Path, arm_ss_env
     if os.environ.get("GT_SSR_REUSE_WORK") == "1" and out_json.is_file():
         try:
             payload = json.loads(out_json.read_text(encoding="utf-8"))
-            return {"rows": payload.get("rows", []), "applied": payload.get("applied", []),
+            return {"rows": _join_payloads(payload), "applied": payload.get("applied", []),
                     "error": None}
         except Exception:  # noqa: BLE001 — fall through to a fresh replay
             pass
@@ -1021,7 +1039,7 @@ def spawn_replay(task: str, recorded_root: Path, snapshot_root: Path, arm_ss_env
             return {"rows": [], "applied": [],
                     "error": f"child rc={r.returncode}: {(r.stderr or r.stdout)[-400:]}"}
         payload = json.loads(out_json.read_text(encoding="utf-8"))
-        return {"rows": payload.get("rows", []), "applied": payload.get("applied", []),
+        return {"rows": _join_payloads(payload), "applied": payload.get("applied", []),
                 "error": None}
     except SeamReplayBlocked as exc:
         return {"rows": [], "applied": [], "error": f"blocked: {exc}"}
