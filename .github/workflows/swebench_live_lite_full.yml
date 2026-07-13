@@ -924,16 +924,26 @@ jobs:
           if [ "$(wc -l < "$DS" 2>/dev/null)" -lt 100 ]; then
             GH_TOKEN="$GH_TOKEN_SECRET" gh release download pipeline-assets-v1 -p swebench_live_lite.jsonl -D benchmarks/data/ --clobber 2>/dev/null || true
           fi
+          # D5 FIX (2026-07-12): the task id MUST reach python via argv. The old `task="$MTASK"`
+          # expanded INSIDE the -c string to an unquoted python expression (`task=camel-ai__camel-1493`
+          # = a subtraction of NameErrors -- every Live-Lite id contains hyphens) -> the -c crashed ->
+          # ISSUE_TEXT empty -> the agent ran BLIND on the literal placeholder -> guaranteed unresolved.
           ISSUE_TEXT=$(python3 -c "
-          import json
-          task="$MTASK"
-          for line in open('benchmarks/data/swebench_live_lite.jsonl'):
-              r=json.loads(line)
-              if r['instance_id']==task:
-                  print(r.get('problem_statement','Fix the issue in the repository.'))
+          import json, sys
+          task = sys.argv[1]
+          for line in open('benchmarks/data/swebench_live_lite.jsonl', encoding='utf-8'):
+              r = json.loads(line)
+              if r['instance_id'] == task:
+                  print(r.get('problem_statement') or '')
                   break
-          ")
-          echo "[GT_META] issue text from: $PRO_ISSUE (${#ISSUE_TEXT} chars)"
+          " "$MTASK")
+          echo "[GT_META] issue text from dataset problem_statement (${#ISSUE_TEXT} chars)"
+          # FAIL-CLOSED (a9f0212db principle): an empty issue means a dataset miss -- abort BEFORE any
+          # container/model spend rather than blind-running a placeholder task to a guaranteed 0.
+          if [ -z "$ISSUE_TEXT" ]; then
+            echo "::error::ISSUE_TEXT empty for $MTASK (dataset miss) -- refusing blind run"
+            exit 1
+          fi
 
           # Write the config + issue text to the writable gt_out mount (not ro /opt/gt).
           # Baseline (control) arm gets the GT-stripped config (no <gt-evidence> prose);
@@ -944,8 +954,8 @@ jobs:
           else
             cp artifact_deepswe/gt_integration/deepswe_gt_pier.yaml /tmp/gt_inject/opt/gt/agent_config.yaml
           fi
-          # Write issue text to a file the container can read
-          echo "$ISSUE_TEXT" > "${HOST_GT_OUT}/issue.txt"
+          # Write issue text to a file the container can read (printf: echo would eat a leading -e/-n)
+          printf '%s\n' "$ISSUE_TEXT" > "${HOST_GT_OUT}/issue.txt"
 
           # Model-specific env vars for inside the container
           MODEL_ENV=""
@@ -1025,6 +1035,37 @@ jobs:
               fi
               echo "[GT] mini-swe-agent installed: $(command -v mini-swe-agent)"
 
+              # ── B5 interpreter resolution (2026-07-12) ─────────────────────────────────────
+              # mini-swe-agent may be installed in an ISOLATED uv-tool venv (the --python 3.11
+              # fallback above), so the container bare `python` (often <3.10 on 155/300 images)
+              # CANNOT import minisweagent -> the headless runner dies before agent.run() = the B5
+              # 0-step wash, AND the separate gt_mini_patch install patches zero env classes. Resolve
+              # the interpreter that CAN import minisweagent ONCE here and reuse it for both the GT
+              # patch install and the runner. Probe common names; else read the mini-swe-agent
+              # console-script shebang (which points AT the uv venv python, handling the /usr/bin/env
+              # form). GUARD: single-quoted docker block — NO apostrophe/single-quote anywhere here.
+              GT_PY=""
+              for _c in python3.12 python3.11 python3 python; do
+                command -v "$_c" >/dev/null 2>&1 && "$_c" -c "import minisweagent" >/dev/null 2>&1 && { GT_PY="$_c"; break; }
+              done
+              if [ -z "$GT_PY" ]; then
+                for _s in mini-swe-agent mini mini-extra; do
+                  _sp="$(command -v "$_s" 2>/dev/null || true)"
+                  [ -n "$_sp" ] || continue
+                  _line="$(head -1 "$_sp" 2>/dev/null | sed "s/^#!//")"
+                  _first="${_line%% *}"
+                  case "$_first" in
+                    */env) _rest="${_line#* }"; _cand="${_rest%% *}" ;;
+                    *) _cand="$_first" ;;
+                  esac
+                  [ -n "$_cand" ] && "$_cand" -c "import minisweagent" >/dev/null 2>&1 && { GT_PY="$_cand"; break; }
+                done
+              fi
+              [ -z "$GT_PY" ] && GT_PY=python
+              export GT_PY
+              echo "[GT] headless interpreter GT_PY=$GT_PY exe=$("$GT_PY" -c "import sys;print(sys.executable)" 2>/dev/null)"
+              echo "[GT] minisweagent module: $("$GT_PY" -c "import minisweagent;print(minisweagent.__file__)" 2>/dev/null || echo NOT-IMPORTABLE)"
+
               # Write mini-swe-agent config AND set env vars to skip interactive wizard
               mkdir -p /root/.config/mini-swe-agent
               printf "model='"$INPUT_MODEL"'\nDEEPSEEK_API_KEY=%s\nOPENROUTER_API_KEY=%s\n" "${DEEPSEEK_API_KEY:-}" "${OPENROUTER_API_KEY:-}" > /root/.config/mini-swe-agent/.env
@@ -1049,9 +1090,12 @@ jobs:
                 # (fail-closed, never self-attested). MUST precede the rl_profile call below so its
                 # subprocess inherits GT_CAPABILITY_RECEIPT. GUARD: single-quoted docker block — the
                 # fallback uses double-quoted echo "{}", NEVER an apostrophe (one closes the whole block).
-                export GT_CAPABILITY_RECEIPT="$(PYTHONPATH=/opt/gt python -m groundtruth.runtime.capability_receipt --emit-json 2>/tmp/gt_receipt_err.txt || echo "{}")"
+                # D3 (2026-07-12): run under GT_PY, not bare python — on the 155/300 images where
+                # system python is <3.10, the 3.11-targeted runtime modules crash -> empty receipt
+                # -> profile dark EXACTLY on the uv-branch images (same divergence class as B5).
+                export GT_CAPABILITY_RECEIPT="$(PYTHONPATH=/opt/gt "$GT_PY" -m groundtruth.runtime.capability_receipt --emit-json 2>/tmp/gt_receipt_err.txt || echo "{}")"
                 echo "[GT] capability receipt: ${GT_CAPABILITY_RECEIPT}"
-                _GT_PROFILE_EXPORTS="$(PYTHONPATH=/opt/gt python -m groundtruth.runtime.rl_profile --emit-exports 2>/tmp/gt_profile_err.txt || true)"
+                _GT_PROFILE_EXPORTS="$(PYTHONPATH=/opt/gt "$GT_PY" -m groundtruth.runtime.rl_profile --emit-exports 2>/tmp/gt_profile_err.txt || true)"
                 if [ -n "${_GT_PROFILE_EXPORTS}" ]; then
                   eval "${_GT_PROFILE_EXPORTS}"
                   echo "[GT] RL profile ${GT_RL_PROFILE:-2} activated in-container ($(printf %s "${_GT_PROFILE_EXPORTS}" | grep -c export) members): $(printf %s "${_GT_PROFILE_EXPORTS}" | tr "\n" " ")"
@@ -1064,7 +1108,12 @@ jobs:
               # BASELINE (control) arm: GT_BASELINE=1 -> skip entirely so NO <gt-evidence>
               # is ever appended. This is the paired-control difference from the GT arm.
               if [ "${GT_BASELINE:-0}" != "1" ] && [ -f /opt/gt/gt_mini_patch.py ]; then
-                python /opt/gt/gt_mini_patch.py --install 2>&1 || echo "WARN: gt_mini_patch install failed"
+                # Belt (defense-in-depth): run under GT_PY (has minisweagent) so _install() patches
+                # real env classes + writes the proof marker EARLY. The load-bearing delivery is the
+                # runner importing gt_mini_patch in-process (gt_headless_runner.py); this separate
+                # process only pre-writes the fail-closed marker. Under bare `python` on a uv-tool
+                # container this patched ZERO classes and wrote no marker (the pre-fix no-op).
+                PYTHONPATH=/opt/gt "$GT_PY" /opt/gt/gt_mini_patch.py 2>&1 || echo "WARN: gt_mini_patch install failed"
               else
                 echo "[GT] BASELINE mode: gt_mini_patch NOT installed (pure mini-swe-agent control arm)"
               fi
@@ -1099,7 +1148,10 @@ jobs:
               if [ -z "$GT_TASK_TEXT" ]; then GT_TASK_TEXT="$(cat /tmp/issue.txt 2>/dev/null)"; fi
               if [ -z "$GT_TASK_TEXT" ]; then GT_TASK_TEXT="Fix the issue in the repository."; fi
               export GT_RUN_TASK="$GT_TASK_TEXT"
-              python /opt/gt/gt_headless_runner.py 2>&1 || true
+              # Launch under GT_PY (the interpreter that CAN import minisweagent — see B5 resolution
+              # above), PYTHONPATH=/opt/gt so the runner imports both minisweagent AND gt_mini_patch
+              # (in-process delivery), PYTHONUNBUFFERED so the runner breadcrumbs survive a hang/kill.
+              PYTHONUNBUFFERED=1 PYTHONPATH=/opt/gt "$GT_PY" /opt/gt/gt_headless_runner.py 2>&1 || true
 
               # CRITICAL: capture the patch to the bind-mount BEFORE the container exits.
               # ROOT-CAUSE FIX (2026-07-08): the agent submission (`cat /tmp/patch.txt`) is captured
@@ -1129,15 +1181,30 @@ jobs:
           fi
           # NEVER exit 1 from trial — Collect/Upload MUST run to capture partial artifacts.
 
-      - name: Verify GT wiring (check GT blocks appeared in agent output)
+      - name: Verify GT wiring (trajectory-based liveness + delivery check)
         continue-on-error: true
         if: ${{ !cancelled() }}
         run: |
-          GT_BLOCKS=$(grep -c "gt-evidence\|gt-contract\|gt-scope\|gt-cochange\|gt-nudge\|gt-verify" trial_output.log 2>/dev/null || echo 0)
-          AGENT_STEPS=$(grep -c "function_call\|bash.*tool_call\|THOUGHT" trial_output.log 2>/dev/null || echo 0)
-          echo "GT wiring check: gt_blocks=$GT_BLOCKS agent_steps=$AGENT_STEPS"
+          # D2 FIX (2026-07-12): the old grep patterns (THOUGHT / function_call) were the
+          # INTERACTIVE-CLI stdout format. The headless runner prints neither model thoughts nor
+          # observations to stdout, so the log-grep false-negatived EVERY headless run (and
+          # gt_blocks read 0 even when GT delivered). The mini-swe-agent NATIVE trajectory is the
+          # authoritative record: info.model_stats.api_calls = steps; GT delivery = literal <gt-
+          # opens inside the serialized messages. Fallback = the runner's own finish line.
+          TRAJ=/tmp/gt_out/mini-swe-agent.trajectory.json
+          AGENT_STEPS=0; GT_BLOCKS=0
+          if [ -s "$TRAJ" ]; then
+            AGENT_STEPS=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1],encoding='utf-8')); print(int((d.get('info') or {}).get('model_stats',{}).get('api_calls') or 0))" "$TRAJ" 2>/dev/null || echo 0)
+            GT_BLOCKS=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1],encoding='utf-8')); print(json.dumps(d.get('messages') or []).count('<gt-'))" "$TRAJ" 2>/dev/null || echo 0)
+          fi
+          if [ "${AGENT_STEPS:-0}" -eq 0 ]; then
+            # exit statuses can contain underscores/parens — anchor on the steps= field only
+            AGENT_STEPS=$(grep "headless agent finished" trial_output.log 2>/dev/null | grep -oE "steps=[0-9]+" | grep -oE "[0-9]+" | tail -1)
+            AGENT_STEPS=${AGENT_STEPS:-0}
+          fi
+          echo "GT wiring check (trajectory-based): gt_blocks=$GT_BLOCKS agent_steps=$AGENT_STEPS"
           if [ "$AGENT_STEPS" -eq 0 ]; then
-            echo "AGENT_DID_NOT_RUN: 0 agent steps detected in trial_output.log"
+            echo "AGENT_DID_NOT_RUN: 0 agent steps (no trajectory api_calls, no runner finish line)"
             exit 1
           fi
           echo "agent ran ($AGENT_STEPS steps, $GT_BLOCKS GT blocks delivered)"
@@ -1157,7 +1224,11 @@ jobs:
           mkdir -p trial_results
 
           # Patch source priority: bind-mount (raw) > git-diff HEAD > log extraction (lossy)
-          HOST_GT_OUT="${HOST_GT_OUT:-/tmp/gt}"
+          # D1 FIX (2026-07-12): this is a SEPARATE step — the trial step's HOST_GT_OUT=/tmp/gt_out
+          # does NOT carry over, so the old default /tmp/gt pointed at the SUBSTRATE artifacts dir,
+          # never the agent output dir -> the raw-patch sources ALWAYS missed -> lossy log fallback
+          # (which finds nothing under the headless runner) -> reward 0 even on a perfect patch.
+          HOST_GT_OUT="${HOST_GT_OUT:-/tmp/gt_out}"
           PATCH_FILE=""
           if [ -s "${HOST_GT_OUT}/agent_patch.diff" ]; then PATCH_FILE="${HOST_GT_OUT}/agent_patch.diff";
           elif [ -s "${HOST_GT_OUT}/git_diff_head.diff" ]; then PATCH_FILE="${HOST_GT_OUT}/git_diff_head.diff";
@@ -1223,8 +1294,10 @@ jobs:
           mkdir -p trial_results trial_results/gt_artifacts
           cp trial_output.log trial_results/ 2>/dev/null || true
           cp /tmp/gt/graph.db trial_results/graph.db 2>/dev/null || true
-          cp /tmp/gt/agent_patch.diff trial_results/ 2>/dev/null || true
-          cp /tmp/gt/git_diff_head.diff trial_results/ 2>/dev/null || true
+          # D4 (2026-07-12): the agent writes these to the /gt_out bind-mount = host /tmp/gt_out
+          # (/tmp/gt is the SUBSTRATE artifacts dir) — the old /tmp/gt paths never matched.
+          cp /tmp/gt_out/agent_patch.diff trial_results/ 2>/dev/null || true
+          cp /tmp/gt_out/git_diff_head.diff trial_results/ 2>/dev/null || true
           for a in runtime_context.json lsp_certificate.json graph_certificate.json \
                    embedder_certificate.json foundational_gate_report.json run_manifest.json \
                    brief.txt gt_issue_anchors.json gt_scope_files.txt gt_lsp_metrics.txt \
@@ -1232,7 +1305,7 @@ jobs:
             cp "/tmp/gt/$a" "trial_results/gt_artifacts/$a" 2>/dev/null || true
           done
           cp /tmp/gt/lsp_certificate_*.json trial_results/gt_artifacts/ 2>/dev/null || true
-          cp /tmp/issue.txt trial_results/gt_artifacts/issue.txt 2>/dev/null || true
+          cp /tmp/gt_out/issue.txt trial_results/gt_artifacts/issue.txt 2>/dev/null || true
           cp /tmp/gt/issue_manifest.json trial_results/gt_artifacts/issue_manifest.json 2>/dev/null || true
           cp /tmp/gt/adapter_witness.json trial_results/adapter_witness.json 2>/dev/null || true
           cp /tmp/gt/run_provenance.json trial_results/gt_artifacts/run_provenance.json 2>/dev/null || true

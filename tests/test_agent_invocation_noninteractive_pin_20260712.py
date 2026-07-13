@@ -45,9 +45,11 @@ def _agent_launch_line(run: str) -> str:
         line = raw.strip()
         if line.startswith("#"):
             continue
-        if "gt_headless_runner.py" in line and line.startswith("python"):
+        # the invocation line runs the runner under the resolved interpreter ($GT_PY), so it no
+        # longer starts with a literal `python`; match the runner path + an interpreter token.
+        if "gt_headless_runner.py" in line and ("$GT_PY" in line or "python" in line):
             return line
-    raise AssertionError("no non-comment `python .../gt_headless_runner.py` launch line found")
+    raise AssertionError("no non-comment gt_headless_runner.py launch line found")
 
 
 def test_launches_via_the_headless_runner() -> None:
@@ -55,6 +57,26 @@ def test_launches_via_the_headless_runner() -> None:
     line = _agent_launch_line(run)
     assert "/opt/gt/gt_headless_runner.py" in line, (
         "the agent must be launched by the headless runner; got line={line!r}".format(line=line)
+    )
+
+
+def test_runner_launched_under_resolved_interpreter_with_pythonpath() -> None:
+    # B5 root cause: bare `python` on a uv-tool container cannot import minisweagent -> 0 steps.
+    # The runner MUST launch under the resolved GT_PY with /opt/gt on PYTHONPATH (so it can import
+    # both minisweagent and gt_mini_patch for in-process delivery).
+    run = _trial_run()
+    line = _agent_launch_line(run)
+    assert "$GT_PY" in line, f"the runner must launch under the resolved interpreter $GT_PY: {line!r}"
+    assert "PYTHONPATH=/opt/gt" in line, f"the runner needs PYTHONPATH=/opt/gt for its imports: {line!r}"
+
+
+def test_trial_resolves_interpreter_by_probing_minisweagent() -> None:
+    # the GT_PY resolution must PROVE importability (probe `import minisweagent`), never assume a
+    # bare `python` works — that assumption is the exact B5 defect.
+    run = _trial_run()
+    assert 'GT_PY=' in run, "the trial step must resolve a GT_PY interpreter"
+    assert '-c "import minisweagent"' in run, (
+        "GT_PY must be chosen by probing `import minisweagent`, not assumed"
     )
 
 
@@ -102,3 +124,84 @@ def test_runner_file_exists_and_forces_default_agent() -> None:
         "the runner must build the non-interactive DefaultAgent (default_type=\"default\"), never interactive"
     )
     assert "agent.run(task)" in src, "the runner must actually call agent.run(task)"
+
+
+def _all_runs() -> list[str]:
+    doc = yaml.safe_load(_WF.read_text(encoding="utf-8"))
+    return [
+        str(step.get("run"))
+        for job in doc.get("jobs", {}).values()
+        for step in job.get("steps", []) or []
+        if isinstance(step, dict) and step.get("run")
+    ]
+
+
+def test_eval_step_reads_patch_from_the_agent_output_dir() -> None:
+    # D1 pin: the eval step is a SEPARATE step (trial-step env does not carry over), so its
+    # HOST_GT_OUT default MUST be the agent output dir /tmp/gt_out. The old /tmp/gt default made
+    # the raw-patch sources always miss -> reward 0 on every task even with a perfect patch.
+    evals = [r for r in _all_runs() if r and "agent_patch.diff" in r and "run_evaluation" in r]
+    assert evals, "no official-eval step found"
+    for r in evals:
+        assert 'HOST_GT_OUT="${HOST_GT_OUT:-/tmp/gt_out}"' in r, (
+            "the eval step must default HOST_GT_OUT to /tmp/gt_out (the agent output bind-mount), "
+            "never /tmp/gt (the substrate artifacts dir)"
+        )
+
+
+def test_liveness_check_is_trajectory_based_not_stdout_grep() -> None:
+    # D2 pin: the headless runner prints neither THOUGHT nor observations to stdout, so a
+    # stdout-grep liveness check false-negatives every headless run. The check must read the
+    # native trajectory (api_calls) with the runner finish line as fallback.
+    checks = [r for r in _all_runs() if r and "AGENT_DID_NOT_RUN" in r]
+    assert checks, "no liveness-check step found"
+    for r in checks:
+        assert "mini-swe-agent.trajectory.json" in r, (
+            "liveness must be read from the native trajectory (api_calls), not stdout grep"
+        )
+        assert "api_calls" in r, "liveness must count info.model_stats.api_calls"
+        assert "headless agent finished" in r, "the runner finish line must be the fallback signal"
+        code_lines = [ln for ln in r.splitlines() if not ln.strip().startswith("#")]
+        assert not any("THOUGHT" in ln for ln in code_lines), (
+            "the interactive-CLI THOUGHT grep must not come back (in code, comments exempt)"
+        )
+
+
+def test_receipt_and_profile_run_under_resolved_interpreter() -> None:
+    # D3 pin: capability_receipt + rl_profile exports must run under $GT_PY — bare `python` is
+    # <3.10 on 155/300 images (the same divergence class as B5) -> empty receipt -> profile dark.
+    run = _trial_run()
+    for mod in ("groundtruth.runtime.capability_receipt", "groundtruth.runtime.rl_profile"):
+        for raw in run.splitlines():
+            if mod in raw and not raw.strip().startswith("#"):
+                assert '"$GT_PY"' in raw, f"{mod} must run under the resolved $GT_PY: {raw.strip()!r}"
+
+
+def test_issue_text_reaches_python_via_argv_and_fails_closed() -> None:
+    # D5 pin: `task="$MTASK"` inside the -c string expanded to an UNQUOTED python expression
+    # (hyphenated ids = NameError) -> ISSUE_TEXT empty -> blind placeholder run. The id must reach
+    # python via sys.argv and an empty issue must abort BEFORE any container/model spend.
+    stagers = [r for r in _all_runs() if r and "ISSUE_TEXT=$(" in r]
+    assert stagers, "no issue-staging step found"
+    for r in stagers:
+        code_lines = [ln for ln in r.splitlines() if not ln.strip().startswith("#")]
+        assert not any('task="$MTASK"' in ln for ln in code_lines), (
+            "the task id must not be shell-interpolated into the python -c source (hyphenated ids "
+            "parse as subtraction -> NameError -> empty issue -> blind run)"
+        )
+        assert "sys.argv[1]" in r, "the task id must reach python via sys.argv"
+        assert 'if [ -z "$ISSUE_TEXT" ]' in r and "exit 1" in r, (
+            "an empty ISSUE_TEXT must fail closed before spend, never blind-run a placeholder"
+        )
+
+
+def test_runner_self_installs_gt_delivery_in_process() -> None:
+    # The load-bearing half of the B5 delivery fix: nothing else imports gt_mini_patch in the agent
+    # process, so the runner MUST import it itself (its _install() patches Environment.execute in
+    # THIS interpreter). A revert to relying on the separate-process install reddens here.
+    src = _RUNNER.read_text(encoding="utf-8")
+    assert "import gt_mini_patch" in src, (
+        "the runner must import gt_mini_patch in-process so GT evidence rides Environment.execute"
+    )
+    # and it must respect the control arm (no GT load under GT_BASELINE=1)
+    assert 'GT_BASELINE' in src, "the runner must skip the gt_mini_patch import in the baseline arm"
