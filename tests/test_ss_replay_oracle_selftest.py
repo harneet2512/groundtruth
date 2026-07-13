@@ -359,6 +359,111 @@ def test_seam_blocked_note_is_precise_not_bare_todo():
     assert "TODO" not in msg
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# SS-R2 — FIXPOINT DIFFER + GATING (the coordinator's fixpoint-first bounce)
+# ══════════════════════════════════════════════════════════════════════════════
+def _ledrow(it, layer, outcome="delivered", chars=0, sha=None, fp="", reason="", evt=""):
+    return {"layer": layer, "event_type": evt, "outcome": outcome, "chars_delivered": chars,
+            "content_sha256_16": sha, "file_path": fp, "reason": reason,
+            "iteration": it, "timestamp_ms": 123}
+
+
+def test_diff_ledgers_strict_and_channel_faithful():
+    rows = [_ledrow(1, "L6", "STAGED_OK", reason="work=/tmp/gt_work.db"),
+            _ledrow(5, "l3b.evidence", "delivered", 311, "aa" * 8, "pkg/a.py", evt="post_view")]
+    fx = sro.diff_ledgers("t", rows, [dict(r, timestamp_ms=999) for r in rows])
+    assert fx.strict and fx.channel and fx.faithful
+    assert fx.boundary_iter == float("inf") and fx.diffs == []
+
+
+def test_diff_ledgers_same_length_different_sha_is_not_moved():
+    """MUTATION-CLASS bug the sha-aware classifier bites: a delivered payload of the SAME
+    length but DIFFERENT bytes must be a real divergence (missing+extra), never 'moved'."""
+    rec = [_ledrow(5, "l3.contract", "delivered", 525, "f" * 16, "pkg/a.py", evt="post_edit")]
+    rep = [_ledrow(5, "l3.contract", "delivered", 525, "5" * 16, "pkg/a.py", evt="post_edit")]
+    fx = sro.diff_ledgers("t", rec, rep)
+    assert not fx.channel and fx.boundary_iter == 5.0
+    ops = {d["op"] for d in fx.diffs}
+    assert ops == {"missing", "extra"} and all(d["op"] != "moved" for d in fx.diffs)
+
+
+def test_diff_ledgers_hidden_diffs_do_not_gate():
+    """Hidden telemetry rows (candidate stamps, L6 counters, arbitration losers) may differ
+    host-side; the GATE is the delivered plane. A hidden-only diff keeps the task faithful."""
+    common = _ledrow(5, "l3b.evidence", "delivered", 311, "aa" * 8, "pkg/a.py", evt="post_view")
+    rec = [_ledrow(1, "L6", "REINDEX_OK", reason="file=../tmp/x.py nodes_before=0 nodes_after=3"),
+           common]
+    rep = [_ledrow(1, "L6", "REINDEX_OK", reason="file=../tmp/x.py nodes_before=0 nodes_after=0"),
+           dict(common, timestamp_ms=7)]
+    fx = sro.diff_ledgers("t", rec, rep)
+    assert fx.channel and fx.faithful and not fx.strict
+    assert fx.n_hidden_diffs > 0 and fx.boundary_iter == float("inf")
+
+
+def test_fixpoint_gate_unfaithful_task_yields_replay_unfaithful_not_fail():
+    """THE GATE (and its mutation): on a task whose off-flag replay diverged BEFORE the case,
+    a killed P5 must be REPLAY_UNFAITHFUL. With the gate disabled (fidelity=None — the
+    pre-SS-R2 behavior) the same input produces a false CARDINAL KILL."""
+    cases = {"preserve": [{"task": "T", "delivery": "consensus.scope m25", "why": "P5 consumed"}]}
+    recorded = {"T": [sro.Delivery("consensus.scope", "review_transition", 12, 367, "x" * 16,
+                                   25, "delivered", "", "", payload="p")]}
+    rep = {"T": []}   # delivery gone — but the channel itself is broken
+    fx = sro.FixpointResult("T", True, False, False, 9.0, 10, 3)   # diverged at iter 9 < 12
+    gated = sro.evaluate_cases(cases, recorded, rep, None, fidelity={"T": fx})
+    assert gated[0].verdict == sro.REPLAY_UNFAITHFUL and gated[0].cardinal
+    # MUTATION: gate removed -> the SAME input yields a false cardinal kill
+    ungated = sro.evaluate_cases(cases, recorded, rep, None, fidelity=None)
+    assert ungated[0].verdict == sro.FAIL
+
+
+def test_fixpoint_gate_trusted_prefix_judges_early_cases():
+    """A case whose recorded delivery sits strictly BEFORE the first divergence is judged."""
+    cases = {"preserve": [{"task": "T", "delivery": "l3b m11", "why": "P5 consumed"}]}
+    recorded = {"T": [sro.Delivery("l3b.evidence", "post_view", 5, 311, "a" * 16,
+                                   11, "delivered", "", "", payload="p")]}
+    fx = sro.FixpointResult("T", True, False, False, 20.0, 10, 9,
+                            drift_map=[(5, 5)])           # diverges at 20 -> iter 5 is trusted
+    rep = {"T": [{"layer": "l3b.evidence", "iteration": 5, "chars_delivered": 311,
+                  "outcome": "delivered", "content_sha256_16": "a" * 16, "reason": ""}]}
+    v = sro.evaluate_cases(cases, recorded, rep, None, fidelity={"T": fx})
+    assert v[0].verdict == sro.PASS
+
+
+def test_fixpoint_gate_not_replayed_task():
+    cases = {"preserve": [{"task": "T", "delivery": "l3b m11", "why": "P5 consumed"}]}
+    recorded = {"T": [sro.Delivery("l3b.evidence", "post_view", 5, 311, "a" * 16,
+                                   11, "delivered", "", "", payload="p")]}
+    fx = sro.FixpointResult("T", False, False, False, -1.0, 10, 0, error="child rc=2")
+    v = sro.evaluate_cases(cases, recorded, {"T": []}, None, fidelity={"T": fx})
+    assert v[0].verdict == sro.REPLAY_UNFAITHFUL and "replay failed" in v[0].reason
+
+
+def test_map_rec_iter_drift():
+    fx = sro.FixpointResult("T", True, True, True, float("inf"), 5, 5,
+                            drift_map=[(5, 5), (18, 16)])
+    assert sro.map_rec_iter(fx, 5) == 5
+    assert sro.map_rec_iter(fx, 12) == 12          # nearest anchor (5,5) + offset 7
+    assert sro.map_rec_iter(fx, 19) == 17          # nearest anchor (18,16) + offset 1
+
+
+def test_edit_applier_allowlist_shapes():
+    """Decision-only checks (no execution): the three mutation shapes are recognized and
+    the dangerous shapes are refused."""
+    strip = sro._strip_lead_cd
+    assert strip("cd $(cat /tmp/gt_root.txt) && sed -i 's/a/b/' x.py") == "sed -i 's/a/b/' x.py"
+    # heredoc BODY containing denied words must not block the write (head-only checks)
+    body = "cat > /tmp/p.py << 'EOF'\nimport pip, pytest\nEOF"
+    assert sro._EDIT_ALLOW.match(body) and not sro._EDIT_DENY.search(sro._head_of(body))
+    assert sro._EDIT_SCRATCH_PY.match("python3 /tmp/patch_code.py")
+    assert sro._EDIT_PY_HEREDOC.match("python3 << 'EOF'\nprint(1)\nEOF")
+    # refusals
+    assert not sro._EDIT_SCRATCH_PY.match("python3 /testbed/setup.py install")
+    assert sro._EDIT_DENY.search("pip install requests")
+    assert not sro._redirect_targets_ok("echo x > /etc/passwd")
+    assert sro._redirect_targets_ok("echo x > /tmp/ok.txt")
+    assert sro._redirect_targets_ok("git diff > /tmp/patch.txt")
+
+
 # ── guarded real-data coverage (only when the recording is on disk) ───────────
 def test_real_recording_reconstructs_zero_residual():
     rec_root = Path("D:/gt_runs/29236533134/art")

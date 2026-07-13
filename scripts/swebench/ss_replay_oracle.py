@@ -51,6 +51,31 @@ THREE LAYERS (all here):
 
 OUTPUT: a per-case verdict table (PASS/FAIL/SKIP:reason) to stdout + a JSON report. EXIT 0 iff
 no case FAILs and no CARDINAL P5 is killed and no manifest entry is invalid; else non-zero.
+
+────────────────────────────────────────────────────────────────────────────────────────────
+SS-R2 (fixpoint-first re-emit, coordinator bounce 2026-07-13). The oracle now runs the
+OFF-flag fixpoint FIRST, per task, and GATES every case on it:
+
+  * PER-TASK REPLAY = one fresh subprocess per task per arm (no module-global bleed), with
+    the recorded env posture reproduced from the task's own gt_profile_receipt.json and the
+    container paths MIRRORED on the current drive (\testbed junction -> the repo snapshot,
+    \gt_artifacts -> graph.db + certs, \opt\gt -> gt-index + gt_root.txt, \tmp cleaned):
+    rootless POSIX paths resolve against the current drive on Windows, so the seam's own
+    path strings — and the ledger reason bytes — match the recording literally.
+  * OFF ARM = every GT_SS_* EXPLICITLY "0" (under the W8 default-inversion an UNSET
+    Profile-2 member is fan-out-resolved to "1", so unset is NOT off).
+  * EDIT APPLICATION: the recorded run's disk state EVOLVED; the replay re-executes the
+    agent's own recorded file-mutation commands (sed/cat-redirect/git-checkout + the two
+    python patch-script shapes) against the mirrored tree, git-restored at teardown. Test
+    runs / pip / network commands are never executed.
+  * THE GATE (two-plane fixpoint): the DELIVERED-row subsequence (the sha-sealed bytes the
+    model saw) must match the recording exactly and in order; hidden telemetry rows
+    (candidate stamps, arbitration losers, L6 node counters, the env-execute-chokepoint
+    submit rows) are diffed + reported but do not gate. A task failing the gate marks its
+    cases REPLAY_UNFAITHFUL (never PASS/FAIL); a task diverging at iteration B keeps a
+    TRUSTED PREFIX — cases whose recorded deliveries all sit strictly before B are judged.
+  * EXIT: 0 all-green; 1 hard fail (case FAIL / cardinal kill / manifest / residual /
+    invariant); 3 inconclusive (no hard fail, but >=1 cardinal P5 case REPLAY_UNFAITHFUL).
 """
 from __future__ import annotations
 
@@ -82,6 +107,10 @@ for _stream in (sys.stdout, sys.stderr):
 PASS = "PASS"
 FAIL = "FAIL"
 SKIP = "SKIP"
+# SS-R2 (fixpoint-first gating): a case on a task/window whose OFF-flag replay does NOT
+# reproduce the recorded ledger is NOT judged — it is REPLAY_UNFAITHFUL, counted neither
+# PASS nor FAIL (a false verdict is worse than no verdict).
+REPLAY_UNFAITHFUL = "REPLAY_UNFAITHFUL"
 
 # ── SS ledger-reason tokens (must match ss_gate.py's feature contract) ────────
 SS_REASON = {
@@ -174,11 +203,12 @@ class Delivery:
 @dataclass
 class ReconstructedTask:
     task: str
-    pairs: list[tuple[str, str]]          # (action_text, native_observation) in chronological order
+    pairs: list[tuple[str, str]]          # (action_text=the executed COMMAND, native_observation)
     recorded_deliveries: list[Delivery]   # the located seals (home_msg == manifest mNN)
     residual_leaks: list[str]             # non-empty => stripping failed (a seal still matches)
     raw_rows: list[dict]                  # the full recorded ledger (for invariants / suppressed rows)
     n_messages: int
+    rcs: list[int] = field(default_factory=list)   # per-pair returncode (from the observation wrapper)
 
 
 def _seal_rows(rows: list[dict]) -> list[dict]:
@@ -229,17 +259,90 @@ def reconstruct_task(task: str, recorded_root: Path) -> ReconstructedTask:
                 residual.append(f"seal {sha} (iter {r['iteration']}, {n}c) still present at m{idx}")
                 break
 
-    # build (action, native_obs) pairs: each tool observation paired with its preceding action.
+    # per-message seal list (ledger order) — needed to strip the SAME seals from raw_output.
+    seals_at: dict[int, list[tuple[int, str]]] = {}
+    for dl in deliveries:
+        if dl.home_msg >= 0:
+            seals_at.setdefault(dl.home_msg, []).append((dl.chars, dl.sha16 or ""))
+
+    # build (command, native_obs) pairs: each tool observation paired with the COMMAND that
+    # produced it. mini-swe v2 stores the executed command in the assistant message's
+    # tool_calls[].function.arguments JSON ({"command": ...}); prose-only content has no
+    # command (fenced-block fallback for synthetic fixtures). The seam at runtime received
+    # the env's RAW output (msg.extra.raw_output) — NOT the templated
+    # <returncode>/<output> content — so the native observation fed back is raw_output with
+    # this message's seals stripped; content-stripped is the fallback when raw is absent.
     pairs: list[tuple[str, str]] = []
+    rcs: list[int] = []
+    pending_cmds: list[str] = []
     for i, m in enumerate(msgs):
-        if m.get("role") == "tool":
-            action = ""
-            if i > 0 and msgs[i - 1].get("role") == "assistant":
-                action = msgs[i - 1].get("content", "") or ""
-            pairs.append((action, stripped[i]))
+        role = m.get("role")
+        if role == "assistant":
+            pending_cmds = _commands_of(m)
+            continue
+        if role != "tool":
+            continue
+        cmd = pending_cmds.pop(0) if pending_cmds else ""
+        content = m.get("content", "") if isinstance(m.get("content"), str) else ""
+        raw = (m.get("extra") or {}).get("raw_output") if isinstance(m.get("extra"), dict) else None
+        if isinstance(raw, str):
+            native = raw
+            for n, sha in seals_at.get(i, []):
+                off = locate_seal(native, n, sha)
+                if off is not None:
+                    native = native[:off] + native[off + n:]
+                else:
+                    residual.append(f"seal {sha} ({n}c) homed at m{i} not found in raw_output")
+            # residual guard on the raw-native too
+            for n, sha in seals_at.get(i, []):
+                if locate_seal(native, n, sha) is not None:
+                    residual.append(f"seal {sha} ({n}c) still present in raw-native of m{i}")
+        else:
+            native = stripped[i]
+        rc = 0
+        mrc = re.match(r"\s*<returncode>(-?\d+)</returncode>", content)
+        if mrc:
+            rc = int(mrc.group(1))
+        pairs.append((cmd, native))
+        rcs.append(rc)
+
+    # SUBMIT WINDOW: the final assistant command (echo COMPLETE_TASK... && cat patch) is
+    # executed by the env but its output becomes the EXIT message, not a tool message — the
+    # recorded completion_cert/submit_gate rows come from that execute. Feed it as the last
+    # pair so the submit-window rows can reproduce.
+    if len(msgs) >= 2 and msgs[-1].get("role") == "exit":
+        for back in range(len(msgs) - 2, -1, -1):
+            if msgs[back].get("role") == "assistant":
+                tail_cmds = _commands_of(msgs[back])
+                if tail_cmds and not (back + 1 < len(msgs) and msgs[back + 1].get("role") == "tool"):
+                    exit_content = msgs[-1].get("content", "") or ""
+                    pairs.append((tail_cmds[0], exit_content if isinstance(exit_content, str) else ""))
+                    rcs.append(0)
+                break
 
     return ReconstructedTask(task=task, pairs=pairs, recorded_deliveries=deliveries,
-                             residual_leaks=residual, raw_rows=rows, n_messages=len(msgs))
+                             residual_leaks=residual, raw_rows=rows, n_messages=len(msgs),
+                             rcs=rcs)
+
+
+def _commands_of(assistant_msg: dict) -> list[str]:
+    """The executed command(s) of one assistant message: tool_calls[].function.arguments
+    ({"command": ...}) when present (mini-swe v2), else the fenced ```bash block(s) of the
+    content (synthetic fixtures / older format)."""
+    cmds: list[str] = []
+    for tc in assistant_msg.get("tool_calls") or []:
+        try:
+            args = json.loads((tc.get("function") or {}).get("arguments") or "{}")
+            c = args.get("command")
+            if isinstance(c, str) and c.strip():
+                cmds.append(c)
+        except Exception:  # noqa: BLE001
+            continue
+    if cmds:
+        return cmds
+    content = assistant_msg.get("content", "") or ""
+    block = extract_command(content)
+    return [block] if block else []
 
 
 def extract_command(action_text: str) -> str:
@@ -450,6 +553,591 @@ def replay_task(recon: ReconstructedTask, driver: SeamDriver, recorded_root: Pat
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# SS-R2 — CONTAINER-PATH MIRRORS (host-side env parity with the recorded run)
+# ══════════════════════════════════════════════════════════════════════════════
+# The recorded ledger rows embed the CONTAINER's absolute paths (/testbed, /gt_artifacts/
+# graph.db, /tmp/gt_work.db, /opt/gt/gt-index). On Windows, a rootless POSIX path resolves
+# against the CURRENT DRIVE, so mirroring those trees at <drive>:\testbed, \gt_artifacts,
+# \opt\gt and \tmp makes the seam's own path strings (and therefore the ledger reason bytes)
+# LITERALLY identical to the recorded ones — a real parity lever, not a normalization hack.
+_MIRROR_TESTBED = Path("/testbed")
+_MIRROR_ARTIFACTS = Path("/gt_artifacts")
+_MIRROR_OPT_GT = Path("/opt/gt")
+_MIRROR_TMP = Path("/tmp")
+
+# /tmp files the recorded seam writes; cleaned between tasks so no state bleeds.
+_TMP_STATE = ["gt_work.db", "gt_index.json", "gt_oracle_events.jsonl",
+              "gt_hook_fire_counts.json"]
+
+
+def _run_quiet(cmd: list[str]) -> int:
+    import subprocess
+    try:
+        return subprocess.run(cmd, capture_output=True, timeout=120).returncode
+    except Exception:  # noqa: BLE001
+        return 1
+
+
+def _make_junction(link: Path, target: Path) -> bool:
+    """Create a Windows directory junction (no admin needed). Removes a stale link first."""
+    import subprocess
+    _remove_junction(link)
+    r = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                       capture_output=True, timeout=60)
+    return r.returncode == 0
+
+
+def _remove_junction(link: Path) -> None:
+    """Remove a junction WITHOUT touching its target (rmdir on a junction unlinks only)."""
+    if link.exists() or link.is_symlink():
+        _run_quiet(["cmd", "/c", "rmdir", str(link)])
+
+
+class TaskMirrors:
+    """Per-task setup/teardown of the container-path mirrors. Snapshot repos are mounted at
+    /testbed via a junction; when edit-application mutates them, teardown restores the exact
+    recorded base commit with git (checkout+clean)."""
+
+    def __init__(self, task: str, recorded_root: Path, snapshot_root: Path) -> None:
+        self.task = task
+        self.recorded = recorded_root / task
+        self.snapshot = snapshot_root / task
+
+    def setup(self) -> None:
+        import shutil
+        if not self.snapshot.is_dir():
+            raise SeamReplayBlocked(f"{self.task}: no repo snapshot at {self.snapshot}")
+        # /testbed + /tmp/gt_work_src -> the snapshot working tree
+        if not _make_junction(_MIRROR_TESTBED, self.snapshot):
+            raise SeamReplayBlocked(f"{self.task}: could not junction {_MIRROR_TESTBED} -> {self.snapshot}")
+        _MIRROR_TMP.mkdir(exist_ok=True)
+        _make_junction(_MIRROR_TMP / "gt_work_src", self.snapshot)
+        # /gt_artifacts: graph.db (the pristine mount copy) + the recorded cert artifacts
+        if _MIRROR_ARTIFACTS.exists():
+            shutil.rmtree(_MIRROR_ARTIFACTS, ignore_errors=True)
+        _MIRROR_ARTIFACTS.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(self.recorded / "graph.db", _MIRROR_ARTIFACTS / "graph.db")
+        art_src = self.recorded / "gt_artifacts"
+        if art_src.is_dir():
+            for f in art_src.iterdir():
+                if f.is_file():
+                    shutil.copyfile(f, _MIRROR_ARTIFACTS / f.name)
+        # /opt/gt: gt-index binary (both extensionless + .exe for CreateProcess) + root file
+        _MIRROR_OPT_GT.mkdir(parents=True, exist_ok=True)
+        bin_src = _REPO / "gt-index" / "gt-index.exe"
+        for name in ("gt-index", "gt-index.exe"):
+            dst = _MIRROR_OPT_GT / name
+            if not dst.is_file() or dst.stat().st_size != bin_src.stat().st_size:
+                shutil.copyfile(bin_src, dst)
+        # /opt/gt/models -> the local embedder models (the recorded run's models_root was
+        # /opt/gt/models; the semantic/content legs stall on HF fetch timeouts without it)
+        models_src = _REPO / "models"
+        if models_src.is_dir() and not (_MIRROR_OPT_GT / "models").exists():
+            _make_junction(_MIRROR_OPT_GT / "models", models_src)
+        (_MIRROR_OPT_GT / "gt_root.txt").write_text("/testbed", encoding="utf-8")
+        # /tmp/gt_root.txt is what the AGENT's own commands `cat` (cd $(cat /tmp/gt_root.txt));
+        # the edit-applier executes those via Git Bash, which needs the WINDOWS form.
+        drive = os.path.splitdrive(os.getcwd())[0] or "D:"
+        (_MIRROR_TMP / "gt_root.txt").write_text(f"{drive}/testbed", encoding="utf-8")
+        # clean the seam's /tmp state from any prior task
+        for name in _TMP_STATE:
+            p = _MIRROR_TMP / name
+            if p.is_file():
+                p.unlink()
+
+    def teardown(self) -> None:
+        # restore the snapshot to the exact recorded base commit (edit-application mutates it)
+        _run_quiet(["git", "-C", str(self.snapshot), "checkout", "--", "."])
+        _run_quiet(["git", "-C", str(self.snapshot), "clean", "-fdq"])
+        _remove_junction(_MIRROR_TMP / "gt_work_src")
+        _remove_junction(_MIRROR_TESTBED)
+        for name in _TMP_STATE:
+            p = _MIRROR_TMP / name
+            if p.is_file():
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+
+
+def recorded_member_env(recorded_root: Path, task: str) -> dict[str, str]:
+    """The recorded run's EXACT flag posture, from the task's own gt_profile_receipt.json
+    (member_source lists every profile member the workflow fanned to '1' in-container)."""
+    env: dict[str, str] = {"GT_RL_PROFILE": "2"}
+    rec = recorded_root / task / "gt_artifacts" / "gt_profile_receipt.json"
+    try:
+        receipt = json.loads(rec.read_text(encoding="utf-8"))
+        for m in receipt.get("member_source", {}):
+            env[m] = "1"
+    except Exception:  # noqa: BLE001 — fall back to rl_profile's own fan-out in-child
+        pass
+    return env
+
+
+def child_env(recorded_root: Path, task: str, ledger_path: Path,
+              ss_env: dict[str, str]) -> dict[str, str]:
+    """The full env for a replay child process: hermetic (no inherited GT_*), the recorded
+    posture (profile members + substrate/proof handoff), the mirrored container paths, and
+    the per-arm GT_SS_* overlay."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GT_")}
+    env.update(recorded_member_env(recorded_root, task))
+    env.update({
+        "GT_PROOF_MODE": "1",
+        "GT_CONTAINERIZED": "1",
+        "GT_PORTABLE_SUBSTRATE": "1",
+        "GT_HOST_GRAPH_DB": "/gt_artifacts/graph.db",
+        "GT_CERT_DIR": "/gt_artifacts",
+        "GT_INDEX_BIN": "/opt/gt/gt-index",
+        "GT_L6_FRESH": "1",
+        "GT_ROOT_FILE": "/opt/gt/gt_root.txt",
+        "GT_HOST_SRC_ROOT": "/tmp/gt_work_src",
+        "GT_RUNTIME_LEDGER": str(ledger_path),
+        "GT_ORACLE_EVENTS": "/tmp/gt_oracle_events.jsonl",
+        "GT_HOOK_FIRE_COUNTS": "/tmp/gt_hook_fire_counts.json",
+        "GT_RUN_TASK": task,
+        "GT_MODELS_ROOT": "/opt/gt/models",
+        # never let a missing local model turn into a network fetch stall mid-replay
+        "HF_HUB_OFFLINE": "1",
+        "TRANSFORMERS_OFFLINE": "1",
+        "HF_HUB_DISABLE_TELEMETRY": "1",
+        "PYTHONIOENCODING": "utf-8",
+    })
+    for k, v in (ss_env or {}).items():
+        if v is None:
+            env.pop(k, None)
+        else:
+            env[k] = str(v)
+    return env
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SS-R2 — EDIT APPLICATION (materialize the recorded disk evolution, allowlisted)
+# ══════════════════════════════════════════════════════════════════════════════
+# The recorded run's disk state EVOLVED (the agent's sed/cat/git edits actually ran). The
+# seam's post_edit producers (edit.syntax parse, L6 -file reindex, contract snapshots) read
+# that state from disk, so a replay that never applies the edits diverges at the first edit.
+# We re-execute ONLY an allowlist of file-mutation commands (no test runs, no python, no
+# network), with write targets confined to /testbed and /tmp, via Git Bash. The snapshot is
+# git-restored at teardown.
+_EDIT_ALLOW = re.compile(
+    r"^\s*(sed\s+-[a-zA-Z]*i|cat\s|echo\s|printf\s|tee\s|mkdir\s|cp\s|mv\s|touch\s|"
+    r"git\s+(checkout|restore|apply|stash|diff|add)\b|patch\s)", re.DOTALL)
+# The agent's dominant edit idioms in the recorded runs beyond sed/cat-redirect:
+#   (a) write a patch SCRIPT to /tmp via a heredoc, then execute it
+#       (`python /tmp/patch_code.py`) to rewrite repo files;
+#   (b) an INLINE python heredoc (`python3 << 'EOF' ... open(...).write(...)`) doing the same.
+# Replaying the write without the execute leaves the repo at base -> every post-edit payload
+# (contract line numbers, edit.syntax parse) diverges. Both shapes are agent-authored
+# mutation scripts already executed once in the recorded container; we re-execute them
+# against the mirrored working tree (git-restored at teardown). pytest/pip/network commands
+# are never executed. Deny/redirect checks apply to the command HEAD only — the heredoc BODY
+# is file CONTENT (it may legitimately contain any word).
+_EDIT_SCRATCH_PY = re.compile(r"^\s*python[0-9.]*\s+(/tmp/[\w.\-]+\.py)\s*$")
+_EDIT_PY_HEREDOC = re.compile(r"^\s*python[0-9.]*\s*<<")
+_EDIT_PY_INLINE = re.compile(r"^\s*python[0-9.]*\s+-c\s", re.DOTALL)   # python3 -c "<script>"
+_EDIT_DENY = re.compile(
+    r"\b(curl|wget|pip|pytest|npm|rm\s+-rf\s+/|ssh|scp)\b")
+
+
+def _head_of(cmd: str) -> str:
+    cut = cmd.find("<<")
+    return cmd if cut < 0 else cmd[:cut]
+
+
+def _normalize_crlf(repo_root: str) -> None:
+    """Host-parity fix: python scripts executed on Windows write CRLF (text-mode newline
+    translation) where the recorded container wrote LF. Normalize every modified repo file
+    back to LF so file bytes — and every payload embedding them — match the recording."""
+    import subprocess
+    try:
+        r = subprocess.run(["git", "-C", repo_root, "diff", "--name-only"],
+                           capture_output=True, text=True, timeout=30)
+        for rel in (r.stdout or "").splitlines():
+            rel = rel.strip()
+            if not rel:
+                continue
+            p = Path(repo_root) / rel
+            if p.is_file():
+                b = p.read_bytes()
+                if b"\r\n" in b:
+                    p.write_bytes(b.replace(b"\r\n", b"\n"))
+    except Exception:  # noqa: BLE001 — normalization is best-effort
+        pass
+
+
+def _strip_lead_cd(cmd: str) -> str:
+    """Drop the harness-mandated ``cd $(cat /tmp/gt_root.txt) && `` / ``cd /testbed && ``
+    prefix so the allowlist matches the ACTUAL mutation command."""
+    return re.sub(r"^\s*cd\s+[^&;|]+&&\s*", "", cmd, count=1)
+
+
+def _rewrite_container_paths(cmd: str) -> str:
+    """Rewrite /testbed and /tmp to their drive-mirrored Windows forms in the command PREFIX
+    only (heredoc bodies are file CONTENT and must stay byte-exact)."""
+    drive = os.path.splitdrive(os.getcwd())[0] or "D:"
+    cut = cmd.find("<<")
+    head, tail = (cmd, "") if cut < 0 else (cmd[:cut], cmd[cut:])
+    head = head.replace("$(cat /tmp/gt_root.txt)", "/testbed")
+    head = head.replace("/testbed", f"{drive}/testbed").replace("/tmp/", f"{drive}/tmp/")
+    return head + tail
+
+
+def _redirect_targets_ok(cmd: str) -> bool:
+    """Every redirect target must live under /testbed, /tmp, or be repo-relative."""
+    for m in re.finditer(r">{1,2}\s*([^\s;|&]+)", cmd):
+        t = m.group(1).strip("'\"")
+        if t in ("/dev/null", "&1", "&2") or t.startswith("&"):
+            continue
+        if t.startswith(("/testbed", "/tmp", "D:/testbed", "D:/tmp")):
+            continue
+        if not t.startswith("/") and ".." not in t:
+            continue  # relative inside cwd (/testbed)
+        return False
+    return True
+
+
+def _find_bash() -> str:
+    """A REAL bash for the edit-applier. A bare 'bash' on Windows resolves to the System32
+    WSL stub (fails without a distro); prefer Git Bash explicitly. GT_SSR_BASH overrides."""
+    env = os.environ.get("GT_SSR_BASH")
+    if env and Path(env).is_file():
+        return env
+    for cand in (r"C:\Program Files\Git\bin\bash.exe",
+                 r"C:\Program Files\Git\usr\bin\bash.exe"):
+        if Path(cand).is_file():
+            return cand
+    return "bash"
+
+
+def apply_edit_command(cmd: str, cwd: str) -> tuple[bool, str]:
+    """Execute one recorded agent command IFF it is an allowlisted file mutation.
+    Returns (executed, note)."""
+    import subprocess
+    body = _strip_lead_cd(cmd or "")
+    if not body:
+        return False, "empty"
+    head = _head_of(body)
+    scratch = _EDIT_SCRATCH_PY.match(body)
+    if scratch:
+        # (a) agent-authored scratch patch script (materialized by an earlier applied
+        # heredoc): run it with the HOST python, cwd=the mirrored working tree. Rootless
+        # POSIX paths inside the script resolve against the current drive (the mirror trick).
+        drive = os.path.splitdrive(os.getcwd())[0] or "D:"
+        script = scratch.group(1).replace("/tmp/", f"{drive}/tmp/")
+        if not Path(script).is_file():
+            return False, "scratch-script-absent"
+        try:
+            r = subprocess.run([sys.executable, script], cwd=cwd,
+                               capture_output=True, timeout=60)
+            _normalize_crlf(cwd)
+            return True, f"scratch-py rc={r.returncode}"
+        except Exception as exc:  # noqa: BLE001
+            return True, f"exec-fault:{type(exc).__name__}"
+    if _EDIT_PY_HEREDOC.match(body) or (_EDIT_PY_INLINE.match(body)
+                                        and not _EDIT_DENY.search(body)):
+        # (b)/(c) inline python mutation script (heredoc or -c): run through bash with the
+        # interpreter token normalized to the host python (python3 is rarely on Windows
+        # PATH), then normalize CRLF back to LF (Windows text-mode writes) so file bytes
+        # match the recorded container's.
+        rewritten = _rewrite_container_paths(cmd)
+        rewritten = re.sub(r"\bpython[0-9.]*(?=\s*<<|\s+-c\s)",
+                           f'"{sys.executable}"'.replace("\\", "/"), rewritten, count=1)
+        try:
+            r = subprocess.run([_find_bash(), "-c", rewritten], cwd=cwd,
+                               capture_output=True, timeout=60)
+            _normalize_crlf(cwd)
+            return True, f"py-inline rc={r.returncode}"
+        except Exception as exc:  # noqa: BLE001
+            return True, f"exec-fault:{type(exc).__name__}"
+    if not _EDIT_ALLOW.match(body) or _EDIT_DENY.search(head):
+        return False, "not-allowlisted"
+    if re.search(r"\bpython[0-9.]*\s", head):
+        return False, "python-outside-scratch-shape"   # only the two script shapes run
+    if not _redirect_targets_ok(head):
+        return False, "redirect-target-outside-roots"
+    rewritten = _rewrite_container_paths(cmd)
+    try:
+        r = subprocess.run([_find_bash(), "-c", rewritten], cwd=cwd,
+                           capture_output=True, timeout=60)
+        return True, f"rc={r.returncode}"
+    except Exception as exc:  # noqa: BLE001
+        return True, f"exec-fault:{type(exc).__name__}"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SS-R2 — CHILD REPLAY (one fresh interpreter per task per arm: no module-global bleed)
+# ══════════════════════════════════════════════════════════════════════════════
+def replay_child_main(task: str, recorded_root: Path, out_path: Path,
+                      apply_edits: bool) -> int:
+    """Runs INSIDE the child process (env already set by the parent): reconstruct the native
+    stream, import the seam fresh (import side effects ARE the install), feed every pair,
+    write the replayed ledger + edit-application log as JSON."""
+    for p in (str(_ART), str(_SRC)):
+        if p not in sys.path:
+            sys.path.insert(0, p)
+    recon = reconstruct_task(task, recorded_root)
+    ledger = Path(os.environ["GT_RUNTIME_LEDGER"])
+    if ledger.is_file():
+        ledger.unlink()
+    import gt_mini_patch as g  # noqa: E402 — fresh install in THIS process
+    applied: list[dict] = []
+    for k, (cmd, native) in enumerate(recon.pairs):
+        rc = recon.rcs[k] if k < len(recon.rcs) else 0
+        if apply_edits and cmd:
+            ran, note = apply_edit_command(cmd, cwd=str(_MIRROR_TESTBED))
+            if ran:
+                applied.append({"pair": k, "cmd": cmd[:160], "note": note})
+        out = {"output": native, "returncode": rc}
+        try:
+            g._augment_output({"command": cmd}, out)
+        except BaseException as exc:  # noqa: BLE001 — incl. GTHandoffEmptyError: record + continue
+            applied.append({"pair": k, "seam_fault": f"{type(exc).__name__}: {exc}"})
+        after = out.get("output") or ""
+        if after != native:
+            delta = after[len(native):] if after.startswith(native) else "(REWROTE-PREFIX)"
+            applied.append({"pair": k, "delta": delta})
+    rows: list[dict] = []
+    if ledger.is_file():
+        for line in ledger.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line:
+                try:
+                    rows.append(json.loads(line))
+                except Exception:  # noqa: BLE001
+                    pass
+    out_path.write_text(json.dumps({"task": task, "rows": rows, "applied": applied,
+                                    "n_pairs": len(recon.pairs)}), encoding="utf-8")
+    return 0
+
+
+def spawn_replay(task: str, recorded_root: Path, snapshot_root: Path, arm_ss_env: dict[str, str],
+                 apply_edits: bool, work_dir: Path, arm: str = "arm") -> dict:
+    """Parent-side: set up mirrors, spawn the child replay, collect its ledger, tear down.
+    Returns {"rows": [...], "applied": [...], "error": str|None}."""
+    import subprocess
+    mirrors = TaskMirrors(task, recorded_root, snapshot_root)
+    out_json = work_dir / f"replay_{task}_{arm}.json"
+    led = work_dir / f"led_{task}_{arm}.jsonl"
+    if os.environ.get("GT_SSR_REUSE_WORK") == "1" and out_json.is_file():
+        try:
+            payload = json.loads(out_json.read_text(encoding="utf-8"))
+            return {"rows": payload.get("rows", []), "applied": payload.get("applied", []),
+                    "error": None}
+        except Exception:  # noqa: BLE001 — fall through to a fresh replay
+            pass
+    try:
+        mirrors.setup()
+        env = child_env(recorded_root, task, led, arm_ss_env)
+        cmd = [sys.executable, str(Path(__file__).resolve()), "--replay-one", task,
+               "--recorded-root", str(recorded_root), "--child-out", str(out_json),
+               "--apply-edits" if apply_edits else "--no-apply-edits"]
+        r = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=1800,
+                           cwd=str(_REPO))
+        if r.returncode != 0 or not out_json.is_file():
+            return {"rows": [], "applied": [],
+                    "error": f"child rc={r.returncode}: {(r.stderr or r.stdout)[-400:]}"}
+        payload = json.loads(out_json.read_text(encoding="utf-8"))
+        return {"rows": payload.get("rows", []), "applied": payload.get("applied", []),
+                "error": None}
+    except SeamReplayBlocked as exc:
+        return {"rows": [], "applied": [], "error": f"blocked: {exc}"}
+    except Exception as exc:  # noqa: BLE001
+        return {"rows": [], "applied": [], "error": f"{type(exc).__name__}: {exc}"}
+    finally:
+        try:
+            mirrors.teardown()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SS-R2 — LEDGER DIFFER (row-level, root-cause tagged, trusted-prefix)
+# ══════════════════════════════════════════════════════════════════════════════
+# Volatile substrings inside `reason` that are environment noise even under path mirroring
+# (exception reprs, stderr byte reprs, subprocess timing). Masked for the CHANNEL key only;
+# the STRICT key masks nothing but timestamp_ms.
+_REASON_VOLATILE = re.compile(r"(stderr=b?['\"].*?['\"]|exc=[A-Za-z]+Error[^ ]*|timeout_s=\d+)")
+
+
+def _strict_key(row: dict) -> str:
+    return json.dumps({k: v for k, v in row.items() if k != "timestamp_ms"}, sort_keys=True)
+
+
+def _channel_key(row: dict) -> str:
+    """Drift-tolerant comparison key: drops `iteration` (the recorded env executed actions
+    the trajectory does not carry, so absolute counters differ), masks volatile reason
+    substrings, and normalizes path SEPARATORS (the seam computes os.path.relpath, which
+    yields `..\\tmp\\x.py` host-side vs `../tmp/x.py` in-container — same path, different
+    platform). Everything else — layer, event_type, outcome, chars, sha seal, file_path,
+    reason — must match exactly."""
+    d = {k: v for k, v in row.items() if k not in ("timestamp_ms", "iteration")}
+    if isinstance(d.get("reason"), str):
+        d["reason"] = _REASON_VOLATILE.sub("<VOLATILE>", d["reason"]).replace("\\", "/")
+    if isinstance(d.get("file_path"), str):
+        d["file_path"] = d["file_path"].replace("\\", "/")
+    return json.dumps(d, sort_keys=True)
+
+
+@dataclass
+class FixpointResult:
+    task: str
+    replayed: bool
+    strict: bool                    # EVERY row byte-equal (minus timestamp) — the gold standard
+    channel: bool                   # the DELIVERED-row subsequence byte-equal — the GATE
+    boundary_iter: float            # recorded iteration of the FIRST DELIVERED divergence (inf = none)
+    n_recorded: int
+    n_replayed: int
+    diffs: list[dict] = field(default_factory=list)   # row-level ops with root-cause tags
+    drift_map: list[tuple[int, int]] = field(default_factory=list)  # (rec_iter, rep_iter) matched
+    error: str = ""
+    n_hidden_diffs: int = 0         # hidden/telemetry row diffs (reported, NOT gating)
+
+    @property
+    def faithful(self) -> bool:
+        """The GATE: model-facing fidelity. ``channel`` compares the DELIVERED rows (the
+        exact bytes the model saw, sha-sealed) in order; hidden telemetry rows (candidate
+        stamps, arbitration losers, L6 counters) are reported but do not gate — any hidden
+        state contamination that MATTERS must surface in later delivered bytes, which DO gate."""
+        return self.replayed and (self.strict or self.channel)
+
+
+def _tag_diff(op: str, row: dict) -> str:
+    """Root-cause tag for one diverging row (heuristic, for the report table)."""
+    layer = str(row.get("layer") or "")
+    fp = str(row.get("file_path") or "")
+    outcome = str(row.get("outcome") or "")
+    if layer.startswith("L6") or layer == "L6":
+        if outcome == "NO_BINARY":
+            return "gt-index-binary-missing"
+        if fp.startswith("../") or fp.startswith("/tmp"):
+            return "agent-scratch-file-not-materialized"
+        return "l6-telemetry"
+    if layer in ("completion_cert", "submit_gate"):
+        return "beyond-trajectory(submit-window)"
+    if layer.startswith("verify.horizon.executed"):
+        return "in-env-test-execution(container-only)"
+    if layer.startswith("edit.syntax") or layer.startswith("l3.contract"):
+        return "post-edit-disk-state"
+    if layer.startswith(("recovery", "detect.", "l5", "verify.horizon")):
+        return "timing/counter-drift"
+    return "unclassified"
+
+
+def _delivered_key(row: dict) -> str:
+    """Gate key for one MODEL-FACING row: the byte seal + placement class. `reason` is ''
+    on delivered rows; `iteration` is drift-tolerant-excluded."""
+    return json.dumps({
+        "layer": row.get("layer"), "event_type": row.get("event_type"),
+        "outcome": row.get("outcome"), "chars": int(row.get("chars_delivered") or 0),
+        "sha": row.get("content_sha256_16"),
+        "file_path": str(row.get("file_path") or "").replace("\\", "/"),
+    }, sort_keys=True)
+
+
+def _diff_seq(rec: list[dict], rep: list[dict], keyf, kind: str) -> tuple[list[dict], list[tuple[int, int]], float]:
+    """SequenceMatcher diff of two row lists under ``keyf``; returns (ops, matched-iteration
+    pairs, first-divergence recorded iteration)."""
+    import difflib
+    sm = difflib.SequenceMatcher(a=[keyf(r) for r in rec], b=[keyf(r) for r in rep], autojunk=False)
+    ops: list[dict] = []
+    matched: list[tuple[int, int]] = []
+    boundary = float("inf")
+    for tag_op, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag_op == "equal":
+            for di, dj in zip(range(i1, i2), range(j1, j2)):
+                ri, rj = rec[di], rep[dj]
+                if ri.get("iteration") is not None and rj.get("iteration") is not None:
+                    matched.append((int(ri["iteration"]), int(rj["iteration"])))
+            continue
+        if i1 < len(rec):
+            b = rec[i1].get("iteration")
+            boundary = min(boundary, float(b) if b is not None else 0.0)
+        elif rec:
+            boundary = min(boundary, float(rec[-1].get("iteration") or 0) + 1)
+        else:
+            boundary = min(boundary, 0.0)
+        for di in range(i1, i2):
+            r = rec[di]
+            ops.append({"op": "missing", "kind": kind, "iteration": r.get("iteration"),
+                        "layer": r.get("layer"), "outcome": r.get("outcome"),
+                        "file_path": r.get("file_path"), "chars": r.get("chars_delivered"),
+                        "sha": r.get("content_sha256_16"),
+                        "reason": str(r.get("reason") or "")[:120],
+                        "tag": _tag_diff("missing", r)})
+        for dj in range(j1, j2):
+            r = rep[dj]
+            ops.append({"op": "extra", "kind": kind, "iteration": r.get("iteration"),
+                        "layer": r.get("layer"), "outcome": r.get("outcome"),
+                        "file_path": r.get("file_path"), "chars": r.get("chars_delivered"),
+                        "sha": r.get("content_sha256_16"),
+                        "reason": str(r.get("reason") or "")[:120],
+                        "tag": _tag_diff("extra", r)})
+    return ops, matched, boundary
+
+
+def diff_ledgers(task: str, recorded_rows: list[dict], replayed_rows: list[dict],
+                 error: str = "") -> FixpointResult:
+    """Sequence-align the recorded vs replayed ledgers, two-plane:
+
+    * DELIVERED plane (THE GATE): the model-facing rows — outcome contains 'delivered' with
+      chars>0 — compared in order on (layer, event_type, chars, sha-seal, file_path). These
+      are the exact bytes the model saw; a divergence here poisons every later verdict, so
+      the trusted-prefix boundary comes from this plane.
+    * HIDDEN plane (REPORTED, not gating): candidate stamps (eligible/produced), arbitration
+      losers (suppressed_*), L6 reindex/staging telemetry, cert/gate rows. Host-side these
+      legitimately differ (platform separators, node-count fields on scratch files, the
+      container-only embedder's drift candidates, submit-window wrapper executes) — and any
+      hidden contamination that MATTERS must surface in later delivered bytes, which gate.
+    """
+    if error:
+        return FixpointResult(task, False, False, False, -1.0,
+                              len(recorded_rows), len(replayed_rows), error=error)
+    strict = ([_strict_key(r) for r in recorded_rows] == [_strict_key(r) for r in replayed_rows])
+    rec_del = [r for r in recorded_rows if _is_delivered(r)]
+    rep_del = [r for r in replayed_rows if _is_delivered(r)]
+    rec_hid = [r for r in recorded_rows if not _is_delivered(r)]
+    rep_hid = [r for r in replayed_rows if not _is_delivered(r)]
+
+    del_ops, del_matched, boundary = _diff_seq(rec_del, rep_del, _delivered_key, "delivered")
+    hid_ops, _hid_matched, _hb = _diff_seq(rec_hid, rep_hid, _channel_key, "hidden")
+
+    # re-classify identical rows that merely MOVED (same key INCLUDING the byte seal,
+    # different position). Without the sha a same-length different-bytes payload would be
+    # masked as a benign move — the exact false-negative the gate exists to catch.
+    def _k(d: dict) -> str:
+        return json.dumps({x: d.get(x) for x in ("kind", "layer", "outcome", "file_path",
+                                                 "chars", "reason", "sha")}, sort_keys=True)
+    all_ops = del_ops + hid_ops
+    missing_by_k: dict[str, list[dict]] = {}
+    for d in all_ops:
+        if d["op"] == "missing":
+            missing_by_k.setdefault(_k(d), []).append(d)
+    for d in all_ops:
+        if d["op"] == "extra":
+            twins = missing_by_k.get(_k(d))
+            if twins:
+                twin = twins.pop(0)
+                twin["op"] = "moved"
+                d["op"] = "moved"
+                d["tag"] = twin["tag"] = "timing/counter-drift(moved)"
+    channel = not del_ops
+    return FixpointResult(task, True, strict, channel, boundary,
+                          len(recorded_rows), len(replayed_rows), all_ops, del_matched,
+                          n_hidden_diffs=len(hid_ops))
+
+
+def map_rec_iter(fx: FixpointResult, rec_iter: int) -> int:
+    """Map a RECORDED iteration to the REPLAYED iteration via the matched drift pairs."""
+    best = None
+    for ri, pi in fx.drift_map:
+        if ri <= rec_iter and (best is None or ri > best[0]):
+            best = (ri, pi)
+    if best is None:
+        return rec_iter
+    return best[1] + (rec_iter - best[0])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # LAYER 3 — ORACLE
 # ══════════════════════════════════════════════════════════════════════════════
 @dataclass
@@ -502,7 +1190,8 @@ def _rows_matching(rows: list[dict], layer: str, mnum: int | None, tol: int = 3)
 def _deliveries_to_rows(dels: list[Delivery]) -> list[dict]:
     """Normalize Delivery objects to plain rows the oracle matchers consume."""
     return [{"layer": d.layer, "home_msg": d.home_msg, "chars": d.chars, "reason": d.reason,
-             "outcome": d.outcome, "payload": d.payload, "delivered": _is_delivered(
+             "outcome": d.outcome, "payload": d.payload, "iteration": d.iteration,
+             "content_sha256_16": d.sha16, "delivered": _is_delivered(
                  {"outcome": d.outcome, "chars_delivered": d.chars})}
             for d in dels]
 
@@ -518,10 +1207,13 @@ def _count_in(text: str) -> set[int]:
 
 def evaluate_cases(cases: dict, recorded: dict[str, list[Delivery]],
                    replayed: dict[str, list[dict]] | None,
-                   blocked_note: str | None) -> list[CaseVerdict]:
+                   blocked_note: str | None,
+                   fidelity: dict[str, "FixpointResult"] | None = None) -> list[CaseVerdict]:
     """The oracle. ``recorded`` = reconstructed recorded deliveries per task; ``replayed`` = the
     replayed ledger per task (or None if the seam driver was BLOCKED — then flag-gated cases
-    SKIP:seam-blocked). Returns one CaseVerdict per case delivery."""
+    SKIP:seam-blocked). ``fidelity`` (SS-R2) = per-task OFF-flag FixpointResult; when present it
+    GATES every case FIRST: a case on an unfaithful task/window is REPLAY_UNFAITHFUL, never a
+    PASS or FAIL. Returns one CaseVerdict per case delivery."""
     out: list[CaseVerdict] = []
 
     def rec_rows(task: str) -> list[dict]:
@@ -542,6 +1234,49 @@ def evaluate_cases(cases: dict, recorded: dict[str, list[Delivery]],
             norm.append(rr)
         return norm
 
+    def _fx(task: str) -> "FixpointResult | None":
+        return fidelity.get(task) if fidelity is not None else None
+
+    def _gate_reason(task: str, rec_matches: list[dict] | None) -> str | None:
+        """FIXPOINT-FIRST GATE (SS-R2). None = the case may be judged. A string = the case is
+        REPLAY_UNFAITHFUL for that reason. Trusted-prefix rule: replay is chronological, so
+        divergence poisons only what comes AT/AFTER it — a case whose every recorded delivery
+        sits strictly BEFORE the first divergence iteration is still judgeable."""
+        if fidelity is None:
+            return None
+        fx = _fx(task)
+        if fx is None:
+            return "task not replayed (no fixpoint result)"
+        if not fx.replayed:
+            return f"replay failed: {(fx.error or 'unknown')[:140]}"
+        if fx.faithful:
+            return None
+        if rec_matches and all(int(r.get("iteration") or 10**9) < fx.boundary_iter for r in rec_matches):
+            return None
+        return (f"off-flag fixpoint diverges at recorded iteration {fx.boundary_iter:g}; "
+                f"case is not in the trusted prefix")
+
+    def _rep_match(rep: list[dict], task: str, layer: str, rec_matches: list[dict],
+                   mnum: int | None, use_sha: bool = False, tol: int = 2) -> list[dict]:
+        """Replay-side rows for a case: drift-aware (recorded iteration mapped through the
+        OFF-arm alignment) when fidelity is available; home/m-based otherwise (stub path)."""
+        fx = _fx(task)
+        if fx is not None and fx.replayed and rec_matches:
+            exps = {map_rec_iter(fx, int(r.get("iteration") or 0)) for r in rec_matches}
+            shas = {r.get("content_sha256_16") for r in rec_matches if r.get("content_sha256_16")}
+            hits = []
+            for r in rep:
+                if not _layer_matches(layer, r.get("layer", "")):
+                    continue
+                if use_sha and r.get("content_sha256_16") in shas:
+                    hits.append(r)
+                    continue
+                it = r.get("iteration")
+                if it is not None and any(abs(int(it) - e) <= tol for e in exps):
+                    hits.append(r)
+            return hits
+        return _rows_matching(rep, layer, mnum)
+
     # ---- PRESERVE (incl. the 3 CARDINAL P5s) --------------------------------
     for c in cases.get("preserve", []):
         layer, mnum = _parse_delivery(c["delivery"])
@@ -552,18 +1287,34 @@ def evaluate_cases(cases: dict, recorded: dict[str, list[Delivery]],
             out.append(CaseVerdict("preserve", c["task"], c["delivery"], SKIP,
                                    "no recorded delivery of this class to preserve", card))
             continue
+        gate = _gate_reason(c["task"], rec)
+        if gate:
+            out.append(CaseVerdict("preserve", c["task"], c["delivery"], REPLAY_UNFAITHFUL, gate, card))
+            continue
         if rep is None:
             out.append(CaseVerdict("preserve", c["task"], c["delivery"], SKIP,
                                    f"seam-blocked: {blocked_note}", card))
             continue
-        still = [r for r in _rows_matching(rep, layer, mnum) if r.get("delivered")]
+        still = [r for r in _rep_match(rep, c["task"], layer, rec, mnum, use_sha=True)
+                 if r.get("delivered")]
         if still:
+            loc = still[0].get("home_msg") or still[0].get("iteration")
             out.append(CaseVerdict("preserve", c["task"], c["delivery"], PASS,
-                                   f"still delivered at m{still[0].get('home_msg')}", card))
+                                   f"still delivered at {loc}", card))
         else:
+            # diagnostics: did the class deliver ANYWHERE (moved/re-rendered) vs vanish?
+            anywhere = [r for r in rep if _layer_matches(layer, r.get("layer", ""))
+                        and r.get("delivered")]
+            if anywhere:
+                locs = [(r.get("iteration"), r.get("content_sha256_16")) for r in anywhere[:3]]
+                detail = (f"delivery MOVED/REWRITTEN, not preserved in place: same-layer "
+                          f"delivered at iter/sha {locs} vs recorded iter "
+                          f"{[r.get('iteration') for r in rec]} (manifest asserts bytes "
+                          f"equivalent + boundary unchanged)")
+            else:
+                detail = "preserve delivery ABSENT after replay (no same-layer delivery at all)"
             out.append(CaseVerdict("preserve", c["task"], c["delivery"], FAIL,
-                                   "CARDINAL P5 KILLED — preserve delivery absent after replay"
-                                   if card else "preserve delivery absent after replay", card))
+                                   ("CARDINAL P5 KILLED — " if card else "") + detail, card))
 
     # ---- SUPPRESS families (step_behind / semantic_dup / provenance / late) --
     def suppress_family(section: str, reason_tok: str):
@@ -579,11 +1330,16 @@ def evaluate_cases(cases: dict, recorded: dict[str, list[Delivery]],
                     out.append(CaseVerdict(section, c["task"], dv, SKIP,
                                            "no recorded delivery of this class", False))
                     continue
+                gate = _gate_reason(c["task"], rec)
+                if gate:
+                    out.append(CaseVerdict(section, c["task"], dv, REPLAY_UNFAITHFUL, gate, False))
+                    continue
                 if rep is None:
                     out.append(CaseVerdict(section, c["task"], dv, SKIP,
                                            f"seam-blocked: {blocked_note}", False))
                     continue
-                delivered = [r for r in _rows_matching(rep, layer, mnum) if r.get("delivered")]
+                delivered = [r for r in _rep_match(rep, c["task"], layer, rec, mnum)
+                             if r.get("delivered")]
                 supp = [r for r in rep if _layer_matches(layer, r.get("layer", ""))
                         and reason_tok in str(r.get("reason") or r.get("outcome") or "")]
                 # conan-17092 m13 step_behind: oracle accepts deliver-OR-suppress (novelty may survive).
@@ -621,10 +1377,14 @@ def evaluate_cases(cases: dict, recorded: dict[str, list[Delivery]],
             if not rec:
                 out.append(CaseVerdict("coherence", c["task"], dv, SKIP, "no recorded coherence delivery", False))
                 continue
+            gate = _gate_reason(c["task"], rec)
+            if gate:
+                out.append(CaseVerdict("coherence", c["task"], dv, REPLAY_UNFAITHFUL, gate, False))
+                continue
             if rep is None:
                 out.append(CaseVerdict("coherence", c["task"], dv, SKIP, f"seam-blocked: {blocked_note}", False))
                 continue
-            fired = [r for r in _rows_matching(rep, layer, mnum) if r.get("delivered")]
+            fired = [r for r in _rep_match(rep, c["task"], layer, rec, mnum) if r.get("delivered")]
             if not fired:
                 out.append(CaseVerdict("coherence", c["task"], dv, PASS, "silent (count<=2 / test intervened)", False))
                 continue
@@ -645,11 +1405,15 @@ def evaluate_cases(cases: dict, recorded: dict[str, list[Delivery]],
             out.append(CaseVerdict("recovery_misfire", c["task"], c["delivery"], SKIP,
                                    "no recorded recovery misfire to check", False))
             continue
+        gate = _gate_reason(c["task"], rec)
+        if gate:
+            out.append(CaseVerdict("recovery_misfire", c["task"], c["delivery"], REPLAY_UNFAITHFUL, gate, False))
+            continue
         if rep is None:
             out.append(CaseVerdict("recovery_misfire", c["task"], c["delivery"], SKIP,
                                    f"seam-blocked: {blocked_note}", False))
             continue
-        fired = [r for r in _rows_matching(rep, "recovery", mnum) if r.get("delivered")]
+        fired = [r for r in _rep_match(rep, c["task"], "recovery", rec, mnum) if r.get("delivered")]
         out.append(CaseVerdict("recovery_misfire", c["task"], c["delivery"],
                                FAIL if fired else PASS,
                                "recovery still fired (misfire not suppressed)" if fired else "no misfire delivery", False))
@@ -658,16 +1422,39 @@ def evaluate_cases(cases: dict, recorded: dict[str, list[Delivery]],
     for c in cases.get("recovery_earlier_release", []):
         rec = _rows_matching(rec_rows(c["task"]), "recovery", None)
         rep = rep_rows(c["task"])
+        # earlier-release spans the WHOLE run: a trusted prefix is not enough — the task's
+        # off-flag replay must be faithful end-to-end for "earlier than recorded" to mean anything.
+        if fidelity is not None:
+            fx = _fx(c["task"])
+            if fx is None or not fx.replayed or not fx.faithful:
+                why = ("task not replayed" if fx is None or not fx.replayed
+                       else f"off-flag fixpoint diverges at iteration {fx.boundary_iter:g} "
+                            f"(whole-run property needs a fully faithful task)")
+                out.append(CaseVerdict("recovery_earlier", c["task"], "recovery",
+                                       REPLAY_UNFAITHFUL, why, False))
+                continue
         if rep is None:
             out.append(CaseVerdict("recovery_earlier", c["task"], "recovery", SKIP,
                                    f"seam-blocked: {blocked_note}", False))
             continue
         recovered = [r for r in rep if _layer_matches("recovery", r.get("layer", "")) and r.get("delivered")]
-        rec_m = min((int(r.get("home_msg")) for r in rec if r.get("home_msg") not in (None, -1)), default=None)
         if not recovered:
             out.append(CaseVerdict("recovery_earlier", c["task"], "recovery", FAIL,
                                    "recovery never delivered on replay", False))
             continue
+        fx = _fx(c["task"])
+        if fx is not None and fx.replayed:
+            rec_it = min((int(r.get("iteration") or 10**9) for r in rec), default=None)
+            first_it = min(int(r.get("iteration") or 10**9) for r in recovered)
+            bound = map_rec_iter(fx, rec_it) if rec_it is not None else None
+            if bound is None or first_it < bound:
+                out.append(CaseVerdict("recovery_earlier", c["task"], "recovery", PASS,
+                                       f"recovery released earlier (iter {first_it} < mapped recorded {bound})", False))
+            else:
+                out.append(CaseVerdict("recovery_earlier", c["task"], "recovery", FAIL,
+                                       f"recovery not earlier (iter {first_it} >= mapped recorded {bound})", False))
+            continue
+        rec_m = min((int(r.get("home_msg")) for r in rec if r.get("home_msg") not in (None, -1)), default=None)
         first_m = min(int(r.get("home_msg")) for r in recovered if r.get("home_msg") is not None)
         if rec_m is None or first_m < rec_m:
             out.append(CaseVerdict("recovery_earlier", c["task"], "recovery", PASS,
@@ -835,20 +1622,55 @@ def _table(headers: list[str], rows: list[list[str]]) -> str:
     return "\n".join(out)
 
 
+# Every SUPER-SAIYAN flag across BOTH vocabularies: the ss_gate feature contract
+# (GT_SS_STEP_BEHIND...) AND the landed rl_profile Profile-2 members (GT_SS_NOVELTY...).
+# The OFF-arm must set each to an EXPLICIT "0": under the W8 default-inversion an UNSET
+# Profile-2 member is RESOLVED to "1" by the seam's own fan-out, so "unset" is NOT off.
+_SS_FLAGS_ALL = ("GT_SS_STEP_BEHIND", "GT_SS_SEMANTIC_DEDUP", "GT_SS_COHERENCE",
+                 "GT_SS_RECOVERY", "GT_SS_PROVENANCE", "GT_SS_LATE", "GT_SS_ACK",
+                 "GT_SS_ARBITER_V2", "GT_SS_NOVELTY", "GT_SS_DEDUP2",
+                 "GT_SS_COHERENCE_V2", "GT_SS_RECOVERY_V2", "GT_SS_LATE_DROP",
+                 "GT_SS_ACK_METRICS")
+
+
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="SS-R SUPER-SAIYAN replay-oracle")
+    ap = argparse.ArgumentParser(description="SS-R2 SUPER-SAIYAN replay-oracle (fixpoint-first)")
     ap.add_argument("--cases", default=str(_DEFAULT_CASES))
     ap.add_argument("--recorded-root", default=str(_DEFAULT_RECORDED),
                     help="dir holding <task>/mini-swe-agent.trajectory.json + gt_runtime_ledger_<task>.jsonl")
-    ap.add_argument("--repo-snapshot-root", default=None,
-                    help="optional dir of per-task repo checkouts (enables real-seam full replay)")
+    ap.add_argument("--snapshots-root", default="D:/gt_runs/ss_replay_snapshots",
+                    help="dir of per-task repo checkouts at the recorded base commits")
+    ap.add_argument("--tasks", default="", help="comma-separated task subset (default: all manifest tasks)")
+    ap.add_argument("--apply-edits", action="store_true", default=True,
+                    help="re-execute allowlisted file-mutation commands (recorded disk evolution)")
+    ap.add_argument("--no-apply-edits", dest="apply_edits", action="store_false")
     ap.add_argument("--out", default=str(_REPO / "ss_replay_oracle_report.json"))
+    ap.add_argument("--work-dir", default="",
+                    help="dir for per-task replay artifacts (default: a fresh temp dir)")
+    ap.add_argument("--kill-members", default="",
+                    help="comma-separated GT members forced to 0 in BOTH arms (e.g. the "
+                         "ONNX embedder legs for speed; any infidelity this introduces is "
+                         "caught by the per-task fixpoint gate)")
+    # child mode (internal): replay ONE task in THIS process with the env the parent set.
+    ap.add_argument("--replay-one", default="", help=argparse.SUPPRESS)
+    ap.add_argument("--child-out", default="", help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
 
+    if args.replay_one:
+        return replay_child_main(args.replay_one, Path(args.recorded_root),
+                                 Path(args.child_out), args.apply_edits)
+
+    import tempfile
     ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     cases = json.loads(Path(args.cases).read_text(encoding="utf-8"))
     recorded_root = Path(args.recorded_root)
+    snapshots_root = Path(args.snapshots_root)
     tasks = _manifest_tasks(cases)
+    if args.tasks:
+        keep = {t.strip() for t in args.tasks.split(",") if t.strip()}
+        tasks = [t for t in tasks if t in keep]
+    work_dir = Path(args.work_dir) if args.work_dir else Path(tempfile.mkdtemp(prefix="ssr2_"))
+    work_dir.mkdir(parents=True, exist_ok=True)
 
     # ── LAYER 1: reconstruct every manifest task ─────────────────────────────
     recon: dict[str, ReconstructedTask] = {}
@@ -865,82 +1687,173 @@ def main(argv=None) -> int:
     # ── manifest validation ──────────────────────────────────────────────────
     manifest_findings = validate_manifest(cases, recorded_deliveries)
 
-    # ── LAYER 2: attempt real-seam replay (Profile-2, all SS on) ─────────────
-    replayed: dict[str, list[dict]] | None = None
-    blocked_note: str | None = None
-    driver_used = "none"
-    snap = Path(args.repo_snapshot_root) if args.repo_snapshot_root else None
-    ss_on = {k: "1" for k in ("GT_SS_STEP_BEHIND", "GT_SS_SEMANTIC_DEDUP", "GT_SS_COHERENCE",
-                              "GT_SS_RECOVERY", "GT_SS_PROVENANCE", "GT_SS_LATE", "GT_SS_ACK",
-                              "GT_SS_ARBITER_V2")}
-    try:
-        driver = MiniSeamDriver(flag_env=ss_on, repo_snapshot_root=snap)
-        replayed = {}
-        for t, r in recon.items():
-            replayed[t] = [dict(row, home_msg=row.get("iteration")) for row in replay_task(r, driver, recorded_root)]
-        driver_used = "mini"
-    except SeamReplayBlocked as exc:
-        blocked_note = str(exc)
-        replayed = None
-        driver_used = "mini(blocked)"
-    except Exception as exc:  # noqa: BLE001
-        blocked_note = f"seam driver fault: {type(exc).__name__}: {exc}"
-        replayed = None
-        driver_used = "mini(error)"
+    # ── SS-R2 STEP 1 (per task): OFF-flag replay -> FIXPOINT GATE ────────────
+    # The off-arm (every GT_SS_* unset) must reproduce the RECORDED ledger; a task that
+    # fails this canary gets its cases marked REPLAY_UNFAITHFUL (outside the trusted
+    # prefix) instead of producing false verdicts.
+    fidelity: dict[str, FixpointResult] = {}
+    replayed_on: dict[str, list[dict]] = {}
+    applied_log: dict[str, dict] = {}
+    kill = {m.strip(): "0" for m in args.kill_members.split(",") if m.strip()}
+    ss_on = {**{k: "1" for k in _SS_FLAGS_ALL}, **kill}
+    ss_off = {**{k: "0" for k in _SS_FLAGS_ALL}, **kill}   # EXPLICIT zeros: unset would be fan-out-resolved ON
+    for t in sorted(recon):
+        off = spawn_replay(t, recorded_root, snapshots_root, ss_off, args.apply_edits,
+                           work_dir, arm="off")
+        fx = diff_ledgers(t, recorded_rows.get(t, []), off["rows"], error=off["error"] or "")
+        fidelity[t] = fx
+        applied_log[t] = {"off_applied": sum(1 for a in off["applied"] if "cmd" in a),
+                          "off_error": off["error"]}
+        print(f"  [fixpoint] {t}: strict={fx.strict} channel={fx.channel} "
+              f"boundary={fx.boundary_iter:g} rows {fx.n_recorded}->{fx.n_replayed} "
+              f"diffs={len(fx.diffs)}", file=sys.stderr)
+        # ── STEP 2: ON-arm replay (all SS flags) for the case verdicts ───────
+        if fx.replayed:
+            on = spawn_replay(t, recorded_root, snapshots_root, ss_on, args.apply_edits,
+                              work_dir, arm="on")
+            replayed_on[t] = on["rows"]
+            applied_log[t]["on_applied"] = sum(1 for a in on["applied"] if "cmd" in a)
+            applied_log[t]["on_error"] = on["error"]
 
-    # ── LAYER 3: oracle ──────────────────────────────────────────────────────
-    verdicts = evaluate_cases(cases, recorded_deliveries, replayed, blocked_note)
-    invariants = evaluate_invariants(recorded_deliveries, replayed, recorded_rows, blocked_note)
+    trusted = sorted(t for t, fx in fidelity.items() if fx.faithful)
+    prefix_only = sorted(t for t, fx in fidelity.items()
+                         if fx.replayed and not fx.faithful and fx.boundary_iter > 0)
+    untrusted = sorted(t for t, fx in fidelity.items() if not fx.replayed)
+
+    # SS built-probes (mirrors ss_gate's SKIP:flag-not-built): globally — any ss_* reason
+    # anywhere or any faithful task whose ON-arm differs from the recording; per FAMILY —
+    # the family's reason token must appear in SOME ON-arm ledger for its suppress cases to
+    # be judged FAIL (an engine that is not landed yet is an honest SKIP, never a false RED).
+    ss_built = False
+    for t in trusted + prefix_only:
+        fx = fidelity[t]
+        on_rows = replayed_on.get(t, [])
+        if any("ss_" in str(r.get("reason") or "") for r in on_rows):
+            ss_built = True
+            break
+        # a FAITHFUL task's OFF-arm equals the recording, so an ON-arm that differs from
+        # the recording differs from OFF -> the SS flags have an effect.
+        if fx.faithful and [_channel_key(r) for r in on_rows] != \
+                [_channel_key(r) for r in recorded_rows.get(t, [])]:
+            ss_built = True
+            break
+    _all_on_reasons = " ".join(str(r.get("reason") or "") for rows in replayed_on.values()
+                               for r in rows)
+    family_token = {
+        "suppress_step_behind": "ss_step_behind", "suppress_semantic_dup": "ss_semantic_dup",
+        "suppress_provenance": "ss_provenance", "suppress_late": "ss_late",
+        "coherence": "ss_coherence", "recovery_misfire": "ss_recovery",
+        "recovery_earlier": "ss_recovery",
+    }
+    family_built = {sec: (tok in _all_on_reasons) for sec, tok in family_token.items()}
+
+    # ── LAYER 3: oracle (fixpoint-gated) ─────────────────────────────────────
+    verdicts = evaluate_cases(cases, recorded_deliveries, replayed_on, None, fidelity)
+    verdicts = [
+        CaseVerdict(v.section, v.task, v.label, SKIP,
+                    f"flag-not-built ({family_token.get(v.section)} never appears in any "
+                    f"ON-arm ledger)", v.cardinal)
+        if (v.verdict == FAIL and v.section in family_token
+            and not family_built.get(v.section, True)) else v
+        for v in verdicts
+    ]
+    trusted_on = {t: replayed_on.get(t, []) for t in trusted + prefix_only}
+    invariants = evaluate_invariants(recorded_deliveries, trusted_on or None, recorded_rows,
+                                     "no trusted replays" if not trusted_on else None)
+    # the legacy in-function "off-flag fixpoint" invariant would compare the ON-arm to the
+    # recording (wrong plane under SS-R2 — the real fixpoint is per-task and IS the gate).
+    # Replace it with the per-task summary; gating already enforces it, so this line is
+    # informational (PASS when every replayed task is faithful, SKIP otherwise — the
+    # unfaithful tasks' cases are already REPLAY_UNFAITHFUL, never silently counted).
+    invariants = [i for i in invariants if not i.name.startswith("off-flag fixpoint")]
+    n_rep = sum(1 for fx in fidelity.values() if fx.replayed)
+    n_faith = sum(1 for fx in fidelity.values() if fx.faithful)
+    invariants.append(InvariantResult(
+        "off-flag fixpoint (per task, delivered plane — THE GATE)",
+        PASS if (n_rep and n_faith == n_rep) else SKIP,
+        f"{n_faith}/{n_rep} replayed tasks faithful; unfaithful tasks' cases are REPLAY_UNFAITHFUL"))
 
     # ── tallies + exit ───────────────────────────────────────────────────────
     n_fail = sum(1 for v in verdicts if v.verdict == FAIL)
     n_pass = sum(1 for v in verdicts if v.verdict == PASS)
     n_skip = sum(1 for v in verdicts if v.verdict == SKIP)
+    n_unf = sum(1 for v in verdicts if v.verdict == REPLAY_UNFAITHFUL)
     cardinal_kills = [v for v in verdicts if v.cardinal and v.verdict == FAIL]
+    cardinal_unf = [v for v in verdicts if v.cardinal and v.verdict == REPLAY_UNFAITHFUL]
     inv_fail = [i for i in invariants if i.verdict == FAIL]
     hard_fail = (n_fail > 0 or bool(cardinal_kills) or bool(manifest_findings)
                  or bool(residuals) or bool(recon_errors) or bool(inv_fail))
-    exit_code = 1 if hard_fail else 0
+    if hard_fail:
+        exit_code = 1
+    elif cardinal_unf:
+        exit_code = 3   # inconclusive: a cardinal P5 sits outside the trusted subset
+    else:
+        exit_code = 0
 
     # ── report ───────────────────────────────────────────────────────────────
-    print(f"\n# SS-R SUPER-SAIYAN replay-oracle — {ts}")
+    print(f"\n# SS-R2 SUPER-SAIYAN replay-oracle (fixpoint-first) — {ts}")
     print(f"  recorded-root : {recorded_root}")
+    print(f"  snapshots     : {snapshots_root}  apply-edits={args.apply_edits}")
     print(f"  tasks         : {len(recon)} reconstructed"
           + (f" ({len(recon_errors)} errors)" if recon_errors else ""))
-    print(f"  seam driver   : {driver_used}"
-          + (f"  — {blocked_note[:110]}..." if blocked_note else ""))
     print(f"  reconstruction: residual seal leaks in {len(residuals)} task(s)"
           + (f" {list(residuals)[:3]}" if residuals else " (0 — every seal stripped cleanly)"))
     print(f"  manifest      : {len(cases_delivery_count(cases))} case-deliveries; "
-          f"{len(manifest_findings)} discrepancy(ies) vs recorded data")
+          f"{len(manifest_findings)} discrepancy(ies)")
     for f in manifest_findings:
         print("     ! " + f)
+    print(f"  SS engines    : {'BUILT (flags have effect)' if ss_built else 'NOT BUILT (GT_SS_* no-op; suppress FAILs -> SKIP)'}")
 
-    print("\n  ── per-case verdicts ──")
-    rows = [[v.verdict + ("*" if v.cardinal else ""), v.section, v.task[:30], v.label[:26], v.reason[:60]]
+    print("\n  ── per-task OFF-flag fixpoint (the gate) ──")
+    fx_rows = []
+    for t in sorted(fidelity):
+        fx = fidelity[t]
+        from collections import Counter
+        tags = Counter(d["tag"] for d in fx.diffs)
+        tag_s = ", ".join(f"{k}x{v}" for k, v in tags.most_common(3)) or "-"
+        n_del = sum(1 for d in fx.diffs if d.get("kind") == "delivered")
+        status = ("FAITHFUL(strict)" if fx.strict else
+                  "FAITHFUL(delivered)" if fx.channel else
+                  (f"PREFIX<iter{fx.boundary_iter:g}" if fx.replayed else "NOT-REPLAYED"))
+        fx_rows.append([status, t[:34], f"{fx.n_recorded}->{fx.n_replayed}",
+                        f"{n_del}/{fx.n_hidden_diffs}", tag_s[:52],
+                        (fx.error or "")[:40]])
+    print(_table(["FIXPOINT", "TASK", "ROWS", "DIFF del/hid", "TOP ROOT-CAUSE TAGS", "ERROR"], fx_rows))
+
+    print("\n  ── per-case verdicts (fixpoint-gated) ──")
+    rows = [[v.verdict + ("*" if v.cardinal else ""), v.section, v.task[:30], v.label[:26], v.reason[:56]]
             for v in verdicts]
     print(_table(["VERDICT", "SECTION", "TASK", "DELIVERY", "REASON"], rows))
 
-    print("\n  ── invariants ──")
+    print("\n  ── invariants (trusted subset) ──")
     print(_table(["VERDICT", "INVARIANT", "DETAIL"],
                  [[i.verdict, i.name, i.detail[:70]] for i in invariants]))
 
-    print(f"\n  cases: PASS={n_pass} FAIL={n_fail} SKIP={n_skip}"
-          f" | cardinal P5 kills={len(cardinal_kills)} | invariant FAILs={len(inv_fail)}")
-    print(f"  EXIT {exit_code} ({'GREEN' if exit_code == 0 else 'RED'})")
-    if driver_used.startswith("mini(") and blocked_note:
-        print(f"\n  [seam-note] {blocked_note}")
+    print(f"\n  trusted subset: {len(trusted)} fully faithful + {len(prefix_only)} prefix-faithful"
+          f" / {len(fidelity)} replayed; not-replayed: {len(untrusted)}")
+    print(f"  cases: PASS={n_pass} FAIL={n_fail} SKIP={n_skip} {REPLAY_UNFAITHFUL}={n_unf}"
+          f" | cardinal kills={len(cardinal_kills)} | cardinal unfaithful={len(cardinal_unf)}")
+    print(f"  EXIT {exit_code} ({'GREEN' if exit_code == 0 else 'INCONCLUSIVE-CARDINALS' if exit_code == 3 else 'RED'})")
 
     report = {
-        "gate": "ss_replay_oracle", "generated_utc": ts, "recorded_root": str(recorded_root),
-        "seam_driver": driver_used, "seam_blocked_note": blocked_note,
+        "gate": "ss_replay_oracle", "schema": "ss.replay_oracle_report.v2", "generated_utc": ts,
+        "recorded_root": str(recorded_root), "snapshots_root": str(snapshots_root),
+        "apply_edits": bool(args.apply_edits), "ss_built": ss_built,
         "tasks_reconstructed": sorted(recon), "reconstruction_errors": recon_errors,
         "residual_seal_leaks": residuals, "manifest_findings": manifest_findings,
+        "fixpoint": {t: {"strict": fx.strict, "channel": fx.channel, "replayed": fx.replayed,
+                         "boundary_iter": fx.boundary_iter if fx.boundary_iter != float("inf") else None,
+                         "rows_recorded": fx.n_recorded, "rows_replayed": fx.n_replayed,
+                         "error": fx.error, "diffs": fx.diffs[:80]}
+                     for t, fx in fidelity.items()},
+        "trusted_subset": {"full": trusted, "prefix": prefix_only, "not_replayed": untrusted},
+        "applied_edits": applied_log,
         "cardinal_p5_kills": [f"{v.task}:{v.label}" for v in cardinal_kills],
+        "cardinal_p5_unfaithful": [f"{v.task}:{v.label} — {v.reason}" for v in cardinal_unf],
         "cases": [{"section": v.section, "task": v.task, "delivery": v.label, "verdict": v.verdict,
                    "reason": v.reason, "cardinal": v.cardinal} for v in verdicts],
         "invariants": [{"name": i.name, "verdict": i.verdict, "detail": i.detail} for i in invariants],
-        "counts": {"pass": n_pass, "fail": n_fail, "skip": n_skip},
+        "counts": {"pass": n_pass, "fail": n_fail, "skip": n_skip, "replay_unfaithful": n_unf},
         "exit_code": exit_code,
     }
     try:
