@@ -145,6 +145,19 @@ _INFRA_MEMBER_MEDIATES: dict[str, tuple[str, ...]] = {
     "GT_NUDGE_NATIVE": ("recovery",),                     # nudge frame drop (imperative body)
     "GT_BRIEF_NATIVE": ("obligations",),                  # brief obligations checklist form
     "GT_INSEAM_METRICS": (),                              # host-side instrumentation only
+    # SS-1..SS-N SUPER-SEAM adherence sweep (2026-07-13) — every one is an INFRA MEDIATOR
+    # (arbitrate/dedup/novelty/timing/provenance/telemetry over EXISTING classes), never a new
+    # fact PRODUCER, so they get correctness+mediation metrics only, never a direct help credit.
+    # An empty tuple = a KERNEL mediator that touches ALL classes (the arbiter/novelty/dedup/
+    # late-drop/provenance/ack kernel); a named class = the class that SS behavior most shapes.
+    "GT_SS_ARBITER_V2": (),                               # the one-dose arbiter (defer/relax/empty-guard)
+    "GT_SS_NOVELTY": (),                                  # novelty gate across all classes
+    "GT_SS_DEDUP2": (),                                   # 2nd-order cross-plane dedup, all classes
+    "GT_SS_COHERENCE_V2": ("cochange_prior",),            # companion/coherence re-detection
+    "GT_SS_RECOVERY_V2": ("recovery",),                  # recovery selection v2
+    "GT_SS_PROVENANCE": (),                               # provenance/seal on every delivery
+    "GT_SS_LATE_DROP": (),                                # late-fact drop timing, all classes
+    "GT_SS_ACK_METRICS": (),                              # host-side ack telemetry only
 }
 
 # Backing-module → producer agreement drift-guard: these members' _MEMBER_CAPABILITY_MODULE

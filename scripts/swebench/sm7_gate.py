@@ -254,6 +254,45 @@ MEMBER_EVIDENCE: dict[str, list[str]] = {
         A + "test_l6_fresh_reindex_telemetry.py::test_l6_fresh_reindex_adds_new_file_and_emits_proof",
         A + "test_l6_fresh_reindex_telemetry.py::test_l6_staging_fallback_refuses_to_reindex_ro_mount",
     ],
+    # ---- SS-1..SS-N SUPER-SEAM adherence sweep (2026-07-13) ----
+    # GT_SS_ARBITER_V2's BEHAVIOR lives in SS-1's owner files (global_arbiter/gateway), proven
+    # by its Stage-1 unit tests. The 7 seam-property flags register+forward here (SS-1 owns
+    # rl_profile), proven by their membership+forward covering tests; their behavioral covering
+    # tests are owned by the implementing seam agents (repointed at reconciliation).
+    "GT_SS_ARBITER_V2": [
+        R + "runtime/test_ss1_arbiter_v2.py::test_empty_payload_candidate_never_wins_under_v2",
+        R + "runtime/test_ss1_arbiter_v2.py::test_repair_support_relaxed_when_obligations_open",
+        R + "runtime/test_ss1_arbiter_v2.py::test_arbitrate_v2_off_is_byte_identical",
+        R + "runtime/test_ss1_gateway_empty_payload.py::test_empty_payload_dropped_under_v2",
+    ],
+    "GT_SS_NOVELTY": [
+        R + "runtime/test_ss1_members.py::test_all_ss_members_are_profile2",
+        R + "runtime/test_ss1_members.py::test_all_ss_members_ae_forwarded",
+    ],
+    "GT_SS_DEDUP2": [
+        R + "runtime/test_ss1_members.py::test_all_ss_members_are_profile2",
+        R + "runtime/test_ss1_members.py::test_all_ss_members_ae_forwarded",
+    ],
+    "GT_SS_COHERENCE_V2": [
+        R + "runtime/test_ss1_members.py::test_all_ss_members_are_profile2",
+        R + "runtime/test_ss1_members.py::test_all_ss_members_ae_forwarded",
+    ],
+    "GT_SS_RECOVERY_V2": [
+        R + "runtime/test_ss1_members.py::test_all_ss_members_are_profile2",
+        R + "runtime/test_ss1_members.py::test_all_ss_members_ae_forwarded",
+    ],
+    "GT_SS_PROVENANCE": [
+        R + "runtime/test_ss1_members.py::test_all_ss_members_are_profile2",
+        R + "runtime/test_ss1_members.py::test_all_ss_members_ae_forwarded",
+    ],
+    "GT_SS_LATE_DROP": [
+        R + "runtime/test_ss1_members.py::test_all_ss_members_are_profile2",
+        R + "runtime/test_ss1_members.py::test_all_ss_members_ae_forwarded",
+    ],
+    "GT_SS_ACK_METRICS": [
+        R + "runtime/test_ss1_members.py::test_all_ss_members_are_profile2",
+        R + "runtime/test_ss1_fact_registry_ack.py::test_ack_expected_metadata_present",
+    ],
 }
 
 # CHECK 6 (<=1 dose + latch) node-ids — the arbiter single-dose law + Lane-A latch defer/commit.

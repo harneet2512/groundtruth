@@ -359,6 +359,25 @@ def _loc_reslot_on() -> bool:
     )
 
 
+def _ss_arbiter_v2_on() -> bool:
+    """SS-1 flag ``GT_SS_ARBITER_V2`` (2026-07-13). Arms the SS-V2 arbiter behaviors; in THIS
+    module it gates the EMPTY-PAYLOAD guard in :func:`augment` — a produced envelope that
+    would render ZERO bytes (empty ``payload``) is dropped so it can never enter the global
+    pool and produce a ``chars=0`` delivered ledger row (the hydra-3005 empty-payload
+    delivery). Default OFF ⇒ the guard is skipped ⇒ :func:`augment` is byte-identical. The
+    same flag is read by ``global_arbiter.arbitrate`` (the ranked-competition v2 branches)."""
+    return os.environ.get("GT_SS_ARBITER_V2", "").strip().lower() not in (
+        "", "0", "false", "no", "off"
+    )
+
+
+def _envelope_has_bytes(env: EvidenceEnvelope) -> bool:
+    """True iff the envelope carries at least one non-whitespace payload line — i.e. it will
+    render non-empty model-facing bytes. An envelope whose ``payload`` is empty (or all-blank
+    after the leak filter) renders nothing; SS-V2 drops it (:func:`_ss_arbiter_v2_on`)."""
+    return any(str(ln).strip() for ln in (env.payload or ()))
+
+
 def _xsession_on() -> bool:
     """SM-9c flag (2026-07-11). Arms the CROSS-SESSION learned-delivery policy: the Gateway
     consults this repo's durable causal-consumption ledger (loaded once at task-start and
@@ -2202,6 +2221,13 @@ def augment(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
         # registered/aliased, so this is a no-op for real facts and blocks only a
         # truly-unregistered class (tests pin the full emitted set as renderable).
         if not _renderable(a.evidence_type):
+            continue
+        # SS-1 EMPTY-PAYLOAD guard (GT_SS_ARBITER_V2): a produced envelope that would render
+        # ZERO model-facing bytes must never be delivered (the hydra-3005 chars=0 / empty-seal
+        # delivered row). Dropped here BEFORE it can enter the global pool. OFF ⇒ skipped ⇒
+        # byte-identical (real producers always build a non-empty payload, so this rejects
+        # only a degenerate empty-payload envelope, and only under the flag).
+        if _ss_arbiter_v2_on() and not _envelope_has_bytes(a):
             continue
         # SM-0 registry ENFORCEMENT (GT_REGISTRY_ENFORCE): bind producer -> the DECLARED
         # native renderer. A class with no available renderer has no native FORM to ride the

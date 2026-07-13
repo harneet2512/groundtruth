@@ -330,6 +330,19 @@ def test_profile_2_is_profile_1_plus_super_mode_members():
         # work-copy of the base graph.db). Runtime consumer gt_mini_patch._db_path; the
         # capability is the staged gt-index binary (substrate property, unmapped-by-convention).
         "GT_L6_FRESH",
+        # SS-1..SS-N (2026-07-13): the SUPER-SEAM adherence sweep (29-task causal audit of run
+        # 29236533134). GT_SS_ARBITER_V2 = arbiter defer-refire + repair_support relaxation +
+        # empty-payload guard (global_arbiter/gateway); the 7 others are default-OFF seam-code
+        # properties (novelty/dedup2/coherence/recovery/provenance/late-drop/ack-metrics), all
+        # unmapped-by-convention. Dropping/adding one here makes this bite.
+        "GT_SS_NOVELTY",
+        "GT_SS_DEDUP2",
+        "GT_SS_COHERENCE_V2",
+        "GT_SS_RECOVERY_V2",
+        "GT_SS_PROVENANCE",
+        "GT_SS_LATE_DROP",
+        "GT_SS_ACK_METRICS",
+        "GT_SS_ARBITER_V2",
     }
     # SM-4: GT_EDIT_OVERLAY is now profile-activated (model-facing stale-drop) -> PRESENT.
     assert "GT_EDIT_OVERLAY" in rp.PROFILE_MEMBERS["2"]

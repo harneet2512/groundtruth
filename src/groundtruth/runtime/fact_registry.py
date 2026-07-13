@@ -56,6 +56,7 @@ __all__ = [
     "required_event",
     "earliest_event_for",
     "required_renderer",
+    "ack_expected",
     "is_reactive",
     "freshness_surfaces",
     "registry_graph_surfaces",
@@ -173,6 +174,11 @@ class FactRegistration:
     freshness_deps: tuple[str, ...] = field(default=())  # revisions that stale the fact
     receipt_predicate: str = ""  # NAME of the non-reacquisition receipt predicate (for now)
     causal_eval: str = ""        # the paired/counterfactual method that grades causality
+    # SS-1 (2026-07-13) — METADATA ONLY (consumed by telemetry; NO behavior change). Whether a
+    # consumption ACK is expected for this class (every §1 class declares a receipt_predicate,
+    # so an ack IS expected). Read by the ack-metrics telemetry (GT_SS_ACK_METRICS); the
+    # delivery kernel never branches on it, so it cannot alter a single delivered byte.
+    ack_expected: bool = True
 
 
 def _reg(
@@ -483,6 +489,10 @@ def _self_check() -> None:
             raise ValueError(f"fact_registry: {key}.surface {reg.surface!r}")
         if reg.native_renderer not in RENDERERS:
             raise ValueError(f"fact_registry: {key}.native_renderer {reg.native_renderer!r}")
+        # SS-1: ack_expected is metadata but MUST be a strict bool (a str/None would poison
+        # the telemetry join that reads it) — fail LOUD at import like the other field guards.
+        if not isinstance(reg.ack_expected, bool):
+            raise ValueError(f"fact_registry: {key}.ack_expected is not a bool")
     # Graph-F2: the evidence-type alias map is part of the vocabulary contract — a bad
     # alias must fail LOUD at import, never silently mis-route (or silence) a shipped fact.
     for src, dst in _EVIDENCE_TYPE_ALIASES.items():
@@ -653,6 +663,16 @@ def required_renderer(evidence_type: str) -> str | None:
     ``None`` here means truly-unregistered — the enforcement drops it correct-or-quiet."""
     reg = registration_for(evidence_type)
     return reg.native_renderer if reg is not None else None
+
+
+def ack_expected(evidence_type: str) -> bool:
+    """SS-1 (2026-07-13): whether a consumption ACK is expected for a shipped ``evidence_type``
+    (resolving via alias / ``base:suffix`` exactly like :func:`required_renderer`). METADATA
+    ONLY — read by the ack-metrics telemetry (GT_SS_ACK_METRICS), never by the delivery kernel,
+    so it changes no delivered byte. An unregistered type -> ``False`` (there is no fact whose
+    ack could be expected)."""
+    reg = registration_for(evidence_type)
+    return bool(reg.ack_expected) if reg is not None else False
 
 
 # --------------------------------------------------------------------------- #

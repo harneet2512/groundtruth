@@ -200,6 +200,27 @@ _SUPER_MODE_MEMBERS: frozenset[str] = frozenset(
         # GT_LOC_RESLOT/GT_CERT_DELIVERY). Default-OFF direct os.environ read; Profile-2 fans it
         # to "1" and an unset profile is byte-identical (the flag stays OFF -> no work-copy).
         "GT_L6_FRESH",            # #48 — per-turn in-container L6 reindex (edit-fresh work-copy)
+        # SS-1..SS-N (2026-07-13) — the SUPER-SEAM adherence sweep from the 29-task causal audit
+        # of run 29236533134. Each is a DEFAULT-OFF, byte-identical-when-unset seam/arbiter code
+        # property (NOT a new tag / pull-tool). NO _MEMBER_CAPABILITY_MODULE entry — these are
+        # seam-spread / arbiter-engine code properties with no single baked SURFACE to find_spec,
+        # so they are available-BY-CONVENTION exactly like GT_D7_RELATEDNESS / GT_SCOPE_NATIVE /
+        # GT_LOC_RESLOT (never a FALSE abort; flag-off is byte-identical anyway). Forwarded in
+        # gt_ae_block.sh (pier drops host env) and pinned in test_ae_forward_profile2_completeness.
+        # ONE evidence line each (audit finding it addresses):
+        "GT_SS_NOVELTY",          # SS — novelty gate: a fact re-offered unchanged is not re-delivered
+        "GT_SS_DEDUP2",           # SS — 2nd-order dedup: cross-plane identity beyond the unified key
+        "GT_SS_COHERENCE_V2",     # SS — coherence/companion re-detection (the l3b-dominated pool composition)
+        "GT_SS_RECOVERY_V2",      # SS — recovery selection v2 (the one proven-consumed short/active form)
+        "GT_SS_PROVENANCE",       # SS — provenance stamp on every model-visible delivery (seal completeness)
+        "GT_SS_LATE_DROP",        # SS — late-fact drop timing (defer-refire vs destroy on a passed boundary)
+        "GT_SS_ACK_METRICS",      # SS — ack-ladder telemetry (fact_registry.ack_expected; host-side only)
+        # GT_SS_ARBITER_V2: the arbiter defer-and-refire + repair_support relaxation + empty-payload
+        # guard (global_arbiter.arbitrate / gateway.augment). Fixes: scope_map blanket-retire (29/29),
+        # consensus.scope repair_support_late (18x suppressed — the ONLY proven-consumed class), and
+        # the hydra-3005 chars=0 empty-payload delivered row. Backed by global_arbiter, but left
+        # UNMAPPED-by-convention with its SS siblings (per task directive; flag-off is byte-identical).
+        "GT_SS_ARBITER_V2",       # SS — arbiter v2: defer-refire + repair_support relax + empty-payload guard
     }
 )
 

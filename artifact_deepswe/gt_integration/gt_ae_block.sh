@@ -232,6 +232,22 @@ GT_AE_ARGS=(
   #    `--ae "GT_L6_FRESH=1"` to GT_AE_ARGS AFTER this entry (last-wins → 1 preserved); the
   #    codespace path appends no L6 flag, so it stays OFF exactly as before.
   --ae "GT_L6_FRESH=${GT_L6_FRESH:-0}"
+  # ── SS-1..SS-N SUPER-SEAM adherence sweep (2026-07-13) — the 8 SS members from the 29-task
+  #    causal audit of run 29236533134. Each is default-OFF byte-identical seam/arbiter code
+  #    (NOT a new tag). pier DROPS host env so forward here or the profile fan-out's `export`
+  #    stays DARK in-container on any caller that splices only GT_AE_ARGS (the codespace path).
+  #    Default 0 → byte-identical when GT_RL_PROFILE is unset; Profile-2 fans each to 1 via
+  #    resolve_profile. Pinned in test_ae_forward_profile2_completeness_20260712 (PROFILE_MEMBERS
+  #    ["2"] ⊆ this forward list). GT_SS_ARBITER_V2 is read by BOTH gt_mini_patch (arbitrate) and
+  #    the synced gateway module (augment empty-payload guard). ──
+  --ae "GT_SS_NOVELTY=${GT_SS_NOVELTY:-0}"
+  --ae "GT_SS_DEDUP2=${GT_SS_DEDUP2:-0}"
+  --ae "GT_SS_COHERENCE_V2=${GT_SS_COHERENCE_V2:-0}"
+  --ae "GT_SS_RECOVERY_V2=${GT_SS_RECOVERY_V2:-0}"
+  --ae "GT_SS_PROVENANCE=${GT_SS_PROVENANCE:-0}"
+  --ae "GT_SS_LATE_DROP=${GT_SS_LATE_DROP:-0}"
+  --ae "GT_SS_ACK_METRICS=${GT_SS_ACK_METRICS:-0}"
+  --ae "GT_SS_ARBITER_V2=${GT_SS_ARBITER_V2:-0}"
 
   # ── Deep 8-dp telemetry sinks (CLAUDE.md mandate) -> host-mounted /gt_out ─────
   # Without these the in-container producers default to /tmp/* and DIE with the

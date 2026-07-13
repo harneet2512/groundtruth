@@ -36,13 +36,24 @@ decision boundary is REPAIR SUPPORT, not preventive guidance. :func:`arbitrate` 
 ``repair_support`` on the winner (``current_ordinal > boundary_ordinal``) so the caller
 labels a late delivery honestly instead of pretending it steered a decision already made.
 
-PURE · DETERMINISTIC · LLM-FREE · stdlib-only. No time, no randomness, no I/O, no
-groundtruth imports (the caller computes the unified ``dedup_key`` via the already-
-shipped ``evidence_envelope.derive_dedup_key`` and passes it in), so the engine is
-trivially import-closed and unit-testable with no graph / no harness.
+PURE · DETERMINISTIC · LLM-FREE · stdlib-only. No time, no randomness, no groundtruth
+imports (the caller computes the unified ``dedup_key`` via the already-shipped
+``evidence_envelope.derive_dedup_key`` and passes it in), so the engine is trivially
+import-closed and unit-testable with no graph / no harness.
+
+SS-1 (GT_SS_ARBITER_V2, 2026-07-13) — the ONE sanctioned env read. :func:`arbitrate`
+takes ``ss_v2`` and, when it is left ``None``, resolves the activation flag from
+``os.environ`` (:func:`_ss_v2_on`). This is the ONLY I/O in the module and it exists so
+the ALREADY-SHIPPED seam call site (``gt_mini_patch._global_pool_flush`` -> ``arbitrate``,
+which SS-1 must not edit) activates the v2 behaviors end-to-end without a seam edit. The
+RANKING core stays pure: every unit test passes ``ss_v2`` EXPLICITLY (never touches env),
+and the whole v2 branch is a strict no-op when the flag is unset OR when candidates carry
+the inert defaults — so ``arbitrate`` is byte-identical to the pre-SS-1 engine with
+``GT_SS_ARBITER_V2`` unset.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 
 __all__ = [
@@ -61,6 +72,9 @@ __all__ = [
     "REASON_ACQUIRED",
     "REASON_OUTRANKED",
     "REASON_INTERNAL",
+    # SS-1 (GT_SS_ARBITER_V2) loser-reason vocabulary
+    "REASON_SS_EMPTY_PAYLOAD",
+    "REASON_REDUNDANT",
 ]
 
 # --------------------------------------------------------------------------- #
@@ -74,6 +88,10 @@ REASON_DEDUP = "dedup"              # dedup_key already in the delivered chain
 REASON_ACQUIRED = "already_acquired"  # the agent already acquired the fact's target
 REASON_OUTRANKED = "outranked"     # a higher-ladder candidate won the single dose
 REASON_INTERNAL = "internal"       # not on the ladder -> never an external dose
+# SS-1 (GT_SS_ARBITER_V2) reasons — inert unless the flag is on AND the candidate carries
+# the corresponding non-default signal (rendered_chars==0 / redundant_with_delivered).
+REASON_SS_EMPTY_PAYLOAD = "ss_empty_payload"  # zero rendered bytes -> never a delivered row
+REASON_REDUNDANT = "redundant_delivered"      # localization superseded by a delivered def_partition
 
 # --------------------------------------------------------------------------- #
 # THE LADDER — class -> priority (higher wins the single global dose).
@@ -164,6 +182,56 @@ _KIND_TO_CLASS: dict[str, str] = {
 # ladder class). Unknown tier -> INFO's rank. Kept local so the engine imports nothing.
 _TIER_RANK: dict[str, int] = {"VERIFIED": 3, "WARNING": 2, "INFO": 1, "HYPOTHESIS": 0}
 
+# --------------------------------------------------------------------------- #
+# SS-1 (GT_SS_ARBITER_V2) — the ONE activation flag + the PREVENTIVE ladder classes.
+# --------------------------------------------------------------------------- #
+_SS_V2_OFF_VALUES = frozenset({"", "0", "false", "no", "off"})
+
+
+def _ss_v2_on() -> bool:
+    """The GT_SS_ARBITER_V2 activation flag (the module's ONLY env read; default OFF ->
+    byte-identical). Consulted by :func:`arbitrate` ONLY when its ``ss_v2`` arg is left
+    ``None`` (the unedited seam call site); every unit test passes ``ss_v2`` explicitly and
+    never reaches this."""
+    return os.environ.get("GT_SS_ARBITER_V2", "").strip().lower() not in _SS_V2_OFF_VALUES
+
+
+# PREVENTIVE ladder classes = guidance meant to arrive BEFORE the decision it steers
+# (localization before a search branch; a caller/companion contract AT the edit). The same
+# set the seam's SM-10 uses (``gt_mini_patch._GA_PREVENTIVE_CLASSES``). Under SS-V2 a
+# preventive fact whose pre-submit-completeness decision point is still LIVE
+# (``obligations_open``) is NOT labeled repair_support — it is exactly its decision point.
+_PREVENTIVE_CLASSES: frozenset[str] = frozenset(
+    {"caller_contract", "causal_chain", "localization"}
+)
+
+
+def _is_preventive_class(kind: str) -> bool:
+    """True iff ``kind`` projects onto a PREVENTIVE ladder class. Reactive/post-event classes
+    (executed_world_fact / edit_violation / obligation_violation / recovery) -> False."""
+    return class_of_kind(kind) in _PREVENTIVE_CLASSES
+
+
+def _repair_support(c: "Candidate", v2: bool) -> bool:
+    """The correct-time verdict on the single-dose winner: True iff delivered AFTER its
+    decision boundary (repair support, not preventive guidance).
+
+    SS-V2 RELAXATION (v2 True): a PREVENTIVE fact (scope / companion / caller contract)
+    delivered at a review/test boundary is NOT repair support while its decision point —
+    pre-submit COMPLETENESS — is still LIVE (``obligations_open``: unresolved obligations or
+    unedited GT-scope files remain). That is exactly when it should steer, so the seam must
+    NOT late-suppress it; suppress only after a clean submit-gate pass (``obligations_open``
+    back to False). The relaxation only ever makes the verdict MORE lenient (True->False),
+    so a reactive class (already protected by the seam's own is_reactive exemption) is never
+    regressed. Byte-identical when v2 is off OR ``obligations_open`` is the default False:
+    the return is ``current_ordinal > boundary_ordinal`` exactly as the pre-SS-1 engine."""
+    late = c.current_ordinal > c.boundary_ordinal
+    if not late:
+        return False
+    if v2 and c.obligations_open and _is_preventive_class(c.kind):
+        return False
+    return True
+
 
 def class_of_kind(kind: str) -> str:
     """The ladder CLASS of a producer ``kind`` / ``evidence_type`` (``""`` = internal).
@@ -210,6 +278,14 @@ class Candidate:
     current_ordinal: int = 0          # the firing-event ordinal (for correct-time labeling)
     suppressible_if_acquired: bool = False  # localization-class facts only
     seq: int = 0                      # stable insertion order (deterministic tiebreak)
+    # SS-1 (GT_SS_ARBITER_V2) signals — ALL inert defaults, so a candidate built without them
+    # is byte-identical under the flag (every v2 branch is a no-op on these defaults). The
+    # SEAM populates them when it has the signal (rendered bytes / open obligations / a
+    # delivered def_ref_partition for this target); the engine only READS the scalars — still
+    # no free-text surface, so leak=0 by construction is preserved.
+    rendered_chars: int = -1          # bytes the plane WILL render: 0 => empty (reject); -1 => unknown (skip)
+    obligations_open: bool = False    # a preventive fact whose pre-submit-completeness point is still live
+    redundant_with_delivered: bool = False  # localization superseded by an already-delivered def_ref_partition
 
     @property
     def tier_rank(self) -> int:
@@ -236,20 +312,33 @@ def arbitrate(
     *,
     acquired: "frozenset[str] | set[str]" = frozenset(),
     delivered: "frozenset[str] | set[str]" = frozenset(),
+    ss_v2: "bool | None" = None,
 ) -> ArbitrationResult:
     """The ONE ranked competition (SM-5). Returns AT MOST ONE winner + every loser's reason.
 
     Filtering, in order (each rejection is a logged loser, never a silent drop):
       1. INTERNAL — a kind not on :data:`RANK_LADDER` is a ranking prior with no external
          form (reason :data:`REASON_INTERNAL`); it never competes.
-      2. DEDUP — a candidate whose ``dedup_key`` is already in ``delivered`` (the ONE
+      2. SS-V2 EMPTY-PAYLOAD — a candidate that will render ZERO bytes
+         (``rendered_chars == 0``) is rejected (:data:`REASON_SS_EMPTY_PAYLOAD`) so it can
+         never win the dose / produce a delivered ledger row (the hydra-3005 ``chars=0 /
+         empty seal`` delivered row). ``rendered_chars < 0`` (== unknown, the default) is
+         SKIPPED, so a candidate built without the signal is unaffected. v2-gated.
+      3. DEDUP — a candidate whose ``dedup_key`` is already in ``delivered`` (the ONE
          unified delivered-dedup chain across all planes) is a repeat
          (:data:`REASON_DEDUP`).
-      3. ALREADY-ACQUIRED — a ``suppressible_if_acquired`` (localization-class) candidate
+      4. ALREADY-ACQUIRED — a ``suppressible_if_acquired`` (localization-class) candidate
          whose normalized ``symbol`` the agent already acquired (``acquired`` = the
          normalized edited/viewed targets) is redundant (:data:`REASON_ACQUIRED`). The
          generalization of the ~3 narrow producer-local acquisition gates; conservative
          (empty ``symbol`` is never suppressed, so a fresh search answer survives).
+      5. SS-V2 REDUNDANT-RETIRE — a localization-class candidate flagged
+         ``redundant_with_delivered`` (a def_ref_partition for the SAME target already
+         delivered this episode) is RETIRED (:data:`REASON_REDUNDANT`). This is the ONLY
+         SS-V2 retire: a merely-LATE localization fact is NOT retired here — it stays
+         eligible and DEFERS via the seam's loser re-arm (driven by ``repair_support``),
+         re-competing at the next search/review boundary (defer-and-refire, not destroy).
+         v2-gated + inert on the default ``redundant_with_delivered == False``.
 
     Then the single dose: the highest ladder class wins, breaking ties by tier, then
     confidence (8-dp), then stable insertion ``seq``, then ``dedup_key`` — a TOTAL
@@ -257,7 +346,16 @@ def arbitrate(
     eligible candidate is a :data:`REASON_OUTRANKED` loser.
 
     ``repair_support`` on the winner = ``current_ordinal > boundary_ordinal`` (delivered
-    after its decision boundary — REPAIR SUPPORT, not preventive guidance)."""
+    after its decision boundary — REPAIR SUPPORT), with the SS-V2 relaxation in
+    :func:`_repair_support` (a preventive fact with a still-live pre-submit-completeness
+    decision point is NOT repair support).
+
+    ``ss_v2``: ``None`` (the default, used by the unedited seam call) resolves the flag from
+    ``GT_SS_ARBITER_V2`` via :func:`_ss_v2_on`; an EXPLICIT ``True``/``False`` (every unit
+    test) wins and keeps the call pure. Every v2 branch is a strict no-op when the flag is
+    off OR when candidates carry the inert defaults, so the result is byte-identical to the
+    pre-SS-1 engine with ``GT_SS_ARBITER_V2`` unset."""
+    v2 = _ss_v2_on() if ss_v2 is None else bool(ss_v2)
     acq = {_norm_symbol(s) for s in (acquired or ())}
     delivered_set = set(delivered or ())
     losers: list = []
@@ -267,11 +365,17 @@ def arbitrate(
         if r is None:
             losers.append((c, REASON_INTERNAL))
             continue
+        if v2 and c.rendered_chars == 0:
+            losers.append((c, REASON_SS_EMPTY_PAYLOAD))
+            continue
         if c.dedup_key and c.dedup_key in delivered_set:
             losers.append((c, REASON_DEDUP))
             continue
         if c.suppressible_if_acquired and c.symbol and _norm_symbol(c.symbol) in acq:
             losers.append((c, REASON_ACQUIRED))
+            continue
+        if v2 and c.redundant_with_delivered and class_of_kind(c.kind) == "localization":
+            losers.append((c, REASON_REDUNDANT))
             continue
         eligible.append((r, c))
     if not eligible:
@@ -288,5 +392,5 @@ def arbitrate(
     winner = eligible[0][1]
     for _r, c in eligible[1:]:
         losers.append((c, REASON_OUTRANKED))
-    repair = winner.current_ordinal > winner.boundary_ordinal
+    repair = _repair_support(winner, v2)
     return ArbitrationResult(winner=winner, repair_support=repair, losers=losers)
