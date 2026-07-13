@@ -1,0 +1,67 @@
+{
+  "schema": "ss.replay_oracle_cases.v1",
+  "source_run": "29236533134",
+  "trajectories": "D:/gt_runs/29236533134/art/<task>/mini-swe-agent.trajectory.json",
+  "note": "Every case is a byte-verified finding from the 29-task causal audit. The replay-oracle replays recorded event streams through the SS-flagged seam and asserts these outcomes. PRESERVE cases are cardinal: killing a known P5 fails the oracle.",
+  "preserve": [
+    {"task": "conan-io__conan-17123", "delivery": "consensus.scope m25", "why": "P5 consumed (G5+U) — scope constraint, agent verified GT-named file", "assert": "still delivered, bytes equivalent, boundary unchanged"},
+    {"task": "geopandas__geopandas-3471", "delivery": "edit.syntax m101", "why": "P5 consumed (G7+U) — real IndentationError from blind sed", "assert": "still delivered at edit boundary"},
+    {"task": "dynaconf__dynaconf-1225", "delivery": "edit.syntax m219", "why": "P5 consumed — real SyntaxError, agent reverted", "assert": "still delivered"},
+    {"task": "hiyouga__llama-factory-7505", "delivery": "recovery m116", "why": "recovery on true repeated failing test (redundant but legitimate)", "assert": "recovery-v2 predicate still qualifies it (verify: second identical failing observation)", "review": true},
+    {"task": "python-babel__babel-1179", "delivery": "detect.coherence m97", "why": "one of the ~4 ACCURATE coherence firings (4 real writes m64/m86/m94/m98, no test between)", "assert": "coherence-v2 still fires with exact count 4"}
+  ],
+  "suppress_step_behind": [
+    {"task": "conan-io__conan-17092", "deliveries": ["l3b m9", "l3b m10", "l3b m13", "l3b m17", "l3b m28"], "why": "caller rows for files agent was reading (SELF_ACQUIRED/NATIVE priors)", "assert": "reason=ss_step_behind", "note": "m13 may survive if its entity set contains genuinely novel cross-file entities the agent had not touched — oracle accepts deliver-or-suppress for m13, requires suppress for pure-echo instances"},
+    {"task": "deepset-ai__haystack-8997", "deliveries": ["l3b m7"], "why": "off-target callers while agent read the file itself", "assert": "suppressed or filtered"},
+    {"task": "pydata__xarray-10076", "deliveries": ["l3b m13", "l3b m19", "l3b m25"], "why": "refs agent had already read (NATIVE_OUTPUT_GIVEN)", "assert": "reason=ss_step_behind"}
+  ],
+  "suppress_semantic_dup": [
+    {"task": "conan-io__conan-17092", "deliveries": ["l3.contract m49", "l3b m53"], "why": "byte-distinct re-deliveries of the m13 migrations entity cluster — m49 is CROSS-CLASS (contract restating evidence) — requires fact-GROUP containment", "assert": "reason=ss_semantic_dup"}
+  ],
+  "suppress_coherence_miscount": [
+    {"task": "conan-io__conan-17092", "delivery": "detect.coherence m55", "actual_writes": 2, "claimed": 4},
+    {"task": "aiogram__aiogram-1594", "delivery": "detect.coherence m23", "actual_writes": 2, "claimed": 4, "note": "2 cat READS counted as rewrites"},
+    {"task": "amoffat__sh-744", "delivery": "detect.coherence m47", "actual_writes": 2, "claimed": 4, "note": "tests RAN between edits — both clauses false"},
+    {"task": "iterative__dvc-10711", "delivery": "detect.coherence m43", "actual_landed": 1, "claimed": 4},
+    {"task": "matplotlib__matplotlib-28933", "delivery": "detect.coherence m58", "actual_writes": 2, "claimed": 4},
+    {"task": "matplotlib__matplotlib-29007", "delivery": "detect.coherence m49", "actual_success": 1, "claimed": 3},
+    {"task": "keras-team__keras-20396", "delivery": "detect.coherence m101", "note": "basename collision: 2 distinct trainer.py files conflated", "claimed": 3},
+    {"task": "pydata__xarray-10076", "deliveries": ["detect.coherence m103 (1 real edit, claimed 4)", "detect.coherence m245 (3 writes, claimed 4)"]},
+    {"task": "deepset-ai__haystack-8489", "delivery": "detect.coherence m59", "actual_writes": 2, "claimed": 3, "note": "3rd was a grep VIEW"},
+    {"task": "delgan__loguru-1297", "delivery": "detect.coherence m33", "actual_writes": 2, "claimed": 4},
+    {"task": "dynaconf__dynaconf-1225", "deliveries": ["detect.coherence m215 (2 writes, claimed 4)", "detect.coherence m267 (3 files basename-conflated, claimed 4x one file)"]},
+    {"task": "fonttools__fonttools-3682", "delivery": "detect.coherence m57", "actual_writes": 2, "claimed": 4},
+    {"task": "geopandas__geopandas-3471", "delivery": "detect.coherence m109", "actual_writes": 3, "claimed": 5},
+    {"task": "modelcontextprotocol__python-sdk-222", "deliveries": ["detect.coherence m76 (2 writes, claimed 4)", "detect.coherence m80 (3 writes, claimed 4)"]},
+    {"task": "privacyidea__privacyidea-4223", "delivery": "detect.coherence m117", "actual_writes": 2, "claimed": 4},
+    "assert: ALL either silent (count<=2 or test intervened) or fire with the EXACT verified write count"
+  ],
+  "suppress_recovery_misfire": [
+    {"task": "privacyidea__privacyidea-4223", "delivery": "recovery m137", "why": "fired during git-log archaeology — outputs differ, no failure", "assert": "no delivery"},
+    {"task": "privacyidea__privacyidea-4223", "delivery": "recovery m175", "why": "fired while tests passing", "assert": "no delivery"},
+    {"task": "matplotlib__matplotlib-28933", "delivery": "recovery m68", "why": "'failing result unchanged' with no test run since the edit", "assert": "no delivery"}
+  ],
+  "recovery_earlier_release": [
+    {"task": "dynaconf__dynaconf-1225", "why": "stall-gate suppressed recovery 11x (iters ~24-140) then delivered m301, 1 msg before LimitsExceeded", "assert": "recovery-v2 delivers at the SECOND qualifying identical failing repeat (iteration far earlier than 150)"}
+  ],
+  "suppress_provenance": [
+    {"task": "delgan__loguru-1297", "delivery": "l3.contract m19", "paths": ["tmp/patch_fix.py"]},
+    {"task": "beancount__beancount-931", "delivery": "l3.contract m25", "paths": ["tmp/patch_leafonly.py"]},
+    {"task": "iterative__dvc-10711", "delivery": "edit.syntax m31", "paths": ["tmp/patch_remote.py"], "note": "ast.parse on a DIFF scratch file"},
+    {"task": "deepset-ai__haystack-8489", "delivery": "verify.horizon m65", "paths": ["change_tracer.py (/tmp)"]},
+    {"task": "privacyidea__privacyidea-4223", "delivery": "gateway.def_ref_partition m7", "paths": ["htmlcov/coverage_html_cb_*.js"]},
+    "assert: lines filtered or delivery suppressed reason=ss_provenance; L6 never reindexes these paths"
+  ],
+  "suppress_late": [
+    {"task": "python-babel__babel-1179", "deliveries": ["spec.obligation m73", "obligation.resurface m87"], "why": "requirement verified GREEN at m67/m75 before delivery", "assert": "reason=ss_late"},
+    {"task": "beetbox__beets-5457", "delivery": "obligation.resurface m201", "why": "covering F2P passed m193 before delivery"},
+    {"task": "arviz-devs__arviz-2413", "delivery": "spec.obligation m71", "why": "passing covering evidence m67/m69 preceded it"},
+    {"task": "conan-io__conan-17123", "delivery": "spec.obligation m37", "why": "stale [edited,untested] after passing tests m33/m35"}
+  ],
+  "invariants": {
+    "leak": "0 test identifiers across all replayed deliveries (unchanged)",
+    "dose": "<=1 payload per observation (unchanged)",
+    "empty_payload": "zero delivered rows with 0 bytes (hydra ga.trace_frame case)",
+    "off_flags": "with all GT_SS_* unset, replayed stream byte-identical to recorded"
+  }
+}
