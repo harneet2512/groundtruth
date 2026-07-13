@@ -90,6 +90,19 @@ FAIL = "FAIL"
 SKIP = "SKIP:flag-not-built"
 ERROR = "ERROR"
 
+
+class SSGateChannelDead(RuntimeError):
+    """The fixture-graph delivery channel is provably DEAD in the CORE arm (GT-on, no
+    ``GT_SS_*`` flags) — graph.db built empty, or the gateway def/ref partition produced
+    ZERO deliveries for the ambiguous ``run`` probe.
+
+    This exists to KILL a silent-degradation class: when the channel dies (ambient state
+    poisons graph.db build / gateway / def_ref producer) EVERY flag-gated scenario (S1/S2/
+    S5/S6/S7/S8) auto-detects 'no behavioural delta between arms' and reports
+    ``SKIP:flag-not-built`` — indistinguishable from a genuinely-unlanded SS feature. That
+    is the exact drift SS-6b closes: a dead channel MUST surface as a LOUD, NAMED ERROR
+    (gate exit 1), never a false-green SKIP."""
+
 # The fixture's known test-identifier tokens — none of these may EVER appear in a
 # delivered model-facing payload (the S9 leak invariant).
 _TEST_TOKENS = ("tests/test_pkg.py", "test_run", "test_pkg")
@@ -196,6 +209,18 @@ def _build_graph_db(db_path: str, spec: dict) -> None:
                 (p["node_id"], p["kind"], p["value"], p.get("line", 1),
                  p.get("confidence", 0.8)))
         con.commit()
+        # HERMETICITY: this deterministic in-python build (no gt-index binary, no cached DB,
+        # no /tmp state) MUST yield a non-empty graph with the DELIBERATELY-ambiguous ``run``
+        # def sites — every def/ref producer reads ``nodes``. An empty/degenerate build would
+        # silently kill the whole fixture channel; fail LOUD here instead of degrading to
+        # false SKIPs downstream.
+        n_nodes = con.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+        n_run = con.execute("SELECT COUNT(*) FROM nodes WHERE name='run'").fetchone()[0]
+        if n_nodes <= 0 or n_run < 2:
+            raise SSGateChannelDead(
+                f"fixture graph.db built degenerate from graph_spec.json "
+                f"(nodes={n_nodes}, run_def_sites={n_run}, want nodes>0 and >=2 'run' defs) "
+                f"— the ambiguity probe the def/ref channel needs is absent")
     finally:
         con.close()
 
@@ -232,6 +257,16 @@ def _all_ss_env_keys() -> list[str]:
     return [k for k in os.environ if k.startswith("GT_SS_")]
 
 
+def _all_gt_env_keys() -> list[str]:
+    """Every ambient ``GT_*`` key currently in the environment. The gate STRIPS this whole
+    namespace before each arm and re-applies ONLY its own pinned core (Profile-2) + the
+    arm's ``GT_SS_*`` overrides — so a leaked ``GT_BASELINE`` / ``GT_INDEX_BIN`` /
+    ``GT_HOST_GRAPH_DB`` / ``GT_CERT_DIR`` / ``GT_POST_SEARCH`` / ``GT_PROOF_MODE`` from an
+    earlier shell or a prior run can never steer the fixture-graph channel. Hermeticity: a
+    scenario's environment is a function of the GATE ALONE, never of the caller's shell."""
+    return [k for k in os.environ if k.startswith("GT_")]
+
+
 class RealSeamDriver:
     """Drives the REAL ``gt_mini_patch`` seam over the fixture repo. Public entry points only."""
 
@@ -266,6 +301,7 @@ class RealSeamDriver:
         saved_db = g._db_path
         saved_root = g._root
         saved_ps = getattr(g, "_POST_SEARCH_ON", None)
+        saved_baseline = getattr(g, "_GT_BASELINE", None)
         tmp = Path(tempfile.mkdtemp(prefix="ss_gate_"))
         try:
             root = tmp / "repo"
@@ -274,8 +310,13 @@ class RealSeamDriver:
             _build_graph_db(db, self.spec)
             ledger = tmp / "led.jsonl"
 
-            # env: clear ALL GT_SS_*, apply core + this arm's overrides.
-            for k in _all_ss_env_keys():
+            # HERMETIC ENV (SS-6b): strip the ENTIRE ambient GT_* namespace, then apply ONLY
+            # the gate's pinned core (Profile-2) + this arm's GT_SS_* overrides. A leaked
+            # GT_BASELINE / GT_INDEX_BIN / GT_HOST_GRAPH_DB / GT_CERT_DIR / GT_POST_SEARCH from
+            # an earlier shell or run could otherwise silently darken the fixture-graph channel
+            # into a false SKIP (the exact drift SS-6b closes). The scenario env is now a
+            # function of the gate ALONE, never of the caller's shell.
+            for k in _all_gt_env_keys():
                 os.environ.pop(k, None)
             for k, v in self._core.items():
                 if v is None:
@@ -288,11 +329,32 @@ class RealSeamDriver:
                 else:
                     os.environ[k] = str(v)
             os.environ["GT_RUNTIME_LEDGER"] = str(ledger)
+            # PIN the L6 reindex binary to a guaranteed-ABSENT path inside THIS run's temp dir
+            # (never created) so no ambient /tmp/gt-index can activate the post-edit reindex
+            # subprocess — the reindex stays deterministically inert (production posture: the
+            # ~49MB binary is legitimately absent on the host-graph-inject path), independent of
+            # host state. Closes the "present gt-index binary -> nondeterminism" poison.
+            os.environ["GT_INDEX_BIN"] = str(tmp / "gt-index-hermetic-absent")
 
             g._db_path = lambda: db
             g._root = lambda: str(root)
+            # FORCE the seam's IMPORT-FROZEN flag globals to hermetic GT-on values. `_GT_BASELINE`
+            # and `_POST_SEARCH_ON` are read from os.environ at MODULE IMPORT — before the gate can
+            # sanitize the env — so a leaked GT_BASELINE=1 / GT_POST_SEARCH at interpreter start
+            # would otherwise stick regardless of the strip above. The gate REQUIRES GT-on +
+            # gateway-owned search delivery; re-assert both every run.
             if saved_ps is not None:
                 g._POST_SEARCH_ON = False
+            if saved_baseline is not None:
+                g._GT_BASELINE = False
+            # Reset the residual L6-FRESH module latches _reset_oracle_state does not clear, so a
+            # prior run's staged work-copy pointer / one-shot warning latch cannot leak into this
+            # run's delivery decisions (cross-run state -> flaky def/ref firing).
+            for _latch, _val in (("_l6_work_db", None), ("_l6_no_binary_warned", False),
+                                 ("_l6_reindex_failed_warned", False),
+                                 ("_l6_probe_emitted", False)):
+                if hasattr(g, _latch):
+                    setattr(g, _latch, _val)
             g._reset_oracle_state()
             try:
                 g._RUNTIME_LEDGER = g._ProductLedger()
@@ -338,6 +400,8 @@ class RealSeamDriver:
             g._root = saved_root
             if saved_ps is not None:
                 g._POST_SEARCH_ON = saved_ps
+            if saved_baseline is not None:
+                g._GT_BASELINE = saved_baseline
             os.environ.clear()
             os.environ.update(env_snapshot)
             shutil.rmtree(tmp, ignore_errors=True)
@@ -467,6 +531,97 @@ def _run_hits() -> str:  # the ambiguous `run` def sites (mod_a + mod_b)
 
 def _gizmo_hits() -> str:
     return "tmp/scratch.py:5: def gizmo():\nhtmlcov/x.js:4: function gizmo()"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HERMETICITY PRE-FLIGHT — prove the fixture-graph channel is LIVE before any SKIP
+# ══════════════════════════════════════════════════════════════════════════════
+def _channel_canary(driver) -> tuple[bool, str]:
+    """Prove the fixture-graph def/ref channel is LIVE in the CORE arm (GT-on, NO ``GT_SS_*``
+    flags) BEFORE any scenario is graded. The whole SS overlay rides on this ONE delivery: a
+    grep for the deliberately-ambiguous ``run`` symbol must yield a def/ref partition (a
+    model-facing delta OR a delivered ledger row).
+
+    If the channel is silently dead (ambient state killed graph.db build / gateway def_ref
+    producer / post_search classification) every flag-gated scenario auto-detects 'no effect'
+    and reports ``SKIP:flag-not-built`` — a dead channel masquerading as an unlanded feature.
+    Return ``(False, reason)`` so :func:`main` reports a LOUD, NAMED ERROR (exit 1), never a
+    false-green SKIP. Any exception during the probe is itself a dead-channel signal.
+
+    The probe is a BARE ``grep run`` with NOTHING pre-viewed: the ambiguous symbol resolves to
+    two def sites the agent has not acquired, so a healthy CORE arm delivers the def/ref
+    partition. (A preceding ``cat`` would let the global arbiter legitimately suppress it as
+    ``already_acquired`` — a LIVE-channel suppression, not a dead channel; the bare grep avoids
+    that confound so 'zero deliveries' means ONLY a genuinely dead channel.)"""
+    probe = [_grep("run", _run_hits())]
+    try:
+        res = driver.run(probe, {})  # CORE arm — no SS flags, gateway owns the search dose
+    except Exception as exc:  # noqa: BLE001 — a probe fault IS a dead channel
+        return False, f"core-arm canary raised {type(exc).__name__}: {exc}"
+    grep_delta = res.observations[-1].delta if res.observations else ""
+    delivered = res.delivered_rows_any()
+    if not grep_delta and not delivered:
+        return False, ("fixture-graph def/ref channel produced ZERO deliveries in the CORE arm "
+                       "for the ambiguous 'run' grep — graph.db build / gateway def_ref_partition "
+                       "/ post_search classification is DEAD (NOT a missing GT_SS_* flag). "
+                       "Refusing to emit false SKIP:flag-not-built.")
+    return True, (f"core-arm channel live: grep_delta={'DELIVERED' if grep_delta else 'empty'}; "
+                  f"delivered_rows={len(delivered)}")
+
+
+def _meta_report(driver) -> int:
+    """``--meta``: print every ENVIRONMENTAL dependency the gate resolves, per arm — so a dead
+    link is PINPOINTED (seam path, fixture paths, graph.db row counts, L6 binary probe, profile
+    posture, def/ref classification, per-arm delivered rows) rather than inferred from a SKIP.
+    Diagnostic only; always exits 0."""
+    g = getattr(driver, "g", None)
+    w = sys.stdout.write
+    w("\n# SS-6 gate --meta (hermeticity diagnostics)\n")
+    w(f"  seam_module      : {getattr(g, '__file__', '(fake/none)')}\n")
+    w(f"  fixtures_dir     : {_FIXTURES}\n")
+    w(f"  fixture_repo     : {_FIXTURES / 'repo'}  exists={(_FIXTURES / 'repo').is_dir()}\n")
+    w(f"  graph_spec       : {_FIXTURES / 'graph_spec.json'}  "
+      f"exists={(_FIXTURES / 'graph_spec.json').is_file()}\n")
+    # graph.db build + row counts (deterministic, pure python, no gt-index/cached DB/tmp state)
+    try:
+        _t = Path(tempfile.mkdtemp(prefix="ss_meta_"))
+        _db = str(_t / "graph.db")
+        _build_graph_db(_db, getattr(driver, "spec", {}) or {})
+        _con = sqlite3.connect(_db)
+        _nn = _con.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+        _ne = _con.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
+        _nr = _con.execute("SELECT COUNT(*) FROM nodes WHERE name='run'").fetchone()[0]
+        _con.close()
+        shutil.rmtree(_t, ignore_errors=True)
+        w(f"  graph.db build   : nodes={_nn} edges={_ne} run_def_sites={_nr} "
+          f"(want run_def_sites>=2 for the ambiguity probe)\n")
+    except Exception as exc:  # noqa: BLE001
+        w(f"  graph.db build   : FAILED {type(exc).__name__}: {exc}\n")
+    # L6 binary probe + profile posture (what the seam WOULD resolve on)
+    _bin = os.environ.get("GT_INDEX_BIN", "/tmp/gt-index")
+    w(f"  L6 GT_INDEX_BIN  : {_bin}  isfile={os.path.isfile(_bin)} "
+      f"(gate pins this ABSENT per-run for hermeticity)\n")
+    if hasattr(driver, "_core"):
+        _c = driver._core
+        w(f"  profile posture  : GT_RL_PROFILE={_c.get('GT_RL_PROFILE')} "
+          f"GT_GATEWAY={_c.get('GT_GATEWAY')} GT_GLOBAL_ARBITER={_c.get('GT_GLOBAL_ARBITER')} "
+          f"GT_L6_FRESH={_c.get('GT_L6_FRESH')}\n")
+    if g is not None:
+        w(f"  seam flag globals: _GT_BASELINE={getattr(g, '_GT_BASELINE', '?')} "
+          f"_POST_SEARCH_ON={getattr(g, '_POST_SEARCH_ON', '?')} "
+          f"_l6_work_db={getattr(g, '_l6_work_db', '?')}\n")
+    # canary + per-arm delivered summary for the def/ref probe
+    ok, detail = _channel_canary(driver)
+    w(f"  channel canary   : {'LIVE' if ok else 'DEAD'} — {detail}\n")
+    probe = [_grep("run", _run_hits())]  # bare grep (nothing pre-viewed) — the def/ref probe
+    for arm_name, arm in (("core", {}), ("NOVELTY=1", {"GT_SS_NOVELTY": "1"})):
+        res = driver.run(probe, arm)
+        gd = res.observations[-1].delta if res.observations else ""
+        rows = [(r.get("layer"), r.get("outcome"), r.get("reason")) for r in res.ledger]
+        w(f"  arm[{arm_name:<10}] : grep_delta={'DELIVERED' if gd else 'empty'} "
+          f"delivered={len(res.delivered_rows_any())} ledger_rows={len(res.ledger)}\n")
+        w(f"      ledger        : {rows}\n")
+    return 0
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -859,6 +1014,10 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="SS-6 SUPER-SAIYAN acceptance gate")
     ap.add_argument("--out", default=str(_REPO / "ss_gate_report.json"),
                     help="report path (default: <repo>/ss_gate_report.json, gitignored)")
+    ap.add_argument("--meta", action="store_true",
+                    help="print per-arm ENVIRONMENTAL dependency diagnostics and exit "
+                         "(hermeticity debug: seam path, graph.db row counts, L6 probe, profile "
+                         "posture, def/ref classification, per-arm delivered rows)")
     args = ap.parse_args(argv)
 
     ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -868,7 +1027,21 @@ def main(argv=None) -> int:
         sys.stderr.write(f"[ss_gate] FATAL: could not install the real seam: {exc}\n")
         return 2
 
-    results = run_all(driver)
+    if args.meta:
+        return _meta_report(driver)
+
+    # HERMETICITY PRE-FLIGHT (SS-6b): prove the fixture-graph channel is LIVE in the CORE arm
+    # before trusting ANY SKIP:flag-not-built verdict. A dead channel makes every flag-gated
+    # scenario SKIP (false 'not landed'); refuse to emit that — surface a LOUD, NAMED ERROR.
+    # The S0 row is always reported (PASS when live) so the channel state is a durable artifact.
+    canary_ok, canary_detail = _channel_canary(driver)
+    s0 = ScenarioResult("S0", "CHANNEL-CANARY", "(hermeticity pre-flight)",
+                        PASS if canary_ok else ERROR, canary_detail)
+    if not canary_ok:
+        sys.stderr.write(f"[ss_gate] CHANNEL-DEAD (refusing false SKIP): {canary_detail}\n")
+        results = [s0]
+    else:
+        results = [s0] + run_all(driver)
     code = _exit_code(results)
 
     counts = {v: sum(1 for r in results if r.verdict == v) for v in (PASS, FAIL, SKIP, ERROR)}

@@ -219,3 +219,84 @@ def test_real_seam_invariants_hold():
     for fn in (G.scenario_s1, G.scenario_s2, G.scenario_s3, G.scenario_s4,
                G.scenario_s5, G.scenario_s6, G.scenario_s7, G.scenario_s8):
         assert fn(driver).verdict in (G.SKIP, G.PASS, G.FAIL)  # honest verdict, never ERROR
+
+
+# --------------------------------------------------------------------------- #
+# 5) HERMETICITY (SS-6b) — the channel canary must ERROR (loud), never SKIP (silent),
+#    when the fixture-graph delivery channel is dead in the CORE arm. This is the exact
+#    drift SS-6b closes: ambient state (a leaked GT_BASELINE, an ambient /tmp/gt-index, a
+#    stale /tmp work-copy) silently killed the def/ref channel, and every flag-gated
+#    scenario reported SKIP:flag-not-built — a dead channel masquerading as an unlanded SS
+#    feature. The canary converts that silent degradation into a loud, named failure.
+# --------------------------------------------------------------------------- #
+def _inert_driver():
+    """A seam double that produces ZERO deliveries for ANY input — a dead fixture-graph
+    channel. scenario_s1 against it reports SKIP:flag-not-built (the silent-degradation the
+    canary must catch)."""
+    def inert(events, ss_env):
+        return G.SeamResult(
+            observations=[G.Obs(ev.output or "", ev.output or "") for ev in events],
+            ledger=[])
+    return G.FakeSeamDriver(inert)
+
+
+def test_channel_canary_live_on_reference_seam():
+    """The SS-reference seam delivers a def/ref partition on the bare `run` grep -> the
+    hermeticity canary reports the CORE-arm channel LIVE."""
+    ok, detail = G._channel_canary(_driver())
+    assert ok is True, f"canary wrongly declared a LIVE reference channel dead: {detail}"
+
+
+def test_channel_canary_dead_on_inert_seam_bites_the_silent_skip():
+    """THE BITE: an inert (zero-delivery) seam makes scenario_s1 report SKIP:flag-not-built
+    (indistinguishable from 'feature not landed'), but the canary detects the DEAD channel and
+    returns False -> main() reports ERROR. Proves the canary catches EXACTLY the silent
+    channel-death that the SKIP verdict would otherwise hide."""
+    dead = _inert_driver()
+    # Without the canary this looks like an honest 'not landed':
+    assert G.scenario_s1(dead).verdict == G.SKIP
+    # With the canary it is caught as a dead channel:
+    ok, detail = G._channel_canary(dead)
+    assert ok is False, "canary FAILED to bite a dead (zero-delivery) core-arm channel"
+    assert "ZERO deliveries" in detail
+
+
+def test_main_errors_not_skips_on_dead_channel(tmp_path, monkeypatch):
+    """END-TO-END: when the channel is dead, `main` must exit 1 with an S0 CHANNEL-CANARY
+    ERROR — NEVER a green (exit 0) run whose scenarios all SKIP. This is the regression guard
+    for the SS-6b drift: a silently-dead channel can no longer pass the gate as 'nothing
+    landed'."""
+    monkeypatch.setattr(G, "RealSeamDriver", lambda: _inert_driver())
+    out = tmp_path / "report.json"
+    code = G.main(["--out", str(out)])
+    assert code == 1, "gate returned GREEN on a dead fixture-graph channel"
+    report = __import__("json").loads(out.read_text(encoding="utf-8"))
+    s0 = report["scenarios"][0]
+    assert s0["id"] == "S0" and s0["verdict"] == G.ERROR
+    # and it did NOT emit a single false SKIP:flag-not-built in place of the ERROR
+    assert all(s["verdict"] != G.SKIP for s in report["scenarios"])
+
+
+def test_real_seam_hermetic_under_leaked_gt_baseline():
+    """Hermeticity on the REAL seam: a leaked GT_BASELINE=1 in the ambient env (the historical
+    poison that darkened S1/S2/S5/S6/S7/S8 to SKIP) must NOT change the gate's verdicts — the
+    gate strips the whole GT_* namespace + forces the import-frozen _GT_BASELINE global per
+    run, so the channel stays live and deterministic."""
+    import os
+    try:
+        driver = G.RealSeamDriver()
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"real seam not installable here: {exc}")
+    prior = os.environ.get("GT_BASELINE")
+    os.environ["GT_BASELINE"] = "1"  # simulate the leaked shell var
+    try:
+        ok, _ = G._channel_canary(driver)
+        assert ok is True, "leaked GT_BASELINE=1 darkened the CORE-arm channel (non-hermetic)"
+        v1 = G.scenario_s1(driver).verdict
+        v2 = G.scenario_s1(driver).verdict
+        assert v1 == v2 == G.PASS, f"S1 non-deterministic/darkened under GT_BASELINE leak: {v1},{v2}"
+    finally:
+        if prior is None:
+            os.environ.pop("GT_BASELINE", None)
+        else:
+            os.environ["GT_BASELINE"] = prior
