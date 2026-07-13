@@ -1345,6 +1345,28 @@ jobs:
             echo "GT_PROFILE_UNPROVEN: no gt_profile_activation.json in the agent-output dir (RL profile activation unproven; treated as INFRA like AGENT_DID_NOT_RUN)"
             exit 1
           fi
+          # BRIEF-DELIVERY PROOF (W16 guard, 2026-07-13): the step-0 brief ran DARK on every
+          # mini run before W16 because generation != delivery. Fail closed: on the GT arm,
+          # when a non-empty brief was generated, its head bytes MUST appear in the agent's
+          # first user message (m1) of the trajectory — bytes-in-stream, not artifact-exists.
+          if [ "${GT_BASELINE_FLAG:-0}" != "1" ] && [ -s /tmp/gt/brief.txt ]; then
+            python3 - <<'BRIEFPY'
+          import json, sys
+          head = open("/tmp/gt/brief.txt", encoding="utf-8").read().strip().splitlines()
+          probe = next((l.strip() for l in head if len(l.strip()) >= 20), "")
+          t = json.load(open("/tmp/gt_out/mini-swe-agent.trajectory.json", encoding="utf-8"))
+          m1 = str(t["messages"][1].get("content", ""))
+          if probe and probe not in m1:
+              print("GT_BRIEF_UNDELIVERED: generated brief bytes absent from the agent first message (m1) - the step-0 channel ran dark; task not citable as GT-on")
+              sys.exit(1)
+          print("GT_BRIEF_DELIVERED: brief bytes verified in m1")
+          BRIEFPY
+            _rc=$?
+            if [ "$_rc" != "0" ]; then
+              echo "GT_BRIEF_UNDELIVERED: see check above" | tee -a trial_output.log
+              exit 1
+            fi
+          fi
           echo "agent ran ($AGENT_STEPS steps, $GT_BLOCKS GT blocks delivered)"
 
       - name: Run official SWE-bench-Live evaluator (this instance, warm image, offline dataset)
