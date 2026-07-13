@@ -1,5 +1,5 @@
 {
-  "__doc__": "Deterministic synthetic graph.db spec for the SS gate. Generic, no benchmark repo, no task id. Consumed by scripts/swebench/ss_gate.py, which builds a fresh graph.db from it per run. Node ids are stable; symbol 'run' is DELIBERATELY ambiguous (pkg/mod_a.py + pkg/mod_b.py) so the gateway emits a def/ref partition (the delivery the step-behind / semantic-dedup scenarios probe). Symbol 'gizmo' resolves only to non-source provenance paths (tmp/scratch.py + htmlcov/x.js) for the provenance scenario. test_run lives in a test file for the leak invariant.",
+  "__doc__": "Deterministic synthetic graph.db spec for the SS gate. Generic, no benchmark repo, no task id. Consumed by scripts/swebench/ss_gate.py, which builds a fresh graph.db from it per run. Node ids are stable; symbol 'run' is DELIBERATELY ambiguous (pkg/mod_a.py + pkg/mod_b.py) so the gateway emits a def/ref partition (the delivery the step-behind / semantic-dedup scenarios probe). Symbol 'sig_target' (pkg/util.py) has a cross-file caller 'handler' with a real call-site line (edge 8->7 source_line=21) so editing pkg/util.py emits a caller-facts witness whose entity set is a strict SUBSET of the mod_b caller block (the semantic-dedup S2 subset delivery). Symbol 'late_probe' is DELIBERATELY ambiguous (pkg/io.py + pkg/db.py, both 2-char stems too short to form dotted path-symbols) so grep late_probe emits a localization def/ref partition whose ONLY code identifier is the bare 'late_probe' — pass-tokenable by a `pytest -k late_probe` passing test (the late-drop S6 probe). Symbol 'gizmo' resolves only to non-source provenance paths (tmp/scratch.py + htmlcov/x.js) for the provenance scenario. Symbol 'vend_probe' is ambiguous but its def sites are ALL under node_modules/ (is_deliverable=False) so the def/ref partition body+provenance are leak-filtered to EMPTY — the S8 empty-payload probe. test_run lives in a test file for the leak invariant.",
   "nodes": [
     {"id": 1, "name": "alpha", "file_path": "pkg/mod_a.py", "label": "Function", "start_line": 4, "end_line": 5, "signature": "alpha()", "is_test": 0, "language": "python"},
     {"id": 2, "name": "run", "file_path": "pkg/mod_a.py", "label": "Function", "start_line": 8, "end_line": 9, "signature": "run()", "is_test": 0, "language": "python"},
@@ -11,12 +11,16 @@
     {"id": 8, "name": "handler", "file_path": "pkg/mod_b.py", "label": "Function", "start_line": 19, "end_line": 21, "signature": "handler()", "is_test": 0, "language": "python"},
     {"id": 9, "name": "gizmo", "file_path": "tmp/scratch.py", "label": "Function", "start_line": 5, "end_line": 6, "signature": "gizmo()", "is_test": 0, "language": "python"},
     {"id": 10, "name": "gizmo", "file_path": "htmlcov/x.js", "label": "Function", "start_line": 4, "end_line": 4, "signature": "gizmo()", "is_test": 0, "language": "javascript"},
-    {"id": 11, "name": "test_run", "file_path": "tests/test_pkg.py", "label": "Function", "start_line": 6, "end_line": 7, "signature": "test_run()", "is_test": 1, "language": "python"}
+    {"id": 11, "name": "test_run", "file_path": "tests/test_pkg.py", "label": "Function", "start_line": 6, "end_line": 7, "signature": "test_run()", "is_test": 1, "language": "python"},
+    {"id": 12, "name": "late_probe", "file_path": "pkg/io.py", "label": "Function", "start_line": 6, "end_line": 7, "signature": "late_probe(x)", "is_test": 0, "language": "python"},
+    {"id": 13, "name": "late_probe", "file_path": "pkg/db.py", "label": "Function", "start_line": 6, "end_line": 7, "signature": "late_probe(x)", "is_test": 0, "language": "python"},
+    {"id": 14, "name": "vend_probe", "file_path": "node_modules/a.js", "label": "Function", "start_line": 3, "end_line": 4, "signature": "vend_probe()", "is_test": 0, "language": "javascript"},
+    {"id": 15, "name": "vend_probe", "file_path": "node_modules/b.js", "label": "Function", "start_line": 3, "end_line": 4, "signature": "vend_probe()", "is_test": 0, "language": "javascript"}
   ],
   "edges": [
     {"source_id": 6, "target_id": 1, "type": "CALLS", "resolution_method": "import", "confidence": 1.0},
     {"source_id": 6, "target_id": 5, "type": "CALLS", "resolution_method": "same_file", "confidence": 1.0},
-    {"source_id": 8, "target_id": 7, "type": "CALLS", "resolution_method": "import", "confidence": 1.0},
+    {"source_id": 8, "target_id": 7, "type": "CALLS", "source_line": 21, "resolution_method": "import", "confidence": 1.0},
     {"source_id": 11, "target_id": 2, "type": "CALLS", "resolution_method": "import", "confidence": 1.0}
   ],
   "properties": [

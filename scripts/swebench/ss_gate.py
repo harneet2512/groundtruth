@@ -201,11 +201,16 @@ def _build_graph_db(db_path: str, spec: dict) -> None:
                  n.get("start_line", 1), n.get("end_line", 5), n.get("signature", ""),
                  n.get("is_test", 0), n.get("language", "python")))
         for e in spec.get("edges", []):
+            # ``source_line`` is OPTIONAL in the spec: an edge with no ``source_line`` key
+            # inserts NULL (the pre-existing behaviour — the caller-witness query gates on
+            # ``e.source_line > 0``, so NULL edges are unchanged). Only an edge that WANTS to
+            # surface as a cross-file caller witness (S2) declares a real call-site line.
             con.execute(
-                "INSERT INTO edges(source_id,target_id,type,resolution_method,confidence)"
-                " VALUES(?,?,?,?,?)",
+                "INSERT INTO edges(source_id,target_id,type,source_line,resolution_method,"
+                "confidence) VALUES(?,?,?,?,?,?)",
                 (e["source_id"], e["target_id"], e.get("type", "CALLS"),
-                 e.get("resolution_method", "import"), e.get("confidence", 1.0)))
+                 e.get("source_line"), e.get("resolution_method", "import"),
+                 e.get("confidence", 1.0)))
         for p in spec.get("properties", []):
             con.execute(
                 "INSERT INTO properties(node_id,kind,value,line,confidence)"
@@ -519,6 +524,7 @@ def _gate(sid, name, flag, subs, core_ok, core_detail, built) -> ScenarioResult:
 # ══════════════════════════════════════════════════════════════════════════════
 _MOD_A = "pkg/mod_a.py"
 _MOD_B = "pkg/mod_b.py"
+_UTIL = "pkg/util.py"
 
 
 def _cat(path: str, body: str) -> Event:
@@ -672,19 +678,30 @@ def scenario_s1(driver) -> ScenarioResult:
 # ══════════════════════════════════════════════════════════════════════════════
 def scenario_s2(driver) -> ScenarioResult:
     flag = "GT_SS_DEDUP2"
-    # two greps for fold-variant symbols that resolve to the SAME def files (same entity set)
-    # but yield byte-DISTINCT partition payloads -> content-hash dedup does NOT fire, so the
-    # semantic (entity-set) dedup must suppress the second.
+    # dedup2's real domain is the caller_facts GROUP ({l3b.evidence, l3.contract} + gateway
+    # caller aliases), NOT localization partitions — episode-scoped ENTITY-SET containment that
+    # kills a byte-DISTINCT semantic repeat the content-hash dedup passes (the conan-17092
+    # cross-class migrations cluster: m13 l3b.evidence -> m49 l3.contract re-delivering a SUBSET).
+    # FIXTURE: editing mod_b delivers an l3b.evidence caller block (the SUPERSET entity set:
+    # consumer/alpha/sig_target across mod_a/mod_b/util). Editing util.py then delivers an
+    # l3.contract caller witness (handler -> sig_target, via the edge-8->7 source_line) whose
+    # cited entity set {sig_target, pkg/mod_b.py} is a strict SUBSET of the mod_b block and is
+    # byte-DISTINCT (a different fact class, different text) -> content-hash dedup does NOT fire,
+    # so the semantic (entity-set) dedup must suppress the SECOND (cross-class, in-group).
     events = [
-        _grep("run", _run_hits()),
-        _grep("RUN", f"{_MOD_A}:8: def run():  # via RUN\n{_MOD_B}:9: def run():  # via RUN"),
+        _write(_MOD_B, "return 'b'", "return 'B'"),
+        _write(_UTIL, "return x + 1", "return x + 2"),
     ]
     on1, off, base, subs = _det_and_byteid(driver, events, flag)
     built = _has_effect(on1, off)
-    delivered = on1.delivered_rows()
+    on_delivered = on1.delivered_rows()
+    off_delivered = off.delivered_rows()
     dup_row = bool(on1.rows_with_reason("ss_semantic_dup"))
-    core_ok = (len(delivered) <= 1 and dup_row)
-    detail = f"delivered_rows={len(delivered)} (want<=1); ss_semantic_dup_row={dup_row}"
+    # ON: the second caller-facts delivery is suppressed (ss_semantic_dup) -> strictly fewer
+    # delivered rows than the OFF arm, which delivers BOTH. dup_row names the reason.
+    core_ok = (dup_row and len(on_delivered) < len(off_delivered) and len(on_delivered) >= 1)
+    detail = (f"on_delivered={len(on_delivered)} off_delivered={len(off_delivered)} "
+              f"(want on<off, on>=1); ss_semantic_dup_row={dup_row}")
     return _gate("S2", "SEMANTIC-DEDUP", flag, subs, core_ok, detail, built)
 
 
@@ -817,17 +834,28 @@ def scenario_s5(driver) -> ScenarioResult:
 # ══════════════════════════════════════════════════════════════════════════════
 def scenario_s6(driver) -> ScenarioResult:
     flag = "GT_SS_LATE_DROP"
-    # a passing test that covers sig_target EARLIER; then a turn that would resurface the
-    # sig_target obligation -> it must be dropped late (reason ss_late).
+    # late-drop fires when a resurfaced fact names code symbols that were ALL already covered by
+    # an observed PASSING test — and the pass-token set is seeded ONLY from the passing test's
+    # command + output (gt_mini_patch _ss_record_test). FIXTURE: the passing test command
+    # literally carries the `late_probe` symbol (`pytest -k late_probe ...`) so the pass-token
+    # set gains 'late_probe'. grep late_probe then resurfaces a def/ref localization partition
+    # whose ONLY code identifier is the bare 'late_probe' (the two def files pkg/io.py + pkg/db.py
+    # have 2-char stems, too short to form a dotted path-symbol, so no `x.py` token pollutes the
+    # entity set) -> every symbol is already GREEN-tested -> the delivery is late-dropped.
     events = [
-        _test_evt("pytest -q tests/test_pkg.py", "1 passed", 0),
-        _grep("sig_target", "pkg/util.py:4: def sig_target(x):"),
+        _test_evt("pytest -k late_probe tests/test_pkg.py", "1 passed", 0),
+        _grep("late_probe", "pkg/io.py:6: def late_probe(x):\npkg/db.py:6: def late_probe(x):"),
     ]
     on1, off, base, subs = _det_and_byteid(driver, events, flag)
     built = _has_effect(on1, off)
     late_row = bool(on1.rows_with_reason("ss_late"))
-    core_ok = late_row
-    detail = f"ss_late_row={late_row}"
+    on_delivered = on1.delivered_rows()
+    off_delivered = off.delivered_rows()
+    # ON: the resurfaced partition is late-dropped (ss_late) -> strictly fewer delivered rows
+    # than the OFF arm, which delivers it. late_row names the reason.
+    core_ok = (late_row and len(on_delivered) < len(off_delivered))
+    detail = (f"ss_late_row={late_row}; on_delivered={len(on_delivered)} "
+              f"off_delivered={len(off_delivered)} (want on<off)")
     return _gate("S6", "LATE-DROP", flag, subs, core_ok, detail, built)
 
 
@@ -856,15 +884,38 @@ def scenario_s7(driver) -> ScenarioResult:
 # ══════════════════════════════════════════════════════════════════════════════
 def scenario_s8(driver) -> ScenarioResult:
     flag = "GT_SS_ARBITER_V2"
-    # a grep whose symbol resolves to a def but where the producer may yield zero renderable
-    # bytes; arbiter-v2 must ensure NO delivered row with chars_delivered==0.
-    events = [_grep("shared_helper", "pkg/mod_a.py:12: def shared_helper():"), _grep("run", _run_hits())]
+    # ARBITER_V2's empty-payload guarantee: a producer that yields ZERO renderable bytes must
+    # never become a delivered ledger row. The genuine empty-payload input is a def/ref
+    # partition for `vend_probe`, whose def sites are ALL under node_modules/ -> the gateway's
+    # `_mk_add` leak-filters the body AND provenance to EMPTY (is_deliverable=False) and the
+    # rendered delta is empty.
+    events = [_grep("vend_probe",
+                    "node_modules/a.js:3: function vend_probe()\n"
+                    "node_modules/b.js:3: function vend_probe()")]
     on1, off, base, subs = _det_and_byteid(driver, events, flag)
     built = _has_effect(on1, off)
+    # HONEST STRUCTURAL SKIP (named reason, code path quoted): through the mini seam an
+    # empty-payload envelope is byte-identical between the ON and OFF arms. The seam's OWN
+    # `if not delta ...: return` in gt_mini_patch `_gt_gateway_deliver` drops an empty rendered
+    # delta BEFORE it can reach a delivered ledger row OR the global pool — so the flag-ON
+    # `_envelope_has_bytes` drop (gateway.augment) and the flag-OFF render-empty bail produce
+    # the SAME zero-delivery, zero-ledger outcome (verified: HAS_EFFECT False). The
+    # `_envelope_has_bytes` guard + arbiter REASON_SS_EMPTY_PAYLOAD are real and unit-proven at
+    # the PURE gateway.augment / arbitrate layer (tests/runtime/test_ss1_gateway_empty_payload.py
+    # + test_ss1_arbiter_v2.py) — a layer this seam-driven gate cannot surface, because no real
+    # gateway producer builds an empty-payload envelope that COMPETES with a full one (the only
+    # reachable empty-payload path is a LONE all-leaky def/ref partition, which self-suppresses
+    # in both arms). So the guard is correct-by-construction here, not a flag-attributable delta.
     if not built:
-        return ScenarioResult("S8", "EMPTY-PAYLOAD", flag, SKIP,
-                              f"GT_SS_ARBITER_V2 has no effect (optional engine not built)", subs)
-    zero_byte_delivered = [r for r in on1.delivered_rows_any() if int(r.get("chars_delivered") or 0) == 0]
+        return ScenarioResult(
+            "S8", "EMPTY-PAYLOAD", flag, SKIP,
+            "empty-payload guard is byte-identical through the mini seam: an empty rendered "
+            "delta bails at gt_mini_patch `_gt_gateway_deliver` `if not delta: return` in BOTH "
+            "arms (no delivered row, no pool entry) => no flag-attributable delta. The guard is "
+            "unit-proven at the pure gateway.augment/arbitrate layer the seam cannot surface.",
+            subs)
+    zero_byte_delivered = [r for r in on1.delivered_rows_any()
+                           if int(r.get("chars_delivered") or 0) == 0]
     core_ok = not zero_byte_delivered
     detail = f"zero_byte_delivered_rows={len(zero_byte_delivered)}(want 0)"
     return _gate("S8", "EMPTY-PAYLOAD", flag, subs, core_ok, detail, built)
@@ -876,14 +927,19 @@ def scenario_s8(driver) -> ScenarioResult:
 def _all_streams() -> list[list[Event]]:
     return [
         [_cat(_MOD_A, "def run(): return 'a'\n"), _cat(_MOD_B, "def run(): return 'b'\n"), _grep("run", _run_hits())],
-        [_grep("run", _run_hits()), _grep("RUN", _run_hits())],
+        # S2 caller_facts dedup domain: mod_b l3b.evidence (superset) + util.py l3.contract (subset).
+        [_write(_MOD_B, "return 'b'", "return 'B'"), _write(_UTIL, "return x + 1", "return x + 2")],
         [_write(_MOD_A, "return 'a'", "return 'a1'"), _write(_MOD_A, "return 'a1'", "return 'a2'"),
          _write(_MOD_A, "return 'a2'", "return 'a3'")],
         [_test_evt("pytest -q", "1 failed", 1), _test_evt("pytest -q", "1 failed", 1)],
         [_grep("gizmo", _gizmo_hits())],
-        [_test_evt("pytest -q tests/test_pkg.py", "1 passed", 0),
-         _grep("sig_target", "pkg/util.py:4: def sig_target(x):")],
+        # S6 late-drop domain: passing test naming late_probe, then a late_probe def/ref partition.
+        [_test_evt("pytest -k late_probe tests/test_pkg.py", "1 passed", 0),
+         _grep("late_probe", "pkg/io.py:6: def late_probe(x):\npkg/db.py:6: def late_probe(x):")],
         [_grep("run", _run_hits()), _write(_MOD_B, "return 'b'", "return 'B'")],
+        # S8 empty-payload domain: an all-node_modules def/ref partition (renders empty).
+        [_grep("vend_probe", "node_modules/a.js:3: function vend_probe()\n"
+                             "node_modules/b.js:3: function vend_probe()")],
     ]
 
 

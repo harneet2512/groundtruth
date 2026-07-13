@@ -13,6 +13,7 @@ tests keep working unchanged as SS lands and the real seam starts responding to 
 from __future__ import annotations
 
 import pathlib
+import re
 import sys
 
 import pytest
@@ -27,13 +28,41 @@ import ss_gate as G  # noqa: E402
 # --------------------------------------------------------------------------- #
 # A faithful SS-REFERENCE seam (test double). Given the fixture graph it knows,
 # it implements the SS standard the gate enforces: step-behind suppression
-# (ss_step_behind), leak-safety, and <=1 dose. `mutations` toggle specific WRONG
-# behaviours so the matching scenario turns RED — the biting proof.
+# (ss_step_behind), caller_facts entity-set dedup (ss_semantic_dup), obligation/
+# localization late-drop (ss_late), leak-safety, and <=1 dose. `mutations` toggle
+# specific WRONG behaviours so the matching scenario turns RED — the biting proof.
 # --------------------------------------------------------------------------- #
 _GRAPH = {
     "run": ["pkg/mod_a.py", "pkg/mod_b.py"],       # ambiguous -> a def/ref partition delivery
     "gizmo": ["tmp/scratch.py", "htmlcov/x.js"],   # provenance fixture
 }
+
+# S2 caller_facts GROUP: editing a file delivers a caller-facts block with a known entity set.
+# Editing mod_b delivers the SUPERSET (l3b.evidence); editing util.py delivers a byte-DISTINCT
+# SUBSET (l3.contract). Both classes are in the ``caller_facts`` dedup group -> the second
+# (subset) is entity-set-deduped when GT_SS_DEDUP2 is on.
+_CALLER_FACTS = {
+    "pkg/mod_b.py": ("l3b.evidence",
+                     "\npkg/mod_a.py:4:consumer\npkg/mod_b.py:9:consumer\n"
+                     "pkg/mod_a.py:4:alpha\npkg/util.py:4:sig_target",
+                     frozenset({"pkg/mod_a.py", "pkg/mod_b.py", "pkg/util.py",
+                                "consumer", "alpha", "sig_target"})),
+    "pkg/util.py": ("l3.contract",
+                    "\npkg/mod_b.py:21:return sig_target(1)",
+                    frozenset({"pkg/mod_b.py", "sig_target"})),
+}
+_CALLER_FACTS_GROUP = "caller_facts"
+# S6 late-drop: an ambiguous symbol whose def/ref partition surfaces ONLY the bare symbol as its
+# code identifier (2-char def-file stems -> no dotted path token). Late-dropped when that symbol
+# was already covered by a PASSING test (seeded into pass-tokens from the test command/output).
+_LATE_SYMS = {"late_probe": ["pkg/io.py", "pkg/db.py"]}
+# S8 empty-payload: an ambiguous symbol whose def sites are ALL leak-filtered (node_modules/),
+# so the produced envelope renders ZERO bytes. Under GT_SS_ARBITER_V2 the empty envelope must
+# NEVER become a delivered ledger row (the guard); off, the un-guarded old behaviour delivers a
+# chars=0 row. (Through the REAL mini seam this is byte-identical in both arms — see scenario_s8;
+# the fake makes the guard OBSERVABLE so the gate's empty-payload CHECK is proven to bite.)
+_EMPTY_SYMS = {"vend_probe": ["node_modules/a.js", "node_modules/b.js"]}
+_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 def _fake_seam(mutations=frozenset()):
@@ -45,6 +74,8 @@ def _fake_seam(mutations=frozenset()):
         ledger: list[dict] = []
         edited: set[str] = set()          # S11: files the agent edited this episode
         last_failing: dict | None = None  # S11: last test touching an edit that FAILED (unresolved)
+        pass_tokens: set[str] = set()     # S6: tokens observed in PASSING test events
+        delivered_ents: dict = {}         # S2: dedup group -> [delivered entity sets]
         it = 0
         for ev in events:
             it += 1
@@ -53,11 +84,36 @@ def _fake_seam(mutations=frozenset()):
             after = before
             out = ev.output or ""
             toks = cmd.split()
-            if cmd == "str_replace":                         # S11: an edit event
+            if cmd == "str_replace":                         # S11/S2: an edit event
                 p = ev.action.get("path")
                 if p and ev.rc == 0:
                     edited.add(str(p))
-            elif ("passed" in out) or ("failed" in out):     # S11: a test event
+                    # S2 caller_facts delivery for the known fixture edits (mod_b/util).
+                    cf = _CALLER_FACTS.get(str(p))
+                    if cf is not None:
+                        kind, block, ents = cf
+                        dedup_on = ss_env.get("GT_SS_DEDUP2") == "1"
+                        prior = delivered_ents.get(_CALLER_FACTS_GROUP, ())
+                        contained = any(ents <= pr for pr in prior)
+                        # reference: suppress a same-group fact whose entity set ⊆ a prior one,
+                        # ATTRIBUTED to ss_semantic_dup (the audit evidence). dedup2_wrong_reason:
+                        # still suppress (an EFFECT), but mislabel it so the audit cannot attribute
+                        # the drop to the semantic dedup -> S2 must FAIL (dup_row absent).
+                        do_dedup = dedup_on and contained
+                        if do_dedup:
+                            _reason = ("delivered" if "dedup2_wrong_reason" in mut
+                                       else "ss_semantic_dup")
+                            ledger.append(dict(layer=kind, event_type="", file_path=str(p),
+                                               outcome="suppressed_duplicate",
+                                               reason=_reason,
+                                               chars_delivered=0, iteration=it))
+                        else:
+                            after = before + block
+                            ledger.append(dict(layer=kind, event_type="", file_path=str(p),
+                                               outcome="delivered", reason="",
+                                               chars_delivered=len(block), iteration=it))
+                            delivered_ents.setdefault(_CALLER_FACTS_GROUP, []).append(ents)
+            elif ("passed" in out) or ("failed" in out):     # S11/S6: a test event
                 failed = ("failed" in out) or (ev.rc != 0)
                 passed = ("passed" in out) and not failed
                 import os as _os
@@ -65,38 +121,88 @@ def _fake_seam(mutations=frozenset()):
                 touches = any(e and (e in hay or _os.path.basename(e) in hay) for e in edited)
                 if touches and (failed or passed):
                     last_failing = {"cmd": cmd} if failed else None
+                if passed:                                   # S6: seed pass-tokens from cmd+output
+                    pass_tokens.update(t for t in _TOKEN_RE.findall(hay) if len(t) >= 3)
             if toks[:1] == ["cat"] and len(toks) >= 2:
                 viewed.add(toks[1].strip())
             elif toks[:1] == ["grep"]:
                 sym = next((t for t in toks[1:] if not t.startswith("-") and t != "."), None)
-                deffiles = _GRAPH.get(sym or "", [])
-                if len(deffiles) >= 2:  # ambiguous -> a partition would deliver
-                    entity = set(deffiles) | {sym}
-                    step_behind = entity <= (viewed | {sym})
-                    ss_on = ss_env.get("GT_SS_NOVELTY") == "1"
-                    # reference: suppress IFF the whole entity set was already seen.
-                    # invert_suppression: suppress the NOVEL case instead (wrong) — still an
-                    # EFFECT (so the gate detects "built") but violates the standard.
-                    want_suppress = ((not step_behind) if "invert_suppression" in mut else step_behind)
-                    do_suppress = ss_on and want_suppress
-                    if do_suppress:
+                if sym in _EMPTY_SYMS:
+                    # S8 empty-payload guard. Reference: GT_SS_ARBITER_V2 DETECTS the empty
+                    # envelope and DROPS it (a suppressed ss_empty_payload row, never a delivered
+                    # row); off, the un-guarded path delivers the degenerate chars=0 row.
+                    # arbiter_detects_but_delivers: the guard records the drop reason but FAILS to
+                    # actually suppress — it STILL delivers the chars=0 row (an EFFECT, but the
+                    # degenerate row survives) -> S8 must FAIL.
+                    deffiles = _EMPTY_SYMS[sym]
+                    arb_on = ss_env.get("GT_SS_ARBITER_V2") == "1"
+                    if arb_on:
                         ledger.append(dict(layer="gateway", event_type="", file_path=deffiles[0],
-                                           outcome="suppressed_hidden_only", reason="ss_step_behind",
+                                           outcome="suppressed_hidden_only",
+                                           reason="ss_empty_payload",
+                                           chars_delivered=0, iteration=it))
+                        if "arbiter_detects_but_delivers" in mut:
+                            ledger.append(dict(layer="gateway", event_type="", file_path=deffiles[0],
+                                               outcome="delivered", reason="",
+                                               chars_delivered=0, iteration=it))
+                    else:
+                        # the empty-payload DELIVERED row (chars=0, zero model bytes) — the exact
+                        # degenerate row the ARBITER_V2 guard exists to prevent.
+                        ledger.append(dict(layer="gateway", event_type="", file_path=deffiles[0],
+                                           outcome="delivered", reason="",
+                                           chars_delivered=0, iteration=it))
+                elif sym in _LATE_SYMS:
+                    # S6 late-drop: a resurfaced localization partition whose ONLY code ident is
+                    # the bare symbol. Late-dropped iff GT_SS_LATE_DROP on AND the symbol was
+                    # passing-tested. latedrop_ignore_pass: deliver anyway (wrong) -> S6 FAIL.
+                    deffiles = _LATE_SYMS[sym]
+                    late_on = ss_env.get("GT_SS_LATE_DROP") == "1"
+                    covered = sym in pass_tokens
+                    # reference: drop the resurfaced fact ATTRIBUTED to ss_late. latedrop_wrong_reason:
+                    # still drop (an EFFECT), but mislabel it as ss_step_behind so the audit cannot
+                    # attribute it to the late-drop -> S6 must FAIL (late_row absent).
+                    do_late = late_on and covered
+                    if do_late:
+                        _reason = ("ss_step_behind" if "latedrop_wrong_reason" in mut
+                                   else "ss_late")
+                        ledger.append(dict(layer="gateway", event_type="", file_path=deffiles[0],
+                                           outcome="suppressed_hidden_only", reason=_reason,
                                            chars_delivered=0, iteration=it))
                     else:
-                        block = ('\n<gt-search-facts symbol="%s">\n%s\n</gt-search-facts>'
-                                 % (sym, "\n".join("def: " + f for f in deffiles)))
-                        if "leak_test_token" in mut:
-                            block += "\ntests/test_pkg.py:6: test_run"   # a model-facing leak
+                        block = "\n" + "\n".join("%s:6:%s" % (f, sym) for f in deffiles)
                         after = before + block
                         ledger.append(dict(layer="gateway", event_type="", file_path=deffiles[0],
                                            outcome="delivered", reason="",
                                            chars_delivered=len(block), iteration=it))
-                        if "double_dose" in mut:               # a SECOND payload on one observation
-                            after = after + block
-                            ledger.append(dict(layer="l3.contract", event_type="", file_path=deffiles[1],
+                else:
+                    deffiles = _GRAPH.get(sym or "", [])
+                    if len(deffiles) >= 2:  # ambiguous -> a partition would deliver
+                        entity = set(deffiles) | {sym}
+                        step_behind = entity <= (viewed | {sym})
+                        ss_on = ss_env.get("GT_SS_NOVELTY") == "1"
+                        # reference: suppress IFF the whole entity set was already seen.
+                        # invert_suppression: suppress the NOVEL case instead (wrong) — still an
+                        # EFFECT (so the gate detects "built") but violates the standard.
+                        want_suppress = ((not step_behind) if "invert_suppression" in mut else step_behind)
+                        do_suppress = ss_on and want_suppress
+                        if do_suppress:
+                            ledger.append(dict(layer="gateway", event_type="", file_path=deffiles[0],
+                                               outcome="suppressed_hidden_only", reason="ss_step_behind",
+                                               chars_delivered=0, iteration=it))
+                        else:
+                            block = ('\n<gt-search-facts symbol="%s">\n%s\n</gt-search-facts>'
+                                     % (sym, "\n".join("def: " + f for f in deffiles)))
+                            if "leak_test_token" in mut:
+                                block += "\ntests/test_pkg.py:6: test_run"   # a model-facing leak
+                            after = before + block
+                            ledger.append(dict(layer="gateway", event_type="", file_path=deffiles[0],
                                                outcome="delivered", reason="",
                                                chars_delivered=len(block), iteration=it))
+                            if "double_dose" in mut:               # a SECOND payload on one observation
+                                after = after + block
+                                ledger.append(dict(layer="l3.contract", event_type="", file_path=deffiles[1],
+                                                   outcome="delivered", reason="",
+                                                   chars_delivered=len(block), iteration=it))
             # fire_when_zero: emit a model byte when the flag is explicitly "0" (a broken
             # flag-gate that is NOT byte-identical vs the unset arm) -> S10 must bite it.
             if "fire_when_zero" in mut and ss_env.get("GT_SS_NOVELTY") == "0":
@@ -144,6 +250,12 @@ def _driver(mutations=frozenset()):
 def test_reference_seam_passes_enforced_scenarios():
     d = _driver()
     assert G.scenario_s1(d).verdict == G.PASS, G.scenario_s1(d).detail
+    assert G.scenario_s2(d).verdict == G.PASS, G.scenario_s2(d).detail   # SS-1 SEMANTIC-DEDUP
+    assert G.scenario_s6(d).verdict == G.PASS, G.scenario_s6(d).detail   # SS-1 LATE-DROP
+    # S8 EMPTY-PAYLOAD: the fake makes the guard OBSERVABLE (it PASSes here) so the gate's
+    # empty-payload CHECK is validated. NOTE the REAL mini seam byte-identically SKIPs S8 (an
+    # empty delta bails before any delivered row in both arms — see scenario_s8's docstring).
+    assert G.scenario_s8(d).verdict == G.PASS, G.scenario_s8(d).detail   # SS-1 ARBITER_V2
     assert G.scenario_s9(d).verdict == G.PASS, G.scenario_s9(d).detail
     assert G.scenario_s10(d).verdict == G.PASS, G.scenario_s10(d).detail
     assert G.scenario_s11(d).verdict == G.PASS, G.scenario_s11(d).detail   # SS-2 SUBMIT-RED
@@ -157,6 +269,30 @@ def test_mutation_invert_suppression_bites_s1():
     (inverted) violates S1 — the gate must FAIL it, not pass or skip."""
     r = G.scenario_s1(_driver({"invert_suppression"}))
     assert r.verdict == G.FAIL, f"gate FAILED to bite inverted step-behind: {r.verdict} {r.detail}"
+
+
+def test_mutation_dedup2_wrong_reason_bites_s2():
+    """A caller_facts entity-set dedup that suppresses the byte-distinct semantic repeat but
+    MISLABELS the drop (not ss_semantic_dup) is unauditable — the gate must FAIL it (the
+    suppression is real, so it is 'built', but the ss_semantic_dup attribution is missing)."""
+    r = G.scenario_s2(_driver({"dedup2_wrong_reason"}))
+    assert r.verdict == G.FAIL, f"gate FAILED to bite an unauditable entity-set dedup: {r.verdict} {r.detail}"
+
+
+def test_mutation_latedrop_wrong_reason_bites_s6():
+    """A late-drop that drops the resurfaced already-green fact but MISLABELS the drop (not
+    ss_late) is unauditable — the gate must FAIL it (the drop is real / 'built', but the
+    ss_late attribution is missing)."""
+    r = G.scenario_s6(_driver({"latedrop_wrong_reason"}))
+    assert r.verdict == G.FAIL, f"gate FAILED to bite an unauditable late-drop: {r.verdict} {r.detail}"
+
+
+def test_mutation_arbiter_detects_but_delivers_bites_s8():
+    """An ARBITER_V2 empty-payload guard that detects the empty envelope (records the drop
+    reason) but FAILS to suppress it — the chars=0 degenerate row still delivers — violates S8.
+    The gate must FAIL it (a chars_delivered==0 delivered row is present)."""
+    r = G.scenario_s8(_driver({"arbiter_detects_but_delivers"}))
+    assert r.verdict == G.FAIL, f"gate FAILED to bite a chars=0 empty-payload delivery: {r.verdict} {r.detail}"
 
 
 def test_mutation_leak_bites_s9():
