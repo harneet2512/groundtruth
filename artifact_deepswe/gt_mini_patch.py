@@ -5915,11 +5915,14 @@ def _semantic_drift_candidate(rel: str) -> tuple[float, str] | None:
         bits.append("guard `%s`" % sorted(lost_g)[0][:60])
     if lost_r:
         bits.append("return path `%s`" % sorted(lost_r)[0][:60])
+    # W10 ITEM-3 completion (2026-07-13, 2-task-smoke finding): the 8th/9th nudge sites the
+    # 7-site sweep missed — route through the SAME _nudge_native FORM arm as the other seven.
     return (_SEV_NUDGE_VERIFY,
-            "\n<gt-nudge reason=\"semantic_drift\">\nGT: your edit to %s removed a %s "
-            "that was present before -- confirm that deletion is intended, not an "
-            "accidental regression of existing behavior.\n</gt-nudge>"
-            % (rel, " and a ".join(bits)))
+            _nudge_native(
+                "\n<gt-nudge reason=\"semantic_drift\">\nGT: your edit to %s removed a %s "
+                "that was present before -- confirm that deletion is intended, not an "
+                "accidental regression of existing behavior.\n</gt-nudge>"
+                % (rel, " and a ".join(bits))))
 
 
 # ---------------------------------------------------------------------------
@@ -6515,11 +6518,14 @@ def _obligation_resurface_candidate() -> tuple[float, str] | None:
         return None
     # NOTE: latch intentionally NOT set here (see C6 note above) — it is consumed on
     # the DELIVERED outcome inside _lane_a_deliver.
+    # W10 ITEM-3 completion (2026-07-13, 2-task-smoke finding m93): this site shipped the ONE
+    # remaining tagged observation on the sh-744 canary — route through _nudge_native.
     return (_SEV_OBLIGATION,
-            "\n<gt-nudge reason=\"obligation_resurface\">\nGT: before you submit, the "
-            "issue requires the following -- re-read it against your patch and confirm "
-            "it is handled (passing local tests does NOT prove the requirement is met):\n%s\n"
-            "</gt-nudge>" % "\n".join(lines))
+            _nudge_native(
+                "\n<gt-nudge reason=\"obligation_resurface\">\nGT: before you submit, the "
+                "issue requires the following -- re-read it against your patch and confirm "
+                "it is handled (passing local tests does NOT prove the requirement is met):\n%s\n"
+                "</gt-nudge>" % "\n".join(lines)))
 
 
 def _obligation_nudge_block() -> tuple[float, str] | None:
