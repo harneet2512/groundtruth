@@ -571,14 +571,17 @@ def _baseline_trajectory_path(task: str, baseline_root: str | None) -> str | Non
 # Consumption receipts (W1 v2) — the ONLY consumption source; tool output cannot promote.
 # ---------------------------------------------------------------------------
 
-def _consumption_by_fact_class(trajectory: dict, runtime_ledger_path: str | None) -> dict[str, dict]:
+def _consumption_by_fact_class(
+    trajectory: dict, runtime_ledger_path: str | None,
+) -> "tuple[dict[str, dict], dict]":
     """Per-fact-class receipt rollup from W1's v2 consumption ledger (chronological receipt
-    grading; NEVER token-overlap or same-file coincidence — defect #3)."""
+    grading; NEVER token-overlap or same-file coincidence — defect #3). Returns
+    ``(per_fact_class_rollup, full_ledger)`` — the ledger rides along for integrity fields."""
     cl_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "consumption_ledger.py")
     import importlib.util
     spec = importlib.util.spec_from_file_location("consumption_ledger_gfm", cl_path)
-    mod = importlib.util.module_from_spec(spec)
     assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)  # type: ignore[union-attr]
     ledger = mod.build_consumption_ledger(trajectory, runtime_ledger_path=runtime_ledger_path)
     per_class = ledger.get("per_class", {}) or {}
@@ -637,10 +640,10 @@ def join_native_delivery(rows: list[dict], messages: list[dict]) -> dict[int, in
     silent False that reads as 'not received'. Requires the seam to emit ``content_sha256_16``
     (optionally ``native_text``) per delivered row."""
     obs = [
-        (i, m.get("content"))
+        (i, _c)
         for i, m in enumerate(messages)
         if isinstance(m, dict) and m.get("role") in ("tool", "user")
-        and isinstance(m.get("content"), str)
+        and isinstance((_c := m.get("content")), str)
     ]
     out: dict[int, int | None] = {}
     for idx, r in enumerate(rows):
@@ -654,7 +657,7 @@ def join_native_delivery(rows: list[dict], messages: list[dict]) -> dict[int, in
         native_text = r.get("native_text") if isinstance(r.get("native_text"), str) else None
         hit = None
         for mi, content in obs:
-            if _content_carries_seal(content, seal, chars, native_text):
+            if content and _content_carries_seal(content, seal, chars, native_text):
                 hit = mi
                 break
         out[idx] = hit
@@ -1080,7 +1083,8 @@ def collect_task(
     state_by_fc = state_predicates(timeline, ledger_by_fc)
     infra_signals = _infra_signals(rows, ledger_by_fc)
 
-    submission = str((traj.get("info") or {}).get("submission") or "")
+    _info = traj.get("info")
+    submission = str((_info.get("submission") if isinstance(_info, dict) else "") or "")
     has_submission = bool(submission) or any(
         m.get("role") == "exit" for m in traj.get("messages", []) if isinstance(m, dict)
     )
