@@ -245,6 +245,9 @@ _SUPER_MODE_MEMBERS: frozenset[str] = frozenset(
         # pinned in test_ae_forward_profile2_completeness + the SS-2 member pin.
         "GT_SS_EXEC_TRUTH",       # SS-2 — covering selection = runner-eligible (no phantom claim)
         "GT_SS_SUBMIT_RED",       # SS-2 — submit gate consumes the agent's own unresolved observed RED
+                                  #   NOTE: reached only via the GT_VERIFY_EXECUTE=1 submit branch
+                                  #   (gt_mini_patch._gt_gate_submit_exception) — enabling this flag
+                                  #   alone (profile off) is a silent no-op; Profile-2 co-activates both.
         # SS-4 (2026-07-13, run 29236533134 causal audit) — the starved-producer ELIGIBILITY
         # widening. MEASURED: 16/29 tasks reached the seam with the arm-4 harness prefix
         # `cd $(cat /tmp/gt_root.txt) && <cmd>` (a command-substitution cd the W13 bare-token

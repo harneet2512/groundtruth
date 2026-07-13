@@ -159,6 +159,9 @@ _INFRA_MEMBER_MEDIATES: dict[str, tuple[str, ...]] = {
     "GT_SS_LATE_DROP": (),                                # late-fact drop timing, all classes
     "GT_SS_ACK_METRICS": (),                              # host-side ack telemetry only
     "GT_SS_ACK_FORM": (),                                 # SS-5 FORM: preamble reframes reading of ALL classes + obligations checklist
+    "GT_SS_EXEC_TRUTH": ("covering_red",),                # SS-2 mediator: runner-eligible covering selection; kills unexecuted assurances
+    "GT_SS_SUBMIT_RED": ("submit_refusal",),              # SS-2 mediator: submit gate consumes observed RED (reached only under GT_VERIFY_EXECUTE=1)
+    "GT_SS_ELIGIBILITY": (),                              # SS-4 mediator: cd-$() prefix widening for search isolation (post_search/loc legs)
 }
 
 # Backing-module → producer agreement drift-guard: these members' _MEMBER_CAPABILITY_MODULE

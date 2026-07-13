@@ -566,8 +566,10 @@ _MIRROR_OPT_GT = Path("/opt/gt")
 _MIRROR_TMP = Path("/tmp")
 
 # /tmp files the recorded seam writes; cleaned between tasks so no state bleeds.
-_TMP_STATE = ["gt_work.db", "gt_index.json", "gt_oracle_events.jsonl",
-              "gt_hook_fire_counts.json"]
+# The -wal/-shm sqlite sidecars MUST go with the main file: a stale WAL from a prior
+# task replays foreign frames into the fresh copy (the conan-17092/aiogram bleed).
+_TMP_STATE = ["gt_work.db", "gt_work.db-wal", "gt_work.db-shm", "gt_index.json",
+              "gt_oracle_events.jsonl", "gt_hook_fire_counts.json"]
 
 
 def _run_quiet(cmd: list[str]) -> int:
@@ -617,6 +619,21 @@ class TaskMirrors:
             shutil.rmtree(_MIRROR_ARTIFACTS, ignore_errors=True)
         _MIRROR_ARTIFACTS.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(self.recorded / "graph.db", _MIRROR_ARTIFACTS / "graph.db")
+        # FAIL-LOUD graph-identity guard (the conan-17092 bleed staged ANOTHER task's graph
+        # after a lock race): the mirrored mount must hash-match THIS task's recorded graph.
+        import hashlib
+        def _h16(p: Path) -> str:
+            h = hashlib.sha256()
+            with open(p, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(chunk)
+            return h.hexdigest()[:16]
+        want = _h16(self.recorded / "graph.db")
+        got = _h16(_MIRROR_ARTIFACTS / "graph.db")
+        if got != want:
+            raise SeamReplayBlocked(
+                f"{self.task}: mirrored graph.db hash {got} != recorded {want} "
+                f"(locked/stale {_MIRROR_ARTIFACTS} — another process is holding the mirror)")
         art_src = self.recorded / "gt_artifacts"
         if art_src.is_dir():
             for f in art_src.iterdir():
@@ -1626,11 +1643,10 @@ def _table(headers: list[str], rows: list[list[str]]) -> str:
 # (GT_SS_STEP_BEHIND...) AND the landed rl_profile Profile-2 members (GT_SS_NOVELTY...).
 # The OFF-arm must set each to an EXPLICIT "0": under the W8 default-inversion an UNSET
 # Profile-2 member is RESOLVED to "1" by the seam's own fan-out, so "unset" is NOT off.
-_SS_FLAGS_ALL = ("GT_SS_STEP_BEHIND", "GT_SS_SEMANTIC_DEDUP", "GT_SS_COHERENCE",
-                 "GT_SS_RECOVERY", "GT_SS_PROVENANCE", "GT_SS_LATE", "GT_SS_ACK",
-                 "GT_SS_ARBITER_V2", "GT_SS_NOVELTY", "GT_SS_DEDUP2",
-                 "GT_SS_COHERENCE_V2", "GT_SS_RECOVERY_V2", "GT_SS_LATE_DROP",
-                 "GT_SS_ACK_METRICS")
+_SS_FLAGS_ALL = ("GT_SS_NOVELTY", "GT_SS_DEDUP2", "GT_SS_COHERENCE_V2",
+                 "GT_SS_RECOVERY_V2", "GT_SS_PROVENANCE", "GT_SS_LATE_DROP",
+                 "GT_SS_ACK_METRICS", "GT_SS_ARBITER_V2", "GT_SS_EXEC_TRUTH",
+                 "GT_SS_SUBMIT_RED", "GT_SS_ACK_FORM", "GT_SS_ELIGIBILITY")
 
 
 def main(argv=None) -> int:

@@ -11205,7 +11205,7 @@ def _global_pool_add_gateway(pool, winner, native, commit_thunk, *, ev_kind: str
         confidence=float(getattr(winner, "confidence", 0.0) or 0.0),
         current_ordinal=_GA_GATEWAY_KIND_ORDINAL.get(ev_kind or "", 0),
         seq=len(pool), suppressible=_arb_suppressible,
-        rendered_chars=(len(_payload) if _payload else -1))
+        rendered_chars=len(_payload))  # '' -> 0 = KNOWN-empty (arbiter rejects); never -1 here
     if cand is None:
         _thunk()
         return
