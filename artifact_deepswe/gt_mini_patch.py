@@ -7658,6 +7658,13 @@ def _executed_covering_emission(covering: list[dict],
         files = [c["file"] for c in (covering or [])
                  if c.get("file") and os.path.exists(os.path.join(root, c["file"]))]
         if not files:
+            # W14 FIX 1 (2026-07-13): instrument the SUPPRESSED None-branch so an executed-
+            # count delta is diagnosable (host row only, ZERO observation bytes). No covering
+            # FILE on disk -> no covering result object exists at this point.
+            _runtime_ledger_record(
+                kind="verify.horizon.executed",
+                outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
+                reason="covering_no_covering", chars=0)
             return None
         # FIX 3 (executor threading): route the covering run through the live env's
         # execute when the covering runner accepts an `executor` param — so a remote
@@ -7682,6 +7689,12 @@ def _executed_covering_emission(covering: list[dict],
         # identical on the off path.
         _last_covering_result = cres
         if cres.get("verdict") != "fail":
+            # W14 FIX 1: record the EXECUTED-but-non-fail verdict (green/unavailable/timeout)
+            # so the None return is diagnosable; pull the ACTUAL verdict, never fabricate.
+            _runtime_ledger_record(
+                kind="verify.horizon.executed",
+                outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
+                reason="covering_%s" % (cres.get("verdict") or "none_produced"), chars=0)
             return None
         ran_tf = cres.get("ran") or files
         # Attribution gate (Wave-2 differential, Fable 2026-07-09): deliver ONLY a
@@ -7697,11 +7710,26 @@ def _executed_covering_emission(covering: list[dict],
                 repo_root=root, covering_files=files,
                 executor=_run_kwargs.get("executor"),
                 per_file_timeout=20, total_budget_seconds=35):
+            # W14 FIX 1: a real RED that the edit did not plausibly cause -> suppressed
+            # (correct-or-quiet); record the class so the None return is diagnosable.
+            _runtime_ledger_record(
+                kind="verify.horizon.executed",
+                outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
+                reason="covering_unattributable", chars=0)
             return None
         _last_test_outcome_failed = True  # V-3: executed verdict drives the verify axis
         sym = next(iter(sorted(edited_syms)), None) if edited_syms else None
         block = render_covering_failure_native(cres, edited_symbol=sym, test_files=ran_tf)
-        return block or None
+        if not block:
+            # W14 FIX 1: an attributed RED the native renderer could not surface -> NOTHING
+            # produced. Record none_produced; do NOT fabricate the raw verdict (nothing reached
+            # the model), so an executed-count delta stays diagnosable.
+            _runtime_ledger_record(
+                kind="verify.horizon.executed",
+                outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
+                reason="covering_none_produced", chars=0)
+            return None
+        return block
     except Exception:  # noqa: BLE001 -- correct-or-quiet; never destabilize the loop
         return None
 
@@ -7729,24 +7757,37 @@ def _executed_covering_candidate() -> "tuple[float, str, str, bool] | None":
     ran a test this turn / no attributed fail -> None. Cost-bounded: it runs at most once per
     distinct-edit-generation of a symbol, reusing the existing per-file/total budgets inside
     ``_executed_covering_emission``."""
-    global _covering_exec_fired_syms
+    global _covering_exec_fired_syms, _last_covering_result
     if os.environ.get("GT_VERIFY_EXECUTE") != "1" or _GT_BASELINE:
         return None
     if not _oracle_edited_rels:
         return None
     if _last_test_step == _action_count:  # agent already ran a test this turn (redundant)
         return None
+    # W14 FIX 2 (2026-07-13) — intra-turn de-dup: ALSO subtract the symbols the RISK block
+    # already covering-attempted THIS turn (it records them in the per-turn
+    # `_covering_exec_pending["syms"]` before its own run). A non-completing RISK covering no
+    # longer burns the cross-turn `_covering_exec_fired_syms` latch, so this per-turn record is
+    # what keeps this independent producer from re-running the SAME symbols in the same arbiter
+    # pass. Empty (no risk turn / flag off) -> identical to the prior fired-syms-only set.
     fresh = {s for s in _edited_symbols_for_selection()
-             if s and s not in _covering_exec_fired_syms}
+             if s and s not in _covering_exec_fired_syms
+             and s not in _covering_exec_pending["syms"]}
     if not fresh:
         return None
     covering = _covering_tests_for_symbols(fresh)
-    # Latch the freshly-considered symbols regardless of the outcome so a symbol with no
-    # covering file (or a green run) is not re-queried/re-run every subsequent turn; a
-    # re-edit re-arms via the post_edit `difference_update`.
-    _covering_exec_fired_syms |= fresh
     if not covering:
+        # No covering FILE -> nothing to re-attempt: latch so the symbol is not re-queried
+        # every subsequent turn (a re-edit re-arms via the post_edit `difference_update`).
+        _covering_exec_fired_syms |= fresh
         return None
+    # W14 FIX 2 — reset the per-turn executed-verdict carrier so the latch decision below
+    # reflects THIS turn's run: a run that never executes (emission's no-covering early return)
+    # leaves it None -> treated as completing -> latches; a run that COMPLETES non-conclusively
+    # (unavailable/timeout/error) sets a non-completing verdict -> the latch is NOT burned, so the
+    # executed channel re-attempts at the next fire point (heavy-repo 35s-budget timeouts no longer
+    # go dark until a re-edit). Only touched on the GT_VERIFY_EXECUTE path (byte-identical off).
+    _last_covering_result = None
     # ITEM-2 (verification-plan divergence, 2026-07-12): when GT_VERIFICATION_PLAN is on the
     # RISK path (`_verification_horizon_candidate`) already routes this exact execution through
     # the PROGRESSIVE plan (syntax -> unit -> …) instead of the single covering lever; this
@@ -7757,6 +7798,12 @@ def _executed_covering_candidate() -> "tuple[float, str, str, bool] | None":
         block = _verification_plan_emission(_oracle_edited_rels, fresh)
     else:
         block = _executed_covering_emission(covering, _oracle_edited_rels, fresh)
+    # W14 FIX 2 — burn the cross-turn per-symbol latch ONLY on a COMPLETING covering verdict
+    # (green / attributed-fail / no-run). A non-completing run (unavailable/timeout/error) must
+    # NOT latch, so it re-attempts next fire point instead of going dark.
+    _cv = _last_covering_result if isinstance(_last_covering_result, dict) else None
+    if (_cv.get("verdict") if _cv else None) not in ("unavailable", "timeout", "error"):
+        _covering_exec_fired_syms |= fresh
     if not block:
         return None
     # SM-10 C-1: record the symbols THIS candidate burned so a gate LOSS re-arms EXACTLY them
@@ -7849,6 +7896,13 @@ def _verification_plan_emission(edited_rels: "set[str] | list[str]",
                 continue  # build/type/integration RED -> HOST-side only this wave
             if block and not contains_gt_tag(block) and not contains_test_identity(block):
                 return block
+        # W14 FIX 1 (2026-07-13): the progressive plan reached its end without a deliverable RED
+        # rung -> nothing produced. Host row only (ZERO observation bytes) so an executed-count
+        # delta through the plan path is diagnosable too.
+        _runtime_ledger_record(
+            kind="verify.horizon.executed",
+            outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
+            reason="plan_none_produced", chars=0)
         return None
     except Exception:  # noqa: BLE001 -- correct-or-quiet; never destabilize the loop
         return None
@@ -8116,7 +8170,7 @@ def _verification_horizon_candidate() -> tuple[float, str, str, bool] | None:
     Respects: dose caps (advisory/urgent/pivot once each, gate cap-3, all
     gate-loss re-armed)."""
     global _horizon_advisory_fired, _horizon_urgent_fired, \
-        _horizon_pivot_fired, _horizon_gate_fire_count
+        _horizon_pivot_fired, _horizon_gate_fire_count, _last_covering_result
 
     if _GT_BASELINE:
         return None
@@ -8151,14 +8205,20 @@ def _verification_horizon_candidate() -> tuple[float, str, str, bool] | None:
         # the per-symbol latch so the INDEPENDENT _executed_covering_candidate does NOT re-run
         # the SAME symbols this turn — one covering execution per symbol per edit-generation.
         # Guarded by GT_VERIFY_EXECUTE -> the set is untouched when off (byte-identical).
+        _rk_syms = _edited_symbols_for_selection()
         if os.environ.get("GT_VERIFY_EXECUTE") == "1" and not _GT_BASELINE:
-            _covering_exec_fired_syms.update(_edited_symbols_for_selection())
             # SM-10 C-1: record that the RISK path is the source of this turn's executed/advisory
-            # candidate — it burned BOTH the once-per-task `_horizon_advisory_fired` dose AND the
-            # per-symbol latch, so a gate LOSS must re-arm both. The independent producer (below)
-            # leaves ``advisory`` False, so the loss re-arm re-opens the advisory dose ONLY here.
-            _covering_exec_pending["syms"].update(_edited_symbols_for_selection())
+            # candidate — a gate LOSS must re-arm BOTH the once-per-task `_horizon_advisory_fired`
+            # dose AND the per-symbol latch. The independent producer (below) leaves ``advisory``
+            # False, so the loss re-arm re-opens the advisory dose ONLY here.
+            #
+            # W14 FIX 2 (2026-07-13): the per-turn `syms` record is populated BEFORE emission so
+            # the INDEPENDENT `_executed_covering_candidate` (which subtracts it this turn) is
+            # pre-empted even when the covering run below does NOT complete — the cross-turn
+            # `_covering_exec_fired_syms` latch is now burned AFTER emission, gated on the verdict.
+            _covering_exec_pending["syms"].update(_rk_syms)
             _covering_exec_pending["advisory"] = True
+            _last_covering_result = None  # W14 FIX 2: reflect THIS turn's run (see the gate below)
         # B1 (Fable 2026-07-09): an EXECUTED, attributed covering RED beats an
         # advisory — run the covering test and deliver the Format-D native failure
         # if the edit broke it. Flag-gated: off -> None -> the advisory below runs
@@ -8168,11 +8228,18 @@ def _verification_horizon_candidate() -> tuple[float, str, str, bool] | None:
         # single covering lever here — the plan's unit rung IS the covering run (no double
         # execution). Off -> the exact single-lever path below (byte-identical).
         if os.environ.get("GT_VERIFICATION_PLAN") == "1":
-            _rk_exec = _verification_plan_emission(
-                _oracle_edited_rels, _edited_symbols_for_selection())
+            _rk_exec = _verification_plan_emission(_oracle_edited_rels, _rk_syms)
         else:
-            _rk_exec = _executed_covering_emission(
-                _rk_cov, _oracle_edited_rels, _edited_symbols_for_selection())
+            _rk_exec = _executed_covering_emission(_rk_cov, _oracle_edited_rels, _rk_syms)
+        # W14 FIX 2: burn the CROSS-TURN per-symbol latch only on a COMPLETING covering verdict
+        # (green / attributed-fail / no-run -> _last_covering_result None -> latches). A
+        # non-completing run (unavailable/timeout/error) must NOT leave the executed channel dark:
+        # with the latch un-burned the INDEPENDENT producer re-attempts next turn. Intra-turn
+        # double-execution is prevented by the `_covering_exec_pending` record populated above.
+        if os.environ.get("GT_VERIFY_EXECUTE") == "1" and not _GT_BASELINE:
+            _rk_cv = _last_covering_result if isinstance(_last_covering_result, dict) else None
+            if (_rk_cv.get("verdict") if _rk_cv else None) not in ("unavailable", "timeout", "error"):
+                _covering_exec_fired_syms.update(_rk_syms)
         if _rk_exec:
             return (float(_SEV_NUDGE_VERIFY), "verify.horizon.executed", _rk_exec, True)
         _rk_block = _render_verify_emission(

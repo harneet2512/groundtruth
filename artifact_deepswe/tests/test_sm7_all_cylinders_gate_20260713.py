@@ -98,25 +98,24 @@ def test_result_parser_survives_variable_padding(gate):
 
 
 def test_preflight_gap_is_caught_and_names_the_fix(gate):
-    """CHECK 2: the fail-closed preflight hole on the UNSET (W8-default) production path is a KNOWN,
-    still-open defect. The gate must FAIL it today and name the exact function to fix — the gate
-    reports it, it does NOT patch rl_profile."""
+    """CHECK 2 (updated 2026-07-13, gap CLOSED): rl_profile.preflight now routes an UNSET env
+    through resolve_default_token (production default "2") and fail-closes on missing
+    capabilities — the gate must PASS this check. A FAIL here means the fix regressed."""
     res = gate.check2_preflight_gap()
-    assert res["verdict"] == gate.FAIL, (
-        "PREFLIGHT-GAP unexpectedly PASSES — if rl_profile.preflight was fixed to route unset "
-        "through resolve_default_token, update this guard; otherwise the check regressed.")
-    assert "rl_profile.preflight" in res["detail"]
-    assert "resolve_default_token" in res["detail"]
+    assert res["verdict"] == gate.PASS, (
+        "PREFLIGHT-GAP FAILS — the unset->production-default fail-closed routing in "
+        "rl_profile.preflight regressed (see the SM-7 gate fix, 2026-07-13).")
 
 
 def test_preflight_gap_probe_matches_live_rl_profile():
-    """The defect is REAL against the live resolver (not a stale assertion): resolve_default_token
-    inverts unset -> '2', yet preflight treats unset as OFF and runs no capability check, while an
-    explicit profile=2 DOES abort on a missing capability."""
+    """The FIX is real against the live resolver: unset routes through resolve_default_token to
+    the production default and fail-closes exactly like an explicit profile=2; only an explicit
+    off token is genuinely off."""
     from groundtruth.runtime import rl_profile as rp
     assert rp.resolve_default_token({}) == "2"
-    assert rp.preflight({}, []) == []                                # blind on the unset path (the gap)
+    assert rp.preflight({}, []) != []                                # fail-closed on the unset default
     assert rp.preflight({"GT_RL_PROFILE": "2"}, []) != []            # fail-closed when explicitly set
+    assert rp.preflight({"GT_RL_PROFILE": "off"}, []) == []          # explicit off stays off
 
 
 if __name__ == "__main__":  # pragma: no cover

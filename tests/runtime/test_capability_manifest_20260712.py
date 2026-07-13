@@ -119,6 +119,11 @@ def test_available_override_still_wins() -> None:
 
 
 def test_profile_off_byte_identical() -> None:
+    # SM-7 gate fix (2026-07-13): only an EXPLICIT off token skips preflight; unset/"" now
+    # resolve the W8 production default and fail-close. resolve_profile stays {} on all three
+    # (the resolver law is unchanged — the DEFAULT routing lives in preflight + the seam).
     for env in ({}, {"GT_RL_PROFILE": ""}, {"GT_RL_PROFILE": "0"}):
         assert resolve_profile(env) == {}
-        assert preflight(env, rl_profile._available_from_env(env)) == []
+    assert preflight({"GT_RL_PROFILE": "0"}, rl_profile._available_from_env({})) == []
+    assert preflight({"GT_RL_PROFILE": "off"}, rl_profile._available_from_env({})) == []
+    assert preflight({}, set()) != []  # unset -> production default -> fail-closed
