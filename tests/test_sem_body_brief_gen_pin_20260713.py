@@ -63,3 +63,17 @@ def test_substrate_proof_step_carries_sem_body_and_content_leg() -> None:
         "the substrate-proof step env must set GT_CONTENT_LEG=1 (explicit content-leg on at brief "
         f"generation); got {env.get('GT_CONTENT_LEG')!r}"
     )
+
+
+def test_brief_form_flags_projected_into_the_proof_container():
+    """Smoke-#3 finding (run 29234478242): the brief GENERATOR flags must survive ALL THREE
+    projection links (workflow step env -> substrate_proof.sh env -> docker -e) or the brief
+    ships the legacy verbose form. Pins the docker -e projections (both gt-run-proof sites)
+    + the workflow step env."""
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    sh = (root / "scripts" / "ci" / "substrate_proof.sh").read_text(encoding="utf-8")
+    assert sh.count('-e GT_BRIEF_MINIMAL="${GT_BRIEF_MINIMAL:-1}"') == 2
+    assert sh.count('-e GT_BRIEF_NATIVE="${GT_BRIEF_NATIVE:-1}"') == 2
+    wf = (root / ".github" / "workflows" / "swebench_live_lite_full.yml").read_text(encoding="utf-8")
+    assert "GT_BRIEF_MINIMAL: '1'" in wf and "GT_BRIEF_NATIVE: '1'" in wf
