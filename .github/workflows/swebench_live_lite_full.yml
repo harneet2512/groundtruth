@@ -1067,6 +1067,7 @@ jobs:
             -v "${HOST_GT_XSESSION}:/opt/gt_xsession:rw" \
             -v "/tmp/gt_inject/opt/gt:/opt/gt:ro" \
             -e GT_HOST_GRAPH_DB="${GT_C_ARTIFACTS}/graph.db" \
+            -e GT_BRIEF_FILE="${GT_C_ARTIFACTS}/brief.txt" \
             -e GT_CERT_DIR="${GT_C_ARTIFACTS}" \
             -e GT_HOST_SRC_ROOT="${GT_C_ARTIFACTS}/src" \
             -e GT_PORTABLE_SUBSTRATE="1" \
