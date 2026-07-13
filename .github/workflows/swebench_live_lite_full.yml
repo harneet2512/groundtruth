@@ -722,6 +722,14 @@ jobs:
           # preserved). Baseline arm is unaffected: this whole step is skipped when inputs.baseline == true.
           GT_SEM_BODY: '1'
           GT_CONTENT_LEG: '1'
+          # 2-task-smoke finding (run 29233180347): the brief GENERATOR flags must also be ON
+          # where the brief is generated (this step) — the profile fan-out is agent-only, so
+          # without these the brief ships the legacy verbose form with the stale
+          # <gt-localization> candidates. GT_BRIEF_MINIMAL retires the step-0 localization
+          # narration (localization rides the reactive channels); GT_BRIEF_NATIVE renders the
+          # obligations as a plain checklist (no <gt-*> tags). Baseline arm skips this step.
+          GT_BRIEF_MINIMAL: '1'
+          GT_BRIEF_NATIVE: '1'
         run: bash scripts/ci/substrate_proof.sh
         # ^^ Inline shell code was extracted to scripts/ci/substrate_proof.sh to stay
         # under GHA's 21,000-character expression limit. All ${{ }} values are passed
