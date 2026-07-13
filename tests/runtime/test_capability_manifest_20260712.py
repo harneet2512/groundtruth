@@ -5,14 +5,17 @@ Profile-2 members were added to the available set UNCONDITIONALLY, so `preflight
 abort on them even when a stale substrate lacked the baked surface.
 
 After the fix:
-  * SUBSTRATE-PROPERTY members (GT_CONTENT_LEG/GT_SEM_BODY/GT_BRIEF_MINIMAL/GT_L6_FRESH) are
-    available IFF a capability RECEIPT proves the baked surface — absent receipt => fail-closed.
+  * SUBSTRATE-PROPERTY members (GT_CONTENT_LEG/GT_SEM_BODY/GT_L6_FRESH) are available IFF a
+    capability RECEIPT proves the baked surface — absent receipt => fail-closed.
+  * GT_BRIEF_MINIMAL is DELIBERATELY NOT receipt-gated (2026-07-12): it is dormant until an SM-8
+    rebake and byte-identical on a non-minimal brief, so gating it aborted the whole profile on
+    every pre-rebake run (micro-verify 29214296174). It is assumed-available by convention.
   * the cleanly-importable native-form members (GT_POST_SEARCH_NATIVE/GT_SCOPE_NATIVE/
     GT_CERT_DELIVERY/GT_LOC_RESLOT) are module-probed.
   * only the 3 mini-seam-spread flags (GT_D7_RELATEDNESS/GT_CONTRACT_MODE/GT_CONTRACT_BILATERAL)
     remain available-by-convention.
 
-The first test BITES on the pre-fix code (those 4 self-attested => in the available set).
+The first test BITES on the pre-fix code (those 3 self-attested => in the available set).
 """
 from __future__ import annotations
 
@@ -21,7 +24,7 @@ import json
 from groundtruth.runtime import rl_profile
 from groundtruth.runtime.rl_profile import preflight, resolve_profile
 
-_SUBSTRATE_PROPERTY = ("GT_CONTENT_LEG", "GT_SEM_BODY", "GT_BRIEF_MINIMAL", "GT_L6_FRESH")
+_SUBSTRATE_PROPERTY = ("GT_CONTENT_LEG", "GT_SEM_BODY", "GT_L6_FRESH")
 _RENDERER_MAPPED = ("GT_POST_SEARCH_NATIVE", "GT_SCOPE_NATIVE", "GT_CERT_DELIVERY", "GT_LOC_RESLOT")
 _SEAM_CONVENTION = ("GT_D7_RELATEDNESS", "GT_CONTRACT_MODE", "GT_CONTRACT_BILATERAL")
 
@@ -60,7 +63,6 @@ def test_receipt_mutation_bites_per_member() -> None:
     mutations = {
         "GT_CONTENT_LEG": {"symbol_content_fts_rows": 0},
         "GT_SEM_BODY": {"sem_body_rows": 0},
-        "GT_BRIEF_MINIMAL": {"brief_minimal": False},
         "GT_L6_FRESH": {"gt_index_bin": ""},
     }
     base = json.loads(_FULL_RECEIPT)
@@ -92,6 +94,15 @@ def test_seam_spread_members_available_by_convention() -> None:
     avail = rl_profile._available_from_env({"GT_RL_PROFILE": "2"})
     for m in _SEAM_CONVENTION:
         assert m in avail, f"{m} is synced-seam code, available by documented convention"
+
+
+def test_brief_minimal_assumed_available_not_receipt_gated() -> None:
+    # GT_BRIEF_MINIMAL is dormant-until-rebake + byte-identical on a non-minimal brief, so it must be
+    # assumed-available WITHOUT a receipt (never a FALSE abort). Full pin: test_brief_minimal_not_
+    # receipt_gated_20260712.py.
+    assert "GT_BRIEF_MINIMAL" not in rl_profile._MEMBER_CAPABILITY_RECEIPT
+    avail = rl_profile._available_from_env({"GT_RL_PROFILE": "2"})  # NO receipt
+    assert "GT_BRIEF_MINIMAL" in avail, "GT_BRIEF_MINIMAL must be assumed-available without a receipt"
 
 
 def test_profile1_unaffected_no_receipt_needed() -> None:

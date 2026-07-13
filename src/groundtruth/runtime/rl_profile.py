@@ -70,9 +70,15 @@ _PROFILE_1_MEMBERS: frozenset[str] = frozenset(
 # call site in gt_mini_patch (submit-gate certificate / per-turn hypothesis classification /
 # progressive verification ladder / transactional edit overlay + episode-overlay freshness).
 # Each flag's capability is proven at preflight (typed manifest, 2026-07-12): a runtime-module member
-# fails CLOSED via find_spec; a SUBSTRATE-PROPERTY member (GT_CONTENT_LEG/GT_SEM_BODY/GT_BRIEF_MINIMAL/
-# GT_L6_FRESH) fails CLOSED against a required RECEIPT (_MEMBER_CAPABILITY_RECEIPT below) so a stale
+# fails CLOSED via find_spec; a SUBSTRATE-PROPERTY member (GT_CONTENT_LEG/GT_SEM_BODY/GT_L6_FRESH)
+# fails CLOSED against a required RECEIPT (_MEMBER_CAPABILITY_RECEIPT below) so a stale
 # substrate that ships the code but lacks the baked SURFACE ABORTS before spend — NOT self-attested.
+# GT_BRIEF_MINIMAL is DELIBERATELY NOT receipt-gated (2026-07-12): the reduced brief is DORMANT until an
+# SM-8 rebake bakes it (read at brief-generation time), and setting the flag on a non-minimal brief is
+# BYTE-IDENTICAL (the generator ignores it) — it has no runtime surface to corrupt, unlike GT_SEM_BODY
+# (which mis-reads absent body rows). Gating it on brief_minimal==true made a dormant member abort the
+# WHOLE profile on every pre-rebake run (proven: micro-verify 29214296174). It is assumed-available by
+# convention (same as GT_LOC_RESLOT/GT_CERT_DELIVERY) — correct-or-quiet, never a FALSE abort.
 # The 3 mini-seam-spread flags (GT_D7_RELATEDNESS/GT_CONTRACT_MODE/GT_CONTRACT_BILATERAL) have no single
 # importable module and no baked surface; they are synced-seam code (present iff the seam synced,
 # byte-identical-off) and are available-by-convention (documented, never a substrate-absence risk).
@@ -440,7 +446,10 @@ _MEMBER_CAPABILITY_MODULE: dict[str, str] = {
 _MEMBER_CAPABILITY_RECEIPT: dict[str, Callable[[Mapping[str, object]], bool]] = {
     "GT_CONTENT_LEG": lambda r: _as_int(r.get("symbol_content_fts_rows")) > 0,
     "GT_SEM_BODY": lambda r: _as_int(r.get("sem_body_rows")) > 0,
-    "GT_BRIEF_MINIMAL": lambda r: r.get("brief_minimal") is True,
+    # NB: GT_BRIEF_MINIMAL is INTENTIONALLY absent — it is dormant until an SM-8 rebake and
+    # byte-identical when set on a non-minimal brief, so it has no surface to fail closed against.
+    # Gating it aborted the whole Profile-2 on every pre-rebake run (micro-verify 29214296174).
+    # It is assumed-available by convention (see the header note). Do NOT re-add it here.
     "GT_L6_FRESH": lambda r: bool(str(r.get("gt_index_bin") or "").strip()),
 }
 

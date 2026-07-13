@@ -771,6 +771,10 @@ jobs:
           mkdir -p "${HOST_GT_INJECT}"
           mkdir -p "${HOST_GT_INJECT}/groundtruth"
           cp artifact_deepswe/gt_mini_patch.py "${HOST_GT_INJECT}/"
+          # Headless agent runner (B5 fix): the non-interactive core of run/mini.py. The bare
+          # `mini-swe-agent` CLI is the INTERACTIVE mini app and never reaches agent.run() in a
+          # headless container (0 steps). This runner builds model+local-env+DefaultAgent and runs.
+          cp artifact_deepswe/gt_headless_runner.py "${HOST_GT_INJECT}/"
           cp artifact_deepswe/gt_hook.py        "${HOST_GT_INJECT}/" 2>/dev/null || true
           cp artifact_deepswe/gt_oracle.py      "${HOST_GT_INJECT}/" 2>/dev/null || true
           cp artifact_deepswe/gt_oracle_sense.py "${HOST_GT_INJECT}/" 2>/dev/null || true
@@ -1073,31 +1077,29 @@ jobs:
               # action_count/tokens/cost all read 0. GUARD: this whole block is a single-quoted
               # docker bash -c argument. NEVER put an apostrophe in any comment here: one
               # apostrophe closes the quote and the agent silently never launches. Cost a smoke.
-              # B5 fix v2 (run 29211807809 + micro-verify 29212976448 = 0 agent steps every task):
-              # mini-swe-agent 2.4.5 hardcodes default_type=interactive (run/mini.py:101), so the bare
-              # CLI builds the InteractiveAgent, which prompts the user for every step via a prompt_toolkit
-              # TUI (agents/interactive.py:60) and, when no task is given, first asks what to do next
-              # (run/mini.py:94). With no TTY in the container both prompts block and the process is Killed
-              # at 0 steps/0 tokens; -y only sets the yolo MODE on that same interactive agent, not the class.
-              # FIX: --agent-class default selects the non-interactive DefaultAgent (agents/default.py:85, a
-              # pure while-True step loop with no prompt) -- what the working GT-on(75) pier path ran
-              # (GTMiniSweAgent subclasses DefaultAgent). GT hooks are preserved: _install() wraps
-              # Environment.execute (gt_mini_patch.py:11623-11624), which DefaultAgent calls, so the hook is
-              # agent-class-agnostic and NOT a GT-off run. Also guard the task: mini.py:94 prompts when
-              # --task is empty; the host /gt_out issue file can exist-but-be-empty (cat exits 0, so a
-              # `|| cat` chain never falls through), so test emptiness with -z and fall back
-              # /gt_out -> /tmp -> a literal, never an empty --task. MSWEA_CONFIGURED=true skips the
-              # first-run key wizard (config.py:62); the model key is already in the container env.
+              # B5 fix v3 (micro-verify 29214296174 PROVED --agent-class default STILL 0 steps):
+              # the `mini-swe-agent` console entry IS the interactive `mini` app (minisweagent.run.mini:app,
+              # confirmed via entry_points). In a headless container it reaches import + config-load then
+              # NEVER calls agent.run() -- 0 steps, no trajectory (both micro-verify tasks). --agent-class
+              # default only swaps the agent the app builds, not the app harness, so it changed nothing.
+              # The working baseline-83 + GT-on(75) never used this CLI; they ran mini-swe-agent
+              # PROGRAMMATICALLY via `pier run --agent-import-path ...GTMiniSweAgent`. FIX: a headless
+              # runner (gt_headless_runner.py) that replays the non-interactive core of mini.py
+              # (get_model -> get_environment(local) -> get_agent(default) -> agent.run) -- the exact
+              # construction run/benchmarks/swebench_single.py:87-96 uses. Locally verified end-to-end with
+              # a DeterministicModel: agent.run() executes, {{task}} renders, trajectory is written. GT
+              # delivery is unchanged: gt_mini_patch --install wraps Environment.execute (agent-agnostic).
+              # Env contract (no apostrophe-prone inline args in this single-quoted docker block); task is
+              # -z guarded /gt_out -> /tmp -> literal since the host issue file can be exist-but-empty.
               export MSWEA_CONFIGURED=true
+              export GT_RUN_MODEL="'"$INPUT_MODEL"'"
+              export GT_RUN_CONFIG=/opt/gt/agent_config.yaml
+              export GT_RUN_OUTPUT=/gt_out/mini-swe-agent.trajectory.json
               GT_TASK_TEXT="$(cat /gt_out/issue.txt 2>/dev/null)"
               if [ -z "$GT_TASK_TEXT" ]; then GT_TASK_TEXT="$(cat /tmp/issue.txt 2>/dev/null)"; fi
               if [ -z "$GT_TASK_TEXT" ]; then GT_TASK_TEXT="Fix the issue in the repository."; fi
-              mini-swe-agent --agent-class default \
-                --model "'"$INPUT_MODEL"'" \
-                --task "$GT_TASK_TEXT" \
-                --config /opt/gt/agent_config.yaml \
-                -o /gt_out/mini-swe-agent.trajectory.json \
-                2>&1 || true
+              export GT_RUN_TASK="$GT_TASK_TEXT"
+              python /opt/gt/gt_headless_runner.py 2>&1 || true
 
               # CRITICAL: capture the patch to the bind-mount BEFORE the container exits.
               # ROOT-CAUSE FIX (2026-07-08): the agent submission (`cat /tmp/patch.txt`) is captured
