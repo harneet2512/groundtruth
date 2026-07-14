@@ -183,6 +183,25 @@ Empty input maps to an empty list.
     assert rows[0].modality_strength == 2
 
 
+def test_spec_v2_feature_requests_exclude_status_and_open_design_questions():
+    issue = """[enhancement] Add force removal for broken state
+
+### What is your suggestion?
+This still requires manual intervention and does not fit our needs to 100%.
+It would be great if cleanup removed stale metadata before updating.
+What shall happen when the source is unavailable?
+Is it possible to add `--force` so `state.json` is removed when unreadable?
+"""
+    text = [o.verbatim_text for o in extract_spec_v2(issue).obligations]
+
+    assert "Add force removal for broken state" in text
+    assert any("cleanup removed stale metadata" in row for row in text)
+    assert any("`--force`" in row and "unreadable" in row for row in text)
+    assert not any("manual intervention" in row for row in text)
+    assert not any("100%" in row for row in text)
+    assert not any("What shall happen" in row for row in text)
+
+
 # ── 6. inline code spans are never arrow-split ───────────────────────────────
 def test_spec_v2_no_split_inside_code_spans():
     spec = extract_spec_v2(_load(TRUE_MYTH))
